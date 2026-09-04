@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 from lamptrack.third_party.lamp.core.se3 import compose, invert
 from lamptrack.third_party.lamp.core.types import Person, PersonState, Skeleton
-from lamptrack.third_party.lamp.io.sensor_io import PerCameraCalibration
+from lamptrack.cameras import PerCameraCalibration
 from scipy.optimize import (
     linear_sum_assignment,  # pyright: ignore[reportUnknownVariableType]
 )

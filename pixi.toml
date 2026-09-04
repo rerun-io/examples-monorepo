@@ -1304,7 +1304,7 @@ smplx = ">=0.1.28"
 
 [feature.lamp.activation.env]
 PACKAGE_DIR = "packages/lamp"
-PYREFLY_TARGET = "lamptrack/__init__.py lamptrack/third_party/__init__.py"
+PYREFLY_TARGET = "lamptrack/apis lamptrack/cameras.py lamptrack/models lamptrack/__init__.py lamptrack/third_party/__init__.py tools"
 
 [feature.lamp.tasks._lamp-download-checkpoint]
 cmd = "test -f data/checkpoints/lamp_smpl_aria_gen2.pt || hf download facebook/LAMP --revision 875ab025bd63c7b0ede9db2485cae72ee414e035 --include 'lamp_smpl_aria_gen2.pt' --local-dir data/checkpoints/"
@@ -1321,6 +1321,17 @@ description = "Download the private chumpy-free neutral SMPL body model"
 [feature.lamp.tasks.lamp-download-artifacts]
 depends-on = ["_lamp-download-checkpoint", "_lamp-download-body-model"]
 description = "Download the released LAMP checkpoint and neutral SMPL body model"
+
+[feature.lamp.tasks._lamp-download-fixture]
+cmd = "test -f data/fixtures/test-library/test-library_fixture.npz || hf download pablovela5620/lamp-fixtures --repo-type dataset --revision 6a1374341998e7e25f4d5c3dc805dff7669fc6e6 --include 'test-library/test-library_fixture.npz' --local-dir data/fixtures/"
+cwd = "packages/lamp"
+outputs = ["packages/lamp/data/fixtures/test-library/test-library_fixture.npz"]
+description = "Download the pinned reviewer-published LAMP test-library replay fixture"
+
+[feature.lamp.tasks.lamp-replay]
+cmd = "python tools/demos/lamp_replay.py"
+cwd = "packages/lamp"
+description = "Replay the LAMP test-library fixture and log its 3D output to Rerun"
 
 [feature.lamp-catalog]
 platforms = ["linux-64"]

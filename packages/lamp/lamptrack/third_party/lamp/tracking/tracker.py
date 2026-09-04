@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from lamptrack.third_party.lamp.core.types import box_iou_xyxy, Detection2D, Person, PersonState, Skeleton
-from lamptrack.third_party.lamp.io.sensor_io import PerCameraCalibration
+from lamptrack.cameras import PerCameraCalibration
 from lamptrack.third_party.lamp.models.lifter import is_outlier_pose, SnippetData
 from lamptrack.third_party.lamp.tracking.smoothing import fuse_or_store_batched
 from lamptrack.third_party.lamp.tracking.snippets import build_snippets_for_lifting
