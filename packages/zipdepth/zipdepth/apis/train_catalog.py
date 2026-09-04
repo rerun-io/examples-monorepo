@@ -27,6 +27,7 @@ from torch.utils.tensorboard import SummaryWriter
 from zipdepth.catalog.instrument import InstrumentedLoader
 from zipdepth.catalog.segments import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, PromptDACatalog, load_promptda_catalog, split_holdout_segments
 from zipdepth.catalog.targets import AugmentPolicy, TargetMode
+from zipdepth.catalog.ultrawide import DEFAULT_ULTRAWIDE_PROMPT_SCALE, CameraSelection, UltrawidePolicy
 from zipdepth.training.distributed import barrier, cleanup_distributed, fix_state_dict_prefix, print_main, setup_distributed
 from zipdepth.training.trainer import ZipDepthTrainer
 
@@ -148,6 +149,22 @@ class TrainCatalogConfig:
     """Samples requested per catalog fetch by the Rerun dataloader path."""
     target_mode: TargetMode = "metric"
     """Prompted metric distillation by default; ``ssi`` retains the legacy RGB-only lane."""
+    cameras: CameraSelection = "wide"
+    """Cameras streamed per segment. ``wide`` reproduces the released lane exactly.
+    ``ultrawide`` trains on the rectified ultrawide frames with the wide LiDAR prompt
+    padded into its footprint. ``both`` interleaves an equal-sized ultrawide subsample
+    with the wide frames, giving roughly balanced batches after the shuffle buffer."""
+    ultrawide_min_valid_fraction: float = 0.7
+    """Reject an ultrawide frame whose in-range target fraction, measured before erosion,
+    falls below this. The raycast depth has holes at glazing and outdoors."""
+    ultrawide_valid_erosion_px: int = 1
+    """Binary-erode the ultrawide target mask by this many pixels; raycast silhouettes
+    bleed about one output pixel past the mesh."""
+    ultrawide_prompt_scale: float = DEFAULT_ULTRAWIDE_PROMPT_SCALE
+    """Prompt block size as a fraction of the prompt canvas per axis. The rectified
+    ultrawide camera sees 2.1x the wide field of view on both axes (measured across
+    landscape and portrait segments; principal point within 0.7% of centre), so the wide
+    LiDAR prompt covers the central 1/2.1 of an ultrawide frame."""
     total_steps: int = 70_000
     """Optimizer steps in the run; the OneCycle schedule spans exactly this many. 70k is about one pass over the 875-segment train split at batch 8 (70.5k steps measured 2026-08-28)."""
     shuffle_buffer_size: int = 256
@@ -604,6 +621,21 @@ def main(
             raise ValueError("save_every_steps must be non-negative")
         if config.target_mode not in ("ssi", "metric"):
             raise ValueError(f"unknown target mode {config.target_mode!r}")
+        if config.cameras not in ("wide", "ultrawide", "both"):
+            raise ValueError(f"unknown camera selection {config.cameras!r}")
+        if config.cameras != "wide" and config.dataloader == "rerun":
+            raise ValueError("the Rerun dataloader A/B path streams the wide camera only")
+        # None keeps the wide lane bit-identical: the builders never consult a policy
+        # they were not given, and they reject an ultrawide request without one.
+        ultrawide_policy: UltrawidePolicy | None = (
+            None
+            if config.cameras == "wide"
+            else UltrawidePolicy(
+                min_valid_fraction=config.ultrawide_min_valid_fraction,
+                valid_erosion_px=config.ultrawide_valid_erosion_px,
+                prompt_scale=config.ultrawide_prompt_scale,
+            )
+        )
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -693,6 +725,7 @@ def main(
                         config.min_depth_span,
                         device,
                         target_mode=config.target_mode,
+                        ultrawide_policy=ultrawide_policy,
                     ),
                     shuffle_buffer_size=config.shuffle_buffer_size,
                     seed=config.seed,
@@ -700,6 +733,7 @@ def main(
                     world_size=world_size,
                     num_producers=config.num_producers,
                     prefetch_samples=config.prefetch_samples,
+                    cameras=config.cameras,
                     # Training ignores confidence: the student takes the raw prompt and the model
                     # range-gates internally. Skipping the column drops a column and ~48 KB/frame
                     # off every segment query.

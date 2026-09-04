@@ -11,6 +11,7 @@ from monopriors.models.depth_completion.base_completion_depth import MAX_METRIC_
 from numpy import ndarray
 from torch import Tensor
 
+from zipdepth.catalog.ultrawide import PromptPlacement, place_wide_prompt
 from zipdepth.data.transforms import AlbumentationsWrapper, resize_rgb_and_depth_exact
 
 MIN_DEPTH_MM: int = int(MIN_METRIC_DEPTH_M * 1000)
@@ -121,12 +122,29 @@ def _prompt_tensors(
     prompt_confidence_hw: UInt8[ndarray, "192 256"],
     *,
     flipped: bool,
+    prompt_placement: PromptPlacement | None = None,
 ) -> dict[str, Tensor]:
-    """Convert one oriented native-grid LiDAR prompt to collatable tensors."""
+    """Convert one oriented native-grid LiDAR prompt to collatable tensors.
+
+    With a placement the prompt is scaled into its ultrawide footprint on a zero
+    canvas instead of filling it, using the shared torch helper so this path
+    stays bit-identical to the CUDA builder's.
+    """
     if prompt_depth_mm_hw.shape != (192, 256) or prompt_confidence_hw.shape != (192, 256):
         raise ValueError(
             f"oriented prompt depth and confidence must both be 192x256, got {prompt_depth_mm_hw.shape} and {prompt_confidence_hw.shape}"
         )
+    if prompt_placement is not None:
+        placed: tuple[Float32[Tensor, "192 256"], Bool[Tensor, "192 256"]] = place_wide_prompt(
+            torch.from_numpy(np.ascontiguousarray(prompt_depth_mm_hw)),
+            torch.from_numpy(np.ascontiguousarray(prompt_confidence_hw)),
+            prompt_placement,
+            flipped=flipped,
+        )
+        return {
+            "prompt_depth": placed[0].unsqueeze(0).contiguous(),
+            "prompt_valid": placed[1].unsqueeze(0).contiguous(),
+        }
     prompt_depth_m_hw: Float32[ndarray, "192 256"] = prompt_depth_mm_hw.astype(np.float32) / 1000.0
     prompt_valid_hw: Bool[ndarray, "192 256"] = (
         (prompt_confidence_hw >= 1) & (prompt_depth_mm_hw >= MIN_DEPTH_MM) & (prompt_depth_mm_hw <= MAX_DEPTH_MM)
@@ -205,6 +223,7 @@ def build_training_sample(
     *,
     prompt_depth_mm_hw: UInt16[ndarray, "192 256"] | None = None,
     prompt_confidence_hw: UInt8[ndarray, "192 256"] | None = None,
+    prompt_placement: PromptPlacement | None = None,
 ) -> dict[str, Tensor]:
     """Augment aligned RGB and inverse depth, then build one collatable sample.
 
@@ -241,7 +260,9 @@ def build_training_sample(
     if (prompt_depth_mm_hw is None) != (prompt_confidence_hw is None):
         raise ValueError("prompt depth and confidence must be provided together")
     if prompt_depth_mm_hw is not None and prompt_confidence_hw is not None:
-        sample.update(_prompt_tensors(prompt_depth_mm_hw, prompt_confidence_hw, flipped=transformed[2]))
+        sample.update(
+            _prompt_tensors(prompt_depth_mm_hw, prompt_confidence_hw, flipped=transformed[2], prompt_placement=prompt_placement)
+        )
     return sample
 
 
@@ -251,6 +272,8 @@ def build_metric_training_sample(
     prompt_depth_mm_hw: UInt16[ndarray, "192 256"],
     prompt_confidence_hw: UInt8[ndarray, "192 256"],
     transform: AlbumentationsWrapper,
+    *,
+    prompt_placement: PromptPlacement | None = None,
 ) -> dict[str, Tensor]:
     """Build a metric prompted sample without inverse-depth quantization.
 
@@ -290,7 +313,7 @@ def build_metric_training_sample(
         "target_depth": torch.from_numpy(target_depth_chw),
         "target_valid": torch.from_numpy(target_valid_chw),
     }
-    sample.update(_prompt_tensors(prompt_depth_mm_hw, prompt_confidence_hw, flipped=transformed[2]))
+    sample.update(_prompt_tensors(prompt_depth_mm_hw, prompt_confidence_hw, flipped=transformed[2], prompt_placement=prompt_placement))
     return sample
 
 
@@ -305,6 +328,7 @@ def build_training_sample_cuda(
     prompt_depth_mm_hw: Shaped[Tensor, "prompt_h prompt_w"] | None = None,
     prompt_confidence_hw: UInt8[Tensor, "prompt_h prompt_w"] | None = None,
     target_mode: TargetMode = "ssi",
+    prompt_placement: PromptPlacement | None = None,
 ) -> dict[str, Tensor]:
     """Build one augmented training sample without leaving CUDA.
 
@@ -374,28 +398,30 @@ def build_training_sample_cuda(
         raise RuntimeError("exact resize dropped the depth target")
     prompt_depth_m_hw: Float32[Tensor, "192 256"] | None = None
     prompt_valid_hw: Bool[Tensor, "192 256"] | None = None
+    rotated_prompt_mm_hw: Shaped[Tensor, "oriented_prompt_h oriented_prompt_w"] | None = None
+    rotated_confidence_hw: UInt8[Tensor, "oriented_prompt_h oriented_prompt_w"] | None = None
     if prompt_depth_mm_hw is not None and prompt_confidence_hw is not None:
-        rotated_prompt_mm_hw: Shaped[Tensor, "oriented_prompt_h oriented_prompt_w"] = torch.rot90(
-            prompt_depth_mm_hw, turns, dims=(-2, -1)
-        )
-        rotated_confidence_hw: UInt8[Tensor, "oriented_prompt_h oriented_prompt_w"] = torch.rot90(
-            prompt_confidence_hw, turns, dims=(-2, -1)
-        )
+        rotated_prompt_mm_hw = torch.rot90(prompt_depth_mm_hw, turns, dims=(-2, -1))
+        rotated_confidence_hw = torch.rot90(prompt_confidence_hw, turns, dims=(-2, -1))
         if tuple(rotated_prompt_mm_hw.shape) != (192, 256) or tuple(rotated_confidence_hw.shape) != (192, 256):
             raise ValueError(
                 f"oriented prompt depth and confidence must both be 192x256, got {tuple(rotated_prompt_mm_hw.shape)} and {tuple(rotated_confidence_hw.shape)}"
             )
-        prompt_depth_m_hw = rotated_prompt_mm_hw.to(dtype=torch.float32) / 1000.0
-        prompt_valid_hw = (
-            (rotated_confidence_hw >= 1)
-            & (rotated_prompt_mm_hw >= MIN_DEPTH_MM)
-            & (rotated_prompt_mm_hw <= MAX_DEPTH_MM)
-        )
+        # A placed prompt is built after augmentation: mirroring the scaled block
+        # instead of the canvas keeps the flip exact for any canvas margin.
+        if prompt_placement is None:
+            prompt_depth_m_hw = rotated_prompt_mm_hw.to(dtype=torch.float32) / 1000.0
+            prompt_valid_hw = (
+                (rotated_confidence_hw >= 1)
+                & (rotated_prompt_mm_hw >= MIN_DEPTH_MM)
+                & (rotated_prompt_mm_hw <= MAX_DEPTH_MM)
+            )
 
     random_values_n: Float32[Tensor, "3"] = torch.rand(3, device=generator.device, generator=generator)
     random_values: list[float] = random_values_n.cpu().tolist()
+    flip_applied: bool = random_values[0] < policy.flip_p
 
-    if random_values[0] < policy.flip_p:
+    if flip_applied:
         resized_rgb_chw = torch.flip(resized_rgb_chw, dims=(-1,))
         resized_target_hw = torch.flip(resized_target_hw, dims=(-1,))
         if prompt_depth_m_hw is not None and prompt_valid_hw is not None:
@@ -412,6 +438,13 @@ def build_training_sample_cuda(
             0.299 * rgb_for_gray_chw[0] + 0.587 * rgb_for_gray_chw[1] + 0.114 * rgb_for_gray_chw[2]
         )
         resized_rgb_chw = torch.round(gray_hw).clamp_(0.0, 255.0).to(dtype=torch.uint8).expand_as(resized_rgb_chw)
+
+    if prompt_placement is not None and rotated_prompt_mm_hw is not None and rotated_confidence_hw is not None:
+        placed: tuple[Float32[Tensor, "192 256"], Bool[Tensor, "192 256"]] = place_wide_prompt(
+            rotated_prompt_mm_hw, rotated_confidence_hw, prompt_placement, flipped=flip_applied
+        )
+        prompt_depth_m_hw = placed[0]
+        prompt_valid_hw = placed[1]
 
     image_chw: UInt8[Tensor, "3 out_h out_w"] = resized_rgb_chw.contiguous()
     if target_mode == "ssi":
