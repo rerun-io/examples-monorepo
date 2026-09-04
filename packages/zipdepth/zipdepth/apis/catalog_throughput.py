@@ -15,6 +15,7 @@ from zipdepth.catalog.dataset import CatalogPromptDepthDataset
 from zipdepth.catalog.segments import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, PromptDACatalog, load_promptda_catalog
 from zipdepth.catalog.stats import CatalogDatasetStats
 from zipdepth.catalog.targets import AugmentPolicy, build_train_transform
+from zipdepth.catalog.ultrawide import DEFAULT_ULTRAWIDE_PROMPT_SCALE, CameraSelection, UltrawidePolicy
 
 
 @dataclass(slots=True)
@@ -51,8 +52,18 @@ class CatalogThroughputConfig:
     """Fetch the ARKit confidence column; training skips it."""
     min_depth_span: float = 1.25
     """Minimum valid-depth p95/p5 ratio; zero disables flat-frame filtering."""
+    cameras: CameraSelection = "wide"
+    """Cameras streamed per segment; ``both`` adds the ultrawide JPEG decode stage."""
+    ultrawide_min_valid_fraction: float = 0.7
+    """Minimum in-range ultrawide target fraction before erosion."""
+    ultrawide_valid_erosion_px: int = 1
+    """Ultrawide target-mask erosion radius in pixels."""
+    ultrawide_prompt_scale: float = DEFAULT_ULTRAWIDE_PROMPT_SCALE
+    """Wide prompt footprint inside an ultrawide frame, as a fraction per axis."""
     max_batches: int | None = None
     """Optional limit on yielded batches, including shuffle-buffer warmup cost."""
+    max_seconds: float | None = None
+    """Optional wall-clock limit on the measured loop; checked between batches."""
 
 
 def main(config: CatalogThroughputConfig) -> None:
@@ -75,6 +86,21 @@ def main(config: CatalogThroughputConfig) -> None:
         raise ValueError("fetch_block_size must be positive")
     if config.max_batches is not None and config.max_batches <= 0:
         raise ValueError("max_batches must be positive when set")
+    if config.max_seconds is not None and config.max_seconds <= 0.0:
+        raise ValueError("max_seconds must be positive when set")
+    if config.cameras not in ("wide", "ultrawide", "both"):
+        raise ValueError(f"unknown camera selection {config.cameras!r}")
+    if config.cameras != "wide" and config.dataloader == "rerun":
+        raise ValueError("the Rerun dataloader A/B path streams the wide camera only")
+    ultrawide_policy: UltrawidePolicy | None = (
+        None
+        if config.cameras == "wide"
+        else UltrawidePolicy(
+            min_valid_fraction=config.ultrawide_min_valid_fraction,
+            valid_erosion_px=config.ultrawide_valid_erosion_px,
+            prompt_scale=config.ultrawide_prompt_scale,
+        )
+    )
 
     catalog: PromptDACatalog = load_promptda_catalog(config.catalog_url, config.dataset_name)
     if config.segment_ids is None:
@@ -89,10 +115,14 @@ def main(config: CatalogThroughputConfig) -> None:
     policy: AugmentPolicy = AugmentPolicy()
     builder_factory: Callable[[], SampleBuilder]
     if config.builder == "cuda":
-        builder_factory = lambda: CudaSampleBuilder((config.height, config.width), policy, config.min_depth_span, device)  # noqa: E731
+        builder_factory = lambda: CudaSampleBuilder(  # noqa: E731
+            (config.height, config.width), policy, config.min_depth_span, device, ultrawide_policy=ultrawide_policy
+        )
     else:
         builder_factory = lambda: CpuSampleBuilder(  # noqa: E731
-            build_train_transform(config.height, config.width, policy), config.min_depth_span
+            build_train_transform(config.height, config.width, policy),
+            config.min_depth_span,
+            ultrawide_policy=ultrawide_policy,
         )
     setup_started: float = perf_counter()
     samples: CatalogPromptDepthDataset | RerunPromptDepthDataset
@@ -127,6 +157,7 @@ def main(config: CatalogThroughputConfig) -> None:
             num_producers=config.num_producers,
             prefetch_samples=config.prefetch_samples,
             load_confidence=config.load_confidence,
+            cameras=config.cameras,
         )
     setup_elapsed: float = perf_counter() - setup_started
     loader: DataLoader[dict[str, Tensor]] = DataLoader(samples, batch_size=config.batch_size, num_workers=0)
@@ -141,25 +172,29 @@ def main(config: CatalogThroughputConfig) -> None:
         batches += 1
         if config.max_batches is not None and batches >= config.max_batches:
             break
+        if config.max_seconds is not None and perf_counter() - started >= config.max_seconds:
+            break
     elapsed: float = perf_counter() - started
     if frames == 0 or samples.stats.samples_built == 0:
         raise RuntimeError("catalog dataset yielded no training samples")
 
     stats: CatalogDatasetStats = samples.stats
     built_frames: int = stats.samples_built
-    decoded_frames: int = built_frames + stats.skipped_flat_frames
+    decoded_frames: int = built_frames + stats.skipped_flat_frames + stats.skipped_low_valid_frames
     video_attempts: int = decoded_frames + stats.skipped_frames
     print(
-        f"config: dataloader={config.dataloader}, builder={config.builder}, producers={config.num_producers}, "
-        f"prefetch_samples={config.prefetch_samples}, fetch_block_size={config.fetch_block_size}, "
-        f"batch_size={config.batch_size}, out={config.width}x{config.height}"
+        f"config: dataloader={config.dataloader}, builder={config.builder}, cameras={config.cameras}, "
+        f"producers={config.num_producers}, prefetch_samples={config.prefetch_samples}, "
+        f"fetch_block_size={config.fetch_block_size}, batch_size={config.batch_size}, out={config.width}x{config.height}"
     )
     print(f"setup: {setup_elapsed:.3f}s")
     print(f"overall: {frames / elapsed:.2f} frames/s ({frames} yielded, {built_frames} built, {batches} batches, {elapsed:.2f}s)")
     print(f"segment_query: {stats.segment_query * 1000.0 / video_attempts:.3f} ms/frame")
     print(f"video_decode: {stats.video_decode * 1000.0 / video_attempts:.3f} ms/frame")
+    print(f"jpeg_decode: {stats.jpeg_decode * 1000.0 / video_attempts:.3f} ms/frame")
     print(f"blob_decode: {stats.blob_decode * 1000.0 / decoded_frames:.3f} ms/frame")
     print(f"augment: {stats.augment * 1000.0 / decoded_frames:.3f} ms/frame")
     print(f"png fallbacks: {stats.png_fallbacks}")
     print(f"skipped frames: {samples.skipped_frames}")
     print(f"skipped flat frames: {samples.skipped_flat_frames}")
+    print(f"skipped low-valid ultrawide frames: {stats.skipped_low_valid_frames}")
