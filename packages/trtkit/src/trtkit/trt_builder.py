@@ -15,7 +15,7 @@ import hashlib
 import json
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
@@ -28,6 +28,20 @@ DEFAULT_TRT_CACHE_DIR: Path = Path(os.environ.get("TRTKIT_TRT_CACHE", "~/.cache/
 
 HardwareCompatibility: TypeAlias = Literal["none", "same_compute_capability"]
 """TensorRT plan portability requested at build time."""
+
+
+@dataclass(frozen=True, slots=True)
+class InputShapeProfile:
+    """Optimization-profile bounds of one dynamic engine input."""
+
+    name: str
+    """ONNX input name."""
+    min_shape: tuple[int, ...]
+    """Smallest accepted shape."""
+    opt_shape: tuple[int, ...]
+    """Shape TensorRT tunes kernels for."""
+    max_shape: tuple[int, ...]
+    """Largest accepted shape; buffers and activation memory size from it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +69,11 @@ class TrtBuildConfig:
     with its consumers — the escape hatch for miscompiled fusions (e.g. plane-sweep
     cost-volume GridSample). Each pattern must match at least one tensor. Part of
     the engine cache key."""
+    shape_profiles: tuple[InputShapeProfile, ...] = ()
+    """Per-input min/opt/max shapes for engines whose dynamic dims go beyond the
+    batch (or whose inputs do not share one batch dim). When set, every dynamic
+    ONNX input must be listed, static inputs are accepted as they are, and the
+    batch fields above no longer constrain the graph. Part of the engine cache key."""
 
 
 def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Path = DEFAULT_TRT_CACHE_DIR, onnx_sha256: str | None = None) -> Path:
@@ -88,9 +107,14 @@ def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Pa
         else ""
     )
     hardware_key: str = "_hcsamecc" if config.hardware_compatibility == "same_compute_capability" else ""
+    profiles_key: str = (
+        f"_s{hashlib.sha256(repr([asdict(profile) for profile in config.shape_profiles]).encode()).hexdigest()[:8]}"
+        if config.shape_profiles
+        else ""
+    )
     name: str = (
         f"{onnx_path.stem}_b1-{config.opt_batch_size}-{config.max_batch_size}_{precision_key}"
-        f"_w{config.workspace_gib:g}o{config.builder_optimization_level}{hardware_key}{extra_outputs_key}"
+        f"_w{config.workspace_gib:g}o{config.builder_optimization_level}{hardware_key}{extra_outputs_key}{profiles_key}"
         f"_trt{trt.__version__}_sm{capability[0]}{capability[1]}_{onnx_hash}.engine"
     )
     return cache_dir / name
@@ -145,22 +169,26 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
     if not config.allow_tf32:
         builder_config.clear_flag(trt.BuilderFlag.TF32)
     profile: Any = builder.create_optimization_profile()
-    has_dynamic_batch: bool = False
-    for idx in range(int(network.num_inputs)):
-        tensor: Any = network.get_input(idx)
-        shape: tuple[int, ...] = tuple(int(dim) for dim in tensor.shape)
-        if any(dim < 0 for dim in shape[1:]):
-            raise RuntimeError(f"ONNX input {tensor.name!r} has dynamic non-batch dims {shape}; trtkit requires static per-sample shapes.")
-        if shape[0] < 0:
-            has_dynamic_batch = True
-            per_sample: tuple[int, ...] = shape[1:]
-            profile.set_shape(tensor.name, (1, *per_sample), (config.opt_batch_size, *per_sample), (config.max_batch_size, *per_sample))
-        elif shape[0] != config.max_batch_size:
-            raise RuntimeError(
-                f"ONNX input {tensor.name!r} has static batch {shape[0]} but the build requests {config.max_batch_size}; re-export or match batch sizes."
-            )
-    if has_dynamic_batch:
+    if config.shape_profiles:
+        _set_shape_profiles(network, profile, config.shape_profiles)
         builder_config.add_optimization_profile(profile)
+    else:
+        has_dynamic_batch: bool = False
+        for idx in range(int(network.num_inputs)):
+            tensor: Any = network.get_input(idx)
+            shape: tuple[int, ...] = tuple(int(dim) for dim in tensor.shape)
+            if any(dim < 0 for dim in shape[1:]):
+                raise RuntimeError(f"ONNX input {tensor.name!r} has dynamic non-batch dims {shape}; trtkit requires static per-sample shapes.")
+            if shape[0] < 0:
+                has_dynamic_batch = True
+                per_sample: tuple[int, ...] = shape[1:]
+                profile.set_shape(tensor.name, (1, *per_sample), (config.opt_batch_size, *per_sample), (config.max_batch_size, *per_sample))
+            elif shape[0] != config.max_batch_size:
+                raise RuntimeError(
+                    f"ONNX input {tensor.name!r} has static batch {shape[0]} but the build requests {config.max_batch_size}; re-export or match batch sizes."
+                )
+        if has_dynamic_batch:
+            builder_config.add_optimization_profile(profile)
 
     # Not a progress bar on purpose: TensorRT emits progress callbacks for only
     # ~1% of an o3 build (measured), so any fraction-complete display is fiction.
@@ -201,8 +229,37 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
         "cuda_device_name": torch.cuda.get_device_name(),
         "cuda_compute_capability": list(torch.cuda.get_device_capability()),
     }
+    if config.shape_profiles:
+        manifest["shape_profiles"] = [asdict(profile) for profile in config.shape_profiles]
     engine_path.with_suffix(engine_path.suffix + ".json").write_text(json.dumps(manifest, indent=2) + "\n")
     os.replace(tmp_path, engine_path)
+
+
+def _set_shape_profiles(network: Any, profile: Any, shape_profiles: tuple[InputShapeProfile, ...]) -> None:
+    """Pin every dynamic network input to its declared min/opt/max shapes.
+
+    Raises:
+        RuntimeError: If a dynamic input has no profile, a profile names an
+            unknown input, or a profile's rank disagrees with the input.
+    """
+    by_name: dict[str, InputShapeProfile] = {entry.name: entry for entry in shape_profiles}
+    seen: set[str] = set()
+    for idx in range(int(network.num_inputs)):
+        tensor: Any = network.get_input(idx)
+        shape: tuple[int, ...] = tuple(int(dim) for dim in tensor.shape)
+        entry: InputShapeProfile | None = by_name.get(str(tensor.name))
+        if entry is None:
+            if any(dim < 0 for dim in shape):
+                raise RuntimeError(f"ONNX input {tensor.name!r} has dynamic dims {shape} but no shape profile was declared for it.")
+            continue
+        seen.add(entry.name)
+        for bound in (entry.min_shape, entry.opt_shape, entry.max_shape):
+            if len(bound) != len(shape):
+                raise RuntimeError(f"shape profile for {tensor.name!r} has rank {len(bound)} but the input has shape {shape}.")
+        profile.set_shape(tensor.name, entry.min_shape, entry.opt_shape, entry.max_shape)
+    unknown: set[str] = set(by_name) - seen
+    if unknown:
+        raise RuntimeError(f"shape profiles name inputs missing from the ONNX graph: {sorted(unknown)}.")
 
 
 def ensure_engine(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Path = DEFAULT_TRT_CACHE_DIR) -> Path:

@@ -218,3 +218,165 @@ def test_fp32_transposed_conv_islands_share_weights_without_mutating() -> None:
     x = torch.randn(1, 2, 8, 8)
     with torch.inference_mode():
         torch.testing.assert_close(wrapped(x), model(x))
+
+
+def test_dynamic_dims_share_symbols_and_derive_multiples(tmp_path: Path) -> None:
+    """One symbol per name across inputs, derived multiples, AUTO hints, and the autocast nesting."""
+    from trtkit import DynamicDim
+
+    captured: dict[str, object] = {}
+
+    def fake_export_fn(model: object, inputs: object, path: str, **kwargs: object) -> None:
+        captured.update(kwargs)
+        Path(path).write_bytes(b"protobuf")
+
+    export_onnx(
+        torch.nn.Identity(),
+        (torch.zeros(2, 3, 28, 42), torch.zeros(1, 3, 2, 3), torch.zeros(1, 9)),
+        tmp_path / "dyn.onnx",
+        input_names=["images", "grid", "tokens"],
+        output_names=["y"],
+        compute_dtype=torch.float16,
+        dynamic_dims={
+            "images": {0: DynamicDim("batch", 1, 4), 2: DynamicDim("rows", 2, 8, multiple=14), 3: DynamicDim("cols", 3, 9, multiple=14)},
+            "grid": {2: DynamicDim("rows", 2, 8), 3: DynamicDim("cols", 3, 9)},
+            "tokens": {1: DynamicDim("tokens", 7, 73, auto=True)},
+        },
+        export_fn=fake_export_fn,
+    )
+
+    shapes = cast(tuple[tuple[dict[int, object], ...]], captured["dynamic_shapes"])
+    assert len(shapes) == 1, "autocast wrapper takes *inputs, so torch.export sees one varargs parameter"
+    images_dims, grid_dims, token_dims = shapes[0]
+    assert str(images_dims[2]) == "14*rows" and str(images_dims[3]) == "14*cols"
+    assert images_dims[2].root is grid_dims[2] and images_dims[3].root is grid_dims[3], "derived dims must share the grid's symbols"
+    assert images_dims[0].min == 1 and images_dims[0].max == 4
+    assert "AUTO" in str(token_dims[1]) and "min=7" in str(token_dims[1]) and "max=73" in str(token_dims[1])
+
+
+def test_dynamic_dims_with_a_range_of_one_stay_static() -> None:
+    """``min == max`` (a batch pinned to 1 inside a dynamic spec) becomes a static dim instead of an invalid ``torch.export.Dim``."""
+    from trtkit import DynamicDim
+    from trtkit.onnx_export import _torch_dynamic_shapes
+
+    (images_dims, grid_dims) = _torch_dynamic_shapes(
+        ["images", "grid"],
+        {"images": {0: DynamicDim("batch", 1, 1), 1: DynamicDim("views", 2, 6)}, "grid": {0: DynamicDim("batch", 1, 1, multiple=14)}},
+    )
+    assert 0 not in images_dims and 0 not in grid_dims, "a range of one is static"
+    assert images_dims[1].min == 2 and images_dims[1].max == 6
+
+
+def test_dynamic_dims_reject_conflicts() -> None:
+    """The spec is complete and consistent: no batch shorthand beside it, no unknown inputs, no conflicting bounds."""
+    from trtkit import DynamicDim
+    from trtkit.onnx_export import _torch_dynamic_shapes
+
+    with pytest.raises(ValueError, match="complete shape spec"):
+        export_onnx(
+            torch.nn.Identity(),
+            (torch.zeros(2, 3),),
+            Path("/nonexistent/dyn.onnx"),
+            input_names=["x"],
+            output_names=["y"],
+            dynamic_batch_max=4,
+            dynamic_dims={"x": {0: DynamicDim("batch", 1, 4)}},
+            export_fn=lambda *_args, **_kwargs: None,
+        )
+    with pytest.raises(ValueError, match="not exported"):
+        _torch_dynamic_shapes(["x"], {"y": {0: DynamicDim("batch", 1, 4)}})
+    with pytest.raises(ValueError, match="bounds"):
+        _torch_dynamic_shapes(["x", "z"], {"x": {0: DynamicDim("n", 1, 4)}, "z": {0: DynamicDim("n", 2, 4)}})
+    with pytest.raises(ValueError, match="multiple"):
+        _torch_dynamic_shapes(["x"], {"x": {0: DynamicDim("n", 1, 4, multiple=2, auto=True)}})
+
+
+def test_shape_profiles_pin_dynamic_inputs_and_key_the_engine(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Profiles set min/opt/max per dynamic input, skip static ones, reject gaps, and change the cache name."""
+    from trtkit import InputShapeProfile
+    from trtkit.trt_builder import _set_shape_profiles
+
+    class FakeProfile:
+        def __init__(self) -> None:
+            self.shapes: dict[str, tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]] = {}
+
+        def set_shape(self, name: str, low: tuple[int, ...], opt: tuple[int, ...], high: tuple[int, ...]) -> None:
+            self.shapes[name] = (low, opt, high)
+
+    network = SimpleNamespace(
+        num_inputs=2,
+        get_input=lambda index: [SimpleNamespace(name="images", shape=(-1, 3, -1, -1)), SimpleNamespace(name="bias", shape=(1, 6, 9, 9))][index],
+    )
+    profile = FakeProfile()
+    entry = InputShapeProfile(name="images", min_shape=(1, 3, 28, 28), opt_shape=(1, 3, 56, 56), max_shape=(4, 3, 112, 112))
+    _set_shape_profiles(network, profile, (entry,))
+    assert profile.shapes == {"images": (entry.min_shape, entry.opt_shape, entry.max_shape)}
+    with pytest.raises(RuntimeError, match="no shape profile"):
+        _set_shape_profiles(network, FakeProfile(), ())
+    with pytest.raises(RuntimeError, match="missing from the ONNX graph"):
+        _set_shape_profiles(network, FakeProfile(), (entry, InputShapeProfile(name="ghost", min_shape=(1,), opt_shape=(1,), max_shape=(1,))))
+    with pytest.raises(RuntimeError, match="rank"):
+        _set_shape_profiles(network, FakeProfile(), (InputShapeProfile(name="images", min_shape=(1, 3), opt_shape=(1, 3), max_shape=(4, 3)),))
+
+    fake_trt = SimpleNamespace(__version__="11.2.1.2")
+    monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (12, 0))
+    onnx_path: Path = tmp_path / "model.onnx"
+    onnx_path.write_bytes(b"onnx")
+    plain: Path = cached_engine_path(onnx_path, TrtBuildConfig(), cache_dir=tmp_path)
+    profiled: Path = cached_engine_path(onnx_path, TrtBuildConfig(shape_profiles=(entry,)), cache_dir=tmp_path)
+    other: Path = cached_engine_path(
+        onnx_path, TrtBuildConfig(shape_profiles=(InputShapeProfile(name="images", min_shape=(1, 3, 28, 28), opt_shape=(1, 3, 56, 56), max_shape=(2, 3, 112, 112)),)), cache_dir=tmp_path
+    )
+    assert plain != profiled != other
+    assert "_s" not in plain.name.split("_trt")[0].split("_w")[1]
+
+
+class _ToyDynamic(torch.nn.Module):
+    """Conv over a dynamic image plus a batch-1 bias input that broadcasts over the batch."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv2d(3, 4, 3, padding=1)
+
+    def forward(self, images: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
+        return self.conv(images) + bias[:, :, None, None]
+
+
+@cuda_only
+def test_dynamic_runtime_runs_two_shapes_from_one_engine(tmp_path: Path) -> None:
+    """A shape-profiled engine serves several batch and spatial sizes with batch-1 side inputs."""
+    from trtkit import DynamicDim, InputShapeProfile, TensorRtDynamicRuntime, ensure_engine
+
+    model = _ToyDynamic().eval().cuda()
+    onnx_path: Path = tmp_path / "toy.onnx"
+    export_onnx(
+        model,
+        (torch.zeros(2, 3, 28, 42, device="cuda"), torch.zeros(1, 4, device="cuda")),
+        onnx_path,
+        input_names=["images", "bias"],
+        output_names=["y"],
+        compute_dtype=torch.float16,
+        dynamic_dims={"images": {0: DynamicDim("batch", 1, 4), 2: DynamicDim("rows", 2, 6, multiple=14), 3: DynamicDim("cols", 2, 6, multiple=14)}},
+    )
+    config = TrtBuildConfig(
+        max_batch_size=4,
+        opt_batch_size=1,
+        workspace_gib=1.0,
+        shape_profiles=(
+            InputShapeProfile(name="images", min_shape=(1, 3, 28, 28), opt_shape=(1, 3, 56, 56), max_shape=(4, 3, 84, 84)),
+            InputShapeProfile(name="bias", min_shape=(1, 4), opt_shape=(1, 4), max_shape=(1, 4)),
+        ),
+    )
+    runtime = TensorRtDynamicRuntime(ensure_engine(onnx_path, config, cache_dir=tmp_path), use_cuda_graph=True)
+    assert runtime.max_input_shapes == {"images": (4, 3, 84, 84), "bias": (1, 4)}
+    bias = torch.randn(1, 4, device="cuda")
+    for shape in ((1, 3, 28, 42), (3, 3, 70, 56), (4, 3, 84, 84)):
+        images = torch.randn(*shape, device="cuda")
+        with torch.inference_mode():
+            expected = model(images, bias)
+        outputs = runtime({"images": images, "bias": bias})
+        assert outputs["y"].shape == expected.shape
+        torch.testing.assert_close(outputs["y"].float(), expected, rtol=2e-2, atol=2e-2)
+    with pytest.raises(ValueError, match="outside the engine profile"):
+        runtime({"images": torch.randn(5, 3, 28, 28, device="cuda"), "bias": bias})

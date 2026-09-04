@@ -27,6 +27,7 @@ from jaxtyping import Float, Float32, Int64
 from torch import Tensor
 
 from monopriors.third_party.xlens.models.dinov2 import DinoV2
+from monopriors.third_party.xlens.models.dinov2.vision_transformer import FrozenRigGeometry
 from monopriors.third_party.xlens.models.dpt_head import DPTHead
 from monopriors.third_party.xlens.models.ray_map_encoder import RayMapEncoder
 
@@ -286,12 +287,48 @@ class XLensNet(nn.Module):
             num_heads=scale_head_num_heads,
         )
 
+    def freeze_geometry(
+        self,
+        d_cam: Float32[Tensor, "batch views 3 height width"],
+        cam_types: Int64[Tensor, "batch views"] | None,
+        ray_map: Float32[Tensor, "batch views 6 height width"] | None = None,
+    ) -> FrozenRigGeometry:
+        """Precompute everything ``forward`` needs from the rig alone.
+
+        Runs the ray-map encoder and the backbone's per-layer geometry (RoPE
+        positions, calibration masks, distortion bias) once. Bit-identical to
+        letting ``forward`` rebuild them from ``ray_map``/``d_cam``/``cam_types``.
+
+        Args:
+            d_cam: Per-pixel camera-frame unit rays, ``Float32[Tensor, "batch views 3 height width"]``.
+            cam_types: Camera type ids (0 fisheye, 1 pinhole), ``Int64[Tensor, "batch views"]``, or None.
+            ray_map: Optional ray map ``Float32[Tensor, "batch views 6 height width"]`` (view 0 is the world frame).
+
+        Returns:
+            Frozen geometry for ``forward(images, frozen=...)``.
+        """
+        batch_size, n_views, _, height, width = d_cam.shape
+        ray_feat: Float32[Tensor, "batch views features patch_height patch_width"] | None = None
+        if ray_map is not None:
+            with torch.autocast(device_type=d_cam.device.type, enabled=False):
+                ray_feat = self.ray_encoder(ray_map.float())
+        return self.backbone.pretrained.freeze_geometry(
+            ray_feat=ray_feat,
+            d_cam=d_cam,
+            cam_types=cam_types,
+            batch_size=batch_size,
+            n_views=n_views,
+            image_hw=(height, width),
+            device=d_cam.device,
+        )
+
     def forward(
         self,
         images: Float[Tensor, "batch views 3 height width"],
         ray_map: Float32[Tensor, "batch views 6 height width"] | None = None,
         d_cam: Float32[Tensor, "batch views 3 height width"] | None = None,
         cam_types: Int64[Tensor, "batch views"] | None = None,
+        frozen: FrozenRigGeometry | None = None,
     ) -> XLensNetOutput:
         """
         Args:
@@ -304,6 +341,8 @@ class XLensNet(nn.Module):
             cam_types: optional (B, S) int camera-type id (0=fisheye, 1=pinhole).
                        Enables cam_type_embed + per-cam attention bias when the
                        backbone is configured with n_cam_types>0. None disables it.
+            frozen:    optional precomputed rig geometry from ``freeze_geometry``;
+                       replaces ray_map/d_cam/cam_types and skips their per-call cost.
 
         Returns:
             dict:
@@ -316,21 +355,26 @@ class XLensNet(nn.Module):
         _, S, _, H, W = images.shape
         assert S >= 2, f"expected at least 2 views, got S={S}"
 
-        ray_feat: Float32[Tensor, "batch views features patch_height patch_width"] | None = None
-        if ray_map is not None:
-            with torch.autocast(device_type=images.device.type, enabled=False):
-                ray_feat = self.ray_encoder(ray_map.float())  # (B, S, embed_dim, H/p, W/p)
-
-        # DINOv2 multi-scale features + scale tokens. d_cam feeds FishRoPE;
-        # cam_types feeds cam_type_embed + per-cam attention bias.
         feats: tuple[BackboneFeature, ...]
         scale_tokens: Float[Tensor, "batch views features"] | None
-        feats, scale_tokens = self.backbone(
-            images,
-            ray_feat=ray_feat,
-            d_cam=d_cam,
-            cam_types=cam_types,
-        )
+        if frozen is not None:
+            if ray_map is not None or d_cam is not None or cam_types is not None:
+                raise ValueError("pass either frozen geometry or ray_map/d_cam/cam_types, not both")
+            feats, scale_tokens = self.backbone(images, frozen=frozen)
+        else:
+            ray_feat: Float32[Tensor, "batch views features patch_height patch_width"] | None = None
+            if ray_map is not None:
+                with torch.autocast(device_type=images.device.type, enabled=False):
+                    ray_feat = self.ray_encoder(ray_map.float())  # (B, S, embed_dim, H/p, W/p)
+
+            # DINOv2 multi-scale features + scale tokens. d_cam feeds FishRoPE;
+            # cam_types feeds cam_type_embed + per-cam attention bias.
+            feats, scale_tokens = self.backbone(
+                images,
+                ray_feat=ray_feat,
+                d_cam=d_cam,
+                cam_types=cam_types,
+            )
 
         # Scale head -> metric scaling factor.
         with torch.autocast(device_type=images.device.type, enabled=False):

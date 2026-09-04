@@ -87,7 +87,11 @@ def custom_interpolate(
     """Interpolation that chunks large tensors to avoid integer overflow."""
     if size is None:
         assert scale_factor is not None
-        size = (int(x.shape[-2] * scale_factor), int(x.shape[-1] * scale_factor))
+        if float(scale_factor).is_integer():
+            # Integer arithmetic keeps traced sizes integral (identical values in eager).
+            size = (x.shape[-2] * int(scale_factor), x.shape[-1] * int(scale_factor))
+        else:
+            size = (int(x.shape[-2] * scale_factor), int(x.shape[-1] * scale_factor))
 
     INT_MAX = 1610612736
     total = size[0] * size[1] * x.shape[0] * x.shape[1]

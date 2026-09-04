@@ -12,12 +12,13 @@ Geometry conditioning is provided through the ray-map path.
 import logging
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from typing import Literal, TypeAlias, cast
 
 import torch
 import torch.nn as nn
 from einops import rearrange
-from jaxtyping import Bool, Float, Int64
+from jaxtyping import Bool, Float, Float32, Int64
 from torch import Tensor
 
 from monopriors.third_party.xlens.models.dinov2.layers import (
@@ -38,6 +39,54 @@ AttentionType = Literal["local", "global"]
 DwcInfo: TypeAlias = tuple[int, int, int, int, int]
 BackboneFeature: TypeAlias = tuple[Float[Tensor, "batch views patches features"], Float[Tensor, "batch views features"]]
 IntermediateOutput: TypeAlias = tuple[tuple[BackboneFeature, ...], Float[Tensor, "batch views features"] | None]
+RopePositions: TypeAlias = Float[Tensor, "batch views tokens 2"] | Int64[Tensor, "batch views tokens 2"]
+AttentionBias: TypeAlias = Float[Tensor, "packed_batch tokens tokens"] | Float[Tensor, "packed_batch heads tokens tokens"]
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenRigGeometry:
+    """Pixel-independent backbone inputs of one fixed calibrated rig.
+
+    Every field depends only on rays, camera types, and poses, never on pixels.
+    Computing them once per rig removes the per-layer calibration masks, token
+    geometry, and distortion-bias MLP from the forward pass; the values are the
+    ones the unfrozen forward would rebuild at every layer.
+    """
+
+    cam_types: Int64[Tensor, "batch views"] | None
+    """X-Lens camera type ids (0 fisheye, 1 pinhole); None disables the camera-type embedding and calibration tokens."""
+    ray_feat: Float32[Tensor, "batch views features patch_height patch_width"] | None
+    """Ray-map encoder output added to the patch tokens; None without poses."""
+    calib_k: int
+    """Calibration tokens appended to every view at every layer; 0 when no view injects them."""
+    pos_local: RopePositions | None
+    """Within-view RoPE positions for the longest per-view sequence ``[CLS, patches, scale, calib]``; shorter layers read a prefix."""
+    pos_global: RopePositions | None
+    """Cross-view RoPE positions with the same layout as ``pos_local``."""
+    attn_masks: tuple[AttentionBias | None, ...]
+    """Per-layer additive attention bias (calibration mask plus distortion bias); layers with equal geometry share one tensor."""
+    pos_embed: Float32[Tensor, "1 tokens features"] | None = None
+    """Position embedding interpolated to this image size (CLS + patches); None recomputes it from the pretrained grid."""
+
+    def with_mask_dtype(self, dtype: torch.dtype) -> "FrozenRigGeometry":
+        """Copy with the attention biases cast to ``dtype``, keeping the tensor sharing between layers.
+
+        Args:
+            dtype: Target floating-point dtype of every attention bias.
+
+        Returns:
+            Frozen geometry whose masks live in ``dtype``; other fields are shared.
+        """
+        cast_masks: dict[int, AttentionBias] = {}
+        attn_masks: list[AttentionBias | None] = []
+        for mask in self.attn_masks:
+            if mask is None:
+                attn_masks.append(None)
+                continue
+            if id(mask) not in cast_masks:
+                cast_masks[id(mask)] = mask.to(dtype)
+            attn_masks.append(cast_masks[id(mask)])
+        return replace(self, attn_masks=tuple(attn_masks))
 
 
 class DinoVisionTransformer(nn.Module):
@@ -243,6 +292,7 @@ class DinoVisionTransformer(nn.Module):
         x: Float[Tensor, "batch views 3 height width"],
         ray_feat: Float[Tensor, "batch views features patch_height patch_width"] | None = None,
         cam_types: Int64[Tensor, "batch views"] | None = None,
+        pos_embed: Float32[Tensor, "1 tokens features"] | None = None,
     ) -> Float[Tensor, "batch views tokens features"]:
         """Build the input token sequence.
 
@@ -255,6 +305,8 @@ class DinoVisionTransformer(nn.Module):
                        RayMapEncoder, added element-wise to patch tokens.
             cam_types: Optional (B, S) int camera-type ids (0=fisheye, 1=pinhole),
                        looked up in cam_type_embed and broadcast over patch tokens.
+            pos_embed: Optional precomputed (1, 1 + N, C) position embedding for this
+                       image size; None interpolates the pretrained grid here.
 
         Returns:
             Token sequence (B, S, N, C).
@@ -281,7 +333,7 @@ class DinoVisionTransformer(nn.Module):
 
         cls_token = self.prepare_cls_token(B, S)
         x = torch.cat((cls_token, x), dim=1)
-        x = x + self.interpolate_pos_encoding(x, w, h)
+        x = x + (self.interpolate_pos_encoding(x, w, h) if pos_embed is None else pos_embed.to(x.dtype))
         if self.register_tokens is not None:
             x = torch.cat(
                 (
@@ -381,6 +433,169 @@ class DinoVisionTransformer(nn.Module):
             pos_nodiff = torch.cat([pos_special, pos_nodiff], dim=2)
         return pos, pos_nodiff
 
+    def _is_global_layer(self, layer_index: int) -> bool:
+        """Whether one block attends across views (odd layers from ``alt_start``)."""
+        return self.alt_start != -1 and layer_index >= self.alt_start and layer_index % 2 == 1
+
+    def _attention_bias(
+        self,
+        attn_type: AttentionType,
+        *,
+        scale_injected: bool,
+        apply_distortion: bool,
+        calib_k: int,
+        inject_mask: Bool[Tensor, "batch views"] | None,
+        d_cam: Float[Tensor, "batch views _channels _height _width"] | None,
+        batch_size: int,
+        n_views: int,
+        patch_hw: tuple[int, int],
+        device: torch.device,
+    ) -> AttentionBias | None:
+        """Build one layer's additive attention bias from rig geometry alone.
+
+        The sequence of every view is ``[CLS, register..., patches, (scale,) calib...]``.
+        The calibration mask blocks calibration tokens from foreign views and isolates
+        placeholder slots; the distortion bias adds the pairwise Jacobian MLP output.
+
+        Args:
+            attn_type: Within-view or cross-view attention.
+            scale_injected: Whether the scale token is present in the sequence.
+            apply_distortion: Whether this layer adds the distortion bias.
+            calib_k: Calibration tokens per view, 0 when none inject.
+            inject_mask: Which views inject calibration tokens, ``Bool[Tensor, "batch views"]``.
+            d_cam: Per-pixel camera-frame unit rays, ``Float[Tensor, "batch views 3 height width"]``.
+            batch_size: Batch size B.
+            n_views: Views per sample S.
+            patch_hw: Patch-grid height and width.
+            device: Device that owns the mask.
+
+        Returns:
+            ``(B', L, L)`` calibration mask, ``(B', H, L, L)`` combined per-head bias, or None.
+        """
+        H_p, W_p = patch_hw
+        prefix = 1 + self.num_register_tokens
+        suffix = 1 if scale_injected else 0
+        combined: AttentionBias | None = None
+        if calib_k > 0:
+            assert inject_mask is not None
+            combined = build_calib_attention_mask(
+                K_per_view=calib_k,
+                inject_mask=inject_mask,
+                N_non_calib=prefix + H_p * W_p + suffix,
+                attn_type=attn_type,
+                device=device,
+                dtype=torch.float32,
+            )
+        if apply_distortion:
+            d_tok, J_tok, valid_tok = build_token_geometry(
+                d_cam=d_cam,
+                H_p=H_p,
+                W_p=W_p,
+                prefix_len=prefix,
+                suffix_len_no_calib=suffix,
+                K_calib=calib_k,
+                n_views=n_views,
+                batch_size=batch_size,
+                device=device,
+                dtype=torch.float32,
+                attn_type=attn_type,
+            )
+            if d_tok is not None:
+                assert self.distortion_bias is not None
+                assert J_tok is not None
+                assert valid_tok is not None
+                db: Float[Tensor, "packed_batch heads tokens tokens"] = self.distortion_bias(d_tok, J_tok, valid_mask=valid_tok)
+                combined = db if combined is None else db + combined.unsqueeze(1).to(db.dtype)
+        return combined
+
+    def freeze_geometry(
+        self,
+        *,
+        ray_feat: Float32[Tensor, "batch views features patch_height patch_width"] | None,
+        d_cam: Float[Tensor, "batch views _channels _height _width"] | None,
+        cam_types: Int64[Tensor, "batch views"] | None,
+        batch_size: int,
+        n_views: int,
+        image_hw: tuple[int, int],
+        device: torch.device,
+    ) -> FrozenRigGeometry:
+        """Precompute every pixel-independent attention input for one rig.
+
+        The unfrozen forward calls this at every invocation, so both paths run
+        the same code and produce identical tensors; callers with a fixed rig
+        compute it once and pass it to ``forward``.
+
+        Args:
+            ray_feat: Ray-map encoder output, ``Float32[Tensor, "batch views features patch_height patch_width"]``, or None.
+            d_cam: Per-pixel camera-frame unit rays, ``Float[Tensor, "batch views 3 height width"]``, or None for pixel-grid RoPE.
+            cam_types: Camera type ids, ``Int64[Tensor, "batch views"]``, or None.
+            batch_size: Batch size B.
+            n_views: Views per sample S.
+            image_hw: Image height and width.
+            device: Device that owns the geometry.
+
+        Returns:
+            Frozen geometry for ``forward(..., frozen=...)``.
+        """
+        height, width = image_hw
+        pos, pos_nodiff = self._prepare_rope(batch_size, n_views, height, width, device, d_cam=d_cam)
+        calib_active: bool = self.calib_tokens is not None and cam_types is not None and self.calib_tokens.needs_inject(cam_types)
+        calib_k: int = 0
+        inject_mask: Bool[Tensor, "batch views"] | None = None
+        if calib_active:
+            assert self.calib_tokens is not None
+            assert cam_types is not None
+            calib_k = self.calib_tokens.K
+            inject_mask = self.calib_tokens.build_view_calib_tokens(0, cam_types)[1]
+        # The scale token (from alt_start) and the calibration tokens sit at the end of
+        # each view with zero RoPE position, so one padded tensor serves every layer:
+        # a layer reads the prefix matching its sequence length.
+        trailing: int = (1 if self.alt_start != -1 else 0) + calib_k
+        if pos is not None and trailing > 0:
+            assert pos_nodiff is not None
+            zeros: RopePositions = torch.zeros(batch_size, n_views, trailing, pos.shape[-1], device=pos.device, dtype=pos.dtype)
+            pos = torch.cat([pos, zeros], dim=2)
+            pos_nodiff = torch.cat([pos_nodiff, zeros], dim=2)
+
+        patch_hw: tuple[int, int] = (height // self.patch_size, width // self.patch_size)
+        # The token sequence is float32 where the position embedding is added (the CLS
+        # concat promotes it), so interpolating in float32 here is what forward does.
+        token_probe: Float32[Tensor, "1 tokens features"] = torch.empty(
+            1, 1 + patch_hw[0] * patch_hw[1], self.embed_dim, dtype=torch.float32, device=device
+        )
+        pos_embed: Float32[Tensor, "1 tokens features"] = self.interpolate_pos_encoding(token_probe, height, width)
+        distortion_active: bool = self.distortion_bias is not None and d_cam is not None
+        shared: dict[tuple[AttentionType, bool], AttentionBias | None] = {}
+        attn_masks: list[AttentionBias | None] = []
+        for layer_index in range(len(self.blocks)):
+            scale_injected: bool = self.alt_start != -1 and layer_index >= self.alt_start
+            is_global: bool = self._is_global_layer(layer_index)
+            attn_type: AttentionType = "global" if is_global else "local"
+            key: tuple[AttentionType, bool] = (attn_type, scale_injected)
+            if key not in shared:
+                shared[key] = self._attention_bias(
+                    attn_type,
+                    scale_injected=scale_injected,
+                    apply_distortion=distortion_active and (self.distortion_bias_layers == "all" or is_global),
+                    calib_k=calib_k,
+                    inject_mask=inject_mask,
+                    d_cam=d_cam,
+                    batch_size=batch_size,
+                    n_views=n_views,
+                    patch_hw=patch_hw,
+                    device=device,
+                )
+            attn_masks.append(shared[key])
+        return FrozenRigGeometry(
+            cam_types=cam_types,
+            ray_feat=ray_feat,
+            calib_k=calib_k,
+            pos_local=pos,
+            pos_global=pos_nodiff,
+            attn_masks=tuple(attn_masks),
+            pos_embed=pos_embed,
+        )
+
     def _get_intermediate_layers_not_chunked(
         self,
         x: Float[Tensor, "batch views 3 height width"],
@@ -389,6 +604,7 @@ class DinoVisionTransformer(nn.Module):
         ray_feat: Float[Tensor, "batch views features patch_height patch_width"] | None = None,
         d_cam: Float[Tensor, "batch views _channels _height _width"] | None = None,
         cam_types: Int64[Tensor, "batch views"] | None = None,
+        frozen: FrozenRigGeometry | None = None,
     ) -> tuple[list[tuple[Float[Tensor, "batch views features"], Float[Tensor, "batch views tokens features"]]], list[bool]]:
         """Extract intermediate features from selected layers.
 
@@ -399,25 +615,22 @@ class DinoVisionTransformer(nn.Module):
 
         cam_types: optional (B, S) int in kwargs, used to (1) add cam_type_embed in
         prepare_tokens_with_masks and (2) forward per-cam bias into each block.
+        frozen: precomputed rig geometry; when given, ray_feat/d_cam/cam_types are read from it.
         """
         B, S, _, H, W = x.shape
-        cam_types_BS = cam_types
+        if frozen is None:
+            frozen = self.freeze_geometry(
+                ray_feat=ray_feat, d_cam=d_cam, cam_types=cam_types, batch_size=B, n_views=S, image_hw=(H, W), device=x.device
+            )
         x = self.prepare_tokens_with_masks(
             x,
-            ray_feat=ray_feat,
-            cam_types=cam_types_BS,
+            ray_feat=frozen.ray_feat,
+            cam_types=frozen.cam_types,
+            pos_embed=frozen.pos_embed,
         )
         output: list[tuple[Float[Tensor, "batch views features"], Float[Tensor, "batch views tokens features"]]] = []
         total_block_len = len(self.blocks)
         blocks_to_take = range(total_block_len - n, total_block_len) if isinstance(n, int) else n
-        pos, pos_nodiff = self._prepare_rope(
-            B,
-            S,
-            H,
-            W,
-            x.device,
-            d_cam=d_cam,
-        )
         scale_injected = False  # whether the scale token has been injected
         output_has_scale = []  # per-output flag: does it include the scale token
 
@@ -425,14 +638,7 @@ class DinoVisionTransformer(nn.Module):
         H_p = H // self.patch_size
         W_p = W // self.patch_size
         dwc_prefix = 1 + self.num_register_tokens  # CLS + register tokens
-
-        # Stage 3 runtime switches. Whether this batch actually runs
-        # calib_tokens / distortion_bias:
-        # - calib: use_calib_tokens=True and cam_types_BS given with an inject type present
-        # - distortion bias: use_distortion_bias=True and d_cam given
-        d_cam_input = d_cam
-        calib_active = self.calib_tokens is not None and cam_types_BS is not None and self.calib_tokens.needs_inject(cam_types_BS)
-        dist_bias_active = self.distortion_bias is not None and d_cam_input is not None
+        K_layer: int = frozen.calib_k
 
         local_x: Float[Tensor, "batch views tokens features"] = x
         for i, block_module in enumerate(self.blocks):
@@ -444,94 +650,27 @@ class DinoVisionTransformer(nn.Module):
                 scale_tok = self.scale_token.expand(B, S, -1, -1)  # (B, S, 1, C)
                 x = torch.cat([x, scale_tok], dim=2)  # (B, S, N+1, C)
                 scale_injected = True
-                # Extend RoPE positions (scale token uses zero position)
-                if pos is not None:
-                    scale_pos = torch.zeros(B, S, 1, pos.shape[-1], device=pos.device, dtype=pos.dtype)
-                    pos = torch.cat([pos, scale_pos], dim=2)
-                    assert pos_nodiff is not None
-                    pos_nodiff = torch.cat([pos_nodiff, scale_pos], dim=2)
 
             # ---- Calib token injection (per-layer, multi-layer variant) ----
-            # Append K tokens at the end of the sequence, dropped right after this
-            # block. Must happen before g_pos/l_pos so RoPE positions stay aligned.
-            K_layer = 0
-            inject_mask = None
-            calib_view_tokens = None
-            if calib_active:
+            # Append K tokens at the end of the sequence, dropped right after this block.
+            if K_layer > 0:
                 assert self.calib_tokens is not None
-                assert cam_types_BS is not None
-                K_layer = self.calib_tokens.K
-                calib_view_tokens, inject_mask = self.calib_tokens.build_view_calib_tokens(i, cam_types_BS)  # (B, S, K, C), (B, S) bool
+                assert frozen.cam_types is not None
+                calib_view_tokens = self.calib_tokens.build_view_calib_tokens(i, frozen.cam_types)[0]  # (B, S, K, C)
                 x = torch.cat([x, calib_view_tokens.to(x.dtype)], dim=2)  # (B, S, N+K, C)
-                if pos is not None:
-                    calib_pos = torch.zeros(B, S, K_layer, pos.shape[-1], device=pos.device, dtype=pos.dtype)
-                    pos = torch.cat([pos, calib_pos], dim=2)
-                    assert pos_nodiff is not None
-                    pos_nodiff = torch.cat([pos_nodiff, calib_pos], dim=2)
 
-            # Select RoPE positions (after scale + calib injection so dims match)
-            if i < self.rope_start or self.rope is None:
+            # RoPE positions: the frozen tensors carry zero positions for the scale and
+            # calib slots, so the prefix matching this layer's sequence length is exact.
+            if i < self.rope_start or self.rope is None or frozen.pos_local is None:
                 g_pos, l_pos = None, None
             else:
-                g_pos = pos_nodiff
-                l_pos = pos
+                assert frozen.pos_global is not None
+                g_pos = frozen.pos_global[:, :, : x.shape[2]]
+                l_pos = frozen.pos_local[:, :, : x.shape[2]]
 
             # Local vs global layer
-            is_global_layer = self.alt_start != -1 and i >= self.alt_start and i % 2 == 1
-            attn_type = "global" if is_global_layer else "local"
-
-            # Build attention mask + distortion bias.
-            # N_non_calib covers CLS + register + N_patches (+ scale if present).
-            N_non_calib_per_view = x.shape[2] - K_layer  # x's N dim now includes calib
-            attn_mask_combined = None  # final mask passed to the attention block
-
-            # 1) calib mask
-            if K_layer > 0:
-                assert inject_mask is not None
-                calib_mask = build_calib_attention_mask(
-                    K_per_view=K_layer,
-                    inject_mask=inject_mask,
-                    N_non_calib=N_non_calib_per_view,
-                    attn_type=attn_type,
-                    device=x.device,
-                    dtype=torch.float32,
-                )
-                if calib_mask is not None:
-                    attn_mask_combined = calib_mask  # (B', L, L)
-
-            # 2) distortion bias (global layers only, when configured)
-            apply_dist_bias = False
-            if dist_bias_active:
-                if self.distortion_bias_layers == "all":
-                    apply_dist_bias = True
-                elif self.distortion_bias_layers == "global_only":
-                    apply_dist_bias = is_global_layer
-                elif self.distortion_bias_layers == "global_after_alt":
-                    apply_dist_bias = is_global_layer  # same as global_only; kept for API
-                else:
-                    apply_dist_bias = False
-
-            if apply_dist_bias:
-                suffix_no_calib = 1 if scale_injected else 0
-                d_tok, J_tok, valid_tok = build_token_geometry(
-                    d_cam=d_cam_input,
-                    H_p=H_p,
-                    W_p=W_p,
-                    prefix_len=dwc_prefix,
-                    suffix_len_no_calib=suffix_no_calib,
-                    K_calib=K_layer,
-                    n_views=S,
-                    batch_size=B,
-                    device=x.device,
-                    dtype=torch.float32,
-                    attn_type=attn_type,
-                )
-                if d_tok is not None:
-                    assert self.distortion_bias is not None
-                    assert J_tok is not None
-                    assert valid_tok is not None
-                    db = self.distortion_bias(d_tok, J_tok, valid_mask=valid_tok)  # (B', H, L, L)
-                    attn_mask_combined = db if attn_mask_combined is None else db + attn_mask_combined.unsqueeze(1).to(db.dtype)
+            is_global_layer = self._is_global_layer(i)
+            attn_mask_combined = frozen.attn_masks[i]
 
             # DWC bypass info; suffix must include the calib token slots
             dwc_suffix = (1 if scale_injected else 0) + K_layer
@@ -564,10 +703,6 @@ class DinoVisionTransformer(nn.Module):
             # Drop calib tokens (present only within this layer's attention)
             if K_layer > 0:
                 x = x[:, :, :-K_layer, :]
-                if pos is not None:
-                    pos = pos[:, :, :-K_layer, :]
-                    assert pos_nodiff is not None
-                    pos_nodiff = pos_nodiff[:, :, :-K_layer, :]
                 # keep the calib-dropped version of local_x for alignment
                 if not is_global_layer:
                     local_x = x
@@ -630,12 +765,17 @@ class DinoVisionTransformer(nn.Module):
         ray_feat: Float[Tensor, "batch views features patch_height patch_width"] | None = None,
         d_cam: Float[Tensor, "batch views _channels _height _width"] | None = None,
         cam_types: Int64[Tensor, "batch views"] | None = None,
+        frozen: FrozenRigGeometry | None = None,
     ) -> IntermediateOutput:
         """Get intermediate-layer features.
 
         Args:
             x: Input images (B, S, 3, H, W).
             n: Layer indices to extract features from.
+            ray_feat: Optional ray-map encoder output added to the patch tokens.
+            d_cam: Optional per-pixel camera-frame unit rays for FishRoPE and the distortion bias.
+            cam_types: Optional camera type ids for the camera-type embedding and calibration tokens.
+            frozen: Precomputed rig geometry replacing ``ray_feat``, ``d_cam``, and ``cam_types``.
 
         Returns:
             ``(features, scale_tokens)``. Each feature is ``(patch_tokens, cls_tokens)``,
@@ -647,6 +787,7 @@ class DinoVisionTransformer(nn.Module):
             ray_feat=ray_feat,
             d_cam=d_cam,
             cam_types=cam_types,
+            frozen=frozen,
         )
         cls_tokens = [out[0] for out in outputs]
 

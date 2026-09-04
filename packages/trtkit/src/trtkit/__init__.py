@@ -36,13 +36,14 @@ from trtkit.backends import (
 )
 from trtkit.base import RuntimeSpec, TensorRuntime, TensorSpec, run_chunked, validate_runtime_inputs
 from trtkit.onnx_cuda import OnnxCudaRuntime
-from trtkit.onnx_export import export_onnx, sweep_stale_onnx_exports
+from trtkit.onnx_export import DynamicDim, DynamicDims, export_onnx, shallow_module_copy, sweep_stale_onnx_exports
 from trtkit.onnx_graph import onnx_static_batch_size
-from trtkit.tensorrt_runtime import TensorRtRuntime
+from trtkit.tensorrt_runtime import TensorRtDynamicRuntime, TensorRtRuntime
 from trtkit.torch_runtime import TorchRuntime
 from trtkit.trt_builder import (
     DEFAULT_TRT_CACHE_DIR,
     HardwareCompatibility,
+    InputShapeProfile,
     TrtBuildConfig,
     build_engine,
     cached_engine_path,
@@ -53,12 +54,16 @@ from trtkit.trt_builder import (
 __all__ = (
     "BackendConfig",
     "DEFAULT_TRT_CACHE_DIR",
+    "DynamicDim",
+    "DynamicDims",
     "HardwareCompatibility",
+    "InputShapeProfile",
     "OnnxBackendConfig",
     "OnnxCudaRuntime",
     "OnnxOrTrtBackendConfig",
     "RuntimeSpec",
     "TensorRtBackendConfig",
+    "TensorRtDynamicRuntime",
     "TensorRtRuntime",
     "TensorRuntime",
     "TensorSpec",
@@ -73,6 +78,7 @@ __all__ = (
     "onnx_content_hash",
     "onnx_static_batch_size",
     "run_chunked",
+    "shallow_module_copy",
     "sweep_stale_onnx_exports",
     "validate_runtime_inputs",
 )

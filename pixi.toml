@@ -576,6 +576,12 @@ cwd = "packages/monoprior"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Stream native-fisheye X-Lens depth through rectified pinhole twins and TSDF for a calibrated Robocap rig"
 
+[feature.monoprior-catalog.tasks.monoprior-xlens-trt-benchmark]
+cmd = "python tools/eval/benchmark_xlens_trt.py"
+cwd = "packages/monoprior"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Time eager, frozen-geometry, and TensorRT X-Lens on four robocap fisheye views at 896x504 and 798x504, with TRT-vs-fp32 parity"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # prompt-da
 # ═══════════════════════════════════════════════════════════════════════════

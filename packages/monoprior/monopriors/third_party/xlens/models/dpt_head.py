@@ -171,8 +171,8 @@ class DPTHead(nn.Module):
         depth_out = self.scratch.refinenet1(depth_out, l1_rn)
 
         # 4) Upsample to target resolution
-        h_out = int(ph * self.patch_size / self.down_ratio)
-        w_out = int(pw * self.patch_size / self.down_ratio)
+        h_out = ph * self.patch_size // self.down_ratio
+        w_out = pw * self.patch_size // self.down_ratio
 
         depth_out = self.scratch.output_conv1(depth_out)
         depth_out = custom_interpolate(depth_out, (h_out, w_out), mode="bilinear", align_corners=True)
