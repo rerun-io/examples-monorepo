@@ -198,3 +198,4 @@ def main(config: CatalogThroughputConfig) -> None:
     print(f"skipped frames: {samples.skipped_frames}")
     print(f"skipped flat frames: {samples.skipped_flat_frames}")
     print(f"skipped low-valid ultrawide frames: {stats.skipped_low_valid_frames}")
+    print(f"skipped ultrawide frames without a payload: {stats.skipped_missing_payload_frames}")

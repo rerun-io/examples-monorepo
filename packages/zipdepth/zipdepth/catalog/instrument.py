@@ -137,7 +137,10 @@ class InstrumentedLoader:
         print(
             f"[catalog io step {self._global_step}] wait={data_wait_ms:.1f}ms compute={compute_ms:.1f}ms "
             f"throughput={frames_per_s:.2f} frames/s gpu={gpu_text} "
-            f"{stage_text} skipped={current_stats.skipped_frames}"
+            f"{stage_text} skipped={current_stats.skipped_frames} "
+            f"skipped_flat={current_stats.skipped_flat_frames} "
+            f"skipped_low_valid={current_stats.skipped_low_valid_frames} "
+            f"skipped_missing_payload={current_stats.skipped_missing_payload_frames}"
         )
         if self._writer is None:
             return
@@ -146,6 +149,9 @@ class InstrumentedLoader:
             "io/compute_ms": compute_ms,
             "io/frames_per_s": frames_per_s,
             "io/skipped_frames": float(current_stats.skipped_frames),
+            "io/skipped_flat_frames": float(current_stats.skipped_flat_frames),
+            "io/skipped_low_valid_frames": float(current_stats.skipped_low_valid_frames),
+            "io/skipped_missing_payload_frames": float(current_stats.skipped_missing_payload_frames),
         }
         name: str
         for name in STAGE_FIELDS:

@@ -29,9 +29,23 @@ Those timestamps are **disjoint** from the wide chosen frames — on `47115416`
 only 1 of 651 ultrawide timestamps coincides with a wide one — so the wide and
 ultrawide passes are genuinely different views of a capture, not duplicates.
 
-Portrait captures store the rectified frame as 480x640; the lane rotates it to
-landscape with the same `property:capture:orientation_quarter_turns_ccw` the wide
-path already uses, then resizes to the lane's 768x1024.
+Portrait captures store the rectified frame as 480x640 — 813 of the 2,024
+segments — because the layer writer (`gauss_surf/apis/ultrawide_depth_batch.py`,
+PR #214) reads `image_wh` straight from the calibration and has no orientation
+guard of its own. The lane rotates to landscape with the same
+`property:capture:orientation_quarter_turns_ccw` the wide path already uses, then
+resizes to the lane's 768x1024. Because nothing upstream enforces this, the
+builders assert that an ultrawide frame **is** landscape after the turns and fail
+loudly otherwise, rather than training on a rotated image.
+
+Rows can also be missing a payload. The ultrawide track has its own
+`drop_leading` and its own 10 Hz selection, so an ultrawide chosen frame can
+precede the first ARKit lowres depth row; latest-at cannot fill a column that has
+not been logged yet, so that row's prompt is null. The lane drops any chosen row
+whose RGB, depth, prompt, or confidence cell is null and counts it in
+`skipped_missing_payload_frames`. A preflight over all 2,024 segments found
+**zero** such rows today (see *Preflight* below), but the guard is what keeps a
+future re-registration from killing a producer mid-run.
 
 ## Why the prompt is resized and padded, not reprojected
 
@@ -132,6 +146,21 @@ segment never share an augmentation draw.
 In practice the two counts are close already (`47115416`: 651 wide, 651
 ultrawide; `42444511`: 528 and 528), so the subsample mostly reorders rather
 than discards.
+
+Two edge cases:
+
+* A segment lacking the `ultrawide_depth` layer (1 of 2,025) **falls back to
+  wide-only** under `both`; under `ultrawide` it yields nothing. Either way the
+  lane warns once for the whole run.
+* A segment with no wide chosen frames is skipped entirely under `both`. There is
+  nothing to balance the ultrawide track against, and streaming its whole 10 Hz
+  selection (up to 1,840 frames) would silently skew the mix.
+
+**Known limitation.** The subsample is seeded by the pass index, so a run resumed
+from a checkpoint restarts at pass 0 and re-draws the subsets the original run
+already used. Over 140k steps that costs some ultrawide coverage after a resume.
+It is not a correctness problem and is left for a follow-up that carries the pass
+index in the checkpoint.
 
 ## Measured cost
 

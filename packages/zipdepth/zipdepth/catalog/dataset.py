@@ -13,6 +13,7 @@ from warnings import warn
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import torch
 from arkitscenes_download.ingest.paths import (
     CONFIDENCE,
@@ -187,6 +188,25 @@ def component_bytes_views(column: pa.ChunkedArray, column_name: str) -> list[UIn
     return views
 
 
+def _drop_null_payload_rows(table: pa.Table, payload_columns: list[str]) -> pa.Table:
+    """Keep only rows whose every payload column carries a value.
+
+    Args:
+        table: Query result whose rows may be missing a payload column.
+        payload_columns: Columns that must be non-null on a usable row.
+
+    Returns:
+        The input table when nothing is null, otherwise a filtered copy.
+    """
+    if all(table.column(column_name).null_count == 0 for column_name in payload_columns):
+        return table
+    keep: pa.ChunkedArray = pc.is_valid(table.column(payload_columns[0]))
+    column_name: str
+    for column_name in payload_columns[1:]:
+        keep = pc.and_(keep, pc.is_valid(table.column(column_name)))
+    return table.filter(keep)
+
+
 def promptda_blob_views(column: pa.ChunkedArray) -> list[UInt8[ndarray, "n_bytes"]]:
     """Return zero-copy PromptDA blob views, retaining the established public helper."""
     return component_bytes_views(column, PROMPTDA_BLOB_COLUMN)
@@ -316,7 +336,7 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
             + self._segment_seed_index[segment_id] * 100_000_007
         )
 
-    def _ordered_times(self, table: pa.Table, segment_id: str) -> Shaped[ndarray, "n_rows"]:
+    def _require_ordered_rows(self, table: pa.Table, segment_id: str) -> Shaped[ndarray, "n_rows"]:
         """Return the reader's index column, rejecting any out-of-order response."""
         all_times_n: Shaped[ndarray, "n_rows"] = table_timestamps(table)
         if np.any(all_times_n[1:] < all_times_n[:-1]):
@@ -363,7 +383,7 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         if table.num_rows == 0:
             return None
 
-        all_times_n: Shaped[ndarray, "n_rows"] = self._ordered_times(table, segment_id)
+        all_times_n: Shaped[ndarray, "n_rows"] = self._require_ordered_rows(table, segment_id)
         chosen_times_n: Shaped[ndarray, "n_chosen"] = all_times_n[:: self._frame_stride]
         target_blobs: list[UInt8[ndarray, "target_n_bytes"]] = component_bytes_views(table.column(PROMPTDA_BLOB_COLUMN), PROMPTDA_BLOB_COLUMN)[
             :: self._frame_stride
@@ -411,11 +431,10 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         confidence: UInt8[ndarray, "confidence_n_values"] | None
         packet_index: np.int64
         first_decode_error_reported: bool = False
-        started: float = perf_counter()
         sample_inputs = zip(prepared.target_blobs, prepared.prompt_blobs, prepared.confidences, prepared.packet_indices, strict=True)
         for sample_index, (target_blob_bytes, prompt_blob_bytes, confidence, packet_index) in enumerate(sample_inputs):
             try:
-                started = perf_counter()
+                started: float = perf_counter()
                 frame_chw: UInt8[Tensor, "3 stored_h stored_w"] = prepared.decoder.get_frame_at(int(packet_index)).data
                 stats.video_decode += perf_counter() - started
             except BeartypeException:
@@ -461,7 +480,13 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         if self._load_confidence:
             contents.append(f"/{CONFIDENCE}")
             columns.append(CONFIDENCE_COLUMN)
-        table: pa.Table = (
+        # Every payload column must be present on a kept row. The ultrawide track
+        # has its own drop_leading and its own 10 Hz selection, so a chosen frame
+        # can precede the first ARKit lowres row; latest-at cannot fill what has
+        # not been logged yet, and component_bytes_views rejects a null outer row.
+        # A null row carries no payload bytes, so dropping these client-side costs
+        # the same transfer as a server-side filter and still yields the count.
+        chosen: pa.Table = (
             self._dataset_entry.filter_segments(segment_id)
             .filter_contents(contents)
             .reader(index=TIMELINE, fill_latest_at=True)
@@ -470,9 +495,11 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
             .to_arrow_table()
         )
         stats.segment_query += perf_counter() - started
+        table: pa.Table = _drop_null_payload_rows(chosen, columns[1:])
+        stats.skipped_missing_payload_frames += chosen.num_rows - table.num_rows
         if table.num_rows == 0:
             return None
-        self._ordered_times(table, segment_id)
+        self._require_ordered_rows(table, segment_id)
 
         rgb_blobs: list[UInt8[ndarray, "rgb_n_bytes"]] = component_bytes_views(
             table.column(ULTRAWIDE_RGB_BLOB_COLUMN), ULTRAWIDE_RGB_BLOB_COLUMN
@@ -559,10 +586,16 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
             wants_ultrawide = False
         wide_prepared: _WideSegment | None = self._prepare_wide(segment_id, stats) if wants_wide else None
         # Match the ultrawide count to the wide count so a mixed pass is about
-        # half of each camera after the shuffle buffer.
-        frame_limit: int | None = (
-            len(wide_prepared.target_blobs) if self._cameras == "both" and wide_prepared is not None else None
-        )
+        # half of each camera after the shuffle buffer. Without wide frames there
+        # is nothing to balance against, and streaming the whole ultrawide track
+        # (up to 1,840 frames) would silently skew the mix, so skip the segment.
+        frame_limit: int | None = None
+        if self._cameras == "both":
+            if wide_prepared is None:
+                warn(f"{segment_id}: no wide chosen frames, skipping its ultrawide frames too", RuntimeWarning, stacklevel=2)
+                wants_ultrawide = False
+            else:
+                frame_limit = len(wide_prepared.target_blobs)
         ultrawide_prepared: _UltrawideSegment | None = (
             self._prepare_ultrawide(segment_id, stats, frame_limit) if wants_ultrawide else None
         )
