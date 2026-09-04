@@ -15,7 +15,7 @@ does not perturb the pretrained ViT patch-token distribution; the non-zero
 contribution is learned during training (residual-style, as in ControlNet/LoRA).
 """
 
-from typing import List, Type
+from typing import List, Sequence, Type
 
 import torch
 import torch.nn as nn
@@ -71,7 +71,7 @@ class RayMapEncoder(nn.Module):
         embed_dim: int,
         patch_size: int = 14,
         in_chans: int = 6,
-        intermediate_dims: List[int] = (588, 768, 1024),
+        intermediate_dims: Sequence[int] = (588, 768, 1024),
         zero_init_proj: bool = True,
         act_layer: Type[nn.Module] = nn.GELU,
     ):

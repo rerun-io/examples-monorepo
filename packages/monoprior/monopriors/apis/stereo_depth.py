@@ -26,17 +26,20 @@ class MiddleburyCalibration:
     """``cam0`` intrinsics."""
     baseline_m: float
     """``baseline`` (stored in millimetres in the file) converted to metres."""
+    doffs_px: float
+    """``doffs`` disparity offset in pixels."""
 
 
 def read_middlebury_calib(path: Path) -> MiddleburyCalibration:
-    """Parse ``cam0=[fx 0 cx; 0 fy cy; 0 0 1]`` and ``baseline=<mm>`` from a Middlebury v3 ``calib.txt``."""
+    """Parse ``cam0``, ``baseline`` and ``doffs`` from a Middlebury v3 ``calib.txt``."""
     text: str = path.read_text()
     cam0_match: re.Match[str] | None = re.search(r"cam0=\[(.*?)\]", text)
     baseline_match: re.Match[str] | None = re.search(r"baseline=([\d.]+)", text)
-    if cam0_match is None or baseline_match is None:
-        raise ValueError(f"{path} lacks cam0/baseline entries")
+    doffs_match: re.Match[str] | None = re.search(r"doffs=([-\d.]+)", text)
+    if cam0_match is None or baseline_match is None or doffs_match is None:
+        raise ValueError(f"{path} lacks cam0/baseline/doffs entries")
     K_33: Float32[np.ndarray, "3 3"] = np.array([[float(v) for v in row.split()] for row in cam0_match.group(1).split(";")], dtype=np.float32)
-    return MiddleburyCalibration(K_33=K_33, baseline_m=float(baseline_match.group(1)) / 1000.0)
+    return MiddleburyCalibration(K_33=K_33, baseline_m=float(baseline_match.group(1)) / 1000.0, doffs_px=float(doffs_match.group(1)))
 
 
 @dataclass

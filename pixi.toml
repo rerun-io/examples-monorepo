@@ -442,6 +442,12 @@ depends-on = ["_monoprior-download-stereo"]
 cwd = "packages/monoprior"
 description = "Selected stereo predictor on the ETH3D playground_1l pair, shown as an exoego:v2 rig in Rerun"
 
+[feature.monoprior.tasks.monoprior-rig-depth]
+cmd = "python tools/demos/rig_depth.py"
+depends-on = ["_monoprior-download-stereo"]
+cwd = "packages/monoprior"
+description = "Run X-Lens metric rig depth on the ETH3D playground_1l pinhole pair"
+
 [feature.monoprior.tasks.monoprior-stereo-depth-app]
 cmd = "python tools/apps/stereo_depth_app.py"
 depends-on = ["_monoprior-download-stereo"]

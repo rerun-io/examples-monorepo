@@ -11,7 +11,7 @@ Geometry conditioning is provided through the ray-map path.
 
 import math
 import logging
-from typing import Callable, List, Sequence, Tuple, Union
+from typing import Callable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -135,7 +135,7 @@ class DinoVisionTransformer(nn.Module):
         alt_start=-1,
         qknorm_start=-1,
         rope_start=-1,
-        rope_freq=100,
+        rope_freq=100.0,
         cat_token=True,
         use_dwc=False,            # DWC bypass (local inductive bias)
         dwc_kernel_size=3,
@@ -721,7 +721,7 @@ class DinoVisionTransformer(nn.Module):
         n: Union[int, Sequence] = 1,
         export_feat_layers: List[int] = [],
         **kwargs,
-    ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor]]]:
+    ) -> Tuple[Tuple[Tuple[torch.Tensor, torch.Tensor], ...], List[torch.Tensor], Optional[torch.Tensor]]:
         """Get intermediate-layer features.
 
         Args:
