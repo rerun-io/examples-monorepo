@@ -13,7 +13,6 @@ from warnings import warn
 
 import numpy as np
 import pyarrow as pa
-import pyarrow.compute as pc
 import torch
 from arkitscenes_download.ingest.paths import (
     CONFIDENCE,
@@ -27,7 +26,7 @@ from arkitscenes_download.ingest.paths import (
 from arkitscenes_download.ingest.timestamps import match_exact_timestamps, table_timestamps
 from beartype.roar import BeartypeException
 from datafusion import col
-from jaxtyping import Int64, Shaped, UInt8
+from jaxtyping import Bool, Int64, Shaped, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from simplecv.rerun_dataloader import open_segment_decoder
@@ -200,11 +199,11 @@ def _drop_null_payload_rows(table: pa.Table, payload_columns: list[str]) -> pa.T
     """
     if all(table.column(column_name).null_count == 0 for column_name in payload_columns):
         return table
-    keep: pa.ChunkedArray = pc.is_valid(table.column(payload_columns[0]))
+    keep_n: Bool[ndarray, "n_rows"] = np.ones(table.num_rows, dtype=bool)
     column_name: str
-    for column_name in payload_columns[1:]:
-        keep = pc.and_(keep, pc.is_valid(table.column(column_name)))
-    return table.filter(keep)
+    for column_name in payload_columns:
+        keep_n &= table.column(column_name).is_valid().to_numpy(zero_copy_only=False).astype(bool)
+    return table.filter(pa.array(keep_n))
 
 
 def promptda_blob_views(column: pa.ChunkedArray) -> list[UInt8[ndarray, "n_bytes"]]:
@@ -433,8 +432,8 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         first_decode_error_reported: bool = False
         sample_inputs = zip(prepared.target_blobs, prepared.prompt_blobs, prepared.confidences, prepared.packet_indices, strict=True)
         for sample_index, (target_blob_bytes, prompt_blob_bytes, confidence, packet_index) in enumerate(sample_inputs):
+            started: float = perf_counter()
             try:
-                started: float = perf_counter()
                 frame_chw: UInt8[Tensor, "3 stored_h stored_w"] = prepared.decoder.get_frame_at(int(packet_index)).data
                 stats.video_decode += perf_counter() - started
             except BeartypeException:
