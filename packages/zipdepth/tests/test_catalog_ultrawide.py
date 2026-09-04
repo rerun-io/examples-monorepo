@@ -43,7 +43,7 @@ def test_prompt_placement_centres_the_measured_ultrawide_footprint() -> None:
     # Horizontal margins are equal, so mirroring the canvas and mirroring the
     # block land on the same pixels at the default scale.
     assert PROMPT_CANVAS_HW[1] - placement.left - placement.width == placement.left
-    assert DEFAULT_ULTRAWIDE_PROMPT_SCALE == pytest.approx(1.0 / ULTRAWIDE_FOV_RATIO)
+    assert pytest.approx(1.0 / ULTRAWIDE_FOV_RATIO) == DEFAULT_ULTRAWIDE_PROMPT_SCALE
 
 
 @pytest.mark.parametrize("scale", [0.0, -0.5, 1.5, 1.0e-4])

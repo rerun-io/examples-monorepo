@@ -9,7 +9,7 @@ than reprojected: zero reads as "no prompt" through the model's own metric
 range gate. ``docs/ultrawide.md`` records the measurement and the alternatives.
 """
 
-from collections.abc import Generator, Iterable, Iterator
+from collections.abc import Generator, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from random import Random
 from typing import Literal, TypeAlias, TypeVar
@@ -286,7 +286,9 @@ def subsample_indices(available: int, wanted: int, seed: int) -> list[int]:
     return sorted(Random(seed).sample(range(available), wanted))
 
 
-def interleave(iterables: list[Iterable[ItemT]]) -> Generator[ItemT, None, None]:
+def interleave(  # noqa: UP047 — beartype does not support PEP 695 type parameters
+    iterables: Sequence[Iterable[ItemT]],
+) -> Generator[ItemT, None, None]:
     """Yield round-robin from every iterable until all are exhausted.
 
     Args:
