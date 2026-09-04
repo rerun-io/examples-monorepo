@@ -90,6 +90,7 @@ def collect_probe_batches(config: TrainCatalogConfig, num_batches: int) -> list[
         if config.cameras == "wide"
         else UltrawidePolicy(
             min_valid_fraction=config.ultrawide_min_valid_fraction,
+            max_hole_fraction=config.ultrawide_max_hole_fraction,
             valid_erosion_px=config.ultrawide_valid_erosion_px,
             prompt_scale=config.ultrawide_prompt_scale,
         )

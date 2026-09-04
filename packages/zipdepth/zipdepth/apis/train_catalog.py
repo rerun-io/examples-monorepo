@@ -163,6 +163,14 @@ class TrainCatalogConfig:
     ultrawide_min_valid_fraction: float = 0.7
     """Reject an ultrawide frame whose in-range target fraction, measured before erosion,
     falls below this. The raycast depth has holes at glazing and outdoors."""
+    ultrawide_max_hole_fraction: float = 1.0
+    """Reject an ultrawide frame whose LARGEST connected invalid region, before erosion,
+    exceeds this fraction of the frame. ``ultrawide_min_valid_fraction`` counts invalid
+    area only, so it passes a frame where one window or skylight removes a contiguous
+    fifth of the image while the rest is dense. Of 5,415 measured ultrawide frames, 6.6%
+    fall below 0.8 valid and 3.5% carry a hole larger than 20% of the frame; the uw-v2 run
+    uses 0.2. Rejections are counted as ``skipped_large_hole_frames``. The default 1.0 is
+    the whole frame, so nothing is rejected and the labelling pass never runs."""
     ultrawide_valid_erosion_px: int = 1
     """Binary-erode the ultrawide target mask by this many pixels; raycast silhouettes
     bleed about one output pixel past the mesh."""
@@ -685,6 +693,7 @@ def main(
             if config.cameras == "wide"
             else UltrawidePolicy(
                 min_valid_fraction=config.ultrawide_min_valid_fraction,
+                max_hole_fraction=config.ultrawide_max_hole_fraction,
                 valid_erosion_px=config.ultrawide_valid_erosion_px,
                 prompt_scale=config.ultrawide_prompt_scale,
             )
