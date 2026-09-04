@@ -9,6 +9,7 @@ from jaxtyping import Bool, Float32, Float64, UInt8
 from monopriors.depth_utils import clip_disparity, depth_edges_mask, depth_to_disparity, depth_to_points
 from monopriors.models.metric_depth import METRIC_PREDICTORS, MetricDepthPrediction
 from monopriors.models.relative_depth import RELATIVE_PREDICTORS, RelativeDepthPrediction
+from monopriors.models.stereo_depth import StereoDepthPrediction
 from monopriors.models.surface_normal.base_normal_model import SurfaceNormalPrediction
 
 CONFIDENCE_THRESHOLD: float = 0.5
@@ -278,3 +279,60 @@ def log_normal_pred(
 
     confidence_hw1: Float32[np.ndarray, "h w 1"] = normal_pred.confidence_hw1
     rr.log(f"{pinhole_path}/confidence", rr.Image((confidence_hw1 * 255).astype(np.uint8)))
+
+
+def create_stereo_depth_blueprint(parent_log_path: Path) -> rrb.Blueprint:
+    """3D rig + cloud beside the stereo pair, metric depth, and disparity (matches ``log_stereo_pred``)."""
+    left_path: Path = parent_log_path / "rig_00" / "cam_00"
+    right_path: Path = parent_log_path / "rig_00" / "cam_01"
+    return rrb.Blueprint(
+        rrb.Horizontal(
+            rrb.Spatial3DView(origin=f"{parent_log_path}", contents=["$origin/**", f"- {left_path}/pinhole/image", f"- {right_path}/pinhole/image", f"- {left_path}/disparity"]),
+            rrb.Vertical(
+                rrb.Horizontal(rrb.Spatial2DView(origin=f"{left_path}/pinhole/image", name="left"), rrb.Spatial2DView(origin=f"{right_path}/pinhole/image", name="right")),
+                rrb.Spatial2DView(origin=f"{left_path}/pinhole/depth", name="depth (m)"),
+                rrb.Spatial2DView(origin=f"{left_path}/disparity", name="disparity (px)"),
+            ),
+            column_shares=[3, 2],
+        ),
+        collapse_panels=True,
+    )
+
+
+def log_stereo_pred(
+    parent_log_path: Path,
+    stereo_pred: StereoDepthPrediction,
+    left_rgb: UInt8[np.ndarray, "h w 3"],
+    right_rgb: UInt8[np.ndarray, "h w 3"],
+    max_depth_m: float = 20.0,
+    jpeg_quality: int = 90,
+) -> None:
+    """Log a calibrated stereo prediction as an exoego:v2 rig.
+
+    ``rig_00/cam_00`` is the left (reference) camera, ``cam_01`` the right one at ``+baseline`` along x. Metric depth goes
+    under the left pinhole (``cam_00/pinhole/depth``) so the viewer backprojects it; disparity is logged beside the pinhole
+    (``cam_00/disparity``) so it is not. Depth beyond ``max_depth_m`` is dropped: sub-pixel disparities explode to kilometres.
+
+    Args:
+        parent_log_path: World entity path; the rig is logged at ``<parent>/rig_00``.
+        stereo_pred: Prediction with ``K_33``, ``baseline_m``, and ``depth_meters`` filled.
+        left_rgb: Left image, ``UInt8[ndarray, "h w 3"]``.
+        right_rgb: Right image, ``UInt8[ndarray, "h w 3"]``.
+        max_depth_m: Depth cut-off for the logged depth image.
+        jpeg_quality: JPEG quality for the two images.
+    """
+    from simplecv.rerun_rig_logger import log_rig_static
+    from simplecv.rig import Rig, stereo_rig_calibration
+
+    height: int = left_rgb.shape[0]
+    width: int = left_rgb.shape[1]
+    rig: Rig = Rig(index=0, calibration=stereo_rig_calibration(stereo_pred.K_33, stereo_pred.baseline_m, width, height), image_plane_distance=0.5)
+    rr.log(f"{parent_log_path}", rr.ViewCoordinates.RDF, static=True)
+    log_rig_static(rig, world_path=str(parent_log_path))
+    left_path: Path = parent_log_path / "rig_00" / "cam_00"
+    right_path: Path = parent_log_path / "rig_00" / "cam_01"
+    rr.log(f"{left_path}/pinhole/image", rr.Image(left_rgb).compress(jpeg_quality=jpeg_quality), static=True)
+    rr.log(f"{right_path}/pinhole/image", rr.Image(right_rgb).compress(jpeg_quality=jpeg_quality), static=True)
+    depth_hw: Float32[np.ndarray, "h w"] = np.where(stereo_pred.depth_meters > max_depth_m, 0.0, stereo_pred.depth_meters).astype(np.float32)
+    rr.log(f"{left_path}/pinhole/depth", rr.DepthImage(depth_hw, meter=1.0, depth_range=(0.0, max_depth_m)), static=True)
+    rr.log(f"{left_path}/disparity", rr.DepthImage(stereo_pred.disparity), static=True)
