@@ -43,9 +43,25 @@ Rows can also be missing a payload. The ultrawide track has its own
 precede the first ARKit lowres depth row; latest-at cannot fill a column that has
 not been logged yet, so that row's prompt is null. The lane drops any chosen row
 whose RGB, depth, prompt, or confidence cell is null and counts it in
-`skipped_missing_payload_frames`. A preflight over all 2,024 segments found
-**zero** such rows today (see *Preflight* below), but the guard is what keeps a
-future re-registration from killing a producer mid-run.
+`skipped_missing_payload_frames`.
+
+**Preflight.** Every one of the 2,024 segments carrying the layer was checked
+against the columns the lane depends on — 1,449,709 ultrawide chosen frames in
+total, 716.3 per segment on average:
+
+```
+chosen frames        1449709
+rgb_mismatch               0   ultrawide rgb timestamps != ultrawide depth timestamps
+rgb_missing                0   chosen frames with no rgb row
+before_first_prompt        0   chosen frames preceding the first ARKit lowres depth row
+before_first_conf          0   chosen frames preceding the first ARKit confidence row
+segments with any problem  0
+```
+
+So the hazard is latent, not active: as registered today no ultrawide chosen
+frame is missing anything, and the ultrawide RGB and depth are logged at exactly
+the same timestamps in every segment. The drop is a guard against a future
+re-registration killing a producer mid-run, not a workaround for current data.
 
 ## Why the prompt is resized and padded, not reprojected
 
@@ -173,7 +189,10 @@ CUDA builder, RTX 5090 (one full pass per configuration):
 | both | 344.2 | 5.00 | 3.64 | 0.39 | 3.29 | 1.14 |
 | ultrawide | 681.3 | 1.73 | 0.00 | 0.75 | 2.50 | 2.24 |
 
-(stage columns in ms/frame.)
+(stage columns in ms/frame.) A 60 s run over 16 segments of mixed stored
+orientation gives 296 frames/s and 18,109 samples built, with 195 frames dropped
+by the valid-fraction gate, 799 by the flat-frame filter, and 0 for a missing
+payload.
 
 The ultrawide lane is far cheaper than the wide one: no NVDEC, a 640x480 JPEG
 instead of a 1920x1440 video frame, and a 640x480 depth PNG instead of a
