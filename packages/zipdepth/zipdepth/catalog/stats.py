@@ -49,6 +49,12 @@ class CatalogDatasetStats:
     """Frames rejected by the configured depth-span filter."""
     skipped_low_valid_frames: int = 0
     """Ultrawide frames rejected by the minimum valid-target-fraction gate."""
+    skipped_missing_payload_frames: int = 0
+    """Ultrawide chosen frames dropped because a payload column was null.
+
+    Latest-at cannot fill a column that has not been logged yet, so an ultrawide
+    frame preceding the first ARKit lowres depth row has no prompt.
+    """
 
     @classmethod
     def from_builder(cls, builder_stats: BuilderStats) -> "CatalogDatasetStats":
@@ -68,6 +74,7 @@ class CatalogDatasetStats:
             skipped_frames=self.skipped_frames + other.skipped_frames,
             skipped_flat_frames=self.skipped_flat_frames + other.skipped_flat_frames,
             skipped_low_valid_frames=self.skipped_low_valid_frames + other.skipped_low_valid_frames,
+            skipped_missing_payload_frames=self.skipped_missing_payload_frames + other.skipped_missing_payload_frames,
         )
 
 

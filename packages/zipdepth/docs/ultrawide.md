@@ -29,9 +29,39 @@ Those timestamps are **disjoint** from the wide chosen frames — on `47115416`
 only 1 of 651 ultrawide timestamps coincides with a wide one — so the wide and
 ultrawide passes are genuinely different views of a capture, not duplicates.
 
-Portrait captures store the rectified frame as 480x640; the lane rotates it to
-landscape with the same `property:capture:orientation_quarter_turns_ccw` the wide
-path already uses, then resizes to the lane's 768x1024.
+Portrait captures store the rectified frame as 480x640 — 813 of the 2,024
+segments — because the layer writer (`gauss_surf/apis/ultrawide_depth_batch.py`,
+PR #214) reads `image_wh` straight from the calibration and has no orientation
+guard of its own. The lane rotates to landscape with the same
+`property:capture:orientation_quarter_turns_ccw` the wide path already uses, then
+resizes to the lane's 768x1024. Because nothing upstream enforces this, the
+builders assert that an ultrawide frame **is** landscape after the turns and fail
+loudly otherwise, rather than training on a rotated image.
+
+Rows can also be missing a payload. The ultrawide track has its own
+`drop_leading` and its own 10 Hz selection, so an ultrawide chosen frame can
+precede the first ARKit lowres depth row; latest-at cannot fill a column that has
+not been logged yet, so that row's prompt is null. The lane drops any chosen row
+whose RGB, depth, prompt, or confidence cell is null and counts it in
+`skipped_missing_payload_frames`.
+
+**Preflight.** Every one of the 2,024 segments carrying the layer was checked
+against the columns the lane depends on — 1,449,709 ultrawide chosen frames in
+total, 716.3 per segment on average:
+
+```
+chosen frames        1449709
+rgb_mismatch               0   ultrawide rgb timestamps != ultrawide depth timestamps
+rgb_missing                0   chosen frames with no rgb row
+before_first_prompt        0   chosen frames preceding the first ARKit lowres depth row
+before_first_conf          0   chosen frames preceding the first ARKit confidence row
+segments with any problem  0
+```
+
+So the hazard is latent, not active: as registered today no ultrawide chosen
+frame is missing anything, and the ultrawide RGB and depth are logged at exactly
+the same timestamps in every segment. The drop is a guard against a future
+re-registration killing a producer mid-run, not a workaround for current data.
 
 ## Why the prompt is resized and padded, not reprojected
 
@@ -133,6 +163,21 @@ In practice the two counts are close already (`47115416`: 651 wide, 651
 ultrawide; `42444511`: 528 and 528), so the subsample mostly reorders rather
 than discards.
 
+Two edge cases:
+
+* A segment lacking the `ultrawide_depth` layer (1 of 2,025) **falls back to
+  wide-only** under `both`; under `ultrawide` it yields nothing. Either way the
+  lane warns once for the whole run.
+* A segment with no wide chosen frames is skipped entirely under `both`. There is
+  nothing to balance the ultrawide track against, and streaming its whole 10 Hz
+  selection (up to 1,840 frames) would silently skew the mix.
+
+**Known limitation.** The subsample is seeded by the pass index, so a run resumed
+from a checkpoint restarts at pass 0 and re-draws the subsets the original run
+already used. Over 140k steps that costs some ultrawide coverage after a resume.
+It is not a correctness problem and is left for a follow-up that carries the pass
+index in the checkpoint.
+
 ## Measured cost
 
 `tools/catalog_throughput.py`, 8 segments, 8 producers, batch 8, 768x1024 out,
@@ -144,7 +189,10 @@ CUDA builder, RTX 5090 (one full pass per configuration):
 | both | 344.2 | 5.00 | 3.64 | 0.39 | 3.29 | 1.14 |
 | ultrawide | 681.3 | 1.73 | 0.00 | 0.75 | 2.50 | 2.24 |
 
-(stage columns in ms/frame.)
+(stage columns in ms/frame.) A 60 s run over 16 segments of mixed stored
+orientation gives 296 frames/s and 18,109 samples built, with 195 frames dropped
+by the valid-fraction gate, 799 by the flat-frame filter, and 0 for a missing
+payload.
 
 The ultrawide lane is far cheaper than the wide one: no NVDEC, a 640x480 JPEG
 instead of a 1920x1440 video frame, and a 640x480 depth PNG instead of a

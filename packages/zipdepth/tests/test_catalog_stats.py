@@ -18,6 +18,7 @@ def _every_field(scale: int) -> CatalogDatasetStats:
         skipped_frames=8 * scale,
         skipped_flat_frames=9 * scale,
         skipped_low_valid_frames=10 * scale,
+        skipped_missing_payload_frames=11 * scale,
     )
 
 

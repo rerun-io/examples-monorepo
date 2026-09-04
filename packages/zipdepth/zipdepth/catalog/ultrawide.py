@@ -229,9 +229,10 @@ def erode_valid(valid_chw: Bool[Tensor, "1 h w"], erosion_px: int) -> Bool[Tenso
     """Binary-erode a validity mask with a ``2 * erosion_px + 1`` square element.
 
     Implemented as a max pool over the inverted mask, which runs on CPU and CUDA
-    through one kernel so both sample builders agree exactly. Zero padding on the
-    inverted mask leaves the image border valid: the rectified frame's genuine
-    border holes are already invalid and erode inward on their own.
+    through one kernel so both sample builders agree exactly. ``max_pool2d`` pads
+    with negative infinity, so padding never wins the maximum over a 0/1 mask and
+    the image border stays valid: the rectified frame's genuine border holes are
+    already invalid and erode inward on their own.
 
     Args:
         valid_chw: Boolean validity with shape ``(1, H, W)``.
