@@ -293,6 +293,68 @@ to the `.rrd` — the same footprint split the evaluation reports. Both cameras 
 logged in the lane's 768x1024 network frame, so a portrait capture appears
 landscape and its `Pinhole` carries the same quarter turns the builders applied.
 
+## The teacher reference ceiling
+
+`tools/eval_teacher_reference.py` (task `zipdepth-eval-teacher-reference`) answers
+what a much larger prompted model does with the lane's own input. It builds the
+identical ultrawide samples through `CpuSampleBuilder` / `CatalogPromptDepthDataset`
+in eval mode and runs PromptDA-L beside any number of ZipDepth-PromptDA
+checkpoints over exactly the same frames, scoring every one of them with
+`score_footprint_split`. On the 20-segment seed-0 holdout at `frame_stride=10`
+(1,451 frames), PromptDA-L eager fp32 at its released 756x1008 network size:
+
+| model | whole AbsRel / delta1 / MAE | inside | outside |
+| --- | --- | --- | --- |
+| PromptDA-L, padded prompt | 0.843 / 0.126 / 1.050 | 0.346 / 0.546 / 0.490 | **0.993 / 0.000 / 1.217** |
+| PromptDA-L, replicated padding | 0.261 / 0.700 / 0.254 | 0.113 / 0.933 / 0.120 | 0.305 / 0.632 / 0.293 |
+| `zdpda-v4` | 0.571 / 0.451 / 0.580 | 0.107 / 0.932 / 0.107 | 0.708 / 0.308 / 0.717 |
+| `zdpda-uw-v1` | 0.202 / 0.749 / 0.190 | 0.096 / 0.943 / 0.091 | **0.234 / 0.692 / 0.219** |
+| prompt-upsample floor | — | 0.102 / 0.925 / 0.112 | — |
+
+**The teacher is not a ceiling on this input; it is a floor.** PromptDA normalizes
+its prompt by the canvas `[min, max]` and de-normalizes its output with the same
+pair, so the lane's zero padding pins `min` at 0 m (against a 3.14 m mean max) and
+hands the periphery a literal "zero metres" reading. PromptDA-L trusts it and
+emits near-zero depth everywhere outside the footprint: AbsRel 0.993 with
+delta1 0.0001 is the signature of predicting zero, not of a hard scene. Replacing
+only the padding — same frame, same block, same network — moves the periphery from
+0.993 to 0.305, which is where the honest teacher reference sits.
+
+`zdpda-uw-v1` beats even that replicated-prompt teacher in every region, so the
+fine-tune has learned something the frozen teacher cannot express on this input.
+
+**The unreachable periphery.** 28.7% of valid periphery pixels lie outside the
+prompt's own `[min, max]` — the exact interval a `range_margin_m = 0` head is
+clamped to. Splitting the periphery AbsRel on that boundary:
+
+| model | unreachable (28.7%) | reachable (71.3%) |
+| --- | --- | --- |
+| PromptDA-L, padded prompt | 0.992 | 0.993 |
+| PromptDA-L, replicated padding | 0.564 | 0.177 |
+| `zdpda-v4` (margin 0) | 1.101 | 0.519 |
+| `zdpda-uw-v1` (margin 3.9) | 0.431 | 0.133 |
+
+`zdpda-v4`'s AbsRel above 1.0 on unreachable pixels is the clamp: it cannot reach
+those depths and the error exceeds the target itself. Widening the range does not
+by itself make those pixels easy — `zdpda-uw-v1` is still 3.2x worse there than on
+the reachable periphery — but it removes the hard wall, and the gap between 0.519
+and 0.133 on the *reachable* pixels shows most of the fine-tune's gain is ordinary
+learning, not the wider sigmoid. PromptDA-L's two columns being equal (0.992 vs
+0.993) confirms it is not clamped at all, just zeroed.
+
+**How the image is fed.** The 768x1024 sample goes to `PromptDAPredictor` as uint8
+BHWC and the predictor's own antialiased bilinear resize takes it to 756x1008 —
+an aspect-preserving resize, because 768x1024 and the 1440x1920 ARKitScenes
+capture PromptDA-L's network size derives from are both 4:3. The prediction is
+bilinearly upsampled back to 768x1024 and scored there. The 192x256 padded prompt
+canvas is passed through untouched. Eager fp32 costs **162 ms/frame** at batch 8
+on an RTX 5090, about 100x a ZipDepth forward.
+
+**Caveat.** PromptDA-L was never trained on a partial prompt either, so the padded
+row is a measurement of a domain shift, not of the model's capability. It says the
+lane cannot borrow a zero-shot teacher for the periphery, and it says nothing about
+what PromptDA-L would do after the same fine-tune.
+
 ## Deployment
 
 One static 768x1024 batch-8 TensorRT engine serves both cameras. Ultrawide

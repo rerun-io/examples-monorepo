@@ -781,6 +781,12 @@ cmd = "python tools/infer_segment_rerun.py"
 cwd = "packages/zipdepth"
 description = "Stream one catalog segment through ZipDepth-PromptDA and log wide + ultrawide inputs, predictions, targets, and per-frame scores to Rerun"
 
+[feature.zipdepth-catalog.tasks.zipdepth-eval-teacher-reference]
+cmd = "python tools/eval_teacher_reference.py"
+cwd = "packages/zipdepth"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Ultrawide reference ceiling: PromptDA-L on the lane's padded prompt beside ZipDepth checkpoints, on identical holdout frames"
+
 [feature.zipdepth-catalog.tasks.zipdepth-eval-hard20]
 cmd = "python tools/eval_hard_frames.py"
 cwd = "packages/zipdepth"
