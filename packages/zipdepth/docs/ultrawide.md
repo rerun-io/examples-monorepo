@@ -137,6 +137,21 @@ views through windows, and thin structure.
   p10 0.866, min 0.669, 95% of frames at or above 0.7; `42444511` mean 0.958,
   p10 0.901, min 0.612, 98% above 0.7. The gate therefore costs a few percent of
   frames and removes the ones that teach the least per decoded frame.
+* **Drop `ultrawide_max_hole_fraction`,** the largest *connected* invalid region
+  as a frame fraction, also measured before erosion. Total invalid area cannot
+  tell speckle at glazing from one window swallowing a contiguous fifth of the
+  frame, and only the second kind leaves the metric loss with no target across a
+  whole region. Measured over 5,415 frames: 6.6% fall below 0.8 valid and 3.5%
+  carry a hole larger than 20% of the frame, so the two filters reject
+  overlapping but different frames. Components come from `scipy.ndimage.label`
+  (4-connectivity) on the CPU; a CUDA-built mask is copied down first so both
+  builders reject exactly the same frames. The pass is gated behind the total
+  invalid area, which no single region can exceed, so the default `1.0` never
+  labels anything. Rejections are counted as `skipped_large_hole_frames` and
+  logged beside `skipped_low_valid`.
+
+The uw-v2 run tightens both: `--ultrawide-min-valid-fraction 0.8
+--ultrawide-max-hole-fraction 0.2`.
 
 The existing flat-frame filter (`min_depth_span`, p95/p5 of valid depth) applies
 unchanged.

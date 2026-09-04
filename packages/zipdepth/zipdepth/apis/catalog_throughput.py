@@ -56,6 +56,8 @@ class CatalogThroughputConfig:
     """Cameras streamed per segment; ``both`` adds the ultrawide JPEG decode stage."""
     ultrawide_min_valid_fraction: float = 0.7
     """Minimum in-range ultrawide target fraction before erosion."""
+    ultrawide_max_hole_fraction: float = 1.0
+    """Maximum connected invalid region, as a frame fraction, before erosion."""
     ultrawide_valid_erosion_px: int = 1
     """Ultrawide target-mask erosion radius in pixels."""
     ultrawide_prompt_scale: float = DEFAULT_ULTRAWIDE_PROMPT_SCALE
@@ -97,6 +99,7 @@ def main(config: CatalogThroughputConfig) -> None:
         if config.cameras == "wide"
         else UltrawidePolicy(
             min_valid_fraction=config.ultrawide_min_valid_fraction,
+            max_hole_fraction=config.ultrawide_max_hole_fraction,
             valid_erosion_px=config.ultrawide_valid_erosion_px,
             prompt_scale=config.ultrawide_prompt_scale,
         )
@@ -180,7 +183,9 @@ def main(config: CatalogThroughputConfig) -> None:
 
     stats: CatalogDatasetStats = samples.stats
     built_frames: int = stats.samples_built
-    decoded_frames: int = built_frames + stats.skipped_flat_frames + stats.skipped_low_valid_frames
+    decoded_frames: int = (
+        built_frames + stats.skipped_flat_frames + stats.skipped_low_valid_frames + stats.skipped_large_hole_frames
+    )
     video_attempts: int = decoded_frames + stats.skipped_frames
     print(
         f"config: dataloader={config.dataloader}, builder={config.builder}, cameras={config.cameras}, "
@@ -198,4 +203,5 @@ def main(config: CatalogThroughputConfig) -> None:
     print(f"skipped frames: {samples.skipped_frames}")
     print(f"skipped flat frames: {samples.skipped_flat_frames}")
     print(f"skipped low-valid ultrawide frames: {stats.skipped_low_valid_frames}")
+    print(f"skipped large-hole ultrawide frames: {stats.skipped_large_hole_frames}")
     print(f"skipped ultrawide frames without a payload: {stats.skipped_missing_payload_frames}")
