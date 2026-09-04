@@ -127,8 +127,9 @@ def _prompt_tensors(
     """Convert one oriented native-grid LiDAR prompt to collatable tensors.
 
     With a placement the prompt is scaled into its ultrawide footprint on a zero
-    canvas instead of filling it, using the shared torch helper so this path
-    stays bit-identical to the CUDA builder's.
+    canvas instead of filling it, through the same torch helper the CUDA builder
+    calls, so both paths agree on placement, resampling, and validity. Only the
+    final metre divide can differ, by one float32 unit in the last place.
     """
     if prompt_depth_mm_hw.shape != (192, 256) or prompt_confidence_hw.shape != (192, 256):
         raise ValueError(
