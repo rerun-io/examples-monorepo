@@ -545,6 +545,20 @@ cmd = "python tools/utils/upload_to_hf.py"
 depends-on = ["monoprior-build-wheel"]
 cwd = "packages/monoprior"
 
+[feature.monoprior-catalog]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.monoprior-catalog.dependencies]
+# simplecv's SegmentNvdecDecoder decodes catalog video packets on NVDEC. The rerun dataloader extra comes from rerun-prerelease.
+av = ">=18"
+torchcodec = "*"
+
+[feature.monoprior-catalog.tasks.monoprior-stereo-catalog]
+cmd = "python tools/apps/stereo_catalog.py"
+cwd = "packages/monoprior"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Stream LiteAnyStereo V2 depth + an incremental TSDF mesh for a catalog rig segment (robocap front pair on :51235) into the Rerun viewer"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # prompt-da
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2753,6 +2767,21 @@ monoprior-dev = { features = [
     "monoprior",
     "dev",
 ], solve-group = "monoprior", no-default-feature = true }
+monoprior-catalog = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "monoprior",
+    "monoprior-catalog",
+], solve-group = "monoprior-catalog", no-default-feature = true }
+monoprior-catalog-dev = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "monoprior",
+    "monoprior-catalog",
+    "dev",
+], solve-group = "monoprior-catalog", no-default-feature = true }
 prompt-da = { features = [
     "common",
     "cuda",

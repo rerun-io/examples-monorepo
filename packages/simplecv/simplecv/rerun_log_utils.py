@@ -522,3 +522,31 @@ def orbit_eye_position(
     direction: Float64[ndarray, "3"] = np.asarray(direction_xyz, dtype=np.float64)
     unit: Float64[ndarray, "3"] = direction / np.linalg.norm(direction)
     return look_target_xyz + distance_factor * bounding_radius_m * unit
+
+
+def log_open3d_mesh(entity_path: str, mesh: Any, *, static: bool = False, recording: rr.RecordingStream | None = None) -> None:
+    """Log an Open3D ``TriangleMesh`` (e.g. from :class:`simplecv.ops.tsdf_depth_fuser.Open3DFuser`) as a ``Mesh3D``.
+
+    Vertex normals are computed if missing. Front-face rendering culls the outward side of TSDF walls (their normals
+    point into the free space), so a fused room reads from outside — the same treatment as the ARKit / PromptDA meshes.
+
+    Args:
+        entity_path: Where to log the mesh.
+        mesh: ``open3d.geometry.TriangleMesh``.
+        static: Log as static data (one final mesh) or at the current time (an incrementally growing mesh).
+        recording: Target recording; the global one when None.
+    """
+    if not mesh.has_vertex_normals():
+        mesh.compute_vertex_normals()
+    rr.log(
+        entity_path,
+        rr.Mesh3D(
+            vertex_positions=np.asarray(mesh.vertices),
+            triangle_indices=np.asarray(mesh.triangles),
+            vertex_normals=np.asarray(mesh.vertex_normals),
+            vertex_colors=np.asarray(mesh.vertex_colors) if mesh.has_vertex_colors() else None,
+            face_rendering=rr.components.MeshFaceRendering.Front,
+        ),
+        static=static,
+        recording=recording,
+    )
