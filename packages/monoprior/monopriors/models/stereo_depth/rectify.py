@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
-from jaxtyping import Float32, Float64
+from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, PinholeParameters
 
@@ -49,6 +49,80 @@ def kannala_brandt_4(camera: Fisheye62Parameters) -> Float64[ndarray, "4 1"]:
     return np.array([[d.k1], [d.k2], [d.k3], [d.k4]], dtype=np.float64)
 
 
+def centered_virtual_intrinsics(intrinsics: Intrinsics, *, focal_scale: float, width: int, height: int) -> Intrinsics:
+    """Build a distortion-free pinhole with a centred principal point.
+
+    Args:
+        intrinsics: Source camera intrinsics. Its horizontal focal length sets the virtual focal length.
+        focal_scale: Virtual focal length divided by the source horizontal focal length.
+        width: Virtual image width in pixels.
+        height: Virtual image height in pixels.
+
+    Returns:
+        OpenCV-axis pinhole intrinsics for the virtual image.
+    """
+    if focal_scale <= 0.0 or width <= 0 or height <= 0:
+        raise ValueError("focal_scale, width, and height must be positive")
+    if intrinsics.fl_x is None:
+        raise ValueError("source intrinsics must define fl_x")
+    focal: float = float(intrinsics.fl_x) * focal_scale
+    K_virtual: Float64[ndarray, "3 3"] = np.array(
+        [[focal, 0.0, width / 2.0], [0.0, focal, height / 2.0], [0.0, 0.0, 1.0]], dtype=np.float64
+    )
+    return Intrinsics.from_k_matrix(camera_conventions="RDF", k_matrix=K_virtual, height=height, width=width)
+
+
+def undistort_fisheye_to_pinhole(
+    camera: Fisheye62Parameters, *, focal_scale: float = 0.8, width: int, height: int
+) -> tuple[PinholeParameters, Float32[ndarray, "h w"], Float32[ndarray, "h w"]]:
+    """Create a same-axis pinhole twin and maps that undistort one fisheye image.
+
+    The identity rectification rotation preserves the optical axis. A camera-frame z-depth can therefore be
+    remapped with these tables without changing its metric meaning.
+
+    Args:
+        camera: Source Kannala-Brandt fisheye camera.
+        focal_scale: Virtual focal length divided by the source horizontal focal length.
+        width: Rectified output width.
+        height: Rectified output height.
+
+    Returns:
+        The virtual pinhole camera and OpenCV x/y remap tables.
+    """
+    virtual_intrinsics: Intrinsics = centered_virtual_intrinsics(camera.intrinsics, focal_scale=focal_scale, width=width, height=height)
+    map_x, map_y = cv2.fisheye.initUndistortRectifyMap(
+        np.asarray(camera.intrinsics.k_matrix, dtype=np.float64),
+        kannala_brandt_4(camera),
+        np.eye(3, dtype=np.float64),
+        np.asarray(virtual_intrinsics.k_matrix, dtype=np.float64),
+        (width, height),
+        cv2.CV_32FC1,
+    )
+    pinhole = PinholeParameters(name=f"{camera.name}_rect", extrinsics=camera.extrinsics, intrinsics=virtual_intrinsics)
+    return pinhole, map_x, map_y
+
+
+def remap_fisheye_image_and_depth(
+    image_hw3: UInt8[ndarray, "h w 3"],
+    depth_hw: Float32[ndarray, "h w"],
+    map_x: Float32[ndarray, "out_h out_w"],
+    map_y: Float32[ndarray, "out_h out_w"],
+) -> tuple[UInt8[ndarray, "out_h out_w 3"], Float32[ndarray, "out_h out_w"]]:
+    """Remap RGB and camera z-depth, zeroing pixels outside the fisheye image."""
+    rectified_image: UInt8[ndarray, "out_h out_w 3"] = cv2.remap(
+        image_hw3, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT
+    )
+    rectified_depth: Float32[ndarray, "out_h out_w"] = cv2.remap(
+        depth_hw, map_x, map_y, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT
+    )
+    source_mask: UInt8[ndarray, "h w"] = np.ones(depth_hw.shape, dtype=np.uint8)
+    valid: UInt8[ndarray, "out_h out_w"] = cv2.remap(
+        source_mask, map_x, map_y, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT
+    )
+    rectified_depth = np.where((valid > 0) & np.isfinite(rectified_depth) & (rectified_depth > 0.0), rectified_depth, 0.0).astype(np.float32)
+    return rectified_image, rectified_depth
+
+
 def fisheye_stereo_rectify(cam0: Fisheye62Parameters, cam1: Fisheye62Parameters, *, focal_scale: float = 1.0) -> StereoRectification:
     """Rectify a Kannala-Brandt fisheye pair whose extrinsics are ``cam_T_rig``.
 
@@ -79,8 +153,8 @@ def fisheye_stereo_rectify(cam0: Fisheye62Parameters, cam1: Fisheye62Parameters,
     )
     R0_33: Float64[ndarray, "3 3"] = stereo_result[0]
     R1_33: Float64[ndarray, "3 3"] = stereo_result[1]
-    focal: float = float(K0_33[0, 0]) * focal_scale
-    K_rect_33: Float64[ndarray, "3 3"] = np.array([[focal, 0.0, width / 2.0], [0.0, focal, height / 2.0], [0.0, 0.0, 1.0]])
+    rectified_intrinsics: Intrinsics = centered_virtual_intrinsics(cam0.intrinsics, focal_scale=focal_scale, width=width, height=height)
+    K_rect_33: Float64[ndarray, "3 3"] = np.asarray(rectified_intrinsics.k_matrix, dtype=np.float64)
     map0: tuple[Float32[ndarray, "h w"], Float32[ndarray, "h w"]] = cv2.fisheye.initUndistortRectifyMap(K0_33, kannala_brandt_4(cam0), R0_33, K_rect_33, (width, height), cv2.CV_32FC1)
     map1: tuple[Float32[ndarray, "h w"], Float32[ndarray, "h w"]] = cv2.fisheye.initUndistortRectifyMap(K1_33, kannala_brandt_4(cam1), R1_33, K_rect_33, (width, height), cv2.CV_32FC1)
 
@@ -90,7 +164,7 @@ def fisheye_stereo_rectify(cam0: Fisheye62Parameters, cam1: Fisheye62Parameters,
         return PinholeParameters(
             name=f"{camera.name}_rectified",
             extrinsics=Extrinsics(cam_R_world=R_rect @ cam_T_rig[:3, :3], cam_t_world=R_rect @ cam_T_rig[:3, 3]),
-            intrinsics=Intrinsics.from_k_matrix(camera_conventions="RDF", k_matrix=K_rect_33, height=height, width=width),
+            intrinsics=rectified_intrinsics,
         )
 
     return StereoRectification(

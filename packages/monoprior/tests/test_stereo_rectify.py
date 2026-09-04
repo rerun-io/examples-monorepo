@@ -4,9 +4,16 @@ import cv2
 import numpy as np
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
-from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion
+from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion, rescale_intri
 
-from monopriors.models.stereo_depth.rectify import StereoRectification, fisheye_stereo_rectify, kannala_brandt_4, rectify_pair
+from monopriors.models.stereo_depth.rectify import (
+    StereoRectification,
+    fisheye_stereo_rectify,
+    kannala_brandt_4,
+    rectify_pair,
+    remap_fisheye_image_and_depth,
+    undistort_fisheye_to_pinhole,
+)
 
 
 def _robocap_front_pair() -> tuple[Fisheye62Parameters, Fisheye62Parameters]:
@@ -92,3 +99,53 @@ def test_rectify_pair_remaps_images_deterministically() -> None:
         assert np.any(image_rect_hw3[height // 4 : 3 * height // 4, width // 4 : 3 * width // 4])
     np.testing.assert_array_equal(first_pair[0], second_pair[0])
     np.testing.assert_array_equal(first_pair[1], second_pair[1])
+
+
+def test_single_fisheye_undistortion_map_matches_projected_rays() -> None:
+    """Each virtual pinhole ray maps to the same source pixel as OpenCV projection."""
+    source, _ = _robocap_front_pair()
+    width, height = 320, 180
+    camera = Fisheye62Parameters(
+        name=source.name,
+        extrinsics=source.extrinsics,
+        intrinsics=rescale_intri(source.intrinsics, target_width=width, target_height=height),
+        distortion=source.distortion,
+    )
+    pinhole, map_x, map_y = undistort_fisheye_to_pinhole(camera, focal_scale=0.8, width=width, height=height)
+    vv, uu = np.mgrid[8 : height - 8 : 16, 8 : width - 8 : 16]
+    pixels_n3 = np.stack((uu.ravel(), vv.ravel(), np.ones(uu.size)), axis=1).astype(np.float64)
+    rays_n13 = (np.linalg.inv(pinhole.intrinsics.k_matrix) @ pixels_n3.T).T[:, None, :]
+    projected = cv2.fisheye.projectPoints(
+        rays_n13,
+        np.zeros(3, dtype=np.float64),
+        np.zeros(3, dtype=np.float64),
+        np.asarray(camera.intrinsics.k_matrix, dtype=np.float64),
+        kannala_brandt_4(camera),
+    )[0][:, 0]
+    mapped = np.stack((map_x[vv, uu], map_y[vv, uu]), axis=-1).reshape(-1, 2)
+    np.testing.assert_allclose(mapped, projected, rtol=0.0, atol=1e-3)
+    np.testing.assert_allclose(pinhole.extrinsics.cam_T_world, camera.extrinsics.cam_T_world, rtol=0.0, atol=0.0)
+
+
+def test_depth_remap_preserves_constant_fronto_parallel_plane() -> None:
+    """Pure undistortion keeps camera z-depth constant and pinhole unprojection planar."""
+    source, _ = _robocap_front_pair()
+    width, height = 320, 180
+    camera = Fisheye62Parameters(
+        name=source.name,
+        extrinsics=source.extrinsics,
+        intrinsics=rescale_intri(source.intrinsics, target_width=width, target_height=height),
+        distortion=source.distortion,
+    )
+    pinhole, map_x, map_y = undistort_fisheye_to_pinhole(camera, focal_scale=0.8, width=width, height=height)
+    image = np.full((height, width, 3), 127, dtype=np.uint8)
+    depth = np.full((height, width), 3.0, dtype=np.float32)
+    _, rectified_depth = remap_fisheye_image_and_depth(image, depth, map_x, map_y)
+    valid = rectified_depth > 0.0
+    np.testing.assert_array_equal(np.unique(rectified_depth[valid]), np.array([3.0], dtype=np.float32))
+
+    v, u = np.nonzero(valid)
+    K = pinhole.intrinsics.k_matrix
+    z = rectified_depth[v, u]
+    points = np.stack(((u - K[0, 2]) / K[0, 0] * z, (v - K[1, 2]) / K[1, 1] * z, z), axis=-1)
+    np.testing.assert_allclose(points[:, 2], 3.0, rtol=0.0, atol=0.0)
