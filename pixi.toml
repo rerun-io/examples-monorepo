@@ -2700,6 +2700,12 @@ cwd = "packages/gauss-surf"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Rectify chosen ultrawide frames and register mesh depth plus MoGe normal layers"
 
+[feature.gauss-surf.tasks.gauss-surf-ultrawide-depth-batch]
+cmd = "python tools/apps/ultrawide_depth_batch.py"
+cwd = "packages/gauss-surf"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Write the depth-only ultrawide_depth layer RRDs for one shard of the corpus"
+
 [feature.gauss-surf.tasks.gauss-surf-register-segment]
 cmd = "python tools/apps/register_segment.py"
 cwd = "packages/gauss-surf"
