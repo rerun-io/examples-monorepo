@@ -42,10 +42,16 @@ def log_skeleton_annotation_context(skeleton: KeypointSkeleton, *, entity_path: 
     )
 
 
-def log_person_bbox(box_xyxy: Float32[ndarray, "4"], person_idx: int) -> None:
-    """Log one person's box with its stable display color."""
+def log_person_bbox(box_xyxy: Float32[ndarray, "4"], person_idx: int, *, entity_path: str = "image") -> None:
+    """Log one person's box with its stable display color.
+
+    Args:
+        box_xyxy: Float32 box with shape ``(4,)`` in ``xyxy`` pixel order.
+        person_idx: Stable person or track index selecting the display color.
+        entity_path: Parent entity holding the ``person_<idx>/bbox`` children.
+    """
     rr.log(
-        f"image/person_{person_idx}/bbox",
+        f"{entity_path}/person_{person_idx}/bbox",
         rr.Boxes2D(
             array=box_xyxy.reshape(1, 4),
             array_format=rr.Box2DFormat.XYXY,

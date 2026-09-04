@@ -12895,8 +12895,10 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/aws-c-s3-0.13.1-h7508075_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/aws-c-sdkutils-0.2.7-h01ee8f8_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/aws-checksums-0.2.10-h01ee8f8_5.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/backports.zstd-1.7.0-py312h3f22e6b_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/binutils_impl_linux-64-2.46.1-default_hfdba357_102.conda
       - conda: https://prefix.dev/conda-forge/linux-64/binutils_linux-64-2.46.1-default_h4852527_102.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/brotli-python-1.2.0-py312he9c40d5_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/bzip2-1.0.8-hda65f42_10.conda
       - conda: https://prefix.dev/conda-forge/linux-64/c-ares-1.34.8-hebe6cf0_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/c-compiler-2.0.0-ha29393d_0.conda
@@ -13176,6 +13178,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/ca-certificates-2026.7.22-hbd8a1cb_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/casefy-1.1.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/certifi-2026.7.22-pyhd8ed1ab_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/charset-normalizer-3.5.1-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/click-8.4.2-pyhc90fa1f_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/colorama-0.4.6-pyhd8ed1ab_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/cpython-3.12.14-py312hd8ed1ab_3.conda
@@ -13226,8 +13229,10 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/pybind11-global-3.0.4-pyh648e204_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pygments-2.21.0-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pyserde-0.31.8-pyhcf101f3_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/pysocks-1.7.1-pyha55dd90_7.conda
       - conda: https://prefix.dev/conda-forge/noarch/python-gil-3.12.14-hd8ed1ab_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/python_abi-3.12-9_cp312.conda
+      - conda: https://prefix.dev/conda-forge/noarch/requests-2.34.2-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/rich-15.0.0-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/setuptools-81.0.0-pyh332efcf_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/shellingham-1.5.4-pyhd8ed1ab_2.conda
@@ -13244,6 +13249,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/typing_inspect-0.9.0-pyhd8ed1ab_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/tyro-0.9.35-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026c-h151e31d_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.7.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wadler-lindig-0.1.7-pyhe01879c_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.49-hd8ed1ab_0.conda
       - pypi: ./packages/lamp
@@ -13279,7 +13285,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/71/43/1947f06babed6b3f1d7f38b0c767f52df66bfb2bc10b468c4a7de9eceff2/aiohappyeyeballs-2.7.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/72/73/b3d451dfc523756cf177d3ebb0af76dc7751b341c60e2a21871be400ae29/iopath-0.1.10.tar.gz
       - pypi: https://files.pythonhosted.org/packages/7a/82/9707c7b0336bca53b75f52fc350956a93da66eb6be632b370bc933216fb4/icecream-2.2.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/87/7b/764082683bbc3b3351a3864ffb87be11aa13642913f78569fa72b934e319/onnxruntime_gpu-1.29.0-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/88/39/799be3f2f0f38cc727ee3b4f1445fe6d5e4133064ec2e4115069418a5bb6/cloudpickle-3.1.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/91/cd/6d1637172eb59c7b18ac90ed089d1f599a11fe0e63b4db2d017f3bb38a32/onnx_ir-1.0.0-py3-none-any.whl
@@ -13332,8 +13337,10 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/aws-c-s3-0.13.1-h7508075_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/aws-c-sdkutils-0.2.7-h01ee8f8_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/aws-checksums-0.2.10-h01ee8f8_5.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/backports.zstd-1.7.0-py312h3f22e6b_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/binutils_impl_linux-64-2.46.1-default_hfdba357_102.conda
       - conda: https://prefix.dev/conda-forge/linux-64/binutils_linux-64-2.46.1-default_h4852527_102.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/brotli-python-1.2.0-py312he9c40d5_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/bzip2-1.0.8-hda65f42_10.conda
       - conda: https://prefix.dev/conda-forge/linux-64/c-ares-1.34.8-hebe6cf0_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/c-compiler-2.0.0-ha29393d_0.conda
@@ -13616,6 +13623,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/ca-certificates-2026.7.22-hbd8a1cb_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/casefy-1.1.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/certifi-2026.7.22-pyhd8ed1ab_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/charset-normalizer-3.5.1-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/click-8.4.2-pyhc90fa1f_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/colorama-0.4.6-pyhd8ed1ab_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/cpython-3.12.14-py312hd8ed1ab_3.conda
@@ -13668,9 +13676,11 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/pybind11-global-3.0.4-pyh648e204_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pygments-2.21.0-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pyserde-0.31.8-pyhcf101f3_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/pysocks-1.7.1-pyha55dd90_7.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-8.4.2-pyhcf101f3_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/python-gil-3.12.14-hd8ed1ab_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/python_abi-3.12-9_cp312.conda
+      - conda: https://prefix.dev/conda-forge/noarch/requests-2.34.2-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/rich-15.0.0-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/setuptools-81.0.0-pyh332efcf_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/shellingham-1.5.4-pyhd8ed1ab_2.conda
@@ -13689,6 +13699,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/typing_inspect-0.9.0-pyhd8ed1ab_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/tyro-0.9.35-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026c-h151e31d_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.7.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wadler-lindig-0.1.7-pyhe01879c_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.49-hd8ed1ab_0.conda
@@ -13726,7 +13737,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/72/73/b3d451dfc523756cf177d3ebb0af76dc7751b341c60e2a21871be400ae29/iopath-0.1.10.tar.gz
       - pypi: https://files.pythonhosted.org/packages/7a/82/9707c7b0336bca53b75f52fc350956a93da66eb6be632b370bc933216fb4/icecream-2.2.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/7a/f0/b0e2a33c0367e79806054f556159f0b43e6a98d7e728aea1b07028a56ee4/types_tqdm-4.70.0.20260827-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/87/7b/764082683bbc3b3351a3864ffb87be11aa13642913f78569fa72b934e319/onnxruntime_gpu-1.29.0-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/88/39/799be3f2f0f38cc727ee3b4f1445fe6d5e4133064ec2e4115069418a5bb6/cloudpickle-3.1.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/91/cd/6d1637172eb59c7b18ac90ed089d1f599a11fe0e63b4db2d017f3bb38a32/onnx_ir-1.0.0-py3-none-any.whl

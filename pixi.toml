@@ -1303,7 +1303,7 @@ smplx = ">=0.1.28"
 
 [feature.lamp.activation.env]
 PACKAGE_DIR = "packages/lamp"
-PYREFLY_TARGET = "lamptrack/apis lamptrack/cameras.py lamptrack/models lamptrack/rerun_logging.py lamptrack/third_party/lamp lamptrack/__init__.py lamptrack/third_party/__init__.py tools"
+PYREFLY_TARGET = "lamptrack/apis lamptrack/cameras.py lamptrack/catalog_rig.py lamptrack/models lamptrack/rerun_logging.py lamptrack/third_party/lamp lamptrack/__init__.py lamptrack/third_party/__init__.py tools"
 
 [feature.lamp.tasks._lamp-download-checkpoint]
 cmd = "test -f data/checkpoints/lamp_smpl_aria_gen2.pt || hf download facebook/LAMP --revision 875ab025bd63c7b0ede9db2485cae72ee414e035 --include 'lamp_smpl_aria_gen2.pt' --local-dir data/checkpoints/"
@@ -1337,7 +1337,14 @@ platforms = ["linux-64"]
 
 [feature.lamp-catalog.dependencies]
 av = ">=18"
+requests = "*"
 torchcodec = "*"
+
+[feature.lamp-catalog.tasks.lamp-catalog]
+cmd = "python tools/apps/lamp_catalog.py"
+cwd = "packages/lamp"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Track people with LAMP in a four-camera Robocap catalog segment"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # robocap-slam
