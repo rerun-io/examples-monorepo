@@ -115,6 +115,8 @@ class _WideSegment:
     """Flattened ARKit confidence per chosen frame, or None when not fetched."""
     packet_indices: Int64[ndarray, "n_chosen"]
     """Video packet index per chosen frame."""
+    times_ns: Int64[ndarray, "n_chosen"]
+    """Chosen-frame timeline position in nanoseconds."""
     decoder: VideoDecoder
     """Whole-segment video decoder owned by the calling producer."""
 
@@ -135,6 +137,8 @@ class _UltrawideSegment:
     """Latest-at ARKit LiDAR depth PNG blobs aligned with the chosen frames."""
     confidences: list[UInt8[ndarray, "confidence_n_values"] | None]
     """Flattened ARKit confidence per chosen frame, or None when not fetched."""
+    times_ns: Int64[ndarray, "n_chosen"]
+    """Chosen-frame timeline position in nanoseconds."""
 
 
 def component_bytes_views(column: pa.ChunkedArray, column_name: str) -> list[UInt8[ndarray, "n_bytes"]]:
@@ -238,6 +242,7 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         prefetch_samples: int = 256,
         load_confidence: bool = True,
         cameras: CameraSelection = "wide",
+        emit_timestamps: bool = False,
     ) -> None:
         """Configure catalog streaming without opening the server or decoder.
 
@@ -265,6 +270,12 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
                 subsample of equal size, interleaved, so the shuffle buffer mixes
                 them into roughly balanced batches. The builder must accept the
                 ultrawide camera when this selects it.
+            emit_timestamps: Add the frame's ``video_time`` position in
+                nanoseconds to every sample as an int64 scalar ``video_time_ns``.
+                Training ignores it; a visualization that logs a sample back onto
+                the capture's own timeline cannot recover it any other way,
+                because the frame filters make sample order no longer index the
+                query rows.
 
         Raises:
             ValueError: If sizes, camera selection, or distributed shard settings
@@ -288,6 +299,7 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         self._device: torch.device = device
         self._builder_factory: Callable[[], SampleBuilder] = builder_factory
         self._load_confidence: bool = load_confidence
+        self._emit_timestamps: bool = emit_timestamps
         self._cameras: CameraSelection = cameras
         self._missing_ultrawide_reported: bool = False
         self._shuffle_buffer_size: int = shuffle_buffer_size
@@ -409,6 +421,7 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
             prompt_blobs=prompt_blobs,
             confidences=confidences,
             packet_indices=packet_indices_n,
+            times_ns=chosen_times_n.astype(np.int64),
             decoder=decoder,
         )
 
@@ -429,9 +442,17 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         prompt_blob_bytes: UInt8[ndarray, "prompt_n_bytes"]
         confidence: UInt8[ndarray, "confidence_n_values"] | None
         packet_index: np.int64
+        time_ns: np.int64
         first_decode_error_reported: bool = False
-        sample_inputs = zip(prepared.target_blobs, prepared.prompt_blobs, prepared.confidences, prepared.packet_indices, strict=True)
-        for sample_index, (target_blob_bytes, prompt_blob_bytes, confidence, packet_index) in enumerate(sample_inputs):
+        sample_inputs = zip(
+            prepared.target_blobs,
+            prepared.prompt_blobs,
+            prepared.confidences,
+            prepared.packet_indices,
+            prepared.times_ns,
+            strict=True,
+        )
+        for sample_index, (target_blob_bytes, prompt_blob_bytes, confidence, packet_index, time_ns) in enumerate(sample_inputs):
             started: float = perf_counter()
             try:
                 frame_chw: UInt8[Tensor, "3 stored_h stored_w"] = prepared.decoder.get_frame_at(int(packet_index)).data
@@ -454,6 +475,8 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
                 (prepared.segment_seed + sample_index) % (2**63 - 1),
             )
             if sample is not None:
+                if self._emit_timestamps:
+                    sample["video_time_ns"] = torch.tensor(int(time_ns), dtype=torch.int64)
                 yield sample
 
     def _prepare_ultrawide(self, segment_id: str, stats: CatalogDatasetStats, frame_limit: int | None) -> _UltrawideSegment | None:
@@ -498,7 +521,8 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         stats.skipped_missing_payload_frames += chosen.num_rows - table.num_rows
         if table.num_rows == 0:
             return None
-        self._require_ordered_rows(table, segment_id)
+        all_times_n: Shaped[ndarray, "n_rows"] = self._require_ordered_rows(table, segment_id)
+        times_ns: Int64[ndarray, "n_chosen"] = all_times_n[:: self._frame_stride].astype(np.int64)
 
         rgb_blobs: list[UInt8[ndarray, "rgb_n_bytes"]] = component_bytes_views(
             table.column(ULTRAWIDE_RGB_BLOB_COLUMN), ULTRAWIDE_RGB_BLOB_COLUMN
@@ -522,6 +546,7 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
             target_blobs = [target_blobs[index] for index in kept]
             prompt_blobs = [prompt_blobs[index] for index in kept]
             confidences = [confidences[index] for index in kept]
+            times_ns = times_ns[kept]
         return _UltrawideSegment(
             quarter_turns=self._quarter_turns(segment_id),
             segment_seed=segment_seed,
@@ -529,6 +554,7 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
             target_blobs=target_blobs,
             prompt_blobs=prompt_blobs,
             confidences=confidences,
+            times_ns=times_ns,
         )
 
     def _build_ultrawide_samples(
@@ -542,8 +568,16 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         target_blob_bytes: UInt8[ndarray, "target_n_bytes"]
         prompt_blob_bytes: UInt8[ndarray, "prompt_n_bytes"]
         confidence: UInt8[ndarray, "confidence_n_values"] | None
-        sample_inputs = zip(prepared.rgb_blobs, prepared.target_blobs, prepared.prompt_blobs, prepared.confidences, strict=True)
-        for sample_index, (rgb_blob_bytes, target_blob_bytes, prompt_blob_bytes, confidence) in enumerate(sample_inputs):
+        time_ns: np.int64
+        sample_inputs = zip(
+            prepared.rgb_blobs,
+            prepared.target_blobs,
+            prepared.prompt_blobs,
+            prepared.confidences,
+            prepared.times_ns,
+            strict=True,
+        )
+        for sample_index, (rgb_blob_bytes, target_blob_bytes, prompt_blob_bytes, confidence, time_ns) in enumerate(sample_inputs):
             started: float = perf_counter()
             # The Arrow view is read-only, and decode_jpeg needs an owned uint8
             # tensor. Copying one ~50 KB blob costs far less than the decode.
@@ -563,6 +597,8 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
                 camera="ultrawide",
             )
             if sample is not None:
+                if self._emit_timestamps:
+                    sample["video_time_ns"] = torch.tensor(int(time_ns), dtype=torch.int64)
                 yield sample
 
     def _iter_segment(
