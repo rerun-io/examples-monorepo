@@ -136,9 +136,11 @@ def _prompt_tensors(
             f"oriented prompt depth and confidence must both be 192x256, got {prompt_depth_mm_hw.shape} and {prompt_confidence_hw.shape}"
         )
     if prompt_placement is not None:
+        # Copy rather than view: an unrotated prompt is still the read-only Arrow
+        # buffer, and torch.from_numpy warns on non-writable arrays.
         placed: tuple[Float32[Tensor, "192 256"], Bool[Tensor, "192 256"]] = place_wide_prompt(
-            torch.from_numpy(np.ascontiguousarray(prompt_depth_mm_hw)),
-            torch.from_numpy(np.ascontiguousarray(prompt_confidence_hw)),
+            torch.from_numpy(prompt_depth_mm_hw.copy()),
+            torch.from_numpy(prompt_confidence_hw.copy()),
             prompt_placement,
             flipped=flipped,
         )
