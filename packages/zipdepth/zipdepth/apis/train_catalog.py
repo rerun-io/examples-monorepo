@@ -13,7 +13,12 @@ import torch
 import torch.distributed as dist
 from monopriors.models.depth_completion.zipdepth_prompt import ZipDepthPrompt, load_zipdepth_prompt
 from monopriors.models.relative_depth.zipdepth import download_zipdepth_checkpoint
-from monopriors.models.zipdepth_checkpoint import load_zipdepth_state_dict, narrow_zipdepth_state_dict
+from monopriors.models.zipdepth_checkpoint import (
+    load_zipdepth_checkpoint,
+    load_zipdepth_state_dict,
+    narrow_zipdepth_state_dict,
+    range_margin_m_from_checkpoint,
+)
 from monopriors.third_party.zipdepth.architecture import ZipDepth, create_model
 from monopriors.third_party.zipdepth.model_utils import strip_state_dict_prefixes
 from serde import field as serde_field
@@ -27,6 +32,7 @@ from torch.utils.tensorboard import SummaryWriter
 from zipdepth.catalog.instrument import InstrumentedLoader
 from zipdepth.catalog.segments import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, PromptDACatalog, load_promptda_catalog, split_holdout_segments
 from zipdepth.catalog.targets import AugmentPolicy, TargetMode
+from zipdepth.catalog.ultrawide import DEFAULT_ULTRAWIDE_PROMPT_SCALE, CameraSelection, UltrawidePolicy
 from zipdepth.training.distributed import barrier, cleanup_distributed, fix_state_dict_prefix, print_main, setup_distributed
 from zipdepth.training.trainer import ZipDepthTrainer
 
@@ -148,6 +154,22 @@ class TrainCatalogConfig:
     """Samples requested per catalog fetch by the Rerun dataloader path."""
     target_mode: TargetMode = "metric"
     """Prompted metric distillation by default; ``ssi`` retains the legacy RGB-only lane."""
+    cameras: CameraSelection = "wide"
+    """Cameras streamed per segment. ``wide`` reproduces the released lane exactly.
+    ``ultrawide`` trains on the rectified ultrawide frames with the wide LiDAR prompt
+    padded into its footprint. ``both`` interleaves an equal-sized ultrawide subsample
+    with the wide frames, giving roughly balanced batches after the shuffle buffer."""
+    ultrawide_min_valid_fraction: float = 0.7
+    """Reject an ultrawide frame whose in-range target fraction, measured before erosion,
+    falls below this. The raycast depth has holes at glazing and outdoors."""
+    ultrawide_valid_erosion_px: int = 1
+    """Binary-erode the ultrawide target mask by this many pixels; raycast silhouettes
+    bleed about one output pixel past the mesh."""
+    ultrawide_prompt_scale: float = DEFAULT_ULTRAWIDE_PROMPT_SCALE
+    """Prompt block size as a fraction of the prompt canvas per axis. The rectified
+    ultrawide camera sees 2.1x the wide field of view on both axes (measured across
+    landscape and portrait segments; principal point within 0.7% of centre), so the wide
+    LiDAR prompt covers the central 1/2.1 of an ultrawide frame."""
     total_steps: int = 70_000
     """Optimizer steps in the run; the OneCycle schedule spans exactly this many. 70k is about one pass over the 875-segment train split at batch 8 (70.5k steps measured 2026-08-28)."""
     shuffle_buffer_size: int = 256
@@ -162,6 +184,14 @@ class TrainCatalogConfig:
     """Maximum completed samples buffered by the current loader."""
     min_depth_span: float = 1.25
     """Minimum valid-depth p95/p5 ratio; zero disables flat-frame filtering."""
+    range_margin_m: float = 0.0
+    """Widen the head's output range beyond the prompt's own [min, max] by this many metres
+    on each side; needed for ultrawide prompts that cover only the image center. The margin
+    is absolute rather than a fraction of the prompt span so that a close-up prompt gains as
+    much reach as a wide one. Clipping to the 0.1--4.0 m validity window means 3.9 or more
+    opens the full window. The value is recorded in ``resolved_config.json`` and in every
+    checkpoint this run writes, so inference rebuilds the same head. Zero reproduces the
+    prompt-bounded head exactly."""
     from_scratch: bool = False
     """Start with random weights instead of the released ZipDepth-base weights."""
     metric_gradient_weight: float = 0.5
@@ -517,13 +547,21 @@ def _restore_resume_state(
     *,
     total_steps: int,
     actual_max_lr: float,
+    range_margin_m: float,
     scheduler_config: UpstreamSchedulerConfig,
     schedule: ScheduleName,
     warmup_pct: float,
     final_div_factor: float,
     cooldown_pct: float,
 ) -> None:
-    """Restore model, optimizer, schedule, and trainer step."""
+    """Restore model, optimizer, schedule, and trainer step.
+
+    Raises:
+        ValueError: If the checkpoint recorded a different output-range margin
+            than this run is configured with. Resuming rewrites the same run, so
+            silently changing the head's output range mid-run would make the
+            optimizer state and the recorded margin describe different models.
+    """
     print_main(f"Resuming from: {resume}", trainer.rank)
     checkpoint: dict[str, object] | None
     if trainer.is_distributed:
@@ -539,6 +577,12 @@ def _restore_resume_state(
         checkpoint = loaded_checkpoint if isinstance(loaded_checkpoint, dict) else None
     if checkpoint is None:
         raise ValueError(f"resume checkpoint must contain a mapping: {resume}")
+    resumed_margin_m: float = range_margin_m_from_checkpoint(checkpoint, resume)
+    if not isclose(resumed_margin_m, range_margin_m, rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError(
+            f"resume checkpoint recorded range_margin_m={resumed_margin_m} but this run is configured with "
+            f"range_margin_m={range_margin_m}; resume with the recorded value or start a new run: {resume}"
+        )
     raw_resume_state: object = checkpoint.get("model_state_dict", checkpoint)
     tensor_state: dict[str, Tensor] = narrow_zipdepth_state_dict(raw_resume_state, resume)
     resume_state: dict[str, Tensor] = fix_state_dict_prefix(strip_state_dict_prefixes(tensor_state), trainer.is_distributed)
@@ -604,6 +648,25 @@ def main(
             raise ValueError("save_every_steps must be non-negative")
         if config.target_mode not in ("ssi", "metric"):
             raise ValueError(f"unknown target mode {config.target_mode!r}")
+        if not isfinite(config.range_margin_m) or config.range_margin_m < 0.0:
+            raise ValueError("range_margin_m must be finite and non-negative")
+        if config.range_margin_m > 0.0 and config.target_mode != "metric":
+            raise ValueError("range_margin_m only applies to the prompted metric lane")
+        if config.cameras not in ("wide", "ultrawide", "both"):
+            raise ValueError(f"unknown camera selection {config.cameras!r}")
+        if config.cameras != "wide" and config.dataloader == "rerun":
+            raise ValueError("the Rerun dataloader A/B path streams the wide camera only")
+        # None keeps the wide lane bit-identical: the builders never consult a policy
+        # they were not given, and they reject an ultrawide request without one.
+        ultrawide_policy: UltrawidePolicy | None = (
+            None
+            if config.cameras == "wide"
+            else UltrawidePolicy(
+                min_valid_fraction=config.ultrawide_min_valid_fraction,
+                valid_erosion_px=config.ultrawide_valid_erosion_px,
+                prompt_scale=config.ultrawide_prompt_scale,
+            )
+        )
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -693,6 +756,7 @@ def main(
                         config.min_depth_span,
                         device,
                         target_mode=config.target_mode,
+                        ultrawide_policy=ultrawide_policy,
                     ),
                     shuffle_buffer_size=config.shuffle_buffer_size,
                     seed=config.seed,
@@ -700,6 +764,7 @@ def main(
                     world_size=world_size,
                     num_producers=config.num_producers,
                     prefetch_samples=config.prefetch_samples,
+                    cameras=config.cameras,
                     # Training ignores confidence: the student takes the raw prompt and the model
                     # range-gates internally. Skipping the column drops a column and ~48 KB/frame
                     # off every segment query.
@@ -735,10 +800,23 @@ def main(
         if config.target_mode == "metric":
             if initialization is not None:
                 print_main(f"Loading prompted trainable initialization: {initialization}", rank)
-                model: nn.Module = load_zipdepth_prompt(initialization)
+                # A fine-tune may deliberately change the margin: v4 recorded none, and the
+                # ultrawide run starts from it with the full window open. Say so loudly
+                # rather than failing, which is what resuming the same run does instead.
+                initialization_margin_m: float = range_margin_m_from_checkpoint(
+                    load_zipdepth_checkpoint(initialization), initialization
+                )
+                if not isclose(initialization_margin_m, config.range_margin_m, rel_tol=0.0, abs_tol=1e-9):
+                    print_main(
+                        f"OVERRIDE: initialization recorded range_margin_m={initialization_margin_m}, "
+                        f"training with range_margin_m={config.range_margin_m}",
+                        rank,
+                    )
+                model: nn.Module = load_zipdepth_prompt(initialization, range_margin_m=config.range_margin_m)
             else:
                 model = ZipDepthPrompt(
-                    create_model(variant="base", upsample_unfold=model_config.upsample_unfold)
+                    create_model(variant="base", upsample_unfold=model_config.upsample_unfold),
+                    range_margin_m=config.range_margin_m,
                 )
                 print_main("Training ZipDepth-PromptDA from scratch", rank)
         else:
@@ -793,6 +871,7 @@ def main(
             target_mode=config.target_mode,
             metric_gradient_weight=config.metric_gradient_weight,
             pin_batchnorm_eval=pin_batchnorm_eval,
+            range_margin_m=config.range_margin_m,
             use_profiler=config.profile,
             profile_dir=str(config.profile_dir),
             profile_wait=config.profile_wait,
@@ -806,6 +885,7 @@ def main(
                 trainer,
                 total_steps=total_steps,
                 actual_max_lr=actual_max_lr,
+                range_margin_m=config.range_margin_m,
                 scheduler_config=scheduler_config,
                 schedule=recipe.schedule,
                 warmup_pct=recipe.warmup_pct,
