@@ -270,6 +270,29 @@ Ultrawide metrics are reported **split by the prompt footprint**, the centred
 The wide gates are unchanged and must still hold: AbsRel <= 0.0140, edge
 MAE <= 73 mm, hard-20 macro edge MAE <= 128.5 mm.
 
+## Looking at a whole segment
+
+`tools/infer_segment_rerun.py` (task `zipdepth-infer-segment-rerun`) is the
+qualitative counterpart of the numbers above: it streams one segment through the
+same builders in eval mode, runs the model in batches, and logs both cameras to
+Rerun on the capture's own `video_time` timeline.
+
+```
+pixi run --frozen -e zipdepth-catalog zipdepth-infer-segment-rerun \
+  --video-id 42446050 --checkpoint data/checkpoints/zdpda-uw-v1/final_model.pth \
+  --cameras both --frame-stride 10 --rr-config.save /var/tmp/42446050.rrd
+```
+
+Ultrawide frames land under `world/rig_00/cam_01/pinhole_rect` as `rgb` (with the
+prompt footprint outlined on it), `prompt_footprint` (the padded 192x256 canvas),
+`depth_pred`, `depth_target`, and `abs_error`; wide frames land under
+`world/rig_00/cam_00/pinhole` with the raw ARKit prompt beside them under
+`pinhole_lowres`. Per-frame AbsRel, delta1, and MAE are logged per region under
+`metrics/`, and the run prints — and, with `--rr-config.save`, writes as JSON next
+to the `.rrd` — the same footprint split the evaluation reports. Both cameras are
+logged in the lane's 768x1024 network frame, so a portrait capture appears
+landscape and its `Pinhole` carries the same quarter turns the builders applied.
+
 ## Deployment
 
 One static 768x1024 batch-8 TensorRT engine serves both cameras. Ultrawide
