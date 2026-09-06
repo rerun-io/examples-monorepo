@@ -5,15 +5,17 @@ from __future__ import annotations
 import tyro
 
 from dataforge.datasets.base import DataforgeDatasetConfig
+from dataforge.datasets.msd import MsdConfig
 from dataforge.datasets.robocap import RobocapConfig
 from dataforge.datasets.selfcap import SelfcapConfig
 from dataforge.datasets.wildcap import WildcapConfig
 
-dataset_defaults: dict[str, DataforgeDatasetConfig] = {config.command: config for config in (RobocapConfig(), SelfcapConfig(), WildcapConfig())}
+dataset_defaults: dict[str, DataforgeDatasetConfig] = {config.command: config for config in (RobocapConfig(), SelfcapConfig(), WildcapConfig(), MsdConfig())}
 """Every dataset dataforge knows about, keyed by its CLI subcommand (``config.command``).
 
 ``config.name`` — the catalog dataset — equals the command for fixed datasets and
-is derived per corpus for wildcap (``wildcap-<corpus>``)."""
+is derived per instance where one command serves several layouts: wildcap
+(``wildcap-<corpus>``) and msd (``msd-<device>``)."""
 
 DatasetUnion = tyro.extras.subcommand_type_from_defaults(dataset_defaults, prefix_names=False)
 """Config type every verb's ``Config.dataset`` field uses (one tyro subcommand per registry key).
