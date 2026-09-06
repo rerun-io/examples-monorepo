@@ -1,4 +1,4 @@
-"""LaMAria: ETH CVG's Aria Gen1 SLAM benchmark → one exoego:v2 base-layer rrd per sequence.
+"""LaMAria: ETH CVG's Aria Gen1 SLAM benchmark → a base and a gt exoego:v2 rrd per sequence.
 
 Upstream is a plain Apache-indexed archive at ``cvg-data.inf.ethz.ch/lamaria/``
 (github.com/cvg/lamaria), four directories deep::
@@ -19,10 +19,19 @@ run on it unchanged::
 **Raw is scratch.** The default selection alone is 18.2 GB of VRS, so
 ``download`` fetches only the small files (a few MB) and writes a
 ``manifest.json`` recording what the archive held; ``convert`` then fetches
-**one** VRS, encodes its three camera streams, writes the rrd, and deletes the
+**one** VRS, encodes its three camera streams, writes the rrds, and deletes the
 VRS and the temp mp4s again. ``--keep-raw`` keeps them. The archive is flaky (it
 was down for hours during development), so every fetch resumes and a stalled one
 is retried.
+
+**Two layers, one fetch.** ``convert`` writes a ``base`` rrd (video and both
+IMUs) and a ``gt`` rrd (the temporal ``world_T_rig``, its path and trail, the
+surveyed control points and their per-camera detections, and the root
+``ViewCoordinates``) under the same recording id, so the catalog stacks them onto
+one segment. Both come out of one VRS read and are therefore skipped and rebuilt
+together: half a sequence on disk means paying for the download again regardless.
+A sequence the archive publishes no ground truth for — the whole test split —
+gets no gt rrd, and is done once its base rrd exists.
 
 **Clocks.** Every VRS timestamp is Aria DEVICE time in nanoseconds, and the
 published pGT and control points are stamped on that same clock. ``video_time``
@@ -37,6 +46,13 @@ directly comparable with that file's ``T_b_s``. ``cam_00`` is camera-slam-left,
 (identity ``rig_T_imu`` by construction) and ``imu_01`` imu-left, 129 mm away.
 The base layer logs NO transform on the rig node and NO root
 ``ViewCoordinates``: the gt layer establishes the world frame and owns both.
+
+**Worlds.** Two of them, both Z-up: ``R_01``…``R_10`` are posed in MPS's own
+gravity-aligned frame, and everything from ``R_11`` onwards is surveyed in
+Switzerland's LV95/LN02 grid, translated by ``aria.CUSTOM_ORIGIN_XYZ`` as the
+official tooling does. The up axis is published rather than guessed, but every
+convert re-measures it from gravity (``measured_world_up``) and warns instead of
+reorienting one rrd on its own.
 """
 
 from __future__ import annotations
@@ -161,8 +177,15 @@ usually not started walking yet, so the mean there is nearly pure gravity."""
 
 GT_TRAJECTORY_COLOR: tuple[int, int, int] = (110, 180, 255)
 """Fixed tint of the whole gt path; one trajectory is one quantity, not a per-row class."""
-GT_TRAJECTORY_RADIUS_M: float = 0.01
-"""Line radius of the gt path, in metres — a walk is hundreds of metres long, so it is thin."""
+GT_TRAJECTORY_WIDTH_UI_POINTS: float = 1.5
+"""Line width of the gt path, in **screen** points rather than metres.
+
+A LaMAria walk is 170 m to 1.1 km long, so the World view frames hundreds of
+metres at once and any honest metric width is a small fraction of a pixel there
+(0.01 m over a 400 m shot is 0.06 px, i.e. invisible). Rerun reads a negative
+radius as UI points, which keeps the overview path one visible hairline at every
+zoom. The trail below stays metric on purpose: it rides the wearer in the Follow
+view, where real centimetres are the point."""
 GT_TRAIL_COLOR: tuple[int, int, int] = (255, 215, 90)
 """Fixed tint of the recent-motion trail; warm, so it reads against the cool full path."""
 GT_TRAIL_RADIUS_M: float = 0.02
@@ -1289,7 +1312,11 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
                 # time range turns into a recent-motion trail in the Follow view.
                 rr.log(
                     schema.trajectory_path(GT_SOURCE),
-                    rr.LineStrips3D([trajectory.translations_xyz], colors=GT_TRAJECTORY_COLOR, radii=GT_TRAJECTORY_RADIUS_M),
+                    rr.LineStrips3D(
+                        [trajectory.translations_xyz],
+                        colors=GT_TRAJECTORY_COLOR,
+                        radii=rr.components.Radius.ui_points(GT_TRAJECTORY_WIDTH_UI_POINTS),
+                    ),
                     static=True,
                     recording=recording,
                 )

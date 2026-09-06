@@ -814,6 +814,11 @@ def recording_properties(store: rr.experimental.ChunkStore, group: str) -> dict[
     return {name.removeprefix(prefix): values[0] for name, values in row.items() if name.startswith(prefix) and values}
 
 
+def static_row(store: rr.experimental.ChunkStore, entity_path: str) -> dict[str, list[object]]:
+    """The one static row of an entity, as a column → values mapping."""
+    return store.reader(index=None, contents=entity_path).to_arrow_table().to_pylist()[0]
+
+
 @pytest.fixture(scope="module")
 def nvenc() -> Path:
     """The resolved ffmpeg, or a skip when this machine cannot encode AV1 on the GPU."""
@@ -1214,6 +1219,12 @@ def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail(tmp_path: Path, m
     assert len(strips) == 1, "the whole trajectory is one strip"
     assert len(strips[0]) == GT_POSES
     assert column_rows(store, f"{schema.trail_path('gt')}:Points3D:positions").num_rows == GT_POSES
+    # A negative radius is Rerun's screen-space unit: a metric hairline over a
+    # kilometre of walking renders as nothing in the World overview.
+    radii: list[object] = static_row(store, trajectory)[f"{trajectory}:LineStrips3D:radii"]
+    assert radii == [pytest.approx(-lamaria.GT_TRAJECTORY_WIDTH_UI_POINTS)]
+    trail_radii: list[object] = static_row(store, schema.trail_path("gt"))[f"{schema.trail_path('gt')}:Points3D:radii"]
+    assert trail_radii == [pytest.approx(lamaria.GT_TRAIL_RADIUS_M)], "the trail is metric: it rides the wearer up close"
 
 
 def test_only_the_gt_layer_states_the_world_axes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
@@ -1271,11 +1282,6 @@ def test_a_level_wearer_measures_the_declared_axis_quietly(
 
 
 # ── control points ────────────────────────────────────────────────────────
-
-
-def static_row(store: rr.experimental.ChunkStore, entity_path: str) -> dict[str, list[object]]:
-    """The one static row of an entity, as a column → values mapping."""
-    return store.reader(index=None, contents=entity_path).to_arrow_table().to_pylist()[0]
 
 
 def test_the_control_points_are_static_labelled_points_in_the_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
