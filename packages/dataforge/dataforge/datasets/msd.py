@@ -87,7 +87,7 @@ from simplecv.camera_parameters import (
     PinholeParameters,
 )
 
-from dataforge import paths, schema, transports, writing
+from dataforge import blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
@@ -886,42 +886,14 @@ def nominal_fps(times_ns: Int64[ndarray, "n_samples"]) -> int:
     return max(1, round(1e9 / median_gap_ns))
 
 
-def follow_eye_controls(follow: FollowFrame) -> rrb.EyeControls3D:
-    """Chase camera for the follow view, expressed in the rig (IMU) frame.
-
-    The view's origin is the rig node, so a fixed eye in this frame rides the
-    headset. It sits ``FOLLOW_BACK_M`` behind the headset and ``FOLLOW_UP_M``
-    above it and aims ``FOLLOW_AHEAD_M`` in front of it, which keeps the headset
-    itself and the ground it moves over both in shot. Every direction comes from
-    the device's own ``FollowFrame``: the three headsets carry their IMUs at
-    different orientations, so one hand-picked position cannot serve them all.
-
-    Args:
-        follow: The device's forward and up, in the rig frame.
-
-    Returns:
-        The eye controls the Follow view of both blueprints uses.
-    """
-    forward_xyz: Float64[ndarray, "3"] = np.array(follow.forward, dtype=np.float64)
-    up_xyz: Float64[ndarray, "3"] = np.array(follow.up, dtype=np.float64)
-    position_xyz: Float64[ndarray, "3"] = -FOLLOW_BACK_M * forward_xyz + FOLLOW_UP_M * up_xyz
-    look_target_xyz: Float64[ndarray, "3"] = FOLLOW_AHEAD_M * forward_xyz
-    # EyeControls3D is marked unstable by the SDK; re-validate this factory on Rerun bumps.
-    return rrb.EyeControls3D(
-        kind=rrb.Eye3DKind.FirstPerson,
-        position=tuple(position_xyz.tolist()),
-        look_target=tuple(look_target_xyz.tolist()),
-        eye_up=follow.up,
-        spin_speed=0.0,
-    )
+def follow_eye(follow: FollowFrame) -> rrb.EyeControls3D:
+    """The device's chase camera: its own forward and up at this package's distances."""
+    return blueprints.follow_eye_controls(follow.forward, follow.up, back_m=FOLLOW_BACK_M, up_m=FOLLOW_UP_M, ahead_m=FOLLOW_AHEAD_M)
 
 
 def camera_views(num_cameras: int) -> list[rrb.Spatial2DView]:
     """One 2D pane per camera, labelled the way the archives name them (``cam0``…)."""
-    return [
-        rrb.Spatial2DView(name=f"cam{index}", origin=schema.pinhole_path(RIG, index), contents=f"{schema.pinhole_path(RIG, index)}/**")
-        for index in range(num_cameras)
-    ]
+    return [blueprints.camera_view(f"cam{index}", RIG, index) for index in range(num_cameras)]
 
 
 def build_blueprint(num_cameras: int, *, has_magnetometer: bool, follow: FollowFrame) -> rrb.Blueprint:
@@ -937,93 +909,36 @@ def build_blueprint(num_cameras: int, *, has_magnetometer: bool, follow: FollowF
         registered as the catalog dataset's default.
     """
     plots: list[rrb.TimeSeriesView] = [
-        rrb.TimeSeriesView(
-            name="Gyroscope", origin=schema.imu_path(RIG, IMU), contents=schema.gyro_path(RIG, IMU), plot_legend=rrb.PlotLegend(visible=True)
-        ),
-        rrb.TimeSeriesView(
-            name="Accelerometer",
-            origin=schema.imu_path(RIG, IMU),
-            contents=schema.accel_path(RIG, IMU),
-            plot_legend=rrb.PlotLegend(visible=True),
-        ),
+        blueprints.sensor_plot(name, origin, contents)
+        for name, origin, contents in (
+            ("Gyroscope", schema.imu_path(RIG, IMU), schema.gyro_path(RIG, IMU)),
+            ("Accelerometer", schema.imu_path(RIG, IMU), schema.accel_path(RIG, IMU)),
+        )
     ]
     if has_magnetometer:
-        plots.append(
-            rrb.TimeSeriesView(
-                name="Magnetometer",
-                origin=schema.mag_path(RIG, MAG),
-                contents=schema.field_path(RIG, MAG),
-                plot_legend=rrb.PlotLegend(visible=True),
-            )
-        )
-    return rrb.Blueprint(
-        rrb.Vertical(
-            rrb.Horizontal(
-                rrb.Vertical(
-                    rrb.Spatial3DView(
-                        name="Rig",
-                        origin="/",
-                        line_grid=True,
-                        # The overview shows the whole gt path; its cursor trail stays hidden.
-                        # Overrides on entities a base-only recording lacks are simply inert.
-                        overrides={schema.trail_path(schema.GT_RUN_SOURCE): rrb.EntityBehavior(visible=False)},
-                    ),
-                    # Follow-cam (rerun-io/eye_control_example pattern): the view's origin
-                    # IS the rig frame, so a fixed first-person eye in that frame rides the
-                    # headset. Inert until the gt layer animates rig_00.
-                    rrb.Spatial3DView(
-                        name="Follow",
-                        origin=schema.rig_path(RIG),
-                        contents="/**",
-                        line_grid=True,
-                        overrides={
-                            schema.trajectory_path(schema.GT_RUN_SOURCE): rrb.EntityBehavior(visible=False),
-                            schema.trail_path(schema.GT_RUN_SOURCE): rrb.VisibleTimeRanges(
-                                rrb.VisibleTimeRange(
-                                    schema.TIMELINE,
-                                    start=rrb.TimeRangeBoundary.cursor_relative(seconds=-10.0),
-                                    end=rrb.TimeRangeBoundary.cursor_relative(),
-                                )
-                            ),
-                        },
-                        eye_controls=follow_eye_controls(follow),
-                    ),
-                ),
-                rrb.Grid(*camera_views(num_cameras), grid_columns=2, name="Synchronized cameras"),
-                column_shares=[3, 2],
-            ),
-            rrb.Horizontal(*plots),
-            row_shares=[3, 1],
-        ),
-        rrb.TimePanel(timeline=schema.TIMELINE),
-        collapse_panels=True,
+        plots.append(blueprints.sensor_plot("Magnetometer", schema.mag_path(RIG, MAG), schema.field_path(RIG, MAG)))
+    return blueprints.rig_blueprint(
+        camera_views(num_cameras),
+        rig=RIG,
+        run_source=schema.GT_RUN_SOURCE,
+        eye_controls=follow_eye(follow),
+        plots=plots,
     )
 
 
 def build_table_blueprint(num_cameras: int, *, follow: FollowFrame) -> rrb.Blueprint:
     """Segment-table preview card: the 3D rig with no video textures, plus ``cam0``.
 
-    Every visible table row renders through this at once, so exactly one video
-    stream is decoded and the rest are *excluded* rather than hidden.
-
     Args:
         num_cameras: Cameras the device carries; all but ``cam0``'s video are excluded.
         follow: The device's forward and up in the rig frame; it orients the Follow view.
     """
-    video_exclusions: list[str] = [f"- {schema.video_path(RIG, index)}/**" for index in range(num_cameras)]
-    return rrb.Blueprint(
-        rrb.Horizontal(
-            rrb.Spatial3DView(
-                name="Follow",
-                origin=schema.rig_path(RIG),
-                contents=["/**", *video_exclusions, f"- {schema.trail_path(schema.GT_RUN_SOURCE)}/**"],
-                line_grid=True,
-                eye_controls=follow_eye_controls(follow),
-            ),
-            rrb.Spatial2DView(name="cam0", origin=schema.pinhole_path(RIG, 0), contents=f"{schema.pinhole_path(RIG, 0)}/**"),
-            column_shares=[3, 2],
-        ),
-        rrb.TimePanel(timeline=schema.TIMELINE),
+    return blueprints.table_blueprint(
+        num_cameras,
+        rig=RIG,
+        run_source=schema.GT_RUN_SOURCE,
+        eye_controls=follow_eye(follow),
+        front_pane=blueprints.camera_view("cam0", RIG, 0),
     )
 
 
@@ -1285,9 +1200,7 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         with writing.atomic_recording(
             target,
             recording_id=identity.recording_id,
-            default_blueprint=build_blueprint(
-                self.device.num_cameras, has_magnetometer=self.device.has_magnetometer, follow=self.device.follow
-            ),
+            default_blueprint=self.default_blueprint(),
         ) as recording:
             # Deliberately NO ViewCoordinates at "/": the gt layer owns the root
             # ViewCoordinates, because it is what establishes a world frame at all.

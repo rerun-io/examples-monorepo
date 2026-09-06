@@ -69,7 +69,7 @@ from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
 
-from dataforge import paths, schema, transports, writing
+from dataforge import blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import ImuChannel, log_imu, log_pose_track, log_rig_node, log_video_stream
@@ -520,11 +520,7 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int) -> rrb.Blueprin
         The blueprint embedded in every SelfCap base-layer rrd.
     """
     def views(kind: str) -> list[rrb.Spatial2DView]:
-        return [
-            rrb.Spatial2DView(name=pane.name, origin=schema.pinhole_path(pane.rig, pane.cam), contents=f"{schema.pinhole_path(pane.rig, pane.cam)}/**")
-            for pane in panes
-            if pane.kind == kind
-        ]
+        return [blueprints.camera_view(pane.name, pane.rig, pane.cam) for pane in panes if pane.kind == kind]
 
     # The layout is grouped by device kind (blueprints cannot select on the rigs'
     # `kind` AnyValues, so the grouping travels through the pane list instead) and
@@ -540,18 +536,8 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int) -> rrb.Blueprin
             ),
             rrb.Horizontal(*views("exo"), name="Exo"),
             rrb.Horizontal(
-                rrb.TimeSeriesView(
-                    name="Gyroscope",
-                    origin=schema.imu_path(ego_rig, IMU_DEVICE),
-                    contents=schema.gyro_path(ego_rig, IMU_DEVICE),
-                    plot_legend=rrb.PlotLegend(visible=True),
-                ),
-                rrb.TimeSeriesView(
-                    name="Accelerometer",
-                    origin=schema.imu_path(ego_rig, IMU_DEVICE),
-                    contents=schema.accel_path(ego_rig, IMU_DEVICE),
-                    plot_legend=rrb.PlotLegend(visible=True),
-                ),
+                blueprints.sensor_plot("Gyroscope", schema.imu_path(ego_rig, IMU_DEVICE), schema.gyro_path(ego_rig, IMU_DEVICE)),
+                blueprints.sensor_plot("Accelerometer", schema.imu_path(ego_rig, IMU_DEVICE), schema.accel_path(ego_rig, IMU_DEVICE)),
             ),
             row_shares=[4.0, 1.4, 1.0],
         ),
@@ -579,8 +565,7 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         Every visible table row renders through this at once, so the card must
         decode exactly one video (see the base-class contract).
         """
-        ego_rgb: str = schema.pinhole_path(DEFAULT_EXO_CAMERAS, 0)
-        return rrb.Blueprint(rrb.Spatial2DView(name="ego rgb", origin=ego_rgb, contents=f"{ego_rgb}/**"), collapse_panels=True)
+        return rrb.Blueprint(blueprints.camera_view("ego rgb", DEFAULT_EXO_CAMERAS, 0), collapse_panels=True)
 
     # ── raw-tree discovery ────────────────────────────────────────────────
     def subset_root(self) -> Path:

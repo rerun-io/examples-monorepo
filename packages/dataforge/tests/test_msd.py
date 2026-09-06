@@ -51,7 +51,7 @@ from dataforge.datasets.msd import (
     TimestampedSamples,
     build_blueprint,
     camera_parameters,
-    follow_eye_controls,
+    follow_eye,
     follow_frame,
     gt_trajectory,
     measured_world_up,
@@ -286,7 +286,7 @@ def eye_vector(batch: rr.components.Position3DBatch | rr.components.Vector3DBatc
     Every field of the archetype is optional, so an unset one is a wiring failure
     rather than a value worth asserting on.
     """
-    assert batch is not None, "follow_eye_controls sets every field of the eye"
+    assert batch is not None, "the follow eye sets every field it is read for"
     return [float(value) for value in batch.as_arrow_array().flatten().to_pylist()]
 
 
@@ -296,7 +296,7 @@ def test_the_follow_eye_chases_the_headset_from_behind_and_above() -> None:
     The Index's frame goes in, so the numbers are readable by hand: 0.9 m back
     along +z and 0.45 m up along -x is (-0.45, 0, -0.9), looking at 0.3 m ahead.
     """
-    eye: rrb.EyeControls3D = follow_eye_controls(FollowFrame(forward=(0.0, 0.0, 1.0), up=(-1.0, 0.0, 0.0)))
+    eye: rrb.EyeControls3D = follow_eye(FollowFrame(forward=(0.0, 0.0, 1.0), up=(-1.0, 0.0, 0.0)))
 
     assert eye_vector(eye.position) == pytest.approx([-0.45, 0.0, -0.9], abs=1e-6)
     assert eye_vector(eye.look_target) == pytest.approx([0.0, 0.0, 0.3], abs=1e-6)
