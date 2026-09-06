@@ -7,6 +7,8 @@ dependencies = [
     # common: numpy, scipy, jaxtyping, rerun-sdk, gradio, gradio-rerun,
     #         huggingface_hub, hf-transfer, tqdm, pyserde, av, opencv
     "tyro",
+    # VRS reader for the LaMAria Aria Gen1 sequences (dataforge.aria).
+    "projectaria-tools>=2.2",
 ]
 
 [build-system]
