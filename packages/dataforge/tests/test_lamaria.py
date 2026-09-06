@@ -171,13 +171,22 @@ def test_discover_ignores_a_manifest_sequence_the_config_did_not_select(tmp_path
     assert [identity.sequence_key for identity, _ in discovered] == ["R_01_easy"]
 
 
-def test_a_selected_sequence_the_manifest_never_saw_is_an_error(tmp_path: Path) -> None:
+def test_a_selected_sequence_the_manifest_never_saw_is_announced_and_skipped(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The selection defaults to all five, so a narrower download must still convert.
+
+    A name the archive genuinely does not have is a hard error at ``download``;
+    here it only means this raw root has not been asked for it yet.
+    """
     manifest: LamariaManifest = manifest_fixture()
     root: Path = downloaded_root(tmp_path, manifest=manifest, complete=("R_01_easy",))
     config: LamariaConfig = LamariaConfig(root=root, sequences=("R_01_easy", "R_99_nonesuch"))
 
-    with pytest.raises(ValueError, match="R_99_nonesuch"):
-        LamariaDataset(config).discover()
+    discovered: list[tuple[SequenceIdentity, LamariaSource]] = LamariaDataset(config).discover()
+
+    assert [identity.sequence_key for identity, _ in discovered] == ["R_01_easy"]
+    output: str = capsys.readouterr().out
+    assert "R_99_nonesuch" in output
+    assert "--sequences R_99_nonesuch" in output, "the message has to say how to fix it"
 
 
 # ── the archive, on loopback ──────────────────────────────────────────────

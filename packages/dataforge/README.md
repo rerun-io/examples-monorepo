@@ -9,7 +9,7 @@ work plan — is in **[docs/dataforge-design-report.html](docs/dataforge-design-
 
 ## Run it
 
-From the repo root, with `<dataset>` one of `robocap`, `selfcap`, `wildcap`, `msd`:
+From the repo root, with `<dataset>` one of `robocap`, `selfcap`, `wildcap`, `msd`, `lamaria`:
 
 ```bash
 # 1. Catalog server, in a tmux session so it outlives your shell. Registrations
@@ -148,6 +148,64 @@ frame, so the chase camera sits behind and above every headset with a level
 horizon. Up comes from the baseline and not from image-up because the G2 mounts
 all four of its cameras rolled a quarter turn. Every convert re-derives the frame
 and warns past 5°, as it does for the world up axis.
+### LaMAria (lamaria)
+
+[LaMAria](https://github.com/cvg/lamaria) (ETH CVG) is an Aria Gen1 egocentric
+SLAM benchmark served from a plain Apache-indexed archive at
+[cvg-data.inf.ethz.ch/lamaria](https://cvg-data.inf.ethz.ch/lamaria/): one VRS
+per sequence (897 MB to 10 GB), a published body-frame calibration, and — for
+the training split — dense pseudo ground truth plus surveyed control points.
+
+dataforge never keeps the VRS. `download` reads the archive's index pages,
+resolves each selected sequence's split and ground truth, writes
+`<root>/manifest.json`, and fetches only the small files; `convert` then fetches
+**one** VRS (resuming, and retrying a stalled transfer up to four times),
+encodes its three camera streams to AV1, writes the rrd, and deletes the VRS and
+the temp mp4s again. `--keep-raw` keeps them. The raw tree is the *official*
+layout, so the upstream evaluation tools run on it unchanged:
+
+```
+<root>/<split>/<seq>/raw_data/<seq>.vrs
+<root>/<split>/<seq>/aria_calibrations/<seq>.json
+<root>/<split>/<seq>/ground_truth/pGT/<seq>.txt
+<root>/<split>/<seq>/ground_truth/control_points/<seq>.json
+```
+
+```bash
+export DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/lamaria-rrd    # rrds go to the NAS
+export DATAFORGE_FFMPEG=/home/pablo/.pixi/bin/ffmpeg          # the ffmpeg with av1_nvenc
+pixi run -e dataforge --frozen dataforge-download lamaria                 # --sequences A B C
+# --sequence belongs to the verb, so it goes before the dataset subcommand
+pixi run -e dataforge --frozen dataforge-convert --sequence R_01_easy lamaria
+pixi run -e dataforge --frozen dataforge-convert lamaria                  # every sequence, one at a time
+pixi run -e dataforge --frozen dataforge-register lamaria
+```
+
+`--sequences` defaults to the five training sequences worth 18.2 GB of VRS
+(`R_01_easy`, `R_04_medium`, `R_11_5cp`, `sequence_1_19`, `sequence_4_11`):
+both upstream collections, all three difficulty tiers, one low-light capture,
+and every ground-truth shape. A name the archive does not list is a hard error
+at `download`; a selected name this raw root has not downloaded yet is announced
+and skipped at `convert`, so a narrower `download --sequences` still leaves the
+rest convertible. `--root` is scratch, not storage: point it at local NVMe.
+
+One sequence is one recording, `lamaria__<seq>`. The rig frame is **imu-right**,
+which is what the published calibration uses as its body frame, so the rig node
+states `reference = "imu_00"` and every logged `rig_T_sensor` is directly
+comparable with that file's `T_b_s`. `cam_00` is camera-slam-left (640×480 gray,
+20 fps), `cam_01` camera-slam-right, `cam_02` camera-rgb (1408×1408, 10 fps);
+`imu_00` is imu-right (identity `rig_T_imu`, since it *is* the rig) and `imu_01`
+imu-left, 129 mm away and rotated. Frames are logged in their **native**
+(sideways) orientation, because that is what the calibration describes.
+Everything comes out of the VRS device calibration via projectaria-tools: the
+published JSON has no RGB camera and no imu-left, and is used to cross-check the
+transform chain rather than to build it.
+
+`video_time` is Aria's raw DEVICE clock in nanoseconds with **no shift**, so a
+pseudo-GT row's own timestamp lands on its frame 1:1. The base layer therefore
+logs no transform on the rig node and no root `ViewCoordinates`: the `gt` layer
+establishes the world frame and owns both. The ground-truth files are downloaded
+and kept for it.
 
 ### Environment variables
 
@@ -169,10 +227,12 @@ layer-major output tree: `base/` and its sibling `gt/`), `schema.py` (the
 `writing.py` (atomic publication and the capture/convert recording properties),
 `logging_toolkit.py` (the shared rig-node, video-stream, camera, IMU,
 magnetometer and pose-track writers, plus the AV1 encoder), `blueprints.py` (the
-single-rig viewer layout robocap and msd both build from), `archives.py` (reading
+single-rig viewer layout every dataset builds from), `archives.py` (reading
 members out of a plain zip or an Info-ZIP volume set), `basalt.py` (basalt's
-`calibration.json`: camera models, extrinsics, and the follow frame), and
-`transports.py` (`local_verify` and `hf_fetch`).
+`calibration.json`: camera models, extrinsics, and the follow frame),
+`transports.py` (`local_verify`, `hf_fetch`, and the resuming `http_fetch` plus
+its Apache index parser), and `aria.py` (the Aria Gen1 VRS and LaMAria
+ground-truth readers).
 
 Two of those carry their weight for datasets that do not ship video.
 `encode_frames_to_mp4` pipes PNG or raw frames straight into ffmpeg's stdin, so
@@ -189,10 +249,11 @@ is a nominal-rate fiction for such a file.
 | `selfcap` | one cut episode | 4 phone exo rigs + the OAK ego rig + the Quest (9 cameras), the OAK IMU, the Quest head-pose track |
 | `wildcap` | one capture directory | the videos only: no `Pinhole`, no `ViewCoordinates`, no transforms — calibration, sync and localization are later layers |
 | `msd` | one Monado SLAM sequence, fetched on demand | **two** rrds: `base` with 2 or 4 grayscale video streams (AV1-encoded from the archive's PNGs), the IMU and on the G2/Odyssey+ the magnetometer; `gt` with the ~1 kHz `world_T_rig`, its path and trail, and the root `ViewCoordinates` |
+| `lamaria` | one Aria Gen1 sequence, its VRS fetched on demand | 3 AV1 video streams (2 gray SLAM + 1 RGB, native sideways orientation), both raw IMUs (`imu_01` carrying its real `rig_T_imu`), on Aria's unshifted device clock |
 
 A config's `command` is its CLI subcommand; its `name` is the catalog dataset
-and the prefix of every recording id. They are equal for robocap and selfcap;
-wildcap derives `wildcap-<corpus>` and msd derives `msd-<device>`.
+and the prefix of every recording id. They are equal for robocap, selfcap and
+lamaria; wildcap derives `wildcap-<corpus>` and msd derives `msd-<device>`.
 
 **Verbs**, each a thin `tools/apps/*.py` shim over `dataforge/apis/`.
 `convert` writes `<DATAFORGE_OUTPUT_ROOT>/base/<recording_id>.rrd` through a
