@@ -10,12 +10,11 @@ real encoder and the real writers do their jobs.
 from __future__ import annotations
 
 import json
-import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import TypeAlias
 
 import numpy as np
 import pyarrow as pa
@@ -43,6 +42,10 @@ from dataforge.logging_toolkit import FrameSource, ImuChannel, require_av1_nvenc
 
 REFERENCE_DIR: Path = Path(__file__).parent / "reference_data" / "lamaria"
 """Verbatim excerpts of published LaMAria files, shared with ``test_aria.py``."""
+
+ServedRequests: TypeAlias = list[tuple[str, str, str | None]]
+"""The shared loopback server's log: ``(method, path, Range header)`` per request.
+Spelled structurally because a test module cannot import ``conftest``'s own type."""
 
 
 # ── config and registration ───────────────────────────────────────────────
@@ -272,87 +275,19 @@ def archive_bodies() -> dict[str, bytes]:
     }
 
 
-def build_archive_handler(bodies: dict[str, bytes], requested: list[str], *, stall_first_get: bool) -> type[BaseHTTPRequestHandler]:
-    """A handler answering GET (with byte ranges) and HEAD for the paths ``bodies`` names.
-
-    Args:
-        bodies: URL path → whole file, exactly as the archive serves it.
-        requested: Appended to on every request, so a test can assert *how* a file was fetched.
-        stall_first_get: Truncate the first GET of a ``.vrs`` to half its length
-            while still advertising the full one, the way the real archive hangs
-            up mid-transfer. The next GET (a ``Range`` resume) is answered in full.
-    """
-    stalled: list[str] = []
-
-    class Handler(BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
-
-        def _body(self) -> bytes | None:
-            requested.append(f"{self.command} {self.path}")
-            return bodies.get(self.path)
-
-        def do_HEAD(self) -> None:
-            body: bytes | None = self._body()
-            if body is None:
-                self.send_response(404)
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-                return
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Accept-Ranges", "bytes")
-            self.end_headers()
-
-        def do_GET(self) -> None:
-            whole: bytes | None = self._body()
-            if whole is None:
-                self.send_response(404)
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-                return
-            requested_range: str | None = self.headers.get("Range")
-            start: int = 0 if requested_range is None else int(requested_range.removeprefix("bytes=").split("-")[0])
-            body: bytes = whole[start:]
-            if stall_first_get and self.path.endswith(".vrs") and not stalled:
-                stalled.append(self.path)
-                body = body[: len(body) // 2]
-            self.send_response(206 if start else 200)
-            if start:
-                self.send_header("Content-Range", f"bytes {start}-{len(whole) - 1}/{len(whole)}")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, format: str, *_args: object) -> None:
-            """Keep pytest's captured output about dataforge, not about HTTP."""
-
-    return Handler
-
-
 @contextmanager
-def archive(bodies: dict[str, bytes] | None = None, *, stall_first_get: bool = False) -> Iterator[tuple[str, list[str]]]:
-    """Serve the archive on a loopback port; yields its base URL and the request log."""
-    requested: list[str] = []
-    handler: type[BaseHTTPRequestHandler] = build_archive_handler(
-        archive_bodies() if bodies is None else bodies, requested, stall_first_get=stall_first_get
-    )
-    server: ThreadingHTTPServer = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    thread: threading.Thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}/lamaria/", requested
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5.0)
+def archive(serving, bodies: dict[str, bytes] | None = None, *, stall_once: str | None = None) -> Iterator[tuple[str, ServedRequests]]:
+    """The LaMAria archive on the shared loopback server: its base URL and the request log."""
+    with serving(archive_bodies() if bodies is None else bodies, stall_once=stall_once) as loopback:
+        yield f"{loopback.base_url}/lamaria/", loopback.served
 
 
 # ── download ──────────────────────────────────────────────────────────────
 
 
-def test_download_resolves_splits_and_ground_truth_from_the_index_pages(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_download_resolves_splits_and_ground_truth_from_the_index_pages(tmp_path: Path, capsys: pytest.CaptureFixture[str], serving) -> None:
     root: Path = tmp_path / "raw"
-    with archive() as (base_url, _):
+    with archive(serving) as (base_url, _):
         LamariaDataset(LamariaConfig(root=root, base_url=base_url, sequences=("R_11_5cp", "R_01_easy", "sequence_1_1"))).download()
 
     manifest: LamariaManifest = serde.json.from_json(LamariaManifest, (root / "manifest.json").read_text())
@@ -376,9 +311,9 @@ def test_download_resolves_splits_and_ground_truth_from_the_index_pages(tmp_path
     assert "13.7 GB" in output
 
 
-def test_download_lands_the_small_files_in_the_official_layout(tmp_path: Path) -> None:
+def test_download_lands_the_small_files_in_the_official_layout(tmp_path: Path, serving) -> None:
     root: Path = tmp_path / "raw"
-    with archive() as (base_url, _):
+    with archive(serving) as (base_url, _):
         LamariaDataset(LamariaConfig(root=root, base_url=base_url, sequences=("R_01_easy", "R_11_5cp", "sequence_1_1"))).download()
 
     assert (root / "training" / "R_01_easy" / "aria_calibrations" / "R_01_easy.json").read_bytes() == CALIBRATION_BODY
@@ -392,10 +327,10 @@ def test_download_lands_the_small_files_in_the_official_layout(tmp_path: Path) -
     assert not list(root.rglob("*.vrs"))
 
 
-def test_download_then_discover_yields_every_downloaded_sequence(tmp_path: Path) -> None:
+def test_download_then_discover_yields_every_downloaded_sequence(tmp_path: Path, serving) -> None:
     root: Path = tmp_path / "raw"
     config: LamariaConfig = LamariaConfig(root=root, sequences=("R_01_easy", "R_11_5cp", "sequence_1_1"))
-    with archive() as (base_url, _):
+    with archive(serving) as (base_url, _):
         dataset: LamariaDataset = LamariaDataset(LamariaConfig(root=root, base_url=base_url, sequences=config.sequences))
         dataset.download()
         discovered: list[tuple[SequenceIdentity, LamariaSource]] = dataset.discover()
@@ -404,16 +339,16 @@ def test_download_then_discover_yields_every_downloaded_sequence(tmp_path: Path)
     assert [source.split for _, source in discovered] == ["training", "training", "test"]
 
 
-def test_a_sequence_no_raw_index_lists_is_named_in_the_error(tmp_path: Path) -> None:
-    with archive() as (base_url, _), pytest.raises(ValueError, match="R_99_nonesuch"):
+def test_a_sequence_no_raw_index_lists_is_named_in_the_error(tmp_path: Path, serving) -> None:
+    with archive(serving) as (base_url, _), pytest.raises(ValueError, match="R_99_nonesuch"):
         LamariaDataset(LamariaConfig(root=tmp_path / "raw", base_url=base_url, sequences=("R_01_easy", "R_99_nonesuch"))).download()
 
 
-def test_a_sequence_with_no_published_calibration_is_named_in_the_error(tmp_path: Path) -> None:
+def test_a_sequence_with_no_published_calibration_is_named_in_the_error(tmp_path: Path, serving) -> None:
     """Every LaMAria sequence ships one, so a missing entry means the archive changed."""
     bodies: dict[str, bytes] = archive_bodies()
     bodies["/lamaria/aria_calibrations/training/"] = apache_page("aria_calibrations/training", CALIBRATION_TRAINING_ROWS.splitlines(True)[0]).encode()
-    with archive(bodies) as (base_url, _), pytest.raises(ValueError, match="R_11_5cp"):
+    with archive(serving, bodies) as (base_url, _), pytest.raises(ValueError, match="R_11_5cp"):
         LamariaDataset(LamariaConfig(root=tmp_path / "raw", base_url=base_url, sequences=("R_01_easy", "R_11_5cp"))).download()
 
 
@@ -746,7 +681,7 @@ class FakeArchive:
     """``LamariaConfig.root``, already holding the manifest and the small files."""
     config: LamariaConfig
     """Config pointed at ``root`` and the loopback base URL."""
-    requested: list[str]
+    requested: ServedRequests
     """Every request the archive answered, in order."""
     vrs_path: Path
     """Where ``convert`` fetches the VRS to."""
@@ -756,10 +691,11 @@ class FakeArchive:
 def converting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    serving,
     *,
     sequence: str = "R_01_easy",
     keep_raw: bool = False,
-    stall_first_get: bool = False,
+    stall_once: str | None = None,
     bodies: dict[str, bytes] | None = None,
 ) -> Iterator[FakeArchive]:
     """Download one sequence from a loopback archive, then hand ``convert`` the seam.
@@ -767,16 +703,17 @@ def converting(
     Args:
         tmp_path: pytest's per-test directory; the raw root and the rrd root live under it.
         monkeypatch: Used for ``DATAFORGE_OUTPUT_ROOT`` and the ``open_streams`` seam.
+        serving: The shared loopback-server fixture.
         sequence: Which archive sequence to select — ``R_01_easy`` has pGT only,
             ``R_11_5cp`` also has control points.
         keep_raw: Passed through to the config.
-        stall_first_get: Make the archive hang up mid-transfer once.
+        stall_once: Suffix of the path the archive hangs up on once, mid-transfer.
         bodies: Replaces the whole archive, for a test that needs different ground truth.
     """
     root: Path = tmp_path / "raw"
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "rrd"))
     monkeypatch.setattr(lamaria, "open_streams", synthetic_streams)
-    with archive(bodies, stall_first_get=stall_first_get) as (base_url, requested):
+    with archive(serving, bodies, stall_once=stall_once) as (base_url, requested):
         config: LamariaConfig = LamariaConfig(root=root, base_url=base_url, sequences=(sequence,), keep_raw=keep_raw)
         LamariaDataset(config).download()
         requested.clear()
@@ -830,8 +767,8 @@ def nvenc() -> Path:
     return ffmpeg
 
 
-def test_convert_writes_three_camera_streams_and_two_imus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
-    with converting(tmp_path, monkeypatch) as fake:
+def test_convert_writes_three_camera_streams_and_two_imus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path, serving) -> None:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         identity, target = convert_one(fake)
 
     assert target.name == "lamaria__R_01_easy.rrd"
@@ -852,9 +789,9 @@ def test_convert_writes_three_camera_streams_and_two_imus(tmp_path: Path, monkey
     assert identity.recording_id == "lamaria__R_01_easy"
 
 
-def test_video_time_is_the_raw_device_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_video_time_is_the_raw_device_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path, serving) -> None:
     """No shift anywhere: a pGT row's own timestamp must land on its frame."""
-    with converting(tmp_path, monkeypatch) as fake:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         _, target = convert_one(fake)
 
     samples: pa.Table = column_rows(read_back(target), f"{schema.video_path(0, 0)}:VideoStream:sample")
@@ -863,9 +800,9 @@ def test_video_time_is_the_raw_device_clock(tmp_path: Path, monkeypatch: pytest.
     assert times_ns[-1] == DEVICE_T0_NS + (SLAM_FRAMES - 1) * SLAM_PERIOD_NS
 
 
-def test_the_logged_cam_00_node_carries_the_published_rig_T_cam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_the_logged_cam_00_node_carries_the_published_rig_T_cam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path, serving) -> None:
     """``log_pinhole`` stores the child-from-parent step, so inverting it gives ``T_b_s`` back."""
-    with converting(tmp_path, monkeypatch) as fake:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         _, target = convert_one(fake)
 
     node: str = schema.cam_path(0, 0)
@@ -883,8 +820,8 @@ def test_the_logged_cam_00_node_carries_the_published_rig_T_cam(tmp_path: Path, 
     assert row[f"{node}:kind"][0] == "grayscale"
 
 
-def test_the_rgb_camera_says_so_and_the_slam_pair_does_not(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
-    with converting(tmp_path, monkeypatch) as fake:
+def test_the_rgb_camera_says_so_and_the_slam_pair_does_not(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path, serving) -> None:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         _, target = convert_one(fake)
 
     store: rr.experimental.ChunkStore = read_back(target)
@@ -896,9 +833,9 @@ def test_the_rgb_camera_says_so_and_the_slam_pair_does_not(tmp_path: Path, monke
     assert kinds == ["grayscale", "grayscale", "rgb"]
 
 
-def test_imu_01_carries_its_real_pose_while_imu_00_is_the_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_imu_01_carries_its_real_pose_while_imu_00_is_the_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path, serving) -> None:
     """imu-right *is* the rig frame; imu-left sits 13 cm away and rotated."""
-    with converting(tmp_path, monkeypatch) as fake:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         _, target = convert_one(fake)
 
     store: rr.experimental.ChunkStore = read_back(target)
@@ -911,9 +848,9 @@ def test_imu_01_carries_its_real_pose_while_imu_00_is_the_rig(tmp_path: Path, mo
     np.testing.assert_allclose(poses[1], IMU_LEFT_TRANSLATION_M, atol=1e-6)
 
 
-def test_the_base_layer_owns_no_world_frame(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_the_base_layer_owns_no_world_frame(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path, serving) -> None:
     """The gt layer establishes the world, so it owns the root axes and the rig transform."""
-    with converting(tmp_path, monkeypatch) as fake:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         _, target = convert_one(fake)
 
     store: rr.experimental.ChunkStore = read_back(target)
@@ -923,8 +860,8 @@ def test_the_base_layer_owns_no_world_frame(tmp_path: Path, monkeypatch: pytest.
     assert not [name for name in rig_columns if "Transform3D" in name]
 
 
-def test_the_capture_properties_describe_the_sequence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
-    with converting(tmp_path, monkeypatch) as fake:
+def test_the_capture_properties_describe_the_sequence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path, serving) -> None:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         vrs_bytes: int = len(archive_bodies()["/lamaria/raw_data/training/R_01_easy.vrs"])
         _, target = convert_one(fake)
 
@@ -946,8 +883,8 @@ def test_the_capture_properties_describe_the_sequence(tmp_path: Path, monkeypatc
 
 def test_convert_deletes_the_vrs_and_the_mp4s_but_keeps_the_small_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path
-) -> None:
-    with converting(tmp_path, monkeypatch) as fake:
+, serving) -> None:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         convert_one(fake)
         assert not fake.vrs_path.exists(), "raw is scratch: 18 GB of VRS must not accumulate"
         assert not list(fake.root.rglob("*.mp4"))
@@ -955,15 +892,15 @@ def test_convert_deletes_the_vrs_and_the_mp4s_but_keeps_the_small_files(
         assert (fake.root / "training" / "R_01_easy" / "ground_truth" / "pGT" / "R_01_easy.txt").is_file()
 
 
-def test_keep_raw_leaves_the_vrs_and_the_encoded_mp4s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
-    with converting(tmp_path, monkeypatch, keep_raw=True) as fake:
+def test_keep_raw_leaves_the_vrs_and_the_encoded_mp4s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path, serving) -> None:
+    with converting(tmp_path, monkeypatch, serving, keep_raw=True) as fake:
         convert_one(fake)
         assert fake.vrs_path.is_file()
         assert sorted(path.name for path in fake.root.rglob("*.mp4")) == ["cam_00.mp4", "cam_01.mp4", "cam_02.mp4"]
 
 
-def test_a_sequence_with_both_layers_already_written_is_skipped_without_fetching(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    with converting(tmp_path, monkeypatch) as fake:
+def test_a_sequence_with_both_layers_already_written_is_skipped_without_fetching(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, serving) -> None:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         dataset: LamariaDataset = LamariaDataset(fake.config)
         identity, source = dataset.discover()[0]
         target: Path = paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity)
@@ -977,8 +914,8 @@ def test_a_sequence_with_both_layers_already_written_is_skipped_without_fetching
         assert target.read_bytes() == b"already done"
 
 
-def test_force_rewrites_an_existing_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
-    with converting(tmp_path, monkeypatch) as fake:
+def test_force_rewrites_an_existing_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path, serving) -> None:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         dataset: LamariaDataset = LamariaDataset(fake.config)
         identity, source = dataset.discover()[0]
         target: Path = paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity)
@@ -991,11 +928,11 @@ def test_force_rewrites_an_existing_recording(tmp_path: Path, monkeypatch: pytes
 
 def test_a_failed_encode_keeps_the_vrs_and_clears_the_scratch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
-) -> None:
+, serving) -> None:
     def explode(*_arguments: object, **_keywords: object) -> int:
         raise RuntimeError("nvenc fell over")
 
-    with converting(tmp_path, monkeypatch) as fake:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         monkeypatch.setattr(lamaria, "encode_frames_to_mp4", explode)
         dataset: LamariaDataset = LamariaDataset(fake.config)
         identity, source = dataset.discover()[0]
@@ -1011,13 +948,14 @@ def test_a_failed_encode_keeps_the_vrs_and_clears_the_scratch(
 
 def test_a_stalled_vrs_fetch_is_retried_and_resumed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
-) -> None:
+, serving) -> None:
     """The archive hangs up mid-transfer; the retry must append, never restart."""
-    with converting(tmp_path, monkeypatch, stall_first_get=True, keep_raw=True) as fake:
+    monkeypatch.setattr(lamaria.transports, "RETRY_BACKOFF_S", (0.0,))
+    with converting(tmp_path, monkeypatch, serving, stall_once=".vrs", keep_raw=True) as fake:
         convert_one(fake)
 
     assert fake.vrs_path.read_bytes() == archive_bodies()["/lamaria/raw_data/training/R_01_easy.vrs"]
-    ranges: list[str] = [entry for entry in fake.requested if entry.endswith(".vrs")]
+    ranges: list[str] = [path for _, path, _ in fake.requested if path.endswith(".vrs")]
     assert len(ranges) >= 3, f"expected HEAD, a stalled GET and a resumed GET, got {ranges}"
     assert "resuming" in capsys.readouterr().out
 
@@ -1157,9 +1095,9 @@ def gt_store(identity: SequenceIdentity) -> rr.experimental.ChunkStore:
     return read_back(paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity))
 
 
-def test_the_gt_layer_is_a_sibling_rrd_of_the_same_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_the_gt_layer_is_a_sibling_rrd_of_the_same_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path, serving) -> None:
     """One convert writes both layers: same recording id, own layer directory."""
-    with converting(tmp_path, monkeypatch) as fake:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         identity, base_target = convert_one(fake)
 
     gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
@@ -1168,9 +1106,9 @@ def test_the_gt_layer_is_a_sibling_rrd_of_the_same_recording(tmp_path: Path, mon
     assert (gt_target.parent.name, base_target.parent.name) == (paths.GT_LAYER, paths.BASE_LAYER)
 
 
-def test_the_gt_layer_animates_the_rig_node_on_the_raw_device_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_the_gt_layer_animates_the_rig_node_on_the_raw_device_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path, serving) -> None:
     """One row per published pose, at the pGT's own stamps, holding ``world_T_rig``."""
-    with converting(tmp_path, monkeypatch) as fake:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         identity, _ = convert_one(fake)
 
     poses: pa.Table = column_rows(gt_store(identity), f"{schema.rig_path(0)}:Transform3D:translation")
@@ -1184,31 +1122,31 @@ def test_the_gt_layer_animates_the_rig_node_on_the_raw_device_clock(tmp_path: Pa
     np.testing.assert_allclose(logged_xyz, expected_rig_translations_xyz(), atol=1e-6)
 
 
-def test_the_logged_rig_rotation_is_the_pose_seen_from_the_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_the_logged_rig_rotation_is_the_pose_seen_from_the_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path, serving) -> None:
     """The fixture poses cam0 at its own ``rig_R_cam0``, so the composed rig rotation is the identity."""
-    with converting(tmp_path, monkeypatch) as fake:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         identity, _ = convert_one(fake)
 
     stored: list[list[list[float]]] = column_rows(gt_store(identity), f"{schema.rig_path(0)}:Transform3D:quaternion").column(1).to_pylist()
     np.testing.assert_allclose(np.asarray(stored[0][0], dtype=np.float64), [0.0, 0.0, 0.0, 1.0], atol=1e-6)
 
 
-def test_the_rig_transform_is_stored_child_from_parent_free(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_the_rig_transform_is_stored_child_from_parent_free(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path, serving) -> None:
     """``world_T_rig`` is a child-to-parent step, which is Rerun's default relation.
 
     A ``ChildFromParent`` relation would silently mean ``rig_T_world`` and put the
     glasses on the far side of the world from where they walked.
     """
-    with converting(tmp_path, monkeypatch) as fake:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         identity, _ = convert_one(fake)
 
     columns: list[str] = gt_store(identity).reader(index=schema.TIMELINE).to_arrow_table().column_names
     assert f"{schema.rig_path(0)}:Transform3D:relation" not in columns
 
 
-def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path, serving) -> None:
     """The overview strip is static and whole; the trail is one point per pose, for the cursor window."""
-    with converting(tmp_path, monkeypatch) as fake:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         identity, _ = convert_one(fake)
 
     store: rr.experimental.ChunkStore = gt_store(identity)
@@ -1227,9 +1165,9 @@ def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail(tmp_path: Path, m
     assert trail_radii == [pytest.approx(lamaria.GT_TRAIL_RADIUS_M)], "the trail is metric: it rides the wearer up close"
 
 
-def test_only_the_gt_layer_states_the_world_axes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_only_the_gt_layer_states_the_world_axes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path, serving) -> None:
     """The pose layer establishes a world frame at all, so it owns the root ViewCoordinates."""
-    with converting(tmp_path, monkeypatch) as fake:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         identity, base_target = convert_one(fake)
 
     gt_root: pa.Table = gt_store(identity).reader(index=None, contents="/").to_arrow_table()
@@ -1238,8 +1176,8 @@ def test_only_the_gt_layer_states_the_world_axes(tmp_path: Path, monkeypatch: py
     assert "/:ViewCoordinates:xyz" not in read_back(base_target).reader(index=None, contents="/").to_arrow_table().column_names
 
 
-def test_the_gt_properties_describe_the_trajectory_and_its_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
-    with converting(tmp_path, monkeypatch) as fake:
+def test_the_gt_properties_describe_the_trajectory_and_its_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path, serving) -> None:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         identity, _ = convert_one(fake)
 
     gt: dict[str, object] = recording_properties(gt_store(identity), "gt")
@@ -1261,10 +1199,10 @@ def test_the_gt_properties_describe_the_trajectory_and_its_world(tmp_path: Path,
 
 def test_a_measured_up_axis_the_declaration_disagrees_with_is_announced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
-) -> None:
+, serving) -> None:
     """The declared axis is a claim about the data, so every convert re-measures it."""
     monkeypatch.setattr(lamaria, "WORLD_UP", "-y")
-    with converting(tmp_path, monkeypatch) as fake:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         convert_one(fake)
 
     output: str = capsys.readouterr().out
@@ -1274,8 +1212,8 @@ def test_a_measured_up_axis_the_declaration_disagrees_with_is_announced(
 
 def test_a_level_wearer_measures_the_declared_axis_quietly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
-) -> None:
-    with converting(tmp_path, monkeypatch) as fake:
+, serving) -> None:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         convert_one(fake)
 
     assert "declares world up" not in capsys.readouterr().out
@@ -1284,9 +1222,9 @@ def test_a_level_wearer_measures_the_declared_axis_quietly(
 # ── control points ────────────────────────────────────────────────────────
 
 
-def test_the_control_points_are_static_labelled_points_in_the_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_the_control_points_are_static_labelled_points_in_the_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path, serving) -> None:
     """Surveyed points are a property of the world, not of a moment, so they are static."""
-    with converting(tmp_path, monkeypatch, sequence="R_11_5cp") as fake:
+    with converting(tmp_path, monkeypatch, serving, sequence="R_11_5cp") as fake:
         identity, _ = convert_one(fake)
 
     entity: str = schema.control_points_path()
@@ -1308,9 +1246,9 @@ def test_the_control_points_are_static_labelled_points_in_the_world(tmp_path: Pa
 
 def test_the_control_point_detections_sit_under_the_camera_that_saw_them(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path
-) -> None:
+, serving) -> None:
     """One columnar Points2D per camera, at the detection stamps, labelled by point."""
-    with converting(tmp_path, monkeypatch, sequence="R_11_5cp") as fake:
+    with converting(tmp_path, monkeypatch, serving, sequence="R_11_5cp") as fake:
         identity, _ = convert_one(fake)
 
     store: rr.experimental.ChunkStore = gt_store(identity)
@@ -1332,8 +1270,8 @@ def test_the_control_point_detections_sit_under_the_camera_that_saw_them(
 
 def test_the_gt_properties_count_the_control_points_and_their_detections(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path
-) -> None:
-    with converting(tmp_path, monkeypatch, sequence="R_11_5cp") as fake:
+, serving) -> None:
+    with converting(tmp_path, monkeypatch, serving, sequence="R_11_5cp") as fake:
         identity, _ = convert_one(fake)
 
     gt: dict[str, object] = recording_properties(gt_store(identity), "gt")
@@ -1344,9 +1282,9 @@ def test_the_gt_properties_count_the_control_points_and_their_detections(
 
 def test_every_levelled_control_point_min_distance_is_reported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
-) -> None:
+, serving) -> None:
     """The reach of each point is printed, because it is the check on the world frame."""
-    with converting(tmp_path, monkeypatch, sequence="R_11_5cp") as fake:
+    with converting(tmp_path, monkeypatch, serving, sequence="R_11_5cp") as fake:
         convert_one(fake)
 
     output: str = capsys.readouterr().out
@@ -1355,14 +1293,12 @@ def test_every_levelled_control_point_min_distance_is_reported(
     assert "no height" in output
 
 
-def test_a_levelled_control_point_far_from_the_walk_stops_the_convert(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path
-) -> None:
+def test_a_levelled_control_point_far_from_the_walk_stops_the_convert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path , serving) -> None:
     """Its tag was photographed by these cameras, so a wrong world frame shows up as distance."""
     far: dict[str, bytes] = archive_bodies()
     far["/lamaria/ground_truth/sparse/R_11_5cp.json"] = control_points_body(levelled_xyz_m=(0.0, 0.0, 500.0))
 
-    with converting(tmp_path, monkeypatch, sequence="R_11_5cp", bodies=far) as fake:
+    with converting(tmp_path, monkeypatch, serving, sequence="R_11_5cp", bodies=far) as fake:
         dataset: LamariaDataset = LamariaDataset(fake.config)
         identity, source = dataset.discover()[0]
         with pytest.raises(ValueError, match="control point"):
@@ -1374,9 +1310,9 @@ def test_a_levelled_control_point_far_from_the_walk_stops_the_convert(
 # ── both layers, one unit ─────────────────────────────────────────────────
 
 
-def test_both_layers_are_skipped_together_and_rebuilt_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_both_layers_are_skipped_together_and_rebuilt_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path, serving) -> None:
     """Both layers come out of one VRS fetch, so a half-converted sequence is redone."""
-    with converting(tmp_path, monkeypatch) as fake:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         identity, base_target = convert_one(fake)
         gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
         fake.requested.clear()
@@ -1390,9 +1326,9 @@ def test_both_layers_are_skipped_together_and_rebuilt_together(tmp_path: Path, m
         assert gt_target.is_file()
 
 
-def test_a_sequence_with_no_ground_truth_writes_no_gt_rrd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_a_sequence_with_no_ground_truth_writes_no_gt_rrd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path, serving) -> None:
     """The test split ships neither pGT nor control points; there is no world to establish."""
-    with converting(tmp_path, monkeypatch) as fake:
+    with converting(tmp_path, monkeypatch, serving) as fake:
         dataset: LamariaDataset = LamariaDataset(fake.config)
         identity, source = dataset.discover()[0]
         without_gt: LamariaSource = replace(source, pseudo_gt_path=None, control_points_path=None)
@@ -1410,9 +1346,9 @@ def test_a_sequence_with_no_ground_truth_writes_no_gt_rrd(tmp_path: Path, monkey
 
 def test_a_sequence_with_control_points_but_no_pgt_still_gets_a_gt_layer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path
-) -> None:
+, serving) -> None:
     """The surveyed points are ground truth in their own right, even with no trajectory."""
-    with converting(tmp_path, monkeypatch, sequence="R_11_5cp") as fake:
+    with converting(tmp_path, monkeypatch, serving, sequence="R_11_5cp") as fake:
         dataset: LamariaDataset = LamariaDataset(fake.config)
         identity, source = dataset.discover()[0]
         dataset.convert(identity, replace(source, pseudo_gt_path=None), force=False)
