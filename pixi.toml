@@ -2747,6 +2747,8 @@ platforms = ["linux-64", "linux-aarch64"]
 [feature.dataforge.dependencies]
 python = "3.12.*"
 tyro = ">=0.9.1,<0.10"
+# transports.http_fetch streams and resumes LaMAria's Apache-served files with it.
+requests = "*"
 # CPU torch only satisfies simplecv's module-load import.
 pytorch-cpu = ">=2.8.0"
 # 7zz: the only extractor that reads MSD's Info-ZIP multi-volume archives
