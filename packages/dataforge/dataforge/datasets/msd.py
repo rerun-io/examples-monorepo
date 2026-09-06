@@ -14,59 +14,45 @@ ships ``data.raw.csv`` / ``data.extra.csv`` siblings, the converter reads only
 
 **Raw is never kept.** The corpus is ~350 GB of PNG sequences, so ``discover()``
 enumerates the *remote* tree and ``convert()`` fetches exactly one sequence,
-streams its PNGs through the AV1 encoder, and deletes the archive again. What
-survives on disk is the rrd. ``raw_budget_gb`` caps the scratch directory so a
-batch run cannot silently fill the NVMe with leftovers from failed sequences;
-the Index and G2 long sessions (66 GB and 55 GB of split archives) are larger
-than the cap and are processed anyway, with a warning, as accepted exceptions.
+streams its PNGs through the AV1 encoder, and deletes the archive again; what
+survives is the rrd. ``enforce_raw_budget`` caps the scratch directory so a batch
+run cannot silently fill the NVMe with leftovers from failed sequences.
 
-**One dataset per device.** A catalog dataset holds exactly one default
-blueprint, hence one camera layout, and the three headsets have two, four and
-two cameras. ``--device`` therefore picks both the corpus and the catalog
-dataset name (``msd-index``, ``msd-g2``, ``msd-odyssey``).
-
-**Two layers, one fetch.** ``convert`` writes a ``base`` rrd (video, IMU,
-magnetometer) and a ``gt`` rrd (``world_T_rig`` at the full ~1 kHz ground-truth
-rate, plus its path and trail) under the same recording id, so the catalog
-stacks them onto one segment. Both come out of one archive read and are
-therefore skipped and rebuilt together: half a sequence on disk means paying
-for the download again regardless.
+**One dataset per device, two layers per sequence.** A catalog dataset holds one
+default blueprint, hence one camera layout, and the three headsets have two, four
+and two cameras — so ``--device`` picks the corpus *and* the catalog dataset
+(``msd-index``, ``msd-g2``, ``msd-odyssey``). Each sequence becomes a ``base`` rrd
+(video, IMU, magnetometer) and a ``gt`` rrd (``world_T_rig`` at the full ~1 kHz
+rate, plus its path and trail) under one recording id, so the catalog stacks them
+onto one segment. Both come out of one archive read, so they are skipped and
+rebuilt together: half a sequence on disk means paying for the download again.
 
 **Clocks.** Every csv timestamp is nanoseconds on one monotonic device clock
 (values around 1e13, not a Unix epoch). ``video_time`` is that clock minus ``t0``,
 the earliest sample of any stream *including* ``gt`` — the two layers must share
 this origin, and the gt file is usually the earliest stream. Nothing is resampled.
 
-**World axes.** MSD documents none: the Index's ground truth comes from SteamVR
-Lighthouse and the G2's and Odyssey+'s from an undocumented MoCap rig. So the up
-axis is *measured*, from gravity as the accelerometer reads it rotated into the
-world by the ground truth (``measured_world_up``), and then fixed per device in
-``MSD_DEVICES`` so every rrd of a device agrees. ``convert`` re-measures every
-sequence and warns on a disagreement rather than silently reorienting one rrd.
+**Per-device claims.** The world up axis and the follow frame are not in the
+corpus; they are measured and derived from real sequences and then written down
+per device. ``MSD_DEVICES`` states both, and why; ``convert`` re-checks both
+against the sequence in front of it and warns on a disagreement rather than
+silently reorienting one rrd.
 
 **Frames.** ``rig_T_cam`` comes from basalt's ``T_imu_cam``, the camera pose in
-the IMU frame; the rig frame *is* the IMU frame (``reference = "imu_00"``), so
-``world`` in the ``Extrinsics`` below means the rig. This is the same convention
-as simplecv's RoboCap loader, one inversion away (Kalibr states ``T_cam_imu``).
-The same extrinsics also orient the Follow view: ``follow_frame`` turns the front
-pair into the headset's forward and up (``FollowFrame``), because each headset
-carries its IMU — and therefore its rig frame — at a different orientation.
+the IMU frame; the rig frame *is* the IMU frame (``reference = "imu_00"``). The
+calibration reader is ``dataforge.basalt``, and the archive readers — one
+sequence can be a plain zip or an Info-ZIP volume set — are ``dataforge.archives``.
 """
 
 from __future__ import annotations
 
 import csv
+import functools
 import io
-import re
-import shutil
-import subprocess
-import zipfile
-from abc import ABC, abstractmethod
-from collections.abc import Iterator, Sequence
-from contextlib import AbstractContextManager
-from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
-from types import TracebackType
+import os
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import ClassVar, Literal, TypeAlias
 
 import numpy as np
@@ -78,16 +64,10 @@ from huggingface_hub import HfApi, RepoFile
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
-from simplecv.camera_parameters import (
-    BrownConradyDistortion,
-    Extrinsics,
-    Fisheye62Parameters,
-    Intrinsics,
-    KannalaBrandtDistortion,
-    PinholeParameters,
-)
 
 from dataforge import blueprints, paths, schema, transports, writing
+from dataforge.archives import MemberReader, group_archives, open_member_reader
+from dataforge.basalt import BasaltCalibration, BasaltCamera, FollowFrame, camera_parameters, follow_frame
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
@@ -119,8 +99,6 @@ MAG: int = 0
 """The G2 and the Odyssey+ ship exactly one magnetometer, ``mag0`` → ``mag_00``."""
 IMAGE_PLANE_DISTANCE: float = 0.1
 """Frustum length in metres; a headset's baseline is ~10 cm, so the frusta stay legible."""
-PART_SUFFIX_RE: re.Pattern[str] = re.compile(r"^\.z\d+$")
-"""Info-ZIP split-volume suffix (``.z01``, ``.z02``, …); the closing volume is the plain ``.zip``."""
 CAMERA_TIMESTAMP_FIELD: str = "#timestamp [ns]"
 """Header cell every MSD csv starts with; the gt file pads the later cells with spaces."""
 IMU_VALUE_COLUMNS: int = 6
@@ -133,8 +111,6 @@ IDENTITY_QUATERNION_XYZW: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.
 """What a dropout row's rotation becomes, so its translation still applies."""
 QUATERNION_NORM_TOLERANCE: float = 1e-3
 """How far a gt quaternion's norm may sit from 1 before the row counts as a dropout."""
-DEGENERATE_DIRECTION_NORM: float = 1e-9
-"""Shortest vector ``follow_frame`` still accepts as a direction; below it the inputs cancelled."""
 FOLLOW_BACK_M: float = 0.9
 """How far behind the headset the follow eye sits, along the device's own forward."""
 FOLLOW_UP_M: float = 0.45
@@ -146,8 +122,6 @@ FOLLOW_FRAME_TOLERANCE_DEG: float = 5.0
 
 MsdDeviceChoice: TypeAlias = Literal["index", "g2", "odyssey"]
 """``--device``: which headset's corpus to work on, and which catalog dataset."""
-CameraModel: TypeAlias = Literal["kb4", "pinhole-radtan8"]
-"""``camera_type`` values basalt writes in ``calibration.json``; MSD uses no others."""
 WorldUpAxis: TypeAlias = Literal["+x", "-x", "+y", "-y", "+z", "-z"]
 """Signed axis of a tracking world that gravity points *away* from."""
 GtSource: TypeAlias = Literal["lighthouse", "mocap"]
@@ -166,7 +140,7 @@ WORLD_UP_VIEW_COORDINATES: dict[WorldUpAxis, rr.components.ViewCoordinates] = {
 Rerun's ``RIGHT_HAND_*`` aliases are exactly this table (``RIGHT_HAND_Y_UP`` is
 ``RUB``, ``RIGHT_HAND_Z_UP`` is ``RFU``), so naming the up axis is the whole
 decision — the remaining two axes are then fixed by handedness. MSD's csvs say
-nothing about world axes at all, hence the empirical ``measured_world_up``.
+nothing about world axes at all; see ``MSD_DEVICES`` for how each device's is fixed.
 """
 POSITIVE_WORLD_AXES: tuple[WorldUpAxis, WorldUpAxis, WorldUpAxis] = ("+x", "+y", "+z")
 """Axis names by column index, for a positive mean; the negative row is below."""
@@ -187,22 +161,6 @@ GT_TRAIL_RADIUS_M: float = 0.004
 
 
 @dataclass(frozen=True, slots=True)
-class FollowFrame:
-    """Where a headset looks and which way is up, as unit vectors in the rig frame.
-
-    The rig frame is the IMU frame, and every headset mounts its IMU differently
-    — the Index's up is rig -x, the G2's and the Odyssey+'s rig -y — so a follow
-    camera cannot be placed by hand-picked numbers that happen to suit one
-    device. ``follow_frame`` derives this pair from the calibration instead.
-    """
-
-    forward: tuple[float, float, float]
-    """Where the front cameras look, unit length."""
-    up: tuple[float, float, float]
-    """The wearer's up, unit length and orthogonal to ``forward``."""
-
-
-@dataclass(frozen=True, slots=True)
 class MsdDevice:
     """Everything that varies between the three headsets."""
 
@@ -219,16 +177,11 @@ class MsdDevice:
     label: str
     """Human device name for the rig node's ``name`` AnyValue."""
     world_up: WorldUpAxis
-    """Up axis of this device's tracking world, **measured** with
-    ``measured_world_up`` on a real sequence rather than assumed, and then fixed
-    here so every rrd of the device carries the same root ``ViewCoordinates``.
-    ``convert`` re-measures each sequence and warns when it disagrees."""
+    """Up axis of this device's tracking world; every rrd of the device carries
+    the matching root ``ViewCoordinates``. Measured, not assumed — see ``MSD_DEVICES``."""
     follow: FollowFrame
-    """Forward and up of this headset in its rig frame, **derived** with
-    ``follow_frame`` from the device's own ``calibration.json`` and fixed here so
-    every rrd of the device places its follow camera the same way. ``convert``
-    re-derives it from the calibration it fetched and warns past
-    ``FOLLOW_FRAME_TOLERANCE_DEG``."""
+    """Forward and up of this headset in its rig frame, which place its follow
+    camera. Derived from the device's calibration — see ``MSD_DEVICES``."""
     gt_source: GtSource
     """What produced ``gt/data.csv``; goes into the gt layer's properties."""
 
@@ -293,15 +246,36 @@ MSD_DEVICES: dict[MsdDeviceChoice, MsdDevice] = {
         gt_source="mocap",
     ),
 }
-"""The three headsets MSD covers, keyed by the ``--device`` literal."""
+"""The three headsets MSD covers, keyed by the ``--device`` literal.
+
+Two of each device's fields are claims about data rather than facts read out of
+the corpus, and this is where both are settled.
+
+**The world up axis.** MSD documents none: the Index's ground truth comes from
+SteamVR Lighthouse and the G2's and Odyssey+'s from an undocumented MoCap rig.
+Gravity settles it — ``measured_world_up`` rotates the first seconds of
+accelerometer samples into the world with the ground truth's own orientation and
+averages, and an accelerometer at rest reads +g pointing *up*. All three headsets
+measure ``+y`` on their ``*09_short_1_updown`` sequence, at 0.96, 0.98 and 0.93
+of |g|, so all three state ``RIGHT_HAND_Y_UP`` at the root of their gt layer.
+
+**The follow frame.** ``follow_frame`` reads it out of the device's own
+``calibration.json``, but the constants are written down here instead of being
+derived at use: ``register`` builds a device's default blueprint from the
+registry alone, with no sequence and no calibration on disk, so the eye has to be
+placeable without one.
+
+Both are re-checked every ``convert`` (see ``warn_on_device_claims``), which
+warns rather than reorienting or re-aiming a single rrd out of step with the rest.
+"""
 
 
 @dataclass(frozen=True, slots=True)
 class MsdSource:
     """One remote sequence as discovery found it; ``convert`` needs nothing else."""
 
-    collection_path: str
-    """Repo-relative directory holding the archive(s), e.g. ``M_monado_datasets/MI_valve_index/MIO_others``."""
+    collection: str
+    """Leaf name of the collection the archive sits in, e.g. ``MIO_others``; also the identity's first part."""
     sequence: str
     """Archive stem, which is also the top-level directory inside it (e.g. ``MIO09_short_1_updown``)."""
     archive_paths: tuple[str, ...]
@@ -363,208 +337,6 @@ def repo_revision(repo_id: str, revision: str | None = None) -> str | None:
     a listing, and a test needs it without a network.
     """
     return HfApi().repo_info(repo_id, repo_type="dataset", revision=revision).sha
-
-
-@serde.serde
-@dataclass(frozen=True, slots=True)
-class BasaltPose:
-    """One ``T_imu_cam`` entry: the camera's pose in the IMU frame, quaternion xyzw."""
-
-    px: float
-    """Translation x, metres."""
-    py: float
-    """Translation y, metres."""
-    pz: float
-    """Translation z, metres."""
-    qx: float
-    """Quaternion x."""
-    qy: float
-    """Quaternion y."""
-    qz: float
-    """Quaternion z."""
-    qw: float
-    """Quaternion w (basalt writes xyzw fields, scalar last)."""
-
-
-@serde.serde
-@dataclass(frozen=True, slots=True)
-class BasaltIntrinsics:
-    """Projection and distortion terms of one camera, in basalt's flat layout.
-
-    Both models share the ``fx fy cx cy`` head. ``kb4`` fills ``k1..k4`` only;
-    ``pinhole-radtan8`` fills all eight plus a ``rpmax`` validity radius.
-    """
-
-    fx: float
-    """Focal length in x, pixels."""
-    fy: float
-    """Focal length in y, pixels."""
-    cx: float
-    """Principal point x, pixels."""
-    cy: float
-    """Principal point y, pixels."""
-    k1: float = 0.0
-    """First radial term (both models)."""
-    k2: float = 0.0
-    """Second radial term (both models)."""
-    k3: float = 0.0
-    """Third radial term: kb4's fourth-order coefficient, radtan8's third."""
-    k4: float = 0.0
-    """Fourth radial term."""
-    k5: float = 0.0
-    """Fifth radial term (radtan8 only)."""
-    k6: float = 0.0
-    """Sixth radial term (radtan8 only)."""
-    p1: float = 0.0
-    """First tangential term (radtan8 only)."""
-    p2: float = 0.0
-    """Second tangential term (radtan8 only)."""
-    rpmax: float | None = None
-    """radtan8's validity radius in normalized image coordinates; ``None`` for kb4, which has no such limit."""
-
-
-@serde.serde
-@dataclass(frozen=True, slots=True)
-class BasaltCamera:
-    """One camera's model tag and its coefficients."""
-
-    camera_type: CameraModel
-    """``kb4`` (Kannala-Brandt fisheye) or ``pinhole-radtan8`` (Brown-Conrady)."""
-    intrinsics: BasaltIntrinsics
-    """The coefficients themselves."""
-
-
-@serde.serde
-@dataclass(frozen=True, slots=True)
-class BasaltCalibrationValue:
-    """The one member of basalt's ``value0`` wrapper that dataforge reads."""
-
-    T_imu_cam: list[BasaltPose]  # noqa: N815 — basalt's own key; renaming it would need a serde alias for no gain
-    """Camera poses in the IMU frame, one per camera, in camera order."""
-    intrinsics: list[BasaltCamera]
-    """Camera models, one per camera, in the same order."""
-    resolution: list[list[int]]
-    """``[width, height]`` per camera, in the same order."""
-
-
-@serde.serde
-@dataclass(frozen=True, slots=True)
-class MsdCalibration:
-    """A device's ``extras/calibration.json``, as basalt writes it."""
-
-    value0: BasaltCalibrationValue
-    """cereal's single-root wrapper; everything lives under it."""
-
-
-def camera_parameters(calibration: MsdCalibration, index: int, *, name: str) -> PinholeParameters | Fisheye62Parameters:
-    """Build one camera's simplecv parameters from the device calibration.
-
-    The extrinsics are the camera's pose **in the rig frame**, because MSD's rig
-    frame is the IMU frame (``RIG_REFERENCE``) and ``T_imu_cam`` is exactly that
-    pose. simplecv's ``Extrinsics`` calls the parent frame "world", so the rig
-    goes in as ``world_R_cam`` / ``world_t_cam`` — the same convention simplecv's
-    RoboCap loader uses, where Kalibr's inverse ``T_cam_imu`` goes in as
-    ``cam_R_world`` / ``cam_t_world``.
-
-    Args:
-        calibration: Parsed ``calibration.json`` of the device.
-        index: Camera index, matching the ``cam<index>`` directory in a sequence.
-        name: Stream label carried into the parameters.
-
-    Returns:
-        A ``Fisheye62Parameters`` for a ``kb4`` camera, a ``PinholeParameters``
-        for a ``pinhole-radtan8`` one.
-    """
-    value: BasaltCalibrationValue = calibration.value0
-    pose: BasaltPose = value.T_imu_cam[index]
-    camera: BasaltCamera = value.intrinsics[index]
-    terms: BasaltIntrinsics = camera.intrinsics
-    width: int = value.resolution[index][0]
-    height: int = value.resolution[index][1]
-
-    rig_R_cam: Float64[ndarray, "3 3"] = Rotation.from_quat([pose.qx, pose.qy, pose.qz, pose.qw]).as_matrix()
-    rig_t_cam: Float64[ndarray, "3"] = np.array([pose.px, pose.py, pose.pz], dtype=np.float64)
-    extrinsics: Extrinsics = Extrinsics(world_R_cam=rig_R_cam, world_t_cam=rig_t_cam)
-    intrinsics: Intrinsics = Intrinsics.from_focal_principal_point(
-        camera_conventions="RDF", fl_x=terms.fx, fl_y=terms.fy, cx=terms.cx, cy=terms.cy, height=height, width=width
-    )
-    if camera.camera_type == "kb4":
-        return Fisheye62Parameters(
-            name=name,
-            extrinsics=extrinsics,
-            intrinsics=intrinsics,
-            distortion=KannalaBrandtDistortion(k1=terms.k1, k2=terms.k2, k3=terms.k3, k4=terms.k4),
-        )
-    return PinholeParameters(
-        name=name,
-        extrinsics=extrinsics,
-        intrinsics=intrinsics,
-        distortion=BrownConradyDistortion(
-            k1=terms.k1, k2=terms.k2, p1=terms.p1, p2=terms.p2, k3=terms.k3, k4=terms.k4, k5=terms.k5, k6=terms.k6
-        ),
-    )
-
-
-def follow_frame(calibration: MsdCalibration, camera_indices: Sequence[int] = (0, 1)) -> FollowFrame:
-    """Derive a headset's forward and up in the rig frame from its front stereo pair.
-
-    Forward is the mean optical axis (camera +z in RDF) of the listed cameras;
-    averaging the pair cancels the slight outward yaw each one carries. Up comes
-    from the pair's *baseline*, not from image-up: the baseline runs along the
-    wearer's lateral axis, so ``right x forward`` is the wearer's up, and the
-    cameras' own roll about the optical axis cannot tilt it. That distinction is
-    not academic — the G2's four cameras are all mounted rolled 90 degrees, so
-    its image-up is rig +x while its up is rig -y (which is also where its
-    accelerometer reads gravity at rest, and what puts its front pair 15 degrees
-    *below* the horizon, where tracking cameras are aimed). Deriving up from
-    image-up matches the baseline within about a degree on the Index and the
-    Odyssey+ and is 90 degrees out on the G2.
-
-    ``camera_indices`` names the front pair, left camera first; the corpus lists
-    every device that way, and on the G2 the two side cameras are ``cam2``/``cam3``.
-
-    Args:
-        calibration: Parsed ``calibration.json`` of the device.
-        camera_indices: Front cameras, left first; the baseline runs from the
-            first to the last, and every listed camera contributes to forward.
-
-    Returns:
-        The orthonormal forward/up pair, in the rig (IMU) frame.
-
-    Raises:
-        ValueError: Fewer than two cameras were named, the mean optical axis
-            cancels out, or the baseline is parallel to it.
-    """
-    if len(camera_indices) < 2:
-        raise ValueError(f"a follow frame needs a stereo pair to place its up axis, got {len(camera_indices)} camera(s)")
-    poses: list[BasaltPose] = calibration.value0.T_imu_cam
-    forward_sum_xyz: Float64[ndarray, "3"] = np.zeros(3, dtype=np.float64)
-    for index in camera_indices:
-        pose: BasaltPose = poses[index]
-        rig_R_cam: Float64[ndarray, "3 3"] = Rotation.from_quat([pose.qx, pose.qy, pose.qz, pose.qw]).as_matrix()
-        forward_sum_xyz += rig_R_cam @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
-    forward_norm: float = float(np.linalg.norm(forward_sum_xyz))
-    if forward_norm < DEGENERATE_DIRECTION_NORM:
-        raise ValueError(f"cameras {tuple(camera_indices)} look in opposing directions; their mean optical axis is degenerate")
-    forward_xyz: Float64[ndarray, "3"] = forward_sum_xyz / forward_norm
-
-    left_camera: BasaltPose = poses[camera_indices[0]]
-    right_camera: BasaltPose = poses[camera_indices[-1]]
-    baseline_xyz: Float64[ndarray, "3"] = np.array(
-        [right_camera.px - left_camera.px, right_camera.py - left_camera.py, right_camera.pz - left_camera.pz], dtype=np.float64
-    )
-    # Gram-Schmidt: a real baseline is only nearly perpendicular to the optical axis
-    # (a few tenths of a degree off on all three headsets), so it is a hint about the
-    # lateral axis rather than the axis itself.
-    right_xyz: Float64[ndarray, "3"] = baseline_xyz - float(np.dot(baseline_xyz, forward_xyz)) * forward_xyz
-    right_norm: float = float(np.linalg.norm(right_xyz))
-    if right_norm < DEGENERATE_DIRECTION_NORM:
-        raise ValueError(f"the baseline of cameras {tuple(camera_indices)} is parallel to their optical axis; it fixes no lateral axis")
-    up_xyz: Float64[ndarray, "3"] = np.cross(right_xyz / right_norm, forward_xyz)
-    return FollowFrame(
-        forward=(float(forward_xyz[0]), float(forward_xyz[1]), float(forward_xyz[2])),
-        up=(float(up_xyz[0]), float(up_xyz[1]), float(up_xyz[2])),
-    )
 
 
 @serde.serde(type_check=serde.coerce)
@@ -639,31 +411,37 @@ def gt_trajectory(samples: TimestampedSamples) -> GtTrajectory:
     )
 
 
-def measured_world_up(gt: GtTrajectory, accel: TimestampedSamples, *, window_ns: int = MEASURED_UP_WINDOW_NS) -> tuple[WorldUpAxis, float]:
+@dataclass(frozen=True, slots=True)
+class MeasuredUp:
+    """What one sequence's own gravity measurement found; the gt layer records both."""
+
+    axis: WorldUpAxis
+    """The dominant signed world axis the mean acceleration points along."""
+    fraction: float
+    """That component as a fraction of standard gravity; near 1 is a clean measurement."""
+
+
+def measured_world_up(gt: GtTrajectory, accel: ImuChannel, *, window_ns: int = MEASURED_UP_WINDOW_NS) -> MeasuredUp:
     """Measure which world axis is up, from gravity as the accelerometer sees it.
 
-    MSD ships no statement of its world axes: the Index's ground truth comes
-    from SteamVR Lighthouse and the G2's and Odyssey+'s from a MoCap rig whose
-    convention is undocumented. Gravity settles it. An accelerometer at rest
-    measures the *reaction* to gravity, so its reading points **up**; rotating
-    each sample into the world with the ground truth's own orientation
-    (``world_R_rig @ a_rig``) and averaging therefore yields a vector along the
-    world's up axis. Only the first couple of seconds are used: a headset is
-    typically still on the floor or on a head that has not started moving, so
-    the mean is nearly pure gravity there and gets noisier the longer the window.
+    An accelerometer at rest measures the *reaction* to gravity, so its reading
+    points **up**; rotating each sample into the world with the ground truth's
+    own orientation (``world_R_rig @ a_rig``) and averaging therefore yields a
+    vector along the world's up axis. Only the first couple of seconds are used:
+    a headset is typically still on the floor or on a head that has not started
+    moving, so the mean is nearly pure gravity there and gets noisier the longer
+    the window. Why this is measured at all, and what the three devices answer,
+    is on ``MSD_DEVICES``.
 
     Args:
         gt: The sequence's ground truth, already in xyzw order and sanitized.
-        accel: Accelerometer samples in m/s^2 — a 3-column ``TimestampedSamples``
-            (``inertial.values[:, 3:6]``), on the same device clock as ``gt``.
+        accel: Accelerometer samples in m/s^2, on the same clock as ``gt``.
         window_ns: Length of the averaging window, from the first sample both
             streams cover.
 
     Returns:
-        The dominant signed world axis, and the mean's component along it as a
-        fraction of standard gravity — a health check, not a calibration: a
-        value near 1 means the window really was near rest and the axis is
-        unambiguous, while a much smaller one means the mean is not gravity.
+        The axis and how much of gravity it carried — a health check, not a
+        calibration: a much smaller fraction means the mean is not gravity.
 
     Raises:
         ValueError: Either stream is empty, or they do not overlap inside the window.
@@ -681,12 +459,12 @@ def measured_world_up(gt: GtTrajectory, accel: TimestampedSamples, *, window_ns:
     nearest: Int64[ndarray, "n_window"] = np.where(
         np.abs(gt.times_ns[before] - window_times_ns) <= np.abs(gt.times_ns[after] - window_times_ns), before, after
     )
-    world_accel_xyz: Float64[ndarray, "n_window 3"] = Rotation.from_quat(gt.quaternions_xyzw[nearest]).apply(accel.values[inside])
+    world_accel_xyz: Float64[ndarray, "n_window 3"] = Rotation.from_quat(gt.quaternions_xyzw[nearest]).apply(accel.values_xyz[inside])
     mean_xyz: Float64[ndarray, "3"] = world_accel_xyz.mean(axis=0)
 
     axis_index: int = int(np.argmax(np.abs(mean_xyz)))
     names: tuple[WorldUpAxis, WorldUpAxis, WorldUpAxis] = POSITIVE_WORLD_AXES if mean_xyz[axis_index] >= 0.0 else NEGATIVE_WORLD_AXES
-    return names[axis_index], float(abs(mean_xyz[axis_index]) / STANDARD_GRAVITY_MS2)
+    return MeasuredUp(axis=names[axis_index], fraction=float(abs(mean_xyz[axis_index]) / STANDARD_GRAVITY_MS2))
 
 
 def read_camera_index(data: bytes) -> list[CameraRow]:
@@ -725,143 +503,6 @@ def read_numeric_csv(data: bytes, *, num_values: int) -> TimestampedSamples:
         io.BytesIO(data), delimiter=",", skiprows=1, usecols=range(1, 1 + num_values), dtype=np.float64, ndmin=2
     )
     return TimestampedSamples(times_ns=times_ns, values=values)
-
-
-def resolve_seven_zip() -> Path:
-    """Locate the 7-Zip CLI that reads MSD's multi-volume archives.
-
-    conda-forge's ``7zip`` package installs the modern ``7zz`` and keeps ``7z``
-    as a compatibility name, so both are accepted.
-    """
-    for binary in ("7zz", "7z"):
-        found: str | None = shutil.which(binary)
-        if found is not None:
-            return Path(found)
-    raise FileNotFoundError("no 7zz/7z on PATH; the conda-forge '7zip' package provides it (see [feature.dataforge.dependencies])")
-
-
-class MemberReader(AbstractContextManager["MemberReader"], ABC):
-    """Reads named members out of one sequence archive.
-
-    Single and multi-volume archives need completely different machinery, but a
-    converter only ever asks two things of either: give me this csv, and give me
-    these PNGs in this order. Those two methods are the whole seam.
-    """
-
-    @abstractmethod
-    def csv_bytes(self, member: str) -> bytes:
-        """Whole contents of one small member, e.g. ``<SEQ>/mav0/imu0/data.csv``."""
-
-    @abstractmethod
-    def png_frames(self, members: Sequence[str]) -> Iterator[bytes]:
-        """Encoded PNG bytes of ``members``, in the given order, one frame at a time.
-
-        Members must all live in one directory (one camera's ``data/``): a
-        multi-volume archive is extracted a directory at a time, so mixing
-        cameras in one call would defeat the point of the extraction budget.
-        """
-
-
-class ZipMemberReader(MemberReader):
-    """A plain single-file ``.zip``, read in-process with the stdlib."""
-
-    def __init__(self, archive: Path) -> None:
-        self.archive: zipfile.ZipFile = zipfile.ZipFile(archive)
-
-    def csv_bytes(self, member: str) -> bytes:
-        return self.archive.read(member)
-
-    def png_frames(self, members: Sequence[str]) -> Iterator[bytes]:
-        for member in members:
-            yield self.archive.read(member)
-
-    def __exit__(self, kind: type[BaseException] | None, error: BaseException | None, traceback: TracebackType | None) -> None:
-        self.archive.close()
-
-
-class SevenZipMemberReader(MemberReader):
-    """An Info-ZIP multi-volume set (``.z01``…``.zip``), read through the 7-Zip CLI.
-
-    Python's ``zipfile`` opens the closing volume — its central directory is
-    intact — and then fails on the first member whose data crosses a volume
-    boundary, so it cannot be used at all here. 7-Zip cannot stream either, so
-    ``png_frames`` extracts the members' directory into ``work_dir``, yields the
-    files from there, and deletes them again: peak scratch is one camera's PNGs
-    rather than the whole sequence.
-    """
-
-    def __init__(self, closing_volume: Path, work_dir: Path) -> None:
-        self.archive: Path = closing_volume
-        self.work_dir: Path = work_dir
-        self.binary: Path = resolve_seven_zip()
-
-    def _run(self, arguments: Sequence[str], *, capture: bool) -> bytes:
-        completed: subprocess.CompletedProcess[bytes] = subprocess.run(
-            [str(self.binary), *arguments], capture_output=True, check=False
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(f"{self.binary.name} exited {completed.returncode} on {self.archive.name}:\n{completed.stderr.decode(errors='replace')}")
-        return completed.stdout if capture else b""
-
-    def csv_bytes(self, member: str) -> bytes:
-        return self._run(["x", "-so", "-bso0", "-bsp0", str(self.archive), member], capture=True)
-
-    def png_frames(self, members: Sequence[str]) -> Iterator[bytes]:
-        if not members:
-            return
-        directory: str = str(PurePosixPath(members[0]).parent)
-        extract_dir: Path = self.work_dir / "extract"
-        shutil.rmtree(extract_dir, ignore_errors=True)
-        extract_dir.mkdir(parents=True, exist_ok=True)
-        self._run(["x", f"-o{extract_dir}", "-y", "-bso0", "-bsp0", str(self.archive), f"{directory}/*"], capture=False)
-        try:
-            for member in members:
-                yield (extract_dir / member).read_bytes()
-        finally:
-            shutil.rmtree(extract_dir, ignore_errors=True)
-
-    def __exit__(self, kind: type[BaseException] | None, error: BaseException | None, traceback: TracebackType | None) -> None:
-        shutil.rmtree(self.work_dir / "extract", ignore_errors=True)
-
-
-def open_member_reader(archives: Sequence[Path], work_dir: Path) -> MemberReader:
-    """Pick the reader one sequence's archive files need.
-
-    Args:
-        archives: Local volume paths, parts first and the closing ``.zip`` last.
-        work_dir: Scratch directory the multi-volume reader extracts into.
-
-    Returns:
-        A stdlib reader for a single file, the 7-Zip-backed one for a volume set.
-    """
-    if len(archives) == 1:
-        return ZipMemberReader(archives[0])
-    return SevenZipMemberReader(archives[-1], work_dir)
-
-
-def group_archives(entries: Sequence[tuple[str, int]]) -> dict[str, list[tuple[str, int]]]:
-    """Group a collection listing into ``stem → volumes``, dropping non-archives.
-
-    An MSD sequence is either one ``<stem>.zip`` or an Info-ZIP multi-volume set
-    (``<stem>.z01``, ``<stem>.z02``, …, ``<stem>.zip``). Volumes come back parts
-    first and ascending, with the closing ``.zip`` last, which is the order 7-Zip
-    wants them named in.
-
-    Args:
-        entries: ``(repo-relative path, size)`` pairs from one collection directory.
-
-    Returns:
-        One entry per sequence stem; README files and anything else are dropped.
-    """
-    grouped: dict[str, list[tuple[str, int]]] = {}
-    for path, size in entries:
-        suffix: str = Path(path).suffix
-        if suffix != ".zip" and PART_SUFFIX_RE.match(suffix) is None:
-            continue
-        grouped.setdefault(Path(path).stem, []).append((path, size))
-    # ".zip" sorts after ".z01".."z99" lexicographically, so one sort gives both
-    # the ascending part order and the closing volume's place at the end.
-    return {stem: sorted(volumes) for stem, volumes in sorted(grouped.items())}
 
 
 def nominal_fps(times_ns: Int64[ndarray, "n_samples"]) -> int:
@@ -943,21 +584,53 @@ def build_table_blueprint(num_cameras: int, *, follow: FollowFrame) -> rrb.Bluep
 
 
 @dataclass(frozen=True, slots=True)
-class RecordingSummary:
-    """What one converted sequence turned out to hold; ``convert`` prints it."""
+class SequencePaths:
+    """Where one sequence's conversion reads and writes; ``convert`` works these out once."""
 
-    num_frames: int
-    """Longest per-camera video sample count."""
-    num_poses: int
-    """Ground-truth poses logged into the gt layer."""
-    measured_up: WorldUpAxis
-    """World up axis this sequence's own gravity measurement found."""
-    measured_up_fraction: float
-    """Fraction of standard gravity the measured axis carried; near 1 is a clean measurement."""
+    archives: tuple[Path, ...]
+    """Local archive volume paths, parts first and the closing ``.zip`` last."""
+    work_dir: Path
+    """Scratch directory for the encoded mp4s and any extraction; deleted unless ``--keep-raw``."""
+    target: Path
+    """Final base-layer rrd path."""
+    gt_target: Path
+    """Final gt-layer rrd path, a sibling of the same recording id."""
+
+
+@dataclass(frozen=True, slots=True)
+class SequenceStreams:
+    """Everything one archive read yields; both layers are written from it and nothing else.
+
+    Every clock here is already zero-based ``video_time`` — the archive's device
+    clock minus ``start_time_ns`` — because the two layers must share one origin
+    and the shift is a property of the sequence, not of either layer.
+    """
+
+    camera_times_ns: tuple[Int64[ndarray, "n_samples"], ...]
+    """Frame times per camera, in ``cam0``…``camN`` order."""
+    clips: tuple[Path, ...]
+    """The encoded mp4 of each camera, in the same order."""
+    gyro: ImuChannel
+    """Angular velocity in rad/s."""
+    accel: ImuChannel
+    """Linear acceleration in m/s^2; also what the world-up measurement reads."""
+    magnetometer: ImuChannel | None
+    """Field samples in the sensor's own units, or ``None`` on a device without one."""
+    gt: GtTrajectory
+    """Ground truth, quaternions already xyzw and dropouts already repaired."""
+    start_time_ns: int
+    """The device-clock origin every stream above was shifted by; a recording property."""
+    duration_ns: int
+    """Span of the *sensor* streams; deliberately not bounded by gt."""
+
+    @property
+    def num_frames(self) -> int:
+        """Longest per-camera sample count, which is what the capture properties report."""
+        return max(times_ns.size for times_ns in self.camera_times_ns)
 
 
 class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
-    """Converts one MSD headset's sequences into exoego:v2 base-layer recordings."""
+    """Converts one MSD headset's sequences into a base and a gt layer each."""
 
     def __init__(self, config: MsdConfig) -> None:
         super().__init__(config)
@@ -979,7 +652,7 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
                     (
                         SequenceIdentity(dataset=self.config.name, parts=(leaf, stem)),
                         MsdSource(
-                            collection_path=collection_path,
+                            collection=leaf,
                             sequence=stem,
                             archive_paths=tuple(path for path, _ in volumes),
                             archive_bytes=sum(size for _, size in volumes),
@@ -1001,6 +674,34 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         """Repo-relative path of the device's basalt calibration."""
         return f"{REPO_ROOT}/{self.device.hf_dir}/extras/calibration.json"
 
+    @functools.cached_property
+    def revision(self) -> str | None:
+        """Repo commit sha stamped into every rrd, resolved once per dataset instance.
+
+        Lazily, and deliberately not inside a recording: a batch run asks the hub
+        once instead of once per sequence, and ``convert`` warms it before it
+        encodes anything, so a transient network failure cannot land on a
+        finished encode.
+        """
+        return repo_revision(REPO_ID, self.config.revision)
+
+    def fetch_calibration(self) -> Path:
+        """Fetch the device's ``calibration.json`` into ``root`` and return where it landed.
+
+        The one place the calibration is pulled from the hub: ``download`` calls
+        it to have the file up front, and ``calibration()`` calls it when a
+        ``convert`` runs against a scratch dir that ``download`` never touched.
+        """
+        transports.hf_fetch(REPO_ID, allow_patterns=[self.calibration_path], local_dir=self.config.root, revision=self.config.revision)
+        return self.config.root / self.calibration_path
+
+    def calibration(self) -> BasaltCalibration:
+        """Load the device calibration, fetching it if ``download`` was skipped."""
+        local_path: Path = self.config.root / self.calibration_path
+        if not local_path.is_file():
+            local_path = self.fetch_calibration()
+        return serde.json.from_json(BasaltCalibration, local_path.read_text())
+
     def download(self) -> None:
         """Fetch the calibration, prove the machine can encode, and print the plan.
 
@@ -1010,32 +711,42 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         check is here because a machine that cannot encode AV1 should find out
         now rather than after the first multi-gigabyte download.
         """
-        transports.hf_fetch(REPO_ID, allow_patterns=[self.calibration_path], local_dir=self.config.root, revision=self.config.revision)
+        local_calibration: Path = self.fetch_calibration()
         require_av1_nvenc(resolve_ffmpeg())
         discovered: list[tuple[SequenceIdentity, MsdSource]] = self.discover()
         per_collection: dict[str, list[MsdSource]] = {}
-        for identity, source in discovered:
-            per_collection.setdefault(identity.parts[0], []).append(source)
+        for _, source in discovered:
+            per_collection.setdefault(source.collection, []).append(source)
         total_bytes: int = sum(source.archive_bytes for _, source in discovered)
         print(f"{self.config.name}: {len(discovered)} sequence(s), {total_bytes / 1e9:.1f} GB of archives to stream through convert")
         for collection, sources in per_collection.items():
             print(f"  {collection}: {len(sources)} sequence(s), {sum(source.archive_bytes for source in sources) / 1e9:.1f} GB")
-        print(f"  calibration → {self.config.root / self.calibration_path}; archives are fetched and deleted one sequence at a time")
+        print(f"  calibration → {local_calibration}; archives are fetched and deleted one sequence at a time")
 
-    def calibration(self) -> MsdCalibration:
-        """Load the device calibration, fetching it if ``download`` was skipped."""
-        local_path: Path = self.config.root / self.calibration_path
-        if not local_path.is_file():
-            transports.hf_fetch(REPO_ID, allow_patterns=[self.calibration_path], local_dir=self.config.root, revision=self.config.revision)
-        return serde.json.from_json(MsdCalibration, local_path.read_text())
+    def sequence_paths(self, identity: SequenceIdentity, source: MsdSource) -> SequencePaths:
+        """Everywhere this sequence's conversion touches disk, worked out in one place."""
+        output_root: Path = paths.output_root()
+        return SequencePaths(
+            archives=tuple(self.config.root / archive_path for archive_path in source.archive_paths),
+            work_dir=self.config.root / "work" / source.sequence,
+            target=paths.rrd_path(output_root, layer=paths.BASE_LAYER, identity=identity),
+            gt_target=paths.rrd_path(output_root, layer=paths.GT_LAYER, identity=identity),
+        )
 
     def enforce_raw_budget(self, source: MsdSource, archives: Sequence[Path]) -> None:
         """Refuse to fetch when ``root`` plus this sequence would breach the budget.
 
-        A sequence whose archives *alone* exceed the budget (the Index and G2
-        long sessions) is an accepted exception and only warns — there is no smaller
-        unit to convert. Anything else is a leftover from an earlier failure, and
-        silently blowing past the cap is how a batch run fills a disk.
+        The cap covers this sequence's archives **plus** whatever else is already
+        in ``root``. Two things ride on top of it and are not counted: one
+        camera's extracted PNGs (split archives only) and the temp mp4s, both of
+        which live in ``work/`` for the length of one sequence.
+
+        A sequence whose archives *alone* exceed the budget (the Index and G2 long
+        sessions) is an accepted exception and only warns — there is no smaller
+        unit to convert — but its leftovers are still tallied, because leftovers
+        that breach the cap on their own are an error whatever is being fetched.
+        HuggingFace's own bookkeeping under ``root/.cache`` (including resumable
+        ``.incomplete`` blobs) is excluded: it is not a leftover anyone should delete.
 
         Args:
             source: Sequence about to be fetched.
@@ -1043,26 +754,42 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
                 a retry of an already-downloaded sequence is not double-counted.
 
         Raises:
-            RuntimeError: Leftovers in ``root`` would push the fetch over the budget.
+            RuntimeError: What is in ``root`` would push the fetch over the budget.
         """
         budget_bytes: int = int(self.config.raw_budget_gb * 1e9)
-        if source.archive_bytes > budget_bytes:
+        oversized: bool = source.archive_bytes > budget_bytes
+        if oversized:
             print(
                 f"  warning: {source.sequence} needs {source.archive_bytes / 1e9:.1f} GB of archives, above the "
                 f"{self.config.raw_budget_gb:g} GB raw budget; converting it anyway as an accepted exception"
             )
-            return
         if not self.config.root.is_dir():
             return
-        own: set[Path] = {archive.resolve() for archive in archives}
-        leftovers: list[Path] = [path for path in self.config.root.rglob("*") if path.is_file() and path.resolve() not in own]
-        occupied: int = sum(path.stat().st_size for path in leftovers)
-        if occupied + source.archive_bytes <= budget_bytes:
+
+        # One walk, one stat per file: this runs before every fetch, and a scratch
+        # dir mid-batch holds a whole sequence's PNGs.
+        cache_dir: Path = self.config.root / ".cache"
+        own: set[Path] = set(archives)
+        leftovers: list[tuple[Path, int]] = []
+        for directory, subdirectories, names in os.walk(self.config.root):
+            here: Path = Path(directory)
+            if here == cache_dir:
+                subdirectories.clear()
+                continue
+            for name in names:
+                path: Path = here / name
+                if path not in own:
+                    leftovers.append((path, os.stat(path).st_size))
+        occupied: int = sum(size for _, size in leftovers)
+        # An oversized sequence has already been waved through, so only its
+        # leftovers are still weighed against the cap.
+        needed: int = 0 if oversized else source.archive_bytes
+        if occupied + needed <= budget_bytes:
             return
-        biggest: list[Path] = sorted(leftovers, key=lambda path: path.stat().st_size, reverse=True)[:3]
-        named: str = ", ".join(f"{path.relative_to(self.config.root)} ({path.stat().st_size / 1e9:.2f} GB)" for path in biggest)
+        biggest: list[tuple[Path, int]] = sorted(leftovers, key=lambda entry: entry[1], reverse=True)[:3]
+        named: str = ", ".join(f"{path.relative_to(self.config.root)} ({size / 1e9:.2f} GB)" for path, size in biggest)
         raise RuntimeError(
-            f"{self.config.root} already holds {occupied / 1e9:.2f} GB and {source.sequence} needs "
+            f"{self.config.root} already holds {occupied / 1e9:.2f} GB of leftovers and {source.sequence} needs "
             f"{source.archive_bytes / 1e9:.2f} GB more, over the {self.config.raw_budget_gb:g} GB raw budget. "
             f"Delete the leftovers of an earlier failed sequence first: {named}"
         )
@@ -1082,72 +809,128 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         attempt starts from a clean scratch dir. Nothing outside ``root`` is ever
         deleted.
         """
-        target: Path = paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity)
-        gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
-        if writing.should_skip(target, force=force) and writing.should_skip(gt_target, force=force):
-            print(f"skip {identity.sequence_key} → {target} + {gt_target}")
-            return target
+        locations: SequencePaths = self.sequence_paths(identity, source)
+        if writing.should_skip(locations.target, force=force) and writing.should_skip(locations.gt_target, force=force):
+            print(f"skip {identity.sequence_key} → {locations.target} + {locations.gt_target}")
+            return locations.target
 
-        archives: list[Path] = [self.config.root / archive_path for archive_path in source.archive_paths]
-        self.enforce_raw_budget(source, archives)
-        on_disk: int = sum(1 for archive in archives if archive.is_file())
+        self.enforce_raw_budget(source, locations.archives)
+        # Both hub lookups happen before the archives are pulled and long before a
+        # frame is encoded: neither a bad calibration nor a transient revision
+        # lookup may throw away a multi-gigabyte download and an hour of encoding.
+        calibration: BasaltCalibration = self.calibration()
+        _ = self.revision
+
+        on_disk: int = sum(1 for archive in locations.archives if archive.is_file())
         if on_disk:
-            print(f"  {on_disk}/{len(archives)} archive volume(s) already in {self.config.root}; the fetch only verifies them")
+            print(f"  {on_disk}/{len(locations.archives)} archive volume(s) already in {self.config.root}; the fetch only verifies them")
         transports.hf_fetch(REPO_ID, allow_patterns=list(source.archive_paths), local_dir=self.config.root, revision=self.config.revision)
 
-        work_dir: Path = self.config.root / "work" / source.sequence
-        work_dir.mkdir(parents=True, exist_ok=True)
+        locations.work_dir.mkdir(parents=True, exist_ok=True)
         try:
-            summary: RecordingSummary = self.write_recording(
-                identity, source, archives=archives, work_dir=work_dir, target=target, gt_target=gt_target
-            )
+            with open_member_reader(locations.archives, locations.work_dir) as reader:
+                streams: SequenceStreams = self.read_sequence(reader, source, work_dir=locations.work_dir)
+            measured: MeasuredUp = measured_world_up(streams.gt, streams.accel)
+            self.warn_on_device_claims(source, calibration=calibration, measured=measured)
+            self.write_base_layer(identity, source, streams, locations.target, calibration=calibration)
+            self.write_gt_layer(identity, streams, locations.gt_target, measured=measured)
         except BaseException:
-            shutil.rmtree(work_dir, ignore_errors=True)
-            retained: int = sum(archive.stat().st_size for archive in archives if archive.is_file())
+            paths.remove_tree(locations.work_dir)
+            retained: int = sum(archive.stat().st_size for archive in locations.archives if archive.is_file())
             print(f"  kept {retained / 1e9:.2f} GB of archives in {self.config.root} so a retry skips the download")
             raise
 
         if self.config.keep_raw:
-            print(f"  keeping raw: {len(archives)} archive volume(s) and the mp4s in {work_dir}")
+            print(f"  keeping raw: {len(locations.archives)} archive volume(s) and the mp4s in {locations.work_dir}")
         else:
-            shutil.rmtree(work_dir, ignore_errors=True)
-            for archive in archives:
+            paths.remove_tree(locations.work_dir)
+            for archive in locations.archives:
                 archive.unlink(missing_ok=True)
         print(
-            f"done {identity.sequence_key} → {target} + {gt_target} "
-            f"({self.device.num_cameras} cameras, {summary.num_frames} frames, {summary.num_poses} gt poses, "
-            f"world up {summary.measured_up} at {summary.measured_up_fraction:.2f} g)"
+            f"done {identity.sequence_key} → {locations.target} + {locations.gt_target} "
+            f"({self.device.num_cameras} cameras, {streams.num_frames} frames, {streams.gt.times_ns.size} gt poses, "
+            f"world up {measured.axis} at {measured.fraction:.2f} g)"
         )
-        return target
+        return locations.target
 
-    def write_recording(
-        self, identity: SequenceIdentity, source: MsdSource, *, archives: Sequence[Path], work_dir: Path, target: Path, gt_target: Path
-    ) -> RecordingSummary:
-        """Encode every camera, read every csv, and write both rrd layers of one sequence.
+    def read_sequence(self, reader: MemberReader, source: MsdSource, *, work_dir: Path) -> SequenceStreams:
+        """Read every csv and encode every camera: the whole archive, in one pass.
 
-        The base layer closes before the gt layer opens: one archive read feeds
-        both, but each is its own recording stream and its own atomic replace, so
-        a failure in the second cannot half-write the first.
+        The csvs come first so a sequence that is missing a stream fails before
+        the expensive half, and the mp4s all exist before any of them is remuxed
+        — a split archive's reader extracts one camera at a time, so a converter
+        cannot hold a reader open across the two.
 
         Args:
-            identity: Sequence identity; names both recordings and both rrd files.
+            reader: Open reader over the sequence's archive volume(s).
             source: The discovered sequence, whose stem is the archive's top directory.
-            archives: Local archive volume paths, the closing ``.zip`` last.
-            work_dir: Scratch directory for the encoded mp4s and any extraction.
-            target: Final base-layer rrd path, written through ``atomic_recording``.
-            gt_target: Final gt-layer rrd path, likewise.
+            work_dir: Scratch directory the encoded mp4s are written into.
 
-        Returns:
-            What the sequence turned out to hold, for the caller's summary line.
+        Raises:
+            ValueError: A camera index, ``imu0/data.csv`` or ``gt/data.csv`` holds
+                no data rows, so the sequence has no clock to place the rest on.
         """
-        calibration: MsdCalibration = self.calibration()
-        cameras: list[PinholeParameters | Fisheye62Parameters] = [
-            camera_parameters(calibration, index, name=f"cam{index}") for index in range(self.device.num_cameras)
+        mav0: str = f"{source.sequence}/mav0"
+        camera_rows: list[list[CameraRow]] = []
+        for index in range(self.device.num_cameras):
+            rows: list[CameraRow] = read_camera_index(reader.csv_bytes(f"{mav0}/cam{index}/data.csv"))
+            if not rows:
+                raise ValueError(f"{source.sequence} cam{index} has an empty data.csv")
+            camera_rows.append(rows)
+        camera_times_ns: list[Int64[ndarray, "n_samples"]] = [
+            np.array([row.timestamp_ns for row in rows], dtype=np.int64) for rows in camera_rows
         ]
-        # The declared follow frame is a claim about this calibration, so re-derive it and
-        # say so on a disagreement, exactly as the declared world_up is re-measured below.
-        # The declared axes are rounded to three decimals and so are a hair short of unit
-        # length; dividing by the norms keeps that rounding out of the reported angles.
+        inertial: TimestampedSamples = read_numeric_csv(reader.csv_bytes(f"{mav0}/imu0/data.csv"), num_values=IMU_VALUE_COLUMNS)
+        if inertial.times_ns.size == 0:
+            raise ValueError(f"{source.sequence} imu0/data.csv has no data rows, so the sequence has no inertial stream")
+        magnetometer: TimestampedSamples | None = (
+            read_numeric_csv(reader.csv_bytes(f"{mav0}/mag0/data.csv"), num_values=MAG_VALUE_COLUMNS) if self.device.has_magnetometer else None
+        )
+        # The gt *layer* is a sibling rrd, but both layers share one zero-based
+        # video_time, so the base layer has to know gt's clock origin too.
+        gt: GtTrajectory = gt_trajectory(read_numeric_csv(reader.csv_bytes(f"{mav0}/gt/data.csv"), num_values=GT_VALUE_COLUMNS))
+
+        sensor_times_ns: list[Int64[ndarray, "n_samples"]] = [*camera_times_ns, inertial.times_ns]
+        if magnetometer is not None and magnetometer.times_ns.size:
+            sensor_times_ns.append(magnetometer.times_ns)
+        start_time_ns: int = min(int(gt.times_ns[0]), *(int(times_ns[0]) for times_ns in sensor_times_ns))
+        # Deliberately not bounded by gt: duration_ns describes the *sensor* layer.
+        duration_ns: int = max(int(times_ns[-1]) for times_ns in sensor_times_ns) - start_time_ns
+
+        clips: list[Path] = []
+        for index, (rows, times_ns) in enumerate(zip(camera_rows, camera_times_ns, strict=True)):
+            clip: Path = work_dir / f"cam{index}.mp4"
+            encode_frames_to_mp4(
+                reader.png_frames([f"{mav0}/cam{index}/data/{row.filename}" for row in rows]),
+                clip,
+                source=FrameSource("png"),
+                fps=nominal_fps(times_ns),
+            )
+            clips.append(clip)
+
+        inertial_times_ns: Int64[ndarray, "n_samples"] = inertial.times_ns - start_time_ns
+        return SequenceStreams(
+            camera_times_ns=tuple(times_ns - start_time_ns for times_ns in camera_times_ns),
+            clips=tuple(clips),
+            gyro=ImuChannel(times_ns=inertial_times_ns, values_xyz=inertial.values[:, :3]),
+            accel=ImuChannel(times_ns=inertial_times_ns, values_xyz=inertial.values[:, 3:6]),
+            magnetometer=(
+                None if magnetometer is None else ImuChannel(times_ns=magnetometer.times_ns - start_time_ns, values_xyz=magnetometer.values)
+            ),
+            gt=replace(gt, times_ns=gt.times_ns - start_time_ns),
+            start_time_ns=start_time_ns,
+            duration_ns=duration_ns,
+        )
+
+    def warn_on_device_claims(self, source: MsdSource, *, calibration: BasaltCalibration, measured: MeasuredUp) -> None:
+        """Re-check both per-device claims against this sequence and say so on a disagreement.
+
+        Neither claim is re-applied: every rrd of a device must carry the same
+        world axes and the same follow eye, so one sequence disagreeing is news,
+        not a reason to reorient that rrd alone. See ``MSD_DEVICES``.
+        """
+        # The declared axes are rounded to three decimals and so are a hair short of
+        # unit length; dividing by the norms keeps that rounding out of the angles.
         derived: FollowFrame = follow_frame(calibration)
         declared_axes: Float64[ndarray, "2 3"] = np.array([self.device.follow.forward, self.device.follow.up], dtype=np.float64)
         derived_axes: Float64[ndarray, "2 3"] = np.array([derived.forward, derived.up], dtype=np.float64)
@@ -1159,53 +942,25 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
                 f"forward off by {deviations_deg[0]:.1f} deg, up off by {deviations_deg[1]:.1f} deg, over the "
                 f"{FOLLOW_FRAME_TOLERANCE_DEG:g} deg tolerance; the blueprint still uses the declared frame"
             )
-        mav0: str = f"{source.sequence}/mav0"
-        camera_times: list[Int64[ndarray, "n_samples"]] = []
-        clips: list[Path] = []
-        magnetometer: TimestampedSamples | None = None
+        if measured.axis != self.device.world_up:
+            print(
+                f"  warning: {self.config.device} declares world_up {self.device.world_up} but {source.sequence} "
+                f"measured {measured.axis} carrying {measured.fraction:.2f} of |g|; the rrd still states the declared axis"
+            )
 
-        # Everything the archive holds is read here, before the recording opens: the
-        # archive reader for a split sequence extracts one camera at a time, so the
-        # mp4s must all exist before any of them is remuxed into the recording.
-        with open_member_reader(archives, work_dir) as reader:
-            for index in range(self.device.num_cameras):
-                rows: list[CameraRow] = read_camera_index(reader.csv_bytes(f"{mav0}/cam{index}/data.csv"))
-                if not rows:
-                    raise ValueError(f"{source.sequence} cam{index} has an empty data.csv")
-                times_ns: Int64[ndarray, "n_samples"] = np.array([row.timestamp_ns for row in rows], dtype=np.int64)
-                clip: Path = work_dir / f"cam{index}.mp4"
-                encode_frames_to_mp4(
-                    reader.png_frames([f"{mav0}/cam{index}/data/{row.filename}" for row in rows]),
-                    clip,
-                    source=FrameSource("png"),
-                    fps=nominal_fps(times_ns),
-                )
-                camera_times.append(times_ns)
-                clips.append(clip)
-            inertial: TimestampedSamples = read_numeric_csv(reader.csv_bytes(f"{mav0}/imu0/data.csv"), num_values=IMU_VALUE_COLUMNS)
-            if self.device.has_magnetometer:
-                magnetometer = read_numeric_csv(reader.csv_bytes(f"{mav0}/mag0/data.csv"), num_values=MAG_VALUE_COLUMNS)
-            # The gt *layer* is a sibling rrd, but both layers share one zero-based
-            # video_time, so the base layer has to know gt's clock origin too.
-            gt: GtTrajectory = gt_trajectory(read_numeric_csv(reader.csv_bytes(f"{mav0}/gt/data.csv"), num_values=GT_VALUE_COLUMNS))
+    def write_base_layer(
+        self, identity: SequenceIdentity, source: MsdSource, streams: SequenceStreams, target: Path, *, calibration: BasaltCalibration
+    ) -> int:
+        """Write the sensor layer: every camera's video, the IMU, the magnetometer.
 
-        streams: list[Int64[ndarray, "n_samples"]] = [*camera_times, inertial.times_ns]
-        if magnetometer is not None and magnetometer.times_ns.size:
-            streams.append(magnetometer.times_ns)
-        start_time_ns: int = min(int(gt.times_ns[0]), *(int(times_ns[0]) for times_ns in streams))
-        # Deliberately not bounded by gt: duration_ns describes the *sensor* layer.
-        duration_ns: int = max(int(times_ns[-1]) for times_ns in streams) - start_time_ns
-        num_frames: int = max(times_ns.size for times_ns in camera_times)
-
-        with writing.atomic_recording(
-            target,
-            recording_id=identity.recording_id,
-            default_blueprint=self.default_blueprint(),
-        ) as recording:
+        Returns:
+            Frames the longest camera holds, which is the recording's ``num_frames``.
+        """
+        with writing.atomic_recording(target, recording_id=identity.recording_id, default_blueprint=self.default_blueprint()) as recording:
             # Deliberately NO ViewCoordinates at "/": the gt layer owns the root
             # ViewCoordinates, because it is what establishes a world frame at all.
             log_rig_node(recording, RIG, reference=RIG_REFERENCE, num_cameras=self.device.num_cameras, name=self.device.label, kind="ego")
-            for index, (camera, clip, times_ns) in enumerate(zip(cameras, clips, camera_times, strict=True)):
+            for index, (clip, times_ns) in enumerate(zip(streams.clips, streams.camera_times_ns, strict=True)):
                 # The model tag saves a consumer from inferring the projection from the
                 # distortion component. ``rpmax`` is radtan8's own key, so it is already
                 # None on a kb4 camera and AnyValues leaves the key off entirely.
@@ -1214,63 +969,51 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
                     recording,
                     RIG,
                     index,
-                    camera,
+                    camera_parameters(calibration, index, name=f"cam{index}"),
                     name=f"cam{index}",
                     kind="grayscale",
                     image_plane_distance=IMAGE_PLANE_DISTANCE,
                     camera_model=basalt_camera.camera_type,
                     distortion_valid_radius=basalt_camera.intrinsics.rpmax,
                 )
-                log_video_stream(recording, clip, schema.video_path(RIG, index), times_ns=times_ns - start_time_ns)
-            log_imu(
-                recording,
-                RIG,
-                IMU,
-                gyro=ImuChannel(times_ns=inertial.times_ns - start_time_ns, values_xyz=inertial.values[:, :3]),
-                accel=ImuChannel(times_ns=inertial.times_ns - start_time_ns, values_xyz=inertial.values[:, 3:6]),
-                name="imu0",
-            )
-            if magnetometer is not None:
-                log_magnetometer(
-                    recording,
-                    RIG,
-                    MAG,
-                    field=ImuChannel(times_ns=magnetometer.times_ns - start_time_ns, values_xyz=magnetometer.values),
-                    name="mag0",
-                )
+                log_video_stream(recording, clip, schema.video_path(RIG, index), times_ns=times_ns)
+            log_imu(recording, RIG, IMU, gyro=streams.gyro, accel=streams.accel, name="imu0")
+            if streams.magnetometer is not None:
+                log_magnetometer(recording, RIG, MAG, field=streams.magnetometer, name="mag0")
             writing.send_capture_properties(
                 recording,
                 identity,
                 num_cameras=self.device.num_cameras,
-                num_frames=num_frames,
-                start_time_ns=start_time_ns,
+                num_frames=streams.num_frames,
+                start_time_ns=streams.start_time_ns,
                 device=self.config.device,
                 device_label=self.device.label,
-                collection=identity.parts[0],
-                hf_revision=repo_revision(REPO_ID, self.config.revision),
-                duration_ns=duration_ns,
+                collection=source.collection,
+                hf_revision=self.revision,
+                duration_ns=streams.duration_ns,
             )
+        return streams.num_frames
 
-        accel: TimestampedSamples = TimestampedSamples(times_ns=inertial.times_ns, values=inertial.values[:, 3:6])
-        measured: tuple[WorldUpAxis, float] = measured_world_up(gt, accel)
-        if measured[0] != self.device.world_up:
-            print(
-                f"  warning: {self.config.device} declares world_up {self.device.world_up} but {source.sequence} "
-                f"measured {measured[0]} carrying {measured[1]:.2f} of |g|; the rrd still states the declared axis"
-            )
+    def write_gt_layer(self, identity: SequenceIdentity, streams: SequenceStreams, gt_target: Path, *, measured: MeasuredUp) -> None:
+        """Write the ground-truth layer: ``world_T_rig`` at the full rate, its path and its trail.
 
-        gt_times_ns: Int64[ndarray, "n_poses"] = gt.times_ns - start_time_ns
+        Its own recording stream and its own atomic replace, opened only after
+        the base layer has closed, so a failure here cannot half-write that one.
+        The recording id is the base layer's, which is what makes the catalog
+        stack the two onto one segment.
+        """
+        gt: GtTrajectory = streams.gt
         with writing.atomic_recording(gt_target, recording_id=identity.recording_id) as recording:
             # The gt layer establishes a world frame at all, so it — not the base
             # layer — owns the root ViewCoordinates. The axis is the device's
             # declared one, not this sequence's measurement: every rrd of a device
-            # must agree, and a disagreement is the warning above, not a silent
+            # must agree, and a disagreement is a warning, not a silent
             # per-sequence reorientation.
             rr.log("/", WORLD_UP_VIEW_COORDINATES[self.device.world_up], static=True, recording=recording)
             log_pose_track(
                 recording,
                 schema.rig_path(RIG),
-                times_ns=gt_times_ns,
+                times_ns=gt.times_ns,
                 translations_xyz=gt.translations_xyz,
                 quaternions_xyzw=gt.quaternions_xyzw,
             )
@@ -1291,7 +1034,7 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
             )
             rr.send_columns(
                 schema.trail_path(schema.GT_RUN_SOURCE),
-                indexes=[time_column(gt_times_ns)],
+                indexes=[time_column(gt.times_ns)],
                 columns=rr.Points3D.columns(positions=gt.translations_xyz),
                 recording=recording,
             )
@@ -1304,10 +1047,7 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
                     num_sanitized=gt.num_sanitized,
                     source=self.device.gt_source,
                     world_up=self.device.world_up,
-                    measured_up=measured[0],
-                    measured_up_fraction=measured[1],
+                    measured_up=measured.axis,
+                    measured_up_fraction=measured.fraction,
                 ),
             )
-        return RecordingSummary(
-            num_frames=num_frames, num_poses=int(gt.times_ns.size), measured_up=measured[0], measured_up_fraction=measured[1]
-        )

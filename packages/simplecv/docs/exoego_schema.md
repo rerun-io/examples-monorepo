@@ -101,11 +101,13 @@ trivially states `"cam_00"`.
 
 Per camera, on `/world/rig_NN/cam_MM`: `name` (human stream label) and `kind`
 (`"rgb"` / `"grayscale"`, a best-effort content hint). Readers must also treat as
-optional the two further per-camera keys `camera_model` (the projection's own name,
-e.g. `"kb4"` / `"pinhole-radtan8"`, so a consumer need not read it off the distortion
-component) and `distortion_valid_radius` (the radius in normalized image coordinates
-past which that model stops holding), which dataforge writes for the Monado SLAM
-Datasets. The reference camera of a
+optional the two further per-camera keys `camera_model` and
+`distortion_valid_radius`, which dataforge writes for the Monado SLAM Datasets.
+`camera_model` is the **dataset's own model tag**, copied through uninterpreted
+(e.g. `"kb4"` / `"pinhole-radtan8"`, basalt's names): this schema fixes no
+vocabulary for it, and a reader that does not recognise a tag falls back to the
+distortion component, which is authoritative. `distortion_valid_radius` is the
+radius in normalized image coordinates past which that model stops holding. The reference camera of a
 **multi-camera** rig gets a green frustum tint; single-camera rigs are untinted.
 
 ## 5. Ground-truth annotations (paths unchanged from v1)
@@ -146,8 +148,11 @@ When ingesting a recording:
 5. Timeline is `video_time` everywhere.
 6. Every non-camera peer sensor (`/world/rig_*/imu_*`, `/world/rig_*/mag_*`) has a
    static `Transform3D` (`rig_T_imu` / `rig_T_mag`) and a static `kind`
-   (`"imu"` / `"mag"`); a sensor node without its transform is an error, because a
-   reader then cannot place its samples in the rig frame. A magnetometer's `field`
+   (`"imu"` / `"mag"`). This is a **writer-side** rule for now — dataforge's
+   `logging_toolkit._log_sensor_node` is the only thing that enforces it, and no
+   reader rejects a recording that breaks it — but a sensor node without its
+   transform is still wrong, because a reader then cannot place its samples in
+   the rig frame. A magnetometer's `field`
    is in the sensor's native units, which are only known when it carries a `unit`
    AnyValue — treat an absent `unit` as uncalibrated counts, never as tesla. The
    optional `heading` child is derived, so a reader may ignore it entirely.

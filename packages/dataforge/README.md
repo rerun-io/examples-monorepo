@@ -19,7 +19,8 @@ tmux new -d -s dataforge-catalog 'pixi run -e dataforge --frozen dataforge-serve
 # 2. Fetch the raw corpus, or verify a local one (--root <dir> if it is not at the default)
 pixi run -e dataforge --frozen dataforge-download <dataset>
 
-# 3. One base-layer rrd per sequence; existing rrds are skipped
+# 3. One rrd per sequence per layer; existing rrds are skipped
+#    --sequence belongs to the verb, so it goes BEFORE the dataset subcommand
 pixi run -e dataforge --frozen dataforge-convert <dataset>               # --sequence <key> | --force
 
 # 4. Register the rrds and the dataset's two blueprints
@@ -31,7 +32,13 @@ pixi run -e dataforge --frozen dataforge-view <dataset> --rr-config.headless   #
 
 Open the catalog with `rerun rerun+http://127.0.0.1:51235`, or a web viewer
 with `?url=rerun+http://<host>:51235`. Reload the viewer after re-registering;
-it caches catalog entries.
+it caches catalog entries. The `register` and `view` tasks set
+`RERUN_INSECURE_SKIP_HOST_CHECK=1`, as every catalog task in this workspace
+does: the local catalog and the rrds it is handed are served over plain
+`rerun+http` on the loopback or the tailnet, with no certificate to check.
+
+`view` opens **every** layer of the chosen recording — `base/` and, when msd has
+written one, `gt/`. They share a recording id, so the viewer merges them.
 
 ### Your own footage (wildcap)
 
@@ -88,7 +95,6 @@ validity radius as `distortion_valid_radius`.
 ```bash
 export DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/msd-rrd     # rrds go to the NAS
 pixi run -e dataforge --frozen dataforge-download msd --device index
-# --sequence belongs to the verb, so it goes before the dataset subcommand
 pixi run -e dataforge --frozen dataforge-convert --sequence MIO09_short_1_updown msd --device index
 pixi run -e dataforge --frozen dataforge-convert msd --device index   # every sequence, one at a time
 pixi run -e dataforge --frozen dataforge-register msd --device index
@@ -96,11 +102,15 @@ pixi run -e dataforge --frozen dataforge-register msd --device index
 
 `--root` is scratch, not storage: point it at local NVMe (it defaults to
 `packages/dataforge/data/raw/msd`). `--raw-budget-gb` (default 50) caps what
-that directory may hold, so a batch run that fails halfway cannot fill the
-disk; a sequence whose archives alone exceed the cap — the Index and G2 long
-sessions, at 66 and 55 GB — warns and is converted anyway, and leftovers that
-would breach it are a hard error naming the files to delete. `--keep-raw` keeps
-the archive and the encoded mp4s for debugging.
+that directory may hold — this sequence's archives **plus** everything already
+in it, minus HuggingFace's own `.cache/` bookkeeping — so a batch run that fails
+halfway cannot fill the disk. Two things ride on top of the cap and are not
+counted: one camera's extracted PNGs (split archives only) and the temp mp4s,
+both of which live in `work/` for the length of one sequence. A sequence whose
+archives alone exceed the cap — the Index and G2 long sessions, at 66 and 55 GB
+— warns and is converted anyway, but leftovers that breach the cap on their own
+are still a hard error naming the files to delete. `--keep-raw` keeps the
+archive and the encoded mp4s for debugging.
 
 Three sequences ship as Info-ZIP multi-volume sets (`.z01 … .zip`) — the
 `*_long_session` archives of all three headsets — which Python's `zipfile`
@@ -157,9 +167,12 @@ sequence key, the Rerun recording id, and the rrd filename), `paths.py` (the
 layer-major output tree: `base/` and its sibling `gt/`), `schema.py` (the
 `exoego:v2` entity paths and the single `video_time` timeline, as code),
 `writing.py` (atomic publication and the capture/convert recording properties),
-`logging_toolkit.py` (the shared rig-node, video-stream, IMU, and magnetometer
-writers, plus the AV1 encoder), and `transports.py` (`local_verify` and
-`hf_fetch`).
+`logging_toolkit.py` (the shared rig-node, video-stream, camera, IMU,
+magnetometer and pose-track writers, plus the AV1 encoder), `blueprints.py` (the
+single-rig viewer layout robocap and msd both build from), `archives.py` (reading
+members out of a plain zip or an Info-ZIP volume set), `basalt.py` (basalt's
+`calibration.json`: camera models, extrinsics, and the follow frame), and
+`transports.py` (`local_verify` and `hf_fetch`).
 
 Two of those carry their weight for datasets that do not ship video.
 `encode_frames_to_mp4` pipes PNG or raw frames straight into ffmpeg's stdin, so

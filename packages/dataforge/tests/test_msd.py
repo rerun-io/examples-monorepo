@@ -1,9 +1,10 @@
-"""Monado SLAM Datasets: remote discovery, calibration, csv readers, and a full convert.
+"""Monado SLAM Datasets: remote discovery, the csv readers, the blueprints, and a full convert.
 
 Nothing here touches the network. The one HF listing helper and ``hf_fetch`` are
-monkeypatched onto a synthetic sequence zip built in ``tmp_path``, so the convert
-test exercises the real archive reader, the real AV1 encoder and the real
-writers — only the transport is faked.
+monkeypatched onto a synthetic sequence zip built in ``tmp_path``, so a convert
+exercises the real archive reader, the real AV1 encoder and the real writers —
+only the transport is faked. The calibration parser has its own module
+(``test_basalt``), as do the archive readers (``test_archives``).
 """
 
 from __future__ import annotations
@@ -11,9 +12,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
-import zipfile
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -27,22 +26,14 @@ from conftest import column_rows, png_frame, read_back
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
-from simplecv.camera_parameters import (
-    BrownConradyDistortion,
-    Fisheye62Parameters,
-    KannalaBrandtDistortion,
-    PinholeParameters,
-)
 
 from dataforge import paths, schema, transports
+from dataforge.basalt import BasaltCalibration, BasaltPose, FollowFrame
 from dataforge.datasets import msd
 from dataforge.datasets.msd import (
     MSD_DEVICES,
-    BasaltPose,
     CameraRow,
-    FollowFrame,
     GtTrajectory,
-    MsdCalibration,
     MsdConfig,
     MsdDataset,
     MsdDevice,
@@ -50,16 +41,14 @@ from dataforge.datasets.msd import (
     MsdSource,
     TimestampedSamples,
     build_blueprint,
-    camera_parameters,
     follow_eye,
-    follow_frame,
     gt_trajectory,
     measured_world_up,
-    open_member_reader,
     read_camera_index,
     read_numeric_csv,
 )
 from dataforge.identity import SequenceIdentity
+from dataforge.logging_toolkit import ImuChannel
 
 REVISION_SHA: str = "0123456789abcdef0123456789abcdef01234567"
 """Fake resolved repo revision every test's ``repo_revision`` stub returns."""
@@ -128,7 +117,7 @@ def test_discover_groups_split_parts_and_orders_by_collection_then_sequence(monk
     assert [Path(path).suffix for path in split.archive_paths] == [".z01", ".z02", ".zip"]
     assert split.archive_bytes == 7
     assert split.sequence == "MIPB08_long"
-    assert split.collection_path == "M_monado_datasets/MI_valve_index/MIP_playing/MIPB_beat_saber"
+    assert split.collection == "MIPB_beat_saber"
 
 
 def test_discover_ignores_collections_of_other_devices(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -143,141 +132,6 @@ def test_discover_ignores_collections_of_other_devices(monkeypatch: pytest.Monke
     assert dataset.discover() == []
     assert asked == ["M_monado_datasets/MG_reverb_g2/MGO_others"]
 
-
-# ── calibration ───────────────────────────────────────────────────────────
-
-KB4_CALIBRATION: str = """
-{"value0": {
-  "T_imu_cam": [
-    {"px": 0.069, "py": 0.121, "pz": 0.013, "qx": -0.0274, "qy": -0.0269, "qz": -0.7011, "qw": 0.7120},
-    {"px": 0.069, "py": -0.013, "pz": 0.013, "qx": 0.0207, "qy": 0.0331, "qz": -0.6987, "qw": 0.7144}
-  ],
-  "intrinsics": [
-    {"camera_type": "kb4", "intrinsics": {"fx": 420.5, "fy": 420.7, "cx": 469.5, "cy": 479.1,
-      "k1": 0.193, "k2": 0.042, "k3": -0.233, "k4": 0.095}},
-    {"camera_type": "kb4", "intrinsics": {"fx": 421.2, "fy": 421.5, "cx": 467.7, "cy": 484.5,
-      "k1": 0.190, "k2": 0.055, "k3": -0.249, "k4": 0.103}}
-  ],
-  "resolution": [[960, 960], [960, 960]],
-  "imu_update_rate": 1000.0,
-  "cam_time_offset_ns": 0,
-  "vignette": []
-}}
-"""
-"""A two-camera kb4 calibration in basalt's format, trimmed from the Valve Index file."""
-
-RADTAN8_CALIBRATION: str = """
-{"value0": {
-  "comment": "trimmed Reverb G2 calibration",
-  "T_imu_cam": [
-    {"px": -0.052, "py": 0.013, "pz": 0.006, "qx": -0.155, "qy": 0.034, "qz": 0.692, "qw": 0.704}
-  ],
-  "intrinsics": [
-    {"camera_type": "pinhole-radtan8", "intrinsics": {"fx": 269.7, "fy": 269.8, "cx": 322.6, "cy": 228.9,
-      "k1": 0.302, "k2": -0.021, "p1": -0.00025, "p2": 6.1e-05, "k3": 0.0158, "k4": 0.575, "k5": -0.063, "k6": 0.034,
-      "rpmax": 2.7276}}
-  ],
-  "resolution": [[640, 480]]
-}}
-"""
-"""A one-camera radtan8 calibration; ``rpmax`` and ``comment`` must be ignored, not rejected."""
-
-
-def test_kb4_becomes_a_fisheye_with_its_four_radial_terms() -> None:
-    calibration: MsdCalibration = serde.json.from_json(MsdCalibration, KB4_CALIBRATION)
-    camera: PinholeParameters | Fisheye62Parameters = camera_parameters(calibration, 1, name="cam1")
-    assert isinstance(camera, Fisheye62Parameters)
-    assert isinstance(camera.distortion, KannalaBrandtDistortion)
-    assert (camera.distortion.k1, camera.distortion.k2, camera.distortion.k3, camera.distortion.k4) == (0.190, 0.055, -0.249, 0.103)
-    assert (camera.intrinsics.width, camera.intrinsics.height) == (960, 960)
-    assert camera.intrinsics.fl_x == 421.2
-
-
-def test_radtan8_becomes_a_pinhole_with_brown_conrady_and_no_rpmax() -> None:
-    calibration: MsdCalibration = serde.json.from_json(MsdCalibration, RADTAN8_CALIBRATION)
-    camera: PinholeParameters | Fisheye62Parameters = camera_parameters(calibration, 0, name="cam0")
-    assert isinstance(camera, PinholeParameters)
-    assert isinstance(camera.distortion, BrownConradyDistortion)
-    assert (camera.distortion.k1, camera.distortion.k2, camera.distortion.p1, camera.distortion.p2) == (0.302, -0.021, -0.00025, 6.1e-05)
-    assert (camera.distortion.k3, camera.distortion.k4, camera.distortion.k5, camera.distortion.k6) == (0.0158, 0.575, -0.063, 0.034)
-    assert (camera.intrinsics.width, camera.intrinsics.height) == (640, 480)
-
-
-def test_rpmax_is_read_off_a_radtan8_block_and_is_absent_from_a_kb4_one() -> None:
-    """Only the rational model has a validity radius, so only radtan8 carries one."""
-    radtan8: MsdCalibration = serde.json.from_json(MsdCalibration, RADTAN8_CALIBRATION)
-    kb4: MsdCalibration = serde.json.from_json(MsdCalibration, KB4_CALIBRATION)
-    assert radtan8.value0.intrinsics[0].intrinsics.rpmax == 2.7276
-    assert kb4.value0.intrinsics[1].intrinsics.rpmax is None
-
-
-def test_extrinsics_are_the_camera_pose_in_the_rig_frame() -> None:
-    """``T_imu_cam`` is ``rig_T_cam``; the rig frame is the IMU frame."""
-    calibration: MsdCalibration = serde.json.from_json(MsdCalibration, KB4_CALIBRATION)
-    camera: PinholeParameters | Fisheye62Parameters = camera_parameters(calibration, 0, name="cam0")
-    pose: BasaltPose = calibration.value0.T_imu_cam[0]
-    expected_rig_R_cam: Float64[ndarray, "3 3"] = Rotation.from_quat([pose.qx, pose.qy, pose.qz, pose.qw]).as_matrix()
-    rig_R_cam: Float64[ndarray, "3 3"] = np.asarray(camera.extrinsics.world_R_cam, dtype=np.float64)
-    rig_t_cam: Float64[ndarray, "3"] = np.asarray(camera.extrinsics.world_t_cam, dtype=np.float64)
-    np.testing.assert_allclose(rig_R_cam, expected_rig_R_cam, atol=1e-12)
-    np.testing.assert_allclose(rig_t_cam, [pose.px, pose.py, pose.pz], atol=1e-12)
-
-
-# ── follow frame ──────────────────────────────────────────────────────────
-
-UPRIGHT_PAIR_CALIBRATION: str = """
-{"value0": {
-  "T_imu_cam": [
-    {"px": 0.0, "py": 0.0, "pz": 0.0, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0},
-    {"px": 1.0, "py": 0.0, "pz": 0.5, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0}
-  ],
-  "intrinsics": [
-    {"camera_type": "kb4", "intrinsics": {"fx": 1.0, "fy": 1.0, "cx": 0.5, "cy": 0.5}},
-    {"camera_type": "kb4", "intrinsics": {"fx": 1.0, "fy": 1.0, "cx": 0.5, "cy": 0.5}}
-  ],
-  "resolution": [[1, 1], [1, 1]]
-}}
-"""
-"""Two unrotated cameras whose baseline is deliberately *not* perpendicular to them.
-
-Unrotated means RDF as it comes: the optical axis is rig +z and the sensor's
-right is rig +x. The 0.5 m of ``pz`` between the two is the point — a baseline
-with a component along the optical axis, which only an orthogonalized frame
-survives.
-"""
-
-
-def test_the_index_pair_looks_along_rig_z_and_calls_rig_minus_x_up() -> None:
-    """Both answers are known outside this file, from the headset itself.
-
-    The Index's cameras face where the wearer faces, and its 13.4 cm stereo
-    baseline runs along rig y — so y is the lateral axis and the optical axis is
-    rig +z. Up is then ±x, and MIO09's raw accelerometer mean (an accelerometer
-    at rest reads *up*) picks -x, which is the measurement ``MSD_DEVICES``
-    already records for this device.
-    """
-    calibration: MsdCalibration = serde.json.from_json(MsdCalibration, KB4_CALIBRATION)
-    frame: FollowFrame = follow_frame(calibration)
-
-    np.testing.assert_allclose(frame.forward, [0.0, 0.0, 1.0], atol=0.05)
-    np.testing.assert_allclose(frame.up, [-1.0, 0.0, 0.0], atol=0.05)
-
-
-def test_a_baseline_tilted_out_of_the_image_plane_still_yields_an_orthonormal_frame() -> None:
-    """Gram-Schmidt: the baseline is a hint about the lateral axis, not the axis itself."""
-    calibration: MsdCalibration = serde.json.from_json(MsdCalibration, UPRIGHT_PAIR_CALIBRATION)
-    frame: FollowFrame = follow_frame(calibration)
-
-    np.testing.assert_allclose(frame.forward, [0.0, 0.0, 1.0], atol=1e-12)
-    np.testing.assert_allclose(frame.up, [0.0, -1.0, 0.0], atol=1e-12)
-
-
-@pytest.mark.parametrize("calibration_text", [KB4_CALIBRATION, UPRIGHT_PAIR_CALIBRATION])
-def test_a_follow_frame_is_two_orthogonal_unit_vectors(calibration_text: str) -> None:
-    frame: FollowFrame = follow_frame(serde.json.from_json(MsdCalibration, calibration_text))
-    assert np.linalg.norm(frame.forward) == pytest.approx(1.0, abs=1e-9)
-    assert np.linalg.norm(frame.up) == pytest.approx(1.0, abs=1e-9)
-    assert float(np.dot(frame.forward, frame.up)) == pytest.approx(0.0, abs=1e-9)
 
 
 def eye_vector(batch: rr.components.Position3DBatch | rr.components.Vector3DBatch | None) -> list[float]:
@@ -376,11 +230,11 @@ def test_the_world_up_axis_is_measured_by_rotating_the_accelerometer_into_the_wo
     rig_accel_xyz[times_ns >= msd.MEASURED_UP_WINDOW_NS] = [0.1, -0.2, -9.81]
     gt: GtTrajectory = gt_trajectory(constant_pose_gt(times_ns, np.asarray(world_R_rig.as_quat(), dtype=np.float64)))
 
-    measured: tuple[msd.WorldUpAxis, float] = measured_world_up(gt, TimestampedSamples(times_ns=times_ns, values=rig_accel_xyz))
+    measured: msd.MeasuredUp = measured_world_up(gt, ImuChannel(times_ns=times_ns, values_xyz=rig_accel_xyz))
 
-    assert measured[0] == "+y"
+    assert measured.axis == "+y"
     # At rest the whole of gravity lands on that one axis.
-    assert measured[1] == pytest.approx(1.0, abs=0.01)
+    assert measured.fraction == pytest.approx(1.0, abs=0.01)
 
 
 def test_an_empty_gt_is_an_error_not_a_silent_zero() -> None:
@@ -496,40 +350,6 @@ def sequence_tree(root: Path, *, num_cameras: int, num_frames: int, with_magneto
     return StreamClocks(firsts=firsts, lasts=lasts)
 
 
-def test_plain_zip_reader_serves_csvs_and_frames_in_order(tmp_path: Path) -> None:
-    tree: Path = tmp_path / "tree"
-    sequence_tree(tree, num_cameras=2, num_frames=4, with_magnetometer=False)
-    archive: Path = tmp_path / f"{SEQUENCE}.zip"
-    shutil.make_archive(str(archive.with_suffix("")), "zip", root_dir=tree)
-
-    with open_member_reader([archive], tmp_path / "work") as reader:
-        rows: list[CameraRow] = read_camera_index(reader.csv_bytes(f"{SEQUENCE}/mav0/cam1/data.csv"))
-        members: list[str] = [f"{SEQUENCE}/mav0/cam1/data/{row.filename}" for row in rows]
-        frames: list[bytes] = list(reader.png_frames(members))
-    assert len(frames) == 4
-    assert all(frame.startswith(b"\x89PNG") for frame in frames)
-    assert frames == [sequence_frame(index) for index in range(4)]
-
-
-@pytest.mark.skipif(shutil.which("zip") is None, reason="needs Info-ZIP's zip to build a multi-volume fixture")
-def test_split_archive_reader_extracts_one_camera_at_a_time(tmp_path: Path) -> None:
-    """Python's zipfile cannot read a spanned archive at all, so 7-Zip does."""
-    tree: Path = tmp_path / "tree"
-    sequence_tree(tree, num_cameras=2, num_frames=12, with_magnetometer=False)
-    subprocess.run(["zip", "-q", "-0", "-r", "-s", "64k", str(tmp_path / f"{SEQUENCE}.zip"), SEQUENCE], cwd=tree, check=True)
-    volumes: list[Path] = sorted(tmp_path.glob(f"{SEQUENCE}.z*"))
-    assert len(volumes) > 1, "the fixture must really be split for this test to mean anything"
-    with pytest.raises(zipfile.BadZipFile):
-        zipfile.ZipFile(tmp_path / f"{SEQUENCE}.zip").read(f"{SEQUENCE}/mav0/cam0/data/{sorted((tree / SEQUENCE / 'mav0' / 'cam0' / 'data').iterdir())[0].name}")
-
-    work: Path = tmp_path / "work"
-    with open_member_reader(volumes, work) as reader:
-        rows: list[CameraRow] = read_camera_index(reader.csv_bytes(f"{SEQUENCE}/mav0/cam0/data.csv"))
-        frames: list[bytes] = list(reader.png_frames([f"{SEQUENCE}/mav0/cam0/data/{row.filename}" for row in rows]))
-    assert frames == [sequence_frame(index) for index in range(12)]
-    # The camera's extracted PNGs are gone again; peak scratch is one camera, not the sequence.
-    assert not list(work.rglob("*.png"))
-
 
 # ── a fake hub in tmp_path ────────────────────────────────────────────────
 
@@ -544,10 +364,8 @@ class FakeHub:
     """``MsdConfig.root``: where the fake fetch copies archives to."""
     config: MsdConfig
     """Config already pointed at ``root`` for this device."""
-    firsts: dict[str, int]
-    """First timestamp of every stream in the synthetic sequence, by stream name."""
-    lasts: dict[str, int]
-    """Last timestamp of every logged stream; ``gt`` is deliberately absent."""
+    clocks: StreamClocks
+    """What the synthetic tree wrote, so an assertion reads it back rather than recomputes it."""
     fetched: list[tuple[str, ...]]
     """``allow_patterns`` of every ``hf_fetch`` call, in order."""
     archives: list[Path]
@@ -669,8 +487,7 @@ def build_hub(
         remote=remote,
         root=root,
         config=config,
-        firsts=clocks.firsts,
-        lasts=clocks.lasts,
+        clocks=clocks,
         fetched=fetched,
         archives=[root / f"{collection_path}/{SEQUENCE}.zip"],
     )
@@ -686,6 +503,27 @@ def recording_properties(store: rr.experimental.ChunkStore, group: str) -> dict[
     row: dict[str, list[object] | None] = table.to_pylist()[0]
     prefix: str = f"property:{group}:"
     return {name.removeprefix(prefix): values[0] for name, values in row.items() if name.startswith(prefix) and values}
+
+
+@pytest.fixture(scope="module")
+def converted_index(tmp_path_factory, nvenc_ffmpeg: Path) -> Iterator[tuple[FakeHub, Path, Path]]:
+    """One real Index convert, shared by every test that only reads back what it wrote.
+
+    A convert encodes a whole synthetic sequence through NVENC, so the tests that
+    only inspect its two rrds share one. Anything whose *setup* differs — another
+    device, a budget, a patched registry, a captured warning — still converts for
+    itself. ``MonkeyPatch.context()`` because the module-scoped fixture outlives
+    the function-scoped ``monkeypatch``.
+
+    Yields:
+        The hub the convert ran against, its base rrd, and its gt rrd.
+    """
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        hub: FakeHub = build_hub(tmp_path_factory.mktemp("converted"), monkeypatch)
+        dataset: MsdDataset = MsdDataset(hub.config)
+        identity, source = dataset.discover()[0]
+        base_target: Path = dataset.convert(identity, source, force=False)
+        yield hub, base_target, paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
 
 
 # ── download ──────────────────────────────────────────────────────────────
@@ -725,13 +563,13 @@ def test_convert_writes_one_replayable_recording_and_deletes_the_raw(
     profile: MsdDevice = MSD_DEVICES[device]
 
     # t0 is gt's first stamp: it is earlier than every other stream in the fixture.
-    start_time_ns: int = hub.firsts["gt"]
-    assert start_time_ns == min(hub.firsts.values())
+    start_time_ns: int = hub.clocks.firsts["gt"]
+    assert start_time_ns == min(hub.clocks.firsts.values())
     for index in range(profile.num_cameras):
         samples: pa.Table = column_rows(store, f"{schema.video_path(0, index)}:VideoStream:sample")
         assert samples.num_rows == 6, f"cam{index} lost samples"
         first_ns: int = samples.column(schema.TIMELINE).combine_chunks().cast(pa.int64()).to_pylist()[0]
-        assert first_ns == hub.firsts[f"cam{index}"] - start_time_ns
+        assert first_ns == hub.clocks.firsts[f"cam{index}"] - start_time_ns
 
     assert column_rows(store, f"{schema.gyro_path(0, 0)}:Scalars:scalars").num_rows == 60
     assert column_rows(store, f"{schema.accel_path(0, 0)}:Scalars:scalars").num_rows == 60
@@ -746,7 +584,7 @@ def test_convert_writes_one_replayable_recording_and_deletes_the_raw(
     assert capture["device_label"] == profile.label
     assert capture["collection"] == profile.collections[0]
     assert capture["hf_revision"] == REVISION_SHA
-    assert capture["duration_ns"] == max(hub.lasts.values()) - start_time_ns
+    assert capture["duration_ns"] == max(hub.clocks.lasts.values()) - start_time_ns
 
     # Raw is scratch: the archive and every temp mp4 are gone once the rrd exists.
     assert not hub.archives[0].exists()
@@ -798,19 +636,16 @@ def test_a_sequence_with_both_layers_already_written_is_skipped_without_fetching
     assert hub.fetched == []
 
 
-def test_the_logged_camera_node_carries_rig_T_cam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
+def test_the_logged_camera_node_carries_rig_T_cam(converted_index: tuple[FakeHub, Path, Path]) -> None:
     """``T_imu_cam`` is the camera's pose in the rig frame, and that is what lands on the node.
 
     ``log_pinhole`` stores the child-from-parent step, so the recording holds
     ``cam_T_rig``; inverting it must give back the calibration's pose.
     """
-    hub: FakeHub = build_hub(tmp_path, monkeypatch)
-    dataset: MsdDataset = MsdDataset(hub.config)
-    identity, source = dataset.discover()[0]
-    target: Path = dataset.convert(identity, source, force=False)
+    hub, target, _ = converted_index
 
-    calibration: MsdCalibration = serde.json.from_json(
-        MsdCalibration, (hub.remote / "M_monado_datasets/MI_valve_index/extras/calibration.json").read_text()
+    calibration: BasaltCalibration = serde.json.from_json(
+        BasaltCalibration, (hub.remote / "M_monado_datasets/MI_valve_index/extras/calibration.json").read_text()
     )
     store: rr.experimental.ChunkStore = read_back(target)
     for index in range(2):
@@ -844,14 +679,9 @@ def test_a_radtan8_camera_node_names_its_projection_and_carries_its_validity_rad
     assert row[f"{node}:distortion_valid_radius"][0] == pytest.approx(FIXTURE_RPMAX)
 
 
-def test_a_kb4_camera_node_names_its_projection_and_claims_no_validity_radius(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
-) -> None:
+def test_a_kb4_camera_node_names_its_projection_and_claims_no_validity_radius(converted_index: tuple[FakeHub, Path, Path]) -> None:
     """kb4 is valid over the whole fisheye, so it declares no radius at all."""
-    hub: FakeHub = build_hub(tmp_path, monkeypatch, device="index")
-    dataset: MsdDataset = MsdDataset(hub.config)
-    identity, source = dataset.discover()[0]
-    target: Path = dataset.convert(identity, source, force=False)
+    _, target, _ = converted_index
 
     store: rr.experimental.ChunkStore = read_back(target)
     node: str = schema.cam_path(0, 0)
@@ -866,44 +696,33 @@ def test_a_kb4_camera_node_names_its_projection_and_claims_no_validity_radius(
 # ── gt layer ──────────────────────────────────────────────────────────────
 
 
-def test_the_gt_layer_is_a_sibling_rrd_of_the_same_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
+def test_the_gt_layer_is_a_sibling_rrd_of_the_same_recording(converted_index: tuple[FakeHub, Path, Path]) -> None:
     """One convert writes both layers: same recording id, own layer directory."""
-    hub: FakeHub = build_hub(tmp_path, monkeypatch)
-    dataset: MsdDataset = MsdDataset(hub.config)
-    identity, source = dataset.discover()[0]
-
-    base_target: Path = dataset.convert(identity, source, force=False)
-    gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
+    _, base_target, gt_target = converted_index
 
     assert gt_target.is_file()
     assert gt_target.name == base_target.name
     assert (gt_target.parent.name, base_target.parent.name) == (paths.GT_LAYER, paths.BASE_LAYER)
 
 
-def test_the_gt_layer_animates_the_rig_node_at_the_full_gt_rate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
-    hub: FakeHub = build_hub(tmp_path, monkeypatch)
-    dataset: MsdDataset = MsdDataset(hub.config)
-    identity, source = dataset.discover()[0]
-    dataset.convert(identity, source, force=False)
+def test_the_gt_layer_animates_the_rig_node_at_the_full_gt_rate(converted_index: tuple[FakeHub, Path, Path]) -> None:
+    hub, _, gt_target = converted_index
 
-    store: rr.experimental.ChunkStore = read_back(paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity))
+    store: rr.experimental.ChunkStore = read_back(gt_target)
     poses: pa.Table = column_rows(store, f"{schema.rig_path(0)}:Transform3D:translation")
     assert poses.num_rows == GT_NUM_POSES, "gt is logged raw: no resampling, one row per csv row"
     times_ns: list[int] = poses.column(schema.TIMELINE).combine_chunks().cast(pa.int64()).to_pylist()
     # gt is the earliest stream in the fixture, so it owns t0 and starts at video_time 0.
-    assert hub.firsts["gt"] == min(hub.firsts.values())
+    assert hub.clocks.firsts["gt"] == min(hub.clocks.firsts.values())
     assert times_ns[0] == 0
     assert times_ns[-1] == (GT_NUM_POSES - 1) * GT_PERIOD_NS
 
 
-def test_the_rig_quaternion_is_the_file_quaternion_reordered_to_xyzw(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
+def test_the_rig_quaternion_is_the_file_quaternion_reordered_to_xyzw(converted_index: tuple[FakeHub, Path, Path]) -> None:
     """The csv writes the scalar first; a viewer reading the rrd must see it last."""
-    hub: FakeHub = build_hub(tmp_path, monkeypatch)
-    dataset: MsdDataset = MsdDataset(hub.config)
-    identity, source = dataset.discover()[0]
-    dataset.convert(identity, source, force=False)
+    _, _, gt_target = converted_index
 
-    store: rr.experimental.ChunkStore = read_back(paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity))
+    store: rr.experimental.ChunkStore = read_back(gt_target)
     stored: list[list[list[float]]] = column_rows(store, f"{schema.rig_path(0)}:Transform3D:quaternion").column(1).to_pylist()
     expected_xyzw: Float64[ndarray, "4"] = np.asarray(FIXTURE_WORLD_R_RIG.as_quat(), dtype=np.float64)
     # float32 on the wire, so a loose tolerance is the honest one.
@@ -912,14 +731,11 @@ def test_the_rig_quaternion_is_the_file_quaternion_reordered_to_xyzw(tmp_path: P
     np.testing.assert_allclose(np.asarray(stored[GT_DROPOUT_ROW][0], dtype=np.float64), [0.0, 0.0, 0.0, 1.0], atol=1e-6)
 
 
-def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
+def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail(converted_index: tuple[FakeHub, Path, Path]) -> None:
     """The overview strip is static and whole; the trail is one point per pose, for the cursor window."""
-    hub: FakeHub = build_hub(tmp_path, monkeypatch)
-    dataset: MsdDataset = MsdDataset(hub.config)
-    identity, source = dataset.discover()[0]
-    dataset.convert(identity, source, force=False)
+    _, _, gt_target = converted_index
 
-    store: rr.experimental.ChunkStore = read_back(paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity))
+    store: rr.experimental.ChunkStore = read_back(gt_target)
     trajectory: str = schema.trajectory_path("gt")
     strips: list[list[list[float]]] = (
         store.reader(index=None, contents=trajectory).to_arrow_table().to_pylist()[0][f"{trajectory}:LineStrips3D:strips"]
@@ -929,31 +745,21 @@ def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail(tmp_path: Path, m
     assert column_rows(store, f"{schema.trail_path('gt')}:Points3D:positions").num_rows == GT_NUM_POSES
 
 
-def test_only_the_gt_layer_states_the_world_axes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
+def test_only_the_gt_layer_states_the_world_axes(converted_index: tuple[FakeHub, Path, Path]) -> None:
     """The pose layer establishes a world frame, so it owns the root ViewCoordinates."""
-    hub: FakeHub = build_hub(tmp_path, monkeypatch)
-    dataset: MsdDataset = MsdDataset(hub.config)
-    identity, source = dataset.discover()[0]
-    base_target: Path = dataset.convert(identity, source, force=False)
+    _, base_target, gt_target = converted_index
 
-    gt_root: pa.Table = read_back(paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)).reader(
-        index=None, contents="/"
-    ).to_arrow_table()
+    gt_root: pa.Table = read_back(gt_target).reader(index=None, contents="/").to_arrow_table()
     assert "/:ViewCoordinates:xyz" in gt_root.column_names
     declared: list[int] = [int(direction.value) for direction in msd.WORLD_UP_VIEW_COORDINATES[MSD_DEVICES["index"].world_up].coordinates]
     assert [int(value) for value in gt_root.to_pylist()[0]["/:ViewCoordinates:xyz"][0]] == declared
     assert "/:ViewCoordinates:xyz" not in read_back(base_target).reader(index=None, contents="/").to_arrow_table().column_names
 
 
-def test_the_gt_properties_report_the_poses_the_repairs_and_the_measured_axis(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
-) -> None:
-    hub: FakeHub = build_hub(tmp_path, monkeypatch)
-    dataset: MsdDataset = MsdDataset(hub.config)
-    identity, source = dataset.discover()[0]
-    dataset.convert(identity, source, force=False)
+def test_the_gt_properties_report_the_poses_the_repairs_and_the_measured_axis(converted_index: tuple[FakeHub, Path, Path]) -> None:
+    _, _, gt_target = converted_index
 
-    store: rr.experimental.ChunkStore = read_back(paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity))
+    store: rr.experimental.ChunkStore = read_back(gt_target)
     gt: dict[str, object] = recording_properties(store, "gt")
     assert gt["num_poses"] == GT_NUM_POSES
     assert gt["duration_ns"] == (GT_NUM_POSES - 1) * GT_PERIOD_NS
