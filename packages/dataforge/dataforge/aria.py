@@ -95,17 +95,10 @@ ImuSamples: TypeAlias = tuple[ImuChannel, ImuChannel]
 def open_vrs(path: Path) -> data_provider.VrsDataProvider:
     """Open one VRS file for reading.
 
-    Args:
-        path: The ``.vrs`` file.
-
-    Returns:
-        A provider over that single file.
-
-    Raises:
-        FileNotFoundError: If the file is missing, truncated or otherwise
-            unreadable — the expected failure after an interrupted download.
-            ``create_vrs_data_provider`` answers all of those with ``None``,
-            which would fail much later as an ``AttributeError``.
+    ``create_vrs_data_provider`` answers a missing, truncated or otherwise
+    unreadable file — the expected state after an interrupted download — with
+    ``None``, which would surface much later as an ``AttributeError``, so the
+    return is checked here.
     """
     provider: data_provider.VrsDataProvider | None = data_provider.create_vrs_data_provider(str(path))
     if provider is None:
@@ -125,14 +118,6 @@ def fisheye62_from_aria(calibration: CameraCalibration, *, rig_T_cam: Float64[nd
     ``rig_T_cam``: ``log_pinhole`` logs ``cam_R_world``/``cam_t_world`` with
     ``from_parent=True``, i.e. the parent-to-child ``cam_T_rig``, which is
     exactly the inverse simplecv computes.
-
-    Args:
-        calibration: The camera's entry in the VRS device calibration.
-        rig_T_cam: This camera's pose in the rig (imu-right) frame.
-        name: Label to carry on the camera, e.g. ``"camera-slam-left"``.
-
-    Returns:
-        The same camera in the form ``log_pinhole`` consumes.
 
     Raises:
         ValueError: If the camera is not a FISHEYE624 (no Gen1 Aria stream is not).
@@ -185,11 +170,7 @@ class AriaRig:
     def from_provider(cls, provider: data_provider.VrsDataProvider) -> AriaRig:
         """Read the device calibration out of an open VRS and rebase it on imu-right.
 
-        Args:
-            provider: An open provider, e.g. from ``open_vrs``.
-
-        Returns:
-            The rig, with one entry per camera and IMU stream of a Gen1 Aria.
+        The result holds one entry per camera and IMU stream of a Gen1 Aria.
 
         Raises:
             ValueError: The file carries no factory calibration, or none for one
@@ -242,13 +223,9 @@ def iter_frames(provider: data_provider.VrsDataProvider, stream_id: AriaStreamId
     or dtype partway fails here rather than as a garbled video hundreds of
     frames later.
 
-    Args:
-        provider: An open provider.
-        stream_id: A camera stream (``1201-1``, ``1201-2``, ``214-1``).
-
     Yields:
-        ``(capture_timestamp_ns, image)`` with a ``uint8`` gray ``h w`` frame for
-        the SLAM cameras and a ``uint8`` ``h w 3`` frame for camera-rgb.
+        ``(capture_timestamp_ns, image)``: a ``uint8`` gray ``h w`` frame for the
+        SLAM cameras, a ``uint8`` ``h w 3`` one for camera-rgb.
     """
     stream: StreamId = StreamId(stream_id)
     first_hw: tuple[int, ...] | None = None
@@ -268,16 +245,9 @@ def iter_frames(provider: data_provider.VrsDataProvider, stream_id: AriaStreamId
 def frame_timestamps_ns(provider: data_provider.VrsDataProvider, stream_id: AriaStreamId) -> Int64[ndarray, "n_frames"]:
     """Capture timestamps of one stream, in record order, on Aria's device clock.
 
-    Args:
-        provider: An open provider.
-        stream_id: Any stream in the file.
-
-    Returns:
-        One nanosecond timestamp per record, ascending.
-
     Raises:
-        ValueError: If the stream's timestamps are not strictly increasing, which
-            would break the 1:1 mapping onto video samples.
+        ValueError: If they are not strictly increasing, which would break the
+            1:1 mapping of a timestamp onto its video sample.
     """
     times_ns: Int64[ndarray, "n_frames"] = np.asarray(
         provider.get_timestamps_ns(StreamId(stream_id), TimeDomain.DEVICE_TIME), dtype=np.int64
@@ -298,12 +268,8 @@ def read_imu(provider: data_provider.VrsDataProvider, stream_id: AriaStreamId) -
     channels, so the two share one timestamp vector (none of the LaMAria
     sequences examined so far contains one).
 
-    Args:
-        provider: An open provider.
-        stream_id: ``1202-1`` (imu-right) or ``1202-2`` (imu-left).
-
     Returns:
-        The gyro channel in rad/s and the accel channel in m/s^2.
+        The gyro channel in rad/s and the accel channel in m/s^2, in that order.
     """
     stream: StreamId = StreamId(stream_id)
     times: list[int] = []
@@ -345,13 +311,8 @@ def read_pseudo_gt(path: Path) -> PseudoGt:
     """Read a ``ground_truth/pseudo_dense/<seq>.txt`` trajectory.
 
     Each line is ``ts_ns tx ty tz qx qy qz qw`` — a translation in metres and a
-    quaternion in x, y, z, w order, the same convention the calibration files use.
-
-    Args:
-        path: The pGT text file.
-
-    Returns:
-        The trajectory, in file order.
+    quaternion in x, y, z, w order, the same convention the calibration files
+    use. Rows stay in file order.
     """
     rows: Float64[ndarray, "n_poses 8"] = np.loadtxt(path, dtype=np.float64).reshape(-1, 8)
     world_T_cam0: Float64[ndarray, "n_poses 4 4"] = np.tile(np.eye(4, dtype=np.float64), (rows.shape[0], 1, 1))
@@ -437,12 +398,6 @@ def read_control_points(path: Path) -> ControlPointSet:
     The published coordinates are LV95/LN02, so they are six-digit numbers whose
     float32 round-off is centimetres; every position is translated by
     ``CUSTOM_ORIGIN_XYZ`` here, once, exactly as the official tooling does.
-
-    Args:
-        path: The sparse ground-truth JSON.
-
-    Returns:
-        The surveyed points and every detection of them.
     """
     document: dict = json.loads(path.read_text())
     points: list[ControlPoint] = []
@@ -481,11 +436,7 @@ def read_control_points(path: Path) -> ControlPointSet:
 
 
 def stream_id_from_image_name(image_name: str) -> AriaStreamId:
-    """The stream an extracted frame came from, e.g. ``1201-2-02100-1010.384.jpg`` → ``1201-2``.
-
-    Raises:
-        ValueError: If the name does not start with a known Aria stream id.
-    """
+    """The stream an extracted frame came from, e.g. ``1201-2-02100-1010.384.jpg`` → ``1201-2``."""
     for stream_id in CAMERA_STREAM_IDS:
         if image_name.startswith(f"{stream_id}-"):
             return stream_id
