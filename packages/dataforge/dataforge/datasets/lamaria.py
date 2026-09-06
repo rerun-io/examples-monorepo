@@ -50,12 +50,15 @@ import rerun.blueprint as rrb
 import serde
 import serde.json
 
-from dataforge import paths, transports
+from dataforge import paths, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
 
 LamariaSplit: TypeAlias = Literal["training", "test"]
 """Which half of the benchmark a sequence belongs to; only ``training`` ships ground truth."""
+
+SPLITS: tuple[LamariaSplit, ...] = ("training", "test")
+"""Both raw_data index pages ``download`` consults to resolve a sequence's split."""
 
 LamariaSet: TypeAlias = Literal["controlled", "additional"]
 """Upstream's two collections: the ``R_*`` controlled experimental set, and the
@@ -193,6 +196,10 @@ def sequence_challenge(sequence: str) -> str | None:
 class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
     """Converts LaMAria sequences into exoego:v2 base-layer recordings."""
 
+    def archive_url(self, *parts: str) -> str:
+        """Absolute URL of one archive path, e.g. ``raw_data/training/R_01_easy.vrs``."""
+        return "/".join([self.config.base_url.rstrip("/"), *parts])
+
     def index(self, directory: str) -> list[transports.IndexEntry]:
         """List one Apache index page under ``base_url`` as ``(name, size_bytes)``.
 
@@ -206,8 +213,7 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
             requests.HTTPError: If the archive answered 4xx/5xx — the flaky-archive
                 case, and one worth failing on rather than treating as "empty".
         """
-        url: str = f"{self.config.base_url.rstrip('/')}/{directory}/"
-        page: requests.Response = requests.get(url, timeout=INDEX_TIMEOUT_S)
+        page: requests.Response = requests.get(f"{self.archive_url(directory)}/", timeout=INDEX_TIMEOUT_S)
         page.raise_for_status()
         return transports.parse_apache_index(page.text)
 
@@ -260,8 +266,74 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         return pairs
 
     def download(self) -> None:
-        """Resolve the archive index pages, write the manifest, fetch the small files."""
-        raise NotImplementedError("download lands with the index resolution slice")
+        """Resolve the archive's index pages, write the manifest, fetch the small files.
+
+        Deliberately **not** a bulk fetch: the default selection alone is 18.2 GB
+        of VRS and ``convert`` pulls one sequence at a time, so what is worth
+        having up front is the few megabytes of calibration and ground truth
+        plus a record of what the archive holds. Which ``raw_data/<split>/``
+        index lists a sequence is what resolves its split; the two ground-truth
+        indexes resolve what it ships.
+        """
+        selected: list[str] = sorted(set(self.config.sequences))
+        splits: dict[str, LamariaSplit] = {}
+        vrs_display_bytes: dict[str, int] = {}
+        for split in SPLITS:
+            for name, size in self.index(f"{RAW_DATA_DIR}/{split}"):
+                sequence: str = name.removesuffix(".vrs")
+                if name.endswith(".vrs") and sequence in selected:
+                    splits[sequence] = split
+                    vrs_display_bytes[sequence] = size
+        unlisted: list[str] = [name for name in selected if name not in splits]
+        if unlisted:
+            raise ValueError(f"no raw_data index at {self.config.base_url} lists a VRS for {', '.join(unlisted)}")
+
+        calibrated: set[str] = {
+            name.removesuffix(".json")
+            for split in sorted(set(splits.values()))
+            for name, _ in self.index(f"{CALIBRATION_DIR}/{split}")
+            if name.endswith(".json")
+        }
+        uncalibrated: list[str] = [name for name in selected if name not in calibrated]
+        if uncalibrated:
+            raise ValueError(f"{CALIBRATION_DIR} lists no published calibration for {', '.join(uncalibrated)}; the archive layout changed")
+        with_pseudo_gt: set[str] = {name.removesuffix(".txt") for name, _ in self.index(PSEUDO_GT_REMOTE_DIR) if name.endswith(".txt")}
+        with_control_points: set[str] = {name.removesuffix(".json") for name, _ in self.index(CONTROL_POINTS_REMOTE_DIR) if name.endswith(".json")}
+
+        records: list[SequenceRecord] = [
+            SequenceRecord(
+                sequence=name,
+                split=splits[name],
+                vrs_url=self.archive_url(RAW_DATA_DIR, splits[name], f"{name}.vrs"),
+                vrs_display_bytes=vrs_display_bytes[name],
+                has_pseudo_gt=name in with_pseudo_gt,
+                has_control_points=name in with_control_points,
+            )
+            for name in selected
+        ]
+        manifest_path: Path = self.config.root / MANIFEST_NAME
+        with writing.atomic_write(manifest_path) as temp_path:
+            temp_path.write_text(serde.json.to_json(LamariaManifest(base_url=self.config.base_url, sequences=records)))
+
+        for record in records:
+            source: LamariaSource = self.source(record)
+            transports.http_fetch(self.archive_url(CALIBRATION_DIR, record.split, f"{record.sequence}.json"), dest=source.calibration_path)
+            if source.pseudo_gt_path is not None:
+                transports.http_fetch(self.archive_url(PSEUDO_GT_REMOTE_DIR, f"{record.sequence}.txt"), dest=source.pseudo_gt_path)
+            if source.control_points_path is not None:
+                transports.http_fetch(self.archive_url(CONTROL_POINTS_REMOTE_DIR, f"{record.sequence}.json"), dest=source.control_points_path)
+
+        total_display_bytes: int = sum(record.vrs_display_bytes for record in records)
+        print(
+            f"lamaria: {len(records)} sequence(s) from {self.config.base_url}, "
+            f"{total_display_bytes / 1e9:.1f} GB of VRS for convert to fetch one at a time"
+        )
+        for record in records:
+            ground_truth: str = ", ".join(
+                label for label, present in (("pGT", record.has_pseudo_gt), ("control points", record.has_control_points)) if present
+            )
+            print(f"  {record.sequence:<16} {record.split:<8} {record.vrs_display_bytes / 1e9:5.1f} GB  {ground_truth or 'no ground truth'}")
+        print(f"  small files → {self.config.root}/<split>/<seq>/, manifest → {manifest_path}")
 
     def convert(self, identity: SequenceIdentity, source: LamariaSource, *, force: bool) -> Path:
         """Fetch one VRS, encode it, write the base-layer rrd, and delete the raw."""
