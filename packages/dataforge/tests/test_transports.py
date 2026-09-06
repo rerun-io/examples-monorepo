@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import serve  # pyrefly: ignore[missing-import]
 
 from dataforge import transports
 from dataforge.transports import StaleLocalFile, gdrive_fetch, hf_fetch, http_fetch, http_index, local_verify, parse_apache_index
@@ -116,9 +117,9 @@ FILE_PATH: str = "/file.bin"
 """Where the loopback archive serves ``PAYLOAD``."""
 
 
-def test_http_fetch_downloads_a_fresh_file(tmp_path: Path, serving) -> None:
+def test_http_fetch_downloads_a_fresh_file(tmp_path: Path) -> None:
     dest: Path = tmp_path / "nested" / "file.bin"
-    with serving({FILE_PATH: PAYLOAD}) as archive:
+    with serve({FILE_PATH: PAYLOAD}) as archive:
         returned: Path = http_fetch(f"{archive.base_url}{FILE_PATH}", dest=dest, timeout_s=5.0)
     assert returned == dest
     assert dest.read_bytes() == PAYLOAD
@@ -126,60 +127,60 @@ def test_http_fetch_downloads_a_fresh_file(tmp_path: Path, serving) -> None:
     assert [(entry.method, entry.range_header) for entry in archive.served] == [("HEAD", None), ("GET", None)]
 
 
-def test_http_fetch_skips_a_file_that_is_already_complete(tmp_path: Path, serving) -> None:
+def test_http_fetch_skips_a_file_that_is_already_complete(tmp_path: Path) -> None:
     dest: Path = tmp_path / "file.bin"
     dest.write_bytes(PAYLOAD)
-    with serving({FILE_PATH: PAYLOAD}) as archive:
+    with serve({FILE_PATH: PAYLOAD}) as archive:
         assert http_fetch(f"{archive.base_url}{FILE_PATH}", dest=dest, timeout_s=5.0) == dest
     assert dest.read_bytes() == PAYLOAD
     assert [entry.method for entry in archive.served] == ["HEAD"], "a complete file must cost one HEAD and no body"
 
 
-def test_http_fetch_resumes_a_partial_file(tmp_path: Path, serving) -> None:
+def test_http_fetch_resumes_a_partial_file(tmp_path: Path) -> None:
     dest: Path = tmp_path / "file.bin"
     already: int = 4_096
     dest.write_bytes(PAYLOAD[:already])
-    with serving({FILE_PATH: PAYLOAD}) as archive:
+    with serve({FILE_PATH: PAYLOAD}) as archive:
         http_fetch(f"{archive.base_url}{FILE_PATH}", dest=dest, timeout_s=5.0)
     assert dest.read_bytes() == PAYLOAD, "the tail must be appended, not prepended to a second copy of the head"
     assert [(entry.method, entry.range_header) for entry in archive.served] == [("HEAD", None), ("GET", f"bytes={already}-")]
 
 
-def test_http_fetch_restarts_when_the_server_ignores_the_range(tmp_path: Path, serving) -> None:
+def test_http_fetch_restarts_when_the_server_ignores_the_range(tmp_path: Path) -> None:
     """A 200 answer to a ``Range`` request carries the whole file, so appending would double the head."""
     dest: Path = tmp_path / "file.bin"
     dest.write_bytes(PAYLOAD[:1_000])
-    with serving({FILE_PATH: PAYLOAD}, honor_ranges=False) as archive:
+    with serve({FILE_PATH: PAYLOAD}, honor_ranges=False) as archive:
         http_fetch(f"{archive.base_url}{FILE_PATH}", dest=dest, timeout_s=5.0)
     assert dest.read_bytes() == PAYLOAD
 
 
-def test_http_fetch_refuses_a_local_file_longer_than_the_remote_one(tmp_path: Path, serving) -> None:
+def test_http_fetch_refuses_a_local_file_longer_than_the_remote_one(tmp_path: Path) -> None:
     """No retry can fix this one, so it must not spend the budget either."""
     dest: Path = tmp_path / "file.bin"
     dest.write_bytes(PAYLOAD + b"extra")
-    with serving({FILE_PATH: PAYLOAD}) as archive, pytest.raises(StaleLocalFile, match="delete it and refetch"):
+    with serve({FILE_PATH: PAYLOAD}) as archive, pytest.raises(StaleLocalFile, match="delete it and refetch"):
         http_fetch(f"{archive.base_url}{FILE_PATH}", dest=dest, timeout_s=5.0)
     assert [entry.method for entry in archive.served] == ["HEAD"], "one attempt, and no body transferred"
 
 
-def test_http_fetch_gives_up_after_its_attempts_and_keeps_the_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, serving) -> None:
+def test_http_fetch_gives_up_after_its_attempts_and_keeps_the_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(transports, "RETRY_BACKOFF_S", (0.0,))
     dest: Path = tmp_path / "file.bin"
     served: int = 2_048
     # Every attempt is truncated the same way, so the budget runs out.
-    with serving({FILE_PATH: PAYLOAD}, body_limit=served) as archive, pytest.raises(RuntimeError, match="2 attempts"):
+    with serve({FILE_PATH: PAYLOAD}, body_limit=served) as archive, pytest.raises(RuntimeError, match="2 attempts"):
         http_fetch(f"{archive.base_url}{FILE_PATH}", dest=dest, timeout_s=5.0, attempts=2)
     assert dest.stat().st_size >= served, "the partial file is the point: the next attempt resumes from it"
 
 
 def test_http_fetch_retries_a_stalled_transfer_and_resumes_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], serving
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The first GET hangs up halfway; the transport's own retry appends the rest."""
     monkeypatch.setattr(transports, "RETRY_BACKOFF_S", (0.0,))
     dest: Path = tmp_path / "file.bin"
-    with serving({FILE_PATH: PAYLOAD}, stall_once=".bin") as archive:
+    with serve({FILE_PATH: PAYLOAD}, stall_once=".bin") as archive:
         assert http_fetch(f"{archive.base_url}{FILE_PATH}", dest=dest, timeout_s=5.0) == dest
     assert dest.read_bytes() == PAYLOAD
     assert [entry.range_header for entry in archive.served if entry.method == "GET"] == [None, f"bytes={len(PAYLOAD) // 2}-"]
@@ -189,14 +190,14 @@ def test_http_fetch_retries_a_stalled_transfer_and_resumes_it(
 # ── http_index ────────────────────────────────────────────────────────────
 
 
-def test_http_index_reads_a_page_and_parses_it(serving) -> None:
-    with serving({"/training/": APACHE_INDEX.encode()}) as archive:
+def test_http_index_reads_a_page_and_parses_it() -> None:
+    with serve({"/training/": APACHE_INDEX.encode()}) as archive:
         listed: list[transports.IndexEntry] = http_index(f"{archive.base_url}/training/")
     assert [entry.name for entry in listed] == ["R_01_easy.vrs", "R_04_medium.vrs", "R_01_easy.json", "sequence_3_17.vrs"]
 
 
-def test_http_index_gives_up_on_a_page_the_archive_does_not_have(monkeypatch: pytest.MonkeyPatch, serving) -> None:
+def test_http_index_gives_up_on_a_page_the_archive_does_not_have(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(transports, "RETRY_BACKOFF_S", (0.0,))
-    with serving({}) as archive, pytest.raises(RuntimeError, match="2 attempts"):
+    with serve({}) as archive, pytest.raises(RuntimeError, match="2 attempts"):
         http_index(f"{archive.base_url}/gone/", attempts=2)
     assert [entry.method for entry in archive.served] == ["GET", "GET"], "a 404 is retried, not treated as an empty directory"

@@ -194,21 +194,6 @@ def serve(
         thread.join(timeout=5.0)
 
 
-def read_back(rrd: Path) -> rr.experimental.ChunkStore:
-    """Load a saved rrd the way a consumer does: reader → store → queryable views.
-
-    The stream is materialized because ``from_chunks`` declares ``Sequence[Chunk]``;
-    these recordings are a few dozen rows, so the list costs nothing.
-    """
-    return rr.experimental.ChunkStore.from_chunks(list(rr.experimental.RrdReader(rrd).stream()))
-
-
-@pytest.fixture(scope="session")
-def serving():
-    """``serve``, as a fixture: a server's lifetime belongs to pytest, not to an import."""
-    return serve
-
-
 # ── the official aria_calibrations JSON ───────────────────────────────────
 #
 # Only the tests read this file: ``convert`` takes every calibration out of the
