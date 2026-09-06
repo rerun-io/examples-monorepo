@@ -880,3 +880,130 @@ def test_a_stalled_vrs_fetch_is_retried_and_resumed(
     ranges: list[str] = [entry for entry in fake.requested if entry.endswith(".vrs")]
     assert len(ranges) >= 3, f"expected HEAD, a stalled GET and a resumed GET, got {ranges}"
     assert "resuming" in capsys.readouterr().out
+
+
+# ── the gt world frame, the trajectory, and the measured up axis ───────────
+
+
+def test_the_first_ten_controlled_sequences_are_posed_in_the_mps_frame() -> None:
+    """Upstream posed ``R_01``…``R_10`` in MPS's own gravity-aligned frame and everything else in LV95/LN02."""
+    assert lamaria.gt_world("R_01_easy") == "mps"
+    assert lamaria.gt_world("R_10_hard") == "mps"
+    assert lamaria.gt_world("R_11_5cp") == "lv95"
+    assert lamaria.gt_world("sequence_1_19") == "lv95"
+
+
+def test_a_controlled_name_without_an_index_is_an_error_not_a_guess() -> None:
+    with pytest.raises(ValueError, match="index"):
+        lamaria.gt_world("R_x_easy")
+
+
+def test_the_rig_pose_is_the_published_camera_pose_seen_from_the_rig() -> None:
+    """``world_T_rig = world_T_cam0 @ cam0_T_rig``, and the fixture pins which way simplecv stores it.
+
+    ``Fisheye62Parameters.extrinsics.world_T_cam`` holds ``rig_T_cam0`` here (its
+    "world" is the rig), so the composition has to invert it. At an identity
+    ``world_T_cam0`` the rig therefore lands on ``cam0_T_rig``'s translation,
+    which is minus the rotated ``T_b_s`` translation of cam0.
+    """
+    rig_T_cam0: Float64[ndarray, "4 4"] = published_rig_T_cam("cam0")
+    identity_pose: aria.PseudoGt = aria.PseudoGt(
+        times_ns=np.array([DEVICE_T0_NS], dtype=np.int64), world_T_cam0=np.eye(4, dtype=np.float64).reshape(1, 4, 4)
+    )
+
+    trajectory: lamaria.GtTrajectory = lamaria.rig_trajectory(identity_pose, rig_T_cam0=rig_T_cam0)
+
+    expected_xyz: Float64[ndarray, "3"] = -rig_T_cam0[:3, :3].T @ rig_T_cam0[:3, 3]
+    np.testing.assert_allclose(trajectory.translations_xyz[0], expected_xyz, atol=1e-12)
+    # And the rotation is cam0's, inverted: the rig is rolled out of the camera frame.
+    np.testing.assert_allclose(
+        Rotation.from_quat(trajectory.quaternions_xyzw[0]).as_matrix(), rig_T_cam0[:3, :3].T, atol=1e-12
+    )
+    assert trajectory.length_m == 0.0, "one pose covers no distance"
+
+
+def test_a_constant_rotation_leaves_the_path_length_the_camera_walked() -> None:
+    """The rig sits a fixed offset from cam0, so a rigid walk has one length in both frames."""
+    rig_T_cam0: Float64[ndarray, "4 4"] = published_rig_T_cam("cam0")
+    world_T_cam0: Float64[ndarray, "n_poses 4 4"] = np.tile(np.eye(4, dtype=np.float64), (4, 1, 1))
+    world_T_cam0[:, :3, 3] = np.column_stack([0.25 * np.arange(4.0), np.zeros(4), np.zeros(4)])
+
+    trajectory: lamaria.GtTrajectory = lamaria.rig_trajectory(
+        aria.PseudoGt(times_ns=DEVICE_T0_NS + np.arange(4, dtype=np.int64) * SLAM_PERIOD_NS, world_T_cam0=world_T_cam0),
+        rig_T_cam0=rig_T_cam0,
+    )
+
+    assert trajectory.length_m == pytest.approx(0.75)
+    assert trajectory.duration_s == pytest.approx(3 * SLAM_PERIOD_NS / 1e9)
+
+
+def test_an_empty_pseudo_gt_yields_an_empty_trajectory() -> None:
+    """A sequence with control points but no pGT still gets a gt layer, without poses."""
+    empty: aria.PseudoGt = aria.PseudoGt(times_ns=np.zeros(0, dtype=np.int64), world_T_cam0=np.zeros((0, 4, 4)))
+
+    trajectory: lamaria.GtTrajectory = lamaria.rig_trajectory(empty, rig_T_cam0=published_rig_T_cam("cam0"))
+
+    assert trajectory.times_ns.size == 0
+    assert trajectory.length_m == 0.0
+    assert trajectory.duration_s == 0.0
+
+
+def resting_accel(times_ns: Int64[ndarray, "n_samples"], accel_xyz: Float64[ndarray, "3"]) -> ImuChannel:
+    """An accelerometer reading one fixed vector, in the rig frame, at ``times_ns``."""
+    return ImuChannel(times_ns=times_ns, values_xyz=np.tile(accel_xyz, (times_ns.size, 1)))
+
+
+def constant_rotation_trajectory(times_ns: Int64[ndarray, "n_poses"], world_R_rig: Rotation) -> lamaria.GtTrajectory:
+    """A gt trajectory that holds one orientation at the world origin."""
+    return lamaria.GtTrajectory(
+        times_ns=times_ns,
+        translations_xyz=np.zeros((times_ns.size, 3)),
+        quaternions_xyzw=np.tile(np.asarray(world_R_rig.as_quat(), dtype=np.float64), (times_ns.size, 1)),
+        length_m=0.0,
+        duration_s=float((times_ns[-1] - times_ns[0]) / 1e9),
+    )
+
+
+def test_the_world_up_axis_is_measured_by_rotating_the_accelerometer_into_the_world() -> None:
+    """An accelerometer at rest reads +g pointing *up*, so ``world_R_rig @ a_rig`` averages to the up axis."""
+    times_ns: Int64[ndarray, "n_samples"] = DEVICE_T0_NS + np.arange(4_000, dtype=np.int64) * IMU_PERIOD_NS
+    accel: ImuChannel = resting_accel(times_ns, np.array([0.1, -0.2, 9.81]))
+    # The second half of the capture points the other way; the 2 s window must ignore it.
+    accel.values_xyz[times_ns >= DEVICE_T0_NS + lamaria.MEASURED_UP_WINDOW_NS] = [0.1, -0.2, -9.81]
+
+    measured: lamaria.WorldUp = lamaria.measured_world_up(constant_rotation_trajectory(times_ns, Rotation.identity()), accel)
+
+    assert measured.axis == "+z"
+    assert measured.fraction_of_g == pytest.approx(1.0, abs=0.01)
+
+
+def test_a_rig_lying_on_its_side_measures_the_axis_its_own_gravity_points_along() -> None:
+    """The mapping is a real rotation, not a relabelling: +90 deg about x sends the rig's +z onto the world's -y."""
+    times_ns: Int64[ndarray, "n_samples"] = DEVICE_T0_NS + np.arange(1_000, dtype=np.int64) * IMU_PERIOD_NS
+    world_R_rig: Rotation = Rotation.from_euler("x", 90.0, degrees=True)
+
+    measured: lamaria.WorldUp = lamaria.measured_world_up(
+        constant_rotation_trajectory(times_ns, world_R_rig), resting_accel(times_ns, np.array([0.0, 0.0, 9.80665]))
+    )
+
+    assert measured.axis == "-y"
+    assert measured.fraction_of_g == pytest.approx(1.0, abs=1e-6)
+
+
+def test_measuring_the_world_up_axis_needs_both_a_pose_and_a_sample() -> None:
+    empty_times: Int64[ndarray, "n_samples"] = np.zeros(0, dtype=np.int64)
+    times_ns: Int64[ndarray, "n_samples"] = DEVICE_T0_NS + np.arange(10, dtype=np.int64) * IMU_PERIOD_NS
+    with pytest.raises(ValueError, match="both a gt pose and an accelerometer sample"):
+        lamaria.measured_world_up(
+            constant_rotation_trajectory(times_ns, Rotation.identity()), resting_accel(empty_times, np.array([0.0, 0.0, 9.8]))
+        )
+
+
+def test_an_accelerometer_that_stops_before_the_ground_truth_starts_is_an_error() -> None:
+    """The window opens where both streams are live, so an IMU that quit first leaves it empty."""
+    times_ns: Int64[ndarray, "n_poses"] = DEVICE_T0_NS + np.arange(10, dtype=np.int64) * IMU_PERIOD_NS
+    far_earlier: Int64[ndarray, "n_samples"] = times_ns - 60_000_000_000
+    with pytest.raises(ValueError, match="no accelerometer sample within"):
+        lamaria.measured_world_up(
+            constant_rotation_trajectory(times_ns, Rotation.identity()), resting_accel(far_earlier, np.array([0.0, 0.0, 9.8]))
+        )

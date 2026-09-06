@@ -54,9 +54,10 @@ import rerun.blueprint as rrb
 import serde
 import serde.json
 from beartype.roar import BeartypeException
-from jaxtyping import Float64, Int64
+from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 from projectaria_tools.core import data_provider
+from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Fisheye62Parameters
 from simplecv.rerun_log_utils import log_pinhole
 
@@ -115,6 +116,76 @@ RIG_REFERENCE: str = "imu_00"
 """The rig frame *is* imu-right's, LaMAria's published body frame."""
 GT_SOURCE: str = "gt"
 """``/world/runs/gt/`` — the run name the gt layer writes its trajectory under."""
+
+GtWorld: TypeAlias = Literal["mps", "lv95"]
+"""Which world frame a sequence's ground truth is expressed in."""
+
+MPS_WORLD_MAX_INDEX: int = 10
+"""Highest ``R_NN`` index posed in the MPS frame; ``R_11`` onwards is surveyed in LV95/LN02."""
+
+WorldUpAxis: TypeAlias = Literal["+x", "-x", "+y", "-y", "+z", "-z"]
+"""Signed axis of a world frame that gravity points *away* from."""
+
+WORLD_UP_VIEW_COORDINATES: dict[WorldUpAxis, rr.components.ViewCoordinates] = {
+    "+x": rr.ViewCoordinates.RIGHT_HAND_X_UP,
+    "-x": rr.ViewCoordinates.RIGHT_HAND_X_DOWN,
+    "+y": rr.ViewCoordinates.RIGHT_HAND_Y_UP,
+    "-y": rr.ViewCoordinates.RIGHT_HAND_Y_DOWN,
+    "+z": rr.ViewCoordinates.RIGHT_HAND_Z_UP,
+    "-z": rr.ViewCoordinates.RIGHT_HAND_Z_DOWN,
+}
+"""Root ``ViewCoordinates`` per world up axis, right-handed throughout: naming the up
+axis is the whole decision, since handedness then fixes the other two."""
+
+WORLD_UP: WorldUpAxis = "+z"
+"""The up axis every LaMAria world is documented to have.
+
+Both frames are Z-up by construction — MPS's is gravity-aligned, and LV95/LN02 is a
+projected national grid with levelled heights — so this is a *published* axis rather
+than a guess. ``convert`` still measures it from gravity on every sequence
+(``measured_world_up``) and warns rather than reorienting one rrd on its own."""
+
+WORLD_UP_MIN_FRACTION_OF_G: float = 0.9
+"""How much of |g| the measured axis must carry before ``convert`` accepts the measurement
+as unambiguous; below it the averaging window was not near rest."""
+
+POSITIVE_WORLD_AXES: tuple[WorldUpAxis, WorldUpAxis, WorldUpAxis] = ("+x", "+y", "+z")
+"""Axis names by column index, for a positive mean; the negative row is below."""
+NEGATIVE_WORLD_AXES: tuple[WorldUpAxis, WorldUpAxis, WorldUpAxis] = ("-x", "-y", "-z")
+"""Axis names by column index, for a negative mean."""
+STANDARD_GRAVITY_MS2: float = 9.80665
+"""Standard gravity; ``measured_world_up`` reports its result as a fraction of this."""
+MEASURED_UP_WINDOW_NS: int = 2_000_000_000
+"""How much of a sequence's start ``measured_world_up`` averages over: a wearer has
+usually not started walking yet, so the mean there is nearly pure gravity."""
+
+GT_TRAJECTORY_COLOR: tuple[int, int, int] = (110, 180, 255)
+"""Fixed tint of the whole gt path; one trajectory is one quantity, not a per-row class."""
+GT_TRAJECTORY_RADIUS_M: float = 0.01
+"""Line radius of the gt path, in metres — a walk is hundreds of metres long, so it is thin."""
+GT_TRAIL_COLOR: tuple[int, int, int] = (255, 215, 90)
+"""Fixed tint of the recent-motion trail; warm, so it reads against the cool full path."""
+GT_TRAIL_RADIUS_M: float = 0.02
+"""Point radius of the trail, in metres, at the pGT's 20 Hz."""
+
+CONTROL_POINT_COLOR: tuple[int, int, int] = (120, 255, 160)
+"""Tint of a fully surveyed (levelled) control point."""
+CONTROL_POINT_UNLEVELLED_COLOR: tuple[int, int, int] = (255, 130, 90)
+"""Tint of a control point the survey never levelled; its height is a placeholder, not a measurement."""
+CONTROL_POINT_RADIUS_FLOOR_M: float = 0.1
+"""Smallest radius a control point is drawn with. The survey uncertainties are
+centimetres, which is invisible against a 1 km walk, so the sphere is a marker
+whose radius only *grows* with a genuinely uncertain point."""
+UNLEVELLED_LABEL_SUFFIX: str = " (no height)"
+"""What an unlevelled point's label says, so a viewer never reads its ``z`` as data."""
+CONTROL_POINT_MAX_DISTANCE_M: float = 50.0
+"""How far a levelled control point may sit from the rig trajectory before ``convert``
+refuses the sequence: its tag was photographed by these cameras, so a bigger gap means
+the world frame or the origin translation is wrong, not that the walk was long."""
+CP_UV_COLOR: tuple[int, int, int] = (120, 255, 160)
+"""Tint of a control-point detection in a camera image; the same green as the 3D point."""
+CP_UV_RADIUS_PX: float = 4.0
+"""Marker radius of a detection, in pixels of the native 640x480 SLAM image."""
 
 FOLLOW_FORWARD: tuple[float, float, float] = (0.018, -0.967, -0.253)
 """Where the wearer looks, in the rig (imu-right) frame.
@@ -269,6 +340,53 @@ class SequenceStreams:
 
 
 @dataclass(frozen=True, slots=True)
+class GtTrajectory:
+    """A sequence's pGT as the rig moves through it, in the columns ``rr.Transform3D`` takes."""
+
+    times_ns: Int64[ndarray, "n_poses"]
+    """Pose times on Aria's device clock — the pGT's own stamps, unshifted."""
+    translations_xyz: Float64[ndarray, "n_poses 3"]
+    """``world_t_rig``, metres."""
+    quaternions_xyzw: Float64[ndarray, "n_poses 4"]
+    """``world_R_rig``, scalar **last**, which is the order ``Transform3D`` wants."""
+    length_m: float
+    """Path length walked, summed over consecutive poses; 0.0 for fewer than two."""
+    duration_s: float
+    """Span from the first pose to the last; 0.0 for fewer than two."""
+
+
+@dataclass(frozen=True, slots=True)
+class WorldUp:
+    """A measurement of which world axis is up, and how much of gravity landed on it.
+
+    A dataclass and not a ``NamedTuple``: beartype resolves a NamedTuple's field
+    annotations as forward references, which a ``Literal`` alias like
+    ``WorldUpAxis`` is not.
+    """
+
+    axis: WorldUpAxis
+    """The dominant signed world axis of the mean upward acceleration."""
+    fraction_of_g: float
+    """The mean's component along that axis as a fraction of standard gravity. A health
+    check, not a calibration: near 1 means the window really was near rest and the axis
+    is unambiguous, much less means the mean is not gravity."""
+
+
+@dataclass(frozen=True, slots=True)
+class ControlPointReach:
+    """How close the rig trajectory came to one surveyed control point."""
+
+    name: str
+    """Survey name of the point."""
+    has_height: bool
+    """Whether the survey levelled it; an unlevelled point's ``z`` is a placeholder."""
+    distance_m: float
+    """Closest approach in 3D; only meaningful for a levelled point."""
+    horizontal_distance_m: float
+    """Closest approach in the horizontal plane, which is all an unlevelled point can be judged on."""
+
+
+@dataclass(frozen=True, slots=True)
 class RecordingSummary:
     """What one converted sequence turned out to hold; ``convert`` prints it."""
 
@@ -278,6 +396,14 @@ class RecordingSummary:
     """Span of every logged stream, in seconds."""
     control_point_count: int
     """Surveyed control points the sequence ships; 0 when it was never surveyed."""
+    num_poses: int
+    """Ground-truth poses written into the gt layer; 0 when the sequence ships no pGT."""
+    trajectory_len_m: float
+    """Path length of those poses, in metres."""
+    num_detections: int
+    """Control-point detections written under the camera pinholes."""
+    world_up: WorldUp | None
+    """This sequence's own gravity measurement, or ``None`` when it has no poses to rotate with."""
 
 
 @dataclass
@@ -328,6 +454,143 @@ def sequence_challenge(sequence: str) -> str | None:
     if sequence_set(sequence) != "controlled":
         return None
     return sequence.rsplit("_", 1)[-1]
+
+
+def gt_world(sequence: str) -> GtWorld:
+    """Which world frame a sequence's published ground truth lives in.
+
+    Upstream posed the first ten controlled sequences with MPS, whose world is
+    Aria's own gravity-aligned frame, and surveyed everything from ``R_11``
+    onwards — the control-point sequences and the whole additional set — in
+    Switzerland's LV95/LN02 grid. Both are Z-up; they differ by hundreds of
+    kilometres of easting, which ``aria.CUSTOM_ORIGIN_XYZ`` takes back out.
+
+    Args:
+        sequence: Upstream sequence name.
+
+    Returns:
+        ``mps`` for ``R_01``…``R_10``, ``lv95`` for everything else.
+
+    Raises:
+        ValueError: A controlled name whose second token is not its index, so
+            which world it belongs to cannot be read off it.
+    """
+    if sequence_set(sequence) != "controlled":
+        return "lv95"
+    index: str = sequence.split("_")[1]
+    if not index.isdigit():
+        raise ValueError(f"{sequence} looks like a controlled sequence but has no index, so its world frame is unknown")
+    return "mps" if int(index) <= MPS_WORLD_MAX_INDEX else "lv95"
+
+
+def rig_trajectory(pseudo_gt: aria.PseudoGt, *, rig_T_cam0: Float64[ndarray, "4 4"]) -> GtTrajectory:
+    """Move the published camera trajectory onto the rig node, as Rerun columns.
+
+    The pGT poses camera-slam-left (``world_T_cam0``) while the schema animates the
+    *rig*, which is imu-right, so every pose is composed with ``cam0_T_rig``:
+    ``world_T_rig = world_T_cam0 @ inv(rig_T_cam0)``. Rows are kept exactly as
+    published, repeats and all — the corpus repeats a pose verbatim while the
+    wearer stands still, and dropping those would change how a viewer draws a stop.
+
+    Args:
+        pseudo_gt: The sequence's published trajectory.
+        rig_T_cam0: camera-slam-left's pose in the rig frame, i.e. what
+            ``Fisheye62Parameters.extrinsics.world_T_cam`` holds for ``cam_00``
+            (its "world" *is* the rig) and what the published calibration calls
+            ``cam0.T_b_s``.
+
+    Returns:
+        The rig's pose per published stamp, plus the path length and span.
+    """
+    cam0_T_rig: Float64[ndarray, "4 4"] = np.linalg.inv(rig_T_cam0)
+    world_T_rig: Float64[ndarray, "n_poses 4 4"] = pseudo_gt.world_T_cam0 @ cam0_T_rig
+    translations_xyz: Float64[ndarray, "n_poses 3"] = np.ascontiguousarray(world_T_rig[:, :3, 3])
+    quaternions_xyzw: Float64[ndarray, "n_poses 4"] = np.asarray(
+        Rotation.from_matrix(world_T_rig[:, :3, :3]).as_quat(), dtype=np.float64
+    ).reshape(-1, 4)
+    steps_m: Float64[ndarray, "n_steps"] = np.linalg.norm(np.diff(translations_xyz, axis=0), axis=1)
+    return GtTrajectory(
+        times_ns=pseudo_gt.times_ns,
+        translations_xyz=translations_xyz,
+        quaternions_xyzw=quaternions_xyzw,
+        length_m=float(steps_m.sum()),
+        duration_s=float((pseudo_gt.times_ns[-1] - pseudo_gt.times_ns[0]) / 1e9) if pseudo_gt.times_ns.size else 0.0,
+    )
+
+
+def measured_world_up(gt: GtTrajectory, accel: ImuChannel, *, window_ns: int = MEASURED_UP_WINDOW_NS) -> WorldUp:
+    """Measure which world axis is up, from gravity as imu-right reads it.
+
+    LaMAria states its worlds are Z-up, and this is what checks the claim instead
+    of trusting it. An accelerometer at rest measures the *reaction* to gravity,
+    so its reading points **up**; imu-right *is* the rig frame, so rotating each
+    sample into the world with the ground truth's own orientation
+    (``world_R_rig @ a_rig``) and averaging yields a vector along the world's up
+    axis. Only the first couple of seconds count: a wearer has usually not
+    started walking yet, and the mean gets noisier the longer the window.
+
+    Args:
+        gt: The sequence's rig trajectory, whose rotations do the rotating.
+        accel: imu-right's accelerometer channel in m/s^2, on the same device clock.
+        window_ns: Length of the averaging window, from the first time both streams cover.
+
+    Returns:
+        The dominant signed world axis and the fraction of |g| it carried.
+
+    Raises:
+        ValueError: Either stream is empty, or they do not overlap inside the window.
+    """
+    if gt.times_ns.size == 0 or accel.times_ns.size == 0:
+        raise ValueError("measuring the world up axis needs both a gt pose and an accelerometer sample")
+    start_ns: int = max(int(gt.times_ns[0]), int(accel.times_ns[0]))
+    inside: Bool[ndarray, "n_samples"] = (accel.times_ns >= start_ns) & (accel.times_ns < start_ns + window_ns)
+    if not inside.any():
+        raise ValueError(f"no accelerometer sample within {window_ns / 1e9:g} s of {start_ns}, where the ground truth starts")
+
+    window_times_ns: Int64[ndarray, "n_window"] = accel.times_ns[inside]
+    after: Int64[ndarray, "n_window"] = np.clip(np.searchsorted(gt.times_ns, window_times_ns), 0, gt.times_ns.size - 1)
+    before: Int64[ndarray, "n_window"] = np.clip(after - 1, 0, gt.times_ns.size - 1)
+    nearest: Int64[ndarray, "n_window"] = np.where(
+        np.abs(gt.times_ns[before] - window_times_ns) <= np.abs(gt.times_ns[after] - window_times_ns), before, after
+    )
+    world_accel_xyz: Float64[ndarray, "n_window 3"] = Rotation.from_quat(gt.quaternions_xyzw[nearest]).apply(accel.values_xyz[inside])
+    mean_xyz: Float64[ndarray, "3"] = world_accel_xyz.mean(axis=0)
+
+    axis_index: int = int(np.argmax(np.abs(mean_xyz)))
+    names: tuple[WorldUpAxis, WorldUpAxis, WorldUpAxis] = POSITIVE_WORLD_AXES if mean_xyz[axis_index] >= 0.0 else NEGATIVE_WORLD_AXES
+    return WorldUp(axis=names[axis_index], fraction_of_g=float(abs(mean_xyz[axis_index]) / STANDARD_GRAVITY_MS2))
+
+
+def control_point_reach(points: tuple[aria.ControlPoint, ...], translations_xyz: Float64[ndarray, "n_poses 3"]) -> tuple[ControlPointReach, ...]:
+    """Closest approach of the rig trajectory to every surveyed control point.
+
+    Every point's tag was photographed by these cameras, so a levelled point has
+    to sit within a few metres of where the wearer walked. That makes this the
+    one check that catches a wrong world frame or a missing origin translation,
+    which no amount of self-consistent maths would.
+
+    Args:
+        points: The sequence's surveyed points, already translated by ``CUSTOM_ORIGIN_XYZ``.
+        translations_xyz: ``world_t_rig`` per pose, metres.
+
+    Returns:
+        One entry per point, in the same order; empty distances become ``inf``
+        when the sequence has no poses to measure against.
+    """
+    reaches: list[ControlPointReach] = []
+    for point in points:
+        offsets_xyz: Float64[ndarray, "n_poses 3"] = translations_xyz - point.position_xyz_m
+        distances_m: Float64[ndarray, "n_poses"] = np.linalg.norm(offsets_xyz, axis=1)
+        horizontal_m: Float64[ndarray, "n_poses"] = np.linalg.norm(offsets_xyz[:, :2], axis=1)
+        reaches.append(
+            ControlPointReach(
+                name=point.name,
+                has_height=point.has_height,
+                distance_m=float(distances_m.min()) if distances_m.size else float("inf"),
+                horizontal_distance_m=float(horizontal_m.min()) if horizontal_m.size else float("inf"),
+            )
+        )
+    return tuple(reaches)
 
 
 def open_streams(vrs_path: Path) -> SequenceStreams:
