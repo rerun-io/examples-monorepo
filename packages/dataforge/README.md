@@ -225,9 +225,10 @@ holds everything the published ground truth establishes.
 
 The pGT poses camera-slam-left, and the schema animates the rig, so every pose
 is composed: `world_T_rig = world_T_cam0 @ inv(rig_T_cam0)`, with `rig_T_cam0`
-straight out of the VRS device calibration (the published `cam0.T_b_s` agrees to
-5e-16). The transform is logged child-to-parent, i.e. the stored value *is*
-`world_T_rig`, so every camera frustum rides it.
+straight out of the published `cam0.T_b_s` (which the VRS device calibration
+agrees with to 5e-16, so this layer needs no VRS). The transform is logged
+child-to-parent, i.e. the stored value *is* `world_T_rig`, so every camera
+frustum rides it.
 
 Both world frames are Z-up (MPS's own for `R_01`…`R_10`, Switzerland's LV95/LN02
 grid for everything from `R_11` on; the gt properties record which as
@@ -238,11 +239,14 @@ and what it refuses is stated once each, at `WORLD_UP_MIN_FRACTION_OF_G` and
 all five default sequences read **+z** at 0.92 to 1.01 of |g|, and on the three
 surveyed ones every levelled point comes within 0.7 m of the walk.
 
-Both layers come out of one VRS fetch, so `convert` skips a sequence only when
-both exist and rebuilds both when either is missing. A sequence the archive
-publishes no ground truth for (the whole test split) writes no `gt` rrd at all
-and is done once its base rrd exists. `register` then registers both layers
-under one dataset:
+Each layer is gated on its own file, and the base recording is the canonical
+raw: `convert` fetches and encodes only when the base rrd is missing, and writes
+the gt layer from the published ground truth, the published calibration and
+imu-right's accelerometer read back out of that base rrd. So regenerating the
+whole gt corpus is `rm gt/*.rrd` and a `dataforge-convert` — seconds per
+sequence, no network. A sequence the archive publishes no ground truth for (the
+whole test split) writes no `gt` rrd at all and is done once its base rrd
+exists. `register` then registers both layers under one dataset:
 
 ```bash
 # --catalog-url belongs to the verb, so it precedes the dataset subcommand
