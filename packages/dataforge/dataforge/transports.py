@@ -23,9 +23,12 @@ ATTEMPTS: int = 4
 """How many times a transport tries one URL before giving up."""
 
 RETRY_BACKOFF_S: tuple[float, ...] = (5.0, 15.0, 45.0)
-"""Waits before each retry. The archives these transports read go down for minutes
-at a time, so a budget spent in milliseconds is no budget at all; the last wait
-repeats if a caller asks for more attempts than there are entries."""
+"""Waits before each retry: four attempts spread over about a minute, which is
+what a stalled transfer or a moment of packet loss needs. A longer outage — the
+LaMAria archive was down for hours during development — is not something to wait
+out in-process: the run gives up, keeps the bytes, and the next one resumes for
+free. The last wait repeats if a caller asks for more attempts than there are
+entries."""
 
 
 class IndexEntry(NamedTuple):
@@ -99,12 +102,7 @@ def hf_fetch(
 def attempts_of(url: str, attempts: int) -> Iterator[int]:
     """Yield attempt numbers ``1..attempts``, waiting ``RETRY_BACKOFF_S`` before each retry.
 
-    Args:
-        url: What is being retried, for the waiting line.
-        attempts: How many tries in total.
-
-    Yields:
-        The attempt number, after whatever wait precedes it.
+    ``url`` is only for the waiting line it prints.
     """
     for attempt in range(1, attempts + 1):
         if attempt > 1:
@@ -129,15 +127,9 @@ def http_fetch(url: str, *, dest: Path, timeout_s: float = 60.0, attempts: int =
     * Nothing is ever deleted: a stalled transfer **leaves the bytes on disk**,
       so the next attempt — this call's own, or the next run's — resumes.
 
-    Args:
-        url: Absolute ``http(s)://`` URL of one file.
-        dest: Local path to write; parent directories are created.
-        timeout_s: Per-request connect/read timeout. A stalled read raises
-            rather than hanging forever, and the next attempt resumes.
-        attempts: How many times to try, spaced by ``RETRY_BACKOFF_S``.
-
-    Returns:
-        ``dest``, so callers can chain the fetch into a read.
+    ``dest`` is returned so a caller can chain the fetch into a read; its parent
+    directories are created, and ``timeout_s`` bounds each request so a stalled
+    read raises instead of hanging forever.
 
     Raises:
         StaleLocalFile: ``dest`` is longer than the remote file, which no retry
@@ -185,13 +177,8 @@ def http_fetch(url: str, *, dest: Path, timeout_s: float = 60.0, attempts: int =
 def http_index(url: str, *, timeout_s: float = 30.0, attempts: int = ATTEMPTS) -> list[IndexEntry]:
     """Read one Apache fancy-index page, retrying the way ``http_fetch`` does.
 
-    Args:
-        url: Absolute URL of the directory listing, trailing slash included.
-        timeout_s: Per-request connect/read timeout; a page is a few kilobytes.
-        attempts: How many times to try, spaced by ``RETRY_BACKOFF_S``.
-
-    Returns:
-        One entry per listed file, in page order.
+    Entries come back in page order. ``url`` needs its trailing slash, and
+    ``timeout_s`` is per request — a page is a few kilobytes.
 
     Raises:
         RuntimeError: Every attempt failed. An archive that answers 4xx/5xx is
@@ -214,13 +201,7 @@ def parse_apache_index(html: str) -> list[IndexEntry]:
 
     Rows without a file (the ``Parent Directory`` link, the ``?C=N;O=D`` sort
     headers, subdirectories) and rows whose size cell is Apache's ``-`` are
-    dropped, so every entry names something fetchable.
-
-    Args:
-        html: The index page's body.
-
-    Returns:
-        One entry per listed file, in the page's order.
+    dropped, so every entry names something fetchable, in the page's own order.
     """
     listed: list[IndexEntry] = []
     for row in APACHE_ROW_RE.finditer(html):

@@ -125,9 +125,12 @@ projected national grid with levelled heights — so this is a *published* axis 
 than a guess. ``convert`` still measures it from gravity on every sequence
 (``measured_world_up``) and warns rather than reorienting one rrd on its own."""
 
-WORLD_UP_MIN_FRACTION_OF_G: float = 0.9
+WORLD_UP_MIN_FRACTION_OF_G: float = 0.8
 """How much of |g| the measured axis must carry before ``convert`` accepts the measurement
-as unambiguous; below it the averaging window was not near rest."""
+as unambiguous; below it the averaging window was not near rest and the warning fires.
+
+The five default sequences measure 0.92 to 1.01 g, so this leaves a visible margin
+for a wearer who is already moving at the start rather than tracking the corpus."""
 
 STANDARD_GRAVITY_MS2: float = 9.80665
 """Standard gravity; ``measured_world_up`` reports its result as a fraction of this."""
@@ -164,7 +167,12 @@ UNLEVELLED_LABEL_SUFFIX: str = " (no height)"
 CONTROL_POINT_MAX_DISTANCE_M: float = 50.0
 """How far a levelled control point may sit from the rig trajectory before ``convert``
 refuses the sequence: its tag was photographed by these cameras, so a bigger gap means
-the world frame or the origin translation is wrong, not that the walk was long."""
+the world frame or the origin translation is wrong, not that the walk was long.
+
+This aborts where a low measured world-up fraction only warns, and the asymmetry is
+deliberate: the up axis is declared once for the whole corpus and a weak measurement
+says the averaging window was moving, while a distant point is per-sequence evidence
+that these coordinates do not belong to this walk."""
 CP_UV_RADIUS_PX: float = 4.0
 """Marker radius of a control-point detection, in pixels of the native 640x480
 SLAM image; it is drawn in ``CONTROL_POINT_COLOR``, the same green as the 3D point."""
@@ -185,7 +193,11 @@ FOLLOW_BACK_M: float = 0.9
 FOLLOW_UP_M: float = 0.45
 """How far above the wearer the follow eye sits, along their own up."""
 FOLLOW_AHEAD_M: float = 0.3
-"""How far ahead of the wearer the eye aims, so the shot leads the motion."""
+"""How far ahead of the wearer the eye aims, so the shot leads the motion.
+
+The three distances were tuned together on R_01_easy, for a shot that holds the
+three camera frusta and the last ten seconds of trail in view at once without the
+ground filling it."""
 FOLLOW_TRAIL_SECONDS: float = -10.0
 """Cursor-relative start of the gt trail's visible window in the Follow view."""
 IMAGE_PLANE_DISTANCE: float = 0.1

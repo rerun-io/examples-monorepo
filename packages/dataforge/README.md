@@ -229,28 +229,14 @@ straight out of the VRS device calibration (the published `cam0.T_b_s` agrees to
 5e-16). The transform is logged child-to-parent, i.e. the stored value *is*
 `world_T_rig`, so every camera frustum rides it.
 
-Two world frames exist and both are Z-up: `R_01`…`R_10` are posed in MPS's own
-gravity-aligned frame, and everything from `R_11` onwards — the control-point
-sequences and the whole additional set — is surveyed in Switzerland's LV95/LN02
-grid, translated by `CUSTOM_ORIGIN = (2683594.412, 1247727.747, 417.307)` exactly
-as the official tooling does. The gt properties record which (`gt_world`). The up
-axis is published rather than guessed, but `convert` still **measures** it on
-every sequence — `measured_world_up` rotates the first two seconds of imu-right
-samples into the world with the ground truth's own orientation and averages,
-since an accelerometer at rest reads +g pointing up — and warns instead of
-reorienting one rrd on its own. All five default sequences measure **+z**, at
-0.92 to 1.01 of |g|.
-
-A surveyed control point is drawn as a labelled sphere at its translated
-position, with a radius that only grows past 0.1 m for a genuinely uncertain
-point. A point the survey never levelled has no height: its `z` is the origin's
-own, so it gets a distinct colour and an `OB1881 (no height)` label, and its
-`NaN` height uncertainty never reaches Rerun. Every **levelled** point has to lie
-within 50 m of the trajectory — its tag was photographed by these cameras — and
-`convert` prints each point's closest approach and refuses the sequence
-otherwise, because distance is what catches a wrong world frame or a missing
-origin translation. On the three surveyed sequences every levelled point comes
-within 0.7 m.
+Both world frames are Z-up (MPS's own for `R_01`…`R_10`, Switzerland's LV95/LN02
+grid for everything from `R_11` on; the gt properties record which as
+`gt_world`), and the surveyed points follow §5 of
+[`exoego_schema.md`](../simplecv/docs/exoego_schema.md). What `convert` measures
+and what it refuses is stated once each, at `WORLD_UP_MIN_FRACTION_OF_G` and
+`CONTROL_POINT_MAX_DISTANCE_M` in `datasets/lamaria.py`. Measured on the corpus:
+all five default sequences read **+z** at 0.92 to 1.01 of |g|, and on the three
+surveyed ones every levelled point comes within 0.7 m of the walk.
 
 Both layers come out of one VRS fetch, so `convert` skips a sequence only when
 both exist and rebuilds both when either is missing. A sequence the archive
