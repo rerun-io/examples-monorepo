@@ -2752,6 +2752,10 @@ pytorch-cpu = ">=2.8.0"
 # 7zz: the only extractor that reads MSD's Info-ZIP multi-volume archives
 # (<seq>.z01/.z02/.zip), which Python's zipfile refuses outright.
 7zip = ">=24.09"
+# The AV1 encoder every image-sequence dataset goes through. conda-forge's build
+# carries av1_nvenc, so the default resolve_ffmpeg() works without DATAFORGE_FFMPEG.
+# ffmpeg <902 links libjxl 0.11 and dlopen-fails beside the env's 0.12.
+ffmpeg = { version = ">=8.1", build-number = ">=902" }
 
 [feature.dataforge.pypi-dependencies]
 dataforge = { path = "packages/dataforge", editable = true }
@@ -2779,11 +2783,13 @@ description = "Convert discovered sequences into their layer rrds (--sequence, -
 [feature.dataforge.tasks.dataforge-register]
 cmd = "python tools/apps/register.py"
 cwd = "packages/dataforge"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Register every layer's rrds into a local Rerun catalog"
 
 [feature.dataforge.tasks.dataforge-view]
 cmd = "python tools/apps/view.py"
 cwd = "packages/dataforge"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Open one converted recording — every layer of it — in the viewer (--rr-config.headless in a bare shell)"
 
 [feature.dataforge.tasks.dataforge-serve]
