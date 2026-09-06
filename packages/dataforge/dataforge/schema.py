@@ -84,6 +84,16 @@ def heading_path(rig: int, mag: int) -> str:
     return f"{mag_path(rig, mag)}/heading"
 
 
+def control_points_path() -> str:
+    """``/world/gt/control_points`` — a sequence's surveyed points, in the world frame."""
+    return "/world/gt/control_points"
+
+
+def cp_uv_path(rig: int, cam: int) -> str:
+    """``.../cam_MM/pinhole/cp_uv`` — control-point detections in that camera's image."""
+    return f"{pinhole_path(rig, cam)}/cp_uv"
+
+
 def run_path(source: str) -> str:
     """``/world/runs/<source>`` — derived outputs from one processing source."""
     return f"/world/runs/{source}"
