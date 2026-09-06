@@ -230,8 +230,8 @@ PSEUDO_DENSE_ROWS: str = """<tr><td valign="top"><img src="/isginf/icons/text.gi
 SPARSE_ROWS: str = """<tr><td valign="top"><img src="/isginf/icons/unknown.gif" alt="[   ]"></td><td><a href="R_11_5cp.json">R_11_5cp.json</a></td><td align="right">2025-09-05 01:08  </td><td align="right">1.8M</td><td>&nbsp;</td></tr>
 """
 
-CALIBRATION_BODY: bytes = b'{"cam0": {"model": "RAD_TAN_THIN_PRISM_FISHEYE"}}'
-"""Stand-in for a published calibration; ``download`` only moves the bytes."""
+CALIBRATION_BODY: bytes = (REFERENCE_DIR / "R_01_easy.calibration.json").read_bytes()
+"""R_01_easy's published calibration, verbatim: the gt layer reads ``cam0.T_b_s`` out of it."""
 VRS_BODY: bytes = bytes(range(256)) * 64
 """16 384 bytes standing in for a VRS, long enough that a half-served body really resumes."""
 
@@ -1281,38 +1281,42 @@ def test_a_levelled_control_point_far_from_the_walk_stops_the_convert(tmp_path: 
         assert not paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity).exists()
 
 
-# ── both layers, one unit ─────────────────────────────────────────────────
+# ── the two layers, gated independently ───────────────────────────────────
 
 
-def test_both_layers_are_skipped_together_and_rebuilt_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
-    """Both layers come out of one VRS fetch, so a half-converted sequence is redone."""
+def test_a_missing_gt_layer_is_rebuilt_from_the_base_rrd_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+    """Regenerating the gt corpus is ``rm gt/*.rrd`` and a convert: no fetch, no encode."""
+
+    def refuse(_vrs_path: Path) -> lamaria.SequenceStreams:
+        raise AssertionError("the gt layer reads the base rrd, so no VRS is opened and nothing is encoded")
+
     with converting(tmp_path, monkeypatch) as fake:
         identity, base_target = convert_one(fake)
         gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
-        fake.requested.clear()
-
-        assert convert_one(fake)[1] == base_target
-        assert fake.requested == [], "both layers exist, so nothing is fetched and nothing is encoded"
-
+        base_written_ns: int = base_target.stat().st_mtime_ns
         gt_target.unlink()
+        fake.requested.clear()
+        monkeypatch.setattr(lamaria, "open_streams", refuse)
+
         assert convert_one(fake)[1] == base_target
-        assert fake.requested != [], "a missing layer means another fetch"
-        assert gt_target.is_file()
+        assert gt_target.is_file(), "the gt layer is written from its own inputs"
+        assert fake.requested == [], "nothing is fetched: the accelerometer comes back out of the base rrd"
+        assert base_target.stat().st_mtime_ns == base_written_ns, "the base recording is the canonical raw, left alone"
 
 
-def test_a_missing_base_layer_rebuilds_the_gt_layer_with_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
-    """The other half of the unit: a gt rrd on its own is not a converted sequence."""
+def test_a_missing_base_layer_is_rebuilt_without_the_gt_layer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+    """The other direction: an existing gt rrd is done, so a base rebuild leaves it as it is."""
     with converting(tmp_path, monkeypatch) as fake:
         identity, base_target = convert_one(fake)
         gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
-        first_written_ns: int = gt_target.stat().st_mtime_ns
+        gt_written_ns: int = gt_target.stat().st_mtime_ns
         base_target.unlink()
         fake.requested.clear()
 
         assert convert_one(fake)[1] == base_target
         assert fake.requested != [], "a missing base layer means another fetch"
         assert base_target.is_file()
-        assert gt_target.stat().st_mtime_ns != first_written_ns, "the gt layer is rewritten from the same read"
+        assert gt_target.stat().st_mtime_ns == gt_written_ns, "the gt layer already exists, so it is not rewritten"
 
 
 def test_a_sequence_with_no_ground_truth_writes_no_gt_rrd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:

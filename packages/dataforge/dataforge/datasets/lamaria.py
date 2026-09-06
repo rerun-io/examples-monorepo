@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import ClassVar, Literal, TypeAlias
 
 import numpy as np
+import pyarrow as pa
 import rerun as rr
 import rerun.blueprint as rrb
 import serde
@@ -368,11 +369,16 @@ class WorldUp:
 
 @dataclass(frozen=True, slots=True)
 class RecordingSummary:
-    """What one converted sequence turned out to hold; ``convert`` prints it."""
+    """What one written layer turned out to hold; ``convert`` prints a line per layer.
 
-    num_frames: int
+    Both layers report through it and each fills its own half, which is why
+    every field defaults: a base layer has frames and no poses, a gt layer poses
+    and no frames.
+    """
+
+    num_frames: int = 0
     """Video samples written for camera-slam-left, the pGT's own camera."""
-    duration_s: float
+    duration_s: float = 0.0
     """Span of every logged stream, in seconds."""
     control_point_count: int = 0
     """Surveyed control points the sequence ships; 0 when it was never surveyed."""
@@ -541,8 +547,8 @@ def measured_world_up(gt: GtTrajectory, accel: ImuChannel, *, window_ns: int = M
 def validate_ground_truth(sequence: str, control_points: aria.ControlPointSet | None, trajectory: GtTrajectory) -> None:
     """Check the published ground truth against itself and against the walk.
 
-    Both failures a sequence's ground truth can have are caught here, before a
-    single frame is encoded: a detection of a point the survey never published,
+    Both failures a sequence's ground truth can have are caught here, before the
+    gt layer is written: a detection of a point the survey never published,
     and a levelled point too far from where the wearer walked. Every point's tag
     was photographed by these cameras, so that distance is the one check that
     catches a wrong world frame or a missing origin translation, which no amount
@@ -692,6 +698,32 @@ def open_streams(vrs_path: Path) -> SequenceStreams:
         channels: aria.ImuSamples = aria.read_imu(provider, stream_id)
         imus.append(ImuStream(stream_id=stream_id, gyro=channels[0], accel=channels[1], rig_T_imu=rig.rig_T_imu[stream_id]))
     return SequenceStreams(cameras=tuple(cameras), imus=tuple(imus))
+
+
+def read_accel(base_rrd: Path) -> ImuChannel:
+    """Read imu-right's accelerometer back out of a written base-layer rrd.
+
+    The base recording is the canonical raw, and it already holds every sample
+    at ``imu_00/accel``, so the gt layer measures gravity from there rather than
+    from the VRS: a tenth of a second on a 93 MB rrd against refetching a
+    multi-gigabyte file. Only that entity's chunks are decoded.
+
+    Args:
+        base_rrd: The sequence's base-layer rrd.
+
+    Returns:
+        The accelerometer channel in m/s^2, on the device-clock stamps the base
+        layer logged it with.
+    """
+    entity_path: str = schema.accel_path(RIG, 0)
+    store: rr.experimental.ChunkStore = rr.experimental.RrdReader(base_rrd).store().stream().filter(content=entity_path).collect()
+    samples: pa.Table = store.reader(index=schema.TIMELINE).to_arrow_table().sort_by(schema.TIMELINE)
+    return ImuChannel(
+        times_ns=np.asarray(samples.column(schema.TIMELINE).combine_chunks().cast(pa.int64()), dtype=np.int64),
+        values_xyz=np.asarray(
+            samples.column(f"{entity_path}:Scalars:scalars").combine_chunks().flatten(), dtype=np.float64
+        ).reshape(-1, 3),
+    )
 
 
 def follow_eye_controls() -> rrb.EyeControls3D:
@@ -851,11 +883,11 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
 
         The manifest is what ``download`` resolved from the archive, so it is the
         selection unless ``--sequences`` narrows it. What proves ``download``
-        finished for a sequence is its ground truth on disk, which is also all
-        ``convert`` reads from the tree: the VRS is fetched on demand and the
-        published calibration is only ever a cross-check. A sequence missing
-        those files is announced and skipped rather than fatal, since a name the
-        archive really does not have is already a hard error at ``download``.
+        finished for a sequence is its ground truth on disk: the VRS is fetched
+        on demand, and the published calibration the gt layer reads lands in the
+        same pass as the ground truth. A sequence missing those files is
+        announced and skipped rather than fatal, since a name the archive really
+        does not have is already a hard error at ``download``.
         """
         selected: set[str] | None = None if self.config.sequences is None else set(self.config.sequences)
         pairs: list[tuple[SequenceIdentity, LamariaSource]] = []
@@ -947,15 +979,16 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         print(f"  small files → {self.config.root}/<split>/<seq>/, manifest → {manifest_path}")
 
     def convert(self, identity: SequenceIdentity, source: LamariaSource, *, force: bool) -> Path:
-        """Fetch one VRS, encode it, write both rrd layers, and delete the raw.
+        """Write whichever of the two layers is missing, base first.
 
-        The base and the gt layer come out of the *same* VRS read, so they are
-        skipped and rebuilt as a unit: half a sequence on disk means paying for
-        the multi-gigabyte download again anyway, and rebuilding the base layer
-        with it costs one encode against a corpus that would otherwise be
-        silently incomplete. A sequence the archive publishes no ground truth for
-        (the whole test split) has no gt layer to wait for, so it is done once
-        its base rrd exists.
+        The layers are gated on their own files, and the base recording is the
+        canonical raw: it is fetched, encoded and written when *its* rrd is
+        missing, and the gt layer is written when *its* rrd is missing, out of
+        the published ground truth plus the accelerometer read back from the
+        base. So a corpus-wide gt rebuild is ``rm gt/*.rrd`` and a convert —
+        seconds per sequence and no network at all — and base first is what
+        makes that read possible. A sequence the archive publishes no ground
+        truth for (the whole test split) is done once its base rrd exists.
 
         The NVENC check comes before the fetch: a machine that cannot encode AV1
         should find out in a second rather than after a multi-gigabyte download.
@@ -965,87 +998,75 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         """
         target: Path = paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity)
         gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
-        if writing.should_skip(target, force=force) and (not source.has_ground_truth or writing.should_skip(gt_target, force=force)):
-            print(f"skip {identity.sequence_key} → {target}{f' + {gt_target}' if source.has_ground_truth else ''}")
-            return target
-
-        require_av1_nvenc(resolve_ffmpeg())
-        if source.vrs_path.is_file():
-            print(f"  {source.vrs_path.stat().st_size / 1e9:.2f} GB already in {source.vrs_path.parent}; the fetch resumes or verifies it")
+        if writing.should_skip(target, force=force):
+            print(f"skip base {identity.sequence_key} → {target}")
         else:
-            print(f"  fetching {source.vrs_display_bytes / 1e9:.1f} GB from {source.vrs_url}")
-        transports.http_fetch(source.vrs_url, dest=source.vrs_path)
-        work_dir: Path = source.vrs_path.parent / f"{source.sequence}-mp4"
-        work_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            summary: RecordingSummary = self.write_recording(identity, source, work_dir=work_dir, target=target, gt_target=gt_target)
-        except BaseException:
-            shutil.rmtree(work_dir, ignore_errors=True)
-            retained: int = source.vrs_path.stat().st_size if source.vrs_path.is_file() else 0
-            print(f"  kept {retained / 1e9:.2f} GB of VRS in {source.vrs_path.parent} so a retry resumes instead of refetching")
-            raise
+            require_av1_nvenc(resolve_ffmpeg())
+            if source.vrs_path.is_file():
+                print(f"  {source.vrs_path.stat().st_size / 1e9:.2f} GB already in {source.vrs_path.parent}; the fetch resumes or verifies it")
+            else:
+                print(f"  fetching {source.vrs_display_bytes / 1e9:.1f} GB from {source.vrs_url}")
+            transports.http_fetch(source.vrs_url, dest=source.vrs_path)
+            work_dir: Path = source.vrs_path.parent / f"{source.sequence}-mp4"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                summary: RecordingSummary = self.write_recording(identity, source, work_dir=work_dir, target=target)
+            except BaseException:
+                shutil.rmtree(work_dir, ignore_errors=True)
+                retained: int = source.vrs_path.stat().st_size if source.vrs_path.is_file() else 0
+                print(f"  kept {retained / 1e9:.2f} GB of VRS in {source.vrs_path.parent} so a retry resumes instead of refetching")
+                raise
+            if self.config.keep_raw:
+                print(f"  keeping raw: {source.vrs_path.name} and the mp4s in {work_dir}")
+            else:
+                # A removal that fails on the success path is a real problem (a full
+                # disk, a stale mount): only the failure path above swallows it.
+                shutil.rmtree(work_dir)
+                source.vrs_path.unlink(missing_ok=True)
+            print(
+                f"done base {identity.sequence_key} → {target} "
+                f"({len(aria.CAMERA_STREAM_IDS)} cameras, {summary.num_frames} frames, {summary.duration_s:.1f} s)"
+            )
 
-        if self.config.keep_raw:
-            print(f"  keeping raw: {source.vrs_path.name} and the mp4s in {work_dir}")
+        if not source.has_ground_truth:
+            print(f"  no ground truth published for {source.sequence}, so no gt layer: nothing establishes a world frame")
+        elif writing.should_skip(gt_target, force=force):
+            print(f"skip gt {identity.sequence_key} → {gt_target}")
         else:
-            # A removal that fails on the success path is a real problem (a full
-            # disk, a stale mount): only the failure path above swallows it.
-            shutil.rmtree(work_dir)
-            source.vrs_path.unlink(missing_ok=True)
-        measured: str = "" if summary.world_up is None else f", world up {summary.world_up.axis} at {summary.world_up.fraction_of_g:.2f} g"
-        print(
-            f"done {identity.sequence_key} → {target}{f' + {gt_target}' if source.has_ground_truth else ''} "
-            f"({len(aria.CAMERA_STREAM_IDS)} cameras, {summary.num_frames} frames, {summary.duration_s:.1f} s, "
-            f"{summary.num_poses} gt poses over {summary.trajectory_len_m:.1f} m, "
-            f"{summary.control_point_count} control points, {summary.num_detections} detections{measured})"
-        )
+            gt: RecordingSummary = self.write_gt_recording(identity, source, base_rrd=target, target=gt_target)
+            measured: str = "" if gt.world_up is None else f", world up {gt.world_up.axis} at {gt.world_up.fraction_of_g:.2f} g"
+            print(
+                f"done gt {identity.sequence_key} → {gt_target} "
+                f"({gt.num_poses} poses over {gt.trajectory_len_m:.1f} m, "
+                f"{gt.control_point_count} control points, {gt.num_detections} detections{measured})"
+            )
         return target
 
-    def write_recording(
-        self, identity: SequenceIdentity, source: LamariaSource, *, work_dir: Path, target: Path, gt_target: Path
-    ) -> RecordingSummary:
-        """Encode every camera stream and write both rrd layers of one sequence.
+    def write_recording(self, identity: SequenceIdentity, source: LamariaSource, *, work_dir: Path, target: Path) -> RecordingSummary:
+        """Encode every camera stream of one sequence and write its base-layer rrd.
 
-        The ground truth is read and checked first, so a wrong world frame fails
-        the sequence before a single frame is encoded. Every camera is then
-        encoded before the first recording opens: the VRS is read once, stream by
-        stream, and ``log_video_stream`` remuxes the finished mp4s. The base layer
-        closes before the gt layer opens — one VRS read feeds both, but each is
-        its own recording stream and its own atomic replace, so a failure in the
-        second cannot half-write the first.
+        Every camera is encoded before the recording opens: the VRS is read once,
+        stream by stream, and ``log_video_stream`` remuxes the finished mp4s. The
+        recording is its own atomic replace, so a target either holds a whole
+        sequence or does not exist.
 
         Args:
-            identity: Sequence identity; names both recordings and both rrd files.
+            identity: Sequence identity; names the recording and the rrd file.
             source: The discovered sequence, its VRS already on disk.
             work_dir: Scratch directory for the temp mp4s, beside the VRS.
             target: Final base-layer rrd path, written through ``atomic_recording``.
-            gt_target: Final gt-layer rrd path, likewise; untouched when the
-                archive publishes no ground truth for the sequence.
 
         Returns:
-            What the sequence turned out to hold, for the caller's summary line.
+            What the layer turned out to hold, for the caller's summary line.
         """
         streams: SequenceStreams = open_streams(source.vrs_path)
         vrs_bytes: int = source.vrs_path.stat().st_size
 
-        # The control points are the gt layer's material, read once here: the base
-        # layer only says how many a consumer should expect.
-        control_points: aria.ControlPointSet | None = (
-            None if source.control_points_path is None else aria.read_control_points(source.control_points_path)
+        # The control points are the gt layer's material; the base layer only says
+        # how many a consumer should expect.
+        control_point_count: int = (
+            0 if source.control_points_path is None else len(aria.read_control_points(source.control_points_path).points)
         )
-        control_point_count: int = 0 if control_points is None else len(control_points.points)
-        trajectory: GtTrajectory | None = None
-        if source.has_ground_truth:
-            published: aria.PseudoGt = (
-                aria.read_pseudo_gt(source.pseudo_gt_path)
-                if source.pseudo_gt_path is not None
-                else aria.PseudoGt(times_ns=np.zeros(0, dtype=np.int64), world_T_cam0=np.zeros((0, 4, 4), dtype=np.float64))
-            )
-            # The pGT poses camera-slam-left, so cam_00's own extrinsics are what
-            # move the trajectory onto the rig.
-            rig_T_cam0: Float64[ndarray, "4 4"] = np.asarray(streams.cameras[0].camera.extrinsics.world_T_cam, dtype=np.float64)
-            trajectory = rig_trajectory(published, rig_T_cam0=rig_T_cam0)
-            validate_ground_truth(source.sequence, control_points, trajectory)
 
         clips: list[Path] = []
         for index, stream in enumerate(streams.cameras):
@@ -1118,36 +1139,16 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
                 duration_s=duration_s,
                 vrs_bytes=vrs_bytes,
             )
+        return RecordingSummary(num_frames=num_frames, duration_s=duration_s)
 
-        if trajectory is None:
-            print(f"  no ground truth published for {source.sequence}, so no gt layer: nothing establishes a world frame")
-            return RecordingSummary(num_frames=num_frames, duration_s=duration_s)
-
-        # imu-right's accelerometer is what measures the world up axis; imu_00 *is* the rig.
-        world_up: WorldUp | None = self.write_gt_recording(
-            identity, source, trajectory=trajectory, accel=streams.imus[0].accel, control_points=control_points, target=gt_target
-        )
-        return RecordingSummary(
-            num_frames=num_frames,
-            duration_s=duration_s,
-            control_point_count=control_point_count,
-            num_poses=int(trajectory.times_ns.size),
-            trajectory_len_m=trajectory.length_m,
-            num_detections=0 if control_points is None else len(control_points.detections),
-            world_up=world_up,
-        )
-
-    def write_gt_recording(
-        self,
-        identity: SequenceIdentity,
-        source: LamariaSource,
-        *,
-        trajectory: GtTrajectory,
-        accel: ImuChannel,
-        control_points: aria.ControlPointSet | None,
-        target: Path,
-    ) -> WorldUp | None:
+    def write_gt_recording(self, identity: SequenceIdentity, source: LamariaSource, *, base_rrd: Path, target: Path) -> RecordingSummary:
         """Write one sequence's gt layer: the rig's pose, its path, and the surveyed points.
+
+        Every input is the layer's own: the published pGT and control points, the
+        published calibration (whose ``cam0.T_b_s`` moves the trajectory onto the
+        rig), and imu-right's accelerometer out of the base rrd. Nothing here
+        reads the VRS, so this layer can be rebuilt over the whole corpus without
+        refetching a byte.
 
         This layer is what establishes a world frame at all, so it — not the base
         layer — owns the root ``ViewCoordinates`` and the transform on the rig
@@ -1157,19 +1158,32 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
 
         Args:
             identity: Sequence identity; names the recording and the rrd file.
-            source: The discovered sequence, for its name and its world frame.
-            trajectory: The rig's pose per published pGT stamp; may be empty when
-                the sequence ships control points only.
-            accel: imu-right's accelerometer channel, which measures the world up axis.
-            control_points: The surveyed points and their detections, or ``None``.
+            source: The discovered sequence: its ground-truth files, its published
+                calibration, its name and its world frame.
+            base_rrd: The sequence's base-layer rrd, whose ``imu_00/accel`` is what
+                the world up axis is measured from.
             target: Final gt-layer rrd path, written through ``atomic_recording``.
 
         Returns:
-            The measured world up axis, or ``None`` when there was no pose to rotate by.
+            What the layer turned out to hold, for the caller's summary line.
+
+        Raises:
+            ValueError: The published ground truth fails ``validate_ground_truth``.
         """
+        published: aria.PseudoGt = (
+            aria.read_pseudo_gt(source.pseudo_gt_path)
+            if source.pseudo_gt_path is not None
+            else aria.PseudoGt(times_ns=np.zeros(0, dtype=np.int64), world_T_cam0=np.zeros((0, 4, 4), dtype=np.float64))
+        )
+        control_points: aria.ControlPointSet | None = (
+            None if source.control_points_path is None else aria.read_control_points(source.control_points_path)
+        )
+        trajectory: GtTrajectory = rig_trajectory(published, rig_T_cam0=aria.read_rig_T_cam0(source.calibration_path))
+        validate_ground_truth(source.sequence, control_points, trajectory)
+
         world_up: WorldUp | None = None
         if trajectory.times_ns.size:
-            world_up = measured_world_up(trajectory, accel)
+            world_up = measured_world_up(trajectory, read_accel(base_rrd))
             if world_up.axis != WORLD_UP or world_up.fraction_of_g < WORLD_UP_MIN_FRACTION_OF_G:
                 print(
                     f"  warning: lamaria declares world up {WORLD_UP} but {source.sequence} measured {world_up.axis} "
@@ -1239,7 +1253,13 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
                     gt_world=gt_world(source.sequence),
                 ),
             )
-        return world_up
+        return RecordingSummary(
+            control_point_count=len(points),
+            num_poses=int(trajectory.times_ns.size),
+            trajectory_len_m=trajectory.length_m,
+            num_detections=0 if control_points is None else len(control_points.detections),
+            world_up=world_up,
+        )
 
     def default_blueprint(self) -> rrb.Blueprint:
         """Corpus-wide layout: every Aria Gen1 sequence carries the same three cameras."""

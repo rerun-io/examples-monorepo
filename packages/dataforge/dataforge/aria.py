@@ -209,6 +209,29 @@ class AriaRig:
         return cls(cameras=cameras, rig_T_imu=rig_T_imu)
 
 
+def read_rig_T_cam0(path: Path) -> Float64[ndarray, "4 4"]:
+    """Read camera-slam-left's rig pose out of a published ``aria_calibrations/<seq>.json``.
+
+    The published body frame is imu-right, which *is* the rig, so that file's
+    ``cam0.T_b_s`` is ``rig_T_cam0`` as it stands — the one thing a gt layer
+    needs from the file, and the one thing it can be had without the VRS. The
+    intrinsics are read out of the VRS device calibration instead, which
+    ``tests/test_aria_vrs.py`` cross-checks against this same file.
+
+    Args:
+        path: The sequence's published calibration JSON.
+
+    Returns:
+        ``rig_T_cam0``, from the entry's x, y, z, w quaternion and its
+        translation in metres.
+    """
+    published: dict = json.loads(path.read_text())["cam0"]["T_b_s"]
+    rig_T_cam0: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
+    rig_T_cam0[:3, :3] = Rotation.from_quat(np.asarray(published["qvec"], dtype=np.float64)).as_matrix()
+    rig_T_cam0[:3, 3] = published["tvec"]
+    return rig_T_cam0
+
+
 # ── streams ───────────────────────────────────────────────────────────────
 
 
