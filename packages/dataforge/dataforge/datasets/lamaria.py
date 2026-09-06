@@ -415,8 +415,10 @@ class LamariaConfig(DataforgeDatasetConfig):
     root: Path = field(default_factory=lambda: paths.raw_root() / "lamaria")
     """Raw tree in the official layout. Point it at local NVMe: every VRS written
     here is deleted again once its rrd exists."""
-    sequences: tuple[str, ...] = DEFAULT_SEQUENCES
-    """Sequences to download and convert; a name the archive does not list is an error."""
+    sequences: tuple[str, ...] | None = None
+    """Sequences to select. Unset means ``DEFAULT_SEQUENCES`` at ``download`` and
+    every downloaded sequence at ``convert``; a name the archive does not list is
+    an error at ``download``."""
     keep_raw: bool = False
     """Keep the fetched VRS and the encoded mp4s instead of deleting them."""
     base_url: str = "https://cvg-data.inf.ethz.ch/lamaria/"
@@ -896,33 +898,27 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         )
 
     def discover(self) -> list[tuple[SequenceIdentity, LamariaSource]]:
-        """Pair every selected sequence whose small files are on disk with its source.
+        """Pair every manifest sequence whose ground truth is on disk with its source.
 
-        The manifest says what the archive holds; the small files on disk are the
-        evidence that ``download`` finished for a sequence. A selected name that
-        fails either check is announced and skipped rather than fatal: the
-        selection defaults to all five sequences, so a narrower
-        ``download --sequences`` must still leave the rest convertible, and a
-        name the archive really does not have is already a hard error at
-        ``download``.
+        The manifest is what ``download`` resolved from the archive, so it is the
+        selection unless ``--sequences`` narrows it. What proves ``download``
+        finished for a sequence is its ground truth on disk, which is also all
+        ``convert`` reads from the tree: the VRS is fetched on demand and the
+        published calibration is only ever a cross-check. A sequence missing
+        those files is announced and skipped rather than fatal, since a name the
+        archive really does not have is already a hard error at ``download``.
         """
-        records: dict[str, SequenceRecord] = {record.sequence: record for record in self.manifest().sequences}
+        selected: set[str] | None = None if self.config.sequences is None else set(self.config.sequences)
         pairs: list[tuple[SequenceIdentity, LamariaSource]] = []
-        for name in sorted(set(self.config.sequences)):
-            record: SequenceRecord | None = records.get(name)
-            if record is None:
-                print(f"  warning: skipping {name}: {MANIFEST_NAME} does not list it; run `dataforge-download lamaria --sequences {name}`")
+        for record in sorted(self.manifest().sequences, key=lambda listed: listed.sequence):
+            if selected is not None and record.sequence not in selected:
                 continue
             source: LamariaSource = self.source(record)
-            missing: list[Path] = [
-                path
-                for path in (source.calibration_path, source.pseudo_gt_path, source.control_points_path)
-                if path is not None and not path.is_file()
-            ]
+            missing: list[Path] = [path for path in (source.pseudo_gt_path, source.control_points_path) if path is not None and not path.is_file()]
             if missing:
-                print(f"  warning: skipping {name}: {len(missing)} small file(s) not on disk, first {missing[0]}; re-run dataforge-download")
+                print(f"  warning: skipping {record.sequence}: {missing[0]} is not on disk; re-run dataforge-download")
                 continue
-            pairs.append((SequenceIdentity(dataset=self.config.name, parts=(name,)), source))
+            pairs.append((SequenceIdentity(dataset=self.config.name, parts=(record.sequence,)), source))
         return pairs
 
     def download(self) -> None:
@@ -935,7 +931,7 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         index lists a sequence is what resolves its split; the two ground-truth
         indexes resolve what it ships.
         """
-        selected: list[str] = sorted(set(self.config.sequences))
+        selected: list[str] = sorted(set(DEFAULT_SEQUENCES if self.config.sequences is None else self.config.sequences))
         splits: dict[str, LamariaSplit] = {}
         vrs_display_bytes: dict[str, int] = {}
         for split in SPLITS:

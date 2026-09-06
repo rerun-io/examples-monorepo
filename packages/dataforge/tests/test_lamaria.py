@@ -59,8 +59,8 @@ def test_lamaria_is_registered_under_its_own_command() -> None:
 
 def test_the_default_selection_is_the_five_surveyed_training_sequences() -> None:
     config: LamariaConfig = LamariaConfig()
-    assert config.sequences == DEFAULT_SEQUENCES
-    assert config.sequences == ("R_01_easy", "R_04_medium", "R_11_5cp", "sequence_1_19", "sequence_4_11")
+    assert config.sequences is None, "unset means the default five at download and everything downloaded at convert"
+    assert DEFAULT_SEQUENCES == ("R_01_easy", "R_04_medium", "R_11_5cp", "sequence_1_19", "sequence_4_11")
     assert config.root == paths.raw_root() / "lamaria"
     assert config.base_url == "https://cvg-data.inf.ethz.ch/lamaria/"
     assert config.keep_raw is False
@@ -153,7 +153,7 @@ def test_discover_pairs_each_selected_sequence_with_its_local_paths(tmp_path: Pa
     assert discovered[1][1].control_points_path == root / "training" / "R_11_5cp" / "ground_truth" / "control_points" / "R_11_5cp.json"
 
 
-def test_discover_skips_a_sequence_whose_small_files_are_missing(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_discover_skips_a_sequence_whose_ground_truth_is_missing(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     manifest: LamariaManifest = manifest_fixture()
     root: Path = downloaded_root(tmp_path, manifest=manifest, complete=("R_01_easy",))
     config: LamariaConfig = LamariaConfig(root=root, sequences=("R_01_easy", "R_11_5cp"))
@@ -175,22 +175,14 @@ def test_discover_ignores_a_manifest_sequence_the_config_did_not_select(tmp_path
     assert [identity.sequence_key for identity, _ in discovered] == ["R_01_easy"]
 
 
-def test_a_selected_sequence_the_manifest_never_saw_is_announced_and_skipped(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """The selection defaults to all five, so a narrower download must still convert.
-
-    A name the archive genuinely does not have is a hard error at ``download``;
-    here it only means this raw root has not been asked for it yet.
-    """
+def test_discover_without_a_selection_yields_every_downloaded_sequence(tmp_path: Path) -> None:
+    """An unset ``--sequences`` converts whatever this raw root holds, however narrow the download was."""
     manifest: LamariaManifest = manifest_fixture()
-    root: Path = downloaded_root(tmp_path, manifest=manifest, complete=("R_01_easy",))
-    config: LamariaConfig = LamariaConfig(root=root, sequences=("R_01_easy", "R_99_nonesuch"))
+    root: Path = downloaded_root(tmp_path, manifest=manifest, complete=("R_01_easy", "R_11_5cp"))
 
-    discovered: list[tuple[SequenceIdentity, LamariaSource]] = LamariaDataset(config).discover()
+    discovered: list[tuple[SequenceIdentity, LamariaSource]] = LamariaDataset(LamariaConfig(root=root)).discover()
 
-    assert [identity.sequence_key for identity, _ in discovered] == ["R_01_easy"]
-    output: str = capsys.readouterr().out
-    assert "R_99_nonesuch" in output
-    assert "--sequences R_99_nonesuch" in output, "the message has to say how to fix it"
+    assert [identity.sequence_key for identity, _ in discovered] == ["R_01_easy", "R_11_5cp"]
 
 
 # ── the archive, on loopback ──────────────────────────────────────────────
