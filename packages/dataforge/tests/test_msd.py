@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import zipfile
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import cv2
@@ -24,7 +24,7 @@ import pytest
 import rerun as rr
 import rerun.blueprint as rrb
 import serde.json
-from jaxtyping import Float64, UInt8
+from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import (
@@ -40,6 +40,7 @@ from dataforge.datasets.msd import (
     MSD_DEVICES,
     BasaltPose,
     CameraRow,
+    GtTrajectory,
     MsdCalibration,
     MsdConfig,
     MsdDataset,
@@ -50,7 +51,8 @@ from dataforge.datasets.msd import (
     build_blueprint,
     camera_parameters,
     camera_views,
-    first_timestamp_ns,
+    gt_trajectory,
+    measured_world_up,
     open_member_reader,
     read_camera_index,
     read_numeric_csv,
@@ -71,6 +73,37 @@ def test_every_device_is_one_catalog_dataset_named_after_it() -> None:
     assert (g2.hf_dir, g2.num_cameras, g2.has_magnetometer, g2.label) == ("MG_reverb_g2", 4, True, "reverb-g2")
     # The calibration collections (MIC/MGC/MOC) are deliberately not convertible sequences.
     assert not any(collection.endswith("C_calibration") for device in MSD_DEVICES.values() for collection in device.collections)
+
+
+VIEWER_AXIS_VECTORS: dict[int, tuple[float, float, float]] = {
+    rr.encodings.ViewDir.Right.value: (1.0, 0.0, 0.0),
+    rr.encodings.ViewDir.Left.value: (-1.0, 0.0, 0.0),
+    rr.encodings.ViewDir.Up.value: (0.0, 1.0, 0.0),
+    rr.encodings.ViewDir.Down.value: (0.0, -1.0, 0.0),
+    rr.encodings.ViewDir.Back.value: (0.0, 0.0, 1.0),
+    rr.encodings.ViewDir.Forward.value: (0.0, 0.0, -1.0),
+}
+"""Each ``ViewDir`` as a vector in one right-handed viewer basis (x right, y up, z back)."""
+
+
+def test_each_world_up_axis_maps_to_a_right_handed_frame_with_that_axis_up() -> None:
+    """The axis name is the whole decision; handedness then fixes the other two."""
+    assert set(msd.WORLD_UP_VIEW_COORDINATES) == {"+x", "-x", "+y", "-y", "+z", "-z"}
+    for axis, coordinates in msd.WORLD_UP_VIEW_COORDINATES.items():
+        directions: list[int] = [int(direction.value) for direction in coordinates.coordinates]
+        column: int = "xyz".index(axis[1])
+        expected: int = (rr.encodings.ViewDir.Up if axis[0] == "+" else rr.encodings.ViewDir.Down).value
+        assert directions[column] == expected, f"{axis} does not put that axis up"
+        basis: Float64[ndarray, "3 3"] = np.array([VIEWER_AXIS_VECTORS[direction] for direction in directions], dtype=np.float64)
+        assert np.linalg.det(basis) > 0.0, f"{axis} maps to a left-handed frame"
+
+
+def test_every_device_declares_a_world_up_axis_and_names_its_gt_source() -> None:
+    for device, profile in MSD_DEVICES.items():
+        assert profile.world_up in msd.WORLD_UP_VIEW_COORDINATES, device
+    # The Index is tracked by SteamVR Lighthouse; the other two by a MoCap rig.
+    assert MSD_DEVICES["index"].gt_source == "lighthouse"
+    assert {MSD_DEVICES[device].gt_source for device in ("g2", "odyssey")} == {"mocap"}
 
 
 def test_discover_groups_split_parts_and_orders_by_collection_then_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -194,13 +227,6 @@ IMU_CSV: bytes = (
     b"12999000000000,0.01,-0.02,0.03,0.1,-0.2,9.8\n"
     b"12999001000000,0.011,-0.021,0.031,0.11,-0.21,9.81\n"
 )
-GT_CSV: bytes = (
-    b"#timestamp [ns], p_RS_R_x [m], p_RS_R_y [m], p_RS_R_z [m], q_RS_w [], q_RS_x [], q_RS_y [], q_RS_z []\n"
-    b"12998000000000,0.0,0.1,0.2,1.0,0.0,0.0,0.0\n"
-    b"12998001000000,0.01,0.11,0.21,1.0,0.0,0.0,0.0\n"
-)
-
-
 def test_camera_index_rows_carry_a_typed_stamp_and_filename() -> None:
     rows: list[CameraRow] = read_camera_index(CAMERA_CSV)
     assert [row.timestamp_ns for row in rows] == [13000000000000, 13000018518000]
@@ -222,15 +248,56 @@ def test_a_single_row_numeric_csv_still_reads_as_a_table() -> None:
     assert samples.values.shape == (1, 6)
 
 
-def test_gt_contributes_only_its_first_stamp_to_the_shared_origin() -> None:
-    # The gt layer is a separate rrd, but both layers must share t0, so the base
-    # converter reads gt's first row and nothing else.
-    assert first_timestamp_ns(GT_CSV) == 12998000000000
+GT_WXYZ_CSV: bytes = (
+    b"#timestamp [ns], p_RS_R_x [m], p_RS_R_y [m], p_RS_R_z [m], q_RS_w [], q_RS_x [], q_RS_y [], q_RS_z []\n"
+    b"12998000000000,0.0,0.1,0.2,0.5,0.5,-0.5,0.5\n"
+    b"12998001000000,0.01,0.11,0.21,0.0,0.0,0.0,0.0\n"
+)
+"""A gt csv with a real rotation and one degenerate row, as a tracking dropout is written."""
 
 
-def test_an_empty_csv_is_an_error_not_a_silent_zero() -> None:
+def test_gt_quaternions_are_reordered_to_xyzw_and_dropouts_become_identity() -> None:
+    trajectory: GtTrajectory = gt_trajectory(read_numeric_csv(GT_WXYZ_CSV, num_values=msd.GT_VALUE_COLUMNS))
+    np.testing.assert_array_equal(trajectory.times_ns, [12998000000000, 12998001000000])
+    np.testing.assert_allclose(trajectory.translations_xyz[1], [0.01, 0.11, 0.21])
+    # The file writes the scalar first; rr.Transform3D wants it last.
+    np.testing.assert_allclose(trajectory.quaternions_xyzw[0], [0.5, -0.5, 0.5, 0.5])
+    # A zero quaternion would break the rotation chain for every later frame.
+    np.testing.assert_allclose(trajectory.quaternions_xyzw[1], [0.0, 0.0, 0.0, 1.0])
+    assert trajectory.num_sanitized == 1
+
+
+def constant_pose_gt(times_ns: Int64[ndarray, "n_poses"], quaternion_xyzw: Float64[ndarray, "4"]) -> TimestampedSamples:
+    """A gt table holding one fixed orientation at the origin, in the file's wxyz order."""
+    return TimestampedSamples(
+        times_ns=times_ns,
+        values=np.column_stack([np.zeros((times_ns.size, 3)), np.tile(quaternion_xyzw[[3, 0, 1, 2]], (times_ns.size, 1))]),
+    )
+
+
+def test_the_world_up_axis_is_measured_by_rotating_the_accelerometer_into_the_world() -> None:
+    """An accelerometer at rest reads +g pointing *up*, so ``world_R_rig @ a_rig`` averages to the up axis."""
+    # -90 deg about x maps the rig's +z onto the world's +y, so a headset held level
+    # in a Y-up world reads gravity along its own +z.
+    world_R_rig: Rotation = Rotation.from_euler("x", -90.0, degrees=True)
+    times_ns: Int64[ndarray, "n_poses"] = np.arange(4_000, dtype=np.int64) * 1_000_000
+    rig_accel_xyz: Float64[ndarray, "n_samples 3"] = np.tile([0.1, -0.2, 9.81], (times_ns.size, 1))
+    # The second half of the capture points the other way; the 2 s window must ignore it.
+    rig_accel_xyz[times_ns >= msd.MEASURED_UP_WINDOW_NS] = [0.1, -0.2, -9.81]
+    gt: GtTrajectory = gt_trajectory(constant_pose_gt(times_ns, np.asarray(world_R_rig.as_quat(), dtype=np.float64)))
+
+    measured: tuple[msd.WorldUpAxis, float] = measured_world_up(gt, TimestampedSamples(times_ns=times_ns, values=rig_accel_xyz))
+
+    assert measured[0] == "+y"
+    # At rest the whole of gravity lands on that one axis.
+    assert measured[1] == pytest.approx(1.0, abs=0.01)
+
+
+def test_an_empty_gt_is_an_error_not_a_silent_zero() -> None:
+    # gt's first stamp is the whole sequence's clock origin; there is no default for it.
+    header_only: bytes = GT_WXYZ_CSV.splitlines()[0] + b"\n"
     with pytest.raises(ValueError, match="no data rows"):
-        first_timestamp_ns(b"#timestamp [ns], p_RS_R_x [m]\n")
+        gt_trajectory(read_numeric_csv(header_only, num_values=msd.GT_VALUE_COLUMNS))
 
 
 # ── archive member reader ─────────────────────────────────────────────────
@@ -243,6 +310,20 @@ FRAME_WIDTH: int = 192
 """Frame width; NVENC refuses anything much smaller, so the fixture is not tiny."""
 FRAME_HEIGHT: int = 160
 """Frame height, likewise above NVENC's minimum."""
+
+
+GT_NUM_POSES: int = 40
+"""gt rows the synthetic tree writes; the gt layer logs one pose per row."""
+GT_PERIOD_NS: int = 1_000_000
+"""gt sample period in the synthetic tree — 1 kHz, as the real files ship."""
+GT_DROPOUT_ROW: int = 17
+"""Row the synthetic tree writes a degenerate quaternion into, as a real dropout is written."""
+FIXTURE_WORLD_R_RIG: Rotation = Rotation.from_euler("x", -90.0, degrees=True)
+"""The synthetic sequence's constant gt orientation.
+
+It maps the rig's +z — where the fixture's accelerometer reads gravity — onto
+the world's +y, so ``measured_world_up`` must answer ``+y`` for this tree.
+"""
 
 
 def png_frame(index: int) -> bytes:
@@ -318,10 +399,16 @@ def sequence_tree(root: Path, *, num_cameras: int, num_frames: int, with_magneto
     # Earlier than every other stream on purpose: gt owns t0.
     gt_first: int = base_ns - 9_000_000
     firsts["gt"] = gt_first
-    # gt is not logged by the base layer, so its last stamp never bounds the duration.
+    # gt bounds the base layer's duration through no stream of its own, so it stays out
+    # of ``lasts``; the gt layer's own span is GT_NUM_POSES rows at GT_PERIOD_NS.
+    quaternion_xyzw: Float64[ndarray, "4"] = np.asarray(FIXTURE_WORLD_R_RIG.as_quat(), dtype=np.float64)
+    scalar_first: list[float] = [float(quaternion_xyzw[3]), *(float(term) for term in quaternion_xyzw[:3])]
     gt_rows: list[str] = ["#timestamp [ns], p_RS_R_x [m], p_RS_R_y [m], p_RS_R_z [m], q_RS_w [], q_RS_x [], q_RS_y [], q_RS_z []"]
-    for index in range(40):
-        gt_rows.append(f"{gt_first + index * 1_000_000},{0.001 * index},0.0,0.0,1.0,0.0,0.0,0.0")
+    for index in range(GT_NUM_POSES):
+        # One degenerate row, exactly as a real tracking dropout is written.
+        written: list[float] = [0.0, 0.0, 0.0, 0.0] if index == GT_DROPOUT_ROW else scalar_first
+        stamps_and_pose: list[str] = [str(gt_first + index * GT_PERIOD_NS), f"{0.001 * index}", "0.0", "0.0"]
+        gt_rows.append(",".join([*stamps_and_pose, *(f"{term}" for term in written)]))
     (gt_dir / "data.csv").write_text("\n".join(gt_rows) + "\n")
     return StreamClocks(firsts=firsts, lasts=lasts)
 
@@ -503,15 +590,15 @@ def column_rows(store: rr.experimental.ChunkStore, column: str) -> pa.Table:
     return table.select([schema.TIMELINE, column]).drop_null()
 
 
-def capture_properties(store: rr.experimental.ChunkStore) -> dict[str, object]:
-    """The recording's ``property:capture:*`` values, unwrapped from their one-row lists.
+def recording_properties(store: rr.experimental.ChunkStore, group: str) -> dict[str, object]:
+    """One property group's values (``property:<group>:*``), unwrapped from their one-row lists.
 
     Properties live on the static ``/__properties`` entity, off every index, so
     they need their own content-filtered read.
     """
     table: pa.Table = store.reader(index=None, contents="/__properties/**").to_arrow_table()
     row: dict[str, list[object] | None] = table.to_pylist()[0]
-    prefix: str = schema.capture_property("")
+    prefix: str = f"property:{group}:"
     return {name.removeprefix(prefix): values[0] for name, values in row.items() if name.startswith(prefix) and values}
 
 
@@ -565,7 +652,7 @@ def test_convert_writes_one_replayable_recording_and_deletes_the_raw(
     if profile.has_magnetometer:
         assert column_rows(store, f"{schema.field_path(0, 0)}:Scalars:scalars").num_rows == 6
 
-    capture: dict[str, object] = capture_properties(store)
+    capture: dict[str, object] = recording_properties(store, "capture")
     assert capture["start_time_ns"] == start_time_ns
     assert capture["num_cameras"] == profile.num_cameras
     assert capture["num_frames"] == 6
@@ -611,13 +698,15 @@ def test_a_failed_encode_keeps_the_archive_and_clears_the_scratch(
     assert "kept 0.0" in capsys.readouterr().out
 
 
-def test_an_existing_recording_is_skipped_without_fetching(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_sequence_with_both_layers_already_written_is_skipped_without_fetching(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     hub: FakeHub = build_hub(tmp_path, monkeypatch)
     dataset: MsdDataset = MsdDataset(hub.config)
     identity, source = dataset.discover()[0]
     target: Path = paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(b"already done")
+    for layer in (paths.BASE_LAYER, paths.GT_LAYER):
+        written: Path = paths.rrd_path(paths.output_root(), layer=layer, identity=identity)
+        written.parent.mkdir(parents=True, exist_ok=True)
+        written.write_bytes(b"already done")
 
     assert dataset.convert(identity, source, force=False) == target
     assert hub.fetched == []
@@ -651,6 +740,141 @@ def test_the_logged_camera_node_carries_rig_T_cam(tmp_path: Path, monkeypatch: p
         # float32 on the wire, so a loose tolerance is the honest one.
         np.testing.assert_allclose(cam_R_rig.T, rig_R_cam, atol=1e-6)
         np.testing.assert_allclose(-cam_R_rig.T @ cam_t_rig, rig_t_cam, atol=1e-6)
+
+
+# ── gt layer ──────────────────────────────────────────────────────────────
+
+
+def test_the_gt_layer_is_a_sibling_rrd_of_the_same_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+    """One convert writes both layers: same recording id, own layer directory."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+
+    base_target: Path = dataset.convert(identity, source, force=False)
+    gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
+
+    assert gt_target.is_file()
+    assert gt_target.name == base_target.name
+    assert (gt_target.parent.name, base_target.parent.name) == (paths.GT_LAYER, paths.BASE_LAYER)
+
+
+def test_the_gt_layer_animates_the_rig_node_at_the_full_gt_rate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    dataset.convert(identity, source, force=False)
+
+    store: rr.experimental.ChunkStore = read_back(paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity))
+    poses: pa.Table = column_rows(store, f"{schema.rig_path(0)}:Transform3D:translation")
+    assert poses.num_rows == GT_NUM_POSES, "gt is logged raw: no resampling, one row per csv row"
+    times_ns: list[int] = poses.column(schema.TIMELINE).combine_chunks().cast(pa.int64()).to_pylist()
+    # gt is the earliest stream in the fixture, so it owns t0 and starts at video_time 0.
+    assert hub.firsts["gt"] == min(hub.firsts.values())
+    assert times_ns[0] == 0
+    assert times_ns[-1] == (GT_NUM_POSES - 1) * GT_PERIOD_NS
+
+
+def test_the_rig_quaternion_is_the_file_quaternion_reordered_to_xyzw(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+    """The csv writes the scalar first; a viewer reading the rrd must see it last."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    dataset.convert(identity, source, force=False)
+
+    store: rr.experimental.ChunkStore = read_back(paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity))
+    stored: list[list[list[float]]] = column_rows(store, f"{schema.rig_path(0)}:Transform3D:quaternion").column(1).to_pylist()
+    expected_xyzw: Float64[ndarray, "4"] = np.asarray(FIXTURE_WORLD_R_RIG.as_quat(), dtype=np.float64)
+    # float32 on the wire, so a loose tolerance is the honest one.
+    np.testing.assert_allclose(np.asarray(stored[0][0], dtype=np.float64), expected_xyzw, atol=1e-6)
+    # The dropout row keeps its translation but loses its rotation, per slam-evals' repair.
+    np.testing.assert_allclose(np.asarray(stored[GT_DROPOUT_ROW][0], dtype=np.float64), [0.0, 0.0, 0.0, 1.0], atol=1e-6)
+
+
+def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+    """The overview strip is static and whole; the trail is one point per pose, for the cursor window."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    dataset.convert(identity, source, force=False)
+
+    store: rr.experimental.ChunkStore = read_back(paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity))
+    trajectory: str = schema.trajectory_path("gt")
+    strips: list[list[list[float]]] = (
+        store.reader(index=None, contents=trajectory).to_arrow_table().to_pylist()[0][f"{trajectory}:LineStrips3D:strips"]
+    )
+    assert len(strips) == 1, "the whole trajectory is one strip"
+    assert len(strips[0]) == GT_NUM_POSES
+    assert column_rows(store, f"{schema.trail_path('gt')}:Points3D:positions").num_rows == GT_NUM_POSES
+
+
+def test_only_the_gt_layer_states_the_world_axes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+    """The pose layer establishes a world frame, so it owns the root ViewCoordinates."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    base_target: Path = dataset.convert(identity, source, force=False)
+
+    gt_root: pa.Table = read_back(paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)).reader(
+        index=None, contents="/"
+    ).to_arrow_table()
+    assert "/:ViewCoordinates:xyz" in gt_root.column_names
+    declared: list[int] = [int(direction.value) for direction in msd.WORLD_UP_VIEW_COORDINATES[MSD_DEVICES["index"].world_up].coordinates]
+    assert [int(value) for value in gt_root.to_pylist()[0]["/:ViewCoordinates:xyz"][0]] == declared
+    assert "/:ViewCoordinates:xyz" not in read_back(base_target).reader(index=None, contents="/").to_arrow_table().column_names
+
+
+def test_the_gt_properties_report_the_poses_the_repairs_and_the_measured_axis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path
+) -> None:
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    dataset.convert(identity, source, force=False)
+
+    store: rr.experimental.ChunkStore = read_back(paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity))
+    gt: dict[str, object] = recording_properties(store, "gt")
+    assert gt["num_poses"] == GT_NUM_POSES
+    assert gt["duration_ns"] == (GT_NUM_POSES - 1) * GT_PERIOD_NS
+    assert gt["num_sanitized"] == 1
+    assert gt["source"] == MSD_DEVICES["index"].gt_source
+    assert gt["world_up"] == MSD_DEVICES["index"].world_up
+    assert gt["measured_up"] == "+y"
+    measured_fraction: object = gt["measured_up_fraction"]
+    assert isinstance(measured_fraction, float) and measured_fraction > 0.9
+
+
+def test_a_world_up_the_data_disagrees_with_is_announced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
+) -> None:
+    """A declared axis is a claim about the data; convert re-measures it every sequence."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    monkeypatch.setitem(MSD_DEVICES, "index", replace(MSD_DEVICES["index"], world_up="+z"))
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    dataset.convert(identity, source, force=False)
+
+    output: str = capsys.readouterr().out
+    assert "declares world_up +z" in output
+    assert "measured +y" in output
+
+
+def test_both_layers_are_skipped_together_and_rebuilt_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+    """Both layers come out of one archive fetch, so a half-converted sequence is redone."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    base_target: Path = dataset.convert(identity, source, force=False)
+    gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
+    fetches: int = len(hub.fetched)
+
+    assert dataset.convert(identity, source, force=False) == base_target
+    assert len(hub.fetched) == fetches, "both layers exist, so nothing is downloaded"
+
+    gt_target.unlink()
+    assert dataset.convert(identity, source, force=False) == base_target
+    assert len(hub.fetched) > fetches, "a missing layer means another fetch"
+    assert gt_target.is_file()
 
 
 # ── raw budget ────────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-"""Monado SLAM Datasets (MSD): download-on-demand VR headset captures → one base rrd per sequence.
+"""Monado SLAM Datasets (MSD): download-on-demand VR headset captures → a base and a gt rrd per sequence.
 
 Upstream is the HuggingFace dataset ``collabora/monado-slam-datasets`` (CC-BY 4.0),
 a tree of per-sequence zip archives::
@@ -25,11 +25,24 @@ blueprint, hence one camera layout, and the three headsets have two, four and
 two cameras. ``--device`` therefore picks both the corpus and the catalog
 dataset name (``msd-index``, ``msd-g2``, ``msd-odyssey``).
 
+**Two layers, one fetch.** ``convert`` writes a ``base`` rrd (video, IMU,
+magnetometer) and a ``gt`` rrd (``world_T_rig`` at the full ~1 kHz ground-truth
+rate, plus its path and trail) under the same recording id, so the catalog
+stacks them onto one segment. Both come out of one archive read and are
+therefore skipped and rebuilt together: half a sequence on disk means paying
+for the download again regardless.
+
 **Clocks.** Every csv timestamp is nanoseconds on one monotonic device clock
 (values around 1e13, not a Unix epoch). ``video_time`` is that clock minus ``t0``,
-the earliest sample of any stream *including* ``gt`` — the ground-truth layer
-(a sibling rrd) has to share this origin, so its first row is read here even
-though no gt is logged. Nothing is resampled.
+the earliest sample of any stream *including* ``gt`` — the two layers must share
+this origin, and the gt file is usually the earliest stream. Nothing is resampled.
+
+**World axes.** MSD documents none: the Index's ground truth comes from SteamVR
+Lighthouse and the G2's and Odyssey+'s from an undocumented MoCap rig. So the up
+axis is *measured*, from gravity as the accelerometer reads it rotated into the
+world by the ground truth (``measured_world_up``), and then fixed per device in
+``MSD_DEVICES`` so every rrd of a device agrees. ``convert`` re-measures every
+sequence and warns on a disagreement rather than silently reorienting one rrd.
 
 **Frames.** ``rig_T_cam`` comes from basalt's ``T_imu_cam``, the camera pose in
 the IMU frame; the rig frame *is* the IMU frame (``reference = "imu_00"``), so
@@ -59,7 +72,7 @@ import rerun.blueprint as rrb
 import serde
 import serde.json
 from huggingface_hub import HfApi, RepoFile
-from jaxtyping import Float64, Int64
+from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import (
@@ -109,11 +122,53 @@ IMU_VALUE_COLUMNS: int = 6
 """``imu0/data.csv`` value columns: gyro xyz (rad/s) then accel xyz (m/s^2)."""
 MAG_VALUE_COLUMNS: int = 3
 """``mag0/data.csv`` value columns: the field xyz, in the sensor's own units."""
+GT_VALUE_COLUMNS: int = 7
+"""``gt/data.csv`` value columns: position xyz (m) then the quaternion **wxyz**, scalar first."""
+IDENTITY_QUATERNION_XYZW: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
+"""What a dropout row's rotation becomes, so its translation still applies."""
+QUATERNION_NORM_TOLERANCE: float = 1e-3
+"""How far a gt quaternion's norm may sit from 1 before the row counts as a dropout."""
 
 MsdDeviceChoice: TypeAlias = Literal["index", "g2", "odyssey"]
 """``--device``: which headset's corpus to work on, and which catalog dataset."""
 CameraModel: TypeAlias = Literal["kb4", "pinhole-radtan8"]
 """``camera_type`` values basalt writes in ``calibration.json``; MSD uses no others."""
+WorldUpAxis: TypeAlias = Literal["+x", "-x", "+y", "-y", "+z", "-z"]
+"""Signed axis of a tracking world that gravity points *away* from."""
+GtSource: TypeAlias = Literal["lighthouse", "mocap"]
+"""What produced a device's ground truth: SteamVR Lighthouse, or a MoCap system."""
+
+WORLD_UP_VIEW_COORDINATES: dict[WorldUpAxis, rr.components.ViewCoordinates] = {
+    "+x": rr.ViewCoordinates.RIGHT_HAND_X_UP,
+    "-x": rr.ViewCoordinates.RIGHT_HAND_X_DOWN,
+    "+y": rr.ViewCoordinates.RIGHT_HAND_Y_UP,
+    "-y": rr.ViewCoordinates.RIGHT_HAND_Y_DOWN,
+    "+z": rr.ViewCoordinates.RIGHT_HAND_Z_UP,
+    "-z": rr.ViewCoordinates.RIGHT_HAND_Z_DOWN,
+}
+"""Root ``ViewCoordinates`` per world up axis, right-handed throughout.
+
+Rerun's ``RIGHT_HAND_*`` aliases are exactly this table (``RIGHT_HAND_Y_UP`` is
+``RUB``, ``RIGHT_HAND_Z_UP`` is ``RFU``), so naming the up axis is the whole
+decision — the remaining two axes are then fixed by handedness. MSD's csvs say
+nothing about world axes at all, hence the empirical ``measured_world_up``.
+"""
+POSITIVE_WORLD_AXES: tuple[WorldUpAxis, WorldUpAxis, WorldUpAxis] = ("+x", "+y", "+z")
+"""Axis names by column index, for a positive mean; the negative row is below."""
+NEGATIVE_WORLD_AXES: tuple[WorldUpAxis, WorldUpAxis, WorldUpAxis] = ("-x", "-y", "-z")
+"""Axis names by column index, for a negative mean."""
+STANDARD_GRAVITY_MS2: float = 9.80665
+"""Standard gravity; ``measured_world_up`` reports its result as a fraction of this."""
+MEASURED_UP_WINDOW_NS: int = 2_000_000_000
+"""How much of a sequence's start ``measured_world_up`` averages over."""
+GT_TRAJECTORY_COLOR: tuple[int, int, int] = (110, 180, 255)
+"""Fixed tint of the whole gt path; one trajectory is one quantity, not a per-row class."""
+GT_TRAJECTORY_RADIUS_M: float = 0.002
+"""Line radius of the gt path, in metres — thin, because it overlays the rig itself."""
+GT_TRAIL_COLOR: tuple[int, int, int] = (255, 215, 90)
+"""Fixed tint of the recent-motion trail; warm, so it reads against the cool full path."""
+GT_TRAIL_RADIUS_M: float = 0.004
+"""Point radius of the trail, in metres; a 1 kHz trail is dense, so the dots stay small."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +187,13 @@ class MsdDevice:
     """Whether the sequences ship a ``mag0/data.csv``."""
     label: str
     """Human device name for the rig node's ``name`` AnyValue."""
+    world_up: WorldUpAxis
+    """Up axis of this device's tracking world, **measured** with
+    ``measured_world_up`` on a real sequence rather than assumed, and then fixed
+    here so every rrd of the device carries the same root ``ViewCoordinates``.
+    ``convert`` re-measures each sequence and warns when it disagrees."""
+    gt_source: GtSource
+    """What produced ``gt/data.csv``; goes into the gt layer's properties."""
 
 
 MSD_DEVICES: dict[MsdDeviceChoice, MsdDevice] = {
@@ -146,9 +208,31 @@ MSD_DEVICES: dict[MsdDeviceChoice, MsdDevice] = {
         num_cameras=2,
         has_magnetometer=False,
         label="valve-index",
+        # Measured on MIO09_short_1_updown: +y carries 1.00 of |g|. OpenVR worlds
+        # are right-handed Y-up, so Lighthouse ground truth agreeing is expected.
+        world_up="+y",
+        gt_source="lighthouse",
     ),
-    "g2": MsdDevice(hf_dir="MG_reverb_g2", collections=("MGO_others",), num_cameras=4, has_magnetometer=True, label="reverb-g2"),
-    "odyssey": MsdDevice(hf_dir="MO_odyssey_plus", collections=("MOO_others",), num_cameras=2, has_magnetometer=True, label="odyssey-plus"),
+    "g2": MsdDevice(
+        hf_dir="MG_reverb_g2",
+        collections=("MGO_others",),
+        num_cameras=4,
+        has_magnetometer=True,
+        label="reverb-g2",
+        # Measured on MGO09_short_1_updown; the MoCap rig documents no convention.
+        world_up="+y",
+        gt_source="mocap",
+    ),
+    "odyssey": MsdDevice(
+        hf_dir="MO_odyssey_plus",
+        collections=("MOO_others",),
+        num_cameras=2,
+        has_magnetometer=True,
+        label="odyssey-plus",
+        # Measured on MOO09_short_1_updown; same undocumented MoCap rig as the G2.
+        world_up="+y",
+        gt_source="mocap",
+    ),
 }
 """The three headsets MSD covers, keyed by the ``--device`` literal."""
 
@@ -382,6 +466,107 @@ class TimestampedSamples:
     """Every column after the timestamp, in file order."""
 
 
+@dataclass(frozen=True, slots=True)
+class GtTrajectory:
+    """One ``gt/data.csv`` as Rerun wants it: ``world_T_rig`` per sample, quaternion xyzw."""
+
+    times_ns: Int64[ndarray, "n_poses"]
+    """Pose times on the device clock, nanoseconds — already the IMU's clock."""
+    translations_xyz: Float64[ndarray, "n_poses 3"]
+    """``world_t_rig``, metres."""
+    quaternions_xyzw: Float64[ndarray, "n_poses 4"]
+    """``world_R_rig``, scalar **last**; a dropout row holds identity."""
+    num_sanitized: int
+    """Rows whose quaternion was not unit-norm and was replaced with identity."""
+
+
+def gt_trajectory(samples: TimestampedSamples) -> GtTrajectory:
+    """Split a parsed ``gt/data.csv`` into the columns ``rr.Transform3D`` takes.
+
+    Two file-format facts live here and nowhere else. The csv writes the
+    quaternion **wxyz** (EuRoC's scalar-first layout) while ``Transform3D``
+    wants xyzw; and a tracking dropout is written as a degenerate quaternion.
+    A non-unit quaternion breaks the rotation chain from that row on, so every
+    child frustum of the rig stops tracking — slam-evals hit exactly this on
+    ROVER-T265's ``0 0 0 0`` rows (``slam_evals/ingest/columns.py``) and settled
+    on the same per-row repair: identity rotation, translation untouched, and
+    the count reported rather than hidden.
+
+    Args:
+        samples: ``read_numeric_csv(..., num_values=GT_VALUE_COLUMNS)`` output.
+
+    Returns:
+        The pose columns, plus how many rows had to be repaired.
+
+    Raises:
+        ValueError: The file holds a header and nothing else. gt's first stamp is
+            also the sequence's clock origin, so an empty one has no silent default.
+    """
+    if samples.times_ns.size == 0:
+        raise ValueError("gt/data.csv has no data rows, so the sequence has neither poses nor a clock origin")
+    translations_xyz: Float64[ndarray, "n_poses 3"] = np.ascontiguousarray(samples.values[:, 0:3])
+    quaternions_xyzw: Float64[ndarray, "n_poses 4"] = np.ascontiguousarray(samples.values[:, [4, 5, 6, 3]])
+    norms: Float64[ndarray, "n_poses"] = np.linalg.norm(quaternions_xyzw, axis=1)
+    dropped: Bool[ndarray, "n_poses"] = np.abs(norms - 1.0) > QUATERNION_NORM_TOLERANCE
+    quaternions_xyzw[dropped] = IDENTITY_QUATERNION_XYZW
+    return GtTrajectory(
+        times_ns=samples.times_ns,
+        translations_xyz=translations_xyz,
+        quaternions_xyzw=quaternions_xyzw,
+        num_sanitized=int(dropped.sum()),
+    )
+
+
+def measured_world_up(gt: GtTrajectory, accel: TimestampedSamples, *, window_ns: int = MEASURED_UP_WINDOW_NS) -> tuple[WorldUpAxis, float]:
+    """Measure which world axis is up, from gravity as the accelerometer sees it.
+
+    MSD ships no statement of its world axes: the Index's ground truth comes
+    from SteamVR Lighthouse and the G2's and Odyssey+'s from a MoCap rig whose
+    convention is undocumented. Gravity settles it. An accelerometer at rest
+    measures the *reaction* to gravity, so its reading points **up**; rotating
+    each sample into the world with the ground truth's own orientation
+    (``world_R_rig @ a_rig``) and averaging therefore yields a vector along the
+    world's up axis. Only the first couple of seconds are used: a headset is
+    typically still on the floor or on a head that has not started moving, so
+    the mean is nearly pure gravity there and gets noisier the longer the window.
+
+    Args:
+        gt: The sequence's ground truth, already in xyzw order and sanitized.
+        accel: Accelerometer samples in m/s^2 — a 3-column ``TimestampedSamples``
+            (``inertial.values[:, 3:6]``), on the same device clock as ``gt``.
+        window_ns: Length of the averaging window, from the first sample both
+            streams cover.
+
+    Returns:
+        The dominant signed world axis, and the mean's component along it as a
+        fraction of standard gravity — a health check, not a calibration: a
+        value near 1 means the window really was near rest and the axis is
+        unambiguous, while a much smaller one means the mean is not gravity.
+
+    Raises:
+        ValueError: Either stream is empty, or they do not overlap inside the window.
+    """
+    if gt.times_ns.size == 0 or accel.times_ns.size == 0:
+        raise ValueError("measuring the world up axis needs both a gt pose and an accelerometer sample")
+    start_ns: int = max(int(gt.times_ns[0]), int(accel.times_ns[0]))
+    inside: Bool[ndarray, "n_samples"] = (accel.times_ns >= start_ns) & (accel.times_ns < start_ns + window_ns)
+    if not inside.any():
+        raise ValueError(f"no accelerometer sample within {window_ns / 1e9:g} s of {start_ns}, where the gt starts")
+
+    window_times_ns: Int64[ndarray, "n_window"] = accel.times_ns[inside]
+    after: Int64[ndarray, "n_window"] = np.clip(np.searchsorted(gt.times_ns, window_times_ns), 0, gt.times_ns.size - 1)
+    before: Int64[ndarray, "n_window"] = np.clip(after - 1, 0, gt.times_ns.size - 1)
+    nearest: Int64[ndarray, "n_window"] = np.where(
+        np.abs(gt.times_ns[before] - window_times_ns) <= np.abs(gt.times_ns[after] - window_times_ns), before, after
+    )
+    world_accel_xyz: Float64[ndarray, "n_window 3"] = Rotation.from_quat(gt.quaternions_xyzw[nearest]).apply(accel.values[inside])
+    mean_xyz: Float64[ndarray, "3"] = world_accel_xyz.mean(axis=0)
+
+    axis_index: int = int(np.argmax(np.abs(mean_xyz)))
+    names: tuple[WorldUpAxis, WorldUpAxis, WorldUpAxis] = POSITIVE_WORLD_AXES if mean_xyz[axis_index] >= 0.0 else NEGATIVE_WORLD_AXES
+    return names[axis_index], float(abs(mean_xyz[axis_index]) / STANDARD_GRAVITY_MS2)
+
+
 def read_camera_index(data: bytes) -> list[CameraRow]:
     """Parse a ``cam<N>/data.csv`` into typed rows, in file order.
 
@@ -418,27 +603,6 @@ def read_numeric_csv(data: bytes, *, num_values: int) -> TimestampedSamples:
         io.BytesIO(data), delimiter=",", skiprows=1, usecols=range(1, 1 + num_values), dtype=np.float64, ndmin=2
     )
     return TimestampedSamples(times_ns=times_ns, values=values)
-
-
-def first_timestamp_ns(data: bytes) -> int:
-    """First data row's timestamp, without parsing the rest of the file.
-
-    The ``gt`` csv is read only for this: the ground-truth *layer* is a sibling
-    rrd, but both layers must be on the same zero-based ``video_time``, so its
-    clock origin has to be known here.
-
-    Args:
-        data: Whole csv, as read out of the archive.
-
-    Raises:
-        ValueError: The file holds a header and nothing else.
-    """
-    reader: Iterator[list[str]] = csv.reader(io.StringIO(data.decode()))
-    next(reader, None)
-    first: list[str] | None = next(reader, None)
-    if first is None:
-        raise ValueError("csv has no data rows, so it cannot contribute a clock origin")
-    return int(first[0])
 
 
 def resolve_seven_zip() -> Path:
@@ -726,6 +890,20 @@ def build_table_blueprint(num_cameras: int) -> rrb.Blueprint:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class RecordingSummary:
+    """What one converted sequence turned out to hold; ``convert`` prints it."""
+
+    num_frames: int
+    """Longest per-camera video sample count."""
+    num_poses: int
+    """Ground-truth poses logged into the gt layer."""
+    measured_up: WorldUpAxis
+    """World up axis this sequence's own gravity measurement found."""
+    measured_up_fraction: float
+    """Fraction of standard gravity the measured axis carried; near 1 is a clean measurement."""
+
+
 class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
     """Converts one MSD headset's sequences into exoego:v2 base-layer recordings."""
 
@@ -838,7 +1016,14 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         )
 
     def convert(self, identity: SequenceIdentity, source: MsdSource, *, force: bool) -> Path:
-        """Fetch one sequence, encode it, write its base-layer rrd, and delete the raw.
+        """Fetch one sequence, encode it, write its two rrd layers, and delete the raw.
+
+        Both layers come out of the *same* archive fetch, so they are skipped and
+        rebuilt as a unit: half a sequence on disk means the multi-gigabyte
+        download has to happen again anyway, and rebuilding the base layer with
+        it costs one encode against a corpus that would otherwise be silently
+        incomplete. The base path is what the caller gets, because that is the
+        layer every dataforge verb keys on.
 
         Failure keeps the archive (a retry then skips the multi-gigabyte
         download) but removes the mp4s and any extraction directory, so the next
@@ -846,8 +1031,9 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         deleted.
         """
         target: Path = paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity)
-        if writing.should_skip(target, force=force):
-            print(f"skip {identity.sequence_key} → {target}")
+        gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
+        if writing.should_skip(target, force=force) and writing.should_skip(gt_target, force=force):
+            print(f"skip {identity.sequence_key} → {target} + {gt_target}")
             return target
 
         archives: list[Path] = [self.config.root / archive_path for archive_path in source.archive_paths]
@@ -860,7 +1046,9 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         work_dir: Path = self.config.root / "work" / source.sequence
         work_dir.mkdir(parents=True, exist_ok=True)
         try:
-            num_frames: int = self.write_recording(identity, source, archives=archives, work_dir=work_dir, target=target)
+            summary: RecordingSummary = self.write_recording(
+                identity, source, archives=archives, work_dir=work_dir, target=target, gt_target=gt_target
+            )
         except BaseException:
             shutil.rmtree(work_dir, ignore_errors=True)
             retained: int = sum(archive.stat().st_size for archive in archives if archive.is_file())
@@ -873,21 +1061,32 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
             shutil.rmtree(work_dir, ignore_errors=True)
             for archive in archives:
                 archive.unlink(missing_ok=True)
-        print(f"done {identity.sequence_key} → {target} ({self.device.num_cameras} cameras, {num_frames} frames)")
+        print(
+            f"done {identity.sequence_key} → {target} + {gt_target} "
+            f"({self.device.num_cameras} cameras, {summary.num_frames} frames, {summary.num_poses} gt poses, "
+            f"world up {summary.measured_up} at {summary.measured_up_fraction:.2f} g)"
+        )
         return target
 
-    def write_recording(self, identity: SequenceIdentity, source: MsdSource, *, archives: Sequence[Path], work_dir: Path, target: Path) -> int:
-        """Encode every camera, read every sensor csv, and write one base-layer rrd.
+    def write_recording(
+        self, identity: SequenceIdentity, source: MsdSource, *, archives: Sequence[Path], work_dir: Path, target: Path, gt_target: Path
+    ) -> RecordingSummary:
+        """Encode every camera, read every csv, and write both rrd layers of one sequence.
+
+        The base layer closes before the gt layer opens: one archive read feeds
+        both, but each is its own recording stream and its own atomic replace, so
+        a failure in the second cannot half-write the first.
 
         Args:
-            identity: Sequence identity; names the recording and the rrd file.
+            identity: Sequence identity; names both recordings and both rrd files.
             source: The discovered sequence, whose stem is the archive's top directory.
             archives: Local archive volume paths, the closing ``.zip`` last.
             work_dir: Scratch directory for the encoded mp4s and any extraction.
-            target: Final rrd path, written through ``atomic_recording``.
+            target: Final base-layer rrd path, written through ``atomic_recording``.
+            gt_target: Final gt-layer rrd path, likewise.
 
         Returns:
-            The longest per-camera frame count, for the caller's summary line.
+            What the sequence turned out to hold, for the caller's summary line.
         """
         calibration: MsdCalibration = self.calibration()
         cameras: list[PinholeParameters | Fisheye62Parameters] = [
@@ -921,12 +1120,13 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
                 magnetometer = read_numeric_csv(reader.csv_bytes(f"{mav0}/mag0/data.csv"), num_values=MAG_VALUE_COLUMNS)
             # The gt *layer* is a sibling rrd, but both layers share one zero-based
             # video_time, so the base layer has to know gt's clock origin too.
-            gt_first_ns: int = first_timestamp_ns(reader.csv_bytes(f"{mav0}/gt/data.csv"))
+            gt: GtTrajectory = gt_trajectory(read_numeric_csv(reader.csv_bytes(f"{mav0}/gt/data.csv"), num_values=GT_VALUE_COLUMNS))
 
         streams: list[Int64[ndarray, "n_samples"]] = [*camera_times, inertial.times_ns]
         if magnetometer is not None and magnetometer.times_ns.size:
             streams.append(magnetometer.times_ns)
-        start_time_ns: int = min(gt_first_ns, *(int(times_ns[0]) for times_ns in streams))
+        start_time_ns: int = min(int(gt.times_ns[0]), *(int(times_ns[0]) for times_ns in streams))
+        # Deliberately not bounded by gt: duration_ns describes the *sensor* layer.
         duration_ns: int = max(int(times_ns[-1]) for times_ns in streams) - start_time_ns
         num_frames: int = max(times_ns.size for times_ns in camera_times)
 
@@ -977,4 +1177,64 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
                 hf_revision=repo_revision(REPO_ID, self.config.revision),
                 duration_ns=duration_ns,
             )
-        return num_frames
+
+        accel: TimestampedSamples = TimestampedSamples(times_ns=inertial.times_ns, values=inertial.values[:, 3:6])
+        measured: tuple[WorldUpAxis, float] = measured_world_up(gt, accel)
+        if measured[0] != self.device.world_up:
+            print(
+                f"  warning: {self.config.device} declares world_up {self.device.world_up} but {source.sequence} "
+                f"measured {measured[0]} carrying {measured[1]:.2f} of |g|; the rrd still states the declared axis"
+            )
+
+        gt_times_ns: Int64[ndarray, "n_poses"] = gt.times_ns - start_time_ns
+        gt_index: list[rr.TimeColumn] = [rr.TimeColumn(schema.TIMELINE, duration=gt_times_ns.astype("timedelta64[ns]"))]
+        with writing.atomic_recording(gt_target, application_id="dataforge", recording_id=identity.recording_id) as recording:
+            # The gt layer establishes a world frame at all, so it — not the base
+            # layer — owns the root ViewCoordinates. The axis is the device's
+            # declared one, not this sequence's measurement: every rrd of a device
+            # must agree, and a disagreement is the warning above, not a silent
+            # per-sequence reorientation.
+            rr.log("/", WORLD_UP_VIEW_COORDINATES[self.device.world_up], static=True, recording=recording)
+            rr.send_columns(
+                schema.rig_path(RIG),
+                indexes=gt_index,
+                columns=rr.Transform3D.columns(translation=gt.translations_xyz, quaternion=gt.quaternions_xyzw),
+                recording=recording,
+            )
+            # Two views of one trajectory: the static strip is the whole path for the
+            # overview, and the per-pose points are what the blueprint's cursor-relative
+            # time range turns into a recent-motion trail in the follow view.
+            rr.log(
+                schema.trajectory_path("gt"),
+                rr.LineStrips3D([gt.translations_xyz], colors=GT_TRAJECTORY_COLOR, radii=GT_TRAJECTORY_RADIUS_M),
+                static=True,
+                recording=recording,
+            )
+            rr.log(
+                schema.trail_path("gt"),
+                rr.Points3D.from_fields(colors=GT_TRAIL_COLOR, radii=GT_TRAIL_RADIUS_M),
+                static=True,
+                recording=recording,
+            )
+            rr.send_columns(
+                schema.trail_path("gt"),
+                indexes=gt_index,
+                columns=rr.Points3D.columns(positions=gt.translations_xyz),
+                recording=recording,
+            )
+            recording.send_recording_name(identity.recording_id)
+            recording.send_property(
+                "gt",
+                rr.AnyValues(
+                    num_poses=gt.times_ns.size,
+                    duration_ns=int(gt.times_ns[-1] - gt.times_ns[0]),
+                    num_sanitized=gt.num_sanitized,
+                    source=self.device.gt_source,
+                    world_up=self.device.world_up,
+                    measured_up=measured[0],
+                    measured_up_fraction=measured[1],
+                ),
+            )
+        return RecordingSummary(
+            num_frames=num_frames, num_poses=int(gt.times_ns.size), measured_up=measured[0], measured_up_fraction=measured[1]
+        )
