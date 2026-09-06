@@ -43,6 +43,8 @@ ignore_names = [
     "on_duplicate",
     "set_default",
     "exist_ok",
+    # A context manager's __exit__ has to accept it; the bodies here do not use it.
+    "traceback",
 ]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
