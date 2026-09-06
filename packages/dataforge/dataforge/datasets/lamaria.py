@@ -40,12 +40,10 @@ from pathlib import Path
 from typing import ClassVar, Literal, TypeAlias
 
 import numpy as np
-import requests
 import rerun as rr
 import rerun.blueprint as rrb
 import serde
 import serde.json
-from beartype.roar import BeartypeException
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 from projectaria_tools.core import data_provider
@@ -98,9 +96,6 @@ PSEUDO_GT_LOCAL_DIR: str = "ground_truth/pGT"
 """Where the official layout keeps the pGT inside a sequence directory."""
 CONTROL_POINTS_LOCAL_DIR: str = "ground_truth/control_points"
 """Where the official layout keeps the control points inside a sequence directory."""
-
-INDEX_TIMEOUT_S: float = 30.0
-"""Per-request timeout for an index page; they are a few kilobytes of HTML."""
 
 RIG: int = 0
 """One Aria per sequence; the glasses are ``rig_00``."""
@@ -228,8 +223,6 @@ CAMERA_KINDS: dict[aria.AriaStreamId, str] = {
     aria.RGB_STREAM_ID: "rgb",
 }
 """exoego:v2 content hint on each camera node."""
-VRS_FETCH_ATTEMPTS: int = 4
-"""How many times a stalled VRS transfer is resumed before ``convert`` gives up."""
 
 
 @serde.serde
@@ -244,9 +237,7 @@ class SequenceRecord:
     vrs_url: str
     """Absolute URL ``convert`` fetches the VRS from."""
     vrs_display_bytes: int
-    """Apache's **rounded** display size (``897M`` → 940 572 672). Good for a
-    budget or a summary line and useless for verification, so it is never passed
-    to ``http_fetch`` as an expected size."""
+    """``IndexEntry.display_bytes`` of the listed VRS: a budget line, not a size."""
     has_pseudo_gt: bool
     """Whether ``ground_truth/pseudo_dense/`` lists this sequence (training only)."""
     has_control_points: bool
@@ -275,7 +266,7 @@ class LamariaSource:
     vrs_url: str
     """Where the VRS is fetched from on demand."""
     vrs_display_bytes: int
-    """Apache's rounded size, for the fetch's progress line only."""
+    """The manifest's display size, for the fetch's progress line only."""
     vrs_path: Path
     """``<root>/<split>/<seq>/raw_data/<seq>.vrs``; deleted after convert unless ``--keep-raw``."""
     calibration_path: Path
@@ -883,23 +874,6 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         """Absolute URL of one archive path, e.g. ``raw_data/training/R_01_easy.vrs``."""
         return "/".join([self.config.base_url.rstrip("/"), *parts])
 
-    def index(self, directory: str) -> list[transports.IndexEntry]:
-        """List one Apache index page under ``base_url`` as ``(name, size_bytes)``.
-
-        Args:
-            directory: Archive-relative directory, e.g. ``raw_data/training``.
-
-        Returns:
-            One entry per listed file, in page order.
-
-        Raises:
-            requests.HTTPError: If the archive answered 4xx/5xx — the flaky-archive
-                case, and one worth failing on rather than treating as "empty".
-        """
-        page: requests.Response = requests.get(f"{self.archive_url(directory)}/", timeout=INDEX_TIMEOUT_S)
-        page.raise_for_status()
-        return transports.parse_apache_index(page.text)
-
     def manifest(self) -> LamariaManifest:
         """Read ``<root>/manifest.json``, the record ``download`` left behind."""
         path: Path = self.config.root / MANIFEST_NAME
@@ -965,11 +939,11 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         splits: dict[str, LamariaSplit] = {}
         vrs_display_bytes: dict[str, int] = {}
         for split in SPLITS:
-            for name, size in self.index(f"{RAW_DATA_DIR}/{split}"):
+            for name, display_bytes in transports.http_index(f"{self.archive_url(RAW_DATA_DIR, split)}/"):
                 sequence: str = name.removesuffix(".vrs")
                 if name.endswith(".vrs") and sequence in selected:
                     splits[sequence] = split
-                    vrs_display_bytes[sequence] = size
+                    vrs_display_bytes[sequence] = display_bytes
         unlisted: list[str] = [name for name in selected if name not in splits]
         if unlisted:
             raise ValueError(f"no raw_data index at {self.config.base_url} lists a VRS for {', '.join(unlisted)}")
@@ -977,14 +951,20 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         calibrated: set[str] = {
             name.removesuffix(".json")
             for split in sorted(set(splits.values()))
-            for name, _ in self.index(f"{CALIBRATION_DIR}/{split}")
+            for name, _ in transports.http_index(f"{self.archive_url(CALIBRATION_DIR, split)}/")
             if name.endswith(".json")
         }
         uncalibrated: list[str] = [name for name in selected if name not in calibrated]
         if uncalibrated:
             raise ValueError(f"{CALIBRATION_DIR} lists no published calibration for {', '.join(uncalibrated)}; the archive layout changed")
-        with_pseudo_gt: set[str] = {name.removesuffix(".txt") for name, _ in self.index(PSEUDO_GT_REMOTE_DIR) if name.endswith(".txt")}
-        with_control_points: set[str] = {name.removesuffix(".json") for name, _ in self.index(CONTROL_POINTS_REMOTE_DIR) if name.endswith(".json")}
+        with_pseudo_gt: set[str] = {
+            name.removesuffix(".txt") for name, _ in transports.http_index(f"{self.archive_url(PSEUDO_GT_REMOTE_DIR)}/") if name.endswith(".txt")
+        }
+        with_control_points: set[str] = {
+            name.removesuffix(".json")
+            for name, _ in transports.http_index(f"{self.archive_url(CONTROL_POINTS_REMOTE_DIR)}/")
+            if name.endswith(".json")
+        }
 
         records: list[SequenceRecord] = [
             SequenceRecord(
@@ -1022,41 +1002,19 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         print(f"  small files → {self.config.root}/<split>/<seq>/, manifest → {manifest_path}")
 
     def fetch_vrs(self, source: LamariaSource) -> Path:
-        """Fetch one sequence's VRS, resuming and retrying a stalled transfer.
-
-        The archive hangs up mid-transfer often enough that a single attempt at a
-        multi-gigabyte file is not a plan: ``http_fetch`` leaves what it got on
-        disk and every retry appends with a ``Range`` request. Nothing is ever
-        deleted here, so even an exhausted retry budget leaves the next run less
-        to do.
-
-        The manifest's size is deliberately **not** passed as ``expected_size``:
-        it is Apache's rounded display size, so it would reject every file.
+        """Announce and fetch one sequence's VRS; ``http_fetch`` resumes and retries it.
 
         Args:
             source: The sequence to fetch.
 
         Returns:
             The local VRS path.
-
-        Raises:
-            RuntimeError: Every attempt stalled; the partial file is kept.
         """
         if source.vrs_path.is_file():
             print(f"  {source.vrs_path.stat().st_size / 1e9:.2f} GB already in {source.vrs_path.parent}; the fetch resumes or verifies it")
         else:
             print(f"  fetching {source.vrs_display_bytes / 1e9:.1f} GB from {source.vrs_url}")
-        last_failure: str = ""
-        for attempt in range(1, VRS_FETCH_ATTEMPTS + 1):
-            try:
-                return transports.http_fetch(source.vrs_url, dest=source.vrs_path)
-            except BeartypeException:
-                raise
-            except (requests.RequestException, ValueError) as failure:
-                last_failure = f"{type(failure).__name__}: {failure}"
-                have: int = source.vrs_path.stat().st_size if source.vrs_path.is_file() else 0
-                print(f"  warning: attempt {attempt}/{VRS_FETCH_ATTEMPTS} stalled at {have / 1e9:.2f} GB ({last_failure}); resuming")
-        raise RuntimeError(f"{VRS_FETCH_ATTEMPTS} attempts at {source.vrs_url} all stalled, last: {last_failure}")
+        return transports.http_fetch(source.vrs_url, dest=source.vrs_path)
 
     def convert(self, identity: SequenceIdentity, source: LamariaSource, *, force: bool) -> Path:
         """Fetch one VRS, encode it, write both rrd layers, and delete the raw.

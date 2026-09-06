@@ -8,9 +8,10 @@ datasets that are already on disk (robocap's download verb is verify-only).
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Sequence
+import time
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import TypeAlias
+from typing import NamedTuple
 
 import requests
 from huggingface_hub import snapshot_download
@@ -18,8 +19,29 @@ from huggingface_hub import snapshot_download
 CHUNK_BYTES: int = 1 << 20
 """Streaming block size: 1 MiB, small enough to resume cheaply, big enough to saturate a link."""
 
-IndexEntry: TypeAlias = tuple[str, int]
-"""One row of a remote directory listing: file name and its size in bytes."""
+ATTEMPTS: int = 4
+"""How many times a transport tries one URL before giving up."""
+
+RETRY_BACKOFF_S: tuple[float, ...] = (5.0, 15.0, 45.0)
+"""Waits before each retry. The archives these transports read go down for minutes
+at a time, so a budget spent in milliseconds is no budget at all; the last wait
+repeats if a caller asks for more attempts than there are entries."""
+
+
+class IndexEntry(NamedTuple):
+    """One row of a remote directory listing."""
+
+    name: str
+    """File name, exactly as the page links it."""
+    display_bytes: int
+    """The size the page *displays*, rounded to three significant digits (``897M``
+    → 940 572 672). Good for a budget, a progress line or a summary, and useless
+    for verification: only the server's ``Content-Length`` says what to expect."""
+
+
+class StaleLocalFile(ValueError):
+    """The file on disk cannot be reconciled with the remote one, so no retry helps."""
+
 
 APACHE_ROW_RE: re.Pattern[str] = re.compile(
     r'<a href="(?P<href>[^"]+)">(?P<name>[^<]*)</a>\s*</td>\s*<td[^>]*>[^<]*</td>\s*<td[^>]*>\s*(?P<size>[0-9.]+[KMGT]?|-)\s*</td>'
@@ -74,8 +96,26 @@ def hf_fetch(
     return local_dir
 
 
-def http_fetch(url: str, *, dest: Path, expected_size: int | None = None, timeout_s: float = 60.0) -> Path:
-    """Fetch one URL to one path over plain HTTP, resuming a partial file.
+def attempts_of(url: str, attempts: int) -> Iterator[int]:
+    """Yield attempt numbers ``1..attempts``, waiting ``RETRY_BACKOFF_S`` before each retry.
+
+    Args:
+        url: What is being retried, for the waiting line.
+        attempts: How many tries in total.
+
+    Yields:
+        The attempt number, after whatever wait precedes it.
+    """
+    for attempt in range(1, attempts + 1):
+        if attempt > 1:
+            delay_s: float = RETRY_BACKOFF_S[min(attempt - 2, len(RETRY_BACKOFF_S) - 1)]
+            print(f"  waiting {delay_s:g} s before attempt {attempt}/{attempts} at {url}")
+            time.sleep(delay_s)
+        yield attempt
+
+
+def http_fetch(url: str, *, dest: Path, timeout_s: float = 60.0, attempts: int = ATTEMPTS) -> Path:
+    """Fetch one URL to one path over plain HTTP, resuming and retrying a partial file.
 
     Written for archives that are big and servers that are flaky (LaMAria's
     multi-GB VRS files behind an Apache index whose TLS handshakes stall for
@@ -86,65 +126,91 @@ def http_fetch(url: str, *, dest: Path, expected_size: int | None = None, timeou
     * A shorter ``dest`` is resumed with a ``Range`` header and appended to. A
       server that ignores the range (answering 200 instead of 206) restarts the
       file rather than corrupting it by appending a second copy of the head.
-    * Nothing is ever deleted on failure: a size mismatch raises and **leaves
-      the bytes on disk**, so the next call resumes instead of starting over.
+    * Nothing is ever deleted: a stalled transfer **leaves the bytes on disk**,
+      so the next attempt — this call's own, or the next run's — resumes.
 
     Args:
         url: Absolute ``http(s)://`` URL of one file.
         dest: Local path to write; parent directories are created.
-        expected_size: Size in bytes the caller believes the file has (e.g. from
-            a manifest). Checked against the server's ``Content-Length`` before
-            any transfer, so a stale manifest fails in a second, not an hour.
         timeout_s: Per-request connect/read timeout. A stalled read raises
-            rather than hanging forever; the caller retries and resumes.
+            rather than hanging forever, and the next attempt resumes.
+        attempts: How many times to try, spaced by ``RETRY_BACKOFF_S``.
 
     Returns:
         ``dest``, so callers can chain the fetch into a read.
 
     Raises:
-        ValueError: If ``expected_size`` disagrees with ``Content-Length``, if
-            ``dest`` is longer than the remote file, or if the bytes on disk
-            after the transfer do not match the announced size.
-        requests.HTTPError: If either request answers 4xx/5xx.
+        StaleLocalFile: ``dest`` is longer than the remote file, which no retry
+            can fix — delete it and refetch.
+        RuntimeError: Every attempt failed; the partial file is kept.
     """
-    head: requests.Response = requests.head(url, timeout=timeout_s, allow_redirects=True)
-    head.raise_for_status()
-    announced: str | None = head.headers.get("Content-Length")
-    remote_size: int | None = None if announced is None else int(announced)
-    if expected_size is not None and remote_size is not None and expected_size != remote_size:
-        raise ValueError(f"{url} is {remote_size} bytes but {expected_size} were expected; the manifest is stale")
-    total: int | None = remote_size if remote_size is not None else expected_size
+    last_failure: str = ""
+    for attempt in attempts_of(url, attempts):
+        try:
+            head: requests.Response = requests.head(url, timeout=timeout_s, allow_redirects=True)
+            head.raise_for_status()
+            announced: str | None = head.headers.get("Content-Length")
+            total: int | None = None if announced is None else int(announced)
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    have: int = dest.stat().st_size if dest.is_file() else 0
-    if total is not None:
-        if have == total:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            have: int = dest.stat().st_size if dest.is_file() else 0
+            if total is not None:
+                if have == total:
+                    return dest
+                if have > total:
+                    raise StaleLocalFile(f"{dest} holds {have} bytes but {url} is only {total}; delete it and refetch")
+
+            headers: dict[str, str] = {"Range": f"bytes={have}-"} if have else {}
+            with requests.get(url, headers=headers, stream=True, timeout=timeout_s) as response:
+                response.raise_for_status()
+                # A 200 to a Range request means the server sent the whole file again.
+                resuming: bool = have > 0 and response.status_code == 206
+                with dest.open("ab" if resuming else "wb") as sink:
+                    for block in response.iter_content(chunk_size=CHUNK_BYTES):
+                        sink.write(block)
+
+            written: int = dest.stat().st_size
+            if total is not None and written != total:
+                raise ValueError(f"{dest} holds {written} of {total} bytes after fetching {url}; resuming from there")
             return dest
-        if have > total:
-            raise ValueError(f"{dest} holds {have} bytes but {url} is only {total}; delete it and refetch")
+        except StaleLocalFile:
+            raise
+        except (requests.RequestException, ValueError) as failure:
+            last_failure = f"{type(failure).__name__}: {failure}"
+            landed: int = dest.stat().st_size if dest.is_file() else 0
+            print(f"  warning: attempt {attempt}/{attempts} stalled at {landed / 1e9:.2f} GB ({last_failure}); resuming")
+    raise RuntimeError(f"{attempts} attempts at {url} all stalled, last: {last_failure}")
 
-    headers: dict[str, str] = {"Range": f"bytes={have}-"} if have else {}
-    with requests.get(url, headers=headers, stream=True, timeout=timeout_s) as response:
-        response.raise_for_status()
-        # A 200 to a Range request means the server sent the whole file again.
-        resuming: bool = have > 0 and response.status_code == 206
-        with dest.open("ab" if resuming else "wb") as sink:
-            for block in response.iter_content(chunk_size=CHUNK_BYTES):
-                sink.write(block)
 
-    written: int = dest.stat().st_size
-    if total is not None and written != total:
-        raise ValueError(f"{dest} holds {written} of {total} bytes after fetching {url}; rerun to resume from there")
-    return dest
+def http_index(url: str, *, timeout_s: float = 30.0, attempts: int = ATTEMPTS) -> list[IndexEntry]:
+    """Read one Apache fancy-index page, retrying the way ``http_fetch`` does.
+
+    Args:
+        url: Absolute URL of the directory listing, trailing slash included.
+        timeout_s: Per-request connect/read timeout; a page is a few kilobytes.
+        attempts: How many times to try, spaced by ``RETRY_BACKOFF_S``.
+
+    Returns:
+        One entry per listed file, in page order.
+
+    Raises:
+        RuntimeError: Every attempt failed. An archive that answers 4xx/5xx is
+            worth failing on rather than treating as an empty directory.
+    """
+    last_failure: str = ""
+    for attempt in attempts_of(url, attempts):
+        try:
+            page: requests.Response = requests.get(url, timeout=timeout_s)
+            page.raise_for_status()
+            return parse_apache_index(page.text)
+        except requests.RequestException as failure:
+            last_failure = f"{type(failure).__name__}: {failure}"
+            print(f"  warning: attempt {attempt}/{attempts} at the index {url} failed ({last_failure})")
+    raise RuntimeError(f"{attempts} attempts at {url} all failed, last: {last_failure}")
 
 
 def parse_apache_index(html: str) -> list[IndexEntry]:
-    """List an Apache fancy-index page as ``(name, size_bytes)`` in listing order.
-
-    The sizes are the **displayed**, three-significant-digit ones (``897M``,
-    ``1.9G``), so they are good for a manifest, a progress bar, or a disk-budget
-    check, and useless for verification — a fetch validates against the
-    ``Content-Length`` the server reports for the file itself.
+    """List an Apache fancy-index page as ``IndexEntry`` rows, in listing order.
 
     Rows without a file (the ``Parent Directory`` link, the ``?C=N;O=D`` sort
     headers, subdirectories) and rows whose size cell is Apache's ``-`` are
@@ -164,7 +230,7 @@ def parse_apache_index(html: str) -> list[IndexEntry]:
             continue
         multiple: int = SIZE_SUFFIX_BYTES.get(size[-1], 1)
         digits: str = size[:-1] if size[-1] in SIZE_SUFFIX_BYTES else size
-        listed.append((row["name"], int(float(digits) * multiple)))
+        listed.append(IndexEntry(name=row["name"], display_bytes=int(float(digits) * multiple)))
     return listed
 
 
