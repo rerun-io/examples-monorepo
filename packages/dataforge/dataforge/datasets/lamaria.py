@@ -104,6 +104,9 @@ RIG_REFERENCE: str = "imu_00"
 GT_SOURCE: str = "gt"
 """``/world/runs/gt/`` — the run name the gt layer writes its trajectory under."""
 
+CameraKind: TypeAlias = Literal["grayscale", "rgb"]
+"""exoego:v2 content hint on a camera node: what a consumer will decode."""
+
 GtWorld: TypeAlias = Literal["mps", "lv95"]
 """Which world frame a sequence's ground truth is expressed in."""
 
@@ -126,10 +129,6 @@ WORLD_UP_MIN_FRACTION_OF_G: float = 0.9
 """How much of |g| the measured axis must carry before ``convert`` accepts the measurement
 as unambiguous; below it the averaging window was not near rest."""
 
-POSITIVE_WORLD_AXES: tuple[WorldUpAxis, WorldUpAxis, WorldUpAxis] = ("+x", "+y", "+z")
-"""Axis names by column index, for a positive mean; the negative row is below."""
-NEGATIVE_WORLD_AXES: tuple[WorldUpAxis, WorldUpAxis, WorldUpAxis] = ("-x", "-y", "-z")
-"""Axis names by column index, for a negative mean."""
 STANDARD_GRAVITY_MS2: float = 9.80665
 """Standard gravity; ``measured_world_up`` reports its result as a fraction of this."""
 MEASURED_UP_WINDOW_NS: int = 2_000_000_000
@@ -166,10 +165,9 @@ CONTROL_POINT_MAX_DISTANCE_M: float = 50.0
 """How far a levelled control point may sit from the rig trajectory before ``convert``
 refuses the sequence: its tag was photographed by these cameras, so a bigger gap means
 the world frame or the origin translation is wrong, not that the walk was long."""
-CP_UV_COLOR: tuple[int, int, int] = CONTROL_POINT_COLOR
-"""Tint of a control-point detection in a camera image; the same green as the 3D point."""
 CP_UV_RADIUS_PX: float = 4.0
-"""Marker radius of a detection, in pixels of the native 640x480 SLAM image."""
+"""Marker radius of a control-point detection, in pixels of the native 640x480
+SLAM image; it is drawn in ``CONTROL_POINT_COLOR``, the same green as the 3D point."""
 
 FOLLOW_FORWARD: tuple[float, float, float] = (0.018, -0.967, -0.253)
 """Where the wearer looks, in the rig (imu-right) frame.
@@ -204,7 +202,7 @@ class CameraSpec:
     frame_kind: FrameKind
     """How its decoded frames reach the encoder: single-plane gray for the SLAM
     pair, interleaved RGB (not BGR) for camera-rgb."""
-    kind: str
+    kind: CameraKind
     """exoego:v2 content hint on the camera node."""
 
 
@@ -357,19 +355,6 @@ class WorldUp:
 
 
 @dataclass(frozen=True, slots=True)
-class ControlPointReach:
-    """How close the rig trajectory came to one surveyed control point."""
-
-    name: str
-    """Survey name of the point."""
-    has_height: bool
-    """Whether the survey levelled it; an unlevelled point's ``z`` is a placeholder."""
-    distance_m: float
-    """Closest approach: in 3D for a levelled point, and in the horizontal plane
-    for one the survey never levelled, which is all such a point can be judged on."""
-
-
-@dataclass(frozen=True, slots=True)
 class RecordingSummary:
     """What one converted sequence turned out to hold; ``convert`` prints it."""
 
@@ -454,18 +439,12 @@ def gt_world(sequence: str) -> GtWorld:
         sequence: Upstream sequence name.
 
     Returns:
-        ``mps`` for ``R_01``…``R_10``, ``lv95`` for everything else.
-
-    Raises:
-        ValueError: A controlled name whose second token is not its index, so
-            which world it belongs to cannot be read off it.
+        ``mps`` for ``R_01``…``R_10``, ``lv95`` for everything else — including a
+        controlled name whose second token is not a number, which the archive
+        does not publish and which would only mislabel one property string.
     """
-    if sequence_set(sequence) != "controlled":
-        return "lv95"
-    index: str = sequence.split("_")[1]
-    if not index.isdigit():
-        raise ValueError(f"{sequence} looks like a controlled sequence but has no index, so its world frame is unknown")
-    return "mps" if int(index) <= MPS_WORLD_MAX_INDEX else "lv95"
+    index: str = sequence.split("_")[1] if sequence_set(sequence) == "controlled" else ""
+    return "mps" if index.isdigit() and int(index) <= MPS_WORLD_MAX_INDEX else "lv95"
 
 
 def rig_trajectory(pseudo_gt: aria.PseudoGt, *, rig_T_cam0: Float64[ndarray, "4 4"]) -> GtTrajectory:
@@ -542,54 +521,25 @@ def measured_world_up(gt: GtTrajectory, accel: ImuChannel, *, window_ns: int = M
     mean_xyz: Float64[ndarray, "3"] = world_accel_xyz.mean(axis=0)
 
     axis_index: int = int(np.argmax(np.abs(mean_xyz)))
-    names: tuple[WorldUpAxis, WorldUpAxis, WorldUpAxis] = POSITIVE_WORLD_AXES if mean_xyz[axis_index] >= 0.0 else NEGATIVE_WORLD_AXES
+    # Axis names by column index, signed by the mean's own direction.
+    names: tuple[WorldUpAxis, ...] = ("+x", "+y", "+z") if mean_xyz[axis_index] >= 0.0 else ("-x", "-y", "-z")
     return WorldUp(axis=names[axis_index], fraction_of_g=float(abs(mean_xyz[axis_index]) / STANDARD_GRAVITY_MS2))
 
 
-def control_point_reach(points: tuple[aria.ControlPoint, ...], translations_xyz: Float64[ndarray, "n_poses 3"]) -> tuple[ControlPointReach, ...]:
-    """Closest approach of the rig trajectory to every surveyed control point.
+def validate_ground_truth(sequence: str, points: tuple[aria.ControlPoint, ...], trajectory: GtTrajectory) -> None:
+    """Report every surveyed point's closest approach to the walk, and refuse a distant one.
 
     Every point's tag was photographed by these cameras, so a levelled point has
-    to sit within a few metres of where the wearer walked. That makes this the
+    to sit within a few metres of where the wearer walked: that distance is the
     one check that catches a wrong world frame or a missing origin translation,
-    which no amount of self-consistent maths would.
-
-    Args:
-        points: The sequence's surveyed points, already translated by ``CUSTOM_ORIGIN_XYZ``.
-        translations_xyz: ``world_t_rig`` per pose, metres.
-
-    Returns:
-        One entry per point, in the same order; empty distances become ``inf``
-        when the sequence has no poses to measure against.
-    """
-    reaches: list[ControlPointReach] = []
-    for point in points:
-        offsets_xyz: Float64[ndarray, "n_poses 3"] = translations_xyz - point.position_xyz_m
-        # An unlevelled point's z is the origin's height rather than a measurement,
-        # so only its horizontal offset means anything.
-        measured_xyz: Float64[ndarray, "n_poses n_axes"] = offsets_xyz if point.has_height else offsets_xyz[:, :2]
-        distances_m: Float64[ndarray, "n_poses"] = np.linalg.norm(measured_xyz, axis=1)
-        reaches.append(
-            ControlPointReach(
-                name=point.name,
-                has_height=point.has_height,
-                distance_m=float(distances_m.min()) if distances_m.size else float("inf"),
-            )
-        )
-    return tuple(reaches)
-
-
-def validate_ground_truth(sequence: str, points: tuple[aria.ControlPoint, ...], trajectory: GtTrajectory) -> None:
-    """Report every surveyed point's closest approach, and refuse a distant one.
-
-    A preflight: it runs before the first rrd is opened, so a wrong world frame
-    or a missing origin translation costs one VRS read rather than a published
-    pair of layers. No pose is nothing to measure a distance against, so a
-    control-point-only sequence passes as it stands rather than being rejected.
+    which no amount of self-consistent maths would. It runs as a preflight, so a
+    wrong frame costs one VRS read rather than a published pair of layers. No
+    pose is nothing to measure against, so a control-point-only sequence passes
+    as it stands rather than being rejected.
 
     Args:
         sequence: Upstream sequence name, for the error message.
-        points: The sequence's surveyed points, in file order.
+        points: The sequence's surveyed points, already translated by ``CUSTOM_ORIGIN_XYZ``.
         trajectory: The rig's pose per published pGT stamp; may be empty.
 
     Raises:
@@ -598,15 +548,20 @@ def validate_ground_truth(sequence: str, points: tuple[aria.ControlPoint, ...], 
     """
     if not trajectory.times_ns.size:
         return
-    reaches: tuple[ControlPointReach, ...] = control_point_reach(points, trajectory.translations_xyz)
-    for reach in reaches:
-        measured_from: str = "in 3D" if reach.has_height else f"horizontally{UNLEVELLED_LABEL_SUFFIX}"
-        print(f"  control point {reach.name:<10} came within {reach.distance_m:8.2f} m of the trajectory, {measured_from}")
-    too_far: list[ControlPointReach] = [reach for reach in reaches if reach.has_height and reach.distance_m > CONTROL_POINT_MAX_DISTANCE_M]
+    too_far: list[str] = []
+    for point in points:
+        offsets_xyz: Float64[ndarray, "n_poses 3"] = trajectory.translations_xyz - point.position_xyz_m
+        # An unlevelled point's z is the origin's height rather than a measurement,
+        # so only its horizontal offset means anything.
+        measured_xyz: Float64[ndarray, "n_poses n_axes"] = offsets_xyz if point.has_height else offsets_xyz[:, :2]
+        distance_m: float = float(np.linalg.norm(measured_xyz, axis=1).min())
+        measured_from: str = "in 3D" if point.has_height else f"horizontally{UNLEVELLED_LABEL_SUFFIX}"
+        print(f"  control point {point.name:<10} came within {distance_m:8.2f} m of the trajectory, {measured_from}")
+        if point.has_height and distance_m > CONTROL_POINT_MAX_DISTANCE_M:
+            too_far.append(f"{point.name} at {distance_m:.1f} m")
     if too_far:
-        named: str = ", ".join(f"{reach.name} at {reach.distance_m:.1f} m" for reach in too_far)
         raise ValueError(
-            f"{sequence}: levelled control point(s) {named} sit further than {CONTROL_POINT_MAX_DISTANCE_M:g} m "
+            f"{sequence}: levelled control point(s) {', '.join(too_far)} sit further than {CONTROL_POINT_MAX_DISTANCE_M:g} m "
             f"from the rig trajectory, but their tags were photographed by these cameras — the world frame or the "
             f"origin translation is wrong"
         )
@@ -674,7 +629,7 @@ def log_control_point_detections(
         times_ns: Int64[ndarray, "n_detections"] = np.array([detection.timestamp_ns for detection in seen], dtype=np.int64)
         rr.log(
             schema.cp_uv_path(RIG, index),
-            rr.Points2D.from_fields(colors=CP_UV_COLOR, radii=CP_UV_RADIUS_PX, show_labels=True),
+            rr.Points2D.from_fields(colors=CONTROL_POINT_COLOR, radii=CP_UV_RADIUS_PX, show_labels=True),
             static=True,
             recording=recording,
         )
@@ -978,21 +933,6 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
             print(f"  {record.sequence:<16} {record.split:<8} {record.vrs_display_bytes / 1e9:5.1f} GB  {ground_truth or 'no ground truth'}")
         print(f"  small files → {self.config.root}/<split>/<seq>/, manifest → {manifest_path}")
 
-    def fetch_vrs(self, source: LamariaSource) -> Path:
-        """Announce and fetch one sequence's VRS; ``http_fetch`` resumes and retries it.
-
-        Args:
-            source: The sequence to fetch.
-
-        Returns:
-            The local VRS path.
-        """
-        if source.vrs_path.is_file():
-            print(f"  {source.vrs_path.stat().st_size / 1e9:.2f} GB already in {source.vrs_path.parent}; the fetch resumes or verifies it")
-        else:
-            print(f"  fetching {source.vrs_display_bytes / 1e9:.1f} GB from {source.vrs_url}")
-        return transports.http_fetch(source.vrs_url, dest=source.vrs_path)
-
     def convert(self, identity: SequenceIdentity, source: LamariaSource, *, force: bool) -> Path:
         """Fetch one VRS, encode it, write both rrd layers, and delete the raw.
 
@@ -1017,7 +957,11 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
             return target
 
         require_av1_nvenc(resolve_ffmpeg())
-        self.fetch_vrs(source)
+        if source.vrs_path.is_file():
+            print(f"  {source.vrs_path.stat().st_size / 1e9:.2f} GB already in {source.vrs_path.parent}; the fetch resumes or verifies it")
+        else:
+            print(f"  fetching {source.vrs_display_bytes / 1e9:.1f} GB from {source.vrs_url}")
+        transports.http_fetch(source.vrs_url, dest=source.vrs_path)
         work_dir: Path = source.vrs_path.parent / f"{source.sequence}-mp4"
         work_dir.mkdir(parents=True, exist_ok=True)
         try:
