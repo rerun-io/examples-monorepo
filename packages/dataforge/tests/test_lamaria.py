@@ -38,7 +38,7 @@ from dataforge.datasets.lamaria import (
     SequenceRecord,
 )
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import FrameSource, ImuChannel, require_av1_nvenc, resolve_ffmpeg
+from dataforge.logging_toolkit import ImuChannel, require_av1_nvenc, resolve_ffmpeg
 
 REFERENCE_DIR: Path = Path(__file__).parent / "reference_data" / "lamaria"
 """Verbatim excerpts of published LaMAria files, shared with ``test_aria.py``."""
@@ -528,8 +528,6 @@ def synthetic_streams(_: Path) -> lamaria.SequenceStreams:
                 camera=synthetic_camera(stream_id, poses[stream_id]),
                 frames=synthetic_frames(count, channels=3 if rgb else 1),
                 times_ns=DEVICE_T0_NS + np.arange(count, dtype=np.int64) * period_ns,
-                frame_source=FrameSource("rgb24" if rgb else "gray8", width=FRAME_WIDTH, height=FRAME_HEIGHT),
-                fps=10 if rgb else 20,
             )
         )
 
@@ -1154,7 +1152,7 @@ def test_only_the_gt_layer_states_the_world_axes(tmp_path: Path, monkeypatch: py
         identity, base_target = convert_one(fake)
 
     gt_root: pa.Table = gt_store(identity).reader(index=None, contents="/").to_arrow_table()
-    declared: list[int] = [int(direction.value) for direction in lamaria.WORLD_UP_VIEW_COORDINATES[lamaria.WORLD_UP].coordinates]
+    declared: list[int] = [int(direction.value) for direction in rr.ViewCoordinates.RIGHT_HAND_Z_UP.coordinates]
     assert [int(value) for value in gt_root.to_pylist()[0]["/:ViewCoordinates:xyz"][0]] == declared
     assert "/:ViewCoordinates:xyz" not in read_back(base_target).reader(index=None, contents="/").to_arrow_table().column_names
 
