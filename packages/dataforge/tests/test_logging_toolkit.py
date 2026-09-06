@@ -30,6 +30,7 @@ from dataforge.logging_toolkit import (
     ImuChannel,
     VideoChunkKind,
     classify_video_chunk,
+    log_imu,
     log_magnetometer,
     log_trail_segments,
     log_video_stream,
@@ -369,3 +370,40 @@ def test_a_trail_of_one_pose_is_a_single_degenerate_segment(tmp_path: Path) -> N
 
     assert len(strips) == 1
     np.testing.assert_allclose(np.asarray(strips[0][0], dtype=np.float64), positions_xyz[[0, 0]], atol=1e-6)
+
+
+# ── log_imu ───────────────────────────────────────────────────────────────
+
+
+def static_translation(table: pa.Table, node: str) -> list[float]:
+    """The one static ``Transform3D`` translation on ``node``.
+
+    A static component answers every row of the timeline view, so the column
+    holds one repeated value; this collapses it and fails loudly if it does not.
+    """
+    rows: list[list[list[float]]] = table.select([f"{node}:Transform3D:translation"]).drop_null().column(0).to_pylist()
+    distinct: set[tuple[float, ...]] = {tuple(row[0]) for row in rows}
+    assert len(distinct) == 1, f"{node} carries {len(distinct)} different static poses"
+    return list(next(iter(distinct)))
+
+
+def test_imu_nodes_carry_the_given_rig_T_imu(tmp_path: Path) -> None:
+    """The default stays the identity; a rig whose reference is imu_00 needs a real pose on imu_01."""
+    channel: ImuChannel = synthetic_field(8)
+    rig_t_imu_left: Float64[ndarray, "3"] = np.array([0.09, -0.02, 0.01])
+    target: Path = tmp_path / "imu.rrd"
+    with rr.RecordingStream("dataforge", recording_id="imu") as recording:
+        recording.save(target)
+        log_imu(recording, RIG, 0, gyro=channel, accel=channel, name="imu-right")
+        log_imu(
+            recording,
+            RIG,
+            1,
+            gyro=channel,
+            accel=channel,
+            name="imu-left",
+            rig_T_imu=rr.Transform3D(translation=rig_t_imu_left, mat3x3=np.eye(3, dtype=np.float32)),
+        )
+    table: pa.Table = read_back(target).reader(index=schema.TIMELINE).to_arrow_table()
+    assert static_translation(table, schema.imu_path(RIG, 0)) == [0.0, 0.0, 0.0], "the reference IMU keeps the identity default"
+    assert static_translation(table, schema.imu_path(RIG, 1)) == pytest.approx(rig_t_imu_left, abs=1e-6)
