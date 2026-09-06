@@ -178,7 +178,7 @@ pixi run -e dataforge --frozen dataforge-download lamaria                 # --se
 # --sequence belongs to the verb, so it goes before the dataset subcommand
 pixi run -e dataforge --frozen dataforge-convert --sequence R_01_easy lamaria
 pixi run -e dataforge --frozen dataforge-convert lamaria                  # every sequence, one at a time
-pixi run -e dataforge --frozen dataforge-register lamaria
+pixi run -e dataforge --frozen dataforge-register lamaria                 # --catalog-url <url> goes first
 ```
 
 `--sequences` defaults to the five training sequences worth 18.2 GB of VRS
@@ -206,6 +206,62 @@ pseudo-GT row's own timestamp lands on its frame 1:1. The base layer therefore
 logs no transform on the rig node and no root `ViewCoordinates`: the `gt` layer
 establishes the world frame and owns both. The ground-truth files are downloaded
 and kept for it.
+
+#### The gt layer
+
+One sequence is **two** rrds under one recording id, so the catalog stacks them
+as layers of one segment: `base/` holds the video and the two IMUs, and `gt/`
+holds everything the published ground truth establishes.
+
+```
+/                                      ViewCoordinates = RIGHT_HAND_Z_UP (static)
+/world/rig_00                          Transform3D = world_T_rig, one row per pGT stamp
+/world/runs/gt/trajectory              LineStrips3D, the whole path (static)
+/world/runs/gt/trail                   Points3D, one per pose — the Follow view's −10 s window
+/world/gt/control_points               Points3D, labelled, static (surveyed sequences only)
+/world/rig_00/cam_MM/pinhole/cp_uv     Points2D at the detection stamps (SLAM pair only)
+```
+
+The pGT poses camera-slam-left, and the schema animates the rig, so every pose
+is composed: `world_T_rig = world_T_cam0 @ inv(rig_T_cam0)`, with `rig_T_cam0`
+straight out of the VRS device calibration (the published `cam0.T_b_s` agrees to
+5e-16). The transform is logged child-to-parent, i.e. the stored value *is*
+`world_T_rig`, so every camera frustum rides it.
+
+Two world frames exist and both are Z-up: `R_01`…`R_10` are posed in MPS's own
+gravity-aligned frame, and everything from `R_11` onwards — the control-point
+sequences and the whole additional set — is surveyed in Switzerland's LV95/LN02
+grid, translated by `CUSTOM_ORIGIN = (2683594.412, 1247727.747, 417.307)` exactly
+as the official tooling does. The gt properties record which (`gt_world`). The up
+axis is published rather than guessed, but `convert` still **measures** it on
+every sequence — `measured_world_up` rotates the first two seconds of imu-right
+samples into the world with the ground truth's own orientation and averages,
+since an accelerometer at rest reads +g pointing up — and warns instead of
+reorienting one rrd on its own. All five default sequences measure **+z**, at
+0.92 to 1.01 of |g|.
+
+A surveyed control point is drawn as a labelled sphere at its translated
+position, with a radius that only grows past 0.1 m for a genuinely uncertain
+point. A point the survey never levelled has no height: its `z` is the origin's
+own, so it gets a distinct colour and an `OB1881 (no height)` label, and its
+`NaN` height uncertainty never reaches Rerun. Every **levelled** point has to lie
+within 50 m of the trajectory — its tag was photographed by these cameras — and
+`convert` prints each point's closest approach and refuses the sequence
+otherwise, because distance is what catches a wrong world frame or a missing
+origin translation. On the three surveyed sequences every levelled point comes
+within 0.7 m.
+
+Both layers come out of one VRS fetch, so `convert` skips a sequence only when
+both exist and rebuilds both when either is missing. A sequence the archive
+publishes no ground truth for (the whole test split) writes no `gt` rrd at all
+and is done once its base rrd exists. `register` then registers both layers
+under one dataset:
+
+```bash
+# --catalog-url belongs to the verb, so it precedes the dataset subcommand
+RERUN_INSECURE_SKIP_HOST_CHECK=1 DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/lamaria-rrd \
+  pixi run -e dataforge --frozen dataforge-register --catalog-url rerun+http://127.0.0.1:9988 lamaria
+```
 
 ### Environment variables
 
@@ -249,7 +305,7 @@ is a nominal-rate fiction for such a file.
 | `selfcap` | one cut episode | 4 phone exo rigs + the OAK ego rig + the Quest (9 cameras), the OAK IMU, the Quest head-pose track |
 | `wildcap` | one capture directory | the videos only: no `Pinhole`, no `ViewCoordinates`, no transforms — calibration, sync and localization are later layers |
 | `msd` | one Monado SLAM sequence, fetched on demand | **two** rrds: `base` with 2 or 4 grayscale video streams (AV1-encoded from the archive's PNGs), the IMU and on the G2/Odyssey+ the magnetometer; `gt` with the ~1 kHz `world_T_rig`, its path and trail, and the root `ViewCoordinates` |
-| `lamaria` | one Aria Gen1 sequence, its VRS fetched on demand | 3 AV1 video streams (2 gray SLAM + 1 RGB, native sideways orientation), both raw IMUs (`imu_01` carrying its real `rig_T_imu`), on Aria's unshifted device clock |
+| `lamaria` | one Aria Gen1 sequence, its VRS fetched on demand | **two** rrds: `base` with 3 AV1 video streams (2 gray SLAM + 1 RGB, native sideways orientation) and both raw IMUs (`imu_01` carrying its real `rig_T_imu`), on Aria's unshifted device clock; `gt` with the published `world_T_rig` (20 Hz on the controlled set, ~3 Hz on the surveyed ones), its path and trail, the surveyed control points and their 2D detections, and the root `ViewCoordinates` |
 
 A config's `command` is its CLI subcommand; its `name` is the catalog dataset
 and the prefix of every recording id. They are equal for robocap, selfcap and
@@ -259,8 +315,8 @@ lamaria; wildcap derives `wildcap-<corpus>` and msd derives `msd-<device>`.
 `convert` writes `<DATAFORGE_OUTPUT_ROOT>/base/<recording_id>.rrd` through a
 temp file that atomically replaces the target, so "exists = done" and a re-run
 never truncates a file the catalog server holds open. Derived layers (slam,
-pose, labels) stack onto the same entities as sibling layers; msd already writes
-one, its `gt/` rrd, in the same convert. `register` walks
+pose, labels) stack onto the same entities as sibling layers; msd and lamaria
+already write one, their `gt/` rrd, in the same convert. `register` walks
 every layer directory it knows — `base`, which is required, then `gt` — and
 registers each under its own layer name, so a corpus with no ground-truth pass
 registers exactly as before.
