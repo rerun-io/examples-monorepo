@@ -58,7 +58,7 @@ That registers dataset `wildcap-<corpus>`. `.mov` is skipped with a warning
 | --- | --- | --- |
 | `DATAFORGE_OUTPUT_ROOT` | `packages/dataforge/data/dataforge/rrd` | where rrds and blueprints go; set it for convert **and** register |
 | `DATAFORGE_RAW_ROOT` | `packages/dataforge/data/raw` | where raw corpora are fetched to |
-| `DATAFORGE_FFMPEG` | the env's ffmpeg | an ffmpeg with hardware encoding. Sources with B-frames (most phone HEVC) must be re-encoded; the env's ffmpeg does that on the CPU, silently and slowly |
+| `DATAFORGE_FFMPEG` | the env's ffmpeg | an ffmpeg with hardware encoding, used both to re-encode B-frame sources (most phone HEVC) and to encode image sequences. Without `av1_nvenc` the encoder refuses to start rather than falling back to a software encode that looks like a hang. Check yours with `ffmpeg -hide_banner -encoders \| grep av1_nvenc` |
 
 Paths in `--root`/`--sequence` and the defaults above are relative to
 `packages/dataforge/` (the tasks run there).
@@ -67,10 +67,19 @@ Paths in `--root`/`--sequence` and the defaults above are relative to
 
 **Contracts** (`dataforge/`): `identity.py` (one `SequenceIdentity` derives the
 sequence key, the Rerun recording id, and the rrd filename), `paths.py` (the
-layer-major output tree), `schema.py` (the `exoego:v2` entity paths and the
-single `video_time` timeline, as code), `writing.py` (atomic publication and the
-capture/convert recording properties), `logging_toolkit.py` (the shared rig-node,
-video-stream, and IMU writers), and `transports.py` (`local_verify`).
+layer-major output tree: `base/` and its sibling `gt/`), `schema.py` (the
+`exoego:v2` entity paths and the single `video_time` timeline, as code),
+`writing.py` (atomic publication and the capture/convert recording properties),
+`logging_toolkit.py` (the shared rig-node, video-stream, IMU, and magnetometer
+writers, plus the AV1 encoder), and `transports.py` (`local_verify` and
+`hf_fetch`).
+
+Two of those carry their weight for datasets that do not ship video.
+`encode_frames_to_mp4` pipes PNG or raw frames straight into ffmpeg's stdin, so
+an image-sequence dataset is encoded (AV1, NVENC, no B-frames) without an
+intermediate frame tree on disk; `log_video_stream(..., times_ns=...)` then
+stamps each sample with its real capture time, because the container's own PTS
+is a nominal-rate fiction for such a file.
 
 **Datasets** (`dataforge/datasets/`), one config + one dataset class each:
 
@@ -88,7 +97,10 @@ wildcap derives `wildcap-<corpus>`.
 `convert` writes `<DATAFORGE_OUTPUT_ROOT>/base/<recording_id>.rrd` through a
 temp file that atomically replaces the target, so "exists = done" and a re-run
 never truncates a file the catalog server holds open. Derived layers (slam,
-pose, labels) stack onto the same entities as sibling layers; v1 emits `base`.
+pose, labels) stack onto the same entities as sibling layers. `register` walks
+every layer directory it knows — `base`, which is required, then `gt` — and
+registers each under its own layer name, so a corpus with no ground-truth pass
+registers exactly as before.
 
 ## Blueprints
 

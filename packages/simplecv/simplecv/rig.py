@@ -37,9 +37,10 @@ from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsi
 
 #: Reserved sensor kinds describing image *content* (not projection model — a
 #: fisheye RGB camera is still ``"rgb"``). Only ``rgb``/``grayscale`` cameras are
-#: emitted today; ``depth``/``imu`` are reserved so a future backend slots a new
-#: peer sensor in (e.g. ``/world/rig_00/imu_00``) without a vocabulary change.
-SensorKind = Literal["rgb", "grayscale", "depth", "imu"]
+#: emitted by this package; ``depth``/``imu``/``mag`` name the peer sensors that slot
+#: in beside the cameras (e.g. ``/world/rig_00/imu_00``, ``/world/rig_00/mag_00``)
+#: without a vocabulary change — dataforge writes the latter two.
+SensorKind = Literal["rgb", "grayscale", "depth", "imu", "mag"]
 
 #: Zero-padded width for rig/sensor entity indices (``rig_00``, ``cam_00``,
 #: ``imu_00``). Two digits so ids sort lexicographically for any realistic rig

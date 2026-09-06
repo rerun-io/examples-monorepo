@@ -2755,6 +2755,9 @@ dataforge = { path = "packages/dataforge", editable = true }
 
 [feature.dataforge.activation.env]
 PACKAGE_DIR = "packages/dataforge"
+# huggingface_hub reads its transfer knobs once, at import, so hf_fetch cannot turn
+# this on from inside the call; it has to be in the environment dataforge launches with.
+HF_XET_HIGH_PERFORMANCE = "1"
 
 [feature.dataforge.tasks.dataforge-download]
 cmd = "python tools/apps/download.py"
