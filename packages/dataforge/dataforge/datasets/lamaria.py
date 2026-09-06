@@ -593,6 +593,86 @@ def control_point_reach(points: tuple[aria.ControlPoint, ...], translations_xyz:
     return tuple(reaches)
 
 
+def log_control_points(
+    recording: rr.RecordingStream, points: tuple[aria.ControlPoint, ...], *, labels_by_name: dict[str, str]
+) -> None:
+    """Log the surveyed points as one static, labelled ``Points3D`` in the world.
+
+    A survey is a property of the world and not of a moment, so this is
+    static. An unlevelled point is drawn in its own colour and says so in its
+    label, because its ``z`` is the origin's height rather than a measurement,
+    and its ``NaN`` height uncertainty never reaches Rerun: the radius is the
+    largest uncertainty the survey *did* publish, floored so a centimetre-level
+    point stays visible against a kilometre-long walk.
+
+    Args:
+        recording: Destination recording stream.
+        points: The sequence's surveyed points, in file order.
+        labels_by_name: Survey name → the label to draw, unlevelled suffix included.
+    """
+    radii_m: list[float] = []
+    for point in points:
+        published_uncertainty_m: Float64[ndarray, "n_axes"] = point.uncertainty_xyz_m[np.isfinite(point.uncertainty_xyz_m)]
+        radii_m.append(max(CONTROL_POINT_RADIUS_FLOOR_M, float(published_uncertainty_m.max()) if published_uncertainty_m.size else 0.0))
+    rr.log(
+        schema.control_points_path(),
+        rr.Points3D(
+            positions=np.stack([point.position_xyz_m for point in points]),
+            colors=[CONTROL_POINT_COLOR if point.has_height else CONTROL_POINT_UNLEVELLED_COLOR for point in points],
+            radii=radii_m,
+            labels=[labels_by_name[point.name] for point in points],
+            # Rerun hides labels past a handful of points on its own; a survey is
+            # exactly the case where every name is worth reading.
+            show_labels=True,
+        ),
+        static=True,
+        recording=recording,
+    )
+
+
+def log_control_point_detections(
+    recording: rr.RecordingStream, detections: tuple[aria.ControlPointDetection, ...], *, labels_by_name: dict[str, str]
+) -> None:
+    """Log each camera's control-point detections under its own pinhole, columnar.
+
+    One ``send_columns`` per camera at the detections' own device timestamps, so
+    a detection lands on the frame it was made in. Upstream runs its tag
+    detector on the SLAM pair only, so camera-rgb usually gets nothing — and
+    then nothing is written under it, rather than an empty column.
+
+    Args:
+        recording: Destination recording stream.
+        detections: Every detection of the sequence, sorted by stream then time.
+        labels_by_name: Survey name → the label to draw, unlevelled suffix included.
+
+    Raises:
+        ValueError: A detection names a control point the survey never published.
+    """
+    unknown: set[str] = {detection.control_point for detection in detections} - set(labels_by_name)
+    if unknown:
+        raise ValueError(f"control point detection(s) name {', '.join(sorted(unknown))}, which the survey does not publish")
+    for index, stream_id in enumerate(aria.CAMERA_STREAM_IDS):
+        seen: list[aria.ControlPointDetection] = [detection for detection in detections if detection.stream_id == stream_id]
+        if not seen:
+            continue
+        times_ns: Int64[ndarray, "n_detections"] = np.array([detection.timestamp_ns for detection in seen], dtype=np.int64)
+        rr.log(
+            schema.cp_uv_path(RIG, index),
+            rr.Points2D.from_fields(colors=CP_UV_COLOR, radii=CP_UV_RADIUS_PX, show_labels=True),
+            static=True,
+            recording=recording,
+        )
+        rr.send_columns(
+            schema.cp_uv_path(RIG, index),
+            indexes=[rr.TimeColumn(schema.TIMELINE, duration=times_ns.astype("timedelta64[ns]"))],
+            columns=rr.Points2D.columns(
+                positions=np.stack([detection.uv_px for detection in seen]),
+                labels=[labels_by_name[detection.control_point] for detection in seen],
+            ),
+            recording=recording,
+        )
+
+
 def open_streams(vrs_path: Path) -> SequenceStreams:
     """Open one VRS and expose its three cameras and two IMUs in rig-frame form.
 
@@ -937,7 +1017,15 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         raise RuntimeError(f"{VRS_FETCH_ATTEMPTS} attempts at {source.vrs_url} all stalled, last: {last_failure}")
 
     def convert(self, identity: SequenceIdentity, source: LamariaSource, *, force: bool) -> Path:
-        """Fetch one VRS, encode it, write the base-layer rrd, and delete the raw.
+        """Fetch one VRS, encode it, write both rrd layers, and delete the raw.
+
+        The base and the gt layer come out of the *same* VRS read, so they are
+        skipped and rebuilt as a unit: half a sequence on disk means paying for
+        the multi-gigabyte download again anyway, and rebuilding the base layer
+        with it costs one encode against a corpus that would otherwise be
+        silently incomplete. A sequence the archive publishes no ground truth for
+        (the whole test split) has no gt layer to wait for, so it is done once
+        its base rrd exists.
 
         The NVENC check comes before the fetch: a machine that cannot encode AV1
         should find out in a second rather than after a multi-gigabyte download.
@@ -946,8 +1034,10 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         directory. Nothing outside the sequence's own directory is touched.
         """
         target: Path = paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity)
-        if writing.should_skip(target, force=force):
-            print(f"skip {identity.sequence_key} → {target}")
+        gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
+        gt_published: bool = source.pseudo_gt_path is not None or source.control_points_path is not None
+        if writing.should_skip(target, force=force) and (not gt_published or writing.should_skip(gt_target, force=force)):
+            print(f"skip {identity.sequence_key} → {target}{f' + {gt_target}' if gt_published else ''}")
             return target
 
         require_av1_nvenc(resolve_ffmpeg())
@@ -955,7 +1045,7 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         work_dir: Path = source.vrs_path.parent / f"{source.sequence}-mp4"
         work_dir.mkdir(parents=True, exist_ok=True)
         try:
-            summary: RecordingSummary = self.write_recording(identity, source, work_dir=work_dir, target=target)
+            summary: RecordingSummary = self.write_recording(identity, source, work_dir=work_dir, target=target, gt_target=gt_target)
         except BaseException:
             shutil.rmtree(work_dir, ignore_errors=True)
             retained: int = source.vrs_path.stat().st_size if source.vrs_path.is_file() else 0
@@ -967,26 +1057,33 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         else:
             shutil.rmtree(work_dir, ignore_errors=True)
             source.vrs_path.unlink(missing_ok=True)
+        measured: str = "" if summary.world_up is None else f", world up {summary.world_up.axis} at {summary.world_up.fraction_of_g:.2f} g"
         print(
-            f"done {identity.sequence_key} → {target} ({len(aria.CAMERA_STREAM_IDS)} cameras, {summary.num_frames} frames, "
-            f"{summary.duration_s:.1f} s, {summary.control_point_count} control points)"
+            f"done {identity.sequence_key} → {target}{f' + {gt_target}' if gt_published else ''} "
+            f"({len(aria.CAMERA_STREAM_IDS)} cameras, {summary.num_frames} frames, {summary.duration_s:.1f} s, "
+            f"{summary.num_poses} gt poses over {summary.trajectory_len_m:.1f} m, "
+            f"{summary.control_point_count} control points, {summary.num_detections} detections{measured})"
         )
         return target
 
-    def write_recording(self, identity: SequenceIdentity, source: LamariaSource, *, work_dir: Path, target: Path) -> RecordingSummary:
-        """Encode every camera stream and write one sequence's base-layer rrd.
+    def write_recording(
+        self, identity: SequenceIdentity, source: LamariaSource, *, work_dir: Path, target: Path, gt_target: Path
+    ) -> RecordingSummary:
+        """Encode every camera stream and write both rrd layers of one sequence.
 
-        Every camera is encoded before the recording opens: the VRS is read once,
-        stream by stream, and ``log_video_stream`` remuxes the finished mp4s.
-        The gt layer is a sibling rrd of the same recording id written by this
-        same call (PR 3), which is why the encode and the base write are split
-        out of ``convert`` rather than inlined into it.
+        Every camera is encoded before the first recording opens: the VRS is read
+        once, stream by stream, and ``log_video_stream`` remuxes the finished
+        mp4s. The base layer then closes before the gt layer opens — one VRS read
+        feeds both, but each is its own recording stream and its own atomic
+        replace, so a failure in the second cannot half-write the first.
 
         Args:
-            identity: Sequence identity; names the recording and the rrd file.
+            identity: Sequence identity; names both recordings and both rrd files.
             source: The discovered sequence, its VRS already on disk.
             work_dir: Scratch directory for the temp mp4s, beside the VRS.
             target: Final base-layer rrd path, written through ``atomic_recording``.
+            gt_target: Final gt-layer rrd path, likewise; untouched when the
+                archive publishes no ground truth for the sequence.
 
         Returns:
             What the sequence turned out to hold, for the caller's summary line.
@@ -999,9 +1096,12 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
             encode_frames_to_mp4(stream.frames, clip, source=stream.frame_source, fps=stream.fps)
             clips.append(clip)
 
-        # The control points are the gt layer's material; the base layer reads them
-        # only to say how many a consumer should expect, and PR 3 reuses the read.
-        control_point_count: int = 0 if source.control_points_path is None else len(aria.read_control_points(source.control_points_path).points)
+        # The control points are the gt layer's material, read once here: the base
+        # layer only says how many a consumer should expect.
+        control_points: aria.ControlPointSet | None = (
+            None if source.control_points_path is None else aria.read_control_points(source.control_points_path)
+        )
+        control_point_count: int = 0 if control_points is None else len(control_points.points)
         clocks: list[Int64[ndarray, "n_samples"]] = [stream.times_ns for stream in streams.cameras if stream.times_ns.size]
         clocks += [imu.gyro.times_ns for imu in streams.imus if imu.gyro.times_ns.size]
         if not clocks:
@@ -1064,9 +1164,169 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
                 duration_s=(end_time_ns - start_time_ns) / 1e9,
                 vrs_bytes=vrs_bytes,
             )
-        return RecordingSummary(
-            num_frames=num_frames, duration_s=(end_time_ns - start_time_ns) / 1e9, control_point_count=control_point_count
+
+        duration_s: float = (end_time_ns - start_time_ns) / 1e9
+        if source.pseudo_gt_path is None and control_points is None:
+            print(f"  no ground truth published for {source.sequence}, so no gt layer: nothing establishes a world frame")
+            return RecordingSummary(
+                num_frames=num_frames,
+                duration_s=duration_s,
+                control_point_count=0,
+                num_poses=0,
+                trajectory_len_m=0.0,
+                num_detections=0,
+                world_up=None,
+            )
+
+        # The pGT poses camera-slam-left, so its own extrinsics are what move the
+        # trajectory onto the rig; imu-right's accelerometer is what measures the world up.
+        slam_left: CameraStream | None = next((stream for stream in streams.cameras if stream.stream_id == aria.SLAM_LEFT_STREAM_ID), None)
+        if slam_left is None:
+            raise ValueError(f"{source.vrs_path} carries no {aria.STREAM_LABELS[aria.SLAM_LEFT_STREAM_ID]} stream, the frame the pGT poses")
+        rig_imu: ImuStream | None = next((imu for imu in streams.imus if imu.stream_id == aria.IMU_RIGHT_STREAM_ID), None)
+        if rig_imu is None:
+            raise ValueError(f"{source.vrs_path} carries no {aria.STREAM_LABELS[aria.IMU_RIGHT_STREAM_ID]} stream, which *is* the rig frame")
+        published: aria.PseudoGt = (
+            aria.read_pseudo_gt(source.pseudo_gt_path)
+            if source.pseudo_gt_path is not None
+            else aria.PseudoGt(times_ns=np.zeros(0, dtype=np.int64), world_T_cam0=np.zeros((0, 4, 4), dtype=np.float64))
         )
+        trajectory: GtTrajectory = rig_trajectory(published, rig_T_cam0=np.asarray(slam_left.camera.extrinsics.world_T_cam, dtype=np.float64))
+        world_up: WorldUp | None = self.write_gt_recording(
+            identity, source, trajectory=trajectory, accel=rig_imu.accel, control_points=control_points, target=gt_target
+        )
+        return RecordingSummary(
+            num_frames=num_frames,
+            duration_s=duration_s,
+            control_point_count=control_point_count,
+            num_poses=int(trajectory.times_ns.size),
+            trajectory_len_m=trajectory.length_m,
+            num_detections=0 if control_points is None else len(control_points.detections),
+            world_up=world_up,
+        )
+
+    def write_gt_recording(
+        self,
+        identity: SequenceIdentity,
+        source: LamariaSource,
+        *,
+        trajectory: GtTrajectory,
+        accel: ImuChannel,
+        control_points: aria.ControlPointSet | None,
+        target: Path,
+    ) -> WorldUp | None:
+        """Write one sequence's gt layer: the rig's pose, its path, and the surveyed points.
+
+        This layer is what establishes a world frame at all, so it — not the base
+        layer — owns the root ``ViewCoordinates`` and the transform on the rig
+        node. The axis stated is the *published* one; this sequence's own gravity
+        measurement is reported and warned about rather than used to reorient one
+        rrd on its own.
+
+        Args:
+            identity: Sequence identity; names the recording and the rrd file.
+            source: The discovered sequence, for its name and its world frame.
+            trajectory: The rig's pose per published pGT stamp; may be empty when
+                the sequence ships control points only.
+            accel: imu-right's accelerometer channel, which measures the world up axis.
+            control_points: The surveyed points and their detections, or ``None``.
+            target: Final gt-layer rrd path, written through ``atomic_recording``.
+
+        Returns:
+            The measured world up axis, or ``None`` when there was no pose to rotate by.
+
+        Raises:
+            ValueError: A levelled control point sits further than
+                ``CONTROL_POINT_MAX_DISTANCE_M`` from the trajectory (a wrong world
+                frame or a missing origin translation), or a detection names a
+                point the survey never published.
+        """
+        world_up: WorldUp | None = None
+        if trajectory.times_ns.size:
+            world_up = measured_world_up(trajectory, accel)
+            if world_up.axis != WORLD_UP or world_up.fraction_of_g < WORLD_UP_MIN_FRACTION_OF_G:
+                print(
+                    f"  warning: lamaria declares world up {WORLD_UP} but {source.sequence} measured {world_up.axis} "
+                    f"carrying {world_up.fraction_of_g:.2f} of |g|; the rrd still states the declared axis"
+                )
+
+        points: tuple[aria.ControlPoint, ...] = () if control_points is None else control_points.points
+        labels_by_name: dict[str, str] = {
+            point.name: f"{point.name}{'' if point.has_height else UNLEVELLED_LABEL_SUFFIX}" for point in points
+        }
+        # No pose is nothing to measure a distance against, so a control-point-only
+        # sequence is reported and published as it stands rather than rejected.
+        reaches: tuple[ControlPointReach, ...] = control_point_reach(points, trajectory.translations_xyz) if trajectory.times_ns.size else ()
+        for reach in reaches:
+            measured_from: str = "in 3D" if reach.has_height else f"horizontally{UNLEVELLED_LABEL_SUFFIX}"
+            distance_m: float = reach.distance_m if reach.has_height else reach.horizontal_distance_m
+            print(f"  control point {reach.name:<10} came within {distance_m:8.2f} m of the trajectory, {measured_from}")
+        too_far: list[ControlPointReach] = [
+            reach for reach in reaches if reach.has_height and reach.distance_m > CONTROL_POINT_MAX_DISTANCE_M
+        ]
+        if too_far:
+            named: str = ", ".join(f"{reach.name} at {reach.distance_m:.1f} m" for reach in too_far)
+            raise ValueError(
+                f"{source.sequence}: levelled control point(s) {named} sit further than {CONTROL_POINT_MAX_DISTANCE_M:g} m "
+                f"from the rig trajectory, but their tags were photographed by these cameras — the world frame or the "
+                f"origin translation is wrong"
+            )
+
+        gt_index: list[rr.TimeColumn] = [rr.TimeColumn(schema.TIMELINE, duration=trajectory.times_ns.astype("timedelta64[ns]"))]
+        with writing.atomic_recording(target, application_id="dataforge", recording_id=identity.recording_id) as recording:
+            rr.log("/", WORLD_UP_VIEW_COORDINATES[WORLD_UP], static=True, recording=recording)
+            if trajectory.times_ns.size:
+                # from_parent stays unset: the stored value is world_T_rig, the
+                # child-to-parent step, which is what every child frustum rides.
+                rr.send_columns(
+                    schema.rig_path(RIG),
+                    indexes=gt_index,
+                    columns=rr.Transform3D.columns(translation=trajectory.translations_xyz, quaternion=trajectory.quaternions_xyzw),
+                    recording=recording,
+                )
+                # Two views of one trajectory: the static strip is the whole path for the
+                # overview, and the per-pose points are what the blueprint's cursor-relative
+                # time range turns into a recent-motion trail in the Follow view.
+                rr.log(
+                    schema.trajectory_path(GT_SOURCE),
+                    rr.LineStrips3D([trajectory.translations_xyz], colors=GT_TRAJECTORY_COLOR, radii=GT_TRAJECTORY_RADIUS_M),
+                    static=True,
+                    recording=recording,
+                )
+                rr.log(
+                    schema.trail_path(GT_SOURCE),
+                    rr.Points3D.from_fields(colors=GT_TRAIL_COLOR, radii=GT_TRAIL_RADIUS_M),
+                    static=True,
+                    recording=recording,
+                )
+                rr.send_columns(
+                    schema.trail_path(GT_SOURCE),
+                    indexes=gt_index,
+                    columns=rr.Points3D.columns(positions=trajectory.translations_xyz),
+                    recording=recording,
+                )
+            if points:
+                log_control_points(recording, points, labels_by_name=labels_by_name)
+            if control_points is not None:
+                log_control_point_detections(recording, control_points.detections, labels_by_name=labels_by_name)
+            recording.send_recording_name(identity.recording_id)
+            # world_up_fraction_of_g belongs to the *measured* axis, which convert warns
+            # about when it is not the declared one; a sequence with no pose has neither,
+            # and AnyValues drops the untyped None rather than writing an empty value.
+            recording.send_property(
+                "gt",
+                rr.AnyValues(
+                    num_poses=int(trajectory.times_ns.size),
+                    trajectory_len_m=trajectory.length_m,
+                    duration_s=trajectory.duration_s,
+                    world_up=WORLD_UP,
+                    world_up_fraction_of_g=None if world_up is None else world_up.fraction_of_g,
+                    control_point_count=len(points),
+                    num_detections=0 if control_points is None else len(control_points.detections),
+                    gt_world=gt_world(source.sequence),
+                ),
+            )
+        return world_up
 
     def default_blueprint(self) -> rrb.Blueprint:
         """Corpus-wide layout: every Aria Gen1 sequence carries the same three cameras."""
