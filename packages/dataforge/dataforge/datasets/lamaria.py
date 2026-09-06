@@ -1104,6 +1104,7 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
             raise ValueError(f"{source.vrs_path} carries no timestamped camera or IMU stream")
         start_time_ns: int = min(int(times_ns[0]) for times_ns in clocks)
         end_time_ns: int = max(int(times_ns[-1]) for times_ns in clocks)
+        duration_s: float = (end_time_ns - start_time_ns) / 1e9
 
         num_frames: int = 0
         with writing.atomic_recording(
@@ -1157,11 +1158,10 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
                 control_point_count=control_point_count,
                 has_pseudo_gt=source.pseudo_gt_path is not None,
                 start_time_ns=start_time_ns,
-                duration_s=(end_time_ns - start_time_ns) / 1e9,
+                duration_s=duration_s,
                 vrs_bytes=vrs_bytes,
             )
 
-        duration_s: float = (end_time_ns - start_time_ns) / 1e9
         if trajectory is None:
             print(f"  no ground truth published for {source.sequence}, so no gt layer: nothing establishes a world frame")
             return RecordingSummary(num_frames=num_frames, duration_s=duration_s)
