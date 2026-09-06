@@ -13,6 +13,7 @@ converter never materializes a decoded frame tree on disk.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -107,8 +108,8 @@ def require_av1_nvenc(ffmpeg: Path) -> None:
     if "av1_nvenc" in listed.stdout:
         return
     raise RuntimeError(
-        f"{ffmpeg} lists no av1_nvenc encoder; many conda-forge ffmpeg builds ship without NVENC. "
-        "Point DATAFORGE_FFMPEG at a binary that has it (e.g. the fleet's ~/.pixi/bin/ffmpeg)."
+        f"{ffmpeg} lists no av1_nvenc encoder; point DATAFORGE_FFMPEG at an NVENC-capable ffmpeg "
+        "(for example ~/.pixi/bin/ffmpeg on the fleet)."
     )
 
 
@@ -191,7 +192,10 @@ def encode_frames_to_mp4(
     except BrokenPipeError:
         pass  # ffmpeg already died; its stderr below says why
     finally:
-        process.stdin.close()
+        # Closing flushes, so an encoder that already died would raise here and
+        # mask the RuntimeError below that carries its stderr.
+        with contextlib.suppress(BrokenPipeError):
+            process.stdin.close()
         returncode: int = process.wait()
         drain.join()
     if returncode != 0:
@@ -358,7 +362,7 @@ def log_video_stream(
     # A B-frame source (iPhone/insta360 HEVC) forces Mp4Reader into an FFmpeg
     # re-encode; everything else passes through untouched, and then these options
     # are documented no-ops. try_gpu turns that unavoidable re-encode into NVENC
-    # when the ffmpeg build has it — conda-forge's does not, so DATAFORGE_FFMPEG
+    # when the ffmpeg build has it, which not every build does, so DATAFORGE_FFMPEG
     # points at an NVENC-capable binary (e.g. the fleet's ~/.pixi/bin/ffmpeg).
     ffmpeg_override: str | None = os.environ.get("DATAFORGE_FFMPEG")
     reader: rr.experimental.Mp4Reader = rr.experimental.Mp4Reader(
@@ -462,7 +466,7 @@ def log_magnetometer(
         measured: Bool[ndarray, "n_samples"] = norms > 0.0
         if measured.any():
             headings: Float64[ndarray, "n_headings 3"] = field.values_xyz[measured] / norms[measured, None] * heading_length_m
-            rr.log(node + "/heading", rr.Arrows3D.from_fields(colors=HEADING_COLOR), static=True, recording=recording)
+            rr.log(schema.heading_path(rig, mag), rr.Arrows3D.from_fields(colors=HEADING_COLOR), static=True, recording=recording)
             rr.send_columns(
                 schema.heading_path(rig, mag),
                 indexes=[rr.TimeColumn(schema.TIMELINE, duration=field.times_ns[measured].astype("timedelta64[ns]"))],

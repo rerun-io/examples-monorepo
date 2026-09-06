@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +38,6 @@ def recorded_snapshot(monkeypatch) -> dict[str, Any]:
     def fake_snapshot_download(repo_id: str, **kwargs: Any) -> str:
         recorded["repo_id"] = repo_id
         recorded.update(kwargs)
-        recorded["hf_transfer"] = os.environ.get("HF_HUB_ENABLE_HF_TRANSFER")
         local_dir: Path = Path(kwargs["local_dir"])
         landed: Path = local_dir / "MI_valid_01" / "camera_calibration.json"
         landed.parent.mkdir(parents=True, exist_ok=True)
@@ -60,18 +58,6 @@ def test_hf_fetch_lands_files_at_local_dir(tmp_path: Path, recorded_snapshot: di
     assert recorded_snapshot["allow_patterns"] == ["MI_valid_01/**"]
     assert recorded_snapshot["local_dir"] == str(tmp_path)
     assert recorded_snapshot["revision"] is None
-
-
-def test_hf_fetch_enables_hf_transfer_for_the_call(tmp_path: Path, monkeypatch, recorded_snapshot: dict[str, Any]) -> None:
-    monkeypatch.delenv("HF_HUB_ENABLE_HF_TRANSFER", raising=False)
-    hf_fetch("collabora/monado-slam-datasets", allow_patterns=("*.json",), local_dir=tmp_path)
-    assert recorded_snapshot["hf_transfer"] == "1"
-
-
-def test_hf_fetch_keeps_an_explicit_hf_transfer_setting(tmp_path: Path, monkeypatch, recorded_snapshot: dict[str, Any]) -> None:
-    monkeypatch.setenv("HF_HUB_ENABLE_HF_TRANSFER", "0")
-    hf_fetch("collabora/monado-slam-datasets", allow_patterns=("*.json",), local_dir=tmp_path)
-    assert recorded_snapshot["hf_transfer"] == "0"
 
 
 def test_hf_fetch_passes_the_revision_through(tmp_path: Path, recorded_snapshot: dict[str, Any]) -> None:

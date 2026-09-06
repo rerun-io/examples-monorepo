@@ -8,6 +8,7 @@ ffmpeg has no ``av1_nvenc``.
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -109,9 +110,11 @@ def test_require_av1_nvenc_rejects_an_encoder_less_ffmpeg(tmp_path: Path) -> Non
     fake: Path = tmp_path / "ffmpeg"
     fake.write_text("#!/bin/sh\necho ' V..... libsvtav1  SVT-AV1 encoder (codec av1)'\n")
     fake.chmod(0o755)
+    # The message must name both the knob and a binary that works, or the reader
+    # is left guessing which ffmpeg to point it at.
     with pytest.raises(RuntimeError, match="DATAFORGE_FFMPEG"):
         require_av1_nvenc(fake)
-    with pytest.raises(RuntimeError, match="conda-forge"):
+    with pytest.raises(RuntimeError, match="av1_nvenc"):
         require_av1_nvenc(fake)
 
 
@@ -197,6 +200,47 @@ def test_a_failing_encode_reports_ffmpeg_stderr(tmp_path: Path, nvenc_ffmpeg: Pa
     with pytest.raises(RuntimeError) as failure:
         encode_frames_to_mp4([b"\x00" * 7], output, source=source, fps=FPS, ffmpeg=nvenc_ffmpeg)
     assert "ffmpeg" in str(failure.value)
+
+
+def test_garbage_frames_report_ffmpeg_stderr(tmp_path: Path, nvenc_ffmpeg: Path) -> None:
+    """ffmpeg rejects the first non-PNG frame and closes the pipe under us.
+
+    Closing our end of a pipe whose reader is gone raises too, so this is the
+    path where a careless ``finally`` would mask ffmpeg's complaint.
+    """
+    # Deliberately small: the frames sit in Python's write buffer, so the dead
+    # reader is only discovered when close() flushes them.
+    output: Path = tmp_path / "garbage.mp4"
+    garbage: list[bytes] = [b"\x89not-a-png"] * 4
+    with pytest.raises(RuntimeError) as failure:
+        encode_frames_to_mp4(garbage, output, source=FrameSource("png"), fps=FPS, ffmpeg=nvenc_ffmpeg)
+    message: str = str(failure.value)
+    assert "ffmpeg exited" in message
+    assert message.strip().splitlines()[1:], f"ffmpeg's own complaint is missing from: {message}"
+
+
+def test_a_reader_that_dies_before_the_pipe_drains_still_reports_stderr(tmp_path: Path) -> None:
+    """An encoder that exits without draining stdin breaks the pipe at close().
+
+    Small payloads sit in Python's write buffer, so the EPIPE surfaces from
+    ``close()`` rather than from ``write()``; an unguarded close would replace
+    the RuntimeError carrying ffmpeg's stderr with a bare BrokenPipeError.
+    """
+    quitter: Path = tmp_path / "ffmpeg"
+    quitter.write_text(
+        '#!/bin/sh\ncase "$*" in *-encoders*) echo " V....D av1_nvenc  NVIDIA NVENC av1 encoder";; *) echo "died early" >&2; exit 3;; esac\n'
+    )
+    quitter.chmod(0o755)
+
+    def slow_frames() -> Iterator[bytes]:
+        """Outlive the child, so the buffered bytes meet a closed pipe at flush."""
+        yield b"tiny"
+        time.sleep(0.5)
+        yield b"tiny"
+
+    output: Path = tmp_path / "dead.mp4"
+    with pytest.raises(RuntimeError, match="died early"):
+        encode_frames_to_mp4(slow_frames(), output, source=FrameSource("png"), fps=FPS, ffmpeg=quitter)
 
 
 def test_env_var_ffmpeg_is_used_when_no_binary_is_passed(tmp_path: Path, monkeypatch, nvenc_ffmpeg: Path) -> None:

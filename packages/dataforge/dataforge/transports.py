@@ -7,7 +7,6 @@ datasets that are already on disk (robocap's download verb is verify-only).
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
@@ -32,15 +31,10 @@ def hf_fetch(
     ``local_dir`` mode on purpose: files land at ``local_dir/<path-in-repo>``
     rather than in the symlinked hub cache, so a converter globs the raw tree
     exactly as it would a locally recorded corpus, and a partial fetch of a
-    multi-hundred-GB dataset costs one copy of what it asked for. The call runs
-    with ``HF_HUB_ENABLE_HF_TRANSFER=1`` unless the caller already set the
-    variable; an explicit ``0`` still wins.
-
-    Caveat on the installed hub: huggingface_hub 1.28 dropped hf-transfer for
-    Xet and reads ``HF_HUB_ENABLE_HF_TRANSFER`` (and its successor
-    ``HF_XET_HIGH_PERFORMANCE``) once, at import. Setting it here is therefore
-    inert for the current process and only reaches subprocesses; the effective
-    place for either knob is the environment dataforge is launched with.
+    multi-hundred-GB dataset costs one copy of what it asked for. Transfer
+    acceleration is not set here but is a launch-environment knob
+    (``HF_XET_HIGH_PERFORMANCE=1``), which the dataforge pixi feature sets in
+    ``[feature.dataforge.activation.env]``.
 
     Args:
         repo_id: Hub repo, e.g. ``"collabora/monado-slam-datasets"``.
@@ -53,7 +47,6 @@ def hf_fetch(
     Returns:
         ``local_dir``, so callers can chain the fetch into a glob.
     """
-    os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
     snapshot_download(
         repo_id,
         repo_type=repo_type,

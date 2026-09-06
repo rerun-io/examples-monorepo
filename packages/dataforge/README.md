@@ -58,7 +58,7 @@ That registers dataset `wildcap-<corpus>`. `.mov` is skipped with a warning
 | --- | --- | --- |
 | `DATAFORGE_OUTPUT_ROOT` | `packages/dataforge/data/dataforge/rrd` | where rrds and blueprints go; set it for convert **and** register |
 | `DATAFORGE_RAW_ROOT` | `packages/dataforge/data/raw` | where raw corpora are fetched to |
-| `DATAFORGE_FFMPEG` | the env's ffmpeg | an ffmpeg with hardware encoding, used both to re-encode B-frame sources (most phone HEVC) and to encode image sequences. Without `av1_nvenc` the encoder refuses to start rather than falling back to a software encode that looks like a hang |
+| `DATAFORGE_FFMPEG` | the env's ffmpeg | an ffmpeg with hardware encoding, used both to re-encode B-frame sources (most phone HEVC) and to encode image sequences. Without `av1_nvenc` the encoder refuses to start rather than falling back to a software encode that looks like a hang. Check yours with `ffmpeg -hide_banner -encoders \| grep av1_nvenc` |
 
 Paths in `--root`/`--sequence` and the defaults above are relative to
 `packages/dataforge/` (the tasks run there).
