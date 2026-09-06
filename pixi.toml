@@ -2754,8 +2754,9 @@ pytorch-cpu = ">=2.8.0"
 7zip = ">=24.09"
 # The AV1 encoder every image-sequence dataset goes through. conda-forge's build
 # carries av1_nvenc, so the default resolve_ffmpeg() works without DATAFORGE_FFMPEG.
-# ffmpeg <902 links libjxl 0.11 and dlopen-fails beside the env's 0.12.
-ffmpeg = { version = ">=8.1", build-number = ">=902" }
+# 9.x builds link the env's libjxl; the 8.1 build-number pin other features carry
+# does not apply (9.0's build numbers restarted below it and would exclude it).
+ffmpeg = ">=9.0.1"
 
 [feature.dataforge.pypi-dependencies]
 dataforge = { path = "packages/dataforge", editable = true }
