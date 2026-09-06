@@ -181,13 +181,14 @@ pixi run -e dataforge --frozen dataforge-convert lamaria                  # ever
 pixi run -e dataforge --frozen dataforge-register lamaria                 # --catalog-url <url> goes first
 ```
 
-`--sequences` defaults to the five training sequences worth 18.2 GB of VRS
-(`R_01_easy`, `R_04_medium`, `R_11_5cp`, `sequence_1_19`, `sequence_4_11`):
-both upstream collections, all three difficulty tiers, one low-light capture,
-and every ground-truth shape. A name the archive does not list is a hard error
-at `download`; a selected name this raw root has not downloaded yet is announced
-and skipped at `convert`, so a narrower `download --sequences` still leaves the
-rest convertible. `--root` is scratch, not storage: point it at local NVMe.
+Unset, `--sequences` means the five training sequences worth 18.2 GB of VRS
+(`R_01_easy`, `R_04_medium`, `R_11_5cp`, `sequence_1_19`, `sequence_4_11`) at
+`download` — both upstream collections, all three difficulty tiers, one
+low-light capture, and every ground-truth shape — and every sequence the
+manifest holds at `convert`, so a narrower `download --sequences` needs no flag
+at all afterwards. A name the archive does not list is a hard error at
+`download`; a sequence whose ground-truth files are not on disk is announced and
+skipped at `convert`. `--root` is scratch, not storage: point it at local NVMe.
 
 One sequence is one recording, `lamaria__<seq>`. The rig frame is **imu-right**,
 which is what the published calibration uses as its body frame, so the rig node
