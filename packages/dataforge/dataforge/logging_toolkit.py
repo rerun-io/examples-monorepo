@@ -137,7 +137,7 @@ def time_column(times_ns: Int64[ndarray, "n_samples"]) -> rr.TimeColumn:
 
 
 def encode_frames_to_mp4(
-    frames: Iterable[bytes],
+    frames: Iterable[bytes | memoryview],
     output: Path,
     *,
     source: FrameSource,

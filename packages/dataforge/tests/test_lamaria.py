@@ -323,7 +323,7 @@ def build_archive_handler(bodies: dict[str, bytes], requested: list[str], *, sta
             self.end_headers()
             self.wfile.write(body)
 
-        def log_message(self, format: str, *args: object) -> None:
+        def log_message(self, format: str, *_args: object) -> None:
             """Keep pytest's captured output about dataforge, not about HTTP."""
 
     return Handler
@@ -844,7 +844,7 @@ def test_convert_writes_three_camera_streams_and_two_imus(tmp_path: Path, monkey
     for imu in range(2):
         assert column_rows(store, f"{schema.gyro_path(0, imu)}:Scalars:scalars").num_rows == IMU_SAMPLES
         assert column_rows(store, f"{schema.accel_path(0, imu)}:Scalars:scalars").num_rows == IMU_SAMPLES
-    rig: dict[str, list[object]] = store.reader(index=None, contents=schema.rig_path(0)).to_arrow_table().to_pylist()[0]
+    rig: dict[str, list[object]] = static_row(store, schema.rig_path(0))
     assert rig[f"{schema.rig_path(0)}:schema_version"][0] == schema.EXOEGO_SCHEMA_VERSION
     assert rig[f"{schema.rig_path(0)}:reference"][0] == "imu_00"
     assert rig[f"{schema.rig_path(0)}:name"][0] == "aria"
@@ -869,7 +869,7 @@ def test_the_logged_cam_00_node_carries_the_published_rig_T_cam(tmp_path: Path, 
         _, target = convert_one(fake)
 
     node: str = schema.cam_path(0, 0)
-    row: dict[str, list[object]] = read_back(target).reader(index=None, contents=node).to_arrow_table().to_pylist()[0]
+    row: dict[str, list[object]] = static_row(read_back(target), node)
     assert row[f"{node}:Transform3D:relation"][0] == rr.components.TransformRelation.ChildFromParent.value
     # Rerun stores mat3x3 column-major, so the read-back needs one transpose.
     cam_R_rig: Float64[ndarray, "3 3"] = np.asarray(row[f"{node}:Transform3D:mat3x3"][0], dtype=np.float64).reshape(3, 3).T
@@ -891,7 +891,7 @@ def test_the_rgb_camera_says_so_and_the_slam_pair_does_not(tmp_path: Path, monke
     kinds: list[object] = []
     for index in range(3):
         node: str = schema.cam_path(0, index)
-        row: dict[str, list[object]] = store.reader(index=None, contents=node).to_arrow_table().to_pylist()[0]
+        row: dict[str, list[object]] = static_row(store, node)
         kinds.append(row[f"{node}:kind"][0])
     assert kinds == ["grayscale", "grayscale", "rgb"]
 
@@ -905,7 +905,7 @@ def test_imu_01_carries_its_real_pose_while_imu_00_is_the_rig(tmp_path: Path, mo
     poses: list[Float64[ndarray, "3"]] = []
     for imu in range(2):
         node: str = schema.imu_path(0, imu)
-        row: dict[str, list[object]] = store.reader(index=None, contents=node).to_arrow_table().to_pylist()[0]
+        row: dict[str, list[object]] = static_row(store, node)
         poses.append(np.asarray(row[f"{node}:Transform3D:translation"][0], dtype=np.float64))
     np.testing.assert_allclose(poses[0], [0.0, 0.0, 0.0], atol=1e-9)
     np.testing.assert_allclose(poses[1], IMU_LEFT_TRANSLATION_M, atol=1e-6)
@@ -992,7 +992,7 @@ def test_force_rewrites_an_existing_recording(tmp_path: Path, monkeypatch: pytes
 def test_a_failed_encode_keeps_the_vrs_and_clears_the_scratch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
 ) -> None:
-    def explode(*arguments: object, **keywords: object) -> int:
+    def explode(*_arguments: object, **_keywords: object) -> int:
         raise RuntimeError("nvenc fell over")
 
     with converting(tmp_path, monkeypatch) as fake:

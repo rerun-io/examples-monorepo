@@ -55,7 +55,7 @@ def rig(provider: VrsDataProvider) -> aria.AriaRig:
 
 
 def test_open_vrs_names_a_missing_file(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match="no VRS at"):
+    with pytest.raises(FileNotFoundError, match="no readable VRS at"):
         aria.open_vrs(tmp_path / "absent.vrs")
 
 
