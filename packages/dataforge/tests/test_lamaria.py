@@ -950,6 +950,25 @@ def test_a_failed_encode_keeps_the_vrs_and_clears_the_scratch(
         assert "kept" in capsys.readouterr().out
 
 
+def test_a_machine_that_cannot_encode_av1_fails_before_it_fetches_anything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing GPU encoder must cost a second, not a multi-gigabyte download."""
+
+    def refuse(_ffmpeg: Path) -> None:
+        raise RuntimeError("no av1_nvenc here")
+
+    with converting(tmp_path, monkeypatch) as fake:
+        monkeypatch.setattr(lamaria, "require_av1_nvenc", refuse)
+        dataset: LamariaDataset = LamariaDataset(fake.config)
+        identity, source = dataset.discover()[0]
+
+        with pytest.raises(RuntimeError, match="no av1_nvenc here"):
+            dataset.convert(identity, source, force=False)
+
+        assert fake.requested == [], "the encoder check comes before the fetch, not after it"
+        assert not fake.vrs_path.exists()
+        assert not paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity).exists()
+
+
 def test_a_stalled_vrs_fetch_is_retried_and_resumed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
 ) -> None:
@@ -1279,6 +1298,21 @@ def test_both_layers_are_skipped_together_and_rebuilt_together(tmp_path: Path, m
         assert convert_one(fake)[1] == base_target
         assert fake.requested != [], "a missing layer means another fetch"
         assert gt_target.is_file()
+
+
+def test_a_missing_base_layer_rebuilds_the_gt_layer_with_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+    """The other half of the unit: a gt rrd on its own is not a converted sequence."""
+    with converting(tmp_path, monkeypatch) as fake:
+        identity, base_target = convert_one(fake)
+        gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
+        first_written_ns: int = gt_target.stat().st_mtime_ns
+        base_target.unlink()
+        fake.requested.clear()
+
+        assert convert_one(fake)[1] == base_target
+        assert fake.requested != [], "a missing base layer means another fetch"
+        assert base_target.is_file()
+        assert gt_target.stat().st_mtime_ns != first_written_ns, "the gt layer is rewritten from the same read"
 
 
 def test_a_sequence_with_no_ground_truth_writes_no_gt_rrd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:

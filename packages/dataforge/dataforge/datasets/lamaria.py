@@ -538,26 +538,32 @@ def measured_world_up(gt: GtTrajectory, accel: ImuChannel, *, window_ns: int = M
     return WorldUp(axis=names[axis_index], fraction_of_g=float(abs(mean_xyz[axis_index]) / STANDARD_GRAVITY_MS2))
 
 
-def validate_ground_truth(sequence: str, points: tuple[aria.ControlPoint, ...], trajectory: GtTrajectory) -> None:
-    """Report every surveyed point's closest approach to the walk, and refuse a distant one.
+def validate_ground_truth(sequence: str, control_points: aria.ControlPointSet | None, trajectory: GtTrajectory) -> None:
+    """Check the published ground truth against itself and against the walk.
 
-    Every point's tag was photographed by these cameras, so a levelled point has
-    to sit within a few metres of where the wearer walked: that distance is the
-    one check that catches a wrong world frame or a missing origin translation,
-    which no amount of self-consistent maths would. It runs as a preflight, so a
-    wrong frame costs one VRS read rather than a published pair of layers. No
-    pose is nothing to measure against, so a control-point-only sequence passes
-    as it stands rather than being rejected.
+    Both failures a sequence's ground truth can have are caught here, before a
+    single frame is encoded: a detection of a point the survey never published,
+    and a levelled point too far from where the wearer walked. Every point's tag
+    was photographed by these cameras, so that distance is the one check that
+    catches a wrong world frame or a missing origin translation, which no amount
+    of self-consistent maths would. No pose is nothing to measure against, so a
+    control-point-only sequence passes as it stands rather than being rejected.
 
     Args:
-        sequence: Upstream sequence name, for the error message.
-        points: The sequence's surveyed points, already translated by ``CUSTOM_ORIGIN_XYZ``.
+        sequence: Upstream sequence name, for the error messages.
+        control_points: The surveyed points and their detections, or ``None``.
         trajectory: The rig's pose per published pGT stamp; may be empty.
 
     Raises:
-        ValueError: A levelled control point sits further than
-            ``CONTROL_POINT_MAX_DISTANCE_M`` from the trajectory.
+        ValueError: A detection names a point the survey never published, or a
+            levelled point sits further than ``CONTROL_POINT_MAX_DISTANCE_M``
+            from the trajectory.
     """
+    points: tuple[aria.ControlPoint, ...] = () if control_points is None else control_points.points
+    if control_points is not None:
+        unknown: set[str] = {detection.control_point for detection in control_points.detections} - {point.name for point in points}
+        if unknown:
+            raise ValueError(f"{sequence}: control point detection(s) name {', '.join(sorted(unknown))}, which the survey does not publish")
     if not trajectory.times_ns.size:
         return
     too_far: list[str] = []
@@ -626,14 +632,9 @@ def log_control_point_detections(
     Args:
         recording: Destination recording stream.
         detections: Every detection of the sequence, sorted by stream then time.
-        labels_by_name: Survey name → the label to draw, unlevelled suffix included.
-
-    Raises:
-        ValueError: A detection names a control point the survey never published.
+        labels_by_name: Survey name → the label to draw, unlevelled suffix included;
+            ``validate_ground_truth`` has already proved it covers every detection.
     """
-    unknown: set[str] = {detection.control_point for detection in detections} - set(labels_by_name)
-    if unknown:
-        raise ValueError(f"control point detection(s) name {', '.join(sorted(unknown))}, which the survey does not publish")
     for index, stream_id in enumerate(aria.CAMERA_STREAM_IDS):
         seen: list[aria.ControlPointDetection] = [detection for detection in detections if detection.stream_id == stream_id]
         if not seen:
@@ -1044,7 +1045,7 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
             # move the trajectory onto the rig.
             rig_T_cam0: Float64[ndarray, "4 4"] = np.asarray(streams.cameras[0].camera.extrinsics.world_T_cam, dtype=np.float64)
             trajectory = rig_trajectory(published, rig_T_cam0=rig_T_cam0)
-            validate_ground_truth(source.sequence, () if control_points is None else control_points.points, trajectory)
+            validate_ground_truth(source.sequence, control_points, trajectory)
 
         clips: list[Path] = []
         for index, stream in enumerate(streams.cameras):
@@ -1165,9 +1166,6 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
 
         Returns:
             The measured world up axis, or ``None`` when there was no pose to rotate by.
-
-        Raises:
-            ValueError: A detection names a point the survey never published.
         """
         world_up: WorldUp | None = None
         if trajectory.times_ns.size:
