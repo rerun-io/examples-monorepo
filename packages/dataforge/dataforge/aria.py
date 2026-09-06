@@ -38,7 +38,7 @@ from projectaria_tools.core.calibration import CameraCalibration, DeviceCalibrat
 from projectaria_tools.core.sensor_data import ImageData, ImageDataRecord, MotionData, TimeDomain
 from projectaria_tools.core.stream_id import StreamId
 from scipy.spatial.transform import Rotation
-from serde import field, from_dict, serde
+from serde import from_dict, serde
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion
 
 from dataforge.logging_toolkit import ImuChannel
@@ -68,9 +68,6 @@ STREAM_LABELS: dict[AriaStreamId, str] = {
     IMU_LEFT_STREAM_ID: "imu-left",
 }
 """Stream id → the label the device calibration is keyed by."""
-
-STREAM_IDS_BY_LABEL: dict[str, AriaStreamId] = {label: stream_id for stream_id, label in STREAM_LABELS.items()}
-"""The inverse of ``STREAM_LABELS``; the control-point JSON keys cameras by label."""
 
 CAMERA_STREAM_IDS: tuple[AriaStreamId, ...] = (SLAM_LEFT_STREAM_ID, SLAM_RIGHT_STREAM_ID, RGB_STREAM_ID)
 """Camera streams in the order they become ``cam_00``, ``cam_01``, ``cam_02``."""
@@ -449,8 +446,6 @@ class ControlPointSet:
     """Every surveyed point, in the file's order."""
     detections: tuple[ControlPointDetection, ...]
     """Every detection, sorted by stream then time, which is the order a columnar log wants."""
-    timestamps: dict[AriaStreamId, dict[int, str]]
-    """Per-camera device timestamp → image name, keyed by stream id rather than the file's label."""
 
 
 def read_control_points(path: Path) -> ControlPointSet:
@@ -464,7 +459,7 @@ def read_control_points(path: Path) -> ControlPointSet:
         path: The sparse ground-truth JSON.
 
     Returns:
-        The surveyed points, their detections, and the per-camera timestamp map.
+        The surveyed points and every detection of them.
     """
     document: dict = json.loads(path.read_text())
     points: list[ControlPoint] = []
@@ -499,12 +494,7 @@ def read_control_points(path: Path) -> ControlPointSet:
             )
         )
     detections.sort(key=lambda detection: (detection.stream_id, detection.timestamp_ns))
-
-    timestamps: dict[AriaStreamId, dict[int, str]] = {
-        STREAM_IDS_BY_LABEL[label]: {int(timestamp): image_name for timestamp, image_name in mapping.items()}
-        for label, mapping in document["timestamps"].items()
-    }
-    return ControlPointSet(points=tuple(points), detections=tuple(detections), timestamps=timestamps)
+    return ControlPointSet(points=tuple(points), detections=tuple(detections))
 
 
 def stream_id_from_image_name(image_name: str) -> AriaStreamId:
@@ -517,72 +507,3 @@ def stream_id_from_image_name(image_name: str) -> AriaStreamId:
         if image_name.startswith(f"{stream_id}-"):
             return stream_id
     raise ValueError(f"{image_name} does not name an Aria camera stream")
-
-
-# ── the official aria_calibrations JSON ───────────────────────────────────
-
-
-@serde
-@dataclass(frozen=True)
-class PublishedResolution:
-    """A published camera's image size."""
-
-    width: int
-    """Image width in pixels."""
-    height: int
-    """Image height in pixels."""
-
-
-@serde
-@dataclass(frozen=True)
-class PublishedTransform:
-    """A published rigid transform: a quaternion in x, y, z, w order and a translation."""
-
-    qvec: list[float]
-    """Rotation as ``[x, y, z, w]`` — pycolmap's order, which the official tooling reads it with."""
-    tvec: list[float]
-    """Translation in metres."""
-
-    def to_matrix(self) -> Float64[ndarray, "4 4"]:
-        """The same transform as a 4x4."""
-        matrix: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
-        matrix[:3, :3] = Rotation.from_quat(np.asarray(self.qvec, dtype=np.float64)).as_matrix()
-        matrix[:3, 3] = self.tvec
-        return matrix
-
-
-@serde
-@dataclass(frozen=True)
-class PublishedCamera:
-    """One ``cam0``/``cam1`` entry of an ``aria_calibrations/<split>/<seq>.json``.
-
-    This is the *published* calibration, kept only to cross-check the one read
-    out of the VRS: it covers the two SLAM cameras and no RGB, and its 16-float
-    ``params`` repeat the single Aria focal length as ``fx, fy``.
-    """
-
-    model: str
-    """Always ``RAD_TAN_THIN_PRISM_FISHEYE``, Aria's FISHEYE624 under COLMAP's name."""
-    resolution: PublishedResolution
-    """The camera's image size."""
-    params: list[float]
-    """``[fx, fy, cx, cy, k0..k5, p0, p1, s0..s3]`` — 16 floats."""
-    rig_T_cam: PublishedTransform = field(rename="T_b_s")
-    """Published as ``T_b_s``; the body frame is imu-right, so this *is* ``rig_T_cam``."""
-
-
-def read_calibration_json(path: Path) -> dict[str, PublishedCamera]:
-    """Read an ``aria_calibrations/<split>/<seq>.json`` file's camera entries.
-
-    The file's third entry, ``imu0``, is skipped: it is the body frame itself, so
-    its transform is the identity by definition, and the rest of it is noise
-    densities rather than a calibration.
-
-    Args:
-        path: The published calibration JSON.
-
-    Returns:
-        The camera entries, keyed by their published names (``cam0``, ``cam1``).
-    """
-    document: dict = json.loads(path.read_text())
-    return {name: from_dict(PublishedCamera, entry) for name, entry in document.items() if name.startswith("cam")}

@@ -14,7 +14,6 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TypeAlias
 
 import numpy as np
 import pyarrow as pa
@@ -22,6 +21,7 @@ import pytest
 import rerun as rr
 import rerun.blueprint as rrb
 import serde.json
+from conftest import PublishedCamera, ServedRequest, read_back, read_calibration_json  # pyrefly: ignore[missing-import]
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
@@ -42,10 +42,6 @@ from dataforge.logging_toolkit import FrameSource, ImuChannel, require_av1_nvenc
 
 REFERENCE_DIR: Path = Path(__file__).parent / "reference_data" / "lamaria"
 """Verbatim excerpts of published LaMAria files, shared with ``test_aria.py``."""
-
-ServedRequests: TypeAlias = list[tuple[str, str, str | None]]
-"""The shared loopback server's log: ``(method, path, Range header)`` per request.
-Spelled structurally because a test module cannot import ``conftest``'s own type."""
 
 
 # ── config and registration ───────────────────────────────────────────────
@@ -268,7 +264,7 @@ def archive_bodies() -> dict[str, bytes]:
 
 
 @contextmanager
-def archive(serving, bodies: dict[str, bytes] | None = None, *, stall_once: str | None = None) -> Iterator[tuple[str, ServedRequests]]:
+def archive(serving, bodies: dict[str, bytes] | None = None, *, stall_once: str | None = None) -> Iterator[tuple[str, list[ServedRequest]]]:
     """The LaMAria archive on the shared loopback server: its base URL and the request log."""
     with serving(archive_bodies() if bodies is None else bodies, stall_once=stall_once) as loopback:
         yield f"{loopback.base_url}/lamaria/", loopback.served
@@ -355,7 +351,7 @@ def test_the_declared_follow_frame_is_the_calibration_own_forward_and_up() -> No
     down, z along the optical axis). So the rotation's third column is where the
     wearer looks and the negated second column is the wearer's up.
     """
-    published: dict[str, aria.PublishedCamera] = aria.read_calibration_json(REFERENCE_DIR / "R_01_easy.calibration.json")
+    published: dict[str, PublishedCamera] = read_calibration_json(REFERENCE_DIR / "R_01_easy.calibration.json")
     rig_R_cam0: Float64[ndarray, "3 3"] = published["cam0"].rig_T_cam.to_matrix()[:3, :3]
 
     np.testing.assert_allclose(lamaria.FOLLOW_FORWARD, rig_R_cam0[:, 2], atol=1e-3)
@@ -504,7 +500,7 @@ def synthetic_camera(stream_id: aria.AriaStreamId, rig_T_cam: Float64[ndarray, "
 
 def published_rig_T_cam(name: str) -> Float64[ndarray, "4 4"]:
     """``rig_T_cam`` of one published camera, straight out of the reference calibration."""
-    published: dict[str, aria.PublishedCamera] = aria.read_calibration_json(REFERENCE_DIR / "R_01_easy.calibration.json")
+    published: dict[str, PublishedCamera] = read_calibration_json(REFERENCE_DIR / "R_01_easy.calibration.json")
     return published[name].rig_T_cam.to_matrix()
 
 
@@ -673,7 +669,7 @@ class FakeArchive:
     """``LamariaConfig.root``, already holding the manifest and the small files."""
     config: LamariaConfig
     """Config pointed at ``root`` and the loopback base URL."""
-    requested: ServedRequests
+    requested: list[ServedRequest]
     """Every request the archive answered, in order."""
     vrs_path: Path
     """Where ``convert`` fetches the VRS to."""
@@ -722,11 +718,6 @@ def convert_one(fake: FakeArchive, *, force: bool = False) -> tuple[SequenceIden
     dataset: LamariaDataset = LamariaDataset(fake.config)
     identity, source = dataset.discover()[0]
     return identity, dataset.convert(identity, source, force=force)
-
-
-def read_back(rrd: Path) -> rr.experimental.ChunkStore:
-    """Load a saved rrd the way a consumer does: reader → store → queryable views."""
-    return rr.experimental.ChunkStore.from_chunks(list(rr.experimental.RrdReader(rrd).stream()))
 
 
 def column_rows(store: rr.experimental.ChunkStore, column: str) -> pa.Table:
@@ -947,7 +938,7 @@ def test_a_stalled_vrs_fetch_is_retried_and_resumed(
         convert_one(fake)
 
     assert fake.vrs_path.read_bytes() == archive_bodies()["/lamaria/raw_data/training/R_01_easy.vrs"]
-    ranges: list[str] = [path for _, path, _ in fake.requested if path.endswith(".vrs")]
+    ranges: list[str] = [entry.path for entry in fake.requested if entry.path.endswith(".vrs")]
     assert len(ranges) >= 3, f"expected HEAD, a stalled GET and a resumed GET, got {ranges}"
     assert "resuming" in capsys.readouterr().out
 
