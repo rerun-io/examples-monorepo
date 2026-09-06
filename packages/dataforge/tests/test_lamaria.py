@@ -12,16 +12,20 @@ from __future__ import annotations
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 import pytest
 import rerun as rr
 import rerun.blueprint as rrb
 import serde.json
-from jaxtyping import Float64
+from jaxtyping import Float64, Int64
 from numpy import ndarray
+from scipy.spatial.transform import Rotation
+from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion
 
 from dataforge import aria, paths, schema
 from dataforge.datasets import dataset_defaults, lamaria
@@ -34,6 +38,7 @@ from dataforge.datasets.lamaria import (
     SequenceRecord,
 )
 from dataforge.identity import SequenceIdentity
+from dataforge.logging_toolkit import FrameSource, ImuChannel, require_av1_nvenc, resolve_ffmpeg
 
 REFERENCE_DIR: Path = Path(__file__).parent / "reference_data" / "lamaria"
 """Verbatim excerpts of published LaMAria files, shared with ``test_aria.py``."""
@@ -227,6 +232,8 @@ CALIBRATION_BODY: bytes = b'{"cam0": {"model": "RAD_TAN_THIN_PRISM_FISHEYE"}}'
 """Stand-in for a published calibration; ``download`` only moves the bytes."""
 PSEUDO_GT_BODY: bytes = b"1389350666375 0.0 0.0 0.0 0.0 0.0 0.0 1.0\n"
 CONTROL_POINTS_BODY: bytes = b'{"control_points": {}, "images": {}, "timestamps": {}}'
+VRS_BODY: bytes = bytes(range(256)) * 64
+"""16 384 bytes standing in for a VRS, long enough that a half-served body really resumes."""
 
 
 def archive_bodies() -> dict[str, bytes]:
@@ -244,11 +251,23 @@ def archive_bodies() -> dict[str, bytes]:
         "/lamaria/ground_truth/pseudo_dense/R_01_easy.txt": PSEUDO_GT_BODY,
         "/lamaria/ground_truth/pseudo_dense/R_11_5cp.txt": PSEUDO_GT_BODY,
         "/lamaria/ground_truth/sparse/R_11_5cp.json": CONTROL_POINTS_BODY,
+        # A stand-in for the 897 MB VRS: the reader is replaced by the ``open_streams``
+        # seam, so what matters is that the fetch, the resume and the deletion are real.
+        "/lamaria/raw_data/training/R_01_easy.vrs": VRS_BODY,
     }
 
 
-def build_archive_handler(bodies: dict[str, bytes], requested: list[str]) -> type[BaseHTTPRequestHandler]:
-    """A handler answering GET and HEAD for exactly the paths ``bodies`` names."""
+def build_archive_handler(bodies: dict[str, bytes], requested: list[str], *, stall_first_get: bool) -> type[BaseHTTPRequestHandler]:
+    """A handler answering GET (with byte ranges) and HEAD for the paths ``bodies`` names.
+
+    Args:
+        bodies: URL path → whole file, exactly as the archive serves it.
+        requested: Appended to on every request, so a test can assert *how* a file was fetched.
+        stall_first_get: Truncate the first GET of a ``.vrs`` to half its length
+            while still advertising the full one, the way the real archive hangs
+            up mid-transfer. The next GET (a ``Range`` resume) is answered in full.
+    """
+    stalled: list[str] = []
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -257,7 +276,8 @@ def build_archive_handler(bodies: dict[str, bytes], requested: list[str]) -> typ
             requested.append(f"{self.command} {self.path}")
             return bodies.get(self.path)
 
-        def _respond(self, body: bytes | None, *, with_body: bool) -> None:
+        def do_HEAD(self) -> None:
+            body: bytes | None = self._body()
             if body is None:
                 self.send_response(404)
                 self.send_header("Content-Length", "0")
@@ -265,15 +285,28 @@ def build_archive_handler(bodies: dict[str, bytes], requested: list[str]) -> typ
                 return
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Accept-Ranges", "bytes")
             self.end_headers()
-            if with_body:
-                self.wfile.write(body)
-
-        def do_HEAD(self) -> None:
-            self._respond(self._body(), with_body=False)
 
         def do_GET(self) -> None:
-            self._respond(self._body(), with_body=True)
+            whole: bytes | None = self._body()
+            if whole is None:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            requested_range: str | None = self.headers.get("Range")
+            start: int = 0 if requested_range is None else int(requested_range.removeprefix("bytes=").split("-")[0])
+            body: bytes = whole[start:]
+            if stall_first_get and self.path.endswith(".vrs") and not stalled:
+                stalled.append(self.path)
+                body = body[: len(body) // 2]
+            self.send_response(206 if start else 200)
+            if start:
+                self.send_header("Content-Range", f"bytes {start}-{len(whole) - 1}/{len(whole)}")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def log_message(self, format: str, *args: object) -> None:
             """Keep pytest's captured output about dataforge, not about HTTP."""
@@ -282,10 +315,12 @@ def build_archive_handler(bodies: dict[str, bytes], requested: list[str]) -> typ
 
 
 @contextmanager
-def archive(bodies: dict[str, bytes] | None = None) -> Iterator[tuple[str, list[str]]]:
+def archive(bodies: dict[str, bytes] | None = None, *, stall_first_get: bool = False) -> Iterator[tuple[str, list[str]]]:
     """Serve the archive on a loopback port; yields its base URL and the request log."""
     requested: list[str] = []
-    handler: type[BaseHTTPRequestHandler] = build_archive_handler(archive_bodies() if bodies is None else bodies, requested)
+    handler: type[BaseHTTPRequestHandler] = build_archive_handler(
+        archive_bodies() if bodies is None else bodies, requested, stall_first_get=stall_first_get
+    )
     server: ThreadingHTTPServer = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread: threading.Thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -447,7 +482,7 @@ def test_the_table_card_decodes_only_the_slam_left_stream() -> None:
     """Every visible table row renders through this at once, so it excludes the rest."""
     views: list[rrb.View] = blueprint_views(LamariaDataset(LamariaConfig()).table_blueprint())
     follow: rrb.View = next(view for view in views if view.name == "Follow")
-    contents: list[str] = [str(part) for part in follow.contents or ()]
+    contents: str = str(follow.contents)
 
     assert [view.name for view in views if isinstance(view, rrb.Spatial2DView)] == ["camera-slam-left"]
     for index in range(3):
@@ -467,3 +502,372 @@ def test_both_blueprints_serialize_to_a_non_empty_rbl(tmp_path: Path) -> None:
 
     assert default_path.stat().st_size > 0
     assert table_path.stat().st_size > 0
+
+
+# ── convert, against the VRS seam ─────────────────────────────────────────
+
+FRAME_WIDTH: int = 192
+"""Synthetic frame width; NVENC refuses anything much smaller."""
+FRAME_HEIGHT: int = 160
+"""Synthetic frame height, likewise above NVENC's minimum."""
+SLAM_FRAMES: int = 8
+"""Frames the synthetic SLAM cameras carry, at 20 Hz."""
+RGB_FRAMES: int = 4
+"""Frames the synthetic RGB camera carries, at 10 Hz — half the rate, as on a real Aria."""
+DEVICE_T0_NS: int = 1_389_350_666_375
+"""R_01_easy's first slam-left device timestamp; ``video_time`` must show it unshifted."""
+SLAM_PERIOD_NS: int = 50_000_000
+"""20 Hz."""
+IMU_SAMPLES: int = 40
+"""Samples per synthetic IMU channel."""
+IMU_PERIOD_NS: int = 1_000_000
+"""1 kHz."""
+IMU_T0_NS: int = DEVICE_T0_NS - 9_000_000
+"""The IMUs start before the first frame, as they do in a real VRS: this is ``start_time_ns``."""
+IMU_LEFT_TRANSLATION_M: tuple[float, float, float] = (0.005, -0.102, -0.086)
+"""imu-left's offset in the rig frame, rounded from R_01_easy's device calibration."""
+
+
+def synthetic_frames(count: int, *, channels: int) -> Iterator[bytes]:
+    """One camera's whole clip, lazily, the way the VRS reader hands frames over.
+
+    A function and not a generator expression on purpose: an expression would
+    look ``channels`` up when it is finally consumed, long after the loop that
+    built it moved on.
+    """
+    for index in range(count):
+        yield synthetic_frame(index, channels=channels)
+
+
+def synthetic_frame(index: int, *, channels: int) -> bytes:
+    """One raw plane with a moving square, so no two frames compress to the same bytes."""
+    shape: tuple[int, ...] = (FRAME_HEIGHT, FRAME_WIDTH) if channels == 1 else (FRAME_HEIGHT, FRAME_WIDTH, channels)
+    frame: aria.AriaImage = np.full(shape, np.uint8(40 + 3 * index), dtype=np.uint8)
+    left: int = (index * 6) % (FRAME_WIDTH - 16)
+    frame[8:24, left : left + 16] = np.uint8(220)
+    return frame.tobytes()
+
+
+def synthetic_camera(stream_id: aria.AriaStreamId, rig_T_cam: Float64[ndarray, "4 4"]) -> Fisheye62Parameters:
+    """A Fisheye62 camera at ``rig_T_cam`` with the synthetic frame size."""
+    return Fisheye62Parameters(
+        name=aria.STREAM_LABELS[stream_id],
+        extrinsics=Extrinsics(world_R_cam=rig_T_cam[:3, :3].copy(), world_t_cam=rig_T_cam[:3, 3].copy()),
+        intrinsics=Intrinsics.from_focal_principal_point(
+            camera_conventions="RDF", fl_x=120.0, fl_y=120.0, cx=96.0, cy=80.0, width=FRAME_WIDTH, height=FRAME_HEIGHT
+        ),
+        distortion=KannalaBrandtDistortion(k1=-0.02, k2=0.09, k3=-0.06, k4=0.006, k5=0.003, k6=-0.0007, p1=0.0008, p2=0.0003),
+    )
+
+
+def published_rig_T_cam(name: str) -> Float64[ndarray, "4 4"]:
+    """``rig_T_cam`` of one published camera, straight out of the reference calibration."""
+    published: dict[str, aria.PublishedCamera] = aria.read_calibration_json(REFERENCE_DIR / "R_01_easy.calibration.json")
+    return published[name].rig_T_cam.to_matrix()
+
+
+def synthetic_streams(_: Path) -> lamaria.SequenceStreams:
+    """Stand in for ``open_streams``: the same shapes, without a 900 MB VRS.
+
+    The two SLAM cameras are placed at R_01_easy's *published* extrinsics, so an
+    assertion about what landed on ``cam_00`` has a source of truth outside this
+    module. camera-rgb has no published entry (it exists only in the VRS), so it
+    reuses cam1's pose.
+    """
+    poses: dict[aria.AriaStreamId, Float64[ndarray, "4 4"]] = {
+        aria.SLAM_LEFT_STREAM_ID: published_rig_T_cam("cam0"),
+        aria.SLAM_RIGHT_STREAM_ID: published_rig_T_cam("cam1"),
+        aria.RGB_STREAM_ID: published_rig_T_cam("cam1"),
+    }
+    cameras: list[lamaria.CameraStream] = []
+    for stream_id in aria.CAMERA_STREAM_IDS:
+        rgb: bool = stream_id == aria.RGB_STREAM_ID
+        count: int = RGB_FRAMES if rgb else SLAM_FRAMES
+        period_ns: int = SLAM_PERIOD_NS * 2 if rgb else SLAM_PERIOD_NS
+        cameras.append(
+            lamaria.CameraStream(
+                stream_id=stream_id,
+                camera=synthetic_camera(stream_id, poses[stream_id]),
+                frames=synthetic_frames(count, channels=3 if rgb else 1),
+                times_ns=DEVICE_T0_NS + np.arange(count, dtype=np.int64) * period_ns,
+                frame_source=FrameSource("rgb24" if rgb else "gray8", width=FRAME_WIDTH, height=FRAME_HEIGHT),
+                fps=10 if rgb else 20,
+            )
+        )
+
+    times_ns: Int64[ndarray, "n_samples"] = IMU_T0_NS + np.arange(IMU_SAMPLES, dtype=np.int64) * IMU_PERIOD_NS
+    rig_T_imu_left: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
+    rig_T_imu_left[:3, :3] = Rotation.from_euler("z", 8.0, degrees=True).as_matrix()
+    rig_T_imu_left[:3, 3] = IMU_LEFT_TRANSLATION_M
+    imus: list[lamaria.ImuStream] = []
+    for stream_id, rig_T_imu in ((aria.IMU_RIGHT_STREAM_ID, np.eye(4, dtype=np.float64)), (aria.IMU_LEFT_STREAM_ID, rig_T_imu_left)):
+        imus.append(
+            lamaria.ImuStream(
+                stream_id=stream_id,
+                gyro=ImuChannel(times_ns=times_ns, values_xyz=np.tile([0.01, -0.02, 0.03], (IMU_SAMPLES, 1))),
+                accel=ImuChannel(times_ns=times_ns, values_xyz=np.tile([0.1, -0.2, 9.81], (IMU_SAMPLES, 1))),
+                rig_T_imu=rig_T_imu,
+            )
+        )
+    return lamaria.SequenceStreams(cameras=tuple(cameras), imus=tuple(imus))
+
+
+@dataclass(frozen=True, slots=True)
+class FakeArchive:
+    """A loopback archive plus the raw root and config a convert works against."""
+
+    root: Path
+    """``LamariaConfig.root``, already holding the manifest and the small files."""
+    config: LamariaConfig
+    """Config pointed at ``root`` and the loopback base URL."""
+    requested: list[str]
+    """Every request the archive answered, in order."""
+    vrs_path: Path
+    """Where ``convert`` fetches the VRS to."""
+
+
+@contextmanager
+def converting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, keep_raw: bool = False, stall_first_get: bool = False
+) -> Iterator[FakeArchive]:
+    """Download R_01_easy from a loopback archive, then hand ``convert`` the seam."""
+    root: Path = tmp_path / "raw"
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "rrd"))
+    monkeypatch.setattr(lamaria, "open_streams", synthetic_streams)
+    with archive(stall_first_get=stall_first_get) as (base_url, requested):
+        config: LamariaConfig = LamariaConfig(root=root, base_url=base_url, sequences=("R_01_easy",), keep_raw=keep_raw)
+        LamariaDataset(config).download()
+        requested.clear()
+        yield FakeArchive(
+            root=root,
+            config=config,
+            requested=requested,
+            vrs_path=root / "training" / "R_01_easy" / "raw_data" / "R_01_easy.vrs",
+        )
+
+
+def convert_one(fake: FakeArchive, *, force: bool = False) -> tuple[SequenceIdentity, Path]:
+    """Discover R_01_easy and convert it, returning its identity and its rrd."""
+    dataset: LamariaDataset = LamariaDataset(fake.config)
+    identity, source = dataset.discover()[0]
+    return identity, dataset.convert(identity, source, force=force)
+
+
+def read_back(rrd: Path) -> rr.experimental.ChunkStore:
+    """Load a saved rrd the way a consumer does: reader → store → queryable views."""
+    return rr.experimental.ChunkStore.from_chunks(list(rr.experimental.RrdReader(rrd).stream()))
+
+
+def column_rows(store: rr.experimental.ChunkStore, column: str) -> pa.Table:
+    """Non-null rows of one component column, index-sorted."""
+    table: pa.Table = store.reader(index=schema.TIMELINE).to_arrow_table().sort_by(schema.TIMELINE)
+    return table.select([schema.TIMELINE, column]).drop_null()
+
+
+def recording_properties(store: rr.experimental.ChunkStore, group: str) -> dict[str, object]:
+    """One property group's values (``property:<group>:*``), unwrapped from their one-row lists."""
+    table: pa.Table = store.reader(index=None, contents="/__properties/**").to_arrow_table()
+    row: dict[str, list[object] | None] = table.to_pylist()[0]
+    prefix: str = f"property:{group}:"
+    return {name.removeprefix(prefix): values[0] for name, values in row.items() if name.startswith(prefix) and values}
+
+
+@pytest.fixture(scope="module")
+def nvenc() -> Path:
+    """The resolved ffmpeg, or a skip when this machine cannot encode AV1 on the GPU."""
+    ffmpeg: Path = resolve_ffmpeg()
+    try:
+        require_av1_nvenc(ffmpeg)
+    except RuntimeError as error:
+        pytest.skip(f"no av1_nvenc: {error}")
+    return ffmpeg
+
+
+def test_convert_writes_three_camera_streams_and_two_imus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+    with converting(tmp_path, monkeypatch) as fake:
+        identity, target = convert_one(fake)
+
+    assert target.name == "lamaria__R_01_easy.rrd"
+    store: rr.experimental.ChunkStore = read_back(target)
+    assert [column_rows(store, f"{schema.video_path(0, index)}:VideoStream:sample").num_rows for index in range(3)] == [
+        SLAM_FRAMES,
+        SLAM_FRAMES,
+        RGB_FRAMES,
+    ]
+    for imu in range(2):
+        assert column_rows(store, f"{schema.gyro_path(0, imu)}:Scalars:scalars").num_rows == IMU_SAMPLES
+        assert column_rows(store, f"{schema.accel_path(0, imu)}:Scalars:scalars").num_rows == IMU_SAMPLES
+    rig: dict[str, list[object]] = store.reader(index=None, contents=schema.rig_path(0)).to_arrow_table().to_pylist()[0]
+    assert rig[f"{schema.rig_path(0)}:schema_version"][0] == schema.EXOEGO_SCHEMA_VERSION
+    assert rig[f"{schema.rig_path(0)}:reference"][0] == "imu_00"
+    assert rig[f"{schema.rig_path(0)}:name"][0] == "aria"
+    assert rig[f"{schema.rig_path(0)}:kind"][0] == "ego"
+    assert identity.recording_id == "lamaria__R_01_easy"
+
+
+def test_video_time_is_the_raw_device_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+    """No shift anywhere: a pGT row's own timestamp must land on its frame."""
+    with converting(tmp_path, monkeypatch) as fake:
+        _, target = convert_one(fake)
+
+    samples: pa.Table = column_rows(read_back(target), f"{schema.video_path(0, 0)}:VideoStream:sample")
+    times_ns: list[int] = samples.column(schema.TIMELINE).combine_chunks().cast(pa.int64()).to_pylist()
+    assert times_ns[0] == DEVICE_T0_NS
+    assert times_ns[-1] == DEVICE_T0_NS + (SLAM_FRAMES - 1) * SLAM_PERIOD_NS
+
+
+def test_the_logged_cam_00_node_carries_the_published_rig_T_cam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+    """``log_pinhole`` stores the child-from-parent step, so inverting it gives ``T_b_s`` back."""
+    with converting(tmp_path, monkeypatch) as fake:
+        _, target = convert_one(fake)
+
+    node: str = schema.cam_path(0, 0)
+    row: dict[str, list[object]] = read_back(target).reader(index=None, contents=node).to_arrow_table().to_pylist()[0]
+    assert row[f"{node}:Transform3D:relation"][0] == rr.components.TransformRelation.ChildFromParent.value
+    # Rerun stores mat3x3 column-major, so the read-back needs one transpose.
+    cam_R_rig: Float64[ndarray, "3 3"] = np.asarray(row[f"{node}:Transform3D:mat3x3"][0], dtype=np.float64).reshape(3, 3).T
+    cam_t_rig: Float64[ndarray, "3"] = np.asarray(row[f"{node}:Transform3D:translation"][0], dtype=np.float64)
+
+    expected: Float64[ndarray, "4 4"] = published_rig_T_cam("cam0")
+    # float32 on the wire, so a loose tolerance is the honest one.
+    np.testing.assert_allclose(cam_R_rig.T, expected[:3, :3], atol=1e-6)
+    np.testing.assert_allclose(-cam_R_rig.T @ cam_t_rig, expected[:3, 3], atol=1e-6)
+    assert row[f"{node}:name"][0] == "camera-slam-left"
+    assert row[f"{node}:kind"][0] == "grayscale"
+
+
+def test_the_rgb_camera_says_so_and_the_slam_pair_does_not(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+    with converting(tmp_path, monkeypatch) as fake:
+        _, target = convert_one(fake)
+
+    store: rr.experimental.ChunkStore = read_back(target)
+    kinds: list[object] = []
+    for index in range(3):
+        node: str = schema.cam_path(0, index)
+        row: dict[str, list[object]] = store.reader(index=None, contents=node).to_arrow_table().to_pylist()[0]
+        kinds.append(row[f"{node}:kind"][0])
+    assert kinds == ["grayscale", "grayscale", "rgb"]
+
+
+def test_imu_01_carries_its_real_pose_while_imu_00_is_the_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+    """imu-right *is* the rig frame; imu-left sits 13 cm away and rotated."""
+    with converting(tmp_path, monkeypatch) as fake:
+        _, target = convert_one(fake)
+
+    store: rr.experimental.ChunkStore = read_back(target)
+    poses: list[Float64[ndarray, "3"]] = []
+    for imu in range(2):
+        node: str = schema.imu_path(0, imu)
+        row: dict[str, list[object]] = store.reader(index=None, contents=node).to_arrow_table().to_pylist()[0]
+        poses.append(np.asarray(row[f"{node}:Transform3D:translation"][0], dtype=np.float64))
+    np.testing.assert_allclose(poses[0], [0.0, 0.0, 0.0], atol=1e-9)
+    np.testing.assert_allclose(poses[1], IMU_LEFT_TRANSLATION_M, atol=1e-6)
+
+
+def test_the_base_layer_owns_no_world_frame(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+    """The gt layer establishes the world, so it owns the root axes and the rig transform."""
+    with converting(tmp_path, monkeypatch) as fake:
+        _, target = convert_one(fake)
+
+    store: rr.experimental.ChunkStore = read_back(target)
+    assert "/:ViewCoordinates:xyz" not in store.reader(index=None, contents="/").to_arrow_table().column_names
+    rig_columns: list[str] = store.reader(index=None, contents=schema.rig_path(0)).to_arrow_table().column_names
+    # A static transform here would permanently shadow the temporal world_T_rig.
+    assert not [name for name in rig_columns if "Transform3D" in name]
+
+
+def test_the_capture_properties_describe_the_sequence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+    with converting(tmp_path, monkeypatch) as fake:
+        vrs_bytes: int = len(archive_bodies()["/lamaria/raw_data/training/R_01_easy.vrs"])
+        _, target = convert_one(fake)
+
+    capture: dict[str, object] = recording_properties(read_back(target), "capture")
+    assert capture["schema"] == schema.DATAFORGE_SCHEMA_VERSION
+    assert capture["num_cameras"] == 3
+    assert capture["num_frames"] == SLAM_FRAMES, "num_frames is the slam-left count, not the RGB one"
+    assert capture["split"] == "training"
+    assert capture["set"] == "controlled"
+    assert capture["challenge"] == "easy"
+    assert capture["has_pseudo_gt"] is True
+    assert capture["control_point_count"] == 0, "R_01_easy was never surveyed"
+    assert capture["start_time_ns"] == IMU_T0_NS, "the IMUs start before the first frame"
+    assert capture["vrs_bytes"] == vrs_bytes
+    duration_s: object = capture["duration_s"]
+    assert isinstance(duration_s, float)
+    assert duration_s == pytest.approx((DEVICE_T0_NS + (SLAM_FRAMES - 1) * SLAM_PERIOD_NS - IMU_T0_NS) / 1e9, abs=1e-9)
+
+
+def test_convert_deletes_the_vrs_and_the_mp4s_but_keeps_the_small_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path
+) -> None:
+    with converting(tmp_path, monkeypatch) as fake:
+        convert_one(fake)
+        assert not fake.vrs_path.exists(), "raw is scratch: 18 GB of VRS must not accumulate"
+        assert not list(fake.root.rglob("*.mp4"))
+        assert (fake.root / "training" / "R_01_easy" / "aria_calibrations" / "R_01_easy.json").is_file()
+        assert (fake.root / "training" / "R_01_easy" / "ground_truth" / "pGT" / "R_01_easy.txt").is_file()
+
+
+def test_keep_raw_leaves_the_vrs_and_the_encoded_mp4s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+    with converting(tmp_path, monkeypatch, keep_raw=True) as fake:
+        convert_one(fake)
+        assert fake.vrs_path.is_file()
+        assert sorted(path.name for path in fake.root.rglob("*.mp4")) == ["cam_00.mp4", "cam_01.mp4", "cam_02.mp4"]
+
+
+def test_an_existing_recording_is_skipped_without_fetching_the_vrs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with converting(tmp_path, monkeypatch) as fake:
+        dataset: LamariaDataset = LamariaDataset(fake.config)
+        identity, source = dataset.discover()[0]
+        target: Path = paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"already done")
+
+        assert dataset.convert(identity, source, force=False) == target
+        assert fake.requested == [], "an existing rrd must cost neither a request nor an encode"
+        assert target.read_bytes() == b"already done"
+
+
+def test_force_rewrites_an_existing_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+    with converting(tmp_path, monkeypatch) as fake:
+        dataset: LamariaDataset = LamariaDataset(fake.config)
+        identity, source = dataset.discover()[0]
+        target: Path = paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"stale")
+
+        assert dataset.convert(identity, source, force=True) == target
+        assert target.read_bytes() != b"stale"
+
+
+def test_a_failed_encode_keeps_the_vrs_and_clears_the_scratch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
+) -> None:
+    def explode(*arguments: object, **keywords: object) -> int:
+        raise RuntimeError("nvenc fell over")
+
+    with converting(tmp_path, monkeypatch) as fake:
+        monkeypatch.setattr(lamaria, "encode_frames_to_mp4", explode)
+        dataset: LamariaDataset = LamariaDataset(fake.config)
+        identity, source = dataset.discover()[0]
+        with pytest.raises(RuntimeError, match="nvenc fell over"):
+            dataset.convert(identity, source, force=False)
+
+        # The download is the expensive half, so it survives; the scratch does not.
+        assert fake.vrs_path.is_file()
+        assert not list(fake.root.rglob("*.mp4"))
+        assert not paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity).exists()
+        assert "kept" in capsys.readouterr().out
+
+
+def test_a_stalled_vrs_fetch_is_retried_and_resumed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
+) -> None:
+    """The archive hangs up mid-transfer; the retry must append, never restart."""
+    with converting(tmp_path, monkeypatch, stall_first_get=True, keep_raw=True) as fake:
+        convert_one(fake)
+
+    assert fake.vrs_path.read_bytes() == archive_bodies()["/lamaria/raw_data/training/R_01_easy.vrs"]
+    ranges: list[str] = [entry for entry in fake.requested if entry.endswith(".vrs")]
+    assert len(ranges) >= 3, f"expected HEAD, a stalled GET and a resumed GET, got {ranges}"
+    assert "resuming" in capsys.readouterr().out
