@@ -16,23 +16,6 @@ run on it unchanged::
     <root>/<split>/<seq>/ground_truth/pGT/<seq>.txt
     <root>/<split>/<seq>/ground_truth/control_points/<seq>.json
 
-**Raw is scratch.** The default selection alone is 18.2 GB of VRS, so
-``download`` fetches only the small files (a few MB) and writes a
-``manifest.json`` recording what the archive held; ``convert`` then fetches
-**one** VRS, encodes its three camera streams, writes the rrds, and deletes the
-VRS and the temp mp4s again. ``--keep-raw`` keeps them. The archive is flaky (it
-was down for hours during development), so every fetch resumes and a stalled one
-is retried.
-
-**Two layers, one fetch.** ``convert`` writes a ``base`` rrd (video and both
-IMUs) and a ``gt`` rrd (the temporal ``world_T_rig``, its path and trail, the
-surveyed control points and their per-camera detections, and the root
-``ViewCoordinates``) under the same recording id, so the catalog stacks them onto
-one segment. Both come out of one VRS read and are therefore skipped and rebuilt
-together: half a sequence on disk means paying for the download again regardless.
-A sequence the archive publishes no ground truth for — the whole test split —
-gets no gt rrd, and is done once its base rrd exists.
-
 **Clocks.** Every VRS timestamp is Aria DEVICE time in nanoseconds, and the
 published pGT and control points are stamped on that same clock. ``video_time``
 is therefore that clock **unshifted**, so a ground-truth pose lines up with its
@@ -40,19 +23,12 @@ frame 1:1 with no retiming anywhere.
 
 **Frames.** The rig frame is imu-right, which is what LaMAria's published
 calibration uses as its body frame, so the rig node states
-``reference = "imu_00"`` and every ``rig_T_sensor`` in ``dataforge.aria`` is
-directly comparable with that file's ``T_b_s``. ``cam_00`` is camera-slam-left,
-``cam_01`` camera-slam-right, ``cam_02`` camera-rgb; ``imu_00`` is imu-right
-(identity ``rig_T_imu`` by construction) and ``imu_01`` imu-left, 129 mm away.
-The base layer logs NO transform on the rig node and NO root
-``ViewCoordinates``: the gt layer establishes the world frame and owns both.
+``reference = "imu_00"``. The base layer logs NO transform on the rig node and
+NO root ``ViewCoordinates``: the gt layer establishes the world frame and owns
+both.
 
-**Worlds.** Two of them, both Z-up: ``R_01``…``R_10`` are posed in MPS's own
-gravity-aligned frame, and everything from ``R_11`` onwards is surveyed in
-Switzerland's LV95/LN02 grid, translated by ``aria.CUSTOM_ORIGIN_XYZ`` as the
-official tooling does. The up axis is published rather than guessed, but every
-convert re-measures it from gravity (``measured_world_up``) and warns instead of
-reorienting one rrd on its own.
+The verbs, the entity layout, the two world frames and the control-point checks
+are documented in ``packages/dataforge/README.md``.
 """
 
 from __future__ import annotations
@@ -205,7 +181,7 @@ CONTROL_POINT_MAX_DISTANCE_M: float = 50.0
 """How far a levelled control point may sit from the rig trajectory before ``convert``
 refuses the sequence: its tag was photographed by these cameras, so a bigger gap means
 the world frame or the origin translation is wrong, not that the walk was long."""
-CP_UV_COLOR: tuple[int, int, int] = (120, 255, 160)
+CP_UV_COLOR: tuple[int, int, int] = CONTROL_POINT_COLOR
 """Tint of a control-point detection in a camera image; the same green as the 3D point."""
 CP_UV_RADIUS_PX: float = 4.0
 """Marker radius of a detection, in pixels of the native 640x480 SLAM image."""
@@ -309,6 +285,11 @@ class LamariaSource:
     control_points_path: Path | None
     """``.../ground_truth/control_points/<seq>.json``, or ``None`` when the sequence was not surveyed."""
 
+    @property
+    def has_ground_truth(self) -> bool:
+        """Whether the archive publishes anything a gt layer could be built from."""
+        return self.pseudo_gt_path is not None or self.control_points_path is not None
+
 
 @dataclass(frozen=True, slots=True)
 class CameraStream:
@@ -323,8 +304,10 @@ class CameraStream:
     """Which Aria stream this is; it names the camera node and picks its ``kind``."""
     camera: Fisheye62Parameters
     """The camera's calibration, extrinsics holding ``rig_T_cam``."""
-    frames: Iterator[bytes]
-    """Raw planes in presentation order, one per frame, native orientation."""
+    frames: Iterator[bytes | memoryview]
+    """Raw planes in presentation order, one per frame, native orientation. A
+    decoded frame is handed over as its own buffer, not as a copy: a 2.4-minute
+    sequence is 10 GB of memcpy otherwise."""
     times_ns: Int64[ndarray, "n_frames"]
     """Capture times on Aria's device clock, one per frame, in the same order."""
     frame_source: FrameSource
@@ -417,15 +400,15 @@ class RecordingSummary:
     """Video samples written for camera-slam-left, the pGT's own camera."""
     duration_s: float
     """Span of every logged stream, in seconds."""
-    control_point_count: int
+    control_point_count: int = 0
     """Surveyed control points the sequence ships; 0 when it was never surveyed."""
-    num_poses: int
+    num_poses: int = 0
     """Ground-truth poses written into the gt layer; 0 when the sequence ships no pGT."""
-    trajectory_len_m: float
+    trajectory_len_m: float = 0.0
     """Path length of those poses, in metres."""
-    num_detections: int
+    num_detections: int = 0
     """Control-point detections written under the camera pinholes."""
-    world_up: WorldUp | None
+    world_up: WorldUp | None = None
     """This sequence's own gravity measurement, or ``None`` when it has no poses to rotate with."""
 
 
@@ -616,6 +599,40 @@ def control_point_reach(points: tuple[aria.ControlPoint, ...], translations_xyz:
     return tuple(reaches)
 
 
+def validate_ground_truth(sequence: str, points: tuple[aria.ControlPoint, ...], trajectory: GtTrajectory) -> None:
+    """Report every surveyed point's closest approach, and refuse a distant one.
+
+    A preflight: it runs before the first rrd is opened, so a wrong world frame
+    or a missing origin translation costs one VRS read rather than a published
+    pair of layers. No pose is nothing to measure a distance against, so a
+    control-point-only sequence passes as it stands rather than being rejected.
+
+    Args:
+        sequence: Upstream sequence name, for the error message.
+        points: The sequence's surveyed points, in file order.
+        trajectory: The rig's pose per published pGT stamp; may be empty.
+
+    Raises:
+        ValueError: A levelled control point sits further than
+            ``CONTROL_POINT_MAX_DISTANCE_M`` from the trajectory.
+    """
+    if not trajectory.times_ns.size:
+        return
+    reaches: tuple[ControlPointReach, ...] = control_point_reach(points, trajectory.translations_xyz)
+    for reach in reaches:
+        measured_from: str = "in 3D" if reach.has_height else f"horizontally{UNLEVELLED_LABEL_SUFFIX}"
+        distance_m: float = reach.distance_m if reach.has_height else reach.horizontal_distance_m
+        print(f"  control point {reach.name:<10} came within {distance_m:8.2f} m of the trajectory, {measured_from}")
+    too_far: list[ControlPointReach] = [reach for reach in reaches if reach.has_height and reach.distance_m > CONTROL_POINT_MAX_DISTANCE_M]
+    if too_far:
+        named: str = ", ".join(f"{reach.name} at {reach.distance_m:.1f} m" for reach in too_far)
+        raise ValueError(
+            f"{sequence}: levelled control point(s) {named} sit further than {CONTROL_POINT_MAX_DISTANCE_M:g} m "
+            f"from the rig trajectory, but their tags were photographed by these cameras — the world frame or the "
+            f"origin translation is wrong"
+        )
+
+
 def log_control_points(
     recording: rr.RecordingStream, points: tuple[aria.ControlPoint, ...], *, labels_by_name: dict[str, str]
 ) -> None:
@@ -720,7 +737,9 @@ def open_streams(vrs_path: Path) -> SequenceStreams:
                 camera=camera,
                 # Native orientation, no rotation: the sideways Aria frames are what
                 # the calibration describes, so rotating them would invalidate it.
-                frames=(image.tobytes() for _, image in aria.iter_frames(provider, stream_id)),
+                # ``image.data`` and not ``tobytes()``: ffmpeg's stdin takes the
+                # decoder's own buffer, so nothing is copied on the way there.
+                frames=(image.data for _, image in aria.iter_frames(provider, stream_id)),
                 times_ns=aria.frame_timestamps_ns(provider, stream_id),
                 frame_source=FrameSource(FRAME_KINDS[stream_id], width=camera.intrinsics.width, height=camera.intrinsics.height),
                 fps=NOMINAL_FPS[stream_id],
@@ -1058,9 +1077,8 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         """
         target: Path = paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity)
         gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
-        gt_published: bool = source.pseudo_gt_path is not None or source.control_points_path is not None
-        if writing.should_skip(target, force=force) and (not gt_published or writing.should_skip(gt_target, force=force)):
-            print(f"skip {identity.sequence_key} → {target}{f' + {gt_target}' if gt_published else ''}")
+        if writing.should_skip(target, force=force) and (not source.has_ground_truth or writing.should_skip(gt_target, force=force)):
+            print(f"skip {identity.sequence_key} → {target}{f' + {gt_target}' if source.has_ground_truth else ''}")
             return target
 
         require_av1_nvenc(resolve_ffmpeg())
@@ -1078,11 +1096,13 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         if self.config.keep_raw:
             print(f"  keeping raw: {source.vrs_path.name} and the mp4s in {work_dir}")
         else:
-            shutil.rmtree(work_dir, ignore_errors=True)
+            # A removal that fails on the success path is a real problem (a full
+            # disk, a stale mount): only the failure path above swallows it.
+            shutil.rmtree(work_dir)
             source.vrs_path.unlink(missing_ok=True)
         measured: str = "" if summary.world_up is None else f", world up {summary.world_up.axis} at {summary.world_up.fraction_of_g:.2f} g"
         print(
-            f"done {identity.sequence_key} → {target}{f' + {gt_target}' if gt_published else ''} "
+            f"done {identity.sequence_key} → {target}{f' + {gt_target}' if source.has_ground_truth else ''} "
             f"({len(aria.CAMERA_STREAM_IDS)} cameras, {summary.num_frames} frames, {summary.duration_s:.1f} s, "
             f"{summary.num_poses} gt poses over {summary.trajectory_len_m:.1f} m, "
             f"{summary.control_point_count} control points, {summary.num_detections} detections{measured})"
@@ -1094,11 +1114,13 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
     ) -> RecordingSummary:
         """Encode every camera stream and write both rrd layers of one sequence.
 
-        Every camera is encoded before the first recording opens: the VRS is read
-        once, stream by stream, and ``log_video_stream`` remuxes the finished
-        mp4s. The base layer then closes before the gt layer opens — one VRS read
-        feeds both, but each is its own recording stream and its own atomic
-        replace, so a failure in the second cannot half-write the first.
+        The ground truth is read and checked first, so a wrong world frame fails
+        the sequence before a single frame is encoded. Every camera is then
+        encoded before the first recording opens: the VRS is read once, stream by
+        stream, and ``log_video_stream`` remuxes the finished mp4s. The base layer
+        closes before the gt layer opens — one VRS read feeds both, but each is
+        its own recording stream and its own atomic replace, so a failure in the
+        second cannot half-write the first.
 
         Args:
             identity: Sequence identity; names both recordings and both rrd files.
@@ -1113,11 +1135,6 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         """
         streams: SequenceStreams = open_streams(source.vrs_path)
         vrs_bytes: int = source.vrs_path.stat().st_size
-        clips: list[Path] = []
-        for index, stream in enumerate(streams.cameras):
-            clip: Path = work_dir / f"cam_{index:02d}.mp4"
-            encode_frames_to_mp4(stream.frames, clip, source=stream.frame_source, fps=stream.fps)
-            clips.append(clip)
 
         # The control points are the gt layer's material, read once here: the base
         # layer only says how many a consumer should expect.
@@ -1125,6 +1142,25 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
             None if source.control_points_path is None else aria.read_control_points(source.control_points_path)
         )
         control_point_count: int = 0 if control_points is None else len(control_points.points)
+        trajectory: GtTrajectory | None = None
+        if source.has_ground_truth:
+            published: aria.PseudoGt = (
+                aria.read_pseudo_gt(source.pseudo_gt_path)
+                if source.pseudo_gt_path is not None
+                else aria.PseudoGt(times_ns=np.zeros(0, dtype=np.int64), world_T_cam0=np.zeros((0, 4, 4), dtype=np.float64))
+            )
+            # The pGT poses camera-slam-left, so cam_00's own extrinsics are what
+            # move the trajectory onto the rig.
+            rig_T_cam0: Float64[ndarray, "4 4"] = np.asarray(streams.cameras[0].camera.extrinsics.world_T_cam, dtype=np.float64)
+            trajectory = rig_trajectory(published, rig_T_cam0=rig_T_cam0)
+            validate_ground_truth(source.sequence, () if control_points is None else control_points.points, trajectory)
+
+        clips: list[Path] = []
+        for index, stream in enumerate(streams.cameras):
+            clip: Path = work_dir / f"cam_{index:02d}.mp4"
+            encode_frames_to_mp4(stream.frames, clip, source=stream.frame_source, fps=stream.fps)
+            clips.append(clip)
+
         clocks: list[Int64[ndarray, "n_samples"]] = [stream.times_ns for stream in streams.cameras if stream.times_ns.size]
         clocks += [imu.gyro.times_ns for imu in streams.imus if imu.gyro.times_ns.size]
         if not clocks:
@@ -1189,34 +1225,13 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
             )
 
         duration_s: float = (end_time_ns - start_time_ns) / 1e9
-        if source.pseudo_gt_path is None and control_points is None:
+        if trajectory is None:
             print(f"  no ground truth published for {source.sequence}, so no gt layer: nothing establishes a world frame")
-            return RecordingSummary(
-                num_frames=num_frames,
-                duration_s=duration_s,
-                control_point_count=0,
-                num_poses=0,
-                trajectory_len_m=0.0,
-                num_detections=0,
-                world_up=None,
-            )
+            return RecordingSummary(num_frames=num_frames, duration_s=duration_s)
 
-        # The pGT poses camera-slam-left, so its own extrinsics are what move the
-        # trajectory onto the rig; imu-right's accelerometer is what measures the world up.
-        slam_left: CameraStream | None = next((stream for stream in streams.cameras if stream.stream_id == aria.SLAM_LEFT_STREAM_ID), None)
-        if slam_left is None:
-            raise ValueError(f"{source.vrs_path} carries no {aria.STREAM_LABELS[aria.SLAM_LEFT_STREAM_ID]} stream, the frame the pGT poses")
-        rig_imu: ImuStream | None = next((imu for imu in streams.imus if imu.stream_id == aria.IMU_RIGHT_STREAM_ID), None)
-        if rig_imu is None:
-            raise ValueError(f"{source.vrs_path} carries no {aria.STREAM_LABELS[aria.IMU_RIGHT_STREAM_ID]} stream, which *is* the rig frame")
-        published: aria.PseudoGt = (
-            aria.read_pseudo_gt(source.pseudo_gt_path)
-            if source.pseudo_gt_path is not None
-            else aria.PseudoGt(times_ns=np.zeros(0, dtype=np.int64), world_T_cam0=np.zeros((0, 4, 4), dtype=np.float64))
-        )
-        trajectory: GtTrajectory = rig_trajectory(published, rig_T_cam0=np.asarray(slam_left.camera.extrinsics.world_T_cam, dtype=np.float64))
+        # imu-right's accelerometer is what measures the world up axis; imu_00 *is* the rig.
         world_up: WorldUp | None = self.write_gt_recording(
-            identity, source, trajectory=trajectory, accel=rig_imu.accel, control_points=control_points, target=gt_target
+            identity, source, trajectory=trajectory, accel=streams.imus[0].accel, control_points=control_points, target=gt_target
         )
         return RecordingSummary(
             num_frames=num_frames,
@@ -1259,10 +1274,7 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
             The measured world up axis, or ``None`` when there was no pose to rotate by.
 
         Raises:
-            ValueError: A levelled control point sits further than
-                ``CONTROL_POINT_MAX_DISTANCE_M`` from the trajectory (a wrong world
-                frame or a missing origin translation), or a detection names a
-                point the survey never published.
+            ValueError: A detection names a point the survey never published.
         """
         world_up: WorldUp | None = None
         if trajectory.times_ns.size:
@@ -1277,24 +1289,6 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         labels_by_name: dict[str, str] = {
             point.name: f"{point.name}{'' if point.has_height else UNLEVELLED_LABEL_SUFFIX}" for point in points
         }
-        # No pose is nothing to measure a distance against, so a control-point-only
-        # sequence is reported and published as it stands rather than rejected.
-        reaches: tuple[ControlPointReach, ...] = control_point_reach(points, trajectory.translations_xyz) if trajectory.times_ns.size else ()
-        for reach in reaches:
-            measured_from: str = "in 3D" if reach.has_height else f"horizontally{UNLEVELLED_LABEL_SUFFIX}"
-            distance_m: float = reach.distance_m if reach.has_height else reach.horizontal_distance_m
-            print(f"  control point {reach.name:<10} came within {distance_m:8.2f} m of the trajectory, {measured_from}")
-        too_far: list[ControlPointReach] = [
-            reach for reach in reaches if reach.has_height and reach.distance_m > CONTROL_POINT_MAX_DISTANCE_M
-        ]
-        if too_far:
-            named: str = ", ".join(f"{reach.name} at {reach.distance_m:.1f} m" for reach in too_far)
-            raise ValueError(
-                f"{source.sequence}: levelled control point(s) {named} sit further than {CONTROL_POINT_MAX_DISTANCE_M:g} m "
-                f"from the rig trajectory, but their tags were photographed by these cameras — the world frame or the "
-                f"origin translation is wrong"
-            )
-
         gt_index: list[rr.TimeColumn] = [rr.TimeColumn(schema.TIMELINE, duration=trajectory.times_ns.astype("timedelta64[ns]"))]
         with writing.atomic_recording(target, application_id="dataforge", recording_id=identity.recording_id) as recording:
             rr.log("/", WORLD_UP_VIEW_COORDINATES[WORLD_UP], static=True, recording=recording)

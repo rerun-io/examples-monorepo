@@ -12,11 +12,10 @@ they only make sense against each other:
 * **The streams.** Frames and IMU samples in VRS record order, on Aria's DEVICE
   clock in nanoseconds — the clock the pGT and the control points are stamped
   with, so nothing needs shifting anywhere downstream.
-* **The ground truth.** ``ground_truth/pseudo_dense/<seq>.txt`` is
-  ``world_T_cam0`` at the slam-left frame times; ``ground_truth/sparse/<seq>.json``
-  holds surveyed control points in LV95/LN02, which are 6-digit coordinates and
-  are therefore translated by ``CUSTOM_ORIGIN_XYZ`` exactly as the official
-  tooling does.
+* **The ground truth.** The pGT is ``world_T_cam0`` at the slam-left frame
+  times; the sparse file holds surveyed control points in LV95/LN02, which are
+  6-digit coordinates and are therefore translated by ``CUSTOM_ORIGIN_XYZ``
+  exactly as the official tooling does.
 
 Reference: github.com/cvg/lamaria (``lamaria/utils/aria.py`` and
 ``lamaria/utils/constants.py``); the quaternion order and the transform chain
@@ -37,7 +36,6 @@ from numpy import ndarray
 from projectaria_tools.core import data_provider
 from projectaria_tools.core.calibration import CameraCalibration, DeviceCalibration, ImuCalibration
 from projectaria_tools.core.sensor_data import ImageData, ImageDataRecord, MotionData, TimeDomain
-from projectaria_tools.core.sophus import SE3
 from projectaria_tools.core.stream_id import StreamId
 from scipy.spatial.transform import Rotation
 from serde import field, from_dict, serde
@@ -107,12 +105,15 @@ def open_vrs(path: Path) -> data_provider.VrsDataProvider:
         A provider over that single file.
 
     Raises:
-        FileNotFoundError: If ``path`` is not a file — the expected failure after
-            an interrupted download, and one whose native error is unreadable.
+        FileNotFoundError: If the file is missing, truncated or otherwise
+            unreadable — the expected failure after an interrupted download.
+            ``create_vrs_data_provider`` answers all of those with ``None``,
+            which would fail much later as an ``AttributeError``.
     """
-    if not path.is_file():
-        raise FileNotFoundError(f"no VRS at {path}; fetch it first (a resumed download leaves a partial file behind)")
-    return data_provider.create_vrs_data_provider(str(path))
+    provider: data_provider.VrsDataProvider | None = data_provider.create_vrs_data_provider(str(path))
+    if provider is None:
+        raise FileNotFoundError(f"no readable VRS at {path}; fetch it first (a resumed download leaves a partial file behind)")
+    return provider
 
 
 def device_calibration(provider: data_provider.VrsDataProvider) -> DeviceCalibration:
@@ -132,16 +133,6 @@ def device_calibration(provider: data_provider.VrsDataProvider) -> DeviceCalibra
     if calibration is None:
         raise ValueError("this VRS carries no device calibration")
     return calibration
-
-
-def se3_matrix(transform: SE3) -> Float64[ndarray, "4 4"]:
-    """A projectaria ``SE3`` as a plain 4x4, homogeneous row included.
-
-    ``SE3.to_matrix()`` already returns 4x4; this exists to give the conversion
-    one annotated place, because the neighbouring ``to_quat()`` returns
-    ``[[w, x, y, z]]`` and mixing the two orders is the classic silent bug here.
-    """
-    return np.asarray(transform.to_matrix(), dtype=np.float64)
 
 
 def fisheye62_from_aria(calibration: CameraCalibration, *, rig_T_cam: Float64[ndarray, "4 4"], name: str) -> Fisheye62Parameters:
@@ -220,30 +211,40 @@ class AriaRig:
             provider: An open provider, e.g. from ``open_vrs``.
 
         Returns:
-            The rig, with one entry per camera and IMU stream present in the file.
+            The rig, with one entry per camera and IMU stream of a Gen1 Aria.
+
+        Raises:
+            ValueError: The file carries no calibration for one of those streams,
+                which every LaMAria sequence does.
         """
         calibration: DeviceCalibration = device_calibration(provider)
         reference: ImuCalibration | None = calibration.get_imu_calib(STREAM_LABELS[IMU_RIGHT_STREAM_ID])
         if reference is None:
             raise ValueError(f"this VRS has no {STREAM_LABELS[IMU_RIGHT_STREAM_ID]} calibration, so it has no rig frame")
-        imu_right_T_device: Float64[ndarray, "4 4"] = np.linalg.inv(se3_matrix(reference.get_transform_device_imu()))
+        # ``to_matrix()``, never the neighbouring ``to_quat()``: that returns
+        # ``[[w, x, y, z]]`` while everything else here reads x, y, z, w.
+        device_T_imu_right: Float64[ndarray, "4 4"] = np.asarray(reference.get_transform_device_imu().to_matrix(), dtype=np.float64)
+        imu_right_T_device: Float64[ndarray, "4 4"] = np.linalg.inv(device_T_imu_right)
 
         cameras: dict[AriaStreamId, Fisheye62Parameters] = {}
         for stream_id in CAMERA_STREAM_IDS:
             camera: CameraCalibration | None = calibration.get_camera_calib(STREAM_LABELS[stream_id])
             if camera is None:
-                continue
+                raise ValueError(f"this VRS has no {STREAM_LABELS[stream_id]} calibration, so {stream_id} has no rig pose")
+            device_T_cam: Float64[ndarray, "4 4"] = np.asarray(camera.get_transform_device_camera().to_matrix(), dtype=np.float64)
             cameras[stream_id] = fisheye62_from_aria(
                 camera,
-                rig_T_cam=imu_right_T_device @ se3_matrix(camera.get_transform_device_camera()),
+                rig_T_cam=imu_right_T_device @ device_T_cam,
                 name=STREAM_LABELS[stream_id],
             )
 
         rig_T_imu: dict[AriaStreamId, Float64[ndarray, "4 4"]] = {}
         for stream_id in IMU_STREAM_IDS:
             imu: ImuCalibration | None = calibration.get_imu_calib(STREAM_LABELS[stream_id])
-            if imu is not None:
-                rig_T_imu[stream_id] = imu_right_T_device @ se3_matrix(imu.get_transform_device_imu())
+            if imu is None:
+                raise ValueError(f"this VRS has no {STREAM_LABELS[stream_id]} calibration, so {stream_id} has no rig pose")
+            device_T_imu: Float64[ndarray, "4 4"] = np.asarray(imu.get_transform_device_imu().to_matrix(), dtype=np.float64)
+            rig_T_imu[stream_id] = imu_right_T_device @ device_T_imu
         return cls(cameras=cameras, rig_T_imu=rig_T_imu)
 
 
@@ -257,9 +258,9 @@ def iter_frames(provider: data_provider.VrsDataProvider, stream_id: AriaStreamId
     sequences), which is what an encoder needs: the mp4's Nth sample and
     ``frame_timestamps_ns``'s Nth value describe the same frame.
 
-    Each frame's shape is checked against the calibrated image size, so a stream
-    that decodes to something unexpected fails here rather than as a garbled
-    video hundreds of frames later.
+    Every frame is checked against the first one, so a stream that changes shape
+    or dtype partway fails here rather than as a garbled video hundreds of
+    frames later.
 
     Args:
         provider: An open provider.
@@ -270,19 +271,17 @@ def iter_frames(provider: data_provider.VrsDataProvider, stream_id: AriaStreamId
         the SLAM cameras and a ``uint8`` ``h w 3`` frame for camera-rgb.
     """
     stream: StreamId = StreamId(stream_id)
-    camera: CameraCalibration | None = device_calibration(provider).get_camera_calib(STREAM_LABELS[stream_id])
-    if camera is None:
-        raise ValueError(f"{stream_id} is not a calibrated camera stream in this VRS")
-    size_wh: Int64[ndarray, "2"] = np.asarray(camera.get_image_size(), dtype=np.int64)
-    calibrated_hw: tuple[int, int] = (int(size_wh[1]), int(size_wh[0]))
+    first_hw: tuple[int, ...] | None = None
     for index in range(provider.get_num_data(stream)):
         frame: tuple[ImageData, ImageDataRecord] = provider.get_image_data_by_index(stream, index)
         # ``AriaImage`` on purpose, not an inline jaxtyping subscript: a subscript
         # is re-evaluated on every annotated assignment, and beartype then
         # compiles and caches a fresh checker per frame (see AGENTS.md).
         image: AriaImage = frame[0].to_numpy_array()
-        if image.dtype != np.uint8 or image.shape[:2] != calibrated_hw:
-            raise ValueError(f"{stream_id} frame {index} is {image.shape} {image.dtype}, not a uint8 {calibrated_hw[0]}x{calibrated_hw[1]} frame")
+        if first_hw is None:
+            first_hw = image.shape[:2]
+        if image.dtype != np.uint8 or image.shape[:2] != first_hw:
+            raise ValueError(f"{stream_id} frame {index} is {image.shape} {image.dtype}, not a uint8 {first_hw[0]}x{first_hw[1]} frame")
         yield int(frame[1].capture_timestamp_ns), image
 
 
