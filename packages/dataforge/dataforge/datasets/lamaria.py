@@ -539,19 +539,22 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
     def discover(self) -> list[tuple[SequenceIdentity, LamariaSource]]:
         """Pair every selected sequence whose small files are on disk with its source.
 
-        The manifest is the list of what the archive holds; the small files on
-        disk are the evidence that ``download`` finished for a sequence. A
-        selected name the manifest never saw is an error (a typo, or a stale
-        manifest), while one whose files are missing is announced and skipped so
-        a batch convert makes progress on the rest.
+        The manifest says what the archive holds; the small files on disk are the
+        evidence that ``download`` finished for a sequence. A selected name that
+        fails either check is announced and skipped rather than fatal: the
+        selection defaults to all five sequences, so a narrower
+        ``download --sequences`` must still leave the rest convertible, and a
+        name the archive really does not have is already a hard error at
+        ``download``.
         """
         records: dict[str, SequenceRecord] = {record.sequence: record for record in self.manifest().sequences}
-        unknown: list[str] = sorted(set(self.config.sequences) - set(records))
-        if unknown:
-            raise ValueError(f"{MANIFEST_NAME} in {self.config.root} lists no sequence named {', '.join(unknown)}; re-run dataforge-download")
         pairs: list[tuple[SequenceIdentity, LamariaSource]] = []
         for name in sorted(set(self.config.sequences)):
-            source: LamariaSource = self.source(records[name])
+            record: SequenceRecord | None = records.get(name)
+            if record is None:
+                print(f"  warning: skipping {name}: {MANIFEST_NAME} does not list it; run `dataforge-download lamaria --sequences {name}`")
+                continue
+            source: LamariaSource = self.source(record)
             missing: list[Path] = [
                 path
                 for path in (source.calibration_path, source.pseudo_gt_path, source.control_points_path)
