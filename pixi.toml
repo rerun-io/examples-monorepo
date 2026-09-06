@@ -2749,6 +2749,9 @@ python = "3.12.*"
 tyro = ">=0.9.1,<0.10"
 # CPU torch only satisfies simplecv's module-load import.
 pytorch-cpu = ">=2.8.0"
+# 7zz: the only extractor that reads MSD's Info-ZIP multi-volume archives
+# (<seq>.z01/.z02/.zip), which Python's zipfile refuses outright.
+7zip = ">=24.09"
 
 [feature.dataforge.pypi-dependencies]
 dataforge = { path = "packages/dataforge", editable = true }
