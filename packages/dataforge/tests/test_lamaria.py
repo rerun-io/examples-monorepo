@@ -9,6 +9,10 @@ real encoder and the real writers do their jobs.
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -164,3 +168,195 @@ def test_a_selected_sequence_the_manifest_never_saw_is_an_error(tmp_path: Path) 
 
     with pytest.raises(ValueError, match="R_99_nonesuch"):
         LamariaDataset(config).discover()
+
+
+# ── the archive, on loopback ──────────────────────────────────────────────
+
+APACHE_HEAD: str = """<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<html>
+ <head>
+  <title>Index of /lamaria/{directory}</title>
+ </head>
+ <body>
+<h1>Index of /lamaria/{directory}</h1>
+  <table>
+   <tr><th valign="top"><img src="/isginf/icons/blank.gif" alt="[ICO]"></th><th><a href="?C=N;O=D">Name</a></th><th><a href="?C=M;O=A">Last modified</a></th><th><a href="?C=S;O=A">Size</a></th><th><a href="?C=D;O=A">Description</a></th></tr>
+   <tr><th colspan="5"><hr></th></tr>
+<tr><td valign="top"><img src="/isginf/icons/back.gif" alt="[PARENTDIR]"></td><td><a href="/lamaria/">Parent Directory</a></td><td>&nbsp;</td><td align="right">  - </td><td>&nbsp;</td></tr>
+"""
+"""Verbatim head of a cvg-data.inf.ethz.ch fancy index, parent link included."""
+
+APACHE_TAIL: str = """   <tr><th colspan="5"><hr></th></tr>
+</table>
+<address>Apache Server at cvg-data.inf.ethz.ch Port 443</address>
+</body></html>
+"""
+"""Verbatim tail of the same page."""
+
+
+def apache_page(directory: str, rows: str) -> str:
+    """One index page: the archive's own wrapper around verbatim listing rows."""
+    return APACHE_HEAD.format(directory=directory) + rows + APACHE_TAIL
+
+
+# Every row below is copied verbatim from the saved index pages of the real archive.
+RAW_TRAINING_ROWS: str = """<tr><td valign="top"><img src="/isginf/icons/unknown.gif" alt="[   ]"></td><td><a href="R_01_easy.vrs">R_01_easy.vrs</a></td><td align="right">2025-08-29 14:39  </td><td align="right">897M</td><td>&nbsp;</td></tr>
+<tr><td valign="top"><img src="/isginf/icons/unknown.gif" alt="[   ]"></td><td><a href="R_04_medium.vrs">R_04_medium.vrs</a></td><td align="right">2025-08-29 14:39  </td><td align="right">1.9G</td><td>&nbsp;</td></tr>
+<tr><td valign="top"><img src="/isginf/icons/unknown.gif" alt="[   ]"></td><td><a href="R_11_5cp.vrs">R_11_5cp.vrs</a></td><td align="right">2025-08-29 14:44  </td><td align="right">2.6G</td><td>&nbsp;</td></tr>
+"""
+RAW_TEST_ROWS: str = """<tr><td valign="top"><img src="/isginf/icons/unknown.gif" alt="[   ]"></td><td><a href="sequence_1_1.vrs">sequence_1_1.vrs</a></td><td align="right">2025-08-29 11:32  </td><td align="right">9.3G</td><td>&nbsp;</td></tr>
+"""
+CALIBRATION_TRAINING_ROWS: str = """<tr><td valign="top"><img src="/isginf/icons/unknown.gif" alt="[   ]"></td><td><a href="R_01_easy.json">R_01_easy.json</a></td><td align="right">2025-08-29 17:40  </td><td align="right">2.7K</td><td>&nbsp;</td></tr>
+<tr><td valign="top"><img src="/isginf/icons/unknown.gif" alt="[   ]"></td><td><a href="R_04_medium.json">R_04_medium.json</a></td><td align="right">2025-08-29 17:40  </td><td align="right">2.7K</td><td>&nbsp;</td></tr>
+<tr><td valign="top"><img src="/isginf/icons/unknown.gif" alt="[   ]"></td><td><a href="R_11_5cp.json">R_11_5cp.json</a></td><td align="right">2025-08-29 17:40  </td><td align="right">2.7K</td><td>&nbsp;</td></tr>
+"""
+CALIBRATION_TEST_ROWS: str = """<tr><td valign="top"><img src="/isginf/icons/unknown.gif" alt="[   ]"></td><td><a href="sequence_1_1.json">sequence_1_1.json</a></td><td align="right">2025-08-29 17:41  </td><td align="right">2.8K</td><td>&nbsp;</td></tr>
+"""
+PSEUDO_DENSE_ROWS: str = """<tr><td valign="top"><img src="/isginf/icons/text.gif" alt="[TXT]"></td><td><a href="R_01_easy.txt">R_01_easy.txt</a></td><td align="right">2025-09-30 21:43  </td><td align="right">429K</td><td>&nbsp;</td></tr>
+<tr><td valign="top"><img src="/isginf/icons/text.gif" alt="[TXT]"></td><td><a href="R_11_5cp.txt">R_11_5cp.txt</a></td><td align="right">2025-09-30 21:50  </td><td align="right">235K</td><td>&nbsp;</td></tr>
+"""
+SPARSE_ROWS: str = """<tr><td valign="top"><img src="/isginf/icons/unknown.gif" alt="[   ]"></td><td><a href="R_11_5cp.json">R_11_5cp.json</a></td><td align="right">2025-09-05 01:08  </td><td align="right">1.8M</td><td>&nbsp;</td></tr>
+"""
+
+CALIBRATION_BODY: bytes = b'{"cam0": {"model": "RAD_TAN_THIN_PRISM_FISHEYE"}}'
+"""Stand-in for a published calibration; ``download`` only moves the bytes."""
+PSEUDO_GT_BODY: bytes = b"1389350666375 0.0 0.0 0.0 0.0 0.0 0.0 1.0\n"
+CONTROL_POINTS_BODY: bytes = b'{"control_points": {}, "images": {}, "timestamps": {}}'
+
+
+def archive_bodies() -> dict[str, bytes]:
+    """The whole loopback archive: index pages plus the small files they list."""
+    return {
+        "/lamaria/raw_data/training/": apache_page("raw_data/training", RAW_TRAINING_ROWS).encode(),
+        "/lamaria/raw_data/test/": apache_page("raw_data/test", RAW_TEST_ROWS).encode(),
+        "/lamaria/aria_calibrations/training/": apache_page("aria_calibrations/training", CALIBRATION_TRAINING_ROWS).encode(),
+        "/lamaria/aria_calibrations/test/": apache_page("aria_calibrations/test", CALIBRATION_TEST_ROWS).encode(),
+        "/lamaria/ground_truth/pseudo_dense/": apache_page("ground_truth/pseudo_dense", PSEUDO_DENSE_ROWS).encode(),
+        "/lamaria/ground_truth/sparse/": apache_page("ground_truth/sparse", SPARSE_ROWS).encode(),
+        "/lamaria/aria_calibrations/training/R_01_easy.json": CALIBRATION_BODY,
+        "/lamaria/aria_calibrations/training/R_11_5cp.json": CALIBRATION_BODY,
+        "/lamaria/aria_calibrations/test/sequence_1_1.json": CALIBRATION_BODY,
+        "/lamaria/ground_truth/pseudo_dense/R_01_easy.txt": PSEUDO_GT_BODY,
+        "/lamaria/ground_truth/pseudo_dense/R_11_5cp.txt": PSEUDO_GT_BODY,
+        "/lamaria/ground_truth/sparse/R_11_5cp.json": CONTROL_POINTS_BODY,
+    }
+
+
+def build_archive_handler(bodies: dict[str, bytes], requested: list[str]) -> type[BaseHTTPRequestHandler]:
+    """A handler answering GET and HEAD for exactly the paths ``bodies`` names."""
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def _body(self) -> bytes | None:
+            requested.append(f"{self.command} {self.path}")
+            return bodies.get(self.path)
+
+        def _respond(self, body: bytes | None, *, with_body: bool) -> None:
+            if body is None:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if with_body:
+                self.wfile.write(body)
+
+        def do_HEAD(self) -> None:
+            self._respond(self._body(), with_body=False)
+
+        def do_GET(self) -> None:
+            self._respond(self._body(), with_body=True)
+
+        def log_message(self, format: str, *args: object) -> None:
+            """Keep pytest's captured output about dataforge, not about HTTP."""
+
+    return Handler
+
+
+@contextmanager
+def archive(bodies: dict[str, bytes] | None = None) -> Iterator[tuple[str, list[str]]]:
+    """Serve the archive on a loopback port; yields its base URL and the request log."""
+    requested: list[str] = []
+    handler: type[BaseHTTPRequestHandler] = build_archive_handler(archive_bodies() if bodies is None else bodies, requested)
+    server: ThreadingHTTPServer = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread: threading.Thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/lamaria/", requested
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5.0)
+
+
+# ── download ──────────────────────────────────────────────────────────────
+
+
+def test_download_resolves_splits_and_ground_truth_from_the_index_pages(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root: Path = tmp_path / "raw"
+    with archive() as (base_url, _):
+        LamariaDataset(LamariaConfig(root=root, base_url=base_url, sequences=("R_11_5cp", "R_01_easy", "sequence_1_1"))).download()
+
+    manifest: LamariaManifest = serde.json.from_json(LamariaManifest, (root / "manifest.json").read_text())
+    assert [record.sequence for record in manifest.sequences] == ["R_01_easy", "R_11_5cp", "sequence_1_1"]
+    easy, surveyed, held_out = manifest.sequences
+    # The split is *resolved*: which raw_data index listed the VRS decides it.
+    assert (easy.split, surveyed.split, held_out.split) == ("training", "training", "test")
+    assert easy.vrs_url == f"{base_url}raw_data/training/R_01_easy.vrs"
+    assert held_out.vrs_url == f"{base_url}raw_data/test/sequence_1_1.vrs"
+    # 897 MiB and 9.3 GiB, Apache's rounded display sizes.
+    assert (easy.vrs_display_bytes, held_out.vrs_display_bytes) == (940_572_672, 9_985_798_963)
+    assert (easy.has_pseudo_gt, easy.has_control_points) == (True, False)
+    assert (surveyed.has_pseudo_gt, surveyed.has_control_points) == (True, True)
+    # The test split ships no ground truth at all.
+    assert (held_out.has_pseudo_gt, held_out.has_control_points) == (False, False)
+
+    output: str = capsys.readouterr().out
+    assert "3 sequence(s)" in output
+    assert "R_11_5cp" in output and "control points" in output
+    # 0.9 + 2.8 + 10.0 GB of VRS the convert verb will fetch one at a time.
+    assert "13.7 GB" in output
+
+
+def test_download_lands_the_small_files_in_the_official_layout(tmp_path: Path) -> None:
+    root: Path = tmp_path / "raw"
+    with archive() as (base_url, _):
+        LamariaDataset(LamariaConfig(root=root, base_url=base_url, sequences=("R_01_easy", "R_11_5cp", "sequence_1_1"))).download()
+
+    assert (root / "training" / "R_01_easy" / "aria_calibrations" / "R_01_easy.json").read_bytes() == CALIBRATION_BODY
+    assert (root / "training" / "R_01_easy" / "ground_truth" / "pGT" / "R_01_easy.txt").read_bytes() == PSEUDO_GT_BODY
+    assert (root / "training" / "R_11_5cp" / "ground_truth" / "control_points" / "R_11_5cp.json").read_bytes() == CONTROL_POINTS_BODY
+    # R_01_easy was never surveyed, and the test split has no ground truth.
+    assert not (root / "training" / "R_01_easy" / "ground_truth" / "control_points").exists()
+    assert (root / "test" / "sequence_1_1" / "aria_calibrations" / "sequence_1_1.json").is_file()
+    assert not (root / "test" / "sequence_1_1" / "ground_truth").exists()
+    # The VRS files themselves are the whole point of fetching on demand.
+    assert not list(root.rglob("*.vrs"))
+
+
+def test_download_then_discover_yields_every_downloaded_sequence(tmp_path: Path) -> None:
+    root: Path = tmp_path / "raw"
+    config: LamariaConfig = LamariaConfig(root=root, sequences=("R_01_easy", "R_11_5cp", "sequence_1_1"))
+    with archive() as (base_url, _):
+        dataset: LamariaDataset = LamariaDataset(LamariaConfig(root=root, base_url=base_url, sequences=config.sequences))
+        dataset.download()
+        discovered: list[tuple[SequenceIdentity, LamariaSource]] = dataset.discover()
+
+    assert [identity.sequence_key for identity, _ in discovered] == ["R_01_easy", "R_11_5cp", "sequence_1_1"]
+    assert [source.split for _, source in discovered] == ["training", "training", "test"]
+
+
+def test_a_sequence_no_raw_index_lists_is_named_in_the_error(tmp_path: Path) -> None:
+    with archive() as (base_url, _), pytest.raises(ValueError, match="R_99_nonesuch"):
+        LamariaDataset(LamariaConfig(root=tmp_path / "raw", base_url=base_url, sequences=("R_01_easy", "R_99_nonesuch"))).download()
+
+
+def test_a_sequence_with_no_published_calibration_is_named_in_the_error(tmp_path: Path) -> None:
+    """Every LaMAria sequence ships one, so a missing entry means the archive changed."""
+    bodies: dict[str, bytes] = archive_bodies()
+    bodies["/lamaria/aria_calibrations/training/"] = apache_page("aria_calibrations/training", CALIBRATION_TRAINING_ROWS.splitlines(True)[0]).encode()
+    with archive(bodies) as (base_url, _), pytest.raises(ValueError, match="R_11_5cp"):
+        LamariaDataset(LamariaConfig(root=tmp_path / "raw", base_url=base_url, sequences=("R_01_easy", "R_11_5cp"))).download()
