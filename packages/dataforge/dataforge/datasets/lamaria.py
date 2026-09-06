@@ -113,19 +113,9 @@ MPS_WORLD_MAX_INDEX: int = 10
 WorldUpAxis: TypeAlias = Literal["+x", "-x", "+y", "-y", "+z", "-z"]
 """Signed axis of a world frame that gravity points *away* from."""
 
-WORLD_UP_VIEW_COORDINATES: dict[WorldUpAxis, rr.components.ViewCoordinates] = {
-    "+x": rr.ViewCoordinates.RIGHT_HAND_X_UP,
-    "-x": rr.ViewCoordinates.RIGHT_HAND_X_DOWN,
-    "+y": rr.ViewCoordinates.RIGHT_HAND_Y_UP,
-    "-y": rr.ViewCoordinates.RIGHT_HAND_Y_DOWN,
-    "+z": rr.ViewCoordinates.RIGHT_HAND_Z_UP,
-    "-z": rr.ViewCoordinates.RIGHT_HAND_Z_DOWN,
-}
-"""Root ``ViewCoordinates`` per world up axis, right-handed throughout: naming the up
-axis is the whole decision, since handedness then fixes the other two."""
-
 WORLD_UP: WorldUpAxis = "+z"
-"""The up axis every LaMAria world is documented to have.
+"""The up axis every LaMAria world is documented to have, and what the gt layer
+states as ``rr.ViewCoordinates.RIGHT_HAND_Z_UP``.
 
 Both frames are Z-up by construction — MPS's is gravity-aligned, and LV95/LN02 is a
 projected national grid with levelled heights — so this is a *published* axis rather
@@ -203,26 +193,27 @@ FOLLOW_TRAIL_SECONDS: float = -10.0
 IMAGE_PLANE_DISTANCE: float = 0.1
 """Frustum length in metres; the SLAM baseline is ~11 cm, so the three frusta stay legible."""
 
-NOMINAL_FPS: dict[aria.AriaStreamId, int] = {
-    aria.SLAM_LEFT_STREAM_ID: 20,
-    aria.SLAM_RIGHT_STREAM_ID: 20,
-    aria.RGB_STREAM_ID: 10,
+
+@dataclass(frozen=True, slots=True)
+class CameraSpec:
+    """What a converter has to know about one Aria camera stream beyond its calibration."""
+
+    fps: int
+    """Nominal container frame rate. Only the mp4 header cares:
+    ``log_video_stream(times_ns=...)`` stamps every sample with its real capture time."""
+    frame_kind: FrameKind
+    """How its decoded frames reach the encoder: single-plane gray for the SLAM
+    pair, interleaved RGB (not BGR) for camera-rgb."""
+    kind: str
+    """exoego:v2 content hint on the camera node."""
+
+
+CAMERA_SPECS: dict[aria.AriaStreamId, CameraSpec] = {
+    aria.SLAM_LEFT_STREAM_ID: CameraSpec(fps=20, frame_kind="gray8", kind="grayscale"),
+    aria.SLAM_RIGHT_STREAM_ID: CameraSpec(fps=20, frame_kind="gray8", kind="grayscale"),
+    aria.RGB_STREAM_ID: CameraSpec(fps=10, frame_kind="rgb24", kind="rgb"),
 }
-"""Container frame rate per camera stream. Only the mp4 header cares:
-``log_video_stream(times_ns=...)`` stamps every sample with its real capture time."""
-FRAME_KINDS: dict[aria.AriaStreamId, FrameKind] = {
-    aria.SLAM_LEFT_STREAM_ID: "gray8",
-    aria.SLAM_RIGHT_STREAM_ID: "gray8",
-    aria.RGB_STREAM_ID: "rgb24",
-}
-"""How each stream's decoded frames reach the encoder: single-plane gray for the
-SLAM pair, and interleaved RGB (not BGR) for camera-rgb."""
-CAMERA_KINDS: dict[aria.AriaStreamId, str] = {
-    aria.SLAM_LEFT_STREAM_ID: "grayscale",
-    aria.SLAM_RIGHT_STREAM_ID: "grayscale",
-    aria.RGB_STREAM_ID: "rgb",
-}
-"""exoego:v2 content hint on each camera node."""
+"""One entry per camera stream a LaMAria VRS carries."""
 
 
 @serde.serde
@@ -301,10 +292,6 @@ class CameraStream:
     sequence is 10 GB of memcpy otherwise."""
     times_ns: Int64[ndarray, "n_frames"]
     """Capture times on Aria's device clock, one per frame, in the same order."""
-    frame_source: FrameSource
-    """How ``frames`` is laid out for the encoder (``gray8`` or ``rgb24``, plus the size)."""
-    fps: int
-    """Nominal container frame rate; the real per-sample times come from ``times_ns``."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,9 +365,8 @@ class ControlPointReach:
     has_height: bool
     """Whether the survey levelled it; an unlevelled point's ``z`` is a placeholder."""
     distance_m: float
-    """Closest approach in 3D; only meaningful for a levelled point."""
-    horizontal_distance_m: float
-    """Closest approach in the horizontal plane, which is all an unlevelled point can be judged on."""
+    """Closest approach: in 3D for a levelled point, and in the horizontal plane
+    for one the survey never levelled, which is all such a point can be judged on."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -579,14 +565,15 @@ def control_point_reach(points: tuple[aria.ControlPoint, ...], translations_xyz:
     reaches: list[ControlPointReach] = []
     for point in points:
         offsets_xyz: Float64[ndarray, "n_poses 3"] = translations_xyz - point.position_xyz_m
-        distances_m: Float64[ndarray, "n_poses"] = np.linalg.norm(offsets_xyz, axis=1)
-        horizontal_m: Float64[ndarray, "n_poses"] = np.linalg.norm(offsets_xyz[:, :2], axis=1)
+        # An unlevelled point's z is the origin's height rather than a measurement,
+        # so only its horizontal offset means anything.
+        measured_xyz: Float64[ndarray, "n_poses n_axes"] = offsets_xyz if point.has_height else offsets_xyz[:, :2]
+        distances_m: Float64[ndarray, "n_poses"] = np.linalg.norm(measured_xyz, axis=1)
         reaches.append(
             ControlPointReach(
                 name=point.name,
                 has_height=point.has_height,
                 distance_m=float(distances_m.min()) if distances_m.size else float("inf"),
-                horizontal_distance_m=float(horizontal_m.min()) if horizontal_m.size else float("inf"),
             )
         )
     return tuple(reaches)
@@ -614,8 +601,7 @@ def validate_ground_truth(sequence: str, points: tuple[aria.ControlPoint, ...], 
     reaches: tuple[ControlPointReach, ...] = control_point_reach(points, trajectory.translations_xyz)
     for reach in reaches:
         measured_from: str = "in 3D" if reach.has_height else f"horizontally{UNLEVELLED_LABEL_SUFFIX}"
-        distance_m: float = reach.distance_m if reach.has_height else reach.horizontal_distance_m
-        print(f"  control point {reach.name:<10} came within {distance_m:8.2f} m of the trajectory, {measured_from}")
+        print(f"  control point {reach.name:<10} came within {reach.distance_m:8.2f} m of the trajectory, {measured_from}")
     too_far: list[ControlPointReach] = [reach for reach in reaches if reach.has_height and reach.distance_m > CONTROL_POINT_MAX_DISTANCE_M]
     if too_far:
         named: str = ", ".join(f"{reach.name} at {reach.distance_m:.1f} m" for reach in too_far)
@@ -626,9 +612,7 @@ def validate_ground_truth(sequence: str, points: tuple[aria.ControlPoint, ...], 
         )
 
 
-def log_control_points(
-    recording: rr.RecordingStream, points: tuple[aria.ControlPoint, ...], *, labels_by_name: dict[str, str]
-) -> None:
+def log_control_points(recording: rr.RecordingStream, points: tuple[aria.ControlPoint, ...]) -> None:
     """Log the surveyed points as one static, labelled ``Points3D`` in the world.
 
     A survey is a property of the world and not of a moment, so this is
@@ -641,7 +625,6 @@ def log_control_points(
     Args:
         recording: Destination recording stream.
         points: The sequence's surveyed points, in file order.
-        labels_by_name: Survey name → the label to draw, unlevelled suffix included.
     """
     radii_m: list[float] = []
     for point in points:
@@ -653,7 +636,7 @@ def log_control_points(
             positions=np.stack([point.position_xyz_m for point in points]),
             colors=[CONTROL_POINT_COLOR if point.has_height else CONTROL_POINT_UNLEVELLED_COLOR for point in points],
             radii=radii_m,
-            labels=[labels_by_name[point.name] for point in points],
+            labels=[f"{point.name}{'' if point.has_height else UNLEVELLED_LABEL_SUFFIX}" for point in points],
             # Rerun hides labels past a handful of points on its own; a survey is
             # exactly the case where every name is worth reading.
             show_labels=True,
@@ -734,8 +717,6 @@ def open_streams(vrs_path: Path) -> SequenceStreams:
                 # decoder's own buffer, so nothing is copied on the way there.
                 frames=(image.data for _, image in aria.iter_frames(provider, stream_id)),
                 times_ns=aria.frame_timestamps_ns(provider, stream_id),
-                frame_source=FrameSource(FRAME_KINDS[stream_id], width=camera.intrinsics.width, height=camera.intrinsics.height),
-                fps=NOMINAL_FPS[stream_id],
             )
         )
     imus: list[ImuStream] = []
@@ -1112,7 +1093,9 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         clips: list[Path] = []
         for index, stream in enumerate(streams.cameras):
             clip: Path = work_dir / f"cam_{index:02d}.mp4"
-            encode_frames_to_mp4(stream.frames, clip, source=stream.frame_source, fps=stream.fps)
+            spec: CameraSpec = CAMERA_SPECS[stream.stream_id]
+            layout: FrameSource = FrameSource(spec.frame_kind, width=stream.camera.intrinsics.width, height=stream.camera.intrinsics.height)
+            encode_frames_to_mp4(stream.frames, clip, source=layout, fps=spec.fps)
             clips.append(clip)
 
         clocks: list[Int64[ndarray, "n_samples"]] = [stream.times_ns for stream in streams.cameras if stream.times_ns.size]
@@ -1133,7 +1116,7 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
             for index, (stream, clip) in enumerate(zip(streams.cameras, clips, strict=True)):
                 rr.log(
                     schema.cam_path(RIG, index),
-                    rr.AnyValues(name=aria.STREAM_LABELS[stream.stream_id], kind=CAMERA_KINDS[stream.stream_id]),
+                    rr.AnyValues(name=aria.STREAM_LABELS[stream.stream_id], kind=CAMERA_SPECS[stream.stream_id].kind),
                     static=True,
                     recording=recording,
                 )
@@ -1245,7 +1228,8 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         }
         gt_index: list[rr.TimeColumn] = [rr.TimeColumn(schema.TIMELINE, duration=trajectory.times_ns.astype("timedelta64[ns]"))]
         with writing.atomic_recording(target, application_id="dataforge", recording_id=identity.recording_id) as recording:
-            rr.log("/", WORLD_UP_VIEW_COORDINATES[WORLD_UP], static=True, recording=recording)
+            # The right-handed axes WORLD_UP names; every LaMAria world is Z-up.
+            rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True, recording=recording)
             if trajectory.times_ns.size:
                 # from_parent stays unset: the stored value is world_T_rig, the
                 # child-to-parent step, which is what every child frustum rides.
@@ -1281,7 +1265,7 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
                     recording=recording,
                 )
             if points:
-                log_control_points(recording, points, labels_by_name=labels_by_name)
+                log_control_points(recording, points)
             if control_points is not None:
                 log_control_point_detections(recording, control_points.detections, labels_by_name=labels_by_name)
             recording.send_recording_name(identity.recording_id)
