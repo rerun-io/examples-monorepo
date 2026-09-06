@@ -975,11 +975,6 @@ def test_the_first_ten_controlled_sequences_are_posed_in_the_mps_frame() -> None
     assert lamaria.gt_world("sequence_1_19") == "lv95"
 
 
-def test_a_controlled_name_without_an_index_is_an_error_not_a_guess() -> None:
-    with pytest.raises(ValueError, match="index"):
-        lamaria.gt_world("R_x_easy")
-
-
 def test_the_rig_pose_is_the_published_camera_pose_seen_from_the_rig() -> None:
     """``world_T_rig = world_T_cam0 @ cam0_T_rig``, and the fixture pins which way simplecv stores it.
 

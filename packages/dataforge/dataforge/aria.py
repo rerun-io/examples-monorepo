@@ -113,25 +113,6 @@ def open_vrs(path: Path) -> data_provider.VrsDataProvider:
     return provider
 
 
-def device_calibration(provider: data_provider.VrsDataProvider) -> DeviceCalibration:
-    """The factory calibration of an open VRS.
-
-    Args:
-        provider: An open provider.
-
-    Returns:
-        The device calibration.
-
-    Raises:
-        ValueError: If the file carries none; every LaMAria sequence does, so
-            this means the recording is not what the caller thinks it is.
-    """
-    calibration: DeviceCalibration | None = provider.get_device_calibration()
-    if calibration is None:
-        raise ValueError("this VRS carries no device calibration")
-    return calibration
-
-
 def fisheye62_from_aria(calibration: CameraCalibration, *, rig_T_cam: Float64[ndarray, "4 4"], name: str) -> Fisheye62Parameters:
     """Convert one Aria FISHEYE624 camera into simplecv's Fisheye62 camera.
 
@@ -211,10 +192,12 @@ class AriaRig:
             The rig, with one entry per camera and IMU stream of a Gen1 Aria.
 
         Raises:
-            ValueError: The file carries no calibration for one of those streams,
-                which every LaMAria sequence does.
+            ValueError: The file carries no factory calibration, or none for one
+                of those streams; every LaMAria sequence carries all of them.
         """
-        calibration: DeviceCalibration = device_calibration(provider)
+        calibration: DeviceCalibration | None = provider.get_device_calibration()
+        if calibration is None:
+            raise ValueError("this VRS carries no device calibration")
         reference: ImuCalibration | None = calibration.get_imu_calib(STREAM_LABELS[IMU_RIGHT_STREAM_ID])
         if reference is None:
             raise ValueError(f"this VRS has no {STREAM_LABELS[IMU_RIGHT_STREAM_ID]} calibration, so it has no rig frame")
