@@ -1,20 +1,21 @@
-"""What the dataforge test modules share: the GPU-encoder gate, rrd read-back, synthetic frames, and a loopback archive.
+"""What the dataforge test modules share: the GPU-encoder gate, rrd read-back, synthetic frames, a loopback archive, and the published calibration reader.
 
-The read-back helpers go through the *public* reader (``RrdReader`` → ``ChunkStore``
-→ a datafusion view over one index), so a test asserts what a consumer sees rather
-than what the writer intended. The frame builders are shared because their only
-job is to make consecutive frames differ; the sizes stay with the modules, which
-each have their own reason for theirs. The loopback archive is here because two
-modules need the same server: ``test_transports.py`` fetches one file from it and
-``test_lamaria.py`` runs a whole ``download`` + ``convert`` against it, index
-pages included.
+Each piece is here because two or more modules need exactly it: the read-back
+helpers go through the *public* reader (``RrdReader`` → ``ChunkStore`` → a
+datafusion view over one index), so a test asserts what a consumer sees rather
+than what the writer intended; the frame builders only have to make consecutive
+frames differ, and the sizes stay with the modules, which each have their own
+reason for theirs; ``test_transports.py`` and ``test_lamaria.py`` fetch from the
+same loopback server; and three modules read the published LaMAria calibration.
 """
 
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import NamedTuple
@@ -24,8 +25,10 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import rerun as rr
-from jaxtyping import UInt8
+from jaxtyping import Float64, UInt8
 from numpy import ndarray
+from scipy.spatial.transform import Rotation
+from serde import field, from_dict, serde
 
 from dataforge import schema
 from dataforge.logging_toolkit import require_av1_nvenc, resolve_ffmpeg
@@ -93,12 +96,7 @@ def column_rows(store: rr.experimental.ChunkStore, column: str) -> pa.Table:
 
 
 class ServedRequest(NamedTuple):
-    """One request the loopback server answered.
-
-    A NamedTuple so a test module can annotate the log as
-    ``list[tuple[str, str, str | None]]``: pyrefly resolves imports from the
-    monorepo's source roots only, and ``tests/`` is not one of them.
-    """
+    """One request the loopback server answered."""
 
     method: str
     """``"HEAD"`` or ``"GET"``."""
@@ -196,11 +194,90 @@ def serve(
         thread.join(timeout=5.0)
 
 
+def read_back(rrd: Path) -> rr.experimental.ChunkStore:
+    """Load a saved rrd the way a consumer does: reader → store → queryable views.
+
+    The stream is materialized because ``from_chunks`` declares ``Sequence[Chunk]``;
+    these recordings are a few dozen rows, so the list costs nothing.
+    """
+    return rr.experimental.ChunkStore.from_chunks(list(rr.experimental.RrdReader(rrd).stream()))
+
+
 @pytest.fixture(scope="session")
 def serving():
-    """The ``serve`` context manager, as a fixture — a test module cannot import it.
-
-    pyrefly resolves imports from the monorepo's declared source roots only, and
-    ``tests/`` is not one, so ``from conftest import serve`` would not typecheck.
-    """
+    """``serve``, as a fixture: a server's lifetime belongs to pytest, not to an import."""
     return serve
+
+
+# ── the official aria_calibrations JSON ───────────────────────────────────
+#
+# Only the tests read this file: ``convert`` takes every calibration out of the
+# VRS device calibration, and the published JSON exists to cross-check that
+# chain (``test_aria_vrs``) and to give the synthetic fixtures real extrinsics
+# (``test_lamaria``). It therefore lives here rather than in the package.
+
+
+@serde
+@dataclass(frozen=True)
+class PublishedResolution:
+    """A published camera's image size."""
+
+    width: int
+    """Image width in pixels."""
+    height: int
+    """Image height in pixels."""
+
+
+@serde
+@dataclass(frozen=True)
+class PublishedTransform:
+    """A published rigid transform: a quaternion in x, y, z, w order and a translation."""
+
+    qvec: list[float]
+    """Rotation as ``[x, y, z, w]`` — pycolmap's order, which the official tooling reads it with."""
+    tvec: list[float]
+    """Translation in metres."""
+
+    def to_matrix(self) -> Float64[ndarray, "4 4"]:
+        """The same transform as a 4x4."""
+        matrix: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
+        matrix[:3, :3] = Rotation.from_quat(np.asarray(self.qvec, dtype=np.float64)).as_matrix()
+        matrix[:3, 3] = self.tvec
+        return matrix
+
+
+@serde
+@dataclass(frozen=True)
+class PublishedCamera:
+    """One ``cam0``/``cam1`` entry of an ``aria_calibrations/<split>/<seq>.json``.
+
+    This is the *published* calibration, kept only to cross-check the one read
+    out of the VRS: it covers the two SLAM cameras and no RGB, and its 16-float
+    ``params`` repeat the single Aria focal length as ``fx, fy``.
+    """
+
+    model: str
+    """Always ``RAD_TAN_THIN_PRISM_FISHEYE``, Aria's FISHEYE624 under COLMAP's name."""
+    resolution: PublishedResolution
+    """The camera's image size."""
+    params: list[float]
+    """``[fx, fy, cx, cy, k0..k5, p0, p1, s0..s3]`` — 16 floats."""
+    rig_T_cam: PublishedTransform = field(rename="T_b_s")
+    """Published as ``T_b_s``; the body frame is imu-right, so this *is* ``rig_T_cam``."""
+
+
+def read_calibration_json(path: Path) -> dict[str, PublishedCamera]:
+    """Read an ``aria_calibrations/<split>/<seq>.json`` file's camera entries.
+
+    The file's third entry, ``imu0``, is skipped: it is the body frame itself, so
+    its transform is the identity by definition, and the rest of it is noise
+    densities rather than a calibration.
+
+    Args:
+        path: The published calibration JSON.
+
+    Returns:
+        The camera entries, keyed by their published names (``cam0``, ``cam1``).
+    """
+    document: dict = json.loads(path.read_text())
+    return {name: from_dict(PublishedCamera, entry) for name, entry in document.items() if name.startswith("cam")}
