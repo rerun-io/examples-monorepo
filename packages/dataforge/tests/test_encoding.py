@@ -7,17 +7,13 @@ ffmpeg has no ``av1_nvenc``.
 
 from __future__ import annotations
 
-import os
 import time
 from collections.abc import Iterator
 from pathlib import Path
 
 import av
-import cv2
-import numpy as np
 import pytest
-from jaxtyping import UInt8
-from numpy import ndarray
+from conftest import gray_frame, png_frame
 
 from dataforge.logging_toolkit import (
     FrameSource,
@@ -35,43 +31,16 @@ HEIGHT: int = 193
 FPS: int = 24
 
 
-def gray_frame(index: int) -> UInt8[ndarray, "193 321"]:
-    """A horizontal gradient with a moving square, so no two frames are identical."""
-    frame: UInt8[ndarray, "193 321"] = np.tile(np.linspace(0, 255, WIDTH, dtype=np.uint8), (HEIGHT, 1))
-    left: int = (index * 4) % (WIDTH - 16)
-    frame[8:24, left : left + 16] = np.uint8(255 - (index * 5) % 256)
-    return frame
-
-
-def gray_frames() -> Iterator[UInt8[ndarray, "193 321"]]:
-    """The synthetic clip, frame by frame."""
-    for index in range(NUM_FRAMES):
-        yield gray_frame(index)
-
-
 def png_bytes() -> Iterator[bytes]:
-    """The same clip as encoded PNG bytes, the ``image2pipe`` input form."""
-    for frame in gray_frames():
-        success, buffer = cv2.imencode(".png", frame)
-        assert success
-        yield buffer.tobytes()
+    """The synthetic clip as encoded PNG bytes, the ``image2pipe`` input form."""
+    for index in range(NUM_FRAMES):
+        yield png_frame(index, width=WIDTH, height=HEIGHT)
 
 
 def raw_gray_bytes() -> Iterator[bytes]:
     """The same clip as raw ``gray8`` planes, the ``rawvideo`` input form."""
-    for frame in gray_frames():
-        yield frame.tobytes()
-
-
-@pytest.fixture(scope="module")
-def nvenc_ffmpeg() -> Path:
-    """The resolved ffmpeg, or a skip when this machine cannot encode AV1 on the GPU."""
-    ffmpeg: Path = resolve_ffmpeg()
-    try:
-        require_av1_nvenc(ffmpeg)
-    except RuntimeError as error:
-        pytest.skip(f"no av1_nvenc: {error}")
-    return ffmpeg
+    for index in range(NUM_FRAMES):
+        yield gray_frame(index, width=WIDTH, height=HEIGHT).tobytes()
 
 
 def video_stream_facts(path: Path) -> tuple[str, int, list[int]]:
@@ -247,4 +216,3 @@ def test_env_var_ffmpeg_is_used_when_no_binary_is_passed(tmp_path: Path, monkeyp
     monkeypatch.setenv("DATAFORGE_FFMPEG", str(nvenc_ffmpeg))
     output: Path = tmp_path / "env.mp4"
     assert encode_frames_to_mp4(png_bytes(), output, source=FrameSource("png"), fps=FPS) == NUM_FRAMES
-    assert os.environ["DATAFORGE_FFMPEG"] == str(nvenc_ffmpeg)

@@ -72,7 +72,7 @@ from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
 from dataforge import paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import ImuChannel, log_imu, log_rig_node, log_video_stream
+from dataforge.logging_toolkit import ImuChannel, log_imu, log_pose_track, log_rig_node, log_video_stream
 
 DATE_DIR_RE: re.Pattern[str] = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 """Capture-day directories under the subset; the loose ``manifest.json`` siblings do not match."""
@@ -638,7 +638,6 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
 
         with writing.atomic_recording(
             target,
-            application_id="dataforge",
             recording_id=identity.recording_id,
             default_blueprint=build_blueprint(plan.panes, ego_rig=plan.ego_rig),
         ) as recording:
@@ -751,9 +750,12 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         if not poses.times_ns.size:
             print(f"  warning: no head poses in {head_pose_path}; the quest rig stays unposed")
             return
-        rr.send_columns(
+        # The csv is read as float32 and Rerun's transform components are float32 too,
+        # so widening here for the shared writer is exact — the same bytes land.
+        log_pose_track(
+            recording,
             schema.rig_path(plan.quest_rig),
-            indexes=[rr.TimeColumn(schema.TIMELINE, duration=poses.times_ns.astype("timedelta64[ns]"))],
-            columns=rr.Transform3D.columns(translation=poses.translations_xyz, quaternion=poses.quaternions_xyzw),
-            recording=recording,
+            times_ns=poses.times_ns,
+            translations_xyz=poses.translations_xyz.astype(np.float64),
+            quaternions_xyzw=poses.quaternions_xyzw.astype(np.float64),
         )

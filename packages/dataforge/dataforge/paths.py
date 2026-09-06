@@ -21,6 +21,14 @@ BASE_LAYER: str = "base"
 GT_LAYER: str = "gt"
 """Ground-truth trajectory layer; sibling of base (same recording ids, own directory)."""
 
+LAYERS: tuple[str, ...] = (BASE_LAYER, GT_LAYER)
+"""Every layer dataforge writes, base first.
+
+The one list ``register`` and ``view`` walk, so a new derived layer is registered
+and opened everywhere by adding it here. Layers share a recording id, so a viewer
+handed several files of one sequence merges them onto the same entities.
+"""
+
 
 def output_root() -> Path:
     """Root of the converted rrd tree; override with ``DATAFORGE_OUTPUT_ROOT``."""

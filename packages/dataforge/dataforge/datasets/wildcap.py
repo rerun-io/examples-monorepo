@@ -234,7 +234,6 @@ class WildcapDataset(DataforgeDataset[WildcapConfig, Path]):
 
         with writing.atomic_recording(
             target,
-            application_id="dataforge",
             recording_id=identity.recording_id,
             default_blueprint=build_blueprint(
                 [video_path.stem for video_path in exo],

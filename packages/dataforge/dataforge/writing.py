@@ -21,6 +21,9 @@ import rerun.blueprint as rrb
 from dataforge import schema
 from dataforge.identity import SequenceIdentity
 
+APPLICATION_ID: str = "dataforge"
+"""Rerun application id of every recording this package writes; one package, one app."""
+
 
 def should_skip(target: Path, *, force: bool) -> bool:
     """Idempotency check: an existing target is done unless ``--force``."""
@@ -54,7 +57,7 @@ def atomic_write(target: Path) -> Iterator[Path]:
 def atomic_recording(
     target: Path,
     *,
-    application_id: str,
+    application_id: str = APPLICATION_ID,
     recording_id: str,
     default_blueprint: rrb.Blueprint | None = None,
 ) -> Iterator[rr.RecordingStream]:

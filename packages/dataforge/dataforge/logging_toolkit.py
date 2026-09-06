@@ -14,6 +14,7 @@ converter never materializes a decoded frame tree on disk.
 from __future__ import annotations
 
 import contextlib
+import functools
 import os
 import shutil
 import subprocess
@@ -29,6 +30,9 @@ import pyarrow as pa
 import rerun as rr
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
+from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
+from simplecv.rerun_log_utils import log_pinhole
+from simplecv.rig import SensorKind
 
 from dataforge import schema
 
@@ -93,11 +97,15 @@ def resolve_ffmpeg() -> Path:
     return Path(found)
 
 
+@functools.lru_cache
 def require_av1_nvenc(ffmpeg: Path) -> None:
     """Refuse an ffmpeg that cannot encode AV1 on the GPU, before any frame is read.
 
     Checked up front because the alternative failure is a software AV1 encode
-    that takes hours on a full sequence and looks like a hang.
+    that takes hours on a full sequence and looks like a hang. Cached per binary
+    path: a batch run asks once per camera and the answer cannot change under it.
+    Only the *pass* is cached — ``lru_cache`` stores no entry for a call that
+    raised, so a rejected binary is re-interrogated (and re-rejected) every time.
 
     Args:
         ffmpeg: Binary to interrogate with ``-encoders``.
@@ -107,10 +115,25 @@ def require_av1_nvenc(ffmpeg: Path) -> None:
     )
     if "av1_nvenc" in listed.stdout:
         return
-    raise RuntimeError(
-        f"{ffmpeg} lists no av1_nvenc encoder; point DATAFORGE_FFMPEG at an NVENC-capable ffmpeg "
-        "(for example ~/.pixi/bin/ffmpeg on the fleet)."
-    )
+    raise RuntimeError(f"{ffmpeg} lists no av1_nvenc encoder; point DATAFORGE_FFMPEG at an NVENC-capable ffmpeg")
+
+
+def time_column(times_ns: Int64[ndarray, "n_samples"]) -> rr.TimeColumn:
+    """The ``video_time`` index column for one stream's sample times.
+
+    ``view`` rather than ``astype``: ``timedelta64[ns]`` and ``int64`` share a
+    layout, so the column reinterprets the caller's array instead of copying a
+    1 kHz stream's worth of stamps. That only holds for ``int64``, hence the
+    dtype check — a float clock would be reinterpreted as nonsense nanoseconds.
+
+    Args:
+        times_ns: Sample times on the ``video_time`` clock, in nanoseconds.
+
+    Returns:
+        The index column every ``send_columns`` call in this package passes.
+    """
+    assert times_ns.dtype == np.int64, f"video_time is an int64 nanosecond clock, got {times_ns.dtype}"
+    return rr.TimeColumn(schema.TIMELINE, duration=times_ns.view("timedelta64[ns]"))
 
 
 def encode_frames_to_mp4(
@@ -327,8 +350,11 @@ def log_video_stream(
     if times_ns is not None and shift_ns != 0:
         raise ValueError("shift_ns and times_ns are mutually exclusive: a per-sample clock is not an offset from the file's own")
     sample_count: int = 0
-    consumed: int = 0
-    new_time_by_pts: dict[int, int] = {}
+    # Original PTS and replacement time of every sample chunk seen so far. The
+    # trailing keyframe chunk concatenates them once, rather than paying for a
+    # per-sample dict on a stream that can run to millions of frames.
+    seen_pts_ns: list[Int64[ndarray, "n_rows"]] = []
+    seen_times_ns: list[Int64[ndarray, "n_rows"]] = []
 
     def retimed(record_batch: pa.RecordBatch, index: int, values_ns: Int64[ndarray, "n_rows"]) -> list[rr.experimental.Chunk]:
         """Same batch, same row ids, new index values (still a ``duration("ns")``)."""
@@ -336,28 +362,41 @@ def log_video_stream(
         return rr.experimental.Chunk.from_record_batch(record_batch.set_column(index, record_batch.schema.field(index), column))  # invariant 3
 
     def tap(chunk: rr.experimental.Chunk) -> list[rr.experimental.Chunk]:
-        nonlocal sample_count, consumed
+        nonlocal sample_count
         if schema.TIMELINE not in chunk.timeline_names:
             return [chunk]  # invariant 1: the static codec chunk carries no index
         record_batch: pa.RecordBatch = chunk.to_record_batch()
         index: int = record_batch.schema.get_field_index(schema.TIMELINE)
-        original_ns: Int64[ndarray, "n_rows"] = np.asarray(record_batch.column(index).cast(pa.int64()))
         is_sample_chunk: bool = VIDEO_SAMPLE_COMPONENT in record_batch.schema.names  # invariant 5
         if is_sample_chunk:
             sample_count += record_batch.num_rows
         if times_ns is None:
-            return [chunk] if shift_ns == 0 else retimed(record_batch, index, original_ns + shift_ns)
+            # invariant 4: the file's own PTS are the clock, so a plain remux never
+            # reads the index out at all and a shift only adds a constant to it.
+            if shift_ns == 0:
+                return [chunk]
+            return retimed(record_batch, index, np.asarray(record_batch.column(index).cast(pa.int64())) + shift_ns)
+
+        original_ns: Int64[ndarray, "n_rows"] = np.asarray(record_batch.column(index).cast(pa.int64()))
         if is_sample_chunk:
-            if consumed + record_batch.num_rows > times_ns.size:
+            if sample_count > times_ns.size:
                 raise ValueError(f"{video_path.name} has more samples than the {times_ns.size} timestamps given")
-            replacement: Int64[ndarray, "n_rows"] = times_ns[consumed : consumed + record_batch.num_rows]
-            consumed += record_batch.num_rows
-            new_time_by_pts.update(zip(original_ns.tolist(), replacement.tolist(), strict=True))
+            replacement: Int64[ndarray, "n_rows"] = times_ns[sample_count - record_batch.num_rows : sample_count]
+            seen_pts_ns.append(original_ns)
+            seen_times_ns.append(replacement)
             return retimed(record_batch, index, replacement)
-        unseen: list[int] = [pts for pts in original_ns.tolist() if pts not in new_time_by_pts]
-        if unseen:
-            raise ValueError(f"{video_path.name}: keyframe PTS {unseen[:4]} precede their samples; the reader's chunk order changed")
-        return retimed(record_batch, index, np.array([new_time_by_pts[pts] for pts in original_ns.tolist()], dtype=np.int64))
+
+        # The trailing keyframe chunk. ``-bf 0`` forbids reordering, so the samples'
+        # PTS are one ascending array and a single searchsorted places every keyframe
+        # among them; comparing what it landed on is what catches a reader that
+        # started emitting the keyframes before their samples.
+        if not seen_pts_ns:
+            raise ValueError(f"{video_path.name}: a keyframe chunk arrived before any sample; the reader's chunk order changed")
+        sample_pts_ns: Int64[ndarray, "n_samples"] = np.concatenate(seen_pts_ns)
+        found: Int64[ndarray, "n_rows"] = np.searchsorted(sample_pts_ns, original_ns)
+        if int(found.max(initial=-1)) >= sample_pts_ns.size or not np.array_equal(sample_pts_ns[found], original_ns):
+            raise ValueError(f"{video_path.name}: keyframe PTS {original_ns[:4].tolist()} precede their samples; the reader's chunk order changed")
+        return retimed(record_batch, index, np.concatenate(seen_times_ns)[found])
 
     # A B-frame source (iPhone/insta360 HEVC) forces Mp4Reader into an FFmpeg
     # re-encode; everything else passes through untouched, and then these options
@@ -373,8 +412,8 @@ def log_video_stream(
         transcode=rr.experimental.Mp4TranscodeOptions(try_gpu=True, ffmpeg_override=ffmpeg_override),
     )
     recording.send_chunks(reader.stream().flat_map(tap))  # invariant 2
-    if times_ns is not None and consumed != times_ns.size:
-        raise ValueError(f"{video_path.name} holds {consumed} samples but {times_ns.size} timestamps were given")
+    if times_ns is not None and sample_count != times_ns.size:
+        raise ValueError(f"{video_path.name} holds {sample_count} samples but {times_ns.size} timestamps were given")
     return sample_count
 
 
@@ -386,6 +425,100 @@ class ImuChannel:
     """Sample times on the ``video_time`` clock, in nanoseconds."""
     values_xyz: Float64[ndarray, "n_samples 3"]
     """Scaled samples (rad/s for gyro, m/s^2 for accel)."""
+
+
+def _log_scalar_channel(recording: rr.RecordingStream, entity_path: str, channel: ImuChannel) -> None:
+    """Send one sensor channel's samples columnar on ``video_time``; an empty channel logs nothing."""
+    if channel.times_ns.size == 0:
+        return
+    rr.send_columns(
+        entity_path,
+        indexes=[time_column(channel.times_ns)],
+        columns=rr.Scalars.columns(scalars=channel.values_xyz),
+        recording=recording,
+    )
+
+
+def _log_sensor_node(recording: rr.RecordingStream, node: str, *, name: str, kind: SensorKind, **extra: object) -> None:
+    """Tag one non-camera peer sensor node with the static pair exoego:v2 §6 requires.
+
+    The identity ``rig_T_sensor`` is **not** optional: a reader that cannot place
+    a sensor's samples in the rig frame has to special-case the writer instead.
+    ``**extra`` carries a sensor's own optional keys (the magnetometer's ``unit``).
+    """
+    rr.log(node, IDENTITY_TRANSFORM, static=True, recording=recording)
+    rr.log(node, rr.AnyValues(drop_untyped_nones=True, name=name, kind=kind, **extra), static=True, recording=recording)
+
+
+def log_camera_node(
+    recording: rr.RecordingStream,
+    rig: int,
+    cam: int,
+    camera: PinholeParameters | Fisheye62Parameters,
+    *,
+    name: str,
+    kind: SensorKind,
+    image_plane_distance: float,
+    **extra: object,
+) -> None:
+    """Tag one ``/world/rig_NN/cam_MM`` node and log its calibration under it.
+
+    The node's metadata and its ``rig_T_cam`` + ``Pinhole`` belong together: a
+    camera whose calibration lands without its ``name``/``kind`` reads as an
+    unlabelled frustum, and one whose metadata lands without its calibration
+    cannot be projected at all.
+
+    Args:
+        recording: Destination recording stream.
+        rig: Rig index owning the camera.
+        cam: Camera index within the rig.
+        camera: The camera's simplecv parameters (intrinsics, distortion, ``rig_T_cam``).
+        name: Human stream label (``"cam0"``, ``"left-eye"``, …).
+        kind: Content hint; ``"grayscale"`` or ``"rgb"`` for a camera.
+        image_plane_distance: Frustum length in metres.
+        **extra: Optional per-camera keys (``camera_model``,
+            ``distortion_valid_radius``); a ``None`` value leaves its key off.
+    """
+    # drop_untyped_nones is AnyValues' default, but it is stated because callers
+    # rely on it: a kb4 camera passes rpmax=None to mean "this model has no such
+    # radius", and the key must be absent rather than logged as an untyped null.
+    rr.log(schema.cam_path(rig, cam), rr.AnyValues(drop_untyped_nones=True, name=name, kind=kind, **extra), static=True, recording=recording)
+    log_pinhole(
+        camera,
+        cam_log_path=Path(schema.cam_path(rig, cam)),
+        image_plane_distance=image_plane_distance,
+        static=True,
+        recording=recording,
+    )
+
+
+def log_pose_track(
+    recording: rr.RecordingStream,
+    entity_path: str,
+    *,
+    times_ns: Int64[ndarray, "n_poses"],
+    translations_xyz: Float64[ndarray, "n_poses 3"],
+    quaternions_xyzw: Float64[ndarray, "n_poses 4"],
+) -> None:
+    """Send a temporal pose track columnar: one ``Transform3D`` per sample on ``video_time``.
+
+    The rig node's ``world_T_rig``, and every other track that animates an
+    entity, go through here so the quaternion layout stays one decision: Rerun
+    wants the scalar **last**, whatever order the source file wrote.
+
+    Args:
+        recording: Destination recording stream.
+        entity_path: Entity to animate, usually ``schema.rig_path(rig)``.
+        times_ns: Pose times on the ``video_time`` clock, in nanoseconds.
+        translations_xyz: Positions in metres.
+        quaternions_xyzw: Orientations, scalar last.
+    """
+    rr.send_columns(
+        entity_path,
+        indexes=[time_column(times_ns)],
+        columns=rr.Transform3D.columns(translation=translations_xyz, quaternion=quaternions_xyzw),
+        recording=recording,
+    )
 
 
 def log_imu(recording: rr.RecordingStream, rig: int, imu: int, *, gyro: ImuChannel, accel: ImuChannel, name: str) -> None:
@@ -403,17 +536,9 @@ def log_imu(recording: rr.RecordingStream, rig: int, imu: int, *, gyro: ImuChann
         accel: Linear-acceleration samples in m/s^2; an empty channel is skipped.
         name: Human label for the device (e.g. ``"dev0"``, ``"oak-imu"``).
     """
-    for channel, entity_path in ((gyro, schema.gyro_path(rig, imu)), (accel, schema.accel_path(rig, imu))):
-        if channel.times_ns.size == 0:
-            continue
-        rr.send_columns(
-            entity_path,
-            indexes=[rr.TimeColumn(schema.TIMELINE, duration=channel.times_ns.astype("timedelta64[ns]"))],
-            columns=rr.Scalars.columns(scalars=channel.values_xyz),
-            recording=recording,
-        )
-    rr.log(schema.imu_path(rig, imu), IDENTITY_TRANSFORM, static=True, recording=recording)
-    rr.log(schema.imu_path(rig, imu), rr.AnyValues(name=name, kind="imu"), static=True, recording=recording)
+    _log_scalar_channel(recording, schema.gyro_path(rig, imu), gyro)
+    _log_scalar_channel(recording, schema.accel_path(rig, imu), accel)
+    _log_sensor_node(recording, schema.imu_path(rig, imu), name=name, kind="imu")
 
 
 HEADING_COLOR: tuple[int, int, int] = (255, 128, 0)
@@ -454,14 +579,8 @@ def log_magnetometer(
             ``None`` leaves the key off rather than guessing.
         heading_length_m: Length of the heading arrows, in metres.
     """
-    node: str = schema.mag_path(rig, mag)
+    _log_scalar_channel(recording, schema.field_path(rig, mag), field)
     if field.times_ns.size:
-        rr.send_columns(
-            schema.field_path(rig, mag),
-            indexes=[rr.TimeColumn(schema.TIMELINE, duration=field.times_ns.astype("timedelta64[ns]"))],
-            columns=rr.Scalars.columns(scalars=field.values_xyz),
-            recording=recording,
-        )
         norms: Float64[ndarray, "n_samples"] = np.linalg.norm(field.values_xyz, axis=1)
         measured: Bool[ndarray, "n_samples"] = norms > 0.0
         if measured.any():
@@ -469,9 +588,8 @@ def log_magnetometer(
             rr.log(schema.heading_path(rig, mag), rr.Arrows3D.from_fields(colors=HEADING_COLOR), static=True, recording=recording)
             rr.send_columns(
                 schema.heading_path(rig, mag),
-                indexes=[rr.TimeColumn(schema.TIMELINE, duration=field.times_ns[measured].astype("timedelta64[ns]"))],
+                indexes=[time_column(field.times_ns[measured])],
                 columns=rr.Arrows3D.columns(vectors=headings),
                 recording=recording,
             )
-    rr.log(node, IDENTITY_TRANSFORM, static=True, recording=recording)
-    rr.log(node, rr.AnyValues(name=name, kind="mag", unit=unit), static=True, recording=recording)
+    _log_sensor_node(recording, schema.mag_path(rig, mag), name=name, kind="mag", unit=unit)

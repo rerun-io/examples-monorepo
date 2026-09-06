@@ -60,12 +60,11 @@ from simplecv.data.ego.robocap_ego import (
     _kalibr_cam_to_fisheye62,
     _load_kalibr_camchain_imucam,
 )
-from simplecv.rerun_log_utils import log_pinhole
 
 from dataforge import paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import ImuChannel, log_imu, log_rig_node, log_video_stream
+from dataforge.logging_toolkit import ImuChannel, log_camera_node, log_imu, log_rig_node, log_video_stream
 
 GYRO_SCALE: float = 0.000266316
 """Raw gyro LSB → rad/s; measured in the basalt fork (``dataset_io_robocap.cpp``)."""
@@ -444,7 +443,6 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
 
         with writing.atomic_recording(
             target,
-            application_id="dataforge",
             recording_id=identity.recording_id,
             default_blueprint=build_blueprint(list(CAMERA_DISPLAY_ORDER)),
         ) as recording:
@@ -456,18 +454,14 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
             frames_per_camera: dict[str, int] = dict.fromkeys(camera_names, 0)
             for cam_name in camera_names:
                 index: int = CAMERA_DISPLAY_ORDER.index(cam_name)
-                rr.log(
-                    schema.cam_path(RIG, index),
-                    rr.AnyValues(name=cam_name, kind="grayscale"),
-                    static=True,
-                    recording=recording,
-                )
-                log_pinhole(
+                log_camera_node(
+                    recording,
+                    RIG,
+                    index,
                     cameras[cam_name],
-                    cam_log_path=Path(schema.cam_path(RIG, index)),
+                    name=cam_name,
+                    kind="grayscale",
                     image_plane_distance=IMAGE_PLANE_DISTANCE,
-                    static=True,
-                    recording=recording,
                 )
                 for segment in source.segments:
                     if cam_name not in segment_epochs[segment]:

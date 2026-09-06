@@ -86,7 +86,6 @@ from simplecv.camera_parameters import (
     KannalaBrandtDistortion,
     PinholeParameters,
 )
-from simplecv.rerun_log_utils import log_pinhole
 
 from dataforge import paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
@@ -95,12 +94,15 @@ from dataforge.logging_toolkit import (
     FrameSource,
     ImuChannel,
     encode_frames_to_mp4,
+    log_camera_node,
     log_imu,
     log_magnetometer,
+    log_pose_track,
     log_rig_node,
     log_video_stream,
     require_av1_nvenc,
     resolve_ffmpeg,
+    time_column,
 )
 
 REPO_ID: str = "collabora/monado-slam-datasets"
@@ -964,7 +966,7 @@ def build_blueprint(num_cameras: int, *, has_magnetometer: bool, follow: FollowF
                         line_grid=True,
                         # The overview shows the whole gt path; its cursor trail stays hidden.
                         # Overrides on entities a base-only recording lacks are simply inert.
-                        overrides={schema.trail_path("gt"): rrb.EntityBehavior(visible=False)},
+                        overrides={schema.trail_path(schema.GT_RUN_SOURCE): rrb.EntityBehavior(visible=False)},
                     ),
                     # Follow-cam (rerun-io/eye_control_example pattern): the view's origin
                     # IS the rig frame, so a fixed first-person eye in that frame rides the
@@ -975,8 +977,8 @@ def build_blueprint(num_cameras: int, *, has_magnetometer: bool, follow: FollowF
                         contents="/**",
                         line_grid=True,
                         overrides={
-                            schema.trajectory_path("gt"): rrb.EntityBehavior(visible=False),
-                            schema.trail_path("gt"): rrb.VisibleTimeRanges(
+                            schema.trajectory_path(schema.GT_RUN_SOURCE): rrb.EntityBehavior(visible=False),
+                            schema.trail_path(schema.GT_RUN_SOURCE): rrb.VisibleTimeRanges(
                                 rrb.VisibleTimeRange(
                                     schema.TIMELINE,
                                     start=rrb.TimeRangeBoundary.cursor_relative(seconds=-10.0),
@@ -1014,7 +1016,7 @@ def build_table_blueprint(num_cameras: int, *, follow: FollowFrame) -> rrb.Bluep
             rrb.Spatial3DView(
                 name="Follow",
                 origin=schema.rig_path(RIG),
-                contents=["/**", *video_exclusions, f"- {schema.trail_path('gt')}/**"],
+                contents=["/**", *video_exclusions, f"- {schema.trail_path(schema.GT_RUN_SOURCE)}/**"],
                 line_grid=True,
                 eye_controls=follow_eye_controls(follow),
             ),
@@ -1282,7 +1284,6 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
 
         with writing.atomic_recording(
             target,
-            application_id="dataforge",
             recording_id=identity.recording_id,
             default_blueprint=build_blueprint(
                 self.device.num_cameras, has_magnetometer=self.device.has_magnetometer, follow=self.device.follow
@@ -1296,23 +1297,16 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
                 # distortion component. ``rpmax`` is radtan8's own key, so it is already
                 # None on a kb4 camera and AnyValues leaves the key off entirely.
                 basalt_camera: BasaltCamera = calibration.value0.intrinsics[index]
-                rr.log(
-                    schema.cam_path(RIG, index),
-                    rr.AnyValues(
-                        name=f"cam{index}",
-                        kind="grayscale",
-                        camera_model=basalt_camera.camera_type,
-                        distortion_valid_radius=basalt_camera.intrinsics.rpmax,
-                    ),
-                    static=True,
-                    recording=recording,
-                )
-                log_pinhole(
+                log_camera_node(
+                    recording,
+                    RIG,
+                    index,
                     camera,
-                    cam_log_path=Path(schema.cam_path(RIG, index)),
+                    name=f"cam{index}",
+                    kind="grayscale",
                     image_plane_distance=IMAGE_PLANE_DISTANCE,
-                    static=True,
-                    recording=recording,
+                    camera_model=basalt_camera.camera_type,
+                    distortion_valid_radius=basalt_camera.intrinsics.rpmax,
                 )
                 log_video_stream(recording, clip, schema.video_path(RIG, index), times_ns=times_ns - start_time_ns)
             log_imu(
@@ -1353,38 +1347,38 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
             )
 
         gt_times_ns: Int64[ndarray, "n_poses"] = gt.times_ns - start_time_ns
-        gt_index: list[rr.TimeColumn] = [rr.TimeColumn(schema.TIMELINE, duration=gt_times_ns.astype("timedelta64[ns]"))]
-        with writing.atomic_recording(gt_target, application_id="dataforge", recording_id=identity.recording_id) as recording:
+        with writing.atomic_recording(gt_target, recording_id=identity.recording_id) as recording:
             # The gt layer establishes a world frame at all, so it — not the base
             # layer — owns the root ViewCoordinates. The axis is the device's
             # declared one, not this sequence's measurement: every rrd of a device
             # must agree, and a disagreement is the warning above, not a silent
             # per-sequence reorientation.
             rr.log("/", WORLD_UP_VIEW_COORDINATES[self.device.world_up], static=True, recording=recording)
-            rr.send_columns(
+            log_pose_track(
+                recording,
                 schema.rig_path(RIG),
-                indexes=gt_index,
-                columns=rr.Transform3D.columns(translation=gt.translations_xyz, quaternion=gt.quaternions_xyzw),
-                recording=recording,
+                times_ns=gt_times_ns,
+                translations_xyz=gt.translations_xyz,
+                quaternions_xyzw=gt.quaternions_xyzw,
             )
             # Two views of one trajectory: the static strip is the whole path for the
             # overview, and the per-pose points are what the blueprint's cursor-relative
             # time range turns into a recent-motion trail in the follow view.
             rr.log(
-                schema.trajectory_path("gt"),
+                schema.trajectory_path(schema.GT_RUN_SOURCE),
                 rr.LineStrips3D([gt.translations_xyz], colors=GT_TRAJECTORY_COLOR, radii=GT_TRAJECTORY_RADIUS_M),
                 static=True,
                 recording=recording,
             )
             rr.log(
-                schema.trail_path("gt"),
+                schema.trail_path(schema.GT_RUN_SOURCE),
                 rr.Points3D.from_fields(colors=GT_TRAIL_COLOR, radii=GT_TRAIL_RADIUS_M),
                 static=True,
                 recording=recording,
             )
             rr.send_columns(
-                schema.trail_path("gt"),
-                indexes=gt_index,
+                schema.trail_path(schema.GT_RUN_SOURCE),
+                indexes=[time_column(gt_times_ns)],
                 columns=rr.Points3D.columns(positions=gt.translations_xyz),
                 recording=recording,
             )

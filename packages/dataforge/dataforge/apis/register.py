@@ -35,7 +35,7 @@ def main(config: Config) -> None:
     name: str = dataset_config.name
     output_root: Path = paths.output_root()
     paths_by_layer: dict[str, list[Path]] = {
-        layer: sorted((output_root / layer).glob(f"{name}__*.rrd")) for layer in (paths.BASE_LAYER, paths.GT_LAYER)
+        layer: sorted((output_root / layer).glob(f"{name}__*.rrd")) for layer in paths.LAYERS
     }
     if not paths_by_layer[paths.BASE_LAYER]:
         raise FileNotFoundError(f"no {paths.BASE_LAYER}-layer rrds for {name} under {output_root / paths.BASE_LAYER}")

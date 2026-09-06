@@ -1,4 +1,4 @@
-"""The shared writers: video remux timing, and the magnetometer node.
+"""The shared writers: the time column, video remux timing, and the magnetometer node.
 
 Every assertion reads the written rrd back through the public reader
 (``RrdReader`` → ``ChunkStore`` → a datafusion view over one index), so these
@@ -10,12 +10,13 @@ from __future__ import annotations
 from collections.abc import Iterator
 from pathlib import Path
 
-import cv2
 import numpy as np
 import pyarrow as pa
 import pytest
 import rerun as rr
-from jaxtyping import Float64, Int64, UInt8
+from beartype.roar import BeartypeException
+from conftest import column_rows, png_frame, read_back
+from jaxtyping import Float64, Int64
 from numpy import ndarray
 
 from dataforge import schema
@@ -25,8 +26,7 @@ from dataforge.logging_toolkit import (
     encode_frames_to_mp4,
     log_magnetometer,
     log_video_stream,
-    require_av1_nvenc,
-    resolve_ffmpeg,
+    time_column,
 )
 
 NUM_FRAMES: int = 24
@@ -39,34 +39,15 @@ ENTITY: str = "/world/rig_00/cam_00/pinhole/video"
 def png_bytes() -> Iterator[bytes]:
     """A short synthetic clip as PNG bytes; every frame differs."""
     for index in range(NUM_FRAMES):
-        frame: UInt8[ndarray, "193 321"] = np.tile(np.linspace(0, 255, WIDTH, dtype=np.uint8), (HEIGHT, 1))
-        left: int = (index * 4) % (WIDTH - 16)
-        frame[8:24, left : left + 16] = np.uint8(255 - (index * 7) % 256)
-        success, buffer = cv2.imencode(".png", frame)
-        assert success
-        yield buffer.tobytes()
+        yield png_frame(index, width=WIDTH, height=HEIGHT)
 
 
 @pytest.fixture(scope="module")
-def clip(tmp_path_factory) -> Path:
+def clip(tmp_path_factory, nvenc_ffmpeg: Path) -> Path:
     """One AV1 mp4 of ``NUM_FRAMES`` samples; skipped when the GPU encoder is absent."""
-    ffmpeg: Path = resolve_ffmpeg()
-    try:
-        require_av1_nvenc(ffmpeg)
-    except RuntimeError as error:
-        pytest.skip(f"no av1_nvenc: {error}")
     output: Path = tmp_path_factory.mktemp("clip") / "clip.mp4"
-    encode_frames_to_mp4(png_bytes(), output, source=FrameSource("png"), fps=FPS, gop=10, ffmpeg=ffmpeg)
+    encode_frames_to_mp4(png_bytes(), output, source=FrameSource("png"), fps=FPS, gop=10, ffmpeg=nvenc_ffmpeg)
     return output
-
-
-def read_back(rrd: Path) -> rr.experimental.ChunkStore:
-    """Load a saved rrd the way a consumer does: reader → store → queryable views.
-
-    The stream is materialized because ``from_chunks`` declares ``Sequence[Chunk]``;
-    these recordings are a few dozen rows, so the list costs nothing.
-    """
-    return rr.experimental.ChunkStore.from_chunks(list(rr.experimental.RrdReader(rrd).stream()))
 
 
 def index_column(rrd: Path, index: str = schema.TIMELINE) -> Int64[ndarray, "n_rows"]:
@@ -79,6 +60,25 @@ def irregular_times_ns(count: int) -> Int64[ndarray, "n_samples"]:
     """Ascending 33 ms steps with per-sample jitter — a real device's capture clock."""
     jitter: Int64[ndarray, "n_samples"] = (np.arange(count, dtype=np.int64) * 7919 % 900_000) - 450_000
     return 1_700_000_000_000_000_000 + np.arange(count, dtype=np.int64) * 33_000_000 + jitter
+
+
+# ── time_column ───────────────────────────────────────────────────────────
+
+
+def test_the_time_column_view_carries_the_same_values_as_a_cast() -> None:
+    """``view`` skips the copy ``astype`` makes; the column a consumer reads is unchanged."""
+    times_ns: Int64[ndarray, "n_samples"] = irregular_times_ns(NUM_FRAMES)
+
+    viewed: rr.TimeColumn = time_column(times_ns)
+    cast: rr.TimeColumn = rr.TimeColumn(schema.TIMELINE, duration=times_ns.astype("timedelta64[ns]"))
+
+    assert viewed.as_arrow_array() == cast.as_arrow_array()
+
+
+def test_a_clock_that_is_not_int64_is_refused() -> None:
+    """A float clock reinterpreted as nanoseconds would be silent nonsense."""
+    with pytest.raises((AssertionError, BeartypeException)):
+        time_column(irregular_times_ns(NUM_FRAMES).astype(np.float64))
 
 
 # ── log_video_stream retiming ─────────────────────────────────────────────
@@ -158,12 +158,6 @@ def synthetic_field(count: int) -> ImuChannel:
     return ImuChannel(times_ns=times_ns, values_xyz=values_xyz)
 
 
-def entity_rows(rrd: Path, entity_path: str, component: str) -> pa.Table:
-    """Rows of one component column, index-sorted, from a saved rrd."""
-    table: pa.Table = read_back(rrd).reader(index=schema.TIMELINE).to_arrow_table().sort_by(schema.TIMELINE)
-    return table.select([schema.TIMELINE, f"{entity_path}:{component}"]).drop_null()
-
-
 def test_magnetometer_logs_field_and_heading(tmp_path: Path) -> None:
     field: ImuChannel = synthetic_field(50)
     target: Path = tmp_path / "mag.rrd"
@@ -171,11 +165,11 @@ def test_magnetometer_logs_field_and_heading(tmp_path: Path) -> None:
         recording.save(target)
         log_magnetometer(recording, RIG, MAG, field=field, name="reverb-g2", unit="mG", heading_length_m=HEADING_LENGTH_M)
 
-    scalars: pa.Table = entity_rows(target, schema.field_path(RIG, MAG), "Scalars:scalars")
+    scalars: pa.Table = column_rows(read_back(target), f"{schema.field_path(RIG, MAG)}:Scalars:scalars")
     assert scalars.num_rows == field.times_ns.size
     assert np.array_equal(scalars.column(schema.TIMELINE).combine_chunks().cast(pa.int64()).to_numpy(), field.times_ns)
 
-    arrows: pa.Table = entity_rows(target, schema.heading_path(RIG, MAG), "Arrows3D:vectors")
+    arrows: pa.Table = column_rows(read_back(target), f"{schema.heading_path(RIG, MAG)}:Arrows3D:vectors")
     # The zero-field sample has no direction, so it is not given an arrow.
     assert arrows.num_rows == field.times_ns.size - 1
     vectors: Float64[ndarray, "n_arrows 3"] = np.asarray(
