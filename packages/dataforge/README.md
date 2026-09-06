@@ -19,7 +19,8 @@ tmux new -d -s dataforge-catalog 'pixi run -e dataforge --frozen dataforge-serve
 # 2. Fetch the raw corpus, or verify a local one (--root <dir> if it is not at the default)
 pixi run -e dataforge --frozen dataforge-download <dataset>
 
-# 3. One base-layer rrd per sequence; existing rrds are skipped
+# 3. One rrd per sequence per layer; existing rrds are skipped
+#    --sequence belongs to the verb, so it goes BEFORE the dataset subcommand
 pixi run -e dataforge --frozen dataforge-convert <dataset>               # --sequence <key> | --force
 
 # 4. Register the rrds and the dataset's two blueprints
@@ -31,7 +32,13 @@ pixi run -e dataforge --frozen dataforge-view <dataset> --rr-config.headless   #
 
 Open the catalog with `rerun rerun+http://127.0.0.1:51235`, or a web viewer
 with `?url=rerun+http://<host>:51235`. Reload the viewer after re-registering;
-it caches catalog entries.
+it caches catalog entries. The `register` and `view` tasks set
+`RERUN_INSECURE_SKIP_HOST_CHECK=1`, as every catalog task in this workspace
+does: the local catalog and the rrds it is handed are served over plain
+`rerun+http` on the loopback or the tailnet, with no certificate to check.
+
+`view` opens **every** layer of the chosen recording — `base/` and, when msd has
+written one, `gt/`. They share a recording id, so the viewer merges them.
 
 ### Your own footage (wildcap)
 
@@ -59,7 +66,17 @@ That registers dataset `wildcap-<corpus>`. `.mov` is skipped with a warning
 sensor logs — about 350 GB in total. dataforge never keeps that: `download`
 fetches only the device calibration and prints the plan, and `convert` fetches
 **one** sequence, streams its PNGs straight into the AV1 encoder, writes the
-rrd, and deletes the archive again.
+rrds, and deletes the archive again.
+
+One sequence is **two** rrds under one recording id, so the catalog stacks them
+as layers of one segment: `base/` holds the video, the IMU and the
+magnetometer, and `gt/` holds the ground truth — the temporal `world_T_rig` on
+the rig node at the archive's full ~1 kHz rate, the whole path as a static
+`LineStrips3D` at `/world/runs/gt/trajectory`, a per-pose `Points3D` at
+`/world/runs/gt/trail` that the default blueprint shows through a −10 s
+cursor-relative window, and the root `ViewCoordinates`. Both layers come out of
+one archive fetch, so `convert` skips a sequence only when both exist and
+rebuilds both when either is missing.
 
 One headset is one catalog dataset, because a catalog dataset holds one default
 blueprint and the three headsets have different camera counts:
@@ -70,10 +87,14 @@ blueprint and the three headsets have different camera counts:
 | `g2` | `msd-g2` | 4 × 640×480 @ ~30 fps, `pinhole-radtan8` | yes |
 | `odyssey` | `msd-odyssey` | 2 × 640×480, `pinhole-radtan8` | yes |
 
+Every device keeps upstream's default calibration — `kb4` on the Index, the
+`pinhole-radtan8` rational model on the G2 and Odyssey+ — so each camera node
+states its `camera_model`, and a radtan8 camera also carries that model's
+validity radius as `distortion_valid_radius`.
+
 ```bash
 export DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/msd-rrd     # rrds go to the NAS
 pixi run -e dataforge --frozen dataforge-download msd --device index
-# --sequence belongs to the verb, so it goes before the dataset subcommand
 pixi run -e dataforge --frozen dataforge-convert --sequence MIO09_short_1_updown msd --device index
 pixi run -e dataforge --frozen dataforge-convert msd --device index   # every sequence, one at a time
 pixi run -e dataforge --frozen dataforge-register msd --device index
@@ -81,11 +102,15 @@ pixi run -e dataforge --frozen dataforge-register msd --device index
 
 `--root` is scratch, not storage: point it at local NVMe (it defaults to
 `packages/dataforge/data/raw/msd`). `--raw-budget-gb` (default 50) caps what
-that directory may hold, so a batch run that fails halfway cannot fill the
-disk; a sequence whose archives alone exceed the cap — the Index and G2 long
-sessions, at 66 and 55 GB — warns and is converted anyway, and leftovers that
-would breach it are a hard error naming the files to delete. `--keep-raw` keeps
-the archive and the encoded mp4s for debugging.
+that directory may hold — this sequence's archives **plus** everything already
+in it, minus HuggingFace's own `.cache/` bookkeeping — so a batch run that fails
+halfway cannot fill the disk. Two things ride on top of the cap and are not
+counted: one camera's extracted PNGs (split archives only) and the temp mp4s,
+both of which live in `work/` for the length of one sequence. A sequence whose
+archives alone exceed the cap — the Index and G2 long sessions, at 66 and 55 GB
+— warns and is converted anyway, but leftovers that breach the cap on their own
+are still a hard error naming the files to delete. `--keep-raw` keeps the
+archive and the encoded mp4s for debugging.
 
 Three sequences ship as Info-ZIP multi-volume sets (`.z01 … .zip`) — the
 `*_long_session` archives of all three headsets — which Python's `zipfile`
@@ -93,10 +118,36 @@ cannot read; those go through the `7zz` CLI (the conda-forge `7zip` package),
 one camera directory extracted at a time.
 
 `video_time` is the device clock minus `t0`, and `t0` is the earliest sample of
-**any** stream including `gt` — the ground-truth layer is a sibling rrd and both
-must share the origin. Camera extrinsics come from the device's basalt
-`calibration.json`, whose `T_imu_cam` is the camera pose in the IMU frame; the
-rig frame *is* that frame, so the rig node states `reference = "imu_00"`.
+**any** stream including `gt` — the two layers must share the origin, and the gt
+file is usually the earliest stream. Camera extrinsics come from the device's
+basalt `calibration.json`, whose `T_imu_cam` is the camera pose in the IMU
+frame; the rig frame *is* that frame, so the rig node states
+`reference = "imu_00"`.
+
+MSD documents no world axes: the Index's ground truth comes from SteamVR
+Lighthouse and the G2's and Odyssey+'s from an undocumented MoCap rig. The up
+axis is therefore **measured** — `measured_world_up` rotates the first two
+seconds of accelerometer samples into the world with the ground truth's own
+orientation and averages, since an accelerometer at rest reads +g pointing up —
+and then fixed per device in `MSD_DEVICES`, so every rrd of a device carries the
+same root `ViewCoordinates`. Every convert re-measures its own sequence, records
+the result in the gt properties (`measured_up`, `measured_up_fraction`), and
+warns when it disagrees with the declared axis instead of reorienting one rrd on
+its own. All three headsets measure **+y** on their `*09_short_1_updown`
+sequence — 0.96, 0.98 and 0.93 of |g| for the Index, G2 and Odyssey+ — so all
+three state `RIGHT_HAND_Y_UP` (`RUB`) at the root. A `gt` row whose quaternion is
+not unit-norm is a tracking dropout: its
+rotation becomes identity so the chain keeps working for later frames, and the
+count lands in the properties as `num_sanitized`.
+
+The Follow view's eye is derived rather than hand-placed: `follow_frame` reads
+the front camera pair out of the same `calibration.json` — their mean optical
+axis is the headset's forward, and their stereo baseline crossed with it is the
+wearer's up — and each device's answer is fixed in `MSD_DEVICES` as its `follow`
+frame, so the chase camera sits behind and above every headset with a level
+horizon. Up comes from the baseline and not from image-up because the G2 mounts
+all four of its cameras rolled a quarter turn. Every convert re-derives the frame
+and warns past 5°, as it does for the world up axis.
 
 ### Environment variables
 
@@ -116,9 +167,12 @@ sequence key, the Rerun recording id, and the rrd filename), `paths.py` (the
 layer-major output tree: `base/` and its sibling `gt/`), `schema.py` (the
 `exoego:v2` entity paths and the single `video_time` timeline, as code),
 `writing.py` (atomic publication and the capture/convert recording properties),
-`logging_toolkit.py` (the shared rig-node, video-stream, IMU, and magnetometer
-writers, plus the AV1 encoder), and `transports.py` (`local_verify` and
-`hf_fetch`).
+`logging_toolkit.py` (the shared rig-node, video-stream, camera, IMU,
+magnetometer and pose-track writers, plus the AV1 encoder), `blueprints.py` (the
+single-rig viewer layout robocap and msd both build from), `archives.py` (reading
+members out of a plain zip or an Info-ZIP volume set), `basalt.py` (basalt's
+`calibration.json`: camera models, extrinsics, and the follow frame), and
+`transports.py` (`local_verify` and `hf_fetch`).
 
 Two of those carry their weight for datasets that do not ship video.
 `encode_frames_to_mp4` pipes PNG or raw frames straight into ffmpeg's stdin, so
@@ -134,7 +188,7 @@ is a nominal-rate fiction for such a file.
 | `robocap` | one `(device, session)`; file-roll segments merge at convert | 6 fisheye video streams, the dev0 IMU, the cap mesh |
 | `selfcap` | one cut episode | 4 phone exo rigs + the OAK ego rig + the Quest (9 cameras), the OAK IMU, the Quest head-pose track |
 | `wildcap` | one capture directory | the videos only: no `Pinhole`, no `ViewCoordinates`, no transforms — calibration, sync and localization are later layers |
-| `msd` | one Monado SLAM sequence, fetched on demand | 2 or 4 grayscale video streams (AV1-encoded from the archive's PNGs), the IMU, and on the G2/Odyssey+ the magnetometer |
+| `msd` | one Monado SLAM sequence, fetched on demand | **two** rrds: `base` with 2 or 4 grayscale video streams (AV1-encoded from the archive's PNGs), the IMU and on the G2/Odyssey+ the magnetometer; `gt` with the ~1 kHz `world_T_rig`, its path and trail, and the root `ViewCoordinates` |
 
 A config's `command` is its CLI subcommand; its `name` is the catalog dataset
 and the prefix of every recording id. They are equal for robocap and selfcap;
@@ -144,7 +198,8 @@ wildcap derives `wildcap-<corpus>` and msd derives `msd-<device>`.
 `convert` writes `<DATAFORGE_OUTPUT_ROOT>/base/<recording_id>.rrd` through a
 temp file that atomically replaces the target, so "exists = done" and a re-run
 never truncates a file the catalog server holds open. Derived layers (slam,
-pose, labels) stack onto the same entities as sibling layers. `register` walks
+pose, labels) stack onto the same entities as sibling layers; msd already writes
+one, its `gt/` rrd, in the same convert. `register` walks
 every layer directory it knows — `base`, which is required, then `gt` — and
 registers each under its own layer name, so a corpus with no ground-truth pass
 registers exactly as before.

@@ -1081,7 +1081,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/mkl-2026.1.0-hecca717_244.conda
       - conda: https://prefix.dev/conda-forge/linux-64/mpc-1.4.0-he0a73b1_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/mpfr-4.2.2-he0a73b1_0.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/mpg123-1.33.7-h8142553_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/mpg123-1.33.7-h877a99e_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/ncurses-6.6-hdb14827_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/numpy-2.5.2-py312h33ff503_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/ocl-icd-2.3.4-hb03c661_1.conda
@@ -1514,7 +1514,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-aarch64/markupsafe-3.0.3-py312hd077ced_1.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/mpc-1.4.0-he6dc3fb_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/mpfr-4.2.2-h3faef18_0.conda
-      - conda: https://prefix.dev/conda-forge/linux-aarch64/mpg123-1.33.7-h2b27223_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-aarch64/mpg123-1.33.7-h922aec4_1.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/ncurses-6.6-h2b6f883_1.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/numpy-2.5.2-py312hce9e0af_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/onednn-3.12-omp_h605b386_0.conda
@@ -1960,7 +1960,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/mkl-2026.1.0-hecca717_244.conda
       - conda: https://prefix.dev/conda-forge/linux-64/mpc-1.4.0-he0a73b1_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/mpfr-4.2.2-he0a73b1_0.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/mpg123-1.33.7-h8142553_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/mpg123-1.33.7-h877a99e_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/ncurses-6.6-hdb14827_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/numpy-2.5.2-py312h33ff503_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/ocl-icd-2.3.4-hb03c661_1.conda
@@ -2402,7 +2402,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-aarch64/markupsafe-3.0.3-py312hd077ced_1.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/mpc-1.4.0-he6dc3fb_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/mpfr-4.2.2-h3faef18_0.conda
-      - conda: https://prefix.dev/conda-forge/linux-aarch64/mpg123-1.33.7-h2b27223_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-aarch64/mpg123-1.33.7-h922aec4_1.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/ncurses-6.6-h2b6f883_1.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/numpy-2.5.2-py312hce9e0af_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/onednn-3.12-omp_h605b386_0.conda
@@ -76922,21 +76922,6 @@ packages:
     - mpg123 >=1.32.9,<1.33.0a0
   size: 491140
   timestamp: 1730581373280
-- conda: https://prefix.dev/conda-forge/linux-64/mpg123-1.33.7-h8142553_0.conda
-  sha256: 065c3cbc1d2de67bf3ffeb66a8e05cd89c12289b0bd0d877db52e472e45c231c
-  md5: 1d90b387cb397d0a75fd2a70be28cad1
-  depends:
-  - __glibc >=2.17,<3.0.a0
-  - libgcc >=14
-  - libstdcxx >=14
-  license: LGPL-2.1-only
-  license_family: LGPL
-  purls: []
-  run_exports:
-    weak:
-    - mpg123 >=1.33.7,<1.34.0a0
-  size: 491740
-  timestamp: 1786232222548
 - conda: https://prefix.dev/conda-forge/linux-64/mpg123-1.33.7-h877a99e_1.conda
   sha256: 5afc3265622de6663f4179bc9023e1c1cac06b9c8620a0bf54aa0a0c232cf15a
   md5: e7cc06dba8d5fb83d9ae033225ffa458
@@ -94574,20 +94559,6 @@ packages:
     - mpg123 >=1.32.9,<1.33.0a0
   size: 558708
   timestamp: 1730581372400
-- conda: https://prefix.dev/conda-forge/linux-aarch64/mpg123-1.33.7-h2b27223_0.conda
-  sha256: 6506406e322bd3b5094579454a612fd5f1a349239530bc303d96782b9c0e710d
-  md5: d45db08f3b813b3b8b9c992e3583ac58
-  depends:
-  - libgcc >=14
-  - libstdcxx >=14
-  license: LGPL-2.1-only
-  license_family: LGPL
-  purls: []
-  run_exports:
-    weak:
-    - mpg123 >=1.33.7,<1.34.0a0
-  size: 575523
-  timestamp: 1786232162349
 - conda: https://prefix.dev/conda-forge/linux-aarch64/mpg123-1.33.7-h922aec4_1.conda
   sha256: bbce8ba03cfe43b5281586b10c65879cf9b7a6741563dd3778637334c6b9e7cd
   md5: 9d5c32d5d1d203dbe98f59d4c73d9961

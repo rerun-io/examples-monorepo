@@ -12,6 +12,7 @@ import rerun.blueprint as rrb
 from dataforge import paths
 from dataforge.apis import register
 from dataforge.apis.register import Config
+from dataforge.datasets.msd import MsdConfig
 from dataforge.datasets.robocap import RobocapConfig
 
 
@@ -124,6 +125,21 @@ def test_reports_a_count_per_layer(tmp_path: Path, catalog: FakeEntry, capsys) -
     register.main(Config(dataset=RobocapConfig()))
     printed: str = capsys.readouterr().out
     assert f"2 {paths.BASE_LAYER}" in printed
+    assert f"1 {paths.GT_LAYER}" in printed
+
+
+def test_a_per_device_dataset_registers_only_its_own_two_layers(tmp_path: Path, catalog: FakeEntry, capsys) -> None:
+    """msd derives ``msd-<device>``, so one device's layers must not pick up another's."""
+    make_rrds(tmp_path, paths.BASE_LAYER, ["msd-g2__MGO_others__MGO09.rrd", "msd-index__MIO_others__MIO09.rrd"])
+    make_rrds(tmp_path, paths.GT_LAYER, ["msd-g2__MGO_others__MGO09.rrd", "msd-index__MIO_others__MIO09.rrd"])
+
+    register.main(Config(dataset=MsdConfig(device="g2")))
+
+    assert catalog.opened_as[1] == "msd-g2"
+    for layer in (paths.BASE_LAYER, paths.GT_LAYER):
+        assert [Path(uri).name for uri in catalog.registered[layer]] == ["msd-g2__MGO_others__MGO09.rrd"]
+    printed: str = capsys.readouterr().out
+    assert f"1 {paths.BASE_LAYER}" in printed
     assert f"1 {paths.GT_LAYER}" in printed
 
 

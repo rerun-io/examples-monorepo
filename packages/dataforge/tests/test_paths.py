@@ -27,7 +27,3 @@ def test_rrd_paths_are_layer_major() -> None:
     root: Path = Path("/out")
     assert rrd_path(root, layer=BASE_LAYER, identity=identity) == root / "base" / f"{identity.recording_id}.rrd"
     assert rrd_path(root, layer=GT_LAYER, identity=identity) == root / "gt" / f"{identity.recording_id}.rrd"
-
-
-def test_base_and_gt_are_sibling_layers() -> None:
-    assert (BASE_LAYER, GT_LAYER) == ("base", "gt")

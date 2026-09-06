@@ -1,4 +1,4 @@
-"""``dataforge-convert``: write the base-layer rrd for one or every sequence."""
+"""``dataforge-convert``: write the layer rrds of one or every sequence."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from dataforge.identity import SequenceIdentity
 
 @dataclass
 class Config:
-    """Convert discovered sequences into base-layer recordings."""
+    """Convert discovered sequences into their base (and derived) layer recordings."""
 
     dataset: AnnotatedDatasetUnion = field(default_factory=RobocapConfig)
     """Dataset to convert; the raw-tree location lives on the dataset config."""

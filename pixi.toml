@@ -2752,12 +2752,21 @@ pytorch-cpu = ">=2.8.0"
 # 7zz: the only extractor that reads MSD's Info-ZIP multi-volume archives
 # (<seq>.z01/.z02/.zip), which Python's zipfile refuses outright.
 7zip = ">=24.09"
+# The AV1 encoder every image-sequence dataset goes through. conda-forge's build
+# carries av1_nvenc, so the default resolve_ffmpeg() works without DATAFORGE_FFMPEG.
+# 9.x builds link the env's libjxl; the 8.1 build-number pin other features carry
+# does not apply (9.0's build numbers restarted below it and would exclude it).
+ffmpeg = ">=9.0.1"
 
 [feature.dataforge.pypi-dependencies]
 dataforge = { path = "packages/dataforge", editable = true }
 
 [feature.dataforge.activation.env]
 PACKAGE_DIR = "packages/dataforge"
+# tests/conftest.py holds the shared fixtures and read-back helpers, and test
+# modules import them by module name the way pytest puts them on sys.path;
+# pyrefly needs the same directory on its search path to resolve that import.
+PYREFLY_EXTRA_ARGS = "--search-path tests"
 # huggingface_hub reads its transfer knobs once, at import, so hf_fetch cannot turn
 # this on from inside the call; it has to be in the environment dataforge launches with.
 HF_XET_HIGH_PERFORMANCE = "1"
@@ -2770,17 +2779,19 @@ description = "Fetch (or verify, for local corpora) a dataset's raw tree"
 [feature.dataforge.tasks.dataforge-convert]
 cmd = "python tools/apps/convert.py"
 cwd = "packages/dataforge"
-description = "Convert discovered sequences into base-layer rrds (--sequence, --force)"
+description = "Convert discovered sequences into their layer rrds (--sequence, --force)"
 
 [feature.dataforge.tasks.dataforge-register]
 cmd = "python tools/apps/register.py"
 cwd = "packages/dataforge"
-description = "Register base-layer rrds into a local Rerun catalog"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Register every layer's rrds into a local Rerun catalog"
 
 [feature.dataforge.tasks.dataforge-view]
 cmd = "python tools/apps/view.py"
 cwd = "packages/dataforge"
-description = "Open one converted recording in the viewer (--rr-config.headless in a bare shell)"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Open one converted recording — every layer of it — in the viewer (--rr-config.headless in a bare shell)"
 
 [feature.dataforge.tasks.dataforge-serve]
 # One open fd per registered rrd; the default 1024 overflows fast (see arkitscenes-download-serve).

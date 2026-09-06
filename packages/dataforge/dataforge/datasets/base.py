@@ -57,7 +57,7 @@ SourceT = TypeVar("SourceT")
 
 
 class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
-    """A dataset dataforge can download, enumerate, and convert to base-layer rrds."""
+    """A dataset dataforge can download, enumerate, and convert to layer rrds."""
 
     def __init__(self, config: ConfigT) -> None:
         self.config: ConfigT = config
@@ -76,7 +76,7 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
 
     @abstractmethod
     def convert(self, identity: SequenceIdentity, source: SourceT, *, force: bool) -> Path:
-        """Write the base-layer rrd for one discovered sequence and return its path."""
+        """Write the base (and derived) layer rrds of one sequence; return the base path."""
 
     @abstractmethod
     def default_blueprint(self) -> rrb.Blueprint:
