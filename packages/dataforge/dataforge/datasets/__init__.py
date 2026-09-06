@@ -5,12 +5,15 @@ from __future__ import annotations
 import tyro
 
 from dataforge.datasets.base import DataforgeDatasetConfig
+from dataforge.datasets.lamaria import LamariaConfig
 from dataforge.datasets.msd import MsdConfig
 from dataforge.datasets.robocap import RobocapConfig
 from dataforge.datasets.selfcap import SelfcapConfig
 from dataforge.datasets.wildcap import WildcapConfig
 
-dataset_defaults: dict[str, DataforgeDatasetConfig] = {config.command: config for config in (RobocapConfig(), SelfcapConfig(), WildcapConfig(), MsdConfig())}
+dataset_defaults: dict[str, DataforgeDatasetConfig] = {
+    config.command: config for config in (LamariaConfig(), MsdConfig(), RobocapConfig(), SelfcapConfig(), WildcapConfig())
+}
 """Every dataset dataforge knows about, keyed by its CLI subcommand (``config.command``).
 
 ``config.name`` — the catalog dataset — equals the command for fixed datasets and
