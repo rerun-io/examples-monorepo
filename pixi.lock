@@ -928,6 +928,7 @@ environments:
     - https://pypi.org/simple
     packages:
       linux-64:
+      - conda: https://prefix.dev/conda-forge/linux-64/7zip-26.03-h4dbf13b_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/_openmp_mutex-4.5-7_kmp_llvm.conda
       - conda: https://prefix.dev/conda-forge/linux-64/alsa-lib-1.2.16.1-hb03c661_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/aom-3.14.1-pl5321h039972f_1.conda
@@ -1367,6 +1368,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/fb/76/641ae371508676492379f16e2fa48f4e2c11741bd63c48be4b12a6b09cba/aiosignal-1.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ff/9a/9afaade874b2fa6c752c36f1548f718b5b83af81ed9b76628329dab81c1b/rfc3986-2.0.0-py2.py3-none-any.whl
       linux-aarch64:
+      - conda: https://prefix.dev/conda-forge/linux-aarch64/7zip-26.03-h45ce4d5_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/_openmp_mutex-4.5-7_kmp_llvm.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/alsa-lib-1.2.16.1-he30d5cf_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/aom-3.14.1-pl5321h8fffa31_1.conda
@@ -1804,6 +1806,7 @@ environments:
     - https://pypi.org/simple
     packages:
       linux-64:
+      - conda: https://prefix.dev/conda-forge/linux-64/7zip-26.03-h4dbf13b_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/_openmp_mutex-4.5-7_kmp_llvm.conda
       - conda: https://prefix.dev/conda-forge/linux-64/alsa-lib-1.2.16.1-hb03c661_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/aom-3.14.1-pl5321h039972f_1.conda
@@ -2252,6 +2255,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/fb/76/641ae371508676492379f16e2fa48f4e2c11741bd63c48be4b12a6b09cba/aiosignal-1.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ff/9a/9afaade874b2fa6c752c36f1548f718b5b83af81ed9b76628329dab81c1b/rfc3986-2.0.0-py2.py3-none-any.whl
       linux-aarch64:
+      - conda: https://prefix.dev/conda-forge/linux-aarch64/7zip-26.03-h45ce4d5_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/_openmp_mutex-4.5-7_kmp_llvm.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/alsa-lib-1.2.16.1-he30d5cf_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/aom-3.14.1-pl5321h8fffa31_1.conda
@@ -62743,6 +62747,20 @@ packages:
   run_exports: {}
   size: 21480534
   timestamp: 1773997834910
+- conda: https://prefix.dev/conda-forge/linux-64/7zip-26.03-h4dbf13b_0.conda
+  sha256: e09b35d799977cfc7af08b8327bb0410238cdd96559cc686c42310a6a30c7910
+  md5: 58289d784bcba66075ffa8f6c08d3534
+  depends:
+  - libstdcxx >=15
+  - libgcc >=15
+  - __glibc >=2.17,<3.0.a0
+  constrains:
+  - 7za ==999999999
+  license: LGPL-2.1-or-later AND LicenseRef-LGPL-2.1-or-later-with-unRAR-restriction
+  purls: []
+  run_exports: {}
+  size: 2159465
+  timestamp: 1788592132475
 - conda: https://prefix.dev/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
   build_number: 20
   sha256: 1dd3fffd892081df9726d7eb7e0dea6198962ba775bd88842135a4ddb4deb3c9
@@ -80172,8 +80190,7 @@ packages:
   - pytorch 2.13.0 cpu_mkl*102
   license: BSD-3-Clause
   license_family: BSD
-  purls:
-  - pkg:pypi/torch?source=compressed-mapping
+  purls: []
   run_exports: {}
   size: 57181
   timestamp: 1786375947340
@@ -83785,6 +83802,19 @@ packages:
     - zstd >=1.5.7,<1.6.0a0
   size: 601301
   timestamp: 1786599621503
+- conda: https://prefix.dev/conda-forge/linux-aarch64/7zip-26.03-h45ce4d5_0.conda
+  sha256: 0e78ca245fd54dd4c5701f62827ced3123ddc495a8c5c39817e979adcf4516c4
+  md5: 982b98ce3da7db30f13258f4370f7522
+  depends:
+  - libstdcxx >=15
+  - libgcc >=15
+  constrains:
+  - 7za ==999999999
+  license: LGPL-2.1-or-later AND LicenseRef-LGPL-2.1-or-later-with-unRAR-restriction
+  purls: []
+  run_exports: {}
+  size: 1990327
+  timestamp: 1788592131265
 - conda: https://prefix.dev/conda-forge/linux-aarch64/_openmp_mutex-4.5-20_gnu.conda
   build_number: 20
   sha256: a2527b1d81792a0ccd2c05850960df119c2b6d8f5fdec97f2db7d25dc23b1068
