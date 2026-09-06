@@ -15,11 +15,16 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import numpy as np
 import pytest
+import rerun as rr
+import rerun.blueprint as rrb
 import serde.json
+from jaxtyping import Float64
+from numpy import ndarray
 
-from dataforge import paths
-from dataforge.datasets import dataset_defaults
+from dataforge import aria, paths, schema
+from dataforge.datasets import dataset_defaults, lamaria
 from dataforge.datasets.lamaria import (
     DEFAULT_SEQUENCES,
     LamariaConfig,
@@ -360,3 +365,105 @@ def test_a_sequence_with_no_published_calibration_is_named_in_the_error(tmp_path
     bodies["/lamaria/aria_calibrations/training/"] = apache_page("aria_calibrations/training", CALIBRATION_TRAINING_ROWS.splitlines(True)[0]).encode()
     with archive(bodies) as (base_url, _), pytest.raises(ValueError, match="R_11_5cp"):
         LamariaDataset(LamariaConfig(root=tmp_path / "raw", base_url=base_url, sequences=("R_01_easy", "R_11_5cp"))).download()
+
+
+# ── the follow frame and the blueprints ───────────────────────────────────
+
+
+def test_the_declared_follow_frame_is_the_calibration_own_forward_and_up() -> None:
+    """The eye's axes are typed in by hand, so the calibration has to agree with them.
+
+    ``T_b_s`` for cam0 is ``rig_T_cam`` of camera-slam-left in the imu-right
+    frame, and the Aria device frame *is* that camera's frame (RDF: x right, y
+    down, z along the optical axis). So the rotation's third column is where the
+    wearer looks and the negated second column is the wearer's up.
+    """
+    published: dict[str, aria.PublishedCamera] = aria.read_calibration_json(REFERENCE_DIR / "R_01_easy.calibration.json")
+    rig_R_cam0: Float64[ndarray, "3 3"] = published["cam0"].rig_T_cam.to_matrix()[:3, :3]
+
+    np.testing.assert_allclose(lamaria.FOLLOW_FORWARD, rig_R_cam0[:, 2], atol=1e-3)
+    np.testing.assert_allclose(lamaria.FOLLOW_UP, -rig_R_cam0[:, 1], atol=1e-3)
+    assert np.linalg.norm(lamaria.FOLLOW_FORWARD) == pytest.approx(1.0, abs=1e-3)
+    assert np.linalg.norm(lamaria.FOLLOW_UP) == pytest.approx(1.0, abs=1e-3)
+    assert float(np.dot(lamaria.FOLLOW_FORWARD, lamaria.FOLLOW_UP)) == pytest.approx(0.0, abs=1e-3)
+
+
+def eye_vector(batch: rr.components.Position3DBatch | rr.components.Vector3DBatch | None) -> list[float]:
+    """Read one three-component field back out of an ``EyeControls3D`` archetype."""
+    assert batch is not None, "follow_eye_controls sets every field of the eye"
+    return [float(value) for value in batch.as_arrow_array().flatten().to_pylist()]
+
+
+def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
+    """Every view in a blueprint, depth-first, whatever containers nest them."""
+    found: list[rrb.View] = []
+
+    def walk(node: rrb.View | rrb.Container) -> None:
+        if isinstance(node, rrb.View):
+            found.append(node)
+            return
+        for child in node.contents or ():
+            walk(child)
+
+    walk(blueprint.root_container)
+    return found
+
+
+def test_the_follow_eye_chases_the_wearer_from_behind_and_above() -> None:
+    eye: rrb.EyeControls3D = lamaria.follow_eye_controls()
+    forward: Float64[ndarray, "3"] = np.array(lamaria.FOLLOW_FORWARD, dtype=np.float64)
+    up: Float64[ndarray, "3"] = np.array(lamaria.FOLLOW_UP, dtype=np.float64)
+
+    assert eye_vector(eye.look_target) == pytest.approx((lamaria.FOLLOW_AHEAD_M * forward).tolist(), abs=1e-6)
+    assert eye_vector(eye.eye_up) == pytest.approx(list(lamaria.FOLLOW_UP), abs=1e-6)
+    position: list[float] = eye_vector(eye.position)
+    assert float(np.dot(position, forward)) < 0.0, "the eye leans against forward"
+    assert float(np.dot(position, up)) > 0.0, "and with up"
+
+
+def test_the_default_blueprint_shows_three_cameras_over_the_imu_plots() -> None:
+    views: list[rrb.View] = blueprint_views(LamariaDataset(LamariaConfig()).default_blueprint())
+
+    assert [view.name for view in views if isinstance(view, rrb.Spatial3DView)] == ["World", "Follow"]
+    assert [view.name for view in views if isinstance(view, rrb.Spatial2DView)] == ["camera-slam-left", "camera-slam-right", "camera-rgb"]
+    assert [view.name for view in views if isinstance(view, rrb.TimeSeriesView)] == ["Gyroscope", "Accelerometer"]
+    plots: list[rrb.View] = [view for view in views if isinstance(view, rrb.TimeSeriesView)]
+    # The plots follow imu_00 (imu-right), the sensor the rig frame coincides with.
+    assert str(plots[0].contents) == schema.gyro_path(0, 0)
+    assert str(plots[1].contents) == schema.accel_path(0, 0)
+
+
+def test_the_default_blueprint_already_names_the_gt_layer_paths() -> None:
+    """The overrides are inert in a base-only rrd, and correct once the gt layer stacks on."""
+    views: list[rrb.View] = blueprint_views(LamariaDataset(LamariaConfig()).default_blueprint())
+    follow: rrb.View = next(view for view in views if view.name == "Follow")
+    world: rrb.View = next(view for view in views if view.name == "World")
+
+    assert set(follow.visualizer_overrides) == {schema.trajectory_path("gt"), schema.trail_path("gt")}
+    assert set(world.visualizer_overrides) == {schema.trail_path("gt")}
+
+
+def test_the_table_card_decodes_only_the_slam_left_stream() -> None:
+    """Every visible table row renders through this at once, so it excludes the rest."""
+    views: list[rrb.View] = blueprint_views(LamariaDataset(LamariaConfig()).table_blueprint())
+    follow: rrb.View = next(view for view in views if view.name == "Follow")
+    contents: list[str] = [str(part) for part in follow.contents or ()]
+
+    assert [view.name for view in views if isinstance(view, rrb.Spatial2DView)] == ["camera-slam-left"]
+    for index in range(3):
+        assert f"- {schema.video_path(0, index)}/**" in contents, "a card must not decode video in the 3D view"
+    assert f"- {schema.trail_path('gt')}/**" in contents
+    pane: rrb.View = next(view for view in views if isinstance(view, rrb.Spatial2DView))
+    assert pane.origin == schema.pinhole_path(0, 0)
+
+
+def test_both_blueprints_serialize_to_a_non_empty_rbl(tmp_path: Path) -> None:
+    dataset: LamariaDataset = LamariaDataset(LamariaConfig())
+    default_path: Path = tmp_path / "lamaria.rbl"
+    table_path: Path = tmp_path / "lamaria-table.rbl"
+
+    dataset.default_blueprint().save("lamaria", str(default_path))
+    dataset.table_blueprint().save("lamaria", str(table_path))
+
+    assert default_path.stat().st_size > 0
+    assert table_path.stat().st_size > 0

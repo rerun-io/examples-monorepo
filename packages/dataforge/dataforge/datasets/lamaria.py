@@ -45,12 +45,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar, Literal, TypeAlias
 
+import numpy as np
 import requests
 import rerun.blueprint as rrb
 import serde
 import serde.json
+from jaxtyping import Float64
+from numpy import ndarray
 
-from dataforge import paths, transports, writing
+from dataforge import aria, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
 
@@ -87,6 +90,35 @@ CONTROL_POINTS_LOCAL_DIR: str = "ground_truth/control_points"
 
 INDEX_TIMEOUT_S: float = 30.0
 """Per-request timeout for an index page; they are a few kilobytes of HTML."""
+
+RIG: int = 0
+"""One Aria per sequence; the glasses are ``rig_00``."""
+RIG_REFERENCE: str = "imu_00"
+"""The rig frame *is* imu-right's, LaMAria's published body frame."""
+GT_SOURCE: str = "gt"
+"""``/world/runs/gt/`` — the run name the gt layer writes its trajectory under."""
+
+FOLLOW_FORWARD: tuple[float, float, float] = (0.018, -0.967, -0.253)
+"""Where the wearer looks, in the rig (imu-right) frame.
+
+The Aria device frame *is* camera-slam-left's frame (``device_T_cam`` for
+``1201-1`` is the identity), so the published ``cam0.T_b_s`` rotation is
+``rig_R_cam0`` and its third column is that camera's optical axis (RDF) in the
+rig frame. Typed in from R_01_easy's published calibration; a test re-derives it
+from the reference fixture."""
+FOLLOW_UP: tuple[float, float, float] = (-0.198, 0.245, -0.949)
+"""The wearer's up, in the rig frame: the negated second column of the same
+rotation (RDF's ``y`` is image-down, and glasses are worn upright)."""
+FOLLOW_BACK_M: float = 0.9
+"""How far behind the wearer the follow eye sits, along their own forward."""
+FOLLOW_UP_M: float = 0.45
+"""How far above the wearer the follow eye sits, along their own up."""
+FOLLOW_AHEAD_M: float = 0.3
+"""How far ahead of the wearer the eye aims, so the shot leads the motion."""
+FOLLOW_TRAIL_SECONDS: float = -10.0
+"""Cursor-relative start of the gt trail's visible window in the Follow view."""
+IMAGE_PLANE_DISTANCE: float = 0.1
+"""Frustum length in metres; the SLAM baseline is ~11 cm, so the three frusta stay legible."""
 
 
 @serde.serde
@@ -191,6 +223,130 @@ def sequence_challenge(sequence: str) -> str | None:
     if sequence_set(sequence) != "controlled":
         return None
     return sequence.rsplit("_", 1)[-1]
+
+
+def follow_eye_controls() -> rrb.EyeControls3D:
+    """Chase camera for the Follow view, expressed in the rig (imu-right) frame.
+
+    The view's origin is the rig node, so a fixed eye in this frame rides the
+    glasses: it sits ``FOLLOW_BACK_M`` behind the wearer and ``FOLLOW_UP_M``
+    above them and aims ``FOLLOW_AHEAD_M`` in front, which keeps both the wearer
+    and the ground they walk over in shot.
+
+    Returns:
+        The eye controls the Follow view of both blueprints uses.
+    """
+    forward_xyz: Float64[ndarray, "3"] = np.array(FOLLOW_FORWARD, dtype=np.float64)
+    up_xyz: Float64[ndarray, "3"] = np.array(FOLLOW_UP, dtype=np.float64)
+    position_xyz: Float64[ndarray, "3"] = -FOLLOW_BACK_M * forward_xyz + FOLLOW_UP_M * up_xyz
+    look_target_xyz: Float64[ndarray, "3"] = FOLLOW_AHEAD_M * forward_xyz
+    # EyeControls3D is marked unstable by the SDK; re-validate this factory on Rerun bumps.
+    return rrb.EyeControls3D(
+        kind=rrb.Eye3DKind.FirstPerson,
+        position=tuple(position_xyz.tolist()),
+        look_target=tuple(look_target_xyz.tolist()),
+        eye_up=FOLLOW_UP,
+        spin_speed=0.0,
+    )
+
+
+def camera_views() -> list[rrb.Spatial2DView]:
+    """One 2D pane per camera stream, labelled the way the VRS names it."""
+    return [
+        rrb.Spatial2DView(
+            name=aria.STREAM_LABELS[stream_id],
+            origin=schema.pinhole_path(RIG, index),
+            contents=f"{schema.pinhole_path(RIG, index)}/**",
+        )
+        for index, stream_id in enumerate(aria.CAMERA_STREAM_IDS)
+    ]
+
+
+def build_blueprint() -> rrb.Blueprint:
+    """Default layout: the rig in 3D beside the camera grid, over the imu-right plots.
+
+    Returns:
+        The blueprint embedded in every LaMAria base-layer rrd and registered as
+        the catalog dataset's default.
+    """
+    return rrb.Blueprint(
+        rrb.Vertical(
+            rrb.Horizontal(
+                rrb.Vertical(
+                    rrb.Spatial3DView(
+                        name="World",
+                        origin="/",
+                        line_grid=True,
+                        # The overview shows the whole gt path; its cursor trail stays hidden.
+                        # Overrides on entities a base-only recording lacks are simply inert.
+                        overrides={schema.trail_path(GT_SOURCE): rrb.EntityBehavior(visible=False)},
+                    ),
+                    # Follow-cam (rerun-io/eye_control_example pattern): the view's origin
+                    # IS the rig frame, so a fixed first-person eye in that frame rides the
+                    # glasses. Inert until the gt layer animates rig_00.
+                    rrb.Spatial3DView(
+                        name="Follow",
+                        origin=schema.rig_path(RIG),
+                        contents="/**",
+                        line_grid=True,
+                        overrides={
+                            schema.trajectory_path(GT_SOURCE): rrb.EntityBehavior(visible=False),
+                            schema.trail_path(GT_SOURCE): rrb.VisibleTimeRanges(
+                                rrb.VisibleTimeRange(
+                                    schema.TIMELINE,
+                                    start=rrb.TimeRangeBoundary.cursor_relative(seconds=FOLLOW_TRAIL_SECONDS),
+                                    end=rrb.TimeRangeBoundary.cursor_relative(),
+                                )
+                            ),
+                        },
+                        eye_controls=follow_eye_controls(),
+                    ),
+                ),
+                rrb.Grid(*camera_views(), grid_columns=2, name="Synchronized cameras"),
+                column_shares=[3, 2],
+            ),
+            rrb.Horizontal(
+                rrb.TimeSeriesView(
+                    name="Gyroscope",
+                    origin=schema.imu_path(RIG, 0),
+                    contents=schema.gyro_path(RIG, 0),
+                    plot_legend=rrb.PlotLegend(visible=True),
+                ),
+                rrb.TimeSeriesView(
+                    name="Accelerometer",
+                    origin=schema.imu_path(RIG, 0),
+                    contents=schema.accel_path(RIG, 0),
+                    plot_legend=rrb.PlotLegend(visible=True),
+                ),
+            ),
+            row_shares=[3, 1],
+        ),
+        rrb.TimePanel(timeline=schema.TIMELINE),
+        collapse_panels=True,
+    )
+
+
+def build_table_blueprint() -> rrb.Blueprint:
+    """Segment-table preview card: the 3D rig with no video textures, plus slam-left.
+
+    Every visible table row renders through this at once, so exactly one video
+    stream is decoded and the other two are *excluded* rather than hidden.
+    """
+    video_exclusions: list[str] = [f"- {schema.video_path(RIG, index)}/**" for index in range(len(aria.CAMERA_STREAM_IDS))]
+    return rrb.Blueprint(
+        rrb.Horizontal(
+            rrb.Spatial3DView(
+                name="Follow",
+                origin=schema.rig_path(RIG),
+                contents=["/**", *video_exclusions, f"- {schema.trail_path(GT_SOURCE)}/**"],
+                line_grid=True,
+                eye_controls=follow_eye_controls(),
+            ),
+            camera_views()[0],
+            column_shares=[3, 2],
+        ),
+        rrb.TimePanel(timeline=schema.TIMELINE),
+    )
 
 
 class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
@@ -340,9 +496,9 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         raise NotImplementedError("convert lands with the recording slice")
 
     def default_blueprint(self) -> rrb.Blueprint:
-        """Corpus-wide layout: every Aria Gen1 sequence has the same three cameras."""
-        raise NotImplementedError("blueprints land with the blueprint slice")
+        """Corpus-wide layout: every Aria Gen1 sequence carries the same three cameras."""
+        return build_blueprint()
 
     def table_blueprint(self) -> rrb.Blueprint:
         """Cheap preview card for the dataset's segment table."""
-        raise NotImplementedError("blueprints land with the blueprint slice")
+        return build_table_blueprint()
