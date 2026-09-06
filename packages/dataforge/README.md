@@ -125,6 +125,15 @@ not unit-norm is a tracking dropout: its
 rotation becomes identity so the chain keeps working for later frames, and the
 count lands in the properties as `num_sanitized`.
 
+The Follow view's eye is derived rather than hand-placed: `follow_frame` reads
+the front camera pair out of the same `calibration.json` — their mean optical
+axis is the headset's forward, and their stereo baseline crossed with it is the
+wearer's up — and each device's answer is fixed in `MSD_DEVICES` as its `follow`
+frame, so the chase camera sits behind and above every headset with a level
+horizon. Up comes from the baseline and not from image-up because the G2 mounts
+all four of its cameras rolled a quarter turn. Every convert re-derives the frame
+and warns past 5°, as it does for the world up axis.
+
 ### Environment variables
 
 | variable | default | purpose |

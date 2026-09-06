@@ -48,6 +48,9 @@ sequence and warns on a disagreement rather than silently reorienting one rrd.
 the IMU frame; the rig frame *is* the IMU frame (``reference = "imu_00"``), so
 ``world`` in the ``Extrinsics`` below means the rig. This is the same convention
 as simplecv's RoboCap loader, one inversion away (Kalibr states ``T_cam_imu``).
+The same extrinsics also orient the Follow view: ``follow_frame`` turns the front
+pair into the headset's forward and up (``FollowFrame``), because each headset
+carries its IMU — and therefore its rig frame — at a different orientation.
 """
 
 from __future__ import annotations
@@ -128,6 +131,16 @@ IDENTITY_QUATERNION_XYZW: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.
 """What a dropout row's rotation becomes, so its translation still applies."""
 QUATERNION_NORM_TOLERANCE: float = 1e-3
 """How far a gt quaternion's norm may sit from 1 before the row counts as a dropout."""
+DEGENERATE_DIRECTION_NORM: float = 1e-9
+"""Shortest vector ``follow_frame`` still accepts as a direction; below it the inputs cancelled."""
+FOLLOW_BACK_M: float = 0.9
+"""How far behind the headset the follow eye sits, along the device's own forward."""
+FOLLOW_UP_M: float = 0.45
+"""How far above the headset the follow eye sits, along the device's own up."""
+FOLLOW_AHEAD_M: float = 0.3
+"""How far ahead of the headset the follow eye aims, so the shot leads the motion."""
+FOLLOW_FRAME_TOLERANCE_DEG: float = 5.0
+"""How far a declared ``FollowFrame`` axis may sit from the calibration's before ``convert`` warns."""
 
 MsdDeviceChoice: TypeAlias = Literal["index", "g2", "odyssey"]
 """``--device``: which headset's corpus to work on, and which catalog dataset."""
@@ -172,6 +185,22 @@ GT_TRAIL_RADIUS_M: float = 0.004
 
 
 @dataclass(frozen=True, slots=True)
+class FollowFrame:
+    """Where a headset looks and which way is up, as unit vectors in the rig frame.
+
+    The rig frame is the IMU frame, and every headset mounts its IMU differently
+    — the Index's up is rig -x, the G2's and the Odyssey+'s rig -y — so a follow
+    camera cannot be placed by hand-picked numbers that happen to suit one
+    device. ``follow_frame`` derives this pair from the calibration instead.
+    """
+
+    forward: tuple[float, float, float]
+    """Where the front cameras look, unit length."""
+    up: tuple[float, float, float]
+    """The wearer's up, unit length and orthogonal to ``forward``."""
+
+
+@dataclass(frozen=True, slots=True)
 class MsdDevice:
     """Everything that varies between the three headsets."""
 
@@ -192,6 +221,12 @@ class MsdDevice:
     ``measured_world_up`` on a real sequence rather than assumed, and then fixed
     here so every rrd of the device carries the same root ``ViewCoordinates``.
     ``convert`` re-measures each sequence and warns when it disagrees."""
+    follow: FollowFrame
+    """Forward and up of this headset in its rig frame, **derived** with
+    ``follow_frame`` from the device's own ``calibration.json`` and fixed here so
+    every rrd of the device places its follow camera the same way. ``convert``
+    re-derives it from the calibration it fetched and warns past
+    ``FOLLOW_FRAME_TOLERANCE_DEG``."""
     gt_source: GtSource
     """What produced ``gt/data.csv``; goes into the gt layer's properties."""
 
@@ -214,6 +249,11 @@ MSD_DEVICES: dict[MsdDeviceChoice, MsdDevice] = {
         # accelerometer's own mean points along the headset's -x, and only the gt
         # rotation (123..142 deg from identity there) turns it into world +y.
         world_up="+y",
+        # follow_frame(calibration.json) on 2026-09-06: the front pair looks along rig +z
+        # and its 13.4 cm baseline runs along rig y, so up is rig -x — the axis MIO09's
+        # raw accelerometer mean already picked out. The Index alone carries no camera
+        # roll: image-up lands within 1.2 deg of this up.
+        follow=FollowFrame(forward=(0.009, 0.0, 1.0), up=(-1.0, 0.001, 0.009)),
         gt_source="lighthouse",
     ),
     "g2": MsdDevice(
@@ -226,6 +266,13 @@ MSD_DEVICES: dict[MsdDeviceChoice, MsdDevice] = {
         # documents no convention, and the sign comes entirely from the gt
         # rotation — the raw accelerometer mean points along the headset's -y.
         world_up="+y",
+        # follow_frame(calibration.json) on 2026-09-06 over cam0/cam1, the front pair
+        # (cam2 and cam3 look along rig -x and +x, i.e. sideways). Their 10.8 cm baseline
+        # runs along rig x, so up is rig -y — again where MGO09's raw accelerometer mean
+        # points, and it puts the front pair 15.6 deg below the horizon, where tracking
+        # cameras are aimed. All four G2 cameras are mounted rolled: image-up is rig +x,
+        # a full 90 deg off this up, which is why the baseline and not image-up fixes it.
+        follow=FollowFrame(forward=(-0.001, 0.268, 0.963), up=(0.006, -0.963, 0.268)),
         gt_source="mocap",
     ),
     "odyssey": MsdDevice(
@@ -237,6 +284,10 @@ MSD_DEVICES: dict[MsdDeviceChoice, MsdDevice] = {
         # Measured on MOO09_short_1_updown: +y at 0.93 of |g|; same undocumented
         # MoCap rig as the G2, and the same Y-up answer.
         world_up="+y",
+        # follow_frame(calibration.json) on 2026-09-06: a 10.6 cm baseline along rig x
+        # and an optical axis pitched 21.3 deg down from it, so up is rig -y. Like the
+        # Index and unlike the G2 these cameras are upright — image-up is 0.3 deg away.
+        follow=FollowFrame(forward=(0.002, 0.364, 0.932), up=(0.0, -0.932, 0.364)),
         gt_source="mocap",
     ),
 }
@@ -448,6 +499,68 @@ def camera_parameters(calibration: MsdCalibration, index: int, *, name: str) -> 
         distortion=BrownConradyDistortion(
             k1=terms.k1, k2=terms.k2, p1=terms.p1, p2=terms.p2, k3=terms.k3, k4=terms.k4, k5=terms.k5, k6=terms.k6
         ),
+    )
+
+
+def follow_frame(calibration: MsdCalibration, camera_indices: Sequence[int] = (0, 1)) -> FollowFrame:
+    """Derive a headset's forward and up in the rig frame from its front stereo pair.
+
+    Forward is the mean optical axis (camera +z in RDF) of the listed cameras;
+    averaging the pair cancels the slight outward yaw each one carries. Up comes
+    from the pair's *baseline*, not from image-up: the baseline runs along the
+    wearer's lateral axis, so ``right x forward`` is the wearer's up, and the
+    cameras' own roll about the optical axis cannot tilt it. That distinction is
+    not academic — the G2's four cameras are all mounted rolled 90 degrees, so
+    its image-up is rig +x while its up is rig -y (which is also where its
+    accelerometer reads gravity at rest, and what puts its front pair 15 degrees
+    *below* the horizon, where tracking cameras are aimed). Deriving up from
+    image-up matches the baseline within about a degree on the Index and the
+    Odyssey+ and is 90 degrees out on the G2.
+
+    ``camera_indices`` names the front pair, left camera first; the corpus lists
+    every device that way, and on the G2 the two side cameras are ``cam2``/``cam3``.
+
+    Args:
+        calibration: Parsed ``calibration.json`` of the device.
+        camera_indices: Front cameras, left first; the baseline runs from the
+            first to the last, and every listed camera contributes to forward.
+
+    Returns:
+        The orthonormal forward/up pair, in the rig (IMU) frame.
+
+    Raises:
+        ValueError: Fewer than two cameras were named, the mean optical axis
+            cancels out, or the baseline is parallel to it.
+    """
+    if len(camera_indices) < 2:
+        raise ValueError(f"a follow frame needs a stereo pair to place its up axis, got {len(camera_indices)} camera(s)")
+    poses: list[BasaltPose] = calibration.value0.T_imu_cam
+    forward_sum_xyz: Float64[ndarray, "3"] = np.zeros(3, dtype=np.float64)
+    for index in camera_indices:
+        pose: BasaltPose = poses[index]
+        rig_R_cam: Float64[ndarray, "3 3"] = Rotation.from_quat([pose.qx, pose.qy, pose.qz, pose.qw]).as_matrix()
+        forward_sum_xyz += rig_R_cam @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    forward_norm: float = float(np.linalg.norm(forward_sum_xyz))
+    if forward_norm < DEGENERATE_DIRECTION_NORM:
+        raise ValueError(f"cameras {tuple(camera_indices)} look in opposing directions; their mean optical axis is degenerate")
+    forward_xyz: Float64[ndarray, "3"] = forward_sum_xyz / forward_norm
+
+    left_camera: BasaltPose = poses[camera_indices[0]]
+    right_camera: BasaltPose = poses[camera_indices[-1]]
+    baseline_xyz: Float64[ndarray, "3"] = np.array(
+        [right_camera.px - left_camera.px, right_camera.py - left_camera.py, right_camera.pz - left_camera.pz], dtype=np.float64
+    )
+    # Gram-Schmidt: a real baseline is only nearly perpendicular to the optical axis
+    # (a few tenths of a degree off on all three headsets), so it is a hint about the
+    # lateral axis rather than the axis itself.
+    right_xyz: Float64[ndarray, "3"] = baseline_xyz - float(np.dot(baseline_xyz, forward_xyz)) * forward_xyz
+    right_norm: float = float(np.linalg.norm(right_xyz))
+    if right_norm < DEGENERATE_DIRECTION_NORM:
+        raise ValueError(f"the baseline of cameras {tuple(camera_indices)} is parallel to their optical axis; it fixes no lateral axis")
+    up_xyz: Float64[ndarray, "3"] = np.cross(right_xyz / right_norm, forward_xyz)
+    return FollowFrame(
+        forward=(float(forward_xyz[0]), float(forward_xyz[1]), float(forward_xyz[2])),
+        up=(float(up_xyz[0]), float(up_xyz[1]), float(up_xyz[2])),
     )
 
 
@@ -770,19 +883,32 @@ def nominal_fps(times_ns: Int64[ndarray, "n_samples"]) -> int:
     return max(1, round(1e9 / median_gap_ns))
 
 
-def follow_eye_controls() -> rrb.EyeControls3D:
-    """First-person eye controls for the follow view, in the rig (IMU) frame.
+def follow_eye_controls(follow: FollowFrame) -> rrb.EyeControls3D:
+    """Chase camera for the follow view, expressed in the rig (IMU) frame.
 
-    Carried over from RoboCap: MSD's world axes are only established by the gt
-    layer, so the eye is placed relative to the headset itself and revisited
-    when that layer lands.
+    The view's origin is the rig node, so a fixed eye in this frame rides the
+    headset. It sits ``FOLLOW_BACK_M`` behind the headset and ``FOLLOW_UP_M``
+    above it and aims ``FOLLOW_AHEAD_M`` in front of it, which keeps the headset
+    itself and the ground it moves over both in shot. Every direction comes from
+    the device's own ``FollowFrame``: the three headsets carry their IMUs at
+    different orientations, so one hand-picked position cannot serve them all.
+
+    Args:
+        follow: The device's forward and up, in the rig frame.
+
+    Returns:
+        The eye controls the Follow view of both blueprints uses.
     """
+    forward_xyz: Float64[ndarray, "3"] = np.array(follow.forward, dtype=np.float64)
+    up_xyz: Float64[ndarray, "3"] = np.array(follow.up, dtype=np.float64)
+    position_xyz: Float64[ndarray, "3"] = -FOLLOW_BACK_M * forward_xyz + FOLLOW_UP_M * up_xyz
+    look_target_xyz: Float64[ndarray, "3"] = FOLLOW_AHEAD_M * forward_xyz
     # EyeControls3D is marked unstable by the SDK; re-validate this factory on Rerun bumps.
     return rrb.EyeControls3D(
         kind=rrb.Eye3DKind.FirstPerson,
-        position=(0.8, -0.8, -0.6),
-        look_target=(0.0, 0.0, 0.0),
-        eye_up=(0.0, 0.0, -1.0),
+        position=tuple(position_xyz.tolist()),
+        look_target=tuple(look_target_xyz.tolist()),
+        eye_up=follow.up,
         spin_speed=0.0,
     )
 
@@ -795,12 +921,13 @@ def camera_views(num_cameras: int) -> list[rrb.Spatial2DView]:
     ]
 
 
-def build_blueprint(num_cameras: int, *, has_magnetometer: bool) -> rrb.Blueprint:
+def build_blueprint(num_cameras: int, *, has_magnetometer: bool, follow: FollowFrame) -> rrb.Blueprint:
     """Default layout: the rig in 3D beside a camera grid, over the sensor plots.
 
     Args:
         num_cameras: Cameras the device carries; the grid holds one pane each.
         has_magnetometer: Whether to add the third plot pane.
+        follow: The device's forward and up in the rig frame; it orients the Follow view.
 
     Returns:
         The blueprint embedded in every base-layer rrd of this device and
@@ -856,7 +983,7 @@ def build_blueprint(num_cameras: int, *, has_magnetometer: bool) -> rrb.Blueprin
                                 )
                             ),
                         },
-                        eye_controls=follow_eye_controls(),
+                        eye_controls=follow_eye_controls(follow),
                     ),
                 ),
                 rrb.Grid(*camera_views(num_cameras), grid_columns=2, name="Synchronized cameras"),
@@ -870,7 +997,7 @@ def build_blueprint(num_cameras: int, *, has_magnetometer: bool) -> rrb.Blueprin
     )
 
 
-def build_table_blueprint(num_cameras: int) -> rrb.Blueprint:
+def build_table_blueprint(num_cameras: int, *, follow: FollowFrame) -> rrb.Blueprint:
     """Segment-table preview card: the 3D rig with no video textures, plus ``cam0``.
 
     Every visible table row renders through this at once, so exactly one video
@@ -878,6 +1005,7 @@ def build_table_blueprint(num_cameras: int) -> rrb.Blueprint:
 
     Args:
         num_cameras: Cameras the device carries; all but ``cam0``'s video are excluded.
+        follow: The device's forward and up in the rig frame; it orients the Follow view.
     """
     video_exclusions: list[str] = [f"- {schema.video_path(RIG, index)}/**" for index in range(num_cameras)]
     return rrb.Blueprint(
@@ -887,7 +1015,7 @@ def build_table_blueprint(num_cameras: int) -> rrb.Blueprint:
                 origin=schema.rig_path(RIG),
                 contents=["/**", *video_exclusions, f"- {schema.trail_path('gt')}/**"],
                 line_grid=True,
-                eye_controls=follow_eye_controls(),
+                eye_controls=follow_eye_controls(follow),
             ),
             rrb.Spatial2DView(name="cam0", origin=schema.pinhole_path(RIG, 0), contents=f"{schema.pinhole_path(RIG, 0)}/**"),
             column_shares=[3, 2],
@@ -944,11 +1072,11 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
 
     def default_blueprint(self) -> rrb.Blueprint:
         """Device-wide layout: every sequence of one headset has the same sensors."""
-        return build_blueprint(self.device.num_cameras, has_magnetometer=self.device.has_magnetometer)
+        return build_blueprint(self.device.num_cameras, has_magnetometer=self.device.has_magnetometer, follow=self.device.follow)
 
     def table_blueprint(self) -> rrb.Blueprint:
         """Cheap preview card for the device's segment table."""
-        return build_table_blueprint(self.device.num_cameras)
+        return build_table_blueprint(self.device.num_cameras, follow=self.device.follow)
 
     @property
     def calibration_path(self) -> str:
@@ -1098,6 +1226,21 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         cameras: list[PinholeParameters | Fisheye62Parameters] = [
             camera_parameters(calibration, index, name=f"cam{index}") for index in range(self.device.num_cameras)
         ]
+        # The declared follow frame is a claim about this calibration, so re-derive it and
+        # say so on a disagreement, exactly as the declared world_up is re-measured below.
+        # The declared axes are rounded to three decimals and so are a hair short of unit
+        # length; dividing by the norms keeps that rounding out of the reported angles.
+        derived: FollowFrame = follow_frame(calibration)
+        declared_axes: Float64[ndarray, "2 3"] = np.array([self.device.follow.forward, self.device.follow.up], dtype=np.float64)
+        derived_axes: Float64[ndarray, "2 3"] = np.array([derived.forward, derived.up], dtype=np.float64)
+        cosines: Float64[ndarray, "2"] = np.einsum("ij,ij->i", declared_axes, derived_axes) / np.linalg.norm(declared_axes, axis=1)
+        deviations_deg: Float64[ndarray, "2"] = np.degrees(np.arccos(np.clip(cosines, -1.0, 1.0)))
+        if float(deviations_deg.max()) > FOLLOW_FRAME_TOLERANCE_DEG:
+            print(
+                f"  warning: {self.config.device} declares a follow frame its calibration disagrees with — "
+                f"forward off by {deviations_deg[0]:.1f} deg, up off by {deviations_deg[1]:.1f} deg, over the "
+                f"{FOLLOW_FRAME_TOLERANCE_DEG:g} deg tolerance; the blueprint still uses the declared frame"
+            )
         mav0: str = f"{source.sequence}/mav0"
         camera_times: list[Int64[ndarray, "n_samples"]] = []
         clips: list[Path] = []
@@ -1140,7 +1283,9 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
             target,
             application_id="dataforge",
             recording_id=identity.recording_id,
-            default_blueprint=build_blueprint(self.device.num_cameras, has_magnetometer=self.device.has_magnetometer),
+            default_blueprint=build_blueprint(
+                self.device.num_cameras, has_magnetometer=self.device.has_magnetometer, follow=self.device.follow
+            ),
         ) as recording:
             # Deliberately NO ViewCoordinates at "/": the gt layer owns the root
             # ViewCoordinates, because it is what establishes a world frame at all.

@@ -40,6 +40,7 @@ from dataforge.datasets.msd import (
     MSD_DEVICES,
     BasaltPose,
     CameraRow,
+    FollowFrame,
     GtTrajectory,
     MsdCalibration,
     MsdConfig,
@@ -51,6 +52,8 @@ from dataforge.datasets.msd import (
     build_blueprint,
     camera_parameters,
     camera_views,
+    follow_eye_controls,
+    follow_frame,
     gt_trajectory,
     measured_world_up,
     open_member_reader,
@@ -216,6 +219,91 @@ def test_extrinsics_are_the_camera_pose_in_the_rig_frame() -> None:
     rig_t_cam: Float64[ndarray, "3"] = np.asarray(camera.extrinsics.world_t_cam, dtype=np.float64)
     np.testing.assert_allclose(rig_R_cam, expected_rig_R_cam, atol=1e-12)
     np.testing.assert_allclose(rig_t_cam, [pose.px, pose.py, pose.pz], atol=1e-12)
+
+
+# ── follow frame ──────────────────────────────────────────────────────────
+
+UPRIGHT_PAIR_CALIBRATION: str = """
+{"value0": {
+  "T_imu_cam": [
+    {"px": 0.0, "py": 0.0, "pz": 0.0, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0},
+    {"px": 1.0, "py": 0.0, "pz": 0.5, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0}
+  ],
+  "intrinsics": [
+    {"camera_type": "kb4", "intrinsics": {"fx": 1.0, "fy": 1.0, "cx": 0.5, "cy": 0.5}},
+    {"camera_type": "kb4", "intrinsics": {"fx": 1.0, "fy": 1.0, "cx": 0.5, "cy": 0.5}}
+  ],
+  "resolution": [[1, 1], [1, 1]]
+}}
+"""
+"""Two unrotated cameras whose baseline is deliberately *not* perpendicular to them.
+
+Unrotated means RDF as it comes: the optical axis is rig +z and the sensor's
+right is rig +x. The 0.5 m of ``pz`` between the two is the point — a baseline
+with a component along the optical axis, which only an orthogonalized frame
+survives.
+"""
+
+
+def test_the_index_pair_looks_along_rig_z_and_calls_rig_minus_x_up() -> None:
+    """Both answers are known outside this file, from the headset itself.
+
+    The Index's cameras face where the wearer faces, and its 13.4 cm stereo
+    baseline runs along rig y — so y is the lateral axis and the optical axis is
+    rig +z. Up is then ±x, and MIO09's raw accelerometer mean (an accelerometer
+    at rest reads *up*) picks -x, which is the measurement ``MSD_DEVICES``
+    already records for this device.
+    """
+    calibration: MsdCalibration = serde.json.from_json(MsdCalibration, KB4_CALIBRATION)
+    frame: FollowFrame = follow_frame(calibration)
+
+    np.testing.assert_allclose(frame.forward, [0.0, 0.0, 1.0], atol=0.05)
+    np.testing.assert_allclose(frame.up, [-1.0, 0.0, 0.0], atol=0.05)
+
+
+def test_a_baseline_tilted_out_of_the_image_plane_still_yields_an_orthonormal_frame() -> None:
+    """Gram-Schmidt: the baseline is a hint about the lateral axis, not the axis itself."""
+    calibration: MsdCalibration = serde.json.from_json(MsdCalibration, UPRIGHT_PAIR_CALIBRATION)
+    frame: FollowFrame = follow_frame(calibration)
+
+    np.testing.assert_allclose(frame.forward, [0.0, 0.0, 1.0], atol=1e-12)
+    np.testing.assert_allclose(frame.up, [0.0, -1.0, 0.0], atol=1e-12)
+
+
+@pytest.mark.parametrize("calibration_text", [KB4_CALIBRATION, UPRIGHT_PAIR_CALIBRATION])
+def test_a_follow_frame_is_two_orthogonal_unit_vectors(calibration_text: str) -> None:
+    frame: FollowFrame = follow_frame(serde.json.from_json(MsdCalibration, calibration_text))
+    assert np.linalg.norm(frame.forward) == pytest.approx(1.0, abs=1e-9)
+    assert np.linalg.norm(frame.up) == pytest.approx(1.0, abs=1e-9)
+    assert float(np.dot(frame.forward, frame.up)) == pytest.approx(0.0, abs=1e-9)
+
+
+def eye_vector(batch: rr.components.Position3DBatch | rr.components.Vector3DBatch | None) -> list[float]:
+    """Read one three-component field back out of an ``EyeControls3D`` archetype.
+
+    Every field of the archetype is optional, so an unset one is a wiring failure
+    rather than a value worth asserting on.
+    """
+    assert batch is not None, "follow_eye_controls sets every field of the eye"
+    return [float(value) for value in batch.as_arrow_array().flatten().to_pylist()]
+
+
+def test_the_follow_eye_chases_the_headset_from_behind_and_above() -> None:
+    """A chase camera: back along forward, up along up, aimed just ahead of the rig.
+
+    The Index's frame goes in, so the numbers are readable by hand: 0.9 m back
+    along +z and 0.45 m up along -x is (-0.45, 0, -0.9), looking at 0.3 m ahead.
+    """
+    eye: rrb.EyeControls3D = follow_eye_controls(FollowFrame(forward=(0.0, 0.0, 1.0), up=(-1.0, 0.0, 0.0)))
+
+    assert eye_vector(eye.position) == pytest.approx([-0.45, 0.0, -0.9], abs=1e-6)
+    assert eye_vector(eye.look_target) == pytest.approx([0.0, 0.0, 0.3], abs=1e-6)
+    assert eye_vector(eye.eye_up) == pytest.approx([-1.0, 0.0, 0.0], abs=1e-6)
+    kind: rrb.components.Eye3DKindBatch | None = eye.kind
+    spin_speed: rrb.components.AngularSpeedBatch | None = eye.spin_speed
+    assert kind is not None and spin_speed is not None
+    assert kind.as_arrow_array().to_pylist() == [rrb.Eye3DKind.FirstPerson.value]
+    assert spin_speed.as_arrow_array().to_pylist() == [0.0]
 
 
 # ── csv readers ───────────────────────────────────────────────────────────
@@ -471,29 +559,50 @@ class FakeHub:
     """The sequence's archive volume(s), as they land under ``root``."""
 
 
-def calibration_json(num_cameras: int, model: str) -> str:
-    """A basalt ``calibration.json`` for ``num_cameras`` identical cameras."""
+FIXTURE_CAMERA_YAW_DEG: float = 3.0
+"""How far each fixture camera is yawed outward from the device's forward, as a real pair is."""
+FIXTURE_BASELINE_M: float = 0.06
+"""Stereo baseline of the fixture's front pair, along the device's right."""
+
+
+def calibration_json(num_cameras: int, model: str, *, follow: FollowFrame) -> str:
+    """A basalt ``calibration.json`` for ``num_cameras`` cameras of one headset.
+
+    The pair is built to *realize* ``follow``, so ``follow_frame`` reads the
+    device's own frame back out of the file and ``convert`` stays quiet: the
+    baseline runs along the wearer's right and the two cameras are yawed
+    symmetrically outward about up, which leaves their mean optical axis on
+    ``forward``. Any camera past the pair is yawed a quarter turn, as the G2's
+    side cameras are. Each rotation is a real one, so a test can still tell
+    ``rig_T_cam`` from its inverse.
+    """
     terms: dict[str, float] = (
         {"k1": 0.19, "k2": 0.04, "k3": -0.23, "k4": 0.09}
         if model == "kb4"
         else {"k1": 0.30, "k2": -0.02, "p1": -0.0002, "p2": 6e-05, "k3": 0.015, "k4": 0.57, "k5": -0.06, "k6": 0.03, "rpmax": 2.72}
     )
-    # A real rotation per camera, so a test can tell rig_T_cam from its inverse.
-    quaternions_xyzw: Float64[ndarray, "n_cameras 4"] = Rotation.from_euler(
-        "xyz", [[0.1 + 0.05 * index, -0.2, 0.3 * index] for index in range(num_cameras)]
-    ).as_quat()
-    poses: list[dict[str, float]] = [
-        {
-            "px": 0.03 * index,
-            "py": 0.01,
-            "pz": 0.005,
-            "qx": float(quaternion[0]),
-            "qy": float(quaternion[1]),
-            "qz": float(quaternion[2]),
-            "qw": float(quaternion[3]),
-        }
-        for index, quaternion in enumerate(quaternions_xyzw)
-    ]
+    forward_xyz: Float64[ndarray, "3"] = np.array(follow.forward, dtype=np.float64)
+    up_xyz: Float64[ndarray, "3"] = np.array(follow.up, dtype=np.float64)
+    right_xyz: Float64[ndarray, "3"] = np.cross(forward_xyz, up_xyz)
+    # An RDF camera at rest on this frame: x right, y down, z along the optical axis.
+    rig_R_rest: Float64[ndarray, "3 3"] = np.column_stack([right_xyz, -up_xyz, forward_xyz])
+    yaws_deg: list[float] = [FIXTURE_CAMERA_YAW_DEG, -FIXTURE_CAMERA_YAW_DEG] + [90.0 * (-1) ** index for index in range(num_cameras - 2)]
+    poses: list[dict[str, float]] = []
+    for index, yaw_deg in enumerate(yaws_deg[:num_cameras]):
+        rig_R_cam: Float64[ndarray, "3 3"] = Rotation.from_rotvec(np.radians(yaw_deg) * up_xyz).as_matrix() @ rig_R_rest
+        rig_t_cam: Float64[ndarray, "3"] = right_xyz * FIXTURE_BASELINE_M * index + up_xyz * 0.01
+        quaternion_xyzw: Float64[ndarray, "4"] = Rotation.from_matrix(rig_R_cam).as_quat()
+        poses.append(
+            {
+                "px": float(rig_t_cam[0]),
+                "py": float(rig_t_cam[1]),
+                "pz": float(rig_t_cam[2]),
+                "qx": float(quaternion_xyzw[0]),
+                "qy": float(quaternion_xyzw[1]),
+                "qz": float(quaternion_xyzw[2]),
+                "qw": float(quaternion_xyzw[3]),
+            }
+        )
     cameras: list[dict[str, object]] = [
         {"camera_type": model, "intrinsics": {"fx": 60.0, "fy": 60.1, "cx": 48.0, "cy": 48.5, **terms}} for _ in range(num_cameras)
     ]
@@ -534,7 +643,9 @@ def build_hub(
 
     calibration_file: Path = remote / "M_monado_datasets" / profile.hf_dir / "extras" / "calibration.json"
     calibration_file.parent.mkdir(parents=True, exist_ok=True)
-    calibration_file.write_text(calibration_json(profile.num_cameras, "kb4" if device == "index" else "pinhole-radtan8"))
+    calibration_file.write_text(
+        calibration_json(profile.num_cameras, "kb4" if device == "index" else "pinhole-radtan8", follow=profile.follow)
+    )
 
     size: int = archive_bytes if archive_bytes is not None else (archive_dir / f"{SEQUENCE}.zip").stat().st_size
     listing: list[tuple[str, int]] = [(f"{collection_path}/{SEQUENCE}.zip", size), (f"{collection_path}/README.md", 12)]
@@ -859,6 +970,34 @@ def test_a_world_up_the_data_disagrees_with_is_announced(
     assert "measured +y" in output
 
 
+def test_a_follow_frame_the_calibration_disagrees_with_is_announced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
+) -> None:
+    """A declared follow frame is a claim about the calibration; convert re-derives it."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    rolled: FollowFrame = FollowFrame(forward=MSD_DEVICES["index"].follow.forward, up=(0.0, 1.0, 0.0))
+    monkeypatch.setitem(MSD_DEVICES, "index", replace(MSD_DEVICES["index"], follow=rolled))
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    dataset.convert(identity, source, force=False)
+
+    output: str = capsys.readouterr().out
+    assert "follow frame" in output
+    assert "up off by 89" in output, "a quarter-turn roll is what the tolerance exists to catch"
+
+
+def test_a_follow_frame_the_calibration_agrees_with_stays_quiet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
+) -> None:
+    """The synthetic calibration is built from the Index's declared frame, so nothing is said."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    dataset.convert(identity, source, force=False)
+
+    assert "follow frame" not in capsys.readouterr().out
+
+
 def test_both_layers_are_skipped_together_and_rebuilt_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
     """Both layers come out of one archive fetch, so a half-converted sequence is redone."""
     hub: FakeHub = build_hub(tmp_path, monkeypatch)
@@ -943,9 +1082,40 @@ def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
     return found
 
 
+@pytest.mark.parametrize("device", ["index", "g2", "odyssey"])
+def test_every_declared_follow_frame_is_two_orthogonal_unit_vectors(device: MsdDeviceChoice) -> None:
+    """The constants are typed in by hand from a calibration, so the invariant is checked here."""
+    follow: FollowFrame = MSD_DEVICES[device].follow
+    assert np.linalg.norm(follow.forward) == pytest.approx(1.0, abs=1e-3)
+    assert np.linalg.norm(follow.up) == pytest.approx(1.0, abs=1e-3)
+    assert float(np.dot(follow.forward, follow.up)) == pytest.approx(0.0, abs=1e-3)
+
+
+@pytest.mark.parametrize("device", ["index", "g2", "odyssey"])
+def test_both_follow_views_are_oriented_by_the_device_own_frame(device: MsdDeviceChoice) -> None:
+    """Every headset carries its IMU differently, so one shared eye would tilt two of three."""
+    follow: FollowFrame = MSD_DEVICES[device].follow
+    dataset: MsdDataset = MsdDataset(MsdConfig(device=device))
+
+    for blueprint in (dataset.default_blueprint(), dataset.table_blueprint()):
+        view: rrb.View = next(each for each in blueprint_views(blueprint) if each.name == "Follow")
+        eye: object = view.properties["EyeControls3D"]
+        assert isinstance(eye, rrb.EyeControls3D)
+        assert eye_vector(eye.eye_up) == pytest.approx(list(follow.up), abs=1e-6)
+        assert eye_vector(eye.look_target) == pytest.approx([0.3 * axis for axis in follow.forward], abs=1e-6)
+        # Behind the headset and above it: the eye leans against forward and with up.
+        position: list[float] = eye_vector(eye.position)
+        assert float(np.dot(position, follow.forward)) < 0.0
+        assert float(np.dot(position, follow.up)) > 0.0
+
+
+UPRIGHT_FOLLOW: FollowFrame = FollowFrame(forward=(0.0, 0.0, 1.0), up=(0.0, -1.0, 0.0))
+"""A stand-in frame for the layout tests, which are about panes and not orientation."""
+
+
 def test_only_a_magnetometer_device_gets_the_third_plot_pane() -> None:
-    with_magnetometer: list[rrb.View] = blueprint_views(build_blueprint(4, has_magnetometer=True))
-    without: list[rrb.View] = blueprint_views(build_blueprint(2, has_magnetometer=False))
+    with_magnetometer: list[rrb.View] = blueprint_views(build_blueprint(4, has_magnetometer=True, follow=UPRIGHT_FOLLOW))
+    without: list[rrb.View] = blueprint_views(build_blueprint(2, has_magnetometer=False, follow=UPRIGHT_FOLLOW))
 
     assert [view.name for view in with_magnetometer if isinstance(view, rrb.TimeSeriesView)] == [
         "Gyroscope",
