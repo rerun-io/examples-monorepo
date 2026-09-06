@@ -439,14 +439,19 @@ def _log_scalar_channel(recording: rr.RecordingStream, entity_path: str, channel
     )
 
 
-def _log_sensor_node(recording: rr.RecordingStream, node: str, *, name: str, kind: SensorKind, **extra: object) -> None:
+def _log_sensor_node(
+    recording: rr.RecordingStream, node: str, *, name: str, kind: SensorKind, rig_T_sensor: rr.Transform3D | None = None, **extra: object
+) -> None:
     """Tag one non-camera peer sensor node with the static pair exoego:v2 §6 requires.
 
-    The identity ``rig_T_sensor`` is **not** optional: a reader that cannot place
-    a sensor's samples in the rig frame has to special-case the writer instead.
+    The ``rig_T_sensor`` is **not** optional: a reader that cannot place a
+    sensor's samples in the rig frame has to special-case the writer instead. It
+    defaults to the identity, which is right for the sensor a rig names as its
+    ``reference`` and wrong for any other — a device with two IMUs (Aria's
+    imu-right and imu-left) passes the second one's real pose.
     ``**extra`` carries a sensor's own optional keys (the magnetometer's ``unit``).
     """
-    rr.log(node, IDENTITY_TRANSFORM, static=True, recording=recording)
+    rr.log(node, IDENTITY_TRANSFORM if rig_T_sensor is None else rig_T_sensor, static=True, recording=recording)
     rr.log(node, rr.AnyValues(drop_untyped_nones=True, name=name, kind=kind, **extra), static=True, recording=recording)
 
 
@@ -521,12 +526,24 @@ def log_pose_track(
     )
 
 
-def log_imu(recording: rr.RecordingStream, rig: int, imu: int, *, gyro: ImuChannel, accel: ImuChannel, name: str) -> None:
+def log_imu(
+    recording: rr.RecordingStream,
+    rig: int,
+    imu: int,
+    *,
+    gyro: ImuChannel,
+    accel: ImuChannel,
+    name: str,
+    rig_T_imu: rr.Transform3D | None = None,
+) -> None:
     """Log one IMU node: both channels columnar, plus the static node metadata.
 
-    The static identity ``rig_T_imu`` is **not** optional — exoego:v2 §8 makes
+    The static ``rig_T_imu`` is **not** optional — exoego:v2 §8 makes
     ``Transform3D`` part of the IMU node, so a reader can resolve the sensor's
-    place in the rig frame without special-casing the writer.
+    place in the rig frame without special-casing the writer. It defaults to the
+    identity, which is right for the one IMU a rig names as its ``reference``
+    and wrong for any other: a device with two IMUs (Aria's imu-right and
+    imu-left) must pass the second one's real pose.
 
     Args:
         recording: Destination recording stream.
@@ -535,10 +552,11 @@ def log_imu(recording: rr.RecordingStream, rig: int, imu: int, *, gyro: ImuChann
         gyro: Angular-velocity samples in rad/s; an empty channel is skipped.
         accel: Linear-acceleration samples in m/s^2; an empty channel is skipped.
         name: Human label for the device (e.g. ``"dev0"``, ``"oak-imu"``).
+        rig_T_imu: This IMU's pose in the rig frame; ``None`` logs the identity.
     """
     _log_scalar_channel(recording, schema.gyro_path(rig, imu), gyro)
     _log_scalar_channel(recording, schema.accel_path(rig, imu), accel)
-    _log_sensor_node(recording, schema.imu_path(rig, imu), name=name, kind="imu")
+    _log_sensor_node(recording, schema.imu_path(rig, imu), name=name, kind="imu", rig_T_sensor=rig_T_imu)
 
 
 HEADING_COLOR: tuple[int, int, int] = (255, 128, 0)
