@@ -208,8 +208,11 @@ MSD_DEVICES: dict[MsdDeviceChoice, MsdDevice] = {
         num_cameras=2,
         has_magnetometer=False,
         label="valve-index",
-        # Measured on MIO09_short_1_updown: +y carries 1.00 of |g|. OpenVR worlds
-        # are right-handed Y-up, so Lighthouse ground truth agreeing is expected.
+        # Measured on MIO09_short_1_updown: +y at 0.96 of |g|. OpenVR worlds are
+        # right-handed Y-up, so Lighthouse ground truth agreeing is expected. The
+        # measurement is not a restatement of the raw samples: over that window the
+        # accelerometer's own mean points along the headset's -x, and only the gt
+        # rotation (123..142 deg from identity there) turns it into world +y.
         world_up="+y",
         gt_source="lighthouse",
     ),
@@ -219,7 +222,9 @@ MSD_DEVICES: dict[MsdDeviceChoice, MsdDevice] = {
         num_cameras=4,
         has_magnetometer=True,
         label="reverb-g2",
-        # Measured on MGO09_short_1_updown; the MoCap rig documents no convention.
+        # Measured on MGO09_short_1_updown: +y at 0.98 of |g|. The MoCap rig
+        # documents no convention, and the sign comes entirely from the gt
+        # rotation — the raw accelerometer mean points along the headset's -y.
         world_up="+y",
         gt_source="mocap",
     ),
@@ -229,7 +234,8 @@ MSD_DEVICES: dict[MsdDeviceChoice, MsdDevice] = {
         num_cameras=2,
         has_magnetometer=True,
         label="odyssey-plus",
-        # Measured on MOO09_short_1_updown; same undocumented MoCap rig as the G2.
+        # Measured on MOO09_short_1_updown: +y at 0.93 of |g|; same undocumented
+        # MoCap rig as the G2, and the same Y-up answer.
         world_up="+y",
         gt_source="mocap",
     ),
@@ -1226,7 +1232,7 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
             recording.send_property(
                 "gt",
                 rr.AnyValues(
-                    num_poses=gt.times_ns.size,
+                    num_poses=int(gt.times_ns.size),
                     duration_ns=int(gt.times_ns[-1] - gt.times_ns[0]),
                     num_sanitized=gt.num_sanitized,
                     source=self.device.gt_source,

@@ -118,7 +118,10 @@ and then fixed per device in `MSD_DEVICES`, so every rrd of a device carries the
 same root `ViewCoordinates`. Every convert re-measures its own sequence, records
 the result in the gt properties (`measured_up`, `measured_up_fraction`), and
 warns when it disagrees with the declared axis instead of reorienting one rrd on
-its own. A `gt` row whose quaternion is not unit-norm is a tracking dropout: its
+its own. All three headsets measure **+y** on their `*09_short_1_updown`
+sequence — 0.96, 0.98 and 0.93 of |g| for the Index, G2 and Odyssey+ — so all
+three state `RIGHT_HAND_Y_UP` (`RUB`) at the root. A `gt` row whose quaternion is
+not unit-norm is a tracking dropout: its
 rotation becomes identity so the chain keeps working for later frames, and the
 count lands in the properties as `num_sanitized`.
 
