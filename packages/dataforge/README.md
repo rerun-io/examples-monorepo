@@ -59,7 +59,17 @@ That registers dataset `wildcap-<corpus>`. `.mov` is skipped with a warning
 sensor logs — about 350 GB in total. dataforge never keeps that: `download`
 fetches only the device calibration and prints the plan, and `convert` fetches
 **one** sequence, streams its PNGs straight into the AV1 encoder, writes the
-rrd, and deletes the archive again.
+rrds, and deletes the archive again.
+
+One sequence is **two** rrds under one recording id, so the catalog stacks them
+as layers of one segment: `base/` holds the video, the IMU and the
+magnetometer, and `gt/` holds the ground truth — the temporal `world_T_rig` on
+the rig node at the archive's full ~1 kHz rate, the whole path as a static
+`LineStrips3D` at `/world/runs/gt/trajectory`, a per-pose `Points3D` at
+`/world/runs/gt/trail` that the default blueprint shows through a −10 s
+cursor-relative window, and the root `ViewCoordinates`. Both layers come out of
+one archive fetch, so `convert` skips a sequence only when both exist and
+rebuilds both when either is missing.
 
 One headset is one catalog dataset, because a catalog dataset holds one default
 blueprint and the three headsets have different camera counts:
@@ -93,10 +103,24 @@ cannot read; those go through the `7zz` CLI (the conda-forge `7zip` package),
 one camera directory extracted at a time.
 
 `video_time` is the device clock minus `t0`, and `t0` is the earliest sample of
-**any** stream including `gt` — the ground-truth layer is a sibling rrd and both
-must share the origin. Camera extrinsics come from the device's basalt
-`calibration.json`, whose `T_imu_cam` is the camera pose in the IMU frame; the
-rig frame *is* that frame, so the rig node states `reference = "imu_00"`.
+**any** stream including `gt` — the two layers must share the origin, and the gt
+file is usually the earliest stream. Camera extrinsics come from the device's
+basalt `calibration.json`, whose `T_imu_cam` is the camera pose in the IMU
+frame; the rig frame *is* that frame, so the rig node states
+`reference = "imu_00"`.
+
+MSD documents no world axes: the Index's ground truth comes from SteamVR
+Lighthouse and the G2's and Odyssey+'s from an undocumented MoCap rig. The up
+axis is therefore **measured** — `measured_world_up` rotates the first two
+seconds of accelerometer samples into the world with the ground truth's own
+orientation and averages, since an accelerometer at rest reads +g pointing up —
+and then fixed per device in `MSD_DEVICES`, so every rrd of a device carries the
+same root `ViewCoordinates`. Every convert re-measures its own sequence, records
+the result in the gt properties (`measured_up`, `measured_up_fraction`), and
+warns when it disagrees with the declared axis instead of reorienting one rrd on
+its own. A `gt` row whose quaternion is not unit-norm is a tracking dropout: its
+rotation becomes identity so the chain keeps working for later frames, and the
+count lands in the properties as `num_sanitized`.
 
 ### Environment variables
 
@@ -134,7 +158,7 @@ is a nominal-rate fiction for such a file.
 | `robocap` | one `(device, session)`; file-roll segments merge at convert | 6 fisheye video streams, the dev0 IMU, the cap mesh |
 | `selfcap` | one cut episode | 4 phone exo rigs + the OAK ego rig + the Quest (9 cameras), the OAK IMU, the Quest head-pose track |
 | `wildcap` | one capture directory | the videos only: no `Pinhole`, no `ViewCoordinates`, no transforms — calibration, sync and localization are later layers |
-| `msd` | one Monado SLAM sequence, fetched on demand | 2 or 4 grayscale video streams (AV1-encoded from the archive's PNGs), the IMU, and on the G2/Odyssey+ the magnetometer |
+| `msd` | one Monado SLAM sequence, fetched on demand | **two** rrds: `base` with 2 or 4 grayscale video streams (AV1-encoded from the archive's PNGs), the IMU and on the G2/Odyssey+ the magnetometer; `gt` with the ~1 kHz `world_T_rig`, its path and trail, and the root `ViewCoordinates` |
 
 A config's `command` is its CLI subcommand; its `name` is the catalog dataset
 and the prefix of every recording id. They are equal for robocap and selfcap;
@@ -144,7 +168,8 @@ wildcap derives `wildcap-<corpus>` and msd derives `msd-<device>`.
 `convert` writes `<DATAFORGE_OUTPUT_ROOT>/base/<recording_id>.rrd` through a
 temp file that atomically replaces the target, so "exists = done" and a re-run
 never truncates a file the catalog server holds open. Derived layers (slam,
-pose, labels) stack onto the same entities as sibling layers. `register` walks
+pose, labels) stack onto the same entities as sibling layers; msd already writes
+one, its `gt/` rrd, in the same convert. `register` walks
 every layer directory it knows — `base`, which is required, then `gt` — and
 registers each under its own layer name, so a corpus with no ground-truth pass
 registers exactly as before.
