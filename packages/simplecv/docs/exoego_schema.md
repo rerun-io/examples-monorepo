@@ -100,7 +100,12 @@ camera: a rig whose extrinsics are all expressed in its inertial frame states
 trivially states `"cam_00"`.
 
 Per camera, on `/world/rig_NN/cam_MM`: `name` (human stream label) and `kind`
-(`"rgb"` / `"grayscale"`, a best-effort content hint). The reference camera of a
+(`"rgb"` / `"grayscale"`, a best-effort content hint). Readers must also treat as
+optional the two further per-camera keys `camera_model` (the projection's own name,
+e.g. `"kb4"` / `"pinhole-radtan8"`, so a consumer need not read it off the distortion
+component) and `distortion_valid_radius` (the radius in normalized image coordinates
+past which that model stops holding), which dataforge writes for the Monado SLAM
+Datasets. The reference camera of a
 **multi-camera** rig gets a green frustum tint; single-camera rigs are untinted.
 
 ## 5. Ground-truth annotations (paths unchanged from v1)

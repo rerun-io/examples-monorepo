@@ -209,6 +209,14 @@ def test_radtan8_becomes_a_pinhole_with_brown_conrady_and_no_rpmax() -> None:
     assert (camera.intrinsics.width, camera.intrinsics.height) == (640, 480)
 
 
+def test_rpmax_is_read_off_a_radtan8_block_and_is_absent_from_a_kb4_one() -> None:
+    """Only the rational model has a validity radius, so only radtan8 carries one."""
+    radtan8: MsdCalibration = serde.json.from_json(MsdCalibration, RADTAN8_CALIBRATION)
+    kb4: MsdCalibration = serde.json.from_json(MsdCalibration, KB4_CALIBRATION)
+    assert radtan8.value0.intrinsics[0].intrinsics.rpmax == 2.7276
+    assert kb4.value0.intrinsics[1].intrinsics.rpmax is None
+
+
 def test_extrinsics_are_the_camera_pose_in_the_rig_frame() -> None:
     """``T_imu_cam`` is ``rig_T_cam``; the rig frame is the IMU frame."""
     calibration: MsdCalibration = serde.json.from_json(MsdCalibration, KB4_CALIBRATION)
@@ -563,6 +571,8 @@ FIXTURE_CAMERA_YAW_DEG: float = 3.0
 """How far each fixture camera is yawed outward from the device's forward, as a real pair is."""
 FIXTURE_BASELINE_M: float = 0.06
 """Stereo baseline of the fixture's front pair, along the device's right."""
+FIXTURE_RPMAX: float = 2.72
+"""Validity radius the fixture's radtan8 cameras declare, as a real G2 file does."""
 
 
 def calibration_json(num_cameras: int, model: str, *, follow: FollowFrame) -> str:
@@ -579,7 +589,7 @@ def calibration_json(num_cameras: int, model: str, *, follow: FollowFrame) -> st
     terms: dict[str, float] = (
         {"k1": 0.19, "k2": 0.04, "k3": -0.23, "k4": 0.09}
         if model == "kb4"
-        else {"k1": 0.30, "k2": -0.02, "p1": -0.0002, "p2": 6e-05, "k3": 0.015, "k4": 0.57, "k5": -0.06, "k6": 0.03, "rpmax": 2.72}
+        else {"k1": 0.30, "k2": -0.02, "p1": -0.0002, "p2": 6e-05, "k3": 0.015, "k4": 0.57, "k5": -0.06, "k6": 0.03, "rpmax": FIXTURE_RPMAX}
     )
     forward_xyz: Float64[ndarray, "3"] = np.array(follow.forward, dtype=np.float64)
     up_xyz: Float64[ndarray, "3"] = np.array(follow.up, dtype=np.float64)
@@ -851,6 +861,41 @@ def test_the_logged_camera_node_carries_rig_T_cam(tmp_path: Path, monkeypatch: p
         # float32 on the wire, so a loose tolerance is the honest one.
         np.testing.assert_allclose(cam_R_rig.T, rig_R_cam, atol=1e-6)
         np.testing.assert_allclose(-cam_R_rig.T @ cam_t_rig, rig_t_cam, atol=1e-6)
+
+
+def test_a_radtan8_camera_node_names_its_projection_and_carries_its_validity_radius(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path
+) -> None:
+    """A consumer reads the projection off the node, plus where the rational model stops holding."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch, device="odyssey")
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    target: Path = dataset.convert(identity, source, force=False)
+
+    store: rr.experimental.ChunkStore = read_back(target)
+    node: str = schema.cam_path(0, 0)
+    row: dict[str, list[object]] = store.reader(index=None, contents=node).to_arrow_table().to_pylist()[0]
+    assert row[f"{node}:camera_model"][0] == "pinhole-radtan8"
+    assert row[f"{node}:distortion_valid_radius"][0] == pytest.approx(FIXTURE_RPMAX)
+
+
+def test_a_kb4_camera_node_names_its_projection_and_claims_no_validity_radius(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path
+) -> None:
+    """kb4 is valid over the whole fisheye, so it declares no radius at all."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch, device="index")
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    target: Path = dataset.convert(identity, source, force=False)
+
+    store: rr.experimental.ChunkStore = read_back(target)
+    node: str = schema.cam_path(0, 0)
+    table: pa.Table = store.reader(index=None, contents=node).to_arrow_table()
+    assert table.to_pylist()[0][f"{node}:camera_model"][0] == "kb4"
+    # AnyValues only *omits* a None key while it is untyped: a radtan8 convert earlier in
+    # this process types it, and later Nones then arrive as nulls. Assert on the value.
+    radius: str = f"{node}:distortion_valid_radius"
+    assert radius not in table.column_names or table.column(radius).null_count == table.num_rows
 
 
 # ── gt layer ──────────────────────────────────────────────────────────────

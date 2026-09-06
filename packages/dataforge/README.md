@@ -80,6 +80,11 @@ blueprint and the three headsets have different camera counts:
 | `g2` | `msd-g2` | 4 × 640×480 @ ~30 fps, `pinhole-radtan8` | yes |
 | `odyssey` | `msd-odyssey` | 2 × 640×480, `pinhole-radtan8` | yes |
 
+Every device keeps upstream's default calibration — `kb4` on the Index, the
+`pinhole-radtan8` rational model on the G2 and Odyssey+ — so each camera node
+states its `camera_model`, and a radtan8 camera also carries that model's
+validity radius as `distortion_valid_radius`.
+
 ```bash
 export DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/msd-rrd     # rrds go to the NAS
 pixi run -e dataforge --frozen dataforge-download msd --device index

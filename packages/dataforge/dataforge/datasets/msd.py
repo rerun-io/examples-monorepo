@@ -390,8 +390,7 @@ class BasaltIntrinsics:
     """Projection and distortion terms of one camera, in basalt's flat layout.
 
     Both models share the ``fx fy cx cy`` head. ``kb4`` fills ``k1..k4`` only;
-    ``pinhole-radtan8`` fills all eight plus a ``rpmax`` validity radius that
-    Rerun has no place for and that pyserde drops with every other unknown key.
+    ``pinhole-radtan8`` fills all eight plus a ``rpmax`` validity radius.
     """
 
     fx: float
@@ -418,6 +417,8 @@ class BasaltIntrinsics:
     """First tangential term (radtan8 only)."""
     p2: float = 0.0
     """Second tangential term (radtan8 only)."""
+    rpmax: float | None = None
+    """radtan8's validity radius in normalized image coordinates; ``None`` for kb4, which has no such limit."""
 
 
 @serde.serde
@@ -1291,7 +1292,21 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
             # ViewCoordinates, because it is what establishes a world frame at all.
             log_rig_node(recording, RIG, reference=RIG_REFERENCE, num_cameras=self.device.num_cameras, name=self.device.label, kind="ego")
             for index, (camera, clip, times_ns) in enumerate(zip(cameras, clips, camera_times, strict=True)):
-                rr.log(schema.cam_path(RIG, index), rr.AnyValues(name=f"cam{index}", kind="grayscale"), static=True, recording=recording)
+                # The model tag saves a consumer from inferring the projection from the
+                # distortion component. ``rpmax`` is radtan8's own key, so it is already
+                # None on a kb4 camera and AnyValues leaves the key off entirely.
+                basalt_camera: BasaltCamera = calibration.value0.intrinsics[index]
+                rr.log(
+                    schema.cam_path(RIG, index),
+                    rr.AnyValues(
+                        name=f"cam{index}",
+                        kind="grayscale",
+                        camera_model=basalt_camera.camera_type,
+                        distortion_valid_radius=basalt_camera.intrinsics.rpmax,
+                    ),
+                    static=True,
+                    recording=recording,
+                )
                 log_pinhole(
                     camera,
                     cam_log_path=Path(schema.cam_path(RIG, index)),
