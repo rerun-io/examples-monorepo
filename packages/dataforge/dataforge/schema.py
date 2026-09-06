@@ -4,7 +4,8 @@ The authoritative prose spec is ``packages/simplecv/docs/exoego_schema.md``:
 one ``video_time`` timestamp timeline everywhere, world-anchored rigs at
 ``/world/rig_NN``, cameras at ``.../cam_MM/pinhole/video``, and IMUs at the
 (previously reserved) ``.../imu_MM/{gyro,accel}``. dataforge is the first
-emitter of the IMU section.
+emitter of the IMU section (§8) and of the magnetometer section (§9), whose
+``.../mag_MM/{field,heading}`` is the same peer-sensor shape.
 """
 
 from __future__ import annotations
@@ -58,6 +59,21 @@ def gyro_path(rig: int, imu: int) -> str:
 def accel_path(rig: int, imu: int) -> str:
     """``.../imu_MM/accel`` — m/s^2 Scalars on ``video_time``."""
     return f"{imu_path(rig, imu)}/accel"
+
+
+def mag_path(rig: int, mag: int) -> str:
+    """``/world/rig_NN/mag_MM`` — carries the static ``rig_T_mag`` transform."""
+    return f"{rig_path(rig)}/mag_{_index(mag, 'mag')}"
+
+
+def field_path(rig: int, mag: int) -> str:
+    """``.../mag_MM/field`` — 3-component Scalars in the sensor's native units."""
+    return f"{mag_path(rig, mag)}/field"
+
+
+def heading_path(rig: int, mag: int) -> str:
+    """``.../mag_MM/heading`` — the field direction as a fixed-length Arrows3D."""
+    return f"{mag_path(rig, mag)}/heading"
 
 
 def run_path(source: str) -> str:

@@ -26,7 +26,7 @@ import av
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from jaxtyping import Float64, Int64
+from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 
 from dataforge import schema
@@ -259,8 +259,9 @@ def log_rig_node(
         name: Optional human device label (``"robocap"``, ``"oak"``, an iPhone name).
         kind: Optional device role (``"exo"`` / ``"ego"`` / ``"quest"``).
     """
-    # AnyValues drops None-valued kwargs, so name/kind simply stay off the node
-    # when a dataset has nothing meaningful to say.
+    # AnyValues omits a None-valued kwarg while its key is still untyped, so name/kind
+    # simply stay off the node when a dataset has nothing meaningful to say. The registry
+    # is process-global: once any recording types the key, later Nones arrive as nulls.
     rr.log(
         schema.rig_path(rig),
         rr.AnyValues(schema_version=schema.EXOEGO_SCHEMA_VERSION, reference=reference, num_cameras=num_cameras, name=name, kind=kind),
@@ -409,3 +410,64 @@ def log_imu(recording: rr.RecordingStream, rig: int, imu: int, *, gyro: ImuChann
         )
     rr.log(schema.imu_path(rig, imu), IDENTITY_TRANSFORM, static=True, recording=recording)
     rr.log(schema.imu_path(rig, imu), rr.AnyValues(name=name, kind="imu"), static=True, recording=recording)
+
+
+HEADING_COLOR: tuple[int, int, int] = (255, 128, 0)
+"""Fixed arrow tint for every magnetometer heading; the field is one quantity, not a per-row class."""
+
+
+def log_magnetometer(
+    recording: rr.RecordingStream,
+    rig: int,
+    mag: int,
+    *,
+    field: ImuChannel,
+    name: str,
+    unit: str | None = None,
+    heading_length_m: float = 0.15,
+) -> None:
+    """Log one magnetometer node: the raw field, a heading arrow, and the node metadata.
+
+    The field is logged in the **sensor's own units** — consumer hardware
+    ships unlabelled counts, and inventing a calibration would be worse than
+    saying so — with the optional ``unit`` AnyValue recording what they are.
+    ``heading`` is a derived convenience: the same samples normalized to a fixed
+    length so the field direction is visible in the 3D view, riding the rig like
+    every other child. Zero-norm rows (a dropout) get no arrow rather than a NaN.
+
+    The static identity ``rig_T_mag`` is **not** optional, for the same reason as
+    the IMU's: a reader resolves the sensor's place in the rig frame without
+    special-casing the writer.
+
+    Args:
+        recording: Destination recording stream.
+        rig: Rig index owning the magnetometer.
+        mag: Magnetometer index within the rig.
+        field: Timestamped 3-axis field samples; an empty channel logs only the
+            static node.
+        name: Human label for the device (e.g. ``"reverb-g2"``).
+        unit: Physical unit of the samples when it is known (e.g. ``"mG"``);
+            ``None`` leaves the key off rather than guessing.
+        heading_length_m: Length of the heading arrows, in metres.
+    """
+    node: str = schema.mag_path(rig, mag)
+    if field.times_ns.size:
+        rr.send_columns(
+            schema.field_path(rig, mag),
+            indexes=[rr.TimeColumn(schema.TIMELINE, duration=field.times_ns.astype("timedelta64[ns]"))],
+            columns=rr.Scalars.columns(scalars=field.values_xyz),
+            recording=recording,
+        )
+        norms: Float64[ndarray, "n_samples"] = np.linalg.norm(field.values_xyz, axis=1)
+        measured: Bool[ndarray, "n_samples"] = norms > 0.0
+        if measured.any():
+            headings: Float64[ndarray, "n_headings 3"] = field.values_xyz[measured] / norms[measured, None] * heading_length_m
+            rr.log(node + "/heading", rr.Arrows3D.from_fields(colors=HEADING_COLOR), static=True, recording=recording)
+            rr.send_columns(
+                schema.heading_path(rig, mag),
+                indexes=[rr.TimeColumn(schema.TIMELINE, duration=field.times_ns[measured].astype("timedelta64[ns]"))],
+                columns=rr.Arrows3D.columns(vectors=headings),
+                recording=recording,
+            )
+    rr.log(node, IDENTITY_TRANSFORM, static=True, recording=recording)
+    rr.log(node, rr.AnyValues(name=name, kind="mag", unit=unit), static=True, recording=recording)
