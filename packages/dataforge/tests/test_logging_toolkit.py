@@ -60,10 +60,18 @@ def clip(tmp_path_factory) -> Path:
     return output
 
 
+def read_back(rrd: Path) -> rr.experimental.ChunkStore:
+    """Load a saved rrd the way a consumer does: reader → store → queryable views.
+
+    The stream is materialized because ``from_chunks`` declares ``Sequence[Chunk]``;
+    these recordings are a few dozen rows, so the list costs nothing.
+    """
+    return rr.experimental.ChunkStore.from_chunks(list(rr.experimental.RrdReader(rrd).stream()))
+
+
 def index_column(rrd: Path, index: str = schema.TIMELINE) -> Int64[ndarray, "n_rows"]:
     """Every value of one index in a saved rrd, ascending."""
-    store: rr.experimental.ChunkStore = rr.experimental.ChunkStore.from_chunks(rr.experimental.RrdReader(rrd).stream())
-    table: pa.Table = store.reader(index=index).to_arrow_table().sort_by(index)
+    table: pa.Table = read_back(rrd).reader(index=index).to_arrow_table().sort_by(index)
     return table.column(index).combine_chunks().cast(pa.int64()).to_numpy()
 
 
@@ -152,8 +160,7 @@ def synthetic_field(count: int) -> ImuChannel:
 
 def entity_rows(rrd: Path, entity_path: str, component: str) -> pa.Table:
     """Rows of one component column, index-sorted, from a saved rrd."""
-    store: rr.experimental.ChunkStore = rr.experimental.ChunkStore.from_chunks(rr.experimental.RrdReader(rrd).stream())
-    table: pa.Table = store.reader(index=schema.TIMELINE).to_arrow_table().sort_by(schema.TIMELINE)
+    table: pa.Table = read_back(rrd).reader(index=schema.TIMELINE).to_arrow_table().sort_by(schema.TIMELINE)
     return table.select([schema.TIMELINE, f"{entity_path}:{component}"]).drop_null()
 
 
@@ -182,7 +189,7 @@ def test_magnetometer_node_carries_its_static_pose_and_metadata(tmp_path: Path) 
     with rr.RecordingStream("dataforge", recording_id="mag_static") as recording:
         recording.save(target)
         log_magnetometer(recording, RIG, MAG, field=synthetic_field(8), name="odyssey", unit=None)
-    store: rr.experimental.ChunkStore = rr.experimental.ChunkStore.from_chunks(rr.experimental.RrdReader(target).stream())
+    store: rr.experimental.ChunkStore = read_back(target)
     columns: set[str] = {str(column) for column in store.schema()}
     node: str = schema.mag_path(RIG, MAG)
     assert any(f"Column name: {node}:Transform3D:" in column for column in columns), "rig_T_mag is mandatory, like the IMU's"
@@ -202,7 +209,7 @@ def test_empty_magnetometer_logs_only_the_static_node(tmp_path: Path) -> None:
     with rr.RecordingStream("dataforge", recording_id="mag_empty") as recording:
         recording.save(target)
         log_magnetometer(recording, RIG, MAG, field=empty, name="none")
-    store: rr.experimental.ChunkStore = rr.experimental.ChunkStore.from_chunks(rr.experimental.RrdReader(target).stream())
+    store: rr.experimental.ChunkStore = read_back(target)
     columns: set[str] = {str(column) for column in store.schema()}
     assert any(f"{schema.mag_path(RIG, MAG)}:Transform3D:" in column for column in columns)
     assert not any(schema.field_path(RIG, MAG) in column for column in columns)
