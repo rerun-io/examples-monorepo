@@ -271,7 +271,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         }
         let check: NullspaceCheck =
             check_marg_nullspace(&self.nullspace_marg_data, &self.ba, &direction)?;
-        let eigenvalues: nalgebra::DVector<f64> = check_eigenvalues(&self.nullspace_marg_data);
+        let eigenvalues: nalgebra::DVector<f64> = check_eigenvalues(&self.nullspace_marg_data)?;
         Ok((check, eigenvalues.iter().copied().collect()))
     }
 
