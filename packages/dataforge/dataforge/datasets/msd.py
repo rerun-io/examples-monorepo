@@ -85,19 +85,16 @@ from dataforge.euroc import (
 )
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
-    FrameSource,
     ImuChannel,
-    encode_frames_to_mp4,
     log_camera_node,
     log_imu,
     log_magnetometer,
     log_pose_track,
     log_rig_node,
     log_video_stream,
-    require_av1_nvenc,
-    resolve_ffmpeg,
     time_column,
 )
+from dataforge.video_encoding import FrameSource, encode_frames_to_mp4, require_av1_nvenc, resolve_ffmpeg
 
 REPO_ID: str = "collabora/monado-slam-datasets"
 """HuggingFace dataset repo holding every MSD device."""

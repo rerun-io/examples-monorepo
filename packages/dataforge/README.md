@@ -168,7 +168,8 @@ layer-major output tree: `base/` and its sibling `gt/`), `schema.py` (the
 `exoego:v2` entity paths and the single `video_time` timeline, as code),
 `writing.py` (atomic publication and the capture/convert recording properties),
 `logging_toolkit.py` (the shared rig-node, video-stream, camera, IMU,
-magnetometer and pose-track writers, plus the AV1 encoder), `blueprints.py` (the
+magnetometer and pose-track writers), `video_encoding.py` (the pipe-fed AV1
+encoder, re-exported through `logging_toolkit`), `blueprints.py` (the
 single-rig viewer layout robocap and msd both build from), `archives.py` (reading
 members out of a plain zip or an Info-ZIP volume set), `basalt.py` (basalt's
 `calibration.json`: camera models, extrinsics, and the follow frame), and

@@ -1,30 +1,22 @@
-"""Shared exoego:v2 writers every dataforge converter reuses, plus the video encoder.
+"""exoego:v2 writers + video remux: the taps every dataforge converter reuses.
 
 These taps live together because every dataset needs them *identically* and each
 one hides an invariant that is easy to break silently: the rig node's honest key
 set, the ``Mp4Reader`` → ``send_chunks`` pass-through (which must not mint fresh
-row ids), the IMU/magnetometer nodes' mandatory static ``rig_T_sensor``, and the
-encoder's ban on B-frames.
+row ids), and the IMU/magnetometer nodes' mandatory static ``rig_T_sensor``.
 
-Datasets that ship image sequences instead of video get here through
-``encode_frames_to_mp4``: frames are piped straight into ffmpeg's stdin, so a
-converter never materializes a decoded frame tree on disk.
+The encoder that produces the mp4 these writers remux lives next door in
+``dataforge.video_encoding`` and is re-exported here, so a converter that
+encodes an image sequence and then logs it has one import to make.
 """
 
 from __future__ import annotations
 
-import contextlib
-import functools
 import os
-import shutil
-import subprocess
-import threading
-from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
 
-import av
 import numpy as np
 import pyarrow as pa
 import rerun as rr
@@ -35,87 +27,79 @@ from simplecv.rerun_log_utils import log_pinhole
 from simplecv.rig import SensorKind
 
 from dataforge import schema
-
-FrameKind: TypeAlias = Literal["png", "gray8", "rgb24"]
-"""How one element of an encoder frame iterable is laid out."""
-
-RAW_PIXEL_FORMATS: dict[FrameKind, str] = {"gray8": "gray", "rgb24": "rgb24"}
-"""ffmpeg ``-pix_fmt`` name for each rawvideo frame kind."""
+from dataforge.video_encoding import (
+    RAW_PIXEL_FORMATS as RAW_PIXEL_FORMATS,
+)
+from dataforge.video_encoding import (
+    FrameKind as FrameKind,
+)
+from dataforge.video_encoding import (
+    FrameSource as FrameSource,
+)
+from dataforge.video_encoding import (
+    encode_frames_to_mp4 as encode_frames_to_mp4,
+)
+from dataforge.video_encoding import (
+    encode_image_files_to_mp4 as encode_image_files_to_mp4,
+)
+from dataforge.video_encoding import (
+    mp4_frame_count as mp4_frame_count,
+)
+from dataforge.video_encoding import (
+    require_av1_nvenc as require_av1_nvenc,
+)
+from dataforge.video_encoding import (
+    resolve_ffmpeg as resolve_ffmpeg,
+)
 
 VIDEO_SAMPLE_COMPONENT: str = "VideoStream:sample"
 """Component that marks an ``Mp4Reader`` chunk as carrying samples, not keyframe flags."""
+
+VIDEO_KEYFRAME_COMPONENT: str = "VideoStream:is_keyframe"
+"""Component of the trailing chunk that flags which samples are keyframes."""
+
+VideoChunkKind: TypeAlias = Literal["codec", "sample", "keyframe"]
+"""What one chunk out of an ``Mp4Reader`` stream is, by the components it carries."""
 
 IDENTITY_TRANSFORM: rr.Transform3D = rr.Transform3D(translation=[0.0, 0.0, 0.0], mat3x3=np.eye(3, dtype=np.float32))
 """Explicit identity pose; an argument-less ``Transform3D`` logs no components at all."""
 
 
-@dataclass(frozen=True, slots=True)
-class FrameSource:
-    """How the caller's frame iterable is laid out for ffmpeg's stdin."""
+def classify_video_chunk(record_batch: pa.RecordBatch) -> VideoChunkKind:
+    """Name one ``Mp4Reader`` chunk by its component set, or refuse to guess.
 
-    kind: FrameKind
-    """``"png"`` feeds encoded PNG bytes through ``image2pipe``; the raw kinds feed ``rawvideo`` planes."""
-    width: int | None = None
-    """Frame width in pixels; required for the raw kinds, which carry no header."""
-    height: int | None = None
-    """Frame height in pixels; required for the raw kinds, which carry no header."""
-
-    def __post_init__(self) -> None:
-        if self.kind == "png":
-            return
-        if self.width is None:
-            raise ValueError(f"a {self.kind} source needs an explicit width: rawvideo frames carry no header")
-        if self.height is None:
-            raise ValueError(f"a {self.kind} source needs an explicit height: rawvideo frames carry no header")
-
-    def input_args(self, *, fps: int) -> list[str]:
-        """ffmpeg input-side arguments that describe this layout on ``pipe:0``."""
-        if self.kind == "png":
-            return ["-f", "image2pipe", "-framerate", str(fps), "-c:v", "png", "-i", "pipe:0"]
-        return [
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            RAW_PIXEL_FORMATS[self.kind],
-            "-s",
-            f"{self.width}x{self.height}",
-            "-framerate",
-            str(fps),
-            "-i",
-            "pipe:0",
-        ]
-
-
-def resolve_ffmpeg() -> Path:
-    """Locate the ffmpeg to encode with: ``DATAFORGE_FFMPEG`` first, then ``PATH``."""
-    override: str | None = os.environ.get("DATAFORGE_FFMPEG")
-    if override:
-        return Path(override)
-    found: str | None = shutil.which("ffmpeg")
-    if found is None:
-        raise FileNotFoundError("no ffmpeg on PATH; set DATAFORGE_FFMPEG to an NVENC-capable binary")
-    return Path(found)
-
-
-@functools.lru_cache
-def require_av1_nvenc(ffmpeg: Path) -> None:
-    """Refuse an ffmpeg that cannot encode AV1 on the GPU, before any frame is read.
-
-    Checked up front because the alternative failure is a software AV1 encode
-    that takes hours on a full sequence and looks like a hang. Cached per binary
-    path: a batch run asks once per camera and the answer cannot change under it.
-    Only the *pass* is cached — ``lru_cache`` stores no entry for a call that
-    raised, so a rejected binary is re-interrogated (and re-rejected) every time.
+    ``Mp4Reader`` emits three shapes and the retiming tap treats each one
+    differently, so which is which is decided here rather than by an ``else``
+    that would silently absorb a fourth shape a later reader adds: a static
+    ``codec`` chunk carrying no index at all, the per-GOP ``sample`` chunks whose
+    index *is* the presentation clock, and one trailing ``keyframe`` chunk
+    indexed on the same timeline but holding one row per keyframe rather than per
+    sample.
 
     Args:
-        ffmpeg: Binary to interrogate with ``-encoders``.
+        record_batch: One chunk's batch, whose ``rerun:*`` schema metadata still
+            carries the entity path an unrecognized shape is reported against.
+
+    Returns:
+        Which of the three shapes this batch is.
+
+    Raises:
+        ValueError: The batch is indexed on ``video_time`` but carries neither a
+            sample nor a keyframe column, so retiming it would be a guess.
     """
-    listed: subprocess.CompletedProcess[str] = subprocess.run(
-        [str(ffmpeg), "-hide_banner", "-encoders"], capture_output=True, text=True, check=False
+    names: list[str] = list(record_batch.schema.names)
+    if schema.TIMELINE not in names:
+        return "codec"
+    if VIDEO_SAMPLE_COMPONENT in names:
+        return "sample"
+    if VIDEO_KEYFRAME_COMPONENT in names:
+        return "keyframe"
+    metadata: dict[bytes, bytes] = record_batch.schema.metadata or {}
+    entity_path: str = metadata.get(b"rerun:entity_path", b"<unknown entity>").decode(errors="replace")
+    raise ValueError(
+        f"{entity_path}: an Mp4Reader chunk indexed on {schema.TIMELINE} carries neither {VIDEO_SAMPLE_COMPONENT} "
+        f"nor {VIDEO_KEYFRAME_COMPONENT}, only {names}; the reader's chunk shapes changed and retiming it would be a guess"
     )
-    if "av1_nvenc" in listed.stdout:
-        return
-    raise RuntimeError(f"{ffmpeg} lists no av1_nvenc encoder; point DATAFORGE_FFMPEG at an NVENC-capable ffmpeg")
 
 
 def time_column(times_ns: Int64[ndarray, "n_samples"]) -> rr.TimeColumn:
@@ -134,129 +118,6 @@ def time_column(times_ns: Int64[ndarray, "n_samples"]) -> rr.TimeColumn:
     """
     assert times_ns.dtype == np.int64, f"video_time is an int64 nanosecond clock, got {times_ns.dtype}"
     return rr.TimeColumn(schema.TIMELINE, duration=times_ns.view("timedelta64[ns]"))
-
-
-def encode_frames_to_mp4(
-    frames: Iterable[bytes],
-    output: Path,
-    *,
-    source: FrameSource,
-    fps: int,
-    gop: int = 30,
-    cq: int = 32,
-    ffmpeg: Path | None = None,
-) -> int:
-    """Encode an iterable of frames into an AV1 mp4 by piping them through ffmpeg.
-
-    Nothing is written to disk but the mp4: a dataset that ships PNG or raw
-    frames streams straight from its archive into ffmpeg's stdin. Two properties
-    are load-bearing for the Rerun side:
-
-    * **No B-frames** (``-bf 0``). ``rr.VideoStream`` rejects reordered samples,
-      and ``Mp4Reader`` would otherwise have to re-encode the file it was just
-      handed.
-    * **Sample count is verified** against the mp4 after ffmpeg exits, so a
-      short pipe (a truncated archive, a dead encoder) fails here rather than as
-      a silent timestamp/sample misalignment in ``log_video_stream``.
-
-    ffmpeg's stderr is drained by a thread while frames go into its stdin: both
-    pipes are finite, so writing a large frame while stderr sits full deadlocks.
-
-    Args:
-        frames: One encoded PNG (``kind="png"``) or one raw plane per frame.
-        output: mp4 to write; its parent directory must exist.
-        source: Layout of the ``frames`` elements.
-        fps: Nominal frame rate stamped into the container. Real per-sample
-            timestamps are applied later by ``log_video_stream(times_ns=...)``.
-        gop: Keyframe interval in frames.
-        cq: NVENC constant-quality target; lower is bigger and better.
-        ffmpeg: Binary to use; ``None`` resolves via ``resolve_ffmpeg()``.
-
-    Returns:
-        Number of frames fed into the encoder.
-    """
-    binary: Path = resolve_ffmpeg() if ffmpeg is None else ffmpeg
-    require_av1_nvenc(binary)
-    command: list[str] = [
-        str(binary),
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        *source.input_args(fps=fps),
-        "-vf",
-        "pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p",
-        "-c:v",
-        "av1_nvenc",
-        "-preset",
-        "p4",
-        "-rc",
-        "vbr",
-        "-cq",
-        str(cq),
-        "-bf",
-        "0",
-        "-g",
-        str(gop),
-        "-movflags",
-        "+faststart",
-        str(output),
-    ]
-    complaints: list[bytes] = []
-    fed: int = 0
-    process: subprocess.Popen[bytes] = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    assert process.stdin is not None and process.stderr is not None
-    drain: threading.Thread = threading.Thread(target=lambda: complaints.append(process.stderr.read()), daemon=True)  # pyrefly: ignore
-    drain.start()
-    try:
-        for frame in frames:
-            process.stdin.write(frame)
-            fed += 1
-    except BrokenPipeError:
-        pass  # ffmpeg already died; its stderr below says why
-    finally:
-        # Closing flushes, so an encoder that already died would raise here and
-        # mask the RuntimeError below that carries its stderr.
-        with contextlib.suppress(BrokenPipeError):
-            process.stdin.close()
-        returncode: int = process.wait()
-        drain.join()
-    if returncode != 0:
-        stderr_text: str = b"".join(complaints).decode(errors="replace").strip()
-        raise RuntimeError(f"ffmpeg exited {returncode} while encoding {output.name} after {fed} frames:\n{stderr_text}")
-
-    written: int = mp4_frame_count(output)
-    if written != fed:
-        raise ValueError(f"{output} holds {written} samples but {fed} frames were fed; the pipe lost data")
-    return fed
-
-
-def mp4_frame_count(path: Path) -> int:
-    """Number of video samples in an mp4, from the container index."""
-    with av.open(str(path)) as container:
-        stream: av.video.stream.VideoStream = container.streams.video[0]
-        if stream.frames:
-            return stream.frames
-        return sum(1 for packet in container.demux(stream) if packet.pts is not None)
-
-
-def encode_image_files_to_mp4(paths: Sequence[Path], output: Path, *, fps: int, gop: int = 30, cq: int = 32, ffmpeg: Path | None = None) -> int:
-    """Encode a PNG sequence already on disk, reading one file at a time.
-
-    Args:
-        paths: PNG files in presentation order.
-        output: mp4 to write.
-        fps: Nominal frame rate; see ``encode_frames_to_mp4``.
-        gop: Keyframe interval in frames.
-        cq: NVENC constant-quality target.
-        ffmpeg: Binary to use; ``None`` resolves via ``resolve_ffmpeg()``.
-
-    Returns:
-        Number of frames fed into the encoder.
-    """
-    return encode_frames_to_mp4(
-        (path.read_bytes() for path in paths), output, source=FrameSource("png"), fps=fps, gop=gop, cq=cq, ffmpeg=ffmpeg
-    )
 
 
 def log_rig_node(
@@ -325,6 +186,9 @@ def log_video_stream(
        indexed on the same timeline, with one row per keyframe. Only the sample
        chunks count toward ``sample_count`` and consume ``times_ns``; the keyframe
        chunk is retimed by looking its PTS up among the samples already seen.
+       ``classify_video_chunk`` names each shape from its components and refuses
+       an unrecognized one, so a reader that grows a fourth shape fails loudly
+       instead of having it silently retimed as a keyframe chunk.
 
     ``shift_ns`` and ``times_ns`` answer different questions and cannot be
     combined: a shift means "the file's own PTS are right, the origin is not",
@@ -363,12 +227,12 @@ def log_video_stream(
 
     def tap(chunk: rr.experimental.Chunk) -> list[rr.experimental.Chunk]:
         nonlocal sample_count
-        if schema.TIMELINE not in chunk.timeline_names:
-            return [chunk]  # invariant 1: the static codec chunk carries no index
         record_batch: pa.RecordBatch = chunk.to_record_batch()
+        kind: VideoChunkKind = classify_video_chunk(record_batch)  # invariant 5
+        if kind == "codec":
+            return [chunk]  # invariant 1: the static codec chunk carries no index
         index: int = record_batch.schema.get_field_index(schema.TIMELINE)
-        is_sample_chunk: bool = VIDEO_SAMPLE_COMPONENT in record_batch.schema.names  # invariant 5
-        if is_sample_chunk:
+        if kind == "sample":
             sample_count += record_batch.num_rows
         if times_ns is None:
             # invariant 4: the file's own PTS are the clock, so a plain remux never
@@ -378,7 +242,7 @@ def log_video_stream(
             return retimed(record_batch, index, np.asarray(record_batch.column(index).cast(pa.int64())) + shift_ns)
 
         original_ns: Int64[ndarray, "n_rows"] = np.asarray(record_batch.column(index).cast(pa.int64()))
-        if is_sample_chunk:
+        if kind == "sample":
             if sample_count > times_ns.size:
                 raise ValueError(f"{video_path.name} has more samples than the {times_ns.size} timestamps given")
             replacement: Int64[ndarray, "n_rows"] = times_ns[sample_count - record_batch.num_rows : sample_count]

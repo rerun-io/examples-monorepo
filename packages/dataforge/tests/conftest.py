@@ -20,7 +20,7 @@ from jaxtyping import UInt8
 from numpy import ndarray
 
 from dataforge import schema
-from dataforge.logging_toolkit import require_av1_nvenc, resolve_ffmpeg
+from dataforge.video_encoding import require_av1_nvenc, resolve_ffmpeg
 
 NOISE_CEILING: int = 96
 """Upper bound of the per-pixel noise, low enough that gradient + noise cannot wrap."""

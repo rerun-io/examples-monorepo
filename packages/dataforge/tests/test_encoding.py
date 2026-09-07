@@ -15,7 +15,7 @@ import av
 import pytest
 from conftest import gray_frame, png_frame
 
-from dataforge.logging_toolkit import (
+from dataforge.video_encoding import (
     FrameSource,
     encode_frames_to_mp4,
     encode_image_files_to_mp4,
