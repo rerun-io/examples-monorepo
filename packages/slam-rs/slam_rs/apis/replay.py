@@ -32,8 +32,8 @@ from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from slam_rs import _core
-from slam_rs.catalog_feed import CameraCalib, Frameset, LocalSegment, SegmentFeed, open_segment
-from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
+from slam_rs.catalog_feed import RIG_ENTITY, CameraCalib, Frameset, LocalSegment, SegmentFeed, open_segment
+from slam_rs.frontend_log import FrontendLogger, camera_entity, frontend_blueprint
 from slam_rs.reference import ReferenceManifest, ReferenceSegment, load_manifest
 from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, shift_clock, write_trajectory
 
@@ -44,7 +44,7 @@ RUN_ENTITY: str = "/world/runs/slam_rs"
 IMAGE_DOWNSCALE: int = 2
 """Images are logged at half resolution: the viewer does not need full-resolution pixels to show what was fed."""
 JPEG_QUALITY: int = 85
-"""Quality of the full-resolution frames the frontend stage logs; 960x960 grayscale lands around 80 kB."""
+"""Quality of the full-resolution frames the frontend stage logs; 960x960 grayscale lands around 38 kB."""
 
 Stage: TypeAlias = Literal["input", "frontend"]
 """How far a replay runs: the estimator's inputs only, or the optical-flow frontend over them."""
@@ -87,9 +87,8 @@ def _log_calibration(cameras: tuple[CameraCalib, ...]) -> None:
     """Log the rig's static geometry so the images sit in the right place in 3D."""
     rr.log("/", rr.ViewCoordinates.RUB, static=True)
     for camera in cameras:
-        entity: str = f"/world/rig_00/cam_{camera.index:02d}"
         rr.log(
-            entity,
+            f"{RIG_ENTITY}/cam_{camera.index:02d}",
             rr.Transform3D(translation=camera.imu_T_cam[:3, 3], mat3x3=camera.imu_T_cam[:3, :3]),
             static=True,
         )
@@ -97,7 +96,7 @@ def _log_calibration(cameras: tuple[CameraCalib, ...]) -> None:
             [[camera.fx, 0.0, camera.cx], [0.0, camera.fy, camera.cy], [0.0, 0.0, 1.0]], dtype=np.float64
         )
         rr.log(
-            f"{entity}/pinhole",
+            camera_entity(camera.index),
             rr.Pinhole(image_from_camera=image_from_camera, resolution=[camera.width, camera.height], camera_xyz=rr.ViewCoordinates.RDF),
             static=True,
         )
@@ -135,26 +134,6 @@ def replayed_identity(rrd: Path | None, segment_id: str) -> str:
     return segment_id if rrd is None else str(rrd)
 
 
-def _open_frontend(feed: SegmentFeed, segment: ReferenceSegment) -> _core.OpticalFlow:
-    """Build the optical-flow frontend for one segment.
-
-    Every frontend field of basalt's shipped configs is already the default the
-    C++ constructor sets; the one exception is the image safe radius, which is a
-    property of the device and which the manifest freezes per segment. So the
-    config is built rather than read from a file the fork owns.
-
-    Args:
-        feed: Open segment feed, whose calibration the frontend is built from.
-        segment: Manifest entry, for the device's image safe radius.
-
-    Returns:
-        A frontend on the port's own defaults: one thread, per-camera epipolar geometry.
-    """
-    config: _core.VioConfig = _core.VioConfig()
-    config.optical_flow_image_safe_radius = segment.reference.optical_flow_image_safe_radius
-    return _core.OpticalFlow(_core.Calibration.from_catalog(list(feed.cameras), feed.imu), config)
-
-
 def _replay(feed: SegmentFeed, config: Config, segment: ReferenceSegment) -> ReplayOutcome:
     """Drive the core over the feed, logging inputs, the frontend and any tracked pose.
 
@@ -170,7 +149,12 @@ def _replay(feed: SegmentFeed, config: Config, segment: ReferenceSegment) -> Rep
     frontend: _core.OpticalFlow | None = None
     logger: FrontendLogger | None = None
     if config.stage == "frontend":
-        frontend = _open_frontend(feed, segment)
+        # Every frontend field of basalt's shipped configs is already the default
+        # the C++ constructor sets; the image safe radius is the one exception,
+        # and it is a property of the device the manifest freezes per segment.
+        flow_config: _core.VioConfig = _core.VioConfig()
+        flow_config.optical_flow_image_safe_radius = segment.reference.optical_flow_image_safe_radius
+        frontend = _core.OpticalFlow(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config)
         logger = FrontendLogger.create(len(feed.cameras), replayed_identity(config.rrd, segment.segment_id))
         rr.send_blueprint(frontend_blueprint(feed.cameras))
     frontend_ms: list[float] = []
@@ -207,7 +191,7 @@ def _replay(feed: SegmentFeed, config: Config, segment: ReferenceSegment) -> Rep
         rr.set_time("video_time", duration=np.timedelta64(frameset.t_ns, "ns"))
 
         for camera, image in zip(feed.cameras, frameset.images, strict=True):
-            entity: str = f"/world/rig_00/cam_{camera.index:02d}/pinhole/image"
+            entity: str = f"{camera_entity(camera.index)}/image"
             if frontend is not None:
                 # Full resolution, or the keypoints would sit two pixels off the
                 # corner they were computed on; JPEG keeps a whole segment small.

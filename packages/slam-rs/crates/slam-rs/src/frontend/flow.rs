@@ -70,7 +70,7 @@ use crate::frontend::parallel::{MAX_THREADS, WorkPool};
 use crate::frontend::patterns::Pattern;
 use crate::frontend::se2::AffineCompact2f;
 use crate::frontend::tracker::{
-    CpuPatchTracker, FlowResult, FlowTransforms, MAX_LEVELS, PatchTracker, PointsSoA,
+    CpuPatchTracker, FlowResult, FlowTransforms, MAX_CAPACITY, MAX_LEVELS, PatchTracker, PointsSoA,
     SourcePatches, TrackerError,
 };
 use crate::image::ImageU16;
@@ -304,6 +304,14 @@ pub enum FrontendError {
         /// `T_i_c` entries it carries.
         extrinsics: usize,
     },
+    /// A frameset arrived at or before the last accepted one.
+    #[error("frameset timestamps must increase: got {t_ns} after {previous_t_ns}")]
+    NonMonotonicFrameset {
+        /// Timestamp of the last accepted frameset.
+        previous_t_ns: i64,
+        /// Timestamp of the frameset handed in.
+        t_ns: i64,
+    },
     /// The frameset does not hold one image per camera.
     #[error("expected {expected} images, got {actual}")]
     CameraCountMismatch {
@@ -424,12 +432,23 @@ pub enum FrontendError {
         /// Threads asked for.
         threads: usize,
     },
+    /// No workers were asked for, which is not a pool anything can run on.
+    #[error("threads must be at least 1")]
+    NoThreads,
     /// More workers were asked for than [`MAX_THREADS`].
     #[error("threads is {threads}, the ceiling is {ceiling}")]
     TooManyThreads {
         /// Workers asked for.
         threads: usize,
         /// [`MAX_THREADS`].
+        ceiling: usize,
+    },
+    /// A larger keypoint budget was asked for than [`MAX_CAPACITY`].
+    #[error("max_keypoints is {max_keypoints}, the ceiling is {ceiling}")]
+    TooManyKeypoints {
+        /// Keypoints asked for.
+        max_keypoints: usize,
+        /// [`MAX_CAPACITY`].
         ceiling: usize,
     },
     /// `optical_flow_levels` asks for a deeper pyramid than the buffers allow.
@@ -553,9 +572,8 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P, CpuPyramidBuilder, CpuPatchTracker<P
     /// [`FrontendError`] when the config names another flow type or pattern,
     /// when the rig is empty, ragged or too small for the grid, when the
     /// detector's threshold ladder would never end, when a camera model has no
-    /// projection, when the thread pool cannot be built, or — through
-    /// [`FrontendError::Tracker`] — when `max_keypoints` is over
-    /// [`crate::frontend::tracker::MAX_CAPACITY`].
+    /// projection, when the thread pool cannot be built, or when `threads` or
+    /// `max_keypoints` is outside what [`FrontendOptions`] allows.
     pub fn new(
         config: VioConfig,
         calibration: &Calibration<f64>,
@@ -655,13 +673,32 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     }
 
     /// The port's own knobs, which arrive from the caller rather than a basalt file.
+    ///
+    /// Every value a caller may type is bounded here, whatever backends the
+    /// frontend is then built on: [`FrameToFrameOpticalFlow::with_backends`]
+    /// takes a tracker that is already built, so [`PatchSoA::new`]'s own
+    /// ceilings — the second line under these — never run on that seam.
+    ///
+    /// [`PatchSoA::new`]: crate::frontend::tracker::PatchSoA::new
     fn validate_options(options: &FrontendOptions) -> Result<(), FrontendError> {
         // rayon spawns exactly what it is asked for, so an unbounded `threads`
-        // exhausts the machine's threads instead of returning an error.
+        // exhausts the machine's threads instead of returning an error; zero is
+        // a pool no work can run on, which `WorkPool::new` reads as one.
+        if options.threads == 0 {
+            return Err(FrontendError::NoThreads);
+        }
         if options.threads > MAX_THREADS {
             return Err(FrontendError::TooManyThreads {
                 threads: options.threads,
                 ceiling: MAX_THREADS,
+            });
+        }
+        // The budget sizes every per-patch buffer, and a `Vec` too long to
+        // allocate panics rather than returning (decision D32).
+        if options.max_keypoints > MAX_CAPACITY {
+            return Err(FrontendError::TooManyKeypoints {
+                max_keypoints: options.max_keypoints,
+                ceiling: MAX_CAPACITY,
             });
         }
         Ok(())
@@ -907,9 +944,10 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     ///
     /// # Errors
     ///
-    /// [`FrontendError`] when the frameset is the wrong width, when an image is
-    /// not the size the calibration gives that camera, when a pyramid refuses the
-    /// geometry, or when the tracker or detector refuses an input.
+    /// [`FrontendError`] when the frameset does not move the clock forward, when
+    /// it is the wrong width, when an image is not the size the calibration gives
+    /// that camera, when a pyramid refuses the geometry, or when the tracker or
+    /// detector refuses an input.
     pub fn process_frame(
         &mut self,
         t_ns: i64,
@@ -917,6 +955,17 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         prediction: &PosePrediction,
         masks: &[Masks],
     ) -> Result<&FlowFrame, FrontendError> {
+        // Tracking is frame to frame, so a frameset that does not follow the last
+        // one has no previous frame of its own; basalt never sees one because its
+        // `processingLoop` reads a monotonic queue.
+        if let Some(previous_t_ns) = self.t_ns
+            && t_ns <= previous_t_ns
+        {
+            return Err(FrontendError::NonMonotonicFrameset {
+                previous_t_ns,
+                t_ns,
+            });
+        }
         let num_cams: usize = self.cameras.len();
         if images.len() != num_cams {
             return Err(FrontendError::CameraCountMismatch {
@@ -1918,12 +1967,30 @@ mod tests {
             .unwrap_err();
             assert_eq!(
                 error,
-                FrontendError::Tracker(TrackerError::CapacityTooLarge {
-                    capacity: max_keypoints,
+                FrontendError::TooManyKeypoints {
+                    max_keypoints,
                     ceiling: MAX_CAPACITY,
-                })
+                }
             );
         }
+    }
+
+    /// A pool of no workers is refused where every other option ceiling is.
+    ///
+    /// `WorkPool::new` reads zero as one, so nothing downstream would fail: the
+    /// caller would silently get a frontend it did not ask for.
+    #[test]
+    fn a_thread_count_of_zero_is_refused() {
+        let error = FrameToFrameOpticalFlow::<Pattern51>::new(
+            config(),
+            &rig(1),
+            FrontendOptions {
+                threads: 0,
+                ..FrontendOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, FrontendError::NoThreads);
     }
 
     /// A thread count nothing could run is refused, not spawned.
@@ -2213,6 +2280,41 @@ mod tests {
         flow.process_frame(2, &moved, &PosePrediction::default(), &[])
             .unwrap();
         assert_eq!(flow.frame_counter(), 2);
+    }
+
+    /// A frameset that does not move the clock forward is refused, and commits nothing.
+    ///
+    /// The rule lives here rather than at the Python boundary because every other
+    /// rule about an input does: the clock the comparison reads is this one.
+    #[test]
+    fn a_frameset_that_does_not_follow_the_last_one_is_refused() {
+        let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(1, FrontendOptions::default());
+        let images: [ImageU16; 1] = [dotted_image(0)];
+        flow.process_frame(1_000, &images, &PosePrediction::default(), &[])
+            .unwrap();
+        let before: FlowFrame = flow.frame().clone();
+
+        for t_ns in [1_000, 999, -1_000] {
+            assert_eq!(
+                flow.process_frame(t_ns, &images, &PosePrediction::default(), &[])
+                    .unwrap_err(),
+                FrontendError::NonMonotonicFrameset {
+                    previous_t_ns: 1_000,
+                    t_ns,
+                }
+            );
+            assert_eq!(flow.t_ns(), Some(1_000));
+            assert_eq!(flow.frame_counter(), 1);
+            assert_eq!(flow.frame(), &before);
+        }
+
+        // The first frameset has no previous one, so any timestamp starts a run.
+        let mut negative: FrameToFrameOpticalFlow<Pattern51> =
+            frontend(1, FrontendOptions::default());
+        negative
+            .process_frame(-2, &images, &PosePrediction::default(), &[])
+            .unwrap();
+        assert_eq!(negative.t_ns(), Some(-2));
     }
 
     /// The keypoint budget is enforced where the keypoints are created, so a

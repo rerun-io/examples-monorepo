@@ -149,10 +149,12 @@ pub enum TrackerError {
     ///
     /// Checked product by product rather than after the fact: a wrapped
     /// multiplication would have turned an impossible shape into a plausible
-    /// allocation. [`MAX_CAPACITY`] and [`MAX_LEVELS`] together already bound
-    /// every product well inside a 32-bit `usize`, so this cannot fire today —
-    /// the test `the_ceilings_bound_every_buffer_product` is the arithmetic that
-    /// says so, and this variant is what keeps raising a ceiling from silently
+    /// allocation. [`MAX_CAPACITY`] and [`MAX_LEVELS`] together bound the largest
+    /// product at 24 x 2^20 x 52 x 3 = 3,925,868,544 elements, which is 91% of
+    /// `u32::MAX` — inside a 32-bit `usize`, but not by much, so this cannot fire
+    /// today and would as soon as either ceiling rose. The test
+    /// `the_ceilings_bound_every_buffer_product` is the arithmetic that says so,
+    /// and this variant is what keeps raising a ceiling from silently
     /// reintroducing a wrapped allocation.
     #[error(
         "a {capacity}-patch buffer over {num_levels} levels of {taps} taps does not fit in a usize"

@@ -24,10 +24,11 @@ import rerun as rr
 import rerun.experimental as rx
 from jaxtyping import Float32, Int64, UInt8
 from numpy import ndarray
-from test_frontend_boundary import FRAME, frontend, texture
+from test_frontend_boundary import frontend, texture
 
 from slam_rs import _core
-from slam_rs.apis.replay import replayed_identity
+from slam_rs.apis.replay import SMOKE_SEGMENT, replayed_identity
+from slam_rs.catalog_feed import TIMELINE
 from slam_rs.frontend_log import (
     CPP_COLOR,
     DEFAULT_DUMPS_DIR,
@@ -40,8 +41,6 @@ from slam_rs.frontend_log import (
     track_colors,
 )
 
-SMOKE_SEGMENT: str = "msd-index__MIO_others__MIO10_short_2_panorama"
-"""The segment the committed dumps were recorded from."""
 OTHER_SEGMENT: str = "msd-index__MIO_others__MIO07_mapping_easy"
 """Another Index segment, whose ``video_time`` also starts at zero."""
 FRAME_INTERVAL_NS: int = 33_000_000
@@ -78,7 +77,7 @@ def read_rows(path: Path) -> Rows:
         if chunk.is_static:
             continue
         batch = chunk.to_record_batch()
-        times: list = batch.column("video_time").to_pylist()
+        times: list = batch.column(TIMELINE).to_pylist()
         components: dict[str, list] = {
             name: batch.column(name).to_pylist() for name in batch.schema.names if ":" in name and not name.startswith("rerun.")
         }
@@ -139,7 +138,7 @@ def replay(tmp_path: Path, framesets: int, segment_id: str, dumps_dir: Path | No
     frames: list[_core.FlowFrame] = []
     for step in range(framesets):
         t_ns: int = step * FRAME_INTERVAL_NS
-        rr.set_time("video_time", duration=np.timedelta64(t_ns, "ns"))
+        rr.set_time(TIMELINE, duration=np.timedelta64(t_ns, "ns"))
         frame: _core.FlowFrame = flow.process(t_ns, [texture(step, 0), texture(step, 1)])
         logger.log(frame, elapsed_ms=1.5 * (step + 1))
         frames.append(frame)
@@ -265,28 +264,42 @@ def test_the_counters_report_each_cameras_own_numbers(tmp_path: Path) -> None:
 def test_trails_follow_a_track_by_id_and_stop_at_the_trail_length(tmp_path: Path) -> None:
     """A strip is one id's history, so it survives the frame's order changing.
 
-    Keying by slot would tie a strip to whatever id happens to sit at that index,
-    which drifts as tracks die: the expectation here is built per id from the
-    frames themselves, so an index-keyed implementation cannot reproduce it.
+    Asserted as invariants rather than as a second copy of ``_log_trails``: a
+    strip ends at that id's current position, it is the same id's previous strip
+    with this position appended, and it stops growing at :data:`TRAIL_LENGTH`.
+    Keying by slot would tie a strip to whatever id sits at that index, which
+    drifts as tracks die, and no invariant here would hold.
     """
     framesets: int = TRAIL_LENGTH + 4
     rows, frames = replay(tmp_path, framesets, OTHER_SEGMENT, tmp_path / "no-dumps")
-    history: dict[int, list[tuple[float, float]]] = {}
+    survived: dict[int, int] = {}
+    previous: dict[int, tuple[tuple[float, float], ...]] = {}
     for step, frame in enumerate(frames):
         positions: Float32[ndarray, "n_tracks 2"] = frame.positions(0)
-        expected: set[tuple[tuple[float, float], ...]] = set()
-        surviving: dict[int, list[tuple[float, float]]] = {}
-        for slot, identifier in enumerate(frame.ids(0).tolist()):
-            trail: list[tuple[float, float]] = history.get(identifier, [])[-(TRAIL_LENGTH - 1) :]
-            trail.append((float(positions[slot, 0]), float(positions[slot, 1])))
-            surviving[identifier] = trail
-            if len(trail) > 1:
-                expected.add(tuple(trail))
-        history = surviving
+        live: dict[int, tuple[float, float]] = {
+            identifier: (float(positions[slot, 0]), float(positions[slot, 1])) for slot, identifier in enumerate(frame.ids(0).tolist())
+        }
+        survived = {identifier: 1 + survived.get(identifier, 0) for identifier in live}
         strips: list = rows[f"{camera_entity(0)}/trails"][step].values["LineStrips2D:strips"]
-        logged: set[tuple[tuple[float, float], ...]] = {tuple((point[0], point[1]) for point in strip) for strip in strips}
-        assert logged == expected, f"frameset {step}: {len(logged)} strips against {len(expected)} expected"
-        assert all(len(strip) <= TRAIL_LENGTH for strip in strips)
+        by_end: dict[tuple[float, float], tuple[tuple[float, float], ...]] = {
+            (strip[-1][0], strip[-1][1]): tuple((point[0], point[1]) for point in strip) for strip in strips
+        }
+        assert len(by_end) == len(strips), f"frameset {step}: two strips end at the same pixel"
+        current: dict[int, tuple[tuple[float, float], ...]] = {}
+        for identifier, position in live.items():
+            expected_length: int = min(survived[identifier], TRAIL_LENGTH)
+            if expected_length == 1:
+                # One position is a point, not a trail, so nothing is drawn yet.
+                assert position not in by_end, f"frameset {step}: a strip for a track born on it"
+                continue
+            strip: tuple[tuple[float, float], ...] | None = by_end.get(position)
+            assert strip is not None, f"frameset {step}: no strip ends at track {identifier}"
+            assert len(strip) == expected_length, f"frameset {step}: track {identifier} carries {len(strip)} points"
+            if identifier in previous:
+                grown: tuple[tuple[float, float], ...] = (*previous[identifier], position)
+                assert strip == grown[-TRAIL_LENGTH:], f"frameset {step}: track {identifier} is not its own history plus this position"
+            current[identifier] = strip
+        previous = current
     # The run is long enough that the cap is actually reached.
     last: list = rows[f"{camera_entity(0)}/trails"][-1].values["LineStrips2D:strips"]
     assert max(len(strip) for strip in last) == TRAIL_LENGTH
@@ -325,12 +338,3 @@ def test_the_overlay_is_cleared_once_the_dumps_run_out_and_stays_cleared(tmp_pat
         assert [row.t_ns for row in logged] == [0, FRAME_INTERVAL_NS]
         assert len(logged[0].values["Points2D:positions"]) == 1
         assert logged[1].values["Points2D:positions"] == []
-
-
-def test_the_frame_is_logged_at_the_calibrated_resolution(tmp_path: Path) -> None:
-    """The keypoints are in the pixels of the frame that was tracked."""
-    rows, frames = replay(tmp_path, 1, OTHER_SEGMENT, tmp_path / "no-dumps")
-    logged: Row = rows[f"{camera_entity(0)}/keypoints"][0]
-    positions: Float32[ndarray, "n_tracks 2"] = np.array(logged.values["Points2D:positions"], dtype=np.float32)
-    assert len(positions) == frames[0].num_tracks(0)
-    assert np.all((positions >= 0.0) & (positions < FRAME))

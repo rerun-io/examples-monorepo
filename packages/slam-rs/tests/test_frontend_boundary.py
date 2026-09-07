@@ -405,7 +405,7 @@ HOSTILE_ARRAYS: tuple[NDArray[np.uint8], ...] = (
     np.asfortranarray(np.zeros((5, 5), dtype=np.uint8)),
 )
 """Arrays of the wrong rank, dtype, layout or extent."""
-EXPECTED_ERRORS: tuple[type[Exception], ...] = (ValueError, TypeError, IndexError, OverflowError, AttributeError)
+EXPECTED_ERRORS: tuple[type[Exception], ...] = (ValueError, TypeError, IndexError, OverflowError)
 """What a boundary may raise. A panic is a ``BaseException`` and is none of these."""
 
 

@@ -37,6 +37,10 @@ pub struct WorkPool {
 impl WorkPool {
     /// A pool of exactly `threads` workers; `threads == 0` is read as one.
     ///
+    /// The frontend refuses zero before it gets here
+    /// ([`FrontendError::NoThreads`](crate::frontend::flow::FrontendError::NoThreads)),
+    /// so the clamp is the second line under that rule rather than the rule.
+    ///
     /// # Errors
     ///
     /// [`ThreadPoolBuildError`] when the operating system refuses the threads.

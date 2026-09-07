@@ -433,8 +433,7 @@ so the catalog-to-basalt rules — the rotation-matrix check, the model names, t
 isotropic noise densities — are not written a second time in Python; either side
 also accepts one of basalt's JSON files as a string. `frame.levels(camera)` is
 always empty: basalt fills `pyramid_levels` only in the multiscale variant, which
-is not ported. Framesets must arrive with a strictly increasing `t_ns`, and a
-refused one leaves the frontend exactly as the last accepted one did.
+is not ported.
 
 ## The reference set
 
