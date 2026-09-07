@@ -93,6 +93,40 @@ impl MargHelper {
     }
 }
 
+/// One of the five things [`MarginalizeSchedule`] decides, named so a refusal
+/// can say which of them was wrong.
+///
+/// The C++ builds all five out of the window itself
+/// (`sqrt_keypoint_vio.cpp:724-880`), so every relationship between them is an
+/// invariant of that construction rather than something checked; the port
+/// checks them, and this is how it reports which one broke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleSet {
+    /// `last_state_to_marg` (`:724`).
+    LastStateToMarg,
+    /// `kfs_to_marg` (`:766`).
+    KfsToMarg,
+    /// `poses_to_marg` (`:729`).
+    PosesToMarg,
+    /// `states_to_marg_all` (`:743`).
+    StatesToMargAll,
+    /// `states_to_marg_vel_bias` (`:742`).
+    StatesToMargVelBias,
+}
+
+impl std::fmt::Display for ScheduleSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name: &str = match self {
+            Self::LastStateToMarg => "last_state_to_marg",
+            Self::KfsToMarg => "kfs_to_marg",
+            Self::PosesToMarg => "poses_to_marg",
+            Self::StatesToMargAll => "states_to_marg_all",
+            Self::StatesToMargVelBias => "states_to_marg_vel_bias",
+        };
+        f.write_str(name)
+    }
+}
+
 /// What marginalization refuses to do.
 ///
 /// Every variant replaces a C++ assertion, an `at()` that would throw, or an
@@ -192,6 +226,47 @@ pub enum MargError {
     /// by `num_trans == 0` (`sqrt_ba_base.cpp:96`).
     #[error("the prior's ordering is empty")]
     EmptyPriorOrder,
+    /// A schedule set names a frame the marginalization ordering does not hold
+    /// as the kind of block that set is about — a pose block for
+    /// `poses_to_marg`, a full state for the two state sets.
+    ///
+    /// C++ trusts the construction: `frame_states.at(id)` throws on a frame
+    /// that is not there, `frame_poses.erase(id)` silently does nothing, and a
+    /// state newer than `last_state_to_marg` is not in the ordering at all —
+    /// so it is deleted without ever being marginalized
+    /// (`sqrt_keypoint_vio.cpp:1090-1112`). Either way the window is already
+    /// half rewritten by the time it shows.
+    #[error(
+        "{set} names frame {frame_id}, which the ordering does not hold as a {block}-row block"
+    )]
+    ScheduledFrameNotInOrdering {
+        /// Which set named it.
+        set: ScheduleSet,
+        /// The offending frame.
+        frame_id: FrameId,
+        /// The block size that set requires.
+        block: usize,
+    },
+    /// Two schedule sets C++ fills in mutually exclusive branches
+    /// (`sqrt_keypoint_vio.cpp:745-750`) name the same frame.
+    #[error("frame {frame_id} is in both {first} and {second}")]
+    ScheduleSetsOverlap {
+        /// The first set.
+        first: ScheduleSet,
+        /// The second set.
+        second: ScheduleSet,
+        /// The frame both name.
+        frame_id: FrameId,
+    },
+    /// `kfs_to_marg` is not a subset of `poses_to_marg`, which
+    /// `sqrt_keypoint_vio.cpp:875-876` guarantees by adding every keyframe it
+    /// picks to both. Without it the keyframe's landmarks are dropped
+    /// (`:1114`) while the frame itself survives.
+    #[error("frame {frame_id} is marginalized as a keyframe but not as a pose")]
+    KeyframeNotInPosesToMarg {
+        /// The offending frame.
+        frame_id: FrameId,
+    },
     /// Something the linearizer refused.
     #[error(transparent)]
     Linearize(#[from] LinearizeError),

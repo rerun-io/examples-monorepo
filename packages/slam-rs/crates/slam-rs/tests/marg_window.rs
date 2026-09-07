@@ -24,6 +24,9 @@
 //! | `the_prior_error_is_the_quadratic_at_the_delta` | `computeMargPriorError` after `applyInc` equals the quadratic model evaluated at the accumulated delta |
 //! | `the_prior_has_the_gauge_directions_in_its_nullspace` | `checkMargNullspace`: a visual-only prior carries no information along a global translation or rotation |
 //! | `a_window_that_disagrees_with_the_prior_is_refused` | the ordering assertions of `:736` and `:758-759` |
+//! | `an_invalid_schedule_is_refused_before_anything_changes` | six broken schedules, each a typed error with the window bit-identical afterwards |
+//! | `a_malformed_prior_is_refused_by_the_diagnostics` | the shapes `checkNullspace` and `checkEigenvalues` rely on and C++ does not assert |
+//! | `the_nullspace_debug_copy_follows_the_live_prior` | the debug prior's `H`, `b` **and** order (`:672`, called at `:1186`) |
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -37,7 +40,7 @@ use slam_rs::landmark::{Landmark, StereographicParam};
 use slam_rs::lie::{Se3, So3};
 use slam_rs::marg::{
     MargError, MarginalizeInputs, MarginalizeOptions, MarginalizeOutput, MarginalizeSchedule,
-    NullspaceCheck, check_eigenvalues, check_marg_nullspace, marginalize,
+    NullspaceCheck, ScheduleSet, check_eigenvalues, check_marg_nullspace, marginalize,
     marginalize_helper_sqrt_to_sqrt,
 };
 use slam_rs::types::{
@@ -682,7 +685,7 @@ fn the_prior_has_the_gauge_directions_in_its_nullspace() {
 
     // `checkEigenvalues` (`:210-233`): the information matrix is positive
     // semi-definite, and it is singular in exactly the gauge directions.
-    let eigenvalues: DVector<f64> = check_eigenvalues(&window.marg);
+    let eigenvalues: DVector<f64> = check_eigenvalues(&window.marg).unwrap();
     assert_eq!(eigenvalues.nrows(), size);
     for i in 1..size {
         assert!(
@@ -808,6 +811,17 @@ fn the_nullspace_debug_copy_follows_the_live_prior() {
     )
     .unwrap();
 
+    // `:1186` calls `logMargNullspace()`, whose first statement is
+    // `nullspace_marg_data.order = marg_data.order` (`:672`) — the *new* order,
+    // the one `:1137` has just given the live prior — before
+    // `checkMargNullspace()` reads the pair. So the two orders agree by the
+    // time `marginalize` returns, and the debug prior is a consistent
+    // `(order, H, b)` triple that [`check_marg_nullspace`] accepts.
+    assert_eq!(nullspace.order, window.marg.order);
+    assert_eq!(nullspace.h.ncols(), nullspace.order.total_size());
+    let probe: DVector<f64> = DVector::zeros(nullspace.order.total_size());
+    assert!(check_marg_nullspace(&nullspace, &window.estimator, &probe).is_ok());
+
     // On the first marginalization the debug prior starts empty, so the second
     // linearization sees exactly what the live one did and the two agree
     // coefficient for coefficient.
@@ -839,6 +853,186 @@ fn the_nullspace_debug_copy_follows_the_live_prior() {
     )
     .unwrap();
     assert_eq!(empty, MargLinData::default());
+}
+
+/// Every relationship the schedule is supposed to have with the window, broken
+/// one at a time: each is a typed error, and each leaves the window **exactly**
+/// as it was.
+///
+/// C++ never checks any of them — `:1090-1112` erases what the sets name in
+/// order, with `frame_states.at()` throwing and `frame_poses.erase()` silently
+/// doing nothing — so a schedule that disagrees with the window took effect
+/// before it was noticed. The five cases are the ones the S7 review
+/// reproduced.
+#[test]
+fn an_invalid_schedule_is_refused_before_anything_changes() {
+    let unknown: FrameId = 999;
+    let cases: [(&str, MarginalizeSchedule, MargError); 6] = [
+        (
+            "a frame the window does not have in states_to_marg_vel_bias",
+            MarginalizeSchedule {
+                states_to_marg_vel_bias: [unknown].into_iter().collect(),
+                ..schedule()
+            },
+            MargError::ScheduledFrameNotInOrdering {
+                set: ScheduleSet::StatesToMargVelBias,
+                frame_id: unknown,
+                block: POSE_VEL_BIAS_SIZE,
+            },
+        ),
+        (
+            "a state in both state sets",
+            MarginalizeSchedule {
+                states_to_marg_vel_bias: [STATE0].into_iter().collect(),
+                ..schedule()
+            },
+            MargError::ScheduleSetsOverlap {
+                first: ScheduleSet::StatesToMargAll,
+                second: ScheduleSet::StatesToMargVelBias,
+                frame_id: STATE0,
+            },
+        ),
+        (
+            "a state past last_state_to_marg, so outside the ordering",
+            MarginalizeSchedule {
+                states_to_marg_all: [STATE0, STATE2].into_iter().collect(),
+                ..schedule()
+            },
+            MargError::ScheduledFrameNotInOrdering {
+                set: ScheduleSet::StatesToMargAll,
+                frame_id: STATE2,
+                block: POSE_VEL_BIAS_SIZE,
+            },
+        ),
+        (
+            "a pose block named as a full state",
+            MarginalizeSchedule {
+                states_to_marg_vel_bias: [KF1].into_iter().collect(),
+                ..schedule()
+            },
+            MargError::ScheduledFrameNotInOrdering {
+                set: ScheduleSet::StatesToMargVelBias,
+                frame_id: KF1,
+                block: POSE_VEL_BIAS_SIZE,
+            },
+        ),
+        (
+            "a keyframe marginalized without its pose block",
+            MarginalizeSchedule {
+                kfs_to_marg: [KF0, KF1].into_iter().collect(),
+                ..schedule()
+            },
+            MargError::KeyframeNotInPosesToMarg { frame_id: KF1 },
+        ),
+        (
+            "last_state_to_marg marginalized outright",
+            MarginalizeSchedule {
+                states_to_marg_all: [STATE0, STATE1].into_iter().collect(),
+                ..schedule()
+            },
+            MargError::ScheduleSetsOverlap {
+                first: ScheduleSet::LastStateToMarg,
+                second: ScheduleSet::StatesToMargAll,
+                frame_id: STATE1,
+            },
+        ),
+    ];
+
+    for (name, sched, want) in cases {
+        let mut window: Window = build_window(0xB015, true);
+        // The whole window, every coefficient of it: `f64`'s `Debug` is the
+        // shortest representation that round-trips, so equal strings are equal
+        // states, and this covers the landmark database and the IMU intervals
+        // as well as the frame maps and the prior.
+        let before: String = format!("{:?}", (&window.estimator, &window.marg, &window.imu_meas));
+        let inputs: MarginalizeInputs<'_, f64> = MarginalizeInputs {
+            schedule: &sched,
+            imu_lin_data: None,
+            lost_landmarks: None,
+            fixed_frames: None,
+            options: MarginalizeOptions::default(),
+        };
+        let mut nullspace: MargLinData<f64> = MargLinData::default();
+        let got = marginalize(
+            &mut window.estimator,
+            &mut window.marg,
+            Some(&mut nullspace),
+            &mut window.imu_meas,
+            &inputs,
+        );
+        assert_eq!(got.err(), Some(want), "{name}");
+        let after: String = format!("{:?}", (&window.estimator, &window.marg, &window.imu_meas));
+        assert_eq!(before, after, "{name}: the window changed");
+        assert_eq!(nullspace, MargLinData::default(), "{name}: the debug prior");
+    }
+}
+
+/// The two diagnostics on priors whose shapes do not close
+/// (`sqrt_ba_base.cpp:52` asserts only the width).
+#[test]
+fn a_malformed_prior_is_refused_by_the_diagnostics() {
+    let mut window: Window = build_window(0xB016, false);
+    run(&mut window, MarginalizeOptions::default());
+    let size: usize = window.marg.order.total_size();
+    let random: DVector<f64> = DVector::zeros(size);
+
+    // A square-root prior whose residual is shorter than its Jacobian: `Hᵀb`
+    // is not formed (`:170`).
+    let mut short_b: MargLinData<f64> = window.marg.clone();
+    short_b.b = DVector::zeros(1);
+    assert_eq!(
+        check_marg_nullspace(&short_b, &window.estimator, &random),
+        Err(MargError::RhsLengthMismatch {
+            rows: short_b.h.nrows(),
+            rhs: 1
+        })
+    );
+
+    // A *squared* prior of the right width but the wrong height: the quadratic
+    // `xᵀHx` does not close (`:180-186`).
+    let mut oblong: MargLinData<f64> = window.marg.clone();
+    oblong.is_sqrt = false;
+    oblong.h = DMatrix::zeros(size - 1, size);
+    oblong.b = DVector::zeros(size);
+    assert_eq!(
+        check_marg_nullspace(&oblong, &window.estimator, &random),
+        Err(MargError::NotSquare {
+            rows: size - 1,
+            cols: size
+        })
+    );
+
+    // ...and the same matrix through `checkEigenvalues`, which hands it
+    // straight to the eigensolver (`:225`).
+    assert_eq!(
+        check_eigenvalues(&oblong),
+        Err(MargError::NotSquare {
+            rows: size - 1,
+            cols: size
+        })
+    );
+
+    // A squared prior of the right shape but a short residual.
+    let mut square_short_b: MargLinData<f64> = window.marg.clone();
+    square_short_b.is_sqrt = false;
+    square_short_b.h = DMatrix::zeros(size, size);
+    square_short_b.b = DVector::zeros(2);
+    assert_eq!(
+        check_marg_nullspace(&square_short_b, &window.estimator, &random),
+        Err(MargError::RhsLengthMismatch { rows: size, rhs: 2 })
+    );
+
+    // The well-shaped prior still works, in both forms.
+    assert!(check_marg_nullspace(&window.marg, &window.estimator, &random).is_ok());
+    assert!(check_eigenvalues(&window.marg).is_ok());
+    let squared: MargLinData<f64> = MargLinData {
+        is_sqrt: false,
+        order: window.marg.order.clone(),
+        h: window.marg.h.transpose() * &window.marg.h,
+        b: window.marg.h.transpose() * &window.marg.b,
+    };
+    assert!(check_marg_nullspace(&squared, &window.estimator, &random).is_ok());
+    assert!(check_eigenvalues(&squared).is_ok());
 }
 
 // ─── helpers ───────────────────────────────────────────────────────────────

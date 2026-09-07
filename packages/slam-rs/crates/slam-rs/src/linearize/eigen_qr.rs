@@ -63,18 +63,21 @@ use crate::lie::LieScalar;
 ///
 /// **Contract: the span must lie inside the matrix**, and the two functions
 /// index without re-checking, because they run once per column of a QR sweep.
-/// The checked *public* boundary is [`crate::linearize::reflect_column`], whose
-/// `checked_add` and `ReflectionOutOfRange` guard a caller-supplied range
-/// (decision D32). Everything else that builds a `BlockSpan` computes a span
-/// that is exact by construction, and each one is one line away from the
-/// dimension it is exact against:
+/// The checked *public* boundaries are [`crate::linearize::reflect_column`],
+/// whose `checked_add` and `ReflectionOutOfRange` guard a caller-supplied
+/// range, and [`crate::marg::Cod::solve`], whose right-hand side decides the
+/// height the spans below are exact against (decision D32).
 ///
-/// * `reflect_column` — the full width, after its own range check;
-/// * `marg_helper`'s flat QR — `row_start + rows == q2jp.nrows()` and
-///   `col_start + cols == q2jp.ncols()`, over index sets `check_indices` has
-///   already validated against the column count;
-/// * `ColPivHouseholderQr` — `k + (rows - k)` and `(k + 1) + (cols - k - 1)`;
-/// * `Cod` — `(rank - 1) + (cols - rank + 1) == cols`, with `rank <= cols`.
+/// Every construction site, and the dimension each span is exact against:
+///
+/// | site | bound |
+/// |---|---|
+/// | [`apply_householder_on_the_left`] (`eigen_qr.rs:287`) | the full width: `0 + storage.ncols()`, and `start + len` from the caller — `reflect_column`'s checked range or the landmark block's own row count |
+/// | `marg/helper.rs:192`, the flat QR | `row_start + rows == q2jp.nrows()` (`base + (rows - base)`) and `col_start + cols == q2jp.ncols()` (`(k + 1) + (cols - k - 1)`), over index sets `check_indices` validated against the column count |
+/// | `marg/eigen_cod.rs:163`, `ColPivHouseholderQr::new` | `k + (rows - k)` and `(k + 1) + (cols - k - 1)` on the matrix it just cloned |
+/// | `marg/eigen_cod.rs:263`, `apply_q_adjoint_on_the_left` | `k + (self.rows - k) == self.rows`, which is `dst.nrows()` because [`crate::marg::Cod::solve`] refuses a right-hand side of any other height — the one span whose bound is *not* local, and the one the S7 review found unguarded |
+/// | `marg/eigen_cod.rs:323`, the `Z` reflectors | `0 + k` with `k < rank <= rows`, and `(rank - 1) + (cols - rank + 1) == cols` |
+/// | `marg/eigen_cod.rs:374`, `apply_z_adjoint_on_the_left_in_place` | `(rank - 1) + (cols - rank + 1) == cols == dst.nrows()`, and `0 + nrhs == dst.ncols()` |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BlockSpan {
     /// First row of the block.
@@ -582,6 +585,48 @@ mod tests {
 
     type S64 = f64;
 
+    /// `applyHouseholderOnTheLeft` (`Householder.h:103-118`) written out over a
+    /// nested `Vec`, so it shares no indexing with the code under test.
+    fn reference_apply_left(a: &mut [Vec<f64>], span: BlockSpan, essential: &[f64], tau: f64) {
+        let (r0, c0): (usize, usize) = (span.row_start, span.col_start);
+        if span.rows == 1 {
+            // `:107-108`.
+            for j in 0..span.cols {
+                a[r0][c0 + j] *= 1.0 - tau;
+            }
+            return;
+        }
+        if tau == 0.0 {
+            // `:109`.
+            return;
+        }
+        // `:113`.
+        let mut tmp: Vec<f64> = (0..span.cols)
+            .map(|j| {
+                let mut acc: f64 = 0.0;
+                for (i, e) in essential.iter().enumerate().take(span.rows - 1) {
+                    acc += *e * a[r0 + 1 + i][c0 + j];
+                }
+                acc
+            })
+            .collect();
+        // `:114`.
+        for (j, slot) in tmp.iter_mut().enumerate() {
+            *slot += a[r0][c0 + j];
+        }
+        // `:115`.
+        for j in 0..span.cols {
+            a[r0][c0 + j] -= tau * tmp[j];
+        }
+        // `:116`.
+        for (i, e) in essential.iter().enumerate().take(span.rows - 1) {
+            let scale: f64 = tau * *e;
+            for j in 0..span.cols {
+                a[r0 + 1 + i][c0 + j] -= scale * tmp[j];
+            }
+        }
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
@@ -637,37 +682,79 @@ mod tests {
             }
         }
 
-        /// The block form over the whole width is the full-width function.
+        /// [`apply_householder_on_the_left_block`] is `Householder.h:103-118`,
+        /// bit for bit, on a sub-block as well as on the whole width.
         ///
-        /// [`apply_householder_on_the_left`] delegates to
-        /// [`apply_householder_on_the_left_block`], so the landmark block's
-        /// proven path and the marginalization QR's share one implementation;
-        /// this is what says the delegation changed nothing.
+        /// The reference is [`reference_apply_left`] — the same four statements
+        /// written out over plain row and column indices, with no
+        /// [`BlockSpan`] and no shared code — so a span computed from the
+        /// wrong bound shows up here rather than in an out-of-range read.
+        /// Comparing [`apply_householder_on_the_left`] against
+        /// [`apply_householder_on_the_left_block`] would not: the first
+        /// delegates to the second. The *independent* check on the arithmetic
+        /// itself is `applying_the_reflector_matches_the_dense_product` above,
+        /// which multiplies by `I - τ v vᵀ`.
         #[test]
-        fn the_block_form_over_the_whole_width_is_the_full_width_form(
-            values in prop::collection::vec(-4.0f64..4.0, 30..31),
+        fn the_block_reflection_is_eigens_four_statements(
+            values in prop::collection::vec(-4.0f64..4.0, 56..57),
+            row_start in 0usize..3,
+            col_start in 0usize..3,
         ) {
-            let (rows, cols): (usize, usize) = (5, 6);
+            let (rows, cols): (usize, usize) = (7, 8);
             let build = || -> DMatrix<f64> {
                 DMatrix::from_fn(rows, cols, |i, j| values[i * cols + j])
             };
-            let mut essential: Vec<f64> = vec![0.0; rows - 1];
-            let mut a: DMatrix<f64> = build();
-            let (tau, _) = make_householder(&a, 0, 0, rows, ColumnRedux::Strided, &mut essential);
+            let span: BlockSpan = BlockSpan {
+                row_start,
+                rows: rows - row_start,
+                col_start,
+                cols: cols - col_start,
+            };
 
-            let mut work: Vec<f64> = vec![0.0; cols];
-            apply_householder_on_the_left(&mut a, 0, rows, &essential, tau, &mut work);
-
-            let mut b: DMatrix<f64> = build();
-            let mut work: Vec<f64> = vec![0.0; cols];
-            apply_householder_on_the_left_block(
-                &mut b,
-                BlockSpan { row_start: 0, rows, col_start: 0, cols },
-                &essential,
-                tau,
-                &mut work,
+            let mut essential: Vec<f64> = vec![0.0; span.rows.saturating_sub(1)];
+            let source: DMatrix<f64> = build();
+            let (tau, _) = make_householder(
+                &source,
+                col_start,
+                span.row_start,
+                span.rows,
+                ColumnRedux::Strided,
+                &mut essential,
             );
-            prop_assert_eq!(a, b);
+
+            let mut got: DMatrix<f64> = build();
+            let mut work: Vec<f64> = vec![0.0; span.cols];
+            apply_householder_on_the_left_block(&mut got, span, &essential, tau, &mut work);
+
+            let mut want: Vec<Vec<f64>> = (0..rows)
+                .map(|i| (0..cols).map(|j| source[(i, j)]).collect())
+                .collect();
+            reference_apply_left(&mut want, span, &essential, tau);
+
+            for i in 0..rows {
+                for j in 0..cols {
+                    prop_assert_eq!(got[(i, j)], want[i][j], "at ({}, {})", i, j);
+                }
+            }
+
+            // ...and the full-width entry point is that block over every
+            // column, which is the one thing the delegation has to preserve.
+            let full: BlockSpan =
+                BlockSpan { row_start, rows: rows - row_start, col_start: 0, cols };
+            let mut wide: DMatrix<f64> = build();
+            let mut work: Vec<f64> = vec![0.0; cols];
+            apply_householder_on_the_left(
+                &mut wide, full.row_start, full.rows, &essential, tau, &mut work,
+            );
+            let mut wide_want: Vec<Vec<f64>> = (0..rows)
+                .map(|i| (0..cols).map(|j| source[(i, j)]).collect())
+                .collect();
+            reference_apply_left(&mut wide_want, full, &essential, tau);
+            for i in 0..rows {
+                for j in 0..cols {
+                    prop_assert_eq!(wide[(i, j)], wide_want[i][j], "wide at ({}, {})", i, j);
+                }
+            }
         }
 
         /// A reflection on a sub-block leaves everything outside the span

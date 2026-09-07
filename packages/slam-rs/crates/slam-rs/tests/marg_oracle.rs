@@ -561,10 +561,17 @@ fn the_rank_threshold_decision_matches_the_cpp() {
 /// EXPECT_TRUE(sol_qr.isApprox(sol_sqrt_sc2));   // :81
 /// ```
 ///
-/// `isApprox` is a **relative** comparison at `sqrt(NumTraits::epsilon())`
-/// (`MatrixBase::isApprox`, `Fuzzy.h:22-27`): `‖a − b‖ ≤ prec · min(‖a‖, ‖b‖)`.
-/// That is basalt's tolerance and it is what is used here, on the port's own
-/// three solutions rather than on the fixture's.
+/// `isApprox` is a **relative** comparison whose default precision is
+/// `NumTraits<Scalar>::dummy_precision()` — `1e-12` in double, `1e-5` in float
+/// (`DenseBase.h:351-352` for the default, `NumTraits.h:236,241` for the
+/// values) — and whose test is
+/// `‖a − b‖² ≤ prec² · min(‖a‖², ‖b‖²)` (`Fuzzy.h:23-27`), i.e.
+/// `‖a − b‖ ≤ prec · min(‖a‖, ‖b‖)`. basalt passes no precision
+/// (`test_qr.cpp:80-81`), so that is the tolerance, and it is what is used
+/// here — on the port's own three solutions rather than on the fixture's.
+///
+/// It is about 15,000 times tighter than the `sqrt(epsilon)` this test used
+/// before the S7 review.
 #[test]
 fn rank_def_least_squares() {
     let oracle: Oracle = load();
@@ -605,8 +612,9 @@ fn rank_def_least_squares() {
     let squared_b: DVector<f64> = sqrt_sc.h.transpose() * &sqrt_sc.b;
     let sol_sqrt_sc2: DVector<f64> = Cod::new(&squared).solve_vec(&squared_b).unwrap();
 
-    // `:80-81`, with Eigen's `isApprox` precision.
-    let prec: f64 = f64::EPSILON.sqrt();
+    // `:80-81`, with Eigen's `isApprox` default precision.
+    let prec: f64 = <f64 as LieScalar>::eigen_dummy_precision();
+    assert_eq!(prec, 1e-12, "NumTraits<double>::dummy_precision()");
     let is_approx = |a: &DVector<f64>, b: &DVector<f64>| -> bool {
         (a - b).norm() <= prec * a.norm().min(b.norm())
     };

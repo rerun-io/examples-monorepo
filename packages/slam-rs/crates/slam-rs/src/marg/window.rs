@@ -29,10 +29,10 @@ use crate::ba_base::BundleAdjustmentBase;
 use crate::imu::{ImuLinData, IntegratedImuMeasurement};
 use crate::lie::{LieScalar, So3};
 use crate::linearize::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
-use crate::marg::MargError;
 use crate::marg::helper::{
     ReducedSystem, marginalize_helper_sq_to_sq, marginalize_helper_sqrt_to_sqrt,
 };
+use crate::marg::{MargError, ScheduleSet};
 use crate::types::{
     AbsOrderMap, FrameId, LandmarkId, MargLinData, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseStateWithLin,
 };
@@ -144,6 +144,118 @@ fn build_absolute_ordering<S: LieScalar>(
         }
     }
     Ok(aom)
+}
+
+/// Check the whole schedule against the linearized ordering, before anything
+/// mutates.
+///
+/// C++ builds the five sets out of the window itself
+/// (`sqrt_keypoint_vio.cpp:724-880`) and then trusts them: `:1090-1112` erases
+/// what they name with `frame_states.at()` (which throws on a frame that is not
+/// there) and `frame_poses.erase()` (which silently does nothing), in that
+/// order, so a schedule that disagrees with the window takes effect *before* it
+/// is noticed — and a state newer than `last_state_to_marg` is not in the
+/// ordering at all, so it is deleted without having been marginalized. Every
+/// relationship below is an invariant of C++'s construction, and checking them
+/// here is what keeps a refused marginalization from leaving a half-rewritten
+/// window (decision D32).
+///
+/// Membership in `aom` is the same question as membership in the live maps:
+/// [`build_absolute_ordering`] just walked `frame_poses` and the prefix of
+/// `frame_states` up to `last_state_to_marg`, and nothing has changed since.
+/// The block size is what tells a pose from a full state, which is also what
+/// makes the four sets pairwise disjoint: `poses_to_marg` must be 6-row blocks
+/// and both state sets 15-row blocks.
+fn validate_schedule(aom: &AbsOrderMap, schedule: &MarginalizeSchedule) -> Result<(), MargError> {
+    // `:729` and `:876`: every pose that leaves is a pose block of the window.
+    for frame_id in &schedule.poses_to_marg {
+        if !matches!(aom.get(*frame_id), Some((_, POSE_SIZE))) {
+            return Err(MargError::ScheduledFrameNotInOrdering {
+                set: ScheduleSet::PosesToMarg,
+                frame_id: *frame_id,
+                block: POSE_SIZE,
+            });
+        }
+    }
+
+    // `:875-876`.
+    for frame_id in &schedule.kfs_to_marg {
+        if !schedule.poses_to_marg.contains(frame_id) {
+            return Err(MargError::KeyframeNotInPosesToMarg {
+                frame_id: *frame_id,
+            });
+        }
+    }
+
+    // `:743` and `:742`: both state sets are full states of the window, and
+    // `:745`'s `if (kv.first != last_state_to_marg)` keeps the newest state out
+    // of both — it is the one that becomes the prior's own block.
+    for (set, frames) in [
+        (ScheduleSet::StatesToMargAll, &schedule.states_to_marg_all),
+        (
+            ScheduleSet::StatesToMargVelBias,
+            &schedule.states_to_marg_vel_bias,
+        ),
+    ] {
+        for frame_id in frames {
+            if !matches!(aom.get(*frame_id), Some((_, POSE_VEL_BIAS_SIZE))) {
+                return Err(MargError::ScheduledFrameNotInOrdering {
+                    set,
+                    frame_id: *frame_id,
+                    block: POSE_VEL_BIAS_SIZE,
+                });
+            }
+            if *frame_id == schedule.last_state_to_marg {
+                return Err(MargError::ScheduleSetsOverlap {
+                    first: ScheduleSet::LastStateToMarg,
+                    second: set,
+                    frame_id: *frame_id,
+                });
+            }
+        }
+    }
+
+    // `:747-750`: the two state sets are an if/else over the same frame.
+    if let Some(frame_id) = schedule
+        .states_to_marg_all
+        .intersection(&schedule.states_to_marg_vel_bias)
+        .next()
+    {
+        return Err(MargError::ScheduleSetsOverlap {
+            first: ScheduleSet::StatesToMargAll,
+            second: ScheduleSet::StatesToMargVelBias,
+            frame_id: *frame_id,
+        });
+    }
+
+    Ok(())
+}
+
+/// The ordering the new prior gets, `marg_order_new` (`:1120-1133`).
+///
+/// C++ builds it by walking the **already shrunk** `frame_poses`; the port
+/// builds it from the sets instead, so the width check at `:1145` can run
+/// before anything mutates and a refusal leaves `marg_data` alone. The two
+/// give the same ordering: C++'s `frame_poses` at that point is
+/// `(frame_poses ∪ states_to_marg_vel_bias) \ poses_to_marg`, a `std::map` in
+/// ascending key order, which is what a [`BTreeSet`] of the same ids iterates.
+fn new_prior_ordering<S: LieScalar>(
+    estimator: &BundleAdjustmentBase<S>,
+    schedule: &MarginalizeSchedule,
+) -> Result<AbsOrderMap, MargError> {
+    let surviving: BTreeSet<FrameId> = estimator
+        .frame_poses
+        .keys()
+        .copied()
+        .chain(schedule.states_to_marg_vel_bias.iter().copied())
+        .filter(|id| !schedule.poses_to_marg.contains(id))
+        .collect();
+    let mut order: AbsOrderMap = AbsOrderMap::new();
+    for frame_id in &surviving {
+        order.push(*frame_id, POSE_SIZE)?;
+    }
+    order.push(schedule.last_state_to_marg, POSE_VEL_BIAS_SIZE)?;
+    Ok(order)
 }
 
 /// Split the ordering into the indices that stay and the indices that go
@@ -263,10 +375,12 @@ fn run_helper<S: LieScalar>(
 /// * `setLinTrue` on `last_state_to_marg` (`:1086-1088`) happens **before**
 ///   `computeDelta`, so that state contributes a zero delta to the re-anchoring
 ///   rather than the increment it accumulated as a free variable;
-/// * `marg_order_new` is built (`:1120-1133`) **after** the
-///   `states_to_marg_vel_bias` frames have been demoted into `frame_poses` and
-///   the `poses_to_marg` frames removed, so it describes the window that
-///   survives.
+/// * `marg_order_new` describes the window that *survives* — C++ builds it at
+///   `:1120-1133`, after the `states_to_marg_vel_bias` frames have been demoted
+///   into `frame_poses` and the `poses_to_marg` frames removed. The port
+///   computes the same set from the schedule instead
+///   ([`new_prior_ordering`]) so that `:1145`'s width check can run before the
+///   first mutation.
 pub fn marginalize<S: LieScalar>(
     estimator: &mut BundleAdjustmentBase<S>,
     marg_data: &mut MargLinData<S>,
@@ -296,6 +410,10 @@ pub fn marginalize<S: LieScalar>(
         Some(_) => {}
     }
 
+    // Everything the schedule claims about the window, checked here rather
+    // than discovered halfway through `:1090-1112`.
+    validate_schedule(&aom, schedule)?;
+
     // `:915-922`: the intervals whose two ends are both in the ordering.
     let imu_input: Option<ImuInput<'_, S>> = inputs.imu_lin_data.map(|lin_data| ImuInput {
         lin_data,
@@ -317,6 +435,17 @@ pub fn marginalize<S: LieScalar>(
     // `:980-1003`.
     let (idx_to_keep, idx_to_marg) = split_indices(&aom, schedule)?;
 
+    // `:1120-1133`, hoisted: the new prior's ordering is a function of the
+    // window and the schedule, so it and the `:1145` width check both run
+    // before the first mutation.
+    let marg_order_new: AbsOrderMap = new_prior_ordering(estimator, schedule)?;
+    if idx_to_keep.len() != marg_order_new.total_size() {
+        return Err(MargError::PriorWidthMismatch {
+            cols: idx_to_keep.len(),
+            total_size: marg_order_new.total_size(),
+        });
+    }
+
     // `:1012-1064`: the debug copy. A second full linearization against the
     // *previous* nullspace prior, so the two can be compared without the
     // fixed-linearization bookkeeping the live prior carries.
@@ -328,12 +457,12 @@ pub fn marginalize<S: LieScalar>(
                     frame_id: last_state_to_marg,
                 });
             };
-            // `:1021`: the order is copied from the live prior, and — this is
-            // basalt's own quirk — never advanced to the new one afterwards, so
-            // it lags one marginalization behind the `H` stored beside it. In a
-            // steady-state window the two have the same width and nothing
-            // notices; [`check_marg_nullspace`] returns a typed error rather
-            // than asserting when they do not.
+            // `:1021`: `nullspace_marg_data.order = marg_data.order`, the
+            // order *before* `:1137` replaces it, so the second linearization
+            // runs against the same variables the live one does. C++ writes it
+            // into `nullspace_marg_data` itself; the port carries it in this
+            // local copy and assigns the field at the end of `marginalize`,
+            // where `:1186`'s `logMargNullspace()` assigns the new one.
             let mut prior: MargLinData<S> = MargLinData {
                 is_sqrt: nullspace.is_sqrt,
                 order: marg_data.order.clone(),
@@ -411,25 +540,11 @@ pub fn marginalize<S: LieScalar>(
         }
     }
 
-    // `:1120-1133`: the new prior's ordering, over the window that survives.
-    let mut marg_order_new: AbsOrderMap = AbsOrderMap::new();
-    for frame_id in estimator.frame_poses.keys() {
-        marg_order_new.push(*frame_id, POSE_SIZE)?;
-    }
-    marg_order_new.push(last_state_to_marg, POSE_VEL_BIAS_SIZE)?;
-
-    // `:1135-1137`.
+    // `:1135-1137`. The width the helper produced is `idx_to_keep.len()`, and
+    // `:1145`'s check on it already ran above, against the same ordering.
     marg_data.h = reduced.h;
     marg_data.b = reduced.b;
     marg_data.order = marg_order_new;
-
-    // `:1145`.
-    if marg_data.h.ncols() != marg_data.order.total_size() {
-        return Err(MargError::PriorWidthMismatch {
-            cols: marg_data.h.ncols(),
-            total_size: marg_data.order.total_size(),
-        });
-    }
 
     // `:1147-1172`, trap 8. The prior comes out of the helper as
     // `P(x) = 0.5‖J x + res‖²`; putting it back into the delta-independent form
@@ -438,12 +553,21 @@ pub fn marginalize<S: LieScalar>(
     subtract_h_delta(&mut marg_data.b, &marg_data.h, &delta);
 
     // `:1174-1178`: the same re-anchoring on the debug copy, with the same
-    // delta.
+    // delta, and then the order.
     if let (Some(nullspace), Some(reduced_ns)) = (nullspace_marg_data, nullspace_reduced) {
         nullspace.is_sqrt = marg_data.is_sqrt;
         nullspace.h = reduced_ns.h;
         nullspace.b = reduced_ns.b;
         subtract_h_delta(&mut nullspace.b, &nullspace.h, &delta);
+        // `:1186` calls `logMargNullspace()`, whose **first** statement is
+        // `nullspace_marg_data.order = marg_data.order` (`:672`) — the *new*
+        // order, since `:1137` has already replaced it — before
+        // `checkMargNullspace()` and `checkMargEigenvalues()` read the pair.
+        // So the debug prior's order does not lag: it is the same ordering the
+        // live prior just got. (C++ also assigns the *old* order at `:1021`,
+        // for the second linearization; the port carries that one in the local
+        // `prior` above, which is the same value at the same point.)
+        nullspace.order = marg_data.order.clone();
     }
 
     Ok(MarginalizeOutput {
@@ -534,6 +658,31 @@ pub fn check_marg_nullspace<S: LieScalar>(
             rows: marg_size,
             rhs: inc_random.nrows(),
         });
+    }
+    // The two shapes `:165-176` and `:180-195` then rely on and C++ does not
+    // assert (decision D32). A square-root prior needs `b` as tall as `H`, or
+    // `Hᵀb` is not formed; a squared one needs `H` square as well as
+    // `marg_size` wide, or the quadratic `xᵀHx` does not close.
+    if mld.is_sqrt {
+        if mld.b.nrows() != mld.h.nrows() {
+            return Err(MargError::RhsLengthMismatch {
+                rows: mld.h.nrows(),
+                rhs: mld.b.nrows(),
+            });
+        }
+    } else {
+        if mld.h.nrows() != marg_size {
+            return Err(MargError::NotSquare {
+                rows: mld.h.nrows(),
+                cols: marg_size,
+            });
+        }
+        if mld.b.nrows() != marg_size {
+            return Err(MargError::RhsLengthMismatch {
+                rows: marg_size,
+                rhs: mld.b.nrows(),
+            });
+        }
     }
 
     // `:82-96`: the mean translation over the prior's blocks.
@@ -663,14 +812,24 @@ fn translation_of<S: LieScalar>(
 /// decomposition, nothing downstream branches on the result: `checkEigenvalues`
 /// is called once, with `verbose = false`, and its output goes into a statistics
 /// log (`sqrt_keypoint_vio.cpp:690`).
-pub fn check_eigenvalues<S: LieScalar>(mld: &MargLinData<S>) -> DVector<f64> {
+///
+/// A squared prior that is not square is refused rather than handed to the
+/// eigensolver, which asserts on it. The square-root branch cannot be
+/// non-square: `HᵀH` is square whatever `H` is.
+pub fn check_eigenvalues<S: LieScalar>(mld: &MargLinData<S>) -> Result<DVector<f64>, MargError> {
     let h_d: DMatrix<f64> = mld.h.map(|v| v.to_f64());
     let h: DMatrix<f64> = if mld.is_sqrt {
         h_d.transpose() * &h_d
     } else {
+        if h_d.nrows() != h_d.ncols() {
+            return Err(MargError::NotSquare {
+                rows: h_d.nrows(),
+                cols: h_d.ncols(),
+            });
+        }
         h_d
     };
     let mut values: Vec<f64> = h.symmetric_eigenvalues().iter().copied().collect();
     values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    DVector::from_vec(values)
+    Ok(DVector::from_vec(values))
 }
