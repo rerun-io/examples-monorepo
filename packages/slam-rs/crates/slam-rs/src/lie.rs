@@ -42,6 +42,24 @@ pub trait LieScalar: RealField + Copy {
         Self::sophus_epsilon().sqrt()
     }
 
+    /// `Eigen::NumTraits<Scalar>::dummy_precision()`: `1e-12` in double and
+    /// `1e-5` in float (`Eigen/src/Core/NumTraits.h`).
+    ///
+    /// Eigen's own fuzzy-comparison tolerance, several orders coarser than the
+    /// machine epsilon `RealField::default_epsilon` reports. It decides the
+    /// anti-parallel branch of `Quaternion::setFromTwoVectors`, which is how
+    /// basalt initialises orientation from the first accelerometer sample.
+    fn eigen_dummy_precision() -> Self;
+
+    /// `std::numeric_limits<Scalar>::min()`: the smallest positive normal value.
+    ///
+    /// Not `RealField::min_value()`, which is the most *negative* finite value
+    /// despite its doc comment. basalt compares an LDLT pivot against this
+    /// constant to decide whether a direction is rank deficient
+    /// (`basalt-headers/include/basalt/imu/preintegration.h:314`), so the two
+    /// must mean the same thing.
+    fn min_positive() -> Self;
+
     /// Exact-as-possible conversion of a literal, standing in for C++'s `Scalar(x)`.
     fn from_literal(value: f64) -> Self;
 
@@ -52,6 +70,14 @@ pub trait LieScalar: RealField + Copy {
 impl LieScalar for f64 {
     fn sophus_epsilon() -> Self {
         1e-10
+    }
+
+    fn eigen_dummy_precision() -> Self {
+        1e-12
+    }
+
+    fn min_positive() -> Self {
+        Self::MIN_POSITIVE
     }
 
     fn from_literal(value: f64) -> Self {
@@ -66,6 +92,14 @@ impl LieScalar for f64 {
 impl LieScalar for f32 {
     fn sophus_epsilon() -> Self {
         1e-5
+    }
+
+    fn eigen_dummy_precision() -> Self {
+        1e-5
+    }
+
+    fn min_positive() -> Self {
+        Self::MIN_POSITIVE
     }
 
     fn from_literal(value: f64) -> Self {

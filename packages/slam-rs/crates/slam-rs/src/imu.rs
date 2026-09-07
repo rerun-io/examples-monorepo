@@ -1,0 +1,2478 @@
+//! IMU preintegration: the pseudo-measurement between two frames, its
+//! covariance, its bias Jacobians and the 9-vector residual the estimator
+//! whitens.
+//!
+//! Ported line by line from
+//! `thirdparty/basalt-headers/include/basalt/imu/preintegration.h` and
+//! `.../imu/imu_types.h`, plus the between-frames accumulation loop in
+//! `src/vi_estimator/sqrt_keypoint_vio.cpp:315-336` and the block that consumes
+//! the result, `include/basalt/linearization/imu_block.hpp`.
+//!
+//! # basalt is not Forster
+//!
+//! basalt cites Forster et al. 2017 and then deviates from it in four ways
+//! (decision D12). Every one of them is reproduced here, because each changes
+//! the numbers:
+//!
+//! 1. **Midpoint rotation** (`preintegration.h:85-88`). Forster Eq. (36) rotates
+//!    the acceleration by the rotation at the *start* of the interval; basalt
+//!    rotates by `ΔR · exp(½ Δt ω)`, an RK2-style midpoint. It propagates into
+//!    `d_next_d_accel` (`:105-106`) and into the `rightJacobianSO3(½ Δt ω)` of
+//!    `d_next_d_gyro` (`:113,116`).
+//! 2. **The position update keeps `½ a Δt²`** (`preintegration.h:93-94`), which
+//!    Paper 1's Eq. (12) drops. That is why `d_next_d_curr(0,3)` is non-zero
+//!    (`:100`) and `d_next_d_accel(0,0)` is `½ R Δt²` (`:105`).
+//! 3. **State ordering is `[translation, rotation, velocity]`**, not Forster's
+//!    `(ΔR, Δv, Δp)`. Provable from the Jacobian block writes, not from any
+//!    comment: `d_next_d_curr(0,6).diagonal() = dt` is `∂p/∂v` (`:98`) and
+//!    `(6,3) = hat(-a_world dt)` is `∂v/∂R` (`:99`). The residual agrees
+//!    (`:217`, `:219`, `:224`), and the 15-vector is
+//!    `[t(3), R(3), v(3), b_g(3), b_a(3)]` — confirmed by the `+9` and `+12`
+//!    column offsets in `imu_block.hpp:57-58`.
+//! 4. **The gyro-bias correction is pre-multiplied**
+//!    (`preintegration.h:219-221`), where Forster Eq. (44) puts it inside the
+//!    transpose on the right. The consequence is two *different* inverse
+//!    Jacobians in one function: [`right_jacobian_inv_so3`] for the state blocks
+//!    (`:228`) and [`left_jacobian_inv_so3`] for the gyro-bias block
+//!    (`:256-257`). Swapping them is a silent bias bug.
+//!
+//! Two more, from the same reading:
+//!
+//! * `sqrt_cov_inv` is a **pseudo**-inverse square root: any LDLT pivot below
+//!   `numeric_limits<Scalar>::min()` is zeroed rather than producing an infinity
+//!   (`preintegration.h:313-319`).
+//! * Paper 1's Eq. (20) omits the `− v_i Δt` term. The code has it
+//!   (`preintegration.h:214`) and so does this port.
+//!
+//! # Deviations of this port from the C++
+//!
+//! * **No `mutable` cache on the square-root inverse covariance.** C++ caches it
+//!   behind a dirty flag (`preintegration.h:163`, `:271-274`, `:328-330`);
+//!   [`IntegratedImuMeasurement::get_cov_inv_sqrt`] recomputes the 9x9 LDLT on
+//!   every call instead, which needs no interior mutability and costs a few
+//!   hundred flops against the ~10⁸ the frontend spends on the same frame.
+//! * **The LDLT is our own.** Eigen's `LDLT` is not available; the pivoted
+//!   factorization in [`ldlt`] uses the same max-|diagonal| symmetric pivot and
+//!   produces the same `D^{-1/2} L^{-1} P`, but the arithmetic order inside a
+//!   column may differ, so the factor can differ in the last bits and — when the
+//!   covariance is rank deficient — in the permutation. The estimator only ever
+//!   uses the factor through `MᵀM` and `‖M r‖`, and both are invariant:
+//!   `MᵀM = cov⁻¹` is asserted in the tests.
+//! * **Jacobians are all-or-nothing.** C++ takes four nullable out-pointers;
+//!   every in-tree caller either asks for all of them or none
+//!   (`imu_block.hpp:41-48`), so the port has one plain method and one
+//!   `_with_jacobians` method.
+//! * **`predict_state` sets the timestamp.** `preintegration.h:174-181` never
+//!   writes `state1.t_ns`, so the frontend's long-lived `predicted_state` keeps
+//!   whatever it held before (`frame_to_frame_optical_flow.h:149`). The port
+//!   returns a fresh state and fills in `state0.t_ns + dt_ns`.
+//! * **Asserts become typed errors or tests.** `propagateState` asserts
+//!   `data.t_ns > curr_state.t_ns` (`preintegration.h:79-80`); here that is
+//!   [`ImuError::NonMonotonicSample`] (decision D32). The residual's
+//!   `BASALT_ASSERT(ba_diff.segment<3>(3).isApproxToConstant(0))` (`:211`) holds
+//!   structurally — `d_next_d_accel` has no rotation rows and `F`'s rotation
+//!   rows are `[0 I 0]` — so it is a test, not a runtime check.
+
+use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, Vector3};
+
+use crate::calib::Calibration;
+use crate::lie::{
+    LieScalar, So3, left_jacobian_inv_so3, right_jacobian_inv_so3, right_jacobian_so3,
+};
+use crate::types::{
+    POSE_VEL_BIAS_SIZE, POSE_VEL_SIZE, PoseVelBiasStateWithLin, PoseVelState, Vector9, Vector15,
+};
+
+/// Where the gyroscope bias starts inside a 15-vector state block: the `+9` of
+/// `imu_block.hpp:57`.
+const BIAS_GYRO_OFFSET: usize = POSE_VEL_SIZE;
+/// Where the accelerometer bias starts: the `+12` of `imu_block.hpp:58`.
+const BIAS_ACCEL_OFFSET: usize = POSE_VEL_SIZE + 3;
+
+/// `Scalar(x)` in C++: a literal in the measurement's scalar type.
+#[inline]
+fn c<S: LieScalar>(value: f64) -> S {
+    S::from_literal(value)
+}
+
+/// A `Vector3<f64>` in the measurement's scalar type.
+#[inline]
+fn cast3<S: LieScalar>(v: &Vector3<f64>) -> Vector3<S> {
+    Vector3::new(c::<S>(v.x), c::<S>(v.y), c::<S>(v.z))
+}
+
+/// The 9x9 blocks: covariance, state transition, residual Jacobians.
+pub type Matrix9<S> = SMatrix<S, POSE_VEL_SIZE, POSE_VEL_SIZE>;
+/// The 9x3 blocks: noise input and bias Jacobians.
+pub type Matrix9x3<S> = SMatrix<S, POSE_VEL_SIZE, 3>;
+/// The 9x6 residual Jacobian with respect to both biases at once.
+pub type Matrix9x6<S> = SMatrix<S, POSE_VEL_SIZE, 6>;
+/// The IMU block's Jacobian: 15 rows over the two 15-column states.
+pub type Matrix15x30<S> = SMatrix<S, POSE_VEL_BIAS_SIZE, { 2 * POSE_VEL_BIAS_SIZE }>;
+
+/// Gravity in the world frame, `basalt::constants::g`
+/// (`include/basalt/utils/imu_types.h:63`).
+pub fn gravity<S: LieScalar>() -> Vector3<S> {
+    Vector3::new(S::zero(), S::zero(), c::<S>(-9.81))
+}
+
+/// One timestamped gyroscope and accelerometer reading, `basalt::ImuData`
+/// (`imu_types.h:244-273`).
+///
+/// `f64` regardless of the estimator's scalar: timestamps are nanoseconds and
+/// IMU integration runs in double (decision D05), exactly as basalt's frontend
+/// does with its `IntegratedImuMeasurement<double>`
+/// (`frame_to_frame_optical_flow.h:142`). The samples are already through the
+/// static IMU calibration — `calib.calib_accel_bias.getCalibrated(...)`
+/// (`sqrt_keypoint_vio.cpp:235-236`) — and carry no bias correction; that
+/// happens at the linearization point inside [`IntegratedImuMeasurement::integrate`].
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ImuSample {
+    /// Timestamp of the sample, in nanoseconds.
+    pub t_ns: i64,
+    /// Angular velocity in the rig frame, rad/s.
+    pub gyro: Vector3<f64>,
+    /// Specific force in the rig frame, m/s².
+    pub accel: Vector3<f64>,
+}
+
+/// The two diagonal noise covariances `integrate` needs.
+///
+/// basalt squares the *discrete-time* noise densities
+/// (`sqrt_keypoint_vio.cpp:228-229`), which are the continuous ones scaled by
+/// `sqrt(imu_update_rate)` (`calibration.hpp:190,196`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImuNoise<S: LieScalar> {
+    /// Diagonal of the accelerometer noise covariance.
+    pub accel_cov: Vector3<S>,
+    /// Diagonal of the gyroscope noise covariance.
+    pub gyro_cov: Vector3<S>,
+}
+
+impl<S: LieScalar> ImuNoise<S> {
+    /// The noise the estimator builds from a calibration
+    /// (`sqrt_keypoint_vio.cpp:228-229`).
+    pub fn from_calibration(calib: &Calibration<S>) -> Self {
+        Self {
+            accel_cov: calib
+                .discrete_time_accel_noise_std()
+                .map(|value: S| value * value),
+            gyro_cov: calib
+                .discrete_time_gyro_noise_std()
+                .map(|value: S| value * value),
+        }
+    }
+}
+
+/// What the preintegration refuses to do.
+///
+/// The core never panics on data (decision D32): every ordering violation the
+/// C++ handles with `BASALT_ASSERT` or by breaking out of the processing loop is
+/// a value here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ImuError {
+    /// A sample does not strictly follow the integrated interval.
+    ///
+    /// `propagateState` asserts `data.t_ns > curr_state.t_ns`
+    /// (`preintegration.h:79-80`); a duplicate timestamp is a zero `dt`, which
+    /// makes the whole measurement singular.
+    #[error("imu sample at {t_ns} ns does not follow the integrated state at {previous_t_ns} ns")]
+    NonMonotonicSample {
+        /// End of what has been integrated so far, relative to the start time.
+        previous_t_ns: i64,
+        /// Timestamp of the rejected sample, on the same clock.
+        t_ns: i64,
+    },
+    /// Two frame timestamps that are equal or go backwards.
+    ///
+    /// `sqrt_keypoint_vio.cpp:307-313` asserts both of these separately, and its
+    /// message says a zero time delta "leads to invalid IMU integration".
+    #[error("frame interval [{t0_ns}, {t1_ns}] ns is empty or reversed")]
+    NonMonotonicFrames {
+        /// Timestamp of the previous frame.
+        t0_ns: i64,
+        /// Timestamp of the current frame.
+        t1_ns: i64,
+    },
+    /// The interval does not start where the measurement was constructed.
+    ///
+    /// C++ cannot get this wrong: `measure()` builds the measurement with
+    /// `prev_frame->t_ns` and then integrates from that same variable
+    /// (`sqrt_keypoint_vio.cpp:304`, `:315`).
+    #[error("interval starts at {t0_ns} ns but the measurement starts at {start_t_ns} ns")]
+    StartTimeMismatch {
+        /// Start time the measurement was constructed with.
+        start_t_ns: i64,
+        /// Start of the interval the caller asked for.
+        t0_ns: i64,
+    },
+    /// The interval cannot be closed because no sample follows the frame.
+    ///
+    /// basalt reaches the same state and ends the estimator: `if (!data.get())
+    /// break;` inside the closing step (`sqrt_keypoint_vio.cpp:331`).
+    #[error("no imu sample after {t1_ns} ns to close the interval with")]
+    MissingSampleAfterFrame {
+        /// Timestamp the interval had to reach.
+        t1_ns: i64,
+    },
+    /// A timestamp difference does not fit in an `i64`.
+    #[error("timestamps {a_ns} and {b_ns} ns are too far apart to subtract")]
+    TimestampOverflow {
+        /// Left operand.
+        a_ns: i64,
+        /// Right operand.
+        b_ns: i64,
+    },
+}
+
+/// The three Jacobians of one propagation step
+/// (`preintegration.h:96-119`, `F`, `A` and `G` at `:154-158`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PropagationJacobians<S: LieScalar> {
+    /// `F = ∂next/∂curr`, Paper 1 Eq. (13)'s `J_f^s`.
+    pub d_next_d_curr: Matrix9<S>,
+    /// `A = ∂next/∂accel`, Paper 1 Eq. (13)'s `J_f^a`.
+    pub d_next_d_accel: Matrix9x3<S>,
+    /// `G = ∂next/∂gyro`, Paper 1 Eq. (13)'s `J_f^g`.
+    pub d_next_d_gyro: Matrix9x3<S>,
+}
+
+/// The residual's Jacobians (`preintegration.h:227-258`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImuResidualJacobians<S: LieScalar> {
+    /// `∂r/∂state0` (`preintegration.h:230-239`).
+    pub d_res_d_state0: Matrix9<S>,
+    /// `∂r/∂state1` (`preintegration.h:241-247`).
+    pub d_res_d_state1: Matrix9<S>,
+    /// `∂r/∂[b_g, b_a]`: gyro bias in columns 0-2, accel bias in columns 3-5.
+    ///
+    /// C++ returns the two 9x3 blocks separately and the block writes them to
+    /// `start_idx + 9` and `start_idx + 12` (`imu_block.hpp:57-58`), which is
+    /// this layout — the bias half of the 15-vector
+    /// `[t(3), R(3), v(3), b_g(3), b_a(3)]`.
+    pub d_res_d_bias: Matrix9x6<S>,
+}
+
+/// A pseudo-measurement built from consecutive IMU samples,
+/// `basalt::IntegratedImuMeasurement` (`preintegration.h:49-335`).
+///
+/// The delta state's `t_ns` is elapsed nanoseconds since [`Self::get_start_t_ns`],
+/// not absolute time: `integrate` subtracts the start time from every sample
+/// (`preintegration.h:148`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IntegratedImuMeasurement<S: LieScalar> {
+    start_t_ns: i64,
+    delta_state: PoseVelState<S>,
+    cov: Matrix9<S>,
+    d_state_d_ba: Matrix9x3<S>,
+    d_state_d_bg: Matrix9x3<S>,
+    bias_gyro_lin: Vector3<S>,
+    bias_accel_lin: Vector3<S>,
+}
+
+impl<S: LieScalar> Default for IntegratedImuMeasurement<S> {
+    /// `preintegration.h:123-130`: everything zero, start time zero.
+    fn default() -> Self {
+        Self::new(0, &Vector3::zeros(), &Vector3::zeros())
+    }
+}
+
+impl<S: LieScalar> IntegratedImuMeasurement<S> {
+    /// An empty measurement starting at `start_t_ns`, linearized about the two
+    /// biases (`preintegration.h:133-139`).
+    pub fn new(start_t_ns: i64, bias_gyro: &Vector3<S>, bias_accel: &Vector3<S>) -> Self {
+        Self {
+            start_t_ns,
+            delta_state: PoseVelState::default(),
+            cov: Matrix9::zeros(),
+            d_state_d_ba: Matrix9x3::zeros(),
+            d_state_d_bg: Matrix9x3::zeros(),
+            bias_gyro_lin: *bias_gyro,
+            bias_accel_lin: *bias_accel,
+        }
+    }
+
+    /// Propagate one state by one bias-corrected sample, with the three
+    /// Jacobians (`preintegration.h:76-120`, `propagateState`).
+    ///
+    /// `t_ns`, `accel` and `gyro` are C++'s `data` after the correction at
+    /// `:147-150`: the timestamp is relative to the measurement's start and the
+    /// biases are already removed. All three Jacobians are always computed
+    /// because every caller in the C++ asks for all three (`:158`).
+    pub fn propagate_state(
+        curr_state: &PoseVelState<S>,
+        t_ns: i64,
+        accel: &Vector3<S>,
+        gyro: &Vector3<S>,
+    ) -> Result<(PoseVelState<S>, PropagationJacobians<S>), ImuError> {
+        // `:79-80` is an assert in C++; here it is the error that keeps a
+        // duplicate or reordered sample from producing a singular measurement.
+        if t_ns <= curr_state.t_ns {
+            return Err(ImuError::NonMonotonicSample {
+                previous_t_ns: curr_state.t_ns,
+                t_ns,
+            });
+        }
+        let dt_ns: i64 = t_ns
+            .checked_sub(curr_state.t_ns)
+            .ok_or(ImuError::TimestampOverflow {
+                a_ns: t_ns,
+                b_ns: curr_state.t_ns,
+            })?;
+        let dt: S = c::<S>(dt_ns as f64) * c::<S>(1e-9); // `:82-83`
+
+        // Deviation 1: the acceleration is rotated by the *midpoint* rotation.
+        let r_w_i_new_2: So3<S> =
+            curr_state.t_w_i.rotation * So3::exp(&(*gyro * (c::<S>(0.5) * dt))); // `:85`
+        let rr_w_i_new_2: Matrix3<S> = r_w_i_new_2.matrix(); // `:86`
+        let accel_world: Vector3<S> = rr_w_i_new_2 * accel; // `:88`
+
+        let mut next_state: PoseVelState<S> = PoseVelState {
+            t_ns, // `:90`
+            t_w_i: curr_state.t_w_i,
+            vel_w_i: curr_state.vel_w_i + accel_world * dt, // `:92`
+        };
+        next_state.t_w_i.rotation = curr_state.t_w_i.rotation * So3::exp(&(*gyro * dt)); // `:91`
+        // `:93-94`, deviation 2: the quadratic term stays.
+        next_state.t_w_i.translation = curr_state.t_w_i.translation
+            + curr_state.vel_w_i * dt
+            + accel_world * c::<S>(0.5) * dt * dt;
+
+        // `:96-101`. Only the *diagonal* of the (0,6) block is set, so the port
+        // writes three entries rather than a scaled identity.
+        let mut d_next_d_curr: Matrix9<S> = Matrix9::identity();
+        for i in 0..3 {
+            d_next_d_curr[(i, 6 + i)] = dt;
+        }
+        let hat_accel_dt: Matrix3<S> = So3::hat(&(-accel_world * dt));
+        d_next_d_curr
+            .fixed_view_mut::<3, 3>(6, 3)
+            .copy_from(&hat_accel_dt);
+        d_next_d_curr
+            .fixed_view_mut::<3, 3>(0, 3)
+            .copy_from(&(hat_accel_dt * dt * c::<S>(0.5)));
+
+        // `:103-107`
+        let mut d_next_d_accel: Matrix9x3<S> = Matrix9x3::zeros();
+        d_next_d_accel
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&(rr_w_i_new_2 * c::<S>(0.5) * dt * dt));
+        d_next_d_accel
+            .fixed_view_mut::<3, 3>(6, 0)
+            .copy_from(&(rr_w_i_new_2 * dt));
+
+        // `:109-119`
+        let mut d_next_d_gyro: Matrix9x3<S> = Matrix9x3::zeros();
+        let jr: Matrix3<S> = right_jacobian_so3(&(*gyro * dt));
+        let jr2: Matrix3<S> = right_jacobian_so3(&(*gyro * (c::<S>(0.5) * dt)));
+        d_next_d_gyro
+            .fixed_view_mut::<3, 3>(3, 0)
+            .copy_from(&(next_state.t_w_i.rotation.matrix() * jr * dt));
+        let d_vel_d_gyro: Matrix3<S> = hat_accel_dt * rr_w_i_new_2 * jr2 * c::<S>(0.5) * dt;
+        d_next_d_gyro
+            .fixed_view_mut::<3, 3>(6, 0)
+            .copy_from(&d_vel_d_gyro);
+        d_next_d_gyro
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&(d_vel_d_gyro * (c::<S>(0.5) * dt)));
+
+        Ok((
+            next_state,
+            PropagationJacobians {
+                d_next_d_curr,
+                d_next_d_accel,
+                d_next_d_gyro,
+            },
+        ))
+    }
+
+    /// Fold one sample into the measurement (`preintegration.h:146-167`).
+    ///
+    /// `accel_cov` and `gyro_cov` are the diagonals of the discrete-time noise
+    /// covariances. Nothing here allocates: every matrix is a fixed-size
+    /// `SMatrix` on the stack.
+    pub fn integrate(
+        &mut self,
+        data: &ImuSample,
+        accel_cov: &Vector3<S>,
+        gyro_cov: &Vector3<S>,
+    ) -> Result<(), ImuError> {
+        // `:147-150`: relative time, bias removed at the linearization point.
+        let t_ns: i64 =
+            data.t_ns
+                .checked_sub(self.start_t_ns)
+                .ok_or(ImuError::TimestampOverflow {
+                    a_ns: data.t_ns,
+                    b_ns: self.start_t_ns,
+                })?;
+        let accel: Vector3<S> = cast3::<S>(&data.accel) - self.bias_accel_lin;
+        let gyro: Vector3<S> = cast3::<S>(&data.gyro) - self.bias_gyro_lin;
+
+        let (new_state, j): (PoseVelState<S>, PropagationJacobians<S>) =
+            Self::propagate_state(&self.delta_state, t_ns, &accel, &gyro)?; // `:158`
+
+        self.delta_state = new_state; // `:160`
+        // `:161-162`, Paper 1 Eq. (21).
+        self.cov = j.d_next_d_curr * self.cov * j.d_next_d_curr.transpose()
+            + j.d_next_d_accel * Matrix3::from_diagonal(accel_cov) * j.d_next_d_accel.transpose()
+            + j.d_next_d_gyro * Matrix3::from_diagonal(gyro_cov) * j.d_next_d_gyro.transpose();
+        // `:165-166`, Paper 1 Eqs. (15)-(16).
+        self.d_state_d_ba = -j.d_next_d_accel + j.d_next_d_curr * self.d_state_d_ba;
+        self.d_state_d_bg = -j.d_next_d_gyro + j.d_next_d_curr * self.d_state_d_bg;
+        Ok(())
+    }
+
+    /// Accumulate every sample that belongs between two frames, exactly as
+    /// `measure()`'s producer loop does (`sqrt_keypoint_vio.cpp:315-336`).
+    ///
+    /// The three parts, in order:
+    ///
+    /// 1. Skip while `sample.t_ns <= t0_ns` (`:315-320`).
+    /// 2. Integrate while `sample.t_ns <= t1_ns` (`:322-328`).
+    /// 3. If the accumulated interval still ends before `t1_ns`, take the first
+    ///    sample *after* `t1_ns`, **retime it to `t1_ns` and integrate it with
+    ///    its own accel and gyro** (`:330-336`, and the same code with the
+    ///    comment "Pretend last IMU sample before now happened now" at
+    ///    `frame_to_frame_optical_flow.h:194-198`). There is **no
+    ///    interpolation**: the values integrated over that last partial step are
+    ///    the later sample's, not a blend. The port does none either.
+    ///
+    /// The C++ reads from a queue and cannot see a reordered sample; here the
+    /// whole slice is checked for strictly increasing timestamps up front, and a
+    /// duplicate or backwards sample is [`ImuError::NonMonotonicSample`].
+    pub fn integrate_between(
+        &mut self,
+        samples: &[ImuSample],
+        t0_ns: i64,
+        t1_ns: i64,
+        noise: &ImuNoise<S>,
+    ) -> Result<(), ImuError> {
+        if t1_ns <= t0_ns {
+            return Err(ImuError::NonMonotonicFrames { t0_ns, t1_ns }); // `:307-313`
+        }
+        if t0_ns != self.start_t_ns {
+            return Err(ImuError::StartTimeMismatch {
+                start_t_ns: self.start_t_ns,
+                t0_ns,
+            });
+        }
+        let mut previous_t_ns: Option<i64> = None;
+        for sample in samples {
+            if let Some(previous_t_ns) = previous_t_ns
+                && sample.t_ns <= previous_t_ns
+            {
+                return Err(ImuError::NonMonotonicSample {
+                    previous_t_ns,
+                    t_ns: sample.t_ns,
+                });
+            }
+            previous_t_ns = Some(sample.t_ns);
+        }
+
+        let mut index: usize = 0;
+        while index < samples.len() && samples[index].t_ns <= t0_ns {
+            index += 1; // `:315-320`
+        }
+        while index < samples.len() && samples[index].t_ns <= t1_ns {
+            self.integrate(&samples[index], &noise.accel_cov, &noise.gyro_cov)?; // `:323`
+            index += 1;
+        }
+
+        let end_t_ns: i64 =
+            self.start_t_ns
+                .checked_add(self.get_dt_ns())
+                .ok_or(ImuError::TimestampOverflow {
+                    a_ns: self.start_t_ns,
+                    b_ns: self.get_dt_ns(),
+                })?;
+        if end_t_ns < t1_ns {
+            // `:330-336`. C++ ends the estimator when the queue is empty here;
+            // a short measurement would be silently wrong, so this is an error.
+            let sample: &ImuSample = samples
+                .get(index)
+                .ok_or(ImuError::MissingSampleAfterFrame { t1_ns })?;
+            self.integrate(
+                &ImuSample {
+                    t_ns: t1_ns,
+                    ..*sample
+                },
+                &noise.accel_cov,
+                &noise.gyro_cov,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Predict the state at the end of the interval (`preintegration.h:174-181`).
+    pub fn predict_state(&self, state0: &PoseVelState<S>, g: &Vector3<S>) -> PoseVelState<S> {
+        let dt: S = c::<S>(self.delta_state.t_ns as f64) * c::<S>(1e-9); // `:175`
+        let mut state1: PoseVelState<S> = PoseVelState {
+            // C++ never writes `t_ns` here; see the module deviations.
+            t_ns: state0.t_ns.saturating_add(self.delta_state.t_ns),
+            t_w_i: state0.t_w_i,
+            // `:178`
+            vel_w_i: state0.vel_w_i + *g * dt + state0.t_w_i.rotation * self.delta_state.vel_w_i,
+        };
+        state1.t_w_i.rotation = state0.t_w_i.rotation * self.delta_state.t_w_i.rotation; // `:177`
+        // `:179-180`
+        state1.t_w_i.translation = state0.t_w_i.translation
+            + state0.vel_w_i * dt
+            + *g * c::<S>(0.5) * dt * dt
+            + state0.t_w_i.rotation * self.delta_state.t_w_i.translation;
+        state1
+    }
+
+    /// The 9-vector residual between two states (`preintegration.h:200-261`).
+    ///
+    /// Ordered `[translation(3), rotation(3), velocity(3)]` (deviation 3).
+    pub fn residual(
+        &self,
+        state0: &PoseVelState<S>,
+        g: &Vector3<S>,
+        state1: &PoseVelState<S>,
+        curr_bg: &Vector3<S>,
+        curr_ba: &Vector3<S>,
+    ) -> Vector9<S> {
+        self.residual_parts(state0, g, state1, curr_bg, curr_ba).0
+    }
+
+    /// [`Self::residual`] plus the three Jacobians (`preintegration.h:227-258`).
+    pub fn residual_with_jacobians(
+        &self,
+        state0: &PoseVelState<S>,
+        g: &Vector3<S>,
+        state1: &PoseVelState<S>,
+        curr_bg: &Vector3<S>,
+        curr_ba: &Vector3<S>,
+    ) -> (Vector9<S>, ImuResidualJacobians<S>) {
+        let (res, r0_inv, tmp, tmp2, dt): (Vector9<S>, Matrix3<S>, Vector3<S>, Vector3<S>, S) =
+            self.residual_parts(state0, g, state1, curr_bg, curr_ba);
+
+        let res_rot: Vector3<S> = res.fixed_rows::<3>(3).into_owned();
+        let j: Matrix3<S> = right_jacobian_inv_so3(&res_rot); // `:228`
+
+        // `:230-239`
+        let mut d_res_d_state0: Matrix9<S> = Matrix9::zeros();
+        d_res_d_state0
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&-r0_inv);
+        d_res_d_state0
+            .fixed_view_mut::<3, 3>(0, 3)
+            .copy_from(&(So3::hat(&tmp) * r0_inv));
+        d_res_d_state0
+            .fixed_view_mut::<3, 3>(3, 3)
+            .copy_from(&(j * r0_inv));
+        d_res_d_state0
+            .fixed_view_mut::<3, 3>(6, 3)
+            .copy_from(&(So3::hat(&tmp2) * r0_inv));
+        d_res_d_state0
+            .fixed_view_mut::<3, 3>(0, 6)
+            .copy_from(&(-r0_inv * dt));
+        d_res_d_state0
+            .fixed_view_mut::<3, 3>(6, 6)
+            .copy_from(&-r0_inv);
+
+        // `:241-247`
+        let mut d_res_d_state1: Matrix9<S> = Matrix9::zeros();
+        d_res_d_state1
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&r0_inv);
+        d_res_d_state1
+            .fixed_view_mut::<3, 3>(3, 3)
+            .copy_from(&(-j * r0_inv));
+        d_res_d_state1
+            .fixed_view_mut::<3, 3>(6, 6)
+            .copy_from(&r0_inv);
+
+        // `:250-258`. The gyro half is `-d_state_d_bg` with its rotation rows
+        // *replaced* — note the missing minus sign there, which is basalt's.
+        let mut d_res_d_bias: Matrix9x6<S> = Matrix9x6::zeros();
+        d_res_d_bias
+            .fixed_view_mut::<9, 3>(0, 0)
+            .copy_from(&-self.d_state_d_bg);
+        let j_left: Matrix3<S> = left_jacobian_inv_so3(&res_rot); // `:256`
+        d_res_d_bias
+            .fixed_view_mut::<3, 3>(3, 0)
+            .copy_from(&(j_left * self.d_state_d_bg.fixed_view::<3, 3>(3, 0))); // `:257`
+        d_res_d_bias
+            .fixed_view_mut::<9, 3>(0, 3)
+            .copy_from(&-self.d_state_d_ba); // `:250`
+
+        (
+            res,
+            ImuResidualJacobians {
+                d_res_d_state0,
+                d_res_d_state1,
+                d_res_d_bias,
+            },
+        )
+    }
+
+    /// The residual and the four intermediates its Jacobians reuse:
+    /// `R0_inv` (`preintegration.h:213`), `tmp` (`:214`), `tmp2` (`:223`) and
+    /// `dt` (`:203`).
+    fn residual_parts(
+        &self,
+        state0: &PoseVelState<S>,
+        g: &Vector3<S>,
+        state1: &PoseVelState<S>,
+        curr_bg: &Vector3<S>,
+        curr_ba: &Vector3<S>,
+    ) -> (Vector9<S>, Matrix3<S>, Vector3<S>, Vector3<S>, S) {
+        let dt: S = c::<S>(self.delta_state.t_ns as f64) * c::<S>(1e-9); // `:203`
+
+        // `:208-209`, Paper 1 Eq. (17).
+        let bg_diff: Vector9<S> = self.d_state_d_bg * (curr_bg - self.bias_gyro_lin);
+        let ba_diff: Vector9<S> = self.d_state_d_ba * (curr_ba - self.bias_accel_lin);
+
+        let r0_inv: Matrix3<S> = state0.t_w_i.rotation.inverse().matrix(); // `:213`
+        // `:214-215`. The `− vel * dt` term is the one Paper 1's Eq. (20) omits.
+        let tmp: Vector3<S> = r0_inv
+            * (state1.t_w_i.translation
+                - state0.t_w_i.translation
+                - state0.vel_w_i * dt
+                - *g * c::<S>(0.5) * dt * dt);
+        // `:223`
+        let tmp2: Vector3<S> = r0_inv * (state1.vel_w_i - state0.vel_w_i - *g * dt);
+
+        let mut res: Vector9<S> = Vector9::zeros();
+        // `:217-218`
+        res.fixed_rows_mut::<3>(0).copy_from(
+            &(tmp
+                - (self.delta_state.t_w_i.translation
+                    + bg_diff.fixed_rows::<3>(0)
+                    + ba_diff.fixed_rows::<3>(0))),
+        );
+        // `:219-221`, deviation 4: the gyro-bias correction is pre-multiplied.
+        res.fixed_rows_mut::<3>(3).copy_from(
+            &(So3::exp(&bg_diff.fixed_rows::<3>(3).into_owned())
+                * self.delta_state.t_w_i.rotation
+                * state1.t_w_i.rotation.inverse()
+                * state0.t_w_i.rotation)
+                .log(),
+        );
+        // `:224-225`
+        res.fixed_rows_mut::<3>(6).copy_from(
+            &(tmp2
+                - (self.delta_state.vel_w_i
+                    + bg_diff.fixed_rows::<3>(6)
+                    + ba_diff.fixed_rows::<3>(6))),
+        );
+
+        (res, r0_inv, tmp, tmp2, dt)
+    }
+
+    /// Elapsed time of the measurement, in nanoseconds (`preintegration.h:264`).
+    pub fn get_dt_ns(&self) -> i64 {
+        self.delta_state.t_ns
+    }
+
+    /// Start time of the measurement, in nanoseconds (`preintegration.h:267`).
+    pub fn get_start_t_ns(&self) -> i64 {
+        self.start_t_ns
+    }
+
+    /// The preintegrated delta state (`preintegration.h:294`).
+    pub fn get_delta_state(&self) -> &PoseVelState<S> {
+        &self.delta_state
+    }
+
+    /// The measurement covariance (`preintegration.h:290`).
+    pub fn get_cov(&self) -> &Matrix9<S> {
+        &self.cov
+    }
+
+    /// Jacobian of the delta state with respect to the accelerometer bias
+    /// (`preintegration.h:297`).
+    pub fn get_d_state_d_ba(&self) -> &Matrix9x3<S> {
+        &self.d_state_d_ba
+    }
+
+    /// Jacobian of the delta state with respect to the gyroscope bias
+    /// (`preintegration.h:300`).
+    pub fn get_d_state_d_bg(&self) -> &Matrix9x3<S> {
+        &self.d_state_d_bg
+    }
+
+    /// The square-root inverse covariance the estimator whitens with,
+    /// `get_sqrt_cov_inv()` (`preintegration.h:280-287`, computed at `:305-321`).
+    ///
+    /// `M = D^{-1/2} L^{-1} P` from the pivoted LDLT `P cov Pᵀ = L D Lᵀ`, so
+    /// `Mᵀ M = cov⁻¹`. A pivot below `numeric_limits<Scalar>::min()` gives a
+    /// zero row rather than an infinity (`:313-319`), which makes this a
+    /// pseudo-inverse — the empty measurement's covariance is exactly zero and
+    /// its factor is exactly zero too.
+    ///
+    /// C++ caches this behind a dirty flag; the port recomputes it. See the
+    /// module deviations.
+    pub fn get_cov_inv_sqrt(&self) -> Matrix9<S> {
+        let (l, d, perm): (Matrix9<S>, Vector9<S>, [usize; POSE_VEL_SIZE]) = ldlt(&self.cov);
+
+        // `:306-309`: start from the permutation matrix.
+        let mut m: Matrix9<S> = Matrix9::zeros();
+        for (row, column) in perm.iter().copied().enumerate() {
+            m[(row, column)] = S::one();
+        }
+        // `:310`: forward substitution with the unit lower triangular factor.
+        for i in 0..POSE_VEL_SIZE {
+            for k in 0..i {
+                let factor: S = l[(i, k)];
+                for column in 0..POSE_VEL_SIZE {
+                    let above: S = m[(k, column)];
+                    m[(i, column)] -= factor * above;
+                }
+            }
+        }
+        // `:312-320`
+        for i in 0..POSE_VEL_SIZE {
+            let scale: S = if d[i] < S::min_positive() {
+                S::zero()
+            } else {
+                S::one() / d[i].sqrt()
+            };
+            for column in 0..POSE_VEL_SIZE {
+                m[(i, column)] *= scale;
+            }
+        }
+        m
+    }
+
+    /// The inverse covariance, `Mᵀ M` (`preintegration.h:270-277`).
+    pub fn get_cov_inv(&self) -> Matrix9<S> {
+        let m: Matrix9<S> = self.get_cov_inv_sqrt();
+        m.transpose() * m
+    }
+}
+
+/// The initial orientation from one accelerometer sample
+/// (`src/vi_estimator/sqrt_keypoint_vio.cpp:277-278`).
+///
+/// basalt zeroes the translation and sets the rotation to
+/// `Eigen::Quaternion::FromTwoVectors(data->accel, Vec3::UnitZ())`, so the
+/// measured specific force — which points "up" in the rig frame at rest — is
+/// rotated onto the world `+Z` axis and gravity ends up along `-Z`, matching
+/// [`gravity`]. Only roll and pitch are set; yaw is unobservable and stays
+/// arbitrary.
+///
+/// This is Eigen's `Quaternion::setFromTwoVectors`. The one deviation is the
+/// anti-parallel branch, which Eigen resolves with a 2x3 `JacobiSVD` to pick an
+/// axis orthogonal to both vectors; the port picks the smallest-component axis
+/// instead. Both give a valid 180° rotation taking `accel` to `+Z`, and any two
+/// such rotations differ by a rotation *about* `+Z` — that is, by yaw, the one
+/// direction basalt's own nullspace test says carries no information. The branch
+/// is reachable: a rig held upside down at initialisation reports
+/// `accel ≈ (0, 0, -9.81)`.
+///
+/// Returns [`So3::identity`] for a zero or non-finite sample, which has no
+/// direction to align.
+pub fn gravity_from_first_accel<S: LieScalar>(accel: &Vector3<S>) -> So3<S> {
+    let norm: S = accel.norm();
+    if !norm.is_finite() || norm <= S::zero() {
+        return So3::identity();
+    }
+    let v0: Vector3<S> = accel / norm;
+    let v1: Vector3<S> = Vector3::new(S::zero(), S::zero(), S::one());
+    let dot: S = v1.dot(&v0);
+
+    // Eigen's degenerate test is `c < Scalar(-1) + dummy_precision()`.
+    if dot < c::<S>(-1.0) + S::eigen_dummy_precision() {
+        let axis: Vector3<S> = smallest_orthogonal_axis(&v0);
+        let w2: S = (S::one() + dot.max(c::<S>(-1.0))) * c::<S>(0.5);
+        let vector_scale: S = (S::one() - w2).sqrt();
+        let quaternion = nalgebra::Quaternion::new(
+            w2.sqrt(),
+            axis.x * vector_scale,
+            axis.y * vector_scale,
+            axis.z * vector_scale,
+        );
+        return So3::from_unit_quaternion(nalgebra::UnitQuaternion::new_normalize(quaternion));
+    }
+
+    let axis: Vector3<S> = v0.cross(&v1);
+    let s: S = ((S::one() + dot) * c::<S>(2.0)).sqrt();
+    let inv_s: S = S::one() / s;
+    let quaternion = nalgebra::Quaternion::new(
+        s * c::<S>(0.5),
+        axis.x * inv_s,
+        axis.y * inv_s,
+        axis.z * inv_s,
+    );
+    So3::from_unit_quaternion(nalgebra::UnitQuaternion::new_normalize(quaternion))
+}
+
+/// A unit vector orthogonal to `v`, built from `v`'s smallest component.
+fn smallest_orthogonal_axis<S: LieScalar>(v: &Vector3<S>) -> Vector3<S> {
+    let basis: Vector3<S> = if v.x.abs() <= v.y.abs() && v.x.abs() <= v.z.abs() {
+        Vector3::new(S::one(), S::zero(), S::zero())
+    } else if v.y.abs() <= v.z.abs() {
+        Vector3::new(S::zero(), S::one(), S::zero())
+    } else {
+        Vector3::new(S::zero(), S::zero(), S::one())
+    };
+    let axis: Vector3<S> = v.cross(&basis);
+    let norm: S = axis.norm();
+    if norm > S::zero() { axis / norm } else { basis }
+}
+
+/// `LDLT` with symmetric pivoting of a 9x9 symmetric matrix.
+///
+/// Returns the unit lower triangular `L`, the diagonal `D` and the permutation
+/// `perm` with `perm[i]` the original index that ends up in row `i`, so
+/// `P cov Pᵀ = L D Lᵀ`. Eigen's `LDLT` picks the same pivot — the largest
+/// `|diagonal|` of the trailing block — and basalt uses nothing else about it
+/// (`preintegration.h:307-320`).
+///
+/// A zero pivot leaves its column of `L` at zero; the caller zeroes that row of
+/// the factor anyway, which is what makes the result a pseudo-inverse.
+fn ldlt<S: LieScalar>(a: &Matrix9<S>) -> (Matrix9<S>, Vector9<S>, [usize; POSE_VEL_SIZE]) {
+    let mut m: Matrix9<S> = *a;
+    let mut l: Matrix9<S> = Matrix9::identity();
+    let mut d: Vector9<S> = Vector9::zeros();
+    let mut perm: [usize; POSE_VEL_SIZE] = [0; POSE_VEL_SIZE];
+    for (index, entry) in perm.iter_mut().enumerate() {
+        *entry = index;
+    }
+
+    for k in 0..POSE_VEL_SIZE {
+        let mut pivot: usize = k;
+        for i in (k + 1)..POSE_VEL_SIZE {
+            if m[(i, i)].abs() > m[(pivot, pivot)].abs() {
+                pivot = i;
+            }
+        }
+        if pivot != k {
+            m.swap_rows(k, pivot);
+            m.swap_columns(k, pivot);
+            for column in 0..k {
+                let swapped: S = l[(k, column)];
+                l[(k, column)] = l[(pivot, column)];
+                l[(pivot, column)] = swapped;
+            }
+            perm.swap(k, pivot);
+        }
+
+        let pivot_value: S = m[(k, k)];
+        d[k] = pivot_value;
+        if pivot_value == S::zero() {
+            continue;
+        }
+        for i in (k + 1)..POSE_VEL_SIZE {
+            l[(i, k)] = m[(i, k)] / pivot_value;
+        }
+        for j in (k + 1)..POSE_VEL_SIZE {
+            for i in (k + 1)..POSE_VEL_SIZE {
+                m[(i, j)] -= l[(i, k)] * pivot_value * l[(j, k)];
+            }
+        }
+    }
+    (l, d, perm)
+}
+
+/// The linearization point the IMU block needs, `basalt::ImuLinData`
+/// (`include/basalt/utils/imu_types.h:306-315`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImuLinData<S: LieScalar> {
+    /// Gravity in the world frame.
+    pub g: Vector3<S>,
+    /// `1 / gyro_bias_std`, the square-root weight of the gyro random walk
+    /// (`sqrt_keypoint_vio.cpp:107-108`).
+    pub gyro_bias_weight_sqrt: Vector3<S>,
+    /// `1 / accel_bias_std`, the same for the accelerometer.
+    pub accel_bias_weight_sqrt: Vector3<S>,
+}
+
+/// One linearized IMU factor: 15 whitened rows over two 15-column states.
+///
+/// A partial port of `basalt::ImuBlock` (`include/basalt/linearization/imu_block.hpp`)
+/// — enough to show how the residual and its Jacobians are consumed. The parts
+/// that belong to the square-root linearizer (`add_dense_Q2Jp_Q2r`,
+/// `scaleJp_cols`, `addJp_diag2`, `backSubstitute`) land with that stage.
+///
+/// Rows 0-8 are the whitened preintegration residual, rows 9-11 the gyro-bias
+/// random walk and rows 12-14 the accel-bias random walk. Columns 0-14 belong to
+/// the start state and 15-29 to the end state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImuBlock<S: LieScalar> {
+    /// `Jp` (`imu_block.hpp:21`, `:54-79`).
+    pub jp: Matrix15x30<S>,
+    /// `r` (`imu_block.hpp:22`, `:60-81`).
+    pub r: Vector15<S>,
+    /// What `linearizeImu` returns: `imu_error + bg_error + ba_error`
+    /// (`imu_block.hpp:85`).
+    pub error: S,
+}
+
+impl<S: LieScalar> ImuBlock<S> {
+    /// `ImuBlock::linearizeImu` (`imu_block.hpp:25-86`).
+    ///
+    /// The residual is evaluated at the *linearized* states together with its
+    /// Jacobians (`:41-43`) and then, if either state has a frozen linearization
+    /// point, re-evaluated at the current states for its **value only**
+    /// (`:45-48`). Skipping that second evaluation is trap 7 of the architecture
+    /// dossier: it drifts rather than fails.
+    pub fn linearize(
+        meas: &IntegratedImuMeasurement<S>,
+        lin_data: &ImuLinData<S>,
+        start_state: &PoseVelBiasStateWithLin<S>,
+        end_state: &PoseVelBiasStateWithLin<S>,
+    ) -> Self {
+        let start_idx: usize = 0;
+        let end_idx: usize = POSE_VEL_BIAS_SIZE;
+
+        let start_lin = start_state.state_lin();
+        let end_lin = end_state.state_lin();
+        let (mut res, jacobians): (Vector9<S>, ImuResidualJacobians<S>) = meas
+            .residual_with_jacobians(
+                &start_lin.pose_vel_state(),
+                &lin_data.g,
+                &end_lin.pose_vel_state(),
+                &start_lin.bias_gyro,
+                &start_lin.bias_accel,
+            );
+
+        if start_state.is_linearized() || end_state.is_linearized() {
+            let start = start_state.state();
+            let end = end_state.state();
+            res = meas.residual(
+                &start.pose_vel_state(),
+                &lin_data.g,
+                &end.pose_vel_state(),
+                &start.bias_gyro,
+                &start.bias_accel,
+            );
+        }
+
+        let sqrt_cov_inv: Matrix9<S> = meas.get_cov_inv_sqrt();
+        let mut jp: Matrix15x30<S> = Matrix15x30::zeros();
+        let mut r: Vector15<S> = Vector15::zeros();
+
+        let imu_error: S = c::<S>(0.5) * (sqrt_cov_inv * res).norm_squared(); // `:51`
+
+        jp.fixed_view_mut::<9, 9>(0, start_idx)
+            .copy_from(&(sqrt_cov_inv * jacobians.d_res_d_state0)); // `:54`
+        jp.fixed_view_mut::<9, 9>(0, end_idx)
+            .copy_from(&(sqrt_cov_inv * jacobians.d_res_d_state1)); // `:55`
+        jp.fixed_view_mut::<9, 6>(0, start_idx + BIAS_GYRO_OFFSET)
+            .copy_from(&(sqrt_cov_inv * jacobians.d_res_d_bias)); // `:57-58`
+        r.fixed_rows_mut::<9>(0).copy_from(&(sqrt_cov_inv * res)); // `:60`
+
+        let dt: S = c::<S>(meas.get_dt_ns() as f64) * c::<S>(1e-9); // `:63`
+        let sqrt_dt: S = dt.sqrt();
+
+        // `:65-73`
+        let gyro_bias_weight_dt: Vector3<S> = lin_data.gyro_bias_weight_sqrt / sqrt_dt;
+        let res_bg: Vector3<S> = start_state.state().bias_gyro - end_state.state().bias_gyro;
+        jp.fixed_view_mut::<3, 3>(9, start_idx + BIAS_GYRO_OFFSET)
+            .copy_from(&Matrix3::from_diagonal(&gyro_bias_weight_dt));
+        jp.fixed_view_mut::<3, 3>(9, end_idx + BIAS_GYRO_OFFSET)
+            .copy_from(&Matrix3::from_diagonal(&-gyro_bias_weight_dt));
+        let weighted_bg: Vector3<S> = gyro_bias_weight_dt.component_mul(&res_bg);
+        r.fixed_rows_mut::<3>(9).copy_from(&weighted_bg);
+        let bg_error: S = c::<S>(0.5) * weighted_bg.norm_squared();
+
+        // `:75-83`
+        let accel_bias_weight_dt: Vector3<S> = lin_data.accel_bias_weight_sqrt / sqrt_dt;
+        let res_ba: Vector3<S> = start_state.state().bias_accel - end_state.state().bias_accel;
+        jp.fixed_view_mut::<3, 3>(12, start_idx + BIAS_ACCEL_OFFSET)
+            .copy_from(&Matrix3::from_diagonal(&accel_bias_weight_dt));
+        jp.fixed_view_mut::<3, 3>(12, end_idx + BIAS_ACCEL_OFFSET)
+            .copy_from(&Matrix3::from_diagonal(&-accel_bias_weight_dt));
+        let weighted_ba: Vector3<S> = accel_bias_weight_dt.component_mul(&res_ba);
+        r.fixed_rows_mut::<3>(12).copy_from(&weighted_ba);
+        let ba_error: S = c::<S>(0.5) * weighted_ba.norm_squared();
+
+        Self {
+            jp,
+            r,
+            error: imu_error + bg_error + ba_error,
+        }
+    }
+
+    /// Scatter `JᵀJ` and `Jᵀr` into a dense Hessian and gradient
+    /// (`imu_block.hpp:104-129`).
+    ///
+    /// `start_idx` and `end_idx` are the two states' offsets in the stacked
+    /// state vector, which C++ reads from the `AbsOrderMap`. Out-of-range
+    /// offsets are ignored rather than panicking (decision D32).
+    pub fn add_dense_h_b(
+        &self,
+        start_idx: usize,
+        end_idx: usize,
+        h: &mut DMatrix<S>,
+        b: &mut DVector<S>,
+    ) {
+        let size: usize = POSE_VEL_BIAS_SIZE;
+        let needed: usize = start_idx.max(end_idx) + size;
+        if h.nrows() < needed || h.ncols() < needed || b.nrows() < needed {
+            return;
+        }
+        let full_h: SMatrix<S, { 2 * POSE_VEL_BIAS_SIZE }, { 2 * POSE_VEL_BIAS_SIZE }> =
+            self.jp.transpose() * self.jp;
+        let full_b: SMatrix<S, { 2 * POSE_VEL_BIAS_SIZE }, 1> = self.jp.transpose() * self.r;
+
+        for (block_row, row_offset) in [(0, start_idx), (size, end_idx)] {
+            for (block_column, column_offset) in [(0, start_idx), (size, end_idx)] {
+                for i in 0..size {
+                    for j in 0..size {
+                        h[(row_offset + i, column_offset + j)] +=
+                            full_h[(block_row + i, block_column + j)];
+                    }
+                }
+            }
+            for i in 0..size {
+                b[row_offset + i] += full_b[block_row + i];
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::lie::Se3;
+    use crate::types::{AbsOrderMap, POSE_SIZE, PoseVelBiasState};
+    use approx::assert_abs_diff_eq;
+    use nalgebra::SVector;
+    use proptest::prelude::*;
+
+    // ── Test support ────────────────────────────────────────────────────
+    //
+    // Two things the C++ tests lean on are not ported: `Se3Spline<5>` (a
+    // cumulative B-spline on SE(3), out of V0 scope per papers.md §5, and about
+    // 700 lines for a ground-truth generator) and Eigen's `Random()`. In their
+    // place: `Trajectory` below is an analytic sum of sinusoids whose pose,
+    // world velocity, world acceleration and *body* angular velocity are all
+    // closed form, and `Rng` is a seeded xorshift so nothing flakes — Eigen's
+    // `Random()` never reseeds, so the C++ tests are deterministic too.
+
+    /// xorshift64*, so every ported test runs the same numbers each time.
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self(seed | 1)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut x: u64 = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+
+        /// Uniform on `[-1, 1]`, which is what `Eigen::Vector3d::Random()` gives.
+        fn uniform(&mut self) -> f64 {
+            (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+        }
+
+        /// Uniform on `[low, high]`.
+        fn range(&mut self, low: f64, high: f64) -> f64 {
+            low + (self.uniform() + 1.0) * 0.5 * (high - low)
+        }
+
+        /// `Eigen::Vector3d::Random()`.
+        fn vector3(&mut self) -> Vector3<f64> {
+            Vector3::new(self.uniform(), self.uniform(), self.uniform())
+        }
+
+        /// `Sophus::Vector6d::Random()`.
+        fn vector6(&mut self) -> SVector<f64, 6> {
+            SVector::<f64, 6>::from_fn(|_, _| self.uniform())
+        }
+    }
+
+    /// A smooth analytic trajectory, standing in for `Se3Spline<5>` with a
+    /// random knot sequence.
+    ///
+    /// Position is `A_k sin(w_k t + f_k)` per axis, so velocity and acceleration
+    /// are exact. Orientation is `exp(phi(t))` with
+    /// `phi_k(t) = B_k sin(u_k t + g_k)`, and the body angular velocity is
+    /// exactly `J_r(phi) phi_dot` — the right Jacobian already ported in
+    /// [`right_jacobian_so3`]. The frequencies are small enough that basalt's
+    /// midpoint integrator reaches the C++ tolerances over the same 20 s horizon.
+    struct Trajectory {
+        pos_amp: Vector3<f64>,
+        pos_freq: Vector3<f64>,
+        pos_phase: Vector3<f64>,
+        rot_amp: Vector3<f64>,
+        rot_freq: Vector3<f64>,
+        rot_phase: Vector3<f64>,
+    }
+
+    impl Trajectory {
+        fn new(rng: &mut Rng) -> Self {
+            Self {
+                pos_amp: Vector3::from_fn(|_, _| rng.range(0.8, 1.5)),
+                pos_freq: Vector3::from_fn(|_, _| rng.range(0.15, 0.35)),
+                pos_phase: Vector3::from_fn(|_, _| rng.range(0.0, std::f64::consts::TAU)),
+                rot_amp: Vector3::from_fn(|_, _| rng.range(0.15, 0.30)),
+                rot_freq: Vector3::from_fn(|_, _| rng.range(0.15, 0.30)),
+                rot_phase: Vector3::from_fn(|_, _| rng.range(0.0, std::f64::consts::TAU)),
+            }
+        }
+
+        fn seconds(t_ns: i64) -> f64 {
+            t_ns as f64 * 1e-9
+        }
+
+        fn rotation_vector(&self, t: f64) -> Vector3<f64> {
+            Vector3::from_fn(|i, _| {
+                self.rot_amp[i] * (self.rot_freq[i] * t + self.rot_phase[i]).sin()
+            })
+        }
+
+        fn rotation_vector_dot(&self, t: f64) -> Vector3<f64> {
+            Vector3::from_fn(|i, _| {
+                self.rot_amp[i]
+                    * self.rot_freq[i]
+                    * (self.rot_freq[i] * t + self.rot_phase[i]).cos()
+            })
+        }
+
+        fn pose(&self, t_ns: i64) -> Se3<f64> {
+            let t: f64 = Self::seconds(t_ns);
+            Se3::new(
+                So3::exp(&self.rotation_vector(t)),
+                Vector3::from_fn(|i, _| {
+                    self.pos_amp[i] * (self.pos_freq[i] * t + self.pos_phase[i]).sin()
+                }),
+            )
+        }
+
+        fn trans_vel_world(&self, t_ns: i64) -> Vector3<f64> {
+            let t: f64 = Self::seconds(t_ns);
+            Vector3::from_fn(|i, _| {
+                self.pos_amp[i]
+                    * self.pos_freq[i]
+                    * (self.pos_freq[i] * t + self.pos_phase[i]).cos()
+            })
+        }
+
+        fn trans_accel_world(&self, t_ns: i64) -> Vector3<f64> {
+            let t: f64 = Self::seconds(t_ns);
+            Vector3::from_fn(|i, _| {
+                -self.pos_amp[i]
+                    * self.pos_freq[i]
+                    * self.pos_freq[i]
+                    * (self.pos_freq[i] * t + self.pos_phase[i]).sin()
+            })
+        }
+
+        /// `omega_body = J_r(phi) phi_dot` for `R(t) = exp(phi(t))`.
+        fn rot_vel_body(&self, t_ns: i64) -> Vector3<f64> {
+            let t: f64 = Self::seconds(t_ns);
+            right_jacobian_so3(&self.rotation_vector(t)) * self.rotation_vector_dot(t)
+        }
+
+        /// The sample basalt's tests build: specific force in the body frame and
+        /// the body angular velocity, stamped at the *middle* of the interval
+        /// (`test_preintegration.cpp:74-81`).
+        fn sample(&self, t_ns: i64, dt_ns: i64) -> ImuSample {
+            let pose: Se3<f64> = self.pose(t_ns);
+            ImuSample {
+                t_ns: t_ns + dt_ns / 2,
+                gyro: self.rot_vel_body(t_ns),
+                accel: pose.rotation.inverse() * (self.trans_accel_world(t_ns) - gravity::<f64>()),
+            }
+        }
+    }
+
+    /// `test_jacobian` from `thirdparty/basalt-headers/test/include/test_utils.h:22-61`.
+    ///
+    /// Central differences at `x0 = 0` — every call site in the fork passes a
+    /// zero `x0` — with Eigen's two comparisons: `isZero(prec)` is
+    /// `norm() <= prec` and `isApprox(other, prec)` is
+    /// `(a - b).norm() <= prec * min(|a|, |b|)`. `TestConstants<double>` is
+    /// `epsilon = 1e-8`, `max_norm = 1e-3` (`test_utils.h:10-14`).
+    fn test_jacobian<const R: usize, const C: usize>(
+        name: &str,
+        ja: &SMatrix<f64, R, C>,
+        func: impl Fn(&SVector<f64, C>) -> SVector<f64, R>,
+        eps: f64,
+        max_norm: f64,
+    ) {
+        let mut jn: SMatrix<f64, R, C> = SMatrix::zeros();
+        for i in 0..C {
+            let mut inc: SVector<f64, C> = SVector::zeros();
+            inc[i] = eps;
+            let fpe: SVector<f64, R> = func(&inc);
+            let fme: SVector<f64, R> = func(&(-inc));
+            jn.set_column(i, &((fpe - fme) / (2.0 * eps)));
+        }
+
+        assert!(
+            ja.iter().all(|v: &f64| v.is_finite()),
+            "{name}: Ja not finite\n{ja}"
+        );
+        assert!(
+            jn.iter().all(|v: &f64| v.is_finite()),
+            "{name}: Jn not finite\n{jn}"
+        );
+
+        let difference: f64 = (jn - ja).norm();
+        if jn.norm() <= max_norm && ja.norm() <= max_norm {
+            assert!(
+                difference <= max_norm,
+                "{name}: Ja not equal to Jn (diff norm {difference})\nJa\n{ja}\nJn\n{jn}"
+            );
+        } else {
+            let bound: f64 = max_norm * jn.norm().min(ja.norm());
+            assert!(
+                difference <= bound,
+                "{name}: Ja not equal to Jn (diff norm {difference} > {bound})\nJa\n{ja}\nJn\n{jn}"
+            );
+        }
+    }
+
+    /// `TestConstants<double>::epsilon` (`test_utils.h:12`).
+    const DEFAULT_EPS: f64 = 1e-8;
+    /// `TestConstants<double>::max_norm` (`test_utils.h:13`).
+    const DEFAULT_MAX_NORM: f64 = 1e-3;
+    /// `test_preintegration.cpp:43-44` and `test_vio.cpp:14-15`.
+    const ACCEL_STD_DEV: f64 = 0.23;
+    const GYRO_STD_DEV: f64 = 0.0027;
+
+    fn noise_from_std_dev() -> ImuNoise<f64> {
+        ImuNoise {
+            accel_cov: Vector3::repeat(ACCEL_STD_DEV * ACCEL_STD_DEV),
+            gyro_cov: Vector3::repeat(GYRO_STD_DEV * GYRO_STD_DEV),
+        }
+    }
+
+    /// `Eigen::MatrixBase::isApprox`, the relative comparison the fork asserts with.
+    fn is_approx(a: &Vector3<f64>, b: &Vector3<f64>, precision: f64) -> bool {
+        (a - b).norm() <= precision * a.norm().min(b.norm())
+    }
+
+    // ── Ported: thirdparty/basalt-headers/test/src/test_preintegration.cpp ──
+    //
+    // Four of the six cases are ported. `CovarianceTest` (`:496-589`) is not:
+    // it is a 1 000-run Monte Carlo over 100 samples whose `kl <= 0.08` bound
+    // only holds at that sample count, which is ~10^5 unoptimised integrations
+    // and does not fit a gate that has to finish in seconds. Its content is
+    // covered instead by `the_first_covariance_step_is_the_noise_input_alone`
+    // and the symmetric-PSD / `MᵀM cov = I` property below. `RandomWalkTest`
+    // (`:591+`) tests Eigen's random number generator, not preintegration.
+
+    /// `ImuPreintegrationTestCase.PredictTestGT` (`test_preintegration.cpp:56-99`).
+    ///
+    /// 2 000 samples over 20 s, then `predictState` from the true state at 0 has
+    /// to land on the true state at the end: velocity and translation within a
+    /// relative `1e-4`, orientation within `1e-6` rad.
+    #[test]
+    fn predict_state_reaches_the_ground_truth_state() {
+        let mut rng: Rng = Rng::new(0x5eed_0001);
+        let trajectory: Trajectory = Trajectory::new(&mut rng);
+        let mut meas: IntegratedImuMeasurement<f64> =
+            IntegratedImuMeasurement::new(0, &Vector3::zeros(), &Vector3::zeros());
+
+        let state0: PoseVelState<f64> =
+            PoseVelState::new(0, trajectory.pose(0), trajectory.trans_vel_world(0));
+
+        let dt_ns: i64 = 10_000_000;
+        let ones: Vector3<f64> = Vector3::repeat(1.0);
+        let mut t_ns: i64 = dt_ns / 2;
+        while t_ns < 20_000_000_000 {
+            meas.integrate(&trajectory.sample(t_ns, dt_ns), &ones, &ones)
+                .unwrap();
+            t_ns += dt_ns;
+        }
+
+        let end_t_ns: i64 = meas.get_dt_ns();
+        let state1: PoseVelState<f64> = meas.predict_state(&state0, &gravity::<f64>());
+        let gt_pose: Se3<f64> = trajectory.pose(end_t_ns);
+        let gt_vel: Vector3<f64> = trajectory.trans_vel_world(end_t_ns);
+
+        assert!(
+            is_approx(&gt_vel, &state1.vel_w_i, 1e-4),
+            "vel_gt {gt_vel} vel {}",
+            state1.vel_w_i
+        );
+        let angular_distance: f64 = gt_pose
+            .rotation
+            .quaternion()
+            .angle_to(state1.t_w_i.rotation.quaternion());
+        assert!(
+            angular_distance <= 1e-6,
+            "angular distance {angular_distance}"
+        );
+        assert!(
+            is_approx(&gt_pose.translation, &state1.t_w_i.translation, 1e-4),
+            "p_gt {} p {}",
+            gt_pose.translation,
+            state1.t_w_i.translation
+        );
+    }
+
+    /// `ImuPreintegrationTestCase.PredictTest` (`test_preintegration.cpp:101-182`).
+    ///
+    /// `F`, `A` and `G` against central differences at every step of the sweep.
+    /// The C++ passes `eps = 1e-8` explicitly for the gyro block, which is the
+    /// `double` default anyway.
+    #[test]
+    fn propagate_state_jacobians_match_finite_differences() {
+        let mut rng: Rng = Rng::new(0x5eed_0002);
+        let trajectory: Trajectory = Trajectory::new(&mut rng);
+
+        let dt_ns: i64 = 10_000_000;
+        let mut t_ns: i64 = dt_ns / 2;
+        while t_ns < 2_000_000_000 {
+            let sample: ImuSample = trajectory.sample(t_ns, dt_ns);
+            let curr_t_ns: i64 = t_ns - dt_ns / 2;
+            let curr_state: PoseVelState<f64> = PoseVelState::new(
+                curr_t_ns,
+                trajectory.pose(curr_t_ns),
+                trajectory.trans_vel_world(curr_t_ns),
+            );
+            let accel: Vector3<f64> = sample.accel;
+            let gyro: Vector3<f64> = sample.gyro;
+            let (next_state, j) = IntegratedImuMeasurement::<f64>::propagate_state(
+                &curr_state,
+                sample.t_ns,
+                &accel,
+                &gyro,
+            )
+            .unwrap();
+
+            test_jacobian(
+                "F_TEST",
+                &j.d_next_d_curr,
+                |x: &Vector9<f64>| {
+                    let mut perturbed: PoseVelState<f64> = curr_state;
+                    perturbed.apply_inc(x);
+                    let (next, _) = IntegratedImuMeasurement::<f64>::propagate_state(
+                        &perturbed,
+                        sample.t_ns,
+                        &accel,
+                        &gyro,
+                    )
+                    .unwrap();
+                    next_state.diff(&next)
+                },
+                DEFAULT_EPS,
+                DEFAULT_MAX_NORM,
+            );
+
+            test_jacobian(
+                "A_TEST",
+                &j.d_next_d_accel,
+                |x: &Vector3<f64>| {
+                    let (next, _) = IntegratedImuMeasurement::<f64>::propagate_state(
+                        &curr_state,
+                        sample.t_ns,
+                        &(accel + x),
+                        &gyro,
+                    )
+                    .unwrap();
+                    next_state.diff(&next)
+                },
+                DEFAULT_EPS,
+                DEFAULT_MAX_NORM,
+            );
+
+            test_jacobian(
+                "G_TEST",
+                &j.d_next_d_gyro,
+                |x: &Vector3<f64>| {
+                    let (next, _) = IntegratedImuMeasurement::<f64>::propagate_state(
+                        &curr_state,
+                        sample.t_ns,
+                        &accel,
+                        &(gyro + x),
+                    )
+                    .unwrap();
+                    next_state.diff(&next)
+                },
+                1e-8,
+                DEFAULT_MAX_NORM,
+            );
+
+            t_ns += dt_ns;
+        }
+    }
+
+    /// `ImuPreintegrationTestCase.ResidualTest` (`test_preintegration.cpp:184-282`).
+    ///
+    /// The residual at the true end state is zero to `1e-6` per coefficient, and
+    /// the four Jacobians match central differences at a perturbed end state.
+    #[test]
+    fn residual_vanishes_at_the_truth_and_its_jacobians_match() {
+        let mut rng: Rng = Rng::new(0x5eed_0003);
+        let trajectory: Trajectory = Trajectory::new(&mut rng);
+        let bg: Vector3<f64> = rng.vector3() / 100.0;
+        let ba: Vector3<f64> = rng.vector3() / 10.0;
+
+        let mut meas: IntegratedImuMeasurement<f64> = IntegratedImuMeasurement::new(0, &bg, &ba);
+        let state0: PoseVelState<f64> =
+            PoseVelState::new(0, trajectory.pose(0), trajectory.trans_vel_world(0));
+
+        let dt_ns: i64 = 10_000_000;
+        let ones: Vector3<f64> = Vector3::repeat(1.0);
+        let mut t_ns: i64 = dt_ns / 2;
+        while t_ns < 100_000_000 {
+            let mut sample: ImuSample = trajectory.sample(t_ns, dt_ns);
+            sample.accel += ba;
+            sample.gyro += bg;
+            meas.integrate(&sample, &ones, &ones).unwrap();
+            t_ns += dt_ns;
+        }
+
+        let end_t_ns: i64 = meas.get_dt_ns();
+        let g: Vector3<f64> = gravity::<f64>();
+        let state1_gt: PoseVelState<f64> = PoseVelState::new(
+            end_t_ns,
+            trajectory.pose(end_t_ns),
+            trajectory.trans_vel_world(end_t_ns),
+        );
+        let res_gt: Vector9<f64> = meas.residual(&state0, &g, &state1_gt, &bg, &ba);
+        assert!(res_gt.amax() <= 1e-6, "res_gt {}", res_gt.transpose());
+
+        let state1: PoseVelState<f64> = PoseVelState::new(
+            end_t_ns,
+            trajectory.pose(end_t_ns) * Se3::exp_decoupled(&(rng.vector6() / 10.0)),
+            trajectory.trans_vel_world(end_t_ns) + rng.vector3() / 10.0,
+        );
+        let (_, jacobians) = meas.residual_with_jacobians(&state0, &g, &state1, &bg, &ba);
+
+        test_jacobian(
+            "d_res_d_state0",
+            &jacobians.d_res_d_state0,
+            |x: &Vector9<f64>| {
+                let mut perturbed: PoseVelState<f64> = state0;
+                perturbed.apply_inc(x);
+                meas.residual(&perturbed, &g, &state1, &bg, &ba)
+            },
+            DEFAULT_EPS,
+            DEFAULT_MAX_NORM,
+        );
+        test_jacobian(
+            "d_res_d_state1",
+            &jacobians.d_res_d_state1,
+            |x: &Vector9<f64>| {
+                let mut perturbed: PoseVelState<f64> = state1;
+                perturbed.apply_inc(x);
+                meas.residual(&state0, &g, &perturbed, &bg, &ba)
+            },
+            DEFAULT_EPS,
+            DEFAULT_MAX_NORM,
+        );
+        test_jacobian(
+            "d_res_d_bg",
+            &jacobians.d_res_d_bias.fixed_view::<9, 3>(0, 0).into_owned(),
+            |x: &Vector3<f64>| meas.residual(&state0, &g, &state1, &(bg + x), &ba),
+            DEFAULT_EPS,
+            DEFAULT_MAX_NORM,
+        );
+        test_jacobian(
+            "d_res_d_ba",
+            &jacobians.d_res_d_bias.fixed_view::<9, 3>(0, 3).into_owned(),
+            |x: &Vector3<f64>| meas.residual(&state0, &g, &state1, &bg, &(ba + x)),
+            DEFAULT_EPS,
+            DEFAULT_MAX_NORM,
+        );
+    }
+
+    /// The samples `BiasTest` and `ResidualBiasTest` share
+    /// (`test_preintegration.cpp:299-309`): 100 samples over 1 s with both
+    /// biases added in.
+    fn biased_samples(
+        trajectory: &Trajectory,
+        bg: &Vector3<f64>,
+        ba: &Vector3<f64>,
+    ) -> Vec<ImuSample> {
+        let dt_ns: i64 = 10_000_000;
+        let mut samples: Vec<ImuSample> = Vec::new();
+        let mut t_ns: i64 = dt_ns / 2;
+        while t_ns < 1_000_000_000 {
+            let mut sample: ImuSample = trajectory.sample(t_ns, dt_ns);
+            sample.accel += ba;
+            sample.gyro += bg;
+            samples.push(sample);
+            t_ns += dt_ns;
+        }
+        samples
+    }
+
+    fn integrate_all(
+        start_t_ns: i64,
+        bg: &Vector3<f64>,
+        ba: &Vector3<f64>,
+        samples: &[ImuSample],
+    ) -> IntegratedImuMeasurement<f64> {
+        let mut meas: IntegratedImuMeasurement<f64> =
+            IntegratedImuMeasurement::new(start_t_ns, bg, ba);
+        let ones: Vector3<f64> = Vector3::repeat(1.0);
+        for sample in samples {
+            meas.integrate(sample, &ones, &ones).unwrap();
+        }
+        meas
+    }
+
+    /// `ImuPreintegrationTestCase.BiasTest` (`test_preintegration.cpp:284-372`).
+    ///
+    /// The two bias Jacobians against re-integrating the same samples about a
+    /// perturbed linearization point, compared through `PoseVelState::diff`.
+    #[test]
+    fn bias_jacobians_match_reintegration_at_a_perturbed_bias() {
+        let mut rng: Rng = Rng::new(0x5eed_0004);
+        let trajectory: Trajectory = Trajectory::new(&mut rng);
+        let bg: Vector3<f64> = rng.vector3() / 100.0;
+        let ba: Vector3<f64> = rng.vector3() / 10.0;
+        let samples: Vec<ImuSample> = biased_samples(&trajectory, &bg, &ba);
+
+        let meas: IntegratedImuMeasurement<f64> = integrate_all(0, &bg, &ba, &samples);
+        let delta_state: PoseVelState<f64> = *meas.get_delta_state();
+
+        test_jacobian(
+            "d_state_d_bg",
+            meas.get_d_state_d_bg(),
+            |x: &Vector3<f64>| {
+                let perturbed: IntegratedImuMeasurement<f64> =
+                    integrate_all(0, &(bg + x), &ba, &samples);
+                delta_state.diff(perturbed.get_delta_state())
+            },
+            DEFAULT_EPS,
+            DEFAULT_MAX_NORM,
+        );
+        test_jacobian(
+            "d_state_d_ba",
+            meas.get_d_state_d_ba(),
+            |x: &Vector3<f64>| {
+                let perturbed: IntegratedImuMeasurement<f64> =
+                    integrate_all(0, &bg, &(ba + x), &samples);
+                delta_state.diff(perturbed.get_delta_state())
+            },
+            DEFAULT_EPS,
+            DEFAULT_MAX_NORM,
+        );
+    }
+
+    /// `ImuPreintegrationTestCase.ResidualBiasTest` (`test_preintegration.cpp:374-494`).
+    ///
+    /// The first-order bias correction inside the residual has to agree with an
+    /// actual re-integration about the shifted bias (relative `1e-4`), and the
+    /// two bias Jacobians have to match finite differences taken *through* that
+    /// re-integration — the gyro one with the looser `max_norm = 1e-2` the C++
+    /// passes at `:492`.
+    #[test]
+    fn residual_bias_correction_agrees_with_reintegration() {
+        let mut rng: Rng = Rng::new(0x5eed_0005);
+        let trajectory: Trajectory = Trajectory::new(&mut rng);
+        let bg: Vector3<f64> = rng.vector3() / 100.0;
+        let ba: Vector3<f64> = rng.vector3() / 10.0;
+        let samples: Vec<ImuSample> = biased_samples(&trajectory, &bg, &ba);
+        let meas: IntegratedImuMeasurement<f64> = integrate_all(0, &bg, &ba, &samples);
+
+        let g: Vector3<f64> = gravity::<f64>();
+        let state0: PoseVelState<f64> =
+            PoseVelState::new(0, trajectory.pose(0), trajectory.trans_vel_world(0));
+        let end_t_ns: i64 = meas.get_dt_ns();
+        let state1: PoseVelState<f64> = PoseVelState::new(
+            end_t_ns,
+            trajectory.pose(end_t_ns) * Se3::exp_decoupled(&(rng.vector6() / 10.0)),
+            trajectory.trans_vel_world(end_t_ns) + rng.vector3() / 10.0,
+        );
+
+        let bg_test: Vector3<f64> = bg + rng.vector3() / 1000.0;
+        let ba_test: Vector3<f64> = ba + rng.vector3() / 100.0;
+        let (res, jacobians) =
+            meas.residual_with_jacobians(&state0, &g, &state1, &bg_test, &ba_test);
+
+        let reintegrated: IntegratedImuMeasurement<f64> =
+            integrate_all(0, &bg_test, &ba_test, &samples);
+        let res1: Vector9<f64> = reintegrated.residual(&state0, &g, &state1, &bg_test, &ba_test);
+        assert!(
+            (res - res1).norm() <= 1e-4 * res.norm().min(res1.norm()),
+            "res {}\nres1 {}",
+            res.transpose(),
+            res1.transpose()
+        );
+
+        test_jacobian(
+            "d_res_d_ba",
+            &jacobians.d_res_d_bias.fixed_view::<9, 3>(0, 3).into_owned(),
+            |x: &Vector3<f64>| {
+                let perturbed: IntegratedImuMeasurement<f64> =
+                    integrate_all(0, &bg_test, &(ba_test + x), &samples);
+                perturbed.residual(&state0, &g, &state1, &bg_test, &(ba_test + x))
+            },
+            DEFAULT_EPS,
+            DEFAULT_MAX_NORM,
+        );
+        test_jacobian(
+            "d_res_d_bg",
+            &jacobians.d_res_d_bias.fixed_view::<9, 3>(0, 0).into_owned(),
+            |x: &Vector3<f64>| {
+                let perturbed: IntegratedImuMeasurement<f64> =
+                    integrate_all(0, &(bg_test + x), &ba_test, &samples);
+                perturbed.residual(&state0, &g, &state1, &(bg_test + x), &ba_test)
+            },
+            1e-8,
+            1e-2,
+        );
+    }
+
+    // ── Ported: test/src/test_vio.cpp ───────────────────────────────────
+
+    /// `ScBundleAdjustmentBase::checkNullspace` (`src/vi_estimator/sc_ba_base.cpp:485-639`),
+    /// restricted to the pose-velocity-bias blocks the two IMU tests use — the
+    /// pose-only branch belongs to the visual factors.
+    ///
+    /// Returns `xHx + xb` for six global directions plus one random direction: a
+    /// shift of every position along x, y and z, and a rotation of every pose
+    /// *and velocity* about the position centroid in roll, pitch and yaw. For a
+    /// VIO problem only yaw and the three translations are unobservable, so only
+    /// entries 0, 1, 2 and 5 are expected to vanish.
+    fn check_nullspace(
+        h: &DMatrix<f64>,
+        b: &DVector<f64>,
+        order: &AbsOrderMap,
+        frame_states: &HashMap<i64, PoseVelBiasStateWithLin<f64>>,
+        rng: &mut Rng,
+    ) -> [f64; 7] {
+        let size: usize = order.total_size();
+        let mut increments: [DVector<f64>; 6] = std::array::from_fn(|_| DVector::zeros(size));
+
+        // `:525-539`: the centroid the rotations turn about.
+        let mut mean_trans: Vector3<f64> = Vector3::zeros();
+        for (frame_id, _, _) in order.iter() {
+            mean_trans += frame_states[&frame_id].state_lin().t_w_i.translation;
+        }
+        mean_trans /= order.items() as f64;
+
+        let eps: f64 = 0.01; // `:541`
+        for (frame_id, offset, _) in order.iter() {
+            let state: &PoseVelBiasState<f64> = frame_states[&frame_id].state_lin();
+            for axis in 0..3 {
+                increments[axis][offset + axis] = eps; // `:545-547`
+                increments[3 + axis][offset + 3 + axis] = eps; // `:548-550`
+            }
+
+            // `:564-573` and `:576-585`: the rotation increments also move the
+            // translations (about the centroid) and the velocities.
+            let j: Matrix3<f64> = -So3::hat(&(state.t_w_i.translation - mean_trans)) * eps;
+            let j_vel: Matrix3<f64> = -So3::hat(&state.vel_w_i) * eps;
+            for axis in 0..3 {
+                for row in 0..3 {
+                    increments[3 + axis][offset + row] = j[(row, axis)];
+                    increments[3 + axis][offset + POSE_SIZE + row] = j_vel[(row, axis)];
+                }
+            }
+        }
+
+        let mut result: [f64; 7] = [0.0; 7];
+        for (index, increment) in increments.iter().enumerate() {
+            let unit: DVector<f64> = increment / increment.norm(); // `:589-594`
+            result[index] = unit.dot(&(h * &unit)) + unit.dot(b);
+        }
+        let random: DVector<f64> = DVector::from_fn(size, |_, _| rng.uniform());
+        let random: DVector<f64> = &random / random.norm(); // `:601-603`
+        result[6] = random.dot(&(h * &random)) + random.dot(b);
+        result
+    }
+
+    /// `ScBundleAdjustmentBase::computeImuError` (`src/vi_estimator/sc_ba_base.cpp:657-704`),
+    /// for the measurements the two IMU tests hold, summed into one number.
+    ///
+    /// Note `gyro_bias_weight / dt` here against `gyro_bias_weight_sqrt / sqrt(dt)`
+    /// in the block (`imu_block.hpp:65`): the caller passes the squared weight.
+    fn compute_imu_error(
+        order: &AbsOrderMap,
+        states: &HashMap<i64, PoseVelBiasStateWithLin<f64>>,
+        measurements: &[IntegratedImuMeasurement<f64>],
+        gyro_bias_weight: &Vector3<f64>,
+        accel_bias_weight: &Vector3<f64>,
+        g: &Vector3<f64>,
+    ) -> f64 {
+        let mut total: f64 = 0.0;
+        for meas in measurements {
+            if meas.get_dt_ns() == 0 {
+                continue;
+            }
+            let start_t: i64 = meas.get_start_t_ns();
+            let end_t: i64 = start_t + meas.get_dt_ns();
+            if !order.contains(start_t) || !order.contains(end_t) {
+                continue;
+            }
+            let start: &PoseVelBiasState<f64> = states[&start_t].state();
+            let end: &PoseVelBiasState<f64> = states[&end_t].state();
+            let res: Vector9<f64> = meas.residual(
+                &start.pose_vel_state(),
+                g,
+                &end.pose_vel_state(),
+                &start.bias_gyro,
+                &start.bias_accel,
+            );
+            total += 0.5 * res.dot(&(meas.get_cov_inv() * res));
+
+            let dt: f64 = meas.get_dt_ns() as f64 * 1e-9;
+            let res_bg: Vector3<f64> = start.bias_gyro - end.bias_gyro;
+            total += 0.5 * res_bg.dot(&(gyro_bias_weight / dt).component_mul(&res_bg));
+            let res_ba: Vector3<f64> = start.bias_accel - end.bias_accel;
+            total += 0.5 * res_ba.dot(&(accel_bias_weight / dt).component_mul(&res_ba));
+        }
+        total
+    }
+
+    /// Noisy samples over `[from_ns, to_ns)`, as both nullspace tests build them
+    /// (`test_vio.cpp:52-74`).
+    fn noisy_samples(
+        trajectory: &Trajectory,
+        bg: &Vector3<f64>,
+        ba: &Vector3<f64>,
+        from_ns: i64,
+        to_ns: i64,
+        rng: &mut Rng,
+    ) -> Vec<ImuSample> {
+        let dt_ns: i64 = 10_000_000;
+        let mut samples: Vec<ImuSample> = Vec::new();
+        let mut t_ns: i64 = from_ns;
+        while t_ns < to_ns {
+            let mut sample: ImuSample = trajectory.sample(t_ns, dt_ns);
+            sample.accel += ba + rng.vector3() * ACCEL_STD_DEV;
+            sample.gyro += bg + rng.vector3() * GYRO_STD_DEV;
+            samples.push(sample);
+            t_ns += dt_ns;
+        }
+        samples
+    }
+
+    fn integrate_noisy(
+        start_t_ns: i64,
+        bg: &Vector3<f64>,
+        ba: &Vector3<f64>,
+        samples: &[ImuSample],
+    ) -> IntegratedImuMeasurement<f64> {
+        let noise: ImuNoise<f64> = noise_from_std_dev();
+        let mut meas: IntegratedImuMeasurement<f64> =
+            IntegratedImuMeasurement::new(start_t_ns, bg, ba);
+        for sample in samples {
+            meas.integrate(sample, &noise.accel_cov, &noise.gyro_cov)
+                .unwrap();
+        }
+        meas
+    }
+
+    /// `test_vio.cpp:82-86, 104-105`: both weights are `1e3`.
+    fn lin_data() -> ImuLinData<f64> {
+        ImuLinData {
+            g: gravity::<f64>(),
+            gyro_bias_weight_sqrt: Vector3::repeat(1e3),
+            accel_bias_weight_sqrt: Vector3::repeat(1e3),
+        }
+    }
+
+    /// `VioTestSuite.ImuNullspace2Test` (`test/src/test_vio.cpp:28-147`).
+    ///
+    /// One IMU factor between two full states: the block's `H` and `b` have to
+    /// reproduce the error change to `2e-2` for ten small random increments, and
+    /// the three global translations and the yaw rotation have to lie in the
+    /// nullspace of `H` and `b` to `1e-8` and `1e-6`.
+    #[test]
+    fn imu_nullspace_2() {
+        let mut rng: Rng = Rng::new(0x5eed_0006);
+        let trajectory: Trajectory = Trajectory::new(&mut rng);
+        let bg: Vector3<f64> = rng.vector3() / 100.0;
+        let ba: Vector3<f64> = rng.vector3() / 10.0;
+
+        let samples: Vec<ImuSample> =
+            noisy_samples(&trajectory, &bg, &ba, 5_000_000, 100_000_000, &mut rng);
+        let meas: IntegratedImuMeasurement<f64> = integrate_noisy(0, &bg, &ba, &samples);
+
+        let state0: PoseVelBiasState<f64> =
+            PoseVelBiasState::new(0, trajectory.pose(0), trajectory.trans_vel_world(0), bg, ba);
+        let end_t_ns: i64 = meas.get_dt_ns();
+        let state1: PoseVelBiasState<f64> = PoseVelBiasState::new(
+            end_t_ns,
+            trajectory.pose(end_t_ns) * Se3::exp_decoupled(&(rng.vector6() / 10.0)),
+            trajectory.trans_vel_world(end_t_ns) + rng.vector3() / 10.0,
+            bg,
+            ba,
+        );
+
+        let mut frame_states: HashMap<i64, PoseVelBiasStateWithLin<f64>> = HashMap::new();
+        frame_states.insert(0, PoseVelBiasStateWithLin::new(state0, false));
+        frame_states.insert(end_t_ns, PoseVelBiasStateWithLin::new(state1, false));
+
+        let mut order: AbsOrderMap = AbsOrderMap::new();
+        order.push(0, POSE_VEL_BIAS_SIZE).unwrap();
+        order.push(end_t_ns, POSE_VEL_BIAS_SIZE).unwrap();
+        let size: usize = order.total_size();
+
+        let ild: ImuLinData<f64> = lin_data();
+        let block: ImuBlock<f64> =
+            ImuBlock::linearize(&meas, &ild, &frame_states[&0], &frame_states[&end_t_ns]);
+        let mut h: DMatrix<f64> = DMatrix::zeros(size, size);
+        let mut b: DVector<f64> = DVector::zeros(size);
+        block.add_dense_h_b(0, POSE_VEL_BIAS_SIZE, &mut h, &mut b);
+        let e0: f64 = block.error;
+
+        // `:114-136`: the quadratic model has to predict the error change.
+        let gyro_weight: Vector3<f64> = ild.gyro_bias_weight_sqrt.map(|v: f64| v * v);
+        let accel_weight: Vector3<f64> = ild.accel_bias_weight_sqrt.map(|v: f64| v * v);
+        for _ in 0..10 {
+            let raw: DVector<f64> = DVector::from_fn(size, |_, _| rng.uniform());
+            let inc: DVector<f64> = &raw / raw.norm() / 10_000.0;
+
+            let mut moved: HashMap<i64, PoseVelBiasStateWithLin<f64>> = frame_states.clone();
+            let mut inc0: Vector15<f64> = Vector15::zeros();
+            let mut inc1: Vector15<f64> = Vector15::zeros();
+            for i in 0..POSE_VEL_BIAS_SIZE {
+                inc0[i] = inc[i];
+                inc1[i] = inc[POSE_VEL_BIAS_SIZE + i];
+            }
+            moved.get_mut(&0).unwrap().apply_inc(&inc0);
+            moved.get_mut(&end_t_ns).unwrap().apply_inc(&inc1);
+
+            let e1: f64 = compute_imu_error(
+                &order,
+                &moved,
+                std::slice::from_ref(&meas),
+                &gyro_weight,
+                &accel_weight,
+                &ild.g,
+            ) - e0;
+            let e2: f64 = 0.5 * inc.dot(&(&h * &inc)) + inc.dot(&b);
+            assert!((e1 - e2).abs() <= 2e-2, "e1 {e1} e2 {e2}");
+        }
+
+        let null_res: [f64; 7] = check_nullspace(&h, &b, &order, &frame_states, &mut rng);
+        assert!(null_res[0].abs() <= 1e-8, "x {}", null_res[0]);
+        assert!(null_res[1].abs() <= 1e-8, "y {}", null_res[1]);
+        assert!(null_res[2].abs() <= 1e-8, "z {}", null_res[2]);
+        assert!(null_res[5].abs() <= 1e-6, "yaw {}", null_res[5]);
+        // Not in the C++, which only prints these: gravity makes roll and pitch
+        // observable, so they — and any random direction — must carry real
+        // information. Without this an all-zero `H` would pass vacuously.
+        assert!(null_res[3].abs() > 1.0, "roll {}", null_res[3]);
+        assert!(null_res[4].abs() > 1.0, "pitch {}", null_res[4]);
+        assert!(null_res[6].abs() > 1.0, "random {}", null_res[6]);
+    }
+
+    /// `VioTestSuite.ImuNullspace3Test` (`test/src/test_vio.cpp:151-286`).
+    ///
+    /// Two consecutive IMU factors over three states; the same four directions
+    /// have to stay in the nullspace once both blocks are accumulated.
+    #[test]
+    fn imu_nullspace_3() {
+        let mut rng: Rng = Rng::new(0x5eed_0007);
+        let trajectory: Trajectory = Trajectory::new(&mut rng);
+        let bg: Vector3<f64> = rng.vector3() / 100.0;
+        let ba: Vector3<f64> = rng.vector3() / 10.0;
+
+        let samples1: Vec<ImuSample> =
+            noisy_samples(&trajectory, &bg, &ba, 5_000_000, 1_000_000_000, &mut rng);
+        let meas1: IntegratedImuMeasurement<f64> = integrate_noisy(0, &bg, &ba, &samples1);
+        let t1_ns: i64 = meas1.get_dt_ns();
+
+        let samples2: Vec<ImuSample> = noisy_samples(
+            &trajectory,
+            &bg,
+            &ba,
+            t1_ns + 5_000_000,
+            2_000_000_000,
+            &mut rng,
+        );
+        let meas2: IntegratedImuMeasurement<f64> = integrate_noisy(t1_ns, &bg, &ba, &samples2);
+        let t2_ns: i64 = t1_ns + meas2.get_dt_ns();
+
+        let state0: PoseVelBiasState<f64> =
+            PoseVelBiasState::new(0, trajectory.pose(0), trajectory.trans_vel_world(0), bg, ba);
+        let state1: PoseVelBiasState<f64> = PoseVelBiasState::new(
+            t1_ns,
+            trajectory.pose(t1_ns) * Se3::exp_decoupled(&(rng.vector6() / 10.0)),
+            trajectory.trans_vel_world(t1_ns) + rng.vector3() / 10.0,
+            bg,
+            ba,
+        );
+        let state2: PoseVelBiasState<f64> = PoseVelBiasState::new(
+            t2_ns,
+            trajectory.pose(t2_ns) * Se3::exp_decoupled(&(rng.vector6() / 10.0)),
+            trajectory.trans_vel_world(t2_ns) + rng.vector3() / 10.0,
+            bg,
+            ba,
+        );
+
+        let mut frame_states: HashMap<i64, PoseVelBiasStateWithLin<f64>> = HashMap::new();
+        frame_states.insert(0, PoseVelBiasStateWithLin::new(state0, false));
+        frame_states.insert(t1_ns, PoseVelBiasStateWithLin::new(state1, false));
+        frame_states.insert(t2_ns, PoseVelBiasStateWithLin::new(state2, false));
+
+        let mut order: AbsOrderMap = AbsOrderMap::new();
+        order.push(0, POSE_VEL_BIAS_SIZE).unwrap();
+        order.push(t1_ns, POSE_VEL_BIAS_SIZE).unwrap();
+        order.push(t2_ns, POSE_VEL_BIAS_SIZE).unwrap();
+        let size: usize = order.total_size();
+
+        let ild: ImuLinData<f64> = lin_data();
+        let mut h: DMatrix<f64> = DMatrix::zeros(size, size);
+        let mut b: DVector<f64> = DVector::zeros(size);
+        ImuBlock::linearize(&meas1, &ild, &frame_states[&0], &frame_states[&t1_ns]).add_dense_h_b(
+            0,
+            POSE_VEL_BIAS_SIZE,
+            &mut h,
+            &mut b,
+        );
+        ImuBlock::linearize(&meas2, &ild, &frame_states[&t1_ns], &frame_states[&t2_ns])
+            .add_dense_h_b(POSE_VEL_BIAS_SIZE, 2 * POSE_VEL_BIAS_SIZE, &mut h, &mut b);
+
+        let null_res: [f64; 7] = check_nullspace(&h, &b, &order, &frame_states, &mut rng);
+        assert!(null_res[0].abs() <= 1e-8, "x {}", null_res[0]);
+        assert!(null_res[1].abs() <= 1e-8, "y {}", null_res[1]);
+        assert!(null_res[2].abs() <= 1e-8, "z {}", null_res[2]);
+        assert!(null_res[5].abs() <= 1e-6, "yaw {}", null_res[5]);
+        // Not in the C++, which only prints these: gravity makes roll and pitch
+        // observable, so they — and any random direction — must carry real
+        // information. Without this an all-zero `H` would pass vacuously.
+        assert!(null_res[3].abs() > 1.0, "roll {}", null_res[3]);
+        assert!(null_res[4].abs() > 1.0, "pitch {}", null_res[4]);
+        assert!(null_res[6].abs() > 1.0, "random {}", null_res[6]);
+    }
+
+    // ── Port-specific tests ─────────────────────────────────────────────
+
+    /// The `BASALT_ASSERT` at `preintegration.h:211` holds structurally: the
+    /// accelerometer bias cannot move the rotation part of the delta state,
+    /// because `d_next_d_accel` has no rotation rows and `F`'s rotation rows are
+    /// `[0 I 0]`.
+    #[test]
+    fn the_accel_bias_jacobian_never_touches_rotation() {
+        let mut rng: Rng = Rng::new(0x5eed_0008);
+        let trajectory: Trajectory = Trajectory::new(&mut rng);
+        let bg: Vector3<f64> = rng.vector3() / 100.0;
+        let ba: Vector3<f64> = rng.vector3() / 10.0;
+        let samples: Vec<ImuSample> = biased_samples(&trajectory, &bg, &ba);
+        let meas: IntegratedImuMeasurement<f64> = integrate_all(0, &bg, &ba, &samples);
+        assert_eq!(
+            meas.get_d_state_d_ba()
+                .fixed_view::<3, 3>(3, 0)
+                .into_owned(),
+            Matrix3::zeros()
+        );
+    }
+
+    /// The empty measurement is exactly zero everywhere, and its square-root
+    /// inverse covariance is zero rather than infinite — the pseudo-inverse
+    /// branch at `preintegration.h:313-319`.
+    #[test]
+    fn an_empty_measurement_has_a_zero_pseudo_inverse() {
+        let meas: IntegratedImuMeasurement<f64> = IntegratedImuMeasurement::default();
+        assert_eq!(meas.get_dt_ns(), 0);
+        assert_eq!(*meas.get_cov(), Matrix9::zeros());
+        assert_eq!(meas.get_cov_inv_sqrt(), Matrix9::zeros());
+        assert_eq!(meas.get_cov_inv(), Matrix9::zeros());
+    }
+
+    /// After one step from the zero initial covariance the recurrence at
+    /// `preintegration.h:161-162` reduces to `A Σa Aᵀ + G Σg Gᵀ`, and the two
+    /// bias Jacobians to `-A` and `-G` (`:165-166`).
+    #[test]
+    fn the_first_covariance_step_is_the_noise_input_alone() {
+        let noise: ImuNoise<f64> = noise_from_std_dev();
+        let sample: ImuSample = ImuSample {
+            t_ns: 5_000_000,
+            gyro: Vector3::new(0.1, -0.2, 0.05),
+            accel: Vector3::new(0.3, 0.1, 9.7),
+        };
+        let mut meas: IntegratedImuMeasurement<f64> =
+            IntegratedImuMeasurement::new(0, &Vector3::zeros(), &Vector3::zeros());
+        let (_, j) = IntegratedImuMeasurement::<f64>::propagate_state(
+            &PoseVelState::default(),
+            sample.t_ns,
+            &sample.accel,
+            &sample.gyro,
+        )
+        .unwrap();
+        meas.integrate(&sample, &noise.accel_cov, &noise.gyro_cov)
+            .unwrap();
+
+        let expected: Matrix9<f64> = j.d_next_d_accel
+            * Matrix3::from_diagonal(&noise.accel_cov)
+            * j.d_next_d_accel.transpose()
+            + j.d_next_d_gyro
+                * Matrix3::from_diagonal(&noise.gyro_cov)
+                * j.d_next_d_gyro.transpose();
+        assert_abs_diff_eq!(*meas.get_cov(), expected, epsilon = 0.0);
+        assert_eq!(*meas.get_d_state_d_ba(), -j.d_next_d_accel);
+        assert_eq!(*meas.get_d_state_d_bg(), -j.d_next_d_gyro);
+    }
+
+    /// A duplicate or reordered sample is rejected and nothing is integrated.
+    #[test]
+    fn duplicate_and_reordered_samples_are_rejected() {
+        let ones: Vector3<f64> = Vector3::repeat(1.0);
+        let mut meas: IntegratedImuMeasurement<f64> =
+            IntegratedImuMeasurement::new(1_000, &Vector3::zeros(), &Vector3::zeros());
+        let sample = |t_ns: i64| ImuSample {
+            t_ns,
+            gyro: Vector3::new(0.01, 0.0, 0.0),
+            accel: Vector3::new(0.0, 0.0, 9.81),
+        };
+
+        meas.integrate(&sample(2_000), &ones, &ones).unwrap();
+        assert_eq!(meas.get_dt_ns(), 1_000);
+        assert_eq!(
+            meas.integrate(&sample(2_000), &ones, &ones),
+            Err(ImuError::NonMonotonicSample {
+                previous_t_ns: 1_000,
+                t_ns: 1_000
+            })
+        );
+        assert_eq!(
+            meas.integrate(&sample(1_500), &ones, &ones),
+            Err(ImuError::NonMonotonicSample {
+                previous_t_ns: 1_000,
+                t_ns: 500
+            })
+        );
+        // The measurement is unchanged after both refusals.
+        assert_eq!(meas.get_dt_ns(), 1_000);
+
+        // A sample at exactly the start time would be a zero-length step.
+        let mut fresh: IntegratedImuMeasurement<f64> =
+            IntegratedImuMeasurement::new(1_000, &Vector3::zeros(), &Vector3::zeros());
+        assert_eq!(
+            fresh.integrate(&sample(1_000), &ones, &ones),
+            Err(ImuError::NonMonotonicSample {
+                previous_t_ns: 0,
+                t_ns: 0
+            })
+        );
+    }
+
+    /// `integrate_between` reproduces `sqrt_keypoint_vio.cpp:315-336`: samples at
+    /// or before `t0` are skipped, samples through `t1` are integrated, and the
+    /// interval is closed by the first sample *after* `t1` retimed to `t1` with
+    /// its own measurement values — no interpolation.
+    #[test]
+    fn integrate_between_matches_the_between_frames_loop() {
+        let noise: ImuNoise<f64> = noise_from_std_dev();
+        let mut samples: Vec<ImuSample> = Vec::new();
+        for k in 0..8 {
+            samples.push(ImuSample {
+                t_ns: k * 1_000_000,
+                gyro: Vector3::new(0.01 * k as f64, 0.0, 0.0),
+                accel: Vector3::new(0.0, 0.1 * k as f64, 9.81),
+            });
+        }
+        let t0_ns: i64 = 1_000_000;
+        let t1_ns: i64 = 4_500_000;
+
+        let mut between: IntegratedImuMeasurement<f64> =
+            IntegratedImuMeasurement::new(t0_ns, &Vector3::zeros(), &Vector3::zeros());
+        between
+            .integrate_between(&samples, t0_ns, t1_ns, &noise)
+            .unwrap();
+
+        // By hand: skip index 0 and 1 (`t <= t0`), integrate 2, 3 and 4
+        // (`t <= t1`), then close with index 5 retimed to `t1`.
+        let mut expected: IntegratedImuMeasurement<f64> =
+            IntegratedImuMeasurement::new(t0_ns, &Vector3::zeros(), &Vector3::zeros());
+        for sample in &samples[2..=4] {
+            expected
+                .integrate(sample, &noise.accel_cov, &noise.gyro_cov)
+                .unwrap();
+        }
+        expected
+            .integrate(
+                &ImuSample {
+                    t_ns: t1_ns,
+                    ..samples[5]
+                },
+                &noise.accel_cov,
+                &noise.gyro_cov,
+            )
+            .unwrap();
+        assert_eq!(between, expected);
+        assert_eq!(between.get_dt_ns(), t1_ns - t0_ns);
+
+        // No closing step is needed when a sample lands exactly on `t1`.
+        let mut exact: IntegratedImuMeasurement<f64> =
+            IntegratedImuMeasurement::new(t0_ns, &Vector3::zeros(), &Vector3::zeros());
+        exact
+            .integrate_between(&samples, t0_ns, 4_000_000, &noise)
+            .unwrap();
+        assert_eq!(exact.get_dt_ns(), 4_000_000 - t0_ns);
+    }
+
+    /// The five ways `integrate_between` refuses.
+    #[test]
+    fn integrate_between_rejects_bad_intervals() {
+        let noise: ImuNoise<f64> = noise_from_std_dev();
+        let sample = |t_ns: i64| ImuSample {
+            t_ns,
+            gyro: Vector3::zeros(),
+            accel: Vector3::new(0.0, 0.0, 9.81),
+        };
+        let meas = || IntegratedImuMeasurement::<f64>::new(0, &Vector3::zeros(), &Vector3::zeros());
+
+        assert_eq!(
+            meas().integrate_between(&[sample(1)], 0, 0, &noise),
+            Err(ImuError::NonMonotonicFrames { t0_ns: 0, t1_ns: 0 })
+        );
+        assert_eq!(
+            meas().integrate_between(&[sample(1)], 5, 10, &noise),
+            Err(ImuError::StartTimeMismatch {
+                start_t_ns: 0,
+                t0_ns: 5
+            })
+        );
+        assert_eq!(
+            meas().integrate_between(&[sample(2), sample(2)], 0, 10, &noise),
+            Err(ImuError::NonMonotonicSample {
+                previous_t_ns: 2,
+                t_ns: 2
+            })
+        );
+        assert_eq!(
+            meas().integrate_between(&[sample(3), sample(1)], 0, 10, &noise),
+            Err(ImuError::NonMonotonicSample {
+                previous_t_ns: 3,
+                t_ns: 1
+            })
+        );
+        // Nothing after `t1` to close the interval with.
+        assert_eq!(
+            meas().integrate_between(&[sample(2), sample(4)], 0, 10, &noise),
+            Err(ImuError::MissingSampleAfterFrame { t1_ns: 10 })
+        );
+    }
+
+    /// `Quaternion::FromTwoVectors(accel, UnitZ)` (`sqrt_keypoint_vio.cpp:278`)
+    /// rotates the measured specific force onto the world `+Z` axis, so gravity
+    /// lands along `-Z`.
+    #[test]
+    fn gravity_init_aligns_the_accelerometer_with_world_up() {
+        let mut rng: Rng = Rng::new(0x5eed_0009);
+        for _ in 0..64 {
+            let accel: Vector3<f64> = rng.vector3() * 9.81;
+            if accel.norm() < 1e-3 {
+                continue;
+            }
+            let rotation: So3<f64> = gravity_from_first_accel(&accel);
+            let up: Vector3<f64> = rotation * (accel / accel.norm());
+            assert_abs_diff_eq!(up, Vector3::new(0.0, 0.0, 1.0), epsilon = 1e-12);
+            // The rig-frame gravity is minus the measured specific force.
+            let g_body: Vector3<f64> = rotation.inverse() * gravity::<f64>();
+            assert_abs_diff_eq!(g_body.normalize(), -accel.normalize(), epsilon = 1e-12);
+        }
+    }
+
+    /// Both degenerate directions: a sample already along `+Z` gives the
+    /// identity, and the anti-parallel sample still lands on `+Z`.
+    #[test]
+    fn gravity_init_handles_the_degenerate_directions() {
+        let up: So3<f64> = gravity_from_first_accel(&Vector3::new(0.0, 0.0, 9.81));
+        assert_abs_diff_eq!(up.log(), Vector3::zeros(), epsilon = 1e-12);
+
+        let down: So3<f64> = gravity_from_first_accel(&Vector3::new(0.0, 0.0, -9.81));
+        assert_abs_diff_eq!(
+            down * Vector3::new(0.0, 0.0, -1.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            epsilon = 1e-12
+        );
+
+        // Nothing to align: the identity, not a NaN.
+        assert_eq!(
+            gravity_from_first_accel(&Vector3::<f64>::zeros()),
+            So3::identity()
+        );
+        assert_eq!(
+            gravity_from_first_accel(&Vector3::new(f64::NAN, 0.0, 0.0)),
+            So3::identity()
+        );
+    }
+
+    /// `gravity_from_first_accel` recovers the orientation of a rig at rest for
+    /// any roll and pitch, up to the yaw it cannot see.
+    #[test]
+    fn gravity_init_recovers_roll_and_pitch() {
+        let mut rng: Rng = Rng::new(0x5eed_000b);
+        let g: Vector3<f64> = gravity::<f64>();
+        for _ in 0..64 {
+            let truth: So3<f64> = So3::exp(&(rng.vector3() * 1.2));
+            // What a rig at rest measures: minus gravity, in the rig frame.
+            let accel: Vector3<f64> = truth.inverse() * (-g);
+            let estimate: So3<f64> = gravity_from_first_accel(&accel);
+            // Both map the measured direction onto world up, so the two differ
+            // by a rotation about the world z axis: yaw only.
+            let residual: Vector3<f64> = (estimate * truth.inverse()).log();
+            assert_abs_diff_eq!(residual.x, 0.0, epsilon = 1e-9);
+            assert_abs_diff_eq!(residual.y, 0.0, epsilon = 1e-9);
+        }
+    }
+
+    /// The same 100-sample integration in `f32` and `f64` agrees to `1e-4`
+    /// (decision D05: the measurement is generic and both are instantiated).
+    #[test]
+    fn f32_agrees_with_f64_over_a_hundred_samples() {
+        let mut rng: Rng = Rng::new(0x5eed_000a);
+        let trajectory: Trajectory = Trajectory::new(&mut rng);
+        let bg: Vector3<f64> = rng.vector3() / 100.0;
+        let ba: Vector3<f64> = rng.vector3() / 10.0;
+        let samples: Vec<ImuSample> = biased_samples(&trajectory, &bg, &ba);
+        assert_eq!(samples.len(), 100);
+
+        let wide: IntegratedImuMeasurement<f64> = integrate_all(0, &bg, &ba, &samples);
+
+        let mut narrow: IntegratedImuMeasurement<f32> = IntegratedImuMeasurement::new(
+            0,
+            &Vector3::new(bg.x as f32, bg.y as f32, bg.z as f32),
+            &Vector3::new(ba.x as f32, ba.y as f32, ba.z as f32),
+        );
+        let ones: Vector3<f32> = Vector3::repeat(1.0);
+        for sample in &samples {
+            narrow.integrate(sample, &ones, &ones).unwrap();
+        }
+
+        assert_eq!(narrow.get_dt_ns(), wide.get_dt_ns());
+        let wide_delta: &PoseVelState<f64> = wide.get_delta_state();
+        let narrow_delta: &PoseVelState<f32> = narrow.get_delta_state();
+        for axis in 0..3 {
+            assert!(
+                (f64::from(narrow_delta.t_w_i.translation[axis])
+                    - wide_delta.t_w_i.translation[axis])
+                    .abs()
+                    <= 1e-4
+            );
+            assert!(
+                (f64::from(narrow_delta.vel_w_i[axis]) - wide_delta.vel_w_i[axis]).abs() <= 1e-4
+            );
+        }
+        let narrow_log: Vector3<f32> = narrow_delta.t_w_i.rotation.log();
+        let wide_log: Vector3<f64> = wide_delta.t_w_i.rotation.log();
+        for axis in 0..3 {
+            assert!((f64::from(narrow_log[axis]) - wide_log[axis]).abs() <= 1e-4);
+        }
+    }
+
+    /// The 9x6 bias Jacobian carries the gyro block in columns 0-2 and the accel
+    /// block in 3-5, which is what the estimator's `start_idx + 9` and
+    /// `start_idx + 12` column offsets mean (`imu_block.hpp:57-58`).
+    #[test]
+    fn the_bias_jacobian_columns_are_gyro_then_accel() {
+        let mut rng: Rng = Rng::new(0x5eed_000c);
+        let trajectory: Trajectory = Trajectory::new(&mut rng);
+        let bg: Vector3<f64> = rng.vector3() / 100.0;
+        let ba: Vector3<f64> = rng.vector3() / 10.0;
+        let samples: Vec<ImuSample> = biased_samples(&trajectory, &bg, &ba);
+        let meas: IntegratedImuMeasurement<f64> = integrate_all(0, &bg, &ba, &samples);
+
+        let g: Vector3<f64> = gravity::<f64>();
+        let state0: PoseVelState<f64> =
+            PoseVelState::new(0, trajectory.pose(0), trajectory.trans_vel_world(0));
+        let end_t_ns: i64 = meas.get_dt_ns();
+        let state1: PoseVelState<f64> = PoseVelState::new(
+            end_t_ns,
+            trajectory.pose(end_t_ns),
+            trajectory.trans_vel_world(end_t_ns),
+        );
+        let (res, jacobians) = meas.residual_with_jacobians(&state0, &g, &state1, &bg, &ba);
+
+        // The accel half is exactly `-d_state_d_ba` (`preintegration.h:250`).
+        assert_eq!(
+            jacobians.d_res_d_bias.fixed_view::<9, 3>(0, 3).into_owned(),
+            -meas.get_d_state_d_ba()
+        );
+        // The gyro half is `-d_state_d_bg` with its rotation rows replaced by
+        // `+ leftJacobianInv(res_rot) * d_state_d_bg(3,0)` (`:252-257`).
+        let gyro_half: Matrix9x3<f64> =
+            jacobians.d_res_d_bias.fixed_view::<9, 3>(0, 0).into_owned();
+        assert_eq!(
+            gyro_half.fixed_view::<3, 3>(0, 0).into_owned(),
+            -meas.get_d_state_d_bg().fixed_view::<3, 3>(0, 0)
+        );
+        assert_eq!(
+            gyro_half.fixed_view::<3, 3>(6, 0).into_owned(),
+            -meas.get_d_state_d_bg().fixed_view::<3, 3>(6, 0)
+        );
+        let res_rot: Vector3<f64> = res.fixed_rows::<3>(3).into_owned();
+        assert_abs_diff_eq!(
+            gyro_half.fixed_view::<3, 3>(3, 0).into_owned(),
+            left_jacobian_inv_so3(&res_rot) * meas.get_d_state_d_bg().fixed_view::<3, 3>(3, 0),
+            epsilon = 1e-15
+        );
+    }
+
+    /// A frozen linearization point changes only the residual *value*, not the
+    /// Jacobians (`imu_block.hpp:45-48`, trap 7 of the architecture dossier).
+    #[test]
+    fn the_block_re_evaluates_the_residual_at_a_linearized_state() {
+        let mut rng: Rng = Rng::new(0x5eed_000d);
+        let trajectory: Trajectory = Trajectory::new(&mut rng);
+        let bg: Vector3<f64> = rng.vector3() / 100.0;
+        let ba: Vector3<f64> = rng.vector3() / 10.0;
+        let samples: Vec<ImuSample> = biased_samples(&trajectory, &bg, &ba);
+        let meas: IntegratedImuMeasurement<f64> = integrate_all(0, &bg, &ba, &samples);
+        let end_t_ns: i64 = meas.get_dt_ns();
+
+        let state0: PoseVelBiasState<f64> =
+            PoseVelBiasState::new(0, trajectory.pose(0), trajectory.trans_vel_world(0), bg, ba);
+        let state1: PoseVelBiasState<f64> = PoseVelBiasState::new(
+            end_t_ns,
+            trajectory.pose(end_t_ns),
+            trajectory.trans_vel_world(end_t_ns),
+            bg,
+            ba,
+        );
+        let ild: ImuLinData<f64> = lin_data();
+
+        let plain0: PoseVelBiasStateWithLin<f64> = PoseVelBiasStateWithLin::new(state0, false);
+        let plain1: PoseVelBiasStateWithLin<f64> = PoseVelBiasStateWithLin::new(state1, false);
+        let reference: ImuBlock<f64> = ImuBlock::linearize(&meas, &ild, &plain0, &plain1);
+
+        let mut frozen0: PoseVelBiasStateWithLin<f64> = PoseVelBiasStateWithLin::new(state0, false);
+        frozen0.set_linearized().unwrap();
+        let mut inc: Vector15<f64> = Vector15::zeros();
+        inc.fixed_rows_mut::<3>(0).copy_from(&Vector3::repeat(0.01));
+        frozen0.apply_inc(&inc);
+
+        let frozen: ImuBlock<f64> = ImuBlock::linearize(&meas, &ild, &frozen0, &plain1);
+        // Same linearization point, so the Jacobian is untouched...
+        assert_eq!(frozen.jp, reference.jp);
+        // ...but the residual moved with the state.
+        assert!((frozen.r - reference.r).norm() > 1e-6);
+    }
+
+    // ── Properties ──────────────────────────────────────────────────────
+
+    fn zero_motion_measurement(
+        steps: usize,
+        dt_ns: i64,
+        accel: Vector3<f64>,
+    ) -> IntegratedImuMeasurement<f64> {
+        let noise: ImuNoise<f64> = noise_from_std_dev();
+        let mut meas: IntegratedImuMeasurement<f64> =
+            IntegratedImuMeasurement::new(0, &Vector3::zeros(), &Vector3::zeros());
+        for step in 1..=steps as i64 {
+            meas.integrate(
+                &ImuSample {
+                    t_ns: step * dt_ns,
+                    gyro: Vector3::zeros(),
+                    accel,
+                },
+                &noise.accel_cov,
+                &noise.gyro_cov,
+            )
+            .unwrap();
+        }
+        meas
+    }
+
+    proptest! {
+        /// Gravity-only accelerometer, zero gyro, zero bias: the delta state has
+        /// no rotation, its velocity is `-g T` and its position `-½ g T²`, so
+        /// `predict_state` leaves a rig that started at rest exactly where it
+        /// was, and the residual against that prediction vanishes.
+        #[test]
+        fn a_rig_at_rest_stays_at_rest(steps in 1usize..40, dt_ns in 1_000_000i64..20_000_000) {
+            let g: Vector3<f64> = gravity::<f64>();
+            let meas: IntegratedImuMeasurement<f64> = zero_motion_measurement(steps, dt_ns, -g);
+            let total: f64 = meas.get_dt_ns() as f64 * 1e-9;
+
+            let delta: &PoseVelState<f64> = meas.get_delta_state();
+            prop_assert!(delta.t_w_i.rotation.log().norm() <= 1e-15);
+            prop_assert!((delta.vel_w_i - (-g * total)).norm() <= 1e-9);
+            prop_assert!((delta.t_w_i.translation - (-g * 0.5 * total * total)).norm() <= 1e-9);
+
+            let state0: PoseVelState<f64> = PoseVelState::default();
+            let state1: PoseVelState<f64> = meas.predict_state(&state0, &g);
+            prop_assert!(state1.t_w_i.translation.norm() <= 1e-9);
+            prop_assert!(state1.vel_w_i.norm() <= 1e-9);
+            prop_assert!(state1.t_w_i.rotation.log().norm() <= 1e-15);
+            prop_assert_eq!(state1.t_ns, meas.get_dt_ns());
+
+            let res = meas.residual(&state0, &g, &state1, &Vector3::zeros(), &Vector3::zeros());
+            prop_assert!(res.amax() <= 1e-9);
+        }
+
+        /// A free-falling rig — zero specific force — accumulates nothing, and
+        /// the prediction is pure gravity: `v = g T`, `p = ½ g T²`.
+        #[test]
+        fn free_fall_is_pure_gravity(steps in 1usize..40, dt_ns in 1_000_000i64..20_000_000) {
+            let g: Vector3<f64> = gravity::<f64>();
+            let meas: IntegratedImuMeasurement<f64> =
+                zero_motion_measurement(steps, dt_ns, Vector3::zeros());
+            let total: f64 = meas.get_dt_ns() as f64 * 1e-9;
+
+            let delta: &PoseVelState<f64> = meas.get_delta_state();
+            prop_assert_eq!(delta.vel_w_i, Vector3::zeros());
+            prop_assert_eq!(delta.t_w_i.translation, Vector3::zeros());
+
+            let state1: PoseVelState<f64> = meas.predict_state(&PoseVelState::default(), &g);
+            prop_assert!((state1.vel_w_i - g * total).norm() <= 1e-12);
+            prop_assert!((state1.t_w_i.translation - g * 0.5 * total * total).norm() <= 1e-12);
+        }
+
+        /// The covariance stays symmetric and positive semi-definite, and the
+        /// square-root inverse really is one: `(MᵀM) cov = I`.
+        #[test]
+        fn the_covariance_is_symmetric_psd_and_its_factor_inverts_it(
+            steps in 2usize..25,
+            dt_ns in 1_000_000i64..10_000_000,
+            gyro_scale in 0.0f64..1.0,
+        ) {
+            let noise: ImuNoise<f64> = noise_from_std_dev();
+            let mut meas: IntegratedImuMeasurement<f64> =
+                IntegratedImuMeasurement::new(0, &Vector3::zeros(), &Vector3::zeros());
+            for step in 1..=steps as i64 {
+                meas.integrate(
+                    &ImuSample {
+                        t_ns: step * dt_ns,
+                        gyro: Vector3::new(0.3, -0.2, 0.5) * gyro_scale,
+                        accel: Vector3::new(0.4, -0.3, 9.7),
+                    },
+                    &noise.accel_cov,
+                    &noise.gyro_cov,
+                )?;
+            }
+
+            let cov: Matrix9<f64> = *meas.get_cov();
+            let asymmetry: f64 = (cov - cov.transpose()).amax();
+            prop_assert!(asymmetry <= 1e-12 * cov.amax().max(1.0), "asymmetry {}", asymmetry);
+
+            let smallest: f64 = cov.symmetric_eigenvalues().min();
+            prop_assert!(smallest >= -1e-9 * cov.amax(), "smallest eigenvalue {}", smallest);
+
+            let m: Matrix9<f64> = meas.get_cov_inv_sqrt();
+            let deviation: f64 = (m.transpose() * m * cov - Matrix9::identity()).amax();
+            prop_assert!(deviation <= 1e-6, "MᵀM cov - I = {}", deviation);
+        }
+
+        /// A duplicate or backwards timestamp is always refused, whatever the
+        /// start time, and the measurement does not move.
+        #[test]
+        fn out_of_order_samples_are_always_refused(
+            start_t_ns in -1_000_000_000i64..1_000_000_000,
+            step_ns in 1i64..10_000_000,
+            back_ns in 0i64..10_000_000,
+        ) {
+            let ones: Vector3<f64> = Vector3::repeat(1.0);
+            let mut meas: IntegratedImuMeasurement<f64> =
+                IntegratedImuMeasurement::new(start_t_ns, &Vector3::zeros(), &Vector3::zeros());
+            let sample = |t_ns: i64| ImuSample {
+                t_ns,
+                gyro: Vector3::new(0.02, 0.0, -0.01),
+                accel: Vector3::new(0.0, 0.0, 9.81),
+            };
+            meas.integrate(&sample(start_t_ns + step_ns), &ones, &ones)?;
+            let before: IntegratedImuMeasurement<f64> = meas;
+
+            let result = meas.integrate(&sample(start_t_ns + step_ns - back_ns), &ones, &ones);
+            prop_assert_eq!(
+                result,
+                Err(ImuError::NonMonotonicSample {
+                    previous_t_ns: step_ns,
+                    t_ns: step_ns - back_ns
+                })
+            );
+            prop_assert_eq!(meas, before);
+        }
+    }
+}

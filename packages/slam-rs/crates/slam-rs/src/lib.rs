@@ -13,6 +13,7 @@ pub mod calib;
 pub mod camera;
 pub mod config;
 pub mod image;
+pub mod imu;
 pub mod lie;
 pub mod pyramid;
 pub mod types;

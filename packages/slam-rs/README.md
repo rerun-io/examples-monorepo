@@ -17,12 +17,13 @@ The core is being filled in stage by stage, bottom up. What is in it today:
 | Module | What it is |
 |---|---|
 | `lie` | `So3`/`Se3` over any `f32`/`f64` scalar: Sophus's `exp`/`log`, the adjoint, basalt's four SO(3) Jacobians and their inverses, the decoupled SE(3) pair, and the left-multiplied pose increment the estimator runs on. |
-| `types` | `TimeCamId`, `KeypointId`/`LandmarkId`, `AbsOrderMap`, `PoseVelBiasState` and the two fixed-linearization wrappers. |
+| `types` | `TimeCamId`, `KeypointId`/`LandmarkId`, `AbsOrderMap`, `PoseState`/`PoseVelState`/`PoseVelBiasState` and the two fixed-linearization wrappers. |
 | `config` | basalt's `VioConfig`, read straight from `data/**/*_config.json`. |
 | `calib` | basalt's `Calibration`: extrinsics, the six shipped camera models, the 9- and 12-parameter IMU bias calibrations, plus a constructor that takes what the Python catalog feed reports. |
 | `camera` | `pinhole`, `kb4` and `pinhole-radtan8` with basalt's 4-D homogeneous `project`/`unproject` and their analytic Jacobians (2x4 point, 2xN parameter, 4x2 and 4xN for unprojection), the `rpmax` and `z >= epsilonSqrt` domain checks, and a `CameraEnum` that dispatches without a vtable. `ds`, `eucm` and `ucm` parse but are rejected here. |
 | `image` | `ImageU16`: an owned flat 16-bit frame with an explicit row stride, the stride-aware `u8 << 8` widening basalt's readers do, and `interp`/`interp_grad`/`in_bounds` reproduced from `image.h` in the same arithmetic order. |
 | `pyramid` | The `PyramidBuilder` stage seam with an associated `Pyramid` type that lends nothing (geometry plus a copy into the caller's buffer), `PyramidU16` (one flat buffer per level, not basalt's packed mipmap) and `CpuPyramidBuilder`, whose `subsample` is bit-exact with `image_pyr.h:99-140`. |
+| `imu` | Preintegration: `IntegratedImuMeasurement<S>` with basalt's midpoint propagation, covariance and bias-Jacobian recurrences, the 9-vector residual and its Jacobians, the LDLT square-root inverse covariance, the between-frames accumulation loop, gravity initialisation, and the 15-row IMU block the estimator whitens. |
 
 Every convention is quoted against the C++ it comes from, file and line, in the
 doc comments. `crates/slam-rs/tests/fixtures/` holds the shipped basalt config
@@ -48,7 +49,7 @@ outside it returns a bearing pointing backwards. basalt's C++ returns the same
 numbers to the last figure, so this is a property of the algorithm, not of the
 port; `crates/slam-rs/tests/camera_jacobians.rs` pins all three cases.
 
-Still to come: IMU preintegration, the frontend, and the square-root estimator.
+Still to come: the frontend and the square-root estimator.
 
 ## Layout
 

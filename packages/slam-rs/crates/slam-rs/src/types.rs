@@ -20,6 +20,10 @@ pub const POSE_VEL_SIZE: usize = 9;
 /// Degrees of freedom of a full state block (`imu_types.h:48`).
 pub const POSE_VEL_BIAS_SIZE: usize = 15;
 
+/// The 9-vector increment a pose-velocity state takes, and the width of the
+/// preintegrated IMU residual.
+pub type Vector9<S> = SVector<S, POSE_VEL_SIZE>;
+
 /// The 15-vector increment a full state takes.
 pub type Vector15<S> = SVector<S, POSE_VEL_BIAS_SIZE>;
 
@@ -220,6 +224,72 @@ impl<S: LieScalar> PoseState<S> {
     }
 }
 
+/// An SE(3) pose and a world-frame linear velocity at a timestamp
+/// (`imu_types.h:109-167`).
+///
+/// This is the state IMU preintegration propagates: the preintegrated
+/// pseudo-measurement is itself a `PoseVelState` whose `t_ns` counts elapsed
+/// nanoseconds rather than absolute time (`preintegration.h:148`, `:325`).
+/// C++ derives it from `PoseState`; here the pose is a field, and
+/// [`PoseVelState::pose_state`] recovers the base.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PoseVelState<S: LieScalar> {
+    /// Timestamp of the state, in nanoseconds.
+    pub t_ns: i64,
+    /// Pose of the IMU (rig) frame in the world frame.
+    pub t_w_i: Se3<S>,
+    /// Linear velocity in the world frame, m/s.
+    pub vel_w_i: Vector3<S>,
+}
+
+impl<S: LieScalar> Default for PoseVelState<S> {
+    fn default() -> Self {
+        Self {
+            t_ns: 0,
+            t_w_i: Se3::identity(),
+            vel_w_i: Vector3::zeros(),
+        }
+    }
+}
+
+impl<S: LieScalar> PoseVelState<S> {
+    /// A pose-velocity state from its parts (`imu_types.h:124-125`).
+    pub fn new(t_ns: i64, t_w_i: Se3<S>, vel_w_i: Vector3<S>) -> Self {
+        Self {
+            t_ns,
+            t_w_i,
+            vel_w_i,
+        }
+    }
+
+    /// The pose part on its own.
+    pub fn pose_state(&self) -> PoseState<S> {
+        PoseState::new(self.t_ns, self.t_w_i)
+    }
+
+    /// Apply a 9-vector increment, `PoseVelState::applyInc` (`imu_types.h:140-143`).
+    ///
+    /// The layout is `[trans(3), rot(3), vel(3)]`; the pose goes through
+    /// [`Se3::apply_inc`] and the velocity is added.
+    pub fn apply_inc(&mut self, inc: &Vector9<S>) {
+        self.t_w_i.apply_inc(&inc.fixed_rows::<6>(0).into_owned());
+        self.vel_w_i += inc.fixed_rows::<3>(6);
+    }
+
+    /// The increment that takes `self` to `other`, `PoseVelState::diff`
+    /// (`imu_types.h:156-162`), the inverse of [`PoseVelState::apply_inc`].
+    pub fn diff(&self, other: &Self) -> Vector9<S> {
+        let mut res: Vector9<S> = Vector9::zeros();
+        res.fixed_rows_mut::<3>(0)
+            .copy_from(&(other.t_w_i.translation - self.t_w_i.translation));
+        res.fixed_rows_mut::<3>(3)
+            .copy_from(&(other.t_w_i.rotation * self.t_w_i.rotation.inverse()).log());
+        res.fixed_rows_mut::<3>(6)
+            .copy_from(&(other.vel_w_i - self.vel_w_i));
+        res
+    }
+}
+
 /// Pose, velocity and the two IMU biases at a timestamp
 /// (`imu_types.h:184-241`), the block the estimator actually optimizes.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -269,6 +339,15 @@ impl<S: LieScalar> PoseVelBiasState<S> {
     /// The pose part on its own.
     pub fn pose_state(&self) -> PoseState<S> {
         PoseState::new(self.t_ns, self.t_w_i)
+    }
+
+    /// The pose and velocity part on its own.
+    ///
+    /// C++ gets this for free by inheritance — `IntegratedImuMeasurement::residual`
+    /// takes a `const PoseVelState&` and a `PoseVelBiasState` slices into it
+    /// (`imu_block.hpp:41-43`). The port hands over an explicit copy.
+    pub fn pose_vel_state(&self) -> PoseVelState<S> {
+        PoseVelState::new(self.t_ns, self.t_w_i, self.vel_w_i)
     }
 
     /// Apply a 15-vector increment, `PoseVelBiasState::applyInc`
