@@ -158,12 +158,21 @@ class VioStage:
     elapsed_ms: list[float] = field(default_factory=list)
     """Wall time each ``track`` call took, in frameset order."""
     statuses: dict[str, int] = field(default_factory=dict)
-    """How many framesets reported each status."""
+    """How many times ``track`` answered each status, retries included."""
     imu_samples: int = 0
     """Inertial samples pushed so far."""
+    pending: list[Frameset] = field(default_factory=list)
+    """Framesets refused for want of IMU, oldest first, waiting for the samples that cover them."""
 
     def run(self, frameset: Frameset) -> None:
-        """Push the frameset's inertial samples, track it, and log what came out.
+        """Push the frameset's inertial samples, then track everything they now cover.
+
+        A frameset the estimator refuses is **held, not dropped** (D17): the next
+        frameset's batch runs one sample past its own frame time and therefore
+        past this one's, so the held frameset tracks then — and before the
+        frameset whose samples unblocked it, because time order is the
+        trajectory. Nothing moved on the refusal, so the retry produces the pose
+        a run that had the samples all along would have produced.
 
         Args:
             frameset: The frameset to track, with the samples since the previous one.
@@ -178,29 +187,41 @@ class VioStage:
                 np.ascontiguousarray(frameset.imu.accel_m_s2),
             )
             self.imu_samples += len(frameset.imu)
-        started: float = time.monotonic()
-        result: _core.VioResult = self.vio.track(frameset.t_ns, frameset.images)
-        self.elapsed_ms.append(1e3 * (time.monotonic() - started))
-        # A PyO3 enum has no ``name`` and is unhashable (see ``_core.pyi``), so the
-        # repr is both the only name it has and the only thing that keys a dict.
-        status_name: str = str(result.status)
-        self.statuses[status_name] = self.statuses.get(status_name, 0) + 1
-        if result.status != _core.VioStatus.Tracking:
-            return
-        # Both are present on a frameset that tracked — the snapshot because it
-        # measured, the keypoints because the frontend accepted it — and the
-        # checks are what say so to the typechecker.
-        snapshot: _core.VioSnapshot | None = self.vio.snapshot()
-        frame: _core.FlowFrame | None = self.vio.flow_frame()
-        if snapshot is not None and frame is not None:
-            self.logger.log(result, snapshot, frame, self.elapsed_ms[-1])
+        self.pending.append(frameset)
+        while self.pending:
+            held: Frameset = self.pending[0]
+            started: float = time.monotonic()
+            result: _core.VioResult = self.vio.track(held.t_ns, held.images)
+            elapsed_ms: float = 1e3 * (time.monotonic() - started)
+            # A PyO3 enum has no ``name`` and is unhashable (see ``_core.pyi``), so the
+            # repr is both the only name it has and the only thing that keys a dict.
+            status_name: str = str(result.status)
+            self.statuses[status_name] = self.statuses.get(status_name, 0) + 1
+            if result.status != _core.VioStatus.Tracking:
+                return
+            self.pending.pop(0)
+            self.elapsed_ms.append(elapsed_ms)
+            # The rows belong at the frameset's own time, which is the caller's
+            # cursor for all but a retried one.
+            rr.set_time("video_time", duration=np.timedelta64(held.t_ns, "ns"))
+            # Both are present on a frameset that tracked — the snapshot because it
+            # measured, the keypoints because the frontend accepted it — and the
+            # checks are what say so to the typechecker.
+            snapshot: _core.VioSnapshot | None = self.vio.snapshot()
+            frame: _core.FlowFrame | None = self.vio.flow_frame()
+            if snapshot is not None and frame is not None:
+                self.logger.log(result, snapshot, frame, elapsed_ms)
 
     def summary(self) -> str:
         """One line on what the stage did, for the end of a replay."""
+        unresolved: str = ""
+        if self.pending:
+            unresolved = f", {len(self.pending)} FRAMESETS NEVER COVERED BY THE IMU at {[held.t_ns for held in self.pending]}"
         return (
             f"vio: {self.imu_samples} IMU samples pushed, statuses {self.statuses}, "
             f"{np.mean(self.elapsed_ms):.1f} ms per frameset "
             f"(median {np.median(self.elapsed_ms):.1f}, max {np.max(self.elapsed_ms):.1f})"
+            f"{unresolved}"
         )
 
 
@@ -336,6 +357,10 @@ def main(config: Config) -> None:
         _replay(feed, config, stage)
         if not isinstance(stage, VioStage):
             return
+        if stage.pending:
+            # Every frameset either produced a pose or is still held; a held one
+            # at the end of the segment is a lost frameset, not a count to print.
+            raise SystemExit(f"{len(stage.pending)} framesets never got the inertial samples that cover them")
 
         # Exports carry the absolute device clock, the one every basalt CSV and
         # every gt.csv sidecar uses. Writing video_time here would produce a file

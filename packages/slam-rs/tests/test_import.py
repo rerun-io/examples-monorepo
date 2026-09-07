@@ -94,6 +94,39 @@ def test_push_imu_rejects_a_non_monotonic_timestamp(pipeline: PipelineFactory) -
         vio.push_imu(1_000, [0.0, 0.0, 0.0], [0.0, 0.0, 9.81])
 
 
+def test_a_frameset_retried_after_its_imu_tracks_as_if_it_had_it(pipeline: PipelineFactory, texture: TextureFactory) -> None:
+    """D17: no arrival order may reach the trajectory.
+
+    One pipeline gets every frameset's samples before the frameset. The other
+    gets only the samples up to the frame time — which do not cover it — is
+    refused, then gets the rest and tracks the same frameset again. The two
+    trajectories agree bit for bit, which is what makes holding a refused
+    frameset and retrying it the right thing for a feed to do.
+    """
+    frames: int = 8
+    covered: _core.Vio = pipeline(2)
+    retried: _core.Vio = pipeline(2)
+    for index in range(frames):
+        t_ns: int = index * FRAME_PERIOD_NS
+        images: list[UInt8[ndarray, "h w"]] = [texture(index, 0), texture(index + 1, 0)]
+        samples: Int64[ndarray, " n_samples"] = np.arange(t_ns, t_ns + FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
+        gyro, accel = gravity_batch(samples)
+        covered.push_imu_batch(samples, gyro, accel)
+        first: _core.VioResult = covered.track(t_ns, images)
+
+        short: Int64[ndarray, " n_short"] = samples[samples <= t_ns]
+        retried.push_imu_batch(short, *gravity_batch(short))
+        assert retried.track(t_ns, images).status == _core.VioStatus.NeedMoreImu
+        rest: Int64[ndarray, " n_rest"] = samples[samples > t_ns]
+        retried.push_imu_batch(rest, *gravity_batch(rest))
+        second: _core.VioResult = retried.track(t_ns, images)
+
+        assert first.status == second.status == _core.VioStatus.Tracking
+        np.testing.assert_array_equal(first.world_from_rig, second.world_from_rig)
+        np.testing.assert_array_equal(first.velocity, second.velocity)
+        np.testing.assert_array_equal(first.gyro_bias, second.gyro_bias)
+
+
 def test_a_refused_frameset_leaves_the_last_accepted_keypoints_alone(pipeline: PipelineFactory, texture: TextureFactory) -> None:
     """``flow_frame`` still describes the last frameset the frontend actually ran on.
 

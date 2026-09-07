@@ -9,7 +9,9 @@ own C++ numbers were produced:
   parity claim and starts at 2 cm (D14; the ladder tightens toward 1 cm);
 * against the ``gt.csv`` sidecar, which must be within 1.2x what the C++ itself
   scored on that segment;
-* tracking never lost: once a frameset has measured, every later one does.
+* every frameset resolved: one refused for want of IMU is held and tracked again
+  once the samples arrive, and anything still held when the segment ends is a
+  lost frameset (D17).
 
 ``no_divergence`` segments gate only the last two clauses plus a bounded
 trajectory (D36): basalt itself sits at 43 cm and 78 cm there, and two legitimate
@@ -69,7 +71,8 @@ class SegmentRun:
     framesets: int
     """Framesets replayed."""
     lost: int
-    """Framesets that failed to measure after the first one that did: tracking loss."""
+    """Framesets that never produced a pose: the estimator was still waiting for
+    inertial samples covering them when the segment ended."""
 
 
 def run_segment(segment: ReferenceSegment, max_framesets: int | None = None) -> SegmentRun:
@@ -90,7 +93,7 @@ def run_segment(segment: ReferenceSegment, max_framesets: int | None = None) -> 
     positions: list[Float64[ndarray, " 3"]] = []
     quaternions: list[Float64[ndarray, " 4"]] = []
     replayed: int = 0
-    lost: int = 0
+    pending: list[Frameset] = []
     feed: SegmentFeed
     with open_segment(source, segment.imu) as feed:
         vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), config)
@@ -105,18 +108,24 @@ def run_segment(segment: ReferenceSegment, max_framesets: int | None = None) -> 
                     np.ascontiguousarray(frameset.imu.gyro_rad_s),
                     np.ascontiguousarray(frameset.imu.accel_m_s2),
                 )
-            result: _core.VioResult = vio.track(frameset.t_ns, frameset.images)
-            if result.status != _core.VioStatus.Tracking:
-                # Before the first measured frameset this is the estimator waiting
-                # for inertial samples that cover it; after it, it is a loss.
-                if t_ns:
-                    lost += 1
-                continue
-            pose: Float64[ndarray, " 7"] = result.world_from_rig
-            t_ns.append(result.t_ns)
-            positions.append(pose[0:3].copy())
-            quaternions.append(np.roll(pose[3:7], 1).copy())
+            # A frameset refused for want of IMU is held and tracked again once
+            # the next batch arrives, in its own time order, as the replay tool
+            # does (D17): dropping it would lose the frame and count it as a
+            # tracking loss it is not.
+            pending.append(frameset)
+            while pending:
+                result: _core.VioResult = vio.track(pending[0].t_ns, pending[0].images)
+                if result.status != _core.VioStatus.Tracking:
+                    break
+                pending.pop(0)
+                pose: Float64[ndarray, " 7"] = result.world_from_rig
+                t_ns.append(result.t_ns)
+                positions.append(pose[0:3].copy())
+                quaternions.append(np.roll(pose[3:7], 1).copy())
         offset_ns: int = feed.capture_start_time_ns
+    # Whatever is still held never got samples covering it, so it produced no
+    # pose: that, and only that, is a lost frameset.
+    lost: int = len(pending)
     # Exports and both references are on the absolute device clock.
     estimate: Trajectory = Trajectory(
         t_ns=np.array(t_ns, dtype=np.int64),
@@ -202,7 +211,7 @@ def gate_failures(
     """
     failures: list[str] = []
     if run.lost:
-        failures.append(f"tracking lost on {run.lost} of {run.framesets} framesets")
+        failures.append(f"{run.lost} of {run.framesets} framesets never got the inertial samples that cover them")
     if against_cpp.n_associated < MIN_ASSOCIATED_POSES:
         failures.append(f"only {against_cpp.n_associated} poses associated with the C++ run")
     if segment.reference.gate_policy == "no_divergence":

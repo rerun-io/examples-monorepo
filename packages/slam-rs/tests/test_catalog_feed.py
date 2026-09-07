@@ -279,9 +279,13 @@ def test_a_replay_export_associates_with_the_ground_truth_sidecar(tmp_path: Path
 
     assert replayed == 40
     assert stage.imu_samples > 0
-    # The first framesets have no inertial samples past their own timestamp, so
-    # they report NeedMoreImu; everything after initialisation tracks.
-    assert 0 < len(estimate) <= replayed
+    # Every frameset resolved: the first has no inertial sample past its own
+    # timestamp when it arrives, so the stage holds it and tracks it once the
+    # next batch lands (D17), rather than losing it.
+    assert len(estimate) == replayed
+    assert not stage.pending
     sidecar: Trajectory = read_trajectory(segment.gt_csv)
-    assert associate(read_trajectory(exported), sidecar).count == len(estimate)
+    # All but that first pose, which predates the sidecar's first row by 17 ms:
+    # the ground truth does not cover the whole segment (D36).
+    assert associate(read_trajectory(exported), sidecar).count == len(estimate) - 1
     assert associate(read_trajectory(relative_export), sidecar).count == 0
