@@ -345,18 +345,12 @@ pub enum FrontendError {
     },
     /// A camera's detection grid has more cells than one occupancy buffer holds.
     #[error(
-        "camera {camera}: a {width}x{height} frame on a {cell}-pixel detection grid is a \
+        "camera {camera}: the calibrated resolution over the detection grid size is a \
          {rows}x{columns} occupancy grid; the ceiling is {ceiling} cells"
     )]
     TooManyCells {
         /// Which camera.
         camera: usize,
-        /// Frame width.
-        width: usize,
-        /// Frame height.
-        height: usize,
-        /// `optical_flow_detection_grid_size`.
-        cell: usize,
         /// Rows the grid asks for.
         rows: usize,
         /// Columns the grid asks for.
@@ -814,20 +808,15 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
                     height,
                     cell,
                 })?;
-            // `cells` below is one `i32` per cell per camera, so the calibrated
-            // resolution sizes a buffer as much as `max_keypoints` does: the
-            // product reaches `Vec` as a length, and a `Vec` too long to exist
-            // panics rather than returning (decision D32).
-            if grid
-                .rows
-                .checked_mul(grid.columns)
-                .is_none_or(|cells| cells > MAX_CELLS)
-            {
+            // Two reasons the ceiling is per camera: camera 0's grid sizes
+            // `cells` below, one `i32` per cell per camera, and a `Vec` too long
+            // to exist panics rather than returning (decision D32); and every
+            // camera is detected on its own grid, which bounds that camera's
+            // detection scan on every frame (`detect.rs:494`). Saturating like
+            // the sibling ceilings: a product that leaves `usize` is past it.
+            if grid.rows.saturating_mul(grid.columns) > MAX_CELLS {
                 return Err(FrontendError::TooManyCells {
                     camera,
-                    width,
-                    height,
-                    cell,
                     rows: grid.rows,
                     columns: grid.columns,
                     ceiling: MAX_CELLS,
@@ -1652,6 +1641,17 @@ mod tests {
         FrameToFrameOpticalFlow::new(config(), &rig(cameras), options).unwrap()
     }
 
+    fn cpu_tracker(config: &VioConfig, capacity: usize) -> CpuPatchTracker<Pattern51> {
+        CpuPatchTracker::new(
+            capacity,
+            config.optical_flow_levels as usize + 1,
+            config.optical_flow_max_iterations as usize,
+            config.optical_flow_max_recovered_dist2,
+            WorkPool::new(1).unwrap(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn the_first_frame_detects_on_camera_zero_and_matches_into_camera_one() {
         let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
@@ -2391,14 +2391,7 @@ mod tests {
     #[test]
     fn a_budget_larger_than_the_tracker_is_refused() {
         let config: VioConfig = config();
-        let tracker: CpuPatchTracker<Pattern51> = CpuPatchTracker::new(
-            4,
-            config.optical_flow_levels as usize + 1,
-            config.optical_flow_max_iterations as usize,
-            config.optical_flow_max_recovered_dist2,
-            WorkPool::new(1).unwrap(),
-        )
-        .unwrap();
+        let tracker: CpuPatchTracker<Pattern51> = cpu_tracker(&config, 4);
         let error = FrameToFrameOpticalFlow::<Pattern51, _, _>::with_backends(
             config,
             &rig(2),
@@ -2459,63 +2452,47 @@ mod tests {
         );
     }
 
-    /// A calibration whose occupancy grid nothing could allocate is refused.
+    /// A calibration whose occupancy grid nothing could allocate is refused
+    /// ([`MAX_CELLS`] carries why).
     ///
-    /// The grid's shape is the calibrated resolution over
-    /// `optical_flow_detection_grid_size`, so the calibration sizes a buffer as
-    /// much as `max_keypoints` does: at 4,294,967,294 pixels and a one-pixel
-    /// grid, `vec![0; rows * columns]` panicked with `capacity overflow` before
-    /// any image had been handed in. Both constructors are checked, because
-    /// `with_backends` takes a tracker that is already built and so runs no
-    /// check of `new`'s.
+    /// Both sides of the guard are exercised: a `u32::MAX - 1` frame on a
+    /// one-pixel grid asks for a product that still fits a `usize`, and a
+    /// `u32::MAX` one asks for exactly 2^64, which leaves it. Both constructors
+    /// are checked, because `with_backends` takes a tracker that is already
+    /// built and so runs no check of `new`'s.
     #[test]
     fn a_calibration_whose_occupancy_grid_is_past_the_ceiling_is_refused() {
-        let mut vast: Calibration<f64> = rig(2);
-        vast.resolution = vec![[u32::MAX - 1, u32::MAX - 1]; 2];
-        let mut fine: VioConfig = config();
-        fine.optical_flow_detection_grid_size = 1;
-        let expected: FrontendError = FrontendError::TooManyCells {
-            camera: 0,
-            width: u32::MAX as usize - 1,
-            height: u32::MAX as usize - 1,
-            cell: 1,
-            rows: u32::MAX as usize,
-            columns: u32::MAX as usize,
-            ceiling: MAX_CELLS,
-        };
-        let error = FrameToFrameOpticalFlow::<Pattern51>::new(
-            fine.clone(),
-            &vast,
-            FrontendOptions::default(),
-        )
-        .unwrap_err();
-        assert_eq!(error, expected);
+        for side in [u32::MAX - 1, u32::MAX] {
+            let mut vast: Calibration<f64> = rig(2);
+            vast.resolution = vec![[side, side]; 2];
+            let mut fine: VioConfig = config();
+            fine.optical_flow_detection_grid_size = 1;
+            let expected: FrontendError = FrontendError::TooManyCells {
+                camera: 0,
+                rows: side as usize + 1,
+                columns: side as usize + 1,
+                ceiling: MAX_CELLS,
+            };
+            let error = FrameToFrameOpticalFlow::<Pattern51>::new(
+                fine.clone(),
+                &vast,
+                FrontendOptions::default(),
+            )
+            .unwrap_err();
+            assert_eq!(error, expected);
 
-        let tracker: CpuPatchTracker<Pattern51> = CpuPatchTracker::new(
-            FrontendOptions::default().max_keypoints,
-            fine.optical_flow_levels as usize + 1,
-            fine.optical_flow_max_iterations as usize,
-            fine.optical_flow_max_recovered_dist2,
-            WorkPool::new(1).unwrap(),
-        )
-        .unwrap();
-        let error = FrameToFrameOpticalFlow::<Pattern51, _, _>::with_backends(
-            fine,
-            &vast,
-            FrontendOptions::default(),
-            CpuPyramidBuilder::new(),
-            tracker,
-        )
-        .unwrap_err();
-        assert_eq!(error, expected);
-
-        // The shipped geometry is nowhere near the ceiling: 200x200 pixels on
-        // 50-pixel cells is a 5x5 grid.
-        let flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
-        assert_eq!(
-            flow.occupancy_grid().rows * flow.occupancy_grid().columns,
-            25
-        );
+            let tracker: CpuPatchTracker<Pattern51> =
+                cpu_tracker(&fine, FrontendOptions::default().max_keypoints);
+            let error = FrameToFrameOpticalFlow::<Pattern51, _, _>::with_backends(
+                fine,
+                &vast,
+                FrontendOptions::default(),
+                CpuPyramidBuilder::new(),
+                tracker,
+            )
+            .unwrap_err();
+            assert_eq!(error, expected);
+        }
     }
 
     /// Every camera is detected on **its own** grid (`keypoints.cpp:140-144`),
@@ -2541,6 +2518,12 @@ mod tests {
 
         assert!(flow.detection_grid(1).contains(210.0, 80.0));
         assert!(!flow.detection_grid(0).contains(210.0, 80.0));
+
+        // A real grid is far under `MAX_CELLS`: 200x200 on 50-pixel cells is 5x5.
+        assert_eq!(
+            flow.occupancy_grid().rows * flow.occupancy_grid().columns,
+            25
+        );
     }
 
     /// A mixed-resolution rig still runs end to end, and camera 1's keypoints
@@ -2627,14 +2610,7 @@ mod tests {
     ) -> FrameToFrameOpticalFlow<Pattern51, CpuPyramidBuilder, FailingTracker> {
         let config: VioConfig = config();
         let options: FrontendOptions = FrontendOptions::default();
-        let inner: CpuPatchTracker<Pattern51> = CpuPatchTracker::new(
-            options.max_keypoints,
-            config.optical_flow_levels as usize + 1,
-            config.optical_flow_max_iterations as usize,
-            config.optical_flow_max_recovered_dist2,
-            WorkPool::new(options.threads).unwrap(),
-        )
-        .unwrap();
+        let inner: CpuPatchTracker<Pattern51> = cpu_tracker(&config, options.max_keypoints);
         FrameToFrameOpticalFlow::with_backends(
             config,
             &rig(2),

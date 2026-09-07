@@ -151,8 +151,8 @@ def test_a_shifted_texture_keeps_its_track_ids(frontend: FrontendFactory, textur
     assert first.num_new(0) == first.num_tracks(0), "every keypoint of the first frameset is new"
     assert second.num_tracks(0) > 0
 
-    before: Int64[ndarray, " n_tracks"] = first.ids(0)
-    after: Int64[ndarray, " n_tracks"] = second.ids(0)
+    before: Int64[ndarray, " n_first"] = first.ids(0)
+    after: Int64[ndarray, " n_second"] = second.ids(0)
     assert np.array_equal(np.sort(before), before), "ids come back ascending"
     kept: Int64[ndarray, " n_kept"] = np.intersect1d(before, after)
     assert len(kept) >= 0.8 * len(before), f"only {len(kept)} of {len(before)} ids survived a ({shift_x}, {shift_y}) px shift"
@@ -307,22 +307,18 @@ def test_a_pyramid_deeper_than_the_ceiling_is_refused(camera: CameraFactory, imu
 def test_a_calibration_whose_detection_grid_nothing_could_allocate_is_refused(camera: CameraFactory, imu: ImuCalib) -> None:
     """The occupancy grid is derived from the calibration, so a resolution is a memory request too.
 
-    A 4,294,967,294-pixel resolution on a one-pixel grid asks for 2**64 cell
-    counts, and ``vec![0; rows * columns]`` answered that with a ``capacity
-    overflow`` panic before any image was handed in — the re-review's finding.
-    The probe runs in a subprocess because the regression is a
-    ``PanicException`` raised out of the constructor, which is a
-    ``BaseException`` and would take the suite with it if it were an abort.
+    The re-review's finding: the grid nothing could allocate used to panic out of
+    the constructor with no image in sight (``detect::MAX_CELLS`` carries the
+    arithmetic). In process like the ceilings above, because nothing is allocated
+    on a refusal and a ``PanicException`` fails this ``pytest.raises`` anyway.
     """
     document: dict = json.loads(_core.Calibration.from_catalog([camera(0, 0.0)], imu).to_json())
     document["value0"]["resolution"] = [[2**32 - 2, 2**32 - 2]]
-    finished: subprocess.CompletedProcess[str] = probe_detector(
-        json.dumps(document), config_with("config.optical_flow_detection_grid_size", 1)
-    )
-    assert finished.returncode != 0, f"a grid nothing could allocate was accepted: {finished.stdout}"
-    assert "ValueError" in finished.stderr, finished.stderr
-    assert "PanicException" not in finished.stderr, finished.stderr
-    assert "occupancy grid" in finished.stderr and "ceiling" in finished.stderr, finished.stderr
+    with pytest.raises(ValueError, match="occupancy grid"):
+        _core.OpticalFlow(
+            _core.Calibration.from_json(json.dumps(document)),
+            _core.VioConfig.from_json(config_with("config.optical_flow_detection_grid_size", 1)),
+        )
 
 
 @settings(max_examples=MAX_EXAMPLES, deadline=None)
