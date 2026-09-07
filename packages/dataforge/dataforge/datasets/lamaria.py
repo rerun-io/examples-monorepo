@@ -50,9 +50,8 @@ from numpy import ndarray
 from projectaria_tools.core import data_provider
 from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Fisheye62Parameters
-from simplecv.rerun_log_utils import log_pinhole
 
-from dataforge import aria, paths, schema, transports, writing
+from dataforge import aria, blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
@@ -60,11 +59,14 @@ from dataforge.logging_toolkit import (
     FrameSource,
     ImuChannel,
     encode_frames_to_mp4,
+    log_camera_node,
     log_imu,
+    log_pose_track,
     log_rig_node,
     log_video_stream,
     require_av1_nvenc,
     resolve_ffmpeg,
+    time_column,
 )
 
 LamariaSplit: TypeAlias = Literal["training", "test"]
@@ -102,8 +104,6 @@ RIG: int = 0
 """One Aria per sequence; the glasses are ``rig_00``."""
 RIG_REFERENCE: str = "imu_00"
 """The rig frame *is* imu-right's, LaMAria's published body frame."""
-GT_SOURCE: str = "gt"
-"""``/world/runs/gt/`` — the run name the gt layer writes its trajectory under."""
 
 CameraKind: TypeAlias = Literal["grayscale", "rgb"]
 """exoego:v2 content hint on a camera node: what a consumer will decode."""
@@ -144,7 +144,7 @@ GT_TRAJECTORY_COLOR: tuple[int, int, int] = (110, 180, 255)
 GT_TRAJECTORY_WIDTH_UI_POINTS: float = 1.5
 """Line width of the gt path, in **screen** points rather than metres.
 
-A LaMAria walk is 170 m to 1.1 km long, so the World view frames hundreds of
+A LaMAria walk is 170 m to 1.1 km long, so the overview view frames hundreds of
 metres at once and any honest metric width is a small fraction of a pixel there
 (0.01 m over a 400 m shot is 0.06 px, i.e. invisible). Rerun reads a negative
 radius as UI points, which keeps the overview path one visible hairline at every
@@ -199,8 +199,6 @@ FOLLOW_AHEAD_M: float = 0.3
 The three distances were tuned together on R_01_easy, for a shot that holds the
 three camera frusta and the last ten seconds of trail in view at once without the
 ground filling it."""
-FOLLOW_TRAIL_SECONDS: float = -10.0
-"""Cursor-relative start of the gt trail's visible window in the Follow view."""
 IMAGE_PLANE_DISTANCE: float = 0.1
 """Frustum length in metres; the SLAM baseline is ~11 cm, so the three frusta stay legible."""
 
@@ -654,7 +652,7 @@ def log_control_point_detections(
         )
         rr.send_columns(
             schema.cp_uv_path(RIG, index),
-            indexes=[rr.TimeColumn(schema.TIMELINE, duration=times_ns.astype("timedelta64[ns]"))],
+            indexes=[time_column(times_ns)],
             columns=rr.Points2D.columns(
                 positions=np.stack([detection.uv_px for detection in seen]),
                 labels=[labels_by_name[detection.control_point] for detection in seen],
@@ -726,127 +724,46 @@ def read_accel(base_rrd: Path) -> ImuChannel:
     )
 
 
-def follow_eye_controls() -> rrb.EyeControls3D:
-    """Chase camera for the Follow view, expressed in the rig (imu-right) frame.
-
-    The view's origin is the rig node, so a fixed eye in this frame rides the
-    glasses: it sits ``FOLLOW_BACK_M`` behind the wearer and ``FOLLOW_UP_M``
-    above them and aims ``FOLLOW_AHEAD_M`` in front, which keeps both the wearer
-    and the ground they walk over in shot.
-
-    Returns:
-        The eye controls the Follow view of both blueprints uses.
-    """
-    forward_xyz: Float64[ndarray, "3"] = np.array(FOLLOW_FORWARD, dtype=np.float64)
-    up_xyz: Float64[ndarray, "3"] = np.array(FOLLOW_UP, dtype=np.float64)
-    position_xyz: Float64[ndarray, "3"] = -FOLLOW_BACK_M * forward_xyz + FOLLOW_UP_M * up_xyz
-    look_target_xyz: Float64[ndarray, "3"] = FOLLOW_AHEAD_M * forward_xyz
-    # EyeControls3D is marked unstable by the SDK; re-validate this factory on Rerun bumps.
-    return rrb.EyeControls3D(
-        kind=rrb.Eye3DKind.FirstPerson,
-        position=tuple(position_xyz.tolist()),
-        look_target=tuple(look_target_xyz.tolist()),
-        eye_up=FOLLOW_UP,
-        spin_speed=0.0,
-    )
+def follow_eye() -> rrb.EyeControls3D:
+    """The wearer's chase camera: their own forward and up at this package's distances."""
+    return blueprints.follow_eye_controls(FOLLOW_FORWARD, FOLLOW_UP, back_m=FOLLOW_BACK_M, up_m=FOLLOW_UP_M, ahead_m=FOLLOW_AHEAD_M)
 
 
 def camera_views() -> list[rrb.Spatial2DView]:
     """One 2D pane per camera stream, labelled the way the VRS names it."""
-    return [
-        rrb.Spatial2DView(
-            name=aria.STREAM_LABELS[stream_id],
-            origin=schema.pinhole_path(RIG, index),
-            contents=f"{schema.pinhole_path(RIG, index)}/**",
-        )
-        for index, stream_id in enumerate(aria.CAMERA_STREAM_IDS)
-    ]
+    return [blueprints.camera_view(aria.STREAM_LABELS[stream_id], RIG, index) for index, stream_id in enumerate(aria.CAMERA_STREAM_IDS)]
 
 
 def build_blueprint() -> rrb.Blueprint:
     """Default layout: the rig in 3D beside the camera grid, over the imu-right plots.
 
+    Only imu-right is plotted: it is the rig frame, so its samples are the ones a
+    reader can interpret without composing a transform first.
+
     Returns:
         The blueprint embedded in every LaMAria base-layer rrd and registered as
         the catalog dataset's default.
     """
-    return rrb.Blueprint(
-        rrb.Vertical(
-            rrb.Horizontal(
-                rrb.Vertical(
-                    rrb.Spatial3DView(
-                        name="World",
-                        origin="/",
-                        line_grid=True,
-                        # The overview shows the whole gt path; its cursor trail stays hidden.
-                        # Overrides on entities a base-only recording lacks are simply inert.
-                        overrides={schema.trail_path(GT_SOURCE): rrb.EntityBehavior(visible=False)},
-                    ),
-                    # Follow-cam (rerun-io/eye_control_example pattern): the view's origin
-                    # IS the rig frame, so a fixed first-person eye in that frame rides the
-                    # glasses. Inert until the gt layer animates rig_00.
-                    rrb.Spatial3DView(
-                        name="Follow",
-                        origin=schema.rig_path(RIG),
-                        contents="/**",
-                        line_grid=True,
-                        overrides={
-                            schema.trajectory_path(GT_SOURCE): rrb.EntityBehavior(visible=False),
-                            schema.trail_path(GT_SOURCE): rrb.VisibleTimeRanges(
-                                rrb.VisibleTimeRange(
-                                    schema.TIMELINE,
-                                    start=rrb.TimeRangeBoundary.cursor_relative(seconds=FOLLOW_TRAIL_SECONDS),
-                                    end=rrb.TimeRangeBoundary.cursor_relative(),
-                                )
-                            ),
-                        },
-                        eye_controls=follow_eye_controls(),
-                    ),
-                ),
-                rrb.Grid(*camera_views(), grid_columns=2, name="Synchronized cameras"),
-                column_shares=[3, 2],
-            ),
-            rrb.Horizontal(
-                rrb.TimeSeriesView(
-                    name="Gyroscope",
-                    origin=schema.imu_path(RIG, 0),
-                    contents=schema.gyro_path(RIG, 0),
-                    plot_legend=rrb.PlotLegend(visible=True),
-                ),
-                rrb.TimeSeriesView(
-                    name="Accelerometer",
-                    origin=schema.imu_path(RIG, 0),
-                    contents=schema.accel_path(RIG, 0),
-                    plot_legend=rrb.PlotLegend(visible=True),
-                ),
-            ),
-            row_shares=[3, 1],
-        ),
-        rrb.TimePanel(timeline=schema.TIMELINE),
-        collapse_panels=True,
+    return blueprints.rig_blueprint(
+        camera_views(),
+        rig=RIG,
+        run_source=schema.GT_RUN_SOURCE,
+        eye_controls=follow_eye(),
+        plots=[
+            blueprints.sensor_plot("Gyroscope", schema.imu_path(RIG, 0), schema.gyro_path(RIG, 0)),
+            blueprints.sensor_plot("Accelerometer", schema.imu_path(RIG, 0), schema.accel_path(RIG, 0)),
+        ],
     )
 
 
 def build_table_blueprint() -> rrb.Blueprint:
-    """Segment-table preview card: the 3D rig with no video textures, plus slam-left.
-
-    Every visible table row renders through this at once, so exactly one video
-    stream is decoded and the other two are *excluded* rather than hidden.
-    """
-    video_exclusions: list[str] = [f"- {schema.video_path(RIG, index)}/**" for index in range(len(aria.CAMERA_STREAM_IDS))]
-    return rrb.Blueprint(
-        rrb.Horizontal(
-            rrb.Spatial3DView(
-                name="Follow",
-                origin=schema.rig_path(RIG),
-                contents=["/**", *video_exclusions, f"- {schema.trail_path(GT_SOURCE)}/**"],
-                line_grid=True,
-                eye_controls=follow_eye_controls(),
-            ),
-            camera_views()[0],
-            column_shares=[3, 2],
-        ),
-        rrb.TimePanel(timeline=schema.TIMELINE),
+    """Segment-table preview card: the 3D rig with no video textures, plus slam-left."""
+    return blueprints.table_blueprint(
+        len(aria.CAMERA_STREAM_IDS),
+        rig=RIG,
+        run_source=schema.GT_RUN_SOURCE,
+        eye_controls=follow_eye(),
+        front_pane=camera_views()[0],
     )
 
 
@@ -1086,25 +1003,21 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
 
         num_frames: int = 0
         with writing.atomic_recording(
-            target, application_id="dataforge", recording_id=identity.recording_id, default_blueprint=build_blueprint()
+            target, recording_id=identity.recording_id, default_blueprint=build_blueprint()
         ) as recording:
             # Deliberately NO ViewCoordinates at "/" and no transform on the rig node:
             # the gt layer establishes the world frame, so it owns both (a static
             # transform here would permanently shadow its temporal world_T_rig).
             log_rig_node(recording, RIG, reference=RIG_REFERENCE, num_cameras=len(streams.cameras), name="aria", kind="ego")
             for index, (stream, clip) in enumerate(zip(streams.cameras, clips, strict=True)):
-                rr.log(
-                    schema.cam_path(RIG, index),
-                    rr.AnyValues(name=aria.STREAM_LABELS[stream.stream_id], kind=CAMERA_SPECS[stream.stream_id].kind),
-                    static=True,
-                    recording=recording,
-                )
-                log_pinhole(
+                log_camera_node(
+                    recording,
+                    RIG,
+                    index,
                     stream.camera,
-                    cam_log_path=Path(schema.cam_path(RIG, index)),
+                    name=aria.STREAM_LABELS[stream.stream_id],
+                    kind=CAMERA_SPECS[stream.stream_id].kind,
                     image_plane_distance=IMAGE_PLANE_DISTANCE,
-                    static=True,
-                    recording=recording,
                 )
                 # times_ns, not shift_ns: the mp4's own PTS is a nominal-rate fiction,
                 # and these are Aria's device timestamps, logged unshifted.
@@ -1194,24 +1107,24 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         labels_by_name: dict[str, str] = {
             point.name: f"{point.name}{'' if point.has_height else UNLEVELLED_LABEL_SUFFIX}" for point in points
         }
-        gt_index: list[rr.TimeColumn] = [rr.TimeColumn(schema.TIMELINE, duration=trajectory.times_ns.astype("timedelta64[ns]"))]
-        with writing.atomic_recording(target, application_id="dataforge", recording_id=identity.recording_id) as recording:
+        with writing.atomic_recording(target, recording_id=identity.recording_id) as recording:
             # The right-handed axes WORLD_UP names; every LaMAria world is Z-up.
             rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True, recording=recording)
             if trajectory.times_ns.size:
                 # from_parent stays unset: the stored value is world_T_rig, the
                 # child-to-parent step, which is what every child frustum rides.
-                rr.send_columns(
+                log_pose_track(
+                    recording,
                     schema.rig_path(RIG),
-                    indexes=gt_index,
-                    columns=rr.Transform3D.columns(translation=trajectory.translations_xyz, quaternion=trajectory.quaternions_xyzw),
-                    recording=recording,
+                    times_ns=trajectory.times_ns,
+                    translations_xyz=trajectory.translations_xyz,
+                    quaternions_xyzw=trajectory.quaternions_xyzw,
                 )
                 # Two views of one trajectory: the static strip is the whole path for the
                 # overview, and the per-pose points are what the blueprint's cursor-relative
                 # time range turns into a recent-motion trail in the Follow view.
                 rr.log(
-                    schema.trajectory_path(GT_SOURCE),
+                    schema.trajectory_path(schema.GT_RUN_SOURCE),
                     rr.LineStrips3D(
                         [trajectory.translations_xyz],
                         colors=GT_TRAJECTORY_COLOR,
@@ -1221,14 +1134,14 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
                     recording=recording,
                 )
                 rr.log(
-                    schema.trail_path(GT_SOURCE),
+                    schema.trail_path(schema.GT_RUN_SOURCE),
                     rr.Points3D.from_fields(colors=GT_TRAIL_COLOR, radii=GT_TRAIL_RADIUS_M),
                     static=True,
                     recording=recording,
                 )
                 rr.send_columns(
-                    schema.trail_path(GT_SOURCE),
-                    indexes=gt_index,
+                    schema.trail_path(schema.GT_RUN_SOURCE),
+                    indexes=[time_column(trajectory.times_ns)],
                     columns=rr.Points3D.columns(positions=trajectory.translations_xyz),
                     recording=recording,
                 )

@@ -364,7 +364,7 @@ def test_the_declared_follow_frame_is_the_calibration_own_forward_and_up() -> No
 
 def eye_vector(batch: rr.components.Position3DBatch | rr.components.Vector3DBatch | None) -> list[float]:
     """Read one three-component field back out of an ``EyeControls3D`` archetype."""
-    assert batch is not None, "follow_eye_controls sets every field of the eye"
+    assert batch is not None, "the follow eye sets every field"
     return [float(value) for value in batch.as_arrow_array().flatten().to_pylist()]
 
 
@@ -384,7 +384,7 @@ def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
 
 
 def test_the_follow_eye_chases_the_wearer_from_behind_and_above() -> None:
-    eye: rrb.EyeControls3D = lamaria.follow_eye_controls()
+    eye: rrb.EyeControls3D = lamaria.follow_eye()
     forward: Float64[ndarray, "3"] = np.array(lamaria.FOLLOW_FORWARD, dtype=np.float64)
     up: Float64[ndarray, "3"] = np.array(lamaria.FOLLOW_UP, dtype=np.float64)
 
@@ -398,7 +398,7 @@ def test_the_follow_eye_chases_the_wearer_from_behind_and_above() -> None:
 def test_the_default_blueprint_shows_three_cameras_over_the_imu_plots() -> None:
     views: list[rrb.View] = blueprint_views(LamariaDataset(LamariaConfig()).default_blueprint())
 
-    assert [view.name for view in views if isinstance(view, rrb.Spatial3DView)] == ["World", "Follow"]
+    assert [view.name for view in views if isinstance(view, rrb.Spatial3DView)] == ["Rig", "Follow"]
     assert [view.name for view in views if isinstance(view, rrb.Spatial2DView)] == ["camera-slam-left", "camera-slam-right", "camera-rgb"]
     assert [view.name for view in views if isinstance(view, rrb.TimeSeriesView)] == ["Gyroscope", "Accelerometer"]
     plots: list[rrb.View] = [view for view in views if isinstance(view, rrb.TimeSeriesView)]
@@ -411,10 +411,10 @@ def test_the_default_blueprint_already_names_the_gt_layer_paths() -> None:
     """The overrides are inert in a base-only rrd, and correct once the gt layer stacks on."""
     views: list[rrb.View] = blueprint_views(LamariaDataset(LamariaConfig()).default_blueprint())
     follow: rrb.View = next(view for view in views if view.name == "Follow")
-    world: rrb.View = next(view for view in views if view.name == "World")
+    overview: rrb.View = next(view for view in views if view.name == "Rig")
 
     assert set(follow.visualizer_overrides) == {schema.trajectory_path("gt"), schema.trail_path("gt")}
-    assert set(world.visualizer_overrides) == {schema.trail_path("gt")}
+    assert set(overview.visualizer_overrides) == {schema.trail_path("gt")}
 
 
 def test_the_table_card_decodes_only_the_slam_left_stream() -> None:
@@ -1161,7 +1161,7 @@ def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail(converted_easy: C
     assert len(strips[0]) == GT_POSES
     assert column_rows(store, f"{schema.trail_path('gt')}:Points3D:positions").num_rows == GT_POSES
     # A negative radius is Rerun's screen-space unit: a metric hairline over a
-    # kilometre of walking renders as nothing in the World overview.
+    # kilometre of walking renders as nothing in the rig overview.
     radii: list[object] = static_row(store, trajectory)[f"{trajectory}:LineStrips3D:radii"]
     assert radii == [pytest.approx(-lamaria.GT_TRAJECTORY_WIDTH_UI_POINTS)]
     trail_radii: list[object] = static_row(store, schema.trail_path("gt"))[f"{schema.trail_path('gt')}:Points3D:radii"]
