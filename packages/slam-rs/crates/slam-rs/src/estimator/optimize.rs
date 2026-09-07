@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::{DMatrix, DVector, Vector3};
 
-use super::{EstimatorError, FrameStats, SqrtKeypointVio, VEE_FACTOR, duration_ns};
+use super::{EstimatorError, SqrtKeypointVio, StageTimings, VEE_FACTOR, duration_ns};
 use crate::imu::{ImuLinData, IntegratedImuMeasurement, Matrix9};
 use crate::lie::{LieScalar, eigen_maxi};
 use crate::linearize::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
@@ -110,7 +110,9 @@ pub struct LmIteration<S: LieScalar> {
 }
 
 impl<S: LieScalar> SqrtKeypointVio<S> {
-    /// `optimize()` (`:1201-1639`).
+    /// `optimize()` (`:1201-1639`), returning the LM trail, why it stopped and
+    /// the stages it timed. Whether it ran at all is `self.opt_started`, which
+    /// it sets.
     ///
     /// # Errors
     ///
@@ -119,14 +121,18 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     /// [`EstimatorError::NumericallyInvalid`] where it prints "did not expect
     /// numerical failure during linearization" and fails the frame
     /// (`:1300-1303`), and the linearization's own errors.
-    pub(super) fn optimize(&mut self, stats: &mut FrameStats<S>) -> Result<(), EstimatorError> {
+    pub(super) fn optimize(
+        &mut self,
+        t_ns: i64,
+    ) -> Result<(Vec<LmIteration<S>>, LmTermination, StageTimings), EstimatorError> {
+        let mut lm: Vec<LmIteration<S>> = Vec::new();
+        let mut timings: StageTimings = StageTimings::default();
         // `:1207`: five states have to accumulate before the first
         // optimization.
         if !self.opt_started && self.ba.frame_states.len() <= 4 {
-            return Ok(());
+            return Ok((lm, LmTermination::NotStarted, timings));
         }
         self.opt_started = true;
-        stats.opt_started = true;
 
         let imu_lin: ImuLinData<S> = self.imu_lin_data();
         // The nine estimator members the C++ reads, as disjoint field borrows:
@@ -218,11 +224,11 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             // `:1297-1303`.
             let (error_total, numerically_valid) = lqr.linearize_problem(ba, &inputs)?;
             if !numerically_valid {
-                return Err(EstimatorError::NumericallyInvalid { t_ns: stats.t_ns });
+                return Err(EstimatorError::NumericallyInvalid { t_ns });
             }
             // `:1320`.
             lqr.perform_qr()?;
-            stats.timings.linearize_ns += duration_ns(mark);
+            timings.linearize_ns += duration_ns(mark);
 
             // `:1350`: the inner loop shares `it` with the outer one.
             let mut backtrack: i32 = 0;
@@ -281,11 +287,10 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 // `:1432`: C++ warns and carries on with the non-finite increment.
                 if !inc_valid {
                     log::warn!(
-                        "frame {} ns: increment still not finite after {MAX_SOLVE_ATTEMPTS} damped solves",
-                        stats.t_ns
+                        "frame {t_ns} ns: increment still not finite after {MAX_SOLVE_ATTEMPTS} damped solves"
                     );
                 }
-                stats.timings.solver_ns += duration_ns(mark);
+                timings.solver_ns += duration_ns(mark);
 
                 // `:1443`.
                 ba.backup();
@@ -294,7 +299,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 let mark: std::time::Instant = std::time::Instant::now();
                 inc = -inc;
                 let l_diff: S = lqr.back_substitute(ba, &inputs, &inc)?;
-                stats.timings.back_substitution_ns += duration_ns(mark);
+                timings.back_substitution_ns += duration_ns(mark);
 
                 // `:1466-1474`.
                 for (frame_id, state) in &mut ba.frame_poses {
@@ -338,7 +343,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 // `:1495`: `vision += ((imu + bg) + ba)`, in that association.
                 let vision_and_inertial: S =
                     vision_error + ((imu_error + bias_gyro_error) + bias_accel_error);
-                stats.timings.error_ns += duration_ns(mark);
+                timings.error_ns += duration_ns(mark);
 
                 // `:1500`.
                 let error_after: S = vision_and_inertial + marg_prior_error;
@@ -349,7 +354,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 let step_is_valid: bool = l_diff > S::zero();
                 let accepted: bool = step_is_valid && relative_decrease > S::zero();
 
-                stats.lm.push(LmIteration {
+                lm.push(LmIteration {
                     iteration: it,
                     backtrack,
                     error_before: error_total,
@@ -404,8 +409,11 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             }
         }
 
-        stats.termination = termination.unwrap_or(LmTermination::MaxIterations);
-        Ok(())
+        Ok((
+            lm,
+            termination.unwrap_or(LmTermination::MaxIterations),
+            timings,
+        ))
     }
 }
 

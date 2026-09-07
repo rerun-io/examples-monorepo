@@ -71,6 +71,7 @@ use crate::types::{
 };
 
 pub use optimize::{LmIteration, LmTermination};
+use schedule::MarginalizationOutcome;
 pub use schedule::{EvictionReason, KeyframeEviction, MarginalizationStats};
 
 /// Everything the driver can refuse.
@@ -288,7 +289,8 @@ pub struct FrameStats<S: LieScalar> {
     pub num_observations: usize,
     /// Landmarks `vio_marg_lost_landmarks` would drop this frame.
     pub num_lost_landmarks: usize,
-    /// Whether `optimize()` ran a linearization at all (`:1207`).
+    /// `opt_started` (`:1207`) after this frameset: false until five states
+    /// have accumulated, true from the first linearization on.
     pub opt_started: bool,
     /// One entry per LM step, accepted or rejected, in order.
     pub lm: Vec<LmIteration<S>>,
@@ -1053,8 +1055,16 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             }
         }
 
-        // `:566`, `:1642-1653`.
-        let mut stats: FrameStats<S> = FrameStats {
+        // `:566`.
+        let (lm, termination, mut timings) = self.optimize(frame.t_ns)?;
+        let marg: MarginalizationOutcome =
+            self.marginalize(&num_points_connected, &lost_landmarks)?;
+        timings.marginalize_ns = marg.elapsed_ns;
+        timings.measure_ns = duration_ns(started);
+        let (nullspace, nullspace_eigenvalues) = marg.nullspace.unzip();
+
+        // `:1642-1653`, read off the window the two stages above left behind.
+        Ok(FrameStats {
             t_ns: frame.t_ns,
             connected,
             unconnected: unconnected_obs.iter().map(BTreeSet::len).collect(),
@@ -1062,29 +1072,19 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             keyframe_vote,
             frames_after_kf: self.frames_after_kf,
             num_points_added,
-            kf_ids: Vec::new(),
-            ltkfs: Vec::new(),
-            num_landmarks: 0,
-            num_observations: 0,
+            kf_ids: self.kf_ids.iter().copied().collect(),
+            ltkfs: self.ltkfs.iter().copied().collect(),
+            num_landmarks: self.ba.lmdb.num_landmarks(),
+            num_observations: self.ba.lmdb.num_observations(),
             num_lost_landmarks: lost_landmarks.len(),
-            opt_started: false,
-            lm: Vec::new(),
-            termination: LmTermination::NotStarted,
-            marginalization: None,
-            nullspace: None,
-            nullspace_eigenvalues: None,
-            timings: StageTimings::default(),
-        };
-
-        self.optimize(&mut stats)?;
-        self.marginalize(&num_points_connected, &lost_landmarks, &mut stats)?;
-
-        stats.kf_ids = self.kf_ids.iter().copied().collect();
-        stats.ltkfs = self.ltkfs.iter().copied().collect();
-        stats.num_landmarks = self.ba.lmdb.num_landmarks();
-        stats.num_observations = self.ba.lmdb.num_observations();
-        stats.timings.measure_ns = duration_ns(started);
-        Ok(stats)
+            opt_started: self.opt_started,
+            lm,
+            termination,
+            marginalization: marg.marginalization,
+            nullspace,
+            nullspace_eigenvalues,
+            timings,
+        })
     }
 
     /// `:474-552`: triangulate every unconnected observation into a new

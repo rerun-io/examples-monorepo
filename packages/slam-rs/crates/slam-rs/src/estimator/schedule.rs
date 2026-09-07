@@ -34,7 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::Vector3;
 
-use super::{EstimatorError, FrameStats, SqrtKeypointVio, duration_ns};
+use super::{EstimatorError, SqrtKeypointVio, duration_ns};
 use crate::config::KeyframeMargCriteria;
 use crate::landmark::eigen_norm3;
 use crate::lie::{LieScalar, Se3};
@@ -104,8 +104,27 @@ pub struct MarginalizationStats {
     pub prior_order: Vec<(FrameId, usize, usize)>,
 }
 
+/// What one call to [`SqrtKeypointVio::marginalize`] did, on its way into
+/// [`FrameStats`].
+///
+/// Everything is empty when the trigger of `:717` did not fire, which is the
+/// common case: the window marginalizes on roughly one frameset in two.
+#[derive(Debug, Clone, Default)]
+pub(super) struct MarginalizationOutcome {
+    /// The marginalization itself.
+    pub marginalization: Option<MarginalizationStats>,
+    /// `logMargNullspace` (`:670-681`) and `checkMargEigenvalues` (`:695`),
+    /// which run together under one `vio_debug || vio_extended_logging` gate.
+    pub nullspace: Option<(NullspaceCheck, Vec<f64>)>,
+    /// `StageTimings::marginalize_ns`.
+    pub elapsed_ns: u64,
+}
+
 impl<S: LieScalar> SqrtKeypointVio<S> {
-    /// `marginalize(num_points_connected, lost_landmaks)` (`:707-1198`).
+    /// `marginalize(num_points_connected, lost_landmaks)` (`:707-1198`),
+    /// returning what it did, the nullspace check when `vio_debug` or
+    /// `vio_extended_logging` asked for one, and how long it took. Every
+    /// component is `None`/zero when the trigger of `:717` did not fire.
     ///
     /// # Errors
     ///
@@ -116,17 +135,16 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         &mut self,
         num_points_connected: &BTreeMap<FrameId, usize>,
         lost_landmarks: &BTreeSet<LandmarkId>,
-        stats: &mut FrameStats<S>,
-    ) -> Result<(), EstimatorError> {
+    ) -> Result<MarginalizationOutcome, EstimatorError> {
         // `:710-713`.
         if !self.opt_started {
-            return Ok(());
+            return Ok(MarginalizationOutcome::default());
         }
         // `:717`.
         if !(self.ba.frame_poses.len() > self.ltkfs.len() + self.max_kfs
             || self.ba.frame_states.len() >= self.max_states)
         {
-            return Ok(());
+            return Ok(MarginalizationOutcome::default());
         }
         let mark: std::time::Instant = std::time::Instant::now();
 
@@ -236,7 +254,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         self.last_marginalized.sort_unstable();
         self.last_marginalized.dedup();
 
-        stats.marginalization = Some(MarginalizationStats {
+        let marginalization: MarginalizationStats = MarginalizationStats {
             states_to_remove,
             last_state_to_marg,
             poses_to_marg: schedule.poses_to_marg.iter().copied().collect(),
@@ -249,16 +267,19 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             numerically_valid: output.numerically_valid,
             ordering_size: output.aom.total_size(),
             prior_order: self.marg_data.order.iter().collect(),
-        });
+        };
 
         // `:1180-1184`, `:670-681`.
-        if keep_nullspace {
-            let (check, eigenvalues) = self.log_marg_nullspace()?;
-            stats.nullspace = Some(check);
-            stats.nullspace_eigenvalues = Some(eigenvalues);
-        }
-        stats.timings.marginalize_ns = duration_ns(mark);
-        Ok(())
+        let nullspace: Option<(NullspaceCheck, Vec<f64>)> = if keep_nullspace {
+            Some(self.log_marg_nullspace()?)
+        } else {
+            None
+        };
+        Ok(MarginalizationOutcome {
+            marginalization: Some(marginalization),
+            nullspace,
+            elapsed_ns: duration_ns(mark),
+        })
     }
 
     /// `logMargNullspace()` (`:670-681`).
