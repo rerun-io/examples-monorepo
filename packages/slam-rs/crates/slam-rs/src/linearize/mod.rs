@@ -48,7 +48,7 @@
 //! the same tree; `par_chunks` with an ordered merge does not.
 
 mod abs_qr;
-mod eigen_qr;
+pub(crate) mod eigen_qr;
 mod landmark_block;
 mod reduce;
 

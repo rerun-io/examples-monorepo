@@ -28,6 +28,7 @@ The core is being filled in stage by stage, bottom up. What is in it today:
 | `imu` | Preintegration: `IntegratedImuMeasurement<S>` with basalt's midpoint propagation, covariance and bias-Jacobian recurrences, the 9-vector residual and its Jacobians, the LDLT square-root inverse covariance, the between-frames accumulation loop, gravity initialisation, and the 15-row IMU block the estimator whitens. |
 | `frontend` | The optical-flow frontend: `patterns` (Pattern24/52/51/50 from `patterns.h`), `se2` (`AffineCompact2` and `Sophus::SE2::exp`), `ldlt` (Eigen's pivoted LDLT at 3x3), `patch` (the streaming inverse-compositional patch build), `tracker` (`PatchSoA`, `FlowTransforms`, the `SourcePatches`/`PatchTracker` stage traits and `CpuPatchTracker`), `detect` (basalt's centred cell grid over kornia-rs's FAST plus OpenCV's suppression), `flow` (`FrameToFrameOpticalFlow`, generic over the builder and tracker) and `parallel` (the explicit thread budget). |
 | `linearize` | The square-root linearization: `LandmarkBlock` (basalt's `[ J_p \| pad \| J_l \| r ]` buffer, the layout arithmetic of `landmark_block_abs_dynamic.hpp:83-96`, the Huber-weighted residual rows, three Householder reflections, the six-Givens damping stack, back-substitution with its exact model cost change) and `LinearizationAbsQR`, which owns the blocks, the IMU blocks and the marginalization prior and produces `H`, `b`, `Q2Jp`, `Q2r` and `l_diff`. Eigen's `makeHouseholder`, `applyHouseholderOnTheLeft` and `makeGivens` are ported coefficient for coefficient rather than delegated to nalgebra's equivalents (D44). |
+| `marg` | Square-root marginalization. `MargHelper`'s three routines from `marg_helper.cpp` — the rank-revealing flat Householder QR of `marginalizeHelperSqrtToSqrt` (the only one the shipped path uses), and the two Schur-complement forms — plus the `marginalize()` mechanics of `sqrt_keypoint_vio.cpp:896-1178` given an explicit keep/marginalize schedule, and `checkMargNullspace`/`checkEigenvalues` returning values instead of printing. Eigen's pivoted LDLT at dynamic size (D41) and its complete orthogonal decomposition, `ColPivHouseholderQR` included, are ported rather than substituted: they are what decides the rank of a deficient block. |
 
 Two conventions in `ba_base` are basalt deviating from its own papers, and the
 port keeps **both** halves of each. The reprojection residual is `pi(...) - z`,
@@ -212,6 +213,60 @@ sort, with no QR preconditioner. It is worth porting because basalt gates
 landmark acceptance on `0 < inv_dist < 3`, where a borderline point either exists
 or does not.
 
+### Marginalization, and the two places a rank decision is load-bearing
+
+`marginalizeHelperSqrtToSqrt` is one flat, rank-revealing Householder QR over
+the stacked `[J_marg | J_keep]`, columns permuted **marginalized first**
+(`marg_helper.cpp:259-273`) so the sweep eliminates what is leaving before it
+reaches what stays; the prior is then the rows between the marginalized rank and
+the total rank (`:320-323`). A column whose reflector produces
+`|beta| <= sqrt(epsilon)` is zeroed and does **not** advance the rank
+(`:301-310`) — an absolute threshold, not a relative one against the largest
+pivot, so it depends on the units the problem is scaled in. That is basalt's
+choice and reproducing its decision is what keeps two runs on the same
+trajectory. `tests/fixtures/marg/marg_oracle.json` carries three cases that are
+the same matrix apart from a single spike placed **exactly on** `sqrt(epsilon)`,
+one ulp below and one ulp above: the first two are rejected and produce a
+bit-identical reduced system, the third is accepted and produces a different
+one, in both precisions.
+
+The other rank decision is Eigen's complete orthogonal decomposition, which the
+two squared routines invert the marginalized block with
+(`marg_helper.cpp:99-100`) after basalt tried and rejected `ldlt`, `fullPivLu`,
+`colPivHouseholderQr` and a Jacobi-SVD pseudo-inverse — the last one with a
+"DO NOT USE!!!". It is ported, not substituted, `ColPivHouseholderQR` and all:
+the LAPACK norm-downdate with its own `sqrt(epsilon)` recompute threshold, the
+`bug 941` non-zero-pivot rule, the `Z` reflectors, and `rank()` as
+`|pivot| > |maxpivot| * epsilon * diagonalSize`. On the fixture's rank-deficient
+blocks the ported pseudo-inverse reproduces Eigen's to **2.0e-16** — one ulp.
+Two departures are documented in the source and neither reaches a rank
+comparison: Eigen applies `Qᵀ` through a blocked `HouseholderSequence` once the
+sequence is at least 48 long, and its triangular solves are blocked kernels;
+both are plain loops here, the same product-kernel association residue D50
+already accepted.
+
+`Eigen::LDLT` is ported at dynamic size for the same reason it was ported at 9x9
+for the IMU (decision D41): `marginalizeHelperSqToSqrt` takes the square root of
+a reduced Hessian that is *rank deficient exactly when it matters*, and what
+comes out is decided by Eigen's pivot-on-the-un-updated-diagonal rule and by the
+`vectorD().array().max(0)` clamp at `:204`.
+
+One quantity in that routine does not reach ulp level and the reason is
+arithmetic, not a formula. On a rank-deficient reduced Hessian the last LDLT
+pivot is cancellation noise — `4.4e-16` against a matrix whose other eigenvalues
+are order one — and `:229` divides `b` by its root, `2.1e-8`, because that is far
+above the `sqrt(min())` floor it guards with. Noise over noise: the port and the
+C++ agree on that entry to `2.5e-9` rather than to an ulp. Nothing consumes it
+alone — the estimator only ever sees `J_mᵀJ_m` and `J_mᵀr_m`, and on that same
+case `J_mᵀr_m` agrees **exactly**.
+
+Finally, one shape makes basalt read out of range. When the marginalized block
+consumes every row of rank, `total_rank == marg_rank == rows` and `:320-323` asks
+for a block whose first row is one past the end; the C++ aborts on Eigen's block
+assertion in a debug build. The port returns a zero row instead, which is the
+answer the arithmetic gives — nothing is left to constrain the kept variables —
+and the oracle carries the case with the flat QR skipped on the C++ side.
+
 ### The damping machinery the shipped VIO never uses
 
 `optimize()` calls exactly four things on the linearizer: `linearizeProblem`,
@@ -248,7 +303,8 @@ residual `Q1^T r` already is. A port that dropped the constant would make every
 Levenberg-Marquardt gain ratio wrong in the same direction, which still
 converges, only worse.
 
-Still to come: marginalization and the sliding-window driver.
+Still to come: the sliding-window driver — the keyframe and marginalization
+schedule, the Levenberg-Marquardt loop and the estimator's own state machine.
 
 ## Layout
 

@@ -36,10 +36,44 @@
 //! covers the contiguous three-coefficient case and is precision-dependent
 //! (decision D47).
 
-use nalgebra::DMatrix;
+use nalgebra::{DMatrix, DVector};
 
 use crate::ba_base::JacobiRotation;
 use crate::lie::LieScalar;
+
+/// The sub-block a reflection acts on, `storage.block(row_start, col_start,
+/// rows, cols)` in Eigen's spelling.
+///
+/// Four indices travel together through
+/// [`apply_householder_on_the_left_block`] and
+/// [`apply_householder_on_the_right_block`]; naming them as one value is what
+/// keeps those signatures readable.
+///
+/// **Contract: the span must lie inside the matrix**, and the two functions
+/// index without re-checking, because they run once per column of a QR sweep.
+/// The checked *public* boundary is [`crate::linearize::reflect_column`], whose
+/// `checked_add` and `ReflectionOutOfRange` guard a caller-supplied range
+/// (decision D32). Everything else that builds a `BlockSpan` computes a span
+/// that is exact by construction, and each one is one line away from the
+/// dimension it is exact against:
+///
+/// * `reflect_column` — the full width, after its own range check;
+/// * `marg_helper`'s flat QR — `row_start + rows == q2jp.nrows()` and
+///   `col_start + cols == q2jp.ncols()`, over index sets `check_indices` has
+///   already validated against the column count;
+/// * `ColPivHouseholderQr` — `k + (rows - k)` and `(k + 1) + (cols - k - 1)`;
+/// * `Cod` — `(rank - 1) + (cols - rank + 1) == cols`, with `rank <= cols`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BlockSpan {
+    /// First row of the block.
+    pub(crate) row_start: usize,
+    /// Number of rows.
+    pub(crate) rows: usize,
+    /// First column of the block.
+    pub(crate) col_start: usize,
+    /// Number of columns.
+    pub(crate) cols: usize,
+}
 
 /// `makeHouseholder` (`Householder.h:63-86`), real scalars, over
 /// `storage.col(col).segment(start, len)`.
@@ -110,12 +144,56 @@ pub(crate) fn apply_householder_on_the_left<S: LieScalar>(
     tau: S,
     work: &mut [S],
 ) {
+    // Every column of the block: the full-width special case of
+    // [`apply_householder_on_the_left_block`], which is the only
+    // implementation so the two cannot drift apart.
     let num_cols: usize = storage.ncols();
-    if len == 1 {
+    apply_householder_on_the_left_block(
+        storage,
+        BlockSpan {
+            row_start: start,
+            rows: len,
+            col_start: 0,
+            cols: num_cols,
+        },
+        essential,
+        tau,
+        work,
+    );
+}
+
+/// The same reflection over an arbitrary sub-block
+/// `storage.block(row_start, col_start, rows, cols)`.
+///
+/// `applyHouseholderOnTheLeft` is a method on whatever expression it is called
+/// on, and the marginalization QR calls it on `Q2Jp.bottomRightCorner(...)`
+/// rather than on a full-width block (`marg_helper.cpp:304-305`), so the column
+/// range has to be a parameter. [`apply_householder_on_the_left`] is this
+/// function over every column, which is what the landmark block wants
+/// (`landmark_block_abs_dynamic.hpp:452`).
+///
+/// `work` is the `tmp` row of `Householder.h:110` and must be at least `cols`
+/// long; C++ passes a pointer into a shared scratch vector offset by the
+/// column the QR is on (`marg_helper.cpp:305`, `tempData + k + 1`), which is
+/// the same storage with a different name.
+pub(crate) fn apply_householder_on_the_left_block<S: LieScalar>(
+    storage: &mut DMatrix<S>,
+    span: BlockSpan,
+    essential: &[S],
+    tau: S,
+    work: &mut [S],
+) {
+    let BlockSpan {
+        row_start,
+        rows,
+        col_start,
+        cols,
+    } = span;
+    if rows == 1 {
         // `:107-108`.
         let factor: S = S::one() - tau;
-        for j in 0..num_cols {
-            storage[(start, j)] *= factor;
+        for j in 0..cols {
+            storage[(row_start, col_start + j)] *= factor;
         }
         return;
     }
@@ -125,32 +203,162 @@ pub(crate) fn apply_householder_on_the_left<S: LieScalar>(
     }
 
     // `tmp.noalias() = essential.adjoint() * bottom` (`:113`): one dot product
-    // per column, over the `len - 1` rows below the first.
-    for (j, slot) in work.iter_mut().enumerate().take(num_cols) {
+    // per column, over the `rows - 1` rows below the first.
+    for (j, slot) in work.iter_mut().enumerate().take(cols) {
         let mut acc: S = S::zero();
-        for (i, e) in essential.iter().enumerate().take(len - 1) {
-            acc += *e * storage[(start + 1 + i, j)];
+        for (i, e) in essential.iter().enumerate().take(rows - 1) {
+            acc += *e * storage[(row_start + 1 + i, col_start + j)];
         }
         *slot = acc;
     }
 
     // `tmp += this->row(0)` (`:114`).
-    for (j, slot) in work.iter_mut().enumerate().take(num_cols) {
-        *slot += storage[(start, j)];
+    for (j, slot) in work.iter_mut().enumerate().take(cols) {
+        *slot += storage[(row_start, col_start + j)];
     }
 
     // `this->row(0) -= tau * tmp` (`:115`).
-    for j in 0..num_cols {
-        storage[(start, j)] -= tau * work[j];
+    for j in 0..cols {
+        storage[(row_start, col_start + j)] -= tau * work[j];
     }
 
     // `bottom.noalias() -= tau * essential * tmp` (`:116`): the outer product,
     // with the scalar folded into the left factor as C++'s left-associative
     // `*` does.
-    for (i, e) in essential.iter().enumerate().take(len - 1) {
+    for (i, e) in essential.iter().enumerate().take(rows - 1) {
         let scale: S = tau * *e;
-        for j in 0..num_cols {
-            storage[(start + 1 + i, j)] -= scale * work[j];
+        for j in 0..cols {
+            storage[(row_start + 1 + i, col_start + j)] -= scale * work[j];
+        }
+    }
+}
+
+/// `applyHouseholderOnTheLeft` on a column vector segment `v.segment(start, len)`.
+///
+/// The `Q2r` half of the marginalization QR (`marg_helper.cpp:306`) — the same
+/// reflection as [`apply_householder_on_the_left_block`] with a single column,
+/// where the `tmp` row of `Householder.h:110` collapses to one scalar.
+pub(crate) fn apply_householder_on_the_left_vec<S: LieScalar>(
+    v: &mut DVector<S>,
+    start: usize,
+    len: usize,
+    essential: &[S],
+    tau: S,
+) {
+    if len == 1 {
+        v[start] *= S::one() - tau;
+        return;
+    }
+    if tau == S::zero() {
+        return;
+    }
+    let mut tmp: S = S::zero();
+    for (i, e) in essential.iter().enumerate().take(len - 1) {
+        tmp += *e * v[start + 1 + i];
+    }
+    tmp += v[start];
+    v[start] -= tau * tmp;
+    for (i, e) in essential.iter().enumerate().take(len - 1) {
+        v[start + 1 + i] -= (tau * *e) * tmp;
+    }
+}
+
+/// `makeHouseholder` over a **row** segment `storage.row(row).segment(col_start, len)`.
+///
+/// Same arithmetic as [`make_householder`], different traversal: the complete
+/// orthogonal decomposition builds its `Z` reflectors out of rows
+/// (`CompleteOrthogonalDecomposition.h:487`).
+pub(crate) fn make_householder_row<S: LieScalar>(
+    storage: &DMatrix<S>,
+    row: usize,
+    col_start: usize,
+    len: usize,
+    essential: &mut [S],
+) -> (S, S) {
+    let c0: S = storage[(row, col_start)];
+    let mut tail_sq_norm: S = S::zero();
+    for i in 1..len {
+        let v: S = storage[(row, col_start + i)];
+        tail_sq_norm += v * v;
+    }
+    let tol: S = S::min_positive();
+    if tail_sq_norm <= tol {
+        for e in essential.iter_mut().take(len.saturating_sub(1)) {
+            *e = S::zero();
+        }
+        (S::zero(), c0)
+    } else {
+        let mut beta: S = (c0 * c0 + tail_sq_norm).sqrt();
+        if c0 >= S::zero() {
+            beta = -beta;
+        }
+        let denom: S = c0 - beta;
+        for (i, e) in essential.iter_mut().enumerate().take(len - 1) {
+            *e = storage[(row, col_start + 1 + i)] / denom;
+        }
+        let tau: S = (beta - c0) / beta;
+        (tau, beta)
+    }
+}
+
+/// `applyHouseholderOnTheRight` (`Householder.h:137-150`), real scalars, over
+/// `storage.block(row_start, col_start, rows, cols)`.
+///
+/// The mirror of [`apply_householder_on_the_left_block`]: the reflector acts on
+/// the block's **columns**, `tmp` is a column of `rows` entries, and the rank
+/// one update is `tau * tmp * essentialᵀ` with the scalar folded into the left
+/// factor. Used only by the complete orthogonal decomposition
+/// (`CompleteOrthogonalDecomposition.h:491-492`).
+pub(crate) fn apply_householder_on_the_right_block<S: LieScalar>(
+    storage: &mut DMatrix<S>,
+    span: BlockSpan,
+    essential: &[S],
+    tau: S,
+    work: &mut [S],
+) {
+    let BlockSpan {
+        row_start,
+        rows,
+        col_start,
+        cols,
+    } = span;
+    if cols == 1 {
+        // `:139-140`.
+        let factor: S = S::one() - tau;
+        for i in 0..rows {
+            storage[(row_start + i, col_start)] *= factor;
+        }
+        return;
+    }
+    if tau == S::zero() {
+        // `:141`.
+        return;
+    }
+
+    // `tmp.noalias() = right * essential` (`:145`).
+    for (i, slot) in work.iter_mut().enumerate().take(rows) {
+        let mut acc: S = S::zero();
+        for (j, e) in essential.iter().enumerate().take(cols - 1) {
+            acc += storage[(row_start + i, col_start + 1 + j)] * *e;
+        }
+        *slot = acc;
+    }
+
+    // `tmp += this->col(0)` (`:146`).
+    for (i, slot) in work.iter_mut().enumerate().take(rows) {
+        *slot += storage[(row_start + i, col_start)];
+    }
+
+    // `this->col(0) -= tau * tmp` (`:147`).
+    for i in 0..rows {
+        storage[(row_start + i, col_start)] -= tau * work[i];
+    }
+
+    // `right.noalias() -= tau * tmp * essential.adjoint()` (`:148`).
+    for i in 0..rows {
+        let scale: S = tau * work[i];
+        for (j, e) in essential.iter().enumerate().take(cols - 1) {
+            storage[(row_start + i, col_start + 1 + j)] -= scale * *e;
         }
     }
 }
@@ -282,6 +490,72 @@ mod tests {
             for i in 0..len {
                 for j in 0..cols {
                     prop_assert!((storage[(i, j)] - dense[(i, j)]).abs() < 1e-9);
+                }
+            }
+        }
+
+        /// The block form over the whole width is the full-width function.
+        ///
+        /// [`apply_householder_on_the_left`] delegates to
+        /// [`apply_householder_on_the_left_block`], so the landmark block's
+        /// proven path and the marginalization QR's share one implementation;
+        /// this is what says the delegation changed nothing.
+        #[test]
+        fn the_block_form_over_the_whole_width_is_the_full_width_form(
+            values in prop::collection::vec(-4.0f64..4.0, 30..31),
+        ) {
+            let (rows, cols): (usize, usize) = (5, 6);
+            let build = || -> DMatrix<f64> {
+                DMatrix::from_fn(rows, cols, |i, j| values[i * cols + j])
+            };
+            let mut essential: Vec<f64> = vec![0.0; rows - 1];
+            let mut a: DMatrix<f64> = build();
+            let (tau, _) = make_householder(&a, 0, 0, rows, &mut essential);
+
+            let mut work: Vec<f64> = vec![0.0; cols];
+            apply_householder_on_the_left(&mut a, 0, rows, &essential, tau, &mut work);
+
+            let mut b: DMatrix<f64> = build();
+            let mut work: Vec<f64> = vec![0.0; cols];
+            apply_householder_on_the_left_block(
+                &mut b,
+                BlockSpan { row_start: 0, rows, col_start: 0, cols },
+                &essential,
+                tau,
+                &mut work,
+            );
+            prop_assert_eq!(a, b);
+        }
+
+        /// A reflection on a sub-block leaves everything outside the span
+        /// untouched, which is what lets the flat QR of `marg_helper.cpp:304`
+        /// act on `bottomRightCorner` without disturbing the columns already
+        /// reduced.
+        #[test]
+        fn a_sub_block_reflection_touches_nothing_outside_the_span(
+            values in prop::collection::vec(-4.0f64..4.0, 42..43),
+        ) {
+            let (rows, cols): (usize, usize) = (6, 7);
+            let before: DMatrix<f64> =
+                DMatrix::from_fn(rows, cols, |i, j| values[i * cols + j]);
+            let mut after: DMatrix<f64> = before.clone();
+            let span: BlockSpan =
+                BlockSpan { row_start: 2, rows: 4, col_start: 3, cols: 4 };
+
+            let mut essential: Vec<f64> = vec![0.0; span.rows - 1];
+            let (tau, _) = make_householder(&after, 1, span.row_start, span.rows, &mut essential);
+            let mut work: Vec<f64> = vec![0.0; span.cols];
+            apply_householder_on_the_left_block(&mut after, span, &essential, tau, &mut work);
+
+            for i in 0..rows {
+                for j in 0..cols {
+                    let inside: bool = i >= span.row_start
+                        && i < span.row_start + span.rows
+                        && j >= span.col_start
+                        && j < span.col_start + span.cols;
+                    if !inside {
+                        prop_assert_eq!(after[(i, j)], before[(i, j)], "at ({}, {})", i, j);
+                    }
                 }
             }
         }

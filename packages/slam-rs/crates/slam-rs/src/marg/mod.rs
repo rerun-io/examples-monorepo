@@ -1,0 +1,204 @@
+//! Square-root marginalization: the rank-revealing QR helper, the sliding
+//! window mechanics that drive it, and the two prior diagnostics.
+//!
+//! Ported from `include/basalt/vi_estimator/marg_helper.h`,
+//! `src/vi_estimator/marg_helper.cpp`, the second half of
+//! `src/vi_estimator/sqrt_keypoint_vio.cpp`'s `marginalize()` and
+//! `src/vi_estimator/sqrt_ba_base.cpp`.
+//!
+//! ```text
+//! marginalize()                     sqrt_keypoint_vio.cpp
+//!   build the absolute ordering       :726-763
+//!   linearize the window + prior      :905-942
+//!   split keep / marg indices         :980-1003
+//!   MargHelper::...                   :1069-1083
+//!   setLinTrue on the newest state    :1085-1088   (trap 7)
+//!   shrink frame_states/poses/lmdb    :1090-1118
+//!   new prior order                   :1120-1137
+//!   b -= H * delta                    :1170-1172   (trap 8)
+//! ```
+//!
+//! **What is here and what is stage S8's.** This module takes the four sets the
+//! schedule produced — which keyframes, poses and states leave, and which state
+//! becomes the prior's newest block — as [`MarginalizeSchedule`] and does
+//! everything downstream of that decision. The scoring at
+//! `sqrt_keypoint_vio.cpp:767-880`, the `states_to_remove` count and the
+//! keyframe bookkeeping are not ported here.
+//!
+//! **Why the QR and not the Schur complement.** With `vio_sqrt_marg` on — every
+//! shipped configuration — the prior is stored as a Jacobian `J_m` and a
+//! residual `r_m` rather than as `H` and `b`, and marginalizing is one flat,
+//! rank-revealing Householder QR over the stacked
+//! `[J_marg | J_keep]` (papers-part2 §12). Squaring the system to eliminate a
+//! block would square its condition number, which is the whole point of the
+//! square-root formulation; the QR never forms `JᵀJ` at all.
+
+mod eigen_cod;
+mod eigen_ldlt;
+mod helper;
+mod window;
+
+pub use eigen_cod::Cod;
+pub use helper::{
+    ReducedSystem, marginalize_helper_sq_to_sq, marginalize_helper_sq_to_sqrt,
+    marginalize_helper_sqrt_to_sqrt,
+};
+pub use window::{
+    MarginalizeInputs, MarginalizeOptions, MarginalizeOutput, MarginalizeSchedule, NullspaceCheck,
+    check_eigenvalues, check_marg_nullspace, marginalize,
+};
+
+use crate::ba_base::BaError;
+use crate::linearize::LinearizeError;
+use crate::types::{FrameId, StateError};
+
+/// The three routines of `MargHelper<Scalar>`
+/// (`include/basalt/vi_estimator/marg_helper.h:52-70`), as free functions.
+///
+/// C++ makes them static members of a class template with no state; the port
+/// keeps them free and groups them here so `MargHelper::…` still names
+/// something. The scalar is a parameter of each function rather than of the
+/// type, which is the only difference.
+pub struct MargHelper;
+
+impl MargHelper {
+    /// [`marginalize_helper_sqrt_to_sqrt`], `marg_helper.cpp:247-327`.
+    pub fn sqrt_to_sqrt<S: crate::lie::LieScalar>(
+        q2jp: nalgebra::DMatrix<S>,
+        q2r: nalgebra::DVector<S>,
+        idx_to_keep: &std::collections::BTreeSet<usize>,
+        idx_to_marg: &std::collections::BTreeSet<usize>,
+    ) -> Result<ReducedSystem<S>, MargError> {
+        marginalize_helper_sqrt_to_sqrt(q2jp, q2r, idx_to_keep, idx_to_marg)
+    }
+
+    /// [`marginalize_helper_sq_to_sqrt`], `marg_helper.cpp:120-244`.
+    pub fn sq_to_sqrt<S: crate::lie::LieScalar>(
+        abs_h: nalgebra::DMatrix<S>,
+        abs_b: nalgebra::DVector<S>,
+        idx_to_keep: &std::collections::BTreeSet<usize>,
+        idx_to_marg: &std::collections::BTreeSet<usize>,
+    ) -> Result<ReducedSystem<S>, MargError> {
+        marginalize_helper_sq_to_sqrt(abs_h, abs_b, idx_to_keep, idx_to_marg)
+    }
+
+    /// [`marginalize_helper_sq_to_sq`], `marg_helper.cpp:42-117`.
+    pub fn sq_to_sq<S: crate::lie::LieScalar>(
+        abs_h: nalgebra::DMatrix<S>,
+        abs_b: nalgebra::DVector<S>,
+        idx_to_keep: &std::collections::BTreeSet<usize>,
+        idx_to_marg: &std::collections::BTreeSet<usize>,
+    ) -> Result<ReducedSystem<S>, MargError> {
+        marginalize_helper_sq_to_sq(abs_h, abs_b, idx_to_keep, idx_to_marg)
+    }
+}
+
+/// What marginalization refuses to do.
+///
+/// Every variant replaces a C++ assertion, an `at()` that would throw, or an
+/// unchecked index; the estimator runs with the GIL released, where a panic
+/// aborts the process (decision D32).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MargError {
+    /// `keep_size + marg_size == abs_H.cols()` (`marg_helper.cpp:47`, `:132`,
+    /// `:253`).
+    #[error("{keep} kept plus {marg} marginalized indices do not cover {total} columns")]
+    IndexCountMismatch {
+        /// Size of `idx_to_keep`.
+        keep: usize,
+        /// Size of `idx_to_marg`.
+        marg: usize,
+        /// Columns of the system.
+        total: usize,
+    },
+    /// An index names a column the system does not have; C++ would read out of
+    /// range.
+    #[error("index {index} is out of range for a system of {total} columns")]
+    IndexOutOfRange {
+        /// The offending index.
+        index: usize,
+        /// Columns of the system.
+        total: usize,
+    },
+    /// An index is in both sets, which would double-count a column.
+    #[error("index {index} is both kept and marginalized")]
+    IndexInBothSets {
+        /// The offending index.
+        index: usize,
+    },
+    /// `Q2Jp.rows() == Q2r.rows()` (`marg_helper.cpp:254`), or a right-hand
+    /// side that does not match a square system.
+    #[error("the system has {rows} rows and the right-hand side {rhs}")]
+    RhsLengthMismatch {
+        /// Rows of the matrix.
+        rows: usize,
+        /// Rows of the vector.
+        rhs: usize,
+    },
+    /// A squared form was handed a non-square `H`.
+    #[error("the squared system is {rows}x{cols}, which is not square")]
+    NotSquare {
+        /// Rows of `H`.
+        rows: usize,
+        /// Columns of `H`.
+        cols: usize,
+    },
+    /// The prior's ordering disagrees with the window's, which C++ asserts
+    /// block by block (`sqrt_keypoint_vio.cpp:736`, `:758-759`).
+    #[error("the marginalization prior's ordering does not match the window at frame {frame_id}")]
+    PriorOrderMismatch {
+        /// The frame that disagrees.
+        frame_id: FrameId,
+    },
+    /// `marg_data.H.cols() == marg_data.order.total_size`
+    /// (`sqrt_keypoint_vio.cpp:1145`, `sqrt_ba_base.cpp:52`).
+    #[error("the prior is {cols} columns wide but its ordering covers {total_size}")]
+    PriorWidthMismatch {
+        /// Columns of `H`.
+        cols: usize,
+        /// Rows the ordering covers.
+        total_size: usize,
+    },
+    /// A frame named by the schedule or the ordering is not in the window.
+    #[error("frame {frame_id} is not in the window")]
+    FrameNotInWindow {
+        /// The frame that is missing.
+        frame_id: FrameId,
+    },
+    /// `last_state_to_marg` was already frozen (`sqrt_keypoint_vio.cpp:1086`
+    /// asserts it is not).
+    #[error("frame {frame_id} is already at its linearization point")]
+    AlreadyLinearized {
+        /// The frame that was to be frozen.
+        frame_id: FrameId,
+    },
+    /// A full state in the ordering is in none of the three sets and is not
+    /// `last_state_to_marg` (`sqrt_keypoint_vio.cpp:999` asserts).
+    #[error("state {frame_id} is neither marginalized nor the last state to marginalize")]
+    UnscheduledState {
+        /// The state the schedule forgot.
+        frame_id: FrameId,
+    },
+    /// A block in the ordering is neither a pose nor a full state
+    /// (`sqrt_keypoint_vio.cpp:990`, `sqrt_ba_base.cpp:91-93`).
+    #[error("frame {frame_id} has a block of {size} rows, which is neither 6 nor 15")]
+    UnexpectedBlockSize {
+        /// The offending frame.
+        frame_id: FrameId,
+        /// Its block size.
+        size: usize,
+    },
+    /// The nullspace check was handed a prior with no blocks, where C++ divides
+    /// by `num_trans == 0` (`sqrt_ba_base.cpp:96`).
+    #[error("the prior's ordering is empty")]
+    EmptyPriorOrder,
+    /// Something the linearizer refused.
+    #[error(transparent)]
+    Linearize(#[from] LinearizeError),
+    /// Something the bundle-adjustment base refused.
+    #[error(transparent)]
+    Ba(#[from] BaError),
+    /// Something a state type refused.
+    #[error(transparent)]
+    State(#[from] StateError),
+}
