@@ -756,22 +756,138 @@ def test_a_follow_frame_the_calibration_agrees_with_stays_quiet(
     assert "follow frame" not in capsys.readouterr().out
 
 
-def test_both_layers_are_skipped_together_and_rebuilt_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
-    """Both layers come out of one archive fetch, so a half-converted sequence is redone."""
+# ── the layer rule ────────────────────────────────────────────────────────
+
+
+def gt_rows(gt_rrd: Path) -> tuple[list[int], list[list[float]]]:
+    """Every pose time and translation in a gt rrd, index-sorted.
+
+    What a gt rebuild has to reproduce exactly: same clock, same positions.
+    Read through the public reader, so it is what a consumer sees.
+    """
+    poses: pa.Table = column_rows(read_back(gt_rrd), f"{schema.rig_path(0)}:Transform3D:translation")
+    times_ns: list[int] = poses.column(schema.TIMELINE).combine_chunks().cast(pa.int64()).to_pylist()
+    return times_ns, [row[0] for row in poses.column(1).to_pylist()]
+
+
+def test_a_convert_publishes_the_gt_csv_verbatim_beside_the_two_rrds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
+) -> None:
+    """The archive is deleted, so the one member gt still needs is kept as a sidecar."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    dataset.convert(identity, source, force=False)
+
+    sidecar: Path = paths.sidecar_path(paths.output_root(), identity, msd.GT_SIDECAR_NAME)
+    assert sidecar.is_file(), f"no sidecar at {sidecar}"
+    assert sidecar == paths.output_root() / paths.SIDECAR_DIR / identity.recording_id / "gt.csv"
+    # Verbatim: byte for byte what the archive shipped, not re-serialized columns.
+    assert sidecar.read_bytes() == (tmp_path / "tree" / SEQUENCE / "mav0" / "gt" / "data.csv").read_bytes()
+
+
+def test_a_missing_gt_layer_is_rebuilt_from_the_sidecar_without_fetching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """This is what the sidecar is for: ``rm gt/*.rrd`` and a convert, no network, no encode.
+
+    The rebuilt layer has to be the *same* layer — it reads the same csv and the
+    same base rrd — so its rows are compared against the ones the full
+    conversion wrote, not merely counted.
+    """
     hub: FakeHub = build_hub(tmp_path, monkeypatch)
     dataset: MsdDataset = MsdDataset(hub.config)
     identity, source = dataset.discover()[0]
     base_target: Path = dataset.convert(identity, source, force=False)
     gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
+    before: tuple[list[int], list[list[float]]] = gt_rows(gt_target)
+    base_bytes: bytes = base_target.read_bytes()
     fetches: int = len(hub.fetched)
-
-    assert dataset.convert(identity, source, force=False) == base_target
-    assert len(hub.fetched) == fetches, "both layers exist, so nothing is downloaded"
+    capsys.readouterr()
 
     gt_target.unlink()
     assert dataset.convert(identity, source, force=False) == base_target
-    assert len(hub.fetched) > fetches, "a missing layer means another fetch"
-    assert gt_target.is_file()
+
+    assert len(hub.fetched) == fetches, "base and the sidecar are on disk, so the archive is not fetched again"
+    assert gt_rows(gt_target) == before, "a rebuilt gt layer is the same layer"
+    assert base_target.read_bytes() == base_bytes, "rebuilding gt must not touch the base rrd"
+    assert "no fetch" in capsys.readouterr().out
+
+
+def test_a_missing_gt_layer_with_no_sidecar_falls_back_to_the_archive_and_says_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Without the sidecar there is nothing to rebuild from, and paying for the download is the only option."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    base_target: Path = dataset.convert(identity, source, force=False)
+    gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
+    sidecar: Path = paths.sidecar_path(paths.output_root(), identity, msd.GT_SIDECAR_NAME)
+    fetches: int = len(hub.fetched)
+    capsys.readouterr()
+
+    gt_target.unlink()
+    sidecar.unlink()
+    assert dataset.convert(identity, source, force=False) == base_target
+
+    assert len(hub.fetched) > fetches, "no sidecar means the archive is the only source left"
+    assert gt_target.is_file() and sidecar.is_file(), "the fallback republishes both"
+    assert "cannot be rebuilt" in capsys.readouterr().out
+
+
+def test_both_layers_and_the_sidecar_are_skipped_when_all_three_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
+) -> None:
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    base_target: Path = dataset.convert(identity, source, force=False)
+    fetches: int = len(hub.fetched)
+
+    assert dataset.convert(identity, source, force=False) == base_target
+    assert len(hub.fetched) == fetches, "everything exists, so nothing is downloaded"
+
+
+def test_force_republishes_both_layers_and_the_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
+    """``--force`` bypasses the skip checks and nothing else: all three come back."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    base_target: Path = dataset.convert(identity, source, force=False)
+    gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
+    sidecar: Path = paths.sidecar_path(paths.output_root(), identity, msd.GT_SIDECAR_NAME)
+    before: tuple[list[int], list[list[float]]] = gt_rows(gt_target)
+    fetches: int = len(hub.fetched)
+
+    assert dataset.convert(identity, source, force=True) == base_target
+
+    assert len(hub.fetched) > fetches, "a forced convert re-reads the archive"
+    for published in (base_target, gt_target, sidecar):
+        assert published.is_file(), f"{published} was not republished"
+        assert not list(published.parent.glob("*.tmp")), f"a staged temp survived beside {published}"
+    assert gt_rows(gt_target) == before, "the same inputs give the same layer"
+
+
+def test_a_derived_layer_carries_its_own_properties_and_no_recording_info(converted_index: tuple[FakeHub, Path, Path]) -> None:
+    """A derived layer is the same recording as its base, so it states nothing about the recording.
+
+    Base owns the ``RecordingInfo`` — the name a viewer shows and the wall clock
+    of the conversion. gt is written with ``send_properties=False`` and no
+    recording name, so a rebuild cannot silently restate either (its own
+    ``start_time`` would be whenever it was last rebuilt). Its ``property:gt:*``
+    group still lands, which is the pair of behaviours this asserts together.
+    """
+    _, base_target, gt_target = converted_index
+
+    gt: dict[str, object] = recording_properties(read_back(gt_target), "gt")
+    assert gt["num_poses"] == GT_NUM_POSES, "the layer's own property group lands with send_properties=False"
+
+    gt_columns: set[str] = set(read_back(gt_target).reader(index=None, contents="/__properties/**").to_arrow_table().column_names)
+    base_columns: set[str] = set(read_back(base_target).reader(index=None, contents="/__properties/**").to_arrow_table().column_names)
+    assert not [name for name in gt_columns if name.startswith("property:RecordingInfo:")], f"gt states a RecordingInfo: {sorted(gt_columns)}"
+    assert "property:RecordingInfo:start_time" in base_columns, "base owns the recording's wall clock"
+    assert "property:RecordingInfo:name" in base_columns, "and its name"
 
 
 # ── raw budget ────────────────────────────────────────────────────────────

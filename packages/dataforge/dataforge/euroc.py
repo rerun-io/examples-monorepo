@@ -147,6 +147,30 @@ def read_numeric_csv(data: bytes, *, num_values: int) -> TimestampedSamples:
     return TimestampedSamples(times_ns=times_ns, values=values)
 
 
+def first_timestamp_ns(data: bytes) -> int:
+    """First data row's timestamp, without parsing the rest of the file.
+
+    A converter that only needs a stream's clock **origin** — the gt file's first
+    stamp is part of a sequence's ``t0`` — should not pay for the whole table:
+    these files run at 1 kHz, so an hour-long one is 3.6M rows, and a layer that
+    parses it properly later would then be the second parse of the same bytes.
+
+    Args:
+        data: Whole csv, as read out of the archive.
+
+    Returns:
+        The first data row's nanosecond timestamp.
+
+    Raises:
+        ValueError: The file holds a header and nothing else, so it has no clock.
+    """
+    for line in io.BytesIO(data).readlines()[1:]:
+        stamp: bytes = line.split(b",")[0].strip()
+        if stamp:
+            return int(stamp)
+    raise ValueError("csv has no data rows, so it carries no timestamp")
+
+
 def nominal_fps(times_ns: Int64[ndarray, "n_samples"]) -> int:
     """Container frame rate for one camera, from the median inter-sample gap.
 

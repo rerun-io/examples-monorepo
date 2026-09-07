@@ -54,21 +54,75 @@ def atomic_write(target: Path) -> Iterator[Path]:
 
 
 @contextmanager
+def recording_to(
+    path: Path,
+    *,
+    application_id: str = APPLICATION_ID,
+    recording_id: str,
+    default_blueprint: rrb.Blueprint | None = None,
+    send_properties: bool = True,
+) -> Iterator[rr.RecordingStream]:
+    """Yield a recording saved to exactly ``path``; the caller owns publication.
+
+    The lower half of ``atomic_recording``, for a converter writing **several**
+    layers that must be published together: it stages each one under its own
+    ``atomic_write`` and writes into the temp paths, which ``atomic_recording``'s
+    single-target contract cannot express. The recording is flushed and closed on
+    exit, so ``path`` is complete and readable by the time the caller returns —
+    which is what lets a derived layer read the staged base rrd it was just
+    handed.
+
+    Args:
+        path: Exact file to save into; nothing is replaced or cleaned up here.
+        application_id: Rerun application id; one per package.
+        recording_id: Shared across a sequence's layers — it is what stacks them.
+        default_blueprint: Layout embedded in the file, if any.
+        send_properties: Whether Rerun adds its own ``RecordingInfo`` (the name
+            and the wall-clock start time). See ``atomic_recording``.
+    """
+    with rr.RecordingStream(application_id=application_id, recording_id=recording_id, send_properties=send_properties) as recording:
+        recording.save(path, default_blueprint=default_blueprint)
+        yield recording
+
+
+@contextmanager
 def atomic_recording(
     target: Path,
     *,
     application_id: str = APPLICATION_ID,
     recording_id: str,
     default_blueprint: rrb.Blueprint | None = None,
+    send_properties: bool = True,
 ) -> Iterator[rr.RecordingStream]:
-    """Yield a recording saved to a temp file that replaces ``target`` on success."""
+    """Yield a recording saved to a temp file that replaces ``target`` on success.
+
+    Args:
+        target: Final location, replaced atomically on a clean exit.
+        application_id: Rerun application id; one per package.
+        recording_id: Shared across a sequence's layers — it is what stacks them.
+        default_blueprint: Layout embedded in the file, if any.
+        send_properties: Whether Rerun adds its own ``RecordingInfo``. A **base**
+            layer wants it: its wall-clock ``start_time`` is when the capture was
+            converted, and the viewer shows it. A **derived** layer passes
+            ``False`` — it is the same recording as the base it stacks onto, so a
+            second name and a second start time are duplicate, and its own
+            ``start_time`` would be whenever it was last rebuilt. Explicit
+            ``send_property``/``send_recording_name`` calls still land either way
+            (verified on rerun 0.37.0), so a layer's own property group is
+            unaffected.
+    """
     # The recording stream is the inner context on purpose: it flushes and closes
     # before atomic_write reaches its os.replace.
     with (
         atomic_write(target) as temp_path,
-        rr.RecordingStream(application_id=application_id, recording_id=recording_id, send_properties=True) as recording,
+        recording_to(
+            temp_path,
+            application_id=application_id,
+            recording_id=recording_id,
+            default_blueprint=default_blueprint,
+            send_properties=send_properties,
+        ) as recording,
     ):
-        recording.save(temp_path, default_blueprint=default_blueprint)
         yield recording
 
 

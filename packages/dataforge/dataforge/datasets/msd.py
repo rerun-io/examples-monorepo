@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import ClassVar, Literal, TypeAlias
 
 import numpy as np
+import pyarrow as pa
 import rerun as rr
 import rerun.blueprint as rrb
 from huggingface_hub import HfApi, RepoFile
@@ -76,6 +77,7 @@ from dataforge.euroc import (
     CameraRow,
     GtTrajectory,
     TimestampedSamples,
+    first_timestamp_ns,
     gt_trajectory,
     nominal_fps,
     read_camera_index,
@@ -116,6 +118,15 @@ FOLLOW_AHEAD_M: float = 0.3
 """How far ahead of the headset the follow eye aims, so the shot leads the motion."""
 FOLLOW_FRAME_TOLERANCE_DEG: float = 5.0
 """How far a declared ``FollowFrame`` axis may sit from the calibration's before ``convert`` warns."""
+PROPERTIES_ENTITY: str = "/__properties"
+"""Where Rerun keeps a recording's properties; the gt layer reads base's clock origin from it."""
+GT_SIDECAR_NAME: str = "gt.csv"
+"""The sidecar the gt layer rebuilds from: the archive's ``gt/data.csv``, byte for byte.
+
+Kept verbatim rather than as parsed columns so it stays the upstream artifact —
+comparable with the corpus, and readable by the same tools — and because at ~1 kHz
+it is the only part of a multi-gigabyte archive small enough to keep.
+"""
 
 MsdDeviceChoice: TypeAlias = Literal["index", "g2", "odyssey"]
 """``--device``: which headset's corpus to work on, and which catalog dataset."""
@@ -462,6 +473,9 @@ class SequencePaths:
     """Final base-layer rrd path."""
     gt_target: Path
     """Final gt-layer rrd path, a sibling of the same recording id."""
+    sidecar: Path
+    """Final ``gt.csv`` sidecar path: the one archive member the gt layer still needs
+    once the archive itself is gone."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -498,10 +512,12 @@ class SequenceStreams:
     """Linear acceleration in m/s^2; also what the world-up measurement reads."""
     magnetometer: ImuChannel | None
     """Field samples in the sensor's own units, or ``None`` on a device without one."""
-    gt: GtTrajectory
-    """Ground truth, quaternions already xyzw and dropouts already repaired."""
     start_time_ns: int
-    """The device-clock origin every stream above was shifted by; a recording property."""
+    """The device-clock origin every stream above was shifted by; a recording property.
+
+    Deliberately the only trace of ``gt`` left here: its first stamp is part of
+    this origin, but the trajectory itself belongs to the gt layer, which parses
+    it out of the sidecar rather than being handed a copy the base layer kept."""
     duration_ns: int
     """Span of the *sensor* streams; deliberately not bounded by gt."""
 
@@ -509,6 +525,77 @@ class SequenceStreams:
     def num_frames(self) -> int:
         """Longest per-camera sample count, which is what the capture properties report."""
         return max(camera.times_ns.size for camera in self.cameras)
+
+
+@dataclass(frozen=True, slots=True)
+class BaseClock:
+    """What the gt layer reads back out of a published base layer, and only that."""
+
+    start_time_ns: int
+    """The device-clock origin the base layer shifted every stream by, off
+    ``property:capture:start_time_ns``. The gt csv holds raw device stamps, so
+    this is what puts its poses on the same ``video_time`` as the video."""
+    accel: ImuChannel
+    """The accelerometer, already on ``video_time``; the world-up measurement's other half."""
+
+
+@dataclass(frozen=True, slots=True)
+class GtSummary:
+    """What one gt-layer write reports back: its size, and what it measured."""
+
+    num_poses: int
+    """Rows the sidecar held, which is what the layer's properties report."""
+    measured: MeasuredUp
+    """This sequence's own gravity measurement, for ``warn_on_world_up``."""
+
+
+def read_base_clock(base_rrd: Path) -> BaseClock:
+    """Read the clock origin and the accelerometer back out of a base-layer rrd.
+
+    Chunks are filtered **while streaming** rather than loaded into a store and
+    queried: a base rrd is mostly video, and the long sessions run to 2 GB, so
+    materializing one to reach a 3-column sensor stream would cost gigabytes of
+    resident memory per sequence. Keeping only the properties entity and the
+    accelerometer holds the same read to a few hundred megabytes on the largest
+    sequence in the corpus.
+
+    Args:
+        base_rrd: A published (or staged) base layer of the sequence.
+
+    Returns:
+        The origin and the accelerometer, ready for ``measured_world_up``.
+
+    Raises:
+        ValueError: The rrd carries no ``capture:start_time_ns`` property or no
+            accelerometer samples, so it is not a base layer this package wrote.
+    """
+    accel_path: str = schema.accel_path(RIG, IMU)
+    wanted: list[rr.experimental.Chunk] = [
+        chunk
+        for chunk in rr.experimental.RrdReader(base_rrd).stream()
+        if chunk.entity_path == accel_path or chunk.entity_path.startswith(PROPERTIES_ENTITY)
+    ]
+    store: rr.experimental.ChunkStore = rr.experimental.ChunkStore.from_chunks(wanted)
+    properties: pa.Table = store.reader(index=None, contents=f"{PROPERTIES_ENTITY}/**").to_arrow_table()
+    origin: list[int] | None = properties.to_pylist()[0].get(schema.capture_property("start_time_ns")) if properties.num_rows else None
+    if not origin:
+        raise ValueError(f"{base_rrd} carries no {schema.capture_property('start_time_ns')}; it is not a dataforge base layer")
+
+    samples: pa.Table = (
+        store.reader(index=schema.TIMELINE)
+        .to_arrow_table()
+        .sort_by(schema.TIMELINE)
+        .select([schema.TIMELINE, f"{accel_path}:Scalars:scalars"])
+        .drop_null()
+    )
+    if samples.num_rows == 0:
+        raise ValueError(f"{base_rrd} holds no {accel_path} samples; the world up axis cannot be measured from it")
+    times_ns: Int64[ndarray, "n_samples"] = samples.column(schema.TIMELINE).combine_chunks().cast(pa.int64()).to_numpy()
+    values_xyz: Float64[ndarray, "n_samples 3"] = np.asarray(samples.column(1).to_pylist(), dtype=np.float64)
+    return BaseClock(
+        start_time_ns=int(origin[0]),
+        accel=ImuChannel(times_ns=np.ascontiguousarray(times_ns, dtype=np.int64), values_xyz=values_xyz),
+    )
 
 
 class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
@@ -634,6 +721,7 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
             work_dir=self.config.root / "work" / source.sequence,
             target=paths.rrd_path(output_root, layer=paths.BASE_LAYER, identity=identity),
             gt_target=paths.rrd_path(output_root, layer=paths.GT_LAYER, identity=identity),
+            sidecar=paths.sidecar_path(output_root, identity, GT_SIDECAR_NAME),
         )
 
     def enforce_raw_budget(self, source: MsdSource, archives: Sequence[Path]) -> None:
@@ -698,24 +786,50 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         )
 
     def convert(self, identity: SequenceIdentity, source: MsdSource, *, force: bool) -> Path:
-        """Fetch one sequence, encode it, write its two rrd layers, and delete the raw.
+        """Write whichever of the two layers is missing, fetching only if base needs it.
 
-        Both layers come out of the *same* archive fetch, so they are skipped and
-        rebuilt as a unit: half a sequence on disk means the multi-gigabyte
-        download has to happen again anyway, and rebuilding the base layer with
-        it costs one encode against a corpus that would otherwise be silently
-        incomplete. The base path is what the caller gets, because that is the
-        layer every dataforge verb keys on.
+        Per README#the-layer-rule the **base** layer is the only step that needs
+        the archive: it is a faithful conversion of the raw sequence, and once it
+        is published the multi-gigabyte source is deleted. What the **gt** layer
+        needs then is a ~1 kHz csv, so that one member is kept verbatim as a
+        sidecar and gt is rebuilt from it plus the base rrd — no network, no
+        encode, seconds instead of an hour. Three cases follow:
+
+        * both rrds exist → nothing to do.
+        * base exists, gt does not, the sidecar does → rebuild gt alone.
+        * anything else → fetch, encode, and stage all three.
+
+        A full conversion stages base, gt and the sidecar in temp files and
+        publishes them back to back, so a corpus never holds a base rrd whose gt
+        pass died halfway; nothing is ever unlinked first, because a catalog
+        server may hold the current file open. ``--force`` bypasses the skip
+        checks and nothing else.
 
         Failure keeps the archive (a retry then skips the multi-gigabyte
         download) but removes the mp4s and any extraction directory, so the next
         attempt starts from a clean scratch dir. Nothing outside ``root`` is ever
         deleted.
+
+        Returns:
+            The base rrd path, because that is the layer every dataforge verb keys on.
         """
         locations: SequencePaths = self.sequence_paths(identity, source)
-        if writing.should_skip(locations.target, force=force) and writing.should_skip(locations.gt_target, force=force):
+        base_done: bool = writing.should_skip(locations.target, force=force)
+        gt_done: bool = writing.should_skip(locations.gt_target, force=force)
+        if base_done and gt_done:
             print(f"skip {identity.sequence_key} → {locations.target} + {locations.gt_target}")
             return locations.target
+        if base_done and locations.sidecar.is_file():
+            with writing.atomic_write(locations.gt_target) as staged_gt:
+                rebuilt: GtSummary = self.write_gt_layer(identity, staged_gt, base_rrd=locations.target, sidecar=locations.sidecar)
+            self.warn_on_world_up(source, rebuilt.measured)
+            print(
+                f"rebuilt gt {identity.sequence_key} → {locations.gt_target} "
+                f"({rebuilt.num_poses} gt poses from {locations.sidecar} and {locations.target}, no fetch)"
+            )
+            return locations.target
+        if base_done:
+            print(f"  {locations.target} exists but {locations.sidecar} does not, so gt cannot be rebuilt from it; fetching the archive again")
 
         self.enforce_raw_budget(source, locations.archives)
         # Both hub lookups happen before the archives are pulled and long before a
@@ -725,6 +839,7 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         # ordering explicit for a scratch dir that already holds the file.)
         _ = self.commit_sha
         cameras: tuple[CalibratedCamera, ...] = self.calibration()
+        self.warn_on_follow_frame(cameras)
 
         on_disk: int = sum(1 for archive in locations.archives if archive.is_file())
         if on_disk:
@@ -733,17 +848,27 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
 
         locations.work_dir.mkdir(parents=True, exist_ok=True)
         try:
-            with open_member_reader(locations.archives, locations.work_dir) as reader:
-                streams: SequenceStreams = self.read_sequence(reader, source, cameras, work_dir=locations.work_dir)
-            measured: MeasuredUp = measured_world_up(streams.gt, streams.accel)
-            self.warn_on_device_claims(source, cameras=cameras, measured=measured)
-            self.write_base_layer(identity, source, streams, locations.target)
-            self.write_gt_layer(identity, streams, locations.gt_target, measured=measured)
+            # Every artifact is staged and the three publications happen as these
+            # contexts unwind — base first, then gt, then the sidecar. The gt step
+            # reads the *staged* base rrd and the *staged* sidecar, so it runs the
+            # same code as a rebuild does against the published pair.
+            with (
+                writing.atomic_write(locations.sidecar) as staged_sidecar,
+                writing.atomic_write(locations.gt_target) as staged_gt,
+                writing.atomic_write(locations.target) as staged_base,
+            ):
+                with open_member_reader(locations.archives, locations.work_dir) as reader:
+                    streams: SequenceStreams = self.read_sequence(
+                        reader, source, cameras, work_dir=locations.work_dir, staged_sidecar=staged_sidecar
+                    )
+                self.write_base_layer(identity, source, streams, staged_base)
+                written: GtSummary = self.write_gt_layer(identity, staged_gt, base_rrd=staged_base, sidecar=staged_sidecar)
         except BaseException:
             remove_tree(locations.work_dir)
             retained: int = sum(archive.stat().st_size for archive in locations.archives if archive.is_file())
             print(f"  kept {retained / 1e9:.2f} GB of archives in {self.config.root} so a retry skips the download")
             raise
+        self.warn_on_world_up(source, written.measured)
 
         if self.config.keep_raw:
             print(f"  keeping raw: {len(locations.archives)} archive volume(s) and the mp4s in {locations.work_dir}")
@@ -752,14 +877,20 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
             for archive in locations.archives:
                 archive.unlink(missing_ok=True)
         print(
-            f"done {identity.sequence_key} → {locations.target} + {locations.gt_target} "
-            f"({self.device.num_cameras} cameras, {streams.num_frames} frames, {streams.gt.times_ns.size} gt poses, "
-            f"world up {measured.axis} at {measured.fraction:.2f} g)"
+            f"done {identity.sequence_key} → {locations.target} + {locations.gt_target} + {locations.sidecar} "
+            f"({self.device.num_cameras} cameras, {streams.num_frames} frames, {written.num_poses} gt poses, "
+            f"world up {written.measured.axis} at {written.measured.fraction:.2f} g)"
         )
         return locations.target
 
     def read_sequence(
-        self, reader: MemberReader, source: MsdSource, cameras: Sequence[CalibratedCamera], *, work_dir: Path
+        self,
+        reader: MemberReader,
+        source: MsdSource,
+        cameras: Sequence[CalibratedCamera],
+        *,
+        work_dir: Path,
+        staged_sidecar: Path,
     ) -> SequenceStreams:
         """Read every csv and encode every camera: the whole archive, in one pass.
 
@@ -768,12 +899,20 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         — a split archive's reader extracts one camera at a time, so a converter
         cannot hold a reader open across the two.
 
+        This is also the only place ``gt/data.csv`` is ever in reach, so it is
+        copied out to the sidecar here, byte for byte and before anything
+        expensive runs. Only its first stamp is read, because that stamp is part
+        of the sequence's clock origin: parsing the trajectory is the gt layer's
+        job, and holding a parsed copy here would make it the second parse.
+
         Args:
             reader: Open reader over the sequence's archive volume(s).
             source: The discovered sequence, whose stem is the archive's top directory.
             cameras: The device's validated calibration records, one per camera;
                 each is carried into the ``EncodedCamera`` beside its own clip.
             work_dir: Scratch directory the encoded mp4s are written into.
+            staged_sidecar: Temp path ``gt/data.csv`` is copied to; the caller
+                publishes it beside the two rrds.
 
         Raises:
             ValueError: A camera index, ``imu0/data.csv`` or ``gt/data.csv`` holds
@@ -795,14 +934,15 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         magnetometer: TimestampedSamples | None = (
             read_numeric_csv(reader.read_member(f"{mav0}/mag0/data.csv"), num_values=MAG_VALUE_COLUMNS) if self.device.has_magnetometer else None
         )
-        # The gt *layer* is a sibling rrd, but both layers share one zero-based
-        # video_time, so the base layer has to know gt's clock origin too.
-        gt: GtTrajectory = gt_trajectory(read_numeric_csv(reader.read_member(f"{mav0}/gt/data.csv"), num_values=GT_VALUE_COLUMNS))
+        # The gt *layer* is a sibling rrd built from this file later, but both layers
+        # share one zero-based video_time, so the base layer needs gt's clock origin.
+        gt_csv: bytes = reader.read_member(f"{mav0}/gt/data.csv")
+        staged_sidecar.write_bytes(gt_csv)
 
         sensor_times_ns: list[Int64[ndarray, "n_samples"]] = [*camera_times_ns, inertial.times_ns]
         if magnetometer is not None and magnetometer.times_ns.size:
             sensor_times_ns.append(magnetometer.times_ns)
-        start_time_ns: int = min(int(gt.times_ns[0]), *(int(times_ns[0]) for times_ns in sensor_times_ns))
+        start_time_ns: int = min(first_timestamp_ns(gt_csv), *(int(times_ns[0]) for times_ns in sensor_times_ns))
         # Deliberately not bounded by gt: duration_ns describes the *sensor* layer.
         duration_ns: int = max(int(times_ns[-1]) for times_ns in sensor_times_ns) - start_time_ns
 
@@ -825,17 +965,19 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
             magnetometer=(
                 None if magnetometer is None else ImuChannel(times_ns=magnetometer.times_ns - start_time_ns, values_xyz=magnetometer.values)
             ),
-            gt=replace(gt, times_ns=gt.times_ns - start_time_ns),
             start_time_ns=start_time_ns,
             duration_ns=duration_ns,
         )
 
-    def warn_on_device_claims(self, source: MsdSource, *, cameras: Sequence[CalibratedCamera], measured: MeasuredUp) -> None:
-        """Re-check both per-device claims against this sequence and say so on a disagreement.
+    def warn_on_follow_frame(self, cameras: Sequence[CalibratedCamera]) -> None:
+        """Re-derive the declared follow frame from this calibration and say so on a disagreement.
 
-        Neither claim is re-applied: every rrd of a device must carry the same
-        world axes and the same follow eye, so one sequence disagreeing is news,
-        not a reason to reorient that rrd alone. See ``MSD_DEVICES``.
+        The claim is not re-applied: every rrd of a device must carry the same
+        follow eye, so a calibration disagreeing is news rather than a reason to
+        re-aim one rrd. Split from the world-up check because the two rest on
+        different inputs — this one needs only the calibration, so it runs before
+        the fetch, while the measurement needs a written base layer.
+        See ``MSD_DEVICES``.
         """
         # The declared axes are rounded to three decimals and so are a hair short of
         # unit length; dividing by the norms keeps that rounding out of the angles.
@@ -850,19 +992,37 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
                 f"forward off by {deviations_deg[0]:.1f} deg, up off by {deviations_deg[1]:.1f} deg, over the "
                 f"{FOLLOW_FRAME_TOLERANCE_DEG:g} deg tolerance; the blueprint still uses the declared frame"
             )
+
+    def warn_on_world_up(self, source: MsdSource, measured: MeasuredUp) -> None:
+        """Compare this sequence's own gravity measurement with the device's declared axis.
+
+        Not re-applied either: every rrd of a device states the same root
+        ``ViewCoordinates``, so one sequence measuring something else is news and
+        not a silent per-sequence reorientation. See ``MSD_DEVICES``.
+        """
         if measured.axis != self.device.world_up:
             print(
                 f"  warning: {self.config.device} declares world_up {self.device.world_up} but {source.sequence} "
                 f"measured {measured.axis} carrying {measured.fraction:.2f} of |g|; the rrd still states the declared axis"
             )
 
-    def write_base_layer(self, identity: SequenceIdentity, source: MsdSource, streams: SequenceStreams, target: Path) -> int:
+    def write_base_layer(self, identity: SequenceIdentity, source: MsdSource, streams: SequenceStreams, staged_base: Path) -> int:
         """Write the sensor layer: every camera's video, the IMU, the magnetometer.
+
+        Saved into ``staged_base`` rather than published, because the gt layer
+        reads this file next and both are published together once it has. The
+        recording is flushed and closed on return, so it is readable then.
+
+        Args:
+            identity: The sequence's identity; its recording id names the recording.
+            source: The discovered sequence, for the collection it came from.
+            streams: One archive read's cameras and sensor channels.
+            staged_base: Temp path to save into; the caller publishes it.
 
         Returns:
             Frames the longest camera holds, which is the recording's ``num_frames``.
         """
-        with writing.atomic_recording(target, recording_id=identity.recording_id, default_blueprint=self.default_blueprint()) as recording:
+        with writing.recording_to(staged_base, recording_id=identity.recording_id, default_blueprint=self.default_blueprint()) as recording:
             # Deliberately NO ViewCoordinates at "/": the gt layer owns the root
             # ViewCoordinates, because it is what establishes a world frame at all.
             log_rig_node(recording, RIG, reference=RIG_REFERENCE, num_cameras=self.device.num_cameras, name=self.device.label, kind="ego")
@@ -900,16 +1060,37 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
             )
         return streams.num_frames
 
-    def write_gt_layer(self, identity: SequenceIdentity, streams: SequenceStreams, gt_target: Path, *, measured: MeasuredUp) -> None:
-        """Write the ground-truth layer: ``world_T_rig`` at the full rate, its path and its trail.
+    def write_gt_layer(self, identity: SequenceIdentity, staged_gt: Path, *, base_rrd: Path, sidecar: Path) -> GtSummary:
+        """Write the ground-truth layer from the sidecar and the base rrd, and nothing else.
 
-        Its own recording stream and its own atomic replace, opened only after
-        the base layer has closed, so a failure here cannot half-write that one.
-        The recording id is the base layer's, which is what makes the catalog
-        stack the two onto one segment.
+        Deliberately not handed the in-memory streams of a conversion: reading
+        the published inputs is what makes a gt rebuild possible at all, and a
+        step that *could* take a shortcut on the fetch path would only be
+        exercised there — the rebuild path would then be the untested one. So the
+        clock origin and the accelerometer come out of the base rrd and the poses
+        out of the sidecar csv, whether those two are a full conversion's staged
+        temp files or last week's published pair.
+
+        Written with ``send_properties=False`` and no recording name: this is the
+        same recording as the base it stacks onto, so a second ``RecordingInfo``
+        would duplicate base's name and record a ``start_time`` of whenever this
+        layer was last rebuilt. Its own ``property:gt:*`` still lands.
+
+        Args:
+            identity: The sequence's identity; its recording id is the base
+                layer's, which is what makes the catalog stack the two.
+            staged_gt: Temp path to save into; the caller publishes it.
+            base_rrd: The base layer to read the clock origin and accelerometer from.
+            sidecar: The archive's ``gt/data.csv``, kept verbatim.
+
+        Returns:
+            The pose count and this sequence's own gravity measurement.
         """
-        gt: GtTrajectory = streams.gt
-        with writing.atomic_recording(gt_target, recording_id=identity.recording_id) as recording:
+        raw: TimestampedSamples = read_numeric_csv(sidecar.read_bytes(), num_values=GT_VALUE_COLUMNS)
+        published: BaseClock = read_base_clock(base_rrd)
+        gt: GtTrajectory = gt_trajectory(replace(raw, times_ns=raw.times_ns - published.start_time_ns))
+        measured: MeasuredUp = measured_world_up(gt, published.accel)
+        with writing.recording_to(staged_gt, recording_id=identity.recording_id, send_properties=False) as recording:
             # The gt layer establishes a world frame at all, so it — not the base
             # layer — owns the root ViewCoordinates. The axis is the device's
             # declared one, not this sequence's measurement: every rrd of a device
@@ -944,7 +1125,6 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
                 columns=rr.Points3D.columns(positions=gt.translations_xyz),
                 recording=recording,
             )
-            recording.send_recording_name(identity.recording_id)
             recording.send_property(
                 "gt",
                 rr.AnyValues(
@@ -957,3 +1137,4 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
                     measured_up_fraction=measured.fraction,
                 ),
             )
+        return GtSummary(num_poses=int(gt.times_ns.size), measured=measured)

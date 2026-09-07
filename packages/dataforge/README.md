@@ -68,15 +68,22 @@ fetches only the device calibration and prints the plan, and `convert` fetches
 **one** sequence, streams its PNGs straight into the AV1 encoder, writes the
 rrds, and deletes the archive again.
 
-One sequence is **two** rrds under one recording id, so the catalog stacks them
-as layers of one segment: `base/` holds the video, the IMU and the
-magnetometer, and `gt/` holds the ground truth — the temporal `world_T_rig` on
-the rig node at the archive's full ~1 kHz rate, the whole path as a static
-`LineStrips3D` at `/world/runs/gt/trajectory`, a per-pose `Points3D` at
-`/world/runs/gt/trail` that the default blueprint shows through a −10 s
-cursor-relative window, and the root `ViewCoordinates`. Both layers come out of
-one archive fetch, so `convert` skips a sequence only when both exist and
-rebuilds both when either is missing.
+One sequence is **two** rrds plus **one** sidecar under one recording id, so the
+catalog stacks the rrds as layers of one segment: `base/` holds the video, the
+IMU and the magnetometer, and `gt/` holds the ground truth — the temporal
+`world_T_rig` on the rig node at the archive's full ~1 kHz rate, the whole path
+as a static `LineStrips3D` at `/world/runs/gt/trajectory`, a per-pose `Points3D`
+at `/world/runs/gt/trail` that the default blueprint shows through a −10 s
+cursor-relative window, and the root `ViewCoordinates`.
+
+Both layers follow [the layer rule](#the-layer-rule). Only `base` needs the
+archive, so the one member `gt` still needs afterwards — `gt/data.csv`, a few MB
+at 1 kHz — is published verbatim to `sidecars/<recording_id>/gt.csv`, and `gt` is
+built from that plus the accelerometer and clock origin read back out of the base
+rrd. A whole-corpus gt rebuild is therefore `rm gt/*.rrd`, a `dataforge-convert`
+and a `dataforge-register --replace`: seconds per sequence, no network, no
+encode. A full conversion stages both rrds and the sidecar and publishes them
+back to back, so a corpus never holds a base rrd whose gt pass died halfway.
 
 One headset is one catalog dataset, because a catalog dataset holds one default
 blueprint and the three headsets have different camera counts:
@@ -98,6 +105,11 @@ pixi run -e dataforge --frozen dataforge-download msd --device index
 pixi run -e dataforge --frozen dataforge-convert --sequence MIO09_short_1_updown msd --device index
 pixi run -e dataforge --frozen dataforge-convert msd --device index   # every sequence, one at a time
 pixi run -e dataforge --frozen dataforge-register msd --device index
+
+# Regenerate just the gt layer across the corpus: no archive is fetched
+rm /mnt/nas/datasets/msd-rrd/gt/msd-index__*.rrd
+pixi run -e dataforge --frozen dataforge-convert msd --device index
+pixi run -e dataforge --frozen dataforge-register --replace msd --device index
 ```
 
 `--root` is scratch, not storage: point it at local NVMe (it defaults to
@@ -153,7 +165,7 @@ and warns past 5°, as it does for the world up axis.
 
 | variable | default | purpose |
 | --- | --- | --- |
-| `DATAFORGE_OUTPUT_ROOT` | `packages/dataforge/data/dataforge/rrd` | where rrds and blueprints go; set it for convert **and** register |
+| `DATAFORGE_OUTPUT_ROOT` | `packages/dataforge/data/dataforge/rrd` | where rrds, blueprints and sidecars go; set it for convert **and** register |
 | `DATAFORGE_RAW_ROOT` | `packages/dataforge/data/raw` | where raw corpora are fetched to |
 | `DATAFORGE_FFMPEG` | the env's ffmpeg | an ffmpeg with hardware encoding, used both to re-encode B-frame sources (most phone HEVC) and to encode image sequences. Without `av1_nvenc` the encoder refuses to start rather than falling back to a software encode that looks like a hang. Check yours with `ffmpeg -hide_banner -encoders \| grep av1_nvenc` |
 
@@ -204,7 +216,9 @@ pose, labels) stack onto the same entities as sibling layers; msd already writes
 one, its `gt/` rrd, in the same convert. `register` walks
 every layer directory it knows — `base`, which is required, then `gt` — and
 registers each under its own layer name, so a corpus with no ground-truth pass
-registers exactly as before.
+registers exactly as before. Duplicates are skipped, which keeps a re-register
+idempotent; after regenerating a layer use `--replace`, because a skipped
+duplicate leaves the server serving the old file and says nothing.
 
 ### The layer rule
 

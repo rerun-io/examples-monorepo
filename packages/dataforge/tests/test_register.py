@@ -8,6 +8,7 @@ from typing import Any, ClassVar
 
 import pytest
 import rerun.blueprint as rrb
+from rerun.catalog import OnDuplicateSegmentLayer
 
 from dataforge import paths
 from dataforge.apis import register
@@ -29,12 +30,15 @@ class FakeEntry:
     """Records every registration so a test can assert the per-layer fan-out."""
 
     registered: dict[str, list[str]] = field(default_factory=dict)
+    duplicates: dict[str, Any] = field(default_factory=dict)
+    """The ``on_duplicate`` policy each layer was registered under."""
     blueprints: list[tuple[str, bool]] = field(default_factory=list)
     opened_as: tuple[str, str] = ("", "")
     """``(catalog url, dataset name)`` the client was asked for."""
 
     def register(self, uris: list[str], *, layer_name: str, on_duplicate: Any) -> FakeRegistration:
         self.registered[layer_name] = list(uris)
+        self.duplicates[layer_name] = on_duplicate
         return FakeRegistration()
 
     def default_blueprint(self) -> None:
@@ -146,3 +150,30 @@ def test_a_per_device_dataset_registers_only_its_own_two_layers(tmp_path: Path, 
 def test_default_blueprint_is_a_blueprint() -> None:
     """Guards the fake above: the real entry receives a saved rrb.Blueprint."""
     assert isinstance(RobocapConfig().setup().default_blueprint(), rrb.Blueprint)
+
+
+def test_registration_skips_duplicates_by_default(tmp_path: Path, catalog: FakeEntry, capsys) -> None:
+    """Re-registering a corpus has to stay cheap and idempotent, so SKIP is the default."""
+    make_rrds(tmp_path, paths.BASE_LAYER, ["robocap__a.rrd"])
+
+    register.main(Config(dataset=RobocapConfig()))
+
+    assert catalog.duplicates[paths.BASE_LAYER] == OnDuplicateSegmentLayer.SKIP
+    assert "skipping duplicates" in capsys.readouterr().out
+
+
+def test_replace_re_registers_a_regenerated_layer(tmp_path: Path, catalog: FakeEntry, capsys) -> None:
+    """A rebuilt layer is a new file at a path the catalog already holds.
+
+    SKIP then leaves the server serving the old registration and says nothing,
+    so the rebuilt rrd is simply never seen — which is the failure ``--replace``
+    exists for (``rm gt/*.rrd``, a convert, a ``register --replace``).
+    """
+    make_rrds(tmp_path, paths.BASE_LAYER, ["robocap__a.rrd"])
+    make_rrds(tmp_path, paths.GT_LAYER, ["robocap__a.rrd"])
+
+    register.main(Config(dataset=RobocapConfig(), replace=True))
+
+    assert catalog.duplicates[paths.BASE_LAYER] == OnDuplicateSegmentLayer.REPLACE
+    assert catalog.duplicates[paths.GT_LAYER] == OnDuplicateSegmentLayer.REPLACE
+    assert "replacing duplicates" in capsys.readouterr().out
