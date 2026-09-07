@@ -27,16 +27,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::{DMatrix, DVector, Vector3};
 
-use super::{EstimatorError, FrameStats, LmDamping, VEE_FACTOR, duration_ns};
-use crate::ba_base::BundleAdjustmentBase;
-use crate::config::VioConfig;
+use super::{EstimatorError, FrameStats, SqrtKeypointVio, VEE_FACTOR, duration_ns};
 use crate::imu::{ImuLinData, IntegratedImuMeasurement, Matrix9};
 use crate::lie::{LieScalar, eigen_maxi};
 use crate::linearize::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
 use crate::marg::eigen_ldlt::EigenLdlt;
 use crate::types::{
-    AbsOrderMap, FrameId, MargLinData, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseVelBiasState,
-    PoseVelBiasStateWithLin, Vector9, Vector15,
+    AbsOrderMap, FrameId, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseVelBiasState, PoseVelBiasStateWithLin,
+    Vector9, Vector15,
 };
 
 /// `max_num_iter` for the damped solve (`:1408`).
@@ -111,300 +109,304 @@ pub struct LmIteration<S: LieScalar> {
     pub accepted: bool,
 }
 
-/// `optimize()` (`:1201-1639`).
-///
-/// # Errors
-///
-/// [`EstimatorError::PriorOrderMismatch`] where C++ asserts the window agrees
-/// with the prior (`:1227`, `:1237`), [`EstimatorError::NumericallyInvalid`]
-/// where it prints "did not expect numerical failure during linearization" and
-/// fails the frame (`:1300-1303`), and the linearization's own errors.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the C++ reads nine estimator members; passing them as fields is what lets the borrow checker see `ba` and `imu_meas` as disjoint"
-)]
-pub(super) fn optimize<S: LieScalar>(
-    ba: &mut BundleAdjustmentBase<S>,
-    marg_data: &MargLinData<S>,
-    imu_meas: &BTreeMap<i64, IntegratedImuMeasurement<S>>,
-    ltkfs: &BTreeSet<FrameId>,
-    imu_lin: &ImuLinData<S>,
-    config: &VioConfig,
-    damping: &mut LmDamping<S>,
-    opt_started: &mut bool,
-    stats: &mut FrameStats<S>,
-) -> Result<(), EstimatorError> {
-    // `:1207`: five states have to accumulate before the first optimization.
-    if !*opt_started && ba.frame_states.len() <= 4 {
-        return Ok(());
-    }
-    *opt_started = true;
-    stats.opt_started = true;
-
-    // `:1221-1242`: poses first, then states, both in ascending timestamp
-    // order, and each entry checked against the prior's. C++ reads the prior
-    // with `.at()` for the poses (an out-of-range throw when it disagrees) and
-    // guards the states with `aom.items < marg_data.order.size()`, because the
-    // newest states are not in the prior yet.
-    //
-    // This is deliberately not `marg::window::build_absolute_ordering`: that
-    // one is `:726-763`, which walks the same two maps but stops at
-    // `last_state_to_marg` and returns the marginalization's own split. basalt
-    // writes the two loops out twice for the same reason, and merging them
-    // would mean one function with two payloads and two stopping rules.
-    let mut aom: AbsOrderMap = AbsOrderMap::new();
-    for frame_id in ba.frame_poses.keys().copied() {
-        let index: usize = aom.push(frame_id, POSE_SIZE)?;
-        let found: (usize, usize) = (index, POSE_SIZE);
-        if marg_data.order.get(frame_id) != Some(found) {
-            return Err(EstimatorError::PriorOrderMismatch {
-                frame_id,
-                expected: marg_data.order.get(frame_id),
-                found,
-            });
+impl<S: LieScalar> SqrtKeypointVio<S> {
+    /// `optimize()` (`:1201-1639`).
+    ///
+    /// # Errors
+    ///
+    /// [`EstimatorError::PriorOrderMismatch`] where C++ asserts the window
+    /// agrees with the prior (`:1227`, `:1237`),
+    /// [`EstimatorError::NumericallyInvalid`] where it prints "did not expect
+    /// numerical failure during linearization" and fails the frame
+    /// (`:1300-1303`), and the linearization's own errors.
+    pub(super) fn optimize(&mut self, stats: &mut FrameStats<S>) -> Result<(), EstimatorError> {
+        // `:1207`: five states have to accumulate before the first
+        // optimization.
+        if !self.opt_started && self.ba.frame_states.len() <= 4 {
+            return Ok(());
         }
-    }
-    for frame_id in ba.frame_states.keys().copied() {
-        let checked: bool = aom.items() < marg_data.order.items();
-        let index: usize = aom.push(frame_id, POSE_VEL_BIAS_SIZE)?;
-        let found: (usize, usize) = (index, POSE_VEL_BIAS_SIZE);
-        if checked && marg_data.order.get(frame_id) != Some(found) {
-            return Err(EstimatorError::PriorOrderMismatch {
-                frame_id,
-                expected: marg_data.order.get(frame_id),
-                found,
-            });
+        self.opt_started = true;
+        stats.opt_started = true;
+
+        let imu_lin: ImuLinData<S> = self.imu_lin_data();
+        // The nine estimator members the C++ reads, as disjoint field borrows:
+        // the linearizer needs `ba` mutably while `marg_data` and `imu_meas`
+        // are borrowed into its inputs.
+        let Self {
+            ref mut ba,
+            ref mut damping,
+            ref marg_data,
+            ref imu_meas,
+            ref ltkfs,
+            ref config,
+            ..
+        } = *self;
+
+        // `:1221-1242`: poses first, then states, both in ascending timestamp
+        // order, and each entry checked against the prior's. C++ reads the prior
+        // with `.at()` for the poses (an out-of-range throw when it disagrees) and
+        // guards the states with `aom.items < marg_data.order.size()`, because the
+        // newest states are not in the prior yet.
+        //
+        // This is deliberately not `marg::window::build_absolute_ordering`: that
+        // one is `:726-763`, which walks the same two maps but stops at
+        // `last_state_to_marg` and returns the marginalization's own split. basalt
+        // writes the two loops out twice for the same reason, and merging them
+        // would mean one function with two payloads and two stopping rules.
+        let mut aom: AbsOrderMap = AbsOrderMap::new();
+        for frame_id in ba.frame_poses.keys().copied() {
+            let index: usize = aom.push(frame_id, POSE_SIZE)?;
+            let found: (usize, usize) = (index, POSE_SIZE);
+            if marg_data.order.get(frame_id) != Some(found) {
+                return Err(EstimatorError::PriorOrderMismatch {
+                    frame_id,
+                    expected: marg_data.order.get(frame_id),
+                    found,
+                });
+            }
         }
-    }
-
-    // `:1249`, D11.
-    damping.lambda = S::from_literal(config.vio_lm_lambda_initial);
-
-    // `:1266-1267`: every interval, with no `aom` filter — unlike
-    // `marginalize`, which keeps only the intervals both of whose ends are in
-    // the ordering.
-    let imu_input: ImuInput<'_, S> = ImuInput {
-        lin_data: *imu_lin,
-        measurements: imu_meas.iter().map(|(t, meas)| (*t, meas)).collect(),
-    };
-    let fixed_kfs: BTreeSet<FrameId> = if config.vio_fix_long_term_keyframes {
-        ltkfs.clone()
-    } else {
-        BTreeSet::new()
-    };
-    let inputs: LinearizationInputs<'_, S> = LinearizationInputs {
-        marg: Some(marg_data),
-        imu: Some(&imu_input),
-        used_frames: None,
-        lost_landmarks: None,
-        fixed_frames: Some(&fixed_kfs),
-    };
-
-    // `:1268-1274`: one linearizer for the whole frame; the outer loop
-    // re-linearizes into it rather than rebuilding it.
-    let mut lqr: LinearizationAbsQR<S> =
-        LinearizationAbsQR::new(ba, &aom, LinearizationOptions::default(), &inputs)?;
-
-    let gyro_bias_weight: Vector3<S> = imu_lin.gyro_bias_weight_sqrt.map(|w| w * w);
-    let accel_bias_weight: Vector3<S> = imu_lin.accel_bias_weight_sqrt.map(|w| w * w);
-
-    let mut it: i32 = 0;
-    let mut termination: Option<LmTermination> = None;
-
-    // `:1283`.
-    while it <= config.vio_max_iterations && termination.is_none() {
-        let mark: std::time::Instant = std::time::Instant::now();
-        // `:1297-1303`.
-        let (error_total, numerically_valid) = lqr.linearize_problem(ba, &inputs)?;
-        if !numerically_valid {
-            return Err(EstimatorError::NumericallyInvalid { t_ns: stats.t_ns });
+        for frame_id in ba.frame_states.keys().copied() {
+            let checked: bool = aom.items() < marg_data.order.items();
+            let index: usize = aom.push(frame_id, POSE_VEL_BIAS_SIZE)?;
+            let found: (usize, usize) = (index, POSE_VEL_BIAS_SIZE);
+            if checked && marg_data.order.get(frame_id) != Some(found) {
+                return Err(EstimatorError::PriorOrderMismatch {
+                    frame_id,
+                    expected: marg_data.order.get(frame_id),
+                    found,
+                });
+            }
         }
-        // `:1320`.
-        lqr.perform_qr()?;
-        stats.timings.linearize_ns += duration_ns(mark);
 
-        // `:1350`: the inner loop shares `it` with the outer one.
-        let mut backtrack: i32 = 0;
+        // `:1249`, D11.
+        damping.lambda = S::from_literal(config.vio_lm_lambda_initial);
+
+        // `:1266-1267`: every interval, with no `aom` filter — unlike
+        // `marginalize`, which keeps only the intervals both of whose ends are in
+        // the ordering.
+        let imu_input: ImuInput<'_, S> = ImuInput {
+            lin_data: imu_lin,
+            measurements: imu_meas.iter().map(|(t, meas)| (*t, meas)).collect(),
+        };
+        let fixed_kfs: BTreeSet<FrameId> = if config.vio_fix_long_term_keyframes {
+            ltkfs.clone()
+        } else {
+            BTreeSet::new()
+        };
+        let inputs: LinearizationInputs<'_, S> = LinearizationInputs {
+            marg: Some(marg_data),
+            imu: Some(&imu_input),
+            used_frames: None,
+            lost_landmarks: None,
+            fixed_frames: Some(&fixed_kfs),
+        };
+
+        // `:1268-1274`: one linearizer for the whole frame; the outer loop
+        // re-linearizes into it rather than rebuilding it.
+        let mut lqr: LinearizationAbsQR<S> =
+            LinearizationAbsQR::new(ba, &aom, LinearizationOptions::default(), &inputs)?;
+
+        let gyro_bias_weight: Vector3<S> = imu_lin.gyro_bias_weight_sqrt.map(|w| w * w);
+        let accel_bias_weight: Vector3<S> = imu_lin.accel_bias_weight_sqrt.map(|w| w * w);
+
+        let mut it: i32 = 0;
+        let mut termination: Option<LmTermination> = None;
+
+        // `:1283`.
         while it <= config.vio_max_iterations && termination.is_none() {
             let mark: std::time::Instant = std::time::Instant::now();
-            // `:1393`.
-            let (mut h, mut b) = lqr.get_dense_h_b(ba, &inputs)?;
+            // `:1297-1303`.
+            let (error_total, numerically_valid) = lqr.linearize_problem(ba, &inputs)?;
+            if !numerically_valid {
+                return Err(EstimatorError::NumericallyInvalid { t_ns: stats.t_ns });
+            }
+            // `:1320`.
+            lqr.perform_qr()?;
+            stats.timings.linearize_ns += duration_ns(mark);
 
-            // `:1395-1406`.
-            if config.vio_fix_long_term_keyframes {
-                let weight: S = S::from_literal(FIXED_KEYFRAME_WEIGHT);
-                for t_ns in ltkfs {
-                    let Some((idx, size)) = aom.get(*t_ns) else {
-                        // `:1397-1399`: C++ prints "[UNEXPECTED]" and skips.
+            // `:1350`: the inner loop shares `it` with the outer one.
+            let mut backtrack: i32 = 0;
+            while it <= config.vio_max_iterations && termination.is_none() {
+                let mark: std::time::Instant = std::time::Instant::now();
+                // `:1393`.
+                let (mut h, mut b) = lqr.get_dense_h_b(ba, &inputs)?;
+
+                // `:1395-1406`.
+                if config.vio_fix_long_term_keyframes {
+                    let weight: S = S::from_literal(FIXED_KEYFRAME_WEIGHT);
+                    for t_ns in ltkfs {
+                        let Some((idx, size)) = aom.get(*t_ns) else {
+                            // `:1397-1399`: C++ prints "[UNEXPECTED]" and skips.
+                            continue;
+                        };
+                        for row in idx..(idx + size).min(h.nrows()) {
+                            for col in 0..h.ncols() {
+                                h[(row, col)] = S::zero();
+                            }
+                            b[row] = S::zero();
+                        }
+                        for row in idx..(idx + POSE_SIZE).min(h.nrows()) {
+                            h[(row, row)] = weight;
+                        }
+                    }
+                }
+
+                // `:1408-1430`: up to three damped solves, escalating `lambda` on a
+                // non-finite increment.
+                let size: usize = h.nrows();
+                let mut solve_attempts: u32 = 0;
+                let lambda_used: S = damping.lambda;
+                // `MAX_SOLVE_ATTEMPTS` is three, so the first solve always happens
+                // and the increment never needs a placeholder value.
+                let (mut inc, inc_valid): (DVector<S>, bool) = loop {
+                    // `:1415-1417`. `cwiseMax` is `numext::maxi`, so a NaN on the
+                    // left survives where `f32::max` would drop it.
+                    let mut h_copy: DMatrix<S> = h.clone();
+                    for i in 0..size {
+                        let damped: S = eigen_maxi(h[(i, i)] * damping.lambda, damping.min_lambda);
+                        h_copy[(i, i)] += damped;
+                    }
+                    // `:1419-1420`.
+                    let inc: DVector<S> = EigenLdlt::new(h_copy).solve_vec(&b);
+                    solve_attempts += 1;
+                    if inc.iter().all(|v| v.is_finite()) {
+                        break (inc, true);
+                    }
+                    damping.lambda = damping.lambda_vee * damping.lambda;
+                    damping.lambda_vee *= S::from_literal(VEE_FACTOR);
+                    if solve_attempts >= MAX_SOLVE_ATTEMPTS {
+                        break (inc, false);
+                    }
+                };
+                // `:1432`: C++ warns and carries on with the non-finite increment.
+                if !inc_valid {
+                    log::warn!(
+                        "frame {} ns: increment still not finite after {MAX_SOLVE_ATTEMPTS} damped solves",
+                        stats.t_ns
+                    );
+                }
+                stats.timings.solver_ns += duration_ns(mark);
+
+                // `:1443`.
+                ba.backup();
+
+                // `:1447-1454`, D13: negate, then back-substitute.
+                let mark: std::time::Instant = std::time::Instant::now();
+                inc = -inc;
+                let l_diff: S = lqr.back_substitute(ba, &inputs, &inc)?;
+                stats.timings.back_substitution_ns += duration_ns(mark);
+
+                // `:1466-1474`.
+                for (frame_id, state) in &mut ba.frame_poses {
+                    let Some((idx, _)) = aom.get(*frame_id) else {
                         continue;
                     };
-                    for row in idx..(idx + size).min(h.nrows()) {
-                        for col in 0..h.ncols() {
-                            h[(row, col)] = S::zero();
-                        }
-                        b[row] = S::zero();
-                    }
-                    for row in idx..(idx + POSE_SIZE).min(h.nrows()) {
-                        h[(row, row)] = weight;
-                    }
+                    let step: nalgebra::SVector<S, POSE_SIZE> =
+                        nalgebra::SVector::from_iterator(inc.rows(idx, POSE_SIZE).iter().copied());
+                    state.apply_inc(&step);
                 }
-            }
+                for (frame_id, state) in &mut ba.frame_states {
+                    let Some((idx, _)) = aom.get(*frame_id) else {
+                        continue;
+                    };
+                    let step: Vector15<S> =
+                        Vector15::from_iterator(inc.rows(idx, POSE_VEL_BIAS_SIZE).iter().copied());
+                    state.apply_inc(&step);
+                }
 
-            // `:1408-1430`: up to three damped solves, escalating `lambda` on a
-            // non-finite increment.
-            let size: usize = h.nrows();
-            let mut solve_attempts: u32 = 0;
-            let lambda_used: S = damping.lambda;
-            // `MAX_SOLVE_ATTEMPTS` is three, so the first solve always happens
-            // and the increment never needs a placeholder value.
-            let (mut inc, inc_valid): (DVector<S>, bool) = loop {
-                // `:1415-1417`. `cwiseMax` is `numext::maxi`, so a NaN on the
-                // left survives where `f32::max` would drop it.
-                let mut h_copy: DMatrix<S> = h.clone();
-                for i in 0..size {
-                    let damped: S = eigen_maxi(h[(i, i)] * damping.lambda, damping.min_lambda);
-                    h_copy[(i, i)] += damped;
+                // `:1477`: `inc.array().abs().maxCoeff()`. `maxCoeff` folds with
+                // `numext::maxi`, which is order-independent for finite values, so a
+                // sequential fold is the same number; with a non-finite increment
+                // the fold order can matter and this one is left to right.
+                let mut step_norminf: S = S::zero();
+                for value in inc.iter() {
+                    step_norminf = eigen_maxi(step_norminf, value.abs());
                 }
-                // `:1419-1420`.
-                let inc: DVector<S> = EigenLdlt::new(h_copy).solve_vec(&b);
-                solve_attempts += 1;
-                if inc.iter().all(|v| v.is_finite()) {
-                    break (inc, true);
+
+                // `:1484-1497`: the true cost at the new state.
+                let mark: std::time::Instant = std::time::Instant::now();
+                let (vision_error, _) = ba.compute_error(None, S::zero())?;
+                let marg_prior_error: S = ba.compute_marg_prior_error(marg_data)?;
+                let (imu_error, bias_gyro_error, bias_accel_error) = compute_imu_error(
+                    &aom,
+                    &ba.frame_states,
+                    imu_meas,
+                    &gyro_bias_weight,
+                    &accel_bias_weight,
+                    &imu_lin.g,
+                );
+                // `:1495`: `vision += ((imu + bg) + ba)`, in that association.
+                let vision_and_inertial: S =
+                    vision_error + ((imu_error + bias_gyro_error) + bias_accel_error);
+                stats.timings.error_ns += duration_ns(mark);
+
+                // `:1500`.
+                let error_after: S = vision_and_inertial + marg_prior_error;
+                // `:1509-1511`.
+                let f_diff: S = error_total - error_after;
+                let relative_decrease: S = f_diff / l_diff;
+                // `:1528-1529`.
+                let step_is_valid: bool = l_diff > S::zero();
+                let accepted: bool = step_is_valid && relative_decrease > S::zero();
+
+                stats.lm.push(LmIteration {
+                    iteration: it,
+                    backtrack,
+                    error_before: error_total,
+                    error_after,
+                    vision_error,
+                    imu_error,
+                    bias_gyro_error,
+                    bias_accel_error,
+                    marg_prior_error,
+                    l_diff,
+                    f_diff,
+                    relative_decrease,
+                    lambda: lambda_used,
+                    step_norminf,
+                    solve_attempts,
+                    step_is_valid,
+                    accepted,
+                });
+
+                if accepted {
+                    // `:1557-1562`: Nielsen's update. `std::pow<Scalar>(x, 3)`
+                    // deduces the exponent as `int`, so `__promote_2<Scalar, int>`
+                    // is `double` in both instantiations and the power and the
+                    // `1 −` happen in `double` before narrowing back.
+                    let x: S = S::from_literal(2.0) * relative_decrease - S::one();
+                    let gain: S = S::from_literal(1.0 - x.to_f64().powf(3.0));
+                    let floor: S = S::one() / S::from_literal(3.0);
+                    damping.lambda *= eigen_maxi(floor, gain);
+                    damping.lambda = eigen_maxi(damping.min_lambda, damping.lambda);
+                    damping.lambda_vee = S::from_literal(VEE_FACTOR);
+                    it += 1;
+
+                    // `:1565-1568`, both constants hard-coded in C++ too.
+                    if (f_diff > S::zero() && f_diff < S::from_literal(FUNCTION_TOLERANCE))
+                        || step_norminf < S::from_literal(STEP_TOLERANCE)
+                    {
+                        termination = Some(LmTermination::Converged);
+                    }
+                    // `:1571`: leave the inner loop and re-linearize.
+                    break;
                 }
+
+                // `:1585-1598`.
                 damping.lambda = damping.lambda_vee * damping.lambda;
                 damping.lambda_vee *= S::from_literal(VEE_FACTOR);
-                if solve_attempts >= MAX_SOLVE_ATTEMPTS {
-                    break (inc, false);
-                }
-            };
-            // `:1432`: C++ warns and carries on with the non-finite increment.
-            if !inc_valid {
-                log::warn!(
-                    "frame {} ns: increment still not finite after {MAX_SOLVE_ATTEMPTS} damped solves",
-                    stats.t_ns
-                );
-            }
-            stats.timings.solver_ns += duration_ns(mark);
-
-            // `:1443`.
-            ba.backup();
-
-            // `:1447-1454`, D13: negate, then back-substitute.
-            let mark: std::time::Instant = std::time::Instant::now();
-            inc = -inc;
-            let l_diff: S = lqr.back_substitute(ba, &inputs, &inc)?;
-            stats.timings.back_substitution_ns += duration_ns(mark);
-
-            // `:1466-1474`.
-            for (frame_id, state) in &mut ba.frame_poses {
-                let Some((idx, _)) = aom.get(*frame_id) else {
-                    continue;
-                };
-                let step: nalgebra::SVector<S, POSE_SIZE> =
-                    nalgebra::SVector::from_iterator(inc.rows(idx, POSE_SIZE).iter().copied());
-                state.apply_inc(&step);
-            }
-            for (frame_id, state) in &mut ba.frame_states {
-                let Some((idx, _)) = aom.get(*frame_id) else {
-                    continue;
-                };
-                let step: Vector15<S> =
-                    Vector15::from_iterator(inc.rows(idx, POSE_VEL_BIAS_SIZE).iter().copied());
-                state.apply_inc(&step);
-            }
-
-            // `:1477`: `inc.array().abs().maxCoeff()`. `maxCoeff` folds with
-            // `numext::maxi`, which is order-independent for finite values, so a
-            // sequential fold is the same number; with a non-finite increment
-            // the fold order can matter and this one is left to right.
-            let mut step_norminf: S = S::zero();
-            for value in inc.iter() {
-                step_norminf = eigen_maxi(step_norminf, value.abs());
-            }
-
-            // `:1484-1497`: the true cost at the new state.
-            let mark: std::time::Instant = std::time::Instant::now();
-            let (vision_error, _) = ba.compute_error(None, S::zero())?;
-            let marg_prior_error: S = ba.compute_marg_prior_error(marg_data)?;
-            let (imu_error, bias_gyro_error, bias_accel_error) = compute_imu_error(
-                &aom,
-                &ba.frame_states,
-                imu_meas,
-                &gyro_bias_weight,
-                &accel_bias_weight,
-                &imu_lin.g,
-            );
-            // `:1495`: `vision += ((imu + bg) + ba)`, in that association.
-            let vision_and_inertial: S =
-                vision_error + ((imu_error + bias_gyro_error) + bias_accel_error);
-            stats.timings.error_ns += duration_ns(mark);
-
-            // `:1500`.
-            let error_after: S = vision_and_inertial + marg_prior_error;
-            // `:1509-1511`.
-            let f_diff: S = error_total - error_after;
-            let relative_decrease: S = f_diff / l_diff;
-            // `:1528-1529`.
-            let step_is_valid: bool = l_diff > S::zero();
-            let accepted: bool = step_is_valid && relative_decrease > S::zero();
-
-            stats.lm.push(LmIteration {
-                iteration: it,
-                backtrack,
-                error_before: error_total,
-                error_after,
-                vision_error,
-                imu_error,
-                bias_gyro_error,
-                bias_accel_error,
-                marg_prior_error,
-                l_diff,
-                f_diff,
-                relative_decrease,
-                lambda: lambda_used,
-                step_norminf,
-                solve_attempts,
-                step_is_valid,
-                accepted,
-            });
-
-            if accepted {
-                // `:1557-1562`: Nielsen's update. `std::pow<Scalar>(x, 3)`
-                // deduces the exponent as `int`, so `__promote_2<Scalar, int>`
-                // is `double` in both instantiations and the power and the
-                // `1 −` happen in `double` before narrowing back.
-                let x: S = S::from_literal(2.0) * relative_decrease - S::one();
-                let gain: S = S::from_literal(1.0 - x.to_f64().powf(3.0));
-                let floor: S = S::one() / S::from_literal(3.0);
-                damping.lambda *= eigen_maxi(floor, gain);
-                damping.lambda = eigen_maxi(damping.min_lambda, damping.lambda);
-                damping.lambda_vee = S::from_literal(VEE_FACTOR);
+                ba.restore();
                 it += 1;
-
-                // `:1565-1568`, both constants hard-coded in C++ too.
-                if (f_diff > S::zero() && f_diff < S::from_literal(FUNCTION_TOLERANCE))
-                    || step_norminf < S::from_literal(STEP_TOLERANCE)
-                {
-                    termination = Some(LmTermination::Converged);
+                backtrack += 1;
+                if damping.lambda > damping.max_lambda {
+                    termination = Some(LmTermination::MaxDamping);
                 }
-                // `:1571`: leave the inner loop and re-linearize.
-                break;
-            }
-
-            // `:1585-1598`.
-            damping.lambda = damping.lambda_vee * damping.lambda;
-            damping.lambda_vee *= S::from_literal(VEE_FACTOR);
-            ba.restore();
-            it += 1;
-            backtrack += 1;
-            if damping.lambda > damping.max_lambda {
-                termination = Some(LmTermination::MaxDamping);
             }
         }
-    }
 
-    stats.termination = termination.unwrap_or(LmTermination::MaxIterations);
-    Ok(())
+        stats.termination = termination.unwrap_or(LmTermination::MaxIterations);
+        Ok(())
+    }
 }
 
 /// `ScBundleAdjustmentBase::computeImuError` (`sc_ba_base.cpp:657-704`), which

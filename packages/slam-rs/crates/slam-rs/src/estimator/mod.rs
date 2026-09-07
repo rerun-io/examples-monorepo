@@ -1076,18 +1076,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             timings: StageTimings::default(),
         };
 
-        let imu_lin: ImuLinData<S> = self.imu_lin_data();
-        optimize::optimize(
-            &mut self.ba,
-            &self.marg_data,
-            &self.imu_meas,
-            &self.ltkfs,
-            &imu_lin,
-            &self.config,
-            &mut self.damping,
-            &mut self.opt_started,
-            &mut stats,
-        )?;
+        self.optimize(&mut stats)?;
         self.marginalize(&num_points_connected, &lost_landmarks, &mut stats)?;
 
         stats.kf_ids = self.kf_ids.iter().copied().collect();
