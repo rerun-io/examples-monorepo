@@ -444,8 +444,10 @@ def write_base_layer(
         for camera in streams.cameras:
             index: int = camera.calibration.index
             # The model tag saves a consumer from inferring the projection from the
-            # distortion component. ``rpmax`` is radtan8's own key, so the record
-            # already reports None on a kb4 camera and AnyValues leaves the key off.
+            # distortion component. The record reports no validity radius for a kb4
+            # camera and for a radtan8 one whose rpmax is non-positive — basalt reads
+            # that as the check being off, not as a zero-radius limit — and AnyValues
+            # then leaves the key off entirely.
             log_camera_node(
                 recording,
                 RIG,

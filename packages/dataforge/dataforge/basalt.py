@@ -234,8 +234,20 @@ class CalibratedCamera:
 
     @property
     def distortion_valid_radius(self) -> float | None:
-        """radtan8's ``rpmax``; ``None`` on kb4, which is valid over the whole fisheye."""
-        return None if isinstance(self.model, Kb4Intrinsics) else self.model.rpmax
+        """The radius past which this camera's model stops holding, or ``None`` for no limit.
+
+        ``None`` on kb4, which is valid over the whole fisheye, and ``None`` for a
+        radtan8 camera whose ``rpmax`` is **non-positive**: basalt treats such a
+        value as *the validity check is off*, so reporting it as a radius would
+        claim the model holds nowhere. Both Odyssey+ cameras ship ``rpmax: 0.0``,
+        so this is the difference between "no stated limit" and "valid out to
+        zero". ``Radtan8Intrinsics.rpmax`` still holds the file's own value —
+        presence is validated at load, and a reader that wants the raw number can
+        have it.
+        """
+        if isinstance(self.model, Kb4Intrinsics) or self.model.rpmax <= 0.0:
+            return None
+        return self.model.rpmax
 
 
 def _required_coefficients(raw: _RawIntrinsics, *, keys: Sequence[str], index: int, camera_type: str) -> dict[str, float]:

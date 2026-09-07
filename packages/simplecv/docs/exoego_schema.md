@@ -112,7 +112,11 @@ optional the two further per-camera keys `camera_model` and
 (e.g. `"kb4"` / `"pinhole-radtan8"`, basalt's names): this schema fixes no
 vocabulary for it, and a reader that does not recognise a tag falls back to the
 distortion component, which is authoritative. `distortion_valid_radius` is the
-radius in normalized image coordinates past which that model stops holding. The reference camera of a
+radius in normalized image coordinates past which that model stops holding; a
+writer whose source states a non-positive radius must **omit the key** rather
+than emit it, because the formats that carry one (basalt's `rpmax`, whose
+non-positive value disables the check) mean "no limit" by it, and a reader
+seeing `0.0` would conclude the model holds nowhere. The reference camera of a
 **multi-camera** rig gets a green frustum tint; single-camera rigs are untinted.
 
 ## 5. Ground-truth annotations (paths unchanged from v1)

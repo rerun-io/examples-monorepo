@@ -23,7 +23,7 @@ from scipy.spatial.transform import Rotation
 
 from dataforge import paths, schema
 from dataforge.basalt import BasaltPose, CalibratedCamera, load_calibration
-from dataforge.datasets.msd import MSD_DEVICES, MsdDataset
+from dataforge.datasets.msd import MSD_DEVICES, MsdDataset, MsdDeviceChoice
 from dataforge.datasets.msd_layers import MEASURED_UP_WINDOW_NS, WORLD_UP_VIEW_COORDINATES, MeasuredUp, measured_world_up
 from dataforge.euroc import GtTrajectory, TimestampedSamples, gt_trajectory
 from dataforge.logging_toolkit import ImuChannel
@@ -126,21 +126,53 @@ def test_the_logged_camera_node_carries_rig_T_cam(converted_index: tuple[FakeHub
         np.testing.assert_allclose(-cam_R_rig.T @ cam_t_rig, rig_t_cam, atol=1e-6)
 
 
+def convert_device(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device: MsdDeviceChoice) -> Path:
+    """Convert the synthetic sequence for one device and return its base rrd."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch, device=device)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    return dataset.convert(identity, source, force=False)
+
+
 def test_a_radtan8_camera_node_names_its_projection_and_carries_its_validity_radius(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
 ) -> None:
-    """A consumer reads the projection off the node, plus where the rational model stops holding."""
-    hub: FakeHub = build_hub(tmp_path, monkeypatch, device="odyssey")
-    dataset: MsdDataset = MsdDataset(hub.config)
-    identity, source = dataset.discover()[0]
-    target: Path = dataset.convert(identity, source, force=False)
+    """A consumer reads the projection off the node, plus where the rational model stops holding.
 
-    expected: float | None = load_calibration(calibration_fixture("odyssey"))[0].distortion_valid_radius
+    The G2, whose four cameras state a real ~2.8 radius. The Odyssey+ is the next
+    test: it states ``0.0``, which is not a radius.
+    """
+    target: Path = convert_device(tmp_path, monkeypatch, "g2")
+
+    expected: float | None = load_calibration(calibration_fixture("g2"))[0].distortion_valid_radius
+    assert expected is not None and expected > 2.7
     store: rr.experimental.ChunkStore = read_back(target)
     node: str = schema.cam_path(0, 0)
     row: dict[str, list[object]] = store.reader(index=None, contents=node).to_arrow_table().to_pylist()[0]
     assert row[f"{node}:camera_model"][0] == "pinhole-radtan8"
     assert row[f"{node}:distortion_valid_radius"][0] == pytest.approx(expected)
+
+
+def test_an_odyssey_camera_node_names_radtan8_and_states_no_validity_radius(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
+) -> None:
+    """Both Odyssey+ cameras ship ``rpmax: 0.0``, which basalt reads as no validity check.
+
+    Logging that through as ``distortion_valid_radius = 0.0`` would tell a consumer
+    the rational model holds nowhere on this device, so the key is left off — the
+    same thing a kb4 camera does, for the same reason.
+    """
+    target: Path = convert_device(tmp_path, monkeypatch, "odyssey")
+
+    store: rr.experimental.ChunkStore = read_back(target)
+    for index in range(2):
+        node: str = schema.cam_path(0, index)
+        table: pa.Table = store.reader(index=None, contents=node).to_arrow_table()
+        assert table.to_pylist()[0][f"{node}:camera_model"][0] == "pinhole-radtan8"
+        # AnyValues only *omits* a None key while it is untyped: a g2 convert
+        # earlier in this process types it, and later Nones then arrive as nulls.
+        radius: str = f"{node}:distortion_valid_radius"
+        assert radius not in table.column_names or table.column(radius).null_count == table.num_rows
 
 
 def test_a_kb4_camera_node_names_its_projection_and_claims_no_validity_radius(converted_index: tuple[FakeHub, Path, Path]) -> None:

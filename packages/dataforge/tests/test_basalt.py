@@ -54,30 +54,34 @@ def test_the_index_ships_two_kb4_cameras_with_no_validity_radius() -> None:
 
 
 @pytest.mark.parametrize(("device", "num_cameras"), [("g2", 4), ("odyssey", 2)])
-def test_the_mocap_headsets_ship_radtan8_cameras_that_all_carry_an_rpmax(device: str, num_cameras: int) -> None:
-    """The rational model stops holding past a radius, so every radtan8 camera states one."""
+def test_the_mocap_headsets_ship_radtan8_cameras_that_all_state_an_rpmax(device: str, num_cameras: int) -> None:
+    """Every radtan8 block holds the key; whether its value is a *limit* is the next test."""
     cameras: tuple[CalibratedCamera, ...] = load_calibration(calibration_fixture(device))
 
     assert len(cameras) == num_cameras
     assert {camera.camera_model for camera in cameras} == {"pinhole-radtan8"}
     for camera in cameras:
         assert isinstance(camera.model, Radtan8Intrinsics)
-        assert camera.distortion_valid_radius is not None, f"cam{camera.index} carries no rpmax"
+        assert camera.model.rpmax is not None, f"cam{camera.index} states no rpmax"
     assert {camera.resolution for camera in cameras} == {(640, 480)}
 
 
-def test_the_odyssey_ships_a_zero_rpmax_and_that_is_not_a_missing_one() -> None:
-    """Upstream really writes ``"rpmax": 0.0`` on both Odyssey+ cameras.
+def test_the_odyssey_zero_rpmax_is_a_stated_value_but_not_a_validity_limit() -> None:
+    """Upstream really writes ``"rpmax": 0.0`` on both Odyssey+ cameras, and basalt reads
+    a non-positive rpmax as *the validity check is off*.
 
-    This is why presence and not truthiness is the invariant: a zero radius is a
-    value the file states, so treating it as absent would mean rejecting a real
-    device's calibration, and defaulting a *missing* one to zero would mean
-    inventing that same claim for a truncated file. The G2's are ~2.8.
+    So the file's value is kept as parsed — presence is what load-time validation
+    checks, because a *missing* key is a truncated block and defaulting it to zero
+    would invent this very claim — while the radius a camera node reports is
+    ``None``: emitting ``0.0`` would tell a consumer the rational model holds
+    nowhere on that camera. The G2's four cameras state a real ~2.8 and keep it.
     """
     odyssey: tuple[CalibratedCamera, ...] = load_calibration(calibration_fixture("odyssey"))
     g2: tuple[CalibratedCamera, ...] = load_calibration(calibration_fixture("g2"))
 
-    assert [camera.distortion_valid_radius for camera in odyssey] == [0.0, 0.0]
+    odyssey_models: list[Radtan8Intrinsics] = [camera.model for camera in odyssey if isinstance(camera.model, Radtan8Intrinsics)]
+    assert [model.rpmax for model in odyssey_models] == [0.0, 0.0], "the parsed value is the file's"
+    assert [camera.distortion_valid_radius for camera in odyssey] == [None, None], "but it states no limit"
     assert all((camera.distortion_valid_radius or 0.0) > 2.7 for camera in g2)
 
 
