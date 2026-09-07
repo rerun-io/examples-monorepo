@@ -10,6 +10,7 @@
 //! reports [`VioStatus::Tracking`].
 
 pub mod calib;
+pub mod camera;
 pub mod config;
 pub mod image;
 pub mod lie;

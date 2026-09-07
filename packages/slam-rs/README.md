@@ -20,18 +20,34 @@ The core is being filled in stage by stage, bottom up. What is in it today:
 | `types` | `TimeCamId`, `KeypointId`/`LandmarkId`, `AbsOrderMap`, `PoseVelBiasState` and the two fixed-linearization wrappers. |
 | `config` | basalt's `VioConfig`, read straight from `data/**/*_config.json`. |
 | `calib` | basalt's `Calibration`: extrinsics, the six shipped camera models, the 9- and 12-parameter IMU bias calibrations, plus a constructor that takes what the Python catalog feed reports. |
+| `camera` | `pinhole`, `kb4` and `pinhole-radtan8` with basalt's 4-D homogeneous `project`/`unproject` and their analytic Jacobians (2x4 point, 2xN parameter, 4x2 and 4xN for unprojection), the `rpmax` and `z >= epsilonSqrt` domain checks, and a `CameraEnum` that dispatches without a vtable. `ds`, `eucm` and `ucm` parse but are rejected here. |
 | `image` | `ImageU16`: an owned flat 16-bit frame with an explicit row stride, the stride-aware `u8 << 8` widening basalt's readers do, and `interp`/`interp_grad`/`in_bounds` reproduced from `image.h` in the same arithmetic order. |
 | `pyramid` | The `PyramidBuilder` stage seam with an associated `Pyramid` type that lends nothing (geometry plus a copy into the caller's buffer), `PyramidU16` (one flat buffer per level, not basalt's packed mipmap) and `CpuPyramidBuilder`, whose `subsample` is bit-exact with `image_pyr.h:99-140`. |
 
 Every convention is quoted against the C++ it comes from, file and line, in the
 doc comments. `crates/slam-rs/tests/fixtures/` holds the shipped basalt config
-and calibration JSON the parsers are tested against, unmodified, and
-`tests/fixtures/pyramid/` holds the first frame of the smoke reference segment
-as a PGM next to the four pyramid levels the C++ fork produces from it, which
-the pyramid is checked against byte for byte.
+and calibration JSON the parsers are tested against, unmodified, plus two
+fixtures produced by the C++ fork itself: `pyramid/`, the first frame of the
+smoke reference segment as a PGM next to the four pyramid levels the fork builds
+from it, which the pyramid is checked against byte for byte; and
+`camera_oracle.json`, what basalt's camera headers return for nine cameras and
+thirty points each - pixel, both projection Jacobians, bearing and unprojection
+Jacobian. The camera port reproduces every one of those numbers to 1e-15
+relative (1e-12 for unprojections, which run a Newton iteration). Both
+generators live on the fork's `slam-rs-reference` branch, as
+`tools/dump_pyramid.cpp` and `tools/camera_oracle.cpp`; the monorepo never
+compiles C++.
 
-Still to come: camera projection, IMU preintegration, the frontend, and the
-square-root estimator.
+One thing the camera port inherits and the frontend will have to live with:
+`unproject` runs a fixed three (kb4) or five (radtan8) Newton steps, and on wide
+calibrations that is not always enough. Inside basalt's own
+`optical_flow_image_safe_radius` nine of the ten shipped cameras invert to 1e-11;
+msd-g2 cam2 is off by 0.12 in bearing *inside* that radius, and RoboCap cam1
+outside it returns a bearing pointing backwards. basalt's C++ returns the same
+numbers to the last figure, so this is a property of the algorithm, not of the
+port; `crates/slam-rs/tests/camera_jacobians.rs` pins all three cases.
+
+Still to come: IMU preintegration, the frontend, and the square-root estimator.
 
 ## Layout
 
