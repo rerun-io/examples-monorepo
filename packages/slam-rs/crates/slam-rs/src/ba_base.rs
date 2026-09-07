@@ -41,6 +41,7 @@ use nalgebra::{
 
 use crate::calib::Calibration;
 use crate::camera::{CameraEnum, CameraError};
+use crate::eigen_blas::redux_dynamic;
 use crate::landmark::{Landmark, LandmarkDatabase, LandmarkError, StereographicParam, eigen_norm3};
 use crate::lie::{LieScalar, Se3, So3};
 use crate::types::{
@@ -1050,11 +1051,7 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
                 abs_b[i] += acc;
             }
             // `delta^T H^T (0.5 H delta + b)` (`:431`).
-            let mut error: S = S::zero();
-            for k in 0..rows {
-                error += h_delta[k] * (c::<S>(0.5) * h_delta[k] + mld.b[k]);
-            }
-            Ok(error)
+            Ok(sqrt_prior_error(&h_delta, &mld.b, rows))
         } else {
             // `:433-437`.
             let mut h_delta: DVector<S> = DVector::zeros(marg_size);
@@ -1098,19 +1095,15 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
             }
             h_delta[i] = acc;
         }
-        let mut error: S = S::zero();
         if mld.is_sqrt {
             // `:461`.
-            for k in 0..rows {
-                error += h_delta[k] * (c::<S>(0.5) * h_delta[k] + mld.b[k]);
-            }
-        } else {
-            // `:463`.
-            for i in 0..rows.min(marg_size) {
-                error += delta[i] * (c::<S>(0.5) * h_delta[i] + mld.b[i]);
-            }
+            return Ok(sqrt_prior_error(&h_delta, &mld.b, rows));
         }
-        Ok(error)
+        // `:463`.
+        let terms: Vec<S> = (0..rows.min(marg_size))
+            .map(|i| delta[i] * (c::<S>(0.5) * h_delta[i] + mld.b[i]))
+            .collect();
+        Ok(redux_dynamic(&terms))
     }
 
     /// The prior's share of the model cost change,
@@ -1209,6 +1202,24 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
         }
         self.lmdb.restore();
     }
+}
+
+/// `deltaᵀ Hᵀ (½ H delta + b)` in the square-root form both prior sites use
+/// (`ba_base.cpp:431`, `:461`).
+///
+/// `deltaᵀ Hᵀ` and `H delta` are the same coefficients, so `h_delta` serves as
+/// both — Eigen evaluates the `ColMajor` `gemv` twice and gets the same bits.
+/// The outer `(1×n)·(n×1)` is Eigen's `InnerProduct`, which is
+/// `(lhs.transpose().cwiseProduct(rhs)).sum()`
+/// (`ProductEvaluators.h`, `generic_product_impl<..., InnerProduct>`), so the
+/// fold is [`redux_dynamic`]'s packet tree and not a left fold: the two differ
+/// in `f32`, and this value enters `error_total` whose difference across an
+/// increment is the LM accept test.
+fn sqrt_prior_error<S: LieScalar>(h_delta: &DVector<S>, b: &DVector<S>, rows: usize) -> S {
+    let terms: Vec<S> = (0..rows)
+        .map(|k| h_delta[k] * (c::<S>(0.5) * h_delta[k] + b[k]))
+        .collect();
+    redux_dynamic(&terms)
 }
 
 #[cfg(test)]
