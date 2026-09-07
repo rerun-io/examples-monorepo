@@ -66,12 +66,12 @@ use crate::frontend::detect::{
     CellGrid, DetectError, DetectorConfig, DetectorScratch, KeypointsData, LOWEST_THRESHOLD_RUNG,
     Masks, Occupancy, Rect, detect_keypoints_with_cells,
 };
-use crate::frontend::parallel::WorkPool;
+use crate::frontend::parallel::{MAX_THREADS, WorkPool};
 use crate::frontend::patterns::Pattern;
 use crate::frontend::se2::AffineCompact2f;
 use crate::frontend::tracker::{
-    CpuPatchTracker, FlowResult, FlowTransforms, PatchTracker, PointsSoA, SourcePatches,
-    TrackerError,
+    CpuPatchTracker, FlowResult, FlowTransforms, MAX_LEVELS, PatchTracker, PointsSoA,
+    SourcePatches, TrackerError,
 };
 use crate::image::ImageU16;
 use crate::lie::{Se3, So3};
@@ -424,6 +424,24 @@ pub enum FrontendError {
         /// Threads asked for.
         threads: usize,
     },
+    /// More workers were asked for than [`MAX_THREADS`].
+    #[error("threads is {threads}, the ceiling is {ceiling}")]
+    TooManyThreads {
+        /// Workers asked for.
+        threads: usize,
+        /// [`MAX_THREADS`].
+        ceiling: usize,
+    },
+    /// `optical_flow_levels` asks for a deeper pyramid than the buffers allow.
+    #[error("optical_flow_levels is {levels}, so {num_levels} levels; the ceiling is {ceiling}")]
+    TooManyLevels {
+        /// `optical_flow_levels` from the config file.
+        levels: i32,
+        /// `optical_flow_levels + 1`, which is what every buffer is sized with.
+        num_levels: usize,
+        /// [`MAX_LEVELS`].
+        ceiling: usize,
+    },
 }
 
 /// `basalt::FrameToFrameOpticalFlow<Scalar, Pattern>` with `Scalar = f32`.
@@ -544,6 +562,7 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P, CpuPyramidBuilder, CpuPatchTracker<P
         options: FrontendOptions,
     ) -> Result<Self, FrontendError> {
         Self::validate_config(&config)?;
+        Self::validate_options(&options)?;
         let num_levels: usize = config.optical_flow_levels as usize + 1;
         let pool: WorkPool =
             WorkPool::new(options.threads).map_err(|_| FrontendError::ThreadPool {
@@ -621,6 +640,30 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
                 max_threshold,
             });
         }
+        // Every per-patch buffer is sized with `optical_flow_levels + 1`, so a
+        // config asking for a pyramid nothing could hold is refused here rather
+        // than at the allocation, which aborts instead of returning.
+        let num_levels: usize = config.optical_flow_levels as usize + 1;
+        if num_levels > MAX_LEVELS {
+            return Err(FrontendError::TooManyLevels {
+                levels: config.optical_flow_levels,
+                num_levels,
+                ceiling: MAX_LEVELS,
+            });
+        }
+        Ok(())
+    }
+
+    /// The port's own knobs, which arrive from the caller rather than a basalt file.
+    fn validate_options(options: &FrontendOptions) -> Result<(), FrontendError> {
+        // rayon spawns exactly what it is asked for, so an unbounded `threads`
+        // exhausts the machine's threads instead of returning an error.
+        if options.threads > MAX_THREADS {
+            return Err(FrontendError::TooManyThreads {
+                threads: options.threads,
+                ceiling: MAX_THREADS,
+            });
+        }
         Ok(())
     }
 
@@ -644,6 +687,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         tracker: T,
     ) -> Result<Self, FrontendError> {
         Self::validate_config(&config)?;
+        Self::validate_options(&options)?;
 
         let num_levels: usize = config.optical_flow_levels as usize + 1;
         if tracker.num_levels() != num_levels {
@@ -1433,9 +1477,9 @@ mod tests {
 
     use super::*;
     use crate::calib::{CalibAccelBias, CalibGyroBias, CameraModel, PinholeParams};
-    use crate::frontend::parallel::WorkPool;
+    use crate::frontend::parallel::{MAX_THREADS, WorkPool};
     use crate::frontend::patterns::{Pattern51, Pattern52};
-    use crate::frontend::tracker::{MAX_CAPACITY, PatchSoA, TrackerError};
+    use crate::frontend::tracker::{MAX_CAPACITY, MAX_LEVELS, PatchSoA, TrackerError};
     use crate::pyramid::{CpuPyramidBuilder, PyramidU16};
     use std::collections::BTreeMap;
 
@@ -1880,6 +1924,74 @@ mod tests {
                 })
             );
         }
+    }
+
+    /// A thread count nothing could run is refused, not spawned.
+    ///
+    /// rayon takes `num_threads` literally, so 100,000 workers arriving over the
+    /// Python boundary spawned OS threads for minutes; the ceiling answers instead.
+    #[test]
+    fn more_workers_than_the_ceiling_is_refused() {
+        for threads in [MAX_THREADS + 1, 100_000, usize::MAX] {
+            let error = FrameToFrameOpticalFlow::<Pattern51>::new(
+                config(),
+                &rig(2),
+                FrontendOptions {
+                    threads,
+                    ..FrontendOptions::default()
+                },
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                FrontendError::TooManyThreads {
+                    threads,
+                    ceiling: MAX_THREADS,
+                }
+            );
+        }
+        // The counts the frontend actually runs on are untouched.
+        for threads in [1, 4, MAX_THREADS] {
+            FrameToFrameOpticalFlow::<Pattern51>::new(
+                config(),
+                &rig(1),
+                FrontendOptions {
+                    threads,
+                    ..FrontendOptions::default()
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    /// A pyramid deeper than the buffers allow is refused before the allocation.
+    ///
+    /// `optical_flow_levels = 10^12` sized a `Vec` of 6e17 floats, and a `Vec`
+    /// that cannot be allocated aborts the process — no exception, no unwind.
+    #[test]
+    fn a_config_asking_for_more_levels_than_the_ceiling_is_refused() {
+        for levels in [MAX_LEVELS as i32, 1_000, i32::MAX] {
+            let mut deep: VioConfig = config();
+            deep.optical_flow_levels = levels;
+            let error = FrameToFrameOpticalFlow::<Pattern51>::new(
+                deep,
+                &rig(2),
+                FrontendOptions::default(),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                FrontendError::TooManyLevels {
+                    levels,
+                    num_levels: levels as usize + 1,
+                    ceiling: MAX_LEVELS,
+                }
+            );
+        }
+        // The shipped depth is three levels plus the base.
+        assert_eq!(config().optical_flow_levels, 3);
+        FrameToFrameOpticalFlow::<Pattern51>::new(config(), &rig(2), FrontendOptions::default())
+            .unwrap();
     }
 
     /// A frame that is not the size the calibration gives its camera is refused.

@@ -16,6 +16,15 @@
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuildError, ThreadPoolBuilder};
 
+/// The most workers a pool may be built for.
+///
+/// `ThreadPoolBuilder::num_threads` takes the request literally: rayon spawns OS
+/// threads until the kernel refuses, so a `threads` of 100,000 arriving over the
+/// Python boundary wedged the machine for minutes instead of returning an error.
+/// A thousand is already more hardware threads than any host this port runs on,
+/// and about 8 GB of thread stacks.
+pub const MAX_THREADS: usize = 1024;
+
 /// A fixed-width worker pool, or the sequential path when one thread was asked for.
 #[derive(Debug)]
 pub struct WorkPool {
