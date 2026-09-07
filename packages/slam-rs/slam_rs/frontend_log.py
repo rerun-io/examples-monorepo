@@ -96,6 +96,26 @@ def track_colors(ids: Int64[ndarray, " n_tracks"]) -> UInt8[ndarray, "n_tracks 3
     return HUE_RAMP[hashed % np.uint64(len(HUE_RAMP))]
 
 
+def log_keypoints(frame: _core.FlowFrame) -> None:
+    """Draw one frameset's tracked keypoints on the camera images.
+
+    Two rungs draw this layer — the frontend's own and the estimator's, whose
+    frontend is the same code — so it is drawn once here: a keypoint then has the
+    same colour, the same radius and the same entity path in both recordings, and
+    the two views can be read side by side. What stays with the frontend rung is
+    its own evidence: the trails, the occupancy grid and the C++ overlay.
+
+    Args:
+        frame: What a frontend produced for one frameset.
+    """
+    for index in range(frame.camera_count):
+        ids: Int64[ndarray, " n_tracks"] = frame.ids(index)
+        rr.log(
+            f"{camera_entity(index)}/keypoints",
+            rr.Points2D(frame.positions(index), colors=track_colors(ids), radii=KEYPOINT_RADIUS_PX),
+        )
+
+
 def dumps_source(directory: Path | None = None) -> str:
     """Which segment a directory of C++ dumps was recorded from.
 
@@ -211,11 +231,11 @@ class FrontendLogger:
             frame: What the frontend produced for this frameset.
             elapsed_ms: Wall time the ``process`` call took.
         """
+        log_keypoints(frame)
         for index in range(self.camera_count):
             ids: Int64[ndarray, " n_tracks"] = frame.ids(index)
             positions: Float32[ndarray, "n_tracks 2"] = frame.positions(index)
             colors: UInt8[ndarray, "n_tracks 3"] = track_colors(ids)
-            rr.log(f"{camera_entity(index)}/keypoints", rr.Points2D(positions, colors=colors, radii=KEYPOINT_RADIUS_PX))
             self._log_trails(index, ids, positions, colors)
             self._log_cells(index, frame)
             rr.log(f"{STATS_ENTITY}/cam_{index:02d}/num_tracks", rr.Scalars(float(frame.num_tracks(index))))

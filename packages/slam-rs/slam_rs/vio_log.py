@@ -49,7 +49,7 @@ from simplecv.ops.umeyama import SimilarityTransform
 
 from slam_rs import _core
 from slam_rs.catalog_feed import CameraCalib
-from slam_rs.frontend_log import KEYPOINT_RADIUS_PX, camera_entity, track_colors
+from slam_rs.frontend_log import camera_entity, log_keypoints, track_colors
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES, Association, AteResult, Trajectory, associate, ate, rigid_alignment
 
 RUN_ENTITY: str = "/world/runs/slam_rs"
@@ -271,7 +271,9 @@ class VioLogger:
 
         estimated: Trajectory = self.estimated()
         rr.log(f"{RUN_ENTITY}/rig", rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7])))
-        self._log_keypoints(frame)
+        # The estimator's own frontend output, on the frontend rung's paths and
+        # in its palette (:func:`slam_rs.frontend_log.log_keypoints`).
+        log_keypoints(frame)
         self._log_paths(estimated)
         self._log_window(snapshot)
         self._log_landmarks(snapshot)
@@ -287,22 +289,6 @@ class VioLogger:
             position_m=np.array(self.estimate_position_m, dtype=np.float64).reshape(-1, 3),
             quaternion_wxyz=np.array(self.estimate_quaternion_wxyz, dtype=np.float64).reshape(-1, 4),
         )
-
-    def _log_keypoints(self, frame: _core.FlowFrame) -> None:
-        """Draw the estimator's own tracked keypoints on the camera images.
-
-        The palette and the entity paths are the frontend rung's
-        (:mod:`slam_rs.frontend_log`), so a keypoint has the same colour in both
-        recordings and the two views can be read side by side. The trails, the
-        occupancy grid and the C++ overlay stay there: they are the frontend's
-        evidence, and this rung's is the trajectory.
-        """
-        for index in range(frame.camera_count):
-            ids: Int64[ndarray, " n_tracks"] = frame.ids(index)
-            rr.log(
-                f"{camera_entity(index)}/keypoints",
-                rr.Points2D(frame.positions(index), colors=track_colors(ids), radii=KEYPOINT_RADIUS_PX),
-            )
 
     def _log_paths(self, estimated: Trajectory) -> None:
         """Draw the three trajectories, each up to the current cursor.
