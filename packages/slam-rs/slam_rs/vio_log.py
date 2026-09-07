@@ -173,20 +173,25 @@ def frustum_strip(camera: CameraCalib, depth_m: float = FRUSTUM_DEPTH_M) -> Floa
     return strip_cam @ camera.imu_T_cam[:3, :3].T + camera.imu_T_cam[:3, 3]
 
 
-def log_run_rig(cameras: tuple[CameraCalib, ...], entity: str = RUN_ENTITY) -> None:
-    """Log the static camera geometry of an estimated rig, so its pose draws as frusta.
+def log_rig(cameras: tuple[CameraCalib, ...], entity_prefix: str, pinhole_child: str = "") -> None:
+    """Log a rig's static camera geometry, so whatever moves it draws as frusta.
 
-    The dataset's own rig already carries this under ``/world/rig_00``; an
-    estimated run needs its own copy under its own path, or the estimate and the
-    ground truth would move the same frusta.
+    Two rigs are drawn from the same calibration and this is the one place that
+    spells it: the dataset's own under ``/world/rig_00``, whose ``Pinhole`` sits
+    on the ``pinhole`` child the images and keypoints hang under, and the
+    estimated run's own copy under its run entity — without which the estimate
+    and the ground truth would move the same frusta.
 
     Args:
         cameras: The rig's cameras, in rig order.
-        entity: Run entity the rig hangs under.
+        entity_prefix: What ``cam_MM`` hangs under.
+        pinhole_child: Child entity the ``Pinhole`` goes on; empty puts it on the
+            camera itself, which is what a rig with no images wants.
     """
     for camera in cameras:
+        node: str = f"{entity_prefix}/cam_{camera.index:02d}"
         rr.log(
-            f"{entity}/rig/cam_{camera.index:02d}",
+            node,
             rr.Transform3D(translation=camera.imu_T_cam[:3, 3], mat3x3=camera.imu_T_cam[:3, :3]),
             static=True,
         )
@@ -194,7 +199,7 @@ def log_run_rig(cameras: tuple[CameraCalib, ...], entity: str = RUN_ENTITY) -> N
             [[camera.fx, 0.0, camera.cx], [0.0, camera.fy, camera.cy], [0.0, 0.0, 1.0]], dtype=np.float64
         )
         rr.log(
-            f"{entity}/rig/cam_{camera.index:02d}",
+            f"{node}{pinhole_child}",
             rr.Pinhole(image_from_camera=image_from_camera, resolution=[camera.width, camera.height], camera_xyz=rr.ViewCoordinates.RDF),
             static=True,
         )
@@ -237,7 +242,7 @@ class VioLogger:
 
     def __post_init__(self) -> None:
         """Log the estimated rig's static geometry, precompute the window wireframe and thin the references."""
-        log_run_rig(self.cameras)
+        log_rig(self.cameras, f"{RUN_ENTITY}/rig")
         self.window_strip = frustum_strip(self.cameras[0])
         self.ground_truth_strip = at_frameset_cadence(self.ground_truth, self.frame_t_ns)
         self.cpp_strip = at_frameset_cadence(self.cpp, self.frame_t_ns)

@@ -41,7 +41,7 @@ from slam_rs.reference import ReferenceManifest, ReferenceSegment, flow_config, 
 from slam_rs.reference_bundle import BundleFile
 from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import Trajectory, ate, coverage, empty_trajectory, read_trajectory, shift_clock, write_trajectory
-from slam_rs.vio_log import VioLogger, vio_blueprint
+from slam_rs.vio_log import VioLogger, log_rig, vio_blueprint
 
 SMOKE_SEGMENT: str = "msd-index__MIO_others__MIO10_short_2_panorama"
 """Default segment: the 7.6 s rotation-dominated panorama from the smoke tier."""
@@ -89,22 +89,14 @@ class Config:
 
 
 def _log_calibration(cameras: tuple[CameraCalib, ...]) -> None:
-    """Log the rig's static geometry so the images sit in the right place in 3D."""
+    """Log the rig's static geometry so the images sit in the right place in 3D.
+
+    The ``Pinhole`` goes on the ``pinhole`` child, which is the dataset's own
+    layout: the images and the keypoints hang under it, so they are the pixels of
+    the camera that projects them.
+    """
     rr.log("/", rr.ViewCoordinates.RUB, static=True)
-    for camera in cameras:
-        rr.log(
-            f"{RIG_ENTITY}/cam_{camera.index:02d}",
-            rr.Transform3D(translation=camera.imu_T_cam[:3, 3], mat3x3=camera.imu_T_cam[:3, :3]),
-            static=True,
-        )
-        image_from_camera: Float64[ndarray, "3 3"] = np.array(
-            [[camera.fx, 0.0, camera.cx], [0.0, camera.fy, camera.cy], [0.0, 0.0, 1.0]], dtype=np.float64
-        )
-        rr.log(
-            camera_entity(camera.index),
-            rr.Pinhole(image_from_camera=image_from_camera, resolution=[camera.width, camera.height], camera_xyz=rr.ViewCoordinates.RDF),
-            static=True,
-        )
+    log_rig(cameras, RIG_ENTITY, pinhole_child="/pinhole")
 
 
 @dataclass(slots=True)
