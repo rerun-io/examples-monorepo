@@ -178,16 +178,17 @@ pixi run -e dataforge --frozen dataforge-download lamaria                 # --se
 # --sequence belongs to the verb, so it goes before the dataset subcommand
 pixi run -e dataforge --frozen dataforge-convert --sequence R_01_easy lamaria
 pixi run -e dataforge --frozen dataforge-convert lamaria                  # every sequence, one at a time
-pixi run -e dataforge --frozen dataforge-register lamaria
+pixi run -e dataforge --frozen dataforge-register lamaria                 # --catalog-url <url> goes first
 ```
 
-`--sequences` defaults to the five training sequences worth 18.2 GB of VRS
-(`R_01_easy`, `R_04_medium`, `R_11_5cp`, `sequence_1_19`, `sequence_4_11`):
-both upstream collections, all three difficulty tiers, one low-light capture,
-and every ground-truth shape. A name the archive does not list is a hard error
-at `download`; a selected name this raw root has not downloaded yet is announced
-and skipped at `convert`, so a narrower `download --sequences` still leaves the
-rest convertible. `--root` is scratch, not storage: point it at local NVMe.
+Unset, `--sequences` means the five training sequences worth 18.2 GB of VRS
+(`R_01_easy`, `R_04_medium`, `R_11_5cp`, `sequence_1_19`, `sequence_4_11`) at
+`download` — both upstream collections, all three difficulty tiers, one
+low-light capture, and every ground-truth shape — and every sequence the
+manifest holds at `convert`, so a narrower `download --sequences` needs no flag
+at all afterwards. A name the archive does not list is a hard error at
+`download`; a sequence whose ground-truth files are not on disk is announced and
+skipped at `convert`. `--root` is scratch, not storage: point it at local NVMe.
 
 One sequence is one recording, `lamaria__<seq>`. The rig frame is **imu-right**,
 which is what the published calibration uses as its body frame, so the rig node
@@ -206,6 +207,51 @@ pseudo-GT row's own timestamp lands on its frame 1:1. The base layer therefore
 logs no transform on the rig node and no root `ViewCoordinates`: the `gt` layer
 establishes the world frame and owns both. The ground-truth files are downloaded
 and kept for it.
+
+#### The gt layer
+
+One sequence is **two** rrds under one recording id, so the catalog stacks them
+as layers of one segment: `base/` holds the video and the two IMUs, and `gt/`
+holds everything the published ground truth establishes.
+
+```
+/                                      ViewCoordinates = RIGHT_HAND_Z_UP (static)
+/world/rig_00                          Transform3D = world_T_rig, one row per pGT stamp
+/world/runs/gt/trajectory              LineStrips3D, the whole path (static)
+/world/runs/gt/trail                   Points3D, one per pose — the Follow view's −10 s window
+/world/gt/control_points               Points3D, labelled, static (surveyed sequences only)
+/world/rig_00/cam_MM/pinhole/cp_uv     Points2D at the detection stamps (SLAM pair only)
+```
+
+The pGT poses camera-slam-left, and the schema animates the rig, so every pose
+is composed: `world_T_rig = world_T_cam0 @ inv(rig_T_cam0)`, with `rig_T_cam0`
+straight out of the published `cam0.T_b_s` (which the VRS device calibration
+agrees with to 5e-16, so this layer needs no VRS). The transform is logged
+child-to-parent, i.e. the stored value *is* `world_T_rig`, so every camera
+frustum rides it.
+
+Both world frames are Z-up (MPS's own for `R_01`…`R_10`, Switzerland's LV95/LN02
+grid for everything from `R_11` on; the gt properties record which as
+`gt_world`), and the surveyed points follow §5 of
+[`exoego_schema.md`](../simplecv/docs/exoego_schema.md). What `convert` measures
+and what it refuses is stated once each, at `WORLD_UP_MIN_FRACTION_OF_G` and
+`CONTROL_POINT_MAX_DISTANCE_M` in `datasets/lamaria.py`. Measured on the corpus:
+all five default sequences read **+z** at 0.92 to 1.01 of |g|, and on the three
+surveyed ones every levelled point comes within 0.7 m of the walk.
+
+Both layers follow [the layer rule](#the-layer-rule) to the letter, which is why
+lamaria is its reference implementation: the gt layer is built from the published
+ground truth, the published calibration and imu-right's accelerometer read back
+out of the base rrd, so a whole-corpus gt rebuild is seconds per sequence with no
+network at all. A sequence the archive publishes no ground truth for (the whole
+test split) writes no `gt` rrd and is done once its base rrd exists. `register`
+then registers both layers under one dataset:
+
+```bash
+# --catalog-url belongs to the verb, so it precedes the dataset subcommand
+RERUN_INSECURE_SKIP_HOST_CHECK=1 DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/lamaria-rrd \
+  pixi run -e dataforge --frozen dataforge-register --catalog-url rerun+http://127.0.0.1:9988 lamaria
+```
 
 ### Environment variables
 
@@ -249,7 +295,7 @@ is a nominal-rate fiction for such a file.
 | `selfcap` | one cut episode | 4 phone exo rigs + the OAK ego rig + the Quest (9 cameras), the OAK IMU, the Quest head-pose track |
 | `wildcap` | one capture directory | the videos only: no `Pinhole`, no `ViewCoordinates`, no transforms — calibration, sync and localization are later layers |
 | `msd` | one Monado SLAM sequence, fetched on demand | **two** rrds: `base` with 2 or 4 grayscale video streams (AV1-encoded from the archive's PNGs), the IMU and on the G2/Odyssey+ the magnetometer; `gt` with the ~1 kHz `world_T_rig`, its path and trail, and the root `ViewCoordinates` |
-| `lamaria` | one Aria Gen1 sequence, its VRS fetched on demand | 3 AV1 video streams (2 gray SLAM + 1 RGB, native sideways orientation), both raw IMUs (`imu_01` carrying its real `rig_T_imu`), on Aria's unshifted device clock |
+| `lamaria` | one Aria Gen1 sequence, its VRS fetched on demand | **two** rrds: `base` with 3 AV1 video streams (2 gray SLAM + 1 RGB, native sideways orientation) and both raw IMUs (`imu_01` carrying its real `rig_T_imu`), on Aria's unshifted device clock; `gt` with the published `world_T_rig` (20 Hz on the controlled set, ~3 Hz on the surveyed ones), its path and trail, the surveyed control points and their 2D detections, and the root `ViewCoordinates` |
 
 A config's `command` is its CLI subcommand; its `name` is the catalog dataset
 and the prefix of every recording id. They are equal for robocap, selfcap and
@@ -259,11 +305,24 @@ lamaria; wildcap derives `wildcap-<corpus>` and msd derives `msd-<device>`.
 `convert` writes `<DATAFORGE_OUTPUT_ROOT>/base/<recording_id>.rrd` through a
 temp file that atomically replaces the target, so "exists = done" and a re-run
 never truncates a file the catalog server holds open. Derived layers (slam,
-pose, labels) stack onto the same entities as sibling layers; msd already writes
-one, its `gt/` rrd, in the same convert. `register` walks
+pose, labels) stack onto the same entities as sibling layers; msd and lamaria
+already write one, their `gt/` rrd, in the same convert. `register` walks
 every layer directory it knows — `base`, which is required, then `gt` — and
 registers each under its own layer name, so a corpus with no ground-truth pass
 registers exactly as before.
+
+### The layer rule
+
+Every dataset follows it; `lamaria` is the reference implementation. **base** is a
+faithful conversion of the raw source and the only layer that needs it: it skips on
+its own rrd, and once it is published the bulk source is deleted, leaving only the
+small sidecars (calibration, ground truth) on disk. A **derived** layer reads the
+base rrd plus those sidecars — never the raw source — skips on its own rrd and
+rebuilds under `--force`, so regenerating one across a corpus is `rm <layer>/*.rrd`,
+a convert, and a `register --replace`. Capture properties live in base; a derived
+layer is written with `send_properties=False` and carries only its own
+`property:<layer>:*` beside its data, never a properties-only layer. Layers share
+nothing but the recording id, which is what stacks them onto one segment.
 
 ## Blueprints
 

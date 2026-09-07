@@ -19,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import PublishedCamera, read_calibration_json  # pyrefly: ignore[missing-import]
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from projectaria_tools.core.data_provider import VrsDataProvider
@@ -55,7 +56,7 @@ def rig(provider: VrsDataProvider) -> aria.AriaRig:
 
 
 def test_open_vrs_names_a_missing_file(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match="no VRS at"):
+    with pytest.raises(FileNotFoundError, match="no readable VRS at"):
         aria.open_vrs(tmp_path / "absent.vrs")
 
 
@@ -86,14 +87,14 @@ def test_iter_frames_and_frame_timestamps_agree_frame_for_frame(provider: VrsDat
 
 
 def test_rig_T_cam_reproduces_the_published_calibration(rig: aria.AriaRig) -> None:
-    published: dict[str, aria.PublishedCamera] = aria.read_calibration_json(PUBLISHED_CALIBRATION_PATH)
+    published: dict[str, PublishedCamera] = read_calibration_json(PUBLISHED_CALIBRATION_PATH)
     for name, stream_id in (("cam0", aria.SLAM_LEFT_STREAM_ID), ("cam1", aria.SLAM_RIGHT_STREAM_ID)):
         from_vrs: Float64[ndarray, "4 4"] = rig.cameras[stream_id].extrinsics.world_T_cam
         assert from_vrs == pytest.approx(published[name].rig_T_cam.to_matrix(), abs=1e-3), name
 
 
 def test_published_intrinsics_match_the_vrs_ones(rig: aria.AriaRig) -> None:
-    published: dict[str, aria.PublishedCamera] = aria.read_calibration_json(PUBLISHED_CALIBRATION_PATH)
+    published: dict[str, PublishedCamera] = read_calibration_json(PUBLISHED_CALIBRATION_PATH)
     for name, stream_id in (("cam0", aria.SLAM_LEFT_STREAM_ID), ("cam1", aria.SLAM_RIGHT_STREAM_ID)):
         camera: Fisheye62Parameters = rig.cameras[stream_id]
         fx, fy, cx, cy = published[name].params[:4]
@@ -117,7 +118,7 @@ def test_the_rig_frame_is_imu_right(rig: aria.AriaRig) -> None:
 def test_the_rgb_camera_is_only_in_the_vrs(rig: aria.AriaRig) -> None:
     """The published calibration has no RGB entry, so the VRS is the only source for cam_02."""
     assert set(rig.cameras) == set(aria.CAMERA_STREAM_IDS)
-    assert "cam2" not in aria.read_calibration_json(PUBLISHED_CALIBRATION_PATH)
+    assert "cam2" not in read_calibration_json(PUBLISHED_CALIBRATION_PATH)
     rgb: Fisheye62Parameters = rig.cameras[aria.RGB_STREAM_ID]
     assert (rgb.intrinsics.width, rgb.intrinsics.height) == (1408, 1408)
 
