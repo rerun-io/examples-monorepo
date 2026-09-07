@@ -32,7 +32,17 @@ from numpy import ndarray
 from slam_rs import _core
 from slam_rs.catalog_feed import TIMELINE, CameraCalib
 from slam_rs.trajectory import Trajectory, empty_trajectory
-from slam_rs.vio_log import CPP_ENTITY, GT_ENTITY, RUN_ENTITY, STATS_ENTITY, VioLogger, frustum_strip, vio_blueprint
+from slam_rs.vio_log import (
+    CPP_ENTITY,
+    GT_ENTITY,
+    IDENTITY,
+    RUN_ENTITY,
+    STATS_ENTITY,
+    VioLogger,
+    alignment_onto,
+    frustum_strip,
+    vio_blueprint,
+)
 
 FRAME_INTERVAL_NS: int = 33_000_000
 """One 30 Hz frameset to the next."""
@@ -68,6 +78,9 @@ def read_rows(path: Path) -> Rows:
         if chunk.is_static:
             continue
         batch = chunk.to_record_batch()
+        if TIMELINE not in batch.schema.names:
+            # A row written before the caller set a cursor sits on no timeline.
+            continue
         times: list = batch.column(TIMELINE).to_pylist()
         components: dict[str, list] = {
             name: batch.column(name).to_pylist() for name in batch.schema.names if ":" in name and not name.startswith("rerun.")
@@ -190,6 +203,38 @@ def test_a_reference_is_drawn_up_to_the_cursor_and_no_further(logged: Logged) ->
             drawn: list = values["LineStrips3D:strips"][0]
             # One reference pose every frame interval, from zero, inclusive.
             assert len(drawn) == t_ns // FRAME_INTERVAL_NS + 1, entity
+
+
+def test_an_alignment_recovers_a_known_rigid_offset() -> None:
+    """The transform a run carries is the one that takes it onto the ground truth."""
+    t_ns: Int64[ndarray, " n"] = np.arange(0, 40 * FRAME_INTERVAL_NS, FRAME_INTERVAL_NS, dtype=np.int64)
+    source: Trajectory = straight_line(t_ns)
+    turn: Float64[ndarray, "3 3"] = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    offset: Float64[ndarray, " 3"] = np.array([3.0, -2.0, 0.5])
+    target: Trajectory = Trajectory(
+        t_ns=t_ns,
+        position_m=source.position_m @ turn.T + offset,
+        quaternion_wxyz=source.quaternion_wxyz,
+    )
+    recovered = alignment_onto(source, target)
+    np.testing.assert_allclose(recovered.dst_R_src, turn, atol=1e-9)
+    np.testing.assert_allclose(recovered.dst_t_src, offset, atol=1e-9)
+    np.testing.assert_allclose(recovered.apply(source.position_m), target.position_m, atol=1e-9)
+
+
+def test_too_short_a_run_carries_no_alignment() -> None:
+    """Below the association floor the identity is honest: nothing has been measured yet."""
+    short: Trajectory = straight_line(np.arange(0, 3 * FRAME_INTERVAL_NS, FRAME_INTERVAL_NS, dtype=np.int64))
+    long: Trajectory = straight_line(np.arange(0, 40 * FRAME_INTERVAL_NS, FRAME_INTERVAL_NS, dtype=np.int64))
+    assert alignment_onto(short, long) is IDENTITY
+    assert alignment_onto(long, empty_trajectory()) is IDENTITY
+
+
+def test_the_cpp_reference_is_placed_once_at_the_first_tracked_frameset(logged: Logged) -> None:
+    """Both it and the ground truth are known up front, so its alignment never changes."""
+    rows: list[tuple[int, dict[str, list]]] = logged.rows[CPP_ENTITY]
+    assert [t_ns for t_ns, _ in rows] == logged.tracked[:1]
+    assert "Transform3D:translation" in rows[0][1]
 
 
 def test_the_keypoints_land_on_the_camera_images(logged: Logged) -> None:
