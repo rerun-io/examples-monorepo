@@ -18,11 +18,27 @@
 //!   camera. The inputs are plain numbers — the direction, the inverse distance,
 //!   the 4x4 `T_t_h` and the observation — so nothing has to be reconstructed
 //!   through a group operation and the comparison is on the residual path alone.
+//! * `norm3` — 32 vectors through `v.head<3>().squaredNorm()` and `.norm()`,
+//!   with a flag per entry saying whether the two candidate summation orders
+//!   disagree on that input and which one Eigen took. 12 of the 32 discriminate
+//!   in `f64` and 17 in `f32`, and the answer is **not** the same in the two
+//!   precisions.
+//! * `huber_cost` — 14 residuals through the cost expression of
+//!   `ba_base.cpp:179-182`, five of them above the threshold so the
+//!   downweighting branch is pinned, and written as the C++ writes it so the
+//!   row-scaling operation order is pinned with it.
 //! * `triangulate` — ten DLT cases, four of them deliberately on basalt's
 //!   `0 < inv_dist < 3` acceptance gate (`sqrt_keypoint_vio.cpp:534`): a point
 //!   exactly 1/3 m away, one just inside, one just outside, and a sub-millimetre
 //!   baseline. The fixture records the `accepted` flag as well as the vector, so
 //!   the port is checked on the decision, not only on the numbers.
+//! * `triangulate_boundary` — 32 more cases per precision, every one a point at
+//!   exactly 1/3 m in a different direction with a different relative pose, so
+//!   the DLT lands within a few ulps of `inv_dist = 3` and basalt's gate really
+//!   is decided by the last bits. **Sixteen of the 32 are selected because the
+//!   summation order of the normalisation flips the accept/reject decision on
+//!   its own** (`order_decides`), which is what makes this an end-to-end test of
+//!   the per-precision reduction order rather than a 1.5%-per-case lottery.
 //!
 //! This is the load-bearing test of the stage. The finite-difference tests in
 //! `src/ba_base.rs` prove the analytic Jacobians are the derivative of *this*
@@ -39,24 +55,31 @@
 //! basalt's `accepted` decision, and that is asserted exactly, on four cases
 //! placed on the gate on purpose.
 //!
-//! Two ulp-level findings came out of this fixture and changed the port:
-//! `So3 * Vector3` now sums Sophus's three terms in Sophus's order rather than
-//! nalgebra's (`lie.rs`), and every `head<3>().norm()` on the residual path sums
-//! in Eigen's `a0 + (a1 + a2)` unroller order (`landmark::eigen_norm3`). Without
-//! the first, `triangulate` was an ulp off in `f64`; without the second, `proj[2]`
-//! for a landmark at `inv_dist = 1e-7` was an ulp off in `f32`.
+//! Three ulp-level findings came out of this fixture and changed the port:
+//! `So3 * Vector3` now sums Sophus's three terms in Sophus's order (`lie.rs`);
+//! `head<3>().norm()` sums in Eigen's order, which is `(a + b) + c` in `f64` and
+//! `a + (b + c)` in `f32` ([`LieScalar::eigen_redux3`]); and `compute_error`
+//! scales the residual **row** before the dot product, as C++'s left-associative
+//! `*` does. Without the first, `triangulate` was an ulp off in `f64`; without
+//! the second, `proj[2]` for a landmark at `inv_dist = 1e-7` was an ulp off in
+//! `f32` and a landmark exactly 1/3 m away was **accepted** where C++ rejects it;
+//! without the third, one observation's cost was 4e-6 off in `f32`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// The literal below is a C++ `%.17g` printout of a float, carried over verbatim
+// even though an `f32` does not need every figure. Keeping the printout is what
+// makes it evidence — the same reason `imu_oracle.rs` allows this.
+#![allow(clippy::excessive_precision)]
 
 use nalgebra::{
     Matrix2x3, Matrix2x4, Matrix2x6, Matrix4, Matrix4x2, Quaternion, UnitQuaternion, Vector2,
     Vector3, Vector4,
 };
 use serde::Deserialize;
-use slam_rs::ba_base::{LinearizePointOut, linearize_point, triangulate};
+use slam_rs::ba_base::{LinearizePointOut, huber_cost, linearize_point, triangulate};
 use slam_rs::calib::Calibration;
 use slam_rs::camera::{CameraEnum, KannalaBrandt4, PinholeRadtan8};
-use slam_rs::landmark::{Landmark, StereographicParam};
+use slam_rs::landmark::{Landmark, StereographicParam, eigen_norm3};
 use slam_rs::lie::{LieScalar, Se3, So3};
 use slam_rs::types::{LandmarkId, TimeCamId};
 
@@ -78,8 +101,34 @@ const TRIANGULATE_TOLERANCE_F32: f64 = 1e-7;
 #[derive(Debug, Deserialize)]
 struct Oracle {
     stereographic: Vec<OracleStereographic>,
+    norm3: Vec<OracleNorm3>,
+    huber_cost: Vec<OracleHuber>,
     linearize_point: Vec<OracleLinearize>,
     triangulate: Vec<OracleTriangulate>,
+    triangulate_boundary: Vec<OracleTriangulate>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OracleNorm3 {
+    scalar: String,
+    v: Vec<f64>,
+    squared_norm: f64,
+    norm: f64,
+    /// Whether `(a + b) + c` and `a + (b + c)` disagree on this input at all.
+    discriminating: bool,
+    /// Which of the two Eigen took, on this input, in this precision.
+    left_assoc: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct OracleHuber {
+    scalar: String,
+    res: Vec<f64>,
+    huber_thresh: f64,
+    obs_std_dev: f64,
+    e: f64,
+    huber_weight: f64,
+    cost: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,6 +172,10 @@ struct OracleTriangulate {
     p2: Vec<f64>,
     result: Vec<Option<f64>>,
     accepted: bool,
+    /// Only on the boundary sweep: whether the summation order of
+    /// `head<3>().norm()` decides this case's accept/reject on its own.
+    #[serde(default)]
+    order_decides: bool,
 }
 
 fn oracle() -> Oracle {
@@ -609,4 +662,248 @@ fn the_bearing_sign_flip_fires() {
         finite(&behind.result, 2) < 0.0,
         "and f0 itself points backwards"
     );
+}
+
+// ─── the three-coefficient reduction order ─────────────────────────────────
+
+fn check_norm3<S: LieScalar>(entries: &[&OracleNorm3], left_assoc: bool) {
+    assert!(!entries.is_empty());
+    let mut discriminating: usize = 0;
+    for entry in entries {
+        let label: String = format!("norm3 {} {:?}", entry.scalar, entry.v);
+        let x: S = scalar(entry.v[0]);
+        let y: S = scalar(entry.v[1]);
+        let z: S = scalar(entry.v[2]);
+
+        // The reduction itself, bit for bit.
+        close(
+            &format!("{label} squared_norm"),
+            S::eigen_redux3(x * x, y * y, z * z).to_f64(),
+            Some(entry.squared_norm),
+            0.0,
+        );
+        // And the square root the residual path actually calls.
+        close(
+            &format!("{label} norm"),
+            eigen_norm3(x, y, z).to_f64(),
+            Some(entry.norm),
+            0.0,
+        );
+
+        if entry.discriminating {
+            discriminating += 1;
+            // On an input the two orders disagree about, Eigen's answer names
+            // the association it took, and it must be the one the port assumes.
+            // On the others the flag is vacuously true and says nothing.
+            assert_eq!(
+                entry.left_assoc, left_assoc,
+                "{label}: Eigen's association is not what the port assumes"
+            );
+            // The *other* order really does give a different answer here, so the
+            // bit-equality above is a test and not a coincidence.
+            let other: S = if left_assoc {
+                (x * x) + ((y * y) + (z * z))
+            } else {
+                ((x * x) + (y * y)) + (z * z)
+            };
+            assert_ne!(
+                other.to_f64(),
+                entry.squared_norm,
+                "{label}: marked discriminating but both orders agree"
+            );
+        }
+    }
+    assert!(
+        discriminating >= 10,
+        "only {discriminating} discriminating probes"
+    );
+}
+
+/// `f64`: `Packet2d` is two doubles, so Eigen reduces one packet and folds the
+/// remainder in — `(a + b) + c` (`Redux.h:29-67`, `LinearVectorizedTraversal`).
+#[test]
+fn the_three_coefficient_reduction_is_left_associated_in_double() {
+    let oracle: Oracle = oracle();
+    let entries: Vec<&OracleNorm3> = oracle.norm3.iter().filter(|e| e.scalar == "f64").collect();
+    assert_eq!(entries.len(), 32);
+    check_norm3::<f64>(&entries, true);
+}
+
+/// `f32`: `Packet4f` is four floats, wider than the expression, so the aligned
+/// part is empty and the scalar `redux_novec_unroller` runs, splitting at
+/// `Length / 2` — `a + (b + c)` (`Redux.h:98-108`).
+#[test]
+fn the_three_coefficient_reduction_is_right_associated_in_float() {
+    let oracle: Oracle = oracle();
+    let entries: Vec<&OracleNorm3> = oracle.norm3.iter().filter(|e| e.scalar == "f32").collect();
+    assert_eq!(entries.len(), 32);
+    check_norm3::<f32>(&entries, false);
+}
+
+/// The two precisions really do disagree about the order, which is the whole
+/// reason `eigen_redux3` is a trait method and not one expression.
+#[test]
+fn the_two_precisions_reduce_in_different_orders() {
+    let oracle: Oracle = oracle();
+    let f64_left: bool = oracle
+        .norm3
+        .iter()
+        .filter(|e| e.scalar == "f64" && e.discriminating)
+        .all(|e| e.left_assoc);
+    let f32_left: bool = oracle
+        .norm3
+        .iter()
+        .filter(|e| e.scalar == "f32" && e.discriminating)
+        .any(|e| e.left_assoc);
+    assert!(
+        f64_left,
+        "f64 is left-associated on every discriminating probe"
+    );
+    assert!(
+        !f32_left,
+        "f32 is right-associated on every discriminating probe"
+    );
+}
+
+// ─── the Huber-weighted cost ───────────────────────────────────────────────
+
+fn check_huber<S: LieScalar>(entries: &[&OracleHuber], tolerance: f64) {
+    assert!(!entries.is_empty());
+    let mut downweighted: usize = 0;
+    for entry in entries {
+        let label: String = format!("huber_cost {} {:?}", entry.scalar, entry.res);
+        let res: Vector2<S> = vector2(&entry.res);
+        let e: S = res.norm();
+        close(&format!("{label} e"), e.to_f64(), Some(entry.e), tolerance);
+        let (weight, cost) = huber_cost(
+            &res,
+            e,
+            scalar(entry.huber_thresh),
+            scalar(entry.obs_std_dev),
+        );
+        close(
+            &format!("{label} huber_weight"),
+            weight.to_f64(),
+            Some(entry.huber_weight),
+            tolerance,
+        );
+        close(
+            &format!("{label} cost"),
+            cost.to_f64(),
+            Some(entry.cost),
+            tolerance,
+        );
+        if entry.huber_weight != 1.0 {
+            downweighted += 1;
+        }
+    }
+    assert!(
+        downweighted >= 5,
+        "only {downweighted} cases above the threshold"
+    );
+}
+
+#[test]
+fn the_huber_cost_matches_the_cpp_in_double() {
+    let oracle: Oracle = oracle();
+    let entries: Vec<&OracleHuber> = oracle
+        .huber_cost
+        .iter()
+        .filter(|e| e.scalar == "f64")
+        .collect();
+    assert_eq!(entries.len(), 14);
+    check_huber::<f64>(&entries, TOLERANCE);
+}
+
+/// Exact in `f32`. This is the finding the reassociated form failed: with
+/// `res = [10.125, 9.625]`, `huber_thresh = 1` and `obs_std_dev = 0.5`, C++
+/// returns `53.879341125488281` and `weight * (rx^2 + ry^2)` returns
+/// `53.879337310791016`.
+#[test]
+fn the_huber_cost_matches_the_cpp_in_float() {
+    let oracle: Oracle = oracle();
+    let entries: Vec<&OracleHuber> = oracle
+        .huber_cost
+        .iter()
+        .filter(|e| e.scalar == "f32")
+        .collect();
+    assert_eq!(entries.len(), 14);
+    check_huber::<f32>(&entries, 0.0);
+
+    // Named explicitly, so a regression on this one case is unmissable.
+    let reviewers_case: &OracleHuber = entries
+        .iter()
+        .find(|e| e.res == vec![10.125, 9.625])
+        .unwrap();
+    let res: Vector2<f32> = Vector2::new(10.125, 9.625);
+    let (_, cost) = huber_cost(&res, res.norm(), 1.0, 0.5);
+    assert_eq!(f64::from(cost), reviewers_case.cost);
+    // The C++ `%.17g` printout of that float, to every figure.
+    assert_eq!(f64::from(cost), 53.879_341_125_488_281);
+    // And what the reassociated form returns instead, which must NOT be it.
+    let reassociated: f32 = (1.0f32 / res.norm() / 0.25)
+        * 0.5
+        * (2.0 - 1.0f32 / res.norm())
+        * (res.x * res.x + res.y * res.y);
+    assert_ne!(cost, reassociated);
+}
+
+// ─── the acceptance gate, end to end ───────────────────────────────────────
+
+/// 32 points per precision at exactly 1/3 m, where basalt's `inv_dist < 3` gate
+/// is decided by the last bits of the normalisation. Both the vector and the
+/// decision are pinned; with the `f64` reduction order wrong, a point that C++
+/// puts at exactly `3.0` (reject) comes out at `2.9999999999999996` (accept).
+#[test]
+fn the_boundary_sweep_matches_the_cpp_in_double() {
+    let oracle: Oracle = oracle();
+    let entries: Vec<&OracleTriangulate> = oracle
+        .triangulate_boundary
+        .iter()
+        .filter(|e| e.scalar == "f64")
+        .collect();
+    assert_eq!(entries.len(), 32);
+    check_triangulate::<f64>(&entries, TRIANGULATE_TOLERANCE_F64);
+    let accepted: usize = entries.iter().filter(|e| e.accepted).count();
+    assert!(
+        (1..entries.len()).contains(&accepted),
+        "the sweep must straddle the gate, not sit on one side ({accepted} accepted)"
+    );
+    assert_eq!(
+        entries.iter().filter(|e| e.order_decides).count(),
+        16,
+        "half the sweep must be decided by the summation order alone"
+    );
+}
+
+#[test]
+fn the_boundary_sweep_matches_the_cpp_in_float() {
+    let oracle: Oracle = oracle();
+    let entries: Vec<&OracleTriangulate> = oracle
+        .triangulate_boundary
+        .iter()
+        .filter(|e| e.scalar == "f32")
+        .collect();
+    assert_eq!(entries.len(), 32);
+    check_triangulate::<f32>(&entries, TRIANGULATE_TOLERANCE_F32);
+    let accepted: usize = entries.iter().filter(|e| e.accepted).count();
+    assert!((1..entries.len()).contains(&accepted));
+    assert_eq!(entries.iter().filter(|e| e.order_decides).count(), 16);
+}
+
+/// Every boundary case lands within a whisker of the gate, so the decisions
+/// above are genuinely the last bits and not a coarse threshold.
+#[test]
+fn every_boundary_case_sits_on_the_gate() {
+    let oracle: Oracle = oracle();
+    for entry in &oracle.triangulate_boundary {
+        let inv_dist: f64 = finite(&entry.result, 3);
+        let tolerance: f64 = if entry.scalar == "f64" { 1e-12 } else { 1e-5 };
+        assert!(
+            (inv_dist - 3.0).abs() < tolerance,
+            "{} {}: inv_dist {inv_dist} is not on the gate",
+            entry.scalar,
+            entry.name
+        );
+    }
 }

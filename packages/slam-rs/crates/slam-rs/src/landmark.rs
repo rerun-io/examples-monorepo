@@ -45,19 +45,18 @@ fn c<S: LieScalar>(value: f64) -> S {
     S::from_literal(value)
 }
 
-/// `v.head<3>().norm()` in Eigen's summation order.
+/// `v.head<3>().norm()` in Eigen's summation order, which differs between the
+/// two precisions.
 ///
-/// Eigen reduces a fixed-size expression with `redux_novec_unroller`, which
-/// splits at `Length / 2` (`Eigen/src/Core/Redux.h`): for three coefficients
-/// that is `a0 + (a1 + a2)`, **not** left to right. A three-element `head<3>()`
-/// of a `Vector4` is shorter than any float packet, so the vectorized path never
-/// applies and this is the order every `norm()` in the reprojection path takes.
-/// The difference is one ulp, and it is visible: the C++ fixture's `proj[2]` for
-/// a landmark at `inv_dist = 1e-7` disagrees with the left-to-right sum in
-/// `f32` (decision D44's rule).
+/// See [`LieScalar::eigen_redux3`]: `f64` reduces one `Packet2d` and folds the
+/// remainder in, `(a + b) + c`; `f32` finds `Packet4f` too wide and falls back
+/// to the scalar unroller's `a + (b + c)`. Using one order for both is a
+/// one-ulp error, and it reaches a threshold in each precision — the `f32`
+/// `proj[2]` of a landmark at `inv_dist = 1e-7`, and the `f64` acceptance gate
+/// on a landmark exactly 1/3 m away (decision D44's rule).
 #[inline]
-pub(crate) fn eigen_norm3<S: LieScalar>(x: S, y: S, z: S) -> S {
-    (x * x + (y * y + z * z)).sqrt()
+pub fn eigen_norm3<S: LieScalar>(x: S, y: S, z: S) -> S {
+    S::eigen_redux3(x * x, y * y, z * z).sqrt()
 }
 
 /// Stereographic projection: the minimal 2-parameter chart on the unit sphere

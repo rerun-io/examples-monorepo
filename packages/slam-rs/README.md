@@ -55,18 +55,23 @@ covariance of seven preintegration runs, plus what
 frontend produced from eight of them; and `lmdb/lmdb_oracle.json`, the
 stereographic chart with both its Jacobians at twelve points, `linearizePoint`'s
 residual, `d_res_d_xi`, `d_res_d_p` and `proj` for five configurations of each of
-the two shipped reference cameras, and ten `triangulate` cases, four of them
-placed on basalt's `0 < inv_dist < 3` acceptance gate.
+the two shipped reference cameras, ten `triangulate` cases with four of them
+placed on basalt's `0 < inv_dist < 3` acceptance gate, 32 more per precision
+sitting on that gate (half of them chosen because the summation order alone
+decides them), 32 probes of `head<3>().squaredNorm()` per precision, and 14
+residuals through the Huber-weighted cost, five of them above the threshold.
 
 The camera port reproduces every double to 1e-15 relative (1e-12 for
 unprojections, which run a Newton iteration) and every float **exactly**; the IMU
 port reproduces every double to 1e-14, and to 1e-7 through the whitening, which
 inverts the covariance; the landmark port reproduces the chart and the residual
-to 1e-12 in double and **exactly** in float, and triangulation bit for bit on
-nine of the ten double cases. All five generators live on the fork's
-`slam-rs-reference` branch, as `tools/dump_pyramid.cpp`,
-`tools/camera_oracle.cpp`, `tools/imu_oracle.cpp`, `tools/dump_flow.cpp` and
-`tools/lmdb_oracle.cpp`; the monorepo never compiles C++.
+to 1e-12 in double and **exactly** in float, triangulation bit for bit on nine of
+the ten double cases, and Eigen's three-coefficient reduction order and the
+Huber-weighted cost of one observation bit for bit in both precisions. All five
+generators live on the fork's `slam-rs-reference` branch, as
+`tools/dump_pyramid.cpp`, `tools/camera_oracle.cpp`, `tools/imu_oracle.cpp`,
+`tools/dump_flow.cpp` and `tools/lmdb_oracle.cpp`; the monorepo never compiles
+C++.
 
 The IMU fixture earns its keep on one run: the covariance after a single sample
 with a still gyroscope and accelerometer is rank deficient, and what basalt does
@@ -150,17 +155,37 @@ budget basalt has no equivalent of: the port's buffers are preallocated, so
 detection and matching stop adding once a camera is full rather than producing a
 frame the tracker cannot carry.
 
-### The landmark stage, and the DLT's SVD
+### The landmark stage, and where an ulp is load-bearing
 
-Two ulp-level findings came out of the landmark fixture, and both changed code
-outside that stage. `So3 * Vector3` now sums Sophus's three terms in Sophus's
-order (`so3.hpp:408-417`) rather than nalgebra's association, which was an ulp
-off in triangulation; and every `head<3>().norm()` on the residual path sums in
-Eigen's `a0 + (a1 + a2)` unroller order, which was an ulp off in the `f32`
-inverse depth of a landmark at `inv_dist = 1e-7`. Both follow decision D44's
-rule: an elementary operation whose rounding can reach a threshold comparison is
-ported in Eigen's or Sophus's operation order, not delegated to nalgebra's
-equivalent.
+Three ulp-level findings came out of the landmark fixture, and all three changed
+code outside the stage. `So3 * Vector3` now sums Sophus's three terms in
+Sophus's order (`so3.hpp:408-417`) rather than nalgebra's association, which was
+an ulp off in triangulation; `compute_error` scales the residual **row** before
+the dot product, as C++'s left-associative `*` does (`ba_base.cpp:182`), which
+was 4e-6 off in `f32` on a 10-pixel residual; and every `head<3>().norm()` on
+the residual path sums in Eigen's order, which is **not the same in the two
+precisions**.
+
+That last one is `LieScalar::eigen_redux3`. Eigen picks a reduction strategy by
+comparing `find_best_packet<Scalar, 3>` against the three coefficients
+(`Redux.h:29-67`): in `f64`, `Packet2d` holds two of them, so one packet is
+reduced and the remainder folded in — `(a + b) + c`; in `f32`, `Packet4f` is
+wider than the whole expression, the aligned part is empty, and the scalar
+unroller's `Length / 2` split runs instead — `a + (b + c)`. Using one order for
+both is an ulp, and the ulp is load-bearing at each end: in `f32` it moved the
+inverse depth of a landmark at `inv_dist = 1e-7`, and in `f64` it made a
+landmark exactly 1/3 m away normalise to `2.9999999999999996` instead of `3.0`,
+which basalt's `inv_dist < 3` gate **accepts** where the C++ rejects. Sixteen of
+the 32 boundary cases in the fixture are there because the summation order
+decides them on its own.
+
+The packet widths are fixed by the fork's own build flags — a trailing
+`-march=nocona` overrides the earlier `-march=native`, so the reference binary
+is SSE3 on every host and this is a property of basalt, not of the machine.
+
+All three follow decision D44's rule: an elementary operation whose rounding can
+reach a threshold comparison is ported in Eigen's or Sophus's operation order,
+not delegated to nalgebra's equivalent.
 
 The DLT's 4x4 SVD is a step-for-step port of Eigen's `JacobiSVD`, not a call into
 nalgebra's: a 4x4 with `ComputeFullV` takes Eigen's square path, so the whole

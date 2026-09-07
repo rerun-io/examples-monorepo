@@ -541,6 +541,45 @@ pub fn triangulate<S: LieScalar>(f0: &Vector3<S>, f1: &Vector3<S>, t_0_1: &Se3<S
     world_point
 }
 
+// ─── the Huber-weighted cost of one observation ───────────────────────────
+
+/// The weight and the cost `computeError` adds for one observation
+/// (`ba_base.cpp:179-182`), in the C++'s operation order.
+///
+/// ```text
+/// huber_weight = e < huber_thresh ? 1 : huber_thresh / e
+/// obs_weight   = huber_weight / (obs_std_dev * obs_std_dev)
+/// cost         = 0.5 * (2 - huber_weight) * obs_weight * res^T * res
+/// ```
+///
+/// `e` is `res.norm()` in **raw pixels**: the Huber comparison happens before
+/// the `1/sigma` scaling (papers-part2 §13 D14), so the shipped 1.0 px threshold
+/// against a 0.5 px sigma is an effective 2 sigma.
+///
+/// The last line is not `weight * (rx^2 + ry^2)`. C++'s `*` is left-associative,
+/// so the scalar factor multiplies `res.transpose()` — a **row expression whose
+/// two coefficients are each scaled** — and only then does the 1x2 by 2x1 product
+/// contract it against the unscaled column. Reassociating it to scale the dot
+/// product instead moves the last bits: at `res = [10.125, 9.625]` with
+/// `huber_thresh = 1` and `obs_std_dev = 0.5` in `f32`, C++ returns
+/// `53.879341125488281` and the reassociated form `53.879337310791016`. This is
+/// the cost the Levenberg-Marquardt accept test compares against its predicted
+/// decrease, so the difference is not cosmetic.
+#[inline]
+pub fn huber_cost<S: LieScalar>(res: &Vector2<S>, e: S, huber_thresh: S, obs_std_dev: S) -> (S, S) {
+    let huber_weight: S = if e < huber_thresh {
+        S::one()
+    } else {
+        huber_thresh / e
+    };
+    let obs_weight: S = huber_weight / (obs_std_dev * obs_std_dev);
+    // `Scalar(0.5) * (2 - huber_weight) * obs_weight` folds left into one
+    // scalar, which then scales the row.
+    let factor: S = c::<S>(0.5) * (c::<S>(2.0) - huber_weight) * obs_weight;
+    let cost: S = (factor * res.x) * res.x + (factor * res.y) * res.y;
+    (huber_weight, cost)
+}
+
 // ─── the sliding-window state ──────────────────────────────────────────────
 
 /// `BundleAdjustmentBase<Scalar>` (`ba_base.h:42-155`): the window the estimator
@@ -754,16 +793,8 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
                         let flag: S = if same_image { c::<S>(-2.0) } else { e };
                         map.entry(kpt_id).or_default().push((tcid_t, flag));
                     }
-                    let huber_weight: S = if e < self.huber_thresh {
-                        S::one()
-                    } else {
-                        self.huber_thresh / e
-                    };
-                    let obs_weight: S = huber_weight / (self.obs_std_dev * self.obs_std_dev);
-                    local_error += c::<S>(0.5)
-                        * (c::<S>(2.0) - huber_weight)
-                        * obs_weight
-                        * (res.x * res.x + res.y * res.y);
+                    let (_, cost) = huber_cost(&res, e, self.huber_thresh, self.obs_std_dev);
+                    local_error += cost;
                     num_points += 1;
                 } else if let Some(map) = outliers.as_deref_mut() {
                     let flag: S = if same_image { c::<S>(-2.0) } else { -S::one() };
@@ -834,6 +865,15 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
     /// nothing; C++ asserts (`:294`, `:297`), the port returns
     /// [`BaError::NotLinearized`].
     pub fn compute_delta(&self, marg_order: &AbsOrderMap) -> Result<DVector<S>, BaError> {
+        // Validate every block **before** allocating. `AbsOrderMap::push` accepts
+        // any size that does not overflow the total, so an ordering carrying, say,
+        // `usize::MAX` would abort the process in the allocator on the line below
+        // instead of returning the typed error four lines later (decision D32).
+        for (frame_id, _, size) in marg_order.iter() {
+            if size != POSE_SIZE && size != POSE_VEL_BIAS_SIZE {
+                return Err(BaError::UnexpectedBlockSize { frame_id, size });
+            }
+        }
         let mut delta: DVector<S> = DVector::zeros(marg_order.total_size());
         for (frame_id, offset, size) in marg_order.iter() {
             match size {
@@ -859,6 +899,8 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
                         .rows_mut(offset, POSE_VEL_BIAS_SIZE)
                         .copy_from(state.delta());
                 }
+                // Unreachable: the validation pass above rejected every other
+                // size before a single row was allocated. Kept for exhaustiveness.
                 size => return Err(BaError::UnexpectedBlockSize { frame_id, size }),
             }
         }
@@ -1268,17 +1310,71 @@ mod tests {
         }
     }
 
+    /// `compute_error` against a sum built from the landmarks directly, at a
+    /// noise level below the Huber threshold and at one well above it.
+    ///
+    /// The second level is the point: with the 0.4 px jitter this test used to
+    /// carry, every residual norm was at most `0.4 sqrt(2) = 0.57` px against a
+    /// 1.0 px threshold, so the downweighting branch never ran and replacing it
+    /// with a constant weight of 1 still passed. The assertions below count the
+    /// downweighted observations and require them.
     #[test]
     fn compute_error_equals_an_independent_huber_sum() {
-        let ba: BundleAdjustmentBase<f64> = a_window(MSDMI, &synthetic_points(), 0.4);
-        let (error, num_points) = ba.compute_error(None, 0.0).unwrap();
+        for (noise, want_downweighted) in [(0.2f64, false), (4.0f64, true)] {
+            let ba: BundleAdjustmentBase<f64> = a_window(MSDMI, &synthetic_points(), noise);
+            let (error, num_points) = ba.compute_error(None, 0.0).unwrap();
 
-        // Recomputed from the landmarks, without touching `compute_error`'s
-        // machinery: project each landmark into each target and apply
-        // `0.5 * (2 - w) * (w / sigma^2) * |r|^2` with `w` the raw-pixel Huber
-        // weight (`ba_base.cpp:179-182`).
-        let mut want: f64 = 0.0;
-        let mut count: usize = 0;
+            // Recomputed from the landmarks, without touching `compute_error`'s
+            // machinery: project each landmark into each target and apply
+            // `0.5 * (2 - w) * (w / sigma^2) * |r|^2` with `w` the raw-pixel
+            // Huber weight (`ba_base.cpp:179-182`).
+            let mut want: f64 = 0.0;
+            let mut count: usize = 0;
+            let mut downweighted: usize = 0;
+            let mut largest: f64 = 0.0;
+            for lm in ba.lmdb.landmarks() {
+                for (&target, observed) in &lm.obs {
+                    let t_t_h: Matrix4<f64> = ba.rel_pose_matrix(lm.host_kf_id, target).unwrap();
+                    let mut q: Vector4<f64> = StereographicParam::unproject(&lm.direction);
+                    q[3] = lm.inv_dist;
+                    let mut pixel: Vector2<f64> = Vector2::zeros();
+                    assert!(ba.cameras()[target.cam_id].project(&(t_t_h * q), &mut pixel));
+                    let r: Vector2<f64> = pixel - observed;
+                    let e: f64 = r.norm();
+                    largest = largest.max(e);
+                    let w: f64 = if e < ba.huber_thresh {
+                        1.0
+                    } else {
+                        downweighted += 1;
+                        ba.huber_thresh / e
+                    };
+                    want += 0.5 * (2.0 - w) * (w / (ba.obs_std_dev * ba.obs_std_dev)) * r.dot(&r);
+                    count += 1;
+                }
+            }
+            assert_eq!(num_points, count);
+            assert_abs_diff_eq!(error, want, epsilon = 1e-12);
+            assert!(want > 0.0);
+            assert_eq!(
+                downweighted > 0,
+                want_downweighted,
+                "noise {noise}: {downweighted} of {count} downweighted, largest residual {largest} px"
+            );
+            if want_downweighted {
+                // A meaningful share of them, not one straggler.
+                assert!(downweighted * 4 >= count, "only {downweighted} of {count}");
+            }
+        }
+    }
+
+    /// The independent sum above shares the port's `res.norm()`; this one does
+    /// not share anything at all with the production Huber branch. Forcing the
+    /// weight to 1 changes the total, which is what the old test failed to catch.
+    #[test]
+    fn the_huber_branch_changes_the_total() {
+        let ba: BundleAdjustmentBase<f64> = a_window(MSDMI, &synthetic_points(), 4.0);
+        let (error, _) = ba.compute_error(None, 0.0).unwrap();
+        let mut unweighted: f64 = 0.0;
         for lm in ba.lmdb.landmarks() {
             for (&target, observed) in &lm.obs {
                 let t_t_h: Matrix4<f64> = ba.rel_pose_matrix(lm.host_kf_id, target).unwrap();
@@ -1287,20 +1383,13 @@ mod tests {
                 let mut pixel: Vector2<f64> = Vector2::zeros();
                 assert!(ba.cameras()[target.cam_id].project(&(t_t_h * q), &mut pixel));
                 let r: Vector2<f64> = pixel - observed;
-                let e: f64 = r.norm();
-                let w: f64 = if e < ba.huber_thresh {
-                    1.0
-                } else {
-                    ba.huber_thresh / e
-                };
-                want += 0.5 * (2.0 - w) * (w / (ba.obs_std_dev * ba.obs_std_dev)) * r.dot(&r);
-                count += 1;
+                // Weight 1 everywhere: the plain squared error, whitened.
+                unweighted += 0.5 * r.dot(&r) / (ba.obs_std_dev * ba.obs_std_dev);
             }
         }
-        assert_eq!(num_points, count);
-        assert_abs_diff_eq!(error, want, epsilon = 1e-12);
-        // The noise is well past the 1 px threshold, so Huber really is active.
-        assert!(want > 0.0);
+        // Huber is a *down*weighting, so the real cost is the smaller one, and
+        // by a wide margin at this noise level.
+        assert!(error < unweighted * 0.75, "{error} vs {unweighted}");
     }
 
     #[test]
@@ -1414,6 +1503,77 @@ mod tests {
                 .iter()
                 .all(|v| *v == 0.2)
         );
+    }
+
+    /// `AbsOrderMap::push` accepts any size that does not overflow the total, so
+    /// a corrupt ordering can name a block of `usize::MAX`. `compute_delta` must
+    /// return the typed error, not abort the process in the allocator: a panic
+    /// here happens on a rayon worker inside a released GIL (decision D32).
+    #[test]
+    fn compute_delta_validates_before_it_allocates() {
+        let ba: BundleAdjustmentBase<f64> = a_window(MSDMI, &synthetic_points(), 0.0);
+        let mut huge: AbsOrderMap = AbsOrderMap::new();
+        huge.push(0, usize::MAX).unwrap();
+        assert_eq!(
+            ba.compute_delta(&huge),
+            Err(BaError::UnexpectedBlockSize {
+                frame_id: 0,
+                size: usize::MAX
+            })
+        );
+        // And a bad block behind a good one is caught before the good one is
+        // allocated for, too.
+        let mut mixed: AbsOrderMap = AbsOrderMap::new();
+        mixed.push(0, POSE_VEL_BIAS_SIZE).unwrap();
+        mixed.push(7, usize::MAX - POSE_VEL_BIAS_SIZE).unwrap();
+        assert_eq!(
+            ba.compute_delta(&mixed),
+            Err(BaError::UnexpectedBlockSize {
+                frame_id: 7,
+                size: usize::MAX - POSE_VEL_BIAS_SIZE
+            })
+        );
+    }
+
+    /// The Huber cost by hand, on residuals chosen so every intermediate is
+    /// exactly representable in both precisions — no fixture, no port
+    /// arithmetic reused.
+    ///
+    /// Above the threshold: `res = [3, 4]`, `e = 5`, `huber_thresh = 2.5`,
+    /// `obs_std_dev = 0.5`, so `hw = 0.5`, `ow = 0.5 / 0.25 = 2`,
+    /// `factor = 0.5 * 1.5 * 2 = 1.5` and `cost = 1.5*9 + 1.5*16 = 37.5`.
+    ///
+    /// Below it: `res = [0.5, 0.5]`, `e = sqrt(0.5) < 1`, so `hw = 1`,
+    /// `ow = 4`, `factor = 2` and `cost = 2 * 0.5 = 1`.
+    #[test]
+    fn the_huber_cost_matches_a_hand_computation() {
+        let above: Vector2<f64> = Vector2::new(3.0, 4.0);
+        let (weight, cost) = huber_cost(&above, above.norm(), 2.5, 0.5);
+        assert_eq!(weight, 0.5);
+        assert_eq!(cost, 37.5);
+
+        let above32: Vector2<f32> = Vector2::new(3.0, 4.0);
+        let (weight32, cost32) = huber_cost(&above32, above32.norm(), 2.5, 0.5);
+        assert_eq!(weight32, 0.5);
+        assert_eq!(cost32, 37.5);
+
+        let below: Vector2<f64> = Vector2::new(0.5, 0.5);
+        let (weight, cost) = huber_cost(&below, below.norm(), 1.0, 0.5);
+        assert_eq!(weight, 1.0);
+        assert_eq!(cost, 1.0);
+
+        let below32: Vector2<f32> = Vector2::new(0.5, 0.5);
+        let (weight32, cost32) = huber_cost(&below32, below32.norm(), 1.0, 0.5);
+        assert_eq!(weight32, 1.0);
+        assert_eq!(cost32, 1.0);
+
+        // The threshold is on the raw pixel norm, before `1/sigma`
+        // (papers-part2 §13 D14): a residual of exactly the threshold is *not*
+        // downweighted only because the comparison is strict `<`.
+        let at: Vector2<f64> = Vector2::new(1.0, 0.0);
+        assert_eq!(huber_cost(&at, at.norm(), 1.0, 0.5).0, 1.0);
+        let just_over: Vector2<f64> = Vector2::new(1.0 + f64::EPSILON, 0.0);
+        assert!(huber_cost(&just_over, just_over.norm(), 1.0, 0.5).0 < 1.0);
     }
 
     #[test]
