@@ -24,7 +24,9 @@
 //! | `the_prior_error_is_the_quadratic_at_the_delta` | `computeMargPriorError` after `applyInc` equals the quadratic model evaluated at the accumulated delta |
 //! | `the_prior_has_the_gauge_directions_in_its_nullspace` | `checkMargNullspace`: a visual-only prior carries no information along a global translation or rotation |
 //! | `a_window_that_disagrees_with_the_prior_is_refused` | the ordering assertions of `:736` and `:758-759` |
-//! | `an_invalid_schedule_is_refused_before_anything_changes` | nine broken schedules, each a typed error with the window bit-identical afterwards |
+//! | `an_invalid_schedule_is_refused_before_anything_changes` | eight broken schedules, each a typed error with the window bit-identical afterwards |
+//! | `a_window_that_is_not_frozen_is_refused_before_anything_changes` | a valid schedule over a block that is not at its linearization point, either kind, refused with the window bit-identical afterwards |
+//! | `a_frozen_demoted_state_marginalizes` | the control: the same schedule, and the demotion it performs |
 //! | `a_malformed_prior_is_refused_by_the_diagnostics` | the shapes `checkNullspace` and `checkEigenvalues` rely on and C++ does not assert |
 //! | `an_empty_prior_has_no_eigenvalues` | `checkEigenvalues` on a prior over no variables, where both eigensolvers assert |
 //! | `the_nullspace_debug_copy_follows_the_live_prior` | the debug prior's `H`, `b` **and** order (`:672`, called at `:1186`) |
@@ -232,6 +234,17 @@ fn schedule() -> MarginalizeSchedule {
     }
 }
 
+/// The schedule that demotes: `STATE1` keeps its pose block and loses its
+/// velocity and biases (`:1098-1105`), so `STATE2` becomes the prior's newest
+/// block.
+fn demote_state1() -> MarginalizeSchedule {
+    MarginalizeSchedule {
+        last_state_to_marg: STATE2,
+        states_to_marg_vel_bias: [STATE1].into_iter().collect(),
+        ..schedule()
+    }
+}
+
 /// One marginalization of `window`, with everything the tests ever vary.
 fn try_run(
     window: &mut Window,
@@ -257,6 +270,14 @@ fn try_run(
 
 fn run(window: &mut Window, options: MarginalizeOptions) -> MarginalizeOutput<f64> {
     try_run(window, &schedule(), None, options).expect("the synthetic window marginalizes")
+}
+
+/// The whole window, every coefficient of it: `f64`'s `Debug` is the shortest
+/// representation that round-trips, so equal strings are equal states, and this
+/// covers the landmark database and the IMU intervals as well as the frame maps
+/// and the prior.
+fn window_debug(window: &Window) -> String {
+    format!("{:?}", (&window.estimator, &window.marg, &window.imu_meas))
 }
 
 // ─── the tests ─────────────────────────────────────────────────────────────
@@ -726,14 +747,13 @@ fn the_nullspace_debug_copy_follows_the_live_prior() {
 /// C++ never checks any of them — `:1090-1112` erases what the sets name in
 /// order, with `frame_states.at()` throwing and `frame_poses.erase()` silently
 /// doing nothing — so a schedule that disagrees with the window took effect
-/// before it was noticed. The first eight cases are the ones the S7 review
-/// reproduced; the last is the re-review's refused demotion, whose precondition
-/// C++ only reaches inside `computeDelta` (`ba_base.cpp:294`), called at
-/// `:1171` — eighty lines after `:1090` started rewriting the window.
+/// before it was noticed. These are the cases the S7 review reproduced; the
+/// re-review's refused demotion is a *valid* schedule over a window that is not
+/// frozen, and has its own test.
 #[test]
 fn an_invalid_schedule_is_refused_before_anything_changes() {
     let unknown: FrameId = 999;
-    let cases: [(&str, MarginalizeSchedule, MargError); 9] = [
+    let cases: [(&str, MarginalizeSchedule, MargError); 8] = [
         (
             "a last_state_to_marg the window does not have",
             MarginalizeSchedule {
@@ -818,26 +838,10 @@ fn an_invalid_schedule_is_refused_before_anything_changes() {
                 frame_id: STATE1,
             },
         ),
-        (
-            "a demoted state that is not frozen at its linearization point",
-            MarginalizeSchedule {
-                last_state_to_marg: STATE2,
-                states_to_marg_vel_bias: [STATE1].into_iter().collect(),
-                ..schedule()
-            },
-            MargError::Ba(BaError::NotLinearized { frame_id: STATE1 }),
-        ),
     ];
 
     let pristine: Window = build_window(0xB015, true);
-    // The whole window, every coefficient of it: `f64`'s `Debug` is the
-    // shortest representation that round-trips, so equal strings are equal
-    // states, and this covers the landmark database and the IMU intervals as
-    // well as the frame maps and the prior.
-    let before: String = format!(
-        "{:?}",
-        (&pristine.estimator, &pristine.marg, &pristine.imu_meas)
-    );
+    let before: String = window_debug(&pristine);
 
     for (name, sched, want) in cases {
         let mut window: Window = pristine.clone();
@@ -849,14 +853,57 @@ fn an_invalid_schedule_is_refused_before_anything_changes() {
             MarginalizeOptions::default(),
         );
         assert_eq!(got.err(), Some(want), "{name}");
-        let after: String = format!("{:?}", (&window.estimator, &window.marg, &window.imu_meas));
-        assert_eq!(before, after, "{name}: the window changed");
+        assert_eq!(before, window_debug(&window), "{name}: the window changed");
         assert_eq!(nullspace, MargLinData::default(), "{name}: the debug prior");
     }
+}
 
-    // The control for the last case: freezing that one state, and nothing
-    // else, makes the same schedule marginalize.
-    let mut window: Window = pristine.clone();
+/// `computeDelta`'s precondition, which C++ only reaches at `:1171` — eighty
+/// lines after `:1090` started rewriting the window (`ba_base.cpp:294`).
+///
+/// The schedule is valid; what is wrong is the window. Both kinds of block the
+/// new prior gets are covered: a state that is about to be demoted into it, and
+/// a pose that simply survives. Either way the refusal is `computeDelta`'s own
+/// error, raised before the first mutation.
+#[test]
+fn a_window_that_is_not_frozen_is_refused_before_anything_changes() {
+    let refused = |window: &mut Window, sched: &MarginalizeSchedule, frame_id: FrameId| {
+        let before: String = window_debug(window);
+        let mut nullspace: MargLinData<f64> = MargLinData::default();
+        let got = try_run(
+            window,
+            sched,
+            Some(&mut nullspace),
+            MarginalizeOptions::default(),
+        );
+        assert_eq!(
+            got.err(),
+            Some(MargError::Ba(BaError::NotLinearized { frame_id }))
+        );
+        assert_eq!(before, window_debug(window), "the window changed");
+        assert_eq!(nullspace, MargLinData::default(), "the debug prior");
+    };
+
+    // The demoted state: `STATE1` is a free variable in the fixture, and
+    // demotion would carry that flag into the new prior (`imu_types.h:206-215`).
+    let mut window: Window = build_window(0xB017, true);
+    refused(&mut window, &demote_state1(), STATE1);
+
+    // The surviving pose: `KF1` stays whole under the normal schedule. Thawed,
+    // with the same linearization point and no increment, it is the other half
+    // of the same walk.
+    let mut window: Window = build_window(0xB017, true);
+    let thawed: PoseStateWithLin<f64> =
+        PoseStateWithLin::new(KF1, *window.estimator.frame_poses[&KF1].pose_lin(), false);
+    window.estimator.frame_poses.insert(KF1, thawed);
+    refused(&mut window, &schedule(), KF1);
+}
+
+/// The control: freezing that one state, and nothing else, makes the same
+/// schedule marginalize — and what it does is the demotion of `:1098-1105`.
+#[test]
+fn a_frozen_demoted_state_marginalizes() {
+    let mut window: Window = build_window(0xB017, true);
     window
         .estimator
         .frame_states
@@ -864,12 +911,24 @@ fn an_invalid_schedule_is_refused_before_anything_changes() {
         .unwrap()
         .set_linearized()
         .unwrap();
-    let sched: MarginalizeSchedule = MarginalizeSchedule {
-        last_state_to_marg: STATE2,
-        states_to_marg_vel_bias: [STATE1].into_iter().collect(),
-        ..schedule()
-    };
-    assert!(try_run(&mut window, &sched, None, MarginalizeOptions::default()).is_ok());
+
+    try_run(
+        &mut window,
+        &demote_state1(),
+        None,
+        MarginalizeOptions::default(),
+    )
+    .expect("freezing STATE1 makes the demotion schedule marginalize");
+
+    // `STATE1` kept its pose and lost its velocity and biases, so it is a
+    // 6-row block of the new prior, behind `KF1` and ahead of `STATE2`.
+    assert!(window.estimator.frame_poses.contains_key(&STATE1));
+    assert!(!window.estimator.frame_states.contains_key(&STATE1));
+    assert_eq!(
+        window.marg.order.get(STATE1),
+        Some((POSE_SIZE, POSE_SIZE)),
+        "the demoted block"
+    );
 }
 
 /// The two diagnostics on priors whose shapes do not close
@@ -950,15 +1009,13 @@ fn a_malformed_prior_is_refused_by_the_diagnostics() {
     assert!(check_eigenvalues(&squared).is_ok());
 }
 
-/// `checkEigenvalues` on a prior over no variables at all.
+/// `checkEigenvalues` on the two empty priors a window really holds before its
+/// first marginalization, neither of which either eigensolver defines (see
+/// `check_eigenvalues`).
 ///
-/// `MargLinData::default()` is that prior, and it is what both the live and the
-/// debug prior hold before the first marginalization. Neither eigensolver
-/// defines the empty problem — nalgebra asserts in its symmetric
-/// tridiagonalisation and Eigen asserts in `maxCoeff` (`Core/Redux.h:445`),
-/// reached from `SelfAdjointEigenSolver.h:437` — so the port answers with the
-/// empty spectrum before the solver sees the matrix, in both precisions and
-/// both prior forms.
+/// `MargLinData::default()` is the live one, 0x0, in both prior forms. The
+/// debug copy's is the other shape: no rows over a real ordering's width, which
+/// squares to that many zero eigenvalues.
 #[test]
 fn an_empty_prior_has_no_eigenvalues() {
     for is_sqrt in [false, true] {
@@ -969,14 +1026,12 @@ fn an_empty_prior_has_no_eigenvalues() {
             }),
             Ok(DVector::zeros(0))
         );
-        assert_eq!(
-            check_eigenvalues(&MargLinData::<f32> {
-                is_sqrt,
-                ..Default::default()
-            }),
-            Ok(DVector::zeros(0))
-        );
     }
+
+    let window: Window = build_window(0xB018, false);
+    let size: usize = window.marg.order.total_size();
+    assert_eq!(window.marg.h.shape(), (0, size), "the debug copy's shape");
+    assert_eq!(check_eigenvalues(&window.marg), Ok(DVector::zeros(size)));
 }
 
 // ─── helpers ───────────────────────────────────────────────────────────────
