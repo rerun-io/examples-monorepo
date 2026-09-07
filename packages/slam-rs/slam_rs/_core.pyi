@@ -8,6 +8,8 @@ from collections.abc import Sequence
 from typing import ClassVar
 
 import numpy as np
+from jaxtyping import Float32, Int32, Int64, UInt8
+from numpy import ndarray
 from numpy.typing import NDArray
 
 from slam_rs.catalog_feed import CameraCalib, ImuCalib
@@ -131,20 +133,20 @@ class FlowFrame:
     def cell_origin(self) -> tuple[int, int]:
         """``(x_start, y_start)``: the top-left corner of cell ``(0, 0)`` in pixels."""
 
-    def ids(self, camera: int) -> NDArray[np.int64]:
-        """One camera's keypoint ids, ascending, shape ``(n,)``."""
+    def ids(self, camera: int) -> Int64[ndarray, " n"]:
+        """One camera's keypoint ids, ascending."""
 
-    def positions(self, camera: int) -> NDArray[np.float32]:
-        """One camera's keypoint positions in pixels, shape ``(n, 2)``."""
+    def positions(self, camera: int) -> Float32[ndarray, "n 2"]:
+        """One camera's keypoint positions in pixels."""
 
-    def transforms(self, camera: int) -> NDArray[np.float32]:
-        """One camera's 2x3 warps ``[[m00, m01, tx], [m10, m11, ty]]``, shape ``(n, 2, 3)``."""
+    def transforms(self, camera: int) -> Float32[ndarray, "n 2 3"]:
+        """One camera's 2x3 warps ``[[m00, m01, tx], [m10, m11, ty]]``."""
 
-    def responses(self, camera: int) -> NDArray[np.float32]:
-        """One camera's detector responses, shape ``(n,)``; ``-1`` where basalt records none."""
+    def responses(self, camera: int) -> Float32[ndarray, " n"]:
+        """One camera's detector responses; ``-1`` where basalt records none."""
 
-    def occupancy(self, camera: int) -> NDArray[np.int32]:
-        """One camera's occupancy counts over camera 0's grid, shape ``(rows, columns)``."""
+    def occupancy(self, camera: int) -> Int32[ndarray, "rows columns"]:
+        """One camera's occupancy counts over camera 0's detection grid."""
 
     def num_new(self, camera: int) -> int:
         """Ids one camera gained on this frameset: detections plus stereo matches."""
@@ -161,9 +163,11 @@ class OpticalFlow:
     ``optical_flow_pattern`` raises ``ValueError`` rather than tracking with the
     wrong pattern.
 
-    Every refusal here is a ``ValueError``: no argument produces a Rust panic,
-    which would arrive as a ``pyo3_runtime.PanicException`` that ``except
-    Exception`` does not catch.
+    A value the core refuses is a ``ValueError``, an object of the wrong type a
+    ``TypeError``, an integer outside the parameter's own type an
+    ``OverflowError`` and a camera past the end of the rig an ``IndexError``.
+    None of them is a Rust panic, which would arrive as a
+    ``pyo3_runtime.PanicException`` that ``except Exception`` does not catch.
     """
 
     def __init__(
@@ -178,9 +182,11 @@ class OpticalFlow:
 
         Raises ``ValueError`` on a config the frontend cannot run — another
         pattern or flow type, a detector threshold ladder that never ends or
-        never runs, more pyramid levels than the patch buffers allow — and on a
-        ``max_keypoints`` or ``threads`` past the core's ceiling, both of which
-        are memory and thread requests rather than plain numbers.
+        never runs, more pyramid levels than the patch buffers allow — on a
+        ``max_keypoints`` or ``threads`` past the core's ceiling, and on a
+        calibration whose resolution over ``optical_flow_detection_grid_size``
+        asks for more occupancy cells than one buffer may hold. Each of those is
+        a memory or thread request rather than a plain number.
         """
 
     @property
@@ -193,8 +199,8 @@ class OpticalFlow:
     def t_ns(self) -> int | None:
         """Timestamp of the last accepted frameset, or None before the first."""
 
-    def process(self, t_ns: int, images: Sequence[NDArray[np.uint8]]) -> FlowFrame:
-        """Track and detect on one frameset of ``camera_count`` C-contiguous ``(h, w)`` uint8 images.
+    def process(self, t_ns: int, images: Sequence[UInt8[ndarray, "h w"]]) -> FlowFrame:
+        """Track and detect on one frameset of ``camera_count`` C-contiguous images.
 
         Raises ``ValueError`` on a bad dtype, rank or layout, on the wrong number
         of images, unless every image is the size the calibration gives its

@@ -381,25 +381,31 @@ Images are copied in and the GIL is released around the core call, so a decoder
 thread keeps running. Wrong dtype, rank, shape or memory layout raises
 `ValueError`; IMU samples must be strictly increasing in time.
 
-**No argument produces a panic.** A Rust panic crosses PyO3 as
+**Every refusal is an exception, not a panic.** A Rust panic crosses PyO3 as
 `pyo3_runtime.PanicException`, which derives from `BaseException` and so walks
 straight through an `except Exception` handler, and a panic on a rayon worker
 inside the released-GIL region aborts the process outright (decision D32). So
-every value that sizes a buffer, bounds a loop or spawns a thread is checked in
-the core before it is used, and each refusal arrives as `ValueError`:
+every value that sizes a buffer, bounds a loop or spawns a thread — the
+calibration included, since it shapes the occupancy grid — is checked in the
+core before it is used. The refusal is a `ValueError`, or the `TypeError`,
+`OverflowError` or `IndexError` PyO3 itself raises for an object of the wrong
+type, an integer outside the parameter's own type, or a camera past the end of
+the rig:
 
 | what | ceiling or rule | why the core cannot just try it |
 |---|---|---|
 | `max_keypoints` | `tracker::MAX_CAPACITY` = 1,048,576 | every per-patch buffer is preallocated from it; `Vec::with_capacity(2**63)` panics with `capacity overflow` |
 | `threads` | `parallel::MAX_THREADS` = 1024 | rayon spawns exactly what it is asked for, so 100,000 workers wedge the machine rather than erroring |
-| `optical_flow_levels` | `tracker::MAX_LEVELS` = 24 levels | it multiplies every buffer; a `Vec` whose bytes do not exist **aborts** instead of unwinding |
+| `optical_flow_levels` | at most 23 reductions, which is `tracker::MAX_LEVELS` = 24 stored levels: every buffer is sized with `levels + 1` | it multiplies every buffer; a `Vec` whose bytes do not exist **aborts** instead of unwinding |
 | `optical_flow_detection_min_threshold` | at least 1 | the detector halves the FAST threshold until it drops below this, and zero halves to zero for ever — `keypoints.cpp:162,187` has the same non-terminating loop, so basalt hangs on it too |
 | `optical_flow_detection_max_threshold` | at least `min_threshold` | otherwise the ladder never runs and the detector can never add a keypoint |
 | frameset image size | exactly the calibration's, per camera | the camera model, the detection grid and the occupancy matrix are all the calibrated geometry |
+| the calibrated resolution over `optical_flow_detection_grid_size` | `detect::MAX_CELLS` = 1,048,576 cells per camera | the occupancy counts are one `i32` per cell per camera, so a calibration is a memory request too: 4,294,967,294 pixels on a one-pixel grid asked for 2^64 counts and `vec![0; rows * columns]` panicked with `capacity overflow` with no image in sight |
 
 `tests/test_frontend_boundary.py` walks the whole surface against hostile
 integers, objects and arrays and fails on anything that is not an ordinary
-`ValueError`, `TypeError`, `IndexError` or `OverflowError`.
+`ValueError`, `TypeError`, `IndexError` or `OverflowError`. That is a walk over
+the surface, not a proof about every object a caller could construct.
 
 The frontend is driven the same way, and is the first stage with real output:
 
@@ -544,11 +550,14 @@ segment it was recorded from. The eight committed dumps under
 which starts at zero on **every** segment, so the timestamp alone is not an
 association: `dumps/source.json` names the segment they came from, and the logger
 compares that name with the segment being replayed once, when it is built — a
-directory from another recording draws nothing and says so in one line. A dump
-directory carrying frames but no `source.json` is refused rather than drawn on
-whatever is being replayed, as is one carrying another rig's cameras. The overlay clears itself on the first
-frameset past the last dump rather than leaving a stale claim on screen. On the smoke
-segment the port hands out 175 keypoint ids over the first eight framesets where
+directory from another recording draws nothing and says so in one line. `--rrd`
+replays a recording the manifest does not name, so the logger is given no segment
+at all there and the overlay is off however the file is spelled: a filename equal
+to a segment id is not an association. A dump directory carrying frames but no
+`source.json` is refused rather than drawn on whatever is being replayed, as is
+one carrying another rig's cameras. The overlay clears itself on the first
+frameset past the last dump rather than leaving a stale claim on screen. On the
+smoke segment the port hands out 175 keypoint ids over the first eight framesets where
 the C++ hands out 174, and every magenta ring in the viewer carries a coloured
 port dot at its centre bar a handful — the detector gap the flow gate measures.
 
@@ -563,8 +572,8 @@ pixi run -e slam-rs-dev --frozen python tools/apps/replay.py \
 
 ## Tests
 
-`pytest -q` deselects the `slow` marker and runs in under a second on synthetic
-inputs. The slow tests read a reference `.rrd` from the NAS or query the
+`pytest -q` deselects the `slow` marker and runs in about two seconds on
+synthetic inputs. The slow tests read a reference `.rrd` from the NAS or query the
 catalog, and skip when neither is reachable:
 
 ```bash

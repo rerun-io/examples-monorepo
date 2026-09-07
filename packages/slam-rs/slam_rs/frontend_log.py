@@ -166,8 +166,8 @@ class FrontendLogger:
 
     camera_count: int
     """Cameras on the rig."""
-    segment_id: str
-    """Segment being replayed; only dumps recorded from it are drawn."""
+    source_segment: str | None
+    """Segment the replayed frames come from; only dumps recorded from it are drawn, and ``None`` — frames no manifest entry names — draws none."""
     dumps_dir: Path | None = None
     """Where the C++ dumps are read from; the committed fixtures by default."""
     cpp_dumps: dict[int, list[Float32[ndarray, "n_keypoints 2"]]] = field(init=False)
@@ -180,9 +180,13 @@ class FrontendLogger:
     def __post_init__(self) -> None:
         """Read the dumps once, and keep them only if this is the segment they came from."""
         dumps: CppDumps = read_cpp_dumps(self.camera_count, self.dumps_dir)
-        this_segment: bool = dumps.segment_id == self.segment_id
+        # `None` is a replay of frames no manifest entry names, where no dump can
+        # be of the recording on screen whatever the two are called: a filename
+        # equal to a segment id used to pass this test (the re-review's finding).
+        this_segment: bool = self.source_segment is not None and dumps.segment_id == self.source_segment
         if dumps.frames and not this_segment:
-            print(f"dumps are from {dumps.segment_id}, replaying {self.segment_id}: no overlay")
+            replaying: str = self.source_segment if self.source_segment is not None else "another recording's frames"
+            print(f"dumps are from {dumps.segment_id}, replaying {replaying}: no overlay")
         self.cpp_dumps = dumps.frames if this_segment else {}
         self.trails = [{} for _ in range(self.camera_count)]
 
