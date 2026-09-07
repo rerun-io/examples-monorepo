@@ -17,7 +17,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeAlias
+from typing import NamedTuple, TypeAlias
 
 import numpy as np
 import pytest
@@ -67,8 +67,16 @@ class Row:
 Rows: TypeAlias = dict[str, list[Row]]
 """Per entity path, its rows in ``video_time`` order."""
 
-ReplayResult: TypeAlias = tuple[Rows, list[_core.FlowFrame]]
-"""What one logged run gives back: the recording's rows, and the frames that produced them."""
+
+
+class ReplayResult(NamedTuple):
+    """What one logged run gives back."""
+
+    rows: Rows
+    """Every non-static row of the recording, by entity path."""
+    frames: list[_core.FlowFrame]
+    """What the frontend produced, in frameset order."""
+
 
 ReplayFactory: TypeAlias = Callable[[Path, int, str, Path | None], ReplayResult]
 """One logged run: where the ``.rrd`` goes, how many framesets, the id the replayed recording carries, the dumps."""
@@ -160,7 +168,7 @@ def replay(frontend: FrontendFactory, texture: TextureFactory) -> ReplayFactory:
             logger.log(frame, elapsed_ms=1.5 * (step + 1))
             frames.append(frame)
         rr.disconnect()
-        return read_rows(output), frames
+        return ReplayResult(rows=read_rows(output), frames=frames)
 
     return run
 
@@ -265,34 +273,32 @@ def test_dumps_of_another_recording_do_not_refuse_the_rig_on_screen(smoke_dumps:
 def test_log_writes_the_dataset_tree_once_per_frameset(replay: ReplayFactory, tmp_path: Path) -> None:
     """Every entity the blueprint shows gets one row per frameset, on ``video_time``."""
     recorded: ReplayResult = replay(tmp_path, 3, OTHER_SEGMENT, tmp_path / "no-dumps")
-    rows: Rows = recorded[0]
-    frames: list[_core.FlowFrame] = recorded[1]
     expected_times: list[int] = [step * FRAME_INTERVAL_NS for step in range(3)]
     for camera in range(2):
         for leaf in ("keypoints", "trails", "cells"):
             entity: str = f"{camera_entity(camera)}/{leaf}"
-            assert entity in rows, sorted(rows)
-            assert [row.t_ns for row in rows[entity]] == expected_times
+            assert entity in recorded.rows, sorted(recorded.rows)
+            assert [row.t_ns for row in recorded.rows[entity]] == expected_times
         for counter in ("num_tracks", "num_new"):
             entity = f"{STATS_ENTITY}/cam_{camera:02d}/{counter}"
-            assert [row.t_ns for row in rows[entity]] == expected_times
-    assert [row.t_ns for row in rows[f"{STATS_ENTITY}/frontend_ms"]] == expected_times
+            assert [row.t_ns for row in recorded.rows[entity]] == expected_times
+    assert [row.t_ns for row in recorded.rows[f"{STATS_ENTITY}/frontend_ms"]] == expected_times
     # The keypoints logged are the ones the frame carries, in the frame's order.
-    for step, frame in enumerate(frames):
-        logged: Float32[ndarray, "n_tracks 2"] = np.array(rows[f"{camera_entity(0)}/keypoints"][step].values["Points2D:positions"], dtype=np.float32)
+    for step, frame in enumerate(recorded.frames):
+        logged: Float32[ndarray, "n_tracks 2"] = np.array(
+            recorded.rows[f"{camera_entity(0)}/keypoints"][step].values["Points2D:positions"], dtype=np.float32
+        )
         assert np.allclose(logged, frame.positions(0))
 
 
 def test_the_counters_report_each_cameras_own_numbers(replay: ReplayFactory, tmp_path: Path) -> None:
     recorded: ReplayResult = replay(tmp_path, 3, OTHER_SEGMENT, tmp_path / "no-dumps")
-    rows: Rows = recorded[0]
-    frames: list[_core.FlowFrame] = recorded[1]
     for camera in range(2):
-        tracks: list[Row] = rows[f"{STATS_ENTITY}/cam_{camera:02d}/num_tracks"]
-        fresh: list[Row] = rows[f"{STATS_ENTITY}/cam_{camera:02d}/num_new"]
-        assert [row.values["Scalars:scalars"] for row in tracks] == [[float(frame.num_tracks(camera))] for frame in frames]
-        assert [row.values["Scalars:scalars"] for row in fresh] == [[float(frame.num_new(camera))] for frame in frames]
-    assert [row.values["Scalars:scalars"] for row in rows[f"{STATS_ENTITY}/frontend_ms"]] == [[1.5], [3.0], [4.5]]
+        tracks: list[Row] = recorded.rows[f"{STATS_ENTITY}/cam_{camera:02d}/num_tracks"]
+        fresh: list[Row] = recorded.rows[f"{STATS_ENTITY}/cam_{camera:02d}/num_new"]
+        assert [row.values["Scalars:scalars"] for row in tracks] == [[float(frame.num_tracks(camera))] for frame in recorded.frames]
+        assert [row.values["Scalars:scalars"] for row in fresh] == [[float(frame.num_new(camera))] for frame in recorded.frames]
+    assert [row.values["Scalars:scalars"] for row in recorded.rows[f"{STATS_ENTITY}/frontend_ms"]] == [[1.5], [3.0], [4.5]]
 
 
 def test_trails_follow_a_track_by_id_and_stop_at_the_trail_length(replay: ReplayFactory, tmp_path: Path) -> None:
@@ -306,17 +312,15 @@ def test_trails_follow_a_track_by_id_and_stop_at_the_trail_length(replay: Replay
     """
     framesets: int = TRAIL_LENGTH + 4
     recorded: ReplayResult = replay(tmp_path, framesets, OTHER_SEGMENT, tmp_path / "no-dumps")
-    rows: Rows = recorded[0]
-    frames: list[_core.FlowFrame] = recorded[1]
     survived: dict[int, int] = {}
     previous: dict[int, tuple[tuple[float, float], ...]] = {}
-    for step, frame in enumerate(frames):
+    for step, frame in enumerate(recorded.frames):
         positions: Float32[ndarray, "n_tracks 2"] = frame.positions(0)
         live: dict[int, tuple[float, float]] = {
             identifier: (float(positions[slot, 0]), float(positions[slot, 1])) for slot, identifier in enumerate(frame.ids(0).tolist())
         }
         survived = {identifier: 1 + survived.get(identifier, 0) for identifier in live}
-        strips: list = rows[f"{camera_entity(0)}/trails"][step].values["LineStrips2D:strips"]
+        strips: list = recorded.rows[f"{camera_entity(0)}/trails"][step].values["LineStrips2D:strips"]
         by_end: dict[tuple[float, float], tuple[tuple[float, float], ...]] = {
             (strip[-1][0], strip[-1][1]): tuple((point[0], point[1]) for point in strip) for strip in strips
         }
@@ -337,19 +341,18 @@ def test_trails_follow_a_track_by_id_and_stop_at_the_trail_length(replay: Replay
             current[identifier] = strip
         previous = current
     # The run is long enough that the cap is actually reached.
-    last: list = rows[f"{camera_entity(0)}/trails"][-1].values["LineStrips2D:strips"]
+    last: list = recorded.rows[f"{camera_entity(0)}/trails"][-1].values["LineStrips2D:strips"]
     assert max(len(strip) for strip in last) == TRAIL_LENGTH
 
 
 def test_the_overlay_is_drawn_on_the_recording_the_dumps_came_from(replay: ReplayFactory, smoke_dumps: Path, tmp_path: Path) -> None:
     """Read back out of the file: the recording whose own id is the dumps' gets them."""
     recorded: ReplayResult = replay(tmp_path / "smoke", 2, SMOKE_SEGMENT, smoke_dumps)
-    rows: Rows = recorded[0]
     for camera in range(2):
         entity: str = f"{camera_entity(camera)}/keypoints_cpp"
-        assert entity in rows, sorted(rows)
-        assert len(rows[entity]) == 2
-        for row in rows[entity]:
+        assert entity in recorded.rows, sorted(recorded.rows)
+        assert len(recorded.rows[entity]) == 2
+        for row in recorded.rows[entity]:
             assert np.allclose(np.array(row.values["Points2D:positions"], dtype=np.float32), OVERLAY)
             assert row.values["Points2D:colors"] == [(CPP_COLOR[0] << 24) | (CPP_COLOR[1] << 16) | (CPP_COLOR[2] << 8) | 0xFF]
 
@@ -359,10 +362,9 @@ def test_no_other_recording_is_given_the_overlay(
 ) -> None:
     """The review's finding: MIO10's dumps used to land on MIO07's first frame."""
     recorded: ReplayResult = replay(tmp_path / "other", 2, OTHER_SEGMENT, smoke_dumps)
-    rows: Rows = recorded[0]
-    assert not [entity for entity in rows if entity.endswith("keypoints_cpp")], sorted(rows)
+    assert not [entity for entity in recorded.rows if entity.endswith("keypoints_cpp")], sorted(recorded.rows)
     # The frames themselves were still tracked and logged, and the run says why, once.
-    assert len(rows[f"{camera_entity(0)}/keypoints"]) == 2
+    assert len(recorded.rows[f"{camera_entity(0)}/keypoints"]) == 2
     assert capsys.readouterr().out == f"dumps are from {SMOKE_SEGMENT}, replaying {OTHER_SEGMENT}: no overlay\n"
 
 
@@ -393,10 +395,8 @@ def test_the_overlay_is_cleared_once_the_dumps_run_out_and_stays_cleared(replay:
     dumps_dir: Path = tmp_path / "dumps"
     write_dumps(dumps_dir, SMOKE_SEGMENT, {0: [OVERLAY, OVERLAY]})
     recorded: ReplayResult = replay(tmp_path, 4, SMOKE_SEGMENT, dumps_dir)
-    rows: Rows = recorded[0]
-
     for camera in range(2):
-        logged: list[Row] = rows[f"{camera_entity(camera)}/keypoints_cpp"]
+        logged: list[Row] = recorded.rows[f"{camera_entity(camera)}/keypoints_cpp"]
         # One drawn row and exactly one clearing row: the clear is not repeated
         # per frameset, and nothing is drawn after it.
         assert [row.t_ns for row in logged] == [0, FRAME_INTERVAL_NS]

@@ -396,16 +396,16 @@ the rig:
 |---|---|---|
 | `max_keypoints` | `tracker::MAX_CAPACITY` = 1,048,576 | every per-patch buffer is preallocated from it; `Vec::with_capacity(2**63)` panics with `capacity overflow` |
 | `threads` | `parallel::MAX_THREADS` = 1024 | rayon spawns exactly what it is asked for, so 100,000 workers wedge the machine rather than erroring |
-| `optical_flow_levels` | at most 23 reductions, which is `tracker::MAX_LEVELS` = 24 stored levels: every buffer is sized with `levels + 1` | it multiplies every buffer; a `Vec` whose bytes do not exist **aborts** instead of unwinding |
+| `optical_flow_levels` | at most 23 reductions, i.e. `tracker::MAX_LEVELS` = 24 stored levels | it multiplies every buffer, each sized with `levels + 1`; a `Vec` whose bytes do not exist **aborts** instead of unwinding |
 | `optical_flow_detection_min_threshold` | at least 1 | the detector halves the FAST threshold until it drops below this, and zero halves to zero for ever — `keypoints.cpp:162,187` has the same non-terminating loop, so basalt hangs on it too |
 | `optical_flow_detection_max_threshold` | at least `min_threshold` | otherwise the ladder never runs and the detector can never add a keypoint |
 | frameset image size | exactly the calibration's, per camera | the camera model, the detection grid and the occupancy matrix are all the calibrated geometry |
-| the calibrated resolution over `optical_flow_detection_grid_size` | `detect::MAX_CELLS` = 1,048,576 cells per camera | the occupancy counts are one `i32` per cell per camera, so a calibration is a memory request too: 4,294,967,294 pixels on a one-pixel grid asked for 2^64 counts and `vec![0; rows * columns]` panicked with `capacity overflow` with no image in sight |
+| the calibrated resolution over `optical_flow_detection_grid_size` | `detect::MAX_CELLS` = 1,048,576 cells per camera | the occupancy counts are one `i32` per cell per camera, so a calibration is a memory request too: a one-pixel grid over a 4,294,967,294-pixel-square frame asked for 2^64 counts and `vec![0; rows * columns]` panicked with `capacity overflow` with no image in sight |
 
 `tests/test_frontend_boundary.py` walks the whole surface against hostile
-integers, objects and arrays and fails on anything that is not an ordinary
-`ValueError`, `TypeError`, `IndexError` or `OverflowError`. That is a walk over
-the surface, not a proof about every object a caller could construct.
+integers, objects and arrays and fails on anything that is not one of the four
+exceptions above. That is a walk over the surface, not a proof about every
+object a caller could construct.
 
 The frontend is driven the same way, and is the first stage with real output:
 

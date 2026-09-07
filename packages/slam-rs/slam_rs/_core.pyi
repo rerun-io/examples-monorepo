@@ -7,10 +7,8 @@ exact: no ``Any``, and every array carries its dtype.
 from collections.abc import Sequence
 from typing import ClassVar
 
-import numpy as np
-from jaxtyping import Float32, Int32, Int64, UInt8
+from jaxtyping import Float32, Float64, Int32, Int64, UInt8
 from numpy import ndarray
-from numpy.typing import NDArray
 
 from slam_rs.catalog_feed import CameraCalib, ImuCalib
 
@@ -41,20 +39,20 @@ class VioResult:
     @property
     def t_ns(self) -> int: ...
     @property
-    def world_from_rig(self) -> NDArray[np.float64]:
+    def world_from_rig(self) -> Float64[ndarray, " 7"]:
         """``[tx, ty, tz, qx, qy, qz, qw]``, metres and a unit quaternion (xyzw)."""
 
     @property
-    def velocity(self) -> NDArray[np.float64]:
-        """Rig velocity in the world frame, m/s, shape ``(3,)``."""
+    def velocity(self) -> Float64[ndarray, " 3"]:
+        """Rig velocity in the world frame, m/s."""
 
     @property
-    def gyro_bias(self) -> NDArray[np.float64]:
-        """Gyroscope bias estimate, rad/s, shape ``(3,)``."""
+    def gyro_bias(self) -> Float64[ndarray, " 3"]:
+        """Gyroscope bias estimate, rad/s."""
 
     @property
-    def accel_bias(self) -> NDArray[np.float64]:
-        """Accelerometer bias estimate, m/s^2, shape ``(3,)``."""
+    def accel_bias(self) -> Float64[ndarray, " 3"]:
+        """Accelerometer bias estimate, m/s^2."""
 
     def __repr__(self) -> str: ...
 
@@ -69,13 +67,13 @@ class Vio:
 
     def push_imu_batch(
         self,
-        t_ns: NDArray[np.int64],
-        gyro: NDArray[np.float64],
-        accel: NDArray[np.float64],
+        t_ns: Int64[ndarray, " n_samples"],
+        gyro: Float64[ndarray, "n_samples 3"],
+        accel: Float64[ndarray, "n_samples 3"],
     ) -> None:
-        """Add ``n`` samples: ``t_ns`` is ``(n,)``, ``gyro`` and ``accel`` are ``(n, 3)``."""
+        """Add a batch of samples; raises ``ValueError`` unless the timestamps follow the last one."""
 
-    def track(self, t_ns: int, images: Sequence[NDArray[np.uint8]]) -> VioResult:
+    def track(self, t_ns: int, images: Sequence[UInt8[ndarray, "h w"]]) -> VioResult:
         """Process one frameset of ``camera_count`` C-contiguous ``(h, w)`` uint8 images."""
 
 class VioConfig:
@@ -133,16 +131,16 @@ class FlowFrame:
     def cell_origin(self) -> tuple[int, int]:
         """``(x_start, y_start)``: the top-left corner of cell ``(0, 0)`` in pixels."""
 
-    def ids(self, camera: int) -> Int64[ndarray, " n"]:
+    def ids(self, camera: int) -> Int64[ndarray, " n_tracks"]:
         """One camera's keypoint ids, ascending."""
 
-    def positions(self, camera: int) -> Float32[ndarray, "n 2"]:
+    def positions(self, camera: int) -> Float32[ndarray, "n_tracks 2"]:
         """One camera's keypoint positions in pixels."""
 
-    def transforms(self, camera: int) -> Float32[ndarray, "n 2 3"]:
+    def transforms(self, camera: int) -> Float32[ndarray, "n_tracks 2 3"]:
         """One camera's 2x3 warps ``[[m00, m01, tx], [m10, m11, ty]]``."""
 
-    def responses(self, camera: int) -> Float32[ndarray, " n"]:
+    def responses(self, camera: int) -> Float32[ndarray, " n_tracks"]:
         """One camera's detector responses; ``-1`` where basalt records none."""
 
     def occupancy(self, camera: int) -> Int32[ndarray, "rows columns"]:
