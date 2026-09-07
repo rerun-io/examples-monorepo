@@ -8,9 +8,10 @@
 //! global pool, whose width depends on the machine and on whatever else in the
 //! process touched rayon first.
 //!
-//! Every loop routed through here writes only to its own index, so the chunking
-//! cannot change a result; the fixed chunk size is belt and braces, and the tests
-//! run `threads = 1` against `threads = 4` and require identical output.
+//! Every loop routed through here is a pure function of the index, so the
+//! chunking cannot change a result; the fixed chunk size is belt and braces, and
+//! the tests run `threads = 1` against `threads = 4` and require identical
+//! output.
 
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuildError, ThreadPoolBuilder};
@@ -45,25 +46,44 @@ impl WorkPool {
         self.threads
     }
 
-    /// Apply `body` to every index of `0..len`, in fixed-size chunks.
+    /// Apply `body` to every index of the shortest input, writing the warp it
+    /// returns into six flat coefficient arrays and its flag into `valid`.
     ///
-    /// `body` receives the index and must write only to slot `index` of whatever
-    /// it owns, which is what makes the split irrelevant to the result. The
-    /// caller supplies the two output slices the tracking phases write, because
-    /// rayon needs disjoint mutable borrows and closures cannot produce them.
-    pub fn for_each_indexed<A: Send, B: Send>(
+    /// `body` is a pure function of the index — it owns no mutable state — which
+    /// is what makes the split irrelevant to the result and what lets the six
+    /// arrays stay structure-of-arrays with the patch index fast-varying
+    /// (`cubecl-portability.md` §12.2). The seven disjoint borrows are written
+    /// out here because a closure cannot produce them and rayon requires them.
+    pub fn for_each_warp(
         &self,
-        first: &mut [A],
-        second: &mut [B],
-        body: impl Fn(usize, &mut A, &mut B) + Sync + Send,
+        coefficients: [&mut [f32]; 6],
+        valid: &mut [bool],
+        body: impl Fn(usize) -> ([f32; 6], bool) + Sync + Send,
     ) {
-        let len: usize = first.len().min(second.len());
-        let first: &mut [A] = &mut first[..len];
-        let second: &mut [B] = &mut second[..len];
+        let [m00, m01, m10, m11, tx, ty] = coefficients;
+        let len: usize = [
+            m00.len(),
+            m01.len(),
+            m10.len(),
+            m11.len(),
+            tx.len(),
+            ty.len(),
+        ]
+        .into_iter()
+        .chain(std::iter::once(valid.len()))
+        .min()
+        .unwrap_or(0);
 
         let Some(pool) = self.pool.as_ref() else {
-            for (index, (a, b)) in first.iter_mut().zip(second.iter_mut()).enumerate() {
-                body(index, a, b);
+            for index in 0..len {
+                let (warp, ok) = body(index);
+                m00[index] = warp[0];
+                m01[index] = warp[1];
+                m10[index] = warp[2];
+                m11[index] = warp[3];
+                tx[index] = warp[4];
+                ty[index] = warp[5];
+                valid[index] = ok;
             }
             return;
         };
@@ -72,18 +92,26 @@ impl WorkPool {
         // (len, threads), not whatever rayon's work stealing would pick.
         let chunk: usize = len.div_ceil(self.threads).max(1);
         pool.install(|| {
-            first
+            m00[..len]
                 .par_chunks_mut(chunk)
-                .zip(second.par_chunks_mut(chunk))
+                .zip(m01[..len].par_chunks_mut(chunk))
+                .zip(m10[..len].par_chunks_mut(chunk))
+                .zip(m11[..len].par_chunks_mut(chunk))
+                .zip(tx[..len].par_chunks_mut(chunk))
+                .zip(ty[..len].par_chunks_mut(chunk))
+                .zip(valid[..len].par_chunks_mut(chunk))
                 .enumerate()
-                .for_each(|(block, (first_block, second_block))| {
+                .for_each(|(block, ((((((m00, m01), m10), m11), tx), ty), valid))| {
                     let base: usize = block * chunk;
-                    for (offset, (a, b)) in first_block
-                        .iter_mut()
-                        .zip(second_block.iter_mut())
-                        .enumerate()
-                    {
-                        body(base + offset, a, b);
+                    for offset in 0..valid.len() {
+                        let (warp, ok) = body(base + offset);
+                        m00[offset] = warp[0];
+                        m01[offset] = warp[1];
+                        m10[offset] = warp[2];
+                        m11[offset] = warp[3];
+                        tx[offset] = warp[4];
+                        ty[offset] = warp[5];
+                        valid[offset] = ok;
                     }
                 });
         });
@@ -95,6 +123,10 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    fn buffers(len: usize) -> ([Vec<f32>; 6], Vec<bool>) {
+        (std::array::from_fn(|_| vec![0.0; len]), vec![false; len])
+    }
 
     #[test]
     fn one_thread_takes_the_sequential_path() {
@@ -112,15 +144,41 @@ mod tests {
     fn every_index_is_visited_exactly_once_however_wide_the_pool() {
         for threads in [1, 2, 3, 8] {
             let pool: WorkPool = WorkPool::new(threads).unwrap();
-            let mut squares: Vec<usize> = vec![0; 37];
-            let mut seen: Vec<u8> = vec![0; 37];
-            pool.for_each_indexed(&mut squares, &mut seen, |index, square, mark| {
-                *square = index * index;
-                *mark += 1;
+            let (mut coefficients, mut valid) = buffers(37);
+            let [m00, m01, m10, m11, tx, ty] = &mut coefficients;
+            pool.for_each_warp([m00, m01, m10, m11, tx, ty], &mut valid, |index| {
+                ([index as f32; 6], index % 3 == 0)
             });
-            assert!(seen.iter().all(|count| *count == 1));
-            for (index, square) in squares.iter().enumerate() {
-                assert_eq!(*square, index * index);
+            for slot in &coefficients {
+                for (index, value) in slot.iter().enumerate() {
+                    assert_eq!(*value, index as f32, "at {threads} threads");
+                }
+            }
+            for (index, flag) in valid.iter().enumerate() {
+                assert_eq!(*flag, index % 3 == 0);
+            }
+        }
+    }
+
+    /// The split must not change a value, whatever the width.
+    #[test]
+    fn every_width_produces_the_same_arrays() {
+        let body = |index: usize| {
+            let value: f32 = (index as f32 * 0.37).sin();
+            (
+                [value, value * 2.0, value * 3.0, value, -value, value],
+                index % 5 != 0,
+            )
+        };
+        let mut reference: Option<([Vec<f32>; 6], Vec<bool>)> = None;
+        for threads in [1, 2, 5, 16] {
+            let pool: WorkPool = WorkPool::new(threads).unwrap();
+            let (mut coefficients, mut valid) = buffers(101);
+            let [m00, m01, m10, m11, tx, ty] = &mut coefficients;
+            pool.for_each_warp([m00, m01, m10, m11, tx, ty], &mut valid, body);
+            match &reference {
+                None => reference = Some((coefficients, valid)),
+                Some(expected) => assert_eq!(&(coefficients, valid), expected),
             }
         }
     }
@@ -128,8 +186,23 @@ mod tests {
     #[test]
     fn an_empty_range_is_a_no_op() {
         let pool: WorkPool = WorkPool::new(4).unwrap();
-        let mut nothing: Vec<usize> = Vec::new();
-        let mut also_nothing: Vec<usize> = Vec::new();
-        pool.for_each_indexed(&mut nothing, &mut also_nothing, |_, _, _| unreachable!());
+        let (mut coefficients, mut valid) = buffers(0);
+        let [m00, m01, m10, m11, tx, ty] = &mut coefficients;
+        pool.for_each_warp([m00, m01, m10, m11, tx, ty], &mut valid, |_| unreachable!());
+    }
+
+    /// A short flag array bounds the pass rather than panicking.
+    #[test]
+    fn the_shortest_input_bounds_the_pass() {
+        let pool: WorkPool = WorkPool::new(2).unwrap();
+        let (mut coefficients, _) = buffers(10);
+        let mut valid: Vec<bool> = vec![false; 4];
+        let [m00, m01, m10, m11, tx, ty] = &mut coefficients;
+        pool.for_each_warp([m00, m01, m10, m11, tx, ty], &mut valid, |index| {
+            assert!(index < 4);
+            ([1.0; 6], true)
+        });
+        assert!(valid.iter().all(|flag| *flag));
+        assert_eq!(coefficients[0][4], 0.0);
     }
 }

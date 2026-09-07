@@ -16,19 +16,27 @@
 //!
 //! ## Two deliberate departures from the C++ shape
 //!
-//! **The 52x3 Jacobian is never materialised.** `setDataJacSe2` builds
+//! **Nothing bigger than a 3x3 is ever held per patch.** `setDataJacSe2` builds
 //! `MatrixP3 J_se2` and `setFromImage` then forms `J^T J` and `H^-1 J^T` from it
-//! (`patch.h:147-156`). Here the *transpose* `J^T` (3xP) is written straight into
-//! the buffer that will hold `H^-1 J^T`, the 3x3 `H` is accumulated one rank-1
-//! outer product per tap while the rows are finalised, and the final product is
-//! applied one column at a time in place. The equivalence is exact as algebra —
-//! `J^T J = sum_i row_i^T row_i` and `(H^-1 J^T)[:, i] = H^-1 (J^T[:, i])` — and
-//! it keeps the largest transient per patch at a 3x3 matrix instead of the 624
-//! bytes a 52x3 `f32` Jacobian needs, which is over the ~512-byte per-thread
-//! private budget that goes racy on Vulkan/SPIR-V
-//! (`cubecl-portability.md` §12.2, CubeCL issue #1336). The summation order of
-//! `J^T J` is tap index ascending; Eigen's blocked product may add in another
-//! order, so the 3x3 can differ in the last `f32` bits.
+//! (`patch.h:147-156`) — 624 bytes of `f32` Jacobian, over the ~512-byte
+//! per-thread private budget that goes racy on Vulkan/SPIR-V
+//! (`cubecl-portability.md` §12.2, CubeCL issue #1336). Here the whole build is
+//! a **streaming write into the caller's storage**: [`build_patch`] takes the
+//! destination `data` and `J^T` arrays with explicit strides, writes the raw
+//! rows straight into them, accumulates `J^T J` one rank-1 outer product per tap
+//! while it finalises those rows, and applies `H^-1` to the stored `J^T` one
+//! column at a time. The largest live temporary is a 3x3 matrix plus a 3-vector
+//! — under 112 bytes, whatever the pattern.
+//!
+//! Because the strides are parameters, the same body fills the packed
+//! [`OpticalFlowPatch`] record (stride 1) and the tracker's structure-of-arrays
+//! (stride = the patch capacity, so the patch index varies fastest). The
+//! tracking path uses the second and never constructs the first.
+//!
+//! The equivalence to the C++ is exact as algebra — `J^T J = sum_i row_i^T row_i`
+//! and `(H^-1 J^T)[:, i] = H^-1 (J^T[:, i])`. The summation order of `J^T J` is
+//! tap index ascending; Eigen's blocked product may add in another order, so the
+//! 3x3 can differ in the last `f32` bits.
 //!
 //! **`residual` takes the warp, not a pre-multiplied pattern.** The C++ builds
 //! `transformed_pat = transform.linear() * pattern2` and adds the translation
@@ -149,11 +157,13 @@ pub fn set_data<P: Pattern, S: LieScalar, Src: PatchSource<S>>(
     (mean, num_valid_points)
 }
 
-/// `OpticalFlowPatch::setDataJacSe2` (`patch.h:101-142`), writing `J^T` not `J`.
+/// `OpticalFlowPatch::setDataJacSe2` (`patch.h:101-142`), writing a strided `J^T`.
 ///
-/// `jacobian_transpose[r][i]` is `J_se2(i, r)`: three rows of `P::SIZE` taps,
-/// tap index fast-varying, which is both the transpose the caller needs next and
-/// the SoA major axis the GPU seam wants (`cubecl-portability.md` §12.2).
+/// `data[i * data_stride]` is tap `i`; `jacobian_transpose[r * jt_row_stride + i
+/// * jt_element_stride]` is `J_se2(i, r)`. Writing the **transpose** is what the
+/// caller needs next, and letting the caller pick the strides is what lets one
+/// body fill both a packed record and a structure-of-arrays whose patch index
+/// varies fastest (`cubecl-portability.md` §12.2).
 ///
 /// The four steps, in the C++'s order:
 ///
@@ -171,14 +181,20 @@ pub fn set_data<P: Pattern, S: LieScalar, Src: PatchSource<S>>(
 /// Step 3 is the term the papers never write out; dropping it gives a Jacobian
 /// that looks right and converges to the wrong warp (`papers-part2.md` §12.1).
 ///
+/// Returns the mean and the number of taps that were in bounds.
+///
 /// # Panics
 ///
-/// If `data` is shorter than `P::SIZE`.
+/// If either array is too short for `P::SIZE` taps at the given strides.
+#[allow(clippy::too_many_arguments)]
 pub fn set_data_jac_se2<P: Pattern, S: LieScalar, Src: PatchSource<S>>(
     source: &Src,
     pos: &Vector2<S>,
     data: &mut [S],
-    jacobian_transpose: &mut [[S; MAX_PATTERN_SIZE]; 3],
+    data_stride: usize,
+    jacobian_transpose: &mut [S],
+    jt_element_stride: usize,
+    jt_row_stride: usize,
 ) -> (S, usize) {
     let border: S = S::from_literal(f64::from(PATCH_BORDER));
     let mut num_valid_points: usize = 0;
@@ -193,20 +209,18 @@ pub fn set_data_jac_se2<P: Pattern, S: LieScalar, Src: PatchSource<S>>(
 
         if source.in_bounds(px, py, border) {
             let (value, grad): (S, [S; 2]) = source.interp_grad(px, py);
-            data[i] = value;
+            data[i * data_stride] = value;
             sum += value;
             // `valGrad.tail<2>().transpose() * Jw_se2` with
-            // `Jw_se2 = [[1, 0, -tap_y], [1 -> 0, 1, tap_x]]` (`patch.h:107-115`).
+            // `Jw_se2 = [[1, 0, -tap_y], [0, 1, tap_x]]` (`patch.h:107-115`).
             let row: [S; 3] = [grad[0], grad[1], grad[0] * -tap_y + grad[1] * tap_x];
-            jacobian_transpose[0][i] = row[0];
-            jacobian_transpose[1][i] = row[1];
-            jacobian_transpose[2][i] = row[2];
-            grad_sum_se2.x += row[0];
-            grad_sum_se2.y += row[1];
-            grad_sum_se2.z += row[2];
+            for r in 0..3 {
+                jacobian_transpose[r * jt_row_stride + i * jt_element_stride] = row[r];
+                grad_sum_se2[r] += row[r];
+            }
             num_valid_points += 1;
         } else {
-            data[i] = -S::one();
+            data[i * data_stride] = -S::one();
         }
     }
 
@@ -214,21 +228,85 @@ pub fn set_data_jac_se2<P: Pattern, S: LieScalar, Src: PatchSource<S>>(
     let mean_inv: S = S::from_literal(num_valid_points as f64) / sum;
 
     for i in 0..P::SIZE {
-        if data[i] >= S::zero() {
-            let raw: S = data[i];
+        let raw: S = data[i * data_stride];
+        if raw >= S::zero() {
             for r in 0..3 {
-                jacobian_transpose[r][i] =
-                    (jacobian_transpose[r][i] - grad_sum_se2[r] * raw / sum) * mean_inv;
+                let slot: usize = r * jt_row_stride + i * jt_element_stride;
+                jacobian_transpose[slot] =
+                    (jacobian_transpose[slot] - grad_sum_se2[r] * raw / sum) * mean_inv;
             }
-            data[i] = raw * mean_inv;
+            data[i * data_stride] = raw * mean_inv;
         } else {
-            for row in jacobian_transpose.iter_mut() {
-                row[i] = S::zero();
+            for r in 0..3 {
+                jacobian_transpose[r * jt_row_stride + i * jt_element_stride] = S::zero();
             }
         }
     }
 
     (mean, num_valid_points)
+}
+
+/// `setFromImage` (`patch.h:144-166`) as a streaming write into caller storage.
+///
+/// Fills `data` and `jacobian_transpose` — which on return holds
+/// `H_se2^-1 J_se2^T`, not `J_se2^T` — at the strides described on
+/// [`set_data_jac_se2`], and returns `(mean, valid)`.
+///
+/// `H_se2 = J^T J` (`patch.h:151`) is accumulated one rank-1 outer product per
+/// tap straight off the stored rows, inverted with Eigen's pivoted LDLT
+/// ([`ldlt_inverse3`], `:154`), and applied to the stored `J^T` one column at a
+/// time (`:156`). Nothing bigger than the 3x3 is live at any point. `valid` is
+/// `mean > eps` and everything finite (`:164-165`): an all-black patch cannot be
+/// normalised and would otherwise carry `inf` into the tracker.
+///
+/// # Panics
+///
+/// If either array is too short for `P::SIZE` taps at the given strides.
+pub fn build_patch<P: Pattern, Src: PatchSource<f32>>(
+    source: &Src,
+    pos: &Vector2<f32>,
+    data: &mut [f32],
+    data_stride: usize,
+    jacobian_transpose: &mut [f32],
+    jt_element_stride: usize,
+    jt_row_stride: usize,
+) -> (f32, bool) {
+    let (mean, _) = set_data_jac_se2::<P, f32, Src>(
+        source,
+        pos,
+        data,
+        data_stride,
+        jacobian_transpose,
+        jt_element_stride,
+        jt_row_stride,
+    );
+
+    let mut h_se2: Matrix3<f32> = Matrix3::zeros();
+    for i in 0..P::SIZE {
+        let row: [f32; 3] =
+            std::array::from_fn(|r| jacobian_transpose[r * jt_row_stride + i * jt_element_stride]);
+        for r in 0..3 {
+            for c in 0..3 {
+                h_se2[(r, c)] += row[r] * row[c];
+            }
+        }
+    }
+
+    let h_se2_inv: Matrix3<f32> = ldlt_inverse3(&h_se2);
+
+    let mut finite: bool = true;
+    for i in 0..P::SIZE {
+        let column: Vector3<f32> =
+            Vector3::from_fn(|r, _| jacobian_transpose[r * jt_row_stride + i * jt_element_stride]);
+        let product: Vector3<f32> = h_se2_inv * column;
+        for r in 0..3 {
+            jacobian_transpose[r * jt_row_stride + i * jt_element_stride] = product[r];
+            finite &= product[r].is_finite();
+        }
+        finite &= data[i * data_stride].is_finite();
+    }
+
+    (mean, mean > f32::EPSILON && finite)
 }
 
 /// `basalt::OpticalFlowPatch<Scalar, Pattern>` (`patch.h:45-214`), `Scalar = f32`.
@@ -275,63 +353,29 @@ impl<P: Pattern> OpticalFlowPatch<P> {
         patch
     }
 
-    /// `setFromImage` (`patch.h:144-166`).
+    /// `setFromImage` (`patch.h:144-166`), into this record's packed storage.
     ///
-    /// Samples the pattern with [`set_data_jac_se2`], forms `H_se2 = J^T J`,
-    /// inverts it with Eigen's pivoted LDLT ([`ldlt_inverse3`], `patch.h:151-154`)
-    /// and caches `H_se2^-1 J_se2^T` (`:156`). A patch is `valid` only when the
-    /// mean is above the scalar epsilon and both the cached factor and the data
-    /// are finite (`:164-165`) — an all-black patch cannot be normalised and
-    /// would otherwise carry `inf` into the tracker.
+    /// A thin call into [`build_patch`] at stride 1. The tracking path does not
+    /// come through here: it points [`build_patch`] straight at its
+    /// structure-of-arrays, so no packed record is ever built per patch.
     pub fn set_from_image<Src: PatchSource<f32>>(&mut self, source: &Src, pos: Vector2<f32>) {
         self.pos = pos;
-
-        // `J_se2^T` goes straight into the buffer that ends up holding
-        // `H^-1 J^T`; see the module note on why `J` is never materialised.
-        let (mean, _) = set_data_jac_se2::<P, f32, Src>(
+        let Self {
+            data,
+            h_se2_inv_j_se2_t,
+            ..
+        } = self;
+        let (mean, valid) = build_patch::<P, Src>(
             source,
             &pos,
-            &mut self.data,
-            &mut self.h_se2_inv_j_se2_t,
+            data,
+            1,
+            h_se2_inv_j_se2_t.as_flattened_mut(),
+            1,
+            MAX_PATTERN_SIZE,
         );
         self.mean = mean;
-
-        // `H_se2 = J_se2.transpose() * J_se2` (`patch.h:151`), accumulated one
-        // rank-1 outer product per tap, in tap order.
-        let mut h_se2: Matrix3<f32> = Matrix3::zeros();
-        for i in 0..P::SIZE {
-            let row: [f32; 3] = [
-                self.h_se2_inv_j_se2_t[0][i],
-                self.h_se2_inv_j_se2_t[1][i],
-                self.h_se2_inv_j_se2_t[2][i],
-            ];
-            for r in 0..3 {
-                for c in 0..3 {
-                    h_se2[(r, c)] += row[r] * row[c];
-                }
-            }
-        }
-
-        let h_se2_inv: Matrix3<f32> = ldlt_inverse3(&h_se2);
-
-        // `H_se2_inv_J_se2_T = H_se2_inv * J_se2.transpose()` (`patch.h:156`),
-        // one column at a time so the 3xP buffer is updated in place.
-        let mut finite: bool = true;
-        for i in 0..P::SIZE {
-            let column: Vector3<f32> = Vector3::new(
-                self.h_se2_inv_j_se2_t[0][i],
-                self.h_se2_inv_j_se2_t[1][i],
-                self.h_se2_inv_j_se2_t[2][i],
-            );
-            let product: Vector3<f32> = h_se2_inv * column;
-            for r in 0..3 {
-                self.h_se2_inv_j_se2_t[r][i] = product[r];
-                finite &= product[r].is_finite();
-            }
-            finite &= self.data[i].is_finite();
-        }
-
-        self.valid = mean > f32::EPSILON && finite;
+        self.valid = valid;
     }
 
     /// `residual` (`patch.h:168-202`), with the warp applied per tap.
@@ -522,12 +566,15 @@ mod tests {
         let point: Vector2<f64> = probe();
 
         let mut data_jac: [f64; MAX_PATTERN_SIZE] = [0.0; MAX_PATTERN_SIZE];
-        let mut jacobian: [[f64; MAX_PATTERN_SIZE]; 3] = [[0.0; MAX_PATTERN_SIZE]; 3];
+        let mut jacobian: [f64; 3 * MAX_PATTERN_SIZE] = [0.0; 3 * MAX_PATTERN_SIZE];
         let (mean_jac, valid_jac) = set_data_jac_se2::<Pattern52, f64, SmoothFunction>(
             &image,
             &point,
             &mut data_jac,
+            1,
             &mut jacobian,
+            1,
+            MAX_PATTERN_SIZE,
         );
 
         let mut data: [f64; MAX_PATTERN_SIZE] = [0.0; MAX_PATTERN_SIZE];
@@ -551,12 +598,15 @@ mod tests {
         let point: Vector2<f64> = probe();
 
         let mut data: [f64; MAX_PATTERN_SIZE] = [0.0; MAX_PATTERN_SIZE];
-        let mut jacobian: [[f64; MAX_PATTERN_SIZE]; 3] = [[0.0; MAX_PATTERN_SIZE]; 3];
+        let mut jacobian: [f64; 3 * MAX_PATTERN_SIZE] = [0.0; 3 * MAX_PATTERN_SIZE];
         set_data_jac_se2::<Pattern52, f64, SmoothFunction>(
             &image,
             &point,
             &mut data,
+            1,
             &mut jacobian,
+            1,
+            MAX_PATTERN_SIZE,
         );
 
         let step: f64 = 1e-6;
@@ -583,7 +633,11 @@ mod tests {
 
             for i in 0..Pattern52::SIZE {
                 let numeric: f64 = (plus[i] - minus[i]) / (2.0 * step);
-                assert_abs_diff_eq!(jacobian[column][i], numeric, epsilon = 1e-6);
+                assert_abs_diff_eq!(
+                    jacobian[column * MAX_PATTERN_SIZE + i],
+                    numeric,
+                    epsilon = 1e-6
+                );
             }
         }
     }

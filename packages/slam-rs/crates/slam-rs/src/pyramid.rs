@@ -89,6 +89,23 @@ pub trait PyramidBuilder {
     /// mismatch from being a panic on a rayon worker inside the released-GIL
     /// region, which aborts the process — decision D32.)
     fn build(&mut self, img: &ImageU16, out: &mut Self::Pyramid) -> Result<(), PyramidError>;
+
+    /// Allocate a pyramid this builder can fill for a `width` x `height` frame
+    /// with `num_levels` halvings on top of level 0.
+    ///
+    /// Without this the seam is only half a seam: a caller generic over the
+    /// builder could fill a pyramid but never make one, so it would have to name
+    /// the concrete type to allocate. A GPU builder allocates device memory here.
+    ///
+    /// # Errors
+    ///
+    /// When the geometry cannot carry that many levels, or does not fit memory.
+    fn allocate(
+        &self,
+        width: usize,
+        height: usize,
+        num_levels: usize,
+    ) -> Result<Self::Pyramid, PyramidError>;
 }
 
 /// What generic frontend code may ask of a pyramid, whatever holds its pixels.
@@ -264,6 +281,15 @@ impl CpuPyramidBuilder {
 
 impl PyramidBuilder for CpuPyramidBuilder {
     type Pyramid = PyramidU16;
+
+    fn allocate(
+        &self,
+        width: usize,
+        height: usize,
+        num_levels: usize,
+    ) -> Result<PyramidU16, PyramidError> {
+        PyramidU16::with_capacity(width, height, num_levels)
+    }
 
     /// `ManagedImagePyr::setFromImage`, `image_pyr.h:70-80`.
     fn build(&mut self, img: &ImageU16, out: &mut PyramidU16) -> Result<(), PyramidError> {

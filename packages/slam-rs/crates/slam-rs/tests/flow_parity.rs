@@ -49,7 +49,9 @@ use slam_rs::frontend::flow::{
 use slam_rs::frontend::parallel::WorkPool;
 use slam_rs::frontend::patterns::Pattern51;
 use slam_rs::frontend::se2::AffineCompact2f;
-use slam_rs::frontend::tracker::{CpuPatchTracker, FlowResult, PatchSoA, PatchTracker};
+use slam_rs::frontend::tracker::{
+    CpuPatchTracker, FlowResult, FlowTransforms, PatchSoA, PatchTracker, PointsSoA, SourcePatches,
+};
 use slam_rs::image::ImageU16;
 use slam_rs::lie::Se3;
 use slam_rs::pyramid::{CpuPyramidBuilder, PyramidBuilder, PyramidU16};
@@ -228,12 +230,12 @@ fn seeded_tracking(
     let identity: Se3<f32> = Se3::identity();
     let depth: f32 = config.optical_flow_matching_default_depth;
 
-    let mut positions: Vec<Vector2<f32>> = Vec::with_capacity(source.len());
-    let mut guesses: Vec<AffineCompact2f> = Vec::with_capacity(source.len());
+    let mut positions: PointsSoA = PointsSoA::with_capacity(source.len());
+    let mut guesses: FlowTransforms = FlowTransforms::with_capacity(source.len());
     for keypoint in source {
         let position: Vector2<f32> = Vector2::new(keypoint.x, keypoint.y);
         positions.push(position);
-        guesses.push(AffineCompact2f {
+        guesses.push(&AffineCompact2f {
             linear: Matrix2::new(
                 keypoint.linear[0],
                 keypoint.linear[1],
@@ -352,15 +354,21 @@ fn seeded_tracking_reproduces_the_cpp_tracker() {
     );
 }
 
-/// Reported, never gated: how much the two detectors agree.
+/// Reported, never gated: how much the two detectors agree, and how much the
+/// two occupancy grids do.
 ///
-/// `cv::FAST` and kornia-rs's FAST rank corners differently
-/// (`cells.rs:57-62` against OpenCV's `cornerScore`), so this number says how
-/// much of the divergence in a full run comes from the detector rather than the
-/// tracker. It is printed with `--nocapture` and only asserted to be non-trivial.
+/// Both sides now run the canonical FAST-9 `cornerScore` and OpenCV's
+/// strictly-greater 3x3 suppression, so what is left is the cell walk itself:
+/// `cv::FAST` sweeps a whole cell with one three-row score ring, and
+/// `std::sort` (`keypoints.cpp:166`) is not stable while the sort here is. This
+/// number says how much of the divergence in a full run comes from the detector
+/// rather than the tracker; it is printed with `--nocapture` and only asserted
+/// to be non-trivial. The two reports share one pipeline run because a
+/// 960x960 frameset through an unoptimised build is the test's whole cost.
 #[test]
 fn detector_overlap_is_reported() {
     let config: VioConfig = config();
+    let budget: i32 = config.optical_flow_detection_num_points_cell;
     let calibration: Calibration<f64> = calibration();
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = FrameToFrameOpticalFlow::new(
         config,
@@ -386,14 +394,16 @@ fn detector_overlap_is_reported() {
 
         for camera in 0..2 {
             let expected: &[DumpKeypoint] = dump.keypoints(camera);
-            let ours: &[AffineCompact2f] = &produced.cameras[camera].transforms;
+            let ours: Vec<Vector2<f32>> = (0..produced.cameras[camera].len())
+                .map(|index| produced.cameras[camera].transforms.translation(index))
+                .collect();
             // A C++ keypoint counts as reproduced when some Rust keypoint sits
             // within one pixel of it, whatever id either side gave it.
             let near: usize = expected
                 .iter()
                 .filter(|keypoint| {
-                    ours.iter().any(|transform| {
-                        (transform.translation - Vector2::new(keypoint.x, keypoint.y)).norm() <= 1.0
+                    ours.iter().any(|translation| {
+                        (translation - Vector2::new(keypoint.x, keypoint.y)).norm() <= 1.0
                     })
                 })
                 .count();
@@ -407,49 +417,10 @@ fn detector_overlap_is_reported() {
         }
     }
 
-    for line in &report {
-        println!("{line}");
-    }
-    assert!(
-        any_overlap,
-        "the two detectors agree on nothing at all, which is a bug rather than a delta"
-    );
-}
-
-/// The grid geometry is not a detector question: both sides must centre the same
-/// cells over camera 0 (`keypoints.cpp:140-144`).
-#[test]
-fn the_detection_grid_matches_the_cpp() {
-    let config: VioConfig = config();
-    let calibration: Calibration<f64> = calibration();
-    let flow: FrameToFrameOpticalFlow<Pattern51> =
-        FrameToFrameOpticalFlow::new(config, &calibration, FrontendOptions::default()).unwrap();
-    let dump: DumpFrame = read_dump(0);
-
-    assert_eq!(flow.grid().cell, dump.grid.cell);
-    assert_eq!(flow.grid().x_start, dump.grid.x_start);
-    assert_eq!(flow.grid().y_start, dump.grid.y_start);
-    assert_eq!(flow.grid().columns, dump.grid.columns);
-    assert_eq!(flow.grid().rows, dump.grid.rows);
-}
-
-/// The occupancy the two sides derive from their own keypoints, reported per
-/// cell. Gated only on the shape and on the port never exceeding the per-cell
-/// budget, since the counts themselves follow the detector.
-#[test]
-fn cell_occupancy_is_reported() {
-    let config: VioConfig = config();
-    let budget: i32 = config.optical_flow_detection_num_points_cell;
-    let calibration: Calibration<f64> = calibration();
-    let mut flow: FrameToFrameOpticalFlow<Pattern51> =
-        FrameToFrameOpticalFlow::new(config, &calibration, FrontendOptions::default()).unwrap();
-
-    let dump: DumpFrame = read_dump(0);
-    let images: Vec<ImageU16> = (0..2).map(|camera| read_pgm(0, camera)).collect();
-    flow.process_frame(dump.t_ns, &images, &PosePrediction::default(), &[])
-        .unwrap();
-
-    let grid = flow.grid();
+    // The occupancy the two sides derive from their own keypoints, on the last
+    // frameset the loop above left in the frontend.
+    let dump: DumpFrame = read_dump(framesets - 1);
+    let grid = flow.occupancy_grid();
     let mut cpp: Vec<i32> = vec![0; grid.rows * grid.columns];
     for keypoint in dump.keypoints(0) {
         if !grid.contains(keypoint.x, keypoint.y) {
@@ -460,7 +431,6 @@ fn cell_occupancy_is_reported() {
     }
     let ours: &[i32] = flow.cell_counts(0);
     assert_eq!(ours.len(), cpp.len());
-
     let occupied_cpp: usize = cpp.iter().filter(|count| **count > 0).count();
     let occupied_rust: usize = ours.iter().filter(|count| **count > 0).count();
     let both: usize = cpp
@@ -468,11 +438,41 @@ fn cell_occupancy_is_reported() {
         .zip(ours.iter())
         .filter(|(a, b)| **a > 0 && **b > 0)
         .count();
-    println!(
+    report.push(format!(
         "camera 0 cell occupancy: cpp {occupied_cpp} cells, rust {occupied_rust} cells, both {both}"
+    ));
+
+    for line in &report {
+        println!("{line}");
+    }
+    assert!(
+        any_overlap,
+        "the two detectors agree on nothing at all, which is a bug rather than a delta"
     );
-    assert!(ours.iter().all(|count| *count <= budget));
+    assert!(
+        ours.iter().all(|count| *count <= budget),
+        "a cell holds more than the per-cell budget"
+    );
     assert!(both * 2 >= occupied_cpp, "the two grids barely overlap");
+}
+
+/// The grid geometry is not a detector question: both sides must centre the same
+/// cells over camera 0 (`keypoints.cpp:140-144`). On this rig every camera is
+/// 960x960, so the per-camera detection grid and the shared occupancy grid are
+/// the same thing.
+#[test]
+fn the_detection_grid_matches_the_cpp() {
+    let config: VioConfig = config();
+    let calibration: Calibration<f64> = calibration();
+    let flow: FrameToFrameOpticalFlow<Pattern51> =
+        FrameToFrameOpticalFlow::new(config, &calibration, FrontendOptions::default()).unwrap();
+    let dump: DumpFrame = read_dump(0);
+
+    assert_eq!(flow.occupancy_grid().cell, dump.grid.cell);
+    assert_eq!(flow.occupancy_grid().x_start, dump.grid.x_start);
+    assert_eq!(flow.occupancy_grid().y_start, dump.grid.y_start);
+    assert_eq!(flow.occupancy_grid().columns, dump.grid.columns);
+    assert_eq!(flow.occupancy_grid().rows, dump.grid.rows);
 }
 
 /// A dump fixture that has silently changed shape would make the gate meaningless.

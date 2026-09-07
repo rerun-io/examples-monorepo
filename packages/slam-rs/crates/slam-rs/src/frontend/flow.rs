@@ -6,6 +6,12 @@
 //! from the previous frame, refresh the occupancy grid, detect and match new
 //! points, and drop the ones that fail the epipolar test.
 //!
+//! The driver is generic over the pyramid builder and the tracker
+//! ([`crate::pyramid::PyramidBuilder`], [`PatchTracker`]), both defaulting to the
+//! CPU backends, and no signature here names a concrete pyramid: a CubeCL
+//! backend arrives through [`FrameToFrameOpticalFlow::with_backends`]
+//! (`cubecl-portability.md` §12.1).
+//!
 //! ## What the port leaves out, and why
 //!
 //! * **The queues and the processing thread.** `processingLoop` (`:122-155`) pops
@@ -24,7 +30,7 @@
 //!   [`Keypoints`] so the shape of the output does not change when that variant
 //!   arrives, and it stays empty here.
 //!
-//! ## Four places the port does not match the C++ exactly
+//! ## Five places the port does not match the C++ exactly
 //!
 //! * **The essential matrix is per camera** (deviation X03). `optical_flow.h:210`
 //!   computes the cam0-cam1 matrix once and stores it under every index, which is
@@ -33,18 +39,23 @@
 //!   two agree exactly.
 //! * **Image bounds come from each camera's own resolution.** basalt reads
 //!   `calib.resolution.at(0)` for the whole rig (`:108-109`, trap 16); msd-g2's
-//!   cameras are stored rotated and do not all share one (decision D30). The
-//!   detection grid still follows camera 0, as the C++ does, because `cells` is
-//!   one matrix shape for every camera.
+//!   cameras are stored rotated and do not share one (decision D30). The
+//!   detection grid is per camera as well, which is what the C++ does
+//!   (`keypoints.cpp:140-144` derives it from the image it is handed); the
+//!   *occupancy* matrix keeps camera 0's shape, which is also what the C++ does
+//!   (`:119`), so the two can disagree on a mixed-resolution rig and a cell whose
+//!   index falls outside the matrix is skipped where the C++ reads out of range.
 //! * **`getNumCams() >= 2` is not required** (trap 17). With one camera the
-//!   matching and filtering passes have nothing to do and are skipped, instead of
-//!   indexing `T_i_c[1]` and crashing. Asking for the C++ essential-matrix bug on
-//!   a one-camera rig is the one case that is refused outright.
+//!   matching and filtering passes are skipped instead of indexing `T_i_c[1]`.
+//!   Asking for the C++ essential-matrix bug on a one-camera rig is refused.
 //! * **The second mask test moves one step later.** `trackPoints` tests
 //!   `masks2.inBounds` between the forward and the backward track (`:352`); here
 //!   the whole forward pass runs, then the whole backward pass, so the test is
 //!   applied to the same tracked position afterwards. The same points are
 //!   dropped; the only cost is a backward track that would have been skipped.
+//! * **There is a keypoint budget.** See [`FrontendOptions::max_keypoints`].
+
+use std::marker::PhantomData;
 
 use nalgebra::{Matrix4, Vector2, Vector3, Vector4};
 
@@ -52,16 +63,19 @@ use crate::calib::Calibration;
 use crate::camera::{CameraError, RigCamera};
 use crate::config::{MatchingGuessType, VioConfig};
 use crate::frontend::detect::{
-    CellGrid, DetectorConfig, DetectorScratch, KeypointsData, Masks, Rect,
+    CellGrid, DetectError, DetectorConfig, DetectorScratch, KeypointsData, Masks, Occupancy, Rect,
     detect_keypoints_with_cells,
 };
 use crate::frontend::parallel::WorkPool;
 use crate::frontend::patterns::Pattern;
 use crate::frontend::se2::AffineCompact2f;
-use crate::frontend::tracker::{CpuPatchTracker, FlowResult, PatchSoA, PatchTracker, TrackerError};
+use crate::frontend::tracker::{
+    CpuPatchTracker, FlowResult, FlowTransforms, PatchTracker, PointsSoA, SourcePatches,
+    TrackerError,
+};
 use crate::image::ImageU16;
 use crate::lie::{Se3, So3};
-use crate::pyramid::{CpuPyramidBuilder, Pyramid, PyramidBuilder, PyramidError, PyramidU16};
+use crate::pyramid::{CpuPyramidBuilder, Pyramid, PyramidBuilder, PyramidError};
 use crate::types::KeypointId;
 
 /// What [`Keypoints::responses`] holds where basalt's `keypoint_responses` map
@@ -78,7 +92,16 @@ pub struct FrontendOptions {
     /// Workers the tracking passes run on (decision D31). One is the
     /// deterministic reference lane; any value gives the same numbers.
     pub threads: usize,
-    /// Keypoints the preallocated buffers hold, per camera.
+    /// Keypoints one camera may carry, and the capacity every buffer is sized for.
+    ///
+    /// basalt has no such cap: its maps grow. The port needs one because the
+    /// tracker's storage is preallocated (§12.2 forbids growing a buffer on the
+    /// per-frame path), so detection and stereo matching **stop adding** once a
+    /// camera reaches it, in the detector's own scan order. Keypoints that
+    /// already exist are never dropped to make room, and the frame stays
+    /// processable. The default is about eight times what the shipped 50-pixel
+    /// grid can produce on a 960x960 frame, so nothing in the reference
+    /// configuration comes near it.
     pub max_keypoints: usize,
 }
 
@@ -117,23 +140,25 @@ pub struct PosePrediction {
 /// (`optical_flow.h:68`), i.e. an ordered map. The order is load-bearing — it is
 /// the order `filterPointsForCam` walks and the order new ids are handed out in —
 /// so this keeps the ids **sorted ascending** with the parallel arrays beside
-/// them, and looks up by binary search. No hash map appears anywhere on the
-/// per-frame path (`cubecl-portability.md` §12.2).
+/// them, and looks up by binary search. The warps live in a [`FlowTransforms`],
+/// six flat coefficient arrays with the keypoint index fast-varying, so no
+/// per-keypoint record is an array of structs (§12.2). No hash map appears
+/// anywhere on the per-frame path.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Keypoints {
     /// Keypoint ids, ascending. `LandmarkId == KeypointId` (`optical_flow.h:71`).
     pub ids: Vec<KeypointId>,
     /// The 2x3 warp of each keypoint, in the same order as [`Keypoints::ids`].
-    pub transforms: Vec<AffineCompact2f>,
+    pub transforms: FlowTransforms,
     /// The detector response of each keypoint, `-1` where there is none.
     ///
     /// basalt keeps the responses in a second map that only `addKeypoint` writes
     /// (`:730`), so a keypoint carried forward by `trackPoints` or inserted by
     /// `addKeypoints` from the stereo match (`:734-741`) has **no entry at all**.
-    /// `-1` is what `addKeypoint`'s own default argument stores for "no response"
-    /// (`:726`), so one array with that sentinel says the same thing as the C++'s
-    /// two maps — and, unlike a `NaN`, it lets two frames be compared for
-    /// equality, which the determinism tests need.
+    /// [`NO_RESPONSE`] is what `addKeypoint`'s own default argument stores for
+    /// "no response" (`:726`), so one array with that sentinel says the same
+    /// thing as the C++'s two maps. The value itself is OpenCV's integer
+    /// `cornerScore`, which is what the C++ records.
     pub responses: Vec<f32>,
     /// `OpticalFlowResult::pyramid_levels`, always empty for this variant.
     pub pyramid_levels: Vec<u32>,
@@ -152,12 +177,21 @@ impl Keypoints {
 
     /// The warp stored for `id`, or `None`.
     pub fn get(&self, id: KeypointId) -> Option<AffineCompact2f> {
-        self.index_of(id).map(|index| self.transforms[index])
+        self.index_of(id).map(|index| self.transforms.get(index))
     }
 
     /// The response stored for `id`, or `None`.
     pub fn response(&self, id: KeypointId) -> Option<f32> {
         self.index_of(id).map(|index| self.responses[index])
+    }
+
+    /// The warp at `index`, in id order.
+    ///
+    /// # Panics
+    ///
+    /// If `index` is past the end.
+    pub fn transform(&self, index: usize) -> AffineCompact2f {
+        self.transforms.get(index)
     }
 
     /// Where `id` sits in the sorted arrays.
@@ -173,10 +207,10 @@ impl Keypoints {
     }
 
     /// `transforms->keypoints[cam][id] = kp`: insert or overwrite.
-    fn set(&mut self, id: KeypointId, transform: AffineCompact2f, response: f32) {
+    fn set(&mut self, id: KeypointId, transform: &AffineCompact2f, response: f32) {
         match self.ids.binary_search(&id) {
             Ok(index) => {
-                self.transforms[index] = transform;
+                self.transforms.set(index, transform);
                 self.responses[index] = response;
             }
             Err(index) => {
@@ -188,19 +222,27 @@ impl Keypoints {
     }
 
     /// `std::map::insert`, which **keeps** an existing entry (`:740`).
-    fn insert_if_absent(&mut self, id: KeypointId, transform: AffineCompact2f) {
-        if let Err(index) = self.ids.binary_search(&id) {
-            self.ids.insert(index, id);
-            self.transforms.insert(index, transform);
-            self.responses.insert(index, NO_RESPONSE);
+    ///
+    /// Returns whether the keypoint was new.
+    fn insert_if_absent(&mut self, id: KeypointId, transform: &AffineCompact2f) -> bool {
+        match self.ids.binary_search(&id) {
+            Ok(_) => false,
+            Err(index) => {
+                self.ids.insert(index, id);
+                self.transforms.insert(index, transform);
+                self.responses.insert(index, NO_RESPONSE);
+                true
+            }
         }
     }
 
     fn remove(&mut self, id: KeypointId) -> Option<AffineCompact2f> {
         let index: usize = self.index_of(id)?;
+        let transform: AffineCompact2f = self.transforms.get(index);
         self.ids.remove(index);
         self.responses.remove(index);
-        Some(self.transforms.remove(index))
+        self.transforms.remove(index);
+        Some(transform)
     }
 }
 
@@ -219,6 +261,14 @@ pub enum FrontendError {
     /// The calibration carries no cameras.
     #[error("the calibration carries no cameras")]
     NoCameras,
+    /// The calibration has fewer extrinsics than cameras.
+    #[error("the calibration has {intrinsics} cameras but {extrinsics} extrinsics")]
+    RaggedExtrinsics {
+        /// Camera models the calibration carries.
+        intrinsics: usize,
+        /// `T_i_c` entries it carries.
+        extrinsics: usize,
+    },
     /// The frameset does not hold one image per camera.
     #[error("expected {expected} images, got {actual}")]
     CameraCountMismatch {
@@ -238,9 +288,11 @@ pub enum FrontendError {
     /// `optical_flow_type` names an implementation that is not ported.
     #[error("optical flow type {0:?} is not ported; only frame_to_frame is")]
     UnsupportedFlowType(String),
-    /// Camera 0's frame is smaller than one detection cell.
-    #[error("a {width}x{height} frame cannot carry a {cell}-pixel detection grid")]
+    /// A camera's frame is smaller than one detection cell.
+    #[error("camera {camera}: a {width}x{height} frame cannot carry a {cell}-pixel detection grid")]
     FrameTooSmall {
+        /// Which camera.
+        camera: usize,
         /// Frame width.
         width: usize,
         /// Frame height.
@@ -255,6 +307,22 @@ pub enum FrontendError {
         field: &'static str,
         /// What it holds.
         value: i32,
+    },
+    /// The keypoint budget is larger than the tracker can carry.
+    #[error("max_keypoints is {max_keypoints}, the tracker's capacity is {capacity}")]
+    BudgetExceedsCapacity {
+        /// What the options ask for.
+        max_keypoints: usize,
+        /// What the tracker was built for.
+        capacity: usize,
+    },
+    /// The tracker was built for a different pyramid depth than the config asks.
+    #[error("config asks for {config} pyramid levels, the tracker runs {tracker}")]
+    LevelMismatch {
+        /// `optical_flow_levels + 1`.
+        config: usize,
+        /// What the tracker was built for.
+        tracker: usize,
     },
     /// The epipolar filter needs a second camera when the C++ bug is reproduced.
     #[error("epipolar_per_camera = false needs at least two cameras, the rig has {cameras}")]
@@ -271,6 +339,9 @@ pub enum FrontendError {
     /// The tracker refused the inputs.
     #[error("tracker: {0}")]
     Tracker(#[from] TrackerError),
+    /// The detector refused the inputs.
+    #[error("detector: {0}")]
+    Detect(#[from] DetectError),
     /// The thread pool could not be built.
     #[error("could not build a pool of {threads} threads")]
     ThreadPool {
@@ -280,16 +351,28 @@ pub enum FrontendError {
 }
 
 /// `basalt::FrameToFrameOpticalFlow<Scalar, Pattern>` with `Scalar = f32`.
+///
+/// Generic over the pyramid builder and the tracker, both defaulting to the CPU
+/// backends: a CubeCL implementation of [`PyramidBuilder`] and [`PatchTracker`]
+/// drops in through [`FrameToFrameOpticalFlow::with_backends`] and no public
+/// signature here names a concrete pyramid (§12.1).
 #[derive(Debug)]
-pub struct FrameToFrameOpticalFlow<P: Pattern> {
+pub struct FrameToFrameOpticalFlow<
+    P: Pattern,
+    B: PyramidBuilder = CpuPyramidBuilder,
+    T: PatchTracker<Pattern = P, Pyramid = B::Pyramid> = CpuPatchTracker<P>,
+> {
     config: VioConfig,
     options: FrontendOptions,
     calib: Calibration<f32>,
     cameras: Vec<RigCamera<f32>>,
     /// `E`, one 4x4 essential matrix per camera (`optical_flow.h:207-213`).
     essential: Vec<Matrix4<f32>>,
-    /// The detection grid, from camera 0's resolution as the C++ does (`:107-113`).
-    grid: CellGrid,
+    /// One detection grid per camera, from that camera's own image size, as the
+    /// C++ derives it inside `detectKeypointsWithCells` (`keypoints.cpp:140-144`).
+    detection_grids: Vec<CellGrid>,
+    /// The occupancy grid, shaped from camera 0 as `cells` is (`:119`).
+    occupancy_grid: CellGrid,
     /// `cells`, `(h/c + 1) x (w/c + 1)` counts per camera (`:119`).
     cells: Vec<Vec<i32>>,
     /// `last_keypoint_id` (`optical_flow.h:174`), the global landmark id space.
@@ -303,26 +386,33 @@ pub struct FrameToFrameOpticalFlow<P: Pattern> {
     /// Masks for this frame, grown by `cam0OverlapCellsMasksForCam`.
     masks: Vec<Masks>,
 
-    pyramid_builder: CpuPyramidBuilder,
-    pyramid: Vec<PyramidU16>,
-    old_pyramid: Vec<PyramidU16>,
-    tracker: CpuPatchTracker<P>,
-    patches: PatchSoA<P>,
+    pyramid_builder: B,
+    /// This frame's pyramids, one per camera.
+    pyramid: Vec<B::Pyramid>,
+    /// The previous frame's.
+    old_pyramid: Vec<B::Pyramid>,
+    /// Where a frame is built before anything else is touched; see
+    /// [`FrameToFrameOpticalFlow::process_frame`] on why there are three.
+    staging: Vec<B::Pyramid>,
+    tracker: T,
+    patches: T::Patches,
     /// The source keypoint ids of the call in flight, in map order (`:299`, `:306`).
     ids: Vec<KeypointId>,
     /// The source warps, in the same order (`:300`, `:307`).
-    source: Vec<AffineCompact2f>,
+    source: FlowTransforms,
     /// Which entries of `ids` survived the `masks1` test and were offered to the
     /// tracker; the tracker's index space is this vector's.
     offered: Vec<usize>,
     /// The source positions the forward patches are built at.
-    positions: Vec<Vector2<f32>>,
+    positions: PointsSoA,
     /// `transform_2` once the depth guess has been applied (`:342`).
-    guesses: Vec<AffineCompact2f>,
+    guesses: FlowTransforms,
     /// The tracker's dense output.
     result: FlowResult,
-    /// `(id, warp)` of every track that survived, in ascending source order.
-    tracked: Vec<(KeypointId, AffineCompact2f)>,
+    /// The ids that survived, in ascending source order, with their warps.
+    tracked_ids: Vec<KeypointId>,
+    /// The warps of [`FrameToFrameOpticalFlow::tracked_ids`].
+    tracked: FlowTransforms,
     detector: DetectorScratch,
     detected: KeypointsData,
     /// The keypoints `addPointsForCamera(0)` produced, to be matched onward.
@@ -330,10 +420,12 @@ pub struct FrameToFrameOpticalFlow<P: Pattern> {
     /// Ids the epipolar filter removes, ascending (`std::set`, `:669`).
     to_remove: Vec<KeypointId>,
     frame: FlowFrame,
+    pattern: PhantomData<P>,
 }
 
-impl<P: Pattern> FrameToFrameOpticalFlow<P> {
-    /// `FrameToFrameOpticalFlow(conf, cal)` (`frame_to_frame_optical_flow.h:103-120`).
+impl<P: Pattern> FrameToFrameOpticalFlow<P, CpuPyramidBuilder, CpuPatchTracker<P>> {
+    /// `FrameToFrameOpticalFlow(conf, cal)` (`frame_to_frame_optical_flow.h:103-120`)
+    /// on the CPU backends.
     ///
     /// The calibration arrives in `f64` — that is what the JSON gives — and is
     /// cast to `f32` here, as `OpticalFlowTyped`'s constructor does
@@ -342,13 +434,41 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
     /// # Errors
     ///
     /// [`FrontendError`] when the config names another flow type or pattern,
-    /// when the rig is empty or too small for the grid, when a camera model has
-    /// no projection, or when the thread pool cannot be built.
+    /// when the rig is empty, ragged or too small for the grid, when a camera
+    /// model has no projection, or when the thread pool cannot be built.
     pub fn new(
         config: VioConfig,
         calibration: &Calibration<f64>,
         options: FrontendOptions,
     ) -> Result<Self, FrontendError> {
+        Self::validate_config(&config)?;
+        let num_levels: usize = config.optical_flow_levels as usize + 1;
+        let pool: WorkPool =
+            WorkPool::new(options.threads).map_err(|_| FrontendError::ThreadPool {
+                threads: options.threads,
+            })?;
+        let tracker: CpuPatchTracker<P> = CpuPatchTracker::new(
+            options.max_keypoints,
+            num_levels,
+            config.optical_flow_max_iterations as usize,
+            config.optical_flow_max_recovered_dist2,
+            pool,
+        );
+        Self::with_backends(
+            config,
+            calibration,
+            options,
+            CpuPyramidBuilder::new(),
+            tracker,
+        )
+    }
+}
+
+impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Pyramid>>
+    FrameToFrameOpticalFlow<P, B, T>
+{
+    /// The config checks that do not depend on the backends.
+    fn validate_config(config: &VioConfig) -> Result<(), FrontendError> {
         if config.optical_flow_type != "frame_to_frame" {
             return Err(FrontendError::UnsupportedFlowType(
                 config.optical_flow_type.clone(),
@@ -379,8 +499,53 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
                 return Err(FrontendError::NegativeConfig { field, value });
             }
         }
+        Ok(())
+    }
+
+    /// Build a frontend on caller-supplied stages.
+    ///
+    /// This is the seam a GPU backend enters through: `builder` and `tracker` are
+    /// any pair whose pyramid types agree, and the patch storage comes from the
+    /// tracker itself.
+    ///
+    /// # Errors
+    ///
+    /// As [`FrameToFrameOpticalFlow::new`], plus
+    /// [`FrontendError::BudgetExceedsCapacity`] and
+    /// [`FrontendError::LevelMismatch`] when the backends were built for a
+    /// different shape than the config asks for.
+    pub fn with_backends(
+        config: VioConfig,
+        calibration: &Calibration<f64>,
+        options: FrontendOptions,
+        builder: B,
+        tracker: T,
+    ) -> Result<Self, FrontendError> {
+        Self::validate_config(&config)?;
+
+        let num_levels: usize = config.optical_flow_levels as usize + 1;
+        if tracker.num_levels() != num_levels {
+            return Err(FrontendError::LevelMismatch {
+                config: num_levels,
+                tracker: tracker.num_levels(),
+            });
+        }
+        if options.max_keypoints > tracker.capacity() {
+            return Err(FrontendError::BudgetExceedsCapacity {
+                max_keypoints: options.max_keypoints,
+                capacity: tracker.capacity(),
+            });
+        }
 
         let calib: Calibration<f32> = calibration.cast();
+        // `calib.T_i_c[i]` is indexed for every camera (`:264-265`, `:651`); a
+        // calibration with fewer poses than models would index past the end.
+        if calib.t_i_c.len() != calib.intrinsics.len() {
+            return Err(FrontendError::RaggedExtrinsics {
+                intrinsics: calib.intrinsics.len(),
+                extrinsics: calib.t_i_c.len(),
+            });
+        }
         let cameras: Vec<RigCamera<f32>> = RigCamera::from_calibration(&calib)?;
         let num_cams: usize = cameras.len();
         if num_cams == 0 {
@@ -409,45 +574,43 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
             })
             .collect();
 
-        // `c`, `w`, `h`, `x_start`, ... from `calib.resolution.at(0)` (`:107-113`).
+        // `detectKeypointsWithCells` derives its grid from the image it is given
+        // (`keypoints.cpp:140-144`), so every camera gets its own; `cells` is
+        // shaped from camera 0 alone (`:119`), so that shape is separate.
         let cell: usize = config.optical_flow_detection_grid_size as usize;
-        let width: usize = cameras[0].width() as usize;
-        let height: usize = cameras[0].height() as usize;
-        let grid: CellGrid =
-            CellGrid::new(width, height, cell).ok_or(FrontendError::FrameTooSmall {
-                width,
-                height,
-                cell,
-            })?;
-
-        let num_levels: usize = config.optical_flow_levels as usize + 1;
-        let pool: WorkPool =
-            WorkPool::new(options.threads).map_err(|_| FrontendError::ThreadPool {
-                threads: options.threads,
-            })?;
+        let mut detection_grids: Vec<CellGrid> = Vec::with_capacity(num_cams);
+        for (camera, rig_camera) in cameras.iter().enumerate() {
+            let width: usize = rig_camera.width() as usize;
+            let height: usize = rig_camera.height() as usize;
+            detection_grids.push(CellGrid::new(width, height, cell).ok_or(
+                FrontendError::FrameTooSmall {
+                    camera,
+                    width,
+                    height,
+                    cell,
+                },
+            )?);
+        }
+        let occupancy_grid: CellGrid = detection_grids[0];
 
         Ok(Self {
             depth_guess: config.optical_flow_matching_default_depth,
-            tracker: CpuPatchTracker::new(
-                options.max_keypoints,
-                num_levels,
-                config.optical_flow_max_iterations as usize,
-                config.optical_flow_max_recovered_dist2,
-                pool,
-            ),
-            patches: PatchSoA::new(options.max_keypoints, num_levels),
-            cells: vec![vec![0; grid.rows * grid.columns]; num_cams],
+            patches: tracker.make_patches(),
+            tracker,
+            cells: vec![vec![0; occupancy_grid.rows * occupancy_grid.columns]; num_cams],
             masks: vec![Masks::default(); num_cams],
             pyramid: Vec::new(),
             old_pyramid: Vec::new(),
-            pyramid_builder: CpuPyramidBuilder::new(),
+            staging: Vec::new(),
+            pyramid_builder: builder,
             ids: Vec::new(),
-            source: Vec::new(),
+            source: FlowTransforms::default(),
             offered: Vec::new(),
-            positions: Vec::new(),
-            guesses: Vec::new(),
+            positions: PointsSoA::default(),
+            guesses: FlowTransforms::default(),
             result: FlowResult::default(),
-            tracked: Vec::new(),
+            tracked_ids: Vec::new(),
+            tracked: FlowTransforms::default(),
             detector: DetectorScratch::default(),
             detected: KeypointsData::default(),
             new_cam0: Keypoints::default(),
@@ -464,7 +627,9 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
             calib,
             cameras,
             essential,
-            grid,
+            detection_grids,
+            occupancy_grid,
+            pattern: PhantomData,
         })
     }
 
@@ -488,14 +653,29 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
         &self.frame
     }
 
-    /// One camera's occupancy counts, row-major over [`FrameToFrameOpticalFlow::grid`].
+    /// One camera's occupancy counts, row-major over
+    /// [`FrameToFrameOpticalFlow::occupancy_grid`].
+    ///
+    /// # Panics
+    ///
+    /// If `camera` is past the end of the rig.
     pub fn cell_counts(&self, camera: usize) -> &[i32] {
         &self.cells[camera]
     }
 
-    /// The detection grid the whole rig shares (`:107-113`).
-    pub fn grid(&self) -> CellGrid {
-        self.grid
+    /// The grid `cells` is shaped and indexed by, from camera 0 (`:119`).
+    pub fn occupancy_grid(&self) -> CellGrid {
+        self.occupancy_grid
+    }
+
+    /// The grid one camera is *detected* on, from its own image size
+    /// (`keypoints.cpp:140-144`).
+    ///
+    /// # Panics
+    ///
+    /// If `camera` is past the end of the rig.
+    pub fn detection_grid(&self, camera: usize) -> CellGrid {
+        self.detection_grids[camera]
     }
 
     /// One camera's essential matrix against camera 0 (`optical_flow.h:221`).
@@ -503,6 +683,10 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
     /// Index 0 is the zero matrix: camera 0 has no epipolar geometry against
     /// itself, and `filterPoints` starts at camera 1 (`:704`), so nothing reads
     /// it. The C++ leaves the cam0-cam1 matrix there instead, equally unread.
+    ///
+    /// # Panics
+    ///
+    /// If `camera` is past the end of the rig.
     pub fn essential(&self, camera: usize) -> Matrix4<f32> {
         self.essential[camera]
     }
@@ -542,10 +726,19 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
     /// shorter than the rig or empty, in which case the missing cameras suppress
     /// nothing.
     ///
+    /// **A rejected frame changes nothing.** Every fallible step that depends on
+    /// the caller's input — the frameset width, and every pyramid — runs before
+    /// any state moves: the pyramids are built into a third, staging set of
+    /// buffers and only rotated into place once all of them succeeded. The C++
+    /// has no such problem because it never rejects a frame; the port would
+    /// otherwise leave the timestamp advanced and the previous pyramid empty, and
+    /// the *next*, valid frame would take the tracking path against nothing.
+    ///
     /// # Errors
     ///
-    /// [`FrontendError`] when the frameset is the wrong width, when a pyramid or
-    /// the tracker refuses its input, or when the keypoint budget is exceeded.
+    /// [`FrontendError`] when the frameset is the wrong width or a pyramid
+    /// refuses the geometry — in both cases before anything is committed — or
+    /// when the tracker or detector refuses an input afterwards.
     pub fn process_frame(
         &mut self,
         t_ns: i64,
@@ -561,6 +754,13 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
             });
         }
 
+        // ── everything that can fail on the caller's input, before any commit
+        self.build_staging(images)?;
+
+        // ── commit: rotate the three pyramid sets, then advance the clock
+        std::mem::swap(&mut self.old_pyramid, &mut self.pyramid);
+        std::mem::swap(&mut self.pyramid, &mut self.staging);
+
         for (index, mask) in self.masks.iter_mut().enumerate() {
             mask.masks.clear();
             if let Some(source) = masks.get(index) {
@@ -571,11 +771,6 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
         let first_frame: bool = self.t_ns < 0;
         self.t_ns = t_ns;
         self.frame.t_ns = t_ns;
-
-        // `old_pyramid = pyramid; pyramid.reset(...)` (`:241-249`), as a swap so
-        // both allocations live for the life of the frontend.
-        std::mem::swap(&mut self.old_pyramid, &mut self.pyramid);
-        self.build_pyramids(images)?;
 
         if first_frame {
             for keypoints in &mut self.frame.cameras {
@@ -608,57 +803,66 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
         Ok(&self.frame)
     }
 
-    /// `pyramid->at(i).setFromImage(img, config.optical_flow_levels)` (`:245-249`).
-    fn build_pyramids(&mut self, images: &[ImageU16]) -> Result<(), FrontendError> {
+    /// Build this frame's pyramids into the staging set, touching nothing else.
+    ///
+    /// `pyramid->at(i).setFromImage(img, config.optical_flow_levels)` (`:245-249`),
+    /// with the allocation reused whenever the geometry is unchanged.
+    fn build_staging(&mut self, images: &[ImageU16]) -> Result<(), FrontendError> {
         let levels: usize = self.config.optical_flow_levels as usize;
-        self.pyramid.truncate(images.len());
+        self.staging.truncate(images.len());
         for (index, image) in images.iter().enumerate() {
-            let fits: bool = self.pyramid.get(index).is_some_and(|pyramid| {
+            let fits: bool = self.staging.get(index).is_some_and(|pyramid| {
                 pyramid.num_levels() == levels + 1
-                    && pyramid.level_size(0) == Some((image.width(), image.height(), image.width()))
+                    && pyramid
+                        .level_size(0)
+                        .is_some_and(|(w, h, _)| w == image.width() && h == image.height())
             });
             if !fits {
-                let fresh: PyramidU16 =
-                    PyramidU16::with_capacity(image.width(), image.height(), levels)?;
-                match self.pyramid.get_mut(index) {
+                let fresh: B::Pyramid =
+                    self.pyramid_builder
+                        .allocate(image.width(), image.height(), levels)?;
+                match self.staging.get_mut(index) {
                     Some(slot) => *slot = fresh,
-                    None => self.pyramid.push(fresh),
+                    None => self.staging.push(fresh),
                 }
             }
             self.pyramid_builder
-                .build(image, &mut self.pyramid[index])?;
+                .build(image, &mut self.staging[index])?;
         }
         Ok(())
     }
 
     /// One camera's frame-to-frame track: `trackPoints(..., cam, cam)` (`:267-270`).
     fn track_camera(&mut self, camera: usize, t_c1_c2: &Se3<f32>) -> Result<(), FrontendError> {
-        // Source and destination are the same slot, so the ids and warps are
-        // copied out before it is cleared (`:299-308`, `:371`).
+        // Source and destination are the same slot (`:299-308`, `:371`), so the
+        // ids and warps are copied out first — and the slot is only cleared once
+        // the track has succeeded, so a refused frame does not lose the camera's
+        // keypoints.
         self.ids.clear();
         self.source.clear();
         self.ids.extend_from_slice(&self.frame.cameras[camera].ids);
-        self.source
-            .extend_from_slice(&self.frame.cameras[camera].transforms);
-        self.frame.cameras[camera].clear();
+        for index in 0..self.frame.cameras[camera].len() {
+            self.source
+                .push(&self.frame.cameras[camera].transforms.get(index));
+        }
 
         self.run_track_points(camera, camera, t_c1_c2, true)?;
-        let mut tracked: Vec<(KeypointId, AffineCompact2f)> = std::mem::take(&mut self.tracked);
-        for (id, transform) in tracked.drain(..) {
+
+        self.frame.cameras[camera].clear();
+        for (slot, id) in self.tracked_ids.iter().enumerate() {
             // `keypoint_map_2.insert(result.begin(), result.end())` (`:372`); the
             // cell counts are rebuilt afterwards by `updateCellCounts`.
-            self.frame.cameras[camera].set(id, transform, NO_RESPONSE);
+            self.frame.cameras[camera].set(*id, &self.tracked.get(slot), NO_RESPONSE);
         }
-        self.tracked = tracked;
         Ok(())
     }
 
     /// The body of `trackPoints` (`:294-375`) minus the map bookkeeping.
     ///
-    /// Reads `ids` and `source`, writes `tracked`. The
-    /// caller decides what to do with the survivors, because `trackPoints` serves
-    /// two purposes: carrying a camera's own keypoints forward in time, and
-    /// matching camera 0's new keypoints into camera *i*.
+    /// Reads `ids` and `source`, writes `tracked_ids` and `tracked`. The caller
+    /// decides what to do with the survivors, because `trackPoints` serves two
+    /// purposes: carrying a camera's own keypoints forward in time, and matching
+    /// camera 0's new keypoints into camera *i*.
     fn run_track_points(
         &mut self,
         cam1: usize,
@@ -674,10 +878,11 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
         self.offered.clear();
         self.positions.clear();
         self.guesses.clear();
+        self.tracked_ids.clear();
         self.tracked.clear();
 
-        let source: Vec<AffineCompact2f> = std::mem::take(&mut self.source);
-        for (index, transform_1) in source.iter().enumerate() {
+        for index in 0..self.source.len() {
+            let transform_1: AffineCompact2f = self.source.get(index);
             let t1: Vector2<f32> = transform_1.translation;
             // `if (masks1.inBounds(t1.x(), t1.y())) continue;` (`:329`).
             if self.masks[cam1].in_bounds(t1.x, t1.y) {
@@ -692,17 +897,15 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
             };
             self.offered.push(index);
             self.positions.push(t1);
-            self.guesses.push(AffineCompact2f {
+            self.guesses.push(&AffineCompact2f {
                 linear: transform_1.linear,
                 translation,
             });
         }
 
-        self.source = source;
-
         // The forward source patches come from the previous frame when tracking
         // and from this frame's camera 0 when matching (`:267`, `:652`).
-        let source_pyramid: &PyramidU16 = if tracking {
+        let source_pyramid: &B::Pyramid = if tracking {
             &self.old_pyramid[cam1]
         } else {
             &self.pyramid[cam1]
@@ -716,32 +919,30 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
             &mut self.result,
         )?;
 
-        let result: FlowResult = std::mem::take(&mut self.result);
-        for slot in result.tracked() {
+        for slot in self.result.tracked() {
             let slot: usize = *slot as usize;
-            let transform: AffineCompact2f = result.transform(slot);
+            let transform: AffineCompact2f = self.result.transform(slot);
             // `if (masks2.inBounds(t2.x(), t2.y())) continue;` (`:352`).
             if self.masks[cam2].in_bounds(transform.translation.x, transform.translation.y) {
                 continue;
             }
-            let id: KeypointId = self.ids[self.offered[slot]];
-            self.tracked.push((id, transform));
+            self.tracked_ids.push(self.ids[self.offered[slot]]);
+            self.tracked.push(&transform);
         }
-        self.result = result;
         Ok(())
     }
 
     /// `updateCellCounts` (`:707-716`): rebuild one camera's occupancy from scratch.
     fn update_cell_counts(&mut self, camera: usize) {
         self.cells[camera].fill(0);
-        for transform in &self.frame.cameras[camera].transforms {
-            let position: Vector2<f32> = transform.translation;
+        for index in 0..self.frame.cameras[camera].len() {
+            let position: Vector2<f32> = self.frame.cameras[camera].transforms.translation(index);
             // `if (p[0] < x_start || ... || p[1] >= y_stop + c) continue;` (`:711`).
-            if !self.grid.contains(position.x, position.y) {
+            if !self.occupancy_grid.contains(position.x, position.y) {
                 continue;
             }
-            let (row, column) = self.grid.cell_of(position.x, position.y);
-            self.cells[camera][row * self.grid.columns + column] += 1;
+            let (row, column) = self.occupancy_grid.cell_of(position.x, position.y);
+            self.cells[camera][row * self.occupancy_grid.columns + column] += 1;
         }
     }
 
@@ -750,14 +951,19 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
         &mut self,
         camera: usize,
         id: KeypointId,
-        transform: AffineCompact2f,
+        transform: &AffineCompact2f,
         response: f32,
     ) {
-        let (row, column) = self
-            .grid
-            .cell_of(transform.translation.x, transform.translation.y);
-        self.cells[camera][row * self.grid.columns + column] += 1;
+        self.bump_cell(camera, transform);
         self.frame.cameras[camera].set(id, transform, response);
+    }
+
+    /// The `cells(y, x)++` half of `addKeypoint`/`addKeypoints` (`:729`, `:738`).
+    fn bump_cell(&mut self, camera: usize, transform: &AffineCompact2f) {
+        let (row, column) = self
+            .occupancy_grid
+            .cell_of(transform.translation.x, transform.translation.y);
+        self.cells[camera][row * self.occupancy_grid.columns + column] += 1;
     }
 
     /// `removeKeypoint` (`:743-749`): drop a keypoint and decrement its cell.
@@ -766,34 +972,59 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
             return;
         };
         let (row, column) = self
-            .grid
+            .occupancy_grid
             .cell_of(transform.translation.x, transform.translation.y);
-        self.cells[camera][row * self.grid.columns + column] -= 1;
+        self.cells[camera][row * self.occupancy_grid.columns + column] -= 1;
     }
 
     /// `addPointsForCamera` (`:577-610`): detect in the empty cells, register the
-    /// corners under fresh ids, and return the ones just created.
-    fn add_points_for_camera(&mut self, camera: usize) {
+    /// corners under fresh ids, and record camera 0's as the ones to match onward.
+    ///
+    /// Detection is capped at the camera's remaining budget
+    /// ([`FrontendOptions::max_keypoints`]), so the frame it produces is always
+    /// one the tracker can carry next time.
+    fn add_points_for_camera(&mut self, camera: usize) -> Result<(), FrontendError> {
         let config: DetectorConfig = DetectorConfig {
             num_points_cell: self.config.optical_flow_detection_num_points_cell as usize,
             min_threshold: self.config.optical_flow_detection_min_threshold,
             max_threshold: self.config.optical_flow_detection_max_threshold,
             safe_radius: self.config.optical_flow_image_safe_radius,
         };
-        // `detectKeypointsWithCells(pyramid->at(cam_id).lvl(0), ...)` (`:579-582`).
-        if let Some(level0) = self.pyramid[camera].level(0) {
-            detect_keypoints_with_cells(
-                level0,
-                &self.grid,
-                &self.cells[camera],
-                &config,
-                &self.masks[camera],
-                &mut self.detector,
-                &mut self.detected,
-            );
-        } else {
-            self.detected.corners.clear();
-            self.detected.responses.clear();
+        let budget: usize = self
+            .options
+            .max_keypoints
+            .saturating_sub(self.frame.cameras[camera].len());
+
+        // `detectKeypointsWithCells(pyramid->at(cam_id).lvl(0), ...)` (`:579-582`),
+        // on this camera's own grid and the rig's shared occupancy matrix.
+        self.detected.corners.clear();
+        self.detected.responses.clear();
+        if budget > 0 {
+            let mut level0: ImageU16 = std::mem::take(&mut self.detector.level0);
+            let copied: Result<(), PyramidError> =
+                self.pyramid[camera].copy_level_into(0, &mut level0);
+            let outcome: Result<(), FrontendError> =
+                copied
+                    .map_err(FrontendError::from)
+                    .and_then(|()| -> Result<(), FrontendError> {
+                        detect_keypoints_with_cells(
+                            &level0,
+                            &self.detection_grids[camera],
+                            &Occupancy {
+                                counts: &self.cells[camera],
+                                rows: self.occupancy_grid.rows,
+                                columns: self.occupancy_grid.columns,
+                            },
+                            &config,
+                            &self.masks[camera],
+                            budget,
+                            &mut self.detector,
+                            &mut self.detected,
+                        )?;
+                        Ok(())
+                    });
+            self.detector.level0 = level0;
+            outcome?;
         }
 
         self.new_cam0.clear();
@@ -803,13 +1034,14 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
             let transform: AffineCompact2f =
                 AffineCompact2f::at(Vector2::new(corner[0], corner[1]));
             let id: KeypointId = KeypointId(self.last_keypoint_id);
-            self.add_keypoint(camera, id, transform, response);
+            self.add_keypoint(camera, id, &transform, response);
             if camera == 0 {
-                self.new_cam0.set(id, transform, response);
+                self.new_cam0.set(id, &transform, response);
             }
             // `last_keypoint_id++` (`:606`), the global landmark id space.
             self.last_keypoint_id += 1;
         }
+        Ok(())
     }
 
     /// `addKeypoints` (`:734-741`): bump a cell for **every** offered keypoint,
@@ -818,29 +1050,33 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
     /// The double count when a keypoint is both tracked in camera *i* and matched
     /// into it from camera 0 is basalt's, not a slip: `std::map::insert` keeps the
     /// existing entry while the loop above it has already incremented the cell.
+    /// The budget is the port's own: once the camera is full, the remaining
+    /// matches are dropped and their cells are not bumped either.
     fn add_keypoints(&mut self, camera: usize) {
-        let mut tracked: Vec<(KeypointId, AffineCompact2f)> = std::mem::take(&mut self.tracked);
-        for (_, transform) in &tracked {
-            let (row, column) = self
-                .grid
-                .cell_of(transform.translation.x, transform.translation.y);
-            self.cells[camera][row * self.grid.columns + column] += 1;
+        let count: usize = self.tracked_ids.len();
+        for slot in 0..count {
+            if self.frame.cameras[camera].len() >= self.options.max_keypoints {
+                break;
+            }
+            let transform: AffineCompact2f = self.tracked.get(slot);
+            self.bump_cell(camera, &transform);
+            self.frame.cameras[camera].insert_if_absent(self.tracked_ids[slot], &transform);
         }
-        for (id, transform) in tracked.drain(..) {
-            self.frame.cameras[camera].insert_if_absent(id, transform);
-        }
-        self.tracked = tracked;
     }
 
     /// `cam0OverlapCellsMasksForCam` (`:612-635`): mask the cells of camera
     /// `camera` that project into camera 0 at `depth_guess`.
+    ///
+    /// The grid walked here is the frontend's own `x_start`/`x_stop`, which the
+    /// C++ takes from camera 0 (`:110-113`) whatever camera is being masked.
     fn cam0_overlap_masks(&self, camera: usize) -> Masks {
-        let cell: usize = self.grid.cell;
+        let grid: CellGrid = self.occupancy_grid;
+        let cell: usize = grid.cell;
         let half: usize = cell / 2;
-        let x_first: usize = self.grid.x_start + half;
-        let y_first: usize = self.grid.y_start + half;
-        let x_last: usize = self.grid.x_stop + half;
-        let y_last: usize = self.grid.y_stop + half;
+        let x_first: usize = grid.x_start + half;
+        let y_first: usize = grid.y_start + half;
+        let x_last: usize = grid.x_stop + half;
+        let y_last: usize = grid.y_stop + half;
 
         let width: f32 = self.cameras[0].resolution[0] as f32;
         let height: f32 = self.cameras[0].resolution[1] as f32;
@@ -880,7 +1116,7 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
     /// `addPoints` (`:637-666`): detect on camera 0, match onward, then detect
     /// again on the cameras that do not overlap camera 0.
     fn add_points(&mut self) -> Result<(), FrontendError> {
-        self.add_points_for_camera(0);
+        self.add_points_for_camera(0)?;
 
         // `for (i = 1; i < getNumCams(); i++) trackPoints(pyr0, pyri, kpts0, ...)`
         // (`:643-654`). With one camera there is nothing to match into (trap 17).
@@ -888,7 +1124,9 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
             self.ids.clear();
             self.source.clear();
             self.ids.extend_from_slice(&self.new_cam0.ids);
-            self.source.extend_from_slice(&self.new_cam0.transforms);
+            for index in 0..self.new_cam0.len() {
+                self.source.push(&self.new_cam0.transforms.get(index));
+            }
             let t_c0_ci: Se3<f32> = self.calib.t_i_c[0].inverse() * self.calib.t_i_c[camera];
             self.run_track_points(0, camera, &t_c0_ci, false)?;
             self.add_keypoints(camera);
@@ -899,7 +1137,7 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
             for camera in 1..self.cameras.len() {
                 let overlap: Masks = self.cam0_overlap_masks(camera);
                 self.masks[camera].extend(&overlap);
-                self.add_points_for_camera(camera);
+                self.add_points_for_camera(camera)?;
             }
         }
         Ok(())
@@ -917,7 +1155,7 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P> {
             let Some(in_cam0) = self.frame.cameras[0].get(id) else {
                 continue;
             };
-            let proj1: Vector2<f32> = self.frame.cameras[camera].transforms[index].translation;
+            let proj1: Vector2<f32> = self.frame.cameras[camera].transforms.translation(index);
 
             let mut p3d0: Vector4<f32> = Vector4::zeros();
             let mut p3d1: Vector4<f32> = Vector4::zeros();
@@ -985,6 +1223,10 @@ fn cast_matrix4(matrix: &Matrix4<f64>) -> Matrix4<f32> {
 /// uses whatever `project` wrote (`frame_to_frame_optical_flow.h:338`), while
 /// `cam0OverlapCellsMasksForCam` reads it (`:625-627`); both behaviours are the
 /// C++'s, so the pixel is always produced and the caller decides.
+///
+/// # Panics
+///
+/// If `i` or `j` is past the end of `cameras`.
 pub fn project_between_cams(
     cameras: &[RigCamera<f32>],
     ci_uv: &Vector2<f32>,
@@ -1015,7 +1257,9 @@ mod tests {
 
     use super::*;
     use crate::calib::{CalibAccelBias, CalibGyroBias, CameraModel, PinholeParams};
+    use crate::frontend::parallel::WorkPool;
     use crate::frontend::patterns::{Pattern51, Pattern52};
+    use crate::pyramid::CpuPyramidBuilder;
     use std::collections::BTreeMap;
 
     const WIDTH: usize = 200;
@@ -1154,10 +1398,11 @@ mod tests {
         flow.process_frame(0, &images, &PosePrediction::default(), &[])
             .unwrap();
 
-        let grid: CellGrid = flow.grid();
+        let grid: CellGrid = flow.occupancy_grid();
         let mut expected: Vec<i32> = vec![0; grid.rows * grid.columns];
-        for transform in &flow.frame().cameras[0].transforms {
-            let (row, column) = grid.cell_of(transform.translation.x, transform.translation.y);
+        for index in 0..flow.frame().cameras[0].len() {
+            let translation = flow.frame().cameras[0].transforms.translation(index);
+            let (row, column) = grid.cell_of(translation.x, translation.y);
             expected[row * grid.columns + column] += 1;
         }
         assert_eq!(flow.cell_counts(0), &expected[..]);
@@ -1416,5 +1661,223 @@ mod tests {
             .unwrap();
         assert!(frame.cameras[0].is_empty());
         assert!(frame.cameras[1].is_empty());
+    }
+    /// A frame the frontend refuses must leave it usable.
+    ///
+    /// The review's sequence: a 1x1 first image is rejected by the pyramid, and
+    /// the *next*, valid frame used to take the tracking path against an empty
+    /// previous pyramid and panic. Nothing commits until every pyramid is built.
+    #[test]
+    fn a_rejected_frame_leaves_the_frontend_usable() {
+        let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
+        let tiny: [ImageU16; 2] = [
+            ImageU16::zeros(1, 1).unwrap(),
+            ImageU16::zeros(1, 1).unwrap(),
+        ];
+        let error = flow
+            .process_frame(1, &tiny, &PosePrediction::default(), &[])
+            .unwrap_err();
+        assert!(
+            matches!(error, FrontendError::Pyramid(_)),
+            "expected a pyramid error, got {error}"
+        );
+        // Nothing moved: the clock is still before the first frame.
+        assert_eq!(flow.t_ns(), -1);
+        assert_eq!(flow.frame_counter(), 0);
+        assert_eq!(flow.last_keypoint_id(), 0);
+
+        // The next valid frame is treated as the first, and the one after it
+        // tracks against a pyramid that exists.
+        let images: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
+        let frame: &FlowFrame = flow
+            .process_frame(2, &images, &PosePrediction::default(), &[])
+            .unwrap();
+        assert!(!frame.cameras[0].is_empty());
+        let moved: [ImageU16; 2] = [dotted_image(1), dotted_image(1)];
+        flow.process_frame(3, &moved, &PosePrediction::default(), &[])
+            .unwrap();
+        assert_eq!(flow.frame_counter(), 2);
+    }
+
+    /// A frameset of the wrong width is refused before anything commits too.
+    #[test]
+    fn a_frameset_of_the_wrong_width_commits_nothing() {
+        let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
+        let images: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
+        flow.process_frame(0, &images, &PosePrediction::default(), &[])
+            .unwrap();
+        let before: FlowFrame = flow.frame().clone();
+
+        let short: [ImageU16; 1] = [dotted_image(1)];
+        assert!(
+            flow.process_frame(1, &short, &PosePrediction::default(), &[])
+                .is_err()
+        );
+        assert_eq!(flow.t_ns(), 0);
+        assert_eq!(flow.frame_counter(), 1);
+        assert_eq!(flow.frame(), &before);
+
+        // And the frontend still works afterwards.
+        let moved: [ImageU16; 2] = [dotted_image(1), dotted_image(1)];
+        flow.process_frame(2, &moved, &PosePrediction::default(), &[])
+            .unwrap();
+        assert_eq!(flow.frame_counter(), 2);
+    }
+
+    /// The keypoint budget is enforced where the keypoints are created, so a
+    /// frame is never produced that the tracker cannot then carry.
+    #[test]
+    fn the_keypoint_budget_is_never_exceeded() {
+        for max_keypoints in [1usize, 3, 7] {
+            let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(
+                2,
+                FrontendOptions {
+                    max_keypoints,
+                    ..FrontendOptions::default()
+                },
+            );
+            for step in 0..3 {
+                let images: [ImageU16; 2] = [dotted_image(step), dotted_image(step)];
+                let frame: &FlowFrame = flow
+                    .process_frame(step.into(), &images, &PosePrediction::default(), &[])
+                    .unwrap();
+                for camera in &frame.cameras {
+                    assert!(
+                        camera.len() <= max_keypoints,
+                        "{} keypoints against a budget of {max_keypoints}",
+                        camera.len()
+                    );
+                }
+            }
+            assert!(!flow.frame().cameras[0].is_empty());
+        }
+    }
+
+    /// The budget may not exceed what the tracker was built for.
+    #[test]
+    fn a_budget_larger_than_the_tracker_is_refused() {
+        let config: VioConfig = config();
+        let tracker: CpuPatchTracker<Pattern51> = CpuPatchTracker::new(
+            4,
+            config.optical_flow_levels as usize + 1,
+            config.optical_flow_max_iterations as usize,
+            config.optical_flow_max_recovered_dist2,
+            WorkPool::new(1).unwrap(),
+        );
+        let error = FrameToFrameOpticalFlow::<Pattern51, _, _>::with_backends(
+            config,
+            &rig(2),
+            FrontendOptions {
+                max_keypoints: 8,
+                ..FrontendOptions::default()
+            },
+            CpuPyramidBuilder::new(),
+            tracker,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            FrontendError::BudgetExceedsCapacity {
+                max_keypoints: 8,
+                capacity: 4
+            }
+        );
+    }
+
+    /// A calibration with fewer poses than camera models used to index past the
+    /// end of `T_i_c`; it is a typed error now (decision D32).
+    #[test]
+    fn a_calibration_missing_an_extrinsic_is_refused() {
+        let mut ragged: Calibration<f64> = rig(2);
+        ragged.t_i_c.pop();
+        let error = FrameToFrameOpticalFlow::<Pattern51>::new(
+            config(),
+            &ragged,
+            FrontendOptions::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            FrontendError::RaggedExtrinsics {
+                intrinsics: 2,
+                extrinsics: 1
+            }
+        );
+    }
+
+    /// A camera too small for one detection cell names itself in the error.
+    #[test]
+    fn a_camera_smaller_than_a_cell_is_refused() {
+        let mut small: Calibration<f64> = rig(2);
+        small.resolution[1] = [30, 30];
+        let error =
+            FrameToFrameOpticalFlow::<Pattern51>::new(config(), &small, FrontendOptions::default())
+                .unwrap_err();
+        assert_eq!(
+            error,
+            FrontendError::FrameTooSmall {
+                camera: 1,
+                width: 30,
+                height: 30,
+                cell: 50
+            }
+        );
+    }
+
+    /// Every camera is detected on **its own** grid (`keypoints.cpp:140-144`),
+    /// even though the occupancy matrix keeps camera 0's shape (`:119`).
+    ///
+    /// The review's probe: with 50-pixel cells a 200x200 camera starts at 0 and a
+    /// 240x240 camera at 20, and those two grids disagree about a corner near
+    /// (210, 80) — camera 0's grid stops at 150 + 50 = 200, so the port would
+    /// have missed it entirely if it had imposed camera 0's geometry.
+    #[test]
+    fn each_camera_is_detected_on_its_own_grid() {
+        let mut mixed: Calibration<f64> = rig(2);
+        mixed.resolution[1] = [240, 240];
+        let flow: FrameToFrameOpticalFlow<Pattern51> =
+            FrameToFrameOpticalFlow::new(config(), &mixed, FrontendOptions::default()).unwrap();
+
+        assert_eq!(flow.detection_grid(0).x_start, 0);
+        assert_eq!(flow.detection_grid(1).x_start, 20);
+        // The occupancy matrix follows camera 0, which is what `cells` is shaped
+        // from; both grids happen to need the same number of columns here.
+        assert_eq!(flow.occupancy_grid(), flow.detection_grid(0));
+        assert_eq!(flow.detection_grid(1).rows, flow.occupancy_grid().rows);
+
+        assert!(flow.detection_grid(1).contains(210.0, 80.0));
+        assert!(!flow.detection_grid(0).contains(210.0, 80.0));
+    }
+
+    /// A mixed-resolution rig still runs end to end, and camera 1's keypoints
+    /// come from its own image.
+    #[test]
+    fn a_mixed_resolution_rig_runs() {
+        let mut mixed: Calibration<f64> = rig(2);
+        mixed.resolution[1] = [240, 240];
+        let mut flow: FrameToFrameOpticalFlow<Pattern51> =
+            FrameToFrameOpticalFlow::new(config(), &mixed, FrontendOptions::default()).unwrap();
+
+        let wide: ImageU16 = {
+            let mut image: ImageU16 = ImageU16::zeros(240, 240).unwrap();
+            let source: ImageU16 = dotted_image(0);
+            for y in 0..240 {
+                for x in 0..240 {
+                    let value: u16 = source.get(x % WIDTH, y % HEIGHT).unwrap_or(0);
+                    image.set(x, y, value);
+                }
+            }
+            image
+        };
+        let images: [ImageU16; 2] = [dotted_image(0), wide];
+        let frame: &FlowFrame = flow
+            .process_frame(0, &images, &PosePrediction::default(), &[])
+            .unwrap();
+        assert!(!frame.cameras[0].is_empty());
+        for index in 0..frame.cameras[1].len() {
+            let position = frame.cameras[1].transforms.translation(index);
+            assert!(position.x >= 0.0 && position.x < 240.0);
+            assert!(position.y >= 0.0 && position.y < 240.0);
+        }
     }
 }

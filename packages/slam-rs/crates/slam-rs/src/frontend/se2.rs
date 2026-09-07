@@ -73,6 +73,35 @@ impl<S: LieScalar> AffineCompact2<S> {
         }
     }
 
+    /// The six coefficients, `[m00, m01, m10, m11, tx, ty]`.
+    ///
+    /// The order the structure-of-arrays layout stores them in
+    /// ([`crate::frontend::tracker::FlowTransforms`]): row-major linear part,
+    /// then the translation.
+    pub fn coefficients(&self) -> [S; 6] {
+        [
+            self.linear[(0, 0)],
+            self.linear[(0, 1)],
+            self.linear[(1, 0)],
+            self.linear[(1, 1)],
+            self.translation.x,
+            self.translation.y,
+        ]
+    }
+
+    /// The inverse of [`AffineCompact2::coefficients`].
+    pub fn from_coefficients(coefficients: [S; 6]) -> Self {
+        Self {
+            linear: Matrix2::new(
+                coefficients[0],
+                coefficients[1],
+                coefficients[2],
+                coefficients[3],
+            ),
+            translation: Vector2::new(coefficients[4], coefficients[5]),
+        }
+    }
+
     /// The affine image of a pattern tap: `linear * tap + translation`.
     ///
     /// This is one column of the `transformed_pat` the tracker builds at

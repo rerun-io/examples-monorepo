@@ -6,7 +6,7 @@
 //! strongest corners that survive a distance-to-centre gate, the rectangle masks
 //! and an edge margin.
 //!
-//! ## What comes from kornia-rs, and the one thing that cannot
+//! ## What comes from kornia-rs, and what this wrapper adds
 //!
 //! kornia's grid detector was written against this exact function
 //! (`kornia-imgproc/src/features/cells.rs:92-99`), but its grid starts at `(0, 0)`
@@ -20,18 +20,30 @@
 //! at sub-coordinates `[3, PATCH_SIZE - 3)`; a rectangle over the whole cell
 //! would detect in a three-pixel band the C++ never looks at.
 //!
-//! The remaining difference is the detector itself and is accepted, not worked
-//! around (decision D09, trap 2): `cv::FAST`'s response is the largest threshold
-//! at which a pixel is still a corner, kornia's is the sum of absolute ring
-//! differences over 255 (`cells.rs:57-62`). The ordering the two induce is
-//! similar but not equal, so the two implementations select different corners in
-//! a cell that offers more than the budget, and the absolute thresholds do not
-//! transfer either. That is why the C++ parity gate seeds the tracker with the
-//! C++ keypoints instead of comparing detector output. Two smaller deltas ride
-//! along: `std::sort` (`keypoints.cpp:166`) is not stable while the sort here is,
-//! so ties break differently, and kornia's threshold is an `f32` in `[0, 255]`
-//! that it rounds back to a `u8` internally (`fast.rs:485`), which reproduces the
-//! integer ladder 40, 20, 10, 5 exactly.
+//! **The scores are the same quantity.** At `arc_length == 9` kornia returns
+//! `corner_score_9_scalar(...) / 255.0` (`fast.rs:705-711`, `:838-873`), which is
+//! the canonical FAST-9 `cornerScore` OpenCV computes: the max over the sixteen
+//! arc starts of the min saturating difference along the arc. So the ranking is
+//! OpenCV's, and multiplying by 255 recovers OpenCV's own integer response, which
+//! is what [`KeypointsData::responses`] reports.
+//!
+//! **Non-maximum suppression is this wrapper's job.** `cv::FAST`'s third argument
+//! defaults to `nonmaxSuppression = true`, and `fast_detect_rect_u8` performs
+//! none (`cells.rs:138`). Without it the port emits every pixel along a strong
+//! edge where the C++ emits only the local peaks — on a synthetic image of flat
+//! bright squares the port produced sixteen corners where `cv::FAST` produces
+//! **none**, because every candidate there ties with its neighbour.
+//! [`suppress_non_maxima`] reproduces OpenCV's rule exactly: a candidate survives
+//! only when its score is **strictly greater** than all eight neighbours', a
+//! neighbour that is not itself a candidate scoring zero. Strictness on both
+//! sides is why a plateau of equal scores yields nothing, which is OpenCV's
+//! behaviour and the reason for that sixteen-versus-zero.
+//!
+//! What is left is genuinely different and is accepted, not worked around
+//! (decision D09, trap 2): `cv::FAST` walks the whole cell in one pass with its
+//! own three-row score ring, and `std::sort` (`keypoints.cpp:166`) is not stable
+//! while the sort here is, so ties inside a cell break differently. The C++
+//! parity gate seeds the tracker with the C++ keypoints for that reason.
 
 use kornia_image::{Image, ImageSize};
 use kornia_imgproc::features::{FastCorner, Rect as KorniaRect, fast_detect_rect_u8};
@@ -47,6 +59,43 @@ const FAST_BORDER: usize = 3;
 
 /// `cv::FAST`'s default segment length, `FastFeatureDetector::TYPE_9_16`.
 const FAST_ARC_LENGTH: usize = 9;
+
+/// What the detector can refuse.
+///
+/// The occupancy matrix is a caller-supplied buffer, so its size is an input
+/// like any other: the C++ indexes it unchecked (`keypoints.cpp:148`, trap 15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DetectError {
+    /// The occupancy buffer is smaller than the shape it was declared with.
+    #[error("occupancy is {actual} cells, the {rows}x{columns} grid needs {expected}")]
+    OccupancyTooSmall {
+        /// Rows the shape declares.
+        rows: usize,
+        /// Columns the shape declares.
+        columns: usize,
+        /// Cells that shape needs.
+        expected: usize,
+        /// Cells the buffer holds.
+        actual: usize,
+    },
+}
+
+/// The shared feature-count matrix, with the shape the caller allocated it for.
+///
+/// basalt sizes `cells` from **camera 0** (`frame_to_frame_optical_flow.h:119`)
+/// and then lets `detectKeypointsWithCells` index it with the *detected* image's
+/// own grid arithmetic (`keypoints.cpp:148`). For a rig whose cameras differ in
+/// size those two disagree, and the C++ reads out of range; carrying the shape
+/// explicitly is what lets the port skip such a cell instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Occupancy<'a> {
+    /// Feature counts, row-major over `rows` x `columns`.
+    pub counts: &'a [i32],
+    /// Rows the matrix was allocated with.
+    pub rows: usize,
+    /// Columns the matrix was allocated with.
+    pub columns: usize,
+}
 
 /// `basalt::Rect` (`utils/keypoints.h:55-61`): a half-open rectangle in pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -212,38 +261,143 @@ pub struct DetectorConfig {
 pub struct DetectorScratch {
     bytes: Vec<u8>,
     corners: Vec<FastCorner>,
+    /// One cell's FAST scores, local coordinates, zero where there is no
+    /// candidate. Kept zero between calls so only the entries a cell writes are
+    /// touched, rather than the whole grid.
+    scores: Vec<f32>,
+    /// Which of a cell's candidates survived suppression, in candidate order.
+    keep: Vec<bool>,
+    /// Level 0 copied out of the pyramid; the `Pyramid` seam lends nothing
+    /// (deviation X04), so the caller owns the buffer and reuses it.
+    pub(crate) level0: crate::image::ImageU16,
+}
+
+/// OpenCV's `cv::FAST` non-maximum suppression, over one cell's candidates.
+///
+/// `scores` is a `side` x `side` scratch grid in the cell's own coordinates,
+/// zero everywhere there is no candidate — which is exactly what OpenCV's row
+/// ring holds, since it `memset`s each row and only fills the columns it tested.
+/// A candidate survives when its score is **strictly greater** than all eight
+/// neighbours'. Two neighbouring candidates with equal scores therefore both
+/// die; that is OpenCV's rule, not an approximation of it.
+///
+/// `corners` is filtered in place and left in its original scan order. The grid
+/// is left zeroed, so only the entries this cell wrote are ever touched and the
+/// cost is linear in the candidate count rather than in the cell's area.
+fn suppress_non_maxima(
+    corners: &mut Vec<FastCorner>,
+    scores: &mut Vec<f32>,
+    keep: &mut Vec<bool>,
+    origin_x: usize,
+    origin_y: usize,
+    side: usize,
+) {
+    if scores.len() < side * side {
+        scores.resize(side * side, 0.0);
+    }
+    let local = |corner: &FastCorner| -> (usize, usize) {
+        (
+            corner.xy[0] as usize - origin_x,
+            corner.xy[1] as usize - origin_y,
+        )
+    };
+
+    for corner in corners.iter() {
+        let (lx, ly) = local(corner);
+        scores[ly * side + lx] = corner.response;
+    }
+
+    keep.clear();
+    keep.reserve(corners.len());
+    for corner in corners.iter() {
+        let (lx, ly) = local(corner);
+        let score: f32 = corner.response;
+        let mut peak: bool = true;
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                if dx == 0 && dy == 0 {
+                    continue;
+                }
+                let nx: i32 = lx as i32 + dx;
+                let ny: i32 = ly as i32 + dy;
+                let neighbour: f32 = if nx < 0 || ny < 0 || nx >= side as i32 || ny >= side as i32 {
+                    0.0
+                } else {
+                    scores[ny as usize * side + nx as usize]
+                };
+                peak &= score > neighbour;
+            }
+        }
+        keep.push(peak);
+    }
+
+    for corner in corners.iter() {
+        let (lx, ly) = local(corner);
+        scores[ly * side + lx] = 0.0;
+    }
+
+    let mut index: usize = 0;
+    corners.retain(|_| {
+        let survives: bool = keep[index];
+        index += 1;
+        survives
+    });
 }
 
 /// `detectKeypointsWithCells` (`keypoints.cpp:132-205`).
 ///
-/// `cells[row * grid.columns + column]` is basalt's `Eigen::MatrixXi cells`: the
-/// number of features already in that cell. Cells at or over `num_points_cell`
-/// are skipped whole (`:148`).
+/// `grid` is **the detected image's own** geometry, as the C++ derives it from
+/// `img_raw.w`/`.h` (`:140-144`); `occupancy` is the shared feature-count matrix,
+/// which basalt shapes from camera 0. The two agree for a rig whose cameras share
+/// a resolution and differ otherwise, which is why they are separate arguments.
+/// Cells at or over `num_points_cell` are skipped whole (`:148`); a cell whose
+/// index falls outside `occupancy` is skipped too, where the C++ reads out of
+/// range.
 ///
 /// The threshold ladder is `max_threshold`, then repeatedly halved by integer
 /// division until it drops below `min_threshold` — 40, 20, 10, 5 for the shipped
 /// configs (`:160-188`) — and it stops early as soon as the cell's budget is full.
-/// Within one threshold the corners are ordered by descending response (`:166-167`)
-/// and taken until the budget is met, each having to clear the safe radius
-/// (`:178`), the masks (`:179`) and `EDGE_THRESHOLD` (`:180`).
+/// Within one threshold the surviving corners are ordered by descending response
+/// (`:166-167`) and taken until the budget is met, each having to clear the safe
+/// radius (`:178`), the masks (`:179`) and `EDGE_THRESHOLD` (`:180`).
 ///
-/// Returns without detecting anything when the image is smaller than one cell.
+/// `max_corners` caps the whole call. basalt has no such cap; the port needs one
+/// because every downstream buffer is fixed-capacity, and truncating in the
+/// detector's own scan order is what keeps a frame processable without ever
+/// discarding a keypoint that already exists.
+///
+/// # Errors
+///
+/// [`DetectError::OccupancyTooSmall`] when the counts buffer is shorter than the
+/// shape it was declared with.
+#[allow(clippy::too_many_arguments)]
 pub fn detect_keypoints_with_cells(
     image: &ImageU16,
     grid: &CellGrid,
-    cells: &[i32],
+    occupancy: &Occupancy<'_>,
     config: &DetectorConfig,
     masks: &Masks,
+    max_corners: usize,
     scratch: &mut DetectorScratch,
     out: &mut KeypointsData,
-) {
+) -> Result<(), DetectError> {
     out.corners.clear();
     out.responses.clear();
 
+    let needed: usize = occupancy.rows * occupancy.columns;
+    if occupancy.counts.len() < needed {
+        return Err(DetectError::OccupancyTooSmall {
+            rows: occupancy.rows,
+            columns: occupancy.columns,
+            expected: needed,
+            actual: occupancy.counts.len(),
+        });
+    }
+
     let width: usize = image.width();
     let height: usize = image.height();
-    if width < grid.cell || height < grid.cell {
-        return;
+    if width < grid.cell || height < grid.cell || max_corners == 0 {
+        return Ok(());
     }
 
     // `sub_ptr[x] = (sub_img_raw(x, y) >> 8)` (`keypoints.cpp:156`), once.
@@ -256,7 +410,7 @@ pub fn detect_keypoints_with_cells(
     }
     let Ok(gray) = Image::<u8, 1>::from_size_slice(ImageSize { width, height }, &scratch.bytes)
     else {
-        return;
+        return Ok(());
     };
 
     // `float dist_to_center = {full_x - img_raw.w / 2, ...}.norm()` — an integer
@@ -270,9 +424,16 @@ pub fn detect_keypoints_with_cells(
     while x <= grid.x_stop {
         let mut y: usize = grid.y_start;
         while y <= grid.y_stop {
+            if out.corners.len() >= max_corners {
+                return Ok(());
+            }
             let column: usize = (x - grid.x_start) / grid.cell;
             let row: usize = (y - grid.y_start) / grid.cell;
-            if cells[row * grid.columns + column] >= config.num_points_cell as i32 {
+            if row >= occupancy.rows || column >= occupancy.columns {
+                y += grid.cell;
+                continue;
+            }
+            if occupancy.counts[row * occupancy.columns + column] >= config.num_points_cell as i32 {
                 y += grid.cell;
                 continue;
             }
@@ -297,6 +458,14 @@ pub fn detect_keypoints_with_cells(
                         FAST_ARC_LENGTH,
                         FAST_BORDER,
                     ));
+                    suppress_non_maxima(
+                        &mut scratch.corners,
+                        &mut scratch.scores,
+                        &mut scratch.keep,
+                        x,
+                        y,
+                        grid.cell,
+                    );
                 }
                 scratch.corners.sort_by(|a, b| {
                     b.response
@@ -305,7 +474,7 @@ pub fn detect_keypoints_with_cells(
                 });
 
                 for corner in &scratch.corners {
-                    if points_added >= config.num_points_cell {
+                    if points_added >= config.num_points_cell || out.corners.len() >= max_corners {
                         break;
                     }
                     let full_x: f32 = corner.xy[0];
@@ -327,7 +496,9 @@ pub fn detect_keypoints_with_cells(
                     }
 
                     out.corners.push([full_x, full_y]);
-                    out.responses.push(corner.response);
+                    // kornia normalises `cornerScore` by 255 (`fast.rs:710`);
+                    // OpenCV reports the integer, and so does this.
+                    out.responses.push((corner.response * 255.0).round());
                     points_added += 1;
                 }
 
@@ -338,6 +509,7 @@ pub fn detect_keypoints_with_cells(
         }
         x += grid.cell;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -345,6 +517,8 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    const BUDGET: usize = 4096;
 
     fn config() -> DetectorConfig {
         DetectorConfig {
@@ -355,16 +529,28 @@ mod tests {
         }
     }
 
-    /// A field of bright 5x5 squares: four strong FAST corners each.
+    /// Bright 5x5 squares on a **gently varying** background.
+    ///
+    /// The variation matters: with a flat background every candidate along a
+    /// square's edge scores the same 255, and OpenCV's strictly-greater
+    /// suppression then kills the whole plateau — a real image has no such ties,
+    /// and neither does this one.
     fn dotted_image(width: usize, height: usize, spacing: usize) -> ImageU16 {
         let mut image: ImageU16 = ImageU16::zeros(width, height).unwrap();
+        for y in 0..height {
+            for x in 0..width {
+                let background: f64 =
+                    60.0 + 25.0 * (x as f64 * 0.09).sin() * (y as f64 * 0.07).cos();
+                image.set(x, y, (background as u16) << 8);
+            }
+        }
         let mut cy: usize = spacing;
         while cy + 5 < height {
             let mut cx: usize = spacing;
             while cx + 5 < width {
                 for dy in 0..5 {
                     for dx in 0..5 {
-                        image.set(cx + dx, cy + dy, 0xFF00);
+                        image.set(cx + dx, cy + dy, 200u16 << 8);
                     }
                 }
                 cx += spacing;
@@ -372,6 +558,14 @@ mod tests {
             cy += spacing;
         }
         image
+    }
+
+    fn occupancy<'a>(counts: &'a [i32], grid: &CellGrid) -> Occupancy<'a> {
+        Occupancy {
+            counts,
+            rows: grid.rows,
+            columns: grid.columns,
+        }
     }
 
     /// `keypoints.cpp:140-144` on a 960x960 frame with `grid_size = 50`.
@@ -385,6 +579,22 @@ mod tests {
         assert_eq!(grid.x_stop + grid.cell, 955);
         assert_eq!(grid.columns, 960 / 50 + 1);
         assert_eq!(grid.rows, 960 / 50 + 1);
+    }
+
+    /// Two cameras of different sizes get different grid **starts** even when
+    /// their occupancy matrices come out the same shape — the review's case.
+    #[test]
+    fn a_different_image_size_gives_a_different_grid_start() {
+        let small: CellGrid = CellGrid::new(200, 200, 50).unwrap();
+        let large: CellGrid = CellGrid::new(240, 240, 50).unwrap();
+        assert_eq!(small.x_start, 0);
+        assert_eq!(large.x_start, 20);
+        assert_eq!(small.rows, large.rows);
+        assert_eq!(small.columns, large.columns);
+        // A corner near (210, 80) is inside the 240-wide camera's own grid and
+        // outside the one the 200-wide camera would impose.
+        assert!(large.contains(210.0, 80.0));
+        assert!(!small.contains(210.0, 80.0));
     }
 
     /// The C++ `x_start + PATCH_SIZE * (w / PATCH_SIZE - 1)` underflows when the
@@ -419,12 +629,14 @@ mod tests {
         detect_keypoints_with_cells(
             &image,
             &grid,
-            &cells,
+            &occupancy(&cells, &grid),
             &config(),
             &Masks::default(),
+            BUDGET,
             &mut scratch,
             &mut out,
-        );
+        )
+        .unwrap();
 
         assert!(!out.is_empty());
         assert_eq!(out.corners.len(), out.responses.len());
@@ -434,10 +646,13 @@ mod tests {
                 "corner {corner:?} is inside the edge margin"
             );
         }
+        // OpenCV reports the integer `cornerScore`, and so does this.
+        for response in &out.responses {
+            assert!(*response >= 1.0 && *response <= 255.0 && response.fract() == 0.0);
+        }
     }
 
-    /// The per-cell budget (`keypoints.cpp:173`) is `num_points_cell`, and the
-    /// grid holds `(x_stop - x_start) / cell + 1` cells per axis.
+    /// The per-cell budget (`keypoints.cpp:173`) is `num_points_cell`.
     #[test]
     fn no_cell_yields_more_than_its_budget() {
         let image: ImageU16 = dotted_image(200, 200, 16);
@@ -450,12 +665,14 @@ mod tests {
         detect_keypoints_with_cells(
             &image,
             &grid,
-            &cells,
+            &occupancy(&cells, &grid),
             &config,
             &Masks::default(),
+            BUDGET,
             &mut scratch,
             &mut out,
-        );
+        )
+        .unwrap();
 
         let mut per_cell: Vec<usize> = vec![0; grid.rows * grid.columns];
         for corner in &out.corners {
@@ -481,24 +698,28 @@ mod tests {
         detect_keypoints_with_cells(
             &image,
             &grid,
-            &empty,
+            &occupancy(&empty, &grid),
             &config(),
             &Masks::default(),
+            BUDGET,
             &mut scratch,
             &mut out,
-        );
+        )
+        .unwrap();
         let with_empty_cells: usize = out.len();
 
         let full: Vec<i32> = vec![1; grid.rows * grid.columns];
         detect_keypoints_with_cells(
             &image,
             &grid,
-            &full,
+            &occupancy(&full, &grid),
             &config(),
             &Masks::default(),
+            BUDGET,
             &mut scratch,
             &mut out,
-        );
+        )
+        .unwrap();
         assert!(with_empty_cells > 0);
         assert_eq!(out.len(), 0);
     }
@@ -522,12 +743,14 @@ mod tests {
         detect_keypoints_with_cells(
             &image,
             &grid,
-            &cells,
+            &occupancy(&cells, &grid),
             &config(),
             &masks,
+            BUDGET,
             &mut scratch,
             &mut out,
-        );
+        )
+        .unwrap();
         assert!(out.is_empty());
     }
 
@@ -544,12 +767,14 @@ mod tests {
         detect_keypoints_with_cells(
             &image,
             &grid,
-            &cells,
+            &occupancy(&cells, &grid),
             &config,
             &Masks::default(),
+            BUDGET,
             &mut scratch,
             &mut out,
-        );
+        )
+        .unwrap();
         for corner in &out.corners {
             let distance: f32 = (corner[0] - 100.0).hypot(corner[1] - 100.0);
             assert!(
@@ -558,6 +783,119 @@ mod tests {
             );
         }
         assert!(!out.is_empty());
+    }
+
+    /// `max_corners` is the port's own cap and stops the walk mid-grid.
+    #[test]
+    fn the_corner_budget_truncates_in_scan_order() {
+        let image: ImageU16 = dotted_image(200, 200, 16);
+        let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
+        let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
+        let mut scratch: DetectorScratch = DetectorScratch::default();
+        let mut full: KeypointsData = KeypointsData::default();
+        detect_keypoints_with_cells(
+            &image,
+            &grid,
+            &occupancy(&cells, &grid),
+            &config(),
+            &Masks::default(),
+            BUDGET,
+            &mut scratch,
+            &mut full,
+        )
+        .unwrap();
+        assert!(full.len() > 2);
+
+        let mut capped: KeypointsData = KeypointsData::default();
+        detect_keypoints_with_cells(
+            &image,
+            &grid,
+            &occupancy(&cells, &grid),
+            &config(),
+            &Masks::default(),
+            2,
+            &mut scratch,
+            &mut capped,
+        )
+        .unwrap();
+        assert_eq!(capped.len(), 2);
+        assert_eq!(capped.corners, full.corners[..2]);
+
+        let mut none: KeypointsData = KeypointsData::default();
+        detect_keypoints_with_cells(
+            &image,
+            &grid,
+            &occupancy(&cells, &grid),
+            &config(),
+            &Masks::default(),
+            0,
+            &mut scratch,
+            &mut none,
+        )
+        .unwrap();
+        assert!(none.is_empty());
+    }
+
+    /// The occupancy buffer is a caller input, so a short one is a typed error
+    /// rather than a read past the end (decision D32).
+    #[test]
+    fn a_short_occupancy_buffer_is_refused() {
+        let image: ImageU16 = dotted_image(200, 200, 16);
+        let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
+        let cells: Vec<i32> = vec![0; 3];
+        let mut scratch: DetectorScratch = DetectorScratch::default();
+        let mut out: KeypointsData = KeypointsData::default();
+        let error = detect_keypoints_with_cells(
+            &image,
+            &grid,
+            &occupancy(&cells, &grid),
+            &config(),
+            &Masks::default(),
+            BUDGET,
+            &mut scratch,
+            &mut out,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            DetectError::OccupancyTooSmall {
+                rows: grid.rows,
+                columns: grid.columns,
+                expected: grid.rows * grid.columns,
+                actual: 3,
+            }
+        );
+    }
+
+    /// A detection grid wider than the occupancy matrix skips the cells that
+    /// fall outside it, where the C++ indexes out of range (trap 15).
+    #[test]
+    fn a_cell_outside_the_occupancy_matrix_is_skipped() {
+        let image: ImageU16 = dotted_image(300, 200, 16);
+        let grid: CellGrid = CellGrid::new(300, 200, 50).unwrap();
+        // The occupancy matrix of a 200-wide camera 0.
+        let narrow: CellGrid = CellGrid::new(200, 200, 50).unwrap();
+        let cells: Vec<i32> = vec![0; narrow.rows * narrow.columns];
+        let mut scratch: DetectorScratch = DetectorScratch::default();
+        let mut out: KeypointsData = KeypointsData::default();
+        detect_keypoints_with_cells(
+            &image,
+            &grid,
+            &occupancy(&cells, &narrow),
+            &config(),
+            &Masks::default(),
+            BUDGET,
+            &mut scratch,
+            &mut out,
+        )
+        .unwrap();
+        for corner in &out.corners {
+            let (_, column) = grid.cell_of(corner[0], corner[1]);
+            assert!(
+                column < narrow.columns,
+                "corner {corner:?} came from a skipped cell"
+            );
+        }
     }
 
     /// `keypoints.h:66-68`: masked means inside *any* rectangle, half-open.
@@ -585,5 +923,53 @@ mod tests {
         assert!(masks.in_bounds(52.0, 52.0));
         assert!(!masks.in_bounds(20.0, 20.0));
         assert!(!Masks::default().in_bounds(1.0, 1.0));
+    }
+
+    /// OpenCV's rule, spelled out: strictly greater than all eight neighbours,
+    /// a non-candidate scoring zero. A tie kills both sides.
+    #[test]
+    fn suppression_keeps_a_strict_peak_and_kills_a_plateau() {
+        let mut scores: Vec<f32> = Vec::new();
+        let mut keep: Vec<bool> = Vec::new();
+        let corner = |x: usize, y: usize, response: f32| FastCorner {
+            xy: [x as f32, y as f32],
+            response,
+        };
+
+        let mut peak: Vec<FastCorner> = vec![corner(10, 10, 9.0), corner(11, 10, 5.0)];
+        suppress_non_maxima(&mut peak, &mut scores, &mut keep, 8, 8, 16);
+        assert_eq!(peak.len(), 1);
+        assert_eq!(peak[0].xy, [10.0, 10.0]);
+
+        let mut plateau: Vec<FastCorner> = vec![corner(10, 10, 9.0), corner(11, 10, 9.0)];
+        suppress_non_maxima(&mut plateau, &mut scores, &mut keep, 8, 8, 16);
+        assert!(plateau.is_empty(), "OpenCV suppresses both sides of a tie");
+
+        // Two peaks two pixels apart do not see each other.
+        let mut apart: Vec<FastCorner> = vec![corner(10, 10, 9.0), corner(12, 10, 9.0)];
+        suppress_non_maxima(&mut apart, &mut scores, &mut keep, 8, 8, 16);
+        assert_eq!(apart.len(), 2);
+
+        // A lone candidate survives: every neighbour scores zero.
+        let mut lone: Vec<FastCorner> = vec![corner(10, 10, 1.0)];
+        suppress_non_maxima(&mut lone, &mut scores, &mut keep, 8, 8, 16);
+        assert_eq!(lone.len(), 1);
+    }
+
+    /// Without suppression a strong edge emits every pixel along it; with
+    /// OpenCV's rule only the peaks survive, which is what `cv::FAST` returns.
+    #[test]
+    fn suppression_thins_a_run_of_candidates() {
+        let mut scores: Vec<f32> = Vec::new();
+        let mut keep: Vec<bool> = Vec::new();
+        let mut run: Vec<FastCorner> = (0..8)
+            .map(|k| FastCorner {
+                xy: [(10 + k) as f32, 10.0],
+                response: [3.0, 7.0, 4.0, 2.0, 9.0, 1.0, 6.0, 2.0][k as usize],
+            })
+            .collect();
+        suppress_non_maxima(&mut run, &mut scores, &mut keep, 8, 8, 24);
+        let kept: Vec<f32> = run.iter().map(|corner| corner.xy[0]).collect();
+        assert_eq!(kept, vec![11.0, 14.0, 16.0]);
     }
 }
