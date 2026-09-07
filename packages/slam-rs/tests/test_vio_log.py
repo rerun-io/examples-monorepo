@@ -29,9 +29,9 @@ import rerun.experimental as rx
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
-from slam_rs import _core
+from slam_rs import _core, vio_log
 from slam_rs.catalog_feed import TIMELINE, CameraCalib
-from slam_rs.trajectory import Trajectory, empty_trajectory
+from slam_rs.trajectory import AteResult, Trajectory, ate, empty_trajectory
 from slam_rs.vio_log import (
     CPP_ENTITY,
     GT_ENTITY,
@@ -114,16 +114,28 @@ def straight_line(t_ns: Int64[ndarray, " n"]) -> Trajectory:
     )
 
 
-@pytest.fixture
-def logged(pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path) -> Logged:
-    """Drive the whole pipeline over the synthetic rig and read back what was logged."""
-    vio: _core.Vio = pipeline(2)
-    cameras: tuple[CameraCalib, ...] = (camera(0, 0.0), camera(1, 0.1))
-    reference_t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_INTERVAL_NS, FRAME_INTERVAL_NS, dtype=np.int64)
-    output: Path = tmp_path / "vio.rrd"
-    rr.init("slam-rs-vio-log-test", recording_id="vio-log")
+def drive(
+    vio: _core.Vio,
+    cameras: tuple[CameraCalib, ...],
+    references: Trajectory,
+    texture: TextureFactory,
+    output: Path,
+) -> Logged:
+    """Log ``FRAMESETS`` framesets of the synthetic rig and read the recording back.
+
+    Args:
+        vio: The pipeline the framesets go through.
+        cameras: The rig the logger draws.
+        references: Ground truth and C++ trajectory, the same line for both.
+        texture: The scene each frameset is a shifted copy of.
+        output: Where the ``.rrd`` is written.
+
+    Returns:
+        The recording's rows, the framesets that tracked, and the logger.
+    """
+    rr.init("slam-rs-vio-log-test", recording_id=f"vio-log-{output.parent.name}")
     rr.save(output)
-    logger: VioLogger = VioLogger(cameras=cameras, ground_truth=straight_line(reference_t_ns), cpp=straight_line(reference_t_ns))
+    logger: VioLogger = VioLogger(cameras=cameras, ground_truth=references, cpp=references)
     tracked: list[int] = []
     for step in range(FRAMESETS):
         t_ns: int = step * FRAME_INTERVAL_NS
@@ -147,6 +159,13 @@ def logged(pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFac
         tracked.append(t_ns)
     rr.disconnect()
     return Logged(rows=read_rows(output), tracked=tracked, logger=logger)
+
+
+@pytest.fixture
+def logged(pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path) -> Logged:
+    """Drive the whole pipeline over the synthetic rig and read back what was logged."""
+    reference_t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_INTERVAL_NS, FRAME_INTERVAL_NS, dtype=np.int64)
+    return drive(pipeline(2), (camera(0, 0.0), camera(1, 0.1)), straight_line(reference_t_ns), texture, tmp_path / "vio.rrd")
 
 
 def test_the_frustum_wireframe_sits_where_the_camera_does(camera: CameraFactory) -> None:
@@ -178,6 +197,7 @@ def test_every_tracked_frameset_writes_the_rung(logged: Logged) -> None:
         f"{RUN_ENTITY}/rig",
         f"{RUN_ENTITY}/trajectory",
         f"{RUN_ENTITY}/window",
+        f"{RUN_ENTITY}/marginalized",
         f"{RUN_ENTITY}/landmarks",
         f"{GT_ENTITY}/trajectory",
         f"{CPP_ENTITY}/trajectory",
@@ -187,6 +207,12 @@ def test_every_tracked_frameset_writes_the_rung(logged: Logged) -> None:
     ):
         assert entity in logged.rows, f"{entity} never reached the recording"
         assert [t_ns for t_ns, _ in logged.rows[entity]] == logged.tracked, entity
+    # The window this run marginalizes from the fifth frameset on, and a
+    # marginalized frame is drawn from the poses of the window it just left: a
+    # row that is always empty is the layer looking the removed frames up in the
+    # window they are already gone from.
+    faded: list[int] = [len(values["LineStrips3D:strips"]) for _, values in logged.rows[f"{RUN_ENTITY}/marginalized"]]
+    assert max(faded) > 0, "the marginalized layer never drew a frame the last marginalization removed"
 
 
 def test_the_estimated_path_grows_by_one_pose_a_frameset(logged: Logged) -> None:
@@ -203,6 +229,32 @@ def test_a_reference_is_drawn_up_to_the_cursor_and_no_further(logged: Logged) ->
             drawn: list = values["LineStrips3D:strips"][0]
             # One reference pose every frame interval, from zero, inclusive.
             assert len(drawn) == t_ns // FRAME_INTERVAL_NS + 1, entity
+
+
+def test_the_plotted_ate_is_the_estimate_driven_one(
+    pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The plotted ``ate_cm`` is the number the tool prints and the gate asserts.
+
+    A 1 kHz ground truth is what tells the two directions apart: driving the
+    association from the reference pairs about 33 truth poses to every frameset
+    and scores a different metric (5.32 cm against this run's 5.74 cm), which is
+    neither what :func:`slam_rs.apis.replay.main` prints nor what the V2 gate
+    asserts. One ATE a frameset, so a 12-frameset run reaches the association
+    floor and plots.
+    """
+    monkeypatch.setattr(vio_log, "ATE_EVERY", 1)
+    dense_t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_INTERVAL_NS, IMU_PERIOD_NS, dtype=np.int64)
+    truth: Trajectory = straight_line(dense_t_ns)
+    logged: Logged = drive(pipeline(2), (camera(0, 0.0), camera(1, 0.1)), truth, texture, tmp_path / "dense.rrd")
+    estimate: Trajectory = logged.logger.estimated()
+    estimate_driven: AteResult = ate(estimate, truth)
+    reference_driven: AteResult = ate(truth, estimate)
+    assert estimate_driven.n_associated == len(estimate), "every estimate pose takes the nearest truth pose"
+    assert reference_driven.n_associated > len(estimate), "the reference-driven association is the denser one"
+    plotted: float = logged.rows[f"{STATS_ENTITY}/ate_cm/gt"][-1][1]["Scalars:scalars"][0]
+    assert plotted == pytest.approx(100.0 * estimate_driven.rmse_m)
+    assert plotted != pytest.approx(100.0 * reference_driven.rmse_m)
 
 
 def test_an_alignment_recovers_a_known_rigid_offset() -> None:

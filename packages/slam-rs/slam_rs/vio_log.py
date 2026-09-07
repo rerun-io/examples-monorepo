@@ -193,6 +193,8 @@ class VioLogger:
     """Rotations of the poses reported so far, w-first as :mod:`slam_rs.trajectory` stores them."""
     window_strip: Float64[ndarray, "10 3"] = field(init=False)
     """Camera 0's frustum wireframe in rig coordinates, drawn at every window pose."""
+    previous_strips: dict[int, Float64[ndarray, " 10 3"]] = field(default_factory=dict)
+    """The last frameset's window wireframes by timestamp: where a marginalized frame is drawn from."""
     framesets: int = 0
     """Framesets logged, which paces the ATE-so-far."""
 
@@ -291,13 +293,18 @@ class VioLogger:
         rr.log(f"{RUN_ENTITY}/window", rr.LineStrips3D(strips, colors=colors, radii=0.001))
 
         # The frames that left this step are gone from the window above, so they
-        # are drawn from the poses they held when it was taken: the last snapshot
-        # that still had them.
-        leaving: Bool[ndarray, " n_frames"] = np.isin(t_ns, snapshot.marginalized)
+        # are drawn from the poses they held when it was taken: the previous
+        # frameset's window, the last snapshot that still had them.
+        leaving: set[int] = set(snapshot.marginalized.tolist())
         rr.log(
             f"{RUN_ENTITY}/marginalized",
-            rr.LineStrips3D([strip for strip, gone in zip(strips, leaving, strict=True) if gone], colors=MARGINALIZED_COLOR, radii=0.001),
+            rr.LineStrips3D(
+                [strip for held_t_ns, strip in self.previous_strips.items() if held_t_ns in leaving],
+                colors=MARGINALIZED_COLOR,
+                radii=0.001,
+            ),
         )
+        self.previous_strips = dict(zip(t_ns.tolist(), strips, strict=True))
 
     def _log_landmarks(self, snapshot: _core.VioSnapshot) -> None:
         """Draw the window's landmarks, coloured by the keyframe that hosts them."""
@@ -326,7 +333,7 @@ class VioLogger:
         for name, reference in (("gt", self.ground_truth), ("cpp", self.cpp)):
             if len(reference) == 0 or len(estimated) < MIN_ASSOCIATED_POSES:
                 continue
-            result: AteResult = ate(reference, estimated)
+            result: AteResult = ate(estimated, reference)
             if result.n_associated >= MIN_ASSOCIATED_POSES:
                 rr.log(f"{STATS_ENTITY}/ate_cm/{name}", rr.Scalars(100.0 * result.rmse_m))
 
