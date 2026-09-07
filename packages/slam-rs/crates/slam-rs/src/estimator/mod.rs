@@ -1083,14 +1083,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             self.take_kf = true;
         }
 
-        // `:465-472`: move the newest keyframe out of the `max_kfs` budget.
-        if self.take_ltkf {
-            if let Some(last_kf) = self.kf_ids.iter().next_back().copied() {
-                self.ltkfs.insert(last_kf);
-                self.kf_ids.remove(&last_kf);
-            }
-            self.take_ltkf = false;
-        }
+        self.demote_long_term_keyframe();
 
         let took_keyframe: bool = self.take_kf;
         let mut num_points_added: usize = 0;

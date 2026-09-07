@@ -121,6 +121,24 @@ pub(super) struct MarginalizationOutcome {
 }
 
 impl<S: LieScalar> SqrtKeypointVio<S> {
+    /// `:465-472`: move the newest keyframe out of the `max_kfs` budget, if
+    /// [`SqrtKeypointVio::take_long_term_keyframe`] asked for it.
+    ///
+    /// The long-term keyframes are counted on the other side of `:717`'s pose
+    /// budget and are never eviction candidates, so this is the one way a
+    /// keyframe leaves the budget without leaving the window. The request is
+    /// consumed whether or not there was a keyframe to demote, as in C++.
+    pub(super) fn demote_long_term_keyframe(&mut self) {
+        if !self.take_ltkf {
+            return;
+        }
+        if let Some(last_kf) = self.kf_ids.iter().next_back().copied() {
+            self.ltkfs.insert(last_kf);
+            self.kf_ids.remove(&last_kf);
+        }
+        self.take_ltkf = false;
+    }
+
     /// `marginalize(num_points_connected, lost_landmaks)` (`:707-1198`),
     /// returning what it did, the nullspace check when `vio_debug` or
     /// `vio_extended_logging` asked for one, and how long it took. Every
@@ -584,6 +602,43 @@ mod tests {
     /// Every keyframe well tracked, so nothing to marginalize on the ratio.
     fn all_connected(vio: &SqrtKeypointVio<f64>) -> BTreeMap<FrameId, usize> {
         vio.kf_ids.iter().map(|t_ns| (*t_ns, 10)).collect()
+    }
+
+    /// `takeLongTermKeyframe()` (`:124-127`) and the demotion it asks for
+    /// (`:465-472`): the newest keyframe leaves `kf_ids` for `ltkfs`, which
+    /// moves it to the other side of `:717`'s pose budget and out of the
+    /// eviction candidates. Nothing in the VIO path calls it — it is the
+    /// Monado/API hook — so this is its only coverage.
+    #[test]
+    fn a_long_term_keyframe_leaves_the_keyframe_budget() {
+        let mut vio: SqrtKeypointVio<f64> =
+            a_window_of_keyframes(KeyframeMargCriteria::Default, FLAT);
+        let newest: FrameId = 5_000_000;
+        let budget_before: usize = vio.ltkfs.len() + vio.max_kfs;
+        assert!(vio.kf_ids.contains(&newest));
+
+        vio.take_long_term_keyframe();
+        vio.demote_long_term_keyframe();
+
+        assert!(
+            !vio.kf_ids.contains(&newest),
+            "the demoted keyframe is still in the budget"
+        );
+        assert!(vio.ltkfs.contains(&newest), "and not in ltkfs");
+        assert!(!vio.take_ltkf, "the request was not consumed");
+        assert_eq!(
+            vio.ltkfs.len() + vio.max_kfs,
+            budget_before + 1,
+            "`:717`'s pose budget did not grow by the demoted keyframe"
+        );
+        assert!(
+            !vio.eviction_candidates().contains(&newest),
+            "a long-term keyframe cannot be evicted"
+        );
+
+        // A second demotion needs a second request.
+        vio.demote_long_term_keyframe();
+        assert_eq!(vio.ltkfs.len(), 1);
     }
 
     /// `std::prev(kf_ids.end(), 2)` (`:819`, `:840`) and the `kf_ids.size() > 2`
