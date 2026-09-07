@@ -77,8 +77,21 @@ pub use schedule::{EvictionReason, KeyframeEviction, MarginalizationStats};
 ///
 /// basalt's equivalents are `BASALT_ASSERT`s, an `std::out_of_range` from a
 /// `.at()`, or a `return false` that makes `proc_func` reset the whole state.
-/// Under D32 none of them may panic on data, so each becomes a variant here and
-/// the window is left untouched.
+/// Under D32 none of them may panic on data, so each becomes a variant here.
+///
+/// **Where the window is left, per error.** The validation errors — a frameset
+/// of the wrong width, a non-monotonic frameset, an unsupported config — are
+/// raised before anything moves, so the window is untouched and the caller may
+/// retry with a corrected frameset. The errors raised inside
+/// [`SqrtKeypointVio::measure`] — `NumericallyInvalid` from the LM loop, and
+/// anything `Linearize`, `Marginalize` or `BundleAdjustment` refuses — come
+/// **after** the new state, its observations and its preintegration were
+/// inserted, so the window has advanced by one frameset while `prev_frame` has
+/// not: retrying the same frameset would file its observations twice. basalt
+/// resets the whole estimator instead (`proc_func`'s `return false`,
+/// `scheduleResetState` at `:120-195`), which this port does not have; a caller
+/// that sees one of those must rebuild the estimator. Stage S9's Realtime mode
+/// is where the reset belongs (D5 of the S8 simplify list).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EstimatorError {
     /// `vio_linearization_type` is not `ABS_QR`, or `vio_sqrt_marg` is false:

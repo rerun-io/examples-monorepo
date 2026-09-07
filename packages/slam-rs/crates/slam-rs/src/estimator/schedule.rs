@@ -312,28 +312,26 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     ) -> Result<KeyframeEviction, EstimatorError> {
         let candidates: Vec<FrameId> = self.eviction_candidates();
 
-        // `:820-830`.
+        // `:820-830`. The `||` at `:823-824` short-circuits on the missing
+        // connection *before* it reads `num_points_kf.at(*it)`, so a keyframe
+        // absent from both maps is evicted rather than refused.
         for frame_id in &candidates {
-            let hosted: usize = match self.num_points_kf.get(frame_id) {
-                Some(count) => *count,
-                // `:827` reads `num_points_kf.at(*it)`; basalt never erases the
-                // map, so a keyframe always has an entry.
-                None => {
-                    return Err(EstimatorError::KeyframeNotInWindow {
-                        frame_id: *frame_id,
-                        wanted: "hosted-landmark count",
-                    });
-                }
+            let Some(connected) = num_points_connected.get(frame_id).copied() else {
+                return Ok(KeyframeEviction {
+                    frame_id: *frame_id,
+                    reason: EvictionReason::FeatureRatio,
+                });
             };
-            let connected: Option<usize> = num_points_connected.get(frame_id).copied();
-            let below: bool = match connected {
-                None => true,
-                Some(connected) => {
-                    let ratio: f32 = connected as f32 / hosted as f32;
-                    f64::from(ratio) < self.config.vio_kf_marg_feature_ratio
-                }
+            // `:827` reads `num_points_kf.at(*it)`; basalt never erases the
+            // map, so a keyframe the frame does see always has an entry.
+            let Some(hosted) = self.num_points_kf.get(frame_id).copied() else {
+                return Err(EstimatorError::KeyframeNotInWindow {
+                    frame_id: *frame_id,
+                    wanted: "hosted-landmark count",
+                });
             };
-            if below {
+            let ratio: f32 = connected as f32 / hosted as f32;
+            if f64::from(ratio) < self.config.vio_kf_marg_feature_ratio {
                 return Ok(KeyframeEviction {
                     frame_id: *frame_id,
                     reason: EvictionReason::FeatureRatio,
@@ -684,6 +682,21 @@ mod tests {
             Err(EstimatorError::KeyframeNotInWindow {
                 frame_id: 1_000_000,
                 wanted: "hosted-landmark count",
+            })
+        );
+
+        // Missing from **both** maps: `:823` sees `count(*it) == 0` first, so
+        // the keyframe is evicted and the hosted count is never read.
+        let mut unseen: SqrtKeypointVio<f64> =
+            a_window_of_keyframes(KeyframeMargCriteria::Default, FLAT);
+        unseen.num_points_kf.remove(&1_000_000);
+        let mut connected: BTreeMap<FrameId, usize> = all_connected(&unseen);
+        connected.remove(&1_000_000);
+        assert_eq!(
+            unseen.evict_by_default(&connected),
+            Ok(KeyframeEviction {
+                frame_id: 1_000_000,
+                reason: EvictionReason::FeatureRatio,
             })
         );
 

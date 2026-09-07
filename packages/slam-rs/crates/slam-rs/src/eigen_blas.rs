@@ -135,6 +135,10 @@ pub(crate) fn redux_dynamic<S: LieScalar>(terms: &[S]) -> S {
 /// `block_cols` is `cols` whenever `cols < 128` (`:143`), which every caller
 /// here satisfies — the triangular panel is at most eight wide — so there is a
 /// single column block and each output coefficient is one left fold from zero.
+///
+/// **Contract: `rhs.len() == block.cols` and `res.len() == block.rows`**, the
+/// shape the block itself names. Dropping a coefficient of a shorter `res`
+/// would return a partially updated LM increment instead of failing.
 pub(crate) fn gemv_col_major_block<S: LieScalar>(
     lhs: &DMatrix<S>,
     block: Block,
@@ -148,6 +152,8 @@ pub(crate) fn gemv_col_major_block<S: LieScalar>(
         rows,
         cols,
     } = block;
+    debug_assert_eq!(rhs.len(), cols);
+    debug_assert_eq!(res.len(), rows);
     let block_cols: usize = if cols < 128 { cols } else { 4 };
     let mut j2: usize = 0;
     while j2 < cols {
@@ -158,9 +164,7 @@ pub(crate) fn gemv_col_major_block<S: LieScalar>(
                 // `pcj.pmadd(lhs, b0, c)` without FMA: `a * b + c`.
                 acc = lhs[(row0 + i, col0 + j)] * rhs[j] + acc;
             }
-            if let Some(slot) = res.get_mut(i) {
-                *slot += alpha * acc;
-            }
+            res[i] += alpha * acc;
         }
         j2 = jend;
     }
@@ -173,6 +177,9 @@ pub(crate) fn gemv_col_major_block<S: LieScalar>(
 /// shape `matrixL().adjoint()` hands the solver, a triangular view over a
 /// `Transpose` of a column-major matrix, which Eigen therefore dispatches to
 /// the row-major kernel.
+///
+/// **Contract: `rhs.len() == block.cols` and `res.len() == block.rows`**, as in
+/// [`gemv_col_major_block`].
 pub(crate) fn gemv_row_major_of_transpose<S: LieScalar>(
     lhs: &DMatrix<S>,
     block: Block,
@@ -186,6 +193,8 @@ pub(crate) fn gemv_row_major_of_transpose<S: LieScalar>(
         rows,
         cols,
     } = block;
+    debug_assert_eq!(rhs.len(), cols);
+    debug_assert_eq!(res.len(), rows);
     let packet: usize = packet_size::<S>();
     let full_col_block_end: usize = packet * (cols / packet);
     let mut lanes: Vec<S> = vec![S::zero(); packet];
@@ -202,9 +211,7 @@ pub(crate) fn gemv_row_major_of_transpose<S: LieScalar>(
         for j in full_col_block_end..cols {
             acc += lhs[(col0 + j, row0 + i)] * rhs[j];
         }
-        if let Some(slot) = res.get_mut(i) {
-            *slot += alpha * acc;
-        }
+        res[i] += alpha * acc;
     }
 }
 

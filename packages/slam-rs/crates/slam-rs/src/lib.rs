@@ -160,6 +160,9 @@ pub enum VioError {
     /// An image could not be widened into the frontend's `u16` buffer.
     #[error("image: {0}")]
     Image(#[from] image::ImageError),
+    /// The frontend's own preintegration (D24) refused a sample.
+    #[error("imu: {0}")]
+    Imu(#[from] imu::ImuError),
 }
 
 /// The frameset validator the PyO3 class still wraps.
@@ -457,7 +460,8 @@ impl<S: lie::LieScalar> Vio<S> {
         let prediction: frontend::flow::PosePrediction = if self.first_state_arrived {
             let latest: types::PoseVelBiasState<f64> =
                 self.latest_state.unwrap_or(self.predicted_state);
-            let pim: imu::IntegratedImuMeasurement<f64> = self.frontend_preintegrate(t_ns, &latest);
+            let pim: imu::IntegratedImuMeasurement<f64> =
+                self.frontend_preintegrate(t_ns, &latest)?;
             self.predicted_state = types::PoseVelBiasState {
                 t_ns,
                 ..self.predicted_state
@@ -506,6 +510,10 @@ impl<S: lie::LieScalar> Vio<S> {
             .estimator
             .process_frame(std::sync::Arc::clone(&self.observations))?;
 
+        // The estimator initialises inside the same `process_frame` that
+        // measures (`:263-296`), so a `Measured` outcome always has a state and
+        // the outcome alone decides the status: `VioStatus::NotInitialised` is
+        // reachable from [`StubVio`] only.
         let status: VioStatus = match outcome {
             estimator::FrameOutcome::NeedMoreImu => VioStatus::NeedMoreImu,
             estimator::FrameOutcome::Measured(stats) => {
@@ -546,12 +554,6 @@ impl<S: lie::LieScalar> Vio<S> {
                 [0.0; 3],
             ),
         };
-        let status: VioStatus = if self.estimator.is_initialized() {
-            status
-        } else {
-            VioStatus::NotInitialised
-        };
-
         Ok(VioResult {
             status,
             t_ns,
@@ -569,11 +571,16 @@ impl<S: lie::LieScalar> Vio<S> {
     /// one, then close the interval by retiming the next sample. The bias
     /// calibration happens in `f32` and is cast back (`:171-178`), which is what
     /// `Calibration<Scalar>` with `Scalar = float` means here.
+    /// # Errors
+    ///
+    /// [`VioError::Imu`] when a sample does not follow the interval: the KLT is
+    /// seeded from this prediction, so a truncated preintegration would move
+    /// the whole trajectory silently (D32).
     fn frontend_preintegrate(
         &mut self,
         curr_t_ns: i64,
         latest: &types::PoseVelBiasState<f64>,
-    ) -> imu::IntegratedImuMeasurement<f64> {
+    ) -> Result<imu::IntegratedImuMeasurement<f64>, VioError> {
         let prev_t_ns: i64 = self.last_frame_t_ns.unwrap_or(-1);
         let mut pim: imu::IntegratedImuMeasurement<f64> =
             imu::IntegratedImuMeasurement::new(prev_t_ns, &latest.bias_gyro, &latest.bias_accel);
@@ -590,16 +597,11 @@ impl<S: lie::LieScalar> Vio<S> {
             if sample.t_ns > curr_t_ns {
                 break;
             }
-            if pim
-                .integrate(
-                    &sample,
-                    &self.frontend_noise.accel_cov,
-                    &self.frontend_noise.gyro_cov,
-                )
-                .is_err()
-            {
-                return pim;
-            }
+            pim.integrate(
+                &sample,
+                &self.frontend_noise.accel_cov,
+                &self.frontend_noise.gyro_cov,
+            )?;
             self.frontend_pending = self.frontend_pop();
         }
         // `:195-198`: "Pretend last IMU sample before now happened now".
@@ -610,13 +612,13 @@ impl<S: lie::LieScalar> Vio<S> {
                 t_ns: curr_t_ns,
                 ..sample
             };
-            let _ = pim.integrate(
+            pim.integrate(
                 &retimed,
                 &self.frontend_noise.accel_cov,
                 &self.frontend_noise.gyro_cov,
-            );
+            )?;
         }
-        pim
+        Ok(pim)
     }
 
     /// One sample off the frontend's buffer, calibrated in `f32` and cast back
@@ -918,6 +920,22 @@ mod tests {
         );
 
         assert_eq!(drive(&mut pipeline(), &framesets), results);
+    }
+
+    /// A frameset that arrives before the IMU covering it reports
+    /// [`VioStatus::NeedMoreImu`], which is what the variant's doc promises and
+    /// what basalt would block on. The frontend still runs, so this needs a
+    /// frameset of the calibrated resolution; blank images detect no corners,
+    /// which is all this asserts.
+    #[test]
+    fn a_frameset_ahead_of_the_imu_needs_more_imu() {
+        let mut vio: Vio<f32> = pipeline();
+        let blank: Vec<u8> = vec![0; 960 * 960];
+        let views: [ImageView<'_>; 2] = [image(&blank, 960, 960), image(&blank, 960, 960)];
+        let result: VioResult = vio.track(1_000, &views).unwrap();
+        assert_eq!(result.status, VioStatus::NeedMoreImu);
+        assert!(!vio.estimator().is_initialized());
+        assert_abs_diff_eq!(result.world_from_rig[6], 1.0, epsilon = 1e-12);
     }
 
     /// `vio_enforce_realtime` drops framesets, which Offline mode cannot do

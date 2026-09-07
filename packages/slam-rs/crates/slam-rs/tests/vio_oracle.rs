@@ -737,9 +737,17 @@ fn lm_prefix<S: LieScalar>(
         "{where_}: LM trail diverged at step {at} (rust {mine:?} vs c++ {expected:?})"
     );
 
-    // The last step each side actually ran up to and including `at`.
-    let ours: &LmIteration<S> = &got[at.min(got.len() - 1)];
-    let theirs: &OracleLm = &want[at.min(want.len() - 1)];
+    // The last step each side actually ran up to and including `at`. Either
+    // trail can be empty when the other is not — that is itself a divergence —
+    // so this reports it rather than underflowing on `len() - 1`.
+    let ours: &LmIteration<S> = got
+        .get(at)
+        .or_else(|| got.last())
+        .unwrap_or_else(|| panic!("{where_}: no rust LM step at all, c++ ran {}", want.len()));
+    let theirs: &OracleLm = want
+        .get(at)
+        .or_else(|| want.last())
+        .unwrap_or_else(|| panic!("{where_}: no c++ LM step at all, rust ran {}", got.len()));
     let floor: f64 = f64::from(f32::EPSILON) * ours.error_before.to_f64().abs();
     let ulps = |f_diff: f64| -> f64 { f_diff / floor };
     assert!(
