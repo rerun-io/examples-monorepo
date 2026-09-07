@@ -109,7 +109,8 @@ def run_segment(segment: ReferenceSegment, max_framesets: int | None = None) -> 
             if result.status != _core.VioStatus.Tracking:
                 # Before the first measured frameset this is the estimator waiting
                 # for inertial samples that cover it; after it, it is a loss.
-                lost += len(t_ns) > 0
+                if t_ns:
+                    lost += 1
                 continue
             pose: Float64[ndarray, " 7"] = result.world_from_rig
             t_ns.append(result.t_ns)
