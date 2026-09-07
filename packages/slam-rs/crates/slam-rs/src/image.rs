@@ -49,6 +49,18 @@ pub enum ImageError {
         /// Row pitch.
         stride: usize,
     },
+    /// The buffer would be bigger than a single Rust allocation may be.
+    ///
+    /// `Vec` requires the size in *bytes* to be at most `isize::MAX`, so a
+    /// pixel count that fits a `usize` can still abort the allocator. This is
+    /// the typed refusal instead (decision D32).
+    #[error("{len} pixels is more than the {max} a single allocation may hold")]
+    LayoutTooLarge {
+        /// Pixels the geometry asks for.
+        len: usize,
+        /// Most pixels one allocation can hold.
+        max: usize,
+    },
     /// The source buffer does not hold `stride * height` elements.
     #[error("{height} rows of stride {stride} do not fit in {len} elements")]
     ShortBuffer {
@@ -80,7 +92,7 @@ impl ImageU16 {
     ///
     /// # Errors
     ///
-    /// [`ImageError::SizeOverflow`] if `width * height` does not fit in a `usize`.
+    /// As [`ImageU16::zeros_with_stride`], which this is `stride == width` of.
     pub fn zeros(width: usize, height: usize) -> Result<Self, ImageError> {
         Self::zeros_with_stride(width, height, width)
     }
@@ -89,14 +101,16 @@ impl ImageU16 {
     ///
     /// # Errors
     ///
-    /// [`ImageError::StrideTooSmall`] if `stride < width`, [`ImageError::SizeOverflow`]
-    /// if `stride * height` does not fit in a `usize`.
+    /// [`ImageError::StrideTooSmall`] if `stride < width`,
+    /// [`ImageError::SizeOverflow`] if `stride * height` does not fit in a
+    /// `usize`, [`ImageError::LayoutTooLarge`] if the buffer it describes is
+    /// bigger than one allocation may be.
     pub fn zeros_with_stride(
         width: usize,
         height: usize,
         stride: usize,
     ) -> Result<Self, ImageError> {
-        let len: usize = checked_len(width, height, stride)?;
+        let len: usize = checked_pixel_len(width, height, stride)?;
         Ok(Self {
             data: vec![0; len],
             width,
@@ -149,7 +163,7 @@ impl ImageU16 {
                 len: bytes.len(),
             });
         }
-        let len: usize = checked_len(width, height, width)?;
+        let len: usize = checked_pixel_len(width, height, width)?;
         // `resize` only allocates when `len` exceeds the current capacity, so a
         // steady stream of same-sized frames never touches the allocator.
         self.data.resize(len, 0);
@@ -164,6 +178,35 @@ impl ImageU16 {
             for (pixel, byte) in target.iter_mut().zip(source.iter()) {
                 *pixel = u16::from(*byte) << 8;
             }
+        }
+        Ok(())
+    }
+
+    /// Copy `source` into this image, reusing the buffer.
+    ///
+    /// The result is dense (`stride == width`) whatever `source`'s stride is,
+    /// and no allocation happens when the capacity already covers it. This is
+    /// how a caller reads pixels out of a pyramid without borrowing its
+    /// storage — see [`crate::pyramid::Pyramid::copy_level_into`].
+    ///
+    /// # Errors
+    ///
+    /// [`ImageError::LayoutTooLarge`] or [`ImageError::SizeOverflow`] when
+    /// `source`'s geometry cannot be allocated densely. Neither is reachable
+    /// from a `source` that already exists.
+    pub fn copy_from(&mut self, source: &ImageU16) -> Result<(), ImageError> {
+        let width: usize = source.width;
+        let height: usize = source.height;
+        let len: usize = checked_pixel_len(width, height, width)?;
+        self.data.resize(len, 0);
+        self.width = width;
+        self.height = height;
+        self.stride = width;
+        for row in 0..height {
+            // Both slices are in range: `source` upholds `stride * height`, and
+            // `data.len() == width * height`.
+            let from: &[u16] = &source.data[row * source.stride..row * source.stride + width];
+            self.data[row * width..row * width + width].copy_from_slice(from);
         }
         Ok(())
     }
@@ -364,7 +407,20 @@ impl ImageU16 {
     }
 }
 
+/// Most elements of type `T` one Rust allocation may hold.
+///
+/// `Vec` and the global allocator cap an allocation at `isize::MAX` *bytes*
+/// (`std::alloc::Layout::from_size_align`), so a count that fits a `usize` can
+/// still abort the process. Every allocation in this crate is sized through
+/// this bound and refused with a typed error instead (decision D32).
+pub(crate) const fn max_elements<T>() -> usize {
+    (isize::MAX as usize) / size_of::<T>()
+}
+
 /// `stride * height`, refusing a stride shorter than the row or a product that wraps.
+///
+/// This is an element *count*, not a layout: use it for a source buffer that
+/// already exists. Sizing an allocation goes through [`checked_pixel_len`].
 fn checked_len(width: usize, height: usize, stride: usize) -> Result<usize, ImageError> {
     if stride < width {
         return Err(ImageError::StrideTooSmall { width, stride });
@@ -372,6 +428,16 @@ fn checked_len(width: usize, height: usize, stride: usize) -> Result<usize, Imag
     stride
         .checked_mul(height)
         .ok_or(ImageError::SizeOverflow { height, stride })
+}
+
+/// [`checked_len`], and the `u16` buffer it describes must be allocatable.
+fn checked_pixel_len(width: usize, height: usize, stride: usize) -> Result<usize, ImageError> {
+    let len: usize = checked_len(width, height, stride)?;
+    let max: usize = max_elements::<u16>();
+    if len > max {
+        return Err(ImageError::LayoutTooLarge { len, max });
+    }
+    Ok(len)
 }
 
 #[cfg(test)]
@@ -455,6 +521,57 @@ mod tests {
                 stride: 1 << 63
             })
         );
+    }
+
+    /// A geometry whose pixel count fits a `usize` but whose *bytes* exceed
+    /// `isize::MAX` must be refused, not handed to the allocator: `vec![0; n]`
+    /// aborts the process there, and an abort inside the released-GIL region
+    /// takes the whole interpreter with it (decision D32).
+    ///
+    /// Nothing here allocates: every call returns before the `vec!`.
+    #[test]
+    fn an_unallocatable_layout_is_an_error_not_an_abort() {
+        let max: usize = max_elements::<u16>();
+        assert_eq!(max, isize::MAX as usize / 2);
+        assert_eq!(
+            ImageU16::zeros(max + 1, 1),
+            Err(ImageError::LayoutTooLarge { len: max + 1, max })
+        );
+        assert_eq!(
+            ImageU16::zeros_with_stride(1, 2, max),
+            Err(ImageError::LayoutTooLarge { len: 2 * max, max })
+        );
+        // A frame that big cannot be filled either. `max + 1` pixels are more
+        // than any slice can hold, so the source check fires first; either way
+        // it is an error and no allocation is attempted.
+        let mut image: ImageU16 = ImageU16::zeros(2, 2).unwrap();
+        assert_eq!(
+            image.fill_from_u8_strided(&[0; 4], max + 1, 1, max + 1),
+            Err(ImageError::ShortBuffer {
+                height: 1,
+                stride: max + 1,
+                len: 4
+            })
+        );
+    }
+
+    #[test]
+    fn copy_from_densifies_and_reuses_the_buffer() {
+        let source: ImageU16 = {
+            let mut padded: ImageU16 = ImageU16::zeros_with_stride(3, 2, 5).unwrap();
+            for y in 0..2 {
+                for x in 0..3 {
+                    padded.set(x, y, (10 * y + x) as u16);
+                }
+            }
+            padded
+        };
+        let mut target: ImageU16 = ImageU16::zeros(3, 2).unwrap();
+        let pointer: *const u16 = target.data().as_ptr();
+        target.copy_from(&source).unwrap();
+        assert_eq!(target.stride(), 3);
+        assert_eq!(target.data(), &[0, 1, 2, 10, 11, 12]);
+        assert_eq!(target.data().as_ptr(), pointer, "the buffer moved");
     }
 
     #[test]
