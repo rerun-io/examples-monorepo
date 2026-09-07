@@ -39,17 +39,18 @@ from slam_rs.catalog_feed import RIG_ENTITY, CameraCalib, Frameset, LocalSegment
 from slam_rs.frontend_log import FrontendLogger, camera_entity, frontend_blueprint
 from slam_rs.reference import ReferenceManifest, ReferenceSegment, load_manifest
 from slam_rs.reference_bundle import BundleFile
-from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_trajectory, read_trajectory, shift_clock, write_trajectory
+from slam_rs.trajectory import Trajectory, ate, coverage, empty_trajectory, read_trajectory, shift_clock, write_trajectory
 from slam_rs.vio_log import VioLogger, vio_blueprint
 
 SMOKE_SEGMENT: str = "msd-index__MIO_others__MIO10_short_2_panorama"
 """Default segment: the 7.6 s rotation-dominated panorama from the smoke tier."""
-RUN_ENTITY: str = "/world/runs/slam_rs"
-"""Where this run's estimate goes, beside the dataset's own ``/world/runs/gt``."""
 IMAGE_DOWNSCALE: int = 2
 """Images are logged at half resolution: the viewer does not need full-resolution pixels to show what was fed."""
 JPEG_QUALITY: int = 85
 """Quality of the full-resolution frames the frontend stage logs; 960x960 grayscale lands around 38 kB."""
+
+MAX_HELD_FRAMESETS: int = 2
+"""Most framesets the hold may ever carry: one refused, plus the one whose samples unblock it (D17)."""
 
 Stage: TypeAlias = Literal["input", "frontend", "vio"]
 """How far a replay runs: the estimator's inputs, the optical-flow frontend over them, or the whole pipeline."""
@@ -188,6 +189,15 @@ class VioStage:
             )
             self.imu_samples += len(frameset.imu)
         self.pending.append(frameset)
+        if len(self.pending) > MAX_HELD_FRAMESETS:
+            # Every batch runs one sample past its own frame time and therefore
+            # past the previous frameset's, so a second refusal in a row cannot
+            # happen; a deeper hold would silently retain whole decoded framesets
+            # (~1.8 MB each) until the end of the segment.
+            raise ValueError(
+                f"frameset {frameset.t_ns} is the {len(self.pending)}th held at once, past the {MAX_HELD_FRAMESETS} "
+                f"the feed's one-sample lead allows; held so far {[held.t_ns for held in self.pending]}"
+            )
         while self.pending:
             held: Frameset = self.pending[0]
             started: float = time.monotonic()
@@ -205,12 +215,13 @@ class VioStage:
             # cursor for all but a retried one.
             rr.set_time("video_time", duration=np.timedelta64(held.t_ns, "ns"))
             # Both are present on a frameset that tracked — the snapshot because it
-            # measured, the keypoints because the frontend accepted it — and the
-            # checks are what say so to the typechecker.
+            # measured, the keypoints because the frontend accepted it — so a
+            # missing one is a broken invariant, not a rung to skip (D32).
             snapshot: _core.VioSnapshot | None = self.vio.snapshot()
             frame: _core.FlowFrame | None = self.vio.flow_frame()
-            if snapshot is not None and frame is not None:
-                self.logger.log(result, snapshot, frame, elapsed_ms)
+            assert snapshot is not None, f"frameset {held.t_ns} tracked without a window snapshot"
+            assert frame is not None, f"frameset {held.t_ns} tracked without the keypoints it tracked on"
+            self.logger.log(result, snapshot, frame, elapsed_ms)
 
     def summary(self) -> str:
         """One line on what the stage did, for the end of a replay."""
@@ -223,22 +234,6 @@ class VioStage:
             f"(median {np.median(self.elapsed_ms):.1f}, max {np.max(self.elapsed_ms):.1f})"
             f"{unresolved}"
         )
-
-
-def _frontend_stage(feed: SegmentFeed, segment: ReferenceSegment) -> FrontendStage:
-    """Build the optical-flow stage for one segment."""
-    return FrontendStage(
-        flow=_core.OpticalFlow(_core.Calibration.from_catalog(feed.cameras, feed.imu), _flow_config(segment)),
-        logger=FrontendLogger(len(feed.cameras), feed.segment_id),
-    )
-
-
-def _vio_stage(feed: SegmentFeed, segment: ReferenceSegment, ground_truth: Trajectory, cpp: Trajectory) -> VioStage:
-    """Build the whole pipeline for one segment, with both reference trajectories to draw against."""
-    return VioStage(
-        vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), _flow_config(segment)),
-        logger=VioLogger(cameras=feed.cameras, ground_truth=ground_truth, cpp=cpp),
-    )
 
 
 def _flow_config(segment: ReferenceSegment) -> _core.VioConfig:
@@ -343,15 +338,21 @@ def main(config: Config) -> None:
         _log_calibration(feed.cameras)
         stage: FrontendStage | VioStage | None = None
         if config.stage == "frontend":
-            stage = _frontend_stage(feed, segment)
+            stage = FrontendStage(
+                flow=_core.OpticalFlow(_core.Calibration.from_catalog(feed.cameras, feed.imu), _flow_config(segment)),
+                logger=FrontendLogger(len(feed.cameras), feed.segment_id),
+            )
             rr.send_blueprint(frontend_blueprint(feed.cameras))
         elif config.stage == "vio":
             truth: Trajectory | None = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
-            stage = _vio_stage(
-                feed,
-                segment,
-                ground_truth=truth if truth is not None else empty_trajectory(),
-                cpp=_cpp_trajectory(manifest, segment, feed.capture_start_time_ns),
+            stage = VioStage(
+                vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), _flow_config(segment)),
+                logger=VioLogger(
+                    cameras=feed.cameras,
+                    ground_truth=truth if truth is not None else empty_trajectory(),
+                    cpp=_cpp_trajectory(manifest, segment, feed.capture_start_time_ns),
+                    frame_t_ns=feed.frame_t_ns,
+                ),
             )
             rr.send_blueprint(vio_blueprint(feed.cameras))
         _replay(feed, config, stage)
@@ -378,9 +379,5 @@ def main(config: Config) -> None:
         for name, reference in (("ground truth", stage.logger.ground_truth), ("basalt C++", stage.logger.cpp)):
             if len(reference) == 0:
                 continue
-            result: AteResult = ate(estimate, reference)
-            print(
-                f"vs {name}: ATE rmse {result.rmse_m * 100:.2f} cm, max {result.max_m * 100:.2f} cm, "
-                f"median {result.median_m * 100:.2f} cm over {result.n_associated} of {len(estimate)} poses; "
-                f"{coverage(reference, estimate):.1%} of its span covered"
-            )
+            print(f"vs {name}, {coverage(reference, estimate):.1%} of its span covered")
+            print(ate(estimate, reference).summary())

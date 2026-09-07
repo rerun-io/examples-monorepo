@@ -135,7 +135,8 @@ def drive(
     """
     rr.init("slam-rs-vio-log-test", recording_id=f"vio-log-{output.parent.name}")
     rr.save(output)
-    logger: VioLogger = VioLogger(cameras=cameras, ground_truth=references, cpp=references)
+    frame_t_ns: Int64[ndarray, " n_frames"] = np.arange(0, FRAMESETS * FRAME_INTERVAL_NS, FRAME_INTERVAL_NS, dtype=np.int64)
+    logger: VioLogger = VioLogger(cameras=cameras, ground_truth=references, cpp=references, frame_t_ns=frame_t_ns)
     tracked: list[int] = []
     for step in range(FRAMESETS):
         t_ns: int = step * FRAME_INTERVAL_NS
@@ -299,7 +300,12 @@ def test_the_keypoints_land_on_the_camera_images(logged: Logged) -> None:
 
 def test_a_run_without_references_still_logs_everything_else(pipeline: PipelineFactory, camera: CameraFactory) -> None:
     """A segment with no ground truth and no C++ trajectory draws neither line, and no ATE."""
-    logger: VioLogger = VioLogger(cameras=(camera(0, 0.0), camera(1, 0.1)), ground_truth=empty_trajectory(), cpp=empty_trajectory())
+    logger: VioLogger = VioLogger(
+        cameras=(camera(0, 0.0), camera(1, 0.1)),
+        ground_truth=empty_trajectory(),
+        cpp=empty_trajectory(),
+        frame_t_ns=np.arange(0, FRAMESETS * FRAME_INTERVAL_NS, FRAME_INTERVAL_NS, dtype=np.int64),
+    )
     assert len(logger.estimated()) == 0
     assert logger.window_strip.shape == (10, 3)
 

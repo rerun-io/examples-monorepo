@@ -309,19 +309,57 @@ impl VioSnapshot {
         stats: &slam_rs::estimator::FrameStats<f32>,
     ) -> PyResult<Self> {
         let frames: usize = window.states.len() + window.poses.len();
-        let mut snapshot: Self = Self {
+        let mut window_t_ns: Vec<i64> = Vec::with_capacity(frames);
+        let mut window_poses: Vec<f64> = Vec::with_capacity(7 * frames);
+        let mut window_linearized: Vec<bool> = Vec::with_capacity(frames);
+        let mut window_is_state: Vec<bool> = Vec::with_capacity(frames);
+        for state in window.states.iter().chain(window.poses.iter()) {
+            let quaternion: [f32; 4] = state.t_w_i.rotation.quaternion_xyzw();
+            window_t_ns.push(state.t_ns);
+            window_poses.extend_from_slice(&[
+                f64::from(state.t_w_i.translation.x),
+                f64::from(state.t_w_i.translation.y),
+                f64::from(state.t_w_i.translation.z),
+                f64::from(quaternion[0]),
+                f64::from(quaternion[1]),
+                f64::from(quaternion[2]),
+                f64::from(quaternion[3]),
+            ]);
+            window_linearized.push(state.linearized);
+            window_is_state.push(state.vel_bias.is_some());
+        }
+        let mut landmark_ids: Vec<i64> = Vec::with_capacity(window.landmarks.len());
+        let mut landmark_hosts: Vec<i64> = Vec::with_capacity(window.landmarks.len());
+        let mut landmark_host_cameras: Vec<i64> = Vec::with_capacity(window.landmarks.len());
+        let mut landmark_positions: Vec<f64> = Vec::with_capacity(3 * window.landmarks.len());
+        for landmark in &window.landmarks {
+            landmark_ids.push(i64::try_from(landmark.id.0).map_err(|_| {
+                PyValueError::new_err(format!(
+                    "landmark id {} does not fit in an int64",
+                    landmark.id.0
+                ))
+            })?);
+            landmark_hosts.push(landmark.host.frame_id);
+            landmark_host_cameras.push(landmark.host.cam_id as i64);
+            landmark_positions.extend_from_slice(&[
+                f64::from(landmark.position_w.x),
+                f64::from(landmark.position_w.y),
+                f64::from(landmark.position_w.z),
+            ]);
+        }
+        Ok(Self {
             t_ns: window.t_ns,
-            window_t_ns: Vec::with_capacity(frames),
-            window_poses: Vec::with_capacity(7 * frames),
-            window_linearized: Vec::with_capacity(frames),
-            window_is_state: Vec::with_capacity(frames),
+            window_t_ns,
+            window_poses,
+            window_linearized,
+            window_is_state,
             kf_ids: stats.kf_ids.clone(),
             ltkfs: stats.ltkfs.clone(),
             marginalized: window.marginalized.clone(),
-            landmark_ids: Vec::with_capacity(window.landmarks.len()),
-            landmark_hosts: Vec::with_capacity(window.landmarks.len()),
-            landmark_host_cameras: Vec::with_capacity(window.landmarks.len()),
-            landmark_positions: Vec::with_capacity(3 * window.landmarks.len()),
+            landmark_ids,
+            landmark_hosts,
+            landmark_host_cameras,
+            landmark_positions,
             lm_iterations: stats.lm.len(),
             lm_accepted: stats.lm.iter().filter(|step| step.accepted).count(),
             // The trail is empty for the first four framesets, where `opt_started`
@@ -343,42 +381,7 @@ impl VioSnapshot {
             },
             num_observations: stats.num_observations,
             timings: stats.timings,
-        };
-        for state in window.states.iter().chain(window.poses.iter()) {
-            let quaternion: [f32; 4] = state.t_w_i.rotation.quaternion_xyzw();
-            snapshot.window_t_ns.push(state.t_ns);
-            snapshot.window_poses.extend_from_slice(&[
-                f64::from(state.t_w_i.translation.x),
-                f64::from(state.t_w_i.translation.y),
-                f64::from(state.t_w_i.translation.z),
-                f64::from(quaternion[0]),
-                f64::from(quaternion[1]),
-                f64::from(quaternion[2]),
-                f64::from(quaternion[3]),
-            ]);
-            snapshot.window_linearized.push(state.linearized);
-            snapshot.window_is_state.push(state.vel_bias.is_some());
-        }
-        for landmark in &window.landmarks {
-            snapshot
-                .landmark_ids
-                .push(i64::try_from(landmark.id.0).map_err(|_| {
-                    PyValueError::new_err(format!(
-                        "landmark id {} does not fit in an int64",
-                        landmark.id.0
-                    ))
-                })?);
-            snapshot.landmark_hosts.push(landmark.host.frame_id);
-            snapshot
-                .landmark_host_cameras
-                .push(landmark.host.cam_id as i64);
-            snapshot.landmark_positions.extend_from_slice(&[
-                f64::from(landmark.position_w.x),
-                f64::from(landmark.position_w.y),
-                f64::from(landmark.position_w.z),
-            ]);
-        }
-        Ok(snapshot)
+        })
     }
 }
 

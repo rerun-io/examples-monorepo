@@ -8,7 +8,8 @@ from jaxtyping import Float64, Int64
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
-from slam_rs.apis.replay import Config, VioStage, _cpp_trajectory, _replay, _vio_stage
+from slam_rs import _core
+from slam_rs.apis.replay import Config, VioStage, _cpp_trajectory, _flow_config, _replay
 from slam_rs.catalog_feed import (
     CameraCalib,
     CameraStatics,
@@ -23,6 +24,7 @@ from slam_rs.catalog_feed import (
 )
 from slam_rs.reference import ReferenceManifest, ReferenceSegment, load_manifest
 from slam_rs.trajectory import AteResult, Trajectory, associate, ate, read_trajectory, shift_clock, write_trajectory
+from slam_rs.vio_log import VioLogger
 
 SMOKE_SEGMENT: str = "msd-index__MIO_others__MIO10_short_2_panorama"
 """The 7.6 s two-camera segment the smoke tier runs on."""
@@ -269,7 +271,15 @@ def test_a_replay_export_associates_with_the_ground_truth_sidecar(tmp_path: Path
     with open_segment(LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path), segment.imu) as feed:
         truth: Trajectory | None = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
         assert truth is not None
-        stage: VioStage = _vio_stage(feed, segment, ground_truth=truth, cpp=_cpp_trajectory(manifest, segment, feed.capture_start_time_ns))
+        stage: VioStage = VioStage(
+            vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), _flow_config(segment)),
+            logger=VioLogger(
+                cameras=feed.cameras,
+                ground_truth=truth,
+                cpp=_cpp_trajectory(manifest, segment, feed.capture_start_time_ns),
+                frame_t_ns=feed.frame_t_ns,
+            ),
+        )
         replayed: int = _replay(feed, config, stage)
         estimate: Trajectory = stage.logger.estimated()
         exported: Path = tmp_path / "slam_rs.csv"

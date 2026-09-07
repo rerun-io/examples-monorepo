@@ -10,9 +10,14 @@ The comparison is the point of the rung. Ground truth and the C++ trajectory are
 both known before the replay starts, so they are drawn **up to the cursor** just
 as the estimate is: at any time in the timeline the three lines have seen exactly
 the same interval, which is what makes a divergence readable rather than a matter
-of where the eye starts. That costs one re-logged strip per frameset — quadratic
-in the segment length, about 2 MB over the 412-frameset smoke segment and 200 MB
-over a 4,000-frameset one, so a long segment wants ``--max-framesets``.
+of where the eye starts. That costs one re-logged strip per frameset, quadratic
+in the frameset count, so each of the three is drawn at the frameset cadence
+(:func:`at_frameset_cadence`): the ground truth runs at 917 Hz against 54 Hz of
+framesets, and re-logging it whole cost 17.20 MB of the smoke recording's 54.13
+MB of rows — 17x the estimate's own strip — to draw a line no viewer can
+resolve. Thinned, the three strips are 1.04 MB each over the 412-frameset smoke
+segment and about 100 MB each over a 4,000-frameset one, so a long segment still
+wants ``--max-framesets``.
 
 The three do not start in one frame. basalt initialises its world at the identity
 with gravity along z, while the ground truth is in the capture rig's own frame,
@@ -106,6 +111,32 @@ def alignment_onto(source: Trajectory, target: Trajectory) -> SimilarityTransfor
     )
 
 
+def at_frameset_cadence(trajectory: Trajectory, frame_t_ns: Int64[ndarray, " n_frames"]) -> Trajectory:
+    """Thin a reference to one pose per frameset: the last one at or before each frame time.
+
+    Only what is **drawn** is thinned. The ATE and the alignment are computed
+    against the whole reference, because there the truth's own density is the
+    thing being measured against; the strip is re-logged once per frameset, so
+    every pose in it is paid for a second time on every later frameset.
+
+    Args:
+        trajectory: The reference to thin; an empty one comes back unchanged.
+        frame_t_ns: The segment's frameset times, ascending.
+
+    Returns:
+        The reference's poses at the frameset cadence, in time order.
+    """
+    if len(trajectory) == 0:
+        return trajectory
+    latest: Int64[ndarray, " n_frames"] = np.searchsorted(trajectory.t_ns, frame_t_ns, side="right") - 1
+    keep: Int64[ndarray, " n_kept"] = np.unique(latest[latest >= 0])
+    return Trajectory(
+        t_ns=trajectory.t_ns[keep],
+        position_m=trajectory.position_m[keep],
+        quaternion_wxyz=trajectory.quaternion_wxyz[keep],
+    )
+
+
 def log_alignment(entity: str, alignment: SimilarityTransform) -> None:
     """Place one run's whole subtree in the frame its alignment maps into."""
     rr.log(entity, rr.Transform3D(translation=alignment.dst_t_src, mat3x3=alignment.dst_R_src))
@@ -185,6 +216,8 @@ class VioLogger:
     """Ground truth for the whole segment, on ``video_time``; may be empty."""
     cpp: Trajectory
     """The basalt C++ trajectory for the whole segment, on ``video_time``; may be empty."""
+    frame_t_ns: Int64[ndarray, " n_frames"]
+    """The segment's frameset times: the cadence the two references are drawn at."""
     estimate_t_ns: list[int] = field(default_factory=list)
     """Timestamps of the poses reported so far, in replay order."""
     estimate_position_m: list[Float64[ndarray, " 3"]] = field(default_factory=list)
@@ -193,15 +226,21 @@ class VioLogger:
     """Rotations of the poses reported so far, w-first as :mod:`slam_rs.trajectory` stores them."""
     window_strip: Float64[ndarray, "10 3"] = field(init=False)
     """Camera 0's frustum wireframe in rig coordinates, drawn at every window pose."""
+    ground_truth_strip: Trajectory = field(init=False)
+    """The ground truth thinned to the frameset cadence: what the drawn strip is taken from."""
+    cpp_strip: Trajectory = field(init=False)
+    """The C++ trajectory thinned the same way."""
     previous_strips: dict[int, Float64[ndarray, " 10 3"]] = field(default_factory=dict)
     """The last frameset's window wireframes by timestamp: where a marginalized frame is drawn from."""
     framesets: int = 0
     """Framesets logged, which paces the ATE-so-far."""
 
     def __post_init__(self) -> None:
-        """Log the estimated rig's static geometry and precompute the window wireframe."""
+        """Log the estimated rig's static geometry, precompute the window wireframe and thin the references."""
         log_run_rig(self.cameras)
         self.window_strip = frustum_strip(self.cameras[0])
+        self.ground_truth_strip = at_frameset_cadence(self.ground_truth, self.frame_t_ns)
+        self.cpp_strip = at_frameset_cadence(self.cpp, self.frame_t_ns)
 
     def log(self, result: _core.VioResult, snapshot: _core.VioSnapshot, frame: _core.FlowFrame, elapsed_ms: float) -> None:
         """Log one tracked frameset: the keypoints, the three paths, the rig, the window, the landmarks and the counters.
@@ -225,15 +264,16 @@ class VioLogger:
         self.estimate_position_m.append(pose[0:3].copy())
         self.estimate_quaternion_wxyz.append(np.roll(pose[3:7], 1).copy())
 
+        estimated: Trajectory = self.estimated()
         rr.log(f"{RUN_ENTITY}/rig", rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7])))
         self._log_keypoints(frame)
-        self._log_paths(result.t_ns)
+        self._log_paths(estimated)
         self._log_window(snapshot)
         self._log_landmarks(snapshot)
         self._log_scalars(result, snapshot, elapsed_ms)
         if self.framesets % ATE_EVERY == 0:
-            self._log_ate()
-            log_alignment(RUN_ENTITY, alignment_onto(self.estimated(), self.ground_truth))
+            self._log_ate(estimated)
+            log_alignment(RUN_ENTITY, alignment_onto(estimated, self.ground_truth))
 
     def estimated(self) -> Trajectory:
         """Everything reported so far, on the replay's ``video_time`` clock."""
@@ -259,17 +299,18 @@ class VioLogger:
                 rr.Points2D(frame.positions(index), colors=track_colors(ids), radii=KEYPOINT_RADIUS_PX),
             )
 
-    def _log_paths(self, t_ns: int) -> None:
+    def _log_paths(self, estimated: Trajectory) -> None:
         """Draw the three trajectories, each up to the current cursor.
 
         Each is logged in its own frame; the run entities' alignment transforms
         are what bring the three together in the dataset's world.
+
+        Args:
+            estimated: Everything reported so far, the newest pose last.
         """
-        rr.log(
-            f"{RUN_ENTITY}/trajectory",
-            rr.LineStrips3D([np.array(self.estimate_position_m, dtype=np.float64).reshape(-1, 3)], colors=ESTIMATE_COLOR, radii=0.004),
-        )
-        for entity, trajectory, color in ((GT_ENTITY, self.ground_truth, GT_COLOR), (CPP_ENTITY, self.cpp, CPP_COLOR)):
+        rr.log(f"{RUN_ENTITY}/trajectory", rr.LineStrips3D([estimated.position_m], colors=ESTIMATE_COLOR, radii=0.004))
+        t_ns: int = int(estimated.t_ns[-1])
+        for entity, trajectory, color in ((GT_ENTITY, self.ground_truth_strip, GT_COLOR), (CPP_ENTITY, self.cpp_strip, CPP_COLOR)):
             if len(trajectory) == 0:
                 continue
             drawn: int = int(np.searchsorted(trajectory.t_ns, t_ns, side="right"))
@@ -327,9 +368,12 @@ class VioLogger:
         for stage, milliseconds in snapshot.timings_ms.items():
             rr.log(f"{STATS_ENTITY}/stage_ms/{stage}", rr.Scalars(milliseconds))
 
-    def _log_ate(self) -> None:
-        """Log the rigid-aligned error of everything reported so far, against both references."""
-        estimated: Trajectory = self.estimated()
+    def _log_ate(self, estimated: Trajectory) -> None:
+        """Log the rigid-aligned error of everything reported so far, against both references.
+
+        Args:
+            estimated: Everything reported so far.
+        """
         for name, reference in (("gt", self.ground_truth), ("cpp", self.cpp)):
             if len(reference) == 0 or len(estimated) < MIN_ASSOCIATED_POSES:
                 continue

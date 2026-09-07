@@ -168,7 +168,8 @@ def test_the_pipeline_tracks_a_shifted_scene_and_reports_its_window(pipeline: Pi
         gyro, accel = gravity_batch(samples)
         vio.push_imu_batch(samples, gyro, accel)
         result: _core.VioResult = vio.track(t_ns, [texture(index, 0), texture(index + 1, 0)])
-        tracked += result.status == _core.VioStatus.Tracking
+        if result.status == _core.VioStatus.Tracking:
+            tracked += 1
     assert tracked >= frames - 2, "only the framesets before the first covered one may fail to track"
 
     snapshot: _core.VioSnapshot | None = vio.snapshot()

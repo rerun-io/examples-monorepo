@@ -624,8 +624,13 @@ and drawn in the dataset's. The alignment is the identity until enough poses hav
 been associated, so a run visibly settles into place over its first second.
 
 Both references are drawn only up to the cursor, as the estimate is, which costs
-one re-logged strip per frameset: about 2 MB over the 412-frameset smoke segment
-and 200 MB over a 4,000-frameset one, so a long segment wants `--max-framesets`.
+one re-logged strip per frameset, quadratic in the frameset count. Each of the
+three is therefore drawn at the frameset cadence: the ground truth runs at 917 Hz
+against 54 Hz of framesets, and re-logging it whole cost 17.20 MB of the smoke
+recording's 54.13 MB of rows to draw a line no viewer can resolve. Thinned, the
+three strips are 1.04 MB each over the 412-frameset smoke segment and about
+100 MB each over a 4,000-frameset one, so a long segment still wants
+`--max-framesets`.
 
 ```bash
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py \
@@ -641,7 +646,9 @@ segment, driving `_core.Vio` and the feed directly with nothing logged:
   2 cm — D14's first rung, which tightens toward 1 cm as parity improves;
 * ATE RMSE against the `gt.csv` sidecar, at most 1.2x what the C++ itself scored
   on that segment, which the manifest carries;
-* tracking never lost: once a frameset has measured, every later one does.
+* every frameset resolved: one refused for want of IMU is held and tracked again
+  once the samples arrive, and anything still held when the segment ends is a
+  lost frameset (D17).
 
 The association is driven by the estimate — each of its poses takes the nearest
 reference pose within 5 ms — because that is how the manifest's own C++ numbers
