@@ -197,7 +197,7 @@ class VioLogger:
     """Framesets logged, which paces the ATE-so-far."""
 
     def __post_init__(self) -> None:
-        """Log the static geometry, place the C++ reference, and precompute the window wireframe."""
+        """Log the estimated rig's static geometry and precompute the window wireframe."""
         log_run_rig(self.cameras)
         self.window_strip = frustum_strip(self.cameras[0])
 
@@ -276,6 +276,9 @@ class VioLogger:
     def _log_window(self, snapshot: _core.VioSnapshot) -> None:
         """Draw a frustum wireframe at every window pose, coloured by what the frame is."""
         poses: Float64[ndarray, "n_frames 7"] = snapshot.window_poses
+        # A measured frameset always leaves at least its own state in the window,
+        # so this is never empty; the reshape is for the one-frame case, where
+        # scipy drops the batch axis.
         rotations: Float64[ndarray, "n_frames 3 3"] = Rotation.from_quat(poses[:, 3:7]).as_matrix().reshape(-1, 3, 3)
         strips: list[Float64[ndarray, "10 3"]] = [
             self.window_strip @ rotation.T + translation for rotation, translation in zip(rotations, poses[:, 0:3], strict=True)
