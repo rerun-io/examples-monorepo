@@ -112,6 +112,11 @@ pub struct Vio {
     inner: slam_rs::Vio<f32>,
     /// `last_keypoint_id` before the last accepted frameset, which is what makes
     /// [`FlowFrame::num_new`] answerable after the fact.
+    ///
+    /// Written only where `track` succeeded whole. A `track` the *estimator*
+    /// refuses has already run the frontend, so this goes stale — but that error
+    /// leaves the window advanced past `prev_frame` and the estimator has to be
+    /// rebuilt anyway (`estimator::EstimatorError`).
     keypoint_id_before_track: u64,
 }
 
