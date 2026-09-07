@@ -386,9 +386,10 @@ and a repeat run over the same input is bit-identical.
 `VioStatus` has two states. basalt's estimator initialises inside the same
 `process_frame` that measures, so a measured frameset always has a state and an
 uncovered one never does: `NeedMoreImu` where basalt would block on its IMU
-queue, `Tracking` otherwise. The frontend runs either way, as basalt's own does
-on its thread, so a `NeedMoreImu` frameset is still consumed and its keypoints
-are readable.
+queue, `Tracking` otherwise. `NeedMoreImu` moves nothing — not the frontend,
+neither IMU buffer, not the estimator — so the frameset is pushed again once its
+samples arrive and tracks as it would have with them all along (D17). A caller
+that drops it instead loses the frame; `replay.py` holds it and retries.
 
 Two accessors carry what a Rerun rung draws, both copies rather than views:
 

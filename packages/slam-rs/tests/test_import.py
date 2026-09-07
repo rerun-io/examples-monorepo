@@ -54,7 +54,12 @@ def test_core_reports_a_version() -> None:
 
 
 def test_a_frame_without_imu_needs_more_imu(pipeline: PipelineFactory, texture: TextureFactory) -> None:
-    """basalt blocks on its IMU queue here; Offline mode says so and returns (D17)."""
+    """basalt blocks on its IMU queue here; Offline mode says so and returns (D17).
+
+    Nothing moves: the coverage test comes before the frontend, so the refused
+    frameset may be pushed again once its samples arrive and the result is the
+    one a run that had them all along would have produced.
+    """
     vio: _core.Vio = pipeline(2)
     assert vio.camera_count == 2
     result: _core.VioResult = vio.track(1_000, [texture(0, 0), texture(1, 0)])
@@ -63,14 +68,10 @@ def test_a_frame_without_imu_needs_more_imu(pipeline: PipelineFactory, texture: 
     assert result.world_from_rig.shape == (7,)
     assert result.velocity.shape == (3,)
     np.testing.assert_allclose(result.world_from_rig, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
-    # Nothing measured, so there is no window and no statistics to snapshot.
+    # Nothing measured, so there is no window and no statistics to snapshot; and
+    # the frontend never ran, so there are no keypoints either.
     assert vio.snapshot() is None
-    # The frontend did run: basalt's own runs on its thread whatever the backend
-    # is waiting for, so the frameset is consumed and its keypoints are readable.
-    frame: _core.FlowFrame | None = vio.flow_frame()
-    assert frame is not None
-    assert frame.t_ns == 1_000
-    assert frame.num_tracks(0) > 0
+    assert vio.flow_frame() is None
 
 
 def test_a_rig_of_one_camera_is_refused(rig: RigFactory) -> None:
@@ -91,6 +92,28 @@ def test_push_imu_rejects_a_non_monotonic_timestamp(pipeline: PipelineFactory) -
     vio.push_imu(1_000, [0.0, 0.0, 0.0], [0.0, 0.0, 9.81])
     with pytest.raises(ValueError, match="does not follow"):
         vio.push_imu(1_000, [0.0, 0.0, 0.0], [0.0, 0.0, 9.81])
+
+
+def test_a_refused_frameset_leaves_the_last_accepted_keypoints_alone(pipeline: PipelineFactory, texture: TextureFactory) -> None:
+    """``flow_frame`` still describes the last frameset the frontend actually ran on.
+
+    ``num_new`` is derived from the keypoint counter as it stood before that
+    frameset, so a refused one must not overwrite it: the keypoints would all
+    look old.
+    """
+    vio: _core.Vio = pipeline(2)
+    samples: Int64[ndarray, " n_samples"] = np.arange(0, FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
+    gyro, accel = gravity_batch(samples)
+    vio.push_imu_batch(samples, gyro, accel)
+    assert vio.track(0, [texture(0, 0), texture(1, 0)]).status == _core.VioStatus.Tracking
+    accepted: _core.FlowFrame | None = vio.flow_frame()
+    assert accepted is not None
+
+    assert vio.track(FRAME_PERIOD_NS, [texture(1, 0), texture(2, 0)]).status == _core.VioStatus.NeedMoreImu
+    refused: _core.FlowFrame | None = vio.flow_frame()
+    assert refused is not None
+    assert refused.t_ns == accepted.t_ns == 0
+    assert refused.num_new(0) == accepted.num_new(0) > 0
 
 
 def test_the_pipeline_tracks_a_shifted_scene_and_reports_its_window(pipeline: PipelineFactory, texture: TextureFactory) -> None:
@@ -187,7 +210,15 @@ def test_a_frameset_of_the_wrong_width_raises_value_error(pipeline: PipelineFact
 
 
 def test_a_frame_that_is_not_the_calibrated_size_is_refused(pipeline: PipelineFactory, texture: TextureFactory) -> None:
-    """The calibration is the geometry: a cropped frame means other bearings."""
+    """The calibration is the geometry: a cropped frame means other bearings.
+
+    The rule is the frontend's, and the frontend runs only on a frameset the
+    buffered IMU covers, so the samples come first: without them ``track``
+    answers ``NeedMoreImu`` before looking at a pixel (D17).
+    """
     vio: _core.Vio = pipeline(2)
+    samples: Int64[ndarray, " n_samples"] = np.arange(0, FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
+    gyro, accel = gravity_batch(samples)
+    vio.push_imu_batch(samples, gyro, accel)
     with pytest.raises(ValueError, match=f"the calibration is for {FRAME}x{FRAME} frames"):
         vio.track(0, [texture(0, 0), np.zeros((64, 64), dtype=np.uint8)])

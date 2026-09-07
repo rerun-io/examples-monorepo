@@ -659,7 +659,8 @@ mod tests {
         assert!(!vio.estimator().is_initialized());
         assert_abs_diff_eq!(result.world_from_rig[6], 1.0, epsilon = 1e-12);
         assert_eq!(vio.frontend().frame_counter(), 0);
-        assert_eq!(vio.frontend().t_ns(), -1);
+        // `None` rather than a sentinel: the frontend has seen no frameset.
+        assert_eq!(vio.frontend().t_ns(), None);
         assert_eq!(
             format!("{vio:?}"),
             before,

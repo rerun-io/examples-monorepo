@@ -113,10 +113,12 @@ pub struct Vio {
     /// `last_keypoint_id` before the last accepted frameset, which is what makes
     /// [`FlowFrame::num_new`] answerable after the fact.
     ///
-    /// Written only where `track` succeeded whole. A `track` the *estimator*
-    /// refuses has already run the frontend, so this goes stale — but that error
-    /// leaves the window advanced past `prev_frame` and the estimator has to be
-    /// rebuilt anyway (`estimator::EstimatorError`).
+    /// Written only where the frontend ran: a `NeedMoreImu` frameset never
+    /// reaches it, and overwriting this there would make the last accepted
+    /// frameset's keypoints all look old. A `track` the *estimator* refuses has
+    /// already run the frontend, so this does go stale — but that error leaves
+    /// the window advanced past `prev_frame` and the estimator has to be rebuilt
+    /// anyway (`estimator::EstimatorError`).
     keypoint_id_before_track: u64,
 }
 
@@ -223,7 +225,9 @@ impl Vio {
                 self.inner.track(t_ns, &views)
             })
             .map_err(value_error)?;
-        self.keypoint_id_before_track = previous_last_id;
+        if result.status != slam_rs::VioStatus::NeedMoreImu {
+            self.keypoint_id_before_track = previous_last_id;
+        }
         Ok(VioResult { inner: result })
     }
 
