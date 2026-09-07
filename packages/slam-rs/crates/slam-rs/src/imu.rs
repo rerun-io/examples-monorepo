@@ -401,16 +401,44 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
         accel_cov: &Vector3<S>,
         gyro_cov: &Vector3<S>,
     ) -> Result<(), ImuError> {
+        self.integrate_calibrated(
+            data.t_ns,
+            &cast3::<S>(&data.accel),
+            &cast3::<S>(&data.gyro),
+            accel_cov,
+            gyro_cov,
+        )
+    }
+
+    /// The same fold, with the sample already in `Scalar`.
+    ///
+    /// The backend needs this: `popFromImuDataQueue` casts to `Scalar`
+    /// **before** `calib_accel_bias.getCalibrated` runs
+    /// (`sqrt_keypoint_vio.cpp:377-390`, `:298-299`), so the static bias
+    /// calibration of an `f32` estimator happens in `f32`. Calibrating in `f64`
+    /// and casting afterwards is a different number.
+    ///
+    /// # Errors
+    ///
+    /// [`ImuError`] as [`Self::integrate`].
+    pub fn integrate_calibrated(
+        &mut self,
+        sample_t_ns: i64,
+        accel: &Vector3<S>,
+        gyro: &Vector3<S>,
+        accel_cov: &Vector3<S>,
+        gyro_cov: &Vector3<S>,
+    ) -> Result<(), ImuError> {
         // `:147-150`: relative time, bias removed at the linearization point.
         let t_ns: i64 =
-            data.t_ns
+            sample_t_ns
                 .checked_sub(self.start_t_ns)
                 .ok_or(ImuError::TimestampOverflow {
-                    a_ns: data.t_ns,
+                    a_ns: sample_t_ns,
                     b_ns: self.start_t_ns,
                 })?;
-        let accel: Vector3<S> = cast3::<S>(&data.accel) - self.bias_accel_lin;
-        let gyro: Vector3<S> = cast3::<S>(&data.gyro) - self.bias_gyro_lin;
+        let accel: Vector3<S> = accel - self.bias_accel_lin;
+        let gyro: Vector3<S> = gyro - self.bias_gyro_lin;
 
         let (new_state, j): (PoseVelState<S>, PropagationJacobians<S>) =
             Self::propagate_state(&self.delta_state, t_ns, &accel, &gyro)?; // `:158`

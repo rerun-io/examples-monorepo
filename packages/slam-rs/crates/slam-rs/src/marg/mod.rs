@@ -34,7 +34,7 @@
 //! square-root formulation; the QR never forms `JᵀJ` at all.
 
 mod eigen_cod;
-mod eigen_ldlt;
+pub(crate) mod eigen_ldlt;
 mod helper;
 mod window;
 

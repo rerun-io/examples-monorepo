@@ -25,14 +25,16 @@
 //!
 //! **What is exact and what is not.** The factorization, the transpositions,
 //! `vectorD` and the `matrixU() * P` product are elementary operations in
-//! Eigen's own order. The unit-lower solve reproduces Eigen's panel structure
-//! (`TriangularSolverVector.h:96-113`, `EIGEN_TUNE_TRIANGULAR_PANEL_WIDTH = 8`)
-//! but its trailing update is a plain loop where Eigen calls a blocked `gemv`,
-//! so systems wider than 8 carry the same product-kernel association residue
-//! decision D50 already accepted for the landmark blocks.
+//! Eigen's own order. The two triangular solves reproduce Eigen's panel
+//! structure (`TriangularSolverVector.h:30-113`,
+//! `EIGEN_TUNE_TRIANGULAR_PANEL_WIDTH = 8`) and route their trailing updates
+//! through [`crate::eigen_blas`], which ports the `gemv` association Eigen
+//! actually uses — stage S8 needed that, because `LDLT::solve` is where the LM
+//! increment comes from and the increment reaches a threshold comparison.
 
 use nalgebra::{DMatrix, DVector};
 
+use crate::eigen_blas::{Block, gemv_col_major_block, gemv_row_major_of_transpose, redux_dynamic};
 use crate::lie::LieScalar;
 
 /// Eigen's `EIGEN_TUNE_TRIANGULAR_PANEL_WIDTH` (`Eigen/src/Core/util/Macros.h`).
@@ -206,10 +208,8 @@ impl<S: LieScalar> EigenLdlt<S> {
     /// forward substitution of `TriangularSolverVector.h:96-113`, `ColMajor`.
     ///
     /// The panel structure is Eigen's — `PanelWidth = 8`, column-oriented
-    /// `axpy` inside a panel, then one trailing update per panel. Eigen's
-    /// trailing update is a blocked `gemv`; this is a plain column-major loop,
-    /// so a system of eight or fewer kept rows is exact and a wider one carries
-    /// the product-kernel residue of D50.
+    /// `axpy` inside a panel, then one `general_matrix_vector_product<ColMajor>`
+    /// per panel for the trailing rows.
     ///
     /// **Contract: `v.nrows() == self.transpositions.len()`**, i.e. `v` is as
     /// long as the factorized matrix is wide. `marg_helper.cpp:224` solves
@@ -235,17 +235,129 @@ impl<S: LieScalar> EigenLdlt<S> {
                     }
                 }
             }
-            // The trailing update: `rhs.tail -= L(endBlock.., panel) * rhs(panel)`.
-            for j in pi..end_block {
-                let scale: S = v[j];
-                if scale != S::zero() {
-                    for i in end_block..size {
-                        v[i] -= scale * self.mat[(i, j)];
-                    }
+            // The trailing update (`TriangularSolverVector.h:104-113`): one
+            // `general_matrix_vector_product<ColMajor>` with `alpha = -1`, which
+            // accumulates each output coefficient from a fresh zero. A
+            // `for j { for i { v[i] -= v[j] * L(i, j) } }` loop is a different
+            // value in `f32`, which is why this goes through `eigen_blas`.
+            let r: usize = size - end_block;
+            if r > 0 {
+                let rhs: Vec<S> = (pi..end_block).map(|j| v[j]).collect();
+                let mut res: Vec<S> = (end_block..size).map(|i| v[i]).collect();
+                gemv_col_major_block(
+                    &self.mat,
+                    Block {
+                        row0: end_block,
+                        col0: pi,
+                        rows: r,
+                        cols: panel,
+                    },
+                    &rhs,
+                    &mut res,
+                    -S::one(),
+                );
+                for (offset, value) in res.into_iter().enumerate() {
+                    v[end_block + offset] = value;
                 }
             }
             pi = end_block;
         }
+    }
+
+    /// `matrixL().adjoint().solveInPlace(v)`, the second substitution of
+    /// `LDLT::_solve_impl_transposed` (`LDLT.h:534-565`).
+    ///
+    /// `matrixL()` is a `UnitLower` view of the column-major factor, so its
+    /// adjoint is a `UnitUpper` view of a `Transpose`, which Eigen dispatches to
+    /// the **row-major** branch of `triangular_solve_vector`
+    /// (`TriangularSolverVector.h:30-72`): panels walk backwards from the end,
+    /// each takes one row-major `gemv` against everything already solved below
+    /// it, and the panel's own rows are then finished by an inner product whose
+    /// `.sum()` follows Eigen's dynamic-length reduction tree.
+    pub(crate) fn solve_unit_upper_in_place(&self, v: &mut DVector<S>) {
+        let size: usize = self.transpositions.len().min(v.nrows());
+        let mut pi: usize = size;
+        while pi > 0 {
+            let panel: usize = TRIANGULAR_PANEL_WIDTH.min(pi);
+            let start_row: usize = pi - panel;
+            // "remaining size" (`:47`): everything already solved, which in the
+            // upper triangle sits to the right of the panel.
+            let r: usize = size - pi;
+            if r > 0 {
+                let rhs: Vec<S> = (pi..size).map(|j| v[j]).collect();
+                let mut res: Vec<S> = (start_row..pi).map(|i| v[i]).collect();
+                gemv_row_major_of_transpose(
+                    &self.mat,
+                    Block {
+                        row0: start_row,
+                        col0: pi,
+                        rows: panel,
+                        cols: r,
+                    },
+                    &rhs,
+                    &mut res,
+                    -S::one(),
+                );
+                for (offset, value) in res.into_iter().enumerate() {
+                    v[start_row + offset] = value;
+                }
+            }
+            for k in 0..panel {
+                let i: usize = pi - k - 1;
+                let s: usize = i + 1;
+                if k > 0 {
+                    // `cjLhs.row(i).segment(s, k)` over the transposed view is
+                    // `mat[(s + t, i)]`, contiguous in the column-major factor,
+                    // so the `.sum()` is packet-accessible and vectorises.
+                    let terms: Vec<S> = (0..k).map(|t| self.mat[(s + t, i)] * v[s + t]).collect();
+                    v[i] -= redux_dynamic(&terms);
+                }
+                // `Mode & UnitDiag`, so there is no division by the diagonal.
+            }
+            pi = start_row;
+        }
+    }
+
+    /// `transpositionsP().transpose() * v`: swap rows `k` and `t[k]` for
+    /// **descending** `k`, undoing [`Self::apply_transpositions_left_vec`].
+    pub(crate) fn apply_transpositions_transpose_left_vec(&self, v: &mut DVector<S>) {
+        for k in (0..self.transpositions.len()).rev() {
+            let j: usize = self.transpositions[k];
+            if j != k {
+                v.swap_rows(k, j);
+            }
+        }
+    }
+
+    /// `LDLT::solve(rhs)` for one right-hand side
+    /// (`LDLT.h:_solve_impl_transposed<true>`), which is what the LM step at
+    /// `sqrt_keypoint_vio.cpp:1419-1420` calls.
+    ///
+    /// `P b`, the unit-lower forward substitution, the **pseudo**-inverse of `D`
+    /// — a diagonal entry at or below `numeric_limits<Scalar>::min()` zeroes its
+    /// row instead of dividing (Eigen's bug 241; the tolerance is deliberately
+    /// `min()` rather than an epsilon, because "LDLT is not rank-revealing" and
+    /// LAPACK's `xSYTRS` uses zero) — then the unit-upper back substitution and
+    /// `Pᵀ`.
+    pub(crate) fn solve_vec(&self, rhs: &DVector<S>) -> DVector<S> {
+        let mut dst: DVector<S> = rhs.clone();
+        self.apply_transpositions_left_vec(&mut dst);
+        self.solve_unit_lower_in_place(&mut dst);
+
+        let tolerance: S = S::min_positive();
+        let size: usize = self.transpositions.len().min(dst.nrows());
+        for i in 0..size {
+            let d: S = self.mat[(i, i)];
+            if d.abs() > tolerance {
+                dst[i] /= d;
+            } else {
+                dst[i] = S::zero();
+            }
+        }
+
+        self.solve_unit_upper_in_place(&mut dst);
+        self.apply_transpositions_transpose_left_vec(&mut dst);
+        dst
     }
 }
 
