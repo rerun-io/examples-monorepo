@@ -2410,6 +2410,11 @@ slam-rs = { path = "packages/slam-rs", editable = true }
 [feature.slam-rs.activation.env]
 PACKAGE_DIR = "packages/slam-rs"
 PYREFLY_TARGET = "slam_rs tools tests"
+# pytest's prepend import mode puts `tests/` on sys.path, so a test module can
+# import a sibling's fixtures (the synthetic rig in `test_frontend_boundary`);
+# pyrefly needs the same directory to resolve that import. Scoped to this
+# package's own run, so no other package's `test_*.py` can be shadowed by it.
+PYREFLY_EXTRA_ARGS = "--search-path tests"
 
 # ── Rust build + gates ───────────────────────────────────────────────────
 # cargo never runs during `pixi lock`/`pixi install`: the extension is built by

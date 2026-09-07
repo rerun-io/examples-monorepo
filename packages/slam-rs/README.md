@@ -381,6 +381,26 @@ Images are copied in and the GIL is released around the core call, so a decoder
 thread keeps running. Wrong dtype, rank, shape or memory layout raises
 `ValueError`; IMU samples must be strictly increasing in time.
 
+**No argument produces a panic.** A Rust panic crosses PyO3 as
+`pyo3_runtime.PanicException`, which derives from `BaseException` and so walks
+straight through an `except Exception` handler, and a panic on a rayon worker
+inside the released-GIL region aborts the process outright (decision D32). So
+every value that sizes a buffer, bounds a loop or spawns a thread is checked in
+the core before it is used, and each refusal arrives as `ValueError`:
+
+| what | ceiling or rule | why the core cannot just try it |
+|---|---|---|
+| `max_keypoints` | `tracker::MAX_CAPACITY` = 1,048,576 | every per-patch buffer is preallocated from it; `Vec::with_capacity(2**63)` panics with `capacity overflow` |
+| `threads` | `parallel::MAX_THREADS` = 1024 | rayon spawns exactly what it is asked for, so 100,000 workers wedge the machine rather than erroring |
+| `optical_flow_levels` | `tracker::MAX_LEVELS` = 24 levels | it multiplies every buffer; a `Vec` whose bytes do not exist **aborts** instead of unwinding |
+| `optical_flow_detection_min_threshold` | at least 1 | the detector halves the FAST threshold until it drops below this, and zero halves to zero for ever — `keypoints.cpp:162,187` has the same non-terminating loop, so basalt hangs on it too |
+| `optical_flow_detection_max_threshold` | at least `min_threshold` | otherwise the ladder never runs and the detector can never add a keypoint |
+| frameset image size | exactly the calibration's, per camera | the camera model, the detection grid and the occupancy matrix are all the calibrated geometry |
+
+`tests/test_frontend_boundary.py` walks the whole surface against hostile
+integers, objects and arrays and fails on anything that is not an ordinary
+`ValueError`, `TypeError`, `IndexError` or `OverflowError`.
+
 The frontend is driven the same way, and is the first stage with real output:
 
 ```python
@@ -398,7 +418,14 @@ frame.transforms(0)  # float32[n, 2, 3], [[m00, m01, tx], [m10, m11, ty]]
 frame.responses(0)   # float32[n], -1 where basalt records none
 frame.occupancy(0)   # int32[rows, columns] over camera 0's detection grid
 frame.num_new(0), frame.num_tracks(0)
+flow.t_ns              # int | None: the last accepted frameset, None before the first
 ```
+
+Any `int64` is a timestamp, negative ones included: the frontend's clock is an
+`Option<i64>` rather than basalt's `t_ns = -1` sentinel (`optical_flow.h:172`),
+which read every negative timestamp as "no previous frame" and so restarted
+tracking on each one. Framesets must still arrive strictly in order, and a
+refused frameset leaves the frontend exactly as the last accepted one did.
 
 `Calibration.from_catalog` reads `slam_rs.catalog_feed.CameraCalib` and
 `ImuCalib` attribute by attribute and hands them to `Calibration::from_catalog_parts`,
@@ -513,11 +540,16 @@ the dataset's own entity tree so nothing needs a second coordinate convention:
 | `.../keypoints_cpp` | what the C++ fork's `dump_flow.cpp` produced for the same frameset, in one contrasting magenta |
 | `/stats/frontend/...` | `num_tracks` and `num_new` per camera, and `frontend_ms` |
 
-The overlay is the parity claim made visible. The eight committed dumps under
-`crates/slam-rs/tests/fixtures/flow/dumps/` are on the same `video_time` clock as
-the feed, so they need no association; point `SLAM_RS_FLOW_DUMPS_DIR` at a fuller
-set to cover more framesets, and the overlay clears itself on the first frameset
-past the last dump rather than leaving a stale claim on screen. On the smoke
+The overlay is the parity claim made visible, and it is only ever drawn on the
+segment it was recorded from. The eight committed dumps under
+`crates/slam-rs/tests/fixtures/flow/dumps/` are on the feed's `video_time` clock,
+which starts at zero on **every** segment, so the timestamp alone is not an
+association: `dumps/source.json` names the segment they came from and the overlay
+is keyed by `(segment id, frameset t_ns)`. A dump directory carrying frames but
+no `source.json` is refused rather than drawn on whatever is being replayed —
+point `SLAM_RS_FLOW_DUMPS_DIR` at a fuller set to cover more framesets and give
+it that file too. The overlay clears itself on the first frameset past the last
+dump rather than leaving a stale claim on screen. On the smoke
 segment the port hands out 175 keypoint ids over the first eight framesets where
 the C++ hands out 174, and every magenta ring in the viewer carries a coloured
 port dot at its centre bar a handful — the detector gap the flow gate measures.

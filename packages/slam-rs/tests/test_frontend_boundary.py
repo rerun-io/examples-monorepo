@@ -9,6 +9,10 @@ Everything here runs on small synthetic frames, so the whole file stays inside
 the default, seconds-long suite.
 """
 
+import json
+import subprocess
+import sys
+from collections.abc import Callable
 from typing import cast
 
 import numpy as np
@@ -212,3 +216,304 @@ def test_a_camera_past_the_end_of_the_rig_is_an_index_error() -> None:
     frame: _core.FlowFrame = frontend().process(0, [texture()])
     with pytest.raises(IndexError, match="past the end"):
         frame.ids(1)
+
+
+HANG_GUARD_S: float = 60.0
+"""How long the subprocess probe below is given before it counts as a hang."""
+
+DETECTOR_PROBE: str = """
+import sys
+
+import numpy as np
+
+from slam_rs import _core
+
+flow = _core.OpticalFlow(sys.argv[1], sys.argv[2])
+flow.process(0, [np.zeros((200, 200), dtype=np.uint8)])
+print("processed")
+"""
+"""Build a frontend from JSON text and detect on a blank frame, with no error handling.
+
+A blank frame is the worst case for the detector's threshold ladder: no cell ever
+fills its budget, so every rung is walked. This runs in a subprocess because the
+failure it guards against is a **hang** inside the released-GIL region, where a
+Python-level ``signal`` handler never gets to run — only an outside timeout can
+end it.
+"""
+
+
+def probe_detector(config_json: str) -> subprocess.CompletedProcess[str]:
+    """Run :data:`DETECTOR_PROBE` against one config, or fail the test on a hang.
+
+    Args:
+        config_json: One of basalt's configs as text.
+
+    Returns:
+        The finished process, so the caller can assert on its output.
+    """
+    calibration: str = _core.Calibration.from_catalog([camera(0)], imu()).to_json()
+    return subprocess.run(  # noqa: S603
+        [sys.executable, "-c", DETECTOR_PROBE, calibration, config_json],
+        capture_output=True,
+        text=True,
+        timeout=HANG_GUARD_S,
+        check=False,
+    )
+
+
+def config_with(key: str, value: int) -> str:
+    """basalt's default config as text, with one integer field replaced."""
+    document: dict = json.loads(_core.VioConfig().to_json())
+    assert key in document["value0"], f"{key} is not a config field: {sorted(document['value0'])}"
+    document["value0"][key] = value
+    return json.dumps(document)
+
+
+def test_the_shipped_config_detects_on_a_blank_frame_and_returns() -> None:
+    """The control for the probe below: this configuration reaches ``process`` and finishes."""
+    finished: subprocess.CompletedProcess[str] = probe_detector(_core.VioConfig().to_json())
+    assert finished.returncode == 0, finished.stderr
+    assert "processed" in finished.stdout
+
+
+@pytest.mark.parametrize("min_threshold", [0, -1, -(2**31)])
+def test_a_detector_threshold_ladder_that_never_ends_is_refused(min_threshold: int) -> None:
+    """``min_threshold <= 0`` hangs the detector — and basalt's own — so it is refused.
+
+    ``keypoints.cpp:162,187`` halves the FAST threshold by integer division while
+    it is at or above ``min_threshold``: zero halves to zero for ever. The C++ has
+    the same non-terminating loop; the port refuses the config instead of running
+    it, and floors its own last rung as a second line.
+    """
+    finished: subprocess.CompletedProcess[str] = probe_detector(config_with("config.optical_flow_detection_min_threshold", min_threshold))
+    assert finished.returncode != 0, f"the frontend accepted min_threshold={min_threshold}: {finished.stdout}"
+    assert "ValueError" in finished.stderr
+    assert "optical_flow_detection_min_threshold" in finished.stderr
+
+
+def test_a_detector_threshold_ladder_that_never_runs_is_refused() -> None:
+    """A ladder starting below where it stops could never add a keypoint."""
+    document: dict = json.loads(_core.VioConfig().to_json())
+    document["value0"]["config.optical_flow_detection_min_threshold"] = 40
+    document["value0"]["config.optical_flow_detection_max_threshold"] = 5
+    with pytest.raises(ValueError, match="ladder starts below"):
+        _core.OpticalFlow(_core.Calibration.from_catalog([camera(0)], imu()), json.dumps(document))
+
+
+@pytest.mark.parametrize("max_keypoints", [2**20 + 1, 2**31, 2**63, 2**64 - 1])
+def test_a_keypoint_budget_nothing_could_allocate_is_a_value_error(max_keypoints: int) -> None:
+    """A budget is a memory request, and an impossible one used to be a Rust panic.
+
+    ``Vec::with_capacity(2**63)`` panics with ``capacity overflow``, which crosses
+    the boundary as ``pyo3_runtime.PanicException`` — a ``BaseException`` that no
+    ordinary ``except Exception`` catches. The ceiling makes it an answer.
+    """
+    with pytest.raises(ValueError, match="ceiling"):
+        _core.OpticalFlow(_core.Calibration.from_catalog([camera(0)], imu()), _core.VioConfig(), max_keypoints=max_keypoints)
+
+
+@pytest.mark.parametrize("threads", [2**20 + 1, 100_000, 2**63])
+def test_more_workers_than_the_ceiling_is_refused(threads: int) -> None:
+    """rayon spawns exactly what it is asked for, so an unbounded count wedges the machine."""
+    with pytest.raises(ValueError, match="ceiling"):
+        _core.OpticalFlow(_core.Calibration.from_catalog([camera(0)], imu()), _core.VioConfig(), threads=threads)
+
+
+@pytest.mark.parametrize("levels", [24, 1_000, 10**9])
+def test_a_pyramid_deeper_than_the_ceiling_is_refused(levels: int) -> None:
+    """``optical_flow_levels`` sizes every per-patch buffer; an absurd one aborted the process."""
+    with pytest.raises(ValueError, match="optical_flow_levels"):
+        _core.OpticalFlow(_core.Calibration.from_catalog([camera(0)], imu()), config_with("config.optical_flow_levels", levels))
+
+
+@settings(max_examples=MAX_EXAMPLES, deadline=None)
+@given(
+    height=st.integers(min_value=1, max_value=2 * FRAME),
+    width=st.integers(min_value=1, max_value=2 * FRAME),
+)
+def test_an_image_that_is_not_the_calibrated_size_is_refused(height: int, width: int) -> None:
+    """The calibration is the geometry: a cropped or resized frame means other bearings.
+
+    The camera model projects with the calibrated intrinsics and the detection
+    grid is derived from the calibrated size, so a 64x64 frame tracked against a
+    200x200 calibration produces keypoints in pixels that do not exist.
+    """
+    assume((height, width) != (FRAME, FRAME))
+    odd: UInt8[ndarray, "h w"] = np.zeros((height, width), dtype=np.uint8)
+    with pytest.raises(ValueError, match=f"the calibration is for {FRAME}x{FRAME} frames, got {width}x{height}"):
+        frontend().process(0, [odd])
+
+
+def test_the_wrong_camera_is_named_when_only_one_image_is_the_wrong_size() -> None:
+    flow: _core.OpticalFlow = frontend(2)
+    with pytest.raises(ValueError, match="camera 1"):
+        flow.process(0, [texture(), np.zeros((64, 64), dtype=np.uint8)])
+
+
+def test_a_frame_of_the_wrong_size_leaves_the_frontend_as_it_was() -> None:
+    """The refusal is transactional: the frontend is as the last accepted frame left it."""
+    flow: _core.OpticalFlow = frontend()
+    first: _core.FlowFrame = flow.process(1_000, [texture()])
+    ids_before: int = flow.last_keypoint_id
+    with pytest.raises(ValueError, match="the calibration is for"):
+        flow.process(2_000, [np.zeros((FRAME + 8, FRAME), dtype=np.uint8)])
+    assert flow.t_ns == 1_000
+    assert flow.frame_counter == 1
+    assert flow.last_keypoint_id == ids_before
+
+    # And it still tracks against the frame it kept.
+    second: _core.FlowFrame = flow.process(3_000, [texture(1, 0)])
+    assert flow.frame_counter == 2
+    kept: NDArray[np.int64] = np.intersect1d(first.ids(0), second.ids(0))
+    assert len(kept) > 0, "the kept frame was not tracked against"
+
+
+@settings(max_examples=10, deadline=None)
+@given(start=st.integers(min_value=-(10**12), max_value=-1))
+def test_identical_frames_at_negative_timestamps_keep_their_ids(start: int) -> None:
+    """basalt reads ``t_ns < 0`` as "no previous frame"; the port's clock is an Option.
+
+    Two identical framesets used to share **zero** ids at ``(-2, -1)`` and 14 of
+    16 at ``(0, 1)``: the negative timestamp made every frameset the first one.
+    """
+    negative: _core.OpticalFlow = frontend()
+    first: _core.FlowFrame = negative.process(start, [texture()])
+    second: _core.FlowFrame = negative.process(start + 1, [texture()])
+    shared: int = len(np.intersect1d(first.ids(0), second.ids(0)))
+
+    zeroed: _core.OpticalFlow = frontend()
+    third: _core.FlowFrame = zeroed.process(0, [texture()])
+    fourth: _core.FlowFrame = zeroed.process(1, [texture()])
+    at_zero: int = len(np.intersect1d(third.ids(0), fourth.ids(0)))
+
+    assert shared > 0, f"no id survived an identical frameset at t = {start}"
+    assert shared == at_zero, f"{shared} ids kept at t = {start} against {at_zero} at t = 0"
+    assert negative.t_ns == start + 1
+
+
+HOSTILE_INTS: tuple[int, ...] = (0, -1, 1, 2**31, 2**63 - 1, -(2**63), 2**63, 2**64, 10**40, -(10**40))
+"""Integers a caller can type: past both ends of ``i64``, past ``u64``, and beyond."""
+HOSTILE_OBJECTS: tuple[object, ...] = (None, "", "x", b"", [], {}, 0.5, float("nan"), object(), (1, 2))
+"""Objects that are not what any parameter here asks for."""
+HOSTILE_ARRAYS: tuple[NDArray[np.uint8], ...] = (
+    np.zeros((0, 0), dtype=np.uint8),
+    np.zeros((1, 0), dtype=np.uint8),
+    cast("NDArray[np.uint8]", np.zeros((0,), dtype=np.uint8)),
+    cast("NDArray[np.uint8]", np.zeros((2, 2, 2), dtype=np.uint8)),
+    cast("NDArray[np.uint8]", np.zeros((3, 3), dtype=np.float64)),
+    cast("NDArray[np.uint8]", np.zeros((FRAME, FRAME), dtype=np.uint8).T),
+    np.asfortranarray(np.zeros((5, 5), dtype=np.uint8)),
+)
+"""Arrays of the wrong rank, dtype, layout or extent."""
+EXPECTED_ERRORS: tuple[type[Exception], ...] = (ValueError, TypeError, IndexError, OverflowError, AttributeError)
+"""What a boundary may raise. A panic is a ``BaseException`` and is none of these."""
+
+
+def refuse(what: str, call: Callable[[], object], failures: list[str]) -> None:
+    """Call ``call`` and record anything that is not an ordinary refusal.
+
+    ``pyo3_runtime.PanicException`` only exists once a panic has been raised, so
+    it is recognised by class name rather than imported.
+
+    Args:
+        what: How the call is named in a failure.
+        call: The boundary call to make.
+        failures: Where an escaping panic is recorded.
+    """
+    try:
+        call()
+    except EXPECTED_ERRORS:
+        return
+    except BaseException as error:  # noqa: BLE001
+        failures.append(f"{what}: {type(error).__name__}({error})")
+
+
+def batch_imu(t_ns: object, gyro: object, accel: object) -> None:
+    """Push an IMU batch of whatever was handed in, past the stub's declared dtypes.
+
+    ``push_imu_batch`` declares ``int64[n]`` and ``float64[n, 3]``, and the audit's
+    business is what happens when it is given something else, so the three
+    arguments arrive as ``object`` and are cast here rather than at a dozen call
+    sites.
+
+    Args:
+        t_ns: Whatever is standing in for the timestamps.
+        gyro: Whatever is standing in for the gyroscope samples.
+        accel: Whatever is standing in for the accelerometer samples.
+    """
+    _core.Vio(1, 1).push_imu_batch(
+        cast("NDArray[np.int64]", t_ns),
+        cast("NDArray[np.float64]", gyro),
+        cast("NDArray[np.float64]", accel),
+    )
+
+
+def test_no_hostile_argument_reaches_python_as_a_panic() -> None:
+    """Every public entry point, against every class of hostile argument (D32).
+
+    A panic inside the core reaches Python as ``PanicException``, which derives
+    from ``BaseException`` and so passes straight through an ``except Exception``
+    handler; ``max_keypoints`` did exactly that. This walks the surface rather
+    than the one argument that was reported.
+    """
+    failures: list[str] = []
+    calibration: _core.Calibration = _core.Calibration.from_catalog([camera(0), camera(1, 0.1)], imu())
+    config: _core.VioConfig = _core.VioConfig()
+    good: list[UInt8[ndarray, "h w"]] = [texture(), texture(1, 0)]
+    flow: _core.OpticalFlow = _core.OpticalFlow(calibration, config)
+    frame: _core.FlowFrame = flow.process(0, good)
+
+    for value in HOSTILE_INTS:
+        refuse(f"Vio({value})", lambda v=value: _core.Vio(v, 1), failures)
+        refuse(f"Vio(min_imu_samples={value})", lambda v=value: _core.Vio(1, v), failures)
+        refuse(f"push_imu({value})", lambda v=value: _core.Vio(1, 1).push_imu(v, [0.0] * 3, [0.0] * 3), failures)
+        refuse(f"OpticalFlow(threads={value})", lambda v=value: _core.OpticalFlow(calibration, config, threads=v), failures)
+        refuse(f"OpticalFlow(max_keypoints={value})", lambda v=value: _core.OpticalFlow(calibration, config, max_keypoints=v), failures)
+        refuse(f"process(t_ns={value})", lambda v=value: _core.OpticalFlow(calibration, config).process(v, good), failures)
+        for accessor in ("ids", "positions", "transforms", "responses", "levels", "occupancy", "num_new", "num_tracks"):
+            refuse(f"frame.{accessor}({value})", lambda a=accessor, v=value: getattr(frame, a)(v), failures)
+
+    # Every value below violates the type its parameter declares — that is what
+    # is under test — so each is passed through the declared type. The casts are
+    # the violation, not an assumption about the value.
+    for thing in HOSTILE_OBJECTS:
+        text: str = cast("str", thing)
+        camera_like: CameraCalib = cast("CameraCalib", thing)
+        imu_like: ImuCalib = cast("ImuCalib", thing)
+        config_like: _core.VioConfig = cast("_core.VioConfig", thing)
+        calibration_like: _core.Calibration = cast("_core.Calibration", thing)
+        images_like: list[UInt8[ndarray, "h w"]] = cast("list[UInt8[ndarray, 'h w']]", thing)
+        frameset_like: list[UInt8[ndarray, "h w"]] = cast("list[UInt8[ndarray, 'h w']]", [thing, thing])
+        index_like: int = cast("int", thing)
+        refuse(f"Calibration.from_json({thing!r})", lambda o=text: _core.Calibration.from_json(o), failures)
+        refuse(f"VioConfig.from_json({thing!r})", lambda o=text: _core.VioConfig.from_json(o), failures)
+        refuse(f"Calibration.from_catalog([{thing!r}])", lambda c=camera_like, i=imu_like: _core.Calibration.from_catalog([c], i), failures)
+        refuse(f"Calibration.from_catalog(imu={thing!r})", lambda i=imu_like: _core.Calibration.from_catalog([camera(0)], i), failures)
+        refuse(f"OpticalFlow(calibration={thing!r})", lambda c=calibration_like: _core.OpticalFlow(c, config), failures)
+        refuse(f"OpticalFlow(config={thing!r})", lambda o=config_like: _core.OpticalFlow(calibration, o), failures)
+        refuse(f"process(images={thing!r})", lambda o=images_like: flow.process(1, o), failures)
+        refuse(f"process([{thing!r}])", lambda o=frameset_like: flow.process(1, o), failures)
+        refuse(f"safe_radius = {thing!r}", lambda o=thing: setattr(config, "optical_flow_image_safe_radius", o), failures)
+        refuse(f"Vio.track({thing!r})", lambda o=images_like: _core.Vio(1, 1).track(0, o), failures)
+        refuse(f"push_imu_batch({thing!r})", lambda o=thing: batch_imu(o, o, o), failures)
+        refuse(f"frame.ids({thing!r})", lambda o=index_like: frame.ids(o), failures)
+
+    for array in HOSTILE_ARRAYS:
+        refuse(f"process({array.shape} {array.dtype})", lambda a=array: flow.process(1, [a, a]), failures)
+        refuse(f"process(mixed {array.shape})", lambda a=array: flow.process(1, [good[0], a]), failures)
+        refuse(f"Vio.track({array.shape} {array.dtype})", lambda a=array: _core.Vio(1, 1).track(0, [a]), failures)
+        refuse(f"push_imu_batch({array.shape} {array.dtype})", lambda a=array: batch_imu(a, a, a), failures)
+
+    # Every numeric config field, one at a time, over the values that broke one.
+    document: dict = json.loads(_core.VioConfig().to_json())
+    numeric: list[str] = [key for key, value in document["value0"].items() if isinstance(value, (int, float)) and not isinstance(value, bool)]
+    assert len(numeric) > 20, f"only {len(numeric)} numeric config fields were found"
+    for key in numeric:
+        for value in (0, -1, 1, 2**31 - 1, -(2**31), 10**12):
+            refuse(f"config {key}={value}", lambda k=key, v=value: _core.OpticalFlow(calibration, config_with(k, v)), failures)
+
+    assert not failures, f"{len(failures)} calls did not refuse cleanly: {failures[:10]}"
+
+    # A refused frameset leaves a frontend that still works, after all of that.
+    assert flow.frame_counter == 1
+    assert flow.process(2, good).num_tracks(0) > 0
