@@ -42,9 +42,10 @@ silently reorienting one rrd.
 the IMU frame; the rig frame *is* the IMU frame (``reference = "imu_00"``).
 
 Three modules hold what is not MSD-specific: ``dataforge.archives`` reads members
-out of a plain zip or an Info-ZIP volume set, ``dataforge.basalt`` parses the
-calibration, and ``dataforge.euroc`` parses the csv streams and measures the
-world up axis. What is left here is the device table and the two layers.
+out of a plain zip or an Info-ZIP volume set, ``dataforge.basalt`` validates the
+calibration, and ``dataforge.euroc`` decodes the csv streams. What is left here
+is the device table, the world-up measurement its claims rest on, and the two
+layers.
 """
 
 from __future__ import annotations
@@ -60,11 +61,12 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 from huggingface_hub import HfApi, RepoFile
-from jaxtyping import Float64, Int64
+from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
+from scipy.spatial.transform import Rotation
 
 from dataforge import blueprints, paths, schema, transports, writing
-from dataforge.archives import MemberReader, group_archives, open_member_reader
+from dataforge.archives import MemberReader, group_archives, open_member_reader, remove_tree
 from dataforge.basalt import CalibratedCamera, FollowFrame, camera_parameters, follow_frame, load_calibration
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.euroc import (
@@ -73,11 +75,8 @@ from dataforge.euroc import (
     MAG_VALUE_COLUMNS,
     CameraRow,
     GtTrajectory,
-    MeasuredUp,
     TimestampedSamples,
-    WorldUpAxis,
     gt_trajectory,
-    measured_world_up,
     nominal_fps,
     read_camera_index,
     read_numeric_csv,
@@ -122,6 +121,16 @@ MsdDeviceChoice: TypeAlias = Literal["index", "g2", "odyssey"]
 """``--device``: which headset's corpus to work on, and which catalog dataset."""
 GtSource: TypeAlias = Literal["lighthouse", "mocap"]
 """What produced a device's ground truth: SteamVR Lighthouse, or a MoCap system."""
+WorldUpAxis: TypeAlias = Literal["+x", "-x", "+y", "-y", "+z", "-z"]
+"""Signed axis of a tracking world that gravity points *away* from."""
+POSITIVE_WORLD_AXES: tuple[WorldUpAxis, WorldUpAxis, WorldUpAxis] = ("+x", "+y", "+z")
+"""Axis names by column index, for a positive mean; the negative row is below."""
+NEGATIVE_WORLD_AXES: tuple[WorldUpAxis, WorldUpAxis, WorldUpAxis] = ("-x", "-y", "-z")
+"""Axis names by column index, for a negative mean."""
+STANDARD_GRAVITY_MS2: float = 9.80665
+"""Standard gravity; ``measured_world_up`` reports its result as a fraction of this."""
+MEASURED_UP_WINDOW_NS: int = 2_000_000_000
+"""How much of a sequence's start ``measured_world_up`` averages over."""
 
 WORLD_UP_VIEW_COORDINATES: dict[WorldUpAxis, rr.components.ViewCoordinates] = {
     "+x": rr.ViewCoordinates.RIGHT_HAND_X_UP,
@@ -259,6 +268,62 @@ warns rather than reorienting or re-aiming a single rrd out of step with the res
 
 
 @dataclass(frozen=True, slots=True)
+class MeasuredUp:
+    """What one sequence's own gravity measurement found; the gt layer records both."""
+
+    axis: WorldUpAxis
+    """The dominant signed world axis the mean acceleration points along."""
+    fraction: float
+    """That component as a fraction of standard gravity; near 1 is a clean measurement."""
+
+
+def measured_world_up(gt: GtTrajectory, accel: ImuChannel, *, window_ns: int = MEASURED_UP_WINDOW_NS) -> MeasuredUp:
+    """Measure which world axis is up, from gravity as the accelerometer sees it.
+
+    An accelerometer at rest measures the *reaction* to gravity, so its reading
+    points **up**; rotating each sample into the world with the ground truth's
+    own orientation (``world_R_rig @ a_rig``) and averaging therefore yields a
+    vector along the world's up axis. Only the first couple of seconds are used:
+    a headset is typically still on the floor or on a head that has not started
+    moving, so the mean is nearly pure gravity there and gets noisier the longer
+    the window. Why this is measured at all, and what the three devices answer,
+    is on ``MSD_DEVICES``.
+
+    Args:
+        gt: The sequence's ground truth, already in xyzw order and sanitized.
+        accel: Accelerometer samples in m/s^2, on the same clock as ``gt``.
+        window_ns: Length of the averaging window, from the first sample both
+            streams cover.
+
+    Returns:
+        The axis and how much of gravity it carried — a health check, not a
+        calibration: a much smaller fraction means the mean is not gravity.
+
+    Raises:
+        ValueError: Either stream is empty, or they do not overlap inside the window.
+    """
+    if gt.times_ns.size == 0 or accel.times_ns.size == 0:
+        raise ValueError("measuring the world up axis needs both a gt pose and an accelerometer sample")
+    start_ns: int = max(int(gt.times_ns[0]), int(accel.times_ns[0]))
+    inside: Bool[ndarray, "n_samples"] = (accel.times_ns >= start_ns) & (accel.times_ns < start_ns + window_ns)
+    if not inside.any():
+        raise ValueError(f"no accelerometer sample within {window_ns / 1e9:g} s of {start_ns}, where the gt starts")
+
+    window_times_ns: Int64[ndarray, "n_window"] = accel.times_ns[inside]
+    after: Int64[ndarray, "n_window"] = np.clip(np.searchsorted(gt.times_ns, window_times_ns), 0, gt.times_ns.size - 1)
+    before: Int64[ndarray, "n_window"] = np.clip(after - 1, 0, gt.times_ns.size - 1)
+    nearest: Int64[ndarray, "n_window"] = np.where(
+        np.abs(gt.times_ns[before] - window_times_ns) <= np.abs(gt.times_ns[after] - window_times_ns), before, after
+    )
+    world_accel_xyz: Float64[ndarray, "n_window 3"] = Rotation.from_quat(gt.quaternions_xyzw[nearest]).apply(accel.values_xyz[inside])
+    mean_xyz: Float64[ndarray, "3"] = world_accel_xyz.mean(axis=0)
+
+    axis_index: int = int(np.argmax(np.abs(mean_xyz)))
+    names: tuple[WorldUpAxis, WorldUpAxis, WorldUpAxis] = POSITIVE_WORLD_AXES if mean_xyz[axis_index] >= 0.0 else NEGATIVE_WORLD_AXES
+    return MeasuredUp(axis=names[axis_index], fraction=float(abs(mean_xyz[axis_index]) / STANDARD_GRAVITY_MS2))
+
+
+@dataclass(frozen=True, slots=True)
 class MsdSource:
     """One remote sequence as discovery found it; ``convert`` needs nothing else."""
 
@@ -292,7 +357,9 @@ class MsdConfig(DataforgeDatasetConfig):
     """Cap on what ``root`` may hold. A sequence whose archives alone exceed it is
     processed anyway with a warning; leftovers that would breach it are an error."""
     revision: str | None = None
-    """Repo branch, tag or commit; ``None`` takes the default branch."""
+    """Repo branch, tag or commit to resolve; ``None`` takes the default branch.
+    Only an input: what every hub call and every rrd records is the *sha* it
+    resolves to (see ``MsdDataset.commit_sha``)."""
 
     @property
     def name(self) -> str:
@@ -460,7 +527,7 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         pairs: list[tuple[SequenceIdentity, MsdSource]] = []
         for collection in self.device.collections:
             collection_path: str = f"{REPO_ROOT}/{self.device.hf_dir}/{collection}"
-            entries: list[tuple[str, int]] = list_collection_files(REPO_ID, collection_path, revision=self.config.revision)
+            entries: list[tuple[str, int]] = list_collection_files(REPO_ID, collection_path, revision=self.commit_sha)
             leaf: str = collection.rsplit("/", 1)[-1]
             for stem, volumes in group_archives(entries).items():
                 pairs.append(
@@ -490,15 +557,30 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         return f"{REPO_ROOT}/{self.device.hf_dir}/extras/calibration.json"
 
     @functools.cached_property
-    def revision(self) -> str | None:
-        """Repo commit sha stamped into every rrd, resolved once per dataset instance.
+    def commit_sha(self) -> str:
+        """The one repo commit this whole run reads, resolved once per dataset instance.
+
+        ``config.revision`` is only the *input*: a branch name moves, so listing
+        a collection on ``main``, fetching an archive on ``main`` an hour later
+        and stamping a third answer into the rrd could describe three different
+        trees. Resolving the branch to a sha up front and passing that sha to
+        every hub call makes the whole conversion one commit, and makes the
+        recorded ``hf_revision`` the sha the bytes actually came from.
 
         Lazily, and deliberately not inside a recording: a batch run asks the hub
         once instead of once per sequence, and ``convert`` warms it before it
         encodes anything, so a transient network failure cannot land on a
         finished encode.
+
+        Raises:
+            RuntimeError: The hub named no sha for ``config.revision``, so there
+                is nothing to pin the conversion to.
         """
-        return repo_revision(REPO_ID, self.config.revision)
+        resolved: str | None = repo_revision(REPO_ID, self.config.revision)
+        if resolved is None:
+            named: str = self.config.revision or "the default branch"
+            raise RuntimeError(f"{REPO_ID} resolved no commit sha for {named}; a conversion has to name the tree it read")
+        return resolved
 
     def fetch_calibration(self) -> Path:
         """Fetch the device's ``calibration.json`` into ``root`` and return where it landed.
@@ -507,7 +589,7 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         it to have the file up front, and ``calibration()`` calls it when a
         ``convert`` runs against a scratch dir that ``download`` never touched.
         """
-        transports.hf_fetch(REPO_ID, allow_patterns=[self.calibration_path], local_dir=self.config.root, revision=self.config.revision)
+        transports.hf_fetch(REPO_ID, allow_patterns=[self.calibration_path], local_dir=self.config.root, revision=self.commit_sha)
         return self.config.root / self.calibration_path
 
     def calibration(self) -> tuple[CalibratedCamera, ...]:
@@ -639,13 +721,15 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         # Both hub lookups happen before the archives are pulled and long before a
         # frame is encoded: neither a bad calibration nor a transient revision
         # lookup may throw away a multi-gigabyte download and an hour of encoding.
+        # (The calibration fetch resolves the sha on its own; this only makes the
+        # ordering explicit for a scratch dir that already holds the file.)
+        _ = self.commit_sha
         cameras: tuple[CalibratedCamera, ...] = self.calibration()
-        _ = self.revision
 
         on_disk: int = sum(1 for archive in locations.archives if archive.is_file())
         if on_disk:
             print(f"  {on_disk}/{len(locations.archives)} archive volume(s) already in {self.config.root}; the fetch only verifies them")
-        transports.hf_fetch(REPO_ID, allow_patterns=list(source.archive_paths), local_dir=self.config.root, revision=self.config.revision)
+        transports.hf_fetch(REPO_ID, allow_patterns=list(source.archive_paths), local_dir=self.config.root, revision=self.commit_sha)
 
         locations.work_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -656,7 +740,7 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
             self.write_base_layer(identity, source, streams, locations.target)
             self.write_gt_layer(identity, streams, locations.gt_target, measured=measured)
         except BaseException:
-            paths.remove_tree(locations.work_dir)
+            remove_tree(locations.work_dir)
             retained: int = sum(archive.stat().st_size for archive in locations.archives if archive.is_file())
             print(f"  kept {retained / 1e9:.2f} GB of archives in {self.config.root} so a retry skips the download")
             raise
@@ -664,7 +748,7 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         if self.config.keep_raw:
             print(f"  keeping raw: {len(locations.archives)} archive volume(s) and the mp4s in {locations.work_dir}")
         else:
-            paths.remove_tree(locations.work_dir)
+            remove_tree(locations.work_dir)
             for archive in locations.archives:
                 archive.unlink(missing_ok=True)
         print(
@@ -698,22 +782,22 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         mav0: str = f"{source.sequence}/mav0"
         camera_rows: list[list[CameraRow]] = []
         for index in range(self.device.num_cameras):
-            rows: list[CameraRow] = read_camera_index(reader.csv_bytes(f"{mav0}/cam{index}/data.csv"))
+            rows: list[CameraRow] = read_camera_index(reader.read_member(f"{mav0}/cam{index}/data.csv"))
             if not rows:
                 raise ValueError(f"{source.sequence} cam{index} has an empty data.csv")
             camera_rows.append(rows)
         camera_times_ns: list[Int64[ndarray, "n_samples"]] = [
             np.array([row.timestamp_ns for row in rows], dtype=np.int64) for rows in camera_rows
         ]
-        inertial: TimestampedSamples = read_numeric_csv(reader.csv_bytes(f"{mav0}/imu0/data.csv"), num_values=IMU_VALUE_COLUMNS)
+        inertial: TimestampedSamples = read_numeric_csv(reader.read_member(f"{mav0}/imu0/data.csv"), num_values=IMU_VALUE_COLUMNS)
         if inertial.times_ns.size == 0:
             raise ValueError(f"{source.sequence} imu0/data.csv has no data rows, so the sequence has no inertial stream")
         magnetometer: TimestampedSamples | None = (
-            read_numeric_csv(reader.csv_bytes(f"{mav0}/mag0/data.csv"), num_values=MAG_VALUE_COLUMNS) if self.device.has_magnetometer else None
+            read_numeric_csv(reader.read_member(f"{mav0}/mag0/data.csv"), num_values=MAG_VALUE_COLUMNS) if self.device.has_magnetometer else None
         )
         # The gt *layer* is a sibling rrd, but both layers share one zero-based
         # video_time, so the base layer has to know gt's clock origin too.
-        gt: GtTrajectory = gt_trajectory(read_numeric_csv(reader.csv_bytes(f"{mav0}/gt/data.csv"), num_values=GT_VALUE_COLUMNS))
+        gt: GtTrajectory = gt_trajectory(read_numeric_csv(reader.read_member(f"{mav0}/gt/data.csv"), num_values=GT_VALUE_COLUMNS))
 
         sensor_times_ns: list[Int64[ndarray, "n_samples"]] = [*camera_times_ns, inertial.times_ns]
         if magnetometer is not None and magnetometer.times_ns.size:
@@ -726,7 +810,7 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         for index, (calibration, rows, times_ns) in enumerate(zip(cameras, camera_rows, camera_times_ns, strict=True)):
             clip: Path = work_dir / f"cam{index}.mp4"
             encode_frames_to_mp4(
-                reader.png_frames([f"{mav0}/cam{index}/data/{row.filename}" for row in rows]),
+                reader.iter_members([f"{mav0}/cam{index}/data/{row.filename}" for row in rows]),
                 clip,
                 source=FrameSource("png"),
                 fps=nominal_fps(times_ns),
@@ -811,7 +895,7 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
                 device=self.config.device,
                 device_label=self.device.label,
                 collection=source.collection,
-                hf_revision=self.revision,
+                hf_revision=self.commit_sha,
                 duration_ns=streams.duration_ns,
             )
         return streams.num_frames

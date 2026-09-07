@@ -1,30 +1,25 @@
-"""The EuRoC-style csv streams: the clock, the value columns, and the gravity check.
+"""The EuRoC-style csv streams: the clock, the value columns, and the quaternion order.
 
 The literals below are the header rows MSD actually ships — including the gt
 file's spaces after each comma and its scalar-first quaternion — so what is
-asserted is the format rather than a fixture's convenience.
+asserted is the format rather than a fixture's convenience. What a parsed
+trajectory *means* is MSD's business: ``test_msd`` owns the gravity check.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
-from jaxtyping import Float64, Int64
-from numpy import ndarray
-from scipy.spatial.transform import Rotation
 
 from dataforge import euroc
 from dataforge.euroc import (
     CameraRow,
     GtTrajectory,
-    MeasuredUp,
     TimestampedSamples,
     gt_trajectory,
-    measured_world_up,
     read_camera_index,
     read_numeric_csv,
 )
-from dataforge.logging_toolkit import ImuChannel
 
 CAMERA_CSV: bytes = b"#timestamp [ns],filename\n13000000000000,13000000000000.png\n13000018518000,13000018518000.png\n"
 IMU_CSV: bytes = (
@@ -71,32 +66,6 @@ def test_gt_quaternions_are_reordered_to_xyzw_and_dropouts_become_identity() -> 
     # A zero quaternion would break the rotation chain for every later frame.
     np.testing.assert_allclose(trajectory.quaternions_xyzw[1], [0.0, 0.0, 0.0, 1.0])
     assert trajectory.num_sanitized == 1
-
-
-def constant_pose_gt(times_ns: Int64[ndarray, "n_poses"], quaternion_xyzw: Float64[ndarray, "4"]) -> TimestampedSamples:
-    """A gt table holding one fixed orientation at the origin, in the file's wxyz order."""
-    return TimestampedSamples(
-        times_ns=times_ns,
-        values=np.column_stack([np.zeros((times_ns.size, 3)), np.tile(quaternion_xyzw[[3, 0, 1, 2]], (times_ns.size, 1))]),
-    )
-
-
-def test_the_world_up_axis_is_measured_by_rotating_the_accelerometer_into_the_world() -> None:
-    """An accelerometer at rest reads +g pointing *up*, so ``world_R_rig @ a_rig`` averages to the up axis."""
-    # -90 deg about x maps the rig's +z onto the world's +y, so a headset held level
-    # in a Y-up world reads gravity along its own +z.
-    world_R_rig: Rotation = Rotation.from_euler("x", -90.0, degrees=True)
-    times_ns: Int64[ndarray, "n_poses"] = np.arange(4_000, dtype=np.int64) * 1_000_000
-    rig_accel_xyz: Float64[ndarray, "n_samples 3"] = np.tile([0.1, -0.2, 9.81], (times_ns.size, 1))
-    # The second half of the capture points the other way; the 2 s window must ignore it.
-    rig_accel_xyz[times_ns >= euroc.MEASURED_UP_WINDOW_NS] = [0.1, -0.2, -9.81]
-    gt: GtTrajectory = gt_trajectory(constant_pose_gt(times_ns, np.asarray(world_R_rig.as_quat(), dtype=np.float64)))
-
-    measured: MeasuredUp = measured_world_up(gt, ImuChannel(times_ns=times_ns, values_xyz=rig_accel_xyz))
-
-    assert measured.axis == "+y"
-    # At rest the whole of gravity lands on that one axis.
-    assert measured.fraction == pytest.approx(1.0, abs=0.01)
 
 
 def test_an_empty_gt_is_an_error_not_a_silent_zero() -> None:

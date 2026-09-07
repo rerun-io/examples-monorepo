@@ -60,18 +60,36 @@ def test_group_archives_orders_volumes_parts_first_and_drops_non_archives() -> N
     assert [path for path, _ in grouped["b"]] == ["d/b.z01", "d/b.z02", "d/b.zip"]
 
 
-def test_plain_zip_reader_serves_csvs_and_frames_in_order(tmp_path: Path) -> None:
+def test_plain_zip_reader_serves_single_members_and_streams_in_order(tmp_path: Path) -> None:
     tree: Path = tmp_path / "tree"
     member_tree(tree, num_directories=2, num_frames=4)
     archive: Path = tmp_path / f"{TOP}.zip"
     shutil.make_archive(str(archive.with_suffix("")), "zip", root_dir=tree)
 
     with open_member_reader([archive], tmp_path / "work") as reader:
-        assert reader.csv_bytes(f"{TOP}/data1/index.csv").startswith(b"filename")
-        frames: list[bytes] = list(reader.png_frames(frame_members(tree, 1)))
+        assert reader.read_member(f"{TOP}/data1/index.csv").startswith(b"filename")
+        frames: list[bytes] = list(reader.iter_members(frame_members(tree, 1)))
     assert len(frames) == 4
     assert all(frame.startswith(b"\x89PNG") for frame in frames)
     assert frames == [frame_bytes(index) for index in range(4)]
+
+
+def test_a_stream_spanning_two_directories_is_refused_by_both_readers(tmp_path: Path) -> None:
+    """The one-directory rule is part of the seam, so the cheap reader enforces it too.
+
+    A split archive is extracted a directory at a time, so a call naming two
+    would extract both and blow the extraction budget. If only that reader
+    checked, a converter would pass on every sequence that happens to ship a
+    plain zip and fail on the one long session that does not.
+    """
+    tree: Path = tmp_path / "tree"
+    member_tree(tree, num_directories=2, num_frames=2)
+    archive: Path = tmp_path / f"{TOP}.zip"
+    shutil.make_archive(str(archive.with_suffix("")), "zip", root_dir=tree)
+    mixed: list[str] = [frame_members(tree, 0)[0], frame_members(tree, 1)[0]]
+
+    with open_member_reader([archive], tmp_path / "work") as reader, pytest.raises(ValueError, match="one directory at a time"):
+        list(reader.iter_members(mixed))
 
 
 @pytest.mark.skipif(shutil.which("zip") is None, reason="needs Info-ZIP's zip to build a multi-volume fixture")
@@ -88,7 +106,7 @@ def test_split_archive_reader_extracts_one_directory_at_a_time(tmp_path: Path) -
 
     work: Path = tmp_path / "work"
     with open_member_reader(volumes, work) as reader:
-        frames: list[bytes] = list(reader.png_frames(members))
+        frames: list[bytes] = list(reader.iter_members(members))
     assert frames == [frame_bytes(index) for index in range(12)]
     # The extracted PNGs are gone again; peak scratch is one directory, not the archive.
     assert not list(work.rglob("*.png"))

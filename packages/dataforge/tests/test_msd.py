@@ -5,7 +5,8 @@ monkeypatched onto a synthetic sequence zip built in ``tmp_path``, so a convert
 exercises the real archive reader, the real AV1 encoder and the real writers —
 only the transport is faked. What is not MSD-specific is tested next door:
 ``test_archives`` (the archive readers), ``test_basalt`` (the calibration) and
-``test_euroc`` (the csv streams and the world-up measurement).
+``test_euroc`` (the csv streams). The world-up measurement is here, because the
+axis it answers is a claim about MSD's own corpus.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ import pytest
 import rerun as rr
 import rerun.blueprint as rrb
 from conftest import calibration_fixture, column_rows, png_frame, read_back
-from jaxtyping import Float64
+from jaxtyping import Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
@@ -31,6 +32,7 @@ from dataforge.basalt import BasaltPose, CalibratedCamera, FollowFrame, follow_f
 from dataforge.datasets import msd
 from dataforge.datasets.msd import (
     MSD_DEVICES,
+    MeasuredUp,
     MsdConfig,
     MsdDataset,
     MsdDevice,
@@ -38,8 +40,11 @@ from dataforge.datasets.msd import (
     MsdSource,
     build_blueprint,
     follow_eye,
+    measured_world_up,
 )
+from dataforge.euroc import GtTrajectory, TimestampedSamples, gt_trajectory
 from dataforge.identity import SequenceIdentity
+from dataforge.logging_toolkit import ImuChannel
 
 REVISION_SHA: str = "0123456789abcdef0123456789abcdef01234567"
 """Fake resolved repo revision every test's ``repo_revision`` stub returns."""
@@ -97,6 +102,7 @@ def test_discover_groups_split_parts_and_orders_by_collection_then_sequence(monk
         ],
     }
     monkeypatch.setattr(msd, "list_collection_files", lambda repo_id, path, revision=None: listing.get(path, []))
+    monkeypatch.setattr(msd, "repo_revision", lambda repo_id, revision=None: REVISION_SHA)
 
     discovered: list[tuple[SequenceIdentity, MsdSource]] = MsdDataset(MsdConfig(device="index")).discover()
     keys: list[str] = [identity.sequence_key for identity, _ in discovered]
@@ -119,6 +125,7 @@ def test_discover_ignores_collections_of_other_devices(monkeypatch: pytest.Monke
         return []
 
     monkeypatch.setattr(msd, "list_collection_files", listing)
+    monkeypatch.setattr(msd, "repo_revision", lambda repo_id, revision=None: REVISION_SHA)
     dataset: MsdDataset = MsdDataset(MsdConfig(device="g2"))
     assert dataset.discover() == []
     assert asked == ["M_monado_datasets/MG_reverb_g2/MGO_others"]
@@ -278,6 +285,8 @@ class FakeHub:
     """What the synthetic tree wrote, so an assertion reads it back rather than recomputes it."""
     fetched: list[tuple[str, ...]]
     """``allow_patterns`` of every ``hf_fetch`` call, in order."""
+    revisions: list[str | None]
+    """The ``revision`` every listing and fetch asked the hub for, in order."""
     archives: list[Path]
     """The sequence's archive volume(s), as they land under ``root``."""
 
@@ -328,11 +337,13 @@ def build_hub(
     size: int = archive_bytes if archive_bytes is not None else (archive_dir / f"{SEQUENCE}.zip").stat().st_size
     listing: list[tuple[str, int]] = [(f"{collection_path}/{SEQUENCE}.zip", size), (f"{collection_path}/README.md", 12)]
     fetched: list[tuple[str, ...]] = []
+    revisions: list[str | None] = []
 
     def fake_fetch(
         repo_id: str, *, allow_patterns: Sequence[str], local_dir: Path, repo_type: str = "dataset", revision: str | None = None
     ) -> Path:
         fetched.append(tuple(allow_patterns))
+        revisions.append(revision)
         for pattern in allow_patterns:
             for match in sorted(remote.glob(pattern)):
                 destination: Path = Path(local_dir) / match.relative_to(remote)
@@ -340,7 +351,11 @@ def build_hub(
                 shutil.copy2(match, destination)
         return Path(local_dir)
 
-    monkeypatch.setattr(msd, "list_collection_files", lambda repo_id, path, revision=None: listing if path == collection_path else [])
+    def fake_listing(repo_id: str, path: str, revision: str | None = None) -> list[tuple[str, int]]:
+        revisions.append(revision)
+        return listing if path == collection_path else []
+
+    monkeypatch.setattr(msd, "list_collection_files", fake_listing)
     monkeypatch.setattr(transports, "hf_fetch", fake_fetch)
     monkeypatch.setattr(msd, "repo_revision", lambda repo_id, revision=None: REVISION_SHA)
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "rrd"))
@@ -352,6 +367,7 @@ def build_hub(
         config=config,
         clocks=clocks,
         fetched=fetched,
+        revisions=revisions,
         archives=[root / f"{collection_path}/{SEQUENCE}.zip"],
     )
 
@@ -407,6 +423,41 @@ def test_download_fetches_only_the_calibration_and_prints_the_plan(
 
 
 # ── convert ───────────────────────────────────────────────────────────────
+
+
+def test_one_resolved_commit_serves_the_listing_the_fetches_and_the_rrd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
+) -> None:
+    """A branch name moves under a conversion; a sha cannot.
+
+    ``--revision main`` is only the input: listing a collection on ``main``,
+    fetching an archive on it minutes later and stamping a third answer into the
+    rrd could describe three different trees, and nothing in the rrd would say
+    so. Every hub call takes the resolved sha instead, and it is the sha the
+    recording reports.
+    """
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    monkeypatch.setattr(msd, "repo_revision", lambda repo_id, revision=None: REVISION_SHA)
+    dataset: MsdDataset = MsdDataset(replace(hub.config, revision="main"))
+    identity, source = dataset.discover()[0]
+
+    target: Path = dataset.convert(identity, source, force=False)
+
+    assert hub.revisions, "the listing and both fetches all go through the hub"
+    assert set(hub.revisions) == {REVISION_SHA}, f"a call used something other than the sha: {hub.revisions}"
+    assert recording_properties(read_back(target), "capture")["hf_revision"] == REVISION_SHA
+
+
+def test_a_revision_the_hub_resolves_to_nothing_stops_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without a sha there is no tree to name, so the conversion has nothing honest to record."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    monkeypatch.setattr(msd, "repo_revision", lambda repo_id, revision=None: None)
+    dataset: MsdDataset = MsdDataset(replace(hub.config, revision="no-such-branch"))
+
+    with pytest.raises(RuntimeError, match="no-such-branch"):
+        dataset.discover()
+
+
 
 
 @pytest.mark.parametrize("device", ["index", "g2"])
@@ -631,6 +682,35 @@ def test_the_gt_properties_report_the_poses_the_repairs_and_the_measured_axis(co
     assert gt["measured_up"] == "+y"
     measured_fraction: object = gt["measured_up_fraction"]
     assert isinstance(measured_fraction, float) and measured_fraction > 0.9
+
+
+# ── the world up measurement ────────────────────────────────────
+
+
+def constant_pose_gt(times_ns: Int64[ndarray, "n_poses"], quaternion_xyzw: Float64[ndarray, "4"]) -> TimestampedSamples:
+    """A gt table holding one fixed orientation at the origin, in the file's wxyz order."""
+    return TimestampedSamples(
+        times_ns=times_ns,
+        values=np.column_stack([np.zeros((times_ns.size, 3)), np.tile(quaternion_xyzw[[3, 0, 1, 2]], (times_ns.size, 1))]),
+    )
+
+
+def test_the_world_up_axis_is_measured_by_rotating_the_accelerometer_into_the_world() -> None:
+    """An accelerometer at rest reads +g pointing *up*, so ``world_R_rig @ a_rig`` averages to the up axis."""
+    # -90 deg about x maps the rig's +z onto the world's +y, so a headset held level
+    # in a Y-up world reads gravity along its own +z.
+    world_R_rig: Rotation = Rotation.from_euler("x", -90.0, degrees=True)
+    times_ns: Int64[ndarray, "n_poses"] = np.arange(4_000, dtype=np.int64) * 1_000_000
+    rig_accel_xyz: Float64[ndarray, "n_samples 3"] = np.tile([0.1, -0.2, 9.81], (times_ns.size, 1))
+    # The second half of the capture points the other way; the 2 s window must ignore it.
+    rig_accel_xyz[times_ns >= msd.MEASURED_UP_WINDOW_NS] = [0.1, -0.2, -9.81]
+    gt: GtTrajectory = gt_trajectory(constant_pose_gt(times_ns, np.asarray(world_R_rig.as_quat(), dtype=np.float64)))
+
+    measured: MeasuredUp = measured_world_up(gt, ImuChannel(times_ns=times_ns, values_xyz=rig_accel_xyz))
+
+    assert measured.axis == "+y"
+    # At rest the whole of gravity lands on that one axis.
+    assert measured.fraction == pytest.approx(1.0, abs=0.01)
 
 
 def test_a_world_up_the_data_disagrees_with_is_announced(

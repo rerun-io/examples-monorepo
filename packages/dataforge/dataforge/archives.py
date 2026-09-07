@@ -3,8 +3,11 @@
 An Info-ZIP multi-volume set (``<stem>.z01``, ``<stem>.z02``, …, ``<stem>.zip``)
 and a plain ``.zip`` need completely different machinery — Python's ``zipfile``
 cannot read a spanned archive at all — but a converter only ever asks two things
-of either: give me this csv, and give me these frames in this order. That pair is
-the whole seam, and ``open_member_reader`` picks the implementation.
+of either: give me this member, and give me these members in this order. That
+pair is the whole seam, and ``open_member_reader`` picks the implementation.
+Neither method knows what a member holds: the small one is a csv today and the
+streamed ones are PNG frames, and a reader that named either would have to grow
+a method per format.
 
 Monado SLAM is the first dataset that needs this; nothing here is MSD-specific.
 """
@@ -21,10 +24,26 @@ from contextlib import AbstractContextManager
 from pathlib import Path, PurePosixPath
 from types import TracebackType
 
-from dataforge.paths import remove_tree
-
 PART_SUFFIX_RE: re.Pattern[str] = re.compile(r"^\.z\d+$")
 """Info-ZIP split-volume suffix (``.z01``, ``.z02``, …); the closing volume is the plain ``.zip``."""
+
+
+def remove_tree(root: Path) -> None:
+    """Delete a scratch directory tree, reporting what it could not delete.
+
+    ``shutil.rmtree(..., ignore_errors=True)`` is the wrong default for a raw
+    tree under a size budget: a directory that quietly fails to go away is
+    exactly how the next sequence's fetch finds the disk full and blames its own
+    leftovers. A tree that was never there is not a failure, so only real errors
+    are printed — and they are printed rather than raised, because every caller
+    is already cleaning up after something else.
+
+    Args:
+        root: Directory to remove, along with everything under it.
+    """
+    if not root.exists():
+        return
+    shutil.rmtree(root, onexc=lambda _function, failed, error: print(f"  warning: could not remove {failed}: {type(error).__name__}: {error}"))
 
 
 def resolve_seven_zip() -> Path:
@@ -41,20 +60,51 @@ def resolve_seven_zip() -> Path:
 
 
 class MemberReader(AbstractContextManager["MemberReader"], ABC):
-    """Reads named members out of one sequence archive; the seam both readers implement."""
+    """Reads named members out of one sequence archive; the seam both readers implement.
+
+    A reader owns whatever scratch it needed: leaving the context removes it,
+    whether the caller finished the members or abandoned them mid-iteration.
+    """
 
     @abstractmethod
-    def csv_bytes(self, member: str) -> bytes:
+    def read_member(self, member: str) -> bytes:
         """Whole contents of one small member, e.g. ``<SEQ>/mav0/imu0/data.csv``."""
 
     @abstractmethod
-    def png_frames(self, members: Sequence[str]) -> Iterator[bytes]:
-        """Encoded PNG bytes of ``members``, in the given order, one frame at a time.
+    def iter_members(self, members: Sequence[str]) -> Iterator[bytes]:
+        """Contents of ``members``, in the given order, one at a time.
 
-        Members must all live in one directory (one camera's ``data/``): a
-        multi-volume archive is extracted a directory at a time, so mixing
-        cameras in one call would defeat the point of the extraction budget.
+        For a stream too big to hold at once — one camera's PNG frames — which
+        is why the members must all live in **one** directory: a multi-volume
+        archive is extracted a directory at a time, so mixing two cameras in one
+        call would extract both and defeat the extraction budget.
+
+        Raises:
+            ValueError: The members do not share one parent directory.
         """
+
+
+def one_parent_directory(members: Sequence[str]) -> str:
+    """The single directory ``members`` live in, refusing a call that spans two.
+
+    Checked in both readers rather than in the split one alone: the constraint is
+    part of the seam, so the cheap in-process reader has to reject the same calls
+    the expensive one cannot serve, or a converter would only find out on the one
+    sequence that happens to ship a split archive.
+
+    Args:
+        members: Archive-relative member names, at least one.
+
+    Returns:
+        Their common parent, as a posix path string.
+
+    Raises:
+        ValueError: They do not all share one parent.
+    """
+    parents: set[str] = {str(PurePosixPath(member).parent) for member in members}
+    if len(parents) != 1:
+        raise ValueError(f"iter_members reads one directory at a time, but these members span {sorted(parents)}")
+    return parents.pop()
 
 
 class ZipMemberReader(MemberReader):
@@ -63,10 +113,12 @@ class ZipMemberReader(MemberReader):
     def __init__(self, archive: Path) -> None:
         self.archive: zipfile.ZipFile = zipfile.ZipFile(archive)
 
-    def csv_bytes(self, member: str) -> bytes:
+    def read_member(self, member: str) -> bytes:
         return self.archive.read(member)
 
-    def png_frames(self, members: Sequence[str]) -> Iterator[bytes]:
+    def iter_members(self, members: Sequence[str]) -> Iterator[bytes]:
+        if members:
+            one_parent_directory(members)
         for member in members:
             yield self.archive.read(member)
 
@@ -80,9 +132,9 @@ class SevenZipMemberReader(MemberReader):
     Python's ``zipfile`` opens the closing volume — its central directory is
     intact — and then fails on the first member whose data crosses a volume
     boundary, so it cannot be used at all here. 7-Zip cannot stream either, so
-    ``png_frames`` extracts the members' directory into ``work_dir``, yields the
-    files from there, and deletes them again: peak scratch is one camera's PNGs
-    rather than the whole sequence.
+    ``iter_members`` extracts the members' directory into ``work_dir``, yields the
+    files from there, and deletes them again: peak scratch is one directory's
+    members rather than the whole sequence.
     """
 
     def __init__(self, closing_volume: Path, work_dir: Path) -> None:
@@ -99,13 +151,13 @@ class SevenZipMemberReader(MemberReader):
             raise RuntimeError(f"{self.binary.name} exited {completed.returncode} on {self.archive.name}:\n{completed.stderr.decode(errors='replace')}")
         return completed.stdout
 
-    def csv_bytes(self, member: str) -> bytes:
+    def read_member(self, member: str) -> bytes:
         return self._run(["x", "-so", "-bso0", "-bsp0", str(self.archive), member])
 
-    def png_frames(self, members: Sequence[str]) -> Iterator[bytes]:
+    def iter_members(self, members: Sequence[str]) -> Iterator[bytes]:
         if not members:
             return
-        directory: str = str(PurePosixPath(members[0]).parent)
+        directory: str = one_parent_directory(members)
         extract_dir: Path = self.work_dir / "extract"
         remove_tree(extract_dir)
         extract_dir.mkdir(parents=True, exist_ok=True)
