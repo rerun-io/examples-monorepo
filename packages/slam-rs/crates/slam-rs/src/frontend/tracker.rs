@@ -92,6 +92,16 @@ const FILTER_MARGIN: f32 = 2.0;
 /// where the products in [`PatchSoA::new`] leave the `usize` range.
 pub const MAX_CAPACITY: usize = 1 << 20;
 
+/// The most pyramid levels a tracker may be sized for.
+///
+/// `num_levels` is `optical_flow_levels + 1` and every per-patch buffer is sized
+/// with it, so it multiplies the capacity above. Each level halves both sides of
+/// the image: at 24 levels the top of the pyramid is one pixel of a 16-million
+/// pixel-wide frame, and basalt ships 3. Without a ceiling here a config asking
+/// for `10^12` levels turned into a 600-petabyte `Vec`, and a `Vec` that cannot be
+/// allocated aborts the process rather than returning.
+pub const MAX_LEVELS: usize = 24;
+
 /// What the tracker can refuse.
 ///
 /// Every public entry point in this module validates its inputs and returns one
@@ -127,11 +137,23 @@ pub enum TrackerError {
         /// [`MAX_CAPACITY`].
         ceiling: usize,
     },
+    /// A tracker was asked for more pyramid levels than [`MAX_LEVELS`].
+    #[error("a patch buffer over {num_levels} pyramid levels is over the ceiling of {ceiling}")]
+    TooManyLevels {
+        /// Levels asked for, which is `optical_flow_levels + 1`.
+        num_levels: usize,
+        /// [`MAX_LEVELS`].
+        ceiling: usize,
+    },
     /// A buffer shape does not fit in a `usize`.
     ///
     /// Checked product by product rather than after the fact: a wrapped
     /// multiplication would have turned an impossible shape into a plausible
-    /// allocation.
+    /// allocation. [`MAX_CAPACITY`] and [`MAX_LEVELS`] together already bound
+    /// every product well inside a 32-bit `usize`, so this cannot fire today —
+    /// the test `the_ceilings_bound_every_buffer_product` is the arithmetic that
+    /// says so, and this variant is what keeps raising a ceiling from silently
+    /// reintroducing a wrapped allocation.
     #[error(
         "a {capacity}-patch buffer over {num_levels} levels of {taps} taps does not fit in a usize"
     )]
@@ -533,16 +555,23 @@ impl<P: Pattern> PatchSoA<P> {
     ///
     /// # Errors
     ///
-    /// [`TrackerError::CapacityTooLarge`] above [`MAX_CAPACITY`], and
+    /// [`TrackerError::CapacityTooLarge`] above [`MAX_CAPACITY`],
+    /// [`TrackerError::TooManyLevels`] above [`MAX_LEVELS`], and
     /// [`TrackerError::BufferShapeOverflow`] when a buffer's element count does
-    /// not fit in a `usize`. Both are checked before anything is allocated: the
-    /// products below reach `Vec` as a length, and a `Vec` too long to exist
+    /// not fit in a `usize`. All three are checked before anything is allocated:
+    /// the products below reach `Vec` as a length, and a `Vec` too long to exist
     /// panics rather than returning (decision D32).
     pub fn new(capacity: usize, num_levels: usize) -> Result<Self, TrackerError> {
         if capacity > MAX_CAPACITY {
             return Err(TrackerError::CapacityTooLarge {
                 capacity,
                 ceiling: MAX_CAPACITY,
+            });
+        }
+        if num_levels > MAX_LEVELS {
+            return Err(TrackerError::TooManyLevels {
+                num_levels,
+                ceiling: MAX_LEVELS,
             });
         }
         let overflow = || TrackerError::BufferShapeOverflow {
@@ -1730,22 +1759,39 @@ mod tests {
         }
     }
 
-    /// A level count that overflows the buffer product is refused too.
+    /// A pyramid deeper than the ceiling is refused before the allocation.
     ///
-    /// The ceiling bounds the capacity; `num_levels` arrives from
-    /// `optical_flow_levels + 1` and is bounded nowhere, so
-    /// `num_levels * P::SIZE * capacity` is checked product by product rather
-    /// than computed and hoped for.
+    /// `optical_flow_levels = 10^12` sized a `Vec` of 6e17 floats. A `Vec` whose
+    /// length fits in a `usize` but whose bytes do not exist does not panic — the
+    /// allocator handler **aborts** the process, taking the Python interpreter
+    /// with it, so this is checked rather than attempted.
     #[test]
-    fn a_buffer_shape_that_does_not_fit_in_a_usize_is_refused() {
-        let error = PatchSoA::<Pattern51>::new(MAX_CAPACITY, usize::MAX).unwrap_err();
-        assert_eq!(
-            error,
-            TrackerError::BufferShapeOverflow {
-                capacity: MAX_CAPACITY,
-                num_levels: usize::MAX,
-                taps: Pattern51::SIZE,
-            }
+    fn more_levels_than_the_ceiling_is_refused() {
+        for num_levels in [MAX_LEVELS + 1, 1_000_000_000_001, usize::MAX] {
+            assert_eq!(
+                PatchSoA::<Pattern51>::new(3000, num_levels).unwrap_err(),
+                TrackerError::TooManyLevels {
+                    num_levels,
+                    ceiling: MAX_LEVELS,
+                }
+            );
+        }
+    }
+
+    /// The two ceilings bound every buffer product, in `usize` and in `u32`.
+    ///
+    /// This is what makes [`TrackerError::BufferShapeOverflow`] unreachable
+    /// today: it is the guard that fires if either ceiling is ever raised past
+    /// the point where a product wraps, and this test is the proof that it does
+    /// not have to fire now.
+    #[test]
+    fn the_ceilings_bound_every_buffer_product() {
+        let flags: usize = MAX_LEVELS.checked_mul(MAX_CAPACITY).unwrap();
+        let taps: usize = flags.checked_mul(Pattern51::SIZE).unwrap();
+        let jacobians: usize = taps.checked_mul(3).unwrap();
+        assert!(
+            jacobians <= u32::MAX as usize,
+            "{jacobians} elements would wrap a 32-bit usize"
         );
     }
 
