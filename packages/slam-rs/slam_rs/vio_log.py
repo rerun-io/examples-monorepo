@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import Bool, Float64, Int64, UInt8
+from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from simplecv.ops.umeyama import SimilarityTransform
@@ -327,10 +327,8 @@ class VioLogger:
             self.window_strip @ rotation.T + translation for rotation, translation in zip(rotations, poses[:, 0:3], strict=True)
         ]
         t_ns: Int64[ndarray, " n_frames"] = snapshot.window_t_ns
-        keyframe: Bool[ndarray, " n_frames"] = np.isin(t_ns, snapshot.kf_ids)
-        long_term: Bool[ndarray, " n_frames"] = np.isin(t_ns, snapshot.ltkfs)
-        colors: UInt8[ndarray, "n_frames 4"] = np.where(keyframe[:, None], KEYFRAME_COLOR, POSE_COLOR).astype(np.uint8)
-        colors[long_term] = LTKF_COLOR
+        colors: UInt8[ndarray, "n_frames 4"] = np.where(snapshot.window_keyframe[:, None], KEYFRAME_COLOR, POSE_COLOR).astype(np.uint8)
+        colors[snapshot.window_long_term] = LTKF_COLOR
         rr.log(f"{RUN_ENTITY}/window", rr.LineStrips3D(strips, colors=colors, radii=0.001))
 
         # The frames that left this step are gone from the window above, so they

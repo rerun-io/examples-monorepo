@@ -253,7 +253,8 @@ impl Vio {
 /// Everything is a flat array or a scalar: the core logs nothing itself (D03),
 /// so this is what the Python layer draws from. The window is the 15-dof states
 /// followed by the pose-only blocks, each oldest first; `is_state` separates
-/// them and `kf_ids`/`ltkfs` say which are keyframes.
+/// them, `keyframe`/`long_term` say what each frame is, and `kf_ids`/`ltkfs`
+/// are the same two facts as id lists, which is what a count wants.
 #[pyclass(module = "slam_rs._core", frozen, skip_from_py_object)]
 #[derive(Debug)]
 pub struct VioSnapshot {
@@ -263,6 +264,8 @@ pub struct VioSnapshot {
     window_poses: Vec<f64>,
     window_linearized: Vec<bool>,
     window_is_state: Vec<bool>,
+    window_keyframe: Vec<bool>,
+    window_long_term: Vec<bool>,
     kf_ids: Vec<i64>,
     ltkfs: Vec<i64>,
     marginalized: Vec<i64>,
@@ -298,6 +301,8 @@ impl VioSnapshot {
         let mut window_poses: Vec<f64> = Vec::with_capacity(7 * frames);
         let mut window_linearized: Vec<bool> = Vec::with_capacity(frames);
         let mut window_is_state: Vec<bool> = Vec::with_capacity(frames);
+        let mut window_keyframe: Vec<bool> = Vec::with_capacity(frames);
+        let mut window_long_term: Vec<bool> = Vec::with_capacity(frames);
         for state in window.states.iter().chain(window.poses.iter()) {
             let quaternion: [f32; 4] = state.t_w_i.rotation.quaternion_xyzw();
             window_t_ns.push(state.t_ns);
@@ -312,6 +317,8 @@ impl VioSnapshot {
             ]);
             window_linearized.push(state.linearized);
             window_is_state.push(state.vel_bias.is_some());
+            window_keyframe.push(state.keyframe);
+            window_long_term.push(state.long_term_keyframe);
         }
         let mut landmark_ids: Vec<i64> = Vec::with_capacity(window.landmarks.len());
         let mut landmark_hosts: Vec<i64> = Vec::with_capacity(window.landmarks.len());
@@ -338,6 +345,8 @@ impl VioSnapshot {
             window_poses,
             window_linearized,
             window_is_state,
+            window_keyframe,
+            window_long_term,
             kf_ids: stats.kf_ids.clone(),
             ltkfs: stats.ltkfs.clone(),
             marginalized: window.marginalized.clone(),
@@ -402,6 +411,21 @@ impl VioSnapshot {
     #[getter]
     fn window_is_state<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
         self.window_is_state.to_pyarray(py)
+    }
+
+    /// Whether each window frame is a keyframe: `bool[n]`.
+    ///
+    /// The estimator answers this per frame, so nothing downstream has to join
+    /// [`VioSnapshot::kf_ids`] back onto [`VioSnapshot::window_t_ns`].
+    #[getter]
+    fn window_keyframe<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        self.window_keyframe.to_pyarray(py)
+    }
+
+    /// Whether each window frame is a long-term keyframe: `bool[n]`.
+    #[getter]
+    fn window_long_term<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        self.window_long_term.to_pyarray(py)
     }
 
     /// The keyframes' timestamps, oldest first: `int64[k]`.

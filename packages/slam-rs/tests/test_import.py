@@ -184,6 +184,12 @@ def test_the_pipeline_tracks_a_shifted_scene_and_reports_its_window(pipeline: Pi
     # Every keyframe is a window frame; the reverse is not true.
     assert set(snapshot.kf_ids.tolist()) <= set(snapshot.window_t_ns.tolist())
     assert set(snapshot.ltkfs.tolist()) <= set(snapshot.kf_ids.tolist())
+    # The per-frame flags and the id lists are the same two facts, so a frame is
+    # a keyframe exactly where its timestamp is in the list.
+    assert snapshot.window_keyframe.shape == (window,)
+    assert snapshot.window_long_term.shape == (window,)
+    np.testing.assert_array_equal(snapshot.window_keyframe, np.isin(snapshot.window_t_ns, snapshot.kf_ids))
+    np.testing.assert_array_equal(snapshot.window_long_term, np.isin(snapshot.window_t_ns, snapshot.ltkfs))
 
     landmarks: int = len(snapshot.landmark_ids)
     assert landmarks > 0, "a textured scene should triangulate something"

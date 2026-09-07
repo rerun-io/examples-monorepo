@@ -399,7 +399,8 @@ snapshot.window_t_ns            # int64[n], the 15-dof states then the pose bloc
 snapshot.window_poses           # float64[n, 7], [tx ty tz qx qy qz qw]
 snapshot.window_linearized      # bool[n]: the frozen linearization points
 snapshot.window_is_state        # bool[n]: a 15-dof state rather than a pose block
-snapshot.kf_ids, snapshot.ltkfs, snapshot.marginalized
+snapshot.window_keyframe        # bool[n]: a keyframe, and window_long_term for a long-term one
+snapshot.kf_ids, snapshot.ltkfs, snapshot.marginalized   # the same two facts as id lists, plus what left
 snapshot.landmark_ids, snapshot.landmark_positions       # int64[p], float64[p, 3] world
 snapshot.landmark_hosts, snapshot.landmark_host_cameras  # int64[p] each
 snapshot.lm_iterations, snapshot.lm_accepted, snapshot.lm_lambda, snapshot.termination

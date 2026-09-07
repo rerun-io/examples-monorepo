@@ -63,10 +63,11 @@ class VioSnapshot:
     """The estimator's window, its landmarks and the last measured frame's statistics.
 
     The window is the 15-dof states followed by the pose-only blocks, each oldest
-    first; :attr:`window_is_state` separates them, :attr:`kf_ids` and
-    :attr:`ltkfs` say which are keyframes, and :attr:`marginalized` is what the
-    last marginalization removed. Everything is a copy, so a snapshot stays valid
-    across the next :meth:`Vio.track`.
+    first; :attr:`window_is_state` separates them, :attr:`window_keyframe` and
+    :attr:`window_long_term` say what each frame is, :attr:`kf_ids` and
+    :attr:`ltkfs` are the same two facts as id lists, and :attr:`marginalized` is
+    what the last marginalization removed. Everything is a copy, so a snapshot
+    stays valid across the next :meth:`Vio.track`.
     """
 
     @property
@@ -86,6 +87,14 @@ class VioSnapshot:
     @property
     def window_is_state(self) -> Bool[ndarray, " n_frames"]:
         """Whether each frame is a 15-dof state rather than a pose-only block."""
+
+    @property
+    def window_keyframe(self) -> Bool[ndarray, " n_frames"]:
+        """Whether each window frame is a keyframe, as the estimator itself answers it."""
+
+    @property
+    def window_long_term(self) -> Bool[ndarray, " n_frames"]:
+        """Whether each window frame is a long-term keyframe."""
 
     @property
     def kf_ids(self) -> Int64[ndarray, " n_keyframes"]:
