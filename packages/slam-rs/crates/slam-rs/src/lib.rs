@@ -759,7 +759,11 @@ mod tests {
         assert_abs_diff_eq!(result.world_from_rig[6], 1.0, epsilon = 1e-12);
         assert_eq!(vio.frontend().frame_counter(), 0);
         assert_eq!(vio.frontend().t_ns(), -1);
-        assert_eq!(format!("{vio:?}"), before, "the refused frameset moved a field");
+        assert_eq!(
+            format!("{vio:?}"),
+            before,
+            "the refused frameset moved a field"
+        );
     }
 
     /// `vio_enforce_realtime` drops framesets, which Offline mode cannot do

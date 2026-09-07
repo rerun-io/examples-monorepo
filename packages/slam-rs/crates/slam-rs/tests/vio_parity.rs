@@ -246,9 +246,11 @@ fn a_refused_frameset_is_retried_bit_identically() {
     // The IMU arrives first: the reference run.
     let mut ahead: Vio<f32> = pipeline();
     push_imu_through(&mut ahead, 0, COMMITTED_IMU_HORIZON_NS);
-    let wanted: Vec<VioResult> = (0..COMMITTED_FRAMESETS)
-        .map(|frame| {
-            let views: Vec<ImageView<'_>> = rasters[frame].iter().map(view).collect();
+    let wanted: Vec<VioResult> = rasters
+        .iter()
+        .enumerate()
+        .map(|(frame, raster)| {
+            let views: Vec<ImageView<'_>> = raster.iter().map(view).collect();
             ahead.track(ORACLE.flow[frame].t_ns, &views).unwrap()
         })
         .collect();
@@ -258,9 +260,9 @@ fn a_refused_frameset_is_retried_bit_identically() {
     let mut behind: Vio<f32> = pipeline();
     let mut next: usize = 0;
     let mut got: Vec<VioResult> = Vec::new();
-    for frame in 0..COMMITTED_FRAMESETS {
+    for (frame, raster) in rasters.iter().enumerate() {
         let t_ns: i64 = ORACLE.flow[frame].t_ns;
-        let views: Vec<ImageView<'_>> = rasters[frame].iter().map(view).collect();
+        let views: Vec<ImageView<'_>> = raster.iter().map(view).collect();
 
         let before: u64 = fingerprint(&behind);
         let refused: VioResult = behind.track(t_ns, &views).unwrap();
@@ -406,5 +408,3 @@ fn the_whole_vio_follows_the_cpp_trajectory() {
         "the orientation drifted {worst_rotation_deg:.4e} deg from basalt's"
     );
 }
-
-
