@@ -362,14 +362,20 @@ fn border101(x: i64, h: i64) -> i64 {
 
 /// basalt's `subsample`, `image_pyr.h:99-140`, operation for operation.
 ///
-/// The vertical pass writes a **transposed** accumulator: C++ declares
-/// `ManagedImage<int> tmp(img_sub.h, img.w)`, whose width is the destination
-/// height, and writes `tmp(r, c)` with `r` the destination row and `c` the
-/// source column (`image_pyr.h:117`). The horizontal pass then walks that
-/// buffer's rows, so `tmp.h` is the *source width* and `tmp.w` the destination
-/// height (`image_pyr.h:126-136`). Reproducing the transposition is not
-/// cosmetic: it is what makes the second pass's `border101(2 * c + 2, tmp.h)`
-/// reflect about the source width.
+/// C++ writes a **transposed** accumulator: `ManagedImage<int> tmp(img_sub.h,
+/// img.w)`, whose width is the destination height, holds `tmp(r, c)` with `r`
+/// the destination row and `c` the source column (`image_pyr.h:117`), and the
+/// horizontal pass walks its rows (`:126-136`). What that transposition decides
+/// is the *arithmetic*: `tmp.h` is the source width, so the second pass's
+/// `border101(2 * c + 2, tmp.h)` reflects about the source width, and that is
+/// reproduced here.
+///
+/// The **layout** is not reproduced, because it costs a cache line per
+/// coefficient in both directions: the vertical pass would stride its writes by
+/// `dst_height` and the horizontal pass would stride its `dst` writes by the
+/// row. The accumulator here is row-major over `dst_height` x `src_width`, so
+/// both passes run along their rows. Every value and every index is the one C++
+/// computes — the taps are integers, where an order is not a rounding.
 ///
 /// There is exactly one rounding, at the end of the horizontal pass, so the
 /// separable form is bit-identical to a direct 5x5 convolution.
@@ -388,7 +394,8 @@ fn subsample(src: &ImageU16, dst: &mut ImageU16, scratch: &mut [i32]) {
     debug_assert_eq!(dst_width, src_width >> 1);
     debug_assert_eq!(dst_height, src_height >> 1);
 
-    // Vertical convolution, `image_pyr.h:108-121`.
+    // Vertical convolution, `image_pyr.h:108-121`, one accumulator row per
+    // destination row.
     for r in 0..dst_height {
         let row2: i64 = 2 * r as i64;
         // `std::abs(2 * r - 2)` and `std::abs(2 * r - 1)`, not `border101`.
@@ -406,9 +413,10 @@ fn subsample(src: &ImageU16, dst: &mut ImageU16, scratch: &mut [i32]) {
             src.row(rows[3]),
             src.row(rows[4]),
         ];
+        // `tmp(r, c)`, one contiguous run of `c` rather than one column of it.
+        let band: &mut [i32] = &mut scratch[r * src_width..(r + 1) * src_width];
         for c in 0..src_width {
-            // `tmp(r, c)`: x = r, y = c, over a buffer of width `dst_height`.
-            scratch[c * dst_height + r] = KERNEL[0] * i32::from(row_m2[c])
+            band[c] = KERNEL[0] * i32::from(row_m2[c])
                 + KERNEL[1] * i32::from(row_m1[c])
                 + KERNEL[2] * i32::from(row_0[c])
                 + KERNEL[3] * i32::from(row_p1[c])
@@ -416,36 +424,31 @@ fn subsample(src: &ImageU16, dst: &mut ImageU16, scratch: &mut [i32]) {
         }
     }
 
-    // Horizontal convolution, `image_pyr.h:123-139`. `tmp.h` is `src_width`.
-    for c in 0..dst_width {
-        let col2: i64 = 2 * c as i64;
-        let columns: [usize; 5] = [
-            (col2 - 2).unsigned_abs() as usize,
-            (col2 - 1).unsigned_abs() as usize,
-            col2 as usize,
-            border101(col2 + 1, src_width as i64) as usize,
-            border101(col2 + 2, src_width as i64) as usize,
-        ];
-        let band = |column: usize| -> &[i32] {
-            &scratch[column * dst_height..column * dst_height + dst_height]
-        };
-        let [col_m2, col_m1, col_0, col_p1, col_p2]: [&[i32]; 5] = [
-            band(columns[0]),
-            band(columns[1]),
-            band(columns[2]),
-            band(columns[3]),
-            band(columns[4]),
-        ];
-        for r in 0..dst_height {
-            let value: i32 = KERNEL[0] * col_m2[r]
-                + KERNEL[1] * col_m1[r]
-                + KERNEL[2] * col_0[r]
-                + KERNEL[3] * col_p1[r]
-                + KERNEL[4] * col_p2[r];
+    // Horizontal convolution, `image_pyr.h:123-139`. `tmp.h` is `src_width`, so
+    // the reflection is about the **source** width whichever way `tmp` is laid
+    // out.
+    let dst_stride: usize = dst.stride();
+    for r in 0..dst_height {
+        let band: &[i32] = &scratch[r * src_width..(r + 1) * src_width];
+        let out: &mut [u16] = &mut dst.data_mut()[r * dst_stride..r * dst_stride + dst_width];
+        for (c, pixel) in out.iter_mut().enumerate() {
+            let col2: i64 = 2 * c as i64;
+            let columns: [usize; 5] = [
+                (col2 - 2).unsigned_abs() as usize,
+                (col2 - 1).unsigned_abs() as usize,
+                col2 as usize,
+                border101(col2 + 1, src_width as i64) as usize,
+                border101(col2 + 2, src_width as i64) as usize,
+            ];
+            let value: i32 = KERNEL[0] * band[columns[0]]
+                + KERNEL[1] * band[columns[1]]
+                + KERNEL[2] * band[columns[2]]
+                + KERNEL[3] * band[columns[3]]
+                + KERNEL[4] * band[columns[4]];
             // `T val = ((val_int + (1 << 7)) >> 8)` (`image_pyr.h:135`). The
             // accumulator peaks at 65535 * 16 * 16, so the shift lands back in
             // `u16` exactly and the cast never truncates.
-            dst.set(c, r, ((value + (1 << 7)) >> 8) as u16);
+            *pixel = ((value + (1 << 7)) >> 8) as u16;
         }
     }
 }
