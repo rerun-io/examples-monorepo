@@ -898,15 +898,8 @@ fn translation_of<S: LieScalar>(
 /// past its `n == 1` shortcut into `maxCoeff()` of an empty matrix
 /// (`Eigenvalues/SelfAdjointEigenSolver.h:437`), which `DenseBase::redux`
 /// asserts against (`Core/Redux.h:445`) — so the check has to happen here
-/// (decision D32). The value is publicly constructible as
-/// `MargLinData::default()`, and it is what the estimator holds before its
-/// first marginalization; every prior a marginalization *produces* is at least
-/// `last_state_to_marg`'s 15 rows wide ([`new_prior_ordering`]). This is not
-/// [`MargError::EmptyPriorOrder`], which [`check_marg_nullspace`] needs because
-/// it divides by the number of blocks (`sqrt_ba_base.cpp:96`); nothing here
-/// reads the ordering at all. The debug copy's own empty prior is the other
-/// shape — no rows over the live ordering's width — and squares to that many
-/// zero eigenvalues.
+/// (decision D32). It is reachable: `MargLinData::default()` is public, and it
+/// is the prior the estimator holds before its first marginalization.
 pub fn check_eigenvalues<S: LieScalar>(mld: &MargLinData<S>) -> Result<DVector<f64>, MargError> {
     let h_d: DMatrix<f64> = mld.h.map(|v| v.to_f64());
     let h: DMatrix<f64> = if mld.is_sqrt {

@@ -182,7 +182,9 @@ pub enum MargError {
         size: usize,
     },
     /// The nullspace check was handed a prior with no blocks, where C++ divides
-    /// by `num_trans == 0` (`sqrt_ba_base.cpp:96`).
+    /// by `num_trans == 0` (`sqrt_ba_base.cpp:96`). [`check_eigenvalues`]
+    /// answers that same prior with the empty spectrum instead, because it
+    /// never reads the ordering at all.
     #[error("the prior's ordering is empty")]
     EmptyPriorOrder,
     /// The control direction handed to [`check_marg_nullspace`] is not as long

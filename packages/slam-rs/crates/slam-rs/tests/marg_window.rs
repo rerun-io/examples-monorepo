@@ -28,7 +28,7 @@
 //! | `a_window_that_is_not_frozen_is_refused_before_anything_changes` | a valid schedule over a block that is not at its linearization point, either kind, refused with the window bit-identical afterwards |
 //! | `a_frozen_demoted_state_marginalizes` | the control: the same schedule, and the demotion it performs |
 //! | `a_malformed_prior_is_refused_by_the_diagnostics` | the shapes `checkNullspace` and `checkEigenvalues` rely on and C++ does not assert |
-//! | `an_empty_prior_has_no_eigenvalues` | `checkEigenvalues` on a prior over no variables, where both eigensolvers assert |
+//! | `an_empty_prior_has_no_eigenvalues` | `checkEigenvalues` on the two empty priors a window holds before its first marginalization, where both eigensolvers assert |
 //! | `the_nullspace_debug_copy_follows_the_live_prior` | the debug prior's `H`, `b` **and** order (`:672`, called at `:1186`) |
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]

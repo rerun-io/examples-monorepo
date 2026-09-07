@@ -11,7 +11,7 @@
 //! inverse would produce `inf`, fail the finiteness test at `patch.h:164` and
 //! drop the point. Decision D41 records the same finding on the IMU side.
 //!
-//! Ported step by step from the vendored Eigen 3.4 in
+//! Ported step by step from the vendored Eigen 5.0.1 (`Eigen/Version:12`) in
 //! `thirdparty/basalt-headers/thirdparty/eigen`:
 //!
 //! * `internal::ldlt_inplace<Lower>::unblocked` (`LDLT.h:277-380`) — largest

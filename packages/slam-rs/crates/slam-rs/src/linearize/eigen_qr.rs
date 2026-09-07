@@ -206,10 +206,8 @@ pub(crate) fn contiguous_squared_norm<S: LieScalar>(
 /// returns `(tau, beta)`. `beta` is what the reflected column's first
 /// coefficient would be. basalt's landmark QR names it and drops it
 /// (`:448-450`), because [`apply_householder_on_the_left`] recomputes the whole
-/// column; its other two callers keep it — the marginalization QR writes it to
-/// the pivot and tests it against the rank threshold
-/// (`marg_helper.cpp:301-302`), and the column-pivoted QR writes it and tracks
-/// the largest (`ColPivHouseholderQR.h:544-547`).
+/// column; its other two callers keep it (see `crate::marg::helper` and
+/// `crate::marg::eigen_cod`).
 ///
 /// The `tailSqNorm <= tol` branch (`:76-79`) is the already-reduced column:
 /// `tau = 0` makes the reflection the identity, which is what
