@@ -5,10 +5,13 @@ basalt VIO fork: pure Rust, CPU first, N-camera from the start. Python owns the
 plumbing — catalog feed, decode, evaluation and Rerun logging — and talks to the
 core through a PyO3 extension module.
 
-The core is still a stub. The state machine, the error taxonomy and the value
-types across the boundary are real, and so is everything on the Python side —
-manifest, feed, metrics and replay — but the estimator itself lands in later PRs,
-so `track()` never reports `Tracking` yet.
+The estimator is still a stub: the state machine, the error taxonomy and the
+value types across the boundary are real, and so is everything on the Python side
+— manifest, feed, metrics and replay — but the sliding window lands in later PRs,
+so `track()` never reports `Tracking` yet. The **frontend** is not a stub, and it
+is driven from Python: `_core.OpticalFlow` tracks and detects on real framesets,
+and `tools/apps/replay.py --stage frontend` draws what it produced beside what
+the C++ fork produced on the same frames.
 
 ## Core modules
 
@@ -378,6 +381,65 @@ Images are copied in and the GIL is released around the core call, so a decoder
 thread keeps running. Wrong dtype, rank, shape or memory layout raises
 `ValueError`; IMU samples must be strictly increasing in time.
 
+**Every refusal is an exception, not a panic.** A Rust panic crosses PyO3 as
+`pyo3_runtime.PanicException`, which derives from `BaseException` and so walks
+straight through an `except Exception` handler, and a panic on a rayon worker
+inside the released-GIL region aborts the process outright (decision D32). So
+every value that sizes a buffer, bounds a loop or spawns a thread — the
+calibration included, since it shapes the occupancy grid — is checked in the
+core before it is used. The refusal is a `ValueError`, or the `TypeError`,
+`OverflowError` or `IndexError` PyO3 itself raises for an object of the wrong
+type, an integer outside the parameter's own type, or a camera past the end of
+the rig:
+
+| what | ceiling or rule | why the core cannot just try it |
+|---|---|---|
+| `max_keypoints` | `tracker::MAX_CAPACITY` = 1,048,576 | every per-patch buffer is preallocated from it; `Vec::with_capacity(2**63)` panics with `capacity overflow` |
+| `threads` | `parallel::MAX_THREADS` = 1024 | rayon spawns exactly what it is asked for, so 100,000 workers wedge the machine rather than erroring |
+| `optical_flow_levels` | at most 23 reductions, i.e. `tracker::MAX_LEVELS` = 24 stored levels | it multiplies every buffer, each sized with `levels + 1`; a `Vec` whose bytes do not exist **aborts** instead of unwinding |
+| `optical_flow_detection_min_threshold` | at least 1 | the detector halves the FAST threshold until it drops below this, and zero halves to zero for ever — `keypoints.cpp:162,187` has the same non-terminating loop, so basalt hangs on it too |
+| `optical_flow_detection_max_threshold` | at least `min_threshold` | otherwise the ladder never runs and the detector can never add a keypoint |
+| frameset image size | exactly the calibration's, per camera | the camera model, the detection grid and the occupancy matrix are all the calibrated geometry |
+| the calibrated resolution over `optical_flow_detection_grid_size` | `detect::MAX_CELLS` = 1,048,576 cells per camera | the occupancy counts are one `i32` per cell per camera, so a calibration is a memory request too: a one-pixel grid over a 4,294,967,294-pixel-square frame asked for 2^64 counts and `vec![0; rows * columns]` panicked with `capacity overflow` with no image in sight |
+
+`tests/test_frontend_boundary.py` walks the whole surface against hostile
+integers, objects and arrays and fails on anything that is not one of the four
+exceptions above. That is a walk over the surface, not a proof about every
+object a caller could construct.
+
+The frontend is driven the same way, and is the first stage with real output:
+
+```python
+from slam_rs import _core
+
+calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)  # the feed's dataclasses
+config = _core.VioConfig()                       # basalt's own defaults
+config.optical_flow_image_safe_radius = 472.0    # the one per-device frontend field
+
+flow = _core.OpticalFlow(calibration, config, threads=1)
+frame = flow.process(t_ns, [left, right])
+frame.ids(0)         # int64[n], ascending
+frame.positions(0)   # float32[n, 2] pixels
+frame.transforms(0)  # float32[n, 2, 3], [[m00, m01, tx], [m10, m11, ty]]
+frame.responses(0)   # float32[n], -1 where basalt records none
+frame.occupancy(0)   # int32[rows, columns] over camera 0's detection grid
+frame.num_new(0), frame.num_tracks(0)
+flow.t_ns              # int | None: the last accepted frameset, None before the first
+```
+
+Any `int64` is a timestamp, negative ones included: the frontend's clock is an
+`Option<i64>` rather than basalt's `t_ns = -1` sentinel (`optical_flow.h:172`),
+which read every negative timestamp as "no previous frame" and so restarted
+tracking on each one. Framesets must still arrive strictly in order, and a
+refused frameset leaves the frontend exactly as the last accepted one did.
+
+`Calibration.from_catalog` reads `slam_rs.catalog_feed.CameraCalib` and
+`ImuCalib` attribute by attribute and hands them to `Calibration::from_catalog_parts`,
+so the catalog-to-basalt rules — the rotation-matrix check, the model names, the
+isotropic noise densities — are not written a second time in Python. One of
+basalt's own files is read by `Calibration.from_json` or `VioConfig.from_json`,
+which is what the frontend's constructor then takes.
+
 ## The reference set
 
 `reference_segments.toml` freezes ten Monado SLAM Dataset segments — five
@@ -467,10 +529,50 @@ Both `--rr-config.headless` and `--rr-config.save` are honoured; in a shell
 without `DISPLAY`, pass `--rr-config.headless` or the spawned viewer wedges the
 recording stream.
 
+### `--stage frontend`, and the C++ overlay
+
+`--stage input` (the default) logs what the estimator is fed. `--stage frontend`
+runs the optical flow over the same framesets and logs what it produced, under
+the dataset's own entity tree so nothing needs a second coordinate convention:
+
+| entity | what |
+|---|---|
+| `/world/rig_00/cam_MM/pinhole/image` | the frame the frontend tracked, **full resolution** (JPEG), because the keypoints are in its pixels |
+| `.../keypoints` | `Points2D`, 2 px, one stable colour per track id from a hash of the id |
+| `.../trails` | `LineStrips2D`, the last ten positions of every live track, in the track's own colour |
+| `.../cells` | `Boxes2D` over the occupied cells of basalt's centred detection grid |
+| `.../keypoints_cpp` | what the C++ fork's `dump_flow.cpp` produced for the same frameset, in one contrasting magenta |
+| `/stats/frontend/...` | `num_tracks` and `num_new` per camera, and `frontend_ms` |
+
+The overlay is the parity claim made visible, and it is only ever drawn on the
+recording it came from. The eight committed dumps under
+`crates/slam-rs/tests/fixtures/flow/dumps/` are on the feed's `video_time` clock,
+which starts at zero on **every** segment, so the timestamp alone is not an
+association: `dumps/source.json` names the segment they came from, and the logger
+compares that name once, when it is built, with the segment id the feed read out
+of the recording being replayed. So the overlay follows the recording itself,
+however its file is named or reached — `--segment` or `--rrd`. A directory from
+another recording draws nothing and says so in one line; one carrying frames but
+no `source.json` is refused rather than drawn on whatever is being replayed, as
+is one carrying another rig's cameras. The overlay clears itself on the first
+frameset past the last dump rather than leaving a stale claim on screen. On the
+smoke segment the port hands out 175 keypoint ids over the first eight framesets where
+the C++ hands out 174, and every magenta ring in the viewer carries a coloured
+port dot at its centre bar a handful — the detector gap the flow gate measures.
+
+A blueprint is sent with the recording: one 2D view per camera plus the counters,
+panels collapsed. The whole 412-frameset smoke segment is 34.5 MiB of `.rrd` and
+takes 17.5 s, of which 29.5 ms per frameset is the frontend itself.
+
+```bash
+pixi run -e slam-rs-dev --frozen python tools/apps/replay.py \
+    --stage frontend --rr-config.headless --rr-config.save data/replay-frontend.rrd
+```
+
 ## Tests
 
-`pytest -q` deselects the `slow` marker and runs in under a second on synthetic
-inputs. The slow tests read a reference `.rrd` from the NAS or query the
+`pytest -q` deselects the `slow` marker and runs in about two seconds on
+synthetic inputs. The slow tests read a reference `.rrd` from the NAS or query the
 catalog, and skip when neither is reachable:
 
 ```bash

@@ -178,6 +178,20 @@ impl KeypointsData {
     }
 }
 
+/// The most cells one camera's detection grid may carry.
+///
+/// The shape comes from the calibrated resolution over
+/// `optical_flow_detection_grid_size`, so a calibration sizes a buffer as much
+/// as `max_keypoints` does: the occupancy counts are one `i32` per cell per
+/// camera, and a one-pixel grid over a 4,294,967,294-pixel-square frame asked
+/// for 2^64 of them — `vec![0; rows * columns]` answers that with a `capacity
+/// overflow` panic rather than an error (decision D32).
+///
+/// It is the keypoint budget's own ceiling because every keypoint occupies a
+/// cell, so no detection could fill a grid larger than the budget; 4 MiB of
+/// counts per camera.
+pub const MAX_CELLS: usize = crate::frontend::tracker::MAX_CAPACITY;
+
 /// basalt's centred detection grid (`keypoints.cpp:140-144`).
 ///
 /// `x_start = (w % cell) / 2` and `x_stop = x_start + cell * (w / cell - 1)`, so
@@ -258,13 +272,27 @@ impl CellGrid {
 pub struct DetectorConfig {
     /// `optical_flow_detection_num_points_cell`.
     pub num_points_cell: usize,
-    /// `optical_flow_detection_min_threshold`.
+    /// `optical_flow_detection_min_threshold`, floored at
+    /// [`LOWEST_THRESHOLD_RUNG`] by the ladder below.
     pub min_threshold: i32,
     /// `optical_flow_detection_max_threshold`.
     pub max_threshold: i32,
     /// `optical_flow_image_safe_radius`; `0` switches the gate off (`keypoints.cpp:178`).
     pub safe_radius: f32,
 }
+
+/// The rung the halving threshold ladder stops at, whatever the config says.
+///
+/// basalt's ladder is `while (points_added < num_points_cell && threshold >=
+/// min_threshold) { ...; threshold /= 2; }` (`keypoints.cpp:162`, `:187`), and
+/// integer division halves 1 to 0 and then 0 to 0 for ever: a
+/// `min_threshold` of `0` or less makes **the C++ loop non-terminating too**, on
+/// the same cell, and the port reproduced that hang. The frontend refuses such a
+/// config up front ([`crate::frontend::flow::FrontendError::ThresholdLadderNeverEnds`]),
+/// and this floor is the second line: the detector is public, so a caller that
+/// builds a [`DetectorConfig`] by hand gets the ladder run down to a threshold of
+/// 1 and no further, rather than a wedged process (decision D32).
+pub const LOWEST_THRESHOLD_RUNG: i32 = 1;
 
 /// The 8-bit view of a level-0 pyramid image, reused between frames.
 ///
@@ -390,6 +418,8 @@ fn suppress_non_maxima(
 /// The threshold ladder is `max_threshold`, then repeatedly halved by integer
 /// division until it drops below `min_threshold` — 40, 20, 10, 5 for the shipped
 /// configs (`:160-188`) — and it stops early as soon as the cell's budget is full.
+/// The last rung is never below [`LOWEST_THRESHOLD_RUNG`], which is what makes the
+/// ladder finite for every `min_threshold`; basalt's own is not.
 /// Within one threshold the surviving corners are ordered by descending response
 /// (`:166-167`) and taken until the budget is met, each having to clear the safe
 /// radius (`:178`), the masks (`:179`) and `EDGE_THRESHOLD` (`:180`).
@@ -432,6 +462,10 @@ pub fn detect_keypoints_with_cells(
             actual: occupancy.counts.len(),
         });
     }
+
+    // The rung the ladder below stops at: the config's own, but never under
+    // `LOWEST_THRESHOLD_RUNG`, or halving never gets past zero.
+    let lowest_rung: i32 = config.min_threshold.max(LOWEST_THRESHOLD_RUNG);
 
     let width: usize = image.width();
     let height: usize = image.height();
@@ -479,7 +513,7 @@ pub fn detect_keypoints_with_cells(
 
             let mut points_added: usize = 0;
             let mut threshold: i32 = config.max_threshold;
-            while points_added < config.num_points_cell && threshold >= config.min_threshold {
+            while points_added < config.num_points_cell && threshold >= lowest_rung {
                 // `cv::FAST` on the `PATCH_SIZE` sub-image detects at
                 // sub-coordinates `[3, PATCH_SIZE - 3)`; the same rectangle in
                 // whole-image coordinates is the cell shrunk by the ring radius.
@@ -730,6 +764,85 @@ mod tests {
                 .iter()
                 .all(|count| *count <= config.num_points_cell)
         );
+    }
+
+    /// A `min_threshold` the halving ladder can never reach must still terminate.
+    ///
+    /// basalt hangs here: `threshold /= 2` reaches 1, then 0, and `0 >= 0` keeps
+    /// the loop alive for ever on the first empty cell (`keypoints.cpp:162`,
+    /// `:187`). A blank frame is the worst case, because no cell ever fills its
+    /// budget and every rung of the ladder is walked. The test finishing at all is
+    /// the assertion; the counts are the same as a `min_threshold` of 1 gives,
+    /// which is what the floor makes the ladder run.
+    #[test]
+    fn a_non_positive_min_threshold_still_terminates() {
+        let blank: ImageU16 = ImageU16::zeros(200, 200).unwrap();
+        let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
+        let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
+        let mut scratch: DetectorScratch = DetectorScratch::default();
+        let mut out: KeypointsData = KeypointsData::default();
+
+        let mut floored: DetectorConfig = config();
+        floored.min_threshold = LOWEST_THRESHOLD_RUNG;
+        detect_keypoints_with_cells(
+            &blank,
+            &grid,
+            &occupancy(&cells, &grid),
+            &floored,
+            &Masks::default(),
+            BUDGET,
+            &mut scratch,
+            &mut out,
+        )
+        .unwrap();
+        let expected: usize = out.corners.len();
+
+        for min_threshold in [0, -1, i32::MIN] {
+            let mut bad: DetectorConfig = config();
+            bad.min_threshold = min_threshold;
+            detect_keypoints_with_cells(
+                &blank,
+                &grid,
+                &occupancy(&cells, &grid),
+                &bad,
+                &Masks::default(),
+                BUDGET,
+                &mut scratch,
+                &mut out,
+            )
+            .unwrap();
+            assert_eq!(
+                out.corners.len(),
+                expected,
+                "min_threshold {min_threshold} detected a different number of corners than the floor"
+            );
+        }
+    }
+
+    /// The floor changes nothing for a config whose ladder already ends.
+    #[test]
+    fn a_valid_min_threshold_is_left_alone() {
+        let image: ImageU16 = dotted_image(200, 200, 16);
+        let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
+        let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
+        let mut scratch: DetectorScratch = DetectorScratch::default();
+        let mut out: KeypointsData = KeypointsData::default();
+        detect_keypoints_with_cells(
+            &image,
+            &grid,
+            &occupancy(&cells, &grid),
+            &config(),
+            &Masks::default(),
+            BUDGET,
+            &mut scratch,
+            &mut out,
+        )
+        .unwrap();
+        assert!(
+            !out.is_empty(),
+            "the shipped 5..40 ladder should still detect on a textured frame"
+        );
+        assert!(config().min_threshold > LOWEST_THRESHOLD_RUNG);
     }
 
     /// `keypoints.cpp:148`: an occupied cell is skipped whole.

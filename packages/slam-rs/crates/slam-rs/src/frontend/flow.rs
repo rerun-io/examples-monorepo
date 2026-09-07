@@ -63,15 +63,15 @@ use crate::calib::Calibration;
 use crate::camera::{CameraError, RigCamera};
 use crate::config::{MatchingGuessType, VioConfig};
 use crate::frontend::detect::{
-    CellGrid, DetectError, DetectorConfig, DetectorScratch, KeypointsData, Masks, Occupancy, Rect,
-    detect_keypoints_with_cells,
+    CellGrid, DetectError, DetectorConfig, DetectorScratch, KeypointsData, LOWEST_THRESHOLD_RUNG,
+    MAX_CELLS, Masks, Occupancy, Rect, detect_keypoints_with_cells,
 };
-use crate::frontend::parallel::WorkPool;
+use crate::frontend::parallel::{MAX_THREADS, WorkPool};
 use crate::frontend::patterns::Pattern;
 use crate::frontend::se2::AffineCompact2f;
 use crate::frontend::tracker::{
-    CpuPatchTracker, FlowResult, FlowTransforms, PatchTracker, PointsSoA, SourcePatches,
-    TrackerError,
+    CpuPatchTracker, FlowResult, FlowTransforms, MAX_CAPACITY, MAX_LEVELS, PatchTracker, PointsSoA,
+    SourcePatches, TrackerError,
 };
 use crate::image::ImageU16;
 use crate::lie::{Se3, So3};
@@ -101,7 +101,9 @@ pub struct FrontendOptions {
     /// already exist are never dropped to make room, and the frame stays
     /// processable. The default is about eight times what the shipped 50-pixel
     /// grid can produce on a 960x960 frame, so nothing in the reference
-    /// configuration comes near it.
+    /// configuration comes near it, and
+    /// [`MAX_CAPACITY`](crate::frontend::tracker::MAX_CAPACITY) is the ceiling a
+    /// caller may ask for.
     pub max_keypoints: usize,
 }
 
@@ -277,8 +279,13 @@ impl Keypoints {
 pub struct FlowFrame {
     // `Vec::clone_from` copies element by element through `Keypoints::clone_from`
     // above, so deriving here keeps the buffer-preserving property.
-    /// Frameset timestamp, nanoseconds.
-    pub t_ns: i64,
+    /// Frameset timestamp in nanoseconds, `None` before the first frameset commits.
+    ///
+    /// basalt writes `t_ns = -1` until then (`optical_flow.h:172`), which makes
+    /// `-1` — and every other negative timestamp — ambiguous. The port carries
+    /// the absence in the type instead, so any `i64` is a timestamp like any
+    /// other.
+    pub t_ns: Option<i64>,
     /// One entry per camera, in rig order.
     pub cameras: Vec<Keypoints>,
 }
@@ -296,6 +303,14 @@ pub enum FrontendError {
         intrinsics: usize,
         /// `T_i_c` entries it carries.
         extrinsics: usize,
+    },
+    /// A frameset arrived at or before the last accepted one.
+    #[error("frameset timestamps must increase: got {t_ns} after {previous_t_ns}")]
+    NonMonotonicFrameset {
+        /// Timestamp of the last accepted frameset.
+        previous_t_ns: i64,
+        /// Timestamp of the frameset handed in.
+        t_ns: i64,
     },
     /// The frameset does not hold one image per camera.
     #[error("expected {expected} images, got {actual}")]
@@ -328,6 +343,21 @@ pub enum FrontendError {
         /// `optical_flow_detection_grid_size`.
         cell: usize,
     },
+    /// A camera's detection grid has more cells than one occupancy buffer holds.
+    #[error(
+        "camera {camera}: the calibrated resolution over the detection grid size is a \
+         {rows}x{columns} occupancy grid; the ceiling is {ceiling} cells"
+    )]
+    TooManyCells {
+        /// Which camera.
+        camera: usize,
+        /// Rows the grid asks for.
+        rows: usize,
+        /// Columns the grid asks for.
+        columns: usize,
+        /// [`MAX_CELLS`].
+        ceiling: usize,
+    },
     /// A config field that indexes or counts is negative.
     #[error("{field} must not be negative, got {value}")]
     NegativeConfig {
@@ -358,6 +388,47 @@ pub enum FrontendError {
         /// Cameras in the rig.
         cameras: usize,
     },
+    /// `optical_flow_detection_min_threshold` cannot stop the halving ladder.
+    #[error(
+        "optical_flow_detection_min_threshold is {min_threshold}, which must be at least {rung}: \
+         the detector halves the FAST threshold until it drops below it, and integer division \
+         never gets a threshold of zero past zero"
+    )]
+    ThresholdLadderNeverEnds {
+        /// `optical_flow_detection_min_threshold` from the config file.
+        min_threshold: i32,
+        /// The lowest rung the ladder can stop at ([`LOWEST_THRESHOLD_RUNG`]).
+        rung: i32,
+    },
+    /// The threshold ladder starts below where it stops, so it never runs.
+    #[error(
+        "optical_flow_detection_max_threshold is {max_threshold} and \
+         optical_flow_detection_min_threshold is {min_threshold}: the ladder starts below where it \
+         stops, so the detector can never add a keypoint"
+    )]
+    EmptyThresholdLadder {
+        /// `optical_flow_detection_min_threshold` from the config file.
+        min_threshold: i32,
+        /// `optical_flow_detection_max_threshold` from the config file.
+        max_threshold: i32,
+    },
+    /// A frameset image is not the size the calibration gives that camera.
+    #[error(
+        "camera {camera}: the calibration is for {expected_width}x{expected_height} frames, \
+         got {actual_width}x{actual_height}"
+    )]
+    FrameSizeMismatch {
+        /// Which camera.
+        camera: usize,
+        /// Width the calibration gives the camera.
+        expected_width: usize,
+        /// Height the calibration gives the camera.
+        expected_height: usize,
+        /// Width of the image handed in.
+        actual_width: usize,
+        /// Height of the image handed in.
+        actual_height: usize,
+    },
     /// A camera model the projection layer does not implement.
     #[error("camera: {0}")]
     Camera(#[from] CameraError),
@@ -375,6 +446,35 @@ pub enum FrontendError {
     ThreadPool {
         /// Threads asked for.
         threads: usize,
+    },
+    /// No workers were asked for, which is not a pool anything can run on.
+    #[error("threads must be at least 1")]
+    NoThreads,
+    /// More workers were asked for than [`MAX_THREADS`].
+    #[error("threads is {threads}, the ceiling is {ceiling}")]
+    TooManyThreads {
+        /// Workers asked for.
+        threads: usize,
+        /// [`MAX_THREADS`].
+        ceiling: usize,
+    },
+    /// A larger keypoint budget was asked for than [`MAX_CAPACITY`].
+    #[error("max_keypoints is {max_keypoints}, the ceiling is {ceiling}")]
+    TooManyKeypoints {
+        /// Keypoints asked for.
+        max_keypoints: usize,
+        /// [`MAX_CAPACITY`].
+        ceiling: usize,
+    },
+    /// `optical_flow_levels` asks for a deeper pyramid than the buffers allow.
+    #[error("optical_flow_levels is {levels}, so {num_levels} levels; the ceiling is {ceiling}")]
+    TooManyLevels {
+        /// `optical_flow_levels` from the config file.
+        levels: i32,
+        /// `optical_flow_levels + 1`, which is what every buffer is sized with.
+        num_levels: usize,
+        /// [`MAX_LEVELS`].
+        ceiling: usize,
     },
 }
 
@@ -405,8 +505,12 @@ pub struct FrameToFrameOpticalFlow<
     cells: Vec<Vec<i32>>,
     /// `last_keypoint_id` (`optical_flow.h:174`), the global landmark id space.
     last_keypoint_id: u64,
-    /// `t_ns`, negative until the first frame (`optical_flow.h:172`).
-    t_ns: i64,
+    /// `t_ns` (`optical_flow.h:172`), `None` until the first frame commits.
+    ///
+    /// basalt's `-1` sentinel is not ported: `processFrame` reads `t_ns < 0` as
+    /// "no previous frame", which would make a frameset at a negative timestamp
+    /// reset tracking instead of continuing it.
+    t_ns: Option<i64>,
     /// `frame_counter` (`optical_flow.h:173`).
     frame_counter: u64,
     /// `depth_guess`, seeded from the config and refreshed by the estimator.
@@ -480,15 +584,19 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P, CpuPyramidBuilder, CpuPatchTracker<P
     ///
     /// # Errors
     ///
-    /// [`FrontendError`] when the config names another flow type or pattern,
-    /// when the rig is empty, ragged or too small for the grid, when a camera
-    /// model has no projection, or when the thread pool cannot be built.
+    /// [`FrontendError`] when the config names another flow type or pattern, when
+    /// the rig is empty, ragged, too small for the grid or asks for more
+    /// occupancy cells than [`MAX_CELLS`], when the detector's threshold ladder
+    /// would never end, when a camera model has no projection, when the thread
+    /// pool cannot be built, or when `threads` or `max_keypoints` is outside
+    /// what [`FrontendOptions`] allows.
     pub fn new(
         config: VioConfig,
         calibration: &Calibration<f64>,
         options: FrontendOptions,
     ) -> Result<Self, FrontendError> {
         Self::validate_config(&config)?;
+        Self::validate_options(&options)?;
         let num_levels: usize = config.optical_flow_levels as usize + 1;
         let pool: WorkPool =
             WorkPool::new(options.threads).map_err(|_| FrontendError::ThreadPool {
@@ -500,7 +608,7 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P, CpuPyramidBuilder, CpuPatchTracker<P
             config.optical_flow_max_iterations as usize,
             config.optical_flow_max_recovered_dist2,
             pool,
-        );
+        )?;
         Self::with_backends(
             config,
             calibration,
@@ -546,6 +654,69 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
                 return Err(FrontendError::NegativeConfig { field, value });
             }
         }
+        // The detector's threshold ladder halves by integer division, so a
+        // `min_threshold` at or below zero never ends it — in basalt as much as
+        // here (`keypoints.cpp:162`, `:187`). The detector floors its own last
+        // rung as well ([`LOWEST_THRESHOLD_RUNG`]), but a config that asks for a
+        // ladder the C++ would hang on is refused rather than quietly run at a
+        // threshold nobody asked for.
+        let min_threshold: i32 = config.optical_flow_detection_min_threshold;
+        if min_threshold < LOWEST_THRESHOLD_RUNG {
+            return Err(FrontendError::ThresholdLadderNeverEnds {
+                min_threshold,
+                rung: LOWEST_THRESHOLD_RUNG,
+            });
+        }
+        let max_threshold: i32 = config.optical_flow_detection_max_threshold;
+        if max_threshold < min_threshold {
+            return Err(FrontendError::EmptyThresholdLadder {
+                min_threshold,
+                max_threshold,
+            });
+        }
+        // Every per-patch buffer is sized with `optical_flow_levels + 1`, so a
+        // config asking for a pyramid nothing could hold is refused here rather
+        // than at the allocation, which aborts instead of returning.
+        let num_levels: usize = config.optical_flow_levels as usize + 1;
+        if num_levels > MAX_LEVELS {
+            return Err(FrontendError::TooManyLevels {
+                levels: config.optical_flow_levels,
+                num_levels,
+                ceiling: MAX_LEVELS,
+            });
+        }
+        Ok(())
+    }
+
+    /// The port's own knobs, which arrive from the caller rather than a basalt file.
+    ///
+    /// Every value a caller may type is bounded here, whatever backends the
+    /// frontend is then built on: [`FrameToFrameOpticalFlow::with_backends`]
+    /// takes a tracker that is already built, so [`PatchSoA::new`]'s own
+    /// ceilings — the second line under these — never run on that seam.
+    ///
+    /// [`PatchSoA::new`]: crate::frontend::tracker::PatchSoA::new
+    fn validate_options(options: &FrontendOptions) -> Result<(), FrontendError> {
+        // rayon spawns exactly what it is asked for, so an unbounded `threads`
+        // exhausts the machine's threads instead of returning an error; zero is
+        // a pool no work can run on, which `WorkPool::new` reads as one.
+        if options.threads == 0 {
+            return Err(FrontendError::NoThreads);
+        }
+        if options.threads > MAX_THREADS {
+            return Err(FrontendError::TooManyThreads {
+                threads: options.threads,
+                ceiling: MAX_THREADS,
+            });
+        }
+        // The budget sizes every per-patch buffer, and a `Vec` too long to
+        // allocate panics rather than returning (decision D32).
+        if options.max_keypoints > MAX_CAPACITY {
+            return Err(FrontendError::TooManyKeypoints {
+                max_keypoints: options.max_keypoints,
+                ceiling: MAX_CAPACITY,
+            });
+        }
         Ok(())
     }
 
@@ -569,6 +740,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         tracker: T,
     ) -> Result<Self, FrontendError> {
         Self::validate_config(&config)?;
+        Self::validate_options(&options)?;
 
         let num_levels: usize = config.optical_flow_levels as usize + 1;
         if tracker.num_levels() != num_levels {
@@ -629,20 +801,35 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         for (camera, rig_camera) in cameras.iter().enumerate() {
             let width: usize = rig_camera.width() as usize;
             let height: usize = rig_camera.height() as usize;
-            detection_grids.push(CellGrid::new(width, height, cell).ok_or(
-                FrontendError::FrameTooSmall {
+            let grid: CellGrid =
+                CellGrid::new(width, height, cell).ok_or(FrontendError::FrameTooSmall {
                     camera,
                     width,
                     height,
                     cell,
-                },
-            )?);
+                })?;
+            // Two reasons the ceiling is per camera: camera 0's grid sizes
+            // `cells` below, one `i32` per cell per camera, and a `Vec` too long
+            // to exist panics rather than returning (decision D32); and every
+            // camera is detected on its own grid, which bounds that camera's
+            // detection scan on every frame (`detect.rs:494`). Saturating like
+            // the sibling ceilings: a product that leaves `usize` is past it.
+            if grid.rows.saturating_mul(grid.columns) > MAX_CELLS {
+                return Err(FrontendError::TooManyCells {
+                    camera,
+                    rows: grid.rows,
+                    columns: grid.columns,
+                    ceiling: MAX_CELLS,
+                });
+            }
+            detection_grids.push(grid);
         }
         let occupancy_grid: CellGrid = detection_grids[0];
 
+        let patches: T::Patches = tracker.make_patches()?;
         Ok(Self {
             depth_guess: config.optical_flow_matching_default_depth,
-            patches: tracker.make_patches(),
+            patches,
             tracker,
             cells: vec![vec![0; occupancy_grid.rows * occupancy_grid.columns]; num_cams],
             masks: vec![Masks::default(); num_cams],
@@ -663,11 +850,11 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             new_cam0: Keypoints::default(),
             to_remove: Vec::new(),
             frame: FlowFrame {
-                t_ns: -1,
+                t_ns: None,
                 cameras: vec![Keypoints::default(); num_cams],
             },
             last_keypoint_id: 0,
-            t_ns: -1,
+            t_ns: None,
             frame_counter: 0,
             config,
             options,
@@ -748,9 +935,9 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         &self.config
     }
 
-    /// Timestamp of the most recent frameset, negative before the first
+    /// Timestamp of the most recent frameset, `None` before the first
     /// (`optical_flow.h:172`).
-    pub fn t_ns(&self) -> i64 {
+    pub fn t_ns(&self) -> Option<i64> {
         self.t_ns
     }
 
@@ -787,8 +974,10 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     ///
     /// # Errors
     ///
-    /// [`FrontendError`] when the frameset is the wrong width, a pyramid refuses
-    /// the geometry, or the tracker or detector refuses an input.
+    /// [`FrontendError`] when the frameset does not move the clock forward, when
+    /// it is the wrong width, when an image is not the size the calibration gives
+    /// that camera, when a pyramid refuses the geometry, or when the tracker or
+    /// detector refuses an input.
     pub fn process_frame(
         &mut self,
         t_ns: i64,
@@ -796,12 +985,43 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         prediction: &PosePrediction,
         masks: &[Masks],
     ) -> Result<&FlowFrame, FrontendError> {
+        // Tracking is frame to frame, so a frameset that does not follow the last
+        // one has no previous frame of its own; basalt never sees one because its
+        // `processingLoop` reads a monotonic queue.
+        if let Some(previous_t_ns) = self.t_ns
+            && t_ns <= previous_t_ns
+        {
+            return Err(FrontendError::NonMonotonicFrameset {
+                previous_t_ns,
+                t_ns,
+            });
+        }
         let num_cams: usize = self.cameras.len();
         if images.len() != num_cams {
             return Err(FrontendError::CameraCountMismatch {
                 expected: num_cams,
                 actual: images.len(),
             });
+        }
+        // The geometry is the calibration's from here on: the camera model
+        // projects with the calibrated intrinsics, the detection grid is derived
+        // from the calibrated size, and the occupancy matrix is allocated from
+        // it. A frame of another size is not a smaller view of the same scene —
+        // its pixels mean different bearings — so it is refused rather than
+        // tracked against geometry it does not belong to. basalt never checks:
+        // its `img_data` comes from the device the calibration describes.
+        for (camera, image) in images.iter().enumerate() {
+            let expected_width: usize = self.cameras[camera].width() as usize;
+            let expected_height: usize = self.cameras[camera].height() as usize;
+            if image.width() != expected_width || image.height() != expected_height {
+                return Err(FrontendError::FrameSizeMismatch {
+                    camera,
+                    expected_width,
+                    expected_height,
+                    actual_width: image.width(),
+                    actual_height: image.height(),
+                });
+            }
         }
 
         // The frame in flight, built where nothing else can see it.
@@ -820,8 +1040,8 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
                 // Commit: the frame in flight becomes the committed one, and the
                 // set it displaces is next frame's staging buffer.
                 std::mem::swap(&mut self.pyramid, &mut self.staging);
-                self.t_ns = t_ns;
-                self.frame.t_ns = t_ns;
+                self.t_ns = Some(t_ns);
+                self.frame.t_ns = Some(t_ns);
                 self.frame_counter += 1;
             }
             Err(_) => {
@@ -852,7 +1072,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         }
 
         let num_cams: usize = self.cameras.len();
-        if self.t_ns < 0 {
+        if self.t_ns.is_none() {
             for keypoints in &mut self.frame.cameras {
                 keypoints.clear();
             }
@@ -1336,9 +1556,9 @@ mod tests {
 
     use super::*;
     use crate::calib::{CalibAccelBias, CalibGyroBias, CameraModel, PinholeParams};
-    use crate::frontend::parallel::WorkPool;
+    use crate::frontend::parallel::{MAX_THREADS, WorkPool};
     use crate::frontend::patterns::{Pattern51, Pattern52};
-    use crate::frontend::tracker::{PatchSoA, TrackerError};
+    use crate::frontend::tracker::{MAX_CAPACITY, MAX_LEVELS, PatchSoA, TrackerError};
     use crate::pyramid::{CpuPyramidBuilder, PyramidU16};
     use std::collections::BTreeMap;
 
@@ -1421,6 +1641,17 @@ mod tests {
         FrameToFrameOpticalFlow::new(config(), &rig(cameras), options).unwrap()
     }
 
+    fn cpu_tracker(config: &VioConfig, capacity: usize) -> CpuPatchTracker<Pattern51> {
+        CpuPatchTracker::new(
+            capacity,
+            config.optical_flow_levels as usize + 1,
+            config.optical_flow_max_iterations as usize,
+            config.optical_flow_max_recovered_dist2,
+            WorkPool::new(1).unwrap(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn the_first_frame_detects_on_camera_zero_and_matches_into_camera_one() {
         let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
@@ -1429,7 +1660,7 @@ mod tests {
             .process_frame(1_000, &images, &PosePrediction::default(), &[])
             .unwrap();
 
-        assert_eq!(frame.t_ns, 1_000);
+        assert_eq!(frame.t_ns, Some(1_000));
         assert_eq!(frame.cameras.len(), 2);
         assert!(!frame.cameras[0].is_empty(), "camera 0 detected nothing");
         assert!(
@@ -1706,6 +1937,285 @@ mod tests {
         );
     }
 
+    /// A `min_threshold` of zero or less wedges the detector, in C++ as much as
+    /// here, so the frontend refuses the config instead of accepting it.
+    #[test]
+    fn a_config_whose_threshold_ladder_never_ends_is_refused() {
+        for min_threshold in [0, -1, i32::MIN] {
+            let mut broken: VioConfig = config();
+            broken.optical_flow_detection_min_threshold = min_threshold;
+            let error = FrameToFrameOpticalFlow::<Pattern51>::new(
+                broken,
+                &rig(2),
+                FrontendOptions::default(),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                FrontendError::ThresholdLadderNeverEnds {
+                    min_threshold,
+                    rung: LOWEST_THRESHOLD_RUNG,
+                }
+            );
+        }
+    }
+
+    /// A ladder that starts below where it stops never runs, so the detector
+    /// could never add a keypoint; that is a config error, not a quiet blank run.
+    #[test]
+    fn a_config_whose_threshold_ladder_never_runs_is_refused() {
+        let mut broken: VioConfig = config();
+        broken.optical_flow_detection_min_threshold = 40;
+        broken.optical_flow_detection_max_threshold = 5;
+        let error =
+            FrameToFrameOpticalFlow::<Pattern51>::new(broken, &rig(2), FrontendOptions::default())
+                .unwrap_err();
+        assert_eq!(
+            error,
+            FrontendError::EmptyThresholdLadder {
+                min_threshold: 40,
+                max_threshold: 5,
+            }
+        );
+    }
+
+    /// The shipped ladder is accepted, so the checks above cannot be blanket ones.
+    #[test]
+    fn the_shipped_threshold_ladder_is_accepted() {
+        assert_eq!(config().optical_flow_detection_min_threshold, 5);
+        assert_eq!(config().optical_flow_detection_max_threshold, 40);
+        FrameToFrameOpticalFlow::<Pattern51>::new(config(), &rig(2), FrontendOptions::default())
+            .unwrap();
+    }
+
+    /// A keypoint budget past the tracker's ceiling is refused, not allocated.
+    ///
+    /// `usize::MAX` patches over four levels of 52 taps is not a number of bytes
+    /// that exists; `Vec::with_capacity` answers that with a `capacity overflow`
+    /// panic, which crosses the Python boundary as a `PanicException` (decision
+    /// D32) — so the budget is checked before anything is sized from it.
+    #[test]
+    fn a_budget_over_the_ceiling_is_refused() {
+        for max_keypoints in [MAX_CAPACITY + 1, usize::MAX / 2, usize::MAX] {
+            let error = FrameToFrameOpticalFlow::<Pattern51>::new(
+                config(),
+                &rig(2),
+                FrontendOptions {
+                    max_keypoints,
+                    ..FrontendOptions::default()
+                },
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                FrontendError::TooManyKeypoints {
+                    max_keypoints,
+                    ceiling: MAX_CAPACITY,
+                }
+            );
+        }
+    }
+
+    /// A pool of no workers is refused where every other option ceiling is.
+    ///
+    /// `WorkPool::new` reads zero as one, so nothing downstream would fail: the
+    /// caller would silently get a frontend it did not ask for.
+    #[test]
+    fn a_thread_count_of_zero_is_refused() {
+        let error = FrameToFrameOpticalFlow::<Pattern51>::new(
+            config(),
+            &rig(1),
+            FrontendOptions {
+                threads: 0,
+                ..FrontendOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, FrontendError::NoThreads);
+    }
+
+    /// A thread count nothing could run is refused, not spawned.
+    ///
+    /// rayon takes `num_threads` literally, so 100,000 workers arriving over the
+    /// Python boundary spawned OS threads for minutes; the ceiling answers instead.
+    #[test]
+    fn more_workers_than_the_ceiling_is_refused() {
+        for threads in [MAX_THREADS + 1, 100_000, usize::MAX] {
+            let error = FrameToFrameOpticalFlow::<Pattern51>::new(
+                config(),
+                &rig(2),
+                FrontendOptions {
+                    threads,
+                    ..FrontendOptions::default()
+                },
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                FrontendError::TooManyThreads {
+                    threads,
+                    ceiling: MAX_THREADS,
+                }
+            );
+        }
+        // The counts the frontend actually runs on are untouched.
+        for threads in [1, 4, MAX_THREADS] {
+            FrameToFrameOpticalFlow::<Pattern51>::new(
+                config(),
+                &rig(1),
+                FrontendOptions {
+                    threads,
+                    ..FrontendOptions::default()
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    /// A pyramid deeper than the buffers allow is refused before the allocation.
+    ///
+    /// `optical_flow_levels = 10^12` sized a `Vec` of 6e17 floats, and a `Vec`
+    /// that cannot be allocated aborts the process — no exception, no unwind.
+    #[test]
+    fn a_config_asking_for_more_levels_than_the_ceiling_is_refused() {
+        for levels in [MAX_LEVELS as i32, 1_000, i32::MAX] {
+            let mut deep: VioConfig = config();
+            deep.optical_flow_levels = levels;
+            let error = FrameToFrameOpticalFlow::<Pattern51>::new(
+                deep,
+                &rig(2),
+                FrontendOptions::default(),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                FrontendError::TooManyLevels {
+                    levels,
+                    num_levels: levels as usize + 1,
+                    ceiling: MAX_LEVELS,
+                }
+            );
+        }
+        // The shipped depth is three levels plus the base.
+        assert_eq!(config().optical_flow_levels, 3);
+        FrameToFrameOpticalFlow::<Pattern51>::new(config(), &rig(2), FrontendOptions::default())
+            .unwrap();
+    }
+
+    /// A frame that is not the size the calibration gives its camera is refused.
+    ///
+    /// Everything downstream is the calibration's geometry — the projection, the
+    /// detection grid, the occupancy matrix — so a cropped or resized frame is
+    /// not a smaller view of the same scene. The check names the camera, which is
+    /// what tells a caller a two-camera rig was fed one right frame and one wrong
+    /// one.
+    #[test]
+    fn a_frame_that_is_not_the_calibrated_size_is_refused() {
+        let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
+        for (width, height) in [(64, 64), (WIDTH - 1, HEIGHT - 1), (250, 250), (WIDTH, 250)] {
+            let odd: ImageU16 = ImageU16::zeros(width, height).unwrap();
+            // Camera 1 is the wrong one here, so the error must name camera 1.
+            let images: [ImageU16; 2] = [dotted_image(0), odd];
+            let error = flow
+                .process_frame(0, &images, &PosePrediction::default(), &[])
+                .unwrap_err();
+            assert_eq!(
+                error,
+                FrontendError::FrameSizeMismatch {
+                    camera: 1,
+                    expected_width: WIDTH,
+                    expected_height: HEIGHT,
+                    actual_width: width,
+                    actual_height: height,
+                }
+            );
+        }
+        assert_eq!(flow.t_ns(), None);
+        assert_eq!(flow.frame_counter(), 0);
+    }
+
+    /// And it is refused transactionally: the frontend is as the last accepted
+    /// frame left it.
+    #[test]
+    fn a_frame_of_the_wrong_size_commits_nothing() {
+        let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
+        let images: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
+        flow.process_frame(1_000, &images, &PosePrediction::default(), &[])
+            .unwrap();
+        let before: FlowFrame = flow.frame().clone();
+        let ids_before: u64 = flow.last_keypoint_id();
+
+        let odd: [ImageU16; 2] = [
+            ImageU16::zeros(WIDTH + 8, HEIGHT).unwrap(),
+            ImageU16::zeros(WIDTH + 8, HEIGHT).unwrap(),
+        ];
+        assert!(
+            flow.process_frame(2_000, &odd, &PosePrediction::default(), &[])
+                .is_err()
+        );
+        assert_eq!(flow.t_ns(), Some(1_000));
+        assert_eq!(flow.frame_counter(), 1);
+        assert_eq!(flow.last_keypoint_id(), ids_before);
+        assert_eq!(flow.frame(), &before);
+
+        // And the frontend still tracks afterwards, from the frame it kept.
+        let moved: [ImageU16; 2] = [dotted_image(1), dotted_image(1)];
+        let after: Vec<KeypointId> = flow
+            .process_frame(3_000, &moved, &PosePrediction::default(), &[])
+            .unwrap()
+            .cameras[0]
+            .ids
+            .clone();
+        assert_eq!(flow.frame_counter(), 2);
+        let shared: usize = after
+            .iter()
+            .filter(|id| before.cameras[0].get(**id).is_some())
+            .count();
+        assert!(shared > 0, "the kept frame was not tracked against");
+    }
+
+    /// Two identical framesets at negative timestamps track each other.
+    ///
+    /// basalt reads `t_ns < 0` as "no previous frame" (`optical_flow.h:172`), so
+    /// the port used to detect from scratch on every negative timestamp and hand
+    /// out a fresh id space each time. The clock is an `Option` now, so `-2` and
+    /// `-1` are ordinary timestamps and the second frameset tracks the first.
+    #[test]
+    fn identical_frames_at_negative_timestamps_keep_their_ids() {
+        let images: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
+        let mut shared_per_start: Vec<usize> = Vec::new();
+        for start in [-2_000_000_000i64, -2, 0] {
+            let mut flow: FrameToFrameOpticalFlow<Pattern51> =
+                frontend(2, FrontendOptions::default());
+            let first: Vec<KeypointId> = flow
+                .process_frame(start, &images, &PosePrediction::default(), &[])
+                .unwrap()
+                .cameras[0]
+                .ids
+                .clone();
+            assert!(!first.is_empty());
+            assert_eq!(flow.t_ns(), Some(start));
+            let second: &FlowFrame = flow
+                .process_frame(start + 1, &images, &PosePrediction::default(), &[])
+                .unwrap();
+            let shared: usize = second.cameras[0]
+                .ids
+                .iter()
+                .filter(|id| first.contains(id))
+                .count();
+            assert!(
+                shared > 0,
+                "no id survived an identical frameset at t = {start}"
+            );
+            shared_per_start.push(shared);
+        }
+        // Identical input, so the negative starts keep exactly what t = 0 keeps.
+        assert!(
+            shared_per_start.windows(2).all(|pair| pair[0] == pair[1]),
+            "negative timestamps tracked differently from zero: {shared_per_start:?}"
+        );
+    }
+
     #[test]
     fn the_cpp_essential_bug_needs_a_second_camera() {
         let error = FrameToFrameOpticalFlow::<Pattern51>::new(
@@ -1744,9 +2254,12 @@ mod tests {
     }
     /// A frame the frontend refuses must leave it usable.
     ///
-    /// The review's sequence: a 1x1 first image is rejected by the pyramid, and
-    /// the *next*, valid frame used to take the tracking path against an empty
-    /// previous pyramid and panic. Nothing commits until every pyramid is built.
+    /// The review's sequence: a 1x1 first image is rejected, and the *next*,
+    /// valid frame used to take the tracking path against an empty previous
+    /// pyramid and panic. Nothing commits until every pyramid is built. The 1x1
+    /// frame is now refused one step earlier than it was — the calibration check
+    /// catches it before the pyramid builder ever sees it — and the sequence this
+    /// test is about is unchanged.
     #[test]
     fn a_rejected_frame_leaves_the_frontend_usable() {
         let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
@@ -1757,12 +2270,18 @@ mod tests {
         let error = flow
             .process_frame(1, &tiny, &PosePrediction::default(), &[])
             .unwrap_err();
-        assert!(
-            matches!(error, FrontendError::Pyramid(_)),
-            "expected a pyramid error, got {error}"
+        assert_eq!(
+            error,
+            FrontendError::FrameSizeMismatch {
+                camera: 0,
+                expected_width: WIDTH,
+                expected_height: HEIGHT,
+                actual_width: 1,
+                actual_height: 1,
+            }
         );
         // Nothing moved: the clock is still before the first frame.
-        assert_eq!(flow.t_ns(), -1);
+        assert_eq!(flow.t_ns(), None);
         assert_eq!(flow.frame_counter(), 0);
         assert_eq!(flow.last_keypoint_id(), 0);
 
@@ -1793,7 +2312,7 @@ mod tests {
             flow.process_frame(1, &short, &PosePrediction::default(), &[])
                 .is_err()
         );
-        assert_eq!(flow.t_ns(), 0);
+        assert_eq!(flow.t_ns(), Some(0));
         assert_eq!(flow.frame_counter(), 1);
         assert_eq!(flow.frame(), &before);
 
@@ -1802,6 +2321,41 @@ mod tests {
         flow.process_frame(2, &moved, &PosePrediction::default(), &[])
             .unwrap();
         assert_eq!(flow.frame_counter(), 2);
+    }
+
+    /// A frameset that does not move the clock forward is refused, and commits nothing.
+    ///
+    /// The rule lives here rather than at the Python boundary because every other
+    /// rule about an input does: the clock the comparison reads is this one.
+    #[test]
+    fn a_frameset_that_does_not_follow_the_last_one_is_refused() {
+        let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(1, FrontendOptions::default());
+        let images: [ImageU16; 1] = [dotted_image(0)];
+        flow.process_frame(1_000, &images, &PosePrediction::default(), &[])
+            .unwrap();
+        let before: FlowFrame = flow.frame().clone();
+
+        for t_ns in [1_000, 999, -1_000] {
+            assert_eq!(
+                flow.process_frame(t_ns, &images, &PosePrediction::default(), &[])
+                    .unwrap_err(),
+                FrontendError::NonMonotonicFrameset {
+                    previous_t_ns: 1_000,
+                    t_ns,
+                }
+            );
+            assert_eq!(flow.t_ns(), Some(1_000));
+            assert_eq!(flow.frame_counter(), 1);
+            assert_eq!(flow.frame(), &before);
+        }
+
+        // The first frameset has no previous one, so any timestamp starts a run.
+        let mut negative: FrameToFrameOpticalFlow<Pattern51> =
+            frontend(1, FrontendOptions::default());
+        negative
+            .process_frame(-2, &images, &PosePrediction::default(), &[])
+            .unwrap();
+        assert_eq!(negative.t_ns(), Some(-2));
     }
 
     /// The keypoint budget is enforced where the keypoints are created, so a
@@ -1837,13 +2391,7 @@ mod tests {
     #[test]
     fn a_budget_larger_than_the_tracker_is_refused() {
         let config: VioConfig = config();
-        let tracker: CpuPatchTracker<Pattern51> = CpuPatchTracker::new(
-            4,
-            config.optical_flow_levels as usize + 1,
-            config.optical_flow_max_iterations as usize,
-            config.optical_flow_max_recovered_dist2,
-            WorkPool::new(1).unwrap(),
-        );
+        let tracker: CpuPatchTracker<Pattern51> = cpu_tracker(&config, 4);
         let error = FrameToFrameOpticalFlow::<Pattern51, _, _>::with_backends(
             config,
             &rig(2),
@@ -1904,6 +2452,49 @@ mod tests {
         );
     }
 
+    /// A calibration whose occupancy grid nothing could allocate is refused
+    /// ([`MAX_CELLS`] carries why).
+    ///
+    /// Both sides of the guard are exercised: a `u32::MAX - 1` frame on a
+    /// one-pixel grid asks for a product that still fits a `usize`, and a
+    /// `u32::MAX` one asks for exactly 2^64, which leaves it. Both constructors
+    /// are checked, because `with_backends` takes a tracker that is already
+    /// built and so runs no check of `new`'s.
+    #[test]
+    fn a_calibration_whose_occupancy_grid_is_past_the_ceiling_is_refused() {
+        for side in [u32::MAX - 1, u32::MAX] {
+            let mut vast: Calibration<f64> = rig(2);
+            vast.resolution = vec![[side, side]; 2];
+            let mut fine: VioConfig = config();
+            fine.optical_flow_detection_grid_size = 1;
+            let expected: FrontendError = FrontendError::TooManyCells {
+                camera: 0,
+                rows: side as usize + 1,
+                columns: side as usize + 1,
+                ceiling: MAX_CELLS,
+            };
+            let error = FrameToFrameOpticalFlow::<Pattern51>::new(
+                fine.clone(),
+                &vast,
+                FrontendOptions::default(),
+            )
+            .unwrap_err();
+            assert_eq!(error, expected);
+
+            let tracker: CpuPatchTracker<Pattern51> =
+                cpu_tracker(&fine, FrontendOptions::default().max_keypoints);
+            let error = FrameToFrameOpticalFlow::<Pattern51, _, _>::with_backends(
+                fine,
+                &vast,
+                FrontendOptions::default(),
+                CpuPyramidBuilder::new(),
+                tracker,
+            )
+            .unwrap_err();
+            assert_eq!(error, expected);
+        }
+    }
+
     /// Every camera is detected on **its own** grid (`keypoints.cpp:140-144`),
     /// even though the occupancy matrix keeps camera 0's shape (`:119`).
     ///
@@ -1927,6 +2518,12 @@ mod tests {
 
         assert!(flow.detection_grid(1).contains(210.0, 80.0));
         assert!(!flow.detection_grid(0).contains(210.0, 80.0));
+
+        // A real grid is far under `MAX_CELLS`: 200x200 on 50-pixel cells is 5x5.
+        assert_eq!(
+            flow.occupancy_grid().rows * flow.occupancy_grid().columns,
+            25
+        );
     }
 
     /// A mixed-resolution rig still runs end to end, and camera 1's keypoints
@@ -1985,7 +2582,7 @@ mod tests {
             self.inner.num_levels()
         }
 
-        fn make_patches(&self) -> PatchSoA<Pattern51> {
+        fn make_patches(&self) -> Result<PatchSoA<Pattern51>, TrackerError> {
             self.inner.make_patches()
         }
 
@@ -2013,13 +2610,7 @@ mod tests {
     ) -> FrameToFrameOpticalFlow<Pattern51, CpuPyramidBuilder, FailingTracker> {
         let config: VioConfig = config();
         let options: FrontendOptions = FrontendOptions::default();
-        let inner: CpuPatchTracker<Pattern51> = CpuPatchTracker::new(
-            options.max_keypoints,
-            config.optical_flow_levels as usize + 1,
-            config.optical_flow_max_iterations as usize,
-            config.optical_flow_max_recovered_dist2,
-            WorkPool::new(options.threads).unwrap(),
-        );
+        let inner: CpuPatchTracker<Pattern51> = cpu_tracker(&config, options.max_keypoints);
         FrameToFrameOpticalFlow::with_backends(
             config,
             &rig(2),
@@ -2075,7 +2666,7 @@ mod tests {
         assert_eq!(faulty.frame(), &after_first);
         assert_eq!(faulty.last_keypoint_id(), ids_after_first);
         assert_eq!(faulty.cell_counts(0), &cells_after_first[..]);
-        assert_eq!(faulty.t_ns(), 0);
+        assert_eq!(faulty.t_ns(), Some(0));
         assert_eq!(faulty.frame_counter(), 1);
 
         // And the next good frame is the one the clean run produced.
