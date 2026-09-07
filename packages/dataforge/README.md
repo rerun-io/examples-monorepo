@@ -239,14 +239,13 @@ and what it refuses is stated once each, at `WORLD_UP_MIN_FRACTION_OF_G` and
 all five default sequences read **+z** at 0.92 to 1.01 of |g|, and on the three
 surveyed ones every levelled point comes within 0.7 m of the walk.
 
-Each layer is gated on its own file, and the base recording is the canonical
-raw: `convert` fetches and encodes only when the base rrd is missing, and writes
-the gt layer from the published ground truth, the published calibration and
-imu-right's accelerometer read back out of that base rrd. So regenerating the
-whole gt corpus is `rm gt/*.rrd` and a `dataforge-convert` — seconds per
-sequence, no network. A sequence the archive publishes no ground truth for (the
-whole test split) writes no `gt` rrd at all and is done once its base rrd
-exists. `register` then registers both layers under one dataset:
+Both layers follow [the layer rule](#the-layer-rule) to the letter, which is why
+lamaria is its reference implementation: the gt layer is built from the published
+ground truth, the published calibration and imu-right's accelerometer read back
+out of the base rrd, so a whole-corpus gt rebuild is seconds per sequence with no
+network at all. A sequence the archive publishes no ground truth for (the whole
+test split) writes no `gt` rrd and is done once its base rrd exists. `register`
+then registers both layers under one dataset:
 
 ```bash
 # --catalog-url belongs to the verb, so it precedes the dataset subcommand
@@ -311,6 +310,19 @@ already write one, their `gt/` rrd, in the same convert. `register` walks
 every layer directory it knows — `base`, which is required, then `gt` — and
 registers each under its own layer name, so a corpus with no ground-truth pass
 registers exactly as before.
+
+### The layer rule
+
+Every dataset follows it; `lamaria` is the reference implementation. **base** is a
+faithful conversion of the raw source and the only layer that needs it: it skips on
+its own rrd, and once it is published the bulk source is deleted, leaving only the
+small sidecars (calibration, ground truth) on disk. A **derived** layer reads the
+base rrd plus those sidecars — never the raw source — skips on its own rrd and
+rebuilds under `--force`, so regenerating one across a corpus is `rm <layer>/*.rrd`,
+a convert, and a `register --replace`. Capture properties live in base; a derived
+layer is written with `send_properties=False` and carries only its own
+`property:<layer>:*` beside its data, never a properties-only layer. Layers share
+nothing but the recording id, which is what stacks them onto one segment.
 
 ## Blueprints
 
