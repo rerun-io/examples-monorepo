@@ -774,6 +774,26 @@ mod tests {
                     prop_assert_eq!(wide[(i, j)], wide_want[i][j], "wide at ({}, {})", i, j);
                 }
             }
+
+            // ...and the vector entry point is that block with one column,
+            // which is the shape `marg_helper.cpp:306` reflects `Q2r` on: the
+            // reflector of column `col_start`, applied to the residual column.
+            let residual: usize = cols - 1;
+            let mut narrow: DVector<f64> = DVector::from_fn(rows, |i, _| source[(i, residual)]);
+            apply_householder_on_the_left_vec(
+                &mut narrow, span.row_start, span.rows, &essential, tau,
+            );
+            let mut narrow_want: Vec<Vec<f64>> =
+                (0..rows).map(|i| vec![source[(i, residual)]]).collect();
+            reference_apply_left(
+                &mut narrow_want,
+                BlockSpan { row_start, rows: span.rows, col_start: 0, cols: 1 },
+                &essential,
+                tau,
+            );
+            for i in 0..rows {
+                prop_assert_eq!(narrow[i], narrow_want[i][0], "vec at {}", i);
+            }
         }
 
         /// A reflection on a sub-block leaves everything outside the span

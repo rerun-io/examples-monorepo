@@ -246,7 +246,9 @@ always zero and that is a property of the expression, not of the address —
 base pointer is. The fork's `tools/marg_norm_probe.cpp` reproduces Eigen bit for
 bit on 7,486 of 7,486 shapes per precision with that emulation, on 5,869 (`f64`)
 and 4,832 (`f32`) with a pointer-derived offset, and on 2,627 and 2,897 with the
-sequential fold. Using the sequential fold in the flat QR and in
+sequential fold; a left fold over a packet's lanes in place of `predux`'s
+pairing reproduces 5,572 in `f32`, and in `f64` a packet holds two lanes, so
+there the two orders coincide. Using the sequential fold in the flat QR and in
 `ColPivHouseholderQR` flips `|beta| > sqrt(epsilon)` and `rank()` on valid
 inputs — in *opposite directions* in the two precisions on the same `9x2`
 problem — which is why the traversal is a parameter of `make_householder` and
