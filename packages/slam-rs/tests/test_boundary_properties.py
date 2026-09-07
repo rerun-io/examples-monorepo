@@ -5,7 +5,8 @@ so the whole file stays inside the default, seconds-long suite. The image rules
 both entry points share — rank, dtype, layout, the frameset's width and the
 calibrated frame size — are parametrized over ``Vio.track`` and
 ``OpticalFlow.process`` in ``test_frontend_boundary.py`` rather than written once
-per entry point; what is left here is the IMU clock, which only the estimator has.
+per entry point; what is left here is the IMU clock and the determinism of a run,
+which only the estimator has.
 """
 
 from collections.abc import Callable
@@ -15,7 +16,7 @@ import numpy as np
 import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
-from jaxtyping import UInt8
+from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from numpy.typing import NDArray
 
@@ -26,6 +27,10 @@ MAX_EXAMPLES: int = 50
 gaps = st.lists(st.integers(min_value=1, max_value=10**6), min_size=1, max_size=20)
 starts = st.integers(min_value=-(10**9), max_value=10**9)
 positions = st.integers(min_value=0, max_value=1000)
+FRAME_PERIOD_NS: int = 33_000_000
+"""Synthetic frame period: about 30 Hz."""
+IMU_PERIOD_NS: int = 1_000_000
+"""Synthetic IMU period: 1 kHz, the Index device's own rate."""
 
 PipelineFactory: TypeAlias = Callable[[int], _core.Vio]
 """The whole pipeline on a rig of the given camera count; a :mod:`conftest` fixture."""
@@ -115,3 +120,32 @@ def test_a_frameset_of_the_calibrated_size_is_accepted_at_any_timestamp(
     result: _core.VioResult = vio.track(t_ns, [texture(0, 0)] * count)
     assert result.status == _core.VioStatus.NeedMoreImu
     assert result.t_ns == t_ns
+
+
+@settings(max_examples=3, deadline=None)
+@given(shifts=st.lists(st.integers(min_value=0, max_value=4), min_size=6, max_size=6))
+def test_two_runs_over_the_same_input_agree_exactly(pipeline: PipelineFactory, texture: TextureFactory, shifts: list[int]) -> None:
+    """Offline mode has no queues and no threads, so a repeat run is bit-identical (D17).
+
+    Two estimators are driven over one sequence of framesets and inertial
+    batches, and every pose is compared exactly rather than to a tolerance: this
+    is the property that makes a reference run reproducible, and a scheduling
+    dependency would break it by an ulp long before it broke an ATE gate.
+
+    The same claim over a real segment, byte for byte through the CSV writer, is
+    ``tests/test_v2_gate.py``'s; this one is fast and runs every commit.
+    """
+    frames: list[list[UInt8[ndarray, "h w"]]] = [[texture(shift, 0), texture(shift + 1, 0)] for shift in shifts]
+    runs: list[list[Float64[ndarray, " 7"]]] = []
+    for _ in range(2):
+        vio: _core.Vio = pipeline(2)
+        poses: list[Float64[ndarray, " 7"]] = []
+        for index, images in enumerate(frames):
+            t_ns: int = index * FRAME_PERIOD_NS
+            samples: Int64[ndarray, " n_samples"] = np.arange(t_ns, t_ns + FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
+            vio.push_imu_batch(samples, zeros(len(samples)), np.tile(np.array([0.0, 0.0, 9.81]), (len(samples), 1)))
+            poses.append(vio.track(t_ns, images).world_from_rig)
+        runs.append(poses)
+    assert len(runs[0]) == len(frames)
+    for index, (first, second) in enumerate(zip(runs[0], runs[1], strict=True)):
+        assert np.array_equal(first, second), f"frameset {index} differed between two runs of the same input"
