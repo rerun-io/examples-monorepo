@@ -571,7 +571,11 @@ DETECTION_FRAMES: dict[aria.AriaStreamId, tuple[int, ...]] = {
 """Which synthetic frame index each SLAM camera saw a tag in; camera-rgb sees none, as
 upstream's detector only runs on the SLAM pair."""
 DETECTION_UV_PX: Float64[ndarray, "2"] = np.array([40.5, 60.25])
-"""First detection's pixel position; the rest step away from it by a pixel each."""
+"""First detection's pixel position, in the published native 640x480 pixels; the
+rest step away from it by a pixel each."""
+DETECTION_UPRIGHT_UV_PX: Float64[ndarray, "2"] = np.array([479.0 - DETECTION_UV_PX[1], DETECTION_UV_PX[0]])
+"""Where that detection lands once the frames are turned clockwise: ``(479 - v, u)``,
+479 being the last row of the SLAM cameras' native 480-pixel-high image."""
 
 
 def pseudo_gt_rows() -> Float64[ndarray, "n_poses 8"]:
@@ -878,6 +882,7 @@ def test_the_capture_properties_describe_the_sequence(converted_easy: ConvertedS
     assert capture["challenge"] == "easy"
     assert capture["has_pseudo_gt"] is True
     assert capture["control_point_count"] == 0, "R_01_easy was never surveyed"
+    assert capture["image_rotation_cw_deg"] == 90, "the frames are logged upright, not as the VRS stores them"
     assert capture["start_time_ns"] == IMU_T0_NS, "the IMUs start before the first frame"
     assert capture["vrs_bytes"] == vrs_bytes
     duration_s: object = capture["duration_s"]
@@ -1140,6 +1145,22 @@ def test_the_logged_rig_rotation_is_the_pose_seen_from_the_rig(converted_easy: C
     np.testing.assert_allclose(np.asarray(stored[0][0], dtype=np.float64), [0.0, 0.0, 0.0, 1.0], atol=1e-6)
 
 
+def test_the_image_rotation_leaves_the_gt_poses_alone(converted_easy: ConvertedSequence) -> None:
+    """The pGT poses the published, unrotated cam0, so ``world_T_rig`` must not turn with the pixels.
+
+    The fixture's pGT rotation *is* cam0's published ``rig_R_cam0``, so composing
+    with the published ``cam0.T_b_s`` stores the identity. Composing with the
+    upright calibration the base layer's frames ride would store a quarter turn
+    about the camera's optical axis instead, which this rules out.
+    """
+    quaternions: pa.Table = column_rows(read_back(converted_easy.gt), f"{schema.rig_path(0)}:Transform3D:quaternion")
+    stored: Float64[ndarray, "4"] = np.asarray(quaternions.column(1).to_pylist()[0][0], dtype=np.float64)
+
+    np.testing.assert_allclose(stored, [0.0, 0.0, 0.0, 1.0], atol=1e-6)
+    quarter_turn: Float64[ndarray, "4"] = Rotation.from_euler("z", 90.0, degrees=True).as_quat()
+    assert np.abs(stored - quarter_turn).max() > 0.5, "the gt layer never reads the rotated rig"
+
+
 def test_the_rig_transform_is_stored_child_from_parent_free(converted_easy: ConvertedSequence) -> None:
     """``world_T_rig`` is a child-to-parent step, which is Rerun's default relation.
 
@@ -1243,8 +1264,10 @@ def test_the_control_point_detections_sit_under_the_camera_that_saw_them(convert
         assert detections.num_rows == rows
         times_ns: list[int] = detections.column(schema.TIMELINE).combine_chunks().cast(pa.int64()).to_pylist()
         assert times_ns == [DEVICE_T0_NS + frame * SLAM_PERIOD_NS for frame in DETECTION_FRAMES[aria.CAMERA_STREAM_IDS[cam]]]
+        # The published detection is in native pixels; the logged one has to follow
+        # the frames it is drawn on, which the base layer turns clockwise.
         uv_px: Float64[ndarray, "2"] = np.asarray(detections.column(1).to_pylist()[0][0], dtype=np.float64)
-        np.testing.assert_allclose(uv_px, DETECTION_UV_PX, atol=1e-3)
+        np.testing.assert_allclose(uv_px, DETECTION_UPRIGHT_UV_PX, atol=1e-3)
     left_labels: list[list[str]] = column_rows(store, f"{schema.cp_uv_path(0, 0)}:Points2D:labels").column(1).to_pylist()
     assert left_labels[0] == [LEVELLED_POINT_NAME]
     right_labels: list[list[str]] = column_rows(store, f"{schema.cp_uv_path(0, 1)}:Points2D:labels").column(1).to_pylist()
