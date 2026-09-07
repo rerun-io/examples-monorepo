@@ -22,14 +22,13 @@ too and read as a parity claim about a recording the C++ never saw.
 """
 
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import Bool, Float32, Float64, Int64, UInt8, UInt64
+from jaxtyping import Float32, Int64, UInt8, UInt64
 from numpy import ndarray
 
 from slam_rs import _core
@@ -45,8 +44,6 @@ CPP_COLOR: tuple[int, int, int] = (255, 0, 255)
 """The one colour the C++ overlay is drawn in; nothing else in the view is magenta."""
 CELL_COLOR: tuple[int, int, int, int] = (70, 190, 255, 110)
 """Occupied detection cells, drawn as translucent outlines."""
-DUMPS_ENV: str = "SLAM_RS_FLOW_DUMPS_DIR"
-"""Environment variable that points the overlay at a fuller set of C++ dumps."""
 DEFAULT_DUMPS_DIR: Path = Path(__file__).resolve().parents[1] / "crates/slam-rs/tests/fixtures/flow/dumps"
 """The eight committed dumps the Rust flow gate runs off."""
 SOURCE_FILE: str = "source.json"
@@ -60,6 +57,27 @@ def camera_entity(index: int) -> str:
     return f"/world/rig_00/cam_{index:02d}/pinhole"
 
 
+_rising: UInt8[ndarray, " 255"] = np.arange(255, dtype=np.uint8)
+_falling: UInt8[ndarray, " 255"] = 255 - _rising
+_full: UInt8[ndarray, " 255"] = np.full(255, 255, dtype=np.uint8)
+_zero: UInt8[ndarray, " 255"] = np.zeros(255, dtype=np.uint8)
+HUE_RAMP: UInt8[ndarray, "1275 3"] = np.concatenate(
+    [
+        np.stack([_full, _rising, _zero], axis=1),
+        np.stack([_falling, _full, _zero], axis=1),
+        np.stack([_zero, _full, _rising], axis=1),
+        np.stack([_zero, _falling, _full], axis=1),
+        np.stack([_rising, _zero, _full], axis=1),
+    ]
+)
+"""Five of the hue circle's six 255-long ramps, red round to blue.
+
+The sixth ramp runs from magenta back to red and starts at exactly
+:data:`CPP_COLOR`, so a track drawn from it would read as the C++ overlay. Built
+once at import: the ramp is fixed, and it was rebuilt per camera per frameset.
+"""
+
+
 def track_colors(ids: Int64[ndarray, " n_tracks"]) -> UInt8[ndarray, "n_tracks 3"]:
     """A stable, saturated colour per track id, from a 32-bit hash of the id.
 
@@ -71,25 +89,13 @@ def track_colors(ids: Int64[ndarray, " n_tracks"]) -> UInt8[ndarray, "n_tracks 3
         ids: Track ids.
 
     Returns:
-        One ``uint8`` RGB triple per id.
+        One ``uint8`` RGB triple per id, never :data:`CPP_COLOR`.
     """
     hashed: UInt64[ndarray, " n_tracks"] = (ids.astype(np.uint64) * np.uint64(2654435761)) % np.uint64(2**32)
-    # Six 255-long ramps around the hue circle, so `sector` is the ramp and
-    # `rising` the position along it.
-    position: Float64[ndarray, " n_tracks"] = (hashed % np.uint64(1530)).astype(np.float64)
-    sector: Int64[ndarray, " n_tracks"] = (position // 255.0).astype(np.int64)
-    rising: UInt8[ndarray, " n_tracks"] = (position % 255.0).astype(np.uint8)
-    falling: UInt8[ndarray, " n_tracks"] = (255 - rising).astype(np.uint8)
-    full: UInt8[ndarray, " n_tracks"] = np.full_like(rising, 255)
-    zero: UInt8[ndarray, " n_tracks"] = np.zeros_like(rising)
-    sectors: list[Bool[ndarray, " n_tracks"]] = [sector == step for step in range(5)]
-    red: UInt8[ndarray, " n_tracks"] = np.select(sectors, [full, falling, zero, zero, rising], full)
-    green: UInt8[ndarray, " n_tracks"] = np.select(sectors, [rising, full, full, falling, zero], zero)
-    blue: UInt8[ndarray, " n_tracks"] = np.select(sectors, [zero, zero, rising, full, full], falling)
-    return np.stack([red, green, blue], axis=1)
+    return HUE_RAMP[hashed % np.uint64(len(HUE_RAMP))]
 
 
-def read_cpp_dumps(directory: Path | None = None) -> dict[tuple[str, int], list[Float32[ndarray, "n_keypoints 2"]]]:
+def read_cpp_dumps(camera_count: int, directory: Path | None = None) -> dict[tuple[str, int], list[Float32[ndarray, "n_keypoints 2"]]]:
     """Read the basalt C++ frontend's own keypoints, keyed by segment and frameset timestamp.
 
     The dumps are on the same ``video_time`` clock the feed reports, which starts
@@ -98,8 +104,10 @@ def read_cpp_dumps(directory: Path | None = None) -> dict[tuple[str, int], list[
     of every key here.
 
     Args:
+        camera_count: Cameras on the rig being replayed; every dump must carry
+            exactly that many, or one camera would keep a stale overlay.
         directory: Where ``frame_XXX.json`` and :data:`SOURCE_FILE` live; the
-            committed fixtures by default, overridden by :data:`DUMPS_ENV`.
+            committed fixtures by default.
 
     Returns:
         ``(segment_id, t_ns)`` to one array of ``[x, y]`` per camera; empty when
@@ -107,9 +115,10 @@ def read_cpp_dumps(directory: Path | None = None) -> dict[tuple[str, int], list[
 
     Raises:
         ValueError: The directory holds dumps but no :data:`SOURCE_FILE` naming
-            the segment they came from, so nothing could be associated with them.
+            the segment they came from, so nothing could be associated with
+            them; or a dump carries no timestamp, or another rig's cameras.
     """
-    source: Path = directory if directory is not None else Path(os.environ.get(DUMPS_ENV, DEFAULT_DUMPS_DIR))
+    source: Path = directory if directory is not None else DEFAULT_DUMPS_DIR
     if not source.is_dir():
         return {}
     frames: list[Path] = sorted(source.glob("frame_*.json"))
@@ -122,13 +131,21 @@ def read_cpp_dumps(directory: Path | None = None) -> dict[tuple[str, int], list[
             '"segment_id" key naming the segment they were dumped from, or the overlay would '
             "be drawn over whatever segment happens to be replayed"
         )
-    segment_id: str = json.loads(provenance.read_text())["segment_id"]
+    segment_id: object = json.loads(provenance.read_text()).get("segment_id")
+    if not isinstance(segment_id, str):
+        raise ValueError(f'{provenance} must carry a "segment_id" string naming the segment the dumps were dumped from')
     dumps: dict[tuple[str, int], list[Float32[ndarray, "n_keypoints 2"]]] = {}
     for path in frames:
-        dump: dict = json.loads(path.read_text())
-        dumps[segment_id, int(dump["t_ns"])] = [
+        dump: dict[str, object] = json.loads(path.read_text())
+        t_ns: object = dump.get("t_ns")
+        if not isinstance(t_ns, int):
+            raise ValueError(f'{path} must carry an integer "t_ns", the frameset time the keypoints were dumped at')
+        cameras: object = dump.get("cameras")
+        if not isinstance(cameras, list) or len(cameras) != camera_count:
+            raise ValueError(f"{path} holds {len(cameras) if isinstance(cameras, list) else 0} cameras, the rig being replayed has {camera_count}")
+        dumps[segment_id, t_ns] = [
             np.array([[keypoint["x"], keypoint["y"]] for keypoint in camera["keypoints"]], dtype=np.float32).reshape(-1, 2)
-            for camera in dump["cameras"]
+            for camera in cameras
         ]
     return dumps
 
@@ -154,7 +171,7 @@ class FrontendLogger:
         return cls(
             camera_count=camera_count,
             segment_id=segment_id,
-            cpp_dumps=read_cpp_dumps(dumps_dir),
+            cpp_dumps=read_cpp_dumps(camera_count, dumps_dir),
             trails=[{} for _ in range(camera_count)],
         )
 
@@ -234,7 +251,7 @@ class FrontendLogger:
                     rr.log(f"{camera_entity(index)}/keypoints_cpp", rr.Points2D(np.zeros((0, 2), dtype=np.float32)))
                 self.cpp_logged = False
             return
-        for index in range(min(self.camera_count, len(dump))):
+        for index in range(self.camera_count):
             rr.log(
                 f"{camera_entity(index)}/keypoints_cpp",
                 rr.Points2D(dump[index], colors=CPP_COLOR, radii=CPP_RADIUS_PX),
