@@ -21,7 +21,7 @@ use crate::ba_base::{BundleAdjustmentBase, compute_rel_pose};
 use crate::imu::{ImuBlock, ImuLinData, IntegratedImuMeasurement};
 use crate::landmark::Landmark;
 use crate::lie::{LieScalar, Se3};
-use crate::linearize::landmark_block::{LandmarkBlock, LandmarkBlockOptions};
+use crate::linearize::landmark_block::{DenseHbScratch, LandmarkBlock, LandmarkBlockOptions};
 use crate::linearize::reduce::{deterministic_reduce, deterministic_reduce_scalar};
 use crate::linearize::{LinearizeError, RelPoseLin};
 use crate::types::{
@@ -650,6 +650,7 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         let mut accumulator: DensePartial<S> = DensePartial::zeros(opt_size);
         let mut scratch: Vec<Option<DensePartial<S>>> = Vec::new();
         let blocks: &[LandmarkBlock<S>] = &self.landmark_blocks;
+        let mut leaf_scratch: DenseHbScratch<S> = DenseHbScratch::default();
         deterministic_reduce::<DensePartial<S>, LinearizeError>(
             blocks.len(),
             &mut accumulator,
@@ -660,7 +661,7 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
                 let block: &LandmarkBlock<S> =
                     blocks.get(i).ok_or(LinearizeError::LayoutOverflow)?;
                 acc.mark(block.active_cols());
-                block.add_dense_h_b(&mut acc.h, &mut acc.b)
+                block.add_dense_h_b(&mut acc.h, &mut acc.b, &mut leaf_scratch)
             },
             &DensePartial::join,
         )?;

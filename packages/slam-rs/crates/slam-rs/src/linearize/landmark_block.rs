@@ -59,6 +59,32 @@ impl<S: LieScalar> Default for LandmarkBlockOptions<S> {
     }
 }
 
+/// The buffers [`LandmarkBlock::add_dense_h_b`] works in, reused across blocks.
+///
+/// `H += Q2Jp^T Q2Jp` is a dot product per coefficient down two columns of
+/// `storage`, and an `f32` sum cannot be reassociated, so the reduction over
+/// rows has to stay sequential. Holding one accumulator per **column** instead
+/// of one per coefficient turns the inner loop into `acc[j] += t * row[j]`,
+/// which each accumulator still walks in row order — the same additions in the
+/// same order — and which vectorises, where the dot product does not.
+#[derive(Debug)]
+pub struct DenseHbScratch<S: LieScalar> {
+    /// The `Q2` rows of `storage` over the active columns then the residual,
+    /// row-major so one row is contiguous.
+    rows: Vec<S>,
+    /// One row of `H` plus its `b`, one coefficient per active column.
+    acc: Vec<S>,
+}
+
+impl<S: LieScalar> Default for DenseHbScratch<S> {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            acc: Vec::new(),
+        }
+    }
+}
+
 /// `LandmarkBlock<Scalar>::State` (`landmark_block.hpp:50`).
 ///
 /// `Uninitialized` is unreachable in the port — [`LandmarkBlock::allocate`] is a
@@ -818,6 +844,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
         &self,
         h: &mut DMatrix<S>,
         b: &mut DVector<S>,
+        scratch: &mut DenseHbScratch<S>,
     ) -> Result<(), LinearizeError> {
         if h.nrows() < self.padding_idx
             || h.ncols() < self.padding_idx
@@ -834,19 +861,36 @@ impl<S: LieScalar> LandmarkBlock<S> {
         // `h` and `b` start at `+0.0` and an IEEE sum is `-0.0` only when both
         // its operands are, so no accumulator here can be the one value `+= 0`
         // would have changed. See [`Self::active_cols`].
-        for &i in &self.active_cols {
-            for &j in &self.active_cols {
-                let mut acc: S = S::zero();
-                for r in 0..rows {
-                    acc += self.storage[(3 + r, i)] * self.storage[(3 + r, j)];
+        let live: usize = self.active_cols.len();
+        // `[ the active columns | the residual ]`, one contiguous row per `Q2`
+        // row; see [`DenseHbScratch`] for why the transpose is worth its copy.
+        let width: usize = live + 1;
+        scratch.rows.clear();
+        scratch.rows.resize(rows * width, S::zero());
+        for (slot, &column) in self.active_cols.iter().enumerate() {
+            for r in 0..rows {
+                scratch.rows[r * width + slot] = self.storage[(3 + r, column)];
+            }
+        }
+        for r in 0..rows {
+            scratch.rows[r * width + live] = self.storage[(3 + r, self.res_idx)];
+        }
+
+        scratch.acc.clear();
+        scratch.acc.resize(width, S::zero());
+        for (slot, &i) in self.active_cols.iter().enumerate() {
+            scratch.acc.fill(S::zero());
+            for r in 0..rows {
+                let row: &[S] = &scratch.rows[r * width..(r + 1) * width];
+                let factor: S = row[slot];
+                for (acc, &value) in scratch.acc.iter_mut().zip(row.iter()) {
+                    *acc += factor * value;
                 }
+            }
+            for (&j, &acc) in self.active_cols.iter().zip(scratch.acc.iter()) {
                 h[(i, j)] += acc;
             }
-            let mut acc: S = S::zero();
-            for r in 0..rows {
-                acc += self.storage[(3 + r, i)] * self.storage[(3 + r, self.res_idx)];
-            }
-            b[i] += acc;
+            b[i] += scratch.acc[live];
         }
         Ok(())
     }
@@ -1117,7 +1161,9 @@ mod tests {
         // loop would have produced.
         let mut h: DMatrix<f64> = DMatrix::zeros(block.padding_idx, block.padding_idx);
         let mut b: DVector<f64> = DVector::zeros(block.padding_idx);
-        block.add_dense_h_b(&mut h, &mut b).unwrap();
+        block
+            .add_dense_h_b(&mut h, &mut b, &mut DenseHbScratch::default())
+            .unwrap();
         let rows: usize = block.num_q2rows();
         for i in 0..block.padding_idx {
             for j in 0..block.padding_idx {

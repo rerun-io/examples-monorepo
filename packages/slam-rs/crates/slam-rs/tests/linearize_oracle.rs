@@ -60,7 +60,7 @@ use slam_rs::calib::{Calibration, Kb4Params};
 use slam_rs::landmark::Landmark;
 use slam_rs::lie::{LieScalar, Se3, So3};
 use slam_rs::linearize::{
-    LandmarkBlock, LinearizationAbsQR, LinearizationInputs, LinearizationOptions,
+    DenseHbScratch, LandmarkBlock, LinearizationAbsQR, LinearizationInputs, LinearizationOptions,
 };
 use slam_rs::types::{AbsOrderMap, LandmarkId, MargLinData, PoseStateWithLin, TimeCamId};
 
@@ -436,7 +436,9 @@ fn check_case<S: LieScalar + Serialize + DeserializeOwned>(case: &Case, toleranc
 
         let mut h: DMatrix<S> = DMatrix::zeros(want.padding_idx, want.padding_idx);
         let mut b: DVector<S> = DVector::zeros(want.padding_idx);
-        block.add_dense_h_b(&mut h, &mut b).unwrap();
+        block
+            .add_dense_h_b(&mut h, &mut b, &mut DenseHbScratch::default())
+            .unwrap();
         cmp.close_matrix(
             &h,
             &want.block_h,

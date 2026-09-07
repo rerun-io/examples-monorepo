@@ -53,7 +53,7 @@ mod landmark_block;
 mod reduce;
 
 pub use abs_qr::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
-pub use landmark_block::{LandmarkBlock, LandmarkBlockOptions, LandmarkBlockState};
+pub use landmark_block::{DenseHbScratch, LandmarkBlock, LandmarkBlockOptions, LandmarkBlockState};
 
 /// [`reduce::deterministic_reduce_scalar`] with the error type erased, so the
 /// fixture test in `tests/tbb_reduce_oracle.rs` can drive the association
