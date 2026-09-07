@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
-from slam_rs import reference_bundle
+from slam_rs import _core, reference_bundle
 from slam_rs.reference_bundle import BundleFile
 
 MANIFEST_PATH: Path = Path(__file__).resolve().parents[1] / "reference_segments.toml"
@@ -232,6 +232,26 @@ class ReferenceSegment:
     def gt_path(self) -> Path:
         """Local filesystem path behind :attr:`gt_url`."""
         return Path(self.gt_url.removeprefix("file://"))
+
+
+def flow_config(segment: ReferenceSegment) -> _core.VioConfig:
+    """basalt's defaults with the one field the manifest freezes per device.
+
+    Every other field of basalt's shipped configs is already the default the C++
+    constructor sets; the image safe radius is a property of the device — 472 on
+    Index, 340 on G2 — and the manifest carries it per segment. The replay tool
+    and the V2 gate both build their estimator from this, so neither can drive a
+    segment with the other's radius.
+
+    Args:
+        segment: The manifest entry naming the device's safe radius.
+
+    Returns:
+        The config to build an estimator or a frontend for that segment with.
+    """
+    config: _core.VioConfig = _core.VioConfig()
+    config.optical_flow_image_safe_radius = segment.reference.optical_flow_image_safe_radius
+    return config
 
 
 @dataclass(slots=True, frozen=True)

@@ -1,0 +1,118 @@
+"""The D17 hold, which the replay tool and the V2 gate both drive.
+
+The rule under test is that arrival order never reaches the trajectory: a
+frameset refused for want of inertial samples is held and tracked again once
+they arrive, before the frameset that brought them, and produces the pose a run
+that had the samples all along would have produced. ``_core`` proves that for
+one frameset (``test_import.py``); what is proved here is that
+:class:`slam_rs.tracking.Lockstep` — the one loop both drivers use — really does
+hold it, and that the hold cannot grow.
+
+The rig and the pipeline are :mod:`conftest` fixtures, which pytest injects; the
+factory aliases below are declared here rather than imported from another test
+module, because ``tests`` is not on the typechecker's search path and every
+module in this directory therefore stands alone.
+"""
+
+import hashlib
+from collections.abc import Callable
+from typing import TypeAlias
+
+import numpy as np
+import pytest
+from jaxtyping import Float64, Int64, UInt8
+from numpy import ndarray
+
+from slam_rs import _core
+from slam_rs.catalog_feed import Frameset, ImuStream
+from slam_rs.tracking import MAX_HELD_FRAMESETS, Lockstep
+
+FRAME_PERIOD_NS: int = 33_000_000
+"""One 30 Hz frameset to the next."""
+IMU_PERIOD_NS: int = 1_000_000
+"""Synthetic IMU period: 1 kHz."""
+
+PipelineFactory: TypeAlias = Callable[[int], _core.Vio]
+"""The whole pipeline on a rig of the given camera count."""
+TextureFactory: TypeAlias = Callable[[int, int], UInt8[ndarray, "h w"]]
+"""The synthetic scene, shifted by whole pixels in x and y."""
+
+
+def frameset(step: int, texture: TextureFactory, sample_t_ns: Int64[ndarray, " n_samples"]) -> Frameset:
+    """One synthetic frameset of the two-camera rig, carrying the given samples.
+
+    Args:
+        step: Frameset index; the scene is shifted by it, and it sets the timestamp.
+        texture: The scene each frameset is a shifted copy of.
+        sample_t_ns: Inertial sample times to attach, which may cover the frame or not.
+
+    Returns:
+        The frameset, with gravity along +z on every sample and no ground truth.
+    """
+    images: list[UInt8[ndarray, "h w"]] = [texture(step, 0), texture(step + 1, 0)]
+    digests: tuple[str, ...] = tuple(hashlib.sha256(image.tobytes()).hexdigest() for image in images)
+    return Frameset(
+        t_ns=step * FRAME_PERIOD_NS,
+        images=images,
+        image_sha256=digests,
+        sha256=hashlib.sha256("".join(digests).encode()).hexdigest(),
+        imu=ImuStream(
+            t_ns=sample_t_ns,
+            gyro_rad_s=np.zeros((len(sample_t_ns), 3), dtype=np.float64),
+            accel_m_s2=np.tile(np.array([0.0, 0.0, 9.81]), (len(sample_t_ns), 1)),
+        ),
+        ground_truth=None,
+    )
+
+
+def test_a_held_frameset_tracks_before_the_one_that_unblocked_it(pipeline: PipelineFactory, texture: TextureFactory) -> None:
+    """Time order is the trajectory, so the retry comes first and the poses are exact.
+
+    One lockstep gets each frameset's samples with the frameset. The other gets
+    only the samples up to its own frame time, which do not cover it, so the
+    frameset is held; the next frameset's batch runs past both frame times and
+    the held one tracks then. Both trajectories must be identical, pose by pose.
+    """
+    batches: list[Int64[ndarray, " n_samples"]] = [
+        np.arange(step * FRAME_PERIOD_NS, (step + 1) * FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64) for step in range(4)
+    ]
+    # The same samples in the same order, only split differently: the first
+    # frameset arrives with one sample at its own frame time, which does not
+    # cover it, and the rest of them come with the second frameset.
+    held_batches: list[Int64[ndarray, " n_samples"]] = [
+        batches[0][:1],
+        np.concatenate([batches[0][1:], batches[1]]),
+        batches[2],
+        batches[3],
+    ]
+    covered: Lockstep = Lockstep(vio=pipeline(2))
+    held: Lockstep = Lockstep(vio=pipeline(2))
+    covered_poses: list[Float64[ndarray, " 7"]] = []
+    held_poses: list[Float64[ndarray, " 7"]] = []
+    for step, (whole, split) in enumerate(zip(batches, held_batches, strict=True)):
+        covered_poses.extend(result.world_from_rig for _tracked, result in covered.push(frameset(step, texture, whole)))
+        held_poses.extend(result.world_from_rig for _tracked, result in held.push(frameset(step, texture, split)))
+
+    assert len(covered.elapsed_ms) == 4
+    assert not covered.pending and not held.pending
+    assert covered.statuses == {"VioStatus.Tracking": 4}
+    # One refusal, then five accepted tracks over four framesets: the held one is
+    # tracked again before the frameset whose samples unblocked it.
+    assert held.statuses == {"VioStatus.NeedMoreImu": 1, "VioStatus.Tracking": 4}
+    for expected, actual in zip(covered_poses, held_poses, strict=True):
+        np.testing.assert_array_equal(expected, actual)
+
+
+def test_the_hold_never_grows_past_one_refused_frameset(pipeline: PipelineFactory, texture: TextureFactory) -> None:
+    """A feed that stops supplying samples fails at the frameset that broke the rule.
+
+    Without the bound the hold retains every remaining frameset — two decoded
+    960x960 frames each on a reference segment — and the error names a count
+    instead of the frameset.
+    """
+    lockstep: Lockstep = Lockstep(vio=pipeline(2))
+    nothing: Int64[ndarray, " 0"] = np.zeros(0, dtype=np.int64)
+    for step in range(MAX_HELD_FRAMESETS):
+        assert list(lockstep.push(frameset(step, texture, nothing))) == []
+    with pytest.raises(ValueError, match=f"frameset {MAX_HELD_FRAMESETS * FRAME_PERIOD_NS} takes the hold to 3 framesets"):
+        list(lockstep.push(frameset(MAX_HELD_FRAMESETS, texture, nothing)))

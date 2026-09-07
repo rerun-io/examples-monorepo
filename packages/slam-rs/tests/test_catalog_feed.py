@@ -9,7 +9,7 @@ from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from slam_rs import _core
-from slam_rs.apis.replay import Config, VioStage, _cpp_trajectory, _flow_config, _replay
+from slam_rs.apis.replay import Config, VioStage, _cpp_trajectory, _replay
 from slam_rs.catalog_feed import (
     CameraCalib,
     CameraStatics,
@@ -22,7 +22,8 @@ from slam_rs.catalog_feed import (
     open_segment,
     rotate_pinhole_clockwise,
 )
-from slam_rs.reference import ReferenceManifest, ReferenceSegment, load_manifest
+from slam_rs.reference import ReferenceManifest, ReferenceSegment, flow_config, load_manifest
+from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import AteResult, Trajectory, associate, ate, read_trajectory, shift_clock, write_trajectory
 from slam_rs.vio_log import VioLogger
 
@@ -272,7 +273,7 @@ def test_a_replay_export_associates_with_the_ground_truth_sidecar(tmp_path: Path
         truth: Trajectory | None = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
         assert truth is not None
         stage: VioStage = VioStage(
-            vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), _flow_config(segment)),
+            lockstep=Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(segment))),
             logger=VioLogger(
                 cameras=feed.cameras,
                 ground_truth=truth,
@@ -288,7 +289,7 @@ def test_a_replay_export_associates_with_the_ground_truth_sidecar(tmp_path: Path
         write_trajectory(relative_export, estimate)
 
     assert replayed == 40
-    assert stage.imu_samples > 0
+    assert stage.lockstep.imu_samples > 0
     # One pose per frameset: every frameset's own batch runs past its frame time,
     # and one that did not would be held and tracked again rather than lost (D17).
     assert len(estimate) == replayed

@@ -37,8 +37,9 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from slam_rs import _core
 from slam_rs.catalog_feed import RIG_ENTITY, CameraCalib, Frameset, LocalSegment, SegmentFeed, open_segment
 from slam_rs.frontend_log import FrontendLogger, camera_entity, frontend_blueprint
-from slam_rs.reference import ReferenceManifest, ReferenceSegment, load_manifest
+from slam_rs.reference import ReferenceManifest, ReferenceSegment, flow_config, load_manifest
 from slam_rs.reference_bundle import BundleFile
+from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import Trajectory, ate, coverage, empty_trajectory, read_trajectory, shift_clock, write_trajectory
 from slam_rs.vio_log import VioLogger, vio_blueprint
 
@@ -48,9 +49,6 @@ IMAGE_DOWNSCALE: int = 2
 """Images are logged at half resolution: the viewer does not need full-resolution pixels to show what was fed."""
 JPEG_QUALITY: int = 85
 """Quality of the full-resolution frames the frontend stage logs; 960x960 grayscale lands around 38 kB."""
-
-MAX_HELD_FRAMESETS: int = 2
-"""Most framesets the hold may ever carry: one refused, plus the one whose samples unblock it (D17)."""
 
 Stage: TypeAlias = Literal["input", "frontend", "vio"]
 """How far a replay runs: the estimator's inputs, the optical-flow frontend over them, or the whole pipeline."""
@@ -152,76 +150,39 @@ class VioStage:
     ``--stage vio``.
     """
 
-    vio: _core.Vio
-    """The estimator every frameset and every inertial sample goes through."""
+    lockstep: Lockstep
+    """The estimator and the D17 hold, which the V2 gate drives the same way."""
     logger: VioLogger
     """Where the trajectories, the window, the landmarks and the counters go."""
-    elapsed_ms: list[float] = field(default_factory=list)
-    """Wall time each ``track`` call took, in frameset order."""
-    statuses: dict[str, int] = field(default_factory=dict)
-    """How many times ``track`` answered each status, retries included."""
-    imu_samples: int = 0
-    """Inertial samples pushed so far."""
-    pending: list[Frameset] = field(default_factory=list)
-    """Framesets refused for want of IMU, oldest first, waiting for the samples that cover them."""
+
+    @property
+    def elapsed_ms(self) -> list[float]:
+        """Wall time each ``track`` call that tracked took, in frameset order."""
+        return self.lockstep.elapsed_ms
+
+    @property
+    def pending(self) -> list[Frameset]:
+        """Framesets still held for want of the inertial samples that cover them."""
+        return self.lockstep.pending
 
     def run(self, frameset: Frameset) -> None:
-        """Push the frameset's inertial samples, then track everything they now cover.
-
-        A frameset the estimator refuses is **held, not dropped** (D17): the next
-        frameset's batch runs one sample past its own frame time and therefore
-        past this one's, so the held frameset tracks then — and before the
-        frameset whose samples unblocked it, because time order is the
-        trajectory. Nothing moved on the refusal, so the retry produces the pose
-        a run that had the samples all along would have produced.
+        """Track the frameset and everything its samples now cover, and log each one.
 
         Args:
             frameset: The frameset to track, with the samples since the previous one.
         """
-        if len(frameset.imu):
-            # The feed already hands over the samples since the previous frameset,
-            # running one past this frame time: a backend that integrates up to the
-            # frame and blocks until it can deadlocks on the first frameset otherwise.
-            self.vio.push_imu_batch(
-                frameset.imu.t_ns,
-                np.ascontiguousarray(frameset.imu.gyro_rad_s),
-                np.ascontiguousarray(frameset.imu.accel_m_s2),
-            )
-            self.imu_samples += len(frameset.imu)
-        self.pending.append(frameset)
-        if len(self.pending) > MAX_HELD_FRAMESETS:
-            # Every batch runs one sample past its own frame time and therefore
-            # past the previous frameset's, so a second refusal in a row cannot
-            # happen; a deeper hold would silently retain whole decoded framesets
-            # (~1.8 MB each) until the end of the segment.
-            raise ValueError(
-                f"frameset {frameset.t_ns} is the {len(self.pending)}th held at once, past the {MAX_HELD_FRAMESETS} "
-                f"the feed's one-sample lead allows; held so far {[held.t_ns for held in self.pending]}"
-            )
-        while self.pending:
-            held: Frameset = self.pending[0]
-            started: float = time.monotonic()
-            result: _core.VioResult = self.vio.track(held.t_ns, held.images)
-            elapsed_ms: float = 1e3 * (time.monotonic() - started)
-            # A PyO3 enum has no ``name`` and is unhashable (see ``_core.pyi``), so the
-            # repr is both the only name it has and the only thing that keys a dict.
-            status_name: str = str(result.status)
-            self.statuses[status_name] = self.statuses.get(status_name, 0) + 1
-            if result.status != _core.VioStatus.Tracking:
-                return
-            self.pending.pop(0)
-            self.elapsed_ms.append(elapsed_ms)
+        for held, result in self.lockstep.push(frameset):
             # The rows belong at the frameset's own time, which is the caller's
             # cursor for all but a retried one.
             rr.set_time("video_time", duration=np.timedelta64(held.t_ns, "ns"))
             # Both are present on a frameset that tracked — the snapshot because it
             # measured, the keypoints because the frontend accepted it — so a
             # missing one is a broken invariant, not a rung to skip (D32).
-            snapshot: _core.VioSnapshot | None = self.vio.snapshot()
-            frame: _core.FlowFrame | None = self.vio.flow_frame()
+            snapshot: _core.VioSnapshot | None = self.lockstep.vio.snapshot()
+            frame: _core.FlowFrame | None = self.lockstep.vio.flow_frame()
             assert snapshot is not None, f"frameset {held.t_ns} tracked without a window snapshot"
             assert frame is not None, f"frameset {held.t_ns} tracked without the keypoints it tracked on"
-            self.logger.log(result, snapshot, frame, elapsed_ms)
+            self.logger.log(result, snapshot, frame, self.lockstep.elapsed_ms[-1])
 
     def summary(self) -> str:
         """One line on what the stage did, for the end of a replay."""
@@ -229,23 +190,11 @@ class VioStage:
         if self.pending:
             unresolved = f", {len(self.pending)} FRAMESETS NEVER COVERED BY THE IMU at {[held.t_ns for held in self.pending]}"
         return (
-            f"vio: {self.imu_samples} IMU samples pushed, statuses {self.statuses}, "
+            f"vio: {self.lockstep.imu_samples} IMU samples pushed, statuses {self.lockstep.statuses}, "
             f"{np.mean(self.elapsed_ms):.1f} ms per frameset "
             f"(median {np.median(self.elapsed_ms):.1f}, max {np.max(self.elapsed_ms):.1f})"
             f"{unresolved}"
         )
-
-
-def _flow_config(segment: ReferenceSegment) -> _core.VioConfig:
-    """basalt's defaults with the one field the manifest freezes per device.
-
-    Every other field of basalt's shipped configs is already the default the C++
-    constructor sets; the image safe radius is a property of the device — 472 on
-    Index, 340 on G2 — and the manifest carries it per segment.
-    """
-    config: _core.VioConfig = _core.VioConfig()
-    config.optical_flow_image_safe_radius = segment.reference.optical_flow_image_safe_radius
-    return config
 
 
 def _cpp_trajectory(manifest: ReferenceManifest, segment: ReferenceSegment, capture_start_time_ns: int) -> Trajectory:
@@ -339,14 +288,14 @@ def main(config: Config) -> None:
         stage: FrontendStage | VioStage | None = None
         if config.stage == "frontend":
             stage = FrontendStage(
-                flow=_core.OpticalFlow(_core.Calibration.from_catalog(feed.cameras, feed.imu), _flow_config(segment)),
+                flow=_core.OpticalFlow(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(segment)),
                 logger=FrontendLogger(len(feed.cameras), feed.segment_id),
             )
             rr.send_blueprint(frontend_blueprint(feed.cameras))
         elif config.stage == "vio":
             truth: Trajectory | None = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
             stage = VioStage(
-                vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), _flow_config(segment)),
+                lockstep=Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(segment))),
                 logger=VioLogger(
                     cameras=feed.cameras,
                     ground_truth=truth if truth is not None else empty_trajectory(),

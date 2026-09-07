@@ -38,9 +38,10 @@ from jaxtyping import Float64
 from numpy import ndarray
 
 from slam_rs import _core
-from slam_rs.catalog_feed import Frameset, LocalSegment, SegmentFeed, open_segment
-from slam_rs.reference import ReferenceManifest, ReferenceSegment, load_manifest
+from slam_rs.catalog_feed import LocalSegment, SegmentFeed, open_segment
+from slam_rs.reference import ReferenceManifest, ReferenceSegment, flow_config, load_manifest
 from slam_rs.reference_bundle import BundleFile
+from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import (
     MIN_ASSOCIATED_POSES,
     AteResult,
@@ -87,38 +88,22 @@ def run_segment(segment: ReferenceSegment, max_framesets: int | None = None) -> 
     Returns:
         The estimated trajectory and the two counts the gate reads.
     """
-    config: _core.VioConfig = _core.VioConfig()
-    config.optical_flow_image_safe_radius = segment.reference.optical_flow_image_safe_radius
     source: LocalSegment = LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path)
     t_ns: list[int] = []
     positions: list[Float64[ndarray, " 3"]] = []
     quaternions: list[Float64[ndarray, " 4"]] = []
     replayed: int = 0
-    pending: list[Frameset] = []
     feed: SegmentFeed
     with open_segment(source, segment.imu) as feed:
-        vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), config)
-        frameset: Frameset
+        # The hold-and-retry rule is the pipeline's contract, not the tool's, so
+        # the gate drives the same :class:`slam_rs.tracking.Lockstep` the replay
+        # tool does (D17); what the gate does not import is the Rerun rung.
+        lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(segment)))
         for frameset in feed.framesets():
             if max_framesets is not None and replayed >= max_framesets:
                 break
             replayed += 1
-            if len(frameset.imu):
-                vio.push_imu_batch(
-                    frameset.imu.t_ns,
-                    np.ascontiguousarray(frameset.imu.gyro_rad_s),
-                    np.ascontiguousarray(frameset.imu.accel_m_s2),
-                )
-            # A frameset refused for want of IMU is held and tracked again once
-            # the next batch arrives, in its own time order, as the replay tool
-            # does (D17): dropping it would lose the frame and count it as a
-            # tracking loss it is not.
-            pending.append(frameset)
-            while pending:
-                result: _core.VioResult = vio.track(pending[0].t_ns, pending[0].images)
-                if result.status != _core.VioStatus.Tracking:
-                    break
-                pending.pop(0)
+            for _tracked, result in lockstep.push(frameset):
                 pose: Float64[ndarray, " 7"] = result.world_from_rig
                 t_ns.append(result.t_ns)
                 positions.append(pose[0:3].copy())
@@ -126,7 +111,7 @@ def run_segment(segment: ReferenceSegment, max_framesets: int | None = None) -> 
         offset_ns: int = feed.capture_start_time_ns
     # Whatever is still held never got samples covering it, so it produced no
     # pose: that, and only that, is a lost frameset.
-    lost: int = len(pending)
+    lost: int = len(lockstep.pending)
     # Exports and both references are on the absolute device clock.
     estimate: Trajectory = Trajectory(
         t_ns=np.array(t_ns, dtype=np.int64),
