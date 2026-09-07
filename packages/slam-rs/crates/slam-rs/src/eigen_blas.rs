@@ -35,56 +35,87 @@ use nalgebra::DMatrix;
 use crate::lie::LieScalar;
 use crate::linearize::eigen_qr::BlockSpan;
 
-/// `redux_impl<Func, Evaluator, LinearVectorizedTraversal, NoUnrolling>`
-/// (`Core/Redux.h:274-325`) over a contiguous, runtime-length expression.
+/// `redux_impl<Func, Evaluator, LinearVectorizedTraversal, NoUnrolling>::run`
+/// (`Core/Redux.h:274-325`): the sum of `len` contiguous coefficients in
+/// Eigen's order, with `term(i)` supplying coefficient `i`.
 ///
-/// This is what `.sum()` does to the `cwiseProduct` inside the row-major
-/// triangular solve (`TriangularSolverVector.h:66-69`). The expression is a
-/// `CwiseBinaryOp`, which carries no `DirectAccessBit`, so `first_aligned`
-/// short-circuits to zero (`Core/util/Memory.h`, `first_aligned<Alignment>(const
-/// DenseBase&)`) and the split below depends only on the length — not on where
-/// the data happens to sit in memory.
-pub(crate) fn redux_dynamic<S: LieScalar>(terms: &[S]) -> S {
-    let size: usize = terms.len();
+/// Two of basalt's reductions come through here — the `.sum()` of a
+/// `cwiseProduct` (an `InnerProduct` product, or the row-major triangular
+/// solve's `TriangularSolverVector.h:66-69`) and the `squaredNorm()` of a
+/// contiguous column segment ([`crate::linearize::eigen_qr::contiguous_squared_norm`]).
+/// They differ only in where the coefficients come from, which is why this
+/// takes a closure: the traversal, the two accumulators and the scalar tail are
+/// Eigen's and must be written once.
+///
+/// **`alignedStart` is always zero, and that is a property of the expression,
+/// not of the address.** `Redux.h:290` calls
+/// `internal::first_default_aligned(xpr)`; every expression that reaches this
+/// port is a `CwiseUnaryOp` or `CwiseBinaryOp`, which carry no
+/// `DirectAccessBit`, so `DenseCoeffsBase.h:533`'s `ReturnZero` is true and the
+/// head split never happens. The fork's `tools/marg_norm_probe.cpp` prints
+/// `first_default_aligned(unaryExpr) = 0` from Eigen itself.
+///
+/// An empty reduction is `Scalar(0)`: `DenseBase::sum()` returns without
+/// reducing at all (`Redux.h:489`), which is what makes an empty column and an
+/// empty tail well defined rather than a read of `coeff(0)`.
+pub(crate) fn redux_contiguous<S: LieScalar>(len: usize, term: impl Fn(usize) -> S) -> S {
+    if len == 0 {
+        return S::zero();
+    }
     let packet: usize = S::EIGEN_PACKET_SIZE;
-    let aligned_size: usize = (size / packet) * packet;
-    let aligned_size2: usize = (size / (2 * packet)) * (2 * packet);
+    // `:291-292` with `alignedStart == 0`.
+    let aligned_size2: usize = (len / (2 * packet)) * (2 * packet);
+    let aligned_size: usize = (len / packet) * packet;
 
     if aligned_size == 0 {
-        // "too small to vectorize anything" (`:317-322`): a left fold, and an
-        // empty input is zero rather than a read of `coeff(0)`.
-        return terms.iter().copied().fold(S::zero(), |acc, x| acc + x);
+        // `:317-322`: "too small to vectorize anything" — `coeff(0)`, then a
+        // left fold over the rest.
+        let mut res: S = term(0);
+        for i in 1..len {
+            res += term(i);
+        }
+        return res;
     }
 
-    // Four lanes because that is the widest packet either scalar has; only the
-    // first `packet` of them are read, as in
-    // [`crate::linearize::eigen_qr::contiguous_squared_norm`].
-    let mut res0: [S; 4] = [S::zero(); 4];
-    res0[..packet].copy_from_slice(&terms[..packet]);
+    // `:296`. Four lanes because that is the widest packet either scalar has;
+    // only the first `packet` of them are read.
+    let mut packet0: [S; 4] = [S::zero(); 4];
+    for (lane, slot) in packet0.iter_mut().enumerate().take(packet) {
+        *slot = term(lane);
+    }
     if aligned_size > packet {
-        let mut res1: [S; 4] = [S::zero(); 4];
-        res1[..packet].copy_from_slice(&terms[packet..2 * packet]);
+        // `:297-307`: two accumulators, one for the even packets and one for
+        // the odd, folded together at the end.
+        let mut packet1: [S; 4] = [S::zero(); 4];
+        for (lane, slot) in packet1.iter_mut().enumerate().take(packet) {
+            *slot = term(packet + lane);
+        }
         let mut index: usize = 2 * packet;
         while index < aligned_size2 {
-            for lane in 0..packet {
-                res0[lane] += terms[index + lane];
-                res1[lane] += terms[index + packet + lane];
+            for (lane, slot) in packet0.iter_mut().enumerate().take(packet) {
+                *slot += term(index + lane);
+            }
+            for (lane, slot) in packet1.iter_mut().enumerate().take(packet) {
+                *slot += term(index + packet + lane);
             }
             index += 2 * packet;
         }
-        for lane in 0..packet {
-            res0[lane] += res1[lane];
+        // `:306`.
+        for (lane, slot) in packet0.iter_mut().enumerate().take(packet) {
+            *slot += packet1[lane];
         }
+        // `:307-308`: one odd packet left over.
         if aligned_size > aligned_size2 {
-            for lane in 0..packet {
-                res0[lane] += terms[aligned_size2 + lane];
+            for (lane, slot) in packet0.iter_mut().enumerate().take(packet) {
+                *slot += term(aligned_size2 + lane);
             }
         }
     }
-    let mut res: S = S::eigen_predux(&res0[..packet]);
-    // `alignedStart` is zero, so only the trailing coefficients are left.
-    for &term in &terms[aligned_size..] {
-        res += term;
+    // `:310`, then `:314` — the head loop of `:312` is empty because
+    // `alignedStart` is zero.
+    let mut res: S = S::eigen_predux(&packet0[..packet]);
+    for i in aligned_size..len {
+        res += term(i);
     }
     res
 }
@@ -178,45 +209,38 @@ mod tests {
     use nalgebra::DMatrix;
     use proptest::prelude::*;
 
-    /// The `f64` splits of `redux_dynamic`, length by length, against the trees
-    /// derived from `Redux.h:274-325` by hand.
+    /// The `f64` splits, length by length, against the trees derived from
+    /// `Redux.h:274-325` by hand.
     #[test]
-    fn redux_dynamic_splits_as_eigen_does() {
+    fn the_reduction_splits_as_eigen_does() {
         let t: Vec<f64> = (1..=7).map(|i| 1.0 / f64::from(i)).collect();
-        assert_eq!(redux_dynamic(&t[0..1]), t[0]);
-        assert_eq!(redux_dynamic(&t[0..2]), t[0] + t[1]);
-        assert_eq!(redux_dynamic(&t[0..3]), (t[0] + t[1]) + t[2]);
+        let sum = |len: usize| -> f64 { redux_contiguous(len, |i| t[i]) };
+        assert_eq!(sum(1), t[0]);
+        assert_eq!(sum(2), t[0] + t[1]);
+        assert_eq!(sum(3), (t[0] + t[1]) + t[2]);
         assert_eq!(
-            redux_dynamic(&t[0..4]),
+            sum(4),
             (t[0] + t[2]) + (t[1] + t[3]),
             "two packets fold lane-wise before predux"
         );
+        assert_eq!(sum(5), ((t[0] + t[2]) + (t[1] + t[3])) + t[4]);
+        assert_eq!(sum(6), ((t[0] + t[2]) + t[4]) + ((t[1] + t[3]) + t[5]));
         assert_eq!(
-            redux_dynamic(&t[0..5]),
-            ((t[0] + t[2]) + (t[1] + t[3])) + t[4]
-        );
-        assert_eq!(
-            redux_dynamic(&t[0..6]),
-            ((t[0] + t[2]) + t[4]) + ((t[1] + t[3]) + t[5])
-        );
-        assert_eq!(
-            redux_dynamic(&t[0..7]),
+            sum(7),
             (((t[0] + t[2]) + t[4]) + ((t[1] + t[3]) + t[5])) + t[6]
         );
-        assert_eq!(redux_dynamic::<f64>(&[]), 0.0);
+        assert_eq!(redux_contiguous::<f64>(0, |_| 1.0), 0.0);
     }
 
     /// The `f32` split: nothing below four coefficients vectorises, and four or
     /// more fold one packet then a scalar tail.
     #[test]
-    fn redux_dynamic_needs_four_coefficients_in_f32() {
+    fn the_reduction_needs_four_coefficients_in_f32() {
         let t: Vec<f32> = (1..=6).map(|i| 1.0 / (i as f32)).collect();
-        assert_eq!(redux_dynamic(&t[0..3]), (t[0] + t[1]) + t[2]);
-        assert_eq!(redux_dynamic(&t[0..4]), (t[0] + t[2]) + (t[1] + t[3]));
-        assert_eq!(
-            redux_dynamic(&t[0..5]),
-            ((t[0] + t[2]) + (t[1] + t[3])) + t[4]
-        );
+        let sum = |len: usize| -> f32 { redux_contiguous(len, |i| t[i]) };
+        assert_eq!(sum(3), (t[0] + t[1]) + t[2]);
+        assert_eq!(sum(4), (t[0] + t[2]) + (t[1] + t[3]));
+        assert_eq!(sum(5), ((t[0] + t[2]) + (t[1] + t[3])) + t[4]);
     }
 
     /// The column-major kernel accumulates from zero, which a naive

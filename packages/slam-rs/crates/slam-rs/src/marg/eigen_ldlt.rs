@@ -34,7 +34,7 @@
 
 use nalgebra::{DMatrix, DVector};
 
-use crate::eigen_blas::{gemv_col_major_block, gemv_row_major_of_transpose, redux_dynamic};
+use crate::eigen_blas::{gemv_col_major_block, gemv_row_major_of_transpose, redux_contiguous};
 use crate::lie::LieScalar;
 use crate::linearize::eigen_qr::BlockSpan;
 
@@ -316,8 +316,8 @@ impl<S: LieScalar> EigenLdlt<S> {
                 // `cjLhs.row(i).segment(s, k)` over the transposed view is
                 // `mat[(s + t, i)]`, contiguous in the column-major factor, so
                 // the `.sum()` is packet-accessible and vectorises.
-                let terms: Vec<S> = (0..k).map(|t| self.mat[(s + t, i)] * v[s + t]).collect();
-                v[i] -= redux_dynamic(&terms);
+                let update: S = redux_contiguous(k, |t| self.mat[(s + t, i)] * v[s + t]);
+                v[i] -= update;
             }
             pi = start_row;
         }

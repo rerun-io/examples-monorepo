@@ -41,7 +41,7 @@ use nalgebra::{
 
 use crate::calib::Calibration;
 use crate::camera::{CameraEnum, CameraError};
-use crate::eigen_blas::redux_dynamic;
+use crate::eigen_blas::redux_contiguous;
 use crate::landmark::{Landmark, LandmarkDatabase, LandmarkError, StereographicParam, eigen_norm3};
 use crate::lie::{LieScalar, Se3, So3};
 use crate::types::{
@@ -1100,10 +1100,9 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
             return Ok(sqrt_prior_error(&h_delta, &mld.b, rows));
         }
         // `:463`.
-        let terms: Vec<S> = (0..rows.min(marg_size))
-            .map(|i| delta[i] * (c::<S>(0.5) * h_delta[i] + mld.b[i]))
-            .collect();
-        Ok(redux_dynamic(&terms))
+        Ok(redux_contiguous(rows.min(marg_size), |i| {
+            delta[i] * (c::<S>(0.5) * h_delta[i] + mld.b[i])
+        }))
     }
 
     /// The prior's share of the model cost change,
@@ -1212,14 +1211,11 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
 /// The outer `(1×n)·(n×1)` is Eigen's `InnerProduct`, which is
 /// `(lhs.transpose().cwiseProduct(rhs)).sum()`
 /// (`ProductEvaluators.h`, `generic_product_impl<..., InnerProduct>`), so the
-/// fold is [`redux_dynamic`]'s packet tree and not a left fold: the two differ
-/// in `f32`, and this value enters `error_total` whose difference across an
-/// increment is the LM accept test.
+/// fold is [`redux_contiguous`]'s packet tree and not a left fold: the two
+/// differ in `f32`, and this value enters `error_total` whose difference across
+/// an increment is the LM accept test.
 fn sqrt_prior_error<S: LieScalar>(h_delta: &DVector<S>, b: &DVector<S>, rows: usize) -> S {
-    let terms: Vec<S> = (0..rows)
-        .map(|k| h_delta[k] * (c::<S>(0.5) * h_delta[k] + b[k]))
-        .collect();
-    redux_dynamic(&terms)
+    redux_contiguous(rows, |k| h_delta[k] * (c::<S>(0.5) * h_delta[k] + b[k]))
 }
 
 #[cfg(test)]

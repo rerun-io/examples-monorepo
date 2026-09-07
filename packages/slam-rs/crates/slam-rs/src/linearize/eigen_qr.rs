@@ -54,6 +54,7 @@
 use nalgebra::{DMatrix, DVector};
 
 use crate::ba_base::JacobiRotation;
+use crate::eigen_blas::redux_contiguous;
 use crate::lie::LieScalar;
 
 /// The sub-block a reflection acts on, `storage.block(row_start, col_start,
@@ -112,91 +113,22 @@ pub(crate) enum ColumnRedux {
 /// `squaredNorm()` over the **contiguous** column segment
 /// `storage.col(col).segment(start, len)`, in Eigen's order.
 ///
-/// `redux_impl<Func, Evaluator, LinearVectorizedTraversal, NoUnrolling>::run`
-/// (`Eigen/src/Core/Redux.h:274-325`) over `unaryExpr(squared_norm_functor)`
-/// (`Dot.h:24`), whose `Evaluator::SizeAtCompileTime` is `Dynamic`, so the cost
-/// is `HugeCost` and the unrolled variants never apply.
-///
-/// **`alignedStart` is always zero, and that is a property of the expression,
-/// not of the address.** `Redux.h:290` calls
-/// `internal::first_default_aligned(xpr)`, and `xpr` here is the `CwiseUnaryOp`
-/// the squared norm reduces; `CwiseUnaryOp.h:25` keeps only `RowMajorBit` in its
-/// flags, so `DenseCoeffsBase.h:533`'s `ReturnZero` is true and the head split
-/// never happens. The fork's `tools/marg_norm_probe.cpp` prints
-/// `first_default_aligned(unaryExpr) = 0` from Eigen itself; the shape sweep it
-/// runs, and what each wrong order scores on it, are in the package README.
+/// `unaryExpr(squared_norm_functor)` (`Dot.h:24`) reduced by
+/// [`crate::eigen_blas::redux_contiguous`], whose doc carries the traversal and
+/// the `alignedStart == 0` argument; `Evaluator::SizeAtCompileTime` is
+/// `Dynamic`, so the cost is `HugeCost` and the unrolled variants never apply.
+/// The shape sweep this order was verified on, and what each wrong order
+/// scores on it, are in the package README.
 pub(crate) fn contiguous_squared_norm<S: LieScalar>(
     storage: &DMatrix<S>,
     col: usize,
     start: usize,
     len: usize,
 ) -> S {
-    if len == 0 {
-        // `DenseBase::sum()` returns `Scalar(0)` for an empty expression
-        // without reducing at all (`Redux.h:489`), which is what makes an empty
-        // tail and an empty column well defined rather than a read of
-        // `coeff(0)`.
-        return S::zero();
-    }
-    let sq = |i: usize| -> S {
+    redux_contiguous(len, |i| {
         let v: S = storage[(start + i, col)];
         v * v
-    };
-    let packet: usize = S::EIGEN_PACKET_SIZE;
-    // `:291-292` with `alignedStart == 0`.
-    let aligned_size2: usize = (len / (2 * packet)) * (2 * packet);
-    let aligned_size: usize = (len / packet) * packet;
-
-    if aligned_size == 0 {
-        // `:317-322`: "too small to vectorize anything".
-        let mut res: S = sq(0);
-        for i in 1..len {
-            res += sq(i);
-        }
-        return res;
-    }
-
-    // `:296`. Four lanes because that is the widest packet either scalar has;
-    // only the first `packet` of them are read.
-    let mut packet0: [S; 4] = [S::zero(); 4];
-    for (lane, slot) in packet0.iter_mut().enumerate().take(packet) {
-        *slot = sq(lane);
-    }
-    if aligned_size > packet {
-        // `:297-307`: two accumulators, one for the even packets and one for
-        // the odd, folded together at the end.
-        let mut packet1: [S; 4] = [S::zero(); 4];
-        for (lane, slot) in packet1.iter_mut().enumerate().take(packet) {
-            *slot = sq(packet + lane);
-        }
-        let mut index: usize = 2 * packet;
-        while index < aligned_size2 {
-            for (lane, slot) in packet0.iter_mut().enumerate().take(packet) {
-                *slot += sq(index + lane);
-            }
-            for (lane, slot) in packet1.iter_mut().enumerate().take(packet) {
-                *slot += sq(index + packet + lane);
-            }
-            index += 2 * packet;
-        }
-        // `:306`.
-        for (lane, slot) in packet0.iter_mut().enumerate().take(packet) {
-            *slot += packet1[lane];
-        }
-        // `:307-308`: one odd packet left over.
-        if aligned_size > aligned_size2 {
-            for (lane, slot) in packet0.iter_mut().enumerate().take(packet) {
-                *slot += sq(aligned_size2 + lane);
-            }
-        }
-    }
-    // `:310`, then `:314` — the head loop of `:312` is empty because
-    // `alignedStart` is zero.
-    let mut res: S = S::eigen_predux(&packet0[..packet]);
-    for i in aligned_size..len {
-        res += sq(i);
-    }
-    res
+    })
 }
 
 /// `makeHouseholder` (`Householder.h:63-86`), real scalars, over
