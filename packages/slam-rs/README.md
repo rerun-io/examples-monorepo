@@ -108,7 +108,15 @@ a 344-byte stack frame.
 A frame the frontend refuses is as if it never happened: the whole call runs
 against a staging pyramid set over a snapshot of the keypoint state, and the two
 pyramid sets swap and the clock advances only after tracking, the cell counts and
-the add/match/filter passes have all succeeded.
+the add/match/filter passes have all succeeded. Snapshot and restore are
+**allocation-free** — every type in the chain writes `clone_from` by hand, since
+the derived one replaces the buffers instead of overwriting them — and
+`crates/slam-rs/tests/frame_allocations.rs` counts that with a global allocator
+rather than claiming it. A whole frame is not allocation-free: on a 200x200
+scene it reaches the allocator a few hundred times, all of it inside kornia's
+FAST, which allocates one `Vec` per image row per cell per rung of the threshold
+ladder. A frame that finds no keypoints at all costs more, which is what pins the
+cost there rather than on anything the port owns.
 
 Three deviations are recorded in the source. `E[i]` is computed from `T_c0_ci`
 per camera rather than reusing the cam0-cam1 matrix everywhere, which is

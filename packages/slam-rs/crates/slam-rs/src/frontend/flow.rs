@@ -144,7 +144,7 @@ pub struct PosePrediction {
 /// six flat coefficient arrays with the keypoint index fast-varying, so no
 /// per-keypoint record is an array of structs (§12.2). No hash map appears
 /// anywhere on the per-frame path.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Keypoints {
     /// Keypoint ids, ascending. `LandmarkId == KeypointId` (`optical_flow.h:71`).
     pub ids: Vec<KeypointId>,
@@ -162,6 +162,32 @@ pub struct Keypoints {
     pub responses: Vec<f32>,
     /// `OpticalFlowResult::pyramid_levels`, always empty for this variant.
     pub pyramid_levels: Vec<u32>,
+}
+
+/// `Clone` by hand for the sake of `clone_from`.
+///
+/// `#[derive(Clone)]` writes only `clone`; the default `clone_from` is
+/// `*self = source.clone()`, which drops all four buffers and allocates four
+/// more — sixteen allocations and sixteen frees per stereo frame once
+/// [`FrameToFrameOpticalFlow::process_frame`] takes its snapshot and again if it
+/// has to restore. Copying field by field lets `Vec::clone_from` overwrite in
+/// place, and `FlowTransforms` does the same one level down.
+impl Clone for Keypoints {
+    fn clone(&self) -> Self {
+        Self {
+            ids: self.ids.clone(),
+            transforms: self.transforms.clone(),
+            responses: self.responses.clone(),
+            pyramid_levels: self.pyramid_levels.clone(),
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.ids.clone_from(&source.ids);
+        self.transforms.clone_from(&source.transforms);
+        self.responses.clone_from(&source.responses);
+        self.pyramid_levels.clone_from(&source.pyramid_levels);
+    }
 }
 
 impl Keypoints {
@@ -249,6 +275,8 @@ impl Keypoints {
 /// What one frameset produced: one [`Keypoints`] per camera.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FlowFrame {
+    // `Vec::clone_from` copies element by element through `Keypoints::clone_from`
+    // above, so deriving here keeps the buffer-preserving property.
     /// Frameset timestamp, nanoseconds.
     pub t_ns: i64,
     /// One entry per camera, in rig order.
@@ -429,9 +457,12 @@ pub struct FrameToFrameOpticalFlow<
 
 /// The state one `processFrame` mutates, kept so a failed frame can be undone.
 ///
-/// Held in the frontend rather than allocated per frame: `clone_from` reuses
-/// every inner allocation, so taking the snapshot costs a copy and no allocator
-/// traffic once the buffers have reached their high-water mark.
+/// Held in the frontend rather than allocated per frame, and every type in it
+/// implements `clone_from` by hand so the copy overwrites the existing buffers
+/// instead of replacing them: once the buffers have reached their high-water
+/// mark, taking the snapshot and restoring from it are **allocation-free**.
+/// `tests/frame_allocations.rs` counts that with a global allocator rather than
+/// asserting it.
 #[derive(Debug, Clone, Default)]
 struct FrameState {
     cameras: Vec<Keypoints>,

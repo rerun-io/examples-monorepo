@@ -119,10 +119,31 @@ pub enum TrackerError {
 ///
 /// `Vec<Vector2<f32>>` would give one coordinate a stride of two floats; here a
 /// warp reading every patch's `x` reads consecutive addresses (§12.2 item 1).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct PointsSoA {
     x: Vec<f32>,
     y: Vec<f32>,
+}
+
+/// `Clone` by hand for the sake of `clone_from`.
+///
+/// `#[derive(Clone)]` only writes `clone`; `clone_from` then falls back to
+/// `*self = source.clone()`, which drops both buffers and allocates two more.
+/// Copying field by field lets `Vec::clone_from` overwrite in place, which is
+/// what makes the frontend's per-frame snapshot allocation-free (see
+/// [`super::flow::FrameToFrameOpticalFlow::process_frame`]).
+impl Clone for PointsSoA {
+    fn clone(&self) -> Self {
+        Self {
+            x: self.x.clone(),
+            y: self.y.clone(),
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.x.clone_from(&source.x);
+        self.y.clone_from(&source.y);
+    }
 }
 
 impl PointsSoA {
@@ -199,7 +220,7 @@ impl PointsSoA {
 /// six coefficients into six arrays is the layout §12.2 asks for; callers that
 /// want one warp back get it through [`FlowTransforms::get`], which costs six
 /// loads and no indirection.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct FlowTransforms {
     m00: Vec<f32>,
     m01: Vec<f32>,
@@ -207,6 +228,29 @@ pub struct FlowTransforms {
     m11: Vec<f32>,
     tx: Vec<f32>,
     ty: Vec<f32>,
+}
+
+/// `Clone` by hand, for the `clone_from` reason on [`PointsSoA`].
+impl Clone for FlowTransforms {
+    fn clone(&self) -> Self {
+        Self {
+            m00: self.m00.clone(),
+            m01: self.m01.clone(),
+            m10: self.m10.clone(),
+            m11: self.m11.clone(),
+            tx: self.tx.clone(),
+            ty: self.ty.clone(),
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.m00.clone_from(&source.m00);
+        self.m01.clone_from(&source.m01);
+        self.m10.clone_from(&source.m10);
+        self.m11.clone_from(&source.m11);
+        self.tx.clone_from(&source.tx);
+        self.ty.clone_from(&source.ty);
+    }
 }
 
 impl FlowTransforms {
@@ -602,11 +646,28 @@ impl<P: Pattern> SourcePatches for PatchSoA<P> {
 /// Dense per-input arrays plus a compacted list of the inputs that survived, all
 /// preallocated and all structure-of-arrays: there is no map keyed by keypoint id
 /// anywhere on this path, and no `push` inside the tracking loop (§12.2, §12.3).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct FlowResult {
     valid: Vec<bool>,
     transforms: FlowTransforms,
     tracked: Vec<u32>,
+}
+
+/// `Clone` by hand, for the `clone_from` reason on [`PointsSoA`].
+impl Clone for FlowResult {
+    fn clone(&self) -> Self {
+        Self {
+            valid: self.valid.clone(),
+            transforms: self.transforms.clone(),
+            tracked: self.tracked.clone(),
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.valid.clone_from(&source.valid);
+        self.transforms.clone_from(&source.transforms);
+        self.tracked.clone_from(&source.tracked);
+    }
 }
 
 impl FlowResult {
