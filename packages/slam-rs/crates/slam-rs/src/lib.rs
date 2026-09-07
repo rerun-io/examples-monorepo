@@ -280,12 +280,11 @@ pub struct Vio<S: lie::LieScalar = f32> {
     frontend_imu: std::collections::VecDeque<imu::ImuSample>,
     /// The frontend's already-popped sample, `processImu`'s `data` (`:169`).
     frontend_pending: Option<imu::ImuSample>,
-    /// `latest_state` (`frame_to_frame_optical_flow.h:141-146`).
+    /// `latest_state` (`frame_to_frame_optical_flow.h:141-146`), which doubles
+    /// as basalt's `first_state_arrived` (`:143`): `None` until the estimator
+    /// has published one. `predicted_state` (`:150`) is a member there and a
+    /// local here — nothing outside the prediction that produces it reads it.
     latest_state: Option<types::PoseVelBiasState<f64>>,
-    /// `predicted_state` (`:150`).
-    predicted_state: types::PoseVelBiasState<f64>,
-    /// `first_state_arrived` (`:143`).
-    first_state_arrived: bool,
     /// The frontend's own preintegration noise, `accel_cov`/`gyro_cov` at
     /// `frame_to_frame_optical_flow.h:105-106`.
     frontend_noise: imu::ImuNoise<f64>,
@@ -333,8 +332,6 @@ impl<S: lie::LieScalar> Vio<S> {
             frontend_imu: std::collections::VecDeque::new(),
             frontend_pending: None,
             latest_state: None,
-            predicted_state: types::PoseVelBiasState::default(),
-            first_state_arrived: false,
             frontend_noise,
             calib_f32,
             frames: Vec::new(),
@@ -403,28 +400,20 @@ impl<S: lie::LieScalar> Vio<S> {
 
         // `frame_to_frame_optical_flow.h:138-152`: the prediction the KLT is
         // seeded with. Until the estimator has produced a state both poses are
-        // the identity, which is basalt's `first_state_arrived == false` path.
-        let prediction: frontend::flow::PosePrediction = if self.first_state_arrived {
-            let latest: types::PoseVelBiasState<f64> =
-                self.latest_state.unwrap_or(self.predicted_state);
-            let pim: imu::IntegratedImuMeasurement<f64> =
-                self.frontend_preintegrate(t_ns, &latest)?;
-            self.predicted_state = types::PoseVelBiasState {
-                t_ns,
-                ..self.predicted_state
-            };
-            let predicted: types::PoseVelState<f64> =
-                pim.predict_state(&latest.pose_vel_state(), &imu::gravity::<f64>());
-            self.predicted_state.t_w_i = predicted.t_w_i;
-            self.predicted_state.vel_w_i = predicted.vel_w_i;
-            self.predicted_state.bias_gyro = latest.bias_gyro;
-            self.predicted_state.bias_accel = latest.bias_accel;
-            frontend::flow::PosePrediction {
-                t_w_i_previous: latest.t_w_i.cast(),
-                t_w_i_current: self.predicted_state.t_w_i.cast(),
+        // the identity, which is basalt's `first_state_arrived == false` path —
+        // and here that flag is `latest_state` being `None`.
+        let prediction: frontend::flow::PosePrediction = match self.latest_state {
+            Some(latest) => {
+                let pim: imu::IntegratedImuMeasurement<f64> =
+                    self.frontend_preintegrate(t_ns, &latest)?;
+                let predicted: types::PoseVelState<f64> =
+                    pim.predict_state(&latest.pose_vel_state(), &imu::gravity::<f64>());
+                frontend::flow::PosePrediction {
+                    t_w_i_previous: latest.t_w_i.cast(),
+                    t_w_i_current: predicted.t_w_i.cast(),
+                }
             }
-        } else {
-            frontend::flow::PosePrediction::default()
+            None => frontend::flow::PosePrediction::default(),
         };
 
         // `vit_tracker.cpp:534`: the `u8 << 8` widening the whole frontend
@@ -588,7 +577,6 @@ impl<S: lie::LieScalar> Vio<S> {
                 bias_gyro: state.bias_gyro.map(lie::LieScalar::to_f64),
                 bias_accel: state.bias_accel.map(lie::LieScalar::to_f64),
             });
-            self.first_state_arrived = true;
         }
     }
 
