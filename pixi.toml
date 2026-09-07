@@ -2387,6 +2387,77 @@ cwd = "packages/slam-evals"
 description = "Push edited layer files into the running catalog (append --datasets / --layers / --only filters; defaults to all)"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# slam-rs — Rust VIO core (PyO3 extension) + Python plumbing
+# ═══════════════════════════════════════════════════════════════════════════
+# Explicit platforms required — see AGENTS.md "Platforms & lockfile". The core
+# is CPU-only pure Rust, so this lists the plain subdirs and no named CUDA
+# platform; osx-arm64 waits for a Mac lane.
+[feature.slam-rs]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.slam-rs.dependencies]
+python = "3.12.*"
+# conda-forge `rust` ships cargo/rustc/clippy/rustfmt and sets the linker; a
+# pure-Rust crate needs nothing else. Same pin as gsplat-rust-renderer.
+rust = "1.97.*"
+tyro = ">=0.9.1,<0.10"
+# CPU torch only satisfies simplecv's module-load import.
+pytorch-cpu = ">=2.8.0"
+
+[feature.slam-rs.pypi-dependencies]
+slam-rs = { path = "packages/slam-rs", editable = true }
+
+[feature.slam-rs.activation.env]
+PACKAGE_DIR = "packages/slam-rs"
+PYREFLY_TARGET = "slam_rs tools tests"
+
+# ── Rust build + gates ───────────────────────────────────────────────────
+# cargo never runs during `pixi lock`/`pixi install`: the extension is built by
+# this task and dropped next to the Python sources, where hatchling's editable
+# .pth already looks (the dpvo / mast3r-slam in-place pattern).
+[feature.slam-rs.tasks.slam-rs-build]
+cmd = "cargo build --release -p slam-rs-py && cp target/release/lib_core.so slam_rs/_core.so"
+cwd = "packages/slam-rs"
+inputs = [
+    "packages/slam-rs/Cargo.toml",
+    "packages/slam-rs/Cargo.lock",
+    "packages/slam-rs/.cargo/config.toml",
+    "packages/slam-rs/crates/*/Cargo.toml",
+    "packages/slam-rs/crates/*/src/**/*.rs",
+]
+outputs = ["packages/slam-rs/slam_rs/_core.so"]
+description = "Build the Rust VIO core and install slam_rs._core in place"
+
+[feature.slam-rs.tasks.slam-rs-clippy]
+cmd = "cargo clippy --workspace --all-targets -- -D warnings"
+cwd = "packages/slam-rs"
+description = "Run clippy over the whole Rust workspace"
+
+[feature.slam-rs.tasks.slam-rs-rust-test]
+cmd = "cargo test --workspace"
+cwd = "packages/slam-rs"
+description = "Run the Rust test suite (unit tests + proptest)"
+
+[feature.slam-rs.tasks.slam-rs-fmt]
+cmd = "cargo fmt --all"
+cwd = "packages/slam-rs"
+description = "Format the Rust sources"
+
+[feature.slam-rs.tasks.slam-rs-version]
+cmd = "python tools/apps/version.py"
+depends-on = ["slam-rs-build"]
+cwd = "packages/slam-rs"
+description = "Print the version reported by the compiled core"
+
+# Python tests import slam_rs._core, so they need the build first; this shadows
+# the generic `tests` task from the dev feature.
+[feature.slam-rs.tasks.tests]
+cmd = "pytest -q"
+depends-on = ["slam-rs-build"]
+cwd = "packages/slam-rs"
+description = "Build the core, then run the package tests"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # mamma — streaming multiview body capture (causal MAMMA pipeline)
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.mamma]
@@ -3180,6 +3251,17 @@ slam-evals-dev = { features = [
     "slam-evals",
     "dev",
 ], solve-group = "slam-evals", no-default-feature = true }
+slam-rs = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "slam-rs",
+], solve-group = "slam-rs", no-default-feature = true }
+slam-rs-dev = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "slam-rs",
+    "dev",
+], solve-group = "slam-rs", no-default-feature = true }
 mamma = { features = [
     "common",
     "cuda",

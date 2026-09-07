@@ -118,6 +118,7 @@ packages/arkitscenes-download/data/
 packages/pysfm/data/
 packages/gsplat-rust-renderer/data/
 packages/dpvo/data/
+packages/slam-rs/data/
 packages/*/outputs/
 packages/*/checkpoints/
 packages/*/_checkpoints/
@@ -128,6 +129,10 @@ packages/vistadream/ckpt/
 # gsplat-rust-renderer
 packages/gsplat-rust-renderer/target/
 packages/gsplat-rust-renderer/examples/*.ply
+
+# slam-rs (the in-place PyO3 extension is also covered by the global *.so)
+packages/slam-rs/target/
+packages/slam-rs/slam_rs/_core.so
 
 # Package-specific ignores
 packages/wilor-nano/onnx_models/

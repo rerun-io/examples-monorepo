@@ -1,0 +1,18 @@
+[package]
+name = "slam-rs-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "PyO3 bindings for the slam-rs core, built in place as slam_rs/_core.so."
+
+[lib]
+# -> target/release/lib_core.so, copied to slam_rs/_core.so by the pixi task.
+name = "_core"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+slam-rs = { workspace = true }
+numpy = { workspace = true }
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py312"] }

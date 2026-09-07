@@ -1,0 +1,38 @@
+# slam-rs Cargo workspace: a pure-Rust VIO core, its PyO3 extension module and a
+# native CLI. Self-contained with a committed lockfile, like
+# packages/gsplat-rust-renderer, and never built during `pixi lock` /
+# `pixi install` — the `slam-rs-build` pixi task compiles it explicitly.
+[workspace]
+resolver = "3"
+members = ["crates/slam-rs", "crates/slam-rs-py", "crates/slam-rs-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+slam-rs = { path = "crates/slam-rs" }
+clap = { version = "4", features = ["derive"] }
+log = "0.4"
+nalgebra = "0.35"
+numpy = "0.29"
+pyo3 = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# dev-only
+approx = "0.5"
+proptest = "1"
+
+# The estimator must never panic on data: errors are typed and returned.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+# kornia-rs' release profile: the hot loops are small functions that have to
+# inline across crate boundaries.
+[profile.release]
+lto = "thin"
+codegen-units = 1

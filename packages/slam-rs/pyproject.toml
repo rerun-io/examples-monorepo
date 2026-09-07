@@ -1,0 +1,45 @@
+[project]
+name = "slam-rs"
+version = "0.1.0"
+description = "Visual-inertial odometry with a Rust core: PyO3 bindings plus catalog, evaluation and Rerun plumbing"
+authors = [{name = "Pablo Vela", email = "pablovela5620@gmail.com"}]
+requires-python = ">=3.12"
+# Static metadata only: `pixi lock` must never build this package, and the Rust
+# core is compiled by the `slam-rs-build` pixi task, not by the wheel build.
+dependencies = [
+    # catalog-common supplies numpy, scipy, jaxtyping, av, opencv, pyserde, rerun-sdk.
+    "simplecv",
+]
+
+# Workspace siblings named above resolve to their in-repo path (never to a PyPI
+# namesake); the root manifest installs the same paths editable.
+[tool.uv.sources]
+simplecv = { path = "../simplecv", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["slam_rs"]
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = [
+    "E501",   # Line too long
+    "F722",   # jaxtyping forward annotation false positive
+    "F821",   # jaxtyping forward annotation false positive
+    "UP037",  # Remove quotes false positive with jaxtyping
+    "UP040",  # Beartype requires TypeAlias, not PEP 695 type
+]
+
+[tool.vulture]
+paths = ["slam_rs", "tests", "tools"]
+exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*", "*/.ruff_cache/*", "*/target/*"]
+sort_by_size = true
+# CLI config fields and reusable metric helpers are runtime/public surfaces
+# that Vulture reports at 60%.
+min_confidence = 80
