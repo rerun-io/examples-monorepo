@@ -33,6 +33,26 @@ FrameKind: TypeAlias = Literal["png", "gray8", "rgb24"]
 RAW_PIXEL_FORMATS: dict[FrameKind, str] = {"gray8": "gray", "rgb24": "rgb24"}
 """ffmpeg ``-pix_fmt`` name for each rawvideo frame kind."""
 
+TRANSPOSE_FILTERS: dict[int, tuple[str, ...]] = {
+    0: (),
+    1: ("transpose=1",),
+    2: ("transpose=1", "transpose=1"),
+    3: ("transpose=2",),
+}
+"""``-vf`` stages that turn a frame that many quarters **clockwise**.
+
+ffmpeg's ``transpose=1`` is the clockwise quarter and ``transpose=2`` the
+counter-clockwise one, so three clockwise quarters go through one
+counter-clockwise stage rather than three clockwise ones. There is no half-turn
+transpose, hence the pair. Which way "clockwise" turns is pinned to
+``np.rot90(frame, k=-1)`` by ``test_encoding``, because
+``dataforge.basalt.rotate_camera_cw`` remaps a calibration against that same
+reference and the two must agree.
+"""
+EVEN_DIMENSION_AND_PIXEL_FORMAT: str = "pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p"
+"""The ``-vf`` tail every encode ends with; a rotation stage goes *ahead* of it,
+so the pad rounds up the dimensions the file actually carries."""
+
 
 @dataclass(frozen=True, slots=True)
 class FrameSource:
@@ -111,6 +131,7 @@ def encode_frames_to_mp4(
     fps: int,
     gop: int = 30,
     cq: int = 32,
+    rotate_cw_quarter_turns: int = 0,
     ffmpeg: Path | None = None,
 ) -> int:
     """Encode an iterable of frames into an AV1 mp4 by piping them through ffmpeg.
@@ -137,11 +158,21 @@ def encode_frames_to_mp4(
             timestamps are applied later by ``log_video_stream(times_ns=...)``.
         gop: Keyframe interval in frames.
         cq: NVENC constant-quality target; lower is bigger and better.
+        rotate_cw_quarter_turns: Quarter turns **clockwise** to rotate every
+            frame by before encoding, 0 to 3 — the same direction as
+            ``np.rot90(frame, k=-turns)``. An odd count swaps the mp4's width
+            and height, and a caller that also logs a calibration for these
+            pixels must roll it the same way (``basalt.rotate_camera_cw``).
         ffmpeg: Binary to use; ``None`` resolves via ``resolve_ffmpeg()``.
 
     Returns:
         Number of frames fed into the encoder.
+
+    Raises:
+        ValueError: ``rotate_cw_quarter_turns`` is not one of 0, 1, 2, 3.
     """
+    if rotate_cw_quarter_turns not in TRANSPOSE_FILTERS:
+        raise ValueError(f"{rotate_cw_quarter_turns} is not a clockwise quarter turn count; it must be one of {sorted(TRANSPOSE_FILTERS)}")
     binary: Path = resolve_ffmpeg() if ffmpeg is None else ffmpeg
     require_av1_nvenc(binary)
     command: list[str] = [
@@ -152,7 +183,7 @@ def encode_frames_to_mp4(
         "-y",
         *source.input_args(fps=fps),
         "-vf",
-        "pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p",
+        ",".join([*TRANSPOSE_FILTERS[rotate_cw_quarter_turns], EVEN_DIMENSION_AND_PIXEL_FORMAT]),
         "-c:v",
         "av1_nvenc",
         "-preset",

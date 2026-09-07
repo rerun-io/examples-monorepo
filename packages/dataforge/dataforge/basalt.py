@@ -14,20 +14,27 @@ and every coefficient that model needs is required to be **present** — basalt
 writes a real value for each, so a zero default would silently turn a truncated
 file into an undistorted camera.
 
-Two things then come out of those records — each camera's simplecv parameters and
-the device's forward/up pair — and both are pure functions of them.
+Three things then come out of those records — each camera's simplecv parameters,
+the device's forward/up pair, and the quarter turn that stands one camera's
+picture upright — and all three are pure functions of them.
 
 **Frames.** ``T_imu_cam`` is the camera's pose *in the IMU frame*. A rig whose
 reference sensor is its IMU therefore has ``rig_T_cam = T_imu_cam`` with no
 inversion; simplecv's ``Extrinsics`` calls that parent frame "world", so the rig
 goes in as ``world_R_cam`` / ``world_t_cam``. This is the same convention as
 simplecv's RoboCap loader, one inversion away (Kalibr states ``T_cam_imu``).
+
+**The roll.** ``upright_quarter_turns`` picks the clockwise quarter turn that
+brings a camera's image-up closest to the wearer's up, and ``rotate_camera_cw``
+rolls the record — pose, resolution, projection head and radtan8's tangential
+pair — to describe frames turned that far. A converter applies the same turn to
+the pixels, so the calibration it logs always describes the image it wrote.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -54,6 +61,34 @@ RADTAN8_COEFFICIENTS: tuple[str, ...] = ("fx", "fy", "cx", "cy", "k1", "k2", "p1
 """Every key a ``pinhole-radtan8`` block must hold, ``rpmax`` (its validity radius) included."""
 DEGENERATE_DIRECTION_NORM: float = 1e-9
 """Shortest vector ``follow_frame`` still accepts as a direction; below it the inputs cancelled."""
+QUARTER_TURNS_PER_REVOLUTION: int = 4
+"""The candidate turns ``upright_quarter_turns`` chooses between, and the period of ``rotate_camera_cw``."""
+IMAGE_UP_CAM: Float64[ndarray, "3"] = np.array([0.0, -1.0, 0.0], dtype=np.float64)
+"""Which way is up in the image, in the camera's own frame: RDF puts ``+y`` **down**."""
+CAM_R_ROTATED: Float64[ndarray, "3 3"] = np.array([[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+"""One clockwise quarter turn of the *image*, as a change of camera frame.
+
+Its columns are the rotated camera's axes written in the original camera frame:
+turning the picture a quarter clockwise puts the sensor's new right where its old
+up was (``x' = -y``) and its new down where its old right was (``y' = x``), while
+the optical axis is untouched (``z' = z``). So ``rig_R_cam' = rig_R_cam @
+CAM_R_ROTATED``, and it is a rotation of -90 degrees about the optical axis.
+"""
+UPRIGHT_MIN_ALIGNMENT: float = 0.5
+"""How much of the headset's up the winning turn must recover, as a dot product.
+
+Below it no image direction points up at all — the camera is aimed within 60
+degrees of the up axis itself, so every candidate is nearly perpendicular to it
+and the winner would be noise.
+"""
+UPRIGHT_MIN_MARGIN: float = 0.1
+"""How far the winning turn must beat the runner-up, as a difference of dot products.
+
+The two candidates sit a quarter turn apart, so they tie when the mounting roll
+is exactly 45 degrees. 0.1 is a residual roll of about 41 degrees: past that
+"the nearest quarter turn" is a coin toss, and rounding it silently would encode
+a picture nobody chose. The real cameras clear this by 0.94.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,3 +467,135 @@ def follow_frame(cameras: Sequence[CalibratedCamera], camera_indices: Sequence[i
         forward=(float(forward_xyz[0]), float(forward_xyz[1]), float(forward_xyz[2])),
         up=(float(up_xyz[0]), float(up_xyz[1]), float(up_xyz[2])),
     )
+
+
+def rotate_camera_cw(camera: CalibratedCamera, quarter_turns: int) -> CalibratedCamera:
+    """Roll one camera's whole record to describe its frames rotated clockwise.
+
+    A converter that encodes a camera's frames turned has to turn the camera with
+    them, or the calibration it logs describes an image nobody has. This is that
+    transform, and it is exact: a roll about the optical axis moves the sensor's
+    axes and nothing else, so there is no resampling and no approximation
+    anywhere in it.
+
+    What one clockwise quarter turn does, on a ``width x height`` image whose
+    pixel centres sit at integer coordinates:
+
+    * **Pose.** ``rig_R_cam' = rig_R_cam @ CAM_R_ROTATED``; the translation is
+      untouched, because the sensor spins in place.
+    * **Resolution.** ``(width, height)`` becomes ``(height, width)``.
+    * **Projection head.** ``fx' = fy``, ``fy' = fx``,
+      ``cx' = (height - 1) - cy``, ``cy' = cx`` — which is exactly where the
+      pixel map ``(u', v') = ((height - 1) - v, u)`` sends the principal point.
+    * **Distortion.** Every radial term and ``rpmax`` are untouched, because a
+      roll leaves each point's radius alone. radtan8's tangential pair is not:
+      substituting ``x = y'``, ``y = -x'`` into the Brown-Conrady terms gives
+      ``p1' = p2`` and ``p2' = -p1``.
+
+    Checked, not asserted: ``test_basalt`` projects points through OpenCV with
+    the original model and with the rotated one and holds the two to a millionth
+    of a pixel, for both camera models and all three turns.
+
+    Args:
+        camera: The record as ``load_calibration`` read it.
+        quarter_turns: Clockwise quarter turns to apply, the same direction as
+            ``np.rot90(frame, k=-turns)`` and ffmpeg's ``transpose=1``. Applied
+            one at a time, so a full revolution returns the input within float
+            noise rather than being folded away.
+
+    Returns:
+        A record describing the rotated frames, with the same ``index``.
+
+    Raises:
+        ValueError: ``quarter_turns`` is negative; the name states clockwise, and
+            a negative count would be a second, unstated convention.
+    """
+    if quarter_turns < 0:
+        raise ValueError(f"{quarter_turns} quarter turns is not a clockwise rotation; count clockwise turns from 0")
+    rolled: CalibratedCamera = camera
+    for _ in range(quarter_turns):
+        pose: BasaltPose = rolled.rig_pose
+        rig_R_rolled: Rotation = Rotation.from_quat([pose.qx, pose.qy, pose.qz, pose.qw]) * Rotation.from_matrix(CAM_R_ROTATED)
+        quaternion_xyzw: Float64[ndarray, "4"] = np.asarray(rig_R_rolled.as_quat(), dtype=np.float64)
+        width, height = rolled.resolution
+        model: Kb4Intrinsics | Radtan8Intrinsics = rolled.model
+        if isinstance(model, Kb4Intrinsics):
+            turned: Kb4Intrinsics | Radtan8Intrinsics = replace(
+                model, fx=model.fy, fy=model.fx, cx=float(height - 1) - model.cy, cy=model.cx
+            )
+        else:
+            turned = replace(
+                model, fx=model.fy, fy=model.fx, cx=float(height - 1) - model.cy, cy=model.cx, p1=model.p2, p2=-model.p1
+            )
+        rolled = CalibratedCamera(
+            index=rolled.index,
+            rig_pose=BasaltPose(
+                px=pose.px,
+                py=pose.py,
+                pz=pose.pz,
+                qx=float(quaternion_xyzw[0]),
+                qy=float(quaternion_xyzw[1]),
+                qz=float(quaternion_xyzw[2]),
+                qw=float(quaternion_xyzw[3]),
+            ),
+            resolution=(height, width),
+            model=turned,
+        )
+    return rolled
+
+
+def upright_quarter_turns(camera: CalibratedCamera, up_rig: tuple[float, float, float]) -> int:
+    """Choose the clockwise quarter turn that stands one camera's picture upright.
+
+    One uniform rule for every camera of every device, rather than a per-device
+    flag: rotate the image by whichever quarter turn brings its own up direction
+    closest to the wearer's up, both read out of the same calibration. A camera
+    mounted upright answers ``0`` and is left exactly as it was, which is why the
+    Index's and the Odyssey+'s output is untouched while all four of the G2's
+    rolled cameras are fixed.
+
+    The candidates are the four rolls of this camera, and each one's up is the
+    rotated record's own image-up (camera ``-y`` in the rig frame) — so the
+    choice cannot disagree with ``rotate_camera_cw`` about which way clockwise
+    turns.
+
+    Args:
+        camera: The record to place, unrotated.
+        up_rig: The wearer's up in the rig frame, from
+            ``follow_frame(...).up`` or a device's declared ``follow``. Need not
+            be unit length; it is normalized here.
+
+    Returns:
+        Clockwise quarter turns, 0 to 3, to pass to ``rotate_camera_cw`` and to
+        the encoder together.
+
+    Raises:
+        ValueError: ``up_rig`` is not a direction, no candidate points up at all
+            (the camera looks along the up axis), or the best two are too close
+            to separate (the mounting roll is near 45 degrees).
+    """
+    up_xyz: Float64[ndarray, "3"] = np.asarray(up_rig, dtype=np.float64)
+    up_norm: float = float(np.linalg.norm(up_xyz))
+    if up_norm < DEGENERATE_DIRECTION_NORM:
+        raise ValueError(f"{up_rig} is too short to be an up direction; a camera cannot be stood upright against it")
+    unit_up_xyz: Float64[ndarray, "3"] = up_xyz / up_norm
+
+    alignments: list[float] = []
+    for turns in range(QUARTER_TURNS_PER_REVOLUTION):
+        pose: BasaltPose = rotate_camera_cw(camera, turns).rig_pose
+        rig_R_cam: Float64[ndarray, "3 3"] = Rotation.from_quat([pose.qx, pose.qy, pose.qz, pose.qw]).as_matrix()
+        alignments.append(float((rig_R_cam @ IMAGE_UP_CAM) @ unit_up_xyz))
+    ranked: list[int] = sorted(range(QUARTER_TURNS_PER_REVOLUTION), key=lambda turns: alignments[turns], reverse=True)
+    best: int = ranked[0]
+    margin: float = alignments[best] - alignments[ranked[1]]
+    if alignments[best] < UPRIGHT_MIN_ALIGNMENT:
+        raise ValueError(
+            f"cam{camera.index} has no image direction that points up: the best of its four quarter turns recovers only "
+            f"{alignments[best]:.3f} of {up_rig}, so it looks along the up axis rather than across it"
+        )
+    if margin < UPRIGHT_MIN_MARGIN:
+        raise ValueError(
+            f"cam{camera.index}'s upright turn is ambiguous: {best} and {ranked[1]} quarter turns score "
+            f"{alignments[best]:.3f} and {alignments[ranked[1]]:.3f}, only {margin:.3f} apart, so it is mounted near 45 degrees"
+        )
+    return best
