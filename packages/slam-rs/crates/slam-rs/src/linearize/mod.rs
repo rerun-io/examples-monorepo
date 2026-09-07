@@ -107,9 +107,16 @@ pub fn reflect_column<S: LieScalar>(
         .checked_add(len)
         .ok_or(LinearizeError::LayoutOverflow)?;
     if col >= storage.ncols() || end > storage.nrows() {
-        return Err(LinearizeError::StackedSystemSize {
-            expected: end.max(col + 1),
-            found: storage.nrows().min(storage.ncols()),
+        // The error carries the raw inputs. Summarising them — `end.max(col + 1)`
+        // was the first attempt — puts arithmetic on the *diagnostic* path,
+        // where `col = usize::MAX` then panics on its way to reporting that
+        // `col = usize::MAX` is out of range.
+        return Err(LinearizeError::ReflectionOutOfRange {
+            col,
+            start,
+            len,
+            rows: storage.nrows(),
+            cols: storage.ncols(),
         });
     }
     if len == 0 {
@@ -171,12 +178,25 @@ mod tests {
         // Out of range without overflowing is refused too.
         assert!(matches!(
             reflect_column(&mut m, 0, 0, 4).unwrap_err(),
-            LinearizeError::StackedSystemSize { .. }
+            LinearizeError::ReflectionOutOfRange { .. }
         ));
         assert!(matches!(
             reflect_column(&mut m, 3, 0, 1).unwrap_err(),
-            LinearizeError::StackedSystemSize { .. }
+            LinearizeError::ReflectionOutOfRange { .. }
         ));
+        // A column index at the top of the range is out of range like any
+        // other, and reporting it must not overflow on the way: the summarising
+        // `expected: end.max(col + 1)` this used to build panicked here.
+        assert_eq!(
+            reflect_column(&mut m, usize::MAX, 0, 1).unwrap_err(),
+            LinearizeError::ReflectionOutOfRange {
+                col: usize::MAX,
+                start: 0,
+                len: 1,
+                rows: 1,
+                cols: 1,
+            }
+        );
         // A zero-length reflection is the identity, not an error: it is what a
         // block with no rows left asks for.
         let before: DMatrix<f64> = m.clone();
@@ -322,6 +342,24 @@ pub enum LinearizeError {
         frame: FrameId,
         /// The size the ordering gave it.
         size: usize,
+    },
+    /// [`reflect_column`] was asked for a column or a row range the matrix does
+    /// not have. The raw inputs are carried through rather than summarised, so
+    /// building the error cannot itself overflow.
+    #[error(
+        "a reflection of column {col}, rows {start}..+{len}, does not fit a {rows} x {cols} matrix"
+    )]
+    ReflectionOutOfRange {
+        /// The column asked for.
+        col: usize,
+        /// The first row of the range.
+        start: usize,
+        /// Its length.
+        len: usize,
+        /// Rows the matrix has.
+        rows: usize,
+        /// Columns the matrix has.
+        cols: usize,
     },
     /// A landmark block's buffer would not fit in memory. `DMatrix::zeros`
     /// multiplies the two dimensions unchecked.
