@@ -123,8 +123,10 @@ const POSE_TOLERANCE_F64: f64 = 2e-10;
 /// The same in `f32`. Measured worst: rotation 8.4e-5, translation 7.8e-5,
 /// velocity 2.3e-4, bias 9.3e-4.
 const POSE_TOLERANCE_F32: f64 = 3e-3;
-/// Relative agreement on the LM error terms, `l_diff` and `lambda`, in `f64`.
-/// Measured worst: 3.1e-10 (`error_before`).
+/// Relative agreement in `f64` on the LM error terms, `l_diff`, `lambda` and
+/// the marginalization prior's Frobenius digest — the stricter lane needs no
+/// split between them. Measured worst: 3.1e-10 (`error_before`), and on the
+/// digest 6.8e-15 on `H` and 1.1e-10 on `b`.
 const ERROR_TOLERANCE_F64: f64 = 2e-9;
 /// The same in `f32`, over the trail prefix the two runs share, for the
 /// quantities one well-conditioned formula computes from the current window:
@@ -132,9 +134,6 @@ const ERROR_TOLERANCE_F64: f64 = 2e-9;
 /// Measured worst over the 60 framesets: 2.2e-3 (`imu_error`); the constant is
 /// 4.5 times that.
 const ERROR_TOLERANCE_F32: f64 = 1e-2;
-/// Relative agreement on the marginalization prior's Frobenius digest.
-/// Measured worst in `f64`: 6.8e-15 on `H`, 1.1e-10 on `b`.
-const PRIOR_TOLERANCE_F64: f64 = 2e-9;
 /// Relative agreement in `f32` on the quantities that carry the prior's
 /// accumulated history rather than the current window.
 ///
@@ -264,6 +263,8 @@ enum LmGate {
 /// having asserted every integer decision on the way.
 fn compare<S: LieScalar>(run: &OracleRun, gate: LmGate) -> Worst {
     let mut estimator: SqrtKeypointVio<S> = window(CONFIG.clone());
+    let max_states: usize = usize::try_from(CONFIG.vio_max_states).unwrap();
+    let max_kfs: usize = usize::try_from(CONFIG.vio_max_kfs).unwrap();
 
     let mut diverged: Vec<i64> = Vec::new();
     let mut worst: Worst = Worst::default();
@@ -531,7 +532,104 @@ fn compare<S: LieScalar>(run: &OracleRun, gate: LmGate) -> Worst {
             expected.frame, index,
             "the fixture's frames are out of order"
         );
+
+        // ── the window's own budget ───────────────────────────────────────
+        //
+        // A property rather than a fixture comparison: the window stays inside
+        // the budget basalt actually enforces, and the index sets the schedule
+        // produces are a partition of the ordering. It holds on every frameset
+        // of either lane, which is why it rides this replay instead of one of
+        // its own.
+        //
+        // The keyframe budget is **lazy**, which is the one thing to get right
+        // here. `sqrt_keypoint_vio.cpp:767` runs the eviction loop only while
+        // `!states_to_marg_vel_bias.empty()`, and that set holds the keyframes
+        // leaving the *state* window this step — so a frame that has just been
+        // voted a keyframe cannot be evicted while it is still a state, and
+        // `kf_ids` sits one over `max_kfs` until it is demoted to a pose
+        // block. On this fixture that is framesets 49-50 and 56-57 (eight
+        // keyframes against `vio_max_kfs = 7`), and the C++ oracle shows
+        // exactly the same eight. The loop's postcondition is therefore
+        // `kf_ids <= max_kfs || states_to_marg_vel_bias.is_empty()`, and the
+        // overshoot is at most one because `vio_min_frames_after_kf = 5` puts
+        // keyframes six framesets apart while a state leaves the window after
+        // `vio_max_states = 3`.
+        if stats.opt_started {
+            assert!(
+                snapshot.states.len() <= max_states,
+                "frame {}: {} states exceed the budget",
+                flow.t_ns,
+                snapshot.states.len()
+            );
+            let could_evict: bool = stats
+                .marginalization
+                .as_ref()
+                .is_some_and(|marg| !marg.states_to_marg_vel_bias.is_empty());
+            let budget: usize = if could_evict { max_kfs } else { max_kfs + 1 };
+            assert!(
+                stats.kf_ids.len() <= budget,
+                "frame {}: {} keyframes exceed the budget of {budget} (a keyframe state {} \
+                 demoted this step)",
+                flow.t_ns,
+                stats.kf_ids.len(),
+                if could_evict { "was" } else { "was not" }
+            );
+            assert!(
+                snapshot.poses.len() <= stats.ltkfs.len() + max_kfs,
+                "frame {}: {} poses exceed the budget",
+                flow.t_ns,
+                snapshot.poses.len()
+            );
+        }
+
+        if let Some(marg) = &stats.marginalization {
+            // The four sets are disjoint, and every frame in them was in the
+            // window when the schedule was built.
+            let mut seen: BTreeSet<i64> = BTreeSet::new();
+            for id in marg
+                .states_to_marg_all
+                .iter()
+                .chain(marg.states_to_marg_vel_bias.iter())
+            {
+                assert!(seen.insert(*id), "frame {} listed twice", *id);
+            }
+            assert!(
+                !marg.states_to_marg_all.contains(&marg.last_state_to_marg),
+                "the frozen state cannot also be removed"
+            );
+            for id in &marg.kfs_to_marg {
+                assert!(
+                    marg.poses_to_marg.contains(id),
+                    "evicted keyframe {id} is not in poses_to_marg"
+                );
+            }
+            // The index split covers the whole ordering exactly once.
+            assert_eq!(
+                marg.kept_indices + marg.marg_indices,
+                marg.ordering_size,
+                "the index split does not cover the {}-wide ordering: kept {} marg {}",
+                marg.ordering_size,
+                marg.kept_indices,
+                marg.marg_indices
+            );
+            // What survives is the new prior, whose width is what the kept
+            // indices amount to only when no rank was lost in the flat QR.
+            let prior_width: usize = marg.prior_order.iter().map(|(_, _, size)| size).sum();
+            assert_eq!(
+                prior_width, marg.kept_indices,
+                "the new ordering is {prior_width} wide but {} indices were kept",
+                marg.kept_indices
+            );
+        }
     }
+
+    // Every keyframe ever created keeps its entry, exactly as basalt never
+    // erases `num_points_kf` (`:218`, the small leak trap 15 warns about).
+    let counts: &BTreeMap<FrameId, usize> = estimator.num_points_kf();
+    assert!(
+        counts.len() >= estimator.kf_ids().count(),
+        "num_points_kf lost an entry"
+    );
     if !diverged.is_empty() {
         println!(
             "{}: LM trail parted company on {} of {} framesets, all inside the noise floor: {diverged:?}",
@@ -617,34 +715,57 @@ fn frobenius<S: LieScalar>(values: impl Iterator<Item = S>) -> f64 {
 
 // ── the gates ─────────────────────────────────────────────────────────────
 
+/// Both lanes' agreement, in the three groups the `f32` lane has to
+/// distinguish (the module header says why).
+///
+/// * `pose` — the window's poses, velocities and biases.
+/// * `window_local` — the quantities one well-conditioned formula computes
+///   from the current window: the reprojection cost, the IMU and bias costs
+///   and the step's infinity norm.
+/// * `history` — the quantities that carry the prior's accumulated history:
+///   the prior's own digest, the errors that include the prior's bilinear
+///   form, and the damping that follows from their gain ratio.
+///
+/// In `f64` the last two groups share one tolerance, so the split costs the
+/// stricter lane nothing.
+fn assert_worst(worst: &Worst, label: &str, pose: f64, window_local: f64, history: f64) {
+    assert!(
+        worst.rotation <= pose && worst.translation <= pose,
+        "{label} pose drifted: {worst:#?}"
+    );
+    assert!(
+        worst.velocity <= pose && worst.bias <= pose,
+        "{label} velocity or bias drifted: {worst:#?}"
+    );
+    assert!(
+        worst.vision_error <= window_local
+            && worst.imu_error <= window_local
+            && worst.bias_error <= window_local
+            && worst.step_norminf <= window_local,
+        "{label} LM trail drifted: {worst:#?}"
+    );
+    assert!(
+        worst.error_before <= history
+            && worst.error_after <= history
+            && worst.marg_prior_error <= history
+            && worst.l_diff <= history
+            && worst.lambda <= history
+            && worst.prior_h <= history
+            && worst.prior_b <= history,
+        "{label} prior-driven quantities drifted: {worst:#?}"
+    );
+}
+
 #[test]
 fn the_double_window_follows_the_cpp() {
     let worst: Worst = compare::<f64>(run_named(&ORACLE, "double"), LmGate::Exact);
     println!("f64 worst relative difference: {worst:#?}");
-
-    assert!(
-        worst.rotation <= POSE_TOLERANCE_F64 && worst.translation <= POSE_TOLERANCE_F64,
-        "f64 pose drifted: {worst:#?}"
-    );
-    assert!(
-        worst.velocity <= POSE_TOLERANCE_F64 && worst.bias <= POSE_TOLERANCE_F64,
-        "f64 velocity or bias drifted: {worst:#?}"
-    );
-    assert!(
-        worst.error_before <= ERROR_TOLERANCE_F64
-            && worst.error_after <= ERROR_TOLERANCE_F64
-            && worst.vision_error <= ERROR_TOLERANCE_F64
-            && worst.imu_error <= ERROR_TOLERANCE_F64
-            && worst.bias_error <= ERROR_TOLERANCE_F64
-            && worst.marg_prior_error <= ERROR_TOLERANCE_F64
-            && worst.l_diff <= ERROR_TOLERANCE_F64
-            && worst.lambda <= ERROR_TOLERANCE_F64
-            && worst.step_norminf <= ERROR_TOLERANCE_F64,
-        "f64 LM trail drifted: {worst:#?}"
-    );
-    assert!(
-        worst.prior_h <= PRIOR_TOLERANCE_F64 && worst.prior_b <= PRIOR_TOLERANCE_F64,
-        "f64 prior drifted: {worst:#?}"
+    assert_worst(
+        &worst,
+        "f64",
+        POSE_TOLERANCE_F64,
+        ERROR_TOLERANCE_F64,
+        ERROR_TOLERANCE_F64,
     );
 }
 
@@ -657,31 +778,12 @@ fn the_double_window_follows_the_cpp() {
 fn the_float_window_follows_the_cpp() {
     let worst: Worst = compare::<f32>(run_named(&ORACLE, "float"), LmGate::NoiseFloor);
     println!("f32 worst relative difference: {worst:#?}");
-
-    assert!(
-        worst.rotation <= POSE_TOLERANCE_F32 && worst.translation <= POSE_TOLERANCE_F32,
-        "f32 pose drifted: {worst:#?}"
-    );
-    assert!(
-        worst.velocity <= POSE_TOLERANCE_F32 && worst.bias <= POSE_TOLERANCE_F32,
-        "f32 velocity or bias drifted: {worst:#?}"
-    );
-    assert!(
-        worst.vision_error <= ERROR_TOLERANCE_F32
-            && worst.imu_error <= ERROR_TOLERANCE_F32
-            && worst.bias_error <= ERROR_TOLERANCE_F32
-            && worst.step_norminf <= ERROR_TOLERANCE_F32,
-        "f32 LM trail drifted: {worst:#?}"
-    );
-    assert!(
-        worst.error_before <= CANCELLING_TOLERANCE_F32
-            && worst.error_after <= CANCELLING_TOLERANCE_F32
-            && worst.marg_prior_error <= CANCELLING_TOLERANCE_F32
-            && worst.l_diff <= CANCELLING_TOLERANCE_F32
-            && worst.lambda <= CANCELLING_TOLERANCE_F32
-            && worst.prior_h <= CANCELLING_TOLERANCE_F32
-            && worst.prior_b <= CANCELLING_TOLERANCE_F32,
-        "f32 prior-driven quantities drifted: {worst:#?}"
+    assert_worst(
+        &worst,
+        "f32",
+        POSE_TOLERANCE_F32,
+        ERROR_TOLERANCE_F32,
+        CANCELLING_TOLERANCE_F32,
     );
 }
 
@@ -765,114 +867,4 @@ fn drive(flow: &[Arc<FlowObservations>]) -> Vec<Trace> {
         });
     }
     traces
-}
-
-/// The window stays inside the budget basalt actually enforces, and the index
-/// sets the schedule produces are a partition of the ordering.
-///
-/// A property rather than a fixture comparison: it holds for every frame of the
-/// run, not only the ones the oracle covers, and it is the invariant a schedule
-/// bug breaks first.
-///
-/// The keyframe budget is **lazy**, which is the one thing to get right here.
-/// `sqrt_keypoint_vio.cpp:767` runs the eviction loop only while
-/// `!states_to_marg_vel_bias.empty()`, and that set holds the keyframes leaving
-/// the *state* window this step — so a frame that has just been voted a
-/// keyframe cannot be evicted while it is still a state, and `kf_ids` sits one
-/// over `max_kfs` until it is demoted to a pose block. On this fixture that is
-/// framesets 49-50 and 56-57 (eight keyframes against `vio_max_kfs = 7`), and
-/// the C++ oracle shows exactly the same eight. The loop's postcondition is
-/// therefore `kf_ids ≤ max_kfs || states_to_marg_vel_bias.is_empty()`, and the
-/// overshoot is at most one because `vio_min_frames_after_kf = 5` puts
-/// keyframes six framesets apart while a state leaves the window after
-/// `vio_max_states = 3`.
-#[test]
-fn the_window_stays_inside_its_budget() {
-    let max_states: usize = usize::try_from(CONFIG.vio_max_states).unwrap();
-    let max_kfs: usize = usize::try_from(CONFIG.vio_max_kfs).unwrap();
-
-    let mut estimator: SqrtKeypointVio<f64> = window(CONFIG.clone());
-    for flow in ORACLE.flow.iter().take(framesets()) {
-        let FrameOutcome::Measured(stats) = estimator.process_frame(observations(flow)).unwrap()
-        else {
-            panic!("NeedMoreImu at {}", flow.t_ns);
-        };
-        let ltkfs: usize = stats.ltkfs.len();
-        if stats.opt_started {
-            let window: WindowSnapshot<f64> = estimator.snapshot();
-            assert!(
-                window.states.len() <= max_states,
-                "frame {}: {} states exceed the budget",
-                flow.t_ns,
-                window.states.len()
-            );
-            let could_evict: bool = stats
-                .marginalization
-                .as_ref()
-                .is_some_and(|marg| !marg.states_to_marg_vel_bias.is_empty());
-            let budget: usize = if could_evict { max_kfs } else { max_kfs + 1 };
-            assert!(
-                stats.kf_ids.len() <= budget,
-                "frame {}: {} keyframes exceed the budget of {budget} (a keyframe state {} \
-                 demoted this step)",
-                flow.t_ns,
-                stats.kf_ids.len(),
-                if could_evict { "was" } else { "was not" }
-            );
-            assert!(
-                window.poses.len() <= ltkfs + max_kfs,
-                "frame {}: {} poses exceed the budget",
-                flow.t_ns,
-                window.poses.len()
-            );
-        }
-
-        if let Some(marg) = &stats.marginalization {
-            // The four sets are disjoint, and every frame in them was in the
-            // window when the schedule was built.
-            let mut seen: BTreeSet<i64> = BTreeSet::new();
-            for id in marg
-                .states_to_marg_all
-                .iter()
-                .chain(marg.states_to_marg_vel_bias.iter())
-            {
-                assert!(seen.insert(*id), "frame {} listed twice", *id);
-            }
-            assert!(
-                !marg.states_to_marg_all.contains(&marg.last_state_to_marg),
-                "the frozen state cannot also be removed"
-            );
-            for id in &marg.kfs_to_marg {
-                assert!(
-                    marg.poses_to_marg.contains(id),
-                    "evicted keyframe {id} is not in poses_to_marg"
-                );
-            }
-            // The index split covers the whole ordering exactly once.
-            assert_eq!(
-                marg.kept_indices + marg.marg_indices,
-                marg.ordering_size,
-                "the index split does not cover the {}-wide ordering: kept {} marg {}",
-                marg.ordering_size,
-                marg.kept_indices,
-                marg.marg_indices
-            );
-            // What survives is the new prior, whose width is what the kept
-            // indices amount to only when no rank was lost in the flat QR.
-            let prior_width: usize = marg.prior_order.iter().map(|(_, _, size)| size).sum();
-            assert_eq!(
-                prior_width, marg.kept_indices,
-                "the new ordering is {prior_width} wide but {} indices were kept",
-                marg.kept_indices
-            );
-        }
-    }
-
-    // Every keyframe ever created keeps its entry, exactly as basalt never
-    // erases `num_points_kf` (`:218`, the small leak trap 15 warns about).
-    let counts: &BTreeMap<FrameId, usize> = estimator.num_points_kf();
-    assert!(
-        counts.len() >= estimator.kf_ids().count(),
-        "num_points_kf lost an entry"
-    );
 }
