@@ -104,19 +104,34 @@ impl std::fmt::Display for WindowRole {
 /// `.at()`, or a `return false` that makes `proc_func` reset the whole state.
 /// Under D32 none of them may panic on data, so each becomes a variant here.
 ///
-/// **Where the window is left, per error.** The validation errors — a frameset
-/// of the wrong width, a non-monotonic frameset, an unsupported config — are
-/// raised before anything moves, so the window is untouched and the caller may
-/// retry with a corrected frameset. The errors raised inside
-/// [`SqrtKeypointVio::measure`] — `NumericallyInvalid` from the LM loop, and
-/// anything `Linearize`, `Marginalize` or `BundleAdjustment` refuses — come
-/// **after** the new state, its observations and its preintegration were
-/// inserted, so the window has advanced by one frameset while `prev_frame` has
-/// not: retrying the same frameset would file its observations twice. basalt
-/// resets the whole estimator instead (`proc_func`'s `return false`,
-/// `scheduleResetState` at `:120-195`), which this port does not have; a caller
-/// that sees one of those must rebuild the estimator. Stage S9's Realtime mode
-/// is where the reset belongs (D5 of the S8 simplify list).
+/// **Where the window is left, per error.** Three classes, and only the first
+/// is retryable.
+///
+/// 1. **Raised before anything moves**, so the estimator is untouched and the
+///    caller may retry with a corrected frameset: [`Self::CameraCountMismatch`]
+///    and [`Self::NonMonotonicFrame`] from [`SqrtKeypointVio::process_frame`],
+///    and [`Self::UnsupportedPath`], [`Self::EnforceRealtime`] and
+///    [`Self::EmptyWindow`] from [`SqrtKeypointVio::new`].
+/// 2. **Raised after the IMU queue was consumed but before the new state was
+///    filed.** [`Self::ImuQueueRanDry`] and [`Self::Imu`] come out of the
+///    preintegration loops, which have already popped samples; and
+///    [`Self::PreviousStateMissing`] comes out of `measure`'s prediction, after
+///    the same pops. The window still holds the frames it did, but the samples
+///    that interval needed are gone, so the same frameset can never be
+///    integrated again: not retryable either.
+/// 3. **Raised after the new state, its observations and its preintegration
+///    were inserted** — every remaining variant, all of them from inside
+///    `measure`: the window-invariant breaks, `NumericallyInvalid` from the LM
+///    loop, and anything `Linearize`, `Marginalize`, `BundleAdjustment`,
+///    `Landmark` or `State` refuses. The window has advanced by one frameset
+///    while `prev_frame` has not, so retrying the same frameset would file its
+///    observations twice.
+///
+/// basalt has one answer to classes 2 and 3: it resets the whole estimator
+/// (`proc_func`'s `return false`, `scheduleResetState` at `:120-195`), which
+/// this port does not have. A caller that sees one of them must rebuild the
+/// estimator. Stage S9's Realtime mode is where the reset belongs (D5 of the S8
+/// simplify list).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EstimatorError {
     /// `vio_linearization_type` is not `ABS_QR`, or `vio_sqrt_marg` is false:
@@ -192,6 +207,31 @@ pub enum EstimatorError {
     PreviousStateMissing {
         /// `last_state_t_ns`.
         t_ns: i64,
+    },
+    /// An IMU factor's endpoint is in the ordering but not in `frame_states`
+    /// (`sc_ba_base.cpp:671-672`, two `.at()` calls C++ throws out of).
+    /// Skipping the factor would drop its residual from the true cost and so
+    /// change which LM step is accepted, silently.
+    #[error("the imu factor over ({start_t_ns}, {end_t_ns}] ns has no state at {missing_t_ns} ns")]
+    ImuFactorStateMissing {
+        /// `get_start_t_ns()`.
+        start_t_ns: i64,
+        /// `get_start_t_ns() + get_dt_ns()`.
+        end_t_ns: i64,
+        /// Whichever endpoint the window is missing; the start when both are.
+        missing_t_ns: i64,
+    },
+    /// A keypoint `measure` recorded as unconnected is missing from the camera's
+    /// own keypoint map when the triangulation reads its pixel back (`:514`'s
+    /// `opt_flow_meas->keypoints.at(i).at(lm_id)`, which C++ throws out of).
+    /// The two come from the same frameset a few lines apart, so a miss means
+    /// the frameset changed under the loop.
+    #[error("keypoint {kpt_id:?} is unconnected in camera {cam_id} but not in its keypoint map")]
+    UnconnectedKeypointMissing {
+        /// The camera whose map the id came from.
+        cam_id: usize,
+        /// The id `measure` filed as unconnected.
+        kpt_id: KeypointId,
     },
     /// The state window is shorter than the marginalization's own advance
     /// (`:724`): C++ advances the iterator past `end()` and dereferences it.
@@ -513,6 +553,12 @@ pub struct SqrtKeypointVio<S: LieScalar> {
     /// C++'s loop-local `data` (`:296`), the one sample already popped and
     /// calibrated. It survives across frames, so it is state, not a local.
     pending: Option<(i64, Vector3<S>, Vector3<S>)>,
+    /// The newest timestamp [`Self::push_imu`] has accepted, whether that
+    /// sample is still in [`Self::imu_queue`] or has already moved into
+    /// [`Self::pending`]. The queue alone cannot answer that: once its last
+    /// sample has been popped it is empty, and an older sample would then be
+    /// accepted behind the pending one.
+    newest_imu_t_ns: Option<i64>,
     /// Frames the last marginalization removed, for [`Self::snapshot`].
     last_marginalized: Vec<FrameId>,
 }
@@ -645,6 +691,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             initial_bias_accel: Vector3::zeros(),
             imu_queue: VecDeque::new(),
             pending: None,
+            newest_imu_t_ns: None,
             last_marginalized: Vec::new(),
         })
     }
@@ -674,17 +721,37 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     /// (`:377-390`).
     ///
     /// Samples must arrive in order; a sample that does not follow the last one
-    /// is dropped rather than reordered, because the integration reads the
-    /// stream strictly forward. The static bias calibration
+    /// **accepted** is dropped rather than reordered, because the integration
+    /// reads the stream strictly forward. "Accepted" is
+    /// [`Self::newest_imu_t_ns`], not the queue's back: the newest sample may
+    /// already sit in [`Self::pending`], leaving the queue empty and an older
+    /// sample free to slot in behind it. The static bias calibration
     /// (`calib_bias.hpp:101-107`) is applied when the sample is popped, as
     /// `:298-299` does, not here.
     pub fn push_imu(&mut self, sample: ImuSample) {
-        if let Some(last) = self.imu_queue.back()
-            && sample.t_ns <= last.t_ns
+        if let Some(newest) = self.newest_imu_t_ns
+            && sample.t_ns <= newest
         {
             return;
         }
+        self.newest_imu_t_ns = Some(sample.t_ns);
         self.imu_queue.push_back(sample);
+    }
+
+    /// Whether the buffered IMU reaches strictly past `t_ns`, which is what
+    /// [`Self::process_frame`] needs before it may consume anything (D17).
+    ///
+    /// Strictly past, because a sample landing exactly on the frameset is
+    /// consumed and the integration loop pops again (`:322-328`). The newest
+    /// accepted sample is never popped past — the skip loop stops at the
+    /// previous frameset and the integration loop at this one, both below it —
+    /// so this reads [`Self::newest_imu_t_ns`] rather than walking the queue.
+    ///
+    /// [`Vio::track`](crate::Vio::track) runs this **before** the frontend, so
+    /// a refused frameset leaves the whole pipeline untouched and the caller
+    /// may push the missing samples and retry the same frameset.
+    pub fn imu_covers_frame(&self, t_ns: i64) -> bool {
+        self.newest_imu_t_ns.is_some_and(|newest| newest > t_ns)
     }
 
     /// Whether the window has a state (`initialized`, `:233`).
@@ -851,18 +918,10 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 
         // The one place Offline mode differs from a blocking queue: every pop
         // below must succeed, so the coverage test happens before any state
-        // moves. The integration needs a sample strictly past the frameset,
-        // because a sample landing exactly on `t_ns` is consumed and the loop
-        // pops again (`:322-328`).
-        let covered: bool = self
-            .pending
-            .map(|(t_ns, _, _)| t_ns > frame.t_ns)
-            .unwrap_or(false)
-            || self
-                .imu_queue
-                .back()
-                .is_some_and(|last| last.t_ns > frame.t_ns);
-        if !covered {
+        // moves. `Vio::track` runs the same predicate before the frontend, so
+        // by the time a caller gets here through the driver this is the second
+        // line, not the first.
+        if !self.imu_covers_frame(frame.t_ns) {
             return Ok(FrameOutcome::NeedMoreImu);
         }
 
@@ -1216,8 +1275,14 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 if self.ba.lmdb.landmark_exists(lm_id) {
                     continue;
                 }
+                // `:514`'s `.at(lm_id)`: `measure` took this id out of
+                // `host_keypoints` itself, so a miss is an invariant break, not
+                // a landmark to skip (D32).
                 let Some(p0_pixel) = host_keypoints.get(kpt_id) else {
-                    continue;
+                    return Err(EstimatorError::UnconnectedKeypointMissing {
+                        cam_id,
+                        kpt_id: *kpt_id,
+                    });
                 };
                 let p0: Vector2<S> = cast_pixel::<S>(p0_pixel);
 
@@ -1333,6 +1398,24 @@ mod tests {
     const CALIB: &str = include_str!("../../tests/fixtures/msdmi_calib.json");
     const CONFIG: &str = include_str!("../../tests/fixtures/msdmi_config.json");
 
+    /// The fixture rig and config, `f32` as the shipped lane runs.
+    fn estimator() -> SqrtKeypointVio<f32> {
+        SqrtKeypointVio::with_default_gravity(
+            Calibration::<f64>::from_json_str(CALIB).unwrap().cast(),
+            VioConfig::from_json_str(CONFIG).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// A sample the initialization can take a gravity direction from.
+    fn sample(t_ns: i64) -> ImuSample {
+        ImuSample {
+            t_ns,
+            gyro: Vector3::zeros(),
+            accel: Vector3::new(0.0, 0.0, 9.81),
+        }
+    }
+
     /// The rig is one list of cameras, and
     /// [`SqrtKeypointVio::triangulate_unconnected`] indexes the projections and
     /// the extrinsics with the same id.
@@ -1352,6 +1435,82 @@ mod tests {
                 }
             ),
             "two extrinsics and one intrinsic is not a rig, got {refused:?}"
+        );
+    }
+
+    /// `push_imu` compares with the newest sample it has **accepted**, not with
+    /// the queue's back: once that sample has moved into `pending` the queue is
+    /// empty, and comparing with its back let an older sample slot in behind
+    /// the pending one, so a later integration met reversed timestamps
+    /// (`:947`'s loop). basalt cannot hit this — its queue is the only buffer —
+    /// but the port's public API could.
+    #[test]
+    fn an_imu_sample_behind_the_pending_one_is_dropped() {
+        let mut estimator: SqrtKeypointVio<f32> = estimator();
+        estimator.push_imu(sample(10));
+        // One frameset before the sample: the initialization pops it into
+        // `pending` and leaves the queue empty, which is the whole setup.
+        estimator
+            .process_frame(Arc::new(FlowObservations::new(5, 2)))
+            .unwrap();
+        assert!(estimator.imu_queue.is_empty());
+        assert_eq!(estimator.pending.map(|(t_ns, _, _)| t_ns), Some(10));
+
+        estimator.push_imu(sample(7));
+        assert!(
+            estimator.imu_queue.is_empty(),
+            "a sample older than the pending one was accepted behind it"
+        );
+        assert_eq!(estimator.newest_imu_t_ns, Some(10));
+
+        // A sample that does follow the pending one is still accepted.
+        estimator.push_imu(sample(12));
+        assert_eq!(
+            estimator.imu_queue.back().map(|s| s.t_ns),
+            Some(12),
+            "the ordering check rejected a sample that does follow"
+        );
+    }
+
+    /// `:514`'s `opt_flow_meas->keypoints.at(i).at(lm_id)`: the triangulation
+    /// reads the host pixel back out of the map `measure` took the unconnected
+    /// id from, and C++ throws when it is not there. The port used to skip the
+    /// landmark silently (D32).
+    ///
+    /// Only a test can build this: `measure` fills `unconnected_obs[cam]` by
+    /// iterating `frame.cameras[cam]` and hands the same `frame` on, so the
+    /// two agree by construction on every ported path. The call below pairs an
+    /// id with a frameset that never carried it.
+    #[test]
+    fn an_unconnected_keypoint_missing_from_its_own_frameset_is_refused() {
+        let mut estimator: SqrtKeypointVio<f32> = estimator();
+        estimator.push_imu(sample(10));
+        estimator
+            .process_frame(Arc::new(FlowObservations::new(5, 2)))
+            .unwrap();
+
+        let frame: FlowObservations = FlowObservations::new(5, 2);
+        let unconnected: Vec<BTreeSet<KeypointId>> =
+            vec![BTreeSet::from([KeypointId(7)]), BTreeSet::new()];
+        assert_eq!(
+            estimator
+                .triangulate_unconnected(&frame, &unconnected)
+                .unwrap_err(),
+            EstimatorError::UnconnectedKeypointMissing {
+                cam_id: 0,
+                kpt_id: KeypointId(7),
+            }
+        );
+
+        // The same call over an id the frameset does carry gets as far as the
+        // triangulation, which one view cannot satisfy: no landmark, no error.
+        let mut carried: FlowObservations = FlowObservations::new(5, 2);
+        carried.cameras[0].insert(KeypointId(7), Vector2::new(480.0, 480.0));
+        assert_eq!(
+            estimator
+                .triangulate_unconnected(&carried, &unconnected)
+                .unwrap(),
+            0
         );
     }
 }

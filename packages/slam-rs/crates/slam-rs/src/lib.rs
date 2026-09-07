@@ -38,7 +38,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub enum VioStatus {
     /// No pose yet: the estimator has not initialised.
     NotInitialised,
-    /// The frame arrived before the IMU samples that cover it.
+    /// The frame arrived before the IMU samples that cover it. Nothing moved:
+    /// push the missing samples and call `track` again with the same frameset
+    /// (D17 — no arrival order may reach the trajectory).
     NeedMoreImu,
     /// The returned pose is an estimate.
     Tracking,
@@ -391,12 +393,30 @@ impl<S: lie::LieScalar> Vio<S> {
 
     /// Process one frameset: one image per camera, oldest to newest in time.
     ///
+    /// Returns [`VioStatus::NeedMoreImu`] without touching anything — the
+    /// frontend, both IMU buffers, the estimator — when the buffered IMU does
+    /// not yet reach past `t_ns`; the same frameset may then be tracked again
+    /// once the samples arrive, and the result is the one a run that had them
+    /// all along would have produced (D17).
+    ///
     /// # Errors
     ///
     /// [`VioError`] when the frameset is the wrong width or geometry, or when
     /// the frontend or the estimator refuses it.
     pub fn track(&mut self, t_ns: i64, images: &[ImageView<'_>]) -> Result<VioResult, VioError> {
         check_frameset(images, self.camera_count)?;
+
+        // D17: the coverage test comes before **any** mutation. Everything
+        // below moves the pipeline forward irreversibly — the frontend swaps
+        // its pyramids, advances `t_ns` and the frame counter, and both
+        // preintegrators eat their buffers — so asking the estimator after all
+        // that would make `NeedMoreImu` a status the caller cannot act on: the
+        // retry would track the frameset against itself. The predicate is the
+        // estimator's own, and `process_frame` still runs it as its second
+        // line.
+        if !self.estimator.imu_covers_frame(t_ns) {
+            return Ok(self.result(VioStatus::NeedMoreImu, t_ns));
+        }
 
         // `frame_to_frame_optical_flow.h:138-152`: the prediction the KLT is
         // seeded with. Until the estimator has produced a state both poses are
@@ -464,6 +484,12 @@ impl<S: lie::LieScalar> Vio<S> {
             }
         };
 
+        Ok(self.result(status, t_ns))
+    }
+
+    /// The estimator's newest state as one [`VioResult`], or the identity pose
+    /// before the window has one.
+    fn result(&self, status: VioStatus, t_ns: i64) -> VioResult {
         let (world_from_rig, velocity, gyro_bias, accel_bias) = match self.estimator.state() {
             Some(state) => (
                 pose_to_array(&Isometry3::from_parts(
@@ -481,14 +507,14 @@ impl<S: lie::LieScalar> Vio<S> {
                 [0.0; 3],
             ),
         };
-        Ok(VioResult {
+        VioResult {
             status,
             t_ns,
             world_from_rig,
             velocity,
             gyro_bias,
             accel_bias,
-        })
+        }
     }
 
     /// `processImu(curr_t_ns)` (`frame_to_frame_optical_flow.h:157-201`).
@@ -717,19 +743,23 @@ mod tests {
     }
 
     /// A frameset that arrives before the IMU covering it reports
-    /// [`VioStatus::NeedMoreImu`], which is what the variant's doc promises and
-    /// what basalt would block on. The frontend still runs, so this needs a
-    /// frameset of the calibrated resolution; blank images detect no corners,
-    /// which is all this asserts.
+    /// [`VioStatus::NeedMoreImu`] and the frontend does **not** run: it would
+    /// swap its pyramids and advance its clock and counter, and the retry the
+    /// status invites would then track the frameset against itself (D17).
+    /// `vio_parity.rs` proves the retry itself; this proves nothing moved.
     #[test]
     fn a_frameset_ahead_of_the_imu_needs_more_imu() {
         let mut vio: Vio<f32> = pipeline();
         let blank: Vec<u8> = vec![0; 960 * 960];
         let views: [ImageView<'_>; 2] = [image(&blank, 960, 960), image(&blank, 960, 960)];
+        let before: String = format!("{vio:?}");
         let result: VioResult = vio.track(1_000, &views).unwrap();
         assert_eq!(result.status, VioStatus::NeedMoreImu);
         assert!(!vio.estimator().is_initialized());
         assert_abs_diff_eq!(result.world_from_rig[6], 1.0, epsilon = 1e-12);
+        assert_eq!(vio.frontend().frame_counter(), 0);
+        assert_eq!(vio.frontend().t_ns(), -1);
+        assert_eq!(format!("{vio:?}"), before, "the refused frameset moved a field");
     }
 
     /// `vio_enforce_realtime` drops framesets, which Offline mode cannot do

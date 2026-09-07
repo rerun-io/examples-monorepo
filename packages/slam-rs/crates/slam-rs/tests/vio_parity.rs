@@ -18,7 +18,9 @@
 //! `SLAM_RS_VIO_FRAMES_DIR` at a directory holding
 //! `frame_<NNN>_cam<C>.pgm` (`tools/dump_flow.cpp`'s layout, which
 //! `slam_rs.catalog_feed` writes on the frozen gray8 decode path) and the test
-//! runs. Without it the test prints why and passes: the three framesets
+//! runs, and it has to hold **all** 60: a prefix is refused rather than
+//! measured, because a short run cannot show a late divergence. Without the
+//! variable the test prints why and passes — the three framesets
 //! `flow/frames/` does carry are too few to reach `opt_started`, which needs
 //! five states.
 //!
@@ -180,8 +182,126 @@ fn the_whole_pipeline_tracks_and_repeats_bit_identically() {
     );
 }
 
-/// The whole pipeline over as many framesets as the directory holds, reporting
-/// the per-frame difference from basalt's own trajectory.
+/// Every field of the pipeline as one number.
+///
+/// `Vio` derives `Debug`, so this reads all of them — the frontend's pyramids,
+/// clock, counter, cells and keypoints, both IMU buffers and their popped
+/// samples, the published state and depth guess, the whole estimator window.
+/// 85 MB of text, so it is hashed rather than kept.
+///
+/// The one field that cannot be compared across runs is `FrameStats::timings`,
+/// which `StageTimings`'s own doc calls wall-clock. It is the last field of the
+/// last field, so cutting the text at it drops the clock and nothing else; the
+/// assertion says so.
+fn fingerprint(vio: &Vio<f32>) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let text: String = format!("{vio:?}");
+    let cut: usize = text.rfind("StageTimings {").unwrap_or(text.len());
+    assert!(
+        text.len() - cut < 256,
+        "the wall-clock block is no longer the tail of the Debug output"
+    );
+    let mut hasher: std::collections::hash_map::DefaultHasher = Default::default();
+    text[..cut].hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The fixture's IMU rows up to and including `horizon`, from `next`; returns
+/// where it stopped.
+fn push_imu_through(vio: &mut Vio<f32>, next: usize, horizon: i64) -> usize {
+    let mut index: usize = next;
+    while index < IMU.len() && IMU[index].t_ns <= horizon {
+        let row = &IMU[index];
+        vio.push_imu(row.t_ns, row.gyro, row.accel).unwrap();
+        index += 1;
+    }
+    index
+}
+
+/// A frameset the IMU does not yet cover leaves the **whole** pipeline
+/// untouched, so pushing the samples and tracking the same frameset again gives
+/// what a run that had them all along gives (D17: no arrival order may reach
+/// the trajectory).
+///
+/// This is the property `VioStatus::NeedMoreImu` promises and the one the
+/// frontend threatens: `track` runs the KLT before the estimator sees anything,
+/// and the KLT swaps the pyramids, advances `t_ns` and the frame counter and
+/// eats the frontend's own IMU buffer. A coverage test placed after all that
+/// would make the retry track the frameset against itself, and the second and
+/// third framesets below — refused *after* initialization — would each lose a
+/// preintegration interval as well.
+#[test]
+fn a_refused_frameset_is_retried_bit_identically() {
+    let directory: PathBuf = common::fixtures().join("flow/frames");
+    let cameras: usize = common::calibration().t_i_c.len();
+    let rasters: Vec<Vec<Pgm>> = (0..COMMITTED_FRAMESETS)
+        .map(|frame| {
+            (0..cameras)
+                .map(|camera| common::read_pgm(&directory, frame, camera))
+                .collect()
+        })
+        .collect();
+
+    // The IMU arrives first: the reference run.
+    let mut ahead: Vio<f32> = pipeline();
+    push_imu_through(&mut ahead, 0, COMMITTED_IMU_HORIZON_NS);
+    let wanted: Vec<VioResult> = (0..COMMITTED_FRAMESETS)
+        .map(|frame| {
+            let views: Vec<ImageView<'_>> = rasters[frame].iter().map(view).collect();
+            ahead.track(ORACLE.flow[frame].t_ns, &views).unwrap()
+        })
+        .collect();
+
+    // Every frameset arrives before the samples that cover it, is refused, and
+    // is tracked again once they land.
+    let mut behind: Vio<f32> = pipeline();
+    let mut next: usize = 0;
+    let mut got: Vec<VioResult> = Vec::new();
+    for frame in 0..COMMITTED_FRAMESETS {
+        let t_ns: i64 = ORACLE.flow[frame].t_ns;
+        let views: Vec<ImageView<'_>> = rasters[frame].iter().map(view).collect();
+
+        let before: u64 = fingerprint(&behind);
+        let refused: VioResult = behind.track(t_ns, &views).unwrap();
+        assert_eq!(
+            refused.status,
+            VioStatus::NeedMoreImu,
+            "frame {frame} was not refused, so the retry it is asked to model never happens"
+        );
+        assert_eq!(
+            fingerprint(&behind),
+            before,
+            "frame {frame}: the refused frameset moved the pipeline"
+        );
+
+        // Up to the next frameset: past this one, so `:330-336` can close its
+        // preintegration, and not past the next, so the next is refused too.
+        // The last horizon is the reference run's, so both runs end holding the
+        // same samples.
+        let horizon: i64 = if frame + 1 < COMMITTED_FRAMESETS {
+            ORACLE.flow[frame + 1].t_ns
+        } else {
+            COMMITTED_IMU_HORIZON_NS
+        };
+        next = push_imu_through(&mut behind, next, horizon);
+        got.push(behind.track(t_ns, &views).unwrap());
+    }
+
+    assert_eq!(got, wanted, "the retried run took a different trajectory");
+    assert_eq!(
+        fingerprint(&behind),
+        fingerprint(&ahead),
+        "the two runs agree on the poses but not on the rest of the pipeline"
+    );
+}
+
+/// The whole pipeline over **all 60** framesets, reporting the per-frame
+/// difference from basalt's own trajectory.
+///
+/// Every frameset has to reach `Tracking` and every pose is compared: a gate
+/// that skipped the ones that did not would pass on a single pose while the
+/// port lost tracking on the other 59.
 #[test]
 fn the_whole_vio_follows_the_cpp_trajectory() {
     let Some(directory) = std::env::var_os("SLAM_RS_VIO_FRAMES_DIR").map(PathBuf::from) else {
@@ -195,11 +315,13 @@ fn the_whole_vio_follows_the_cpp_trajectory() {
     let run = run_named(&ORACLE, "float");
     let cameras: usize = common::calibration().t_i_c.len();
     let available: usize = common::available_framesets(&directory, cameras, ORACLE.flow.len());
-    assert!(
-        available > 4,
-        "{} holds {available} framesets; five states have to accumulate before the estimator \
-         optimizes at all",
-        directory.display()
+    assert_eq!(
+        available,
+        ORACLE.flow.len(),
+        "{} holds {available} of the {} framesets the fixture describes; a short directory would \
+         make this gate pass on a prefix",
+        directory.display(),
+        ORACLE.flow.len()
     );
 
     let mut vio: Vio<f32> = pipeline();
@@ -220,9 +342,21 @@ fn the_whole_vio_follows_the_cpp_trajectory() {
         let views: Vec<ImageView<'_>> = rasters.iter().map(view).collect();
         let result = vio.track(flow.t_ns, &views).unwrap();
         assert_eq!(result.t_ns, flow.t_ns, "frame {frame}: timestamp");
-        if result.status != VioStatus::Tracking {
-            continue;
-        }
+        // No frameset may legitimately miss `Tracking` here, and skipping one
+        // would let the tolerances below pass on a single pose. The whole IMU
+        // is pushed above and its last sample (1_091_997_574 ns) is past the
+        // last frameset (1_091_905_000 ns), so every frameset is covered and
+        // none can report `NeedMoreImu`; and the estimator initialises inside
+        // the same `process_frame` that measures (`:263-296`), so frameset 0 is
+        // `Tracking` too and `NotInitialised` is unreachable from `Vio`. The
+        // C++ dump agrees: all 60 of its `frames` carry a state, `frames[0]`
+        // included.
+        assert_eq!(
+            result.status,
+            VioStatus::Tracking,
+            "frame {frame} at {} ns lost tracking",
+            flow.t_ns
+        );
 
         // basalt's newest state at this frameset. `last_state_t_ns` is the
         // frameset itself once `measure` has run, so this is the same pose the
@@ -258,7 +392,11 @@ fn the_whole_vio_follows_the_cpp_trajectory() {
          {worst_position:.4e} m, worst rotation {worst_rotation_deg:.4e} deg, {travelled:.4} m \
          travelled"
     );
-    assert!(compared > 0, "no frameset reached Tracking");
+    assert_eq!(
+        compared,
+        ORACLE.flow.len(),
+        "every frameset has to be compared, not just the ones that tracked"
+    );
     assert!(
         worst_position <= POSITION_TOLERANCE_M,
         "the trajectory drifted {worst_position:.4e} m from basalt's over {travelled:.4} m"
@@ -268,3 +406,5 @@ fn the_whole_vio_follows_the_cpp_trajectory() {
         "the orientation drifted {worst_rotation_deg:.4e} deg from basalt's"
     );
 }
+
+
