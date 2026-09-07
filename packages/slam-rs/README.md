@@ -230,6 +230,28 @@ one ulp below and one ulp above: the first two are rejected and produce a
 bit-identical reduced system, the third is accepted and produces a different
 one, in both precisions.
 
+**Which reduction the column norms take is part of that decision, and it is not
+the same at every call site.** `makeHouseholder` needs `tail.squaredNorm()`, and
+`Redux.h` picks the traversal from the *C++* matrix's storage order. The
+landmark block's `storage` is `Eigen::RowMajor`, so its columns have an inner
+stride of `num_cols`, carry no `PacketAccessBit`, and fold left to right
+(`Redux.h:236-244`). basalt's marginalization matrices are plain
+`Eigen::Matrix<Scalar, Dynamic, Dynamic>` — column-major — so a column segment
+is contiguous and `LinearVectorizedTraversal` runs instead
+(`Redux.h:274-325`): two packet accumulators, `predux` to pair the lanes
+(`(a₀+a₂) + (a₁+a₃)` for a `Packet4f`), then a scalar tail. `alignedStart` is
+always zero and that is a property of the expression, not of the address —
+`squaredNorm()` reduces a `CwiseUnaryOp` (`Dot.h:24`) whose flags keep only
+`RowMajorBit`, so `DenseCoeffsBase.h:533` returns zero whatever the matrix's
+base pointer is. The fork's `tools/marg_norm_probe.cpp` reproduces Eigen bit for
+bit on 7,486 of 7,486 shapes per precision with that emulation, on 5,869 (`f64`)
+and 4,832 (`f32`) with a pointer-derived offset, and on 2,627 and 2,897 with the
+sequential fold. Using the sequential fold in the flat QR and in
+`ColPivHouseholderQR` flips `|beta| > sqrt(epsilon)` and `rank()` on valid
+inputs — in *opposite directions* in the two precisions on the same `9x2`
+problem — which is why [`ColumnRedux`] is a parameter of `make_householder` and
+named at every call site.
+
 The other rank decision is Eigen's complete orthogonal decomposition, which the
 two squared routines invert the marginalized block with
 (`marg_helper.cpp:99-100`) after basalt tried and rejected `ldlt`, `fullPivLu`,
@@ -263,9 +285,12 @@ case `J_mᵀr_m` agrees **exactly**.
 Finally, one shape makes basalt read out of range. When the marginalized block
 consumes every row of rank, `total_rank == marg_rank == rows` and `:320-323` asks
 for a block whose first row is one past the end; the C++ aborts on Eigen's block
-assertion in a debug build. The port returns a zero row instead, which is the
-answer the arithmetic gives — nothing is left to constrain the kept variables —
-and the oracle carries the case with the flat QR skipped on the C++ side.
+assertion in a debug build and reads past the allocation in a release one, where
+there is no defined result — a probe returned `H = [7, 2.42e-322]` with a garbage
+residual. The port returns a zero row instead, which is the answer the
+arithmetic gives — nothing is left to constrain the kept variables — and stays a
+disclosed deviation rather than a reproduction. The oracle carries the case with
+the flat QR skipped on the C++ side.
 
 ### The damping machinery the shipped VIO never uses
 
