@@ -15,11 +15,11 @@ it stands alone.
 An overlay is only ever drawn on the segment it was recorded from. The dumps carry
 no segment of their own — ``dump_flow.cpp`` writes a frame index and a timestamp —
 so the fixture directory names it in :data:`SOURCE_FILE`, and the logger compares
-that name with the segment being replayed once, when it is built. Timestamps alone
-are not an association: the feed reports ``video_time``, which starts at zero on
-every segment, so the smoke segment's first-frame keypoints landed on the first
-frame of every other segment too and read as a parity claim about a recording the
-C++ never saw.
+that name once, when it is built, with the segment id the replayed recording
+carries. Timestamps alone are not an association: the feed reports ``video_time``,
+which starts at zero on every segment, so the smoke segment's first-frame
+keypoints landed on the first frame of every other segment too and read as a
+parity claim about a recording the C++ never saw.
 """
 
 import json
@@ -96,18 +96,8 @@ def track_colors(ids: Int64[ndarray, " n_tracks"]) -> UInt8[ndarray, "n_tracks 3
     return HUE_RAMP[hashed % np.uint64(len(HUE_RAMP))]
 
 
-@dataclass(frozen=True, slots=True)
-class CppDumps:
-    """One directory of C++ dumps: the segment they came from, and their keypoints."""
-
-    segment_id: str
-    """Segment the dumps were recorded from; empty when the directory holds none."""
-    frames: dict[int, list[Float32[ndarray, "n_keypoints 2"]]]
-    """Frameset ``t_ns`` to one array of ``[x, y]`` per camera."""
-
-
-def read_cpp_dumps(camera_count: int, directory: Path | None = None) -> CppDumps:
-    """Read the basalt C++ frontend's own keypoints, with the segment they came from.
+def dumps_source(directory: Path | None = None) -> str:
+    """Which segment a directory of C++ dumps was recorded from.
 
     The dumps are on the same ``video_time`` clock the feed reports, which starts
     at zero on every segment, so the timestamp alone does not say which recording
@@ -115,25 +105,23 @@ def read_cpp_dumps(camera_count: int, directory: Path | None = None) -> CppDumps
     fact about the directory rather than about each dump in it.
 
     Args:
-        camera_count: Cameras on the rig being replayed; every dump must carry
-            exactly that many, or one camera would keep a stale overlay.
         directory: Where ``frame_XXX.json`` and :data:`SOURCE_FILE` live; the
             committed fixtures by default.
 
     Returns:
-        The dumps, or no segment and no frames when the directory holds none.
+        The segment the dumps came from, or the empty string when the directory
+        holds none.
 
     Raises:
         ValueError: The directory holds dumps but no :data:`SOURCE_FILE` naming
-            the segment they came from, so nothing could be associated with
-            them; or a dump carries no timestamp, or another rig's cameras.
+            the segment they came from, so nothing could be associated with them.
     """
     source: Path = directory if directory is not None else DEFAULT_DUMPS_DIR
-    if not source.is_dir():
-        return CppDumps(segment_id="", frames={})
-    frames: list[Path] = sorted(source.glob("frame_*.json"))
+    # A missing directory globs to nothing, which is what a directory holding no
+    # dumps is: the committed fixtures are the only ones that always exist.
+    frames: list[Path] = list(source.glob("frame_*.json"))
     if not frames:
-        return CppDumps(segment_id="", frames={})
+        return ""
     provenance: Path = source / SOURCE_FILE
     if not provenance.is_file():
         raise ValueError(
@@ -144,8 +132,32 @@ def read_cpp_dumps(camera_count: int, directory: Path | None = None) -> CppDumps
     segment_id: object = json.loads(provenance.read_text()).get("segment_id")
     if not isinstance(segment_id, str):
         raise ValueError(f'{provenance} must carry a "segment_id" string naming the segment the dumps were dumped from')
+    return segment_id
+
+
+def read_cpp_dumps(camera_count: int, directory: Path | None = None) -> dict[int, list[Float32[ndarray, "n_keypoints 2"]]]:
+    """Read the basalt C++ frontend's own keypoints, by frameset ``t_ns``.
+
+    Called once :func:`dumps_source` has said the dumps are of the recording
+    being replayed, and not before: the rig check below is a fact about the
+    overlay that will be drawn, so dumps of another recording must not refuse a
+    replay they would draw nothing on.
+
+    Args:
+        camera_count: Cameras on the rig being replayed; every dump must carry
+            exactly that many, or one camera would keep a stale overlay.
+        directory: Where the ``frame_XXX.json`` live; the committed fixtures by default.
+
+    Returns:
+        One ``[x, y]`` array per camera, per frameset ``t_ns``; empty when the
+        directory holds no dumps.
+
+    Raises:
+        ValueError: A dump carries no timestamp, or another rig's cameras.
+    """
+    source: Path = directory if directory is not None else DEFAULT_DUMPS_DIR
     dumps: dict[int, list[Float32[ndarray, "n_keypoints 2"]]] = {}
-    for path in frames:
+    for path in sorted(source.glob("frame_*.json")):
         dump: dict[str, object] = json.loads(path.read_text())
         t_ns: object = dump.get("t_ns")
         if not isinstance(t_ns, int):
@@ -157,7 +169,7 @@ def read_cpp_dumps(camera_count: int, directory: Path | None = None) -> CppDumps
             np.array([[keypoint["x"], keypoint["y"]] for keypoint in camera["keypoints"]], dtype=np.float32).reshape(-1, 2)
             for camera in cameras
         ]
-    return CppDumps(segment_id=segment_id, frames=dumps)
+    return dumps
 
 
 @dataclass(slots=True)
@@ -166,28 +178,27 @@ class FrontendLogger:
 
     camera_count: int
     """Cameras on the rig."""
-    source_segment: str | None
-    """Segment the replayed frames come from; only dumps recorded from it are drawn, and ``None`` — frames no manifest entry names — draws none."""
+    source_segment: str
+    """Segment id the replayed recording carries; only dumps recorded from it are drawn."""
     dumps_dir: Path | None = None
     """Where the C++ dumps are read from; the committed fixtures by default."""
     cpp_dumps: dict[int, list[Float32[ndarray, "n_keypoints 2"]]] = field(init=False)
-    """This segment's C++ keypoints by frameset ``t_ns``; empty when the dumps are another's."""
+    """This recording's C++ keypoints by frameset ``t_ns``; empty when the dumps are another's."""
     trails: list[dict[int, list[tuple[float, float]]]] = field(init=False)
     """Per camera, the last :data:`TRAIL_LENGTH` positions of every live track."""
     cpp_logged: bool = False
     """Whether an overlay has been drawn, so it can be cleared once the dumps run out."""
 
     def __post_init__(self) -> None:
-        """Read the dumps once, and keep them only if this is the segment they came from."""
-        dumps: CppDumps = read_cpp_dumps(self.camera_count, self.dumps_dir)
-        # `None` is a replay of frames no manifest entry names, where no dump can
-        # be of the recording on screen whatever the two are called: a filename
-        # equal to a segment id used to pass this test (the re-review's finding).
-        this_segment: bool = self.source_segment is not None and dumps.segment_id == self.source_segment
-        if dumps.frames and not this_segment:
-            replaying: str = self.source_segment if self.source_segment is not None else "another recording's frames"
-            print(f"dumps are from {dumps.segment_id}, replaying {replaying}: no overlay")
-        self.cpp_dumps = dumps.frames if this_segment else {}
+        """Associate the dumps with the recording once, and read their bodies only if they are of it."""
+        dumped_from: str = dumps_source(self.dumps_dir)
+        of_this_recording: bool = dumped_from == self.source_segment
+        if dumped_from != "" and not of_this_recording:
+            print(f"dumps are from {dumped_from}, replaying {self.source_segment}: no overlay")
+        # Only the dumps that will be drawn are read: their camera count is a
+        # fact about the overlay, so another recording's dumps would otherwise
+        # refuse the replay of a rig they say nothing about.
+        self.cpp_dumps = read_cpp_dumps(self.camera_count, self.dumps_dir) if of_this_recording else {}
         self.trails = [{} for _ in range(self.camera_count)]
 
     def log(self, frame: _core.FlowFrame, elapsed_ms: float) -> None:
@@ -253,8 +264,8 @@ class FrontendLogger:
     def _log_cpp(self, t_ns: int) -> None:
         """Draw the C++ frontend's own keypoints for this frameset, if it dumped any.
 
-        Only this segment's dumps are here: another recording's were dropped when
-        the logger was built, however well the two clocks line up.
+        Only this recording's dumps are here: another's were never read, however
+        well the two clocks line up.
         """
         dump: list[Float32[ndarray, "n_keypoints 2"]] | None = self.cpp_dumps.get(t_ns)
         if dump is None:
