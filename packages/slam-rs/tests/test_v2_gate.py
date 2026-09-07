@@ -13,10 +13,10 @@ own C++ numbers were produced:
   once the samples arrive, and anything still held when the segment ends is a
   lost frameset (D17).
 
-``no_divergence`` segments gate only the last two clauses plus a bounded
-trajectory (D36): basalt itself sits at 43 cm and 78 cm there, and two legitimate
-decode paths of the same C++ estimator already differ by 18 to 32 cm, so a
-tolerance would measure noise.
+``no_divergence`` segments gate only the frameset clause plus a finite, bounded
+trajectory (D36) — neither error tolerance: basalt itself sits at 43 cm and 78 cm
+there, and two legitimate decode paths of the same C++ estimator already differ
+by 18 to 32 cm, so a tolerance would measure noise.
 
 The gate drives :class:`slam_rs._core.Vio` and the feed directly rather than the
 replay tool: what is gated is the pipeline and the manifest, not the Rerun rung
