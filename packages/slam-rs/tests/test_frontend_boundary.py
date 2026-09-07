@@ -30,12 +30,14 @@ from slam_rs.catalog_feed import CameraCalib, ImuCalib
 MAX_EXAMPLES: int = 25
 
 sizes = st.integers(min_value=1, max_value=32)
-camera_counts = st.integers(min_value=1, max_value=3)
+camera_counts = st.integers(min_value=2, max_value=3)
+"""Camera counts both entry points accept: the estimator refuses a one-camera rig (``optical_flow.h:210``)."""
 wrong_sizes = st.integers(min_value=1, max_value=400)
 """Frame sides on both sides of the synthetic rig's, so cropped and enlarged frames are both generated."""
 
 CameraFactory: TypeAlias = Callable[[int, float], CameraCalib]
 FrontendFactory: TypeAlias = Callable[[int], _core.OpticalFlow]
+PipelineFactory: TypeAlias = Callable[[int], _core.Vio]
 TextureFactory: TypeAlias = Callable[[int, int], UInt8[ndarray, "h w"]]
 EntryPoint: TypeAlias = Callable[[int, list[UInt8[ndarray, "h w"]]], object]
 """One frameset into a boundary call: ``(t_ns, images)``."""
@@ -44,14 +46,16 @@ EntryFactory: TypeAlias = Callable[[int], EntryPoint]
 
 
 @pytest.fixture(scope="session", params=["Vio.track", "OpticalFlow.process"])
-def entry_point(request: pytest.FixtureRequest, frontend: FrontendFactory) -> EntryFactory:
+def entry_point(request: pytest.FixtureRequest, frontend: FrontendFactory, pipeline: PipelineFactory) -> EntryFactory:
     """Both array-taking entry points, so one property covers the two of them.
 
-    They share ``gray_array``'s rank, dtype and layout checks, so a rule proved
-    on one of them says nothing about the other unless both are driven.
+    They share ``gray_array``'s rank, dtype and layout checks and the frontend's
+    own frame-size rule, so a rule proved on one of them says nothing about the
+    other unless both are driven. Every rig here has at least two cameras,
+    because that is what the estimator's epipolar filter requires.
     """
     if request.param == "Vio.track":
-        return lambda camera_count: _core.Vio(camera_count=camera_count, min_imu_samples=1).track
+        return lambda camera_count: pipeline(camera_count).track
     return lambda camera_count: frontend(camera_count).process
 
 
@@ -89,14 +93,15 @@ def test_the_image_safe_radius_survives_the_json_round_trip() -> None:
 def test_images_of_the_wrong_dtype_are_rejected(entry_point: EntryFactory, dtype: type, height: int, width: int) -> None:
     wrong: NDArray[np.uint8] = cast("NDArray[np.uint8]", np.zeros((height, width), dtype=dtype))
     with pytest.raises(ValueError, match="2-D uint8"):
-        entry_point(1)(0, [wrong])
+        entry_point(2)(0, [wrong, wrong])
 
 
 @settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(ndim=st.sampled_from([1, 3, 4]), size=st.integers(min_value=1, max_value=4))
 def test_images_of_the_wrong_rank_are_rejected(entry_point: EntryFactory, ndim: int, size: int) -> None:
+    wrong: UInt8[ndarray, "..."] = np.zeros((size,) * ndim, dtype=np.uint8)
     with pytest.raises(ValueError, match="2-D uint8"):
-        entry_point(1)(0, [np.zeros((size,) * ndim, dtype=np.uint8)])
+        entry_point(2)(0, [wrong, wrong])
 
 
 @settings(max_examples=MAX_EXAMPLES, deadline=None)
@@ -414,7 +419,7 @@ def refuse(what: str, call: Callable[[], object], failures: list[str]) -> None:
         failures.append(f"{what}: {type(error).__name__}({error})")
 
 
-def batch_imu(t_ns: object, gyro: object, accel: object) -> None:
+def batch_imu(vio: _core.Vio, t_ns: object, gyro: object, accel: object) -> None:
     """Push an IMU batch of whatever was handed in, past the stub's declared dtypes.
 
     ``push_imu_batch`` declares ``int64[n]`` and ``float64[n, 3]``, and the audit's
@@ -423,18 +428,21 @@ def batch_imu(t_ns: object, gyro: object, accel: object) -> None:
     sites.
 
     Args:
+        vio: The estimator to push into.
         t_ns: Whatever is standing in for the timestamps.
         gyro: Whatever is standing in for the gyroscope samples.
         accel: Whatever is standing in for the accelerometer samples.
     """
-    _core.Vio(1, 1).push_imu_batch(
+    vio.push_imu_batch(
         cast("NDArray[np.int64]", t_ns),
         cast("NDArray[np.float64]", gyro),
         cast("NDArray[np.float64]", accel),
     )
 
 
-def test_no_hostile_argument_reaches_python_as_a_panic(camera: CameraFactory, imu: ImuCalib, texture: TextureFactory) -> None:
+def test_no_hostile_argument_reaches_python_as_a_panic(
+    camera: CameraFactory, imu: ImuCalib, texture: TextureFactory, pipeline: PipelineFactory
+) -> None:
     """Every public entry point, against every class of hostile argument (D32).
 
     A panic inside the core reaches Python as ``PanicException``, which derives
@@ -448,11 +456,13 @@ def test_no_hostile_argument_reaches_python_as_a_panic(camera: CameraFactory, im
     good: list[UInt8[ndarray, "h w"]] = [texture(0, 0), texture(1, 0)]
     flow: _core.OpticalFlow = _core.OpticalFlow(calibration, config)
     frame: _core.FlowFrame = flow.process(0, good)
+    vio: _core.Vio = pipeline(2)
 
     for value in HOSTILE_INTS:
-        refuse(f"Vio({value})", lambda v=value: _core.Vio(v, 1), failures)
-        refuse(f"Vio(min_imu_samples={value})", lambda v=value: _core.Vio(1, v), failures)
-        refuse(f"push_imu({value})", lambda v=value: _core.Vio(1, 1).push_imu(v, [0.0] * 3, [0.0] * 3), failures)
+        refuse(f"push_imu({value})", lambda v=value: pipeline(2).push_imu(v, [0.0] * 3, [0.0] * 3), failures)
+        refuse(f"Vio(threads={value})", lambda v=value: _core.Vio(calibration, config, threads=v), failures)
+        refuse(f"Vio(max_keypoints={value})", lambda v=value: _core.Vio(calibration, config, max_keypoints=v), failures)
+        refuse(f"Vio.track(t_ns={value})", lambda v=value: pipeline(2).track(v, good), failures)
         refuse(f"OpticalFlow(threads={value})", lambda v=value: _core.OpticalFlow(calibration, config, threads=v), failures)
         refuse(f"OpticalFlow(max_keypoints={value})", lambda v=value: _core.OpticalFlow(calibration, config, max_keypoints=v), failures)
         refuse(f"process(t_ns={value})", lambda v=value: _core.OpticalFlow(calibration, config).process(v, good), failures)
@@ -477,11 +487,13 @@ def test_no_hostile_argument_reaches_python_as_a_panic(camera: CameraFactory, im
         refuse(f"Calibration.from_catalog(imu={thing!r})", lambda i=imu_like: _core.Calibration.from_catalog([camera(0, 0.0)], i), failures)
         refuse(f"OpticalFlow(calibration={thing!r})", lambda c=calibration_like: _core.OpticalFlow(c, config), failures)
         refuse(f"OpticalFlow(config={thing!r})", lambda o=config_like: _core.OpticalFlow(calibration, o), failures)
+        refuse(f"Vio(calibration={thing!r})", lambda c=calibration_like: _core.Vio(c, config), failures)
+        refuse(f"Vio(config={thing!r})", lambda o=config_like: _core.Vio(calibration, o), failures)
         refuse(f"process(images={thing!r})", lambda o=images_like: flow.process(1, o), failures)
         refuse(f"process([{thing!r}])", lambda o=frameset_like: flow.process(1, o), failures)
         refuse(f"safe_radius = {thing!r}", lambda o=thing: setattr(config, "optical_flow_image_safe_radius", o), failures)
-        refuse(f"Vio.track({thing!r})", lambda o=images_like: _core.Vio(1, 1).track(0, o), failures)
-        refuse(f"push_imu_batch({thing!r})", lambda o=thing: batch_imu(o, o, o), failures)
+        refuse(f"Vio.track({thing!r})", lambda o=images_like: vio.track(0, o), failures)
+        refuse(f"push_imu_batch({thing!r})", lambda o=thing: batch_imu(vio, o, o, o), failures)
         refuse(f"frame.ids({thing!r})", lambda o=index_like: frame.ids(o), failures)
 
     # Arrays of the wrong rank, dtype, layout or extent, the transposed one being
@@ -498,18 +510,25 @@ def test_no_hostile_argument_reaches_python_as_a_panic(camera: CameraFactory, im
     for array in hostile_arrays:
         refuse(f"process({array.shape} {array.dtype})", lambda a=array: flow.process(1, [a, a]), failures)
         refuse(f"process(mixed {array.shape})", lambda a=array: flow.process(1, [good[0], a]), failures)
-        refuse(f"Vio.track({array.shape} {array.dtype})", lambda a=array: _core.Vio(1, 1).track(0, [a]), failures)
-        refuse(f"push_imu_batch({array.shape} {array.dtype})", lambda a=array: batch_imu(a, a, a), failures)
+        refuse(f"Vio.track({array.shape} {array.dtype})", lambda a=array: vio.track(0, [a, a]), failures)
+        refuse(f"Vio.track(mixed {array.shape})", lambda a=array: vio.track(0, [good[0], a]), failures)
+        refuse(f"push_imu_batch({array.shape} {array.dtype})", lambda a=array: batch_imu(vio, a, a, a), failures)
 
     # Every numeric config field, one at a time, over the values that broke one.
+    # Both constructors: the estimator reads fields the frontend never looks at.
     document: dict = json.loads(_core.VioConfig().to_json())
     numeric: list[str] = [key for key, value in document["value0"].items() if isinstance(value, (int, float)) and not isinstance(value, bool)]
     assert len(numeric) > 20, f"only {len(numeric)} numeric config fields were found"
     for key in numeric:
         for value in (0, -1, 1, 2**31 - 1, -(2**31), 10**12):
             refuse(
-                f"config {key}={value}",
+                f"OpticalFlow config {key}={value}",
                 lambda k=key, v=value: _core.OpticalFlow(calibration, _core.VioConfig.from_json(config_with(k, v))),
+                failures,
+            )
+            refuse(
+                f"Vio config {key}={value}",
+                lambda k=key, v=value: _core.Vio(calibration, _core.VioConfig.from_json(config_with(k, v))),
                 failures,
             )
 
@@ -518,3 +537,5 @@ def test_no_hostile_argument_reaches_python_as_a_panic(camera: CameraFactory, im
     # A refused frameset leaves a frontend that still works, after all of that.
     assert flow.frame_counter == 1
     assert flow.process(2, good).num_tracks(0) > 0
+    # And an estimator that still tracks: nothing above moved its clock.
+    assert vio.track(1, good).status == _core.VioStatus.NeedMoreImu

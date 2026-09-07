@@ -29,8 +29,12 @@ FRAME: int = 200
 
 CameraFactory: TypeAlias = Callable[[int, float], CameraCalib]
 """One camera of the synthetic rig, by rig index and baseline in metres."""
+RigFactory: TypeAlias = Callable[[int], _core.Calibration]
+"""A calibration for a rig of the given camera count."""
 FrontendFactory: TypeAlias = Callable[[int], _core.OpticalFlow]
 """A frontend on a rig of the given camera count."""
+PipelineFactory: TypeAlias = Callable[[int], _core.Vio]
+"""The whole pipeline on a rig of the given camera count."""
 TextureFactory: TypeAlias = Callable[[int, int], UInt8[ndarray, "h w"]]
 """The synthetic scene, shifted by whole pixels in x and y."""
 
@@ -76,12 +80,36 @@ def imu() -> ImuCalib:
 
 
 @pytest.fixture(scope="session")
-def frontend(camera: CameraFactory, imu: ImuCalib) -> FrontendFactory:
-    """A frontend on a rig of ``camera_count`` identical cameras, 10 cm apart."""
+def rig(camera: CameraFactory, imu: ImuCalib) -> RigFactory:
+    """A calibration for ``camera_count`` identical cameras, 10 cm apart."""
+
+    def build(camera_count: int) -> _core.Calibration:
+        return _core.Calibration.from_catalog([camera(index, 0.1 * index) for index in range(camera_count)], imu)
+
+    return build
+
+
+@pytest.fixture(scope="session")
+def frontend(rig: RigFactory) -> FrontendFactory:
+    """A frontend on a rig of ``camera_count`` identical cameras."""
 
     def build(camera_count: int) -> _core.OpticalFlow:
-        cameras: list[CameraCalib] = [camera(index, 0.1 * index) for index in range(camera_count)]
-        return _core.OpticalFlow(_core.Calibration.from_catalog(cameras, imu), _core.VioConfig())
+        return _core.OpticalFlow(rig(camera_count), _core.VioConfig())
+
+    return build
+
+
+@pytest.fixture(scope="session")
+def pipeline(rig: RigFactory) -> PipelineFactory:
+    """The whole pipeline on a rig of ``camera_count`` identical cameras.
+
+    Two cameras at least: the epipolar filter is a hard precondition
+    (``optical_flow.h:210``), so a one-camera rig is a refusal to assert on, not
+    a fixture to build from.
+    """
+
+    def build(camera_count: int) -> _core.Vio:
+        return _core.Vio(rig(camera_count), _core.VioConfig())
 
     return build
 

@@ -240,7 +240,8 @@ def test_a_static_method_is_static_on_both_sides() -> None:
 def test_vio_status_behaves_as_the_stub_describes() -> None:
     """The stub calls VioStatus a plain PyO3 class; hold it to exactly that contract."""
     status: _core.VioStatus = _core.VioStatus.NeedMoreImu
-    assert int(status) == 1
+    assert int(status) == 0
+    assert int(_core.VioStatus.Tracking) == 1
     assert status == _core.VioStatus.NeedMoreImu
     assert status != _core.VioStatus.Tracking
     assert repr(status) == "VioStatus.NeedMoreImu"

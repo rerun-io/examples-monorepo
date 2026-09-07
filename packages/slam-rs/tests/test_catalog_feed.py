@@ -8,7 +8,7 @@ from jaxtyping import Float64, Int64
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
-from slam_rs.apis.replay import Config, ReplayOutcome, _replay
+from slam_rs.apis.replay import Config, VioStage, _cpp_trajectory, _replay, _vio_stage
 from slam_rs.catalog_feed import (
     CameraCalib,
     CameraStatics,
@@ -255,29 +255,33 @@ def test_the_absolute_clock_matches_the_ground_truth_sidecar() -> None:
 def test_a_replay_export_associates_with_the_ground_truth_sidecar(tmp_path: Path) -> None:
     """The replay's own export path, end to end, lands on the sidecar's clock.
 
-    The core is a stub and produces no pose, so the exported trajectory here is
-    the ground truth resampled at the frameset times — the point is the clock and
-    the file, not the estimator. Written with ``video_time`` this associates with
-    nothing, which is the regression being pinned.
+    Forty framesets of the smoke segment through the whole pipeline: enough for
+    the estimator to initialise and produce poses, which is what gets exported.
+    Written with ``video_time`` the file associates with **nothing**, which is
+    the regression being pinned.
     """
     manifest: ReferenceManifest = load_manifest()
     segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
     if not segment.base_path.is_file() or not segment.gt_csv.is_file():
         pytest.skip(f"{segment.base_path} or {segment.gt_csv} is not mounted on this host")
 
-    config: Config = Config(rr_config=RerunTyroConfig(headless=True), segment=SMOKE_SEGMENT, max_framesets=40)
+    config: Config = Config(rr_config=RerunTyroConfig(headless=True), segment=SMOKE_SEGMENT, stage="vio", max_framesets=40)
     with open_segment(LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path), segment.imu) as feed:
-        outcome: ReplayOutcome = _replay(feed, config, segment)
+        truth: Trajectory | None = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
+        assert truth is not None
+        stage: VioStage = _vio_stage(feed, segment, ground_truth=truth, cpp=_cpp_trajectory(manifest, segment, feed.capture_start_time_ns))
+        replayed: int = _replay(feed, config, stage)
+        estimate: Trajectory = stage.logger.estimated()
         exported: Path = tmp_path / "slam_rs.csv"
-        write_trajectory(exported, shift_clock(outcome.ground_truth, feed.capture_start_time_ns))
+        write_trajectory(exported, shift_clock(estimate, feed.capture_start_time_ns))
         relative_export: Path = tmp_path / "relative.csv"
-        write_trajectory(relative_export, outcome.ground_truth)
+        write_trajectory(relative_export, estimate)
 
-    assert outcome.framesets == 40
-    assert outcome.imu_samples > 0
-    # Ground truth starts 17.5 ms after video_time zero, so the first frameset has
-    # no pose inside the tolerance and contributes no row; every later one does.
-    assert len(outcome.ground_truth) == outcome.framesets - 1
+    assert replayed == 40
+    assert stage.imu_samples > 0
+    # The first framesets have no inertial samples past their own timestamp, so
+    # they report NeedMoreImu; everything after initialisation tracks.
+    assert 0 < len(estimate) <= replayed
     sidecar: Trajectory = read_trajectory(segment.gt_csv)
-    assert associate(read_trajectory(exported), sidecar).count == len(outcome.ground_truth)
+    assert associate(read_trajectory(exported), sidecar).count == len(estimate)
     assert associate(read_trajectory(relative_export), sidecar).count == 0

@@ -401,6 +401,21 @@ pub struct WindowState<S: LieScalar> {
     pub frame_index: Option<usize>,
 }
 
+/// One landmark as the V2 rung draws it.
+///
+/// The host is carried because the rung colours the point cloud by the keyframe
+/// that hosts it: the position alone cannot say which frame's bearing it is a
+/// distance along, and `lmdb` keys on the host rather than storing it per point.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapshotLandmark<S: LieScalar> {
+    /// The landmark's id, which is the id of the keypoint that spawned it.
+    pub id: LandmarkId,
+    /// Host keyframe and camera: the image the inverse distance is measured from.
+    pub host: TimeCamId,
+    /// Position in the world frame, metres.
+    pub position_w: Vector3<S>,
+}
+
 /// The window and its landmarks, for the V2 visual-validation rung (D51).
 ///
 /// `getAllPosesMap`, `get_current_points` and the `VioVisualizationData` fields
@@ -414,8 +429,8 @@ pub struct WindowSnapshot<S: LieScalar> {
     pub states: Vec<WindowState<S>>,
     /// The pose-only blocks, oldest first.
     pub poses: Vec<WindowState<S>>,
-    /// Landmark positions in the world frame, with their ids.
-    pub landmarks: Vec<(LandmarkId, Vector3<S>)>,
+    /// Landmarks the window currently holds, in `lmdb` order.
+    pub landmarks: Vec<SnapshotLandmark<S>>,
     /// Frames the last marginalization removed from the window.
     pub marginalized: Vec<FrameId>,
 }
@@ -785,7 +800,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             })
             .collect();
 
-        let mut landmarks: Vec<(LandmarkId, Vector3<S>)> = Vec::new();
+        let mut landmarks: Vec<SnapshotLandmark<S>> = Vec::new();
         for lm in self.ba.lmdb.landmarks() {
             let Ok(host) = self.ba.get_pose_state_with_lin(lm.host_kf_id.frame_id) else {
                 continue;
@@ -798,7 +813,11 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             let scale: S = S::one() / lm.inv_dist;
             let point_c: Vector3<S> =
                 Vector3::new(bearing[0] * scale, bearing[1] * scale, bearing[2] * scale);
-            landmarks.push((lm.id, t_w_c * point_c));
+            landmarks.push(SnapshotLandmark {
+                id: lm.id,
+                host: lm.host_kf_id,
+                position_w: t_w_c * point_c,
+            });
         }
 
         WindowSnapshot {
