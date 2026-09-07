@@ -65,7 +65,12 @@ class Config:
     segment: str = SMOKE_SEGMENT
     """Segment id from ``reference_segments.toml``; also names the IMU parameters used for ``--rrd``."""
     rrd: Path | None = None
-    """Base-layer ``.rrd`` to replay instead of the manifest's, keeping ``--segment``'s IMU parameters."""
+    """Base-layer ``.rrd`` to replay instead of the manifest's, keeping ``--segment``'s IMU parameters.
+
+    The frames are then another recording's, so the frontend stage draws no C++
+    overlay on them: the path is what the dumps are matched against, and no dump
+    directory names a path.
+    """
     gt_rrd: Path | None = None
     """Ground-truth ``.rrd`` for ``--rrd``; the manifest's own path is used when neither is given."""
     max_framesets: int | None = None
@@ -112,6 +117,24 @@ class ReplayOutcome:
     """Framesets replayed."""
 
 
+def replayed_identity(rrd: Path | None, segment_id: str) -> str:
+    """What the frontend's C++ overlay matches its dumps against.
+
+    ``--rrd`` replays another recording's frames under ``--segment``'s IMU
+    parameters, so the manifest's segment id would attach that segment's dumps to
+    pixels the C++ never saw. The path stands in as the identity instead, and no
+    dump directory can name one.
+
+    Args:
+        rrd: The ``--rrd`` override, or None when the manifest's own layer is replayed.
+        segment_id: Manifest segment id.
+
+    Returns:
+        The segment id, or the overriding path as text.
+    """
+    return segment_id if rrd is None else str(rrd)
+
+
 def _open_frontend(feed: SegmentFeed, segment: ReferenceSegment) -> _core.OpticalFlow:
     """Build the optical-flow frontend for one segment.
 
@@ -148,7 +171,7 @@ def _replay(feed: SegmentFeed, config: Config, segment: ReferenceSegment) -> Rep
     logger: FrontendLogger | None = None
     if config.stage == "frontend":
         frontend = _open_frontend(feed, segment)
-        logger = FrontendLogger.create(len(feed.cameras), segment.segment_id)
+        logger = FrontendLogger.create(len(feed.cameras), replayed_identity(config.rrd, segment.segment_id))
         rr.send_blueprint(frontend_blueprint(feed.cameras))
     frontend_ms: list[float] = []
     statuses: dict[str, int] = {}

@@ -27,6 +27,7 @@ from numpy import ndarray
 from test_frontend_boundary import FRAME, frontend, texture
 
 from slam_rs import _core
+from slam_rs.apis.replay import replayed_identity
 from slam_rs.frontend_log import (
     CPP_COLOR,
     DEFAULT_DUMPS_DIR,
@@ -161,13 +162,19 @@ def test_a_track_keeps_its_colour_and_neighbours_do_not_share_one() -> None:
     assert np.all(np.abs(colors[1:].astype(np.int64) - colors[:-1].astype(np.int64)).sum(axis=1) > 30)
 
 
+def test_no_track_is_ever_drawn_in_the_overlays_colour() -> None:
+    """The palette walks five of the six hue ramps: the sixth starts at magenta."""
+    colors: UInt8[ndarray, "n_tracks 3"] = track_colors(np.arange(5000, dtype=np.int64))
+    assert not np.any(np.all(colors == np.array(CPP_COLOR, dtype=np.uint8), axis=1))
+
+
 def test_an_empty_track_list_gives_an_empty_colour_list() -> None:
     assert track_colors(np.zeros(0, dtype=np.int64)).shape == (0, 3)
 
 
 def test_the_committed_cpp_dumps_are_keyed_by_their_own_segment() -> None:
     """The dumps carry the smoke segment's id and the feed's own ``video_time``."""
-    dumps: dict[tuple[str, int], list[Float32[ndarray, "n_keypoints 2"]]] = read_cpp_dumps(DEFAULT_DUMPS_DIR)
+    dumps: dict[tuple[str, int], list[Float32[ndarray, "n_keypoints 2"]]] = read_cpp_dumps(2, DEFAULT_DUMPS_DIR)
     assert len(dumps) == 8
     assert {segment for segment, _ in dumps} == {SMOKE_SEGMENT}
     assert (SMOKE_SEGMENT, 0) in dumps and (SMOKE_SEGMENT, 18507000) in dumps, sorted(dumps)
@@ -181,8 +188,8 @@ def test_the_committed_cpp_dumps_are_keyed_by_their_own_segment() -> None:
 
 
 def test_a_directory_without_dumps_leaves_the_overlay_empty(tmp_path: Path) -> None:
-    assert read_cpp_dumps(tmp_path) == {}
-    assert read_cpp_dumps(tmp_path / "does-not-exist") == {}
+    assert read_cpp_dumps(2, tmp_path) == {}
+    assert read_cpp_dumps(2, tmp_path / "does-not-exist") == {}
 
 
 def test_dumps_with_no_source_file_are_refused(tmp_path: Path) -> None:
@@ -190,7 +197,40 @@ def test_dumps_with_no_source_file_are_refused(tmp_path: Path) -> None:
     write_dumps(tmp_path, SMOKE_SEGMENT, {0: [np.zeros((1, 2), dtype=np.float32)]})
     (tmp_path / SOURCE_FILE).unlink()
     with pytest.raises(ValueError, match=SOURCE_FILE):
-        read_cpp_dumps(tmp_path)
+        read_cpp_dumps(1, tmp_path)
+
+
+def test_dumps_from_another_rig_are_refused(tmp_path: Path) -> None:
+    """A dump short of a camera would leave that camera's last overlay on screen."""
+    write_dumps(tmp_path, SMOKE_SEGMENT, {0: [np.zeros((1, 2), dtype=np.float32)]})
+    with pytest.raises(ValueError, match="1 cameras, the rig being replayed has 2"):
+        read_cpp_dumps(2, tmp_path)
+
+
+def test_a_dump_without_a_timestamp_is_refused(tmp_path: Path) -> None:
+    """``t_ns`` is the whole association within a segment, so its absence is not a default."""
+    write_dumps(tmp_path, SMOKE_SEGMENT, {0: [np.zeros((1, 2), dtype=np.float32)]})
+    path: Path = tmp_path / "frame_000.json"
+    dump: dict[str, object] = json.loads(path.read_text())
+    del dump["t_ns"]
+    path.write_text(json.dumps(dump))
+    with pytest.raises(ValueError, match="t_ns"):
+        read_cpp_dumps(1, tmp_path)
+
+
+def test_a_dump_directory_with_no_source_segment_is_refused(tmp_path: Path) -> None:
+    """An empty ``source.json`` names no segment, so nothing may be associated with it."""
+    write_dumps(tmp_path, SMOKE_SEGMENT, {0: [np.zeros((1, 2), dtype=np.float32)]})
+    (tmp_path / SOURCE_FILE).write_text("{}")
+    with pytest.raises(ValueError, match="segment_id"):
+        read_cpp_dumps(1, tmp_path)
+
+
+def test_a_recording_replayed_with_rrd_is_never_the_dumps_segment() -> None:
+    """``--rrd`` is the other door onto the review's finding: foreign frames, this segment's dumps."""
+    assert replayed_identity(None, SMOKE_SEGMENT) == SMOKE_SEGMENT
+    identity: str = replayed_identity(Path("/data/another/base.rrd"), SMOKE_SEGMENT)
+    assert identity not in {segment for segment, _ in read_cpp_dumps(2, DEFAULT_DUMPS_DIR)}
 
 
 def test_log_writes_the_dataset_tree_once_per_frameset(tmp_path: Path) -> None:
