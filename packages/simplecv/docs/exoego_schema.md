@@ -132,6 +132,39 @@ points are `NaN` with confidence `0.0`. A parallel prediction layout under
 `/world/pred/...` and `/world/rig_NN/cam_MM/pinhole/pred/coco133_uv` is
 **reserved but not emitted by the current writer**.
 
+### Surveyed control points *(emitted — first writer: dataforge / LaMAria)*
+
+A **surveyed control point** is a point of the world whose coordinates a survey
+measured, independently of any capture: LaMAria's `R_11`-onwards sequences ship 5
+to 15 of them, tags photographed along the walk and levelled in Switzerland's
+LV95/LN02 grid. It is ground truth about the *world*, not about a body in it, so
+it sits under `/world/gt/` beside the §5 annotations above, and its per-camera
+detections sit under that camera's `pinhole` exactly as `coco133_uv` does:
+
+```
+/world/gt/control_points               Points3D + labels (static; positions metres, world frame)
+/world/rig_NN/cam_MM/pinhole/cp_uv     Points2D + labels ("n_detections 2", video_time)
+```
+
+- The 3D points are **static**: a survey is a property of the world, not of a
+  moment. The 2D detections are temporal, one row at the timestamp of the frame
+  the tag was detected in, so a detection lands on its own frame.
+- Positions are in the recording's own world frame, i.e. after whatever origin
+  translation that frame carries (LaMAria subtracts a fixed LV95/LN02 origin so
+  metres stay small). A reader treats them as metres like any other position.
+- A point the survey **never levelled** has no height. Its `z` is a placeholder,
+  so it is drawn in a distinct colour and its label says so (`OB1881 (no
+  height)`), and its unknown height uncertainty never reaches Rerun — a `NaN`
+  radius is not a radius.
+- Radii are a **marker size**, not a measurement: survey uncertainties are
+  centimetres, which is invisible against a kilometre of walking, so the writer
+  floors the radius and only lets a genuinely uncertain point grow past it.
+- A camera whose detector found nothing (LaMAria runs its tag detector on the
+  SLAM pair only, never on the RGB camera) gets **no** `cp_uv` entity rather than
+  an empty one.
+- Emitting control points did not change any existing path, so the schema version
+  stays `exoego:v2` — the same additive precedent as §8 and §9.
+
 ## 6. Validation rules
 
 When ingesting a recording:
