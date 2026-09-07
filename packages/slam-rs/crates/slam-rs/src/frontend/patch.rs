@@ -735,4 +735,35 @@ mod tests {
         assert!(valid < Pattern51::SIZE);
         assert!(data.iter().take(Pattern51::SIZE).any(|value| *value < 0.0));
     }
+    /// The GPU seam budgets about 512 bytes of thread-private state before
+    /// Vulkan/SPIR-V goes racy (`cubecl-portability.md` §12.2, CubeCL #1336).
+    /// This pins the accounting the module doc claims, so a future edit that
+    /// reintroduces a pattern-sized temporary fails here.
+    #[test]
+    fn no_per_patch_temporary_exceeds_the_private_state_budget() {
+        // `build_patch`: the Hessian, its inverse, one column and one row.
+        const BUILD: usize =
+            2 * size_of::<Matrix3<f32>>() + size_of::<Vector3<f32>>() + size_of::<[f32; 3]>();
+        // `track_point_at_level`: one residual vector, one warp, one increment.
+        const TRACK: usize = size_of::<[f32; MAX_PATTERN_SIZE]>()
+            + size_of::<AffineCompact2<f32>>()
+            + size_of::<Vector3<f32>>();
+        const {
+            assert!(BUILD <= 512, "the patch build holds too much private state");
+        };
+        const {
+            assert!(
+                TRACK <= 512,
+                "one tracking iteration holds too much private state"
+            );
+        };
+
+        // The packed record is one patch's *storage*, the same bytes the
+        // structure-of-arrays holds in its columns — not a transient. It is over
+        // the budget, which is exactly why the tracking path never builds one:
+        // `PatchSoA::build` points `build_patch` at its own arrays instead.
+        const {
+            assert!(size_of::<OpticalFlowPatch<Pattern51>>() > 512);
+        };
+    }
 }

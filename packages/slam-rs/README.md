@@ -24,7 +24,7 @@ The core is being filled in stage by stage, bottom up. What is in it today:
 | `image` | `ImageU16`: an owned flat 16-bit frame with an explicit row stride, the stride-aware `u8 << 8` widening basalt's readers do, and `interp`/`interp_grad`/`in_bounds` reproduced from `image.h` in the same arithmetic order. |
 | `pyramid` | The `PyramidBuilder` stage seam with an associated `Pyramid` type that lends nothing (geometry plus a copy into the caller's buffer), `PyramidU16` (one flat buffer per level, not basalt's packed mipmap) and `CpuPyramidBuilder`, whose `subsample` is bit-exact with `image_pyr.h:99-140`. |
 | `imu` | Preintegration: `IntegratedImuMeasurement<S>` with basalt's midpoint propagation, covariance and bias-Jacobian recurrences, the 9-vector residual and its Jacobians, the LDLT square-root inverse covariance, the between-frames accumulation loop, gravity initialisation, and the 15-row IMU block the estimator whitens. |
-| `frontend` | The optical-flow frontend: `patterns` (Pattern24/52/51/50 from `patterns.h`), `se2` (`AffineCompact2` and `Sophus::SE2::exp`), `ldlt` (Eigen's pivoted LDLT at 3x3), `patch` (`OpticalFlowPatch` with the inverse-compositional `H^-1 J^T`), `tracker` (`PatchSoA`, the `PatchTracker` stage trait and `CpuPatchTracker`), `detect` (basalt's centred cell grid over kornia-rs's FAST), `flow` (`FrameToFrameOpticalFlow`) and `parallel` (the explicit thread budget). |
+| `frontend` | The optical-flow frontend: `patterns` (Pattern24/52/51/50 from `patterns.h`), `se2` (`AffineCompact2` and `Sophus::SE2::exp`), `ldlt` (Eigen's pivoted LDLT at 3x3), `patch` (the streaming inverse-compositional patch build), `tracker` (`PatchSoA`, `FlowTransforms`, the `SourcePatches`/`PatchTracker` stage traits and `CpuPatchTracker`), `detect` (basalt's centred cell grid over kornia-rs's FAST plus OpenCV's suppression), `flow` (`FrameToFrameOpticalFlow`, generic over the builder and tracker) and `parallel` (the explicit thread budget). |
 
 Every convention is quoted against the C++ it comes from, file and line, in the
 doc comments. `crates/slam-rs/tests/fixtures/` holds the shipped basalt config
@@ -74,25 +74,42 @@ framesets, the port's tracker puts **697 of 697** of them within half a pixel of
 where the C++ put the same id one frame later, the worst of them 0.0003 px away.
 That gate lives in `crates/slam-rs/tests/flow_parity.rs` and runs off two small
 fixtures: three 960x960 frameset pairs as PGMs (the exact bytes the Python feed
-decodes) and the eight per-frameset JSON dumps the fork's
-`tools/dump_flow.cpp` produced from them.
+decodes) and the eight per-frameset JSON dumps the fork's `tools/dump_flow.cpp`
+produced from them.
 
-The detector is the deliberate exception (decision D09, trap 2). basalt calls
-`cv::FAST` on each 8-bit cell and ranks by OpenCV's corner score; the port calls
-kornia-rs's FAST over basalt's own centred cell geometry and ranks by kornia's
-sum-of-ring-differences. The grid, the threshold ladder, the per-cell budget, the
-safe radius, the masks and the edge margin are identical, so the two land in the
-same cells — 66 of 66 occupied cells agree on the first frameset — but they pick
-different corners inside a crowded one: **88-93% of the C++'s keypoints have a
-port keypoint within one pixel**, and the port finds a few more. That is why the
-gate seeds the tracker instead of diffing keypoint sets.
+The detector is the one place the port cannot be bit-identical (decision D09,
+trap 2), but it is close. basalt runs `cv::FAST` on each 8-bit cell; the port
+runs kornia-rs's FAST over basalt's own centred cell geometry, and at arc length
+9 kornia returns the same canonical FAST-9 `cornerScore` OpenCV computes. The
+grid, the threshold ladder, the per-cell budget, the safe radius, the masks, the
+edge margin **and OpenCV's non-maximum suppression** — strictly greater than all
+eight neighbours, so a tie kills both sides — are all reproduced. What is left is
+the cell walk itself and an unstable `std::sort`. Measured against the C++ dump:
+**95.5 to 96.9% of the C++'s keypoints have a port keypoint within one pixel**,
+the two agree on the keypoint count on six of the eight framesets, and their
+occupancy grids agree on **87 of 87** occupied cells. The gate still seeds the
+tracker rather than diffing keypoint sets, because "close" is not "equal".
 
-Two smaller deviations are recorded in the source. `E[i]` is computed from
-`T_c0_ci` per camera rather than reusing the cam0-cam1 matrix everywhere, which
-is upstream's bug (`optical_flow.h:207-213`); `FrontendOptions::epipolar_per_camera`
+The frontend is generic over its two stages. `PyramidBuilder` and `PatchTracker`
+(with `SourcePatches` beside it) carry associated pyramid and patch types, and
+`FrameToFrameOpticalFlow<P, B, T>` defaults them to the CPU pair — so a CubeCL
+backend arrives through `with_backends` and no public signature here names a
+concrete pyramid. Every per-patch buffer is structure-of-arrays with the patch
+index fast-varying, including the 2x3 warps, which live as six flat coefficient
+arrays; the patch build streams straight into those arrays and never holds more
+than a 3x3 matrix per patch.
+
+Three deviations are recorded in the source. `E[i]` is computed from `T_c0_ci`
+per camera rather than reusing the cam0-cam1 matrix everywhere, which is
+upstream's bug (`optical_flow.h:207-213`); `FrontendOptions::epipolar_per_camera`
 switches it back for a C++-parity run and makes no difference at all on a
-two-camera rig. And image bounds come from each camera's own resolution rather
-than camera 0's, because the msd-g2 recordings are stored rotated.
+two-camera rig. Image bounds come from each camera's own resolution rather than
+camera 0's, because the msd-g2 recordings are stored rotated — while the
+detection grid is per camera, as the C++'s is, and the occupancy matrix keeps
+camera 0's shape, as the C++'s does. And `FrontendOptions::max_keypoints` is a
+budget basalt has no equivalent of: the port's buffers are preallocated, so
+detection and matching stop adding once a camera is full rather than producing a
+frame the tracker cannot carry.
 
 Still to come: the square-root estimator.
 
