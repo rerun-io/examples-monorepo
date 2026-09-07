@@ -115,8 +115,8 @@ use common::{IMU, ORACLE, OracleFlow, OracleLm, OracleRun, run_named};
 const ORACLE_FRAMESETS: usize = 60;
 
 /// Relative agreement on every pose, velocity and bias coefficient of the
-/// window, in `f64`. Measured worst over the 60 framesets: rotation 9.8e-13,
-/// translation 2.0e-13, velocity 6.8e-13, bias 2.6e-11.
+/// window, in `f64`. Measured worst over the 60 framesets: rotation 4.9e-13,
+/// translation 2.5e-13, velocity 9.2e-13, bias 1.3e-11.
 const POSE_TOLERANCE_F64: f64 = 2e-10;
 /// The same in `f32`. Measured worst: rotation 8.4e-5, translation 7.8e-5,
 /// velocity 2.3e-4, bias 9.3e-4.
@@ -124,13 +124,13 @@ const POSE_TOLERANCE_F32: f64 = 3e-3;
 /// Relative agreement in `f64` on the LM error terms, `l_diff`, `lambda` and
 /// the marginalization prior's Frobenius digest — the stricter lane needs no
 /// split between them. Measured worst: 3.1e-10 (`error_before`), and on the
-/// digest 6.8e-15 on `H` and 1.1e-10 on `b`.
+/// digest 1.5e-15 on `H` and 6.4e-11 on `b`.
 const ERROR_TOLERANCE_F64: f64 = 2e-9;
 /// The same in `f32`, over the trail prefix the two runs share, for the
 /// quantities one well-conditioned formula computes from the current window:
 /// the reprojection cost, the IMU and bias costs and the step's infinity norm.
-/// Measured worst over the 60 framesets: 2.2e-3 (`imu_error`); the constant is
-/// 4.5 times that.
+/// Measured worst over the 60 framesets: 1.8e-3 (`imu_error`); the constant is
+/// 5.5 times that.
 const ERROR_TOLERANCE_F32: f64 = 1e-2;
 /// Relative agreement in `f32` on the quantities that carry the prior's
 /// accumulated history rather than the current window.
@@ -147,7 +147,8 @@ const ERROR_TOLERANCE_F32: f64 = 1e-2;
 /// the prior's error moved `‖H‖_F` from 5.0e-6 to 3.3e-4 and `lambda` from
 /// 0.145 to 0.016 without moving any decision. The constant is 3.4 times the
 /// worse of the two measurements (0.145, `lambda` — whose Nielsen update cubes
-/// a ratio whose numerator is a noise-level `f_diff`), and it is a margin, not
+/// a ratio whose numerator is a noise-level `f_diff`); on the current tree the
+/// worst in the group is 0.121 (`error_before`), so it is a margin, not
 /// a bound anything derives.
 const CANCELLING_TOLERANCE_F32: f64 = 5e-1;
 
