@@ -79,10 +79,12 @@
 //! why `vio_parity.rs` skips without them and this file does not need them at
 //! all.
 //!
-//! All 60 framesets take about 55 s per run in a debug build — 272 s for the
-//! four tests here, most of the Rust suite's budget — so the default replays
-//! [`DEFAULT_FRAMESETS`] and `SLAM_RS_VIO_ORACLE_FULL=1` replays all 60. Every
-//! measurement quoted in this file is from the full run.
+//! Every lane replays all 60 framesets, which is 2.6 s for the three tests
+//! here. It used to be 272 s, and the default was ten framesets with
+//! `SLAM_RS_VIO_ORACLE_FULL=1` for the rest; optimizing the test profile
+//! (`Cargo.toml`) removed the reason for the split, and with it the one gap
+//! the short lane left — the keyframe eviction loop, which first fires at
+//! frameset 51.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -104,17 +106,13 @@ use common::{IMU, ORACLE, OracleFlow, OracleLm, OracleRun, run_named};
 
 // ── the window, and the tolerances measured on this fixture ───────────────
 
-/// Framesets the fixture covers.
+/// Framesets the fixture covers, and the number every lane replays.
+///
+/// The window they walk through: `opt_started` at frameset 4, the second
+/// keyframe at 7, both keyframe demotions at 4 and 9, the prior growing from
+/// 15x15 to 16x21 at 4 and to 22x27 at 9, the first `f32` LM-trail divergence
+/// at 9, and the keyframe eviction loop's first firing at 51.
 const ORACLE_FRAMESETS: usize = 60;
-
-/// Framesets the default suite replays, about 4.8 s for the four tests. Ten
-/// reaches `opt_started` (frameset 4), six marginalizations, the second
-/// keyframe (7), both keyframe demotions (4 and 9), both prior growth steps
-/// (15x15 to 16x21 at 4, to 22x27 at 9) and the first `f32` LM-trail
-/// divergence (9). The keyframe *eviction* loop first fires at frameset 51, so
-/// only the full window covers it — plus the unit tests in
-/// `src/estimator/schedule.rs`.
-const DEFAULT_FRAMESETS: usize = 10;
 
 /// Relative agreement on every pose, velocity and bias coefficient of the
 /// window, in `f64`. Measured worst over the 60 framesets: rotation 9.8e-13,
@@ -163,15 +161,6 @@ const CANCELLING_TOLERANCE_F32: f64 = 5e-1;
 /// that with room, and still two orders below the 1e-3-scale decrease the
 /// `f64` run sees at those steps.
 const F32_ACCEPT_NOISE_ULPS: f64 = 64.0;
-
-/// Whether `SLAM_RS_VIO_ORACLE_FULL` asked for all 60 framesets.
-fn framesets() -> usize {
-    if std::env::var_os("SLAM_RS_VIO_ORACLE_FULL").is_some() {
-        ORACLE_FRAMESETS
-    } else {
-        DEFAULT_FRAMESETS
-    }
-}
 
 // ── loading ───────────────────────────────────────────────────────────────
 
@@ -268,7 +257,7 @@ fn compare<S: LieScalar>(run: &OracleRun, gate: LmGate) -> Worst {
 
     let mut diverged: Vec<i64> = Vec::new();
     let mut worst: Worst = Worst::default();
-    for (index, expected) in run.frames.iter().take(framesets()).enumerate() {
+    for (index, expected) in run.frames.iter().take(ORACLE_FRAMESETS).enumerate() {
         let flow: &OracleFlow = ORACLE
             .flow
             .get(index)
@@ -635,7 +624,7 @@ fn compare<S: LieScalar>(run: &OracleRun, gate: LmGate) -> Worst {
             "{}: LM trail parted company on {} of {} framesets, all inside the noise floor: {diverged:?}",
             run.scalar,
             diverged.len(),
-            framesets()
+            ORACLE_FRAMESETS
         );
     }
     worst
@@ -797,7 +786,7 @@ fn a_repeat_run_is_bit_identical() {
     let flow: Vec<Arc<FlowObservations>> = ORACLE
         .flow
         .iter()
-        .take(framesets())
+        .take(ORACLE_FRAMESETS)
         .map(observations)
         .collect();
 

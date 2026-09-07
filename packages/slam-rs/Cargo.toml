@@ -50,6 +50,27 @@ kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864
 unwrap_used = "deny"
 expect_used = "deny"
 
+# The test suite is dominated by two things an unoptimized build makes ten
+# times slower than they need to be: 960x960 KLT pyramids, and the oracle
+# replays of a dense LM loop. Optimizing the dev and test profiles moved
+# `cargo test -p slam-rs` from 15.1 s to 0.74 s and the whole-pipeline test
+# from 14.2 s to 0.31 s, which is what lets that test and the whole
+# 60-frameset oracle window run in the default lane. A cold build costs 31 s
+# once.
+#
+# Floating-point semantics do not depend on the optimization level — rustc
+# never contracts or reassociates — and every oracle fixture still compares
+# exactly, which is the evidence for that here rather than an appeal to the
+# reference.
+#
+# `2`, not `3`: `.cargo/config.toml` records opt-level 3 crashing rustc's LLVM
+# while compiling faer on aarch64.
+[profile.dev]
+opt-level = 2
+
+[profile.test]
+opt-level = 2
+
 # kornia-rs' release profile: the hot loops are small functions that have to
 # inline across crate boundaries.
 [profile.release]

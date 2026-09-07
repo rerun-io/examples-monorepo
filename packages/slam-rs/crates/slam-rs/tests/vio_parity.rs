@@ -142,11 +142,10 @@ fn drive_the_committed_framesets(vio: &mut Vio<f32>) -> Vec<VioResult> {
 /// bit-identical (D17) — `vio_oracle.rs`'s determinism gate replays the C++'s
 /// keypoints, so it cannot see the frontend.
 ///
-/// Ignored by default: three framesets of 960x960 KLT twice over is 14 s and
-/// the Rust suite's budget is 15 s in total. Run it with
-/// `cargo test -p slam-rs --test vio_parity -- --ignored`.
+/// In the default lane: three framesets of 960x960 KLT twice over is 0.31 s
+/// with the optimized test profile (`Cargo.toml`), where it was 14 s of the
+/// suite's 15 s budget unoptimized, which is why it used to be `#[ignore]`d.
 #[test]
-#[ignore = "14 s of 960x960 KLT; run with --ignored"]
 fn the_whole_pipeline_tracks_and_repeats_bit_identically() {
     let mut vio: Vio<f32> = pipeline();
     let results: Vec<VioResult> = drive_the_committed_framesets(&mut vio);
