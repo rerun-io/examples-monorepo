@@ -388,7 +388,7 @@ fn a_restored_frame_costs_no_more_than_a_successful_one() {
             self.inner.num_levels()
         }
 
-        fn make_patches(&self) -> PatchSoA<Pattern51> {
+        fn make_patches(&self) -> Result<PatchSoA<Pattern51>, TrackerError> {
             self.inner.make_patches()
         }
 
@@ -419,7 +419,8 @@ fn a_restored_frame_costs_no_more_than_a_successful_one() {
         configuration.optical_flow_max_iterations as usize,
         configuration.optical_flow_max_recovered_dist2,
         WorkPool::new(options.threads).unwrap(),
-    );
+    )
+    .unwrap();
     // Frame 1 makes one call and each later frame three, so failing from call 8
     // lets four frames through and then refuses every frame after.
     let mut flow = FrameToFrameOpticalFlow::with_backends(

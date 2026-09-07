@@ -76,6 +76,22 @@ const MAX_INCREMENT_INFINITY_NORM: f32 = 1e6;
 /// `const int filter_margin = 2` (`frame_to_frame_optical_flow.h:430`).
 const FILTER_MARGIN: f32 = 2.0;
 
+/// The most keypoints a tracker may be sized for.
+///
+/// basalt needs no such ceiling: its keypoint maps grow, so its memory follows
+/// the scene. The port preallocates every per-patch buffer
+/// ([`FrontendOptions::max_keypoints`](super::flow::FrontendOptions::max_keypoints)),
+/// which turns the budget into a memory request that arrives from outside — over
+/// the Python boundary among other places — and `2^63` keypoints panicked
+/// `Vec::with_capacity` with a capacity overflow before this existed.
+///
+/// A million keypoints is about 3.4 kB of patch storage each at pattern 51 over
+/// four pyramid levels, so roughly 7 GB across the two [`PatchSoA`] a
+/// [`CpuPatchTracker`] holds: far more than any rig this port runs (the shipped
+/// 50-pixel grid on a 960x960 frame produces about 400) and far below the point
+/// where the products in [`PatchSoA::new`] leave the `usize` range.
+pub const MAX_CAPACITY: usize = 1 << 20;
+
 /// What the tracker can refuse.
 ///
 /// Every public entry point in this module validates its inputs and returns one
@@ -102,6 +118,30 @@ pub enum TrackerError {
         second_name: &'static str,
         /// How many it holds.
         second: usize,
+    },
+    /// A tracker was asked for more keypoints than [`MAX_CAPACITY`].
+    #[error("a capacity of {capacity} keypoints is over the ceiling of {ceiling}")]
+    CapacityTooLarge {
+        /// Keypoints asked for.
+        capacity: usize,
+        /// [`MAX_CAPACITY`].
+        ceiling: usize,
+    },
+    /// A buffer shape does not fit in a `usize`.
+    ///
+    /// Checked product by product rather than after the fact: a wrapped
+    /// multiplication would have turned an impossible shape into a plausible
+    /// allocation.
+    #[error(
+        "a {capacity}-patch buffer over {num_levels} levels of {taps} taps does not fit in a usize"
+    )]
+    BufferShapeOverflow {
+        /// Patches the buffer is sized for.
+        capacity: usize,
+        /// Pyramid levels it is sized for.
+        num_levels: usize,
+        /// Pattern taps per patch and level.
+        taps: usize,
     },
     /// A pyramid or patch set does not carry the levels the tracker was built for.
     #[error("{what} holds {actual} levels, the tracker needs {expected}")]
@@ -490,20 +530,42 @@ impl<P: Pattern> PatchSoA<P> {
     ///
     /// `num_levels` is `optical_flow_levels + 1`, matching
     /// [`crate::pyramid::Pyramid::num_levels`].
-    pub fn new(capacity: usize, num_levels: usize) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`TrackerError::CapacityTooLarge`] above [`MAX_CAPACITY`], and
+    /// [`TrackerError::BufferShapeOverflow`] when a buffer's element count does
+    /// not fit in a `usize`. Both are checked before anything is allocated: the
+    /// products below reach `Vec` as a length, and a `Vec` too long to exist
+    /// panics rather than returning (decision D32).
+    pub fn new(capacity: usize, num_levels: usize) -> Result<Self, TrackerError> {
+        if capacity > MAX_CAPACITY {
+            return Err(TrackerError::CapacityTooLarge {
+                capacity,
+                ceiling: MAX_CAPACITY,
+            });
+        }
+        let overflow = || TrackerError::BufferShapeOverflow {
+            capacity,
+            num_levels,
+            taps: P::SIZE,
+        };
+        let flags: usize = num_levels.checked_mul(capacity).ok_or_else(overflow)?;
+        let taps: usize = flags.checked_mul(P::SIZE).ok_or_else(overflow)?;
+        let jacobians: usize = taps.checked_mul(3).ok_or_else(overflow)?;
         let mut positions: PointsSoA = PointsSoA::with_capacity(capacity);
         positions.resize(capacity);
-        Self {
+        Ok(Self {
             capacity,
             num_levels,
             len: 0,
             positions,
-            data: vec![0.0; num_levels * P::SIZE * capacity],
-            h_inv_jt: vec![0.0; num_levels * 3 * P::SIZE * capacity],
-            valid: vec![false; num_levels * capacity],
-            mean: vec![0.0; num_levels * capacity],
+            data: vec![0.0; taps],
+            h_inv_jt: vec![0.0; jacobians],
+            valid: vec![false; flags],
+            mean: vec![0.0; flags],
             pattern: std::marker::PhantomData,
-        }
+        })
     }
 
     /// Patches this set can hold.
@@ -815,7 +877,12 @@ pub trait PatchTracker {
     /// Fresh source-patch storage matching this tracker's capacity and depth.
     ///
     /// The driver cannot name the concrete type, so the tracker makes it.
-    fn make_patches(&self) -> Self::Patches;
+    ///
+    /// # Errors
+    ///
+    /// [`TrackerError`] when the storage cannot be sized — the same shape checks
+    /// the tracker's own constructor made.
+    fn make_patches(&self) -> Result<Self::Patches, TrackerError>;
 }
 
 /// The CPU tracker: `trackPoints` with the same arithmetic and a fixed thread budget.
@@ -842,28 +909,37 @@ impl<P: Pattern> CpuPatchTracker<P> {
     /// `max_iterations` is `optical_flow_max_iterations`,
     /// `max_recovered_dist2` is `optical_flow_max_recovered_dist2`, and `pool`
     /// carries the explicit thread budget (decision D31).
+    ///
+    /// # Errors
+    ///
+    /// As [`PatchSoA::new`]: the capacity is checked against [`MAX_CAPACITY`] and
+    /// every buffer product against the `usize` range before anything is
+    /// allocated.
     pub fn new(
         capacity: usize,
         num_levels: usize,
         max_iterations: usize,
         max_recovered_dist2: f32,
         pool: WorkPool,
-    ) -> Self {
+    ) -> Result<Self, TrackerError> {
+        // First, so the smaller buffers below cannot be sized from a capacity the
+        // patch storage would have refused.
+        let backward: PatchSoA<P> = PatchSoA::new(capacity, num_levels)?;
         let mut forward: FlowTransforms = FlowTransforms::with_capacity(capacity);
         forward.resize(capacity);
         let mut backward_positions: PointsSoA = PointsSoA::with_capacity(capacity);
         backward_positions.resize(capacity);
-        Self {
+        Ok(Self {
             capacity,
             num_levels,
             max_iterations,
             max_recovered_dist2,
             pool,
-            backward: PatchSoA::new(capacity, num_levels),
+            backward,
             forward,
             forward_valid: vec![false; capacity],
             backward_positions,
-        }
+        })
     }
 
     /// Workers the tracking passes run on.
@@ -885,7 +961,7 @@ impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
         self.num_levels
     }
 
-    fn make_patches(&self) -> PatchSoA<P> {
+    fn make_patches(&self) -> Result<PatchSoA<P>, TrackerError> {
         PatchSoA::new(self.capacity, self.num_levels)
     }
 
@@ -1275,7 +1351,7 @@ mod tests {
             transforms.push(&AffineCompact2f::at(positions.get(index)));
         }
 
-        let mut patches: PatchSoA<Pattern51> = PatchSoA::new(positions.len(), levels + 1);
+        let mut patches: PatchSoA<Pattern51> = PatchSoA::new(positions.len(), levels + 1).unwrap();
         patches.build(&prev, &positions, None).unwrap();
 
         Fixture {
@@ -1295,6 +1371,7 @@ mod tests {
             0.04,
             WorkPool::new(threads).unwrap(),
         )
+        .unwrap()
     }
 
     #[test]
@@ -1532,7 +1609,7 @@ mod tests {
         for threads in [1, 4] {
             let levels: usize = 3;
             let scene: Fixture = fixture(0.0, 0.0, levels);
-            let mut shallow: PatchSoA<Pattern51> = PatchSoA::new(scene.positions.len(), 1);
+            let mut shallow: PatchSoA<Pattern51> = PatchSoA::new(scene.positions.len(), 1).unwrap();
             shallow.build(&scene.prev, &scene.positions, None).unwrap();
 
             let mut tracker: CpuPatchTracker<Pattern51> =
@@ -1590,7 +1667,8 @@ mod tests {
     fn a_short_selection_mask_is_refused() {
         let levels: usize = 1;
         let scene: Fixture = fixture(0.0, 0.0, levels);
-        let mut patches: PatchSoA<Pattern51> = PatchSoA::new(scene.positions.len(), levels + 1);
+        let mut patches: PatchSoA<Pattern51> =
+            PatchSoA::new(scene.positions.len(), levels + 1).unwrap();
         let short: Vec<bool> = vec![true; 2];
         let error = patches
             .build(&scene.prev, &scene.positions, Some(&short))
@@ -1611,7 +1689,7 @@ mod tests {
     fn more_positions_than_patch_capacity_is_refused() {
         let levels: usize = 1;
         let scene: Fixture = fixture(0.0, 0.0, levels);
-        let mut patches: PatchSoA<Pattern51> = PatchSoA::new(2, levels + 1);
+        let mut patches: PatchSoA<Pattern51> = PatchSoA::new(2, levels + 1).unwrap();
         let error = patches
             .build(&scene.prev, &scene.positions, None)
             .unwrap_err();
@@ -1625,6 +1703,62 @@ mod tests {
     }
 
     /// The warp storage is six flat arrays; the round trip through them is exact.
+    /// A capacity past the ceiling is refused before a byte is allocated.
+    ///
+    /// `Vec::with_capacity(2^63)` panics with `capacity overflow`, and a panic in
+    /// here reaches Python as a `PanicException` that ordinary `except Exception`
+    /// handlers do not catch (decision D32). The ceiling is what makes the
+    /// request answerable instead.
+    #[test]
+    fn a_capacity_over_the_ceiling_is_refused() {
+        for capacity in [MAX_CAPACITY + 1, 1 << 40, usize::MAX / 2, usize::MAX] {
+            assert_eq!(
+                PatchSoA::<Pattern51>::new(capacity, 4).unwrap_err(),
+                TrackerError::CapacityTooLarge {
+                    capacity,
+                    ceiling: MAX_CAPACITY,
+                }
+            );
+            assert_eq!(
+                CpuPatchTracker::<Pattern51>::new(capacity, 4, 5, 0.04, WorkPool::new(1).unwrap())
+                    .unwrap_err(),
+                TrackerError::CapacityTooLarge {
+                    capacity,
+                    ceiling: MAX_CAPACITY,
+                }
+            );
+        }
+    }
+
+    /// A level count that overflows the buffer product is refused too.
+    ///
+    /// The ceiling bounds the capacity; `num_levels` arrives from
+    /// `optical_flow_levels + 1` and is bounded nowhere, so
+    /// `num_levels * P::SIZE * capacity` is checked product by product rather
+    /// than computed and hoped for.
+    #[test]
+    fn a_buffer_shape_that_does_not_fit_in_a_usize_is_refused() {
+        let error = PatchSoA::<Pattern51>::new(MAX_CAPACITY, usize::MAX).unwrap_err();
+        assert_eq!(
+            error,
+            TrackerError::BufferShapeOverflow {
+                capacity: MAX_CAPACITY,
+                num_levels: usize::MAX,
+                taps: Pattern51::SIZE,
+            }
+        );
+    }
+
+    /// The ceiling is well clear of anything the port runs.
+    #[test]
+    fn the_default_budget_is_far_under_the_ceiling() {
+        // `FrontendOptions::default().max_keypoints` is 3000.
+        const { assert!(MAX_CAPACITY > 300 * 3000) };
+        let patches: PatchSoA<Pattern51> = PatchSoA::new(3000, 4).unwrap();
+        assert_eq!(patches.capacity(), 3000);
+        assert_eq!(patches.num_levels(), 4);
+    }
+
     #[test]
     fn flow_transforms_round_trip_through_the_soa_arrays() {
         let mut transforms: FlowTransforms = FlowTransforms::default();
@@ -1684,7 +1818,7 @@ mod tests {
             self.num_levels
         }
 
-        fn make_patches(&self) -> PatchSoA<Pattern51> {
+        fn make_patches(&self) -> Result<PatchSoA<Pattern51>, TrackerError> {
             PatchSoA::new(self.capacity, self.num_levels)
         }
 
