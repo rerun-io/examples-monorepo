@@ -554,9 +554,11 @@ pub fn detect_keypoints_with_cells(
     scratch.bytes.clear();
     scratch.bytes.reserve(width * height);
     for y in 0..height {
-        for pixel in image.row(y) {
-            scratch.bytes.push((*pixel >> 8) as u8);
-        }
+        // One `extend` per row, not one `push` per pixel: the capacity check a
+        // `push` carries is what stops the narrowing from vectorising.
+        scratch
+            .bytes
+            .extend(image.row(y).iter().map(|pixel| (*pixel >> 8) as u8));
     }
     let Ok(gray) = Image::<u8, 1>::from_size_slice(ImageSize { width, height }, &scratch.bytes)
     else {
