@@ -18,6 +18,7 @@ pub mod image;
 pub mod imu;
 pub mod landmark;
 pub mod lie;
+pub mod linearize;
 pub mod pyramid;
 pub mod types;
 

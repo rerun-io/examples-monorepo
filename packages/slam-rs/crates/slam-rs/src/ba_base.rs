@@ -35,8 +35,8 @@
 use std::collections::BTreeMap;
 
 use nalgebra::{
-    DVector, Matrix2x3, Matrix2x4, Matrix2x6, Matrix3, Matrix4, Matrix4x2, Matrix4x3, Matrix6,
-    Vector2, Vector3, Vector4,
+    DMatrix, DVector, Matrix2x3, Matrix2x4, Matrix2x6, Matrix3, Matrix4, Matrix4x2, Matrix4x3,
+    Matrix6, Vector2, Vector3, Vector4,
 };
 
 use crate::calib::Calibration;
@@ -44,8 +44,8 @@ use crate::camera::{CameraEnum, CameraError};
 use crate::landmark::{Landmark, LandmarkDatabase, LandmarkError, StereographicParam, eigen_norm3};
 use crate::lie::{LieScalar, Se3, So3};
 use crate::types::{
-    AbsOrderMap, CamId, FrameId, LandmarkId, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseStateWithLin,
-    PoseVelBiasStateWithLin, TimeCamId,
+    AbsOrderMap, CamId, FrameId, LandmarkId, MargLinData, POSE_SIZE, POSE_VEL_BIAS_SIZE,
+    PoseStateWithLin, PoseVelBiasStateWithLin, TimeCamId,
 };
 
 /// `Scalar(x)` in C++: a literal in the estimator's scalar type.
@@ -97,6 +97,22 @@ pub enum BaError {
     #[error("frame {frame_id} is in the marginalization ordering but is not linearized")]
     NotLinearized {
         /// The frame the ordering names.
+        frame_id: FrameId,
+    },
+    /// The marginalization prior's matrix does not match its own ordering, or
+    /// the destination system is too small (`ba_base.cpp:379`, `:444` assert).
+    #[error("marginalization prior has {cols} columns, expected {total_size}")]
+    MargPriorSize {
+        /// The prior's column count.
+        cols: usize,
+        /// What its ordering says it should be.
+        total_size: usize,
+    },
+    /// The prior's ordering disagrees with the window's, which C++ asserts
+    /// block by block (`ba_base.cpp:383-388`).
+    #[error("frame {frame_id} has a different offset in the prior than in the window")]
+    MargOrderMismatch {
+        /// The frame that disagrees.
         frame_id: FrameId,
     },
     /// A calibration this module cannot project with.
@@ -375,13 +391,24 @@ fn jacobi_svd_4x4_full_v<S: LieScalar>(a: &Matrix4<S>) -> Option<(Vector4<S>, Ma
 
 /// A Jacobi rotation `(c, s)`, `Eigen::JacobiRotation`
 /// (`Eigen/src/Jacobi/Jacobi.h:30-84`), real scalars only.
-#[derive(Debug, Clone, Copy)]
-struct JacobiRotation<S: LieScalar> {
-    c: S,
-    s: S,
+///
+/// Shared with the linearization stage, whose landmark damping stores six of
+/// them to undo (`landmark_block_abs_dynamic.hpp:533`); `makeGivens` lives in
+/// [`crate::linearize`] next to its only caller.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct JacobiRotation<S: LieScalar> {
+    pub(crate) c: S,
+    pub(crate) s: S,
 }
 
 impl<S: LieScalar> JacobiRotation<S> {
+    /// `adjoint()` (`Jacobi.h:65-68`), which for a real rotation is the
+    /// transpose. This is what un-applies a stored damping rotation
+    /// (`landmark_block_abs_dynamic.hpp:226`).
+    pub(crate) fn adjoint(self) -> Self {
+        self.transpose()
+    }
+
     /// `transpose()` (`Jacobi.h:60-63`).
     fn transpose(self) -> Self {
         Self {
@@ -905,6 +932,207 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
             }
         }
         Ok(delta)
+    }
+
+    /// The marginalization prior's contribution to `H` and `b`, and its current
+    /// cost, `linearizeMargPrior` (`ba_base.cpp:374-439`).
+    ///
+    /// The prior is a quadratic in the drift since its own linearization point,
+    /// `P(x) = 0.5 ‖J (delta + x) + r‖²` (`:390-408`), so linearizing it at
+    /// `x = 0` gives Jacobian `J` and residual `J delta + r` — that
+    /// re-anchoring is trap 8, and its mirror is
+    /// `linearization_abs_qr.cpp:592`. The returned error **drops the constant
+    /// `0.5 rᵀr` term** (`:416-419`) and can therefore be negative; it is only
+    /// ever compared against itself across an increment.
+    ///
+    /// C++ asserts that the prior's ordering is a prefix of the window's, block
+    /// for block (`:379-388`); the port returns
+    /// [`crate::linearize::LinearizeError::MargOrderMismatch`] through the
+    /// caller.
+    pub fn linearize_marg_prior(
+        &self,
+        mld: &MargLinData<S>,
+        aom: &AbsOrderMap,
+        abs_h: &mut DMatrix<S>,
+        abs_b: &mut DVector<S>,
+    ) -> Result<S, BaError> {
+        let marg_size: usize = mld.order.total_size();
+        // `:379`.
+        if mld.h.ncols() != marg_size {
+            return Err(BaError::MargPriorSize {
+                cols: mld.h.ncols(),
+                total_size: marg_size,
+            });
+        }
+        // `:383-388`: same offsets, same sizes, and inside the prior's own span.
+        for (frame_id, offset, size) in mld.order.iter() {
+            match aom.get(frame_id) {
+                Some((window_offset, window_size))
+                    if window_offset == offset && window_size == size && offset < marg_size => {}
+                _ => return Err(BaError::MargOrderMismatch { frame_id }),
+            }
+        }
+        if abs_h.nrows() < marg_size || abs_h.ncols() < marg_size || abs_b.nrows() < marg_size {
+            return Err(BaError::MargPriorSize {
+                cols: abs_h.ncols(),
+                total_size: marg_size,
+            });
+        }
+
+        let delta: DVector<S> = self.compute_delta(&mld.order)?;
+
+        if mld.is_sqrt {
+            // `:427-431`.
+            let rows: usize = mld.h.nrows();
+            // `H_delta = mld.H * delta`, reused by both `b` and the error.
+            let mut h_delta: DVector<S> = DVector::zeros(rows);
+            for i in 0..rows {
+                let mut acc: S = S::zero();
+                for j in 0..marg_size {
+                    acc += mld.h[(i, j)] * delta[j];
+                }
+                h_delta[i] = acc;
+            }
+            for i in 0..marg_size {
+                for j in 0..marg_size {
+                    let mut acc: S = S::zero();
+                    for k in 0..rows {
+                        acc += mld.h[(k, i)] * mld.h[(k, j)];
+                    }
+                    abs_h[(i, j)] += acc;
+                }
+                let mut acc: S = S::zero();
+                for k in 0..rows {
+                    acc += mld.h[(k, i)] * (mld.b[k] + h_delta[k]);
+                }
+                abs_b[i] += acc;
+            }
+            // `delta^T H^T (0.5 H delta + b)` (`:431`).
+            let mut error: S = S::zero();
+            for k in 0..rows {
+                error += h_delta[k] * (c::<S>(0.5) * h_delta[k] + mld.b[k]);
+            }
+            Ok(error)
+        } else {
+            // `:433-437`.
+            let mut h_delta: DVector<S> = DVector::zeros(marg_size);
+            for i in 0..marg_size {
+                let mut acc: S = S::zero();
+                for j in 0..marg_size {
+                    acc += mld.h[(i, j)] * delta[j];
+                }
+                h_delta[i] = acc;
+            }
+            for i in 0..marg_size {
+                for j in 0..marg_size {
+                    abs_h[(i, j)] += mld.h[(i, j)];
+                }
+                abs_b[i] += h_delta[i] + mld.b[i];
+            }
+            let mut error: S = S::zero();
+            for i in 0..marg_size {
+                error += delta[i] * (c::<S>(0.5) * h_delta[i] + mld.b[i]);
+            }
+            Ok(error)
+        }
+    }
+
+    /// The prior's cost at the current state, `computeMargPriorError`
+    /// (`ba_base.cpp:441-465`).
+    ///
+    /// The same expression as [`Self::linearize_marg_prior`]'s error, without
+    /// touching `H` or `b`; the constant `0.5 rᵀr` is dropped for the same
+    /// reason (`:452-455`), so this can be negative.
+    pub fn compute_marg_prior_error(&self, mld: &MargLinData<S>) -> Result<S, BaError> {
+        let marg_size: usize = mld.order.total_size();
+        if mld.h.ncols() != marg_size {
+            return Err(BaError::MargPriorSize {
+                cols: mld.h.ncols(),
+                total_size: marg_size,
+            });
+        }
+        let delta: DVector<S> = self.compute_delta(&mld.order)?;
+        let rows: usize = mld.h.nrows();
+        let mut h_delta: DVector<S> = DVector::zeros(rows);
+        for i in 0..rows {
+            let mut acc: S = S::zero();
+            for j in 0..marg_size {
+                acc += mld.h[(i, j)] * delta[j];
+            }
+            h_delta[i] = acc;
+        }
+        let mut error: S = S::zero();
+        if mld.is_sqrt {
+            // `:461`.
+            for k in 0..rows {
+                error += h_delta[k] * (c::<S>(0.5) * h_delta[k] + mld.b[k]);
+            }
+        } else {
+            // `:463`.
+            for i in 0..rows.min(marg_size) {
+                error += delta[i] * (c::<S>(0.5) * h_delta[i] + mld.b[i]);
+            }
+        }
+        Ok(error)
+    }
+
+    /// The prior's share of the model cost change,
+    /// `computeMargPriorModelCostChange` (`ba_base.cpp:467-528`).
+    ///
+    /// `l_diff = -(J inc)ᵀ (J delta + r + 0.5 (J inc))` in square-root form
+    /// (`:519-522`). Note the asymmetry the comment at `:503-507` spells out:
+    /// the Jacobian scaling multiplies `H` where it meets `inc`, but **not**
+    /// where it meets `delta`, because `delta` was never scaled.
+    pub fn compute_marg_prior_model_cost_change(
+        &self,
+        mld: &MargLinData<S>,
+        marg_scaling: Option<&DVector<S>>,
+        marg_pose_inc: &DVector<S>,
+    ) -> Result<S, BaError> {
+        let marg_size: usize = mld.order.total_size();
+        if mld.h.ncols() != marg_size || marg_pose_inc.nrows() != marg_size {
+            return Err(BaError::MargPriorSize {
+                cols: mld.h.ncols(),
+                total_size: marg_size,
+            });
+        }
+        let delta: DVector<S> = self.compute_delta(&mld.order)?;
+
+        // `:512-513`.
+        let mut scaled_inc: DVector<S> = marg_pose_inc.clone();
+        if let Some(scaling) = marg_scaling {
+            for i in 0..marg_size {
+                scaled_inc[i] *= scaling[i];
+            }
+        }
+
+        let rows: usize = mld.h.nrows();
+        if mld.is_sqrt {
+            // `:519-522`.
+            let mut l_diff: S = S::zero();
+            for k in 0..rows {
+                let mut b_jdelta: S = S::zero();
+                let mut j_inc: S = S::zero();
+                for j in 0..marg_size {
+                    b_jdelta += mld.h[(k, j)] * delta[j];
+                    j_inc += mld.h[(k, j)] * scaled_inc[j];
+                }
+                b_jdelta += mld.b[k];
+                l_diff -= j_inc * (b_jdelta + c::<S>(0.5) * j_inc);
+            }
+            Ok(l_diff)
+        } else {
+            // `:524`: `-inc . (H (delta + 0.5 inc) + b)`.
+            let mut l_diff: S = S::zero();
+            for i in 0..rows.min(marg_size) {
+                let mut acc: S = S::zero();
+                for j in 0..marg_size {
+                    acc += mld.h[(i, j)] * (delta[j] + c::<S>(0.5) * scaled_inc[j]);
+                }
+                l_diff -= scaled_inc[i] * (acc + mld.b[i]);
+            }
+            Ok(l_diff)
+        }
     }
 
     /// Save every state and every landmark parameter, `backup`
@@ -1574,6 +1802,158 @@ mod tests {
         assert_eq!(huber_cost(&at, at.norm(), 1.0, 0.5).0, 1.0);
         let just_over: Vector2<f64> = Vector2::new(1.0 + f64::EPSILON, 0.0);
         assert!(huber_cost(&just_over, just_over.norm(), 1.0, 0.5).0 < 1.0);
+    }
+
+    /// The three marginalization-prior helpers agree with each other and with
+    /// the algebra written out in `ba_base.cpp:390-419`.
+    ///
+    /// The prior is a quadratic in the drift since its own linearization point,
+    /// so all three have to use the same `delta`, and the square-root form has
+    /// to square `H` where the squared form does not.
+    #[test]
+    fn the_marginalization_prior_helpers_agree() {
+        let mut rng: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            rng ^= rng >> 12;
+            rng ^= rng << 25;
+            rng ^= rng >> 27;
+            (rng.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+        };
+
+        // One frozen pose block, drifted from its linearization point.
+        let mut estimator: BundleAdjustmentBase<f64> = a_window(MSDMI, &synthetic_points(), 0.0);
+        estimator.frame_states.clear();
+        estimator.frame_poses.clear();
+        let delta_applied: Vector6<f64> = Vector6::from_iterator((0..6).map(|_| next() / 100.0));
+        let mut pose: PoseStateWithLin<f64> = PoseStateWithLin::new(0, Se3::identity(), false);
+        pose.set_linearized().unwrap();
+        pose.apply_inc(&delta_applied);
+        estimator.frame_poses.insert(0, pose);
+
+        let mut order: AbsOrderMap = AbsOrderMap::new();
+        order.push(0, POSE_SIZE).unwrap();
+        let mut aom: AbsOrderMap = AbsOrderMap::new();
+        aom.push(0, POSE_SIZE).unwrap();
+
+        // A rectangular `J`: the prior does not have to be square.
+        let rows: usize = 4;
+        let mut j: DMatrix<f64> = DMatrix::zeros(rows, POSE_SIZE);
+        for r in 0..rows {
+            for c in 0..POSE_SIZE {
+                j[(r, c)] = next();
+            }
+        }
+        let r_vec: DVector<f64> = DVector::from_iterator(rows, (0..rows).map(|_| next()));
+        let mld: MargLinData<f64> = MargLinData {
+            is_sqrt: true,
+            order: order.clone(),
+            h: j.clone(),
+            b: r_vec.clone(),
+        };
+
+        let delta: DVector<f64> = estimator.compute_delta(&order).unwrap();
+        assert_eq!(delta.as_slice(), delta_applied.as_slice());
+
+        let mut h: DMatrix<f64> = DMatrix::zeros(POSE_SIZE, POSE_SIZE);
+        let mut b: DVector<f64> = DVector::zeros(POSE_SIZE);
+        let error: f64 = estimator
+            .linearize_marg_prior(&mld, &aom, &mut h, &mut b)
+            .unwrap();
+
+        // `:427-431`.
+        let want_h: DMatrix<f64> = j.transpose() * &j;
+        let want_b: DVector<f64> = j.transpose() * (&r_vec + &j * &delta);
+        let j_delta: DVector<f64> = &j * &delta;
+        let want_error: f64 = (j_delta.transpose() * (0.5 * &j_delta + &r_vec))[(0, 0)];
+        assert_abs_diff_eq!(h, want_h, epsilon = 1e-12 * want_h.norm());
+        assert_abs_diff_eq!(b, want_b, epsilon = 1e-12 * want_b.norm().max(1.0));
+        assert_abs_diff_eq!(
+            error,
+            want_error,
+            epsilon = 1e-12 * want_error.abs().max(1.0)
+        );
+
+        // `computeMargPriorError` is the same number without touching H or b.
+        let error_only: f64 = estimator.compute_marg_prior_error(&mld).unwrap();
+        assert_eq!(error_only, error);
+
+        // `computeMargPriorModelCostChange` (`:519-522`).
+        let inc: DVector<f64> =
+            DVector::from_iterator(POSE_SIZE, (0..POSE_SIZE).map(|_| next() / 10.0));
+        let l_diff: f64 = estimator
+            .compute_marg_prior_model_cost_change(&mld, None, &inc)
+            .unwrap();
+        let j_inc: DVector<f64> = &j * &inc;
+        let want_l_diff: f64 = -(j_inc.transpose() * (&j_delta + &r_vec + 0.5 * &j_inc))[(0, 0)];
+        assert_abs_diff_eq!(
+            l_diff,
+            want_l_diff,
+            epsilon = 1e-12 * want_l_diff.abs().max(1.0)
+        );
+
+        // The Jacobian scaling multiplies `H` where it meets `inc` and **not**
+        // where it meets `delta` (`:503-507`).
+        let scaling: DVector<f64> =
+            DVector::from_iterator(POSE_SIZE, (0..POSE_SIZE).map(|k| 1.0 + k as f64));
+        let scaled: f64 = estimator
+            .compute_marg_prior_model_cost_change(&mld, Some(&scaling), &inc)
+            .unwrap();
+        let j_inc_scaled: DVector<f64> = &j * inc.component_mul(&scaling);
+        let want_scaled: f64 =
+            -(j_inc_scaled.transpose() * (&j_delta + &r_vec + 0.5 * &j_inc_scaled))[(0, 0)];
+        assert_abs_diff_eq!(
+            scaled,
+            want_scaled,
+            epsilon = 1e-12 * want_scaled.abs().max(1.0)
+        );
+
+        // The squared form (`:433-437`), on a square prior.
+        let square: DMatrix<f64> = want_h.clone();
+        let squared: MargLinData<f64> = MargLinData {
+            is_sqrt: false,
+            order: order.clone(),
+            h: square.clone(),
+            b: DVector::from_iterator(POSE_SIZE, (0..POSE_SIZE).map(|_| next())),
+        };
+        let mut h2: DMatrix<f64> = DMatrix::zeros(POSE_SIZE, POSE_SIZE);
+        let mut b2: DVector<f64> = DVector::zeros(POSE_SIZE);
+        let error2: f64 = estimator
+            .linearize_marg_prior(&squared, &aom, &mut h2, &mut b2)
+            .unwrap();
+        assert_eq!(h2, square);
+        let want_b2: DVector<f64> = &square * &delta + &squared.b;
+        assert_abs_diff_eq!(b2, want_b2, epsilon = 1e-12 * want_b2.norm().max(1.0));
+        let want_error2: f64 =
+            (delta.transpose() * (0.5 * (&square * &delta) + &squared.b))[(0, 0)];
+        assert_abs_diff_eq!(
+            error2,
+            want_error2,
+            epsilon = 1e-12 * want_error2.abs().max(1.0)
+        );
+
+        // An ordering the window disagrees with is rejected (`:383-388`).
+        let mut wrong: AbsOrderMap = AbsOrderMap::new();
+        wrong.push(0, POSE_VEL_BIAS_SIZE).unwrap();
+        let mut h3: DMatrix<f64> = DMatrix::zeros(POSE_SIZE, POSE_SIZE);
+        let mut b3: DVector<f64> = DVector::zeros(POSE_SIZE);
+        assert_eq!(
+            estimator
+                .linearize_marg_prior(&mld, &wrong, &mut h3, &mut b3)
+                .unwrap_err(),
+            BaError::MargOrderMismatch { frame_id: 0 }
+        );
+
+        // And a prior whose matrix does not match its own ordering (`:379`).
+        let ragged: MargLinData<f64> = MargLinData {
+            is_sqrt: true,
+            order,
+            h: DMatrix::zeros(rows, POSE_SIZE - 1),
+            b: r_vec,
+        };
+        assert!(matches!(
+            estimator.compute_marg_prior_error(&ragged).unwrap_err(),
+            BaError::MargPriorSize { .. }
+        ));
     }
 
     #[test]

@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use nalgebra::{SVector, Vector3, Vector6};
+use nalgebra::{DMatrix, DVector, SVector, Vector3, Vector6};
 
 use crate::lie::{LieScalar, Se3};
 
@@ -188,6 +188,43 @@ impl AbsOrderMap {
     /// The blocks as `(frame_id, offset, size)`, in insertion order.
     pub fn iter(&self) -> impl Iterator<Item = (FrameId, usize, usize)> + '_ {
         self.entries.iter().copied()
+    }
+}
+
+/// The marginalization prior, `MargLinData<Scalar>`
+/// (`include/basalt/utils/imu_types.h:317-326`).
+///
+/// The field named `h` is **not** a Hessian on the square-root path: with
+/// `is_sqrt` set — the only form the QR linearizer accepts
+/// (`linearization_abs_qr.cpp:578`) — it is the Jacobian `J_m` of Paper 2
+/// Eq. (4), and `b` is the residual `r_m`. In the squared form it really is
+/// `H = JᵀJ` and `b = Jᵀr`. Both branches are ported, because
+/// `ba_base.cpp:426-438` carries both.
+///
+/// `order` gives the prior's variables their offsets, and the linearizer
+/// requires them to be a prefix of the window's ordering
+/// (`ba_base.cpp:383-388`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MargLinData<S: LieScalar> {
+    /// Square-root form (`:321`). The QR path asserts it.
+    pub is_sqrt: bool,
+    /// The prior's ordering (`:323`).
+    pub order: AbsOrderMap,
+    /// `J_m` in square-root form, `H_m` otherwise (`:324`).
+    pub h: DMatrix<S>,
+    /// `r_m` in square-root form, `b_m` otherwise (`:325`).
+    pub b: DVector<S>,
+}
+
+impl<S: LieScalar> Default for MargLinData<S> {
+    /// basalt's in-class initialiser: square root, empty (`:321-325`).
+    fn default() -> Self {
+        Self {
+            is_sqrt: true,
+            order: AbsOrderMap::new(),
+            h: DMatrix::zeros(0, 0),
+            b: DVector::zeros(0),
+        }
     }
 }
 
