@@ -95,6 +95,24 @@ fn is_approx<S: LieScalar, const R: usize, const C: usize>(
     (a - b).norm() <= prec * a.norm().min(b.norm())
 }
 
+/// How far apart the `f32` and `f64` projections of one point may be, in pixels.
+///
+/// Not a constant, and not relative to the pixel either. Every projection ends
+/// in `u = fx * m + cx`, and near the principal point those two terms cancel:
+/// at `u = -32` on the msd-index calibration the summands are `-501` and `469`,
+/// so the last rounding step is an ulp of **501**, not of 32. The bound is
+/// therefore eight ulps of `|u| + |c|`, the magnitude the addition actually
+/// works at.
+///
+/// Eight rather than one: `f32` rounds at every step of the Horner chain, the
+/// `atan2` promotion and the divisions before it, and the point of this test is
+/// that `f32` stays far below the half pixel the KLT tracker cares about — not
+/// that it is correctly rounded. At a 960-pixel image edge the bound is 1.3e-3
+/// px; at the principal point it is 4.5e-4 px.
+fn f32_pixel_bound(value: f64, principal_point: f64) -> f64 {
+    8.0 * f64::from(f32::EPSILON) * (value.abs() + principal_point.abs())
+}
+
 /// `test_jacobian` (`test/include/test_utils.h:22-61`), with `x0` always zero as
 /// every call site in `test_camera.cpp` passes `…::Zero()`.
 fn assert_jacobian<S: TestConstants, const R: usize, const C: usize>(
@@ -656,6 +674,46 @@ fn robocap_cam1_inverts_backwards_outside_the_safe_radius() {
     assert!(bearing.dot(&expected) < -0.9);
 }
 
+/// The case that made the old bound flaky, pinned.
+///
+/// A fresh proptest seed found `(-1.1009091, 0.27731937, 0.52727574)` on
+/// msd-index cam0: the `f64` pixel is -32.09515 and the `f32` one -32.09503, so
+/// the two differ by 1.2e-4 px. The old bound floored at 1e-4 px, which that
+/// point clears by 20 percent — not because `f32` is unusually bad there, but
+/// because a pixel near the principal point is a small difference of two numbers
+/// around 500, and 1.2e-4 is two ulps of 500. The bound now says so.
+#[test]
+fn a_pixel_near_the_principal_point_still_agrees_between_the_precisions() {
+    let camera64: CameraEnum<f64> = CameraEnum::Kb4(shipped_kb4::<f64>()[0].0);
+    let camera32: CameraEnum<f32> = CameraEnum::Kb4(shipped_kb4::<f32>()[0].0);
+
+    let (x, y, z): (f32, f32, f32) = (-1.1009091, 0.27731937, 0.52727574);
+    let mut proj64: Vector2<f64> = Vector2::zeros();
+    let mut proj32: Vector2<f32> = Vector2::zeros();
+    assert!(camera64.project(
+        &Vector4::new(f64::from(x), f64::from(y), f64::from(z), 1.0),
+        &mut proj64
+    ));
+    assert!(camera32.project(&Vector4::new(x, y, z, 1.0), &mut proj32));
+
+    let principal_point: [f64; 4] = camera64.focal_and_principal_point();
+    let difference: f64 = (proj64[0] - f64::from(proj32[0])).abs();
+    assert!(
+        difference > 1e-4,
+        "this case is only a regression while it exceeds the old floor: {difference:e}"
+    );
+    assert!(
+        difference < f32_pixel_bound(proj64[0], principal_point[2]),
+        "f64 {} f32 {}",
+        proj64[0],
+        proj32[0]
+    );
+    // And the reason: the sum that produced it works at the scale of the
+    // principal point, some fifteen times the pixel itself.
+    assert!(proj64[0].abs() < 33.0);
+    assert!(principal_point[2] > 469.0);
+}
+
 // ─── properties ───────────────────────────────────────────────────────────
 
 proptest! {
@@ -735,10 +793,14 @@ proptest! {
         prop_assert!(proj.iter().all(|value| value.is_finite()));
     }
 
-    /// The `f32` instantiation projects where the `f64` one does, to within four
-    /// `f32` ulps of the pixel: 1e-4 px near the principal point, 4e-4 px at 900
-    /// px out, where one ulp is already 6e-5 px. A plain 1e-4 px bound would be
-    /// asking `f32` for less than two ulps at the edge of a 960-pixel image.
+    /// The `f32` instantiation projects where the `f64` one does, to within
+    /// [`f32_pixel_bound`], for all three models.
+    ///
+    /// Measured over a 481 x 481 x 20 grid of the drawn domain, the worst
+    /// difference sits at 0.11 of the bound for pinhole, 0.37 for kb4 and 0.44
+    /// for pinhole-radtan8 — the rational distortion is the least accurate of
+    /// the three in `f32`, but only by a factor of four, not the order of
+    /// magnitude a separate bound for it once implied.
     #[test]
     fn f32_and_f64_agree_on_in_domain_points(
         x in -1.2f32..1.2,
@@ -761,43 +823,22 @@ proptest! {
                 CameraEnum::Kb4(shipped_kb4::<f64>()[0].0),
                 CameraEnum::Kb4(shipped_kb4::<f32>()[0].0),
             ),
+            (
+                CameraEnum::PinholeRadtan8(shipped_radtan8::<f64>()[0].0),
+                CameraEnum::PinholeRadtan8(shipped_radtan8::<f32>()[0].0),
+            ),
         ] {
             prop_assume!(camera64.project(&point64, &mut proj64));
             prop_assert!(camera32.project(&point32, &mut proj32));
+            let principal_point: [f64; 4] = camera64.focal_and_principal_point();
             for axis in 0..2 {
-                let ulp: f64 = f64::from(f32::EPSILON) * proj64[axis].abs();
-                let bound: f64 = (4.0 * ulp).max(1e-4);
+                let bound: f64 = f32_pixel_bound(proj64[axis], principal_point[2 + axis]);
                 prop_assert!(
                     (proj64[axis] - f64::from(proj32[axis])).abs() < bound,
                     "{} axis {axis}: f64 {} f32 {} (bound {bound:e})",
                     camera64.name(), proj64[axis], proj32[axis]
                 );
             }
-        }
-    }
-
-    /// radtan8 in `f32`: the rational distortion is a ratio of degree-six
-    /// polynomials in `z`, so the two precisions part company an order of
-    /// magnitude earlier than they do for kb4. A hundredth of a pixel is still
-    /// far below the half pixel the KLT tracker cares about.
-    #[test]
-    fn f32_and_f64_agree_for_radtan8(
-        x in -1.2f32..1.2,
-        y in -1.2f32..1.2,
-        z in 0.5f32..5.0,
-    ) {
-        let camera64: PinholeRadtan8<f64> = shipped_radtan8::<f64>()[0].0;
-        let camera32: PinholeRadtan8<f32> = shipped_radtan8::<f32>()[0].0;
-        let mut proj64: Vector2<f64> = Vector2::zeros();
-        let mut proj32: Vector2<f32> = Vector2::zeros();
-        let point64: Vector4<f64> = Vector4::new(f64::from(x), f64::from(y), f64::from(z), 1.0);
-        prop_assume!(camera64.project(&point64, &mut proj64));
-        prop_assert!(camera32.project(&Vector4::new(x, y, z, 1.0), &mut proj32));
-        for axis in 0..2 {
-            prop_assert!(
-                (proj64[axis] - f64::from(proj32[axis])).abs() < 1e-2,
-                "axis {axis}: f64 {} f32 {}", proj64[axis], proj32[axis]
-            );
         }
     }
 }

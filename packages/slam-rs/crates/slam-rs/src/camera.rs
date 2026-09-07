@@ -1081,6 +1081,30 @@ impl<S: LieScalar> CameraEnum<S> {
         }
     }
 
+    /// `[fx, fy, cx, cy]`, which every model's `getParam()` starts with.
+    ///
+    /// The same four numbers [`crate::calib::CameraModel::focal_and_principal_point`]
+    /// reports, without going back to the parsed calibration. Every projection
+    /// ends in `f * m + c`, so `c` is also the scale a rounding argument about a
+    /// pixel has to use: near the principal point the two terms cancel and the
+    /// error of the sum is set by `c`, not by the pixel.
+    pub fn focal_and_principal_point(&self) -> [S; 4] {
+        match self {
+            Self::Pinhole(cam) => {
+                let p: SVector<S, 4> = cam.params();
+                [p[0], p[1], p[2], p[3]]
+            }
+            Self::Kb4(cam) => {
+                let p: SVector<S, 8> = cam.params();
+                [p[0], p[1], p[2], p[3]]
+            }
+            Self::PinholeRadtan8(cam) => {
+                let p: SVector<S, 12> = cam.params();
+                [p[0], p[1], p[2], p[3]]
+            }
+        }
+    }
+
     /// Project a homogeneous point; `false` outside the model's valid domain.
     #[inline]
     pub fn project(&self, p3d: &Vector4<S>, proj: &mut Vector2<S>) -> bool {
@@ -1404,6 +1428,22 @@ mod tests {
             Err(CameraError::UnprojectJacobianUnsupported {
                 model: "pinhole-radtan8"
             })
+        );
+    }
+
+    #[test]
+    fn the_variant_reports_the_focal_length_and_principal_point() {
+        let calibration: Calibration<f64> =
+            Calibration::from_json_str(include_str!("../tests/fixtures/msdmg_calib.json")).unwrap();
+        let model: CameraEnum<f64> = CameraEnum::from_model(&calibration.intrinsics[0]).unwrap();
+        assert_eq!(
+            model.focal_and_principal_point(),
+            calibration.intrinsics[0].focal_and_principal_point()
+        );
+        assert_abs_diff_eq!(
+            model.focal_and_principal_point()[2],
+            322.5578605887897,
+            epsilon = 0.0
         );
     }
 
