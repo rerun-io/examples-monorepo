@@ -33,6 +33,12 @@ faer = "=0.24.4"
 # dev-only
 approx = "0.5"
 proptest = "1"
+# Test oracle only, never a runtime dependency: kornia's `pyrdown_u8` is an
+# independent implementation of basalt's `subsample` arithmetic (decision D08).
+# Pinned by exact git rev with default features off; kornia's CUDA features are
+# never enabled, because GPU work here is CubeCL only (decision D20, T04).
+kornia-image = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
+kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
 
 # The estimator must never panic on data: errors are typed and returned.
 [workspace.lints.clippy]

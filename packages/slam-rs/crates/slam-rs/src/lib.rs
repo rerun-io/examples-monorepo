@@ -11,7 +11,9 @@
 
 pub mod calib;
 pub mod config;
+pub mod image;
 pub mod lie;
+pub mod pyramid;
 pub mod types;
 
 use nalgebra::{Isometry3, UnitQuaternion, Vector3};
