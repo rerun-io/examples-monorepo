@@ -387,12 +387,13 @@ pub struct FrameToFrameOpticalFlow<
     masks: Vec<Masks>,
 
     pyramid_builder: B,
-    /// This frame's pyramids, one per camera.
+    /// The last **committed** frame's pyramids, one per camera.
+    ///
+    /// While a frame is in flight this is the *previous* frame, and `staging`
+    /// holds the one being processed; the two swap only once every step has
+    /// succeeded. See [`FrameToFrameOpticalFlow::process_frame`].
     pyramid: Vec<B::Pyramid>,
-    /// The previous frame's.
-    old_pyramid: Vec<B::Pyramid>,
-    /// Where a frame is built before anything else is touched; see
-    /// [`FrameToFrameOpticalFlow::process_frame`] on why there are three.
+    /// The frame in flight.
     staging: Vec<B::Pyramid>,
     tracker: T,
     patches: T::Patches,
@@ -420,7 +421,22 @@ pub struct FrameToFrameOpticalFlow<
     /// Ids the epipolar filter removes, ascending (`std::set`, `:669`).
     to_remove: Vec<KeypointId>,
     frame: FlowFrame,
+    /// The keypoint state as it was before the frame in flight; see
+    /// [`FrameToFrameOpticalFlow::process_frame`].
+    snapshot: FrameState,
     pattern: PhantomData<P>,
+}
+
+/// The state one `processFrame` mutates, kept so a failed frame can be undone.
+///
+/// Held in the frontend rather than allocated per frame: `clone_from` reuses
+/// every inner allocation, so taking the snapshot costs a copy and no allocator
+/// traffic once the buffers have reached their high-water mark.
+#[derive(Debug, Clone, Default)]
+struct FrameState {
+    cameras: Vec<Keypoints>,
+    cells: Vec<Vec<i32>>,
+    last_keypoint_id: u64,
 }
 
 impl<P: Pattern> FrameToFrameOpticalFlow<P, CpuPyramidBuilder, CpuPatchTracker<P>> {
@@ -600,8 +616,8 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             cells: vec![vec![0; occupancy_grid.rows * occupancy_grid.columns]; num_cams],
             masks: vec![Masks::default(); num_cams],
             pyramid: Vec::new(),
-            old_pyramid: Vec::new(),
             staging: Vec::new(),
+            snapshot: FrameState::default(),
             pyramid_builder: builder,
             ids: Vec::new(),
             source: FlowTransforms::default(),
@@ -726,19 +742,22 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     /// shorter than the rig or empty, in which case the missing cameras suppress
     /// nothing.
     ///
-    /// **A rejected frame changes nothing.** Every fallible step that depends on
-    /// the caller's input — the frameset width, and every pyramid — runs before
-    /// any state moves: the pyramids are built into a third, staging set of
-    /// buffers and only rotated into place once all of them succeeded. The C++
-    /// has no such problem because it never rejects a frame; the port would
-    /// otherwise leave the timestamp advanced and the previous pyramid empty, and
-    /// the *next*, valid frame would take the tracking path against nothing.
+    /// **A rejected frame is as if it never happened.** The C++ has no such
+    /// problem because it never rejects a frame; the port can, at three points —
+    /// the frameset width, a pyramid geometry, and any error a pluggable backend
+    /// returns from the middle of tracking — and every one of them must leave the
+    /// frontend exactly as the last successful frame did. So the whole call runs
+    /// against a *staging* pyramid set with `pyramid` still holding the previous
+    /// frame, over a snapshot of the keypoint state; only after tracking, the
+    /// cell counts, the add/match passes and the epipolar filter have all
+    /// succeeded do the two pyramid sets swap and the clock advance. On any error
+    /// the keypoints, the occupancy counts and the id counter are restored and
+    /// the timestamp never moved.
     ///
     /// # Errors
     ///
-    /// [`FrontendError`] when the frameset is the wrong width or a pyramid
-    /// refuses the geometry — in both cases before anything is committed — or
-    /// when the tracker or detector refuses an input afterwards.
+    /// [`FrontendError`] when the frameset is the wrong width, a pyramid refuses
+    /// the geometry, or the tracker or detector refuses an input.
     pub fn process_frame(
         &mut self,
         t_ns: i64,
@@ -754,13 +773,46 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             });
         }
 
-        // ── everything that can fail on the caller's input, before any commit
+        // The frame in flight, built where nothing else can see it.
         self.build_staging(images)?;
 
-        // ── commit: rotate the three pyramid sets, then advance the clock
-        std::mem::swap(&mut self.old_pyramid, &mut self.pyramid);
-        std::mem::swap(&mut self.pyramid, &mut self.staging);
+        // What the passes below mutate, kept so they can be undone.
+        let mut snapshot: FrameState = std::mem::take(&mut self.snapshot);
+        snapshot.cameras.clone_from(&self.frame.cameras);
+        snapshot.cells.clone_from(&self.cells);
+        snapshot.last_keypoint_id = self.last_keypoint_id;
 
+        let outcome: Result<(), FrontendError> = self.run_passes(prediction, masks);
+
+        match &outcome {
+            Ok(()) => {
+                // Commit: the frame in flight becomes the committed one, and the
+                // set it displaces is next frame's staging buffer.
+                std::mem::swap(&mut self.pyramid, &mut self.staging);
+                self.t_ns = t_ns;
+                self.frame.t_ns = t_ns;
+                self.frame_counter += 1;
+            }
+            Err(_) => {
+                self.frame.cameras.clone_from(&snapshot.cameras);
+                self.cells.clone_from(&snapshot.cells);
+                self.last_keypoint_id = snapshot.last_keypoint_id;
+            }
+        }
+        self.snapshot = snapshot;
+        outcome?;
+        Ok(&self.frame)
+    }
+
+    /// Steps 4 to 7 of `processFrame`, against `staging` as the current frame.
+    ///
+    /// Split out so [`FrameToFrameOpticalFlow::process_frame`] can undo them: no
+    /// step here touches the pyramid sets, the timestamp or the frame counter.
+    fn run_passes(
+        &mut self,
+        prediction: &PosePrediction,
+        masks: &[Masks],
+    ) -> Result<(), FrontendError> {
         for (index, mask) in self.masks.iter_mut().enumerate() {
             mask.masks.clear();
             if let Some(source) = masks.get(index) {
@@ -768,11 +820,8 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             }
         }
 
-        let first_frame: bool = self.t_ns < 0;
-        self.t_ns = t_ns;
-        self.frame.t_ns = t_ns;
-
-        if first_frame {
+        let num_cams: usize = self.cameras.len();
+        if self.t_ns < 0 {
             for keypoints in &mut self.frame.cameras {
                 keypoints.clear();
             }
@@ -798,9 +847,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
 
         self.add_points()?;
         self.filter_points();
-
-        self.frame_counter += 1;
-        Ok(&self.frame)
+        Ok(())
     }
 
     /// Build this frame's pyramids into the staging set, touching nothing else.
@@ -904,16 +951,17 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         }
 
         // The forward source patches come from the previous frame when tracking
-        // and from this frame's camera 0 when matching (`:267`, `:652`).
+        // and from this frame's camera 0 when matching (`:267`, `:652`). This
+        // frame is `staging` until the call commits.
         let source_pyramid: &B::Pyramid = if tracking {
-            &self.old_pyramid[cam1]
-        } else {
             &self.pyramid[cam1]
+        } else {
+            &self.staging[cam1]
         };
         self.patches.build(source_pyramid, &self.positions, None)?;
         self.tracker.track(
             source_pyramid,
-            &self.pyramid[cam2],
+            &self.staging[cam2],
             &self.patches,
             &self.guesses,
             &mut self.result,
@@ -1002,7 +1050,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         if budget > 0 {
             let mut level0: ImageU16 = std::mem::take(&mut self.detector.level0);
             let copied: Result<(), PyramidError> =
-                self.pyramid[camera].copy_level_into(0, &mut level0);
+                self.staging[camera].copy_level_into(0, &mut level0);
             let outcome: Result<(), FrontendError> =
                 copied
                     .map_err(FrontendError::from)
@@ -1259,7 +1307,8 @@ mod tests {
     use crate::calib::{CalibAccelBias, CalibGyroBias, CameraModel, PinholeParams};
     use crate::frontend::parallel::WorkPool;
     use crate::frontend::patterns::{Pattern51, Pattern52};
-    use crate::pyramid::CpuPyramidBuilder;
+    use crate::frontend::tracker::{PatchSoA, TrackerError};
+    use crate::pyramid::{CpuPyramidBuilder, PyramidU16};
     use std::collections::BTreeMap;
 
     const WIDTH: usize = 200;
@@ -1879,5 +1928,165 @@ mod tests {
             assert!(position.x >= 0.0 && position.x < 240.0);
             assert!(position.y >= 0.0 && position.y < 240.0);
         }
+    }
+    /// A tracker that forwards to the CPU one and refuses the *n*-th call.
+    ///
+    /// The point is a failure from inside a pluggable backend, in the middle of
+    /// `processFrame`, after the frame's pyramids are built and after some of the
+    /// cameras have already been tracked. Nothing else can produce that.
+    #[derive(Debug)]
+    struct FailingTracker {
+        inner: CpuPatchTracker<Pattern51>,
+        calls: std::cell::Cell<usize>,
+        fail_on: usize,
+    }
+
+    impl PatchTracker for FailingTracker {
+        type Pattern = Pattern51;
+        type Pyramid = PyramidU16;
+        type Patches = PatchSoA<Pattern51>;
+
+        fn capacity(&self) -> usize {
+            self.inner.capacity()
+        }
+
+        fn num_levels(&self) -> usize {
+            self.inner.num_levels()
+        }
+
+        fn make_patches(&self) -> PatchSoA<Pattern51> {
+            self.inner.make_patches()
+        }
+
+        fn track(
+            &mut self,
+            prev: &PyramidU16,
+            next: &PyramidU16,
+            patches: &PatchSoA<Pattern51>,
+            transforms_in: &FlowTransforms,
+            out: &mut FlowResult,
+        ) -> Result<(), TrackerError> {
+            self.calls.set(self.calls.get() + 1);
+            if self.calls.get() == self.fail_on {
+                return Err(TrackerError::CapacityExceeded {
+                    offered: usize::MAX,
+                    capacity: 0,
+                });
+            }
+            self.inner.track(prev, next, patches, transforms_in, out)
+        }
+    }
+
+    fn failing_frontend(
+        fail_on: usize,
+    ) -> FrameToFrameOpticalFlow<Pattern51, CpuPyramidBuilder, FailingTracker> {
+        let config: VioConfig = config();
+        let options: FrontendOptions = FrontendOptions::default();
+        let inner: CpuPatchTracker<Pattern51> = CpuPatchTracker::new(
+            options.max_keypoints,
+            config.optical_flow_levels as usize + 1,
+            config.optical_flow_max_iterations as usize,
+            config.optical_flow_max_recovered_dist2,
+            WorkPool::new(options.threads).unwrap(),
+        );
+        FrameToFrameOpticalFlow::with_backends(
+            config,
+            &rig(2),
+            options,
+            CpuPyramidBuilder::new(),
+            FailingTracker {
+                inner,
+                calls: std::cell::Cell::new(0),
+                fail_on,
+            },
+        )
+        .unwrap()
+    }
+
+    /// A backend error part-way through frame 2 must leave the frontend exactly
+    /// as frame 1 left it, so frame 3 comes out of `{1, 2 fails, 3}` identical to
+    /// frame 3 of a clean `{1, 3}`.
+    ///
+    /// The rotation used to commit before tracking, which paired frame 1's
+    /// keypoints with frame 2's pyramid on the next call.
+    #[test]
+    fn a_backend_error_leaves_the_frame_as_the_last_good_one() {
+        let first: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
+        let second: [ImageU16; 2] = [dotted_image(1), dotted_image(1)];
+        let third: [ImageU16; 2] = [dotted_image(2), dotted_image(2)];
+
+        // The clean run skips the frame the other run fails on.
+        let mut clean: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
+        clean
+            .process_frame(0, &first, &PosePrediction::default(), &[])
+            .unwrap();
+        clean
+            .process_frame(2, &third, &PosePrediction::default(), &[])
+            .unwrap();
+
+        // Frame 1 makes one call (the stereo match), so call 2 is camera 0 of
+        // frame 2: the failure lands after the first frame committed and before
+        // the second one could.
+        let mut faulty = failing_frontend(2);
+        faulty
+            .process_frame(0, &first, &PosePrediction::default(), &[])
+            .unwrap();
+        let after_first: FlowFrame = faulty.frame().clone();
+        let ids_after_first: u64 = faulty.last_keypoint_id();
+        let cells_after_first: Vec<i32> = faulty.cell_counts(0).to_vec();
+
+        let error = faulty
+            .process_frame(1, &second, &PosePrediction::default(), &[])
+            .unwrap_err();
+        assert!(matches!(error, FrontendError::Tracker(_)), "got {error}");
+
+        // Nothing moved.
+        assert_eq!(faulty.frame(), &after_first);
+        assert_eq!(faulty.last_keypoint_id(), ids_after_first);
+        assert_eq!(faulty.cell_counts(0), &cells_after_first[..]);
+        assert_eq!(faulty.t_ns(), 0);
+        assert_eq!(faulty.frame_counter(), 1);
+
+        // And the next good frame is the one the clean run produced.
+        faulty
+            .process_frame(2, &third, &PosePrediction::default(), &[])
+            .unwrap();
+        assert_eq!(faulty.frame(), clean.frame());
+        assert_eq!(faulty.last_keypoint_id(), clean.last_keypoint_id());
+        assert_eq!(faulty.cell_counts(0), clean.cell_counts(0));
+        assert_eq!(faulty.cell_counts(1), clean.cell_counts(1));
+    }
+
+    /// The same, with the failure on camera 1 — after camera 0 has already been
+    /// tracked and its keypoint map rewritten inside the same call.
+    #[test]
+    fn a_backend_error_after_the_first_camera_is_undone_too() {
+        let first: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
+        let second: [ImageU16; 2] = [dotted_image(1), dotted_image(1)];
+        let third: [ImageU16; 2] = [dotted_image(2), dotted_image(2)];
+
+        let mut clean: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
+        clean
+            .process_frame(0, &first, &PosePrediction::default(), &[])
+            .unwrap();
+        clean
+            .process_frame(2, &third, &PosePrediction::default(), &[])
+            .unwrap();
+
+        // Frame 1 makes one matching call, so frame 2's camera-1 track is call 3.
+        let mut faulty = failing_frontend(3);
+        faulty
+            .process_frame(0, &first, &PosePrediction::default(), &[])
+            .unwrap();
+        assert!(
+            faulty
+                .process_frame(1, &second, &PosePrediction::default(), &[])
+                .is_err()
+        );
+        faulty
+            .process_frame(2, &third, &PosePrediction::default(), &[])
+            .unwrap();
+        assert_eq!(faulty.frame(), clean.frame());
+        assert_eq!(faulty.last_keypoint_id(), clean.last_keypoint_id());
     }
 }

@@ -20,12 +20,15 @@
 //! at sub-coordinates `[3, PATCH_SIZE - 3)`; a rectangle over the whole cell
 //! would detect in a three-pixel band the C++ never looks at.
 //!
-//! **The scores are the same quantity.** At `arc_length == 9` kornia returns
-//! `corner_score_9_scalar(...) / 255.0` (`fast.rs:705-711`, `:838-873`), which is
-//! the canonical FAST-9 `cornerScore` OpenCV computes: the max over the sixteen
-//! arc starts of the min saturating difference along the arc. So the ranking is
-//! OpenCV's, and multiplying by 255 recovers OpenCV's own integer response, which
-//! is what [`KeypointsData::responses`] reports.
+//! **The scores are the same quantity, off by one.** At `arc_length == 9` kornia
+//! returns `corner_score_9_scalar(...) / 255.0` (`fast.rs:705-711`, `:838-873`):
+//! the max over the sixteen arc starts of the min saturating difference along the
+//! arc, which is the smallest threshold at which the pixel stops being a corner.
+//! OpenCV's `cornerScore` returns `max(a0, -b0) - 1`
+//! (`modules/features2d/src/fast_score.cpp`), i.e. the largest threshold at which
+//! it is **still** a corner — one less. [`opencv_corner_score`] applies that
+//! subtraction the moment a candidate comes back, so suppression, ranking and
+//! [`KeypointsData::responses`] all carry the integer `cv::FAST` reports.
 //!
 //! **Non-maximum suppression is this wrapper's job.** `cv::FAST`'s third argument
 //! defaults to `nonmaxSuppression = true`, and `fast_detect_rect_u8` performs
@@ -66,6 +69,17 @@ const FAST_ARC_LENGTH: usize = 9;
 /// like any other: the C++ indexes it unchecked (`keypoints.cpp:148`, trap 15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum DetectError {
+    /// The declared occupancy shape does not fit in a `usize`.
+    ///
+    /// Checked before the multiplication, not after: `rows * columns` wrapping
+    /// would have turned an impossible shape into a plausible one.
+    #[error("an occupancy shape of {rows}x{columns} does not fit in a usize")]
+    OccupancyShapeOverflow {
+        /// Rows the shape declares.
+        rows: usize,
+        /// Columns the shape declares.
+        columns: usize,
+    },
     /// The occupancy buffer is smaller than the shape it was declared with.
     #[error("occupancy is {actual} cells, the {rows}x{columns} grid needs {expected}")]
     OccupancyTooSmall {
@@ -272,6 +286,25 @@ pub struct DetectorScratch {
     pub(crate) level0: crate::image::ImageU16,
 }
 
+/// kornia's normalised FAST score as OpenCV's integer `cornerScore`.
+///
+/// kornia returns `corner_score_9_scalar(...) / 255.0` (`fast.rs:710`), the
+/// smallest threshold at which the pixel stops being a corner. OpenCV returns
+/// that minus one — the largest threshold at which it is still a corner
+/// (`fast_score.cpp`, `threshold = std::max(a0, -b0) - 1`). The subtraction is a
+/// constant shift, so it cannot change an ordering, but it is what makes the
+/// number the port reports equal to the one `cv::FAST` writes into
+/// `cv::KeyPoint::response` and basalt copies into `keypoint_responses`.
+///
+/// It is applied before suppression rather than after, so the scores compared
+/// against a non-candidate's zero are OpenCV's own. Nothing reaches zero: a
+/// candidate found at threshold `t` scores at least `t`, and the ladder's floor
+/// is `optical_flow_detection_min_threshold`.
+#[inline]
+pub fn opencv_corner_score(normalized: f32) -> f32 {
+    (normalized * 255.0).round() - 1.0
+}
+
 /// OpenCV's `cv::FAST` non-maximum suppression, over one cell's candidates.
 ///
 /// `scores` is a `side` x `side` scratch grid in the cell's own coordinates,
@@ -368,8 +401,9 @@ fn suppress_non_maxima(
 ///
 /// # Errors
 ///
-/// [`DetectError::OccupancyTooSmall`] when the counts buffer is shorter than the
-/// shape it was declared with.
+/// [`DetectError::OccupancyShapeOverflow`] when the declared shape does not fit
+/// in a `usize`, or [`DetectError::OccupancyTooSmall`] when the counts buffer is
+/// shorter than the shape it was declared with.
 #[allow(clippy::too_many_arguments)]
 pub fn detect_keypoints_with_cells(
     image: &ImageU16,
@@ -384,7 +418,12 @@ pub fn detect_keypoints_with_cells(
     out.corners.clear();
     out.responses.clear();
 
-    let needed: usize = occupancy.rows * occupancy.columns;
+    let needed: usize = occupancy.rows.checked_mul(occupancy.columns).ok_or(
+        DetectError::OccupancyShapeOverflow {
+            rows: occupancy.rows,
+            columns: occupancy.columns,
+        },
+    )?;
     if occupancy.counts.len() < needed {
         return Err(DetectError::OccupancyTooSmall {
             rows: occupancy.rows,
@@ -446,18 +485,25 @@ pub fn detect_keypoints_with_cells(
                 // whole-image coordinates is the cell shrunk by the ring radius.
                 scratch.corners.clear();
                 if grid.cell > 2 * FAST_BORDER {
-                    scratch.corners.extend(fast_detect_rect_u8(
-                        &gray,
-                        KorniaRect {
-                            x: x + FAST_BORDER,
-                            y: y + FAST_BORDER,
-                            w: grid.cell - 2 * FAST_BORDER,
-                            h: grid.cell - 2 * FAST_BORDER,
-                        },
-                        threshold as f32,
-                        FAST_ARC_LENGTH,
-                        FAST_BORDER,
-                    ));
+                    scratch.corners.extend(
+                        fast_detect_rect_u8(
+                            &gray,
+                            KorniaRect {
+                                x: x + FAST_BORDER,
+                                y: y + FAST_BORDER,
+                                w: grid.cell - 2 * FAST_BORDER,
+                                h: grid.cell - 2 * FAST_BORDER,
+                            },
+                            threshold as f32,
+                            FAST_ARC_LENGTH,
+                            FAST_BORDER,
+                        )
+                        .into_iter()
+                        .map(|corner| FastCorner {
+                            xy: corner.xy,
+                            response: opencv_corner_score(corner.response),
+                        }),
+                    );
                     suppress_non_maxima(
                         &mut scratch.corners,
                         &mut scratch.scores,
@@ -496,9 +542,9 @@ pub fn detect_keypoints_with_cells(
                     }
 
                     out.corners.push([full_x, full_y]);
-                    // kornia normalises `cornerScore` by 255 (`fast.rs:710`);
-                    // OpenCV reports the integer, and so does this.
-                    out.responses.push((corner.response * 255.0).round());
+                    // Already OpenCV's integer `cornerScore`; see
+                    // `opencv_corner_score`.
+                    out.responses.push(corner.response);
                     points_added += 1;
                 }
 
@@ -646,9 +692,9 @@ mod tests {
                 "corner {corner:?} is inside the edge margin"
             );
         }
-        // OpenCV reports the integer `cornerScore`, and so does this.
+        // OpenCV reports `max(a0, -b0) - 1`, and so does this.
         for response in &out.responses {
-            assert!(*response >= 1.0 && *response <= 255.0 && response.fract() == 0.0);
+            assert!(*response >= 0.0 && *response <= 254.0 && response.fract() == 0.0);
         }
     }
 
@@ -971,5 +1017,75 @@ mod tests {
         suppress_non_maxima(&mut run, &mut scores, &mut keep, 8, 8, 24);
         let kept: Vec<f32> = run.iter().map(|corner| corner.xy[0]).collect();
         assert_eq!(kept, vec![11.0, 14.0, 16.0]);
+    }
+    /// OpenCV's `cornerScore` is one less than the smallest threshold at which
+    /// the pixel stops being a corner (`fast_score.cpp`), which is what kornia
+    /// returns. An isolated maximum-contrast peak therefore scores 254, not 255.
+    #[test]
+    fn the_response_is_opencvs_corner_score() {
+        assert_eq!(opencv_corner_score(1.0), 254.0);
+        assert_eq!(opencv_corner_score(40.0 / 255.0), 39.0);
+        // A constant shift cannot reorder two candidates.
+        assert!(opencv_corner_score(0.5) < opencv_corner_score(0.75));
+
+        // On a real isolated peak, the whole pipeline reports 254.
+        let mut image: ImageU16 = ImageU16::zeros(120, 120).unwrap();
+        for y in 0..120 {
+            for x in 0..120 {
+                image.set(x, y, 0);
+            }
+        }
+        // Inside cell (60, 60)'s detection band `[63, 107)` and clear of the
+        // 19-pixel edge margin.
+        image.set(80, 80, 255u16 << 8);
+        let grid: CellGrid = CellGrid::new(120, 120, 50).unwrap();
+        let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
+        let mut scratch: DetectorScratch = DetectorScratch::default();
+        let mut out: KeypointsData = KeypointsData::default();
+        detect_keypoints_with_cells(
+            &image,
+            &grid,
+            &occupancy(&cells, &grid),
+            &config(),
+            &Masks::default(),
+            BUDGET,
+            &mut scratch,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out.corners, vec![[80.0, 80.0]]);
+        assert_eq!(out.responses, vec![254.0]);
+    }
+
+    /// `rows * columns` used to wrap before it was compared with the buffer.
+    #[test]
+    fn an_occupancy_shape_that_overflows_is_refused() {
+        let image: ImageU16 = dotted_image(200, 200, 16);
+        let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
+        let cells: Vec<i32> = vec![0; 32];
+        let mut scratch: DetectorScratch = DetectorScratch::default();
+        let mut out: KeypointsData = KeypointsData::default();
+        let error = detect_keypoints_with_cells(
+            &image,
+            &grid,
+            &Occupancy {
+                counts: &cells,
+                rows: usize::MAX,
+                columns: 2,
+            },
+            &config(),
+            &Masks::default(),
+            BUDGET,
+            &mut scratch,
+            &mut out,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            DetectError::OccupancyShapeOverflow {
+                rows: usize::MAX,
+                columns: 2
+            }
+        );
     }
 }

@@ -86,18 +86,29 @@ edge margin **and OpenCV's non-maximum suppression** — strictly greater than a
 eight neighbours, so a tie kills both sides — are all reproduced. What is left is
 the cell walk itself and an unstable `std::sort`. Measured against the C++ dump:
 **95.5 to 96.9% of the C++'s keypoints have a port keypoint within one pixel**,
-the two agree on the keypoint count on six of the eight framesets, and their
-occupancy grids agree on **87 of 87** occupied cells. The gate still seeds the
-tracker rather than diffing keypoint sets, because "close" is not "equal".
+the two agree on camera 0's keypoint count on **seven of the eight** framesets,
+their occupancy grids agree on **87 of 87** occupied cells, and every one of the
+171 corners both sides picked at the same pixel carries the **same integer
+`cornerScore`** — OpenCV's `max(a0, -b0) - 1`, which is one less than the value
+kornia returns. The gate still seeds the tracker rather than diffing keypoint
+sets, because "close" is not "equal".
 
 The frontend is generic over its two stages. `PyramidBuilder` and `PatchTracker`
 (with `SourcePatches` beside it) carry associated pyramid and patch types, and
 `FrameToFrameOpticalFlow<P, B, T>` defaults them to the CPU pair — so a CubeCL
 backend arrives through `with_backends` and no public signature here names a
-concrete pyramid. Every per-patch buffer is structure-of-arrays with the patch
-index fast-varying, including the 2x3 warps, which live as six flat coefficient
-arrays; the patch build streams straight into those arrays and never holds more
-than a 3x3 matrix per patch.
+concrete pyramid, and `FlowResult` has a public writing surface (`reset`,
+`set_track`, `parts_mut`, `finish`) that the CPU tracker itself publishes
+through, so a second backend can too. Every per-patch buffer is
+structure-of-arrays with the patch index fast-varying, including the 2x3 warps,
+which live as six flat coefficient arrays; the patch build streams straight into
+those arrays, and at `-O3` its largest local allocation measures 36 bytes against
+a 344-byte stack frame.
+
+A frame the frontend refuses is as if it never happened: the whole call runs
+against a staging pyramid set over a snapshot of the keypoint state, and the two
+pyramid sets swap and the clock advances only after tracking, the cell counts and
+the add/match/filter passes have all succeeded.
 
 Three deviations are recorded in the source. `E[i]` is computed from `T_c0_ci`
 per camera rather than reusing the cam0-cam1 matrix everywhere, which is

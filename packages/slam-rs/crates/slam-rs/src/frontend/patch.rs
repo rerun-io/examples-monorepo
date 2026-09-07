@@ -735,12 +735,20 @@ mod tests {
         assert!(valid < Pattern51::SIZE);
         assert!(data.iter().take(Pattern51::SIZE).any(|value| *value < 0.0));
     }
+    /// The **accounting** behind the module's private-state claim, not the
+    /// claim itself.
+    ///
     /// The GPU seam budgets about 512 bytes of thread-private state before
     /// Vulkan/SPIR-V goes racy (`cubecl-portability.md` §12.2, CubeCL #1336).
-    /// This pins the accounting the module doc claims, so a future edit that
-    /// reintroduces a pattern-sized temporary fails here.
+    /// What a compiler actually puts on the stack is a property of the compiled
+    /// code — measured at 36 bytes for the largest local and 344 for the frame,
+    /// quoted in the module docs — and no `size_of` can stand in for that. What
+    /// this pins is the *shape*: the pieces the build and the tracking loop hold
+    /// are all small and none is sized by the pattern, and the packed record
+    /// that is sized by the pattern is over the budget, so an edit that put one
+    /// back on the hot path would have to change this test to pass.
     #[test]
-    fn no_per_patch_temporary_exceeds_the_private_state_budget() {
+    fn the_documented_private_state_accounting_holds() {
         // `build_patch`: the Hessian, its inverse, one column and one row.
         const BUILD: usize =
             2 * size_of::<Matrix3<f32>>() + size_of::<Vector3<f32>>() + size_of::<[f32; 3]>();

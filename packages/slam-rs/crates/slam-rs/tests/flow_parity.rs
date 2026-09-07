@@ -383,6 +383,7 @@ fn detector_overlap_is_reported() {
     let framesets: usize = available_framesets();
     let mut report: Vec<String> = Vec::new();
     let mut any_overlap: bool = false;
+    let mut shared_responses: usize = 0;
 
     for frame in 0..framesets {
         let dump: DumpFrame = read_dump(frame);
@@ -397,6 +398,34 @@ fn detector_overlap_is_reported() {
             let ours: Vec<Vector2<f32>> = (0..produced.cameras[camera].len())
                 .map(|index| produced.cameras[camera].transforms.translation(index))
                 .collect();
+
+            // Where the two detectors chose the same pixel, they must agree on
+            // its `cornerScore` to the integer: OpenCV returns
+            // `max(a0, -b0) - 1` (`fast_score.cpp`) and the port subtracts the
+            // same one from kornia's score. A response the C++ dump records as
+            // -1 is a keypoint `addKeypoint` was given no response for, and is
+            // skipped.
+            for keypoint in expected {
+                if keypoint.response < 0.0 {
+                    continue;
+                }
+                let Some(index) = (0..produced.cameras[camera].len()).find(|index| {
+                    produced.cameras[camera].transforms.translation(*index)
+                        == Vector2::new(keypoint.x, keypoint.y)
+                }) else {
+                    continue;
+                };
+                let ours: f32 = produced.cameras[camera].responses[index];
+                if ours < 0.0 {
+                    continue;
+                }
+                assert_eq!(
+                    ours, keypoint.response,
+                    "frame {frame} camera {camera}: the two FAST scores at ({}, {}) differ",
+                    keypoint.x, keypoint.y
+                );
+                shared_responses += 1;
+            }
             // A C++ keypoint counts as reproduced when some Rust keypoint sits
             // within one pixel of it, whatever id either side gave it.
             let near: usize = expected
@@ -441,6 +470,9 @@ fn detector_overlap_is_reported() {
     report.push(format!(
         "camera 0 cell occupancy: cpp {occupied_cpp} cells, rust {occupied_rust} cells, both {both}"
     ));
+    report.push(format!(
+        "FAST scores compared at the same pixel and equal: {shared_responses}"
+    ));
 
     for line in &report {
         println!("{line}");
@@ -448,6 +480,10 @@ fn detector_overlap_is_reported() {
     assert!(
         any_overlap,
         "the two detectors agree on nothing at all, which is a bug rather than a delta"
+    );
+    assert!(
+        shared_responses > 100,
+        "only {shared_responses} responses were comparable, which is too few to mean anything"
     );
     assert!(
         ours.iter().all(|count| *count <= budget),

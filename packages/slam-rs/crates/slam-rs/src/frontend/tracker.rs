@@ -347,6 +347,25 @@ impl FlowTransforms {
         ]
     }
 
+    /// The six coefficient arrays, mutably, in the order
+    /// [`AffineCompact2f::coefficients`] uses.
+    ///
+    /// This is how a backend writes a whole camera's warps without going through
+    /// one warp at a time: each array is contiguous with the patch index
+    /// fast-varying, which is what a device copy and a rayon `par_chunks_mut`
+    /// both want. [`crate::frontend::parallel::WorkPool::for_each_warp`] takes
+    /// exactly this shape.
+    pub fn coefficients_mut(&mut self) -> [&mut [f32]; 6] {
+        [
+            &mut self.m00,
+            &mut self.m01,
+            &mut self.m10,
+            &mut self.m11,
+            &mut self.tx,
+            &mut self.ty,
+        ]
+    }
+
     /// Every translation `x`, patch index fast-varying.
     pub fn translations_x(&self) -> &[f32] {
         &self.tx
@@ -630,6 +649,57 @@ impl FlowResult {
         &self.tracked
     }
 
+    /// Size this result for `len` inputs and mark them all untracked.
+    ///
+    /// The first call of the write sequence a [`PatchTracker`] uses to publish:
+    /// `reset`, then [`FlowResult::set_track`] or
+    /// [`FlowResult::parts_mut`] per input, then [`FlowResult::finish`]. The
+    /// allocation is kept, so a backend that resets every frame never allocates.
+    pub fn reset(&mut self, len: usize) {
+        if self.valid.len() < len {
+            self.valid.resize(len, false);
+        }
+        if self.transforms.len() < len {
+            self.transforms.resize(len);
+        }
+        self.valid[..len].fill(false);
+        self.tracked.clear();
+    }
+
+    /// Publish one input's outcome.
+    ///
+    /// # Panics
+    ///
+    /// If `index` is past the length [`FlowResult::reset`] was given.
+    pub fn set_track(&mut self, index: usize, valid: bool, transform: &AffineCompact2f) {
+        self.valid[index] = valid;
+        self.transforms.set(index, transform);
+    }
+
+    /// The validity flags and the warps, mutably, for a backend that writes them
+    /// in bulk rather than one at a time.
+    ///
+    /// Pair it with [`FlowTransforms::coefficients_mut`] and
+    /// [`crate::frontend::parallel::WorkPool::for_each_warp`]; [`CpuPatchTracker`]
+    /// publishes through exactly this, so the seam is exercised by the shipped
+    /// backend and not only by a test.
+    pub fn parts_mut(&mut self) -> (&mut [bool], &mut FlowTransforms) {
+        (&mut self.valid, &mut self.transforms)
+    }
+
+    /// Rebuild the compacted survivor list from the validity flags.
+    ///
+    /// The last call of the write sequence. `len` is what
+    /// [`FlowResult::reset`] was given; entries past it are ignored.
+    pub fn finish(&mut self, len: usize) {
+        self.tracked.clear();
+        for index in 0..len.min(self.valid.len()) {
+            if self.valid[index] {
+                self.tracked.push(index as u32);
+            }
+        }
+    }
+
     /// How many inputs survived.
     pub fn len(&self) -> usize {
         self.tracked.len()
@@ -801,28 +871,14 @@ impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
             }
         }
 
-        if out.valid.len() < count {
-            out.valid.resize(count, false);
-        }
-        if out.transforms.len() < count {
-            out.transforms.resize(count);
-        }
-        out.valid[..count].fill(false);
-        out.tracked.clear();
+        out.reset(count);
 
         // ── forward: `trackPoint(pyr_1, pyr_2, transform_1, transform_2)` (`:349`)
         let max_iterations: usize = self.max_iterations;
         let num_levels: usize = self.num_levels;
         let (target_width, target_height): (f32, f32) = level0_size(next);
         {
-            let FlowTransforms {
-                m00,
-                m01,
-                m10,
-                m11,
-                tx,
-                ty,
-            } = &mut self.forward;
+            let [m00, m01, m10, m11, tx, ty] = self.forward.coefficients_mut();
             self.pool.for_each_warp(
                 [
                     &mut m00[..count],
@@ -879,14 +935,8 @@ impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
         let forward_valid: &[bool] = &self.forward_valid[..count];
         let max_recovered_dist2: f32 = self.max_recovered_dist2;
         {
-            let FlowTransforms {
-                m00,
-                m01,
-                m10,
-                m11,
-                tx,
-                ty,
-            } = &mut out.transforms;
+            let (valid, transforms) = out.parts_mut();
+            let [m00, m01, m10, m11, tx, ty] = transforms.coefficients_mut();
             self.pool.for_each_warp(
                 [
                     &mut m00[..count],
@@ -896,7 +946,7 @@ impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
                     &mut tx[..count],
                     &mut ty[..count],
                 ],
-                &mut out.valid[..count],
+                &mut valid[..count],
                 |index| {
                     let kept: [f32; 6] = forward.coefficients(index);
                     if !forward_valid[index] {
@@ -926,11 +976,7 @@ impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
             );
         }
 
-        for index in 0..count {
-            if out.valid[index] {
-                out.tracked.push(index as u32);
-            }
-        }
+        out.finish(count);
         Ok(())
     }
 }
@@ -1549,5 +1595,114 @@ mod tests {
         assert_eq!(transforms.get(1), warps[1]);
         transforms.set(0, &warps[2]);
         assert_eq!(transforms.get(0), warps[2]);
+    }
+    /// A second [`PatchTracker`] implementation, written only against the public
+    /// API, proving a backend outside this module can publish results.
+    ///
+    /// It reports every input as tracked, at the guess it was given, through
+    /// [`FlowResult::reset`], [`FlowResult::set_track`] and
+    /// [`FlowResult::finish`]; the bulk path through [`FlowResult::parts_mut`]
+    /// and [`FlowTransforms::coefficients_mut`] is what [`CpuPatchTracker`]
+    /// itself uses, so both halves of the writing surface are exercised.
+    #[derive(Debug, Default)]
+    struct EchoTracker {
+        capacity: usize,
+        num_levels: usize,
+    }
+
+    impl PatchTracker for EchoTracker {
+        type Pattern = Pattern51;
+        type Pyramid = PyramidU16;
+        type Patches = PatchSoA<Pattern51>;
+
+        fn capacity(&self) -> usize {
+            self.capacity
+        }
+
+        fn num_levels(&self) -> usize {
+            self.num_levels
+        }
+
+        fn make_patches(&self) -> PatchSoA<Pattern51> {
+            PatchSoA::new(self.capacity, self.num_levels)
+        }
+
+        fn track(
+            &mut self,
+            _prev: &PyramidU16,
+            _next: &PyramidU16,
+            patches: &PatchSoA<Pattern51>,
+            transforms_in: &FlowTransforms,
+            out: &mut FlowResult,
+        ) -> Result<(), TrackerError> {
+            let count: usize = transforms_in.len();
+            if count != patches.len() {
+                return Err(TrackerError::LengthMismatch {
+                    first_name: "patches",
+                    first: patches.len(),
+                    second_name: "transforms",
+                    second: count,
+                });
+            }
+            out.reset(count);
+            for index in 0..count {
+                out.set_track(index, true, &transforms_in.get(index));
+            }
+            // The bulk path over the same buffers, to prove it is reachable.
+            let (valid, transforms) = out.parts_mut();
+            let [m00, ..] = transforms.coefficients_mut();
+            assert_eq!(m00.len(), valid.len().max(m00.len()));
+            out.finish(count);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_second_backend_can_publish_results_through_the_public_api() {
+        let levels: usize = 3;
+        let scene: Fixture = fixture(0.7, -1.2, levels);
+        let mut echo: EchoTracker = EchoTracker {
+            capacity: scene.positions.len(),
+            num_levels: levels + 1,
+        };
+        let mut out: FlowResult = FlowResult::default();
+        echo.track(
+            &scene.prev,
+            &scene.next,
+            &scene.patches,
+            &scene.transforms,
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(out.len(), scene.positions.len());
+        for index in out.tracked() {
+            let index: usize = *index as usize;
+            assert!(out.is_valid(index));
+            assert_eq!(out.transform(index), scene.transforms.get(index));
+        }
+    }
+
+    /// The write sequence is usable on its own: reset, set, finish.
+    #[test]
+    fn the_flow_result_writing_surface_compacts_what_it_is_given() {
+        let mut out: FlowResult = FlowResult::default();
+        out.reset(5);
+        assert!(out.is_empty());
+        out.set_track(1, true, &AffineCompact2f::at(Vector2::new(3.0, 4.0)));
+        out.set_track(4, true, &AffineCompact2f::at(Vector2::new(-1.0, 0.5)));
+        out.set_track(2, false, &AffineCompact2f::identity());
+        out.finish(5);
+
+        assert_eq!(out.tracked(), &[1, 4]);
+        assert_eq!(out.transform(1).translation, Vector2::new(3.0, 4.0));
+        assert_eq!(out.transform(4).translation, Vector2::new(-1.0, 0.5));
+        assert!(!out.is_valid(0));
+        assert!(!out.is_valid(2));
+
+        // A reset clears the survivors without dropping the allocation.
+        out.reset(3);
+        assert!(out.tracked().is_empty());
+        assert!(!out.is_valid(1));
     }
 }
