@@ -294,6 +294,29 @@ pub struct DetectorConfig {
 /// 1 and no further, rather than a wedged process (decision D32).
 pub const LOWEST_THRESHOLD_RUNG: i32 = 1;
 
+/// One cell row's raw FAST candidates at one threshold, over the whole image width.
+///
+/// `fast_detect_rect_u8` detects over **whole rows** and filters the result by
+/// column (`cells.rs:20-35`), so the scan a cell asks for depends only on its
+/// row band and its threshold — the nineteen cells of one grid row at one rung
+/// all pay for the same 960-wide sweep. Scanning it once and filtering each
+/// cell's columns out of it is the same call with the same arguments, so the
+/// candidates and their order are the ones the per-cell calls produced.
+///
+/// The whole-image width is what the scan has to keep: kornia's kernel turns its
+/// in-block local-maximum filter on at `width >= 800` and aligns its sixteen-lane
+/// blocks to the image's own left margin (`fast.rs:517`, `:524`), so a cell-sized
+/// copy would detect a different set.
+#[derive(Debug)]
+struct Band {
+    /// Top of the cell row the band was scanned for.
+    y: usize,
+    /// Threshold rung it was scanned at.
+    threshold: i32,
+    /// Candidates over the whole width, row-major, already carrying OpenCV's score.
+    corners: Vec<FastCorner>,
+}
+
 /// The 8-bit view of a level-0 pyramid image, reused between frames.
 ///
 /// basalt copies each cell into its own `cv::Mat` with `sub_img_raw(x, y) >> 8`
@@ -303,6 +326,9 @@ pub const LOWEST_THRESHOLD_RUNG: i32 = 1;
 pub struct DetectorScratch {
     bytes: Vec<u8>,
     corners: Vec<FastCorner>,
+    /// The [`Band`]s this frame has already scanned, in the order they were
+    /// first asked for.
+    bands: Vec<Band>,
     /// One cell's FAST scores, local coordinates, zero where there is no
     /// candidate. Kept zero between calls so only the entries a cell writes are
     /// touched, rather than the whole grid.
@@ -405,6 +431,54 @@ fn suppress_non_maxima(
     });
 }
 
+/// The band for one cell row at one threshold, scanned on the first cell that
+/// asks for it and reused by the rest of that row.
+///
+/// The scan is `fast_detect_rect_u8` over the **whole width** at the same row
+/// range a cell's own rectangle would have given it: the cell rectangle
+/// `{x + 3, y + 3, cell - 6, cell - 6}` clamps to rows `[y + 3, y + cell - 3)`
+/// whatever `x` is, and the kernel only ever emits columns `[3, width - 3)`. So
+/// one call per `(y, threshold)` produces the union of the nineteen per-cell
+/// calls it replaces, corner for corner and in the same row-major order.
+fn band_index(
+    bands: &mut Vec<Band>,
+    gray: &Image<u8, 1>,
+    y: usize,
+    cell: usize,
+    threshold: i32,
+) -> usize {
+    if let Some(index) = bands
+        .iter()
+        .position(|band| band.y == y && band.threshold == threshold)
+    {
+        return index;
+    }
+    let corners: Vec<FastCorner> = fast_detect_rect_u8(
+        gray,
+        KorniaRect {
+            x: 0,
+            y: y + FAST_BORDER,
+            w: gray.width(),
+            h: cell - 2 * FAST_BORDER,
+        },
+        threshold as f32,
+        FAST_ARC_LENGTH,
+        FAST_BORDER,
+    )
+    .into_iter()
+    .map(|corner| FastCorner {
+        xy: corner.xy,
+        response: opencv_corner_score(corner.response),
+    })
+    .collect();
+    bands.push(Band {
+        y,
+        threshold,
+        corners,
+    });
+    bands.len() - 1
+}
+
 /// `detectKeypointsWithCells` (`keypoints.cpp:132-205`).
 ///
 /// `grid` is **the detected image's own** geometry, as the C++ derives it from
@@ -473,6 +547,9 @@ pub fn detect_keypoints_with_cells(
         return Ok(());
     }
 
+    // The bands are this image's; the previous frame's are stale.
+    scratch.bands.clear();
+
     // `sub_ptr[x] = (sub_img_raw(x, y) >> 8)` (`keypoints.cpp:156`), once.
     scratch.bytes.clear();
     scratch.bytes.reserve(width * height);
@@ -519,24 +596,20 @@ pub fn detect_keypoints_with_cells(
                 // whole-image coordinates is the cell shrunk by the ring radius.
                 scratch.corners.clear();
                 if grid.cell > 2 * FAST_BORDER {
+                    // `fast_detect_rect_u8` clamps the rectangle to the ring
+                    // margin on every side (`cells.rs:12-15`); the columns this
+                    // cell keeps out of its row band are that clamp.
+                    let first: f32 = (x + FAST_BORDER).max(FAST_BORDER) as f32;
+                    let last: f32 =
+                        (x + grid.cell - FAST_BORDER).min(width.saturating_sub(FAST_BORDER)) as f32;
+                    let index: usize =
+                        band_index(&mut scratch.bands, &gray, y, grid.cell, threshold);
                     scratch.corners.extend(
-                        fast_detect_rect_u8(
-                            &gray,
-                            KorniaRect {
-                                x: x + FAST_BORDER,
-                                y: y + FAST_BORDER,
-                                w: grid.cell - 2 * FAST_BORDER,
-                                h: grid.cell - 2 * FAST_BORDER,
-                            },
-                            threshold as f32,
-                            FAST_ARC_LENGTH,
-                            FAST_BORDER,
-                        )
-                        .into_iter()
-                        .map(|corner| FastCorner {
-                            xy: corner.xy,
-                            response: opencv_corner_score(corner.response),
-                        }),
+                        scratch.bands[index]
+                            .corners
+                            .iter()
+                            .filter(|corner| corner.xy[0] >= first && corner.xy[0] < last)
+                            .copied(),
                     );
                     suppress_non_maxima(
                         &mut scratch.corners,
