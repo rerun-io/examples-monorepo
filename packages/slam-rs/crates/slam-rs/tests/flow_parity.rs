@@ -35,7 +35,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use nalgebra::{Matrix2, Vector2};
 use serde::Deserialize;
@@ -56,11 +56,17 @@ use slam_rs::image::ImageU16;
 use slam_rs::lie::Se3;
 use slam_rs::pyramid::{CpuPyramidBuilder, PyramidBuilder, PyramidU16};
 
+mod common;
+
 /// How close a tracked keypoint must land to the C++'s, in pixels.
 const POSITION_TOLERANCE_PX: f32 = 0.5;
 
 /// The fraction of the C++'s tracks the port must reproduce.
 const SEEDED_TRACKING_GATE: f64 = 0.95;
+
+/// Framesets `tools/dump_flow.cpp` dumped, and the most the PGM directory can
+/// hold.
+const DUMPED_FRAMESETS: usize = 8;
 
 /// One keypoint of one camera, as `tools/dump_flow.cpp` writes it.
 #[derive(Debug, Clone, Deserialize)]
@@ -110,83 +116,31 @@ impl DumpFrame {
     }
 }
 
-fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
-}
-
 /// Where the PGMs live: the checked-in three, or a directory holding all eight.
 fn frames_dir() -> PathBuf {
     match std::env::var_os("SLAM_RS_FLOW_FRAMES_DIR") {
         Some(path) => PathBuf::from(path),
-        None => fixtures().join("flow/frames"),
+        None => common::fixtures().join("flow/frames"),
     }
 }
 
 /// How many consecutive framesets the PGMs on disk cover.
 fn available_framesets() -> usize {
-    let directory: PathBuf = frames_dir();
-    (0..8)
-        .take_while(|frame| {
-            directory
-                .join(format!("frame_{frame:03}_cam0.pgm"))
-                .exists()
-                && directory
-                    .join(format!("frame_{frame:03}_cam1.pgm"))
-                    .exists()
-        })
-        .count()
+    common::available_framesets(&frames_dir(), 2, DUMPED_FRAMESETS)
 }
 
 fn read_dump(frame: usize) -> DumpFrame {
-    let path: PathBuf = fixtures().join(format!("flow/dumps/frame_{frame:03}.json"));
+    let path: PathBuf = common::fixtures().join(format!("flow/dumps/frame_{frame:03}.json"));
     let text: String = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
     serde_json::from_str(&text)
         .unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()))
 }
 
-/// Read an 8-bit binary PGM and widen it the way basalt widens a camera source.
+/// A PGM frameset image, widened the way basalt widens a camera source.
 fn read_pgm(frame: usize, camera: usize) -> ImageU16 {
-    let path: PathBuf = frames_dir().join(format!("frame_{frame:03}_cam{camera}.pgm"));
-    let bytes: Vec<u8> = std::fs::read(&path)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-
-    // "P5\n<w> <h>\n255\n" then the raster; the writer emits exactly that.
-    let mut fields: Vec<usize> = Vec::new();
-    let mut cursor: usize = 2;
-    while fields.len() < 3 {
-        while bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
-        let start: usize = cursor;
-        while !bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
-        fields.push(
-            std::str::from_utf8(&bytes[start..cursor])
-                .unwrap()
-                .parse()
-                .unwrap(),
-        );
-    }
-    cursor += 1;
-    let (width, height): (usize, usize) = (fields[0], fields[1]);
-    assert_eq!(fields[2], 255, "{} is not an 8-bit PGM", path.display());
-    ImageU16::from_u8_strided(&bytes[cursor..], width, height, width).unwrap()
-}
-
-fn config() -> VioConfig {
-    VioConfig::from_json_str(
-        &std::fs::read_to_string(fixtures().join("msdmi_config.json")).unwrap(),
-    )
-    .unwrap()
-}
-
-fn calibration() -> Calibration<f64> {
-    Calibration::from_json_str(
-        &std::fs::read_to_string(fixtures().join("msdmi_calib.json")).unwrap(),
-    )
-    .unwrap()
+    let pgm: common::Pgm = common::read_pgm(&frames_dir(), frame, camera);
+    ImageU16::from_u8_strided(&pgm.pixels, pgm.width, pgm.height, pgm.width).unwrap()
 }
 
 fn pyramid_of(image: &ImageU16, levels: usize, builder: &mut CpuPyramidBuilder) -> PyramidU16 {
@@ -296,8 +250,8 @@ fn seeded_tracking(
 /// reproduce at least 95% of the C++'s own tracks to within half a pixel.
 #[test]
 fn seeded_tracking_reproduces_the_cpp_tracker() {
-    let config: VioConfig = config();
-    let calibration: Calibration<f64> = calibration();
+    let config: VioConfig = common::config();
+    let calibration: Calibration<f64> = common::calibration();
     let cameras: Vec<RigCamera<f32>> = RigCamera::from_calibration(&calibration.cast()).unwrap();
     let mut builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
 
@@ -367,9 +321,9 @@ fn seeded_tracking_reproduces_the_cpp_tracker() {
 /// 960x960 frameset through an unoptimised build is the test's whole cost.
 #[test]
 fn detector_overlap_is_reported() {
-    let config: VioConfig = config();
+    let config: VioConfig = common::config();
     let budget: i32 = config.optical_flow_detection_num_points_cell;
-    let calibration: Calibration<f64> = calibration();
+    let calibration: Calibration<f64> = common::calibration();
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = FrameToFrameOpticalFlow::new(
         config,
         &calibration,
@@ -498,8 +452,8 @@ fn detector_overlap_is_reported() {
 /// the same thing.
 #[test]
 fn the_detection_grid_matches_the_cpp() {
-    let config: VioConfig = config();
-    let calibration: Calibration<f64> = calibration();
+    let config: VioConfig = common::config();
+    let calibration: Calibration<f64> = common::calibration();
     let flow: FrameToFrameOpticalFlow<Pattern51> =
         FrameToFrameOpticalFlow::new(config, &calibration, FrontendOptions::default()).unwrap();
     let dump: DumpFrame = read_dump(0);

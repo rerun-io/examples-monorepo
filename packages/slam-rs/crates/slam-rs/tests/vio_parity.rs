@@ -38,16 +38,16 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use nalgebra::Vector3;
-use serde::Deserialize;
 
-use slam_rs::calib::Calibration;
-use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::FrontendOptions;
 use slam_rs::lie::So3;
-use slam_rs::{ImageView, Vio, VioStatus};
+use slam_rs::{ImageView, Vio, VioResult, VioStatus};
+
+mod common;
+use common::{IMU, ORACLE, OracleFrame, OracleState, Pgm, run_named};
 
 /// How far the port's rig position may sit from basalt's, in metres.
 ///
@@ -65,80 +65,120 @@ const POSITION_TOLERANCE_M: f64 = 3e-3;
 /// the measurement.
 const ROTATION_TOLERANCE_DEG: f64 = 1.0;
 
-/// Fixture shapes: only the fields this file reads.
-#[derive(Debug, Deserialize)]
-struct Oracle {
-    runs: Vec<OracleRun>,
-    flow: Vec<OracleFlow>,
+/// Framesets `tests/fixtures/flow/frames/` carries.
+const COMMITTED_FRAMESETS: usize = 3;
+
+/// The last of them, `ORACLE.flow[2].t_ns`.
+const LAST_COMMITTED_T_NS: i64 = 37_012_000;
+
+/// How far the IMU is pushed for the committed run: one frameset interval past
+/// [`LAST_COMMITTED_T_NS`].
+///
+/// It has to reach *past* the last frameset. `:330-336` closes the last
+/// preintegration by re-stamping the first sample after the frameset, so a
+/// queue that stops on the frameset leaves the interval short and `track`
+/// reports `NeedMoreImu` for it.
+const COMMITTED_IMU_HORIZON_NS: i64 = 40_000_000;
+
+/// The pipeline both tests drive: the fixture's config and calibration, one
+/// frontend thread so the reduction shape is fixed (D31).
+fn pipeline() -> Vio<f32> {
+    Vio::new(
+        common::config(),
+        common::calibration(),
+        FrontendOptions {
+            threads: 1,
+            ..FrontendOptions::default()
+        },
+    )
+    .unwrap()
 }
 
-#[derive(Debug, Deserialize)]
-struct OracleRun {
-    scalar: String,
-    frames: Vec<OracleFrame>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OracleFlow {
-    t_ns: i64,
-}
-
-#[derive(Debug, Deserialize)]
-struct OracleFrame {
-    last_state_t_ns: i64,
-    states: Vec<OracleState>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OracleState {
-    t_ns: i64,
-    q: [f64; 4],
-    t: [f64; 3],
-}
-
-#[derive(Debug, Deserialize)]
-struct ImuFixture {
-    imu: Vec<ImuRow>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ImuRow {
-    t_ns: i64,
-    gyro: [f64; 3],
-    accel: [f64; 3],
-}
-
-fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
-}
-
-/// An 8-bit binary PGM as its raw raster, the bytes `ImageView` wants.
-fn read_pgm(directory: &Path, frame: usize, camera: usize) -> (usize, usize, Vec<u8>) {
-    let path: PathBuf = directory.join(format!("frame_{frame:03}_cam{camera}.pgm"));
-    let bytes: Vec<u8> = std::fs::read(&path)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-
-    // "P5\n<w> <h>\n255\n" then the raster; the writer emits exactly that.
-    let mut fields: Vec<usize> = Vec::new();
-    let mut cursor: usize = 2;
-    while fields.len() < 3 {
-        while bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
-        let start: usize = cursor;
-        while !bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
-        fields.push(
-            std::str::from_utf8(&bytes[start..cursor])
-                .unwrap()
-                .parse()
-                .unwrap(),
-        );
+/// A read PGM as the byte view `Vio::track` takes.
+fn view(pgm: &Pgm) -> ImageView<'_> {
+    ImageView {
+        width: pgm.width,
+        height: pgm.height,
+        stride: pgm.width,
+        data: &pgm.pixels,
     }
-    cursor += 1;
-    assert_eq!(fields[2], 255, "{} is not an 8-bit PGM", path.display());
-    (fields[0], fields[1], bytes[cursor..].to_vec())
+}
+
+/// The three committed framesets, and the IMU that covers them.
+///
+/// The whole pipeline needs real pixels: `Vio::track` runs the KLT before the
+/// estimator sees anything, and a constant frame detects no corners. Three is
+/// what `tests/fixtures/flow/frames/` carries, so this cannot reach
+/// `opt_started` (five states) — that is what the sixty-frameset gate above
+/// is for.
+fn drive_the_committed_framesets(vio: &mut Vio<f32>) -> Vec<VioResult> {
+    let directory: PathBuf = common::fixtures().join("flow/frames");
+    let cameras: usize = common::calibration().t_i_c.len();
+    let framesets: usize = common::available_framesets(&directory, cameras, COMMITTED_FRAMESETS);
+    assert_eq!(framesets, COMMITTED_FRAMESETS, "{}", directory.display());
+
+    for row in IMU
+        .iter()
+        .take_while(|row| row.t_ns <= COMMITTED_IMU_HORIZON_NS)
+    {
+        vio.push_imu(row.t_ns, row.gyro, row.accel).unwrap();
+    }
+    ORACLE
+        .flow
+        .iter()
+        .take(framesets)
+        .enumerate()
+        .map(|(frame, flow)| {
+            let rasters: Vec<Pgm> = (0..cameras)
+                .map(|camera| common::read_pgm(&directory, frame, camera))
+                .collect();
+            let views: Vec<ImageView<'_>> = rasters.iter().map(view).collect();
+            vio.track(flow.t_ns, &views).unwrap()
+        })
+        .collect()
+}
+
+/// The frontend and the estimator are wired together, and a repeat run is
+/// bit-identical (D17) — `vio_oracle.rs`'s determinism gate replays the C++'s
+/// keypoints, so it cannot see the frontend.
+///
+/// Ignored by default: three framesets of 960x960 KLT twice over is 14 s and
+/// the Rust suite's budget is 15 s in total. Run it with
+/// `cargo test -p slam-rs --test vio_parity -- --ignored`.
+#[test]
+#[ignore = "14 s of 960x960 KLT; run with --ignored"]
+fn the_whole_pipeline_tracks_and_repeats_bit_identically() {
+    let mut vio: Vio<f32> = pipeline();
+    let results: Vec<VioResult> = drive_the_committed_framesets(&mut vio);
+
+    assert_eq!(
+        results.iter().map(|r| r.status).collect::<Vec<VioStatus>>(),
+        vec![VioStatus::Tracking; COMMITTED_FRAMESETS]
+    );
+    assert_eq!(
+        results.iter().map(|r| r.t_ns).collect::<Vec<i64>>(),
+        ORACLE.flow[..COMMITTED_FRAMESETS]
+            .iter()
+            .map(|flow| flow.t_ns)
+            .collect::<Vec<i64>>()
+    );
+    let estimator = vio.estimator();
+    assert_eq!(estimator.snapshot().states.len(), COMMITTED_FRAMESETS);
+    assert_eq!(estimator.last_state_t_ns(), LAST_COMMITTED_T_NS);
+    // The first frameset is always a keyframe (`sqrt_keypoint_vio.cpp:61`)
+    // and three framesets cannot reach `opt_started` (`:1207`).
+    assert_eq!(estimator.kf_ids().collect::<Vec<i64>>(), vec![0]);
+    assert!(!estimator.optimization_started());
+    assert!(
+        vio.last_stats()
+            .is_some_and(|stats| stats.num_landmarks > 0)
+    );
+
+    assert_eq!(
+        drive_the_committed_framesets(&mut pipeline()),
+        results,
+        "a repeat run is not bit-identical"
+    );
 }
 
 /// The whole pipeline over as many framesets as the directory holds, reporting
@@ -153,34 +193,9 @@ fn the_whole_vio_follows_the_cpp_trajectory() {
         return;
     };
 
-    let text: String = std::fs::read_to_string(fixtures().join("vio/vio_oracle.json")).unwrap();
-    let oracle: Oracle = serde_json::from_str(&text).unwrap();
-    let run: &OracleRun = oracle
-        .runs
-        .iter()
-        .find(|run| run.scalar == "float")
-        .expect("the fixture has no float run");
-    let text: String = std::fs::read_to_string(fixtures().join("vio/imu.json")).unwrap();
-    let imu: ImuFixture = serde_json::from_str(&text).unwrap();
-    let config: VioConfig = VioConfig::from_json_str(
-        &std::fs::read_to_string(fixtures().join("msdmi_config.json")).unwrap(),
-    )
-    .unwrap();
-    let calibration: Calibration<f64> = Calibration::from_json_str(
-        &std::fs::read_to_string(fixtures().join("msdmi_calib.json")).unwrap(),
-    )
-    .unwrap();
-    let cameras: usize = calibration.t_i_c.len();
-
-    let available: usize = (0..oracle.flow.len())
-        .take_while(|frame| {
-            (0..cameras).all(|camera| {
-                directory
-                    .join(format!("frame_{frame:03}_cam{camera}.pgm"))
-                    .exists()
-            })
-        })
-        .count();
+    let run = run_named(&ORACLE, "float");
+    let cameras: usize = common::calibration().t_i_c.len();
+    let available: usize = common::available_framesets(&directory, cameras, ORACLE.flow.len());
     assert!(
         available > 4,
         "{} holds {available} framesets; five states have to accumulate before the estimator \
@@ -188,16 +203,8 @@ fn the_whole_vio_follows_the_cpp_trajectory() {
         directory.display()
     );
 
-    let mut vio: Vio<f32> = Vio::new(
-        config,
-        calibration,
-        FrontendOptions {
-            threads: 1,
-            ..FrontendOptions::default()
-        },
-    )
-    .unwrap();
-    for row in &imu.imu {
+    let mut vio: Vio<f32> = pipeline();
+    for row in IMU.iter() {
         vio.push_imu(row.t_ns, row.gyro, row.accel).unwrap();
     }
 
@@ -207,19 +214,11 @@ fn the_whole_vio_follows_the_cpp_trajectory() {
     let mut previous: Option<Vector3<f64>> = None;
     let mut compared: usize = 0;
 
-    for (frame, flow) in oracle.flow.iter().take(available).enumerate() {
-        let rasters: Vec<(usize, usize, Vec<u8>)> = (0..cameras)
-            .map(|camera| read_pgm(&directory, frame, camera))
+    for (frame, flow) in ORACLE.flow.iter().take(available).enumerate() {
+        let rasters: Vec<Pgm> = (0..cameras)
+            .map(|camera| common::read_pgm(&directory, frame, camera))
             .collect();
-        let views: Vec<ImageView<'_>> = rasters
-            .iter()
-            .map(|(width, height, data)| ImageView {
-                width: *width,
-                height: *height,
-                stride: *width,
-                data,
-            })
-            .collect();
+        let views: Vec<ImageView<'_>> = rasters.iter().map(view).collect();
         let result = vio.track(flow.t_ns, &views).unwrap();
         assert_eq!(result.t_ns, flow.t_ns, "frame {frame}: timestamp");
         if result.status != VioStatus::Tracking {

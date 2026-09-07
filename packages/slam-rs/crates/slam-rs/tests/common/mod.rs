@@ -7,11 +7,258 @@
 
 #![allow(dead_code)]
 
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
 use nalgebra::{DMatrix, DVector, Vector3, Vector6};
+use serde::Deserialize;
 use slam_rs::calib::{Calibration, CameraModel, Kb4Params};
+use slam_rs::config::VioConfig;
 use slam_rs::lie::{LieScalar, Se3};
 
 const MSDMI: &str = include_str!("../fixtures/msdmi_calib.json");
+
+// ── the fixture directory and the two files every VIO lane reads ───────────
+
+/// `crates/slam-rs/tests/fixtures`.
+pub fn fixtures() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
+
+/// The MSDMI config, which every VIO lane and the whole-pipeline test share.
+pub fn config() -> VioConfig {
+    VioConfig::from_json_str(
+        &std::fs::read_to_string(fixtures().join("msdmi_config.json")).unwrap(),
+    )
+    .unwrap()
+}
+
+/// The MSDMI calibration, always `f64`: the estimator casts it to its own
+/// scalar, so a lane that runs `f32` still reads the file's doubles.
+pub fn calibration() -> Calibration<f64> {
+    Calibration::from_json_str(
+        &std::fs::read_to_string(fixtures().join("msdmi_calib.json")).unwrap(),
+    )
+    .unwrap()
+}
+
+// ── the PGM framesets ─────────────────────────────────────────────
+
+/// One camera's image as it sits in a PGM: the raw 8-bit raster and its shape.
+///
+/// The raster, not an `ImageU16`: `flow_parity` widens it the way basalt's
+/// camera source does, while `vio_parity` hands the bytes straight to
+/// [`slam_rs::ImageView`], and one of those wrapping the other is the only
+/// difference between them.
+pub struct Pgm {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<u8>,
+}
+
+/// `frame_<NNN>_cam<C>.pgm` under `directory`, in `tools/dump_flow.cpp`'s
+/// layout.
+pub fn read_pgm(directory: &Path, frame: usize, camera: usize) -> Pgm {
+    let path: PathBuf = directory.join(format!("frame_{frame:03}_cam{camera}.pgm"));
+    let bytes: Vec<u8> = std::fs::read(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+    // "P5\n<w> <h>\n255\n" then the raster; the writer emits exactly that.
+    let mut fields: Vec<usize> = Vec::new();
+    let mut cursor: usize = 2;
+    while fields.len() < 3 {
+        while bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        let start: usize = cursor;
+        while !bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        fields.push(
+            std::str::from_utf8(&bytes[start..cursor])
+                .unwrap()
+                .parse()
+                .unwrap(),
+        );
+    }
+    cursor += 1;
+    assert_eq!(fields[2], 255, "{} is not an 8-bit PGM", path.display());
+    Pgm {
+        width: fields[0],
+        height: fields[1],
+        pixels: bytes[cursor..].to_vec(),
+    }
+}
+
+/// How many consecutive framesets `directory` covers, up to `limit`: a
+/// frameset counts only when every camera's PGM is there.
+pub fn available_framesets(directory: &Path, cameras: usize, limit: usize) -> usize {
+    (0..limit)
+        .take_while(|frame| {
+            (0..cameras).all(|camera| {
+                directory
+                    .join(format!("frame_{frame:03}_cam{camera}.pgm"))
+                    .exists()
+            })
+        })
+        .count()
+}
+
+// ── the VIO oracle fixture ─────────────────────────────────────
+
+/// `tools/vio_oracle.cpp`'s dump: one run per precision, plus the C++
+/// frontend's keypoints per frameset. Both VIO lanes read it, so the shape
+/// lives here even though `vio_parity` reads only part of it.
+#[derive(Debug, Deserialize)]
+pub struct Oracle {
+    pub runs: Vec<OracleRun>,
+    pub flow: Vec<OracleFlow>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OracleRun {
+    pub scalar: String,
+    pub frames: Vec<OracleFrame>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OracleFlow {
+    pub t_ns: i64,
+    pub cameras: Vec<Vec<OraclePoint>>,
+}
+
+/// One tracked keypoint of the C++ frontend's `OpticalFlowResult`.
+///
+/// The fixture also carries the warp's four `linear` coefficients so a reader
+/// can see the whole `AffineCompact2f`; the estimator reads only the
+/// translation, so they are not deserialized.
+#[derive(Debug, Deserialize)]
+pub struct OraclePoint {
+    pub id: u64,
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OracleFrame {
+    pub frame: usize,
+    pub t_ns: i64,
+    pub states: Vec<OracleState>,
+    pub poses: Vec<OraclePose>,
+    pub kf_ids: Vec<i64>,
+    pub ltkfs: Vec<i64>,
+    pub num_points_kf: Vec<(i64, i64)>,
+    pub last_state_t_ns: i64,
+    pub frames_after_kf: i32,
+    pub opt_started: bool,
+    pub num_landmarks: usize,
+    pub num_observations: usize,
+    pub num_imu_meas: usize,
+    pub marg_order: Vec<(i64, usize, usize)>,
+    pub marg_digest: OracleDigest,
+    pub marg: Option<OracleMarg>,
+    pub lm: Vec<OracleLm>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OracleState {
+    pub t_ns: i64,
+    pub q: [f64; 4],
+    pub t: [f64; 3],
+    pub vel: [f64; 3],
+    pub bg: [f64; 3],
+    pub ba: [f64; 3],
+    pub linearized: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OraclePose {
+    pub t_ns: i64,
+    pub q: [f64; 4],
+    pub t: [f64; 3],
+    pub linearized: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OracleDigest {
+    pub rows: usize,
+    pub cols: usize,
+    pub h_frobenius: f64,
+    pub b_norm: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OracleMarg {
+    pub states_to_remove: usize,
+    pub last_state_to_marg: i64,
+    pub poses_to_marg: Vec<i64>,
+    pub states_to_marg_all: Vec<i64>,
+    pub states_to_marg_vel_bias: Vec<i64>,
+    pub kfs_to_marg: Vec<i64>,
+    pub idx_to_keep: usize,
+    pub idx_to_marg: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OracleLm {
+    pub it: i32,
+    pub backtrack: i32,
+    pub error_before: f64,
+    pub error_after: f64,
+    pub vision_error: f64,
+    pub imu_error: f64,
+    pub bg_error: f64,
+    pub ba_error: f64,
+    pub marg_prior_error: f64,
+    pub l_diff: f64,
+    pub f_diff: f64,
+    pub lambda: f64,
+    pub step_norminf: f64,
+    pub solve_attempts: u32,
+    pub step_is_valid: bool,
+    pub step_is_successful: bool,
+}
+
+/// One uncalibrated IMU sample of `vio/imu.json`, as the fixture writes it.
+#[derive(Debug, Deserialize)]
+pub struct ImuRow {
+    pub t_ns: i64,
+    pub gyro: [f64; 3],
+    pub accel: [f64; 3],
+}
+
+#[derive(Debug, Deserialize)]
+struct ImuFixture {
+    imu: Vec<ImuRow>,
+}
+
+/// The 1.55 MB oracle, parsed once per test binary: five lanes read it and
+/// `serde_json` is otherwise the slowest thing in them.
+pub static ORACLE: LazyLock<Oracle> = LazyLock::new(|| {
+    let path: PathBuf = fixtures().join("vio/vio_oracle.json");
+    let text: String = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+    serde_json::from_str(&text).expect("vio_oracle.json does not match the expected shape")
+});
+
+/// The 1,077 uncalibrated samples of the window, in capture order.
+pub static IMU: LazyLock<Vec<ImuRow>> = LazyLock::new(|| {
+    let path: PathBuf = fixtures().join("vio/imu.json");
+    let text: String = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+    let fixture: ImuFixture =
+        serde_json::from_str(&text).expect("imu.json does not match the expected shape");
+    fixture.imu
+});
+
+/// The run of one precision, `"double"` or `"float"`.
+pub fn run_named<'a>(oracle: &'a Oracle, scalar: &str) -> &'a OracleRun {
+    oracle
+        .runs
+        .iter()
+        .find(|run| run.scalar == scalar)
+        .unwrap_or_else(|| panic!("the fixture has no {scalar} run"))
+}
 
 /// `KannalaBrandtCamera4<Scalar>::getTestProjections()[0]`
 /// (`basalt-headers/include/basalt/camera/kannala_brandt_camera4.hpp:487-495`),

@@ -87,13 +87,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
-use nalgebra::Vector2;
-use serde::Deserialize;
+use nalgebra::{Vector2, Vector3};
 
-use slam_rs::calib::Calibration;
 use slam_rs::config::VioConfig;
 use slam_rs::estimator::{
     FlowObservations, FrameOutcome, FrameStats, LmIteration, SqrtKeypointVio, WindowSnapshot,
@@ -101,6 +98,9 @@ use slam_rs::estimator::{
 use slam_rs::imu::ImuSample;
 use slam_rs::lie::LieScalar;
 use slam_rs::types::{FrameId, KeypointId};
+
+mod common;
+use common::{IMU, ORACLE, OracleFlow, OracleLm, OracleRun, run_named};
 
 // ── the window, and the tolerances measured on this fixture ───────────────
 
@@ -174,180 +174,21 @@ fn framesets() -> usize {
     }
 }
 
-// ── the fixture's shape ───────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-struct Oracle {
-    runs: Vec<OracleRun>,
-    flow: Vec<OracleFlow>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OracleRun {
-    scalar: String,
-    frames: Vec<OracleFrame>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OracleFlow {
-    t_ns: i64,
-    cameras: Vec<Vec<OraclePoint>>,
-}
-
-#[derive(Debug, Deserialize)]
-/// One tracked keypoint of the C++ frontend's `OpticalFlowResult`.
-///
-/// The fixture also carries the warp's four `linear` coefficients so a reader
-/// can see the whole `AffineCompact2f`; the estimator reads only the
-/// translation, so they are not deserialized.
-struct OraclePoint {
-    id: u64,
-    x: f32,
-    y: f32,
-}
-
-#[derive(Debug, Deserialize)]
-struct OracleFrame {
-    frame: usize,
-    t_ns: i64,
-    states: Vec<OracleState>,
-    poses: Vec<OraclePose>,
-    kf_ids: Vec<i64>,
-    ltkfs: Vec<i64>,
-    num_points_kf: Vec<(i64, i64)>,
-    last_state_t_ns: i64,
-    frames_after_kf: i32,
-    opt_started: bool,
-    num_landmarks: usize,
-    num_observations: usize,
-    num_imu_meas: usize,
-    marg_order: Vec<(i64, usize, usize)>,
-    marg_digest: OracleDigest,
-    marg: Option<OracleMarg>,
-    lm: Vec<OracleLm>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OracleState {
-    t_ns: i64,
-    q: [f64; 4],
-    t: [f64; 3],
-    vel: [f64; 3],
-    bg: [f64; 3],
-    ba: [f64; 3],
-    linearized: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct OraclePose {
-    t_ns: i64,
-    q: [f64; 4],
-    t: [f64; 3],
-    linearized: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct OracleDigest {
-    rows: usize,
-    cols: usize,
-    h_frobenius: f64,
-    b_norm: f64,
-}
-
-#[derive(Debug, Deserialize)]
-struct OracleMarg {
-    states_to_remove: usize,
-    last_state_to_marg: i64,
-    poses_to_marg: Vec<i64>,
-    states_to_marg_all: Vec<i64>,
-    states_to_marg_vel_bias: Vec<i64>,
-    kfs_to_marg: Vec<i64>,
-    idx_to_keep: usize,
-    idx_to_marg: usize,
-}
-
-#[derive(Debug, Deserialize)]
-struct OracleLm {
-    it: i32,
-    backtrack: i32,
-    error_before: f64,
-    error_after: f64,
-    vision_error: f64,
-    imu_error: f64,
-    bg_error: f64,
-    ba_error: f64,
-    marg_prior_error: f64,
-    l_diff: f64,
-    f_diff: f64,
-    lambda: f64,
-    step_norminf: f64,
-    solve_attempts: u32,
-    step_is_valid: bool,
-    step_is_successful: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct ImuFixture {
-    imu: Vec<ImuRow>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ImuRow {
-    t_ns: i64,
-    gyro: [f64; 3],
-    accel: [f64; 3],
-}
-
 // ── loading ───────────────────────────────────────────────────────────────
 
-fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
-}
-
-/// The 1.55 MB fixture, parsed once for the whole test binary: five lanes read
-/// it and `serde_json` is the slowest thing in this file otherwise.
-static ORACLE: LazyLock<Oracle> = LazyLock::new(|| {
-    let path: PathBuf = fixtures().join("vio/vio_oracle.json");
-    let text: String = std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-    serde_json::from_str(&text).expect("vio_oracle.json does not match the expected shape")
-});
-
-/// The 1,077 uncalibrated samples of the window, in capture order.
-static IMU: LazyLock<Vec<ImuSample>> = LazyLock::new(|| {
-    let path: PathBuf = fixtures().join("vio/imu.json");
-    let text: String = std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-    let fixture: ImuFixture =
-        serde_json::from_str(&text).expect("imu.json does not match the expected shape");
-    fixture
-        .imu
-        .into_iter()
-        .map(|row| ImuSample {
-            t_ns: row.t_ns,
-            gyro: nalgebra::Vector3::new(row.gyro[0], row.gyro[1], row.gyro[2]),
-            accel: nalgebra::Vector3::new(row.accel[0], row.accel[1], row.accel[2]),
-        })
-        .collect()
-});
-
-static CONFIG: LazyLock<VioConfig> = LazyLock::new(|| {
-    let text: String = std::fs::read_to_string(fixtures().join("msdmi_config.json")).unwrap();
-    VioConfig::from_json_str(&text).unwrap()
-});
-
-static CALIB: LazyLock<Calibration<f64>> = LazyLock::new(|| {
-    let text: String = std::fs::read_to_string(fixtures().join("msdmi_calib.json")).unwrap();
-    Calibration::from_json_str(&text).unwrap()
-});
+static CONFIG: LazyLock<VioConfig> = LazyLock::new(common::config);
 
 /// The estimator every lane starts from: the fixture's calibration and config,
 /// with the whole IMU window already pushed.
 fn window<S: LieScalar>(config: VioConfig) -> SqrtKeypointVio<S> {
     let mut estimator: SqrtKeypointVio<S> =
-        SqrtKeypointVio::with_default_gravity(CALIB.cast(), config).unwrap();
-    for sample in IMU.iter().copied() {
-        estimator.push_imu(sample);
+        SqrtKeypointVio::with_default_gravity(common::calibration().cast(), config).unwrap();
+    for row in IMU.iter() {
+        estimator.push_imu(ImuSample {
+            t_ns: row.t_ns,
+            gyro: Vector3::from(row.gyro),
+            accel: Vector3::from(row.accel),
+        });
     }
     estimator
 }
@@ -772,14 +613,6 @@ fn lm_prefix<S: LieScalar>(
 /// `‖·‖_F` over any coefficient sequence, which on a vector is `‖·‖`.
 fn frobenius<S: LieScalar>(values: impl Iterator<Item = S>) -> f64 {
     values.map(|v| v.to_f64() * v.to_f64()).sum::<f64>().sqrt()
-}
-
-fn run_named<'a>(oracle: &'a Oracle, scalar: &str) -> &'a OracleRun {
-    oracle
-        .runs
-        .iter()
-        .find(|run| run.scalar == scalar)
-        .unwrap_or_else(|| panic!("the fixture has no {scalar} run"))
 }
 
 // ── the gates ─────────────────────────────────────────────────────────────
