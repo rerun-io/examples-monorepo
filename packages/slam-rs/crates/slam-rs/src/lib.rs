@@ -5,9 +5,11 @@
 //! (catalog feed, evaluation, logging) lives in the `slam_rs` package and the
 //! bindings in `slam-rs-py`; a native runner lives in `slam-rs-cli`.
 //!
-//! This is the skeleton: the state machine, the error taxonomy and the value
-//! types are real, the estimator is not implemented yet, so `track` never
-//! reports [`VioStatus::Tracking`].
+//! [`Vio`] is the Offline driver (D17): [`Vio::push_imu`] buffers samples and
+//! [`Vio::track`] runs the frontend and then the estimator to completion in the
+//! calling thread, so every result is final and a repeat run over the same input
+//! is bit-identical. Realtime mode — basalt's two threads joined by bounded
+//! queues — is stage S9's.
 
 pub mod ba_base;
 pub mod calib;
@@ -42,10 +44,11 @@ pub enum VioStatus {
     Tracking,
 }
 
-/// Estimator configuration.
+/// The pre-estimator stub's configuration.
 ///
-/// A placeholder: basalt's own JSON config replaces it once the estimator
-/// lands, which is why it already deserializes and ignores nothing.
+/// Not basalt's config — that is [`config::VioConfig`], which is what the real
+/// [`Vio`] takes. This is the two numbers [`StubVio`] needs, and it goes when
+/// the PyO3 class stops wrapping the stub (stage S9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     /// Number of cameras in the rig; every frameset carries exactly this many images.
@@ -98,7 +101,7 @@ pub struct VioResult {
 }
 
 /// Everything that can go wrong at the API boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum VioError {
     /// IMU samples must arrive strictly ordered; duplicates are rejected too.
     #[error("imu sample at {t_ns} ns does not follow the previous sample at {previous_t_ns} ns")]
@@ -148,11 +151,27 @@ pub enum VioError {
         /// Bytes actually supplied.
         len: usize,
     },
+    /// The frontend refused the configuration, the rig or a frame.
+    #[error("frontend: {0}")]
+    Frontend(#[from] frontend::flow::FrontendError),
+    /// The estimator refused the configuration or a frame.
+    #[error("estimator: {0}")]
+    Estimator(#[from] estimator::EstimatorError),
+    /// An image could not be widened into the frontend's `u16` buffer.
+    #[error("image: {0}")]
+    Image(#[from] image::ImageError),
 }
 
-/// The estimator, driven one frameset at a time.
+/// The frameset validator the PyO3 class still wraps.
+///
+/// Everything about it is real except the estimator: it enforces the IMU
+/// ordering and the frameset geometry, and reports
+/// [`VioStatus::NeedMoreImu`]/[`VioStatus::NotInitialised`] accordingly, but it
+/// never tracks. The bindings and the Python replay call this while stage S9
+/// moves them onto [`Vio`]; the boundary tests that pin the error taxonomy are
+/// written against it.
 #[derive(Debug, Clone)]
-pub struct Vio {
+pub struct StubVio {
     config: Config,
     world_from_rig: Isometry3<f64>,
     velocity: Vector3<f64>,
@@ -162,8 +181,8 @@ pub struct Vio {
     imu_count: usize,
 }
 
-impl Vio {
-    /// Build an estimator that has seen nothing yet.
+impl StubVio {
+    /// Build a validator that has seen nothing yet.
     pub fn new(config: Config) -> Self {
         Self {
             config,
@@ -265,6 +284,457 @@ impl Vio {
     }
 }
 
+/// The estimator, driven one frameset at a time (D17, D24).
+///
+/// One `track` call is basalt's whole pipeline for one frameset, in the calling
+/// thread and in basalt's order:
+///
+/// 1. the frontend's own preintegration over `(t_prev, t_now]` and the pose
+///    prediction it feeds the KLT (`frame_to_frame_optical_flow.h:138-152`) —
+///    the estimator runs a **second, independent** preintegrator (D24) and the
+///    two are deliberately not shared;
+/// 2. `processFrame`, which produces the tracked keypoints;
+/// 3. the estimator's own IMU consumption and `measure`, which optimises and
+///    marginalizes;
+/// 4. the two feedback values basalt pushes back to the frontend: the newest
+///    state, and — because every shipped config sets
+///    `optical_flow_matching_guess_type = REPROJ_AVG_DEPTH` — the average scene
+///    depth from `computeProjections` (`sqrt_keypoint_vio.cpp:583-604`).
+///
+/// Nothing about arrival order can reach a decision: there are no queues, no
+/// drops (`vio_enforce_realtime` is refused) and no threads, which is what makes
+/// a repeat run bit-identical.
+///
+/// The frontend is `f32` throughout, as `FrameToFrameOpticalFlow<float,
+/// Pattern51>` is; the estimator's scalar is the type parameter, and `f32` is
+/// the shipped precision the reference lane runs (Q07).
+#[derive(Debug)]
+pub struct Vio<S: lie::LieScalar = f32> {
+    frontend: frontend::flow::FrameToFrameOpticalFlow<frontend::patterns::Pattern51>,
+    estimator: estimator::SqrtKeypointVio<S>,
+    /// The frontend's own IMU buffer (D24). The same samples reach the
+    /// estimator through its own queue.
+    frontend_imu: std::collections::VecDeque<imu::ImuSample>,
+    /// The frontend's already-popped sample, `processImu`'s `data` (`:169`).
+    frontend_pending: Option<imu::ImuSample>,
+    /// `latest_state` (`frame_to_frame_optical_flow.h:141-146`).
+    latest_state: Option<types::PoseVelBiasState<f64>>,
+    /// `predicted_state` (`:150`).
+    predicted_state: types::PoseVelBiasState<f64>,
+    /// `first_state_arrived` (`:143`).
+    first_state_arrived: bool,
+    /// The frontend's own preintegration noise, `accel_cov`/`gyro_cov` at
+    /// `frame_to_frame_optical_flow.h:105-106`.
+    frontend_noise: imu::ImuNoise<f64>,
+    /// The static bias calibration, applied to the frontend's samples in `f32`
+    /// and cast back to `f64` (`:171-178`).
+    calib_f32: calib::Calibration<f32>,
+    /// Widened frames, reused so a steady-state `track` does not allocate.
+    frames: Vec<image::ImageU16>,
+    /// `img->masks`, always empty here: masks come from Monado.
+    masks: Vec<frontend::detect::Masks>,
+    /// The last IMU timestamp accepted, for the ordering check.
+    last_imu_t_ns: Option<i64>,
+    /// Cameras in the rig; every frameset must carry exactly this many.
+    camera_count: usize,
+    /// The last frameset's timestamp, `t_ns` in the frontend (`:172`).
+    last_frame_t_ns: Option<i64>,
+    /// The estimator's flow input, reused between frames.
+    observations: std::sync::Arc<estimator::FlowObservations>,
+    /// What the last `track` decided; the S9 Rerun rung reads this.
+    last_stats: Option<Box<estimator::FrameStats<S>>>,
+}
+
+impl<S: lie::LieScalar> Vio<S> {
+    /// Build the pipeline from basalt's own config and calibration (D18).
+    ///
+    /// # Errors
+    ///
+    /// [`VioError::Frontend`] when the config names another flow type or
+    /// pattern or the rig is unusable, and [`VioError::Estimator`] when the
+    /// config asks for a path this port does not have — `vio_linearization_type`
+    /// other than `ABS_QR`, `vio_sqrt_marg` false, or `vio_enforce_realtime`.
+    pub fn new(
+        config: config::VioConfig,
+        calibration: calib::Calibration<f64>,
+        options: frontend::flow::FrontendOptions,
+    ) -> Result<Self, VioError> {
+        let camera_count: usize = calibration.t_i_c.len();
+        let frontend: frontend::flow::FrameToFrameOpticalFlow<frontend::patterns::Pattern51> =
+            frontend::flow::FrameToFrameOpticalFlow::new(config.clone(), &calibration, options)?;
+        let calib_f32: calib::Calibration<f32> = calibration.cast();
+        let frontend_noise: imu::ImuNoise<f64> = imu::ImuNoise::from_calibration(&calibration);
+        let estimator: estimator::SqrtKeypointVio<S> =
+            estimator::SqrtKeypointVio::with_default_gravity(calibration.cast(), config)?;
+        Ok(Self {
+            frontend,
+            estimator,
+            frontend_imu: std::collections::VecDeque::new(),
+            frontend_pending: None,
+            latest_state: None,
+            predicted_state: types::PoseVelBiasState::default(),
+            first_state_arrived: false,
+            frontend_noise,
+            calib_f32,
+            frames: Vec::new(),
+            masks: vec![frontend::detect::Masks::default(); camera_count],
+            last_imu_t_ns: None,
+            camera_count,
+            last_frame_t_ns: None,
+            observations: std::sync::Arc::new(estimator::FlowObservations::new(0, camera_count)),
+            last_stats: None,
+        })
+    }
+
+    /// The estimator, for callers that want the window or the snapshot.
+    pub fn estimator(&self) -> &estimator::SqrtKeypointVio<S> {
+        &self.estimator
+    }
+
+    /// The frontend, for callers that want the tracked keypoints.
+    pub fn frontend(
+        &self,
+    ) -> &frontend::flow::FrameToFrameOpticalFlow<frontend::patterns::Pattern51> {
+        &self.frontend
+    }
+
+    /// What the last `track` decided, or `None` before the first one.
+    pub fn last_stats(&self) -> Option<&estimator::FrameStats<S>> {
+        self.last_stats.as_deref()
+    }
+
+    /// Cameras in the rig; every frameset must carry exactly this many.
+    pub fn camera_count(&self) -> usize {
+        self.camera_count
+    }
+
+    /// Timestamp of the last accepted IMU sample, if any.
+    pub fn last_imu_t_ns(&self) -> Option<i64> {
+        self.last_imu_t_ns
+    }
+
+    /// Add one IMU sample: `gyro` in rad/s, `accel` in m/s², both in the rig
+    /// frame, uncalibrated (the static bias calibration is applied inside).
+    ///
+    /// The sample reaches both preintegrators (D24).
+    ///
+    /// # Errors
+    ///
+    /// [`VioError::NonMonotonicImu`] on a duplicate or out-of-order timestamp,
+    /// never a silent reorder.
+    pub fn push_imu(&mut self, t_ns: i64, gyro: [f64; 3], accel: [f64; 3]) -> Result<(), VioError> {
+        if let Some(previous_t_ns) = self.last_imu_t_ns
+            && t_ns <= previous_t_ns
+        {
+            return Err(VioError::NonMonotonicImu {
+                previous_t_ns,
+                t_ns,
+            });
+        }
+        let sample: imu::ImuSample = imu::ImuSample {
+            t_ns,
+            gyro: Vector3::new(gyro[0], gyro[1], gyro[2]),
+            accel: Vector3::new(accel[0], accel[1], accel[2]),
+        };
+        self.frontend_imu.push_back(sample);
+        self.estimator.push_imu(sample);
+        self.last_imu_t_ns = Some(t_ns);
+        Ok(())
+    }
+
+    /// Process one frameset: one image per camera, oldest to newest in time.
+    ///
+    /// # Errors
+    ///
+    /// [`VioError`] when the frameset is the wrong width or geometry, or when
+    /// the frontend or the estimator refuses it.
+    pub fn track(&mut self, t_ns: i64, images: &[ImageView<'_>]) -> Result<VioResult, VioError> {
+        check_frameset(images, self.camera_count)?;
+
+        // `frame_to_frame_optical_flow.h:138-152`: the prediction the KLT is
+        // seeded with. Until the estimator has produced a state both poses are
+        // the identity, which is basalt's `first_state_arrived == false` path.
+        let prediction: frontend::flow::PosePrediction = if self.first_state_arrived {
+            let latest: types::PoseVelBiasState<f64> =
+                self.latest_state.unwrap_or(self.predicted_state);
+            let pim: imu::IntegratedImuMeasurement<f64> = self.frontend_preintegrate(t_ns, &latest);
+            self.predicted_state = types::PoseVelBiasState {
+                t_ns,
+                ..self.predicted_state
+            };
+            let predicted: types::PoseVelState<f64> =
+                pim.predict_state(&latest.pose_vel_state(), &imu::gravity::<f64>());
+            self.predicted_state.t_w_i = predicted.t_w_i;
+            self.predicted_state.vel_w_i = predicted.vel_w_i;
+            self.predicted_state.bias_gyro = latest.bias_gyro;
+            self.predicted_state.bias_accel = latest.bias_accel;
+            frontend::flow::PosePrediction {
+                t_w_i_previous: latest.t_w_i.cast(),
+                t_w_i_current: self.predicted_state.t_w_i.cast(),
+            }
+        } else {
+            frontend::flow::PosePrediction::default()
+        };
+
+        // `vit_tracker.cpp:534`: the `u8 << 8` widening the whole frontend
+        // assumes, into buffers that are reused frame to frame.
+        self.frames
+            .resize_with(images.len(), image::ImageU16::default);
+        for (frame, view) in self.frames.iter_mut().zip(images.iter()) {
+            frame.fill_from_u8_strided(view.data, view.width, view.height, view.stride)?;
+        }
+        self.frontend
+            .process_frame(t_ns, &self.frames, &prediction, &self.masks)?;
+        self.last_frame_t_ns = Some(t_ns);
+
+        // The estimator reads only the ids and the observed pixels
+        // (`optical_flow.h:186-215`).
+        let mut observations: estimator::FlowObservations =
+            estimator::FlowObservations::new(t_ns, self.camera_count);
+        for (cam_id, keypoints) in self.frontend.frame().cameras.iter().enumerate() {
+            let Some(slot) = observations.cameras.get_mut(cam_id) else {
+                continue;
+            };
+            for (index, id) in keypoints.ids.iter().enumerate() {
+                let warp: frontend::se2::AffineCompact2f = keypoints.transform(index);
+                slot.insert(*id, warp.translation);
+            }
+        }
+        self.observations = std::sync::Arc::new(observations);
+
+        let outcome: estimator::FrameOutcome<S> = self
+            .estimator
+            .process_frame(std::sync::Arc::clone(&self.observations))?;
+
+        let status: VioStatus = match outcome {
+            estimator::FrameOutcome::NeedMoreImu => VioStatus::NeedMoreImu,
+            estimator::FrameOutcome::Measured(stats) => {
+                self.last_stats = Some(stats);
+                // `:592-620`: the two feedback values, in basalt's order.
+                self.publish_state();
+                self.publish_depth_guess()?;
+                VioStatus::Tracking
+            }
+        };
+
+        let (world_from_rig, velocity, gyro_bias, accel_bias) = match self.estimator.state() {
+            Some(state) => (
+                pose_to_array(&Isometry3::from_parts(
+                    state.t_w_i.translation.map(lie::LieScalar::to_f64).into(),
+                    *state.t_w_i.rotation.cast::<f64>().quaternion(),
+                )),
+                [
+                    state.vel_w_i[0].to_f64(),
+                    state.vel_w_i[1].to_f64(),
+                    state.vel_w_i[2].to_f64(),
+                ],
+                [
+                    state.bias_gyro[0].to_f64(),
+                    state.bias_gyro[1].to_f64(),
+                    state.bias_gyro[2].to_f64(),
+                ],
+                [
+                    state.bias_accel[0].to_f64(),
+                    state.bias_accel[1].to_f64(),
+                    state.bias_accel[2].to_f64(),
+                ],
+            ),
+            None => (
+                pose_to_array(&Isometry3::identity()),
+                [0.0; 3],
+                [0.0; 3],
+                [0.0; 3],
+            ),
+        };
+        let status: VioStatus = if self.estimator.is_initialized() {
+            status
+        } else {
+            VioStatus::NotInitialised
+        };
+
+        Ok(VioResult {
+            status,
+            t_ns,
+            world_from_rig,
+            velocity,
+            gyro_bias,
+            accel_bias,
+        })
+    }
+
+    /// `processImu(curr_t_ns)` (`frame_to_frame_optical_flow.h:157-201`).
+    ///
+    /// The same three-part loop the estimator runs, over the frontend's own
+    /// buffer and at `f64`: skip up to the previous frame, integrate up to this
+    /// one, then close the interval by retiming the next sample. The bias
+    /// calibration happens in `f32` and is cast back (`:171-178`), which is what
+    /// `Calibration<Scalar>` with `Scalar = float` means here.
+    fn frontend_preintegrate(
+        &mut self,
+        curr_t_ns: i64,
+        latest: &types::PoseVelBiasState<f64>,
+    ) -> imu::IntegratedImuMeasurement<f64> {
+        let prev_t_ns: i64 = self.last_frame_t_ns.unwrap_or(-1);
+        let mut pim: imu::IntegratedImuMeasurement<f64> =
+            imu::IntegratedImuMeasurement::new(prev_t_ns, &latest.bias_gyro, &latest.bias_accel);
+        if self.frontend_pending.is_none() {
+            self.frontend_pending = self.frontend_pop();
+        }
+        while let Some(sample) = self.frontend_pending {
+            if sample.t_ns > prev_t_ns {
+                break;
+            }
+            self.frontend_pending = self.frontend_pop();
+        }
+        while let Some(sample) = self.frontend_pending {
+            if sample.t_ns > curr_t_ns {
+                break;
+            }
+            if pim
+                .integrate(
+                    &sample,
+                    &self.frontend_noise.accel_cov,
+                    &self.frontend_noise.gyro_cov,
+                )
+                .is_err()
+            {
+                return pim;
+            }
+            self.frontend_pending = self.frontend_pop();
+        }
+        // `:195-198`: "Pretend last IMU sample before now happened now".
+        if pim.get_start_t_ns() + pim.get_dt_ns() < curr_t_ns
+            && let Some(sample) = self.frontend_pending
+        {
+            let retimed: imu::ImuSample = imu::ImuSample {
+                t_ns: curr_t_ns,
+                ..sample
+            };
+            let _ = pim.integrate(
+                &retimed,
+                &self.frontend_noise.accel_cov,
+                &self.frontend_noise.gyro_cov,
+            );
+        }
+        pim
+    }
+
+    /// One sample off the frontend's buffer, calibrated in `f32` and cast back
+    /// to `f64` (`frame_to_frame_optical_flow.h:171-178`).
+    fn frontend_pop(&mut self) -> Option<imu::ImuSample> {
+        let sample: imu::ImuSample = self.frontend_imu.pop_front()?;
+        let accel: Vector3<f32> = self
+            .calib_f32
+            .calib_accel_bias
+            .calibrated(&sample.accel.cast());
+        let gyro: Vector3<f32> = self
+            .calib_f32
+            .calib_gyro_bias
+            .calibrated(&sample.gyro.cast());
+        Some(imu::ImuSample {
+            t_ns: sample.t_ns,
+            gyro: gyro.cast(),
+            accel: accel.cast(),
+        })
+    }
+
+    /// `opt_flow_state_queue->push(data)` (`sqrt_keypoint_vio.cpp:620`).
+    fn publish_state(&mut self) {
+        if let Some(state) = self.estimator.state() {
+            self.latest_state = Some(types::PoseVelBiasState {
+                t_ns: state.t_ns,
+                t_w_i: state.t_w_i.cast(),
+                vel_w_i: state.vel_w_i.map(lie::LieScalar::to_f64),
+                bias_gyro: state.bias_gyro.map(lie::LieScalar::to_f64),
+                bias_accel: state.bias_accel.map(lie::LieScalar::to_f64),
+            });
+            self.first_state_arrived = true;
+        }
+    }
+
+    /// `opt_flow_depth_guess_queue->push(avg_depth)` (`:583-604`).
+    ///
+    /// `num_features / Σ inverse-depth`, or `optical_flow_matching_default_depth`
+    /// when the sum is not positive. Only computed when the config asks for
+    /// `REPROJ_AVG_DEPTH`, which every shipped config does.
+    fn publish_depth_guess(&mut self) -> Result<(), VioError> {
+        if self.estimator.ba.calib.t_i_c.is_empty()
+            || self.frontend.config().optical_flow_matching_guess_type
+                != config::MatchingGuessType::ReprojAvgDepth
+        {
+            return Ok(());
+        }
+        let projections: Vec<Vec<nalgebra::Vector4<S>>> = self
+            .estimator
+            .ba
+            .compute_projections(self.estimator.last_state_t_ns())
+            .map_err(estimator::EstimatorError::from)?;
+        let mut avg_invdepth: f64 = 0.0;
+        let mut num_features: f64 = 0.0;
+        for cam in &projections {
+            for entry in cam {
+                avg_invdepth += entry[2].to_f64();
+            }
+            num_features += cam.len() as f64;
+        }
+        let valid: bool = avg_invdepth > 0.0 && num_features > 0.0;
+        let default_depth: f32 = self.frontend.config().optical_flow_matching_default_depth;
+        let avg_depth: f64 = if valid {
+            num_features / avg_invdepth
+        } else {
+            f64::from(default_depth)
+        };
+        self.frontend.set_depth_guess(avg_depth as f32);
+        Ok(())
+    }
+}
+
+/// The frameset geometry checks of [`Vio::track`], shared with [`StubVio`].
+///
+/// Caller-controlled `width`, `height` and `stride`: an unchecked
+/// `stride * height` panics in debug and wraps to an accepted zero in release,
+/// so the product is checked (D32).
+///
+/// # Errors
+///
+/// [`VioError::CameraCountMismatch`], [`VioError::StrideTooSmall`],
+/// [`VioError::ImageSizeOverflow`] or [`VioError::ShortImage`].
+pub fn check_frameset(images: &[ImageView<'_>], camera_count: usize) -> Result<(), VioError> {
+    if images.len() != camera_count {
+        return Err(VioError::CameraCountMismatch {
+            expected: camera_count,
+            actual: images.len(),
+        });
+    }
+    for (index, image) in images.iter().enumerate() {
+        if image.stride < image.width {
+            return Err(VioError::StrideTooSmall {
+                index,
+                width: image.width,
+                stride: image.stride,
+            });
+        }
+        let needed: usize =
+            image
+                .stride
+                .checked_mul(image.height)
+                .ok_or(VioError::ImageSizeOverflow {
+                    index,
+                    height: image.height,
+                    stride: image.stride,
+                })?;
+        if image.data.len() < needed {
+            return Err(VioError::ShortImage {
+                index,
+                height: image.height,
+                stride: image.stride,
+                len: image.data.len(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Flatten an isometry into `[tx, ty, tz, qx, qy, qz, qw]`.
 fn pose_to_array(pose: &Isometry3<f64>) -> [f64; 7] {
     let rotation: UnitQuaternion<f64> = pose.rotation;
@@ -313,7 +783,7 @@ mod tests {
 
     #[test]
     fn a_frame_without_imu_needs_more_imu() {
-        let mut vio: Vio = Vio::new(Config::default());
+        let mut vio: StubVio = StubVio::new(Config::default());
         let pixels: Vec<u8> = vec![0; 16];
         let images: [ImageView<'_>; 2] = [image(&pixels, 4, 4), image(&pixels, 4, 4)];
         let result: VioResult = vio.track(1_000, &images).unwrap();
@@ -325,7 +795,7 @@ mod tests {
 
     #[test]
     fn imu_lifts_the_frame_out_of_need_more_imu() {
-        let mut vio: Vio = Vio::new(Config {
+        let mut vio: StubVio = StubVio::new(Config {
             camera_count: 1,
             min_imu_samples: 2,
         });
@@ -344,7 +814,7 @@ mod tests {
 
     #[test]
     fn repeated_imu_timestamps_are_rejected() {
-        let mut vio: Vio = Vio::new(Config::default());
+        let mut vio: StubVio = StubVio::new(Config::default());
         vio.push_imu(5, [0.0; 3], [0.0; 3]).unwrap();
         assert_eq!(
             vio.push_imu(5, [0.0; 3], [0.0; 3]),
@@ -358,7 +828,7 @@ mod tests {
 
     #[test]
     fn a_frameset_of_the_wrong_width_is_rejected() {
-        let mut vio: Vio = Vio::new(Config::default());
+        let mut vio: StubVio = StubVio::new(Config::default());
         let pixels: Vec<u8> = vec![0; 16];
         assert_eq!(
             vio.track(0, &[image(&pixels, 4, 4)]),
@@ -371,7 +841,7 @@ mod tests {
 
     #[test]
     fn a_short_buffer_is_rejected() {
-        let mut vio: Vio = Vio::new(Config {
+        let mut vio: StubVio = StubVio::new(Config {
             camera_count: 1,
             min_imu_samples: 1,
         });
@@ -404,7 +874,7 @@ mod tests {
 
     #[test]
     fn an_image_whose_size_overflows_is_rejected() {
-        let mut vio: Vio = Vio::new(Config {
+        let mut vio: StubVio = StubVio::new(Config {
             camera_count: 1,
             min_imu_samples: 1,
         });
@@ -429,7 +899,7 @@ mod tests {
         /// follow it is rejected, and the accepted state does not move.
         #[test]
         fn non_monotonic_imu_is_always_rejected(first in -1_000_000i64..1_000_000, back in 0i64..1_000_000) {
-            let mut vio: Vio = Vio::new(Config::default());
+            let mut vio: StubVio = StubVio::new(Config::default());
             vio.push_imu(first, [0.0; 3], [0.0; 3]).unwrap();
             let result: Result<(), VioError> = vio.push_imu(first - back, [0.0; 3], [0.0; 3]);
             prop_assert_eq!(

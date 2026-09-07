@@ -91,9 +91,16 @@ impl VioResult {
 }
 
 /// The estimator, driven one frameset at a time.
+///
+/// Still wrapping [`slam_rs::StubVio`], the pre-estimator frameset validator:
+/// the real pipeline is `slam_rs::Vio`, which takes basalt's own config and
+/// calibration, and pointing this class at it — with the config and calibration
+/// coming across the boundary — is stage S9's deliverable together with the
+/// Realtime mode. The Python surface below does not change when that happens
+/// except for the constructor.
 #[pyclass(module = "slam_rs._core")]
 pub struct Vio {
-    inner: slam_rs::Vio,
+    inner: slam_rs::StubVio,
 }
 
 #[pymethods]
@@ -106,7 +113,7 @@ impl Vio {
             return Err(PyValueError::new_err("camera_count must be at least 1"));
         }
         Ok(Self {
-            inner: slam_rs::Vio::new(Config {
+            inner: slam_rs::StubVio::new(Config {
                 camera_count,
                 min_imu_samples,
             }),
