@@ -12,8 +12,7 @@ use numpy::{
 use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
 use slam_rs::calib::{
-    CalibError, Calibration as CoreCalibration, CameraParts as CoreCameraParts,
-    ImuParts as CoreImuParts,
+    Calibration as CoreCalibration, CameraParts as CoreCameraParts, ImuParts as CoreImuParts,
 };
 use slam_rs::config::VioConfig as CoreVioConfig;
 use slam_rs::frontend::detect::CellGrid;
@@ -25,8 +24,8 @@ use slam_rs::frontend::patterns::Pattern51;
 use slam_rs::image::ImageU16;
 use slam_rs::{Config, ImageView, VioError};
 
-/// Map a core error onto `ValueError`.
-fn to_py_err(error: VioError) -> PyErr {
+/// Map any core error onto `ValueError`, which is what every refusal here is.
+fn value_error<E: std::fmt::Display>(error: E) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
 
@@ -136,7 +135,7 @@ impl Vio {
 
     /// Add one IMU sample: `gyro` in rad/s, `accel` in m/s², both in the rig frame.
     fn push_imu(&mut self, t_ns: i64, gyro: [f64; 3], accel: [f64; 3]) -> PyResult<()> {
-        self.inner.push_imu(t_ns, gyro, accel).map_err(to_py_err)
+        self.inner.push_imu(t_ns, gyro, accel).map_err(value_error)
     }
 
     /// Add `n` IMU samples at once: `t_ns` is `int64[n]`, `gyro` and `accel` are `float64[n, 3]`.
@@ -166,7 +165,7 @@ impl Vio {
             }
             Ok::<(), VioError>(())
         })
-        .map_err(to_py_err)
+        .map_err(value_error)
     }
 
     /// Process one frameset: `images` holds one `uint8[h, w]` array per camera.
@@ -193,7 +192,7 @@ impl Vio {
                     .collect();
                 self.inner.track(t_ns, &views)
             })
-            .map_err(to_py_err)?;
+            .map_err(value_error)?;
         Ok(VioResult { inner: result })
     }
 }
@@ -227,18 +226,31 @@ fn gray_array<'py>(
     Ok(array.readonly())
 }
 
-/// Copy one C-contiguous `uint8[h, w]` array out of Python.
-fn gray_image(object: &Bound<'_, PyAny>, index: usize) -> PyResult<GrayImage> {
-    let readonly: PyReadonlyArray2<'_, u8> = gray_array(object, index)?;
-    let shape: Vec<usize> = readonly.shape().to_vec();
+/// The pixels, width and height of an array [`gray_array`] has accepted.
+///
+/// `as_slice` refuses a non-contiguous array, which [`gray_array`] has already
+/// ruled out; the message is here so the refusal has one wording wherever the
+/// two callers reach it.
+fn gray_pixels<'a>(
+    readonly: &'a PyReadonlyArray2<'_, u8>,
+    index: usize,
+) -> PyResult<(&'a [u8], usize, usize)> {
+    let shape: &[usize] = readonly.shape();
     let pixels: &[u8] = readonly.as_slice().map_err(|_| {
         PyValueError::new_err(format!(
             "image {index} must be C-contiguous; pass numpy.ascontiguousarray(image)"
         ))
     })?;
+    Ok((pixels, shape[1], shape[0]))
+}
+
+/// Copy one C-contiguous `uint8[h, w]` array out of Python.
+fn gray_image(object: &Bound<'_, PyAny>, index: usize) -> PyResult<GrayImage> {
+    let readonly: PyReadonlyArray2<'_, u8> = gray_array(object, index)?;
+    let (pixels, width, height) = gray_pixels(&readonly, index)?;
     Ok(GrayImage {
-        width: shape[1],
-        height: shape[0],
+        width,
+        height,
         pixels: pixels.to_vec(),
     })
 }
@@ -267,7 +279,7 @@ fn float64_triples(object: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<[f64; 
     let array: &Bound<'_, PyArray2<f64>> = object
         .cast::<PyArray2<f64>>()
         .map_err(|_| PyValueError::new_err(format!("{name} must be a 2-D float64 numpy array")))?;
-    let shape: Vec<usize> = array.shape().to_vec();
+    let shape: &[usize] = array.shape();
     if shape[1] != 3 {
         return Err(PyValueError::new_err(format!(
             "{name} must have shape (n, 3), got {shape:?}"
@@ -317,16 +329,13 @@ impl VioConfig {
     #[staticmethod]
     fn from_json(text: &str) -> PyResult<Self> {
         Ok(Self {
-            inner: CoreVioConfig::from_json_str(text)
-                .map_err(|error| PyValueError::new_err(error.to_string()))?,
+            inner: CoreVioConfig::from_json_str(text).map_err(value_error)?,
         })
     }
 
     /// Write the config back in basalt's shape, `value0` wrapper and all.
     fn to_json(&self) -> PyResult<String> {
-        self.inner
-            .to_json_string()
-            .map_err(|error| PyValueError::new_err(error.to_string()))
+        self.inner.to_json_string().map_err(value_error)
     }
 
     /// `config.optical_flow_image_safe_radius`: the circular mask that hides a
@@ -376,7 +385,7 @@ impl Calibration {
     #[staticmethod]
     fn from_json(text: &str) -> PyResult<Self> {
         Ok(Self {
-            inner: CoreCalibration::<f64>::from_json_str(text).map_err(calib_error)?,
+            inner: CoreCalibration::<f64>::from_json_str(text).map_err(value_error)?,
         })
     }
 
@@ -393,13 +402,13 @@ impl Calibration {
         }
         Ok(Self {
             inner: CoreCalibration::from_catalog_parts(&parts, &imu_parts(imu)?)
-                .map_err(calib_error)?,
+                .map_err(value_error)?,
         })
     }
 
     /// Write the calibration back in basalt's shape, `value0` wrapper and all.
     fn to_json(&self) -> PyResult<String> {
-        self.inner.to_json_string().map_err(calib_error)
+        self.inner.to_json_string().map_err(value_error)
     }
 
     /// Cameras on the rig.
@@ -603,9 +612,6 @@ impl OpticalFlow {
         epipolar_per_camera: bool,
         max_keypoints: Option<usize>,
     ) -> PyResult<Self> {
-        if threads == 0 {
-            return Err(PyValueError::new_err("threads must be at least 1"));
-        }
         let defaults: FrontendOptions = FrontendOptions::default();
         let options: FrontendOptions = FrontendOptions {
             epipolar_per_camera,
@@ -617,7 +623,7 @@ impl OpticalFlow {
             &calibration_argument(calibration)?,
             options,
         )
-        .map_err(frontend_error)?;
+        .map_err(value_error)?;
         let cameras: usize = inner.camera_count();
         Ok(Self {
             inner,
@@ -664,27 +670,24 @@ impl OpticalFlow {
         t_ns: i64,
         images: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<FlowFrame> {
-        if let Some(last) = self.inner.t_ns()
-            && t_ns <= last
-        {
-            return Err(PyValueError::new_err(format!(
-                "frameset timestamps must increase: got {t_ns} after {last}"
-            )));
+        // Refuse the frameset's width before widening anything: the core would
+        // refuse it too, but only after every image had been copied in. The
+        // buffer is sized once, at construction, so nothing here resizes it.
+        let cameras: usize = self.inner.camera_count();
+        if images.len() != cameras {
+            return Err(value_error(FrontendError::CameraCountMismatch {
+                expected: cameras,
+                actual: images.len(),
+            }));
         }
         // Widen here, where the GIL is still held: the numpy borrow cannot
         // outlive it. `fill_from_u8_strided` reuses the buffer whenever the
         // geometry is unchanged, which is every frame after the first.
-        self.images.resize_with(images.len(), ImageU16::default);
         for (index, image) in images.iter().enumerate() {
             let readonly: PyReadonlyArray2<'_, u8> = gray_array(image, index)?;
-            let shape: Vec<usize> = readonly.shape().to_vec();
-            let pixels: &[u8] = readonly.as_slice().map_err(|_| {
-                PyValueError::new_err(format!(
-                    "image {index} must be C-contiguous; pass numpy.ascontiguousarray(image)"
-                ))
-            })?;
+            let (pixels, width, height) = gray_pixels(&readonly, index)?;
             self.images[index]
-                .fill_from_u8_strided(pixels, shape[1], shape[0], shape[1])
+                .fill_from_u8_strided(pixels, width, height, width)
                 .map_err(|error| PyValueError::new_err(format!("image {index}: {error}")))?;
         }
 
@@ -719,7 +722,7 @@ enum ProcessError {
 impl From<ProcessError> for PyErr {
     fn from(error: ProcessError) -> Self {
         match error {
-            ProcessError::Frontend(inner) => frontend_error(inner),
+            ProcessError::Frontend(inner) => value_error(inner),
             ProcessError::IdOverflow(id) => {
                 PyValueError::new_err(format!("keypoint id {id} does not fit in an int64"))
             }
@@ -786,7 +789,7 @@ fn calibration_argument(object: &Bound<'_, PyAny>) -> PyResult<CoreCalibration<f
             "calibration must be a Calibration or a basalt calibration JSON string",
         )
     })?;
-    CoreCalibration::<f64>::from_json_str(&text).map_err(calib_error)
+    CoreCalibration::<f64>::from_json_str(&text).map_err(value_error)
 }
 
 /// A [`VioConfig`] or one of basalt's config files as text.
@@ -797,15 +800,13 @@ fn config_argument(object: &Bound<'_, PyAny>) -> PyResult<CoreVioConfig> {
     let text: String = object.extract().map_err(|_| {
         PyValueError::new_err("config must be a VioConfig or a basalt config JSON string")
     })?;
-    CoreVioConfig::from_json_str(&text).map_err(|error| PyValueError::new_err(error.to_string()))
+    CoreVioConfig::from_json_str(&text).map_err(value_error)
 }
 
 /// One `slam_rs.catalog_feed.CameraCalib`, read attribute by attribute.
 fn camera_parts(object: &Bound<'_, PyAny>, index: usize) -> PyResult<CoreCameraParts<f64>> {
     let what: String = format!("camera {index}");
-    let rows: Vec<Vec<f64>> = attribute(object, "imu_T_cam", &what)?
-        .extract()
-        .map_err(|_| wrong_type(&what, "imu_T_cam", "a 4x4 float matrix"))?;
+    let rows: Vec<Vec<f64>> = extract_attribute(object, "imu_T_cam", &what, "a 4x4 float matrix")?;
     if rows.len() != 4 || rows.iter().any(|row| row.len() != 4) {
         return Err(wrong_type(&what, "imu_T_cam", "a 4x4 float matrix"));
     }
@@ -814,21 +815,20 @@ fn camera_parts(object: &Bound<'_, PyAny>, index: usize) -> PyResult<CoreCameraP
         imu_t_cam_row_major[4 * row..4 * row + 4].copy_from_slice(values);
     }
     Ok(CoreCameraParts {
-        width: size_attribute(object, "width", &what)?,
-        height: size_attribute(object, "height", &what)?,
-        fx: float_attribute(object, "fx", &what)?,
-        fy: float_attribute(object, "fy", &what)?,
-        cx: float_attribute(object, "cx", &what)?,
-        cy: float_attribute(object, "cy", &what)?,
-        model: attribute(object, "model", &what)?
-            .extract()
-            .map_err(|_| wrong_type(&what, "model", "a string"))?,
-        distortion: attribute(object, "distortion", &what)?
-            .extract()
-            .map_err(|_| wrong_type(&what, "distortion", "a float sequence"))?,
-        distortion_valid_radius: attribute(object, "distortion_valid_radius", &what)?
-            .extract()
-            .map_err(|_| wrong_type(&what, "distortion_valid_radius", "a float or None"))?,
+        width: extract_attribute(object, "width", &what, "a non-negative integer")?,
+        height: extract_attribute(object, "height", &what, "a non-negative integer")?,
+        fx: extract_attribute(object, "fx", &what, "a float")?,
+        fy: extract_attribute(object, "fy", &what, "a float")?,
+        cx: extract_attribute(object, "cx", &what, "a float")?,
+        cy: extract_attribute(object, "cy", &what, "a float")?,
+        model: extract_attribute(object, "model", &what, "a string")?,
+        distortion: extract_attribute(object, "distortion", &what, "a float sequence")?,
+        distortion_valid_radius: extract_attribute(
+            object,
+            "distortion_valid_radius",
+            &what,
+            "a float or None",
+        )?,
         imu_t_cam_row_major,
     })
 }
@@ -840,14 +840,12 @@ fn camera_parts(object: &Bound<'_, PyAny>, index: usize) -> PyResult<CoreCameraP
 fn imu_parts(object: &Bound<'_, PyAny>) -> PyResult<CoreImuParts<f64>> {
     let what: &str = "imu";
     Ok(CoreImuParts {
-        frequency_hz: float_attribute(object, "frequency_hz", what)?,
-        gyro_noise_std: float_attribute(object, "gyro_noise_std", what)?,
-        accel_noise_std: float_attribute(object, "accel_noise_std", what)?,
-        gyro_bias_std: float_attribute(object, "gyro_bias_std", what)?,
-        accel_bias_std: float_attribute(object, "accel_bias_std", what)?,
-        cam_time_offset_ns: attribute(object, "cam_time_offset_ns", what)?
-            .extract()
-            .map_err(|_| wrong_type(what, "cam_time_offset_ns", "an integer"))?,
+        frequency_hz: extract_attribute(object, "frequency_hz", what, "a float")?,
+        gyro_noise_std: extract_attribute(object, "gyro_noise_std", what, "a float")?,
+        accel_noise_std: extract_attribute(object, "accel_noise_std", what, "a float")?,
+        gyro_bias_std: extract_attribute(object, "gyro_bias_std", what, "a float")?,
+        accel_bias_std: extract_attribute(object, "accel_bias_std", what, "a float")?,
+        cam_time_offset_ns: extract_attribute(object, "cam_time_offset_ns", what, "an integer")?,
     })
 }
 
@@ -862,33 +860,25 @@ fn attribute<'py>(
         .map_err(|_| PyValueError::new_err(format!("{what}: no attribute {name:?}")))
 }
 
-/// One `float` attribute.
-fn float_attribute(object: &Bound<'_, PyAny>, name: &str, what: &str) -> PyResult<f64> {
+/// One attribute of a calibration dataclass, as the type the field it feeds asks for.
+///
+/// `expected` is how that type reads in the refusal: the caller names it, because
+/// `u32` is "a non-negative integer" to a caller who typed a pixel count and
+/// `Option<f64>` is "a float or None".
+fn extract_attribute<'py, T: FromPyObjectOwned<'py>>(
+    object: &Bound<'py, PyAny>,
+    name: &str,
+    what: &str,
+    expected: &str,
+) -> PyResult<T> {
     attribute(object, name, what)?
         .extract()
-        .map_err(|_| wrong_type(what, name, "a float"))
-}
-
-/// One pixel-count attribute, which must be a non-negative `int`.
-fn size_attribute(object: &Bound<'_, PyAny>, name: &str, what: &str) -> PyResult<u32> {
-    attribute(object, name, what)?
-        .extract()
-        .map_err(|_| wrong_type(what, name, "a non-negative integer"))
+        .map_err(|_| wrong_type(what, name, expected))
 }
 
 /// The one shape every calibration-attribute error takes.
 fn wrong_type(what: &str, name: &str, expected: &str) -> PyErr {
     PyValueError::new_err(format!("{what}.{name} must be {expected}"))
-}
-
-/// Map a calibration error onto `ValueError`.
-fn calib_error(error: CalibError) -> PyErr {
-    PyValueError::new_err(error.to_string())
-}
-
-/// Map a frontend error onto `ValueError`.
-fn frontend_error(error: FrontendError) -> PyErr {
-    PyValueError::new_err(error.to_string())
 }
 
 /// The compiled core of the `slam_rs` package.

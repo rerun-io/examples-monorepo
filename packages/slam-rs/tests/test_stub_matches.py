@@ -28,7 +28,8 @@ from slam_rs import _core
 
 STUB_PATH: Path = Path(__file__).resolve().parents[1] / "slam_rs" / "_core.pyi"
 STUB_TREE: ast.Module = ast.parse(STUB_PATH.read_text())
-CLASS_NAMES: tuple[str, ...] = ("Vio", "VioResult", "VioStatus", "VioConfig", "Calibration", "OpticalFlow", "FlowFrame")
+CLASS_NAMES: tuple[str, ...] = tuple(node.name for node in STUB_TREE.body if isinstance(node, ast.ClassDef))
+"""The stub's own class list, so a class added to it is checked without editing this file."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,16 +123,20 @@ def _stub_module_names() -> set[str]:
 def _stub_class_members(class_name: str) -> set[str]:
     """Method, property and attribute names declared on one stub class."""
     members: set[str] = set()
-    for node in STUB_TREE.body:
-        if isinstance(node, ast.ClassDef) and node.name == class_name:
-            for item in node.body:
-                if isinstance(item, ast.FunctionDef):
-                    members.add(item.name)
-                elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
-                    members.add(item.target.id)
-                elif isinstance(item, ast.Assign):
-                    members.update(target.id for target in item.targets if isinstance(target, ast.Name))
+    for item in _stub_class(class_name).body:
+        if isinstance(item, ast.FunctionDef):
+            members.add(item.name)
+        elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+            members.add(item.target.id)
+        elif isinstance(item, ast.Assign):
+            members.update(target.id for target in item.targets if isinstance(target, ast.Name))
     return members
+
+
+def test_the_stub_declares_exactly_the_extension_classes() -> None:
+    """Every check below walks :data:`CLASS_NAMES`, so the two sides must agree on it."""
+    exported: set[str] = {name for name in dir(_core) if isinstance(getattr(_core, name), type)}
+    assert set(CLASS_NAMES) == exported
 
 
 def test_every_public_module_name_is_declared() -> None:
@@ -171,7 +176,6 @@ def test_every_declared_class_member_exists_at_runtime() -> None:
 def test_every_method_signature_matches_the_stub() -> None:
     """Names, order, the keyword-only split and defaults, per method."""
     wrong: dict[str, tuple[tuple[Parameter, ...], tuple[Parameter, ...]]] = {}
-    checked: int = 0
     for class_name in CLASS_NAMES:
         runtime_class: type = getattr(_core, class_name)
         for name, function in _stub_functions(class_name).items():
@@ -179,12 +183,9 @@ def test_every_method_signature_matches_the_stub() -> None:
                 continue
             declared: tuple[Parameter, ...] = stub_parameters(function)
             actual: tuple[Parameter, ...] = runtime_parameters(getattr(runtime_class, name))
-            checked += 1
             if declared != actual:
                 wrong[f"{class_name}.{name}"] = (declared, actual)
     assert not wrong, f"_core.pyi disagrees with the extension: {wrong}"
-    # 17 methods today; a floor, so a walk that silently matched nothing fails.
-    assert checked >= 15, f"only {checked} signatures were compared"
 
 
 def test_every_constructor_signature_matches_the_stub() -> None:
@@ -199,9 +200,6 @@ def test_every_constructor_signature_matches_the_stub() -> None:
         if declared != actual:
             wrong[class_name] = (declared, actual)
     assert not wrong, f"_core.pyi disagrees with the extension: {wrong}"
-    # The three constructible classes, so a stub that dropped one is caught.
-    constructors: set[str] = {name for name in CLASS_NAMES if "__init__" in _stub_functions(name)}
-    assert constructors == {"Vio", "VioConfig", "OpticalFlow"}, constructors
 
 
 def test_a_class_the_stub_gives_no_constructor_cannot_be_constructed() -> None:

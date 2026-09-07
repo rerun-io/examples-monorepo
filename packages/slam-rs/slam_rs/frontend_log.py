@@ -28,11 +28,11 @@ from pathlib import Path
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import Float32, Int64, UInt8, UInt64
+from jaxtyping import Float32, Int32, Int64, UInt8, UInt64
 from numpy import ndarray
 
 from slam_rs import _core
-from slam_rs.catalog_feed import CameraCalib
+from slam_rs.catalog_feed import RIG_ENTITY, CameraCalib
 
 TRAIL_LENGTH: int = 10
 """Positions kept per track for the trail behind it."""
@@ -54,7 +54,7 @@ STATS_ENTITY: str = "/stats/frontend"
 
 def camera_entity(index: int) -> str:
     """The dataset's own path for one camera's image plane."""
-    return f"/world/rig_00/cam_{index:02d}/pinhole"
+    return f"{RIG_ENTITY}/cam_{index:02d}/pinhole"
 
 
 _rising: UInt8[ndarray, " 255"] = np.arange(255, dtype=np.uint8)
@@ -186,13 +186,12 @@ class FrontendLogger:
             elapsed_ms: Wall time the ``process`` call took.
         """
         for index in range(self.camera_count):
-            entity: str = camera_entity(index)
             ids: Int64[ndarray, " n_tracks"] = frame.ids(index)
             positions: Float32[ndarray, "n_tracks 2"] = frame.positions(index)
             colors: UInt8[ndarray, "n_tracks 3"] = track_colors(ids)
-            rr.log(f"{entity}/keypoints", rr.Points2D(positions, colors=colors, radii=KEYPOINT_RADIUS_PX))
-            self._log_trails(entity, index, ids, positions, colors)
-            self._log_cells(entity, index, frame)
+            rr.log(f"{camera_entity(index)}/keypoints", rr.Points2D(positions, colors=colors, radii=KEYPOINT_RADIUS_PX))
+            self._log_trails(index, ids, positions, colors)
+            self._log_cells(index, frame)
             rr.log(f"{STATS_ENTITY}/cam_{index:02d}/num_tracks", rr.Scalars(float(frame.num_tracks(index))))
             rr.log(f"{STATS_ENTITY}/cam_{index:02d}/num_new", rr.Scalars(float(frame.num_new(index))))
         rr.log(f"{STATS_ENTITY}/frontend_ms", rr.Scalars(elapsed_ms))
@@ -200,7 +199,6 @@ class FrontendLogger:
 
     def _log_trails(
         self,
-        entity: str,
         index: int,
         ids: Int64[ndarray, " n_tracks"],
         positions: Float32[ndarray, "n_tracks 2"],
@@ -221,17 +219,19 @@ class FrontendLogger:
                 strips.append(np.array(trail, dtype=np.float32))
                 strip_colors.append(colors[slot])
         self.trails[index] = updated
-        rr.log(f"{entity}/trails", rr.LineStrips2D(strips, colors=strip_colors, radii=1.0))
+        rr.log(f"{camera_entity(index)}/trails", rr.LineStrips2D(strips, colors=strip_colors, radii=1.0))
 
-    def _log_cells(self, entity: str, index: int, frame: _core.FlowFrame) -> None:
+    def _log_cells(self, index: int, frame: _core.FlowFrame) -> None:
         """Draw the occupied detection cells over the image."""
-        occupancy: ndarray = frame.occupancy(index)
-        rows, columns = np.nonzero(occupancy)
+        occupancy: Int32[ndarray, "rows columns"] = frame.occupancy(index)
+        occupied: tuple[Int64[ndarray, " n_cells"], ...] = np.nonzero(occupancy)
+        rows: Int64[ndarray, " n_cells"] = occupied[0]
+        columns: Int64[ndarray, " n_cells"] = occupied[1]
         cell: int = frame.cell_size
-        x_start, y_start = frame.cell_origin
-        mins: Float32[ndarray, "n_cells 2"] = np.stack([x_start + columns * cell, y_start + rows * cell], axis=1).astype(np.float32)
+        origin: tuple[int, int] = frame.cell_origin
+        mins: Float32[ndarray, "n_cells 2"] = np.stack([origin[0] + columns * cell, origin[1] + rows * cell], axis=1).astype(np.float32)
         rr.log(
-            f"{entity}/cells",
+            f"{camera_entity(index)}/cells",
             rr.Boxes2D(mins=mins, sizes=np.full_like(mins, float(cell)), colors=CELL_COLOR),
         )
 
