@@ -65,6 +65,33 @@ def test_published_rig_T_cam_reads_the_quaternion_as_xyzw() -> None:
     assert rig_T_cam[3].tolist() == [0.0, 0.0, 0.0, 1.0]
 
 
+# ── the clockwise quarter turn ───────────────────────────────────────────
+
+SLAM_NATIVE_HEIGHT_PX: int = 480
+"""What both SLAM cameras' published pixel coordinates are measured in, before the turn."""
+
+
+def test_rotate_uv_cw90_lands_the_principal_point_on_the_rotated_one() -> None:
+    """The pixel map has to agree with what rotating the *calibration* does.
+
+    ``rotate_camera_calib_cw90deg`` moves camera-slam-left's principal point from
+    (322.8956, 240.4446) to (238.5554, 322.8956) — measured in
+    ``test_aria_vrs.py`` — so a detection at the native principal point must land
+    exactly there, or a control point would draw a quarter turn away from its tag.
+    """
+    published: dict[str, PublishedCamera] = read_calibration_json(REFERENCE_DIR / "R_01_easy.calibration.json")
+    cx, cy = published["cam0"].params[2:4]
+
+    rotated_uv_px: Float64[ndarray, "n_points 2"] = aria.rotate_uv_cw90(
+        np.array([[cx, cy], [0.0, 0.0]], dtype=np.float64), native_height_px=SLAM_NATIVE_HEIGHT_PX
+    )
+
+    assert rotated_uv_px.shape == (2, 2)
+    assert rotated_uv_px[0] == pytest.approx([238.5554400439367, 322.895555771704], abs=1e-9)
+    # The native top-left corner is the rotated top-right one: u = h - 1, v = 0.
+    assert rotated_uv_px[1] == pytest.approx([SLAM_NATIVE_HEIGHT_PX - 1.0, 0.0], abs=1e-12)
+
+
 # ── pseudo ground truth ──────────────────────────────────────────────────
 
 

@@ -9,6 +9,9 @@ they only make sense against each other:
   ``rig_T_sensor = imuR_T_device @ device_T_sensor``. Cameras land in simplecv's
   ``Fisheye62Parameters`` (Aria's FISHEYE624 minus the thin-prism terms, as in
   ``simplecv.data.hot3d_utils``), which is what ``log_pinhole`` consumes.
+  Gen1 records its cameras sideways, so ``from_provider(rotate_cw90=True)``
+  turns each of them a quarter turn clockwise for a converter that logs upright
+  frames, and ``rotate_uv_cw90`` turns published pixel coordinates the same way.
 * **The streams.** Frames and IMU samples in VRS record order, on Aria's DEVICE
   clock in nanoseconds — the clock the pGT and the control points are stamped
   with, so nothing needs shifting anywhere downstream.
@@ -34,7 +37,7 @@ import numpy as np
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from projectaria_tools.core import data_provider
-from projectaria_tools.core.calibration import CameraCalibration, DeviceCalibration, ImuCalibration
+from projectaria_tools.core.calibration import CameraCalibration, DeviceCalibration, ImuCalibration, rotate_camera_calib_cw90deg
 from projectaria_tools.core.sensor_data import ImageData, ImageDataRecord, MotionData, TimeDomain
 from projectaria_tools.core.stream_id import StreamId
 from scipy.spatial.transform import Rotation
@@ -167,10 +170,23 @@ class AriaRig:
     """Every IMU stream's pose in the rig frame; imu-right is the identity by construction."""
 
     @classmethod
-    def from_provider(cls, provider: data_provider.VrsDataProvider) -> AriaRig:
+    def from_provider(cls, provider: data_provider.VrsDataProvider, *, rotate_cw90: bool) -> AriaRig:
         """Read the device calibration out of an open VRS and rebase it on imu-right.
 
         The result holds one entry per camera and IMU stream of a Gen1 Aria.
+
+        Args:
+            provider: An open VRS.
+            rotate_cw90: Turn every camera a quarter turn clockwise, which a
+                converter that logs upright frames must, since Aria Gen1 records
+                its cameras sideways. ``rotate_camera_calib_cw90deg`` is what
+                keeps the pixels and their calibration describing the same rays:
+                the image size swaps, the principal point moves to
+                ``(h - 1 - cy, cx)``, the tangential and thin-prism terms swap
+                with it, and ``device_T_cam`` turns about the optical axis with
+                its translation untouched. Left False the calibration is the
+                factory's, which is what the published JSON describes and what
+                the published ground truth is posed in.
 
         Raises:
             ValueError: The file carries no factory calibration, or none for one
@@ -189,9 +205,12 @@ class AriaRig:
 
         cameras: dict[AriaStreamId, Fisheye62Parameters] = {}
         for stream_id in CAMERA_STREAM_IDS:
-            camera: CameraCalibration | None = calibration.get_camera_calib(STREAM_LABELS[stream_id])
-            if camera is None:
+            factory: CameraCalibration | None = calibration.get_camera_calib(STREAM_LABELS[stream_id])
+            if factory is None:
                 raise ValueError(f"this VRS has no {STREAM_LABELS[stream_id]} calibration, so {stream_id} has no rig pose")
+            # Rotated before anything is read off it, so the intrinsics and the
+            # pose that reach the rig both describe the frames a converter logs.
+            camera: CameraCalibration = rotate_camera_calib_cw90deg(factory) if rotate_cw90 else factory
             device_T_cam: Float64[ndarray, "4 4"] = np.asarray(camera.get_transform_device_camera().to_matrix(), dtype=np.float64)
             cameras[stream_id] = fisheye62_from_aria(
                 camera,
@@ -230,6 +249,25 @@ def read_rig_T_cam0(path: Path) -> Float64[ndarray, "4 4"]:
     rig_T_cam0[:3, :3] = Rotation.from_quat(np.asarray(published["qvec"], dtype=np.float64)).as_matrix()
     rig_T_cam0[:3, 3] = published["tvec"]
     return rig_T_cam0
+
+
+def rotate_uv_cw90(uv_px: Float64[ndarray, "n_points 2"], *, native_height_px: int) -> Float64[ndarray, "n_points 2"]:
+    """Turn pixel coordinates a quarter turn clockwise, with the image they name.
+
+    ``np.rot90(image, -1)`` puts the pixel at row ``v``, column ``u`` at row
+    ``u``, column ``h - 1 - v``, so this is that same map on ``(u, v)`` pairs.
+    It is what keeps a published detection on its tag once the frames are logged
+    upright, and it moves a native principal point onto the one
+    ``from_provider(rotate_cw90=True)`` reports.
+
+    Args:
+        uv_px: Coordinates in the camera's native image, ``[u, v]`` per row.
+        native_height_px: Height of that native image, in pixels.
+
+    Returns:
+        The same coordinates in the rotated image, ``[u, v]`` per row.
+    """
+    return np.stack([native_height_px - 1.0 - uv_px[:, 1], uv_px[:, 0]], axis=1)
 
 
 # ── streams ───────────────────────────────────────────────────────────────
