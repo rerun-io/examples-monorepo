@@ -14,6 +14,17 @@ of where the eye starts. That costs one re-logged strip per frameset — quadrat
 in the segment length, about 2 MB over the 412-frameset smoke segment and 200 MB
 over a 4,000-frameset one, so a long segment wants ``--max-framesets``.
 
+The three do not start in one frame. basalt initialises its world at the identity
+with gravity along z, while the ground truth is in the capture rig's own frame,
+so an unaligned overlay puts the estimate metres away from the truth it is being
+compared with. The run and the C++ reference therefore carry a
+:class:`rerun.Transform3D` — the rigid alignment onto the ground truth, the same
+one the ATE reports — and everything under them (the trajectory, the rig, the
+window and the landmarks) is logged in the estimator's own frame and drawn in the
+dataset's. The alignment is refreshed every :data:`ATE_EVERY` framesets and is
+the identity until enough poses have been associated, so the run visibly settles
+into place over the first second.
+
 The keyframe window is drawn as frustum wireframes rather than
 :class:`rerun.Pinhole` frusta: a ``Pinhole`` carries no colour, and colour is how
 a keyframe, a demoted pose block and the frames the last marginalization removed
@@ -29,11 +40,12 @@ import rerun.blueprint as rrb
 from jaxtyping import Bool, Float64, Int64, UInt8
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
+from simplecv.ops.umeyama import SimilarityTransform
 
 from slam_rs import _core
 from slam_rs.catalog_feed import CameraCalib
 from slam_rs.frontend_log import KEYPOINT_RADIUS_PX, camera_entity, track_colors
-from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, Trajectory, ate
+from slam_rs.trajectory import MIN_ASSOCIATED_POSES, Association, AteResult, Trajectory, associate, ate, rigid_alignment
 
 RUN_ENTITY: str = "/world/runs/slam_rs"
 """Where this run's estimate goes, beside the dataset's own ``/world/runs/gt``."""
@@ -63,6 +75,40 @@ FRUSTUM_DEPTH_M: float = 0.08
 """How far a window frame's wireframe extends, metres. An orientation marker, not a claim about range."""
 ATE_EVERY: int = 30
 """Framesets between two ATE-so-far points: about one a second, and each costs a rigid alignment."""
+
+IDENTITY: SimilarityTransform = SimilarityTransform(dst_R_src=np.eye(3), dst_t_src=np.zeros(3), scale=1.0)
+"""The alignment a run carries before enough of it has been associated with the ground truth."""
+
+
+def alignment_onto(source: Trajectory, target: Trajectory) -> SimilarityTransform:
+    """The rigid transform taking one trajectory into another's frame.
+
+    The association is driven by ``source`` — each of its poses takes the nearest
+    ``target`` pose within the tolerance — which is the convention the reference
+    manifest's own numbers were produced with.
+
+    Args:
+        source: Trajectory to move, e.g. the estimate.
+        target: Trajectory whose frame to move it into, e.g. the ground truth.
+
+    Returns:
+        The alignment, or the identity when too few poses associate for one to
+        mean anything.
+    """
+    if len(source) == 0 or len(target) == 0:
+        return IDENTITY
+    association: Association = associate(source, target)
+    if association.count < MIN_ASSOCIATED_POSES:
+        return IDENTITY
+    return rigid_alignment(
+        source.position_m[association.matched],
+        target.position_m[association.candidate_index[association.matched]],
+    )
+
+
+def log_alignment(entity: str, alignment: SimilarityTransform) -> None:
+    """Place one run's whole subtree in the frame its alignment maps into."""
+    rr.log(entity, rr.Transform3D(translation=alignment.dst_t_src, mat3x3=alignment.dst_R_src))
 
 
 def frustum_strip(camera: CameraCalib, depth_m: float = FRUSTUM_DEPTH_M) -> Float64[ndarray, "10 3"]:
@@ -151,7 +197,7 @@ class VioLogger:
     """Framesets logged, which paces the ATE-so-far."""
 
     def __post_init__(self) -> None:
-        """Log the estimated rig's static geometry and precompute the window wireframe."""
+        """Log the static geometry, place the C++ reference, and precompute the window wireframe."""
         log_run_rig(self.cameras)
         self.window_strip = frustum_strip(self.cameras[0])
 
@@ -165,6 +211,13 @@ class VioLogger:
             elapsed_ms: Wall time the ``track`` call took.
         """
         self.framesets += 1
+        if self.framesets == 1:
+            # Both the C++ trajectory and the ground truth are known before the
+            # replay starts, so this alignment is a constant of the run; it is
+            # written here rather than at construction because a row needs the
+            # caller's time cursor. The run's own alignment has no row until the
+            # first ATE, and a missing transform is the identity.
+            log_alignment(CPP_ENTITY, alignment_onto(self.cpp, self.ground_truth))
         pose: Float64[ndarray, " 7"] = result.world_from_rig
         self.estimate_t_ns.append(result.t_ns)
         self.estimate_position_m.append(pose[0:3].copy())
@@ -178,6 +231,7 @@ class VioLogger:
         self._log_scalars(result, snapshot, elapsed_ms)
         if self.framesets % ATE_EVERY == 0:
             self._log_ate()
+            log_alignment(RUN_ENTITY, alignment_onto(self.estimated(), self.ground_truth))
 
     def estimated(self) -> Trajectory:
         """Everything reported so far, on the replay's ``video_time`` clock."""
@@ -204,7 +258,11 @@ class VioLogger:
             )
 
     def _log_paths(self, t_ns: int) -> None:
-        """Draw the three trajectories, each up to the current cursor."""
+        """Draw the three trajectories, each up to the current cursor.
+
+        Each is logged in its own frame; the run entities' alignment transforms
+        are what bring the three together in the dataset's world.
+        """
         rr.log(
             f"{RUN_ENTITY}/trajectory",
             rr.LineStrips3D([np.array(self.estimate_position_m, dtype=np.float64).reshape(-1, 3)], colors=ESTIMATE_COLOR, radii=0.004),

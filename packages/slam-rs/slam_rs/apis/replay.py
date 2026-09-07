@@ -348,5 +348,8 @@ def main(config: Config) -> None:
             if len(reference) == 0:
                 continue
             result: AteResult = ate(estimate, reference)
-            print(f"vs {name}: {result.summary()}")
-            print(f"vs {name}: coverage {coverage(reference, estimate):.1%}")
+            print(
+                f"vs {name}: ATE rmse {result.rmse_m * 100:.2f} cm, max {result.max_m * 100:.2f} cm, "
+                f"median {result.median_m * 100:.2f} cm over {result.n_associated} of {len(estimate)} poses; "
+                f"{coverage(reference, estimate):.1%} of its span covered"
+            )
