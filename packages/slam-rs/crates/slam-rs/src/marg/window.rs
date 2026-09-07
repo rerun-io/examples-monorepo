@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 
-use crate::ba_base::BundleAdjustmentBase;
+use crate::ba_base::{BaError, BundleAdjustmentBase};
 use crate::imu::{ImuLinData, IntegratedImuMeasurement};
 use crate::lie::{LieScalar, So3};
 use crate::linearize::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
@@ -39,11 +39,14 @@ use crate::types::{
 
 /// What the schedule decided, `sqrt_keypoint_vio.cpp:724-880`.
 ///
-/// The four sets are disjoint by construction in C++ and the port checks it:
 /// `poses_to_marg` names pose blocks that leave, `kfs_to_marg` the subset of
 /// those that were keyframes hosting landmarks, `states_to_marg_all` full
 /// states that leave outright, and `states_to_marg_vel_bias` full states that
-/// keep their pose and lose their velocity and biases.
+/// keep their pose and lose their velocity and biases. So `poses_to_marg` is
+/// disjoint from both state sets, the two state sets are disjoint from each
+/// other, and `kfs_to_marg` is a subset of `poses_to_marg` rather than
+/// disjoint from it. C++ gets all of that from how it builds them; the port
+/// checks it ([`validate_schedule`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MarginalizeSchedule {
     /// `last_state_to_marg` (`:724`): the newest state the ordering reaches and
@@ -163,10 +166,21 @@ fn build_absolute_ordering<S: LieScalar>(
 /// Membership in `aom` is the same question as membership in the live maps:
 /// [`build_absolute_ordering`] just walked `frame_poses` and the prefix of
 /// `frame_states` up to `last_state_to_marg`, and nothing has changed since.
-/// The block size is what tells a pose from a full state, which is also what
-/// makes the four sets pairwise disjoint: `poses_to_marg` must be 6-row blocks
-/// and both state sets 15-row blocks.
-fn validate_schedule(aom: &AbsOrderMap, schedule: &MarginalizeSchedule) -> Result<(), MargError> {
+/// The block size is what tells a pose from a full state, and it is what keeps
+/// `poses_to_marg` disjoint from the two state sets: it must hold 6-row blocks
+/// and they must hold 15-row blocks. The two state sets are checked against
+/// each other below; `kfs_to_marg` is checked to be a *subset* of
+/// `poses_to_marg`, which is what C++ builds it as.
+///
+/// The last check is the one C++ only reaches from inside `computeDelta`
+/// (`ba_base.cpp:294`, `:297`), called at `sqrt_keypoint_vio.cpp:1171` on the
+/// **new** prior's ordering: every block of it must be frozen at its
+/// linearization point.
+fn validate_schedule<S: LieScalar>(
+    estimator: &BundleAdjustmentBase<S>,
+    aom: &AbsOrderMap,
+    schedule: &MarginalizeSchedule,
+) -> Result<(), MargError> {
     // `:729` and `:876`: every pose that leaves is a pose block of the window.
     for frame_id in &schedule.poses_to_marg {
         if !matches!(aom.get(*frame_id), Some((_, POSE_SIZE))) {
@@ -227,6 +241,40 @@ fn validate_schedule(aom: &AbsOrderMap, schedule: &MarginalizeSchedule) -> Resul
             frame_id: *frame_id,
         });
     }
+
+    // `ba_base.cpp:294`: `BASALT_ASSERT(frame_poses.at(kv.first).isLinearized())`
+    // for every 6-row block of the ordering `computeDelta` is given, which at
+    // `sqrt_keypoint_vio.cpp:1171` is the new prior's. Those blocks are the
+    // poses that survive plus the states that were just demoted
+    // ([`new_prior_ordering`]), and demotion copies the state's `linearized`
+    // flag over (`imu_types.h:206-215`), so both are decidable here — before
+    // `:1090-1112` has moved anything.
+    for (frame_id, pose) in &estimator.frame_poses {
+        if !schedule.poses_to_marg.contains(frame_id) && !pose.is_linearized() {
+            return Err(BaError::NotLinearized {
+                frame_id: *frame_id,
+            }
+            .into());
+        }
+    }
+    for frame_id in &schedule.states_to_marg_vel_bias {
+        // Proven by the block-size check above: the 15-row blocks of `aom` are
+        // exactly the `frame_states` prefix it was built from.
+        let Some(state) = estimator.frame_states.get(frame_id) else {
+            return Err(MargError::FrameNotInWindow {
+                frame_id: *frame_id,
+            });
+        };
+        if !state.is_linearized() {
+            return Err(BaError::NotLinearized {
+                frame_id: *frame_id,
+            }
+            .into());
+        }
+    }
+    // The remaining block is `last_state_to_marg`'s 15 rows
+    // (`ba_base.cpp:297`), which the caller checked is *not* linearized and is
+    // about to freeze (`:1086-1088`).
 
     Ok(())
 }
@@ -430,8 +478,10 @@ pub fn marginalize<S: LieScalar>(
     }
 
     // Everything the schedule claims about the window, checked here rather
-    // than discovered halfway through `:1090-1112`.
-    validate_schedule(&aom, schedule)?;
+    // than discovered halfway through `:1090-1112` or, for the linearization
+    // precondition, inside `compute_delta` at `:1171`, with the window already
+    // rewritten.
+    validate_schedule(estimator, &aom, schedule)?;
 
     // `:915-922`: the intervals whose two ends are both in the ordering.
     let imu_input: Option<ImuInput<'_, S>> = inputs.imu_lin_data.map(|lin_data| ImuInput {
@@ -580,6 +630,9 @@ pub fn marginalize<S: LieScalar>(
     // `:1147-1172`, trap 8. The prior comes out of the helper as
     // `P(x) = 0.5‖J x + res‖²`; putting it back into the delta-independent form
     // `P(x) = 0.5‖J (delta + x) + (res − J delta)‖²` is one subtraction.
+    // `compute_delta`'s own precondition, every block of this ordering frozen
+    // at its linearization point (`ba_base.cpp:294`, `:297`), was checked
+    // before the first mutation, in `validate_schedule` and at `:1086` above.
     let delta: DVector<S> = estimator.compute_delta(&marg_data.order)?;
     subtract_h_delta(&mut marg_data.b, &marg_data.h, &delta);
 
@@ -848,6 +901,23 @@ fn translation_of<S: LieScalar>(
 /// A squared prior that is not square is refused rather than handed to the
 /// eigensolver, which asserts on it. The square-root branch cannot be
 /// non-square: `HᵀH` is square whatever `H` is.
+///
+/// **A prior over no variables answers with the empty spectrum**, rather than
+/// with an error, because that is the answer: a 0x0 matrix has no eigenvalues.
+/// Neither library defines the empty problem — nalgebra asserts in its
+/// symmetric tridiagonalisation, and Eigen's `SelfAdjointEigenSolver` falls
+/// past its `n == 1` shortcut into `maxCoeff()` of an empty matrix
+/// (`Eigenvalues/SelfAdjointEigenSolver.h:437`), which `DenseBase::redux`
+/// asserts against (`Core/Redux.h:445`) — so the check has to happen here
+/// (decision D32). The value is publicly constructible as
+/// `MargLinData::default()`, and it is what the estimator holds before its
+/// first marginalization; every prior a marginalization *produces* is at least
+/// `last_state_to_marg`'s 15 rows wide ([`new_prior_ordering`]). This is not
+/// [`MargError::EmptyPriorOrder`], which [`check_marg_nullspace`] needs because
+/// it divides by the number of blocks (`sqrt_ba_base.cpp:96`); nothing here
+/// reads the ordering at all. The debug copy's own empty prior is the other
+/// shape — no rows over the live ordering's width — and squares to that many
+/// zero eigenvalues.
 pub fn check_eigenvalues<S: LieScalar>(mld: &MargLinData<S>) -> Result<DVector<f64>, MargError> {
     let h_d: DMatrix<f64> = mld.h.map(|v| v.to_f64());
     let h: DMatrix<f64> = if mld.is_sqrt {
@@ -861,6 +931,9 @@ pub fn check_eigenvalues<S: LieScalar>(mld: &MargLinData<S>) -> Result<DVector<f
         }
         h_d
     };
+    if h.ncols() == 0 {
+        return Ok(DVector::zeros(0));
+    }
     let mut values: DVector<f64> = h.symmetric_eigenvalues();
     values.as_mut_slice().sort_by(f64::total_cmp);
     Ok(values)

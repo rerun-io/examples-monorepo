@@ -7,7 +7,7 @@
 //! D41 settled that Eigen's LDLT is **not** interchangeable with a textbook
 //! pivoted LDLT — the IMU stage found a rank-deficient covariance where the two
 //! differ by 26 orders of magnitude — so it is ported statement by statement
-//! from the vendored Eigen 3.4
+//! from the vendored Eigen 5.0.1 (`Eigen/Version:12`)
 //! (`thirdparty/basalt-headers/thirdparty/eigen/Eigen/src/Cholesky/LDLT.h`),
 //! exactly as [`crate::imu`] did at fixed size 9 and `frontend::ldlt` at 3.
 //!

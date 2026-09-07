@@ -24,8 +24,9 @@
 //! | `the_prior_error_is_the_quadratic_at_the_delta` | `computeMargPriorError` after `applyInc` equals the quadratic model evaluated at the accumulated delta |
 //! | `the_prior_has_the_gauge_directions_in_its_nullspace` | `checkMargNullspace`: a visual-only prior carries no information along a global translation or rotation |
 //! | `a_window_that_disagrees_with_the_prior_is_refused` | the ordering assertions of `:736` and `:758-759` |
-//! | `an_invalid_schedule_is_refused_before_anything_changes` | six broken schedules, each a typed error with the window bit-identical afterwards |
+//! | `an_invalid_schedule_is_refused_before_anything_changes` | nine broken schedules, each a typed error with the window bit-identical afterwards |
 //! | `a_malformed_prior_is_refused_by_the_diagnostics` | the shapes `checkNullspace` and `checkEigenvalues` rely on and C++ does not assert |
+//! | `an_empty_prior_has_no_eigenvalues` | `checkEigenvalues` on a prior over no variables, where both eigensolvers assert |
 //! | `the_nullspace_debug_copy_follows_the_live_prior` | the debug prior's `H`, `b` **and** order (`:672`, called at `:1186`) |
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -33,7 +34,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::{DMatrix, DVector, Vector2, Vector3, Vector4, Vector6};
-use slam_rs::ba_base::BundleAdjustmentBase;
+use slam_rs::ba_base::{BaError, BundleAdjustmentBase};
 use slam_rs::calib::Calibration;
 use slam_rs::imu::IntegratedImuMeasurement;
 use slam_rs::landmark::{Landmark, StereographicParam};
@@ -725,12 +726,14 @@ fn the_nullspace_debug_copy_follows_the_live_prior() {
 /// C++ never checks any of them — `:1090-1112` erases what the sets name in
 /// order, with `frame_states.at()` throwing and `frame_poses.erase()` silently
 /// doing nothing — so a schedule that disagrees with the window took effect
-/// before it was noticed. The five cases are the ones the S7 review
-/// reproduced.
+/// before it was noticed. The first eight cases are the ones the S7 review
+/// reproduced; the last is the re-review's refused demotion, whose precondition
+/// C++ only reaches inside `computeDelta` (`ba_base.cpp:294`), called at
+/// `:1171` — eighty lines after `:1090` started rewriting the window.
 #[test]
 fn an_invalid_schedule_is_refused_before_anything_changes() {
     let unknown: FrameId = 999;
-    let cases: [(&str, MarginalizeSchedule, MargError); 8] = [
+    let cases: [(&str, MarginalizeSchedule, MargError); 9] = [
         (
             "a last_state_to_marg the window does not have",
             MarginalizeSchedule {
@@ -815,6 +818,15 @@ fn an_invalid_schedule_is_refused_before_anything_changes() {
                 frame_id: STATE1,
             },
         ),
+        (
+            "a demoted state that is not frozen at its linearization point",
+            MarginalizeSchedule {
+                last_state_to_marg: STATE2,
+                states_to_marg_vel_bias: [STATE1].into_iter().collect(),
+                ..schedule()
+            },
+            MargError::Ba(BaError::NotLinearized { frame_id: STATE1 }),
+        ),
     ];
 
     let pristine: Window = build_window(0xB015, true);
@@ -841,6 +853,23 @@ fn an_invalid_schedule_is_refused_before_anything_changes() {
         assert_eq!(before, after, "{name}: the window changed");
         assert_eq!(nullspace, MargLinData::default(), "{name}: the debug prior");
     }
+
+    // The control for the last case: freezing that one state, and nothing
+    // else, makes the same schedule marginalize.
+    let mut window: Window = pristine.clone();
+    window
+        .estimator
+        .frame_states
+        .get_mut(&STATE1)
+        .unwrap()
+        .set_linearized()
+        .unwrap();
+    let sched: MarginalizeSchedule = MarginalizeSchedule {
+        last_state_to_marg: STATE2,
+        states_to_marg_vel_bias: [STATE1].into_iter().collect(),
+        ..schedule()
+    };
+    assert!(try_run(&mut window, &sched, None, MarginalizeOptions::default()).is_ok());
 }
 
 /// The two diagnostics on priors whose shapes do not close
@@ -919,6 +948,35 @@ fn a_malformed_prior_is_refused_by_the_diagnostics() {
     };
     assert!(check_marg_nullspace(&squared, &window.estimator, &random).is_ok());
     assert!(check_eigenvalues(&squared).is_ok());
+}
+
+/// `checkEigenvalues` on a prior over no variables at all.
+///
+/// `MargLinData::default()` is that prior, and it is what both the live and the
+/// debug prior hold before the first marginalization. Neither eigensolver
+/// defines the empty problem — nalgebra asserts in its symmetric
+/// tridiagonalisation and Eigen asserts in `maxCoeff` (`Core/Redux.h:445`),
+/// reached from `SelfAdjointEigenSolver.h:437` — so the port answers with the
+/// empty spectrum before the solver sees the matrix, in both precisions and
+/// both prior forms.
+#[test]
+fn an_empty_prior_has_no_eigenvalues() {
+    for is_sqrt in [false, true] {
+        assert_eq!(
+            check_eigenvalues(&MargLinData::<f64> {
+                is_sqrt,
+                ..Default::default()
+            }),
+            Ok(DVector::zeros(0))
+        );
+        assert_eq!(
+            check_eigenvalues(&MargLinData::<f32> {
+                is_sqrt,
+                ..Default::default()
+            }),
+            Ok(DVector::zeros(0))
+        );
+    }
 }
 
 // ─── helpers ───────────────────────────────────────────────────────────────

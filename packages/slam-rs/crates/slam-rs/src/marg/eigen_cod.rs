@@ -11,7 +11,7 @@
 //! answer on a deficient block is decided entirely by the decomposition's rank
 //! threshold. So this is a port of Eigen's algorithm, not a substitution.
 //!
-//! Ported from the vendored Eigen 3.4:
+//! Ported from the vendored Eigen 5.0.1 (`Eigen/Version:12`):
 //!
 //! * `ColPivHouseholderQR::computeInPlace` (`Eigen/src/QR/ColPivHouseholderQR.h:488-583`)
 //!   — the LAPACK `xGEQP3` norm-downdate with its `sqrt(epsilon)` recompute
@@ -399,9 +399,10 @@ impl<S: LieScalar> Cod<S> {
 
     /// The body of `_solve_impl` (`:544-569`).
     ///
-    /// **Contract: `rhs.nrows() == self.cpqr.rows`.** [`Self::solve`] is the
-    /// checked boundary; [`Self::pseudo_inverse`] passes an identity of exactly
-    /// that many rows, one line away from where it is built.
+    /// **Contract: `rhs.nrows() == self.cpqr.qr.nrows()`,** the factorized
+    /// matrix's row count. [`Self::solve`] is the checked boundary;
+    /// [`Self::pseudo_inverse`] passes an identity of exactly that many rows,
+    /// one line away from where it is built.
     fn solve_with_validated_rhs(&self, rhs: &DMatrix<S>) -> DMatrix<S> {
         let cols: usize = self.cpqr.qr.ncols();
         let nrhs: usize = rhs.ncols();
