@@ -253,11 +253,11 @@ pub(super) fn optimize<S: LieScalar>(
             // `:1408-1430`: up to three damped solves, escalating `lambda` on a
             // non-finite increment.
             let size: usize = h.nrows();
-            let mut inc: DVector<S> = DVector::zeros(size);
             let mut solve_attempts: u32 = 0;
-            let mut inc_valid: bool = false;
             let lambda_used: S = damping.lambda;
-            while solve_attempts < MAX_SOLVE_ATTEMPTS && !inc_valid {
+            // `MAX_SOLVE_ATTEMPTS` is three, so the first solve always happens
+            // and the increment never needs a placeholder value.
+            let (mut inc, inc_valid): (DVector<S>, bool) = loop {
                 // `:1415-1417`. `cwiseMax` is `numext::maxi`, so a NaN on the
                 // left survives where `f32::max` would drop it.
                 let mut h_copy: DMatrix<S> = h.clone();
@@ -266,15 +266,17 @@ pub(super) fn optimize<S: LieScalar>(
                     h_copy[(i, i)] += damped;
                 }
                 // `:1419-1420`.
-                inc = EigenLdlt::new(h_copy).solve_vec(&b);
-                if inc.iter().all(|v| v.is_finite()) {
-                    inc_valid = true;
-                } else {
-                    damping.lambda = damping.lambda_vee * damping.lambda;
-                    damping.lambda_vee *= S::from_literal(VEE_FACTOR);
-                }
+                let inc: DVector<S> = EigenLdlt::new(h_copy).solve_vec(&b);
                 solve_attempts += 1;
-            }
+                if inc.iter().all(|v| v.is_finite()) {
+                    break (inc, true);
+                }
+                damping.lambda = damping.lambda_vee * damping.lambda;
+                damping.lambda_vee *= S::from_literal(VEE_FACTOR);
+                if solve_attempts >= MAX_SOLVE_ATTEMPTS {
+                    break (inc, false);
+                }
+            };
             // `:1432`: C++ warns and carries on with the non-finite increment.
             if !inc_valid {
                 log::warn!(

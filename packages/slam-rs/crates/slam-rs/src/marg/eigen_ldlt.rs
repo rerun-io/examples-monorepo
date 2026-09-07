@@ -243,8 +243,10 @@ impl<S: LieScalar> EigenLdlt<S> {
             // value in `f32`, which is why this goes through `eigen_blas`.
             let r: usize = size - end_block;
             if r > 0 {
-                let rhs: Vec<S> = (pi..end_block).map(|j| v[j]).collect();
-                let mut res: Vec<S> = (end_block..size).map(|i| v[i]).collect();
+                // The `rhs` is the panel just substituted and the `res` the
+                // trailing rows: two disjoint halves of `v` at `end_block`, so
+                // the kernel reads and writes it in place.
+                let (substituted, trailing) = v.as_mut_slice().split_at_mut(end_block);
                 gemv_col_major_block(
                     &self.mat,
                     BlockSpan {
@@ -253,13 +255,10 @@ impl<S: LieScalar> EigenLdlt<S> {
                         col_start: pi,
                         cols: panel,
                     },
-                    &rhs,
-                    &mut res,
+                    &substituted[pi..end_block],
+                    trailing,
                     -S::one(),
                 );
-                for (offset, value) in res.into_iter().enumerate() {
-                    v[end_block + offset] = value;
-                }
             }
             pi = end_block;
         }
@@ -290,8 +289,9 @@ impl<S: LieScalar> EigenLdlt<S> {
             // upper triangle sits to the right of the panel.
             let r: usize = size - pi;
             if r > 0 {
-                let rhs: Vec<S> = (pi..size).map(|j| v[j]).collect();
-                let mut res: Vec<S> = (start_row..pi).map(|i| v[i]).collect();
+                // The `res` is the panel and the `rhs` everything already
+                // substituted to its right: two disjoint halves of `v` at `pi`.
+                let (panel_rows, substituted) = v.as_mut_slice().split_at_mut(pi);
                 gemv_row_major_of_transpose(
                     &self.mat,
                     BlockSpan {
@@ -300,13 +300,10 @@ impl<S: LieScalar> EigenLdlt<S> {
                         col_start: pi,
                         cols: r,
                     },
-                    &rhs,
-                    &mut res,
+                    substituted,
+                    &mut panel_rows[start_row..pi],
                     -S::one(),
                 );
-                for (offset, value) in res.into_iter().enumerate() {
-                    v[start_row + offset] = value;
-                }
             }
             // `Mode & UnitDiag`, so there is no division by the diagonal, and
             // the panel's last row (`k == 0`) has nothing to its right yet.
