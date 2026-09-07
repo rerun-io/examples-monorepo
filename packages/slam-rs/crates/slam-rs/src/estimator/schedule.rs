@@ -12,17 +12,23 @@
 //!   `last_state_to_marg` is the **second** oldest state when the window is
 //!   full, not the oldest (`:720-724`). The oldest state leaves; the second
 //!   oldest is kept whole and has its linearization point frozen.
-//! * The keyframe budget is only enforced when the departing state was itself a
-//!   keyframe: the loop condition is
-//!   `kf_ids.size() > max_kfs && !states_to_marg_vel_bias.empty()` (`:767`), and
-//!   nothing in the body shrinks `states_to_marg_vel_bias`. With the shipped
-//!   `vio_min_frames_after_kf = 5` keyframes are at least six frames apart, so
-//!   `states_to_marg_vel_bias` holds at most one entry and the newest keyframe
-//!   is always inside the two the eviction score skips.
+//! * The keyframe budget is **lazy**. The eviction loop runs only while
+//!   `kf_ids.size() > max_kfs && !states_to_marg_vel_bias.empty()` (`:767`),
+//!   and nothing in the body shrinks `states_to_marg_vel_bias` — the keyframes
+//!   leaving the *state* window this step. A frame that has just been voted a
+//!   keyframe is still a state, so it cannot be evicted, and `kf_ids` sits one
+//!   over `max_kfs` until it is demoted to a pose block. On the smoke segment
+//!   that is framesets 49-50 and 56-57, eight keyframes against
+//!   `vio_max_kfs = 7`, and the C++ does exactly the same. The overshoot is at
+//!   most one because `vio_min_frames_after_kf = 5` puts keyframes six
+//!   framesets apart while a state leaves after `vio_max_states = 3` — which is
+//!   also why `states_to_marg_vel_bias` holds at most one entry and the newest
+//!   keyframe is always inside the two the eviction score skips.
 //!
 //! `KF_MARG_DEFAULT`'s second pass is a DSO-derived distance score whose own
 //! comment admits it "seems to mostly marginalize the oldest keyframe"
-//! (`:832-836`, D22).
+//! (`:832-836`, D22) — which is not what it does; see
+//! [`SqrtKeypointVio::evict_by_default`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -283,12 +289,23 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     /// observe at all, which is what `num_points_connected.count(*it) == 0`
     /// means. The ratio is computed in **`float`** whatever the estimator's
     /// scalar is (`static_cast<float>` at `:826`) and then promoted to `double`
-    /// for the comparison against the config field, so the `f64` instantiation
-    /// compares a single-precision quotient.
+    /// for the comparison, so the `f64` instantiation compares a
+    /// single-precision quotient. That cast cannot change the outcome for any
+    /// count the window can hold: distinct quotients of counts below a million
+    /// are at least `1e-6` apart while one `f32` ulp near `0.1` is `7.5e-9`,
+    /// and the one quotient that lands exactly on the threshold —
+    /// `connected · 10 == hosted` — rounds *up* in `f32` and so fails the
+    /// strict `<` in both precisions. It is ported because it is what the C++
+    /// computes, not because a decision turns on it.
     ///
     /// Second pass: the DSO score `sqrt(‖p_i − p_last‖) · Σ_j 1/(‖p_i − p_j‖ +
-    /// 1e-5)`, minimized. The norms are Eigen's three-coefficient reduction,
-    /// whose order differs between the precisions (D47).
+    /// 1e-5)`, minimized, with the sum running over the candidate set
+    /// *including `i` itself* (`:848`). That self term is `1/1e-5 = 1e5` and
+    /// swamps the metre-scale distances to the other keyframes, so what
+    /// actually discriminates is `sqrt(‖p_i − p_last‖)` and the candidate
+    /// **nearest the newest keyframe** is evicted — not the oldest that the
+    /// comment at `:832-836` expects. The norms are Eigen's three-coefficient
+    /// reduction, whose order differs between the precisions (D47).
     fn evict_by_default(
         &self,
         num_points_connected: &BTreeMap<FrameId, usize>,
@@ -473,4 +490,210 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 /// three-coefficient reduction (D47).
 fn eigen_norm3<S: LieScalar>(v: &Vector3<S>) -> S {
     crate::landmark::eigen_norm3(v[0], v[1], v[2])
+}
+
+#[cfg(test)]
+mod tests {
+    use nalgebra::Vector3;
+
+    use super::*;
+    use crate::calib::Calibration;
+    use crate::config::VioConfig;
+    use crate::lie::So3;
+    use crate::types::{PoseStateWithLin, PoseVelBiasState, PoseVelBiasStateWithLin};
+
+    const CALIB: &str = include_str!("../../tests/fixtures/msdmi_calib.json");
+    const CONFIG: &str = include_str!("../../tests/fixtures/msdmi_config.json");
+
+    /// Six keyframes all facing the same way: the default criterion never
+    /// reads the azimuth.
+    const FLAT: [f64; 6] = [0.0; 6];
+
+    /// Six keyframes one metre apart along `x` at the given azimuths, the
+    /// newest also a state because the distance score reads
+    /// `frame_states.at(last_kf)` (`:854`), each hosting ten landmarks.
+    ///
+    /// The azimuth is a rotation about the **world z**, so it turns the
+    /// camera-0 forward vector's `(x, y)` part without changing its length —
+    /// which makes `fwd_i · fwd_j` a monotone function of the azimuth
+    /// difference alone and the forward-vector score predictable. A rotation
+    /// about `y` would not: it changes the length of the `head<2>()` the
+    /// criterion takes, and the scores stop being comparable.
+    fn a_window_of_keyframes(
+        criteria: KeyframeMargCriteria,
+        azimuths: [f64; 6],
+    ) -> SqrtKeypointVio<f64> {
+        let mut config: VioConfig = VioConfig::from_json_str(CONFIG).unwrap();
+        config.vio_kf_marg_criteria = criteria;
+        let calibration: Calibration<f64> = Calibration::from_json_str(CALIB).unwrap();
+        let mut vio: SqrtKeypointVio<f64> =
+            SqrtKeypointVio::new(Vector3::new(0.0, 0.0, -9.81), calibration, config).unwrap();
+        for (index, azimuth) in azimuths.into_iter().enumerate() {
+            let t_ns: FrameId = i64::try_from(index).unwrap() * 1_000_000;
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "six small integers, exactly representable"
+            )]
+            let pose: Se3<f64> = Se3::new(
+                So3::exp(&Vector3::new(0.0, 0.0, azimuth)),
+                Vector3::new(index as f64, 0.0, 0.0),
+            );
+            vio.kf_ids.insert(t_ns);
+            vio.num_points_kf.insert(t_ns, 10);
+            vio.ba
+                .frame_poses
+                .insert(t_ns, PoseStateWithLin::new(t_ns, pose, true));
+            if index == azimuths.len() - 1 {
+                vio.ba.frame_states.insert(
+                    t_ns,
+                    PoseVelBiasStateWithLin::new(
+                        PoseVelBiasState::new(
+                            t_ns,
+                            pose,
+                            Vector3::zeros(),
+                            Vector3::zeros(),
+                            Vector3::zeros(),
+                        ),
+                        false,
+                    ),
+                );
+            }
+        }
+        vio
+    }
+
+    /// Every keyframe well tracked, so nothing to marginalize on the ratio.
+    fn all_connected(vio: &SqrtKeypointVio<f64>) -> BTreeMap<FrameId, usize> {
+        vio.kf_ids.iter().map(|t_ns| (*t_ns, 10)).collect()
+    }
+
+    /// `std::prev(kf_ids.end(), 2)` (`:819`, `:840`) and the `kf_ids.size() > 2`
+    /// guard that keeps it valid.
+    #[test]
+    fn the_newest_two_keyframes_are_never_candidates() {
+        let vio: SqrtKeypointVio<f64> = a_window_of_keyframes(KeyframeMargCriteria::Default, FLAT);
+        assert_eq!(
+            vio.eviction_candidates(),
+            vec![0, 1_000_000, 2_000_000, 3_000_000]
+        );
+
+        let mut two: SqrtKeypointVio<f64> =
+            a_window_of_keyframes(KeyframeMargCriteria::Default, FLAT);
+        two.kf_ids.retain(|t_ns| *t_ns >= 4_000_000);
+        assert!(two.eviction_candidates().is_empty());
+    }
+
+    /// `:822-829` first pass: the oldest keyframe below
+    /// `vio_kf_marg_feature_ratio`, and nothing newer even if it is worse.
+    #[test]
+    fn the_ratio_pass_takes_the_oldest_poorly_tracked_keyframe() {
+        let vio: SqrtKeypointVio<f64> = a_window_of_keyframes(KeyframeMargCriteria::Default, FLAT);
+        let mut connected: BTreeMap<FrameId, usize> = all_connected(&vio);
+        connected.insert(1_000_000, 0);
+        connected.insert(2_000_000, 0);
+        assert_eq!(
+            vio.evict_by_default(&connected).unwrap(),
+            KeyframeEviction {
+                frame_id: 1_000_000,
+                reason: EvictionReason::FeatureRatio,
+            }
+        );
+    }
+
+    /// `num_points_connected.count(*it) == 0` (`:823`): a keyframe the current
+    /// frame does not observe at all is taken by the **first** pass, whatever
+    /// its hosted count — the missing entry and the low ratio are one `||`.
+    #[test]
+    fn a_keyframe_the_frame_does_not_see_goes_first() {
+        let vio: SqrtKeypointVio<f64> = a_window_of_keyframes(KeyframeMargCriteria::Default, FLAT);
+        let mut connected: BTreeMap<FrameId, usize> = all_connected(&vio);
+        connected.remove(&2_000_000);
+        assert_eq!(
+            vio.evict_by_default(&connected).unwrap(),
+            KeyframeEviction {
+                frame_id: 2_000_000,
+                reason: EvictionReason::FeatureRatio,
+            }
+        );
+    }
+
+    /// `:845-867` second pass: the DSO score is
+    /// `sqrt(‖p_i − p_last‖) · Σ_j 1/(‖p_i − p_j‖ + 1e-5)`, and the sum runs
+    /// over the candidate set **including `i` itself** (`:848`), so every
+    /// candidate carries a `1/1e-5 = 1e5` self term that swamps the metre-scale
+    /// distances to the others. What is left to discriminate is
+    /// `sqrt(‖p_i − p_last‖)`, so the candidate **nearest the newest keyframe**
+    /// is evicted — on six keyframes a metre apart, the newest candidate, not
+    /// the oldest that basalt's comment expects (`:832-836`, D22). Dropping the
+    /// self term, which reads like a bug, would invert the answer.
+    #[test]
+    fn the_distance_pass_takes_the_candidate_nearest_the_newest_keyframe() {
+        let vio: SqrtKeypointVio<f64> = a_window_of_keyframes(KeyframeMargCriteria::Default, FLAT);
+        assert_eq!(
+            vio.evict_by_default(&all_connected(&vio)).unwrap(),
+            KeyframeEviction {
+                frame_id: 3_000_000,
+                reason: EvictionReason::DistanceScore,
+            }
+        );
+    }
+
+    /// `:788-812`: the score is the sum of angles to every other keyframe, so
+    /// the minimum is the least distinctive viewing direction. With three
+    /// candidates sharing an azimuth and a fourth a radian away, the eviction
+    /// has to come out of the cluster — which of the three it is depends on
+    /// `acos`'s curvature and is not a property worth pinning.
+    #[test]
+    fn the_forward_vector_pass_takes_a_direction_from_the_cluster() {
+        let vio: SqrtKeypointVio<f64> = a_window_of_keyframes(
+            KeyframeMargCriteria::ForwardVector,
+            [0.0, 0.02, 0.04, 1.0, 2.0, 3.0],
+        );
+        let evicted: KeyframeEviction = vio.evict_by_forward_vector().unwrap();
+        assert_eq!(evicted.reason, EvictionReason::ForwardVector);
+        assert!(
+            [0, 1_000_000, 2_000_000].contains(&evicted.frame_id),
+            "evicted {} instead of one of the three clustered azimuths",
+            evicted.frame_id
+        );
+    }
+
+    /// `frame_poses.at(ts)` (`:794`, `:849`) and `frame_states.at(last_kf)`
+    /// (`:854`) both throw when the window disagrees with `kf_ids`; the port
+    /// returns the typed error instead (D32).
+    #[test]
+    fn a_keyframe_missing_from_the_window_is_a_typed_error() {
+        let mut vio: SqrtKeypointVio<f64> =
+            a_window_of_keyframes(KeyframeMargCriteria::Default, FLAT);
+        vio.ba.frame_states.clear();
+        assert_eq!(
+            vio.evict_by_default(&all_connected(&vio)),
+            Err(EstimatorError::KeyframeNotInWindow {
+                frame_id: 5_000_000,
+                wanted: "state",
+            })
+        );
+
+        let mut hostless: SqrtKeypointVio<f64> =
+            a_window_of_keyframes(KeyframeMargCriteria::Default, FLAT);
+        hostless.num_points_kf.remove(&1_000_000);
+        assert_eq!(
+            hostless.evict_by_default(&all_connected(&hostless)),
+            Err(EstimatorError::KeyframeNotInWindow {
+                frame_id: 1_000_000,
+                wanted: "hosted-landmark count",
+            })
+        );
+
+        let mut poseless: SqrtKeypointVio<f64> =
+            a_window_of_keyframes(KeyframeMargCriteria::ForwardVector, FLAT);
+        poseless.ba.frame_poses.remove(&2_000_000);
+        assert_eq!(
+            poseless.evict_by_forward_vector(),
+            Err(EstimatorError::KeyframeNotInWindow {
+                frame_id: 2_000_000,
+                wanted: "pose",
+            })
+        );
+    }
 }

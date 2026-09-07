@@ -15,18 +15,51 @@
 //!
 //! ## What is asserted exactly and what is a tolerance
 //!
-//! Every **integer decision** must be identical, in both precisions: the
-//! keyframe vote, `kf_ids`, `ltkfs`, `num_points_kf`, the landmark and
-//! observation counts, the LM iteration count and its accept/reject sequence,
-//! the marginalization schedule (which frames in which set) and the prior's
-//! `AbsOrderMap`. Those are what a divergence shows up in first, and none of
-//! them is allowed to drift.
+//! Every **integer decision** is identical in both precisions and asserted as
+//! such: the keyframe vote, `kf_ids`, `ltkfs`, `num_points_kf`, the landmark and
+//! observation counts, the preintegrated-interval count, which frames are states
+//! and which are poses, every fixed-linearization flag, the marginalization
+//! schedule (which frames in which set, and the index split) and the prior's
+//! `AbsOrderMap`. Over the 60 framesets the `f32` run breaks none of them.
 //!
 //! The **floating** comparisons are relative and the tolerances are the measured
 //! agreement plus a margin; see the constants below for the numbers this run
 //! produced.
 //!
-//! ## The fixture
+//! ## The one thing `f32` cannot reproduce: the LM accept decision
+//!
+//! In `f64` the LM trail is exact — the same step count, the same accept/reject
+//! sequence, every number to 3.1e-10. In `f32` it is not, and cannot be. Two
+//! facts, both basalt's, put the accept test below the noise floor:
+//!
+//! * The reduced system's right-hand side is formed by cancellation. Its
+//!   velocity and bias rows are mathematically zero (they measure 1e-11 to
+//!   1e-18 in `f64`), and its pose rows lose three to four significant digits:
+//!   over the eight LM steps of frameset 4, C++'s own `float` `b` differs from
+//!   its `double` `b` by 4.7e-4 to 5.8e-1 in relative 2-norm.
+//! * The damped normal matrix `H + max(diag(H)·λ, λ_min)` has a condition number
+//!   of 1.6e7 to 4.6e8 on those same eight steps, so `cond · eps(f32)` is 1.9 to
+//!   56: the single-precision `LDLT` solve has no guaranteed significant digit.
+//!
+//! The port's own algebra is exact where the precision allows it — measured
+//! against the fork's `hb_trace` hook on frameset 4: the dense `H` agrees with
+//! Eigen's to 7.9e-17 in `f64` (one ulp) and to 1.0e-8 … 7.8e-8 in `f32` (at
+//! most 0.65 `f32` eps), `b` to 3.1e-9 and `inc` to 2.5e-11 in `f64`. In `f32`
+//! the port's `inc` differs from C++'s by 7.0e-5 … 9.7e-3 while C++'s differs
+//! from its own `double` by 7.6e-5 … 2.5e-2 — the port is as close to Eigen as
+//! Eigen is to the truth, and closer in four of the eight steps.
+//!
+//! What that does to the accept test: `f_diff = error_total − after_error_total`
+//! is a difference of two ~1.2e3 quantities whose true value is ~1e-3, i.e. ten
+//! `f32` ulps of the terms. Over the 60 framesets the two trails part company on
+//! 21 of them, and on every one of those the deciding step's `f_diff` is between
+//! −16.5 and +30.4 ulps of `error_before`. So the gate is: the trails agree up
+//! to the first step whose accept-or-converge test is decided inside
+//! [`F32_ACCEPT_NOISE_ULPS`], and the poses stay inside
+//! [`POSE_TOLERANCE_F32`] regardless — measured worst over the 60 framesets:
+//! rotation 8.4e-5, translation 9.9e-5, velocity 1.9e-4, bias 1.5e-3.
+//!
+//! ## The fixture, and the default window
 //!
 //! `basalt_vio_oracle` on the fork's `slam-rs-reference` branch, over the first
 //! 60 framesets of the smoke reference segment
@@ -37,6 +70,10 @@
 //! frames are **not** committed (107 MB); only the frontend needs them, which is
 //! why `vio_parity.rs` skips without them and this file does not need them at
 //! all.
+//!
+//! All 60 framesets take about 55 s per run in a debug build, four runs of
+//! which would be most of the Rust suite's budget, so the default replays
+//! [`DEFAULT_FRAMESETS`] and `SLAM_RS_VIO_ORACLE_FULL=1` replays all 60.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -49,26 +86,72 @@ use serde::Deserialize;
 
 use slam_rs::calib::Calibration;
 use slam_rs::config::VioConfig;
-use slam_rs::estimator::{FlowObservations, FrameOutcome, FrameStats, SqrtKeypointVio};
+use slam_rs::estimator::{
+    FlowObservations, FrameOutcome, FrameStats, LmIteration, SqrtKeypointVio,
+};
 use slam_rs::imu::ImuSample;
 use slam_rs::lie::LieScalar;
 use slam_rs::types::{FrameId, KeypointId};
 
-// ── the tolerances, measured on this fixture ──────────────────────────────
+// ── the window, and the tolerances measured on this fixture ───────────────
+
+/// Framesets the fixture covers.
+const ORACLE_FRAMESETS: usize = 60;
+
+/// Framesets the default suite replays. Twelve reaches `opt_started` (frameset
+/// 4), eight marginalizations, the second keyframe (7), both keyframe
+/// demotions (4 and 9), both prior growth steps and the first `f32` LM-trail
+/// divergence (9). The keyframe *eviction* loop first fires at frameset 51, so
+/// only the full window covers it — plus the unit tests in
+/// `src/estimator/schedule.rs`.
+const DEFAULT_FRAMESETS: usize = 12;
 
 /// Relative agreement on every pose, velocity and bias coefficient of the
-/// window, in `f64`.
+/// window, in `f64`. Measured worst over the 60 framesets: rotation 9.8e-13,
+/// translation 2.0e-13, velocity 6.8e-13, bias 2.6e-11.
 const POSE_TOLERANCE_F64: f64 = 2e-10;
-/// The same in `f32`.
+/// The same in `f32`. Measured worst: rotation 8.4e-5, translation 9.9e-5,
+/// velocity 1.9e-4, bias 1.5e-3.
 const POSE_TOLERANCE_F32: f64 = 3e-3;
 /// Relative agreement on the LM error terms, `l_diff` and `lambda`, in `f64`.
+/// Measured worst: 3.1e-10 (`error_before`).
 const ERROR_TOLERANCE_F64: f64 = 2e-9;
-/// The same in `f32`.
-const ERROR_TOLERANCE_F32: f64 = 5e-3;
+/// The same in `f32`, over the trail prefix the two runs share, for the
+/// quantities that are sums of well-conditioned terms: the reprojection cost,
+/// the IMU and bias costs, the step's infinity norm and the prior's `H`.
+/// Measured worst over the 60 framesets: 2.2e-3 (`imu_error`).
+const ERROR_TOLERANCE_F32: f64 = 1e-2;
 /// Relative agreement on the marginalization prior's Frobenius digest.
+/// Measured worst in `f64`: 6.8e-15 on `H`, 1.1e-10 on `b`.
 const PRIOR_TOLERANCE_F64: f64 = 2e-9;
-/// The same in `f32`.
-const PRIOR_TOLERANCE_F32: f64 = 5e-3;
+/// Relative agreement in `f32` on the quantities the prior's cancelling half
+/// drives. `marg_data.b` is `−H·delta` plus a residue three orders smaller
+/// (8.30 against 0.12 at frameset 4), so it carries the accumulated `f32` error
+/// of every increment the frozen blocks absorbed; `marg_prior_error` is its
+/// bilinear form, `error_before` is that plus a reprojection cost two orders
+/// smaller (1.2e3 against 1.3e2), and `l_diff` and `lambda` follow from the
+/// gain ratio. Measured worst: 0.145 (`lambda`, whose Nielsen update cubes a
+/// ratio whose numerator is a noise-level `f_diff`).
+const CANCELLING_TOLERANCE_F32: f64 = 3e-1;
+
+/// How far an accept-or-converge decision may be inside the `f32` noise floor
+/// before the two LM trails are allowed to part company, in units of
+/// `f32::EPSILON · |error_before|`.
+///
+/// The survey over the 60 framesets found 21 framesets where they do; the
+/// widest deciding `f_diff` was 30.4 ulps (frameset 43) and the narrowest
+/// −16.5 (frameset 58). 64 is that with room, and still two orders below the
+/// 1e-3-scale decrease the `f64` run sees at those steps.
+const F32_ACCEPT_NOISE_ULPS: f64 = 64.0;
+
+/// Whether `SLAM_RS_VIO_ORACLE_FULL` asked for all 60 framesets.
+fn framesets() -> usize {
+    if std::env::var_os("SLAM_RS_VIO_ORACLE_FULL").is_some() {
+        ORACLE_FRAMESETS
+    } else {
+        DEFAULT_FRAMESETS
+    }
+}
 
 // ── the fixture's shape ───────────────────────────────────────────────────
 
@@ -292,17 +375,28 @@ impl Worst {
     }
 }
 
-/// Drive the whole 60-frame window and return the worst relative difference per
-/// quantity, having asserted every integer decision on the way.
-fn compare<S: LieScalar>(oracle: &Oracle, run: &OracleRun) -> Worst {
+/// How much of the LM trail the precision can be held to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LmGate {
+    /// Every step, exactly: the same count and the same accept/reject sequence.
+    Exact,
+    /// The trail may part company at a step whose accept-or-converge test is
+    /// decided inside [`F32_ACCEPT_NOISE_ULPS`]; see the module header.
+    NoiseFloor,
+}
+
+/// Drive the window and return the worst relative difference per quantity,
+/// having asserted every integer decision on the way.
+fn compare<S: LieScalar>(oracle: &Oracle, run: &OracleRun, gate: LmGate) -> Worst {
     let mut estimator: SqrtKeypointVio<S> =
         SqrtKeypointVio::with_default_gravity(calibration().cast(), config()).unwrap();
     for sample in imu_window() {
         estimator.push_imu(sample);
     }
 
+    let mut diverged: Vec<i64> = Vec::new();
     let mut worst: Worst = Worst::default();
-    for (index, expected) in run.frames.iter().enumerate() {
+    for (index, expected) in run.frames.iter().take(framesets()).enumerate() {
         let flow: &OracleFlow = oracle
             .flow
             .get(index)
@@ -387,24 +481,14 @@ fn compare<S: LieScalar>(oracle: &Oracle, run: &OracleRun) -> Worst {
             "{where_}: frame_poses"
         );
 
-        // The LM trail: the same number of steps and the same accept/reject
-        // sequence, which is the strictest integer statement in the file.
-        assert_eq!(
-            stats.lm.len(),
-            expected.lm.len(),
-            "{where_}: LM step count (rust {:?} vs c++ {:?})",
-            stats
-                .lm
-                .iter()
-                .map(|step| (step.iteration, step.accepted))
-                .collect::<Vec<(i32, bool)>>(),
-            expected
-                .lm
-                .iter()
-                .map(|step| (step.it, step.step_is_successful))
-                .collect::<Vec<(i32, bool)>>()
-        );
-        for (step, want) in stats.lm.iter().zip(expected.lm.iter()) {
+        // The LM trail: in `f64` the same number of steps and the same
+        // accept/reject sequence, the strictest integer statement in the file;
+        // in `f32` the same up to the first decision inside the noise floor.
+        let shared: usize = lm_prefix(&where_, &stats.lm, &expected.lm, gate);
+        if shared < stats.lm.len().max(expected.lm.len()) {
+            diverged.push(expected.t_ns);
+        }
+        for (step, want) in stats.lm.iter().zip(expected.lm.iter()).take(shared) {
             let step_where: String = format!("{where_} it={} j={}", want.it, want.backtrack);
             assert_eq!(step.iteration, want.it, "{step_where}: iteration index");
             assert_eq!(
@@ -481,8 +565,8 @@ fn compare<S: LieScalar>(oracle: &Oracle, run: &OracleRun) -> Worst {
             .zip(expected.states.iter())
         {
             let q: [S; 4] = state.t_w_i.rotation.quaternion_xyzw();
-            for i in 0..4 {
-                Worst::take(&mut worst.rotation, q[i].to_f64(), want.q[i]);
+            for (got, want) in q.iter().zip(want.q.iter()) {
+                Worst::take(&mut worst.rotation, got.to_f64(), *want);
             }
             for i in 0..3 {
                 Worst::take(
@@ -506,8 +590,8 @@ fn compare<S: LieScalar>(oracle: &Oracle, run: &OracleRun) -> Worst {
         }
         for (pose, want) in estimator.snapshot().poses.iter().zip(expected.poses.iter()) {
             let q: [S; 4] = pose.t_w_i.rotation.quaternion_xyzw();
-            for i in 0..4 {
-                Worst::take(&mut worst.rotation, q[i].to_f64(), want.q[i]);
+            for (got, want) in q.iter().zip(want.q.iter()) {
+                Worst::take(&mut worst.rotation, got.to_f64(), *want);
             }
             for i in 0..3 {
                 Worst::take(
@@ -523,7 +607,7 @@ fn compare<S: LieScalar>(oracle: &Oracle, run: &OracleRun) -> Worst {
             );
         }
 
-        for (step, want) in stats.lm.iter().zip(expected.lm.iter()) {
+        for (step, want) in stats.lm.iter().zip(expected.lm.iter()).take(shared) {
             Worst::take(
                 &mut worst.error_before,
                 step.error_before.to_f64(),
@@ -586,7 +670,74 @@ fn compare<S: LieScalar>(oracle: &Oracle, run: &OracleRun) -> Worst {
         );
         let _ = (expected.take_kf, expected.frames_after_kf);
     }
+    if !diverged.is_empty() {
+        println!(
+            "{}: LM trail parted company on {} of {} framesets, all inside the noise floor: {diverged:?}",
+            run.scalar,
+            diverged.len(),
+            framesets()
+        );
+    }
     worst
+}
+
+/// How many leading LM steps the two trails share, and — when they do not share
+/// all of them — the proof that the step they part on was decided inside the
+/// `f32` noise floor.
+///
+/// The first differing step is the one whose accept-or-converge test went the
+/// other way, so it is the step whose `f_diff` has to be at the noise floor;
+/// when one trail is shorter the other side terminated on `:1566`'s
+/// convergence test, and the last step it ran is the one that decided it.
+fn lm_prefix<S: LieScalar>(
+    where_: &str,
+    got: &[LmIteration<S>],
+    want: &[OracleLm],
+    gate: LmGate,
+) -> usize {
+    let sequence = |steps: &[LmIteration<S>]| -> Vec<(i32, i32, bool)> {
+        steps
+            .iter()
+            .map(|step| (step.iteration, step.backtrack, step.accepted))
+            .collect()
+    };
+    let expected: Vec<(i32, i32, bool)> = want
+        .iter()
+        .map(|step| (step.it, step.backtrack, step.step_is_successful))
+        .collect();
+    let mine: Vec<(i32, i32, bool)> = sequence(got);
+    if mine == expected {
+        return got.len();
+    }
+    let at: usize = mine
+        .iter()
+        .zip(expected.iter())
+        .position(|(a, b)| a != b)
+        .unwrap_or_else(|| mine.len().min(expected.len()));
+    assert_eq!(
+        gate,
+        LmGate::NoiseFloor,
+        "{where_}: LM trail diverged at step {at} (rust {mine:?} vs c++ {expected:?})"
+    );
+
+    // The last step each side actually ran up to and including `at`.
+    let ours: &LmIteration<S> = &got[at.min(got.len() - 1)];
+    let theirs: &OracleLm = &want[at.min(want.len() - 1)];
+    let floor: f64 = f64::from(f32::EPSILON) * ours.error_before.to_f64().abs();
+    let ulps = |f_diff: f64| -> f64 { f_diff / floor };
+    assert!(
+        ulps(ours.f_diff.to_f64()).abs() <= F32_ACCEPT_NOISE_ULPS
+            && ulps(theirs.f_diff).abs() <= F32_ACCEPT_NOISE_ULPS,
+        "{where_}: the LM trails parted at step {at} on a decision outside the f32 noise floor \
+         (rust f_diff {:.4e} = {:.2} ulp, c++ {:.4e} = {:.2} ulp, one ulp of error_before {:.4e} \
+         is {floor:.4e}); rust {mine:?} vs c++ {expected:?}",
+        ours.f_diff.to_f64(),
+        ulps(ours.f_diff.to_f64()),
+        theirs.f_diff,
+        ulps(theirs.f_diff),
+        ours.error_before.to_f64(),
+    );
+    at
 }
 
 fn frobenius<S: LieScalar>(m: &nalgebra::DMatrix<S>) -> f64 {
@@ -616,7 +767,7 @@ fn run_named<'a>(oracle: &'a Oracle, scalar: &str) -> &'a OracleRun {
 #[test]
 fn the_double_window_follows_the_cpp() {
     let oracle: Oracle = oracle();
-    let worst: Worst = compare::<f64>(&oracle, run_named(&oracle, "double"));
+    let worst: Worst = compare::<f64>(&oracle, run_named(&oracle, "double"), LmGate::Exact);
     println!("f64 worst relative difference: {worst:#?}");
 
     assert!(
@@ -645,10 +796,15 @@ fn the_double_window_follows_the_cpp() {
     );
 }
 
+/// The `f32` lane, which is the precision basalt ships (Q07).
+///
+/// Every integer decision is still exact; the LM trail is held to the noise
+/// floor and the poses to the measured tolerance. See the module header for why
+/// the accept test cannot be reproduced and what was measured.
 #[test]
 fn the_float_window_follows_the_cpp() {
     let oracle: Oracle = oracle();
-    let worst: Worst = compare::<f32>(&oracle, run_named(&oracle, "float"));
+    let worst: Worst = compare::<f32>(&oracle, run_named(&oracle, "float"), LmGate::NoiseFloor);
     println!("f32 worst relative difference: {worst:#?}");
 
     assert!(
@@ -660,20 +816,21 @@ fn the_float_window_follows_the_cpp() {
         "f32 velocity or bias drifted: {worst:#?}"
     );
     assert!(
-        worst.error_before <= ERROR_TOLERANCE_F32
-            && worst.error_after <= ERROR_TOLERANCE_F32
-            && worst.vision_error <= ERROR_TOLERANCE_F32
+        worst.vision_error <= ERROR_TOLERANCE_F32
             && worst.imu_error <= ERROR_TOLERANCE_F32
             && worst.bias_error <= ERROR_TOLERANCE_F32
-            && worst.marg_prior_error <= ERROR_TOLERANCE_F32
-            && worst.l_diff <= ERROR_TOLERANCE_F32
-            && worst.lambda <= ERROR_TOLERANCE_F32
-            && worst.step_norminf <= ERROR_TOLERANCE_F32,
+            && worst.step_norminf <= ERROR_TOLERANCE_F32
+            && worst.prior_h <= ERROR_TOLERANCE_F32,
         "f32 LM trail drifted: {worst:#?}"
     );
     assert!(
-        worst.prior_h <= PRIOR_TOLERANCE_F32 && worst.prior_b <= PRIOR_TOLERANCE_F32,
-        "f32 prior drifted: {worst:#?}"
+        worst.error_before <= CANCELLING_TOLERANCE_F32
+            && worst.error_after <= CANCELLING_TOLERANCE_F32
+            && worst.marg_prior_error <= CANCELLING_TOLERANCE_F32
+            && worst.l_diff <= CANCELLING_TOLERANCE_F32
+            && worst.lambda <= CANCELLING_TOLERANCE_F32
+            && worst.prior_b <= CANCELLING_TOLERANCE_F32,
+        "f32 prior-driven quantities drifted: {worst:#?}"
     );
 }
 
@@ -685,7 +842,12 @@ fn the_float_window_follows_the_cpp() {
 #[test]
 fn a_repeat_run_is_bit_identical() {
     let oracle: Oracle = oracle();
-    let flow: Vec<Arc<FlowObservations>> = oracle.flow.iter().map(observations).collect();
+    let flow: Vec<Arc<FlowObservations>> = oracle
+        .flow
+        .iter()
+        .take(framesets())
+        .map(observations)
+        .collect();
 
     let first: Vec<Trace> = drive(&flow);
     let second: Vec<Trace> = drive(&flow);
@@ -759,12 +921,25 @@ fn drive(flow: &[Arc<FlowObservations>]) -> Vec<Trace> {
     traces
 }
 
-/// The window never exceeds the configured budget, and the index sets the
-/// schedule produces are a partition of the ordering.
+/// The window stays inside the budget basalt actually enforces, and the index
+/// sets the schedule produces are a partition of the ordering.
 ///
 /// A property rather than a fixture comparison: it holds for every frame of the
-/// run, not only the sixty the oracle covers, and it is the invariant a schedule
+/// run, not only the ones the oracle covers, and it is the invariant a schedule
 /// bug breaks first.
+///
+/// The keyframe budget is **lazy**, which is the one thing to get right here.
+/// `sqrt_keypoint_vio.cpp:767` runs the eviction loop only while
+/// `!states_to_marg_vel_bias.empty()`, and that set holds the keyframes leaving
+/// the *state* window this step — so a frame that has just been voted a
+/// keyframe cannot be evicted while it is still a state, and `kf_ids` sits one
+/// over `max_kfs` until it is demoted to a pose block. On this fixture that is
+/// framesets 49-50 and 56-57 (eight keyframes against `vio_max_kfs = 7`), and
+/// the C++ oracle shows exactly the same eight. The loop's postcondition is
+/// therefore `kf_ids ≤ max_kfs || states_to_marg_vel_bias.is_empty()`, and the
+/// overshoot is at most one because `vio_min_frames_after_kf = 5` puts
+/// keyframes six framesets apart while a state leaves the window after
+/// `vio_max_states = 3`.
 #[test]
 fn the_window_stays_inside_its_budget() {
     let oracle: Oracle = oracle();
@@ -777,7 +952,7 @@ fn the_window_stays_inside_its_budget() {
     for sample in imu_window() {
         estimator.push_imu(sample);
     }
-    for flow in &oracle.flow {
+    for flow in oracle.flow.iter().take(framesets()) {
         let FrameOutcome::Measured(stats) = estimator.process_frame(observations(flow)).unwrap()
         else {
             panic!("NeedMoreImu at {}", flow.t_ns);
@@ -790,11 +965,18 @@ fn the_window_stays_inside_its_budget() {
                 flow.t_ns,
                 estimator.ba.frame_states.len()
             );
+            let could_evict: bool = stats
+                .marginalization
+                .as_ref()
+                .is_some_and(|marg| !marg.states_to_marg_vel_bias.is_empty());
+            let budget: usize = if could_evict { max_kfs } else { max_kfs + 1 };
             assert!(
-                stats.kf_ids.len() <= max_kfs,
-                "frame {}: {} keyframes exceed the budget",
+                stats.kf_ids.len() <= budget,
+                "frame {}: {} keyframes exceed the budget of {budget} (a keyframe state {} \
+                 demoted this step)",
                 flow.t_ns,
-                stats.kf_ids.len()
+                stats.kf_ids.len(),
+                if could_evict { "was" } else { "was not" }
             );
             assert!(
                 estimator.ba.frame_poses.len() <= ltkfs + max_kfs,
