@@ -26,6 +26,7 @@
 //! rather than a rewrite.
 
 pub mod detect;
+pub mod flow;
 
 pub mod ldlt;
 pub mod parallel;

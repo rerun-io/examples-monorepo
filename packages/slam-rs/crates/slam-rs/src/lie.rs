@@ -159,6 +159,25 @@ impl<S: LieScalar> So3<S> {
         })
     }
 
+    /// `Sophus::SO3::cast` (`Sophus/sophus/so3.hpp`): the same rotation in
+    /// another scalar.
+    ///
+    /// Sophus casts the four coefficients and hands them to the quaternion
+    /// constructor, which normalizes; the narrowing is what makes that
+    /// normalization not a no-op. A rotation that cannot be normalized in the
+    /// target scalar — only reachable from a non-finite input — comes back as
+    /// the identity, which is what `Calibration::cast` needs to stay total.
+    pub fn cast<T: LieScalar>(&self) -> So3<T> {
+        let [x, y, z, w]: [S; 4] = self.quaternion_xyzw();
+        So3::from_quaternion_xyzw(
+            T::from_literal(x.to_f64()),
+            T::from_literal(y.to_f64()),
+            T::from_literal(z.to_f64()),
+            T::from_literal(w.to_f64()),
+        )
+        .unwrap_or_else(So3::identity)
+    }
+
     /// The underlying unit quaternion.
     pub fn quaternion(&self) -> &UnitQuaternion<S> {
         &self.quaternion
@@ -449,6 +468,18 @@ impl<S: LieScalar> Se3<S> {
             omega.y,
             omega.z,
         )
+    }
+
+    /// `Sophus::SE3::cast`: the same transform in another scalar.
+    pub fn cast<T: LieScalar>(&self) -> Se3<T> {
+        Se3 {
+            rotation: self.rotation.cast(),
+            translation: Vector3::new(
+                T::from_literal(self.translation.x.to_f64()),
+                T::from_literal(self.translation.y.to_f64()),
+                T::from_literal(self.translation.z.to_f64()),
+            ),
+        }
     }
 
     /// The inverse transform.

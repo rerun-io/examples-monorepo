@@ -193,8 +193,6 @@ impl CellGrid {
 /// Everything `detectKeypointsWithCells` reads out of the config.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DetectorConfig {
-    /// `optical_flow_detection_grid_size` (`PATCH_SIZE`).
-    pub grid_size: usize,
     /// `optical_flow_detection_num_points_cell`.
     pub num_points_cell: usize,
     /// `optical_flow_detection_min_threshold`.
@@ -350,7 +348,6 @@ mod tests {
 
     fn config() -> DetectorConfig {
         DetectorConfig {
-            grid_size: 50,
             num_points_cell: 1,
             min_threshold: 5,
             max_threshold: 40,

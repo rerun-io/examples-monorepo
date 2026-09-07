@@ -374,6 +374,70 @@ impl<S: Copy> CameraModel<S> {
     }
 }
 
+impl<S: LieScalar> CameraModel<S> {
+    /// `GenericCamera::cast` (`camera/generic_camera.hpp`): the same model in
+    /// another scalar.
+    pub fn cast<T: LieScalar>(&self) -> CameraModel<T> {
+        let convert = |value: S| -> T { T::from_literal(value.to_f64()) };
+        match self {
+            Self::Pinhole(p) => CameraModel::Pinhole(PinholeParams {
+                fx: convert(p.fx),
+                fy: convert(p.fy),
+                cx: convert(p.cx),
+                cy: convert(p.cy),
+            }),
+            Self::Kb4(p) => CameraModel::Kb4(Kb4Params {
+                fx: convert(p.fx),
+                fy: convert(p.fy),
+                cx: convert(p.cx),
+                cy: convert(p.cy),
+                k1: convert(p.k1),
+                k2: convert(p.k2),
+                k3: convert(p.k3),
+                k4: convert(p.k4),
+            }),
+            Self::PinholeRadtan8(p) => CameraModel::PinholeRadtan8(Radtan8Params {
+                fx: convert(p.fx),
+                fy: convert(p.fy),
+                cx: convert(p.cx),
+                cy: convert(p.cy),
+                k1: convert(p.k1),
+                k2: convert(p.k2),
+                p1: convert(p.p1),
+                p2: convert(p.p2),
+                k3: convert(p.k3),
+                k4: convert(p.k4),
+                k5: convert(p.k5),
+                k6: convert(p.k6),
+                rpmax: convert(p.rpmax),
+            }),
+            Self::DoubleSphere(p) => CameraModel::DoubleSphere(DoubleSphereParams {
+                fx: convert(p.fx),
+                fy: convert(p.fy),
+                cx: convert(p.cx),
+                cy: convert(p.cy),
+                xi: convert(p.xi),
+                alpha: convert(p.alpha),
+            }),
+            Self::ExtendedUnified(p) => CameraModel::ExtendedUnified(ExtendedUnifiedParams {
+                fx: convert(p.fx),
+                fy: convert(p.fy),
+                cx: convert(p.cx),
+                cy: convert(p.cy),
+                alpha: convert(p.alpha),
+                beta: convert(p.beta),
+            }),
+            Self::Unified(p) => CameraModel::Unified(UnifiedParams {
+                fx: convert(p.fx),
+                fy: convert(p.fy),
+                cx: convert(p.cx),
+                cy: convert(p.cy),
+                alpha: convert(p.alpha),
+            }),
+        }
+    }
+}
+
 /// Static accelerometer calibration: bias plus a lower-triangular scale
 /// (`calibration/calib_bias.hpp:44-125`, 9 parameters).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -728,6 +792,48 @@ impl<S: LieScalar> Calibration<S> {
     /// Number of cameras on the rig.
     pub fn camera_count(&self) -> usize {
         self.intrinsics.len()
+    }
+
+    /// `Calibration::cast` (`calibration.hpp:113-136`): the whole rig in
+    /// another scalar.
+    ///
+    /// basalt builds its frontend from `cal.template cast<Scalar>()`
+    /// (`optical_flow.h:204`), so a `Calibration<f64>` read from the JSON is what
+    /// the file gives and a `Calibration<f32>` is what the frontend runs on
+    /// (decision D05). `unknown` is carried across unchanged; the C++ has no
+    /// such field.
+    pub fn cast<T: LieScalar>(&self) -> Calibration<T> {
+        let convert = |value: S| -> T { T::from_literal(value.to_f64()) };
+        let convert3 = |value: &Vector3<S>| -> Vector3<T> {
+            Vector3::new(convert(value.x), convert(value.y), convert(value.z))
+        };
+        Calibration {
+            t_i_c: self.t_i_c.iter().map(Se3::cast).collect(),
+            intrinsics: self.intrinsics.iter().map(CameraModel::cast).collect(),
+            resolution: self.resolution.clone(),
+            vignette: self
+                .vignette
+                .iter()
+                .map(|spline| VignetteSpline {
+                    start_t_ns: spline.start_t_ns,
+                    dt_ns: spline.dt_ns,
+                    knots: spline.knots.iter().map(|knot| [convert(knot[0])]).collect(),
+                })
+                .collect(),
+            cam_time_offset_ns: self.cam_time_offset_ns,
+            calib_accel_bias: CalibAccelBias {
+                params: std::array::from_fn(|i| convert(self.calib_accel_bias.params[i])),
+            },
+            calib_gyro_bias: CalibGyroBias {
+                params: std::array::from_fn(|i| convert(self.calib_gyro_bias.params[i])),
+            },
+            imu_update_rate: convert(self.imu_update_rate),
+            gyro_noise_std: convert3(&self.gyro_noise_std),
+            accel_noise_std: convert3(&self.accel_noise_std),
+            gyro_bias_std: convert3(&self.gyro_bias_std),
+            accel_bias_std: convert3(&self.accel_bias_std),
+            unknown: self.unknown.clone(),
+        }
     }
 
     /// Discrete-time gyroscope noise, `sigma_c sqrt(rate)`
