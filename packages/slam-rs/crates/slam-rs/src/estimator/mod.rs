@@ -56,6 +56,7 @@ use nalgebra::{DMatrix, DVector, Vector2, Vector3, Vector4};
 
 use crate::ba_base::{BaError, BundleAdjustmentBase, triangulate};
 use crate::calib::Calibration;
+use crate::camera::CameraEnum;
 use crate::config::{LinearizationType, VioConfig};
 use crate::imu::{
     ImuError, ImuLinData, ImuNoise, ImuSample, IntegratedImuMeasurement, gravity,
@@ -119,13 +120,14 @@ pub enum EstimatorError {
         /// `vio_max_kfs`.
         max_kfs: i32,
     },
-    /// The rig has fewer than the two cameras `optical_flow.h:210` requires, or
-    /// the frameset carries a different number.
-    #[error("expected {expected} cameras, the frameset carries {actual}")]
+    /// The rig has fewer than the two cameras `optical_flow.h:210` requires,
+    /// its intrinsics and extrinsics disagree, or a frameset carries a
+    /// different number of cameras than the rig.
+    #[error("expected {expected} cameras, got {actual}")]
     CameraCountMismatch {
-        /// Cameras in the calibration.
+        /// Cameras the rig is required or known to have.
         expected: usize,
-        /// Cameras in the frameset.
+        /// Cameras the rejected input carries.
         actual: usize,
     },
     /// Frame timestamps must strictly increase: `:309-313` asserts both the
@@ -498,6 +500,17 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             return Err(EstimatorError::CameraCountMismatch {
                 expected: 2,
                 actual: calibration.t_i_c.len(),
+            });
+        }
+        // The rig is one list of cameras: `intrinsics` carries the projections
+        // and `t_i_c` the extrinsics, and every camera id downstream indexes
+        // both. basalt reads them out of one `Calibration` and never checks,
+        // so a JSON with two extrinsics and one intrinsic would index out of
+        // range deep inside the triangulation; refuse it here instead.
+        if calibration.intrinsics.len() != calibration.t_i_c.len() {
+            return Err(EstimatorError::CameraCountMismatch {
+                expected: calibration.t_i_c.len(),
+                actual: calibration.intrinsics.len(),
             });
         }
 
@@ -1101,20 +1114,45 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     ///
     /// The host camera is `i`, not camera 0: the database is genuinely
     /// N-camera.
+    ///
+    /// **Contract: every camera id below is in the rig**, so the rig is
+    /// indexed directly. `cam_id` indexes `unconnected_obs`, which
+    /// [`Self::measure`] builds with one entry per frameset camera, and
+    /// `tcido.cam_id` names a camera of a frameset [`Self::process_frame`]
+    /// already accepted; both are therefore `< t_i_c.len()`, and
+    /// [`Self::new`] refuses a calibration whose `intrinsics` and `t_i_c`
+    /// disagree.
+    ///
+    /// **Deliberate deviation from the C++ line shape:** `:519-521` re-reads
+    /// the host pose and re-inverts it and the host camera's extrinsic for
+    /// every candidate pair. Nothing in the loop moves the host frame's pose
+    /// or the calibration, so they are resolved once each — the same values
+    /// from the same inputs, in the same products.
     fn triangulate_unconnected(
         &mut self,
         frame: &FlowObservations,
         unconnected_obs: &[BTreeSet<KeypointId>],
     ) -> Result<usize, EstimatorError> {
+        debug_assert_eq!(unconnected_obs.len(), self.ba.calib.t_i_c.len());
         // `:509`: the squared threshold is formed in `double` and cast, so the
         // `f32` instantiation compares against `(float)(0.05 * 0.05)`.
         let min_triang_distance2: S = S::from_literal(
             self.config.vio_min_triangulation_dist * self.config.vio_min_triangulation_dist,
         );
         let mut num_points_added: usize = 0;
+        // `:519`'s `T_i0_inv`: the host is this frameset, for every landmark
+        // and every pair.
+        let t_i0_inv: Se3<S> = self
+            .ba
+            .get_pose_state_with_lin(frame.t_ns)?
+            .pose()
+            .inverse();
 
         for (cam_id, ids) in unconnected_obs.iter().enumerate() {
             let tcidl: TimeCamId = TimeCamId::new(frame.t_ns, cam_id);
+            let host_keypoints: &BTreeMap<KeypointId, Vector2<f32>> = &frame.cameras[cam_id];
+            let cam0: CameraEnum<S> = self.ba.cameras()[cam_id];
+            let t_i_c0_inv: Se3<S> = self.ba.calib.t_i_c[cam_id].inverse();
             for kpt_id in ids {
                 let lm_id: LandmarkId = LandmarkId::from(*kpt_id);
                 // `:487`: another camera of this frameset may have hosted it
@@ -1122,7 +1160,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 if self.ba.lmdb.landmark_exists(lm_id) {
                     continue;
                 }
-                let Some(p0_pixel) = frame.cameras.get(cam_id).and_then(|c| c.get(kpt_id)) else {
+                let Some(p0_pixel) = host_keypoints.get(kpt_id) else {
                     continue;
                 };
                 let p0: Vector2<S> = cast_pixel::<S>(p0_pixel);
@@ -1148,12 +1186,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                     // pair, not the landmark.
                     let mut p0_3d: Vector4<S> = Vector4::zeros();
                     let mut p1_3d: Vector4<S> = Vector4::zeros();
-                    let Some(cam0) = self.ba.cameras().get(cam_id) else {
-                        continue;
-                    };
-                    let Some(cam1) = self.ba.cameras().get(tcido.cam_id) else {
-                        continue;
-                    };
+                    let cam1: CameraEnum<S> = self.ba.cameras()[tcido.cam_id];
                     let valid0: bool = cam0.unproject(&p0, &mut p0_3d);
                     let valid1: bool = cam1.unproject(p1, &mut p1_3d);
                     if !valid0 || !valid1 {
@@ -1161,18 +1194,10 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                     }
 
                     // `:519-522`.
-                    let host_pose: Se3<S> =
-                        *self.ba.get_pose_state_with_lin(tcidl.frame_id)?.pose();
                     let other_pose: Se3<S> =
                         *self.ba.get_pose_state_with_lin(tcido.frame_id)?.pose();
-                    let t_i0_i1: Se3<S> = host_pose.inverse() * other_pose;
-                    let Some(t_i_c0) = self.ba.calib.t_i_c.get(cam_id) else {
-                        continue;
-                    };
-                    let Some(t_i_c1) = self.ba.calib.t_i_c.get(tcido.cam_id) else {
-                        continue;
-                    };
-                    let t_0_1: Se3<S> = t_i_c0.inverse() * t_i0_i1 * *t_i_c1;
+                    let t_i0_i1: Se3<S> = t_i0_inv * other_pose;
+                    let t_0_1: Se3<S> = t_i_c0_inv * t_i0_i1 * self.ba.calib.t_i_c[tcido.cam_id];
 
                     // `:524`: `squaredNorm()` on a 3-vector is Eigen's
                     // three-coefficient reduction, whose order differs between
@@ -1240,4 +1265,37 @@ fn cast_pixel<S: LieScalar>(pixel: &Vector2<f32>) -> Vector2<S> {
 /// Elapsed nanoseconds, saturating rather than panicking on an absurd clock.
 fn duration_ns(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use crate::config::VioConfig;
+
+    const CALIB: &str = include_str!("../../tests/fixtures/msdmi_calib.json");
+    const CONFIG: &str = include_str!("../../tests/fixtures/msdmi_config.json");
+
+    /// The rig is one list of cameras, and
+    /// [`SqrtKeypointVio::triangulate_unconnected`] indexes the projections and
+    /// the extrinsics with the same id.
+    #[test]
+    fn a_rig_whose_intrinsics_and_extrinsics_disagree_is_refused() {
+        let config: VioConfig = VioConfig::from_json_str(CONFIG).unwrap();
+        let mut calibration: Calibration<f64> = Calibration::from_json_str(CALIB).unwrap();
+        calibration.intrinsics.pop();
+        let refused: EstimatorError =
+            SqrtKeypointVio::new(Vector3::new(0.0, 0.0, -9.81), calibration, config).unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                EstimatorError::CameraCountMismatch {
+                    expected: 2,
+                    actual: 1
+                }
+            ),
+            "two extrinsics and one intrinsic is not a rig, got {refused:?}"
+        );
+    }
 }
