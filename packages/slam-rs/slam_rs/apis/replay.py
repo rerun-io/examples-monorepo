@@ -18,14 +18,14 @@ from pathlib import Path
 
 import numpy as np
 import rerun as rr
-from jaxtyping import Float64, Int64, UInt8
+from jaxtyping import Float64, UInt8
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from slam_rs import _core
 from slam_rs.catalog_feed import CameraCalib, Frameset, LocalSegment, SegmentFeed, open_segment
 from slam_rs.reference import ReferenceManifest, ReferenceSegment, load_manifest
-from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, write_trajectory
+from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, shift_clock, write_trajectory
 
 SMOKE_SEGMENT: str = "msd-index__MIO_others__MIO10_short_2_panorama"
 """Default segment: the 7.6 s rotation-dominated panorama from the smoke tier."""
@@ -77,12 +77,21 @@ def _log_calibration(cameras: tuple[CameraCalib, ...]) -> None:
         )
 
 
-def _nearest_ground_truth(ground_truth: Trajectory, t_ns: int) -> int:
-    """Index of the ground-truth pose closest in time to ``t_ns``."""
-    return int(np.abs(ground_truth.t_ns - t_ns).argmin())
+@dataclass(slots=True, frozen=True)
+class ReplayOutcome:
+    """What one replay produced, all on the ``video_time`` clock."""
+
+    estimate: Trajectory
+    """Poses the core reported while tracking; possibly empty."""
+    ground_truth: Trajectory
+    """The nearest ground-truth pose per replayed frameset, row-aligned in time with the framesets."""
+    imu_samples: int
+    """Inertial samples pushed into the core."""
+    framesets: int
+    """Framesets replayed."""
 
 
-def _replay(feed: SegmentFeed, config: Config) -> Trajectory:
+def _replay(feed: SegmentFeed, config: Config) -> ReplayOutcome:
     """Drive the core over the feed, logging inputs and any tracked pose.
 
     Args:
@@ -90,56 +99,54 @@ def _replay(feed: SegmentFeed, config: Config) -> Trajectory:
         config: Parsed CLI options.
 
     Returns:
-        The poses the core reported while tracking; possibly empty.
+        The estimate, the ground truth sampled at the frameset times, and counts.
     """
     vio: _core.Vio = _core.Vio(camera_count=len(feed.cameras), min_imu_samples=1)
-    imu_t_ns: Int64[ndarray, " n_samples"] = feed.imu_stream.t_ns
-    cursor: int = 0
     statuses: dict[str, int] = {}
     pose_t_ns: list[int] = []
     positions: list[Float64[ndarray, " 3"]] = []
     quaternions: list[Float64[ndarray, " 4"]] = []
+    gt_t_ns: list[int] = []
+    gt_positions: list[Float64[ndarray, " 3"]] = []
+    gt_quaternions: list[Float64[ndarray, " 4"]] = []
     started: float = time.monotonic()
     replayed: int = 0
+    pushed: int = 0
     frameset: Frameset
     for frameset in feed.framesets():
         if config.max_framesets is not None and replayed >= config.max_framesets:
             break
         replayed += 1
-        rr.set_time("video_time", duration=np.timedelta64(frameset.t_ns, "ns"))
 
-        # Push every IMU sample up to and including the first one at or after the
-        # frame time. Feeding only samples <= t_frame deadlocks a blocking backend
-        # on the very first frameset, which is the bug the basalt fork hit.
-        lead: int = int(np.searchsorted(imu_t_ns, frameset.t_ns, side="right"))
-        lead = min(lead + 1, len(imu_t_ns))
-        if lead > cursor:
+        # The feed already hands over the samples since the previous frameset,
+        # running one past this frame time: a backend that integrates up to the
+        # frame and blocks until it can deadlocks on the first frameset otherwise.
+        if len(frameset.imu):
             vio.push_imu_batch(
-                imu_t_ns[cursor:lead],
-                np.ascontiguousarray(feed.imu_stream.gyro_rad_s[cursor:lead]),
-                np.ascontiguousarray(feed.imu_stream.accel_m_s2[cursor:lead]),
+                frameset.imu.t_ns,
+                np.ascontiguousarray(frameset.imu.gyro_rad_s),
+                np.ascontiguousarray(frameset.imu.accel_m_s2),
             )
-            for sample in range(cursor, lead):
-                rr.set_time("video_time", duration=np.timedelta64(int(imu_t_ns[sample]), "ns"))
-                rr.log("/world/rig_00/imu_00/gyro", rr.Scalars(feed.imu_stream.gyro_rad_s[sample]))
-                rr.log("/world/rig_00/imu_00/accel", rr.Scalars(feed.imu_stream.accel_m_s2[sample]))
-            cursor = lead
-            rr.set_time("video_time", duration=np.timedelta64(frameset.t_ns, "ns"))
+            pushed += len(frameset.imu)
+            for sample in range(len(frameset.imu)):
+                rr.set_time("video_time", duration=np.timedelta64(int(frameset.imu.t_ns[sample]), "ns"))
+                rr.log("/world/rig_00/imu_00/gyro", rr.Scalars(frameset.imu.gyro_rad_s[sample]))
+                rr.log("/world/rig_00/imu_00/accel", rr.Scalars(frameset.imu.accel_m_s2[sample]))
+        rr.set_time("video_time", duration=np.timedelta64(frameset.t_ns, "ns"))
 
         for camera, image in zip(feed.cameras, frameset.images, strict=True):
             small: UInt8[ndarray, "h w"] = np.ascontiguousarray(image[::IMAGE_DOWNSCALE, ::IMAGE_DOWNSCALE])
             rr.log(f"/world/rig_00/cam_{camera.index:02d}/pinhole/image", rr.Image(small, color_model="L"))
 
-        if feed.ground_truth is not None:
-            nearest: int = _nearest_ground_truth(feed.ground_truth, frameset.t_ns)
-            quaternion_wxyz: Float64[ndarray, " 4"] = feed.ground_truth.quaternion_wxyz[nearest]
+        if frameset.ground_truth is not None:
+            pose_wxyz: Float64[ndarray, " 7"] = frameset.ground_truth
             rr.log(
                 "/world/rig_00",
-                rr.Transform3D(
-                    translation=feed.ground_truth.position_m[nearest],
-                    quaternion=rr.Quaternion(xyzw=np.roll(quaternion_wxyz, -1)),
-                ),
+                rr.Transform3D(translation=pose_wxyz[0:3], quaternion=rr.Quaternion(xyzw=np.roll(pose_wxyz[3:7], -1))),
             )
+            gt_t_ns.append(frameset.t_ns)
+            gt_positions.append(pose_wxyz[0:3].copy())
+            gt_quaternions.append(pose_wxyz[3:7].copy())
 
         result: _core.VioResult = vio.track(frameset.t_ns, frameset.images)
         # A PyO3 enum has no ``name`` and is unhashable (see ``_core.pyi``), so the
@@ -156,10 +163,19 @@ def _replay(feed: SegmentFeed, config: Config) -> Trajectory:
 
     elapsed: float = time.monotonic() - started
     print(f"{replayed} framesets in {elapsed:.1f} s ({replayed / max(elapsed, 1e-9):.1f} fps), statuses: {statuses}")
-    return Trajectory(
-        t_ns=np.array(pose_t_ns, dtype=np.int64),
-        position_m=np.array(positions, dtype=np.float64).reshape(-1, 3),
-        quaternion_wxyz=np.array(quaternions, dtype=np.float64).reshape(-1, 4),
+    return ReplayOutcome(
+        estimate=Trajectory(
+            t_ns=np.array(pose_t_ns, dtype=np.int64),
+            position_m=np.array(positions, dtype=np.float64).reshape(-1, 3),
+            quaternion_wxyz=np.array(quaternions, dtype=np.float64).reshape(-1, 4),
+        ),
+        ground_truth=Trajectory(
+            t_ns=np.array(gt_t_ns, dtype=np.int64),
+            position_m=np.array(gt_positions, dtype=np.float64).reshape(-1, 3),
+            quaternion_wxyz=np.array(gt_quaternions, dtype=np.float64).reshape(-1, 4),
+        ),
+        imu_samples=pushed,
+        framesets=replayed,
     )
 
 
@@ -180,16 +196,21 @@ def main(config: Config) -> None:
 
     with open_segment(source, segment.imu, frame_stride=config.frame_stride, window_s=config.window_s) as feed:
         print(
-            f"{len(feed.cameras)} cameras, {len(feed.frame_t_ns)} framesets, {len(feed.imu_stream)} IMU samples, "
-            f"{0 if feed.ground_truth is None else len(feed.ground_truth)} ground-truth poses"
+            f"{len(feed.cameras)} cameras, {len(feed.frame_t_ns)} framesets, ground truth "
+            f"{'attached' if feed.has_ground_truth else 'absent'}, clock offset {feed.capture_start_time_ns} ns"
         )
         _log_calibration(feed.cameras)
-        estimate: Trajectory = _replay(feed, config)
-        write_trajectory(output_csv, estimate)
-        print(f"{len(estimate)} tracked poses -> {output_csv}")
-        if len(estimate) >= 3 and feed.ground_truth is not None:
-            result: AteResult = ate(feed.ground_truth, estimate)
+        outcome: ReplayOutcome = _replay(feed, config)
+        print(f"{outcome.imu_samples} IMU samples pushed, {len(outcome.ground_truth)} ground-truth poses sampled")
+
+        # Exports carry the absolute device clock, the one every basalt CSV and
+        # every gt.csv sidecar uses. Writing video_time here would produce a file
+        # that associates with none of them.
+        write_trajectory(output_csv, shift_clock(outcome.estimate, feed.capture_start_time_ns))
+        print(f"{len(outcome.estimate)} tracked poses -> {output_csv} (absolute ns)")
+        if len(outcome.estimate) > 0 and len(outcome.ground_truth) > 0:
+            result: AteResult = ate(outcome.ground_truth, outcome.estimate)
             print(result.summary())
-            print(f"coverage: {coverage(feed.ground_truth, estimate):.1%}")
+            print(f"coverage: {coverage(outcome.ground_truth, outcome.estimate):.1%}")
         else:
             print("no ATE: the core reported no tracked poses (expected until the estimator lands)")

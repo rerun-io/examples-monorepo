@@ -9,6 +9,7 @@ from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
 from jaxtyping import Float64, Int64
 from numpy import ndarray
+from simplecv.ops.umeyama import SimilarityTransform, umeyama_alignment
 
 from slam_rs.reference import ReferenceManifest, load_manifest
 from slam_rs.trajectory import (
@@ -20,6 +21,8 @@ from slam_rs.trajectory import (
     coverage,
     passes_gate,
     read_trajectory,
+    rigid_alignment,
+    shift_clock,
     write_trajectory,
 )
 
@@ -65,10 +68,11 @@ def _trajectory(t_ns: Int64[ndarray, " n"], position_m: Float64[ndarray, "n 3"])
 def test_a_rigidly_transformed_trajectory_has_zero_ate(
     positions: Float64[ndarray, "n 3"], quaternion: Float64[ndarray, " 4"], translation: Float64[ndarray, " 3"]
 ) -> None:
-    """Umeyama undoes any rigid transform exactly, so the aligned error is numerical noise."""
-    # A cloud with no spread leaves the alignment undetermined, which the helper
-    # rejects by design rather than returning an arbitrary rotation.
-    assume(float(np.var(positions, axis=0).sum()) > 1e-3)
+    """Umeyama undoes any rigid transform exactly, so the aligned error is numerical noise.
+
+    No assumption filters the input: a stationary cloud is a legitimate reference
+    run and must align to zero, not raise.
+    """
     rotation: Float64[ndarray, "3 3"] = _rotation_from(_quaternion_from(quaternion))
     t_ns: Int64[ndarray, " n"] = np.arange(positions.shape[0], dtype=np.int64) * 20_000_000
     moved: Float64[ndarray, "n 3"] = np.einsum("ij,nj->ni", rotation, positions) + translation
@@ -90,6 +94,79 @@ def test_association_matches_exactly_up_to_the_tolerance(positions: Float64[ndar
     assert associate(reference, candidate).count == expected
 
 
+def test_a_stationary_trajectory_aligns_to_zero_rather_than_raising() -> None:
+    """golden_compare has no variance floor, so a rig that never moved is a pass, not an error."""
+    positions: Float64[ndarray, "10 3"] = np.tile(np.array([1.5, -2.0, 0.25]), (10, 1))
+    t_ns: Int64[ndarray, " 10"] = np.arange(10, dtype=np.int64) * 20_000_000
+    stationary: Trajectory = _trajectory(t_ns, positions)
+    result: AteResult = ate(stationary, stationary)
+    assert result.n_associated == 10
+    assert result.rmse_m == pytest.approx(0.0, abs=1e-12)
+    assert passes_gate(result, tolerance_m=0.02)
+    # The shared helper refuses this input; that difference is the reason
+    # `rigid_alignment` exists rather than calling it.
+    with pytest.raises(ValueError, match="variance too small"):
+        umeyama_alignment(positions, positions, allow_scaling=False)
+
+
+def test_a_micrometre_span_aligns_to_zero_rather_than_raising() -> None:
+    """A trajectory spanning 1e-5 m has a variance under the shared helper's 1e-9 floor."""
+    span: Float64[ndarray, " 12"] = np.linspace(0.0, 1e-5, 12)
+    positions: Float64[ndarray, "12 3"] = np.column_stack([span, span * 0.5, -span])
+    t_ns: Int64[ndarray, " 12"] = np.arange(12, dtype=np.int64) * 20_000_000
+    tiny: Trajectory = _trajectory(t_ns, positions)
+    result: AteResult = ate(tiny, tiny)
+    assert result.n_associated == 12
+    assert result.rmse_m == pytest.approx(0.0, abs=1e-12)
+    assert passes_gate(result, tolerance_m=0.02)
+    with pytest.raises(ValueError, match="variance too small"):
+        umeyama_alignment(positions, positions, allow_scaling=False)
+
+
+@settings(deadline=None, max_examples=50)
+@given(
+    positions=POSITIONS,
+    quaternion=arrays(dtype=np.float64, shape=(4,), elements=st.floats(min_value=-1.0, max_value=1.0, allow_nan=False, width=64)),
+    translation=arrays(dtype=np.float64, shape=(3,), elements=st.floats(min_value=-20.0, max_value=20.0, allow_nan=False, width=64)),
+)
+def test_the_ported_alignment_agrees_with_simplecvs_on_well_conditioned_input(
+    positions: Float64[ndarray, "n 3"], quaternion: Float64[ndarray, " 4"], translation: Float64[ndarray, " 3"]
+) -> None:
+    """Where both are defined, the ported arithmetic and the shared helper are the same transform."""
+    # The rotation is unique only when the cloud spans all three axes. A collinear
+    # or planar set admits a family of equally good alignments, and the two
+    # implementations may legitimately return different members of it, so the
+    # smallest singular value of the centred cloud gates this comparison.
+    centered: Float64[ndarray, "n 3"] = positions - positions.mean(axis=0)
+    assume(float(np.linalg.svd(centered, compute_uv=False)[-1]) > 1e-2)
+    rotation: Float64[ndarray, "3 3"] = _rotation_from(_quaternion_from(quaternion))
+    moved: Float64[ndarray, "n 3"] = np.einsum("ij,nj->ni", rotation, positions) + translation
+    ported: SimilarityTransform = rigid_alignment(moved, positions)
+    shared: SimilarityTransform = umeyama_alignment(moved, positions, allow_scaling=False)
+    np.testing.assert_allclose(ported.dst_R_src, shared.dst_R_src, atol=1e-8)
+    np.testing.assert_allclose(ported.dst_t_src, shared.dst_t_src, atol=1e-8)
+    assert ported.scale == 1.0
+    # Whatever the alignment, both map the source onto the target identically.
+    np.testing.assert_allclose(ported.apply(moved), shared.apply(moved), atol=1e-8)
+
+
+def test_shift_clock_moves_a_trajectory_onto_the_absolute_device_clock() -> None:
+    """The one conversion between video_time and the clock every basalt CSV uses."""
+    offset_ns: int = 10_433_867_587_166
+    positions: Float64[ndarray, "5 3"] = np.arange(15, dtype=np.float64).reshape(5, 3)
+    relative: Trajectory = _trajectory(np.array([0, 17_504_134, 100, 2**53 + 1, 2**54 + 3], dtype=np.int64), positions)
+    absolute: Trajectory = shift_clock(relative, offset_ns)
+    assert absolute.t_ns.dtype == np.int64
+    np.testing.assert_array_equal(absolute.t_ns, relative.t_ns + offset_ns)
+    # The dossier's worked example: the sidecar's first row on the smoke segment.
+    assert int(absolute.t_ns[1]) == 10_433_885_091_300
+    # Positions and rotations are untouched, and the shift is exactly invertible.
+    np.testing.assert_array_equal(absolute.position_m, relative.position_m)
+    np.testing.assert_array_equal(shift_clock(absolute, -offset_ns).t_ns, relative.t_ns)
+    # Nothing associates across the offset, which is the bug this prevents.
+    assert associate(relative, absolute).count == 0
+
+
 def test_the_association_tolerance_is_inclusive_on_both_edges() -> None:
     positions: Float64[ndarray, "3 3"] = np.zeros((3, 3), dtype=np.float64)
     t_ns: Int64[ndarray, " 3"] = np.array([0, 1_000_000_000, 2_000_000_000], dtype=np.int64)
@@ -101,7 +178,10 @@ def test_the_association_tolerance_is_inclusive_on_both_edges() -> None:
 @settings(deadline=None, max_examples=50)
 @given(
     positions=POSITIONS,
-    start_ns=st.integers(min_value=0, max_value=2**52),
+    # Reach well past 2**53, where float64 stops representing every integer, and
+    # keep the low bits odd: routing these through a float would round them and
+    # the round-trip assertion below would fail.
+    start_ns=st.integers(min_value=2**53 + 1, max_value=2**62).map(lambda value: value | 1),
     quaternion=arrays(dtype=np.float64, shape=(4,), elements=st.floats(min_value=-1.0, max_value=1.0, allow_nan=False, width=64)),
 )
 def test_the_csv_round_trip_preserves_nanoseconds_and_values(

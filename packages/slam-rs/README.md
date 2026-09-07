@@ -45,9 +45,9 @@ import numpy as np
 from slam_rs import _core
 
 vio = _core.Vio(camera_count=2, min_imu_samples=1)
-vio.push_imu_batch(t_ns, gyro, accel)          # int64[n], float64[n, 3], float64[n, 3]
-result = vio.track(t_ns, [left, right])        # uint8[h, w] per camera
-result.status, result.world_from_rig           # VioStatus, [tx ty tz qx qy qz qw]
+vio.push_imu_batch(t_ns, gyro, accel)  # int64[n], float64[n, 3], float64[n, 3]
+result = vio.track(t_ns, [left, right])  # uint8[h, w] per camera
+result.status, result.world_from_rig  # VioStatus, [tx ty tz qx qy qz qw]
 ```
 
 Images are copied in and the GIL is released around the core call, so a decoder
@@ -59,11 +59,13 @@ thread keeps running. Wrong dtype, rank, shape or memory layout raises
 `reference_segments.toml` freezes ten Monado SLAM Dataset segments — five
 two-camera `msd-index` (KB4 fisheye, 54 Hz) and five four-camera `msd-g2`
 (radtan8, 30 Hz) — in three tiers: **smoke** on every commit, **accuracy** per
-pull request, **long** nightly. Each entry carries the catalog entry id, the
-NAS storage URLs of the `base` and `gt` layers, the `gt.csv` sidecar, the
-capture and ground-truth properties the catalog reports, the frozen decode path
-and the frozen IMU noise model. A `[robocap]` section adds session 15, which has
-no ground truth and is gated against basalt's own output instead.
+pull request, **long** nightly. Each entry carries the catalog entry id, the NAS
+storage URLs of the `base` and `gt` layers with their registered size and schema
+digest, the `gt.csv` sidecar, the capture and ground-truth properties the catalog
+reports, the frozen decode path and the frozen IMU noise model. A `[[dataset]]`
+block per catalog dataset pins the rig geometry — per-camera resolution and image
+rotation — and a `[robocap]` section adds session 15, which has no ground truth
+and is gated against basalt's own output instead.
 
 Three things are frozen because the catalog cannot carry them and each one moves
 the numbers: the IMU noise densities and update rate (basalt's `msd*_calib.json`),
@@ -72,22 +74,39 @@ decode path (`cpu_gray8_dav1d_1thread`, worth about 5 cm of ATE against NVDEC RG
 
 ```python
 from slam_rs.reference import load_manifest
+
 manifest = load_manifest()
 segment = manifest.in_tier("smoke")[0]
 ```
 
+### Two clocks, converted once
+
+The catalog indexes a segment on `video_time`, which is **relative** to
+`capture.start_time_ns`. Every basalt CSV, including the `gt.csv` sidecars, is on
+the **absolute** device clock. On the Index smoke segment the two differ by
+10,433,867,587,166 ns, so a trajectory exported on the wrong clock associates with
+nothing at all. The feed works in `video_time` throughout and
+`trajectory.shift_clock` converts once, at the CSV boundary — the same discipline
+the w-first-versus-XYZW quaternion ordering follows.
+
 ## The feed, the metrics and the replay tool
 
-`slam_rs.catalog_feed` turns one segment into calibration, an IMU stream, ground
-truth and grayscale framesets. It reads a catalog URL or local `.rrd` files
-served in process (no catalog server needed), fetches video, IMU and ground
-truth one time window at a time with window edges on shared keyframes, and
-decodes AV1 with single-threaded dav1d to `gray8`. Each frameset carries a
-sha256 of its pixels, so two runs can prove they saw the same images.
+`slam_rs.catalog_feed` turns one segment into calibration and grayscale
+framesets. It reads a catalog URL or local `.rrd` files served in process (no
+catalog server needed) and decodes AV1 with single-threaded dav1d to `gray8`.
+Video, inertial samples and ground truth are all fetched one `video_time` window
+at a time, with window edges on frames that are keyframes in every camera, so
+`window_s` really does bound memory on the 410 s and 586 s segments. Each
+frameset carries a sha256 of its pixels, the inertial samples since the previous
+frameset (running one past its own timestamp, so a blocking backend cannot
+deadlock), and the nearest ground-truth pose within the association tolerance.
 
 `slam_rs.trajectory` reads and writes basalt's CSV form (`#timestamp [ns], p_x,
 …, q_w, …`, w-first, integer nanoseconds), associates two trajectories with a
-5 ms tolerance, and reports rigid-aligned ATE plus the fork's PASS criteria.
+5 ms tolerance, and reports rigid-aligned ATE plus the fork's PASS criteria. The
+alignment is `golden_compare.py`'s inline arithmetic rather than the shared
+`simplecv` helper, whose variance floor would reject a stationary rig that the
+fork passes.
 
 ```bash
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py \

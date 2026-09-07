@@ -5,23 +5,44 @@
 # into three tiers: `smoke` runs on every commit, `accuracy` per pull request,
 # `long` nightly.
 #
-# Everything here is frozen on purpose. The capture and ground-truth properties
-# are what the catalog reports today, so a re-conversion that changes a frame
-# count fails a test instead of silently moving the numbers. The decode path is
-# frozen because it moves ATE by about 5 cm on a deterministic VIO: the MSD AV1
-# streams are limited-range yuv420p with flat chroma, so the `gray8` reformat
+# Everything here is frozen on purpose. The capture and ground-truth properties,
+# and each layer's size and schema hash, are what the catalog reports today, so a
+# re-conversion that changes a frame count or a schema fails a test instead of
+# silently moving the numbers. The decode path is frozen because it moves ATE by
+# about 5 cm on a deterministic VIO: the MSD AV1 streams are limited-range
+# yuv420p with flat chroma, so the `gray8` reformat (limited to full expansion)
 # recovers the original grayscale while the raw Y plane is off by up to 17 LSB.
 # The IMU block is frozen because the catalog does not carry noise densities,
 # bias random walks, the update rate or the camera time offset; the values are
 # basalt's own MSD calibration (`data/msd/msd*_calib.json`).
 #
 # Layers live on the NAS, one `.rrd` per segment per layer, plus a EuRoC-style
-# `gt.csv` sidecar with absolute device-clock timestamps and a w-first
-# quaternion. The `video_time` index is that clock minus
-# `property:capture:start_time_ns`.
+# `gt.csv` sidecar. Two clocks are in play and confusing them costs every
+# association: the `video_time` index is relative, and the sidecar (like every
+# basalt CSV) is absolute device-clock nanoseconds. The conversion is exactly
+# `absolute = video_time + capture.start_time_ns`, which is why that field is
+# recorded per segment here.
 
-schema_version = 1
+schema_version = 2
 catalog_url = "rerun+http://dgx-spark:9988"
+
+# Landscape, unrotated: the Index stores its two fisheye cameras as captured.
+[[dataset]]
+name = "msd-index"
+entry_id = "18D2C8A5D1E6B2217c6d7f028ca47884"
+num_cameras = 2
+camera_resolution_wh = [[960, 960], [960, 960]]
+image_rotation_cw_deg = [0, 0]
+
+# Portrait: the G2 video is stored rotated (cam0/cam1 90 degrees clockwise,
+# cam2/cam3 270), with the catalog intrinsics and extrinsics rotated to match.
+# Nothing may assume a landscape frame or a shared orientation across cameras.
+[[dataset]]
+name = "msd-g2"
+entry_id = "18D2CC37925CE0376257837ab3439f34"
+num_cameras = 4
+camera_resolution_wh = [[480, 640], [480, 640], [480, 640], [480, 640]]
+image_rotation_cw_deg = [90, 90, 270, 270]
 
 # rotation-dominated panorama; 8 s, catches gross frontend or IMU sign errors in seconds
 [[segment]]
@@ -38,10 +59,19 @@ decode_path = "cpu_gray8_dav1d_1thread"
 duration_ns = 7646127329
 num_frames = 412
 num_cameras = 2
+start_time_ns = 10433867587166
 
 [segment.gt]
 num_poses = 6998
 source = "lighthouse"
+
+[segment.layers.base]
+size_bytes = 5943287
+schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c9610064132"
+
+[segment.layers.gt]
+size_bytes = 547545
+schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [segment.imu]
 rate_hz = 1000.0
@@ -66,10 +96,19 @@ decode_path = "cpu_gray8_dav1d_1thread"
 duration_ns = 76009472425
 num_frames = 4095
 num_cameras = 2
+start_time_ns = 11352949516251
 
 [segment.gt]
 num_poses = 69600
 source = "lighthouse"
+
+[segment.layers.base]
+size_bytes = 60519130
+schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c9610064132"
+
+[segment.layers.gt]
+size_bytes = 6059638
+schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [segment.imu]
 rate_hz = 1000.0
@@ -94,10 +133,19 @@ decode_path = "cpu_gray8_dav1d_1thread"
 duration_ns = 113411079341
 num_frames = 6119
 num_cameras = 2
+start_time_ns = 10723479976823
 
 [segment.gt]
 num_poses = 103789
 source = "lighthouse"
+
+[segment.layers.base]
+size_bytes = 100094801
+schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c9610064132"
+
+[segment.layers.gt]
+size_bytes = 9180481
+schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [segment.imu]
 rate_hz = 1000.0
@@ -122,10 +170,19 @@ decode_path = "cpu_gray8_dav1d_1thread"
 duration_ns = 410547359554
 num_frames = 22117
 num_cameras = 2
+start_time_ns = 25356462262424
 
 [segment.gt]
 num_poses = 374397
 source = "lighthouse"
+
+[segment.layers.base]
+size_bytes = 328435938
+schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c9610064132"
+
+[segment.layers.gt]
+size_bytes = 32687369
+schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [segment.imu]
 rate_hz = 1000.0
@@ -150,10 +207,19 @@ decode_path = "cpu_gray8_dav1d_1thread"
 duration_ns = 585634144799
 num_frames = 31577
 num_cameras = 2
+start_time_ns = 8359447525796
 
 [segment.gt]
 num_poses = 535910
 source = "lighthouse"
+
+[segment.layers.base]
+size_bytes = 594406063
+schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c9610064132"
+
+[segment.layers.gt]
+size_bytes = 47783314
+schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [segment.imu]
 rate_hz = 1000.0
@@ -178,10 +244,19 @@ decode_path = "cpu_gray8_dav1d_1thread"
 duration_ns = 3578417141
 num_frames = 107
 num_cameras = 4
+start_time_ns = 6298736610267
 
 [segment.gt]
 num_poses = 3264
 source = "mocap"
+
+[segment.layers.base]
+size_bytes = 2679587
+schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26ba"
+
+[segment.layers.gt]
+size_bytes = 276750
+schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [segment.imu]
 rate_hz = 1000.0
@@ -206,10 +281,19 @@ decode_path = "cpu_gray8_dav1d_1thread"
 duration_ns = 53146662319
 num_frames = 1596
 num_cameras = 4
+start_time_ns = 5422527461389
 
 [segment.gt]
 num_poses = 48585
 source = "mocap"
+
+[segment.layers.base]
+size_bytes = 40448125
+schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26ba"
+
+[segment.layers.gt]
+size_bytes = 4234733
+schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [segment.imu]
 rate_hz = 1000.0
@@ -234,10 +318,19 @@ decode_path = "cpu_gray8_dav1d_1thread"
 duration_ns = 96108306337
 num_frames = 2887
 num_cameras = 4
+start_time_ns = 9635655498771
 
 [segment.gt]
 num_poses = 87936
 source = "mocap"
+
+[segment.layers.base]
+size_bytes = 71019722
+schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26ba"
+
+[segment.layers.gt]
+size_bytes = 7752549
+schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [segment.imu]
 rate_hz = 1000.0
@@ -262,10 +355,19 @@ decode_path = "cpu_gray8_dav1d_1thread"
 duration_ns = 141649952216
 num_frames = 4255
 num_cameras = 4
+start_time_ns = 9948743944192
 
 [segment.gt]
 num_poses = 129603
 source = "mocap"
+
+[segment.layers.base]
+size_bytes = 117658002
+schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26ba"
+
+[segment.layers.gt]
+size_bytes = 11475535
+schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [segment.imu]
 rate_hz = 1000.0
@@ -290,10 +392,19 @@ decode_path = "cpu_gray8_dav1d_1thread"
 duration_ns = 124349056730
 num_frames = 3735
 num_cameras = 4
+start_time_ns = 9395346713678
 
 [segment.gt]
 num_poses = 113774
 source = "mocap"
+
+[segment.layers.base]
+size_bytes = 94639693
+schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26ba"
+
+[segment.layers.gt]
+size_bytes = 10042232
+schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [segment.imu]
 rate_hz = 1000.0
@@ -310,7 +421,8 @@ cam_time_offset_ns = 0
 # fixture pair under `tests/reference/robocap-s15/`.
 #
 # RoboCap is not registered on any running catalog server; both layers are read
-# from the NAS `.rrd` files, served in process.
+# from the NAS `.rrd` files, served in process, so there are no layer
+# fingerprints to record.
 [robocap]
 session_id = "s00000015"
 device_id = "f408193e6447b3b0"
@@ -332,7 +444,7 @@ cam_time_offset_ns = 14902432
 # Checked-in basalt C++ outputs for session 15, copied from the fork's gate run.
 # `golden` is the machine-local trajectory the fork gates against; `candidate` is
 # a fresh file-fed run of the same session. Comparing them reproduces the fork's
-# published gate numbers, which is what `tests/test_trajectory_fixtures.py` asserts.
+# published gate numbers, which is what `tests/test_trajectory.py` asserts.
 [robocap.fixtures]
 golden = "tests/reference/robocap-s15/traj_s15_vga.csv"
 candidate = "tests/reference/robocap-s15/vit_files_trajectory.csv"

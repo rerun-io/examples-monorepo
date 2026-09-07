@@ -46,7 +46,7 @@ from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name
 
 from slam_rs.reference import ImuParameters
-from slam_rs.trajectory import Trajectory
+from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory
 
 RIG_ENTITY: str = "/world/rig_00"
 """Rig node of the ``exoego:v2`` tree; its reference frame is the IMU."""
@@ -164,6 +164,11 @@ class ImuStream:
     def __len__(self) -> int:
         return int(self.t_ns.shape[0])
 
+    def between(self, first_ns: int, last_ns: int) -> "ImuStream":
+        """The samples with ``first_ns < t <= last_ns``, half-open at the start."""
+        keep: Bool[ndarray, " n_samples"] = (self.t_ns > first_ns) & (self.t_ns <= last_ns)
+        return ImuStream(t_ns=self.t_ns[keep], gyro_rad_s=self.gyro_rad_s[keep], accel_m_s2=self.accel_m_s2[keep])
+
 
 @dataclass(slots=True, frozen=True)
 class Frameset:
@@ -175,6 +180,15 @@ class Frameset:
     """One C-contiguous grayscale image per camera, in rig camera order."""
     sha256: str
     """Digest of the timestamp and every image's bytes, so two runs can prove identical pixels."""
+    imu: ImuStream
+    """Inertial samples since the previous frameset, running one sample past :attr:`t_ns`.
+
+    The lead sample matters: a backend that integrates up to the frame time and
+    blocks until it can deadlocks on the very first frameset if it is only ever
+    given samples at or before that time.
+    """
+    ground_truth: Float64[ndarray, " 7"] | None
+    """Nearest ground-truth pose as ``[tx, ty, tz, qw, qx, qy, qz]``, or None without a ``gt`` layer."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -354,6 +368,24 @@ def _static_string(statics: pa.Table, column: str) -> str:
     return value
 
 
+def _static_int(statics: pa.Table, column: str) -> int:
+    """One static integer component, read without passing through float64.
+
+    A device clock is around 1e13 ns today, which float64 holds exactly, but the
+    margin to 2^53 is only three decades and the whole point of this value is that
+    it is added to timestamps that must stay exact.
+    """
+    if column not in statics.column_names:
+        raise ValueError(f"static column {column} is missing")
+    cell: pa.Scalar = statics[column][0]
+    if not cell.is_valid:
+        raise ValueError(f"static column {column} is null")
+    value: object = cell.values.to_pylist()[0] if isinstance(cell, pa.ListScalar | pa.LargeListScalar) else cell.as_py()
+    if not isinstance(value, int):
+        raise ValueError(f"static column {column} is not an integer: {value!r}")
+    return value
+
+
 def read_camera_statics(statics: pa.Table, entity: str) -> CameraStatics:
     """Pull one camera node's static components out of a statics table.
 
@@ -462,36 +494,78 @@ class SegmentFeed:
     """Camera calibrations, in rig order; a frameset's images follow the same order."""
     imu: ImuCalib
     """IMU calibration, noise model included."""
-    imu_stream: ImuStream
-    """Every inertial sample of the segment, on the ``video_time`` clock."""
-    ground_truth: Trajectory | None
-    """Ground-truth rig poses on ``video_time``, or None when the source has no ``gt`` layer."""
+    capture_start_time_ns: int
+    """``property:capture:start_time_ns``: add it to a ``video_time`` to reach the absolute device clock."""
     frame_t_ns: Int64[ndarray, " n_frames"]
     """Timestamp of every frameset in the segment, before ``frame_stride`` is applied."""
     frame_stride: int
     """Yield every n-th frameset. Every frame is still decoded: decimated AV1 decode is unreliable."""
     dataset: DatasetEntry
     """Dataset the video samples are fetched from."""
+    gt_dataset: DatasetEntry | None
+    """Dataset the ground-truth poses come from; None when the source has no ``gt`` layer."""
     index: _VideoIndex
     """Frame timing and codec, shared by all cameras."""
     window_ns: int
     """Longest time window fetched in one round trip."""
 
+    @property
+    def has_ground_truth(self) -> bool:
+        """Whether a ``gt`` layer is attached."""
+        return self.gt_dataset is not None
+
+    def imu_between(self, first_ns: int, last_ns: int) -> ImuStream:
+        """Every inertial sample with ``first_ns <= t <= last_ns``, on the ``video_time`` clock."""
+        return _read_imu(self.dataset, self.segment_id, self.imu.cam_time_offset_ns, first_ns, last_ns)
+
+    def ground_truth_between(self, first_ns: int, last_ns: int) -> Trajectory | None:
+        """Ground-truth rig poses with ``first_ns <= t <= last_ns``, or None without a ``gt`` layer."""
+        if self.gt_dataset is None:
+            return None
+        return _read_ground_truth(self.gt_dataset, self.segment_id, first_ns, last_ns)
+
     def framesets(self) -> Iterator[Frameset]:
         """Decode the segment and yield one frameset at a time.
 
-        Window edges land on frames that are keyframes in every camera, so each
-        window decodes standalone; inside a window the cameras are decoded in
+        Video, inertial samples and ground truth are all fetched one window at a
+        time, so ``window_s`` really does bound memory and startup cost — reading
+        a 586 s segment's IMU whole is 500k+ samples before the first frame comes
+        out. Window edges land on frames that are keyframes in every camera, so
+        each window decodes standalone; inside a window the cameras are decoded in
         lockstep, so only one frame per camera is ever resident.
+
+        Each frameset carries the inertial samples since the previous one, running
+        one sample past its own timestamp, and the nearest ground-truth pose.
 
         Yields:
             Framesets in time order, every :attr:`frame_stride`-th one.
 
         Raises:
-            ValueError: If a camera's decoder runs dry before the window ends, or
-                a decoded frame disagrees with the calibrated resolution.
+            ValueError: If a camera's decoder runs dry before the window ends, a
+                decoded frame disagrees with the calibrated resolution, or a
+                window's inertial read leaves a gap at the boundary.
         """
+        # Each read reaches past both ends of its window. Forward, because a
+        # frameset needs one sample beyond its own timestamp. Backward by a whole
+        # frame period, because the first frameset of a window owns the samples
+        # since the *previous* window's last frameset, which is one frame earlier —
+        # a margin of a few IMU periods silently drops 16 ms of every boundary at
+        # 54 Hz, which is what the gap check below is here to catch.
+        frame_period_ns: int = int(1e9 / max(self.index.fps, 1))
+        imu_period_ns: int = int(1e9 / max(self.imu.frequency_hz, 1.0))
+        margin_ns: int = max(2 * frame_period_ns + 2 * imu_period_ns, 2_000_000)
+        emitted_imu_t_ns: int = -(2**62)
         for start, stop in _window_bounds(self.index, self.window_ns):
+            window_first_ns: int = int(self.index.t_ns[start])
+            window_last_ns: int = int(self.index.t_ns[stop - 1])
+            window_imu: ImuStream = self.imu_between(window_first_ns - margin_ns, window_last_ns + margin_ns)
+            if len(window_imu) and emitted_imu_t_ns > -(2**62) and int(window_imu.t_ns[0]) > emitted_imu_t_ns + 1:
+                raise ValueError(
+                    f"{self.segment_id}: inertial gap at the window starting {window_first_ns} ns — "
+                    f"the read begins at {int(window_imu.t_ns[0])} but the last emitted sample was {emitted_imu_t_ns}"
+                )
+            window_gt: Trajectory | None = self.ground_truth_between(window_first_ns - margin_ns, window_last_ns + margin_ns)
+
             muxed: list[bytes] = [
                 wrap_mp4(*self._fetch_samples(camera.index, start, stop), fps=self.index.fps, codec=self.index.codec) for camera in self.cameras
             ]
@@ -510,10 +584,21 @@ class SegmentFeed:
                 if frame_index % self.frame_stride:
                     continue
                 t_ns: int = int(self.frame_t_ns[frame_index])
+                lead_index: int = int(np.searchsorted(window_imu.t_ns, t_ns, side="right"))
+                lead_ns: int = int(window_imu.t_ns[min(lead_index, len(window_imu) - 1)]) if len(window_imu) else t_ns
+                frame_imu: ImuStream = window_imu.between(emitted_imu_t_ns, max(lead_ns, t_ns))
+                if len(frame_imu):
+                    emitted_imu_t_ns = int(frame_imu.t_ns[-1])
                 digest = hashlib.sha256(np.int64(t_ns).tobytes())
                 for image in images:
                     digest.update(image.tobytes())
-                yield Frameset(t_ns=t_ns, images=images, sha256=digest.hexdigest())
+                yield Frameset(
+                    t_ns=t_ns,
+                    images=images,
+                    sha256=digest.hexdigest(),
+                    imu=frame_imu,
+                    ground_truth=_nearest_pose(window_gt, t_ns),
+                )
 
     def _fetch_samples(self, camera_index: int, start: int, stop: int) -> tuple[list[bytes], list[bool]]:
         """Encoded samples and keyframe flags of one camera over the frame range ``[start, stop)``."""
@@ -592,10 +677,30 @@ def _read_video_index(dataset: DatasetEntry, segment_id: str, camera_count: int)
     return _VideoIndex(t_ns=frame_t_ns, keyframe=shared_keyframe, codec=catalog_codec_name(codec_fourcc), fps=fps)
 
 
-def _read_imu(dataset: DatasetEntry, segment_id: str, cam_time_offset_ns: int) -> ImuStream:
-    """Gyroscope and accelerometer of one segment, asserted paired on one clock."""
+def _nearest_pose(trajectory: Trajectory | None, t_ns: int, tolerance_ns: int = ASSOCIATION_TOLERANCE_NS) -> Float64[ndarray, " 7"] | None:
+    """The pose closest in time to ``t_ns`` as ``[tx, ty, tz, qw, qx, qy, qz]``, or None if none is close enough.
+
+    The tolerance is the gate's own association tolerance. Without it a frameset
+    outside the ground truth's span would silently receive a stale pose: on the
+    Index smoke segment the ground truth starts 17.5 ms after ``video_time`` zero,
+    so the very first frameset has no truth and must say so rather than borrow one.
+    """
+    if trajectory is None or len(trajectory) == 0:
+        return None
+    nearest: int = int(np.abs(trajectory.t_ns - t_ns).argmin())
+    if abs(int(trajectory.t_ns[nearest]) - t_ns) > tolerance_ns:
+        return None
+    return np.concatenate([trajectory.position_m[nearest], trajectory.quaternion_wxyz[nearest]])
+
+
+def _read_imu(dataset: DatasetEntry, segment_id: str, cam_time_offset_ns: int, first_ns: int, last_ns: int) -> ImuStream:
+    """Gyroscope and accelerometer over one time window, asserted paired on one clock."""
     table: pa.Table = (
-        dataset.filter_segments([segment_id]).filter_contents([f"{IMU_ENTITY}/gyro", f"{IMU_ENTITY}/accel"]).reader(index=TIMELINE).to_arrow_table()
+        dataset.filter_segments([segment_id])
+        .filter_contents([f"{IMU_ENTITY}/gyro", f"{IMU_ENTITY}/accel"])
+        .reader(index=TIMELINE)
+        .filter(col(TIMELINE).cast(pa.int64()).between(lit(first_ns), lit(last_ns)))
+        .to_arrow_table()
     )
     row_t_ns: Int64[ndarray, " n_rows"] = np.asarray(table[TIMELINE].combine_chunks().cast(pa.int64()))
     order: Int64[ndarray, " n_rows"] = np.argsort(row_t_ns, kind="stable")
@@ -620,9 +725,15 @@ def _read_imu(dataset: DatasetEntry, segment_id: str, cam_time_offset_ns: int) -
     return ImuStream(t_ns=gyro_t_ns + cam_time_offset_ns, gyro_rad_s=streams["gyro"][1], accel_m_s2=streams["accel"][1])
 
 
-def _read_ground_truth(dataset: DatasetEntry, segment_id: str) -> Trajectory | None:
-    """Ground-truth rig poses on ``video_time``, converted from Rerun's XYZW to w-first."""
-    table: pa.Table = dataset.filter_segments([segment_id]).filter_contents([RIG_ENTITY]).reader(index=TIMELINE).to_arrow_table()
+def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, last_ns: int) -> Trajectory | None:
+    """Ground-truth rig poses over one window on ``video_time``, converted from Rerun's XYZW to w-first."""
+    table: pa.Table = (
+        dataset.filter_segments([segment_id])
+        .filter_contents([RIG_ENTITY])
+        .reader(index=TIMELINE)
+        .filter(col(TIMELINE).cast(pa.int64()).between(lit(first_ns), lit(last_ns)))
+        .to_arrow_table()
+    )
     translation_column: str = f"{RIG_ENTITY}:Transform3D:translation"
     quaternion_column: str = f"{RIG_ENTITY}:Transform3D:quaternion"
     if translation_column not in table.column_names or quaternion_column not in table.column_names:
@@ -671,15 +782,18 @@ def _build_feed(
     imu_T_body: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
     imu_T_body[:3, :3] = _static_values(rig_statics, f"{IMU_ENTITY}:Transform3D:mat3x3").reshape(3, 3, order="F")
     imu_T_body[:3, 3] = _static_values(rig_statics, f"{IMU_ENTITY}:Transform3D:translation")
+    properties: pa.Table = (
+        sensor_dataset.filter_segments([segment_id]).filter_contents(["/__properties", "/__properties/**"]).reader(index=None).to_arrow_table()
+    )
     return SegmentFeed(
         segment_id=segment_id,
         cameras=cameras,
         imu=imu_calib(parameters, imu_T_body),
-        imu_stream=_read_imu(sensor_dataset, segment_id, parameters.cam_time_offset_ns),
-        ground_truth=_read_ground_truth(gt_dataset, segment_id) if gt_dataset is not None else None,
+        capture_start_time_ns=_static_int(properties, "property:capture:start_time_ns"),
         frame_t_ns=index.t_ns,
         frame_stride=frame_stride,
         dataset=sensor_dataset,
+        gt_dataset=gt_dataset,
         index=index,
         window_ns=int(window_s * 1e9),
     )

@@ -1,14 +1,19 @@
 """The catalog-to-estimator mapping rules, on synthetic statics, plus one real smoke segment."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
-from jaxtyping import Float64
+from jaxtyping import Float64, Int64
 from numpy import ndarray
+from simplecv.rerun_log_utils import RerunTyroConfig
 
+from slam_rs.apis.replay import Config, ReplayOutcome, _replay
 from slam_rs.catalog_feed import (
     CameraCalib,
     CameraStatics,
     Frameset,
+    ImuStream,
     LocalSegment,
     SegmentFeed,
     camera_calib,
@@ -17,6 +22,7 @@ from slam_rs.catalog_feed import (
     rotate_pinhole_clockwise,
 )
 from slam_rs.reference import ReferenceManifest, ReferenceSegment, load_manifest
+from slam_rs.trajectory import AteResult, Trajectory, associate, ate, read_trajectory, shift_clock, write_trajectory
 
 SMOKE_SEGMENT: str = "msd-index__MIO_others__MIO10_short_2_panorama"
 """The 7.6 s two-camera segment the smoke tier runs on."""
@@ -153,19 +159,23 @@ def test_the_smoke_segment_decodes_from_the_nas() -> None:
         assert isinstance(feed, SegmentFeed)
         assert len(feed.cameras) == segment.capture.num_cameras
         assert len(feed.frame_t_ns) == segment.capture.num_frames
+        assert feed.capture_start_time_ns == segment.capture.start_time_ns
         for camera in feed.cameras:
             assert (camera.width, camera.height) == (960, 960)
             assert camera.model == "kb4"
         # Gyroscope and accelerometer share timestamps on MSD; the feed refuses to
         # build an ImuStream otherwise, so reaching here is the assertion.
-        assert len(feed.imu_stream) > 7_000
-        assert feed.imu_stream.t_ns.dtype == np.int64
-        assert feed.imu_stream.gyro_rad_s.shape == (len(feed.imu_stream), 3)
-        assert feed.imu_stream.accel_m_s2.shape == (len(feed.imu_stream), 3)
-        assert feed.ground_truth is not None
-        assert len(feed.ground_truth) == segment.gt.num_poses
+        whole_imu: ImuStream = feed.imu_between(-(2**62), 2**62)
+        assert len(whole_imu) > 7_000
+        assert whole_imu.t_ns.dtype == np.int64
+        assert whole_imu.gyro_rad_s.shape == (len(whole_imu), 3)
+        assert whole_imu.accel_m_s2.shape == (len(whole_imu), 3)
+        whole_gt: Trajectory | None = feed.ground_truth_between(-(2**62), 2**62)
+        assert whole_gt is not None
+        assert len(whole_gt) == segment.gt.num_poses
 
         digests: list[str] = []
+        with_truth: int = 0
         frameset: Frameset
         for frameset in feed.framesets():
             assert len(frameset.images) == segment.capture.num_cameras
@@ -173,20 +183,101 @@ def test_the_smoke_segment_decodes_from_the_nas() -> None:
                 assert image.shape == (960, 960)
                 assert image.dtype == np.uint8
                 assert image.flags["C_CONTIGUOUS"]
+            if frameset.ground_truth is not None:
+                assert frameset.ground_truth.shape == (7,)
+                with_truth += 1
             digests.append(frameset.sha256)
         assert len(digests) == segment.capture.num_frames
+        # Ground truth starts 17.5 ms into the segment, so only the first frameset
+        # is without it; a frameset outside the truth's span reports None rather
+        # than borrowing a stale pose.
+        assert with_truth == segment.capture.num_frames - 1
 
 
 @pytest.mark.slow
-def test_the_window_size_does_not_change_a_single_pixel() -> None:
-    """Cutting the segment into 2 s windows must reproduce the one-window digests exactly."""
+def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample() -> None:
+    """Cutting the segment into 2 s windows must reproduce the pixels and the inertial stream exactly."""
     manifest: ReferenceManifest = load_manifest()
     segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
     if not segment.base_path.is_file():
         pytest.skip(f"{segment.base_path} is not mounted on this host")
     digests: dict[float, list[tuple[int, str]]] = {}
+    imu_t_ns: dict[float, Int64[ndarray, " n_samples"]] = {}
     for window_s in (60.0, 2.0):
         with open_segment(LocalSegment(base_rrd=segment.base_path), segment.imu, window_s=window_s) as feed:
-            digests[window_s] = [(frameset.t_ns, frameset.sha256) for frameset in feed.framesets()]
+            per_frameset: list[tuple[int, str]] = []
+            emitted: list[Int64[ndarray, " n"]] = []
+            for frameset in feed.framesets():
+                per_frameset.append((frameset.t_ns, frameset.sha256))
+                emitted.append(frameset.imu.t_ns)
+            digests[window_s] = per_frameset
+            imu_t_ns[window_s] = np.concatenate(emitted)
     assert digests[60.0] == digests[2.0]
     assert len(digests[60.0]) == segment.capture.num_frames
+
+    # The inertial samples handed out across window boundaries must form one
+    # stream: strictly increasing, no sample delivered twice, and the same set
+    # whatever the window size. A window that failed to reach back would drop
+    # samples here instead of silently under-integrating.
+    for window_s, times in imu_t_ns.items():
+        assert bool(np.all(np.diff(times) > 0)), f"window {window_s}s emitted non-monotonic IMU timestamps"
+    np.testing.assert_array_equal(imu_t_ns[60.0], imu_t_ns[2.0])
+
+
+@pytest.mark.slow
+def test_the_absolute_clock_matches_the_ground_truth_sidecar() -> None:
+    """The feed's ground truth, shifted by the capture start time, is the ``gt.csv`` sidecar."""
+    manifest: ReferenceManifest = load_manifest()
+    segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
+    if not segment.base_path.is_file() or not segment.gt_csv.is_file():
+        pytest.skip(f"{segment.base_path} or {segment.gt_csv} is not mounted on this host")
+    sidecar: Trajectory = read_trajectory(segment.gt_csv)
+    assert len(sidecar) == segment.gt.num_poses
+
+    with open_segment(LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path), segment.imu) as feed:
+        relative: Trajectory | None = feed.ground_truth_between(-(2**62), 2**62)
+        assert relative is not None
+        absolute: Trajectory = shift_clock(relative, feed.capture_start_time_ns)
+
+    # Exact, not approximate: video_time + capture.start_time_ns is the sidecar's
+    # clock by construction, so every one of the 6,998 timestamps must land.
+    np.testing.assert_array_equal(absolute.t_ns, sidecar.t_ns)
+    assert associate(sidecar, absolute).count == len(sidecar)
+    # Without the shift the two share no instant at all.
+    assert associate(sidecar, relative).count == 0
+    # The rrd stores float32 positions; the sidecar keeps more digits.
+    result: AteResult = ate(sidecar, absolute)
+    assert result.n_associated == len(sidecar)
+    assert result.rmse_m < 1e-5
+
+
+@pytest.mark.slow
+def test_a_replay_export_associates_with_the_ground_truth_sidecar(tmp_path: Path) -> None:
+    """The replay's own export path, end to end, lands on the sidecar's clock.
+
+    The core is a stub and produces no pose, so the exported trajectory here is
+    the ground truth resampled at the frameset times — the point is the clock and
+    the file, not the estimator. Written with ``video_time`` this associates with
+    nothing, which is the regression being pinned.
+    """
+    manifest: ReferenceManifest = load_manifest()
+    segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
+    if not segment.base_path.is_file() or not segment.gt_csv.is_file():
+        pytest.skip(f"{segment.base_path} or {segment.gt_csv} is not mounted on this host")
+
+    config: Config = Config(rr_config=RerunTyroConfig(headless=True), segment=SMOKE_SEGMENT, max_framesets=40)
+    with open_segment(LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path), segment.imu) as feed:
+        outcome: ReplayOutcome = _replay(feed, config)
+        exported: Path = tmp_path / "slam_rs.csv"
+        write_trajectory(exported, shift_clock(outcome.ground_truth, feed.capture_start_time_ns))
+        relative_export: Path = tmp_path / "relative.csv"
+        write_trajectory(relative_export, outcome.ground_truth)
+
+    assert outcome.framesets == 40
+    assert outcome.imu_samples > 0
+    # Ground truth starts 17.5 ms after video_time zero, so the first frameset has
+    # no pose inside the tolerance and contributes no row; every later one does.
+    assert len(outcome.ground_truth) == outcome.framesets - 1
+    sidecar: Trajectory = read_trajectory(segment.gt_csv)
+    assert associate(read_trajectory(exported), sidecar).count == len(outcome.ground_truth)
+    assert associate(read_trajectory(relative_export), sidecar).count == 0

@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
-from simplecv.ops.umeyama import SimilarityTransform, umeyama_alignment
+from simplecv.ops.umeyama import SimilarityTransform
 
 ASSOCIATION_TOLERANCE_NS: int = 5_000_000
 """Largest timestamp gap a reference pose and a candidate pose may be associated across."""
@@ -134,6 +134,30 @@ def write_trajectory(path: Path, trajectory: Trajectory) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
+def shift_clock(trajectory: Trajectory, offset_ns: int) -> Trajectory:
+    """Move a trajectory onto another clock by adding a constant nanosecond offset.
+
+    The catalog indexes a segment on ``video_time``, which is relative to
+    ``property:capture:start_time_ns``; every basalt CSV, including the ``gt.csv``
+    sidecars, is on the absolute device clock. On the Index smoke segment the two
+    differ by 10,433,867,587,166 ns, so exporting relative timestamps produces a
+    file that associates with **nothing**. This is the one place the conversion
+    happens, and it happens at the CSV boundary.
+
+    Args:
+        trajectory: Poses on the source clock.
+        offset_ns: Nanoseconds to add; ``capture.start_time_ns`` to go from ``video_time`` to absolute.
+
+    Returns:
+        The same poses on the shifted clock. Positions and rotations are shared, not copied.
+    """
+    return Trajectory(
+        t_ns=trajectory.t_ns + np.int64(offset_ns),
+        position_m=trajectory.position_m,
+        quaternion_wxyz=trajectory.quaternion_wxyz,
+    )
+
+
 def associate(reference: Trajectory, candidate: Trajectory, tolerance_ns: int = ASSOCIATION_TOLERANCE_NS) -> Association:
     """Match every reference pose to its nearest candidate pose in time.
 
@@ -160,11 +184,55 @@ def associate(reference: Trajectory, candidate: Trajectory, tolerance_ns: int = 
     return Association(matched=matched, candidate_index=index)
 
 
+def rigid_alignment(source: Float64[ndarray, "n 3"], target: Float64[ndarray, "n 3"]) -> SimilarityTransform:
+    """Least-squares rigid transform taking ``source`` onto ``target``, scale fixed at 1.
+
+    This is ``golden_compare.py``'s inline arithmetic, ported unchanged, because
+    D14 gates on parity with the fork's numbers. In particular there is **no
+    variance floor**: a stationary rig, or a trajectory spanning micrometres,
+    aligns to itself with zero error rather than raising. The shared
+    ``simplecv.ops.umeyama_alignment`` rejects a source variance of 1e-9 or less
+    even when it is not estimating a scale, which would turn those runs into
+    errors instead of the passes the fork reports. That helper cross-checks this
+    one in the tests, on inputs where both are defined.
+
+    Args:
+        source: Points to move, one XYZ per row.
+        target: Points to move onto, row-aligned with ``source``.
+
+    Returns:
+        The rigid transform, with ``scale`` always ``1.0``.
+
+    Raises:
+        ValueError: If the shapes differ or there are no points.
+    """
+    if source.shape != target.shape:
+        raise ValueError(f"source and target shapes must match; got {source.shape} vs {target.shape}")
+    if source.shape[0] == 0:
+        raise ValueError("rigid alignment needs at least one point pair")
+    source_mean: Float64[ndarray, " 3"] = source.mean(axis=0)
+    target_mean: Float64[ndarray, " 3"] = target.mean(axis=0)
+    svd: tuple[Float64[ndarray, "3 3"], Float64[ndarray, " 3"], Float64[ndarray, "3 3"]] = np.linalg.svd(
+        (target - target_mean).T @ (source - source_mean)
+    )
+    u: Float64[ndarray, "3 3"] = svd[0]
+    vt: Float64[ndarray, "3 3"] = svd[2]
+    # u and vt are orthogonal, so the determinant is exactly +/-1 and the sign is
+    # never zero; this only ever flips a reflection back into a rotation.
+    sign: float = float(np.sign(np.linalg.det(u @ vt)))
+    dst_R_src: Float64[ndarray, "3 3"] = u @ np.diag([1.0, 1.0, sign]) @ vt
+    return SimilarityTransform(dst_R_src=dst_R_src, dst_t_src=target_mean - dst_R_src @ source_mean, scale=1.0)
+
+
 def ate(reference: Trajectory, candidate: Trajectory, tolerance_ns: int = ASSOCIATION_TOLERANCE_NS) -> AteResult:
     """Rigid-aligned absolute trajectory error of ``candidate`` against ``reference``.
 
-    The alignment is Umeyama with the scale fixed at 1: a visual-inertial
-    estimator is metric, so a fitted scale would hide a real error.
+    The alignment fixes the scale at 1: a visual-inertial estimator is metric, so
+    a fitted scale would hide a real error.
+
+    Whether the result is meaningful is :func:`passes_gate`'s question, not this
+    one's — a two-pose comparison returns a number here and fails the gate there,
+    exactly as the fork orders it.
 
     Args:
         reference: Trajectory taken as truth.
@@ -175,12 +243,14 @@ def ate(reference: Trajectory, candidate: Trajectory, tolerance_ns: int = ASSOCI
         The error statistics and the alignment that produced them.
 
     Raises:
-        ValueError: If fewer than three poses associate, which leaves the alignment undetermined.
+        ValueError: If no pose associates, which leaves nothing to compare.
     """
     association: Association = associate(reference, candidate, tolerance_ns)
     source: Float64[ndarray, "n_associated 3"] = candidate.position_m[association.candidate_index[association.matched]]
     target: Float64[ndarray, "n_associated 3"] = reference.position_m[association.matched]
-    alignment: SimilarityTransform = umeyama_alignment(source, target, allow_scaling=False)
+    if source.shape[0] == 0:
+        raise ValueError(f"no pose associated within {tolerance_ns} ns; the two trajectories may be on different clocks")
+    alignment: SimilarityTransform = rigid_alignment(source, target)
     errors: Float64[ndarray, " n_associated"] = np.linalg.norm(alignment.apply(source) - target, axis=1)
     return AteResult(
         rmse_m=float(np.sqrt(np.mean(errors**2))),

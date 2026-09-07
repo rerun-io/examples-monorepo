@@ -62,6 +62,43 @@ class CaptureProperties:
     """Frames per camera."""
     num_cameras: int
     """Cameras on the rig."""
+    start_time_ns: int
+    """Device-clock time of ``video_time`` zero; add it to reach the clock every basalt CSV uses."""
+
+
+@dataclass(slots=True, frozen=True)
+class LayerFingerprint:
+    """What the catalog manifest reports about one registered layer.
+
+    Pinning these turns a silent re-conversion into a failing test: the property
+    columns alone would not notice a layer that grew, shrank or changed schema.
+    """
+
+    size_bytes: int
+    """Registered size of the layer's ``.rrd``."""
+    schema_sha256: str
+    """Hex digest of the layer's schema, as ``DatasetEntry.manifest()`` reports it."""
+
+
+@dataclass(slots=True, frozen=True)
+class DatasetProperties:
+    """The rig geometry shared by every segment of one dataset.
+
+    Calibration is byte-identical across a dataset's segments (33/33 for
+    ``msd-index``, 15/15 for ``msd-g2``), so it is recorded once per dataset and
+    asserted rather than assumed.
+    """
+
+    name: str
+    """Catalog dataset name."""
+    entry_id: str
+    """Catalog entry id."""
+    num_cameras: int
+    """Cameras on the rig."""
+    camera_resolution_wh: tuple[tuple[int, int], ...]
+    """Per-camera ``(width, height)``, in rig order; the decoded array is ``(height, width)``."""
+    image_rotation_cw_deg: tuple[int, ...]
+    """Per-camera clockwise rotation already baked into the stored images and the calibration."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -98,6 +135,8 @@ class ReferenceSegment:
     """Expected capture properties."""
     gt: GroundTruthProperties
     """Expected ground-truth properties."""
+    layers: dict[str, LayerFingerprint]
+    """Size and schema digest per layer name (``base``, ``gt``)."""
     imu: ImuParameters
     """Frozen IMU noise model for this device."""
 
@@ -170,12 +209,25 @@ class ReferenceManifest:
     """Manifest layout version; bumped when a field changes meaning."""
     catalog_url: str
     """Catalog the MSD properties were read from, and that the slow test checks against."""
+    datasets: tuple[DatasetProperties, ...]
+    """Rig geometry, one entry per catalog dataset the segments come from."""
     segments: tuple[ReferenceSegment, ...]
     """The ten MSD segments, in tier-then-dataset order."""
     robocap: RobocapReference
     """The RoboCap third reference."""
     package_root: Path
     """Directory the manifest was read from; fixture paths are relative to it."""
+
+    def dataset(self, name: str) -> DatasetProperties:
+        """The dataset with this name.
+
+        Raises:
+            KeyError: If the manifest has no such dataset.
+        """
+        for dataset in self.datasets:
+            if dataset.name == name:
+                return dataset
+        raise KeyError(f"{name!r} is not in the reference set; have {[d.name for d in self.datasets]}")
 
     def by_id(self, segment_id: str) -> ReferenceSegment:
         """The segment with this id.
@@ -219,6 +271,21 @@ def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
         ValueError: If a tier, decode path or ground-truth source is unknown, or a segment id repeats.
     """
     document: dict[str, Any] = tomllib.loads(path.read_text())
+    datasets: list[DatasetProperties] = []
+    for entry in document["dataset"]:
+        resolutions: tuple[tuple[int, int], ...] = tuple((int(pair[0]), int(pair[1])) for pair in entry["camera_resolution_wh"])
+        rotations: tuple[int, ...] = tuple(int(value) for value in entry["image_rotation_cw_deg"])
+        if len(resolutions) != entry["num_cameras"] or len(rotations) != entry["num_cameras"]:
+            raise ValueError(f"{entry['name']}: {entry['num_cameras']} cameras but {len(resolutions)} resolutions and {len(rotations)} rotations")
+        datasets.append(
+            DatasetProperties(
+                name=entry["name"],
+                entry_id=entry["entry_id"],
+                num_cameras=int(entry["num_cameras"]),
+                camera_resolution_wh=resolutions,
+                image_rotation_cw_deg=rotations,
+            )
+        )
     segments: list[ReferenceSegment] = []
     for entry in document["segment"]:
         identifier: str = entry["segment_id"]
@@ -245,8 +312,13 @@ def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
                     duration_ns=int(entry["capture"]["duration_ns"]),
                     num_frames=int(entry["capture"]["num_frames"]),
                     num_cameras=int(entry["capture"]["num_cameras"]),
+                    start_time_ns=int(entry["capture"]["start_time_ns"]),
                 ),
                 gt=GroundTruthProperties(num_poses=int(entry["gt"]["num_poses"]), source=source),
+                layers={
+                    name: LayerFingerprint(size_bytes=int(block["size_bytes"]), schema_sha256=block["schema_sha256"])
+                    for name, block in entry["layers"].items()
+                },
                 imu=_imu(entry["imu"]),
             )
         )
@@ -278,6 +350,7 @@ def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
     return ReferenceManifest(
         schema_version=int(document["schema_version"]),
         catalog_url=document["catalog_url"],
+        datasets=tuple(datasets),
         segments=tuple(segments),
         robocap=robocap,
         package_root=path.parent,
