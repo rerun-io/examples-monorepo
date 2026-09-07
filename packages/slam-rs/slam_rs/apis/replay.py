@@ -182,8 +182,8 @@ class VioStage:
         if self.pending:
             unresolved = f", {len(self.pending)} FRAMESETS NEVER COVERED BY THE IMU at {[held.t_ns for held in self.pending]}"
         return (
-            f"vio: {self.lockstep.imu_samples} IMU samples pushed, statuses {self.lockstep.statuses}, "
-            f"{np.mean(self.elapsed_ms):.1f} ms per frameset "
+            f"vio: {self.lockstep.imu_samples} IMU samples pushed, {len(self.elapsed_ms)} tracked, "
+            f"{self.lockstep.retries} retries, {np.mean(self.elapsed_ms):.1f} ms per frameset "
             f"(median {np.median(self.elapsed_ms):.1f}, max {np.max(self.elapsed_ms):.1f})"
             f"{unresolved}"
         )

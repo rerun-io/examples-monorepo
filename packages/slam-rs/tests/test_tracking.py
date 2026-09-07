@@ -93,12 +93,12 @@ def test_a_held_frameset_tracks_before_the_one_that_unblocked_it(pipeline: Pipel
         covered_poses.extend(result.world_from_rig for _tracked, result in covered.push(frameset(step, texture, whole)))
         held_poses.extend(result.world_from_rig for _tracked, result in held.push(frameset(step, texture, split)))
 
-    assert len(covered.elapsed_ms) == 4
+    assert len(covered.elapsed_ms) == len(held.elapsed_ms) == 4
     assert not covered.pending and not held.pending
-    assert covered.statuses == {"VioStatus.Tracking": 4}
-    # One refusal, then five accepted tracks over four framesets: the held one is
-    # tracked again before the frameset whose samples unblocked it.
-    assert held.statuses == {"VioStatus.NeedMoreImu": 1, "VioStatus.Tracking": 4}
+    assert covered.retries == 0
+    # One refusal, and the frameset it refused tracked again on the next push,
+    # before the frameset whose samples unblocked it.
+    assert held.retries == 1
     for expected, actual in zip(covered_poses, held_poses, strict=True):
         np.testing.assert_array_equal(expected, actual)
 

@@ -28,7 +28,8 @@ class Lockstep:
 
     Everything a driver needs to report afterwards is on this value: what was
     pushed, what tracked and how long it took, how many retries it cost, and
-    what is still held.
+    what is still held. The tracked count is ``len(elapsed_ms)``: the same branch
+    that times a ``track`` call is the one that accepts its pose.
     """
 
     vio: _core.Vio
@@ -37,8 +38,8 @@ class Lockstep:
     """Framesets refused for want of IMU, oldest first, waiting for the samples that cover them."""
     imu_samples: int = 0
     """Inertial samples pushed so far."""
-    statuses: dict[str, int] = field(default_factory=dict)
-    """How many times ``track`` answered each status, retries included."""
+    retries: int = 0
+    """How many framesets were refused for want of IMU, and so had to be tracked a second time."""
     elapsed_ms: list[float] = field(default_factory=list)
     """Wall time each ``track`` call that tracked took, in the order they tracked."""
 
@@ -90,11 +91,8 @@ class Lockstep:
             started: float = time.monotonic()
             result: _core.VioResult = self.vio.track(held.t_ns, held.images)
             elapsed_ms: float = 1e3 * (time.monotonic() - started)
-            # A PyO3 enum has no ``name`` and is unhashable (see ``_core.pyi``), so the
-            # repr is both the only name it has and the only thing that keys a dict.
-            status_name: str = str(result.status)
-            self.statuses[status_name] = self.statuses.get(status_name, 0) + 1
             if result.status != _core.VioStatus.Tracking:
+                self.retries += 1
                 return
             self.pending.pop(0)
             self.elapsed_ms.append(elapsed_ms)
