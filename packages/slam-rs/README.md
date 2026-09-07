@@ -30,13 +30,14 @@ and calibration JSON the parsers are tested against, unmodified, plus two
 fixtures produced by the C++ fork itself: `pyramid/`, the first frame of the
 smoke reference segment as a PGM next to the four pyramid levels the fork builds
 from it, which the pyramid is checked against byte for byte; and
-`camera_oracle.json`, what basalt's camera headers return for nine cameras and
-thirty points each - pixel, both projection Jacobians, bearing and unprojection
-Jacobian. The camera port reproduces every one of those numbers to 1e-15
-relative (1e-12 for unprojections, which run a Newton iteration). Both
-generators live on the fork's `slam-rs-reference` branch, as
-`tools/dump_pyramid.cpp` and `tools/camera_oracle.cpp`; the monorepo never
-compiles C++.
+`camera_oracle.json`, what basalt's camera headers return for ten cameras and
+thirty points each in **both** precisions - pixel, bearing, and in double also
+both projection Jacobians and the unprojection Jacobian - plus six probe pixels
+handed straight to `unproject`, one of them singular. The camera port reproduces
+every double to 1e-15 relative (1e-12 for unprojections, which run a Newton
+iteration) and every float **exactly**. Both generators live on the fork's
+`slam-rs-reference` branch, as `tools/dump_pyramid.cpp` and
+`tools/camera_oracle.cpp`; the monorepo never compiles C++.
 
 One thing the camera port inherits and the frontend will have to live with:
 `unproject` runs a fixed three (kb4) or five (radtan8) Newton steps, and on wide

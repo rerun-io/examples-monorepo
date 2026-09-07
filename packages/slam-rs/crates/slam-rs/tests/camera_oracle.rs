@@ -3,10 +3,14 @@
 //! `fixtures/camera_oracle.json` is the output of `tools/camera_oracle.cpp` on
 //! the fork's `slam-rs-reference` branch (target `basalt_camera_oracle`), built
 //! and run out of tree against the basalt headers, since the monorepo never
-//! compiles C++ (decision D15). It holds, for nine cameras and thirty points
-//! each, everything the C++ returns:
-//! validity, pixel, `d_proj_d_p3d`, `d_proj_d_param`, the unprojected bearing
-//! and, where the model has one, `d_p3d_d_proj`.
+//! compiles C++ (decision D15). It holds two sections:
+//!
+//! * `cameras` — ten cameras in `f64` and the same ten in `f32`, thirty points
+//!   each: validity, pixel, the unprojected bearing, and in the `f64` pass also
+//!   `d_proj_d_p3d`, `d_proj_d_param` and `d_p3d_d_proj` where the model has one.
+//! * `probes` — pixels handed straight to `unproject`, including one where the
+//!   radtan8 Newton solve meets a **singular** Jacobian. Coefficients the C++
+//!   returns as NaN are written as JSON `null`.
 //!
 //! This is the load-bearing test of the stage. Finite differences (see
 //! `camera_jacobians.rs`) prove the analytic Jacobian is the derivative of
@@ -16,9 +20,10 @@
 //! (`cargo tree -i nalgebra` on a probe crate), which the brief rules out — and
 //! neither would have been bit-exact anyway.
 //!
-//! The tolerance is `1e-15` relative, not zero: Rust and C++ evaluate the same
-//! expressions in the same order but are free to contract `a * b + c` into an
-//! FMA differently.
+//! The `f64` tolerance is `1e-15` relative, not zero: Rust and C++ evaluate the
+//! same expressions in the same order but are free to contract `a * b + c` into
+//! an FMA differently. The `f32` pass asks for **exact equality**, because there
+//! the port and the C++ agree bit for bit.
 
 #![allow(clippy::unwrap_used)]
 
@@ -45,53 +50,83 @@ const TOLERANCE: f64 = 1e-15;
 const UNPROJECT_TOLERANCE: f64 = 1e-12;
 
 #[derive(Debug, Deserialize)]
+struct Oracle {
+    cameras: Vec<OracleCamera>,
+    probes: Vec<OracleProbe>,
+}
+
+#[derive(Debug, Deserialize)]
 struct OracleCamera {
     name: String,
     model: String,
+    scalar: String,
     rpmax: f64,
     params: Vec<f64>,
     points: Vec<OraclePoint>,
 }
 
+/// `None` in any of these arrays means the C++ returned a non-finite number.
 #[derive(Debug, Deserialize)]
 struct OraclePoint {
     p: [f64; 4],
     valid: bool,
-    proj: [f64; 2],
-    d_proj_d_p3d: Vec<f64>,
-    d_proj_d_param: Vec<f64>,
+    proj: Vec<Option<f64>>,
+    d_proj_d_p3d: Option<Vec<Option<f64>>>,
+    d_proj_d_param: Option<Vec<Option<f64>>>,
     unproject_valid: bool,
-    unproject: [f64; 4],
-    d_p3d_d_proj: Option<Vec<f64>>,
+    unproject: Vec<Option<f64>>,
+    d_p3d_d_proj: Option<Vec<Option<f64>>>,
 }
 
-fn oracle() -> Vec<OracleCamera> {
+#[derive(Debug, Deserialize)]
+struct OracleProbe {
+    name: String,
+    model: String,
+    scalar: String,
+    rpmax: f64,
+    params: Vec<f64>,
+    pixel: [f64; 2],
+    valid: bool,
+    unproject: Vec<Option<f64>>,
+}
+
+fn oracle() -> Oracle {
     serde_json::from_str(ORACLE).unwrap()
 }
 
 fn camera(name: &str) -> OracleCamera {
     oracle()
+        .cameras
         .into_iter()
         .find(|entry| entry.name == name)
         .unwrap_or_else(|| panic!("no oracle camera named {name}"))
 }
 
-/// Every coefficient within `TOLERANCE` relative to the C++ value.
+/// Every coefficient within `tolerance` of the C++ value, and non-finite exactly
+/// where the C++ is non-finite.
 #[track_caller]
-fn assert_within(tolerance: f64, what: &str, actual: &[f64], expected: &[f64]) {
+fn assert_within(tolerance: f64, what: &str, actual: &[f64], expected: &[Option<f64>]) {
     assert_eq!(actual.len(), expected.len(), "{what}: length");
     for (index, (got, want)) in actual.iter().zip(expected.iter()).enumerate() {
-        let scale: f64 = want.abs().max(1.0);
-        assert!(
-            (got - want).abs() <= tolerance * scale,
-            "{what}[{index}]: got {got}, basalt says {want}"
-        );
+        match want {
+            Some(want) => {
+                let scale: f64 = want.abs().max(1.0);
+                assert!(
+                    (got - want).abs() <= tolerance * scale,
+                    "{what}[{index}]: got {got}, basalt says {want}"
+                );
+            }
+            None => assert!(
+                !got.is_finite(),
+                "{what}[{index}]: got {got}, basalt says a non-finite number"
+            ),
+        }
     }
 }
 
 /// Every coefficient within [`TOLERANCE`] of the C++ value.
 #[track_caller]
-fn assert_matches(what: &str, actual: &[f64], expected: &[f64]) {
+fn assert_matches(what: &str, actual: &[f64], expected: &[Option<f64>]) {
     assert_within(TOLERANCE, what, actual, expected);
 }
 
@@ -106,17 +141,14 @@ fn row_major<const R: usize, const C: usize>(m: &SMatrix<f64, R, C>) -> Vec<f64>
     values
 }
 
-/// Replay one oracle camera through the port.
+/// Replay one `f64` oracle camera through the port.
 fn check<const N: usize, Cam>(entry: &OracleCamera, camera: &Cam)
 where
     Cam: Camera<f64, Params = SVector<f64, N>, ParamJacobian = SMatrix<f64, 2, N>>,
 {
+    assert_eq!(entry.scalar, "f64");
     assert_eq!(camera.name(), entry.model);
-    assert_matches(
-        &format!("{}: params", entry.name),
-        camera.params().as_slice(),
-        &entry.params,
-    );
+    assert_eq!(camera.params().as_slice(), entry.params.as_slice());
 
     for (index, point) in entry.points.iter().enumerate() {
         let what = format!("{} point {index}", entry.name);
@@ -137,12 +169,12 @@ where
         assert_matches(
             &format!("{what}: d_proj_d_p3d"),
             &row_major(&d_proj_d_p3d),
-            &point.d_proj_d_p3d,
+            point.d_proj_d_p3d.as_ref().unwrap(),
         );
         assert_matches(
             &format!("{what}: d_proj_d_param"),
             &row_major(&d_proj_d_param),
-            &point.d_proj_d_param,
+            point.d_proj_d_param.as_ref().unwrap(),
         );
 
         let mut bearing: Vector4<f64> = Vector4::zeros();
@@ -166,11 +198,11 @@ where
     Cam: UnprojectJacobians<f64, Params = SVector<f64, N>, ParamJacobian = SMatrix<f64, 2, N>>,
 {
     for (index, point) in entry.points.iter().enumerate() {
-        let expected: &Vec<f64> = point
+        let expected: &Vec<Option<f64>> = point
             .d_p3d_d_proj
             .as_ref()
             .unwrap_or_else(|| panic!("{} has no unprojection Jacobian", entry.name));
-        let proj: Vector2<f64> = Vector2::from_column_slice(&point.proj);
+        let proj: Vector2<f64> = Vector2::new(point.proj[0].unwrap(), point.proj[1].unwrap());
         let mut bearing: Vector4<f64> = Vector4::zeros();
         let mut d_p3d_d_proj: Matrix4x2<f64> = Matrix4x2::zeros();
         camera.unproject_with_jacobians(&proj, &mut bearing, Some(&mut d_p3d_d_proj), None);
@@ -179,6 +211,26 @@ where
             &row_major(&d_p3d_d_proj),
             expected,
         );
+    }
+}
+
+/// The variant the fixture entry describes, at whichever scalar it was produced
+/// in. `f64 -> f32` on the parameters is exact: they were printed from the
+/// `float` the C++ held.
+fn model_f32(entry_model: &str, params: &[f64], rpmax: f64) -> CameraEnum<f32> {
+    let cast = |value: &f64| *value as f32;
+    match entry_model {
+        "pinhole" => CameraEnum::Pinhole(Pinhole::new(SVector::<f32, 4>::from_iterator(
+            params.iter().map(cast),
+        ))),
+        "kb4" => CameraEnum::Kb4(KannalaBrandt4::new(SVector::<f32, 8>::from_iterator(
+            params.iter().map(cast),
+        ))),
+        "pinhole-radtan8" => CameraEnum::PinholeRadtan8(PinholeRadtan8::new(
+            SVector::<f32, 12>::from_iterator(params.iter().map(cast)),
+            rpmax as f32,
+        )),
+        other => panic!("unexpected model {other}"),
     }
 }
 
@@ -213,6 +265,7 @@ fn radtan8_matches_the_cpp() {
         "radtan8_msdmg_cam2",
         "radtan8_odyssey_no_rpmax",
         "radtan8_odyssey_computed_rpmax",
+        "radtan8_singular",
     ] {
         let entry: OracleCamera = camera(name);
         let model: PinholeRadtan8<f64> = PinholeRadtan8::new(
@@ -251,58 +304,102 @@ fn the_oracle_cameras_are_the_shipped_calibrations() {
     }
 }
 
-/// `f32` reproduces the C++ `f64` pixel to well under a hundredth of a pixel
-/// wherever the point lands on the sensor, so the frontend's precision costs
-/// nothing the KLT tracker can see.
+/// The `f32` instantiation reproduces the C++ `float` build **exactly**, pixel
+/// and bearing, on all ten cameras.
 ///
-/// "On the sensor" is `|u - cx| <= cx` and `|v - cy| <= cy`, which is basalt's
-/// own stand-in for an image extent when it has no resolution to hand
-/// (`pinhole_radtan8_camera.hpp:196-200`: `w = 2 cx`, `h = 2 cy`). The bound
-/// matters: at the extreme fixture points, several image widths outside any
-/// sensor, `f32` and `f64` part company by 0.22 px, and no camera in the
-/// reference set can see there.
+/// The bearing is the point of this test. Getting the pixel right leaves the
+/// unprojection free to drift: it took reproducing Eigen's 2x2 inverse
+/// (one reciprocal of the determinant, then a multiply per cofactor,
+/// `eigen/Eigen/src/LU/InverseImpl.h:66-83`) rather than nalgebra's
+/// divide-each-coefficient to bring msd-g2 cam2 back into line, and only a
+/// bearing comparison can see that.
 #[test]
-fn the_f32_instantiation_tracks_the_cpp_numbers() {
-    let mut worst: f64 = 0.0;
-    for entry in oracle() {
-        let cx: f64 = entry.params[2];
-        let cy: f64 = entry.params[3];
-        for point in &entry.points {
-            if !point.valid {
-                continue;
-            }
-            let on_sensor: bool =
-                (point.proj[0] - cx).abs() <= cx && (point.proj[1] - cy).abs() <= cy;
-            if !on_sensor {
-                continue;
-            }
+fn the_f32_instantiation_matches_the_cpp() {
+    let mut checked: usize = 0;
+    for entry in oracle().cameras.iter().filter(|e| e.scalar == "f32") {
+        let model: CameraEnum<f32> = model_f32(&entry.model, &entry.params, entry.rpmax);
+        for (index, point) in entry.points.iter().enumerate() {
+            let what = format!("{} point {index}", entry.name);
             let p: Vector4<f32> = Vector4::new(
                 point.p[0] as f32,
                 point.p[1] as f32,
                 point.p[2] as f32,
                 point.p[3] as f32,
             );
+
             let mut proj: Vector2<f32> = Vector2::zeros();
-            let model: CameraEnum<f32> = match entry.model.as_str() {
-                "pinhole" => CameraEnum::Pinhole(Pinhole::new(SVector::<f32, 4>::from_iterator(
-                    entry.params.iter().map(|value| *value as f32),
-                ))),
-                "kb4" => CameraEnum::Kb4(KannalaBrandt4::new(SVector::<f32, 8>::from_iterator(
-                    entry.params.iter().map(|value| *value as f32),
-                ))),
-                "pinhole-radtan8" => CameraEnum::PinholeRadtan8(PinholeRadtan8::new(
-                    SVector::<f32, 12>::from_iterator(
-                        entry.params.iter().map(|value| *value as f32),
-                    ),
-                    entry.rpmax as f32,
-                )),
-                other => panic!("unexpected model {other}"),
-            };
-            assert!(model.project(&p, &mut proj));
-            for axis in 0..2 {
-                worst = worst.max((point.proj[axis] - f64::from(proj[axis])).abs());
-            }
+            assert_eq!(
+                model.project(&p, &mut proj),
+                point.valid,
+                "{what}: validity"
+            );
+            let widened: Vec<f64> = proj.iter().map(|value| f64::from(*value)).collect();
+            assert_within(0.0, &format!("{what}: proj"), &widened, &point.proj);
+
+            let mut bearing: Vector4<f32> = Vector4::zeros();
+            assert_eq!(
+                model.unproject(&proj, &mut bearing),
+                point.unproject_valid,
+                "{what}: unprojection validity"
+            );
+            let widened: Vec<f64> = bearing.iter().map(|value| f64::from(*value)).collect();
+            assert_within(
+                0.0,
+                &format!("{what}: unproject"),
+                &widened,
+                &point.unproject,
+            );
+            checked += 1;
         }
     }
-    assert!(worst < 1e-2, "worst f32-vs-C++ pixel error {worst}");
+    assert_eq!(checked, 300);
+}
+
+/// Pixels handed straight to `unproject`, including the singular Newton case.
+///
+/// `radtan8_singular` is `fx = fy = 100`, `cx = 320`, `cy = 240`, `k4 = 1`: the
+/// distortion is `xp / (1 + rp^2)`, whose derivative vanishes at `xp = 1`. Pixel
+/// (420, 240) asks for `xp'' = 1`, which that map never reaches — it peaks at
+/// 0.5 — so Newton walks onto the singular point. The C++ divides by a zero
+/// determinant, produces NaNs and **rejects** the pixel; so does the port. An
+/// earlier version of this module stopped the iteration instead and returned
+/// success with a bearing that reprojected 50 px away.
+#[test]
+fn the_probe_pixels_match_the_cpp() {
+    let probes: Vec<OracleProbe> = oracle().probes;
+    assert_eq!(probes.len(), 6);
+    for probe in &probes {
+        let pixel64: Vector2<f64> = Vector2::new(probe.pixel[0], probe.pixel[1]);
+        let (valid, bearing): (bool, Vec<f64>) = if probe.scalar == "f64" {
+            let model: PinholeRadtan8<f64> = PinholeRadtan8::new(
+                SVector::<f64, 12>::from_column_slice(&probe.params),
+                probe.rpmax,
+            );
+            let mut bearing: Vector4<f64> = Vector4::zeros();
+            let valid: bool = model.unproject(&pixel64, &mut bearing);
+            (valid, bearing.iter().copied().collect())
+        } else {
+            let model: CameraEnum<f32> = model_f32(&probe.model, &probe.params, probe.rpmax);
+            let pixel32: Vector2<f32> = Vector2::new(probe.pixel[0] as f32, probe.pixel[1] as f32);
+            let mut bearing: Vector4<f32> = Vector4::zeros();
+            let valid: bool = model.unproject(&pixel32, &mut bearing);
+            (
+                valid,
+                bearing.iter().map(|value| f64::from(*value)).collect(),
+            )
+        };
+
+        assert_eq!(valid, probe.valid, "{}: validity", probe.name);
+        let tolerance: f64 = if probe.scalar == "f64" {
+            UNPROJECT_TOLERANCE
+        } else {
+            0.0
+        };
+        assert_within(
+            tolerance,
+            &format!("{}: unproject", probe.name),
+            &bearing,
+            &probe.unproject,
+        );
+    }
 }

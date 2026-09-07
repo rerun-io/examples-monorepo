@@ -63,12 +63,21 @@
 //! ## Scalars
 //!
 //! Generic over [`LieScalar`] (`f32` and `f64`) because the frontend runs `f32`
-//! and the estimator is instantiated at both (decision D05). Unlike the Lie
-//! module, **no comparison here is promoted to `f64`**: every domain check in
-//! the C++ compares a `Scalar` against `Sophus::Constants<Scalar>::epsilonSqrt()`,
-//! which is `sqrt(1e-10)` in double and `sqrt(1e-5)` in float, so the branch is
-//! genuinely precision-dependent and the port reproduces it (decision D37 applies
-//! to comparisons C++ performs in `double`; these are not those).
+//! and the estimator is instantiated at both (decision D05). Two rules, and they
+//! point in opposite directions:
+//!
+//! * **No domain check is promoted.** Every one compares a `Scalar` against
+//!   `Sophus::Constants<Scalar>::epsilonSqrt()`, which is `sqrt(1e-10)` in double
+//!   and `sqrt(1e-5)` in float, so the branch is genuinely precision-dependent
+//!   and the port reproduces it as it stands.
+//! * **`atan2` is promoted**, in kb4's projection only. The header imports `cos`,
+//!   `sin` and `sqrt` from `std` (`kannala_brandt_camera4.hpp:48-50`) but not
+//!   `atan2`, so the unqualified call at `:153` takes the `double` overload from
+//!   `<math.h>` and the float instantiation computes its angle in double. The
+//!   port does the same; see the comment at the call site for the measurement.
+//!
+//! Both are decision D37's rule — do in `f64` exactly what the C++ does in
+//! `double`, and no more — read off the C++ rather than assumed.
 
 use nalgebra::{Matrix2, Matrix2x4, Matrix4x2, SMatrix, SVector, Vector2, Vector4};
 
@@ -423,7 +432,18 @@ impl<S: LieScalar> Camera<S> for KannalaBrandt4<S> {
         if r > S::sophus_epsilon_sqrt() {
             // :153-167. atan2(r, z) accepts z < 0: a fisheye sees behind its
             // own plane, which is why this branch never invalidates a point.
-            let theta: S = r.atan2(z);
+            //
+            // The angle is computed in `f64` and rounded back even in the `f32`
+            // instantiation, because that is what the C++ does. The header's
+            // `using` declarations (`:48-50`) cover `cos`, `sin` and `sqrt` but
+            // **not** `atan2`, so the unqualified call at `:153` resolves to
+            // `::atan2(double, double)` from `<math.h>` and the float arguments
+            // are promoted. Measured on this host: `atan2f(4.123105526f, -1.0f)`
+            // is `0x3fe784b5` while the promoted call gives `0x3fe784b6`, and
+            // that one bit of angle is 6e-5 px on basalt's own kb4 test camera.
+            // Same rule as decision D37, applied to a call instead of a
+            // comparison.
+            let theta: S = S::from_literal(r.to_f64().atan2(z.to_f64()));
             let theta2: S = theta * theta;
 
             let mut r_theta: S = k4 * theta2;
@@ -932,10 +952,21 @@ impl<S: LieScalar> Camera<S> for PinholeRadtan8<S> {
     /// `pinhole_radtan8_camera.hpp:597-669`: five Newton steps on `distort`,
     /// stopping early when the residual falls under `epsilonSqrt`.
     ///
-    /// One deviation, forced by the panic policy (decision D32): where C++ calls
-    /// `J.inverse()` unconditionally and lets a singular Jacobian produce
-    /// infinities (`:628`), the port stops iterating and keeps the last finite
-    /// iterate.
+    /// The 2x2 inverse inside the loop is written out because it has to round
+    /// like Eigen's, not like nalgebra's: Eigen takes **one** reciprocal of the
+    /// determinant and multiplies each cofactor by it
+    /// (`eigen/Eigen/src/LU/InverseImpl.h:66-83`, determinant at
+    /// `Determinant.h:40-44`), while `Matrix2::try_inverse` divides each
+    /// coefficient by the determinant. The two differ by a rounding step, which
+    /// is worth 4e-5 of bearing in `f32` on the msd-g2 cam2 calibration.
+    ///
+    /// A singular Jacobian is not special-cased either. `1 / 0` is an infinity,
+    /// the iterate becomes NaN, and the final `rp2 <= rpmax^2` comparison is
+    /// false, so the pixel is rejected — which is exactly what the C++ does with
+    /// `J.inverse()` (`:628`). Dividing by zero in floating point is not a
+    /// panic, so decision D32 is not in play, and returning the last finite
+    /// iterate instead would report success for a pixel that reprojects 50 px
+    /// away.
     fn unproject(&self, proj: &Vector2<S>, p3d: &mut Vector4<S>) -> bool {
         let fx: S = self.param[0];
         let fy: S = self.param[1];
@@ -953,10 +984,16 @@ impl<S: LieScalar> Camera<S> for PinholeRadtan8<S> {
             let mut fundist: Vector2<S> = Vector2::zeros();
             self.distort(&undist, &mut fundist, Some(&mut jacobian));
             let residual: Vector2<S> = fundist - dist;
-            match jacobian.try_inverse() {
-                Some(inverse) => undist -= inverse * residual,
-                None => break,
-            }
+            let determinant: S =
+                jacobian[(0, 0)] * jacobian[(1, 1)] - jacobian[(1, 0)] * jacobian[(0, 1)];
+            let invdet: S = S::one() / determinant;
+            let inverse: Matrix2<S> = Matrix2::new(
+                jacobian[(1, 1)] * invdet,
+                -jacobian[(0, 1)] * invdet,
+                -jacobian[(1, 0)] * invdet,
+                jacobian[(0, 0)] * invdet,
+            );
+            undist -= inverse * residual;
             if residual.norm() < eps {
                 break;
             }
@@ -1263,6 +1300,67 @@ mod tests {
 
         // The bound is inclusive: `rp2 <= rpmax * rpmax`.
         assert!(camera.project(&Vector4::new(rpmax, 0.0, 1.0, 1.0), &mut uv));
+    }
+
+    /// A pixel the distortion never reaches sends the Newton solve onto a
+    /// singular Jacobian, and the pixel must be **rejected**.
+    ///
+    /// `fx = fy = 100`, `cx = 320`, `cy = 240`, `k4 = 1`: the distortion is
+    /// `xp / (1 + rp^2)`, which peaks at 0.5 and has a vanishing derivative
+    /// there. Pixel (420, 240) asks for `xpp = 1`. C++ divides by the zero
+    /// determinant, carries NaNs through and fails the `rp2 <= rpmax^2` check
+    /// (`pinhole_radtan8_camera.hpp:628, :664-666`); so does this port. Stopping
+    /// the iteration and keeping the last finite iterate instead — which an
+    /// earlier version of this module did — reports success for a bearing that
+    /// reprojects fifty pixels away, which is the failure this test exists to
+    /// catch. `tests/camera_oracle.rs` pins the same case against the C++
+    /// numbers, in both scalars.
+    #[test]
+    fn a_singular_newton_step_rejects_the_pixel() {
+        let camera: PinholeRadtan8<f64> = PinholeRadtan8::new(
+            SVector::<f64, 12>::from([
+                100.0, 100.0, 320.0, 240.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+            ]),
+            1.0,
+        );
+        let pixel: Vector2<f64> = Vector2::new(420.0, 240.0);
+        let mut bearing: Vector4<f64> = Vector4::zeros();
+        assert!(!camera.unproject(&pixel, &mut bearing));
+        assert!(bearing[0].is_nan() && bearing[1].is_nan() && bearing[2].is_nan());
+
+        // The same solve on a pixel the distortion does reach is unremarkable.
+        let mut inside: Vector4<f64> = Vector4::zeros();
+        assert!(camera.unproject(&Vector2::new(340.0, 250.0), &mut inside));
+        assert!(inside.iter().all(|value| value.is_finite()));
+        let mut reprojected: Vector2<f64> = Vector2::zeros();
+        assert!(camera.project(&inside, &mut reprojected));
+        assert_abs_diff_eq!(reprojected[0], 340.0, epsilon = 1e-9);
+        assert_abs_diff_eq!(reprojected[1], 250.0, epsilon = 1e-9);
+    }
+
+    /// `unproject` in `f32` rounds like the C++ because the 2x2 Newton inverse
+    /// does: one reciprocal of the determinant, then a multiply per cofactor
+    /// (`eigen/Eigen/src/LU/InverseImpl.h:66-83`). nalgebra's `try_inverse`
+    /// divides each coefficient instead, which moved this bearing by 4e-5.
+    // The three bearings below are the C++ float build printed at %.17g: more
+    // figures than an f32 needs, kept verbatim because that is what makes them
+    // evidence.
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn the_f32_newton_inverse_rounds_like_eigen() {
+        let calibration: Calibration<f32> =
+            Calibration::from_json_str(include_str!("../tests/fixtures/msdmg_calib.json")).unwrap();
+        let CameraEnum::PinholeRadtan8(camera) =
+            CameraEnum::from_model(&calibration.intrinsics[2]).unwrap()
+        else {
+            panic!("msdmg cam2 is pinhole-radtan8");
+        };
+        let mut bearing: Vector4<f32> = Vector4::zeros();
+        assert!(camera.unproject(&Vector2::new(156.0, 452.0), &mut bearing));
+        // The C++ float build, from `tools/camera_oracle.cpp` on the fork.
+        assert_eq!(bearing[0], -0.484336256980896);
+        assert_eq!(bearing[1], 0.634190559387207);
+        assert_eq!(bearing[2], 0.6026779413223267);
     }
 
     #[test]
