@@ -34,7 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::Vector3;
 
-use super::{EstimatorError, SqrtKeypointVio, duration_ns};
+use super::{EstimatorError, SqrtKeypointVio, WindowRole, duration_ns};
 use crate::config::KeyframeMargCriteria;
 use crate::landmark::eigen_norm3;
 use crate::lie::{LieScalar, Se3};
@@ -157,9 +157,9 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         let Some(last_state_to_marg) = self.ba.frame_states.keys().nth(states_to_remove).copied()
         else {
             // C++ advances the iterator past `end()` and dereferences it.
-            return Err(EstimatorError::KeyframeNotInWindow {
-                frame_id: self.last_state_t_ns,
-                wanted: "state",
+            return Err(EstimatorError::StateWindowTooShort {
+                states: self.ba.frame_states.len(),
+                states_to_remove,
             });
         };
 
@@ -352,7 +352,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             let Some(hosted) = self.num_points_kf.get(frame_id).copied() else {
                 return Err(EstimatorError::KeyframeNotInWindow {
                     frame_id: *frame_id,
-                    wanted: "hosted-landmark count",
+                    wanted: WindowRole::HostedLandmarkCount,
                 });
             };
             let ratio: f32 = connected as f32 / hosted as f32;
@@ -378,7 +378,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             let Some(last_state) = self.ba.frame_states.get(&last_kf) else {
                 return Err(EstimatorError::KeyframeNotInWindow {
                     frame_id: last_kf,
-                    wanted: "state",
+                    wanted: WindowRole::State,
                 });
             };
             let last_translation: Vector3<S> = last_state.state().t_w_i.translation;
@@ -492,7 +492,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             .map(|pose| *pose.pose())
             .ok_or(EstimatorError::KeyframeNotInWindow {
                 frame_id,
-                wanted: "pose",
+                wanted: WindowRole::Pose,
             })
     }
 
@@ -689,7 +689,7 @@ mod tests {
             vio.evict_by_default(&all_connected(&vio)),
             Err(EstimatorError::KeyframeNotInWindow {
                 frame_id: 5_000_000,
-                wanted: "state",
+                wanted: WindowRole::State,
             })
         );
 
@@ -700,7 +700,7 @@ mod tests {
             hostless.evict_by_default(&all_connected(&hostless)),
             Err(EstimatorError::KeyframeNotInWindow {
                 frame_id: 1_000_000,
-                wanted: "hosted-landmark count",
+                wanted: WindowRole::HostedLandmarkCount,
             })
         );
 
@@ -726,7 +726,7 @@ mod tests {
             poseless.evict_by_forward_vector(),
             Err(EstimatorError::KeyframeNotInWindow {
                 frame_id: 2_000_000,
-                wanted: "pose",
+                wanted: WindowRole::Pose,
             })
         );
     }

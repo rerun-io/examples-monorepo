@@ -75,6 +75,29 @@ pub use optimize::{LmIteration, LmTermination};
 use schedule::MarginalizationOutcome;
 pub use schedule::{EvictionReason, KeyframeEviction, MarginalizationStats};
 
+/// What the eviction score wanted a keyframe as, for
+/// [`EstimatorError::KeyframeNotInWindow`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowRole {
+    /// A pose block, `frame_poses` (`:794`, `:849`).
+    Pose,
+    /// A state block, `frame_states` (`:854`).
+    State,
+    /// An entry in `num_points_kf`, the landmarks a keyframe hosts (`:827`).
+    HostedLandmarkCount,
+}
+
+impl std::fmt::Display for WindowRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name: &str = match self {
+            Self::Pose => "pose",
+            Self::State => "state",
+            Self::HostedLandmarkCount => "hosted-landmark count",
+        };
+        f.write_str(name)
+    }
+}
+
 /// Everything the driver can refuse.
 ///
 /// basalt's equivalents are `BASALT_ASSERT`s, an `std::out_of_range` from a
@@ -152,15 +175,32 @@ pub enum EstimatorError {
         /// `(index, size)` the window just built.
         found: (usize, usize),
     },
-    /// A keyframe the eviction score reads is not a pose block, or the newest
-    /// keyframe is not a state block (`:824`, `:845-856`) — both `.at()` calls
-    /// that C++ would throw out of.
+    /// A keyframe the eviction score reads is missing from the window
+    /// (`:824`, `:845-856`, `:794`) — `.at()` calls that C++ would throw out
+    /// of.
     #[error("keyframe {frame_id} is not in the window as a {wanted}")]
     KeyframeNotInWindow {
         /// The keyframe the score wanted.
         frame_id: FrameId,
-        /// `"pose"` or `"state"`.
-        wanted: &'static str,
+        /// What the score wanted it as.
+        wanted: WindowRole,
+    },
+    /// `measure` predicts the new state from `frame_states.at(last_state_t_ns)`
+    /// (`:428`), which C++ throws out of when the previous state has already
+    /// been marginalized.
+    #[error("the previous state at {t_ns} ns is not in the window")]
+    PreviousStateMissing {
+        /// `last_state_t_ns`.
+        t_ns: i64,
+    },
+    /// The state window is shorter than the marginalization's own advance
+    /// (`:724`): C++ advances the iterator past `end()` and dereferences it.
+    #[error("{states} states cannot spare the {states_to_remove} the marginalization removes")]
+    StateWindowTooShort {
+        /// States in the window.
+        states: usize,
+        /// `states_to_remove` (`:720-724`).
+        states_to_remove: usize,
     },
     /// A frame in the window is missing from the ordering `optimize` built
     /// from that same window a few lines earlier (`:1468`, `:1472`, both
@@ -971,9 +1011,8 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 match self.ba.frame_states.get(&self.last_state_t_ns) {
                     Some(state) => *state.state(),
                     None => {
-                        return Err(EstimatorError::KeyframeNotInWindow {
-                            frame_id: self.last_state_t_ns,
-                            wanted: "state",
+                        return Err(EstimatorError::PreviousStateMissing {
+                            t_ns: self.last_state_t_ns,
                         });
                     }
                 };
