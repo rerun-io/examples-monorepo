@@ -14,11 +14,9 @@ exists, and the day it starts tracking nothing else has to change.
 ``--stage frontend`` is the stage that does produce something. It runs
 :class:`slam_rs._core.OpticalFlow` over the same framesets and hands what it
 produced to :mod:`slam_rs.frontend_log`, which draws the keypoints, their trails,
-the occupancy grid and — where the C++ fork dumped its own, **for this segment** —
-the two frontends' keypoints side by side. The committed dumps are the smoke
-segment's, so any other ``--segment`` gets no overlay rather than the smoke
-segment's keypoints over its pixels, and a ``--rrd`` replay of a recording the
-manifest does not name gets none at all.
+the occupancy grid and — on the one recording the C++ fork dumped its own
+keypoints from — the two frontends' keypoints side by side; :attr:`Config.rrd`
+states how that recording is recognised.
 """
 
 import time
@@ -68,10 +66,10 @@ class Config:
     rrd: Path | None = None
     """Base-layer ``.rrd`` to replay instead of the manifest's, keeping ``--segment``'s IMU parameters.
 
-    The frames are then another recording's, so the frontend stage draws no C++
-    overlay on them at all: the overlay is switched off outright rather than
-    matched against the file's name, which is free to be spelled like any
-    segment id.
+    The C++ overlay is drawn only where the replayed recording's own segment id —
+    the one inside the file, not the name the file is filed under — is the one the
+    dumps came from. So another recording's frames get no overlay however the
+    file is spelled, and this recording's own ``.rrd`` still gets one.
     """
     gt_rrd: Path | None = None
     """Ground-truth ``.rrd`` for ``--rrd``; the manifest's own path is used when neither is given."""
@@ -116,25 +114,6 @@ class ReplayOutcome:
     """Inertial samples pushed into the estimator; zero on ``--stage frontend``, which runs none."""
     framesets: int
     """Framesets replayed."""
-
-
-def overlay_segment(rrd: Path | None, segment_id: str) -> str | None:
-    """Which segment's C++ dumps may be drawn over the frames being replayed.
-
-    ``--rrd`` replays another recording's frames under ``--segment``'s IMU
-    parameters, so no dump of any segment is of the pixels on screen. The overlay
-    is switched off there rather than associated with the file: a path is free to
-    be spelled exactly like the segment the committed dumps came from, and a
-    relative one so spelled drew them over foreign frames.
-
-    Args:
-        rrd: The ``--rrd`` override, or None when the manifest's own layer is replayed.
-        segment_id: Manifest segment id.
-
-    Returns:
-        The segment id, or None when another recording's frames are replayed.
-    """
-    return None if rrd is not None else segment_id
 
 
 @dataclass(slots=True)
@@ -185,7 +164,7 @@ def _replay(feed: SegmentFeed, config: Config, segment: ReferenceSegment) -> Rep
         flow_config.optical_flow_image_safe_radius = segment.reference.optical_flow_image_safe_radius
         stage = FrontendStage(
             flow=_core.OpticalFlow(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config),
-            logger=FrontendLogger(len(feed.cameras), overlay_segment(config.rrd, segment.segment_id)),
+            logger=FrontendLogger(len(feed.cameras), feed.segment_id),
         )
         rr.send_blueprint(frontend_blueprint(feed.cameras))
     else:
