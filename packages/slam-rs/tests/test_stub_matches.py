@@ -14,7 +14,7 @@ from slam_rs import _core
 
 STUB_PATH: Path = Path(__file__).resolve().parents[1] / "slam_rs" / "_core.pyi"
 STUB_TREE: ast.Module = ast.parse(STUB_PATH.read_text())
-CLASS_NAMES: tuple[str, ...] = ("Vio", "VioResult", "VioStatus")
+CLASS_NAMES: tuple[str, ...] = ("Vio", "VioResult", "VioStatus", "VioConfig", "Calibration", "OpticalFlow", "FlowFrame")
 
 
 def _stub_module_names() -> set[str]:

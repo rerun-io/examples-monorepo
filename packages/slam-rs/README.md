@@ -5,10 +5,13 @@ basalt VIO fork: pure Rust, CPU first, N-camera from the start. Python owns the
 plumbing — catalog feed, decode, evaluation and Rerun logging — and talks to the
 core through a PyO3 extension module.
 
-The core is still a stub. The state machine, the error taxonomy and the value
-types across the boundary are real, and so is everything on the Python side —
-manifest, feed, metrics and replay — but the estimator itself lands in later PRs,
-so `track()` never reports `Tracking` yet.
+The estimator is still a stub: the state machine, the error taxonomy and the
+value types across the boundary are real, and so is everything on the Python side
+— manifest, feed, metrics and replay — but the sliding window lands in later PRs,
+so `track()` never reports `Tracking` yet. The **frontend** is not a stub, and it
+is driven from Python: `_core.OpticalFlow` tracks and detects on real framesets,
+and `tools/apps/replay.py --stage frontend` draws what it produced beside what
+the C++ fork produced on the same frames.
 
 ## Core modules
 
@@ -378,6 +381,34 @@ Images are copied in and the GIL is released around the core call, so a decoder
 thread keeps running. Wrong dtype, rank, shape or memory layout raises
 `ValueError`; IMU samples must be strictly increasing in time.
 
+The frontend is driven the same way, and is the first stage with real output:
+
+```python
+from slam_rs import _core
+
+calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)  # the feed's dataclasses
+config = _core.VioConfig()                       # basalt's own defaults
+config.optical_flow_image_safe_radius = 472.0    # the one per-device frontend field
+
+flow = _core.OpticalFlow(calibration, config, threads=1)
+frame = flow.process(t_ns, [left, right])
+frame.ids(0)         # int64[n], ascending
+frame.positions(0)   # float32[n, 2] pixels
+frame.transforms(0)  # float32[n, 2, 3], [[m00, m01, tx], [m10, m11, ty]]
+frame.responses(0)   # float32[n], -1 where basalt records none
+frame.occupancy(0)   # int32[rows, columns] over camera 0's detection grid
+frame.num_new(0), frame.num_tracks(0)
+```
+
+`Calibration.from_catalog` reads `slam_rs.catalog_feed.CameraCalib` and
+`ImuCalib` attribute by attribute and hands them to `Calibration::from_catalog_parts`,
+so the catalog-to-basalt rules — the rotation-matrix check, the model names, the
+isotropic noise densities — are not written a second time in Python; either side
+also accepts one of basalt's JSON files as a string. `frame.levels(camera)` is
+always empty: basalt fills `pyramid_levels` only in the multiscale variant, which
+is not ported. Framesets must arrive with a strictly increasing `t_ns`, and a
+refused one leaves the frontend exactly as the last accepted one did.
+
 ## The reference set
 
 `reference_segments.toml` freezes ten Monado SLAM Dataset segments — five
@@ -466,6 +497,39 @@ pixi run -e slam-rs-dev --frozen python tools/apps/replay.py \
 Both `--rr-config.headless` and `--rr-config.save` are honoured; in a shell
 without `DISPLAY`, pass `--rr-config.headless` or the spawned viewer wedges the
 recording stream.
+
+### `--stage frontend`, and the C++ overlay
+
+`--stage input` (the default) logs what the estimator is fed. `--stage frontend`
+runs the optical flow over the same framesets and logs what it produced, under
+the dataset's own entity tree so nothing needs a second coordinate convention:
+
+| entity | what |
+|---|---|
+| `/world/rig_00/cam_MM/pinhole/image` | the frame the frontend tracked, **full resolution** (JPEG), because the keypoints are in its pixels |
+| `.../keypoints` | `Points2D`, 2 px, one stable colour per track id from a hash of the id |
+| `.../trails` | `LineStrips2D`, the last ten positions of every live track, in the track's own colour |
+| `.../cells` | `Boxes2D` over the occupied cells of basalt's centred detection grid |
+| `.../keypoints_cpp` | what the C++ fork's `dump_flow.cpp` produced for the same frameset, in one contrasting magenta |
+| `/stats/frontend/...` | `num_tracks` and `num_new` per camera, and `frontend_ms` |
+
+The overlay is the parity claim made visible. The eight committed dumps under
+`crates/slam-rs/tests/fixtures/flow/dumps/` are on the same `video_time` clock as
+the feed, so they need no association; point `SLAM_RS_FLOW_DUMPS_DIR` at a fuller
+set to cover more framesets, and the overlay clears itself on the first frameset
+past the last dump rather than leaving a stale claim on screen. On the smoke
+segment the port hands out 175 keypoint ids over the first eight framesets where
+the C++ hands out 174, and every magenta ring in the viewer carries a coloured
+port dot at its centre bar a handful — the detector gap the flow gate measures.
+
+A blueprint is sent with the recording: one 2D view per camera plus the counters,
+panels collapsed. The whole 412-frameset smoke segment is 34.5 MiB of `.rrd` and
+takes 17.5 s, of which 29.5 ms per frameset is the frontend itself.
+
+```bash
+pixi run -e slam-rs-dev --frozen python tools/apps/replay.py \
+    --stage frontend --rr-config.headless --rr-config.save data/replay-frontend.rrd
+```
 
 ## Tests
 

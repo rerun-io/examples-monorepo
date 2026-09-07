@@ -267,7 +267,7 @@ def test_a_replay_export_associates_with_the_ground_truth_sidecar(tmp_path: Path
 
     config: Config = Config(rr_config=RerunTyroConfig(headless=True), segment=SMOKE_SEGMENT, max_framesets=40)
     with open_segment(LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path), segment.imu) as feed:
-        outcome: ReplayOutcome = _replay(feed, config)
+        outcome: ReplayOutcome = _replay(feed, config, segment)
         exported: Path = tmp_path / "slam_rs.csv"
         write_trajectory(exported, shift_clock(outcome.ground_truth, feed.capture_start_time_ns))
         relative_export: Path = tmp_path / "relative.csv"

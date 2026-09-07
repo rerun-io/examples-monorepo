@@ -6,15 +6,22 @@ pinned CPU ``gray8`` path, the core consumes framesets and IMU batches, and the
 result is logged under paths that mirror the dataset so a run sits beside the
 ground truth in one viewer.
 
-The core is still a stub, so ``track()`` reports ``NotInitialised`` or
-``NeedMoreImu`` and no pose is written. That is the point of running it now: the
+The estimator is still a stub, so ``--stage input`` reports ``NotInitialised`` or
+``NeedMoreImu`` and writes no pose. That is the point of running it now: the
 plumbing, the timestamps and the ATE report are exercised before the estimator
 exists, and the day it starts tracking nothing else has to change.
+
+``--stage frontend`` is the stage that does produce something. It runs
+:class:`slam_rs._core.OpticalFlow` over the same framesets and hands what it
+produced to :mod:`slam_rs.frontend_log`, which draws the keypoints, their trails,
+the occupancy grid and — where the C++ fork dumped its own — the two frontends'
+keypoints side by side.
 """
 
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal, TypeAlias
 
 import numpy as np
 import rerun as rr
@@ -24,6 +31,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 
 from slam_rs import _core
 from slam_rs.catalog_feed import CameraCalib, Frameset, LocalSegment, SegmentFeed, open_segment
+from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
 from slam_rs.reference import ReferenceManifest, ReferenceSegment, load_manifest
 from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, shift_clock, write_trajectory
 
@@ -33,6 +41,11 @@ RUN_ENTITY: str = "/world/runs/slam_rs"
 """Where this run's estimate goes, beside the dataset's own ``/world/runs/gt``."""
 IMAGE_DOWNSCALE: int = 2
 """Images are logged at half resolution: the viewer does not need full-resolution pixels to show what was fed."""
+JPEG_QUALITY: int = 85
+"""Quality of the full-resolution frames the frontend stage logs; 960x960 grayscale lands around 80 kB."""
+
+Stage: TypeAlias = Literal["input", "frontend"]
+"""How far a replay runs: the estimator's inputs only, or the optical-flow frontend over them."""
 
 
 @dataclass(slots=True)
@@ -41,6 +54,12 @@ class Config:
 
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
     """Viewer, save and headless behaviour."""
+    stage: Stage = "input"
+    """``input`` logs what the estimator is fed; ``frontend`` also runs the optical flow over it.
+
+    The frontend stage logs full-resolution frames, because its keypoints are in
+    the pixels of the frame it tracked, not of a downscaled copy of it.
+    """
     segment: str = SMOKE_SEGMENT
     """Segment id from ``reference_segments.toml``; also names the IMU parameters used for ``--rrd``."""
     rrd: Path | None = None
@@ -91,17 +110,45 @@ class ReplayOutcome:
     """Framesets replayed."""
 
 
-def _replay(feed: SegmentFeed, config: Config) -> ReplayOutcome:
-    """Drive the core over the feed, logging inputs and any tracked pose.
+def _open_frontend(feed: SegmentFeed, segment: ReferenceSegment) -> _core.OpticalFlow:
+    """Build the optical-flow frontend for one segment.
+
+    Every frontend field of basalt's shipped configs is already the default the
+    C++ constructor sets; the one exception is the image safe radius, which is a
+    property of the device and which the manifest freezes per segment. So the
+    config is built rather than read from a file the fork owns.
+
+    Args:
+        feed: Open segment feed, whose calibration the frontend is built from.
+        segment: Manifest entry, for the device's image safe radius.
+
+    Returns:
+        A frontend on the port's own defaults: one thread, per-camera epipolar geometry.
+    """
+    config: _core.VioConfig = _core.VioConfig()
+    config.optical_flow_image_safe_radius = segment.reference.optical_flow_image_safe_radius
+    return _core.OpticalFlow(_core.Calibration.from_catalog(list(feed.cameras), feed.imu), config)
+
+
+def _replay(feed: SegmentFeed, config: Config, segment: ReferenceSegment) -> ReplayOutcome:
+    """Drive the core over the feed, logging inputs, the frontend and any tracked pose.
 
     Args:
         feed: Open segment feed.
         config: Parsed CLI options.
+        segment: Manifest entry for the segment being replayed.
 
     Returns:
         The estimate, the ground truth sampled at the frameset times, and counts.
     """
     vio: _core.Vio = _core.Vio(camera_count=len(feed.cameras), min_imu_samples=1)
+    frontend: _core.OpticalFlow | None = None
+    logger: FrontendLogger | None = None
+    if config.stage == "frontend":
+        frontend = _open_frontend(feed, segment)
+        logger = FrontendLogger.create(len(feed.cameras))
+        rr.send_blueprint(frontend_blueprint(feed.cameras))
+    frontend_ms: list[float] = []
     statuses: dict[str, int] = {}
     pose_t_ns: list[int] = []
     positions: list[Float64[ndarray, " 3"]] = []
@@ -135,8 +182,14 @@ def _replay(feed: SegmentFeed, config: Config) -> ReplayOutcome:
         rr.set_time("video_time", duration=np.timedelta64(frameset.t_ns, "ns"))
 
         for camera, image in zip(feed.cameras, frameset.images, strict=True):
-            small: UInt8[ndarray, "h w"] = np.ascontiguousarray(image[::IMAGE_DOWNSCALE, ::IMAGE_DOWNSCALE])
-            rr.log(f"/world/rig_00/cam_{camera.index:02d}/pinhole/image", rr.Image(small, color_model="L"))
+            entity: str = f"/world/rig_00/cam_{camera.index:02d}/pinhole/image"
+            if frontend is not None:
+                # Full resolution, or the keypoints would sit two pixels off the
+                # corner they were computed on; JPEG keeps a whole segment small.
+                rr.log(entity, rr.Image(image, color_model="L").compress(jpeg_quality=JPEG_QUALITY))
+            else:
+                small: UInt8[ndarray, "h w"] = np.ascontiguousarray(image[::IMAGE_DOWNSCALE, ::IMAGE_DOWNSCALE])
+                rr.log(entity, rr.Image(small, color_model="L"))
 
         if frameset.ground_truth is not None:
             pose_wxyz: Float64[ndarray, " 7"] = frameset.ground_truth
@@ -147,6 +200,13 @@ def _replay(feed: SegmentFeed, config: Config) -> ReplayOutcome:
             gt_t_ns.append(frameset.t_ns)
             gt_positions.append(pose_wxyz[0:3].copy())
             gt_quaternions.append(pose_wxyz[3:7].copy())
+
+        if frontend is not None and logger is not None:
+            started_frame: float = time.monotonic()
+            frame: _core.FlowFrame = frontend.process(frameset.t_ns, frameset.images)
+            frontend_ms.append(1e3 * (time.monotonic() - started_frame))
+            logger.log(frame, frontend_ms[-1])
+            continue
 
         result: _core.VioResult = vio.track(frameset.t_ns, frameset.images)
         # A PyO3 enum has no ``name`` and is unhashable (see ``_core.pyi``), so the
@@ -163,6 +223,11 @@ def _replay(feed: SegmentFeed, config: Config) -> ReplayOutcome:
 
     elapsed: float = time.monotonic() - started
     print(f"{replayed} framesets in {elapsed:.1f} s ({replayed / max(elapsed, 1e-9):.1f} fps), statuses: {statuses}")
+    if frontend is not None and frontend_ms:
+        print(
+            f"frontend: {frontend.last_keypoint_id} keypoint ids handed out, "
+            f"{np.mean(frontend_ms):.1f} ms per frameset (median {np.median(frontend_ms):.1f}, max {np.max(frontend_ms):.1f})"
+        )
     return ReplayOutcome(
         estimate=Trajectory(
             t_ns=np.array(pose_t_ns, dtype=np.int64),
@@ -200,7 +265,7 @@ def main(config: Config) -> None:
             f"{'attached' if feed.has_ground_truth else 'absent'}, clock offset {feed.capture_start_time_ns} ns"
         )
         _log_calibration(feed.cameras)
-        outcome: ReplayOutcome = _replay(feed, config)
+        outcome: ReplayOutcome = _replay(feed, config, segment)
         print(f"{outcome.imu_samples} IMU samples pushed, {len(outcome.ground_truth)} ground-truth poses sampled")
 
         # Exports carry the absolute device clock, the one every basalt CSV and
