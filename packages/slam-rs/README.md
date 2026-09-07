@@ -542,10 +542,11 @@ The overlay is the parity claim made visible, and it is only ever drawn on the
 segment it was recorded from. The eight committed dumps under
 `crates/slam-rs/tests/fixtures/flow/dumps/` are on the feed's `video_time` clock,
 which starts at zero on **every** segment, so the timestamp alone is not an
-association: `dumps/source.json` names the segment they came from and the overlay
-is keyed by `(segment id, frameset t_ns)`. A dump directory carrying frames but
-no `source.json` is refused rather than drawn on whatever is being replayed, as
-is one carrying another rig's cameras. The overlay clears itself on the first
+association: `dumps/source.json` names the segment they came from, and the logger
+compares that name with the segment being replayed once, when it is built — a
+directory from another recording draws nothing and says so in one line. A dump
+directory carrying frames but no `source.json` is refused rather than drawn on
+whatever is being replayed, as is one carrying another rig's cameras. The overlay clears itself on the first
 frameset past the last dump rather than leaving a stale claim on screen. On the smoke
 segment the port hands out 175 keypoint ids over the first eight framesets where
 the C++ hands out 174, and every magenta ring in the viewer carries a coloured
