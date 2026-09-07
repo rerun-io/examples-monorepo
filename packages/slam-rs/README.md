@@ -27,18 +27,32 @@ The core is being filled in stage by stage, bottom up. What is in it today:
 
 Every convention is quoted against the C++ it comes from, file and line, in the
 doc comments. `crates/slam-rs/tests/fixtures/` holds the shipped basalt config
-and calibration JSON the parsers are tested against, unmodified, plus two
+and calibration JSON the parsers are tested against, unmodified, plus three
 fixtures produced by the C++ fork itself: `pyramid/`, the first frame of the
 smoke reference segment as a PGM next to the four pyramid levels the fork builds
-from it, which the pyramid is checked against byte for byte; and
+from it, which the pyramid is checked against byte for byte;
 `camera_oracle.json`, what basalt's camera headers return for ten cameras and
 thirty points each in **both** precisions - pixel, bearing, and in double also
 both projection Jacobians and the unprojection Jacobian - plus six probe pixels
-handed straight to `unproject`, one of them singular. The camera port reproduces
-every double to 1e-15 relative (1e-12 for unprojections, which run a Newton
-iteration) and every float **exactly**. Both generators live on the fork's
-`slam-rs-reference` branch, as `tools/dump_pyramid.cpp` and
-`tools/camera_oracle.cpp`; the monorepo never compiles C++.
+handed straight to `unproject`, one of them singular; and `imu/imu_oracle.json`,
+the delta state, covariance, bias Jacobians, Eigen LDLT and square-root inverse
+covariance of seven preintegration runs, plus what
+`Quaternion::FromTwoVectors` returns for ten accelerometer readings. The camera
+port reproduces every double to 1e-15 relative (1e-12 for unprojections, which
+run a Newton iteration) and every float **exactly**; the IMU port reproduces
+every double to 1e-14, and to 1e-7 through the whitening, which inverts the
+covariance. All three generators live on the fork's `slam-rs-reference` branch,
+as `tools/dump_pyramid.cpp`, `tools/camera_oracle.cpp` and
+`tools/imu_oracle.cpp`; the monorepo never compiles C++.
+
+The IMU fixture earns its keep on one run: the covariance after a single sample
+with a still gyroscope and accelerometer is rank deficient, and what basalt does
+with it is decided entirely by `Eigen::LDLT`. Eigen pivots on the *un-updated*
+diagonal, eliminates velocity first and leaves the position pivots at `-1.6e-27`,
+which basalt's `vectorD()[i] < numeric_limits::min()` test zeroes. A textbook
+pivoted LDLT eliminates position first, leaves a tiny *positive* pivot, and puts
+an information weight of `6.2e26` on a direction the measurement says nothing
+about.
 
 One thing the camera port inherits and the frontend will have to live with:
 `unproject` runs a fixed three (kb4) or five (radtan8) Newton steps, and on wide

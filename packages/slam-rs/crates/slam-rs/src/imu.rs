@@ -51,13 +51,14 @@
 //!   [`IntegratedImuMeasurement::get_cov_inv_sqrt`] recomputes the 9x9 LDLT on
 //!   every call instead, which needs no interior mutability and costs a few
 //!   hundred flops against the ~10⁸ the frontend spends on the same frame.
-//! * **The LDLT is our own.** Eigen's `LDLT` is not available; the pivoted
-//!   factorization in [`ldlt`] uses the same max-|diagonal| symmetric pivot and
-//!   produces the same `D^{-1/2} L^{-1} P`, but the arithmetic order inside a
-//!   column may differ, so the factor can differ in the last bits and — when the
-//!   covariance is rank deficient — in the permutation. The estimator only ever
-//!   uses the factor through `MᵀM` and `‖M r‖`, and both are invariant:
-//!   `MᵀM = cov⁻¹` is asserted in the tests.
+//! * **The LDLT is Eigen's, ported.** `Eigen::LDLT` is not available as a
+//!   dependency, and it is not interchangeable with a textbook pivoted LDLT:
+//!   see [`ldlt_in_place`] for the two properties — pivoting on the *un-updated*
+//!   diagonal, and a tiny negative pivot on a dependent direction — that decide
+//!   what a *singular* covariance whitens to. Getting them wrong puts an
+//!   information weight of `1e26` on an unobservable direction where basalt puts
+//!   zero. `crates/slam-rs/tests/imu_oracle.rs` pins the factorization, the
+//!   whitening and the delta state against the C++ itself.
 //! * **Jacobians are all-or-nothing.** C++ takes four nullable out-pointers;
 //!   every in-tree caller either asks for all of them or none
 //!   (`imu_block.hpp:41-48`), so the port has one plain method and one
@@ -66,6 +67,9 @@
 //!   writes `state1.t_ns`, so the frontend's long-lived `predicted_state` keeps
 //!   whatever it held before (`frame_to_frame_optical_flow.h:149`). The port
 //!   returns a fresh state and fills in `state0.t_ns + dt_ns`.
+//! * **`gravity_from_first_accel` takes the null axis in closed form** rather
+//!   than through Eigen's `JacobiSVD`; the difference, and its bound, are on
+//!   that function.
 //! * **Asserts become typed errors or tests.** `propagateState` asserts
 //!   `data.t_ns > curr_state.t_ns` (`preintegration.h:79-80`); here that is
 //!   [`ImuError::NonMonotonicSample`] (decision D32). The residual's
@@ -706,29 +710,40 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
     /// C++ caches this behind a dirty flag; the port recomputes it. See the
     /// module deviations.
     pub fn get_cov_inv_sqrt(&self) -> Matrix9<S> {
-        let (l, d, perm): (Matrix9<S>, Vector9<S>, [usize; POSE_VEL_SIZE]) = ldlt(&self.cov);
+        // `:306-307`
+        let mut mat: Matrix9<S> = self.cov;
+        let transpositions: [usize; POSE_VEL_SIZE] = ldlt_in_place(&mut mat);
 
-        // `:306-309`: start from the permutation matrix.
-        let mut m: Matrix9<S> = Matrix9::zeros();
-        for (row, column) in perm.iter().copied().enumerate() {
-            m[(row, column)] = S::one();
+        // `:306` and `:309`: start from the identity, then apply the
+        // transpositions from the left in ascending order, which is what
+        // `transpositionsP() * I` evaluates to
+        // (`Eigen/src/Core/ProductEvaluators.h:1193-1200`).
+        let mut m: Matrix9<S> = Matrix9::identity();
+        for (k, pivot) in transpositions.iter().copied().enumerate() {
+            if pivot != k {
+                m.swap_rows(k, pivot);
+            }
         }
-        // `:310`: forward substitution with the unit lower triangular factor.
+        // `:310`: `matrixL()` is a *unit* lower triangular view, so the stored
+        // diagonal (which holds D) is not read here.
         for i in 0..POSE_VEL_SIZE {
             for k in 0..i {
-                let factor: S = l[(i, k)];
+                let factor: S = mat[(i, k)];
                 for column in 0..POSE_VEL_SIZE {
                     let above: S = m[(k, column)];
                     m[(i, column)] -= factor * above;
                 }
             }
         }
-        // `:312-320`
+        // `:312-320`. The comparison is against
+        // `std::numeric_limits<Scalar>::min()`, so a *negative* pivot — what a
+        // rank-deficient covariance actually produces, see [`ldlt_in_place`] —
+        // zeroes its row rather than taking the square root of a negative.
         for i in 0..POSE_VEL_SIZE {
-            let scale: S = if d[i] < S::min_positive() {
+            let scale: S = if mat[(i, i)] < S::min_positive() {
                 S::zero()
             } else {
-                S::one() / d[i].sqrt()
+                S::one() / mat[(i, i)].sqrt()
             };
             for column in 0..POSE_VEL_SIZE {
                 m[(i, column)] *= scale;
@@ -751,17 +766,29 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
 /// `Eigen::Quaternion::FromTwoVectors(data->accel, Vec3::UnitZ())`, so the
 /// measured specific force — which points "up" in the rig frame at rest — is
 /// rotated onto the world `+Z` axis and gravity ends up along `-Z`, matching
-/// [`gravity`]. Only roll and pitch are set; yaw is unobservable and stays
-/// arbitrary.
+/// [`gravity`]. Only roll and pitch are set; yaw is unobservable.
 ///
-/// This is Eigen's `Quaternion::setFromTwoVectors`. The one deviation is the
-/// anti-parallel branch, which Eigen resolves with a 2x3 `JacobiSVD` to pick an
-/// axis orthogonal to both vectors; the port picks the smallest-component axis
-/// instead. Both give a valid 180° rotation taking `accel` to `+Z`, and any two
-/// such rotations differ by a rotation *about* `+Z` — that is, by yaw, the one
-/// direction basalt's own nullspace test says carries no information. The branch
-/// is reachable: a rig held upside down at initialisation reports
-/// `accel ≈ (0, 0, -9.81)`.
+/// Ported from Eigen's `Quaternion::setFromTwoVectors`
+/// (`thirdparty/basalt-headers/thirdparty/eigen/Eigen/src/Geometry/Quaternion.h:686-726`),
+/// including the near-antiparallel branch at `:707-718`, which is reachable: a
+/// rig held upside down at initialisation reports `accel ≈ (0, 0, -9.81)`.
+///
+/// That branch needs an axis orthogonal to **both** input directions — Eigen
+/// solves `x·v0 = 0, x·v1 = 0` with a 2x3 `JacobiSVD` and takes `V.col(2)`
+/// (`:709-712`). The port takes `normalize(v0 × v1)`, which is the same null
+/// vector in closed form and, because `v1` is always `UnitZ` here, is computed
+/// without cancellation: `v0 × UnitZ = (v0.y, -v0.x, 0)`. An axis orthogonal to
+/// `v0` alone — what an earlier revision of this port used — leaves a real tilt
+/// error, not just a yaw offset.
+///
+/// One residual difference from Eigen, measured against the C++ probe in
+/// `crates/slam-rs/tests/imu_oracle.rs`: `V.col(2)` carries an arbitrary sign,
+/// and in `f32` Eigen's SVD sometimes returns the *opposite* one. On the probe's
+/// `accel = (0.01, -0.005, -9.81)` in `f32`, Eigen's own answer misses `+Z` by
+/// 2.2e-3 rad while this port hits it to 1e-7. The disagreement is bounded by
+/// twice the deficit angle of the branch, `2·sqrt(2·dummy_precision)` — 0.0089 rad
+/// in `f32`, 8.9e-6 rad in `f64` — and only ever affects a rig that starts within
+/// that angle of upside down. Every `f64` case the probe covers agrees exactly.
 ///
 /// Returns [`So3::identity`] for a zero or non-finite sample, which has no
 /// direction to align.
@@ -770,24 +797,28 @@ pub fn gravity_from_first_accel<S: LieScalar>(accel: &Vector3<S>) -> So3<S> {
     if !norm.is_finite() || norm <= S::zero() {
         return So3::identity();
     }
-    let v0: Vector3<S> = accel / norm;
+    let v0: Vector3<S> = accel / norm; // `:693`
     let v1: Vector3<S> = Vector3::new(S::zero(), S::zero(), S::one());
-    let dot: S = v1.dot(&v0);
+    let dot: S = v1.dot(&v0); // `:695`
 
-    // Eigen's degenerate test is `c < Scalar(-1) + dummy_precision()`.
     if dot < c::<S>(-1.0) + S::eigen_dummy_precision() {
-        let axis: Vector3<S> = smallest_orthogonal_axis(&v0);
-        let w2: S = (S::one() + dot.max(c::<S>(-1.0))) * c::<S>(0.5);
-        let vector_scale: S = (S::one() - w2).sqrt();
+        // `:707-717`
+        let clamped: S = dot.max(c::<S>(-1.0)); // `:708`
+        let axis: Vector3<S> = axis_orthogonal_to_both(&v0, &v1);
+        let w2: S = (S::one() + clamped) * c::<S>(0.5); // `:714`
+        let vector_scale: S = (S::one() - w2).sqrt(); // `:716`
         let quaternion = nalgebra::Quaternion::new(
             w2.sqrt(),
             axis.x * vector_scale,
             axis.y * vector_scale,
             axis.z * vector_scale,
         );
+        // Eigen leaves the coefficients as computed; normalizing only removes
+        // the rounding of `sqrt(w2)² + (1 - w2)` against one.
         return So3::from_unit_quaternion(nalgebra::UnitQuaternion::new_normalize(quaternion));
     }
 
+    // `:719-723`
     let axis: Vector3<S> = v0.cross(&v1);
     let s: S = ((S::one() + dot) * c::<S>(2.0)).sqrt();
     let inv_s: S = S::one() / s;
@@ -800,72 +831,159 @@ pub fn gravity_from_first_accel<S: LieScalar>(accel: &Vector3<S>) -> So3<S> {
     So3::from_unit_quaternion(nalgebra::UnitQuaternion::new_normalize(quaternion))
 }
 
-/// A unit vector orthogonal to `v`, built from `v`'s smallest component.
-fn smallest_orthogonal_axis<S: LieScalar>(v: &Vector3<S>) -> Vector3<S> {
-    let basis: Vector3<S> = if v.x.abs() <= v.y.abs() && v.x.abs() <= v.z.abs() {
+/// A unit vector orthogonal to both `v0` and `v1`, Eigen's `V.col(2)` in closed
+/// form (`Quaternion.h:709-712`).
+///
+/// `v0 × v1` is the null vector of `[v0ᵀ; v1ᵀ]` whenever the two are
+/// independent. They coincide up to sign only when the rig is *exactly* upside
+/// down; the cross product then vanishes and the null space is the whole plane
+/// orthogonal to `v1`, of which Eigen's SVD returns `UnitX` for `v1 = UnitZ`.
+/// The fallback picks the same vector: the canonical axis with the smallest
+/// component in `v1`, projected off `v1`.
+fn axis_orthogonal_to_both<S: LieScalar>(v0: &Vector3<S>, v1: &Vector3<S>) -> Vector3<S> {
+    let cross: Vector3<S> = v0.cross(v1);
+    let norm: S = cross.norm();
+    if norm > S::zero() {
+        return cross / norm;
+    }
+    let basis: Vector3<S> = if v1.x.abs() <= v1.y.abs() && v1.x.abs() <= v1.z.abs() {
         Vector3::new(S::one(), S::zero(), S::zero())
-    } else if v.y.abs() <= v.z.abs() {
+    } else if v1.y.abs() <= v1.z.abs() {
         Vector3::new(S::zero(), S::one(), S::zero())
     } else {
         Vector3::new(S::zero(), S::zero(), S::one())
     };
-    let axis: Vector3<S> = v.cross(&basis);
-    let norm: S = axis.norm();
-    if norm > S::zero() { axis / norm } else { basis }
+    let projected: Vector3<S> = basis - v1 * basis.dot(v1);
+    let projected_norm: S = projected.norm();
+    if projected_norm > S::zero() {
+        projected / projected_norm
+    } else {
+        basis
+    }
 }
 
-/// `LDLT` with symmetric pivoting of a 9x9 symmetric matrix.
+/// `Eigen::LDLT`'s in-place factorization of a 9x9 symmetric matrix, ported from
+/// `ldlt_inplace<Lower>::unblocked`
+/// (`thirdparty/basalt-headers/thirdparty/eigen/Eigen/src/Cholesky/LDLT.h:280-382`).
 ///
-/// Returns the unit lower triangular `L`, the diagonal `D` and the permutation
-/// `perm` with `perm[i]` the original index that ends up in row `i`, so
-/// `P cov Pᵀ = L D Lᵀ`. Eigen's `LDLT` picks the same pivot — the largest
-/// `|diagonal|` of the trailing block — and basalt uses nothing else about it
-/// (`preintegration.h:307-320`).
+/// On return `mat` holds `D` on its diagonal and the strictly lower triangle of
+/// the unit lower `L`; the strict upper triangle is untouched leftover input,
+/// as in Eigen. The returned array is Eigen's `transpositionsP()`: applying
+/// `swap_rows(k, transpositions[k])` for ascending `k` builds the permutation
+/// `P` with `P A Pᵀ = L D Lᵀ`.
 ///
-/// A zero pivot leaves its column of `L` at zero; the caller zeroes that row of
-/// the factor anyway, which is what makes the result a pseudo-inverse.
-fn ldlt<S: LieScalar>(a: &Matrix9<S>) -> (Matrix9<S>, Vector9<S>, [usize; POSE_VEL_SIZE]) {
-    let mut m: Matrix9<S> = *a;
-    let mut l: Matrix9<S> = Matrix9::identity();
-    let mut d: Vector9<S> = Vector9::zeros();
-    let mut perm: [usize; POSE_VEL_SIZE] = [0; POSE_VEL_SIZE];
-    for (index, entry) in perm.iter_mut().enumerate() {
-        *entry = index;
-    }
+/// Two properties of *this* algorithm decide the whitening of a rank-deficient
+/// covariance, and neither survives a textbook right-looking LDLT:
+///
+/// * **The pivot is chosen on the un-updated diagonal.** Eigen delays the
+///   column updates (`:335-339`), so at step `k` the trailing diagonal still
+///   holds the *original* entries. That is why the Eigen source calls LDLT
+///   "not rank-revealing" (`:342-344`), and it changes which direction is
+///   eliminated first. For the covariance after one 5 ms sample with zero gyro
+///   and accelerometer, position and velocity are perfectly correlated
+///   (`p = ½ dt² a`, `v = dt a`), and Eigen eliminates the three *velocity*
+///   directions first, on their larger original variance.
+/// * **A dependent direction leaves a tiny negative pivot, not a zero.** With
+///   the velocity directions eliminated, the position pivots come out as
+///   `-1.6e-27` rather than `0`, and basalt's `vectorD()[i] < numeric_limits::min()`
+///   test (`preintegration.h:314`) — which a negative number passes — zeroes
+///   those rows of the factor. Pivoting the other way round leaves a tiny
+///   *positive* pivot instead, and `1/sqrt(tiny)` puts weights of order `1e26`
+///   on an unobservable direction.
+///
+/// Which side of zero the residue lands on is a property of the precision, not
+/// of the algorithm: the *same* case in `f32` leaves `+8.7e-19`, which is above
+/// `f32`'s `min()`, so basalt itself whitens those directions with a weight of
+/// `1.07e9`. The port reproduces that too, rather than deciding for basalt what
+/// a singular measurement ought to mean.
+///
+/// `crates/slam-rs/tests/imu_oracle.rs` pins all of it against the C++.
+fn ldlt_in_place<S: LieScalar>(mat: &mut Matrix9<S>) -> [usize; POSE_VEL_SIZE] {
+    let size: usize = POSE_VEL_SIZE;
+    let mut transpositions: [usize; POSE_VEL_SIZE] = [0; POSE_VEL_SIZE];
 
-    for k in 0..POSE_VEL_SIZE {
+    for k in 0..size {
+        // `:305-307`. `maxCoeff` keeps the *first* maximum, so the comparison
+        // has to be strict.
         let mut pivot: usize = k;
-        for i in (k + 1)..POSE_VEL_SIZE {
-            if m[(i, i)].abs() > m[(pivot, pivot)].abs() {
+        for i in (k + 1)..size {
+            if mat[(i, i)].abs() > mat[(pivot, pivot)].abs() {
                 pivot = i;
             }
         }
+        transpositions[k] = pivot;
+
         if pivot != k {
-            m.swap_rows(k, pivot);
-            m.swap_columns(k, pivot);
+            // `:313-321`: a symmetric swap written to keep only the lower
+            // triangle valid, which is all the rest of the algorithm reads.
             for column in 0..k {
-                let swapped: S = l[(k, column)];
-                l[(k, column)] = l[(pivot, column)];
-                l[(pivot, column)] = swapped;
+                let swapped: S = mat[(k, column)];
+                mat[(k, column)] = mat[(pivot, column)];
+                mat[(pivot, column)] = swapped;
             }
-            perm.swap(k, pivot);
+            for row in (pivot + 1)..size {
+                let swapped: S = mat[(row, k)];
+                mat[(row, k)] = mat[(row, pivot)];
+                mat[(row, pivot)] = swapped;
+            }
+            let swapped: S = mat[(k, k)];
+            mat[(k, k)] = mat[(pivot, pivot)];
+            mat[(pivot, pivot)] = swapped;
+            for i in (k + 1)..pivot {
+                let swapped: S = mat[(i, k)];
+                mat[(i, k)] = mat[(pivot, i)];
+                mat[(pivot, i)] = swapped;
+            }
         }
 
-        let pivot_value: S = m[(k, k)];
-        d[k] = pivot_value;
-        if pivot_value == S::zero() {
-            continue;
+        // `:330-339`: the delayed update. Column `k` is brought up to date from
+        // the columns already factorized; the trailing diagonal is not touched.
+        let rs: usize = size - k - 1;
+        if k > 0 {
+            let mut temp: [S; POSE_VEL_SIZE] = [S::zero(); POSE_VEL_SIZE];
+            for (j, entry) in temp.iter_mut().enumerate().take(k) {
+                *entry = mat[(j, j)] * mat[(k, j)]; // `:336`
+            }
+            let mut diagonal: S = S::zero();
+            for (j, entry) in temp.iter().enumerate().take(k) {
+                diagonal += mat[(k, j)] * *entry;
+            }
+            mat[(k, k)] -= diagonal; // `:337`
+            if rs > 0 {
+                for i in (k + 1)..size {
+                    let mut sum: S = S::zero();
+                    for (j, entry) in temp.iter().enumerate().take(k) {
+                        sum += mat[(i, j)] * *entry;
+                    }
+                    mat[(i, k)] -= sum; // `:338`
+                }
+            }
         }
-        for i in (k + 1)..POSE_VEL_SIZE {
-            l[(i, k)] = m[(i, k)] / pivot_value;
+
+        // `:345-346`. Eigen's cutoff is exactly zero, not an epsilon: LDLT is
+        // not rank-revealing, and the only thing this guard prevents is an
+        // infinity or a NaN (`:341-344`).
+        let real_akk: S = mat[(k, k)];
+        let pivot_is_valid: bool = real_akk.abs() > S::zero();
+
+        if k == 0 && !pivot_is_valid {
+            // `:348-357`: the whole diagonal is zero, so there is nothing left
+            // to do but fill in the identity transpositions. The empty
+            // measurement takes this branch and whitens to zero.
+            for (j, entry) in transpositions.iter_mut().enumerate() {
+                *entry = j;
+            }
+            return transpositions;
         }
-        for j in (k + 1)..POSE_VEL_SIZE {
-            for i in (k + 1)..POSE_VEL_SIZE {
-                m[(i, j)] -= l[(i, k)] * pivot_value * l[(j, k)];
+
+        // `:359-360`. Eigen divides; it does not multiply by a reciprocal.
+        if rs > 0 && pivot_is_valid {
+            for i in (k + 1)..size {
+                mat[(i, k)] /= real_akk;
             }
         }
     }
-    (l, d, perm)
+    transpositions
 }
 
 /// The linearization point the IMU block needs, `basalt::ImuLinData`
@@ -1002,7 +1120,12 @@ impl<S: LieScalar> ImuBlock<S> {
         b: &mut DVector<S>,
     ) {
         let size: usize = POSE_VEL_BIAS_SIZE;
-        let needed: usize = start_idx.max(end_idx) + size;
+        // The offsets come from an `AbsOrderMap` the caller owns, so the sum has
+        // to be checked before it is compared: `usize::MAX + 15` wraps to a
+        // small number in release and panics in debug (decision D32).
+        let Some(needed) = start_idx.max(end_idx).checked_add(size) else {
+            return;
+        };
         if h.nrows() < needed || h.ncols() < needed || b.nrows() < needed {
             return;
         }
@@ -1969,38 +2092,168 @@ mod tests {
         assert_eq!(meas.get_cov_inv(), Matrix9::zeros());
     }
 
-    /// After one step from the zero initial covariance the recurrence at
-    /// `preintegration.h:161-162` reduces to `A Σa Aᵀ + G Σg Gᵀ`, and the two
-    /// bias Jacobians to `-A` and `-G` (`:165-166`).
-    #[test]
-    fn the_first_covariance_step_is_the_noise_input_alone() {
-        let noise: ImuNoise<f64> = noise_from_std_dev();
-        let sample: ImuSample = ImuSample {
-            t_ns: 5_000_000,
-            gyro: Vector3::new(0.1, -0.2, 0.05),
-            accel: Vector3::new(0.3, 0.1, 9.7),
-        };
-        let mut meas: IntegratedImuMeasurement<f64> =
-            IntegratedImuMeasurement::new(0, &Vector3::zeros(), &Vector3::zeros());
-        let (_, j) = IntegratedImuMeasurement::<f64>::propagate_state(
-            &PoseVelState::default(),
-            sample.t_ns,
-            &sample.accel,
-            &sample.gyro,
-        )
-        .unwrap();
-        meas.integrate(&sample, &noise.accel_cov, &noise.gyro_cov)
-            .unwrap();
+    /// `F`, `A` and `G` for a rig whose gyroscope reads exactly zero, written
+    /// out here from Paper 1 Eq. (13) instead of being taken from
+    /// [`IntegratedImuMeasurement::propagate_state`].
+    ///
+    /// With no rotation the delta rotation stays the identity, so `accel_world`
+    /// is the measurement itself and `rightJacobianSO3(0)` is the identity: the
+    /// three Jacobians are the *same* at every step, which turns the covariance
+    /// recurrence into a closed-form sum. Being written twice is the point —
+    /// a check that rebuilds the expected covariance out of the implementation's
+    /// own `F` cannot see a wrong `F`.
+    fn constant_jacobians(
+        dt: f64,
+        accel: &Vector3<f64>,
+    ) -> (Matrix9<f64>, Matrix9x3<f64>, Matrix9x3<f64>) {
+        let hat: Matrix3<f64> = So3::hat(&(-accel * dt));
 
-        let expected: Matrix9<f64> = j.d_next_d_accel
-            * Matrix3::from_diagonal(&noise.accel_cov)
-            * j.d_next_d_accel.transpose()
-            + j.d_next_d_gyro
-                * Matrix3::from_diagonal(&noise.gyro_cov)
-                * j.d_next_d_gyro.transpose();
-        assert_abs_diff_eq!(*meas.get_cov(), expected, epsilon = 0.0);
-        assert_eq!(*meas.get_d_state_d_ba(), -j.d_next_d_accel);
-        assert_eq!(*meas.get_d_state_d_bg(), -j.d_next_d_gyro);
+        let mut f: Matrix9<f64> = Matrix9::identity();
+        f.fixed_view_mut::<3, 3>(0, 6)
+            .copy_from(&(Matrix3::identity() * dt));
+        f.fixed_view_mut::<3, 3>(6, 3).copy_from(&hat);
+        f.fixed_view_mut::<3, 3>(0, 3).copy_from(&(hat * dt * 0.5));
+
+        let mut a: Matrix9x3<f64> = Matrix9x3::zeros();
+        a.fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&(Matrix3::identity() * 0.5 * dt * dt));
+        a.fixed_view_mut::<3, 3>(6, 0)
+            .copy_from(&(Matrix3::identity() * dt));
+
+        let mut g: Matrix9x3<f64> = Matrix9x3::zeros();
+        g.fixed_view_mut::<3, 3>(3, 0)
+            .copy_from(&(Matrix3::identity() * dt));
+        let d_vel_d_gyro: Matrix3<f64> = hat * 0.5 * dt;
+        g.fixed_view_mut::<3, 3>(6, 0).copy_from(&d_vel_d_gyro);
+        g.fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&(d_vel_d_gyro * 0.5 * dt));
+
+        (f, a, g)
+    }
+
+    /// The relative Frobenius distance between two matrices.
+    fn relative_distance<const R: usize, const C: usize>(
+        got: &SMatrix<f64, R, C>,
+        want: &SMatrix<f64, R, C>,
+    ) -> f64 {
+        let scale: f64 = want.norm().max(f64::MIN_POSITIVE);
+        (got - want).norm() / scale
+    }
+
+    proptest! {
+        /// The covariance and both bias Jacobians against the closed forms of
+        /// their recurrences, evaluated with an independently written `F`, `A`
+        /// and `G`.
+        ///
+        /// `cov_n = Σ_{k<n} F^k Q (F^k)ᵀ` with `Q = A Σa Aᵀ + G Σg Gᵀ`
+        /// (`preintegration.h:161-162`), `d_state_d_ba_n = -Σ_{k<n} F^k A` and
+        /// `d_state_d_bg_n = -Σ_{k<n} F^k G` (`:165-166`). One step, thirty
+        /// steps and sub-millisecond intervals all fall out of the ranges.
+        #[test]
+        fn the_covariance_recurrence_matches_its_closed_form(
+            steps in 1usize..30,
+            dt_ns in 50_000i64..20_000_000,
+            ax in -12.0f64..12.0,
+            ay in -12.0f64..12.0,
+            az in -12.0f64..12.0,
+        ) {
+            let noise: ImuNoise<f64> = noise_from_std_dev();
+            let accel: Vector3<f64> = Vector3::new(ax, ay, az);
+            let dt: f64 = dt_ns as f64 * 1e-9;
+
+            let mut meas: IntegratedImuMeasurement<f64> =
+                IntegratedImuMeasurement::new(0, &Vector3::zeros(), &Vector3::zeros());
+            for step in 1..=steps as i64 {
+                meas.integrate(
+                    &ImuSample { t_ns: step * dt_ns, gyro: Vector3::zeros(), accel },
+                    &noise.accel_cov,
+                    &noise.gyro_cov,
+                )?;
+            }
+
+            let (f, a, g) = constant_jacobians(dt, &accel);
+            let q: Matrix9<f64> = a * Matrix3::from_diagonal(&noise.accel_cov) * a.transpose()
+                + g * Matrix3::from_diagonal(&noise.gyro_cov) * g.transpose();
+
+            let mut power: Matrix9<f64> = Matrix9::identity();
+            let mut cov: Matrix9<f64> = Matrix9::zeros();
+            let mut d_ba: Matrix9x3<f64> = Matrix9x3::zeros();
+            let mut d_bg: Matrix9x3<f64> = Matrix9x3::zeros();
+            for _ in 0..steps {
+                cov += power * q * power.transpose();
+                d_ba -= power * a;
+                d_bg -= power * g;
+                power *= f;
+            }
+
+            prop_assert!(
+                relative_distance(meas.get_cov(), &cov) <= 1e-9,
+                "cov off by {} relative",
+                relative_distance(meas.get_cov(), &cov)
+            );
+            prop_assert!(
+                relative_distance(meas.get_d_state_d_ba(), &d_ba) <= 1e-12,
+                "d_state_d_ba off by {} relative",
+                relative_distance(meas.get_d_state_d_ba(), &d_ba)
+            );
+            prop_assert!(
+                relative_distance(meas.get_d_state_d_bg(), &d_bg) <= 1e-12,
+                "d_state_d_bg off by {} relative",
+                relative_distance(meas.get_d_state_d_bg(), &d_bg)
+            );
+        }
+    }
+
+    /// The same closed form in `f32`, at one fixed configuration.
+    ///
+    /// The recurrence and the explicit sum are different orders of the same
+    /// arithmetic, so the tolerance is the `f32` accumulation of 20 steps, not
+    /// the agreement of two exact quantities.
+    #[test]
+    fn the_covariance_recurrence_matches_its_closed_form_in_float() {
+        let accel: Vector3<f64> = Vector3::new(0.35, -1.25, 9.75);
+        let dt_ns: i64 = 2_500_000;
+        let steps: i64 = 20;
+        let noise: ImuNoise<f32> = ImuNoise {
+            accel_cov: Vector3::repeat((ACCEL_STD_DEV * ACCEL_STD_DEV) as f32),
+            gyro_cov: Vector3::repeat((GYRO_STD_DEV * GYRO_STD_DEV) as f32),
+        };
+
+        let mut meas: IntegratedImuMeasurement<f32> =
+            IntegratedImuMeasurement::new(0, &Vector3::zeros(), &Vector3::zeros());
+        for step in 1..=steps {
+            meas.integrate(
+                &ImuSample {
+                    t_ns: step * dt_ns,
+                    gyro: Vector3::zeros(),
+                    accel,
+                },
+                &noise.accel_cov,
+                &noise.gyro_cov,
+            )
+            .unwrap();
+        }
+
+        let dt: f64 = dt_ns as f64 * 1e-9;
+        let (f, a, g) = constant_jacobians(dt, &accel);
+        let accel_cov: Vector3<f64> = Vector3::repeat(f64::from(noise.accel_cov.x));
+        let gyro_cov: Vector3<f64> = Vector3::repeat(f64::from(noise.gyro_cov.x));
+        let q: Matrix9<f64> = a * Matrix3::from_diagonal(&accel_cov) * a.transpose()
+            + g * Matrix3::from_diagonal(&gyro_cov) * g.transpose();
+
+        let mut power: Matrix9<f64> = Matrix9::identity();
+        let mut cov: Matrix9<f64> = Matrix9::zeros();
+        for _ in 0..steps {
+            cov += power * q * power.transpose();
+            power *= f;
+        }
+
+        let got: Matrix9<f64> = meas.get_cov().map(f64::from);
+        assert!(
+            relative_distance(&got, &cov) <= 1e-5,
+            "cov off by {} relative",
+            relative_distance(&got, &cov)
+        );
     }
 
     /// A duplicate or reordered sample is rejected and nothing is integrated.
@@ -2298,6 +2551,57 @@ mod tests {
             left_jacobian_inv_so3(&res_rot) * meas.get_d_state_d_bg().fixed_view::<3, 3>(3, 0),
             epsilon = 1e-15
         );
+    }
+
+    /// An out-of-range block offset is ignored, and the *check itself* does not
+    /// overflow: `usize::MAX + 15` panics in debug and wraps to a small,
+    /// accepted number in release (decision D32).
+    #[test]
+    fn the_block_ignores_offsets_that_do_not_fit() {
+        let mut rng: Rng = Rng::new(0x5eed_000e);
+        let trajectory: Trajectory = Trajectory::new(&mut rng);
+        let bg: Vector3<f64> = rng.vector3() / 100.0;
+        let ba: Vector3<f64> = rng.vector3() / 10.0;
+        let samples: Vec<ImuSample> = biased_samples(&trajectory, &bg, &ba);
+        let meas: IntegratedImuMeasurement<f64> = integrate_all(0, &bg, &ba, &samples);
+        let end_t_ns: i64 = meas.get_dt_ns();
+
+        let state0: PoseVelBiasState<f64> =
+            PoseVelBiasState::new(0, trajectory.pose(0), trajectory.trans_vel_world(0), bg, ba);
+        let state1: PoseVelBiasState<f64> = PoseVelBiasState::new(
+            end_t_ns,
+            trajectory.pose(end_t_ns),
+            trajectory.trans_vel_world(end_t_ns),
+            bg,
+            ba,
+        );
+        let block: ImuBlock<f64> = ImuBlock::linearize(
+            &meas,
+            &lin_data(),
+            &PoseVelBiasStateWithLin::new(state0, false),
+            &PoseVelBiasStateWithLin::new(state1, false),
+        );
+
+        let size: usize = 2 * POSE_VEL_BIAS_SIZE;
+        for (start_idx, end_idx) in [
+            (usize::MAX, 0),
+            (0, usize::MAX),
+            (usize::MAX, usize::MAX),
+            (size, 0),
+            (0, size),
+        ] {
+            let mut h: DMatrix<f64> = DMatrix::zeros(size, size);
+            let mut b: DVector<f64> = DVector::zeros(size);
+            block.add_dense_h_b(start_idx, end_idx, &mut h, &mut b);
+            assert_eq!(h.norm(), 0.0, "({start_idx}, {end_idx}) wrote to H");
+            assert_eq!(b.norm(), 0.0, "({start_idx}, {end_idx}) wrote to b");
+        }
+
+        // The offsets that do fit still work.
+        let mut h: DMatrix<f64> = DMatrix::zeros(size, size);
+        let mut b: DVector<f64> = DVector::zeros(size);
+        block.add_dense_h_b(0, POSE_VEL_BIAS_SIZE, &mut h, &mut b);
+        assert!(h.norm() > 0.0);
     }
 
     /// A frozen linearization point changes only the residual *value*, not the
