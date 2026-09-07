@@ -401,6 +401,9 @@ pub struct PoseStateWithLin<S: LieScalar> {
     delta: Vector6<S>,
     pose_linearized: PoseState<S>,
     t_w_i_current: Se3<S>,
+    backup_delta: Vector6<S>,
+    backup_pose_linearized: PoseState<S>,
+    backup_t_w_i_current: Se3<S>,
 }
 
 impl<S: LieScalar> Default for PoseStateWithLin<S> {
@@ -410,6 +413,9 @@ impl<S: LieScalar> Default for PoseStateWithLin<S> {
             delta: Vector6::zeros(),
             pose_linearized: PoseState::default(),
             t_w_i_current: Se3::identity(),
+            backup_delta: Vector6::zeros(),
+            backup_pose_linearized: PoseState::default(),
+            backup_t_w_i_current: Se3::identity(),
         }
     }
 }
@@ -422,6 +428,9 @@ impl<S: LieScalar> PoseStateWithLin<S> {
             delta: Vector6::zeros(),
             pose_linearized: PoseState::new(t_ns, t_w_i),
             t_w_i_current: t_w_i,
+            backup_delta: Vector6::zeros(),
+            backup_pose_linearized: PoseState::new(t_ns, t_w_i),
+            backup_t_w_i_current: t_w_i,
         }
     }
 
@@ -438,6 +447,12 @@ impl<S: LieScalar> PoseStateWithLin<S> {
             delta,
             pose_linearized,
             t_w_i_current,
+            // `backup_delta.setZero()` with the comment "unused, but avoids
+            // uninitialized gcc warning" (`imu_types.h:211`); the two poses get
+            // the same treatment here because Rust has no uninitialized field.
+            backup_delta: Vector6::zeros(),
+            backup_pose_linearized: pose_linearized,
+            backup_t_w_i_current: t_w_i_current,
         }
     }
 
@@ -466,6 +481,23 @@ impl<S: LieScalar> PoseStateWithLin<S> {
         } else {
             self.pose_linearized.t_w_i.apply_inc(inc);
         }
+    }
+
+    /// Save the mutable state, `backup` (`imu_types.h:254-258`).
+    ///
+    /// The `linearized` flag is deliberately **not** saved: C++ does not save it
+    /// either, because a rejected Levenberg-Marquardt step never changes it.
+    pub fn backup(&mut self) {
+        self.backup_delta = self.delta;
+        self.backup_pose_linearized = self.pose_linearized;
+        self.backup_t_w_i_current = self.t_w_i_current;
+    }
+
+    /// Undo the last increments, `restore` (`imu_types.h:260-264`).
+    pub fn restore(&mut self) {
+        self.delta = self.backup_delta;
+        self.pose_linearized = self.backup_pose_linearized;
+        self.t_w_i_current = self.backup_t_w_i_current;
     }
 
     /// The pose the residuals are evaluated at, `getPose` (`imu_types.h:250-256`).
@@ -508,6 +540,9 @@ pub struct PoseVelBiasStateWithLin<S: LieScalar> {
     delta: Vector15<S>,
     state_linearized: PoseVelBiasState<S>,
     state_current: PoseVelBiasState<S>,
+    backup_delta: Vector15<S>,
+    backup_state_linearized: PoseVelBiasState<S>,
+    backup_state_current: PoseVelBiasState<S>,
 }
 
 impl<S: LieScalar> Default for PoseVelBiasStateWithLin<S> {
@@ -517,6 +552,9 @@ impl<S: LieScalar> Default for PoseVelBiasStateWithLin<S> {
             delta: Vector15::zeros(),
             state_linearized: PoseVelBiasState::default(),
             state_current: PoseVelBiasState::default(),
+            backup_delta: Vector15::zeros(),
+            backup_state_linearized: PoseVelBiasState::default(),
+            backup_state_current: PoseVelBiasState::default(),
         }
     }
 }
@@ -529,6 +567,9 @@ impl<S: LieScalar> PoseVelBiasStateWithLin<S> {
             delta: Vector15::zeros(),
             state_linearized: state,
             state_current: state,
+            backup_delta: Vector15::zeros(),
+            backup_state_linearized: state,
+            backup_state_current: state,
         }
     }
 
@@ -566,6 +607,22 @@ impl<S: LieScalar> PoseVelBiasStateWithLin<S> {
         } else {
             self.state_linearized.apply_inc(inc);
         }
+    }
+
+    /// Save the mutable state, `backup` (`imu_types.h:139-143`).
+    ///
+    /// As for [`PoseStateWithLin::backup`], the `linearized` flag is not saved.
+    pub fn backup(&mut self) {
+        self.backup_delta = self.delta;
+        self.backup_state_linearized = self.state_linearized;
+        self.backup_state_current = self.state_current;
+    }
+
+    /// Undo the last increments, `restore` (`imu_types.h:145-149`).
+    pub fn restore(&mut self) {
+        self.delta = self.backup_delta;
+        self.state_linearized = self.backup_state_linearized;
+        self.state_current = self.backup_state_current;
     }
 
     /// The state the residuals are evaluated at, `getState` (`imu_types.h:126-132`).

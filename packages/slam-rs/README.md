@@ -23,8 +23,20 @@ The core is being filled in stage by stage, bottom up. What is in it today:
 | `camera` | `pinhole`, `kb4` and `pinhole-radtan8` with basalt's 4-D homogeneous `project`/`unproject` and their analytic Jacobians (2x4 point, 2xN parameter, 4x2 and 4xN for unprojection), the `rpmax` and `z >= epsilonSqrt` domain checks, and a `CameraEnum` that dispatches without a vtable. `ds`, `eucm` and `ucm` parse but are rejected here. |
 | `image` | `ImageU16`: an owned flat 16-bit frame with an explicit row stride, the stride-aware `u8 << 8` widening basalt's readers do, and `interp`/`interp_grad`/`in_bounds` reproduced from `image.h` in the same arithmetic order. |
 | `pyramid` | The `PyramidBuilder` stage seam with an associated `Pyramid` type that lends nothing (geometry plus a copy into the caller's buffer), `PyramidU16` (one flat buffer per level, not basalt's packed mipmap) and `CpuPyramidBuilder`, whose `subsample` is bit-exact with `image_pyr.h:99-140`. |
+| `landmark` | `StereographicParam` (`project`/`unproject` and both Jacobians), the three-parameter `Landmark` with its backup pair, and `LandmarkDatabase`: the host->target->landmark adjacency, the `min_num_obs = 2` sweep and `remove_keyframes`. Landmarks live in one id-sorted `Vec` behind a `BTreeMap` index rather than a per-landmark hash map, and every map is a `BTreeMap`, so iteration order is reproducible (D31). |
+| `ba_base` | `BundleAdjustmentBase`: the two window state maps, `get_pose_state_with_lin`, basalt's Huber-weighted `compute_error` with optional outlier collection, `compute_projections`, `compute_delta`, `backup`/`restore`, the reprojection residual and its three Jacobians from `ba_utils.h`, `computeRelPose`, and DLT `triangulate` over a ported Eigen `JacobiSVD`. |
 | `imu` | Preintegration: `IntegratedImuMeasurement<S>` with basalt's midpoint propagation, covariance and bias-Jacobian recurrences, the 9-vector residual and its Jacobians, the LDLT square-root inverse covariance, the between-frames accumulation loop, gravity initialisation, and the 15-row IMU block the estimator whitens. |
 | `frontend` | The optical-flow frontend: `patterns` (Pattern24/52/51/50 from `patterns.h`), `se2` (`AffineCompact2` and `Sophus::SE2::exp`), `ldlt` (Eigen's pivoted LDLT at 3x3), `patch` (the streaming inverse-compositional patch build), `tracker` (`PatchSoA`, `FlowTransforms`, the `SourcePatches`/`PatchTracker` stage traits and `CpuPatchTracker`), `detect` (basalt's centred cell grid over kornia-rs's FAST plus OpenCV's suppression), `flow` (`FrameToFrameOpticalFlow`, generic over the builder and tracker) and `parallel` (the explicit thread budget). |
+
+Two conventions in `ba_base` are basalt deviating from its own papers, and the
+port keeps **both** halves of each. The reprojection residual is `pi(...) - z`,
+the flip of Paper 1 Eq. (8) (`ba_utils.h:117`), which the estimator compensates
+for by negating the increment (`sqrt_keypoint_vio.cpp:1450`); and the Huber
+weight is taken on the raw pixel residual, before the `1/sigma` scaling
+(`ba_base.cpp:179-182`), so the shipped 1.0 px threshold against a 0.5 px sigma
+is an effective 2 sigma. `compute_error` is sequential in this stage, written as
+a fixed-order fold over per-host-frame partials so the `threads` config field can
+later turn it into a `par_chunks` without changing the sum.
 
 Every convention is quoted against the C++ it comes from, file and line, in the
 doc comments. `crates/slam-rs/tests/fixtures/` holds the shipped basalt config
@@ -35,18 +47,26 @@ from it, which the pyramid is checked against byte for byte;
 `camera_oracle.json`, what basalt's camera headers return for ten cameras and
 thirty points each in **both** precisions - pixel, bearing, and in double also
 both projection Jacobians and the unprojection Jacobian - plus six probe pixels
-handed straight to `unproject`, one of them singular; and `imu/imu_oracle.json`,
+handed straight to `unproject`, one of them singular; `imu/imu_oracle.json`,
 the delta state, covariance, bias Jacobians, Eigen LDLT and square-root inverse
 covariance of seven preintegration runs, plus what
 `Quaternion::FromTwoVectors` returns for ten accelerometer readings; and
 `flow/`, three 960x960 frameset pairs as PGMs beside the keypoints the C++
-frontend produced from eight of them. The camera port reproduces every double to
-1e-15 relative (1e-12 for unprojections, which run a Newton iteration) and every
-float **exactly**; the IMU port reproduces every double to 1e-14, and to 1e-7
-through the whitening, which inverts the covariance. All four generators live on
-the fork's `slam-rs-reference` branch, as `tools/dump_pyramid.cpp`,
-`tools/camera_oracle.cpp`, `tools/imu_oracle.cpp` and `tools/dump_flow.cpp`; the
-monorepo never compiles C++.
+frontend produced from eight of them; and `lmdb/lmdb_oracle.json`, the
+stereographic chart with both its Jacobians at twelve points, `linearizePoint`'s
+residual, `d_res_d_xi`, `d_res_d_p` and `proj` for five configurations of each of
+the two shipped reference cameras, and ten `triangulate` cases, four of them
+placed on basalt's `0 < inv_dist < 3` acceptance gate.
+
+The camera port reproduces every double to 1e-15 relative (1e-12 for
+unprojections, which run a Newton iteration) and every float **exactly**; the IMU
+port reproduces every double to 1e-14, and to 1e-7 through the whitening, which
+inverts the covariance; the landmark port reproduces the chart and the residual
+to 1e-12 in double and **exactly** in float, and triangulation bit for bit on
+nine of the ten double cases. All five generators live on the fork's
+`slam-rs-reference` branch, as `tools/dump_pyramid.cpp`,
+`tools/camera_oracle.cpp`, `tools/imu_oracle.cpp`, `tools/dump_flow.cpp` and
+`tools/lmdb_oracle.cpp`; the monorepo never compiles C++.
 
 The IMU fixture earns its keep on one run: the covariance after a single sample
 with a still gyroscope and accelerometer is rank deficient, and what basalt does
@@ -129,6 +149,25 @@ camera 0's shape, as the C++'s does. And `FrontendOptions::max_keypoints` is a
 budget basalt has no equivalent of: the port's buffers are preallocated, so
 detection and matching stop adding once a camera is full rather than producing a
 frame the tracker cannot carry.
+
+### The landmark stage, and the DLT's SVD
+
+Two ulp-level findings came out of the landmark fixture, and both changed code
+outside that stage. `So3 * Vector3` now sums Sophus's three terms in Sophus's
+order (`so3.hpp:408-417`) rather than nalgebra's association, which was an ulp
+off in triangulation; and every `head<3>().norm()` on the residual path sums in
+Eigen's `a0 + (a1 + a2)` unroller order, which was an ulp off in the `f32`
+inverse depth of a landmark at `inv_dist = 1e-7`. Both follow decision D44's
+rule: an elementary operation whose rounding can reach a threshold comparison is
+ported in Eigen's or Sophus's operation order, not delegated to nalgebra's
+equivalent.
+
+The DLT's 4x4 SVD is a step-for-step port of Eigen's `JacobiSVD`, not a call into
+nalgebra's: a 4x4 with `ComputeFullV` takes Eigen's square path, so the whole
+algorithm is the scaling, the sweep of 2x2 real Jacobi rotations and the final
+sort, with no QR preconditioner. It is worth porting because basalt gates
+landmark acceptance on `0 < inv_dist < 3`, where a borderline point either exists
+or does not.
 
 Still to come: the square-root estimator.
 

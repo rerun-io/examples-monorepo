@@ -9,12 +9,14 @@
 //! types are real, the estimator is not implemented yet, so `track` never
 //! reports [`VioStatus::Tracking`].
 
+pub mod ba_base;
 pub mod calib;
 pub mod camera;
 pub mod config;
 pub mod frontend;
 pub mod image;
 pub mod imu;
+pub mod landmark;
 pub mod lie;
 pub mod pyramid;
 pub mod types;

@@ -25,7 +25,9 @@
 //! difference is below the branch threshold, but reproducing each at its own
 //! call site keeps the port literal.
 
-use nalgebra::{Matrix3, Matrix6, Quaternion, RealField, UnitQuaternion, Vector3, Vector6};
+use nalgebra::{
+    Matrix3, Matrix3x4, Matrix4, Matrix6, Quaternion, RealField, UnitQuaternion, Vector3, Vector6,
+};
 
 /// A scalar the Lie module can run in: `f32` and `f64`.
 ///
@@ -382,8 +384,30 @@ fn normalized<S: LieScalar>(quaternion: Quaternion<S>) -> UnitQuaternion<S> {
 impl<S: LieScalar> std::ops::Mul<Vector3<S>> for So3<S> {
     type Output = Vector3<S>;
 
+    /// Rotate a point, `Sophus::SO3::operator*(Point)`
+    /// (`Sophus/sophus/so3.hpp:408-417`).
+    ///
+    /// Sophus writes this out rather than calling Eigen's `_transformVector`,
+    /// and the port writes out Sophus's:
+    ///
+    /// ```text
+    /// uv = 2 (q.vec x p);  result = p + q.w uv + q.vec x uv
+    /// ```
+    ///
+    /// nalgebra's `UnitQuaternion * Vector3` forms the same three terms but adds
+    /// them as `(uv w + cross) + p`, one association away from Sophus's
+    /// `(p + uv w) + cross`. That is a last-ulp difference in every rotated
+    /// point, and it reaches a threshold: `computeRelPose` rotates the baseline
+    /// (`ba_utils.h:50`) into the relative pose the DLT triangulates from, and
+    /// basalt accepts a landmark only when the result satisfies
+    /// `0 < inv_dist < 3` (`sqrt_keypoint_vio.cpp:534`). Decision D44's rule
+    /// applies, so the order is Sophus's.
     fn mul(self, rhs: Vector3<S>) -> Vector3<S> {
-        self.quaternion * rhs
+        let q: &Quaternion<S> = self.quaternion.as_ref();
+        let vec: Vector3<S> = q.vector().into_owned();
+        let mut uv: Vector3<S> = vec.cross(&rhs);
+        uv += uv;
+        rhs + uv * q.w + vec.cross(&uv)
     }
 }
 
@@ -480,6 +504,34 @@ impl<S: LieScalar> Se3<S> {
                 T::from_literal(self.translation.z.to_f64()),
             ),
         }
+    }
+
+    /// The homogeneous 4x4 matrix, `Sophus::SE3::matrix()`
+    /// (`Sophus/sophus/se3.hpp:275-280`).
+    ///
+    /// The rotation block goes through [`So3::matrix`], i.e. Eigen's
+    /// `toRotationMatrix` operation order (decision D44), because this matrix
+    /// is what the reprojection residual multiplies its landmark by
+    /// (`ba_utils.h:94`).
+    pub fn matrix(&self) -> Matrix4<S> {
+        let mut res: Matrix4<S> = Matrix4::zeros();
+        res.fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&self.rotation.matrix());
+        res.fixed_view_mut::<3, 1>(0, 3)
+            .copy_from(&self.translation);
+        res[(3, 3)] = S::one();
+        res
+    }
+
+    /// The affine 3x4 matrix, `Sophus::SE3::matrix3x4()`
+    /// (`Sophus/sophus/se3.hpp:285-290`): `[R | t]`.
+    pub fn matrix3x4(&self) -> Matrix3x4<S> {
+        let mut res: Matrix3x4<S> = Matrix3x4::zeros();
+        res.fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&self.rotation.matrix());
+        res.fixed_view_mut::<3, 1>(0, 3)
+            .copy_from(&self.translation);
+        res
     }
 
     /// The inverse transform.
