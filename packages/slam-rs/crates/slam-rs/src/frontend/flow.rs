@@ -505,6 +505,10 @@ pub struct FrameToFrameOpticalFlow<
     cells: Vec<Vec<i32>>,
     /// `last_keypoint_id` (`optical_flow.h:174`), the global landmark id space.
     last_keypoint_id: u64,
+    /// `last_keypoint_id` as it stood before the last **committed** frameset,
+    /// which is what makes "how many of these keypoints are new" answerable
+    /// after the fact rather than only inside the call that produced them.
+    last_keypoint_id_before_frame: u64,
     /// `t_ns` (`optical_flow.h:172`), `None` until the first frame commits.
     ///
     /// basalt's `-1` sentinel is not ported: `processFrame` reads `t_ns < 0` as
@@ -854,6 +858,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
                 cameras: vec![Keypoints::default(); num_cams],
             },
             last_keypoint_id: 0,
+            last_keypoint_id_before_frame: 0,
             t_ns: None,
             frame_counter: 0,
             config,
@@ -875,6 +880,16 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     /// The next keypoint id that will be handed out (`optical_flow.h:174`).
     pub fn last_keypoint_id(&self) -> u64 {
         self.last_keypoint_id
+    }
+
+    /// The id space's watermark before the last committed frameset: every
+    /// keypoint at or above it was handed out on that frameset.
+    ///
+    /// Zero before the first frameset commits, and unchanged by a frameset the
+    /// frontend refuses — that one is rolled back whole, so the last committed
+    /// frame and its watermark still describe each other.
+    pub fn last_keypoint_id_before_frame(&self) -> u64 {
+        self.last_keypoint_id_before_frame
     }
 
     /// Framesets processed so far (`optical_flow.h:173`).
@@ -1043,6 +1058,9 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
                 self.t_ns = Some(t_ns);
                 self.frame.t_ns = Some(t_ns);
                 self.frame_counter += 1;
+                // The snapshot holds the id space as it stood before this frame,
+                // which is exactly what a reader of the committed frame needs.
+                self.last_keypoint_id_before_frame = snapshot.last_keypoint_id;
             }
             Err(_) => {
                 self.frame.cameras.clone_from(&snapshot.cameras);
@@ -1697,6 +1715,35 @@ mod tests {
             .unwrap();
         assert!(flow.last_keypoint_id() >= after_first);
         assert_eq!(flow.frame_counter(), 2);
+    }
+
+    /// The watermark says which of the committed frame's keypoints are new, and
+    /// it belongs to the committed frame: a refused frameset must not move it,
+    /// or the frame it still describes would read as all-old keypoints.
+    #[test]
+    fn the_keypoint_watermark_describes_the_committed_frame() {
+        let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
+        assert_eq!(flow.last_keypoint_id_before_frame(), 0);
+
+        let images: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
+        flow.process_frame(0, &images, &PosePrediction::default(), &[])
+            .unwrap();
+        // Everything the first frameset detected is new, so the watermark is
+        // still the empty id space it started from.
+        assert_eq!(flow.last_keypoint_id_before_frame(), 0);
+        let after_first: u64 = flow.last_keypoint_id();
+
+        let moved: [ImageU16; 2] = [dotted_image(1), dotted_image(1)];
+        flow.process_frame(1, &moved, &PosePrediction::default(), &[])
+            .unwrap();
+        assert_eq!(flow.last_keypoint_id_before_frame(), after_first);
+
+        // A frameset that does not move the clock forward is refused whole.
+        assert!(
+            flow.process_frame(1, &moved, &PosePrediction::default(), &[])
+                .is_err()
+        );
+        assert_eq!(flow.last_keypoint_id_before_frame(), after_first);
     }
 
     /// `updateCellCounts` / `addKeypoint` / `removeKeypoint` (`:707-749`) keep

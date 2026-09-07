@@ -110,16 +110,6 @@ impl VioResult {
 #[pyclass(module = "slam_rs._core")]
 pub struct Vio {
     inner: slam_rs::Vio<f32>,
-    /// `last_keypoint_id` before the last accepted frameset, which is what makes
-    /// [`FlowFrame::num_new`] answerable after the fact.
-    ///
-    /// Written only where the frontend ran: a `NeedMoreImu` frameset never
-    /// reaches it, and overwriting this there would make the last accepted
-    /// frameset's keypoints all look old. A `track` the *estimator* refuses has
-    /// already run the frontend, so this does go stale — but that error leaves
-    /// the window advanced past `prev_frame` and the estimator has to be rebuilt
-    /// anyway (`estimator::EstimatorError`).
-    keypoint_id_before_track: u64,
 }
 
 #[pymethods]
@@ -146,7 +136,6 @@ impl Vio {
                 frontend_options(threads, max_keypoints),
             )
             .map_err(value_error)?,
-            keypoint_id_before_track: 0,
         })
     }
 
@@ -210,7 +199,6 @@ impl Vio {
         for (index, image) in images.iter().enumerate() {
             frames.push(gray_image(image, index)?);
         }
-        let previous_last_id: u64 = self.inner.frontend().last_keypoint_id();
         let result: slam_rs::VioResult = py
             .detach(|| {
                 let views: Vec<ImageView<'_>> = frames
@@ -225,9 +213,6 @@ impl Vio {
                 self.inner.track(t_ns, &views)
             })
             .map_err(value_error)?;
-        if result.status != slam_rs::VioStatus::NeedMoreImu {
-            self.keypoint_id_before_track = previous_last_id;
-        }
         Ok(VioResult { inner: result })
     }
 
@@ -241,7 +226,7 @@ impl Vio {
         let Some(t_ns) = self.inner.frontend().t_ns() else {
             return Ok(None);
         };
-        flow_frame(self.inner.frontend(), self.keypoint_id_before_track, t_ns)
+        flow_frame(self.inner.frontend(), t_ns)
             .map(Some)
             .map_err(PyErr::from)
     }
@@ -1027,13 +1012,12 @@ impl OpticalFlow {
                 .map_err(|error| PyValueError::new_err(format!("image {index}: {error}")))?;
         }
 
-        let previous_last_id: u64 = self.inner.last_keypoint_id();
         let Self { inner, images } = self;
         py.detach(|| -> Result<FlowFrame, ProcessError> {
             inner
                 .process_frame(t_ns, images, &PosePrediction::default(), &[])
                 .map_err(ProcessError::Frontend)?;
-            flow_frame(inner, previous_last_id, t_ns)
+            flow_frame(inner, t_ns)
         })
         .map_err(PyErr::from)
     }
@@ -1068,15 +1052,20 @@ impl From<ProcessError> for PyErr {
 
 /// Copy the frontend's committed frame into an owned [`FlowFrame`].
 ///
+/// A pure read: `num_new` comes from the frontend's own watermark
+/// ([`FrameToFrameOpticalFlow::last_keypoint_id_before_frame`]), so this answers
+/// the same thing inside the `process` that produced the frame and afterwards
+/// through [`Vio::flow_frame`].
+///
 /// `t_ns` is the timestamp `process_frame` has just accepted. The core carries
 /// its own as an `Option` — `None` until the first frameset commits — and this
 /// runs only after a commit, so taking the value the caller passed keeps the
 /// Python-facing `FlowFrame.t_ns` a plain `int` with no impossible branch.
 fn flow_frame(
     flow: &FrameToFrameOpticalFlow<Pattern51>,
-    previous_last_id: u64,
     t_ns: i64,
 ) -> Result<FlowFrame, ProcessError> {
+    let previous_last_id: u64 = flow.last_keypoint_id_before_frame();
     let grid: CellGrid = flow.occupancy_grid();
     let frame: &CoreFlowFrame = flow.frame();
     let mut cameras: Vec<CameraKeypoints> = Vec::with_capacity(frame.cameras.len());
