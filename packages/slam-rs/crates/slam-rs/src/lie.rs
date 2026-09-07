@@ -278,8 +278,50 @@ impl<S: LieScalar> So3<S> {
     }
 
     /// The rotation as a 3x3 matrix.
+    ///
+    /// `Sophus::SO3::matrix()` is `unit_quaternion().toRotationMatrix()`
+    /// (`Sophus/sophus/so3.hpp:257`), so this is Eigen's
+    /// `QuaternionBase::toRotationMatrix`
+    /// (`thirdparty/basalt-headers/thirdparty/eigen/Eigen/src/Geometry/Quaternion.h:646-678`)
+    /// written out in its own operation order rather than nalgebra's
+    /// `to_rotation_matrix`.
+    ///
+    /// The two agree mathematically and disagree in the last bits: Eigen builds
+    /// each diagonal entry as `1 - (tyy + tzz)` from the doubled coefficients,
+    /// nalgebra as `ww + ii - jj - kk`, and the off-diagonal triple products
+    /// associate differently (`(2y)·x` against `(x·y)·2`). That is enough to
+    /// move a cancellation residue across zero: on one 5 ms `f32` IMU sample the
+    /// preintegrated covariance is rank deficient in a different *direction*
+    /// under the two roundings, and the whitening then puts its `1.15e18` weight
+    /// on a different axis (`crates/slam-rs/tests/imu_oracle.rs`,
+    /// `rotating_singular_f32`).
     pub fn matrix(&self) -> Matrix3<S> {
-        self.quaternion.to_rotation_matrix().into_inner()
+        let q = self.quaternion.as_ref();
+        let two: S = c::<S>(2.0);
+        let tx: S = two * q.i;
+        let ty: S = two * q.j;
+        let tz: S = two * q.k;
+        let twx: S = tx * q.w;
+        let twy: S = ty * q.w;
+        let twz: S = tz * q.w;
+        let txx: S = tx * q.i;
+        let txy: S = ty * q.i;
+        let txz: S = tz * q.i;
+        let tyy: S = ty * q.j;
+        let tyz: S = tz * q.j;
+        let tzz: S = tz * q.k;
+        let one: S = S::one();
+        Matrix3::new(
+            one - (tyy + tzz),
+            txy - twz,
+            txz + twy,
+            txy + twz,
+            one - (txx + tzz),
+            tyz - twx,
+            txz - twy,
+            tyz + twx,
+            one - (txx + tyy),
+        )
     }
 
     /// The adjoint of SO(3), which is the rotation matrix itself

@@ -759,6 +759,10 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
     }
 }
 
+/// Fires the near-antiparallel warning in [`gravity_from_first_accel`] once per
+/// process, not once per frame.
+static ANTIPARALLEL_WARNING: std::sync::Once = std::sync::Once::new();
+
 /// The initial orientation from one accelerometer sample
 /// (`src/vi_estimator/sqrt_keypoint_vio.cpp:277-278`).
 ///
@@ -781,14 +785,35 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
 /// `v0` alone — what an earlier revision of this port used — leaves a real tilt
 /// error, not just a yaw offset.
 ///
-/// One residual difference from Eigen, measured against the C++ probe in
-/// `crates/slam-rs/tests/imu_oracle.rs`: `V.col(2)` carries an arbitrary sign,
-/// and in `f32` Eigen's SVD sometimes returns the *opposite* one. On the probe's
-/// `accel = (0.01, -0.005, -9.81)` in `f32`, Eigen's own answer misses `+Z` by
-/// 2.2e-3 rad while this port hits it to 1e-7. The disagreement is bounded by
-/// twice the deficit angle of the branch, `2·sqrt(2·dummy_precision)` — 0.0089 rad
-/// in `f32`, 8.9e-6 rad in `f64` — and only ever affects a rig that starts within
-/// that angle of upside down. Every `f64` case the probe covers agrees exactly.
+/// # An accepted deviation, not a fixed one
+///
+/// `V.col(2)` is a null vector, so its **sign is arbitrary**, and Eigen's
+/// `JacobiSVD` does not pick the same one the closed form does. Over the probe's
+/// 64-point near-antiparallel sweep the two disagree on the sign in 17 of 64
+/// `f64` cases and 37 of 64 `f32` cases, with no pattern in the inputs — the
+/// choice comes out of the SVD's internal ordering, not out of the data.
+///
+/// When the signs disagree the two rotations differ by twice the branch's
+/// deficit angle, bounded by `2·sqrt(2·dummy_precision)`: **2.83e-6 rad in
+/// `f64`, 8.94e-3 rad in `f32`**. Measured worst cases on the sweep are 9.9e-7
+/// and 9.8e-4, and the reviewer's own random inputs reached 2.3e-6 and 2.2e-3.
+/// It is *Eigen* that is the inaccurate side: over the sweep its own tilt error
+/// reaches 9.9e-7 (`f64`) and 9.9e-4 (`f32`) where the closed form stays at
+/// 1.4e-9 and 3.2e-4. That is still a parity gap against the C++ reference, and
+/// the port does not hide it: the branch logs a warning the first time it fires,
+/// and `crates/slam-rs/tests/imu_oracle.rs`
+/// (`gravity_init_deviation_from_eigen_stays_within_its_bound`) pins the bound
+/// and the measured numbers against Eigen's own.
+///
+/// Reproducing Eigen exactly needs its `JacobiSVD` for a 2x3 with
+/// `ComputeFullV`, which for `rows < cols` runs a `ColPivHouseholderQR`
+/// preconditioner on the adjoint before the two-sided Jacobi sweep
+/// (`Eigen/src/SVD/JacobiSVD.h:36-44`, `:194-253`) — several hundred lines of
+/// Householder, pivoting and sign conventions that would each have to be
+/// bit-exact. That was assessed and deliberately not attempted; the branch only
+/// fires when a rig initialises within milliradians of upside down, and it sets
+/// yaw plus a bounded fraction of a degree of roll and pitch that the estimator
+/// re-estimates immediately.
 ///
 /// Returns [`So3::identity`] for a zero or non-finite sample, which has no
 /// direction to align.
@@ -802,7 +827,15 @@ pub fn gravity_from_first_accel<S: LieScalar>(accel: &Vector3<S>) -> So3<S> {
     let dot: S = v1.dot(&v0); // `:695`
 
     if dot < c::<S>(-1.0) + S::eigen_dummy_precision() {
-        // `:707-717`
+        // `:707-717`. This is the branch that is not bit-parity with Eigen; say
+        // so once, so a trajectory that starts here is explainable later.
+        ANTIPARALLEL_WARNING.call_once(|| {
+            log::warn!(
+                "gravity initialisation took the near-antiparallel branch: the rig started \
+                 within milliradians of upside down, and the initial yaw and up to \
+                 2*sqrt(2*eps) rad of roll and pitch differ from basalt's Eigen JacobiSVD"
+            );
+        });
         let clamped: S = dot.max(c::<S>(-1.0)); // `:708`
         let axis: Vector3<S> = axis_orthogonal_to_both(&v0, &v1);
         let w2: S = (S::one() + clamped) * c::<S>(0.5); // `:714`
