@@ -14,8 +14,11 @@ path = "src/lib.rs"
 workspace = true
 
 [dependencies]
+kornia-image = { workspace = true }
+kornia-imgproc = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }
+rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -23,5 +26,3 @@ thiserror = { workspace = true }
 [dev-dependencies]
 approx = { workspace = true }
 proptest = { workspace = true }
-kornia-image = { workspace = true }
-kornia-imgproc = { workspace = true }

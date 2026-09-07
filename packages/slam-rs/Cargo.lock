@@ -815,6 +815,7 @@ dependencies = [
  "log",
  "nalgebra",
  "proptest",
+ "rayon",
  "serde",
  "serde_json",
  "thiserror",
