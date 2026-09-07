@@ -24,7 +24,7 @@ from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 from simplecv.rerun_log_utils import log_pinhole
-from simplecv.rig import SensorKind
+from simplecv.rig import CameraKind, PeerSensorKind
 
 from dataforge import schema
 from dataforge.video_encoding import (
@@ -303,12 +303,15 @@ def _log_scalar_channel(recording: rr.RecordingStream, entity_path: str, channel
     )
 
 
-def _log_sensor_node(recording: rr.RecordingStream, node: str, *, name: str, kind: SensorKind, **extra: object) -> None:
+def _log_sensor_node(recording: rr.RecordingStream, node: str, *, name: str, kind: PeerSensorKind, **extra: object) -> None:
     """Tag one non-camera peer sensor node with the static pair exoego:v2 §6 requires.
 
     The identity ``rig_T_sensor`` is **not** optional: a reader that cannot place
     a sensor's samples in the rig frame has to special-case the writer instead.
     ``**extra`` carries a sensor's own optional keys (the magnetometer's ``unit``).
+    ``kind`` is a ``PeerSensorKind`` and not the wider ``SensorKind``: this writer
+    logs no ``Pinhole``, so a camera word here would produce a camera node with
+    no calibration.
     """
     rr.log(node, IDENTITY_TRANSFORM, static=True, recording=recording)
     rr.log(node, rr.AnyValues(drop_untyped_nones=True, name=name, kind=kind, **extra), static=True, recording=recording)
@@ -321,9 +324,10 @@ def log_camera_node(
     camera: PinholeParameters | Fisheye62Parameters,
     *,
     name: str,
-    kind: SensorKind,
+    kind: CameraKind,
     image_plane_distance: float,
-    **extra: object,
+    camera_model: str | None = None,
+    distortion_valid_radius: float | None = None,
 ) -> None:
     """Tag one ``/world/rig_NN/cam_MM`` node and log its calibration under it.
 
@@ -332,21 +336,41 @@ def log_camera_node(
     unlabelled frustum, and one whose metadata lands without its calibration
     cannot be projected at all.
 
+    The optional keys are **named** rather than taken as ``**extra``: they are a
+    closed set that consumers read off the node, and a kwargs bag turns a
+    misspelt one into a silently different AnyValue key.
+
     Args:
         recording: Destination recording stream.
         rig: Rig index owning the camera.
         cam: Camera index within the rig.
         camera: The camera's simplecv parameters (intrinsics, distortion, ``rig_T_cam``).
         name: Human stream label (``"cam0"``, ``"left-eye"``, …).
-        kind: Content hint; ``"grayscale"`` or ``"rgb"`` for a camera.
+        kind: Image content; ``"grayscale"``, ``"rgb"`` or ``"depth"``.
         image_plane_distance: Frustum length in metres.
-        **extra: Optional per-camera keys (``camera_model``,
-            ``distortion_valid_radius``); a ``None`` value leaves its key off.
+        camera_model: Projection the coefficients belong to (``"kb4"``,
+            ``"pinhole-radtan8"``), so a consumer need not infer it from the
+            distortion component; ``None`` leaves the key off.
+        distortion_valid_radius: Normalized image radius past which the model
+            stops holding, for the models that declare one; ``None`` leaves the
+            key off, which is what a model without such a limit means.
     """
     # drop_untyped_nones is AnyValues' default, but it is stated because callers
-    # rely on it: a kb4 camera passes rpmax=None to mean "this model has no such
-    # radius", and the key must be absent rather than logged as an untyped null.
-    rr.log(schema.cam_path(rig, cam), rr.AnyValues(drop_untyped_nones=True, name=name, kind=kind, **extra), static=True, recording=recording)
+    # rely on it: a kb4 camera passes distortion_valid_radius=None to mean "this
+    # model has no such radius", and the key must be absent rather than logged as
+    # an untyped null.
+    rr.log(
+        schema.cam_path(rig, cam),
+        rr.AnyValues(
+            drop_untyped_nones=True,
+            name=name,
+            kind=kind,
+            camera_model=camera_model,
+            distortion_valid_radius=distortion_valid_radius,
+        ),
+        static=True,
+        recording=recording,
+    )
     log_pinhole(
         camera,
         cam_log_path=Path(schema.cam_path(rig, cam)),

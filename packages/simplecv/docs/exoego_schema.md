@@ -52,6 +52,11 @@ world_T_cam  = world_T_rig @ rig_T_cam           # composes along the entity tre
   `rig_T_cam`; the reference camera's is identity).
 - A **tracking dropout** is encoded as a **NaN** `world_T_rig` on the rig node for
   that frame; the whole rig — and every child frustum — disappears for the gap.
+  A source-side pose a writer *repaired* to identity is a different thing and must
+  not be emitted as one: it keeps its translation and stays visible, and the count
+  belongs in that layer's properties (dataforge's msd reports `num_sanitized`),
+  because "the source wrote a degenerate rotation here" and "there was no pose
+  here" are claims a consumer has to be able to tell apart.
 
 ## 3. Entity tree
 

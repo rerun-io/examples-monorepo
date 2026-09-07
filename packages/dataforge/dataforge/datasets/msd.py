@@ -12,40 +12,37 @@ and on the Reverb G2 / Odyssey+ a 50 Hz ``mag0/data.csv``. Where a stream also
 ships ``data.raw.csv`` / ``data.extra.csv`` siblings, the converter reads only
 ``data.csv``.
 
-**Raw is never kept.** The corpus is ~350 GB of PNG sequences, so ``discover()``
-enumerates the *remote* tree and ``convert()`` fetches exactly one sequence,
-streams its PNGs through the AV1 encoder, and deletes the archive again; what
-survives is the rrd. ``enforce_raw_budget`` caps the scratch directory so a batch
-run cannot silently fill the NVMe with leftovers from failed sequences.
+Four invariants hold across everything below, and every one of them is a thing
+this converter would break silently rather than loudly:
 
-**One dataset per device, two layers per sequence.** A catalog dataset holds one
-default blueprint, hence one camera layout, and the three headsets have two, four
-and two cameras — so ``--device`` picks the corpus *and* the catalog dataset
-(``msd-index``, ``msd-g2``, ``msd-odyssey``). Each sequence becomes a ``base`` rrd
-(video, IMU, magnetometer) and a ``gt`` rrd (``world_T_rig`` at the full ~1 kHz
-rate, plus its path and trail) under one recording id, so the catalog stacks them
-onto one segment. Both layers obey the rule stated in
-``packages/dataforge/README.md#the-layer-rule``.
+* **Raw is never kept.** The corpus is ~350 GB of PNG sequences, so ``discover``
+  enumerates the *remote* tree and ``convert`` fetches exactly one sequence,
+  streams its PNGs through the AV1 encoder, and deletes the archive again.
+  ``enforce_raw_budget`` caps the scratch directory so a batch run cannot fill
+  the NVMe with leftovers from failed sequences.
+* **One clock, no resampling.** Every csv timestamp is nanoseconds on one
+  monotonic device clock (values around 1e13, not a Unix epoch). ``video_time``
+  is that clock minus ``start_time_ns``, the earliest sample of any stream
+  *including* ``gt``, because the two layers must share an origin.
+* **The rig frame is the IMU frame.** ``rig_T_cam`` is basalt's ``T_imu_cam`` with
+  no inversion, and the rig node states ``reference = "imu_00"``.
+* **Two per-device claims are not in the corpus** — the world up axis and the
+  follow frame. ``MSD_DEVICES`` holds both; ``convert`` re-checks each against
+  the sequence in front of it and *warns*, because every rrd of a device must
+  agree and one disagreeing is news rather than a reason to reorient it alone.
 
-**Clocks.** Every csv timestamp is nanoseconds on one monotonic device clock
-(values around 1e13, not a Unix epoch). ``video_time`` is that clock minus ``t0``,
-the earliest sample of any stream *including* ``gt`` — the two layers must share
-this origin, and the gt file is usually the earliest stream. Nothing is resampled.
+Each sequence becomes a ``base`` rrd (video, IMU, magnetometer), a ``gt`` rrd
+(``world_T_rig`` at the full ~1 kHz rate, plus its path and trail) and a
+``gt.csv`` sidecar, all under one recording id, following the rule in
+``packages/dataforge/README.md#the-layer-rule``. ``--device`` picks the corpus
+*and* the catalog dataset (``msd-index``, ``msd-g2``, ``msd-odyssey``).
 
-**Per-device claims.** The world up axis and the follow frame are not in the
-corpus; they are measured and derived from real sequences and then written down
-per device. ``MSD_DEVICES`` states both, and why; ``convert`` re-checks both
-against the sequence in front of it and warns on a disagreement rather than
-silently reorienting one rrd.
-
-**Frames.** ``rig_T_cam`` comes from basalt's ``T_imu_cam``, the camera pose in
-the IMU frame; the rig frame *is* the IMU frame (``reference = "imu_00"``).
-
-Three modules hold what is not MSD-specific: ``dataforge.archives`` reads members
-out of a plain zip or an Info-ZIP volume set, ``dataforge.basalt`` validates the
-calibration, and ``dataforge.euroc`` decodes the csv streams. What is left here
-is the device table, the world-up measurement its claims rest on, and the two
-layers.
+What was measured, what it answered, and why each format decision went the way
+it did is in ``packages/dataforge/docs/msd.md``. Three modules hold what is not
+MSD-specific: ``dataforge.archives`` reads archive members,
+``dataforge.basalt`` validates the calibration, and ``dataforge.euroc`` decodes
+the csv streams. What is left here is the device table, the world-up measurement
+its claims rest on, and the two layers.
 """
 
 from __future__ import annotations
@@ -256,25 +253,18 @@ MSD_DEVICES: dict[MsdDeviceChoice, MsdDevice] = {
 }
 """The three headsets MSD covers, keyed by the ``--device`` literal.
 
-Two of each device's fields are claims about data rather than facts read out of
-the corpus, and this is where both are settled.
+``world_up`` and ``follow`` are claims about data rather than facts read out of
+the corpus, and this is where both are settled. Each device's comment above
+records what its own answer came from; the evidence behind all three, and why the
+baseline and not image-up fixes the follow frame, is in
+``packages/dataforge/docs/msd.md``.
 
-**The world up axis.** MSD documents none: the Index's ground truth comes from
-SteamVR Lighthouse and the G2's and Odyssey+'s from an undocumented MoCap rig.
-Gravity settles it — ``measured_world_up`` rotates the first seconds of
-accelerometer samples into the world with the ground truth's own orientation and
-averages, and an accelerometer at rest reads +g pointing *up*. All three headsets
-measure ``+y`` on their ``*09_short_1_updown`` sequence, at 0.96, 0.98 and 0.93
-of |g|, so all three state ``RIGHT_HAND_Y_UP`` at the root of their gt layer.
-
-**The follow frame.** ``follow_frame`` reads it out of the device's own
-``calibration.json``, but the constants are written down here instead of being
-derived at use: ``register`` builds a device's default blueprint from the
-registry alone, with no sequence and no calibration on disk, so the eye has to be
-placeable without one.
-
-Both are re-checked every ``convert`` (see ``warn_on_device_claims``), which
-warns rather than reorienting or re-aiming a single rrd out of step with the rest.
+They are written down here rather than derived at use because ``register`` builds
+a device's default blueprint from the registry alone — no sequence, no
+calibration on disk — so the eye and the world axes have to be placeable without
+either. ``warn_on_follow_frame`` and ``warn_on_world_up`` re-check them per
+sequence and warn rather than re-aiming or reorienting a single rrd out of step
+with the rest.
 """
 
 

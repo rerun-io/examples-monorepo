@@ -124,42 +124,15 @@ archives alone exceed the cap — the Index and G2 long sessions, at 66 and 55 G
 are still a hard error naming the files to delete. `--keep-raw` keeps the
 archive and the encoded mp4s for debugging.
 
-Three sequences ship as Info-ZIP multi-volume sets (`.z01 … .zip`) — the
-`*_long_session` archives of all three headsets — which Python's `zipfile`
-cannot read; those go through the `7zz` CLI (the conda-forge `7zip` package),
-one camera directory extracted at a time.
+Three of the corpus's sequences ship as Info-ZIP multi-volume sets
+(`.z01 … .zip`), which Python's `zipfile` cannot read; those go through the `7zz`
+CLI (the conda-forge `7zip` package), one camera directory extracted at a time.
 
-`video_time` is the device clock minus `t0`, and `t0` is the earliest sample of
-**any** stream including `gt` — the two layers must share the origin, and the gt
-file is usually the earliest stream. Camera extrinsics come from the device's
-basalt `calibration.json`, whose `T_imu_cam` is the camera pose in the IMU
-frame; the rig frame *is* that frame, so the rig node states
-`reference = "imu_00"`.
-
-MSD documents no world axes: the Index's ground truth comes from SteamVR
-Lighthouse and the G2's and Odyssey+'s from an undocumented MoCap rig. The up
-axis is therefore **measured** — `measured_world_up` rotates the first two
-seconds of accelerometer samples into the world with the ground truth's own
-orientation and averages, since an accelerometer at rest reads +g pointing up —
-and then fixed per device in `MSD_DEVICES`, so every rrd of a device carries the
-same root `ViewCoordinates`. Every convert re-measures its own sequence, records
-the result in the gt properties (`measured_up`, `measured_up_fraction`), and
-warns when it disagrees with the declared axis instead of reorienting one rrd on
-its own. All three headsets measure **+y** on their `*09_short_1_updown`
-sequence — 0.96, 0.98 and 0.93 of |g| for the Index, G2 and Odyssey+ — so all
-three state `RIGHT_HAND_Y_UP` (`RUB`) at the root. A `gt` row whose quaternion is
-not unit-norm is a tracking dropout: its
-rotation becomes identity so the chain keeps working for later frames, and the
-count lands in the properties as `num_sanitized`.
-
-The Follow view's eye is derived rather than hand-placed: `follow_frame` reads
-the front camera pair out of the same `calibration.json` — their mean optical
-axis is the headset's forward, and their stereo baseline crossed with it is the
-wearer's up — and each device's answer is fixed in `MSD_DEVICES` as its `follow`
-frame, so the chase camera sits behind and above every headset with a level
-horizon. Up comes from the baseline and not from image-up because the G2 mounts
-all four of its cameras rolled a quarter turn. Every convert re-derives the frame
-and warns past 5°, as it does for the world up axis.
+Two of a device's claims are **not** in the corpus — its world up axis and its
+follow frame — so both are measured or derived, written down in `MSD_DEVICES`,
+and re-checked with a warning on every convert. The evidence, the per-device
+answers, and the format decisions behind the clock, the camera models and the
+ground-truth repair are in **[docs/msd.md](docs/msd.md)**.
 
 ### Environment variables
 
