@@ -766,6 +766,189 @@ mod tests {
         }
     }
 
+    /// One camera's raster, as read from a PGM.
+    struct Raster {
+        width: usize,
+        height: usize,
+        pixels: Vec<u8>,
+    }
+
+    /// One frameset from disk: its timestamp and one raster per camera.
+    struct Frameset {
+        t_ns: i64,
+        cameras: Vec<Raster>,
+    }
+
+    /// The three committed framesets, as `ImageView` wants them.
+    ///
+    /// The whole pipeline needs real pixels: `Vio::track` runs the KLT before
+    /// the estimator sees anything, and a constant frame detects no corners.
+    /// Three is what `tests/fixtures/flow/frames/` carries, so this cannot
+    /// reach `opt_started` (five states) — `tests/vio_parity.rs` is the gate
+    /// that does, on the uncommitted sixty.
+    fn committed_framesets() -> Vec<Frameset> {
+        let directory: std::path::PathBuf =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/flow/frames");
+        [0i64, 18_507_000, 37_012_000]
+            .into_iter()
+            .enumerate()
+            .map(|(frame, t_ns)| Frameset {
+                t_ns,
+                cameras: (0..2)
+                    .map(|camera| {
+                        let bytes: Vec<u8> = std::fs::read(
+                            directory.join(format!("frame_{frame:03}_cam{camera}.pgm")),
+                        )
+                        .unwrap();
+                        // "P5\n<w> <h>\n255\n" then the raster.
+                        let header: usize = bytes
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, byte)| byte.is_ascii_whitespace())
+                            .nth(3)
+                            .map(|(index, _)| index + 1)
+                            .unwrap();
+                        let mut fields = std::str::from_utf8(&bytes[2..header])
+                            .unwrap()
+                            .split_ascii_whitespace();
+                        Raster {
+                            width: fields.next().unwrap().parse().unwrap(),
+                            height: fields.next().unwrap().parse().unwrap(),
+                            pixels: bytes[header..].to_vec(),
+                        }
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    fn pipeline() -> Vio<f32> {
+        let directory: std::path::PathBuf =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let config: config::VioConfig = config::VioConfig::from_json_str(
+            &std::fs::read_to_string(directory.join("msdmi_config.json")).unwrap(),
+        )
+        .unwrap();
+        let calibration: calib::Calibration<f64> = calib::Calibration::from_json_str(
+            &std::fs::read_to_string(directory.join("msdmi_calib.json")).unwrap(),
+        )
+        .unwrap();
+        Vio::new(
+            config,
+            calibration,
+            frontend::flow::FrontendOptions {
+                threads: 1,
+                ..frontend::flow::FrontendOptions::default()
+            },
+        )
+        .unwrap()
+    }
+
+    /// Drive the pipeline over the committed framesets and return what each
+    /// `track` reported.
+    fn drive(vio: &mut Vio<f32>, framesets: &[Frameset]) -> Vec<VioResult> {
+        let directory: std::path::PathBuf =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let text: String = std::fs::read_to_string(directory.join("vio/imu.json")).unwrap();
+        let imu: serde_json::Value = serde_json::from_str(&text).unwrap();
+        for row in imu["imu"].as_array().unwrap() {
+            let t_ns: i64 = row["t_ns"].as_i64().unwrap();
+            if t_ns > 40_000_000 {
+                break;
+            }
+            let read = |key: &str| -> [f64; 3] {
+                let v = row[key].as_array().unwrap();
+                [
+                    v[0].as_f64().unwrap(),
+                    v[1].as_f64().unwrap(),
+                    v[2].as_f64().unwrap(),
+                ]
+            };
+            vio.push_imu(t_ns, read("gyro"), read("accel")).unwrap();
+        }
+        framesets
+            .iter()
+            .map(|frameset| {
+                let views: Vec<ImageView<'_>> = frameset
+                    .cameras
+                    .iter()
+                    .map(|raster| ImageView {
+                        width: raster.width,
+                        height: raster.height,
+                        stride: raster.width,
+                        data: &raster.pixels,
+                    })
+                    .collect();
+                vio.track(frameset.t_ns, &views).unwrap()
+            })
+            .collect()
+    }
+
+    /// The frontend and the estimator are wired together, and a repeat run is
+    /// bit-identical (D17) — `tests/vio_oracle.rs`'s determinism gate replays
+    /// the C++'s keypoints, so it cannot see the frontend.
+    ///
+    /// Ignored by default: three framesets of 960x960 KLT twice over is 15 s
+    /// and the Rust suite's budget is 15 s in total. Run it with
+    /// `cargo test -p slam-rs --lib -- --ignored`.
+    #[test]
+    #[ignore = "15 s of 960x960 KLT; run with --ignored"]
+    fn the_whole_pipeline_tracks_and_repeats_bit_identically() {
+        let framesets = committed_framesets();
+        let mut vio: Vio<f32> = pipeline();
+        let results: Vec<VioResult> = drive(&mut vio, &framesets);
+
+        assert_eq!(
+            results.iter().map(|r| r.status).collect::<Vec<VioStatus>>(),
+            vec![VioStatus::Tracking; 3]
+        );
+        assert_eq!(
+            results.iter().map(|r| r.t_ns).collect::<Vec<i64>>(),
+            vec![0, 18_507_000, 37_012_000]
+        );
+        assert_eq!(vio.estimator().ba.frame_states.len(), 3);
+        assert_eq!(vio.estimator().last_state_t_ns(), 37_012_000);
+        // The first frameset is always a keyframe (`sqrt_keypoint_vio.cpp:61`)
+        // and three framesets cannot reach `opt_started` (`:1207`).
+        assert_eq!(vio.estimator().kf_ids().collect::<Vec<i64>>(), vec![0]);
+        assert!(!vio.estimator().optimization_started());
+        assert!(
+            vio.last_stats()
+                .is_some_and(|stats| stats.num_landmarks > 0)
+        );
+
+        assert_eq!(drive(&mut pipeline(), &framesets), results);
+    }
+
+    /// `vio_enforce_realtime` drops framesets, which Offline mode cannot do
+    /// without letting arrival order reach a decision, so it is refused at
+    /// construction rather than silently ignored.
+    #[test]
+    fn realtime_frame_dropping_is_refused() {
+        let directory: std::path::PathBuf =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let mut config: config::VioConfig = config::VioConfig::from_json_str(
+            &std::fs::read_to_string(directory.join("msdmi_config.json")).unwrap(),
+        )
+        .unwrap();
+        config.vio_enforce_realtime = true;
+        let calibration: calib::Calibration<f64> = calib::Calibration::from_json_str(
+            &std::fs::read_to_string(directory.join("msdmi_calib.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            Vio::<f32>::new(
+                config,
+                calibration,
+                frontend::flow::FrontendOptions::default()
+            )
+            .err(),
+            Some(VioError::Estimator(
+                estimator::EstimatorError::EnforceRealtime
+            ))
+        );
+    }
+
     #[test]
     fn version_is_the_crate_version() {
         assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));

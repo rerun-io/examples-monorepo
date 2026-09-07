@@ -32,8 +32,8 @@
 //! difference in metres and the rotation difference in degrees, both absolute,
 //! plus the distance travelled so the numbers can be read in context. The
 //! estimator runs `f32`, the precision basalt ships (Q07). On the smoke segment
-//! all 60 framesets reach `Tracking` and the worst differences are 6.17e-4 m
-//! and 0.218° over 1.49 cm of travel — the segment is a panorama, so the
+//! all 60 framesets reach `Tracking` and the worst differences are 6.14e-4 m
+//! and 0.219° over 1.49 cm of travel — the segment is a panorama, so the
 //! rotation is the number with meaning.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -50,14 +50,14 @@ use slam_rs::{ImageView, Vio, VioStatus};
 
 /// How far the port's rig position may sit from basalt's, in metres.
 ///
-/// Measured over the 60 framesets: worst 6.17e-4 m. The segment is a panorama —
+/// Measured over the 60 framesets: worst 6.14e-4 m. The segment is a panorama —
 /// 1.49 cm of translation over 1.09 s — so this is not a drift ratio, it is how
 /// far two nearly-stationary trajectories part; five times the measurement.
 const POSITION_TOLERANCE_M: f64 = 3e-3;
 
 /// How far the port's rig orientation may sit from basalt's, in degrees.
 ///
-/// Measured worst: 0.218°, and on a panorama this is the number that matters.
+/// Measured worst: 0.219°, and on a panorama this is the number that matters.
 /// It is two orders above the backend-only gate's 8.4e-5 relative rotation
 /// because the two frontends pick different corners (D45) and a different
 /// keypoint set gives a different set of triangulated landmarks; four times

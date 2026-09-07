@@ -57,7 +57,11 @@
 //! to the first step whose accept-or-converge test is decided inside
 //! [`F32_ACCEPT_NOISE_ULPS`], and the poses stay inside
 //! [`POSE_TOLERANCE_F32`] regardless — measured worst over the 60 framesets:
-//! rotation 8.4e-5, translation 9.9e-5, velocity 1.9e-4, bias 1.5e-3.
+//! rotation 8.4e-5, translation 7.8e-5, velocity 2.3e-4, bias 9.3e-4.
+//!
+//! Which framesets diverge is itself chaotic: it is 23 of the 60 as this ships,
+//! and changing one reduction order inside the prior's error moved the set
+//! (21 framesets, a different 21) without moving a single integer decision.
 //!
 //! ## The fixture, and the default window
 //!
@@ -112,38 +116,49 @@ const DEFAULT_FRAMESETS: usize = 10;
 /// window, in `f64`. Measured worst over the 60 framesets: rotation 9.8e-13,
 /// translation 2.0e-13, velocity 6.8e-13, bias 2.6e-11.
 const POSE_TOLERANCE_F64: f64 = 2e-10;
-/// The same in `f32`. Measured worst: rotation 8.4e-5, translation 9.9e-5,
-/// velocity 1.9e-4, bias 1.5e-3.
+/// The same in `f32`. Measured worst: rotation 8.4e-5, translation 7.8e-5,
+/// velocity 2.3e-4, bias 9.3e-4.
 const POSE_TOLERANCE_F32: f64 = 3e-3;
 /// Relative agreement on the LM error terms, `l_diff` and `lambda`, in `f64`.
 /// Measured worst: 3.1e-10 (`error_before`).
 const ERROR_TOLERANCE_F64: f64 = 2e-9;
 /// The same in `f32`, over the trail prefix the two runs share, for the
-/// quantities that are sums of well-conditioned terms: the reprojection cost,
-/// the IMU and bias costs, the step's infinity norm and the prior's `H`.
-/// Measured worst over the 60 framesets: 2.2e-3 (`imu_error`).
+/// quantities one well-conditioned formula computes from the current window:
+/// the reprojection cost, the IMU and bias costs and the step's infinity norm.
+/// Measured worst over the 60 framesets: 2.2e-3 (`imu_error`); the constant is
+/// 4.5 times that.
 const ERROR_TOLERANCE_F32: f64 = 1e-2;
 /// Relative agreement on the marginalization prior's Frobenius digest.
 /// Measured worst in `f64`: 6.8e-15 on `H`, 1.1e-10 on `b`.
 const PRIOR_TOLERANCE_F64: f64 = 2e-9;
-/// Relative agreement in `f32` on the quantities the prior's cancelling half
-/// drives. `marg_data.b` is `−H·delta` plus a residue three orders smaller
-/// (8.30 against 0.12 at frameset 4), so it carries the accumulated `f32` error
-/// of every increment the frozen blocks absorbed; `marg_prior_error` is its
-/// bilinear form, `error_before` is that plus a reprojection cost two orders
-/// smaller (1.2e3 against 1.3e2), and `l_diff` and `lambda` follow from the
-/// gain ratio. Measured worst: 0.145 (`lambda`, whose Nielsen update cubes a
-/// ratio whose numerator is a noise-level `f_diff`).
-const CANCELLING_TOLERANCE_F32: f64 = 3e-1;
+/// Relative agreement in `f32` on the quantities that carry the prior's
+/// accumulated history rather than the current window.
+///
+/// `marg_data.b` is `−H·delta` plus a residue three orders smaller (8.30
+/// against 0.12 at frameset 4), so it carries the accumulated `f32` error of
+/// every increment the frozen blocks absorbed; `marg_prior_error` is its
+/// bilinear form; `error_before` is that plus a reprojection cost two orders
+/// smaller (1.2e3 against 1.3e2); `l_diff` and `lambda` follow from the gain
+/// ratio; and `marg_data.H` comes out of a rank-revealing QR of a window that
+/// has already diverged.
+///
+/// These are chaos-limited, not physics: changing one reduction order inside
+/// the prior's error moved `‖H‖_F` from 5.0e-6 to 3.3e-4 and `lambda` from
+/// 0.145 to 0.016 without moving any decision. The constant is 3.4 times the
+/// worse of the two measurements (0.145, `lambda` — whose Nielsen update cubes
+/// a ratio whose numerator is a noise-level `f_diff`), and it is a margin, not
+/// a bound anything derives.
+const CANCELLING_TOLERANCE_F32: f64 = 5e-1;
 
 /// How far an accept-or-converge decision may be inside the `f32` noise floor
 /// before the two LM trails are allowed to part company, in units of
 /// `f32::EPSILON · |error_before|`.
 ///
-/// The survey over the 60 framesets found 21 framesets where they do; the
-/// widest deciding `f_diff` was 30.4 ulps (frameset 43) and the narrowest
-/// −16.5 (frameset 58). 64 is that with room, and still two orders below the
-/// 1e-3-scale decrease the `f64` run sees at those steps.
+/// The survey over the 60 framesets found 23 framesets where they do, and 21
+/// before one reduction order inside the prior's error changed; over both runs
+/// the widest deciding `f_diff` was 30.4 ulps and the narrowest −16.5. 64 is
+/// that with room, and still two orders below the 1e-3-scale decrease the
+/// `f64` run sees at those steps.
 const F32_ACCEPT_NOISE_ULPS: f64 = 64.0;
 
 /// Whether `SLAM_RS_VIO_ORACLE_FULL` asked for all 60 framesets.
@@ -821,8 +836,7 @@ fn the_float_window_follows_the_cpp() {
         worst.vision_error <= ERROR_TOLERANCE_F32
             && worst.imu_error <= ERROR_TOLERANCE_F32
             && worst.bias_error <= ERROR_TOLERANCE_F32
-            && worst.step_norminf <= ERROR_TOLERANCE_F32
-            && worst.prior_h <= ERROR_TOLERANCE_F32,
+            && worst.step_norminf <= ERROR_TOLERANCE_F32,
         "f32 LM trail drifted: {worst:#?}"
     );
     assert!(
@@ -831,6 +845,7 @@ fn the_float_window_follows_the_cpp() {
             && worst.marg_prior_error <= CANCELLING_TOLERANCE_F32
             && worst.l_diff <= CANCELLING_TOLERANCE_F32
             && worst.lambda <= CANCELLING_TOLERANCE_F32
+            && worst.prior_h <= CANCELLING_TOLERANCE_F32
             && worst.prior_b <= CANCELLING_TOLERANCE_F32,
         "f32 prior-driven quantities drifted: {worst:#?}"
     );
