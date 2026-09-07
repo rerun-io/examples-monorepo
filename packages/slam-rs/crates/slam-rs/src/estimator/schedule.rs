@@ -494,6 +494,8 @@ fn eigen_norm3<S: LieScalar>(v: &Vector3<S>) -> S {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use nalgebra::Vector3;
 
     use super::*;
