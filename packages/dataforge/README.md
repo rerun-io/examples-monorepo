@@ -172,7 +172,8 @@ magnetometer and pose-track writers), `video_encoding.py` (the pipe-fed AV1
 encoder, re-exported through `logging_toolkit`), `blueprints.py` (the
 single-rig viewer layout robocap and msd both build from), `archives.py` (reading
 members out of a plain zip or an Info-ZIP volume set), `basalt.py` (basalt's
-`calibration.json`: camera models, extrinsics, and the follow frame), and
+`calibration.json` as one validated `CalibratedCamera` per camera: model,
+extrinsics, resolution, and the follow frame derived from them), and
 `transports.py` (`local_verify` and `hf_fetch`).
 
 Two of those carry their weight for datasets that do not ship video.

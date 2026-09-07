@@ -25,6 +25,28 @@ from dataforge.video_encoding import require_av1_nvenc, resolve_ffmpeg
 NOISE_CEILING: int = 96
 """Upper bound of the per-pixel noise, low enough that gradient + noise cannot wrap."""
 
+FIXTURES: Path = Path(__file__).parent / "fixtures"
+"""Checked-in binaries and real upstream files; ``fixtures/README.md`` says where each came from."""
+
+
+def calibration_fixture(device: str) -> Path:
+    """One MSD device's **real** ``calibration.json``, copied verbatim from upstream.
+
+    Shared because two modules need the same three files for opposite reasons:
+    ``test_basalt`` asserts what the format holds, and ``test_msd`` builds its
+    synthetic sequence's calibration out of the real one rather than out of the
+    device constant it is checking.
+
+    Args:
+        device: ``"index"``, ``"g2"`` or ``"odyssey"``.
+
+    Returns:
+        The fixture path; missing means the copy was not checked in.
+    """
+    path: Path = FIXTURES / "msd" / f"{device}-calibration.json"
+    assert path.is_file(), f"{path} is checked in; see tests/fixtures/README.md"
+    return path
+
 
 @pytest.fixture(scope="session")
 def nvenc_ffmpeg() -> Path:

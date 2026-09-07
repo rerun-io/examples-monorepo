@@ -59,14 +59,13 @@ from typing import ClassVar, Literal, TypeAlias
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-import serde.json
 from huggingface_hub import HfApi, RepoFile
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 
 from dataforge import blueprints, paths, schema, transports, writing
 from dataforge.archives import MemberReader, group_archives, open_member_reader
-from dataforge.basalt import BasaltCalibration, BasaltCamera, FollowFrame, camera_parameters, follow_frame
+from dataforge.basalt import CalibratedCamera, FollowFrame, camera_parameters, follow_frame, load_calibration
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.euroc import (
     GT_VALUE_COLUMNS,
@@ -399,6 +398,23 @@ class SequencePaths:
 
 
 @dataclass(frozen=True, slots=True)
+class EncodedCamera:
+    """One camera of one sequence: its calibration, its frame clock, and its clip.
+
+    The three travel together because the base layer writes them together and a
+    camera missing any one of them cannot be logged at all — as three parallel
+    tuples they could go out of step between the encode and the write.
+    """
+
+    calibration: CalibratedCamera
+    """This camera's validated record out of the device's ``calibration.json``."""
+    times_ns: Int64[ndarray, "n_samples"]
+    """Frame times on the zero-based ``video_time`` clock, one per sample in ``clip``."""
+    clip: Path
+    """The mp4 this camera's PNGs were encoded into."""
+
+
+@dataclass(frozen=True, slots=True)
 class SequenceStreams:
     """Everything one archive read yields; both layers are written from it and nothing else.
 
@@ -407,10 +423,8 @@ class SequenceStreams:
     and the shift is a property of the sequence, not of either layer.
     """
 
-    camera_times_ns: tuple[Int64[ndarray, "n_samples"], ...]
-    """Frame times per camera, in ``cam0``…``camN`` order."""
-    clips: tuple[Path, ...]
-    """The encoded mp4 of each camera, in the same order."""
+    cameras: tuple[EncodedCamera, ...]
+    """Every camera, in ``cam0``…``camN`` order, with its clock and its clip."""
     gyro: ImuChannel
     """Angular velocity in rad/s."""
     accel: ImuChannel
@@ -427,7 +441,7 @@ class SequenceStreams:
     @property
     def num_frames(self) -> int:
         """Longest per-camera sample count, which is what the capture properties report."""
-        return max(times_ns.size for times_ns in self.camera_times_ns)
+        return max(camera.times_ns.size for camera in self.cameras)
 
 
 class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
@@ -496,12 +510,18 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         transports.hf_fetch(REPO_ID, allow_patterns=[self.calibration_path], local_dir=self.config.root, revision=self.config.revision)
         return self.config.root / self.calibration_path
 
-    def calibration(self) -> BasaltCalibration:
-        """Load the device calibration, fetching it if ``download`` was skipped."""
+    def calibration(self) -> tuple[CalibratedCamera, ...]:
+        """Load and validate the device calibration, fetching it if ``download`` was skipped.
+
+        The camera count is checked against the device table here rather than at
+        each use: a file that lists a different number of cameras is the wrong
+        file or a corpus change, and either way the per-camera loop below would
+        otherwise walk off the end of one list or quietly ignore a camera.
+        """
         local_path: Path = self.config.root / self.calibration_path
         if not local_path.is_file():
             local_path = self.fetch_calibration()
-        return serde.json.from_json(BasaltCalibration, local_path.read_text())
+        return load_calibration(local_path, expected_cameras=self.device.num_cameras)
 
     def download(self) -> None:
         """Fetch the calibration, prove the machine can encode, and print the plan.
@@ -619,7 +639,7 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         # Both hub lookups happen before the archives are pulled and long before a
         # frame is encoded: neither a bad calibration nor a transient revision
         # lookup may throw away a multi-gigabyte download and an hour of encoding.
-        calibration: BasaltCalibration = self.calibration()
+        cameras: tuple[CalibratedCamera, ...] = self.calibration()
         _ = self.revision
 
         on_disk: int = sum(1 for archive in locations.archives if archive.is_file())
@@ -630,10 +650,10 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         locations.work_dir.mkdir(parents=True, exist_ok=True)
         try:
             with open_member_reader(locations.archives, locations.work_dir) as reader:
-                streams: SequenceStreams = self.read_sequence(reader, source, work_dir=locations.work_dir)
+                streams: SequenceStreams = self.read_sequence(reader, source, cameras, work_dir=locations.work_dir)
             measured: MeasuredUp = measured_world_up(streams.gt, streams.accel)
-            self.warn_on_device_claims(source, calibration=calibration, measured=measured)
-            self.write_base_layer(identity, source, streams, locations.target, calibration=calibration)
+            self.warn_on_device_claims(source, cameras=cameras, measured=measured)
+            self.write_base_layer(identity, source, streams, locations.target)
             self.write_gt_layer(identity, streams, locations.gt_target, measured=measured)
         except BaseException:
             paths.remove_tree(locations.work_dir)
@@ -654,7 +674,9 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         )
         return locations.target
 
-    def read_sequence(self, reader: MemberReader, source: MsdSource, *, work_dir: Path) -> SequenceStreams:
+    def read_sequence(
+        self, reader: MemberReader, source: MsdSource, cameras: Sequence[CalibratedCamera], *, work_dir: Path
+    ) -> SequenceStreams:
         """Read every csv and encode every camera: the whole archive, in one pass.
 
         The csvs come first so a sequence that is missing a stream fails before
@@ -665,6 +687,8 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         Args:
             reader: Open reader over the sequence's archive volume(s).
             source: The discovered sequence, whose stem is the archive's top directory.
+            cameras: The device's validated calibration records, one per camera;
+                each is carried into the ``EncodedCamera`` beside its own clip.
             work_dir: Scratch directory the encoded mp4s are written into.
 
         Raises:
@@ -698,8 +722,8 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         # Deliberately not bounded by gt: duration_ns describes the *sensor* layer.
         duration_ns: int = max(int(times_ns[-1]) for times_ns in sensor_times_ns) - start_time_ns
 
-        clips: list[Path] = []
-        for index, (rows, times_ns) in enumerate(zip(camera_rows, camera_times_ns, strict=True)):
+        encoded: list[EncodedCamera] = []
+        for index, (calibration, rows, times_ns) in enumerate(zip(cameras, camera_rows, camera_times_ns, strict=True)):
             clip: Path = work_dir / f"cam{index}.mp4"
             encode_frames_to_mp4(
                 reader.png_frames([f"{mav0}/cam{index}/data/{row.filename}" for row in rows]),
@@ -707,12 +731,11 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
                 source=FrameSource("png"),
                 fps=nominal_fps(times_ns),
             )
-            clips.append(clip)
+            encoded.append(EncodedCamera(calibration=calibration, times_ns=times_ns - start_time_ns, clip=clip))
 
         inertial_times_ns: Int64[ndarray, "n_samples"] = inertial.times_ns - start_time_ns
         return SequenceStreams(
-            camera_times_ns=tuple(times_ns - start_time_ns for times_ns in camera_times_ns),
-            clips=tuple(clips),
+            cameras=tuple(encoded),
             gyro=ImuChannel(times_ns=inertial_times_ns, values_xyz=inertial.values[:, :3]),
             accel=ImuChannel(times_ns=inertial_times_ns, values_xyz=inertial.values[:, 3:6]),
             magnetometer=(
@@ -723,7 +746,7 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
             duration_ns=duration_ns,
         )
 
-    def warn_on_device_claims(self, source: MsdSource, *, calibration: BasaltCalibration, measured: MeasuredUp) -> None:
+    def warn_on_device_claims(self, source: MsdSource, *, cameras: Sequence[CalibratedCamera], measured: MeasuredUp) -> None:
         """Re-check both per-device claims against this sequence and say so on a disagreement.
 
         Neither claim is re-applied: every rrd of a device must carry the same
@@ -732,7 +755,7 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         """
         # The declared axes are rounded to three decimals and so are a hair short of
         # unit length; dividing by the norms keeps that rounding out of the angles.
-        derived: FollowFrame = follow_frame(calibration)
+        derived: FollowFrame = follow_frame(cameras)
         declared_axes: Float64[ndarray, "2 3"] = np.array([self.device.follow.forward, self.device.follow.up], dtype=np.float64)
         derived_axes: Float64[ndarray, "2 3"] = np.array([derived.forward, derived.up], dtype=np.float64)
         cosines: Float64[ndarray, "2"] = np.einsum("ij,ij->i", declared_axes, derived_axes) / np.linalg.norm(declared_axes, axis=1)
@@ -749,9 +772,7 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
                 f"measured {measured.axis} carrying {measured.fraction:.2f} of |g|; the rrd still states the declared axis"
             )
 
-    def write_base_layer(
-        self, identity: SequenceIdentity, source: MsdSource, streams: SequenceStreams, target: Path, *, calibration: BasaltCalibration
-    ) -> int:
+    def write_base_layer(self, identity: SequenceIdentity, source: MsdSource, streams: SequenceStreams, target: Path) -> int:
         """Write the sensor layer: every camera's video, the IMU, the magnetometer.
 
         Returns:
@@ -761,23 +782,23 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
             # Deliberately NO ViewCoordinates at "/": the gt layer owns the root
             # ViewCoordinates, because it is what establishes a world frame at all.
             log_rig_node(recording, RIG, reference=RIG_REFERENCE, num_cameras=self.device.num_cameras, name=self.device.label, kind="ego")
-            for index, (clip, times_ns) in enumerate(zip(streams.clips, streams.camera_times_ns, strict=True)):
+            for camera in streams.cameras:
+                index: int = camera.calibration.index
                 # The model tag saves a consumer from inferring the projection from the
-                # distortion component. ``rpmax`` is radtan8's own key, so it is already
-                # None on a kb4 camera and AnyValues leaves the key off entirely.
-                basalt_camera: BasaltCamera = calibration.value0.intrinsics[index]
+                # distortion component. ``rpmax`` is radtan8's own key, so the record
+                # already reports None on a kb4 camera and AnyValues leaves the key off.
                 log_camera_node(
                     recording,
                     RIG,
                     index,
-                    camera_parameters(calibration, index, name=f"cam{index}"),
+                    camera_parameters(camera.calibration, name=f"cam{index}"),
                     name=f"cam{index}",
                     kind="grayscale",
                     image_plane_distance=IMAGE_PLANE_DISTANCE,
-                    camera_model=basalt_camera.camera_type,
-                    distortion_valid_radius=basalt_camera.intrinsics.rpmax,
+                    camera_model=camera.calibration.camera_model,
+                    distortion_valid_radius=camera.calibration.distortion_valid_radius,
                 )
-                log_video_stream(recording, clip, schema.video_path(RIG, index), times_ns=times_ns)
+                log_video_stream(recording, camera.clip, schema.video_path(RIG, index), times_ns=camera.times_ns)
             log_imu(recording, RIG, IMU, gyro=streams.gyro, accel=streams.accel, name="imu0")
             if streams.magnetometer is not None:
                 log_magnetometer(recording, RIG, MAG, field=streams.magnetometer, name="mag0")

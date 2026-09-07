@@ -10,7 +10,6 @@ only the transport is faked. What is not MSD-specific is tested next door:
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 from collections.abc import Iterator, Sequence
@@ -22,14 +21,13 @@ import pyarrow as pa
 import pytest
 import rerun as rr
 import rerun.blueprint as rrb
-import serde.json
-from conftest import column_rows, png_frame, read_back
+from conftest import calibration_fixture, column_rows, png_frame, read_back
 from jaxtyping import Float64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
 from dataforge import paths, schema, transports
-from dataforge.basalt import BasaltCalibration, BasaltPose, FollowFrame
+from dataforge.basalt import BasaltPose, CalibratedCamera, FollowFrame, follow_frame, load_calibration
 from dataforge.datasets import msd
 from dataforge.datasets.msd import (
     MSD_DEVICES,
@@ -284,63 +282,13 @@ class FakeHub:
     """The sequence's archive volume(s), as they land under ``root``."""
 
 
-FIXTURE_CAMERA_YAW_DEG: float = 3.0
-"""How far each fixture camera is yawed outward from the device's forward, as a real pair is."""
-FIXTURE_BASELINE_M: float = 0.06
-"""Stereo baseline of the fixture's front pair, along the device's right."""
-FIXTURE_RPMAX: float = 2.72
-"""Validity radius the fixture's radtan8 cameras declare, as a real G2 file does."""
+FOLLOW_FRAME_AGREEMENT_DEG: float = 0.05
+"""How far a declared ``MSD_DEVICES`` axis may sit from the real calibration's.
 
-
-def calibration_json(num_cameras: int, model: str, *, follow: FollowFrame) -> str:
-    """A basalt ``calibration.json`` for ``num_cameras`` cameras of one headset.
-
-    The pair is built to *realize* ``follow``, so ``follow_frame`` reads the
-    device's own frame back out of the file and ``convert`` stays quiet: the
-    baseline runs along the wearer's right and the two cameras are yawed
-    symmetrically outward about up, which leaves their mean optical axis on
-    ``forward``. Any camera past the pair is yawed a quarter turn, as the G2's
-    side cameras are. Each rotation is a real one, so a test can still tell
-    ``rig_T_cam`` from its inverse.
-    """
-    terms: dict[str, float] = (
-        {"k1": 0.19, "k2": 0.04, "k3": -0.23, "k4": 0.09}
-        if model == "kb4"
-        else {"k1": 0.30, "k2": -0.02, "p1": -0.0002, "p2": 6e-05, "k3": 0.015, "k4": 0.57, "k5": -0.06, "k6": 0.03, "rpmax": FIXTURE_RPMAX}
-    )
-    forward_xyz: Float64[ndarray, "3"] = np.array(follow.forward, dtype=np.float64)
-    up_xyz: Float64[ndarray, "3"] = np.array(follow.up, dtype=np.float64)
-    right_xyz: Float64[ndarray, "3"] = np.cross(forward_xyz, up_xyz)
-    # An RDF camera at rest on this frame: x right, y down, z along the optical axis.
-    rig_R_rest: Float64[ndarray, "3 3"] = np.column_stack([right_xyz, -up_xyz, forward_xyz])
-    yaws_deg: list[float] = [FIXTURE_CAMERA_YAW_DEG, -FIXTURE_CAMERA_YAW_DEG] + [90.0 * (-1) ** index for index in range(num_cameras - 2)]
-    poses: list[dict[str, float]] = []
-    for index, yaw_deg in enumerate(yaws_deg[:num_cameras]):
-        rig_R_cam: Float64[ndarray, "3 3"] = Rotation.from_rotvec(np.radians(yaw_deg) * up_xyz).as_matrix() @ rig_R_rest
-        rig_t_cam: Float64[ndarray, "3"] = right_xyz * FIXTURE_BASELINE_M * index + up_xyz * 0.01
-        quaternion_xyzw: Float64[ndarray, "4"] = Rotation.from_matrix(rig_R_cam).as_quat()
-        poses.append(
-            {
-                "px": float(rig_t_cam[0]),
-                "py": float(rig_t_cam[1]),
-                "pz": float(rig_t_cam[2]),
-                "qx": float(quaternion_xyzw[0]),
-                "qy": float(quaternion_xyzw[1]),
-                "qz": float(quaternion_xyzw[2]),
-                "qw": float(quaternion_xyzw[3]),
-            }
-        )
-    cameras: list[dict[str, object]] = [
-        {"camera_type": model, "intrinsics": {"fx": 60.0, "fy": 60.1, "cx": 48.0, "cy": 48.5, **terms}} for _ in range(num_cameras)
-    ]
-    value: dict[str, object] = {
-        "comment": "synthetic",
-        "T_imu_cam": poses,
-        "intrinsics": cameras,
-        "resolution": [[FRAME_WIDTH, FRAME_HEIGHT]] * num_cameras,
-        "imu_update_rate": 1000.0,
-    }
-    return json.dumps({"value0": value})
+Far tighter than ``convert``'s 5 deg warning tolerance: the constants were read
+off these very files, so the only gap left is the three decimals they are
+rounded to.
+"""
 
 
 def build_hub(
@@ -368,11 +316,14 @@ def build_hub(
     archive_dir.mkdir(parents=True, exist_ok=True)
     shutil.make_archive(str(archive_dir / SEQUENCE), "zip", root_dir=tree)
 
+    # The device's REAL calibration, verbatim. Deriving it from ``profile.follow``
+    # instead would make every follow-frame assertion circular, and the model tags
+    # and rpmax below are upstream facts no synthetic file should get to invent.
+    # Its resolution is the headset's, not the 192x160 of these noise frames: what
+    # this fixture exercises is the wiring, and no writer cross-checks the two.
     calibration_file: Path = remote / "M_monado_datasets" / profile.hf_dir / "extras" / "calibration.json"
     calibration_file.parent.mkdir(parents=True, exist_ok=True)
-    calibration_file.write_text(
-        calibration_json(profile.num_cameras, "kb4" if device == "index" else "pinhole-radtan8", follow=profile.follow)
-    )
+    calibration_file.write_bytes(calibration_fixture(device).read_bytes())
 
     size: int = archive_bytes if archive_bytes is not None else (archive_dir / f"{SEQUENCE}.zip").stat().st_size
     listing: list[tuple[str, int]] = [(f"{collection_path}/{SEQUENCE}.zip", size), (f"{collection_path}/README.md", 12)]
@@ -556,9 +507,7 @@ def test_the_logged_camera_node_carries_rig_T_cam(converted_index: tuple[FakeHub
     """
     hub, target, _ = converted_index
 
-    calibration: BasaltCalibration = serde.json.from_json(
-        BasaltCalibration, (hub.remote / "M_monado_datasets/MI_valve_index/extras/calibration.json").read_text()
-    )
+    cameras: tuple[CalibratedCamera, ...] = load_calibration(hub.remote / "M_monado_datasets/MI_valve_index/extras/calibration.json")
     store: rr.experimental.ChunkStore = read_back(target)
     for index in range(2):
         node: str = schema.cam_path(0, index)
@@ -567,7 +516,7 @@ def test_the_logged_camera_node_carries_rig_T_cam(converted_index: tuple[FakeHub
         cam_R_rig: Float64[ndarray, "3 3"] = np.asarray(row[f"{node}:Transform3D:mat3x3"][0], dtype=np.float64).reshape(3, 3).T
         cam_t_rig: Float64[ndarray, "3"] = np.asarray(row[f"{node}:Transform3D:translation"][0], dtype=np.float64)
 
-        pose: BasaltPose = calibration.value0.T_imu_cam[index]
+        pose: BasaltPose = cameras[index].rig_pose
         rig_R_cam: Float64[ndarray, "3 3"] = Rotation.from_quat([pose.qx, pose.qy, pose.qz, pose.qw]).as_matrix()
         rig_t_cam: Float64[ndarray, "3"] = np.array([pose.px, pose.py, pose.pz])
         # float32 on the wire, so a loose tolerance is the honest one.
@@ -584,11 +533,12 @@ def test_a_radtan8_camera_node_names_its_projection_and_carries_its_validity_rad
     identity, source = dataset.discover()[0]
     target: Path = dataset.convert(identity, source, force=False)
 
+    expected: float | None = load_calibration(calibration_fixture("odyssey"))[0].distortion_valid_radius
     store: rr.experimental.ChunkStore = read_back(target)
     node: str = schema.cam_path(0, 0)
     row: dict[str, list[object]] = store.reader(index=None, contents=node).to_arrow_table().to_pylist()[0]
     assert row[f"{node}:camera_model"][0] == "pinhole-radtan8"
-    assert row[f"{node}:distortion_valid_radius"][0] == pytest.approx(FIXTURE_RPMAX)
+    assert row[f"{node}:distortion_valid_radius"][0] == pytest.approx(expected)
 
 
 def test_a_kb4_camera_node_names_its_projection_and_claims_no_validity_radius(converted_index: tuple[FakeHub, Path, Path]) -> None:
@@ -711,7 +661,7 @@ def test_a_follow_frame_the_calibration_disagrees_with_is_announced(
 
     output: str = capsys.readouterr().out
     assert "follow frame" in output
-    assert "up off by 89" in output, "a quarter-turn roll is what the tolerance exists to catch"
+    assert "up off by 90.0 deg" in output, "a quarter-turn roll is what the tolerance exists to catch"
 
 
 def test_a_follow_frame_the_calibration_agrees_with_stays_quiet(
@@ -815,6 +765,26 @@ def test_every_declared_follow_frame_is_two_orthogonal_unit_vectors(device: MsdD
     assert np.linalg.norm(follow.forward) == pytest.approx(1.0, abs=1e-3)
     assert np.linalg.norm(follow.up) == pytest.approx(1.0, abs=1e-3)
     assert float(np.dot(follow.forward, follow.up)) == pytest.approx(0.0, abs=1e-3)
+
+
+@pytest.mark.parametrize("device", ["index", "g2", "odyssey"])
+def test_every_declared_follow_frame_is_the_real_calibration_own(device: MsdDeviceChoice) -> None:
+    """The constants exist only because ``register`` has no sequence to derive them from.
+
+    That makes them a copy of a derivation, and a copy can rot: this reads the
+    device's **real** ``calibration.json`` and re-derives the pair. ``convert``
+    re-checks the same thing per sequence but only warns past 5 deg; here the two
+    must agree to 0.05 deg, because nothing but the constants' three decimals
+    separates them.
+    """
+    declared: FollowFrame = MSD_DEVICES[device].follow
+    derived: FollowFrame = follow_frame(load_calibration(calibration_fixture(device), expected_cameras=MSD_DEVICES[device].num_cameras))
+
+    for axis, (stated, real) in (("forward", (declared.forward, derived.forward)), ("up", (declared.up, derived.up))):
+        stated_xyz: Float64[ndarray, "3"] = np.asarray(stated, dtype=np.float64)
+        cosine: float = float(np.dot(stated_xyz, real) / np.linalg.norm(stated_xyz))
+        deviation_deg: float = float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
+        assert deviation_deg < FOLLOW_FRAME_AGREEMENT_DEG, f"{device}'s declared {axis} is {deviation_deg:.3f} deg off its calibration"
 
 
 @pytest.mark.parametrize("device", ["index", "g2", "odyssey"])

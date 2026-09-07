@@ -1,11 +1,21 @@
-"""basalt's ``calibration.json``, as code: camera models, extrinsics, and the follow frame.
+"""basalt's ``calibration.json``, as validated records: camera models, extrinsics, and the follow frame.
 
 The Monado SLAM Datasets ship one ``extras/calibration.json`` per headset in the
 format `basalt <https://gitlab.com/VladyslavUsenko/basalt>`_ writes through
-cereal: a ``value0`` wrapper holding one ``T_imu_cam`` pose, one intrinsics block
-and one resolution per camera. Two things come out of it — each camera's simplecv
-parameters, and the device's forward/up pair — and both are pure functions of the
-file, so they live here rather than in a dataset that happens to read one.
+cereal: a ``value0`` wrapper holding three parallel lists — one ``T_imu_cam``
+pose, one flat intrinsics block and one ``[width, height]`` per camera.
+
+**Parallel lists are checked once, at the boundary.** ``load_calibration`` reads
+that file and returns one ``CalibratedCamera`` per camera, so nothing downstream
+can index the three lists out of step, read a coefficient the file never held, or
+disagree about how many cameras a device has. The flat intrinsics block becomes
+whichever of ``Kb4Intrinsics`` / ``Radtan8Intrinsics`` its ``camera_type`` names,
+and every coefficient that model needs is required to be **present** — basalt
+writes a real value for each, so a zero default would silently turn a truncated
+file into an undistorted camera.
+
+Two things then come out of those records — each camera's simplecv parameters and
+the device's forward/up pair — and both are pure functions of them.
 
 **Frames.** ``T_imu_cam`` is the camera's pose *in the IMU frame*. A rig whose
 reference sensor is its IMU therefore has ``rig_T_cam = T_imu_cam`` with no
@@ -18,10 +28,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, TypeAlias
 
 import numpy as np
 import serde
+import serde.json
 from jaxtyping import Float64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
@@ -36,6 +48,10 @@ from simplecv.camera_parameters import (
 
 CameraModel: TypeAlias = Literal["kb4", "pinhole-radtan8"]
 """``camera_type`` values basalt writes in ``calibration.json``; MSD uses no others."""
+KB4_COEFFICIENTS: tuple[str, ...] = ("fx", "fy", "cx", "cy", "k1", "k2", "k3", "k4")
+"""Every key a ``kb4`` block must hold; a missing one is a truncated file, not a zero."""
+RADTAN8_COEFFICIENTS: tuple[str, ...] = ("fx", "fy", "cx", "cy", "k1", "k2", "p1", "p2", "k3", "k4", "k5", "k6", "rpmax")
+"""Every key a ``pinhole-radtan8`` block must hold, ``rpmax`` (its validity radius) included."""
 DEGENERATE_DIRECTION_NORM: float = 1e-9
 """Shortest vector ``follow_frame`` still accepts as a direction; below it the inputs cancelled."""
 
@@ -79,11 +95,72 @@ class BasaltPose:
 
 @serde.serde
 @dataclass(frozen=True, slots=True)
-class BasaltIntrinsics:
-    """Projection and distortion terms of one camera, in basalt's flat layout.
+class _RawIntrinsics:
+    """The file's flat intrinsics block, **raw**: every coefficient optional because
+    which ones a camera holds depends on its ``camera_type``.
 
-    Both models share the ``fx fy cx cy`` head. ``kb4`` fills ``k1..k4`` only;
-    ``pinhole-radtan8`` fills all eight plus a ``rpmax`` validity radius.
+    ``None`` means *the key was absent*, which is why nothing here defaults to
+    ``0.0``: a zero radial term is a legitimate value basalt does write, and
+    conflating the two would turn a truncated block into an undistorted camera.
+    ``load_calibration`` is the only reader, and it requires exactly the keys the
+    named model needs.
+    """
+
+    fx: float | None = None
+    fy: float | None = None
+    cx: float | None = None
+    cy: float | None = None
+    k1: float | None = None
+    k2: float | None = None
+    k3: float | None = None
+    k4: float | None = None
+    k5: float | None = None
+    k6: float | None = None
+    p1: float | None = None
+    p2: float | None = None
+    rpmax: float | None = None
+
+
+@serde.serde
+@dataclass(frozen=True, slots=True)
+class _RawCamera:
+    """One camera's model tag and its raw coefficients, as the file pairs them."""
+
+    camera_type: str
+    """``kb4`` or ``pinhole-radtan8``; a plain ``str`` so an unknown tag is a
+    validated ``ValueError`` naming it rather than a deserialization failure."""
+    intrinsics: _RawIntrinsics
+    """The flat coefficient block."""
+
+
+@serde.serde
+@dataclass(frozen=True, slots=True)
+class _RawCalibrationValue:
+    """The three parallel lists dataforge reads out of basalt's ``value0`` wrapper."""
+
+    T_imu_cam: list[BasaltPose]  # noqa: N815 — basalt's own key; renaming it would need a serde alias for no gain
+    """Camera poses in the IMU frame, one per camera, in camera order."""
+    intrinsics: list[_RawCamera]
+    """Camera models, one per camera, in the same order."""
+    resolution: list[list[int]]
+    """``[width, height]`` per camera, in the same order."""
+
+
+@serde.serde
+@dataclass(frozen=True, slots=True)
+class _RawCalibration:
+    """One device's whole ``calibration.json``, as basalt writes it."""
+
+    value0: _RawCalibrationValue
+    """cereal's single-root wrapper; everything lives under it."""
+
+
+@dataclass(frozen=True, slots=True)
+class Kb4Intrinsics:
+    """A Kannala-Brandt fisheye camera: the shared projection head plus four radial terms.
+
+    kb4's model is valid over the whole fisheye, so unlike radtan8 it declares no
+    validity radius.
     """
 
     fx: float
@@ -94,61 +171,149 @@ class BasaltIntrinsics:
     """Principal point x, pixels."""
     cy: float
     """Principal point y, pixels."""
-    k1: float = 0.0
-    """First radial term (both models)."""
-    k2: float = 0.0
-    """Second radial term (both models)."""
-    k3: float = 0.0
-    """Third radial term: kb4's fourth-order coefficient, radtan8's third."""
-    k4: float = 0.0
+    k1: float
+    """First radial term."""
+    k2: float
+    """Second radial term."""
+    k3: float
+    """Third radial term."""
+    k4: float
     """Fourth radial term."""
-    k5: float = 0.0
-    """Fifth radial term (radtan8 only)."""
-    k6: float = 0.0
-    """Sixth radial term (radtan8 only)."""
-    p1: float = 0.0
-    """First tangential term (radtan8 only)."""
-    p2: float = 0.0
-    """Second tangential term (radtan8 only)."""
-    rpmax: float | None = None
-    """radtan8's validity radius in normalized image coordinates; ``None`` for kb4, which has no such limit."""
 
 
-@serde.serde
 @dataclass(frozen=True, slots=True)
-class BasaltCamera:
-    """One camera's model tag and its coefficients."""
+class Radtan8Intrinsics:
+    """A Brown-Conrady rational camera: the projection head, six radial and two tangential terms."""
 
-    camera_type: CameraModel
-    """``kb4`` (Kannala-Brandt fisheye) or ``pinhole-radtan8`` (Brown-Conrady)."""
-    intrinsics: BasaltIntrinsics
-    """The coefficients themselves."""
+    fx: float
+    """Focal length in x, pixels."""
+    fy: float
+    """Focal length in y, pixels."""
+    cx: float
+    """Principal point x, pixels."""
+    cy: float
+    """Principal point y, pixels."""
+    k1: float
+    """First radial term."""
+    k2: float
+    """Second radial term."""
+    p1: float
+    """First tangential term."""
+    p2: float
+    """Second tangential term."""
+    k3: float
+    """Third radial term."""
+    k4: float
+    """Fourth radial term (numerator of the rational model's second half)."""
+    k5: float
+    """Fifth radial term."""
+    k6: float
+    """Sixth radial term."""
+    rpmax: float
+    """Validity radius in normalized image coordinates: past it the rational model
+    stops holding, so a consumer needs it as much as the coefficients."""
 
 
-@serde.serde
 @dataclass(frozen=True, slots=True)
-class BasaltCalibrationValue:
-    """The one member of basalt's ``value0`` wrapper that dataforge reads."""
+class CalibratedCamera:
+    """One camera of a device, with its three parallel-list entries already joined and checked."""
 
-    T_imu_cam: list[BasaltPose]  # noqa: N815 — basalt's own key; renaming it would need a serde alias for no gain
-    """Camera poses in the IMU frame, one per camera, in camera order."""
-    intrinsics: list[BasaltCamera]
-    """Camera models, one per camera, in the same order."""
-    resolution: list[list[int]]
-    """``[width, height]`` per camera, in the same order."""
+    index: int
+    """Camera index, matching the ``cam<index>`` directory in a sequence."""
+    rig_pose: BasaltPose
+    """``T_imu_cam``: this camera's pose in the rig (IMU) frame."""
+    resolution: tuple[int, int]
+    """``(width, height)`` in pixels, both positive."""
+    model: Kb4Intrinsics | Radtan8Intrinsics
+    """Whichever projection the file's ``camera_type`` named, with every coefficient present."""
+
+    @property
+    def camera_model(self) -> CameraModel:
+        """The model tag a camera node records, so a consumer needs no ``isinstance``."""
+        return "kb4" if isinstance(self.model, Kb4Intrinsics) else "pinhole-radtan8"
+
+    @property
+    def distortion_valid_radius(self) -> float | None:
+        """radtan8's ``rpmax``; ``None`` on kb4, which is valid over the whole fisheye."""
+        return None if isinstance(self.model, Kb4Intrinsics) else self.model.rpmax
 
 
-@serde.serde
-@dataclass(frozen=True, slots=True)
-class BasaltCalibration:
-    """One device's whole ``calibration.json``, as basalt writes it."""
+def _required_coefficients(raw: _RawIntrinsics, *, keys: Sequence[str], index: int, camera_type: str) -> dict[str, float]:
+    """Pull the named keys off a raw block, refusing one the file never held.
 
-    value0: BasaltCalibrationValue
-    """cereal's single-root wrapper; everything lives under it."""
+    Args:
+        raw: The camera's raw coefficient block.
+        keys: Keys the named model needs, all of them.
+        index: Camera index, for the error message.
+        camera_type: Model tag, for the error message.
+
+    Returns:
+        Every named key's value, ready to splat into the model dataclass.
+
+    Raises:
+        ValueError: One of ``keys`` is absent from the json.
+    """
+    present: dict[str, float] = {}
+    for key in keys:
+        value: float | None = getattr(raw, key)
+        if value is None:
+            raise ValueError(f"cam{index} is a {camera_type} camera but its intrinsics hold no {key!r}; the calibration is incomplete")
+        present[key] = value
+    return present
 
 
-def camera_parameters(calibration: BasaltCalibration, index: int, *, name: str) -> PinholeParameters | Fisheye62Parameters:
-    """Build one camera's simplecv parameters from the device calibration.
+def load_calibration(path: Path, *, expected_cameras: int | None = None) -> tuple[CalibratedCamera, ...]:
+    """Read one device's ``calibration.json`` into validated per-camera records.
+
+    Everything a later reader would otherwise have to assume is settled here: the
+    three lists are the same length, each resolution is two positive ints, the
+    ``camera_type`` is one this package knows, and the named model's coefficients
+    are all present rather than defaulted to zero.
+
+    Args:
+        path: The device's ``extras/calibration.json``.
+        expected_cameras: Cameras the caller's device table says this headset has;
+            ``None`` accepts whatever the file holds. Given, a mismatch is an
+            error — a device whose calibration lists a different number of cameras
+            is either the wrong file or a corpus change, and both need a human.
+
+    Returns:
+        One record per camera, in camera order.
+
+    Raises:
+        ValueError: Any of the above does not hold.
+    """
+    raw: _RawCalibration = serde.json.from_json(_RawCalibration, path.read_text())
+    value: _RawCalibrationValue = raw.value0
+    counts: tuple[int, int, int] = (len(value.T_imu_cam), len(value.intrinsics), len(value.resolution))
+    if len(set(counts)) != 1:
+        raise ValueError(
+            f"{path} lists {counts[0]} T_imu_cam pose(s), {counts[1]} intrinsics block(s) and {counts[2]} resolution(s); "
+            "the three are per-camera and must agree"
+        )
+    if expected_cameras is not None and counts[0] != expected_cameras:
+        raise ValueError(f"{path} describes {counts[0]} camera(s) but this device has {expected_cameras}")
+
+    cameras: list[CalibratedCamera] = []
+    for index, (pose, camera, resolution) in enumerate(zip(value.T_imu_cam, value.intrinsics, value.resolution, strict=True)):
+        if len(resolution) != 2 or any(side <= 0 for side in resolution):
+            raise ValueError(f"{path} gives cam{index} the resolution {resolution}; it must be one positive [width, height] pair")
+        if camera.camera_type == "kb4":
+            model: Kb4Intrinsics | Radtan8Intrinsics = Kb4Intrinsics(
+                **_required_coefficients(camera.intrinsics, keys=KB4_COEFFICIENTS, index=index, camera_type=camera.camera_type)
+            )
+        elif camera.camera_type == "pinhole-radtan8":
+            model = Radtan8Intrinsics(
+                **_required_coefficients(camera.intrinsics, keys=RADTAN8_COEFFICIENTS, index=index, camera_type=camera.camera_type)
+            )
+        else:
+            raise ValueError(f"{path} gives cam{index} the camera_type {camera.camera_type!r}; only 'kb4' and 'pinhole-radtan8' are known")
+        cameras.append(CalibratedCamera(index=index, rig_pose=pose, resolution=(resolution[0], resolution[1]), model=model))
+    return tuple(cameras)
+
+
+def camera_parameters(camera: CalibratedCamera, *, name: str) -> PinholeParameters | Fisheye62Parameters:
+    """Build one camera's simplecv parameters from its validated record.
 
     The extrinsics are the camera's pose **in the rig frame**, because MSD's rig
     frame is the IMU frame (``RIG_REFERENCE``) and ``T_imu_cam`` is exactly that
@@ -158,45 +323,45 @@ def camera_parameters(calibration: BasaltCalibration, index: int, *, name: str) 
     ``cam_R_world`` / ``cam_t_world``.
 
     Args:
-        calibration: Parsed ``calibration.json`` of the device.
-        index: Camera index, matching the ``cam<index>`` directory in a sequence.
+        camera: One camera out of ``load_calibration``.
         name: Stream label carried into the parameters.
 
     Returns:
         A ``Fisheye62Parameters`` for a ``kb4`` camera, a ``PinholeParameters``
         for a ``pinhole-radtan8`` one.
     """
-    value: BasaltCalibrationValue = calibration.value0
-    pose: BasaltPose = value.T_imu_cam[index]
-    camera: BasaltCamera = value.intrinsics[index]
-    terms: BasaltIntrinsics = camera.intrinsics
-    width: int = value.resolution[index][0]
-    height: int = value.resolution[index][1]
-
+    pose: BasaltPose = camera.rig_pose
     rig_R_cam: Float64[ndarray, "3 3"] = Rotation.from_quat([pose.qx, pose.qy, pose.qz, pose.qw]).as_matrix()
     rig_t_cam: Float64[ndarray, "3"] = np.array([pose.px, pose.py, pose.pz], dtype=np.float64)
     extrinsics: Extrinsics = Extrinsics(world_R_cam=rig_R_cam, world_t_cam=rig_t_cam)
+    model: Kb4Intrinsics | Radtan8Intrinsics = camera.model
     intrinsics: Intrinsics = Intrinsics.from_focal_principal_point(
-        camera_conventions="RDF", fl_x=terms.fx, fl_y=terms.fy, cx=terms.cx, cy=terms.cy, height=height, width=width
+        camera_conventions="RDF",
+        fl_x=model.fx,
+        fl_y=model.fy,
+        cx=model.cx,
+        cy=model.cy,
+        height=camera.resolution[1],
+        width=camera.resolution[0],
     )
-    if camera.camera_type == "kb4":
+    if isinstance(model, Kb4Intrinsics):
         return Fisheye62Parameters(
             name=name,
             extrinsics=extrinsics,
             intrinsics=intrinsics,
-            distortion=KannalaBrandtDistortion(k1=terms.k1, k2=terms.k2, k3=terms.k3, k4=terms.k4),
+            distortion=KannalaBrandtDistortion(k1=model.k1, k2=model.k2, k3=model.k3, k4=model.k4),
         )
     return PinholeParameters(
         name=name,
         extrinsics=extrinsics,
         intrinsics=intrinsics,
         distortion=BrownConradyDistortion(
-            k1=terms.k1, k2=terms.k2, p1=terms.p1, p2=terms.p2, k3=terms.k3, k4=terms.k4, k5=terms.k5, k6=terms.k6
+            k1=model.k1, k2=model.k2, p1=model.p1, p2=model.p2, k3=model.k3, k4=model.k4, k5=model.k5, k6=model.k6
         ),
     )
 
 
-def follow_frame(calibration: BasaltCalibration, camera_indices: Sequence[int] = (0, 1)) -> FollowFrame:
+def follow_frame(cameras: Sequence[CalibratedCamera], camera_indices: Sequence[int] = (0, 1)) -> FollowFrame:
     """Derive a headset's forward and up in the rig frame from its front stereo pair.
 
     Forward is the mean optical axis (camera +z in RDF) of the listed cameras;
@@ -215,7 +380,7 @@ def follow_frame(calibration: BasaltCalibration, camera_indices: Sequence[int] =
     every device that way, and on the G2 the two side cameras are ``cam2``/``cam3``.
 
     Args:
-        calibration: Parsed ``calibration.json`` of the device.
+        cameras: The device's cameras, from ``load_calibration``.
         camera_indices: Front cameras, left first; the baseline runs from the
             first to the last, and every listed camera contributes to forward.
 
@@ -228,10 +393,9 @@ def follow_frame(calibration: BasaltCalibration, camera_indices: Sequence[int] =
     """
     if len(camera_indices) < 2:
         raise ValueError(f"a follow frame needs a stereo pair to place its up axis, got {len(camera_indices)} camera(s)")
-    poses: list[BasaltPose] = calibration.value0.T_imu_cam
     forward_sum_xyz: Float64[ndarray, "3"] = np.zeros(3, dtype=np.float64)
     for index in camera_indices:
-        pose: BasaltPose = poses[index]
+        pose: BasaltPose = cameras[index].rig_pose
         rig_R_cam: Float64[ndarray, "3 3"] = Rotation.from_quat([pose.qx, pose.qy, pose.qz, pose.qw]).as_matrix()
         forward_sum_xyz += rig_R_cam @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
     forward_norm: float = float(np.linalg.norm(forward_sum_xyz))
@@ -239,8 +403,8 @@ def follow_frame(calibration: BasaltCalibration, camera_indices: Sequence[int] =
         raise ValueError(f"cameras {tuple(camera_indices)} look in opposing directions; their mean optical axis is degenerate")
     forward_xyz: Float64[ndarray, "3"] = forward_sum_xyz / forward_norm
 
-    left_camera: BasaltPose = poses[camera_indices[0]]
-    right_camera: BasaltPose = poses[camera_indices[-1]]
+    left_camera: BasaltPose = cameras[camera_indices[0]].rig_pose
+    right_camera: BasaltPose = cameras[camera_indices[-1]].rig_pose
     baseline_xyz: Float64[ndarray, "3"] = np.array(
         [right_camera.px - left_camera.px, right_camera.py - left_camera.py, right_camera.pz - left_camera.pz], dtype=np.float64
     )
