@@ -126,6 +126,15 @@ pub struct LandmarkBlock<S: LieScalar> {
     damping_rotations: Vec<JacobiRotation<S>>,
     /// One entry per observation, in `lm.obs` order.
     observations: Vec<BlockObservation>,
+    /// The pose columns the observations write into, ascending and deduplicated.
+    ///
+    /// Every other column of `0..padding_idx` stays exactly zero for the block's
+    /// whole life: `linearizeLandmark` only ever writes `block<2, 6>` at an
+    /// observation's host and target offsets (`:178-179`), and the Householder
+    /// reflections and Givens rotations that follow act on rows, which cannot
+    /// move a zero column off zero. [`Self::add_dense_h_b`] is the only reader,
+    /// and `dense_h_b_touches_only_observed_columns` pins the invariant.
+    active_cols: Vec<usize>,
     /// The landmark this block belongs to.
     lm_id: LandmarkId,
     /// `lm_ptr->host_kf_id` (`:525`).
@@ -261,11 +270,21 @@ impl<S: LieScalar> LandmarkBlock<S> {
             }
         }
 
+        let mut active_cols: Vec<usize> = Vec::with_capacity(2 * POSE_SIZE * observations.len());
+        for obs in &observations {
+            for offset in [obs.abs_h_idx, obs.abs_t_idx] {
+                active_cols.extend(offset..(offset + POSE_SIZE).min(padding_idx));
+            }
+        }
+        active_cols.sort_unstable();
+        active_cols.dedup();
+
         Ok(Self {
             storage: DMatrix::zeros(num_rows, num_cols),
             jl_col_scale: Vector3::repeat(S::one()),
             damping_rotations: Vec::with_capacity(6),
             observations,
+            active_cols,
             lm_id,
             host_kf_id: host,
             is_fixed,
@@ -805,8 +824,13 @@ impl<S: LieScalar> LandmarkBlock<S> {
             });
         }
         let rows: usize = self.num_q2rows();
-        for i in 0..self.padding_idx {
-            for j in 0..self.padding_idx {
+        // Only the observed pose columns: everywhere else `Q2Jp` is exactly
+        // zero, so the C++'s `H(i, j) += 0` and `b(i) += 0` are the identity —
+        // `h` and `b` start at `+0.0` and an IEEE sum is `-0.0` only when both
+        // its operands are, so no accumulator here can be the one value `+= 0`
+        // would have changed. See [`Self::active_cols`].
+        for &i in &self.active_cols {
+            for &j in &self.active_cols {
                 let mut acc: S = S::zero();
                 for r in 0..rows {
                     acc += self.storage[(3 + r, i)] * self.storage[(3 + r, j)];
@@ -1046,6 +1070,63 @@ mod tests {
             huber_parameter: 0.5,
             obs_std_dev: 2.0,
             ..Default::default()
+        }
+    }
+
+    /// `add_dense_h_b` reads only the observed pose columns, and the rest of
+    /// `0..padding_idx` really is zero — through the linearization, the QR and
+    /// the landmark damping, which is the whole life of a block.
+    ///
+    /// The optimization that skips them is only the identity because of this:
+    /// a column of zeros makes every product `+/-0.0`, so the accumulator stays
+    /// `+0.0`, and `H += +0.0` cannot move an `H` that is never `-0.0` either.
+    #[test]
+    fn dense_h_b_touches_only_observed_columns() {
+        let (aom, lm, rel) = fixture(4);
+        let mut block: LandmarkBlock<f64> =
+            LandmarkBlock::allocate(lm.id, &lm, &index, &aom, false).unwrap();
+        // Both observations are in frame 0, so only its six columns are live.
+        assert_eq!(block.active_cols, (0..POSE_SIZE).collect::<Vec<usize>>());
+
+        block
+            .linearize_landmark(&lm, &rel, &cameras(), &options())
+            .unwrap();
+        let zero_after = |block: &LandmarkBlock<f64>, stage: &str| {
+            for column in POSE_SIZE..block.padding_idx {
+                for row in 0..block.num_rows {
+                    assert_eq!(
+                        block.storage[(row, column)],
+                        0.0,
+                        "column {column} moved off zero at {stage}"
+                    );
+                }
+            }
+        };
+        zero_after(&block, "linearizeLandmark");
+        block.perform_qr(&options()).unwrap();
+        zero_after(&block, "performQR");
+        block.set_landmark_damping(1e-3).unwrap();
+        zero_after(&block, "setLandmarkDamping");
+
+        // And the dense system it produces is the one the whole `padding_idx`
+        // loop would have produced.
+        let mut h: DMatrix<f64> = DMatrix::zeros(block.padding_idx, block.padding_idx);
+        let mut b: DVector<f64> = DVector::zeros(block.padding_idx);
+        block.add_dense_h_b(&mut h, &mut b).unwrap();
+        let rows: usize = block.num_q2rows();
+        for i in 0..block.padding_idx {
+            for j in 0..block.padding_idx {
+                let mut acc: f64 = 0.0;
+                for r in 0..rows {
+                    acc += block.storage[(3 + r, i)] * block.storage[(3 + r, j)];
+                }
+                assert_eq!(h[(i, j)], acc, "H({i}, {j})");
+            }
+            let mut acc: f64 = 0.0;
+            for r in 0..rows {
+                acc += block.storage[(3 + r, i)] * block.storage[(3 + r, block.res_idx)];
+            }
+            assert_eq!(b[i], acc, "b({i})");
         }
     }
 
