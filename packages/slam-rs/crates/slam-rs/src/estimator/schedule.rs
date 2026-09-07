@@ -87,6 +87,9 @@ pub struct MarginalizationStats {
     /// basalt discards this; the port reports it, because a marginalization run
     /// on an invalid linearization is worth knowing about.
     pub numerically_valid: bool,
+    /// `asize`, the width of the ordering the split was taken over (`:898`).
+    /// `kept_indices + marg_indices` is exactly this, by construction.
+    pub ordering_size: usize,
     /// `marg_order_new`, as `(frame, index, size)` (`:1120-1133`).
     pub prior_order: Vec<(FrameId, usize, usize)>,
 }
@@ -234,6 +237,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             kept_indices: output.idx_to_keep.len(),
             marg_indices: output.idx_to_marg.len(),
             numerically_valid: output.numerically_valid,
+            ordering_size: output.aom.total_size(),
             prior_order: self.marg_data.order.iter().collect(),
         });
 
