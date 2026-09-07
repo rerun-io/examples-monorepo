@@ -593,8 +593,6 @@ pub struct OpticalFlow {
     inner: FrameToFrameOpticalFlow<Pattern51>,
     /// The widened frameset, reused so a steady stream never reallocates.
     images: Vec<ImageU16>,
-    /// Timestamp of the last accepted frameset; the clock must move forward.
-    last_t_ns: Option<i64>,
 }
 
 #[pymethods]
@@ -631,7 +629,6 @@ impl OpticalFlow {
         Ok(Self {
             inner,
             images: vec![ImageU16::default(); cameras],
-            last_t_ns: None,
         })
     }
 
@@ -654,9 +651,12 @@ impl OpticalFlow {
     }
 
     /// Timestamp of the last accepted frameset, or None before the first.
+    ///
+    /// The core's own clock, not a copy of it: the two cannot drift apart when a
+    /// frameset is refused.
     #[getter]
     fn t_ns(&self) -> Option<i64> {
-        self.last_t_ns
+        self.inner.t_ns()
     }
 
     /// Track and detect on one frameset of `camera_count` `uint8[h, w]` images.
@@ -671,7 +671,7 @@ impl OpticalFlow {
         t_ns: i64,
         images: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<FlowFrame> {
-        if let Some(last) = self.last_t_ns
+        if let Some(last) = self.inner.t_ns()
             && t_ns <= last
         {
             return Err(PyValueError::new_err(format!(
@@ -696,15 +696,14 @@ impl OpticalFlow {
         }
 
         let previous_last_id: u64 = self.inner.last_keypoint_id();
-        let Self { inner, images, .. } = self;
-        let frame: FlowFrame = py.detach(|| -> Result<FlowFrame, ProcessError> {
+        let Self { inner, images } = self;
+        py.detach(|| -> Result<FlowFrame, ProcessError> {
             inner
                 .process_frame(t_ns, images, &PosePrediction::default(), &[])
                 .map_err(ProcessError::Frontend)?;
-            flow_frame(inner, previous_last_id)
-        })?;
-        self.last_t_ns = Some(t_ns);
-        Ok(frame)
+            flow_frame(inner, previous_last_id, t_ns)
+        })
+        .map_err(PyErr::from)
     }
 
     fn __repr__(&self) -> String {
@@ -736,9 +735,15 @@ impl From<ProcessError> for PyErr {
 }
 
 /// Copy the frontend's committed frame into an owned [`FlowFrame`].
+///
+/// `t_ns` is the timestamp `process_frame` has just accepted. The core carries
+/// its own as an `Option` — `None` until the first frameset commits — and this
+/// runs only after a commit, so taking the value the caller passed keeps the
+/// Python-facing `FlowFrame.t_ns` a plain `int` with no impossible branch.
 fn flow_frame(
     flow: &FrameToFrameOpticalFlow<Pattern51>,
     previous_last_id: u64,
+    t_ns: i64,
 ) -> Result<FlowFrame, ProcessError> {
     let grid: CellGrid = flow.occupancy_grid();
     let frame: &CoreFlowFrame = flow.frame();
@@ -772,7 +777,7 @@ fn flow_frame(
         });
     }
     Ok(FlowFrame {
-        t_ns: frame.t_ns,
+        t_ns,
         grid,
         cameras,
     })

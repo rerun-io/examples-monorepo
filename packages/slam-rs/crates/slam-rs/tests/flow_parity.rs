@@ -201,7 +201,7 @@ fn seeded_tracking(
         });
     }
 
-    let mut patches: PatchSoA<Pattern51> = PatchSoA::new(source.len().max(1), levels + 1);
+    let mut patches: PatchSoA<Pattern51> = PatchSoA::new(source.len().max(1), levels + 1).unwrap();
     patches.build(&previous_pyramid, &positions, None).unwrap();
     let mut tracker: CpuPatchTracker<Pattern51> = CpuPatchTracker::new(
         source.len().max(1),
@@ -209,7 +209,8 @@ fn seeded_tracking(
         config.optical_flow_max_iterations as usize,
         config.optical_flow_max_recovered_dist2,
         WorkPool::new(1).unwrap(),
-    );
+    )
+    .unwrap();
     let mut result: FlowResult = FlowResult::with_capacity(source.len().max(1));
     tracker
         .track(
@@ -345,7 +346,7 @@ fn detector_overlap_is_reported() {
         let produced: &FlowFrame = flow
             .process_frame(dump.t_ns, &images, &PosePrediction::default(), &[])
             .unwrap();
-        assert_eq!(produced.t_ns, dump.t_ns);
+        assert_eq!(produced.t_ns, Some(dump.t_ns));
 
         for camera in 0..2 {
             let expected: &[DumpKeypoint] = dump.keypoints(camera);
