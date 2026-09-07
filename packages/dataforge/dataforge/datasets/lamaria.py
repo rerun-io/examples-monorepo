@@ -27,6 +27,14 @@ calibration uses as its body frame, so the rig node states
 NO root ``ViewCoordinates``: the gt layer establishes the world frame and owns
 both.
 
+**Orientation.** Aria Gen1 records its cameras sideways. Every frame is logged
+turned a quarter turn **clockwise** so the scene is upright, and the calibration
+is turned with it (``rotate_camera_calib_cw90deg``), as are the published
+control-point detections; the capture property ``image_rotation_cw_deg`` says so.
+The published calibration file and the published ground truth stay native, and
+the gt layer composes with the native ``cam0.T_b_s`` — turning the pixels must
+not turn the trajectory.
+
 The verbs, the entity layout, the two world frames and the control-point checks
 are documented in ``packages/dataforge/README.md``.
 """
@@ -175,7 +183,7 @@ deliberate: the up axis is declared once for the whole corpus and a weak measure
 says the averaging window was moving, while a distant point is per-sequence evidence
 that these coordinates do not belong to this walk."""
 CP_UV_RADIUS_PX: float = 4.0
-"""Marker radius of a control-point detection, in pixels of the native 640x480
+"""Marker radius of a control-point detection, in pixels of the upright 480x640
 SLAM image; it is drawn in ``CONTROL_POINT_COLOR``, the same green as the 3D point."""
 
 FOLLOW_FORWARD: tuple[float, float, float] = (0.018, -0.967, -0.253)
@@ -199,6 +207,10 @@ FOLLOW_AHEAD_M: float = 0.3
 The three distances were tuned together on R_01_easy, for a shot that holds the
 three camera frusta and the last ten seconds of trail in view at once without the
 ground filling it."""
+IMAGE_ROTATION_CW_DEG: int = 90
+"""How far clockwise every logged frame, pinhole and 2D detection is turned from
+what the archive publishes. Aria Gen1 records its cameras sideways; a consumer
+that wants the published pixel coordinates back turns them the other way."""
 IMAGE_PLANE_DISTANCE: float = 0.1
 """Frustum length in metres; the SLAM baseline is ~11 cm, so the three frusta stay legible."""
 
@@ -215,12 +227,17 @@ class CameraSpec:
     pair, interleaved RGB (not BGR) for camera-rgb."""
     kind: CameraKind
     """exoego:v2 content hint on the camera node."""
+    native_height_px: int
+    """Image height as the VRS records it, before the clockwise turn. The published
+    control-point detections are measured in those native pixels, and this is what
+    ``aria.rotate_uv_cw90`` turns them about; the *rotated* size a converter logs
+    comes from the rotated calibration instead."""
 
 
 CAMERA_SPECS: dict[aria.AriaStreamId, CameraSpec] = {
-    aria.SLAM_LEFT_STREAM_ID: CameraSpec(fps=20, frame_kind="gray8", kind="grayscale"),
-    aria.SLAM_RIGHT_STREAM_ID: CameraSpec(fps=20, frame_kind="gray8", kind="grayscale"),
-    aria.RGB_STREAM_ID: CameraSpec(fps=10, frame_kind="rgb24", kind="rgb"),
+    aria.SLAM_LEFT_STREAM_ID: CameraSpec(fps=20, frame_kind="gray8", kind="grayscale", native_height_px=480),
+    aria.SLAM_RIGHT_STREAM_ID: CameraSpec(fps=20, frame_kind="gray8", kind="grayscale", native_height_px=480),
+    aria.RGB_STREAM_ID: CameraSpec(fps=10, frame_kind="rgb24", kind="rgb", native_height_px=1408),
 }
 """One entry per camera stream a LaMAria VRS carries."""
 
@@ -296,9 +313,9 @@ class CameraStream:
     camera: Fisheye62Parameters
     """The camera's calibration, extrinsics holding ``rig_T_cam``."""
     frames: Iterator[bytes | memoryview]
-    """Raw planes in presentation order, one per frame, native orientation. A
-    decoded frame is handed over as its own buffer, not as a copy: a 2.4-minute
-    sequence is 10 GB of memcpy otherwise."""
+    """Raw planes in presentation order, one per frame, turned upright. A frame is
+    handed over as one buffer of its own rather than accumulated anywhere: a
+    2.4-minute sequence is 10 GB of planes."""
     times_ns: Int64[ndarray, "n_frames"]
     """Capture times on Aria's device clock, one per frame, in the same order."""
 
@@ -644,6 +661,11 @@ def log_control_point_detections(
         if not seen:
             continue
         times_ns: Int64[ndarray, "n_detections"] = np.array([detection.timestamp_ns for detection in seen], dtype=np.int64)
+        # The published detections are native pixels and the logged frames are
+        # upright, so they turn together or a tag draws a quarter turn away.
+        uv_px: Float64[ndarray, "n_detections 2"] = aria.rotate_uv_cw90(
+            np.stack([detection.uv_px for detection in seen]), native_height_px=CAMERA_SPECS[stream_id].native_height_px
+        )
         rr.log(
             schema.cp_uv_path(RIG, index),
             rr.Points2D.from_fields(colors=CONTROL_POINT_COLOR, radii=CP_UV_RADIUS_PX, show_labels=True),
@@ -654,7 +676,7 @@ def log_control_point_detections(
             schema.cp_uv_path(RIG, index),
             indexes=[time_column(times_ns)],
             columns=rr.Points2D.columns(
-                positions=np.stack([detection.uv_px for detection in seen]),
+                positions=uv_px,
                 labels=[labels_by_name[detection.control_point] for detection in seen],
             ),
             recording=recording,
@@ -675,7 +697,7 @@ def open_streams(vrs_path: Path) -> SequenceStreams:
         The camera and IMU streams, in ``cam_MM`` / ``imu_MM`` order.
     """
     provider: data_provider.VrsDataProvider = aria.open_vrs(vrs_path)
-    rig: aria.AriaRig = aria.AriaRig.from_provider(provider)
+    rig: aria.AriaRig = aria.AriaRig.from_provider(provider, rotate_cw90=True)
     cameras: list[CameraStream] = []
     for stream_id in aria.CAMERA_STREAM_IDS:
         camera: Fisheye62Parameters = rig.cameras[stream_id]
@@ -683,11 +705,12 @@ def open_streams(vrs_path: Path) -> SequenceStreams:
             CameraStream(
                 stream_id=stream_id,
                 camera=camera,
-                # Native orientation, no rotation: the sideways Aria frames are what
-                # the calibration describes, so rotating them would invalidate it.
-                # ``image.data`` and not ``tobytes()``: ffmpeg's stdin takes the
-                # decoder's own buffer, so nothing is copied on the way there.
-                frames=(image.data for _, image in aria.iter_frames(provider, stream_id)),
+                # Turned upright, the same quarter turn the calibration above took:
+                # Aria records sideways, and a viewer should not have to. The turn
+                # costs one copy per frame (2 s on the shortest sequence, 15 s on
+                # the longest), and ``ascontiguousarray`` is what makes ``.data`` a
+                # buffer ffmpeg's stdin can take as it stands.
+                frames=(np.ascontiguousarray(np.rot90(image, -1)).data for _, image in aria.iter_frames(provider, stream_id)),
                 times_ns=aria.frame_timestamps_ns(provider, stream_id),
             )
         )
@@ -1043,6 +1066,7 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
                 identity,
                 num_cameras=len(streams.cameras),
                 num_frames=num_frames,
+                image_rotation_cw_deg=IMAGE_ROTATION_CW_DEG,
                 split=source.split,
                 set=sequence_set(source.sequence),
                 challenge=sequence_challenge(source.sequence),

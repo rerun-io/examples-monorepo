@@ -193,12 +193,19 @@ skipped at `convert`. `--root` is scratch, not storage: point it at local NVMe.
 One sequence is one recording, `lamaria__<seq>`. The rig frame is **imu-right**,
 which is what the published calibration uses as its body frame, so the rig node
 states `reference = "imu_00"` and every logged `rig_T_sensor` is directly
-comparable with that file's `T_b_s`. `cam_00` is camera-slam-left (640×480 gray,
+comparable with that file's `T_b_s`. `cam_00` is camera-slam-left (480×640 gray,
 20 fps), `cam_01` camera-slam-right, `cam_02` camera-rgb (1408×1408, 10 fps);
 `imu_00` is imu-right (identity `rig_T_imu`, since it *is* the rig) and `imu_01`
-imu-left, 129 mm away and rotated. Frames are logged in their **native**
-(sideways) orientation, because that is what the calibration describes.
-Everything comes out of the VRS device calibration via projectaria-tools: the
+imu-left, 129 mm away and rotated. Aria Gen1 records its cameras sideways, so
+our frames and every pixel coordinate on them — the pinholes and the
+control-point detections alike — are turned **90° clockwise** from LaMAria's
+published files, and the calibration is turned with them
+([`rotate_camera_calib_cw90deg`](https://facebookresearch.github.io/projectaria_tools/docs/data_utilities/core_code_snippets/calibration),
+which swaps the image size, moves the principal point to `(h - 1 - cy, cx)` and
+turns `device_T_cam` about the optical axis), so the scene is upright and the
+calibration still describes it. The capture property `image_rotation_cw_deg`
+records the turn; the pGT is *not* turned, because it poses the published,
+unrotated camera. Everything comes out of the VRS device calibration via projectaria-tools: the
 published JSON has no RGB camera and no imu-left, and is used to cross-check the
 transform chain rather than to build it.
 
@@ -295,7 +302,7 @@ is a nominal-rate fiction for such a file.
 | `selfcap` | one cut episode | 4 phone exo rigs + the OAK ego rig + the Quest (9 cameras), the OAK IMU, the Quest head-pose track |
 | `wildcap` | one capture directory | the videos only: no `Pinhole`, no `ViewCoordinates`, no transforms — calibration, sync and localization are later layers |
 | `msd` | one Monado SLAM sequence, fetched on demand | **two** rrds: `base` with 2 or 4 grayscale video streams (AV1-encoded from the archive's PNGs), the IMU and on the G2/Odyssey+ the magnetometer; `gt` with the ~1 kHz `world_T_rig`, its path and trail, and the root `ViewCoordinates` |
-| `lamaria` | one Aria Gen1 sequence, its VRS fetched on demand | **two** rrds: `base` with 3 AV1 video streams (2 gray SLAM + 1 RGB, native sideways orientation) and both raw IMUs (`imu_01` carrying its real `rig_T_imu`), on Aria's unshifted device clock; `gt` with the published `world_T_rig` (20 Hz on the controlled set, ~3 Hz on the surveyed ones), its path and trail, the surveyed control points and their 2D detections, and the root `ViewCoordinates` |
+| `lamaria` | one Aria Gen1 sequence, its VRS fetched on demand | **two** rrds: `base` with 3 AV1 video streams (2 gray SLAM + 1 RGB, turned 90° clockwise so the scene is upright) and both raw IMUs (`imu_01` carrying its real `rig_T_imu`), on Aria's unshifted device clock; `gt` with the published `world_T_rig` (20 Hz on the controlled set, ~3 Hz on the surveyed ones), its path and trail, the surveyed control points and their 2D detections, and the root `ViewCoordinates` |
 
 A config's `command` is its CLI subcommand; its `name` is the catalog dataset
 and the prefix of every recording id. They are equal for robocap, selfcap and
