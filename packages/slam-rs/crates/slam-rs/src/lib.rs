@@ -9,6 +9,11 @@
 //! types are real, the estimator is not implemented yet, so `track` never
 //! reports [`VioStatus::Tracking`].
 
+pub mod calib;
+pub mod config;
+pub mod lie;
+pub mod types;
+
 use nalgebra::{Isometry3, UnitQuaternion, Vector3};
 use serde::{Deserialize, Serialize};
 

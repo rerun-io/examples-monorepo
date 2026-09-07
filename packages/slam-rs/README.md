@@ -10,6 +10,24 @@ types across the boundary are real, and so is everything on the Python side —
 manifest, feed, metrics and replay — but the estimator itself lands in later PRs,
 so `track()` never reports `Tracking` yet.
 
+## Core modules
+
+The core is being filled in stage by stage, bottom up. What is in it today:
+
+| Module | What it is |
+|---|---|
+| `lie` | `So3`/`Se3` over any `f32`/`f64` scalar: Sophus's `exp`/`log`, the adjoint, basalt's four SO(3) Jacobians and their inverses, the decoupled SE(3) pair, and the left-multiplied pose increment the estimator runs on. |
+| `types` | `TimeCamId`, `KeypointId`/`LandmarkId`, `AbsOrderMap`, `PoseVelBiasState` and the two fixed-linearization wrappers. |
+| `config` | basalt's `VioConfig`, read straight from `data/**/*_config.json`. |
+| `calib` | basalt's `Calibration`: extrinsics, the six shipped camera models, the 9- and 12-parameter IMU bias calibrations, plus a constructor that takes what the Python catalog feed reports. |
+
+Every convention is quoted against the C++ it comes from, file and line, in the
+doc comments. `crates/slam-rs/tests/fixtures/` holds the shipped basalt config
+and calibration JSON the parsers are tested against, unmodified.
+
+Still to come: camera projection, the image pyramid, IMU preintegration, the
+frontend, and the square-root estimator.
+
 ## Layout
 
 | Path | What it is |

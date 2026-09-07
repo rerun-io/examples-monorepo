@@ -20,8 +20,16 @@ nalgebra = "0.35"
 numpy = "0.29"
 pyo3 = "0.29"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip` makes the JSON float parser correctly rounded, like the
+# `strtod` cereal uses on the C++ side. Without it several calibration and
+# config values land one ulp off the double basalt reads from the same file,
+# which is exactly the kind of difference the accuracy gate must not measure.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "2"
+# The marginalization QR and the final dense solve will use faer, pinned to
+# kornia-rs's exact version so the graph never holds two copies (decision D07).
+# Declared now, used by the linearization PR; nothing depends on it yet.
+faer = "=0.24.4"
 # dev-only
 approx = "0.5"
 proptest = "1"
