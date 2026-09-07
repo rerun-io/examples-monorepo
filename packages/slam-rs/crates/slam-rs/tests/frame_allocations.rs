@@ -8,17 +8,38 @@
 //! keypoint snapshot replaced sixteen buffers per stereo frame — so it is
 //! measured here rather than asserted in a comment.
 //!
-//! The measurement is a counting global allocator over this test binary alone.
-//! It is `#[cfg(test)]` only in the sense that this is a test target: the shipped
-//! library never sees it. Counting is gated by a flag held under a mutex, so two
-//! tests in this binary cannot pollute each other's numbers.
+//! ## The counter is thread-scoped, and has to be
+//!
+//! The measurement is a counting global allocator over this test binary alone;
+//! the shipped library never sees it. Both the gate **and the counters** are
+//! thread-locals, so an allocation is counted only when it happens on the thread
+//! that opened the gate.
+//!
+//! A global flag under a mutex is not enough, and was observed failing: the
+//! mutex serialises the *measurements*, but libtest runs each test on its own
+//! thread and those threads keep allocating — printing, panicking, unwinding,
+//! setting up the next test — while one of them holds the gate open. Under build
+//! load one run of `copying_the_warp_arrays_costs_nothing_once_warm` counted two
+//! reallocations that were another thread's. Thread-locals remove the shared
+//! state entirely: no mutex, no cross-talk, and the numbers do not depend on how
+//! many tests the harness decides to run at once.
+//!
+//! A `thread_local!` with a `const` initialiser allocates nothing itself and
+//! registers no destructor for a `Cell`, so it cannot recurse into the allocator
+//! it is counting; `try_with` is still used, so a call during thread teardown
+//! degrades to "not counting" instead of panicking inside `alloc`.
+//!
+//! One consequence to know about: work the frontend does on *other* threads is
+//! not counted. Every measurement here runs at `FrontendOptions::threads == 1`,
+//! where `WorkPool` takes its sequential path and never starts a rayon worker, so
+//! there is no such work. A future test at a wider thread budget would have to
+//! account for it.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use nalgebra::Vector3;
 
@@ -35,38 +56,46 @@ use slam_rs::lie::{Se3, So3};
 
 // ── the counting allocator ────────────────────────────────────────────────
 
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-static REALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-static DEALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-static COUNTING: AtomicBool = AtomicBool::new(false);
-/// Only one measurement at a time, so the harness's other test threads cannot
-/// land inside a counted region.
-static MEASURING: Mutex<()> = Mutex::new(());
+thread_local! {
+    /// Whether this thread is inside a [`measure`] call.
+    static COUNTING: Cell<bool> = const { Cell::new(false) };
+    /// This thread's counts since the gate opened.
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    static REALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    static DEALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Add one to `counter`, but only on a thread that is measuring.
+///
+/// `try_with` rather than `with`: a thread tearing down its locals may no longer
+/// have them, and a panic inside `alloc` would be an abort.
+#[inline]
+fn count(counter: &'static std::thread::LocalKey<Cell<usize>>) {
+    let counting: bool = COUNTING.try_with(Cell::get).unwrap_or(false);
+    if counting {
+        let _ = counter.try_with(|slot| slot.set(slot.get() + 1));
+    }
+}
 
 struct Counting;
 
 // SAFETY: every method forwards to `System` with the layout it was given and
-// changes nothing about the returned pointer; the counters are the only
-// addition, and they are plain relaxed atomics.
+// changes nothing about the returned pointer. The only addition is a
+// thread-local increment, which cannot allocate: the locals are `Cell`s with
+// `const` initialisers, so they need no lazy setup and register no destructor.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if COUNTING.load(Ordering::Relaxed) {
-            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        }
+        count(&ALLOCATIONS);
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if COUNTING.load(Ordering::Relaxed) {
-            DEALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        }
+        count(&DEALLOCATIONS);
         unsafe { System.dealloc(ptr, layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if COUNTING.load(Ordering::Relaxed) {
-            REALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        }
+        count(&REALLOCATIONS);
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
@@ -89,21 +118,23 @@ impl Allocations {
     }
 }
 
-/// Run `body` with the allocator counting, and report what it cost.
+/// Run `body` with this thread's allocator counting, and report what it cost.
+///
+/// Re-entrant by accident is impossible — `body` is `FnOnce` and the gate is
+/// this thread's — and concurrent measurements on other threads are independent,
+/// because there is no shared counter to share.
 fn measure<T>(body: impl FnOnce() -> T) -> (T, Allocations) {
-    let guard = MEASURING.lock().unwrap_or_else(|error| error.into_inner());
-    ALLOCATIONS.store(0, Ordering::Relaxed);
-    REALLOCATIONS.store(0, Ordering::Relaxed);
-    DEALLOCATIONS.store(0, Ordering::Relaxed);
-    COUNTING.store(true, Ordering::Relaxed);
+    ALLOCATIONS.set(0);
+    REALLOCATIONS.set(0);
+    DEALLOCATIONS.set(0);
+    COUNTING.set(true);
     let value: T = body();
-    COUNTING.store(false, Ordering::Relaxed);
+    COUNTING.set(false);
     let counted: Allocations = Allocations {
-        allocations: ALLOCATIONS.load(Ordering::Relaxed),
-        reallocations: REALLOCATIONS.load(Ordering::Relaxed),
-        deallocations: DEALLOCATIONS.load(Ordering::Relaxed),
+        allocations: ALLOCATIONS.get(),
+        reallocations: REALLOCATIONS.get(),
+        deallocations: DEALLOCATIONS.get(),
     };
-    drop(guard);
     (value, counted)
 }
 
@@ -177,7 +208,7 @@ fn dotted_image(shift: i32) -> ImageU16 {
 /// The snapshot's exact shape: one `Keypoints` per camera, copied in place.
 ///
 /// This is the operation the review measured at sixteen allocations and sixteen
-/// frees per call. Every type in the chain — `Vec`, `Keypoints` and
+/// frees per call, on this thread only. Every type in the chain — `Vec`, `Keypoints` and
 /// `FlowTransforms` — now implements `clone_from` by hand, so a copy into
 /// buffers that are already big enough reaches the allocator zero times.
 #[test]
