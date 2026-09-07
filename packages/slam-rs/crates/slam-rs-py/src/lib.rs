@@ -22,7 +22,7 @@ use slam_rs::frontend::flow::{
 };
 use slam_rs::frontend::patterns::Pattern51;
 use slam_rs::image::ImageU16;
-use slam_rs::{Config, ImageView, VioError};
+use slam_rs::{ImageView, VioError};
 
 /// Map any core error onto `ValueError`, which is what every refusal here is.
 fn value_error<E: std::fmt::Display>(error: E) -> PyErr {
@@ -33,8 +33,6 @@ fn value_error<E: std::fmt::Display>(error: E) -> PyErr {
 #[pyclass(module = "slam_rs._core", eq, eq_int, skip_from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VioStatus {
-    /// No pose yet: the estimator has not initialised.
-    NotInitialised,
     /// The frame arrived before the IMU samples that cover it.
     NeedMoreImu,
     /// The returned pose is an estimate.
@@ -44,7 +42,6 @@ pub enum VioStatus {
 impl From<slam_rs::VioStatus> for VioStatus {
     fn from(status: slam_rs::VioStatus) -> Self {
         match status {
-            slam_rs::VioStatus::NotInitialised => Self::NotInitialised,
             slam_rs::VioStatus::NeedMoreImu => Self::NeedMoreImu,
             slam_rs::VioStatus::Tracking => Self::Tracking,
         }
@@ -104,43 +101,59 @@ impl VioResult {
     }
 }
 
-/// The estimator, driven one frameset at a time.
+/// The estimator, driven one frameset at a time (D16, D17).
 ///
-/// Still wrapping [`slam_rs::StubVio`], the pre-estimator frameset validator:
-/// the real pipeline is `slam_rs::Vio`, which takes basalt's own config and
-/// calibration, and pointing this class at it — with the config and calibration
-/// coming across the boundary — is stage S9's deliverable together with the
-/// Realtime mode. The Python surface below does not change when that happens
-/// except for the constructor.
+/// Offline mode: the frontend and the backend run to completion in the calling
+/// thread, so every `track` result is final and a repeat run over the same input
+/// is bit-identical. The GIL is released around the whole call, so a decoder
+/// thread keeps running while the frameset is tracked.
 #[pyclass(module = "slam_rs._core")]
 pub struct Vio {
-    inner: slam_rs::StubVio,
+    inner: slam_rs::Vio<f32>,
+    /// `last_keypoint_id` before the last accepted frameset, which is what makes
+    /// [`FlowFrame::num_new`] answerable after the fact.
+    keypoint_id_before_track: u64,
 }
 
 #[pymethods]
 impl Vio {
-    /// Build an estimator for a rig of `camera_count` cameras.
+    /// Build the pipeline from basalt's own calibration and config.
+    ///
+    /// The two objects are the ones [`OpticalFlow`] takes: basalt's files arrive
+    /// through [`Calibration::from_json`] and [`VioConfig::from_json`], and the
+    /// catalog's own dataclasses through [`Calibration::from_catalog`]. The
+    /// estimator runs in single precision, which is the precision every
+    /// reference run was produced at (`use-double` false).
     #[new]
-    #[pyo3(signature = (camera_count = 2, min_imu_samples = 1))]
-    fn new(camera_count: usize, min_imu_samples: usize) -> PyResult<Self> {
-        if camera_count == 0 {
-            return Err(PyValueError::new_err("camera_count must be at least 1"));
-        }
+    #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None))]
+    fn new(
+        calibration: PyRef<'_, Calibration>,
+        config: PyRef<'_, VioConfig>,
+        threads: usize,
+        max_keypoints: Option<usize>,
+    ) -> PyResult<Self> {
         Ok(Self {
-            inner: slam_rs::StubVio::new(Config {
-                camera_count,
-                min_imu_samples,
-            }),
+            inner: slam_rs::Vio::new(
+                config.inner.clone(),
+                calibration.inner.clone(),
+                frontend_options(threads, max_keypoints),
+            )
+            .map_err(value_error)?,
+            keypoint_id_before_track: 0,
         })
     }
 
-    /// Number of cameras this estimator expects in every frameset.
+    /// Cameras this estimator expects in every frameset.
+    ///
+    /// Read off the frontend rather than mirrored, so it cannot drift from the
+    /// calibration the rig was built with.
     #[getter]
     fn camera_count(&self) -> usize {
-        self.inner.config().camera_count
+        self.inner.frontend().camera_count()
     }
 
-    /// Add one IMU sample: `gyro` in rad/s, `accel` in m/s², both in the rig frame.
+    /// Add one IMU sample: `gyro` in rad/s, `accel` in m/s², both in the rig
+    /// frame and uncalibrated — the static bias calibration is applied inside.
     fn push_imu(&mut self, t_ns: i64, gyro: [f64; 3], accel: [f64; 3]) -> PyResult<()> {
         self.inner.push_imu(t_ns, gyro, accel).map_err(value_error)
     }
@@ -176,6 +189,10 @@ impl Vio {
     }
 
     /// Process one frameset: `images` holds one `uint8[h, w]` array per camera.
+    ///
+    /// The pixels are copied out of numpy while the GIL is held — one copy — and
+    /// the whole pipeline then runs without it. A frameset the core refuses
+    /// leaves the estimator exactly as the last accepted one did.
     fn track(
         &mut self,
         py: Python<'_>,
@@ -186,6 +203,7 @@ impl Vio {
         for (index, image) in images.iter().enumerate() {
             frames.push(gray_image(image, index)?);
         }
+        let previous_last_id: u64 = self.inner.frontend().last_keypoint_id();
         let result: slam_rs::VioResult = py
             .detach(|| {
                 let views: Vec<ImageView<'_>> = frames
@@ -200,7 +218,318 @@ impl Vio {
                 self.inner.track(t_ns, &views)
             })
             .map_err(value_error)?;
+        self.keypoint_id_before_track = previous_last_id;
         Ok(VioResult { inner: result })
+    }
+
+    /// The keypoints the frontend tracked on the last accepted frameset.
+    ///
+    /// `None` before the first one. The estimator drives its own frontend, so
+    /// this is where a Rerun rung reads the keypoints it draws over the images;
+    /// they are copied out on every call, as [`OpticalFlow::process`] copies them
+    /// out of the same buffers.
+    fn flow_frame(&self) -> PyResult<Option<FlowFrame>> {
+        let Some(t_ns) = self.inner.frontend().t_ns() else {
+            return Ok(None);
+        };
+        flow_frame(self.inner.frontend(), self.keypoint_id_before_track, t_ns)
+            .map(Some)
+            .map_err(PyErr::from)
+    }
+
+    /// The window, its landmarks and the last measured frame's statistics.
+    ///
+    /// `None` until a frameset has been measured: before that the window is
+    /// empty and there are no statistics to report. Everything is copied, so a
+    /// snapshot stays valid across the next `track`.
+    fn snapshot(&self) -> PyResult<Option<VioSnapshot>> {
+        let Some(stats) = self.inner.last_stats() else {
+            return Ok(None);
+        };
+        VioSnapshot::build(&self.inner.estimator().snapshot(), stats).map(Some)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Vio(camera_count={})", self.camera_count())
+    }
+}
+
+/// The estimator's window and last frame, copied out for the Rerun rung (D51).
+///
+/// Everything is a flat array or a scalar: the core logs nothing itself (D03),
+/// so this is what the Python layer draws from. The window is the 15-dof states
+/// followed by the pose-only blocks, each oldest first; `is_state` separates
+/// them and `kf_ids`/`ltkfs` say which are keyframes.
+#[pyclass(module = "slam_rs._core", frozen, skip_from_py_object)]
+#[derive(Debug)]
+pub struct VioSnapshot {
+    t_ns: i64,
+    window_t_ns: Vec<i64>,
+    /// `[tx, ty, tz, qx, qy, qz, qw]` per window frame.
+    window_poses: Vec<f64>,
+    window_linearized: Vec<bool>,
+    window_is_state: Vec<bool>,
+    kf_ids: Vec<i64>,
+    ltkfs: Vec<i64>,
+    marginalized: Vec<i64>,
+    landmark_ids: Vec<i64>,
+    landmark_hosts: Vec<i64>,
+    landmark_host_cameras: Vec<i64>,
+    /// `[x, y, z]` per landmark, world frame.
+    landmark_positions: Vec<f64>,
+    lm_iterations: usize,
+    lm_accepted: usize,
+    lm_lambda: f64,
+    lm_error_before: f64,
+    lm_error_after: f64,
+    termination: &'static str,
+    num_observations: usize,
+    timings: slam_rs::estimator::StageTimings,
+}
+
+impl VioSnapshot {
+    /// Flatten one window snapshot and the frame that produced it.
+    ///
+    /// # Errors
+    ///
+    /// `ValueError` when a landmark id has outgrown the `int64` the boundary
+    /// hands to numpy, which is the same refusal `OpticalFlow` makes for the
+    /// keypoint ids the landmarks inherit.
+    fn build(
+        window: &slam_rs::estimator::WindowSnapshot<f32>,
+        stats: &slam_rs::estimator::FrameStats<f32>,
+    ) -> PyResult<Self> {
+        let frames: usize = window.states.len() + window.poses.len();
+        let mut snapshot: Self = Self {
+            t_ns: window.t_ns,
+            window_t_ns: Vec::with_capacity(frames),
+            window_poses: Vec::with_capacity(7 * frames),
+            window_linearized: Vec::with_capacity(frames),
+            window_is_state: Vec::with_capacity(frames),
+            kf_ids: stats.kf_ids.clone(),
+            ltkfs: stats.ltkfs.clone(),
+            marginalized: window.marginalized.clone(),
+            landmark_ids: Vec::with_capacity(window.landmarks.len()),
+            landmark_hosts: Vec::with_capacity(window.landmarks.len()),
+            landmark_host_cameras: Vec::with_capacity(window.landmarks.len()),
+            landmark_positions: Vec::with_capacity(3 * window.landmarks.len()),
+            lm_iterations: stats.lm.len(),
+            lm_accepted: stats.lm.iter().filter(|step| step.accepted).count(),
+            // The trail is empty for the first four framesets, where `opt_started`
+            // is still false and no linearization ran at all.
+            lm_lambda: stats.lm.last().map_or(0.0, |step| f64::from(step.lambda)),
+            lm_error_before: stats
+                .lm
+                .first()
+                .map_or(0.0, |step| f64::from(step.error_before)),
+            lm_error_after: stats
+                .lm
+                .last()
+                .map_or(0.0, |step| f64::from(step.error_after)),
+            termination: match stats.termination {
+                slam_rs::estimator::LmTermination::NotStarted => "NotStarted",
+                slam_rs::estimator::LmTermination::Converged => "Converged",
+                slam_rs::estimator::LmTermination::MaxIterations => "MaxIterations",
+                slam_rs::estimator::LmTermination::MaxDamping => "MaxDamping",
+            },
+            num_observations: stats.num_observations,
+            timings: stats.timings,
+        };
+        for state in window.states.iter().chain(window.poses.iter()) {
+            let quaternion: [f32; 4] = state.t_w_i.rotation.quaternion_xyzw();
+            snapshot.window_t_ns.push(state.t_ns);
+            snapshot.window_poses.extend_from_slice(&[
+                f64::from(state.t_w_i.translation.x),
+                f64::from(state.t_w_i.translation.y),
+                f64::from(state.t_w_i.translation.z),
+                f64::from(quaternion[0]),
+                f64::from(quaternion[1]),
+                f64::from(quaternion[2]),
+                f64::from(quaternion[3]),
+            ]);
+            snapshot.window_linearized.push(state.linearized);
+            snapshot.window_is_state.push(state.vel_bias.is_some());
+        }
+        for landmark in &window.landmarks {
+            snapshot
+                .landmark_ids
+                .push(i64::try_from(landmark.id.0).map_err(|_| {
+                    PyValueError::new_err(format!(
+                        "landmark id {} does not fit in an int64",
+                        landmark.id.0
+                    ))
+                })?);
+            snapshot.landmark_hosts.push(landmark.host.frame_id);
+            snapshot
+                .landmark_host_cameras
+                .push(landmark.host.cam_id as i64);
+            snapshot.landmark_positions.extend_from_slice(&[
+                f64::from(landmark.position_w.x),
+                f64::from(landmark.position_w.y),
+                f64::from(landmark.position_w.z),
+            ]);
+        }
+        Ok(snapshot)
+    }
+}
+
+#[pymethods]
+impl VioSnapshot {
+    /// Frameset timestamp of the newest state in the window.
+    #[getter]
+    fn t_ns(&self) -> i64 {
+        self.t_ns
+    }
+
+    /// Timestamps of the window's frames: `int64[n]`.
+    #[getter]
+    fn window_t_ns<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+        self.window_t_ns.to_pyarray(py)
+    }
+
+    /// Rig poses of the window's frames, `[tx, ty, tz, qx, qy, qz, qw]`: `float64[n, 7]`.
+    #[getter]
+    fn window_poses<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        self.window_poses
+            .to_pyarray(py)
+            .reshape((self.window_t_ns.len(), 7))
+    }
+
+    /// Whether each window frame's linearization point is frozen: `bool[n]`.
+    #[getter]
+    fn window_linearized<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        self.window_linearized.to_pyarray(py)
+    }
+
+    /// Whether each window frame is a 15-dof state rather than a pose-only block: `bool[n]`.
+    #[getter]
+    fn window_is_state<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        self.window_is_state.to_pyarray(py)
+    }
+
+    /// The keyframes' timestamps, oldest first: `int64[k]`.
+    #[getter]
+    fn kf_ids<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+        self.kf_ids.to_pyarray(py)
+    }
+
+    /// The long-term keyframes' timestamps: `int64[l]`.
+    #[getter]
+    fn ltkfs<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+        self.ltkfs.to_pyarray(py)
+    }
+
+    /// Frames the last marginalization removed from the window: `int64[m]`.
+    #[getter]
+    fn marginalized<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+        self.marginalized.to_pyarray(py)
+    }
+
+    /// Landmark ids, which are the ids of the keypoints that spawned them: `int64[p]`.
+    #[getter]
+    fn landmark_ids<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+        self.landmark_ids.to_pyarray(py)
+    }
+
+    /// Timestamp of the keyframe hosting each landmark: `int64[p]`.
+    #[getter]
+    fn landmark_hosts<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+        self.landmark_hosts.to_pyarray(py)
+    }
+
+    /// Rig index of the camera hosting each landmark: `int64[p]`.
+    #[getter]
+    fn landmark_host_cameras<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+        self.landmark_host_cameras.to_pyarray(py)
+    }
+
+    /// Landmark positions in the world frame, metres: `float64[p, 3]`.
+    #[getter]
+    fn landmark_positions<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        self.landmark_positions
+            .to_pyarray(py)
+            .reshape((self.landmark_ids.len(), 3))
+    }
+
+    /// Levenberg-Marquardt steps the last frame took, accepted and rejected.
+    #[getter]
+    fn lm_iterations(&self) -> usize {
+        self.lm_iterations
+    }
+
+    /// How many of those steps were kept; the rest were backtracked.
+    #[getter]
+    fn lm_accepted(&self) -> usize {
+        self.lm_accepted
+    }
+
+    /// Damping the last step solved with; zero when no step ran.
+    #[getter]
+    fn lm_lambda(&self) -> f64 {
+        self.lm_lambda
+    }
+
+    /// Total cost before the first step; zero when no step ran.
+    #[getter]
+    fn lm_error_before(&self) -> f64 {
+        self.lm_error_before
+    }
+
+    /// Total cost after the last step; zero when no step ran.
+    #[getter]
+    fn lm_error_after(&self) -> f64 {
+        self.lm_error_after
+    }
+
+    /// Why the LM loop stopped: `NotStarted`, `Converged`, `MaxIterations` or `MaxDamping`.
+    #[getter]
+    fn termination(&self) -> &'static str {
+        self.termination
+    }
+
+    /// Landmark observations the window holds after the last frame.
+    #[getter]
+    fn num_observations(&self) -> usize {
+        self.num_observations
+    }
+
+    /// Wall time each estimator stage took on the last frame, milliseconds.
+    #[getter]
+    fn timings_ms(&self) -> std::collections::BTreeMap<&'static str, f64> {
+        [
+            ("back_substitution", self.timings.back_substitution_ns),
+            ("error", self.timings.error_ns),
+            ("linearize", self.timings.linearize_ns),
+            ("marginalize", self.timings.marginalize_ns),
+            ("measure", self.timings.measure_ns),
+            ("solver", self.timings.solver_ns),
+        ]
+        .into_iter()
+        .map(|(name, ns)| (name, ns as f64 / 1e6))
+        .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "VioSnapshot(t_ns={}, window={}, keyframes={}, landmarks={})",
+            self.t_ns,
+            self.window_t_ns.len(),
+            self.kf_ids.len(),
+            self.landmark_ids.len()
+        )
+    }
+}
+
+/// The frontend options both entry points build, from the two knobs they expose.
+///
+/// Everything else in `FrontendOptions` is a property of the port rather than of
+/// a run, so `None` means the default rather than "unset".
+fn frontend_options(threads: usize, max_keypoints: Option<usize>) -> FrontendOptions {
+    let defaults: FrontendOptions = FrontendOptions::default();
+    FrontendOptions {
+        threads,
+        max_keypoints: max_keypoints.unwrap_or(defaults.max_keypoints),
+        ..defaults
     }
 }
 
@@ -613,15 +942,12 @@ impl OpticalFlow {
         threads: usize,
         max_keypoints: Option<usize>,
     ) -> PyResult<Self> {
-        let defaults: FrontendOptions = FrontendOptions::default();
-        let options: FrontendOptions = FrontendOptions {
-            threads,
-            max_keypoints: max_keypoints.unwrap_or(defaults.max_keypoints),
-            ..defaults
-        };
-        let inner: FrameToFrameOpticalFlow<Pattern51> =
-            FrameToFrameOpticalFlow::new(config.inner.clone(), &calibration.inner, options)
-                .map_err(value_error)?;
+        let inner: FrameToFrameOpticalFlow<Pattern51> = FrameToFrameOpticalFlow::new(
+            config.inner.clone(),
+            &calibration.inner,
+            frontend_options(threads, max_keypoints),
+        )
+        .map_err(value_error)?;
         let cameras: usize = inner.camera_count();
         Ok(Self {
             inner,
@@ -862,5 +1188,6 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<VioConfig>()?;
     module.add_class::<OpticalFlow>()?;
     module.add_class::<FlowFrame>()?;
+    module.add_class::<VioSnapshot>()?;
     Ok(())
 }

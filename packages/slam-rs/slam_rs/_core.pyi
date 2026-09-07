@@ -7,7 +7,7 @@ exact: no ``Any``, and every array carries its dtype.
 from collections.abc import Sequence
 from typing import ClassVar
 
-from jaxtyping import Float32, Float64, Int32, Int64, UInt8
+from jaxtyping import Bool, Float32, Float64, Int32, Int64, UInt8
 from numpy import ndarray
 
 from slam_rs.catalog_feed import CameraCalib, ImuCalib
@@ -17,12 +17,15 @@ __version__: str
 class VioStatus:
     """How far the estimator has got.
 
+    Offline mode has exactly these two states: a measured frameset always has a
+    state and an uncovered one never does, so there is no third, "initialising"
+    status to branch on.
+
     A PyO3 enum, not a ``enum.Enum``: it carries no ``name`` or ``value``, it is
     unhashable, and ``VioStatus(1)`` raises ``TypeError``. It does convert to
     ``int`` and compares equal both to its own variants and to their ordinals.
     """
 
-    NotInitialised: ClassVar[VioStatus]
     NeedMoreImu: ClassVar[VioStatus]
     Tracking: ClassVar[VioStatus]
     __hash__: ClassVar[None]
@@ -56,14 +59,129 @@ class VioResult:
 
     def __repr__(self) -> str: ...
 
-class Vio:
-    """The estimator, driven one frameset at a time."""
+class VioSnapshot:
+    """The estimator's window, its landmarks and the last measured frame's statistics.
 
-    def __init__(self, camera_count: int = 2, min_imu_samples: int = 1) -> None: ...
+    The window is the 15-dof states followed by the pose-only blocks, each oldest
+    first; :attr:`window_is_state` separates them, :attr:`kf_ids` and
+    :attr:`ltkfs` say which are keyframes, and :attr:`marginalized` is what the
+    last marginalization removed. Everything is a copy, so a snapshot stays valid
+    across the next :meth:`Vio.track`.
+    """
+
+    @property
+    def t_ns(self) -> int:
+        """Frameset timestamp of the newest state in the window."""
+
+    @property
+    def window_t_ns(self) -> Int64[ndarray, " n_frames"]: ...
+    @property
+    def window_poses(self) -> Float64[ndarray, "n_frames 7"]:
+        """``[tx, ty, tz, qx, qy, qz, qw]`` per window frame, metres and a unit quaternion (xyzw)."""
+
+    @property
+    def window_linearized(self) -> Bool[ndarray, " n_frames"]:
+        """Whether each frame's linearization point is frozen."""
+
+    @property
+    def window_is_state(self) -> Bool[ndarray, " n_frames"]:
+        """Whether each frame is a 15-dof state rather than a pose-only block."""
+
+    @property
+    def kf_ids(self) -> Int64[ndarray, " n_keyframes"]:
+        """The keyframes' timestamps, oldest first."""
+
+    @property
+    def ltkfs(self) -> Int64[ndarray, " n_long_term"]:
+        """The long-term keyframes' timestamps."""
+
+    @property
+    def marginalized(self) -> Int64[ndarray, " n_marginalized"]:
+        """Frames the last marginalization removed from the window."""
+
+    @property
+    def landmark_ids(self) -> Int64[ndarray, " n_landmarks"]:
+        """Landmark ids, which are the ids of the keypoints that spawned them."""
+
+    @property
+    def landmark_hosts(self) -> Int64[ndarray, " n_landmarks"]:
+        """Timestamp of the keyframe hosting each landmark."""
+
+    @property
+    def landmark_host_cameras(self) -> Int64[ndarray, " n_landmarks"]:
+        """Rig index of the camera hosting each landmark."""
+
+    @property
+    def landmark_positions(self) -> Float64[ndarray, "n_landmarks 3"]:
+        """Landmark positions in the world frame, metres."""
+
+    @property
+    def lm_iterations(self) -> int:
+        """Levenberg-Marquardt steps the last frame took; the rejected ones are the rest."""
+
+    @property
+    def lm_accepted(self) -> int:
+        """How many of those steps were kept."""
+
+    @property
+    def lm_lambda(self) -> float:
+        """Damping the last step solved with; ``0.0`` when no step ran."""
+
+    @property
+    def lm_error_before(self) -> float:
+        """Total cost before the first step; ``0.0`` when no step ran."""
+
+    @property
+    def lm_error_after(self) -> float:
+        """Total cost after the last step; ``0.0`` when no step ran."""
+
+    @property
+    def termination(self) -> str:
+        """Why the LM loop stopped: ``NotStarted``, ``Converged``, ``MaxIterations`` or ``MaxDamping``."""
+
+    @property
+    def num_observations(self) -> int:
+        """Landmark observations the window holds."""
+
+    @property
+    def timings_ms(self) -> dict[str, float]:
+        """Wall time each estimator stage took on the last frame, in milliseconds."""
+
+    def __repr__(self) -> str: ...
+
+class Vio:
+    """basalt's VIO pipeline, driven one frameset at a time.
+
+    Offline mode (D17): the frontend and the backend run to completion in the
+    calling thread, so every result is final and a repeat run over the same
+    input is bit-identical.
+
+    The refusals are the ones :class:`OpticalFlow` makes — a value the core
+    refuses is a ``ValueError``, an object of the wrong type a ``TypeError`` and
+    an integer outside the parameter's own type an ``OverflowError`` — never a
+    Rust panic.
+    """
+
+    def __init__(
+        self,
+        calibration: Calibration,
+        config: VioConfig,
+        *,
+        threads: int = 1,
+        max_keypoints: int | None = None,
+    ) -> None:
+        """Build the pipeline for one rig; basalt's own files arrive through ``from_json``.
+
+        Raises ``ValueError`` on everything :class:`OpticalFlow` refuses, and on
+        a config asking for a path this port does not have:
+        ``vio_linearization_type`` other than ``ABS_QR``, ``vio_sqrt_marg``
+        false, or ``vio_enforce_realtime``, which Offline mode cannot honour.
+        """
+
     @property
     def camera_count(self) -> int: ...
     def push_imu(self, t_ns: int, gyro: Sequence[float], accel: Sequence[float]) -> None:
-        """Add one IMU sample; raises ``ValueError`` unless ``t_ns`` follows the last one."""
+        """Add one uncalibrated IMU sample; raises ``ValueError`` unless ``t_ns`` follows the last one."""
 
     def push_imu_batch(
         self,
@@ -74,7 +192,20 @@ class Vio:
         """Add a batch of samples; raises ``ValueError`` unless the timestamps follow the last one."""
 
     def track(self, t_ns: int, images: Sequence[UInt8[ndarray, "h w"]]) -> VioResult:
-        """Process one frameset of ``camera_count`` C-contiguous ``(h, w)`` uint8 images."""
+        """Process one frameset of ``camera_count`` C-contiguous ``(h, w)`` uint8 images.
+
+        Raises ``ValueError`` on a bad dtype, rank or layout, on the wrong number
+        of images, unless every image is the size the calibration gives its
+        camera, and unless ``t_ns`` is strictly after the last accepted frameset.
+        """
+
+    def snapshot(self) -> VioSnapshot | None:
+        """The window and the last measured frame, or None before the first one."""
+
+    def flow_frame(self) -> FlowFrame | None:
+        """The keypoints the frontend tracked on the last accepted frameset, or None before the first."""
+
+    def __repr__(self) -> str: ...
 
 class VioConfig:
     """basalt's ``VioConfig``, as ``data/**/*_config.json`` carries it."""

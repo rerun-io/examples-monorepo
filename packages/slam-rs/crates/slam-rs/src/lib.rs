@@ -9,7 +9,7 @@
 //! [`Vio::track`] runs the frontend and then the estimator to completion in the
 //! calling thread, so every result is final and a repeat run over the same input
 //! is bit-identical. Realtime mode — basalt's two threads joined by bounded
-//! queues — is stage S9's.
+//! queues — is stage S10's.
 
 pub mod ba_base;
 pub mod calib;
@@ -34,38 +34,22 @@ use serde::{Deserialize, Serialize};
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// How far the estimator has got.
+///
+/// Offline mode has exactly these two states: basalt's estimator initialises
+/// inside the same `process_frame` that measures
+/// (`sqrt_keypoint_vio.cpp:263-296`), so a measured frameset always has a state
+/// and an uncovered one never does. There is no third, "initialising" status a
+/// caller could branch on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VioStatus {
-    /// No pose yet: the estimator has not initialised.
-    NotInitialised,
-    /// The frame arrived before the IMU samples that cover it. Nothing moved:
-    /// push the missing samples and call `track` again with the same frameset
-    /// (D17 — no arrival order may reach the trajectory).
+    /// The frame arrived before the IMU samples that cover it. Nothing moved —
+    /// not the frontend, neither IMU buffer, not the estimator — and the pose on
+    /// the result is the last one, not this frame's: push the missing samples
+    /// and call `track` again with the same frameset (D17 — no arrival order may
+    /// reach the trajectory).
     NeedMoreImu,
-    /// The returned pose is an estimate.
+    /// The returned pose is an estimate of this frameset's rig pose.
     Tracking,
-}
-
-/// The pre-estimator stub's configuration.
-///
-/// Not basalt's config — that is [`config::VioConfig`], which is what the real
-/// [`Vio`] takes. This is the two numbers [`StubVio`] needs, and it goes when
-/// the PyO3 class stops wrapping the stub (stage S9).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Config {
-    /// Number of cameras in the rig; every frameset carries exactly this many images.
-    pub camera_count: usize,
-    /// IMU samples needed before a frame can be processed.
-    pub min_imu_samples: usize,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            camera_count: 2,
-            min_imu_samples: 1,
-        }
-    }
 }
 
 /// A borrowed grayscale image: `height` rows of `width` bytes, `stride` bytes apart.
@@ -165,88 +149,6 @@ pub enum VioError {
     /// The frontend's own preintegration (D24) refused a sample.
     #[error("imu: {0}")]
     Imu(#[from] imu::ImuError),
-}
-
-/// The frameset validator the PyO3 class still wraps.
-///
-/// Everything about it is real except the estimator: it enforces the IMU
-/// ordering and the frameset geometry, and reports
-/// [`VioStatus::NeedMoreImu`]/[`VioStatus::NotInitialised`] accordingly, but it
-/// never tracks. The bindings and the Python replay call this while stage S9
-/// moves them onto [`Vio`]; the boundary tests that pin the error taxonomy are
-/// written against it.
-#[derive(Debug, Clone)]
-pub struct StubVio {
-    config: Config,
-    last_imu_t_ns: Option<i64>,
-    imu_count: usize,
-}
-
-impl StubVio {
-    /// Build a validator that has seen nothing yet.
-    pub fn new(config: Config) -> Self {
-        Self {
-            config,
-            last_imu_t_ns: None,
-            imu_count: 0,
-        }
-    }
-
-    /// The configuration this estimator runs with.
-    pub fn config(&self) -> Config {
-        self.config
-    }
-
-    /// Timestamp of the last accepted IMU sample, if any.
-    pub fn last_imu_t_ns(&self) -> Option<i64> {
-        self.last_imu_t_ns
-    }
-
-    /// Add one IMU sample: `gyro` in rad/s, `accel` in m/s², both in the rig frame.
-    ///
-    /// Samples must be strictly increasing in time; a duplicate or out-of-order
-    /// timestamp is a [`VioError::NonMonotonicImu`], never a silent reorder.
-    pub fn push_imu(&mut self, t_ns: i64, gyro: [f64; 3], accel: [f64; 3]) -> Result<(), VioError> {
-        if let Some(previous_t_ns) = self.last_imu_t_ns
-            && t_ns <= previous_t_ns
-        {
-            return Err(VioError::NonMonotonicImu {
-                previous_t_ns,
-                t_ns,
-            });
-        }
-        let _ = (gyro, accel); // the stub counts samples; it never integrates
-        self.last_imu_t_ns = Some(t_ns);
-        self.imu_count += 1;
-        Ok(())
-    }
-
-    /// Process one frameset: one image per camera, oldest to newest in time.
-    pub fn track(&mut self, t_ns: i64, images: &[ImageView<'_>]) -> Result<VioResult, VioError> {
-        check_frameset(images, self.config.camera_count)?;
-
-        let status: VioStatus = if self.imu_count < self.config.min_imu_samples {
-            VioStatus::NeedMoreImu
-        } else {
-            // The estimator arrives with the frontend and backend PRs; until then
-            // the state stays at the identity and no frame ever tracks.
-            VioStatus::NotInitialised
-        };
-        log::debug!(
-            "frame {t_ns} ns: {} images, status {status:?}",
-            images.len()
-        );
-
-        Ok(VioResult {
-            status,
-            t_ns,
-            // The stub never tracks, so the state is the identity every frame.
-            world_from_rig: pose_to_array(&Isometry3::identity()),
-            velocity: [0.0; 3],
-            gyro_bias: [0.0; 3],
-            accel_bias: [0.0; 3],
-        })
-    }
 }
 
 /// The estimator, driven one frameset at a time (D17, D24).
@@ -471,8 +373,7 @@ impl<S: lie::LieScalar> Vio<S> {
 
         // The estimator initialises inside the same `process_frame` that
         // measures (`:263-296`), so a `Measured` outcome always has a state and
-        // the outcome alone decides the status: `VioStatus::NotInitialised` is
-        // reachable from [`StubVio`] only.
+        // the outcome alone decides the status.
         let status: VioStatus = match outcome {
             estimator::FrameOutcome::NeedMoreImu => VioStatus::NeedMoreImu,
             estimator::FrameOutcome::Measured(stats) => {
@@ -643,7 +544,7 @@ impl<S: lie::LieScalar> Vio<S> {
     }
 }
 
-/// The frameset geometry checks both [`Vio::track`] and [`StubVio::track`] run.
+/// The frameset geometry checks [`Vio::track`] runs before it widens anything.
 ///
 /// Caller-controlled `width`, `height` and `stride`: an unchecked
 /// `stride * height` panics in debug and wraps to an accepted zero in release,
@@ -801,49 +702,8 @@ mod tests {
     }
 
     #[test]
-    fn config_round_trips_through_json() {
-        let config: Config = Config {
-            camera_count: 4,
-            min_imu_samples: 8,
-        };
-        let text: String = serde_json::to_string(&config).unwrap();
-        assert_eq!(serde_json::from_str::<Config>(&text).unwrap(), config);
-    }
-
-    #[test]
-    fn a_frame_without_imu_needs_more_imu() {
-        let mut vio: StubVio = StubVio::new(Config::default());
-        let pixels: Vec<u8> = vec![0; 16];
-        let images: [ImageView<'_>; 2] = [image(&pixels, 4, 4), image(&pixels, 4, 4)];
-        let result: VioResult = vio.track(1_000, &images).unwrap();
-        assert_eq!(result.status, VioStatus::NeedMoreImu);
-        assert_eq!(result.t_ns, 1_000);
-        assert_abs_diff_eq!(result.world_from_rig[6], 1.0, epsilon = 1e-12);
-        assert_eq!(result.velocity, [0.0; 3]);
-    }
-
-    #[test]
-    fn imu_lifts_the_frame_out_of_need_more_imu() {
-        let mut vio: StubVio = StubVio::new(Config {
-            camera_count: 1,
-            min_imu_samples: 2,
-        });
-        let pixels: Vec<u8> = vec![0; 16];
-        vio.push_imu(0, [0.0; 3], [0.0, 0.0, 9.81]).unwrap();
-        assert_eq!(
-            vio.track(10, &[image(&pixels, 4, 4)]).unwrap().status,
-            VioStatus::NeedMoreImu
-        );
-        vio.push_imu(1_000, [0.0; 3], [0.0, 0.0, 9.81]).unwrap();
-        assert_eq!(
-            vio.track(2_000, &[image(&pixels, 4, 4)]).unwrap().status,
-            VioStatus::NotInitialised
-        );
-    }
-
-    #[test]
     fn repeated_imu_timestamps_are_rejected() {
-        let mut vio: StubVio = StubVio::new(Config::default());
+        let mut vio: Vio<f32> = pipeline();
         vio.push_imu(5, [0.0; 3], [0.0; 3]).unwrap();
         assert_eq!(
             vio.push_imu(5, [0.0; 3], [0.0; 3]),
@@ -852,12 +712,11 @@ mod tests {
                 t_ns: 5
             })
         );
-        assert_eq!(vio.last_imu_t_ns(), Some(5));
     }
 
     #[test]
     fn a_frameset_of_the_wrong_width_is_rejected() {
-        let mut vio: StubVio = StubVio::new(Config::default());
+        let mut vio: Vio<f32> = pipeline();
         let pixels: Vec<u8> = vec![0; 16];
         assert_eq!(
             vio.track(0, &[image(&pixels, 4, 4)]),
@@ -868,14 +727,14 @@ mod tests {
         );
     }
 
+    /// The geometry of the buffer is checked before a pixel is read, so an
+    /// under-long or a narrow-stride frameset is a typed refusal rather than the
+    /// out-of-range read the widening would otherwise make (D32).
     #[test]
     fn a_short_buffer_is_rejected() {
-        let mut vio: StubVio = StubVio::new(Config {
-            camera_count: 1,
-            min_imu_samples: 1,
-        });
+        let mut vio: Vio<f32> = pipeline();
         let pixels: Vec<u8> = vec![0; 8];
-        let short: [ImageView<'_>; 1] = [image(&pixels, 4, 4)];
+        let short: [ImageView<'_>; 2] = [image(&pixels, 4, 4), image(&pixels, 4, 4)];
         assert_eq!(
             vio.track(0, &short),
             Err(VioError::ShortImage {
@@ -885,12 +744,15 @@ mod tests {
                 len: 8
             })
         );
-        let narrow: [ImageView<'_>; 1] = [ImageView {
-            width: 4,
-            height: 2,
-            stride: 2,
-            data: &pixels,
-        }];
+        let narrow: [ImageView<'_>; 2] = [
+            ImageView {
+                width: 4,
+                height: 2,
+                stride: 2,
+                data: &pixels,
+            },
+            image(&pixels, 4, 2),
+        ];
         assert_eq!(
             vio.track(0, &narrow),
             Err(VioError::StrideTooSmall {
@@ -903,16 +765,16 @@ mod tests {
 
     #[test]
     fn an_image_whose_size_overflows_is_rejected() {
-        let mut vio: StubVio = StubVio::new(Config {
-            camera_count: 1,
-            min_imu_samples: 1,
-        });
-        let huge: [ImageView<'_>; 1] = [ImageView {
-            width: 1,
-            height: 2,
-            stride: 1 << 63,
-            data: &[],
-        }];
+        let mut vio: Vio<f32> = pipeline();
+        let huge: [ImageView<'_>; 2] = [
+            ImageView {
+                width: 1,
+                height: 2,
+                stride: 1 << 63,
+                data: &[],
+            },
+            image(&[], 0, 0),
+        ];
         assert_eq!(
             vio.track(0, &huge),
             Err(VioError::ImageSizeOverflow {
@@ -924,18 +786,23 @@ mod tests {
     }
 
     proptest! {
+        // The pipeline reads two JSON fixtures and builds a frontend per case,
+        // so the case count is cut to what the ordering guard needs.
+        #![proptest_config(ProptestConfig::with_cases(16))]
+
         /// Whatever the first timestamp is, a second one that does not strictly
         /// follow it is rejected, and the accepted state does not move.
         #[test]
         fn non_monotonic_imu_is_always_rejected(first in -1_000_000i64..1_000_000, back in 0i64..1_000_000) {
-            let mut vio: StubVio = StubVio::new(Config::default());
+            let mut vio: Vio<f32> = pipeline();
             vio.push_imu(first, [0.0; 3], [0.0; 3]).unwrap();
-            let result: Result<(), VioError> = vio.push_imu(first - back, [0.0; 3], [0.0; 3]);
             prop_assert_eq!(
-                result,
+                vio.push_imu(first - back, [0.0; 3], [0.0; 3]),
                 Err(VioError::NonMonotonicImu { previous_t_ns: first, t_ns: first - back })
             );
-            prop_assert_eq!(vio.last_imu_t_ns(), Some(first));
+            // The guard is the only thing that moved, so the next in-order
+            // sample is still accepted.
+            prop_assert!(vio.push_imu(first + 1, [0.0; 3], [0.0; 3]).is_ok());
         }
     }
 }

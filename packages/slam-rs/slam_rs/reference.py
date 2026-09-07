@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
+from slam_rs import reference_bundle
+from slam_rs.reference_bundle import BundleFile
+
 MANIFEST_PATH: Path = Path(__file__).resolve().parents[1] / "reference_segments.toml"
 """The checked-in manifest, beside the package rather than inside it."""
 
@@ -323,6 +326,26 @@ class ReferenceManifest:
     def in_tier(self, tier: Tier) -> tuple[ReferenceSegment, ...]:
         """Every segment in one tier, in manifest order."""
         return tuple(segment for segment in self.segments if segment.tier == tier)
+
+    def cpp_trajectory(self, segment: ReferenceSegment) -> BundleFile:
+        """Where one segment's basalt C++ trajectory is, and why it cannot be read when it cannot.
+
+        Eight of the ten are committed beside the manifest and are always there;
+        the two long-tier ones are too large for the history and live in the
+        machine-local reference bundle (:mod:`slam_rs.reference_bundle`), so the
+        answer is the same shape either way and a caller can skip with a reason.
+
+        Args:
+            segment: The segment whose reference trajectory is wanted.
+
+        Returns:
+            The path it occupies, and why it is unusable if it is missing.
+        """
+        if segment.reference.bundle_only:
+            return reference_bundle.resolve(segment.segment_id, "basalt_traj.csv")
+        path: Path = self.package_root / segment.reference.trajectory_csv
+        reason: str | None = None if path.is_file() else f"{path} is committed in the manifest but missing from this checkout"
+        return BundleFile(path=path, reason=reason)
 
 
 def _imu(block: dict[str, Any]) -> ImuParameters:
