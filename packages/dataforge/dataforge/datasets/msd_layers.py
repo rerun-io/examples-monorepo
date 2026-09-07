@@ -51,8 +51,8 @@ from dataforge.logging_toolkit import (
     log_magnetometer,
     log_pose_track,
     log_rig_node,
+    log_trail_segments,
     log_video_stream,
-    time_column,
 )
 from dataforge.video_encoding import FrameSource, encode_frames_to_mp4
 
@@ -115,8 +115,14 @@ GT_TRAJECTORY_RADIUS_M: float = 0.002
 """Line radius of the gt path, in metres — thin, because it overlays the rig itself."""
 GT_TRAIL_COLOR: tuple[int, int, int] = (255, 215, 90)
 """Fixed tint of the recent-motion trail; warm, so it reads against the cool full path."""
-GT_TRAIL_RADIUS_M: float = 0.004
-"""Point radius of the trail, in metres; a 1 kHz trail is dense, so the dots stay small."""
+GT_TRAIL_RADIUS_UI_POINTS: float = 3.0
+"""Stroke width of the trail, in ui points — a screen-space width, not a metric one.
+
+The trail used to be a 2 cm ``Points3D`` and read as a string of scattered
+balls: at the archive's ~1 kHz a dot wide enough to see is wider than the gap
+between samples. It is drawn as segments now (``log_trail_segments``), and a
+stroke is measured on screen so one number serves a headset and a vehicle alike.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -583,26 +589,23 @@ def write_gt_layer(
             translations_xyz=gt.translations_xyz,
             quaternions_xyzw=gt.quaternions_xyzw,
         )
-        # Two views of one trajectory: the static strip is the whole path for the
-        # overview, and the per-pose points are what the blueprint's cursor-relative
-        # time range turns into a recent-motion trail in the follow view.
+        # Two views of one trajectory: the static strip is the whole path, shown
+        # whole in the overview and dimmed to context in the follow view, and the
+        # per-pose segments are what the blueprint's cursor-relative time range
+        # turns into a recent-motion trail on top of it.
         rr.log(
             schema.trajectory_path(schema.GT_RUN_SOURCE),
             rr.LineStrips3D([gt.translations_xyz], colors=GT_TRAJECTORY_COLOR, radii=GT_TRAJECTORY_RADIUS_M),
             static=True,
             recording=recording,
         )
-        rr.log(
+        log_trail_segments(
+            recording,
             schema.trail_path(schema.GT_RUN_SOURCE),
-            rr.Points3D.from_fields(colors=GT_TRAIL_COLOR, radii=GT_TRAIL_RADIUS_M),
-            static=True,
-            recording=recording,
-        )
-        rr.send_columns(
-            schema.trail_path(schema.GT_RUN_SOURCE),
-            indexes=[time_column(gt.times_ns)],
-            columns=rr.Points3D.columns(positions=gt.translations_xyz),
-            recording=recording,
+            times_ns=gt.times_ns,
+            translations_xyz=gt.translations_xyz,
+            color=GT_TRAIL_COLOR,
+            radius_ui_points=GT_TRAIL_RADIUS_UI_POINTS,
         )
         recording.send_property(
             "gt",

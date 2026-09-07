@@ -4,9 +4,11 @@ A capture rig's viewer layout is the same shape whatever device recorded it: the
 rig in 3D beside a grid of camera panes, over a row of sensor plots, with a
 follow camera that rides the rig once a pose layer animates it. Only the panes,
 the plots, the eye and the run source of the derived trajectory change, so those
-are the arguments and everything else lives here once — including the two
-overrides that make the pair of 3D views complementary (the overview shows the
-whole path and hides the trail; the follow view does the opposite).
+are the arguments and everything else lives here once — including the overrides
+that make the pair of 3D views complementary. The overview shows the whole path
+and hides the trail; the follow view keeps both, with the path repainted thin
+and dim so it reads as context under the highlighted trail rather than as a
+second stroke competing with it.
 
 The overrides name entities a base-only recording does not have. That is
 deliberate: an override on a missing entity is inert, so the layout is already
@@ -17,12 +19,17 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import rerun as rr
 import rerun.blueprint as rrb
 
 from dataforge import schema
 
 TRAIL_WINDOW_S: float = -10.0
 """How far back of the cursor the follow view's motion trail reaches, in seconds."""
+DIM_TRAJECTORY_COLOR: tuple[int, int, int] = (90, 110, 140)
+"""Tint the follow view repaints the full path in: cool and desaturated, so it sits behind the trail."""
+DIM_TRAJECTORY_RADIUS_UI_POINTS: float = 1.0
+"""How thin the follow view draws the full path, in ui points; the trail is three."""
 CAMERA_GRID_COLUMNS: int = 2
 """Columns in the synchronized-camera grid; two keeps a stereo pair side by side."""
 RIG_COLUMN_SHARES: tuple[int, int] = (3, 2)
@@ -141,8 +148,9 @@ def rig_blueprint(
 
     Two 3D views on purpose. The overview is rooted at the world and shows the
     whole derived path with its cursor trail hidden; the follow view is rooted at
-    the rig and shows only the last ``TRAIL_WINDOW_S`` of motion, so the two
-    together read as "where it went" and "where it is going".
+    the rig and highlights the last ``TRAIL_WINDOW_S`` of motion over the same
+    path drawn thin and dim, so the two together read as "where it went" and
+    "where it is going".
 
     Args:
         camera_panes: One pane per camera, in display order.
@@ -172,7 +180,12 @@ def rig_blueprint(
                         contents="/**",
                         line_grid=True,
                         overrides={
-                            schema.trajectory_path(run_source): rrb.EntityBehavior(visible=False),
+                            # Not hidden: with the path gone the highlighted trail
+                            # floated with nothing to place it against, so it stays
+                            # as thin dim context underneath.
+                            schema.trajectory_path(run_source): rr.LineStrips3D.from_fields(
+                                colors=DIM_TRAJECTORY_COLOR, radii=rr.Radius.ui_points(DIM_TRAJECTORY_RADIUS_UI_POINTS)
+                            ),
                             schema.trail_path(run_source): rrb.VisibleTimeRanges(
                                 rrb.VisibleTimeRange(
                                     schema.TIMELINE,

@@ -72,9 +72,9 @@ One sequence is **two** rrds plus **one** sidecar under one recording id, so the
 catalog stacks the rrds as layers of one segment: `base/` holds the video, the
 IMU and the magnetometer, and `gt/` holds the ground truth — the temporal
 `world_T_rig` on the rig node at the archive's full ~1 kHz rate, the whole path
-as a static `LineStrips3D` at `/world/runs/gt/trajectory`, a per-pose `Points3D`
-at `/world/runs/gt/trail` that the default blueprint shows through a −10 s
-cursor-relative window, and the root `ViewCoordinates`.
+as a static `LineStrips3D` at `/world/runs/gt/trajectory`, a per-pose two-point
+`LineStrips3D` at `/world/runs/gt/trail` that the default blueprint shows through
+a −10 s cursor-relative window, and the root `ViewCoordinates`.
 
 Both layers follow [the layer rule](#the-layer-rule). Only `base` needs the
 archive, so the one member `gt` still needs afterwards — `gt/data.csv`, a few MB

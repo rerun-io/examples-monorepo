@@ -130,6 +130,14 @@ states its `camera_model` and a radtan8 camera also carries `rpmax` as
 the Odyssey+ really writes `"rpmax": 0.0`, which is a claim, whereas a missing
 key is a truncated file, and a zero default would make the two the same thing.
 
+**The trail is segments, not dots.** The recent-motion trail is one two-point
+`LineStrips3D` per pose — the step that reached it — with a 3 ui-point stroke,
+because a metric-radius `Points3D` trail read as a string of scattered balls: at
+the archive's ~1 kHz a dot wide enough to see is wider than the gap between
+samples. The first pose gets a zero-length segment so the trail has exactly as
+many rows as the pose track it trails, and the Follow view keeps the full
+trajectory as thin dim context underneath rather than hiding it.
+
 **A repaired quaternion is not a dropout.** A `gt` row whose quaternion is not
 unit-norm (upstream writes `0 0 0 0`) breaks the rotation chain from that row on,
 so every child frustum of the rig stops tracking. The repair is per-row: identity

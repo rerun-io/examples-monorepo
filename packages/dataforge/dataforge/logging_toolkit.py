@@ -417,6 +417,60 @@ def log_pose_track(
     )
 
 
+def log_trail_segments(
+    recording: rr.RecordingStream,
+    entity_path: str,
+    *,
+    times_ns: Int64[ndarray, "n_poses"],
+    translations_xyz: Float64[ndarray, "n_poses 3"],
+    color: tuple[int, int, int],
+    radius_ui_points: float,
+) -> None:
+    """Send a motion trail columnar: one two-point ``LineStrips3D`` per pose, the step that reached it.
+
+    A trail is what a blueprint shows through a cursor-relative window, so it has
+    to be **per pose** rather than one growing strip — but a per-pose
+    ``Points3D`` draws it as dots, and at a 1 kHz sample rate a dot wide enough
+    to see is wider than the gap between samples, so the trail reads as a string
+    of scattered balls. One segment per pose, from the previous position to this
+    one, draws the same rows as a stroke the eye follows.
+
+    Two decisions the caller does not get to vary per row:
+
+    * **The first pose gets a zero-length segment**, so the trail has exactly as
+      many rows as the pose track it trails. One fewer would put the window a
+      sample out of step with the rig, which is worse than a strip the viewer
+      draws as nothing.
+    * **The tint and the width are static.** One trail is one quantity, not a
+      per-row class. The width is in ui points because it is a stroke on screen:
+      a metric radius would have to be re-picked for every device whose motion
+      is on a different scale.
+
+    Args:
+        recording: Destination recording stream.
+        entity_path: Entity to draw the trail on, usually ``schema.trail_path(source)``.
+        times_ns: Pose times on the ``video_time`` clock, in nanoseconds.
+        translations_xyz: Positions in metres, in the same order as ``times_ns``.
+        color: Trail tint, RGB.
+        radius_ui_points: Stroke width in ui points; Rerun carries it as a
+            negative radius, which is what keeps it screen-space.
+    """
+    rr.log(
+        entity_path,
+        rr.LineStrips3D.from_fields(colors=color, radii=rr.Radius.ui_points(radius_ui_points)),
+        static=True,
+        recording=recording,
+    )
+    previous: Int64[ndarray, "n_poses"] = np.maximum(np.arange(times_ns.size, dtype=np.int64) - 1, 0)
+    segments_xyz: Float64[ndarray, "n_poses 2 3"] = np.stack([translations_xyz[previous], translations_xyz], axis=1)
+    rr.send_columns(
+        entity_path,
+        indexes=[time_column(times_ns)],
+        columns=rr.LineStrips3D.columns(strips=list(segments_xyz)),
+        recording=recording,
+    )
+
+
 def log_imu(recording: rr.RecordingStream, rig: int, imu: int, *, gyro: ImuChannel, accel: ImuChannel, name: str) -> None:
     """Log one IMU node: both channels columnar, plus the static node metadata.
 

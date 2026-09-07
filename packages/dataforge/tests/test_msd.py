@@ -24,7 +24,7 @@ from jaxtyping import Float64
 from msd_hub import REVISION_SHA, SEQUENCE, FakeHub, build_hub, recording_properties
 from numpy import ndarray
 
-from dataforge import paths, schema
+from dataforge import blueprints, paths, schema
 from dataforge.basalt import FollowFrame, follow_frame, load_calibration
 from dataforge.datasets import msd, msd_layers
 from dataforge.datasets.msd import (
@@ -577,3 +577,26 @@ def test_only_a_magnetometer_device_gets_the_third_plot_pane() -> None:
     assert set(follow.visualizer_overrides) == {schema.trajectory_path("gt"), schema.trail_path("gt")}
     rig: rrb.View = next(view for view in without if view.name == "Rig")
     assert set(rig.visualizer_overrides) == {schema.trail_path("gt")}
+
+
+def test_the_two_3d_views_are_complementary_views_of_one_path() -> None:
+    """The overview hides the trail; the Follow view keeps the whole path as dim context.
+
+    Hiding the trajectory in the Follow view left the highlighted trail floating
+    with nothing to place it against, so the path stays and is overridden thin and
+    dim instead — context behind the highlight rather than a competing stroke.
+    """
+    views: list[rrb.View] = blueprint_views(build_blueprint(2, has_magnetometer=False, follow=UPRIGHT_FOLLOW))
+    rig: rrb.View = next(view for view in views if view.name == "Rig")
+    follow: rrb.View = next(view for view in views if view.name == "Follow")
+
+    assert rig.visualizer_overrides[schema.trail_path("gt")] == rrb.EntityBehavior(visible=False), "the overview still hides the trail"
+
+    dimmed: object = follow.visualizer_overrides[schema.trajectory_path("gt")]
+    assert isinstance(dimmed, rr.LineStrips3D), "the Follow view styles the path rather than hiding it"
+    assert dimmed.radii is not None and dimmed.colors is not None
+    assert dimmed.radii.as_arrow_array().to_pylist() == [-blueprints.DIM_TRAJECTORY_RADIUS_UI_POINTS], "thin, and in ui points"
+    packed: int = dimmed.colors.as_arrow_array().to_pylist()[0]
+    assert ((packed >> 24) & 0xFF, (packed >> 16) & 0xFF, (packed >> 8) & 0xFF) == blueprints.DIM_TRAJECTORY_COLOR
+    trail_override: object = follow.visualizer_overrides[schema.trail_path("gt")]
+    assert isinstance(trail_override, rrb.VisibleTimeRanges), "the trail is still the cursor-relative window"

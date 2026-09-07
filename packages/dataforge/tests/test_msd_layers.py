@@ -35,7 +35,13 @@ from scipy.spatial.transform import Rotation
 from dataforge import paths, schema
 from dataforge.basalt import BasaltPose, CalibratedCamera, load_calibration, rotate_camera_cw, upright_quarter_turns
 from dataforge.datasets.msd import MSD_DEVICES, MsdDataset, MsdDeviceChoice
-from dataforge.datasets.msd_layers import MEASURED_UP_WINDOW_NS, WORLD_UP_VIEW_COORDINATES, MeasuredUp, measured_world_up
+from dataforge.datasets.msd_layers import (
+    GT_TRAIL_RADIUS_UI_POINTS,
+    MEASURED_UP_WINDOW_NS,
+    WORLD_UP_VIEW_COORDINATES,
+    MeasuredUp,
+    measured_world_up,
+)
 from dataforge.euroc import GtTrajectory, TimestampedSamples, gt_trajectory
 from dataforge.logging_toolkit import ImuChannel
 
@@ -362,8 +368,17 @@ def test_the_rig_quaternion_is_the_file_quaternion_reordered_to_xyzw(converted_i
     np.testing.assert_allclose(np.asarray(stored[GT_DROPOUT_ROW][0], dtype=np.float64), [0.0, 0.0, 0.0, 1.0], atol=1e-6)
 
 
-def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail(converted_index: tuple[FakeHub, Path, Path]) -> None:
-    """The overview strip is static and whole; the trail is one point per pose, for the cursor window."""
+def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail_of_segments(converted_index: tuple[FakeHub, Path, Path]) -> None:
+    """The overview strip is static and whole; the trail is one 2-point segment per pose.
+
+    A metric-radius ``Points3D`` trail read as a string of scattered balls, because
+    at ~1 kHz a dot wide enough to see is wider than the gap between samples. The
+    rows are the same rows; each one is now the step that reached that pose.
+
+    The segments are checked against the *trajectory's own* points, so the two
+    views of one path are asserted to be the same path rather than each being
+    compared to a recomputed expectation.
+    """
     _, _, gt_target = converted_index
 
     store: rr.experimental.ChunkStore = read_back(gt_target)
@@ -372,8 +387,21 @@ def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail(converted_index: 
         store.reader(index=None, contents=trajectory).to_arrow_table().to_pylist()[0][f"{trajectory}:LineStrips3D:strips"]
     )
     assert len(strips) == 1, "the whole trajectory is one strip"
-    assert len(strips[0]) == GT_NUM_POSES
-    assert column_rows(store, f"{schema.trail_path('gt')}:Points3D:positions").num_rows == GT_NUM_POSES
+    path_xyz: Float64[ndarray, "n_poses 3"] = np.asarray(strips[0], dtype=np.float64)
+    assert path_xyz.shape == (GT_NUM_POSES, 3)
+
+    trail: str = schema.trail_path("gt")
+    segments: pa.Table = column_rows(store, f"{trail}:LineStrips3D:strips")
+    assert segments.num_rows == GT_NUM_POSES, "one segment per pose, so the trail indexes exactly like the rig"
+    rows: list[list[list[list[float]]]] = segments.column(1).to_pylist()
+    for pose in range(GT_NUM_POSES):
+        assert len(rows[pose]) == 1, "one strip per row"
+        segment: Float64[ndarray, "2 3"] = np.asarray(rows[pose][0], dtype=np.float64)
+        np.testing.assert_allclose(segment, path_xyz[[max(pose - 1, 0), pose]], atol=1e-6)
+
+    static: dict[str, list[object]] = store.reader(index=None, contents=trail).to_arrow_table().to_pylist()[0]
+    assert static[f"{trail}:LineStrips3D:radii"] == [-GT_TRAIL_RADIUS_UI_POINTS], "the stroke is screen-space, not metric"
+    assert f"{trail}:Points3D:positions" not in store.reader(index=schema.TIMELINE).to_arrow_table().column_names
 
 
 def test_only_the_gt_layer_states_the_world_axes(converted_index: tuple[FakeHub, Path, Path]) -> None:
