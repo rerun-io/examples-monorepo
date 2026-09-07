@@ -966,11 +966,12 @@ fn the_window_stays_inside_its_budget() {
         };
         let ltkfs: usize = stats.ltkfs.len();
         if stats.opt_started {
+            let window: WindowSnapshot<f64> = estimator.snapshot();
             assert!(
-                estimator.ba.frame_states.len() <= max_states,
+                window.states.len() <= max_states,
                 "frame {}: {} states exceed the budget",
                 flow.t_ns,
-                estimator.ba.frame_states.len()
+                window.states.len()
             );
             let could_evict: bool = stats
                 .marginalization
@@ -986,10 +987,10 @@ fn the_window_stays_inside_its_budget() {
                 if could_evict { "was" } else { "was not" }
             );
             assert!(
-                estimator.ba.frame_poses.len() <= ltkfs + max_kfs,
+                window.poses.len() <= ltkfs + max_kfs,
                 "frame {}: {} poses exceed the budget",
                 flow.t_ns,
-                estimator.ba.frame_poses.len()
+                window.poses.len()
             );
         }
 

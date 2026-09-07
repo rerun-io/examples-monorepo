@@ -391,9 +391,10 @@ const VEE_FACTOR: f64 = 2.0;
 #[derive(Debug, Clone)]
 pub struct SqrtKeypointVio<S: LieScalar> {
     /// The sliding window: `frame_states`, `frame_poses`, `lmdb` and the
-    /// calibration. Public because [`crate::marg::marginalize`] takes it by
-    /// `&mut` and the snapshot reads it.
-    pub ba: BundleAdjustmentBase<S>,
+    /// calibration. Crate-visible because [`crate::marg::marginalize`] takes
+    /// it by `&mut` and [`Self::snapshot`] reads it; outside the crate the
+    /// snapshot is the window's only view.
+    pub(crate) ba: BundleAdjustmentBase<S>,
 
     /// `prev_frame` (`:198`), the frameset the last `measure` consumed.
     prev_frame: Option<Arc<FlowObservations>>,
