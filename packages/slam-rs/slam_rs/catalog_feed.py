@@ -178,8 +178,15 @@ class Frameset:
     """Shared capture timestamp of every image, on the ``video_time`` clock."""
     images: list[UInt8[ndarray, "h w"]]
     """One C-contiguous grayscale image per camera, in rig camera order."""
+    image_sha256: tuple[str, ...]
+    """Digest of each camera's gray8 bytes, in the same order as :attr:`images`.
+
+    This is the unit the basalt C++ reference records in its ``frames.sha256``
+    (one ``t_ns,cam_index,sha256`` line per decoded frame), so the two decoders
+    can be compared frame by frame rather than only in aggregate.
+    """
     sha256: str
-    """Digest of the timestamp and every image's bytes, so two runs can prove identical pixels."""
+    """Digest of the timestamp and the per-camera digests: one value per frameset."""
     imu: ImuStream
     """Inertial samples since the previous frameset, running one sample past :attr:`t_ns`.
 
@@ -589,12 +596,17 @@ class SegmentFeed:
                 frame_imu: ImuStream = window_imu.between(emitted_imu_t_ns, max(lead_ns, t_ns))
                 if len(frame_imu):
                     emitted_imu_t_ns = int(frame_imu.t_ns[-1])
+                # Per camera first, because that is the unit the C++ reference
+                # records; the frameset digest is then built from those, which
+                # also avoids hashing every pixel twice.
+                image_sha256: tuple[str, ...] = tuple(hashlib.sha256(image.tobytes()).hexdigest() for image in images)
                 digest = hashlib.sha256(np.int64(t_ns).tobytes())
-                for image in images:
-                    digest.update(image.tobytes())
+                for camera_digest in image_sha256:
+                    digest.update(bytes.fromhex(camera_digest))
                 yield Frameset(
                     t_ns=t_ns,
                     images=images,
+                    image_sha256=image_sha256,
                     sha256=digest.hexdigest(),
                     imu=frame_imu,
                     ground_truth=_nearest_pose(window_gt, t_ns),

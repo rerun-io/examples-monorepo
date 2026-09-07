@@ -17,6 +17,19 @@ MANIFEST_PATH: Path = Path(__file__).resolve().parents[1] / "reference_segments.
 
 Tier: TypeAlias = Literal["smoke", "accuracy", "long"]
 """How often a segment runs: every commit, per pull request, nightly."""
+GatePolicy: TypeAlias = Literal["tight", "standard", "no_divergence"]
+"""How hard a segment may be gated.
+
+``tight`` segments are where basalt is comfortably accurate (about 1-2 cm) and a
+regression is unambiguous. ``standard`` segments are harder but still stable, and
+gate relative to basalt's own number rather than an absolute threshold.
+``no_divergence`` segments are ones where basalt itself is near failure: on
+``MGO01_low_light`` and ``MGO13_sudden_movements`` the C++ binary gets 68 cm, and
+merely changing between two legitimate decode paths of the same estimator moves
+the answer by 32 cm and 18 cm — on MGO01 the ordering even flips. A tolerance
+there would measure noise, so those two only gate "kept tracking, did not
+diverge".
+"""
 DecodePath: TypeAlias = Literal["cpu_gray8_dav1d_1thread"]
 """Frozen pixel provenance. Only the single-threaded dav1d ``gray8`` path is gated in V0."""
 GroundTruthSource: TypeAlias = Literal["lighthouse", "mocap"]
@@ -28,6 +41,8 @@ DECODE_PATH_BY_NAME: dict[str, DecodePath] = {"cpu_gray8_dav1d_1thread": "cpu_gr
 """Decode paths a gate may be frozen on."""
 GT_SOURCE_BY_NAME: dict[str, GroundTruthSource] = {"lighthouse": "lighthouse", "mocap": "mocap"}
 """Ground-truth measurement systems the two MSD devices use."""
+GATE_POLICY_BY_NAME: dict[str, GatePolicy] = {"tight": "tight", "standard": "standard", "no_divergence": "no_divergence"}
+"""Valid gate policies, in decreasing strictness."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -112,6 +127,69 @@ class GroundTruthProperties:
 
 
 @dataclass(slots=True, frozen=True)
+class CppAte:
+    """The basalt C++ run's error against the ``gt.csv`` sidecar.
+
+    The association is driven by the **estimate**: each basalt pose takes the
+    nearest ground-truth pose within 5 ms, so ``associated`` counts estimate poses
+    and ``total`` is the estimate's own length. Driving it the other way would
+    pair ten 917 Hz truth poses to every 54 Hz estimate and weight the metric by
+    truth density.
+    """
+
+    rmse_cm: float
+    """Rigid-aligned RMSE, centimetres."""
+    max_cm: float
+    """Largest residual, centimetres."""
+    median_cm: float
+    """Median residual, centimetres."""
+    associated: int
+    """Estimate poses that found a truth pose within the tolerance."""
+    total: int
+    """Poses the C++ run produced, one per frameset."""
+
+
+@dataclass(slots=True, frozen=True)
+class CppReferenceRun:
+    """The basalt C++ run this port is measured against, and how hard it may be gated."""
+
+    gate_policy: GatePolicy
+    """How hard this segment may be gated; see :data:`GatePolicy`."""
+    fork_commit: str
+    """Commit of the basalt fork that produced the run."""
+    fork_branch: str
+    """Branch the commit sits on. Not pushed anywhere; the fork is machine-local."""
+    fork_base: str
+    """Upstream commit the branch was cut from."""
+    decode_path: DecodePath
+    """Decode path the run consumed, which must equal the segment's own."""
+    deterministic: bool
+    """``deterministic=1``: the tracker pops state in the calling loop instead of on a thread."""
+    num_threads: int
+    """``num-threads``: the TBB cap, so every reported wall time is single-thread."""
+    use_double: bool
+    """``use-double``: false, so the estimator ran in single precision."""
+    vio_config: str
+    """basalt VIO config the run used, relative to the fork."""
+    optical_flow_image_safe_radius: float
+    """``config.optical_flow_image_safe_radius`` for this device; 472 on Index, 340 on G2."""
+    run_json: Path
+    """Full run manifest, relative to the package root; always committed."""
+    trajectory_sha256: str
+    """Digest of ``basalt_traj.csv``, so a bundle copy can be checked."""
+    bundle_only: bool
+    """True when the trajectory is too large to check in and lives in the reference bundle."""
+    trajectory_csv: Path
+    """Trajectory path: relative to the package root when committed, to the bundle root when ``bundle_only``."""
+    frames_sha256: Path | None
+    """Per-frame pixel digests, relative to the package root; committed for the smoke pair only."""
+    gt_csv_fixture: Path | None
+    """Committed copy of the ``gt.csv`` sidecar, so the smoke gate runs offline."""
+    expected_cpp_ate: CppAte
+    """What the C++ run scored, reproduced by the fast and slow gate tests."""
+
+
+@dataclass(slots=True, frozen=True)
 class ReferenceSegment:
     """One frozen segment of the reference set."""
 
@@ -137,6 +215,8 @@ class ReferenceSegment:
     """Expected ground-truth properties."""
     layers: dict[str, LayerFingerprint]
     """Size and schema digest per layer name (``base``, ``gt``)."""
+    reference: CppReferenceRun
+    """The basalt C++ run this segment is measured against."""
     imu: ImuParameters
     """Frozen IMU noise model for this device."""
 
@@ -257,6 +337,44 @@ def _imu(block: dict[str, Any]) -> ImuParameters:
     )
 
 
+def _reference_run(block: dict[str, Any], segment_id: str) -> CppReferenceRun:
+    """One ``[segment.reference]`` table.
+
+    Raises:
+        ValueError: If the gate policy or decode path is unknown.
+    """
+    if block["gate_policy"] not in GATE_POLICY_BY_NAME:
+        raise ValueError(f"{segment_id}: unknown gate policy {block['gate_policy']!r}, expected one of {sorted(GATE_POLICY_BY_NAME)}")
+    if block["decode_path"] not in DECODE_PATH_BY_NAME:
+        raise ValueError(f"{segment_id}: reference run has unknown decode path {block['decode_path']!r}")
+    ate_block: dict[str, Any] = block["expected_cpp_ate"]
+    return CppReferenceRun(
+        gate_policy=GATE_POLICY_BY_NAME[block["gate_policy"]],
+        fork_commit=block["fork_commit"],
+        fork_branch=block["fork_branch"],
+        fork_base=block["fork_base"],
+        decode_path=DECODE_PATH_BY_NAME[block["decode_path"]],
+        deterministic=bool(block["deterministic"]),
+        num_threads=int(block["num_threads"]),
+        use_double=bool(block["use_double"]),
+        vio_config=block["vio_config"],
+        optical_flow_image_safe_radius=float(block["optical_flow_image_safe_radius"]),
+        run_json=Path(block["run_json"]),
+        trajectory_sha256=block["trajectory_sha256"],
+        bundle_only=bool(block["bundle_only"]),
+        trajectory_csv=Path(block["trajectory_csv"]),
+        frames_sha256=Path(block["frames_sha256"]) if "frames_sha256" in block else None,
+        gt_csv_fixture=Path(block["gt_csv_fixture"]) if "gt_csv_fixture" in block else None,
+        expected_cpp_ate=CppAte(
+            rmse_cm=float(ate_block["rmse_cm"]),
+            max_cm=float(ate_block["max_cm"]),
+            median_cm=float(ate_block["median_cm"]),
+            associated=int(ate_block["associated"]),
+            total=int(ate_block["total"]),
+        ),
+    )
+
+
 def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
     """Parse the reference manifest.
 
@@ -319,6 +437,7 @@ def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
                     name: LayerFingerprint(size_bytes=int(block["size_bytes"]), schema_sha256=block["schema_sha256"])
                     for name, block in entry["layers"].items()
                 },
+                reference=_reference_run(entry["reference"], identifier),
                 imu=_imu(entry["imu"]),
             )
         )

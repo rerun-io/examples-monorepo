@@ -1,0 +1,10 @@
+This long-tier segment ships its run manifest only.
+
+`basalt_traj.csv` (4.8 MB) and `frames.sha256` (5.1 MB) are too
+large to check in and come from the reference bundle instead: point
+SLAM_RS_REFERENCE_DIR at a copy, or drop it in packages/slam-rs/data/reference/,
+laid out as <segment>/basalt_traj.csv. `slam_rs.reference_bundle` resolves them
+and the tests skip with a clear message when they are absent.
+
+run.json here carries the full provenance, including the trajectory's own
+sha256, so a bundle copy can be verified against it.

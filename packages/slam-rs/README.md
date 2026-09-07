@@ -21,6 +21,7 @@ so `track()` never reports `Tracking` yet.
 | `tools/` | Thin CLI shims over `slam_rs/apis/`. |
 | `reference_segments.toml` | The frozen reference set (below). |
 | `tests/reference/` | Checked-in basalt C++ trajectories the gate tests reproduce. |
+| `slam_rs/reference_bundle.py` | Resolves the two long-tier artifacts kept out of git. |
 
 `Cargo.lock` is committed. `cargo` never runs during `pixi lock` or
 `pixi install`: the build is an explicit, cached pixi task.
@@ -78,6 +79,32 @@ from slam_rs.reference import load_manifest
 manifest = load_manifest()
 segment = manifest.in_tier("smoke")[0]
 ```
+
+### The basalt C++ reference and the gate policy
+
+`tests/reference/msd/<segment>/` holds what the basalt C++ fork produced on each
+segment: `run.json` for all ten (fork commit, deterministic settings, the VIO
+config and calibration actually pushed, timings and the ATE against `gt.csv`),
+`basalt_traj.csv` for the eight smoke and accuracy segments, and `frames.sha256`
+plus a copy of `gt.csv` for the smoke pair so its gate runs with no NAS and no
+catalog. The two long-tier trajectories are 3.4 MB and 4.8 MB and stay out of
+git; `slam_rs.reference_bundle` resolves them from `SLAM_RS_REFERENCE_DIR` (or
+`data/reference/`) and the tests skip with a message naming the variable.
+
+Each segment carries a `gate_policy`, because basalt is not equally good
+everywhere:
+
+| policy | segments | why |
+|---|---|---|
+| `tight` | MIO10, MGO09, MIO07, MGO07 | basalt scores 0.8-2.4 cm; a regression is unambiguous |
+| `standard` | MIO04, MGO14, MIO14, MIPT03 | 8-38 cm, stable; gate relative to basalt's own number, not an absolute threshold |
+| `no_divergence` | MGO01, MGO13 | basalt is near failure: 43 cm and 78 cm here, 68 cm for the C++ binary on the raw files, and **18-32 cm of spread between two legitimate decode paths of the same estimator** — on MGO01 the ordering even flips. Only "kept tracking, did not diverge" is measurable. |
+
+`slam_rs.trajectory.ate` reproduces all ten published C++ figures exactly, and a
+re-decode through `catalog_feed` reproduces the C++ run's per-camera pixel
+digests frame for frame (824 of 824 on MIO10, 428 of 428 on MGO09). That second
+result is the load-bearing one: it means an A/B between the two estimators
+measures the estimator, not the decoder.
 
 ### Two clocks, converted once
 

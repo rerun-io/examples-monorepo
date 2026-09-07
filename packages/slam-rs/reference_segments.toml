@@ -23,7 +23,13 @@
 # `absolute = video_time + capture.start_time_ns`, which is why that field is
 # recorded per segment here.
 
-schema_version = 2
+# `[segment.reference]` pins the basalt C++ run this port is measured against:
+# the fork commit that produced it, the deterministic settings, the committed
+# trajectory (or a bundle-only marker for the two long segments), and the C++
+# ATE against the `gt.csv` sidecar. `gate_policy` says how hard that segment may
+# be gated -- see the README.
+
+schema_version = 3
 catalog_url = "rerun+http://dgx-spark:9988"
 
 # Landscape, unrotated: the Index stores its two fisheye cameras as captured.
@@ -73,6 +79,31 @@ schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c961006413
 size_bytes = 547545
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
+[segment.reference]
+gate_policy = "tight"
+fork_commit = "1455013875738d06ad2d0345b6bd7a779a54d5f0"
+fork_branch = "slam-rs-reference"
+fork_base = "30da970"
+decode_path = "cpu_gray8_dav1d_1thread"
+deterministic = true
+num_threads = 1
+use_double = false
+vio_config = "data/msd/msdmi_config.json"
+optical_flow_image_safe_radius = 472.0
+run_json = "tests/reference/msd/msd-index__MIO_others__MIO10_short_2_panorama/run.json"
+trajectory_sha256 = "19df37cecb08a2ea8687fdc6b8a5d44f07c4cb3040e6ae4a20d9bced682a125d"
+bundle_only = false
+trajectory_csv = "tests/reference/msd/msd-index__MIO_others__MIO10_short_2_panorama/basalt_traj.csv"
+frames_sha256 = "tests/reference/msd/msd-index__MIO_others__MIO10_short_2_panorama/frames.sha256"
+gt_csv_fixture = "tests/reference/msd/msd-index__MIO_others__MIO10_short_2_panorama/gt.csv"
+
+[segment.reference.expected_cpp_ate]
+rmse_cm = 1.427751
+max_cm = 3.688551
+median_cm = 1.140685
+associated = 411
+total = 412
+
 [segment.imu]
 rate_hz = 1000.0
 gyro_noise_std = 0.000282
@@ -109,6 +140,29 @@ schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c961006413
 [segment.layers.gt]
 size_bytes = 6059638
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
+
+[segment.reference]
+gate_policy = "tight"
+fork_commit = "1583e31a7301942fcc123964b5a6b17fb10cbf44"
+fork_branch = "slam-rs-reference"
+fork_base = "30da970"
+decode_path = "cpu_gray8_dav1d_1thread"
+deterministic = true
+num_threads = 1
+use_double = false
+vio_config = "data/msd/msdmi_config.json"
+optical_flow_image_safe_radius = 472.0
+run_json = "tests/reference/msd/msd-index__MIO_others__MIO07_mapping_easy/run.json"
+trajectory_sha256 = "66641879339e0bf585f0487ff5289472240672746e0bed496816604139ad5d73"
+bundle_only = false
+trajectory_csv = "tests/reference/msd/msd-index__MIO_others__MIO07_mapping_easy/basalt_traj.csv"
+
+[segment.reference.expected_cpp_ate]
+rmse_cm = 2.391717
+max_cm = 7.165734
+median_cm = 1.805338
+associated = 4094
+total = 4095
 
 [segment.imu]
 rate_hz = 1000.0
@@ -147,6 +201,29 @@ schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c961006413
 size_bytes = 9180481
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
+[segment.reference]
+gate_policy = "standard"
+fork_commit = "1583e31a7301942fcc123964b5a6b17fb10cbf44"
+fork_branch = "slam-rs-reference"
+fork_base = "30da970"
+decode_path = "cpu_gray8_dav1d_1thread"
+deterministic = true
+num_threads = 1
+use_double = false
+vio_config = "data/msd/msdmi_config.json"
+optical_flow_image_safe_radius = 472.0
+run_json = "tests/reference/msd/msd-index__MIO_others__MIO04_hand_shooter_hard/run.json"
+trajectory_sha256 = "104165a3102a3e5af086e8a5b213442d70afd3fd2611f2727a1eab5511345145"
+bundle_only = false
+trajectory_csv = "tests/reference/msd/msd-index__MIO_others__MIO04_hand_shooter_hard/basalt_traj.csv"
+
+[segment.reference.expected_cpp_ate]
+rmse_cm = 19.238481
+max_cm = 45.759902
+median_cm = 14.858707
+associated = 6118
+total = 6119
+
 [segment.imu]
 rate_hz = 1000.0
 gyro_noise_std = 0.000282
@@ -183,6 +260,29 @@ schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c961006413
 [segment.layers.gt]
 size_bytes = 32687369
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
+
+[segment.reference]
+gate_policy = "standard"
+fork_commit = "e0a5f8b020dc5990c277823f42b1cfb6c739e280"
+fork_branch = "slam-rs-reference"
+fork_base = "30da970"
+decode_path = "cpu_gray8_dav1d_1thread"
+deterministic = true
+num_threads = 1
+use_double = false
+vio_config = "data/msd/msdmi_config.json"
+optical_flow_image_safe_radius = 472.0
+run_json = "tests/reference/msd/msd-index__MIO_others__MIO14_moving_props/run.json"
+trajectory_sha256 = "68b4157d379967b1126a10592d42a02458625bf05fb3c2ee59495a90b824bb5e"
+bundle_only = true
+trajectory_csv = "msd-index__MIO_others__MIO14_moving_props/basalt_traj.csv"
+
+[segment.reference.expected_cpp_ate]
+rmse_cm = 8.861614
+max_cm = 18.028181
+median_cm = 8.384531
+associated = 21969
+total = 22117
 
 [segment.imu]
 rate_hz = 1000.0
@@ -221,6 +321,29 @@ schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c961006413
 size_bytes = 47783314
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
+[segment.reference]
+gate_policy = "standard"
+fork_commit = "e0a5f8b020dc5990c277823f42b1cfb6c739e280"
+fork_branch = "slam-rs-reference"
+fork_base = "30da970"
+decode_path = "cpu_gray8_dav1d_1thread"
+deterministic = true
+num_threads = 1
+use_double = false
+vio_config = "data/msd/msdmi_config.json"
+optical_flow_image_safe_radius = 472.0
+run_json = "tests/reference/msd/msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_fight_2/run.json"
+trajectory_sha256 = "19ccc1638147418b7f2385f1d69e2b85787626942f5193927929de51e3722e96"
+bundle_only = true
+trajectory_csv = "msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_fight_2/basalt_traj.csv"
+
+[segment.reference.expected_cpp_ate]
+rmse_cm = 37.976171
+max_cm = 84.843701
+median_cm = 33.382882
+associated = 31576
+total = 31577
+
 [segment.imu]
 rate_hz = 1000.0
 gyro_noise_std = 0.000282
@@ -257,6 +380,31 @@ schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26b
 [segment.layers.gt]
 size_bytes = 276750
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
+
+[segment.reference]
+gate_policy = "tight"
+fork_commit = "1455013875738d06ad2d0345b6bd7a779a54d5f0"
+fork_branch = "slam-rs-reference"
+fork_base = "30da970"
+decode_path = "cpu_gray8_dav1d_1thread"
+deterministic = true
+num_threads = 1
+use_double = false
+vio_config = "data/msd/msdmg_config.json"
+optical_flow_image_safe_radius = 340.0
+run_json = "tests/reference/msd/msd-g2__MGO_others__MGO09_short_1_updown/run.json"
+trajectory_sha256 = "ae893a3d1aacf56c8ee8d6e5fd353eb7765a19c8075dfe00a9b410c741fab346"
+bundle_only = false
+trajectory_csv = "tests/reference/msd/msd-g2__MGO_others__MGO09_short_1_updown/basalt_traj.csv"
+frames_sha256 = "tests/reference/msd/msd-g2__MGO_others__MGO09_short_1_updown/frames.sha256"
+gt_csv_fixture = "tests/reference/msd/msd-g2__MGO_others__MGO09_short_1_updown/gt.csv"
+
+[segment.reference.expected_cpp_ate]
+rmse_cm = 0.812082
+max_cm = 1.710338
+median_cm = 0.403854
+associated = 107
+total = 107
 
 [segment.imu]
 rate_hz = 1000.0
@@ -295,6 +443,29 @@ schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26b
 size_bytes = 4234733
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
+[segment.reference]
+gate_policy = "tight"
+fork_commit = "1583e31a7301942fcc123964b5a6b17fb10cbf44"
+fork_branch = "slam-rs-reference"
+fork_base = "30da970"
+decode_path = "cpu_gray8_dav1d_1thread"
+deterministic = true
+num_threads = 1
+use_double = false
+vio_config = "data/msd/msdmg_config.json"
+optical_flow_image_safe_radius = 340.0
+run_json = "tests/reference/msd/msd-g2__MGO_others__MGO07_mapping_easy/run.json"
+trajectory_sha256 = "94a5d506c39d368e1f4cd13040d1fb8cb698ba02ab99064488e4fd1e45afb2c8"
+bundle_only = false
+trajectory_csv = "tests/reference/msd/msd-g2__MGO_others__MGO07_mapping_easy/basalt_traj.csv"
+
+[segment.reference.expected_cpp_ate]
+rmse_cm = 2.075976
+max_cm = 4.669990
+median_cm = 1.769015
+associated = 1596
+total = 1596
+
 [segment.imu]
 rate_hz = 1000.0
 gyro_noise_std = 0.000282
@@ -331,6 +502,29 @@ schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26b
 [segment.layers.gt]
 size_bytes = 7752549
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
+
+[segment.reference]
+gate_policy = "standard"
+fork_commit = "1583e31a7301942fcc123964b5a6b17fb10cbf44"
+fork_branch = "slam-rs-reference"
+fork_base = "30da970"
+decode_path = "cpu_gray8_dav1d_1thread"
+deterministic = true
+num_threads = 1
+use_double = false
+vio_config = "data/msd/msdmg_config.json"
+optical_flow_image_safe_radius = 340.0
+run_json = "tests/reference/msd/msd-g2__MGO_others__MGO14_flickering_light/run.json"
+trajectory_sha256 = "eabf539fb507dd9d443ab55eedcce58998840ac3d8f0406d63557b2ed2cee850"
+bundle_only = false
+trajectory_csv = "tests/reference/msd/msd-g2__MGO_others__MGO14_flickering_light/basalt_traj.csv"
+
+[segment.reference.expected_cpp_ate]
+rmse_cm = 8.587941
+max_cm = 18.404963
+median_cm = 7.132659
+associated = 2887
+total = 2887
 
 [segment.imu]
 rate_hz = 1000.0
@@ -369,6 +563,29 @@ schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26b
 size_bytes = 11475535
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
+[segment.reference]
+gate_policy = "no_divergence"
+fork_commit = "1583e31a7301942fcc123964b5a6b17fb10cbf44"
+fork_branch = "slam-rs-reference"
+fork_base = "30da970"
+decode_path = "cpu_gray8_dav1d_1thread"
+deterministic = true
+num_threads = 1
+use_double = false
+vio_config = "data/msd/msdmg_config.json"
+optical_flow_image_safe_radius = 340.0
+run_json = "tests/reference/msd/msd-g2__MGO_others__MGO01_low_light/run.json"
+trajectory_sha256 = "fcbddaf825cdb8358f0a99cf9038b6dff0b00b800125df7f06784805e4f61b14"
+bundle_only = false
+trajectory_csv = "tests/reference/msd/msd-g2__MGO_others__MGO01_low_light/basalt_traj.csv"
+
+[segment.reference.expected_cpp_ate]
+rmse_cm = 42.925818
+max_cm = 113.670573
+median_cm = 37.044695
+associated = 4255
+total = 4255
+
 [segment.imu]
 rate_hz = 1000.0
 gyro_noise_std = 0.000282
@@ -405,6 +622,29 @@ schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26b
 [segment.layers.gt]
 size_bytes = 10042232
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
+
+[segment.reference]
+gate_policy = "no_divergence"
+fork_commit = "1583e31a7301942fcc123964b5a6b17fb10cbf44"
+fork_branch = "slam-rs-reference"
+fork_base = "30da970"
+decode_path = "cpu_gray8_dav1d_1thread"
+deterministic = true
+num_threads = 1
+use_double = false
+vio_config = "data/msd/msdmg_config.json"
+optical_flow_image_safe_radius = 340.0
+run_json = "tests/reference/msd/msd-g2__MGO_others__MGO13_sudden_movements/run.json"
+trajectory_sha256 = "9aabe18d53cf62475f1f92bf5b6ae41e72eb070b46c30157dab94042151794dd"
+bundle_only = false
+trajectory_csv = "tests/reference/msd/msd-g2__MGO_others__MGO13_sudden_movements/basalt_traj.csv"
+
+[segment.reference.expected_cpp_ate]
+rmse_cm = 77.971586
+max_cm = 120.581903
+median_cm = 79.325404
+associated = 3735
+total = 3735
 
 [segment.imu]
 rate_hz = 1000.0

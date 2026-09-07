@@ -29,7 +29,7 @@ def manifest() -> ReferenceManifest:
 
 def test_the_manifest_holds_ten_segments(manifest: ReferenceManifest) -> None:
     assert len(manifest.segments) == 10
-    assert manifest.schema_version == 2
+    assert manifest.schema_version == 3
 
 
 def test_every_segment_carries_both_layer_fingerprints(manifest: ReferenceManifest) -> None:
