@@ -11,18 +11,19 @@ fails here.
 The frames are the synthetic 200x200 textures of :mod:`conftest` rather than the
 committed 960x960 fixtures: the fixtures are the Rust parity gate's, and four
 framesets of them through the frontend cost more than this whole Python suite.
+Reading the recording back is :mod:`conftest`'s :func:`read_rows`, which the
+estimator's logging suite drives too; the aliases below are declared here
+because ``tests`` is not on the typechecker's search path.
 """
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple, TypeAlias
 
 import numpy as np
 import pytest
 import rerun as rr
-import rerun.experimental as rx
 from jaxtyping import Float32, Int64, UInt8
 from numpy import ndarray
 
@@ -54,9 +55,8 @@ FrontendFactory: TypeAlias = Callable[[int], _core.OpticalFlow]
 TextureFactory: TypeAlias = Callable[[int, int], UInt8[ndarray, "h w"]]
 
 
-@dataclass(frozen=True, slots=True)
-class Row:
-    """One logged row of one entity, as it comes back out of the file."""
+class Row(NamedTuple):
+    """One logged row of one entity, as :func:`conftest.read_rows` hands it back."""
 
     t_ns: int
     """Where on ``video_time`` the row sits, in nanoseconds."""
@@ -66,6 +66,8 @@ class Row:
 
 Rows: TypeAlias = dict[str, list[Row]]
 """Per entity path, its rows in ``video_time`` order."""
+RowsReader: TypeAlias = Callable[[Path], Rows]
+"""The :mod:`conftest` fixture that reads a recording back."""
 
 
 
@@ -80,35 +82,6 @@ class ReplayResult(NamedTuple):
 
 ReplayFactory: TypeAlias = Callable[[Path, int, str, Path | None], ReplayResult]
 """One logged run: where the ``.rrd`` goes, how many framesets, the id the replayed recording carries, the dumps."""
-
-
-def read_rows(path: Path) -> Rows:
-    """Read every non-static row of a recording, grouped by entity path.
-
-    A component a row did not set comes back as a null and is dropped, so a
-    missing key here means the row really did not carry that component.
-
-    Args:
-        path: An ``.rrd`` written by :func:`rerun.save`.
-
-    Returns:
-        Entity path to its rows, in ``video_time`` order.
-    """
-    rows: Rows = {}
-    for chunk in rx.RrdReader(path).stream().collect().stream():
-        if chunk.is_static:
-            continue
-        batch = chunk.to_record_batch()
-        times: list = batch.column(TIMELINE).to_pylist()
-        components: dict[str, list] = {
-            name: batch.column(name).to_pylist() for name in batch.schema.names if ":" in name and not name.startswith("rerun.")
-        }
-        for index, time in enumerate(times):
-            values: dict[str, list] = {name: column[index] for name, column in components.items() if column[index] is not None}
-            rows.setdefault(chunk.entity_path, []).append(Row(t_ns=int(np.timedelta64(time, "ns").astype(np.int64)), values=values))
-    for entity in rows:
-        rows[entity].sort(key=lambda row: row.t_ns)
-    return rows
 
 
 def write_dumps(directory: Path, segment_id: str, per_frameset: dict[int, list[Float32[ndarray, "n_keypoints 2"]]]) -> None:
@@ -140,12 +113,13 @@ def write_dumps(directory: Path, segment_id: str, per_frameset: dict[int, list[F
 
 
 @pytest.fixture
-def replay(frontend: FrontendFactory, texture: TextureFactory) -> ReplayFactory:
+def replay(frontend: FrontendFactory, texture: TextureFactory, read_rows: RowsReader) -> ReplayFactory:
     """Log ``framesets`` framesets of a drifting texture and read the recording back.
 
     Args:
         frontend: The two-camera frontend the framesets go through.
         texture: The scene each frameset is a shifted copy of.
+        read_rows: Reads the recording back, from :mod:`conftest`.
 
     Returns:
         A function of the ``.rrd`` directory, the frameset count, the segment id

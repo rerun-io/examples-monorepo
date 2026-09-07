@@ -11,10 +11,10 @@ The reference trajectories are synthetic straight lines rather than a segment's:
 what is under test is that a reference is drawn up to the cursor and no further,
 which a straight line says as well as a real one and in milliseconds.
 
-The rig and the pipeline are :mod:`conftest` fixtures, which pytest injects; the
-factory aliases and the recording reader below are declared here rather than
-imported from another test module, because ``tests`` is not on the typechecker's
-search path and every module in this directory therefore stands alone.
+The rig, the pipeline and the recording reader are :mod:`conftest` fixtures,
+which pytest injects; the aliases below are declared here rather than imported
+from it, because ``tests`` is not on the typechecker's search path and every
+module in this directory therefore stands alone.
 """
 
 from collections.abc import Callable
@@ -25,7 +25,6 @@ import numpy as np
 import pytest
 import rerun as rr
 import rerun.blueprint as rrb
-import rerun.experimental as rx
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
@@ -57,40 +56,21 @@ PipelineFactory: TypeAlias = Callable[[int], _core.Vio]
 """The whole pipeline on a rig of the given camera count."""
 TextureFactory: TypeAlias = Callable[[int, int], UInt8[ndarray, "h w"]]
 """The synthetic scene, shifted by whole pixels in x and y."""
-Rows: TypeAlias = dict[str, list[tuple[int, dict[str, list]]]]
-"""Per entity path, its non-static rows as ``(video_time ns, components by short name)``."""
 
 
-def read_rows(path: Path) -> Rows:
-    """Read every non-static row of a recording, grouped by entity path.
+class Row(NamedTuple):
+    """One logged row of one entity, as :func:`conftest.read_rows` hands it back."""
 
-    A component a row did not set comes back as a null and is dropped, so a
-    missing key here means the row really did not carry that component.
+    t_ns: int
+    """Where on ``video_time`` the row sits, in nanoseconds."""
+    values: dict[str, list]
+    """The components this row set, by their short name."""
 
-    Args:
-        path: An ``.rrd`` written by :func:`rerun.save`.
 
-    Returns:
-        Entity path to its rows, in ``video_time`` order.
-    """
-    rows: Rows = {}
-    for chunk in rx.RrdReader(path).stream().collect().stream():
-        if chunk.is_static:
-            continue
-        batch = chunk.to_record_batch()
-        if TIMELINE not in batch.schema.names:
-            # A row written before the caller set a cursor sits on no timeline.
-            continue
-        times: list = batch.column(TIMELINE).to_pylist()
-        components: dict[str, list] = {
-            name: batch.column(name).to_pylist() for name in batch.schema.names if ":" in name and not name.startswith("rerun.")
-        }
-        for index, time in enumerate(times):
-            values: dict[str, list] = {name: column[index] for name, column in components.items() if column[index] is not None}
-            rows.setdefault(chunk.entity_path, []).append((int(np.timedelta64(time, "ns").astype(np.int64)), values))
-    for entity in rows:
-        rows[entity].sort(key=lambda row: row[0])
-    return rows
+Rows: TypeAlias = dict[str, list[Row]]
+"""Per entity path, its non-static rows in ``video_time`` order."""
+RowsReader: TypeAlias = Callable[[Path], Rows]
+"""The :mod:`conftest` fixture that reads a recording back."""
 
 
 class Logged(NamedTuple):
@@ -120,6 +100,7 @@ def drive(
     references: Trajectory,
     texture: TextureFactory,
     output: Path,
+    read_rows: RowsReader,
 ) -> Logged:
     """Log ``FRAMESETS`` framesets of the synthetic rig and read the recording back.
 
@@ -129,6 +110,7 @@ def drive(
         references: Ground truth and C++ trajectory, the same line for both.
         texture: The scene each frameset is a shifted copy of.
         output: Where the ``.rrd`` is written.
+        read_rows: Reads the recording back, from :mod:`conftest`.
 
     Returns:
         The recording's rows, the framesets that tracked, and the logger.
@@ -163,10 +145,12 @@ def drive(
 
 
 @pytest.fixture
-def logged(pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path) -> Logged:
+def logged(
+    pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
+) -> Logged:
     """Drive the whole pipeline over the synthetic rig and read back what was logged."""
     reference_t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_INTERVAL_NS, FRAME_INTERVAL_NS, dtype=np.int64)
-    return drive(pipeline(2), (camera(0, 0.0), camera(1, 0.1)), straight_line(reference_t_ns), texture, tmp_path / "vio.rrd")
+    return drive(pipeline(2), (camera(0, 0.0), camera(1, 0.1)), straight_line(reference_t_ns), texture, tmp_path / "vio.rrd", read_rows)
 
 
 def test_the_frustum_wireframe_sits_where_the_camera_does(camera: CameraFactory) -> None:
@@ -233,7 +217,12 @@ def test_a_reference_is_drawn_up_to_the_cursor_and_no_further(logged: Logged) ->
 
 
 def test_the_plotted_ate_is_the_estimate_driven_one(
-    pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    pipeline: PipelineFactory,
+    texture: TextureFactory,
+    camera: CameraFactory,
+    tmp_path: Path,
+    read_rows: RowsReader,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The plotted ``ate_cm`` is the number the tool prints and the gate asserts.
 
@@ -247,7 +236,7 @@ def test_the_plotted_ate_is_the_estimate_driven_one(
     monkeypatch.setattr(vio_log, "ATE_EVERY", 1)
     dense_t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_INTERVAL_NS, IMU_PERIOD_NS, dtype=np.int64)
     truth: Trajectory = straight_line(dense_t_ns)
-    logged: Logged = drive(pipeline(2), (camera(0, 0.0), camera(1, 0.1)), truth, texture, tmp_path / "dense.rrd")
+    logged: Logged = drive(pipeline(2), (camera(0, 0.0), camera(1, 0.1)), truth, texture, tmp_path / "dense.rrd", read_rows)
     estimate: Trajectory = logged.logger.estimated()
     estimate_driven: AteResult = ate(estimate, truth)
     reference_driven: AteResult = ate(truth, estimate)
@@ -285,9 +274,9 @@ def test_too_short_a_run_carries_no_alignment() -> None:
 
 def test_the_cpp_reference_is_placed_once_at_the_first_tracked_frameset(logged: Logged) -> None:
     """Both it and the ground truth are known up front, so its alignment never changes."""
-    rows: list[tuple[int, dict[str, list]]] = logged.rows[CPP_ENTITY]
-    assert [t_ns for t_ns, _ in rows] == logged.tracked[:1]
-    assert "Transform3D:translation" in rows[0][1]
+    rows: list[Row] = logged.rows[CPP_ENTITY]
+    assert [row.t_ns for row in rows] == logged.tracked[:1]
+    assert "Transform3D:translation" in rows[0].values
 
 
 def test_the_keypoints_land_on_the_camera_images(logged: Logged) -> None:

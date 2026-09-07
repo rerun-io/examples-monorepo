@@ -1,4 +1,4 @@
-"""The synthetic rig the boundary and logging suites both drive, as fixtures.
+"""What the boundary and logging suites share: the synthetic rig, and the recording reader.
 
 One 200x200 kb4 camera per index with every distortion coefficient zero, the
 Index device's frozen noise model, and one blocky-noise scene that can be shifted
@@ -10,19 +10,23 @@ and the shift. Session-scoped, because a factory holds no per-test state and a
 ``@given`` test may not request a function-scoped fixture — each call still hands
 back a fresh calibration or frontend, so a test may mutate what it is given.
 Fixtures rather than a module the tests import from each other: pytest injects
-these, so no test module has to be on another one's import path.
+these, so no test module has to be on another one's import path. That is also
+where :func:`read_rows` belongs — the two logging suites check their rungs
+against a real recording, and one reader means one account of what a row is.
 """
 
 from collections.abc import Callable
-from typing import TypeAlias
+from pathlib import Path
+from typing import NamedTuple, TypeAlias
 
 import numpy as np
 import pytest
+import rerun.experimental as rx
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
 
 from slam_rs import _core
-from slam_rs.catalog_feed import CameraCalib, ImuCalib
+from slam_rs.catalog_feed import TIMELINE, CameraCalib, ImuCalib
 
 FRAME: int = 200
 """Synthetic frame size: four whole 50-pixel detection cells per side."""
@@ -37,6 +41,21 @@ PipelineFactory: TypeAlias = Callable[[int], _core.Vio]
 """The whole pipeline on a rig of the given camera count."""
 TextureFactory: TypeAlias = Callable[[int, int], UInt8[ndarray, "h w"]]
 """The synthetic scene, shifted by whole pixels in x and y."""
+
+
+class Row(NamedTuple):
+    """One logged row of one entity, as it comes back out of the file."""
+
+    t_ns: int
+    """Where on ``video_time`` the row sits, in nanoseconds."""
+    values: dict[str, list]
+    """The components this row set, by their short name (``Points2D:positions`` and such)."""
+
+
+Rows: TypeAlias = dict[str, list[Row]]
+"""Per entity path, its rows in ``video_time`` order."""
+RowsReader: TypeAlias = Callable[[Path], Rows]
+"""Reads back what a logger wrote: every non-static row of a recording, by entity path."""
 
 
 @pytest.fixture(scope="session")
@@ -112,6 +131,41 @@ def pipeline(rig: RigFactory) -> PipelineFactory:
         return _core.Vio(rig(camera_count), _core.VioConfig())
 
     return build
+
+
+@pytest.fixture(scope="session")
+def read_rows() -> RowsReader:
+    """Read every non-static row of a recording, grouped by entity path.
+
+    A component a row did not set comes back as a null and is dropped, so a
+    missing key means the row really did not carry that component.
+
+    Returns:
+        A function of an ``.rrd`` written by :func:`rerun.save`, giving each
+        entity path's rows in ``video_time`` order.
+    """
+
+    def read(path: Path) -> Rows:
+        rows: Rows = {}
+        for chunk in rx.RrdReader(path).stream().collect().stream():
+            if chunk.is_static:
+                continue
+            batch = chunk.to_record_batch()
+            if TIMELINE not in batch.schema.names:
+                # A row written before the caller set a cursor sits on no timeline.
+                continue
+            times: list = batch.column(TIMELINE).to_pylist()
+            components: dict[str, list] = {
+                name: batch.column(name).to_pylist() for name in batch.schema.names if ":" in name and not name.startswith("rerun.")
+            }
+            for index, time in enumerate(times):
+                values: dict[str, list] = {name: column[index] for name, column in components.items() if column[index] is not None}
+                rows.setdefault(chunk.entity_path, []).append(Row(t_ns=int(np.timedelta64(time, "ns").astype(np.int64)), values=values))
+        for entity in rows:
+            rows[entity].sort(key=lambda row: row.t_ns)
+        return rows
+
+    return read
 
 
 @pytest.fixture(scope="session")
