@@ -176,10 +176,6 @@ pub enum VioError {
 #[derive(Debug, Clone)]
 pub struct StubVio {
     config: Config,
-    world_from_rig: Isometry3<f64>,
-    velocity: Vector3<f64>,
-    gyro_bias: Vector3<f64>,
-    accel_bias: Vector3<f64>,
     last_imu_t_ns: Option<i64>,
     imu_count: usize,
 }
@@ -189,10 +185,6 @@ impl StubVio {
     pub fn new(config: Config) -> Self {
         Self {
             config,
-            world_from_rig: Isometry3::identity(),
-            velocity: Vector3::zeros(),
-            gyro_bias: Vector3::zeros(),
-            accel_bias: Vector3::zeros(),
             last_imu_t_ns: None,
             imu_count: 0,
         }
@@ -221,7 +213,7 @@ impl StubVio {
                 t_ns,
             });
         }
-        let _ = (gyro, accel); // integrated once the preintegration lands
+        let _ = (gyro, accel); // the stub counts samples; it never integrates
         self.last_imu_t_ns = Some(t_ns);
         self.imu_count += 1;
         Ok(())
@@ -229,40 +221,7 @@ impl StubVio {
 
     /// Process one frameset: one image per camera, oldest to newest in time.
     pub fn track(&mut self, t_ns: i64, images: &[ImageView<'_>]) -> Result<VioResult, VioError> {
-        if images.len() != self.config.camera_count {
-            return Err(VioError::CameraCountMismatch {
-                expected: self.config.camera_count,
-                actual: images.len(),
-            });
-        }
-        for (index, image) in images.iter().enumerate() {
-            if image.stride < image.width {
-                return Err(VioError::StrideTooSmall {
-                    index,
-                    width: image.width,
-                    stride: image.stride,
-                });
-            }
-            // width, height and stride are caller-controlled: an unchecked product
-            // panics in debug and wraps to an accepted zero in release.
-            let needed: usize =
-                image
-                    .stride
-                    .checked_mul(image.height)
-                    .ok_or(VioError::ImageSizeOverflow {
-                        index,
-                        height: image.height,
-                        stride: image.stride,
-                    })?;
-            if image.data.len() < needed {
-                return Err(VioError::ShortImage {
-                    index,
-                    height: image.height,
-                    stride: image.stride,
-                    len: image.data.len(),
-                });
-            }
-        }
+        check_frameset(images, self.config.camera_count)?;
 
         let status: VioStatus = if self.imu_count < self.config.min_imu_samples {
             VioStatus::NeedMoreImu
@@ -279,10 +238,11 @@ impl StubVio {
         Ok(VioResult {
             status,
             t_ns,
-            world_from_rig: pose_to_array(&self.world_from_rig),
-            velocity: self.velocity.into(),
-            gyro_bias: self.gyro_bias.into(),
-            accel_bias: self.accel_bias.into(),
+            // The stub never tracks, so the state is the identity every frame.
+            world_from_rig: pose_to_array(&Isometry3::identity()),
+            velocity: [0.0; 3],
+            gyro_bias: [0.0; 3],
+            accel_bias: [0.0; 3],
         })
     }
 }
@@ -342,8 +302,6 @@ pub struct Vio<S: lie::LieScalar = f32> {
     camera_count: usize,
     /// The last frameset's timestamp, `t_ns` in the frontend (`:172`).
     last_frame_t_ns: Option<i64>,
-    /// The estimator's flow input, reused between frames.
-    observations: std::sync::Arc<estimator::FlowObservations>,
     /// What the last `track` decided; the S9 Rerun rung reads this.
     last_stats: Option<Box<estimator::FrameStats<S>>>,
 }
@@ -384,7 +342,6 @@ impl<S: lie::LieScalar> Vio<S> {
             last_imu_t_ns: None,
             camera_count,
             last_frame_t_ns: None,
-            observations: std::sync::Arc::new(estimator::FlowObservations::new(0, camera_count)),
             last_stats: None,
         })
     }
@@ -404,16 +361,6 @@ impl<S: lie::LieScalar> Vio<S> {
     /// What the last `track` decided, or `None` before the first one.
     pub fn last_stats(&self) -> Option<&estimator::FrameStats<S>> {
         self.last_stats.as_deref()
-    }
-
-    /// Cameras in the rig; every frameset must carry exactly this many.
-    pub fn camera_count(&self) -> usize {
-        self.camera_count
-    }
-
-    /// Timestamp of the last accepted IMU sample, if any.
-    pub fn last_imu_t_ns(&self) -> Option<i64> {
-        self.last_imu_t_ns
     }
 
     /// Add one IMU sample: `gyro` in rad/s, `accel` in m/s², both in the rig
@@ -504,11 +451,9 @@ impl<S: lie::LieScalar> Vio<S> {
                 slot.insert(*id, warp.translation);
             }
         }
-        self.observations = std::sync::Arc::new(observations);
-
         let outcome: estimator::FrameOutcome<S> = self
             .estimator
-            .process_frame(std::sync::Arc::clone(&self.observations))?;
+            .process_frame(std::sync::Arc::new(observations))?;
 
         // The estimator initialises inside the same `process_frame` that
         // measures (`:263-296`), so a `Measured` outcome always has a state and
@@ -531,21 +476,9 @@ impl<S: lie::LieScalar> Vio<S> {
                     state.t_w_i.translation.map(lie::LieScalar::to_f64).into(),
                     *state.t_w_i.rotation.cast::<f64>().quaternion(),
                 )),
-                [
-                    state.vel_w_i[0].to_f64(),
-                    state.vel_w_i[1].to_f64(),
-                    state.vel_w_i[2].to_f64(),
-                ],
-                [
-                    state.bias_gyro[0].to_f64(),
-                    state.bias_gyro[1].to_f64(),
-                    state.bias_gyro[2].to_f64(),
-                ],
-                [
-                    state.bias_accel[0].to_f64(),
-                    state.bias_accel[1].to_f64(),
-                    state.bias_accel[2].to_f64(),
-                ],
+                state.vel_w_i.map(lie::LieScalar::to_f64).into(),
+                state.bias_gyro.map(lie::LieScalar::to_f64).into(),
+                state.bias_accel.map(lie::LieScalar::to_f64).into(),
             ),
             None => (
                 pose_to_array(&Isometry3::identity()),
@@ -691,7 +624,7 @@ impl<S: lie::LieScalar> Vio<S> {
     }
 }
 
-/// The frameset geometry checks of [`Vio::track`], shared with [`StubVio`].
+/// The frameset geometry checks both [`Vio::track`] and [`StubVio::track`] run.
 ///
 /// Caller-controlled `width`, `height` and `stride`: an unchecked
 /// `stride * height` panics in debug and wraps to an accepted zero in release,
@@ -701,7 +634,7 @@ impl<S: lie::LieScalar> Vio<S> {
 ///
 /// [`VioError::CameraCountMismatch`], [`VioError::StrideTooSmall`],
 /// [`VioError::ImageSizeOverflow`] or [`VioError::ShortImage`].
-pub fn check_frameset(images: &[ImageView<'_>], camera_count: usize) -> Result<(), VioError> {
+fn check_frameset(images: &[ImageView<'_>], camera_count: usize) -> Result<(), VioError> {
     if images.len() != camera_count {
         return Err(VioError::CameraCountMismatch {
             expected: camera_count,

@@ -62,6 +62,13 @@ pub trait LieScalar: RealField + Copy {
     /// must mean the same thing.
     fn min_positive() -> Self;
 
+    /// `std::numeric_limits<Scalar>::max()`: the largest finite value.
+    ///
+    /// basalt seeds both keyframe-eviction scores with it
+    /// (`sqrt_keypoint_vio.cpp:788`, `:842`) so the first candidate always
+    /// wins the `score < min_score` test.
+    fn largest() -> Self;
+
     /// Eigen's summation order for a **three**-coefficient reduction, such as
     /// `v.head<3>().squaredNorm()`.
     ///
@@ -140,6 +147,10 @@ impl LieScalar for f64 {
         Self::MIN_POSITIVE
     }
 
+    fn largest() -> Self {
+        Self::MAX
+    }
+
     /// One `Packet2d` plus the scalar remainder.
     fn eigen_redux3(a: Self, b: Self, c: Self) -> Self {
         (a + b) + c
@@ -174,6 +185,10 @@ impl LieScalar for f32 {
         Self::MIN_POSITIVE
     }
 
+    fn largest() -> Self {
+        Self::MAX
+    }
+
     /// `Packet4f` is wider than three floats, so the scalar unroller runs.
     fn eigen_redux3(a: Self, b: Self, c: Self) -> Self {
         a + (b + c)
@@ -200,6 +215,17 @@ impl LieScalar for f32 {
 #[inline]
 fn c<S: LieScalar>(value: f64) -> S {
     S::from_literal(value)
+}
+
+/// `numext::maxi(a, b)` (`Core/MathFunctions.h`), which is what `cwiseMax`
+/// applies coefficient by coefficient.
+///
+/// `(a < b ? b : a)`, so a NaN on the left survives and `f32::max`'s
+/// NaN-suppressing behaviour is wrong here. `sqrt_keypoint_vio.cpp:1415` sends
+/// the result straight into the damped diagonal, so a NaN that Eigen keeps and
+/// Rust would drop changes whether the solve retries.
+pub(crate) fn eigen_maxi<S: LieScalar>(a: S, b: S) -> S {
+    if a < b { b } else { a }
 }
 
 /// A rotation, stored as a unit quaternion exactly as `Sophus::SO3` does.
@@ -871,6 +897,42 @@ mod tests {
 
     /// Keeps the whole Rust suite in the "runs in seconds" band.
     const CASES: u32 = 256;
+
+    /// The packet widths are the fork's SSE3 ones, whatever this machine is.
+    #[test]
+    fn the_packet_widths_are_the_forks() {
+        assert_eq!(f32::EIGEN_PACKET_SIZE, 4);
+        assert_eq!(f64::EIGEN_PACKET_SIZE, 2);
+    }
+
+    /// The two `predux` trees, spelled out on values whose sum is
+    /// order-dependent in `f32`: `1 + 2^-24` rounds away against `1` but
+    /// survives against `2^-24`.
+    #[test]
+    fn eigen_predux_pairs_the_lanes_across_the_halves() {
+        let tiny: f32 = f32::EPSILON / 2.0;
+        // (1 + 1) + (tiny + tiny) keeps both tiny terms; a left fold
+        // ((1 + 1) + tiny) + tiny loses them.
+        assert_eq!(
+            f32::eigen_predux(&[1.0, tiny, 1.0, tiny]),
+            2.0 + (tiny + tiny)
+        );
+        assert_eq!(
+            [1.0f32, tiny, 1.0f32, tiny]
+                .iter()
+                .copied()
+                .fold(0.0f32, |a, b| a + b),
+            2.0
+        );
+        assert_eq!(f64::eigen_predux(&[1.0, 2.0]), 3.0);
+    }
+
+    #[test]
+    fn eigen_maxi_keeps_a_nan_on_the_left() {
+        assert!(eigen_maxi(f64::NAN, 1.0).is_nan());
+        assert_eq!(eigen_maxi(1.0f64, f64::NAN), 1.0);
+        assert_eq!(f64::NAN.max(1.0), 1.0, "std::f64::max is the other way");
+    }
 
     fn config() -> ProptestConfig {
         ProptestConfig::with_cases(CASES)

@@ -34,8 +34,9 @@
 
 use nalgebra::{DMatrix, DVector};
 
-use crate::eigen_blas::{Block, gemv_col_major_block, gemv_row_major_of_transpose, redux_dynamic};
+use crate::eigen_blas::{gemv_col_major_block, gemv_row_major_of_transpose, redux_dynamic};
 use crate::lie::LieScalar;
+use crate::linearize::eigen_qr::BlockSpan;
 
 /// Eigen's `EIGEN_TUNE_TRIANGULAR_PANEL_WIDTH` (`Eigen/src/Core/util/Macros.h`).
 const TRIANGULAR_PANEL_WIDTH: usize = 8;
@@ -246,10 +247,10 @@ impl<S: LieScalar> EigenLdlt<S> {
                 let mut res: Vec<S> = (end_block..size).map(|i| v[i]).collect();
                 gemv_col_major_block(
                     &self.mat,
-                    Block {
-                        row0: end_block,
-                        col0: pi,
+                    BlockSpan {
+                        row_start: end_block,
                         rows: r,
+                        col_start: pi,
                         cols: panel,
                     },
                     &rhs,
@@ -274,8 +275,13 @@ impl<S: LieScalar> EigenLdlt<S> {
     /// each takes one row-major `gemv` against everything already solved below
     /// it, and the panel's own rows are then finished by an inner product whose
     /// `.sum()` follows Eigen's dynamic-length reduction tree.
+    ///
+    /// **Contract: `v.nrows() == self.transpositions.len()`**, as in
+    /// [`Self::solve_unit_lower_in_place`] — the two run back to back on the
+    /// same vector.
     pub(crate) fn solve_unit_upper_in_place(&self, v: &mut DVector<S>) {
-        let size: usize = self.transpositions.len().min(v.nrows());
+        debug_assert_eq!(v.nrows(), self.transpositions.len());
+        let size: usize = self.transpositions.len();
         let mut pi: usize = size;
         while pi > 0 {
             let panel: usize = TRIANGULAR_PANEL_WIDTH.min(pi);
@@ -288,10 +294,10 @@ impl<S: LieScalar> EigenLdlt<S> {
                 let mut res: Vec<S> = (start_row..pi).map(|i| v[i]).collect();
                 gemv_row_major_of_transpose(
                     &self.mat,
-                    Block {
-                        row0: start_row,
-                        col0: pi,
+                    BlockSpan {
+                        row_start: start_row,
                         rows: panel,
+                        col_start: pi,
                         cols: r,
                     },
                     &rhs,
@@ -302,17 +308,16 @@ impl<S: LieScalar> EigenLdlt<S> {
                     v[start_row + offset] = value;
                 }
             }
-            for k in 0..panel {
+            // `Mode & UnitDiag`, so there is no division by the diagonal, and
+            // the panel's last row (`k == 0`) has nothing to its right yet.
+            for k in 1..panel {
                 let i: usize = pi - k - 1;
                 let s: usize = i + 1;
-                if k > 0 {
-                    // `cjLhs.row(i).segment(s, k)` over the transposed view is
-                    // `mat[(s + t, i)]`, contiguous in the column-major factor,
-                    // so the `.sum()` is packet-accessible and vectorises.
-                    let terms: Vec<S> = (0..k).map(|t| self.mat[(s + t, i)] * v[s + t]).collect();
-                    v[i] -= redux_dynamic(&terms);
-                }
-                // `Mode & UnitDiag`, so there is no division by the diagonal.
+                // `cjLhs.row(i).segment(s, k)` over the transposed view is
+                // `mat[(s + t, i)]`, contiguous in the column-major factor, so
+                // the `.sum()` is packet-accessible and vectorises.
+                let terms: Vec<S> = (0..k).map(|t| self.mat[(s + t, i)] * v[s + t]).collect();
+                v[i] -= redux_dynamic(&terms);
             }
             pi = start_row;
         }
@@ -339,14 +344,19 @@ impl<S: LieScalar> EigenLdlt<S> {
     /// `min()` rather than an epsilon, because "LDLT is not rank-revealing" and
     /// LAPACK's `xSYTRS` uses zero) — then the unit-upper back substitution and
     /// `Pᵀ`.
+    ///
+    /// **Contract: `rhs.nrows() == self.transpositions.len()`**. The LM step
+    /// factorizes the damped `H` and solves against the `b` that came out of
+    /// the same `get_dense_H_b` (`sqrt_keypoint_vio.cpp:1393`, `:1419`), so the
+    /// two agree by construction.
     pub(crate) fn solve_vec(&self, rhs: &DVector<S>) -> DVector<S> {
+        debug_assert_eq!(rhs.nrows(), self.transpositions.len());
         let mut dst: DVector<S> = rhs.clone();
         self.apply_transpositions_left_vec(&mut dst);
         self.solve_unit_lower_in_place(&mut dst);
 
         let tolerance: S = S::min_positive();
-        let size: usize = self.transpositions.len().min(dst.nrows());
-        for i in 0..size {
+        for i in 0..self.transpositions.len() {
             let d: S = self.mat[(i, i)];
             if d.abs() > tolerance {
                 dst[i] /= d;
@@ -462,6 +472,89 @@ mod tests {
                 prop_assert!((solved[i] - x[i]).abs() < 1e-9);
             }
         }
+
+        /// The unit-upper solve inverts a unit-upper multiply, the second
+        /// substitution of `LDLT::_solve_impl_transposed`. `matrixL()` is a
+        /// `UnitLower` view of the packed factor, so its adjoint's coefficient
+        /// `(i, j)` for `j > i` is `mat[(j, i)]`.
+        #[test]
+        fn the_unit_upper_solve_inverts_the_multiply(
+            values in prop::collection::vec(-2.0f64..2.0, 121..122),
+        ) {
+            let size: usize = 11;
+            let mut j: DMatrix<f64> = DMatrix::zeros(size, size);
+            for r in 0..size {
+                for c in 0..size {
+                    j[(r, c)] = values[r * size + c];
+                }
+            }
+            let a: DMatrix<f64> = j.transpose() * &j + DMatrix::identity(size, size);
+            let ldlt: EigenLdlt<f64> = EigenLdlt::new(a);
+
+            let x: DVector<f64> = DVector::from_iterator(size, values.iter().take(size).copied());
+            // `Lᵀ x`, unit diagonal.
+            let mut ltx: DVector<f64> = x.clone();
+            for i in 0..size {
+                let mut acc: f64 = x[i];
+                for k in (i + 1)..size {
+                    acc += ldlt.mat[(k, i)] * x[k];
+                }
+                ltx[i] = acc;
+            }
+            let mut solved: DVector<f64> = ltx;
+            ldlt.solve_unit_upper_in_place(&mut solved);
+            for i in 0..size {
+                prop_assert!((solved[i] - x[i]).abs() < 1e-9);
+            }
+        }
+
+        /// `solve_vec` is `A⁻¹ b` end to end — permutation, both substitutions
+        /// and the diagonal — on a well-conditioned SPD `A` wider than one
+        /// panel.
+        #[test]
+        fn solve_vec_inverts_a_positive_definite_system(
+            values in prop::collection::vec(-2.0f64..2.0, 121..122),
+        ) {
+            let size: usize = 11;
+            let mut j: DMatrix<f64> = DMatrix::zeros(size, size);
+            for r in 0..size {
+                for c in 0..size {
+                    j[(r, c)] = values[r * size + c];
+                }
+            }
+            let a: DMatrix<f64> = j.transpose() * &j + DMatrix::identity(size, size) * 4.0;
+            let x: DVector<f64> = DVector::from_iterator(size, values.iter().take(size).copied());
+            let b: DVector<f64> = &a * &x;
+
+            let solved: DVector<f64> = EigenLdlt::new(a).solve_vec(&b);
+            for i in 0..size {
+                prop_assert!(
+                    (solved[i] - x[i]).abs() < 1e-7 * (1.0 + x[i].abs()),
+                    "coefficient {i}: {} vs {}", solved[i], x[i]
+                );
+            }
+        }
+    }
+
+    /// A zero direction in `D` is pseudo-inverted, not divided by: Eigen's bug
+    /// 241 zeroes the row when the pivot is at or below
+    /// `numeric_limits<Scalar>::min()` (`LDLT.h:_solve_impl_transposed`), so a
+    /// singular system comes back with that coefficient zero instead of an
+    /// infinity.
+    #[test]
+    fn solve_vec_zeroes_a_singular_direction() {
+        // `diag(4, 0, 9)`: the middle direction has no information at all.
+        let mut a: DMatrix<f64> = DMatrix::zeros(3, 3);
+        a[(0, 0)] = 4.0;
+        a[(2, 2)] = 9.0;
+        let b: DVector<f64> = DVector::from_vec(vec![8.0, 5.0, 27.0]);
+
+        let solved: DVector<f64> = EigenLdlt::new(a).solve_vec(&b);
+        assert_eq!(solved[1], 0.0, "the singular direction must be zeroed");
+        assert!(solved.iter().all(|v| v.is_finite()));
+        // The other two directions are still solved exactly.
+        assert!((solved[0] - 2.0).abs() < 1e-12);
+        assert!((solved[2] - 3.0).abs() < 1e-12);
     }
 
     /// The all-zero matrix takes the `k == 0 && !pivot_is_valid` branch and

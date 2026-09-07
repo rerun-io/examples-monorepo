@@ -33,55 +33,10 @@
 use nalgebra::DMatrix;
 
 use crate::lie::LieScalar;
-
-/// Lanes in an SSE packet of `S`: four for `f32`, two for `f64`.
-///
-/// `unpacket_traits<Packet4f>::size` / `<Packet2d>::size`
-/// (`arch/SSE/PacketMath.h:304-320`). Both packets are one 16-byte register,
-/// and `unpacket_traits<Packet4f>::half` is `Packet4f` itself, so Eigen's
-/// half- and quarter-packet paths are disabled for both scalars and the only
-/// widths that occur are these.
-pub(crate) fn packet_size<S>() -> usize {
-    match size_of::<S>() {
-        4 => 4,
-        8 => 2,
-        // No other `LieScalar` exists; one lane makes the kernels a plain
-        // sequential fold rather than a panic (D32).
-        _ => 1,
-    }
-}
-
-/// The sub-block a kernel reads, `lhs.block(row0, col0, rows, cols)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Block {
-    /// First row of the block in the enclosing matrix.
-    pub row0: usize,
-    /// First column of the block.
-    pub col0: usize,
-    /// Rows in the block, which is the length of `res`.
-    pub rows: usize,
-    /// Columns in the block, which is the length of `rhs`.
-    pub cols: usize,
-}
-
-/// `internal::predux` on one SSE packet (`arch/SSE/Reductions.h:206-278`).
-///
-/// `Packet2d` is one `_mm_unpackhi_pd` and an add, so `a0 + a1`. `Packet4f`
-/// is `movehl` then `movehdup`, which pairs the lanes across the halves:
-/// `(a0 + a2) + (a1 + a3)`. A left fold over four lanes is a different value in
-/// `f32`.
-fn predux<S: LieScalar>(lanes: &[S]) -> S {
-    match lanes {
-        [a0, a1] => *a0 + *a1,
-        [a0, a1, a2, a3] => (*a0 + *a2) + (*a1 + *a3),
-        // Not reachable for `f32`/`f64`, the only `LieScalar` impls; a left
-        // fold keeps the function total rather than panicking (D32).
-        rest => rest.iter().copied().fold(S::zero(), |acc, x| acc + x),
-    }
-}
+use crate::linearize::eigen_qr::BlockSpan;
 
 /// `redux_impl<Func, Evaluator, LinearVectorizedTraversal, NoUnrolling>`
-/// (`Core/Redux.h:207-253`) over a contiguous, runtime-length expression.
+/// (`Core/Redux.h:274-325`) over a contiguous, runtime-length expression.
 ///
 /// This is what `.sum()` does to the `cwiseProduct` inside the row-major
 /// triangular solve (`TriangularSolverVector.h:66-69`). The expression is a
@@ -91,19 +46,24 @@ fn predux<S: LieScalar>(lanes: &[S]) -> S {
 /// the data happens to sit in memory.
 pub(crate) fn redux_dynamic<S: LieScalar>(terms: &[S]) -> S {
     let size: usize = terms.len();
-    let packet: usize = packet_size::<S>();
+    let packet: usize = S::EIGEN_PACKET_SIZE;
     let aligned_size: usize = (size / packet) * packet;
     let aligned_size2: usize = (size / (2 * packet)) * (2 * packet);
 
     if aligned_size == 0 {
-        // "too small to vectorize anything" (`:246-252`): a left fold, and an
+        // "too small to vectorize anything" (`:317-322`): a left fold, and an
         // empty input is zero rather than a read of `coeff(0)`.
         return terms.iter().copied().fold(S::zero(), |acc, x| acc + x);
     }
 
-    let mut res0: Vec<S> = terms[0..packet].to_vec();
+    // Four lanes because that is the widest packet either scalar has; only the
+    // first `packet` of them are read, as in
+    // [`crate::linearize::eigen_qr::contiguous_squared_norm`].
+    let mut res0: [S; 4] = [S::zero(); 4];
+    res0[..packet].copy_from_slice(&terms[..packet]);
     if aligned_size > packet {
-        let mut res1: Vec<S> = terms[packet..2 * packet].to_vec();
+        let mut res1: [S; 4] = [S::zero(); 4];
+        res1[..packet].copy_from_slice(&terms[packet..2 * packet]);
         let mut index: usize = 2 * packet;
         while index < aligned_size2 {
             for lane in 0..packet {
@@ -121,7 +81,7 @@ pub(crate) fn redux_dynamic<S: LieScalar>(terms: &[S]) -> S {
             }
         }
     }
-    let mut res: S = predux(&res0);
+    let mut res: S = S::eigen_predux(&res0[..packet]);
     // `alignedStart` is zero, so only the trailing coefficients are left.
     for &term in &terms[aligned_size..] {
         res += term;
@@ -132,98 +92,82 @@ pub(crate) fn redux_dynamic<S: LieScalar>(terms: &[S]) -> S {
 /// `res += alpha * lhs.block(row0, col0, rows, cols) * rhs`, with Eigen's
 /// `ColMajor` association (`GeneralMatrixVector.h:105-258`).
 ///
-/// `block_cols` is `cols` whenever `cols < 128` (`:143`), which every caller
-/// here satisfies — the triangular panel is at most eight wide — so there is a
-/// single column block and each output coefficient is one left fold from zero.
-///
-/// **Contract: `rhs.len() == block.cols` and `res.len() == block.rows`**, the
-/// shape the block itself names. Dropping a coefficient of a shorter `res`
-/// would return a partially updated LM increment instead of failing.
+/// **Contract: `cols < 128`**, so `GeneralMatrixVector.h:143`'s
+/// `cols < 128 ? cols : ...` makes the column block the whole width — one
+/// block, each output coefficient one left fold from zero. Every caller here is
+/// a triangular panel, at most eight wide. Also `rhs.len() == span.cols` and
+/// `res.len() == span.rows`, the shape the span itself names: dropping a
+/// coefficient of a shorter `res` would return a partially updated LM
+/// increment instead of failing.
 pub(crate) fn gemv_col_major_block<S: LieScalar>(
     lhs: &DMatrix<S>,
-    block: Block,
+    span: BlockSpan,
     rhs: &[S],
     res: &mut [S],
     alpha: S,
 ) {
-    let Block {
-        row0,
-        col0,
+    let BlockSpan {
+        row_start,
         rows,
+        col_start,
         cols,
-    } = block;
+    } = span;
+    debug_assert!(cols < 128, "GeneralMatrixVector.h:143 blocks a wider gemv");
     debug_assert_eq!(rhs.len(), cols);
     debug_assert_eq!(res.len(), rows);
-    let block_cols: usize = if cols < 128 { cols } else { 4 };
-    let mut j2: usize = 0;
-    while j2 < cols {
-        let jend: usize = (j2 + block_cols).min(cols);
-        for i in 0..rows {
-            let mut acc: S = S::zero();
-            for j in j2..jend {
-                // `pcj.pmadd(lhs, b0, c)` without FMA: `a * b + c`.
-                acc = lhs[(row0 + i, col0 + j)] * rhs[j] + acc;
-            }
-            res[i] += alpha * acc;
+    for i in 0..rows {
+        let mut acc: S = S::zero();
+        for j in 0..cols {
+            // `pcj.pmadd(lhs, b0, c)` without FMA: `a * b + c`.
+            acc = lhs[(row_start + i, col_start + j)] * rhs[j] + acc;
         }
-        j2 = jend;
+        res[i] += alpha * acc;
     }
 }
 
 /// `res += alpha * lhsᵀ.block(row0, col0, rows, cols) * rhs` read as a
 /// `RowMajor` product (`GeneralMatrixVector.h:298-450`).
 ///
-/// The logical coefficient `(i, j)` is `lhs[(col0 + j, row0 + i)]`: this is the
-/// shape `matrixL().adjoint()` hands the solver, a triangular view over a
-/// `Transpose` of a column-major matrix, which Eigen therefore dispatches to
-/// the row-major kernel.
+/// The logical coefficient `(i, j)` is `lhs[(col_start + j, row_start + i)]`:
+/// this is the shape `matrixL().adjoint()` hands the solver, a triangular view
+/// over a `Transpose` of a column-major matrix, which Eigen therefore
+/// dispatches to the row-major kernel.
 ///
-/// **Contract: `rhs.len() == block.cols` and `res.len() == block.rows`**, as in
+/// **Contract: `rhs.len() == span.cols` and `res.len() == span.rows`**, as in
 /// [`gemv_col_major_block`].
 pub(crate) fn gemv_row_major_of_transpose<S: LieScalar>(
     lhs: &DMatrix<S>,
-    block: Block,
+    span: BlockSpan,
     rhs: &[S],
     res: &mut [S],
     alpha: S,
 ) {
-    let Block {
-        row0,
-        col0,
+    let BlockSpan {
+        row_start,
         rows,
+        col_start,
         cols,
-    } = block;
+    } = span;
     debug_assert_eq!(rhs.len(), cols);
     debug_assert_eq!(res.len(), rows);
-    let packet: usize = packet_size::<S>();
+    let packet: usize = S::EIGEN_PACKET_SIZE;
     let full_col_block_end: usize = packet * (cols / packet);
-    let mut lanes: Vec<S> = vec![S::zero(); packet];
     for i in 0..rows {
-        lanes.fill(S::zero());
+        let mut lanes: [S; 4] = [S::zero(); 4];
         let mut j: usize = 0;
         while j < full_col_block_end {
             for lane in 0..packet {
-                lanes[lane] = lhs[(col0 + j + lane, row0 + i)] * rhs[j + lane] + lanes[lane];
+                lanes[lane] =
+                    lhs[(col_start + j + lane, row_start + i)] * rhs[j + lane] + lanes[lane];
             }
             j += packet;
         }
-        let mut acc: S = predux(&lanes);
+        let mut acc: S = S::eigen_predux(&lanes[..packet]);
         for j in full_col_block_end..cols {
-            acc += lhs[(col0 + j, row0 + i)] * rhs[j];
+            acc += lhs[(col_start + j, row_start + i)] * rhs[j];
         }
         res[i] += alpha * acc;
     }
-}
-
-/// `numext::maxi(a, b)` (`Core/MathFunctions.h`), which is what `cwiseMax`
-/// applies coefficient by coefficient.
-///
-/// `(a < b ? b : a)`, so a NaN on the left survives and `f32::max`'s
-/// NaN-suppressing behaviour is wrong here. `sqrt_keypoint_vio.cpp:1415` sends
-/// the result straight into the damped diagonal, so a NaN that Eigen keeps and
-/// Rust would drop changes whether the solve retries.
-pub(crate) fn eigen_maxi<S: LieScalar>(a: S, b: S) -> S {
-    if a < b { b } else { a }
 }
 
 #[cfg(test)]
@@ -234,33 +178,8 @@ mod tests {
     use nalgebra::DMatrix;
     use proptest::prelude::*;
 
-    #[test]
-    fn the_packet_widths_are_the_forks() {
-        assert_eq!(packet_size::<f32>(), 4);
-        assert_eq!(packet_size::<f64>(), 2);
-    }
-
-    /// The two `predux` trees, spelled out on values whose sum is
-    /// order-dependent in `f32`: `1 + 2^-24` rounds away against `1` but
-    /// survives against `2^-24`.
-    #[test]
-    fn predux_pairs_the_lanes_across_the_halves() {
-        let tiny: f32 = f32::EPSILON / 2.0;
-        // (1 + 1) + (tiny + tiny) keeps both tiny terms; a left fold
-        // ((1 + 1) + tiny) + tiny loses them.
-        assert_eq!(predux(&[1.0f32, tiny, 1.0f32, tiny]), 2.0 + (tiny + tiny));
-        assert_eq!(
-            [1.0f32, tiny, 1.0f32, tiny]
-                .iter()
-                .copied()
-                .fold(0.0f32, |a, b| a + b),
-            2.0
-        );
-        assert_eq!(predux(&[1.0f64, 2.0f64]), 3.0);
-    }
-
     /// The `f64` splits of `redux_dynamic`, length by length, against the trees
-    /// derived from `Redux.h:207-253` by hand.
+    /// derived from `Redux.h:274-325` by hand.
     #[test]
     fn redux_dynamic_splits_as_eigen_does() {
         let t: Vec<f64> = (1..=7).map(|i| 1.0 / f64::from(i)).collect();
@@ -311,10 +230,10 @@ mod tests {
         let mut res: [f32; 1] = [1.0];
         gemv_col_major_block(
             &lhs,
-            Block {
-                row0: 0,
-                col0: 0,
+            BlockSpan {
+                row_start: 0,
                 rows: 1,
+                col_start: 0,
                 cols: 2,
             },
             &rhs,
@@ -343,24 +262,17 @@ mod tests {
                 .collect();
 
             let mut res: Vec<f64> = vec![0.0; 5];
-            gemv_col_major_block(&lhs, Block { row0: 0, col0: 0, rows: 5, cols: 7 }, &rhs, &mut res, 1.0);
+            gemv_col_major_block(&lhs, BlockSpan { row_start: 0, rows: 5, col_start: 0, cols: 7 }, &rhs, &mut res, 1.0);
             for i in 0..5 {
                 prop_assert!((res[i] - expected[i]).abs() <= 1e-12 * (1.0 + expected[i].abs()));
             }
 
             let transposed: DMatrix<f64> = lhs.transpose();
             let mut res2: Vec<f64> = vec![0.0; 5];
-            gemv_row_major_of_transpose(&transposed, Block { row0: 0, col0: 0, rows: 5, cols: 7 }, &rhs, &mut res2, 1.0);
+            gemv_row_major_of_transpose(&transposed, BlockSpan { row_start: 0, rows: 5, col_start: 0, cols: 7 }, &rhs, &mut res2, 1.0);
             for i in 0..5 {
                 prop_assert!((res2[i] - expected[i]).abs() <= 1e-12 * (1.0 + expected[i].abs()));
             }
         }
-    }
-
-    #[test]
-    fn eigen_maxi_keeps_a_nan_on_the_left() {
-        assert!(eigen_maxi(f64::NAN, 1.0).is_nan());
-        assert_eq!(eigen_maxi(1.0f64, f64::NAN), 1.0);
-        assert_eq!(f64::NAN.max(1.0), 1.0, "std::f64::max is the other way");
     }
 }

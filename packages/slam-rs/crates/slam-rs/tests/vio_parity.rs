@@ -40,6 +40,7 @@
 
 use std::path::{Path, PathBuf};
 
+use nalgebra::Vector3;
 use serde::Deserialize;
 
 use slam_rs::calib::Calibration;
@@ -203,7 +204,7 @@ fn the_whole_vio_follows_the_cpp_trajectory() {
     let mut worst_position: f64 = 0.0;
     let mut worst_rotation_deg: f64 = 0.0;
     let mut travelled: f64 = 0.0;
-    let mut previous: Option<[f64; 3]> = None;
+    let mut previous: Option<Vector3<f64>> = None;
     let mut compared: usize = 0;
 
     for (frame, flow) in oracle.flow.iter().take(available).enumerate() {
@@ -236,19 +237,13 @@ fn the_whole_vio_follows_the_cpp_trajectory() {
             .unwrap_or_else(|| panic!("frame {frame}: the newest state is not in the window"));
 
         let pose: [f64; 7] = result.world_from_rig;
-        let position: [f64; 3] = [pose[0], pose[1], pose[2]];
+        let position: Vector3<f64> = Vector3::new(pose[0], pose[1], pose[2]);
         if let Some(before) = previous {
-            travelled += ((position[0] - before[0]).powi(2)
-                + (position[1] - before[1]).powi(2)
-                + (position[2] - before[2]).powi(2))
-            .sqrt();
+            travelled += (position - before).norm();
         }
         previous = Some(position);
 
-        let offset: f64 = ((position[0] - newest.t[0]).powi(2)
-            + (position[1] - newest.t[1]).powi(2)
-            + (position[2] - newest.t[2]).powi(2))
-        .sqrt();
+        let offset: f64 = (position - Vector3::from(newest.t)).norm();
         // The relative rotation's angle, from Sophus's own log.
         let mine: So3<f64> = So3::from_quaternion_xyzw(pose[3], pose[4], pose[5], pose[6]).unwrap();
         let theirs: So3<f64> =

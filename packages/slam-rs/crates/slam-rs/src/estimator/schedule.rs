@@ -36,6 +36,7 @@ use nalgebra::Vector3;
 
 use super::{EstimatorError, FrameStats, SqrtKeypointVio, duration_ns};
 use crate::config::KeyframeMargCriteria;
+use crate::landmark::eigen_norm3;
 use crate::lie::{LieScalar, Se3};
 use crate::marg::{
     MarginalizeInputs, MarginalizeOptions, MarginalizeSchedule, NullspaceCheck, check_eigenvalues,
@@ -94,7 +95,10 @@ pub struct MarginalizationStats {
     /// on an invalid linearization is worth knowing about.
     pub numerically_valid: bool,
     /// `asize`, the width of the ordering the split was taken over (`:898`).
-    /// `kept_indices + marg_indices` is exactly this, by construction.
+    ///
+    /// It witnesses that the split covers the ordering: `kept_indices +
+    /// marg_indices == ordering_size` is what "every variable is either kept or
+    /// marginalized" means, and `tests/vio_oracle.rs` asserts that sum.
     pub ordering_size: usize,
     /// `marg_order_new`, as `(frame, index, size)` (`:1120-1133`).
     pub prior_order: Vec<(FrameId, usize, usize)>,
@@ -259,14 +263,14 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 
     /// `logMargNullspace()` (`:670-681`).
     ///
-    /// The order is copied from the live prior **here**, which is what makes the
-    /// debug copy's `H` and its ordering agree again after the marginalization
-    /// replaced both. The control direction is a parameter of
-    /// [`check_marg_nullspace`] rather than `inc_random.setRandom()`
-    /// (`sqrt_ba_base.cpp:158`), which is `rand()`-seeded and not reproducible;
-    /// a fixed direction keeps the diagnostic deterministic (D17).
-    fn log_marg_nullspace(&mut self) -> Result<(NullspaceCheck, Vec<f64>), EstimatorError> {
-        self.nullspace_marg_data.order = self.marg_data.order.clone();
+    /// `:672`'s `nullspace_marg_data.order = marg_data.order` already happened:
+    /// [`crate::marg::marginalize`] assigns it beside the debug prior's `H` and
+    /// `b` under the same condition, so the pair this reads is consistent. The
+    /// control direction is a parameter of [`check_marg_nullspace`] rather than
+    /// `inc_random.setRandom()` (`sqrt_ba_base.cpp:158`), which is
+    /// `rand()`-seeded and not reproducible; a fixed direction keeps the
+    /// diagnostic deterministic (D17).
+    fn log_marg_nullspace(&self) -> Result<(NullspaceCheck, Vec<f64>), EstimatorError> {
         let width: usize = self.nullspace_marg_data.order.total_size();
         let mut direction: nalgebra::DVector<f64> = nalgebra::DVector::zeros(width);
         for (i, slot) in direction.iter_mut().enumerate() {
@@ -339,38 +343,40 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             }
         }
 
-        // `:838-867`.
-        let Some(last_kf) = self.kf_ids.iter().next_back().copied() else {
-            return Err(EstimatorError::NoKeyframeToMarginalize { candidates: 0 });
-        };
-        // `:854`: `frame_states.at(last_kf)`. The newest keyframe is the newest
-        // frame whenever `take_kf` fired on it, and keyframes are at least six
-        // frames apart, so it is a state in every shipped configuration.
-        let Some(last_state) = self.ba.frame_states.get(&last_kf) else {
-            return Err(EstimatorError::KeyframeNotInWindow {
-                frame_id: last_kf,
-                wanted: "state",
-            });
-        };
-        let last_translation: Vector3<S> = last_state.state().t_w_i.translation;
-
-        let mut min_score: S = S::max_value().unwrap_or_else(S::one);
+        // `:838-867`. `:842`: `std::numeric_limits<Scalar>::max()`.
+        let mut min_score: S = S::largest();
         let mut min_score_id: Option<FrameId> = None;
-        for frame_id in &candidates {
-            let here: Vector3<S> = self.keyframe_pose(*frame_id)?.translation;
-            // `:848-853`: the sum runs over the same candidate set, so a
-            // keyframe's distance to itself contributes `1 / 1e-5`.
-            let mut denom: S = S::zero();
-            for other in &candidates {
-                let there: Vector3<S> = self.keyframe_pose(*other)?.translation;
-                let d: Vector3<S> = here - there;
-                denom += S::one() / (eigen_norm3(&d) + S::from_literal(1e-5));
-            }
-            let d: Vector3<S> = here - last_translation;
-            let score: S = eigen_norm3(&d).sqrt() * denom;
-            if score < min_score {
-                min_score = score;
-                min_score_id = Some(*frame_id);
+        // `:841`: `*kf_ids.crbegin()`. Every candidate comes out of `kf_ids`,
+        // so an empty keyframe set has no candidate either and the one
+        // `NoKeyframeToMarginalize` below reports it.
+        if let Some(last_kf) = self.kf_ids.iter().next_back().copied() {
+            // `:854`: `frame_states.at(last_kf)`. The newest keyframe is the
+            // newest frame whenever `take_kf` fired on it, and keyframes are at
+            // least six frames apart, so it is a state in every shipped
+            // configuration.
+            let Some(last_state) = self.ba.frame_states.get(&last_kf) else {
+                return Err(EstimatorError::KeyframeNotInWindow {
+                    frame_id: last_kf,
+                    wanted: "state",
+                });
+            };
+            let last_translation: Vector3<S> = last_state.state().t_w_i.translation;
+            for frame_id in &candidates {
+                let here: Vector3<S> = self.keyframe_pose(*frame_id)?.translation;
+                // `:848-853`: the sum runs over the same candidate set, so a
+                // keyframe's distance to itself contributes `1 / 1e-5`.
+                let mut denom: S = S::zero();
+                for other in &candidates {
+                    let there: Vector3<S> = self.keyframe_pose(*other)?.translation;
+                    let d: Vector3<S> = here - there;
+                    denom += S::one() / (eigen_norm3(d[0], d[1], d[2]) + S::from_literal(1e-5));
+                }
+                let d: Vector3<S> = here - last_translation;
+                let score: S = eigen_norm3(d[0], d[1], d[2]).sqrt() * denom;
+                if score < min_score {
+                    min_score = score;
+                    min_score_id = Some(*frame_id);
+                }
             }
         }
         // `:872`: "if no frame was selected, the logic above is faulty".
@@ -405,7 +411,8 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             .take(all_kfs.len().saturating_sub(2))
             .collect();
 
-        let mut min_score: S = S::max_value().unwrap_or_else(S::one);
+        // `:788`: `std::numeric_limits<Scalar>::max()`.
+        let mut min_score: S = S::largest();
         let mut min_score_id: Option<FrameId> = None;
         for frame_id in &candidates {
             let fwd1: (S, S) = self.forward_vector_2d(*frame_id)?;
@@ -482,12 +489,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         let fwd: Vector3<S> = t_w_c0.rotation * Vector3::new(S::zero(), S::zero(), S::one());
         Ok((fwd[0], fwd[1]))
     }
-}
-
-/// `Vector3::norm()`, which is `sqrt(squaredNorm())` and therefore Eigen's
-/// three-coefficient reduction (D47).
-fn eigen_norm3<S: LieScalar>(v: &Vector3<S>) -> S {
-    crate::landmark::eigen_norm3(v[0], v[1], v[2])
 }
 
 #[cfg(test)]

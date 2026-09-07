@@ -273,6 +273,9 @@ pub struct FrameStats<S: LieScalar> {
     pub took_keyframe: bool,
     /// Whether the keyframe vote of `:454-456` fired on this frame.
     pub keyframe_vote: bool,
+    /// `frames_after_kf` (`:202`) after the update: the vote's rate limiter,
+    /// zero on a keyframe and one more than the last frame otherwise.
+    pub frames_after_kf: i32,
     /// `num_points_added` (`:552`), zero on a non-keyframe.
     pub num_points_added: usize,
     /// Keyframes after the update, oldest first.
@@ -302,6 +305,21 @@ pub struct FrameStats<S: LieScalar> {
     pub timings: StageTimings,
 }
 
+/// The nine degrees of freedom a 15-dof state carries beyond its pose.
+///
+/// A pose block (`frame_poses`) has none of them, a state block
+/// (`frame_states`) has all three, so they travel as one value rather than as
+/// three `Option`s that are always all-`Some` or all-`None`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VelBias<S: LieScalar> {
+    /// World-frame velocity.
+    pub vel_w_i: Vector3<S>,
+    /// Gyroscope bias.
+    pub bias_gyro: Vector3<S>,
+    /// Accelerometer bias.
+    pub bias_accel: Vector3<S>,
+}
+
 /// One window state, as the S9 Rerun rung needs it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowState<S: LieScalar> {
@@ -309,12 +327,8 @@ pub struct WindowState<S: LieScalar> {
     pub t_ns: i64,
     /// `T_w_i`, the rig pose in the world frame.
     pub t_w_i: Se3<S>,
-    /// World-frame velocity, `None` for a pose-only block.
-    pub vel_w_i: Option<Vector3<S>>,
-    /// Gyroscope bias, `None` for a pose-only block.
-    pub bias_gyro: Option<Vector3<S>>,
-    /// Accelerometer bias, `None` for a pose-only block.
-    pub bias_accel: Option<Vector3<S>>,
+    /// The nine dof beyond the pose, `None` for a pose-only block.
+    pub vel_bias: Option<VelBias<S>>,
     /// Whether the linearization point is frozen (`imu_types.h:109`).
     pub linearized: bool,
     /// Whether this frame is a keyframe.
@@ -574,61 +588,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         Self::new(gravity::<S>(), calibration, config)
     }
 
-    /// The biases every new state and preintegration starts from,
-    /// `initialize(bg, ba)` (`:245`).
-    ///
-    /// basalt captures them in the processing lambda and never changes them; the
-    /// port stores them for the same reason.
-    pub fn set_initial_bias(&mut self, bias_gyro: Vector3<S>, bias_accel: Vector3<S>) {
-        self.initial_bias_gyro = bias_gyro;
-        self.initial_bias_accel = bias_accel;
-    }
-
-    /// `initialize(t_ns, T_w_i, vel_w_i, bg, ba)` (`:198-217`): seed the window
-    /// from a pose the caller already has, instead of from gravity.
-    ///
-    /// Not on the VIO path — `src/vio.cpp` uses the accelerometer bootstrap of
-    /// `:263-296` — but it is the `VioEstimatorBase` entry point the VIT API
-    /// exposes, and it is the only way a test can start the window at a known
-    /// pose.
-    ///
-    /// # Errors
-    ///
-    /// [`EstimatorError::State`] if the ordering cannot take the first entry.
-    pub fn initialize_at(
-        &mut self,
-        t_ns: i64,
-        t_w_i: Se3<S>,
-        vel_w_i: Vector3<S>,
-        bias_gyro: Vector3<S>,
-        bias_accel: Vector3<S>,
-    ) -> Result<(), EstimatorError> {
-        self.initialized = true;
-        self.t_w_i_init = t_w_i;
-        self.last_state_t_ns = t_ns;
-        self.imu_meas.insert(
-            t_ns,
-            IntegratedImuMeasurement::new(t_ns, &bias_gyro, &bias_accel),
-        );
-        self.ba.frame_states.insert(
-            t_ns,
-            PoseVelBiasStateWithLin::new(
-                PoseVelBiasState::new(t_ns, t_w_i, vel_w_i, bias_gyro, bias_accel),
-                true,
-            ),
-        );
-        self.frame_idx.insert(t_ns, self.frame_count);
-        self.frame_count += 1;
-
-        let mut order: AbsOrderMap = AbsOrderMap::new();
-        order.push(t_ns, POSE_VEL_BIAS_SIZE)?;
-        self.marg_data.order = order.clone();
-        self.nullspace_marg_data.order = order;
-
-        self.set_initial_bias(bias_gyro, bias_accel);
-        Ok(())
-    }
-
     /// `takeLongTermKeyframe()` (`:124-127`): the next `measure` moves the
     /// newest keyframe into `ltkfs`, where the `max_kfs` budget cannot evict it.
     ///
@@ -654,11 +613,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         self.imu_queue.push_back(sample);
     }
 
-    /// How many buffered IMU samples have not been consumed yet.
-    pub fn buffered_imu(&self) -> usize {
-        self.imu_queue.len() + usize::from(self.pending.is_some())
-    }
-
     /// Whether the window has a state (`initialized`, `:233`).
     pub fn is_initialized(&self) -> bool {
         self.initialized
@@ -681,11 +635,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             .frame_states
             .get(&self.last_state_t_ns)
             .map(PoseVelBiasStateWithLin::state)
-    }
-
-    /// `getT_w_i_init()` (`:184`), the pose the accelerometer bootstrap chose.
-    pub fn t_w_i_init(&self) -> &Se3<S> {
-        &self.t_w_i_init
     }
 
     /// The keyframes, oldest first (`kf_ids`, `:204`).
@@ -735,9 +684,11 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 WindowState {
                     t_ns: *t_ns,
                     t_w_i: inner.t_w_i,
-                    vel_w_i: Some(inner.vel_w_i),
-                    bias_gyro: Some(inner.bias_gyro),
-                    bias_accel: Some(inner.bias_accel),
+                    vel_bias: Some(VelBias {
+                        vel_w_i: inner.vel_w_i,
+                        bias_gyro: inner.bias_gyro,
+                        bias_accel: inner.bias_accel,
+                    }),
                     linearized: state.is_linearized(),
                     keyframe: self.kf_ids.contains(t_ns),
                     long_term_keyframe: self.ltkfs.contains(t_ns),
@@ -752,9 +703,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             .map(|(t_ns, pose)| WindowState {
                 t_ns: *t_ns,
                 t_w_i: *pose.pose(),
-                vel_w_i: None,
-                bias_gyro: None,
-                bias_accel: None,
+                vel_bias: None,
                 linearized: pose.is_linearized(),
                 keyframe: self.kf_ids.contains(t_ns),
                 long_term_keyframe: self.ltkfs.contains(t_ns),
@@ -972,10 +921,16 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 
     /// `measure(opt_flow_meas, meas)` (`:422-575`).
     ///
+    /// **Contract: `frame.cameras.len() == self.ba.calib.t_i_c.len()`, which is
+    /// at least two.** [`Self::process_frame`] checks the frameset width
+    /// against the rig (`:309`) and [`Self::new`] refuses a rig of fewer than
+    /// two cameras, so camera 0 exists and the per-camera vectors below are
+    /// indexed directly rather than re-validated here.
+    ///
     /// # Errors
     ///
-    /// [`EstimatorError`] when the frameset has no cameras, when an observation
-    /// cannot be filed, or when `optimize_and_marg` refuses.
+    /// [`EstimatorError`] when an observation cannot be filed or when
+    /// `optimize_and_marg` refuses.
     fn measure(
         &mut self,
         frame: Arc<FlowObservations>,
@@ -983,12 +938,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     ) -> Result<FrameStats<S>, EstimatorError> {
         let started: std::time::Instant = std::time::Instant::now();
         let num_cams: usize = frame.cameras.len();
-        if num_cams == 0 {
-            return Err(EstimatorError::CameraCountMismatch {
-                expected: self.ba.calib.t_i_c.len(),
-                actual: 0,
-            });
-        }
+        debug_assert_eq!(num_cams, self.ba.calib.t_i_c.len());
 
         // `:427-441`: predict the new state from the previous one and the
         // preintegration, then file it under the frameset's timestamp.
@@ -1110,6 +1060,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             unconnected: unconnected_obs.iter().map(BTreeSet::len).collect(),
             took_keyframe,
             keyframe_vote,
+            frames_after_kf: self.frames_after_kf,
             num_points_added,
             kf_ids: Vec::new(),
             ltkfs: Vec::new(),

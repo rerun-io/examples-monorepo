@@ -18,9 +18,13 @@
 //! Every **integer decision** is identical in both precisions and asserted as
 //! such: the keyframe vote, `kf_ids`, `ltkfs`, `num_points_kf`, the landmark and
 //! observation counts, the preintegrated-interval count, which frames are states
-//! and which are poses, every fixed-linearization flag, the marginalization
-//! schedule (which frames in which set, and the index split) and the prior's
-//! `AbsOrderMap`. Over the 60 framesets the `f32` run breaks none of them.
+//! and which are poses, every fixed-linearization flag, `frames_after_kf`, the
+//! marginalization schedule (which frames in which set, and the index split)
+//! and the prior's `AbsOrderMap`. Over the 60 framesets the `f32` run breaks
+//! none of them. The vote itself is asserted through its effects — `kf_ids` and
+//! `num_points_kf` gain an entry exactly when it fires — because the fixture's
+//! `take_kf` is dumped *after* `measure` consumed it and is therefore always
+//! false; the field stays in the fixture for a reader and is not read here.
 //!
 //! The **floating** comparisons are relative and the tolerances are the measured
 //! agreement plus a margin; see the constants below for the numbers this run
@@ -84,7 +88,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use nalgebra::Vector2;
 use serde::Deserialize;
@@ -92,7 +96,7 @@ use serde::Deserialize;
 use slam_rs::calib::Calibration;
 use slam_rs::config::VioConfig;
 use slam_rs::estimator::{
-    FlowObservations, FrameOutcome, FrameStats, LmIteration, SqrtKeypointVio,
+    FlowObservations, FrameOutcome, FrameStats, LmIteration, SqrtKeypointVio, WindowSnapshot,
 };
 use slam_rs::imu::ImuSample;
 use slam_rs::lie::LieScalar;
@@ -191,15 +195,15 @@ struct OracleFlow {
 }
 
 #[derive(Debug, Deserialize)]
+/// One tracked keypoint of the C++ frontend's `OpticalFlowResult`.
+///
+/// The fixture also carries the warp's four `linear` coefficients so a reader
+/// can see the whole `AffineCompact2f`; the estimator reads only the
+/// translation, so they are not deserialized.
 struct OraclePoint {
     id: u64,
     x: f32,
     y: f32,
-    #[allow(
-        dead_code,
-        reason = "the estimator reads only the translation; the linear part is dumped so a reader can see the whole warp"
-    )]
-    linear: [f32; 4],
 }
 
 #[derive(Debug, Deserialize)]
@@ -212,7 +216,6 @@ struct OracleFrame {
     ltkfs: Vec<i64>,
     num_points_kf: Vec<(i64, i64)>,
     last_state_t_ns: i64,
-    take_kf: bool,
     frames_after_kf: i32,
     opt_started: bool,
     num_landmarks: usize,
@@ -301,14 +304,17 @@ fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
-fn oracle() -> Oracle {
+/// The 1.55 MB fixture, parsed once for the whole test binary: five lanes read
+/// it and `serde_json` is the slowest thing in this file otherwise.
+static ORACLE: LazyLock<Oracle> = LazyLock::new(|| {
     let path: PathBuf = fixtures().join("vio/vio_oracle.json");
     let text: String = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
     serde_json::from_str(&text).expect("vio_oracle.json does not match the expected shape")
-}
+});
 
-fn imu_window() -> Vec<ImuSample> {
+/// The 1,077 uncalibrated samples of the window, in capture order.
+static IMU: LazyLock<Vec<ImuSample>> = LazyLock::new(|| {
     let path: PathBuf = fixtures().join("vio/imu.json");
     let text: String = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
@@ -323,16 +329,27 @@ fn imu_window() -> Vec<ImuSample> {
             accel: nalgebra::Vector3::new(row.accel[0], row.accel[1], row.accel[2]),
         })
         .collect()
-}
+});
 
-fn config() -> VioConfig {
+static CONFIG: LazyLock<VioConfig> = LazyLock::new(|| {
     let text: String = std::fs::read_to_string(fixtures().join("msdmi_config.json")).unwrap();
     VioConfig::from_json_str(&text).unwrap()
-}
+});
 
-fn calibration() -> Calibration<f64> {
+static CALIB: LazyLock<Calibration<f64>> = LazyLock::new(|| {
     let text: String = std::fs::read_to_string(fixtures().join("msdmi_calib.json")).unwrap();
     Calibration::from_json_str(&text).unwrap()
+});
+
+/// The estimator every lane starts from: the fixture's calibration and config,
+/// with the whole IMU window already pushed.
+fn window<S: LieScalar>(config: VioConfig) -> SqrtKeypointVio<S> {
+    let mut estimator: SqrtKeypointVio<S> =
+        SqrtKeypointVio::with_default_gravity(CALIB.cast(), config).unwrap();
+    for sample in IMU.iter().copied() {
+        estimator.push_imu(sample);
+    }
+    estimator
 }
 
 fn observations(flow: &OracleFlow) -> Arc<FlowObservations> {
@@ -404,17 +421,13 @@ enum LmGate {
 
 /// Drive the window and return the worst relative difference per quantity,
 /// having asserted every integer decision on the way.
-fn compare<S: LieScalar>(oracle: &Oracle, run: &OracleRun, gate: LmGate) -> Worst {
-    let mut estimator: SqrtKeypointVio<S> =
-        SqrtKeypointVio::with_default_gravity(calibration().cast(), config()).unwrap();
-    for sample in imu_window() {
-        estimator.push_imu(sample);
-    }
+fn compare<S: LieScalar>(run: &OracleRun, gate: LmGate) -> Worst {
+    let mut estimator: SqrtKeypointVio<S> = window(CONFIG.clone());
 
     let mut diverged: Vec<i64> = Vec::new();
     let mut worst: Worst = Worst::default();
     for (index, expected) in run.frames.iter().take(framesets()).enumerate() {
-        let flow: &OracleFlow = oracle
+        let flow: &OracleFlow = ORACLE
             .flow
             .get(index)
             .unwrap_or_else(|| panic!("no flow stream for frame {index}"));
@@ -472,26 +485,22 @@ fn compare<S: LieScalar>(oracle: &Oracle, run: &OracleRun, gate: LmGate) -> Wors
             expected.opt_started,
             "{where_}: opt_started"
         );
+        assert_eq!(
+            stats.frames_after_kf, expected.frames_after_kf,
+            "{where_}: frames_after_kf, the keyframe vote's rate limiter"
+        );
 
         // The window itself: the same frames, as the same kind of block, with
-        // the same fixed-linearization flags.
-        let states: Vec<i64> = estimator
-            .snapshot()
-            .states
-            .iter()
-            .map(|state| state.t_ns)
-            .collect();
+        // the same fixed-linearization flags. One snapshot per frameset — it
+        // clones the window and re-derives every landmark's world position.
+        let snapshot: WindowSnapshot<S> = estimator.snapshot();
+        let states: Vec<i64> = snapshot.states.iter().map(|state| state.t_ns).collect();
         assert_eq!(
             states,
             expected.states.iter().map(|s| s.t_ns).collect::<Vec<i64>>(),
             "{where_}: frame_states"
         );
-        let poses: Vec<i64> = estimator
-            .snapshot()
-            .poses
-            .iter()
-            .map(|pose| pose.t_ns)
-            .collect();
+        let poses: Vec<i64> = snapshot.poses.iter().map(|pose| pose.t_ns).collect();
         assert_eq!(
             poses,
             expected.poses.iter().map(|p| p.t_ns).collect::<Vec<i64>>(),
@@ -575,12 +584,7 @@ fn compare<S: LieScalar>(oracle: &Oracle, run: &OracleRun, gate: LmGate) -> Wors
         );
 
         // ── the floating agreement ────────────────────────────────────────
-        for (state, want) in estimator
-            .snapshot()
-            .states
-            .iter()
-            .zip(expected.states.iter())
-        {
+        for (state, want) in snapshot.states.iter().zip(expected.states.iter()) {
             let q: [S; 4] = state.t_w_i.rotation.quaternion_xyzw();
             for (got, want) in q.iter().zip(want.q.iter()) {
                 Worst::take(&mut worst.rotation, got.to_f64(), *want);
@@ -591,12 +595,14 @@ fn compare<S: LieScalar>(oracle: &Oracle, run: &OracleRun, gate: LmGate) -> Wors
                     state.t_w_i.translation[i].to_f64(),
                     want.t[i],
                 );
-                if let Some(vel) = state.vel_w_i {
-                    Worst::take(&mut worst.velocity, vel[i].to_f64(), want.vel[i]);
-                }
-                if let (Some(bg), Some(ba)) = (state.bias_gyro, state.bias_accel) {
-                    Worst::take(&mut worst.bias, bg[i].to_f64(), want.bg[i]);
-                    Worst::take(&mut worst.bias, ba[i].to_f64(), want.ba[i]);
+                if let Some(vel_bias) = state.vel_bias {
+                    Worst::take(
+                        &mut worst.velocity,
+                        vel_bias.vel_w_i[i].to_f64(),
+                        want.vel[i],
+                    );
+                    Worst::take(&mut worst.bias, vel_bias.bias_gyro[i].to_f64(), want.bg[i]);
+                    Worst::take(&mut worst.bias, vel_bias.bias_accel[i].to_f64(), want.ba[i]);
                 }
             }
             assert_eq!(
@@ -605,7 +611,7 @@ fn compare<S: LieScalar>(oracle: &Oracle, run: &OracleRun, gate: LmGate) -> Wors
                 want.t_ns
             );
         }
-        for (pose, want) in estimator.snapshot().poses.iter().zip(expected.poses.iter()) {
+        for (pose, want) in snapshot.poses.iter().zip(expected.poses.iter()) {
             let q: [S; 4] = pose.t_w_i.rotation.quaternion_xyzw();
             for (got, want) in q.iter().zip(want.q.iter()) {
                 Worst::take(&mut worst.rotation, got.to_f64(), *want);
@@ -667,17 +673,16 @@ fn compare<S: LieScalar>(oracle: &Oracle, run: &OracleRun, gate: LmGate) -> Wors
                 step.step_norminf.to_f64(),
                 want.step_norminf,
             );
-            let _ = want.f_diff;
         }
 
         Worst::take(
             &mut worst.prior_h,
-            frobenius(&estimator.marg_data().h),
+            frobenius(estimator.marg_data().h.iter().copied()),
             expected.marg_digest.h_frobenius,
         );
         Worst::take(
             &mut worst.prior_b,
-            frobenius_vec(&estimator.marg_data().b),
+            frobenius(estimator.marg_data().b.iter().copied()),
             expected.marg_digest.b_norm,
         );
 
@@ -685,7 +690,6 @@ fn compare<S: LieScalar>(oracle: &Oracle, run: &OracleRun, gate: LmGate) -> Wors
             expected.frame, index,
             "the fixture's frames are out of order"
         );
-        let _ = (expected.take_kf, expected.frames_after_kf);
     }
     if !diverged.is_empty() {
         println!(
@@ -765,18 +769,9 @@ fn lm_prefix<S: LieScalar>(
     at
 }
 
-fn frobenius<S: LieScalar>(m: &nalgebra::DMatrix<S>) -> f64 {
-    m.iter()
-        .map(|v| v.to_f64() * v.to_f64())
-        .sum::<f64>()
-        .sqrt()
-}
-
-fn frobenius_vec<S: LieScalar>(v: &nalgebra::DVector<S>) -> f64 {
-    v.iter()
-        .map(|x| x.to_f64() * x.to_f64())
-        .sum::<f64>()
-        .sqrt()
+/// `‖·‖_F` over any coefficient sequence, which on a vector is `‖·‖`.
+fn frobenius<S: LieScalar>(values: impl Iterator<Item = S>) -> f64 {
+    values.map(|v| v.to_f64() * v.to_f64()).sum::<f64>().sqrt()
 }
 
 fn run_named<'a>(oracle: &'a Oracle, scalar: &str) -> &'a OracleRun {
@@ -791,8 +786,7 @@ fn run_named<'a>(oracle: &'a Oracle, scalar: &str) -> &'a OracleRun {
 
 #[test]
 fn the_double_window_follows_the_cpp() {
-    let oracle: Oracle = oracle();
-    let worst: Worst = compare::<f64>(&oracle, run_named(&oracle, "double"), LmGate::Exact);
+    let worst: Worst = compare::<f64>(run_named(&ORACLE, "double"), LmGate::Exact);
     println!("f64 worst relative difference: {worst:#?}");
 
     assert!(
@@ -828,8 +822,7 @@ fn the_double_window_follows_the_cpp() {
 /// the accept test cannot be reproduced and what was measured.
 #[test]
 fn the_float_window_follows_the_cpp() {
-    let oracle: Oracle = oracle();
-    let worst: Worst = compare::<f32>(&oracle, run_named(&oracle, "float"), LmGate::NoiseFloor);
+    let worst: Worst = compare::<f32>(run_named(&ORACLE, "float"), LmGate::NoiseFloor);
     println!("f32 worst relative difference: {worst:#?}");
 
     assert!(
@@ -866,8 +859,7 @@ fn the_float_window_follows_the_cpp() {
 /// or a thread schedule reach a decision.
 #[test]
 fn a_repeat_run_is_bit_identical() {
-    let oracle: Oracle = oracle();
-    let flow: Vec<Arc<FlowObservations>> = oracle
+    let flow: Vec<Arc<FlowObservations>> = ORACLE
         .flow
         .iter()
         .take(framesets())
@@ -895,11 +887,7 @@ struct Trace {
 }
 
 fn drive(flow: &[Arc<FlowObservations>]) -> Vec<Trace> {
-    let mut estimator: SqrtKeypointVio<f32> =
-        SqrtKeypointVio::with_default_gravity(calibration().cast(), config()).unwrap();
-    for sample in imu_window() {
-        estimator.push_imu(sample);
-    }
+    let mut estimator: SqrtKeypointVio<f32> = window(CONFIG.clone());
     let mut traces: Vec<Trace> = Vec::new();
     for frame in flow {
         let outcome: FrameOutcome<f32> = estimator.process_frame(Arc::clone(frame)).unwrap();
@@ -967,17 +955,11 @@ fn drive(flow: &[Arc<FlowObservations>]) -> Vec<Trace> {
 /// `vio_max_states = 3`.
 #[test]
 fn the_window_stays_inside_its_budget() {
-    let oracle: Oracle = oracle();
-    let config: VioConfig = config();
-    let max_states: usize = usize::try_from(config.vio_max_states).unwrap();
-    let max_kfs: usize = usize::try_from(config.vio_max_kfs).unwrap();
+    let max_states: usize = usize::try_from(CONFIG.vio_max_states).unwrap();
+    let max_kfs: usize = usize::try_from(CONFIG.vio_max_kfs).unwrap();
 
-    let mut estimator: SqrtKeypointVio<f64> =
-        SqrtKeypointVio::with_default_gravity(calibration().cast(), config).unwrap();
-    for sample in imu_window() {
-        estimator.push_imu(sample);
-    }
-    for flow in oracle.flow.iter().take(framesets()) {
+    let mut estimator: SqrtKeypointVio<f64> = window(CONFIG.clone());
+    for flow in ORACLE.flow.iter().take(framesets()) {
         let FrameOutcome::Measured(stats) = estimator.process_frame(observations(flow)).unwrap()
         else {
             panic!("NeedMoreImu at {}", flow.t_ns);
@@ -1043,17 +1025,10 @@ fn the_window_stays_inside_its_budget() {
             );
             // What survives is the new prior, whose width is what the kept
             // indices amount to only when no rank was lost in the flat QR.
-            assert!(
-                marg.prior_order
-                    .iter()
-                    .map(|(_, _, size)| size)
-                    .sum::<usize>()
-                    == marg.kept_indices,
-                "the new ordering is {} wide but {} indices were kept",
-                marg.prior_order
-                    .iter()
-                    .map(|(_, _, size)| size)
-                    .sum::<usize>(),
+            let prior_width: usize = marg.prior_order.iter().map(|(_, _, size)| size).sum();
+            assert_eq!(
+                prior_width, marg.kept_indices,
+                "the new ordering is {prior_width} wide but {} indices were kept",
                 marg.kept_indices
             );
         }

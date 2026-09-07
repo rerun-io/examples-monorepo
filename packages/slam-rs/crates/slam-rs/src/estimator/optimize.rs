@@ -30,9 +30,8 @@ use nalgebra::{DMatrix, DVector, Vector3};
 use super::{EstimatorError, FrameStats, LmDamping, VEE_FACTOR, duration_ns};
 use crate::ba_base::BundleAdjustmentBase;
 use crate::config::VioConfig;
-use crate::eigen_blas::eigen_maxi;
 use crate::imu::{ImuLinData, IntegratedImuMeasurement, Matrix9};
-use crate::lie::LieScalar;
+use crate::lie::{LieScalar, eigen_maxi};
 use crate::linearize::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
 use crate::marg::eigen_ldlt::EigenLdlt;
 use crate::types::{
@@ -147,6 +146,12 @@ pub(super) fn optimize<S: LieScalar>(
     // with `.at()` for the poses (an out-of-range throw when it disagrees) and
     // guards the states with `aom.items < marg_data.order.size()`, because the
     // newest states are not in the prior yet.
+    //
+    // This is deliberately not `marg::window::build_absolute_ordering`: that
+    // one is `:726-763`, which walks the same two maps but stops at
+    // `last_state_to_marg` and returns the marginalization's own split. basalt
+    // writes the two loops out twice for the same reason, and merging them
+    // would mean one function with two payloads and two stopping rules.
     let mut aom: AbsOrderMap = AbsOrderMap::new();
     for frame_id in ba.frame_poses.keys().copied() {
         let index: usize = aom.push(frame_id, POSE_SIZE)?;
