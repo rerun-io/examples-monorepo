@@ -58,15 +58,21 @@ GT_ENTITY: str = "/world/runs/gt"
 """The dataset's own ground-truth run, which the base recording already names."""
 CPP_ENTITY: str = "/world/runs/basalt_cpp"
 """The basalt C++ reference trajectory for the same segment."""
-STATS_ENTITY: str = "/stats/vio"
-"""Where the per-frame counters go, off the dataset's own tree and beside the frontend's."""
+VIO_STATS_ENTITY: str = "/stats/vio"
+"""Where the per-frame counters go, off the dataset's own tree and beside the frontend's.
+
+Named for the rung it belongs to, not for what it is: this module already imports
+three names from :mod:`slam_rs.frontend_log`, which has its own ``STATS_ENTITY``
+and its own ``CPP_COLOR`` with different values, and one unqualified import of
+either would have been silently wrong.
+"""
 
 ESTIMATE_COLOR: tuple[int, int, int] = (70, 220, 130)
 """The port's own trajectory: green."""
 GT_COLOR: tuple[int, int, int] = (235, 235, 235)
 """Ground truth: near-white, the reference every error is measured against."""
-CPP_COLOR: tuple[int, int, int] = (255, 150, 40)
-"""The basalt C++ trajectory: orange."""
+CPP_TRAJECTORY_COLOR: tuple[int, int, int] = (255, 150, 40)
+"""The basalt C++ trajectory: orange, and not the frontend rung's magenta ``CPP_COLOR``."""
 KEYFRAME_COLOR: tuple[int, int, int, int] = (90, 200, 255, 255)
 """A keyframe still inside the window."""
 LTKF_COLOR: tuple[int, int, int, int] = (255, 235, 90, 255)
@@ -301,7 +307,7 @@ class VioLogger:
         """
         rr.log(f"{RUN_ENTITY}/trajectory", rr.LineStrips3D([estimated.position_m], colors=ESTIMATE_COLOR, radii=0.004))
         t_ns: int = int(estimated.t_ns[-1])
-        for entity, trajectory, color in ((GT_ENTITY, self.ground_truth_strip, GT_COLOR), (CPP_ENTITY, self.cpp_strip, CPP_COLOR)):
+        for entity, trajectory, color in ((GT_ENTITY, self.ground_truth_strip, GT_COLOR), (CPP_ENTITY, self.cpp_strip, CPP_TRAJECTORY_COLOR)):
             if len(trajectory) == 0:
                 continue
             drawn: int = int(np.searchsorted(trajectory.t_ns, t_ns, side="right"))
@@ -348,18 +354,18 @@ class VioLogger:
         rr.log(f"{RUN_ENTITY}/velocity", rr.Scalars(result.velocity))
         rr.log(f"{RUN_ENTITY}/gyro_bias", rr.Scalars(result.gyro_bias))
         rr.log(f"{RUN_ENTITY}/accel_bias", rr.Scalars(result.accel_bias))
-        rr.log(f"{STATS_ENTITY}/num_landmarks", rr.Scalars(float(len(snapshot.landmark_ids))))
-        rr.log(f"{STATS_ENTITY}/num_observations", rr.Scalars(float(snapshot.num_observations)))
-        rr.log(f"{STATS_ENTITY}/num_keyframes", rr.Scalars(float(len(snapshot.kf_ids))))
-        rr.log(f"{STATS_ENTITY}/lm_iterations", rr.Scalars(float(snapshot.lm_iterations)))
-        rr.log(f"{STATS_ENTITY}/lm_lambda", rr.Scalars(snapshot.lm_lambda))
+        rr.log(f"{VIO_STATS_ENTITY}/num_landmarks", rr.Scalars(float(len(snapshot.landmark_ids))))
+        rr.log(f"{VIO_STATS_ENTITY}/num_observations", rr.Scalars(float(snapshot.num_observations)))
+        rr.log(f"{VIO_STATS_ENTITY}/num_keyframes", rr.Scalars(float(len(snapshot.kf_ids))))
+        rr.log(f"{VIO_STATS_ENTITY}/lm_iterations", rr.Scalars(float(snapshot.lm_iterations)))
+        rr.log(f"{VIO_STATS_ENTITY}/lm_lambda", rr.Scalars(snapshot.lm_lambda))
         # The cost the frame started and ended the LM loop at: the pair is the
         # convergence trace, and it is only readable beside the damping.
-        rr.log(f"{STATS_ENTITY}/lm_error_before", rr.Scalars(snapshot.lm_error_before))
-        rr.log(f"{STATS_ENTITY}/lm_error_after", rr.Scalars(snapshot.lm_error_after))
-        rr.log(f"{STATS_ENTITY}/track_ms", rr.Scalars(elapsed_ms))
+        rr.log(f"{VIO_STATS_ENTITY}/lm_error_before", rr.Scalars(snapshot.lm_error_before))
+        rr.log(f"{VIO_STATS_ENTITY}/lm_error_after", rr.Scalars(snapshot.lm_error_after))
+        rr.log(f"{VIO_STATS_ENTITY}/track_ms", rr.Scalars(elapsed_ms))
         for stage, milliseconds in snapshot.timings_ms.items():
-            rr.log(f"{STATS_ENTITY}/stage_ms/{stage}", rr.Scalars(milliseconds))
+            rr.log(f"{VIO_STATS_ENTITY}/stage_ms/{stage}", rr.Scalars(milliseconds))
 
     def _log_ate(self, estimated: Trajectory) -> None:
         """Log the rigid-aligned error of everything reported so far, against both references.
@@ -372,7 +378,7 @@ class VioLogger:
                 continue
             result: AteResult = ate(estimated, reference)
             if result.n_associated >= MIN_ASSOCIATED_POSES:
-                rr.log(f"{STATS_ENTITY}/ate_cm/{name}", rr.Scalars(100.0 * result.rmse_m))
+                rr.log(f"{VIO_STATS_ENTITY}/ate_cm/{name}", rr.Scalars(100.0 * result.rmse_m))
 
 
 def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
@@ -392,7 +398,7 @@ def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
                 rrb.Vertical(*views),
                 column_shares=[2, 1],
             ),
-            rrb.TimeSeriesView(origin=STATS_ENTITY, name="estimator"),
+            rrb.TimeSeriesView(origin=VIO_STATS_ENTITY, name="estimator"),
             row_shares=[3, 1],
         ),
         collapse_panels=True,

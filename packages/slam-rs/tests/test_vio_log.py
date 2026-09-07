@@ -36,7 +36,7 @@ from slam_rs.vio_log import (
     GT_ENTITY,
     IDENTITY,
     RUN_ENTITY,
-    STATS_ENTITY,
+    VIO_STATS_ENTITY,
     VioLogger,
     alignment_onto,
     frustum_strip,
@@ -186,11 +186,11 @@ def test_every_tracked_frameset_writes_the_rung(logged: Logged) -> None:
         f"{RUN_ENTITY}/landmarks",
         f"{GT_ENTITY}/trajectory",
         f"{CPP_ENTITY}/trajectory",
-        f"{STATS_ENTITY}/num_landmarks",
-        f"{STATS_ENTITY}/lm_iterations",
-        f"{STATS_ENTITY}/lm_error_before",
-        f"{STATS_ENTITY}/lm_error_after",
-        f"{STATS_ENTITY}/stage_ms/measure",
+        f"{VIO_STATS_ENTITY}/num_landmarks",
+        f"{VIO_STATS_ENTITY}/lm_iterations",
+        f"{VIO_STATS_ENTITY}/lm_error_before",
+        f"{VIO_STATS_ENTITY}/lm_error_after",
+        f"{VIO_STATS_ENTITY}/stage_ms/measure",
     ):
         assert entity in logged.rows, f"{entity} never reached the recording"
         assert [t_ns for t_ns, _ in logged.rows[entity]] == logged.tracked, entity
@@ -244,7 +244,7 @@ def test_the_plotted_ate_is_the_estimate_driven_one(
     reference_driven: AteResult = ate(truth, estimate)
     assert estimate_driven.n_associated == len(estimate), "every estimate pose takes the nearest truth pose"
     assert reference_driven.n_associated > len(estimate), "the reference-driven association is the denser one"
-    plotted: float = logged.rows[f"{STATS_ENTITY}/ate_cm/gt"][-1][1]["Scalars:scalars"][0]
+    plotted: float = logged.rows[f"{VIO_STATS_ENTITY}/ate_cm/gt"][-1][1]["Scalars:scalars"][0]
     assert plotted == pytest.approx(100.0 * estimate_driven.rmse_m)
     assert plotted != pytest.approx(100.0 * reference_driven.rmse_m)
 
@@ -315,6 +315,6 @@ def test_the_blueprint_covers_the_world_the_cameras_and_the_counters(camera: Cam
         "/world",
         "/world/rig_00/cam_00/pinhole",
         "/world/rig_00/cam_01/pinhole",
-        STATS_ENTITY,
+        VIO_STATS_ENTITY,
     ]
     assert blueprint.collapse_panels
