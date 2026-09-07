@@ -91,13 +91,20 @@ blueprint and the three headsets have different camera counts:
 | `--device` | catalog dataset | cameras | magnetometer |
 | --- | --- | --- | --- |
 | `index` | `msd-index` | 2 × 960×960 @ ~54 fps, `kb4` fisheye | no |
-| `g2` | `msd-g2` | 4 × 640×480 @ ~30 fps, `pinhole-radtan8` | yes |
+| `g2` | `msd-g2` | 4 × 640×480 @ ~30 fps, `pinhole-radtan8`, all four mounted rolled a quarter turn | yes |
 | `odyssey` | `msd-odyssey` | 2 × 640×480, `pinhole-radtan8` | yes |
 
 Every device keeps upstream's default calibration — `kb4` on the Index, the
 `pinhole-radtan8` rational model on the G2 and Odyssey+ — so each camera node
 states its `camera_model`, and a radtan8 camera also carries that model's
 validity radius as `distortion_valid_radius`.
+
+**Frames are encoded upright.** Each camera is rotated by the quarter turn that
+aligns image-up with the headset up, both derived from the calibration, and its
+calibration is rotated with it; the turn is stored as `image_rotation_cw_deg` on
+the camera node. One uniform rule, so the Index's and the Odyssey+'s upright
+cameras answer zero turns and are byte-for-byte unchanged, while all four of the
+G2's rolled cameras (90°, 90°, 270°, 270°) stop showing the room sideways.
 
 ```bash
 export DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/msd-rrd     # rrds go to the NAS

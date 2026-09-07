@@ -106,8 +106,9 @@ trivially states `"cam_00"`.
 
 Per camera, on `/world/rig_NN/cam_MM`: `name` (human stream label) and `kind`
 (`"rgb"` / `"grayscale"`, a best-effort content hint). Readers must also treat as
-optional the two further per-camera keys `camera_model` and
-`distortion_valid_radius`, which dataforge writes for the Monado SLAM Datasets.
+optional the three further per-camera keys `camera_model`,
+`distortion_valid_radius` and `image_rotation_cw_deg`, which dataforge writes for
+the Monado SLAM Datasets.
 `camera_model` is the **dataset's own model tag**, copied through uninterpreted
 (e.g. `"kb4"` / `"pinhole-radtan8"`, basalt's names): this schema fixes no
 vocabulary for it, and a reader that does not recognise a tag falls back to the
@@ -116,7 +117,14 @@ radius in normalized image coordinates past which that model stops holding; a
 writer whose source states a non-positive radius must **omit the key** rather
 than emit it, because the formats that carry one (basalt's `rpmax`, whose
 non-positive value disables the check) mean "no limit" by it, and a reader
-seeing `0.0` would conclude the model holds nowhere. The reference camera of a
+seeing `0.0` would conclude the model holds nowhere.
+`image_rotation_cw_deg` is a **clockwise rotation of 90, 180 or 270 degrees that
+the writer already applied to this camera's encoded frames**, for a sensor
+mounted rolled: the intrinsics, the distortion and the `rig_T_cam` on the same
+node describe the rotated image, so a reader that only projects needs nothing
+from this key — it is there for one that relates the video back to the raw sensor
+readout. A writer that applied no rotation must **omit the key** rather than emit
+`0`, which would state a decision where none was made. The reference camera of a
 **multi-camera** rig gets a green frustum tint; single-camera rigs are untinted.
 
 ## 5. Ground-truth annotations (paths unchanged from v1)

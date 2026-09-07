@@ -328,6 +328,7 @@ def log_camera_node(
     image_plane_distance: float,
     camera_model: str | None = None,
     distortion_valid_radius: float | None = None,
+    image_rotation_cw_deg: int | None = None,
 ) -> None:
     """Tag one ``/world/rig_NN/cam_MM`` node and log its calibration under it.
 
@@ -354,6 +355,12 @@ def log_camera_node(
         distortion_valid_radius: Normalized image radius past which the model
             stops holding, for the models that declare one; ``None`` leaves the
             key off, which is what a model without such a limit means.
+        image_rotation_cw_deg: Clockwise rotation already applied to this
+            camera's encoded frames — and to the ``camera`` parameters above,
+            which describe the rotated image — so a consumer relating the video
+            to the raw sensor readout knows how far it was turned. ``None``
+            leaves the key off, which is what an unturned camera means: a
+            logged ``0`` would state a decision where none was needed.
     """
     # drop_untyped_nones is AnyValues' default, but it is stated because callers
     # rely on it: a kb4 camera passes distortion_valid_radius=None to mean "this
@@ -367,6 +374,7 @@ def log_camera_node(
             kind=kind,
             camera_model=camera_model,
             distortion_valid_radius=distortion_valid_radius,
+            image_rotation_cw_deg=image_rotation_cw_deg,
         ),
         static=True,
         recording=recording,

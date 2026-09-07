@@ -11,18 +11,29 @@ from __future__ import annotations
 from collections.abc import Iterator
 from pathlib import Path
 
+import av
 import numpy as np
 import pyarrow as pa
 import pytest
 import rerun as rr
 from conftest import calibration_fixture, column_rows, read_back
 from jaxtyping import Float64, Int64
-from msd_hub import FIXTURE_WORLD_R_RIG, GT_DROPOUT_ROW, GT_NUM_POSES, GT_PERIOD_NS, FakeHub, build_hub, recording_properties
+from msd_hub import (
+    FIXTURE_WORLD_R_RIG,
+    FRAME_HEIGHT,
+    FRAME_WIDTH,
+    GT_DROPOUT_ROW,
+    GT_NUM_POSES,
+    GT_PERIOD_NS,
+    FakeHub,
+    build_hub,
+    recording_properties,
+)
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
 from dataforge import paths, schema
-from dataforge.basalt import BasaltPose, CalibratedCamera, load_calibration
+from dataforge.basalt import BasaltPose, CalibratedCamera, load_calibration, rotate_camera_cw, upright_quarter_turns
 from dataforge.datasets.msd import MSD_DEVICES, MsdDataset, MsdDeviceChoice
 from dataforge.datasets.msd_layers import MEASURED_UP_WINDOW_NS, WORLD_UP_VIEW_COORDINATES, MeasuredUp, measured_world_up
 from dataforge.euroc import GtTrajectory, TimestampedSamples, gt_trajectory
@@ -188,6 +199,130 @@ def test_a_kb4_camera_node_names_its_projection_and_claims_no_validity_radius(co
     radius: str = f"{node}:distortion_valid_radius"
     assert radius not in table.column_names or table.column(radius).null_count == table.num_rows
 
+
+# ── the upright roll ──────────────────────────────────────────────────────
+
+
+def test_the_g2_camera_nodes_state_the_quarter_turn_their_frames_were_encoded_by(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
+) -> None:
+    """All four G2 cameras are mounted rolled, so all four record a rotation on the node.
+
+    The value is the turn ``upright_quarter_turns`` chose for that camera, in
+    degrees, which is how a consumer knows the frames are not in the orientation
+    the sensor read them out in. Which integer each camera answers is pinned in
+    ``test_basalt``; what this asserts is that the number reaching the rrd is the
+    one the encoder was given.
+    """
+    target: Path = convert_device(tmp_path, monkeypatch, "g2")
+
+    up_rig: tuple[float, float, float] = MSD_DEVICES["g2"].follow.up
+    store: rr.experimental.ChunkStore = read_back(target)
+    logged: list[object] = []
+    for camera in load_calibration(calibration_fixture("g2")):
+        node: str = schema.cam_path(0, camera.index)
+        row: dict[str, list[object]] = store.reader(index=None, contents=node).to_arrow_table().to_pylist()[0]
+        assert row[f"{node}:image_rotation_cw_deg"][0] == 90 * upright_quarter_turns(camera, up_rig)
+        logged.append(row[f"{node}:image_rotation_cw_deg"][0])
+    assert all(rotation in (90, 180, 270) for rotation in logged), f"the G2's sideways cameras were not turned: {logged}"
+
+
+def test_a_rolled_camera_logs_the_calibration_of_the_pixels_it_encoded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
+) -> None:
+    """The calibration follows the pixels: what lands is the rolled record, not the file's.
+
+    Resolution, intrinsics and ``rig_T_cam`` are all asserted against
+    ``rotate_camera_cw`` of the calibration, **and** asserted to differ from the
+    unrolled one — because a wiring that forgot to roll the calibration would
+    pass the first half on a device whose cameras happen to be square.
+    """
+    target: Path = convert_device(tmp_path, monkeypatch, "g2")
+
+    up_rig: tuple[float, float, float] = MSD_DEVICES["g2"].follow.up
+    store: rr.experimental.ChunkStore = read_back(target)
+    for camera in load_calibration(calibration_fixture("g2")):
+        rolled: CalibratedCamera = rotate_camera_cw(camera, upright_quarter_turns(camera, up_rig))
+        assert rolled.resolution != camera.resolution, "this test needs a camera the roll actually changes"
+        node: str = schema.cam_path(0, camera.index)
+        row: dict[str, list[object]] = store.reader(index=None, contents=f"{node}/**").to_arrow_table().to_pylist()[0]
+
+        resolution: Float64[ndarray, "2"] = np.asarray(row[f"{node}/pinhole:Pinhole:resolution"][0], dtype=np.float64)
+        np.testing.assert_array_equal(resolution, rolled.resolution)
+
+        # Rerun's mat3x3 is column-major, so the transpose is the textbook K.
+        image_from_camera: Float64[ndarray, "3 3"] = (
+            np.asarray(row[f"{node}/pinhole:Pinhole:image_from_camera"][0], dtype=np.float64).reshape(3, 3).T
+        )
+        np.testing.assert_allclose(
+            [image_from_camera[0, 0], image_from_camera[1, 1], image_from_camera[0, 2], image_from_camera[1, 2]],
+            [rolled.model.fx, rolled.model.fy, rolled.model.cx, rolled.model.cy],
+            atol=1e-3,
+        )
+        assert image_from_camera[0, 2] != pytest.approx(camera.model.cx, abs=1e-3), "the principal point was not rolled"
+
+        cam_R_rig: Float64[ndarray, "3 3"] = np.asarray(row[f"{node}:Transform3D:mat3x3"][0], dtype=np.float64).reshape(3, 3).T
+        rolled_pose: BasaltPose = rolled.rig_pose
+        rolled_rig_R_cam: Float64[ndarray, "3 3"] = Rotation.from_quat(
+            [rolled_pose.qx, rolled_pose.qy, rolled_pose.qz, rolled_pose.qw]
+        ).as_matrix()
+        # float32 on the wire, so a loose tolerance is the honest one.
+        np.testing.assert_allclose(cam_R_rig.T, rolled_rig_R_cam, atol=1e-6)
+        pose: BasaltPose = camera.rig_pose
+        unrolled_rig_R_cam: Float64[ndarray, "3 3"] = Rotation.from_quat([pose.qx, pose.qy, pose.qz, pose.qw]).as_matrix()
+        assert not np.allclose(cam_R_rig.T, unrolled_rig_R_cam, atol=1e-3), "the pose was not rolled with the pixels"
+
+
+def test_the_g2_writes_frames_whose_dimensions_the_quarter_turn_swapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
+) -> None:
+    """The turn reaches the encoder, not only the metadata: the mp4 itself comes out H x W.
+
+    ``--keep-raw`` leaves the per-camera clips behind, which is the only place the
+    encoded frame size is readable without decoding an rrd's video samples.
+    """
+    hub: FakeHub = build_hub(tmp_path, monkeypatch, device="g2", keep_raw=True)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    dataset.convert(identity, source, force=False)
+
+    up_rig: tuple[float, float, float] = MSD_DEVICES["g2"].follow.up
+    for camera in load_calibration(calibration_fixture("g2")):
+        clip: Path = hub.config.root / "work" / source.sequence / f"cam{camera.index}.mp4"
+        with av.open(str(clip)) as container:
+            stream: av.video.stream.VideoStream = container.streams.video[0]
+            encoded: tuple[int, int] = (stream.codec_context.width, stream.codec_context.height)
+        turns: int = upright_quarter_turns(camera, up_rig)
+        assert turns % 2 == 1, "this test needs a camera whose turn swaps the frame"
+        assert encoded == (FRAME_HEIGHT, FRAME_WIDTH), f"cam{camera.index} was encoded {encoded} after {turns} quarter turn(s)"
+
+
+@pytest.mark.parametrize("device", ["index", "odyssey"])
+def test_an_upright_headset_is_left_exactly_as_it_was(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path, device: MsdDeviceChoice
+) -> None:
+    """The Index's and the Odyssey+'s cameras are mounted upright, so the rule is a no-op there.
+
+    Zero turns means no rotation key on the node — a rotation of ``0`` would tell
+    a consumer a decision was made where none was needed — and the calibration
+    that lands is the file's own, unrolled.
+    """
+    target: Path = convert_device(tmp_path, monkeypatch, device)
+
+    up_rig: tuple[float, float, float] = MSD_DEVICES[device].follow.up
+    store: rr.experimental.ChunkStore = read_back(target)
+    for camera in load_calibration(calibration_fixture(device)):
+        assert upright_quarter_turns(camera, up_rig) == 0
+        node: str = schema.cam_path(0, camera.index)
+        table: pa.Table = store.reader(index=None, contents=f"{node}/**").to_arrow_table()
+        # AnyValues only *omits* a None key while it is untyped: a g2 convert
+        # earlier in this process types it, and later Nones then arrive as nulls.
+        rotation: str = f"{node}:image_rotation_cw_deg"
+        assert rotation not in table.column_names or table.column(rotation).null_count == table.num_rows
+        resolution: Float64[ndarray, "2"] = np.asarray(
+            table.to_pylist()[0][f"{node}/pinhole:Pinhole:resolution"][0], dtype=np.float64
+        )
+        np.testing.assert_array_equal(resolution, camera.resolution)
 
 # ── gt layer ──────────────────────────────────────────────────────────────
 

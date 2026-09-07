@@ -12,7 +12,7 @@ and on the Reverb G2 / Odyssey+ a 50 Hz ``mag0/data.csv``. Where a stream also
 ships ``data.raw.csv`` / ``data.extra.csv`` siblings, the converter reads only
 ``data.csv``.
 
-Four invariants hold across everything below, and every one of them is a thing
+Five invariants hold across everything below, and every one of them is a thing
 this converter would break silently rather than loudly:
 
 * **Raw is never kept.** The corpus is ~350 GB of PNG sequences, so ``discover``
@@ -26,6 +26,12 @@ this converter would break silently rather than loudly:
   *including* ``gt``, because the two layers must share an origin.
 * **The rig frame is the IMU frame.** ``rig_T_cam`` is basalt's ``T_imu_cam`` with
   no inversion, and the rig node states ``reference = "imu_00"``.
+* **Frames are encoded upright.** Each camera is rotated by the quarter turn that
+  aligns its image-up with the headset's up, both derived from the calibration,
+  and its calibration is rotated with it; the turn is stored as
+  ``image_rotation_cw_deg`` on the camera node. One uniform rule, so the Index's
+  and the Odyssey+'s upright cameras answer zero turns and are untouched, while
+  all four of the Reverb G2's rolled cameras stop showing the room sideways.
 * **Two per-device claims are not in the corpus** — the world up axis and the
   follow frame. ``MSD_DEVICES`` holds both; ``convert`` re-checks each against
   the sequence in front of it and *warns*, because every rrd of a device must

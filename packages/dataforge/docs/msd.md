@@ -65,6 +65,50 @@ files, so `test_msd` re-derives the pair and holds the constants to 0.05°;
 `convert` re-derives it per sequence and warns past `FOLLOW_FRAME_TOLERANCE_DEG`
 (5°).
 
+## Frames are encoded upright
+
+The mounting roll above is not only a hazard for the follow frame: it is what a
+viewer shows. Encoded as read out, all four G2 panes show the room lying on its
+side. So **frames are encoded upright**: each camera is rotated by the quarter
+turn that aligns image-up with the headset up, and its calibration is rotated
+with it; the turn is stored as `image_rotation_cw_deg` on the camera node.
+
+It is one uniform rule over every camera of every device, not a G2 flag. Both
+directions come out of the same `calibration.json` — image-up is camera `-y`
+carried into the rig frame (RDF puts `+y` down) and the headset's up is
+`follow_frame`'s — and the turn is whichever of the four brings them closest.
+A camera already upright therefore answers **zero** turns and passes through
+untouched, which is what a flag would have had to promise and this derives:
+
+| device | `image_rotation_cw_deg` per camera |
+| --- | --- |
+| `index` | none, none |
+| `g2` | 90, 90, 270, 270 |
+| `odyssey` | none, none |
+
+The G2's front pair (`cam0`/`cam1`) and its sideways pair (`cam2`/`cam3`) roll
+opposite ways, which is the other reason this is per camera. The key is omitted
+rather than logged as `0` where there was no turn: a `0` would state a decision
+where none was needed.
+
+Rolling the calibration with the pixels is exact — a roll spins the sensor about
+its own optical axis, so nothing is resampled. `basalt.rotate_camera_cw` swaps
+`fx`/`fy`, sends the principal point to `(cx', cy') = ((height - 1) - cy, cx)`
+where the pixel map `(u', v') = ((height - 1) - v, u)` sends it, and swaps
+radtan8's tangential pair to `p1' = p2`, `p2' = -p1`; every radial term and
+`rpmax` are invariant, because a roll leaves each point's radius alone. That is
+checked rather than argued: `test_basalt` projects points through OpenCV with the
+original model, moves the pixels the way the rotation moves them, and compares
+against projecting the same points in the rotated camera's frame with the
+rotated model — both camera models, all three turns, every real fixture camera,
+agreeing to 1.1e-13 px. `test_encoding` pins ffmpeg's `transpose` to
+`np.rot90(frame, k=-k)`, which is the same clockwise the remap was derived
+against.
+
+The follow frame and the world up axis are unaffected, and that is not a
+coincidence to be re-derived per device: `follow_frame` reads the mean optical
+axis and the baseline, and a roll moves neither.
+
 ## Format decisions
 
 **One clock, no resampling.** Every csv timestamp is nanoseconds on one monotonic

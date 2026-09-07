@@ -29,7 +29,7 @@ from scipy.spatial.transform import Rotation
 
 from dataforge import schema, writing
 from dataforge.archives import MemberReader
-from dataforge.basalt import CalibratedCamera, FollowFrame, camera_parameters
+from dataforge.basalt import CalibratedCamera, FollowFrame, camera_parameters, rotate_camera_cw, upright_quarter_turns
 from dataforge.euroc import (
     GT_VALUE_COLUMNS,
     IMU_VALUE_COLUMNS,
@@ -66,6 +66,9 @@ MAG: int = 0
 """The G2 and the Odyssey+ ship exactly one magnetometer, ``mag0`` → ``mag_00``."""
 IMAGE_PLANE_DISTANCE: float = 0.1
 """Frustum length in metres; a headset's baseline is ~10 cm, so the frusta stay legible."""
+DEGREES_PER_QUARTER_TURN: int = 90
+"""What a camera node's ``image_rotation_cw_deg`` reports a quarter turn as; degrees read
+better on a node than a turn count, and no camera is ever turned by anything else."""
 PROPERTIES_ENTITY: str = "/__properties"
 """Where Rerun keeps a recording's properties; the gt layer reads base's clock origin from it."""
 GT_SIDECAR_NAME: str = "gt.csv"
@@ -202,13 +205,27 @@ def measured_world_up(gt: GtTrajectory, accel: ImuChannel, *, window_ns: int = M
 class EncodedCamera:
     """One camera of one sequence: its calibration, its frame clock, and its clip.
 
-    The three travel together because the base layer writes them together and a
-    camera missing any one of them cannot be logged at all — as three parallel
-    tuples they could go out of step between the encode and the write.
+    The four travel together because the base layer writes them together and a
+    camera missing any one of them cannot be logged at all — as parallel tuples
+    they could go out of step between the encode and the write.
     """
 
     calibration: CalibratedCamera
-    """This camera's validated record out of the device's ``calibration.json``."""
+    """This camera's record, **rolled to match ``clip``**.
+
+    Every camera is encoded upright (see ``read_sequence``), so this is
+    ``rotate_camera_cw`` of the device's ``calibration.json`` record by
+    ``quarter_turns_cw`` — it describes the pixels in the mp4 rather than the
+    orientation the sensor read them out in. On a camera mounted upright the two
+    are the same record.
+    """
+    quarter_turns_cw: int
+    """Clockwise quarter turns the frames in ``clip`` were rotated by, 0 to 3.
+
+    Kept beside the rolled calibration because it is the only thing the roll
+    leaves no trace of, and a consumer needs it to relate the video back to the
+    raw sensor readout.
+    """
     times_ns: Int64[ndarray, "n_samples"]
     """Frame times on the zero-based ``video_time`` clock, one per sample in ``clip``."""
     clip: Path
@@ -334,6 +351,14 @@ def read_sequence(
     — a split archive's reader extracts one camera at a time, so a converter
     cannot hold a reader open across the two.
 
+    Every camera is encoded **upright**, and this is the only place that
+    decision is made: the quarter turn that brings a camera's image-up closest
+    to the headset's up goes to the encoder and to ``rotate_camera_cw`` in one
+    step, so the calibration in each ``EncodedCamera`` always describes the
+    pixels beside it. It is one uniform rule rather than a per-device flag —
+    the Index's and the Odyssey+'s cameras are mounted upright and answer zero
+    turns, so nothing about their output changes.
+
     This is also the only place ``gt/data.csv`` is ever in reach, so it is
     copied out to the sidecar here, byte for byte and before anything
     expensive runs. Only its first stamp is read, because that stamp is part
@@ -386,13 +411,28 @@ def read_sequence(
     encoded: list[EncodedCamera] = []
     for index, (calibration, rows, times_ns) in enumerate(zip(cameras, camera_rows, camera_times_ns, strict=True)):
         clip: Path = work_dir / f"cam{index}.mp4"
+        # Every camera is encoded upright, by the one rule: the quarter turn that
+        # brings this camera's image-up closest to the headset's up. The turn goes
+        # to the pixels and to the calibration in the same step, so the two cannot
+        # drift apart — which is the whole reason this is not a per-device flag.
+        # The Index's and the Odyssey+'s cameras answer 0 and are untouched; all
+        # four of the G2's are mounted rolled, and this is what stands them up.
+        quarter_turns_cw: int = upright_quarter_turns(calibration, profile.follow.up)
         encode_frames_to_mp4(
             reader.iter_members([f"{mav0}/cam{index}/data/{row.filename}" for row in rows]),
             clip,
             source=FrameSource("png"),
             fps=nominal_fps(times_ns),
+            rotate_cw_quarter_turns=quarter_turns_cw,
         )
-        encoded.append(EncodedCamera(calibration=calibration, times_ns=times_ns - start_time_ns, clip=clip))
+        encoded.append(
+            EncodedCamera(
+                calibration=rotate_camera_cw(calibration, quarter_turns_cw),
+                quarter_turns_cw=quarter_turns_cw,
+                times_ns=times_ns - start_time_ns,
+                clip=clip,
+            )
+        )
 
     inertial_times_ns: Int64[ndarray, "n_samples"] = inertial.times_ns - start_time_ns
     return SequenceStreams(
@@ -424,6 +464,10 @@ def write_base_layer(
     reads this file next and both are published together once it has. The
     recording is flushed and closed on return, so it is readable then.
 
+    Each camera node carries the calibration ``read_sequence`` already rolled to
+    match its clip, plus the turn itself as ``image_rotation_cw_deg`` where there
+    was one.
+
     Args:
         identity: The sequence's identity; its recording id names the recording.
         streams: One archive read's cameras and sensor channels.
@@ -443,6 +487,11 @@ def write_base_layer(
         log_rig_node(recording, RIG, reference=RIG_REFERENCE, num_cameras=profile.num_cameras, name=profile.label, kind="ego")
         for camera in streams.cameras:
             index: int = camera.calibration.index
+            # ``camera.calibration`` is already rolled to match the clip, so what
+            # lands describes the encoded pixels; the turn itself goes on the node,
+            # and only when there was one — a logged 0 would state a decision where
+            # none was needed.
+            #
             # The model tag saves a consumer from inferring the projection from the
             # distortion component. The record reports no validity radius for a kb4
             # camera and for a radtan8 one whose rpmax is non-positive — basalt reads
@@ -458,6 +507,7 @@ def write_base_layer(
                 image_plane_distance=IMAGE_PLANE_DISTANCE,
                 camera_model=camera.calibration.camera_model,
                 distortion_valid_radius=camera.calibration.distortion_valid_radius,
+                image_rotation_cw_deg=(DEGREES_PER_QUARTER_TURN * camera.quarter_turns_cw if camera.quarter_turns_cw else None),
             )
             log_video_stream(recording, camera.clip, schema.video_path(RIG, index), times_ns=camera.times_ns)
         log_imu(recording, RIG, IMU, gyro=streams.gyro, accel=streams.accel, name="imu0")
