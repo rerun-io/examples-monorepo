@@ -71,9 +71,10 @@
 //! why `vio_parity.rs` skips without them and this file does not need them at
 //! all.
 //!
-//! All 60 framesets take about 55 s per run in a debug build, four runs of
-//! which would be most of the Rust suite's budget, so the default replays
-//! [`DEFAULT_FRAMESETS`] and `SLAM_RS_VIO_ORACLE_FULL=1` replays all 60.
+//! All 60 framesets take about 55 s per run in a debug build — 272 s for the
+//! four tests here, most of the Rust suite's budget — so the default replays
+//! [`DEFAULT_FRAMESETS`] and `SLAM_RS_VIO_ORACLE_FULL=1` replays all 60. Every
+//! measurement quoted in this file is from the full run.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -98,13 +99,14 @@ use slam_rs::types::{FrameId, KeypointId};
 /// Framesets the fixture covers.
 const ORACLE_FRAMESETS: usize = 60;
 
-/// Framesets the default suite replays. Twelve reaches `opt_started` (frameset
-/// 4), eight marginalizations, the second keyframe (7), both keyframe
-/// demotions (4 and 9), both prior growth steps and the first `f32` LM-trail
+/// Framesets the default suite replays, about 4.8 s for the four tests. Ten
+/// reaches `opt_started` (frameset 4), six marginalizations, the second
+/// keyframe (7), both keyframe demotions (4 and 9), both prior growth steps
+/// (15x15 to 16x21 at 4, to 22x27 at 9) and the first `f32` LM-trail
 /// divergence (9). The keyframe *eviction* loop first fires at frameset 51, so
 /// only the full window covers it — plus the unit tests in
 /// `src/estimator/schedule.rs`.
-const DEFAULT_FRAMESETS: usize = 12;
+const DEFAULT_FRAMESETS: usize = 10;
 
 /// Relative agreement on every pose, velocity and bias coefficient of the
 /// window, in `f64`. Measured worst over the 60 framesets: rotation 9.8e-13,
