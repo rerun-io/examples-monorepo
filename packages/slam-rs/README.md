@@ -27,6 +27,7 @@ The core is being filled in stage by stage, bottom up. What is in it today:
 | `ba_base` | `BundleAdjustmentBase`: the two window state maps, `get_pose_state_with_lin`, basalt's Huber-weighted `compute_error` with optional outlier collection, `compute_projections`, `compute_delta`, `backup`/`restore`, the reprojection residual and its three Jacobians from `ba_utils.h`, `computeRelPose`, and DLT `triangulate` over a ported Eigen `JacobiSVD`. |
 | `imu` | Preintegration: `IntegratedImuMeasurement<S>` with basalt's midpoint propagation, covariance and bias-Jacobian recurrences, the 9-vector residual and its Jacobians, the LDLT square-root inverse covariance, the between-frames accumulation loop, gravity initialisation, and the 15-row IMU block the estimator whitens. |
 | `frontend` | The optical-flow frontend: `patterns` (Pattern24/52/51/50 from `patterns.h`), `se2` (`AffineCompact2` and `Sophus::SE2::exp`), `ldlt` (Eigen's pivoted LDLT at 3x3), `patch` (the streaming inverse-compositional patch build), `tracker` (`PatchSoA`, `FlowTransforms`, the `SourcePatches`/`PatchTracker` stage traits and `CpuPatchTracker`), `detect` (basalt's centred cell grid over kornia-rs's FAST plus OpenCV's suppression), `flow` (`FrameToFrameOpticalFlow`, generic over the builder and tracker) and `parallel` (the explicit thread budget). |
+| `linearize` | The square-root linearization: `LandmarkBlock` (basalt's `[ J_p \| pad \| J_l \| r ]` buffer, the layout arithmetic of `landmark_block_abs_dynamic.hpp:83-96`, the Huber-weighted residual rows, three Householder reflections, the six-Givens damping stack, back-substitution with its exact model cost change) and `LinearizationAbsQR`, which owns the blocks, the IMU blocks and the marginalization prior and produces `H`, `b`, `Q2Jp`, `Q2r` and `l_diff`. Eigen's `makeHouseholder`, `applyHouseholderOnTheLeft` and `makeGivens` are ported coefficient for coefficient rather than delegated to nalgebra's equivalents (D44). |
 
 Two conventions in `ba_base` are basalt deviating from its own papers, and the
 port keeps **both** halves of each. The reprojection residual is `pi(...) - z`,
@@ -50,9 +51,20 @@ both projection Jacobians and the unprojection Jacobian - plus six probe pixels
 handed straight to `unproject`, one of them singular; `imu/imu_oracle.json`,
 the delta state, covariance, bias Jacobians, Eigen LDLT and square-root inverse
 covariance of seven preintegration runs, plus what
-`Quaternion::FromTwoVectors` returns for ten accelerometer readings; and
+`Quaternion::FromTwoVectors` returns for ten accelerometer readings;
 `flow/`, three 960x960 frameset pairs as PGMs beside the keypoints the C++
-frontend produced from eight of them; and `lmdb/lmdb_oracle.json`, the
+frontend produced from eight of them; `linearize/linearize_oracle.json`, four
+small visual-odometry problems (two and three frames, two cameras, three to six
+landmarks with two to four observations each, two of them carrying a
+marginalization prior with both of their first frames frozen at their
+linearization point) with, per landmark block, the layout numbers, the
+linearization error, the whole `storage` buffer after `linearizeLandmark`, after
+`performQR`, after `setLandmarkDamping(lambda)` and after
+`setLandmarkDamping(0)` undoes it, the `Q2Jp`/`Q2r` and `JtJ`/`Jtr` exports, and
+what `backSubstitute` leaves behind - plus, per problem, what
+`LinearizationAbsQR` returns through its public interface: the error, the dense
+`H` and `b`, the stacked `Q2Jp`/`Q2r` and the total `l_diff`; and
+`lmdb/lmdb_oracle.json`, the
 stereographic chart with both its Jacobians at twelve points, `linearizePoint`'s
 residual, `d_res_d_xi`, `d_res_d_p` and `proj` for five configurations of each of
 the two shipped reference cameras, ten `triangulate` cases with four of them
@@ -67,11 +79,14 @@ port reproduces every double to 1e-14, and to 1e-7 through the whitening, which
 inverts the covariance; the landmark port reproduces the chart and the residual
 to 1e-12 in double and **exactly** in float, triangulation bit for bit on nine of
 the ten double cases, and Eigen's three-coefficient reduction order and the
-Huber-weighted cost of one observation bit for bit in both precisions. All five
-generators live on the fork's `slam-rs-reference` branch, as
+Huber-weighted cost of one observation bit for bit in both precisions. The
+linearization port reproduces **every** coefficient of all four problems - the
+QR'd block, `H`, `b`, `Q2Jp`, `Q2r`, the landmark increments and `l_diff` - to
+`6.3e-16` relative in double and `1.4e-6` in float, measured against the array's
+own scale. All six generators live on the fork's `slam-rs-reference` branch, as
 `tools/dump_pyramid.cpp`, `tools/camera_oracle.cpp`, `tools/imu_oracle.cpp`,
-`tools/dump_flow.cpp` and `tools/lmdb_oracle.cpp`; the monorepo never compiles
-C++.
+`tools/dump_flow.cpp`, `tools/lmdb_oracle.cpp` and `tools/linearize_oracle.cpp`;
+the monorepo never compiles C++.
 
 The IMU fixture earns its keep on one run: the covariance after a single sample
 with a still gyroscope and accelerometer is rank deficient, and what basalt does
@@ -194,7 +209,41 @@ sort, with no QR preconditioner. It is worth porting because basalt gates
 landmark acceptance on `0 < inv_dist < 3`, where a borderline point either exists
 or does not.
 
-Still to come: the square-root estimator.
+### The damping machinery the shipped VIO never uses
+
+`optimize()` calls exactly four things on the linearizer: `linearizeProblem`,
+`performQR`, `get_dense_H_b` and `backSubstitute`
+(`sqrt_keypoint_vio.cpp:1297`, `:1320`, `:1393`, `:1454`). Everything else is
+commented out - the Jacobian scaling at `:1307-1317` and `:1461-1463`, the pose
+damping at `:1361-1365`, the landmark damping at `:1373-1377` - which matches the
+ICCV 2021 paper's own statement that the Givens damping stack is not used in the
+sliding-window VIO. Levenberg-Marquardt damping enters through
+`H.diagonal() * lambda` in the dense solve instead (`:1415-1417`).
+
+The port implements all five anyway - `set_pose_damping`,
+`set_landmark_damping`, `scale_jl_cols`, `scale_jp_cols`, `get_jp_diag2` - and
+calls none of them from its own driver, so the hook is real if a parity gap ever
+points at it. There is one live entry: `backSubstitute` calls
+`setLandmarkDamping(0)` on itself (`landmark_block_abs_dynamic.hpp:310`) before
+it computes the model cost change, and with no rotations stored that reduces to
+zeroing the damping diagonal. The six-Givens stack and its LIFO un-apply are
+pinned against the C++ fixture rather than against a live run, because a live run
+never reaches them.
+
+One consequence of that same code path changes what `l_diff` means. With the
+optimal landmark increment substituted in, the first three rows of
+`Q^T J inc + Q^T r` collapse to `-Q1^T r`, so
+
+```text
+l_diff = 0.5 * sum ||Q1^T r||^2  -  inc^T b  -  0.5 inc^T H inc
+```
+
+and the first term does not depend on the pose increment at all: basalt's
+`l_diff` is **positive at `inc = 0`**, because the landmarks still move to their
+own optimum. A port that dropped the constant would make every Levenberg-Marquardt
+gain ratio wrong in the same direction, which still converges, only worse.
+
+Still to come: marginalization and the sliding-window driver.
 
 ## Layout
 
