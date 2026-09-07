@@ -134,6 +134,14 @@ class FrontendStage:
         self.elapsed_ms.append(1e3 * (time.monotonic() - started))
         self.logger.log(frame, self.elapsed_ms[-1])
 
+    def summary(self) -> str:
+        """One line on what the stage did, for the end of a replay."""
+        return (
+            f"frontend: {self.flow.last_keypoint_id} keypoint ids handed out, "
+            f"{np.mean(self.elapsed_ms):.1f} ms per frameset "
+            f"(median {np.median(self.elapsed_ms):.1f}, max {np.max(self.elapsed_ms):.1f})"
+        )
+
 
 @dataclass(slots=True)
 class VioStage:
@@ -186,6 +194,14 @@ class VioStage:
         frame: _core.FlowFrame | None = self.vio.flow_frame()
         if snapshot is not None and frame is not None:
             self.logger.log(result, snapshot, frame, self.elapsed_ms[-1])
+
+    def summary(self) -> str:
+        """One line on what the stage did, for the end of a replay."""
+        return (
+            f"vio: {self.imu_samples} IMU samples pushed, statuses {self.statuses}, "
+            f"{np.mean(self.elapsed_ms):.1f} ms per frameset "
+            f"(median {np.median(self.elapsed_ms):.1f}, max {np.max(self.elapsed_ms):.1f})"
+        )
 
 
 def _frontend_stage(feed: SegmentFeed, segment: ReferenceSegment) -> FrontendStage:
@@ -278,18 +294,8 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
 
     elapsed: float = time.monotonic() - started
     print(f"{replayed} framesets in {elapsed:.1f} s ({replayed / max(elapsed, 1e-9):.1f} fps)")
-    if isinstance(stage, FrontendStage) and stage.elapsed_ms:
-        print(
-            f"frontend: {stage.flow.last_keypoint_id} keypoint ids handed out, "
-            f"{np.mean(stage.elapsed_ms):.1f} ms per frameset "
-            f"(median {np.median(stage.elapsed_ms):.1f}, max {np.max(stage.elapsed_ms):.1f})"
-        )
-    if isinstance(stage, VioStage) and stage.elapsed_ms:
-        print(
-            f"vio: {stage.imu_samples} IMU samples pushed, statuses {stage.statuses}, "
-            f"{np.mean(stage.elapsed_ms):.1f} ms per frameset "
-            f"(median {np.median(stage.elapsed_ms):.1f}, max {np.max(stage.elapsed_ms):.1f})"
-        )
+    if stage is not None and stage.elapsed_ms:
+        print(stage.summary())
     return replayed
 
 

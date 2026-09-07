@@ -5,13 +5,11 @@ basalt VIO fork: pure Rust, CPU first, N-camera from the start. Python owns the
 plumbing — catalog feed, decode, evaluation and Rerun logging — and talks to the
 core through a PyO3 extension module.
 
-The estimator is still a stub: the state machine, the error taxonomy and the
-value types across the boundary are real, and so is everything on the Python side
-— manifest, feed, metrics and replay — but the sliding window lands in later PRs,
-so `track()` never reports `Tracking` yet. The **frontend** is not a stub, and it
-is driven from Python: `_core.OpticalFlow` tracks and detects on real framesets,
-and `tools/apps/replay.py --stage frontend` draws what it produced beside what
-the C++ fork produced on the same frames.
+The whole pipeline runs from Python: `_core.Vio` consumes IMU samples and
+framesets and reports a pose, and `tools/apps/replay.py --stage vio` draws the
+estimate against the ground truth and against the basalt C++ reference on the
+same frames. On the smoke segment it is 1.41 cm from the C++ trajectory and
+1.64 cm from ground truth, where the C++ itself is 1.43 cm.
 
 ## Core modules
 
@@ -368,14 +366,50 @@ pixi run -e slam-rs-dev --frozen slam-rs-version    # print the core version
 ## Python API
 
 ```python
-import numpy as np
 from slam_rs import _core
 
-vio = _core.Vio(camera_count=2, min_imu_samples=1)
-vio.push_imu_batch(t_ns, gyro, accel)  # int64[n], float64[n, 3], float64[n, 3]
-result = vio.track(t_ns, [left, right])  # uint8[h, w] per camera
-result.status, result.world_from_rig  # VioStatus, [tx ty tz qx qy qz qw]
+calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)  # the feed's dataclasses
+config = _core.VioConfig()                       # basalt's own defaults
+config.optical_flow_image_safe_radius = 472.0    # the one per-device frontend field
+
+vio = _core.Vio(calibration, config, threads=1)
+vio.push_imu_batch(t_ns, gyro, accel)     # int64[n], float64[n, 3], float64[n, 3], uncalibrated
+result = vio.track(t_ns, [left, right])   # uint8[h, w] per camera
+result.status, result.world_from_rig      # VioStatus, [tx ty tz qx qy qz qw]
 ```
+
+One `track` call is basalt's whole pipeline for one frameset — the frontend's
+own preintegration and pose prediction, `processFrame`, then the estimator's
+`measure` — in the calling thread (Offline mode, D17), so every result is final
+and a repeat run over the same input is bit-identical.
+
+`VioStatus` has two states. basalt's estimator initialises inside the same
+`process_frame` that measures, so a measured frameset always has a state and an
+uncovered one never does: `NeedMoreImu` where basalt would block on its IMU
+queue, `Tracking` otherwise. The frontend runs either way, as basalt's own does
+on its thread, so a `NeedMoreImu` frameset is still consumed and its keypoints
+are readable.
+
+Two accessors carry what a Rerun rung draws, both copies rather than views:
+
+```python
+snapshot = vio.snapshot()       # None until a frameset has measured
+snapshot.window_t_ns            # int64[n], the 15-dof states then the pose blocks
+snapshot.window_poses           # float64[n, 7], [tx ty tz qx qy qz qw]
+snapshot.window_linearized      # bool[n]: the frozen linearization points
+snapshot.window_is_state        # bool[n]: a 15-dof state rather than a pose block
+snapshot.kf_ids, snapshot.ltkfs, snapshot.marginalized
+snapshot.landmark_ids, snapshot.landmark_positions       # int64[p], float64[p, 3] world
+snapshot.landmark_hosts, snapshot.landmark_host_cameras  # int64[p] each
+snapshot.lm_iterations, snapshot.lm_accepted, snapshot.lm_lambda, snapshot.termination
+snapshot.lm_error_before, snapshot.lm_error_after, snapshot.num_observations
+snapshot.timings_ms             # the six estimator stages, milliseconds
+
+frame = vio.flow_frame()        # the keypoints of the last accepted frameset, or None
+```
+
+`snapshot()` describes the last frameset that **measured**, which
+`snapshot.t_ns` names; on a `NeedMoreImu` frameset it is the previous one.
 
 Images are copied in and the GIL is released around the core call, so a decoder
 thread keeps running. Wrong dtype, rank, shape or memory layout raises
@@ -407,15 +441,9 @@ integers, objects and arrays and fails on anything that is not one of the four
 exceptions above. That is a walk over the surface, not a proof about every
 object a caller could construct.
 
-The frontend is driven the same way, and is the first stage with real output:
+The frontend alone is driven the same way, for a run that needs no backend:
 
 ```python
-from slam_rs import _core
-
-calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)  # the feed's dataclasses
-config = _core.VioConfig()                       # basalt's own defaults
-config.optical_flow_image_safe_radius = 472.0    # the one per-device frontend field
-
 flow = _core.OpticalFlow(calibration, config, threads=1)
 frame = flow.process(t_ns, [left, right])
 frame.ids(0)         # int64[n], ascending
@@ -567,6 +595,65 @@ takes 17.5 s, of which 29.5 ms per frameset is the frontend itself.
 ```bash
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py \
     --stage frontend --rr-config.headless --rr-config.save data/replay-frontend.rrd
+```
+
+### `--stage vio`, and the three trajectories
+
+`--stage vio` runs the whole pipeline and draws what the estimator decided, under
+the same tree:
+
+| entity | what |
+|---|---|
+| `/world/runs/slam_rs/trajectory` | the estimate so far, one green `LineStrips3D` |
+| `/world/runs/gt/trajectory` | the ground truth up to the cursor, near-white |
+| `/world/runs/basalt_cpp/trajectory` | the C++ reference up to the cursor, orange |
+| `/world/runs/slam_rs/rig` (+ `/cam_MM`) | the estimated rig's current pose, as `Pinhole` frusta from the calibration |
+| `/world/runs/slam_rs/window` | one frustum wireframe per window frame, blue for a keyframe, yellow for a long-term one, grey for a pose block |
+| `/world/runs/slam_rs/marginalized` | the frames the last marginalization removed, the same wireframes faded |
+| `/world/runs/slam_rs/landmarks` | `Points3D` in the world frame, coloured by the keyframe that hosts them |
+| `/world/rig_00/cam_MM/pinhole/keypoints` | the estimator's own frontend output, in the frontend rung's palette |
+| `/stats/vio/...` | landmark, observation and keyframe counts, LM iterations and lambda, the six `stage_ms/*`, `track_ms`, and `ate_cm/{gt,cpp}` |
+
+The three trajectories do not start in one frame: basalt initialises its world at
+the identity with gravity along z, while the ground truth is in the capture rig's
+own frame. The run and the C++ reference therefore carry a `Transform3D` — the
+rigid alignment onto the ground truth, the same one the ATE reports, refreshed
+every 30 framesets — so everything under them is logged in the estimator's frame
+and drawn in the dataset's. The alignment is the identity until enough poses have
+been associated, so a run visibly settles into place over its first second.
+
+Both references are drawn only up to the cursor, as the estimate is, which costs
+one re-logged strip per frameset: about 2 MB over the 412-frameset smoke segment
+and 200 MB over a 4,000-frameset one, so a long segment wants `--max-framesets`.
+
+```bash
+pixi run -e slam-rs-dev --frozen python tools/apps/replay.py \
+    --stage vio --rr-config.headless --rr-config.save data/replay-vio.rrd
+```
+
+## The V2 gate
+
+`tests/test_v2_gate.py` is the accuracy milestone (D14, D35, D36). Per reference
+segment, driving `_core.Vio` and the feed directly with nothing logged:
+
+* ATE RMSE against the basalt C++ trajectory fed the same decoded pixels, at most
+  2 cm — D14's first rung, which tightens toward 1 cm as parity improves;
+* ATE RMSE against the `gt.csv` sidecar, at most 1.2x what the C++ itself scored
+  on that segment, which the manifest carries;
+* tracking never lost: once a frameset has measured, every later one does.
+
+The association is driven by the estimate — each of its poses takes the nearest
+reference pose within 5 ms — because that is how the manifest's own C++ numbers
+were produced. The `no_divergence` pair (`MGO01_low_light`, `MGO13_sudden_movements`)
+gates only on a bounded, finite run: basalt itself sits at 43 cm and 78 cm there,
+and two legitimate decode paths of the same C++ estimator already differ by 18
+to 32 cm, so a tolerance would measure noise. A second test runs the smoke
+segment twice and diffs the CSVs byte for byte, which is what Offline mode's
+"no queue state reaches a decision" means (D17).
+
+```bash
+cd packages/slam-rs && pytest -m slow -q tests/test_v2_gate.py            # the smoke segment
+SLAM_RS_V2_ALL=1 pytest -m slow -q -s tests/test_v2_gate.py               # all ten
 ```
 
 ## Tests
