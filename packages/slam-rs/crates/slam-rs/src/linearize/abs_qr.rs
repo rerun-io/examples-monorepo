@@ -135,6 +135,77 @@ pub struct LinearizationAbsQR<S: LieScalar> {
     marg_scaling: DVector<S>,
 }
 
+/// One subtree's partial `(H, b)` of the dense reduction, and the columns it holds.
+///
+/// C++ gives every TBB task a full `total_size` x `total_size` partial and adds
+/// the whole square at each join (`:513-542`), but a subtree only ever writes
+/// the pose columns its landmarks observe — 22 of 85 on the median MIO10 frame
+/// for one landmark, and the union of a subtree's landmarks above that. The
+/// rest is `+0.0` on both sides of a join and `+0.0` after a reset, so keeping
+/// the square but touching only `columns` is the same arithmetic; see
+/// [`LandmarkBlock::active_cols`] for why `+= +0.0` here is the identity.
+struct DensePartial<S: LieScalar> {
+    /// The partial `H`, full size, zero outside `columns` x `columns`.
+    h: DMatrix<S>,
+    /// The partial `b`, full size, zero outside `columns`.
+    b: DVector<S>,
+    /// Which columns have been written, indexed by column.
+    written: Vec<bool>,
+    /// The same set ascending, which is the order `h`'s column-major storage wants.
+    columns: Vec<usize>,
+}
+
+impl<S: LieScalar> DensePartial<S> {
+    /// An identity accumulator for an `n`-column ordering.
+    fn zeros(n: usize) -> Self {
+        Self {
+            h: DMatrix::zeros(n, n),
+            b: DVector::zeros(n),
+            written: vec![false; n],
+            columns: Vec::with_capacity(n),
+        }
+    }
+
+    /// Record that `columns` are about to be written, keeping the list ascending.
+    fn mark(&mut self, columns: &[usize]) {
+        let mut added: bool = false;
+        for &column in columns {
+            if let Some(slot) = self.written.get_mut(column) {
+                added |= !*slot;
+                *slot = true;
+            }
+        }
+        if added {
+            self.columns.clear();
+            self.columns
+                .extend((0..self.written.len()).filter(|&i| self.written[i]));
+        }
+    }
+
+    /// Back to the identity, zeroing only what was written.
+    fn reset(&mut self) {
+        for &j in &self.columns {
+            for &i in &self.columns {
+                self.h[(i, j)] = S::zero();
+            }
+            self.b[j] = S::zero();
+        }
+        self.columns.clear();
+        self.written.fill(false);
+    }
+
+    /// `H_ += b.H_; b_ += b.b_` (`:532-535`), over the right side's columns.
+    fn join(&mut self, right: &Self) {
+        for &j in &right.columns {
+            for &i in &right.columns {
+                self.h[(i, j)] += right.h[(i, j)];
+            }
+            self.b[j] += right.b[j];
+        }
+        self.mark(&right.columns);
+    }
+}
+
 impl<S: LieScalar> LinearizationAbsQR<S> {
     /// The constructor (`linearization_abs_qr.cpp:50-172`).
     ///
@@ -576,38 +647,24 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         inputs: &LinearizationInputs<'_, S>,
     ) -> Result<(DMatrix<S>, DVector<S>), LinearizeError> {
         let opt_size: usize = self.aom.total_size();
-        let mut accumulator: (DMatrix<S>, DVector<S>) =
-            (DMatrix::zeros(opt_size, opt_size), DVector::zeros(opt_size));
-        let mut scratch: Vec<Option<(DMatrix<S>, DVector<S>)>> = Vec::new();
+        let mut accumulator: DensePartial<S> = DensePartial::zeros(opt_size);
+        let mut scratch: Vec<Option<DensePartial<S>>> = Vec::new();
         let blocks: &[LandmarkBlock<S>] = &self.landmark_blocks;
-        deterministic_reduce::<(DMatrix<S>, DVector<S>), LinearizeError>(
+        deterministic_reduce::<DensePartial<S>, LinearizeError>(
             blocks.len(),
             &mut accumulator,
             &mut scratch,
-            &|| (DMatrix::zeros(opt_size, opt_size), DVector::zeros(opt_size)),
-            &|value: &mut (DMatrix<S>, DVector<S>)| {
-                value.0.fill(S::zero());
-                value.1.fill(S::zero());
+            &|| DensePartial::zeros(opt_size),
+            &DensePartial::reset,
+            &mut |i: usize, acc: &mut DensePartial<S>| {
+                let block: &LandmarkBlock<S> =
+                    blocks.get(i).ok_or(LinearizeError::LayoutOverflow)?;
+                acc.mark(block.active_cols());
+                block.add_dense_h_b(&mut acc.h, &mut acc.b)
             },
-            &mut |i: usize, acc: &mut (DMatrix<S>, DVector<S>)| {
-                blocks
-                    .get(i)
-                    .ok_or(LinearizeError::LayoutOverflow)?
-                    .add_dense_h_b(&mut acc.0, &mut acc.1)
-            },
-            &|left: &mut (DMatrix<S>, DVector<S>), right: &(DMatrix<S>, DVector<S>)| {
-                // `H_ += b.H_; b_ += b.b_` (`:532-535`), coefficient by
-                // coefficient in column-major order, which is what nalgebra's
-                // `+=` would do anyway.
-                for k in 0..left.0.len() {
-                    left.0[k] += right.0[k];
-                }
-                for k in 0..left.1.nrows() {
-                    left.1[k] += right.1[k];
-                }
-            },
+            &DensePartial::join,
         )?;
-        let (mut h, mut b) = accumulator;
+        let DensePartial { mut h, mut b, .. } = accumulator;
 
         // `add_dense_H_b_imu` (`:640-653`).
         for (block, meta) in self.imu_blocks.iter().zip(self.imu_meta.iter()) {

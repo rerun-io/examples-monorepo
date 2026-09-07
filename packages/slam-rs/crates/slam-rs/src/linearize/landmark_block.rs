@@ -809,6 +809,11 @@ impl<S: LieScalar> LandmarkBlock<S> {
     /// blocking may associate a long sum differently; over `num_rows - 3` rows —
     /// at most a few tens — the difference is at the last bits and the fixture
     /// measures it.
+    /// The pose columns [`Self::add_dense_h_b`] writes; see the field.
+    pub fn active_cols(&self) -> &[usize] {
+        &self.active_cols
+    }
+
     pub fn add_dense_h_b(
         &self,
         h: &mut DMatrix<S>,
