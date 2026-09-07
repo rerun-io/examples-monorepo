@@ -27,7 +27,7 @@ from jaxtyping import Float32, Int64, UInt8
 from numpy import ndarray
 
 from slam_rs import _core
-from slam_rs.apis.replay import SMOKE_SEGMENT, replayed_identity
+from slam_rs.apis.replay import SMOKE_SEGMENT, overlay_segment
 from slam_rs.catalog_feed import TIMELINE
 from slam_rs.frontend_log import (
     CPP_COLOR,
@@ -49,8 +49,8 @@ FRAME_INTERVAL_NS: int = 33_000_000
 
 FrontendFactory: TypeAlias = Callable[[int], _core.OpticalFlow]
 TextureFactory: TypeAlias = Callable[[int, int], UInt8[ndarray, "h w"]]
-ReplayFactory: TypeAlias = Callable[[Path, int, str, Path | None], tuple["Rows", list[_core.FlowFrame]]]
-"""One logged run: where the ``.rrd`` goes, how many framesets, the segment replayed, the dumps."""
+ReplayFactory: TypeAlias = Callable[[Path, int, str | None, Path | None], "ReplayResult"]
+"""One logged run: where the ``.rrd`` goes, how many framesets, the segment replayed (None for ``--rrd``), the dumps."""
 
 @dataclass(frozen=True, slots=True)
 class Row:
@@ -62,8 +62,11 @@ class Row:
     """The components this row set, by their short name (``Points2D:positions`` and such)."""
 
 
-Rows = dict[str, list[Row]]
+Rows: TypeAlias = dict[str, list[Row]]
 """Per entity path, its rows in ``video_time`` order."""
+
+ReplayResult: TypeAlias = tuple[Rows, list[_core.FlowFrame]]
+"""What one logged run gives back: the recording's rows, and the frames that produced them."""
 
 
 def read_rows(path: Path) -> Rows:
@@ -133,11 +136,12 @@ def replay(frontend: FrontendFactory, texture: TextureFactory) -> ReplayFactory:
 
     Returns:
         A function of the ``.rrd`` directory, the frameset count, the segment the
-        logger is told it is replaying and where its C++ dumps come from, giving
-        back the recording's rows and the frames that produced them.
+        logger is told it is replaying — None for a ``--rrd`` replay of frames no
+        manifest entry names — and where its C++ dumps come from, giving back the
+        recording's rows and the frames that produced them.
     """
 
-    def run(tmp_path: Path, framesets: int, segment_id: str, dumps_dir: Path | None) -> tuple[Rows, list[_core.FlowFrame]]:
+    def run(tmp_path: Path, framesets: int, segment_id: str | None, dumps_dir: Path | None) -> ReplayResult:
         flow: _core.OpticalFlow = frontend(2)
         logger: FrontendLogger = FrontendLogger(2, segment_id, dumps_dir)
         tmp_path.mkdir(parents=True, exist_ok=True)
@@ -236,16 +240,25 @@ def test_a_dump_directory_with_no_source_segment_is_refused(tmp_path: Path) -> N
         read_cpp_dumps(1, tmp_path)
 
 
-def test_a_recording_replayed_with_rrd_is_never_the_dumps_segment() -> None:
-    """``--rrd`` is the other door onto the review's finding: foreign frames, this segment's dumps."""
-    assert replayed_identity(None, SMOKE_SEGMENT) == SMOKE_SEGMENT
-    identity: str = replayed_identity(Path("/data/another/base.rrd"), SMOKE_SEGMENT)
-    assert identity != read_cpp_dumps(2, DEFAULT_DUMPS_DIR).segment_id
+def test_a_recording_replayed_with_rrd_is_never_given_a_dumps_segment() -> None:
+    """``--rrd`` is the other door onto the review's finding: foreign frames, this segment's dumps.
+
+    The eligibility is the replay source, not a name: the re-review drew MIO10's
+    dumps over MIO07's pixels through a **relative** ``--rrd`` spelled exactly
+    like the smoke segment, which the old string comparison could not tell apart
+    from the segment itself.
+    """
+    assert overlay_segment(None, SMOKE_SEGMENT) == SMOKE_SEGMENT
+    assert overlay_segment(Path("/data/another/base.rrd"), SMOKE_SEGMENT) is None
+    assert overlay_segment(Path(SMOKE_SEGMENT), SMOKE_SEGMENT) is None
+    assert overlay_segment(Path(f"./{read_cpp_dumps(2, DEFAULT_DUMPS_DIR).segment_id}"), SMOKE_SEGMENT) is None
 
 
 def test_log_writes_the_dataset_tree_once_per_frameset(replay: ReplayFactory, tmp_path: Path) -> None:
     """Every entity the blueprint shows gets one row per frameset, on ``video_time``."""
-    rows, frames = replay(tmp_path, 3, OTHER_SEGMENT, tmp_path / "no-dumps")
+    recorded: ReplayResult = replay(tmp_path, 3, OTHER_SEGMENT, tmp_path / "no-dumps")
+    rows: Rows = recorded[0]
+    frames: list[_core.FlowFrame] = recorded[1]
     expected_times: list[int] = [step * FRAME_INTERVAL_NS for step in range(3)]
     for camera in range(2):
         for leaf in ("keypoints", "trails", "cells"):
@@ -263,7 +276,9 @@ def test_log_writes_the_dataset_tree_once_per_frameset(replay: ReplayFactory, tm
 
 
 def test_the_counters_report_each_cameras_own_numbers(replay: ReplayFactory, tmp_path: Path) -> None:
-    rows, frames = replay(tmp_path, 3, OTHER_SEGMENT, tmp_path / "no-dumps")
+    recorded: ReplayResult = replay(tmp_path, 3, OTHER_SEGMENT, tmp_path / "no-dumps")
+    rows: Rows = recorded[0]
+    frames: list[_core.FlowFrame] = recorded[1]
     for camera in range(2):
         tracks: list[Row] = rows[f"{STATS_ENTITY}/cam_{camera:02d}/num_tracks"]
         fresh: list[Row] = rows[f"{STATS_ENTITY}/cam_{camera:02d}/num_new"]
@@ -282,7 +297,9 @@ def test_trails_follow_a_track_by_id_and_stop_at_the_trail_length(replay: Replay
     drifts as tracks die, and no invariant here would hold.
     """
     framesets: int = TRAIL_LENGTH + 4
-    rows, frames = replay(tmp_path, framesets, OTHER_SEGMENT, tmp_path / "no-dumps")
+    recorded: ReplayResult = replay(tmp_path, framesets, OTHER_SEGMENT, tmp_path / "no-dumps")
+    rows: Rows = recorded[0]
+    frames: list[_core.FlowFrame] = recorded[1]
     survived: dict[int, int] = {}
     previous: dict[int, tuple[tuple[float, float], ...]] = {}
     for step, frame in enumerate(frames):
@@ -324,7 +341,8 @@ def test_the_overlay_is_drawn_only_on_the_segment_the_dumps_came_from(
     overlay: Float32[ndarray, "n_keypoints 2"] = np.array([[10.0, 20.0], [30.0, 40.0]], dtype=np.float32)
     write_dumps(dumps_dir, SMOKE_SEGMENT, {0: [overlay, overlay], FRAME_INTERVAL_NS: [overlay, overlay]})
 
-    smoke, _ = replay(tmp_path / "smoke", 2, SMOKE_SEGMENT, dumps_dir)
+    recorded: ReplayResult = replay(tmp_path / "smoke", 2, SMOKE_SEGMENT, dumps_dir)
+    smoke: Rows = recorded[0]
     for camera in range(2):
         entity: str = f"{camera_entity(camera)}/keypoints_cpp"
         assert entity in smoke, sorted(smoke)
@@ -334,10 +352,32 @@ def test_the_overlay_is_drawn_only_on_the_segment_the_dumps_came_from(
             assert row.values["Points2D:colors"] == [(CPP_COLOR[0] << 24) | (CPP_COLOR[1] << 16) | (CPP_COLOR[2] << 8) | 0xFF]
 
     capsys.readouterr()
-    other, _ = replay(tmp_path / "other", 2, OTHER_SEGMENT, dumps_dir)
+    second: ReplayResult = replay(tmp_path / "other", 2, OTHER_SEGMENT, dumps_dir)
+    other: Rows = second[0]
     assert not [entity for entity in other if entity.endswith("keypoints_cpp")], sorted(other)
     # And the run says why, once, rather than silently drawing nothing.
     assert capsys.readouterr().out == f"dumps are from {SMOKE_SEGMENT}, replaying {OTHER_SEGMENT}: no overlay\n"
+
+
+def test_a_replay_of_another_recording_logs_no_overlay_at_all(
+    replay: ReplayFactory, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A ``--rrd`` replay, read back out of the file: the entity is never written.
+
+    The logger is given no source segment, which is what the tool passes for
+    ``--rrd``, so this holds however the replayed file is named — the review's
+    collision was a relative path spelled like :data:`SMOKE_SEGMENT`.
+    """
+    dumps_dir: Path = tmp_path / "dumps"
+    overlay: Float32[ndarray, "n_keypoints 2"] = np.array([[10.0, 20.0], [30.0, 40.0]], dtype=np.float32)
+    write_dumps(dumps_dir, SMOKE_SEGMENT, {0: [overlay, overlay], FRAME_INTERVAL_NS: [overlay, overlay]})
+
+    recorded: ReplayResult = replay(tmp_path / "rrd", 2, None, dumps_dir)
+    rows: Rows = recorded[0]
+    assert not [entity for entity in rows if entity.endswith("keypoints_cpp")], sorted(rows)
+    # The frames themselves were still tracked and logged.
+    assert len(rows[f"{camera_entity(0)}/keypoints"]) == 2
+    assert capsys.readouterr().out == f"dumps are from {SMOKE_SEGMENT}, replaying another recording's frames: no overlay\n"
 
 
 def test_the_overlay_is_cleared_once_the_dumps_run_out_and_stays_cleared(replay: ReplayFactory, tmp_path: Path) -> None:
@@ -345,7 +385,8 @@ def test_the_overlay_is_cleared_once_the_dumps_run_out_and_stays_cleared(replay:
     dumps_dir: Path = tmp_path / "dumps"
     overlay: Float32[ndarray, "n_keypoints 2"] = np.array([[10.0, 20.0]], dtype=np.float32)
     write_dumps(dumps_dir, SMOKE_SEGMENT, {0: [overlay, overlay]})
-    rows, _ = replay(tmp_path, 4, SMOKE_SEGMENT, dumps_dir)
+    recorded: ReplayResult = replay(tmp_path, 4, SMOKE_SEGMENT, dumps_dir)
+    rows: Rows = recorded[0]
 
     for camera in range(2):
         logged: list[Row] = rows[f"{camera_entity(camera)}/keypoints_cpp"]

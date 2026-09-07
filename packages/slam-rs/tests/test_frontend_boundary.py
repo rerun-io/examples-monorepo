@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
-from jaxtyping import UInt8
+from jaxtyping import Float32, Int64, UInt8
 from numpy import ndarray
 from numpy.typing import NDArray
 
@@ -151,13 +151,13 @@ def test_a_shifted_texture_keeps_its_track_ids(frontend: FrontendFactory, textur
     assert first.num_new(0) == first.num_tracks(0), "every keypoint of the first frameset is new"
     assert second.num_tracks(0) > 0
 
-    before: NDArray[np.int64] = first.ids(0)
-    after: NDArray[np.int64] = second.ids(0)
+    before: Int64[ndarray, " n_tracks"] = first.ids(0)
+    after: Int64[ndarray, " n_tracks"] = second.ids(0)
     assert np.array_equal(np.sort(before), before), "ids come back ascending"
-    kept: NDArray[np.int64] = np.intersect1d(before, after)
+    kept: Int64[ndarray, " n_kept"] = np.intersect1d(before, after)
     assert len(kept) >= 0.8 * len(before), f"only {len(kept)} of {len(before)} ids survived a ({shift_x}, {shift_y}) px shift"
 
-    moved: NDArray[np.float32] = second.positions(0)[np.isin(after, kept)] - first.positions(0)[np.isin(before, kept)]
+    moved: Float32[ndarray, "n_kept 2"] = second.positions(0)[np.isin(after, kept)] - first.positions(0)[np.isin(before, kept)]
     assert np.allclose(np.median(moved, axis=0), [shift_x, shift_y], atol=0.5)
 
 
@@ -304,6 +304,27 @@ def test_a_pyramid_deeper_than_the_ceiling_is_refused(camera: CameraFactory, imu
         )
 
 
+def test_a_calibration_whose_detection_grid_nothing_could_allocate_is_refused(camera: CameraFactory, imu: ImuCalib) -> None:
+    """The occupancy grid is derived from the calibration, so a resolution is a memory request too.
+
+    A 4,294,967,294-pixel resolution on a one-pixel grid asks for 2**64 cell
+    counts, and ``vec![0; rows * columns]`` answered that with a ``capacity
+    overflow`` panic before any image was handed in — the re-review's finding.
+    The probe runs in a subprocess because the regression is a
+    ``PanicException`` raised out of the constructor, which is a
+    ``BaseException`` and would take the suite with it if it were an abort.
+    """
+    document: dict = json.loads(_core.Calibration.from_catalog([camera(0, 0.0)], imu).to_json())
+    document["value0"]["resolution"] = [[2**32 - 2, 2**32 - 2]]
+    finished: subprocess.CompletedProcess[str] = probe_detector(
+        json.dumps(document), config_with("config.optical_flow_detection_grid_size", 1)
+    )
+    assert finished.returncode != 0, f"a grid nothing could allocate was accepted: {finished.stdout}"
+    assert "ValueError" in finished.stderr, finished.stderr
+    assert "PanicException" not in finished.stderr, finished.stderr
+    assert "occupancy grid" in finished.stderr and "ceiling" in finished.stderr, finished.stderr
+
+
 @settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(height=wrong_sizes, width=wrong_sizes)
 def test_an_image_that_is_not_the_calibrated_size_is_refused(camera: CameraFactory, frontend: FrontendFactory, height: int, width: int) -> None:
@@ -343,7 +364,7 @@ def test_a_frame_of_the_wrong_size_leaves_the_frontend_as_it_was(
     # And it still tracks against the frame it kept.
     second: _core.FlowFrame = flow.process(3_000, [texture(1, 0)])
     assert flow.frame_counter == 2
-    kept: NDArray[np.int64] = np.intersect1d(first.ids(0), second.ids(0))
+    kept: Int64[ndarray, " n_kept"] = np.intersect1d(first.ids(0), second.ids(0))
     assert len(kept) > 0, "the kept frame was not tracked against"
 
 

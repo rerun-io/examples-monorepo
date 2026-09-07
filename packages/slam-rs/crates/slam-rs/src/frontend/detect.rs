@@ -178,6 +178,19 @@ impl KeypointsData {
     }
 }
 
+/// The most cells one camera's detection grid may carry.
+///
+/// The shape comes from the calibrated resolution over
+/// `optical_flow_detection_grid_size`, so a calibration sizes a buffer as much
+/// as `max_keypoints` does: the occupancy counts are one `i32` per cell per
+/// camera, and a 4,294,967,294-pixel resolution on a one-pixel grid asked for
+/// 2^64 of them — `vec![0; rows * columns]` answers that with a `capacity
+/// overflow` panic rather than an error (decision D32). The ceiling is
+/// [`MAX_CAPACITY`](crate::frontend::tracker::MAX_CAPACITY) cells, which is
+/// 4 MiB of counts per camera and more than any detection could fill: every
+/// keypoint occupies a cell, and the keypoint budget stops at that same number.
+pub const MAX_CELLS: usize = 1 << 20;
+
 /// basalt's centred detection grid (`keypoints.cpp:140-144`).
 ///
 /// `x_start = (w % cell) / 2` and `x_stop = x_start + cell * (w / cell - 1)`, so
