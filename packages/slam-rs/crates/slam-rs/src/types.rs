@@ -99,6 +99,16 @@ pub enum StateError {
         /// The frame that was being frozen.
         frame_id: FrameId,
     },
+    /// A block would push the stacked state vector past the address space.
+    #[error("frame {frame_id}: {size} rows do not fit after the existing {total_size}")]
+    OrderingOverflow {
+        /// The frame that was being added.
+        frame_id: FrameId,
+        /// Rows already in the ordering.
+        total_size: usize,
+        /// Rows the caller asked for.
+        size: usize,
+    },
 }
 
 /// Where each frame's block starts in the stacked state vector.
@@ -124,14 +134,27 @@ impl AbsOrderMap {
     }
 
     /// Give `frame_id` the next `size` rows and return the offset it got.
+    ///
+    /// Both checks run before either collection changes, so a rejected push
+    /// leaves the ordering exactly as it was. The size comes from a caller, and
+    /// an unchecked sum would panic in debug and wrap the total to a smaller
+    /// number in release — a state vector that then overlaps its own blocks
+    /// (decision D32).
     pub fn push(&mut self, frame_id: FrameId, size: usize) -> Result<usize, StateError> {
         if self.index.contains_key(&frame_id) {
             return Err(StateError::DuplicateFrame { frame_id });
         }
         let offset: usize = self.total_size;
+        let total_size: usize = offset
+            .checked_add(size)
+            .ok_or(StateError::OrderingOverflow {
+                frame_id,
+                total_size: offset,
+                size,
+            })?;
         self.index.insert(frame_id, self.entries.len());
         self.entries.push((frame_id, offset, size));
-        self.total_size += size;
+        self.total_size = total_size;
         Ok(offset)
     }
 
@@ -572,6 +595,28 @@ mod tests {
             order.iter().collect::<Vec<_>>(),
             [(100, 0, 6), (200, 6, 6), (300, 12, 15)]
         );
+    }
+
+    /// A size that would overflow the total is refused, and refusing it leaves
+    /// the ordering untouched rather than half-updated.
+    #[test]
+    fn the_ordering_rejects_a_size_that_overflows() {
+        let mut order: AbsOrderMap = AbsOrderMap::new();
+        order.push(0, usize::MAX).unwrap();
+        assert_eq!(order.total_size(), usize::MAX);
+
+        assert_eq!(
+            order.push(1, 1),
+            Err(StateError::OrderingOverflow {
+                frame_id: 1,
+                total_size: usize::MAX,
+                size: 1
+            })
+        );
+        assert_eq!(order.total_size(), usize::MAX);
+        assert_eq!(order.items(), 1);
+        assert!(!order.contains(1));
+        assert_eq!(order.get(1), None);
     }
 
     #[test]

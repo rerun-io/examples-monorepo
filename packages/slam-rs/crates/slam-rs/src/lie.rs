@@ -44,6 +44,9 @@ pub trait LieScalar: RealField + Copy {
 
     /// Exact-as-possible conversion of a literal, standing in for C++'s `Scalar(x)`.
     fn from_literal(value: f64) -> Self;
+
+    /// Widen to `f64`, for the comparisons C++ promotes to `double`.
+    fn to_f64(self) -> f64;
 }
 
 impl LieScalar for f64 {
@@ -54,6 +57,10 @@ impl LieScalar for f64 {
     fn from_literal(value: f64) -> Self {
         value
     }
+
+    fn to_f64(self) -> f64 {
+        self
+    }
 }
 
 impl LieScalar for f32 {
@@ -63,6 +70,10 @@ impl LieScalar for f32 {
 
     fn from_literal(value: f64) -> Self {
         value as Self
+    }
+
+    fn to_f64(self) -> f64 {
+        f64::from(self)
     }
 }
 
@@ -220,9 +231,15 @@ impl<S: LieScalar> So3<S> {
     }
 
     /// The inverse rotation.
+    ///
+    /// Sophus builds it as `SO3(unit_quaternion().conjugate())`
+    /// (`Sophus/sophus/so3.hpp:267-269`), and that constructor renormalizes
+    /// (`:548-553`), so this one does too. Conjugating only flips signs, so the
+    /// renormalization is a no-op here — it is kept for the same reason Sophus
+    /// keeps it: every path that produces an `So3` leaves it unit length.
     pub fn inverse(&self) -> Self {
         Self {
-            quaternion: self.quaternion.inverse(),
+            quaternion: normalized(self.quaternion.conjugate().into_inner()),
         }
     }
 
@@ -241,11 +258,30 @@ impl<S: LieScalar> So3<S> {
 impl<S: LieScalar> std::ops::Mul for So3<S> {
     type Output = Self;
 
+    /// Compose two rotations, renormalizing the product.
+    ///
+    /// Sophus's `operator*` hands the raw quaternion product to the `SO3`
+    /// quaternion constructor (`Sophus/sophus/so3.hpp:378-389`), which calls
+    /// `normalize()` (`:548-553`, `:339-345`). `nalgebra`'s
+    /// `UnitQuaternion * UnitQuaternion` does not: it trusts the invariant and
+    /// lets rounding accumulate. Over a long chain that matters — composing one
+    /// small rotation 100,000 times in `f32` drifts the norm to 1.00105 without
+    /// the renormalization and stays at 1 with it.
     fn mul(self, rhs: Self) -> Self {
         Self {
-            quaternion: self.quaternion * rhs.quaternion,
+            quaternion: normalized(self.quaternion.into_inner() * rhs.quaternion.into_inner()),
         }
     }
+}
+
+/// `Sophus::SO3::normalize()` (`Sophus/sophus/so3.hpp:339-345`).
+///
+/// Sophus refuses a quaternion shorter than its epsilon; here the inputs are
+/// always products or conjugates of unit quaternions, so the norm is within a
+/// few ulps of 1 and `new_normalize` cannot divide by zero.
+#[inline]
+fn normalized<S: LieScalar>(quaternion: Quaternion<S>) -> UnitQuaternion<S> {
+    UnitQuaternion::new_normalize(quaternion)
 }
 
 impl<S: LieScalar> std::ops::Mul<Vector3<S>> for So3<S> {
@@ -428,7 +464,7 @@ pub fn right_jacobian_inv_so3<S: LieScalar>(phi: &Vector3<S>) -> Matrix3<S> {
     let phi_hat2: Matrix3<S> = phi_hat * phi_hat;
 
     let mut j: Matrix3<S> = Matrix3::identity() + phi_hat / c::<S>(2.0);
-    j += phi_hat2 * near_pi_second_order_term(phi_norm2);
+    j += inverse_jacobian_second_order_term(&phi_hat2, phi_norm2);
     j
 }
 
@@ -466,7 +502,7 @@ pub fn left_jacobian_inv_so3<S: LieScalar>(phi: &Vector3<S>) -> Matrix3<S> {
     let phi_hat2: Matrix3<S> = phi_hat * phi_hat;
 
     let mut j: Matrix3<S> = Matrix3::identity() - phi_hat / c::<S>(2.0);
-    j += phi_hat2 * near_pi_second_order_term(phi_norm2);
+    j += inverse_jacobian_second_order_term(&phi_hat2, phi_norm2);
     j
 }
 
@@ -500,22 +536,48 @@ pub fn right_jacobian_inv_se3_decoupled<S: LieScalar>(phi: &Vector6<S>) -> Matri
     j
 }
 
-/// The scalar multiplying `hat(phi)^2` in both inverse SO(3) Jacobians.
+/// The `hat(phi)^2` term both inverse SO(3) Jacobians add.
 ///
 /// The three branches are basalt's (`sophus_utils.hpp:191-215`): the closed
 /// form on `(0, pi)`, a zeroth-order expansion at pi where `sin` vanishes, and
 /// the Taylor value `1/12` at zero.
-fn near_pi_second_order_term<S: LieScalar>(phi_norm2: S) -> S {
+///
+/// Two details are about arithmetic width rather than mathematics, and both
+/// change which branch an `f32` input lands in:
+///
+/// * **The pi comparison happens in `f64`.** C++ writes
+///   `phi_norm < M_PI - Sophus::Constants<Scalar>::epsilonSqrt()`
+///   (`sophus_utils.hpp:202`). `M_PI` is a `double`, so the whole comparison is
+///   promoted to `double` even when `Scalar` is `float`. Doing it in `f32`
+///   moves the threshold by about 2e-8, and the single `f32` value
+///   `3.13843035697937` — which is exactly `pi_f32 - epsilonSqrt_f32` — then
+///   takes the pi branch where basalt takes the closed form, changing the
+///   result from 0.0024845 to 0.0020120.
+/// * **`M_PI * M_PI` is a `double` product** that Eigen rounds to `Scalar`
+///   only when it divides (`sophus_utils.hpp:214`). Squaring `pi_f32` instead
+///   gives a different last bit.
+///
+/// The matrix is divided rather than multiplied by a reciprocal in the two
+/// constant branches, because that is what the C++ does and the two differ by
+/// an ulp in `f32`.
+fn inverse_jacobian_second_order_term<S: LieScalar>(
+    phi_hat2: &Matrix3<S>,
+    phi_norm2: S,
+) -> Matrix3<S> {
     if phi_norm2 <= S::sophus_epsilon() {
-        return c::<S>(1.0) / c::<S>(12.0);
+        // Taylor expansion around 0.
+        return phi_hat2 / c::<S>(12.0);
     }
     let phi_norm: S = phi_norm2.sqrt();
-    let pi: S = S::pi();
-    if phi_norm < pi - S::sophus_epsilon_sqrt() {
-        c::<S>(1.0) / phi_norm2
-            - (c::<S>(1.0) + phi_norm.cos()) / (c::<S>(2.0) * phi_norm * phi_norm.sin())
+    let threshold: f64 = std::f64::consts::PI - S::sophus_epsilon_sqrt().to_f64();
+    if phi_norm.to_f64() < threshold {
+        // Regular case on (0, pi).
+        phi_hat2
+            * (c::<S>(1.0) / phi_norm2
+                - (c::<S>(1.0) + phi_norm.cos()) / (c::<S>(2.0) * phi_norm * phi_norm.sin()))
     } else {
-        c::<S>(1.0) / (pi * pi)
+        // 0th-order Taylor expansion around pi.
+        phi_hat2 / c::<S>(std::f64::consts::PI * std::f64::consts::PI)
     }
 }
 
@@ -673,6 +735,90 @@ mod tests {
             let j_left_inv: Matrix3<f64> = left_jacobian_inv_so3(&phi);
             assert_abs_diff_eq!(j_left_inv * j_left, Matrix3::identity(), epsilon = 1e-12);
         }
+    }
+
+    /// A long chain of compositions must not leak unit length.
+    ///
+    /// `nalgebra`'s `UnitQuaternion * UnitQuaternion` skips the renormalization
+    /// Sophus does on every product (`Sophus/sophus/so3.hpp:378-389`), and
+    /// 100,000 `f32` compositions of one small rotation take the norm to
+    /// 1.0010456 without it — a rotation matrix off by 7e-3, which the
+    /// estimator's window would carry straight into the residuals.
+    #[test]
+    fn a_hundred_thousand_compositions_stay_unit_length() {
+        let step32: So3<f32> = So3::exp(&Vector3::new(0.001, 0.002, -0.0015));
+        let mut chain32: So3<f32> = So3::identity();
+        let step64: So3<f64> = So3::exp(&Vector3::new(0.001, 0.002, -0.0015));
+        let mut chain64: So3<f64> = So3::identity();
+        for _ in 0..100_000 {
+            chain32 = chain32 * step32;
+            chain64 = chain64 * step64;
+        }
+
+        let norm32: f32 = chain32
+            .quaternion_xyzw()
+            .iter()
+            .map(|v| v * v)
+            .sum::<f32>()
+            .sqrt();
+        assert_abs_diff_eq!(norm32, 1.0, epsilon = 1e-6);
+        let m: Matrix3<f32> = chain32.matrix();
+        assert!((m.transpose() * m - Matrix3::identity()).norm() < 1e-5);
+
+        let norm64: f64 = chain64
+            .quaternion_xyzw()
+            .iter()
+            .map(|v| v * v)
+            .sum::<f64>()
+            .sqrt();
+        assert_abs_diff_eq!(norm64, 1.0, epsilon = 1e-12);
+        let m: Matrix3<f64> = chain64.matrix();
+        assert!((m.transpose() * m - Matrix3::identity()).norm() < 1e-12);
+    }
+
+    /// The pi branch is selected in `f64`, as C++ does through `M_PI`.
+    ///
+    /// `3.13843035697937_f32` is exactly `pi_f32 - epsilonSqrt_f32`, so an
+    /// `f32` comparison sends it to the pi branch while basalt's promoted
+    /// `double` comparison keeps it on the closed form. The two expected values
+    /// are the ones the C++ produces at this input and at the next
+    /// representable `f32` above it (`sophus_utils.hpp:202-214`).
+    #[test]
+    fn the_inverse_jacobian_pi_boundary_is_compared_in_f64() {
+        // 3.1384304_f32 is 3.138430356979370... exactly, which is exactly
+        // pi_f32 - epsilonSqrt_f32; the next f32 up is 3.138430595397949...
+        let below: Vector3<f32> = Vector3::new(3.138_430_4, 0.0, 0.0);
+        let above: Vector3<f32> = Vector3::new(f32::from_bits(below.x.to_bits() + 1), 0.0, 0.0);
+        assert_eq!(f64::from(below.x), 3.138_430_356_979_37);
+        assert_eq!(f64::from(above.x), 3.138_430_595_397_949);
+
+        // Closed form on (0, pi), the value the C++ produces here.
+        let expected_closed_form: f64 = 0.002_484_500_408_172_607_4;
+        assert_abs_diff_eq!(
+            f64::from(right_jacobian_inv_so3(&below)[(1, 1)]),
+            expected_closed_form,
+            epsilon = 1e-12
+        );
+        assert_abs_diff_eq!(
+            f64::from(left_jacobian_inv_so3(&below)[(1, 1)]),
+            expected_closed_form,
+            epsilon = 1e-12
+        );
+        // 0th-order expansion around pi, one ulp of input later.
+        let expected_near_pi: f64 = 0.002_011_954_784_393_310_5;
+        assert_abs_diff_eq!(
+            f64::from(right_jacobian_inv_so3(&above)[(1, 1)]),
+            expected_near_pi,
+            epsilon = 1e-12
+        );
+        assert_abs_diff_eq!(
+            f64::from(left_jacobian_inv_so3(&above)[(1, 1)]),
+            expected_near_pi,
+            epsilon = 1e-12
+        );
+        // The two branches really are far apart here, so this is a branch test,
+        // not a rounding test.
+        assert!((expected_closed_form - expected_near_pi).abs() > 4e-4);
     }
 
     /// Near pi the closed form's `sin` denominator vanishes; basalt swaps in a

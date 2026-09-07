@@ -91,6 +91,12 @@ pub enum CalibError {
         /// Index of the offending camera.
         index: usize,
     },
+    /// A 4x4 pose whose rotation block is orthonormal but mirrors the frame.
+    #[error("camera {index}: the rotation block of imu_T_cam is a reflection, not a rotation")]
+    ReflectedRotation {
+        /// Index of the offending camera.
+        index: usize,
+    },
 }
 
 /// cereal's outer wrapper.
@@ -776,6 +782,12 @@ impl<S: LieScalar> Calibration<S> {
 }
 
 /// A rigid transform from a row-major 4x4, rejecting anything that is not one.
+///
+/// Sophus's rotation-matrix constructor requires **both** orthogonality and a
+/// positive determinant (`Sophus/sophus/so3.hpp:536-541`). Checking only the
+/// first lets a reflection through, and Eigen's matrix-to-quaternion conversion
+/// then returns a rotation that is not the input at all — `diag(-1, 1, 1)`
+/// becomes the identity, silently discarding the camera's geometry.
 fn pose_from_row_major<S: LieScalar>(m: &[S; 16], index: usize) -> Result<Se3<S>, CalibError> {
     let rotation: Matrix3<S> = Matrix3::new(m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]);
     let residual: Matrix3<S> = rotation.transpose() * rotation - Matrix3::identity();
@@ -784,6 +796,11 @@ fn pose_from_row_major<S: LieScalar>(m: &[S; 16], index: usize) -> Result<Se3<S>
     // mirrored matrix.
     if !residual.norm().is_finite() || residual.norm() > S::from_literal(1e-4) {
         return Err(CalibError::NonRotation { index });
+    }
+    // A NaN determinant cannot reach here: the orthogonality check above rejects
+    // any non-finite entry first.
+    if rotation.determinant() <= S::zero() {
+        return Err(CalibError::ReflectedRotation { index });
     }
     let quaternion: nalgebra::UnitQuaternion<S> = nalgebra::UnitQuaternion::from_rotation_matrix(
         &nalgebra::Rotation3::from_matrix_unchecked(rotation),
@@ -1291,6 +1308,30 @@ mod tests {
         assert!(matches!(
             Calibration::from_catalog_parts(&[camera], &an_imu()),
             Err(CalibError::NonRotation { index: 0 })
+        ));
+    }
+
+    /// A reflection is orthonormal, so the orthogonality check alone lets it
+    /// through, and Eigen's conversion then turns `diag(-1, 1, 1)` into the
+    /// identity — a camera silently pointing somewhere else. Sophus rejects it
+    /// on the determinant (`Sophus/sophus/so3.hpp:539-540`) and so does this.
+    #[test]
+    fn catalog_parts_reject_a_reflected_rotation() {
+        let mut camera: CameraParts<f64> = a_camera("kb4", vec![0.1; 4]);
+        camera.imu_t_cam_row_major = [
+            -1.0, 0.0, 0.0, 0.1, 0.0, 1.0, 0.0, 0.2, 0.0, 0.0, 1.0, 0.3, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let rotation: Matrix3<f64> = Matrix3::new(-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
+        // Orthonormal, so only the determinant tells it apart from a rotation.
+        assert_abs_diff_eq!(
+            rotation.transpose() * rotation,
+            Matrix3::identity(),
+            epsilon = 0.0
+        );
+        assert_eq!(rotation.determinant(), -1.0);
+        assert!(matches!(
+            Calibration::from_catalog_parts(&[camera], &an_imu()),
+            Err(CalibError::ReflectedRotation { index: 0 })
         ));
     }
 
