@@ -236,6 +236,16 @@ pub enum EstimatorError {
     /// when it was frozen.
     #[error("state: {0}")]
     State(#[from] StateError),
+    /// The IMU queue ran dry while skipping forward to the frameset (`:265-271`)
+    /// after the coverage test found a sample past it, which means
+    /// [`SqrtKeypointVio::push_imu`]'s ordering invariant broke. Not
+    /// [`FrameOutcome::NeedMoreImu`]: the skip has consumed samples by then, so
+    /// the estimator is no longer untouched.
+    #[error("the imu queue ran dry while skipping forward to the frameset at {t_ns} ns")]
+    ImuQueueRanDry {
+        /// The frameset being initialized on.
+        t_ns: i64,
+    },
     /// `linearizeProblem` reported `numerically_valid == false`, which `:1301`
     /// prints as "did not expect numerical failure during linearization" and
     /// then fails the frame.
@@ -865,14 +875,19 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         if !self.initialized {
             // `:265-271`: skip forward to the frameset, then take that sample's
             // accelerometer reading as the whole initialization.
-            while let Some((t_ns, _, _)) = self.pending {
-                if t_ns >= frame.t_ns {
-                    break;
+            //
+            // No `NeedMoreImu` exit here, and that is the point: the skip has
+            // already consumed samples by the time it could want one, and the
+            // outcome promises the estimator was left untouched. It cannot
+            // want one either — the coverage test above found a sample
+            // strictly past the frameset and `push_imu` keeps the queue
+            // ordered, so the skip stops on a sample at or after it.
+            let accel: Vector3<S> = loop {
+                match self.pending {
+                    Some((t_ns, _, accel)) if t_ns >= frame.t_ns => break accel,
+                    Some(_) => self.pending = self.pop_calibrated(),
+                    None => return Err(EstimatorError::ImuQueueRanDry { t_ns: frame.t_ns }),
                 }
-                self.pending = self.pop_calibrated();
-            }
-            let Some((_, _, accel)) = self.pending else {
-                return Ok(FrameOutcome::NeedMoreImu);
             };
 
             // `:273-278`: zero velocity, zero translation, and the rotation that
