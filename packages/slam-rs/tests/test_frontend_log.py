@@ -35,6 +35,7 @@ from slam_rs.frontend_log import (
     SOURCE_FILE,
     STATS_ENTITY,
     TRAIL_LENGTH,
+    CppDumps,
     FrontendLogger,
     camera_entity,
     read_cpp_dumps,
@@ -130,7 +131,7 @@ def replay(tmp_path: Path, framesets: int, segment_id: str, dumps_dir: Path | No
         The recording's rows, and the frames that produced them.
     """
     flow: _core.OpticalFlow = frontend(2)
-    logger: FrontendLogger = FrontendLogger.create(2, segment_id, dumps_dir)
+    logger: FrontendLogger = FrontendLogger(2, segment_id, dumps_dir)
     tmp_path.mkdir(parents=True, exist_ok=True)
     output: Path = tmp_path / "frontend.rrd"
     rr.init("slam-rs-frontend-log-test", recording_id=f"{segment_id}-{framesets}")
@@ -171,24 +172,24 @@ def test_an_empty_track_list_gives_an_empty_colour_list() -> None:
     assert track_colors(np.zeros(0, dtype=np.int64)).shape == (0, 3)
 
 
-def test_the_committed_cpp_dumps_are_keyed_by_their_own_segment() -> None:
+def test_the_committed_cpp_dumps_name_their_own_segment() -> None:
     """The dumps carry the smoke segment's id and the feed's own ``video_time``."""
-    dumps: dict[tuple[str, int], list[Float32[ndarray, "n_keypoints 2"]]] = read_cpp_dumps(2, DEFAULT_DUMPS_DIR)
-    assert len(dumps) == 8
-    assert {segment for segment, _ in dumps} == {SMOKE_SEGMENT}
-    assert (SMOKE_SEGMENT, 0) in dumps and (SMOKE_SEGMENT, 18507000) in dumps, sorted(dumps)
-    first: list[Float32[ndarray, "n_keypoints 2"]] = dumps[SMOKE_SEGMENT, 0]
+    dumps: CppDumps = read_cpp_dumps(2, DEFAULT_DUMPS_DIR)
+    assert dumps.segment_id == SMOKE_SEGMENT
+    assert len(dumps.frames) == 8
+    assert 0 in dumps.frames and 18507000 in dumps.frames, sorted(dumps.frames)
+    first: list[Float32[ndarray, "n_keypoints 2"]] = dumps.frames[0]
     assert len(first) == 2, "the smoke segment is a two-camera rig"
     assert first[0].shape == (66, 2), "what dump_flow.cpp recorded for camera 0 of frameset 0"
     assert first[0].dtype == np.float32
     assert np.all((first[0] >= 0.0) & (first[0] < 960.0)), "keypoints lie inside the 960x960 frame"
-    # And no other segment finds them, however well its clock lines up.
-    assert (OTHER_SEGMENT, 0) not in dumps
 
 
 def test_a_directory_without_dumps_leaves_the_overlay_empty(tmp_path: Path) -> None:
-    assert read_cpp_dumps(2, tmp_path) == {}
-    assert read_cpp_dumps(2, tmp_path / "does-not-exist") == {}
+    for empty in (tmp_path, tmp_path / "does-not-exist"):
+        dumps: CppDumps = read_cpp_dumps(2, empty)
+        assert dumps.frames == {}
+        assert dumps.segment_id == ""
 
 
 def test_dumps_with_no_source_file_are_refused(tmp_path: Path) -> None:
@@ -229,7 +230,7 @@ def test_a_recording_replayed_with_rrd_is_never_the_dumps_segment() -> None:
     """``--rrd`` is the other door onto the review's finding: foreign frames, this segment's dumps."""
     assert replayed_identity(None, SMOKE_SEGMENT) == SMOKE_SEGMENT
     identity: str = replayed_identity(Path("/data/another/base.rrd"), SMOKE_SEGMENT)
-    assert identity not in {segment for segment, _ in read_cpp_dumps(2, DEFAULT_DUMPS_DIR)}
+    assert identity != read_cpp_dumps(2, DEFAULT_DUMPS_DIR).segment_id
 
 
 def test_log_writes_the_dataset_tree_once_per_frameset(tmp_path: Path) -> None:
@@ -305,7 +306,7 @@ def test_trails_follow_a_track_by_id_and_stop_at_the_trail_length(tmp_path: Path
     assert max(len(strip) for strip in last) == TRAIL_LENGTH
 
 
-def test_the_overlay_is_drawn_only_on_the_segment_the_dumps_came_from(tmp_path: Path) -> None:
+def test_the_overlay_is_drawn_only_on_the_segment_the_dumps_came_from(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """The review's finding: MIO10's dumps used to land on MIO07's first frame."""
     dumps_dir: Path = tmp_path / "dumps"
     overlay: Float32[ndarray, "n_keypoints 2"] = np.array([[10.0, 20.0], [30.0, 40.0]], dtype=np.float32)
@@ -320,8 +321,11 @@ def test_the_overlay_is_drawn_only_on_the_segment_the_dumps_came_from(tmp_path: 
             assert np.allclose(np.array(row.values["Points2D:positions"], dtype=np.float32), overlay)
             assert row.values["Points2D:colors"] == [(CPP_COLOR[0] << 24) | (CPP_COLOR[1] << 16) | (CPP_COLOR[2] << 8) | 0xFF]
 
+    capsys.readouterr()
     other, _ = replay(tmp_path / "other", 2, OTHER_SEGMENT, dumps_dir)
     assert not [entity for entity in other if entity.endswith("keypoints_cpp")], sorted(other)
+    # And the run says why, once, rather than silently drawing nothing.
+    assert capsys.readouterr().out == f"dumps are from {SMOKE_SEGMENT}, replaying {OTHER_SEGMENT}: no overlay\n"
 
 
 def test_the_overlay_is_cleared_once_the_dumps_run_out_and_stays_cleared(tmp_path: Path) -> None:

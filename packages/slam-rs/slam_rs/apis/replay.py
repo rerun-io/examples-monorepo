@@ -111,7 +111,7 @@ class ReplayOutcome:
     ground_truth: Trajectory
     """The nearest ground-truth pose per replayed frameset, row-aligned in time with the framesets."""
     imu_samples: int
-    """Inertial samples pushed into the core."""
+    """Inertial samples pushed into the estimator; zero on ``--stage frontend``, which runs none."""
     framesets: int
     """Framesets replayed."""
 
@@ -134,6 +134,33 @@ def replayed_identity(rrd: Path | None, segment_id: str) -> str:
     return segment_id if rrd is None else str(rrd)
 
 
+@dataclass(slots=True)
+class FrontendStage:
+    """The optical-flow frontend over one segment, and the Rerun layer it draws.
+
+    One value rather than three: the frontend, its logger and its timings only
+    ever exist together, on ``--stage frontend``.
+    """
+
+    flow: _core.OpticalFlow
+    """The frontend every frameset goes through."""
+    logger: FrontendLogger
+    """Where its keypoints, trails, occupancy and counters go."""
+    elapsed_ms: list[float] = field(default_factory=list)
+    """Wall time each ``process`` call took, in frameset order."""
+
+    def run(self, frameset: Frameset) -> None:
+        """Track one frameset and log what it produced, at the caller's time cursor.
+
+        Args:
+            frameset: The frameset to track.
+        """
+        started: float = time.monotonic()
+        frame: _core.FlowFrame = self.flow.process(frameset.t_ns, frameset.images)
+        self.elapsed_ms.append(1e3 * (time.monotonic() - started))
+        self.logger.log(frame, self.elapsed_ms[-1])
+
+
 def _replay(feed: SegmentFeed, config: Config, segment: ReferenceSegment) -> ReplayOutcome:
     """Drive the core over the feed, logging inputs, the frontend and any tracked pose.
 
@@ -145,19 +172,23 @@ def _replay(feed: SegmentFeed, config: Config, segment: ReferenceSegment) -> Rep
     Returns:
         The estimate, the ground truth sampled at the frameset times, and counts.
     """
-    vio: _core.Vio = _core.Vio(camera_count=len(feed.cameras), min_imu_samples=1)
-    frontend: _core.OpticalFlow | None = None
-    logger: FrontendLogger | None = None
+    vio: _core.Vio | None = None
+    stage: FrontendStage | None = None
     if config.stage == "frontend":
         # Every frontend field of basalt's shipped configs is already the default
         # the C++ constructor sets; the image safe radius is the one exception,
         # and it is a property of the device the manifest freezes per segment.
         flow_config: _core.VioConfig = _core.VioConfig()
         flow_config.optical_flow_image_safe_radius = segment.reference.optical_flow_image_safe_radius
-        frontend = _core.OpticalFlow(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config)
-        logger = FrontendLogger.create(len(feed.cameras), replayed_identity(config.rrd, segment.segment_id))
+        stage = FrontendStage(
+            flow=_core.OpticalFlow(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config),
+            logger=FrontendLogger(len(feed.cameras), replayed_identity(config.rrd, segment.segment_id)),
+        )
         rr.send_blueprint(frontend_blueprint(feed.cameras))
-    frontend_ms: list[float] = []
+    else:
+        # Only the stage that tracks builds an estimator: an IMU sample out of
+        # order would otherwise fail a replay that has nothing to estimate with.
+        vio = _core.Vio(camera_count=len(feed.cameras), min_imu_samples=1)
     statuses: dict[str, int] = {}
     pose_t_ns: list[int] = []
     positions: list[Float64[ndarray, " 3"]] = []
@@ -174,16 +205,19 @@ def _replay(feed: SegmentFeed, config: Config, segment: ReferenceSegment) -> Rep
             break
         replayed += 1
 
-        # The feed already hands over the samples since the previous frameset,
-        # running one past this frame time: a backend that integrates up to the
-        # frame and blocks until it can deadlocks on the first frameset otherwise.
         if len(frameset.imu):
-            vio.push_imu_batch(
-                frameset.imu.t_ns,
-                np.ascontiguousarray(frameset.imu.gyro_rad_s),
-                np.ascontiguousarray(frameset.imu.accel_m_s2),
-            )
-            pushed += len(frameset.imu)
+            if vio is not None:
+                # The feed already hands over the samples since the previous
+                # frameset, running one past this frame time: a backend that
+                # integrates up to the frame and blocks until it can deadlocks on
+                # the first frameset otherwise.
+                vio.push_imu_batch(
+                    frameset.imu.t_ns,
+                    np.ascontiguousarray(frameset.imu.gyro_rad_s),
+                    np.ascontiguousarray(frameset.imu.accel_m_s2),
+                )
+                pushed += len(frameset.imu)
+            # Logged in both stages: the samples are what the estimator is fed.
             for sample in range(len(frameset.imu)):
                 rr.set_time("video_time", duration=np.timedelta64(int(frameset.imu.t_ns[sample]), "ns"))
                 rr.log("/world/rig_00/imu_00/gyro", rr.Scalars(frameset.imu.gyro_rad_s[sample]))
@@ -192,7 +226,7 @@ def _replay(feed: SegmentFeed, config: Config, segment: ReferenceSegment) -> Rep
 
         for camera, image in zip(feed.cameras, frameset.images, strict=True):
             entity: str = f"{camera_entity(camera.index)}/image"
-            if frontend is not None:
+            if config.stage == "frontend":
                 # Full resolution, or the keypoints would sit two pixels off the
                 # corner they were computed on; JPEG keeps a whole segment small.
                 rr.log(entity, rr.Image(image, color_model="L").compress(jpeg_quality=JPEG_QUALITY))
@@ -210,32 +244,30 @@ def _replay(feed: SegmentFeed, config: Config, segment: ReferenceSegment) -> Rep
             gt_positions.append(pose_wxyz[0:3].copy())
             gt_quaternions.append(pose_wxyz[3:7].copy())
 
-        if frontend is not None and logger is not None:
-            started_frame: float = time.monotonic()
-            frame: _core.FlowFrame = frontend.process(frameset.t_ns, frameset.images)
-            frontend_ms.append(1e3 * (time.monotonic() - started_frame))
-            logger.log(frame, frontend_ms[-1])
-            continue
+        if stage is not None:
+            stage.run(frameset)
 
-        result: _core.VioResult = vio.track(frameset.t_ns, frameset.images)
-        # A PyO3 enum has no ``name`` and is unhashable (see ``_core.pyi``), so the
-        # repr is both the only name it has and the only thing that keys a dict.
-        status_name: str = str(result.status)
-        statuses[status_name] = statuses.get(status_name, 0) + 1
-        if result.status == _core.VioStatus.Tracking:
-            pose: Float64[ndarray, " 7"] = result.world_from_rig
-            rr.log(f"{RUN_ENTITY}/rig", rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7])))
-            rr.log(f"{RUN_ENTITY}/velocity", rr.Scalars(result.velocity))
-            pose_t_ns.append(result.t_ns)
-            positions.append(pose[0:3].copy())
-            quaternions.append(np.roll(pose[3:7], 1).copy())
+        if vio is not None:
+            result: _core.VioResult = vio.track(frameset.t_ns, frameset.images)
+            # A PyO3 enum has no ``name`` and is unhashable (see ``_core.pyi``), so
+            # the repr is both the only name it has and the only thing that keys a dict.
+            status_name: str = str(result.status)
+            statuses[status_name] = statuses.get(status_name, 0) + 1
+            if result.status == _core.VioStatus.Tracking:
+                pose: Float64[ndarray, " 7"] = result.world_from_rig
+                rr.log(f"{RUN_ENTITY}/rig", rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7])))
+                rr.log(f"{RUN_ENTITY}/velocity", rr.Scalars(result.velocity))
+                pose_t_ns.append(result.t_ns)
+                positions.append(pose[0:3].copy())
+                quaternions.append(np.roll(pose[3:7], 1).copy())
 
     elapsed: float = time.monotonic() - started
     print(f"{replayed} framesets in {elapsed:.1f} s ({replayed / max(elapsed, 1e-9):.1f} fps), statuses: {statuses}")
-    if frontend is not None and frontend_ms:
+    if stage is not None and stage.elapsed_ms:
         print(
-            f"frontend: {frontend.last_keypoint_id} keypoint ids handed out, "
-            f"{np.mean(frontend_ms):.1f} ms per frameset (median {np.median(frontend_ms):.1f}, max {np.max(frontend_ms):.1f})"
+            f"frontend: {stage.flow.last_keypoint_id} keypoint ids handed out, "
+            f"{np.mean(stage.elapsed_ms):.1f} ms per frameset "
+            f"(median {np.median(stage.elapsed_ms):.1f}, max {np.max(stage.elapsed_ms):.1f})"
         )
     return ReplayOutcome(
         estimate=Trajectory(
