@@ -105,13 +105,19 @@ impl std::fmt::Display for WindowRole {
 /// Under D32 none of them may panic on data, so each becomes a variant here.
 ///
 /// **Where the window is left, per error.** Three classes, and only the first
-/// is retryable.
+/// is retryable. The class is the **call site**, not the variant:
+/// [`Self::BundleAdjustment`] and [`Self::State`] are each raised from more
+/// than one, and the sites fall in different classes.
 ///
 /// 1. **Raised before anything moves**, so the estimator is untouched and the
-///    caller may retry with a corrected frameset: [`Self::CameraCountMismatch`]
-///    and [`Self::NonMonotonicFrame`] from [`SqrtKeypointVio::process_frame`],
-///    and [`Self::UnsupportedPath`], [`Self::EnforceRealtime`] and
-///    [`Self::EmptyWindow`] from [`SqrtKeypointVio::new`].
+///    caller may retry with a corrected input: [`Self::CameraCountMismatch`]
+///    and [`Self::NonMonotonicFrame`] from [`SqrtKeypointVio::process_frame`]'s
+///    validation, and [`Self::UnsupportedPath`], [`Self::EnforceRealtime`],
+///    [`Self::EmptyWindow`] and one [`Self::BundleAdjustment`] site from
+///    [`SqrtKeypointVio::new`]: [`BaError::Camera`], raised while
+///    [`BundleAdjustmentBase::new`] resolves the rig's projection models
+///    (`ba_base.rs:647`, `camera.rs:1058`), which returns before an estimator
+///    exists at all, so a corrected calibration may be passed to a new one.
 /// 2. **Raised after the IMU queue was consumed but before the new state was
 ///    filed.** [`Self::ImuQueueRanDry`] and [`Self::Imu`] come out of the
 ///    preintegration loops, which have already popped samples; and
@@ -120,12 +126,20 @@ impl std::fmt::Display for WindowRole {
 ///    that interval needed are gone, so the same frameset can never be
 ///    integrated again: not retryable either.
 /// 3. **Raised after the new state, its observations and its preintegration
-///    were inserted** — every remaining variant, all of them from inside
-///    `measure`: the window-invariant breaks, `NumericallyInvalid` from the LM
-///    loop, and anything `Linearize`, `Marginalize`, `BundleAdjustment`,
-///    `Landmark` or `State` refuses. The window has advanced by one frameset
-///    while `prev_frame` has not, so retrying the same frameset would file its
-///    observations twice.
+///    were inserted** — every remaining variant, and all but one of the sites
+///    inside `measure`: the window-invariant breaks, `NumericallyInvalid` from
+///    the LM loop, and anything `Linearize`, `Marginalize`, `BundleAdjustment`,
+///    `Landmark` or `State` refuses there. The window has advanced by one
+///    frameset while `prev_frame` has not, so retrying the same frameset would
+///    file its observations twice.
+///
+///    One class-3 site sits before `measure`: `process_frame`'s initialization
+///    pushes the first ordering entry (`:281-283`) after it has filed the first
+///    state, so its [`Self::State`] would leave that same advanced window. It
+///    cannot fire — the push is the first into a fresh [`AbsOrderMap`], with
+///    nothing for `DuplicateFrame` to collide with and a fixed
+///    `POSE_VEL_BIAS_SIZE` that cannot overflow the offset — and stays a `?`
+///    because D32 leaves no room for the `unwrap` that would replace it.
 ///
 /// basalt has one answer to classes 2 and 3: it resets the whole estimator
 /// (`proc_func`'s `return false`, `scheduleResetState` at `:120-195`), which
