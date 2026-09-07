@@ -353,6 +353,10 @@ class VioLogger:
         rr.log(f"{STATS_ENTITY}/num_keyframes", rr.Scalars(float(len(snapshot.kf_ids))))
         rr.log(f"{STATS_ENTITY}/lm_iterations", rr.Scalars(float(snapshot.lm_iterations)))
         rr.log(f"{STATS_ENTITY}/lm_lambda", rr.Scalars(snapshot.lm_lambda))
+        # The cost the frame started and ended the LM loop at: the pair is the
+        # convergence trace, and it is only readable beside the damping.
+        rr.log(f"{STATS_ENTITY}/lm_error_before", rr.Scalars(snapshot.lm_error_before))
+        rr.log(f"{STATS_ENTITY}/lm_error_after", rr.Scalars(snapshot.lm_error_after))
         rr.log(f"{STATS_ENTITY}/track_ms", rr.Scalars(elapsed_ms))
         for stage, milliseconds in snapshot.timings_ms.items():
             rr.log(f"{STATS_ENTITY}/stage_ms/{stage}", rr.Scalars(milliseconds))

@@ -188,6 +188,8 @@ def test_every_tracked_frameset_writes_the_rung(logged: Logged) -> None:
         f"{CPP_ENTITY}/trajectory",
         f"{STATS_ENTITY}/num_landmarks",
         f"{STATS_ENTITY}/lm_iterations",
+        f"{STATS_ENTITY}/lm_error_before",
+        f"{STATS_ENTITY}/lm_error_after",
         f"{STATS_ENTITY}/stage_ms/measure",
     ):
         assert entity in logged.rows, f"{entity} never reached the recording"

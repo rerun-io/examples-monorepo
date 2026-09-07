@@ -614,7 +614,7 @@ the same tree:
 | `/world/runs/slam_rs/marginalized` | the frames the last marginalization removed, the same wireframes faded |
 | `/world/runs/slam_rs/landmarks` | `Points3D` in the world frame, coloured by the keyframe that hosts them |
 | `/world/rig_00/cam_MM/pinhole/keypoints` | the estimator's own frontend output, in the frontend rung's palette |
-| `/stats/vio/...` | landmark, observation and keyframe counts, LM iterations and lambda, the six `stage_ms/*`, `track_ms`, and `ate_cm/{gt,cpp}` |
+| `/stats/vio/...` | landmark, observation and keyframe counts, LM iterations, lambda and the error before and after, the six `stage_ms/*`, `track_ms`, and `ate_cm/{gt,cpp}` |
 
 The three trajectories do not start in one frame: basalt initialises its world at
 the identity with gravity along z, while the ground truth is in the capture rig's
