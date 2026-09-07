@@ -110,6 +110,16 @@ pub enum VioError {
         /// Declared row pitch in bytes.
         stride: usize,
     },
+    /// `stride * height` does not fit in a `usize`, so no buffer can satisfy it.
+    #[error("camera {index}: {height} rows of stride {stride} overflow the address space")]
+    ImageSizeOverflow {
+        /// Index of the offending camera.
+        index: usize,
+        /// Declared number of rows.
+        height: usize,
+        /// Declared row pitch in bytes.
+        stride: usize,
+    },
     /// The buffer does not hold `stride * height` bytes.
     #[error("camera {index}: {height} rows of stride {stride} do not fit in {len} bytes")]
     ShortImage {
@@ -195,7 +205,18 @@ impl Vio {
                     stride: image.stride,
                 });
             }
-            if image.data.len() < image.stride * image.height {
+            // width, height and stride are caller-controlled: an unchecked product
+            // panics in debug and wraps to an accepted zero in release.
+            let needed: usize =
+                image
+                    .stride
+                    .checked_mul(image.height)
+                    .ok_or(VioError::ImageSizeOverflow {
+                        index,
+                        height: image.height,
+                        stride: image.stride,
+                    })?;
+            if image.data.len() < needed {
                 return Err(VioError::ShortImage {
                     index,
                     height: image.height,
@@ -361,6 +382,28 @@ mod tests {
                 index: 0,
                 width: 4,
                 stride: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn an_image_whose_size_overflows_is_rejected() {
+        let mut vio: Vio = Vio::new(Config {
+            camera_count: 1,
+            min_imu_samples: 1,
+        });
+        let huge: [ImageView<'_>; 1] = [ImageView {
+            width: 1,
+            height: 2,
+            stride: 1 << 63,
+            data: &[],
+        }];
+        assert_eq!(
+            vio.track(0, &huge),
+            Err(VioError::ImageSizeOverflow {
+                index: 0,
+                height: 2,
+                stride: 1 << 63,
             })
         );
     }

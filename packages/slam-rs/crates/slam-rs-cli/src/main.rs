@@ -1,6 +1,7 @@
 //! Native runner for the slam-rs core: the estimator without any Python.
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
@@ -34,14 +35,20 @@ enum Command {
     },
 }
 
-fn main() {
+fn main() -> ExitCode {
     match Cli::parse().command {
-        Command::Version => println!("slam-rs {}", slam_rs::VERSION),
+        Command::Version => {
+            println!("slam-rs {}", slam_rs::VERSION);
+            ExitCode::SUCCESS
+        }
+        // The estimator is not ported yet. Fail loudly: a zero status here would
+        // let a script read a missing or stale trajectory as a finished replay.
         Command::Replay { frames, imu, out } => {
-            println!("replay is not implemented yet; it would:");
-            println!("  read framesets from {}", frames.display());
-            println!("  read imu samples from {}", imu.display());
-            println!("  write the trajectory to {}", out.display());
+            eprintln!("error: replay is not implemented yet; it would:");
+            eprintln!("  read framesets from {}", frames.display());
+            eprintln!("  read imu samples from {}", imu.display());
+            eprintln!("  write the trajectory to {}", out.display());
+            ExitCode::FAILURE
         }
     }
 }

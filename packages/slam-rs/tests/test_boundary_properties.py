@@ -1,0 +1,128 @@
+"""Property tests driven through ``slam_rs._core`` (D23).
+
+Hypothesis drives the PyO3 boundary directly: no CLI oracle. Examples are capped
+so the whole file stays inside the default, seconds-long suite.
+"""
+
+from typing import cast
+
+import numpy as np
+import pytest
+from hypothesis import assume, given, settings
+from hypothesis import strategies as st
+from jaxtyping import UInt8
+from numpy.typing import NDArray
+
+from slam_rs import _core
+
+MAX_EXAMPLES: int = 50
+
+gaps = st.lists(st.integers(min_value=1, max_value=10**6), min_size=1, max_size=20)
+starts = st.integers(min_value=-(10**9), max_value=10**9)
+sizes = st.integers(min_value=1, max_value=32)
+camera_counts = st.integers(min_value=1, max_value=4)
+positions = st.integers(min_value=0, max_value=1000)
+
+
+def increasing(start: int, steps: list[int]) -> NDArray[np.int64]:
+    """Timestamps that strictly increase from ``start`` by the given positive steps."""
+    return np.array(np.cumsum([start, *steps]), dtype=np.int64)
+
+
+def zeros(count: int) -> NDArray[np.float64]:
+    """A C-contiguous ``(count, 3)`` block of zeros."""
+    return np.zeros((count, 3), dtype=np.float64)
+
+
+@settings(max_examples=MAX_EXAMPLES, deadline=None)
+@given(start=starts, steps=gaps)
+def test_strictly_increasing_timestamps_are_accepted(start: int, steps: list[int]) -> None:
+    vio: _core.Vio = _core.Vio(camera_count=1)
+    for t_ns in increasing(start, steps):
+        vio.push_imu(int(t_ns), [0.0, 0.0, 0.0], [0.0, 0.0, 9.81])
+
+
+@settings(max_examples=MAX_EXAMPLES, deadline=None)
+@given(start=starts, steps=gaps, back=st.integers(min_value=0, max_value=10**6))
+def test_any_non_increasing_timestamp_is_rejected(start: int, steps: list[int], back: int) -> None:
+    vio: _core.Vio = _core.Vio(camera_count=1)
+    times: NDArray[np.int64] = increasing(start, steps)
+    for t_ns in times:
+        vio.push_imu(int(t_ns), [0.0, 0.0, 0.0], [0.0, 0.0, 9.81])
+    with pytest.raises(ValueError, match="does not follow"):
+        vio.push_imu(int(times[-1]) - back, [0.0, 0.0, 0.0], [0.0, 0.0, 9.81])
+
+
+@settings(max_examples=MAX_EXAMPLES, deadline=None)
+@given(start=starts, steps=gaps)
+def test_an_increasing_batch_is_accepted(start: int, steps: list[int]) -> None:
+    vio: _core.Vio = _core.Vio(camera_count=1)
+    times: NDArray[np.int64] = increasing(start, steps)
+    vio.push_imu_batch(times, zeros(len(times)), zeros(len(times)))
+
+
+@settings(max_examples=MAX_EXAMPLES, deadline=None)
+@given(start=starts, steps=gaps, index=positions)
+def test_a_batch_that_repeats_one_timestamp_is_rejected(start: int, steps: list[int], index: int) -> None:
+    times: NDArray[np.int64] = increasing(start, steps)  # at least two samples
+    position: int = 1 + index % (len(times) - 1)
+    broken: NDArray[np.int64] = times.copy()
+    broken[position] = broken[position - 1]
+    vio: _core.Vio = _core.Vio(camera_count=1)
+    with pytest.raises(ValueError, match="does not follow"):
+        vio.push_imu_batch(broken, zeros(len(broken)), zeros(len(broken)))
+
+
+@settings(max_examples=MAX_EXAMPLES, deadline=None)
+@given(times=st.integers(min_value=1, max_value=8), rows=st.integers(min_value=1, max_value=8))
+def test_mismatched_batch_lengths_are_rejected(times: int, rows: int) -> None:
+    assume(times != rows)
+    vio: _core.Vio = _core.Vio(camera_count=1)
+    with pytest.raises(ValueError, match="same length"):
+        vio.push_imu_batch(np.arange(times, dtype=np.int64), zeros(rows), zeros(rows))
+
+
+@settings(max_examples=MAX_EXAMPLES, deadline=None)
+@given(dtype=st.sampled_from([np.float32, np.float64, np.int16, np.uint16]), height=sizes, width=sizes)
+def test_images_of_the_wrong_dtype_are_rejected(dtype: type, height: int, width: int) -> None:
+    vio: _core.Vio = _core.Vio(camera_count=1)
+    wrong: NDArray[np.uint8] = cast("NDArray[np.uint8]", np.zeros((height, width), dtype=dtype))
+    with pytest.raises(ValueError, match="2-D uint8"):
+        vio.track(0, [wrong])
+
+
+@settings(max_examples=MAX_EXAMPLES, deadline=None)
+@given(ndim=st.sampled_from([1, 3, 4]), size=st.integers(min_value=1, max_value=4))
+def test_images_of_the_wrong_rank_are_rejected(ndim: int, size: int) -> None:
+    vio: _core.Vio = _core.Vio(camera_count=1)
+    with pytest.raises(ValueError, match="2-D uint8"):
+        vio.track(0, [np.zeros((size,) * ndim, dtype=np.uint8)])
+
+
+@settings(max_examples=MAX_EXAMPLES, deadline=None)
+@given(dtype=st.sampled_from([np.int32, np.float64, np.uint64]), count=st.integers(min_value=1, max_value=8))
+def test_batch_timestamps_of_the_wrong_dtype_are_rejected(dtype: type, count: int) -> None:
+    vio: _core.Vio = _core.Vio(camera_count=1)
+    wrong: NDArray[np.int64] = cast("NDArray[np.int64]", np.arange(count, dtype=dtype))
+    with pytest.raises(ValueError, match="1-D int64"):
+        vio.push_imu_batch(wrong, zeros(count), zeros(count))
+
+
+@settings(max_examples=MAX_EXAMPLES, deadline=None)
+@given(count=camera_counts, height=sizes, width=sizes)
+def test_any_contiguous_uint8_frameset_is_accepted(count: int, height: int, width: int) -> None:
+    vio: _core.Vio = _core.Vio(camera_count=count)
+    image: UInt8[np.ndarray, "h w"] = np.zeros((height, width), dtype=np.uint8)
+    result: _core.VioResult = vio.track(7, [image] * count)
+    assert result.status == _core.VioStatus.NeedMoreImu
+    assert result.t_ns == 7
+
+
+@settings(max_examples=MAX_EXAMPLES, deadline=None)
+@given(count=camera_counts, given_count=st.integers(min_value=0, max_value=5))
+def test_the_wrong_number_of_images_is_rejected(count: int, given_count: int) -> None:
+    assume(count != given_count)
+    vio: _core.Vio = _core.Vio(camera_count=count)
+    image: UInt8[np.ndarray, "4 4"] = np.zeros((4, 4), dtype=np.uint8)
+    with pytest.raises(ValueError, match=f"expected {count} images"):
+        vio.track(0, [image] * given_count)

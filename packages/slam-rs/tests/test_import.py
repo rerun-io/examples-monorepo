@@ -66,6 +66,24 @@ def test_non_contiguous_rows_raise_value_error() -> None:
         vio.track(0, [strided])
 
 
+def test_fortran_order_arrays_are_rejected() -> None:
+    """Fortran bytes run down the columns; copying them as rows would transpose the data."""
+    vio: _core.Vio = _core.Vio(camera_count=1)
+    fortran_image: UInt8[np.ndarray, "4 6"] = np.asfortranarray(np.arange(24, dtype=np.uint8).reshape(4, 6))
+    with pytest.raises(ValueError, match="C-contiguous"):
+        vio.track(0, [fortran_image])
+
+    t_ns: NDArray[np.int64] = np.arange(2, dtype=np.int64)
+    fortran_gyro: NDArray[np.float64] = np.asfortranarray(np.arange(6, dtype=np.float64).reshape(2, 3))
+    contiguous: NDArray[np.float64] = np.zeros((2, 3), dtype=np.float64)
+    with pytest.raises(ValueError, match="C-contiguous"):
+        vio.push_imu_batch(t_ns, fortran_gyro, contiguous)
+    with pytest.raises(ValueError, match="C-contiguous"):
+        vio.push_imu_batch(t_ns, contiguous, fortran_gyro)
+    with pytest.raises(ValueError, match="C-contiguous"):
+        vio.push_imu_batch(np.arange(4, dtype=np.int64)[::2], contiguous, contiguous)
+
+
 def test_a_frameset_of_the_wrong_width_raises_value_error() -> None:
     vio: _core.Vio = _core.Vio(camera_count=2)
     image: UInt8[np.ndarray, "4 4"] = np.zeros((4, 4), dtype=np.uint8)

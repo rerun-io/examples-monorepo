@@ -195,11 +195,18 @@ fn gray_image(object: &Bound<'_, PyAny>, index: usize) -> PyResult<GrayImage> {
     let array: &Bound<'_, PyArray2<u8>> = object.cast::<PyArray2<u8>>().map_err(|_| {
         PyValueError::new_err(format!("image {index} must be a 2-D uint8 numpy array"))
     })?;
+    // as_slice() alone accepts Fortran order, whose bytes are transposed with
+    // respect to the row-major copy below, so check the C flag explicitly.
+    if !array.is_c_contiguous() {
+        return Err(PyValueError::new_err(format!(
+            "image {index} must be C-contiguous; pass numpy.ascontiguousarray(image)"
+        )));
+    }
     let shape: Vec<usize> = array.shape().to_vec();
     let readonly = array.readonly();
     let pixels: &[u8] = readonly.as_slice().map_err(|_| {
         PyValueError::new_err(format!(
-            "image {index} rows are not contiguous; pass numpy.ascontiguousarray(image)"
+            "image {index} must be C-contiguous; pass numpy.ascontiguousarray(image)"
         ))
     })?;
     Ok(GrayImage {
@@ -214,10 +221,15 @@ fn int64_column(object: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<i64>> {
     let array: &Bound<'_, PyArray1<i64>> = object
         .cast::<PyArray1<i64>>()
         .map_err(|_| PyValueError::new_err(format!("{name} must be a 1-D int64 numpy array")))?;
+    if !array.is_c_contiguous() {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be C-contiguous; pass numpy.ascontiguousarray({name})"
+        )));
+    }
     let readonly = array.readonly();
     let values: &[i64] = readonly.as_slice().map_err(|_| {
         PyValueError::new_err(format!(
-            "{name} is not contiguous; pass numpy.ascontiguousarray({name})"
+            "{name} must be C-contiguous; pass numpy.ascontiguousarray({name})"
         ))
     })?;
     Ok(values.to_vec())
@@ -234,10 +246,17 @@ fn float64_triples(object: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<[f64; 
             "{name} must have shape (n, 3), got {shape:?}"
         )));
     }
+    // Fortran order passes as_slice() but its bytes run down the columns, which
+    // would turn the chunks below into transposed samples.
+    if !array.is_c_contiguous() {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be C-contiguous; pass numpy.ascontiguousarray({name})"
+        )));
+    }
     let readonly = array.readonly();
     let values: &[f64] = readonly.as_slice().map_err(|_| {
         PyValueError::new_err(format!(
-            "{name} rows are not contiguous; pass numpy.ascontiguousarray({name})"
+            "{name} must be C-contiguous; pass numpy.ascontiguousarray({name})"
         ))
     })?;
     Ok(values

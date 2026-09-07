@@ -4,20 +4,30 @@ The signatures here are the only static check on the FFI boundary, so they stay
 exact: no ``Any``, and every array carries its dtype.
 """
 
-import enum
 from collections.abc import Sequence
+from typing import ClassVar
 
 import numpy as np
 from numpy.typing import NDArray
 
 __version__: str
 
-class VioStatus(enum.Enum):
-    """How far the estimator has got."""
+class VioStatus:
+    """How far the estimator has got.
 
-    NotInitialised = 0
-    NeedMoreImu = 1
-    Tracking = 2
+    A PyO3 enum, not a ``enum.Enum``: it carries no ``name`` or ``value``, it is
+    unhashable, and ``VioStatus(1)`` raises ``TypeError``. It does convert to
+    ``int`` and compares equal both to its own variants and to their ordinals.
+    """
+
+    NotInitialised: ClassVar[VioStatus]
+    NeedMoreImu: ClassVar[VioStatus]
+    Tracking: ClassVar[VioStatus]
+    __hash__: ClassVar[None]
+
+    def __int__(self) -> int: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __repr__(self) -> str: ...
 
 class VioResult:
     """What one :meth:`Vio.track` call produced."""
