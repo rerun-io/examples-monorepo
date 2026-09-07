@@ -49,9 +49,12 @@ use nalgebra::{DMatrix, DVector};
 use serde::Deserialize;
 use slam_rs::lie::LieScalar;
 use slam_rs::marg::{
-    Cod, MargHelper, ReducedSystem, marginalize_helper_sq_to_sq, marginalize_helper_sq_to_sqrt,
+    Cod, ReducedSystem, marginalize_helper_sq_to_sq, marginalize_helper_sq_to_sqrt,
     marginalize_helper_sqrt_to_sqrt,
 };
+
+mod common;
+use common::Compare;
 
 // ─── the fixture ───────────────────────────────────────────────────────────
 
@@ -110,84 +113,6 @@ static ORACLE: LazyLock<Oracle> = LazyLock::new(|| {
 
 // ─── comparison ────────────────────────────────────────────────────────────
 
-/// The largest magnitude in a slice, floored at one.
-///
-/// Comparisons scale by the array's own largest coefficient rather than by each
-/// entry: the sub-diagonal entries a Householder QR drives to zero have no
-/// scale of their own, and basalt's own tests compare `(H_a - H_b).norm()` for
-/// exactly that reason (`test_linearization.cpp:148-157`).
-fn scale_of(values: &[f64]) -> f64 {
-    values.iter().fold(1.0f64, |acc, v| acc.max(v.abs()))
-}
-
-struct Worst {
-    value: f64,
-    at: String,
-}
-
-impl Worst {
-    fn new() -> Self {
-        Self {
-            value: 0.0,
-            at: String::new(),
-        }
-    }
-
-    fn note(&mut self, diff: f64, at: impl FnOnce() -> String) {
-        if diff > self.value {
-            self.value = diff;
-            self.at = at();
-        }
-    }
-}
-
-/// Compare a Rust matrix with the C++ row-major dump.
-fn compare<S: LieScalar>(
-    got: &DMatrix<S>,
-    want: &[f64],
-    rows: usize,
-    cols: usize,
-    tol: f64,
-    label: &str,
-    worst: &mut Worst,
-) {
-    assert_eq!(got.nrows(), rows, "{label}: row count");
-    assert_eq!(got.ncols(), cols, "{label}: column count");
-    let scale: f64 = scale_of(want);
-    for i in 0..rows {
-        for j in 0..cols {
-            let expected: f64 = want[i * cols + j];
-            let actual: f64 = got[(i, j)].to_f64();
-            let diff: f64 = (actual - expected).abs() / scale;
-            worst.note(diff, || format!("{label}[{i},{j}]"));
-            assert!(
-                diff <= tol,
-                "{label}[{i},{j}]: {actual} vs {expected}, relative {diff:e} > {tol:e}"
-            );
-        }
-    }
-}
-
-fn compare_vec<S: LieScalar>(
-    got: &DVector<S>,
-    want: &[f64],
-    tol: f64,
-    label: &str,
-    worst: &mut Worst,
-) {
-    assert_eq!(got.nrows(), want.len(), "{label}: length");
-    let scale: f64 = scale_of(want);
-    for (i, expected) in want.iter().enumerate() {
-        let actual: f64 = got[i].to_f64();
-        let diff: f64 = (actual - expected).abs() / scale;
-        worst.note(diff, || format!("{label}[{i}]"));
-        assert!(
-            diff <= tol,
-            "{label}[{i}]: {actual} vs {expected}, relative {diff:e} > {tol:e}"
-        );
-    }
-}
-
 /// How close the port has to be, per quantity.
 ///
 /// One number covers everything except `marginalizeHelperSqToSqrt`'s residual,
@@ -210,6 +135,31 @@ struct Tolerances {
     /// routine's own output at [`Tolerances::general`] in
     /// [`check_case`] — `J_mᵀ r_m` agrees **exactly** on this case.
     sq_to_sqrt_b: f64,
+}
+
+/// One [`Compare`] per tolerance of [`Tolerances`], so each quantity is checked
+/// against its own and the run still reports a single worst case.
+struct Comparisons {
+    general: Compare,
+    sq_to_sqrt_b: Compare,
+}
+
+impl Comparisons {
+    fn new(tols: Tolerances) -> Self {
+        Self {
+            general: Compare::new(tols.general),
+            sq_to_sqrt_b: Compare::new(tols.sq_to_sqrt_b),
+        }
+    }
+
+    /// The worse of the two, as `(relative difference, what)`.
+    fn worst(&self) -> (f64, &str) {
+        if self.sq_to_sqrt_b.worst > self.general.worst {
+            (self.sq_to_sqrt_b.worst, &self.sq_to_sqrt_b.worst_what)
+        } else {
+            (self.general.worst, &self.general.worst_what)
+        }
+    }
 }
 
 // ─── rebuilding one case in the target scalar ──────────────────────────────
@@ -235,8 +185,7 @@ fn index_set(values: &[usize]) -> BTreeSet<usize> {
 // ─── the tests ─────────────────────────────────────────────────────────────
 
 /// Everything one case asserts, in one scalar.
-fn check_case<S: LieScalar>(case: &Case, tols: Tolerances, worst: &mut Worst) {
-    let tol: f64 = tols.general;
+fn check_case<S: LieScalar>(case: &Case, cmp: &mut Comparisons) {
     let label = |what: &str| format!("{} {} {what}", case.name, case.scalar);
     let keep: BTreeSet<usize> = index_set(&case.idx_to_keep);
     let marg: BTreeSet<usize> = index_set(&case.idx_to_marg);
@@ -259,16 +208,15 @@ fn check_case<S: LieScalar>(case: &Case, tols: Tolerances, worst: &mut Worst) {
     if let Some(want) = &case.sqrt_to_sqrt {
         let got: ReducedSystem<S> =
             marginalize_helper_sqrt_to_sqrt(j.clone(), r.clone(), &keep, &marg).unwrap();
-        compare(
+        cmp.general.close_matrix(
             &got.h,
             &want.h,
             want.rows,
             want.cols,
-            tol,
             &label("sqrt_to_sqrt.h"),
-            worst,
         );
-        compare_vec(&got.b, &want.b, tol, &label("sqrt_to_sqrt.b"), worst);
+        cmp.general
+            .close_slice(got.b.as_slice(), &want.b, &label("sqrt_to_sqrt.b"));
         // The rank the QR reached is visible in the shape, and is an integer:
         // no tolerance applies.
         assert_eq!(
@@ -286,12 +234,10 @@ fn check_case<S: LieScalar>(case: &Case, tols: Tolerances, worst: &mut Worst) {
             label("sqrt_to_sqrt")
         );
         let solution: DVector<S> = reduced.solve_vec(&got.b).unwrap();
-        compare_vec(
-            &solution,
+        cmp.general.close_slice(
+            solution.as_slice(),
             &want.solution,
-            tol,
             &label("sqrt_to_sqrt.solution"),
-            worst,
         );
     } else {
         // The C++ reads out of range on this shape; the port must not.
@@ -326,14 +272,12 @@ fn check_case<S: LieScalar>(case: &Case, tols: Tolerances, worst: &mut Worst) {
         "{}: rank of the marginalized block",
         label("h_mm")
     );
-    compare(
+    cmp.general.close_matrix(
         &cod.pseudo_inverse(),
         &case.h_mm_pinv,
         case.h_mm_size,
         case.h_mm_size,
-        tol,
         &label("h_mm_pinv"),
-        worst,
     );
 
     // `marginalizeHelperSqToSqrt` (`:120-244`).
@@ -341,43 +285,32 @@ fn check_case<S: LieScalar>(case: &Case, tols: Tolerances, worst: &mut Worst) {
         let got: ReducedSystem<S> =
             marginalize_helper_sq_to_sqrt(sq_h.clone(), sq_b.clone(), &keep, &marg).unwrap();
         let want: &Reduced = &case.sq_to_sqrt;
-        compare(
+        cmp.general.close_matrix(
             &got.h,
             &want.h,
             want.rows,
             want.cols,
-            tol,
             &label("sq_to_sqrt.h"),
-            worst,
         );
-        compare_vec(
-            &got.b,
-            &want.b,
-            tols.sq_to_sqrt_b,
-            &label("sq_to_sqrt.b"),
-            worst,
-        );
+        cmp.sq_to_sqrt_b
+            .close_slice(got.b.as_slice(), &want.b, &label("sq_to_sqrt.b"));
 
         // What the estimator actually consumes: the square root squared. The
         // rank-deficient row that the coefficient comparison above has to be
         // lenient about contributes nothing here, which is the point.
         let squared: DMatrix<S> = got.h.transpose() * &got.h;
         let squared_b: DVector<S> = got.h.transpose() * &got.b;
-        compare(
+        cmp.general.close_matrix(
             &squared,
             &case.sq_to_sq.h,
             case.sq_to_sq.rows,
             case.sq_to_sq.cols,
-            tol,
             &label("sq_to_sqrt.h^T h"),
-            worst,
         );
-        compare_vec(
-            &squared_b,
+        cmp.general.close_slice(
+            squared_b.as_slice(),
             &case.sq_to_sq.b,
-            tol,
             &label("sq_to_sqrt.h^T b"),
-            worst,
         );
     }
 
@@ -386,16 +319,10 @@ fn check_case<S: LieScalar>(case: &Case, tols: Tolerances, worst: &mut Worst) {
         let got: ReducedSystem<S> =
             marginalize_helper_sq_to_sq(sq_h.clone(), sq_b.clone(), &keep, &marg).unwrap();
         let want: &Reduced = &case.sq_to_sq;
-        compare(
-            &got.h,
-            &want.h,
-            want.rows,
-            want.cols,
-            tol,
-            &label("sq_to_sq.h"),
-            worst,
-        );
-        compare_vec(&got.b, &want.b, tol, &label("sq_to_sq.b"), worst);
+        cmp.general
+            .close_matrix(&got.h, &want.h, want.rows, want.cols, &label("sq_to_sq.h"));
+        cmp.general
+            .close_slice(got.b.as_slice(), &want.b, &label("sq_to_sq.b"));
         assert_eq!(
             Cod::new(&got.h).rank(),
             want.rank,
@@ -408,29 +335,25 @@ fn check_case<S: LieScalar>(case: &Case, tols: Tolerances, worst: &mut Worst) {
     // `original_solution` of `test_qr.cpp:48`.
     let full: Cod<S> = Cod::new(&j);
     assert_eq!(full.rank(), case.full_rank, "{}: rank", label("full"));
-    compare_vec(
-        &full.solve_vec(&r).unwrap(),
+    cmp.general.close_slice(
+        full.solve_vec(&r).unwrap().as_slice(),
         &case.full_solution,
-        tol,
         &label("full_solution"),
-        worst,
     );
 }
 
 /// Every case of one precision, and the worst relative difference over all of
 /// them.
 fn run_all<S: LieScalar>(scalar: &str, tols: Tolerances) {
-    let mut worst: Worst = Worst::new();
+    let mut cmp: Comparisons = Comparisons::new(tols);
     let mut seen: usize = 0;
     for case in ORACLE.cases.iter().filter(|c| c.scalar == scalar) {
-        check_case::<S>(case, tols, &mut worst);
+        check_case::<S>(case, &mut cmp);
         seen += 1;
     }
     assert_eq!(seen, 9, "every {scalar} case ran");
-    println!(
-        "worst {scalar} relative difference {:e} at {}",
-        worst.value, worst.at
-    );
+    let (value, what) = cmp.worst();
+    println!("worst {scalar} relative difference {value:e} at {what}");
 }
 
 #[test]
@@ -486,23 +409,27 @@ fn the_rank_threshold_decision_matches_the_cpp() {
         let below: &Case = case_named("threshold_below");
         let above: &Case = case_named("threshold_above");
 
-        for case in [exact, below, above] {
+        // The three cases sit where their names say, in C++'s own numbers: the
+        // fixture prints both `|beta|` and `sqrt(epsilon)`, so this reads the
+        // C++ against itself and says nothing about the port.
+        for (case, ordering) in [
+            (exact, std::cmp::Ordering::Equal),
+            (below, std::cmp::Ordering::Less),
+            (above, std::cmp::Ordering::Greater),
+        ] {
             let beta: f64 = case.beta_probe.expect("threshold case carries beta");
-            let accepted: bool = case.beta_probe_accepted.expect("and its decision");
-            // The port's own comparison, on the same bits, in the same scalar.
-            let ours: bool = if scalar == "f64" {
-                beta.abs() > f64::EPSILON.sqrt()
-            } else {
-                let beta32: f32 = beta as f32;
-                beta32.abs() > f32::EPSILON.sqrt()
-            };
             assert_eq!(
-                ours, accepted,
-                "{} {}: |beta| = {beta:e} against sqrt(eps) = {:e}",
-                case.name, scalar, case.rank_threshold
+                beta.abs().total_cmp(&case.rank_threshold),
+                ordering,
+                "{} {scalar}: |beta| = {beta:e} against sqrt(eps) = {:e}",
+                case.name,
+                case.rank_threshold
             );
             checked += 1;
         }
+
+        // C++'s own decision on those numbers: equality is not greater-than,
+        // so the case built *on* the threshold is rejected.
         assert!(!exact.beta_probe_accepted.unwrap(), "equality is not >");
         assert!(!below.beta_probe_accepted.unwrap());
         assert!(above.beta_probe_accepted.unwrap());
@@ -516,27 +443,42 @@ fn the_rank_threshold_decision_matches_the_cpp() {
         assert_eq!(e.b, bl.b);
         assert_ne!(e.h, ab.h, "{scalar}: above the threshold differs");
 
-        // The port reproduces that same relation, computed rather than read.
-        if scalar == "f64" {
-            let run = |case: &Case| -> ReducedSystem<f64> {
-                marginalize_helper_sqrt_to_sqrt(
-                    matrix_of::<f64>(&case.j, case.rows, case.cols),
-                    vector_of::<f64>(&case.r),
-                    &index_set(&case.idx_to_keep),
-                    &index_set(&case.idx_to_marg),
-                )
-                .unwrap()
-            };
-            let (ours_e, ours_b, ours_a) = (run(exact), run(below), run(above));
-            assert_eq!(
-                ours_e.h, ours_b.h,
-                "the port coincides on the threshold too"
-            );
-            assert_eq!(ours_e.b, ours_b.b);
-            assert_ne!(ours_e.h, ours_a.h);
+        // The port reproduces that same relation, computed rather than read:
+        // its own reduction, its own `|beta|`, its own branch. Running it in
+        // the case's own scalar is what makes this the port and not a second
+        // copy of `helper.rs`'s comparison.
+        match scalar {
+            "f64" => reproduce_threshold_relation::<f64>(exact, below, above, scalar),
+            _ => reproduce_threshold_relation::<f32>(exact, below, above, scalar),
         }
     }
     assert_eq!(checked, 6);
+}
+
+/// The port's own flat QR on the three threshold cases: the two rejected ones
+/// must coincide and the accepted one must differ.
+fn reproduce_threshold_relation<S: LieScalar>(
+    exact: &Case,
+    below: &Case,
+    above: &Case,
+    scalar: &str,
+) {
+    let run = |case: &Case| -> ReducedSystem<S> {
+        marginalize_helper_sqrt_to_sqrt(
+            matrix_of::<S>(&case.j, case.rows, case.cols),
+            vector_of::<S>(&case.r),
+            &index_set(&case.idx_to_keep),
+            &index_set(&case.idx_to_marg),
+        )
+        .unwrap()
+    };
+    let (ours_e, ours_b, ours_a) = (run(exact), run(below), run(above));
+    assert_eq!(
+        ours_e.h, ours_b.h,
+        "{scalar}: the port coincides on the threshold too"
+    );
+    assert_eq!(ours_e.b, ours_b.b, "{scalar}");
+    assert_ne!(ours_e.h, ours_a.h, "{scalar}: above the threshold differs");
 }
 
 /// `test/src/test_qr.cpp`'s `RankDefLeastSquares` (`:38-83`), ported.
@@ -587,16 +529,17 @@ fn rank_def_least_squares() {
     assert_eq!(full.rank(), case.full_rank);
 
     // `:63-78`, the QR version.
-    let qr: ReducedSystem<f64> = MargHelper::sqrt_to_sqrt(j, r, &keep, &marg).unwrap();
+    let qr: ReducedSystem<f64> = marginalize_helper_sqrt_to_sqrt(j, r, &keep, &marg).unwrap();
     let sol_qr: DVector<f64> = Cod::new(&qr.h).solve_vec(&qr.b).unwrap();
 
     // `:46-61`, the SC version.
     let sc: ReducedSystem<f64> =
-        MargHelper::sq_to_sq(sq_h.clone(), sq_b.clone(), &keep, &marg).unwrap();
+        marginalize_helper_sq_to_sq(sq_h.clone(), sq_b.clone(), &keep, &marg).unwrap();
     let sol_sc: DVector<f64> = Cod::new(&sc.h).solve_vec(&sc.b).unwrap();
 
     // `:23-44`, the square-root SC version, and its squared form.
-    let sqrt_sc: ReducedSystem<f64> = MargHelper::sq_to_sqrt(sq_h, sq_b, &keep, &marg).unwrap();
+    let sqrt_sc: ReducedSystem<f64> =
+        marginalize_helper_sq_to_sqrt(sq_h, sq_b, &keep, &marg).unwrap();
     let squared: DMatrix<f64> = sqrt_sc.h.transpose() * &sqrt_sc.h;
     let squared_b: DVector<f64> = sqrt_sc.h.transpose() * &sqrt_sc.b;
     let sol_sqrt_sc2: DVector<f64> = Cod::new(&squared).solve_vec(&squared_b).unwrap();
@@ -617,26 +560,16 @@ fn rank_def_least_squares() {
     );
 
     // And each agrees with what the C++ printed for it.
-    let mut worst: Worst = Worst::new();
-    compare_vec(
-        &sol_qr,
+    let mut cmp: Compare = Compare::new(1e-13);
+    cmp.close_slice(
+        sol_qr.as_slice(),
         &case.sqrt_to_sqrt.as_ref().unwrap().solution,
-        1e-13,
         "sol_qr",
-        &mut worst,
     );
-    compare_vec(
-        &sol_sc,
-        &case.sq_to_sq.solution,
-        1e-13,
-        "sol_sc",
-        &mut worst,
-    );
-    compare_vec(
-        &sol_sqrt_sc2,
+    cmp.close_slice(sol_sc.as_slice(), &case.sq_to_sq.solution, "sol_sc");
+    cmp.close_slice(
+        sol_sqrt_sc2.as_slice(),
         &case.sq_to_sqrt_squared.solution,
-        1e-13,
         "sol_sqrt_sc2",
-        &mut worst,
     );
 }

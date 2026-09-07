@@ -114,12 +114,11 @@ pub trait LieScalar: RealField + Copy {
     ///   the low lanes, then SSE3's `movehdup` adds lane 1 into lane 0:
     ///   `(a₀ + a₂) + (a₁ + a₃)`.
     ///
-    /// The argument is four lanes wide — the widest packet either scalar has,
-    /// so one stack array serves both — and an implementation reads only its
-    /// own [`Self::EIGEN_PACKET_SIZE`] of them. The pairing is not free choice:
-    /// the package README records how a left fold over the lanes scores against
-    /// the fork's own Eigen on the shape sweep.
-    fn eigen_predux(packet: [Self; 4]) -> Self;
+    /// **Contract: `lanes` is at least [`Self::EIGEN_PACKET_SIZE`] long**, and
+    /// an implementation reads exactly that many of them. The pairing is not
+    /// free choice: the package README records how a left fold over the lanes
+    /// scores against the fork's own Eigen on the shape sweep.
+    fn eigen_predux(lanes: &[Self]) -> Self;
 
     /// Exact-as-possible conversion of a literal, standing in for C++'s `Scalar(x)`.
     fn from_literal(value: f64) -> Self;
@@ -148,9 +147,9 @@ impl LieScalar for f64 {
 
     const EIGEN_PACKET_SIZE: usize = 2;
 
-    fn eigen_predux(packet: [Self; 4]) -> Self {
+    fn eigen_predux(lanes: &[Self]) -> Self {
         // `Packet2d`: two lanes, so the sum is the only order there is.
-        packet[0] + packet[1]
+        lanes[0] + lanes[1]
     }
 
     fn from_literal(value: f64) -> Self {
@@ -182,10 +181,10 @@ impl LieScalar for f32 {
 
     const EIGEN_PACKET_SIZE: usize = 4;
 
-    fn eigen_predux(packet: [Self; 4]) -> Self {
+    fn eigen_predux(lanes: &[Self]) -> Self {
         // `Packet4f`: `movehl` pairs lane 0 with lane 2 and lane 1 with lane 3
         // before the two halves meet.
-        (packet[0] + packet[2]) + (packet[1] + packet[3])
+        (lanes[0] + lanes[2]) + (lanes[1] + lanes[3])
     }
 
     fn from_literal(value: f64) -> Self {

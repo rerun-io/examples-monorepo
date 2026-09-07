@@ -7,8 +7,8 @@
 //! stage S8's and is not here. This module takes those four sets as
 //! [`MarginalizeSchedule`] and does the rest: build the absolute ordering,
 //! linearize the window with the current prior, split the ordering into kept
-//! and marginalized indices, run [`crate::marg::MargHelper`], shrink the window
-//! and the landmark database, and re-anchor the new prior.
+//! and marginalized indices, run [`marginalize_helper_sqrt_to_sqrt`], shrink
+//! the window and the landmark database, and re-anchor the new prior.
 //!
 //! Two traps of the architecture dossier live here and are called out at the
 //! lines that implement them:
@@ -477,7 +477,11 @@ pub fn marginalize<S: LieScalar>(
             // local copy and assigns the field at the end of `marginalize`,
             // where `:1186`'s `logMargNullspace()` assigns the new one.
             let mut prior: MargLinData<S> = MargLinData {
-                is_sqrt: nullspace.is_sqrt,
+                // `:1042` and `:1051` both branch on `marg_data.is_sqrt`, not
+                // on the debug copy's own flag: the dense form the linearizer
+                // exports and the helper that reduces it are chosen by the
+                // *live* prior's representation.
+                is_sqrt: marg_data.is_sqrt,
                 order: marg_data.order.clone(),
                 h: nullspace.h.clone(),
                 b: nullspace.b.clone(),
@@ -608,11 +612,19 @@ pub fn marginalize<S: LieScalar>(
 
 /// `b -= H * delta` (`sqrt_keypoint_vio.cpp:1172`), written out so the
 /// summation order is fixed rather than nalgebra's.
+///
+/// **Contract: `b.nrows() == h.nrows()` and `delta.nrows() == h.ncols()`.**
+/// Both hold where this is called: `h` and `b` are the two halves of one
+/// [`ReducedSystem`], and `delta` is `compute_delta` over the ordering the
+/// width check above matched `h` against. Clamping the extents instead would
+/// turn a shape that does not close into a *partial* re-anchoring, which is a
+/// prior that is quietly wrong rather than one that is refused.
 fn subtract_h_delta<S: LieScalar>(b: &mut DVector<S>, h: &DMatrix<S>, delta: &DVector<S>) {
-    let cols: usize = h.ncols().min(delta.nrows());
-    for i in 0..h.nrows().min(b.nrows()) {
+    debug_assert_eq!(b.nrows(), h.nrows());
+    debug_assert_eq!(delta.nrows(), h.ncols());
+    for i in 0..h.nrows() {
         let mut acc: S = S::zero();
-        for j in 0..cols {
+        for j in 0..h.ncols() {
             acc += h[(i, j)] * delta[j];
         }
         b[i] -= acc;

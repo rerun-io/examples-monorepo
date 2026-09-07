@@ -52,47 +52,6 @@ use crate::ba_base::BaError;
 use crate::linearize::LinearizeError;
 use crate::types::{FrameId, StateError};
 
-/// The three routines of `MargHelper<Scalar>`
-/// (`include/basalt/vi_estimator/marg_helper.h:52-70`), as free functions.
-///
-/// C++ makes them static members of a class template with no state; the port
-/// keeps them free and groups them here so `MargHelper::…` still names
-/// something. The scalar is a parameter of each function rather than of the
-/// type, which is the only difference.
-pub struct MargHelper;
-
-impl MargHelper {
-    /// [`marginalize_helper_sqrt_to_sqrt`], `marg_helper.cpp:247-327`.
-    pub fn sqrt_to_sqrt<S: crate::lie::LieScalar>(
-        q2jp: nalgebra::DMatrix<S>,
-        q2r: nalgebra::DVector<S>,
-        idx_to_keep: &std::collections::BTreeSet<usize>,
-        idx_to_marg: &std::collections::BTreeSet<usize>,
-    ) -> Result<ReducedSystem<S>, MargError> {
-        marginalize_helper_sqrt_to_sqrt(q2jp, q2r, idx_to_keep, idx_to_marg)
-    }
-
-    /// [`marginalize_helper_sq_to_sqrt`], `marg_helper.cpp:120-244`.
-    pub fn sq_to_sqrt<S: crate::lie::LieScalar>(
-        abs_h: nalgebra::DMatrix<S>,
-        abs_b: nalgebra::DVector<S>,
-        idx_to_keep: &std::collections::BTreeSet<usize>,
-        idx_to_marg: &std::collections::BTreeSet<usize>,
-    ) -> Result<ReducedSystem<S>, MargError> {
-        marginalize_helper_sq_to_sqrt(abs_h, abs_b, idx_to_keep, idx_to_marg)
-    }
-
-    /// [`marginalize_helper_sq_to_sq`], `marg_helper.cpp:42-117`.
-    pub fn sq_to_sq<S: crate::lie::LieScalar>(
-        abs_h: nalgebra::DMatrix<S>,
-        abs_b: nalgebra::DVector<S>,
-        idx_to_keep: &std::collections::BTreeSet<usize>,
-        idx_to_marg: &std::collections::BTreeSet<usize>,
-    ) -> Result<ReducedSystem<S>, MargError> {
-        marginalize_helper_sq_to_sq(abs_h, abs_b, idx_to_keep, idx_to_marg)
-    }
-}
-
 /// One of the five things [`MarginalizeSchedule`] decides, named so a refusal
 /// can say which of them was wrong.
 ///

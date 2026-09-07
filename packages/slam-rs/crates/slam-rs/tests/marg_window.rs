@@ -34,7 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::{DMatrix, DVector, Vector2, Vector3, Vector4, Vector6};
 use slam_rs::ba_base::BundleAdjustmentBase;
-use slam_rs::calib::{Calibration, CameraModel, Kb4Params};
+use slam_rs::calib::Calibration;
 use slam_rs::imu::IntegratedImuMeasurement;
 use slam_rs::landmark::{Landmark, StereographicParam};
 use slam_rs::lie::{Se3, So3};
@@ -48,58 +48,14 @@ use slam_rs::types::{
     PoseVelBiasState, PoseVelBiasStateWithLin, TimeCamId,
 };
 
-const MSDMI: &str = include_str!("fixtures/msdmi_calib.json");
-
-/// `KannalaBrandtCamera4<Scalar>::getTestProjections()[0]`, the calibration
-/// `test_linearization.cpp:19` puts in both camera slots.
-const KB4_TEST_PROJECTION: [f64; 8] = [
-    379.045,
-    379.008,
-    505.512,
-    509.969,
-    0.00693023,
-    -0.0013828,
-    -0.000272596,
-    -0.000452646,
-];
+mod common;
+use common::{Rng, dense_schur, test_calibration};
 
 const KF0: FrameId = 0;
 const KF1: FrameId = 100;
 const STATE0: FrameId = 200;
 const STATE1: FrameId = 300;
 const STATE2: FrameId = 400;
-
-/// xorshift64*, standing in for Eigen's `Random()`, as the other ported tests
-/// do: a Rust test that flakes is worse than one that is merely differently
-/// arbitrary.
-struct Rng(u64);
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self(seed | 1)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut x: u64 = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    fn symmetric(&mut self) -> f64 {
-        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
-    }
-
-    fn vector3(&mut self) -> Vector3<f64> {
-        Vector3::new(self.symmetric(), self.symmetric(), self.symmetric())
-    }
-
-    fn vector6(&mut self) -> Vector6<f64> {
-        Vector6::from_iterator((0..6).map(|_| self.symmetric()))
-    }
-}
 
 /// A window ready to marginalize.
 #[derive(Clone)]
@@ -129,25 +85,7 @@ fn pose_at(index: usize, rng: &mut Rng) -> Se3<f64> {
 fn build_window(seed: u64, prior_covers_state0: bool) -> Window {
     let mut rng: Rng = Rng::new(seed);
 
-    let mut calib: Calibration<f64> = Calibration::from_json_str(MSDMI).unwrap();
-    calib.t_i_c = (0..2)
-        .map(|_| Se3::<f64>::exp_decoupled(&(rng.vector6() / 100.0)))
-        .collect();
-    let p: [f64; 8] = KB4_TEST_PROJECTION;
-    calib.intrinsics = vec![
-        CameraModel::Kb4(Kb4Params {
-            fx: p[0],
-            fy: p[1],
-            cx: p[2],
-            cy: p[3],
-            k1: p[4],
-            k2: p[5],
-            k3: p[6],
-            k4: p[7],
-        });
-        2
-    ];
-
+    let calib: Calibration<f64> = test_calibration(&mut rng);
     let mut estimator: BundleAdjustmentBase<f64> =
         BundleAdjustmentBase::new(calib, 2.0, 0.5).unwrap();
 
@@ -1020,24 +958,4 @@ fn linearized_system(window: &Window) -> (DMatrix<f64>, DVector<f64>) {
     lqr.linearize_problem(&window.estimator, &inputs).unwrap();
     lqr.perform_qr().unwrap();
     lqr.get_dense_q2jp_q2r(&window.estimator, &inputs).unwrap()
-}
-
-/// `H_kk − H_km H_mm⁻¹ H_mk`, written out independently of the code under test.
-fn dense_schur(
-    h: &DMatrix<f64>,
-    b: &DVector<f64>,
-    keep: &[usize],
-    marg: &[usize],
-) -> (DMatrix<f64>, DVector<f64>) {
-    let k: usize = keep.len();
-    let m: usize = marg.len();
-    let h_kk: DMatrix<f64> = DMatrix::from_fn(k, k, |i, j| h[(keep[i], keep[j])]);
-    let h_km: DMatrix<f64> = DMatrix::from_fn(k, m, |i, j| h[(keep[i], marg[j])]);
-    let h_mk: DMatrix<f64> = DMatrix::from_fn(m, k, |i, j| h[(marg[i], keep[j])]);
-    let h_mm: DMatrix<f64> = DMatrix::from_fn(m, m, |i, j| h[(marg[i], marg[j])]);
-    let b_k: DVector<f64> = DVector::from_fn(k, |i, _| b[keep[i]]);
-    let b_m: DVector<f64> = DVector::from_fn(m, |i, _| b[marg[i]]);
-    let h_mm_inv: DMatrix<f64> = h_mm.try_inverse().expect("the marginalized block inverts");
-    let cross: DMatrix<f64> = &h_km * &h_mm_inv;
-    (h_kk - &cross * h_mk, b_k - &cross * b_m)
 }

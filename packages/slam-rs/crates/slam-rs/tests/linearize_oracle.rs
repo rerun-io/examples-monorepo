@@ -64,6 +64,9 @@ use slam_rs::linearize::{
 };
 use slam_rs::types::{AbsOrderMap, LandmarkId, MargLinData, PoseStateWithLin, TimeCamId};
 
+mod common;
+use common::Compare;
+
 const ORACLE: &str = include_str!("fixtures/linearize/linearize_oracle.json");
 const MSDMI: &str = include_str!("fixtures/msdmi_calib.json");
 
@@ -196,86 +199,6 @@ struct LandmarkAfter {
     id: u64,
     direction: [f64; 2],
     inv_dist: f64,
-}
-
-/// Compares against the fixture and remembers the worst deviation it saw, so a
-/// failure names the single worst coefficient of the whole case rather than the
-/// first one over the line, and a pass can print how much margin is left.
-///
-/// **Scale.** Every coefficient of an array is compared against the *array's*
-/// largest magnitude, not against itself. That is not laziness: after a
-/// Householder reflection the sub-diagonal entries of the landmark columns are
-/// zero in exact arithmetic and pure cancellation in floating point, so in `f32`
-/// C++ leaves `4.3e-5` where the port leaves `6.5e-3` — both of them noise on a
-/// block whose live coefficients are in the hundreds. basalt's own tests compare
-/// `(H_a - H_b).norm()` for the same reason (`test_linearization.cpp:148-157`).
-struct Compare {
-    tolerance: f64,
-    worst: f64,
-    worst_what: String,
-}
-
-impl Compare {
-    fn new(tolerance: f64) -> Self {
-        Self {
-            tolerance,
-            worst: 0.0,
-            worst_what: String::from("(nothing compared)"),
-        }
-    }
-
-    /// One coefficient against a scale the caller chose.
-    fn close_scaled(&mut self, got: f64, want: f64, scale: f64, what: &str) {
-        let scale: f64 = scale.max(1.0);
-        let relative: f64 = (got - want).abs() / scale;
-        if relative > self.worst {
-            self.worst = relative;
-            self.worst_what = format!("{what}: got {got:.9e}, want {want:.9e}");
-        }
-        assert!(
-            relative <= self.tolerance,
-            "{what}: got {got:.17e}, want {want:.17e}, relative {relative:.3e} > {:.1e}",
-            self.tolerance
-        );
-    }
-
-    /// One scalar, against its own magnitude.
-    fn close(&mut self, got: f64, want: f64, what: &str) {
-        self.close_scaled(got, want, want.abs(), what);
-    }
-
-    fn close_slice<S: LieScalar>(&mut self, got: &[S], want: &[f64], what: &str) {
-        assert_eq!(got.len(), want.len(), "{what}: length");
-        let scale: f64 = want.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-        for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
-            self.close_scaled(g.to_f64(), *w, scale, &format!("{what}[{i}]"));
-        }
-    }
-
-    /// A row-major matrix from the fixture against a column-major `DMatrix`.
-    fn close_matrix<S: LieScalar>(
-        &mut self,
-        got: &DMatrix<S>,
-        want: &[f64],
-        rows: usize,
-        cols: usize,
-        what: &str,
-    ) {
-        assert_eq!(got.nrows(), rows, "{what}: rows");
-        assert_eq!(got.ncols(), cols, "{what}: cols");
-        assert_eq!(want.len(), rows * cols, "{what}: fixture size");
-        let scale: f64 = want.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-        for r in 0..rows {
-            for col in 0..cols {
-                self.close_scaled(
-                    got[(r, col)].to_f64(),
-                    want[r * cols + col],
-                    scale,
-                    &format!("{what}[{r},{col}]"),
-                );
-            }
-        }
-    }
 }
 
 fn se3_from<S: LieScalar>(q: &[f64; 4], t: &[f64; 3]) -> Se3<S> {

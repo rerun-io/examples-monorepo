@@ -210,8 +210,16 @@ impl<S: LieScalar> EigenLdlt<S> {
     /// trailing update is a blocked `gemv`; this is a plain column-major loop,
     /// so a system of eight or fewer kept rows is exact and a wider one carries
     /// the product-kernel residue of D50.
+    ///
+    /// **Contract: `v.nrows() == self.transpositions.len()`**, i.e. `v` is as
+    /// long as the factorized matrix is wide. `marg_helper.cpp:224` solves
+    /// against the `marg_b` that came out of the same Schur complement as the
+    /// `marg_H` this was factorized from, so the two agree by construction; a
+    /// shorter `v` would be a caller bug, and clamping it would return a
+    /// *partially* solved vector instead.
     pub(crate) fn solve_unit_lower_in_place(&self, v: &mut DVector<S>) {
-        let size: usize = self.transpositions.len().min(v.nrows());
+        debug_assert_eq!(v.nrows(), self.transpositions.len());
+        let size: usize = self.transpositions.len();
         let mut pi: usize = 0;
         while pi < size {
             let panel: usize = TRIANGULAR_PANEL_WIDTH.min(size - pi);

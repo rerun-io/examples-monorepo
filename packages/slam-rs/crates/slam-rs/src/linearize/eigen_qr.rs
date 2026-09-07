@@ -192,7 +192,7 @@ pub(crate) fn contiguous_squared_norm<S: LieScalar>(
     }
     // `:310`, then `:314` — the head loop of `:312` is empty because
     // `alignedStart` is zero.
-    let mut res: S = S::eigen_predux(packet0);
+    let mut res: S = S::eigen_predux(&packet0[..packet]);
     for i in aligned_size..len {
         res += sq(i);
     }
@@ -222,10 +222,10 @@ pub(crate) fn make_householder<S: LieScalar>(
     redux: ColumnRedux,
     essential: &mut [S],
 ) -> (S, S) {
-    let c0: S = storage[(start, col)];
-
     // `tail.squaredNorm()` (`:72`) over `segment(start + 1, len - 1)`. The
-    // `size() == 1` guard of `:72` is the empty loop / zero length here.
+    // `size() == 1` guard of `:72` is the empty fold / zero length here, and
+    // `saturating_sub` and the empty-sum rule agree that a tail of no
+    // coefficients is zero.
     let tail_sq_norm: S = match redux {
         ColumnRedux::Strided => {
             let mut acc: S = S::zero();
@@ -235,13 +235,30 @@ pub(crate) fn make_householder<S: LieScalar>(
             }
             acc
         }
-        // `saturating_sub` and the empty-sum rule agree on a tail of no
-        // coefficients: both give zero, as the fold above does.
         ColumnRedux::Contiguous => {
             contiguous_squared_norm(storage, col, start + 1, len.saturating_sub(1))
         }
     };
+    reflector_from_tail(storage[(start, col)], tail_sq_norm, len, essential, |i| {
+        storage[(start + 1 + i, col)]
+    })
+}
 
+/// The rest of `makeHouseholder` once `tail.squaredNorm()` is known
+/// (`Householder.h:74-85`): the `numeric_limits::min()` test, the sign of
+/// `beta`, the division that makes the essential part, and `tau`.
+///
+/// `tail` reads coefficient `i` of the tail, which is a column for
+/// [`make_householder`] and a row for [`make_householder_row`] — the only thing
+/// the two entry points do differently, apart from computing their own
+/// `tail_sq_norm`.
+fn reflector_from_tail<S: LieScalar>(
+    c0: S,
+    tail_sq_norm: S,
+    len: usize,
+    essential: &mut [S],
+    tail: impl Fn(usize) -> S,
+) -> (S, S) {
     // `std::numeric_limits<RealScalar>::min()` (`:74`), the smallest positive
     // normal — not `RealField::min_value()`, which is the most negative finite.
     let tol: S = S::min_positive();
@@ -260,7 +277,7 @@ pub(crate) fn make_householder<S: LieScalar>(
         }
         let denom: S = c0 - beta;
         for (i, e) in essential.iter_mut().enumerate().take(len - 1) {
-            *e = storage[(start + 1 + i, col)] / denom;
+            *e = tail(i) / denom;
         }
         let tau: S = (beta - c0) / beta;
         (tau, beta)
@@ -427,30 +444,18 @@ pub(crate) fn make_householder_row<S: LieScalar>(
     len: usize,
     essential: &mut [S],
 ) -> (S, S) {
-    let c0: S = storage[(row, col_start)];
     let mut tail_sq_norm: S = S::zero();
     for i in 1..len {
         let v: S = storage[(row, col_start + i)];
         tail_sq_norm += v * v;
     }
-    let tol: S = S::min_positive();
-    if tail_sq_norm <= tol {
-        for e in essential.iter_mut().take(len.saturating_sub(1)) {
-            *e = S::zero();
-        }
-        (S::zero(), c0)
-    } else {
-        let mut beta: S = (c0 * c0 + tail_sq_norm).sqrt();
-        if c0 >= S::zero() {
-            beta = -beta;
-        }
-        let denom: S = c0 - beta;
-        for (i, e) in essential.iter_mut().enumerate().take(len - 1) {
-            *e = storage[(row, col_start + 1 + i)] / denom;
-        }
-        let tau: S = (beta - c0) / beta;
-        (tau, beta)
-    }
+    reflector_from_tail(
+        storage[(row, col_start)],
+        tail_sq_norm,
+        len,
+        essential,
+        |i| storage[(row, col_start + 1 + i)],
+    )
 }
 
 /// `applyHouseholderOnTheRight` (`Householder.h:137-150`), real scalars, over

@@ -44,7 +44,7 @@
 use nalgebra::{DMatrix, DVector, Vector2, Vector3, Vector4, Vector6};
 use slam_rs::ba_base::BaError;
 use slam_rs::ba_base::{BundleAdjustmentBase, LinearizePointOut, linearize_point};
-use slam_rs::calib::{Calibration, CameraModel, Kb4Params};
+use slam_rs::calib::Calibration;
 use slam_rs::imu::{ImuLinData, ImuSample, IntegratedImuMeasurement};
 use slam_rs::landmark::{Landmark, StereographicParam};
 use slam_rs::lie::{Se3, So3};
@@ -56,52 +56,8 @@ use slam_rs::types::{
     AbsOrderMap, LandmarkId, MargLinData, POSE_SIZE, PoseStateWithLin, TimeCamId,
 };
 
-const MSDMI: &str = include_str!("fixtures/msdmi_calib.json");
-
-/// `KannalaBrandtCamera4<Scalar>::getTestProjections()[0]`
-/// (`basalt-headers/include/basalt/camera/kannala_brandt_camera4.hpp:487-495`),
-/// which is what `test_linearization.cpp:19` puts in both camera slots.
-const KB4_TEST_PROJECTION: [f64; 8] = [
-    379.045,
-    379.008,
-    505.512,
-    509.969,
-    0.00693023,
-    -0.0013828,
-    -0.000272596,
-    -0.000452646,
-];
-
-/// xorshift64*, standing in for Eigen's `Random()`.
-struct Rng(u64);
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self(seed | 1)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut x: u64 = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    /// Uniform on `[-1, 1]`, like `Eigen::Matrix::Random()`.
-    fn symmetric(&mut self) -> f64 {
-        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
-    }
-
-    fn vector3(&mut self) -> Vector3<f64> {
-        Vector3::new(self.symmetric(), self.symmetric(), self.symmetric())
-    }
-
-    fn vector6(&mut self) -> Vector6<f64> {
-        Vector6::from_iterator((0..6).map(|_| self.symmetric()))
-    }
-}
+mod common;
+use common::{Rng, test_calibration};
 
 /// The window `get_vo_estimator` builds (`test_linearization.cpp:9-76`), plus
 /// the ordering it fills in.
@@ -115,28 +71,8 @@ struct Problem {
 fn vo_problem(num_frames: usize, seed: u64) -> Problem {
     let mut rng: Rng = Rng::new(seed);
 
-    // Everything the linearizer reads is overwritten below; the file supplies
-    // only the fields it never touches.
-    let mut calib: Calibration<f64> = Calibration::from_json_str(MSDMI).unwrap();
-    // `:15-16`: two camera-to-IMU transforms, small perturbations of identity.
-    calib.t_i_c = (0..2)
-        .map(|_| Se3::<f64>::exp_decoupled(&(rng.vector6() / 100.0)))
-        .collect();
-    let p: [f64; 8] = KB4_TEST_PROJECTION;
-    // `:18-22`: both cameras get the same model.
-    calib.intrinsics = vec![
-        CameraModel::Kb4(Kb4Params {
-            fx: p[0],
-            fy: p[1],
-            cx: p[2],
-            cy: p[3],
-            k1: p[4],
-            k2: p[5],
-            k3: p[6],
-            k4: p[7],
-        });
-        2
-    ];
+    // `:15-22`: the two camera-to-IMU transforms and both intrinsics.
+    let calib: Calibration<f64> = test_calibration(&mut rng);
 
     // `:25-26`: the 3-D points, five metres in front.
     let points: Vec<Vector3<f64>> = (0..num_frames * 10)
