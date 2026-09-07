@@ -66,8 +66,6 @@ pub(crate) struct ColPivHouseholderQr<S: LieScalar> {
     nonzero_pivots: usize,
     /// `m_maxpivot` (`:518`, `:547`).
     max_pivot: S,
-    rows: usize,
-    cols: usize,
 }
 
 impl<S: LieScalar> ColPivHouseholderQr<S> {
@@ -102,12 +100,7 @@ impl<S: LieScalar> ColPivHouseholderQr<S> {
             }
         }
         let scaled: S = max_norm * S::default_epsilon();
-        let rows_scalar: S = S::from_literal(rows as f64);
-        let threshold_helper: S = if rows == 0 {
-            S::zero()
-        } else {
-            (scaled * scaled) / rows_scalar
-        };
+        let threshold_helper: S = (scaled * scaled) / S::from_literal(rows as f64);
         let norm_downdate_threshold: S = S::default_epsilon().sqrt();
 
         let mut nonzero_pivots: usize = size;
@@ -186,13 +179,9 @@ impl<S: LieScalar> ColPivHouseholderQr<S> {
                         // `m_qr.col(j).tail(rows - k - 1).norm()` — contiguous
                         // again. The tail is empty when `k + 1 == rows`, which a
                         // wider-than-tall matrix reaches on its last step, and
-                        // `DenseBase::sum()` returns `Scalar(0)` for an empty
-                        // expression rather than reducing (`Redux.h:489`).
-                        col_norms_direct[j] = if k + 1 < rows {
-                            contiguous_squared_norm(&qr, j, k + 1, rows - k - 1).sqrt()
-                        } else {
-                            S::zero()
-                        };
+                        // an empty reduction is zero.
+                        col_norms_direct[j] =
+                            contiguous_squared_norm(&qr, j, k + 1, rows - k - 1).sqrt();
                         col_norms_updated[j] = col_norms_direct[j];
                     } else {
                         // `:571`.
@@ -217,15 +206,13 @@ impl<S: LieScalar> ColPivHouseholderQr<S> {
             cols_permutation,
             nonzero_pivots,
             max_pivot,
-            rows,
-            cols,
         }
     }
 
     /// `threshold()` (`:375-381`): the default, `epsilon * diagonalSize`.
     /// basalt never calls `setThreshold`.
     fn threshold(&self) -> S {
-        S::default_epsilon() * S::from_literal(self.rows.min(self.cols) as f64)
+        S::default_epsilon() * S::from_literal(self.qr.nrows().min(self.qr.ncols()) as f64)
     }
 
     /// `rank()` (`:261-268`).
@@ -250,11 +237,12 @@ impl<S: LieScalar> ColPivHouseholderQr<S> {
     /// (`HouseholderSequence.h:359-368`, `m_reverse` set by `adjoint()`), each
     /// reflection acting on rows `k..rows`.
     fn apply_q_adjoint_on_the_left(&self, dst: &mut DMatrix<S>, length: usize) {
+        let rows: usize = self.qr.nrows();
         let cols: usize = dst.ncols();
         let mut work: Vec<S> = vec![S::zero(); cols];
-        let mut essential: Vec<S> = vec![S::zero(); self.rows.saturating_sub(1)];
+        let mut essential: Vec<S> = vec![S::zero(); rows.saturating_sub(1)];
         for k in 0..length {
-            let len: usize = self.rows - k;
+            let len: usize = rows - k;
             for (i, slot) in essential.iter_mut().enumerate().take(len.saturating_sub(1)) {
                 *slot = self.qr[(k + 1 + i, k)];
             }
@@ -288,8 +276,8 @@ impl<S: LieScalar> Cod<S> {
     pub fn new(matrix: &DMatrix<S>) -> Self {
         let mut cpqr: ColPivHouseholderQr<S> = ColPivHouseholderQr::new(matrix);
         let rank: usize = cpqr.rank();
-        let cols: usize = cpqr.cols;
-        let rows: usize = cpqr.rows;
+        let cols: usize = cpqr.qr.ncols();
+        let rows: usize = cpqr.qr.nrows();
         let mut z_coeffs: Vec<S> = vec![S::zero(); rows.min(cols)];
         let mut temp: Vec<S> = vec![S::zero(); cols];
 
@@ -353,7 +341,7 @@ impl<S: LieScalar> Cod<S> {
 
     /// `applyZAdjointOnTheLeftInPlace(rhs)` (`:524-539`).
     fn apply_z_adjoint_on_the_left_in_place(&self, rhs: &mut DMatrix<S>) {
-        let cols: usize = self.cpqr.cols;
+        let cols: usize = self.cpqr.qr.ncols();
         let rank: usize = self.rank();
         if rank == 0 {
             return;
@@ -399,9 +387,10 @@ impl<S: LieScalar> Cod<S> {
     /// unchecked [`BlockSpan`] built from `rows` rather than from the argument
     /// (decision D32).
     pub fn solve(&self, rhs: &DMatrix<S>) -> Result<DMatrix<S>, MargError> {
-        if rhs.nrows() != self.cpqr.rows {
+        let rows: usize = self.cpqr.qr.nrows();
+        if rhs.nrows() != rows {
             return Err(MargError::RhsLengthMismatch {
-                rows: self.cpqr.rows,
+                rows,
                 rhs: rhs.nrows(),
             });
         }
@@ -414,7 +403,7 @@ impl<S: LieScalar> Cod<S> {
     /// checked boundary; [`Self::pseudo_inverse`] passes an identity of exactly
     /// that many rows, one line away from where it is built.
     fn solve_with_validated_rhs(&self, rhs: &DMatrix<S>) -> DMatrix<S> {
-        let cols: usize = self.cpqr.cols;
+        let cols: usize = self.cpqr.qr.ncols();
         let nrhs: usize = rhs.ncols();
         let mut dst: DMatrix<S> = DMatrix::zeros(cols, nrhs);
         let rank: usize = self.rank();
@@ -458,20 +447,15 @@ impl<S: LieScalar> Cod<S> {
     /// Infallible, because the identity it solves against is `rows` tall by
     /// construction — the one dimension [`Self::solve`] would check.
     pub fn pseudo_inverse(&self) -> DMatrix<S> {
-        self.solve_with_validated_rhs(&DMatrix::identity(self.cpqr.rows, self.cpqr.rows))
+        let rows: usize = self.cpqr.qr.nrows();
+        self.solve_with_validated_rhs(&DMatrix::identity(rows, rows))
     }
 
     /// `solve` for a single right-hand side, which is what
     /// `test_qr.cpp`'s `RankDefLeastSquares` asks for.
     pub fn solve_vec(&self, rhs: &DVector<S>) -> Result<DVector<S>, MargError> {
-        if rhs.nrows() != self.cpqr.rows {
-            return Err(MargError::RhsLengthMismatch {
-                rows: self.cpqr.rows,
-                rhs: rhs.nrows(),
-            });
-        }
         let as_matrix: DMatrix<S> = DMatrix::from_iterator(rhs.nrows(), 1, rhs.iter().copied());
-        let solved: DMatrix<S> = self.solve_with_validated_rhs(&as_matrix);
+        let solved: DMatrix<S> = self.solve(&as_matrix)?;
         Ok(DVector::from_iterator(
             solved.nrows(),
             solved.column(0).iter().copied(),
@@ -578,6 +562,14 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A matrix with no rows has rank zero, where the column norms used to
+    /// reduce an empty column by reading its first coefficient.
+    #[test]
+    fn a_matrix_with_no_rows_has_rank_zero() {
+        assert_eq!(Cod::new(&DMatrix::<f64>::zeros(0, 3)).rank(), 0);
+        assert_eq!(Cod::new(&DMatrix::<f32>::zeros(0, 3)).rank(), 0);
     }
 
     /// The zero matrix has rank zero and `solve` returns zero, the `rank == 0`

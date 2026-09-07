@@ -46,7 +46,10 @@
 //! `|beta| > sqrt(epsilon)` (`marg_helper.cpp:284`) and
 //! `ColPivHouseholderQR::rank()`. [`ColumnRedux`] is therefore a parameter of
 //! [`make_householder`], named at every call site, and
-//! [`contiguous_squared_norm`] is the vectorised order.
+//! [`contiguous_squared_norm`] is the vectorised order. The measured agreement
+//! against the fork's own Eigen, and against every wrong order that was tried,
+//! is in the package README under "Marginalization, and the two places a rank
+//! decision is load-bearing".
 
 use nalgebra::{DMatrix, DVector};
 
@@ -62,25 +65,18 @@ use crate::lie::LieScalar;
 /// keeps those signatures readable.
 ///
 /// **Contract: the span must lie inside the matrix**, and the two functions
-/// index without re-checking, because they run once per column of a QR sweep.
-/// The checked *public* boundaries are [`crate::linearize::reflect_column`],
-/// whose `checked_add` and `ReflectionOutOfRange` guard a caller-supplied
-/// range, and [`crate::marg::Cod::solve`], whose right-hand side decides the
-/// height the spans below are exact against (decision D32).
+/// index without re-checking, because they run once per column of a QR sweep;
+/// a `debug_assert!` in each states the contract without paying for it in
+/// release. The checked *public* boundary for a caller-supplied range is
+/// [`crate::linearize::reflect_column`], whose `checked_add` and
+/// `ReflectionOutOfRange` guard it (decision D32).
 ///
-/// Every construction site, and the dimension each span is exact against:
-///
-/// | site | bound |
-/// |---|---|
-/// | [`apply_householder_on_the_left`] (`eigen_qr.rs:287`) | the full width: `0 + storage.ncols()`, and `start + len` from the caller — `reflect_column`'s checked range or the landmark block's own row count |
-/// | `marg/helper.rs:192`, the flat QR | `row_start + rows == q2jp.nrows()` (`base + (rows - base)`) and `col_start + cols == q2jp.ncols()` (`(k + 1) + (cols - k - 1)`), over index sets `check_indices` validated against the column count |
-/// | `marg/eigen_cod.rs:163`, `ColPivHouseholderQr::new` | `k + (rows - k)` and `(k + 1) + (cols - k - 1)` on the matrix it just cloned |
-/// | `marg/eigen_cod.rs:263`, `apply_q_adjoint_on_the_left` | `k + (self.rows - k) == self.rows`, which is `dst.nrows()` because [`crate::marg::Cod::solve`] refuses a right-hand side of any other height — the one span whose bound is *not* local, and the one the S7 review found unguarded |
-/// | `marg/eigen_cod.rs:323`, the `Z` reflectors | `0 + k` with `k < rank <= rows`, and `(rank - 1) + (cols - rank + 1) == cols` |
-/// | `marg/eigen_cod.rs:374`, `apply_z_adjoint_on_the_left_in_place` | `(rank - 1) + (cols - rank + 1) == cols == dst.nrows()`, and `0 + nrhs == dst.ncols()` |
-///
-/// The tests below build three more (`:707`, `:743`, `:773`), each against a
-/// matrix they allocate two lines above.
+/// Every other site computes a span that is exact against a dimension one line
+/// away from it, with one exception worth naming:
+/// `ColPivHouseholderQr::apply_q_adjoint_on_the_left` spans the *factorized
+/// matrix's* row count over a right-hand side the caller supplied. That is
+/// exact only because [`crate::marg::Cod::solve`] refuses a right-hand side of
+/// any other height — and it is the one the S7 review found unguarded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BlockSpan {
     /// First row of the block.
@@ -127,17 +123,21 @@ pub(crate) enum ColumnRedux {
 /// the squared norm reduces; `CwiseUnaryOp.h:25` keeps only `RowMajorBit` in its
 /// flags, so `DenseCoeffsBase.h:533`'s `ReturnZero` is true and the head split
 /// never happens. The fork's `tools/marg_norm_probe.cpp` prints
-/// `first_default_aligned(unaryExpr) = 0` from Eigen itself and reproduces
-/// Eigen bit for bit on **7,486 of 7,486** shapes per precision (rows 1..100,
-/// column counts 1, 2, 3, 5, 8, every column index, segment starts 0..3); the
-/// same emulation fed the *pointer*-derived offset instead reproduces 5,869
-/// (`f64`) and 4,832 (`f32`), and the sequential left fold 2,627 and 2,897.
+/// `first_default_aligned(unaryExpr) = 0` from Eigen itself; the shape sweep it
+/// runs, and what each wrong order scores on it, are in the package README.
 pub(crate) fn contiguous_squared_norm<S: LieScalar>(
     storage: &DMatrix<S>,
     col: usize,
     start: usize,
     len: usize,
 ) -> S {
+    if len == 0 {
+        // `DenseBase::sum()` returns `Scalar(0)` for an empty expression
+        // without reducing at all (`Redux.h:489`), which is what makes an empty
+        // tail and an empty column well defined rather than a read of
+        // `coeff(0)`.
+        return S::zero();
+    }
     let sq = |i: usize| -> S {
         let v: S = storage[(start + i, col)];
         v * v
@@ -235,12 +235,11 @@ pub(crate) fn make_householder<S: LieScalar>(
             }
             acc
         }
-        ColumnRedux::Contiguous if len > 1 => {
-            contiguous_squared_norm(storage, col, start + 1, len - 1)
+        // `saturating_sub` and the empty-sum rule agree on a tail of no
+        // coefficients: both give zero, as the fold above does.
+        ColumnRedux::Contiguous => {
+            contiguous_squared_norm(storage, col, start + 1, len.saturating_sub(1))
         }
-        // An empty tail: `DenseBase::sum()` returns `Scalar(0)` without
-        // reducing (`Redux.h:489`), which is also what the fold above gives.
-        ColumnRedux::Contiguous => S::zero(),
     };
 
     // `std::numeric_limits<RealScalar>::min()` (`:74`), the smallest positive
@@ -329,6 +328,12 @@ pub(crate) fn apply_householder_on_the_left_block<S: LieScalar>(
         col_start,
         cols,
     } = span;
+    debug_assert!(
+        row_start + rows <= storage.nrows() && col_start + cols <= storage.ncols(),
+        "span {span:?} outside a {}x{} matrix",
+        storage.nrows(),
+        storage.ncols()
+    );
     if rows == 1 {
         // `:107-108`.
         let factor: S = S::one() - tau;
@@ -469,6 +474,12 @@ pub(crate) fn apply_householder_on_the_right_block<S: LieScalar>(
         col_start,
         cols,
     } = span;
+    debug_assert!(
+        row_start + rows <= storage.nrows() && col_start + cols <= storage.ncols(),
+        "span {span:?} outside a {}x{} matrix",
+        storage.nrows(),
+        storage.ncols()
+    );
     if cols == 1 {
         // `:139-140`.
         let factor: S = S::one() - tau;

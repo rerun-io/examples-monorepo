@@ -43,6 +43,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeSet;
+use std::sync::LazyLock;
 
 use nalgebra::{DMatrix, DVector};
 use serde::Deserialize;
@@ -101,10 +102,11 @@ struct Reduced {
     solution: Vec<f64>,
 }
 
-fn load() -> Oracle {
+/// The fixture, parsed once for the whole binary.
+static ORACLE: LazyLock<Oracle> = LazyLock::new(|| {
     let text: &str = include_str!("fixtures/marg/marg_oracle.json");
     serde_json::from_str(text).expect("marg_oracle.json parses")
-}
+});
 
 // ─── comparison ────────────────────────────────────────────────────────────
 
@@ -276,13 +278,14 @@ fn check_case<S: LieScalar>(case: &Case, tols: Tolerances, worst: &mut Worst) {
             label("sqrt_to_sqrt")
         );
         // The reduced system's own rank, through the ported decomposition.
+        let reduced: Cod<S> = Cod::new(&got.h);
         assert_eq!(
-            Cod::new(&got.h).rank(),
+            reduced.rank(),
             want.rank,
             "{}: rank of the reduced system",
             label("sqrt_to_sqrt")
         );
-        let solution: DVector<S> = Cod::new(&got.h).solve_vec(&got.b).unwrap();
+        let solution: DVector<S> = reduced.solve_vec(&got.b).unwrap();
         compare_vec(
             &solution,
             &want.solution,
@@ -414,55 +417,41 @@ fn check_case<S: LieScalar>(case: &Case, tols: Tolerances, worst: &mut Worst) {
     );
 }
 
-#[test]
-fn the_helper_matches_the_cpp_in_double() {
-    let oracle: Oracle = load();
+/// Every case of one precision, and the worst relative difference over all of
+/// them.
+fn run_all<S: LieScalar>(scalar: &str, tols: Tolerances) {
     let mut worst: Worst = Worst::new();
     let mut seen: usize = 0;
-    for case in &oracle.cases {
-        if case.scalar != "f64" {
-            continue;
-        }
-        check_case::<f64>(
-            case,
-            Tolerances {
-                general: 1e-14,
-                sq_to_sqrt_b: 1e-8,
-            },
-            &mut worst,
-        );
+    for case in ORACLE.cases.iter().filter(|c| c.scalar == scalar) {
+        check_case::<S>(case, tols, &mut worst);
         seen += 1;
     }
-    assert_eq!(seen, 9, "every double case ran");
+    assert_eq!(seen, 9, "every {scalar} case ran");
     println!(
-        "worst f64 relative difference {:e} at {}",
+        "worst {scalar} relative difference {:e} at {}",
         worst.value, worst.at
     );
 }
 
 #[test]
+fn the_helper_matches_the_cpp_in_double() {
+    run_all::<f64>(
+        "f64",
+        Tolerances {
+            general: 1e-14,
+            sq_to_sqrt_b: 1e-8,
+        },
+    );
+}
+
+#[test]
 fn the_helper_matches_the_cpp_in_float() {
-    let oracle: Oracle = load();
-    let mut worst: Worst = Worst::new();
-    let mut seen: usize = 0;
-    for case in &oracle.cases {
-        if case.scalar != "f32" {
-            continue;
-        }
-        check_case::<f32>(
-            case,
-            Tolerances {
-                general: 5e-6,
-                sq_to_sqrt_b: 5e-6,
-            },
-            &mut worst,
-        );
-        seen += 1;
-    }
-    assert_eq!(seen, 9, "every float case ran");
-    println!(
-        "worst f32 relative difference {:e} at {}",
-        worst.value, worst.at
+    run_all::<f32>(
+        "f32",
+        Tolerances {
+            general: 5e-6,
+            sq_to_sqrt_b: 5e-6,
+        },
     );
 }
 
@@ -483,7 +472,7 @@ fn the_helper_matches_the_cpp_in_float() {
 /// estimator diverge from a single ulp.
 #[test]
 fn the_rank_threshold_decision_matches_the_cpp() {
-    let oracle: Oracle = load();
+    let oracle: &Oracle = &ORACLE;
     let mut checked: usize = 0;
     for scalar in ["f64", "f32"] {
         let case_named = |name: &str| -> &Case {
@@ -574,7 +563,7 @@ fn the_rank_threshold_decision_matches_the_cpp() {
 /// before the S7 review.
 #[test]
 fn rank_def_least_squares() {
-    let oracle: Oracle = load();
+    let oracle: &Oracle = &ORACLE;
     let case: &Case = oracle
         .cases
         .iter()

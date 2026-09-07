@@ -310,14 +310,13 @@ fn split_indices(
 /// constantly true and the branch at `:935-939` is decided by
 /// `marg_data.is_sqrt` alone: a square-root prior takes `get_dense_Q2Jp_Q2r`,
 /// a squared one takes `get_dense_H_b`.
-#[allow(clippy::type_complexity)]
 fn linearize_for_marginalization<S: LieScalar>(
     estimator: &BundleAdjustmentBase<S>,
     aom: &AbsOrderMap,
     prior: &MargLinData<S>,
     imu_input: Option<&ImuInput<'_, S>>,
     inputs: &MarginalizeInputs<'_, S>,
-) -> Result<(DMatrix<S>, DVector<S>, S, bool), MargError> {
+) -> Result<LinearizedWindow<S>, MargError> {
     let lin_inputs: LinearizationInputs<'_, S> = LinearizationInputs {
         marg: Some(prior),
         imu: imu_input,
@@ -326,6 +325,9 @@ fn linearize_for_marginalization<S: LieScalar>(
         lost_landmarks: inputs.lost_landmarks,
         fixed_frames: inputs.fixed_frames,
     };
+    // The defaults are safe: `LinearizationAbsQR::new` overwrites
+    // `huber_parameter` and `obs_std_dev` from the estimator
+    // (`linearization_abs_qr.cpp:69-73`, where C++ asserts they agree).
     let mut lqr: LinearizationAbsQR<S> =
         LinearizationAbsQR::new(estimator, aom, LinearizationOptions::default(), &lin_inputs)?;
     // `:928`.
@@ -338,7 +340,24 @@ fn linearize_for_marginalization<S: LieScalar>(
     } else {
         lqr.get_dense_h_b(estimator, &lin_inputs)?
     };
-    Ok((h, b, error, numerically_valid))
+    Ok(LinearizedWindow {
+        h,
+        b,
+        error,
+        numerically_valid,
+    })
+}
+
+/// What one pass of `:905-942` produced.
+struct LinearizedWindow<S: LieScalar> {
+    /// `Q2Jp_or_H`.
+    h: DMatrix<S>,
+    /// `Q2r_or_b`.
+    b: DVector<S>,
+    /// What `linearizeProblem` reported.
+    error: S,
+    /// Whether every landmark block held finite Jacobians.
+    numerically_valid: bool,
 }
 
 /// Run the helper the prior's representation calls for
@@ -384,7 +403,7 @@ fn run_helper<S: LieScalar>(
 pub fn marginalize<S: LieScalar>(
     estimator: &mut BundleAdjustmentBase<S>,
     marg_data: &mut MargLinData<S>,
-    nullspace_marg_data: Option<&mut MargLinData<S>>,
+    mut nullspace_marg_data: Option<&mut MargLinData<S>>,
     imu_meas: &mut BTreeMap<i64, IntegratedImuMeasurement<S>>,
     inputs: &MarginalizeInputs<'_, S>,
 ) -> Result<MarginalizeOutput<S>, MargError> {
@@ -429,7 +448,7 @@ pub fn marginalize<S: LieScalar>(
     });
 
     // `:905-942`.
-    let (h, b, error, numerically_valid) =
+    let live: LinearizedWindow<S> =
         linearize_for_marginalization(estimator, &aom, marg_data, imu_input.as_ref(), inputs)?;
 
     // `:980-1003`.
@@ -449,14 +468,8 @@ pub fn marginalize<S: LieScalar>(
     // `:1012-1064`: the debug copy. A second full linearization against the
     // *previous* nullspace prior, so the two can be compared without the
     // fixed-linearization bookkeeping the live prior carries.
-    let nullspace_reduced: Option<ReducedSystem<S>> =
-        if inputs.options.keep_nullspace_marg_data && nullspace_marg_data.is_some() {
-            let Some(nullspace) = nullspace_marg_data.as_ref() else {
-                // Unreachable: guarded by `is_some` above.
-                return Err(MargError::FrameNotInWindow {
-                    frame_id: last_state_to_marg,
-                });
-            };
+    let nullspace_reduced: Option<ReducedSystem<S>> = match nullspace_marg_data.as_deref_mut() {
+        Some(nullspace) if inputs.options.keep_nullspace_marg_data => {
             // `:1021`: `nullspace_marg_data.order = marg_data.order`, the
             // order *before* `:1137` replaces it, so the second linearization
             // runs against the same variables the live one does. C++ writes it
@@ -475,30 +488,41 @@ pub fn marginalize<S: LieScalar>(
                 prior.h = DMatrix::zeros(0, prior.order.total_size());
                 prior.b = DVector::zeros(0);
             }
-            let (ns_h, ns_b, _, _) =
+            let debug: LinearizedWindow<S> =
                 linearize_for_marginalization(estimator, &aom, &prior, imu_input.as_ref(), inputs)?;
             Some(run_helper(
                 marg_data.is_sqrt,
-                ns_h,
-                ns_b,
+                debug.h,
+                debug.b,
                 &idx_to_keep,
                 &idx_to_marg,
             )?)
-        } else {
-            None
-        };
+        }
+        _ => None,
+    };
 
     // `:1069-1083`.
-    let reduced: ReducedSystem<S> =
-        run_helper(marg_data.is_sqrt, h, b, &idx_to_keep, &idx_to_marg)?;
+    let reduced: ReducedSystem<S> = run_helper(
+        marg_data.is_sqrt,
+        live.h,
+        live.b,
+        &idx_to_keep,
+        &idx_to_marg,
+    )?;
 
     // The linearization is done with the window; everything from here mutates.
     drop(imu_input);
 
-    // `:1085-1088`, trap 7.
-    if let Some(state) = estimator.frame_states.get_mut(&last_state_to_marg) {
-        state.set_linearized()?;
-    }
+    // `:1085-1088`, trap 7. `validate_schedule` and the `:1086` check above
+    // both prove the lookup, so the `else` is unreachable; it is an error
+    // rather than a skip because silently not freezing the state is trap 7
+    // happening.
+    let Some(state) = estimator.frame_states.get_mut(&last_state_to_marg) else {
+        return Err(MargError::FrameNotInWindow {
+            frame_id: last_state_to_marg,
+        });
+    };
+    state.set_linearized()?;
 
     // `:1090-1096`.
     for id in &schedule.states_to_marg_all {
@@ -510,6 +534,9 @@ pub fn marginalize<S: LieScalar>(
     // carrying the first six entries of its delta and its `linearized` flag
     // (`imu_types.h:206-215`).
     for id in &schedule.states_to_marg_vel_bias {
+        // Proven by `validate_schedule`, like the lookup above: every frame in
+        // this set is a 15-row block of the ordering, and the ordering was
+        // built from `frame_states`.
         let Some(state) = estimator.frame_states.get(id) else {
             return Err(MargError::FrameNotInWindow { frame_id: *id });
         };
@@ -574,8 +601,8 @@ pub fn marginalize<S: LieScalar>(
         aom,
         idx_to_keep,
         idx_to_marg,
-        error,
-        numerically_valid,
+        error: live.error,
+        numerically_valid: live.numerically_valid,
     })
 }
 
@@ -654,9 +681,9 @@ pub fn check_marg_nullspace<S: LieScalar>(
         });
     }
     if inc_random.nrows() != marg_size {
-        return Err(MargError::RhsLengthMismatch {
-            rows: marg_size,
-            rhs: inc_random.nrows(),
+        return Err(MargError::ProbeLengthMismatch {
+            expected: marg_size,
+            actual: inc_random.nrows(),
         });
     }
     // The two shapes `:165-176` and `:180-195` then rely on and C++ does not
@@ -700,14 +727,7 @@ pub fn check_marg_nullspace<S: LieScalar>(
     // `:98`.
     let eps: f64 = 0.01;
 
-    let mut inc: [DVector<f64>; 6] = [
-        DVector::zeros(marg_size),
-        DVector::zeros(marg_size),
-        DVector::zeros(marg_size),
-        DVector::zeros(marg_size),
-        DVector::zeros(marg_size),
-        DVector::zeros(marg_size),
-    ];
+    let mut inc: [DVector<f64>; 6] = std::array::from_fn(|_| DVector::zeros(marg_size));
 
     // `:101-144`.
     for (frame_id, offset, size) in mld.order.iter() {
@@ -829,7 +849,7 @@ pub fn check_eigenvalues<S: LieScalar>(mld: &MargLinData<S>) -> Result<DVector<f
         }
         h_d
     };
-    let mut values: Vec<f64> = h.symmetric_eigenvalues().iter().copied().collect();
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    Ok(DVector::from_vec(values))
+    let mut values: DVector<f64> = h.symmetric_eigenvalues();
+    values.as_mut_slice().sort_by(f64::total_cmp);
+    Ok(values)
 }

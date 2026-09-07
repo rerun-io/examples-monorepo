@@ -116,10 +116,9 @@ pub trait LieScalar: RealField + Copy {
     ///
     /// The argument is four lanes wide — the widest packet either scalar has,
     /// so one stack array serves both — and an implementation reads only its
-    /// own [`Self::EIGEN_PACKET_SIZE`] of them. Probed over 7,486 shapes per
-    /// precision: an otherwise identical reduction with a left fold over the
-    /// lanes reproduces Eigen on 5,572 of them in `f32` (in `f64` a packet has
-    /// two lanes, so the two orders coincide).
+    /// own [`Self::EIGEN_PACKET_SIZE`] of them. The pairing is not free choice:
+    /// the package README records how a left fold over the lanes scores against
+    /// the fork's own Eigen on the shape sweep.
     fn eigen_predux(packet: [Self; 4]) -> Self;
 
     /// Exact-as-possible conversion of a literal, standing in for C++'s `Scalar(x)`.

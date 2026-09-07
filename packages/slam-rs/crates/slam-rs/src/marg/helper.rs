@@ -52,17 +52,6 @@ pub struct ReducedSystem<S: LieScalar> {
     pub b: DVector<S>,
 }
 
-/// The index permutation the two square routines use: **keep first**, then
-/// marg, both in ascending index order because C++ walks a `std::set`
-/// (`marg_helper.cpp:52-66`).
-fn keep_first_indices(idx_to_keep: &BTreeSet<usize>, idx_to_marg: &BTreeSet<usize>) -> Vec<usize> {
-    idx_to_keep
-        .iter()
-        .chain(idx_to_marg.iter())
-        .copied()
-        .collect()
-}
-
 /// Validate the index sets against a system of `total` columns.
 ///
 /// C++ has one assertion, `keep_size + marg_size == abs_H.cols()` (`:47`), and
@@ -153,9 +142,6 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
     // slot past the end for the right-hand side.
     let mut temp: Vec<S> = vec![S::zero(); cols + 1];
     let mut essential: Vec<S> = vec![S::zero(); rows.saturating_sub(1)];
-    // `k == marg_size - 1` on a signed index: with nothing to marginalize C++
-    // compares against `-1` and never fires (`:316`).
-    let marg_last: i64 = marg_size as i64 - 1;
 
     for k in 0..cols {
         if total_rank >= rows {
@@ -219,8 +205,9 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
             q2jp[(i, k)] = S::zero();
         }
 
-        // `:316`.
-        if k as i64 == marg_last {
+        // `:316`: `k == marg_size - 1` on a signed index, so with nothing to
+        // marginalize C++ compares against `-1` and never fires.
+        if k + 1 == marg_size {
             marg_rank = total_rank;
         }
     }
@@ -263,7 +250,7 @@ pub fn marginalize_helper_sq_to_sq<S: LieScalar>(
     idx_to_keep: &BTreeSet<usize>,
     idx_to_marg: &BTreeSet<usize>,
 ) -> Result<ReducedSystem<S>, MargError> {
-    let (h, b, _, _) = schur_complement(abs_h, abs_b, idx_to_keep, idx_to_marg)?;
+    let (h, b) = schur_complement(abs_h, abs_b, idx_to_keep, idx_to_marg)?;
     Ok(ReducedSystem { h, b })
 }
 
@@ -287,7 +274,8 @@ pub fn marginalize_helper_sq_to_sqrt<S: LieScalar>(
     idx_to_keep: &BTreeSet<usize>,
     idx_to_marg: &BTreeSet<usize>,
 ) -> Result<ReducedSystem<S>, MargError> {
-    let (marg_h, marg_b, keep_size, _) = schur_complement(abs_h, abs_b, idx_to_keep, idx_to_marg)?;
+    let (marg_h, marg_b) = schur_complement(abs_h, abs_b, idx_to_keep, idx_to_marg)?;
+    let keep_size: usize = marg_h.nrows();
 
     // `:202`.
     let ldlt: EigenLdlt<S> = EigenLdlt::new(marg_h);
@@ -329,13 +317,13 @@ pub fn marginalize_helper_sq_to_sqrt<S: LieScalar>(
 /// The shared body of `:44-113` and `:129-200`, which are the same statements
 /// twice over in the C++.
 ///
-/// Returns `(marg_H, marg_b, keep_size, marg_size)`.
+/// Returns `(marg_H, marg_b)`, both over the kept variables.
 fn schur_complement<S: LieScalar>(
     abs_h: DMatrix<S>,
     abs_b: DVector<S>,
     idx_to_keep: &BTreeSet<usize>,
     idx_to_marg: &BTreeSet<usize>,
-) -> Result<(DMatrix<S>, DVector<S>, usize, usize), MargError> {
+) -> Result<(DMatrix<S>, DVector<S>), MargError> {
     let total: usize = abs_h.ncols();
     let (keep_size, marg_size) = check_indices(idx_to_keep, idx_to_marg, total)?;
     if abs_h.nrows() != total {
@@ -354,7 +342,13 @@ fn schur_complement<S: LieScalar>(
     // `:68-74`: `pt = p.transpose()`, `abs_b.applyOnTheLeft(pt)`,
     // `abs_H.applyOnTheLeft(pt)`, `abs_H.applyOnTheRight(p)`. Both work out to
     // `new[i] = old[indices[i]]` on each axis.
-    let indices: Vec<usize> = keep_first_indices(idx_to_keep, idx_to_marg);
+    // **keep first**, then marg, both in ascending index order because C++
+    // walks a `std::set` (`:52-66`).
+    let indices: Vec<usize> = idx_to_keep
+        .iter()
+        .chain(idx_to_marg.iter())
+        .copied()
+        .collect();
     let h: DMatrix<S> = DMatrix::from_fn(total, total, |i, j| abs_h[(indices[i], indices[j])]);
     let b: DVector<S> = DVector::from_fn(total, |i, _| abs_b[indices[i]]);
 
@@ -394,7 +388,7 @@ fn schur_complement<S: LieScalar>(
         marg_b[i] = b[i] - acc;
     }
 
-    Ok((marg_h, marg_b, keep_size, marg_size))
+    Ok((marg_h, marg_b))
 }
 
 #[cfg(test)]

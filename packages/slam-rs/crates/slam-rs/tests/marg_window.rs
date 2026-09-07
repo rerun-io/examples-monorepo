@@ -102,20 +102,11 @@ impl Rng {
 }
 
 /// A window ready to marginalize.
+#[derive(Clone)]
 struct Window {
     estimator: BundleAdjustmentBase<f64>,
     marg: MargLinData<f64>,
     imu_meas: BTreeMap<i64, IntegratedImuMeasurement<f64>>,
-}
-
-impl Clone for Window {
-    fn clone(&self) -> Self {
-        Self {
-            estimator: self.estimator.clone(),
-            marg: self.marg.clone(),
-            imu_meas: self.imu_meas.clone(),
-        }
-    }
 }
 
 /// The pose of a frame in the synthetic trajectory: a metre of forward motion
@@ -302,10 +293,15 @@ fn schedule() -> MarginalizeSchedule {
     }
 }
 
-fn run(window: &mut Window, options: MarginalizeOptions) -> MarginalizeOutput<f64> {
-    let sched: MarginalizeSchedule = schedule();
+/// One marginalization of `window`, with everything the tests ever vary.
+fn try_run(
+    window: &mut Window,
+    sched: &MarginalizeSchedule,
+    nullspace: Option<&mut MargLinData<f64>>,
+    options: MarginalizeOptions,
+) -> Result<MarginalizeOutput<f64>, MargError> {
     let inputs: MarginalizeInputs<'_, f64> = MarginalizeInputs {
-        schedule: &sched,
+        schedule: sched,
         imu_lin_data: None,
         lost_landmarks: None,
         fixed_frames: None,
@@ -314,11 +310,14 @@ fn run(window: &mut Window, options: MarginalizeOptions) -> MarginalizeOutput<f6
     marginalize(
         &mut window.estimator,
         &mut window.marg,
-        None,
+        nullspace,
         &mut window.imu_meas,
         &inputs,
     )
-    .expect("the synthetic window marginalizes")
+}
+
+fn run(window: &mut Window, options: MarginalizeOptions) -> MarginalizeOutput<f64> {
+    try_run(window, &schedule(), None, options).expect("the synthetic window marginalizes")
 }
 
 // ─── the tests ─────────────────────────────────────────────────────────────
@@ -703,111 +702,44 @@ fn the_prior_has_the_gauge_directions_in_its_nullspace() {
 }
 
 /// The ordering assertions of `:736` and `:758-759` are typed errors here.
+///
+/// The schedule's own relationships to the window are
+/// `an_invalid_schedule_is_refused_before_anything_changes`; this is the other
+/// direction, the *prior* disagreeing with the window it is supposed to cover.
 #[test]
 fn a_window_that_disagrees_with_the_prior_is_refused() {
-    let sched: MarginalizeSchedule = schedule();
-    let options: MarginalizeOptions = MarginalizeOptions::default();
-
-    // A prior that does not mention one of the window's keyframes.
-    {
-        let mut window: Window = build_window(0xB011, true);
-        let mut order: AbsOrderMap = AbsOrderMap::new();
-        order.push(KF0, POSE_SIZE).unwrap();
-        order.push(STATE0, POSE_VEL_BIAS_SIZE).unwrap();
-        window.marg.order = order;
-        window.marg.h = DMatrix::zeros(0, POSE_SIZE + POSE_VEL_BIAS_SIZE);
-        window.marg.b = DVector::zeros(0);
-        let inputs: MarginalizeInputs<'_, f64> = MarginalizeInputs {
-            schedule: &sched,
-            imu_lin_data: None,
-            lost_landmarks: None,
-            fixed_frames: None,
-            options,
-        };
-        assert_eq!(
-            marginalize(
-                &mut window.estimator,
-                &mut window.marg,
-                None,
-                &mut window.imu_meas,
-                &inputs,
-            ),
-            Err(MargError::PriorOrderMismatch { frame_id: KF1 })
-        );
-    }
-
-    // A schedule naming a state the window does not have.
-    {
-        let mut window: Window = build_window(0xB012, true);
-        let mut bad: MarginalizeSchedule = schedule();
-        bad.last_state_to_marg = 999;
-        let inputs: MarginalizeInputs<'_, f64> = MarginalizeInputs {
-            schedule: &bad,
-            imu_lin_data: None,
-            lost_landmarks: None,
-            fixed_frames: None,
-            options,
-        };
-        assert_eq!(
-            marginalize(
-                &mut window.estimator,
-                &mut window.marg,
-                None,
-                &mut window.imu_meas,
-                &inputs,
-            ),
-            Err(MargError::FrameNotInWindow { frame_id: 999 })
-        );
-    }
-
-    // A state that is neither marginalized nor the last one to marginalize
-    // (`:999` asserts).
-    {
-        let mut window: Window = build_window(0xB013, true);
-        let mut bad: MarginalizeSchedule = schedule();
-        bad.states_to_marg_all.clear();
-        let inputs: MarginalizeInputs<'_, f64> = MarginalizeInputs {
-            schedule: &bad,
-            imu_lin_data: None,
-            lost_landmarks: None,
-            fixed_frames: None,
-            options,
-        };
-        assert_eq!(
-            marginalize(
-                &mut window.estimator,
-                &mut window.marg,
-                None,
-                &mut window.imu_meas,
-                &inputs,
-            ),
-            Err(MargError::UnscheduledState { frame_id: STATE0 })
-        );
-    }
+    let mut window: Window = build_window(0xB011, true);
+    let mut order: AbsOrderMap = AbsOrderMap::new();
+    order.push(KF0, POSE_SIZE).unwrap();
+    order.push(STATE0, POSE_VEL_BIAS_SIZE).unwrap();
+    window.marg.order = order;
+    window.marg.h = DMatrix::zeros(0, POSE_SIZE + POSE_VEL_BIAS_SIZE);
+    window.marg.b = DVector::zeros(0);
+    assert_eq!(
+        try_run(
+            &mut window,
+            &schedule(),
+            None,
+            MarginalizeOptions::default()
+        ),
+        Err(MargError::PriorOrderMismatch { frame_id: KF1 })
+    );
 }
 
 /// The debug copy, `nullspace_marg_data` (`:1012-1064`, `:1174-1178`).
 #[test]
 fn the_nullspace_debug_copy_follows_the_live_prior() {
-    let mut window: Window = build_window(0xB014, false);
+    let pristine: Window = build_window(0xB014, false);
+    let mut window: Window = pristine.clone();
     let mut nullspace: MargLinData<f64> = MargLinData::default();
-    let sched: MarginalizeSchedule = schedule();
-    let inputs: MarginalizeInputs<'_, f64> = MarginalizeInputs {
-        schedule: &sched,
-        imu_lin_data: None,
-        lost_landmarks: None,
-        fixed_frames: None,
-        options: MarginalizeOptions {
+    try_run(
+        &mut window,
+        &schedule(),
+        Some(&mut nullspace),
+        MarginalizeOptions {
             marg_lost_landmarks: false,
             keep_nullspace_marg_data: true,
         },
-    };
-    marginalize(
-        &mut window.estimator,
-        &mut window.marg,
-        Some(&mut nullspace),
-        &mut window.imu_meas,
-        &inputs,
     )
     .unwrap();
 
@@ -834,22 +766,15 @@ fn the_nullspace_debug_copy_follows_the_live_prior() {
         assert_eq!(nullspace.b[i], window.marg.b[i]);
     }
 
-    // Without the flag nothing is written.
-    let mut untouched: Window = build_window(0xB014, false);
+    // Without the flag nothing is written: the same window, marginalized again
+    // from the pristine copy with the default options.
+    let mut untouched: Window = pristine;
     let mut empty: MargLinData<f64> = MargLinData::default();
-    let inputs: MarginalizeInputs<'_, f64> = MarginalizeInputs {
-        schedule: &sched,
-        imu_lin_data: None,
-        lost_landmarks: None,
-        fixed_frames: None,
-        options: MarginalizeOptions::default(),
-    };
-    marginalize(
-        &mut untouched.estimator,
-        &mut untouched.marg,
+    try_run(
+        &mut untouched,
+        &schedule(),
         Some(&mut empty),
-        &mut untouched.imu_meas,
-        &inputs,
+        MarginalizeOptions::default(),
     )
     .unwrap();
     assert_eq!(empty, MargLinData::default());
@@ -867,7 +792,23 @@ fn the_nullspace_debug_copy_follows_the_live_prior() {
 #[test]
 fn an_invalid_schedule_is_refused_before_anything_changes() {
     let unknown: FrameId = 999;
-    let cases: [(&str, MarginalizeSchedule, MargError); 6] = [
+    let cases: [(&str, MarginalizeSchedule, MargError); 8] = [
+        (
+            "a last_state_to_marg the window does not have",
+            MarginalizeSchedule {
+                last_state_to_marg: unknown,
+                ..schedule()
+            },
+            MargError::FrameNotInWindow { frame_id: unknown },
+        ),
+        (
+            "a state in neither set that is not last_state_to_marg (`:999`)",
+            MarginalizeSchedule {
+                states_to_marg_all: BTreeSet::new(),
+                ..schedule()
+            },
+            MargError::UnscheduledState { frame_id: STATE0 },
+        ),
         (
             "a frame the window does not have in states_to_marg_vel_bias",
             MarginalizeSchedule {
@@ -938,27 +879,24 @@ fn an_invalid_schedule_is_refused_before_anything_changes() {
         ),
     ];
 
+    let pristine: Window = build_window(0xB015, true);
+    // The whole window, every coefficient of it: `f64`'s `Debug` is the
+    // shortest representation that round-trips, so equal strings are equal
+    // states, and this covers the landmark database and the IMU intervals as
+    // well as the frame maps and the prior.
+    let before: String = format!(
+        "{:?}",
+        (&pristine.estimator, &pristine.marg, &pristine.imu_meas)
+    );
+
     for (name, sched, want) in cases {
-        let mut window: Window = build_window(0xB015, true);
-        // The whole window, every coefficient of it: `f64`'s `Debug` is the
-        // shortest representation that round-trips, so equal strings are equal
-        // states, and this covers the landmark database and the IMU intervals
-        // as well as the frame maps and the prior.
-        let before: String = format!("{:?}", (&window.estimator, &window.marg, &window.imu_meas));
-        let inputs: MarginalizeInputs<'_, f64> = MarginalizeInputs {
-            schedule: &sched,
-            imu_lin_data: None,
-            lost_landmarks: None,
-            fixed_frames: None,
-            options: MarginalizeOptions::default(),
-        };
+        let mut window: Window = pristine.clone();
         let mut nullspace: MargLinData<f64> = MargLinData::default();
-        let got = marginalize(
-            &mut window.estimator,
-            &mut window.marg,
+        let got = try_run(
+            &mut window,
+            &sched,
             Some(&mut nullspace),
-            &mut window.imu_meas,
-            &inputs,
+            MarginalizeOptions::default(),
         );
         assert_eq!(got.err(), Some(want), "{name}");
         let after: String = format!("{:?}", (&window.estimator, &window.marg, &window.imu_meas));
@@ -975,6 +913,16 @@ fn a_malformed_prior_is_refused_by_the_diagnostics() {
     run(&mut window, MarginalizeOptions::default());
     let size: usize = window.marg.order.total_size();
     let random: DVector<f64> = DVector::zeros(size);
+
+    // A probe direction that is not as long as the prior's ordering; C++ builds
+    // it with `setRandom()` (`:158`), so it cannot be wrong there.
+    assert_eq!(
+        check_marg_nullspace(&window.marg, &window.estimator, &DVector::zeros(size - 1)),
+        Err(MargError::ProbeLengthMismatch {
+            expected: size,
+            actual: size - 1
+        })
+    );
 
     // A square-root prior whose residual is shorter than its Jacobian: `Hᵀb`
     // is not formed (`:170`).

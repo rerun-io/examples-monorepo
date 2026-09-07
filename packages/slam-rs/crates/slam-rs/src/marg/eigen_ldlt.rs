@@ -59,6 +59,11 @@ impl<S: LieScalar> EigenLdlt<S> {
     pub(crate) fn new(mut mat: DMatrix<S>) -> Self {
         let size: usize = mat.nrows().min(mat.ncols());
         let mut transpositions: Vec<usize> = vec![0; size];
+        // Eigen passes one `temp` workspace through the whole sweep
+        // (`m_temporary.resize(size)` at `:496`, then `temp.head(k)` at
+        // `:336-338`); step `k` reads and writes its first `k` entries, so
+        // hoisting it here changes no read and no write.
+        let mut temp: Vec<S> = vec![S::zero(); size];
 
         for k in 0..size {
             // "Find largest diagonal element" (`:305-307`). `maxCoeff` reports
@@ -100,7 +105,7 @@ impl<S: LieScalar> EigenLdlt<S> {
             // *un-updated* one.
             let rs: usize = size - k - 1;
             if k > 0 {
-                let mut temp: Vec<S> = vec![S::zero(); k];
+                let temp: &mut [S] = &mut temp[..k];
                 for (j, entry) in temp.iter_mut().enumerate() {
                     *entry = mat[(j, j)] * mat[(k, j)]; // `:336`
                 }

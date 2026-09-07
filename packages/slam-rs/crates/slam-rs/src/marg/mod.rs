@@ -226,6 +226,18 @@ pub enum MargError {
     /// by `num_trans == 0` (`sqrt_ba_base.cpp:96`).
     #[error("the prior's ordering is empty")]
     EmptyPriorOrder,
+    /// The control direction handed to [`check_marg_nullspace`] is not as long
+    /// as the prior's ordering. C++ builds it with `inc_random.setRandom()`
+    /// (`sqrt_ba_base.cpp:158`), so the length cannot be wrong there; the port
+    /// takes it as a parameter to keep the diagnostic reproducible, and then
+    /// has to check it.
+    #[error("the nullspace probe direction is {actual} long, not {expected}")]
+    ProbeLengthMismatch {
+        /// Rows the prior's ordering covers.
+        expected: usize,
+        /// Rows the probe has.
+        actual: usize,
+    },
     /// A schedule set names a frame the marginalization ordering does not hold
     /// as the kind of block that set is about — a pose block for
     /// `poses_to_marg`, a full state for the two state sets.
