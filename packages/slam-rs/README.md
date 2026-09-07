@@ -249,7 +249,7 @@ and 4,832 (`f32`) with a pointer-derived offset, and on 2,627 and 2,897 with the
 sequential fold. Using the sequential fold in the flat QR and in
 `ColPivHouseholderQR` flips `|beta| > sqrt(epsilon)` and `rank()` on valid
 inputs — in *opposite directions* in the two precisions on the same `9x2`
-problem — which is why [`ColumnRedux`] is a parameter of `make_householder` and
+problem — which is why the traversal is a parameter of `make_householder` and
 named at every call site.
 
 The other rank decision is Eigen's complete orthogonal decomposition, which the

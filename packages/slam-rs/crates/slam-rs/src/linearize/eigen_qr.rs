@@ -78,6 +78,9 @@ use crate::lie::LieScalar;
 /// | `marg/eigen_cod.rs:263`, `apply_q_adjoint_on_the_left` | `k + (self.rows - k) == self.rows`, which is `dst.nrows()` because [`crate::marg::Cod::solve`] refuses a right-hand side of any other height — the one span whose bound is *not* local, and the one the S7 review found unguarded |
 /// | `marg/eigen_cod.rs:323`, the `Z` reflectors | `0 + k` with `k < rank <= rows`, and `(rank - 1) + (cols - rank + 1) == cols` |
 /// | `marg/eigen_cod.rs:374`, `apply_z_adjoint_on_the_left_in_place` | `(rank - 1) + (cols - rank + 1) == cols == dst.nrows()`, and `0 + nrhs == dst.ncols()` |
+///
+/// The tests below build three more (`:707`, `:743`, `:773`), each against a
+/// matrix they allocate two lines above.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BlockSpan {
     /// First row of the block.
