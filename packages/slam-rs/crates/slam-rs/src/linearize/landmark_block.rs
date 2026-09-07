@@ -221,6 +221,27 @@ impl<S: LieScalar> LandmarkBlock<S> {
         if num_cols % 4 != 0 {
             return Err(LinearizeError::UnalignedBlock { num_cols });
         }
+        // `storage.resize(num_rows, num_cols)` (`:98`). Each dimension being
+        // representable is not enough: nalgebra multiplies them, and the
+        // allocator wants the byte count, which must fit in an `isize`
+        // (decision D32). An ordering carrying one absurd block size reaches
+        // here with both dimensions individually fine.
+        let elements: usize =
+            num_rows
+                .checked_mul(num_cols)
+                .ok_or(LinearizeError::BlockTooLarge {
+                    rows: num_rows,
+                    cols: num_cols,
+                })?;
+        let fits: bool = elements
+            .checked_mul(size_of::<S>())
+            .is_some_and(|bytes| bytes <= isize::MAX as usize);
+        if !fits {
+            return Err(LinearizeError::BlockTooLarge {
+                rows: num_rows,
+                cols: num_cols,
+            });
+        }
         // Every pose block must fit: C++ writes `block<2, 6>(obs_idx, abs_idx)`
         // with no bound check (`:178-179`).
         for obs in &observations {
@@ -1250,6 +1271,25 @@ mod tests {
         let (error, weight) = block.compute_error_weight(res_squared, &plain);
         assert_eq!(weight, 1.0);
         assert_eq!(error, 0.5 * res_squared);
+    }
+
+    /// An ordering with one absurd block size passes every per-dimension check
+    /// and then multiplies out to a matrix nalgebra cannot allocate. C++ calls
+    /// `storage.resize(num_rows, num_cols)` (`:98`), which would abort in the
+    /// allocator; the port refuses first (decision D32).
+    #[test]
+    fn a_block_too_large_to_allocate_is_an_error() {
+        let (_, lm, _) = fixture(1);
+        let mut aom: AbsOrderMap = AbsOrderMap::new();
+        // The `% 4` rule needs a multiple of four, and the product of the two
+        // dimensions has to overflow: 7 rows times this is far past `isize::MAX`
+        // bytes long before it wraps.
+        aom.push(0, usize::MAX / 2 - (usize::MAX / 2) % 4).unwrap();
+        let err = LandmarkBlock::<f64>::allocate(lm.id, &lm, &index, &aom, false).unwrap_err();
+        assert!(
+            matches!(err, LinearizeError::BlockTooLarge { .. }),
+            "{err:?}"
+        );
     }
 
     /// `Vector4` is only here to keep the import list honest about what the

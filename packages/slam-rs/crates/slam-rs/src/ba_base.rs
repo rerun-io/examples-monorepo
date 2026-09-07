@@ -949,6 +949,61 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
     /// for block (`:379-388`); the port returns
     /// [`crate::linearize::LinearizeError::MargOrderMismatch`] through the
     /// caller.
+    /// The prior's own shape: `H` as wide as its ordering, `b` as long as `H`
+    /// is tall, and — in the squared form, where `H` is a Hessian rather than a
+    /// Jacobian — square.
+    ///
+    /// C++ asserts only the width (`ba_base.cpp:379`, `:444`) and indexes the
+    /// rest; a prior with an empty `b` reaches `mld.b[k]` and a squared prior
+    /// that is not square reaches `mld.H(i, j)` past its end. Neither may be a
+    /// panic here (decision D32).
+    fn check_marg_prior_shape(mld: &MargLinData<S>) -> Result<(), BaError> {
+        let marg_size: usize = mld.order.total_size();
+        if mld.h.ncols() != marg_size {
+            return Err(BaError::MargPriorSize {
+                cols: mld.h.ncols(),
+                total_size: marg_size,
+            });
+        }
+        if mld.b.nrows() != mld.h.nrows() {
+            return Err(BaError::MargPriorSize {
+                cols: mld.b.nrows(),
+                total_size: mld.h.nrows(),
+            });
+        }
+        if !mld.is_sqrt && mld.h.nrows() != marg_size {
+            return Err(BaError::MargPriorSize {
+                cols: mld.h.nrows(),
+                total_size: marg_size,
+            });
+        }
+        Ok(())
+    }
+
+    /// The prior's ordering must be the window's prefix, block for block
+    /// (`ba_base.cpp:383-388`).
+    ///
+    /// Public because the square-root export needs it too: it writes the prior
+    /// into the first columns of the stacked system
+    /// (`linearization_abs_qr.cpp:587-589`) without checking anything, which
+    /// would attach one frame's columns to another.
+    pub fn check_marg_prior_order(
+        &self,
+        mld: &MargLinData<S>,
+        aom: &AbsOrderMap,
+    ) -> Result<(), BaError> {
+        Self::check_marg_prior_shape(mld)?;
+        let marg_size: usize = mld.order.total_size();
+        for (frame_id, offset, size) in mld.order.iter() {
+            match aom.get(frame_id) {
+                Some((window_offset, window_size))
+                    if window_offset == offset && window_size == size && offset < marg_size => {}
+                _ => return Err(BaError::MargOrderMismatch { frame_id }),
+            }
+        }
+        Ok(())
+    }
+
     pub fn linearize_marg_prior(
         &self,
         mld: &MargLinData<S>,
@@ -957,21 +1012,8 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
         abs_b: &mut DVector<S>,
     ) -> Result<S, BaError> {
         let marg_size: usize = mld.order.total_size();
-        // `:379`.
-        if mld.h.ncols() != marg_size {
-            return Err(BaError::MargPriorSize {
-                cols: mld.h.ncols(),
-                total_size: marg_size,
-            });
-        }
-        // `:383-388`: same offsets, same sizes, and inside the prior's own span.
-        for (frame_id, offset, size) in mld.order.iter() {
-            match aom.get(frame_id) {
-                Some((window_offset, window_size))
-                    if window_offset == offset && window_size == size && offset < marg_size => {}
-                _ => return Err(BaError::MargOrderMismatch { frame_id }),
-            }
-        }
+        // `:379`, and the shapes C++ indexes without asserting.
+        self.check_marg_prior_order(mld, aom)?;
         if abs_h.nrows() < marg_size || abs_h.ncols() < marg_size || abs_b.nrows() < marg_size {
             return Err(BaError::MargPriorSize {
                 cols: abs_h.ncols(),
@@ -1045,12 +1087,7 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
     /// reason (`:452-455`), so this can be negative.
     pub fn compute_marg_prior_error(&self, mld: &MargLinData<S>) -> Result<S, BaError> {
         let marg_size: usize = mld.order.total_size();
-        if mld.h.ncols() != marg_size {
-            return Err(BaError::MargPriorSize {
-                cols: mld.h.ncols(),
-                total_size: marg_size,
-            });
-        }
+        Self::check_marg_prior_shape(mld)?;
         let delta: DVector<S> = self.compute_delta(&mld.order)?;
         let rows: usize = mld.h.nrows();
         let mut h_delta: DVector<S> = DVector::zeros(rows);
@@ -1090,11 +1127,24 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
         marg_pose_inc: &DVector<S>,
     ) -> Result<S, BaError> {
         let marg_size: usize = mld.order.total_size();
-        if mld.h.ncols() != marg_size || marg_pose_inc.nrows() != marg_size {
+        Self::check_marg_prior_shape(mld)?;
+        if marg_pose_inc.nrows() != marg_size {
             return Err(BaError::MargPriorSize {
-                cols: mld.h.ncols(),
+                cols: marg_pose_inc.nrows(),
                 total_size: marg_size,
             });
+        }
+        // C++ builds `marg_scaling` from `jacobian_scaling.head(marg_size)`
+        // (`linearization_abs_qr.cpp:448`), so it is always long enough there;
+        // a caller that hands in a shorter one would index past its end
+        // (`ba_base.cpp:513`).
+        if let Some(scaling) = marg_scaling {
+            if scaling.nrows() < marg_size {
+                return Err(BaError::MargPriorSize {
+                    cols: scaling.nrows(),
+                    total_size: marg_size,
+                });
+            }
         }
         let delta: DVector<S> = self.compute_delta(&mld.order)?;
 
@@ -1946,13 +1996,53 @@ mod tests {
         // And a prior whose matrix does not match its own ordering (`:379`).
         let ragged: MargLinData<f64> = MargLinData {
             is_sqrt: true,
-            order,
+            order: order.clone(),
             h: DMatrix::zeros(rows, POSE_SIZE - 1),
-            b: r_vec,
+            b: r_vec.clone(),
         };
         assert!(matches!(
             estimator.compute_marg_prior_error(&ragged).unwrap_err(),
             BaError::MargPriorSize { .. }
+        ));
+
+        // Three shapes C++ indexes without asserting, each of which would be a
+        // panic here (decision D32): a residual that is not as long as `H` is
+        // tall, a squared prior that is not square, and a scaling vector shorter
+        // than the prior.
+        let empty_b: MargLinData<f64> = MargLinData {
+            is_sqrt: true,
+            order: order.clone(),
+            h: j.clone(),
+            b: DVector::zeros(0),
+        };
+        for outcome in [
+            estimator.compute_marg_prior_error(&empty_b),
+            estimator.linearize_marg_prior(
+                &empty_b,
+                &aom,
+                &mut DMatrix::zeros(POSE_SIZE, POSE_SIZE),
+                &mut DVector::zeros(POSE_SIZE),
+            ),
+            estimator.compute_marg_prior_model_cost_change(&empty_b, None, &inc),
+        ] {
+            assert!(matches!(outcome, Err(BaError::MargPriorSize { .. })));
+        }
+
+        let not_square: MargLinData<f64> = MargLinData {
+            is_sqrt: false,
+            order: order.clone(),
+            h: j.clone(),
+            b: r_vec,
+        };
+        assert!(matches!(
+            estimator.compute_marg_prior_error(&not_square),
+            Err(BaError::MargPriorSize { .. })
+        ));
+
+        let short_scaling: DVector<f64> = DVector::from_element(1, 1.0);
+        assert!(matches!(
+            estimator.compute_marg_prior_model_cost_change(&mld, Some(&short_scaling), &inc),
+            Err(BaError::MargPriorSize { .. })
         ));
     }
 

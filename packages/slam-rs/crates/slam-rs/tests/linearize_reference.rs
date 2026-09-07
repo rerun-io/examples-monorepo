@@ -42,12 +42,15 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use nalgebra::{DMatrix, DVector, Vector2, Vector3, Vector4, Vector6};
+use slam_rs::ba_base::BaError;
 use slam_rs::ba_base::{BundleAdjustmentBase, LinearizePointOut, linearize_point};
 use slam_rs::calib::{Calibration, CameraModel, Kb4Params};
+use slam_rs::imu::{ImuLinData, ImuSample, IntegratedImuMeasurement};
 use slam_rs::landmark::{Landmark, StereographicParam};
 use slam_rs::lie::{Se3, So3};
 use slam_rs::linearize::{
-    LandmarkBlockOptions, LinearizationAbsQR, LinearizationInputs, LinearizationOptions,
+    ImuInput, LandmarkBlockOptions, LinearizationAbsQR, LinearizationInputs, LinearizationOptions,
+    LinearizeError,
 };
 use slam_rs::types::{
     AbsOrderMap, LandmarkId, MargLinData, POSE_SIZE, PoseStateWithLin, TimeCamId,
@@ -633,7 +636,7 @@ fn householder_r(j: &DMatrix<f64>) -> DMatrix<f64> {
     let cols: usize = j.ncols();
     let mut work: DMatrix<f64> = j.clone();
     for k in 0..cols {
-        slam_rs::linearize::reflect_column(&mut work, k, k, rows - k);
+        slam_rs::linearize::reflect_column(&mut work, k, k, rows - k).unwrap();
     }
     let mut r: DMatrix<f64> = DMatrix::zeros(cols, cols);
     for row in 0..cols {
@@ -705,7 +708,8 @@ fn the_q2_rows_are_orthogonal_to_the_landmark_columns() {
 ///
 /// For one block with the orthogonal `Q = [Q₁, Q₂]` and the optimal landmark
 /// increment `R inc_l = −(Q₁ᵀr + Q₁ᵀJ_p inc_p)`, the first three rows of
-/// `Qᵀ J inc + Qᵀ r` collapse to `−Q₁ᵀr`, so
+/// `Qᵀ J inc` are `−Q₁ᵀr` — so the *updated residual* `Qᵀ J inc + Qᵀ r` is zero
+/// there, which is what "the landmarks move to their own optimum" means — and
 ///
 /// ```text
 /// l_diff = 0.5 ‖Q₁ᵀr‖²  −  inc_pᵀ b  −  0.5 inc_pᵀ H inc_p
@@ -713,7 +717,8 @@ fn the_q2_rows_are_orthogonal_to_the_landmark_columns() {
 ///
 /// with `H` and `b` the reduced camera system. The first term does not depend on
 /// the pose increment at all: it is what the landmarks gain by moving to their
-/// own optimum, and it is why basalt's `l_diff` is **positive at `inc = 0`**.
+/// own optimum, and it is why basalt's `l_diff` is **nonnegative at `inc = 0`**
+/// — zero exactly when the eliminated residual `Q₁ᵀr` already is.
 /// The identity is `landmark_block_abs_dynamic.hpp:276-320` written out, and
 /// getting the constant term wrong would make every Levenberg-Marquardt gain
 /// ratio wrong in the same direction — which is exactly the kind of bug that
@@ -868,6 +873,141 @@ fn the_reductions_are_reproducible() {
     for (a, b) in b_a.iter().zip(b_b.iter()) {
         assert_eq!(a.to_bits(), b.to_bits());
     }
+}
+
+/// The square-root export writes the prior into the *first* columns of the
+/// stacked system (`linearization_abs_qr.cpp:587-589`), so it is only correct
+/// when the prior's ordering is the window's prefix. C++ checks that in the
+/// Hessian path (`ba_base.cpp:383-388`) and not in the square-root one, where a
+/// disagreeing ordering silently attaches one frame's columns to another.
+#[test]
+fn a_prior_ordering_that_disagrees_is_refused_by_both_exports() {
+    let mut problem: Problem = vo_problem_with_marg(4, 0x3333_4444);
+
+    // The window has frame 0 at offset 0 and frame 1 at offset 6; give the
+    // prior the same two frames the other way round.
+    let mut reversed: AbsOrderMap = AbsOrderMap::new();
+    reversed.push(1, POSE_SIZE).unwrap();
+    reversed.push(0, POSE_SIZE).unwrap();
+    if let Some(marg) = problem.marg.as_mut() {
+        marg.order = reversed;
+    }
+
+    let (_, lqr) = linearize(&problem);
+    let inputs: LinearizationInputs<'_, f64> = LinearizationInputs {
+        marg: problem.marg.as_ref(),
+        ..Default::default()
+    };
+
+    // The Hessian path already refused it...
+    assert!(matches!(
+        lqr.get_dense_h_b(&problem.estimator, &inputs),
+        Err(LinearizeError::Ba(BaError::MargOrderMismatch { .. }))
+    ));
+    // ...and now so does the square-root path.
+    assert!(matches!(
+        lqr.get_dense_q2jp_q2r(&problem.estimator, &inputs),
+        Err(LinearizeError::Ba(BaError::MargOrderMismatch { .. }))
+    ));
+}
+
+/// An IMU factor is fifteen columns wide at each end (`imu_block.hpp:21`), and
+/// C++ discards the ordering's block sizes (`linearization_abs_qr.cpp:163-167`)
+/// and computes `start_t + dt` unchecked (`imu_block.hpp:30`). With pose-sized
+/// slots the scatter writes over the neighbouring state; the port refuses at
+/// construction, where it costs nothing.
+#[test]
+fn an_imu_factor_over_pose_sized_slots_is_refused() {
+    // A one-nanosecond measurement, so its endpoints are the two frames
+    // `vo_problem` numbers 0 and 1.
+    let noise: Vector3<f64> = Vector3::repeat(1e-4);
+    let mut meas: IntegratedImuMeasurement<f64> =
+        IntegratedImuMeasurement::new(0, &Vector3::zeros(), &Vector3::zeros());
+    meas.integrate(
+        &ImuSample {
+            t_ns: 1,
+            gyro: Vector3::new(0.01, -0.02, 0.03),
+            accel: Vector3::new(0.0, 0.0, 9.81),
+        },
+        &noise,
+        &noise,
+    )
+    .unwrap();
+    assert_eq!(meas.get_dt_ns(), 1);
+
+    let problem: Problem = vo_problem(2, 0x4444_5555);
+    assert_eq!(problem.aom.get(0), Some((0, POSE_SIZE)));
+    assert_eq!(problem.aom.get(1), Some((POSE_SIZE, POSE_SIZE)));
+
+    let imu: ImuInput<'_, f64> = ImuInput {
+        lin_data: ImuLinData {
+            g: Vector3::new(0.0, 0.0, -9.81),
+            gyro_bias_weight_sqrt: Vector3::repeat(100.0),
+            accel_bias_weight_sqrt: Vector3::repeat(100.0),
+        },
+        measurements: vec![(0, &meas)],
+    };
+    let inputs: LinearizationInputs<'_, f64> = LinearizationInputs {
+        imu: Some(&imu),
+        ..Default::default()
+    };
+    let err = LinearizationAbsQR::new(
+        &problem.estimator,
+        &problem.aom,
+        LinearizationOptions::default(),
+        &inputs,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err,
+        LinearizeError::ImuStateNotFullSize {
+            frame: 0,
+            size: POSE_SIZE
+        },
+        "a six-column slot must not carry a fifteen-column factor"
+    );
+
+    // And an end timestamp that does not fit in an `i64`.
+    let overflowing: ImuInput<'_, f64> = ImuInput {
+        lin_data: imu.lin_data,
+        measurements: vec![(i64::MAX, &meas)],
+    };
+    let inputs: LinearizationInputs<'_, f64> = LinearizationInputs {
+        imu: Some(&overflowing),
+        ..Default::default()
+    };
+    assert_eq!(
+        LinearizationAbsQR::new(
+            &problem.estimator,
+            &problem.aom,
+            LinearizationOptions::default(),
+            &inputs,
+        )
+        .unwrap_err(),
+        LinearizeError::ImuIntervalOverflow {
+            start: i64::MAX,
+            dt_ns: 1
+        }
+    );
+
+    // A frame the window does not have at all is still the older error.
+    let unknown: ImuInput<'_, f64> = ImuInput {
+        lin_data: imu.lin_data,
+        measurements: vec![(7, &meas)],
+    };
+    let inputs: LinearizationInputs<'_, f64> = LinearizationInputs {
+        imu: Some(&unknown),
+        ..Default::default()
+    };
+    assert!(matches!(
+        LinearizationAbsQR::new(
+            &problem.estimator,
+            &problem.aom,
+            LinearizationOptions::default(),
+            &inputs,
+        ),
+        Err(LinearizeError::UnknownImuFrames { start: 7, end: 8 })
+    ));
 }
 
 /// The block layout arithmetic of `landmark_block_abs_dynamic.hpp:83-96` on

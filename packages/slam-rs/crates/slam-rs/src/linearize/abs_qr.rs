@@ -22,6 +22,7 @@ use crate::imu::{ImuBlock, ImuLinData, IntegratedImuMeasurement};
 use crate::landmark::Landmark;
 use crate::lie::{LieScalar, Se3};
 use crate::linearize::landmark_block::{LandmarkBlock, LandmarkBlockOptions};
+use crate::linearize::reduce::{deterministic_reduce, deterministic_reduce_scalar};
 use crate::linearize::{LinearizeError, RelPoseLin};
 use crate::types::{
     AbsOrderMap, FrameId, LandmarkId, MargLinData, POSE_SIZE, POSE_VEL_BIAS_SIZE, TimeCamId,
@@ -216,19 +217,40 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
                 .ok_or(LinearizeError::LayoutOverflow)?;
         }
 
-        // `:163-167`.
+        // `:163-167`. C++ computes `start_t + dt` unchecked and then indexes
+        // the ordering with `at()` inside every method that uses the block
+        // (`imu_block.hpp:89-93` and its four siblings), which throws on a
+        // missing frame and silently misplaces a 15x15 write on a frame that is
+        // in the ordering with a *pose-sized* slot. Both are resolved here,
+        // once, so the per-iteration path cannot fail (decision D32).
         let mut imu_meta: Vec<ImuMeta> = Vec::new();
         if let Some(imu) = inputs.imu {
             for (start_t, meas) in &imu.measurements {
-                let end_t: i64 = start_t + meas.get_dt_ns();
-                let (start_idx, _) = aom.get(*start_t).ok_or(LinearizeError::UnknownImuFrames {
-                    start: *start_t,
-                    end: end_t,
-                })?;
-                let (end_idx, _) = aom.get(end_t).ok_or(LinearizeError::UnknownImuFrames {
-                    start: *start_t,
-                    end: end_t,
-                })?;
+                let end_t: i64 = start_t.checked_add(meas.get_dt_ns()).ok_or(
+                    LinearizeError::ImuIntervalOverflow {
+                        start: *start_t,
+                        dt_ns: meas.get_dt_ns(),
+                    },
+                )?;
+                let (start_idx, start_size) =
+                    aom.get(*start_t).ok_or(LinearizeError::UnknownImuFrames {
+                        start: *start_t,
+                        end: end_t,
+                    })?;
+                let (end_idx, end_size) =
+                    aom.get(end_t).ok_or(LinearizeError::UnknownImuFrames {
+                        start: *start_t,
+                        end: end_t,
+                    })?;
+                // An IMU factor is 15 columns wide at each end
+                // (`imu_block.hpp:21`). A pose-only slot next to one is not a
+                // narrower factor, it is a different problem: C++ would write
+                // fifteen columns over a six-column slot and into its neighbour.
+                for (frame, size) in [(*start_t, start_size), (end_t, end_size)] {
+                    if size != POSE_VEL_BIAS_SIZE {
+                        return Err(LinearizeError::ImuStateNotFullSize { frame, size });
+                    }
+                }
                 imu_meta.push(ImuMeta {
                     start_t: *start_t,
                     end_t,
@@ -350,25 +372,30 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         }
 
         // 2. the landmark blocks. **Reduction site 1 of 4** (`:246-262`):
-        // `tbb::parallel_deterministic_reduce` over `[0, num_landmarks)`, summing
-        // the per-block error and ANDing the validity. A `par_chunks` over the
-        // same slice with an index-ordered merge produces the same sum.
+        // `tbb::parallel_deterministic_reduce` over `[0, num_landmarks)`,
+        // summing the per-block error and ANDing the validity. The sum follows
+        // TBB's balanced join tree, not a left fold — see
+        // [`crate::linearize::reduce`]. The `&&` needs no order.
         let cameras = estimator.cameras();
         let lb_options: LandmarkBlockOptions<S> = self.options.lb_options;
-        let mut error: S = S::zero();
+        let blocks: &mut [LandmarkBlock<S>] = &mut self.landmark_blocks;
+        let ids: &[LandmarkId] = &self.landmark_ids;
+        let rel_pose_lin: &[RelPoseLin<S>] = &self.rel_pose_lin;
         let mut numerically_valid: bool = true;
-        for (block, &lm_id) in self
-            .landmark_blocks
-            .iter_mut()
-            .zip(self.landmark_ids.iter())
-        {
-            let lm: &Landmark<S> = estimator
-                .lmdb
-                .get_landmark(lm_id)
-                .ok_or(LinearizeError::UnknownLandmark(lm_id))?;
-            error += block.linearize_landmark(lm, &self.rel_pose_lin, cameras, &lb_options)?;
-            numerically_valid = numerically_valid && !block.is_numerical_failure();
-        }
+        let mut error: S =
+            deterministic_reduce_scalar::<S, LinearizeError>(blocks.len(), &mut |i, acc| {
+                let lm_id: LandmarkId = *ids.get(i).ok_or(LinearizeError::LayoutOverflow)?;
+                let lm: &Landmark<S> = estimator
+                    .lmdb
+                    .get_landmark(lm_id)
+                    .ok_or(LinearizeError::UnknownLandmark(lm_id))?;
+                let block: &mut LandmarkBlock<S> =
+                    blocks.get_mut(i).ok_or(LinearizeError::LayoutOverflow)?;
+                let contribution: S =
+                    block.linearize_landmark(lm, rel_pose_lin, cameras, &lb_options)?;
+                numerically_valid = numerically_valid && !block.is_numerical_failure();
+                Ok(acc + contribution)
+            })?;
 
         // 3a. the IMU blocks (`:266-268`).
         self.imu_blocks.clear();
@@ -487,10 +514,28 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         &self,
         inputs: &LinearizationInputs<'_, S>,
     ) -> Result<DVector<S>, LinearizeError> {
-        let mut res: DVector<S> = DVector::zeros(self.aom.total_size());
-        for block in &self.landmark_blocks {
-            block.add_jp_diag2(&mut res)?;
-        }
+        let total: usize = self.aom.total_size();
+        let mut res: DVector<S> = DVector::zeros(total);
+        let mut scratch: Vec<Option<DVector<S>>> = Vec::new();
+        let blocks: &[LandmarkBlock<S>] = &self.landmark_blocks;
+        deterministic_reduce::<DVector<S>, LinearizeError>(
+            blocks.len(),
+            &mut res,
+            &mut scratch,
+            &|| DVector::zeros(total),
+            &|value: &mut DVector<S>| value.fill(S::zero()),
+            &mut |i: usize, acc: &mut DVector<S>| {
+                blocks
+                    .get(i)
+                    .ok_or(LinearizeError::LayoutOverflow)?
+                    .add_jp_diag2(acc)
+            },
+            &|left: &mut DVector<S>, right: &DVector<S>| {
+                for k in 0..left.nrows() {
+                    left[k] += right[k];
+                }
+            },
+        )?;
         for (block, meta) in self.imu_blocks.iter().zip(self.imu_meta.iter()) {
             block.add_jp_diag2(meta.start_idx, meta.end_idx, &mut res);
         }
@@ -527,12 +572,38 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         inputs: &LinearizationInputs<'_, S>,
     ) -> Result<(DMatrix<S>, DVector<S>), LinearizeError> {
         let opt_size: usize = self.aom.total_size();
-        let mut h: DMatrix<S> = DMatrix::zeros(opt_size, opt_size);
-        let mut b: DVector<S> = DVector::zeros(opt_size);
-
-        for block in &self.landmark_blocks {
-            block.add_dense_h_b(&mut h, &mut b)?;
-        }
+        let mut accumulator: (DMatrix<S>, DVector<S>) =
+            (DMatrix::zeros(opt_size, opt_size), DVector::zeros(opt_size));
+        let mut scratch: Vec<Option<(DMatrix<S>, DVector<S>)>> = Vec::new();
+        let blocks: &[LandmarkBlock<S>] = &self.landmark_blocks;
+        deterministic_reduce::<(DMatrix<S>, DVector<S>), LinearizeError>(
+            blocks.len(),
+            &mut accumulator,
+            &mut scratch,
+            &|| (DMatrix::zeros(opt_size, opt_size), DVector::zeros(opt_size)),
+            &|value: &mut (DMatrix<S>, DVector<S>)| {
+                value.0.fill(S::zero());
+                value.1.fill(S::zero());
+            },
+            &mut |i: usize, acc: &mut (DMatrix<S>, DVector<S>)| {
+                blocks
+                    .get(i)
+                    .ok_or(LinearizeError::LayoutOverflow)?
+                    .add_dense_h_b(&mut acc.0, &mut acc.1)
+            },
+            &|left: &mut (DMatrix<S>, DVector<S>), right: &(DMatrix<S>, DVector<S>)| {
+                // `H_ += b.H_; b_ += b.b_` (`:532-535`), coefficient by
+                // coefficient in column-major order, which is what nalgebra's
+                // `+=` would do anyway.
+                for k in 0..left.0.len() {
+                    left.0[k] += right.0[k];
+                }
+                for k in 0..left.1.nrows() {
+                    left.1[k] += right.1[k];
+                }
+            },
+        )?;
+        let (mut h, mut b) = accumulator;
 
         // `add_dense_H_b_imu` (`:640-653`).
         for (block, meta) in self.imu_blocks.iter().zip(self.imu_meta.iter()) {
@@ -625,6 +696,14 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             if !marg.is_sqrt {
                 return Err(LinearizeError::MargPriorNotSqrt);
             }
+            // The prior's columns are written into the *first* `marg_cols`
+            // columns of the stacked system (`:587-589`), which is only correct
+            // if its ordering is the window's prefix. `linearizeMargPrior`
+            // asserts exactly that before it does the same thing in Hessian
+            // form (`ba_base.cpp:383-388`); the square-root export in C++ does
+            // not, and would silently attach a frame's columns to another
+            // frame. The port checks both paths.
+            estimator.check_marg_prior_order(marg, &self.aom)?;
             let delta: DVector<S> = estimator.compute_delta(&marg.order)?;
             let (marg_rows, marg_cols) = (marg.h.nrows(), marg.h.ncols());
             for i in 0..marg_rows {
@@ -669,18 +748,24 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             });
         }
 
-        let mut l_diff: S = S::zero();
-        for (block, &lm_id) in self
-            .landmark_blocks
-            .iter_mut()
-            .zip(self.landmark_ids.iter())
-        {
-            let lm: &mut Landmark<S> = estimator
-                .lmdb
-                .get_landmark_mut(lm_id)
-                .ok_or(LinearizeError::UnknownLandmark(lm_id))?;
-            block.back_substitute(lm, pose_inc, &mut l_diff)?;
-        }
+        // **Reduction site 2 of 4** (`:301-307`): TBB's join tree again, with
+        // the subtraction inside the leaf, exactly as `backSubstitute` mutates
+        // the accumulator it is handed (`:302`).
+        let blocks: &mut [LandmarkBlock<S>] = &mut self.landmark_blocks;
+        let ids: &[LandmarkId] = &self.landmark_ids;
+        let lmdb: &mut crate::landmark::LandmarkDatabase<S> = &mut estimator.lmdb;
+        let mut l_diff: S =
+            deterministic_reduce_scalar::<S, LinearizeError>(blocks.len(), &mut |i, acc| {
+                let lm_id: LandmarkId = *ids.get(i).ok_or(LinearizeError::LayoutOverflow)?;
+                let lm: &mut Landmark<S> = lmdb
+                    .get_landmark_mut(lm_id)
+                    .ok_or(LinearizeError::UnknownLandmark(lm_id))?;
+                let block: &mut LandmarkBlock<S> =
+                    blocks.get_mut(i).ok_or(LinearizeError::LayoutOverflow)?;
+                let mut value: S = acc;
+                block.back_substitute(lm, pose_inc, &mut value)?;
+                Ok(value)
+            })?;
 
         for (block, meta) in self.imu_blocks.iter().zip(self.imu_meta.iter()) {
             block.back_substitute(meta.start_idx, meta.end_idx, pose_inc, &mut l_diff);

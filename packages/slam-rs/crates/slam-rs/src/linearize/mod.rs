@@ -33,20 +33,48 @@
 //!
 //! **Determinism.** basalt uses `tbb::parallel_deterministic_reduce` at four
 //! sites where the summation order changes the answer
-//! (`linearization_abs_qr.cpp:262`, `:307`, `:354`, `:550`). Each is a
-//! sequential fold over the landmark blocks in index order here, written so that
-//! a `par_chunks` with a fixed chunk size and an index-ordered merge is a
-//! drop-in that produces the same sum (decision D31). The four sites are named
-//! at their Rust counterparts: [`LinearizationAbsQR::linearize_problem`],
+//! (`linearization_abs_qr.cpp:262`, `:307`, `:354`, `:550`). Decision D31 asked
+//! for a fixed order at each; what it did not say is *which*, and a sequential
+//! fold is the wrong one. `parallel_deterministic_reduce` over
+//! `blocked_range(0, n)` with grainsize 1 splits at `begin + size / 2` until a
+//! range holds one element and then joins up a balanced tree, so four elements
+//! reduce as `(x0 + x1) + (x2 + x3)`. In `f32` with `[2²⁴, 1, 1, 1]` that is
+//! `16777218` where a fold gives `16777216`. The [`reduce`] module reproduces
+//! the tree, pinned bit for bit against the fork's own TBB by
+//! `tests/fixtures/linearize/tbb_reduce_oracle.json`, and all four sites go
+//! through it: [`LinearizationAbsQR::linearize_problem`],
 //! [`LinearizationAbsQR::back_substitute`], [`LinearizationAbsQR::get_jp_diag2`]
-//! and [`LinearizationAbsQR::get_dense_h_b`].
+//! and [`LinearizationAbsQR::get_dense_h_b`]. A rayon version has to reproduce
+//! the same tree; `par_chunks` with an ordered merge does not.
 
 mod abs_qr;
 mod eigen_qr;
 mod landmark_block;
+mod reduce;
 
 pub use abs_qr::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
 pub use landmark_block::{LandmarkBlock, LandmarkBlockOptions, LandmarkBlockState};
+
+/// [`reduce::deterministic_reduce_scalar`] with the error type erased, so the
+/// fixture test in `tests/tbb_reduce_oracle.rs` can drive the association
+/// directly.
+///
+/// The reduction itself is internal — it exists to be called at the four sites
+/// of [`LinearizationAbsQR`] — but the *association* is a claim about basalt
+/// that has to be checked against basalt, and an integration test cannot reach
+/// a private module.
+pub fn deterministic_reduce_scalar_for_tests<S: LieScalar>(
+    n: usize,
+    leaf: &mut dyn FnMut(usize, S) -> S,
+) -> S {
+    let result: Result<S, std::convert::Infallible> =
+        reduce::deterministic_reduce_scalar(n, &mut |index: usize, acc: S| Ok(leaf(index, acc)));
+    match result {
+        Ok(value) => value,
+        // Unreachable: the leaf above cannot fail.
+        Err(never) => match never {},
+    }
+}
 
 use nalgebra::{DMatrix, Matrix4, Matrix6};
 
@@ -71,14 +99,27 @@ pub fn reflect_column<S: LieScalar>(
     col: usize,
     start: usize,
     len: usize,
-) {
-    if len == 0 || col >= storage.ncols() || start + len > storage.nrows() {
-        return;
+) -> Result<(), LinearizeError> {
+    // This is a public boundary, so the range arithmetic is checked rather than
+    // assumed: `start + len` on a caller-supplied `start` wraps in release and
+    // would then pass a bounds test it should fail (decision D32).
+    let end: usize = start
+        .checked_add(len)
+        .ok_or(LinearizeError::LayoutOverflow)?;
+    if col >= storage.ncols() || end > storage.nrows() {
+        return Err(LinearizeError::StackedSystemSize {
+            expected: end.max(col + 1),
+            found: storage.nrows().min(storage.ncols()),
+        });
     }
-    let mut essential: Vec<S> = vec![S::zero(); len.saturating_sub(1)];
+    if len == 0 {
+        return Ok(());
+    }
+    let mut essential: Vec<S> = vec![S::zero(); len - 1];
     let mut work: Vec<S> = vec![S::zero(); storage.ncols()];
     let (tau, _beta) = eigen_qr::make_householder(storage, col, start, len, &mut essential);
     eigen_qr::apply_householder_on_the_left(storage, start, len, &essential, tau, &mut work);
+    Ok(())
 }
 
 /// `RelPoseLin<Scalar>` (`landmark_block.hpp:16-26`): one (host, target) pair's
@@ -107,6 +148,40 @@ impl<S: LieScalar> Default for RelPoseLin<S> {
             d_rel_d_h: Matrix6::zeros(),
             d_rel_d_t: Matrix6::zeros(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use nalgebra::DMatrix;
+
+    /// `reflect_column` is public, so its range arithmetic is checked: with
+    /// `start = usize::MAX` the sum wraps to a small number that would pass a
+    /// naive bounds test and then index out of range (decision D32).
+    #[test]
+    fn reflect_column_refuses_a_range_that_overflows() {
+        let mut m: DMatrix<f64> = DMatrix::identity(1, 1);
+        assert_eq!(
+            reflect_column(&mut m, 0, usize::MAX, 2).unwrap_err(),
+            LinearizeError::LayoutOverflow
+        );
+        // Out of range without overflowing is refused too.
+        assert!(matches!(
+            reflect_column(&mut m, 0, 0, 4).unwrap_err(),
+            LinearizeError::StackedSystemSize { .. }
+        ));
+        assert!(matches!(
+            reflect_column(&mut m, 3, 0, 1).unwrap_err(),
+            LinearizeError::StackedSystemSize { .. }
+        ));
+        // A zero-length reflection is the identity, not an error: it is what a
+        // block with no rows left asks for.
+        let before: DMatrix<f64> = m.clone();
+        reflect_column(&mut m, 0, 0, 0).unwrap();
+        assert_eq!(m, before);
     }
 }
 
@@ -228,6 +303,34 @@ pub enum LinearizeError {
         start: FrameId,
         /// End timestamp.
         end: FrameId,
+    },
+    /// An IMU interval's end timestamp does not fit in an `i64`; C++ computes
+    /// `start_t + dt` unchecked (`imu_block.hpp:30`).
+    #[error("IMU interval from {start} ns lasting {dt_ns} ns overflows the timestamp")]
+    ImuIntervalOverflow {
+        /// Start timestamp.
+        start: FrameId,
+        /// The measurement's duration.
+        dt_ns: i64,
+    },
+    /// An IMU factor's endpoint has a pose-sized block in the ordering. The
+    /// factor is 15 columns wide at each end (`imu_block.hpp:21`), so a 6-column
+    /// slot means C++ writes over the neighbouring state.
+    #[error("frame {frame} carries a {size}-column block, but an IMU factor needs 15")]
+    ImuStateNotFullSize {
+        /// The frame that disagrees.
+        frame: FrameId,
+        /// The size the ordering gave it.
+        size: usize,
+    },
+    /// A landmark block's buffer would not fit in memory. `DMatrix::zeros`
+    /// multiplies the two dimensions unchecked.
+    #[error("a landmark block of {rows} x {cols} cannot be allocated")]
+    BlockTooLarge {
+        /// Rows asked for.
+        rows: usize,
+        /// Columns asked for.
+        cols: usize,
     },
     /// The marginalization prior's ordering disagrees with the window's, which
     /// C++ asserts block by block (`ba_base.cpp:383-388`).

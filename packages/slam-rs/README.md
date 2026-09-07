@@ -37,7 +37,10 @@ weight is taken on the raw pixel residual, before the `1/sigma` scaling
 (`ba_base.cpp:179-182`), so the shipped 1.0 px threshold against a 0.5 px sigma
 is an effective 2 sigma. `compute_error` is sequential in this stage, written as
 a fixed-order fold over per-host-frame partials so the `threads` config field can
-later turn it into a `par_chunks` without changing the sum.
+later turn it into a `par_chunks` without changing the sum. The linearizer's four
+reductions are a different matter: they replace
+`tbb::parallel_deterministic_reduce`, whose order is a balanced join tree rather
+than a fold - see the `linearize` module.
 
 Every convention is quoted against the C++ it comes from, file and line, in the
 doc comments. `crates/slam-rs/tests/fixtures/` holds the shipped basalt config
@@ -231,17 +234,19 @@ pinned against the C++ fixture rather than against a live run, because a live ru
 never reaches them.
 
 One consequence of that same code path changes what `l_diff` means. With the
-optimal landmark increment substituted in, the first three rows of
-`Q^T J inc + Q^T r` collapse to `-Q1^T r`, so
+optimal landmark increment substituted in, the first three rows of `Q^T J inc`
+are `-Q1^T r` — so the *updated residual* `Q^T J inc + Q^T r` is zero there,
+which is what "the landmarks move to their own optimum" means — and
 
 ```text
 l_diff = 0.5 * sum ||Q1^T r||^2  -  inc^T b  -  0.5 inc^T H inc
 ```
 
-and the first term does not depend on the pose increment at all: basalt's
-`l_diff` is **positive at `inc = 0`**, because the landmarks still move to their
-own optimum. A port that dropped the constant would make every Levenberg-Marquardt
-gain ratio wrong in the same direction, which still converges, only worse.
+The first term does not depend on the pose increment at all, so basalt's
+`l_diff` is **nonnegative at `inc = 0`**, and zero exactly when the eliminated
+residual `Q1^T r` already is. A port that dropped the constant would make every
+Levenberg-Marquardt gain ratio wrong in the same direction, which still
+converges, only worse.
 
 Still to come: marginalization and the sliding-window driver.
 
