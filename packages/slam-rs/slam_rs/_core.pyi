@@ -143,9 +143,6 @@ class FlowFrame:
     def responses(self, camera: int) -> NDArray[np.float32]:
         """One camera's detector responses, shape ``(n,)``; ``-1`` where basalt records none."""
 
-    def levels(self, camera: int) -> NDArray[np.uint32]:
-        """``OpticalFlowResult::pyramid_levels``: **always empty** for ``frame_to_frame``."""
-
     def occupancy(self, camera: int) -> NDArray[np.int32]:
         """One camera's occupancy counts over camera 0's grid, shape ``(rows, columns)``."""
 
@@ -171,14 +168,13 @@ class OpticalFlow:
 
     def __init__(
         self,
-        calibration: Calibration | str,
-        config: VioConfig | str,
+        calibration: Calibration,
+        config: VioConfig,
         *,
         threads: int = 1,
-        epipolar_per_camera: bool = True,
         max_keypoints: int | None = None,
     ) -> None:
-        """Build a frontend for one rig; a ``str`` is read as basalt's JSON.
+        """Build a frontend for one rig; basalt's own files arrive through ``from_json``.
 
         Raises ``ValueError`` on a config the frontend cannot run — another
         pattern or flow type, a detector threshold ladder that never ends or

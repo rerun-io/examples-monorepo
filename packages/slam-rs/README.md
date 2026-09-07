@@ -430,10 +430,9 @@ refused frameset leaves the frontend exactly as the last accepted one did.
 `Calibration.from_catalog` reads `slam_rs.catalog_feed.CameraCalib` and
 `ImuCalib` attribute by attribute and hands them to `Calibration::from_catalog_parts`,
 so the catalog-to-basalt rules — the rotation-matrix check, the model names, the
-isotropic noise densities — are not written a second time in Python; either side
-also accepts one of basalt's JSON files as a string. `frame.levels(camera)` is
-always empty: basalt fills `pyramid_levels` only in the multiscale variant, which
-is not ported.
+isotropic noise densities — are not written a second time in Python. One of
+basalt's own files is read by `Calibration.from_json` or `VioConfig.from_json`,
+which is what the frontend's constructor then takes.
 
 ## The reference set
 

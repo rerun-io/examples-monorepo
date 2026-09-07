@@ -447,14 +447,13 @@ impl Calibration {
 struct CameraKeypoints {
     /// Keypoint ids, ascending.
     ids: Vec<i64>,
-    /// `[x, y]` per keypoint, keypoint index slow-varying.
-    positions: Vec<f32>,
     /// `[m00, m01, tx, m10, m11, ty]` per keypoint, keypoint index slow-varying.
+    ///
+    /// The keypoint's pixel is `[tx, ty]`, so this is where a position comes
+    /// from as well ([`FlowFrame::positions`]).
     transforms: Vec<f32>,
     /// Detector response per keypoint, `-1` where basalt records none.
     responses: Vec<f32>,
-    /// `OpticalFlowResult::pyramid_levels`, empty for this flow type.
-    levels: Vec<u32>,
     /// Occupancy counts, row-major over the frame's grid.
     occupancy: Vec<i32>,
     /// Ids handed out on this frameset: detections plus stereo matches.
@@ -517,16 +516,21 @@ impl FlowFrame {
     }
 
     /// One camera's keypoint positions in pixels: `float32[n, 2]`.
+    ///
+    /// Read out of the warps' translation column rather than stored beside them:
+    /// they are the same two floats.
     fn positions<'py>(
         &self,
         py: Python<'py>,
         camera: usize,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
         let keypoints: &CameraKeypoints = self.camera(camera)?;
-        keypoints
-            .positions
-            .to_pyarray(py)
-            .reshape((keypoints.ids.len(), 2))
+        let positions: Vec<f32> = keypoints
+            .transforms
+            .chunks_exact(6)
+            .flat_map(|warp| [warp[2], warp[5]])
+            .collect();
+        positions.to_pyarray(py).reshape((keypoints.ids.len(), 2))
     }
 
     /// One camera's 2x3 warps, `[[m00, m01, tx], [m10, m11, ty]]`: `float32[n, 2, 3]`.
@@ -549,15 +553,6 @@ impl FlowFrame {
         camera: usize,
     ) -> PyResult<Bound<'py, PyArray1<f32>>> {
         Ok(self.camera(camera)?.responses.to_pyarray(py))
-    }
-
-    /// `OpticalFlowResult::pyramid_levels`: `uint32[0]` for `frame_to_frame`.
-    ///
-    /// basalt only fills this in the multiscale variant, which is not ported, so
-    /// the array is empty rather than one entry per keypoint. It is exposed
-    /// because the core carries it, not because it holds anything today.
-    fn levels<'py>(&self, py: Python<'py>, camera: usize) -> PyResult<Bound<'py, PyArray1<u32>>> {
-        Ok(self.camera(camera)?.levels.to_pyarray(py))
     }
 
     /// One camera's occupancy counts: `int32[rows, columns]`.
@@ -608,29 +603,25 @@ pub struct OpticalFlow {
 impl OpticalFlow {
     /// Build a frontend for one rig.
     ///
-    /// `calibration` is a [`Calibration`] or one of basalt's calibration files as
-    /// text; `config` is a [`VioConfig`] or one of its config files as text.
+    /// One of basalt's own files arrives through [`Calibration::from_json`] and
+    /// [`VioConfig::from_json`], so this takes the two classes only.
     #[new]
-    #[pyo3(signature = (calibration, config, *, threads = 1, epipolar_per_camera = true, max_keypoints = None))]
+    #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None))]
     fn new(
-        calibration: &Bound<'_, PyAny>,
-        config: &Bound<'_, PyAny>,
+        calibration: PyRef<'_, Calibration>,
+        config: PyRef<'_, VioConfig>,
         threads: usize,
-        epipolar_per_camera: bool,
         max_keypoints: Option<usize>,
     ) -> PyResult<Self> {
         let defaults: FrontendOptions = FrontendOptions::default();
         let options: FrontendOptions = FrontendOptions {
-            epipolar_per_camera,
             threads,
             max_keypoints: max_keypoints.unwrap_or(defaults.max_keypoints),
+            ..defaults
         };
-        let inner: FrameToFrameOpticalFlow<Pattern51> = FrameToFrameOpticalFlow::new(
-            config_argument(config)?,
-            &calibration_argument(calibration)?,
-            options,
-        )
-        .map_err(value_error)?;
+        let inner: FrameToFrameOpticalFlow<Pattern51> =
+            FrameToFrameOpticalFlow::new(config.inner.clone(), &calibration.inner, options)
+                .map_err(value_error)?;
         let cameras: usize = inner.camera_count();
         Ok(Self {
             inner,
@@ -754,7 +745,6 @@ fn flow_frame(
     for (index, keypoints) in frame.cameras.iter().enumerate() {
         let count: usize = keypoints.len();
         let mut ids: Vec<i64> = Vec::with_capacity(count);
-        let mut positions: Vec<f32> = Vec::with_capacity(2 * count);
         let mut transforms: Vec<f32> = Vec::with_capacity(6 * count);
         let mut num_new: usize = 0;
         for (slot, id) in keypoints.ids.iter().enumerate() {
@@ -766,15 +756,12 @@ fn flow_frame(
             }
             // `[m00, m01, m10, m11, tx, ty]`, into row-major 2x3.
             let warp: [f32; 6] = keypoints.transforms.coefficients(slot);
-            positions.extend_from_slice(&[warp[4], warp[5]]);
             transforms.extend_from_slice(&[warp[0], warp[1], warp[4], warp[2], warp[3], warp[5]]);
         }
         cameras.push(CameraKeypoints {
             ids,
-            positions,
             transforms,
             responses: keypoints.responses.clone(),
-            levels: keypoints.pyramid_levels.clone(),
             occupancy: flow.cell_counts(index).to_vec(),
             num_new,
         });
@@ -784,30 +771,6 @@ fn flow_frame(
         grid,
         cameras,
     })
-}
-
-/// A [`Calibration`] or one of basalt's calibration files as text.
-fn calibration_argument(object: &Bound<'_, PyAny>) -> PyResult<CoreCalibration<f64>> {
-    if let Ok(calibration) = object.extract::<PyRef<'_, Calibration>>() {
-        return Ok(calibration.inner.clone());
-    }
-    let text: String = object.extract().map_err(|_| {
-        PyValueError::new_err(
-            "calibration must be a Calibration or a basalt calibration JSON string",
-        )
-    })?;
-    CoreCalibration::<f64>::from_json_str(&text).map_err(value_error)
-}
-
-/// A [`VioConfig`] or one of basalt's config files as text.
-fn config_argument(object: &Bound<'_, PyAny>) -> PyResult<CoreVioConfig> {
-    if let Ok(config) = object.extract::<PyRef<'_, VioConfig>>() {
-        return Ok(config.inner.clone());
-    }
-    let text: String = object.extract().map_err(|_| {
-        PyValueError::new_err("config must be a VioConfig or a basalt config JSON string")
-    })?;
-    CoreVioConfig::from_json_str(&text).map_err(value_error)
 }
 
 /// One `slam_rs.catalog_feed.CameraCalib`, read attribute by attribute.

@@ -75,7 +75,7 @@ def test_a_config_asking_for_another_pattern_is_rejected(camera: CameraFactory, 
     config: _core.VioConfig = _core.VioConfig()
     raw: str = config.to_json().replace('"config.optical_flow_pattern": 51', '"config.optical_flow_pattern": 24')
     with pytest.raises(ValueError, match="pattern"):
-        _core.OpticalFlow(_core.Calibration.from_catalog([camera(0, 0.0)], imu), raw)
+        _core.OpticalFlow(_core.Calibration.from_catalog([camera(0, 0.0)], imu), _core.VioConfig.from_json(raw))
 
 
 def test_the_image_safe_radius_survives_the_json_round_trip() -> None:
@@ -175,8 +175,6 @@ def test_the_frame_reports_shapes_the_stub_promises(camera: CameraFactory, front
         assert frame.positions(index).dtype == np.float32
         assert frame.transforms(index).shape == (count, 2, 3)
         assert frame.responses(index).shape == (count,)
-        # basalt only fills pyramid_levels in the multiscale variant.
-        assert frame.levels(index).shape == (0,)
         # The occupancy grid is camera 0's for every camera, as basalt's is.
         assert frame.occupancy(index).shape == (cells, cells)
         assert frame.occupancy(index).dtype == np.int32
@@ -274,7 +272,7 @@ def test_a_detector_threshold_ladder_that_never_runs_is_refused(camera: CameraFa
     document["value0"]["config.optical_flow_detection_min_threshold"] = 40
     document["value0"]["config.optical_flow_detection_max_threshold"] = 5
     with pytest.raises(ValueError, match="ladder starts below"):
-        _core.OpticalFlow(_core.Calibration.from_catalog([camera(0, 0.0)], imu), json.dumps(document))
+        _core.OpticalFlow(_core.Calibration.from_catalog([camera(0, 0.0)], imu), _core.VioConfig.from_json(json.dumps(document)))
 
 
 @pytest.mark.parametrize("max_keypoints", [2**20 + 1, 2**31, 2**63, 2**64 - 1])
@@ -300,7 +298,10 @@ def test_more_workers_than_the_ceiling_is_refused(camera: CameraFactory, imu: Im
 def test_a_pyramid_deeper_than_the_ceiling_is_refused(camera: CameraFactory, imu: ImuCalib, levels: int) -> None:
     """``optical_flow_levels`` sizes every per-patch buffer; an absurd one aborted the process."""
     with pytest.raises(ValueError, match="optical_flow_levels"):
-        _core.OpticalFlow(_core.Calibration.from_catalog([camera(0, 0.0)], imu), config_with("config.optical_flow_levels", levels))
+        _core.OpticalFlow(
+            _core.Calibration.from_catalog([camera(0, 0.0)], imu),
+            _core.VioConfig.from_json(config_with("config.optical_flow_levels", levels)),
+        )
 
 
 @settings(max_examples=MAX_EXAMPLES, deadline=None)
@@ -438,7 +439,7 @@ def test_no_hostile_argument_reaches_python_as_a_panic(camera: CameraFactory, im
         refuse(f"OpticalFlow(threads={value})", lambda v=value: _core.OpticalFlow(calibration, config, threads=v), failures)
         refuse(f"OpticalFlow(max_keypoints={value})", lambda v=value: _core.OpticalFlow(calibration, config, max_keypoints=v), failures)
         refuse(f"process(t_ns={value})", lambda v=value: _core.OpticalFlow(calibration, config).process(v, good), failures)
-        for accessor in ("ids", "positions", "transforms", "responses", "levels", "occupancy", "num_new", "num_tracks"):
+        for accessor in ("ids", "positions", "transforms", "responses", "occupancy", "num_new", "num_tracks"):
             refuse(f"frame.{accessor}({value})", lambda a=accessor, v=value: getattr(frame, a)(v), failures)
 
     # Every value below violates the type its parameter declares — that is what
@@ -489,7 +490,11 @@ def test_no_hostile_argument_reaches_python_as_a_panic(camera: CameraFactory, im
     assert len(numeric) > 20, f"only {len(numeric)} numeric config fields were found"
     for key in numeric:
         for value in (0, -1, 1, 2**31 - 1, -(2**31), 10**12):
-            refuse(f"config {key}={value}", lambda k=key, v=value: _core.OpticalFlow(calibration, config_with(k, v)), failures)
+            refuse(
+                f"config {key}={value}",
+                lambda k=key, v=value: _core.OpticalFlow(calibration, _core.VioConfig.from_json(config_with(k, v))),
+                failures,
+            )
 
     assert not failures, f"{len(failures)} calls did not refuse cleanly: {failures[:10]}"
 
