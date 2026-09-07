@@ -1051,7 +1051,7 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
                 abs_b[i] += acc;
             }
             // `delta^T H^T (0.5 H delta + b)` (`:431`).
-            Ok(sqrt_prior_error(&h_delta, &mld.b, rows))
+            Ok(prior_error(&h_delta, &h_delta, &mld.b, rows))
         } else {
             // `:433-437`.
             let mut h_delta: DVector<S> = DVector::zeros(marg_size);
@@ -1068,11 +1068,8 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
                 }
                 abs_b[i] += h_delta[i] + mld.b[i];
             }
-            let mut error: S = S::zero();
-            for i in 0..marg_size {
-                error += delta[i] * (c::<S>(0.5) * h_delta[i] + mld.b[i]);
-            }
-            Ok(error)
+            // `delta^T (0.5 H delta + b)` (`:437`).
+            Ok(prior_error(&delta, &h_delta, &mld.b, marg_size))
         }
     }
 
@@ -1097,12 +1094,10 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
         }
         if mld.is_sqrt {
             // `:461`.
-            return Ok(sqrt_prior_error(&h_delta, &mld.b, rows));
+            return Ok(prior_error(&h_delta, &h_delta, &mld.b, rows));
         }
         // `:463`.
-        Ok(redux_contiguous(rows.min(marg_size), |i| {
-            delta[i] * (c::<S>(0.5) * h_delta[i] + mld.b[i])
-        }))
+        Ok(prior_error(&delta, &h_delta, &mld.b, rows.min(marg_size)))
     }
 
     /// The prior's share of the model cost change,
@@ -1203,19 +1198,29 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
     }
 }
 
-/// `deltaᵀ Hᵀ (½ H delta + b)` in the square-root form both prior sites use
-/// (`ba_base.cpp:431`, `:461`).
+/// `lhsᵀ (½ H delta + b)` over the first `n` coefficients: the prior's cost at
+/// the current state, which all four prior-error sites compute.
 ///
-/// `deltaᵀ Hᵀ` and `H delta` are the same coefficients, so `h_delta` serves as
-/// both — Eigen evaluates the `ColMajor` `gemv` twice and gets the same bits.
-/// The outer `(1×n)·(n×1)` is Eigen's `InnerProduct`, which is
+/// The `lhs` is what tells the two forms apart. Square-root
+/// (`ba_base.cpp:431`, `:461`) writes `deltaᵀ Hᵀ (½ H delta + b)`, and `deltaᵀ
+/// Hᵀ` and `H delta` are the same coefficients, so `h_delta` is passed as both
+/// — Eigen evaluates the `ColMajor` `gemv` twice and gets the same bits.
+/// Hessian form (`:437`, `:463`) writes `deltaᵀ (½ H delta + b)`, so the `lhs`
+/// is `delta` itself.
+///
+/// The outer `(1×n)·(n×1)` is Eigen's `InnerProduct` in all four, which is
 /// `(lhs.transpose().cwiseProduct(rhs)).sum()`
 /// (`ProductEvaluators.h`, `generic_product_impl<..., InnerProduct>`), so the
 /// fold is [`redux_contiguous`]'s packet tree and not a left fold: the two
 /// differ in `f32`, and this value enters `error_total` whose difference across
 /// an increment is the LM accept test.
-fn sqrt_prior_error<S: LieScalar>(h_delta: &DVector<S>, b: &DVector<S>, rows: usize) -> S {
-    redux_contiguous(rows, |k| h_delta[k] * (c::<S>(0.5) * h_delta[k] + b[k]))
+fn prior_error<S: LieScalar>(
+    lhs: &DVector<S>,
+    h_delta: &DVector<S>,
+    b: &DVector<S>,
+    n: usize,
+) -> S {
+    redux_contiguous(n, |i| lhs[i] * (c::<S>(0.5) * h_delta[i] + b[i]))
 }
 
 #[cfg(test)]
