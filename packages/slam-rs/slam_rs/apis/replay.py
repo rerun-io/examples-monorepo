@@ -14,8 +14,10 @@ exists, and the day it starts tracking nothing else has to change.
 ``--stage frontend`` is the stage that does produce something. It runs
 :class:`slam_rs._core.OpticalFlow` over the same framesets and hands what it
 produced to :mod:`slam_rs.frontend_log`, which draws the keypoints, their trails,
-the occupancy grid and — where the C++ fork dumped its own — the two frontends'
-keypoints side by side.
+the occupancy grid and — where the C++ fork dumped its own, **for this segment** —
+the two frontends' keypoints side by side. The committed dumps are the smoke
+segment's, so any other ``--segment`` gets no overlay rather than the smoke
+segment's keypoints over its pixels.
 """
 
 import time
@@ -146,7 +148,7 @@ def _replay(feed: SegmentFeed, config: Config, segment: ReferenceSegment) -> Rep
     logger: FrontendLogger | None = None
     if config.stage == "frontend":
         frontend = _open_frontend(feed, segment)
-        logger = FrontendLogger.create(len(feed.cameras))
+        logger = FrontendLogger.create(len(feed.cameras), segment.segment_id)
         rr.send_blueprint(frontend_blueprint(feed.cameras))
     frontend_ms: list[float] = []
     statuses: dict[str, int] = {}

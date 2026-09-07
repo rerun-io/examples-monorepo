@@ -163,6 +163,10 @@ class OpticalFlow:
     Pattern 51 only, which is what every shipped config asks for; another
     ``optical_flow_pattern`` raises ``ValueError`` rather than tracking with the
     wrong pattern.
+
+    Every refusal here is a ``ValueError``: no argument produces a Rust panic,
+    which would arrive as a ``pyo3_runtime.PanicException`` that ``except
+    Exception`` does not catch.
     """
 
     def __init__(
@@ -174,7 +178,14 @@ class OpticalFlow:
         epipolar_per_camera: bool = True,
         max_keypoints: int | None = None,
     ) -> None:
-        """Build a frontend for one rig; a ``str`` is read as basalt's JSON."""
+        """Build a frontend for one rig; a ``str`` is read as basalt's JSON.
+
+        Raises ``ValueError`` on a config the frontend cannot run — another
+        pattern or flow type, a detector threshold ladder that never ends or
+        never runs, more pyramid levels than the patch buffers allow — and on a
+        ``max_keypoints`` or ``threads`` past the core's ceiling, both of which
+        are memory and thread requests rather than plain numbers.
+        """
 
     @property
     def camera_count(self) -> int: ...
@@ -190,7 +201,10 @@ class OpticalFlow:
         """Track and detect on one frameset of ``camera_count`` C-contiguous ``(h, w)`` uint8 images.
 
         Raises ``ValueError`` on a bad dtype, rank or layout, on the wrong number
-        of images, and unless ``t_ns`` is strictly after the last accepted frameset.
+        of images, unless every image is the size the calibration gives its
+        camera, and unless ``t_ns`` is strictly after the last accepted frameset.
+        Any ``int64`` is a timestamp, negative ones included; a refused frameset
+        leaves the frontend exactly as the last accepted one did.
         """
 
     def __repr__(self) -> str: ...
