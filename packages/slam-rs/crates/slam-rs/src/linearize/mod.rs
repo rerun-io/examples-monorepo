@@ -124,7 +124,16 @@ pub fn reflect_column<S: LieScalar>(
     }
     let mut essential: Vec<S> = vec![S::zero(); len - 1];
     let mut work: Vec<S> = vec![S::zero(); storage.ncols()];
-    let (tau, _beta) = eigen_qr::make_householder(storage, col, start, len, &mut essential);
+    // `performQRHouseholder`'s own reduction: the landmark block's `storage` is
+    // `Eigen::RowMajor`, so the column is strided (see [`eigen_qr`]).
+    let (tau, _beta) = eigen_qr::make_householder(
+        storage,
+        col,
+        start,
+        len,
+        eigen_qr::ColumnRedux::Strided,
+        &mut essential,
+    );
     eigen_qr::apply_householder_on_the_left(storage, start, len, &essential, tau, &mut work);
     Ok(())
 }

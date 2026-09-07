@@ -26,15 +26,27 @@
 //! numbers reach `det(Q1Jl) == 0` and the Levenberg-Marquardt accept/reject
 //! test. So: **Eigen's arithmetic, ported; nalgebra's versions are not called.**
 //!
-//! One reduction order is worth spelling out. `makeHouseholder` needs
-//! `tail.squaredNorm()` over a *column* of `storage`, and `storage` is
-//! `Eigen::RowMajor` (`landmark_block_abs_dynamic.hpp:530`), so that column has
-//! an inner stride of `num_cols` and is not packet-accessible. Eigen therefore
-//! takes `DefaultTraversal` with no unrolling (`Redux.h:174-192`) — a strictly
-//! sequential left fold — in **both** precisions. That is why the fold below is
-//! sequential and why it does not go through [`LieScalar::eigen_redux3`], which
-//! covers the contiguous three-coefficient case and is precision-dependent
-//! (decision D47).
+//! **One reduction order is the whole of decision D47 again, and it is not the
+//! same at every call site.** `makeHouseholder` needs `tail.squaredNorm()` over
+//! a *column* of the matrix it is called on, and which `Redux.h` traversal that
+//! takes depends on the **C++** matrix's storage order:
+//!
+//! * the landmark block's `storage` is `Eigen::RowMajor`
+//!   (`landmark_block_abs_dynamic.hpp:530`), so its columns have an inner stride
+//!   of `num_cols`, carry no `PacketAccessBit`, and reduce through
+//!   `LinearTraversal` — a strictly sequential left fold (`Redux.h:236-244`) —
+//!   in **both** precisions;
+//! * basalt's marginalization matrices are plain `Eigen::Matrix<Scalar,
+//!   Dynamic, Dynamic>`, which is column-major, so a column segment is
+//!   *contiguous* and reduces through `LinearVectorizedTraversal`
+//!   (`Redux.h:274-325`): two packet accumulators, `predux` to fold the lanes,
+//!   then a scalar tail.
+//!
+//! The two disagree in the last bits, and the result reaches
+//! `|beta| > sqrt(epsilon)` (`marg_helper.cpp:284`) and
+//! `ColPivHouseholderQR::rank()`. [`ColumnRedux`] is therefore a parameter of
+//! [`make_householder`], named at every call site, and
+//! [`contiguous_squared_norm`] is the vectorised order.
 
 use nalgebra::{DMatrix, DVector};
 
@@ -75,6 +87,112 @@ pub(crate) struct BlockSpan {
     pub(crate) cols: usize,
 }
 
+/// Which `Redux.h` traversal a column segment's `squaredNorm()` takes, which is
+/// decided by the **C++** matrix's storage order and not by nalgebra's.
+///
+/// Every `DMatrix` in this port is column-major whatever it stands for, so the
+/// distinction cannot be read off the Rust type; it has to be named where the
+/// reduction happens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ColumnRedux {
+    /// The C++ matrix is `Eigen::RowMajor`, so the column has an inner stride of
+    /// `cols`, no `PacketAccessBit`, and `LinearTraversal` folds it left to
+    /// right (`Redux.h:236-244`). The landmark block
+    /// (`landmark_block_abs_dynamic.hpp:530`).
+    Strided,
+    /// The C++ matrix is column-major, so the segment is contiguous and
+    /// `LinearVectorizedTraversal` runs (`Redux.h:274-325`). basalt's
+    /// marginalization matrices — `Q2Jp` in `marg_helper.cpp` and `m_qr` in
+    /// `ColPivHouseholderQR`.
+    Contiguous,
+}
+
+/// `squaredNorm()` over the **contiguous** column segment
+/// `storage.col(col).segment(start, len)`, in Eigen's order.
+///
+/// `redux_impl<Func, Evaluator, LinearVectorizedTraversal, NoUnrolling>::run`
+/// (`Eigen/src/Core/Redux.h:274-325`) over `unaryExpr(squared_norm_functor)`
+/// (`Dot.h:24`), whose `Evaluator::SizeAtCompileTime` is `Dynamic`, so the cost
+/// is `HugeCost` and the unrolled variants never apply.
+///
+/// **`alignedStart` is always zero, and that is a property of the expression,
+/// not of the address.** `Redux.h:290` calls
+/// `internal::first_default_aligned(xpr)`, and `xpr` here is the `CwiseUnaryOp`
+/// the squared norm reduces; `CwiseUnaryOp.h:25` keeps only `RowMajorBit` in its
+/// flags, so `DenseCoeffsBase.h:533`'s `ReturnZero` is true and the head split
+/// never happens. The fork's `tools/marg_norm_probe.cpp` prints
+/// `first_default_aligned(unaryExpr) = 0` from Eigen itself and reproduces
+/// Eigen bit for bit on **7,486 of 7,486** shapes per precision (rows 1..100,
+/// column counts 1, 2, 3, 5, 8, every column index, segment starts 0..3); the
+/// same emulation fed the *pointer*-derived offset instead reproduces 5,869
+/// (`f64`) and 4,832 (`f32`), and the sequential left fold 2,627 and 2,897.
+pub(crate) fn contiguous_squared_norm<S: LieScalar>(
+    storage: &DMatrix<S>,
+    col: usize,
+    start: usize,
+    len: usize,
+) -> S {
+    let sq = |i: usize| -> S {
+        let v: S = storage[(start + i, col)];
+        v * v
+    };
+    let packet: usize = S::EIGEN_PACKET_SIZE;
+    // `:291-292` with `alignedStart == 0`.
+    let aligned_size2: usize = (len / (2 * packet)) * (2 * packet);
+    let aligned_size: usize = (len / packet) * packet;
+
+    if aligned_size == 0 {
+        // `:317-322`: "too small to vectorize anything".
+        let mut res: S = sq(0);
+        for i in 1..len {
+            res += sq(i);
+        }
+        return res;
+    }
+
+    // `:296`. Four lanes because that is the widest packet either scalar has;
+    // only the first `packet` of them are read.
+    let mut packet0: [S; 4] = [S::zero(); 4];
+    for (lane, slot) in packet0.iter_mut().enumerate().take(packet) {
+        *slot = sq(lane);
+    }
+    if aligned_size > packet {
+        // `:297-307`: two accumulators, one for the even packets and one for
+        // the odd, folded together at the end.
+        let mut packet1: [S; 4] = [S::zero(); 4];
+        for (lane, slot) in packet1.iter_mut().enumerate().take(packet) {
+            *slot = sq(packet + lane);
+        }
+        let mut index: usize = 2 * packet;
+        while index < aligned_size2 {
+            for (lane, slot) in packet0.iter_mut().enumerate().take(packet) {
+                *slot += sq(index + lane);
+            }
+            for (lane, slot) in packet1.iter_mut().enumerate().take(packet) {
+                *slot += sq(index + packet + lane);
+            }
+            index += 2 * packet;
+        }
+        // `:306`.
+        for (lane, slot) in packet0.iter_mut().enumerate().take(packet) {
+            *slot += packet1[lane];
+        }
+        // `:307-308`: one odd packet left over.
+        if aligned_size > aligned_size2 {
+            for (lane, slot) in packet0.iter_mut().enumerate().take(packet) {
+                *slot += sq(aligned_size2 + lane);
+            }
+        }
+    }
+    // `:310`, then `:314` — the head loop of `:312` is empty because
+    // `alignedStart` is zero.
+    let mut res: S = S::eigen_predux(packet0);
+    for i in aligned_size..len {
+        res += sq(i);
+    }
+    res
+}
+
 /// `makeHouseholder` (`Householder.h:63-86`), real scalars, over
 /// `storage.col(col).segment(start, len)`.
 ///
@@ -86,22 +204,38 @@ pub(crate) struct BlockSpan {
 /// The `tailSqNorm <= tol` branch (`:76-79`) is the already-reduced column:
 /// `tau = 0` makes the reflection the identity, which is what
 /// [`apply_householder_on_the_left`] then skips.
+///
+/// `redux` names which reduction `tail.squaredNorm()` (`:72`) takes; see the
+/// module docs and [`ColumnRedux`]. Getting it wrong moves `beta`, and `beta`
+/// is what the marginalization QR compares against `sqrt(epsilon)`.
 pub(crate) fn make_householder<S: LieScalar>(
     storage: &DMatrix<S>,
     col: usize,
     start: usize,
     len: usize,
+    redux: ColumnRedux,
     essential: &mut [S],
 ) -> (S, S) {
     let c0: S = storage[(start, col)];
 
-    // `tail.squaredNorm()` (`:72`): a sequential fold, see the module docs. The
-    // `size() == 1` guard of `:72` is the empty loop here.
-    let mut tail_sq_norm: S = S::zero();
-    for i in 1..len {
-        let v: S = storage[(start + i, col)];
-        tail_sq_norm += v * v;
-    }
+    // `tail.squaredNorm()` (`:72`) over `segment(start + 1, len - 1)`. The
+    // `size() == 1` guard of `:72` is the empty loop / zero length here.
+    let tail_sq_norm: S = match redux {
+        ColumnRedux::Strided => {
+            let mut acc: S = S::zero();
+            for i in 1..len {
+                let v: S = storage[(start + i, col)];
+                acc += v * v;
+            }
+            acc
+        }
+        ColumnRedux::Contiguous if len > 1 => {
+            contiguous_squared_norm(storage, col, start + 1, len - 1)
+        }
+        // An empty tail: `DenseBase::sum()` returns `Scalar(0)` without
+        // reducing (`Redux.h:489`), which is also what the fold above gives.
+        ColumnRedux::Contiguous => S::zero(),
+    };
 
     // `std::numeric_limits<RealScalar>::min()` (`:74`), the smallest positive
     // normal — not `RealField::min_value()`, which is the most negative finite.
@@ -268,6 +402,13 @@ pub(crate) fn apply_householder_on_the_left_vec<S: LieScalar>(
 /// Same arithmetic as [`make_householder`], different traversal: the complete
 /// orthogonal decomposition builds its `Z` reflectors out of rows
 /// (`CompleteOrthogonalDecomposition.h:487`).
+///
+/// The reduction stays **sequential** and takes no [`ColumnRedux`], because a
+/// row of a column-major matrix has an inner stride of `rows`: `traits<Block>`
+/// gives a one-row block `InnerStrideAtCompileTime = Dynamic`, so it carries no
+/// `PacketAccessBit` and `LinearTraversal` folds it left to right
+/// (`Redux.h:236-244`) — the mirror of what the landmark block's row-major
+/// *columns* get.
 pub(crate) fn make_householder_row<S: LieScalar>(
     storage: &DMatrix<S>,
     row: usize,
@@ -422,7 +563,7 @@ pub(crate) fn apply_rotation_on_the_left<S: LieScalar>(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
     use nalgebra::DMatrix;
@@ -456,7 +597,8 @@ mod tests {
                 storage[(i, 0)] = *v;
             }
             let mut essential: Vec<f64> = vec![0.0; len - 1];
-            let (tau, beta) = make_householder(&storage, 0, 0, len, &mut essential);
+            let (tau, beta) =
+                make_householder(&storage, 0, 0, len, ColumnRedux::Strided, &mut essential);
             let h: DMatrix<f64> = dense_reflection(len, &essential, tau);
             let reflected: nalgebra::DVector<f64> =
                 h * nalgebra::DVector::from_column_slice(&values);
@@ -483,7 +625,8 @@ mod tests {
                 }
             }
             let mut essential: Vec<f64> = vec![0.0; len - 1];
-            let (tau, _) = make_householder(&storage, 0, 0, len, &mut essential);
+            let (tau, _) =
+                make_householder(&storage, 0, 0, len, ColumnRedux::Strided, &mut essential);
             let dense: DMatrix<f64> = dense_reflection(len, &essential, tau) * storage.clone();
             let mut work: Vec<f64> = vec![0.0; cols];
             apply_householder_on_the_left(&mut storage, 0, len, &essential, tau, &mut work);
@@ -510,7 +653,7 @@ mod tests {
             };
             let mut essential: Vec<f64> = vec![0.0; rows - 1];
             let mut a: DMatrix<f64> = build();
-            let (tau, _) = make_householder(&a, 0, 0, rows, &mut essential);
+            let (tau, _) = make_householder(&a, 0, 0, rows, ColumnRedux::Strided, &mut essential);
 
             let mut work: Vec<f64> = vec![0.0; cols];
             apply_householder_on_the_left(&mut a, 0, rows, &essential, tau, &mut work);
@@ -543,7 +686,14 @@ mod tests {
                 BlockSpan { row_start: 2, rows: 4, col_start: 3, cols: 4 };
 
             let mut essential: Vec<f64> = vec![0.0; span.rows - 1];
-            let (tau, _) = make_householder(&after, 1, span.row_start, span.rows, &mut essential);
+            let (tau, _) = make_householder(
+                &after,
+                1,
+                span.row_start,
+                span.rows,
+                ColumnRedux::Strided,
+                &mut essential,
+            );
             let mut work: Vec<f64> = vec![0.0; span.cols];
             apply_householder_on_the_left_block(&mut after, span, &essential, tau, &mut work);
 
@@ -581,5 +731,140 @@ mod tests {
             let survivor: f64 = -rot.s * q + rot.c * p;
             prop_assert!((survivor.abs() - (p * p + q * q).sqrt()).abs() < 1e-12 * scale);
         }
+    }
+
+    /// One case of [`contiguous_squared_norm`] against the bits Eigen produced
+    /// for it, decoded from `column` and compared to `expected`.
+    fn assert_contiguous<S: LieScalar>(column: &[S], expected: S) {
+        let len: usize = column.len();
+        // A wide matrix, so the reduced column is neither the first nor the
+        // last: the port must not depend on where in the allocation it sits.
+        let mut storage: DMatrix<S> = DMatrix::zeros(len, 3);
+        for (i, v) in column.iter().enumerate() {
+            storage[(i, 1)] = *v;
+        }
+        let got: S = contiguous_squared_norm(&storage, 1, 0, len);
+        assert_eq!(
+            got.to_f64().to_bits(),
+            expected.to_f64().to_bits(),
+            "len {len}: got {got:?}, Eigen {expected:?}"
+        );
+    }
+
+    /// [`contiguous_squared_norm`] reproduces Eigen's `squaredNorm()` bit for
+    /// bit on four cases, one per branch of `Redux.h:274-325`.
+    ///
+    /// The numbers are the fork's, printed by `tools/marg_norm_probe.cpp` as
+    /// raw bit patterns, so nothing is lost to decimal. Each case is chosen to
+    /// **fail** under a plausible wrong order, which is what makes the test say
+    /// something: the `f64` cases of length 8 and 9 both reject a
+    /// single-accumulator packet loop and the sequential left fold the port
+    /// shipped before this, and the `f32` case of length 16 rejects those two
+    /// *and* a `predux` that folds the four lanes left to right instead of
+    /// pairing them `(a₀+a₂) + (a₁+a₃)`.
+    #[test]
+    fn the_contiguous_reduction_is_eigens_reduction() {
+        // `alignedSize == 0`: one coefficient, nothing to vectorize.
+        assert_contiguous::<f64>(
+            &[f64::from_bits(0xbfe8_0d2e_9c86_ddda)],
+            f64::from_bits(0x3fe2_13cb_58ed_5f5d),
+        );
+        // Four packets, no tail: the two accumulators and their fold.
+        assert_contiguous::<f64>(
+            &[
+                f64::from_bits(0x3fdf_6dcc_c0d2_463c),
+                f64::from_bits(0x3fe1_a542_f880_2596),
+                f64::from_bits(0xbf92_ffaa_148d_aa00),
+                f64::from_bits(0xbfdc_fbf2_788d_6bc4),
+                f64::from_bits(0x3fc0_4612_22f0_f260),
+                f64::from_bits(0xbfe7_d130_9531_90a8),
+                f64::from_bits(0x3fed_74ea_52b4_3272),
+                f64::from_bits(0x3fd8_2eff_ab90_0400),
+            ],
+            f64::from_bits(0x4002_7ccc_bea8_8ea9),
+        );
+        // Nine coefficients: four packets and a one-coefficient scalar tail.
+        assert_contiguous::<f64>(
+            &[
+                f64::from_bits(0xbfd6_f147_67c1_07fc),
+                f64::from_bits(0x3fe7_3f95_5182_2c26),
+                f64::from_bits(0xbfdf_8a84_bbe8_45f4),
+                f64::from_bits(0xbfc1_dadc_d961_a750),
+                f64::from_bits(0xbfea_9027_5d35_44d2),
+                f64::from_bits(0xbfd9_23aa_5c1d_6a98),
+                f64::from_bits(0xbfdb_dd99_e6da_f05c),
+                f64::from_bits(0x3fd2_a792_6e43_18e4),
+                f64::from_bits(0xbfd8_ee16_95fb_94d0),
+            ],
+            f64::from_bits(0x4001_819b_c3ad_06dd),
+        );
+        // Four `Packet4f`s: the lane pairing decides this one.
+        assert_contiguous::<f32>(
+            &[
+                f32::from_bits(0x3e85_2fc5),
+                f32::from_bits(0x3ec7_c6df),
+                f32::from_bits(0xbf4b_e21e),
+                f32::from_bits(0x3ec1_4ea3),
+                f32::from_bits(0x3f4d_2a52),
+                f32::from_bits(0x3dc6_8a92),
+                f32::from_bits(0x3d79_1b02),
+                f32::from_bits(0x3ea9_b602),
+                f32::from_bits(0x3f62_822b),
+                f32::from_bits(0xbf0e_1bf2),
+                f32::from_bits(0xbf5b_9c9a),
+                f32::from_bits(0xbeed_9ec9),
+                f32::from_bits(0xbea2_8f3d),
+                f32::from_bits(0x3e72_a5ee),
+                f32::from_bits(0x3f69_6d43),
+                f32::from_bits(0xbf05_df74),
+            ],
+            f32::from_bits(0x40a2_1e1a),
+        );
+    }
+
+    /// The whole shape sweep, when the fork's probe has been run.
+    ///
+    /// `SLAM_RS_MARG_NORM_SWEEP` points at the file
+    /// `basalt_marg_norm_probe <file>` writes: one line per case, `scalar rows
+    /// cols col start expected-bits value-bits…`, 7,486 cases per precision
+    /// over rows 1..100. Unset — the default — this passes without checking
+    /// anything, the way the optical-flow parity test treats its frame
+    /// directory; the inline cases above cover the branches on every run.
+    #[test]
+    fn the_contiguous_reduction_reproduces_eigen_over_the_whole_sweep() {
+        let Ok(path) = std::env::var("SLAM_RS_MARG_NORM_SWEEP") else {
+            return;
+        };
+        let text: String = std::fs::read_to_string(&path).expect("the sweep file");
+        let mut checked: usize = 0;
+        for line in text.lines() {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            assert!(fields.len() > 6, "short line: {line}");
+            let scalar: &str = fields[0];
+            let expected: u64 = u64::from_str_radix(fields[5], 16).expect("hex");
+            let values: Vec<u64> = fields[6..]
+                .iter()
+                .map(|f| u64::from_str_radix(f, 16).expect("hex"))
+                .collect();
+            match scalar {
+                "f64" => {
+                    let column: Vec<f64> = values.iter().map(|b| f64::from_bits(*b)).collect();
+                    assert_contiguous::<f64>(&column, f64::from_bits(expected));
+                }
+                "f32" => {
+                    let column: Vec<f32> = values
+                        .iter()
+                        .map(|b| f32::from_bits(u32::try_from(*b).expect("32 bits")))
+                        .collect();
+                    assert_contiguous::<f32>(
+                        &column,
+                        f32::from_bits(u32::try_from(expected).expect("32 bits")),
+                    );
+                }
+                other => panic!("unknown scalar {other}"),
+            }
+            checked += 1;
+        }
+        assert!(checked > 10_000, "only {checked} cases in {path}");
     }
 }

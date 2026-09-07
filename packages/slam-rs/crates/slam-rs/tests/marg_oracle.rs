@@ -282,7 +282,7 @@ fn check_case<S: LieScalar>(case: &Case, tols: Tolerances, worst: &mut Worst) {
             "{}: rank of the reduced system",
             label("sqrt_to_sqrt")
         );
-        let solution: DVector<S> = Cod::new(&got.h).solve_vec(&got.b);
+        let solution: DVector<S> = Cod::new(&got.h).solve_vec(&got.b).unwrap();
         compare_vec(
             &solution,
             &want.solution,
@@ -406,7 +406,7 @@ fn check_case<S: LieScalar>(case: &Case, tols: Tolerances, worst: &mut Worst) {
     let full: Cod<S> = Cod::new(&j);
     assert_eq!(full.rank(), case.full_rank, "{}: rank", label("full"));
     compare_vec(
-        &full.solve_vec(&r),
+        &full.solve_vec(&r).unwrap(),
         &case.full_solution,
         tol,
         &label("full_solution"),
@@ -592,18 +592,18 @@ fn rank_def_least_squares() {
 
     // `:63-78`, the QR version.
     let qr: ReducedSystem<f64> = MargHelper::sqrt_to_sqrt(j, r, &keep, &marg).unwrap();
-    let sol_qr: DVector<f64> = Cod::new(&qr.h).solve_vec(&qr.b);
+    let sol_qr: DVector<f64> = Cod::new(&qr.h).solve_vec(&qr.b).unwrap();
 
     // `:46-61`, the SC version.
     let sc: ReducedSystem<f64> =
         MargHelper::sq_to_sq(sq_h.clone(), sq_b.clone(), &keep, &marg).unwrap();
-    let sol_sc: DVector<f64> = Cod::new(&sc.h).solve_vec(&sc.b);
+    let sol_sc: DVector<f64> = Cod::new(&sc.h).solve_vec(&sc.b).unwrap();
 
     // `:23-44`, the square-root SC version, and its squared form.
     let sqrt_sc: ReducedSystem<f64> = MargHelper::sq_to_sqrt(sq_h, sq_b, &keep, &marg).unwrap();
     let squared: DMatrix<f64> = sqrt_sc.h.transpose() * &sqrt_sc.h;
     let squared_b: DVector<f64> = sqrt_sc.h.transpose() * &sqrt_sc.b;
-    let sol_sqrt_sc2: DVector<f64> = Cod::new(&squared).solve_vec(&squared_b);
+    let sol_sqrt_sc2: DVector<f64> = Cod::new(&squared).solve_vec(&squared_b).unwrap();
 
     // `:80-81`, with Eigen's `isApprox` precision.
     let prec: f64 = f64::EPSILON.sqrt();

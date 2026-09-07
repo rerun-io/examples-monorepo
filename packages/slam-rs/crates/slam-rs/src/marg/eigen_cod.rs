@@ -46,9 +46,11 @@ use nalgebra::{DMatrix, DVector};
 
 use crate::lie::LieScalar;
 use crate::linearize::eigen_qr::{
-    BlockSpan, apply_householder_on_the_left_block, apply_householder_on_the_right_block,
-    make_householder, make_householder_row,
+    BlockSpan, ColumnRedux, apply_householder_on_the_left_block,
+    apply_householder_on_the_right_block, contiguous_squared_norm, make_householder,
+    make_householder_row,
 };
+use crate::marg::MargError;
 
 /// `Eigen::ColPivHouseholderQR<MatX>`.
 #[derive(Debug, Clone)]
@@ -80,15 +82,15 @@ impl<S: LieScalar> ColPivHouseholderQr<S> {
         let mut temp: Vec<S> = vec![S::zero(); cols];
         let mut cols_transpositions: Vec<usize> = vec![0; cols];
 
-        // `:504-511`.
+        // `:504-511`: `m_colNormsDirect(k) = m_qr.col(k).norm()`. `m_qr` is
+        // column-major, so the whole column is contiguous and Eigen's
+        // vectorised reduction runs; a sequential fold here moves the pivot
+        // search and `rank()` (the review's `10x2` problem: Eigen 2, a
+        // sequential fold 1, in both precisions).
         let mut col_norms_updated: Vec<S> = vec![S::zero(); cols];
         let mut col_norms_direct: Vec<S> = vec![S::zero(); cols];
         for k in 0..cols {
-            let mut acc: S = S::zero();
-            for i in 0..rows {
-                acc += qr[(i, k)] * qr[(i, k)];
-            }
-            col_norms_direct[k] = acc.sqrt();
+            col_norms_direct[k] = contiguous_squared_norm(&qr, k, 0, rows).sqrt();
             col_norms_updated[k] = col_norms_direct[k];
         }
 
@@ -142,7 +144,8 @@ impl<S: LieScalar> ColPivHouseholderQr<S> {
 
             // `:540-544`.
             let len: usize = rows - k;
-            let (tau, beta) = make_householder(&qr, k, k, len, &mut essential);
+            let (tau, beta) =
+                make_householder(&qr, k, k, len, ColumnRedux::Contiguous, &mut essential);
             h_coeffs[k] = tau;
             for (i, e) in essential.iter().enumerate().take(len - 1) {
                 qr[(k + 1 + i, k)] = *e;
@@ -179,12 +182,17 @@ impl<S: LieScalar> ColPivHouseholderQr<S> {
                     let ratio: S = col_norms_updated[j] / col_norms_direct[j];
                     let temp2: S = t * (ratio * ratio);
                     if temp2 <= norm_downdate_threshold {
-                        // `:568-569`: recompute directly.
-                        let mut acc: S = S::zero();
-                        for i in (k + 1)..rows {
-                            acc += qr[(i, j)] * qr[(i, j)];
-                        }
-                        col_norms_direct[j] = acc.sqrt();
+                        // `:568-569`: recompute directly, from
+                        // `m_qr.col(j).tail(rows - k - 1).norm()` — contiguous
+                        // again. The tail is empty when `k + 1 == rows`, which a
+                        // wider-than-tall matrix reaches on its last step, and
+                        // `DenseBase::sum()` returns `Scalar(0)` for an empty
+                        // expression rather than reducing (`Redux.h:489`).
+                        col_norms_direct[j] = if k + 1 < rows {
+                            contiguous_squared_norm(&qr, j, k + 1, rows - k - 1).sqrt()
+                        } else {
+                            S::zero()
+                        };
                         col_norms_updated[j] = col_norms_direct[j];
                     } else {
                         // `:571`.
@@ -381,7 +389,31 @@ impl<S: LieScalar> Cod<S> {
 
     /// `solve(rhs)` (`_solve_impl`, `:544-569`): the minimum-norm least-squares
     /// solution.
-    pub fn solve(&self, rhs: &DMatrix<S>) -> DMatrix<S> {
+    ///
+    /// C++ asserts the right-hand side's height —
+    /// `derived().rows() == b.rows()` in `SolverBase::solve`
+    /// (`Eigen/src/Core/util/../SolverBase.h`), where
+    /// `CompleteOrthogonalDecomposition::rows()` is the *factorized matrix's*
+    /// row count. The port returns [`MargError::RhsLengthMismatch`] instead: a
+    /// short right-hand side used to index past the end of it through the
+    /// unchecked [`BlockSpan`] built from `rows` rather than from the argument
+    /// (decision D32).
+    pub fn solve(&self, rhs: &DMatrix<S>) -> Result<DMatrix<S>, MargError> {
+        if rhs.nrows() != self.cpqr.rows {
+            return Err(MargError::RhsLengthMismatch {
+                rows: self.cpqr.rows,
+                rhs: rhs.nrows(),
+            });
+        }
+        Ok(self.solve_with_validated_rhs(rhs))
+    }
+
+    /// The body of `_solve_impl` (`:544-569`).
+    ///
+    /// **Contract: `rhs.nrows() == self.cpqr.rows`.** [`Self::solve`] is the
+    /// checked boundary; [`Self::pseudo_inverse`] passes an identity of exactly
+    /// that many rows, one line away from where it is built.
+    fn solve_with_validated_rhs(&self, rhs: &DMatrix<S>) -> DMatrix<S> {
         let cols: usize = self.cpqr.cols;
         let nrhs: usize = rhs.ncols();
         let mut dst: DMatrix<S> = DMatrix::zeros(cols, nrhs);
@@ -422,22 +454,38 @@ impl<S: LieScalar> Cod<S> {
     }
 
     /// `pseudoInverse()` (`:640-651`): `solve(Identity(rows, rows))`.
+    ///
+    /// Infallible, because the identity it solves against is `rows` tall by
+    /// construction — the one dimension [`Self::solve`] would check.
     pub fn pseudo_inverse(&self) -> DMatrix<S> {
-        self.solve(&DMatrix::identity(self.cpqr.rows, self.cpqr.rows))
+        self.solve_with_validated_rhs(&DMatrix::identity(self.cpqr.rows, self.cpqr.rows))
     }
 
     /// `solve` for a single right-hand side, which is what
     /// `test_qr.cpp`'s `RankDefLeastSquares` asks for.
-    pub fn solve_vec(&self, rhs: &DVector<S>) -> DVector<S> {
+    pub fn solve_vec(&self, rhs: &DVector<S>) -> Result<DVector<S>, MargError> {
+        if rhs.nrows() != self.cpqr.rows {
+            return Err(MargError::RhsLengthMismatch {
+                rows: self.cpqr.rows,
+                rhs: rhs.nrows(),
+            });
+        }
         let as_matrix: DMatrix<S> = DMatrix::from_iterator(rhs.nrows(), 1, rhs.iter().copied());
-        let solved: DMatrix<S> = self.solve(&as_matrix);
-        DVector::from_iterator(solved.nrows(), solved.column(0).iter().copied())
+        let solved: DMatrix<S> = self.solve_with_validated_rhs(&as_matrix);
+        Ok(DVector::from_iterator(
+            solved.nrows(),
+            solved.column(0).iter().copied(),
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+    // The probe columns below are the fork's `%.17g` printout, carried over
+    // verbatim even where the scalar does not need every figure. Keeping the
+    // printout is what makes them evidence.
+    #![allow(clippy::excessive_precision)]
 
     use super::*;
     use proptest::prelude::*;
@@ -508,6 +556,27 @@ mod tests {
                     prop_assert!((pap[(r, c)] - inv[(r, c)]).abs() < 1e-8 * inv_scale);
                 }
             }
+
+            // The other two conditions. `APA = A` and `PAP = P` alone hold for
+            // any generalized inverse; what singles the Moore-Penrose one out
+            // is that both products are *symmetric*, i.e. `AP` and `PA` are the
+            // orthogonal projectors onto the column and row spaces.
+            let ap: DMatrix<f64> = &a * &inv;
+            let pa: DMatrix<f64> = &inv * &a;
+            let ap_scale: f64 = ap.iter().fold(0.0f64, |acc, v| acc.max(v.abs())).max(1.0);
+            let pa_scale: f64 = pa.iter().fold(0.0f64, |acc, v| acc.max(v.abs())).max(1.0);
+            for r in 0..size {
+                for c in 0..size {
+                    prop_assert!(
+                        (ap[(r, c)] - ap[(c, r)]).abs() < 1e-8 * ap_scale,
+                        "(AP)ᵀ != AP at ({}, {})", r, c
+                    );
+                    prop_assert!(
+                        (pa[(r, c)] - pa[(c, r)]).abs() < 1e-8 * pa_scale,
+                        "(PA)ᵀ != PA at ({}, {})", r, c
+                    );
+                }
+            }
         }
     }
 
@@ -517,7 +586,82 @@ mod tests {
     fn a_zero_matrix_solves_to_zero() {
         let cod: Cod<f64> = Cod::new(&DMatrix::zeros(4, 4));
         assert_eq!(cod.rank(), 0);
-        let solved: DVector<f64> = cod.solve_vec(&DVector::from_element(4, 1.0));
+        let solved: DVector<f64> = cod.solve_vec(&DVector::from_element(4, 1.0)).unwrap();
         assert_eq!(solved, DVector::zeros(4));
+    }
+
+    /// A right-hand side of the wrong height is a typed error, not an
+    /// out-of-range read through the unchecked span of
+    /// [`ColPivHouseholderQr::apply_q_adjoint_on_the_left`].
+    ///
+    /// `Cod::new` on a `2x2` then `solve` on a `1x1` used to index row 1 of a
+    /// one-row matrix.
+    #[test]
+    fn a_right_hand_side_of_the_wrong_height_is_refused() {
+        let mut a: DMatrix<f64> = DMatrix::zeros(2, 2);
+        a[(0, 0)] = 1.0;
+        a[(1, 0)] = 1.0;
+        a[(1, 1)] = 1.0;
+        let cod: Cod<f64> = Cod::new(&a);
+        assert_eq!(cod.rank(), 2);
+        assert_eq!(
+            cod.solve(&DMatrix::zeros(1, 1)),
+            Err(MargError::RhsLengthMismatch { rows: 2, rhs: 1 })
+        );
+        assert_eq!(
+            cod.solve_vec(&DVector::zeros(1)),
+            Err(MargError::RhsLengthMismatch { rows: 2, rhs: 1 })
+        );
+        assert_eq!(
+            cod.solve(&DMatrix::zeros(3, 1)),
+            Err(MargError::RhsLengthMismatch { rows: 2, rhs: 3 })
+        );
+        // The right height still works, whatever the width.
+        assert!(cod.solve(&DMatrix::zeros(2, 5)).is_ok());
+    }
+
+    /// The `10x2` problem the S7 review reproduced: Eigen's rank is **2** and
+    /// the sequential column-norm fold the port shipped made it **1**, in both
+    /// precisions.
+    ///
+    /// `a(0, 0) = 1` and rows 1..9 of column 1 hold a vector scaled to just
+    /// past `2 * epsilon`, so the second pivot lands within an ulp of
+    /// `rank()`'s `maxpivot * epsilon * diagonalSize` threshold and the
+    /// reduction order decides it. The two columns and the expected ranks come
+    /// from the fork (`tools/marg_norm_probe.cpp`, the "COD problem" section).
+    #[test]
+    fn the_reviews_rank_boundary_problem_has_eigens_rank() {
+        fn check<S: LieScalar>(column: &[f64; 9]) {
+            let mut a: DMatrix<S> = DMatrix::zeros(10, 2);
+            a[(0, 0)] = S::one();
+            for (i, v) in column.iter().enumerate() {
+                a[(i + 1, 1)] = S::from_literal(*v);
+            }
+            assert_eq!(Cod::new(&a).rank(), 2);
+        }
+        // The `f32` column, scaled in `f32`.
+        check::<f32>(&[
+            3.8839900184939324e-08,
+            8.5545108774454093e-09,
+            -1.0945134221174158e-07,
+            -7.9057826951611787e-08,
+            -1.1235827912514651e-07,
+            -1.0663756455642215e-07,
+            -8.3013901530648582e-08,
+            -6.6877191784442402e-08,
+            -4.0892032870942785e-08,
+        ]);
+        // The `f64` column.
+        check::<f64>(&[
+            2.1142743579943638e-16,
+            -8.1965718710367306e-17,
+            -2.4687331390702622e-16,
+            -9.5228852078720228e-17,
+            1.365723716499534e-16,
+            1.1965862760119914e-17,
+            -3.6399123055194747e-17,
+            2.049020062317018e-16,
+            -1.1694185041507896e-16,
+        ]);
     }
 }

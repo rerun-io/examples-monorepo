@@ -14,7 +14,8 @@ use crate::camera::CameraEnum;
 use crate::landmark::Landmark;
 use crate::lie::LieScalar;
 use crate::linearize::eigen_qr::{
-    apply_householder_on_the_left, apply_rotation_on_the_left, make_givens, make_householder,
+    ColumnRedux, apply_householder_on_the_left, apply_rotation_on_the_left, make_givens,
+    make_householder,
 };
 use crate::linearize::{LinearizeError, RelPoseLin};
 use crate::types::{AbsOrderMap, LandmarkId, POSE_SIZE, TimeCamId};
@@ -477,6 +478,9 @@ impl<S: LieScalar> LandmarkBlock<S> {
                 self.lm_idx + k,
                 k,
                 remaining_rows,
+                // `storage` stands for an `Eigen::RowMajor` matrix (`:530`), so
+                // its columns are strided and reduce sequentially.
+                ColumnRedux::Strided,
                 &mut self.work_essential,
             );
             apply_householder_on_the_left(

@@ -90,6 +90,38 @@ pub trait LieScalar: RealField + Copy {
     /// rejects.
     fn eigen_redux3(a: Self, b: Self, c: Self) -> Self;
 
+    /// The width of the widest Eigen packet for this scalar in the reference
+    /// build: `unpacket_traits<packet_traits<Scalar>::type>::size`.
+    ///
+    /// The reference `libbasalt.so` is SSE3 on every host — conda's `CXXFLAGS`
+    /// append `-march=nocona` after the CMakeLists' `-march=native`, and the
+    /// last `-march` wins — so a `Packet2d` holds two doubles and a `Packet4f`
+    /// four floats. `tools/marg_norm_probe.cpp` on the fork prints both sizes
+    /// from `packet_traits` itself rather than trusting the flag reading.
+    ///
+    /// This is the loop bound of [`crate::linearize::eigen_qr::contiguous_squared_norm`],
+    /// which is Eigen's vectorised `redux` for a contiguous column segment.
+    const EIGEN_PACKET_SIZE: usize;
+
+    /// `predux` on a full packet of this scalar
+    /// (`Eigen/src/Core/arch/SSE/Reductions.h`).
+    ///
+    /// Not a plain fold: each architecture pairs the lanes the way its shuffle
+    /// instructions do, and the pairing is a different rounding.
+    ///
+    /// * `Packet2d` (`:265-272`) — `a + unpackhi(a, a)`, lane 0: `a₀ + a₁`.
+    /// * `Packet4f` (`:205-217`) — `a + movehl(a, a)` puts `(a₀+a₂, a₁+a₃)` in
+    ///   the low lanes, then SSE3's `movehdup` adds lane 1 into lane 0:
+    ///   `(a₀ + a₂) + (a₁ + a₃)`.
+    ///
+    /// The argument is four lanes wide — the widest packet either scalar has,
+    /// so one stack array serves both — and an implementation reads only its
+    /// own [`Self::EIGEN_PACKET_SIZE`] of them. Probed over 7,486 shapes per
+    /// precision: an otherwise identical reduction with a left fold over the
+    /// lanes reproduces Eigen on 5,572 of them in `f32` (in `f64` a packet has
+    /// two lanes, so the two orders coincide).
+    fn eigen_predux(packet: [Self; 4]) -> Self;
+
     /// Exact-as-possible conversion of a literal, standing in for C++'s `Scalar(x)`.
     fn from_literal(value: f64) -> Self;
 
@@ -113,6 +145,13 @@ impl LieScalar for f64 {
     /// One `Packet2d` plus the scalar remainder.
     fn eigen_redux3(a: Self, b: Self, c: Self) -> Self {
         (a + b) + c
+    }
+
+    const EIGEN_PACKET_SIZE: usize = 2;
+
+    fn eigen_predux(packet: [Self; 4]) -> Self {
+        // `Packet2d`: two lanes, so the sum is the only order there is.
+        packet[0] + packet[1]
     }
 
     fn from_literal(value: f64) -> Self {
@@ -140,6 +179,14 @@ impl LieScalar for f32 {
     /// `Packet4f` is wider than three floats, so the scalar unroller runs.
     fn eigen_redux3(a: Self, b: Self, c: Self) -> Self {
         a + (b + c)
+    }
+
+    const EIGEN_PACKET_SIZE: usize = 4;
+
+    fn eigen_predux(packet: [Self; 4]) -> Self {
+        // `Packet4f`: `movehl` pairs lane 0 with lane 2 and lane 1 with lane 3
+        // before the two halves meet.
+        (packet[0] + packet[2]) + (packet[1] + packet[3])
     }
 
     fn from_literal(value: f64) -> Self {
