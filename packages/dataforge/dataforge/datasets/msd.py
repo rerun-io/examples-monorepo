@@ -24,8 +24,8 @@ and two cameras — so ``--device`` picks the corpus *and* the catalog dataset
 (``msd-index``, ``msd-g2``, ``msd-odyssey``). Each sequence becomes a ``base`` rrd
 (video, IMU, magnetometer) and a ``gt`` rrd (``world_T_rig`` at the full ~1 kHz
 rate, plus its path and trail) under one recording id, so the catalog stacks them
-onto one segment. Both come out of one archive read, so they are skipped and
-rebuilt together: half a sequence on disk means paying for the download again.
+onto one segment. Both layers obey the rule stated in
+``packages/dataforge/README.md#the-layer-rule``.
 
 **Clocks.** Every csv timestamp is nanoseconds on one monotonic device clock
 (values around 1e13, not a Unix epoch). ``video_time`` is that clock minus ``t0``,

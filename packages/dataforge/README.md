@@ -204,6 +204,19 @@ every layer directory it knows — `base`, which is required, then `gt` — and
 registers each under its own layer name, so a corpus with no ground-truth pass
 registers exactly as before.
 
+### The layer rule
+
+Every dataset follows it; `lamaria` is the reference implementation. **base** is a
+faithful conversion of the raw source and the only layer that needs it: it skips on
+its own rrd, and once it is published the bulk source is deleted, leaving only the
+small sidecars (calibration, ground truth) on disk. A **derived** layer reads the
+base rrd plus those sidecars — never the raw source — skips on its own rrd and
+rebuilds under `--force`, so regenerating one across a corpus is `rm <layer>/*.rrd`,
+a convert, and a `register --replace`. Capture properties live in base; a derived
+layer is written with `send_properties=False` and carries only its own
+`property:<layer>:*` beside its data, never a properties-only layer. Layers share
+nothing but the recording id, which is what stacks them onto one segment.
+
 ## Blueprints
 
 Every dataset provides two (abstract on `DataforgeDataset`; missing one fails
