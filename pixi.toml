@@ -2747,6 +2747,8 @@ platforms = ["linux-64", "linux-aarch64"]
 [feature.dataforge.dependencies]
 python = "3.12.*"
 tyro = ">=0.9.1,<0.10"
+# transports.http_fetch streams and resumes LaMAria's Apache-served files with it.
+requests = "*"
 # CPU torch only satisfies simplecv's module-load import.
 pytorch-cpu = ">=2.8.0"
 # 7zz: the only extractor that reads MSD's Info-ZIP multi-volume archives
@@ -2757,9 +2759,21 @@ pytorch-cpu = ">=2.8.0"
 # 9.x builds link the env's libjxl; the 8.1 build-number pin other features carry
 # does not apply (9.0's build numbers restarted below it and would exclude it).
 ffmpeg = ">=9.0.1"
+# projectaria-tools drags moviepy in for its tutorial notebooks, and every moviepy
+# 2.x caps pillow < 12; the conda solve would otherwise pin pillow 12 and make the
+# PyPI side unsatisfiable. Nothing here uses pillow directly.
+pillow = ">=11,<12"
 
 [feature.dataforge.pypi-dependencies]
 dataforge = { path = "packages/dataforge", editable = true }
+# VRS reader for the LaMAria Aria Gen1 sequences; ships linux-aarch64 wheels.
+projectaria-tools = ">=2.2"
+
+[feature.dataforge.pypi-options.dependency-overrides]
+# projectaria-tools pins rerun-sdk==0.33.0 for its own notebook tutorials; dataforge
+# only uses its VRS reader, and the workspace lane is rerun-sdk 0.37.0 (AGENTS.md
+# "Testing Rerun builds"). Same version + extras as [feature.common.pypi-dependencies].
+rerun-sdk = { version = "==0.37.0", extras = ["catalog"] }
 
 [feature.dataforge.activation.env]
 PACKAGE_DIR = "packages/dataforge"
