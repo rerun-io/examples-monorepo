@@ -162,6 +162,14 @@ pub enum EstimatorError {
         /// `"pose"` or `"state"`.
         wanted: &'static str,
     },
+    /// A frame in the window is missing from the ordering `optimize` built
+    /// from that same window a few lines earlier (`:1468`, `:1472`, both
+    /// `.at()` calls C++ would throw out of).
+    #[error("frame {frame_id} is in the window but not in its ordering")]
+    FrameNotInOrdering {
+        /// The frame the increment could not be applied to.
+        frame_id: FrameId,
+    },
     /// The eviction loop found no keyframe to marginalize, which `:872` asserts
     /// is impossible ("the logic above is faulty").
     #[error("no keyframe could be selected for marginalization out of {candidates} candidates")]

@@ -120,7 +120,9 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     /// agrees with the prior (`:1227`, `:1237`),
     /// [`EstimatorError::NumericallyInvalid`] where it prints "did not expect
     /// numerical failure during linearization" and fails the frame
-    /// (`:1300-1303`), and the linearization's own errors.
+    /// (`:1300-1303`), [`EstimatorError::FrameNotInOrdering`] where `:1468`
+    /// and `:1472` read the ordering with `.at()`, and the linearization's own
+    /// errors.
     pub(super) fn optimize(
         &mut self,
         t_ns: i64,
@@ -236,6 +238,12 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 let mark: std::time::Instant = std::time::Instant::now();
                 // `:1393`.
                 let (mut h, mut b) = lqr.get_dense_h_b(ba, &inputs)?;
+                // The reduced system is the ordering's: every `(idx, size)` in
+                // `aom` is a block of it, and every frame of the two maps has
+                // an entry, because `aom` was built from those maps above and
+                // nothing since has added or removed a frame. The three loops
+                // below index it under that invariant.
+                debug_assert_eq!(h.nrows(), aom.total_size());
 
                 // `:1395-1406`.
                 if config.vio_fix_long_term_keyframes {
@@ -245,13 +253,13 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                             // `:1397-1399`: C++ prints "[UNEXPECTED]" and skips.
                             continue;
                         };
-                        for row in idx..(idx + size).min(h.nrows()) {
+                        for row in idx..(idx + size) {
                             for col in 0..h.ncols() {
                                 h[(row, col)] = S::zero();
                             }
                             b[row] = S::zero();
                         }
-                        for row in idx..(idx + POSE_SIZE).min(h.nrows()) {
+                        for row in idx..(idx + POSE_SIZE) {
                             h[(row, row)] = weight;
                         }
                     }
@@ -304,7 +312,9 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 // `:1466-1474`.
                 for (frame_id, state) in &mut ba.frame_poses {
                     let Some((idx, _)) = aom.get(*frame_id) else {
-                        continue;
+                        return Err(EstimatorError::FrameNotInOrdering {
+                            frame_id: *frame_id,
+                        });
                     };
                     let step: nalgebra::SVector<S, POSE_SIZE> =
                         nalgebra::SVector::from_iterator(inc.rows(idx, POSE_SIZE).iter().copied());
@@ -312,7 +322,9 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 }
                 for (frame_id, state) in &mut ba.frame_states {
                     let Some((idx, _)) = aom.get(*frame_id) else {
-                        continue;
+                        return Err(EstimatorError::FrameNotInOrdering {
+                            frame_id: *frame_id,
+                        });
                     };
                     let step: Vector15<S> =
                         Vector15::from_iterator(inc.rows(idx, POSE_VEL_BIAS_SIZE).iter().copied());

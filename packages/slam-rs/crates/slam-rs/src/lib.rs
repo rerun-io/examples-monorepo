@@ -442,10 +442,15 @@ impl<S: lie::LieScalar> Vio<S> {
         // (`optical_flow.h:186-215`).
         let mut observations: estimator::FlowObservations =
             estimator::FlowObservations::new(t_ns, self.camera_count);
-        for (cam_id, keypoints) in self.frontend.frame().cameras.iter().enumerate() {
-            let Some(slot) = observations.cameras.get_mut(cam_id) else {
-                continue;
-            };
+        debug_assert_eq!(
+            observations.cameras.len(),
+            self.frontend.frame().cameras.len()
+        );
+        for (slot, keypoints) in observations
+            .cameras
+            .iter_mut()
+            .zip(self.frontend.frame().cameras.iter())
+        {
             for (index, id) in keypoints.ids.iter().enumerate() {
                 let warp: frontend::se2::AffineCompact2f = keypoints.transform(index);
                 slot.insert(*id, warp.translation);

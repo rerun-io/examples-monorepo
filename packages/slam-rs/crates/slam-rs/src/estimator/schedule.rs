@@ -498,15 +498,12 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 
     /// `get_forward_vector2d` (`:792-798`): the camera-0 optical axis in the
     /// world frame, projected onto the horizontal plane.
+    ///
+    /// Camera 0 exists: [`SqrtKeypointVio::new`] refuses a rig of fewer than
+    /// two cameras.
     fn forward_vector_2d(&self, frame_id: FrameId) -> Result<(S, S), EstimatorError> {
         let t_w_i: Se3<S> = self.keyframe_pose(frame_id)?;
-        let Some(t_i_c0) = self.ba.calib.t_i_c.first() else {
-            return Err(EstimatorError::CameraCountMismatch {
-                expected: 1,
-                actual: 0,
-            });
-        };
-        let t_w_c0: Se3<S> = t_w_i * *t_i_c0;
+        let t_w_c0: Se3<S> = t_w_i * self.ba.calib.t_i_c[0];
         let fwd: Vector3<S> = t_w_c0.rotation * Vector3::new(S::zero(), S::zero(), S::one());
         Ok((fwd[0], fwd[1]))
     }
