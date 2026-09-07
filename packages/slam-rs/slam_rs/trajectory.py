@@ -1,9 +1,10 @@
 """EuRoC/basalt trajectory CSVs and the rigid-aligned ATE that gates a run.
 
 The arithmetic is the basalt fork's ``golden_compare.py``: nearest-neighbour
-association with a 5 ms tolerance, rigid Umeyama alignment of the candidate onto
-the reference, and RMSE of the residual positions. It lives here so the gate,
-the replay tool and the tests all use one implementation.
+association with a 5 ms tolerance, driven by the estimate, rigid Umeyama
+alignment of the two associated point sets, and RMSE of the residual positions.
+It lives here so the gate, the replay tool and the tests all use one
+implementation.
 
 The file format is basalt's own: a ``#``-prefixed header line, then
 ``t_ns, p_x, p_y, p_z, q_w, q_x, q_y, q_z``. Timestamps are integer nanoseconds
@@ -72,20 +73,20 @@ class AteResult:
     median_m: float
     """Median position residual after alignment."""
     n_associated: int
-    """Poses the association matched."""
+    """Estimate poses the association matched."""
+    n_estimate: int
+    """Poses in the estimate, which is the trajectory under test."""
     n_reference: int
     """Poses in the reference trajectory."""
-    n_candidate: int
-    """Poses in the candidate trajectory."""
     count_delta: float
-    """Relative pose-count difference, ``|n_candidate - n_reference| / n_reference``."""
+    """Relative pose-count difference, ``|n_reference - n_estimate| / n_estimate``."""
     alignment: SimilarityTransform
-    """The rigid transform that took the candidate positions onto the reference."""
+    """The rigid transform that took the reference positions onto the estimate's."""
 
     def summary(self) -> str:
         """The two lines ``golden_compare.py`` prints, in centimetres."""
         return (
-            f"poses: reference={self.n_reference} candidate={self.n_candidate} "
+            f"poses: estimate={self.n_estimate} reference={self.n_reference} "
             f"associated={self.n_associated} (count delta {self.count_delta:.1%})\n"
             f"ATE  : rmse={self.rmse_m * 100:.2f} cm  max={self.max_m * 100:.2f} cm  median={self.median_m * 100:.2f} cm"
         )
@@ -235,8 +236,15 @@ def rigid_alignment(source: Float64[ndarray, "n 3"], target: Float64[ndarray, "n
     return SimilarityTransform(dst_R_src=dst_R_src, dst_t_src=target_mean - dst_R_src @ source_mean, scale=1.0)
 
 
-def ate(reference: Trajectory, candidate: Trajectory, tolerance_ns: int = ASSOCIATION_TOLERANCE_NS) -> AteResult:
-    """Rigid-aligned absolute trajectory error of ``candidate`` against ``reference``.
+def ate(estimate: Trajectory, reference: Trajectory, tolerance_ns: int = ASSOCIATION_TOLERANCE_NS) -> AteResult:
+    """Rigid-aligned absolute trajectory error of ``estimate`` against ``reference``.
+
+    **The estimate drives the association**: each of its poses takes the nearest
+    reference pose within the tolerance, which is how the reference manifest's
+    own C++ numbers were produced and what keeps a 917 Hz ground truth from
+    weighting the metric by its own density. The convention is in this signature
+    on purpose — it used to live only in prose, and the one call site that
+    trusted the old parameter names silently plotted a different metric.
 
     The alignment fixes the scale at 1: a visual-inertial estimator is metric, so
     a fitted scale would hide a real error.
@@ -246,8 +254,8 @@ def ate(reference: Trajectory, candidate: Trajectory, tolerance_ns: int = ASSOCI
     exactly as the fork orders it.
 
     Args:
-        reference: Trajectory taken as truth.
-        candidate: Trajectory under test.
+        estimate: Trajectory under test, whose poses drive the association.
+        reference: Trajectory taken as truth, searched for the nearest pose.
         tolerance_ns: Association tolerance passed to :func:`associate`.
 
     Returns:
@@ -256,9 +264,9 @@ def ate(reference: Trajectory, candidate: Trajectory, tolerance_ns: int = ASSOCI
     Raises:
         ValueError: If no pose associates, which leaves nothing to compare.
     """
-    association: Association = associate(reference, candidate, tolerance_ns)
-    source: Float64[ndarray, "n_associated 3"] = candidate.position_m[association.candidate_index[association.matched]]
-    target: Float64[ndarray, "n_associated 3"] = reference.position_m[association.matched]
+    association: Association = associate(estimate, reference, tolerance_ns)
+    source: Float64[ndarray, "n_associated 3"] = reference.position_m[association.candidate_index[association.matched]]
+    target: Float64[ndarray, "n_associated 3"] = estimate.position_m[association.matched]
     if source.shape[0] == 0:
         raise ValueError(f"no pose associated within {tolerance_ns} ns; the two trajectories may be on different clocks")
     alignment: SimilarityTransform = rigid_alignment(source, target)
@@ -268,9 +276,9 @@ def ate(reference: Trajectory, candidate: Trajectory, tolerance_ns: int = ASSOCI
         max_m=float(errors.max()),
         median_m=float(np.median(errors)),
         n_associated=association.count,
+        n_estimate=len(estimate),
         n_reference=len(reference),
-        n_candidate=len(candidate),
-        count_delta=abs(len(candidate) - len(reference)) / len(reference),
+        count_delta=abs(len(reference) - len(estimate)) / len(estimate),
         alignment=alignment,
     )
 

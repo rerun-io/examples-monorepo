@@ -372,10 +372,6 @@ def main(config: Config) -> None:
         if len(estimate) == 0:
             print("no ATE: the estimator reported no tracked pose")
             return
-        # The association is driven by the estimate, as the reference manifest's
-        # own C++ numbers are: every estimate pose takes the nearest reference
-        # pose within the tolerance, so a 917 Hz ground truth does not weight the
-        # metric by its own density.
         for name, reference in (("ground truth", stage.logger.ground_truth), ("basalt C++", stage.logger.cpp)):
             if len(reference) == 0:
                 continue

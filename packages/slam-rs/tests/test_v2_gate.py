@@ -1,9 +1,10 @@
 """The V2 milestone gate: the reference segments through the whole pipeline (D14, D35, D36).
 
 Three numbers per segment, all on the absolute device clock every basalt CSV
-uses, and all with the association driven by the **estimate** — each of its poses
-takes the nearest reference pose within 5 ms — because that is how the manifest's
-own C++ numbers were produced:
+uses, and all through :func:`slam_rs.trajectory.ate`, whose first argument is the
+estimate and therefore drives the association — each estimate pose takes the
+nearest reference pose within 5 ms, as the manifest's own C++ numbers were
+produced:
 
 * against the basalt C++ trajectory fed the same decoded pixels, which is the
   parity claim and starts at 2 cm (D14; the ladder tightens toward 1 cm);

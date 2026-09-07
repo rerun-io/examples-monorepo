@@ -221,14 +221,14 @@ def test_the_gate_needs_ten_associations_and_a_two_percent_count_match() -> None
     angle: Float64[ndarray, " 40"] = np.linspace(0.0, 4.0, 40)
     positions: Float64[ndarray, "40 3"] = np.column_stack([np.cos(angle), np.sin(angle), angle * 0.3])
     t_ns: Int64[ndarray, " 40"] = np.arange(40, dtype=np.int64) * 20_000_000
-    reference: Trajectory = _trajectory(t_ns, positions)
-    assert passes_gate(ate(reference, reference), tolerance_m=0.02)
+    estimate: Trajectory = _trajectory(t_ns, positions)
+    assert passes_gate(ate(estimate, estimate), tolerance_m=0.02)
     # Enough associations and no count delta, but a scale error the rigid alignment cannot absorb.
-    assert not passes_gate(ate(reference, _trajectory(t_ns, positions * 1.05)), tolerance_m=0.02)
-    # A tight fit over 12 poses, rejected on the count delta alone.
-    assert not passes_gate(ate(reference, _trajectory(t_ns[:12], positions[:12])), tolerance_m=0.02)
+    assert not passes_gate(ate(estimate, _trajectory(t_ns, positions * 1.05)), tolerance_m=0.02)
+    # A reference a third of the estimate's length, rejected on the count delta alone.
+    assert not passes_gate(ate(estimate, _trajectory(t_ns[:12], positions[:12])), tolerance_m=0.02)
     # Fewer than ten associations is not a comparison at all.
-    assert not passes_gate(ate(reference, _trajectory(t_ns[:9], positions[:9])), tolerance_m=0.02)
+    assert not passes_gate(ate(estimate, _trajectory(t_ns[:9], positions[:9])), tolerance_m=0.02)
 
 
 def test_it_reproduces_the_forks_robocap_gate_numbers() -> None:
@@ -236,10 +236,10 @@ def test_it_reproduces_the_forks_robocap_gate_numbers() -> None:
     manifest: ReferenceManifest = load_manifest()
     golden: Trajectory = read_trajectory(manifest.package_root / manifest.robocap.fixtures.golden)
     candidate: Trajectory = read_trajectory(manifest.package_root / manifest.robocap.fixtures.candidate)
-    result: AteResult = ate(golden, candidate)
+    result: AteResult = ate(candidate, golden)
     assert result.n_associated == manifest.robocap.fixtures.expected_associated
+    assert result.n_estimate == manifest.robocap.basalt_num_poses
     assert result.n_reference == manifest.robocap.basalt_num_poses
-    assert result.n_candidate == manifest.robocap.basalt_num_poses
     assert result.rmse_m * 100 == pytest.approx(manifest.robocap.fixtures.expected_ate_rmse_cm, abs=0.005)
     assert result.count_delta == 0.0
     assert passes_gate(result, tolerance_m=0.05)

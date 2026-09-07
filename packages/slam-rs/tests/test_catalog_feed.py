@@ -248,8 +248,8 @@ def test_the_absolute_clock_matches_the_ground_truth_sidecar() -> None:
     # Without the shift the two share no instant at all.
     assert associate(sidecar, relative).count == 0
     # The rrd stores float32 positions; the sidecar keeps more digits.
-    result: AteResult = ate(sidecar, absolute)
-    assert result.n_associated == len(sidecar)
+    result: AteResult = ate(absolute, sidecar)
+    assert result.n_associated == len(absolute)
     assert result.rmse_m < 1e-5
 
 

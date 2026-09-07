@@ -47,7 +47,7 @@ def _committed(manifest: ReferenceManifest, segment: ReferenceSegment, relative:
 def _assert_reproduces(result: AteResult, expected: CppAte, segment_id: str) -> None:
     """The recomputed error must be the published one, to the precision it was published at."""
     assert result.n_associated == expected.associated, segment_id
-    assert result.n_reference == expected.total, segment_id
+    assert result.n_estimate == expected.total, segment_id
     assert result.rmse_m * 100 == pytest.approx(expected.rmse_cm, abs=RMSE_TOLERANCE_CM), segment_id
     assert result.max_m * 100 == pytest.approx(expected.max_cm, abs=RMSE_TOLERANCE_CM), segment_id
     assert result.median_m * 100 == pytest.approx(expected.median_cm, abs=RMSE_TOLERANCE_CM), segment_id
