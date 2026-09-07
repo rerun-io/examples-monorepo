@@ -8,15 +8,16 @@ temp file, and reads the chunks back with
 an entity path, a ``video_time`` value or a trail that never reached the file
 fails here.
 
-The frames are the synthetic 200x200 textures of ``test_frontend_boundary``
-rather than the committed 960x960 fixtures: the fixtures are the Rust parity
-gate's, and four framesets of them through the frontend cost more than this whole
-Python suite.
+The frames are the synthetic 200x200 textures of :mod:`conftest` rather than the
+committed 960x960 fixtures: the fixtures are the Rust parity gate's, and four
+framesets of them through the frontend cost more than this whole Python suite.
 """
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeAlias
 
 import numpy as np
 import pytest
@@ -24,7 +25,6 @@ import rerun as rr
 import rerun.experimental as rx
 from jaxtyping import Float32, Int64, UInt8
 from numpy import ndarray
-from test_frontend_boundary import frontend, texture
 
 from slam_rs import _core
 from slam_rs.apis.replay import SMOKE_SEGMENT, replayed_identity
@@ -46,6 +46,11 @@ OTHER_SEGMENT: str = "msd-index__MIO_others__MIO07_mapping_easy"
 """Another Index segment, whose ``video_time`` also starts at zero."""
 FRAME_INTERVAL_NS: int = 33_000_000
 """One 30 Hz frameset to the next."""
+
+FrontendFactory: TypeAlias = Callable[[int], _core.OpticalFlow]
+TextureFactory: TypeAlias = Callable[[int, int], UInt8[ndarray, "h w"]]
+ReplayFactory: TypeAlias = Callable[[Path, int, str, Path | None], tuple["Rows", list[_core.FlowFrame]]]
+"""One logged run: where the ``.rrd`` goes, how many framesets, the segment replayed, the dumps."""
 
 @dataclass(frozen=True, slots=True)
 class Row:
@@ -118,33 +123,38 @@ def write_dumps(directory: Path, segment_id: str, per_frameset: dict[int, list[F
         (directory / f"frame_{index:03d}.json").write_text(json.dumps(dump))
 
 
-def replay(tmp_path: Path, framesets: int, segment_id: str, dumps_dir: Path | None) -> tuple[Rows, list[_core.FlowFrame]]:
+@pytest.fixture
+def replay(frontend: FrontendFactory, texture: TextureFactory) -> ReplayFactory:
     """Log ``framesets`` framesets of a drifting texture and read the recording back.
 
     Args:
-        tmp_path: Where the ``.rrd`` is written.
-        framesets: How many framesets to log, each shifted one pixel from the last.
-        segment_id: Segment the logger is told it is replaying.
-        dumps_dir: Where its C++ dumps come from, or None for the committed ones.
+        frontend: The two-camera frontend the framesets go through.
+        texture: The scene each frameset is a shifted copy of.
 
     Returns:
-        The recording's rows, and the frames that produced them.
+        A function of the ``.rrd`` directory, the frameset count, the segment the
+        logger is told it is replaying and where its C++ dumps come from, giving
+        back the recording's rows and the frames that produced them.
     """
-    flow: _core.OpticalFlow = frontend(2)
-    logger: FrontendLogger = FrontendLogger(2, segment_id, dumps_dir)
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    output: Path = tmp_path / "frontend.rrd"
-    rr.init("slam-rs-frontend-log-test", recording_id=f"{segment_id}-{framesets}")
-    rr.save(output)
-    frames: list[_core.FlowFrame] = []
-    for step in range(framesets):
-        t_ns: int = step * FRAME_INTERVAL_NS
-        rr.set_time(TIMELINE, duration=np.timedelta64(t_ns, "ns"))
-        frame: _core.FlowFrame = flow.process(t_ns, [texture(step, 0), texture(step, 1)])
-        logger.log(frame, elapsed_ms=1.5 * (step + 1))
-        frames.append(frame)
-    rr.disconnect()
-    return read_rows(output), frames
+
+    def run(tmp_path: Path, framesets: int, segment_id: str, dumps_dir: Path | None) -> tuple[Rows, list[_core.FlowFrame]]:
+        flow: _core.OpticalFlow = frontend(2)
+        logger: FrontendLogger = FrontendLogger(2, segment_id, dumps_dir)
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        output: Path = tmp_path / "frontend.rrd"
+        rr.init("slam-rs-frontend-log-test", recording_id=f"{segment_id}-{framesets}")
+        rr.save(output)
+        frames: list[_core.FlowFrame] = []
+        for step in range(framesets):
+            t_ns: int = step * FRAME_INTERVAL_NS
+            rr.set_time(TIMELINE, duration=np.timedelta64(t_ns, "ns"))
+            frame: _core.FlowFrame = flow.process(t_ns, [texture(step, 0), texture(step, 1)])
+            logger.log(frame, elapsed_ms=1.5 * (step + 1))
+            frames.append(frame)
+        rr.disconnect()
+        return read_rows(output), frames
+
+    return run
 
 
 def test_a_track_keeps_its_colour_and_neighbours_do_not_share_one() -> None:
@@ -233,7 +243,7 @@ def test_a_recording_replayed_with_rrd_is_never_the_dumps_segment() -> None:
     assert identity != read_cpp_dumps(2, DEFAULT_DUMPS_DIR).segment_id
 
 
-def test_log_writes_the_dataset_tree_once_per_frameset(tmp_path: Path) -> None:
+def test_log_writes_the_dataset_tree_once_per_frameset(replay: ReplayFactory, tmp_path: Path) -> None:
     """Every entity the blueprint shows gets one row per frameset, on ``video_time``."""
     rows, frames = replay(tmp_path, 3, OTHER_SEGMENT, tmp_path / "no-dumps")
     expected_times: list[int] = [step * FRAME_INTERVAL_NS for step in range(3)]
@@ -252,7 +262,7 @@ def test_log_writes_the_dataset_tree_once_per_frameset(tmp_path: Path) -> None:
         assert np.allclose(logged, frame.positions(0))
 
 
-def test_the_counters_report_each_cameras_own_numbers(tmp_path: Path) -> None:
+def test_the_counters_report_each_cameras_own_numbers(replay: ReplayFactory, tmp_path: Path) -> None:
     rows, frames = replay(tmp_path, 3, OTHER_SEGMENT, tmp_path / "no-dumps")
     for camera in range(2):
         tracks: list[Row] = rows[f"{STATS_ENTITY}/cam_{camera:02d}/num_tracks"]
@@ -262,7 +272,7 @@ def test_the_counters_report_each_cameras_own_numbers(tmp_path: Path) -> None:
     assert [row.values["Scalars:scalars"] for row in rows[f"{STATS_ENTITY}/frontend_ms"]] == [[1.5], [3.0], [4.5]]
 
 
-def test_trails_follow_a_track_by_id_and_stop_at_the_trail_length(tmp_path: Path) -> None:
+def test_trails_follow_a_track_by_id_and_stop_at_the_trail_length(replay: ReplayFactory, tmp_path: Path) -> None:
     """A strip is one id's history, so it survives the frame's order changing.
 
     Asserted as invariants rather than as a second copy of ``_log_trails``: a
@@ -306,7 +316,9 @@ def test_trails_follow_a_track_by_id_and_stop_at_the_trail_length(tmp_path: Path
     assert max(len(strip) for strip in last) == TRAIL_LENGTH
 
 
-def test_the_overlay_is_drawn_only_on_the_segment_the_dumps_came_from(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_the_overlay_is_drawn_only_on_the_segment_the_dumps_came_from(
+    replay: ReplayFactory, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """The review's finding: MIO10's dumps used to land on MIO07's first frame."""
     dumps_dir: Path = tmp_path / "dumps"
     overlay: Float32[ndarray, "n_keypoints 2"] = np.array([[10.0, 20.0], [30.0, 40.0]], dtype=np.float32)
@@ -328,7 +340,7 @@ def test_the_overlay_is_drawn_only_on_the_segment_the_dumps_came_from(tmp_path: 
     assert capsys.readouterr().out == f"dumps are from {SMOKE_SEGMENT}, replaying {OTHER_SEGMENT}: no overlay\n"
 
 
-def test_the_overlay_is_cleared_once_the_dumps_run_out_and_stays_cleared(tmp_path: Path) -> None:
+def test_the_overlay_is_cleared_once_the_dumps_run_out_and_stays_cleared(replay: ReplayFactory, tmp_path: Path) -> None:
     """Latest-at would leave the last overlay on screen for the rest of the segment."""
     dumps_dir: Path = tmp_path / "dumps"
     overlay: Float32[ndarray, "n_keypoints 2"] = np.array([[10.0, 20.0]], dtype=np.float32)

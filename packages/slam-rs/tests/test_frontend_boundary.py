@@ -1,7 +1,8 @@
 """Property tests for the optical-flow boundary, driven through ``slam_rs._core`` (D23).
 
-The calibration is built from the feed's own ``CameraCalib``/``ImuCalib``
-dataclasses, so these tests also pin the field-name contract
+The rig, its frames and the frontend over it come from :mod:`conftest` as
+fixtures. The calibration is built from the feed's own ``CameraCalib``/
+``ImuCalib`` dataclasses, so these tests also pin the field-name contract
 ``Calibration.from_catalog`` reads across the boundary: rename a field in
 :mod:`slam_rs.catalog_feed` and this file fails rather than the estimator.
 
@@ -13,13 +14,13 @@ import json
 import subprocess
 import sys
 from collections.abc import Callable
-from typing import cast
+from typing import TypeAlias, cast
 
 import numpy as np
 import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
-from jaxtyping import Float64, UInt8
+from jaxtyping import UInt8
 from numpy import ndarray
 from numpy.typing import NDArray
 
@@ -27,85 +28,54 @@ from slam_rs import _core
 from slam_rs.catalog_feed import CameraCalib, ImuCalib
 
 MAX_EXAMPLES: int = 25
-FRAME: int = 200
-"""Synthetic frame size: four whole 50-pixel detection cells per side."""
 
 sizes = st.integers(min_value=1, max_value=32)
 camera_counts = st.integers(min_value=1, max_value=3)
+wrong_sizes = st.integers(min_value=1, max_value=400)
+"""Frame sides on both sides of the synthetic rig's, so cropped and enlarged frames are both generated."""
+
+CameraFactory: TypeAlias = Callable[[int, float], CameraCalib]
+FrontendFactory: TypeAlias = Callable[[int], _core.OpticalFlow]
+TextureFactory: TypeAlias = Callable[[int, int], UInt8[ndarray, "h w"]]
+EntryPoint: TypeAlias = Callable[[int, list[UInt8[ndarray, "h w"]]], object]
+"""One frameset into a boundary call: ``(t_ns, images)``."""
+EntryFactory: TypeAlias = Callable[[int], EntryPoint]
+"""An entry point on a rig of the given camera count."""
 
 
-def camera(index: int, baseline_m: float = 0.0) -> CameraCalib:
-    """A 200x200 pinhole-like camera: kb4 with every coefficient zero."""
-    imu_T_cam: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
-    imu_T_cam[0, 3] = baseline_m
-    return CameraCalib(
-        index=index,
-        width=FRAME,
-        height=FRAME,
-        frequency_hz=30.0,
-        fx=100.0,
-        fy=100.0,
-        cx=FRAME / 2,
-        cy=FRAME / 2,
-        model="kb4",
-        distortion=np.zeros(4, dtype=np.float64),
-        distortion_valid_radius=None,
-        imu_T_cam=imu_T_cam,
-        image_rotation_cw_deg=0,
-    )
+@pytest.fixture(scope="session", params=["Vio.track", "OpticalFlow.process"])
+def entry_point(request: pytest.FixtureRequest, frontend: FrontendFactory) -> EntryFactory:
+    """Both array-taking entry points, so one property covers the two of them.
 
-
-def imu() -> ImuCalib:
-    """The Index device's frozen noise model, which no test here is sensitive to."""
-    return ImuCalib(
-        frequency_hz=1000.0,
-        gyro_noise_std=0.000282,
-        accel_noise_std=0.016,
-        gyro_bias_std=0.0001,
-        accel_bias_std=0.001,
-        cam_time_offset_ns=0,
-        imu_T_body=np.eye(4, dtype=np.float64),
-    )
-
-
-def frontend(camera_count: int = 1) -> _core.OpticalFlow:
-    """A frontend on a rig of ``camera_count`` identical cameras, 10 cm apart."""
-    cameras: list[CameraCalib] = [camera(index, 0.1 * index) for index in range(camera_count)]
-    return _core.OpticalFlow(_core.Calibration.from_catalog(cameras, imu()), _core.VioConfig())
-
-
-def texture(shift_x: int = 0, shift_y: int = 0) -> UInt8[ndarray, "h w"]:
-    """One fixed blocky-noise scene, shifted by whole pixels.
-
-    Blocky **noise**, not a lattice: a repeating pattern gives every corner the
-    same score, and basalt's suppression is strictly-greater-than, so a tie kills
-    both sides and a perfectly regular scene detects almost nothing.
+    They share ``gray_array``'s rank, dtype and layout checks, so a rule proved
+    on one of them says nothing about the other unless both are driven.
     """
-    blocks: UInt8[ndarray, "b b"] = np.random.default_rng(20250907).integers(0, 256, (FRAME // 2, FRAME // 2), dtype=np.uint8)
-    image: UInt8[ndarray, "h w"] = np.repeat(np.repeat(blocks, 2, axis=0), 2, axis=1)
-    return np.ascontiguousarray(np.roll(image, (shift_y, shift_x), axis=(0, 1)))
+    if request.param == "Vio.track":
+        return lambda camera_count: _core.Vio(camera_count=camera_count, min_imu_samples=1).track
+    return lambda camera_count: frontend(camera_count).process
 
 
-def test_the_calibration_comes_across_field_by_field() -> None:
-    calibration: _core.Calibration = _core.Calibration.from_catalog([camera(0), camera(1, 0.1)], imu())
+def test_the_calibration_comes_across_field_by_field(camera: CameraFactory, imu: ImuCalib) -> None:
+    calibrated: int = camera(0, 0.0).width
+    calibration: _core.Calibration = _core.Calibration.from_catalog([camera(0, 0.0), camera(1, 0.1)], imu)
     assert calibration.camera_count == 2
-    assert calibration.resolution == [(FRAME, FRAME), (FRAME, FRAME)]
+    assert calibration.resolution == [(calibrated, calibrated), (calibrated, calibrated)]
     # basalt's own JSON is the round trip, so a reader can check what was pushed.
     assert _core.Calibration.from_json(calibration.to_json()).resolution == calibration.resolution
 
 
-def test_an_extrinsic_that_is_not_a_rotation_is_rejected() -> None:
-    mirrored: CameraCalib = camera(0)
+def test_an_extrinsic_that_is_not_a_rotation_is_rejected(camera: CameraFactory, imu: ImuCalib) -> None:
+    mirrored: CameraCalib = camera(0, 0.0)
     mirrored.imu_T_cam[0, 0] = -1.0
     with pytest.raises(ValueError, match="rotation"):
-        _core.Calibration.from_catalog([mirrored], imu())
+        _core.Calibration.from_catalog([mirrored], imu)
 
 
-def test_a_config_asking_for_another_pattern_is_rejected() -> None:
+def test_a_config_asking_for_another_pattern_is_rejected(camera: CameraFactory, imu: ImuCalib) -> None:
     config: _core.VioConfig = _core.VioConfig()
     raw: str = config.to_json().replace('"config.optical_flow_pattern": 51', '"config.optical_flow_pattern": 24')
     with pytest.raises(ValueError, match="pattern"):
-        _core.OpticalFlow(_core.Calibration.from_catalog([camera(0)], imu()), raw)
+        _core.OpticalFlow(_core.Calibration.from_catalog([camera(0, 0.0)], imu), raw)
 
 
 def test_the_image_safe_radius_survives_the_json_round_trip() -> None:
@@ -116,62 +86,64 @@ def test_the_image_safe_radius_survives_the_json_round_trip() -> None:
 
 @settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(dtype=st.sampled_from([np.float32, np.float64, np.int16, np.uint16]), height=sizes, width=sizes)
-def test_images_of_the_wrong_dtype_are_rejected(dtype: type, height: int, width: int) -> None:
+def test_images_of_the_wrong_dtype_are_rejected(entry_point: EntryFactory, dtype: type, height: int, width: int) -> None:
     wrong: NDArray[np.uint8] = cast("NDArray[np.uint8]", np.zeros((height, width), dtype=dtype))
     with pytest.raises(ValueError, match="2-D uint8"):
-        frontend().process(0, [wrong])
+        entry_point(1)(0, [wrong])
 
 
 @settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(ndim=st.sampled_from([1, 3, 4]), size=st.integers(min_value=1, max_value=4))
-def test_images_of_the_wrong_rank_are_rejected(ndim: int, size: int) -> None:
+def test_images_of_the_wrong_rank_are_rejected(entry_point: EntryFactory, ndim: int, size: int) -> None:
     with pytest.raises(ValueError, match="2-D uint8"):
-        frontend().process(0, [np.zeros((size,) * ndim, dtype=np.uint8)])
+        entry_point(1)(0, [np.zeros((size,) * ndim, dtype=np.uint8)])
 
 
 @settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(height=st.integers(min_value=2, max_value=16), width=st.integers(min_value=2, max_value=16))
-def test_a_transposed_image_is_rejected(height: int, width: int) -> None:
+def test_a_transposed_image_is_rejected(frontend: FrontendFactory, height: int, width: int) -> None:
     """Fortran order passes ``as_slice`` but its bytes run down the columns."""
     transposed: UInt8[ndarray, "w h"] = np.zeros((height, width), dtype=np.uint8).T
     with pytest.raises(ValueError, match="C-contiguous"):
-        frontend().process(0, [transposed])
+        frontend(1).process(0, [transposed])
 
 
 @settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(count=camera_counts, given_count=st.integers(min_value=0, max_value=4))
-def test_the_wrong_number_of_images_is_rejected(count: int, given_count: int) -> None:
+def test_the_wrong_number_of_images_is_rejected(entry_point: EntryFactory, texture: TextureFactory, count: int, given_count: int) -> None:
     assume(count != given_count)
-    image: UInt8[ndarray, "h w"] = np.zeros((FRAME, FRAME), dtype=np.uint8)
+    image: UInt8[ndarray, "h w"] = texture(0, 0)
     with pytest.raises(ValueError, match=f"expected {count} images"):
-        frontend(count).process(0, [image] * given_count)
+        entry_point(count)(0, [image] * given_count)
 
 
 @settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(first=st.integers(min_value=-(10**9), max_value=10**9), back=st.integers(min_value=0, max_value=10**6))
-def test_a_frameset_that_does_not_move_the_clock_forward_is_rejected(first: int, back: int) -> None:
-    flow: _core.OpticalFlow = frontend()
-    image: UInt8[ndarray, "h w"] = np.zeros((FRAME, FRAME), dtype=np.uint8)
+def test_a_frameset_that_does_not_move_the_clock_forward_is_rejected(
+    frontend: FrontendFactory, texture: TextureFactory, first: int, back: int
+) -> None:
+    flow: _core.OpticalFlow = frontend(1)
+    image: UInt8[ndarray, "h w"] = texture(0, 0)
     flow.process(first, [image])
     with pytest.raises(ValueError, match="must increase"):
         flow.process(first - back, [image])
 
 
-def test_a_refused_frameset_leaves_the_clock_alone() -> None:
-    flow: _core.OpticalFlow = frontend()
-    flow.process(1_000, [texture()])
+def test_a_refused_frameset_leaves_the_clock_alone(frontend: FrontendFactory, texture: TextureFactory) -> None:
+    flow: _core.OpticalFlow = frontend(1)
+    flow.process(1_000, [texture(0, 0)])
     with pytest.raises(ValueError, match="expected 1 images"):
-        flow.process(2_000, [texture(), texture()])
+        flow.process(2_000, [texture(0, 0), texture(0, 0)])
     assert flow.t_ns == 1_000
     assert flow.frame_counter == 1
 
 
 @settings(max_examples=10, deadline=None)
 @given(shift_x=st.integers(min_value=-3, max_value=3), shift_y=st.integers(min_value=-3, max_value=3))
-def test_a_shifted_texture_keeps_its_track_ids(shift_x: int, shift_y: int) -> None:
+def test_a_shifted_texture_keeps_its_track_ids(frontend: FrontendFactory, texture: TextureFactory, shift_x: int, shift_y: int) -> None:
     """Two frames of the same scene: the ids survive and the positions follow the shift."""
-    flow: _core.OpticalFlow = frontend()
-    first: _core.FlowFrame = flow.process(0, [texture()])
+    flow: _core.OpticalFlow = frontend(1)
+    first: _core.FlowFrame = flow.process(0, [texture(0, 0)])
     second: _core.FlowFrame = flow.process(33_000_000, [texture(shift_x, shift_y)])
 
     # 4x4 whole cells at one point per cell, so 16 is the ceiling.
@@ -189,9 +161,10 @@ def test_a_shifted_texture_keeps_its_track_ids(shift_x: int, shift_y: int) -> No
     assert np.allclose(np.median(moved, axis=0), [shift_x, shift_y], atol=0.5)
 
 
-def test_the_frame_reports_shapes_the_stub_promises() -> None:
+def test_the_frame_reports_shapes_the_stub_promises(camera: CameraFactory, frontend: FrontendFactory, texture: TextureFactory) -> None:
+    cells: int = camera(0, 0.0).width // 50 + 1
     flow: _core.OpticalFlow = frontend(2)
-    frame: _core.FlowFrame = flow.process(0, [texture(), texture(2, 0)])
+    frame: _core.FlowFrame = flow.process(0, [texture(0, 0), texture(2, 0)])
     assert frame.t_ns == 0
     assert frame.camera_count == 2
     for index in range(2):
@@ -205,15 +178,15 @@ def test_the_frame_reports_shapes_the_stub_promises() -> None:
         # basalt only fills pyramid_levels in the multiscale variant.
         assert frame.levels(index).shape == (0,)
         # The occupancy grid is camera 0's for every camera, as basalt's is.
-        assert frame.occupancy(index).shape == (FRAME // 50 + 1, FRAME // 50 + 1)
+        assert frame.occupancy(index).shape == (cells, cells)
         assert frame.occupancy(index).dtype == np.int32
     # The 2x3 warp starts at the identity with the keypoint's pixel in the last column.
     assert np.allclose(frame.transforms(0)[:, :, :2], np.eye(2), atol=1e-6)
     assert np.array_equal(frame.transforms(0)[:, :, 2], frame.positions(0))
 
 
-def test_a_camera_past_the_end_of_the_rig_is_an_index_error() -> None:
-    frame: _core.FlowFrame = frontend().process(0, [texture()])
+def test_a_camera_past_the_end_of_the_rig_is_an_index_error(frontend: FrontendFactory, texture: TextureFactory) -> None:
+    frame: _core.FlowFrame = frontend(1).process(0, [texture(0, 0)])
     with pytest.raises(IndexError, match="past the end"):
         frame.ids(1)
 
@@ -228,7 +201,7 @@ import numpy as np
 
 from slam_rs import _core
 
-flow = _core.OpticalFlow(sys.argv[1], sys.argv[2])
+flow = _core.OpticalFlow(_core.Calibration.from_json(sys.argv[1]), _core.VioConfig.from_json(sys.argv[2]))
 flow.process(0, [np.zeros((200, 200), dtype=np.uint8)])
 print("processed")
 """
@@ -242,18 +215,18 @@ end it.
 """
 
 
-def probe_detector(config_json: str) -> subprocess.CompletedProcess[str]:
+def probe_detector(calibration_json: str, config_json: str) -> subprocess.CompletedProcess[str]:
     """Run :data:`DETECTOR_PROBE` against one config, or fail the test on a hang.
 
     Args:
+        calibration_json: The rig's calibration as basalt's JSON.
         config_json: One of basalt's configs as text.
 
     Returns:
         The finished process, so the caller can assert on its output.
     """
-    calibration: str = _core.Calibration.from_catalog([camera(0)], imu()).to_json()
     return subprocess.run(  # noqa: S603
-        [sys.executable, "-c", DETECTOR_PROBE, calibration, config_json],
+        [sys.executable, "-c", DETECTOR_PROBE, calibration_json, config_json],
         capture_output=True,
         text=True,
         timeout=HANG_GUARD_S,
@@ -269,15 +242,16 @@ def config_with(key: str, value: int) -> str:
     return json.dumps(document)
 
 
-def test_the_shipped_config_detects_on_a_blank_frame_and_returns() -> None:
+def test_the_shipped_config_detects_on_a_blank_frame_and_returns(camera: CameraFactory, imu: ImuCalib) -> None:
     """The control for the probe below: this configuration reaches ``process`` and finishes."""
-    finished: subprocess.CompletedProcess[str] = probe_detector(_core.VioConfig().to_json())
+    calibration: str = _core.Calibration.from_catalog([camera(0, 0.0)], imu).to_json()
+    finished: subprocess.CompletedProcess[str] = probe_detector(calibration, _core.VioConfig().to_json())
     assert finished.returncode == 0, finished.stderr
     assert "processed" in finished.stdout
 
 
 @pytest.mark.parametrize("min_threshold", [0, -1, -(2**31)])
-def test_a_detector_threshold_ladder_that_never_ends_is_refused(min_threshold: int) -> None:
+def test_a_detector_threshold_ladder_that_never_ends_is_refused(camera: CameraFactory, imu: ImuCalib, min_threshold: int) -> None:
     """``min_threshold <= 0`` hangs the detector — and basalt's own — so it is refused.
 
     ``keypoints.cpp:162,187`` halves the FAST threshold by integer division while
@@ -285,23 +259,26 @@ def test_a_detector_threshold_ladder_that_never_ends_is_refused(min_threshold: i
     the same non-terminating loop; the port refuses the config instead of running
     it, and floors its own last rung as a second line.
     """
-    finished: subprocess.CompletedProcess[str] = probe_detector(config_with("config.optical_flow_detection_min_threshold", min_threshold))
+    calibration: str = _core.Calibration.from_catalog([camera(0, 0.0)], imu).to_json()
+    finished: subprocess.CompletedProcess[str] = probe_detector(
+        calibration, config_with("config.optical_flow_detection_min_threshold", min_threshold)
+    )
     assert finished.returncode != 0, f"the frontend accepted min_threshold={min_threshold}: {finished.stdout}"
     assert "ValueError" in finished.stderr
     assert "optical_flow_detection_min_threshold" in finished.stderr
 
 
-def test_a_detector_threshold_ladder_that_never_runs_is_refused() -> None:
+def test_a_detector_threshold_ladder_that_never_runs_is_refused(camera: CameraFactory, imu: ImuCalib) -> None:
     """A ladder starting below where it stops could never add a keypoint."""
     document: dict = json.loads(_core.VioConfig().to_json())
     document["value0"]["config.optical_flow_detection_min_threshold"] = 40
     document["value0"]["config.optical_flow_detection_max_threshold"] = 5
     with pytest.raises(ValueError, match="ladder starts below"):
-        _core.OpticalFlow(_core.Calibration.from_catalog([camera(0)], imu()), json.dumps(document))
+        _core.OpticalFlow(_core.Calibration.from_catalog([camera(0, 0.0)], imu), json.dumps(document))
 
 
 @pytest.mark.parametrize("max_keypoints", [2**20 + 1, 2**31, 2**63, 2**64 - 1])
-def test_a_keypoint_budget_nothing_could_allocate_is_a_value_error(max_keypoints: int) -> None:
+def test_a_keypoint_budget_nothing_could_allocate_is_a_value_error(camera: CameraFactory, imu: ImuCalib, max_keypoints: int) -> None:
     """A budget is a memory request, and an impossible one used to be a Rust panic.
 
     ``Vec::with_capacity(2**63)`` panics with ``capacity overflow``, which crosses
@@ -309,54 +286,55 @@ def test_a_keypoint_budget_nothing_could_allocate_is_a_value_error(max_keypoints
     ordinary ``except Exception`` catches. The ceiling makes it an answer.
     """
     with pytest.raises(ValueError, match="ceiling"):
-        _core.OpticalFlow(_core.Calibration.from_catalog([camera(0)], imu()), _core.VioConfig(), max_keypoints=max_keypoints)
+        _core.OpticalFlow(_core.Calibration.from_catalog([camera(0, 0.0)], imu), _core.VioConfig(), max_keypoints=max_keypoints)
 
 
 @pytest.mark.parametrize("threads", [2**20 + 1, 100_000, 2**63])
-def test_more_workers_than_the_ceiling_is_refused(threads: int) -> None:
+def test_more_workers_than_the_ceiling_is_refused(camera: CameraFactory, imu: ImuCalib, threads: int) -> None:
     """rayon spawns exactly what it is asked for, so an unbounded count wedges the machine."""
     with pytest.raises(ValueError, match="ceiling"):
-        _core.OpticalFlow(_core.Calibration.from_catalog([camera(0)], imu()), _core.VioConfig(), threads=threads)
+        _core.OpticalFlow(_core.Calibration.from_catalog([camera(0, 0.0)], imu), _core.VioConfig(), threads=threads)
 
 
 @pytest.mark.parametrize("levels", [24, 1_000, 10**9])
-def test_a_pyramid_deeper_than_the_ceiling_is_refused(levels: int) -> None:
+def test_a_pyramid_deeper_than_the_ceiling_is_refused(camera: CameraFactory, imu: ImuCalib, levels: int) -> None:
     """``optical_flow_levels`` sizes every per-patch buffer; an absurd one aborted the process."""
     with pytest.raises(ValueError, match="optical_flow_levels"):
-        _core.OpticalFlow(_core.Calibration.from_catalog([camera(0)], imu()), config_with("config.optical_flow_levels", levels))
+        _core.OpticalFlow(_core.Calibration.from_catalog([camera(0, 0.0)], imu), config_with("config.optical_flow_levels", levels))
 
 
 @settings(max_examples=MAX_EXAMPLES, deadline=None)
-@given(
-    height=st.integers(min_value=1, max_value=2 * FRAME),
-    width=st.integers(min_value=1, max_value=2 * FRAME),
-)
-def test_an_image_that_is_not_the_calibrated_size_is_refused(height: int, width: int) -> None:
+@given(height=wrong_sizes, width=wrong_sizes)
+def test_an_image_that_is_not_the_calibrated_size_is_refused(camera: CameraFactory, frontend: FrontendFactory, height: int, width: int) -> None:
     """The calibration is the geometry: a cropped or resized frame means other bearings.
 
     The camera model projects with the calibrated intrinsics and the detection
     grid is derived from the calibrated size, so a 64x64 frame tracked against a
     200x200 calibration produces keypoints in pixels that do not exist.
     """
-    assume((height, width) != (FRAME, FRAME))
+    calibrated: int = camera(0, 0.0).width
+    assume((height, width) != (calibrated, calibrated))
     odd: UInt8[ndarray, "h w"] = np.zeros((height, width), dtype=np.uint8)
-    with pytest.raises(ValueError, match=f"the calibration is for {FRAME}x{FRAME} frames, got {width}x{height}"):
-        frontend().process(0, [odd])
+    with pytest.raises(ValueError, match=f"the calibration is for {calibrated}x{calibrated} frames, got {width}x{height}"):
+        frontend(1).process(0, [odd])
 
 
-def test_the_wrong_camera_is_named_when_only_one_image_is_the_wrong_size() -> None:
+def test_the_wrong_camera_is_named_when_only_one_image_is_the_wrong_size(frontend: FrontendFactory, texture: TextureFactory) -> None:
     flow: _core.OpticalFlow = frontend(2)
     with pytest.raises(ValueError, match="camera 1"):
-        flow.process(0, [texture(), np.zeros((64, 64), dtype=np.uint8)])
+        flow.process(0, [texture(0, 0), np.zeros((64, 64), dtype=np.uint8)])
 
 
-def test_a_frame_of_the_wrong_size_leaves_the_frontend_as_it_was() -> None:
+def test_a_frame_of_the_wrong_size_leaves_the_frontend_as_it_was(
+    camera: CameraFactory, frontend: FrontendFactory, texture: TextureFactory
+) -> None:
     """The refusal is transactional: the frontend is as the last accepted frame left it."""
-    flow: _core.OpticalFlow = frontend()
-    first: _core.FlowFrame = flow.process(1_000, [texture()])
+    calibrated: int = camera(0, 0.0).width
+    flow: _core.OpticalFlow = frontend(1)
+    first: _core.FlowFrame = flow.process(1_000, [texture(0, 0)])
     ids_before: int = flow.last_keypoint_id
     with pytest.raises(ValueError, match="the calibration is for"):
-        flow.process(2_000, [np.zeros((FRAME + 8, FRAME), dtype=np.uint8)])
+        flow.process(2_000, [np.zeros((calibrated + 8, calibrated), dtype=np.uint8)])
     assert flow.t_ns == 1_000
     assert flow.frame_counter == 1
     assert flow.last_keypoint_id == ids_before
@@ -370,20 +348,20 @@ def test_a_frame_of_the_wrong_size_leaves_the_frontend_as_it_was() -> None:
 
 @settings(max_examples=10, deadline=None)
 @given(start=st.integers(min_value=-(10**12), max_value=-1))
-def test_identical_frames_at_negative_timestamps_keep_their_ids(start: int) -> None:
+def test_identical_frames_at_negative_timestamps_keep_their_ids(frontend: FrontendFactory, texture: TextureFactory, start: int) -> None:
     """basalt reads ``t_ns < 0`` as "no previous frame"; the port's clock is an Option.
 
     Two identical framesets used to share **zero** ids at ``(-2, -1)`` and 14 of
     16 at ``(0, 1)``: the negative timestamp made every frameset the first one.
     """
-    negative: _core.OpticalFlow = frontend()
-    first: _core.FlowFrame = negative.process(start, [texture()])
-    second: _core.FlowFrame = negative.process(start + 1, [texture()])
+    negative: _core.OpticalFlow = frontend(1)
+    first: _core.FlowFrame = negative.process(start, [texture(0, 0)])
+    second: _core.FlowFrame = negative.process(start + 1, [texture(0, 0)])
     shared: int = len(np.intersect1d(first.ids(0), second.ids(0)))
 
-    zeroed: _core.OpticalFlow = frontend()
-    third: _core.FlowFrame = zeroed.process(0, [texture()])
-    fourth: _core.FlowFrame = zeroed.process(1, [texture()])
+    zeroed: _core.OpticalFlow = frontend(1)
+    third: _core.FlowFrame = zeroed.process(0, [texture(0, 0)])
+    fourth: _core.FlowFrame = zeroed.process(1, [texture(0, 0)])
     at_zero: int = len(np.intersect1d(third.ids(0), fourth.ids(0)))
 
     assert shared > 0, f"no id survived an identical frameset at t = {start}"
@@ -395,16 +373,6 @@ HOSTILE_INTS: tuple[int, ...] = (0, -1, 1, 2**31, 2**63 - 1, -(2**63), 2**63, 2*
 """Integers a caller can type: past both ends of ``i64``, past ``u64``, and beyond."""
 HOSTILE_OBJECTS: tuple[object, ...] = (None, "", "x", b"", [], {}, 0.5, float("nan"), object(), (1, 2))
 """Objects that are not what any parameter here asks for."""
-HOSTILE_ARRAYS: tuple[NDArray[np.uint8], ...] = (
-    np.zeros((0, 0), dtype=np.uint8),
-    np.zeros((1, 0), dtype=np.uint8),
-    cast("NDArray[np.uint8]", np.zeros((0,), dtype=np.uint8)),
-    cast("NDArray[np.uint8]", np.zeros((2, 2, 2), dtype=np.uint8)),
-    cast("NDArray[np.uint8]", np.zeros((3, 3), dtype=np.float64)),
-    cast("NDArray[np.uint8]", np.zeros((FRAME, FRAME), dtype=np.uint8).T),
-    np.asfortranarray(np.zeros((5, 5), dtype=np.uint8)),
-)
-"""Arrays of the wrong rank, dtype, layout or extent."""
 EXPECTED_ERRORS: tuple[type[Exception], ...] = (ValueError, TypeError, IndexError, OverflowError)
 """What a boundary may raise. A panic is a ``BaseException`` and is none of these."""
 
@@ -448,7 +416,7 @@ def batch_imu(t_ns: object, gyro: object, accel: object) -> None:
     )
 
 
-def test_no_hostile_argument_reaches_python_as_a_panic() -> None:
+def test_no_hostile_argument_reaches_python_as_a_panic(camera: CameraFactory, imu: ImuCalib, texture: TextureFactory) -> None:
     """Every public entry point, against every class of hostile argument (D32).
 
     A panic inside the core reaches Python as ``PanicException``, which derives
@@ -457,9 +425,9 @@ def test_no_hostile_argument_reaches_python_as_a_panic() -> None:
     than the one argument that was reported.
     """
     failures: list[str] = []
-    calibration: _core.Calibration = _core.Calibration.from_catalog([camera(0), camera(1, 0.1)], imu())
+    calibration: _core.Calibration = _core.Calibration.from_catalog([camera(0, 0.0), camera(1, 0.1)], imu)
     config: _core.VioConfig = _core.VioConfig()
-    good: list[UInt8[ndarray, "h w"]] = [texture(), texture(1, 0)]
+    good: list[UInt8[ndarray, "h w"]] = [texture(0, 0), texture(1, 0)]
     flow: _core.OpticalFlow = _core.OpticalFlow(calibration, config)
     frame: _core.FlowFrame = flow.process(0, good)
 
@@ -488,7 +456,7 @@ def test_no_hostile_argument_reaches_python_as_a_panic() -> None:
         refuse(f"Calibration.from_json({thing!r})", lambda o=text: _core.Calibration.from_json(o), failures)
         refuse(f"VioConfig.from_json({thing!r})", lambda o=text: _core.VioConfig.from_json(o), failures)
         refuse(f"Calibration.from_catalog([{thing!r}])", lambda c=camera_like, i=imu_like: _core.Calibration.from_catalog([c], i), failures)
-        refuse(f"Calibration.from_catalog(imu={thing!r})", lambda i=imu_like: _core.Calibration.from_catalog([camera(0)], i), failures)
+        refuse(f"Calibration.from_catalog(imu={thing!r})", lambda i=imu_like: _core.Calibration.from_catalog([camera(0, 0.0)], i), failures)
         refuse(f"OpticalFlow(calibration={thing!r})", lambda c=calibration_like: _core.OpticalFlow(c, config), failures)
         refuse(f"OpticalFlow(config={thing!r})", lambda o=config_like: _core.OpticalFlow(calibration, o), failures)
         refuse(f"process(images={thing!r})", lambda o=images_like: flow.process(1, o), failures)
@@ -498,7 +466,18 @@ def test_no_hostile_argument_reaches_python_as_a_panic() -> None:
         refuse(f"push_imu_batch({thing!r})", lambda o=thing: batch_imu(o, o, o), failures)
         refuse(f"frame.ids({thing!r})", lambda o=index_like: frame.ids(o), failures)
 
-    for array in HOSTILE_ARRAYS:
+    # Arrays of the wrong rank, dtype, layout or extent, the transposed one being
+    # a frame of exactly the calibrated size whose bytes run down the columns.
+    hostile_arrays: tuple[NDArray[np.uint8], ...] = (
+        np.zeros((0, 0), dtype=np.uint8),
+        np.zeros((1, 0), dtype=np.uint8),
+        cast("NDArray[np.uint8]", np.zeros((0,), dtype=np.uint8)),
+        cast("NDArray[np.uint8]", np.zeros((2, 2, 2), dtype=np.uint8)),
+        cast("NDArray[np.uint8]", np.zeros((3, 3), dtype=np.float64)),
+        cast("NDArray[np.uint8]", good[0].T),
+        np.asfortranarray(np.zeros((5, 5), dtype=np.uint8)),
+    )
+    for array in hostile_arrays:
         refuse(f"process({array.shape} {array.dtype})", lambda a=array: flow.process(1, [a, a]), failures)
         refuse(f"process(mixed {array.shape})", lambda a=array: flow.process(1, [good[0], a]), failures)
         refuse(f"Vio.track({array.shape} {array.dtype})", lambda a=array: _core.Vio(1, 1).track(0, [a]), failures)
