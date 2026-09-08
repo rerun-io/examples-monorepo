@@ -188,9 +188,21 @@ def test_robocap_names_the_configuration_the_cpp_ran(manifest: ReferenceManifest
     assert '"camera_type": "kb4"' in (manifest.package_root / manifest.robocap.calibration).read_text()
 
 
-def test_an_unknown_robocap_session_names_the_ones_there_are(manifest: ReferenceManifest) -> None:
-    with pytest.raises(KeyError, match="s00000099.*s00000015"):
+def test_a_selector_the_manifest_cannot_satisfy_is_a_typed_error(manifest: ReferenceManifest) -> None:
+    """Every accessor that resolves a name names the ones there are, as a ``ValueError``.
+
+    These three are what a tool resolves a command line through, and a
+    ``KeyError`` reads as a dictionary miss: ``fleet_check --segments <clip>
+    typo`` reached one after replaying the valid clip. The loader has always
+    promised ``ValueError`` for a manifest it cannot read; a selector it cannot
+    satisfy is the same kind of answer.
+    """
+    with pytest.raises(ValueError, match="MIO10_typo.*MIO10_short_2_panorama"):
+        manifest.by_id("MIO10_typo")
+    with pytest.raises(ValueError, match="s00000099.*s00000015"):
         manifest.robocap.session("s00000099")
+    with pytest.raises(ValueError, match="msd-nope.*msd-index"):
+        manifest.dataset("msd-nope")
 
 
 def test_the_robocap_fixtures_are_checked_in(manifest: ReferenceManifest) -> None:

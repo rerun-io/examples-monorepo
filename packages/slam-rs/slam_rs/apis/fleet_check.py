@@ -267,15 +267,21 @@ def main(config: Config) -> None:
         config: Parsed CLI options.
 
     Raises:
+        ValueError: If ``--segments`` names an id the manifest does not have,
+            before any clip is replayed.
         SystemExit: If any clip missed a D60 clause.
     """
     manifest: ReferenceManifest = load_manifest(config.manifest, config.artifact_root)
+    # Every id resolved before the first replay, not one at a time inside the
+    # loop: `--segments <410 s clip> typo` used to pay that clip and then reach
+    # the typo (S22 review).
+    segments: tuple[ReferenceSegment, ...] = tuple(manifest.by_id(segment_id) for segment_id in config.segments)
     machine: Machine = this_machine()
     print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores")
     config.output_json.parent.mkdir(parents=True, exist_ok=True)
     results: list[ClipResult] = []
-    for segment_id in config.segments:
-        results.append(measure(manifest, manifest.by_id(segment_id)))
+    for segment in segments:
+        results.append(measure(manifest, segment))
         print(results[-1].row(machine))
         payload: dict[str, object] = {"machine": asdict(machine), "clips": [asdict(clip_json(clip)) for clip in results]}
         config.output_json.write_text(json.dumps(payload, indent=2))

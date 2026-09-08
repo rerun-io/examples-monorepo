@@ -211,6 +211,21 @@ def test_a_reference_trajectory_that_is_not_here_is_refused_before_the_replay(
         measure(manifest, absent)
 
 
+def test_an_unknown_segment_id_is_refused_before_the_first_replay(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """``--segments <410 s clip> typo`` used to pay the clip and then traceback on the typo.
+
+    Every id the run was given is resolved before the loop opens anything, and
+    the manifest's own selector error names the id and the ten it has.
+    """
+
+    def never(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a clip was measured before every id was resolved")
+
+    monkeypatch.setattr(fleet_check, "measure", never)
+    with pytest.raises(ValueError, match="MIO10_typo.*MIO10_short_2_panorama"):
+        main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1], "MIO10_typo"), output_json=tmp_path / "fleet_check.json"))
+
+
 def test_the_first_clips_evidence_survives_a_directory_that_is_not_there_yet(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The JSON is the whole point of the run, and it is written after every clip.
 

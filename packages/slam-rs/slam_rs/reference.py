@@ -394,12 +394,12 @@ class RobocapReference:
         """The session with this id.
 
         Raises:
-            KeyError: If the manifest has no such session.
+            ValueError: If the manifest has no such session.
         """
         for session in self.sessions:
             if session.session_id == session_id:
                 return session
-        raise KeyError(f"{session_id!r} is not a RoboCap session in the manifest; have {[s.session_id for s in self.sessions]}")
+        raise ValueError(f"{session_id!r} is not a RoboCap session in the manifest; have {[s.session_id for s in self.sessions]}")
 
 
 @dataclass(slots=True, frozen=True)
@@ -423,12 +423,12 @@ class ReferenceManifest:
         """The dataset with this name.
 
         Raises:
-            KeyError: If the manifest has no such dataset.
+            ValueError: If the manifest has no such dataset.
         """
         for dataset in self.datasets:
             if dataset.name == name:
                 return dataset
-        raise KeyError(f"{name!r} is not in the reference set; have {[d.name for d in self.datasets]}")
+        raise ValueError(f"{name!r} is not in the reference set; have {[d.name for d in self.datasets]}")
 
     def vio_config_text(self, dataset_name: str) -> str:
         """The basalt VIO config one dataset's segments run with, as its file's own text.
@@ -440,20 +440,26 @@ class ReferenceManifest:
             The vendored file's text, ready for :meth:`slam_rs._core.VioConfig.from_json`.
 
         Raises:
-            KeyError: If the manifest has no such dataset.
+            ValueError: If the manifest has no such dataset.
         """
         return (self.package_root / self.dataset(dataset_name).vio_config).read_text()
 
     def by_id(self, segment_id: str) -> ReferenceSegment:
         """The segment with this id.
 
+        A command line is what reaches this — ``fleet_check --segments`` and the
+        replay tool's ``--segment`` — so an id the manifest cannot satisfy is a
+        ``ValueError`` naming the ten it has, the same kind of answer
+        :func:`load_manifest` gives for a manifest it cannot read. A bare
+        ``KeyError`` reads as a dictionary miss.
+
         Raises:
-            KeyError: If no segment in the manifest has that id.
+            ValueError: If no segment in the manifest has that id.
         """
         for segment in self.segments:
             if segment.segment_id == segment_id:
                 return segment
-        raise KeyError(f"{segment_id!r} is not in the reference set; have {[s.segment_id for s in self.segments]}")
+        raise ValueError(f"{segment_id!r} is not in the reference set; have {[s.segment_id for s in self.segments]}")
 
     def in_tier(self, tier: Tier) -> tuple[ReferenceSegment, ...]:
         """Every segment in one tier, in manifest order."""
