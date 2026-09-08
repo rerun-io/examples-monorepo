@@ -17,7 +17,8 @@
 //! * **No Jacobian scaling and no landmark or pose damping** (D9/D34): the four
 //!   calls are commented out in the shipped source, and damping enters only
 //!   through the reduced system's diagonal. `backSubstitute` still calls
-//!   `setLandmarkDamping(0)` on itself, so the undo path runs as a no-op.
+//!   `setLandmarkDamping(0)` on itself; here there is nothing to undo, because
+//!   the three damping rows are never written.
 //!
 //! The accept test compares the true cost decrease with the linearized model's,
 //! and the model's includes the landmarks' own gain — it is positive at

@@ -25,11 +25,6 @@
 //! * `storage` after `linearizeLandmark` and after `performQR`, so the residual,
 //!   the Huber weighting, the two 2x6 pose blocks and all three Householder
 //!   reflections are compared coefficient by coefficient;
-//! * `storage` after `setLandmarkDamping(lambda)` and after
-//!   `setLandmarkDamping(0)` undoes it — the six Givens rotations and the LIFO
-//!   un-apply of `:220-231` (trap 10). **Nothing on the shipped VIO path calls
-//!   this** (decision D34, `sqrt_keypoint_vio.cpp:1373-1377` is commented out),
-//!   which is exactly why it needs a fixture rather than a live test;
 //! * the per-block `Q2Jp`/`Q2r` and `JᵀJ`/`Jᵀr`;
 //! * `backSubstitute`: the model cost change and the landmark parameters it
 //!   leaves behind, including the `max(0, inv_dist + inc[2])` projection;
@@ -38,8 +33,13 @@
 //!   `Q2Jp`/`Q2r` with the prior's re-anchored residual `H delta + b`
 //!   (`linearization_abs_qr.cpp:592`, trap 8), and the total `l_diff`.
 //!
+//! The fixture also carries `storage` after `setLandmarkDamping(lambda)` and
+//! after `setLandmarkDamping(0)` undoes it; nothing reads those entries since
+//! D68 removed the damping stack the shipped VIO never called. It is left as
+//! the C++ emitted it.
+//!
 //! **Tolerances, and what they measure.** The port reproduces Eigen's formulas
-//! (`makeHouseholder`, `makeGivens`, the triangular solve) coefficient for
+//! (`makeHouseholder`, the triangular solve) coefficient for
 //! coefficient, but not Eigen's *product kernels*: `essential.adjoint() * bottom`
 //! inside `applyHouseholderOnTheLeft` and `J.transpose() * J` inside
 //! `add_dense_H_b` are `gemv`/`gemm` calls whose blocking associates a sum

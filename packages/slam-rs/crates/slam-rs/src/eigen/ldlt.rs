@@ -1,27 +1,21 @@
-//! Eigen's pivoted LDLT at dynamic size, and the three things
-//! `marginalizeHelperSqToSqrt` asks of it.
+//! Eigen's pivoted LDLT at dynamic size: the Levenberg-Marquardt step's solve.
 //!
-//! `marg_helper.cpp:202-231` takes the square root of the reduced Hessian
-//! through `Eigen::LDLT<Eigen::Ref<MatX>>`, and reads back `vectorD()`,
-//! `transpositionsP()`, `matrixU()` and `matrixL().solveInPlace()`. Decision
-//! D41 settled that Eigen's LDLT is **not** interchangeable with a textbook
-//! pivoted LDLT — the IMU stage found a rank-deficient covariance where the two
-//! differ by 26 orders of magnitude — so it is ported statement by statement
-//! from the vendored Eigen 5.0.1 (`Eigen/Version:12`)
+//! `sqrt_keypoint_vio.cpp:1415-1430` solves `(H + lambda diag(H)) inc = b`
+//! through `Eigen::LDLT<Eigen::Ref<MatX>>`. Decision D41 settled that Eigen's
+//! LDLT is **not** interchangeable with a textbook pivoted LDLT — the IMU stage
+//! found a rank-deficient covariance where the two differ by 26 orders of
+//! magnitude — so it is ported statement by statement from the vendored Eigen
+//! 5.0.1 (`Eigen/Version:12`)
 //! (`thirdparty/basalt-headers/thirdparty/eigen/Eigen/src/Cholesky/LDLT.h`),
 //! exactly as [`crate::imu`] did at fixed size 9 and `frontend::ldlt` at 3.
 //!
-//! Two properties decide what a rank-deficient prior becomes, and neither
-//! survives a right-looking rewrite:
-//!
-//! * **The pivot is chosen on the un-updated diagonal** (`LDLT.h:335-339`), so
-//!   at step `k` the trailing diagonal still holds the original entries. The
-//!   Eigen source says so itself: LDLT "is not rank-revealing" (`:342-344`).
-//! * **A dependent direction leaves a tiny pivot of either sign**, and
-//!   `marginalizeHelperSqToSqrt` clamps it with `vectorD().array().max(0)`
-//!   (`marg_helper.cpp:204`) and then drops the matching `b` entry when the
-//!   root is below `sqrt(numeric_limits::min())` (`:229`). Which side of zero
-//!   the residue lands on is a property of the precision, not of the algorithm.
+//! One property of the factorization decides what a rank-deficient system
+//! becomes, and it does not survive a right-looking rewrite: **the pivot is
+//! chosen on the un-updated diagonal** (`LDLT.h:335-339`), so at step `k` the
+//! trailing diagonal still holds the original entries. The Eigen source says so
+//! itself: LDLT "is not rank-revealing" (`:342-344`). A dependent direction
+//! therefore leaves a tiny pivot of either sign, and which side of zero the
+//! residue lands on is a property of the precision, not of the algorithm.
 //!
 //! **What is exact and what is not.** The factorization, the transpositions,
 //! `vectorD` and the `matrixU() * P` product are elementary operations in
