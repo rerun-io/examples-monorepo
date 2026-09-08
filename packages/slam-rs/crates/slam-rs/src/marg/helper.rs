@@ -24,11 +24,11 @@ use std::collections::BTreeSet;
 
 use nalgebra::{DMatrix, DVector};
 
-use crate::lie::LieScalar;
-use crate::linearize::eigen_qr::{
+use crate::eigen::qr::{
     BlockSpan, ColumnRedux, apply_householder_on_the_left_block, apply_householder_on_the_left_vec,
     make_householder,
 };
+use crate::lie::LieScalar;
 use crate::marg::MargError;
 
 /// What the marginalization helper returns: the reduced system over the kept

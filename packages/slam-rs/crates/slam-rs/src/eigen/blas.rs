@@ -32,8 +32,22 @@
 
 use nalgebra::DMatrix;
 
+use super::qr::BlockSpan;
 use crate::lie::LieScalar;
-use crate::linearize::eigen_qr::BlockSpan;
+
+/// `v.head<3>().norm()` in Eigen's summation order, which differs between the
+/// two precisions.
+///
+/// See [`crate::lie::LieScalar::eigen_redux3`]: `f64` reduces one `Packet2d` and folds the
+/// remainder in, `(a + b) + c`; `f32` finds `Packet4f` too wide and falls back
+/// to the scalar unroller's `a + (b + c)`. Using one order for both is a
+/// one-ulp error, and it reaches a threshold in each precision — the `f32`
+/// `proj[2]` of a landmark at `inv_dist = 1e-7`, and the `f64` acceptance gate
+/// on a landmark exactly 1/3 m away (decision D44's rule).
+#[inline]
+pub fn norm3<S: LieScalar>(x: S, y: S, z: S) -> S {
+    S::eigen_redux3(x * x, y * y, z * z).sqrt()
+}
 
 /// `redux_impl<Func, Evaluator, LinearVectorizedTraversal, NoUnrolling>::run`
 /// (`Core/Redux.h:274-325`): the sum of `len` contiguous coefficients in
@@ -42,7 +56,7 @@ use crate::linearize::eigen_qr::BlockSpan;
 /// Two of basalt's reductions come through here — the `.sum()` of a
 /// `cwiseProduct` (an `InnerProduct` product, or the row-major triangular
 /// solve's `TriangularSolverVector.h:66-69`) and the `squaredNorm()` of a
-/// contiguous column segment ([`crate::linearize::eigen_qr::contiguous_squared_norm`]).
+/// contiguous column segment ([`crate::eigen::qr::contiguous_squared_norm`]).
 /// They differ only in where the coefficients come from, which is why this
 /// takes a closure: the traversal, the two accumulators and the scalar tail are
 /// Eigen's and must be written once.

@@ -31,10 +31,10 @@ use super::{
     EstimatorError, LmDamping, SqrtKeypointVio, StageTimings, VEE_FACTOR, fixed_keyframes,
 };
 use crate::duration_ns;
+use crate::eigen::ldlt::EigenLdlt;
 use crate::imu::{ImuLinData, IntegratedImuMeasurement, Matrix9};
 use crate::lie::{LieScalar, eigen_maxi};
 use crate::linearize::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
-use crate::marg::eigen_ldlt::EigenLdlt;
 use crate::types::{
     AbsOrderMap, FrameId, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseVelBiasState, PoseVelBiasStateWithLin,
     Vector9, Vector15,

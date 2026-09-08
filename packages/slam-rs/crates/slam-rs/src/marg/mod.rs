@@ -35,7 +35,6 @@
 //! compared against; the port carries only the square-root form, because
 //! `SqrtKeypointVio::new` refuses the flag off (D68).
 
-pub(crate) mod eigen_ldlt;
 mod helper;
 mod window;
 

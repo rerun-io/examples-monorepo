@@ -28,15 +28,15 @@
 //! Eigen's own order. The two triangular solves reproduce Eigen's panel
 //! structure (`TriangularSolverVector.h:30-113`,
 //! `EIGEN_TUNE_TRIANGULAR_PANEL_WIDTH = 8`) and route their trailing updates
-//! through [`crate::eigen_blas`], which ports the `gemv` association Eigen
+//! through [`crate::eigen::blas`], which ports the `gemv` association Eigen
 //! actually uses — stage S8 needed that, because `LDLT::solve` is where the LM
 //! increment comes from and the increment reaches a threshold comparison.
 
 use nalgebra::{DMatrix, DVector};
 
-use crate::eigen_blas::{gemv_col_major_block, gemv_row_major_of_transpose, redux_contiguous};
+use super::blas::{gemv_col_major_block, gemv_row_major_of_transpose, redux_contiguous};
+use crate::eigen::qr::BlockSpan;
 use crate::lie::LieScalar;
-use crate::linearize::eigen_qr::BlockSpan;
 
 /// Eigen's `EIGEN_TUNE_TRIANGULAR_PANEL_WIDTH` (`Eigen/src/Core/util/Macros.h`).
 const TRIANGULAR_PANEL_WIDTH: usize = 8;
@@ -206,7 +206,7 @@ impl<S: LieScalar> EigenLdlt<S> {
             // `general_matrix_vector_product<ColMajor>` with `alpha = -1`, which
             // accumulates each output coefficient from a fresh zero. A
             // `for j { for i { v[i] -= v[j] * L(i, j) } }` loop is a different
-            // value in `f32`, which is why this goes through `eigen_blas`.
+            // value in `f32`, which is why this goes through [`super::blas`].
             let r: usize = size - end_block;
             if r > 0 {
                 // The `rhs` is the panel just substituted and the `res` the

@@ -53,8 +53,8 @@
 
 use nalgebra::{DMatrix, DVector};
 
-use crate::ba_base::JacobiRotation;
-use crate::eigen_blas::redux_contiguous;
+use super::blas::redux_contiguous;
+use super::svd::JacobiRotation;
 use crate::lie::LieScalar;
 
 /// The sub-block a reflection acts on, `storage.block(row_start, col_start,
@@ -113,7 +113,7 @@ pub(crate) enum ColumnRedux {
 /// `storage.col(col).segment(start, len)`, in Eigen's order.
 ///
 /// `unaryExpr(squared_norm_functor)` (`Dot.h:24`) reduced by
-/// [`crate::eigen_blas::redux_contiguous`], whose doc carries the traversal and
+/// [`crate::eigen::blas::redux_contiguous`], whose doc carries the traversal and
 /// the `alignedStart == 0` argument; `Evaluator::SizeAtCompileTime` is
 /// `Dynamic`, so the cost is `HugeCost` and the unrolled variants never apply.
 /// The shape sweep this order was verified on, and what each wrong order

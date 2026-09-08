@@ -36,6 +36,7 @@ use std::marker::PhantomData;
 
 use nalgebra::{Matrix2x4, Matrix4x2, Vector2, Vector4};
 
+use crate::eigen::norm3;
 use crate::lie::LieScalar;
 use crate::types::{FrameId, LandmarkId, TimeCamId};
 
@@ -43,20 +44,6 @@ use crate::types::{FrameId, LandmarkId, TimeCamId};
 #[inline]
 fn c<S: LieScalar>(value: f64) -> S {
     S::from_literal(value)
-}
-
-/// `v.head<3>().norm()` in Eigen's summation order, which differs between the
-/// two precisions.
-///
-/// See [`LieScalar::eigen_redux3`]: `f64` reduces one `Packet2d` and folds the
-/// remainder in, `(a + b) + c`; `f32` finds `Packet4f` too wide and falls back
-/// to the scalar unroller's `a + (b + c)`. Using one order for both is a
-/// one-ulp error, and it reaches a threshold in each precision — the `f32`
-/// `proj[2]` of a landmark at `inv_dist = 1e-7`, and the `f64` acceptance gate
-/// on a landmark exactly 1/3 m away (decision D44's rule).
-#[inline]
-pub fn eigen_norm3<S: LieScalar>(x: S, y: S, z: S) -> S {
-    S::eigen_redux3(x * x, y * y, z * z).sqrt()
 }
 
 /// Stereographic projection: the minimal 2-parameter chart on the unit sphere
@@ -79,7 +66,7 @@ impl<S: LieScalar> StereographicParam<S> {
     #[inline]
     pub fn project(p3d: &Vector4<S>) -> Vector2<S> {
         // `p3d.template head<3>().norm()` (`:80`) — the name `sqrt` is basalt's.
-        let sqrt: S = eigen_norm3(p3d[0], p3d[1], p3d[2]);
+        let sqrt: S = norm3(p3d[0], p3d[1], p3d[2]);
         let norm: S = p3d[2] + sqrt;
         let norm_inv: S = S::one() / norm;
         Vector2::new(p3d[0] * norm_inv, p3d[1] * norm_inv)
@@ -89,7 +76,7 @@ impl<S: LieScalar> StereographicParam<S> {
     /// (`stereographic_param.hpp:86-103`).
     #[inline]
     pub fn project_with_jacobian(p3d: &Vector4<S>, d_r_d_p: &mut Matrix2x4<S>) -> Vector2<S> {
-        let sqrt: S = eigen_norm3(p3d[0], p3d[1], p3d[2]);
+        let sqrt: S = norm3(p3d[0], p3d[1], p3d[2]);
         let norm: S = p3d[2] + sqrt;
         let norm_inv: S = S::one() / norm;
         let res: Vector2<S> = Vector2::new(p3d[0] * norm_inv, p3d[1] * norm_inv);

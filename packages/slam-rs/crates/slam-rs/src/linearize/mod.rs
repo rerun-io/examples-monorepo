@@ -43,7 +43,6 @@
 //! `par_chunks` with an ordered merge does not.
 
 mod abs_qr;
-pub(crate) mod eigen_qr;
 mod landmark_block;
 mod reduce;
 
@@ -83,7 +82,7 @@ use crate::types::{CamId, FrameId, LandmarkId};
 /// This is one step of `performQRHouseholder`
 /// (`landmark_block_abs_dynamic.hpp:445-453`), with Eigen's `makeHouseholder`
 /// and `applyHouseholderOnTheLeft` arithmetic ported rather than nalgebra's
-/// (see `eigen_qr` for why). Exposed because the marginalization QR of
+/// (see `crate::eigen::qr` for why). Exposed because the marginalization QR of
 /// `marg_helper.cpp:293-317` drives the same primitive over a wider matrix, and
 /// because the ported `test_qr.cpp` builds a full QR out of it.
 ///
@@ -120,16 +119,18 @@ pub fn reflect_column<S: LieScalar>(
     let mut essential: Vec<S> = vec![S::zero(); len - 1];
     let mut work: Vec<S> = vec![S::zero(); storage.ncols()];
     // `performQRHouseholder`'s own reduction: the landmark block's `storage` is
-    // `Eigen::RowMajor`, so the column is strided (see [`eigen_qr`]).
-    let (tau, _beta) = eigen_qr::make_householder(
+    // `Eigen::RowMajor`, so the column is strided (see `crate::eigen::qr`).
+    let (tau, _beta) = crate::eigen::qr::make_householder(
         storage,
         col,
         start,
         len,
-        eigen_qr::ColumnRedux::Strided,
+        crate::eigen::qr::ColumnRedux::Strided,
         &mut essential,
     );
-    eigen_qr::apply_householder_on_the_left(storage, start, len, &essential, tau, &mut work);
+    crate::eigen::qr::apply_householder_on_the_left(
+        storage, start, len, &essential, tau, &mut work,
+    );
     Ok(())
 }
 

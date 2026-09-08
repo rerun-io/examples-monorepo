@@ -79,7 +79,8 @@ use serde::Deserialize;
 use slam_rs::ba_base::{LinearizePointOut, huber_cost, linearize_point, triangulate};
 use slam_rs::calib::Calibration;
 use slam_rs::camera::{CameraEnum, KannalaBrandt4, PinholeRadtan8};
-use slam_rs::landmark::{Landmark, StereographicParam, eigen_norm3};
+use slam_rs::eigen::norm3;
+use slam_rs::landmark::{Landmark, StereographicParam};
 use slam_rs::lie::{LieScalar, Se3, So3};
 use slam_rs::types::{LandmarkId, TimeCamId};
 
@@ -685,7 +686,7 @@ fn check_norm3<S: LieScalar>(entries: &[&OracleNorm3], left_assoc: bool) {
         // And the square root the residual path actually calls.
         close(
             &format!("{label} norm"),
-            eigen_norm3(x, y, z).to_f64(),
+            norm3(x, y, z).to_f64(),
             Some(entry.norm),
             0.0,
         );
