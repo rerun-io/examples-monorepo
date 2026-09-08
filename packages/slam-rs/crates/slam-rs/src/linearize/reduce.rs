@@ -43,15 +43,32 @@ use crate::lie::LieScalar;
 /// basalt's `backSubstitute` mutates it in place (`:302`).
 pub(crate) type LeafResult<E> = Result<(), E>;
 
+/// What [`deterministic_reduce`] can build a tree over.
+///
+/// C++'s reduction body carries the three operations TBB needs: the split
+/// constructor that starts a right-hand subtree from the identity, the identity
+/// itself, and `join` (`linearization_abs_qr.cpp:513-542`). Naming them on the
+/// accumulator instead of passing three closures per call is what keeps the
+/// recursion below to one shape for both accumulator types — and the shape is
+/// the contract the `tbb_reduce_oracle` fixture pins.
+pub(crate) trait Reducible {
+    /// A fresh identity of this accumulator's own shape, for the scratch buffer
+    /// one recursion level down.
+    fn identity_like(&self) -> Self;
+    /// Back to the identity, so one scratch buffer serves every subtree at its
+    /// depth.
+    fn reset(&mut self);
+    /// `my_value = my_reduction(my_value, rhs.my_value)`: left, then right.
+    fn join(&mut self, right: &Self);
+}
+
 /// Reduce `0..n` in `tbb::parallel_deterministic_reduce`'s order, accumulating
 /// through `&mut T` so nothing is cloned and the matrix sites can reuse one
 /// buffer per recursion level.
 ///
-/// `out` must already hold the identity. `zero` builds a fresh identity for a
-/// scratch level, `reset` returns an existing one to the identity, `leaf`
-/// folds one index into an accumulator and `join` adds the right subtree's
-/// accumulator into the left's — in that order, as `lambda_reduce_body::join`
-/// does.
+/// `out` must already hold the identity, and `leaf` folds one index into an
+/// accumulator; the identity, the reset and the join come off [`Reducible`], in
+/// that order, as `lambda_reduce_body::join` does.
 ///
 /// Scratch buffers are kept between calls in `scratch`, one per recursion
 /// depth, so a reduction over `n` blocks allocates `ceil(log2 n)` accumulators
@@ -59,33 +76,26 @@ pub(crate) type LeafResult<E> = Result<(), E>;
 /// task (`linearization_abs_qr.cpp:527-535`), which the architecture dossier
 /// already flags as wasteful; the association is what has to match, not the
 /// allocation count.
-pub(crate) fn deterministic_reduce<T, E>(
+pub(crate) fn deterministic_reduce<T: Reducible, E>(
     n: usize,
     out: &mut T,
     scratch: &mut Vec<Option<T>>,
-    zero: &dyn Fn() -> T,
-    reset: &dyn Fn(&mut T),
     leaf: &mut dyn FnMut(usize, &mut T) -> LeafResult<E>,
-    join: &dyn Fn(&mut T, &T),
 ) -> LeafResult<E> {
     if n == 0 {
         // An empty `blocked_range` never runs a body, so the identity survives.
         return Ok(());
     }
-    reduce_range(0, n, 0, out, scratch, zero, reset, leaf, join)
+    reduce_range(0, n, 0, out, scratch, leaf)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn reduce_range<T, E>(
+fn reduce_range<T: Reducible, E>(
     lo: usize,
     hi: usize,
     depth: usize,
     out: &mut T,
     scratch: &mut Vec<Option<T>>,
-    zero: &dyn Fn() -> T,
-    reset: &dyn Fn(&mut T),
     leaf: &mut dyn FnMut(usize, &mut T) -> LeafResult<E>,
-    join: &dyn Fn(&mut T, &T),
 ) -> LeafResult<E> {
     // `blocked_range::is_divisible()` is `grainsize < size()`, and the
     // grainsize at all four of basalt's sites is the default 1.
@@ -99,7 +109,7 @@ fn reduce_range<T, E>(
 
     // The left subtree accumulates into the caller's buffer, which already
     // holds the identity — that is C++'s original body.
-    reduce_range(lo, mid, depth + 1, out, scratch, zero, reset, leaf, join)?;
+    reduce_range(lo, mid, depth + 1, out, scratch, leaf)?;
 
     // The right subtree is C++'s split-constructed body, which starts from the
     // identity. Take the buffer for this depth so the recursion below can use
@@ -109,23 +119,12 @@ fn reduce_range<T, E>(
     }
     let mut buffer: T = match scratch.get_mut(depth).and_then(Option::take) {
         Some(buffer) => buffer,
-        None => zero(),
+        None => out.identity_like(),
     };
-    reset(&mut buffer);
-    let result: LeafResult<E> = reduce_range(
-        mid,
-        hi,
-        depth + 1,
-        &mut buffer,
-        scratch,
-        zero,
-        reset,
-        leaf,
-        join,
-    );
+    buffer.reset();
+    let result: LeafResult<E> = reduce_range(mid, hi, depth + 1, &mut buffer, scratch, leaf);
     if result.is_ok() {
-        // `my_value = my_reduction(my_value, rhs.my_value)`: left, then right.
-        join(out, &buffer);
+        out.join(&buffer);
     }
     if let Some(slot) = scratch.get_mut(depth) {
         *slot = Some(buffer);
@@ -141,21 +140,34 @@ pub(crate) fn deterministic_reduce_scalar<S: LieScalar, E>(
     n: usize,
     leaf: &mut dyn FnMut(usize, S) -> Result<S, E>,
 ) -> Result<S, E> {
-    let mut out: S = S::zero();
-    let mut scratch: Vec<Option<S>> = Vec::new();
+    let mut out: Sum<S> = Sum(S::zero());
+    let mut scratch: Vec<Option<Sum<S>>> = Vec::new();
     deterministic_reduce(
         n,
         &mut out,
         &mut scratch,
-        &S::zero,
-        &|value: &mut S| *value = S::zero(),
-        &mut |index: usize, acc: &mut S| {
-            *acc = leaf(index, *acc)?;
+        &mut |index: usize, acc: &mut Sum<S>| {
+            acc.0 = leaf(index, acc.0)?;
             Ok(())
         },
-        &|left: &mut S, right: &S| *left += *right,
     )?;
-    Ok(out)
+    Ok(out.0)
+}
+
+/// A scalar accumulator. [`Reducible`] sits on this rather than on `LieScalar`,
+/// so the two numeric widths keep no knowledge of the reduction tree.
+struct Sum<S: LieScalar>(S);
+
+impl<S: LieScalar> Reducible for Sum<S> {
+    fn identity_like(&self) -> Self {
+        Self(S::zero())
+    }
+    fn reset(&mut self) {
+        self.0 = S::zero();
+    }
+    fn join(&mut self, right: &Self) {
+        self.0 += right.0;
+    }
 }
 
 #[cfg(test)]
@@ -163,6 +175,18 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    impl Reducible for String {
+        fn identity_like(&self) -> Self {
+            Self::new()
+        }
+        fn reset(&mut self) {
+            self.clear();
+        }
+        fn join(&mut self, right: &Self) {
+            *self = format!("({self}+{right})");
+        }
+    }
 
     /// The tree of `n = 4` is `(x0 + x1) + (x2 + x3)`, and of `n = 5`
     /// `(x0 + x1) + (x2 + (x3 + x4))`. Checked structurally, by recording the
@@ -185,15 +209,10 @@ mod tests {
                 n,
                 &mut out,
                 &mut scratch,
-                &String::new,
-                &|value: &mut String| value.clear(),
                 &mut |index: usize, acc: &mut String| {
                     assert!(acc.is_empty(), "a leaf ran on a non-identity accumulator");
                     *acc = index.to_string();
                     Ok(())
-                },
-                &|left: &mut String, right: &String| {
-                    *left = format!("({left}+{right})");
                 },
             )
             .unwrap();

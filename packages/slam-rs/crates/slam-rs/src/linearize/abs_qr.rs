@@ -22,7 +22,7 @@ use crate::imu::{ImuBlock, ImuLinData, IntegratedImuMeasurement};
 use crate::landmark::Landmark;
 use crate::lie::{LieScalar, Se3};
 use crate::linearize::landmark_block::{DenseHbScratch, LandmarkBlock, LandmarkBlockOptions};
-use crate::linearize::reduce::{deterministic_reduce, deterministic_reduce_scalar};
+use crate::linearize::reduce::{Reducible, deterministic_reduce, deterministic_reduce_scalar};
 use crate::linearize::{LinearizeError, RelPoseLin};
 use crate::types::{AbsOrderMap, FrameId, LandmarkId, MargLinData, POSE_VEL_BIAS_SIZE, TimeCamId};
 
@@ -211,6 +211,15 @@ impl<S: LieScalar> DensePartial<S> {
         }
         Ok(())
     }
+}
+
+impl<S: LieScalar> Reducible for DensePartial<S> {
+    /// A second `opt_size`-wide accumulator, which is what C++'s split
+    /// constructor allocates per task (`:513-542`).
+    fn identity_like(&self) -> Self {
+        Self::zeros(self.b.nrows())
+    }
+
     /// Back to the identity, zeroing only what was written.
     fn reset(&mut self) {
         for &j in &self.columns {
@@ -555,14 +564,11 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             blocks.len(),
             &mut accumulator,
             &mut scratch,
-            &|| DensePartial::zeros(opt_size),
-            &DensePartial::reset,
             &mut |i: usize, acc: &mut DensePartial<S>| {
                 let block: &LandmarkBlock<S> =
                     blocks.get(i).ok_or(LinearizeError::LayoutOverflow)?;
                 acc.accumulate(block, &mut leaf_scratch)
             },
-            &DensePartial::join,
         )?;
         let DensePartial { mut h, mut b, .. } = accumulator;
 
