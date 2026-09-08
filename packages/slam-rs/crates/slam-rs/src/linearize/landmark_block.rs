@@ -158,8 +158,13 @@ pub struct LandmarkBlock<S: LieScalar> {
     /// whole life: `linearizeLandmark` only ever writes `block<2, 6>` at an
     /// observation's host and target offsets (`:178-179`), and the Householder
     /// reflections and Givens rotations that follow act on rows, which cannot
-    /// move a zero column off zero. [`Self::add_dense_h_b`] is the only reader,
-    /// and `dense_h_b_touches_only_observed_columns` pins the invariant.
+    /// move a zero column off zero. An observation dropped for marginalization
+    /// writes nothing at all — `:137` skips it for want of a relative pose, and
+    /// its `abs_t_idx` is the `0` sentinel of `:74`, which is a column of
+    /// whichever frame the ordering puts first — so it is left out.
+    /// [`Self::add_dense_h_b`] is the only reader, and
+    /// `dense_h_b_touches_only_observed_columns` and
+    /// `a_dropped_observation_writes_no_columns` pin the invariant.
     active_cols: Vec<usize>,
     /// The landmark this block belongs to.
     lm_id: LandmarkId,
@@ -298,8 +303,15 @@ impl<S: LieScalar> LandmarkBlock<S> {
 
         let mut active_cols: Vec<usize> = Vec::with_capacity(2 * POSE_SIZE * observations.len());
         for obs in &observations {
+            // A dropped observation is skipped at `:137` and writes nothing;
+            // its `abs_t_idx` is the `0` sentinel, not a column it owns.
+            if obs.rel_pose.is_none() {
+                continue;
+            }
+            // Both offsets are inside `padding_idx`: the check above refuses
+            // the block otherwise, and it covers exactly these observations.
             for offset in [obs.abs_h_idx, obs.abs_t_idx] {
-                active_cols.extend(offset..(offset + POSE_SIZE).min(padding_idx));
+                active_cols.extend(offset..offset + POSE_SIZE);
             }
         }
         active_cols.sort_unstable();
@@ -1159,6 +1171,13 @@ mod tests {
 
         // And the dense system it produces is the one the whole `padding_idx`
         // loop would have produced.
+        assert_dense_h_b_is_the_full_loop(&block);
+    }
+
+    /// The system `add_dense_h_b` writes over `active_cols` equals the one a
+    /// loop over the whole `padding_idx` square produces, coefficient by
+    /// coefficient. Both tests of the skip rest on this.
+    fn assert_dense_h_b_is_the_full_loop(block: &LandmarkBlock<f64>) {
         let mut h: DMatrix<f64> = DMatrix::zeros(block.padding_idx, block.padding_idx);
         let mut b: DVector<f64> = DVector::zeros(block.padding_idx);
         block
@@ -1179,6 +1198,53 @@ mod tests {
             }
             assert_eq!(b[i], acc, "b({i})");
         }
+    }
+
+    /// A measurement dropped during marginalization writes no pose columns.
+    ///
+    /// `linearizeLandmark` skips an observation with no relative pose (`:137`),
+    /// so nothing ever writes at its `abs_t_idx` — which is the `0` sentinel of
+    /// `:74`, another frame's first column. The block here is hosted in frame 1,
+    /// so that sentinel is not the host's own offset and the two are told apart:
+    /// columns `0..6` stay zero through the linearization, the QR and the
+    /// damping, and the dense system is the full loop's either way.
+    #[test]
+    fn a_dropped_observation_writes_no_columns() {
+        let (aom, _, rel) = fixture(4);
+        let host: TimeCamId = TimeCamId::new(1, 0);
+        let mut lm: Landmark<f64> =
+            Landmark::new(LandmarkId(7), host, Vector2::new(0.01, -0.02), 0.25);
+        lm.obs.insert(host, Vector2::new(505.0, 510.0));
+        lm.obs
+            .insert(TimeCamId::new(1, 1), Vector2::new(500.0, 512.0));
+        // Frame 9 is not in the ordering, so this one is dropped.
+        lm.obs
+            .insert(TimeCamId::new(9, 0), Vector2::new(498.0, 507.0));
+
+        let mut block: LandmarkBlock<f64> =
+            LandmarkBlock::allocate(lm.id, &lm, &index, &aom, false).unwrap();
+        let live: std::ops::Range<usize> = POSE_SIZE..2 * POSE_SIZE;
+        assert_eq!(
+            block.active_cols,
+            live.clone().collect::<Vec<usize>>(),
+            "the dropped observation's sentinel offset is not a column it writes"
+        );
+        block
+            .linearize_landmark(&lm, &rel, &cameras(), &options())
+            .unwrap();
+        block.perform_qr(&options()).unwrap();
+        block.set_landmark_damping(1e-3).unwrap();
+
+        for column in (0..block.padding_idx).filter(|column| !live.contains(column)) {
+            for row in 0..block.num_rows {
+                assert_eq!(
+                    block.storage[(row, column)],
+                    0.0,
+                    "column {column} moved off zero"
+                );
+            }
+        }
+        assert_dense_h_b_is_the_full_loop(&block);
     }
 
     /// The layout arithmetic of `:83-96` on every remainder of the padding rule.

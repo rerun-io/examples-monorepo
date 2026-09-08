@@ -171,8 +171,9 @@ impl<S: LieScalar> DensePartial<S> {
     /// Every column is in range, so this indexes rather than absorbing an
     /// out-of-range one (decision D32): [`Self::accumulate`] marks only a block
     /// [`LandmarkBlock::add_dense_h_b`] has accepted, whose check is
-    /// `padding_idx <= h.ncols()`, and a block's `active_cols` are clamped to
-    /// its `padding_idx`; [`Self::join`] marks a partial of the same ordering.
+    /// `padding_idx <= h.ncols()`, and a block's `active_cols` are inside its
+    /// own `padding_idx` ([`LandmarkBlock::allocate`] refuses a pose block that
+    /// is not); [`Self::join`] marks a partial of the same ordering.
     fn mark(&mut self, columns: &[usize]) {
         let mut added: bool = false;
         for &column in columns {
