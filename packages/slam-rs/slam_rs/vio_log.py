@@ -178,6 +178,27 @@ def at_frameset_cadence(trajectory: Trajectory, frame_t_ns: Int64[ndarray, " n_f
     )
 
 
+def inverted(alignment: SimilarityTransform) -> SimilarityTransform:
+    """The rigid alignment the other way round.
+
+    :func:`slam_rs.trajectory.ate` solves the reference onto the estimate, which
+    is the direction its residuals are measured in; a run's subtree is drawn in
+    the reference's frame, which is this direction. Rigid only — the scale is
+    fixed at one, so the inverse is the transposed rotation.
+
+    Args:
+        alignment: A rigid alignment, ``scale == 1``.
+
+    Returns:
+        The alignment mapping the destination frame back into the source's.
+    """
+    return SimilarityTransform(
+        dst_R_src=alignment.dst_R_src.T,
+        dst_t_src=-alignment.dst_R_src.T @ alignment.dst_t_src,
+        scale=1.0,
+    )
+
+
 def log_alignment(entity: str, alignment: SimilarityTransform) -> None:
     """Place one run's whole subtree in the frame its alignment maps into."""
     rr.log(entity, rr.Transform3D(translation=alignment.dst_t_src, mat3x3=alignment.dst_R_src))
@@ -329,8 +350,11 @@ class VioLogger:
             # the run cost 1.64 s over a 4,648-frameset clip to draw a segment
             # from the last two poses.
             estimated: Trajectory = self.estimated()
-            self._log_ate(estimated)
-            log_alignment(RUN_ENTITY, alignment_onto(estimated, self.ground_truth))
+            # The ATE against the ground truth has already solved this alignment,
+            # in the direction its own residuals are measured in; drawing it is
+            # that solution inverted, not a second association and a second SVD.
+            against_truth: AteResult | None = self._log_ate(estimated)
+            log_alignment(RUN_ENTITY, IDENTITY if against_truth is None else inverted(against_truth.alignment))
 
     def estimated(self) -> Trajectory:
         """Everything reported so far, on the replay's ``video_time`` clock."""
@@ -447,18 +471,27 @@ class VioLogger:
         for stage, milliseconds in snapshot.timings_ms.items():
             rr.log(f"{VIO_STATS_ENTITY}/stage_ms/{stage}", rr.Scalars(milliseconds))
 
-    def _log_ate(self, estimated: Trajectory) -> None:
+    def _log_ate(self, estimated: Trajectory) -> AteResult | None:
         """Log the rigid-aligned error of everything reported so far, against both references.
 
         Args:
             estimated: Everything reported so far.
+
+        Returns:
+            The error against the ground truth, whose alignment is also what
+            places the run's subtree, or None where too few poses associated for
+            either number to mean anything.
         """
+        scored: AteResult | None = None
         for name, reference in (("gt", self.ground_truth), ("cpp", self.cpp)):
             if len(reference) == 0 or len(estimated) < MIN_ASSOCIATED_POSES:
                 continue
             result: AteResult = ate(estimated, reference)
             if result.n_associated >= MIN_ASSOCIATED_POSES:
                 rr.log(f"{VIO_STATS_ENTITY}/ate_cm/{name}", rr.Scalars(100.0 * result.rmse_m))
+                if name == "gt":
+                    scored = result
+        return scored
 
 
 def log_calibration(cameras: tuple[CameraCalib, ...]) -> None:
