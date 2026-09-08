@@ -248,14 +248,6 @@ impl<S: LieScalar> PoseState<S> {
     pub fn new(t_ns: i64, t_w_i: Se3<S>) -> Self {
         Self { t_ns, t_w_i }
     }
-
-    /// Apply a 6-vector increment, `PoseState::applyInc` (`imu_types.h:81`).
-    ///
-    /// See [`Se3::apply_inc`] for the convention: translation added, rotation
-    /// left-multiplied.
-    pub fn apply_inc(&mut self, inc: &Vector6<S>) {
-        self.t_w_i.apply_inc(inc);
-    }
 }
 
 /// An SE(3) pose and a world-frame linear velocity at a timestamp
@@ -264,8 +256,7 @@ impl<S: LieScalar> PoseState<S> {
 /// This is the state IMU preintegration propagates: the preintegrated
 /// pseudo-measurement is itself a `PoseVelState` whose `t_ns` counts elapsed
 /// nanoseconds rather than absolute time (`preintegration.h:148`, `:325`).
-/// C++ derives it from `PoseState`; here the pose is a field, and
-/// [`PoseVelState::pose_state`] recovers the base.
+/// C++ derives it from `PoseState`; here the pose is a field.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PoseVelState<S: LieScalar> {
     /// Timestamp of the state, in nanoseconds.
@@ -296,11 +287,6 @@ impl<S: LieScalar> PoseVelState<S> {
         }
     }
 
-    /// The pose part on its own.
-    pub fn pose_state(&self) -> PoseState<S> {
-        PoseState::new(self.t_ns, self.t_w_i)
-    }
-
     /// Apply a 9-vector increment, `PoseVelState::applyInc` (`imu_types.h:140-143`).
     ///
     /// The layout is `[trans(3), rot(3), vel(3)]`; the pose goes through
@@ -312,6 +298,11 @@ impl<S: LieScalar> PoseVelState<S> {
 
     /// The increment that takes `self` to `other`, `PoseVelState::diff`
     /// (`imu_types.h:156-162`), the inverse of [`PoseVelState::apply_inc`].
+    ///
+    /// No production caller: the estimator's states are 15-dof and use
+    /// [`PoseVelBiasState::diff`]. This is the 9-dof one, and it is what the
+    /// preintegration's finite-difference tests measure their Jacobians with —
+    /// the residual they check is `delta_state.diff(propagated)`.
     pub fn diff(&self, other: &Self) -> Vector9<S> {
         let mut res: Vector9<S> = Vector9::zeros();
         res.fixed_rows_mut::<3>(0)
@@ -607,12 +598,6 @@ impl<S: LieScalar> PoseVelBiasStateWithLin<S> {
         }
     }
 
-    /// Release the linearization point, `setLinFalse` (`imu_types.h:105-108`).
-    pub fn set_lin_false(&mut self) {
-        self.linearized = false;
-        self.delta = Vector15::zeros();
-    }
-
     /// Freeze the linearization point, `setLinTrue` (`imu_types.h:110-114`).
     ///
     /// See [`PoseStateWithLin::set_linearized`] for why this returns an error
@@ -898,9 +883,6 @@ mod tests {
         let mut block: PoseVelBiasStateWithLin<f64> =
             PoseVelBiasStateWithLin::new(a_state(), false);
         block.set_linearized().unwrap();
-        block.apply_inc(&an_inc());
-        block.set_lin_false();
-        assert_eq!(block.delta(), &Vector15::zeros());
 
         let mut block: PoseVelBiasStateWithLin<f64> = PoseVelBiasStateWithLin::new(a_state(), true);
         block.apply_inc(&an_inc());

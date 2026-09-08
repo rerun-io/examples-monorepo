@@ -21,7 +21,8 @@
 //! Two *different* small-angle branches live here on purpose. [`Se3::exp`] and
 //! [`Se3::log`] need Sophus's own `SO3::leftJacobian`/`leftJacobianInverse`
 //! (`Sophus/sophus/so3.hpp:570,594`), whose Taylor branch stops one term
-//! earlier than basalt's [`left_jacobian_so3`] (`sophus_utils.hpp:312`). The
+//! earlier than basalt's own left Jacobian (`sophus_utils.hpp:312`), which
+//! [`left_jacobian_inv_so3`] inverts. The
 //! difference is below the branch threshold, but reproducing each at its own
 //! call site keeps the port literal.
 
@@ -453,12 +454,6 @@ impl<S: LieScalar> So3<S> {
             one - (txx + tyy),
         )
     }
-
-    /// The adjoint of SO(3), which is the rotation matrix itself
-    /// (`Sophus/sophus/so3.hpp` `Adj()`): `R hat(v) R^T = hat(R v)`.
-    pub fn adjoint(&self) -> Matrix3<S> {
-        self.matrix()
-    }
 }
 
 impl<S: LieScalar> std::ops::Mul for So3<S> {
@@ -591,6 +586,13 @@ impl<S: LieScalar> Se3<S> {
 
     /// basalt's decoupled logarithm, `Sophus::se3_logd`
     /// (`basalt-headers/include/basalt/utils/sophus_utils.hpp:62-68`).
+    ///
+    /// No production caller: the estimator moves states with
+    /// [`Self::exp_decoupled`] and [`Self::apply_inc`] and never reads a
+    /// tangent back. It is kept as the ported pair's other half, and it is what
+    /// pins `exp_decoupled` — the round-trip proptests here and the
+    /// finite-difference Jacobians in `ba_base`'s tests take their tangents
+    /// through it.
     pub fn log_decoupled(&self) -> Vector6<S> {
         let omega: Vector3<S> = self.rotation.log();
         Vector6::new(
@@ -736,30 +738,6 @@ pub fn right_jacobian_inv_so3<S: LieScalar>(phi: &Vector3<S>) -> Matrix3<S> {
     j
 }
 
-/// Left Jacobian of SO(3): `exp(phi + eps) ~ exp(J eps) exp(phi)`.
-///
-/// Ported from `basalt-headers/include/basalt/utils/sophus_utils.hpp:312-337`.
-/// It is [`right_jacobian_so3`] with the sign of the `phi_hat` term flipped,
-/// which is the transpose relation `J_l(phi) = J_r(phi)^T`.
-pub fn left_jacobian_so3<S: LieScalar>(phi: &Vector3<S>) -> Matrix3<S> {
-    let phi_norm2: S = phi.norm_squared();
-    let phi_hat: Matrix3<S> = So3::hat(phi);
-    let phi_hat2: Matrix3<S> = phi_hat * phi_hat;
-
-    let mut j: Matrix3<S> = Matrix3::identity();
-    if phi_norm2 > S::sophus_epsilon() {
-        let phi_norm: S = phi_norm2.sqrt();
-        let phi_norm3: S = phi_norm2 * phi_norm;
-        j += phi_hat * ((c::<S>(1.0) - phi_norm.cos()) / phi_norm2);
-        j += phi_hat2 * ((phi_norm - phi_norm.sin()) / phi_norm3);
-    } else {
-        // Taylor expansion around 0.
-        j += phi_hat / c::<S>(2.0);
-        j += phi_hat2 / c::<S>(6.0);
-    }
-    j
-}
-
 /// Inverse left Jacobian of SO(3): `log(exp(eps) exp(phi)) ~ phi + J eps`.
 ///
 /// Ported from `basalt-headers/include/basalt/utils/sophus_utils.hpp:348-384`,
@@ -771,36 +749,6 @@ pub fn left_jacobian_inv_so3<S: LieScalar>(phi: &Vector3<S>) -> Matrix3<S> {
 
     let mut j: Matrix3<S> = Matrix3::identity() - phi_hat / c::<S>(2.0);
     j += inverse_jacobian_second_order_term(&phi_hat2, phi_norm2);
-    j
-}
-
-/// Right Jacobian of the decoupled SE(3), `Sophus::rightJacobianSE3Decoupled`
-/// (`basalt-headers/include/basalt/utils/sophus_utils.hpp:394-407`).
-///
-/// Block diagonal in the `(upsilon, omega)` split: `exp(omega)^-1` on the
-/// translation block and [`right_jacobian_so3`] on the rotation block. The
-/// off-diagonal blocks are exactly zero, which is the whole point of the
-/// decoupled convention.
-pub fn right_jacobian_se3_decoupled<S: LieScalar>(phi: &Vector6<S>) -> Matrix6<S> {
-    let omega: Vector3<S> = phi.fixed_rows::<3>(3).into_owned();
-    let mut j: Matrix6<S> = Matrix6::zeros();
-    j.fixed_view_mut::<3, 3>(3, 3)
-        .copy_from(&right_jacobian_so3(&omega));
-    j.fixed_view_mut::<3, 3>(0, 0)
-        .copy_from(&So3::exp(&omega).inverse().matrix());
-    j
-}
-
-/// Inverse right Jacobian of the decoupled SE(3),
-/// `Sophus::rightJacobianInvSE3Decoupled`
-/// (`basalt-headers/include/basalt/utils/sophus_utils.hpp:419-432`).
-pub fn right_jacobian_inv_se3_decoupled<S: LieScalar>(phi: &Vector6<S>) -> Matrix6<S> {
-    let omega: Vector3<S> = phi.fixed_rows::<3>(3).into_owned();
-    let mut j: Matrix6<S> = Matrix6::zeros();
-    j.fixed_view_mut::<3, 3>(3, 3)
-        .copy_from(&right_jacobian_inv_so3(&omega));
-    j.fixed_view_mut::<3, 3>(0, 0)
-        .copy_from(&So3::exp(&omega).matrix());
     j
 }
 
@@ -853,8 +801,8 @@ fn inverse_jacobian_second_order_term<S: LieScalar>(
 /// (`Sophus/sophus/so3.hpp:570-591`).
 ///
 /// Used only by [`Se3::exp`], because that is what `SE3::exp` calls. It differs
-/// from basalt's [`left_jacobian_so3`] in the Taylor branch, which stops at
-/// `I + Omega/2` instead of adding `Omega^2/6`.
+/// from basalt's own left Jacobian (`sophus_utils.hpp:312-337`) in the Taylor
+/// branch, which stops at `I + Omega/2` instead of adding `Omega^2/6`.
 fn sophus_left_jacobian_so3<S: LieScalar>(omega: &Vector3<S>, theta: S) -> Matrix3<S> {
     let theta_sq: S = theta * theta;
     let big_omega: Matrix3<S> = So3::hat(omega);
@@ -974,24 +922,6 @@ mod tests {
         j
     }
 
-    /// Central-difference Jacobian of a map from R^6 to R^6.
-    fn numeric_jacobian6<F>(at: &Vector6<f64>, f: F) -> Matrix6<f64>
-    where
-        F: Fn(&Vector6<f64>) -> Vector6<f64>,
-    {
-        let h: f64 = 1e-6;
-        let mut j: Matrix6<f64> = Matrix6::zeros();
-        for i in 0..6 {
-            let mut plus: Vector6<f64> = *at;
-            let mut minus: Vector6<f64> = *at;
-            plus[i] += h;
-            minus[i] -= h;
-            let column: Vector6<f64> = (f(&plus) - f(&minus)) / (2.0 * h);
-            j.set_column(i, &column);
-        }
-        j
-    }
-
     /// The one value in this module checked by hand rather than against a
     /// finite difference: `SO3::exp([0.1, 0.2, 0.3])` under Sophus's formula
     /// `w = cos(theta/2)`, `v = sin(theta/2)/theta * omega`
@@ -1035,9 +965,6 @@ mod tests {
             let j_right: Matrix3<f64> = right_jacobian_so3(&phi);
             let j_right_inv: Matrix3<f64> = right_jacobian_inv_so3(&phi);
             assert_abs_diff_eq!(j_right_inv * j_right, Matrix3::identity(), epsilon = 1e-12);
-            let j_left: Matrix3<f64> = left_jacobian_so3(&phi);
-            let j_left_inv: Matrix3<f64> = left_jacobian_inv_so3(&phi);
-            assert_abs_diff_eq!(j_left_inv * j_left, Matrix3::identity(), epsilon = 1e-12);
         }
     }
 
@@ -1234,7 +1161,6 @@ mod tests {
             let lhs: Matrix3<f64> = rotation.matrix() * So3::hat(&v) * rotation.matrix().transpose();
             let rhs: Matrix3<f64> = So3::hat(&(rotation * v));
             prop_assert!((lhs - rhs).norm() < 1e-12);
-            prop_assert!((rotation.adjoint() - rotation.matrix()).norm() < 1e-15);
         }
 
         #[test]
@@ -1274,47 +1200,21 @@ mod tests {
             prop_assert!((numeric - right_jacobian_so3(&phi)).norm() < 1e-7);
         }
 
-        /// `J_l(phi) = d/d eps log(exp(phi + eps) exp(phi)^-1)` at `eps = 0`.
-        #[test]
-        fn left_jacobian_so3_matches_finite_differences(phi in tangent3()) {
-            let base_inverse: So3<f64> = So3::exp(&phi).inverse();
-            let numeric: Matrix3<f64> = numeric_jacobian3(&phi, |p| (So3::exp(p) * base_inverse).log());
-            prop_assert!((numeric - left_jacobian_so3(&phi)).norm() < 1e-7);
-        }
-
         #[test]
         fn the_inverse_so3_jacobians_invert(phi in tangent3()) {
             let identity: Matrix3<f64> = Matrix3::identity();
             prop_assert!((right_jacobian_inv_so3(&phi) * right_jacobian_so3(&phi) - identity).norm() < 1e-11);
             prop_assert!((right_jacobian_so3(&phi) * right_jacobian_inv_so3(&phi) - identity).norm() < 1e-11);
-            prop_assert!((left_jacobian_inv_so3(&phi) * left_jacobian_so3(&phi) - identity).norm() < 1e-11);
-            prop_assert!((left_jacobian_so3(&phi) * left_jacobian_inv_so3(&phi) - identity).norm() < 1e-11);
         }
 
-        /// basalt's `J_l(phi) = J_r(phi)^T` (`sophus_utils.hpp:145` vs `:312`).
+        /// basalt's `J_l(phi) = J_r(phi)^T` (`sophus_utils.hpp:145` vs `:312`),
+        /// which is what pins [`left_jacobian_inv_so3`]: the right-hand pair is
+        /// checked against finite differences and against each other above.
         #[test]
         fn the_left_jacobian_is_the_right_jacobian_transposed(phi in tangent3()) {
-            prop_assert!((left_jacobian_so3(&phi) - right_jacobian_so3(&phi).transpose()).norm() < 1e-14);
             prop_assert!(
                 (left_jacobian_inv_so3(&phi) - right_jacobian_inv_so3(&phi).transpose()).norm() < 1e-14
             );
-        }
-
-        /// `J(phi) = d/d eps logd(expd(phi)^-1 expd(phi + eps))` at `eps = 0`.
-        #[test]
-        fn right_jacobian_se3_decoupled_matches_finite_differences(phi in tangent6()) {
-            let base_inverse: Se3<f64> = Se3::exp_decoupled(&phi).inverse();
-            let numeric: Matrix6<f64> =
-                numeric_jacobian6(&phi, |p| (base_inverse * Se3::exp_decoupled(p)).log_decoupled());
-            prop_assert!((numeric - right_jacobian_se3_decoupled(&phi)).norm() < 1e-7);
-        }
-
-        #[test]
-        fn the_decoupled_se3_jacobians_invert(phi in tangent6()) {
-            let identity: Matrix6<f64> = Matrix6::identity();
-            let product: Matrix6<f64> =
-                right_jacobian_inv_se3_decoupled(&phi) * right_jacobian_se3_decoupled(&phi);
-            prop_assert!((product - identity).norm() < 1e-11);
         }
 
         /// The same identities in f32, where Sophus's epsilon is 1e-5.

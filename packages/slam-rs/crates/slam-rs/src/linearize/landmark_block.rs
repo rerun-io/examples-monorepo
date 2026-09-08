@@ -901,11 +901,6 @@ impl<S: LieScalar> LandmarkBlock<S> {
         self.num_rows - 3
     }
 
-    /// `getHostKf()` (`:525`).
-    pub fn host_kf(&self) -> TimeCamId {
-        self.host_kf_id
-    }
-
     /// The landmark this block belongs to.
     pub fn landmark_id(&self) -> LandmarkId {
         self.lm_id

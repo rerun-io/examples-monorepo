@@ -112,10 +112,11 @@ pub struct LinearizationAbsQR<S: LieScalar> {
     landmark_block_idx: Vec<usize>,
     /// `num_rows_Q2r` (`:135`).
     num_rows_q2r: usize,
-    /// `relative_pose_lin` (`:126`) as a dense table plus its index, so the
-    /// blocks hold an index rather than a pointer.
+    /// `relative_pose_lin` (`:126`) as a dense table, so the blocks hold an
+    /// index rather than a pointer. The `(host, target)` -> slot map that
+    /// builds it is a local in [`Self::new`]: nothing needs it once the blocks
+    /// have their indices.
     rel_pose_pairs: Vec<(TimeCamId, TimeCamId)>,
-    rel_pose_index: BTreeMap<(TimeCamId, TimeCamId), usize>,
     rel_pose_lin: Vec<RelPoseLin<S>>,
     /// One per preintegrated interval (`:106`, `:163-167`).
     imu_meta: Vec<ImuMeta>,
@@ -373,7 +374,6 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             landmark_block_idx,
             num_rows_q2r,
             rel_pose_pairs,
-            rel_pose_index,
             rel_pose_lin,
             imu_meta,
             imu_blocks: Vec::new(),
@@ -728,25 +728,9 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         &self.landmark_ids
     }
 
-    /// The first row each landmark block occupies in the stacked `Q2Jp`,
-    /// `landmark_block_idx` (`:111`).
-    pub fn landmark_block_offsets(&self) -> &[usize] {
-        &self.landmark_block_idx
-    }
-
-    /// `num_rows_Q2r` (`:135`): the rows the landmark blocks contribute.
-    pub fn num_rows_q2r(&self) -> usize {
-        self.num_rows_q2r
-    }
-
     /// The relative poses, indexed as the blocks index them.
     pub fn relative_poses(&self) -> &[RelPoseLin<S>] {
         &self.rel_pose_lin
-    }
-
-    /// The slot a (host, target) pair's relative pose lives in.
-    pub fn relative_pose_slot(&self, host: TimeCamId, target: TimeCamId) -> Option<usize> {
-        self.rel_pose_index.get(&(host, target)).copied()
     }
 }
 

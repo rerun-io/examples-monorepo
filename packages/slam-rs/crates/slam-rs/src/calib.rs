@@ -330,9 +330,11 @@ impl<S: Copy> CameraModel<S> {
 
     /// The optimized parameters in basalt's `getParam()` order.
     ///
-    /// `fx fy cx cy` first in every model, then the model's own terms. For
-    /// `pinhole-radtan8` this is the twelve-vector basalt optimizes; `rpmax` is
-    /// a fixed bound and is reported by [`CameraModel::valid_radius`] instead
+    /// `fx fy cx cy` first in every model, then the model's own terms; the
+    /// distortion coefficients alone are `params()[4..]`. For
+    /// `pinhole-radtan8` this is the twelve-vector basalt optimizes, and
+    /// `rpmax` is not in it: it is a fixed bound, which
+    /// [`CameraModel::valid_radius`] reports instead
     /// (`serialization/headers_serialization.h:144-153`).
     pub fn params(&self) -> Vec<S> {
         match self {
@@ -347,25 +349,12 @@ impl<S: Copy> CameraModel<S> {
         }
     }
 
-    /// The distortion coefficients alone: [`CameraModel::params`] without the
-    /// leading `fx fy cx cy`.
-    pub fn distortion(&self) -> Vec<S> {
-        self.params().split_off(4)
-    }
-
-    /// `[fx, fy, cx, cy]`, which every model starts with.
-    pub fn focal_and_principal_point(&self) -> [S; 4] {
-        match self {
-            Self::Pinhole(p) => [p.fx, p.fy, p.cx, p.cy],
-            Self::Kb4(p) => [p.fx, p.fy, p.cx, p.cy],
-            Self::PinholeRadtan8(p) => [p.fx, p.fy, p.cx, p.cy],
-            Self::DoubleSphere(p) => [p.fx, p.fy, p.cx, p.cy],
-            Self::ExtendedUnified(p) => [p.fx, p.fy, p.cx, p.cy],
-            Self::Unified(p) => [p.fx, p.fy, p.cx, p.cy],
-        }
-    }
-
     /// `rpmax` for `pinhole-radtan8`, which is the only model that has one.
+    ///
+    /// No production caller — `rpmax` reaches the projection through
+    /// [`crate::camera::CameraEnum::from_model`] — and the only reader of the
+    /// parsed field on this type, which is what makes a calibration's `rpmax`
+    /// checkable where it is parsed.
     pub fn valid_radius(&self) -> Option<S> {
         match self {
             Self::PinholeRadtan8(p) => Some(p.rpmax),
@@ -1102,7 +1091,6 @@ mod tests {
         for model in &calib.intrinsics {
             assert_eq!(model.name(), "kb4");
             // kb4 is `fx fy cx cy` plus exactly four radial terms.
-            assert_eq!(model.distortion().len(), 4);
             assert_eq!(model.params().len(), 8);
             assert_eq!(model.valid_radius(), None);
         }
@@ -1123,7 +1111,6 @@ mod tests {
         for model in &calib.intrinsics {
             assert_eq!(model.name(), "pinhole-radtan8");
             // radtan8 is `fx fy cx cy`, eight distortion terms and `rpmax`.
-            assert_eq!(model.distortion().len(), 8);
             assert_eq!(model.params().len(), 12);
             assert!(model.valid_radius().is_some());
         }
@@ -1155,7 +1142,7 @@ mod tests {
         let calib: Calibration<f64> = Calibration::from_json_str(EUROC).unwrap();
         assert_eq!(calib.camera_count(), 2);
         assert!(calib.intrinsics.iter().all(|m| m.name() == "ds"));
-        assert_eq!(calib.intrinsics[0].distortion().len(), 2);
+        assert_eq!(calib.intrinsics[0].params().len(), 6);
         assert_eq!(calib.vignette.len(), 2);
         assert!(!calib.vignette[0].knots.is_empty());
         assert_eq!(
@@ -1334,7 +1321,7 @@ mod tests {
             epsilon = 0.0
         );
         assert_eq!(calib.intrinsics[0].name(), "kb4");
-        assert_eq!(calib.intrinsics[0].distortion().len(), 4);
+        assert_eq!(calib.intrinsics[0].params().len(), 8);
 
         // The 4x4 came in row-major, so the translation is the last column.
         assert_abs_diff_eq!(
@@ -1365,7 +1352,7 @@ mod tests {
         let calib: Calibration<f64> =
             Calibration::from_catalog_parts(&[camera], &an_imu()).unwrap();
         assert_eq!(calib.intrinsics[0].name(), "pinhole-radtan8");
-        assert_eq!(calib.intrinsics[0].distortion(), coefficients);
+        assert_eq!(calib.intrinsics[0].params()[4..], coefficients);
         assert_eq!(calib.intrinsics[0].valid_radius(), Some(1.5));
 
         let basalt_name: Calibration<f64> = Calibration::from_catalog_parts(

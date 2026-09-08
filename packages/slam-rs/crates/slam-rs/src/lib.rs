@@ -375,11 +375,6 @@ impl FrontendLane {
         on_lane!(self, |flow| flow.t_ns())
     }
 
-    /// The average scene depth the KLT's matching guess uses.
-    pub fn depth_guess(&self) -> f32 {
-        on_lane!(self, |flow| flow.depth_guess())
-    }
-
     /// Publish a new average scene depth.
     pub fn set_depth_guess(&mut self, depth: f32) {
         on_lane!(self, |flow| flow.set_depth_guess(depth));

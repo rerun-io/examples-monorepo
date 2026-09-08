@@ -1072,19 +1072,10 @@ impl<S: LieScalar> CameraEnum<S> {
         }
     }
 
-    /// basalt's `getN()` (`generic_camera.hpp:89`).
-    pub fn num_params(&self) -> usize {
-        match self {
-            Self::Pinhole(_) => Pinhole::<S>::NUM_PARAMS,
-            Self::Kb4(_) => KannalaBrandt4::<S>::NUM_PARAMS,
-            Self::PinholeRadtan8(_) => PinholeRadtan8::<S>::NUM_PARAMS,
-        }
-    }
-
     /// `[fx, fy, cx, cy]`, which every model's `getParam()` starts with.
     ///
-    /// The same four numbers [`crate::calib::CameraModel::focal_and_principal_point`]
-    /// reports, without going back to the parsed calibration. Every projection
+    /// Read off the optimized parameters rather than the parsed calibration.
+    /// Every projection
     /// ends in `f * m + c`, so `c` is also the scale a rounding argument about a
     /// pixel has to use: near the principal point the two terms cancel and the
     /// error of the sum is set by `c`, not by the pixel.
@@ -1217,6 +1208,12 @@ impl<S: LieScalar> RigCamera<S> {
     /// The `offset` of one that the C++ adds for floating-point scalars is what
     /// keeps `interp` from reading the row past the last one, so a keypoint at
     /// `border` is in and a keypoint at `height - border - 1` is out.
+    ///
+    /// No production caller: the frontend asks
+    /// [`crate::image::ImageU16::in_bounds`], the same C++ predicate over the
+    /// buffer it is about to read. This one answers from the *calibrated*
+    /// resolution, which is what `tests/camera_jacobians.rs` needs to say where
+    /// a projection lands on the sensor.
     pub fn in_bounds(&self, uv: &Vector2<S>, border: S) -> bool {
         let width: S = c(f64::from(self.resolution[0]));
         let height: S = c(f64::from(self.resolution[1]));
@@ -1436,10 +1433,6 @@ mod tests {
         let calibration: Calibration<f64> =
             Calibration::from_json_str(include_str!("../tests/fixtures/msdmg_calib.json")).unwrap();
         let model: CameraEnum<f64> = CameraEnum::from_model(&calibration.intrinsics[0]).unwrap();
-        assert_eq!(
-            model.focal_and_principal_point(),
-            calibration.intrinsics[0].focal_and_principal_point()
-        );
         assert_abs_diff_eq!(
             model.focal_and_principal_point()[2],
             322.5578605887897,
@@ -1454,7 +1447,6 @@ mod tests {
         let rig: Vec<RigCamera<f64>> = RigCamera::from_calibration(&calibration).unwrap();
         assert_eq!(rig.len(), 2);
         assert_eq!(rig[0].model.name(), "kb4");
-        assert_eq!(rig[0].model.num_params(), 8);
         assert_eq!([rig[0].width(), rig[0].height()], [960, 960]);
 
         // `image/image.h:704`: border <= u < w - border - 1.

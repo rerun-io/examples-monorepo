@@ -425,36 +425,6 @@ impl<S: LieScalar> LandmarkDatabase<S> {
         self.observations.get(&tcid)
     }
 
-    /// Every landmark hosted by `tcid`, `getLandmarksForHost`
-    /// (`landmark_database.cpp:99-107`).
-    ///
-    /// A landmark seen in several targets appears once per target, exactly as
-    /// in C++ — the C++ comment does not say so, but the nested loop does.
-    /// Missing ids are skipped where C++ would throw from `kpts.at`.
-    pub fn landmarks_for_host(&self, tcid: TimeCamId) -> Vec<&Landmark<S>> {
-        self.landmarks_for_host_with_ids(tcid)
-            .into_iter()
-            .map(|(_, lm)| lm)
-            .collect()
-    }
-
-    /// The same with the ids, `getLandmarksForHostWithIds`
-    /// (`landmark_database.cpp:109-118`).
-    pub fn landmarks_for_host_with_ids(&self, tcid: TimeCamId) -> Vec<(LandmarkId, &Landmark<S>)> {
-        let mut res: Vec<(LandmarkId, &Landmark<S>)> = Vec::new();
-        let Some(targets) = self.observations.get(&tcid) else {
-            return res;
-        };
-        for ids in targets.values() {
-            for &lm_id in ids {
-                if let Some(lm) = self.get_landmark(lm_id) {
-                    res.push((lm_id, lm));
-                }
-            }
-        }
-        res
-    }
-
     /// Number of landmarks, `numLandmarks` (`landmark_database.cpp:156-159`).
     pub fn num_landmarks(&self) -> usize {
         self.kpts.len()
@@ -470,63 +440,12 @@ impl<S: LieScalar> LandmarkDatabase<S> {
             .sum()
     }
 
-    /// Observations of one landmark, `numObservations(lm_id)`
-    /// (`landmark_database.cpp:172-175`).
-    pub fn num_observations_of(&self, lm_id: LandmarkId) -> Result<usize, LandmarkError> {
-        self.get_landmark(lm_id)
-            .map(|lm| lm.obs.len())
-            .ok_or(LandmarkError::UnknownLandmark(lm_id))
-    }
-
     /// Delete one landmark and its adjacency, `removeLandmark`
     /// (`landmark_database.cpp:207-211`). A missing id is a no-op, as in C++.
     pub fn remove_landmark(&mut self, lm_id: LandmarkId) {
         if let Some(&at) = self.index.get(&lm_id) {
             self.remove_landmark_at(at);
         }
-    }
-
-    /// Drop the listed observations, then the landmark if too few remain,
-    /// `removeObservations` (`landmark_database.cpp:213-225`).
-    ///
-    /// C++ asserts the landmark exists; the port returns
-    /// [`LandmarkError::UnknownLandmark`].
-    pub fn remove_observations(
-        &mut self,
-        lm_id: LandmarkId,
-        obs: &BTreeSet<TimeCamId>,
-    ) -> Result<(), LandmarkError> {
-        let at: usize = *self
-            .index
-            .get(&lm_id)
-            .ok_or(LandmarkError::UnknownLandmark(lm_id))?;
-        let Some(kpt) = self.kpts.get_mut(at) else {
-            return Err(LandmarkError::UnknownLandmark(lm_id));
-        };
-        let host: TimeCamId = kpt.host_kf_id;
-        let dropped: Vec<TimeCamId> = kpt
-            .obs
-            .keys()
-            .copied()
-            .filter(|target| obs.contains(target))
-            .collect();
-        for target in &dropped {
-            kpt.obs.remove(target);
-        }
-        for target in dropped {
-            self.detach_observation(host, target, lm_id);
-        }
-        let remaining: usize = self.kpts.get(at).map_or(0, |lm| lm.obs.len());
-        if remaining < MIN_NUM_OBS {
-            self.remove_landmark_at(at);
-        }
-        Ok(())
-    }
-
-    /// Drop every observation made in `frame`, then sweep, `removeFrame`
-    /// (`landmark_database.cpp:49-63`).
-    pub fn remove_frame(&mut self, frame: FrameId) {
-        self.retain_observations(|target| target.frame_id != frame, |_| false);
     }
 
     /// The marginalization sweep, `removeKeyframes`
@@ -811,10 +730,6 @@ mod tests {
             db.add_observation(tcid(1, 0), LandmarkId(7), Vector2::zeros()),
             Err(LandmarkError::UnknownLandmark(LandmarkId(7)))
         );
-        assert_eq!(
-            db.num_observations_of(LandmarkId(7)),
-            Err(LandmarkError::UnknownLandmark(LandmarkId(7)))
-        );
     }
 
     #[test]
@@ -832,20 +747,6 @@ mod tests {
         db.remove_landmark(LandmarkId(2));
         assert!(db.observations().is_empty());
         assert!(db.host_kfs().is_empty());
-    }
-
-    #[test]
-    fn dropping_below_two_observations_deletes_the_landmark() {
-        // `removeObservations` runs the `min_num_obs` sweep itself
-        // (`landmark_database.cpp:224`).
-        let mut db: LandmarkDatabase<f64> = a_database();
-        let two: BTreeSet<TimeCamId> = [tcid(20, 0), tcid(30, 0)].into_iter().collect();
-        db.remove_observations(LandmarkId(0), &two).unwrap();
-        assert!(!db.landmark_exists(LandmarkId(0)));
-        let one: BTreeSet<TimeCamId> = [tcid(30, 0)].into_iter().collect();
-        db.remove_observations(LandmarkId(1), &one).unwrap();
-        assert_eq!(db.num_observations_of(LandmarkId(1)).unwrap(), 2);
-        check_invariants(&db);
     }
 
     #[test]
@@ -884,17 +785,6 @@ mod tests {
     }
 
     #[test]
-    fn remove_frame_drops_every_observation_in_it() {
-        let mut db: LandmarkDatabase<f64> = a_database();
-        db.remove_frame(20);
-        assert_eq!(db.num_landmarks(), 3);
-        for lm in db.landmarks() {
-            assert!(!lm.obs.keys().any(|t| t.frame_id == 20));
-        }
-        check_invariants(&db);
-    }
-
-    #[test]
     fn backup_and_restore_move_only_the_three_parameters() {
         let mut db: LandmarkDatabase<f64> = a_database();
         db.backup();
@@ -907,15 +797,6 @@ mod tests {
         assert_eq!(lm.direction, Vector2::new(0.1, -0.2));
         assert_eq!(lm.inv_dist, 0.5);
         assert_eq!(lm.obs.len(), 3);
-    }
-
-    #[test]
-    fn landmarks_for_host_lists_one_entry_per_observation() {
-        let db: LandmarkDatabase<f64> = a_database();
-        // Three landmarks, three targets each.
-        assert_eq!(db.landmarks_for_host(tcid(10, 0)).len(), 9);
-        assert_eq!(db.landmarks_for_host_with_ids(tcid(10, 0)).len(), 9);
-        assert!(db.landmarks_for_host(tcid(99, 0)).is_empty());
     }
 
     proptest! {
