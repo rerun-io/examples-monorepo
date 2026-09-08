@@ -1049,11 +1049,39 @@ def _video_codec(table: pa.Table, entity: str) -> CatalogCodecName:
     return catalog_codec_name(int(codecs[0].as_py()))
 
 
+def _shared_codec(per_camera: Sequence[tuple[int, CatalogCodecName]], segment_id: str) -> CatalogCodecName:
+    """The one codec every fed camera's stream is in.
+
+    :attr:`_VideoIndex.codec` names the codec :meth:`SegmentFeed._fetch_samples`
+    muxes *every* camera's samples under, so a rig whose cameras disagree cannot
+    be decoded from one index and has to name the two that differ rather than
+    silently decode three of four streams as the fourth.
+
+    Args:
+        per_camera: ``(camera_index, codec)`` in feed order, at least one entry.
+        segment_id: Segment the cameras belong to, for the error.
+
+    Returns:
+        The codec the sample wrapper needs.
+
+    Raises:
+        ValueError: If two fed cameras carry different codecs.
+    """
+    first_camera, codec = per_camera[0]
+    for camera_index, other in per_camera[1:]:
+        if other != codec:
+            raise ValueError(
+                f"{segment_id}: cam_{camera_index:02d} is {other} where cam_{first_camera:02d} is {codec}; "
+                f"one video index carries one codec for every camera"
+            )
+    return codec
+
+
 def _read_video_index(dataset: DatasetEntry, segment_id: str, camera_positions: Sequence[int], tolerance_ns: int) -> _VideoIndex:
     """Frameset timing, per-camera frames, shared keyframes and codec, fetched without any sample bytes."""
     per_camera_times: list[Int64[ndarray, " n_frames"]] = []
     per_camera_keyframe: list[Bool[ndarray, " n_frames"]] = []
-    codec: CatalogCodecName | None = None
+    per_camera_codec: list[tuple[int, CatalogCodecName]] = []
     for camera_index in camera_positions:
         entity: str = f"{RIG_ENTITY}/cam_{camera_index:02d}/pinhole/video"
         table: pa.Table = (
@@ -1065,9 +1093,10 @@ def _read_video_index(dataset: DatasetEntry, segment_id: str, camera_positions: 
         )
         per_camera_times.append(np.asarray(table[TIMELINE].combine_chunks().cast(pa.int64())))
         per_camera_keyframe.append(np.asarray(table[1].combine_chunks().is_valid().to_numpy(zero_copy_only=False), dtype=bool))
-        codec = _video_codec(table, entity)
-    if codec is None:
+        per_camera_codec.append((camera_index, _video_codec(table, entity)))
+    if not per_camera_codec:
         raise ValueError(f"{segment_id}: no camera was selected, so no video columns were read")
+    codec: CatalogCodecName = _shared_codec(per_camera_codec, segment_id)
     if tolerance_ns == 0:
         # MSD is hardware-synced: a frameset is "all cameras at the same
         # video_time", and the identity table is what a matcher would return.

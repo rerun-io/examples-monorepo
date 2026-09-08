@@ -19,6 +19,7 @@ from slam_rs.catalog_feed import (
     ImuStream,
     LocalSegment,
     SegmentFeed,
+    _shared_codec,
     _static_int,
     _static_string,
     _static_values,
@@ -187,6 +188,17 @@ def test_a_video_stream_with_no_codec_names_the_entity() -> None:
     )
     with pytest.raises(ValueError, match=f"{entity}: the video stream carries no codec"):
         _video_codec(no_codec, entity)
+
+
+def test_a_rig_whose_cameras_disagree_on_the_codec_names_both() -> None:
+    """One index carries one codec, so a mixed rig must say which two cameras differ.
+
+    Every current rig is uniform (MSD is AV1, RoboCap H.264), so the muxer would
+    otherwise write the last camera's codec over every camera's samples.
+    """
+    assert _shared_codec([(0, "av1"), (2, "av1")], SMOKE_SEGMENT) == "av1"
+    with pytest.raises(ValueError, match="cam_02 is h264 where cam_00 is av1"):
+        _shared_codec([(0, "av1"), (2, "h264")], SMOKE_SEGMENT)
 
 
 @pytest.mark.slow
