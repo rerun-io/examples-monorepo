@@ -34,7 +34,7 @@ from pathlib import Path
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb, this_temperature_c
 from slam_rs.reference import ReferenceManifest, RobocapSession, load_manifest
 from slam_rs.tracking import SegmentRun, robocap_cpp_trajectory, run_robocap
-from slam_rs.trajectory import AteResult, Trajectory, ate, read_trajectory, write_trajectory
+from slam_rs.trajectory import AteResult, Trajectory, ate, nonfinite_position_text, read_trajectory, write_trajectory
 
 BUDGET_15FPS_MS: float = 1e3 / 15.0
 """What one four-camera frameset may cost for the cap to keep up at 15 fps."""
@@ -151,9 +151,9 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
 
     Returns:
         The row, and the estimated trajectory on the device clock so the caller
-        can export it. An estimate that associates with nothing carries NaN
-        where the agreement would be and the reason on
-        :attr:`RobocapRow.unscored`.
+        can export it. An estimate that associates with nothing, or that carries
+        a position which is not finite, has NaN where the agreement would be and
+        the reason on :attr:`RobocapRow.unscored`.
 
     Raises:
         FileNotFoundError: If the session's ``slam`` layer or the other machine's
@@ -177,21 +177,28 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
     after: float | None = this_temperature_c()
     against_cpp: AteResult | None = None
     across: float | None = None
-    unscored: str | None = None
-    try:
-        against_cpp = ate(run.estimate, cpp)
-        across = None if across_reference is None else 100.0 * ate(run.estimate, across_reference).rmse_m
-    except ValueError as association_failed:
-        # 52.9 s of video has already been paid for by here, and the wall, the
-        # budget and the temperatures it bought are the row's reason to exist —
-        # so an estimate that associates with nothing loses its agreement and
-        # not the run. The clause is the sentence `ate` refused with, tolerance
-        # and all; both numbers go, not the half that may have associated
-        # already. `ValueError` and not `Exception`, so a beartype violation
-        # still raises. `main` prints the row and then exits non-zero.
-        against_cpp = None
-        across = None
-        unscored = str(association_failed)
+    # Finiteness before the alignment, not after it: a NaN position reaches
+    # `np.linalg.svd` inside `rigid_alignment` as `LinAlgError`, which the
+    # `ValueError` below does not catch — so a diverged estimator lost the whole
+    # 52.9 s replay to a traceback, with no row, no trajectory and no JSON, on
+    # exactly the machine whose cost this lane exists to measure (S25 review).
+    unscored: str | None = nonfinite_position_text(run.estimate)
+    if unscored is None:
+        try:
+            against_cpp = ate(run.estimate, cpp)
+            across = None if across_reference is None else 100.0 * ate(run.estimate, across_reference).rmse_m
+        except ValueError as association_failed:
+            # 52.9 s of video has already been paid for by here, and the wall,
+            # the budget and the temperatures it bought are the row's reason to
+            # exist — so an estimate that associates with nothing loses its
+            # agreement and not the run. The clause is the sentence `ate`
+            # refused with, tolerance and all; both numbers go, not the half
+            # that may have associated already. `ValueError` and not
+            # `Exception`, so a beartype violation still raises. `main` prints
+            # the row and then exits non-zero.
+            against_cpp = None
+            across = None
+            unscored = str(association_failed)
     ms_per_frameset: float = 1e3 * run.wall_s / max(run.framesets, 1)
     return (
         RobocapRow(

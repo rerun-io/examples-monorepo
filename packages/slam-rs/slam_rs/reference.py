@@ -566,7 +566,9 @@ def d60_failures(
     the C++ does not meet it against its own other precision (`MIO14`: 4.24 cm).
     A ``no_divergence`` clip gates neither error at all — basalt itself sits at
     43 cm and 78 cm there and two of its own decode paths differ by 18 to 32 cm —
-    and gates a finite, bounded run instead. Both the V2 gate and
+    and gates a bounded run instead. Finite poses are asked of every policy: an
+    error against a non-finite estimate is NaN, and NaN passes every bound
+    below. Both the V2 gate and
     :mod:`slam_rs.apis.fleet_check` read the verdict off these clauses, so they
     are written once: a fleet row that applied the bounds unconditionally called
     a healthy machine broken on any clip but the two smoke ones.
@@ -608,10 +610,15 @@ def d60_failures(
         failures.append(f"{lost} of {framesets} framesets never got the inertial samples that cover them")
     if associated < MIN_ASSOCIATED_POSES:
         failures.append(f"only {associated} poses associated with the C++ run")
+    # Every policy and not only ``no_divergence``: a NaN error passes every ``>``
+    # comparison there is, so a diverged run measured under ``tight`` or
+    # ``standard`` came back with no failure at all and a fleet row printed it as
+    # ``pass`` (S25 review). A run whose poses are not numbers has missed every
+    # clause D60 has, whichever policy the clip carries.
+    if not poses_finite:
+        failures.append("a pose is not finite")
     if gate_policy == "no_divergence":
         # basalt itself is near failure here, so only a bounded run is asserted.
-        if not poses_finite:
-            failures.append("a pose is not finite")
         if extent_m > DIVERGENCE_FACTOR * truth_extent_m:
             failures.append(f"spans {extent_m:.1f} m against the truth's {truth_extent_m:.1f} m")
         return failures

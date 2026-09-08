@@ -21,6 +21,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 from fixture_types import never
+from jaxtyping import Float64, Int64
+from numpy import ndarray
 
 from slam_rs.apis import robocap_fleet
 from slam_rs.apis.robocap_fleet import BUDGET_15FPS_MS, BUDGET_30FPS_MS, Config, RobocapRow, main, measure
@@ -173,6 +175,64 @@ def test_an_estimate_on_another_clock_is_a_row_and_not_a_traceback(
     written: dict = json.loads(output.read_text())
     assert math.isnan(written["cpp_rmse_cm"])
     assert "no pose associated within" in written["unscored"]
+    assert output.with_suffix(".csv").is_file()
+
+
+def test_a_non_finite_estimate_is_a_row_and_not_an_alignment_traceback(
+    manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The cost of 52.9 s of video must survive a diverged estimator too.
+
+    An estimate whose positions carry a NaN associates on the ``slam`` layer's
+    own clock, so a row was built by aligning it — and
+    :func:`~slam_rs.trajectory.rigid_alignment` hands the covariance to
+    ``np.linalg.svd``, which raises ``LinAlgError: SVD did not converge``. That
+    is not the :class:`ValueError` the association case is caught as, so the
+    whole replay was lost to a traceback: no row, no trajectory and no JSON on
+    exactly the machine whose numbers this lane exists to collect. Finiteness is
+    tested before the alignment, the clause names it, the agreement reads as
+    NaN, the cost beside it is still a number, and both outputs are written
+    before the run exits non-zero.
+    """
+    poses: int = 30
+    t_ns: Int64[ndarray, " n"] = np.arange(poses, dtype=np.int64) * 33_000_000
+    reference: Trajectory = Trajectory(
+        t_ns=t_ns, position_m=np.arange(3 * poses, dtype=np.float64).reshape(poses, 3), quaternion_wxyz=np.zeros((poses, 4))
+    )
+    positions: Float64[ndarray, "n 3"] = np.arange(3 * poses, dtype=np.float64).reshape(poses, 3).copy()
+    positions[7, 2] = np.inf
+    monkeypatch.setattr(robocap_fleet, "robocap_cpp_trajectory", lambda *_args: reference)
+    monkeypatch.setattr(
+        robocap_fleet,
+        "run_robocap",
+        lambda *_args, **_kwargs: SegmentRun(
+            estimate=Trajectory(t_ns=t_ns, position_m=positions, quaternion_wxyz=np.zeros((poses, 4))), framesets=poses, lost=0, wall_s=3.0
+        ),
+    )
+    monkeypatch.setattr(robocap_fleet, "ate", never("an estimate with a non-finite position was handed to the alignment"))
+    (tmp_path / "slam.rrd").write_bytes(b"")
+    session: RobocapSession = replace(manifest.robocap.session("s00000015"), slam_url=f"file://{tmp_path / 'slam.rrd'}")
+
+    row: RobocapRow
+    estimate: Trajectory
+    row, estimate = measure(manifest, session, Config(), CAP)
+    assert row.unscored is not None
+    assert "1 of 30 estimated positions is not finite" in row.unscored
+    assert math.isnan(row.cpp_rmse_cm)
+    assert math.isnan(row.cpp_max_cm)
+    assert math.isnan(row.cpp_median_cm)
+    assert row.cross_platform_ate_cm is None
+    # Measured, not scored, so it is a number on exactly this row.
+    assert row.ms_per_frameset == pytest.approx(100.0)
+    assert len(estimate) == poses
+
+    monkeypatch.setattr(robocap_fleet, "measure", lambda *_args: (row, estimate))
+    output: Path = tmp_path / "robocap_fleet.json"
+    with pytest.raises(SystemExit, match="is not finite"):
+        main(Config(output_json=output))
+    written: dict = json.loads(output.read_text())
+    assert math.isnan(written["cpp_rmse_cm"])
+    assert "is not finite" in written["unscored"]
     assert output.with_suffix(".csv").is_file()
 
 

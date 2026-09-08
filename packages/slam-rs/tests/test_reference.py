@@ -1,6 +1,7 @@
 """The reference manifest parses, is internally consistent, and still matches the catalog."""
 
 import json
+import math
 import socket
 import urllib.parse
 from dataclasses import replace
@@ -14,6 +15,7 @@ from beartype.roar import BeartypeException
 from slam_rs import _core
 from slam_rs.reference import (
     DECODE_PATH_BY_NAME,
+    GATE_POLICY_BY_NAME,
     GT_BAND_RATIO,
     MANIFEST_PATH,
     TIER_BY_NAME,
@@ -296,6 +298,34 @@ def test_the_gated_ten_clip_run_still_earns_the_verdict_it_earned(manifest: Refe
             )
             == []
         ), segment_id
+
+
+def test_a_non_finite_pose_misses_a_clause_under_every_gate_policy() -> None:
+    """D60 has no policy that scores a run whose poses are not numbers.
+
+    The clause was written inside the ``no_divergence`` branch, where basalt
+    itself is near failure and boundedness is all that is asked. The two gated
+    policies read the errors instead, and a NaN error passes every ``>``
+    comparison there is — so a diverged run with `nan` centimetres from both
+    references came back with no failure at all, which
+    :mod:`slam_rs.apis.fleet_check` prints as ``pass``.
+    """
+    for gate_policy in GATE_POLICY_BY_NAME.values():
+        failures: list[str] = d60_failures(
+            gate_policy=gate_policy,
+            framesets=412,
+            tracked=412,
+            lost=0,
+            associated=412,
+            replayed_s=7.6,
+            cpp_rmse_cm=math.nan,
+            gt_rmse_cm=math.nan,
+            band=(1.427751, 1.427823),
+            extent_m=3.4,
+            truth_extent_m=3.4,
+            poses_finite=False,
+        )
+        assert failures == ["a pose is not finite"], gate_policy
 
 
 def test_an_unknown_tier_is_rejected(tmp_path: Path) -> None:

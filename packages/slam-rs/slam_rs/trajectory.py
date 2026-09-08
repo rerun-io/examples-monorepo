@@ -285,6 +285,35 @@ def ate(estimate: Trajectory, reference: Trajectory, tolerance_ns: int = ASSOCIA
     )
 
 
+def nonfinite_position_text(trajectory: Trajectory) -> str | None:
+    """Why an estimate cannot be aligned, when one of its positions is not finite; None when every one is.
+
+    :func:`ate` cannot refuse this itself in the shape its callers read:
+    :func:`rigid_alignment` hands the cross-covariance to ``np.linalg.svd``,
+    which raises ``LinAlgError: SVD did not converge`` on a NaN — not the
+    :class:`ValueError` a caller catches, and not a row. Both fleet tools
+    therefore ask this **before** the alignment, so a machine whose estimator
+    diverged is reported rather than lost to a traceback, which is the one
+    machine the fleet lane exists to find. The clause names the first offending
+    pose, because the timestamp is where a diverged run is read from.
+
+    Args:
+        trajectory: The estimate about to be scored.
+
+    Returns:
+        The clause, ready for a row's ``unscored`` field, or None when the
+        estimate is finite throughout (including when it has no pose at all).
+    """
+    finite: Bool[ndarray, " n"] = np.isfinite(trajectory.position_m).all(axis=1)
+    if bool(finite.all()):
+        return None
+    first: int = int(np.flatnonzero(~finite)[0])
+    return (
+        f"{int((~finite).sum())} of {len(trajectory)} estimated positions is not finite, "
+        f"the first at {int(trajectory.t_ns[first])} ns; there is nothing to align"
+    )
+
+
 def coverage(reference: Trajectory, candidate: Trajectory) -> float:
     """Fraction of the reference time span that the candidate spans.
 
