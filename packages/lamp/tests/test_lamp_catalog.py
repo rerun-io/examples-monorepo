@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import pytest
 import rerun as rr
+import rerun.blueprint as rrb
 import torch
 from jaxtyping import Float32, Int32, UInt8
 from numpy import ndarray
@@ -13,15 +14,19 @@ from posekit.predictions import BoxDetections, Keypoints2d
 from posekit.rerun_logging import person_color
 from posekit.skeletons import COCO_17
 from scipy.spatial.transform import Rotation
+from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion
 
 from lamptrack.apis.lamp_catalog import (
     Config,
     _log_camera_observations,
     _log_person,
     best_detection_window,
+    build_blueprint,
     build_time_grid,
+    follow_eye_controls,
     interpolate_pose,
     log_static_context,
+    preview_camera,
 )
 from lamptrack.models.lamp import PersonState
 
@@ -144,6 +149,7 @@ def test_log_person_draws_annotated_joints_a_trail_and_a_translucent_mesh(monkey
     joints = _batches_by_component(logged[0][1])
     assert joints["Points3D:keypoint_ids"].as_arrow_array().to_pylist() == list(range(24))
     assert joints["Points3D:class_ids"].as_arrow_array().to_pylist() == [0]
+    assert joints["Points3D:show_labels"].as_arrow_array().to_pylist() == [False], "the joint names would bury the 3D scene"
 
     trail = _batches_by_component(logged[4][1])
     assert len(trail["LineStrips3D:strips"].as_arrow_array().to_pylist()[0]) == 2, "the pelvis trail grows one point per frameset"
@@ -197,3 +203,56 @@ def test_log_camera_observations_halves_the_preview_and_its_overlays(monkeypatch
     np.testing.assert_allclose(positions, np.arange(34, dtype=np.float32).reshape(17, 2))
     assert points["Points2D:keypoint_ids"].as_arrow_array().to_pylist() == list(range(17))
     assert points["Points2D:class_ids"].as_arrow_array().to_pylist() == [0]
+
+
+
+def _views(container: rrb.Container | rrb.View) -> list[rrb.View]:
+    """Collect every view of a blueprint container in depth-first order."""
+    if not isinstance(container, rrb.Container):
+        return [container]
+    return [view for child in container.contents for view in _views(child)]
+
+
+def test_preview_camera_rescales_intrinsics_to_the_logged_preview_size() -> None:
+    """The frustum's image plane must span exactly the pixels the preview covers."""
+    camera = Fisheye62Parameters(
+        name="left_front",
+        extrinsics=Extrinsics(cam_R_world=np.eye(3), cam_t_world=np.zeros(3)),
+        intrinsics=Intrinsics(camera_conventions="RDF", fl_x=636.4, fl_y=634.7, cx=956.2, cy=525.4, width=1920, height=1080),
+        distortion=KannalaBrandtDistortion(k1=0.1, k2=0.2, k3=0.3, k4=0.4, k5=0.5, k6=0.6, p1=0.7, p2=0.8),
+    )
+
+    preview = preview_camera(camera)
+
+    assert (preview.intrinsics.width, preview.intrinsics.height) == (960, 540)
+    assert (preview.intrinsics.fl_x, preview.intrinsics.cx) == (318.2, 478.1)
+    assert preview.distortion == camera.distortion, "Kannala-Brandt coefficients act on normalised rays"
+    assert preview.extrinsics == camera.extrinsics
+
+
+def test_blueprint_follows_the_rig_and_keeps_overlays_inside_the_camera_views() -> None:
+    """The 3D eye rides the rig frame and every 2D view is rooted at its pinhole."""
+    cams = ("cam_00", "cam_01", "cam_04", "cam_05")
+
+    views = _views(build_blueprint(cams).root_container)
+
+    spatial_3d = [view for view in views if isinstance(view, rrb.Spatial3DView)]
+    assert len(spatial_3d) == 1
+    assert spatial_3d[0].origin == "world/rig_00", "the eye is expressed in the rig frame, so it rides the rig"
+    assert spatial_3d[0].contents == ["/**"], "world-frame people and in-frustum previews both stay visible"
+    assert "EyeControls3D" in spatial_3d[0].properties
+
+    camera_views = [view for view in views if isinstance(view, rrb.Spatial2DView)]
+    assert [view.origin for view in camera_views] == [f"world/rig_00/{cam}/pinhole" for cam in cams]
+    assert [view.name for view in camera_views] == list(cams)
+    assert all(view.contents == "$origin/**" for view in camera_views), "image and detections share the pinhole space"
+
+
+def test_follow_eye_sits_behind_and_above_the_rig_origin() -> None:
+    """cam_00 looks along rig ``+Y`` and the wearer's up is rig ``-Z``."""
+    eye = _batches_by_component(follow_eye_controls())
+
+    np.testing.assert_allclose(eye["EyeControls3D:position"].as_arrow_array().to_pylist(), [[0.0, -3.5, -1.8]], atol=1e-6)
+    np.testing.assert_allclose(eye["EyeControls3D:look_target"].as_arrow_array().to_pylist(), [[0.0, 0.0, 0.0]], atol=1e-6)
+    np.testing.assert_allclose(eye["EyeControls3D:eye_up"].as_arrow_array().to_pylist(), [[0.0, 0.0, -1.0]], atol=1e-6)
+    assert eye["EyeControls3D:spin_speed"].as_arrow_array().to_pylist() == [0.0]

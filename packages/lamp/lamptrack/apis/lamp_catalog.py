@@ -18,7 +18,7 @@ from posekit.rerun_logging import log_person_bbox, log_person_points2d, log_skel
 from posekit.skeletons import COCO_17
 from rerun.catalog import CatalogClient, DatasetEntry, DatasetView
 from scipy.spatial.transform import Rotation, Slerp
-from simplecv.camera_parameters import Fisheye62Parameters
+from simplecv.camera_parameters import Fisheye62Parameters, Intrinsics, rescale_intri
 from simplecv.rerun_dataloader import open_segment_decoder
 from simplecv.rerun_log_utils import RerunTyroConfig, compute_vertex_normals
 from simplecv.rerun_rig_logger import log_rig_static
@@ -30,7 +30,7 @@ from lamptrack.models.lamp import AnnotatedLampTrackerUnion, Frameset, LampConfi
 from lamptrack.rerun_logging import LivePeopleLogger, log_smpl_annotation_context
 
 PREVIEW_SCALE: float = 0.5
-"""Downscale applied to logged camera frames and their 2D overlays."""
+"""Downscale applied to the logged camera frames, their 2D overlays, and the logged pinholes."""
 
 
 @runtime_checkable
@@ -178,19 +178,55 @@ def best_detection_window(
     return best_start, best_total
 
 
-def build_blueprint(cams: tuple[str, ...]) -> rrb.Blueprint:
-    """Show the moving rig and people beside a two-by-two preview grid.
+def preview_camera(camera: Fisheye62Parameters) -> Fisheye62Parameters:
+    """Copy a camera with intrinsics rescaled to the logged preview resolution.
 
-    The previews are half resolution, so they would cover only a quarter of the
-    full-resolution pinhole image plane; the 3D view therefore excludes them.
+    The logged frustum must span exactly the pixels the preview covers, so the
+    ``Pinhole`` resolution has to match the downscaled image instead of the
+    sensor's. Kannala–Brandt coefficients act on normalised rays, so only the
+    intrinsics change.
     """
-    camera_views = [rrb.Spatial2DView(origin=f"{RIG}/{cam}/pinhole/preview", name=cam) for cam in cams]
+    intrinsics: Intrinsics = rescale_intri(
+        camera.intrinsics,
+        target_width=round(camera.intrinsics.width * PREVIEW_SCALE),
+        target_height=round(camera.intrinsics.height * PREVIEW_SCALE),
+    )
+    return Fisheye62Parameters(name=camera.name, extrinsics=camera.extrinsics, intrinsics=intrinsics, distortion=camera.distortion)
+
+
+def follow_eye_controls() -> rrb.EyeControls3D:
+    """Third-person eye that rides the Robocap rig frame (see ``dataforge.datasets.robocap``).
+
+    Measured from the segment's ``cam_T_rig``: the rig's ``+Y`` is where the
+    front cameras look and ``-Z`` is the wearer's up, so the eye sits 3.5 m
+    behind and 1.8 m above the rig origin and looks back at it.
+    """
+    # EyeControls3D is marked unstable by the SDK; re-validate this factory on Rerun bumps.
+    return rrb.EyeControls3D(
+        kind=rrb.Eye3DKind.FirstPerson,
+        position=(0.0, -3.5, -1.8),
+        look_target=(0.0, 0.0, 0.0),
+        eye_up=(0.0, 0.0, -1.0),
+        spin_speed=0.0,
+    )
+
+
+def build_blueprint(cams: tuple[str, ...]) -> rrb.Blueprint:
+    """Follow the moving rig in 3D beside a two-by-two camera grid.
+
+    The 3D view is rooted at the rig so a fixed eye in the rig frame rides
+    along; ``/**`` keeps the world-frame people and the previews inside their
+    frustums. Each 2D view is rooted at a camera's ``pinhole`` — the shared
+    space of the preview image and its detection overlays.
+    """
+    camera_views = [rrb.Spatial2DView(origin=f"{RIG}/{cam}/pinhole", contents="$origin/**", name=cam) for cam in cams]
     return rrb.Blueprint(
         rrb.Horizontal(
             rrb.Spatial3DView(
-                origin="world",
+                origin=RIG,
                 name="rig + tracked people",
-                contents=["$origin/**", *[f"- {RIG}/{cam}/pinhole/preview/**" for cam in cams]],
+                contents=["/**"],
+                eye_controls=follow_eye_controls(),
             ),
             rrb.Vertical(
                 rrb.Horizontal(camera_views[0], camera_views[1]),
@@ -282,7 +318,7 @@ def _log_person(
     color: tuple[int, int, int] = person_color(track_id)
     root: str = f"world/people/{track_id}"
     joints: Float32[ndarray, "24 3"] = state.joints_world[-1]
-    rr.log(f"{root}/joints", rr.Points3D(joints, keypoint_ids=range(24), class_ids=0, colors=color, radii=0.02))
+    rr.log(f"{root}/joints", rr.Points3D(joints, keypoint_ids=range(24), class_ids=0, colors=color, radii=0.02, show_labels=False))
     trail: list[Float32[ndarray, "3"]] = trails.setdefault(track_id, [])
     trail.append(joints[0].copy())
     rr.log(f"{root}/pelvis_trail", rr.LineStrips3D([np.stack(trail)], colors=color, radii=0.01))
@@ -351,13 +387,15 @@ def run(config: Config) -> RunMetrics:
         max_seconds=config.max_seconds,
     )
 
-    rr.send_blueprint(build_blueprint(config.cams))
+    # Both flags already default to true; they are explicit because a viewer that
+    # falls back to its heuristics lays out `.../preview/image` views with no overlays.
+    rr.send_blueprint(build_blueprint(config.cams), make_active=True, make_default=True)
     log_static_context(config.cams)
     rig = Rig(
         index=0,
         calibration=RigCalibration(
             cameras=[
-                CameraSensor(index=int(cam.split("_")[1]), name=parameters.name, kind="rgb", pinhole=parameters)
+                CameraSensor(index=int(cam.split("_")[1]), name=parameters.name, kind="rgb", pinhole=preview_camera(parameters))
                 for cam, parameters in zip(config.cams, camera_parameters, strict=True)
             ],
             reference_index=int(config.cams[0].split("_")[1]),
@@ -455,8 +493,10 @@ __all__ = (
     "best_detection_window",
     "build_blueprint",
     "build_time_grid",
+    "follow_eye_controls",
     "interpolate_pose",
     "log_static_context",
     "main",
+    "preview_camera",
     "run",
 )
