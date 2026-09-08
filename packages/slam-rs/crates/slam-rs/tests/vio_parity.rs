@@ -192,33 +192,43 @@ fn the_whole_pipeline_tracks_and_repeats_bit_identically() {
 /// samples, the published state and depth guess, the whole estimator window.
 /// 85 MB of text, so it is hashed rather than kept.
 ///
-/// The one field that cannot be compared across runs is `FrameStats::timings`,
-/// which `StageTimings`'s own doc calls wall-clock. It is the last field of the
-/// last field, so cutting the text at it drops the clock and nothing else; the
-/// assertion says so.
+/// The fields that cannot be compared across runs are the three wall-clock
+/// blocks, which their own docs call wall-clock: each is replaced by a fixed
+/// string, and each replacement is asserted to have found exactly the one block
+/// that this pipeline's state says is there — so a renamed, removed or repeated
+/// block fails the test instead of quietly leaving a clock in the hash.
 fn fingerprint(vio: &Vio<f32>) -> u64 {
     use std::hash::{Hash, Hasher};
 
     let mut text: String = format!("{vio:?}");
     // Every wall-clock block comes out: they are measurements of this run's own
     // speed and differ run to run by design, where the fingerprint is what must
-    // not. `FlowTimings` is the frontend's three phases, `FrontendTimings` the
-    // four `Vio` publishes, `StageTimings` the estimator's six on the last
-    // measured frame; each holds integers only, so its first `}` closes it.
-    let mut stripped: usize = 0;
-    for marker in ["FlowTimings {", "FrontendTimings {", "StageTimings {"] {
-        while let Some(start) = text.find(marker) {
-            let end: usize = text[start..]
-                .find('}')
-                .map_or(text.len(), |offset| start + offset + 1);
-            text.replace_range(start..end, "<wall clock>");
-            stripped += 1;
+    // not. `FlowTimings` is the frontend's three phases and `FrontendTimings`
+    // the four `Vio` publishes, one of each; `StageTimings` is the estimator's
+    // six on the last measured frame, so it is in the text exactly when a frame
+    // has been measured and not at all on a pipeline that has refused every one.
+    // Each holds integers only, so its first `}` closes it.
+    let blocks: [(&str, usize); 3] = [
+        ("FlowTimings {", 1),
+        ("FrontendTimings {", 1),
+        ("StageTimings {", usize::from(vio.last_stats().is_some())),
+    ];
+    for (marker, wanted) in blocks {
+        let found: usize = text.matches(marker).count();
+        assert_eq!(
+            found, wanted,
+            "`{marker}` is in the Debug output {found} times, not {wanted}: \
+             the fingerprint either hashes a wall clock or no longer covers one"
+        );
+        if wanted == 0 {
+            continue;
         }
+        let start: usize = text.find(marker).unwrap();
+        let length: usize = text[start..].find('}').unwrap_or_else(|| {
+            panic!("`{marker}` is never closed in the Debug output, so its wall clock cannot be cut out")
+        }) + 1;
+        text.replace_range(start..start + length, "<wall clock>");
     }
-    assert!(
-        stripped >= 2,
-        "the wall-clock blocks are no longer named in the Debug output, so the fingerprint now hashes them"
-    );
     let mut hasher: std::collections::hash_map::DefaultHasher = Default::default();
     text.hash(&mut hasher);
     hasher.finish()
