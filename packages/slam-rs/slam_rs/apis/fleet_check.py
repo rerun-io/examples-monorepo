@@ -129,6 +129,41 @@ class ClipResult:
         )
 
 
+def check_scoring_inputs(manifest: ReferenceManifest, segment: ReferenceSegment) -> tuple[Path, Path]:
+    """Where one clip's two scoring inputs are, refusing the clip when either cannot be read here.
+
+    Both of them, before anything is replayed: a 410 s clip is a long way to
+    travel to reach a bare ``FileNotFoundError`` from the CSV reader, and the
+    corpus a fleet machine reads is often partial — the pack carries two of the
+    ten segments, and ``--artifact-root`` points at whatever unpacked.
+    :func:`main` asks this of every clip it was given before the first replay,
+    and :func:`measure` asks it again for the clip it is about to run.
+
+    Args:
+        manifest: The reference set, which resolves the C++ trajectory.
+        segment: The clip about to be scored.
+
+    Returns:
+        The basalt C++ trajectory and the ``gt.csv`` sidecar, in that order.
+
+    Raises:
+        FileNotFoundError: If either is not a readable file on this machine — the
+            C++ trajectory with the manifest's own sentence about why, since the
+            two long-tier segments keep theirs in a bundle.
+    """
+    reference: BundleFile = manifest.cpp_trajectory(segment)
+    if not reference.available:
+        raise FileNotFoundError(reference.reason)
+    for path in (reference.path, segment.gt_csv):
+        if not path.is_file():
+            raise FileNotFoundError(f"{segment.segment_id}: {path} is not a file on this machine")
+        # Opened, not only counted: a pack unpacked without the permission to
+        # read it costs the same replay as a pack that is missing the file.
+        with path.open("rb") as handle:
+            handle.read(1)
+    return reference.path, segment.gt_csv
+
+
 def measure(manifest: ReferenceManifest, segment: ReferenceSegment) -> ClipResult:
     """Run one clip through the estimator and score it against both references.
 
@@ -142,23 +177,23 @@ def measure(manifest: ReferenceManifest, segment: ReferenceSegment) -> ClipResul
         scored, and the verdict says so.
 
     Raises:
-        FileNotFoundError: If the C++ trajectory is not on this machine, with the
-            manifest's own sentence about why — the two long-tier segments keep
-            theirs in a bundle and the pack carries two of the ten.
+        FileNotFoundError: If either scoring input cannot be read here
+            (:func:`check_scoring_inputs`).
     """
-    # Before the replay, not after it: a 410 s clip is a long way to travel to
-    # reach a bare FileNotFoundError from the CSV reader.
-    reference: BundleFile = manifest.cpp_trajectory(segment)
-    if not reference.available:
-        raise FileNotFoundError(reference.reason)
+    cpp_csv: Path
+    gt_csv: Path
+    cpp_csv, gt_csv = check_scoring_inputs(manifest, segment)
+    # Read before the replay too, so a CSV that is there but is not a trajectory
+    # costs nothing either.
+    cpp: Trajectory = read_trajectory(cpp_csv)
+    truth: Trajectory = read_trajectory(gt_csv)
     run: SegmentRun = run_segment(manifest, segment)
     tracked: int = len(run.estimate)
-    truth: Trajectory = read_trajectory(segment.gt_csv)
     # A run below the floor is not scored at all: `ate` has no pose to align and
     # raises, and a machine that tracked nothing is precisely the machine this
     # tool exists to report on. The floor is the verdict (D60, `d60_failures`).
     scored: bool = tracked >= MIN_TRACKED_POSES
-    against_cpp: AteResult | None = ate(run.estimate, read_trajectory(reference.path)) if scored else None
+    against_cpp: AteResult | None = ate(run.estimate, cpp) if scored else None
     against_gt: AteResult | None = ate(run.estimate, truth) if scored else None
     expected: CppAte = segment.reference.expected_cpp_ate
     return ClipResult(
@@ -267,8 +302,9 @@ def main(config: Config) -> None:
         config: Parsed CLI options.
 
     Raises:
-        ValueError: If ``--segments`` names an id the manifest does not have,
-            before any clip is replayed.
+        ValueError: If ``--segments`` names an id the manifest does not have.
+        FileNotFoundError: If any named clip's scoring inputs cannot be read
+            here. Both are decided before the first replay.
         SystemExit: If any clip missed a D60 clause.
     """
     manifest: ReferenceManifest = load_manifest(config.manifest, config.artifact_root)
@@ -276,6 +312,10 @@ def main(config: Config) -> None:
     # loop: `--segments <410 s clip> typo` used to pay that clip and then reach
     # the typo (S22 review).
     segments: tuple[ReferenceSegment, ...] = tuple(manifest.by_id(segment_id) for segment_id in config.segments)
+    # The same for every clip's scoring inputs: the second clip's missing
+    # sidecar must not cost the first clip's replay (S22 review).
+    for segment in segments:
+        check_scoring_inputs(manifest, segment)
     machine: Machine = this_machine()
     print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores")
     config.output_json.parent.mkdir(parents=True, exist_ok=True)

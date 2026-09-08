@@ -144,14 +144,29 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
 
     Returns:
         The row, and the estimated trajectory on the device clock so the caller can export it.
+
+    Raises:
+        FileNotFoundError: If the session's ``slam`` layer or the other machine's
+            trajectory is not a readable file here, before anything is replayed.
     """
+    # Every scoring input before the replay: 52.9 s of video must not be spent to
+    # reach a `slam` layer that did not ship or a mistyped `--reference-csv`
+    # (S22 review). Existence and readability first, and for both together,
+    # because reading the layer spins a catalog server and the typed path is the
+    # cheap mistake.
+    scoring: tuple[Path, ...] = (session.slam_path,) if config.reference_csv is None else (session.slam_path, config.reference_csv)
+    for path in scoring:
+        if not path.is_file():
+            raise FileNotFoundError(f"{session.fleet_id}: {path} is not a file on this machine")
+        with path.open("rb") as handle:
+            handle.read(1)
+    cpp: Trajectory = robocap_cpp_trajectory(manifest, session)
+    across_reference: Trajectory | None = None if config.reference_csv is None else read_trajectory(config.reference_csv)
     before: float | None = this_temperature_c()
     run: SegmentRun = run_robocap(manifest, session, seconds=config.seconds, window_s=config.window_s)
     after: float | None = this_temperature_c()
-    against_cpp: AteResult = ate(run.estimate, robocap_cpp_trajectory(manifest, session))
-    across: float | None = None
-    if config.reference_csv is not None:
-        across = 100.0 * ate(run.estimate, read_trajectory(config.reference_csv)).rmse_m
+    against_cpp: AteResult = ate(run.estimate, cpp)
+    across: float | None = None if across_reference is None else 100.0 * ate(run.estimate, across_reference).rmse_m
     ms_per_frameset: float = 1e3 * run.wall_s / max(run.framesets, 1)
     return (
         RobocapRow(

@@ -95,6 +95,32 @@ def test_both_outputs_survive_a_directory_that_is_not_there_yet(
     assert output.with_suffix(".csv").is_file()
 
 
+def test_a_scoring_input_that_is_not_here_is_refused_before_the_replay(
+    manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """52.9 s of video must not be spent to reach a missing ``slam`` layer or a mistyped ``--reference-csv``.
+
+    Both were opened only after the whole session had replayed: the C++ layer to
+    score against, and the other machine's trajectory for the cross-platform
+    figure. A relocated corpus can be partial and a path is typed by hand, so
+    both are opened before the estimator is fed anything.
+    """
+
+    def never(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the session replayed before its scoring inputs were opened")
+
+    monkeypatch.setattr(robocap_fleet, "run_robocap", never)
+    session: RobocapSession = manifest.robocap.session("s00000015")
+    absent: RobocapSession = replace(session, slam_url=f"file://{tmp_path / 'slam.rrd'}")
+    with pytest.raises(FileNotFoundError, match="slam.rrd is not a file on this machine"):
+        measure(manifest, absent, Config(), this_machine())
+
+    # The layer is here; the other machine's trajectory is a typo.
+    (tmp_path / "slam.rrd").write_bytes(b"")
+    with pytest.raises(FileNotFoundError, match="typo.csv is not a file on this machine"):
+        measure(manifest, absent, Config(reference_csv=tmp_path / "typo.csv"), this_machine())
+
+
 @pytest.mark.slow
 def test_the_real_session_replays_on_this_machine_and_agrees_with_the_cpp(manifest: ReferenceManifest) -> None:
     """The first second of session 15 off the NAS, scored against the C++ layer beside it.

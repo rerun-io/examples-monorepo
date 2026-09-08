@@ -17,7 +17,7 @@ from slam_rs.apis.fleet_check import ClipResult, Config, clip_json, main, measur
 from slam_rs.machine import Machine
 from slam_rs.reference import MANIFEST_PATH, PATH_BOUND_MAX_CLIP_S, SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment, pose_floor_text
 from slam_rs.tracking import SegmentRun
-from slam_rs.trajectory import empty_trajectory
+from slam_rs.trajectory import empty_trajectory, write_trajectory
 
 CLIP_JSON_KEYS: tuple[str, ...] = (
     "segment_id",
@@ -224,6 +224,25 @@ def test_an_unknown_segment_id_is_refused_before_the_first_replay(monkeypatch: p
     monkeypatch.setattr(fleet_check, "measure", never)
     with pytest.raises(ValueError, match="MIO10_typo.*MIO10_short_2_panorama"):
         main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1], "MIO10_typo"), output_json=tmp_path / "fleet_check.json"))
+
+
+def test_a_partial_corpus_is_refused_before_the_first_replay(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The second clip's missing sidecar must not cost the first clip's replay.
+
+    A relocated corpus can be partial — the pack carries two of the ten — and the
+    ``gt.csv`` used to be opened only after ``run_segment`` had returned, so a
+    pack that unpacked half way spent a whole replay to find out. Every clip's
+    scoring inputs are opened before the loop starts; the first clip here has its
+    sidecar and the second does not, and nothing is replayed.
+    """
+
+    def never(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a replay was paid for before every scoring input was opened")
+
+    monkeypatch.setattr(fleet_check, "run_segment", never)
+    write_trajectory(tmp_path / SMOKE_SEGMENTS[0] / "gt.csv", empty_trajectory())
+    with pytest.raises(FileNotFoundError, match=f"{SMOKE_SEGMENTS[1]}.*is not a file on this machine"):
+        main(Config(manifest=MANIFEST_PATH, artifact_root=tmp_path, segments=SMOKE_SEGMENTS, output_json=tmp_path / "fleet_check.json"))
 
 
 def test_the_first_clips_evidence_survives_a_directory_that_is_not_there_yet(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
