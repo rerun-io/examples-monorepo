@@ -25,6 +25,7 @@
 //! ([`crate::lie::LieScalar::EIGEN_PACKET_SIZE`]).
 
 pub(crate) mod blas;
+pub(crate) mod ldlt;
 pub(crate) mod qr;
 pub(crate) mod svd;
 

@@ -30,6 +30,9 @@
 //! why `pmadd(a, b, c)` below is `a * b + c` with two roundings rather than one
 //! (D47 established the same fact for the three-coefficient reductions).
 
+use nalgebra::DMatrix;
+
+use super::qr::BlockSpan;
 use crate::lie::LieScalar;
 
 /// `v.head<3>().norm()` in Eigen's summation order, which differs between the
@@ -131,11 +134,94 @@ pub(crate) fn redux_contiguous<S: LieScalar>(len: usize, term: impl Fn(usize) ->
     res
 }
 
+/// `res += alpha * lhs.block(row0, col0, rows, cols) * rhs`, with Eigen's
+/// `ColMajor` association (`GeneralMatrixVector.h:105-258`).
+///
+/// **Contract: `cols < 128`**, so `GeneralMatrixVector.h:143`'s
+/// `cols < 128 ? cols : ...` makes the column block the whole width — one
+/// block, each output coefficient one left fold from zero. Every caller here is
+/// a triangular panel, at most eight wide. Also `rhs.len() == span.cols` and
+/// `res.len() == span.rows`, the shape the span itself names: dropping a
+/// coefficient of a shorter `res` would return a partially updated LM
+/// increment instead of failing.
+pub(crate) fn gemv_col_major_block<S: LieScalar>(
+    lhs: &DMatrix<S>,
+    span: BlockSpan,
+    rhs: &[S],
+    res: &mut [S],
+    alpha: S,
+) {
+    let BlockSpan {
+        row_start,
+        rows,
+        col_start,
+        cols,
+    } = span;
+    debug_assert!(cols < 128, "GeneralMatrixVector.h:143 blocks a wider gemv");
+    debug_assert_eq!(rhs.len(), cols);
+    debug_assert_eq!(res.len(), rows);
+    for i in 0..rows {
+        let mut acc: S = S::zero();
+        for j in 0..cols {
+            // `pcj.pmadd(lhs, b0, c)` without FMA: `a * b + c`.
+            acc = lhs[(row_start + i, col_start + j)] * rhs[j] + acc;
+        }
+        res[i] += alpha * acc;
+    }
+}
+
+/// `res += alpha * lhsᵀ.block(row0, col0, rows, cols) * rhs` read as a
+/// `RowMajor` product (`GeneralMatrixVector.h:298-450`).
+///
+/// The logical coefficient `(i, j)` is `lhs[(col_start + j, row_start + i)]`:
+/// this is the shape `matrixL().adjoint()` hands the solver, a triangular view
+/// over a `Transpose` of a column-major matrix, which Eigen therefore
+/// dispatches to the row-major kernel.
+///
+/// **Contract: `rhs.len() == span.cols` and `res.len() == span.rows`**, as in
+/// [`gemv_col_major_block`].
+pub(crate) fn gemv_row_major_of_transpose<S: LieScalar>(
+    lhs: &DMatrix<S>,
+    span: BlockSpan,
+    rhs: &[S],
+    res: &mut [S],
+    alpha: S,
+) {
+    let BlockSpan {
+        row_start,
+        rows,
+        col_start,
+        cols,
+    } = span;
+    debug_assert_eq!(rhs.len(), cols);
+    debug_assert_eq!(res.len(), rows);
+    let packet: usize = S::EIGEN_PACKET_SIZE;
+    let full_col_block_end: usize = packet * (cols / packet);
+    for i in 0..rows {
+        let mut lanes: [S; 4] = [S::zero(); 4];
+        let mut j: usize = 0;
+        while j < full_col_block_end {
+            for lane in 0..packet {
+                lanes[lane] =
+                    lhs[(col_start + j + lane, row_start + i)] * rhs[j + lane] + lanes[lane];
+            }
+            j += packet;
+        }
+        let mut acc: S = S::eigen_predux(&lanes[..packet]);
+        for j in full_col_block_end..cols {
+            acc += lhs[(col_start + j, row_start + i)] * rhs[j];
+        }
+        res[i] += alpha * acc;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use nalgebra::DMatrix;
+    use proptest::prelude::*;
 
     /// The `f64` splits, length by length, against the trees derived from
     /// `Redux.h:274-325` by hand.
@@ -169,5 +255,62 @@ mod tests {
         assert_eq!(sum(3), (t[0] + t[1]) + t[2]);
         assert_eq!(sum(4), (t[0] + t[2]) + (t[1] + t[3]));
         assert_eq!(sum(5), ((t[0] + t[2]) + (t[1] + t[3])) + t[4]);
+    }
+
+    /// The column-major kernel accumulates from zero, which a naive
+    /// `res[i] -= lhs * rhs[j]` loop does not: on this input the two disagree
+    /// in `f32`.
+    #[test]
+    fn the_column_major_kernel_accumulates_from_zero() {
+        let tiny: f32 = f32::EPSILON / 2.0;
+        let lhs: DMatrix<f32> = DMatrix::from_row_slice(1, 2, &[tiny, tiny]);
+        let rhs: [f32; 2] = [1.0, 1.0];
+        let mut res: [f32; 1] = [1.0];
+        gemv_col_major_block(
+            &lhs,
+            BlockSpan {
+                row_start: 0,
+                rows: 1,
+                col_start: 0,
+                cols: 2,
+            },
+            &rhs,
+            &mut res,
+            1.0,
+        );
+        assert_eq!(res[0], 1.0 + (tiny + tiny), "one rounding into res");
+
+        let mut naive: f32 = 1.0;
+        naive += tiny;
+        naive += tiny;
+        assert_eq!(naive, 1.0, "the naive loop loses both");
+    }
+
+    proptest! {
+        /// Both kernels compute the mathematical product; the tests above pin
+        /// the association, this pins the value.
+        #[test]
+        fn the_kernels_agree_with_the_dense_product(
+            values in prop::collection::vec(-4.0f64..4.0, 5 * 7),
+            rhs in prop::collection::vec(-4.0f64..4.0, 7),
+        ) {
+            let lhs: DMatrix<f64> = DMatrix::from_row_slice(5, 7, &values);
+            let expected: Vec<f64> = (0..5)
+                .map(|i| (0..7).map(|j| lhs[(i, j)] * rhs[j]).sum::<f64>())
+                .collect();
+
+            let mut res: Vec<f64> = vec![0.0; 5];
+            gemv_col_major_block(&lhs, BlockSpan { row_start: 0, rows: 5, col_start: 0, cols: 7 }, &rhs, &mut res, 1.0);
+            for i in 0..5 {
+                prop_assert!((res[i] - expected[i]).abs() <= 1e-12 * (1.0 + expected[i].abs()));
+            }
+
+            let transposed: DMatrix<f64> = lhs.transpose();
+            let mut res2: Vec<f64> = vec![0.0; 5];
+            gemv_row_major_of_transpose(&transposed, BlockSpan { row_start: 0, rows: 5, col_start: 0, cols: 7 }, &rhs, &mut res2, 1.0);
+            for i in 0..5 {
+                prop_assert!((res2[i] - expected[i]).abs() <= 1e-12 * (1.0 + expected[i].abs()));
+            }
+        }
     }
 }

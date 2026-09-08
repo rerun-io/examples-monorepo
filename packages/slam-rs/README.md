@@ -25,6 +25,7 @@ The core is being filled in stage by stage, bottom up. What is in it today:
 | `linearize` | The square-root linearization: `LandmarkBlock` (basalt's `[ J_p \| pad \| J_l \| r ]` buffer, the layout arithmetic of `landmark_block_abs_dynamic.hpp:83-96`, the Huber-weighted residual rows, three Householder reflections, back-substitution with its exact model cost change) and `LinearizationAbsQR`, which owns the blocks, the IMU blocks and the marginalization prior and produces `H`, `b`, `Q2Jp`, `Q2r` and `l_diff`. No damping and no Jacobian scaling: the fork comments every call site out and the port carries none of it (D34, D68). Eigen's `makeHouseholder` and `applyHouseholderOnTheLeft` are ported coefficient for coefficient rather than delegated to nalgebra's equivalents (D44). |
 | `marg` | Square-root marginalization: `MargHelper`'s rank-revealing flat Householder QR, `marginalizeHelperSqrtToSqrt` — the one routine of the three the shipped path reaches — plus the `marginalize()` mechanics of `sqrt_keypoint_vio.cpp:896-1178` given an explicit keep/marginalize schedule. The two squared-form routines, the complete orthogonal decomposition they inverted the marginalized block with, and `checkMargNullspace`/`checkEigenvalues` are **not** ported: `SqrtKeypointVio::new` refuses `vio_sqrt_marg` off, so nothing on any shipped config reaches them (D68). |
 | `eigen` | The Eigen ports, in one place, each reproducing Eigen's **operation order** rather than only its result: `qr` (`makeHouseholder`, `applyHouseholderOnTheLeft`, `makeGivens` and the `Redux.h` traversals), `ldlt` (the pivoted LDLT at dynamic size, D41, which the LM step solves through), `svd` (the Jacobi SVD the DLT triangulation needs) and `blas` (the `gemv` associations the other three call). Not "numerics utilities" to be swapped for nalgebra's (D44): the last bit reaches a rank test, a finite check and a triangulation gate. |
+| `estimator` | The Offline sliding-window driver: `process_frame` (cover, initialise, measure, optimise, marginalize), `schedule` (basalt's keyframe vote, the lazy keyframe budget and the keep/marginalize sets `marg` is given) and `optimize` (the Levenberg-Marquardt loop, with the per-frame `lambda` reset, the `lambda · diag(H)` damping and the shared 7-iteration budget). |
 
 Two conventions in `ba_base` are basalt deviating from its own papers, and the
 port keeps **both** halves of each. The reprojection residual is `pi(...) - z`,
@@ -276,6 +277,50 @@ residual. The port returns a zero row instead, which is the answer the
 arithmetic gives — nothing is left to constrain the kept variables — and stays a
 disclosed deviation rather than a reproduction. The oracle carries the case with
 the flat QR skipped on the C++ side.
+
+
+### The damping machinery the shipped VIO never uses
+
+`optimize()` calls exactly four things on the linearizer: `linearizeProblem`,
+`performQR`, `get_dense_H_b` and `backSubstitute`
+(`sqrt_keypoint_vio.cpp:1297`, `:1320`, `:1393`, `:1454`). Everything else is
+commented out - the Jacobian scaling at `:1307-1317` and `:1461-1463`, the pose
+damping at `:1361-1365`, the landmark damping at `:1373-1377` - which matches the
+ICCV 2021 paper's own statement that the Givens damping stack is not used in the
+sliding-window VIO. Levenberg-Marquardt damping enters through
+`H.diagonal() * lambda` in the dense solve instead (`:1415-1417`).
+
+The port carries none of it (D68). The five methods it used to implement -
+`set_pose_damping`, `set_landmark_damping`, `scale_jl_cols`, `scale_jp_cols`,
+`get_jp_diag2` - together with the six-Givens stack and its LIFO un-apply, were
+reachable from no driver and pinned only against the C++ fixture, because a live
+run never reaches them. `backSubstitute`'s own `setLandmarkDamping(0)`
+(`landmark_block_abs_dynamic.hpp:310`) has nothing to undo here: `storage`
+starts zeroed, both QR paths stop at `num_rows - 3`, so the three damping rows
+are provably still zero when the model cost change is computed.
+
+One consequence of that same code path changes what `l_diff` means. With the
+optimal landmark increment substituted in, the first three rows of `Q^T J inc`
+are `-Q1^T r` — so the *updated residual* `Q^T J inc + Q^T r` is zero there,
+which is what "the landmarks move to their own optimum" means — and
+
+```text
+l_diff = 0.5 * sum ||Q1^T r||^2  -  inc^T b  -  0.5 inc^T H inc
+```
+
+The first term does not depend on the pose increment at all, so basalt's
+`l_diff` is **nonnegative at `inc = 0`**, and zero exactly when the eliminated
+residual `Q1^T r` already is. A port that dropped the constant would make every
+Levenberg-Marquardt gain ratio wrong in the same direction, which still
+converges, only worse.
+
+None of that is still to come: the sliding-window driver, its keyframe and
+marginalization schedule and this Levenberg-Marquardt loop are the `estimator`
+module (`schedule.rs`, `optimize.rs`), and every reference number in this README
+is what they produce. What is not ported is realtime mode — basalt's two threads
+joined by bounded queues. Offline mode runs the frontend and then the estimator
+to completion in the calling thread, which is what makes a repeat run over the
+same input bit-identical (D17).
 
 
 ## Layout
