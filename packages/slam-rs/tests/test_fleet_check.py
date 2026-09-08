@@ -313,9 +313,47 @@ def test_the_first_clips_evidence_survives_a_directory_that_is_not_there_yet(mon
     clip's row has to be on disk already — and it is not, if the last line of the
     run is what discovers that ``out/`` does not exist.
     """
-    monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment: PASSING)
+    monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment, _gpu: PASSING)
     output: Path = tmp_path / "out" / "fleet_check.json"
     main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1],), output_json=output))
     written: dict = json.loads(output.read_text())
-    assert list(written) == ["machine", "clips"]
+    assert list(written) == ["machine", "lane", "clips"]
     assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)
+
+
+def test_the_lane_is_on_the_json_and_the_clip_columns_are_not(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A GPU row and a CPU row differ in the run, not in the clip's columns.
+
+    The chart reads :class:`~slam_rs.apis.fleet_check.ClipJson` as a contract, so
+    the lane cannot be a thirteenth column of it; it is one key beside
+    ``machine``, written from the flag rather than sensed, because a core built
+    without a GPU feature refuses ``gpu=True`` outright and never reaches here.
+    """
+    monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment, _gpu: PASSING)
+    output: Path = tmp_path / "fleet_check.json"
+    main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1],), output_json=output, gpu=True))
+    written: dict = json.loads(output.read_text())
+    assert written["lane"] == "gpu"
+    assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)
+
+
+def test_the_gpu_flag_reaches_the_estimator_and_nothing_else_does(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--gpu`` is only worth a row if it arrives at the run that produced it.
+
+    The flag crosses two hops — the config to :func:`~slam_rs.apis.fleet_check.measure`,
+    then ``measure`` to :func:`~slam_rs.tracking.run_segment` — and a lost hop
+    would label a CPU row ``gpu`` with nothing to notice, which is the one
+    failure this whole tool exists to rule out.
+    """
+    seen: list[bool] = []
+
+    def record(_manifest: ReferenceManifest, _segment: ReferenceSegment, *, gpu: bool) -> SegmentRun:
+        seen.append(gpu)
+        return SegmentRun(estimate=empty_trajectory(), framesets=412, lost=412, wall_s=1.0)
+
+    monkeypatch.setattr(fleet_check, "run_segment", record)
+    manifest: ReferenceManifest = fleet_check.load_manifest(MANIFEST_PATH)
+    segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENTS[1])
+    measure(manifest, segment, True)
+    measure(manifest, segment)
+    assert seen == [True, False]

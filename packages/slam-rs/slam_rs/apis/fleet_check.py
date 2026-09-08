@@ -177,12 +177,16 @@ def check_scoring_inputs(manifest: ReferenceManifest, segment: ReferenceSegment)
     return reference.path, segment.gt_csv
 
 
-def measure(manifest: ReferenceManifest, segment: ReferenceSegment) -> ClipResult:
+def measure(manifest: ReferenceManifest, segment: ReferenceSegment, gpu: bool = False) -> ClipResult:
     """Run one clip through the estimator and score it against both references.
 
     Args:
         manifest: The reference set, which resolves the dataset's config and the C++ trajectory.
         segment: The clip to run; its three artifacts must be on this machine.
+        gpu: Put the frontend on this machine's GPU through CubeCL instead of the
+            CPU port. A core built without a GPU cargo feature refuses it rather
+            than quietly running on the CPU, which is what makes a GPU row a GPU
+            row.
 
     Returns:
         The clip's numbers, with the peak resident set the process has reached.
@@ -202,7 +206,7 @@ def measure(manifest: ReferenceManifest, segment: ReferenceSegment) -> ClipResul
     # costs nothing either.
     cpp: Trajectory = read_trajectory(cpp_csv)
     truth: Trajectory = read_trajectory(gt_csv)
-    run: SegmentRun = run_segment(manifest, segment)
+    run: SegmentRun = run_segment(manifest, segment, gpu=gpu)
     tracked: int = len(run.estimate)
     # A run below the floor is not scored at all: `ate` has no pose to align and
     # raises, and a machine that tracked nothing is precisely the machine this
@@ -322,6 +326,14 @@ class Config:
     """Clips to run, in order."""
     output_json: Path = Path("fleet_check.json")
     """Where the machine's facts and every clip's numbers are written."""
+    gpu: bool = False
+    """Run the frontend on this machine's GPU through CubeCL instead of the CPU port.
+
+    Which lane produced a row is a fact about the run and not about the machine
+    or the clip, so it is written as the JSON's own ``lane`` key beside
+    ``machine`` and ``clips`` — :class:`ClipJson` is a consumer contract and
+    gains nothing.
+    """
 
 
 def main(config: Config) -> None:
@@ -350,13 +362,18 @@ def main(config: Config) -> None:
     for segment in segments:
         check_scoring_inputs(manifest, segment)
     machine: Machine = this_machine()
-    print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores")
+    lane: str = "gpu" if config.gpu else "cpu"
+    print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores, {lane} lane")
     config.output_json.parent.mkdir(parents=True, exist_ok=True)
     results: list[ClipResult] = []
     for segment in segments:
-        results.append(measure(manifest, segment))
+        results.append(measure(manifest, segment, config.gpu))
         print(results[-1].row(machine))
-        payload: dict[str, object] = {"machine": asdict(machine), "clips": [asdict(clip_json(clip)) for clip in results]}
+        payload: dict[str, object] = {
+            "machine": asdict(machine),
+            "lane": lane,
+            "clips": [asdict(clip_json(clip)) for clip in results],
+        }
         config.output_json.write_text(json.dumps(payload, indent=2))
     missed: list[ClipResult] = [clip for clip in results if clip.failures]
     if missed:
