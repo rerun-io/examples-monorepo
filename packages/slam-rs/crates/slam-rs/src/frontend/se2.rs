@@ -89,19 +89,6 @@ impl<S: LieScalar> AffineCompact2<S> {
         ]
     }
 
-    /// The inverse of [`AffineCompact2::coefficients`].
-    pub fn from_coefficients(coefficients: [S; 6]) -> Self {
-        Self {
-            linear: Matrix2::new(
-                coefficients[0],
-                coefficients[1],
-                coefficients[2],
-                coefficients[3],
-            ),
-            translation: Vector2::new(coefficients[4], coefficients[5]),
-        }
-    }
-
     /// The affine image of a pattern tap: `linear * tap + translation`.
     ///
     /// This is one column of the `transformed_pat` the tracker builds at

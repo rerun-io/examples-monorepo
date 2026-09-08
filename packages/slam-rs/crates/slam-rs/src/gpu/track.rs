@@ -9,7 +9,7 @@ use super::pyramid::GpuPyramid;
 use super::{GpuError, guarded};
 use crate::frontend::patterns::Pattern;
 use crate::frontend::tracker::{
-    FlowResult, FlowTransforms, PatchTracker, SourcePatches, TrackerError,
+    FlowResult, FlowTransforms, PatchTracker, SourcePatches, TrackerError, check_track_inputs,
 };
 use crate::pyramid::Pyramid;
 
@@ -120,36 +120,15 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
         // method's error rather than a `PanicException` in Python (decision D32).
         guarded(GpuError::DeviceLost { what: "tracker" }, || {
             let count: usize = transforms_in.len();
-            if count != patches.len() {
-                return Err(TrackerError::LengthMismatch {
-                    first_name: "patches",
-                    first: patches.len(),
-                    second_name: "transforms",
-                    second: count,
-                });
-            }
-            if count > self.capacity {
-                return Err(TrackerError::CapacityExceeded {
-                    offered: count,
-                    capacity: self.capacity,
-                });
-            }
-            if patches.num_levels() < self.num_levels {
-                return Err(TrackerError::LevelMismatch {
-                    what: "the patch set",
-                    expected: self.num_levels,
-                    actual: patches.num_levels(),
-                });
-            }
-            for (what, pyramid) in [("the previous pyramid", prev), ("the next pyramid", next)] {
-                if pyramid.num_levels() < self.num_levels {
-                    return Err(TrackerError::LevelMismatch {
-                        what,
-                        expected: self.num_levels,
-                        actual: pyramid.num_levels(),
-                    });
-                }
-            }
+            check_track_inputs(
+                count,
+                patches.len(),
+                patches.num_levels(),
+                prev.num_levels(),
+                next.num_levels(),
+                self.capacity,
+                self.num_levels,
+            )?;
 
             out.reset(count);
             if count == 0 {

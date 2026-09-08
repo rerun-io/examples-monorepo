@@ -231,11 +231,6 @@ impl ImageU16 {
         &self.data
     }
 
-    /// The whole buffer, mutably.
-    pub fn data_mut(&mut self) -> &mut [u16] {
-        &mut self.data
-    }
-
     /// One row, `width` pixels long.
     ///
     /// # Panics
@@ -480,11 +475,13 @@ mod tests {
     fn random_image(width: usize, height: usize, seed: u64) -> ImageU16 {
         let mut image: ImageU16 = ImageU16::zeros(width, height).unwrap();
         let mut state: u64 = seed | 1;
-        for pixel in image.data_mut() {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1);
-            *pixel = (state >> 32) as u16;
+        for y in 0..height {
+            for pixel in image.row_mut(y) {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                *pixel = (state >> 32) as u16;
+            }
         }
         image
     }

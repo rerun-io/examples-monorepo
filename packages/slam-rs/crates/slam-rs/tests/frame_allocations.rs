@@ -39,12 +39,8 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::collections::BTreeMap;
 
-use nalgebra::Vector3;
-
-use slam_rs::calib::{CalibAccelBias, CalibGyroBias, Calibration, CameraModel, PinholeParams};
-use slam_rs::config::{MatchingGuessType, VioConfig};
+use slam_rs::config::VioConfig;
 use slam_rs::frontend::detect::{CellGrid, CpuCornerScan};
 use slam_rs::frontend::flow::{
     FlowFrame, FrameToFrameOpticalFlow, FrontendOptions, Keypoints, PosePrediction,
@@ -53,7 +49,10 @@ use slam_rs::frontend::patterns::Pattern51;
 use slam_rs::frontend::se2::AffineCompact2f;
 use slam_rs::frontend::tracker::FlowTransforms;
 use slam_rs::image::ImageU16;
-use slam_rs::lie::{Se3, So3};
+
+mod common;
+
+use common::{dotted_image, flow_config, flow_rig};
 
 // ── the counting allocator ────────────────────────────────────────────────
 
@@ -141,75 +140,10 @@ fn measure<T>(body: impl FnOnce() -> T) -> (T, Allocations) {
 
 // ── the frontend under test ───────────────────────────────────────────────
 
-const WIDTH: usize = 200;
-const HEIGHT: usize = 200;
-
-fn rig(count: usize) -> Calibration<f64> {
-    let intrinsics: CameraModel<f64> = CameraModel::Pinhole(PinholeParams {
-        fx: 180.0,
-        fy: 180.0,
-        cx: WIDTH as f64 / 2.0,
-        cy: HEIGHT as f64 / 2.0,
-    });
-    Calibration {
-        t_i_c: (0..count)
-            .map(|index| Se3::new(So3::identity(), Vector3::new(0.05 * index as f64, 0.0, 0.0)))
-            .collect(),
-        intrinsics: vec![intrinsics; count],
-        resolution: vec![[WIDTH as u32, HEIGHT as u32]; count],
-        vignette: Vec::new(),
-        cam_time_offset_ns: 0,
-        calib_accel_bias: CalibAccelBias::default(),
-        calib_gyro_bias: CalibGyroBias::default(),
-        imu_update_rate: 200.0,
-        gyro_noise_std: Vector3::repeat(1e-4),
-        accel_noise_std: Vector3::repeat(1e-3),
-        gyro_bias_std: Vector3::repeat(1e-5),
-        accel_bias_std: Vector3::repeat(1e-4),
-        unknown: BTreeMap::new(),
-    }
-}
-
-fn config() -> VioConfig {
-    VioConfig {
-        optical_flow_matching_guess_type: MatchingGuessType::SamePixel,
-        ..VioConfig::default()
-    }
-}
-
-/// Bright squares on a gently varying background, shifted by `shift` pixels.
-fn dotted_image(shift: i32) -> ImageU16 {
-    let mut image: ImageU16 = ImageU16::zeros(WIDTH, HEIGHT).unwrap();
-    for y in 0..HEIGHT {
-        for x in 0..WIDTH {
-            let fx: f64 = f64::from(x as i32 - shift);
-            let background: f64 = 60.0 + 25.0 * (fx * 0.09).sin() * (y as f64 * 0.07).cos();
-            image.set(x, y, (background as u16) << 8);
-        }
-    }
-    let mut cy: usize = 14;
-    while cy + 5 < HEIGHT {
-        let mut cx: usize = 14;
-        while cx + 5 < WIDTH {
-            for dy in 0..5 {
-                for dx in 0..5 {
-                    let x: i32 = (cx + dx) as i32 + shift;
-                    if x >= 0 && (x as usize) < WIDTH {
-                        image.set(x as usize, cy + dy, 200u16 << 8);
-                    }
-                }
-            }
-            cx += 17;
-        }
-        cy += 17;
-    }
-    image
-}
-
 /// The snapshot's exact shape: one `Keypoints` per camera, copied in place.
 ///
-/// This is the operation the review measured at sixteen allocations and sixteen
-/// frees per call, on this thread only. Every type in the chain — `Vec`, `Keypoints` and
+/// This is the operation that once cost sixteen allocations and sixteen frees
+/// per call, on this thread only. Every type in the chain — `Vec`, `Keypoints` and
 /// `FlowTransforms` — now implements `clone_from` by hand, so a copy into
 /// buffers that are already big enough reaches the allocator zero times.
 #[test]
@@ -325,7 +259,8 @@ fn band_scan_bound(grid: &CellGrid, cameras: usize) -> usize {
 #[test]
 fn a_steady_state_frame_reports_its_allocation_count() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> =
-        FrameToFrameOpticalFlow::new(config(), &rig(2), FrontendOptions::default()).unwrap();
+        FrameToFrameOpticalFlow::new(flow_config(), &flow_rig(2), FrontendOptions::default())
+            .unwrap();
     let frames: Vec<[ImageU16; 2]> = (0..6)
         .map(|step| [dotted_image(step), dotted_image(step)])
         .collect();
@@ -373,11 +308,12 @@ fn a_steady_state_frame_reports_its_allocation_count() {
 #[test]
 fn a_frame_that_finds_nothing_costs_the_same_order() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> =
-        FrameToFrameOpticalFlow::new(config(), &rig(2), FrontendOptions::default()).unwrap();
+        FrameToFrameOpticalFlow::new(flow_config(), &flow_rig(2), FrontendOptions::default())
+            .unwrap();
     let flat: ImageU16 = {
-        let mut image: ImageU16 = ImageU16::zeros(WIDTH, HEIGHT).unwrap();
-        for y in 0..HEIGHT {
-            for x in 0..WIDTH {
+        let mut image: ImageU16 = ImageU16::zeros(common::FLOW_WIDTH, common::FLOW_HEIGHT).unwrap();
+        for y in 0..common::FLOW_HEIGHT {
+            for x in 0..common::FLOW_WIDTH {
                 image.set(x, y, 100u16 << 8);
             }
         }
@@ -472,7 +408,7 @@ fn a_restored_frame_costs_no_more_than_a_successful_one() {
     }
 
     let options: FrontendOptions = FrontendOptions::default();
-    let configuration: VioConfig = config();
+    let configuration: VioConfig = flow_config();
     let inner: CpuPatchTracker<Pattern51> = CpuPatchTracker::new(
         options.max_keypoints,
         configuration.optical_flow_levels as usize + 1,
@@ -485,7 +421,7 @@ fn a_restored_frame_costs_no_more_than_a_successful_one() {
     // lets four frames through and then refuses every frame after.
     let mut flow = FrameToFrameOpticalFlow::with_backends(
         configuration,
-        &rig(2),
+        &flow_rig(2),
         options,
         CpuPyramidBuilder::new(),
         FailingTracker {
