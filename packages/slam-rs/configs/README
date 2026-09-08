@@ -1,0 +1,23 @@
+basalt VIO configs, vendored from the fork's `data/msd/`, and the RoboCap
+calibration its converter wrote.
+
+Each `[[dataset]]` in `../reference_segments.toml` names the file its segments
+run with, and `slam_rs.reference.flow_config` reads it -- the C++ reference runs
+were driven with these files, and basalt's constructor defaults are a different
+estimator (`vio_marg_lost_landmarks`, C72).
+
+`tests/test_cpp_reference.py` compares each file, key by key, with the
+configuration every C++ `run.json` embeds, so a stale copy fails a test. The
+Rust crate's config tests read these same files -- `crates/slam-rs/src/config.rs`
+includes them and `tests/common/mod.rs` reads them through `configs()`.
+
+The RoboCap pair is named by the `[robocap]` block instead of by a `[[dataset]]`:
+`msdmo_config.json`, the config `python/robocap_vit.toml` runs, and
+`robocap_calib_downscale3.json`, which `basalt_convert_robocap_calib.py
+--downscale 3` wrote from the device's Kalibr tree. Neither is covered by the
+key-by-key test above, which iterates `manifest.segments` and so never sees
+them: RoboCap has no C++ `run.json` in the reference bundle. What does check
+them is `tests/test_reference.py` (two substring asserts that the manifest names
+files of the right kind) and, at run time,
+`slam_rs.apis.robocap_probe.check_calibration_matches_recording`, which compares
+the calibration against the recording's own statics camera by camera.
