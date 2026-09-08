@@ -1454,8 +1454,23 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     ///
     /// The grid walked here is the frontend's own `x_start`/`x_stop`, which the
     /// C++ takes from camera 0 (`:110-113`) whatever camera is being masked.
-    fn cam0_overlap_masks(&self, camera: usize) -> Masks {
-        let grid: CellGrid = self.occupancy_grid;
+    /// The rectangles are appended to camera `camera`'s own mask list, which
+    /// `run_passes` clears once per frameset: `optical_flow_detection_nonoverlap`
+    /// is `true` in every shipped config, so returning a fresh `Masks` here
+    /// allocated and freed up to `rows x columns` = 361 `Rect` per camera per
+    /// frameset on the msd rigs — the one per-frame allocation left in a module
+    /// whose doc promises none. The destructure is what lets one field be
+    /// written while the others are read.
+    fn append_cam0_overlap_masks(&mut self, camera: usize) {
+        let Self {
+            masks,
+            cameras,
+            calib,
+            occupancy_grid,
+            depth_guess,
+            ..
+        } = self;
+        let grid: CellGrid = *occupancy_grid;
         let cell: usize = grid.cell;
         let half: usize = cell / 2;
         let x_first: usize = grid.x_start + half;
@@ -1463,28 +1478,22 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         let x_last: usize = grid.x_stop + half;
         let y_last: usize = grid.y_stop + half;
 
-        let width: f32 = self.cameras[0].resolution[0] as f32;
-        let height: f32 = self.cameras[0].resolution[1] as f32;
-        let t_ci_c0: Se3<f32> = self.calib.t_i_c[camera].inverse() * self.calib.t_i_c[0];
+        let width: f32 = cameras[0].resolution[0] as f32;
+        let height: f32 = cameras[0].resolution[1] as f32;
+        let t_ci_c0: Se3<f32> = calib.t_i_c[camera].inverse() * calib.t_i_c[0];
 
-        let mut masks: Masks = Masks::default();
+        let out: &mut Masks = &mut masks[camera];
         let mut y: usize = y_first;
         while y <= y_last {
             let mut x: usize = x_first;
             while x <= x_last {
                 let ci_uv: Vector2<f32> = Vector2::new(x as f32, y as f32);
-                let (projected, c0_uv) = project_between_cams(
-                    &self.cameras,
-                    &ci_uv,
-                    self.depth_guess,
-                    &t_ci_c0,
-                    camera,
-                    0,
-                );
+                let (projected, c0_uv) =
+                    project_between_cams(cameras, &ci_uv, *depth_guess, &t_ci_c0, camera, 0);
                 let in_bounds: bool =
                     c0_uv.x >= 0.0 && c0_uv.x < width && c0_uv.y >= 0.0 && c0_uv.y < height;
                 if projected && in_bounds {
-                    masks.masks.push(Rect {
+                    out.masks.push(Rect {
                         x: (x - half) as f32,
                         y: (y - half) as f32,
                         w: cell as f32,
@@ -1495,7 +1504,6 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             }
             y += cell;
         }
-        masks
     }
 
     /// `addPoints` (`:637-666`): detect on camera 0, match onward, then detect
@@ -1520,8 +1528,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         // `if (!config.optical_flow_detection_nonoverlap) continue;` (`:657-664`).
         if self.config.optical_flow_detection_nonoverlap {
             for camera in 1..self.cameras.len() {
-                let overlap: Masks = self.cam0_overlap_masks(camera);
-                self.masks[camera].extend(&overlap);
+                self.append_cam0_overlap_masks(camera);
                 self.add_points_for_camera(camera, images)?;
             }
         }
@@ -1562,12 +1569,14 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         }
 
         // `for (int id : kp_to_remove) removeKeypoint(cam_id, id);` (`:700`), a
-        // `std::set`, so ascending; `self.to_remove` is built in id order already.
-        let mut to_remove: Vec<KeypointId> = std::mem::take(&mut self.to_remove);
-        for id in to_remove.drain(..) {
+        // `std::set`, so ascending; `self.to_remove` is built in id order
+        // already. Indexed rather than drained because `remove_keypoint` takes
+        // `&mut self`, and the list does not change while it runs.
+        for slot in 0..self.to_remove.len() {
+            let id: KeypointId = self.to_remove[slot];
             self.remove_keypoint(camera, id);
         }
-        self.to_remove = to_remove;
+        self.to_remove.clear();
     }
 
     /// `filterPoints` (`:703-705`): every camera but camera 0.

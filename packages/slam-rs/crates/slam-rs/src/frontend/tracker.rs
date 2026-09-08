@@ -1154,20 +1154,24 @@ impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
         }
 
         // ── the backward source patches, from `next` at the forward result
-        for index in 0..count {
-            self.backward_positions
-                .set(index, self.forward.translation(index));
+        {
+            // `build` wants `&mut self.backward` and `&self.backward_positions`
+            // at once, which is what the destructure is for; `resize(count)` is
+            // what `PatchSoA::build` reads as the patch count, and it comes
+            // before the writes so the next call's may be longer.
+            let Self {
+                backward,
+                backward_positions,
+                forward,
+                forward_valid,
+                ..
+            } = self;
+            backward_positions.resize(count);
+            for index in 0..count {
+                backward_positions.set(index, forward.translation(index));
+            }
+            backward.build(next, backward_positions, Some(&forward_valid[..count]))?;
         }
-        let mut backward_positions: PointsSoA = std::mem::take(&mut self.backward_positions);
-        backward_positions.resize(count);
-        let build: Result<(), TrackerError> = self.backward.build(
-            next,
-            &backward_positions,
-            Some(&self.forward_valid[..count]),
-        );
-        backward_positions.resize(self.capacity);
-        self.backward_positions = backward_positions;
-        build?;
 
         // ── backward: `trackPoint(pyr_2, pyr_1, transform_2, transform_1_recovered)` (`:359`)
         let backward: &PatchSoA<P> = &self.backward;
