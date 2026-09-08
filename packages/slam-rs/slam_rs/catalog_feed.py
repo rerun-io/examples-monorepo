@@ -1102,7 +1102,7 @@ def pair_accel_onto_gyro(
     Args:
         gyro_t_ns: Gyroscope timestamps, strictly increasing.
         gyro_rad_s: Angular velocity, rad/s.
-        accel_t_ns: Accelerometer timestamps, strictly increasing.
+        accel_t_ns: Accelerometer timestamps, non-decreasing; a repeated one keeps its first sample.
         accel_m_s2: Linear acceleration, m/s^2.
 
     Returns:
@@ -1112,6 +1112,16 @@ def pair_accel_onto_gyro(
         ValueError: If a channel is too short to interpolate with, or the two
             spans do not overlap, so the paired stream would be empty.
     """
+    # basalt deduplicates both raw channels before it pairs them
+    # (`sort_and_deduplicate`, `dataset_io_robocap.cpp:472`), keeping the first
+    # sample of each equal-timestamp run. That is what its `interval == 0` guard
+    # reads as alpha 0, and it is the whole difference from `numpy.interp`, which
+    # takes the second of a duplicated pair and then interpolates the next
+    # gyroscope sample from the wrong end of the gap.
+    first_of_run: Bool[ndarray, " n_accel"] = np.ones(accel_t_ns.size, dtype=bool)
+    first_of_run[1:] = np.diff(accel_t_ns) != 0
+    accel_t_ns = accel_t_ns[first_of_run]
+    accel_m_s2 = accel_m_s2[first_of_run]
     if gyro_t_ns.size == 0 or accel_t_ns.size < 2:
         raise ValueError(
             f"pairing needs a gyroscope sample and two accelerometer samples to interpolate between; "

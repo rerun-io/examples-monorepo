@@ -7,6 +7,7 @@ the cameras, and frames fed at a third of the resolution the recording stores.
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
@@ -169,6 +170,41 @@ def test_a_gyroscope_sample_the_accelerometer_does_not_cover_is_dropped() -> Non
     # dropped and 150 — an accelerometer time — was never a candidate.
     assert paired.t_ns.tolist() == [60, 110]
     assert len(paired) == len(paired.gyro_rad_s) == len(paired.accel_m_s2)
+
+
+def test_the_accelerometers_span_is_closed_at_both_ends() -> None:
+    """basalt's endpoints, one nanosecond either side (`dataset_io_robocap.cpp:476-483`).
+
+    A gyroscope sample **on** the first accelerometer timestamp interpolates with
+    alpha 0 and one on the last with alpha 1, so both are measurements and both
+    are kept; one nanosecond outside has no accelerometer sample on both sides of
+    it and is dropped rather than clamped.
+    """
+    gyro_t_ns: Int64[ndarray, " 4"] = np.array([49, 50, 150, 151], dtype=np.int64)
+    accel: Float64[ndarray, "2 3"] = np.array([[1.0, 1.0, 1.0], [3.0, 3.0, 3.0]])
+    paired = pair_accel_onto_gyro(gyro_t_ns, np.ones((4, 3)), np.array([50, 150], dtype=np.int64), accel)
+
+    assert paired.t_ns.tolist() == [50, 150]
+    assert paired.accel_m_s2[:, 0].tolist() == pytest.approx([1.0, 3.0])
+
+
+def test_two_accelerometer_samples_on_one_timestamp_take_the_first() -> None:
+    """basalt deduplicates the raw channel before pairing (`dataset_io_robocap.cpp:472`).
+
+    Its `interval == 0` guard reads alpha 0 — the sample *before* — and the
+    deduplication is what makes that the only possible answer.
+    ``numpy.interp`` takes the second of the pair instead, and then interpolates
+    the following gyroscope sample from the wrong end of the gap.
+    """
+    paired = pair_accel_onto_gyro(
+        np.array([20, 30], dtype=np.int64),
+        np.ones((2, 3)),
+        np.array([20, 20, 40], dtype=np.int64),
+        np.array([[1.0, 1.0, 1.0], [9.0, 9.0, 9.0], [5.0, 5.0, 5.0]]),
+    )
+
+    assert paired.t_ns.tolist() == [20, 30]
+    assert paired.accel_m_s2[:, 0].tolist() == pytest.approx([1.0, 3.0])
 
 
 def test_two_channels_that_do_not_overlap_are_refused() -> None:
@@ -510,6 +546,46 @@ def test_the_pairing_boundary_is_typed() -> None:
 
 
 # --- the real rig, behind `slow` ---------------------------------------------
+
+
+CPP_FRAME_DIGESTS: Path = Path("tests/reference/robocap-s15/frames.sha256")
+"""The C++ lane's own gray8 digests for session 15's first framesets; the file states how they were made."""
+
+
+@pytest.mark.slow
+def test_the_feeds_pixels_are_the_cpp_lanes_pixels(manifest: ReferenceManifest) -> None:
+    """The one `swscale` call, pinned: byte for byte against the C++ lane's frames.
+
+    Every A/B between the two estimators rests on this. The digests were computed
+    from the raw session files with the recipe the fork's file-fed driver uses —
+    one `reformat(width=640, height=360, format="gray8", interpolation="AREA")`
+    call, one decoder thread — which is the C++'s single `SWS_AREA` conversion
+    (`dataset_io_robocap.cpp:249`). Converting to gray8 first and resampling
+    afterwards is a different filter and fails this test, which is what it is
+    for: a flag, a format or a two-step conversion can no longer drift silently.
+    """
+    session: RobocapSession = manifest.robocap.session("s00000015")
+    if not session.base_path.is_file():
+        pytest.skip(f"{session.base_path} is not on this machine")
+    expected: dict[tuple[int, int], str] = {}
+    for line in (manifest.package_root / CPP_FRAME_DIGESTS).read_text().splitlines():
+        if line and not line.startswith("#"):
+            t_ns, camera_index, digest = line.split(",")
+            expected[(int(t_ns), int(camera_index))] = digest
+    assert len(expected) == 48
+    last_ns: int = max(t_ns for t_ns, _ in expected)
+
+    compared: int = 0
+    with open_segment(LocalSegment(base_rrd=session.base_path), manifest.robocap.imu, profile=robocap_profile(manifest)) as feed:
+        for frameset in feed.framesets(last_ns):
+            if int(frameset.t_ns) > last_ns:
+                break
+            for camera, digest in zip(feed.cameras, frameset.image_sha256, strict=True):
+                key: tuple[int, int] = (int(frameset.t_ns), camera.index)
+                assert key in expected, f"the C++ lane has no frame at {key}"
+                assert digest == expected[key], f"cam_{camera.index:02d} at {key[0]} ns: the feed's pixels are not the C++ lane's"
+                compared += 1
+    assert compared == len(expected)
 
 
 @pytest.mark.slow
