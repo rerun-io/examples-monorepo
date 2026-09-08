@@ -370,9 +370,9 @@ def clip_failures(clip: GatedClip, run: SegmentRun, available: References, again
         # Inside the C++'s own band, or within GT_BAND_RATIO of its worst member,
         # whichever is looser — which is the second alone, because the ratio is
         # above one and the band's worst member is its upper end.
-        allowed_cm: float = GT_BAND_RATIO * max(cpp_gt_band_cm(clip, run, available))
+        band: tuple[float, float] = cpp_gt_band_cm(clip, run, available)
+        allowed_cm: float = GT_BAND_RATIO * max(band)
         if against_gt.rmse_m * 100.0 > allowed_cm:
-            band: tuple[float, float] = cpp_gt_band_cm(clip, run, available)
             failures.append(
                 f"{against_gt.rmse_m * 100:.2f} cm from ground truth, gate is {GT_BAND_RATIO}x the worst of the "
                 f"C++'s own band [{band[0]:.2f}, {band[1]:.2f}] cm = {allowed_cm:.2f} cm"
