@@ -148,6 +148,12 @@ def _drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, ma
     positions: list[Float64[ndarray, " 3"]] = []
     quaternions: list[Float64[ndarray, " 4"]] = []
     replayed: int = 0
+    # A count is asked of the feed as a time, or it fetches a window nothing here
+    # reads. The in-loop breaks still make the cut, because the feed yields to
+    # the end of the window that covers `stop_ns`.
+    counted_ns: int | None = feed.stop_ns_after(max_framesets)
+    if counted_ns is not None:
+        stop_ns = counted_ns if stop_ns is None else min(stop_ns, counted_ns)
     started: float = time.monotonic()
     for frameset in feed.framesets(stop_ns):
         if max_framesets is not None and replayed >= max_framesets:

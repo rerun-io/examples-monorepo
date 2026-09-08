@@ -267,13 +267,10 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
     """
     started: float = time.monotonic()
     replayed: int = 0
-    # `--max-framesets` is a count and the feed reads by time, so it is converted
-    # here: the time of the last frameset that will be yielded, which is what
-    # keeps the feed from fetching a window nothing below will read.
-    stop_ns: int | None = None
-    if config.max_framesets is not None:
-        last_index: int = min((config.max_framesets - 1) * config.frame_stride, len(feed.frame_t_ns) - 1)
-        stop_ns = int(feed.frame_t_ns[last_index])
+    # `--max-framesets` is a count and the feed reads by time; the feed is what
+    # converts one to the other, so this loop and `tracking._drive` cannot
+    # disagree about which frameset a count ends on.
+    stop_ns: int | None = feed.stop_ns_after(config.max_framesets)
     frameset: Frameset
     for frameset in feed.framesets(stop_ns):
         if config.max_framesets is not None and replayed >= config.max_framesets:

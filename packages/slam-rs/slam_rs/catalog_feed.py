@@ -698,6 +698,27 @@ class SegmentFeed:
         """Whether a ``gt`` layer is attached."""
         return self.gt_dataset is not None
 
+    def stop_ns_after(self, max_framesets: int | None) -> int | None:
+        """When a count of framesets runs out, as a time :meth:`framesets` can stop at.
+
+        A caller counts framesets and the feed reads by time, so the count has to
+        become the timestamp of the last frameset that will be yielded. Without
+        it the feed is told to run to the end of the segment and fetches a whole
+        window nothing below will decode — on the RoboCap rig, thirty seconds of
+        four 1080p H.264 streams.
+
+        Args:
+            max_framesets: Framesets the caller will consume; None to run on.
+
+        Returns:
+            The last yielded frameset's timestamp, or None where the caller set
+            no count.
+        """
+        if max_framesets is None:
+            return None
+        last_index: int = min(max(max_framesets - 1, 0) * self.frame_stride, len(self.frame_t_ns) - 1)
+        return int(self.frame_t_ns[last_index])
+
     def imu_between(self, first_ns: int, last_ns: int) -> ImuStream:
         """Every inertial sample with ``first_ns <= t <= last_ns``, on the inertial clock."""
         return _read_imu(self.dataset, self.segment_id, self.profile.interpolate_accel_onto_gyro, first_ns, last_ns)

@@ -213,6 +213,15 @@ def test_the_smoke_segment_decodes_from_the_nas() -> None:
         whole_imu: ImuStream = feed.imu_between(-(2**62), 2**62)
         assert len(whole_imu) > 7_000
         assert whole_imu.t_ns.dtype == np.int64
+
+        # A count of framesets is a time to the feed, or it is told to run to
+        # the end of the segment and fetches a window nothing decodes. The
+        # hundredth frameset with no stride, and the segment's last when the
+        # count runs past its end.
+        assert feed.stop_ns_after(None) is None
+        assert feed.stop_ns_after(100) == int(feed.frame_t_ns[99])
+        assert feed.stop_ns_after(len(feed.frame_t_ns) + 1) == int(feed.frame_t_ns[-1])
+        assert feed.stop_ns_after(1) == int(feed.frame_t_ns[0])
         assert whole_imu.gyro_rad_s.shape == (len(whole_imu), 3)
         assert whole_imu.accel_m_s2.shape == (len(whole_imu), 3)
         whole_gt: Trajectory | None = feed.ground_truth_between(-(2**62), 2**62)
