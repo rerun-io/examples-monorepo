@@ -54,7 +54,7 @@ use slam_rs::frontend::tracker::{
 };
 use slam_rs::image::ImageU16;
 use slam_rs::lie::Se3;
-use slam_rs::pyramid::{CpuPyramidBuilder, PyramidBuilder, PyramidU16};
+use slam_rs::pyramid::PyramidU16;
 
 mod common;
 
@@ -143,13 +143,6 @@ fn read_pgm(frame: usize, camera: usize) -> ImageU16 {
     ImageU16::from_u8_strided(&pgm.pixels, pgm.width, pgm.height, pgm.width).unwrap()
 }
 
-fn pyramid_of(image: &ImageU16, levels: usize, builder: &mut CpuPyramidBuilder) -> PyramidU16 {
-    let mut pyramid: PyramidU16 =
-        PyramidU16::with_capacity(image.width(), image.height(), levels).unwrap();
-    builder.build(0, image, &mut pyramid).unwrap();
-    pyramid
-}
-
 /// How many of the C++'s own tracks the port reproduces, for one camera and one
 /// frameset pair.
 struct SeededResult {
@@ -167,12 +160,11 @@ fn seeded_tracking(
     camera: usize,
     previous: &DumpFrame,
     current: &DumpFrame,
-    builder: &mut CpuPyramidBuilder,
 ) -> SeededResult {
     let levels: usize = config.optical_flow_levels as usize;
     let previous_pyramid: PyramidU16 =
-        pyramid_of(&read_pgm(previous.frame, camera), levels, builder);
-    let current_pyramid: PyramidU16 = pyramid_of(&read_pgm(current.frame, camera), levels, builder);
+        common::pyramid_of(&read_pgm(previous.frame, camera), levels);
+    let current_pyramid: PyramidU16 = common::pyramid_of(&read_pgm(current.frame, camera), levels);
 
     let source: &[DumpKeypoint] = previous.keypoints(camera);
     let target: BTreeMap<u64, &DumpKeypoint> = current.by_id(camera);
@@ -254,7 +246,6 @@ fn seeded_tracking_reproduces_the_cpp_tracker() {
     let config: VioConfig = common::config();
     let calibration: Calibration<f64> = common::calibration();
     let cameras: Vec<RigCamera<f32>> = RigCamera::from_calibration(&calibration.cast()).unwrap();
-    let mut builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
 
     let framesets: usize = available_framesets();
     assert!(
@@ -272,7 +263,7 @@ fn seeded_tracking_reproduces_the_cpp_tracker() {
 
         for (camera, total) in totals.iter_mut().enumerate() {
             let seeded: SeededResult =
-                seeded_tracking(&config, &cameras, camera, &previous, &current, &mut builder);
+                seeded_tracking(&config, &cameras, camera, &previous, &current);
             total.0 += seeded.expected;
             total.1 += seeded.matched;
             worst_px = worst_px.max(seeded.worst_matched_px);
