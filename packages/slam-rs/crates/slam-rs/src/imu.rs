@@ -482,7 +482,13 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
     ///
     /// # Errors
     ///
-    /// Whatever [`Self::integrate_calibrated`] refuses.
+    /// [`ImuError::NonMonotonicFrames`] on an empty or reversed frame gap,
+    /// [`ImuError::StartTimeMismatch`] when `skip_past_ns` is not the time the
+    /// measurement was built with, [`ImuError::MissingSampleAfterFrame`] when
+    /// nothing follows the frame to close the interval with, and whatever
+    /// [`Self::integrate_calibrated`] refuses. Both live producers precheck a
+    /// sample strictly after the frame, so none of these can fire on the
+    /// shipped path.
     pub fn accumulate_to(
         &mut self,
         pending: Option<Popped<S>>,
@@ -491,6 +497,24 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
         until_ns: i64,
         noise: &ImuNoise<S>,
     ) -> Result<Option<Popped<S>>, ImuError> {
+        // `:307-313`: the frame gap is what the measurement integrates over, so
+        // an empty or reversed one has no measurement.
+        if until_ns <= skip_past_ns {
+            return Err(ImuError::NonMonotonicFrames {
+                t0_ns: skip_past_ns,
+                t1_ns: until_ns,
+            });
+        }
+        // `:304` builds the measurement with `prev_frame->t_ns` and `:315`
+        // skips past that same variable. Any other origin times every sample
+        // against a start the measurement does not have.
+        if skip_past_ns != self.start_t_ns {
+            return Err(ImuError::StartTimeMismatch {
+                start_t_ns: self.start_t_ns,
+                t0_ns: skip_past_ns,
+            });
+        }
+
         let mut pending: Option<Popped<S>> = pending.or_else(&mut pop);
 
         // `:315-320`: discard everything at or before the previous frameset.
@@ -508,10 +532,14 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
             self.integrate_calibrated(t_ns, &accel, &gyro, &noise.accel_cov, &noise.gyro_cov)?;
             pending = pop();
         }
-        // `:330-336`: close the interval exactly on the frameset.
-        if self.start_t_ns + self.get_dt_ns() < until_ns
-            && let Some((_, gyro, accel)) = pending
-        {
+        // `:330-336`: close the interval exactly on the frameset. basalt ends
+        // the estimator when its queue is dry here (`if (!data.get()) break;`);
+        // a measurement that stops short of the frame is silently wrong, so it
+        // is refused instead of returned.
+        if self.start_t_ns + self.get_dt_ns() < until_ns {
+            let Some((_, gyro, accel)) = pending else {
+                return Err(ImuError::MissingSampleAfterFrame { t1_ns: until_ns });
+            };
             self.integrate_calibrated(until_ns, &accel, &gyro, &noise.accel_cov, &noise.gyro_cov)?;
         }
         Ok(pending)
@@ -2419,6 +2447,82 @@ mod tests {
                 t_ns: 0
             })
         );
+    }
+
+    /// The five ways the shared accumulation loop refuses a malformed interval,
+    /// and the closing step that must still happen when a sample does follow.
+    ///
+    /// `integrate_between` carried these cases and RC9 deleted it with its
+    /// tests, leaving the two live producers driving a loop that accepted an
+    /// empty interval, an interval starting somewhere else, and an interval it
+    /// could not close — the last as `Ok` with a measurement shorter than the
+    /// frame gap. Both producers precheck a sample strictly after the frame
+    /// (`sqrt_keypoint_vio.cpp:265-271` through `imu_covers_frame`, and
+    /// `Vio::track`'s own coverage test), so none of this can fire on the
+    /// shipped path; a public method promising to close the interval exactly
+    /// must say so anyway (D32).
+    #[test]
+    fn accumulate_to_rejects_bad_intervals() {
+        let noise: ImuNoise<f64> = noise_from_std_dev();
+        let sample =
+            |t_ns: i64| -> Popped<f64> { (t_ns, Vector3::zeros(), Vector3::new(0.0, 0.0, 9.81)) };
+        let meas = || IntegratedImuMeasurement::<f64>::new(0, &Vector3::zeros(), &Vector3::zeros());
+        // The queue both producers pop from, as a closure over a list.
+        let feed = |samples: Vec<Popped<f64>>| {
+            let mut samples = samples.into_iter();
+            move || samples.next()
+        };
+
+        // An empty interval: `:307-313` asserts it, because a zero time delta
+        // "leads to invalid IMU integration".
+        assert_eq!(
+            meas().accumulate_to(None, feed(vec![sample(1)]), 0, 0, &noise),
+            Err(ImuError::NonMonotonicFrames { t0_ns: 0, t1_ns: 0 })
+        );
+        // An interval that does not start where the measurement was built:
+        // every sample would be timed against the wrong origin.
+        assert_eq!(
+            meas().accumulate_to(None, feed(vec![sample(1)]), 5, 10, &noise),
+            Err(ImuError::StartTimeMismatch {
+                start_t_ns: 0,
+                t0_ns: 5
+            })
+        );
+        // A duplicate and a reordered sample, both from the per-sample step.
+        assert_eq!(
+            meas().accumulate_to(None, feed(vec![sample(2), sample(2)]), 0, 10, &noise),
+            Err(ImuError::NonMonotonicSample {
+                previous_t_ns: 2,
+                t_ns: 2
+            })
+        );
+        assert_eq!(
+            meas().accumulate_to(None, feed(vec![sample(3), sample(1)]), 0, 10, &noise),
+            Err(ImuError::NonMonotonicSample {
+                previous_t_ns: 3,
+                t_ns: 1
+            })
+        );
+        // Nothing after the frame to close the interval with.
+        assert_eq!(
+            meas().accumulate_to(None, feed(vec![sample(2), sample(4)]), 0, 10, &noise),
+            Err(ImuError::MissingSampleAfterFrame { t1_ns: 10 })
+        );
+
+        // The sample that does follow closes the interval exactly on the frame
+        // and comes back out at its own time (`:330-336`).
+        let mut closed: IntegratedImuMeasurement<f64> = meas();
+        let pending: Option<Popped<f64>> = closed
+            .accumulate_to(
+                None,
+                feed(vec![sample(2), sample(4), sample(12)]),
+                0,
+                10,
+                &noise,
+            )
+            .unwrap();
+        assert_eq!(pending.map(|(t_ns, _, _)| t_ns), Some(12));
+        assert_eq!(closed.get_dt_ns(), 10);
     }
 
     /// `Quaternion::FromTwoVectors(accel, UnitZ)` (`sqrt_keypoint_vio.cpp:278`)
