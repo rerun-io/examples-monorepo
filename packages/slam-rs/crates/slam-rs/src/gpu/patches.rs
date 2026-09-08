@@ -87,7 +87,16 @@ pub struct GpuPatches<P: Pattern, R: Runtime> {
     pattern: std::marker::PhantomData<P>,
 }
 
-/// Runs of `capacity` inside the positions buffer.
+/// Runs inside the positions buffer, each `len` long.
+///
+/// Strided by the live patch count, not by the capacity: the transform buffers
+/// in `super::track` already are, and at the shipped `max_keypoints = 3000` a
+/// capacity stride meant every upload zeroed and shipped 5 x 3000 floats — 60 kB,
+/// copied twice on the host inside `create_from_slice` — to carry about two
+/// hundred patches, five to seven times a frameset. The cost is ~0.05 ms, which
+/// is under this host's noise; what the change buys is that it stops scaling
+/// with a config knob and starts scaling with the live patch count, which is
+/// what matters on a machine with a tenth of the bandwidth.
 pub(super) const POSITION_RUNS: usize = 5;
 /// Run index of the selection flag.
 pub(super) const SELECTED_RUN: usize = 2;
@@ -167,15 +176,15 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
 
     /// The positions buffer and its element count.
     pub(super) fn position_buffer(&self) -> (&cubecl::server::Handle, usize) {
-        (&self.positions, POSITION_RUNS * self.layout.capacity)
+        (&self.positions, POSITION_RUNS * self.len)
     }
 
     /// Where the kernels find the source positions and the selection flag.
     pub(super) fn bases(&self) -> PositionBases {
         PositionBases {
             x: 0,
-            y: self.layout.capacity,
-            selected: SELECTED_RUN * self.layout.capacity,
+            y: self.len,
+            selected: SELECTED_RUN * self.len,
         }
     }
 
@@ -183,13 +192,12 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
     ///
     /// Beside [`GpuPatches::bases`] so the positions buffer's run layout stays
     /// one module's knowledge: the tracker asks for the offsets rather than
-    /// rebuilding them out of `OFFSET_RUN` and the capacity.
+    /// rebuilding them out of [`OFFSET_RUN`] and the stride.
     pub(super) fn offset_bases(&self) -> PositionBases {
-        let capacity: usize = self.layout.capacity;
         PositionBases {
-            x: OFFSET_RUN * capacity,
-            y: (OFFSET_RUN + 1) * capacity,
-            selected: SELECTED_RUN * capacity,
+            x: OFFSET_RUN * self.len,
+            y: (OFFSET_RUN + 1) * self.len,
+            selected: SELECTED_RUN * self.len,
         }
     }
 
@@ -205,14 +213,14 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
 
     /// Upload the source positions and the selection flags.
     fn upload_positions(&mut self, positions: &PointsSoA, selected: Option<&[bool]>) {
-        let capacity: usize = self.layout.capacity;
-        let count: usize = positions.len();
-        self.staging.fill(0.0);
-        self.staging[..count].copy_from_slice(&positions.xs()[..count]);
-        self.staging[capacity..capacity + count].copy_from_slice(&positions.ys()[..count]);
+        let count: usize = self.len;
+        let staging: &mut [f32] = &mut self.staging[..POSITION_RUNS * count];
+        staging.fill(0.0);
+        staging[..count].copy_from_slice(&positions.xs()[..count]);
+        staging[count..2 * count].copy_from_slice(&positions.ys()[..count]);
         for index in 0..count {
             let on: bool = selected.is_none_or(|flags| flags[index]);
-            self.staging[SELECTED_RUN * capacity + index] = f32::from(u8::from(on));
+            staging[SELECTED_RUN * count + index] = f32::from(u8::from(on));
         }
         self.upload_staging();
     }
@@ -226,22 +234,25 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
     /// build needs the buffer anyway. The position runs stay zero on purpose: a
     /// backward build reads its positions out of the *forward result*, on the
     /// device, so nothing would look at them.
-    pub(super) fn upload_offsets(&mut self, count: usize, offset_x: &[f32], offset_y: &[f32]) {
-        let capacity: usize = self.layout.capacity;
-        self.staging.fill(0.0);
+    pub(super) fn upload_offsets(&mut self, offset_x: &[f32], offset_y: &[f32]) {
+        let count: usize = self.len;
+        let staging: &mut [f32] = &mut self.staging[..POSITION_RUNS * count];
+        staging.fill(0.0);
         for index in 0..count {
-            self.staging[SELECTED_RUN * capacity + index] = 1.0;
+            staging[SELECTED_RUN * count + index] = 1.0;
         }
-        self.staging[OFFSET_RUN * capacity..OFFSET_RUN * capacity + count]
-            .copy_from_slice(&offset_x[..count]);
-        self.staging[(OFFSET_RUN + 1) * capacity..(OFFSET_RUN + 1) * capacity + count]
+        staging[OFFSET_RUN * count..(OFFSET_RUN + 1) * count].copy_from_slice(&offset_x[..count]);
+        staging[(OFFSET_RUN + 1) * count..POSITION_RUNS * count]
             .copy_from_slice(&offset_y[..count]);
         self.upload_staging();
     }
 
-    /// Replace the device positions buffer with the staging buffer's contents.
+    /// Replace the device positions buffer with this call's runs of the staging
+    /// buffer, which is as long as the capacity but only filled to `len`.
     fn upload_staging(&mut self) {
-        self.positions = self.client.create_from_slice(f32::as_bytes(&self.staging));
+        self.positions = self
+            .client
+            .create_from_slice(f32::as_bytes(&self.staging[..POSITION_RUNS * self.len]));
     }
 
     /// Sample every filled patch at every level of `pyramid`, without waiting.
@@ -360,6 +371,7 @@ impl<P: Pattern, R: Runtime> SourcePatches for GpuPatches<P, R> {
         for index in 0..positions.len() {
             self.host.set(index, positions.get(index));
         }
+        // `accept` has set `len`, which is what the runs are now strided by.
         self.upload_positions(positions, selected);
         let bases: PositionBases = self.bases();
         self.launch_build(pyramid, bases);

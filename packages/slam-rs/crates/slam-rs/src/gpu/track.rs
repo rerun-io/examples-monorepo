@@ -200,11 +200,8 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
         // ── the backward source patches, from `next` at the forward result.
         self.backward_patches
             .accept(count, None, next.num_levels())?;
-        self.backward_patches.upload_offsets(
-            count,
-            &self.offset_x[..count],
-            &self.offset_y[..count],
-        );
+        self.backward_patches
+            .upload_offsets(&self.offset_x[..count], &self.offset_y[..count]);
         kernels::launch_prepare_backward::<R>(
             &self.client,
             forward_view,
