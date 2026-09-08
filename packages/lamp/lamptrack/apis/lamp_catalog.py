@@ -6,7 +6,6 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Protocol, runtime_checkable
 
-import cv2
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
@@ -18,8 +17,8 @@ from posekit.rerun_logging import log_person_bbox, log_person_points2d, log_skel
 from posekit.skeletons import COCO_17
 from rerun.catalog import CatalogClient, DatasetEntry, DatasetView
 from scipy.spatial.transform import Rotation, Slerp
-from simplecv.camera_parameters import Fisheye62Parameters, Intrinsics, rescale_intri
-from simplecv.rerun_dataloader import open_segment_decoder
+from simplecv.camera_parameters import Fisheye62Parameters
+from simplecv.rerun_dataloader import open_segment_decoder, relay_video_stream
 from simplecv.rerun_log_utils import RerunTyroConfig, compute_vertex_normals
 from simplecv.rerun_rig_logger import log_rig_static
 from simplecv.rig import CameraSensor, Rig, RigCalibration
@@ -28,9 +27,6 @@ from lamptrack.cameras import RigCamera
 from lamptrack.catalog_rig import RIG, TIMELINE, read_fisheye_camera, read_rig_poses
 from lamptrack.models.lamp import AnnotatedLampTrackerUnion, Frameset, LampConfig, LampStep, LampTracker, PersonState
 from lamptrack.rerun_logging import LivePeopleLogger, log_smpl_annotation_context
-
-PREVIEW_SCALE: float = 0.5
-"""Downscale applied to the logged camera frames, their 2D overlays, and the logged pinholes."""
 
 
 @runtime_checkable
@@ -178,22 +174,6 @@ def best_detection_window(
     return best_start, best_total
 
 
-def preview_camera(camera: Fisheye62Parameters) -> Fisheye62Parameters:
-    """Copy a camera with intrinsics rescaled to the logged preview resolution.
-
-    The logged frustum must span exactly the pixels the preview covers, so the
-    ``Pinhole`` resolution has to match the downscaled image instead of the
-    sensor's. Kannala–Brandt coefficients act on normalised rays, so only the
-    intrinsics change.
-    """
-    intrinsics: Intrinsics = rescale_intri(
-        camera.intrinsics,
-        target_width=round(camera.intrinsics.width * PREVIEW_SCALE),
-        target_height=round(camera.intrinsics.height * PREVIEW_SCALE),
-    )
-    return Fisheye62Parameters(name=camera.name, extrinsics=camera.extrinsics, intrinsics=intrinsics, distortion=camera.distortion)
-
-
 def follow_eye_controls() -> rrb.EyeControls3D:
     """Third-person eye that rides the Robocap rig frame (see ``dataforge.datasets.robocap``).
 
@@ -215,9 +195,9 @@ def build_blueprint(cams: tuple[str, ...]) -> rrb.Blueprint:
     """Follow the moving rig in 3D beside a two-by-two camera grid.
 
     The 3D view is rooted at the rig so a fixed eye in the rig frame rides
-    along; ``/**`` keeps the world-frame people and the previews inside their
-    frustums. Each 2D view is rooted at a camera's ``pinhole`` — the shared
-    space of the preview image and its detection overlays.
+    along; ``/**`` keeps the world-frame people and the relayed video frames
+    inside their frustums. Each 2D view is rooted at a camera's ``pinhole`` —
+    the shared space of the relayed ``VideoStream`` and its detection overlays.
     """
     camera_views = [rrb.Spatial2DView(origin=f"{RIG}/{cam}/pinhole", contents="$origin/**", name=cam) for cam in cams]
     return rrb.Blueprint(
@@ -266,27 +246,19 @@ def _frame_at(
 
 def _log_camera_observations(
     cam: str,
-    image: UInt8[ndarray, "h w 3"],
     boxes: BoxDetections,
     keypoints: Keypoints2d,
     keypoint_conf_min: float,
 ) -> None:
-    """Log one half-resolution preview with per-track COCO-17 boxes and joints.
+    """Log one camera's per-track COCO-17 boxes and joints over its relayed video frame.
 
-    Detection and tracking consume the full-resolution frame; only the logged
-    preview and its overlay pixel coordinates are scaled by ``PREVIEW_SCALE``.
+    The overlays share the pinhole's space with the relayed ``VideoStream``, so
+    they stay in the detector's own full-resolution pixel coordinates.
     """
-    preview_root: str = f"{RIG}/{cam}/pinhole/preview"
-    height, width = int(image.shape[0]), int(image.shape[1])
-    preview: UInt8[ndarray, "preview_h preview_w 3"] = cv2.resize(
-        image,
-        (round(width * PREVIEW_SCALE), round(height * PREVIEW_SCALE)),
-        interpolation=cv2.INTER_AREA,
-    )
-    rr.log(f"{preview_root}/image", rr.Image(preview, color_model=rr.ColorModel.RGB).compress(jpeg_quality=85))
-    rr.log(f"{preview_root}/detections", rr.Clear(recursive=True))
-    boxes_xyxy: Float32[ndarray, "n 4"] = (boxes.xyxy_numpy() * PREVIEW_SCALE).astype(np.float32, copy=False)
-    points_xy: Float32[ndarray, "n k 2"] = (keypoints.xy_numpy() * PREVIEW_SCALE).astype(np.float32, copy=False)
+    detections_root: str = f"{RIG}/{cam}/pinhole/detections"
+    rr.log(detections_root, rr.Clear(recursive=True))
+    boxes_xyxy: Float32[ndarray, "n 4"] = boxes.xyxy_numpy().astype(np.float32, copy=False)
+    points_xy: Float32[ndarray, "n k 2"] = keypoints.xy_numpy().astype(np.float32, copy=False)
     scores: Float32[ndarray, "n k"] = keypoints.scores_numpy()
     track_ids: Int64[ndarray, "n"] = (
         boxes.track_ids.detach().cpu().numpy().astype(np.int64, copy=False)
@@ -296,9 +268,9 @@ def _log_camera_observations(
     keypoint_ids: UInt16[ndarray, "k"] = np.arange(points_xy.shape[1], dtype=np.uint16)
     for row, track_id_raw in enumerate(track_ids):
         track_id = int(track_id_raw)
-        log_person_bbox(boxes_xyxy[row], track_id, entity_path=f"{preview_root}/detections")
+        log_person_bbox(boxes_xyxy[row], track_id, entity_path=detections_root)
         log_person_points2d(
-            f"{preview_root}/detections/person_{track_id}/keypoints",
+            f"{detections_root}/person_{track_id}/keypoints",
             points_xy[row],
             scores[row],
             keypoint_conf_min,
@@ -388,14 +360,15 @@ def run(config: Config) -> RunMetrics:
     )
 
     # Both flags already default to true; they are explicit because a viewer that
-    # falls back to its heuristics lays out `.../preview/image` views with no overlays.
+    # falls back to its heuristics lays out the video and overlay entities in separate
+    # views instead of stacking them in one per-camera 2D view.
     rr.send_blueprint(build_blueprint(config.cams), make_active=True, make_default=True)
     log_static_context(config.cams)
     rig = Rig(
         index=0,
         calibration=RigCalibration(
             cameras=[
-                CameraSensor(index=int(cam.split("_")[1]), name=parameters.name, kind="rgb", pinhole=preview_camera(parameters))
+                CameraSensor(index=int(cam.split("_")[1]), name=parameters.name, kind="rgb", pinhole=parameters)
                 for cam, parameters in zip(config.cams, camera_parameters, strict=True)
             ],
             reference_index=int(config.cams[0].split("_")[1]),
@@ -403,6 +376,14 @@ def run(config: Config) -> RunMetrics:
         image_plane_distance=0.15,
     )
     log_rig_static(rig)
+    # Relay the stored H.264 packets instead of re-encoding decoded frames: full sensor
+    # resolution and the source frame rate, for a fraction of the bytes. The tracker keeps
+    # decoding the same segment through its own NVDEC decoders.
+    for cam in config.cams:
+        relayed: int = relay_video_stream(
+            dataset, config.segment_id, f"{RIG}/{cam}/pinhole/video", TIMELINE, int(grid_ns[0]), int(grid_ns[-1])
+        )
+        print(f"relayed {relayed} {cam} video samples")
 
     tracker_config = replace(config.tracker, floor_z=config.floor_z)
     tracker: LampTracker = tracker_config.setup(device=device)
@@ -425,10 +406,10 @@ def run(config: Config) -> RunMetrics:
         rr.set_time(TIMELINE, duration=np.timedelta64(timestamp_ns, "ns"))
         people_logger.update([state.track_id for state in current_people])
         rr.log(RIG, rr.Transform3D(mat3x3=world_T_rig[:3, :3], translation=world_T_rig[:3, 3]))
-        for camera_index, (cam, camera, image) in enumerate(zip(config.cams, cameras, images, strict=True)):
+        for camera_index, (cam, camera) in enumerate(zip(config.cams, cameras, strict=True)):
             boxes = step.boxes_by_camera[camera_index]
             keypoints = step.keypoints_by_camera[camera_index]
-            _log_camera_observations(cam, image, boxes, keypoints, tracker_config.keypoint_conf_min)
+            _log_camera_observations(cam, boxes, keypoints, tracker_config.keypoint_conf_min)
             if config.log_rays:
                 _log_rays(cam, camera, world_T_rig, boxes, keypoints, tracker_config.keypoint_conf_min)
         if current_people:
@@ -487,7 +468,6 @@ def main(config: Config) -> None:
 
 
 __all__ = (
-    "PREVIEW_SCALE",
     "Config",
     "RunMetrics",
     "best_detection_window",
@@ -497,6 +477,5 @@ __all__ = (
     "interpolate_pose",
     "log_static_context",
     "main",
-    "preview_camera",
     "run",
 )
