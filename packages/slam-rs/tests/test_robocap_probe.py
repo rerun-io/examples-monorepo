@@ -351,6 +351,82 @@ def test_a_camera_that_misses_the_anchor_drops_the_frameset() -> None:
     assert frame_index.tolist() == [[0, 0], [2, 1]]
 
 
+def test_a_frame_belongs_to_one_frameset(manifest: ReferenceManifest) -> None:
+    """basalt consumes the frame it took, so the next anchor cannot have it again.
+
+    Cursors move to ``selected + 1`` once every camera is inside the tolerance
+    (`dataset_io_robocap.cpp:439`). Leaving them on the selected frame fed the
+    estimator the same image twice under two frameset timestamps, which is a
+    measurement the rig never made.
+    """
+    anchors: Int64[ndarray, " 2"] = np.array([100, 180], dtype=np.int64)
+    partner: Int64[ndarray, " 1"] = np.array([140], dtype=np.int64)
+    t_ns, frame_index = match_framesets([anchors, partner], 50)
+
+    assert t_ns.tolist() == [120]
+    assert frame_index.tolist() == [[0, 0]]
+
+
+def test_a_frame_the_anchor_is_too_early_for_waits_for_the_next_anchor() -> None:
+    """A camera ahead of the anchor keeps its frame; one behind it is consumed.
+
+    The C++ advances the cursor past the nearest frame only when that frame is
+    *earlier* than the anchor (`dataset_io_robocap.cpp:437`), because a late
+    camera's frame is still the right partner for the anchor after this one.
+    """
+    anchors: Int64[ndarray, " 2"] = np.array([100, 200], dtype=np.int64)
+    partner: Int64[ndarray, " 1"] = np.array([190], dtype=np.int64)
+    t_ns, frame_index = match_framesets([anchors, partner], 50)
+
+    assert t_ns.tolist() == [195]
+    assert frame_index.tolist() == [[1, 0]]
+
+
+def test_the_tolerance_is_inclusive() -> None:
+    """`> kFramesetToleranceNs` drops it, so the tolerance itself still joins."""
+    anchor: Int64[ndarray, " 1"] = np.array([0], dtype=np.int64)
+    t_ns, _ = match_framesets([anchor, np.array([1_000_000], dtype=np.int64)], 1_000_000)
+    assert t_ns.tolist() == [500_000]
+    with pytest.raises(ValueError, match="no frameset has all 2 cameras"):
+        match_framesets([anchor, np.array([1_000_001], dtype=np.int64)], 1_000_000)
+
+
+def test_a_tie_takes_the_later_frame() -> None:
+    """The advance condition is ``<=``, so two frames equally close pick the later one."""
+    t_ns, frame_index = match_framesets([np.array([100], dtype=np.int64), np.array([90, 110], dtype=np.int64)], 50)
+    assert frame_index.tolist() == [[0, 1]]
+    assert t_ns.tolist() == [105]
+
+
+def test_interior_drops_are_allowed_one_in_a_thousand() -> None:
+    """A run that drops more interior framesets than basalt tolerates is not a run.
+
+    `dataset_io_robocap.cpp:457` allows ``max(1, ceil(interior * 0.001))``
+    incomplete framesets whose anchor lies inside every camera's own span; more
+    than that is a rig whose cameras are not the same recording.
+    """
+    anchors: Int64[ndarray, " 4"] = np.array([1000, 1100, 1200, 1300], dtype=np.int64)
+    # Four interior anchors allow one drop: this partner misses the third anchor.
+    t_ns, _ = match_framesets([anchors, np.array([990, 1110, 1310], dtype=np.int64)], 50)
+    assert t_ns.tolist() == [995, 1105, 1305]
+
+    # The same rig missing two of them is refused, and the error carries both counts.
+    with pytest.raises(ValueError, match="2 of 4 interior framesets are incomplete, more than the 1"):
+        match_framesets([anchors, np.array([990, 1310], dtype=np.int64)], 50)
+
+
+def test_frameset_timestamps_must_strictly_increase() -> None:
+    """Two anchors on one timestamp would file two framesets under one time."""
+    with pytest.raises(ValueError, match="frameset timestamps are not strictly increasing: 100 follows 100"):
+        match_framesets([np.array([100, 100], dtype=np.int64)], 1_000)
+
+
+def test_a_camera_with_no_frames_is_named() -> None:
+    """basalt refuses the rig rather than the frameset (`dataset_io_robocap.cpp:821`)."""
+    with pytest.raises(ValueError, match="camera 1 has no frames"):
+        match_framesets([np.array([100, 200], dtype=np.int64), np.array([], dtype=np.int64)], 50)
+
+
 def test_a_rig_no_frameset_survives_says_so() -> None:
     with pytest.raises(ValueError, match="no frameset has all 2 cameras within 10 ns"):
         match_framesets([np.array([0, 100], dtype=np.int64), np.array([500, 600], dtype=np.int64)], 10)

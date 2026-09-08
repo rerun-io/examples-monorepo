@@ -37,6 +37,7 @@ Three decisions are frozen here because each one silently changes the numbers:
 """
 
 import hashlib
+import math
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -849,6 +850,17 @@ def match_framesets(camera_t_ns: Sequence[Int64[ndarray, " n_frames"]], toleranc
     one — the arithmetic is basalt's, and reproducing it exactly is what makes the
     port's frameset times equal the C++'s to the nanosecond.
 
+    A frame joins one frameset only: a complete frameset moves every non-anchor
+    cursor past the frame it took (``selected + 1``,
+    ``dataset_io_robocap.cpp:439``). An incomplete one moves a cursor only where
+    that camera's nearest frame is *earlier* than the anchor and can therefore
+    never partner a later one; a camera running ahead keeps its frame for the
+    next anchor.
+
+    An incomplete frameset whose anchor lies inside every camera's own span is an
+    interior drop, and basalt allows one per thousand interior anchors before it
+    calls the run unusable.
+
     Args:
         camera_t_ns: Each fed camera's frame timestamps, in time order.
         tolerance_ns: How far a frame may sit from the anchor's and still join it.
@@ -857,15 +869,31 @@ def match_framesets(camera_t_ns: Sequence[Int64[ndarray, " n_frames"]], toleranc
         The frameset timestamps, and the frame each camera contributes to each.
 
     Raises:
-        ValueError: If no camera was given, or no frameset is complete.
+        ValueError: If no camera was given, a camera has no frames, the frameset
+            timestamps do not strictly increase, too many interior framesets are
+            incomplete, or no frameset is complete.
     """
     if not camera_t_ns:
         raise ValueError("a frameset needs at least one camera")
+    for position, times in enumerate(camera_t_ns):
+        if times.size == 0:
+            raise ValueError(f"camera {position} has no frames, so it is not part of this recording")
+    # The span every camera covers: only an anchor inside it can be expected to
+    # have partners, so only a drop inside it counts against the run.
+    overlap_start: int = max(int(times[0]) for times in camera_t_ns)
+    overlap_end: int = min(int(times[-1]) for times in camera_t_ns)
     cursors: list[int] = [0] * len(camera_t_ns)
     t_ns: list[int] = []
     rows: list[list[int]] = []
+    interior_anchors: int = 0
+    interior_drops: int = 0
     for anchor_index, anchor_t_ns in enumerate(camera_t_ns[0].tolist()):
+        interior: bool = overlap_start <= anchor_t_ns <= overlap_end
+        interior_anchors += interior
         row: list[int] = [anchor_index]
+        # Where each camera would land: basalt commits these to the cursors only
+        # once the whole frameset stands.
+        selected: list[int] = list(cursors)
         for position in range(1, len(camera_t_ns)):
             times: Int64[ndarray, " n_frames"] = camera_t_ns[position]
             index: int = cursors[position]
@@ -879,14 +907,27 @@ def match_framesets(camera_t_ns: Sequence[Int64[ndarray, " n_frames"]], toleranc
                 if int(times[index]) < anchor_t_ns:
                     cursors[position] = index + 1
                 break
-            cursors[position] = index
+            selected[position] = index
             row.append(index)
         if len(row) != len(camera_t_ns):
+            interior_drops += interior
             continue
+        for position in range(1, len(camera_t_ns)):
+            cursors[position] = selected[position] + 1
         members: list[int] = sorted(int(camera_t_ns[position][frame]) for position, frame in enumerate(row))
         middle: int = len(members) // 2
-        t_ns.append(members[middle] if len(members) % 2 else members[middle - 1] + (members[middle] - members[middle - 1]) // 2)
+        frameset_t_ns: int = members[middle] if len(members) % 2 else members[middle - 1] + (members[middle] - members[middle - 1]) // 2
+        if t_ns and frameset_t_ns <= t_ns[-1]:
+            raise ValueError(f"frameset timestamps are not strictly increasing: {frameset_t_ns} follows {t_ns[-1]}")
+        t_ns.append(frameset_t_ns)
         rows.append(row)
+    # basalt's own allowance, in its own arithmetic: one in a thousand, at least one.
+    allowed_drops: int = max(1, math.ceil(interior_anchors * 0.001))
+    if interior_drops > allowed_drops:
+        raise ValueError(
+            f"{interior_drops} of {interior_anchors} interior framesets are incomplete, more than the {allowed_drops} "
+            f"basalt allows: the cameras are not one recording within {tolerance_ns} ns"
+        )
     if not rows:
         raise ValueError(f"no frameset has all {len(camera_t_ns)} cameras within {tolerance_ns} ns of camera 0")
     return np.array(t_ns, dtype=np.int64), np.array(rows, dtype=np.int64)
