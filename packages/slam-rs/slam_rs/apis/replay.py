@@ -63,7 +63,13 @@ class Config:
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
     """Viewer, save and headless behaviour."""
     manifest: Path = MANIFEST_PATH
-    """Reference manifest; a machine without the NAS runs a copy with the artifact prefix rewritten."""
+    """Reference manifest; ``--artifact-root`` is usually the flag a machine without the NAS wants instead."""
+    artifact_root: Path | None = None
+    """Read every recording and sidecar from ``<root>/<segment id>/`` instead of the manifest's own NAS paths.
+
+    What a machine without the NAS points at: one directory, no manifest copy
+    and no ``sed``.
+    """
     stage: Stage = "input"
     """``input`` logs what the estimator is fed, ``frontend`` runs the optical flow over it, ``vio`` runs the whole pipeline.
 
@@ -316,7 +322,7 @@ def main(config: Config) -> None:
     Args:
         config: Parsed CLI options.
     """
-    manifest: ReferenceManifest = load_manifest(config.manifest)
+    manifest: ReferenceManifest = load_manifest(config.manifest, config.artifact_root)
     segment: ReferenceSegment = manifest.by_id(config.segment)
     source: LocalSegment = LocalSegment(
         base_rrd=config.rrd if config.rrd is not None else segment.base_path,

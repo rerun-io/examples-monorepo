@@ -75,6 +75,7 @@ from slam_rs.reference import (
     ReferenceSegment,
     band_cm_text,
     d60_failures,
+    load_manifest,
 )
 from slam_rs.reference_bundle import BundleFile
 from slam_rs.tracking import SegmentRun, run_segment
@@ -353,42 +354,38 @@ def test_every_gated_clip_meets_the_v2_numbers(manifest: ReferenceManifest) -> N
         assert not failures, f"{clip.name}:\n" + "\n".join(failures)
 
 
-def relocated(manifest: ReferenceManifest, root: Path, absent: frozenset[str] = frozenset()) -> ReferenceManifest:
-    """The reference set with every artifact moved under ``root``, and the named segments' left out.
+def relocated(root: Path, absent: frozenset[str] = frozenset()) -> ReferenceManifest:
+    """The reference set read from under ``root``, with the named segments' artifacts left out.
 
     Empty files, because what is under test is which clips the lane refuses to
     leave out — a decision it makes before it opens anything. That is also why
     this needs no NAS: a host that holds the corpus and one that does not must
     take the same decision.
 
+    The three artifacts move through :func:`slam_rs.reference.load_manifest`'s
+    own ``artifact_root``, which is the rule a fleet machine runs; only the C++
+    trajectory is moved here, because a reference bundle is not part of the
+    corpus a root points at.
+
     Args:
-        manifest: The real reference set, whose ten segments are kept whole apart
-            from where their three artifacts sit.
         root: Directory the artifacts are written into, one subdirectory each.
         absent: Segment ids to leave without any artifact at all.
 
     Returns:
         The same manifest against the relocated corpus.
     """
+    corpus: ReferenceManifest = load_manifest(artifact_root=root)
     segments: list[ReferenceSegment] = []
-    for segment in manifest.segments:
+    for segment in corpus.segments:
         directory: Path = root / segment.segment_id
         directory.mkdir(parents=True, exist_ok=True)
         for name in ("base.rrd", "gt.rrd", "gt.csv", "basalt_traj.csv"):
             if segment.segment_id not in absent:
                 (directory / name).write_text("")
-        segments.append(
-            replace(
-                segment,
-                base_url=f"file://{directory / 'base.rrd'}",
-                gt_url=f"file://{directory / 'gt.rrd'}",
-                gt_csv=directory / "gt.csv",
-                # Absolute, so the manifest's own package root drops out of the
-                # join, and committed, so the bundle is not consulted either.
-                reference=replace(segment.reference, bundle_only=False, trajectory_csv=directory / "basalt_traj.csv"),
-            )
-        )
-    return replace(manifest, segments=tuple(segments))
+        # Absolute, so the manifest's own package root drops out of the join,
+        # and committed, so the bundle is not consulted either.
+        segments.append(replace(segment, reference=replace(segment.reference, bundle_only=False, trajectory_csv=directory / "basalt_traj.csv")))
+    return replace(corpus, segments=tuple(segments))
 
 
 def test_a_clip_whose_reference_is_missing_fails_the_lane_rather_than_leaving_it_out(
@@ -402,7 +399,7 @@ def test_a_clip_whose_reference_is_missing_fails_the_lane_rather_than_leaving_it
     whole point of having one.
     """
     monkeypatch.setenv(ALL_SEGMENTS_VARIABLE, "1")
-    corpus: ReferenceManifest = relocated(manifest, tmp_path, absent=frozenset({SMOKE_SEGMENT}))
+    corpus: ReferenceManifest = relocated(tmp_path, absent=frozenset({SMOKE_SEGMENT}))
     assert len(gate_clips(corpus)) == len(manifest.segments)
     try:
         test_every_gated_clip_meets_the_v2_numbers(corpus)
@@ -421,7 +418,7 @@ def test_a_host_that_holds_no_clip_of_the_lane_skips_it(
 ) -> None:
     """Total absence — a checkout without the NAS mount — is the one skip left, and it says so."""
     monkeypatch.setenv(ALL_SEGMENTS_VARIABLE, "1")
-    corpus: ReferenceManifest = relocated(manifest, tmp_path, absent=frozenset(segment.segment_id for segment in manifest.segments))
+    corpus: ReferenceManifest = relocated(tmp_path, absent=frozenset(segment.segment_id for segment in manifest.segments))
     with pytest.raises(Skipped, match="no clip of this lane is on this host"):
         test_every_gated_clip_meets_the_v2_numbers(corpus)
 

@@ -16,7 +16,7 @@ now says.
 """
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
@@ -712,11 +712,63 @@ def _robocap(robocap_block: dict[str, Any]) -> RobocapReference:
     )
 
 
-def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
+ARTIFACT_NAMES: tuple[str, ...] = ("base.rrd", "gt.rrd", "gt.csv", "slam.rrd")
+"""What a relocated segment's directory holds; a segment has three of the four."""
+
+
+def relocate(manifest: ReferenceManifest, root: Path) -> ReferenceManifest:
+    """The same reference set with every artifact read from one directory per segment.
+
+    The manifest's URLs are absolute paths on the NAS the corpus was converted
+    on. A machine that is not that NAS holds a copy somewhere else, and used to
+    say so with a shell ``sed`` over a 28 KB manifest copy per machine — one
+    prefix for MSD and a different one for RoboCap, which is how the S20 probe
+    found the base layer locally and then went to the NAS for the ``slam`` one.
+
+    The layout is ``<root>/<segment_id>/`` holding
+    :data:`ARTIFACT_NAMES`. The names are the layer's, not the file's, because
+    a segment's ``base`` and ``gt`` layers are both stored as ``<segment_id>.rrd``
+    and would collide in one directory.
+
+    Nothing else moves: the thresholds, the C++ numbers, the vendored configs and
+    the checked-in fixtures are the manifest and not the mount, and they stay
+    relative to :attr:`ReferenceManifest.package_root`.
+
+    Args:
+        manifest: The parsed reference set.
+        root: Directory the per-segment directories sit in.
+
+    Returns:
+        The same manifest against the corpus under ``root``.
+    """
+    segments: tuple[ReferenceSegment, ...] = tuple(
+        replace(
+            segment,
+            base_url=f"file://{root / segment.segment_id / 'base.rrd'}",
+            gt_url=f"file://{root / segment.segment_id / 'gt.rrd'}",
+            gt_csv=root / segment.segment_id / "gt.csv",
+        )
+        for segment in manifest.segments
+    )
+    sessions: tuple[RobocapSession, ...] = tuple(
+        replace(
+            session,
+            base_url=f"file://{root / session.segment_id / 'base.rrd'}",
+            slam_url=f"file://{root / session.segment_id / 'slam.rrd'}",
+        )
+        for session in manifest.robocap.sessions
+    )
+    return replace(manifest, segments=segments, robocap=replace(manifest.robocap, sessions=sessions))
+
+
+def load_manifest(path: Path = MANIFEST_PATH, artifact_root: Path | None = None) -> ReferenceManifest:
     """Parse the reference manifest.
 
     Args:
         path: Manifest file; defaults to the copy checked in beside the package.
+        artifact_root: Read every recording and sidecar from under this
+            directory instead of the absolute NAS paths the manifest carries;
+            see :func:`relocate`. None reads them where the manifest says.
 
     Returns:
         The parsed manifest, with tiers, decode paths and ground-truth sources
@@ -790,7 +842,7 @@ def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
         robocap: RobocapReference = _robocap(document["robocap"])
     except KeyError as missing:
         raise ValueError(f"{path}: the [robocap] table is missing the key {missing}") from missing
-    return ReferenceManifest(
+    parsed: ReferenceManifest = ReferenceManifest(
         schema_version=int(document["schema_version"]),
         catalog_url=document["catalog_url"],
         datasets=tuple(datasets),
@@ -798,3 +850,4 @@ def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
         robocap=robocap,
         package_root=path.parent,
     )
+    return parsed if artifact_root is None else relocate(parsed, artifact_root)

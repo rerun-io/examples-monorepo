@@ -80,7 +80,13 @@ class Config:
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
     """Viewer, save and headless behaviour."""
     manifest: Path = MANIFEST_PATH
-    """Reference manifest; a machine without the NAS runs a copy with the artifact prefix rewritten."""
+    """Reference manifest; ``--artifact-root`` is usually the flag a machine without the NAS wants instead."""
+    artifact_root: Path | None = None
+    """Read every recording and sidecar from ``<root>/<segment id>/`` instead of the manifest's own NAS paths.
+
+    What a machine without the NAS points at: one directory, no manifest copy
+    and no ``sed``.
+    """
     session: str = "s00000021"
     """RoboCap session id from ``reference_segments.toml``."""
     seconds: float = 90.0
@@ -175,7 +181,7 @@ def main(config: Config) -> None:
     Args:
         config: Parsed CLI options.
     """
-    manifest: ReferenceManifest = load_manifest(config.manifest)
+    manifest: ReferenceManifest = load_manifest(config.manifest, config.artifact_root)
     session: RobocapSession = manifest.robocap.session(config.session)
     offset_ns: int = manifest.robocap.imu.cam_time_offset_ns
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / f"robocap-{session.session_id}" / "slam_rs.csv"

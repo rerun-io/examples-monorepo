@@ -233,7 +233,13 @@ class Config:
     """Run the reference smoke clips on this machine and report the D60 verdict."""
 
     manifest: Path = MANIFEST_PATH
-    """Reference manifest; a machine without the NAS runs a copy with the artifact prefix rewritten."""
+    """Reference manifest; ``--artifact-root`` is usually the flag a machine without the NAS wants instead."""
+    artifact_root: Path | None = None
+    """Read every recording and sidecar from ``<root>/<segment id>/`` instead of the manifest's own NAS paths.
+
+    What a machine without the NAS points at: one directory, no manifest copy
+    and no ``sed``.
+    """
     segments: tuple[str, ...] = SMOKE_SEGMENTS
     """Clips to run, in order."""
     output_json: Path = Path("fleet_check.json")
@@ -253,7 +259,7 @@ def main(config: Config) -> None:
     Raises:
         SystemExit: If any clip missed a D60 clause.
     """
-    manifest: ReferenceManifest = load_manifest(config.manifest)
+    manifest: ReferenceManifest = load_manifest(config.manifest, config.artifact_root)
     machine: Machine = this_machine()
     print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores")
     config.output_json.parent.mkdir(parents=True, exist_ok=True)

@@ -111,7 +111,13 @@ class Config:
     """Replay one RoboCap session on this machine, with nothing logged."""
 
     manifest: Path = MANIFEST_PATH
-    """Reference manifest; a machine without the NAS runs a copy with the artifact prefix rewritten."""
+    """Reference manifest; ``--artifact-root`` is usually the flag a machine without the NAS wants instead."""
+    artifact_root: Path | None = None
+    """Read every recording and sidecar from ``<root>/<segment id>/`` instead of the manifest's own NAS paths.
+
+    What a machine without the NAS points at: one directory, no manifest copy
+    and no ``sed``.
+    """
     session: str = "s00000015"
     """RoboCap session id from the manifest. Session 15 is the one with a C++ wall on the cap."""
     seconds: float = 0.0
@@ -177,7 +183,7 @@ def main(config: Config) -> None:
     Args:
         config: Parsed CLI options.
     """
-    manifest: ReferenceManifest = load_manifest(config.manifest)
+    manifest: ReferenceManifest = load_manifest(config.manifest, config.artifact_root)
     session: RobocapSession = manifest.robocap.session(config.session)
     machine: Machine = this_machine()
     print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores")

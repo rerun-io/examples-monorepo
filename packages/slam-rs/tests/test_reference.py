@@ -3,6 +3,7 @@
 import json
 import socket
 import urllib.parse
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -25,12 +26,6 @@ from slam_rs.reference import (
 
 CATALOG_CONNECT_TIMEOUT_S: float = 3.0
 """How long the slow test waits for the catalog before it skips."""
-
-
-@pytest.fixture(scope="module")
-def manifest() -> ReferenceManifest:
-    """The checked-in reference manifest."""
-    return load_manifest()
 
 
 def test_the_manifest_holds_ten_segments(manifest: ReferenceManifest) -> None:
@@ -400,3 +395,36 @@ def test_the_catalog_still_reports_the_manifest_rig_geometry(manifest: Reference
             if rotation_column in statics.column_names and statics[rotation_column][0].is_valid:
                 rotation = int(np.asarray(statics[rotation_column][0].values.to_pylist(), dtype=np.float64).ravel()[0])
             assert rotation == dataset.image_rotation_cw_deg[index], f"{dataset.name} cam_{index:02d} rotation"
+
+
+def test_a_relocated_manifest_resolves_every_artifact_under_the_root(manifest: ReferenceManifest, tmp_path: Path) -> None:
+    """One directory per segment, named by its manifest id: that is what pointing at a root means.
+
+    The five off-NAS machines and the cap each carried a 28 KB manifest copy that
+    a shell ``sed`` had prefix-substituted, and the RoboCap prefix is a different
+    string from the MSD one, which is exactly how the S20 probe still went to the
+    NAS for the ``slam`` layer. A root is one flag and no copy.
+    """
+    moved: ReferenceManifest = load_manifest(artifact_root=tmp_path)
+    for segment in moved.segments:
+        directory: Path = tmp_path / segment.segment_id
+        assert segment.base_path == directory / "base.rrd"
+        assert segment.gt_path == directory / "gt.rrd"
+        assert segment.gt_csv == directory / "gt.csv"
+    for session in moved.robocap.sessions:
+        directory = tmp_path / session.segment_id
+        assert session.base_path == directory / "base.rrd"
+        assert session.slam_path == directory / "slam.rrd"
+
+
+def test_relocating_changes_the_artifacts_and_nothing_else(manifest: ReferenceManifest, tmp_path: Path) -> None:
+    """The thresholds, the C++ numbers, the configs and the fixture paths are the manifest, not the mount."""
+    moved: ReferenceManifest = load_manifest(artifact_root=tmp_path)
+    assert moved.package_root == manifest.package_root
+    assert moved.robocap.fixtures == manifest.robocap.fixtures
+    assert [replace(segment, base_url="", gt_url="", gt_csv=Path()) for segment in moved.segments] == [
+        replace(segment, base_url="", gt_url="", gt_csv=Path()) for segment in manifest.segments
+    ]
+    assert [replace(session, base_url="", slam_url="") for session in moved.robocap.sessions] == [
+        replace(session, base_url="", slam_url="") for session in manifest.robocap.sessions
+    ]
