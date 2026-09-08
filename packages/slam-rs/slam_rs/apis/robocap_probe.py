@@ -67,7 +67,7 @@ from slam_rs.catalog_feed import (
     read_rig_trajectory,
 )
 from slam_rs.frontend_log import camera_entity
-from slam_rs.reference import ImuParameters, ReferenceManifest, RobocapSession, load_manifest
+from slam_rs.reference import MANIFEST_PATH, ImuParameters, ReferenceManifest, RobocapSession, load_manifest
 from slam_rs.tracking import Lockstep, robocap_profile
 from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_trajectory, shift_clock, write_trajectory
 from slam_rs.vio_log import VioLogger, vio_blueprint
@@ -79,6 +79,8 @@ class Config:
 
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
     """Viewer, save and headless behaviour."""
+    manifest: Path = MANIFEST_PATH
+    """Reference manifest; a machine without the NAS runs a copy with the artifact prefix rewritten."""
     session: str = "s00000021"
     """RoboCap session id from ``reference_segments.toml``."""
     seconds: float = 90.0
@@ -173,7 +175,7 @@ def main(config: Config) -> None:
     Args:
         config: Parsed CLI options.
     """
-    manifest: ReferenceManifest = load_manifest()
+    manifest: ReferenceManifest = load_manifest(config.manifest)
     session: RobocapSession = manifest.robocap.session(config.session)
     offset_ns: int = manifest.robocap.imu.cam_time_offset_ns
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / f"robocap-{session.session_id}" / "slam_rs.csv"
