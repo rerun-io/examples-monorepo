@@ -257,7 +257,12 @@ impl Vio {
         let Some(stats) = self.inner.last_stats() else {
             return Ok(None);
         };
-        VioSnapshot::build(&self.inner.estimator().snapshot(), stats).map(Some)
+        VioSnapshot::build(
+            &self.inner.estimator().snapshot(),
+            stats,
+            self.inner.frontend_timings(),
+        )
+        .map(Some)
     }
 
     fn __repr__(&self) -> String {
@@ -299,6 +304,7 @@ pub struct VioSnapshot {
     termination: &'static str,
     num_observations: usize,
     timings: slam_rs::estimator::StageTimings,
+    frontend_timings: slam_rs::FrontendTimings,
 }
 
 impl VioSnapshot {
@@ -312,6 +318,7 @@ impl VioSnapshot {
     fn build(
         window: &slam_rs::estimator::WindowSnapshot<f32>,
         stats: &slam_rs::estimator::FrameStats<f32>,
+        frontend_timings: slam_rs::FrontendTimings,
     ) -> PyResult<Self> {
         let frames: usize = window.states.len() + window.poses.len();
         let mut window_t_ns: Vec<i64> = Vec::with_capacity(frames);
@@ -392,6 +399,7 @@ impl VioSnapshot {
             },
             num_observations: stats.num_observations,
             timings: stats.timings,
+            frontend_timings,
         })
     }
 }
@@ -531,7 +539,14 @@ impl VioSnapshot {
         self.num_observations
     }
 
-    /// Wall time each estimator stage took on the last frame, milliseconds.
+    /// Wall time each stage took on the last frame, milliseconds.
+    ///
+    /// The estimator's six, and the frontend lane's four under a
+    /// `frontend_` prefix: the pyramid build, the FAST detection, every KLT
+    /// call, and the preintegration that seeds the KLT. The four are the same
+    /// kind of measurement as the six and are read the same way, which is why
+    /// they come back in one map; they do not add up to the frame, because the
+    /// bookkeeping between the phases is nobody's stage.
     #[getter]
     fn timings_ms(&self) -> std::collections::BTreeMap<&'static str, f64> {
         [
@@ -541,6 +556,10 @@ impl VioSnapshot {
             ("marginalize", self.timings.marginalize_ns),
             ("measure", self.timings.measure_ns),
             ("solver", self.timings.solver_ns),
+            ("frontend_pyramid", self.frontend_timings.pyramid_ns),
+            ("frontend_detect", self.frontend_timings.detect_ns),
+            ("frontend_track", self.frontend_timings.track_ns),
+            ("frontend_imu", self.frontend_timings.imu_ns),
         ]
         .into_iter()
         .map(|(name, ns)| (name, ns as f64 / 1e6))

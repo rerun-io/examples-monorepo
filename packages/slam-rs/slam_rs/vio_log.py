@@ -517,6 +517,15 @@ def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
                     contents=[f"{VIO_STATS_ENTITY}/stage_ms/{stage}" for stage in ("back_substitution", "error", "linearize", "marginalize")],
                     name="solve stages (ms)",
                 ),
+                # The frontend's four in their own view for the same reason the
+                # solver's four have one: on a 640x360 fisheye rig the KLT and
+                # the detector are tens of milliseconds where the preintegration
+                # is a fiftieth of one, and one axis for both hides the smaller.
+                rrb.TimeSeriesView(
+                    origin=VIO_STATS_ENTITY,
+                    contents=[f"{VIO_STATS_ENTITY}/stage_ms/frontend_{stage}" for stage in ("pyramid", "detect", "track", "imu")],
+                    name="frontend stages (ms)",
+                ),
                 rrb.TimeSeriesView(
                     origin=VIO_STATS_ENTITY,
                     contents=[f"{VIO_STATS_ENTITY}/lm_error_before", f"{VIO_STATS_ENTITY}/lm_error_after"],

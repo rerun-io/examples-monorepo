@@ -33,6 +33,15 @@ use serde::{Deserialize, Serialize};
 /// Version of the core, as declared in `crates/slam-rs/Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Elapsed nanoseconds, saturating rather than panicking on an absurd clock.
+///
+/// The one place a stage mark is taken: the estimator's six
+/// ([`estimator::StageTimings`]) and the frontend's three
+/// ([`frontend::flow::FlowTimings`]) are the same measurement of different work.
+pub(crate) fn duration_ns(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
 /// How far the estimator has got.
 ///
 /// Offline mode has exactly these two states: basalt's estimator initialises
@@ -50,6 +59,25 @@ pub enum VioStatus {
     NeedMoreImu,
     /// The returned pose is an estimate of this frameset's rig pose.
     Tracking,
+}
+
+/// Wall time the frontend lane spent on the last tracked frameset, nanoseconds.
+///
+/// The three phases the frontend measures itself
+/// ([`frontend::flow::FlowTimings`]) and the preintegration [`Vio::track`] runs
+/// to seed the KLT with a pose prediction (D24) — the frontend's own inertial
+/// work, and no part of the estimator's six stages
+/// ([`estimator::StageTimings`]). Reported, never compared, like those.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FrontendTimings {
+    /// Building this frameset's pyramids, every camera.
+    pub pyramid_ns: u64,
+    /// FAST detection with cells, every camera.
+    pub detect_ns: u64,
+    /// Every KLT call: frame to frame, then camera 0 into the others.
+    pub track_ns: u64,
+    /// Preintegrating the samples since the previous frameset into the KLT's prediction.
+    pub imu_ns: u64,
 }
 
 /// A borrowed grayscale image: `height` rows of `width` bytes, `stride` bytes apart.
@@ -221,6 +249,8 @@ pub struct Vio<S: lie::LieScalar = f32> {
     last_frame_t_ns: Option<i64>,
     /// What the last `track` decided; the S9 Rerun rung reads this.
     last_stats: Option<Box<estimator::FrameStats<S>>>,
+    /// What the last tracked frameset's frontend lane cost; see [`FrontendTimings`].
+    frontend_timings: FrontendTimings,
 }
 
 impl<S: lie::LieScalar> Vio<S> {
@@ -258,6 +288,7 @@ impl<S: lie::LieScalar> Vio<S> {
             camera_count,
             last_frame_t_ns: None,
             last_stats: None,
+            frontend_timings: FrontendTimings::default(),
         })
     }
 
@@ -271,6 +302,15 @@ impl<S: lie::LieScalar> Vio<S> {
         &self,
     ) -> &frontend::flow::FrameToFrameOpticalFlow<frontend::patterns::Pattern51> {
         &self.frontend
+    }
+
+    /// What the frontend lane cost on the last frameset that ran it.
+    ///
+    /// All zero before the first one. A frameset the IMU does not cover is
+    /// refused before any of this work happens, so what stands then is the
+    /// previous frameset's, exactly as the keypoints and the snapshot are.
+    pub fn frontend_timings(&self) -> FrontendTimings {
+        self.frontend_timings
     }
 
     /// What the last `track` decided, or `None` before the first one.
@@ -351,6 +391,7 @@ impl<S: lie::LieScalar> Vio<S> {
         // seeded with. Until the estimator has produced a state both poses are
         // the identity, which is basalt's `first_state_arrived == false` path —
         // and here that flag is `latest_state` being `None`.
+        let mark: std::time::Instant = std::time::Instant::now();
         let prediction: frontend::flow::PosePrediction = match self.latest_state {
             Some(latest) => {
                 let pim: imu::IntegratedImuMeasurement<f64> =
@@ -364,6 +405,7 @@ impl<S: lie::LieScalar> Vio<S> {
             }
             None => frontend::flow::PosePrediction::default(),
         };
+        self.frontend_timings.imu_ns = duration_ns(mark);
 
         // `vit_tracker.cpp:534`: the `u8 << 8` widening the whole frontend
         // assumes, into buffers that are reused frame to frame.
@@ -374,6 +416,10 @@ impl<S: lie::LieScalar> Vio<S> {
         }
         self.frontend
             .process_frame(t_ns, &self.frames, &prediction, &self.masks)?;
+        let flow: frontend::flow::FlowTimings = self.frontend.timings();
+        self.frontend_timings.pyramid_ns = flow.pyramid_ns;
+        self.frontend_timings.detect_ns = flow.detect_ns;
+        self.frontend_timings.track_ns = flow.track_ns;
         self.last_frame_t_ns = Some(t_ns);
 
         // The estimator reads only the ids and the observed pixels

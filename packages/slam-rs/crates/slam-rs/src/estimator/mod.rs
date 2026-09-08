@@ -58,6 +58,7 @@ use crate::ba_base::{BaError, BundleAdjustmentBase, triangulate};
 use crate::calib::Calibration;
 use crate::camera::CameraEnum;
 use crate::config::{LinearizationType, VioConfig};
+use crate::duration_ns;
 use crate::imu::{
     ImuError, ImuLinData, ImuNoise, ImuSample, IntegratedImuMeasurement, gravity,
     gravity_from_first_accel,
@@ -1414,11 +1415,6 @@ fn cast_pixel<S: LieScalar>(pixel: &Vector2<f32>) -> Vector2<S> {
         S::from_literal(f64::from(pixel.x)),
         S::from_literal(f64::from(pixel.y)),
     )
-}
-
-/// Elapsed nanoseconds, saturating rather than panicking on an absurd clock.
-fn duration_ns(started: std::time::Instant) -> u64 {
-    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

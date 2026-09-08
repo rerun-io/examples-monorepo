@@ -401,13 +401,14 @@ def test_the_blueprint_covers_the_world_the_cameras_and_the_counters(camera: Cam
         "/world",
         "/world/rig_00/cam_00/pinhole",
         "/world/rig_00/cam_01/pinhole",
-        *[VIO_STATS_ENTITY] * 7,
+        *[VIO_STATS_ENTITY] * 8,
     ]
     assert [str(view.name) for view in views[3:]] == [
         "counts",
         "keyframes & LM steps",
         "timing (ms)",
         "solve stages (ms)",
+        "frontend stages (ms)",
         "LM cost",
         "LM damping",
         "ATE (cm)",

@@ -154,7 +154,14 @@ class VioSnapshot:
 
     @property
     def timings_ms(self) -> dict[str, float]:
-        """Wall time each estimator stage took on the last frame, in milliseconds."""
+        """Wall time each stage took on the last frame, in milliseconds.
+
+        The estimator's six — ``back_substitution``, ``error``, ``linearize``,
+        ``marginalize``, ``measure``, ``solver`` — and the frontend lane's four:
+        ``frontend_pyramid``, ``frontend_detect``, ``frontend_track`` and
+        ``frontend_imu``. They do not sum to the frame: what happens between the
+        phases is nobody's stage.
+        """
 
     def __repr__(self) -> str: ...
 

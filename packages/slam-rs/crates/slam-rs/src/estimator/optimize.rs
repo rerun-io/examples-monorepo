@@ -27,7 +27,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::{DMatrix, DVector, Vector3};
 
-use super::{EstimatorError, LmDamping, SqrtKeypointVio, StageTimings, VEE_FACTOR, duration_ns};
+use super::{EstimatorError, LmDamping, SqrtKeypointVio, StageTimings, VEE_FACTOR};
+use crate::duration_ns;
 use crate::imu::{ImuLinData, IntegratedImuMeasurement, Matrix9};
 use crate::lie::{LieScalar, eigen_maxi};
 use crate::linearize::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};

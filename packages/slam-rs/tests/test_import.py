@@ -202,8 +202,25 @@ def test_the_pipeline_tracks_a_shifted_scene_and_reports_its_window(pipeline: Pi
 
     assert snapshot.lm_accepted <= snapshot.lm_iterations
     assert snapshot.termination in {"NotStarted", "Converged", "MaxIterations", "MaxDamping"}
-    assert set(snapshot.timings_ms) == {"back_substitution", "error", "linearize", "marginalize", "measure", "solver"}
+    # The estimator's six stages and the frontend lane's four, in one map.
+    assert set(snapshot.timings_ms) == {
+        "back_substitution",
+        "error",
+        "linearize",
+        "marginalize",
+        "measure",
+        "solver",
+        "frontend_pyramid",
+        "frontend_detect",
+        "frontend_track",
+        "frontend_imu",
+    }
     assert all(milliseconds >= 0.0 for milliseconds in snapshot.timings_ms.values())
+    # The three the frontend measures itself ran on every frameset this drive
+    # tracked; the preintegration only runs once the estimator has published a
+    # state, which it has by the last of them.
+    for stage in ("frontend_pyramid", "frontend_detect", "frontend_track", "frontend_imu"):
+        assert snapshot.timings_ms[stage] > 0.0, stage
 
     frame: _core.FlowFrame | None = vio.flow_frame()
     assert frame is not None

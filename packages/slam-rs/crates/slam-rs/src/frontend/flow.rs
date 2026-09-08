@@ -62,6 +62,7 @@ use nalgebra::{Matrix4, Vector2, Vector3, Vector4};
 use crate::calib::Calibration;
 use crate::camera::{CameraError, RigCamera};
 use crate::config::{MatchingGuessType, VioConfig};
+use crate::duration_ns;
 use crate::frontend::detect::{
     CellGrid, DetectError, DetectorConfig, DetectorScratch, KeypointsData, LOWEST_THRESHOLD_RUNG,
     MAX_CELLS, Masks, Occupancy, Rect, detect_keypoints_with_cells,
@@ -560,7 +561,29 @@ pub struct FrameToFrameOpticalFlow<
     /// The keypoint state as it was before the frame in flight; see
     /// [`FrameToFrameOpticalFlow::process_frame`].
     snapshot: FrameState,
+    /// What the last frame's phases cost; see [`FlowTimings`].
+    timings: FlowTimings,
     pattern: PhantomData<P>,
+}
+
+/// Wall time the frontend's phases took on the last frame, nanoseconds.
+///
+/// Reported, never compared: they are wall-clock, so they differ run to run and
+/// nothing in `process_frame` reads them, which is what keeps the frame
+/// bit-reproducible (D17), exactly as the estimator's own `StageTimings` are.
+///
+/// The three do not add up to the frame: the cell counts, the epipolar filter
+/// and the bookkeeping between them are nobody's stage. Each names the work it
+/// names — the pyramid build, the FAST detection, and every KLT call, which is
+/// the frame-to-frame track plus the stereo match of the new keypoints.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FlowTimings {
+    /// Building this frame's pyramids, every camera.
+    pub pyramid_ns: u64,
+    /// `detectKeypointsWithCells`, every camera.
+    pub detect_ns: u64,
+    /// Every `trackPoints` call: frame to frame, then camera 0 into the others.
+    pub track_ns: u64,
 }
 
 /// The state one `processFrame` mutates, kept so a failed frame can be undone.
@@ -840,6 +863,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             pyramid: Vec::new(),
             staging: Vec::new(),
             snapshot: FrameState::default(),
+            timings: FlowTimings::default(),
             pyramid_builder: builder,
             ids: Vec::new(),
             source: FlowTransforms::default(),
@@ -900,6 +924,11 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     /// The keypoints of the most recent frameset.
     pub fn frame(&self) -> &FlowFrame {
         &self.frame
+    }
+
+    /// What the most recent frame's phases cost, wall clock.
+    pub fn timings(&self) -> FlowTimings {
+        self.timings
     }
 
     /// One camera's occupancy counts, row-major over
@@ -1069,7 +1098,10 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         )?;
 
         // The frame in flight, built where nothing else can see it.
+        self.timings = FlowTimings::default();
+        let mark: std::time::Instant = std::time::Instant::now();
         self.build_staging(images)?;
+        self.timings.pyramid_ns = duration_ns(mark);
 
         // What the passes below mutate, kept so they can be undone.
         let mut snapshot: FrameState = std::mem::take(&mut self.snapshot);
@@ -1257,6 +1289,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         } else {
             &self.staging[cam1]
         };
+        let mark: std::time::Instant = std::time::Instant::now();
         self.patches.build(source_pyramid, &self.positions, None)?;
         self.tracker.track(
             source_pyramid,
@@ -1265,6 +1298,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             &self.guesses,
             &mut self.result,
         )?;
+        self.timings.track_ns += duration_ns(mark);
 
         for slot in self.result.tracked() {
             let slot: usize = *slot as usize;
@@ -1355,6 +1389,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         // pyramid — whose seam lends nothing (deviation X04).
         self.detected.corners.clear();
         self.detected.responses.clear();
+        let mark: std::time::Instant = std::time::Instant::now();
         if budget > 0 {
             detect_keypoints_with_cells(
                 &images[camera],
@@ -1371,6 +1406,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
                 &mut self.detected,
             )?;
         }
+        self.timings.detect_ns += duration_ns(mark);
 
         self.new_cam0.clear();
         for index in 0..self.detected.corners.len() {

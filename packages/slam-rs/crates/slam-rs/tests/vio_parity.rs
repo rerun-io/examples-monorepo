@@ -199,14 +199,28 @@ fn the_whole_pipeline_tracks_and_repeats_bit_identically() {
 fn fingerprint(vio: &Vio<f32>) -> u64 {
     use std::hash::{Hash, Hasher};
 
-    let text: String = format!("{vio:?}");
-    let cut: usize = text.rfind("StageTimings {").unwrap_or(text.len());
+    let mut text: String = format!("{vio:?}");
+    // Every wall-clock block comes out: they are measurements of this run's own
+    // speed and differ run to run by design, where the fingerprint is what must
+    // not. `FlowTimings` is the frontend's three phases, `FrontendTimings` the
+    // four `Vio` publishes, `StageTimings` the estimator's six on the last
+    // measured frame; each holds integers only, so its first `}` closes it.
+    let mut stripped: usize = 0;
+    for marker in ["FlowTimings {", "FrontendTimings {", "StageTimings {"] {
+        while let Some(start) = text.find(marker) {
+            let end: usize = text[start..]
+                .find('}')
+                .map_or(text.len(), |offset| start + offset + 1);
+            text.replace_range(start..end, "<wall clock>");
+            stripped += 1;
+        }
+    }
     assert!(
-        text.len() - cut < 256,
-        "the wall-clock block is no longer the tail of the Debug output"
+        stripped >= 2,
+        "the wall-clock blocks are no longer named in the Debug output, so the fingerprint now hashes them"
     );
     let mut hasher: std::collections::hash_map::DefaultHasher = Default::default();
-    text[..cut].hash(&mut hasher);
+    text.hash(&mut hasher);
     hasher.finish()
 }
 
