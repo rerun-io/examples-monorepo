@@ -332,6 +332,10 @@ same input bit-identical (D17).
 | `crates/slam-rs-cli` | `slam-rs` binary: a placeholder. `version` is the only subcommand that does anything; a replay runs through the Python tools. |
 | `slam_rs/` | The Python package: stubs, Tyro entry points under `apis/`. |
 | `tools/` | Thin CLI shims over `slam_rs/apis/`. |
+| `reference_segments.toml` | The frozen reference set (below). |
+| `configs/` | The basalt VIO configs the reference runs used, vendored from the fork. |
+| `tests/reference/` | Checked-in basalt C++ trajectories the gate tests reproduce. |
+| `slam_rs/reference_bundle.py` | Resolves the two long-tier artifacts kept out of git. |
 
 `Cargo.lock` is committed. `cargo` never runs during `pixi lock` or
 `pixi install`: the build is an explicit, cached pixi task.
@@ -369,3 +373,77 @@ Any `int64` is a timestamp, negative ones included: the frontend's clock is an
 which read every negative timestamp as "no previous frame" and so restarted
 tracking on each one. Framesets must still arrive strictly in order, and a
 refused frameset leaves the frontend exactly as the last accepted one did.
+
+## The reference set
+
+`reference_segments.toml` freezes ten Monado SLAM Dataset segments — five
+two-camera `msd-index` (KB4 fisheye, 54 Hz) and five four-camera `msd-g2`
+(radtan8, 30 Hz) — in three tiers: **smoke** on every commit, **accuracy** per
+pull request, **long** nightly. A `[[dataset]]` block per catalog dataset pins the
+rig geometry and names the basalt VIO config its segments run with; a `[robocap]`
+section adds the two RoboCap sessions, 15 (1,588 framesets) and 21 (4,648), which
+have no ground truth and are gated against basalt's own output instead. Only
+session 15 carries a reference wall, measured on the cap itself.
+
+Four things are frozen because the catalog cannot carry them and each one moves
+the numbers: the IMU noise densities and update rate, the camera-to-IMU time
+offset (0 for MSD, 14,902,432 ns for RoboCap), the decode path
+(`cpu_gray8_dav1d_1thread`, worth about 5 cm of ATE against NVDEC RGB), and the
+VIO config, vendored under `configs/` — basalt's constructor defaults are not its
+shipped files, and `vio_marg_lost_landmarks` alone was worth up to 12 cm (C72),
+so `slam_rs.reference.flow_config` reads the dataset's file and asserts the
+manifest's image safe radius against it. `slam_rs.reference`'s module docstring
+carries the rest of the account, including where the V2 tolerances live and why.
+
+```python
+from slam_rs.reference import load_manifest
+
+manifest = load_manifest()
+segment = manifest.in_tier("smoke")[0]
+```
+
+### The basalt C++ reference and the gate policy
+
+`tests/reference/msd/<segment>/` holds what the basalt C++ fork produced on each
+segment: `run.json` for all ten (fork commit, deterministic settings, the VIO
+config and calibration actually pushed, timings and the ATE against `gt.csv`),
+`basalt_traj.csv` for the eight smoke and accuracy segments, and `frames.sha256`
+plus a copy of `gt.csv` for the smoke pair so its gate runs with no NAS and no
+catalog. The two long-tier trajectories are 3.4 MB and 4.8 MB and stay out of
+git; `slam_rs.reference_bundle` resolves them from `SLAM_RS_REFERENCE_DIR` (or
+`data/reference/`) and the tests skip with a message naming the variable.
+
+Each segment carries a `gate_policy`, because basalt is not equally good
+everywhere:
+
+| policy | segments | why |
+|---|---|---|
+| `tight` | MIO10, MGO09, MIO07, MGO07 | basalt scores 0.8-2.4 cm; a regression is unambiguous |
+| `standard` | MIO04, MGO14, MIO14, MIPT03 | 8-38 cm, stable; gate relative to basalt's own number, not an absolute threshold |
+| `no_divergence` | MGO01, MGO13 | basalt is near failure: 43 cm and 78 cm here, 68 cm for the C++ binary on the raw files, and **18-32 cm of spread between two legitimate decode paths of the same estimator** — on MGO01 the ordering even flips. Only "kept tracking, did not diverge" is measurable. |
+
+`slam_rs.trajectory.ate` reproduces all ten published C++ figures exactly, and a
+re-decode through `catalog_feed` reproduces the C++ run's per-camera pixel
+digests frame for frame (824 of 824 on MIO10, 428 of 428 on MGO09). That second
+result is the load-bearing one: it means an A/B between the two estimators
+measures the estimator, not the decoder.
+
+### Two clocks, converted once
+
+The catalog indexes a segment on `video_time`, which is **relative** to
+`capture.start_time_ns`, while every basalt CSV including the `gt.csv` sidecars is
+on the **absolute** device clock; on the Index smoke segment the two differ by
+10,433,867,587,166 ns, so a trajectory exported on the wrong clock associates with
+nothing at all. The feed works in `video_time` throughout and
+`trajectory.shift_clock` converts once, at the CSV boundary.
+
+## Tests
+
+`pytest -q` deselects the `slow` marker and runs in about two seconds on
+synthetic inputs. The slow tests read a reference `.rrd` from the NAS or query the
+catalog, and skip when neither is reachable:
+
+```bash
+pixi run -e slam-rs-dev --frozen tests   # fast
+cd packages/slam-rs && pytest -m slow -q # NAS + catalog
+```
