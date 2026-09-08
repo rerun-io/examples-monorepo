@@ -118,7 +118,6 @@ def robocap_statics(
     drifted[0, 3] += shift_m
     cam_T_imu: Float64[ndarray, "4 4"] = np.linalg.inv(drifted)
     return CameraStatics(
-        camera_model=None,
         distortion_model="kannala_brandt",
         distortion_coefficients=np.array([*(distortion if distortion is not None else ROBOCAP_KB4[camera]), 0.0, 0.0, 0.0, 0.0]),
         image_from_camera=np.array([fx, 0.0, 0.0, 0.0, fy, 0.0, cx, cy, 1.0]),
@@ -127,7 +126,6 @@ def robocap_statics(
         transform_translation=cam_T_imu[:3, 3],
         transform_relation=CHILD_FROM_PARENT,
         distortion_valid_radius=None,
-        image_rotation_cw_deg=0,
     )
 
 
@@ -276,7 +274,7 @@ def test_downscaling_the_recording_reproduces_basalts_own_calibration(manifest: 
     basalt: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
     assert list(basalt.resolution) == [(640, 360)] * 4
 
-    calib = camera_calib(0, robocap_statics(), 30.0, manifest.robocap.downscale)
+    calib = camera_calib(0, robocap_statics(), manifest.robocap.downscale)
     assert (calib.width, calib.height) == (640, 360)
     written = json.loads(basalt.to_json())["value0"]["intrinsics"][0]["intrinsics"]
     assert calib.fx == pytest.approx(written["fx"], abs=1e-3)
@@ -295,12 +293,12 @@ def test_the_principal_point_scales_by_the_pixel_centre() -> None:
 
 def test_a_downscale_below_one_is_refused() -> None:
     with pytest.raises(ValueError, match="downscale must be at least 1"):
-        camera_calib(0, robocap_statics(), 30.0, 0)
+        camera_calib(0, robocap_statics(), 0)
 
 
 def robocap_rig(downscale: int = 3) -> tuple[CameraCalib, ...]:
     """The four fed cameras as the recording gives them, scaled by ``downscale``."""
-    return tuple(camera_calib(number, robocap_statics(*values, camera=number), 30.0, downscale) for number, values in enumerate(ROBOCAP_INTRINSICS))
+    return tuple(camera_calib(number, robocap_statics(*values, camera=number), downscale) for number, values in enumerate(ROBOCAP_INTRINSICS))
 
 
 def test_the_probe_refuses_a_calibration_that_is_not_the_recordings_rig(manifest: ReferenceManifest) -> None:
@@ -316,7 +314,7 @@ def test_the_probe_refuses_a_calibration_that_is_not_the_recordings_rig(manifest
         check_calibration_matches_recording(basalt, at_three[:3], manifest.robocap.imu, 3)
 
     moved = ROBOCAP_INTRINSICS[0][:2] + (1200.0, ROBOCAP_INTRINSICS[0][3])
-    shifted = (camera_calib(0, robocap_statics(*moved), 30.0, 3), *at_three[1:])
+    shifted = (camera_calib(0, robocap_statics(*moved), 3), *at_three[1:])
     with pytest.raises(ValueError, match="cam 0: basalt's cx is 332.81.*the recording gives 399.66"):
         check_calibration_matches_recording(basalt, shifted, manifest.robocap.imu, 3)
 
@@ -332,15 +330,15 @@ def test_the_probe_refuses_a_lens_or_a_rig_geometry_that_drifted(manifest: Refer
 
     bent = ROBOCAP_KB4[0][:1] + (ROBOCAP_KB4[0][1] + 1e-4,) + ROBOCAP_KB4[0][2:]
     with pytest.raises(ValueError, match="cam 0: basalt's k2 is"):
-        lens = (camera_calib(0, robocap_statics(*ROBOCAP_INTRINSICS[0], distortion=bent), 30.0, 3), *at_three[1:])
+        lens = (camera_calib(0, robocap_statics(*ROBOCAP_INTRINSICS[0], distortion=bent), 3), *at_three[1:])
         check_calibration_matches_recording(basalt, lens, manifest.robocap.imu, 3)
 
     with pytest.raises(ValueError, match="cam 0: basalt places it 1.000 mm from where the recording does"):
-        shifted = (camera_calib(0, robocap_statics(*ROBOCAP_INTRINSICS[0], shift_m=1e-3), 30.0, 3), *at_three[1:])
+        shifted = (camera_calib(0, robocap_statics(*ROBOCAP_INTRINSICS[0], shift_m=1e-3), 3), *at_three[1:])
         check_calibration_matches_recording(basalt, shifted, manifest.robocap.imu, 3)
 
     with pytest.raises(ValueError, match="cam 0: basalt turns it 0.1000 deg from where the recording does"):
-        turned = (camera_calib(0, robocap_statics(*ROBOCAP_INTRINSICS[0], turn_deg=0.1), 30.0, 3), *at_three[1:])
+        turned = (camera_calib(0, robocap_statics(*ROBOCAP_INTRINSICS[0], turn_deg=0.1), 3), *at_three[1:])
         check_calibration_matches_recording(basalt, turned, manifest.robocap.imu, 3)
 
 
@@ -613,7 +611,7 @@ def test_a_downscale_that_leaves_no_frame_is_refused() -> None:
     frames would disagree about the size of the image the estimator is given.
     """
     with pytest.raises(ValueError, match=r"downscale 2000 leaves nothing of the 1920x1080 frame"):
-        camera_calib(0, robocap_statics(), 30.0, 2000)
+        camera_calib(0, robocap_statics(), 2000)
 
 
 def test_the_pairing_boundary_is_typed() -> None:

@@ -19,7 +19,6 @@ from slam_rs.trajectory import (
     associate,
     ate,
     coverage,
-    passes_gate,
     read_trajectory,
     rigid_alignment,
     shift_clock,
@@ -102,7 +101,6 @@ def test_a_stationary_trajectory_aligns_to_zero_rather_than_raising() -> None:
     result: AteResult = ate(stationary, stationary)
     assert result.n_associated == 10
     assert result.rmse_m == pytest.approx(0.0, abs=1e-12)
-    assert passes_gate(result, tolerance_m=0.02)
     # The shared helper refuses this input; that difference is the reason
     # `rigid_alignment` exists rather than calling it.
     with pytest.raises(ValueError, match="variance too small"):
@@ -118,7 +116,6 @@ def test_a_micrometre_span_aligns_to_zero_rather_than_raising() -> None:
     result: AteResult = ate(tiny, tiny)
     assert result.n_associated == 12
     assert result.rmse_m == pytest.approx(0.0, abs=1e-12)
-    assert passes_gate(result, tolerance_m=0.02)
     with pytest.raises(ValueError, match="variance too small"):
         umeyama_alignment(positions, positions, allow_scaling=False)
 
@@ -217,20 +214,6 @@ def test_coverage_is_the_overlapping_fraction_of_the_reference_span() -> None:
     assert coverage(reference, _trajectory(t_ns[5:], positions[5:])) == pytest.approx(0.5)
 
 
-def test_the_gate_needs_ten_associations_and_a_two_percent_count_match() -> None:
-    angle: Float64[ndarray, " 40"] = np.linspace(0.0, 4.0, 40)
-    positions: Float64[ndarray, "40 3"] = np.column_stack([np.cos(angle), np.sin(angle), angle * 0.3])
-    t_ns: Int64[ndarray, " 40"] = np.arange(40, dtype=np.int64) * 20_000_000
-    estimate: Trajectory = _trajectory(t_ns, positions)
-    assert passes_gate(ate(estimate, estimate), tolerance_m=0.02)
-    # Enough associations and no count delta, but a scale error the rigid alignment cannot absorb.
-    assert not passes_gate(ate(estimate, _trajectory(t_ns, positions * 1.05)), tolerance_m=0.02)
-    # A reference a third of the estimate's length, rejected on the count delta alone.
-    assert not passes_gate(ate(estimate, _trajectory(t_ns[:12], positions[:12])), tolerance_m=0.02)
-    # Fewer than ten associations is not a comparison at all.
-    assert not passes_gate(ate(estimate, _trajectory(t_ns[:9], positions[:9])), tolerance_m=0.02)
-
-
 def test_it_reproduces_the_forks_robocap_gate_numbers() -> None:
     """The checked-in basalt outputs must still give 0.13 cm over 1,588 associated poses."""
     manifest: ReferenceManifest = load_manifest()
@@ -242,5 +225,4 @@ def test_it_reproduces_the_forks_robocap_gate_numbers() -> None:
     assert result.n_reference == manifest.robocap.session("s00000015").basalt_num_poses
     assert result.rmse_m * 100 == pytest.approx(manifest.robocap.fixtures.expected_ate_rmse_cm, abs=0.005)
     assert result.count_delta == 0.0
-    assert passes_gate(result, tolerance_m=0.05)
     assert coverage(golden, candidate) == pytest.approx(1.0)

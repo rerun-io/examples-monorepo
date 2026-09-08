@@ -88,15 +88,13 @@ class CameraStatics:
     what lets them be tested without a catalog.
     """
 
-    camera_model: str | None
-    """``camera_model`` string on the camera node, or None where the writer logged none.
-
-    Nothing here reads it — the projection model comes from
-    :attr:`distortion_model` — so a recording without it is read, not refused.
-    The RoboCap conversion predates the field.
-    """
     distortion_model: str
-    """``simplecv.components.DistortionModel``, e.g. ``kannala_brandt``."""
+    """``simplecv.components.DistortionModel``, e.g. ``kannala_brandt``.
+
+    The projection model comes from here and not from the camera node's own
+    ``camera_model`` string, which the RoboCap conversion predates and some
+    writers omit.
+    """
     distortion_coefficients: Float64[ndarray, " n_slots"]
     """Fixed-width coefficient list; the unused tail is zero."""
     image_from_camera: Float64[ndarray, " 9"]
@@ -111,8 +109,6 @@ class CameraStatics:
     """``Transform3D:relation``; must be :data:`CHILD_FROM_PARENT`."""
     distortion_valid_radius: float | None
     """basalt's ``rpmax``; present on msd-g2 only."""
-    image_rotation_cw_deg: int
-    """Clockwise rotation the stored images already carry; 0, 90, 180 or 270."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -132,8 +128,6 @@ class CameraCalib:
     """Decoded frame width in pixels."""
     height: int
     """Decoded frame height in pixels."""
-    frequency_hz: float
-    """Nominal frame rate; the per-frame timestamps are authoritative."""
     fx: float
     """Focal length along image x, pixels."""
     fy: float
@@ -150,8 +144,6 @@ class CameraCalib:
     """basalt's ``rpmax``, when the recording carries one."""
     imu_T_cam: Float64[ndarray, "4 4"]
     """Camera pose in the IMU frame: the inverse of the stored ``ChildFromParent`` transform."""
-    image_rotation_cw_deg: int
-    """Clockwise rotation already baked into both the images and this calibration."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -309,43 +301,6 @@ MSD_RIG: RigProfile = RigProfile()
 """The Monado SLAM Dataset rigs: every camera, native resolution, one clock, paired inertial channels."""
 
 
-def rotate_pinhole_clockwise(
-    fx: float, fy: float, cx: float, cy: float, width: int, height: int, rotation_cw_deg: int
-) -> tuple[float, float, float, float]:
-    """Rotate a landscape pinhole calibration into the frame the images are stored in.
-
-    msd-g2's video is stored rotated into portrait and its catalog calibration is
-    rotated to match, so this is the arithmetic that reconciles a raw-MSD
-    calibration with a catalog one. Nothing in the feed needs it — the catalog
-    already stores the rotated values — but any A/B against a C++ basalt run fed
-    from raw MSD does, and pinning it keeps the convention from drifting.
-
-    Args:
-        fx: Focal length along x before rotation.
-        fy: Focal length along y before rotation.
-        cx: Principal point x before rotation.
-        cy: Principal point y before rotation.
-        width: Image width before rotation.
-        height: Image height before rotation.
-        rotation_cw_deg: Clockwise rotation applied to the image, 0, 90, 180 or 270.
-
-    Returns:
-        ``(fx, fy, cx, cy)`` in the rotated frame.
-
-    Raises:
-        ValueError: If the rotation is not a multiple of 90 degrees.
-    """
-    if rotation_cw_deg == 0:
-        return fx, fy, cx, cy
-    if rotation_cw_deg == 90:
-        return fy, fx, (height - 1) - cy, cx
-    if rotation_cw_deg == 180:
-        return fx, fy, (width - 1) - cx, (height - 1) - cy
-    if rotation_cw_deg == 270:
-        return fy, fx, cy, (width - 1) - cx
-    raise ValueError(f"image rotation must be 0, 90, 180 or 270 degrees clockwise; got {rotation_cw_deg}")
-
-
 def scale_principal_point(value: float, downscale: int) -> float:
     """One principal-point coordinate at ``1 / downscale`` of its resolution.
 
@@ -359,7 +314,7 @@ def scale_principal_point(value: float, downscale: int) -> float:
     return (value + 0.5) / downscale - 0.5
 
 
-def camera_calib(index: int, statics: CameraStatics, frequency_hz: float, downscale: int = 1) -> CameraCalib:
+def camera_calib(index: int, statics: CameraStatics, downscale: int = 1) -> CameraCalib:
     """Apply the catalog-to-estimator mapping rules to one camera's statics.
 
     The rules, each of which has cost someone a wrong trajectory: reshape
@@ -375,7 +330,6 @@ def camera_calib(index: int, statics: CameraStatics, frequency_hz: float, downsc
     Args:
         index: Camera index on the rig.
         statics: Raw static components of the camera node.
-        frequency_hz: Nominal frame rate for this segment.
         downscale: Integer factor the frames are decoded at.
 
     Returns:
@@ -414,7 +368,6 @@ def camera_calib(index: int, statics: CameraStatics, frequency_hz: float, downsc
         index=index,
         width=width // downscale,
         height=height // downscale,
-        frequency_hz=frequency_hz,
         fx=float(k_matrix[0, 0]) / downscale,
         fy=float(k_matrix[1, 1]) / downscale,
         cx=scale_principal_point(float(k_matrix[0, 2]), downscale),
@@ -423,7 +376,6 @@ def camera_calib(index: int, statics: CameraStatics, frequency_hz: float, downsc
         distortion=statics.distortion_coefficients[:n_coeffs].copy(),
         distortion_valid_radius=statics.distortion_valid_radius,
         imu_T_cam=imu_T_cam,
-        image_rotation_cw_deg=statics.image_rotation_cw_deg,
     )
 
 
@@ -520,9 +472,7 @@ def read_camera_statics(statics: pa.Table, entity: str) -> CameraStatics:
         The raw statics, unconverted.
     """
     optional_radius: str = f"{entity}:distortion_valid_radius"
-    optional_rotation: str = f"{entity}:image_rotation_cw_deg"
     return CameraStatics(
-        camera_model=_static_string(statics, f"{entity}:camera_model") if f"{entity}:camera_model" in statics.column_names else None,
         distortion_model=_static_string(statics, f"{entity}/pinhole:simplecv.components.DistortionModel"),
         distortion_coefficients=_static_values(statics, f"{entity}/pinhole:simplecv.components.DistortionCoefficients"),
         image_from_camera=_static_values(statics, f"{entity}/pinhole:Pinhole:image_from_camera"),
@@ -531,7 +481,6 @@ def read_camera_statics(statics: pa.Table, entity: str) -> CameraStatics:
         transform_translation=_static_values(statics, f"{entity}:Transform3D:translation"),
         transform_relation=int(_static_values(statics, f"{entity}:Transform3D:relation")[0]),
         distortion_valid_radius=float(_static_values(statics, optional_radius)[0]) if optional_radius in statics.column_names else None,
-        image_rotation_cw_deg=int(_static_values(statics, optional_rotation)[0]) if optional_rotation in statics.column_names else 0,
     )
 
 
@@ -1329,7 +1278,7 @@ def _build_feed(
     camera_positions: tuple[int, ...] = select_cameras(camera_statics, camera_count, profile.camera_names)
     index: _VideoIndex = _read_video_index(sensor_dataset, segment_id, camera_positions, profile.frameset_tolerance_ns)
     cameras: tuple[CameraCalib, ...] = tuple(
-        camera_calib(number, read_camera_statics(camera_statics, rig_entities[position]), float(index.fps), profile.downscale)
+        camera_calib(number, read_camera_statics(camera_statics, rig_entities[position]), profile.downscale)
         for number, position in enumerate(camera_positions)
     )
     imu_T_body: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)

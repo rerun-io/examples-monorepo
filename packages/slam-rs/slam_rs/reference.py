@@ -220,11 +220,12 @@ class CppReferenceRun:
     gate_policy: GatePolicy
     """How hard this segment may be gated; see :data:`GatePolicy`."""
     fork_commit: str
-    """Commit of the basalt fork that produced the run."""
-    fork_branch: str
-    """Branch the commit sits on. Not pushed anywhere; the fork is machine-local."""
-    fork_base: str
-    """Upstream commit the branch was cut from."""
+    """Commit of the basalt fork that produced the run.
+
+    The manifest also records ``fork_branch`` and ``fork_base`` beside it; the
+    fork is machine-local and nothing here reads either, so they stay in the TOML
+    as provenance rather than becoming fields.
+    """
     decode_path: DecodePath
     """Decode path the run consumed, which must equal the segment's own."""
     deterministic: bool
@@ -361,10 +362,12 @@ class RobocapReference:
     to be fed the same configuration to be measured against it (C72): the four
     cameras of six, the downscale, and basalt's own calibration and VIO config
     files as the fork's converter and ``robocap_vit.toml`` produced them.
+
+    The manifest's ``device_id`` — the capture device every session came from,
+    which is what makes the calibration per device — stays in the TOML as
+    provenance; nothing here reads it.
     """
 
-    device_id: str
-    """Capture device every session came from; the calibration is per device."""
     has_ground_truth: bool
     """Always false: RoboCap has no measured ground truth."""
     decode_path: DecodePath
@@ -670,8 +673,6 @@ def _reference_run(block: dict[str, Any], segment_id: str) -> CppReferenceRun:
     return CppReferenceRun(
         gate_policy=GATE_POLICY_BY_NAME[block["gate_policy"]],
         fork_commit=block["fork_commit"],
-        fork_branch=block["fork_branch"],
-        fork_base=block["fork_base"],
         decode_path=DECODE_PATH_BY_NAME[block["decode_path"]],
         deterministic=bool(block["deterministic"]),
         num_threads=int(block["num_threads"]),
@@ -715,7 +716,6 @@ def _robocap(robocap_block: dict[str, Any]) -> RobocapReference:
     if robocap_block["decode_path"] not in DECODE_PATH_BY_NAME:
         raise ValueError(f"robocap: unknown decode path {robocap_block['decode_path']!r}")
     return RobocapReference(
-        device_id=robocap_block["device_id"],
         has_ground_truth=bool(robocap_block["has_ground_truth"]),
         decode_path=DECODE_PATH_BY_NAME[robocap_block["decode_path"]],
         camera_names=tuple(str(name) for name in robocap_block["camera_names"]),

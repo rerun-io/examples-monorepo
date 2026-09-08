@@ -78,7 +78,6 @@ def camera() -> CameraFactory:
             index=index,
             width=FRAME,
             height=FRAME,
-            frequency_hz=30.0,
             fx=100.0,
             fy=100.0,
             cx=FRAME / 2,
@@ -87,7 +86,6 @@ def camera() -> CameraFactory:
             distortion=np.zeros(4, dtype=np.float64),
             distortion_valid_radius=None,
             imu_T_cam=imu_T_cam,
-            image_rotation_cw_deg=0,
         )
 
     return build
