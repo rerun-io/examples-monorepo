@@ -18,7 +18,6 @@ from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
 from slam_rs import _core
-from slam_rs.apis.robocap_probe import check_calibration_matches_recording
 from slam_rs.catalog_feed import (
     CHILD_FROM_PARENT,
     CameraCalib,
@@ -31,6 +30,7 @@ from slam_rs.catalog_feed import (
     scale_principal_point,
 )
 from slam_rs.reference import ImuParameters, ReferenceManifest, RobocapSession
+from slam_rs.tracking import check_calibration_matches_recording
 from slam_rs.trajectory import shift_clock
 
 # The four fed cameras' native intrinsics exactly as the recording carries them,
