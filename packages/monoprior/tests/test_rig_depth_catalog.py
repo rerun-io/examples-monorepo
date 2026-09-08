@@ -11,7 +11,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
 from monopriors.apis.benchmark_xlens_trt import nearest_time_index
-from monopriors.apis.rig_depth_catalog import RigBatch, RigCollate, RigDepthCatalogConfig
+from monopriors.apis.rig_depth_catalog import RigBatch, RigCollate, RigDepthCatalogConfig, create_rig_depth_catalog_blueprint
 
 CAMS: tuple[str, ...] = ("cam_00", "cam_01")
 
@@ -89,3 +89,16 @@ def test_collate_builds_the_rig_pose_from_translation_and_xyzw_quaternion() -> N
     )
     assert batch.world_T_rig.dtype == np.float64
     assert np.allclose(batch.world_T_rig[0], expected, atol=1e-6)
+
+
+def test_blueprint_shows_the_relayed_fisheye_video_under_its_source_pinhole() -> None:
+    """The fisheye tab is rooted at the pinhole the relayed ``VideoStream`` shares with the frustum."""
+    blueprint = create_rig_depth_catalog_blueprint(CAMS)
+    tabs = blueprint.root_container.contents[1]
+    fisheye_views = tabs.contents[1].contents
+
+    assert [view.origin for view in fisheye_views] == [f"world/rig_00/{cam}/pinhole" for cam in CAMS]
+    assert all(view.contents == "$origin/**" for view in fisheye_views)
+
+    spatial_3d = blueprint.root_container.contents[0]
+    assert "- $origin/rig_00/cam_00/rig_depth/**" in spatial_3d.contents, "only the model-resolution depth stays out of 3D"
