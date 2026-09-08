@@ -171,12 +171,12 @@ fn the_whole_pipeline_tracks_and_repeats_bit_identically() {
     assert_eq!(estimator.last_state_t_ns(), LAST_COMMITTED_T_NS);
     // The first frameset is always a keyframe (`sqrt_keypoint_vio.cpp:61`)
     // and three framesets cannot reach `opt_started` (`:1207`).
-    assert_eq!(estimator.kf_ids().collect::<Vec<i64>>(), vec![0]);
-    assert!(!estimator.optimization_started());
-    assert!(
-        vio.last_stats()
-            .is_some_and(|stats| stats.num_landmarks > 0)
-    );
+    let Some(stats) = vio.last_stats() else {
+        panic!("three framesets measured, so the last one left stats");
+    };
+    assert_eq!(stats.kf_ids, vec![0]);
+    assert!(!stats.opt_started);
+    assert!(stats.num_landmarks > 0);
 
     assert_eq!(
         drive_the_committed_framesets(&mut pipeline()),

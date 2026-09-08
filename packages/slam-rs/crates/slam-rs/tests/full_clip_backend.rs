@@ -185,7 +185,7 @@ fn compare<S: LieScalar>(
         );
         record(
             "kf_ids",
-            format!("{:?}", estimator.kf_ids().collect::<Vec<i64>>()),
+            format!("{:?}", stats.kf_ids),
             format!("{:?}", expected.kf_ids),
         );
         record(
@@ -303,7 +303,7 @@ fn compare<S: LieScalar>(
                 "frameset {index}: rust keyframes {:?} landmarks {} observations {} \
                  frames_after_kf {}; c++ keyframes {:?} landmarks {} observations {} \
                  frames_after_kf {}",
-                estimator.kf_ids().collect::<Vec<i64>>(),
+                stats.kf_ids,
                 stats.num_landmarks,
                 stats.num_observations,
                 stats.frames_after_kf,

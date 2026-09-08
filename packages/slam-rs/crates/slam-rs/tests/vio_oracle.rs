@@ -267,16 +267,8 @@ fn compare<S: LieScalar>(run: &OracleRun, gate: LmGate) -> Worst {
             expected.last_state_t_ns,
             "{where_}: last_state_t_ns"
         );
-        assert_eq!(
-            estimator.kf_ids().collect::<Vec<FrameId>>(),
-            expected.kf_ids,
-            "{where_}: kf_ids"
-        );
-        assert_eq!(
-            estimator.ltkfs().collect::<Vec<FrameId>>(),
-            expected.ltkfs,
-            "{where_}: ltkfs"
-        );
+        assert_eq!(stats.kf_ids, expected.kf_ids, "{where_}: kf_ids");
+        assert_eq!(stats.ltkfs, expected.ltkfs, "{where_}: ltkfs");
         let num_points_kf: Vec<(i64, i64)> = estimator
             .num_points_kf()
             .iter()
@@ -300,8 +292,7 @@ fn compare<S: LieScalar>(run: &OracleRun, gate: LmGate) -> Worst {
             "{where_}: preintegrated intervals"
         );
         assert_eq!(
-            estimator.optimization_started(),
-            expected.opt_started,
+            stats.opt_started, expected.opt_started,
             "{where_}: opt_started"
         );
         assert_eq!(

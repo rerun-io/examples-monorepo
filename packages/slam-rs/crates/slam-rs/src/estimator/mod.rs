@@ -786,11 +786,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         self.initialized
     }
 
-    /// Whether `optimize()` has started running (`opt_started`, `:1207`).
-    pub fn optimization_started(&self) -> bool {
-        self.opt_started
-    }
-
     /// `get_t_ns()` (`:138`), the newest state's timestamp.
     pub fn last_state_t_ns(&self) -> i64 {
         self.last_state_t_ns
@@ -808,11 +803,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     /// The keyframes, oldest first (`kf_ids`, `:204`).
     pub fn kf_ids(&self) -> impl Iterator<Item = FrameId> + '_ {
         self.kf_ids.iter().copied()
-    }
-
-    /// The long-term keyframes, oldest first (`ltkfs`, `:205`).
-    pub fn ltkfs(&self) -> impl Iterator<Item = FrameId> + '_ {
-        self.ltkfs.iter().copied()
     }
 
     /// The live marginalization prior.
