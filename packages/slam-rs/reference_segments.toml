@@ -720,9 +720,11 @@ cam_time_offset_ns = 0
 # `swscale` AREA downscale 3 to 640x360 on gray8, the Kalibr calibration
 # converted at that downscale, `deterministic=1` on one thread in f32.
 #
-# RoboCap is not registered on any running catalog server; both layers are read
-# from the NAS `.rrd` files, served in process, so there are no layer
-# fingerprints to record.
+# Both RoboCap entries name NAS file URLs on purpose: the base and `slam` layers
+# are read from those `.rrd` files and served in process, so this lane does not
+# depend on any catalog registration and there are no layer fingerprints to
+# record. Whether a catalog somewhere also holds the dataset is not this file's
+# business.
 [robocap]
 device_id = "f408193e6447b3b0"
 has_ground_truth = false
