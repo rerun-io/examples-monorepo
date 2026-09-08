@@ -627,6 +627,13 @@ const GUARDED_REGION: &str = "a guarded region";
 #[cfg(test)]
 const STORAGE_PROBE: &str = "the storage probe";
 
+/// A fault site: the corner scan's download, which is where a real device
+/// failure lands **after** the scan has recorded the new frame's geometry. The
+/// guarded region's own site fires before the body runs and so cannot ask what
+/// a half-finished scan leaves behind.
+#[cfg(test)]
+const CORNER_SCAN_READ: &str = "the corner scan's read";
+
 /// Panic if a test armed `site`, and disarm it.
 #[cfg(test)]
 fn fire_if_armed(site: &'static str) {

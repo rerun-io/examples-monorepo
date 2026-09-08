@@ -68,6 +68,15 @@ pub(super) struct Level {
 /// The `meta` buffer beside them carries the level geometry and the sampling
 /// pattern the per-patch kernels read (see `kernels`); it is written once,
 /// when the pyramid is allocated, and never touched per frame.
+///
+/// One configuration the CPU lane accepts and this one does not, left open by
+/// the S25 review and recorded here rather than in a report only:
+/// `optical_flow_levels = 0` builds level 0 alone on the CPU
+/// ([`crate::pyramid::PyramidU16`]) and is [`PyramidError::TooSmall`] here,
+/// because the odd buffer would then hold no level and `client.empty(0)` is a
+/// zero-sized allocation wgpu rejects at validation. No shipped manifest sets
+/// it, so no lane runs differently today; closing it means giving the empty
+/// buffer a harmless length rather than refusing the geometry.
 pub struct GpuPyramid<R: Runtime> {
     client: ComputeClient<R>,
     levels: Vec<Level>,
