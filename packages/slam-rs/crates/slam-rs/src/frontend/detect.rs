@@ -338,7 +338,7 @@ struct Band {
     corners: Vec<FastCorner>,
 }
 
-/// The 8-bit view of a level-0 pyramid image, reused between frames.
+/// The 8-bit view of the frame the detector reads, reused between frames.
 ///
 /// basalt copies each cell into its own `cv::Mat` with `sub_img_raw(x, y) >> 8`
 /// (`keypoints.cpp:152-157`); one whole-image shift produces the same bytes and
@@ -356,9 +356,6 @@ pub struct DetectorScratch {
     scores: Vec<f32>,
     /// Which of a cell's candidates survived suppression, in candidate order.
     keep: Vec<bool>,
-    /// Level 0 copied out of the pyramid; the `Pyramid` seam lends nothing
-    /// (deviation X04), so the caller owns the buffer and reuses it.
-    pub(crate) level0: crate::image::ImageU16,
 }
 
 /// kornia's normalised FAST score as OpenCV's integer `cornerScore`.

@@ -1077,7 +1077,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         snapshot.cells.clone_from(&self.cells);
         snapshot.last_keypoint_id = self.last_keypoint_id;
 
-        let outcome: Result<(), FrontendError> = self.run_passes(prediction, masks);
+        let outcome: Result<(), FrontendError> = self.run_passes(images, prediction, masks);
 
         match &outcome {
             Ok(()) => {
@@ -1108,6 +1108,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     /// step here touches the pyramid sets, the timestamp or the frame counter.
     fn run_passes(
         &mut self,
+        images: &[ImageU16],
         prediction: &PosePrediction,
         masks: &[Masks],
     ) -> Result<(), FrontendError> {
@@ -1143,7 +1144,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             }
         }
 
-        self.add_points()?;
+        self.add_points(images)?;
         self.filter_points();
         Ok(())
     }
@@ -1329,7 +1330,11 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     /// Detection is capped at the camera's remaining budget
     /// ([`FrontendOptions::max_keypoints`]), so the frame it produces is always
     /// one the tracker can carry next time.
-    fn add_points_for_camera(&mut self, camera: usize) -> Result<(), FrontendError> {
+    fn add_points_for_camera(
+        &mut self,
+        camera: usize,
+        images: &[ImageU16],
+    ) -> Result<(), FrontendError> {
         let config: DetectorConfig = DetectorConfig {
             num_points_cell: self.config.optical_flow_detection_num_points_cell as usize,
             min_threshold: self.config.optical_flow_detection_min_threshold,
@@ -1343,34 +1348,28 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
 
         // `detectKeypointsWithCells(pyramid->at(cam_id).lvl(0), ...)` (`:579-582`),
         // on this camera's own grid and the rig's shared occupancy matrix.
+        //
+        // Level 0 of the staging pyramid is this frame's input image copied in
+        // unchanged (`image_pyr.h:73`), and the caller still holds it, so the
+        // detector reads the image itself: same pixels, and no copy out of the
+        // pyramid — whose seam lends nothing (deviation X04).
         self.detected.corners.clear();
         self.detected.responses.clear();
         if budget > 0 {
-            let mut level0: ImageU16 = std::mem::take(&mut self.detector.level0);
-            let copied: Result<(), PyramidError> =
-                self.staging[camera].copy_level_into(0, &mut level0);
-            let outcome: Result<(), FrontendError> =
-                copied
-                    .map_err(FrontendError::from)
-                    .and_then(|()| -> Result<(), FrontendError> {
-                        detect_keypoints_with_cells(
-                            &level0,
-                            &self.detection_grids[camera],
-                            &Occupancy {
-                                counts: &self.cells[camera],
-                                rows: self.occupancy_grid.rows,
-                                columns: self.occupancy_grid.columns,
-                            },
-                            &config,
-                            &self.masks[camera],
-                            budget,
-                            &mut self.detector,
-                            &mut self.detected,
-                        )?;
-                        Ok(())
-                    });
-            self.detector.level0 = level0;
-            outcome?;
+            detect_keypoints_with_cells(
+                &images[camera],
+                &self.detection_grids[camera],
+                &Occupancy {
+                    counts: &self.cells[camera],
+                    rows: self.occupancy_grid.rows,
+                    columns: self.occupancy_grid.columns,
+                },
+                &config,
+                &self.masks[camera],
+                budget,
+                &mut self.detector,
+                &mut self.detected,
+            )?;
         }
 
         self.new_cam0.clear();
@@ -1461,8 +1460,8 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
 
     /// `addPoints` (`:637-666`): detect on camera 0, match onward, then detect
     /// again on the cameras that do not overlap camera 0.
-    fn add_points(&mut self) -> Result<(), FrontendError> {
-        self.add_points_for_camera(0)?;
+    fn add_points(&mut self, images: &[ImageU16]) -> Result<(), FrontendError> {
+        self.add_points_for_camera(0, images)?;
 
         // `for (i = 1; i < getNumCams(); i++) trackPoints(pyr0, pyri, kpts0, ...)`
         // (`:643-654`). With one camera there is nothing to match into (trap 17).
@@ -1483,7 +1482,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             for camera in 1..self.cameras.len() {
                 let overlap: Masks = self.cam0_overlap_masks(camera);
                 self.masks[camera].extend(&overlap);
-                self.add_points_for_camera(camera)?;
+                self.add_points_for_camera(camera, images)?;
             }
         }
         Ok(())

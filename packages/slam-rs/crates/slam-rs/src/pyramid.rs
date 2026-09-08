@@ -126,7 +126,10 @@ pub trait Pyramid {
     /// Copy one level into `out`, resizing it to the level's geometry.
     ///
     /// `out` keeps its allocation when it is already big enough, so a caller
-    /// that reads the same level every frame never allocates.
+    /// that reads the same level every frame never allocates. Only the tests
+    /// call it today — the detector reads the frame it was handed rather than a
+    /// copy of level 0 — and it stays because it is the seam's forward half:
+    /// the one way generic code can read a pyramid a GPU backend owns.
     ///
     /// # Errors
     ///
