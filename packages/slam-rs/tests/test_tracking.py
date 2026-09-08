@@ -24,9 +24,11 @@ from fixture_types import FRAME_PERIOD_NS, IMU_PERIOD_NS, CameraFactory, Pipelin
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
+from slam_rs import _core, tracking
 from slam_rs.catalog_feed import Frameset, ImuStream
-from slam_rs.tracking import MAX_HELD_FRAMESETS, Lockstep
-from slam_rs.trajectory import empty_trajectory
+from slam_rs.reference import ReferenceManifest
+from slam_rs.tracking import MAX_HELD_FRAMESETS, Lockstep, robocap_cpp_trajectory, robocap_estimator_files
+from slam_rs.trajectory import Trajectory, empty_trajectory
 from slam_rs.vio_log import VioLogger, VioStage
 
 
@@ -130,3 +132,36 @@ def test_a_run_that_never_tracked_still_reports_what_it_held(
     assert not stage.elapsed_ms
     assert "nothing tracked" in stage.summary()
     assert "NEVER COVERED BY THE IMU at [0]" in stage.summary()
+
+
+def test_the_robocap_reference_is_moved_onto_the_trajectory_clock_once(
+    manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``slam`` layer sits on ``video_time``; every basalt CSV beside it is a camera offset later.
+
+    Two callers read that trajectory — the probe's Rerun rung and the fleet
+    row — and they used to state the rule each. One of them getting the sign or
+    the offset wrong would move the whole comparison and still look plausible,
+    because the error is a constant 14.9 ms of drift.
+    """
+    on_video_time: Trajectory = Trajectory(
+        t_ns=np.array([0, 1_000_000], dtype=np.int64), position_m=np.zeros((2, 3)), quaternion_wxyz=np.zeros((2, 4))
+    )
+    monkeypatch.setattr(tracking, "read_rig_trajectory", lambda _path: on_video_time)
+    offset_ns: int = manifest.robocap.imu.cam_time_offset_ns
+    assert offset_ns == 14_902_432
+    moved: Trajectory = robocap_cpp_trajectory(manifest, manifest.robocap.session("s00000015"))
+    assert moved.t_ns.tolist() == [offset_ns, offset_ns + 1_000_000]
+
+
+def test_the_estimator_is_configured_from_basalts_own_two_files(manifest: ReferenceManifest) -> None:
+    """C72: the RoboCap number is agreement with the C++, so the port is fed the C++'s own configuration.
+
+    Both files are committed beside the manifest, so this needs no NAS — which
+    is also why the cap can run the lane at all.
+    """
+    calibration: _core.Calibration
+    flow: _core.VioConfig
+    calibration, flow = robocap_estimator_files(manifest)
+    assert list(calibration.resolution) == [(640, 360)] * 4
+    assert flow.optical_flow_image_safe_radius > 0.0

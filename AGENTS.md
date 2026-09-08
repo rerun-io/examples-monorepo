@@ -162,6 +162,13 @@ extra through `common`. Catalog/stream environments add the `dataloader` extra
 through `rerun-prerelease`. `gradio-rerun` pins an exact `rerun-sdk`, so bump
 both pins in `[feature.common.pypi-dependencies]` together, never separately.
 
+Two macOS lanes restate that exact pin rather than composing `common`, because
+`common` is linux-only (`rerun-sdk[dataloader]` needs a torchvision that does
+not build on `osx-arm64`): `[feature.mv-api-catalog-register-mac]` and
+`[feature.slam-rs-osx]`. Both are tagged `# pin-bump: hold`; a bump has to touch
+all four sites or the Mac silently runs a release behind, and no linux gate and
+no `pixi lock --check` can see it.
+
 To test an **unreleased** Rerun build, add a `find-links` at
 `build.rerun.io/commit/<sha>/wheels/` to `[feature.rerun-prerelease.pypi-options]` (CI builds one
 per commit, including PR branches — `curl` the index first to confirm your platform; PR commits

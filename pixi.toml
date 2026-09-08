@@ -967,7 +967,8 @@ scipy = "*"
 [feature.mv-api-catalog-register-mac.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
 simplecv = { path = "packages/simplecv", editable = true }
-rerun-sdk = { version = "==0.37.0", extras = ["catalog"] }
+# pin-bump: hold — the macOS lane restates `common`'s exact pin; see AGENTS.md.
+rerun-sdk = { version = "==0.37.0", extras = ["catalog"] } # pin-bump: hold
 
 [feature.mv-api-catalog-register-mac.pypi-options]
 index-url = "https://pypi.org/simple"
@@ -2475,6 +2476,39 @@ depends-on = ["slam-rs-build"]
 cwd = "packages/slam-rs"
 description = "Build the core, then run the package tests"
 
+# ── the macOS lane ───────────────────────────────────────────────────────
+# The linux environments get their runtime stack from `catalog-common` and
+# `rerun-prerelease`, and both are linux-only on purpose: eighteen of the twenty
+# environments that compose them also compose `cuda`. Widening them was tried
+# first and `pixi lock` refused, for one reason worth writing down: the
+# `dataloader` extra on `rerun-sdk` requires `torchvision`, and on `osx-arm64`
+# no published torchvision builds against the torch that the conda solve pins,
+# so the environment is unsatisfiable. slam-rs imports no torchvision, so the
+# macOS lane restates what the package actually loads and asks `rerun-sdk` for
+# the `catalog` extra alone. The duplication with `catalog-common` is the price
+# of not making nineteen other environments solve for a platform none of them
+# runs on.
+[feature.slam-rs-osx]
+platforms = ["osx-arm64"]
+
+[feature.slam-rs-osx.dependencies]
+av = "*"
+py-opencv = "*"
+numpy = "*"
+pyserde = ">=0.31.2,<0.32"
+jaxtyping = "*"
+typing_extensions = ">=4.1.0,<4.16.0"
+scipy = "*"
+tqdm = "*"
+# simplecv declares it, and the conda build spares uv a Rust source build.
+hf-transfer = "*"
+
+[feature.slam-rs-osx.pypi-dependencies]
+simplecv = { path = "packages/simplecv", editable = true }
+# pin-bump: hold — the macOS lane restates `common`'s exact pin, so a Rerun bump
+# that misses this line leaves the Mac a release behind with no gate to say so.
+rerun-sdk = { version = "==0.37.0", extras = ["catalog"] } # pin-bump: hold
+
 # ═══════════════════════════════════════════════════════════════════════════
 # mamma — streaming multiview body capture (causal MAMMA pipeline)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3280,6 +3314,15 @@ slam-rs-dev = { features = [
     "slam-rs",
     "dev",
 ], solve-group = "slam-rs", no-default-feature = true }
+slam-rs-osx = { features = [
+    "slam-rs",
+    "slam-rs-osx",
+], solve-group = "slam-rs-osx", no-default-feature = true }
+slam-rs-osx-dev = { features = [
+    "slam-rs",
+    "slam-rs-osx",
+    "dev",
+], solve-group = "slam-rs-osx", no-default-feature = true }
 mamma = { features = [
     "common",
     "cuda",
