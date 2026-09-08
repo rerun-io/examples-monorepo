@@ -73,11 +73,10 @@ class VioSnapshot:
     """The estimator's window, its landmarks and the last measured frame's statistics.
 
     The window is the 15-dof states followed by the pose-only blocks, each oldest
-    first; :attr:`window_is_state` separates them, :attr:`window_keyframe` and
-    :attr:`window_long_term` say what each frame is, :attr:`kf_ids` and
-    :attr:`ltkfs` are the same two facts as id lists, and :attr:`marginalized` is
-    what the last marginalization removed. Everything is a copy, so a snapshot
-    stays valid across the next :meth:`Vio.track`.
+    first; :attr:`window_keyframe` and :attr:`window_long_term` say what each
+    frame is, :attr:`kf_ids` is the keyframes as an id list, and
+    :attr:`marginalized` is what the last marginalization removed. Everything is
+    a copy, so a snapshot stays valid across the next :meth:`Vio.track`.
     """
 
     @property
@@ -89,14 +88,6 @@ class VioSnapshot:
     @property
     def window_poses(self) -> Float64[ndarray, "n_frames 7"]:
         """``[tx, ty, tz, qx, qy, qz, qw]`` per window frame, metres and a unit quaternion (xyzw)."""
-
-    @property
-    def window_linearized(self) -> Bool[ndarray, " n_frames"]:
-        """Whether each frame's linearization point is frozen."""
-
-    @property
-    def window_is_state(self) -> Bool[ndarray, " n_frames"]:
-        """Whether each frame is a 15-dof state rather than a pose-only block."""
 
     @property
     def window_keyframe(self) -> Bool[ndarray, " n_frames"]:
@@ -111,10 +102,6 @@ class VioSnapshot:
         """The keyframes' timestamps, oldest first."""
 
     @property
-    def ltkfs(self) -> Int64[ndarray, " n_long_term"]:
-        """The long-term keyframes' timestamps."""
-
-    @property
     def marginalized(self) -> Int64[ndarray, " n_marginalized"]:
         """Frames the last marginalization removed from the window."""
 
@@ -127,20 +114,12 @@ class VioSnapshot:
         """Timestamp of the keyframe hosting each landmark."""
 
     @property
-    def landmark_host_cameras(self) -> Int64[ndarray, " n_landmarks"]:
-        """Rig index of the camera hosting each landmark."""
-
-    @property
     def landmark_positions(self) -> Float64[ndarray, "n_landmarks 3"]:
         """Landmark positions in the world frame, metres."""
 
     @property
     def lm_iterations(self) -> int:
         """Levenberg-Marquardt steps the last frame took; the rejected ones are the rest."""
-
-    @property
-    def lm_accepted(self) -> int:
-        """How many of those steps were kept."""
 
     @property
     def lm_lambda(self) -> float:
@@ -153,10 +132,6 @@ class VioSnapshot:
     @property
     def lm_error_after(self) -> float:
         """Total cost after the last step; ``0.0`` when no step ran."""
-
-    @property
-    def termination(self) -> str:
-        """Why the LM loop stopped: ``NotStarted``, ``Converged``, ``MaxIterations`` or ``MaxDamping``."""
 
     @property
     def num_observations(self) -> int:
@@ -326,9 +301,6 @@ class FlowFrame:
     def transforms(self, camera: int) -> Float32[ndarray, "n_tracks 2 3"]:
         """One camera's 2x3 warps ``[[m00, m01, tx], [m10, m11, ty]]``."""
 
-    def responses(self, camera: int) -> Float32[ndarray, " n_tracks"]:
-        """One camera's detector responses; ``-1`` where basalt records none."""
-
     def occupancy(self, camera: int) -> Int32[ndarray, "rows columns"]:
         """One camera's occupancy counts over camera 0's detection grid."""
 
@@ -375,8 +347,6 @@ class OpticalFlow:
 
     @property
     def camera_count(self) -> int: ...
-    @property
-    def frame_counter(self) -> int: ...
     @property
     def last_keypoint_id(self) -> int: ...
     @property

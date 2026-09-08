@@ -137,7 +137,6 @@ def test_a_refused_frameset_leaves_the_clock_alone(frontend: FrontendFactory, te
     with pytest.raises(ValueError, match="expected 1 images"):
         flow.process(2_000, [texture(0, 0), texture(0, 0)])
     assert flow.t_ns == 1_000
-    assert flow.frame_counter == 1
 
 
 @settings(max_examples=10, deadline=None)
@@ -176,7 +175,6 @@ def test_the_frame_reports_shapes_the_stub_promises(camera: CameraFactory, front
         assert frame.positions(index).shape == (count, 2)
         assert frame.positions(index).dtype == np.float32
         assert frame.transforms(index).shape == (count, 2, 3)
-        assert frame.responses(index).shape == (count,)
         # The occupancy grid is camera 0's for every camera, as basalt's is.
         assert frame.occupancy(index).shape == (cells, cells)
         assert frame.occupancy(index).dtype == np.int32
@@ -356,12 +354,11 @@ def test_a_frame_of_the_wrong_size_leaves_the_frontend_as_it_was(
     with pytest.raises(ValueError, match="the calibration is for"):
         flow.process(2_000, [np.zeros((calibrated + 8, calibrated), dtype=np.uint8)])
     assert flow.t_ns == 1_000
-    assert flow.frame_counter == 1
     assert flow.last_keypoint_id == ids_before
 
     # And it still tracks against the frame it kept.
     second: _core.FlowFrame = flow.process(3_000, [texture(1, 0)])
-    assert flow.frame_counter == 2
+    assert flow.t_ns == 3_000
     kept: Int64[ndarray, " n_kept"] = np.intersect1d(first.ids(0), second.ids(0))
     assert len(kept) > 0, "the kept frame was not tracked against"
 
@@ -463,7 +460,7 @@ def test_no_hostile_argument_reaches_python_as_a_panic(
         refuse(f"OpticalFlow(threads={value})", lambda v=value: _core.OpticalFlow(calibration, config, threads=v), failures)
         refuse(f"OpticalFlow(max_keypoints={value})", lambda v=value: _core.OpticalFlow(calibration, config, max_keypoints=v), failures)
         refuse(f"process(t_ns={value})", lambda v=value: _core.OpticalFlow(calibration, config).process(v, good), failures)
-        for accessor in ("ids", "positions", "transforms", "responses", "occupancy", "num_new", "num_tracks"):
+        for accessor in ("ids", "positions", "transforms", "occupancy", "num_new", "num_tracks"):
             refuse(f"frame.{accessor}({value})", lambda a=accessor, v=value: getattr(frame, a)(v), failures)
 
     # Every value below violates the type its parameter declares — that is what
@@ -532,7 +529,7 @@ def test_no_hostile_argument_reaches_python_as_a_panic(
     assert not failures, f"{len(failures)} calls did not refuse cleanly: {failures[:10]}"
 
     # A refused frameset leaves a frontend that still works, after all of that.
-    assert flow.frame_counter == 1
+    assert flow.t_ns == 0
     assert flow.process(2, good).num_tracks(0) > 0
     # And an estimator that still tracks: nothing above moved its clock.
     assert vio.track(1, good).status == _core.VioStatus.NeedMoreImu

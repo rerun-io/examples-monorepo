@@ -304,9 +304,9 @@ impl Vio {
 ///
 /// Everything is a flat array or a scalar: the core logs nothing itself (D03),
 /// so this is what the Python layer draws from. The window is the 15-dof states
-/// followed by the pose-only blocks, each oldest first; `is_state` separates
-/// them, `keyframe`/`long_term` say what each frame is, and `kf_ids`/`ltkfs`
-/// are the same two facts as id lists, which is what a count wants.
+/// followed by the pose-only blocks, each oldest first; `keyframe`/`long_term`
+/// say what each frame is, and `kf_ids` is the keyframes as an id list, which is
+/// what a count wants.
 #[pyclass(module = "slam_rs._core", frozen, skip_from_py_object)]
 #[derive(Debug)]
 pub struct VioSnapshot {
@@ -314,24 +314,18 @@ pub struct VioSnapshot {
     window_t_ns: Vec<i64>,
     /// `[tx, ty, tz, qx, qy, qz, qw]` per window frame.
     window_poses: Vec<f64>,
-    window_linearized: Vec<bool>,
-    window_is_state: Vec<bool>,
     window_keyframe: Vec<bool>,
     window_long_term: Vec<bool>,
     kf_ids: Vec<i64>,
-    ltkfs: Vec<i64>,
     marginalized: Vec<i64>,
     landmark_ids: Vec<i64>,
     landmark_hosts: Vec<i64>,
-    landmark_host_cameras: Vec<i64>,
     /// `[x, y, z]` per landmark, world frame.
     landmark_positions: Vec<f64>,
     lm_iterations: usize,
-    lm_accepted: usize,
     lm_lambda: f64,
     lm_error_before: f64,
     lm_error_after: f64,
-    termination: &'static str,
     num_observations: usize,
     timings: slam_rs::estimator::StageTimings,
     frontend_timings: slam_rs::FrontendTimings,
@@ -353,8 +347,6 @@ impl VioSnapshot {
         let frames: usize = window.states.len() + window.poses.len();
         let mut window_t_ns: Vec<i64> = Vec::with_capacity(frames);
         let mut window_poses: Vec<f64> = Vec::with_capacity(7 * frames);
-        let mut window_linearized: Vec<bool> = Vec::with_capacity(frames);
-        let mut window_is_state: Vec<bool> = Vec::with_capacity(frames);
         let mut window_keyframe: Vec<bool> = Vec::with_capacity(frames);
         let mut window_long_term: Vec<bool> = Vec::with_capacity(frames);
         for state in window.states.iter().chain(window.poses.iter()) {
@@ -369,14 +361,11 @@ impl VioSnapshot {
                 f64::from(quaternion[2]),
                 f64::from(quaternion[3]),
             ]);
-            window_linearized.push(state.linearized);
-            window_is_state.push(state.vel_bias.is_some());
             window_keyframe.push(state.keyframe);
             window_long_term.push(state.long_term_keyframe);
         }
         let mut landmark_ids: Vec<i64> = Vec::with_capacity(window.landmarks.len());
         let mut landmark_hosts: Vec<i64> = Vec::with_capacity(window.landmarks.len());
-        let mut landmark_host_cameras: Vec<i64> = Vec::with_capacity(window.landmarks.len());
         let mut landmark_positions: Vec<f64> = Vec::with_capacity(3 * window.landmarks.len());
         for landmark in &window.landmarks {
             landmark_ids.push(i64::try_from(landmark.id.0).map_err(|_| {
@@ -386,7 +375,6 @@ impl VioSnapshot {
                 ))
             })?);
             landmark_hosts.push(landmark.host.frame_id);
-            landmark_host_cameras.push(landmark.host.cam_id as i64);
             landmark_positions.extend_from_slice(&[
                 f64::from(landmark.position_w.x),
                 f64::from(landmark.position_w.y),
@@ -397,19 +385,14 @@ impl VioSnapshot {
             t_ns: window.t_ns,
             window_t_ns,
             window_poses,
-            window_linearized,
-            window_is_state,
             window_keyframe,
             window_long_term,
             kf_ids: stats.kf_ids.clone(),
-            ltkfs: stats.ltkfs.clone(),
             marginalized: window.marginalized.clone(),
             landmark_ids,
             landmark_hosts,
-            landmark_host_cameras,
             landmark_positions,
             lm_iterations: stats.lm.len(),
-            lm_accepted: stats.lm.iter().filter(|step| step.accepted).count(),
             // The trail is empty for the first four framesets, where `opt_started`
             // is still false and no linearization ran at all.
             lm_lambda: stats.lm.last().map_or(0.0, |step| f64::from(step.lambda)),
@@ -421,12 +404,6 @@ impl VioSnapshot {
                 .lm
                 .last()
                 .map_or(0.0, |step| f64::from(step.error_after)),
-            termination: match stats.termination {
-                slam_rs::estimator::LmTermination::NotStarted => "NotStarted",
-                slam_rs::estimator::LmTermination::Converged => "Converged",
-                slam_rs::estimator::LmTermination::MaxIterations => "MaxIterations",
-                slam_rs::estimator::LmTermination::MaxDamping => "MaxDamping",
-            },
             num_observations: stats.num_observations,
             timings: stats.timings,
             frontend_timings,
@@ -456,18 +433,6 @@ impl VioSnapshot {
             .reshape((self.window_t_ns.len(), 7))
     }
 
-    /// Whether each window frame's linearization point is frozen: `bool[n]`.
-    #[getter]
-    fn window_linearized<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
-        self.window_linearized.to_pyarray(py)
-    }
-
-    /// Whether each window frame is a 15-dof state rather than a pose-only block: `bool[n]`.
-    #[getter]
-    fn window_is_state<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
-        self.window_is_state.to_pyarray(py)
-    }
-
     /// Whether each window frame is a keyframe: `bool[n]`.
     ///
     /// The estimator answers this per frame, so nothing downstream has to join
@@ -489,12 +454,6 @@ impl VioSnapshot {
         self.kf_ids.to_pyarray(py)
     }
 
-    /// The long-term keyframes' timestamps: `int64[l]`.
-    #[getter]
-    fn ltkfs<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
-        self.ltkfs.to_pyarray(py)
-    }
-
     /// Frames the last marginalization removed from the window: `int64[m]`.
     #[getter]
     fn marginalized<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
@@ -513,12 +472,6 @@ impl VioSnapshot {
         self.landmark_hosts.to_pyarray(py)
     }
 
-    /// Rig index of the camera hosting each landmark: `int64[p]`.
-    #[getter]
-    fn landmark_host_cameras<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
-        self.landmark_host_cameras.to_pyarray(py)
-    }
-
     /// Landmark positions in the world frame, metres: `float64[p, 3]`.
     #[getter]
     fn landmark_positions<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
@@ -527,16 +480,10 @@ impl VioSnapshot {
             .reshape((self.landmark_ids.len(), 3))
     }
 
-    /// Levenberg-Marquardt steps the last frame took, accepted and rejected.
+    /// Levenberg-Marquardt steps the last frame took, accepted and rejected alike.
     #[getter]
     fn lm_iterations(&self) -> usize {
         self.lm_iterations
-    }
-
-    /// How many of those steps were kept; the rest were backtracked.
-    #[getter]
-    fn lm_accepted(&self) -> usize {
-        self.lm_accepted
     }
 
     /// Damping the last step solved with; zero when no step ran.
@@ -555,12 +502,6 @@ impl VioSnapshot {
     #[getter]
     fn lm_error_after(&self) -> f64 {
         self.lm_error_after
-    }
-
-    /// Why the LM loop stopped: `NotStarted`, `Converged`, `MaxIterations` or `MaxDamping`.
-    #[getter]
-    fn termination(&self) -> &'static str {
-        self.termination
     }
 
     /// Landmark observations the window holds after the last frame.
@@ -864,8 +805,6 @@ struct CameraKeypoints {
     /// The keypoint's pixel is `[tx, ty]`, so this is where a position comes
     /// from as well ([`FlowFrame::positions`]).
     transforms: Vec<f32>,
-    /// Detector response per keypoint, `-1` where basalt records none.
-    responses: Vec<f32>,
     /// Occupancy counts, row-major over the frame's grid.
     occupancy: Vec<i32>,
     /// Ids handed out on this frameset: detections plus stereo matches.
@@ -958,15 +897,6 @@ impl FlowFrame {
             .reshape((keypoints.ids.len(), 2, 3))
     }
 
-    /// One camera's detector responses: `float32[n]`, `-1` where basalt records none.
-    fn responses<'py>(
-        &self,
-        py: Python<'py>,
-        camera: usize,
-    ) -> PyResult<Bound<'py, PyArray1<f32>>> {
-        Ok(self.camera(camera)?.responses.to_pyarray(py))
-    }
-
     /// One camera's occupancy counts: `int32[rows, columns]`.
     ///
     /// The grid is camera 0's, as basalt's is (`frame_to_frame_optical_flow.h:119`),
@@ -1046,12 +976,6 @@ impl OpticalFlow {
     #[getter]
     fn camera_count(&self) -> usize {
         self.inner.camera_count()
-    }
-
-    /// Framesets accepted so far.
-    #[getter]
-    fn frame_counter(&self) -> u64 {
-        self.inner.frame_counter()
     }
 
     /// The next keypoint id that will be handed out.
@@ -1175,7 +1099,6 @@ fn flow_frame(flow: &FrontendLane, t_ns: i64) -> Result<FlowFrame, ProcessError>
         cameras.push(CameraKeypoints {
             ids,
             transforms,
-            responses: keypoints.responses.clone(),
             occupancy: flow.cell_counts(index).to_vec(),
             num_new,
         });

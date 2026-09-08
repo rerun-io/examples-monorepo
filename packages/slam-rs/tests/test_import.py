@@ -149,30 +149,26 @@ def test_the_pipeline_tracks_a_shifted_scene_and_reports_its_window(pipeline: Pi
     assert window > 0
     assert snapshot.t_ns == snapshot.window_t_ns.max()
     assert snapshot.window_poses.shape == (window, 7)
-    assert snapshot.window_linearized.shape == (window,)
-    assert snapshot.window_is_state.shape == (window,)
-    assert snapshot.window_is_state.sum() >= 1, "the window always holds at least the newest state"
     # Every keyframe is a window frame; the reverse is not true.
     assert set(snapshot.kf_ids.tolist()) <= set(snapshot.window_t_ns.tolist())
-    assert set(snapshot.ltkfs.tolist()) <= set(snapshot.kf_ids.tolist())
-    # The per-frame flags and the id lists are the same two facts, so a frame is
-    # a keyframe exactly where its timestamp is in the list.
+    # The per-frame flags and the id list are the same fact, so a frame is a
+    # keyframe exactly where its timestamp is in the list.
     assert snapshot.window_keyframe.shape == (window,)
     assert snapshot.window_long_term.shape == (window,)
     np.testing.assert_array_equal(snapshot.window_keyframe, np.isin(snapshot.window_t_ns, snapshot.kf_ids))
-    np.testing.assert_array_equal(snapshot.window_long_term, np.isin(snapshot.window_t_ns, snapshot.ltkfs))
+    # A long-term keyframe is a keyframe.
+    assert not np.any(snapshot.window_long_term & ~snapshot.window_keyframe)
 
     landmarks: int = len(snapshot.landmark_ids)
     assert landmarks > 0, "a textured scene should triangulate something"
     assert snapshot.landmark_positions.shape == (landmarks, 3)
     assert snapshot.landmark_hosts.shape == (landmarks,)
     assert set(snapshot.landmark_hosts.tolist()) <= set(snapshot.kf_ids.tolist()), "a landmark is hosted by a keyframe"
-    assert snapshot.landmark_host_cameras.min() >= 0
-    assert snapshot.landmark_host_cameras.max() < 2
     assert snapshot.num_observations >= landmarks
 
-    assert snapshot.lm_accepted <= snapshot.lm_iterations
-    assert snapshot.termination in {"NotStarted", "Converged", "MaxIterations", "MaxDamping"}
+    # The four LM scalars the Rerun rung logs, in the types the stub declares.
+    assert isinstance(snapshot.lm_iterations, int)
+    assert all(isinstance(value, float) for value in (snapshot.lm_lambda, snapshot.lm_error_before, snapshot.lm_error_after))
     # The estimator's six stages and the frontend lane's four, in one map.
     assert set(snapshot.timings_ms) == {
         "back_substitution",

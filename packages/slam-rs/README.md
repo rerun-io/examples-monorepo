@@ -547,14 +547,12 @@ Two accessors carry what a Rerun rung draws, both copies rather than views:
 snapshot = vio.snapshot()       # None until a frameset has measured
 snapshot.window_t_ns            # int64[n], the 15-dof states then the pose blocks
 snapshot.window_poses           # float64[n, 7], [tx ty tz qx qy qz qw]
-snapshot.window_linearized      # bool[n]: the frozen linearization points
-snapshot.window_is_state        # bool[n]: a 15-dof state rather than a pose block
 snapshot.window_keyframe        # bool[n]: a keyframe, and window_long_term for a long-term one
-snapshot.kf_ids, snapshot.ltkfs, snapshot.marginalized   # the same two facts as id lists, plus what left
+snapshot.kf_ids, snapshot.marginalized                   # the keyframes as ids, plus what left
 snapshot.landmark_ids, snapshot.landmark_positions       # int64[p], float64[p, 3] world
-snapshot.landmark_hosts, snapshot.landmark_host_cameras  # int64[p] each
-snapshot.lm_iterations, snapshot.lm_accepted, snapshot.lm_lambda, snapshot.termination
-snapshot.lm_error_before, snapshot.lm_error_after, snapshot.num_observations
+snapshot.landmark_hosts         # int64[p], the hosting keyframe's timestamp
+snapshot.lm_iterations, snapshot.lm_lambda, snapshot.num_observations
+snapshot.lm_error_before, snapshot.lm_error_after
 snapshot.timings_ms             # the six estimator stages, milliseconds
 
 frame = vio.flow_frame()        # the keypoints of the last accepted frameset, or None
@@ -601,7 +599,6 @@ frame = flow.process(t_ns, [left, right])
 frame.ids(0)         # int64[n], ascending
 frame.positions(0)   # float32[n, 2] pixels
 frame.transforms(0)  # float32[n, 2, 3], [[m00, m01, tx], [m10, m11, ty]]
-frame.responses(0)   # float32[n], -1 where basalt records none
 frame.occupancy(0)   # int32[rows, columns] over camera 0's detection grid
 frame.num_new(0), frame.num_tracks(0)
 flow.t_ns              # int | None: the last accepted frameset, None before the first
