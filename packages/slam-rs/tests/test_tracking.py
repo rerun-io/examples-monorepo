@@ -15,36 +15,21 @@ module, because ``tests`` is not on the typechecker's search path and every
 module in this directory therefore stands alone.
 """
 
-import hashlib
-from collections.abc import Callable
 from pathlib import Path
-from typing import TypeAlias
 
 import numpy as np
 import pytest
 import rerun as rr
+from fixture_types import FRAME_PERIOD_NS, IMU_PERIOD_NS, CameraFactory, PipelineFactory, TextureFactory, gravity_batch
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
 from slam_rs import _core, tracking
-from slam_rs.apis.replay import VioStage
-from slam_rs.catalog_feed import CameraCalib, Frameset, ImuStream
+from slam_rs.catalog_feed import Frameset, ImuStream
 from slam_rs.reference import ReferenceManifest
 from slam_rs.tracking import MAX_HELD_FRAMESETS, Lockstep, robocap_cpp_trajectory, robocap_estimator_files
 from slam_rs.trajectory import Trajectory, empty_trajectory
-from slam_rs.vio_log import VioLogger
-
-FRAME_PERIOD_NS: int = 33_000_000
-"""One 30 Hz frameset to the next."""
-IMU_PERIOD_NS: int = 1_000_000
-"""Synthetic IMU period: 1 kHz."""
-
-CameraFactory: TypeAlias = Callable[[int, float], CameraCalib]
-"""One camera of the synthetic rig, by rig index and baseline in metres."""
-PipelineFactory: TypeAlias = Callable[[int], _core.Vio]
-"""The whole pipeline on a rig of the given camera count."""
-TextureFactory: TypeAlias = Callable[[int, int], UInt8[ndarray, "h w"]]
-"""The synthetic scene, shifted by whole pixels in x and y."""
+from slam_rs.vio_log import VioLogger, VioStage
 
 
 def frameset(step: int, texture: TextureFactory, sample_t_ns: Int64[ndarray, " n_samples"]) -> Frameset:
@@ -59,17 +44,11 @@ def frameset(step: int, texture: TextureFactory, sample_t_ns: Int64[ndarray, " n
         The frameset, with gravity along +z on every sample and no ground truth.
     """
     images: list[UInt8[ndarray, "h w"]] = [texture(step, 0), texture(step + 1, 0)]
-    digests: tuple[str, ...] = tuple(hashlib.sha256(image.tobytes()).hexdigest() for image in images)
+    gyro_rad_s, accel_m_s2 = gravity_batch(sample_t_ns)
     return Frameset(
         t_ns=step * FRAME_PERIOD_NS,
         images=images,
-        image_sha256=digests,
-        sha256=hashlib.sha256("".join(digests).encode()).hexdigest(),
-        imu=ImuStream(
-            t_ns=sample_t_ns,
-            gyro_rad_s=np.zeros((len(sample_t_ns), 3), dtype=np.float64),
-            accel_m_s2=np.tile(np.array([0.0, 0.0, 9.81]), (len(sample_t_ns), 1)),
-        ),
+        imu=ImuStream(t_ns=sample_t_ns, gyro_rad_s=gyro_rad_s, accel_m_s2=accel_m_s2),
         ground_truth=None,
     )
 

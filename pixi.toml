@@ -2412,6 +2412,10 @@ slam-rs = { path = "packages/slam-rs", editable = true }
 [feature.slam-rs.activation.env]
 PACKAGE_DIR = "packages/slam-rs"
 PYREFLY_TARGET = "slam_rs tools tests"
+# `tests/fixture_types.py` is what the suites share and is not a test module, so
+# pytest finds it through `tests/` on sys.path and pyrefly needs the same
+# directory on its search path.
+PYREFLY_EXTRA_ARGS = "--search-path tests"
 # cargo decides the cdylib's prefix and suffix from the target and no rustflag
 # renames it, so the one filename that differs per platform is a variable rather
 # than a second copy of the build task. Not a `lib_core.*` glob: that would also
@@ -2479,13 +2483,10 @@ description = "Build the core, then run the package tests"
 # the base feature and run from `slam-rs`/`slam-rs-dev` on every Linux
 # platform the package declares. The CUDA lane keeps `slam-rs-gpu` because
 # cubecl-cuda JIT-compiles with NVRTC and needs the CUDA runtime headers.
-# The portable lane the Spark, the Pi 5 and the cap will run. Kept honest here
-# so a kernel that only compiles on NVRTC cannot land.
-[feature.slam-rs.tasks.slam-rs-wgpu-check]
-cmd = "cargo check -p slam-rs --features gpu-wgpu"
-cwd = "packages/slam-rs"
-description = "Type-check the portable wgpu lane (a green check proves nothing at runtime: see slam-rs-wgpu-test)"
-
+# The portable lane the Spark, the Pi 5 and the cap will run: kept honest here so
+# a kernel that only compiles on NVRTC cannot land. Clippy is the only gate it
+# needs — it compiles everything `cargo check` does and then some, so a separate
+# check task was the same work under a second name.
 # The portable lane's own `-D warnings`, which `slam-rs-clippy` cannot be: that
 # one lints the default features, so an item the `gpu` feature keeps alive and
 # this lane does not is invisible to it. One was — the CUDA-only

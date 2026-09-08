@@ -17,16 +17,16 @@ from it, because ``tests`` is not on the typechecker's search path and every
 module in this directory therefore stands alone.
 """
 
-from collections.abc import Callable
 from pathlib import Path
-from typing import NamedTuple, TypeAlias
+from typing import NamedTuple
 
 import numpy as np
 import pytest
 import rerun as rr
 import rerun.blueprint as rrb
 import rerun.experimental as rx
-from jaxtyping import Float64, Int64, UInt8
+from fixture_types import FRAME_PERIOD_NS, IMU_PERIOD_NS, CameraFactory, PipelineFactory, Row, Rows, RowsReader, TextureFactory, gravity_batch
+from jaxtyping import Float64, Int64
 from numpy import ndarray
 
 from slam_rs import _core, vio_log
@@ -46,34 +46,8 @@ from slam_rs.vio_log import (
     vio_blueprint,
 )
 
-FRAME_INTERVAL_NS: int = 33_000_000
-"""One 30 Hz frameset to the next."""
-IMU_PERIOD_NS: int = 1_000_000
-"""Synthetic IMU period: 1 kHz."""
 FRAMESETS: int = 12
 """Enough framesets for the estimator to initialise, optimise and fill a window."""
-
-CameraFactory: TypeAlias = Callable[[int, float], CameraCalib]
-"""One camera of the synthetic rig, by rig index and baseline in metres."""
-PipelineFactory: TypeAlias = Callable[[int], _core.Vio]
-"""The whole pipeline on a rig of the given camera count."""
-TextureFactory: TypeAlias = Callable[[int, int], UInt8[ndarray, "h w"]]
-"""The synthetic scene, shifted by whole pixels in x and y."""
-
-
-class Row(NamedTuple):
-    """One logged row of one entity, as :func:`conftest.read_rows` hands it back."""
-
-    t_ns: int
-    """Where on ``video_time`` the row sits, in nanoseconds."""
-    values: dict[str, list]
-    """The components this row set, by their short name."""
-
-
-Rows: TypeAlias = dict[str, list[Row]]
-"""Per entity path, its non-static rows in ``video_time`` order."""
-RowsReader: TypeAlias = Callable[[Path], Rows]
-"""The :mod:`conftest` fixture that reads a recording back."""
 
 
 class Logged(NamedTuple):
@@ -122,16 +96,13 @@ def drive(
     """
     rr.init("slam-rs-vio-log-test", recording_id=f"vio-log-{output.parent.name}")
     rr.save(output)
-    frame_t_ns: Int64[ndarray, " n_frames"] = np.arange(0, FRAMESETS * FRAME_INTERVAL_NS, FRAME_INTERVAL_NS, dtype=np.int64)
+    frame_t_ns: Int64[ndarray, " n_frames"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
     logger: VioLogger = VioLogger(cameras=cameras, ground_truth=references, cpp=references, frame_t_ns=frame_t_ns)
     tracked: list[int] = []
     for step in range(FRAMESETS):
-        t_ns: int = step * FRAME_INTERVAL_NS
-        vio.push_imu_batch(
-            np.arange(t_ns, t_ns + FRAME_INTERVAL_NS, IMU_PERIOD_NS, dtype=np.int64),
-            np.zeros((FRAME_INTERVAL_NS // IMU_PERIOD_NS, 3), dtype=np.float64),
-            np.tile(np.array([0.0, 0.0, 9.81]), (FRAME_INTERVAL_NS // IMU_PERIOD_NS, 1)),
-        )
+        t_ns: int = step * FRAME_PERIOD_NS
+        samples: Int64[ndarray, " n_samples"] = np.arange(t_ns, t_ns + FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
+        vio.push_imu_batch(samples, *gravity_batch(samples))
         rr.set_time(TIMELINE, duration=np.timedelta64(t_ns, "ns"))
         # Camera 1 is the scene shifted one pixel along the baseline, so the
         # stereo pass matches: a shift across it matches nothing and camera 1
@@ -157,7 +128,7 @@ def logged(
     pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
 ) -> Logged:
     """Drive the whole pipeline over the synthetic rig and read back what was logged."""
-    reference_t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_INTERVAL_NS, FRAME_INTERVAL_NS, dtype=np.int64)
+    reference_t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
     return drive(pipeline(2), (camera(0, 0.0), camera(1, 0.1)), straight_line(reference_t_ns), texture, tmp_path / "vio.rrd", read_rows)
 
 
@@ -285,7 +256,7 @@ def test_a_reference_segment_ends_at_the_cursor_and_no_further(logged: Logged) -
         rows: list[Row] = logged.rows[entity]
         # One reference pose every frame interval, from zero, so a cursor before
         # the second one has no segment to draw.
-        assert [t_ns for t_ns, _ in rows] == [t_ns for t_ns in logged.tracked if t_ns >= FRAME_INTERVAL_NS], entity
+        assert [t_ns for t_ns, _ in rows] == [t_ns for t_ns in logged.tracked if t_ns >= FRAME_PERIOD_NS], entity
         for t_ns, values in rows:
             drawn: list = values["LineStrips3D:strips"][0]
             assert len(drawn) == 2, entity
@@ -321,7 +292,7 @@ def test_the_plotted_ate_is_the_estimate_driven_one(
     floor and plots.
     """
     monkeypatch.setattr(vio_log, "ATE_EVERY", 1)
-    dense_t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_INTERVAL_NS, IMU_PERIOD_NS, dtype=np.int64)
+    dense_t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
     truth: Trajectory = straight_line(dense_t_ns)
     logged: Logged = drive(pipeline(2), (camera(0, 0.0), camera(1, 0.1)), truth, texture, tmp_path / "dense.rrd", read_rows)
     estimate: Trajectory = logged.logger.estimated()
@@ -336,7 +307,7 @@ def test_the_plotted_ate_is_the_estimate_driven_one(
 
 def test_an_alignment_recovers_a_known_rigid_offset() -> None:
     """The transform a run carries is the one that takes it onto the ground truth."""
-    t_ns: Int64[ndarray, " n"] = np.arange(0, 40 * FRAME_INTERVAL_NS, FRAME_INTERVAL_NS, dtype=np.int64)
+    t_ns: Int64[ndarray, " n"] = np.arange(0, 40 * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
     source: Trajectory = straight_line(t_ns)
     turn: Float64[ndarray, "3 3"] = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
     offset: Float64[ndarray, " 3"] = np.array([3.0, -2.0, 0.5])
@@ -353,8 +324,8 @@ def test_an_alignment_recovers_a_known_rigid_offset() -> None:
 
 def test_too_short_a_run_carries_no_alignment() -> None:
     """Below the association floor the identity is honest: nothing has been measured yet."""
-    short: Trajectory = straight_line(np.arange(0, 3 * FRAME_INTERVAL_NS, FRAME_INTERVAL_NS, dtype=np.int64))
-    long: Trajectory = straight_line(np.arange(0, 40 * FRAME_INTERVAL_NS, FRAME_INTERVAL_NS, dtype=np.int64))
+    short: Trajectory = straight_line(np.arange(0, 3 * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64))
+    long: Trajectory = straight_line(np.arange(0, 40 * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64))
     assert alignment_onto(short, long) is IDENTITY
     assert alignment_onto(long, empty_trajectory()) is IDENTITY
 
@@ -380,7 +351,7 @@ def test_a_run_without_references_still_logs_everything_else(pipeline: PipelineF
         cameras=(camera(0, 0.0), camera(1, 0.1)),
         ground_truth=empty_trajectory(),
         cpp=empty_trajectory(),
-        frame_t_ns=np.arange(0, FRAMESETS * FRAME_INTERVAL_NS, FRAME_INTERVAL_NS, dtype=np.int64),
+        frame_t_ns=np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64),
     )
     assert len(logger.estimated()) == 0
     assert logger.window_strip.shape == (10, 3)

@@ -13,7 +13,15 @@ directory:
 <clip>/frame_<NNN>_cam<C>.pgm tools/dump_flow.cpp's layout, gray8
 <clip>/timestamps.txt         the same layout's frameset clock, one per line
 <clip>/imu.json               the same samples as imu.csv, in the fork's shape
+<clip>/clip.npz               `--npz`: the same framesets as one array bundle
+<clip>/clip.npz.calib.pkl     `--npz`: the feed's own `CameraCalib`/`ImuCalib`
 ```
+
+The last pair is what `slam_rs.apis.bench_track` replays: that harness times
+`Vio.track` with no decoder and no Rerun, so it needs the pixels as one array
+and the calibration as the dataclasses the feed built — this is the tool that
+writes them, and `--npz` holds every frame in memory, so a bench dump wants
+`--max-framesets`.
 
 The last two are what the fork's `basalt_vio_oracle <frames-dir> <calib.json>
 <config.json> <out.json> [n]` reads, so one dump feeds both the port's own lane
@@ -32,17 +40,18 @@ Nothing here is committed and the directory is meant to be deleted afterwards.
 
 import hashlib
 import json
+import pickle
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
 import tyro
-from jaxtyping import Float64, UInt8
+from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
 from slam_rs.catalog_feed import CameraCalib, Frameset, LocalSegment, SegmentFeed, open_segment
-from slam_rs.reference import ReferenceManifest, ReferenceSegment, load_manifest
+from slam_rs.reference import ReferenceManifest, ReferenceSegment, flow_config, load_manifest
 
 FIXTURES: Path = Path(__file__).resolve().parents[2] / "crates/slam-rs/tests/fixtures"
 """Where the fork's own MSD calibration files sit in this repository."""
@@ -63,6 +72,8 @@ class Config:
     """``catalog`` writes the float32-stored values the C++ reference was pushed; ``fixture`` writes the fork file's doubles."""
     max_framesets: int | None = None
     """Stop after this many framesets; None dumps the whole segment."""
+    npz: bool = False
+    """Also write ``clip.npz`` and ``clip.npz.calib.pkl``, which is what ``bench_track`` replays."""
     window_s: float = 60.0
     """Longest time window fetched in one round trip."""
 
@@ -199,22 +210,24 @@ def main(config: Config) -> None:
         ValueError: If the segment is not in the manifest or its dataset has no fork calibration.
     """
     manifest: ReferenceManifest = load_manifest()
-    matches: list[ReferenceSegment] = [segment for segment in manifest.segments if segment.segment_id == config.segment]
-    if not matches:
-        raise ValueError(f"{config.segment} is not in the manifest")
-    segment: ReferenceSegment = matches[0]
+    segment: ReferenceSegment = manifest.by_id(config.segment)
     if segment.dataset_name not in DEVICE_CALIBRATION:
         raise ValueError(f"{segment.dataset_name} has no fork calibration file")
     fork_file: dict[str, Any] = json.loads((FIXTURES / DEVICE_CALIBRATION[segment.dataset_name]).read_text())["value0"]
 
     config.output.mkdir(parents=True, exist_ok=True)
+    bundle_images: list[UInt8[ndarray, "n_cameras h w"]] = []
+    bundle_imu_counts: list[int] = []
+    bundle_imu_t: list[Int64[ndarray, " n_samples"]] = []
+    bundle_imu_gyro: list[Float64[ndarray, "n_samples 3"]] = []
+    bundle_imu_accel: list[Float64[ndarray, "n_samples 3"]] = []
     imu_lines: list[str] = ["#t_ns,gyro_x,gyro_y,gyro_z,accel_x,accel_y,accel_z"]
     frame_lines: list[str] = ["# t_ns,cam_index,sha256 of the gray8 HxW pixels pushed to basalt"]
     frame_t_ns: list[int] = []
     dumped: int = 0
 
     with open_segment(
-        LocalSegment(base_rrd=Path(segment.base_url.removeprefix("file://")), gt_rrd=None),
+        LocalSegment(base_rrd=segment.base_path, gt_rrd=None),
         segment.imu,
         window_s=config.window_s,
     ) as feed:
@@ -226,8 +239,14 @@ def main(config: Config) -> None:
                 break
             for index, image in enumerate(frameset.images):
                 write_pgm(config.output / f"frame_{dumped:03d}_cam{index}.pgm", image)
+            if config.npz:
+                bundle_images.append(np.stack(frameset.images))
+                bundle_imu_counts.append(len(frameset.imu))
+                bundle_imu_t.append(frameset.imu.t_ns)
+                bundle_imu_gyro.append(frameset.imu.gyro_rad_s)
+                bundle_imu_accel.append(frameset.imu.accel_m_s2)
             absolute_ns: int = frameset.t_ns + feed.capture_start_time_ns
-            frame_lines.extend(f"{absolute_ns},{index},{digest}" for index, digest in enumerate(frameset.image_sha256))
+            frame_lines.extend(f"{absolute_ns},{index},{digest}" for index, digest in enumerate(frameset.image_digests()))
             for t_ns, gyro, accel in zip(frameset.imu.t_ns.tolist(), frameset.imu.gyro_rad_s.tolist(), frameset.imu.accel_m_s2.tolist(), strict=True):
                 imu_lines.append(f"{t_ns}," + ",".join(repr(value) for value in [*gyro, *accel]))
             frame_t_ns.append(frameset.t_ns)
@@ -251,6 +270,26 @@ def main(config: Config) -> None:
     write_oracle_inputs(config.output, frame_t_ns, imu_lines[1:])
     (config.output / "frames.sha256").write_text("\n".join(frame_lines) + "\n")
     (config.output / "clip.json").write_text(json.dumps(clip, indent=2) + "\n")
+    if config.npz:
+        bundle: Path = config.output / "clip.npz"
+        np.savez(
+            bundle,
+            images=np.stack(bundle_images),
+            t_ns=np.array(frame_t_ns, dtype=np.int64),
+            imu_counts=np.array(bundle_imu_counts, dtype=np.int64),
+            imu_t=np.concatenate(bundle_imu_t),
+            imu_g=np.concatenate(bundle_imu_gyro),
+            imu_a=np.concatenate(bundle_imu_accel),
+            safe_radius=np.int64(flow_config(manifest, segment).optical_flow_image_safe_radius),
+        )
+        # The dataclasses the feed built, because `bench_track` compares lanes on
+        # the calibration the reference ran and not on a second derivation of it.
+        # Pickle rather than JSON for the same reason: these two values are the
+        # feed's own, and a hand-written schema here would be a third account of
+        # what a calibration is. Producer and consumer therefore ship together.
+        with bundle.with_suffix(bundle.suffix + ".calib.pkl").open("wb") as handle:
+            pickle.dump({"cameras": feed.cameras, "imu": feed.imu}, handle)
+        print(f"clip.npz {np.stack(bundle_images).shape} + calib.pkl -> {bundle}")
     digest: str = hashlib.sha256((config.output / "frames.sha256").read_bytes()).hexdigest()
     print(f"{dumped} framesets, {clip['imu_samples']} inertial samples -> {config.output}")
     print(f"frames.sha256 {digest}")

@@ -24,6 +24,7 @@ from typing import NamedTuple, TypeAlias
 import numpy as np
 import pytest
 import rerun as rr
+from fixture_types import FRAME_PERIOD_NS, FrontendFactory, Row, Rows, RowsReader, TextureFactory
 from jaxtyping import Float32, Int64, UInt8
 from numpy import ndarray
 
@@ -42,32 +43,12 @@ from slam_rs.frontend_log import (
     read_cpp_dumps,
     track_colors,
 )
-from slam_rs.reference import ReferenceManifest, ReferenceSegment, load_manifest
+from slam_rs.reference import ReferenceManifest, ReferenceSegment
 
 OTHER_SEGMENT: str = "msd-index__MIO_others__MIO07_mapping_easy"
 """Another Index segment, whose ``video_time`` also starts at zero."""
-FRAME_INTERVAL_NS: int = 33_000_000
-"""One 30 Hz frameset to the next."""
 OVERLAY: Float32[ndarray, "n_keypoints 2"] = np.array([[10.0, 20.0], [30.0, 40.0]], dtype=np.float32)
 """The C++ keypoints every written dump carries, on both cameras."""
-
-FrontendFactory: TypeAlias = Callable[[int], _core.OpticalFlow]
-TextureFactory: TypeAlias = Callable[[int, int], UInt8[ndarray, "h w"]]
-
-
-class Row(NamedTuple):
-    """One logged row of one entity, as :func:`conftest.read_rows` hands it back."""
-
-    t_ns: int
-    """Where on ``video_time`` the row sits, in nanoseconds."""
-    values: dict[str, list]
-    """The components this row set, by their short name (``Points2D:positions`` and such)."""
-
-
-Rows: TypeAlias = dict[str, list[Row]]
-"""Per entity path, its rows in ``video_time`` order."""
-RowsReader: TypeAlias = Callable[[Path], Rows]
-"""The :mod:`conftest` fixture that reads a recording back."""
 
 
 
@@ -136,7 +117,7 @@ def replay(frontend: FrontendFactory, texture: TextureFactory, read_rows: RowsRe
         rr.save(output)
         frames: list[_core.FlowFrame] = []
         for step in range(framesets):
-            t_ns: int = step * FRAME_INTERVAL_NS
+            t_ns: int = step * FRAME_PERIOD_NS
             rr.set_time(TIMELINE, duration=np.timedelta64(t_ns, "ns"))
             frame: _core.FlowFrame = flow.process(t_ns, [texture(step, 0), texture(step, 1)])
             logger.log(frame, elapsed_ms=1.5 * (step + 1))
@@ -155,7 +136,7 @@ def smoke_dumps(tmp_path: Path) -> Path:
         The directory they were written to.
     """
     directory: Path = tmp_path / "dumps"
-    write_dumps(directory, SMOKE_SEGMENT, {0: [OVERLAY, OVERLAY], FRAME_INTERVAL_NS: [OVERLAY, OVERLAY]})
+    write_dumps(directory, SMOKE_SEGMENT, {0: [OVERLAY, OVERLAY], FRAME_PERIOD_NS: [OVERLAY, OVERLAY]})
     return directory
 
 
@@ -247,7 +228,7 @@ def test_dumps_of_another_recording_do_not_refuse_the_rig_on_screen(smoke_dumps:
 def test_log_writes_the_dataset_tree_once_per_frameset(replay: ReplayFactory, tmp_path: Path) -> None:
     """Every entity the blueprint shows gets one row per frameset, on ``video_time``."""
     recorded: ReplayResult = replay(tmp_path, 3, OTHER_SEGMENT, tmp_path / "no-dumps")
-    expected_times: list[int] = [step * FRAME_INTERVAL_NS for step in range(3)]
+    expected_times: list[int] = [step * FRAME_PERIOD_NS for step in range(3)]
     for camera in range(2):
         for leaf in ("keypoints", "trails", "cells"):
             entity: str = f"{camera_entity(camera)}/{leaf}"
@@ -343,14 +324,13 @@ def test_no_other_recording_is_given_the_overlay(
 
 
 @pytest.mark.slow
-def test_the_overlay_follows_the_recording_and_not_the_filename(tmp_path: Path) -> None:
+def test_the_overlay_follows_the_recording_and_not_the_filename(manifest: ReferenceManifest, tmp_path: Path) -> None:
     """The re-review's collision: a file named like the dumps' segment, holding another recording.
 
     ``--rrd`` used to switch the overlay off by the flag, so a path spelled like
     a segment id drew MIO10's keypoints over MIO07's pixels. The feed reads the
     id out of the recording, so what the file is called decides nothing.
     """
-    manifest: ReferenceManifest = load_manifest()
     smoke: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
     other: ReferenceSegment = manifest.by_id(OTHER_SEGMENT)
     if not other.base_path.is_file():
@@ -373,6 +353,6 @@ def test_the_overlay_is_cleared_once_the_dumps_run_out_and_stays_cleared(replay:
         logged: list[Row] = recorded.rows[f"{camera_entity(camera)}/keypoints_cpp"]
         # One drawn row and exactly one clearing row: the clear is not repeated
         # per frameset, and nothing is drawn after it.
-        assert [row.t_ns for row in logged] == [0, FRAME_INTERVAL_NS]
+        assert [row.t_ns for row in logged] == [0, FRAME_PERIOD_NS]
         assert len(logged[0].values["Points2D:positions"]) == len(OVERLAY)
         assert logged[1].values["Points2D:positions"] == []

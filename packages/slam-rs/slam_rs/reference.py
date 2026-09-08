@@ -65,6 +65,30 @@ GT_SOURCE_BY_NAME: dict[str, GroundTruthSource] = {"lighthouse": "lighthouse", "
 GATE_POLICY_BY_NAME: dict[str, GatePolicy] = {"tight": "tight", "standard": "standard", "no_divergence": "no_divergence"}
 """Valid gate policies, in decreasing strictness."""
 
+def _one_of[LiteralName: str](value: object, allowed: dict[str, LiteralName], what: str, where: str) -> LiteralName:
+    """Narrow one manifest string into its literal alphabet, or say what the alphabet is.
+
+    Every one of these values is typed into the file by hand, so the message has
+    to carry the alphabet: a typo used to get a helpful sentence or an unhelpful
+    one depending on which of the four tables it was in.
+
+    Args:
+        value: The string the manifest carries.
+        allowed: The identity table for the literal type, e.g. :data:`TIER_BY_NAME`.
+        what: What the value names, for the error, e.g. ``"tier"``.
+        where: Which segment or table it was read from, for the error.
+
+    Returns:
+        The same string, typed as the literal it is.
+
+    Raises:
+        ValueError: If it is not one of the alphabet.
+    """
+    if not isinstance(value, str) or value not in allowed:
+        raise ValueError(f"{where}: unknown {what} {value!r}, expected one of {sorted(allowed)}")
+    return allowed[value]
+
+
 ATE_VS_CPP_CM: float = 2.0
 """Largest ATE RMSE against the basalt C++ trajectory the V2 gate accepts (D14's first rung)."""
 PATH_BOUND_MAX_CLIP_S: float = 100.0
@@ -220,11 +244,12 @@ class CppReferenceRun:
     gate_policy: GatePolicy
     """How hard this segment may be gated; see :data:`GatePolicy`."""
     fork_commit: str
-    """Commit of the basalt fork that produced the run."""
-    fork_branch: str
-    """Branch the commit sits on. Not pushed anywhere; the fork is machine-local."""
-    fork_base: str
-    """Upstream commit the branch was cut from."""
+    """Commit of the basalt fork that produced the run.
+
+    The manifest also records ``fork_branch`` and ``fork_base`` beside it; the
+    fork is machine-local and nothing here reads either, so they stay in the TOML
+    as provenance rather than becoming fields.
+    """
     decode_path: DecodePath
     """Decode path the run consumed, which must equal the segment's own."""
     deterministic: bool
@@ -361,10 +386,12 @@ class RobocapReference:
     to be fed the same configuration to be measured against it (C72): the four
     cameras of six, the downscale, and basalt's own calibration and VIO config
     files as the fork's converter and ``robocap_vit.toml`` produced them.
+
+    The manifest's ``device_id`` — the capture device every session came from,
+    which is what makes the calibration per device — stays in the TOML as
+    provenance; nothing here reads it.
     """
 
-    device_id: str
-    """Capture device every session came from; the calibration is per device."""
     has_ground_truth: bool
     """Always false: RoboCap has no measured ground truth."""
     decode_path: DecodePath
@@ -480,7 +507,7 @@ class ReferenceManifest:
             The path it occupies, and why it is unusable if it is missing.
         """
         if segment.reference.bundle_only:
-            return reference_bundle.resolve(segment.segment_id, "basalt_traj.csv")
+            return reference_bundle.resolve(segment.segment_id, reference_bundle.TRAJECTORY_CSV)
         path: Path = self.package_root / segment.reference.trajectory_csv
         reason: str | None = None if path.is_file() else f"{path} is committed in the manifest but missing from this checkout"
         return BundleFile(path=path, reason=reason)
@@ -662,17 +689,11 @@ def _reference_run(block: dict[str, Any], segment_id: str) -> CppReferenceRun:
     Raises:
         ValueError: If the gate policy or decode path is unknown.
     """
-    if block["gate_policy"] not in GATE_POLICY_BY_NAME:
-        raise ValueError(f"{segment_id}: unknown gate policy {block['gate_policy']!r}, expected one of {sorted(GATE_POLICY_BY_NAME)}")
-    if block["decode_path"] not in DECODE_PATH_BY_NAME:
-        raise ValueError(f"{segment_id}: reference run has unknown decode path {block['decode_path']!r}")
     ate_block: dict[str, Any] = block["expected_cpp_ate"]
     return CppReferenceRun(
-        gate_policy=GATE_POLICY_BY_NAME[block["gate_policy"]],
+        gate_policy=_one_of(block["gate_policy"], GATE_POLICY_BY_NAME, "gate policy", segment_id),
         fork_commit=block["fork_commit"],
-        fork_branch=block["fork_branch"],
-        fork_base=block["fork_base"],
-        decode_path=DECODE_PATH_BY_NAME[block["decode_path"]],
+        decode_path=_one_of(block["decode_path"], DECODE_PATH_BY_NAME, "decode path", f"{segment_id} reference run"),
         deterministic=bool(block["deterministic"]),
         num_threads=int(block["num_threads"]),
         use_double=bool(block["use_double"]),
@@ -712,12 +733,9 @@ def _robocap(robocap_block: dict[str, Any]) -> RobocapReference:
         ValueError: If the decode path is unknown.
     """
     fixtures_block: dict[str, Any] = robocap_block["fixtures"]
-    if robocap_block["decode_path"] not in DECODE_PATH_BY_NAME:
-        raise ValueError(f"robocap: unknown decode path {robocap_block['decode_path']!r}")
     return RobocapReference(
-        device_id=robocap_block["device_id"],
         has_ground_truth=bool(robocap_block["has_ground_truth"]),
-        decode_path=DECODE_PATH_BY_NAME[robocap_block["decode_path"]],
+        decode_path=_one_of(robocap_block["decode_path"], DECODE_PATH_BY_NAME, "decode path", "robocap"),
         camera_names=tuple(str(name) for name in robocap_block["camera_names"]),
         downscale=int(robocap_block["downscale"]),
         frameset_tolerance_ns=int(robocap_block["frameset_tolerance_ns"]),
@@ -833,15 +851,9 @@ def load_manifest(path: Path = MANIFEST_PATH, artifact_root: Path | None = None)
     segments: list[ReferenceSegment] = []
     for entry in document["segment"]:
         identifier: str = entry["segment_id"]
-        if entry["tier"] not in TIER_BY_NAME:
-            raise ValueError(f"{identifier}: unknown tier {entry['tier']!r}, expected one of {sorted(TIER_BY_NAME)}")
-        if entry["decode_path"] not in DECODE_PATH_BY_NAME:
-            raise ValueError(f"{identifier}: unknown decode path {entry['decode_path']!r}, expected one of {sorted(DECODE_PATH_BY_NAME)}")
-        if entry["gt"]["source"] not in GT_SOURCE_BY_NAME:
-            raise ValueError(f"{identifier}: unknown ground-truth source {entry['gt']['source']!r}, expected one of {sorted(GT_SOURCE_BY_NAME)}")
-        tier: Tier = TIER_BY_NAME[entry["tier"]]
-        decode_path: DecodePath = DECODE_PATH_BY_NAME[entry["decode_path"]]
-        source: GroundTruthSource = GT_SOURCE_BY_NAME[entry["gt"]["source"]]
+        tier: Tier = _one_of(entry["tier"], TIER_BY_NAME, "tier", identifier)
+        decode_path: DecodePath = _one_of(entry["decode_path"], DECODE_PATH_BY_NAME, "decode path", identifier)
+        source: GroundTruthSource = _one_of(entry["gt"]["source"], GT_SOURCE_BY_NAME, "ground-truth source", identifier)
         segments.append(
             ReferenceSegment(
                 dataset_name=entry["dataset_name"],

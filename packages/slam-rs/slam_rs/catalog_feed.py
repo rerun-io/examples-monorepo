@@ -41,7 +41,6 @@ import math
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from fractions import Fraction
 from io import BytesIO
 from os import PathLike
 from pathlib import Path
@@ -55,10 +54,10 @@ from datafusion import col, lit
 from jaxtyping import Bool, Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
-from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name
+from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name, wrap_mp4
 
 from slam_rs.reference import ImuParameters, RobocapReference
-from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, shift_clock
+from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, empty_trajectory, shift_clock
 
 RIG_ENTITY: str = "/world/rig_00"
 """Rig node of the ``exoego:v2`` tree; its reference frame is the IMU."""
@@ -88,15 +87,13 @@ class CameraStatics:
     what lets them be tested without a catalog.
     """
 
-    camera_model: str | None
-    """``camera_model`` string on the camera node, or None where the writer logged none.
-
-    Nothing here reads it — the projection model comes from
-    :attr:`distortion_model` — so a recording without it is read, not refused.
-    The RoboCap conversion predates the field.
-    """
     distortion_model: str
-    """``simplecv.components.DistortionModel``, e.g. ``kannala_brandt``."""
+    """``simplecv.components.DistortionModel``, e.g. ``kannala_brandt``.
+
+    The projection model comes from here and not from the camera node's own
+    ``camera_model`` string, which the RoboCap conversion predates and some
+    writers omit.
+    """
     distortion_coefficients: Float64[ndarray, " n_slots"]
     """Fixed-width coefficient list; the unused tail is zero."""
     image_from_camera: Float64[ndarray, " 9"]
@@ -111,8 +108,6 @@ class CameraStatics:
     """``Transform3D:relation``; must be :data:`CHILD_FROM_PARENT`."""
     distortion_valid_radius: float | None
     """basalt's ``rpmax``; present on msd-g2 only."""
-    image_rotation_cw_deg: int
-    """Clockwise rotation the stored images already carry; 0, 90, 180 or 270."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -132,8 +127,6 @@ class CameraCalib:
     """Decoded frame width in pixels."""
     height: int
     """Decoded frame height in pixels."""
-    frequency_hz: float
-    """Nominal frame rate; the per-frame timestamps are authoritative."""
     fx: float
     """Focal length along image x, pixels."""
     fy: float
@@ -150,8 +143,6 @@ class CameraCalib:
     """basalt's ``rpmax``, when the recording carries one."""
     imu_T_cam: Float64[ndarray, "4 4"]
     """Camera pose in the IMU frame: the inverse of the stored ``ChildFromParent`` transform."""
-    image_rotation_cw_deg: int
-    """Clockwise rotation already baked into both the images and this calibration."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -202,15 +193,6 @@ class Frameset:
     """Shared capture timestamp of every image, on the ``video_time`` clock."""
     images: list[UInt8[ndarray, "h w"]]
     """One C-contiguous grayscale image per camera, in rig camera order."""
-    image_sha256: tuple[str, ...]
-    """Digest of each camera's gray8 bytes, in the same order as :attr:`images`.
-
-    This is the unit the basalt C++ reference records in its ``frames.sha256``
-    (one ``t_ns,cam_index,sha256`` line per decoded frame), so the two decoders
-    can be compared frame by frame rather than only in aggregate.
-    """
-    sha256: str
-    """Digest of the timestamp and the per-camera digests: one value per frameset."""
     imu: ImuStream
     """Inertial samples since the previous frameset, running one sample past :attr:`t_ns`.
 
@@ -220,6 +202,38 @@ class Frameset:
     """
     ground_truth: Float64[ndarray, " 7"] | None
     """Nearest ground-truth pose as ``[tx, ty, tz, qw, qx, qy, qz]``, or None without a ``gt`` layer."""
+
+    def image_digests(self) -> tuple[str, ...]:
+        """Digest of each camera's gray8 bytes, in the same order as :attr:`images`.
+
+        This is the unit the basalt C++ reference records in its
+        ``frames.sha256`` (one ``t_ns,cam_index,sha256`` line per decoded frame),
+        so the two decoders can be compared frame by frame rather than only in
+        aggregate. Only the pixel-parity tests and the clip dumper ask for it,
+        which is why it is hashed on demand rather than in the feed loop: that
+        loop is what a gate's wall time and every fleet row's realtime factor
+        measure, and 0.68 ms a frameset of SHA-256 over 2x960x960 is decode plus
+        `track` and something else.
+
+        The array's own buffer is hashed rather than a ``tobytes()`` copy of it —
+        the same bytes and the same digest, and a non-contiguous frame raises
+        here rather than being hashed in a different order.
+
+        Returns:
+            One hex digest per camera.
+        """
+        return tuple(hashlib.sha256(image).hexdigest() for image in self.images)
+
+    def digest(self) -> str:
+        """Digest of the timestamp and the per-camera digests: one value per frameset.
+
+        Returns:
+            One hex digest for the whole frameset.
+        """
+        rolled = hashlib.sha256(np.int64(self.t_ns).tobytes())
+        for camera_digest in self.image_digests():
+            rolled.update(bytes.fromhex(camera_digest))
+        return rolled.hexdigest()
 
 
 @dataclass(slots=True, frozen=True)
@@ -309,43 +323,6 @@ MSD_RIG: RigProfile = RigProfile()
 """The Monado SLAM Dataset rigs: every camera, native resolution, one clock, paired inertial channels."""
 
 
-def rotate_pinhole_clockwise(
-    fx: float, fy: float, cx: float, cy: float, width: int, height: int, rotation_cw_deg: int
-) -> tuple[float, float, float, float]:
-    """Rotate a landscape pinhole calibration into the frame the images are stored in.
-
-    msd-g2's video is stored rotated into portrait and its catalog calibration is
-    rotated to match, so this is the arithmetic that reconciles a raw-MSD
-    calibration with a catalog one. Nothing in the feed needs it — the catalog
-    already stores the rotated values — but any A/B against a C++ basalt run fed
-    from raw MSD does, and pinning it keeps the convention from drifting.
-
-    Args:
-        fx: Focal length along x before rotation.
-        fy: Focal length along y before rotation.
-        cx: Principal point x before rotation.
-        cy: Principal point y before rotation.
-        width: Image width before rotation.
-        height: Image height before rotation.
-        rotation_cw_deg: Clockwise rotation applied to the image, 0, 90, 180 or 270.
-
-    Returns:
-        ``(fx, fy, cx, cy)`` in the rotated frame.
-
-    Raises:
-        ValueError: If the rotation is not a multiple of 90 degrees.
-    """
-    if rotation_cw_deg == 0:
-        return fx, fy, cx, cy
-    if rotation_cw_deg == 90:
-        return fy, fx, (height - 1) - cy, cx
-    if rotation_cw_deg == 180:
-        return fx, fy, (width - 1) - cx, (height - 1) - cy
-    if rotation_cw_deg == 270:
-        return fy, fx, cy, (width - 1) - cx
-    raise ValueError(f"image rotation must be 0, 90, 180 or 270 degrees clockwise; got {rotation_cw_deg}")
-
-
 def scale_principal_point(value: float, downscale: int) -> float:
     """One principal-point coordinate at ``1 / downscale`` of its resolution.
 
@@ -359,7 +336,7 @@ def scale_principal_point(value: float, downscale: int) -> float:
     return (value + 0.5) / downscale - 0.5
 
 
-def camera_calib(index: int, statics: CameraStatics, frequency_hz: float, downscale: int = 1) -> CameraCalib:
+def camera_calib(index: int, statics: CameraStatics, downscale: int = 1) -> CameraCalib:
     """Apply the catalog-to-estimator mapping rules to one camera's statics.
 
     The rules, each of which has cost someone a wrong trajectory: reshape
@@ -375,7 +352,6 @@ def camera_calib(index: int, statics: CameraStatics, frequency_hz: float, downsc
     Args:
         index: Camera index on the rig.
         statics: Raw static components of the camera node.
-        frequency_hz: Nominal frame rate for this segment.
         downscale: Integer factor the frames are decoded at.
 
     Returns:
@@ -414,7 +390,6 @@ def camera_calib(index: int, statics: CameraStatics, frequency_hz: float, downsc
         index=index,
         width=width // downscale,
         height=height // downscale,
-        frequency_hz=frequency_hz,
         fx=float(k_matrix[0, 0]) / downscale,
         fy=float(k_matrix[1, 1]) / downscale,
         cx=scale_principal_point(float(k_matrix[0, 2]), downscale),
@@ -423,7 +398,6 @@ def camera_calib(index: int, statics: CameraStatics, frequency_hz: float, downsc
         distortion=statics.distortion_coefficients[:n_coeffs].copy(),
         distortion_valid_radius=statics.distortion_valid_radius,
         imu_T_cam=imu_T_cam,
-        image_rotation_cw_deg=statics.image_rotation_cw_deg,
     )
 
 
@@ -462,8 +436,24 @@ def _flat_float(column: pa.Array) -> Float64[ndarray, " n_values"]:
     return np.asarray(values.to_numpy(zero_copy_only=False), dtype=np.float64)
 
 
-def _static_values(statics: pa.Table, column: str) -> Float64[ndarray, " n"]:
-    """One static list component as a flat float64 array."""
+def _static_cell(statics: pa.Table, column: str) -> pa.Scalar:
+    """Row zero of one static component column.
+
+    A static is logged once, so row zero is the value — but a rig node that
+    carries no statics at all reached ``statics[column][0]`` as an ``IndexError``
+    out of pyarrow with nothing in it that says which component was being read.
+    The three readers below differ only in what they make of the cell.
+
+    Args:
+        statics: Single-row table from ``filter_contents(...).reader(index=None)``.
+        column: Component column name, e.g. ``/world/rig_00:reference``.
+
+    Returns:
+        The cell, valid.
+
+    Raises:
+        ValueError: If the column is absent, the table has no rows, or the cell is null.
+    """
     if column not in statics.column_names:
         raise ValueError(f"static column {column} is missing")
     if statics.num_rows == 0:
@@ -471,19 +461,22 @@ def _static_values(statics: pa.Table, column: str) -> Float64[ndarray, " n"]:
     cell: pa.Scalar = statics[column][0]
     if not cell.is_valid:
         raise ValueError(f"static column {column} is null")
-    return np.asarray(cell.values.to_pylist(), dtype=np.float64).ravel()
+    return cell
+
+
+def _static_scalar(cell: pa.Scalar) -> object:
+    """The one Python value in a static cell, whether or not Rerun wrapped it in a list."""
+    return cell.values.to_pylist()[0] if isinstance(cell, pa.ListScalar | pa.LargeListScalar) else cell.as_py()
+
+
+def _static_values(statics: pa.Table, column: str) -> Float64[ndarray, " n"]:
+    """One static list component as a flat float64 array."""
+    return np.asarray(_static_cell(statics, column).values.to_pylist(), dtype=np.float64).ravel()
 
 
 def _static_string(statics: pa.Table, column: str) -> str:
     """One static string component, bare or wrapped in a single-element list."""
-    if column not in statics.column_names:
-        raise ValueError(f"static column {column} is missing")
-    if statics.num_rows == 0:
-        raise ValueError(f"static column {column} has no rows")
-    cell: pa.Scalar = statics[column][0]
-    if not cell.is_valid:
-        raise ValueError(f"static column {column} is null")
-    value: object = cell.values.to_pylist()[0] if isinstance(cell, pa.ListScalar | pa.LargeListScalar) else cell.as_py()
+    value: object = _static_scalar(_static_cell(statics, column))
     if not isinstance(value, str):
         raise ValueError(f"static column {column} is not a string: {value!r}")
     return value
@@ -496,14 +489,7 @@ def _static_int(statics: pa.Table, column: str) -> int:
     margin to 2^53 is only three decades and the whole point of this value is that
     it is added to timestamps that must stay exact.
     """
-    if column not in statics.column_names:
-        raise ValueError(f"static column {column} is missing")
-    if statics.num_rows == 0:
-        raise ValueError(f"static column {column} has no rows")
-    cell: pa.Scalar = statics[column][0]
-    if not cell.is_valid:
-        raise ValueError(f"static column {column} is null")
-    value: object = cell.values.to_pylist()[0] if isinstance(cell, pa.ListScalar | pa.LargeListScalar) else cell.as_py()
+    value: object = _static_scalar(_static_cell(statics, column))
     if not isinstance(value, int):
         raise ValueError(f"static column {column} is not an integer: {value!r}")
     return value
@@ -520,9 +506,7 @@ def read_camera_statics(statics: pa.Table, entity: str) -> CameraStatics:
         The raw statics, unconverted.
     """
     optional_radius: str = f"{entity}:distortion_valid_radius"
-    optional_rotation: str = f"{entity}:image_rotation_cw_deg"
     return CameraStatics(
-        camera_model=_static_string(statics, f"{entity}:camera_model") if f"{entity}:camera_model" in statics.column_names else None,
         distortion_model=_static_string(statics, f"{entity}/pinhole:simplecv.components.DistortionModel"),
         distortion_coefficients=_static_values(statics, f"{entity}/pinhole:simplecv.components.DistortionCoefficients"),
         image_from_camera=_static_values(statics, f"{entity}/pinhole:Pinhole:image_from_camera"),
@@ -531,40 +515,7 @@ def read_camera_statics(statics: pa.Table, entity: str) -> CameraStatics:
         transform_translation=_static_values(statics, f"{entity}:Transform3D:translation"),
         transform_relation=int(_static_values(statics, f"{entity}:Transform3D:relation")[0]),
         distortion_valid_radius=float(_static_values(statics, optional_radius)[0]) if optional_radius in statics.column_names else None,
-        image_rotation_cw_deg=int(_static_values(statics, optional_rotation)[0]) if optional_rotation in statics.column_names else 0,
     )
-
-
-def wrap_mp4(samples: list[bytes], keyframes: list[bool], fps: int, codec: CatalogCodecName) -> bytes:
-    """Mux pre-encoded samples into an in-memory MP4 with positional pts, no re-encode.
-
-    ``simplecv.rerun_dataloader`` has the same function, but importing it drags in
-    torchcodec and torchvision, which this CPU lane deliberately does not install.
-
-    Args:
-        samples: Encoded video samples in decode order; the first must be a keyframe.
-        keyframes: Keyframe flag per sample.
-        fps: Frame rate written into the muxed track and its time base.
-        codec: Codec of the pre-encoded samples.
-
-    Returns:
-        The complete MP4 file as bytes.
-    """
-    buffer: BytesIO = BytesIO()
-    # Pin the track timescale to fps: the muxer otherwise picks 15360 without
-    # rescaling our positional pts, and the track then claims a ~0.1 s duration.
-    with av.open(buffer, "w", format="mp4", options={"video_track_timescale": str(fps)}) as container:
-        stream = container.add_mux_stream(codec, rate=fps, width=16, height=16)
-        stream.time_base = Fraction(1, fps)
-        for sample_index, (sample, is_keyframe) in enumerate(zip(samples, keyframes, strict=True)):
-            packet: av.Packet = av.Packet(sample)
-            packet.pts = packet.dts = sample_index
-            packet.duration = 1
-            packet.time_base = stream.time_base
-            packet.stream = stream
-            packet.is_keyframe = is_keyframe
-            container.mux(packet)
-    return buffer.getvalue()
 
 
 def decode_gray(mp4_bytes: bytes, downscale: int = 1) -> Iterator[UInt8[ndarray, "h w"]]:
@@ -723,17 +674,20 @@ class SegmentFeed:
         """Every inertial sample with ``first_ns <= t <= last_ns``, on the inertial clock."""
         return _read_imu(self.dataset, self.segment_id, self.profile.interpolate_accel_onto_gyro, first_ns, last_ns)
 
-    def ground_truth_between(self, first_ns: int, last_ns: int) -> Trajectory | None:
-        """Ground-truth rig poses over ``[first_ns, last_ns]`` of the inertial clock, or None without a ``gt`` layer.
+    def ground_truth_between(self, first_ns: int, last_ns: int) -> Trajectory:
+        """Ground-truth rig poses over ``[first_ns, last_ns]`` of the inertial clock.
 
         The layer stores them on ``video_time``, like the frames, so the window is
         asked for in that clock and the answer comes back in the inertial one.
+        Empty where there is nothing to give: no ``gt`` layer at all, or a window
+        the layer does not cover. Whether the segment *has* a layer is
+        :attr:`has_ground_truth`, which is the distinction a caller acts on;
+        callers of this test :func:`len`.
         """
         if self.gt_dataset is None:
-            return None
+            return empty_trajectory()
         offset_ns: int = self.imu.cam_time_offset_ns
-        found: Trajectory | None = _read_ground_truth(self.gt_dataset, self.segment_id, first_ns - offset_ns, last_ns - offset_ns)
-        return found if found is None else shift_clock(found, offset_ns)
+        return shift_clock(_read_ground_truth(self.gt_dataset, self.segment_id, first_ns - offset_ns, last_ns - offset_ns), offset_ns)
 
     def framesets(self, stop_ns: int | None = None) -> Iterator[Frameset]:
         """Decode the segment and yield one frameset at a time.
@@ -789,7 +743,7 @@ class SegmentFeed:
                     f"{self.segment_id}: inertial gap at the window starting {window_first_ns} ns — "
                     f"the read begins at {int(window_imu.t_ns[0])} but the last emitted sample was {emitted_imu_t_ns}"
                 )
-            window_gt: Trajectory | None = self.ground_truth_between(window_first_ns - margin_ns, window_last_ns + margin_ns)
+            window_gt: Trajectory = self.ground_truth_between(window_first_ns - margin_ns, window_last_ns + margin_ns)
 
             decoders: list[Iterator[UInt8[ndarray, "h w"]]] = []
             for position in range(len(self.cameras)):
@@ -826,26 +780,14 @@ class SegmentFeed:
                 frame_imu: ImuStream = window_imu.between(emitted_imu_t_ns, max(lead_ns, t_ns))
                 if len(frame_imu):
                     emitted_imu_t_ns = int(frame_imu.t_ns[-1])
-                # Per camera first, because that is the unit the C++ reference
-                # records; the frameset digest is then built from those, which
-                # also avoids hashing every pixel twice. The array's own buffer
-                # is hashed rather than a `tobytes()` copy of it — the same bytes
-                # and the same digest, and a non-contiguous frame would raise
-                # here rather than be hashed in a different order.
-                image_sha256: tuple[str, ...] = tuple(hashlib.sha256(image).hexdigest() for image in images)
-                digest = hashlib.sha256(np.int64(t_ns).tobytes())
-                for camera_digest in image_sha256:
-                    digest.update(bytes.fromhex(camera_digest))
                 yield Frameset(
                     t_ns=t_ns,
                     images=images,
-                    image_sha256=image_sha256,
-                    sha256=digest.hexdigest(),
                     imu=frame_imu,
                     ground_truth=_nearest_pose(window_gt, t_ns),
                 )
 
-    def _fetch_samples(self, position: int, start: int, stop: int) -> tuple[list[bytes], list[bool]]:
+    def _fetch_samples(self, position: int, start: int, stop: int) -> tuple[list[UInt8[ndarray, " n_sample_bytes"]], list[bool]]:
         """Encoded samples and keyframe flags of one fed camera, over the framesets ``[start, stop)``.
 
         The range is contiguous in that camera's own frames, from the frame the
@@ -878,7 +820,10 @@ class SegmentFeed:
         blobs: pa.LargeListArray = table[1].combine_chunks().cast(pa.list_(pa.large_list(pa.uint8()))).flatten()
         data: UInt8[ndarray, " n_bytes"] = blobs.values.to_numpy(zero_copy_only=True)
         offsets: Int64[ndarray, " n_offsets"] = blobs.offsets.to_numpy(zero_copy_only=True)
-        samples: list[bytes] = [data[begin:end].tobytes() for begin, end in zip(offsets[:-1], offsets[1:], strict=True)]
+        # Views into the column, not copies of it: `av.Packet` takes any buffer
+        # and copies into its own, so a `tobytes()` here would be a second copy
+        # of every encoded byte. The views keep `data` alive while they live.
+        samples: list[UInt8[ndarray, " n_sample_bytes"]] = [data[begin:end] for begin, end in zip(offsets[:-1], offsets[1:], strict=True)]
         # is_keyframe is logged only on keyframes, so its validity is the flag.
         keyframes: list[bool] = table[2].combine_chunks().is_valid().to_pylist()
         return samples, keyframes
@@ -1049,11 +994,39 @@ def _video_codec(table: pa.Table, entity: str) -> CatalogCodecName:
     return catalog_codec_name(int(codecs[0].as_py()))
 
 
+def _shared_codec(per_camera: Sequence[tuple[int, CatalogCodecName]], segment_id: str) -> CatalogCodecName:
+    """The one codec every fed camera's stream is in.
+
+    :attr:`_VideoIndex.codec` names the codec :meth:`SegmentFeed._fetch_samples`
+    muxes *every* camera's samples under, so a rig whose cameras disagree cannot
+    be decoded from one index and has to name the two that differ rather than
+    silently decode three of four streams as the fourth.
+
+    Args:
+        per_camera: ``(camera_index, codec)`` in feed order, at least one entry.
+        segment_id: Segment the cameras belong to, for the error.
+
+    Returns:
+        The codec the sample wrapper needs.
+
+    Raises:
+        ValueError: If two fed cameras carry different codecs.
+    """
+    first_camera, codec = per_camera[0]
+    for camera_index, other in per_camera[1:]:
+        if other != codec:
+            raise ValueError(
+                f"{segment_id}: cam_{camera_index:02d} is {other} where cam_{first_camera:02d} is {codec}; "
+                f"one video index carries one codec for every camera"
+            )
+    return codec
+
+
 def _read_video_index(dataset: DatasetEntry, segment_id: str, camera_positions: Sequence[int], tolerance_ns: int) -> _VideoIndex:
     """Frameset timing, per-camera frames, shared keyframes and codec, fetched without any sample bytes."""
     per_camera_times: list[Int64[ndarray, " n_frames"]] = []
     per_camera_keyframe: list[Bool[ndarray, " n_frames"]] = []
-    codec: CatalogCodecName | None = None
+    per_camera_codec: list[tuple[int, CatalogCodecName]] = []
     for camera_index in camera_positions:
         entity: str = f"{RIG_ENTITY}/cam_{camera_index:02d}/pinhole/video"
         table: pa.Table = (
@@ -1065,9 +1038,10 @@ def _read_video_index(dataset: DatasetEntry, segment_id: str, camera_positions: 
         )
         per_camera_times.append(np.asarray(table[TIMELINE].combine_chunks().cast(pa.int64())))
         per_camera_keyframe.append(np.asarray(table[1].combine_chunks().is_valid().to_numpy(zero_copy_only=False), dtype=bool))
-        codec = _video_codec(table, entity)
-    if codec is None:
+        per_camera_codec.append((camera_index, _video_codec(table, entity)))
+    if not per_camera_codec:
         raise ValueError(f"{segment_id}: no camera was selected, so no video columns were read")
+    codec: CatalogCodecName = _shared_codec(per_camera_codec, segment_id)
     if tolerance_ns == 0:
         # MSD is hardware-synced: a frameset is "all cameras at the same
         # video_time", and the identity table is what a matcher would return.
@@ -1099,7 +1073,7 @@ def _read_video_index(dataset: DatasetEntry, segment_id: str, camera_positions: 
     )
 
 
-def _nearest_pose(trajectory: Trajectory | None, t_ns: int, tolerance_ns: int = ASSOCIATION_TOLERANCE_NS) -> Float64[ndarray, " 7"] | None:
+def _nearest_pose(trajectory: Trajectory, t_ns: int, tolerance_ns: int = ASSOCIATION_TOLERANCE_NS) -> Float64[ndarray, " 7"] | None:
     """The pose closest in time to ``t_ns`` as ``[tx, ty, tz, qw, qx, qy, qz]``, or None if none is close enough.
 
     The tolerance is the gate's own association tolerance. Without it a frameset
@@ -1107,7 +1081,7 @@ def _nearest_pose(trajectory: Trajectory | None, t_ns: int, tolerance_ns: int = 
     Index smoke segment the ground truth starts 17.5 ms after ``video_time`` zero,
     so the very first frameset has no truth and must say so rather than borrow one.
     """
-    if trajectory is None or len(trajectory) == 0:
+    if len(trajectory) == 0:
         return None
     nearest: int = int(np.abs(trajectory.t_ns - t_ns).argmin())
     if abs(int(trajectory.t_ns[nearest]) - t_ns) > tolerance_ns:
@@ -1211,8 +1185,13 @@ def pair_accel_onto_gyro(
     return ImuStream(t_ns=paired_t_ns, gyro_rad_s=gyro_rad_s[inside], accel_m_s2=interpolated)
 
 
-def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, last_ns: int) -> Trajectory | None:
-    """Ground-truth rig poses over one window on ``video_time``, converted from Rerun's XYZW to w-first."""
+def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, last_ns: int) -> Trajectory:
+    """Ground-truth rig poses over one window on ``video_time``, converted from Rerun's XYZW to w-first.
+
+    Empty when the layer carries no rig transform at all and when this window
+    holds no pose: the two are the same answer to "what is the truth here", and
+    the layer's own absence is :attr:`SegmentFeed.has_ground_truth`.
+    """
     table: pa.Table = (
         dataset.filter_segments([segment_id])
         .filter_contents([RIG_ENTITY])
@@ -1223,13 +1202,13 @@ def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, la
     translation_column: str = f"{RIG_ENTITY}:Transform3D:translation"
     quaternion_column: str = f"{RIG_ENTITY}:Transform3D:quaternion"
     if translation_column not in table.column_names or quaternion_column not in table.column_names:
-        return None
+        return empty_trajectory()
     row_t_ns: Int64[ndarray, " n_rows"] = np.asarray(table[TIMELINE].combine_chunks().cast(pa.int64()))
     translations: pa.Array = table[translation_column].combine_chunks()
     valid: Bool[ndarray, " n_rows"] = translations.is_valid().to_numpy(zero_copy_only=False)
     position_m: Float64[ndarray, "n_poses 3"] = _flat_float(translations).reshape(-1, 3)
     if position_m.shape[0] == 0:
-        return None
+        return empty_trajectory()
     quaternion_xyzw: Float64[ndarray, "n_poses 4"] = _flat_float(table[quaternion_column].combine_chunks()).reshape(-1, 4)
     return Trajectory(
         t_ns=row_t_ns[valid],
@@ -1300,7 +1279,7 @@ def _build_feed(
     camera_positions: tuple[int, ...] = select_cameras(camera_statics, camera_count, profile.camera_names)
     index: _VideoIndex = _read_video_index(sensor_dataset, segment_id, camera_positions, profile.frameset_tolerance_ns)
     cameras: tuple[CameraCalib, ...] = tuple(
-        camera_calib(number, read_camera_statics(camera_statics, rig_entities[position]), float(index.fps), profile.downscale)
+        camera_calib(number, read_camera_statics(camera_statics, rig_entities[position]), profile.downscale)
         for number, position in enumerate(camera_positions)
     )
     imu_T_body: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
@@ -1396,7 +1375,7 @@ def read_rig_trajectory(rrd: Path) -> Trajectory:
         segment_ids: list[str] = list(dataset.segment_ids())
         if len(segment_ids) != 1:
             raise ValueError(f"{rrd} holds {len(segment_ids)} segments; a trajectory layer holds one")
-        found: Trajectory | None = _read_ground_truth(dataset, segment_ids[0], -(2**62), 2**62)
-    if found is None:
+        found: Trajectory = _read_ground_truth(dataset, segment_ids[0], -(2**62), 2**62)
+    if len(found) == 0:
         raise ValueError(f"{rrd} carries no {RIG_ENTITY} Transform3D rows")
     return found

@@ -32,7 +32,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb, this_temperature_c
-from slam_rs.reference import MANIFEST_PATH, ReferenceManifest, RobocapSession, load_manifest
+from slam_rs.reference import ReferenceManifest, RobocapSession, load_manifest
 from slam_rs.tracking import SegmentRun, robocap_cpp_trajectory, run_robocap
 from slam_rs.trajectory import AteResult, Trajectory, ate, read_trajectory, write_trajectory
 
@@ -100,12 +100,9 @@ class RobocapRow:
     unscored: str | None
     """Why no agreement could be measured, or None where it was; the sentence :func:`~slam_rs.trajectory.ate` refused the pair with.
 
-    Accuracy is reported and not gated here, but an estimate that associates with
-    nothing is not an accuracy number: :func:`~slam_rs.trajectory.ate` needs an
-    association and not a pose count, so an estimate on another clock leaves the
-    three ``cpp_`` fields NaN and :attr:`cross_platform_ate_cm` unmeasured. The
-    cost beside them was still measured, which is why this is a row and not a
-    traceback (S22 review round 2).
+    Accuracy is reported and not gated here, and a refusal leaves the three
+    ``cpp_`` fields NaN and :attr:`cross_platform_ate_cm` unmeasured while the
+    cost beside them is still measured; see ``ate`` for why it is a row.
     """
 
     def row(self) -> str:
@@ -126,14 +123,8 @@ class RobocapRow:
 class Config:
     """Replay one RoboCap session on this machine, with nothing logged."""
 
-    manifest: Path = MANIFEST_PATH
-    """Reference manifest; ``--artifact-root`` is usually the flag a machine without the NAS wants instead."""
     artifact_root: Path | None = None
-    """Read every recording and sidecar from ``<root>/<segment id>/`` instead of the manifest's own NAS paths.
-
-    What a machine without the NAS points at: one directory, no manifest copy
-    and no ``sed``.
-    """
+    """Read every recording and sidecar from one directory per segment; see :func:`slam_rs.reference.relocate`."""
     session: str = "s00000015"
     """RoboCap session id from the manifest. Session 15 is the one with a C++ wall on the cap."""
     seconds: float = 0.0
@@ -238,7 +229,7 @@ def main(config: Config) -> None:
             accuracy number to report but a run that went wrong. Both outputs
             are written first: the cost they carry was measured.
     """
-    manifest: ReferenceManifest = load_manifest(config.manifest, config.artifact_root)
+    manifest: ReferenceManifest = load_manifest(artifact_root=config.artifact_root)
     session: RobocapSession = manifest.robocap.session(config.session)
     machine: Machine = this_machine()
     print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores")
