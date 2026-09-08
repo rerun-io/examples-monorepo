@@ -85,6 +85,9 @@ pub const TAP_UNITS: u32 = 64;
 /// no test that would say so. Off one constant, the coupling is the compiler's.
 const TAP_SLOTS: usize = TAP_UNITS as usize;
 
+/// Units per cube on the per-element bookkeeping kernels.
+const LINEAR_UNITS: u32 = 256;
+
 /// Cube width on the pyramid kernel, the 32x8 tile the CubeCL-versus-CUDA test
 /// settled on.
 pub const TILE_W: u32 = 32;
@@ -1057,50 +1060,77 @@ fn finish_kernel(
 
 // ── launchers ────────────────────────────────────────────────────────────────
 //
-// Every launcher is generic over `R: Runtime` and every one uses
+// Every launcher is generic over `R: Runtime` and every per-frame one uses
 // `launch_unchecked`: the default checked mode adds a `select` per array access
 // and the shape checks the stage traits already make are what put every index
 // in range (`Robocap.md`, "Kernel-design rules learned"). The per-kernel
 // tolerance tests, which assert the pyramid **bit-exact** against the CPU, are
-// what validates that claim on every `cargo test --features gpu`.
+// what validates that claim on every `cargo test --features gpu`. The one
+// exception is [`launch_probe`], which is off that path and says why.
 
-/// One level of one pyramid: `src[src_base..]` at `src_width x src_height` down
-/// into `dst[dst_base..]` at half that.
-#[allow(clippy::too_many_arguments)]
+/// A device buffer and the element count the kernel will see in it.
+///
+/// Spelled once rather than at each of the launcher parameters below, all of
+/// which take exactly this: the count is a promise `ArrayArg::from_raw_parts`
+/// cannot check, so keeping it beside the handle is what makes the promise
+/// visible at the call site.
+pub(super) type Buffer<'a> = (&'a cubecl::server::Handle, usize);
+
+/// The dispatch every image-shaped kernel uses: one unit per pixel, over
+/// [`TILE_W`] x [`TILE_H`] tiles.
+///
+/// Two-dimensional cube dims with `ABSOLUTE_POS_X`/`_Y` rather than a linear
+/// index and a `div`/`mod`, which is the layout the CubeCL-versus-CUDA
+/// measurement settled on.
+fn tile_2d(width: usize, height: usize) -> (CubeCount, CubeDim) {
+    (
+        CubeCount::Static(
+            (width as u32).div_ceil(TILE_W),
+            (height as u32).div_ceil(TILE_H),
+            1,
+        ),
+        CubeDim {
+            x: TILE_W,
+            y: TILE_H,
+            z: 1,
+        },
+    )
+}
+
+/// The dispatch every per-element bookkeeping kernel uses: one unit per element.
+fn linear_1d(count: usize) -> (CubeCount, CubeDim) {
+    (
+        CubeCount::Static((count as u32).div_ceil(LINEAR_UNITS), 1, 1),
+        CubeDim {
+            x: LINEAR_UNITS,
+            y: 1,
+            z: 1,
+        },
+    )
+}
+
+/// One level of one pyramid: `source` down into `target` at half its size.
 pub(super) fn launch_subsample<R: Runtime>(
     client: &ComputeClient<R>,
-    src: &cubecl::server::Handle,
-    src_len: usize,
-    dst: &cubecl::server::Handle,
-    dst_len: usize,
-    src_base: usize,
-    src_width: usize,
-    src_height: usize,
-    dst_base: usize,
-    dst_width: usize,
-    dst_height: usize,
+    src: Buffer<'_>,
+    dst: Buffer<'_>,
+    source: super::pyramid::Level,
+    target: super::pyramid::Level,
 ) {
+    let (cubes, units) = tile_2d(target.width, target.height);
     unsafe {
         subsample_kernel::launch_unchecked::<R>(
             client,
-            CubeCount::Static(
-                (dst_width as u32).div_ceil(TILE_W),
-                (dst_height as u32).div_ceil(TILE_H),
-                1,
-            ),
-            CubeDim {
-                x: TILE_W,
-                y: TILE_H,
-                z: 1,
-            },
-            ArrayArg::from_raw_parts(src.clone(), src_len),
-            ArrayArg::from_raw_parts(dst.clone(), dst_len),
-            src_base,
-            src_width,
-            src_height,
-            dst_base,
-            dst_width,
-            dst_height,
+            cubes,
+            units,
+            ArrayArg::from_raw_parts(src.0.clone(), src.1),
+            ArrayArg::from_raw_parts(dst.0.clone(), dst.1),
+            source.base,
+            source.width,
+            source.height,
+            target.base,
+            target.width,
+            target.height,
         );
     }
 }
@@ -1139,9 +1169,9 @@ pub(super) fn launch_patch_build<R: Runtime>(
         &cubecl::server::Handle,
         usize,
     ),
-    meta: (&cubecl::server::Handle, usize),
-    positions: (&cubecl::server::Handle, usize),
-    store: (&cubecl::server::Handle, usize),
+    meta: Buffer<'_>,
+    positions: Buffer<'_>,
+    store: Buffer<'_>,
     shape: PatchShape,
     bases: PositionBases,
 ) {
@@ -1180,10 +1210,10 @@ pub(super) fn launch_klt<R: Runtime>(
         &cubecl::server::Handle,
         usize,
     ),
-    meta: (&cubecl::server::Handle, usize),
-    store: (&cubecl::server::Handle, usize),
-    transforms_in: (&cubecl::server::Handle, usize),
-    out: (&cubecl::server::Handle, usize),
+    meta: Buffer<'_>,
+    store: Buffer<'_>,
+    transforms_in: Buffer<'_>,
+    out: Buffer<'_>,
     shape: PatchShape,
     max_iterations: usize,
     check_guess_bounds: bool,
@@ -1213,10 +1243,21 @@ pub(super) fn launch_klt<R: Runtime>(
     }
 }
 
-/// Units per cube on the two per-patch bookkeeping kernels.
-const LINEAR_UNITS: u32 = 256;
-
-/// A device copy of one element width, for [`super::probe_storage`].
+/// A device copy of `count` elements of one width.
+///
+/// Two callers, and the second is why the kernel is generic rather than fixed
+/// to the width the probe needs. [`super::probe_storage`] copies a known
+/// pattern of four widths to refuse a runtime that cannot store one of them;
+/// [`launch_copy_level0`] copies the frame at `u16`, because the upload and the
+/// pyramid want different shapes. The upload wants to be exactly as long as the
+/// frame — `create_from_slice` is CubeCL 0.10's only host-to-device write and it
+/// copies the payload on the host before the bus sees it, so every byte over
+/// the frame is paid for twice — while the pyramid wants level 0 at offset zero
+/// of the buffer that also holds levels 2 and 4, because the per-patch kernels
+/// reach a level through two bindings split by parity. One device copy of the
+/// frame, a few microseconds at this card's bandwidth, buys both, and leaves
+/// the even allocation to be made once at `allocate` rather than replaced every
+/// frame.
 #[cube(launch, launch_unchecked)]
 fn probe_kernel<N: Numeric>(src: &Array<N>, dst: &mut Array<N>, count: usize) {
     let index = usize::cast_from(ABSOLUTE_POS_X);
@@ -1236,19 +1277,16 @@ fn probe_kernel<N: Numeric>(src: &Array<N>, dst: &mut Array<N>, count: usize) {
 /// needs to name a handle's element count, not the launch.
 pub(super) fn launch_probe<N: Numeric, R: Runtime>(
     client: &ComputeClient<R>,
-    src: (&cubecl::server::Handle, usize),
-    dst: (&cubecl::server::Handle, usize),
+    src: Buffer<'_>,
+    dst: Buffer<'_>,
     count: usize,
 ) {
+    let (cubes, units) = linear_1d(count);
     unsafe {
         probe_kernel::launch::<N, R>(
             client,
-            CubeCount::Static((count as u32).div_ceil(LINEAR_UNITS), 1, 1),
-            CubeDim {
-                x: LINEAR_UNITS,
-                y: 1,
-                z: 1,
-            },
+            cubes,
+            units,
             ArrayArg::from_raw_parts(src.0.clone(), src.1),
             ArrayArg::from_raw_parts(dst.0.clone(), dst.1),
             count,
@@ -1256,43 +1294,24 @@ pub(super) fn launch_probe<N: Numeric, R: Runtime>(
     }
 }
 
-/// Level 0, from the buffer it was uploaded into to the front of the pyramid's
-/// even allocation.
-///
-/// The upload and the pyramid want different shapes. The upload wants to be
-/// exactly as long as the frame, because `create_from_slice` is CubeCL 0.10's
-/// only host-to-device write and it copies the payload on the host before the
-/// bus sees it, so every byte over the frame is paid for twice. The pyramid
-/// wants level 0 at offset zero of the buffer that also holds levels 2 and 4,
-/// because the per-patch kernels reach a level through two bindings split by
-/// parity. One device copy of the frame — a few microseconds at this card's
-/// bandwidth — buys both, and leaves the even allocation to be made once at
-/// `allocate` rather than replaced every frame.
-#[cube(launch, launch_unchecked)]
-fn copy_level0_kernel(src: &Array<u16>, dst: &mut Array<u16>, count: usize) {
-    let index = usize::cast_from(ABSOLUTE_POS_X);
-    if index >= count {
-        terminate!();
-    }
-    dst[index] = src[index];
-}
-
 /// Copy `count` pixels from the upload buffer to the front of `dst`.
+///
+/// [`probe_kernel`] instantiated at `u16`, not a second kernel: the body was
+/// the same three lines, so a copy kernel of its own meant two NVRTC and two
+/// SPIR-V modules compiled for one copy. `launch_unchecked` here where
+/// [`launch_probe`] takes the checked one — this is the per-frame path.
 pub(super) fn launch_copy_level0<R: Runtime>(
     client: &ComputeClient<R>,
-    src: (&cubecl::server::Handle, usize),
-    dst: (&cubecl::server::Handle, usize),
+    src: Buffer<'_>,
+    dst: Buffer<'_>,
     count: usize,
 ) {
+    let (cubes, units) = linear_1d(count);
     unsafe {
-        copy_level0_kernel::launch_unchecked::<R>(
+        probe_kernel::launch_unchecked::<u16, R>(
             client,
-            CubeCount::Static((count as u32).div_ceil(LINEAR_UNITS), 1, 1),
-            CubeDim {
-                x: LINEAR_UNITS,
-                y: 1,
-                z: 1,
-            },
+            cubes,
+            units,
             ArrayArg::from_raw_parts(src.0.clone(), src.1),
             ArrayArg::from_raw_parts(dst.0.clone(), dst.1),
             count,
@@ -1304,21 +1323,18 @@ pub(super) fn launch_copy_level0<R: Runtime>(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn launch_prepare_backward<R: Runtime>(
     client: &ComputeClient<R>,
-    forward: (&cubecl::server::Handle, usize),
-    offsets: (&cubecl::server::Handle, usize),
-    out: (&cubecl::server::Handle, usize),
+    forward: Buffer<'_>,
+    offsets: Buffer<'_>,
+    out: Buffer<'_>,
     count: usize,
     bases: PositionBases,
 ) {
+    let (cubes, units) = linear_1d(count);
     unsafe {
         prepare_backward_kernel::launch_unchecked::<R>(
             client,
-            CubeCount::Static((count as u32).div_ceil(LINEAR_UNITS), 1, 1),
-            CubeDim {
-                x: LINEAR_UNITS,
-                y: 1,
-                z: 1,
-            },
+            cubes,
+            units,
             ArrayArg::from_raw_parts(forward.0.clone(), forward.1),
             ArrayArg::from_raw_parts(offsets.0.clone(), offsets.1),
             ArrayArg::from_raw_parts(out.0.clone(), out.1),
@@ -1333,23 +1349,20 @@ pub(super) fn launch_prepare_backward<R: Runtime>(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn launch_finish<R: Runtime>(
     client: &ComputeClient<R>,
-    forward: (&cubecl::server::Handle, usize),
-    backward: (&cubecl::server::Handle, usize),
-    positions: (&cubecl::server::Handle, usize),
-    out: (&cubecl::server::Handle, usize),
+    forward: Buffer<'_>,
+    backward: Buffer<'_>,
+    positions: Buffer<'_>,
+    out: Buffer<'_>,
     count: usize,
     bases: PositionBases,
     max_recovered_dist2: f32,
 ) {
+    let (cubes, units) = linear_1d(count);
     unsafe {
         finish_kernel::launch_unchecked::<R>(
             client,
-            CubeCount::Static((count as u32).div_ceil(LINEAR_UNITS), 1, 1),
-            CubeDim {
-                x: LINEAR_UNITS,
-                y: 1,
-                z: 1,
-            },
+            cubes,
+            units,
             ArrayArg::from_raw_parts(forward.0.clone(), forward.1),
             ArrayArg::from_raw_parts(backward.0.clone(), backward.1),
             ArrayArg::from_raw_parts(positions.0.clone(), positions.1),
@@ -1511,26 +1524,19 @@ fn fast_localmax_kernel(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn launch_fast_score<R: Runtime>(
     client: &ComputeClient<R>,
-    frame: (&cubecl::server::Handle, usize),
-    ring: (&cubecl::server::Handle, usize),
-    score: (&cubecl::server::Handle, usize),
+    frame: Buffer<'_>,
+    ring: Buffer<'_>,
+    score: Buffer<'_>,
     width: usize,
     height: usize,
     margin: usize,
 ) {
+    let (cubes, units) = tile_2d(width, height);
     unsafe {
         fast_score_kernel::launch_unchecked::<R>(
             client,
-            CubeCount::Static(
-                (width as u32).div_ceil(TILE_W),
-                (height as u32).div_ceil(TILE_H),
-                1,
-            ),
-            CubeDim {
-                x: TILE_W,
-                y: TILE_H,
-                z: 1,
-            },
+            cubes,
+            units,
             ArrayArg::from_raw_parts(frame.0.clone(), frame.1),
             ArrayArg::from_raw_parts(ring.0.clone(), ring.1),
             ArrayArg::from_raw_parts(score.0.clone(), score.1),
@@ -1545,27 +1551,20 @@ pub(super) fn launch_fast_score<R: Runtime>(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn launch_fast_localmax<R: Runtime>(
     client: &ComputeClient<R>,
-    score: (&cubecl::server::Handle, usize),
-    kept: (&cubecl::server::Handle, usize),
+    score: Buffer<'_>,
+    kept: Buffer<'_>,
     width: usize,
     height: usize,
     margin: usize,
     filtered_end: usize,
     use_filter: bool,
 ) {
+    let (cubes, units) = tile_2d(width, height);
     unsafe {
         fast_localmax_kernel::launch_unchecked::<R>(
             client,
-            CubeCount::Static(
-                (width as u32).div_ceil(TILE_W),
-                (height as u32).div_ceil(TILE_H),
-                1,
-            ),
-            CubeDim {
-                x: TILE_W,
-                y: TILE_H,
-                z: 1,
-            },
+            cubes,
+            units,
             ArrayArg::from_raw_parts(score.0.clone(), score.1),
             ArrayArg::from_raw_parts(kept.0.clone(), kept.1),
             width,
@@ -1615,25 +1614,18 @@ fn fast_mask_kernel(
 /// Pack the candidate image into one bit per column.
 pub(super) fn launch_fast_mask<R: Runtime>(
     client: &ComputeClient<R>,
-    kept: (&cubecl::server::Handle, usize),
-    mask: (&cubecl::server::Handle, usize),
+    kept: Buffer<'_>,
+    mask: Buffer<'_>,
     width: usize,
     height: usize,
     words: usize,
 ) {
+    let (cubes, units) = tile_2d(words, height);
     unsafe {
         fast_mask_kernel::launch_unchecked::<R>(
             client,
-            CubeCount::Static(
-                (words as u32).div_ceil(TILE_W),
-                (height as u32).div_ceil(TILE_H),
-                1,
-            ),
-            CubeDim {
-                x: TILE_W,
-                y: TILE_H,
-                z: 1,
-            },
+            cubes,
+            units,
             ArrayArg::from_raw_parts(kept.0.clone(), kept.1),
             ArrayArg::from_raw_parts(mask.0.clone(), mask.1),
             width,

@@ -41,16 +41,19 @@ pub struct Level0 {
 pub type Level0Table = Arc<Mutex<Vec<Option<Level0>>>>;
 
 /// One level's place inside a [`GpuPyramid`]'s two buffers.
+///
+/// Visible to [`super::kernels`] because the subsample launcher takes a source
+/// and a target level, and this names exactly the three fields it needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Level {
+pub(super) struct Level {
     /// Offset of pixel `(0, 0)` inside the buffer this level lives in.
-    base: usize,
+    pub(super) base: usize,
     /// Row length, which is also the stride: levels are packed without padding.
-    width: usize,
+    pub(super) width: usize,
     /// Row count.
-    height: usize,
+    pub(super) height: usize,
     /// `false` for buffer `a`, `true` for buffer `b`; the level index's parity.
-    odd: bool,
+    pub(super) odd: bool,
 }
 
 /// One camera's pyramid, resident on the device.
@@ -316,20 +319,12 @@ impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
         for level in 1..out.levels.len() {
             let source: Level = out.levels[level - 1];
             let target: Level = out.levels[level];
-            let (src, src_len) = out.buffer_of(&source);
-            let (dst, dst_len) = out.buffer_of(&target);
             kernels::launch_subsample::<R>(
                 &out.client,
-                src,
-                src_len,
-                dst,
-                dst_len,
-                source.base,
-                source.width,
-                source.height,
-                target.base,
-                target.width,
-                target.height,
+                out.buffer_of(&source),
+                out.buffer_of(&target),
+                source,
+                target,
             );
         }
         Ok(())
