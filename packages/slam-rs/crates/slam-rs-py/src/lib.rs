@@ -21,7 +21,7 @@ use slam_rs::frontend::flow::{
     PosePrediction,
 };
 use slam_rs::image::ImageU16;
-use slam_rs::{FrontendLane, ImageView, VioError};
+use slam_rs::{Backend, FrontendLane, ImageView, VioError};
 
 /// Map any core error onto `ValueError`, which is what every refusal here is.
 fn value_error<E: std::fmt::Display>(error: E) -> PyErr {
@@ -120,22 +120,48 @@ impl Vio {
     /// catalog's own dataclasses through [`Calibration::from_catalog`]. The
     /// estimator runs in single precision, which is the precision every
     /// reference run was produced at (`use-double` false).
+    /// `gpu` runs the frontend's pyramid, patch build and KLT tracker through
+    /// CubeCL on this host's GPU instead of the CPU port (decision D21). The
+    /// default is the CPU, which is what every accuracy reference was produced
+    /// on; a build without the `gpu` cargo feature refuses `gpu=True` rather
+    /// than ignoring it, and so does a build that has the feature on a host
+    /// with no usable GPU — a missing driver library, a driver that will not
+    /// initialise, no visible device, no adapter — each a `ValueError` naming
+    /// what is absent rather than the `PanicException` CubeCL's own unwrapped
+    /// bring-up produces (decision D32). A failure no probe anticipates is
+    /// caught rather than raised, so it is a `ValueError` too — with the
+    /// runtime's own panic message left on stderr, which is the only account of
+    /// a case the probe did not know to ask about.
+    ///
+    /// `threads` is **inert on the GPU lane**: it reaches
+    /// `FrontendOptions::threads`, which only `CpuPatchTracker::new` reads, and
+    /// the GPU tracker holds no work pool. It is accepted rather than refused
+    /// together with `gpu=True` so the same call site can select either lane.
     #[new]
-    #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None))]
+    #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None, gpu = false))]
     fn new(
         calibration: PyRef<'_, Calibration>,
         config: PyRef<'_, VioConfig>,
         threads: usize,
         max_keypoints: Option<usize>,
+        gpu: bool,
     ) -> PyResult<Self> {
+        let backend: Backend = if gpu { Backend::Gpu } else { Backend::Cpu };
         Ok(Self {
-            inner: slam_rs::Vio::new(
+            inner: slam_rs::Vio::with_backend(
                 config.inner.clone(),
                 calibration.inner.clone(),
                 frontend_options(threads, max_keypoints),
+                backend,
             )
             .map_err(value_error)?,
         })
+    }
+
+    /// Whether the frontend runs on the GPU.
+    #[getter]
+    fn gpu(&self) -> bool {
+        self.inner.backend() == Backend::Gpu
     }
 
     /// Cameras this estimator expects in every frameset.
@@ -1166,6 +1192,11 @@ fn wrong_type(what: &str, name: &str, expected: &str) -> PyErr {
 #[pymodule]
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", slam_rs::VERSION)?;
+    // Which GPU runtime this extension was compiled with, so a caller can say
+    // `cuda` or `wgpu` rather than `gpu`: the two are separate builds of one
+    // source and `Vio(gpu=True)` cannot tell them apart. `None` here is the CPU
+    // port, whose `gpu=True` is refused.
+    module.add("gpu_backend", slam_rs::GPU_BACKEND)?;
     module.add_class::<Vio>()?;
     module.add_class::<VioResult>()?;
     module.add_class::<VioStatus>()?;

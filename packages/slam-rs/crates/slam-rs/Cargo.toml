@@ -13,7 +13,45 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
+[features]
+# The kernels, the stage backends and the seam — everything that is not a
+# runtime. Internal: enable `gpu` or `gpu-wgpu`, which both turn it on. It
+# exists so the portable lane does not pull the NVIDIA one: `gpu-wgpu` used to
+# be `["gpu", "dep:cubecl-wgpu"]`, which put `cubecl-cuda` and cudarc and the
+# CUDA C++ codegen into every Pi 5, cap and Mac build, where `cuda_client` is
+# dead code that still compiles — on hosts where the CubeCL notes record a 195 s
+# Rust build for a trivial kernel.
+gpu-core = ["dep:cubecl"]
+# The CubeCL GPU frontend on the NVIDIA lane. Off by default: the CPU port is
+# what the fleet installs and what the pixi lock covers.
+gpu = ["gpu-core", "dep:cubecl-cuda", "dep:cudarc", "dep:libloading"]
+# The same kernels through wgpu (Vulkan / Metal / DX12), for the Spark, the
+# Pi 5 and the cap. Only the client line differs; `slam-rs-wgpu-test` — not a
+# `cargo check` — is what keeps that true.
+#
+# `exclusive-memory-only` — one wgpu buffer per handle instead of slices of a
+# shared page — is not a tuning choice, it is what makes the lane correct on
+# the cap. cubecl-wgpu 0.10 aligns its memory pool to the adapter's
+# `min_uniform_buffer_offset_alignment` (`runtime.rs:292`) and then binds those
+# slices as *storage* buffers, so on any adapter whose
+# `min_storage_buffer_offset_alignment` is the larger of the two, every slice
+# past the first is an invalid binding. The RK3588's Mali G610 asks for 64 and
+# gets slices on 32: five of the eleven tolerance tests died there with
+# "Buffer offset 139744 does not respect device's requested
+# min_storage_buffer_offset_alignment limit 64", and none of them can, because
+# the pool alignment is decided inside `create_server` and `RuntimeOptions`
+# carries no override.
+#
+# It costs nothing here: the per-frame path holds fifteen long-lived
+# allocations, so there is nothing for a shared page to save, and the plateau
+# drops from 40 MiB to 12 — which is the direction the 8 GB targets want.
+gpu-wgpu = ["gpu-core", "dep:cubecl-wgpu", "dep:wgpu", "cubecl-wgpu/exclusive-memory-only"]
+
 [dependencies]
+cubecl = { workspace = true, optional = true }
+cubecl-cuda = { workspace = true, optional = true }
+cudarc = { workspace = true, optional = true }
+libloading = { workspace = true, optional = true }
 kornia-image = { workspace = true }
 kornia-imgproc = { workspace = true }
 log = { workspace = true }
@@ -22,6 +60,34 @@ rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+wgpu = { workspace = true, optional = true }
+
+# `cubecl-wgpu` chooses its shader compiler from the adapter's backend at run
+# time — Vulkan takes SPIR-V, Metal takes MSL, anything else takes WGSL — but
+# which of those compilers is *built* is a cargo feature, and the two the fleet
+# needs cannot both be on for one platform: `spirv` adds ash and a SPIR-V
+# assembler and only ever fires on a Vulkan adapter, while `msl`'s backend is
+# `#[cfg(target_os = "macos")]` inside cubecl-wgpu and never fires anywhere
+# else. So the choice is per **target**, not per cargo feature of ours: one
+# `--features gpu-wgpu` build line works on the Mac, the Spark, the Pi and the
+# cap, and no caller has to know which compiler its host will use.
+#
+# Brush (`362dc39`) made the same switch an opt-in cargo feature instead, for a
+# reason that does not apply here: burn changes bool storage to `u8` as soon as
+# the Metal compiler is built, so a device that fails cubecl's family check
+# falls back to WGSL, which has no `u8`, and every kernel touching a bool stops
+# compiling. Our kernels bind no bool array (only `u8`, `u16`, `f32` and
+# `usize`), and cubecl-wgpu 0.10's Metal path has no family check — it takes
+# any Metal adapter — so the per-target form is safe and needs no flag.
+#
+# WGSL is what is left if neither fires, and it is not a lane: its compiler has
+# no `u16` or `u8` and panics on cubecl's worker thread while every launch
+# reports success (C107). `probe_storage` is what refuses that at construction.
+[target.'cfg(target_os = "macos")'.dependencies]
+cubecl-wgpu = { workspace = true, optional = true, features = ["msl"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+cubecl-wgpu = { workspace = true, optional = true, features = ["spirv"] }
 
 [dev-dependencies]
 approx = { workspace = true }

@@ -18,6 +18,7 @@ use serde::Deserialize;
 use slam_rs::calib::{Calibration, CameraModel, Kb4Params};
 use slam_rs::config::VioConfig;
 use slam_rs::estimator::FlowObservations;
+use slam_rs::frontend::tracker::PointsSoA;
 use slam_rs::image::ImageU16;
 use slam_rs::lie::{LieScalar, Se3};
 use slam_rs::types::KeypointId;
@@ -200,6 +201,7 @@ pub fn frobenius<S: LieScalar>(values: impl Iterator<Item = S>) -> f64 {
     values.map(|v| v.to_f64() * v.to_f64()).sum::<f64>().sqrt()
 }
 
+/// The C++ frontend's keypoints for one frameset, as the estimator takes them.
 ///
 /// Both lanes that replay `OracleFlow` need exactly this, and an id the
 /// insertion order would collide on cannot happen: the dump's ids are unique
@@ -277,122 +279,6 @@ pub fn available_framesets(directory: &Path, cameras: usize, limit: usize) -> us
             })
         })
         .count()
-}
-
-/// A textured 8-bit field with fine detail, so FAST has plenty to find: the
-/// smooth plane-wave texture above gives almost no corners.
-///
-/// One LCG plus a `sin`/`cos` wave, so it is the same field on every machine.
-pub fn cornered_bytes(width: usize, height: usize) -> Vec<u8> {
-    let mut out: Vec<u8> = vec![0u8; width * height];
-    let mut state: u32 = 0x1234_5678;
-    for y in 0..height {
-        for x in 0..width {
-            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            let wave: i32 = ((x as f64 / 11.0).sin() * 60.0 + (y as f64 / 7.0).cos() * 50.0) as i32;
-            let noise: i32 = (state >> 24) as i32 / 4;
-            out[y * width + x] = (128 + wave + noise).clamp(0, 255) as u8;
-        }
-    }
-    out
-}
-
-// ---- frontend fixtures (S25 FRONT) ----------------------------------------
-//
-// The frontend's synthetic rig and its two frames. `flow_rig` and `flow_config`
-// were byte-identical in `tests/frame_allocations.rs` and in
-// `src/frontend/flow.rs`'s test module, and the allocation test only measures
-// the frame the flow tests describe while the two stay in step.
-
-use slam_rs::calib::{CalibAccelBias, CalibGyroBias, PinholeParams};
-use slam_rs::config::MatchingGuessType;
-use slam_rs::lie::So3;
-use slam_rs::pyramid::{CpuPyramidBuilder, PyramidBuilder, PyramidU16};
-use std::collections::BTreeMap;
-
-/// The synthetic rig's frame size, shared by `flow_rig` and `dotted_image`.
-pub const FLOW_WIDTH: usize = 200;
-/// The synthetic rig's frame height.
-pub const FLOW_HEIGHT: usize = 200;
-
-/// `count` identical pinhole cameras 5 cm apart along `x`, all seeing a
-/// `FLOW_WIDTH` x `FLOW_HEIGHT` frame.
-pub fn flow_rig(count: usize) -> Calibration<f64> {
-    let intrinsics: CameraModel<f64> = CameraModel::Pinhole(PinholeParams {
-        fx: 180.0,
-        fy: 180.0,
-        cx: FLOW_WIDTH as f64 / 2.0,
-        cy: FLOW_HEIGHT as f64 / 2.0,
-    });
-    Calibration {
-        t_i_c: (0..count)
-            .map(|index| Se3::new(So3::identity(), Vector3::new(0.05 * index as f64, 0.0, 0.0)))
-            .collect(),
-        intrinsics: vec![intrinsics; count],
-        resolution: vec![[FLOW_WIDTH as u32, FLOW_HEIGHT as u32]; count],
-        vignette: Vec::new(),
-        cam_time_offset_ns: 0,
-        calib_accel_bias: CalibAccelBias::default(),
-        calib_gyro_bias: CalibGyroBias::default(),
-        imu_update_rate: 200.0,
-        gyro_noise_std: Vector3::repeat(1e-4),
-        accel_noise_std: Vector3::repeat(1e-3),
-        gyro_bias_std: Vector3::repeat(1e-5),
-        accel_bias_std: Vector3::repeat(1e-4),
-        unknown: BTreeMap::new(),
-    }
-}
-
-/// basalt's shipped configuration, with the matching guess set to the same
-/// pixel so that `flow_rig`'s cameras — which see identical frames — really do
-/// match.
-pub fn flow_config() -> VioConfig {
-    VioConfig {
-        optical_flow_matching_guess_type: MatchingGuessType::SamePixel,
-        ..VioConfig::default()
-    }
-}
-
-/// Bright 5x5 squares on a regular lattice, the whole frame shifted by `shift`
-/// pixels: four strong FAST corners each, and enough texture in between for the
-/// KLT to follow them.
-pub fn dotted_image(shift: i32) -> ImageU16 {
-    let mut image: ImageU16 = ImageU16::zeros(FLOW_WIDTH, FLOW_HEIGHT).expect("a valid geometry");
-    for y in 0..FLOW_HEIGHT {
-        for x in 0..FLOW_WIDTH {
-            let fx: f64 = f64::from(x as i32 - shift);
-            let fy: f64 = f64::from(y as i32);
-            let base: f64 = 18_000.0 + 5_000.0 * (fx * 0.07).sin() * (fy * 0.05).cos();
-            image.set(x, y, base as u16);
-        }
-    }
-    let mut cy: usize = 14;
-    while cy + 5 < FLOW_HEIGHT {
-        let mut cx: usize = 14;
-        while cx + 5 < FLOW_WIDTH {
-            for dy in 0..5 {
-                for dx in 0..5 {
-                    let x: i32 = (cx + dx) as i32 + shift;
-                    if x >= 0 && (x as usize) < FLOW_WIDTH {
-                        image.set(x as usize, cy + dy, 0xF000);
-                    }
-                }
-            }
-            cx += 17;
-        }
-        cy += 17;
-    }
-    image
-}
-
-/// A CPU pyramid of `image` with `levels` halvings on top of level 0.
-pub fn pyramid_of(image: &ImageU16, levels: usize) -> PyramidU16 {
-    let mut pyramid: PyramidU16 =
-        PyramidU16::with_capacity(image.width(), image.height(), levels).expect("a valid geometry");
-    CpuPyramidBuilder::new()
-        .build(0, image, &mut pyramid)
-        .expect("the geometry the pyramid was allocated for");
-    pyramid
 }
 
 // ── the VIO oracle fixture ─────────────────────────────────────
@@ -729,4 +615,199 @@ impl Compare {
             }
         }
     }
+}
+
+// ── synthetic images and patch positions ───────────────────────────────────
+//
+// Two fields, shared because the tracker's unit tests, the GPU tolerance tests
+// and the FAST model test all need the *same* pixels: a band-limited one where
+// every patch is well conditioned, and a corner-rich one where FAST has plenty
+// to find.
+
+/// Twelve plane waves between 16 and 56 pixels, in fixed pseudo-random
+/// directions and phases: band-limited, so a shift really does survive down a
+/// pyramid and every patch's `H_se2` is well conditioned.
+pub fn texture(x: f64, y: f64) -> f64 {
+    const WAVES: [(f64, f64, f64); 12] = [
+        (16.0, 0.031, 0.11),
+        (19.0, 0.187, 0.37),
+        (23.0, 0.311, 0.63),
+        (27.0, 0.451, 0.05),
+        (31.0, 0.077, 0.81),
+        (35.0, 0.229, 0.29),
+        (39.0, 0.383, 0.55),
+        (43.0, 0.497, 0.73),
+        (47.0, 0.143, 0.19),
+        (51.0, 0.271, 0.91),
+        (54.0, 0.419, 0.43),
+        (56.0, 0.353, 0.67),
+    ];
+    let mut total: f64 = 0.0;
+    for (wavelength, direction, phase) in WAVES {
+        let angle: f64 = std::f64::consts::TAU * direction;
+        let projection: f64 = x * angle.cos() + y * angle.sin();
+        total += (std::f64::consts::TAU * (projection / wavelength + phase)).sin();
+    }
+    total / WAVES.len() as f64
+}
+
+/// [`texture`] rendered into a `u16` image, shifted by `(dx, dy)`.
+pub fn textured_image(width: usize, height: usize, dx: f32, dy: f32) -> ImageU16 {
+    let mut image: ImageU16 = ImageU16::zeros(width, height).expect("a valid image geometry");
+    for y in 0..height {
+        for x in 0..width {
+            let value: f64 = texture(x as f64 - f64::from(dx), y as f64 - f64::from(dy));
+            let scaled: f64 = (value * 0.4 + 0.5) * 65535.0;
+            image.set(x, y, scaled.clamp(0.0, 65535.0) as u16);
+        }
+    }
+    image
+}
+
+/// A textured 8-bit field with fine detail, so FAST has plenty to find: the
+/// smooth plane-wave texture above gives almost no corners.
+///
+/// One LCG plus a `sin`/`cos` wave, so it is the same field on every machine.
+pub fn cornered_bytes(width: usize, height: usize) -> Vec<u8> {
+    let mut out: Vec<u8> = vec![0u8; width * height];
+    let mut state: u32 = 0x1234_5678;
+    for y in 0..height {
+        for x in 0..width {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let wave: i32 = ((x as f64 / 11.0).sin() * 60.0 + (y as f64 / 7.0).cos() * 50.0) as i32;
+            let noise: i32 = (state >> 24) as i32 / 4;
+            out[y * width + x] = (128 + wave + noise).clamp(0, 255) as u8;
+        }
+    }
+    out
+}
+
+/// [`cornered_bytes`] as a `u16` image, the byte in the high half.
+///
+/// The detector reads `pixel >> 8`, so this is the same field the CPU sweep and
+/// the GPU score kernel see.
+pub fn cornered_image(width: usize, height: usize) -> ImageU16 {
+    let bytes: Vec<u8> = cornered_bytes(width, height);
+    let mut image: ImageU16 = ImageU16::zeros(width, height).expect("a valid image geometry");
+    for y in 0..height {
+        for x in 0..width {
+            image.set(x, y, u16::from(bytes[y * width + x]) << 8);
+        }
+    }
+    image
+}
+
+/// A grid of source positions well inside a `size` x `size` frame, spaced so no
+/// two patches overlap and every one is far enough from the border for the
+/// coarsest level's 52-tap pattern.
+pub fn grid_positions(size: usize) -> PointsSoA {
+    let mut positions: PointsSoA = PointsSoA::with_capacity(256);
+    let mut y: usize = 96;
+    while y + 96 < size {
+        let mut x: usize = 96;
+        while x + 96 < size {
+            positions.push(Vector2::new(x as f32 + 0.37, y as f32 - 0.21));
+            x += 71;
+        }
+        y += 71;
+    }
+    positions
+}
+
+// ---- frontend fixtures (S25 FRONT) ----------------------------------------
+//
+// The frontend's synthetic rig and its two frames. `flow_rig` and `flow_config`
+// were byte-identical in `tests/frame_allocations.rs` and in
+// `src/frontend/flow.rs`'s test module, and the allocation test only measures
+// the frame the flow tests describe while the two stay in step.
+
+use slam_rs::calib::{CalibAccelBias, CalibGyroBias, PinholeParams};
+use slam_rs::config::MatchingGuessType;
+use slam_rs::lie::So3;
+use slam_rs::pyramid::{CpuPyramidBuilder, PyramidBuilder, PyramidU16};
+use std::collections::BTreeMap;
+
+/// The synthetic rig's frame size, shared by `flow_rig` and `dotted_image`.
+pub const FLOW_WIDTH: usize = 200;
+/// The synthetic rig's frame height.
+pub const FLOW_HEIGHT: usize = 200;
+
+/// `count` identical pinhole cameras 5 cm apart along `x`, all seeing a
+/// `FLOW_WIDTH` x `FLOW_HEIGHT` frame.
+pub fn flow_rig(count: usize) -> Calibration<f64> {
+    let intrinsics: CameraModel<f64> = CameraModel::Pinhole(PinholeParams {
+        fx: 180.0,
+        fy: 180.0,
+        cx: FLOW_WIDTH as f64 / 2.0,
+        cy: FLOW_HEIGHT as f64 / 2.0,
+    });
+    Calibration {
+        t_i_c: (0..count)
+            .map(|index| Se3::new(So3::identity(), Vector3::new(0.05 * index as f64, 0.0, 0.0)))
+            .collect(),
+        intrinsics: vec![intrinsics; count],
+        resolution: vec![[FLOW_WIDTH as u32, FLOW_HEIGHT as u32]; count],
+        vignette: Vec::new(),
+        cam_time_offset_ns: 0,
+        calib_accel_bias: CalibAccelBias::default(),
+        calib_gyro_bias: CalibGyroBias::default(),
+        imu_update_rate: 200.0,
+        gyro_noise_std: Vector3::repeat(1e-4),
+        accel_noise_std: Vector3::repeat(1e-3),
+        gyro_bias_std: Vector3::repeat(1e-5),
+        accel_bias_std: Vector3::repeat(1e-4),
+        unknown: BTreeMap::new(),
+    }
+}
+
+/// basalt's shipped configuration, with the matching guess set to the same
+/// pixel so that `flow_rig`'s cameras — which see identical frames — really do
+/// match.
+pub fn flow_config() -> VioConfig {
+    VioConfig {
+        optical_flow_matching_guess_type: MatchingGuessType::SamePixel,
+        ..VioConfig::default()
+    }
+}
+
+/// Bright 5x5 squares on a regular lattice, the whole frame shifted by `shift`
+/// pixels: four strong FAST corners each, and enough texture in between for the
+/// KLT to follow them.
+pub fn dotted_image(shift: i32) -> ImageU16 {
+    let mut image: ImageU16 = ImageU16::zeros(FLOW_WIDTH, FLOW_HEIGHT).expect("a valid geometry");
+    for y in 0..FLOW_HEIGHT {
+        for x in 0..FLOW_WIDTH {
+            let fx: f64 = f64::from(x as i32 - shift);
+            let fy: f64 = f64::from(y as i32);
+            let base: f64 = 18_000.0 + 5_000.0 * (fx * 0.07).sin() * (fy * 0.05).cos();
+            image.set(x, y, base as u16);
+        }
+    }
+    let mut cy: usize = 14;
+    while cy + 5 < FLOW_HEIGHT {
+        let mut cx: usize = 14;
+        while cx + 5 < FLOW_WIDTH {
+            for dy in 0..5 {
+                for dx in 0..5 {
+                    let x: i32 = (cx + dx) as i32 + shift;
+                    if x >= 0 && (x as usize) < FLOW_WIDTH {
+                        image.set(x as usize, cy + dy, 0xF000);
+                    }
+                }
+            }
+            cx += 17;
+        }
+        cy += 17;
+    }
+    image
+}
+
+/// A CPU pyramid of `image` with `levels` halvings on top of level 0.
+pub fn pyramid_of(image: &ImageU16, levels: usize) -> PyramidU16 {
+    let mut pyramid: PyramidU16 =
+        PyramidU16::with_capacity(image.width(), image.height(), levels).expect("a valid geometry");
+    CpuPyramidBuilder::new()
+        .build(0, image, &mut pyramid)
+        .expect("the geometry the pyramid was allocated for");
+    pyramid
 }

@@ -88,6 +88,15 @@ class Config:
     """Longest time window fetched from the catalog in one round trip."""
     output_csv: Path | None = None
     """Where the estimated trajectory is written; defaults to ``data/<segment>/slam_rs.csv``."""
+    gpu: bool = False
+    """Run the frontend's pyramid, patch build and KLT tracker on the GPU through CubeCL.
+
+    The default is the CPU port, which is what every reference number was
+    produced on. A core built without the ``gpu`` cargo feature refuses this
+    rather than quietly running on the CPU, and so does a host with no usable
+    GPU: the run stops with one sentence naming what is absent.
+    """
+
 
 @dataclass(slots=True)
 class FrontendStage:
@@ -214,7 +223,7 @@ def main(config: Config) -> None:
             # with no driver, no device or no adapter — and the shim
             # (:func:`slam_rs.apis.run`) is what turns it into one sentence and a
             # non-zero exit rather than a traceback through the feed.
-            vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment))
+            vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment), gpu=config.gpu)
             stage = VioStage(
                 lockstep=Lockstep(vio=vio),
                 logger=VioLogger(

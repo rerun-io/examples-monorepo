@@ -17,10 +17,12 @@ from fixture_types import never
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 
+from slam_rs import _core
 from slam_rs.apis import fleet_check
-from slam_rs.apis.fleet_check import CLIP_JSON_KEYS, ClipResult, Config, clip_json, main, measure
+from slam_rs.apis.fleet_check import CLIP_JSON_KEYS, ClipResult, Config, clip_json, main, measure, this_lane
 from slam_rs.machine import Machine
 from slam_rs.reference import (
+    MANIFEST_PATH,
     MIN_TRACKED_POSES,
     PATH_BOUND_MAX_CLIP_S,
     SMOKE_SEGMENTS,
@@ -341,12 +343,68 @@ def test_the_first_clips_evidence_survives_a_directory_that_is_not_there_yet(mon
     clip's row has to be on disk already — and it is not, if the last line of the
     run is what discovers that ``out/`` does not exist.
     """
-    monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment: PASSING)
+    monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment, _gpu: PASSING)
     output: Path = tmp_path / "out" / "fleet_check.json"
     main(Config(segments=(SMOKE_SEGMENTS[1],), output_json=output))
     written: dict = json.loads(output.read_text())
-    assert list(written) == ["machine", "clips"]
+    assert list(written) == ["machine", "lane", "clips"]
     assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)
+
+
+def test_the_lane_is_on_the_json_and_the_clip_columns_are_not(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A GPU row and a CPU row differ in the run, not in the clip's columns.
+
+    The chart reads :data:`~slam_rs.apis.fleet_check.CLIP_JSON_KEYS` as a
+    contract, so the lane cannot be a thirteenth column of it; it is one key
+    beside ``machine``.
+    """
+    monkeypatch.setattr(_core, "gpu_backend", "wgpu")
+    monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment, _gpu: PASSING)
+    output: Path = tmp_path / "fleet_check.json"
+    main(Config(segments=(SMOKE_SEGMENTS[1],), output_json=output, gpu=True))
+    written: dict = json.loads(output.read_text())
+    assert written["lane"] == "wgpu"
+    assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)
+
+
+def test_the_lane_names_the_gpu_runtime_this_core_was_built_with() -> None:
+    """``gpu`` was two lanes under one name, and the JSON is where that fact was lost.
+
+    The CUDA build and the portable wgpu build are the same source and the same
+    ``--gpu`` flag, so a row that says only ``gpu`` cannot say which backend
+    produced its numbers — which is the first thing a reader of a cross-machine
+    chart asks, since the two lanes differ on MIO14. The extension reports the
+    runtime it was compiled with and the lane is that name.
+    """
+    assert _core.gpu_backend in (None, "cuda", "wgpu")
+    assert this_lane(gpu=False) == "cpu"
+
+
+def test_each_gpu_build_reports_its_own_backend_as_the_lane(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both GPU lanes, from the one core this suite has: the name comes from the build, not the flag."""
+    monkeypatch.setattr(_core, "gpu_backend", "cuda")
+    assert this_lane(gpu=True) == "cuda"
+    assert this_lane(gpu=False) == "cpu"
+    monkeypatch.setattr(_core, "gpu_backend", "wgpu")
+    assert this_lane(gpu=True) == "wgpu"
+
+
+def test_a_gpu_run_on_a_core_without_a_gpu_feature_is_refused_before_any_file_is_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A CPU-only core has no GPU lane to name, and the refusal is worth nothing after a replay.
+
+    :class:`slam_rs._core.Vio` refuses ``gpu=True`` on such a core anyway; asking
+    the extension which runtime it carries is what lets the row say so before the
+    manifest is even read.
+    """
+
+    monkeypatch.setattr(_core, "gpu_backend", None)
+    monkeypatch.setattr(fleet_check, "measure", never("a clip was measured on a core that has no GPU lane"))
+    output: Path = tmp_path / "fleet_check.json"
+    with pytest.raises(ValueError, match="built with a GPU cargo feature"):
+        main(Config(segments=(SMOKE_SEGMENTS[1],), output_json=output, gpu=True))
+    assert not output.exists()
 
 
 def test_an_empty_segment_selection_is_refused_rather_than_read_as_a_pass(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -362,3 +420,25 @@ def test_an_empty_segment_selection_is_refused_rather_than_read_as_a_pass(monkey
     with pytest.raises(ValueError, match="--segments named no clip"):
         main(Config(segments=(), output_json=output))
     assert not output.exists()
+
+
+def test_the_gpu_flag_reaches_the_estimator_and_nothing_else_does(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--gpu`` is only worth a row if it arrives at the run that produced it.
+
+    The flag crosses two hops — the config to :func:`~slam_rs.apis.fleet_check.measure`,
+    then ``measure`` to :func:`~slam_rs.tracking.run_segment` — and a lost hop
+    would label a CPU row ``gpu`` with nothing to notice, which is the one
+    failure this whole tool exists to rule out.
+    """
+    seen: list[bool] = []
+
+    def record(_manifest: ReferenceManifest, _segment: ReferenceSegment, *, gpu: bool) -> SegmentRun:
+        seen.append(gpu)
+        return SegmentRun(estimate=empty_trajectory(), framesets=412, lost=412, wall_s=1.0)
+
+    monkeypatch.setattr(fleet_check, "run_segment", record)
+    manifest: ReferenceManifest = fleet_check.load_manifest(MANIFEST_PATH)
+    segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENTS[1])
+    measure(manifest, segment, True)
+    measure(manifest, segment)
+    assert seen == [True, False]

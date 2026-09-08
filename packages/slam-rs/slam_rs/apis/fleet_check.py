@@ -17,7 +17,9 @@ import json
 import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Literal, TypeAlias
 
+from slam_rs import _core
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb
 from slam_rs.reference import (
     GT_BAND_RATIO,
@@ -172,12 +174,16 @@ def check_scoring_inputs(manifest: ReferenceManifest, segment: ReferenceSegment)
     return reference.path, segment.gt_csv
 
 
-def measure(manifest: ReferenceManifest, segment: ReferenceSegment) -> ClipResult:
+def measure(manifest: ReferenceManifest, segment: ReferenceSegment, gpu: bool = False) -> ClipResult:
     """Run one clip through the estimator and score it against both references.
 
     Args:
         manifest: The reference set, which resolves the dataset's config and the C++ trajectory.
         segment: The clip to run; its three artifacts must be on this machine.
+        gpu: Put the frontend on this machine's GPU through CubeCL instead of the
+            CPU port. A core built without a GPU cargo feature refuses it rather
+            than quietly running on the CPU, which is what makes a GPU row a GPU
+            row.
 
     Returns:
         The clip's numbers, with the peak resident set the process has reached.
@@ -197,7 +203,7 @@ def measure(manifest: ReferenceManifest, segment: ReferenceSegment) -> ClipResul
     # costs nothing either.
     cpp: Trajectory = read_trajectory(cpp_csv)
     truth: Trajectory = read_trajectory(gt_csv)
-    run: SegmentRun = run_segment(manifest, segment)
+    run: SegmentRun = run_segment(manifest, segment, gpu=gpu)
     tracked: int = len(run.estimate)
     # A run below the floor is not scored at all: `ate` has no pose to align and
     # raises, and a machine that tracked nothing is precisely the machine this
@@ -281,6 +287,39 @@ def clip_json(clip: ClipResult) -> dict[str, object]:
     return {key: getattr(clip, key) for key in CLIP_JSON_KEYS}
 
 
+Lane: TypeAlias = Literal["cpu", "cuda", "wgpu"]
+"""Which frontend measured a row: the CPU port, or the GPU runtime the core was built with."""
+
+
+def this_lane(gpu: bool) -> Lane:
+    """The lane this core runs a clip on, named after the runtime rather than the flag.
+
+    ``--gpu`` does not say which GPU: the NVIDIA ``gpu`` feature and the portable
+    ``gpu-wgpu`` one are two builds of one source behind the same flag, and they
+    do not agree on every clip, so a row labelled ``gpu`` has lost the first
+    thing its reader asks. The extension reports the feature it was compiled with
+    (:data:`slam_rs._core.gpu_backend`) and the lane is that name.
+
+    Args:
+        gpu: Whether the run was asked for the GPU frontend.
+
+    Returns:
+        ``cpu`` for the CPU port, or the compiled-in runtime's own name.
+
+    Raises:
+        ValueError: If the GPU frontend was asked of a core built without a GPU
+            cargo feature. :class:`slam_rs._core.Vio` refuses such a run too;
+            asking here is what keeps the refusal ahead of the manifest and the
+            first replay.
+    """
+    if not gpu:
+        return "cpu"
+    backend: Lane | None = _core.gpu_backend
+    if backend is None:
+        raise ValueError("--gpu needs a core built with a GPU cargo feature; this one has none (slam-rs-gpu-build for CUDA, slam-rs-wgpu-build for wgpu)")
+    return backend
+
+
 @dataclass(slots=True)
 class Config:
     """Run the reference smoke clips on this machine and report the D60 verdict."""
@@ -291,6 +330,15 @@ class Config:
     """Clips to run, in order; naming none of them is refused rather than run as a pass."""
     output_json: Path = Path("fleet_check.json")
     """Where the machine's facts and every clip's numbers are written."""
+    gpu: bool = False
+    """Run the frontend on this machine's GPU through CubeCL instead of the CPU port.
+
+    Which lane produced a row is a fact about the run and not about the machine
+    or the clip, so it is written as the JSON's own ``lane`` key beside
+    ``machine`` and ``clips`` — :data:`CLIP_JSON_KEYS` is a consumer contract and
+    gains nothing. The key's value is the runtime, not the flag:
+    :func:`this_lane`.
+    """
 
 
 def main(config: Config) -> None:
@@ -304,8 +352,9 @@ def main(config: Config) -> None:
         config: Parsed CLI options.
 
     Raises:
-        ValueError: If ``--segments`` names no clip at all, or if it names an id the
-            manifest does not have.
+        ValueError: If ``--segments`` names no clip at all, if it names an id the
+            manifest does not have, or if ``--gpu`` was asked of a core built
+            without a GPU cargo feature (:func:`this_lane`).
         FileNotFoundError: If any named clip's scoring inputs cannot be read
             here. All of them are decided before the first replay.
         SystemExit: If any clip missed a D60 clause.
@@ -314,6 +363,9 @@ def main(config: Config) -> None:
     # which a script reads as this machine having passed (S24 review).
     if not config.segments:
         raise ValueError("--segments named no clip; a run that measures nothing is not a pass")
+    # Before any file is opened: a `--gpu` run has no lane to report on a core
+    # built without a GPU feature, and that costs nothing to say here.
+    lane: Lane = this_lane(config.gpu)
     manifest: ReferenceManifest = load_manifest(artifact_root=config.artifact_root)
     # Every id resolved before the first replay, not one at a time inside the
     # loop: `--segments <410 s clip> typo` used to pay that clip and then reach
@@ -324,14 +376,15 @@ def main(config: Config) -> None:
     for segment in segments:
         check_scoring_inputs(manifest, segment)
     machine: Machine = this_machine()
-    print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores")
+    print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores, {lane} lane")
     config.output_json.parent.mkdir(parents=True, exist_ok=True)
     results: list[ClipResult] = []
     for segment in segments:
-        results.append(measure(manifest, segment))
+        results.append(measure(manifest, segment, config.gpu))
         print(results[-1].row(machine))
         payload: dict[str, object] = {
             "machine": asdict(machine),
+            "lane": lane,
             "clips": [clip_json(clip) for clip in results],
         }
         config.output_json.write_text(json.dumps(payload, indent=2))
