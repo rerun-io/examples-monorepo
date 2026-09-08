@@ -546,6 +546,19 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
     }
 
     /// Predict the state at the end of the interval (`preintegration.h:174-181`).
+    ///
+    /// **Unchecked precondition:** `state0` is the state at
+    /// [`Self::get_start_t_ns`]. The delta this applies is relative to that
+    /// start, so a `state0` from any other time advances the pose and the
+    /// velocity over an interval it did not begin, and the timestamp it reports
+    /// is `state0.t_ns` plus the delta **saturated** — at `i64::MAX` the clock
+    /// stands still while the motion still applies. Both callers hold the
+    /// precondition by construction and neither reads the timestamp: the
+    /// estimator files the predicted state under the frameset's own `t_ns`
+    /// (`:427-441`) and the frontend takes only the pose
+    /// (`frame_to_frame_optical_flow.h:149`). Checking it would make this
+    /// fallible on the LM path for a value nothing there reads, which is the
+    /// review follow-up rather than this fix round.
     pub fn predict_state(&self, state0: &PoseVelState<S>, g: &Vector3<S>) -> PoseVelState<S> {
         let dt: S = c::<S>(self.delta_state.t_ns as f64) * c::<S>(1e-9); // `:175`
         let mut state1: PoseVelState<S> = PoseVelState {
