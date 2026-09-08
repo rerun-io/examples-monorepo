@@ -82,10 +82,8 @@ class ClipResult:
     unscored: str | None
     """Why nothing could be scored, or None where it was; the sentence :func:`~slam_rs.trajectory.ate` refused the pair with.
 
-    D60's pose floor is not the only way a clip goes unscored. ``ate`` needs an
-    association and not a pose count, so an estimate on another clock clears the
-    floor and still has nothing to align — which is a fact about this machine and
-    therefore a row, not a traceback (S22 review round 2).
+    D60's pose floor is not the only way a clip goes unscored; see ``ate`` for
+    why a refusal is a row here.
     """
 
     @property
@@ -352,11 +350,7 @@ class Config:
     manifest: Path = MANIFEST_PATH
     """Reference manifest; ``--artifact-root`` is usually the flag a machine without the NAS wants instead."""
     artifact_root: Path | None = None
-    """Read every recording and sidecar from ``<root>/<segment id>/`` instead of the manifest's own NAS paths.
-
-    What a machine without the NAS points at: one directory, no manifest copy
-    and no ``sed``.
-    """
+    """Read every recording and sidecar from one directory per segment; see :func:`slam_rs.reference.relocate`."""
     segments: tuple[str, ...] = SMOKE_SEGMENTS
     """Clips to run, in order; naming none of them is refused rather than run as a pass."""
     output_json: Path = Path("fleet_check.json")

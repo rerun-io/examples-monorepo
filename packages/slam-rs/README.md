@@ -625,24 +625,21 @@ which is what the frontend's constructor then takes.
 `reference_segments.toml` freezes ten Monado SLAM Dataset segments — five
 two-camera `msd-index` (KB4 fisheye, 54 Hz) and five four-camera `msd-g2`
 (radtan8, 30 Hz) — in three tiers: **smoke** on every commit, **accuracy** per
-pull request, **long** nightly. Each entry carries the catalog entry id, the NAS
-storage URLs of the `base` and `gt` layers with their registered size and schema
-digest, the `gt.csv` sidecar, the capture and ground-truth properties the catalog
-reports, the frozen decode path and the frozen IMU noise model. A `[[dataset]]`
-block per catalog dataset pins the rig geometry — per-camera resolution and image
-rotation — and names the basalt VIO config its segments run with; a `[robocap]`
-section adds the two RoboCap sessions, 15 (1,588 framesets) and 21 (4,648),
-which have no ground truth and are gated against basalt's own output instead.
-Only session 15 carries a reference wall, measured on the cap itself.
+pull request, **long** nightly. A `[[dataset]]` block per catalog dataset pins the
+rig geometry and names the basalt VIO config its segments run with; a `[robocap]`
+section adds the two RoboCap sessions, 15 (1,588 framesets) and 21 (4,648), which
+have no ground truth and are gated against basalt's own output instead. Only
+session 15 carries a reference wall, measured on the cap itself.
 
 Four things are frozen because the catalog cannot carry them and each one moves
-the numbers: the IMU noise densities and update rate (basalt's `msd*_calib.json`),
-the camera-to-IMU time offset (0 for MSD, 14,902,432 ns for RoboCap), the decode
-path (`cpu_gray8_dav1d_1thread`, worth about 5 cm of ATE against NVDEC RGB), and
-the VIO config, vendored under `configs/` — basalt's constructor defaults are not
-its shipped files (`vio_marg_lost_landmarks`) and the difference was worth up to
-12 cm (C72), so `slam_rs.reference.flow_config` reads the dataset's file and
-asserts the manifest's image safe radius against it.
+the numbers: the IMU noise densities and update rate, the camera-to-IMU time
+offset (0 for MSD, 14,902,432 ns for RoboCap), the decode path
+(`cpu_gray8_dav1d_1thread`, worth about 5 cm of ATE against NVDEC RGB), and the
+VIO config, vendored under `configs/` — basalt's constructor defaults are not its
+shipped files, and `vio_marg_lost_landmarks` alone was worth up to 12 cm (C72),
+so `slam_rs.reference.flow_config` reads the dataset's file and asserts the
+manifest's image safe radius against it. `slam_rs.reference`'s module docstring
+carries the rest of the account, including where the V2 tolerances live and why.
 
 ```python
 from slam_rs.reference import load_manifest
@@ -680,29 +677,22 @@ measures the estimator, not the decoder.
 ### Two clocks, converted once
 
 The catalog indexes a segment on `video_time`, which is **relative** to
-`capture.start_time_ns`. Every basalt CSV, including the `gt.csv` sidecars, is on
-the **absolute** device clock. On the Index smoke segment the two differ by
+`capture.start_time_ns`, while every basalt CSV including the `gt.csv` sidecars is
+on the **absolute** device clock; on the Index smoke segment the two differ by
 10,433,867,587,166 ns, so a trajectory exported on the wrong clock associates with
 nothing at all. The feed works in `video_time` throughout and
-`trajectory.shift_clock` converts once, at the CSV boundary — the same discipline
-the w-first-versus-XYZW quaternion ordering follows.
+`trajectory.shift_clock` converts once, at the CSV boundary.
 
 ## The feed, the metrics and the replay tool
 
 `slam_rs.catalog_feed` turns one segment into calibration and grayscale
-framesets. It reads a catalog URL or local `.rrd` files served in process (no
-catalog server needed) and decodes AV1 with single-threaded dav1d to `gray8`.
-Video, inertial samples and ground truth are all fetched one `video_time` window
-at a time, with window edges on frames that are keyframes in every camera, so
-`window_s` really does bound memory on the 410 s and 586 s segments. Each
-frameset carries a sha256 of its pixels, the inertial samples since the previous
-frameset (running one past its own timestamp, so a blocking backend cannot
-deadlock), and the nearest ground-truth pose within the association tolerance.
-
-`slam_rs.trajectory` reads and writes basalt's CSV form (`#timestamp [ns], p_x,
-…, q_w, …`, w-first, integer nanoseconds), associates two trajectories with a
-5 ms tolerance, and reports rigid-aligned ATE plus the fork's PASS criteria. The
-alignment is `golden_compare.py`'s inline arithmetic rather than the shared
+framesets, reading a catalog URL or local `.rrd` files served in process (no
+catalog server needed); its module docstring states the decisions that silently
+change the numbers — the pinned `gray8` dav1d path, the one-query windows whose
+edges land on frames that are keyframes in every camera, the rig shape and the
+two clocks. `slam_rs.trajectory` reads and writes basalt's CSV form (w-first,
+integer nanoseconds) and reports the rigid-aligned ATE the gate is written
+against, in `golden_compare.py`'s own arithmetic rather than the shared
 `simplecv` helper, whose variance floor would reject a stationary rig that the
 fork passes.
 
@@ -731,20 +721,14 @@ the dataset's own entity tree so nothing needs a second coordinate convention:
 | `/stats/frontend/...` | `num_tracks` and `num_new` per camera, and `frontend_ms` |
 
 The overlay is the parity claim made visible, and it is only ever drawn on the
-recording it came from. The eight committed dumps under
-`crates/slam-rs/tests/fixtures/flow/dumps/` are on the feed's `video_time` clock,
-which starts at zero on **every** segment, so the timestamp alone is not an
-association: `dumps/source.json` names the segment they came from, and the logger
-compares that name once, when it is built, with the segment id the feed read out
-of the recording being replayed. So the overlay follows the recording itself,
-however its file is named or reached — `--segment` or `--rrd`. A directory from
-another recording draws nothing and says so in one line; one carrying frames but
-no `source.json` is refused rather than drawn on whatever is being replayed, as
-is one carrying another rig's cameras. The overlay clears itself on the first
-frameset past the last dump rather than leaving a stale claim on screen. On the
-smoke segment the port hands out 175 keypoint ids over the first eight framesets where
-the C++ hands out 174, and every magenta ring in the viewer carries a coloured
-port dot at its centre bar a handful — the detector gap the flow gate measures.
+recording it came from: the eight committed dumps under
+`crates/slam-rs/tests/fixtures/flow/dumps/` name their segment in
+`dumps/source.json`, and `slam_rs.frontend_log`'s module docstring says why a
+`video_time` timestamp is not an association and what a directory from another
+recording, another rig or no `source.json` gets instead. On the smoke segment the
+port hands out 175 keypoint ids over the first eight framesets where the C++
+hands out 174, and every magenta ring in the viewer carries a coloured port dot
+at its centre bar a handful — the detector gap the flow gate measures.
 
 A blueprint is sent with the recording: one 2D view per camera plus the counters,
 panels collapsed. The whole 412-frameset smoke segment is 34.5 MiB of `.rrd` and
@@ -772,22 +756,17 @@ the same tree:
 | `/world/rig_00/cam_MM/pinhole/keypoints` | the estimator's own frontend output, in the frontend rung's palette |
 | `/stats/vio/...` | landmark, observation and keyframe counts, LM iterations, lambda and the error before and after, the six `stage_ms/*`, `track_ms`, and `ate_cm/{gt,cpp}` |
 
-The three trajectories do not start in one frame: basalt initialises its world at
-the identity with gravity along z, while the ground truth is in the capture rig's
-own frame. The run and the C++ reference therefore carry a `Transform3D` — the
-rigid alignment onto the ground truth, the same one the ATE reports, refreshed
-every 30 framesets — so everything under them is logged in the estimator's frame
-and drawn in the dataset's. The alignment is the identity until enough poses have
-been associated, so a run visibly settles into place over its first second.
-
-Both references are drawn only up to the cursor, as the estimate is, which costs
-one re-logged strip per frameset, quadratic in the frameset count. Each of the
-three is therefore drawn at the frameset cadence: the ground truth runs at 917 Hz
-against 54 Hz of framesets, and re-logging it whole cost 17.20 MB of the smoke
-recording's 54.13 MB of rows to draw a line no viewer can resolve. Thinned, the
-three strips are 1.04 MB each over the 412-frameset smoke segment and about
-100 MB each over a 4,000-frameset one, so a long segment still wants
-`--max-framesets`.
+The three trajectories do not start in one frame — basalt initialises its world
+at the identity with gravity along z, the ground truth is in the capture rig's
+own frame — so the run and the C++ reference carry the rigid alignment onto the
+ground truth as a `Transform3D`, refreshed every 30 framesets, and a run visibly
+settles into place over its first second. All three are drawn only up to the
+cursor and thinned to the frameset cadence: 1.04 MB each over the 412-frameset
+smoke segment, against the 17.20 MB of that recording's 54.13 MB that re-logging
+the 917 Hz ground truth whole cost, and about 100 MB each over a 4,000-frameset
+clip, so a long segment still wants `--max-framesets`. `slam_rs.vio_log`'s module
+docstring carries the reasoning, the visible time range that makes a per-frameset
+segment render as a path, and why the window is wireframes and the rig is not.
 
 ```bash
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py \
@@ -797,45 +776,30 @@ pixi run -e slam-rs-dev --frozen python tools/apps/replay.py \
 ## The V2 gate
 
 `tests/test_v2_gate.py` is the milestone (D14, D35, D36, D58). Per gated clip,
-driving `_core.Vio` and the feed directly with nothing logged:
-
-* every frameset resolved: one refused for want of IMU is held and tracked again
-  once the samples arrive, and anything still held when the clip ends is a lost
-  frameset (D17);
-* ATE RMSE against the basalt C++ trajectory fed the same decoded pixels, at most
-  2 cm — and only where the C++ meets that against itself, which is clips under
-  `PATH_BOUND_MAX_CLIP_S` = 100 seconds of replayed footage: on the 410-second
-  `MIO14` its own two precisions are 4.24 cm apart, so a 2 cm bound there would
-  gate the clip's length rather than the port (D60);
-* ATE RMSE against the `gt.csv` sidecar, inside **the C++'s own precision band**
-  — `rmse_cm` and `rmse_cm_f64` in the manifest, the same code on the same pixels
-  with `use-double` flipped — or within `GT_BAND_RATIO` = 1.2 of the band's worst
-  member, whichever is looser, which is the second alone since the ratio is above
-  one. The band is 0.00007 cm wide on `MIO10` and 2.3 cm wide on `MIO14`, so
-  "inside the band" on its own would gate the tight clips on rounding (D60);
-* speed: the replay's own feed loop — decode plus `track`, nothing logged, the
-  loop the C++ reference timed and recorded as `run.feed_wall_time_s` — within
-  1.2x the C++ single-thread wall for the same footage (D58). Never left off: a
-  port several times slower is not a port of the thing. Every row prints
-  `wall x.xx s, C++ y.yy s, ratio z.zz`.
-
-The association is driven by the estimate — each of its poses takes the nearest
-reference pose within 5 ms — because that is how the manifest's own C++ numbers
-were produced. The `no_divergence` pair (`MGO01_low_light`, `MGO13_sudden_movements`)
-gates the frameset and speed clauses plus a bounded, finite run: basalt itself
-sits at 43 cm and 78 cm there, and two legitimate decode paths of the same C++
-estimator already differ by 18 to 32 cm, so a tolerance would measure noise. A
-second test runs the smoke segment twice and diffs the CSVs byte for byte, which
-is what Offline mode's "no queue state reaches a decision" means (D17).
+driving `_core.Vio` and the feed directly with nothing logged: every frameset
+resolved, a refusal for want of IMU held and tracked again once the samples
+arrive (D17); at most 2 cm of ATE RMSE against the basalt C++ trajectory fed the
+same decoded pixels, and only where the C++ meets that against itself, which is
+clips under `PATH_BOUND_MAX_CLIP_S` = 100 seconds of replayed footage — on the
+410-second `MIO14` its own two precisions are 4.24 cm apart; against the `gt.csv`
+sidecar, inside **the C++'s own precision band** (`rmse_cm` and `rmse_cm_f64`,
+the same code on the same pixels with `use-double` flipped) or within
+`GT_BAND_RATIO` = 1.2 of the band's worst member, whichever is looser, which is
+the second alone since the ratio is above one — the band is 0.00007 cm wide on
+`MIO10` and 2.3 cm wide on `MIO14`, so "inside the band" on its own would gate
+the tight clips on rounding; and speed, the replay's own feed loop (decode plus
+`track`, nothing logged, the loop the C++ recorded as `run.feed_wall_time_s`)
+within 1.2x the C++ single-thread wall for the same footage (D58), never left
+off. The clauses, the association convention, the `no_divergence` pair's
+exception and the "every named clip is asserted" rule (C56) are stated once in
+the test's own module docstring.
 
 The tolerances live in `slam_rs/reference.py` (`ATE_VS_CPP_CM`,
 `PATH_BOUND_MAX_CLIP_S`, `GT_BAND_RATIO`, `SPEED_TOLERANCE`,
 `DIVERGENCE_FACTOR`), not in the test: they are the milestone's verdict, and S15
-measured what a meaningful band is (D60).
-
-Every row prints what it was judged on: `tracked, vs C++ <cm> (bound 2 cm | no
-bound, <n> s clip), vs GT <cm> (band [f32, f64], allowed <cm>), wall, C++ wall,
-ratio`.
+measured what a meaningful band is (D60). Every row prints what it was judged on:
+`tracked, vs C++ <cm> (bound 2 cm | no bound, <n> s clip), vs GT <cm> (band [f32,
+f64], allowed <cm>), wall, C++ wall, ratio`.
 
 The lanes are D59's iteration rule. The default is the **iteration set** — MIO10
 whole plus the first ten seconds of one two-camera and one four-camera clip,

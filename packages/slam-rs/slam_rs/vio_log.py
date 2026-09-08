@@ -57,7 +57,7 @@ from simplecv.ops.umeyama import SimilarityTransform
 
 from slam_rs import _core
 from slam_rs.catalog_feed import TIMELINE, CameraCalib
-from slam_rs.frontend_log import camera_entity, log_keypoints, track_colors
+from slam_rs.frontend_log import camera_views, log_keypoints, track_colors
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES, Association, AteResult, Trajectory, associate, ate, rigid_alignment
 
 RUN_ENTITY: str = "/world/runs/slam_rs"
@@ -478,7 +478,7 @@ def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
     Returns:
         A blueprint with the panels collapsed, so the frame is all content.
     """
-    views: list[rrb.View] = [rrb.Spatial2DView(origin=camera_entity(camera.index), name=f"cam {camera.index:02d}") for camera in cameras]
+    views: list[rrb.View] = camera_views(cameras)
     trail: rrb.VisibleTimeRanges = rrb.VisibleTimeRanges(
         rrb.VisibleTimeRange(TIMELINE, start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.cursor_relative())
     )

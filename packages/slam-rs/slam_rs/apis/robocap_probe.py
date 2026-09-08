@@ -82,11 +82,7 @@ class Config:
     manifest: Path = MANIFEST_PATH
     """Reference manifest; ``--artifact-root`` is usually the flag a machine without the NAS wants instead."""
     artifact_root: Path | None = None
-    """Read every recording and sidecar from ``<root>/<segment id>/`` instead of the manifest's own NAS paths.
-
-    What a machine without the NAS points at: one directory, no manifest copy
-    and no ``sed``.
-    """
+    """Read every recording and sidecar from one directory per segment; see :func:`slam_rs.reference.relocate`."""
     session: str = "s00000021"
     """RoboCap session id from ``reference_segments.toml``."""
     seconds: float = 90.0

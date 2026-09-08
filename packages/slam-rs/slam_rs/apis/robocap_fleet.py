@@ -100,12 +100,9 @@ class RobocapRow:
     unscored: str | None
     """Why no agreement could be measured, or None where it was; the sentence :func:`~slam_rs.trajectory.ate` refused the pair with.
 
-    Accuracy is reported and not gated here, but an estimate that associates with
-    nothing is not an accuracy number: :func:`~slam_rs.trajectory.ate` needs an
-    association and not a pose count, so an estimate on another clock leaves the
-    three ``cpp_`` fields NaN and :attr:`cross_platform_ate_cm` unmeasured. The
-    cost beside them was still measured, which is why this is a row and not a
-    traceback (S22 review round 2).
+    Accuracy is reported and not gated here, and a refusal leaves the three
+    ``cpp_`` fields NaN and :attr:`cross_platform_ate_cm` unmeasured while the
+    cost beside them is still measured; see ``ate`` for why it is a row.
     """
 
     def row(self) -> str:
@@ -129,11 +126,7 @@ class Config:
     manifest: Path = MANIFEST_PATH
     """Reference manifest; ``--artifact-root`` is usually the flag a machine without the NAS wants instead."""
     artifact_root: Path | None = None
-    """Read every recording and sidecar from ``<root>/<segment id>/`` instead of the manifest's own NAS paths.
-
-    What a machine without the NAS points at: one directory, no manifest copy
-    and no ``sed``.
-    """
+    """Read every recording and sidecar from one directory per segment; see :func:`slam_rs.reference.relocate`."""
     session: str = "s00000015"
     """RoboCap session id from the manifest. Session 15 is the one with a C++ wall on the cap."""
     seconds: float = 0.0

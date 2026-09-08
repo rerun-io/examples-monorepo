@@ -111,7 +111,7 @@ def test_the_committed_run_manifests_carry_the_bundles_configuration(manifest: R
     """
     compared: list[str] = []
     for segment in manifest.segments:
-        resolved: reference_bundle.BundleFile = reference_bundle.resolve(segment.segment_id, "run.json")
+        resolved: reference_bundle.BundleFile = reference_bundle.resolve(segment.segment_id, reference_bundle.RUN_JSON)
         if not resolved.available:
             continue
         original: dict[str, Any] = json.loads(resolved.path.read_text())["vio_config"]
@@ -218,7 +218,7 @@ def _read_frame_digests(path: Path) -> dict[tuple[int, int], str]:
 def test_the_long_tier_trajectories_resolve_through_the_bundle(manifest: ReferenceManifest) -> None:
     """Present or not, the resolution has to name a path and a reason."""
     for segment in manifest.in_tier("long"):
-        resolved = reference_bundle.resolve(segment.segment_id, "basalt_traj.csv")
+        resolved = reference_bundle.resolve(segment.segment_id, reference_bundle.TRAJECTORY_CSV)
         assert resolved.path.name == "basalt_traj.csv"
         assert resolved.path.parent.name == segment.segment_id
         if not resolved.available:
@@ -258,7 +258,7 @@ def test_every_committed_trajectory_reproduces_its_published_ate(manifest: Refer
     checked: list[str] = []
     for segment in manifest.segments:
         if segment.reference.bundle_only:
-            resolved = reference_bundle.resolve(segment.segment_id, "basalt_traj.csv")
+            resolved = reference_bundle.resolve(segment.segment_id, reference_bundle.TRAJECTORY_CSV)
             if not resolved.available:
                 continue
             trajectory_path: Path = resolved.path

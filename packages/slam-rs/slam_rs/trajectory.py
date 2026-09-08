@@ -249,7 +249,11 @@ def ate(estimate: Trajectory, reference: Trajectory, tolerance_ns: int = ASSOCIA
 
     Whether the result is meaningful is the gate's question, not this one's: a
     two-pose comparison returns a number here and
-    :func:`slam_rs.reference.d60_failures` rejects it there.
+    :func:`slam_rs.reference.d60_failures` rejects it there. This needs an
+    association and not a pose count, so an estimate on another clock has
+    nothing to align however many poses it carries: both fleet tools take the
+    refusal's own sentence as a row rather than a traceback, because which clock
+    a trajectory landed on is a fact about that machine.
 
     Args:
         estimate: Trajectory under test, whose poses drive the association.

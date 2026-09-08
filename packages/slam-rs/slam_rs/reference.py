@@ -483,7 +483,7 @@ class ReferenceManifest:
             The path it occupies, and why it is unusable if it is missing.
         """
         if segment.reference.bundle_only:
-            return reference_bundle.resolve(segment.segment_id, "basalt_traj.csv")
+            return reference_bundle.resolve(segment.segment_id, reference_bundle.TRAJECTORY_CSV)
         path: Path = self.package_root / segment.reference.trajectory_csv
         reason: str | None = None if path.is_file() else f"{path} is committed in the manifest but missing from this checkout"
         return BundleFile(path=path, reason=reason)

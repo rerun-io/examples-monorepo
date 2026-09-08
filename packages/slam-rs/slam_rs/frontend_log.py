@@ -305,6 +305,21 @@ class FrontendLogger:
         self.cpp_logged = True
 
 
+def camera_views(cameras: tuple[CameraCalib, ...]) -> list[rrb.View]:
+    """One 2D view per camera, named and origined on the camera's own entity.
+
+    The panel layout of a camera is a convention both rungs share, so both
+    blueprints build their views here.
+
+    Args:
+        cameras: The rig's cameras, in rig order.
+
+    Returns:
+        The views, in the same order.
+    """
+    return [rrb.Spatial2DView(origin=camera_entity(camera.index), name=f"cam {camera.index:02d}") for camera in cameras]
+
+
 def frontend_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
     """One 2D view per camera over the images, keypoints, trails and overlay, plus the counters.
 
@@ -314,12 +329,9 @@ def frontend_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
     Returns:
         A blueprint with the panels collapsed, so the frame is all content.
     """
-    views: list[rrb.View] = [
-        rrb.Spatial2DView(origin=camera_entity(camera.index), name=f"cam {camera.index:02d}") for camera in cameras
-    ]
     return rrb.Blueprint(
         rrb.Vertical(
-            rrb.Horizontal(*views),
+            rrb.Horizontal(*camera_views(cameras)),
             rrb.TimeSeriesView(origin=STATS_ENTITY, name="frontend"),
             row_shares=[3, 1],
         ),

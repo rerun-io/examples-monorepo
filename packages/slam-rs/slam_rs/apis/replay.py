@@ -35,7 +35,18 @@ from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from slam_rs import _core
-from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream, LocalSegment, SegmentFeed, open_segment
+from slam_rs.catalog_feed import (
+    DEFAULT_WINDOW_S,
+    IMU_ENTITY,
+    RIG_ENTITY,
+    TIMELINE,
+    CameraCalib,
+    Frameset,
+    ImuStream,
+    LocalSegment,
+    SegmentFeed,
+    open_segment,
+)
 from slam_rs.frontend_log import FrontendLogger, camera_entity, frontend_blueprint
 from slam_rs.reference import MANIFEST_PATH, SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment, flow_config, load_manifest
 from slam_rs.reference_bundle import BundleFile
@@ -45,8 +56,6 @@ from slam_rs.vio_log import VioLogger, log_rig, vio_blueprint
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
 """Default segment: the 7.6 s rotation-dominated panorama from the smoke tier."""
-IMU_ENTITY: str = f"{RIG_ENTITY}/imu_00"
-"""Where the inertial input is drawn, under the rig it belongs to."""
 IMAGE_DOWNSCALE: int = 2
 """Images are logged at half resolution: the viewer does not need full-resolution pixels to show what was fed."""
 JPEG_QUALITY: int = 85
@@ -65,11 +74,7 @@ class Config:
     manifest: Path = MANIFEST_PATH
     """Reference manifest; ``--artifact-root`` is usually the flag a machine without the NAS wants instead."""
     artifact_root: Path | None = None
-    """Read every recording and sidecar from ``<root>/<segment id>/`` instead of the manifest's own NAS paths.
-
-    What a machine without the NAS points at: one directory, no manifest copy
-    and no ``sed``.
-    """
+    """Read every recording and sidecar from one directory per segment; see :func:`slam_rs.reference.relocate`."""
     stage: Stage = "input"
     """``input`` logs what the estimator is fed, ``frontend`` runs the optical flow over it, ``vio`` runs the whole pipeline.
 
@@ -92,7 +97,7 @@ class Config:
     """Stop after this many framesets; None replays the whole segment."""
     frame_stride: int = 1
     """Replay every n-th frameset. Every frame is still decoded: decimated AV1 decode is unreliable."""
-    window_s: float = 60.0
+    window_s: float = DEFAULT_WINDOW_S
     """Longest time window fetched from the catalog in one round trip."""
     output_csv: Path | None = None
     """Where the estimated trajectory is written; defaults to ``data/<segment>/slam_rs.csv``."""
