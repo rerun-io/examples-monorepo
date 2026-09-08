@@ -68,6 +68,15 @@ pub(super) struct Level {
 /// The `meta` buffer beside them carries the level geometry and the sampling
 /// pattern the per-patch kernels read (see `kernels`); it is written once,
 /// when the pyramid is allocated, and never touched per frame.
+///
+/// One configuration the CPU lane accepts and this one does not, left open by
+/// the S25 review and recorded here rather than in a report only:
+/// `optical_flow_levels = 0` builds level 0 alone on the CPU
+/// ([`crate::pyramid::PyramidU16`]) and is [`PyramidError::TooSmall`] here,
+/// because the odd buffer would then hold no level and `client.empty(0)` is a
+/// zero-sized allocation wgpu rejects at validation. No shipped manifest sets
+/// it, so no lane runs differently today; closing it means giving the empty
+/// buffer a harmless length rather than refusing the geometry.
 pub struct GpuPyramid<R: Runtime> {
     client: ComputeClient<R>,
     levels: Vec<Level>,
@@ -89,7 +98,9 @@ impl<R: Runtime> GpuPyramid<R> {
     ///
     /// [`PyramidError::TooSmall`] when a level would be under the 5-tap
     /// kernel's reach, as the CPU pyramid refuses it, and for `num_levels == 0`,
-    /// which the CPU pyramid accepts and this one cannot allocate.
+    /// which the CPU pyramid accepts and this one cannot allocate;
+    /// [`GpuError::BufferTooLong`] when a pyramid buffer would be longer than
+    /// the `u32` its device metadata indexes it with.
     fn new(
         client: ComputeClient<R>,
         width: usize,
@@ -136,18 +147,37 @@ impl<R: Runtime> GpuPyramid<R> {
             *slot += level_width * level_height;
         }
 
-        // The `meta` layout `kernels` documents: four floats per level, then the
-        // pattern. Level bases stay under 2^24, where `f32` is still exact.
-        let mut meta: Vec<f32> = Vec::with_capacity((num_levels + 1) * 4 + pattern.len() * 2);
+        // Every integer in `meta` is an index into one of these two buffers —
+        // a base, a width, a height — so refusing a buffer longer than a `u32`
+        // refuses every field of every level at once, and the casts below are
+        // exact by that check rather than by hope.
+        for pixels in lengths {
+            if u32::try_from(pixels).is_err() {
+                return Err(GpuError::BufferTooLong { pixels }.into());
+            }
+        }
+
+        // The `meta` layout `kernels` documents: four integers per level, then
+        // the pattern taps as their bit patterns. `u32` and not `f32`, because
+        // a base is an index the kernels add to a pixel offset and `f32` holds
+        // only every second integer above 2^24: a 4097x4097 frame puts level 2
+        // at base 16,785,409, which `f32` stores as 16,785,408, and every
+        // level-2 sample then read one pixel early on both lanes with nothing
+        // reporting it (the S25 review). The taps ride in the same buffer as
+        // bits rather than in a second one because both per-patch kernels are at
+        // the six-buffer ceiling `kernels` documents and a seventh binding is a
+        // question on every device the portable lane runs on, while a bitcast is
+        // one instruction on all three of its shader compilers.
+        let mut meta: Vec<u32> = Vec::with_capacity((num_levels + 1) * 4 + pattern.len() * 2);
         for level in &levels {
-            meta.push(level.base as f32);
-            meta.push(level.width as f32);
-            meta.push(level.height as f32);
-            meta.push(f32::from(u8::from(level.odd)));
+            meta.push(level.base as u32);
+            meta.push(level.width as u32);
+            meta.push(level.height as u32);
+            meta.push(u32::from(level.odd));
         }
         for tap in pattern {
-            meta.push(tap[0]);
-            meta.push(tap[1]);
+            meta.push(tap[0].to_bits());
+            meta.push(tap[1].to_bits());
         }
 
         Ok(Self {
@@ -156,7 +186,7 @@ impl<R: Runtime> GpuPyramid<R> {
             even_len: lengths[0],
             odd: client.empty(lengths[1] * size_of::<u16>()),
             odd_len: lengths[1],
-            meta: client.create_from_slice(f32::as_bytes(&meta)),
+            meta: client.create_from_slice(u32::as_bytes(&meta)),
             meta_len: meta.len(),
             client,
         })
@@ -351,35 +381,44 @@ impl<R: Runtime> Pyramid for GpuPyramid<R> {
     /// The one synchronising call on a [`GpuPyramid`], and nothing on the
     /// per-frame path uses it: it exists because the trait's forward half is how
     /// generic code — and the tolerance tests — read a pyramid a GPU backend
-    /// owns.
+    /// owns. Being off the per-frame path is also why it carries its own guard
+    /// rather than sitting inside a stage's: a download panics rather than
+    /// returning when the device is gone (decision D32).
     fn copy_level_into(&self, level: usize, out: &mut ImageU16) -> Result<(), PyramidError> {
-        let Some(&geometry) = self.levels.get(level) else {
-            return Err(PyramidError::NoSuchLevel {
-                level,
-                num_levels: self.levels.len(),
-            });
-        };
-        let (handle, length) = self.buffer_of(&geometry);
-        let bytes = self
-            .client
-            .read_one(handle.clone())
-            .map_err(|error| super::read_failed("a pyramid level", &error))?;
-        let expected: usize = length * size_of::<u16>();
-        if bytes.len() != expected {
-            return Err(PyramidError::ShortDeviceRead {
-                level,
-                actual: bytes.len(),
-                expected,
-            });
-        }
-        let pixels: &[u16] = u16::from_bytes(&bytes);
-        *out = ImageU16::zeros(geometry.width, geometry.height)?;
-        for y in 0..geometry.height {
-            let start: usize = geometry.base + y * geometry.width;
-            out.row_mut(y)
-                .copy_from_slice(&pixels[start..start + geometry.width]);
-        }
-        Ok(())
+        guarded(
+            GpuError::DeviceLost {
+                what: "a pyramid level read",
+            },
+            || {
+                let Some(&geometry) = self.levels.get(level) else {
+                    return Err(PyramidError::NoSuchLevel {
+                        level,
+                        num_levels: self.levels.len(),
+                    });
+                };
+                let (handle, length) = self.buffer_of(&geometry);
+                let bytes = self
+                    .client
+                    .read_one(handle.clone())
+                    .map_err(|error| super::read_failed("a pyramid level", &error))?;
+                let expected: usize = length * size_of::<u16>();
+                if bytes.len() != expected {
+                    return Err(PyramidError::ShortDeviceRead {
+                        level,
+                        actual: bytes.len(),
+                        expected,
+                    });
+                }
+                let pixels: &[u16] = u16::from_bytes(&bytes);
+                *out = ImageU16::zeros(geometry.width, geometry.height)?;
+                for y in 0..geometry.height {
+                    let start: usize = geometry.base + y * geometry.width;
+                    out.row_mut(y)
+                        .copy_from_slice(&pixels[start..start + geometry.width]);
+                }
+                Ok(())
+            },
+        )
     }
 }
 

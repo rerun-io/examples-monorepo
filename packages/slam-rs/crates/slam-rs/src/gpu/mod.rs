@@ -132,6 +132,24 @@ pub enum GpuError {
         /// Which stage was running.
         what: &'static str,
     },
+    /// A pyramid buffer is longer than the `u32` its device metadata carries.
+    ///
+    /// The metadata array is `u32` because a level base is an **index**: the
+    /// per-patch kernels add it to a pixel offset, so it has to arrive exactly,
+    /// and every field in that array is an index into one of the two pyramid
+    /// buffers. Refusing a buffer past `u32::MAX` therefore refuses every field
+    /// at once. Nothing on this lane can reach it — that buffer would be 8 GB of
+    /// `u16`, past every device's binding limit — but a silent truncation is a
+    /// wrong trajectory rather than a refusal, and this lane does not do that
+    /// (decision D32).
+    #[error(
+        "a pyramid buffer of {pixels} pixels is past the u32 its device metadata \
+         carries, so the kernels could not index it"
+    )]
+    BufferTooLong {
+        /// Pixels the buffer would have held.
+        pixels: usize,
+    },
     /// The runtime cannot store an element width the kernels bind.
     ///
     /// See [`probe_storage`]: both of this backend's bring-up failures are
@@ -528,7 +546,7 @@ pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
                 max_recovered_dist2,
             )?;
             let builder: LanePyramidBuilder = GpuPyramidBuilder::new(client.clone(), P::OFFSETS);
-            let mut scanner: GpuCornerScan<GpuRuntime> = GpuCornerScan::new(client);
+            let mut scanner: GpuCornerScan<GpuRuntime> = GpuCornerScan::new(client)?;
             // The two stages are handed the same frame, so they read the same
             // upload: the builder publishes level 0 per camera and the scanner
             // reads it. This is the one line that makes it one upload per camera
@@ -609,6 +627,13 @@ const GUARDED_REGION: &str = "a guarded region";
 #[cfg(test)]
 const STORAGE_PROBE: &str = "the storage probe";
 
+/// A fault site: the corner scan's download, which is where a real device
+/// failure lands **after** the scan has recorded the new frame's geometry. The
+/// guarded region's own site fires before the body runs and so cannot ask what
+/// a half-finished scan leaves behind.
+#[cfg(test)]
+const CORNER_SCAN_READ: &str = "the corner scan's read";
+
 /// Panic if a test armed `site`, and disarm it.
 #[cfg(test)]
 fn fire_if_armed(site: &'static str) {
@@ -687,18 +712,16 @@ pub(super) fn upload_frame<R: cubecl::prelude::Runtime>(
 ///
 /// # Errors
 ///
-/// [`GpuError::StorageRoundTrip`] naming the width that did not survive.
+/// [`GpuError::StorageRoundTrip`] naming the width that did not survive,
+/// [`GpuError::ShortRead`] or [`GpuError::DeviceReadFailed`] from the read back,
+/// and [`GpuError::DeviceLost`] if any of it panics: this is public, so it is a
+/// device operation a caller reaches without going through [`gpu_backends`] and
+/// its guard, and it carries its own (decision D32).
 #[cfg(feature = "gpu-core")]
 pub fn probe_storage<R: cubecl::prelude::Runtime>(
     client: &cubecl::prelude::ComputeClient<R>,
 ) -> Result<(), GpuError> {
     use cubecl::prelude::CubeElement;
-
-    // This function allocates, launches and reads, so it has to run inside
-    // `gpu_backends`' catch: the fault site is here so a test can say it does
-    // (test-only).
-    #[cfg(test)]
-    fire_if_armed(STORAGE_PROBE);
 
     /// One width: a pattern no zeroing or truncation reproduces.
     fn round_trip<N, R>(
@@ -741,24 +764,37 @@ pub fn probe_storage<R: cubecl::prelude::Runtime>(
         }
     }
 
-    const COUNT: usize = 256;
-    // Patterns whose every byte differs from its neighbours, so a truncation, a
-    // widening or a packing slip all show up rather than cancelling.
-    let bytes: Vec<u8> = (0..COUNT)
-        .map(|i| (i as u8).wrapping_mul(7).wrapping_add(1))
-        .collect();
-    let shorts: Vec<u16> = (0..COUNT)
-        .map(|i| (i as u16).wrapping_mul(1_237).wrapping_add(9))
-        .collect();
-    let words: Vec<u32> = (0..COUNT)
-        .map(|i| (i as u32).wrapping_mul(2_654_435_761) ^ 0x5a5a)
-        .collect();
-    let floats: Vec<f32> = (0..COUNT).map(|i| (i as f32) * 0.5 - 3.25).collect();
-    round_trip::<u8, R>(client, &bytes)?;
-    round_trip::<u16, R>(client, &shorts)?;
-    round_trip::<u32, R>(client, &words)?;
-    round_trip::<f32, R>(client, &floats)?;
-    Ok(())
+    guarded(
+        GpuError::DeviceLost {
+            what: "the storage probe",
+        },
+        || {
+            // The fault site is inside the guard, so a test can say the guard is
+            // what turns a panicking probe into an error (test-only).
+            #[cfg(test)]
+            fire_if_armed(STORAGE_PROBE);
+
+            const COUNT: usize = 256;
+            // Patterns whose every byte differs from its neighbours, so a
+            // truncation, a widening or a packing slip all show up rather than
+            // cancelling.
+            let bytes: Vec<u8> = (0..COUNT)
+                .map(|i| (i as u8).wrapping_mul(7).wrapping_add(1))
+                .collect();
+            let shorts: Vec<u16> = (0..COUNT)
+                .map(|i| (i as u16).wrapping_mul(1_237).wrapping_add(9))
+                .collect();
+            let words: Vec<u32> = (0..COUNT)
+                .map(|i| (i as u32).wrapping_mul(2_654_435_761) ^ 0x5a5a)
+                .collect();
+            let floats: Vec<f32> = (0..COUNT).map(|i| (i as f32) * 0.5 - 3.25).collect();
+            round_trip::<u8, R>(client, &bytes)?;
+            round_trip::<u16, R>(client, &shorts)?;
+            round_trip::<u32, R>(client, &words)?;
+            round_trip::<f32, R>(client, &floats)?;
+            Ok(())
+        },
+    )
 }
 
 /// A [`cubecl_wgpu::WgpuRuntime`] client on the default device.
@@ -853,27 +889,172 @@ mod tests {
 
     /// A panic anywhere in the bring-up is a typed error, not an unwind.
     ///
-    /// The guard has to reach past the client: `probe_storage` and the three
-    /// backend constructors allocate, launch and read, so a guard that ended at
-    /// the client would miss all four. The fault is armed at the storage probe,
-    /// which is inside the region only if `gpu_backends` guards the whole of
-    /// what it does, and what comes back is the constructor's own error type.
+    /// Two guards, because the bring-up has two layers now. `gpu_backends`
+    /// itself is guarded from its first line to the returned backends, and a
+    /// fault at the top of that region — before any client exists — comes back
+    /// as `ClientPanicked`. Inside it, `probe_storage` and the three
+    /// constructors each carry their own guard, because each is also a public
+    /// entry a caller reaches on its own, and a fault at the probe's site comes
+    /// back as that guard's `DeviceLost`. Either way nothing unwinds past the
+    /// constructor (decision D32).
     #[test]
     fn a_panic_after_the_client_is_built_is_a_typed_error() {
-        arm_fault_at(STORAGE_PROBE);
-        let error: crate::frontend::tracker::TrackerError =
+        arm_fault_at(GUARDED_REGION);
+        let outer: crate::frontend::tracker::TrackerError =
             gpu_backends::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0).unwrap_err();
         assert!(
             matches!(
-                error,
+                outer,
                 crate::frontend::tracker::TrackerError::Gpu(GpuError::ClientPanicked { .. })
             ),
-            "a panic in the storage probe gave {error}"
+            "a panic in the outer region gave {outer}"
+        );
+
+        arm_fault_at(STORAGE_PROBE);
+        let probe: crate::frontend::tracker::TrackerError =
+            gpu_backends::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0).unwrap_err();
+        assert!(
+            matches!(
+                probe,
+                crate::frontend::tracker::TrackerError::Gpu(GpuError::DeviceLost {
+                    what: "the storage probe"
+                })
+            ),
+            "a panic in the storage probe gave {probe}"
         );
 
         // And the same call with nothing armed builds the three backends, so
-        // what the line above measures is the guard.
+        // what the lines above measure is the guards.
         gpu_backends::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0).unwrap();
+    }
+
+    /// A panic in an exported constructor is a typed error, not an unwind.
+    ///
+    /// Three of them touch the device before they return — the corner scanner
+    /// uploads the FAST ring, the patch set allocates its store and its
+    /// positions, the tracker allocates both transform buffers — and each is a
+    /// public entry a caller outside `gpu_backends` can reach. Armed at the
+    /// guard, each returns its own error type; unarmed, each builds, so what
+    /// the armed lines measure is the guard and not a broken build (decision
+    /// D32).
+    #[test]
+    fn a_panic_in_an_exported_constructor_is_a_typed_error() {
+        use crate::frontend::patterns::Pattern51;
+        use crate::frontend::tracker::TrackerError;
+
+        let client = gpu_client().unwrap();
+
+        arm_fault_at(GUARDED_REGION);
+        let scan: GpuError = GpuCornerScan::<GpuRuntime>::new(client.clone()).unwrap_err();
+        assert_eq!(
+            scan,
+            GpuError::DeviceLost {
+                what: "corner scan setup"
+            }
+        );
+
+        arm_fault_at(GUARDED_REGION);
+        let patches: TrackerError =
+            GpuPatches::<Pattern51, GpuRuntime>::new(client.clone(), 64, 4).unwrap_err();
+        assert!(
+            matches!(
+                patches,
+                TrackerError::Gpu(GpuError::DeviceLost {
+                    what: "patch allocation"
+                })
+            ),
+            "a panicking patch allocation gave {patches}"
+        );
+
+        arm_fault_at(GUARDED_REGION);
+        let tracker: TrackerError =
+            GpuPatchTracker::<Pattern51, GpuRuntime>::new(client.clone(), 64, 4, 5, 4.0)
+                .unwrap_err();
+        assert!(
+            matches!(
+                tracker,
+                TrackerError::Gpu(GpuError::DeviceLost {
+                    what: "tracker allocation"
+                })
+            ),
+            "a panicking tracker allocation gave {tracker}"
+        );
+
+        GpuCornerScan::<GpuRuntime>::new(client.clone()).unwrap();
+        GpuPatches::<Pattern51, GpuRuntime>::new(client.clone(), 64, 4).unwrap();
+        GpuPatchTracker::<Pattern51, GpuRuntime>::new(client, 64, 4, 5, 4.0).unwrap();
+    }
+
+    /// A panic in the public storage probe is a typed error, not an unwind.
+    ///
+    /// [`probe_storage`] is public and it allocates, launches and downloads, so
+    /// it is a device operation a caller reaches without going through
+    /// `gpu_backends` and its guard. The fault is armed at the probe's own
+    /// site — the same one `a_panic_after_the_client_is_built_is_a_typed_error`
+    /// uses through the constructor path — and here the call is direct.
+    #[test]
+    fn a_panic_in_the_public_storage_probe_is_a_typed_error() {
+        let client = gpu_client().unwrap();
+
+        arm_fault_at(STORAGE_PROBE);
+        assert_eq!(
+            probe_storage(&client).unwrap_err(),
+            GpuError::DeviceLost {
+                what: "the storage probe"
+            }
+        );
+
+        // Unarmed the same probe passes on this host, so the line above is the
+        // guard and not a runtime that cannot store these widths.
+        probe_storage(&client).unwrap();
+    }
+
+    /// A panic in an exported read is a typed error, not an unwind.
+    ///
+    /// The two downloads that are not on the per-frame path — a pyramid level
+    /// and the patch store, both of them how generic code and the tolerance
+    /// suite read a buffer a GPU backend owns. Neither is inside a per-frame
+    /// stage, so neither was covered by the stage guards.
+    #[test]
+    fn a_panic_in_an_exported_read_is_a_typed_error() {
+        use crate::frontend::patterns::Pattern51;
+        use crate::frontend::tracker::TrackerError;
+        use crate::pyramid::{Pyramid, PyramidBuilder, PyramidError};
+
+        let client = gpu_client().unwrap();
+        let builder: GpuPyramidBuilder<GpuRuntime> =
+            GpuPyramidBuilder::new(client.clone(), &[[0.0, 0.0]]);
+        let pyramid: GpuPyramid<GpuRuntime> = builder.allocate(64, 64, 2).unwrap();
+        let patches: GpuPatches<Pattern51, GpuRuntime> = GpuPatches::new(client, 64, 3).unwrap();
+        let mut level: crate::image::ImageU16 = crate::image::ImageU16::default();
+
+        arm_fault_at(GUARDED_REGION);
+        let read: PyramidError = pyramid.copy_level_into(0, &mut level).unwrap_err();
+        assert!(
+            matches!(
+                read,
+                PyramidError::Gpu(GpuError::DeviceLost {
+                    what: "a pyramid level read"
+                })
+            ),
+            "a panicking level read gave {read}"
+        );
+
+        arm_fault_at(GUARDED_REGION);
+        let store: TrackerError = patches.read_store().unwrap_err();
+        assert!(
+            matches!(
+                store,
+                TrackerError::Gpu(GpuError::DeviceLost {
+                    what: "the patch store read"
+                })
+            ),
+            "a panicking store read gave {store}"
+        );
+
+        // Both reads succeed unarmed, so the two lines above are the guards.
+        pyramid.copy_level_into(0, &mut level).unwrap();
+        patches.read_store().unwrap();
     }
 
     /// A library cudarc would panic on is a typed error naming it.

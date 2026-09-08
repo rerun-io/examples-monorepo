@@ -115,39 +115,50 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
     /// [`crate::frontend::tracker::PatchSoA::new`] refuses: a GPU tracker turns
     /// down exactly what the CPU one turns down rather than asking the device
     /// for a buffer no allocation could hold. Only the last product differs —
-    /// this lane folds `4 * taps + flags` into one buffer.
+    /// this lane folds `4 * taps + flags` into one buffer. And
+    /// [`super::GpuError::DeviceLost`], because the two allocations are device
+    /// operations: CubeCL panics rather than returning when the worker
+    /// submission fails, so the body runs inside the module's guard (D32).
     pub fn new(
         client: ComputeClient<R>,
         capacity: usize,
         num_levels: usize,
     ) -> Result<Self, TrackerError> {
-        let (flags, taps): (usize, usize) = checked_patch_shape(capacity, num_levels, P::SIZE)?;
-        let elements: usize = taps
-            .checked_mul(4)
-            .and_then(|body| body.checked_add(flags))
-            .ok_or(TrackerError::BufferShapeOverflow {
-                capacity,
-                num_levels,
-                taps: P::SIZE,
-            })?;
+        guarded(
+            GpuError::DeviceLost {
+                what: "patch allocation",
+            },
+            || {
+                let (flags, taps): (usize, usize) =
+                    checked_patch_shape(capacity, num_levels, P::SIZE)?;
+                let elements: usize = taps
+                    .checked_mul(4)
+                    .and_then(|body| body.checked_add(flags))
+                    .ok_or(TrackerError::BufferShapeOverflow {
+                        capacity,
+                        num_levels,
+                        taps: P::SIZE,
+                    })?;
 
-        let layout: StoreLayout = StoreLayout {
-            capacity,
-            taps: P::SIZE,
-            num_levels,
-        };
-        let mut host: PointsSoA = PointsSoA::with_capacity(capacity);
-        host.resize(capacity);
-        Ok(Self {
-            layout,
-            len: 0,
-            store: client.empty(elements * size_of::<f32>()),
-            positions: client.empty(POSITION_RUNS * capacity * size_of::<f32>()),
-            host,
-            staging: vec![0.0; POSITION_RUNS * capacity],
-            pattern: std::marker::PhantomData,
-            client,
-        })
+                let layout: StoreLayout = StoreLayout {
+                    capacity,
+                    taps: P::SIZE,
+                    num_levels,
+                };
+                let mut host: PointsSoA = PointsSoA::with_capacity(capacity);
+                host.resize(capacity);
+                Ok(Self {
+                    layout,
+                    len: 0,
+                    store: client.empty(elements * size_of::<f32>()),
+                    positions: client.empty(POSITION_RUNS * capacity * size_of::<f32>()),
+                    host,
+                    staging: vec![0.0; POSITION_RUNS * capacity],
+                    pattern: std::marker::PhantomData,
+                    client,
+                })
+            },
+        )
     }
 
     /// Patches this set can hold.
@@ -307,23 +318,32 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
     ///
     /// [`TrackerError::LengthMismatch`] when the device returns the wrong
     /// number of bytes, which is what an incomplete CubeCL runtime does instead
-    /// of failing, and [`super::GpuError::DeviceReadFailed`] when the read
-    /// itself fails (decision D32).
+    /// of failing, [`super::GpuError::DeviceReadFailed`] when the read itself
+    /// fails, and [`super::GpuError::DeviceLost`] when it panics instead of
+    /// failing — this download is not on the per-frame path, so it carries its
+    /// own guard rather than sitting inside a stage's (decision D32).
     pub fn read_store(&self) -> Result<Vec<f32>, TrackerError> {
-        let bytes = self
-            .client
-            .read_one(self.store.clone())
-            .map_err(|error| super::read_failed("the patch store", &error))?;
-        let expected: usize = self.layout.elements() * size_of::<f32>();
-        if bytes.len() != expected {
-            return Err(TrackerError::LengthMismatch {
-                first_name: "store bytes expected",
-                first: expected,
-                second_name: "returned",
-                second: bytes.len(),
-            });
-        }
-        Ok(f32::from_bytes(&bytes).to_vec())
+        guarded(
+            GpuError::DeviceLost {
+                what: "the patch store read",
+            },
+            || {
+                let bytes = self
+                    .client
+                    .read_one(self.store.clone())
+                    .map_err(|error| super::read_failed("the patch store", &error))?;
+                let expected: usize = self.layout.elements() * size_of::<f32>();
+                if bytes.len() != expected {
+                    return Err(TrackerError::LengthMismatch {
+                        first_name: "store bytes expected",
+                        first: expected,
+                        second_name: "returned",
+                        second: bytes.len(),
+                    });
+                }
+                Ok(f32::from_bytes(&bytes).to_vec())
+            },
+        )
     }
 
     /// Where each coefficient of a downloaded [`GpuPatches::read_store`] sits.

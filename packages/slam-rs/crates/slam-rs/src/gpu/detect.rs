@@ -105,28 +105,44 @@ pub struct GpuCornerScan<R: Runtime> {
 
 impl<R: Runtime> GpuCornerScan<R> {
     /// A scanner on `client`, with the ring uploaded.
-    pub fn new(client: ComputeClient<R>) -> Self {
-        let mut ring: Vec<u32> = Vec::with_capacity(32);
-        for offsets in [FAST_RING_ROW, FAST_RING_COLUMN] {
-            for offset in offsets {
-                ring.push((offset + RING_BIAS as i32) as u32);
-            }
-        }
-        Self {
-            ring: client.create_from_slice(u32::as_bytes(&ring)),
-            level0: Level0Table::default(),
-            uploads: 0,
-            packed: Vec::new(),
-            buffers: Vec::new(),
-            buffer_allocations: 0,
-            kept: None,
-            mask: None,
-            words: 0,
-            width: 0,
-            height: 0,
-            bands: BandCache::default(),
-            client,
-        }
+    ///
+    /// Fallible because the upload is a device operation like any other:
+    /// `create_from_slice` **panics** inside CubeCL's own client when the worker
+    /// submission fails, so a constructor with no error channel is a path from a
+    /// dying device to an unwind through the caller (decision D32).
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError::DeviceLost`] when the upload panics instead of returning.
+    pub fn new(client: ComputeClient<R>) -> Result<Self, GpuError> {
+        guarded(
+            GpuError::DeviceLost {
+                what: "corner scan setup",
+            },
+            || {
+                let mut ring: Vec<u32> = Vec::with_capacity(32);
+                for offsets in [FAST_RING_ROW, FAST_RING_COLUMN] {
+                    for offset in offsets {
+                        ring.push((offset + RING_BIAS as i32) as u32);
+                    }
+                }
+                Ok(Self {
+                    ring: client.create_from_slice(u32::as_bytes(&ring)),
+                    level0: Level0Table::default(),
+                    uploads: 0,
+                    packed: Vec::new(),
+                    buffers: Vec::new(),
+                    buffer_allocations: 0,
+                    kept: None,
+                    mask: None,
+                    words: 0,
+                    width: 0,
+                    height: 0,
+                    bands: BandCache::default(),
+                    client,
+                })
+            },
+        )
     }
 
     /// Read level 0 out of `table` rather than uploading the frame.
@@ -234,7 +250,17 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                 what: "corner scan",
             },
             || {
+                // Nothing of the previous frame survives this call, and it is
+                // dropped **first**: the two buffers below are replaced only
+                // where the scan succeeds, so a scan that fails after this line
+                // would otherwise leave the last frame's corners readable — and
+                // readable under the new frame's width, which for a rig whose
+                // cameras differ in size indexes them out of range. A band after
+                // a failed scan is the same refusal as a band before the first
+                // one (decision D32).
                 self.bands.clear();
+                self.kept = None;
+                self.mask = None;
                 self.width = image.width();
                 self.height = image.height();
                 let pixels: usize = self.width * self.height;
@@ -296,6 +322,11 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                     self.height,
                     self.words,
                 );
+
+                // Where a test makes this scan fail as a lost device would, on
+                // the far side of the geometry above (test-only).
+                #[cfg(test)]
+                super::fire_if_armed(super::CORNER_SCAN_READ);
 
                 // One read for both, so one synchronisation for the frame — and the
                 // fallible form of it: `client.read` is `read_sync(..).expect("TODO")`,
@@ -380,5 +411,97 @@ impl<R: Runtime> std::fmt::Debug for GpuCornerScan<R> {
             .field("bands", &self.bands.len())
             .field("uploads", &self.uploads)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use crate::gpu::{CORNER_SCAN_READ, GpuRuntime, arm_fault_at, gpu_client};
+
+    /// Bright squares on a flat background: a frame FAST finds corners in,
+    /// which is what `frontend::detect`'s own fixture is for the CPU lane.
+    fn dotted_image(width: usize, height: usize) -> ImageU16 {
+        let mut image: ImageU16 = ImageU16::zeros(width, height).unwrap();
+        for y in 0..height {
+            for x in 0..width {
+                image.set(x, y, 60u16 << 8);
+            }
+        }
+        let mut cy: usize = 20;
+        while cy + 5 < height {
+            let mut cx: usize = 20;
+            while cx + 5 < width {
+                for dy in 0..5 {
+                    for dx in 0..5 {
+                        image.set(cx + dx, cy + dy, 200u16 << 8);
+                    }
+                }
+                cx += 20;
+            }
+            cy += 20;
+        }
+        image
+    }
+
+    /// One band of the grid the detector walks, at the first rung.
+    fn band(y: usize) -> BandRequest {
+        BandRequest {
+            row: 0,
+            rung: 0,
+            y,
+            rows: 44,
+            threshold: 5,
+        }
+    }
+
+    /// A failed scan leaves nothing readable, not the previous frame's corners.
+    ///
+    /// The new buffers replace the old ones only where the scan succeeds, so a
+    /// scan that fails on the far side of the geometry it records would answer
+    /// the next band with the *last* frame's corners under this frame's request.
+    /// The fault is armed at the download, which is where a lost device really
+    /// lands, and what the band returns afterwards is the refusal a band before
+    /// any scan returns.
+    #[test]
+    fn a_failed_scan_leaves_no_band_readable() {
+        let mut scanner: GpuCornerScan<GpuRuntime> =
+            GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+        scanner.scan(0, &dotted_image(512, 128)).unwrap();
+        assert!(
+            !scanner.band(band(3)).unwrap().is_empty(),
+            "the dotted frame has corners, so the failed scan below has something to leak"
+        );
+
+        arm_fault_at(CORNER_SCAN_READ);
+        assert_eq!(
+            scanner.scan(0, &dotted_image(512, 128)).unwrap_err(),
+            DetectError::Gpu(GpuError::DeviceLost {
+                what: "corner scan"
+            })
+        );
+        assert_eq!(scanner.band(band(3)).unwrap_err(), DetectError::NotScanned);
+    }
+
+    /// A failed scan that changes the geometry refuses rather than indexes.
+    ///
+    /// The dangerous half of the same state: a rig whose cameras differ in size
+    /// — which the port supports — would walk 512-wide rows of the last frame
+    /// with the 960-wide stride of this one, and a band deep in the taller frame
+    /// runs off the end of the buffer.
+    #[test]
+    fn a_failed_scan_that_changes_the_geometry_does_not_panic() {
+        let mut scanner: GpuCornerScan<GpuRuntime> =
+            GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+        scanner.scan(0, &dotted_image(512, 128)).unwrap();
+
+        arm_fault_at(CORNER_SCAN_READ);
+        assert!(scanner.scan(1, &dotted_image(960, 240)).is_err());
+        assert_eq!(
+            scanner.band(band(150)).unwrap_err(),
+            DetectError::NotScanned
+        );
     }
 }
