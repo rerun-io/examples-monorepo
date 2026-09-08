@@ -439,17 +439,24 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
 ///
 /// basalt copies each cell into its own `cv::Mat` with `sub_img_raw(x, y) >> 8`
 /// (`keypoints.cpp:152-157`); one whole-image shift produces the same bytes and
-/// lets every cell be a zero-copy rectangle over it.
-/// `Image` owns its pixels — `from_size_slice` is `data.to_vec()` — so the
-/// narrowed frame is built **once per frame** and kept. Rebuilding the view per
-/// band call instead copies the whole frame forty times a frameset, which
-/// measured 40.1 ms against 9.4 ms on MIO07/1500 with every value unchanged.
+/// lets every cell be a zero-copy rectangle over it. The narrowed frame is
+/// built **once per frame** and kept: rebuilding the view per band call instead
+/// copies the whole frame forty times a frameset, which measured 40.1 ms against
+/// 9.4 ms on MIO07/1500 with every value unchanged.
+///
+/// And the frame is narrowed **into** that image rather than into a staging
+/// buffer it is then built from. `Image::from_size_slice` is `data.to_vec()`, so
+/// the old shape kept the frame twice — a `Vec<u8>` and the image's own copy —
+/// and paid a whole-frame `memcpy` per camera per frameset (0.9 MB at 960x960)
+/// for the second. kornia's `Image` derefs to its tensor, which has
+/// `as_slice_mut`, so the narrowing pass can write straight into the pixels the
+/// detector will read, and the image is reallocated only when the geometry
+/// changes.
 #[derive(Default)]
 pub struct CpuCornerScan {
-    /// The narrowed frame, `None` until the first [`CornerScan::scan`].
+    /// The narrowed frame, `None` until the first [`CornerScan::scan`], and
+    /// reallocated only for a new geometry.
     gray: Option<Image<u8, 1>>,
-    /// The narrowing's staging buffer, reused between frames.
-    bytes: Vec<u8>,
     width: usize,
     height: usize,
     /// The [`Band`]s this frame has already scanned, in the order they were
@@ -474,31 +481,45 @@ impl CornerScan for CpuCornerScan {
     fn scan(&mut self, _camera: usize, image: &ImageU16) -> Result<(), DetectError> {
         // The bands are this image's; the previous frame's are stale.
         self.bands.clear();
-        self.width = image.width();
-        self.height = image.height();
-        // `sub_ptr[x] = (sub_img_raw(x, y) >> 8)` (`keypoints.cpp:156`), once.
-        self.bytes.clear();
-        self.bytes.reserve(self.width * self.height);
-        for y in 0..self.height {
-            // One `extend` per row, not one `push` per pixel: the capacity check
-            // a `push` carries is what stops the narrowing from vectorising.
-            self.bytes
-                .extend(image.row(y).iter().map(|pixel| (*pixel >> 8) as u8));
+        let (width, height): (usize, usize) = (image.width(), image.height());
+        self.width = width;
+        self.height = height;
+        let fits: bool = self
+            .gray
+            .as_ref()
+            .is_some_and(|gray| gray.width() == width && gray.height() == height);
+        let gray: &mut Image<u8, 1> = match &mut self.gray {
+            Some(existing) if fits => existing,
+            slot => slot.insert(
+                Image::from_size_val(ImageSize { width, height }, 0u8).map_err(|_| {
+                    DetectError::GrayViewRefused {
+                        width,
+                        height,
+                        actual: 0,
+                    }
+                })?,
+            ),
+        };
+        // `sub_ptr[x] = (sub_img_raw(x, y) >> 8)` (`keypoints.cpp:156`), once,
+        // straight into the pixels the detector reads. One row's slice at a
+        // time, not one `push` per pixel: the capacity check a `push` carries is
+        // what stops the narrowing from vectorising.
+        let pixels: &mut [u8] = gray.as_slice_mut();
+        if image.stride() == width {
+            // One pass over the whole frame when it is unstrided, which every
+            // frame from the port's own decode path is: a single long loop
+            // vectorises where 960 short ones each pay their own prologue.
+            for (narrowed, wide) in pixels.iter_mut().zip(&image.data()[..width * height]) {
+                *narrowed = (*wide >> 8) as u8;
+            }
+        } else {
+            for y in 0..height {
+                let row: &mut [u8] = &mut pixels[y * width..(y + 1) * width];
+                for (narrowed, wide) in row.iter_mut().zip(image.row(y)) {
+                    *narrowed = (*wide >> 8) as u8;
+                }
+            }
         }
-        self.gray = Some(
-            Image::from_size_slice(
-                ImageSize {
-                    width: self.width,
-                    height: self.height,
-                },
-                &self.bytes,
-            )
-            .map_err(|_| DetectError::GrayViewRefused {
-                width: self.width,
-                height: self.height,
-                actual: self.bytes.len(),
-            })?,
-        );
         Ok(())
     }
 
@@ -512,7 +533,7 @@ impl CornerScan for CpuCornerScan {
             return Err(DetectError::GrayViewRefused {
                 width: self.width,
                 height: self.height,
-                actual: self.bytes.len(),
+                actual: 0,
             });
         };
         let index: usize = match self
