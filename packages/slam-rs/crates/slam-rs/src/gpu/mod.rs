@@ -330,8 +330,10 @@ const RUNTIME_NAME: &str = "wgpu";
 
 /// The same runtime as the name a machine reads: the cargo feature's own word,
 /// lowercase, which is what a fleet row's `lane` says and what a chart groups on
-/// ([`crate::GPU_BACKEND`]). Kept beside [`RUNTIME_NAME`] rather than derived
-/// from it, because that one is prose in a sentence a person reads.
+/// ([`crate::GPU_BACKEND`]). Kept beside `RUNTIME_NAME` rather than derived from
+/// it, because that one is prose in a sentence a person reads. Not a link:
+/// `RUNTIME_NAME` is private, and a public item linking to a private one renders
+/// as plain text, which the doc gate denies.
 #[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
 pub const BACKEND_NAME: &str = "cuda";
 

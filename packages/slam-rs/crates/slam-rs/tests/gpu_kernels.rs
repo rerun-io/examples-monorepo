@@ -946,6 +946,11 @@ mod absent_gpu {
     /// that is exactly the one object that must lose its `RUNPATH`. `None` when
     /// the loader is not where this architecture keeps it, which is a skip and
     /// not a pass.
+    ///
+    /// The same `cfg` as its one caller: only the NVIDIA lane has a library to
+    /// take away, and without the `cfg` this is dead code on the portable lane,
+    /// where `clippy --all-targets -D warnings` refuses it (S24 review).
+    #[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
     fn child_without_runpath(test: &str, case: &str, variables: &[(&str, &str)]) -> Option<String> {
         let loader: &str = ["/lib64/ld-linux-x86-64.so.2", "/lib/ld-linux-aarch64.so.1"]
             .into_iter()

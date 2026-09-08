@@ -104,8 +104,8 @@ pub struct FrontendOptions {
     /// processable. The default is about eight times what the shipped 50-pixel
     /// grid can produce on a 960x960 frame, so nothing in the reference
     /// configuration comes near it, and
-    /// [`MAX_CAPACITY`](crate::frontend::tracker::MAX_CAPACITY) is the ceiling a
-    /// caller may ask for.
+    /// [`crate::frontend::tracker::MAX_CAPACITY`] is the ceiling a caller may
+    /// ask for.
     pub max_keypoints: usize,
 }
 

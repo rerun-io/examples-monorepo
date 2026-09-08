@@ -2486,6 +2486,17 @@ cmd = "cargo check -p slam-rs --features gpu-wgpu"
 cwd = "packages/slam-rs"
 description = "Type-check the portable wgpu lane (a green check proves nothing at runtime: see slam-rs-wgpu-test)"
 
+# The portable lane's own `-D warnings`, which `slam-rs-clippy` cannot be: that
+# one lints the default features, so an item the `gpu` feature keeps alive and
+# this lane does not is invisible to it. One was — the CUDA-only
+# `child_without_runpath` test helper, dead code here — and `--all-targets` is
+# what catches it, because it is in a test rather than in the library (S24
+# review).
+[feature.slam-rs.tasks.slam-rs-wgpu-clippy]
+cmd = "cargo clippy -p slam-rs --features gpu-wgpu --all-targets -- -D warnings"
+cwd = "packages/slam-rs"
+description = "Lint the portable wgpu lane, tests included, with warnings denied"
+
 # `--list | grep -c` first, and it is not decoration: this suite is
 # `#![cfg(feature = "gpu-core")]` and the task selects `gpu-wgpu`, so a feature
 # rename that stops the two matching compiles the file away and `cargo test`
@@ -2613,9 +2624,12 @@ description = "Run every Rust test with the CUDA CubeCL frontend, including the 
 # `private_intra_doc_links` is denied beside the broken ones because a public
 # item linking to a private one renders as **plain text** in the published docs:
 # the link is not broken, it is silently dropped, which is the same rot with no
-# warning to grep for.
+# warning to grep for. `redundant_explicit_links` joins them for the reason the
+# gate exists at all: it was firing on `frontend::flow` and the gate returned
+# success, because a lint that is only a warning is one nobody reads (S24
+# review).
 [feature.slam-rs-gpu.tasks.slam-rs-gpu-clippy]
-cmd = "cargo clippy --workspace --all-targets --features slam-rs/gpu -- -D warnings && RUSTDOCFLAGS='-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links' cargo doc -p slam-rs --features gpu --no-deps"
+cmd = "cargo clippy --workspace --all-targets --features slam-rs/gpu -- -D warnings && RUSTDOCFLAGS='-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links -D rustdoc::redundant_explicit_links' cargo doc -p slam-rs --features gpu --no-deps"
 cwd = "packages/slam-rs"
 description = "Lint the CUDA CubeCL lane and check the seam's intra-doc links"
 
