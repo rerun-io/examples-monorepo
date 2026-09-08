@@ -913,8 +913,11 @@ fn the_runtime_stores_every_element_width_the_kernels_bind() {
 /// variable changed and reads what the child printed.
 ///
 /// The child asserts, so a child that stopped reaching the probe fails rather
-/// than passing quietly; the parent additionally refuses any child whose output
-/// carries the word `panicked`.
+/// than passing quietly; each case additionally says whether rustc's own
+/// `panicked at` belongs in the child's output — for the two the probe answers
+/// it must not appear, and for the one that reaches cubecl's own unwrap it
+/// must, because the caught panic's message is the only account of a failure no
+/// probe anticipated.
 mod absent_gpu {
     use std::process::{Command, Output};
 
@@ -939,14 +942,16 @@ mod absent_gpu {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(output.status.success(), "the {case} child failed:\n{text}");
-        // `panicked at` is rustc's own header and nothing else prints it; the
-        // word alone appears in `ClientPanicked`'s message, which is the typed
-        // error one of these cases is asserting it got.
-        assert!(
-            !text.contains("panicked at"),
-            "the {case} child panicked instead of returning an error:\n{text}"
-        );
         text
+    }
+
+    /// `panicked at` is rustc's own header and nothing else prints it, so it is
+    /// how a case says whether a panic happened at all — which is not the same
+    /// question as whether one escaped. A case that reaches the runtime's own
+    /// unwrap panics and is caught; a case the probe answers never panics. Both
+    /// return the typed error, and each test below says which it is.
+    fn panicked(text: &str) -> bool {
+        text.contains("panicked at")
     }
 
     /// The case this process is the child of, or `None` if it is the parent.
@@ -985,6 +990,8 @@ mod absent_gpu {
             text.contains("CHILD the CUDA driver reports 0 devices"),
             "{text}"
         );
+        // The probe answers this one, so nothing panicked anywhere.
+        assert!(!panicked(&text), "the no-device child panicked:\n{text}");
     }
 
     /// No Vulkan ICD: the loader enumerates nothing and wgpu has no adapter.
@@ -1010,6 +1017,8 @@ mod absent_gpu {
             text.contains("CHILD wgpu found no vulkan adapter"),
             "{text}"
         );
+        // The probe answers this one too.
+        assert!(!panicked(&text), "the no-adapter child panicked:\n{text}");
     }
 
     /// `CUBECL_WGPU_DEFAULT_DEVICE` naming an index the host does not have.
@@ -1039,6 +1048,14 @@ mod absent_gpu {
         assert!(
             text.contains("CHILD building the wgpu client panicked"),
             "{text}"
+        );
+        // And the runtime's own message survives to stderr, which is what
+        // dropping the quiet panic hook bought: the child caught the panic and
+        // returned the typed error, and the one clue about a case no probe
+        // anticipated is still printed rather than swallowed.
+        assert!(
+            panicked(&text),
+            "the runtime's own message was swallowed:\n{text}"
         );
     }
 }

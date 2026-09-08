@@ -128,7 +128,10 @@ impl Vio {
     /// with no usable GPU — a missing driver library, a driver that will not
     /// initialise, no visible device, no adapter — each a `ValueError` naming
     /// what is absent rather than the `PanicException` CubeCL's own unwrapped
-    /// bring-up produces (decision D32).
+    /// bring-up produces (decision D32). A failure no probe anticipates is
+    /// caught rather than raised, so it is a `ValueError` too — with the
+    /// runtime's own panic message left on stderr, which is the only account of
+    /// a case the probe did not know to ask about.
     #[new]
     #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None, gpu = false))]
     fn new(
@@ -223,6 +226,11 @@ impl Vio {
     /// The pixels are copied out of numpy while the GIL is held — one copy — and
     /// the whole pipeline then runs without it. A frameset the core refuses
     /// leaves the estimator exactly as the last accepted one did.
+    ///
+    /// On a GPU lane a device that dies mid-run is a `ValueError` here as well:
+    /// CubeCL panics on a lost device rather than returning an error, and every
+    /// GPU stage runs inside a guard that turns that into the core's typed error
+    /// before it can unwind through the released GIL (decision D32).
     fn track(
         &mut self,
         py: Python<'_>,

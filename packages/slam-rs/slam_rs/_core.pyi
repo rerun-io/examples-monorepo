@@ -198,7 +198,10 @@ class Vio:
         a driver that will not initialise, no visible device and no graphics
         adapter each raise ``ValueError`` naming what is absent. None of them is
         a ``PanicException``, which is what CubeCL's own unwrapped bring-up
-        would otherwise produce.
+        would otherwise produce. A failure no probe anticipates is caught rather
+        than raised, so it is a ``ValueError`` too — with the runtime's own panic
+        message left on stderr, which is the only account of a case the probe did
+        not know to ask about.
 
         Raises ``ValueError`` on everything :class:`OpticalFlow` refuses, and on
         a config asking for a path this port does not have:
@@ -237,6 +240,8 @@ class Vio:
         Raises ``ValueError`` on a bad dtype, rank or layout, on the wrong number
         of images, unless every image is the size the calibration gives its
         camera, and unless ``t_ns`` is strictly after the last accepted frameset.
+        On a GPU lane a device that dies mid-run raises ``ValueError`` here as
+        well, never a ``PanicException``.
         """
 
     def snapshot(self) -> VioSnapshot | None:

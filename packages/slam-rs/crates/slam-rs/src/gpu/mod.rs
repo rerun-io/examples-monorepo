@@ -280,8 +280,20 @@ pub type GpuRuntime = cubecl_wgpu::WgpuRuntime;
 /// 1. `probe_availability` asks the runtime's **own** fallible API — cudarc's
 ///    `init` and device count, wgpu's `request_adapter` — before any client
 ///    exists, so the common failures name what is missing.
-/// 2. The construction itself runs inside `catch_unwind`, because a probe can
-///    only anticipate what it knows to ask.
+/// 2. The construction itself runs inside the module's `guarded`, because a
+///    probe can only anticipate what it knows to ask.
+///
+/// **A caught panic still prints its own message to stderr**, and that is the
+/// deliberate half of the trade. Round 1 swapped in a quiet panic hook around
+/// the construction; the hook is process-global and unsynchronised, so it also
+/// silenced unrelated threads for that window and two concurrent constructors
+/// could restore it out of order — and the same guard is now on the per-frame
+/// path, where swapping a global hook per frameset is not a thing that can be
+/// done at all. It is gone. What it was there to hide is no longer the expected
+/// case either: every failure a host without a GPU produces is caught by the
+/// probe above and never panics, so the stderr line only ever appears for
+/// something the probe could not anticipate — where the runtime's own message
+/// is the only clue there is.
 ///
 /// # Errors
 ///
@@ -291,37 +303,21 @@ pub type GpuRuntime = cubecl_wgpu::WgpuRuntime;
 #[cfg(feature = "gpu-core")]
 pub fn gpu_client() -> Result<cubecl::prelude::ComputeClient<GpuRuntime>, GpuError> {
     probe_availability()?;
-    // The hook is restored before this returns. It is global for that window,
-    // so a panic on an unrelated thread during it loses its stderr line; the
-    // alternative is the expected case — an absent GPU — printing a Rust panic
-    // and a backtrace under a message that says the host has no device.
-    let previous: Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send> =
-        std::panic::take_hook();
-    std::panic::set_hook(Box::new(|info| {
-        log::debug!("constructing the {RUNTIME_NAME} client panicked: {info}");
-    }));
-    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        #[cfg(feature = "gpu-wgpu")]
-        {
-            wgpu_client()
-        }
-        #[cfg(not(feature = "gpu-wgpu"))]
-        {
-            cuda_client()
-        }
-    }));
-    std::panic::set_hook(previous);
-    built.map_err(|payload| {
-        let reason: &str = payload
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-            .unwrap_or("no message");
-        log::warn!("constructing the {RUNTIME_NAME} client panicked: {reason}");
+    guarded(
         GpuError::ClientPanicked {
             runtime: RUNTIME_NAME,
-        }
-    })
+        },
+        || {
+            #[cfg(feature = "gpu-wgpu")]
+            {
+                Ok(wgpu_client())
+            }
+            #[cfg(not(feature = "gpu-wgpu"))]
+            {
+                Ok(cuda_client())
+            }
+        },
+    )
 }
 
 /// What this build's lane is called in an error a user reads.
