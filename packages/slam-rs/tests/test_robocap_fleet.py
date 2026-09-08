@@ -15,8 +15,8 @@ from pathlib import Path
 import pytest
 
 from slam_rs.apis import robocap_fleet
-from slam_rs.apis.fleet_check import Machine
-from slam_rs.apis.robocap_fleet import FRAMESET_BUDGET_MS, Config, RobocapRow, main, measure, this_temperature_c
+from slam_rs.apis.robocap_fleet import BUDGET_15FPS_MS, BUDGET_30FPS_MS, Config, RobocapRow, main, measure
+from slam_rs.machine import Machine, this_machine
 from slam_rs.reference import MANIFEST_PATH, ReferenceManifest, RobocapSession
 from slam_rs.trajectory import Trajectory, empty_trajectory
 
@@ -34,8 +34,8 @@ ROW: RobocapRow = RobocapRow(
     wall_s=158.8,
     ms_per_frameset=100.0,
     cpp_wall_s=88.9,
-    realtime_factor_15fps=FRAMESET_BUDGET_MS[15] / 100.0,
-    realtime_factor_30fps=FRAMESET_BUDGET_MS[30] / 100.0,
+    realtime_factor_15fps=BUDGET_15FPS_MS / 100.0,
+    realtime_factor_30fps=BUDGET_30FPS_MS / 100.0,
     peak_rss_mb=512.0,
     temp_c_before=40.7,
     temp_c_after=51.8,
@@ -51,8 +51,8 @@ def test_a_row_reads_its_cost_against_the_caps_two_input_budgets() -> None:
     factor should: at or above 1.0 the machine keeps up, and 0.67 means it needs
     half again as long as the sensor gives it.
     """
-    assert FRAMESET_BUDGET_MS[15] == pytest.approx(66.67, abs=0.01)
-    assert FRAMESET_BUDGET_MS[30] == pytest.approx(33.33, abs=0.01)
+    assert round(BUDGET_15FPS_MS, 2) == 66.67
+    assert round(BUDGET_30FPS_MS, 2) == 33.33
     assert ROW.realtime_factor_15fps == pytest.approx(0.667, abs=0.001)
     assert ROW.realtime_factor_30fps == pytest.approx(0.333, abs=0.001)
 
@@ -77,27 +77,6 @@ def test_a_machine_that_measures_neither_a_cpp_wall_nor_a_temperature_says_so() 
     assert cells[6] == "—"
     assert cells[9] == "—"
     assert cells[13] == "—"
-
-
-def test_the_warmest_zone_wins_and_an_unreadable_one_is_skipped(tmp_path: Path) -> None:
-    """The cap publishes seven zones that disagree by a degree, and any of them may vanish.
-
-    A temperature is context for a wall, so a zone that cannot be parsed must
-    cost the reading nothing — losing a 158 s measurement to a sysfs file is the
-    wrong trade.
-    """
-    zones: Path = tmp_path / "sys" / "class" / "thermal"
-    for index, millidegrees in enumerate(["40700", "39800", "51800\n"]):
-        (zones / f"thermal_zone{index}").mkdir(parents=True)
-        (zones / f"thermal_zone{index}" / "temp").write_text(millidegrees)
-    (zones / "thermal_zone3").mkdir()
-    (zones / "thermal_zone3" / "temp").write_text("not a number")
-    assert this_temperature_c(tmp_path) == pytest.approx(51.8)
-
-
-def test_a_machine_with_no_thermal_zones_reports_none(tmp_path: Path) -> None:
-    """macOS publishes no zones, and the column has to stay empty rather than read 0 °C."""
-    assert this_temperature_c(tmp_path) is None
 
 
 def test_the_session_is_named_the_way_a_fleet_row_names_it(manifest: ReferenceManifest) -> None:
@@ -130,7 +109,7 @@ def test_the_real_session_replays_on_this_machine_and_agrees_with_the_cpp(manife
         pytest.skip(f"{session.base_path} is not mounted on this host")
     row: RobocapRow
     estimate: Trajectory
-    row, estimate = measure(manifest, session, seconds=1.0, window_s=5.0, reference_csv=None)
+    row, estimate = measure(manifest, session, Config(seconds=1.0, window_s=5.0), this_machine())
     assert row.segment_id == "robocap-s15"
     assert row.lost == 0
     assert row.tracked == row.framesets

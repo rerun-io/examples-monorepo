@@ -36,7 +36,6 @@ from slam_rs.catalog_feed import (
     select_cameras,
 )
 from slam_rs.reference import ImuParameters, ReferenceManifest, RobocapSession
-from slam_rs.tracking import robocap_profile
 from slam_rs.trajectory import shift_clock
 
 # The four fed cameras' native intrinsics exactly as the recording carries them,
@@ -584,7 +583,7 @@ def test_the_profile_comes_from_the_manifest_not_the_code(manifest: ReferenceMan
     All four fields, each against the manifest's own value: the tolerance and the
     pairing rule were constants in the tool, which left the claim half true.
     """
-    profile = robocap_profile(manifest)
+    profile = RigProfile.from_robocap(manifest.robocap)
     assert profile.camera_names == manifest.robocap.camera_names == ("left", "left_front", "right_front", "right")
     assert profile.downscale == manifest.robocap.downscale == 3
     assert profile.interpolate_accel_onto_gyro is manifest.robocap.interpolate_accel_onto_gyro is True
@@ -604,7 +603,7 @@ def test_a_profile_with_no_frames_left_is_refused_on_construction(manifest: Refe
     with pytest.raises(ValueError, match="downscale must be at least 1; got 0"):
         RigProfile(downscale=0)
     with pytest.raises(ValueError, match="downscale must be at least 1; got -3"):
-        replace(robocap_profile(manifest), downscale=-3)
+        replace(RigProfile.from_robocap(manifest.robocap), downscale=-3)
 
 
 def test_a_downscale_that_leaves_no_frame_is_refused() -> None:
@@ -659,7 +658,7 @@ def test_the_feeds_pixels_are_the_cpp_lanes_pixels(manifest: ReferenceManifest) 
     last_ns: int = max(t_ns for t_ns, _ in expected)
 
     compared: int = 0
-    with open_segment(LocalSegment(base_rrd=session.base_path), manifest.robocap.imu, profile=robocap_profile(manifest)) as feed:
+    with open_segment(LocalSegment(base_rrd=session.base_path), manifest.robocap.imu, profile=RigProfile.from_robocap(manifest.robocap)) as feed:
         for frameset in feed.framesets(last_ns):
             if int(frameset.t_ns) > last_ns:
                 break
@@ -684,12 +683,12 @@ def test_the_feed_opens_the_real_robocap_rig(manifest: ReferenceManifest) -> Non
     cpp = shift_clock(read_rig_trajectory(session.slam_path), manifest.robocap.imu.cam_time_offset_ns)
     assert len(cpp) == session.basalt_num_poses
 
-    with open_segment(LocalSegment(base_rrd=session.base_path), manifest.robocap.imu, profile=robocap_profile(manifest)) as feed:
+    with open_segment(LocalSegment(base_rrd=session.base_path), manifest.robocap.imu, profile=RigProfile.from_robocap(manifest.robocap)) as feed:
         assert feed.camera_positions == (4, 0, 1, 5)
         assert feed.rig_cameras == 6
         # The feed reads its rig knobs off the profile it was given, so what the
         # manifest says and what the feed does are one statement.
-        assert feed.profile == robocap_profile(manifest)
+        assert feed.profile == RigProfile.from_robocap(manifest.robocap)
         assert [(camera.width, camera.height) for camera in feed.cameras] == [(640, 360)] * 4
         assert all(camera.model == "kb4" for camera in feed.cameras)
         assert all(len(camera.distortion) == 4 for camera in feed.cameras)

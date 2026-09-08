@@ -6,17 +6,14 @@ needs none of that: the verdict a clip's numbers earn, and how the row reads.
 """
 
 import json
-import os
-import platform
-import resource
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from slam_rs.apis import fleet_check
-from slam_rs.apis.fleet_check import ClipResult, Config, Machine, main, measure, this_libc, this_peak_rss_mb
+from slam_rs.apis.fleet_check import ClipResult, Config, main, measure
+from slam_rs.machine import Machine
 from slam_rs.reference import MANIFEST_PATH, PATH_BOUND_MAX_CLIP_S, SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment
 
 CLIP_JSON_KEYS: tuple[str, ...] = (
@@ -97,36 +94,6 @@ def test_the_row_carries_the_machine_beside_the_numbers() -> None:
     assert cells[9] == "30.00"
     assert cells[10] == "3.91x"
     assert cells[11] == "512"
-
-
-def test_a_machine_without_glibc_still_names_its_c_library(monkeypatch: pytest.MonkeyPatch) -> None:
-    """macOS has no ``CS_GNU_LIBC_VERSION`` and raises on the name, so the row says ``libSystem``.
-
-    The row's third cell is what limits where a compiled core can be carried,
-    which on Linux is the glibc version and on macOS is the system release the
-    extension binds ``libSystem`` from. Asking for the glibc name on a Mac is a
-    ``ValueError``, not a ``None``, so the name has to be looked up before it is
-    asked for.
-    """
-    monkeypatch.setattr(os, "confstr_names", {})
-    monkeypatch.setattr(platform, "mac_ver", lambda: ("26.5.1", ("", "", ""), "arm64"))
-    assert this_libc() == "libSystem, macOS 26.5.1"
-
-
-def test_the_peak_resident_set_is_megabytes_on_both_kinds_of_machine(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``ru_maxrss`` counts kilobytes on Linux and bytes on macOS, and the pack target is judged on the number.
-
-    The clip that fits in 2 GB is the whole question on the constrained device,
-    so a row reading 382,544 MB on a Mac is not a cosmetic slip: it is the one
-    figure that decides whether the pack can go anywhere.
-    """
-    half_a_gigabyte: int = 512 * 1024 * 1024
-    monkeypatch.setattr(resource, "getrusage", lambda _who: SimpleNamespace(ru_maxrss=half_a_gigabyte // 1024))
-    monkeypatch.setattr(platform, "system", lambda: "Linux")
-    assert this_peak_rss_mb() == 512.0
-    monkeypatch.setattr(resource, "getrusage", lambda _who: SimpleNamespace(ru_maxrss=half_a_gigabyte))
-    monkeypatch.setattr(platform, "system", lambda: "Darwin")
-    assert this_peak_rss_mb() == 512.0
 
 
 def test_a_clip_longer_than_the_path_bound_allows_is_not_held_to_two_centimetres() -> None:

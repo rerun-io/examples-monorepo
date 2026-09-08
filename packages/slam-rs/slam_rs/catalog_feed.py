@@ -57,7 +57,7 @@ from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name
 
-from slam_rs.reference import ImuParameters
+from slam_rs.reference import ImuParameters, RobocapReference
 from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, shift_clock
 
 RIG_ENTITY: str = "/world/rig_00"
@@ -284,6 +284,25 @@ class RigProfile:
             raise ValueError(f"downscale must be at least 1; got {self.downscale}")
         if self.frameset_tolerance_ns < 0:
             raise ValueError(f"frameset_tolerance_ns cannot be negative; got {self.frameset_tolerance_ns}")
+
+    @classmethod
+    def from_robocap(cls, reference: RobocapReference) -> "RigProfile":
+        """How the RoboCap rig has to be read, from the manifest's record of the C++ lane.
+
+        Args:
+            reference: The manifest's ``[robocap]`` table, which is where the five
+                departures from MSD are written down.
+
+        Returns:
+            The profile the probe and both fleet tools open the rig with.
+        """
+        return cls(
+            camera_names=reference.camera_names,
+            downscale=reference.downscale,
+            interpolate_accel_onto_gyro=reference.interpolate_accel_onto_gyro,
+            frameset_tolerance_ns=reference.frameset_tolerance_ns,
+            video_time_is_absolute=reference.video_time_is_absolute,
+        )
 
 
 MSD_RIG: RigProfile = RigProfile()

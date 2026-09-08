@@ -22,8 +22,9 @@
 //!
 //! The `f64` tolerance is `1e-15` relative, not zero: Rust and C++ evaluate the
 //! same expressions in the same order but are free to contract `a * b + c` into
-//! an FMA differently. The `f32` pass asks for **exact equality**, because there
-//! the port and the C++ agree bit for bit.
+//! an FMA differently. The `f32` pass asks for **exact equality on x86-64**,
+//! which is where the fixture was produced and where the two agree bit for bit;
+//! see [`F32_TOLERANCE`] for the band the other targets get.
 
 #![allow(clippy::unwrap_used)]
 
@@ -48,6 +49,26 @@ const TOLERANCE: f64 = 1e-15;
 /// orders of magnitude tighter than anything downstream can see and still not
 /// bit-equality.
 const UNPROJECT_TOLERANCE: f64 = 1e-12;
+
+/// What the `f32` pass allows: exact on `x86_64`, two ULP anywhere else.
+///
+/// The fixture is a dump the C++ produced on `x86_64`, so exact equality there
+/// is a statement about the port. Elsewhere it is a statement about a second
+/// toolchain's rounding: on `aarch64-apple-darwin` one of the three hundred
+/// points comes back 1.5e-8 out on a bearing of 0.236 — one ULP at `f32` — from
+/// an FMA contracted differently in the Kannala-Brandt Newton step, while the
+/// `f64` instantiation and the other four oracle tests pass. Bit parity off the
+/// reference host was never the bar (D58, D60: "we never expected bit parity,
+/// just close enough"), and two ULP is four orders of magnitude tighter than the
+/// centimetre the trajectory gate reads.
+///
+/// The band is relative to [`assert_within`]'s `max(|want|, 1)` scale, so below
+/// unit magnitude it is looser than two ULP of the value itself.
+const F32_TOLERANCE: f64 = if cfg!(target_arch = "x86_64") {
+    0.0
+} else {
+    2.0 * f32::EPSILON as f64
+};
 
 #[derive(Debug, Deserialize)]
 struct Oracle {
@@ -304,8 +325,8 @@ fn the_oracle_cameras_are_the_shipped_calibrations() {
     }
 }
 
-/// The `f32` instantiation reproduces the C++ `float` build **exactly**, pixel
-/// and bearing, on all ten cameras.
+/// The `f32` instantiation reproduces the C++ `float` build pixel and bearing on
+/// all ten cameras: exactly on `x86_64`, inside [`F32_TOLERANCE`] elsewhere.
 ///
 /// The bearing is the point of this test. Getting the pixel right leaves the
 /// unprojection free to drift: it took reproducing Eigen's 2x2 inverse
@@ -334,7 +355,12 @@ fn the_f32_instantiation_matches_the_cpp() {
                 "{what}: validity"
             );
             let widened: Vec<f64> = proj.iter().map(|value| f64::from(*value)).collect();
-            assert_within(0.0, &format!("{what}: proj"), &widened, &point.proj);
+            assert_within(
+                F32_TOLERANCE,
+                &format!("{what}: proj"),
+                &widened,
+                &point.proj,
+            );
 
             let mut bearing: Vector4<f32> = Vector4::zeros();
             assert_eq!(
@@ -344,7 +370,7 @@ fn the_f32_instantiation_matches_the_cpp() {
             );
             let widened: Vec<f64> = bearing.iter().map(|value| f64::from(*value)).collect();
             assert_within(
-                0.0,
+                F32_TOLERANCE,
                 &format!("{what}: unproject"),
                 &widened,
                 &point.unproject,

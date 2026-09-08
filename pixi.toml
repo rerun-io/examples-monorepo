@@ -967,7 +967,8 @@ scipy = "*"
 [feature.mv-api-catalog-register-mac.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
 simplecv = { path = "packages/simplecv", editable = true }
-rerun-sdk = { version = "==0.37.0", extras = ["catalog"] }
+# pin-bump: hold — the macOS lane restates `common`'s exact pin; see AGENTS.md.
+rerun-sdk = { version = "==0.37.0", extras = ["catalog"] } # pin-bump: hold
 
 [feature.mv-api-catalog-register-mac.pypi-options]
 index-url = "https://pypi.org/simple"
@@ -2502,7 +2503,9 @@ hf-transfer = "*"
 
 [feature.slam-rs-osx.pypi-dependencies]
 simplecv = { path = "packages/simplecv", editable = true }
-rerun-sdk = { version = "==0.37.0", extras = ["catalog"] }
+# pin-bump: hold — the macOS lane restates `common`'s exact pin, so a Rerun bump
+# that misses this line leaves the Mac a release behind with no gate to say so.
+rerun-sdk = { version = "==0.37.0", extras = ["catalog"] } # pin-bump: hold
 
 # ═══════════════════════════════════════════════════════════════════════════
 # mamma — streaming multiview body capture (causal MAMMA pipeline)

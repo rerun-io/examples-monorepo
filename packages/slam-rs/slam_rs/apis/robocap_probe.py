@@ -63,12 +63,13 @@ from slam_rs.catalog_feed import (
     CameraCalib,
     Frameset,
     LocalSegment,
+    RigProfile,
     open_segment,
     read_rig_trajectory,
 )
 from slam_rs.frontend_log import camera_entity
 from slam_rs.reference import MANIFEST_PATH, ImuParameters, ReferenceManifest, RobocapSession, load_manifest
-from slam_rs.tracking import Lockstep, robocap_profile
+from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_trajectory, shift_clock, write_trajectory
 from slam_rs.vio_log import VioLogger, vio_blueprint
 
@@ -191,7 +192,7 @@ def main(config: Config) -> None:
     with open_segment(
         LocalSegment(base_rrd=session.base_path),
         manifest.robocap.imu,
-        profile=robocap_profile(manifest),
+        profile=RigProfile.from_robocap(manifest.robocap),
         window_s=config.window_s,
     ) as feed:
         check_calibration_matches_recording(calibration, feed.cameras, manifest.robocap.imu, manifest.robocap.downscale)

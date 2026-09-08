@@ -158,8 +158,11 @@ def _drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, ma
         for _tracked, result in lockstep.push(frameset):
             pose: Float64[ndarray, " 7"] = result.world_from_rig
             t_ns.append(result.t_ns)
+            # The slice is a view onto a 7-float buffer the estimator would
+            # otherwise keep alive per pose, so it is copied; `np.roll` already
+            # returns a new array, so the second copy would be a second one.
             positions.append(pose[0:3].copy())
-            quaternions.append(np.roll(pose[3:7], 1).copy())
+            quaternions.append(np.roll(pose[3:7], 1))
     wall_s: float = time.monotonic() - started
     estimate: Trajectory = Trajectory(
         t_ns=np.array(t_ns, dtype=np.int64),
@@ -193,17 +196,6 @@ def run_segment(
         return _drive(feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets)
 
 
-def robocap_profile(manifest: ReferenceManifest) -> RigProfile:
-    """How the RoboCap rig has to be read, from the manifest's record of the C++ lane."""
-    return RigProfile(
-        camera_names=manifest.robocap.camera_names,
-        downscale=manifest.robocap.downscale,
-        interpolate_accel_onto_gyro=manifest.robocap.interpolate_accel_onto_gyro,
-        frameset_tolerance_ns=manifest.robocap.frameset_tolerance_ns,
-        video_time_is_absolute=manifest.robocap.video_time_is_absolute,
-    )
-
-
 def run_robocap(manifest: ReferenceManifest, session: RobocapSession, seconds: float = 0.0, window_s: float = DEFAULT_WINDOW_S) -> SegmentRun:
     """Drive one RoboCap session through :class:`slam_rs._core.Vio`, nothing logged.
 
@@ -227,6 +219,6 @@ def run_robocap(manifest: ReferenceManifest, session: RobocapSession, seconds: f
     calibration: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
     flow: _core.VioConfig = _core.VioConfig.from_json((manifest.package_root / manifest.robocap.vio_config).read_text())
     feed: SegmentFeed
-    with open_segment(LocalSegment(base_rrd=session.base_path), manifest.robocap.imu, profile=robocap_profile(manifest), window_s=window_s) as feed:
+    with open_segment(LocalSegment(base_rrd=session.base_path), manifest.robocap.imu, profile=RigProfile.from_robocap(manifest.robocap), window_s=window_s) as feed:
         stop_ns: int | None = None if seconds <= 0.0 else int(feed.frame_t_ns[0]) + int(seconds * 1e9)
         return _drive(feed, Lockstep(vio=_core.Vio(calibration, flow)), stop_ns)

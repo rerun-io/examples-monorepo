@@ -25,45 +25,27 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from slam_rs.apis.fleet_check import Machine, this_machine, this_peak_rss_mb
 from slam_rs.catalog_feed import read_rig_trajectory
+from slam_rs.machine import Machine, this_machine, this_peak_rss_mb, this_temperature_c
 from slam_rs.reference import MANIFEST_PATH, ReferenceManifest, RobocapSession, load_manifest
 from slam_rs.tracking import SegmentRun, run_robocap
 from slam_rs.trajectory import AteResult, Trajectory, ate, read_trajectory, shift_clock, write_trajectory
 
-FRAMESET_BUDGET_MS: dict[int, float] = {15: 1e3 / 15.0, 30: 1e3 / 30.0}
-"""The cap's two input budgets: what one four-camera frameset may cost at each rate."""
-THERMAL_ZONES: str = "sys/class/thermal/thermal_zone*/temp"
-"""Where Linux publishes die temperatures, relative to the root; the cap has seven zones and a Mac has none."""
-
-
-def this_temperature_c(root: Path = Path("/")) -> float | None:
-    """Warmest thermal zone this machine publishes, in degrees, or None where it publishes none.
-
-    The number matters on the cap and only there: it is a fanless board in a
-    plastic shell that throttles, and a wall measured on a hot die is not the
-    wall a cold one gives. Every zone is read and the largest wins, because
-    which zone is the SoC differs per board — on the cap zones 0-3 and 6 track
-    together and 4-5 sit a degree lower. A zone that cannot be read is skipped
-    rather than raised on: a temperature is context for a wall, and no wall
-    should be lost to a sysfs file that went away between the glob and the read.
-
-    Args:
-        root: Filesystem root to read the zones under; the parameter exists so a
-            test can hand over a directory instead of the machine it runs on.
-    """
-    readings: list[float] = []
-    for zone in sorted(root.glob(THERMAL_ZONES)):
-        try:
-            readings.append(int(zone.read_text().strip()) / 1000.0)
-        except (OSError, ValueError):
-            continue
-    return max(readings) if readings else None
+BUDGET_15FPS_MS: float = 1e3 / 15.0
+"""What one four-camera frameset may cost for the cap to keep up at 15 fps."""
+BUDGET_30FPS_MS: float = 1e3 / 30.0
+"""The same at 30 fps, which is the rate session 15 was recorded at."""
 
 
 @dataclass(slots=True, frozen=True)
 class RobocapRow:
-    """One RoboCap session on one machine: what it agreed with, what it cost, how hot it got."""
+    """One RoboCap session on one machine: what it agreed with, what it cost, how hot it got.
+
+    :attr:`ms_per_frameset` and the two realtime factors are stored rather than
+    derived because ``asdict`` is what the fleet chart reads and a property
+    would drop the columns; whoever builds a row owes it the invariant that all
+    three follow from :attr:`wall_s` and :attr:`framesets`.
+    """
 
     machine: Machine
     """The host this ran on, as a fleet row names it."""
@@ -120,55 +102,6 @@ class RobocapRow:
         )
 
 
-def measure(manifest: ReferenceManifest, session: RobocapSession, seconds: float, window_s: float, reference_csv: Path | None) -> tuple[RobocapRow, Trajectory]:
-    """Replay one session and score it against the C++ beside it, and optionally another machine.
-
-    Args:
-        manifest: The reference set, which carries the RoboCap lane's configuration.
-        session: The session to replay.
-        seconds: Replay this much video time from the first frameset; 0 replays the whole session.
-        window_s: Longest time window of encoded samples fetched in one round trip.
-        reference_csv: Another machine's exported trajectory for the same session,
-            against which the cross-platform figure is computed; None skips it.
-
-    Returns:
-        The row, and the estimated trajectory on the device clock so the caller can export it.
-    """
-    before: float | None = this_temperature_c()
-    run: SegmentRun = run_robocap(manifest, session, seconds=seconds, window_s=window_s)
-    after: float | None = this_temperature_c()
-    # The layer sits on the recording's own `video_time`; the trajectory clock is
-    # that plus the camera offset, which is what the frames got too.
-    cpp: Trajectory = shift_clock(read_rig_trajectory(session.slam_path), manifest.robocap.imu.cam_time_offset_ns)
-    against_cpp: AteResult = ate(run.estimate, cpp)
-    across: float | None = None
-    if reference_csv is not None:
-        across = 100.0 * ate(run.estimate, read_trajectory(reference_csv)).rmse_m
-    ms_per_frameset: float = 1e3 * run.wall_s / max(run.framesets, 1)
-    return (
-        RobocapRow(
-            machine=this_machine(),
-            segment_id=session.fleet_id,
-            framesets=run.framesets,
-            tracked=len(run.estimate),
-            lost=run.lost,
-            cpp_rmse_cm=100.0 * against_cpp.rmse_m,
-            cpp_max_cm=100.0 * against_cpp.max_m,
-            cpp_median_cm=100.0 * against_cpp.median_m,
-            wall_s=run.wall_s,
-            ms_per_frameset=ms_per_frameset,
-            cpp_wall_s=None,
-            realtime_factor_15fps=FRAMESET_BUDGET_MS[15] / ms_per_frameset,
-            realtime_factor_30fps=FRAMESET_BUDGET_MS[30] / ms_per_frameset,
-            peak_rss_mb=this_peak_rss_mb(),
-            temp_c_before=before,
-            temp_c_after=after,
-            cross_platform_ate_cm=across,
-        ),
-        run.estimate,
-    )
-
-
 @dataclass(slots=True)
 class Config:
     """Replay one RoboCap session on this machine, with nothing logged."""
@@ -189,6 +122,54 @@ class Config:
     """Longest time window of encoded samples fetched in one round trip."""
 
 
+def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config, machine: Machine) -> tuple[RobocapRow, Trajectory]:
+    """Replay one session and score it against the C++ beside it, and optionally another machine.
+
+    Args:
+        manifest: The reference set, which carries the RoboCap lane's configuration.
+        session: The session to replay.
+        config: Parsed CLI options; the replay reads the span, the window and the
+            other machine's trajectory off it.
+        machine: The host this is running on, read once by the caller.
+
+    Returns:
+        The row, and the estimated trajectory on the device clock so the caller can export it.
+    """
+    before: float | None = this_temperature_c()
+    run: SegmentRun = run_robocap(manifest, session, seconds=config.seconds, window_s=config.window_s)
+    after: float | None = this_temperature_c()
+    # The layer sits on the recording's own `video_time`; the trajectory clock is
+    # that plus the camera offset, which is what the frames got too.
+    cpp: Trajectory = shift_clock(read_rig_trajectory(session.slam_path), manifest.robocap.imu.cam_time_offset_ns)
+    against_cpp: AteResult = ate(run.estimate, cpp)
+    across: float | None = None
+    if config.reference_csv is not None:
+        across = 100.0 * ate(run.estimate, read_trajectory(config.reference_csv)).rmse_m
+    ms_per_frameset: float = 1e3 * run.wall_s / max(run.framesets, 1)
+    return (
+        RobocapRow(
+            machine=machine,
+            segment_id=session.fleet_id,
+            framesets=run.framesets,
+            tracked=len(run.estimate),
+            lost=run.lost,
+            cpp_rmse_cm=100.0 * against_cpp.rmse_m,
+            cpp_max_cm=100.0 * against_cpp.max_m,
+            cpp_median_cm=100.0 * against_cpp.median_m,
+            wall_s=run.wall_s,
+            ms_per_frameset=ms_per_frameset,
+            cpp_wall_s=None,
+            realtime_factor_15fps=BUDGET_15FPS_MS / ms_per_frameset,
+            realtime_factor_30fps=BUDGET_30FPS_MS / ms_per_frameset,
+            peak_rss_mb=this_peak_rss_mb(),
+            temp_c_before=before,
+            temp_c_after=after,
+            cross_platform_ate_cm=across,
+        ),
+        run.estimate,
+    )
+
+
 def main(config: Config) -> None:
     """Replay the session, print its row, and write the trajectory and the JSON.
 
@@ -203,7 +184,7 @@ def main(config: Config) -> None:
     started: float = time.monotonic()
     row: RobocapRow
     estimate: Trajectory
-    row, estimate = measure(manifest, session, config.seconds, config.window_s, config.reference_csv)
+    row, estimate = measure(manifest, session, config, machine)
     output_csv: Path = config.output_csv if config.output_csv is not None else config.output_json.with_suffix(".csv")
     # Above both writes: a run that spent 52.9 s of video must not lose it to a
     # directory that is not there. `write_trajectory` makes its own parents,
