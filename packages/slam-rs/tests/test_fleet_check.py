@@ -1,0 +1,67 @@
+"""What a fleet row says, and when it says the machine failed (D60).
+
+The tool that produces these rows runs on machines with no NAS, no repository
+and — on the pack target — no pixi, so what is under test here is the part that
+needs none of that: the verdict a clip's numbers earn, and how the row reads.
+"""
+
+from slam_rs.apis.fleet_check import ClipResult, Machine
+
+MACHINE: Machine = Machine(hostname="pablo-rpi", arch="aarch64", glibc="2.36", cores=4)
+"""A four-core Pi, which is the smallest machine that runs a full install."""
+PASSING: ClipResult = ClipResult(
+    segment_id="msd-index__MIO_others__MIO10_short_2_panorama",
+    framesets=412,
+    tracked=412,
+    lost=0,
+    cpp_rmse_cm=0.31,
+    gt_rmse_cm=1.50,
+    cpp_gt_band_cm=(1.427751, 1.427823),
+    wall_s=30.0,
+    cpp_wall_s=7.674,
+    peak_rss_mb=512.0,
+)
+"""The smoke clip as this host measures it, on a machine four times slower."""
+
+
+def test_a_clip_inside_the_bands_passes_wherever_it_ran() -> None:
+    """The three D60 clauses, and the speed ratio that is not one of them.
+
+    The Pi is four times slower than the x86-64 host the C++ wall was measured
+    on. That is a fact about the machine, not a failure of the port, so the ratio
+    is reported and the verdict does not read it — the gate's speed clause is
+    against a wall measured on one host and means nothing on another.
+    """
+    assert PASSING.failures == ()
+    assert PASSING.verdict == "pass"
+    assert PASSING.cpp_wall_ratio == 30.0 / 7.674
+
+
+def test_every_clause_a_machine_can_miss_is_named_in_its_own_row() -> None:
+    """A lost frameset, a path error and a ground-truth error outside the band."""
+    from dataclasses import replace
+
+    lost: ClipResult = replace(PASSING, tracked=410, lost=2)
+    assert lost.verdict.startswith("fail")
+    assert "2 of 412" in lost.failures[0]
+
+    adrift: ClipResult = replace(PASSING, cpp_rmse_cm=2.5, gt_rmse_cm=9.0)
+    assert len(adrift.failures) == 2
+    assert "2.50 cm from the C++ trajectory" in adrift.failures[0]
+    assert "9.00 cm from ground truth" in adrift.failures[1]
+    # 1.2 x the worse of the C++'s own two precisions on this clip.
+    assert adrift.gt_allowed_cm == 1.2 * 1.427823
+
+
+def test_the_row_carries_the_machine_beside_the_numbers() -> None:
+    """One markdown row: the machine, the clip, both errors, the verdict, the cost."""
+    cells: list[str] = [cell.strip() for cell in PASSING.row(MACHINE).strip().strip("|").split("|")]
+    assert cells[:4] == ["pablo-rpi", "aarch64", "2.36", "4"]
+    assert cells[4].endswith("MIO10_short_2_panorama")
+    assert cells[5] == "412/412/0"
+    assert cells[6] == "0.31"
+    assert cells[7] == "1.50 (allowed 1.71)"
+    assert cells[8] == "pass"
+    assert cells[9] == "30.00"
+    assert cells[10] == "3.91x"
+    assert cells[11] == "512"

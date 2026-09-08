@@ -7,6 +7,11 @@ replay tool draws a Rerun rung from what tracked and the V2 gate asserts numbers
 on it, and both have to hold and retry identically or the gate stops measuring
 the tool. It therefore lives here once, and :class:`Lockstep` is what both
 drive.
+
+:func:`run_segment` is the loop over that hold with nothing logged — the one the
+C++ reference timed — and it is here for the same reason: the V2 gate reads its
+numbers and :mod:`slam_rs.apis.fleet_check` reports them from another machine, so
+the two must feed the estimator identically or they are measuring different runs.
 """
 
 import time
@@ -14,9 +19,13 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 import numpy as np
+from jaxtyping import Float64
+from numpy import ndarray
 
 from slam_rs import _core
-from slam_rs.catalog_feed import Frameset
+from slam_rs.catalog_feed import Frameset, LocalSegment, SegmentFeed, open_segment
+from slam_rs.reference import ReferenceManifest, ReferenceSegment, flow_config
+from slam_rs.trajectory import Trajectory, shift_clock
 
 MAX_HELD_FRAMESETS: int = 2
 """Most framesets the hold may ever carry: one refused, plus the one whose samples unblock it."""
@@ -97,3 +106,70 @@ class Lockstep:
             self.pending.pop(0)
             self.elapsed_ms.append(elapsed_ms)
             yield held, result
+
+
+@dataclass(slots=True, frozen=True)
+class SegmentRun:
+    """What one clip through the whole pipeline produced, on the absolute device clock."""
+
+    estimate: Trajectory
+    """Every pose the estimator reported, in frameset order."""
+    framesets: int
+    """Framesets replayed."""
+    lost: int
+    """Framesets that never produced a pose: the estimator was still waiting for
+    inertial samples covering them when the clip ended."""
+    wall_s: float
+    """Wall time the feed loop took: decode plus ``track``, nothing logged."""
+
+
+def run_segment(
+    manifest: ReferenceManifest, segment: ReferenceSegment, window_s: float | None = None, max_framesets: int | None = None
+) -> SegmentRun:
+    """Drive one reference clip through :class:`slam_rs._core.Vio`.
+
+    Args:
+        manifest: The reference set, which resolves the dataset's basalt config.
+        segment: Manifest entry naming the layers, the IMU model and the device's
+            image safe radius.
+        window_s: Stop after this many seconds of the clip; None replays it whole.
+        max_framesets: Stop after this many framesets; None replays the clip.
+
+    Returns:
+        The estimated trajectory, the two counts the gate reads, and the wall
+        time of the feed loop — which starts once the segment is open, because
+        that is the loop the C++ reference timed.
+    """
+    source: LocalSegment = LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path)
+    window_ns: int | None = None if window_s is None else int(window_s * 1e9)
+    t_ns: list[int] = []
+    positions: list[Float64[ndarray, " 3"]] = []
+    quaternions: list[Float64[ndarray, " 4"]] = []
+    replayed: int = 0
+    feed: SegmentFeed
+    with open_segment(source, segment.imu) as feed:
+        lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment)))
+        started: float = time.monotonic()
+        for frameset in feed.framesets():
+            if max_framesets is not None and replayed >= max_framesets:
+                break
+            if window_ns is not None and frameset.t_ns > window_ns:
+                break
+            replayed += 1
+            for _tracked, result in lockstep.push(frameset):
+                pose: Float64[ndarray, " 7"] = result.world_from_rig
+                t_ns.append(result.t_ns)
+                positions.append(pose[0:3].copy())
+                quaternions.append(np.roll(pose[3:7], 1).copy())
+        wall_s: float = time.monotonic() - started
+        offset_ns: int = feed.capture_start_time_ns
+    # Whatever is still held never got samples covering it, so it produced no
+    # pose: that, and only that, is a lost frameset.
+    lost: int = len(lockstep.pending)
+    # Exports and both references are on the absolute device clock.
+    estimate: Trajectory = Trajectory(
+        t_ns=np.array(t_ns, dtype=np.int64),
+        position_m=np.array(positions, dtype=np.float64).reshape(-1, 3),
+        quaternion_wxyz=np.array(quaternions, dtype=np.float64).reshape(-1, 4),
+    )
+    return SegmentRun(estimate=shift_clock(estimate, offset_ns), framesets=replayed, lost=lost, wall_s=wall_s)

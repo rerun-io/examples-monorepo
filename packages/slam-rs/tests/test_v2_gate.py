@@ -46,8 +46,8 @@ being stepped over, and only a host that holds none of them skips.
 The tolerances live in :mod:`slam_rs.reference`, not here: they are the
 milestone's verdict and S15 decides them from measurement.
 
-The gate drives :class:`slam_rs._core.Vio` through :class:`slam_rs.tracking.Lockstep`
-and the feed directly rather than the replay tool: what is gated is the pipeline
+The gate drives :class:`slam_rs._core.Vio` through :func:`slam_rs.tracking.run_segment`
+rather than the replay tool: what is gated is the pipeline
 and the manifest, not the Rerun rung over them. Nothing here logs.
 
 The measuring tests are ``slow`` and skip cleanly on a host without the corpus;
@@ -56,18 +56,13 @@ decide against a relocated manifest of empty files and need no NAS.
 """
 
 import os
-import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 import pytest
 from _pytest.outcomes import Skipped
-from jaxtyping import Float64
-from numpy import ndarray
 
-from slam_rs import _core
-from slam_rs.catalog_feed import LocalSegment, SegmentFeed, open_segment
 from slam_rs.reference import (
     ATE_VS_CPP_CM,
     DIVERGENCE_FACTOR,
@@ -78,18 +73,16 @@ from slam_rs.reference import (
     CppAte,
     ReferenceManifest,
     ReferenceSegment,
-    flow_config,
     load_manifest,
 )
 from slam_rs.reference_bundle import BundleFile
-from slam_rs.tracking import Lockstep
+from slam_rs.tracking import SegmentRun, run_segment
 from slam_rs.trajectory import (
     MIN_ASSOCIATED_POSES,
     AteResult,
     Trajectory,
     ate,
     read_trajectory,
-    shift_clock,
     write_trajectory,
 )
 
@@ -130,76 +123,6 @@ class GatedClip:
             return self.segment.capture.num_frames
         covered: float = min(1.0, self.window_s * 1e9 / self.segment.capture.duration_ns)
         return max(1, round(covered * self.segment.capture.num_frames))
-
-
-@dataclass(slots=True, frozen=True)
-class SegmentRun:
-    """What one clip through the whole pipeline produced, on the absolute device clock."""
-
-    estimate: Trajectory
-    """Every pose the estimator reported, in frameset order."""
-    framesets: int
-    """Framesets replayed."""
-    lost: int
-    """Framesets that never produced a pose: the estimator was still waiting for
-    inertial samples covering them when the clip ended."""
-    wall_s: float
-    """Wall time the feed loop took: decode plus ``track``, nothing logged."""
-
-
-def run_segment(
-    manifest: ReferenceManifest, segment: ReferenceSegment, window_s: float | None = None, max_framesets: int | None = None
-) -> SegmentRun:
-    """Drive one reference clip through :class:`slam_rs._core.Vio`.
-
-    Args:
-        manifest: The reference set, which resolves the dataset's basalt config.
-        segment: Manifest entry naming the layers, the IMU model and the device's
-            image safe radius.
-        window_s: Stop after this many seconds of the clip; None replays it whole.
-        max_framesets: Stop after this many framesets; None replays the clip.
-
-    Returns:
-        The estimated trajectory, the two counts the gate reads, and the wall
-        time of the feed loop — which starts once the segment is open, because
-        that is the loop the C++ reference timed.
-    """
-    source: LocalSegment = LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path)
-    window_ns: int | None = None if window_s is None else int(window_s * 1e9)
-    t_ns: list[int] = []
-    positions: list[Float64[ndarray, " 3"]] = []
-    quaternions: list[Float64[ndarray, " 4"]] = []
-    replayed: int = 0
-    feed: SegmentFeed
-    with open_segment(source, segment.imu) as feed:
-        # The hold-and-retry rule is the pipeline's contract, not the tool's, so
-        # the gate drives the same :class:`slam_rs.tracking.Lockstep` the replay
-        # tool does (D17); what the gate does not import is the Rerun rung.
-        lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment)))
-        started: float = time.monotonic()
-        for frameset in feed.framesets():
-            if max_framesets is not None and replayed >= max_framesets:
-                break
-            if window_ns is not None and frameset.t_ns > window_ns:
-                break
-            replayed += 1
-            for _tracked, result in lockstep.push(frameset):
-                pose: Float64[ndarray, " 7"] = result.world_from_rig
-                t_ns.append(result.t_ns)
-                positions.append(pose[0:3].copy())
-                quaternions.append(np.roll(pose[3:7], 1).copy())
-        wall_s: float = time.monotonic() - started
-        offset_ns: int = feed.capture_start_time_ns
-    # Whatever is still held never got samples covering it, so it produced no
-    # pose: that, and only that, is a lost frameset.
-    lost: int = len(lockstep.pending)
-    # Exports and both references are on the absolute device clock.
-    estimate: Trajectory = Trajectory(
-        t_ns=np.array(t_ns, dtype=np.int64),
-        position_m=np.array(positions, dtype=np.float64).reshape(-1, 3),
-        quaternion_wxyz=np.array(quaternions, dtype=np.float64).reshape(-1, 4),
-    )
-    return SegmentRun(estimate=shift_clock(estimate, offset_ns), framesets=replayed, lost=lost, wall_s=wall_s)
 
 
 def extent_m(trajectory: Trajectory) -> float:
