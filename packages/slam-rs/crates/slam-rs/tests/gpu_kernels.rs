@@ -572,3 +572,65 @@ fn the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing() {
     shared.scan(0, &odd).unwrap();
     assert_eq!(shared.frame_uploads(), 1);
 }
+
+/// The per-frame path keeps CubeCL's pool bounded.
+///
+/// The lane held 670 MiB to 1.4 GiB over idle for about 6 MB of pyramids and
+/// patch storage, which is irrelevant on a 32 GB card and decisive on the cap's
+/// shared 8 GB. The cause is not the data: `cubecl-cuda` sizes its pools from
+/// the device — `max_page_size = total / 4`, then `MemoryConfiguration::SubSlices`
+/// lays a geometric ladder of pools down to 8 MB pages — and `RuntimeOptions`
+/// is built inside `DeviceService::init`, so a client cannot ask for anything
+/// smaller. What a caller controls is how many allocations per frame it hands
+/// the pool and how many distinct sizes they come in. This measures that, over
+/// enough framesets that a leak would show, and holds the reserved bytes to a
+/// ceiling the 8 GB lane can afford.
+#[test]
+fn the_per_frame_path_holds_the_pool_flat() {
+    const FRAMES: usize = 200;
+    /// Two 960x960 four-level pyramids are 4.7 MB and the scan buffers 3.9 MB.
+    /// A pool that reuses its pages sits far under this; one that grows a page
+    /// per frame passes it before frame twenty.
+    const RESERVED_CEILING: u64 = 256 * 1024 * 1024;
+
+    let client = cuda_client();
+    let mut builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
+    let mut scanner: GpuCornerScan<_> = GpuCornerScan::new(client.clone());
+    scanner.share_level0(builder.level0_table());
+
+    let frames: [ImageU16; 2] = [cornered_image(960, 960), cornered_image(960, 960)];
+    let mut pyramids: Vec<_> = frames
+        .iter()
+        .map(|frame| builder.allocate(frame.width(), frame.height(), 3).unwrap())
+        .collect();
+
+    let mut worst: u64 = 0;
+    for frame_index in 0..FRAMES {
+        for (camera, frame) in frames.iter().enumerate() {
+            builder.build(camera, frame, &mut pyramids[camera]).unwrap();
+            scanner.scan(camera, frame).unwrap();
+            // One band, so the download and the host-side walk run too.
+            scanner.band(3, 44, 20).unwrap();
+        }
+        if let Ok(usage) = client.memory_usage() {
+            worst = worst.max(usage.bytes_reserved);
+            if frame_index == 0 || frame_index == 9 || frame_index + 1 == FRAMES {
+                println!(
+                    "frame {}: {} allocs, {:.2} MiB in use, {:.2} MiB reserved",
+                    frame_index + 1,
+                    usage.number_allocs,
+                    usage.bytes_in_use as f64 / (1024.0 * 1024.0),
+                    usage.bytes_reserved as f64 / (1024.0 * 1024.0),
+                );
+            }
+        }
+    }
+    println!(
+        "worst reserved over {FRAMES} framesets: {:.2} MiB",
+        worst as f64 / (1024.0 * 1024.0)
+    );
+    assert!(
+        worst < RESERVED_CEILING,
+        "CubeCL reserved {worst} bytes over {FRAMES} framesets of two 960x960 cameras"
+    );
+}

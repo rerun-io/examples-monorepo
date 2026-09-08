@@ -21,6 +21,20 @@ const RING_COLUMN: [i32; 16] = [3, 3, 2, 1, 0, -1, -2, -3, -3, -3, -2, -1, 0, 1,
 /// (`fast.rs:517`).
 const FILTER_WIDTH: usize = 800;
 
+/// The three device buffers one frame geometry needs, kept between frames.
+struct ScanBuffers {
+    /// The dense FAST-9 score, one byte per pixel.
+    score: cubecl::server::Handle,
+    /// The score where the local-maximum filter kept it.
+    kept: cubecl::server::Handle,
+    /// One bit per column of `kept`, thirty-two to a word.
+    mask: cubecl::server::Handle,
+    /// Pixels these were sized for.
+    pixels: usize,
+    /// Mask words these were sized for.
+    mask_len: usize,
+}
+
 /// One row band at one threshold, already filtered out of the candidate image.
 #[derive(Debug)]
 struct Band {
@@ -65,6 +79,16 @@ pub struct GpuCornerScan<R: Runtime> {
     /// A repack buffer for a frame whose stride exceeds its width, reused
     /// between frames so the per-frame path allocates nothing (D49).
     packed: Vec<u16>,
+    /// The dense score image, the candidate image and the column bitmask,
+    /// allocated once per geometry rather than once per frame.
+    ///
+    /// Every one of the three kernels writes every element of its output in
+    /// range — the score kernel zeroes the margin, the filter writes each pixel
+    /// and the packer each word — so a reused buffer cannot carry a previous
+    /// frame's candidate, and `a_reused_corner_scan_carries_only_the_newest_frame`
+    /// is the test that says so. Three `client.empty` calls per camera per
+    /// frameset were the largest source of pool churn in the lane.
+    buffers: Option<ScanBuffers>,
     /// The candidate image, one byte per pixel, as it came back.
     kept: Vec<u8>,
     /// One bit per column of `kept`, thirty-two to a word.
@@ -91,6 +115,7 @@ impl<R: Runtime> GpuCornerScan<R> {
             level0: Level0Table::default(),
             uploads: 0,
             packed: Vec::new(),
+            buffers: None,
             kept: Vec::new(),
             mask: Vec::new(),
             words: 0,
@@ -196,9 +221,31 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         let mask_len: usize = self.words * self.height;
 
         let (handle, handle_len): (cubecl::server::Handle, usize) = self.frame(camera, image);
-        let score: cubecl::server::Handle = self.client.empty(pixels);
-        let kept: cubecl::server::Handle = self.client.empty(pixels);
-        let mask: cubecl::server::Handle = self.client.empty(mask_len * size_of::<u32>());
+        let fits: bool = self
+            .buffers
+            .as_ref()
+            .is_some_and(|buffers| buffers.pixels == pixels && buffers.mask_len == mask_len);
+        if !fits {
+            self.buffers = Some(ScanBuffers {
+                score: self.client.empty(pixels),
+                kept: self.client.empty(pixels),
+                mask: self.client.empty(mask_len * size_of::<u32>()),
+                pixels,
+                mask_len,
+            });
+        }
+        // Unreachable: the branch above has just filled it.
+        let Some(buffers) = self.buffers.as_ref() else {
+            return Err(DetectError::DeviceRead {
+                expected: pixels,
+                actual: 0,
+            });
+        };
+        let (score, kept, mask) = (
+            buffers.score.clone(),
+            buffers.kept.clone(),
+            buffers.mask.clone(),
+        );
         kernels::launch_fast_score::<R>(
             &self.client,
             (&handle, handle_len),
@@ -231,14 +278,14 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         );
 
         // One read for both, so one synchronisation for the frame.
-        let mut buffers = self.client.read(vec![kept, mask]);
-        let Some(mask_bytes) = buffers.pop() else {
+        let mut reads = self.client.read(vec![kept, mask]);
+        let Some(mask_bytes) = reads.pop() else {
             return Err(DetectError::DeviceRead {
                 expected: mask_len * size_of::<u32>(),
                 actual: 0,
             });
         };
-        let Some(kept_bytes) = buffers.pop() else {
+        let Some(kept_bytes) = reads.pop() else {
             return Err(DetectError::DeviceRead {
                 expected: pixels,
                 actual: 0,

@@ -172,9 +172,9 @@ impl<R: Runtime> GpuPyramid<R> {
 /// The GPU [`PyramidBuilder`].
 ///
 /// Holds the client, the pattern the per-patch kernels need in every pyramid's
-/// `meta`, and a contiguous host staging buffer for level 0 — a frame may be
-/// strided, a level never is, and one upload of a packed buffer beats one
-/// upload per row.
+/// `meta`, and a repack buffer used only by a frame whose stride exceeds its
+/// width — a level never is strided, and one upload of a packed buffer beats
+/// one upload per row.
 pub struct GpuPyramidBuilder<R: Runtime> {
     client: ComputeClient<R>,
     pattern: Vec<[f32; 2]>,
@@ -253,31 +253,46 @@ impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
             });
         }
 
-        // `create_from_slice` is CubeCL 0.10's only host-to-device write and it
-        // allocates a buffer the size of the slice, so the upload has to be the
-        // whole `even` allocation: level 0 at the front, and past it the levels
-        // the subsample launches below overwrite. That makes the tail's contents
-        // irrelevant, so the staging buffer is filled once and only its level-0
-        // prefix is rewritten per frame. The cost is one host copy of level 0
-        // and `even_len - width * height` extra uploaded pixels — 6 % on a
-        // 960x960 four-level pyramid, measured rather than assumed.
-        self.staging.resize(out.even_len, 0);
-        for y in 0..img.height() {
-            let start: usize = y * img.width();
-            self.staging[start..start + img.width()].copy_from_slice(img.row(y));
-        }
-        out.even = out.client.create_from_slice(u16::as_bytes(&self.staging));
+        // `create_from_slice` is CubeCL 0.10's only host-to-device write, it
+        // allocates a buffer the size of the slice, and it copies the payload
+        // **twice** on the host before the bus sees it (`slice.to_vec()`, then
+        // `Bytes::from_bytes_vec(data.to_vec())` inside `do_create_from_slices`).
+        // So the upload is exactly as long as the frame and nothing more: an
+        // unstrided frame goes straight out of the caller's buffer with no
+        // staging copy at all, and only a strided one is repacked. Level 0 then
+        // reaches the front of the even allocation through one device copy,
+        // which costs microseconds and lets that allocation be made once at
+        // `allocate` instead of replaced every frame.
+        let pixels: usize = level0.width * level0.height;
+        let upload: cubecl::server::Handle = if img.stride() == level0.width {
+            out.client
+                .create_from_slice(u16::as_bytes(&img.data()[..pixels]))
+        } else {
+            self.staging.clear();
+            self.staging.reserve(pixels);
+            for y in 0..img.height() {
+                self.staging.extend_from_slice(img.row(y));
+            }
+            out.client.create_from_slice(u16::as_bytes(&self.staging))
+        };
+        kernels::launch_copy_level0::<R>(
+            &out.client,
+            (&upload, pixels),
+            (&out.even, out.even_len),
+            pixels,
+        );
 
-        // Level 0 is now on the device and the detector wants exactly it. A
-        // poisoned lock is left to fall through: the scanner then uploads its
-        // own copy, which is slower and correct.
+        // Level 0 is now on the device and the detector wants exactly it — the
+        // upload buffer, which is the frame and nothing else. A poisoned lock is
+        // left to fall through: the scanner then uploads its own copy, which is
+        // slower and correct.
         if let Ok(mut table) = self.level0.lock() {
             if table.len() <= camera {
                 table.resize(camera + 1, None);
             }
             table[camera] = Some(Level0 {
-                handle: out.even.clone(),
-                len: out.even_len,
+                handle: upload,
+                len: pixels,
                 width: level0.width,
                 height: level0.height,
             });

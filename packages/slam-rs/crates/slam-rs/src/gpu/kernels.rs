@@ -1207,6 +1207,50 @@ pub(super) fn launch_klt<R: Runtime>(
 /// Units per cube on the two per-patch bookkeeping kernels.
 const LINEAR_UNITS: u32 = 256;
 
+/// Level 0, from the buffer it was uploaded into to the front of the pyramid's
+/// even allocation.
+///
+/// The upload and the pyramid want different shapes. The upload wants to be
+/// exactly as long as the frame, because `create_from_slice` is CubeCL 0.10's
+/// only host-to-device write and it copies the payload on the host before the
+/// bus sees it, so every byte over the frame is paid for twice. The pyramid
+/// wants level 0 at offset zero of the buffer that also holds levels 2 and 4,
+/// because the per-patch kernels reach a level through two bindings split by
+/// parity. One device copy of the frame — a few microseconds at this card's
+/// bandwidth — buys both, and leaves the even allocation to be made once at
+/// `allocate` rather than replaced every frame.
+#[cube(launch, launch_unchecked)]
+fn copy_level0_kernel(src: &Array<u16>, dst: &mut Array<u16>, count: usize) {
+    let index = usize::cast_from(ABSOLUTE_POS_X);
+    if index >= count {
+        terminate!();
+    }
+    dst[index] = src[index];
+}
+
+/// Copy `count` pixels from the upload buffer to the front of `dst`.
+pub(super) fn launch_copy_level0<R: Runtime>(
+    client: &ComputeClient<R>,
+    src: (&cubecl::server::Handle, usize),
+    dst: (&cubecl::server::Handle, usize),
+    count: usize,
+) {
+    unsafe {
+        copy_level0_kernel::launch_unchecked::<R>(
+            client,
+            CubeCount::Static((count as u32).div_ceil(LINEAR_UNITS), 1, 1),
+            CubeDim {
+                x: LINEAR_UNITS,
+                y: 1,
+                z: 1,
+            },
+            ArrayArg::from_raw_parts(src.0.clone(), src.1),
+            ArrayArg::from_raw_parts(dst.0.clone(), dst.1),
+            count,
+        );
+    }
+}
+
 /// Build the backward pass's transform inputs from the forward result.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn launch_prepare_backward<R: Runtime>(
