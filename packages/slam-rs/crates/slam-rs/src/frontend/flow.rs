@@ -214,7 +214,7 @@ impl Keypoints {
     ///
     /// # Panics
     ///
-    /// If `index` is past the end.
+    /// Whatever [`FlowTransforms::get`] panics on: an `index` past the end.
     pub fn transform(&self, index: usize) -> AffineCompact2f {
         self.transforms.get(index)
     }
@@ -1330,18 +1330,6 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         }
     }
 
-    /// `addKeypoint` (`:726-732`): register a keypoint and bump its cell.
-    fn add_keypoint(
-        &mut self,
-        camera: usize,
-        id: KeypointId,
-        transform: &AffineCompact2f,
-        response: f32,
-    ) {
-        self.bump_cell(camera, transform);
-        self.frame.cameras[camera].set(id, transform, response);
-    }
-
     /// The `cells(y, x)++` half of `addKeypoint`/`addKeypoints` (`:729`, `:738`).
     fn bump_cell(&mut self, camera: usize, transform: &AffineCompact2f) {
         let (row, column) = self
@@ -1419,7 +1407,9 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             let transform: AffineCompact2f =
                 AffineCompact2f::at(Vector2::new(corner[0], corner[1]));
             let id: KeypointId = KeypointId(self.last_keypoint_id);
-            self.add_keypoint(camera, id, &transform, response);
+            // `addKeypoint` (`:726-732`): bump the cell, then register.
+            self.bump_cell(camera, &transform);
+            self.frame.cameras[camera].set(id, &transform, response);
             if camera == 0 {
                 self.new_cam0.set(id, &transform, response);
             }

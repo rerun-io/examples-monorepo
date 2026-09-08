@@ -132,6 +132,11 @@ impl Vio {
     /// caught rather than raised, so it is a `ValueError` too — with the
     /// runtime's own panic message left on stderr, which is the only account of
     /// a case the probe did not know to ask about.
+    ///
+    /// `threads` is **inert on the GPU lane**: it reaches
+    /// `FrontendOptions::threads`, which only `CpuPatchTracker::new` reads, and
+    /// the GPU tracker holds no work pool. It is accepted rather than refused
+    /// together with `gpu=True` so the same call site can select either lane.
     #[new]
     #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None, gpu = false))]
     fn new(
@@ -605,7 +610,8 @@ impl VioSnapshot {
 /// The frontend options both entry points build, from the two knobs they expose.
 ///
 /// Everything else in `FrontendOptions` is a property of the port rather than of
-/// a run, so `None` means the default rather than "unset".
+/// a run, so `None` means the default rather than "unset". `threads` is read by
+/// `CpuPatchTracker::new` alone, so it does nothing on the GPU lane.
 fn frontend_options(threads: usize, max_keypoints: Option<usize>) -> FrontendOptions {
     let defaults: FrontendOptions = FrontendOptions::default();
     FrontendOptions {
@@ -622,11 +628,40 @@ struct GrayImage {
     pixels: Vec<u8>,
 }
 
-/// Borrow one `uint8[h, w]` array out of Python: rank, dtype and layout checked.
+/// The C-contiguous elements of an array borrowed out of Python.
+///
+/// Both halves of one check, so the refusal has one wording. `as_slice` alone
+/// accepts Fortran order, whose bytes run down the columns and would transpose
+/// every row-major read here, so the C flag is asked explicitly; `as_slice`'s
+/// own refusal — which the flag has already ruled out — lands on the same
+/// sentence rather than a second copy of it. `what` names the array in the
+/// message and `hint` is what the caller should wrap.
+fn contiguous<'a, T, D>(
+    readonly: &'a numpy::PyReadonlyArray<'_, T, D>,
+    what: &str,
+    hint: &str,
+) -> PyResult<&'a [T]>
+where
+    T: numpy::Element,
+    D: numpy::ndarray::Dimension,
+{
+    let refused = || {
+        PyValueError::new_err(format!(
+            "{what} must be C-contiguous; pass numpy.ascontiguousarray({hint})"
+        ))
+    };
+    if !readonly.is_c_contiguous() {
+        return Err(refused());
+    }
+    readonly.as_slice().map_err(|_| refused())
+}
+
+/// Borrow one `uint8[h, w]` array out of Python: rank and dtype checked.
 ///
 /// The two consumers differ only in what they do with the bytes — [`Vio::track`]
 /// copies them into a `Vec`, [`OpticalFlow::process`] widens them straight into a
-/// reused [`ImageU16`] — so the checks live here and neither repeats them.
+/// reused [`ImageU16`] — so the checks live here and neither repeats them. The
+/// layout is [`gray_pixels`]' half of the same pair.
 fn gray_array<'py>(
     object: &Bound<'py, PyAny>,
     index: usize,
@@ -634,31 +669,16 @@ fn gray_array<'py>(
     let array: &Bound<'py, PyArray2<u8>> = object.cast::<PyArray2<u8>>().map_err(|_| {
         PyValueError::new_err(format!("image {index} must be a 2-D uint8 numpy array"))
     })?;
-    // as_slice() alone accepts Fortran order, whose bytes are transposed with
-    // respect to the row-major copies below, so check the C flag explicitly.
-    if !array.is_c_contiguous() {
-        return Err(PyValueError::new_err(format!(
-            "image {index} must be C-contiguous; pass numpy.ascontiguousarray(image)"
-        )));
-    }
     Ok(array.readonly())
 }
 
 /// The pixels, width and height of an array [`gray_array`] has accepted.
-///
-/// `as_slice` refuses a non-contiguous array, which [`gray_array`] has already
-/// ruled out; the message is here so the refusal has one wording wherever the
-/// two callers reach it.
 fn gray_pixels<'a>(
     readonly: &'a PyReadonlyArray2<'_, u8>,
     index: usize,
 ) -> PyResult<(&'a [u8], usize, usize)> {
     let shape: &[usize] = readonly.shape();
-    let pixels: &[u8] = readonly.as_slice().map_err(|_| {
-        PyValueError::new_err(format!(
-            "image {index} must be C-contiguous; pass numpy.ascontiguousarray(image)"
-        ))
-    })?;
+    let pixels: &[u8] = contiguous(readonly, &format!("image {index}"), "image")?;
     Ok((pixels, shape[1], shape[0]))
 }
 
@@ -678,18 +698,8 @@ fn int64_column(object: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<i64>> {
     let array: &Bound<'_, PyArray1<i64>> = object
         .cast::<PyArray1<i64>>()
         .map_err(|_| PyValueError::new_err(format!("{name} must be a 1-D int64 numpy array")))?;
-    if !array.is_c_contiguous() {
-        return Err(PyValueError::new_err(format!(
-            "{name} must be C-contiguous; pass numpy.ascontiguousarray({name})"
-        )));
-    }
     let readonly = array.readonly();
-    let values: &[i64] = readonly.as_slice().map_err(|_| {
-        PyValueError::new_err(format!(
-            "{name} must be C-contiguous; pass numpy.ascontiguousarray({name})"
-        ))
-    })?;
-    Ok(values.to_vec())
+    Ok(contiguous(&readonly, name, name)?.to_vec())
 }
 
 /// Copy a C-contiguous `float64[n, 3]` array out of Python, row by row.
@@ -705,17 +715,8 @@ fn float64_triples(object: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<[f64; 
     }
     // Fortran order passes as_slice() but its bytes run down the columns, which
     // would turn the chunks below into transposed samples.
-    if !array.is_c_contiguous() {
-        return Err(PyValueError::new_err(format!(
-            "{name} must be C-contiguous; pass numpy.ascontiguousarray({name})"
-        )));
-    }
     let readonly = array.readonly();
-    let values: &[f64] = readonly.as_slice().map_err(|_| {
-        PyValueError::new_err(format!(
-            "{name} must be C-contiguous; pass numpy.ascontiguousarray({name})"
-        ))
-    })?;
+    let values: &[f64] = contiguous(&readonly, name, name)?;
     Ok(values
         .chunks_exact(3)
         .map(|row| [row[0], row[1], row[2]])

@@ -481,6 +481,26 @@ impl FlowTransforms {
         ]
     }
 
+    /// The first `len` entries of the six coefficient arrays, mutably.
+    ///
+    /// The prefix [`crate::frontend::parallel::WorkPool::for_each_warp`] wants
+    /// when a capacity-sized buffer is carrying `len` live warps, which is the
+    /// tracker's shape on both of its passes.
+    ///
+    /// # Panics
+    ///
+    /// If `len` is past the end of the arrays.
+    pub fn coefficients_prefix_mut(&mut self, len: usize) -> [&mut [f32]; 6] {
+        [
+            &mut self.m00[..len],
+            &mut self.m01[..len],
+            &mut self.m10[..len],
+            &mut self.m11[..len],
+            &mut self.tx[..len],
+            &mut self.ty[..len],
+        ]
+    }
+
     /// Every translation `x`, patch index fast-varying.
     pub fn translations_x(&self) -> &[f32] {
         &self.tx
@@ -1118,16 +1138,8 @@ impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
         let num_levels: usize = self.num_levels;
         let (target_width, target_height): (f32, f32) = level0_size(next);
         {
-            let [m00, m01, m10, m11, tx, ty] = self.forward.coefficients_mut();
             self.pool.for_each_warp(
-                [
-                    &mut m00[..count],
-                    &mut m01[..count],
-                    &mut m10[..count],
-                    &mut m11[..count],
-                    &mut tx[..count],
-                    &mut ty[..count],
-                ],
+                self.forward.coefficients_prefix_mut(count),
                 &mut self.forward_valid[..count],
                 |index| {
                     let guess: Vector2<f32> = transforms_in.translation(index);
@@ -1180,16 +1192,8 @@ impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
         let max_recovered_dist2: f32 = self.max_recovered_dist2;
         {
             let (valid, transforms) = out.parts_mut();
-            let [m00, m01, m10, m11, tx, ty] = transforms.coefficients_mut();
             self.pool.for_each_warp(
-                [
-                    &mut m00[..count],
-                    &mut m01[..count],
-                    &mut m10[..count],
-                    &mut m11[..count],
-                    &mut tx[..count],
-                    &mut ty[..count],
-                ],
+                transforms.coefficients_prefix_mut(count),
                 &mut valid[..count],
                 |index| {
                     let kept: [f32; 6] = forward.coefficients(index);
