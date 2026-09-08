@@ -383,8 +383,21 @@ pixi run -e slam-rs-gpu-dev --frozen slam-rs-gpu-test    # cargo test --features
 pixi run -e slam-rs-gpu-dev --frozen slam-rs-gpu-clippy  # clippy with the feature, -D warnings
 ```
 
-The environment is linux-64 only and its own solve group, so no other lane in
-the workspace enters a CUDA solve.
+The environment is `linux-64` and `linux-aarch64`, in its own solve group, so no
+other lane in the workspace enters a CUDA solve. The aarch64 subdir is the
+Spark's: conda-forge ships both packages at 13.0 there through the `sbsa` arm
+variant, whose header directory is `targets/sbsa-linux`, which is the one thing
+`CUDA_PATH` has to say per target.
+
+The portable lane's three tasks need no CUDA package at all, so they live in the
+base feature and run from `slam-rs`/`slam-rs-dev` on Linux and from
+`slam-rs-osx`/`slam-rs-osx-dev` on the Mac:
+
+```bash
+pixi run -e slam-rs-dev --frozen slam-rs-wgpu-check      # the portable lane still compiles
+pixi run -e slam-rs-dev --frozen slam-rs-wgpu-test       # the same kernels, on this host's GPU
+pixi run -e slam-rs-dev --frozen slam-rs-wgpu-build      # a core whose `--gpu` is wgpu
+```
 
 The **portable** lane's three tasks are not in it, and the difference is the
 point of the split: `gpu-wgpu` links no NVIDIA crate, so those tasks need no
@@ -407,15 +420,36 @@ pixi run -e slam-rs-osx-dev --frozen slam-rs-wgpu-test   # the same kernels thro
 
 ### The portable lane, and the two silent failures
 
-`gpu-wgpu` builds the same kernels through `cubecl-wgpu`, which is what the
-Spark, the Pi 5 and the cap will run. It needs **`cubecl-wgpu/spirv`**, and
-that is not a preference. cubecl-wgpu's WGSL compiler has no 16- or 8-bit
-element type — `U16 is not a valid WgpuElement` — and the pyramid is `u16`
-while the candidate image is `u8`, so on the WGSL path every kernel here
-produces nothing. With `spirv`, a Vulkan adapter is compiled through SPIR-V
-instead, which stores both widths when the device advertises `shaderInt16` and
-16-bit storage; a Metal adapter still falls back to WGSL and would need
-`cubecl-wgpu/msl`.
+`gpu-wgpu` builds the same kernels through `cubecl-wgpu`, which is what the Mac,
+the Spark, the Pi 5 and the cap run. cubecl-wgpu picks its shader compiler at
+run time from the adapter's backend — Vulkan takes SPIR-V, Metal takes MSL,
+anything else takes WGSL — but which compilers are *built* is a cargo feature,
+and the two the fleet needs cannot both be on for one platform. So the choice is
+per **target**, not per feature of ours:
+
+```toml
+[target.'cfg(target_os = "macos")'.dependencies]
+cubecl-wgpu = { workspace = true, optional = true, features = ["msl"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+cubecl-wgpu = { workspace = true, optional = true, features = ["spirv"] }
+```
+
+One `--features gpu-wgpu` line therefore works everywhere, and a Mac build
+cannot silently forget the Metal compiler. **WGSL is not a lane**: its compiler
+has no 16- or 8-bit element type — `U16 is not a valid WgpuElement` — and the
+pyramid is `u16` while the candidate image is `u8`, so on that path every kernel
+here produces nothing.
+
+`gpu-wgpu` also turns on **`cubecl-wgpu/exclusive-memory-only`**, one buffer per
+handle rather than slices of a shared page. That is correctness, not tuning:
+cubecl-wgpu 0.10 aligns its pool to the adapter's
+`min_uniform_buffer_offset_alignment` and then binds the slices as *storage*
+buffers, so an adapter whose `min_storage_buffer_offset_alignment` is the larger
+of the two rejects every slice past the first — the RK3588's Mali G610 asks for
+64 and got 32. It costs nothing here (fifteen long-lived allocations per frame)
+and drops the pool plateau from 40.00 MiB to 11.97, which is the direction the
+8 GB targets want.
 
 That failure and the missing-CUDA-install one are the same shape and both are
 **silent**: the panic happens on cubecl's own worker thread, the launch reports
@@ -445,6 +479,28 @@ the C++'s own two precisions differ by 2.3 cm on it — so the reading is that
 the band is not wide enough to hold a third backend there. It is still a gate
 failure, and **the portable lane is not anyone's default until MIO14 is
 understood** (`reports/pr22-gpu-round2.md`, next step 1).
+
+### Where the portable lane runs
+
+Measured device by device in S23 (`reports/pr23-portable.md`), the two smoke
+clips and the eleven per-kernel tolerance tests on each:
+
+| device | driver → compiler | tolerance suite | the lane |
+|---|---|---|---|
+| RTX 5090 (this host) | Vulkan → SPIR-V | 11/11 | works, 1.1x faster than its CPU lane on the smoke clips |
+| Apple M4 (Mac mini) | Metal → MSL | 11/11 | works, **2.3x slower** than the M4's CPU lane |
+| NVIDIA GB10 (Spark) | Vulkan → SPIR-V | 11/11 | works, 1.08x faster |
+| Mali G610 (RoboCap cap, RK3588) | Vulkan 1.3.276 → SPIR-V | 11/11 | works, **2.2x slower** than the cap's CPU lane |
+| VideoCore VII (Pi 5) | Mesa v3dv → SPIR-V | **6/11** | refused: the driver is wrong on sub-word storage |
+| VideoCore VII (Pi 5) | Mesa lavapipe (software) → SPIR-V | 11/11, patch build bit-exact | works, 2.2x slower — a CPU rasteriser |
+| Maxwell (Jetson Nano, L4T 32.7) | Vulkan 1.2 → SPIR-V | **9/11** | refused: the two per-patch cube kernels SIGSEGV in the driver |
+
+Accuracy is the same on every device that runs it, and the same as the CPU
+lane's: 0.31 cm against the basalt C++ trajectory, 0.77 and 1.50 cm against
+ground truth on the two clips. **On a shared-memory SoC the GPU lane is slower
+than the CPU port**, so it is a portability result there, not a speed one.
+Do not run `vulkaninfo` on the Pi 5: it hangs in uninterruptible sleep and
+wedges the box's I/O. The tolerance suite is the probe.
 
 ## Python API
 
