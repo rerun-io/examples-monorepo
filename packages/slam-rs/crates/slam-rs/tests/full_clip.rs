@@ -84,8 +84,16 @@ fn read_imu(path: &Path) -> Vec<ImuRow> {
         .collect()
 }
 
-/// The VIO config of the device the clip was captured on, from the committed fixtures.
+/// The VIO config of the device the clip was captured on, from the committed
+/// fixtures, or the file `SLAM_RS_CLIP_CONFIG` names.
+///
+/// The override exists because a config field is an input like any other: the
+/// reference runs load `data/msd/msd*_config.json`, and a lane that builds a
+/// default config instead differs from them by whatever that file overrides.
 fn config_for(dataset_name: &str) -> VioConfig {
+    if let Some(path) = std::env::var_os("SLAM_RS_CLIP_CONFIG") {
+        return VioConfig::from_json_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    }
     let file: &str = match dataset_name {
         "msd-index" => "msdmi_config.json",
         "msd-g2" => "msdmg_config.json",
@@ -107,6 +115,7 @@ fn replay<S: LieScalar>(
     directory: &Path,
     imu: &[ImuRow],
     calibration: &Path,
+    streamed: bool,
     out: &Path,
     stats: Option<PathBuf>,
 ) {
@@ -119,8 +128,17 @@ fn replay<S: LieScalar>(
         },
     )
     .unwrap();
-    for row in imu {
-        vio.push_imu(row.t_ns, row.gyro, row.accel).unwrap();
+    // Either the whole window before the first frameset, or the samples each
+    // frameset needs plus the one past it, which is how a live feed arrives.
+    // `vio_parity.rs`'s retry gate says the two give the same trajectory; over a
+    // whole clip that is a claim worth checking rather than assuming, so it is
+    // an option here and the report quotes the comparison.
+    let mut cursor: usize = 0;
+    if !streamed {
+        for row in imu {
+            vio.push_imu(row.t_ns, row.gyro, row.accel).unwrap();
+        }
+        cursor = imu.len();
     }
 
     let mut poses: String = String::from("#timestamp [ns], p_x, p_y, p_z, q_w, q_x, q_y, q_z\n");
@@ -131,6 +149,14 @@ fn replay<S: LieScalar>(
     let started: Instant = Instant::now();
     let mut tracked: usize = 0;
     for (frame, &t_ns) in clip.frame_t_ns.iter().enumerate() {
+        while cursor < imu.len() {
+            let row: &ImuRow = &imu[cursor];
+            vio.push_imu(row.t_ns, row.gyro, row.accel).unwrap();
+            cursor += 1;
+            if row.t_ns > t_ns {
+                break;
+            }
+        }
         let rasters: Vec<Pgm> = (0..clip.num_cameras)
             .map(|camera| read_pgm(directory, frame, camera))
             .collect();
@@ -243,9 +269,10 @@ fn the_whole_clip_replays_into_a_trajectory_csv() {
         clip.framesets,
         clip.imu_samples
     );
+    let streamed: bool = std::env::var("SLAM_RS_CLIP_IMU").is_ok_and(|mode| mode == "streamed");
     match scalar.as_str() {
-        "f32" => replay::<f32>(&clip, &directory, &imu, &calibration, &out, stats),
-        "f64" => replay::<f64>(&clip, &directory, &imu, &calibration, &out, stats),
+        "f32" => replay::<f32>(&clip, &directory, &imu, &calibration, streamed, &out, stats),
+        "f64" => replay::<f64>(&clip, &directory, &imu, &calibration, streamed, &out, stats),
         other => panic!("SLAM_RS_CLIP_SCALAR is f32 or f64, not {other}"),
     }
 }

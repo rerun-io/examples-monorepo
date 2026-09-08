@@ -11,7 +11,13 @@ directory:
 <clip>/imu.csv                t_ns,gx,gy,gz,ax,ay,az on the video_time clock
 <clip>/frames.sha256          the C++ reference's own format, absolute timestamps
 <clip>/frame_<NNN>_cam<C>.pgm tools/dump_flow.cpp's layout, gray8
+<clip>/timestamps.txt         the same layout's frameset clock, one per line
+<clip>/imu.json               the same samples as imu.csv, in the fork's shape
 ```
+
+The last two are what the fork's `basalt_vio_oracle <frames-dir> <calib.json>
+<config.json> <out.json> [n]` reads, so one dump feeds both the port's own lane
+and the C++ oracle that isolates the backend from the frontend.
 
 The pixels come off the frozen `cpu_gray8_dav1d_1thread` decode path, so
 `frames.sha256` is comparable line by line with the reference run's file — which
@@ -163,6 +169,26 @@ def write_pgm(path: Path, image: UInt8[ndarray, "h w"]) -> None:
     path.write_bytes(header + image.tobytes())
 
 
+def write_oracle_inputs(output: Path, frame_t_ns: list[int], imu_lines: list[str]) -> None:
+    """Write the two files `basalt_vio_oracle` reads beside the PGMs.
+
+    The tool takes the frameset clock as one integer per line and the inertial
+    window as JSON. Both are the values already written to ``clip.json`` and
+    ``imu.csv``, in the shape ``tools/vio_oracle.cpp`` parses.
+
+    Args:
+        output: Clip directory.
+        frame_t_ns: Frameset timestamps, in order.
+        imu_lines: The data rows of ``imu.csv``, without the header.
+    """
+    (output / "timestamps.txt").write_text("".join(f"{t_ns}\n" for t_ns in frame_t_ns))
+    samples: list[str] = []
+    for line in imu_lines:
+        fields: list[str] = line.split(",")
+        samples.append(f'    {{"t_ns": {fields[0]}, "gyro": [{", ".join(fields[1:4])}], "accel": [{", ".join(fields[4:7])}]}}')
+    (output / "imu.json").write_text('{"imu": [\n' + ",\n".join(samples) + "\n]}\n")
+
+
 def main(config: Config) -> None:
     """Dump the segment named by the config.
 
@@ -222,6 +248,7 @@ def main(config: Config) -> None:
             "decode_path": segment.decode_path,
         }
     (config.output / "imu.csv").write_text("\n".join(imu_lines) + "\n")
+    write_oracle_inputs(config.output, frame_t_ns, imu_lines[1:])
     (config.output / "frames.sha256").write_text("\n".join(frame_lines) + "\n")
     (config.output / "clip.json").write_text(json.dumps(clip, indent=2) + "\n")
     digest: str = hashlib.sha256((config.output / "frames.sha256").read_bytes()).hexdigest()
