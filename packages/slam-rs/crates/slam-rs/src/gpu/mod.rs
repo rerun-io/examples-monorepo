@@ -49,7 +49,7 @@ pub use pyramid::{GpuPyramid, GpuPyramidBuilder, Level0, Level0Table};
 pub use track::GpuPatchTracker;
 
 /// What can go wrong bringing up or running a GPU backend.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GpuError {
     /// The device has no room for a buffer this geometry needs.
     #[error("a {what} buffer of {elements} elements does not fit in a usize")]
@@ -75,19 +75,27 @@ pub enum GpuError {
         /// Bytes the geometry needs.
         expected: usize,
     },
+    /// The runtime cannot store an element width the kernels bind.
+    ///
+    /// See [`probe_storage`]: both of this backend's bring-up failures are
+    /// silent, and this is what turns them into an error.
+    #[error(
+        "this runtime does not store {width}-bit elements: a device copy of a \
+         known pattern came back with {wrong} of {count} elements wrong"
+    )]
+    StorageRoundTrip {
+        /// Element width in bits.
+        width: usize,
+        /// Elements that came back changed.
+        wrong: usize,
+        /// Elements copied.
+        count: usize,
+    },
 }
 
 /// The NVIDIA runtime, so nothing outside this module names `cubecl_cuda`.
 #[cfg(feature = "gpu")]
 pub type CudaRuntime = cubecl_cuda::CudaRuntime;
-
-/// The pyramid builder of the NVIDIA lane.
-#[cfg(feature = "gpu")]
-pub type CudaPyramidBuilder = GpuPyramidBuilder<CudaRuntime>;
-
-/// The patch tracker of the NVIDIA lane.
-#[cfg(feature = "gpu")]
-pub type CudaPatchTracker<P> = GpuPatchTracker<P, CudaRuntime>;
 
 /// A [`CudaRuntime`] client on the default device.
 ///
@@ -99,16 +107,56 @@ pub fn cuda_client() -> cubecl::prelude::ComputeClient<CudaRuntime> {
     cubecl_cuda::CudaRuntime::client(&cubecl_cuda::CudaDevice::default())
 }
 
+/// The runtime this build's GPU lane runs on.
+///
+/// CUDA when only `gpu` is enabled and wgpu when `gpu-wgpu` is. Every type in
+/// the crate outside this file names [`GpuRuntime`], never a concrete runtime,
+/// so moving a host onto the portable lane is a cargo feature rather than a
+/// port — and `cargo test --features gpu-wgpu` runs the same per-kernel
+/// tolerance tests through Vulkan, which is what makes that claim checkable
+/// rather than merely compiled.
+#[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
+pub type GpuRuntime = CudaRuntime;
+
+/// The runtime this build's GPU lane runs on: the portable one.
+#[cfg(feature = "gpu-wgpu")]
+pub type GpuRuntime = cubecl_wgpu::WgpuRuntime;
+
+/// A client on this build's runtime.
+///
+/// The whole of what selecting a backend costs. Select the adapter with
+/// `CUBECL_WGPU_DEFAULT_DEVICE` on the portable lane; `WGPU_BACKEND` and
+/// `WGPU_ADAPTER_NAME` are ignored by cubecl-wgpu.
+#[cfg(feature = "gpu")]
+pub fn gpu_client() -> cubecl::prelude::ComputeClient<GpuRuntime> {
+    #[cfg(feature = "gpu-wgpu")]
+    {
+        wgpu_client()
+    }
+    #[cfg(not(feature = "gpu-wgpu"))]
+    {
+        cuda_client()
+    }
+}
+
+/// The pyramid builder of this build's lane.
+#[cfg(feature = "gpu")]
+pub type LanePyramidBuilder = GpuPyramidBuilder<GpuRuntime>;
+
+/// The patch tracker of this build's lane.
+#[cfg(feature = "gpu")]
+pub type LanePatchTracker<P> = GpuPatchTracker<P, GpuRuntime>;
+
 /// The three stage backends `FrameToFrameOpticalFlow::with_backends` takes.
 #[cfg(feature = "gpu")]
-pub type CudaBackends<P> = (
-    CudaPyramidBuilder,
-    CudaPatchTracker<P>,
+pub type LaneBackends<P> = (
+    LanePyramidBuilder,
+    LanePatchTracker<P>,
     Box<dyn crate::frontend::detect::CornerScan>,
 );
 
 /// The three stage backends `FrameToFrameOpticalFlow::with_backends` needs, on
-/// one shared NVIDIA client.
+/// one shared client.
 ///
 /// One client for both stages is what keeps a pyramid and the patches it feeds
 /// on the same device queue, so the frontend synchronises once per
@@ -121,28 +169,122 @@ pub type CudaBackends<P> = (
 /// count is over its ceiling, or a buffer's element count does not fit a
 /// `usize` — the same refusals the CPU tracker makes.
 #[cfg(feature = "gpu")]
-pub fn cuda_backends<P: crate::frontend::patterns::Pattern>(
+pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
     capacity: usize,
     num_levels: usize,
     max_iterations: usize,
     max_recovered_dist2: f32,
-) -> Result<CudaBackends<P>, crate::frontend::tracker::TrackerError> {
-    let client = cuda_client();
-    let tracker: CudaPatchTracker<P> = GpuPatchTracker::new(
+) -> Result<LaneBackends<P>, crate::frontend::tracker::TrackerError> {
+    let client = gpu_client();
+    // Before anything else: a runtime that cannot store these widths produces
+    // zeros rather than an error, and a trajectory made of zeros is worse than
+    // a refusal.
+    probe_storage(&client)?;
+    let tracker: LanePatchTracker<P> = GpuPatchTracker::new(
         client.clone(),
         capacity,
         num_levels,
         max_iterations,
         max_recovered_dist2,
     )?;
-    let builder: CudaPyramidBuilder = GpuPyramidBuilder::new(client.clone(), P::OFFSETS);
-    let mut scanner: GpuCornerScan<CudaRuntime> = GpuCornerScan::new(client);
+    let builder: LanePyramidBuilder = GpuPyramidBuilder::new(client.clone(), P::OFFSETS);
+    let mut scanner: GpuCornerScan<GpuRuntime> = GpuCornerScan::new(client);
     // The two stages are handed the same frame, so they read the same upload:
     // the builder publishes level 0 per camera and the scanner reads it. This
     // is the one line that makes it one upload per camera per frameset instead
     // of two (see [`Level0`]).
     scanner.share_level0(builder.level0_table());
     Ok((builder, tracker, Box::new(scanner)))
+}
+
+/// Refuse a runtime that cannot store an element width the kernels bind.
+///
+/// Both of this backend's bring-up failures are **silent**, and neither is
+/// visible in `client.properties()`, which describes the device rather than the
+/// compiler that will run on it:
+///
+/// * A CUDA install without `cuda-nvrtc` / `cuda-cudart-dev` panics on cubecl's
+///   own worker thread. The client still constructs, every launch reports
+///   success, and every read comes back as zeros (round 1's report).
+/// * `cubecl-wgpu`'s **WGSL** compiler panics on `u16` and `u8` —
+///   "U16 is not a valid WgpuElement" — on the same worker thread, with the
+///   same result. The pyramid is `u16` and the candidate image is `u8`, so on
+///   the portable lane without `cubecl-wgpu/spirv` every kernel here silently
+///   produces nothing. Measured on this host: the pyramid came back all zeros
+///   and the detector found no corners, with no error anywhere.
+///
+/// So the check is the one thing that cannot lie: write a known pattern, copy
+/// it **on the device**, read it back. Four widths, 256 elements each, once at
+/// construction — microseconds, and it is what a fleet machine whose driver
+/// silently mishandles a width will fail on instead of producing a trajectory
+/// out of zeros (decisions D21, D32).
+///
+/// # Errors
+///
+/// [`GpuError::StorageRoundTrip`] naming the width that did not survive.
+#[cfg(feature = "gpu")]
+pub fn probe_storage<R: cubecl::prelude::Runtime>(
+    client: &cubecl::prelude::ComputeClient<R>,
+) -> Result<(), GpuError> {
+    use cubecl::prelude::CubeElement;
+
+    /// One width: a pattern no zeroing or truncation reproduces.
+    fn round_trip<N, R>(
+        client: &cubecl::prelude::ComputeClient<R>,
+        pattern: &[N],
+    ) -> Result<(), GpuError>
+    where
+        N: cubecl::prelude::Numeric + CubeElement + PartialEq + Copy,
+        R: cubecl::prelude::Runtime,
+    {
+        let count: usize = pattern.len();
+        let width: usize = size_of::<N>() * 8;
+        let expected: usize = size_of_val(pattern);
+        let source: cubecl::server::Handle = client.create_from_slice(N::as_bytes(pattern));
+        let target: cubecl::server::Handle = client.empty(expected);
+        kernels::launch_probe::<N, R>(client, (&source, count), (&target, count), count);
+        let bytes = client.read_one_unchecked(target);
+        if bytes.len() != expected {
+            return Err(GpuError::StorageRoundTrip {
+                width,
+                wrong: count,
+                count,
+            });
+        }
+        let wrong: usize = N::from_bytes(&bytes)
+            .iter()
+            .zip(pattern.iter())
+            .filter(|(got, want)| got != want)
+            .count();
+        if wrong == 0 {
+            Ok(())
+        } else {
+            Err(GpuError::StorageRoundTrip {
+                width,
+                wrong,
+                count,
+            })
+        }
+    }
+
+    const COUNT: usize = 256;
+    // Patterns whose every byte differs from its neighbours, so a truncation, a
+    // widening or a packing slip all show up rather than cancelling.
+    let bytes: Vec<u8> = (0..COUNT)
+        .map(|i| (i as u8).wrapping_mul(7).wrapping_add(1))
+        .collect();
+    let shorts: Vec<u16> = (0..COUNT)
+        .map(|i| (i as u16).wrapping_mul(1_237).wrapping_add(9))
+        .collect();
+    let words: Vec<u32> = (0..COUNT)
+        .map(|i| (i as u32).wrapping_mul(2_654_435_761) ^ 0x5a5a)
+        .collect();
+    let floats: Vec<f32> = (0..COUNT).map(|i| (i as f32) * 0.5 - 3.25).collect();
+    round_trip::<u8, R>(client, &bytes)?;
+    round_trip::<u16, R>(client, &shorts)?;
+    round_trip::<u32, R>(client, &words)?;
+    round_trip::<f32, R>(client, &floats)?;
+    Ok(())
 }
 
 /// A [`cubecl_wgpu::WgpuRuntime`] client on the default device.

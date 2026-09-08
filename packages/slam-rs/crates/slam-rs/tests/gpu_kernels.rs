@@ -29,7 +29,7 @@ use slam_rs::frontend::se2::AffineCompact2f;
 use slam_rs::frontend::tracker::{
     CpuPatchTracker, FlowResult, FlowTransforms, PatchSoA, PatchTracker, PointsSoA, SourcePatches,
 };
-use slam_rs::gpu::{GpuCornerScan, GpuPatchTracker, GpuPatches, GpuPyramidBuilder, cuda_client};
+use slam_rs::gpu::{GpuCornerScan, GpuPatchTracker, GpuPatches, GpuPyramidBuilder, gpu_client};
 use slam_rs::image::ImageU16;
 use slam_rs::pyramid::{CpuPyramidBuilder, Pyramid, PyramidBuilder, PyramidU16};
 
@@ -93,7 +93,7 @@ fn the_gpu_pyramid_is_bit_exact_with_the_cpu() {
     let mut cpu: PyramidU16 = cpu_builder.allocate(960, 960, LEVELS).unwrap();
     cpu_builder.build(0, &image, &mut cpu).unwrap();
 
-    let client = cuda_client();
+    let client = gpu_client();
     let mut gpu_builder = GpuPyramidBuilder::new(client, &[[0.0, 0.0]]);
     let mut gpu = gpu_builder.allocate(960, 960, LEVELS).unwrap();
     gpu_builder.build(0, &image, &mut gpu).unwrap();
@@ -146,7 +146,7 @@ fn a_strided_frame_uploads_its_rows_and_not_its_padding() {
     let mut cpu: PyramidU16 = cpu_builder.allocate(64, 48, LEVELS).unwrap();
     cpu_builder.build(0, &strided, &mut cpu).unwrap();
 
-    let mut gpu_builder = GpuPyramidBuilder::new(cuda_client(), &[[0.0, 0.0]]);
+    let mut gpu_builder = GpuPyramidBuilder::new(gpu_client(), &[[0.0, 0.0]]);
     let mut gpu = gpu_builder.allocate(64, 48, LEVELS).unwrap();
     gpu_builder.build(0, &strided, &mut gpu).unwrap();
 
@@ -166,7 +166,7 @@ fn a_reused_pyramid_carries_only_the_newest_frame() {
     let first: ImageU16 = textured_image(128, 96, 0.0, 0.0);
     let second: ImageU16 = textured_image(128, 96, 7.0, -3.0);
 
-    let mut gpu_builder = GpuPyramidBuilder::new(cuda_client(), &[[0.0, 0.0]]);
+    let mut gpu_builder = GpuPyramidBuilder::new(gpu_client(), &[[0.0, 0.0]]);
     let mut gpu = gpu_builder.allocate(128, 96, LEVELS).unwrap();
     gpu_builder.build(0, &first, &mut gpu).unwrap();
     gpu_builder.build(0, &second, &mut gpu).unwrap();
@@ -212,7 +212,7 @@ fn the_gpu_patch_build_matches_the_cpu_within_tolerance() {
     let mut cpu: PyramidU16 = cpu_builder.allocate(512, 512, LEVELS).unwrap();
     cpu_builder.build(0, &image, &mut cpu).unwrap();
 
-    let client = cuda_client();
+    let client = gpu_client();
     let mut gpu_builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
     let mut gpu = gpu_builder.allocate(512, 512, LEVELS).unwrap();
     gpu_builder.build(0, &image, &mut gpu).unwrap();
@@ -317,7 +317,7 @@ fn the_gpu_tracker_recovers_the_same_shift_as_the_cpu() {
         .unwrap();
 
     // ── the GPU lane
-    let client = cuda_client();
+    let client = gpu_client();
     let mut gpu_builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
     let mut gpu_prev = gpu_builder.allocate(512, 512, LEVELS).unwrap();
     let mut gpu_next = gpu_builder.allocate(512, 512, LEVELS).unwrap();
@@ -449,7 +449,7 @@ fn the_gpu_corner_scan_is_exact_against_kornia() {
     for (width, height) in [(960usize, 240usize), (512, 192)] {
         let image: ImageU16 = cornered_image(width, height);
         let mut cpu: CpuCornerScan = CpuCornerScan::default();
-        let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(cuda_client());
+        let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client());
         cpu.scan(0, &image).unwrap();
         gpu.scan(0, &image).unwrap();
 
@@ -489,7 +489,7 @@ fn a_reused_corner_scan_carries_only_the_newest_frame() {
     let first: ImageU16 = cornered_image(512, 128);
     let second: ImageU16 = ImageU16::zeros(512, 128).unwrap();
 
-    let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(cuda_client());
+    let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client());
     gpu.scan(0, &first).unwrap();
     assert!(
         !gpu.band(3, 44, 5).unwrap().is_empty(),
@@ -515,7 +515,7 @@ fn a_reused_corner_scan_carries_only_the_newest_frame() {
 #[test]
 fn the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing() {
     let frames: [ImageU16; 2] = [cornered_image(960, 240), cornered_image(512, 192)];
-    let client = cuda_client();
+    let client = gpu_client();
 
     // The lane the frontend runs: one builder, one scanner, one client, the
     // level-0 table between them.
@@ -593,7 +593,7 @@ fn the_per_frame_path_holds_the_pool_flat() {
     /// per frame passes it before frame twenty.
     const RESERVED_CEILING: u64 = 256 * 1024 * 1024;
 
-    let client = cuda_client();
+    let client = gpu_client();
     let mut builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
     let mut scanner: GpuCornerScan<_> = GpuCornerScan::new(client.clone());
     scanner.share_level0(builder.level0_table());
@@ -633,4 +633,18 @@ fn the_per_frame_path_holds_the_pool_flat() {
         worst < RESERVED_CEILING,
         "CubeCL reserved {worst} bytes over {FRAMES} framesets of two 960x960 cameras"
     );
+}
+
+/// This runtime stores every element width the kernels bind.
+///
+/// The one test that would fire on a fleet machine before any of the others
+/// mean anything. Both of the backend's bring-up failures — a CUDA install
+/// without nvrtc/cudart, and `cubecl-wgpu`'s WGSL compiler on `u16`/`u8` —
+/// panic on cubecl's own worker thread, so the launch reports success and every
+/// read comes back as zeros. `probe_storage` copies a known pattern on the
+/// device and refuses the runtime if it does not survive; measured on this
+/// host, the portable lane without `cubecl-wgpu/spirv` fails exactly here.
+#[test]
+fn the_runtime_stores_every_element_width_the_kernels_bind() {
+    slam_rs::gpu::probe_storage(&gpu_client()).unwrap();
 }

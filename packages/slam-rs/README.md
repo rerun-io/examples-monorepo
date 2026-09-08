@@ -383,10 +383,40 @@ pixi run -e slam-rs-gpu-dev --frozen slam-rs-gpu-test    # cargo test --features
 pixi run -e slam-rs-gpu-dev --frozen slam-rs-gpu-clippy  # clippy with the feature, -D warnings
 pixi run -e slam-rs-gpu-dev --frozen slam-rs-wgpu-check  # the portable lane still compiles
 pixi run -e slam-rs-gpu-dev --frozen slam-rs-wgpu-test   # the same kernels through wgpu
+pixi run -e slam-rs-gpu-dev --frozen slam-rs-wgpu-build  # a core whose `--gpu` is wgpu
 ```
 
 The environment is linux-64 only and its own solve group, so no other lane in
 the workspace enters a CUDA solve.
+
+### The portable lane, and the two silent failures
+
+`gpu-wgpu` builds the same kernels through `cubecl-wgpu`, which is what the
+Spark, the Pi 5 and the cap will run. It needs **`cubecl-wgpu/spirv`**, and
+that is not a preference. cubecl-wgpu's WGSL compiler has no 16- or 8-bit
+element type — `U16 is not a valid WgpuElement` — and the pyramid is `u16`
+while the candidate image is `u8`, so on the WGSL path every kernel here
+produces nothing. With `spirv`, a Vulkan adapter is compiled through SPIR-V
+instead, which stores both widths when the device advertises `shaderInt16` and
+16-bit storage; a Metal adapter still falls back to WGSL and would need
+`cubecl-wgpu/msl`.
+
+That failure and the missing-CUDA-install one are the same shape and both are
+**silent**: the panic happens on cubecl's own worker thread, the launch reports
+success, and every read comes back as a buffer of zeros. Neither is visible in
+`client.properties()`, which describes the device rather than the compiler.
+So `gpu::probe_storage` runs first on every GPU backend: it writes a known
+pattern of all four widths, copies it **on the device**, reads it back, and
+refuses the runtime if it does not survive. Microseconds once, and it is what a
+fleet machine fails on instead of producing a trajectory out of zeros.
+
+Measured on this host (RTX 5090, MIO07/1500, three interleaved rounds): the
+portable lane runs at **7.153 ms** against CUDA's 6.005 and the CPU lane's
+9.384 — **1.31x** over the CPU, 19 % behind CUDA — and holds **+271 MiB** of
+device memory over idle against CUDA's +667. Every per-kernel tolerance test
+passes on it, with the pyramid and the corner scan bit-exact; whole-clip ATE is
+2.085 cm on MIO07 and 2.295 cm on MGO07, the same numbers as the other two
+lanes.
 
 ## Python API
 

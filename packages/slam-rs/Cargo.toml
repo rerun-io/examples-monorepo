@@ -51,7 +51,7 @@ kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864
 # is the CPU port with no GPU dependency in the graph at all.
 cubecl = "0.10"
 cubecl-cuda = "0.10"
-cubecl-wgpu = "0.10"
+cubecl-wgpu = { version = "0.10", features = ["spirv"] }
 
 # The estimator must never panic on data: errors are typed and returned.
 [workspace.lints.clippy]

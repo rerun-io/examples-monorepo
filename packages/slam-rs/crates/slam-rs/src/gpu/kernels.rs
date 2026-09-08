@@ -1207,6 +1207,39 @@ pub(super) fn launch_klt<R: Runtime>(
 /// Units per cube on the two per-patch bookkeeping kernels.
 const LINEAR_UNITS: u32 = 256;
 
+/// A device copy of one element width, for [`super::probe_storage`].
+#[cube(launch, launch_unchecked)]
+fn probe_kernel<N: Numeric>(src: &Array<N>, dst: &mut Array<N>, count: usize) {
+    let index = usize::cast_from(ABSOLUTE_POS_X);
+    if index >= count {
+        terminate!();
+    }
+    dst[index] = src[index];
+}
+
+/// Copy `count` elements of type `N` from `src` to `dst`.
+pub(super) fn launch_probe<N: Numeric, R: Runtime>(
+    client: &ComputeClient<R>,
+    src: (&cubecl::server::Handle, usize),
+    dst: (&cubecl::server::Handle, usize),
+    count: usize,
+) {
+    unsafe {
+        probe_kernel::launch_unchecked::<N, R>(
+            client,
+            CubeCount::Static((count as u32).div_ceil(LINEAR_UNITS), 1, 1),
+            CubeDim {
+                x: LINEAR_UNITS,
+                y: 1,
+                z: 1,
+            },
+            ArrayArg::from_raw_parts(src.0.clone(), src.1),
+            ArrayArg::from_raw_parts(dst.0.clone(), dst.1),
+            count,
+        );
+    }
+}
+
 /// Level 0, from the buffer it was uploaded into to the front of the pyramid's
 /// even allocation.
 ///

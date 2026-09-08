@@ -264,8 +264,8 @@ pub enum FrontendLane {
     Gpu(
         frontend::flow::FrameToFrameOpticalFlow<
             frontend::patterns::Pattern51,
-            gpu::CudaPyramidBuilder,
-            gpu::CudaPatchTracker<frontend::patterns::Pattern51>,
+            gpu::LanePyramidBuilder,
+            gpu::LanePatchTracker<frontend::patterns::Pattern51>,
         >,
     ),
 }
@@ -400,7 +400,7 @@ fn build_frontend(
         #[cfg(feature = "gpu")]
         Backend::Gpu => {
             let num_levels: usize = config.optical_flow_levels as usize + 1;
-            let (pyramid, tracker, scanner) = gpu::cuda_backends::<frontend::patterns::Pattern51>(
+            let (pyramid, tracker, scanner) = gpu::gpu_backends::<frontend::patterns::Pattern51>(
                 options.max_keypoints,
                 num_levels,
                 config.optical_flow_max_iterations as usize,

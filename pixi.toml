@@ -2553,6 +2553,12 @@ cwd = "packages/slam-rs"
 cmd = "cargo test -p slam-rs --features gpu-wgpu --test gpu_kernels"
 cwd = "packages/slam-rs"
 
+# The same core on the portable lane, for measuring it: `--gpu` then selects
+# wgpu rather than CUDA, because the runtime is what the feature picks.
+[feature.slam-rs-gpu.tasks.slam-rs-wgpu-build]
+cmd = "cargo build --release -p slam-rs-py --features gpu-wgpu && cp target/release/lib_core.so slam_rs/_core.so"
+cwd = "packages/slam-rs"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # mamma — streaming multiview body capture (causal MAMMA pipeline)
 # ═══════════════════════════════════════════════════════════════════════════
