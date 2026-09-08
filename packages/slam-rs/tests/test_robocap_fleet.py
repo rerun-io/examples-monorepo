@@ -14,16 +14,19 @@ this one on the real rig.
 """
 
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from slam_rs.apis import robocap_fleet
 from slam_rs.apis.robocap_fleet import BUDGET_15FPS_MS, BUDGET_30FPS_MS, Config, RobocapRow, main, measure
 from slam_rs.machine import Machine, this_machine
 from slam_rs.reference import MANIFEST_PATH, ReferenceManifest, RobocapSession
-from slam_rs.trajectory import Trajectory, empty_trajectory
+from slam_rs.tracking import SegmentRun
+from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, empty_trajectory, shift_clock
 
 CAP: Machine = Machine(hostname="robocap_f403b0", arch="aarch64", libc="2.41", cores=8)
 """The RK3588 cap, which is the machine every budget in this module is for."""
@@ -45,6 +48,7 @@ ROW: RobocapRow = RobocapRow(
     temp_c_before=40.7,
     temp_c_after=51.8,
     cross_platform_ate_cm=0.004,
+    unscored=None,
 )
 """Session 15 at a round 100 ms per frameset, so the budget arithmetic is readable."""
 
@@ -124,6 +128,54 @@ def test_a_scoring_input_that_is_not_here_is_refused_before_the_replay(
     (tmp_path / "slam.rrd").write_bytes(b"")
     with pytest.raises(FileNotFoundError, match="typo.csv is not a file on this machine"):
         measure(manifest, absent, Config(reference_csv=tmp_path / "typo.csv"), this_machine())
+
+
+def test_an_estimate_on_another_clock_is_a_row_and_not_a_traceback(
+    manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The cost this row exists to report must survive an estimate that scores against nothing.
+
+    :func:`~slam_rs.trajectory.ate` needs an association and not a pose count,
+    so an estimate on the wrong clock — the ``slam`` layer's ``video_time``
+    against the device clock every basalt CSV beside it uses — used to traceback
+    after the whole 52.9 s clip had replayed, losing the wall, the budget and the
+    temperatures the RoboCap lane exists to measure. The agreement reads as NaN,
+    the reason is on the row, and both outputs are written before the run exits
+    non-zero.
+    """
+    poses: int = 30
+    reference: Trajectory = Trajectory(
+        t_ns=np.arange(poses, dtype=np.int64) * 33_000_000, position_m=np.zeros((poses, 3)), quaternion_wxyz=np.zeros((poses, 4))
+    )
+    monkeypatch.setattr(robocap_fleet, "robocap_cpp_trajectory", lambda *_args: reference)
+    monkeypatch.setattr(
+        robocap_fleet,
+        "run_robocap",
+        lambda *_args, **_kwargs: SegmentRun(estimate=shift_clock(reference, 4_800_000_000_000), framesets=poses, lost=0, wall_s=3.0),
+    )
+    (tmp_path / "slam.rrd").write_bytes(b"")
+    session: RobocapSession = replace(manifest.robocap.session("s00000015"), slam_url=f"file://{tmp_path / 'slam.rrd'}")
+
+    row: RobocapRow
+    estimate: Trajectory
+    row, estimate = measure(manifest, session, Config(), CAP)
+    assert row.unscored is not None
+    assert f"no pose associated within {ASSOCIATION_TOLERANCE_NS} ns" in row.unscored
+    assert math.isnan(row.cpp_rmse_cm)
+    assert math.isnan(row.cpp_max_cm)
+    assert math.isnan(row.cpp_median_cm)
+    # The cost is measured, not scored, so it is a number on exactly this row.
+    assert row.ms_per_frameset == pytest.approx(100.0)
+    assert len(estimate) == poses
+
+    monkeypatch.setattr(robocap_fleet, "measure", lambda *_args: (row, estimate))
+    output: Path = tmp_path / "robocap_fleet.json"
+    with pytest.raises(SystemExit, match="no pose associated within"):
+        main(Config(manifest=MANIFEST_PATH, output_json=output))
+    written: dict = json.loads(output.read_text())
+    assert math.isnan(written["cpp_rmse_cm"])
+    assert "no pose associated within" in written["unscored"]
+    assert output.with_suffix(".csv").is_file()
 
 
 @pytest.mark.slow

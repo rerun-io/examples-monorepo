@@ -10,14 +10,23 @@ import math
 from dataclasses import asdict, replace
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from slam_rs.apis import fleet_check
 from slam_rs.apis.fleet_check import ClipResult, Config, clip_json, main, measure
 from slam_rs.machine import Machine
-from slam_rs.reference import MANIFEST_PATH, PATH_BOUND_MAX_CLIP_S, SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment, pose_floor_text
+from slam_rs.reference import (
+    MANIFEST_PATH,
+    MIN_TRACKED_POSES,
+    PATH_BOUND_MAX_CLIP_S,
+    SMOKE_SEGMENTS,
+    ReferenceManifest,
+    ReferenceSegment,
+    pose_floor_text,
+)
 from slam_rs.tracking import SegmentRun
-from slam_rs.trajectory import empty_trajectory, write_trajectory
+from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, empty_trajectory, shift_clock, write_trajectory
 
 CLIP_JSON_KEYS: tuple[str, ...] = (
     "segment_id",
@@ -35,6 +44,13 @@ CLIP_JSON_KEYS: tuple[str, ...] = (
     "verdict",
 )
 """The clip keys the fleet chart reads, in the order it reads them: a consumer contract, not a dump of the row."""
+CLOCK_GAP_NS: int = 10_433_867_587_166
+"""What the Index smoke segment's two clocks are apart: ``video_time`` zero against the device clock every basalt CSV uses.
+
+The gap a machine lands on when it exports the wrong one of the two
+(:func:`slam_rs.trajectory.shift_clock`), and the one this suite uses to make an
+estimate that associates with nothing.
+"""
 MACHINE: Machine = Machine(hostname="pablo-rpi", arch="aarch64", libc="2.36", cores=4)
 """A four-core Pi, which is the smallest machine that runs a full install."""
 PASSING: ClipResult = ClipResult(
@@ -54,6 +70,7 @@ PASSING: ClipResult = ClipResult(
     extent_m=3.4,
     truth_extent_m=3.4,
     poses_finite=True,
+    unscored=None,
 )
 """The smoke clip as this host measures it, on a machine four times slower."""
 
@@ -188,6 +205,50 @@ def test_a_clip_the_estimator_never_tracked_is_a_row_and_not_a_traceback(
     assert written["clips"][0]["verdict"].startswith("fail:")
     # NaN is what the chart's own `f"{value:.2f}"` reads; None is what it cannot.
     assert math.isnan(asdict(clip_json(dead))["cpp_rmse_cm"])
+
+
+def test_an_estimate_on_another_clock_is_a_row_and_not_a_traceback(
+    manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Ten poses clears D60's floor and can still be scored against nothing.
+
+    The floor was the only unscored case a row knew, and it is not the only one
+    there is: :func:`~slam_rs.trajectory.ate` needs an association, not a pose
+    count, so an estimate on the wrong clock — the Index segment's two are
+    :data:`CLOCK_GAP_NS` apart — tracked well enough to be scored and reached a
+    traceback instead of a row. The clause names what ``ate`` refused and the
+    tolerance it refused it at, both errors read as NaN exactly as they do below
+    the floor, the JSON keeps its keys, and the run exits non-zero.
+    """
+    poses: int = MIN_TRACKED_POSES
+    # Both references are on the device clock, so one shifted estimate misses
+    # both of them; positions are never reached, because nothing associates.
+    reference: Trajectory = Trajectory(
+        t_ns=np.arange(poses, dtype=np.int64) * 20_000_000, position_m=np.zeros((poses, 3)), quaternion_wxyz=np.zeros((poses, 4))
+    )
+    monkeypatch.setattr(fleet_check, "read_trajectory", lambda _path: reference)
+    monkeypatch.setattr(
+        fleet_check,
+        "run_segment",
+        lambda *_args, **_kwargs: SegmentRun(estimate=shift_clock(reference, CLOCK_GAP_NS), framesets=poses, lost=0, wall_s=1.0),
+    )
+    segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENTS[1])
+
+    adrift: ClipResult = measure(manifest, segment)
+    assert adrift.tracked == poses
+    assert len(adrift.failures) == 1
+    assert f"no pose associated within {ASSOCIATION_TOLERANCE_NS} ns" in adrift.failures[0]
+    assert math.isnan(adrift.cpp_rmse_cm)
+    assert math.isnan(adrift.gt_rmse_cm)
+    assert adrift.cpp_associated == 0
+
+    output: Path = tmp_path / "fleet_check.json"
+    with pytest.raises(SystemExit, match="no pose associated within"):
+        main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1],), output_json=output))
+    written: dict = json.loads(output.read_text())
+    assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)
+    assert "no pose associated within" in written["clips"][0]["verdict"]
+    assert math.isnan(written["clips"][0]["gt_rmse_cm"])
 
 
 def test_a_reference_trajectory_that_is_not_here_is_refused_before_the_replay(

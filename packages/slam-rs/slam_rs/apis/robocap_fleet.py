@@ -26,6 +26,7 @@ at 30 fps, over four cameras.
 """
 
 import json
+import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -96,6 +97,16 @@ class RobocapRow:
     on a rig whose frontend has more corners to choose between, so the number is
     measured rather than assumed.
     """
+    unscored: str | None
+    """Why no agreement could be measured, or None where it was; the sentence :func:`~slam_rs.trajectory.ate` refused the pair with.
+
+    Accuracy is reported and not gated here, but an estimate that associates with
+    nothing is not an accuracy number: :func:`~slam_rs.trajectory.ate` needs an
+    association and not a pose count, so an estimate on another clock leaves the
+    three ``cpp_`` fields NaN and :attr:`cross_platform_ate_cm` unmeasured. The
+    cost beside them was still measured, which is why this is a row and not a
+    traceback (S22 review round 2).
+    """
 
     def row(self) -> str:
         """This session as one row of the fleet's runtime-budget table."""
@@ -148,7 +159,10 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
         machine: The host this is running on, read once by the caller.
 
     Returns:
-        The row, and the estimated trajectory on the device clock so the caller can export it.
+        The row, and the estimated trajectory on the device clock so the caller
+        can export it. An estimate that associates with nothing carries NaN
+        where the agreement would be and the reason on
+        :attr:`RobocapRow.unscored`.
 
     Raises:
         FileNotFoundError: If the session's ``slam`` layer or the other machine's
@@ -170,8 +184,23 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
     before: float | None = this_temperature_c()
     run: SegmentRun = run_robocap(manifest, session, seconds=config.seconds, window_s=config.window_s)
     after: float | None = this_temperature_c()
-    against_cpp: AteResult = ate(run.estimate, cpp)
-    across: float | None = None if across_reference is None else 100.0 * ate(run.estimate, across_reference).rmse_m
+    against_cpp: AteResult | None = None
+    across: float | None = None
+    unscored: str | None = None
+    try:
+        against_cpp = ate(run.estimate, cpp)
+        across = None if across_reference is None else 100.0 * ate(run.estimate, across_reference).rmse_m
+    except ValueError as association_failed:
+        # 52.9 s of video has already been paid for by here, and the wall, the
+        # budget and the temperatures it bought are the row's reason to exist —
+        # so an estimate that associates with nothing loses its agreement and
+        # not the run. The clause is the sentence `ate` refused with, tolerance
+        # and all; both numbers go, not the half that may have associated
+        # already. `ValueError` and not `Exception`, so a beartype violation
+        # still raises. `main` prints the row and then exits non-zero.
+        against_cpp = None
+        across = None
+        unscored = str(association_failed)
     ms_per_frameset: float = 1e3 * run.wall_s / max(run.framesets, 1)
     return (
         RobocapRow(
@@ -180,9 +209,9 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
             framesets=run.framesets,
             tracked=len(run.estimate),
             lost=run.lost,
-            cpp_rmse_cm=100.0 * against_cpp.rmse_m,
-            cpp_max_cm=100.0 * against_cpp.max_m,
-            cpp_median_cm=100.0 * against_cpp.median_m,
+            cpp_rmse_cm=100.0 * against_cpp.rmse_m if against_cpp is not None else math.nan,
+            cpp_max_cm=100.0 * against_cpp.max_m if against_cpp is not None else math.nan,
+            cpp_median_cm=100.0 * against_cpp.median_m if against_cpp is not None else math.nan,
             wall_s=run.wall_s,
             ms_per_frameset=ms_per_frameset,
             cpp_wall_s=session.expected_cpp_wall_s,
@@ -192,6 +221,7 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
             temp_c_before=before,
             temp_c_after=after,
             cross_platform_ate_cm=across,
+            unscored=unscored,
         ),
         run.estimate,
     )
@@ -202,6 +232,11 @@ def main(config: Config) -> None:
 
     Args:
         config: Parsed CLI options.
+
+    Raises:
+        SystemExit: If the estimate associated with nothing, which is not an
+            accuracy number to report but a run that went wrong. Both outputs
+            are written first: the cost they carry was measured.
     """
     manifest: ReferenceManifest = load_manifest(config.manifest, config.artifact_root)
     session: RobocapSession = manifest.robocap.session(config.session)
@@ -226,3 +261,5 @@ def main(config: Config) -> None:
         f"({row.realtime_factor_15fps:.2f}x the 15 fps budget, {row.realtime_factor_30fps:.2f}x the 30 fps one)"
     )
     print(f"{config.output_json} written; whole job {time.monotonic() - started:.1f} s")
+    if row.unscored is not None:
+        raise SystemExit(f"{row.segment_id}: {row.unscored}")

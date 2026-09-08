@@ -77,6 +77,14 @@ class ClipResult:
     """The same for the ground truth, which is what a ``no_divergence`` run is bounded against."""
     poses_finite: bool
     """Whether every estimated position is finite."""
+    unscored: str | None
+    """Why nothing could be scored, or None where it was; the sentence :func:`~slam_rs.trajectory.ate` refused the pair with.
+
+    D60's pose floor is not the only way a clip goes unscored. ``ate`` needs an
+    association and not a pose count, so an estimate on another clock clears the
+    floor and still has nothing to align — which is a fact about this machine and
+    therefore a row, not a traceback (S22 review round 2).
+    """
 
     @property
     def gt_allowed_cm(self) -> float:
@@ -97,6 +105,11 @@ class ClipResult:
         ``--segments``, so the conditions on the two error bounds — the clip's
         length and its gate policy — decide the verdict as much as the numbers do.
         """
+        if self.unscored is not None:
+            # Alone, like D60's own pose floor and for the same reason: with no
+            # error to read, the rest of D60 has nothing to say, and what the row
+            # owes its reader is the sentence that stopped the scoring.
+            return (self.unscored,)
         return tuple(
             d60_failures(
                 gate_policy=self.gate_policy,
@@ -173,8 +186,10 @@ def measure(manifest: ReferenceManifest, segment: ReferenceSegment) -> ClipResul
 
     Returns:
         The clip's numbers, with the peak resident set the process has reached.
-        A run below D60's pose floor carries NaN for both errors: it was not
-        scored, and the verdict says so.
+        A run that could not be scored carries NaN for both errors and the reason
+        on :attr:`ClipResult.unscored`, and the verdict says so: below D60's pose
+        floor, or with poses enough to score and none of them on the references'
+        clock.
 
     Raises:
         FileNotFoundError: If either scoring input cannot be read here
@@ -193,8 +208,25 @@ def measure(manifest: ReferenceManifest, segment: ReferenceSegment) -> ClipResul
     # raises, and a machine that tracked nothing is precisely the machine this
     # tool exists to report on. The floor is the verdict (D60, `d60_failures`).
     scored: bool = tracked >= MIN_TRACKED_POSES
-    against_cpp: AteResult | None = ate(run.estimate, cpp) if scored else None
-    against_gt: AteResult | None = ate(run.estimate, truth) if scored else None
+    against_cpp: AteResult | None = None
+    against_gt: AteResult | None = None
+    unscored: str | None = None
+    if scored:
+        try:
+            against_cpp = ate(run.estimate, cpp)
+            against_gt = ate(run.estimate, truth)
+        except ValueError as association_failed:
+            # The other unscored case, and the one only a whole machine reaches:
+            # poses enough to score, none of them on the references' clock. The
+            # clause is the sentence `ate` refused with, tolerance and all, read
+            # off the failure rather than by counting the associations again.
+            # Both errors go, not the half that may have associated already: the
+            # two references share the device clock, so whichever call refused,
+            # the estimate is what moved. `ValueError` and not `Exception`, so a
+            # beartype violation still raises.
+            against_cpp = None
+            against_gt = None
+            unscored = str(association_failed)
     expected: CppAte = segment.reference.expected_cpp_ate
     return ClipResult(
         segment_id=segment.segment_id,
@@ -213,6 +245,7 @@ def measure(manifest: ReferenceManifest, segment: ReferenceSegment) -> ClipResul
         extent_m=extent_m(run.estimate),
         truth_extent_m=extent_m(truth),
         poses_finite=bool(np.isfinite(run.estimate.position_m).all()),
+        unscored=unscored,
     )
 
 
