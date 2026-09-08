@@ -208,8 +208,8 @@ fn dotted_image(shift: i32) -> ImageU16 {
 
 /// The snapshot's exact shape: one `Keypoints` per camera, copied in place.
 ///
-/// This is the operation the review measured at sixteen allocations and sixteen
-/// frees per call, on this thread only. Every type in the chain — `Vec`, `Keypoints` and
+/// This is the operation that once cost sixteen allocations and sixteen frees
+/// per call, on this thread only. Every type in the chain — `Vec`, `Keypoints` and
 /// `FlowTransforms` — now implements `clone_from` by hand, so a copy into
 /// buffers that are already big enough reaches the allocator zero times.
 #[test]

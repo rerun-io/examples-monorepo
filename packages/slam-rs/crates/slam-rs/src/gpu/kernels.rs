@@ -94,8 +94,6 @@ pub const TILE_W: u32 = 32;
 /// Cube height on the pyramid kernel.
 pub const TILE_H: u32 = 8;
 
-/// `optical_flow_max_iterations` is 5 in every shipped config; the loop bound
-/// is a runtime scalar all the same, so a config that raises it still runs.
 /// `border` on every patch tap, `PATCH_BORDER` (`patch.h:87`).
 const PATCH_BORDER: f32 = 2.0;
 /// `const int filter_margin = 2` (`frame_to_frame_optical_flow.h:430`).
@@ -1603,10 +1601,10 @@ pub(super) const MASK_BITS: usize = 32;
 ///
 /// The detector asks for up to eighty row bands per camera per frame and each
 /// one is the whole image width, so walking the candidate image byte by byte
-/// costs more than the FAST sweep it replaced — measured 1.53 ms of host time
-/// against kornia's 1.81 ms, which is why the first version of this kernel was
-/// not faster. With a bitmask the host reads one word per thirty-two columns and
-/// only touches the score where a bit is set.
+/// costs more than the FAST sweep it replaced: a byte-by-byte host walk measured
+/// 1.53 ms against kornia's 1.81 ms, so the whole GPU scan was barely ahead of
+/// the CPU one. With a bitmask the host reads one word per thirty-two columns
+/// and only touches the score where a bit is set.
 #[cube(launch, launch_unchecked)]
 fn fast_mask_kernel(
     kept: &Array<u8>,

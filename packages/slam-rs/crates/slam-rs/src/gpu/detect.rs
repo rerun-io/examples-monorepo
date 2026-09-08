@@ -159,7 +159,7 @@ impl<R: Runtime> GpuCornerScan<R> {
     /// Times the score, candidate and bitmask buffers have been allocated.
     ///
     /// One per camera geometry for the life of the scanner; anything that grows
-    /// with the frameset count is the pool churn step 1b removed coming back.
+    /// with the frameset count is per-frame pool churn coming back.
     pub fn buffer_allocations(&self) -> usize {
         self.buffer_allocations
     }

@@ -23,10 +23,10 @@ use crate::pyramid::{MIN_SIDE, Pyramid, PyramidError};
 /// pyramid afterwards.
 #[derive(Debug, Clone)]
 pub struct Level0 {
-    /// The upload buffer, which is the frame and nothing else: since the upload
-    /// became exactly as long as the frame (round 2, step 1b) this is `width *
-    /// height` `u16` with a stride equal to the width, and a device copy is
-    /// what puts the same pixels at the front of the pyramid's even allocation.
+    /// The upload buffer, which is the frame and nothing else: `width * height`
+    /// `u16` with a stride equal to the width, the upload being exactly as long
+    /// as the frame. A device copy is what puts the same pixels at the front of
+    /// the pyramid's even allocation.
     pub(super) handle: cubecl::server::Handle,
     /// Level 0's width, checked against the frame the scanner was handed.
     pub(super) width: usize,

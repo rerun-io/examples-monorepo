@@ -347,12 +347,10 @@ impl PyramidBuilder for CpuPyramidBuilder {
             });
         }
 
-        // `lvl_internal(0).CopyFrom(other)` (`image_pyr.h:73`), row by row
-        // because the source may be strided and the level never is.
-        let target: &mut ImageU16 = &mut out.levels[0];
-        for y in 0..img.height() {
-            target.row_mut(y).copy_from_slice(img.row(y));
-        }
+        // `lvl_internal(0).CopyFrom(other)` (`image_pyr.h:73`). `copy_from` is
+        // the same row-by-row copy, which is what a possibly strided source
+        // needs; the geometry check above makes its resize a no-op.
+        out.levels[0].copy_from(img)?;
 
         // `for (i = 0; i < num_levels; i++) subsample(lvl(i), lvl_internal(i + 1))`.
         self.scratch

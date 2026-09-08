@@ -966,7 +966,7 @@ mod tests {
     }
 
     /// Two cameras of different sizes get different grid **starts** even when
-    /// their occupancy matrices come out the same shape — the review's case.
+    /// their occupancy matrices come out the same shape.
     #[test]
     fn a_different_image_size_gives_a_different_grid_start() {
         let small: CellGrid = CellGrid::new(200, 200, 50).unwrap();

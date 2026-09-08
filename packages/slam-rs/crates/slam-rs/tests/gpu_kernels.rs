@@ -703,8 +703,8 @@ fn the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing() {
     // And each camera's three device buffers are allocated once for the life of
     // the scanner, not once per frameset. A one-slot geometry cache holds only
     // for a rig whose cameras are all the same size; on this one — 960x240 next
-    // to 512x192, which is why the test drives two — every scan missed and
-    // re-allocated 4 MB, the pool churn step 1b removed.
+    // to 512x192, which is why the test drives two — a scanner without the
+    // cache misses on every scan and re-allocates 4 MB.
     let allocations: usize = shared.buffer_allocations();
     assert_eq!(allocations, frames.len(), "one geometry, one allocation");
     for _ in 0..3 {
@@ -912,8 +912,8 @@ fn the_runtime_stores_every_element_width_the_kernels_bind() {
 
 /// A host with no GPU is a typed error, in a subprocess that really has none.
 ///
-/// The failure the review reproduced: with `CUDA_VISIBLE_DEVICES=` a one-frame
-/// GPU replay raised `pyo3_runtime.PanicException: ... RecvError`, because
+/// The failure this closes: with `CUDA_VISIBLE_DEVICES=` a one-frame GPU replay
+/// raised `pyo3_runtime.PanicException: ... RecvError`, because
 /// CubeCL unwraps its own bring-up on its worker thread and the process's
 /// documented contract is a `ValueError` and never a Rust panic (decision D32).
 /// It cannot be tested in-process — a client is a per-process singleton and the
@@ -957,7 +957,7 @@ mod absent_gpu {
     ///
     /// The same `cfg` as its one caller: only the NVIDIA lane has a library to
     /// take away, and without the `cfg` this is dead code on the portable lane,
-    /// where `clippy --all-targets -D warnings` refuses it (S24 review).
+    /// where `clippy --all-targets -D warnings` refuses it.
     #[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
     fn child_without_runpath(test: &str, case: &str, variables: &[(&str, &str)]) -> Option<String> {
         let loader: &str = ["/lib64/ld-linux-x86-64.so.2", "/lib/ld-linux-aarch64.so.1"]

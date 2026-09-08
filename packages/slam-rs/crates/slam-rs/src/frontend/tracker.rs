@@ -635,7 +635,7 @@ impl<P: Pattern> SourcePatches for PatchSoA<P> {
     /// One patch per entry of `positions`, at `position / (1 << level)` — the
     /// `old_transform.translation() / scale` of `frame_to_frame_optical_flow.h:388`.
     /// [`build_patch`] writes straight into this structure's arrays, so no packed
-    /// per-patch record is ever built (§12.2, and the review finding it answers).
+    /// per-patch record is ever built (§12.2).
     ///
     /// This runs on the calling thread. It is a pure per-patch map, so moving it
     /// onto [`WorkPool`] later cannot change a value; it is left sequential in V0
@@ -1137,6 +1137,11 @@ impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
 /// share a resolution and the right one for msd-g2, whose cameras do not
 /// (decision D30).
 fn level0_size(pyramid: &PyramidU16) -> (f32, f32) {
+    // `check_track_inputs` refuses a pyramid with fewer levels than the patch
+    // set, and the patch set always has at least one, so level 0 is there. The
+    // `(0.0, 0.0)` would fail every keypoint's bounds test silently, so the
+    // debug build says so instead (decision D32).
+    debug_assert!(pyramid.level_size(0).is_some(), "no level 0 to size");
     match pyramid.level_size(0) {
         Some((width, height, _)) => (width as f32, height as f32),
         None => (0.0, 0.0),

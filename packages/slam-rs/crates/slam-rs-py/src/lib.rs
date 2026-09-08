@@ -201,9 +201,9 @@ impl Vio {
             // All or nothing. Pushing as it goes leaves the samples before a bad
             // one in the estimator and the frontier past them, so the caller can
             // neither retry the batch nor correct it: `[10, 20, 20, 30]` raised
-            // at the duplicate and then refused 10 and 20 as too old (Codex, S9
-            // review). The whole batch is decided first, each sample against the
-            // one before it and the frontier.
+            // at the duplicate and then refused 10 and 20 as too old. The whole
+            // batch is decided first, each sample against the one before it and
+            // the frontier.
             let mut previous_t_ns: Option<i64> = self.inner.last_imu_t_ns();
             for ((&t, gyro_sample), accel_sample) in
                 times.iter().zip(gyro_rows.iter()).zip(accel_rows.iter())
