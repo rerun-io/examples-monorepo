@@ -17,15 +17,9 @@ use crate::eigen::qr::{
 };
 use crate::eigen::svd::JacobiRotation;
 use crate::landmark::Landmark;
-use crate::lie::LieScalar;
+use crate::lie::{LieScalar, c};
 use crate::linearize::{LinearizeError, RelPoseLin};
 use crate::types::{AbsOrderMap, LandmarkId, POSE_SIZE, TimeCamId};
-
-/// `Scalar(x)` in C++: a literal in the estimator's scalar type.
-#[inline]
-fn c<S: LieScalar>(value: f64) -> S {
-    S::from_literal(value)
-}
 
 /// `LandmarkBlock<Scalar>::Options` (`landmark_block.hpp:31-48`).
 #[derive(Debug, Clone, Copy, PartialEq)]

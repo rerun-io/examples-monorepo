@@ -37,14 +37,8 @@ use std::marker::PhantomData;
 use nalgebra::{Matrix2x4, Matrix4x2, Vector2, Vector4};
 
 use crate::eigen::norm3;
-use crate::lie::LieScalar;
+use crate::lie::{LieScalar, c};
 use crate::types::{FrameId, LandmarkId, TimeCamId};
-
-/// `Scalar(x)` in C++: a literal in the estimator's scalar type.
-#[inline]
-fn c<S: LieScalar>(value: f64) -> S {
-    S::from_literal(value)
-}
 
 /// Stereographic projection: the minimal 2-parameter chart on the unit sphere
 /// basalt parameterises landmark directions with

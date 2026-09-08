@@ -45,17 +45,11 @@ use crate::eigen::blas::redux_contiguous;
 use crate::eigen::norm3;
 use crate::eigen::svd::jacobi_svd_4x4_full_v;
 use crate::landmark::{Landmark, LandmarkDatabase, LandmarkError, StereographicParam};
-use crate::lie::{LieScalar, Se3, So3};
+use crate::lie::{LieScalar, Se3, So3, c};
 use crate::types::{
     AbsOrderMap, CamId, FrameId, LandmarkId, MargLinData, POSE_SIZE, POSE_VEL_BIAS_SIZE,
     PoseStateWithLin, PoseVelBiasStateWithLin, TimeCamId,
 };
-
-/// `Scalar(x)` in C++: a literal in the estimator's scalar type.
-#[inline]
-fn c<S: LieScalar>(value: f64) -> S {
-    S::from_literal(value)
-}
 
 /// What the bundle-adjustment base refuses to do.
 ///

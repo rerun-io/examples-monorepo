@@ -81,7 +81,7 @@ use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, Vector3};
 
 use crate::calib::Calibration;
 use crate::lie::{
-    LieScalar, So3, left_jacobian_inv_so3, right_jacobian_inv_so3, right_jacobian_so3,
+    LieScalar, So3, c, left_jacobian_inv_so3, right_jacobian_inv_so3, right_jacobian_so3,
 };
 use crate::types::{
     POSE_VEL_BIAS_SIZE, POSE_VEL_SIZE, PoseVelBiasStateWithLin, PoseVelState, Vector9, Vector15,
@@ -92,12 +92,6 @@ use crate::types::{
 const BIAS_GYRO_OFFSET: usize = POSE_VEL_SIZE;
 /// Where the accelerometer bias starts: the `+12` of `imu_block.hpp:58`.
 const BIAS_ACCEL_OFFSET: usize = POSE_VEL_SIZE + 3;
-
-/// `Scalar(x)` in C++: a literal in the measurement's scalar type.
-#[inline]
-fn c<S: LieScalar>(value: f64) -> S {
-    S::from_literal(value)
-}
 
 /// A `Vector3<f64>` in the measurement's scalar type.
 #[inline]

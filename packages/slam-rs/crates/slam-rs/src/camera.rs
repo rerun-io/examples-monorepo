@@ -82,13 +82,7 @@
 use nalgebra::{Matrix2, Matrix2x4, Matrix4x2, SMatrix, SVector, Vector2, Vector4};
 
 use crate::calib::{Calibration, CameraModel};
-use crate::lie::LieScalar;
-
-/// `Scalar(x)` in C++: a literal in the camera's scalar type.
-#[inline]
-fn c<S: LieScalar>(value: f64) -> S {
-    S::from_literal(value)
-}
+use crate::lie::{LieScalar, c};
 
 /// Something a camera model cannot do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

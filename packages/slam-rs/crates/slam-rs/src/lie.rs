@@ -212,7 +212,11 @@ impl LieScalar for f32 {
     }
 }
 
-/// `Scalar(x)` in C++: a literal in the estimator's scalar type.
+/// `Scalar(x)` in C++: a literal in the caller's scalar type.
+///
+/// The crate's one spelling of it. `estimator/*`, `marg/*` and
+/// `linearize/abs_qr.rs` say `S::from_literal(...)` directly, which is the same
+/// call; everything with enough literals for the noise to matter imports this.
 #[inline]
 pub(crate) fn c<S: LieScalar>(value: f64) -> S {
     S::from_literal(value)
