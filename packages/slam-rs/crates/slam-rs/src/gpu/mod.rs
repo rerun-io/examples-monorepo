@@ -19,7 +19,7 @@
 //!
 //! Every type here is generic over `R: Runtime` and every kernel is one source;
 //! [`GpuRuntime`] carries which one this build picked. A compiling portable
-//! lane proves nothing — round 1's `cargo check --features gpu-wgpu` was green
+//! lane proves nothing — `cargo check --features gpu-wgpu` has been green
 //! while every kernel returned zeros — so the claim is checked by running:
 //! `slam-rs-wgpu-test` puts the same tolerance tests through Vulkan, and
 //! [`probe_storage`] refuses at construction any runtime whose device copy of a
@@ -236,11 +236,10 @@ pub type CudaRuntime = cubecl_cuda::CudaRuntime;
 /// The one NVIDIA-specific line in the crate; `wgpu_client` — which only a
 /// `gpu-wgpu` build has — is the same code with another client.
 ///
-/// Private, and that is the fix the re-review asked for: it constructs a client
-/// without probing this host and without a panic guard, so a public one was a
-/// second door into exactly the failure [`gpu_client`] exists to close. The only
-/// way to a client from outside this module is [`gpu_client`], which is
-/// fallible.
+/// Private: it constructs a client without probing this host and without a
+/// panic guard, so a public one would be a second door into exactly the failure
+/// [`gpu_client`] exists to close. The only way to a client from outside this
+/// module is [`gpu_client`], which is fallible.
 #[cfg(feature = "gpu")]
 fn cuda_client() -> cubecl::prelude::ComputeClient<CudaRuntime> {
     use cubecl::prelude::Runtime;
@@ -284,8 +283,8 @@ pub type GpuRuntime = cubecl_wgpu::WgpuRuntime;
 ///    probe can only anticipate what it knows to ask.
 ///
 /// **A caught panic still prints its own message to stderr**, and that is the
-/// deliberate half of the trade. Round 1 swapped in a quiet panic hook around
-/// the construction; the hook is process-global and unsynchronised, so it also
+/// deliberate half of the trade. A quiet panic hook around the construction was
+/// tried; the hook is process-global and unsynchronised, so it also
 /// silenced unrelated threads for that window and two concurrent constructors
 /// could restore it out of order — and the same guard is now on the per-frame
 /// path, where swapping a global hook per frameset is not a thing that can be
@@ -506,7 +505,9 @@ pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
     // The guard is around the whole of it, not around the client alone: from
     // here to the returned backends every line allocates, launches or reads on
     // the device, and CubeCL panics rather than returning an error when one of
-    // those meets a device that is not there (decision D32).
+    // those meets a device that is not there (decision D32). `gpu_client`'s own
+    // inner `guarded` is for its own callers — the tolerance tests — and on this
+    // path it catches nothing this one would not.
     guarded(
         GpuError::ClientPanicked {
             runtime: RUNTIME_NAME,
@@ -556,13 +557,14 @@ fn read_failed(what: &'static str, error: &cubecl::server::ServerError) -> GpuEr
 /// submission, so on a lost device `create_from_slice`, a launch and a read all
 /// **panic** on the calling thread. On the per-frame path that unwind crosses
 /// the released GIL and reaches Python as a `PanicException`, past
-/// `process_frame`'s transactional restore; on the bring-up path it is the
-/// `RecvError` the review reproduced. Both land here as the typed error the
-/// caller already documents.
+/// `process_frame`'s transactional restore; on the bring-up path it surfaces as
+/// a `RecvError`. Both land here as the typed error the caller already
+/// documents.
 ///
 /// It costs nothing on the path that does not panic — `catch_unwind` is a
-/// landing pad the happy path never enters — and the interleaved A/B in the
-/// report's "Review fixes (round 2)" is the measurement rather than the claim.
+/// landing pad the happy path never enters — and three interleaved A/B pairs on
+/// MIO07/1500 measured the guarded build at 5.77-5.86 ms against 5.92-5.99,
+/// build-to-build noise in the guardless build's favour nowhere.
 fn guarded<T, E: From<GpuError>>(
     fault: GpuError,
     stage: impl FnOnce() -> Result<T, E>,
@@ -591,9 +593,9 @@ fn guarded<T, E: From<GpuError>>(
 // that is gone, or a staging allocation refused under memory pressure — so one
 // thread-local stands in for it. It names a site rather than being a bare flag
 // because two questions need asking separately: what a panic inside a guarded
-// region does, and what one inside the storage probe does, the probe being what
-// the re-review found running outside the guard. A doc comment cannot sit on a
-// macro invocation.
+// region does, and what one inside the storage probe does, the probe being the
+// site that has to be inside the guard for `gpu_backends` to cover the whole of
+// what it does. A doc comment cannot sit on a macro invocation.
 #[cfg(test)]
 thread_local! {
     static FAULT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
@@ -632,7 +634,7 @@ fn arm_fault_at(site: &'static str) {
 ///
 /// * A CUDA install without `cuda-nvrtc` / `cuda-cudart-dev` panics on cubecl's
 ///   own worker thread. The client still constructs, every launch reports
-///   success, and every read comes back as zeros (round 1's report).
+///   success, and every read comes back as zeros.
 /// * `cubecl-wgpu`'s **WGSL** compiler panics on `u16` and `u8` —
 ///   "U16 is not a valid WgpuElement" — on the same worker thread, with the
 ///   same result. The pyramid is `u16` and the candidate image is `u8`, so on
@@ -640,6 +642,43 @@ fn arm_fault_at(site: &'static str) {
 ///   produces nothing. Measured on this host: the pyramid came back all zeros
 ///   and the detector found no corners, with no error anywhere.
 ///
+/// One frame on the device, and how many pixels it holds.
+///
+/// `create_from_slice` is CubeCL 0.10's only host-to-device write, it allocates
+/// a buffer the size of the slice, and it copies the payload **twice** on the
+/// host before the bus sees it (`slice.to_vec()`, then
+/// `Bytes::from_bytes_vec(data.to_vec())` inside `do_create_from_slices`). So
+/// the upload is exactly as long as the frame and nothing more: an unstrided
+/// frame goes straight out of the caller's buffer with no staging copy at all,
+/// and only a strided one — dav1d's shape — is repacked row by row into
+/// `scratch`, which the caller owns so the per-frame path never allocates.
+///
+/// Both the pyramid builder's level-0 upload and the corner scanner's own frame
+/// upload are this, which is why it is here and not in either.
+#[cfg(feature = "gpu-core")]
+pub(super) fn upload_frame<R: cubecl::prelude::Runtime>(
+    client: &cubecl::prelude::ComputeClient<R>,
+    image: &crate::image::ImageU16,
+    scratch: &mut Vec<u16>,
+) -> (cubecl::server::Handle, usize) {
+    use cubecl::prelude::CubeElement;
+
+    let (width, height): (usize, usize) = (image.width(), image.height());
+    let pixels: usize = width * height;
+    if image.stride() == width {
+        return (
+            client.create_from_slice(u16::as_bytes(&image.data()[..pixels])),
+            pixels,
+        );
+    }
+    scratch.clear();
+    scratch.reserve(pixels);
+    for y in 0..height {
+        scratch.extend_from_slice(image.row(y));
+    }
+    (client.create_from_slice(u16::as_bytes(scratch)), pixels)
+}
+
 /// So the check is the one thing that cannot lie: write a known pattern, copy
 /// it **on the device**, read it back. Four widths, 256 elements each, once at
 /// construction — microseconds, and it is what a fleet machine whose driver
@@ -655,9 +694,9 @@ pub fn probe_storage<R: cubecl::prelude::Runtime>(
 ) -> Result<(), GpuError> {
     use cubecl::prelude::CubeElement;
 
-    // This function allocates, launches and reads, and until this round it ran
-    // outside every catch: the fault site is here so a test can say that it no
-    // longer does (test-only).
+    // This function allocates, launches and reads, so it has to run inside
+    // `gpu_backends`' catch: the fault site is here so a test can say it does
+    // (test-only).
     #[cfg(test)]
     fire_if_armed(STORAGE_PROBE);
 
@@ -814,9 +853,9 @@ mod tests {
 
     /// A panic anywhere in the bring-up is a typed error, not an unwind.
     ///
-    /// The re-review's second gap: the guard ended at the client, and
-    /// `probe_storage` and the three backend constructors — which allocate,
-    /// launch and read — ran after it. The fault is armed at the storage probe,
+    /// The guard has to reach past the client: `probe_storage` and the three
+    /// backend constructors allocate, launch and read, so a guard that ended at
+    /// the client would miss all four. The fault is armed at the storage probe,
     /// which is inside the region only if `gpu_backends` guards the whole of
     /// what it does, and what comes back is the constructor's own error type.
     #[test]

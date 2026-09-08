@@ -4,8 +4,10 @@
 //! the cached inverse-compositional factor `H_se2^-1 J_se2^T` that turns a
 //! residual into an SE(2) increment. The three pieces are:
 //!
-//! * [`set_data`] — `patch.h:73-99`, sample and mean-normalise, optionally
-//!   through an SE(2) warp. Only the ported `test_patch.cpp` uses it.
+//! * `set_data` — `patch.h:73-99`, sample and mean-normalise, optionally
+//!   through an SE(2) warp. The tracking path never samples without the
+//!   Jacobian, so it lives in this module's tests, where the ported
+//!   `test_patch.cpp` cases are its only callers.
 //! * [`set_data_jac_se2`] — `patch.h:101-142`, the same sampling with the
 //!   gradient, the SE(2) warp Jacobian, and the product-rule term that comes
 //!   from differentiating the `1/mean` factor.
@@ -96,65 +98,6 @@ impl PatchSource<f32> for ImageU16 {
     fn interp_grad(&self, x: f32, y: f32) -> (f32, [f32; 2]) {
         ImageU16::interp_grad(self, x, y)
     }
-}
-
-/// `OpticalFlowPatch::setData` (`patch.h:73-99`).
-///
-/// Samples the pattern around `pos`, optionally through the SE(2) warp `se2`
-/// (`p = pos + (*se2) * pattern2.col(i)`, `patch.h:82`), marks out-of-bounds taps
-/// with `-1` (`:93`) and divides every tap by the mean of the valid ones (`:98`).
-/// Note that `data /= mean` scales the `-1` markers too, exactly as the C++ does;
-/// the sign is what later tests look at, and it survives a positive mean.
-///
-/// Returns the number of taps that were in bounds. `data` must be at least
-/// `P::SIZE` long; only that prefix is written.
-///
-/// # Panics
-///
-/// If `data` is shorter than `P::SIZE`.
-// The loop variable is the pattern tap index, shared by `data`, `P::OFFSETS`
-// and the C++ `for (int i = 0; i < PATTERN_SIZE; i++)` this mirrors; an
-// `enumerate` over one of them would name the wrong thing.
-#[allow(clippy::needless_range_loop)]
-pub fn set_data<P: Pattern, S: LieScalar, Src: PatchSource<S>>(
-    source: &Src,
-    pos: &Vector2<S>,
-    se2: Option<&AffineCompact2<S>>,
-    data: &mut [S],
-) -> (S, usize) {
-    let border: S = S::from_literal(f64::from(PATCH_BORDER));
-    let mut num_valid_points: usize = 0;
-    let mut sum: S = S::zero();
-
-    for i in 0..P::SIZE {
-        let tap: [S; 2] = [
-            S::from_literal(f64::from(P::OFFSETS[i][0])),
-            S::from_literal(f64::from(P::OFFSETS[i][1])),
-        ];
-        let warped: [S; 2] = match se2 {
-            Some(warp) => warp.warp_tap(tap),
-            None => tap,
-        };
-        let px: S = pos.x + warped[0];
-        let py: S = pos.y + warped[1];
-
-        if source.in_bounds(px, py, border) {
-            let value: S = source.interp(px, py);
-            data[i] = value;
-            sum += value;
-            num_valid_points += 1;
-        } else {
-            data[i] = -S::one();
-        }
-    }
-
-    // `mean = sum / num_valid_points; data /= mean;` (`patch.h:97-98`). The int
-    // is converted to the scalar before the division, as C++ does.
-    let mean: S = sum / S::from_literal(num_valid_points as f64);
-    for value in data.iter_mut().take(P::SIZE) {
-        *value /= mean;
-    }
-    (mean, num_valid_points)
 }
 
 /// `OpticalFlowPatch::setDataJacSe2` (`patch.h:101-142`), writing a strided `J^T`.
@@ -311,6 +254,13 @@ pub fn build_patch<P: Pattern, Src: PatchSource<f32>>(
 
 /// `basalt::OpticalFlowPatch<Scalar, Pattern>` (`patch.h:45-214`), `Scalar = f32`.
 ///
+/// **The reference form, not the tracking path.** The tracker samples straight
+/// into [`crate::frontend::tracker::PatchSoA`]'s strided arrays and never builds
+/// a packed per-patch record. This type is what the ported `test_patch.cpp`
+/// cases and `tests/gpu_kernels.rs`'s patch-build tolerance test measure
+/// against: both go through the same [`build_patch`] with different strides, so
+/// it is the same arithmetic read at a packed stride.
+///
 /// The stored state is `patch.h:204-213`: the source position, the
 /// mean-normalised taps with `-1` marking the ones that fell outside, the cached
 /// `H_se2^-1 J_se2^T`, the mean, and the validity flag. The buffers are sized for
@@ -404,17 +354,6 @@ impl<P: Pattern> OpticalFlowPatch<P> {
     ) -> bool {
         patch_residual::<P, Src>(&self.data, 1, source, transform, residual)
     }
-
-    /// `inc = -H_se2_inv_J_se2_T * res` (`frame_to_frame_optical_flow.h:419`).
-    #[inline]
-    pub fn increment(&self, residual: &[f32]) -> Vector3<f32> {
-        patch_increment::<P>(
-            self.h_se2_inv_j_se2_t.as_flattened(),
-            1,
-            MAX_PATTERN_SIZE,
-            residual,
-        )
-    }
 }
 
 /// [`OpticalFlowPatch::residual`] over a strided `data` array.
@@ -506,6 +445,69 @@ pub fn patch_increment<P: Pattern>(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+
+    /// `OpticalFlowPatch::setData` (`patch.h:73-99`), the reference form.
+    ///
+    /// The tracking path never samples without the Jacobian, so this is here
+    /// rather than in the module: it is what the ported `test_patch.cpp` cases
+    /// below compare [`set_data_jac_se2`] against.
+    ///
+    /// Samples the pattern around `pos`, optionally through the SE(2) warp `se2`
+    /// (`p = pos + (*se2) * pattern2.col(i)`, `patch.h:82`), marks out-of-bounds taps
+    /// with `-1` (`:93`) and divides every tap by the mean of the valid ones (`:98`).
+    /// Note that `data /= mean` scales the `-1` markers too, exactly as the C++ does;
+    /// the sign is what later tests look at, and it survives a positive mean.
+    ///
+    /// Returns the number of taps that were in bounds. `data` must be at least
+    /// `P::SIZE` long; only that prefix is written.
+    ///
+    /// # Panics
+    ///
+    /// If `data` is shorter than `P::SIZE`.
+    // The loop variable is the pattern tap index, shared by `data`, `P::OFFSETS`
+    // and the C++ `for (int i = 0; i < PATTERN_SIZE; i++)` this mirrors; an
+    // `enumerate` over one of them would name the wrong thing.
+    #[allow(clippy::needless_range_loop)]
+    fn set_data<P: Pattern, S: LieScalar, Src: PatchSource<S>>(
+        source: &Src,
+        pos: &Vector2<S>,
+        se2: Option<&AffineCompact2<S>>,
+        data: &mut [S],
+    ) -> (S, usize) {
+        let border: S = S::from_literal(f64::from(PATCH_BORDER));
+        let mut num_valid_points: usize = 0;
+        let mut sum: S = S::zero();
+
+        for i in 0..P::SIZE {
+            let tap: [S; 2] = [
+                S::from_literal(f64::from(P::OFFSETS[i][0])),
+                S::from_literal(f64::from(P::OFFSETS[i][1])),
+            ];
+            let warped: [S; 2] = match se2 {
+                Some(warp) => warp.warp_tap(tap),
+                None => tap,
+            };
+            let px: S = pos.x + warped[0];
+            let py: S = pos.y + warped[1];
+
+            if source.in_bounds(px, py, border) {
+                let value: S = source.interp(px, py);
+                data[i] = value;
+                sum += value;
+                num_valid_points += 1;
+            } else {
+                data[i] = -S::one();
+            }
+        }
+
+        // `mean = sum / num_valid_points; data /= mean;` (`patch.h:97-98`). The int
+        // is converted to the scalar before the division, as C++ does.
+        let mean: S = sum / S::from_literal(num_valid_points as f64);
+        for value in data.iter_mut().take(P::SIZE) {
+            *value /= mean;
+        }
+        (mean, num_valid_points)
+    }
 
     use super::*;
     use crate::frontend::patterns::{Pattern51, Pattern52};

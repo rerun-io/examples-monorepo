@@ -21,7 +21,7 @@
 
 use kornia_imgproc::features::FastCorner;
 use nalgebra::Vector2;
-use slam_rs::frontend::detect::{CornerScan, CpuCornerScan, DetectError};
+use slam_rs::frontend::detect::{BandRequest, CornerScan, CpuCornerScan, DetectError};
 use slam_rs::frontend::parallel::WorkPool;
 use slam_rs::frontend::patch::OpticalFlowPatch;
 use slam_rs::frontend::patterns::{Pattern, Pattern51};
@@ -29,13 +29,29 @@ use slam_rs::frontend::se2::AffineCompact2f;
 use slam_rs::frontend::tracker::{
     CpuPatchTracker, FlowResult, FlowTransforms, PatchSoA, PatchTracker, PointsSoA, SourcePatches,
 };
-use slam_rs::gpu::{GpuCornerScan, GpuPatchTracker, GpuPatches, GpuPyramidBuilder, gpu_client};
+use slam_rs::gpu::{
+    GpuCornerScan, GpuPatchTracker, GpuPatches, GpuPyramid, GpuPyramidBuilder, GpuRuntime,
+    gpu_client,
+};
 use slam_rs::image::ImageU16;
 use slam_rs::pyramid::{CpuPyramidBuilder, Pyramid, PyramidBuilder, PyramidError, PyramidU16};
 
 mod common;
 
 use common::{cornered_image, grid_positions, textured_image};
+
+/// One band of a 50-pixel cell grid, keyed the way
+/// `detect_keypoints_with_cells` keys it: `row` is the grid row and `rung` the
+/// place on the threshold ladder, and the cache is indexed by the pair.
+fn band_at(row: usize, rung: usize, y: usize, rows: usize, threshold: i32) -> BandRequest {
+    BandRequest {
+        row,
+        rung,
+        y,
+        rows,
+        threshold,
+    }
+}
 
 /// The keypoint budget both lanes are sized for, well over what the grid needs.
 const MAX_KEYPOINTS: usize = 1024;
@@ -48,27 +64,36 @@ const MAX_RECOVERED_DIST2: f32 = 0.09;
 /// on a 960x960 frame, so four levels.
 const LEVELS: usize = 3;
 
-#[test]
-fn the_gpu_pyramid_is_bit_exact_with_the_cpu() {
-    let image: ImageU16 = textured_image(960, 960, 0.0, 0.0);
+/// `image`'s pyramid on both lanes, `LEVELS` deep and the same geometry.
+fn both_pyramids(image: &ImageU16) -> (PyramidU16, GpuPyramid<GpuRuntime>) {
+    let (width, height): (usize, usize) = (image.width(), image.height());
 
     let mut cpu_builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
-    let mut cpu: PyramidU16 = cpu_builder.allocate(960, 960, LEVELS).unwrap();
-    cpu_builder.build(0, &image, &mut cpu).unwrap();
+    let mut cpu: PyramidU16 = cpu_builder.allocate(width, height, LEVELS).unwrap();
+    cpu_builder.build(0, image, &mut cpu).unwrap();
 
-    let client = gpu_client().unwrap();
-    let mut gpu_builder = GpuPyramidBuilder::new(client, &[[0.0, 0.0]]);
-    let mut gpu = gpu_builder.allocate(960, 960, LEVELS).unwrap();
-    gpu_builder.build(0, &image, &mut gpu).unwrap();
+    let mut gpu_builder: GpuPyramidBuilder<GpuRuntime> =
+        GpuPyramidBuilder::new(gpu_client().unwrap(), &[[0.0, 0.0]]);
+    let mut gpu: GpuPyramid<GpuRuntime> = gpu_builder.allocate(width, height, LEVELS).unwrap();
+    gpu_builder.build(0, image, &mut gpu).unwrap();
 
-    assert_eq!(gpu.num_levels(), cpu.num_levels());
+    (cpu, gpu)
+}
+
+/// Every level of the two pyramids holds the same geometry and the same pixels.
+///
+/// The message names the worst pixel and where it is, so a regression says how
+/// far it moved rather than only that it moved. Equality is the bound: the
+/// arithmetic is integer on both lanes (module doc).
+fn assert_levels_equal(cpu: &PyramidU16, gpu: &GpuPyramid<GpuRuntime>, label: &str) {
+    assert_eq!(gpu.num_levels(), cpu.num_levels(), "{label}");
     let mut expected: ImageU16 = ImageU16::default();
     let mut actual: ImageU16 = ImageU16::default();
     for level in 0..cpu.num_levels() {
         assert_eq!(
             gpu.level_size(level),
             cpu.level_size(level),
-            "level {level}"
+            "{label}, level {level}"
         );
         cpu.copy_level_into(level, &mut expected).unwrap();
         gpu.copy_level_into(level, &mut actual).unwrap();
@@ -87,12 +112,19 @@ fn the_gpu_pyramid_is_bit_exact_with_the_cpu() {
         assert_eq!(
             worst,
             0,
-            "level {level} differs: max-abs-diff {worst} at {worst_at:?} \
+            "{label}, level {level} differs: max-abs-diff {worst} at {worst_at:?} \
              ({}x{}); the fused 5x5 pass is integer arithmetic and must be exact",
             expected.width(),
             expected.height()
         );
     }
+}
+
+#[test]
+fn the_gpu_pyramid_is_bit_exact_with_the_cpu() {
+    let image: ImageU16 = textured_image(960, 960, 0.0, 0.0);
+    let (cpu, gpu) = both_pyramids(&image);
+    assert_levels_equal(&cpu, &gpu, "960x960");
 }
 
 /// A pyramid of level 0 alone is refused rather than allocated empty.
@@ -130,21 +162,8 @@ fn a_strided_frame_uploads_its_rows_and_not_its_padding() {
         strided.row_mut(y).copy_from_slice(source.row(y));
     }
 
-    let mut cpu_builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
-    let mut cpu: PyramidU16 = cpu_builder.allocate(64, 48, LEVELS).unwrap();
-    cpu_builder.build(0, &strided, &mut cpu).unwrap();
-
-    let mut gpu_builder = GpuPyramidBuilder::new(gpu_client().unwrap(), &[[0.0, 0.0]]);
-    let mut gpu = gpu_builder.allocate(64, 48, LEVELS).unwrap();
-    gpu_builder.build(0, &strided, &mut gpu).unwrap();
-
-    let mut expected: ImageU16 = ImageU16::default();
-    let mut actual: ImageU16 = ImageU16::default();
-    for level in 0..cpu.num_levels() {
-        cpu.copy_level_into(level, &mut expected).unwrap();
-        gpu.copy_level_into(level, &mut actual).unwrap();
-        assert_eq!(actual.data(), expected.data(), "level {level}");
-    }
+    let (cpu, gpu) = both_pyramids(&strided);
+    assert_levels_equal(&cpu, &gpu, "a 64x48 frame with stride 96");
 }
 
 /// The pyramid the builder allocates is reused frame after frame, so the second
@@ -154,8 +173,9 @@ fn a_reused_pyramid_carries_only_the_newest_frame() {
     let first: ImageU16 = textured_image(128, 96, 0.0, 0.0);
     let second: ImageU16 = textured_image(128, 96, 7.0, -3.0);
 
-    let mut gpu_builder = GpuPyramidBuilder::new(gpu_client().unwrap(), &[[0.0, 0.0]]);
-    let mut gpu = gpu_builder.allocate(128, 96, LEVELS).unwrap();
+    let mut gpu_builder: GpuPyramidBuilder<GpuRuntime> =
+        GpuPyramidBuilder::new(gpu_client().unwrap(), &[[0.0, 0.0]]);
+    let mut gpu: GpuPyramid<GpuRuntime> = gpu_builder.allocate(128, 96, LEVELS).unwrap();
     gpu_builder.build(0, &first, &mut gpu).unwrap();
     gpu_builder.build(0, &second, &mut gpu).unwrap();
 
@@ -163,13 +183,7 @@ fn a_reused_pyramid_carries_only_the_newest_frame() {
     let mut cpu: PyramidU16 = cpu_builder.allocate(128, 96, LEVELS).unwrap();
     cpu_builder.build(0, &second, &mut cpu).unwrap();
 
-    let mut expected: ImageU16 = ImageU16::default();
-    let mut actual: ImageU16 = ImageU16::default();
-    for level in 0..cpu.num_levels() {
-        cpu.copy_level_into(level, &mut expected).unwrap();
-        gpu.copy_level_into(level, &mut actual).unwrap();
-        assert_eq!(actual.data(), expected.data(), "level {level}");
-    }
+    assert_levels_equal(&cpu, &gpu, "the second frame of a reused pyramid");
 }
 
 #[test]
@@ -572,10 +586,11 @@ fn bands_agree(
     label: &str,
 ) -> usize {
     let mut total: usize = 0;
-    for band_y in (3..height - 3).step_by(50) {
-        for threshold in [40i32, 20, 10, 5, 1] {
-            let want: Vec<FastCorner> = reference.band(band_y, 44, threshold).unwrap().to_vec();
-            let got: &[FastCorner] = actual.band(band_y, 44, threshold).unwrap();
+    for (row, band_y) in (3..height - 3).step_by(50).enumerate() {
+        for (rung, threshold) in [40i32, 20, 10, 5, 1].into_iter().enumerate() {
+            let request: BandRequest = band_at(row, rung, band_y, 44, threshold);
+            let want: Vec<FastCorner> = reference.band(request).unwrap().to_vec();
+            let got: &[FastCorner] = actual.band(request).unwrap();
             assert_eq!(
                 got.len(),
                 want.len(),
@@ -623,7 +638,10 @@ fn the_gpu_corner_scan_is_exact_against_kornia() {
 #[test]
 fn a_gpu_band_before_a_scan_is_refused() {
     let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap());
-    assert_eq!(gpu.band(0, 32, 5).unwrap_err(), DetectError::NotScanned);
+    assert_eq!(
+        gpu.band(band_at(0, 0, 0, 32, 5)).unwrap_err(),
+        DetectError::NotScanned
+    );
 }
 
 /// The scanner is reused frame after frame, so the second frame's bands must be
@@ -636,12 +654,12 @@ fn a_reused_corner_scan_carries_only_the_newest_frame() {
     let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap());
     gpu.scan(0, &first).unwrap();
     assert!(
-        !gpu.band(3, 44, 5).unwrap().is_empty(),
+        !gpu.band(band_at(0, 0, 3, 44, 5)).unwrap().is_empty(),
         "the textured frame has corners"
     );
     gpu.scan(0, &second).unwrap();
     assert!(
-        gpu.band(3, 44, 5).unwrap().is_empty(),
+        gpu.band(band_at(0, 0, 3, 44, 5)).unwrap().is_empty(),
         "a black frame has none"
     );
 }
@@ -703,8 +721,8 @@ fn the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing() {
     // And each camera's three device buffers are allocated once for the life of
     // the scanner, not once per frameset. A one-slot geometry cache holds only
     // for a rig whose cameras are all the same size; on this one — 960x240 next
-    // to 512x192, which is why the test drives two — every scan missed and
-    // re-allocated 4 MB, the pool churn step 1b removed.
+    // to 512x192, which is why the test drives two — a scanner without the
+    // cache misses on every scan and re-allocates 4 MB.
     let allocations: usize = shared.buffer_allocations();
     assert_eq!(allocations, frames.len(), "one geometry, one allocation");
     for _ in 0..3 {
@@ -822,7 +840,7 @@ fn the_whole_gpu_path_holds_the_pool_flat() {
             builder.build(camera, frame, &mut pyramids[camera]).unwrap();
             scanner.scan(camera, frame).unwrap();
             // One band, so the download and the host-side walk run too.
-            scanner.band(3, 44, 20).unwrap();
+            scanner.band(band_at(0, 0, 3, 44, 20)).unwrap();
         }
         // The patch build and the tracking call are the other two per-frame
         // allocations, and neither ran here before: camera 0's pyramid is the
@@ -912,8 +930,8 @@ fn the_runtime_stores_every_element_width_the_kernels_bind() {
 
 /// A host with no GPU is a typed error, in a subprocess that really has none.
 ///
-/// The failure the review reproduced: with `CUDA_VISIBLE_DEVICES=` a one-frame
-/// GPU replay raised `pyo3_runtime.PanicException: ... RecvError`, because
+/// The failure this closes: with `CUDA_VISIBLE_DEVICES=` a one-frame GPU replay
+/// raised `pyo3_runtime.PanicException: ... RecvError`, because
 /// CubeCL unwraps its own bring-up on its worker thread and the process's
 /// documented contract is a `ValueError` and never a Rust panic (decision D32).
 /// It cannot be tested in-process — a client is a per-process singleton and the
@@ -957,7 +975,7 @@ mod absent_gpu {
     ///
     /// The same `cfg` as its one caller: only the NVIDIA lane has a library to
     /// take away, and without the `cfg` this is dead code on the portable lane,
-    /// where `clippy --all-targets -D warnings` refuses it (S24 review).
+    /// where `clippy --all-targets -D warnings` refuses it.
     #[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
     fn child_without_runpath(test: &str, case: &str, variables: &[(&str, &str)]) -> Option<String> {
         let loader: &str = ["/lib64/ld-linux-x86-64.so.2", "/lib/ld-linux-aarch64.so.1"]
@@ -1014,30 +1032,54 @@ mod absent_gpu {
         }
     }
 
+    /// The shape all four cases share, run once as the child and once as the
+    /// parent.
+    ///
+    /// In the child: the client's error is `expected`, and it is printed with
+    /// the `CHILD` prefix the parent greps for. In the parent: `spawn` starts
+    /// the child, its output contains `expected_text`, and whether rustc's own
+    /// `panicked at` appears is exactly `expect_panic` — the two questions each
+    /// shim's doc answers for its own case. `None` from `spawn` is a skip and
+    /// not a pass (see `child_without_runpath` for the one case that can).
+    fn assert_absent_gpu_case(
+        expected: slam_rs::gpu::GpuError,
+        expected_text: &str,
+        expect_panic: bool,
+        spawn: impl FnOnce() -> Option<String>,
+    ) {
+        if case().is_some() {
+            let error: slam_rs::gpu::GpuError = client_error();
+            assert_eq!(error, expected);
+            println!("CHILD {error}");
+            return;
+        }
+        let Some(text) = spawn() else {
+            println!("SKIPPED: this case's child could not be started, so the case is not a pass");
+            return;
+        };
+        assert!(text.contains(expected_text), "{text}");
+        assert_eq!(
+            panicked(&text),
+            expect_panic,
+            "the child's `panicked at` lines are not this case's (expected {expect_panic}):\n{text}"
+        );
+    }
+
     /// `CUDA_VISIBLE_DEVICES=`: the driver is healthy and no device is visible.
     #[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
     #[test]
     fn a_cuda_host_with_no_visible_device_is_a_typed_error() {
         const NAME: &str = "absent_gpu::a_cuda_host_with_no_visible_device_is_a_typed_error";
-        if case().is_some() {
-            let error: slam_rs::gpu::GpuError = client_error();
-            assert_eq!(
-                error,
-                slam_rs::gpu::GpuError::NoDevice {
-                    runtime: "CUDA",
-                    count: 0
-                }
-            );
-            println!("CHILD {error}");
-            return;
-        }
-        let text: String = child(NAME, "no-device", &[("CUDA_VISIBLE_DEVICES", "")]);
-        assert!(
-            text.contains("CHILD the CUDA driver reports 0 devices"),
-            "{text}"
+        // The probe answers this one, so nothing panics anywhere.
+        assert_absent_gpu_case(
+            slam_rs::gpu::GpuError::NoDevice {
+                runtime: "CUDA",
+                count: 0,
+            },
+            "CHILD the CUDA driver reports 0 devices",
+            false,
+            || Some(child(NAME, "no-device", &[("CUDA_VISIBLE_DEVICES", "")])),
         );
-        // The probe answers this one, so nothing panicked anywhere.
-        assert!(!panicked(&text), "the no-device child panicked:\n{text}");
     }
 
     /// No Vulkan ICD: the loader enumerates nothing and wgpu has no adapter.
@@ -1045,26 +1087,19 @@ mod absent_gpu {
     #[test]
     fn a_wgpu_host_with_no_adapter_is_a_typed_error() {
         const NAME: &str = "absent_gpu::a_wgpu_host_with_no_adapter_is_a_typed_error";
-        if case().is_some() {
-            let error: slam_rs::gpu::GpuError = client_error();
-            assert_eq!(
-                error,
-                slam_rs::gpu::GpuError::NoAdapter { backend: "vulkan" }
-            );
-            println!("CHILD {error}");
-            return;
-        }
-        let text: String = child(
-            NAME,
-            "no-adapter",
-            &[("VK_DRIVER_FILES", "/nonexistent/no-such-icd.json")],
-        );
-        assert!(
-            text.contains("CHILD wgpu found no vulkan adapter"),
-            "{text}"
-        );
         // The probe answers this one too.
-        assert!(!panicked(&text), "the no-adapter child panicked:\n{text}");
+        assert_absent_gpu_case(
+            slam_rs::gpu::GpuError::NoAdapter { backend: "vulkan" },
+            "CHILD wgpu found no vulkan adapter",
+            false,
+            || {
+                Some(child(
+                    NAME,
+                    "no-adapter",
+                    &[("VK_DRIVER_FILES", "/nonexistent/no-such-icd.json")],
+                ))
+            },
+        );
     }
 
     /// A library cudarc `dlopen`s that cannot be found, in a child that really
@@ -1086,39 +1121,25 @@ mod absent_gpu {
     #[test]
     fn a_cuda_host_that_cannot_load_nvrtc_is_a_typed_error() {
         const NAME: &str = "absent_gpu::a_cuda_host_that_cannot_load_nvrtc_is_a_typed_error";
-        if case().is_some() {
-            let error: slam_rs::gpu::GpuError = client_error();
-            assert_eq!(
-                error,
-                slam_rs::gpu::GpuError::MissingLibrary { library: "nvrtc" }
-            );
-            println!("CHILD {error}");
-            return;
-        }
-        let empty: std::path::PathBuf = std::env::temp_dir();
-        let Some(text) = child_without_runpath(
-            NAME,
-            "missing-library",
-            &[
-                ("LD_LIBRARY_PATH", &empty.to_string_lossy()),
-                ("CUDA_PATH", ""),
-            ],
-        ) else {
-            println!(
-                "SKIPPED: no dynamic loader at a path this test knows, so the child's own
-                RUNPATH cannot be inhibited and libnvrtc cannot be taken away from it"
-            );
-            return;
-        };
-        assert!(
-            text.contains("CHILD the GPU runtime needs the nvrtc shared library"),
-            "{text}"
-        );
-        // The probe answers this one, so nothing panicked: cudarc never reached
-        // its own `panic_no_lib_found`.
-        assert!(
-            !panicked(&text),
-            "the missing-library child panicked:\n{text}"
+        // The probe answers this one, so nothing panics: cudarc never reaches
+        // its own `panic_no_lib_found`. `None` from the spawn means no dynamic
+        // loader at a path this test knows, so the child's own RUNPATH cannot
+        // be inhibited and libnvrtc cannot be taken away from it — a skip.
+        assert_absent_gpu_case(
+            slam_rs::gpu::GpuError::MissingLibrary { library: "nvrtc" },
+            "CHILD the GPU runtime needs the nvrtc shared library",
+            false,
+            || {
+                let empty: std::path::PathBuf = std::env::temp_dir();
+                child_without_runpath(
+                    NAME,
+                    "missing-library",
+                    &[
+                        ("LD_LIBRARY_PATH", &empty.to_string_lossy()),
+                        ("CUDA_PATH", ""),
+                    ],
+                )
+            },
         );
     }
 
@@ -1132,31 +1153,21 @@ mod absent_gpu {
     #[test]
     fn a_wgpu_device_index_past_the_end_is_a_typed_error() {
         const NAME: &str = "absent_gpu::a_wgpu_device_index_past_the_end_is_a_typed_error";
-        if case().is_some() {
-            let error: slam_rs::gpu::GpuError = client_error();
-            assert_eq!(
-                error,
-                slam_rs::gpu::GpuError::ClientPanicked { runtime: "wgpu" }
-            );
-            println!("CHILD {error}");
-            return;
-        }
-        let text: String = child(
-            NAME,
-            "bad-index",
-            &[("CUBECL_WGPU_DEFAULT_DEVICE", "DiscreteGpu(99)")],
-        );
-        assert!(
-            text.contains("CHILD building the wgpu client panicked"),
-            "{text}"
-        );
-        // And the runtime's own message survives to stderr, which is what
-        // dropping the quiet panic hook bought: the child caught the panic and
-        // returned the typed error, and the one clue about a case no probe
-        // anticipated is still printed rather than swallowed.
-        assert!(
-            panicked(&text),
-            "the runtime's own message was swallowed:\n{text}"
+        // This one reaches cubecl's own unwrap, so the runtime's own message
+        // must survive to stderr: the child caught the panic and returned the
+        // typed error, and without the quiet panic hook the one clue about a
+        // case no probe anticipated is still printed rather than swallowed.
+        assert_absent_gpu_case(
+            slam_rs::gpu::GpuError::ClientPanicked { runtime: "wgpu" },
+            "CHILD building the wgpu client panicked",
+            true,
+            || {
+                Some(child(
+                    NAME,
+                    "bad-index",
+                    &[("CUBECL_WGPU_DEFAULT_DEVICE", "DiscreteGpu(99)")],
+                ))
+            },
         );
     }
 }

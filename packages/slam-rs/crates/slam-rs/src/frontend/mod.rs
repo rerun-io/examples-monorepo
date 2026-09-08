@@ -9,7 +9,7 @@
 //! left out too (trap 18).
 //!
 //! ```text
-//!   patterns  Pattern24 / 52 / 51 / 50            patterns.h
+//!   patterns  Pattern52 / Pattern51                patterns.h
 //!   se2       AffineCompact2f, SE2::exp           optical_flow.h:66, se2.hpp:609
 //!   ldlt      Eigen's pivoted LDLT, 3x3           Cholesky/LDLT.h
 //!   patch     OpticalFlowPatch, residual          patch.h

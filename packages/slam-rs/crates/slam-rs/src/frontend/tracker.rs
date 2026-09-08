@@ -71,10 +71,15 @@ use crate::image::ImageU16;
 use crate::pyramid::{Pyramid, PyramidU16};
 
 /// The increment guard at `frame_to_frame_optical_flow.h:425`.
-const MAX_INCREMENT_INFINITY_NORM: f32 = 1e6;
+///
+/// `pub(crate)` so the GPU lane's kernels alias it rather than re-declaring the
+/// number: the two lanes have no compiler coupling otherwise.
+pub(crate) const MAX_INCREMENT_INFINITY_NORM: f32 = 1e6;
 
 /// `const int filter_margin = 2` (`frame_to_frame_optical_flow.h:430`).
-const FILTER_MARGIN: f32 = 2.0;
+///
+/// `pub(crate)` for the same reason as [`MAX_INCREMENT_INFINITY_NORM`].
+pub(crate) const FILTER_MARGIN: f32 = 2.0;
 
 /// The most keypoints a tracker may be sized for.
 ///
@@ -218,6 +223,9 @@ impl Clone for PointsSoA {
     }
 }
 
+// Nothing asks a point list, a warp list or a patch set whether it is empty:
+// they are sized to a capacity at construction and read by index.
+#[allow(clippy::len_without_is_empty)]
 impl PointsSoA {
     /// An empty list with room for `capacity` points.
     pub fn with_capacity(capacity: usize) -> Self {
@@ -230,11 +238,6 @@ impl PointsSoA {
     /// Points held.
     pub fn len(&self) -> usize {
         self.x.len()
-    }
-
-    /// Whether the list is empty.
-    pub fn is_empty(&self) -> bool {
-        self.x.is_empty()
     }
 
     /// Drop every point, keeping the allocation.
@@ -325,6 +328,7 @@ impl Clone for FlowTransforms {
     }
 }
 
+#[allow(clippy::len_without_is_empty)]
 impl FlowTransforms {
     /// An empty list with room for `capacity` warps.
     pub fn with_capacity(capacity: usize) -> Self {
@@ -341,11 +345,6 @@ impl FlowTransforms {
     /// Warps held.
     pub fn len(&self) -> usize {
         self.m00.len()
-    }
-
-    /// Whether the list is empty.
-    pub fn is_empty(&self) -> bool {
-        self.m00.is_empty()
     }
 
     /// Drop every warp, keeping the allocation.
@@ -482,6 +481,26 @@ impl FlowTransforms {
         ]
     }
 
+    /// The first `len` entries of the six coefficient arrays, mutably.
+    ///
+    /// The prefix [`crate::frontend::parallel::WorkPool::for_each_warp`] wants
+    /// when a capacity-sized buffer is carrying `len` live warps, which is the
+    /// tracker's shape on both of its passes.
+    ///
+    /// # Panics
+    ///
+    /// If `len` is past the end of the arrays.
+    pub fn coefficients_prefix_mut(&mut self, len: usize) -> [&mut [f32]; 6] {
+        [
+            &mut self.m00[..len],
+            &mut self.m01[..len],
+            &mut self.m10[..len],
+            &mut self.m11[..len],
+            &mut self.tx[..len],
+            &mut self.ty[..len],
+        ]
+    }
+
     /// Every translation `x`, patch index fast-varying.
     pub fn translations_x(&self) -> &[f32] {
         &self.tx
@@ -493,11 +512,154 @@ impl FlowTransforms {
     }
 }
 
+/// The four preconditions of [`PatchTracker::track`], checked before any
+/// mutation.
+///
+/// Both lanes call this rather than each spelling the four out: the seam exists
+/// to keep them interchangeable, and a fifth check added to one lane and not the
+/// other would be invisible.
+///
+/// # Errors
+///
+/// [`TrackerError::LengthMismatch`] when the patch set and the guesses disagree,
+/// [`TrackerError::CapacityExceeded`] above the tracker's capacity, and
+/// [`TrackerError::LevelMismatch`] when the patch set or either pyramid is
+/// shallower than the tracker. The patch set is built by the caller, so its
+/// depth is an input like any other: a one-level `PatchSoA` in a two-level
+/// tracker used to index past the end of `valid`.
+pub(crate) fn check_track_inputs(
+    count: usize,
+    patches_len: usize,
+    patch_levels: usize,
+    prev_levels: usize,
+    next_levels: usize,
+    capacity: usize,
+    num_levels: usize,
+) -> Result<(), TrackerError> {
+    if count != patches_len {
+        return Err(TrackerError::LengthMismatch {
+            first_name: "patches",
+            first: patches_len,
+            second_name: "transforms",
+            second: count,
+        });
+    }
+    if count > capacity {
+        return Err(TrackerError::CapacityExceeded {
+            offered: count,
+            capacity,
+        });
+    }
+    if patch_levels < num_levels {
+        return Err(TrackerError::LevelMismatch {
+            what: "the patch set",
+            expected: num_levels,
+            actual: patch_levels,
+        });
+    }
+    for (what, levels) in [
+        ("the previous pyramid", prev_levels),
+        ("the next pyramid", next_levels),
+    ] {
+        if levels < num_levels {
+            return Err(TrackerError::LevelMismatch {
+                what,
+                expected: num_levels,
+                actual: levels,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The element counts a patch set of this shape needs: `(flags, taps)`.
+///
+/// `flags` is one entry per (level, patch) and `taps` is `flags * P::SIZE`; each
+/// constructor forms its own last product from them, which is the part the two
+/// lanes do differently (the CPU one wants three Jacobian arrays, the GPU one
+/// folds `4 * taps + flags` into a single buffer). The ceilings and the
+/// `checked_mul` ladder are the part that must not drift.
+///
+/// # Errors
+///
+/// [`TrackerError::CapacityTooLarge`] above [`MAX_CAPACITY`],
+/// [`TrackerError::TooManyLevels`] above [`MAX_LEVELS`], and
+/// [`TrackerError::BufferShapeOverflow`] when a count does not fit a `usize`.
+pub(crate) fn checked_patch_shape(
+    capacity: usize,
+    num_levels: usize,
+    taps_per_patch: usize,
+) -> Result<(usize, usize), TrackerError> {
+    if capacity > MAX_CAPACITY {
+        return Err(TrackerError::CapacityTooLarge {
+            capacity,
+            ceiling: MAX_CAPACITY,
+        });
+    }
+    if num_levels > MAX_LEVELS {
+        return Err(TrackerError::TooManyLevels {
+            num_levels,
+            ceiling: MAX_LEVELS,
+        });
+    }
+    let overflow = || TrackerError::BufferShapeOverflow {
+        capacity,
+        num_levels,
+        taps: taps_per_patch,
+    };
+    let flags: usize = num_levels.checked_mul(capacity).ok_or_else(overflow)?;
+    let taps: usize = flags.checked_mul(taps_per_patch).ok_or_else(overflow)?;
+    Ok((flags, taps))
+}
+
+/// The three preconditions of [`SourcePatches::build`], checked before any
+/// mutation, on both lanes for the same reason as [`check_track_inputs`].
+///
+/// # Errors
+///
+/// [`TrackerError::CapacityExceeded`] when the positions do not fit,
+/// [`TrackerError::LengthMismatch`] when the selection mask is shorter than the
+/// positions, and [`TrackerError::LevelMismatch`] when the pyramid is shallower
+/// than the patch set.
+pub(crate) fn check_patch_inputs(
+    count: usize,
+    capacity: usize,
+    selected: Option<&[bool]>,
+    pyramid_levels: usize,
+    num_levels: usize,
+) -> Result<(), TrackerError> {
+    if count > capacity {
+        return Err(TrackerError::CapacityExceeded {
+            offered: count,
+            capacity,
+        });
+    }
+    if let Some(flags) = selected
+        && flags.len() < count
+    {
+        return Err(TrackerError::LengthMismatch {
+            first_name: "positions",
+            first: count,
+            second_name: "selection flags",
+            second: flags.len(),
+        });
+    }
+    if pyramid_levels < num_levels {
+        return Err(TrackerError::LevelMismatch {
+            what: "the pyramid",
+            expected: num_levels,
+            actual: pyramid_levels,
+        });
+    }
+    Ok(())
+}
+
 /// The source patches of one camera, whatever holds them.
 ///
 /// Split from [`PatchTracker`] so a backend can pair its own patch storage with
 /// its own pyramid: `build` is the "sample every patch at every level" stage the
 /// GPU wants as one kernel, and the tracker consumes the result.
+#[allow(clippy::len_without_is_empty)]
 pub trait SourcePatches {
     /// The pyramid representation these patches are sampled from.
     type Pyramid: Pyramid;
@@ -520,11 +682,6 @@ pub trait SourcePatches {
 
     /// Patches currently filled.
     fn len(&self) -> usize;
-
-    /// Whether no patch is filled.
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 
     /// The level-0 source position of one patch.
     ///
@@ -552,8 +709,6 @@ pub struct PatchSoA<P: Pattern> {
     h_inv_jt: Vec<f32>,
     /// `valid[level * capacity + patch]`.
     valid: Vec<bool>,
-    /// `mean[level * capacity + patch]`.
-    mean: Vec<f32>,
     pattern: std::marker::PhantomData<P>,
 }
 
@@ -565,33 +720,18 @@ impl<P: Pattern> PatchSoA<P> {
     ///
     /// # Errors
     ///
-    /// [`TrackerError::CapacityTooLarge`] above [`MAX_CAPACITY`],
-    /// [`TrackerError::TooManyLevels`] above [`MAX_LEVELS`], and
-    /// [`TrackerError::BufferShapeOverflow`] when a buffer's element count does
-    /// not fit in a `usize`. All three are checked before anything is allocated:
-    /// the products below reach `Vec` as a length, and a `Vec` too long to exist
-    /// panics rather than returning (decision D32).
+    /// Whatever the crate's `checked_patch_shape` refuses. All of it is checked before
+    /// anything is allocated: the products below reach `Vec` as a length, and a
+    /// `Vec` too long to exist panics rather than returning (decision D32).
     pub fn new(capacity: usize, num_levels: usize) -> Result<Self, TrackerError> {
-        if capacity > MAX_CAPACITY {
-            return Err(TrackerError::CapacityTooLarge {
+        let (flags, taps): (usize, usize) = checked_patch_shape(capacity, num_levels, P::SIZE)?;
+        let jacobians: usize = taps
+            .checked_mul(3)
+            .ok_or(TrackerError::BufferShapeOverflow {
                 capacity,
-                ceiling: MAX_CAPACITY,
-            });
-        }
-        if num_levels > MAX_LEVELS {
-            return Err(TrackerError::TooManyLevels {
                 num_levels,
-                ceiling: MAX_LEVELS,
-            });
-        }
-        let overflow = || TrackerError::BufferShapeOverflow {
-            capacity,
-            num_levels,
-            taps: P::SIZE,
-        };
-        let flags: usize = num_levels.checked_mul(capacity).ok_or_else(overflow)?;
-        let taps: usize = flags.checked_mul(P::SIZE).ok_or_else(overflow)?;
-        let jacobians: usize = taps.checked_mul(3).ok_or_else(overflow)?;
+                taps: P::SIZE,
+            })?;
         let mut positions: PointsSoA = PointsSoA::with_capacity(capacity);
         positions.resize(capacity);
         Ok(Self {
@@ -602,7 +742,6 @@ impl<P: Pattern> PatchSoA<P> {
             data: vec![0.0; taps],
             h_inv_jt: vec![0.0; jacobians],
             valid: vec![false; flags],
-            mean: vec![0.0; flags],
             pattern: std::marker::PhantomData,
         })
     }
@@ -624,15 +763,6 @@ impl<P: Pattern> PatchSoA<P> {
     /// If `level` or `patch` is past the end.
     pub fn valid(&self, level: usize, patch: usize) -> bool {
         self.valid[level * self.capacity + patch]
-    }
-
-    /// The mean of one patch at one level (`patch.h:129`).
-    ///
-    /// # Panics
-    ///
-    /// If `level` or `patch` is past the end.
-    pub fn mean(&self, level: usize, patch: usize) -> f32 {
-        self.mean[level * self.capacity + patch]
     }
 
     /// Offset of tap 0 of one patch's `data` at one level; taps are `capacity` apart.
@@ -657,7 +787,7 @@ impl<P: Pattern> SourcePatches for PatchSoA<P> {
     /// One patch per entry of `positions`, at `position / (1 << level)` — the
     /// `old_transform.translation() / scale` of `frame_to_frame_optical_flow.h:388`.
     /// [`build_patch`] writes straight into this structure's arrays, so no packed
-    /// per-patch record is ever built (§12.2, and the review finding it answers).
+    /// per-patch record is ever built (§12.2).
     ///
     /// This runs on the calling thread. It is a pure per-patch map, so moving it
     /// onto [`WorkPool`] later cannot change a value; it is left sequential in V0
@@ -670,29 +800,13 @@ impl<P: Pattern> SourcePatches for PatchSoA<P> {
         selected: Option<&[bool]>,
     ) -> Result<(), TrackerError> {
         let count: usize = positions.len();
-        if count > self.capacity {
-            return Err(TrackerError::CapacityExceeded {
-                offered: count,
-                capacity: self.capacity,
-            });
-        }
-        if let Some(flags) = selected
-            && flags.len() < count
-        {
-            return Err(TrackerError::LengthMismatch {
-                first_name: "positions",
-                first: count,
-                second_name: "selection flags",
-                second: flags.len(),
-            });
-        }
-        if pyramid.num_levels() < self.num_levels {
-            return Err(TrackerError::LevelMismatch {
-                what: "the pyramid",
-                expected: self.num_levels,
-                actual: pyramid.num_levels(),
-            });
-        }
+        check_patch_inputs(
+            count,
+            self.capacity,
+            selected,
+            pyramid.num_levels(),
+            self.num_levels,
+        )?;
         self.len = count;
 
         for level in 0..self.num_levels {
@@ -713,7 +827,7 @@ impl<P: Pattern> SourcePatches for PatchSoA<P> {
                 let position: Vector2<f32> = positions.get(index) / scale;
                 let data_offset: usize = self.data_offset(level, index);
                 let jacobian_offset: usize = self.jacobian_offset(level, index);
-                let (mean, valid) = build_patch::<P, ImageU16>(
+                let (_mean, valid) = build_patch::<P, ImageU16>(
                     image,
                     &position,
                     &mut self.data[data_offset..],
@@ -722,7 +836,6 @@ impl<P: Pattern> SourcePatches for PatchSoA<P> {
                     self.capacity,
                     P::SIZE * self.capacity,
                 );
-                self.mean[level * self.capacity + index] = mean;
                 self.valid[level * self.capacity + index] = valid;
             }
         }
@@ -799,11 +912,6 @@ impl FlowResult {
     /// If `index` is past the end.
     pub fn transform(&self, index: usize) -> AffineCompact2f {
         self.transforms.get(index)
-    }
-
-    /// The tracked warps, structure-of-arrays, one entry per input.
-    pub fn transforms(&self) -> &FlowTransforms {
-        &self.transforms
     }
 
     /// The input indices that survived, ascending.
@@ -1013,39 +1121,15 @@ impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
         out: &mut FlowResult,
     ) -> Result<(), TrackerError> {
         let count: usize = transforms_in.len();
-        if count != patches.len() {
-            return Err(TrackerError::LengthMismatch {
-                first_name: "patches",
-                first: patches.len(),
-                second_name: "transforms",
-                second: count,
-            });
-        }
-        if count > self.capacity {
-            return Err(TrackerError::CapacityExceeded {
-                offered: count,
-                capacity: self.capacity,
-            });
-        }
-        // The patch set is built by the caller, so its depth is an input like any
-        // other: a one-level `PatchSoA` in a two-level tracker used to index past
-        // the end of `valid`.
-        if patches.num_levels() < self.num_levels {
-            return Err(TrackerError::LevelMismatch {
-                what: "the patch set",
-                expected: self.num_levels,
-                actual: patches.num_levels(),
-            });
-        }
-        for (what, pyramid) in [("the previous pyramid", prev), ("the next pyramid", next)] {
-            if pyramid.num_levels() < self.num_levels {
-                return Err(TrackerError::LevelMismatch {
-                    what,
-                    expected: self.num_levels,
-                    actual: pyramid.num_levels(),
-                });
-            }
-        }
+        check_track_inputs(
+            count,
+            patches.len(),
+            patches.num_levels(),
+            prev.num_levels(),
+            next.num_levels(),
+            self.capacity,
+            self.num_levels,
+        )?;
 
         out.reset(count);
 
@@ -1054,16 +1138,8 @@ impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
         let num_levels: usize = self.num_levels;
         let (target_width, target_height): (f32, f32) = level0_size(next);
         {
-            let [m00, m01, m10, m11, tx, ty] = self.forward.coefficients_mut();
             self.pool.for_each_warp(
-                [
-                    &mut m00[..count],
-                    &mut m01[..count],
-                    &mut m10[..count],
-                    &mut m11[..count],
-                    &mut tx[..count],
-                    &mut ty[..count],
-                ],
+                self.forward.coefficients_prefix_mut(count),
                 &mut self.forward_valid[..count],
                 |index| {
                     let guess: Vector2<f32> = transforms_in.translation(index);
@@ -1090,20 +1166,24 @@ impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
         }
 
         // ── the backward source patches, from `next` at the forward result
-        for index in 0..count {
-            self.backward_positions
-                .set(index, self.forward.translation(index));
+        {
+            // `build` wants `&mut self.backward` and `&self.backward_positions`
+            // at once, which is what the destructure is for; `resize(count)` is
+            // what `PatchSoA::build` reads as the patch count, and it comes
+            // before the writes so the next call's may be longer.
+            let Self {
+                backward,
+                backward_positions,
+                forward,
+                forward_valid,
+                ..
+            } = self;
+            backward_positions.resize(count);
+            for index in 0..count {
+                backward_positions.set(index, forward.translation(index));
+            }
+            backward.build(next, backward_positions, Some(&forward_valid[..count]))?;
         }
-        let mut backward_positions: PointsSoA = std::mem::take(&mut self.backward_positions);
-        backward_positions.resize(count);
-        let build: Result<(), TrackerError> = self.backward.build(
-            next,
-            &backward_positions,
-            Some(&self.forward_valid[..count]),
-        );
-        backward_positions.resize(self.capacity);
-        self.backward_positions = backward_positions;
-        build?;
 
         // ── backward: `trackPoint(pyr_2, pyr_1, transform_2, transform_1_recovered)` (`:359`)
         let backward: &PatchSoA<P> = &self.backward;
@@ -1112,16 +1192,8 @@ impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
         let max_recovered_dist2: f32 = self.max_recovered_dist2;
         {
             let (valid, transforms) = out.parts_mut();
-            let [m00, m01, m10, m11, tx, ty] = transforms.coefficients_mut();
             self.pool.for_each_warp(
-                [
-                    &mut m00[..count],
-                    &mut m01[..count],
-                    &mut m10[..count],
-                    &mut m11[..count],
-                    &mut tx[..count],
-                    &mut ty[..count],
-                ],
+                transforms.coefficients_prefix_mut(count),
                 &mut valid[..count],
                 |index| {
                     let kept: [f32; 6] = forward.coefficients(index);
@@ -1165,6 +1237,11 @@ impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
 /// share a resolution and the right one for msd-g2, whose cameras do not
 /// (decision D30).
 fn level0_size(pyramid: &PyramidU16) -> (f32, f32) {
+    // `check_track_inputs` refuses a pyramid with fewer levels than the patch
+    // set, and the patch set always has at least one, so level 0 is there. The
+    // `(0.0, 0.0)` would fail every keypoint's bounds test silently, so the
+    // debug build says so instead (decision D32).
+    debug_assert!(pyramid.level_size(0).is_some(), "no level 0 to size");
     match pyramid.level_size(0) {
         Some((width, height, _)) => (width as f32, height as f32),
         None => (0.0, 0.0),
@@ -1291,671 +1368,4 @@ fn track_point_at_level<P: Pattern>(
     }
 
     patch_valid
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-
-    use super::*;
-    use crate::frontend::patterns::Pattern51;
-    use crate::pyramid::{CpuPyramidBuilder, PyramidBuilder};
-    use proptest::prelude::*;
-
-    /// A band-limited texture: twelve plane waves with wavelengths between 16
-    /// and 56 pixels, in fixed pseudo-random directions and phases.
-    ///
-    /// Band-limited matters twice over. Below the Nyquist of the finest pyramid
-    /// level the `[1,4,6,4,1]` subsample does not alias, so the coarse levels
-    /// really do carry the same shift; and away from the sampling limit bilinear
-    /// interpolation reconstructs the field closely, so the residual's fixed
-    /// point sits near the true shift rather than a fraction of a pixel off it.
-    /// Twelve components in different directions also keep every patch's `H_se2`
-    /// well conditioned: a single wave, or a field that is locally almost affine,
-    /// is the aperture problem and no tracker recovers a shift from it.
-    fn texture(x: f64, y: f64) -> f64 {
-        // (wavelength, direction in turns, phase in turns)
-        const WAVES: [(f64, f64, f64); 16] = [
-            (22.0000, 0.000000, 0.000000),
-            (23.5218, 0.381966, 0.618034),
-            (25.1489, 0.763932, 0.236068),
-            (26.8886, 0.145898, 0.854102),
-            (28.7486, 0.527864, 0.472136),
-            (30.7373, 0.909830, 0.090170),
-            (32.8635, 0.291796, 0.708204),
-            (35.1368, 0.673762, 0.326238),
-            (37.5674, 0.055728, 0.944272),
-            (40.1661, 0.437694, 0.562306),
-            (42.9446, 0.819660, 0.180340),
-            (45.9153, 0.201626, 0.798374),
-            (49.0914, 0.583592, 0.416408),
-            (52.4873, 0.965558, 0.034442),
-            (56.1181, 0.347524, 0.652476),
-            (60.0000, 0.729490, 0.270510),
-        ];
-        let tau: f64 = std::f64::consts::TAU;
-        let mut sum: f64 = 0.0;
-        for (wavelength, direction, phase) in WAVES {
-            let angle: f64 = tau * direction;
-            let projection: f64 = x * angle.cos() + y * angle.sin();
-            sum += (tau * (projection / wavelength + phase)).sin();
-        }
-        sum / WAVES.len() as f64
-    }
-
-    /// A textured frame, shifted by `(dx, dy)`: the same continuous field
-    /// resampled at `(x - dx, y - dy)`, so the shift is exact by construction.
-    fn shifted_image(width: usize, height: usize, dx: f32, dy: f32) -> ImageU16 {
-        let mut image: ImageU16 = ImageU16::zeros(width, height).unwrap();
-        for y in 0..height {
-            for x in 0..width {
-                let fx: f64 = f64::from(x as f32 - dx);
-                let fy: f64 = f64::from(y as f32 - dy);
-                let value: f64 = 32_000.0 + 28_000.0 * texture(fx, fy);
-                image.set(x, y, value as u16);
-            }
-        }
-        image
-    }
-
-    fn pyramid_of(image: &ImageU16, levels: usize) -> PyramidU16 {
-        let mut pyramid: PyramidU16 =
-            PyramidU16::with_capacity(image.width(), image.height(), levels).unwrap();
-        CpuPyramidBuilder::new()
-            .build(0, image, &mut pyramid)
-            .unwrap();
-        pyramid
-    }
-
-    struct Fixture {
-        prev: PyramidU16,
-        next: PyramidU16,
-        patches: PatchSoA<Pattern51>,
-        transforms: FlowTransforms,
-        positions: PointsSoA,
-    }
-
-    fn fixture(dx: f32, dy: f32, levels: usize) -> Fixture {
-        let base: ImageU16 = shifted_image(160, 160, 0.0, 0.0);
-        let moved: ImageU16 = shifted_image(160, 160, dx, dy);
-        let prev: PyramidU16 = pyramid_of(&base, levels);
-        let next: PyramidU16 = pyramid_of(&moved, levels);
-
-        let mut positions: PointsSoA = PointsSoA::default();
-        for y in (40..120).step_by(16) {
-            for x in (40..120).step_by(16) {
-                positions.push(Vector2::new(x as f32, y as f32));
-            }
-        }
-        let mut transforms: FlowTransforms = FlowTransforms::default();
-        for index in 0..positions.len() {
-            transforms.push(&AffineCompact2f::at(positions.get(index)));
-        }
-
-        let mut patches: PatchSoA<Pattern51> = PatchSoA::new(positions.len(), levels + 1).unwrap();
-        patches.build(&prev, &positions, None).unwrap();
-
-        Fixture {
-            prev,
-            next,
-            patches,
-            transforms,
-            positions,
-        }
-    }
-
-    fn tracker(capacity: usize, levels: usize, threads: usize) -> CpuPatchTracker<Pattern51> {
-        CpuPatchTracker::new(
-            capacity,
-            levels + 1,
-            5,
-            0.04,
-            WorkPool::new(threads).unwrap(),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn an_integer_shift_is_recovered() {
-        let levels: usize = 3;
-        let scene: Fixture = fixture(2.0, -1.0, levels);
-        let mut tracker: CpuPatchTracker<Pattern51> = tracker(scene.positions.len(), levels, 1);
-        let mut out: FlowResult = FlowResult::with_capacity(scene.positions.len());
-        tracker
-            .track(
-                &scene.prev,
-                &scene.next,
-                &scene.patches,
-                &scene.transforms,
-                &mut out,
-            )
-            .unwrap();
-
-        assert!(
-            out.len() >= scene.positions.len() / 2,
-            "tracked {}",
-            out.len()
-        );
-        for index in out.tracked() {
-            let index: usize = *index as usize;
-            let moved: Vector2<f32> = out.transform(index).translation - scene.positions.get(index);
-            // An integer shift moves the samples themselves, so the two
-            // bilinear reconstructions are exact translates of each other and
-            // the residual's fixed point is the true shift.
-            assert!(
-                (moved.x - 2.0).abs() < 0.01 && (moved.y + 1.0).abs() < 0.01,
-                "patch {index} moved by {moved:?}, expected (2, -1)"
-            );
-        }
-    }
-
-    /// A sub-pixel shift, up to the pattern's own radius.
-    ///
-    /// The tolerance is not the tracker's convergence — it converges to five
-    /// decimal places in three iterations — but the **bias of the fixed point
-    /// itself**. `interp` reconstructs the image bilinearly and `interpGrad`
-    /// differentiates that reconstruction by central differences
-    /// (`image.h:396-469`), so for a shift that is not a whole number of samples
-    /// the residual vanishes not at the true shift but a little beside it.
-    ///
-    /// The size of that displacement depends only on the **fractional** part of
-    /// the shift, not on its magnitude: on this texture an exactly integer shift
-    /// is recovered to `0.0000` px, a shift of 0.02 px to 0.0004, and a shift of
-    /// half a pixel to 0.035 on the median patch and 0.13 on the worst — the same
-    /// numbers whether the shift is 0.5 or 3.5 pixels. Shortening the texture's
-    /// wavelengths raises the floor and lengthening them makes the patches
-    /// ill-conditioned instead; basalt's C++ has the same property, because this
-    /// is its arithmetic. The gate is therefore the median, with a cap on the tail.
-    fn sub_pixel_shift_error(dx: f32, dy: f32) -> (f32, f32, usize, usize) {
-        let levels: usize = 3;
-        let scene: Fixture = fixture(dx, dy, levels);
-        let mut tracker: CpuPatchTracker<Pattern51> = tracker(scene.positions.len(), levels, 1);
-        let mut out: FlowResult = FlowResult::with_capacity(scene.positions.len());
-        tracker
-            .track(
-                &scene.prev,
-                &scene.next,
-                &scene.patches,
-                &scene.transforms,
-                &mut out,
-            )
-            .unwrap();
-
-        let mut errors: Vec<f32> = Vec::new();
-        for index in out.tracked() {
-            let index: usize = *index as usize;
-            let moved: Vector2<f32> = out.transform(index).translation - scene.positions.get(index);
-            errors.push((moved.x - dx).abs().max((moved.y - dy).abs()));
-        }
-        errors.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median: f32 = errors
-            .get(errors.len() / 2)
-            .copied()
-            .unwrap_or(f32::INFINITY);
-        let worst: f32 = errors.last().copied().unwrap_or(f32::INFINITY);
-        (median, worst, out.len(), scene.positions.len())
-    }
-
-    #[test]
-    fn a_sub_pixel_shift_is_recovered() {
-        let (median, worst, tracked, total) = sub_pixel_shift_error(0.6, 1.4);
-        assert_eq!(tracked, total);
-        assert!(median < 0.05, "median error {median}");
-        assert!(worst < 0.2, "worst error {worst}");
-    }
-
-    /// The forward-backward gate (`frame_to_frame_optical_flow.h:362-364`) is
-    /// what rejects a track onto an unrelated image.
-    #[test]
-    fn a_mismatched_pair_is_rejected() {
-        let levels: usize = 3;
-        let scene: Fixture = fixture(0.0, 0.0, levels);
-        // A different texture entirely, not a shift of the first.
-        let mut other: ImageU16 = ImageU16::zeros(160, 160).unwrap();
-        for y in 0..160 {
-            for x in 0..160 {
-                let value: f64 = 25_000.0
-                    + 9_000.0 * ((x as f64) * 0.61).cos()
-                    + 6_000.0 * ((y as f64) * 0.47).sin();
-                other.set(x, y, value as u16);
-            }
-        }
-        let unrelated: PyramidU16 = pyramid_of(&other, levels);
-
-        let mut tracker: CpuPatchTracker<Pattern51> = tracker(scene.positions.len(), levels, 1);
-        let mut out: FlowResult = FlowResult::with_capacity(scene.positions.len());
-        tracker
-            .track(
-                &scene.prev,
-                &unrelated,
-                &scene.patches,
-                &scene.transforms,
-                &mut out,
-            )
-            .unwrap();
-        assert!(
-            out.len() * 4 < scene.positions.len(),
-            "{} of {} tracks survived an unrelated image",
-            out.len(),
-            scene.positions.len()
-        );
-    }
-
-    #[test]
-    fn one_thread_and_four_threads_agree_exactly() {
-        let levels: usize = 3;
-        let scene: Fixture = fixture(1.3, -0.7, levels);
-
-        let mut single: FlowResult = FlowResult::with_capacity(scene.positions.len());
-        tracker(scene.positions.len(), levels, 1)
-            .track(
-                &scene.prev,
-                &scene.next,
-                &scene.patches,
-                &scene.transforms,
-                &mut single,
-            )
-            .unwrap();
-
-        let mut wide: FlowResult = FlowResult::with_capacity(scene.positions.len());
-        tracker(scene.positions.len(), levels, 4)
-            .track(
-                &scene.prev,
-                &scene.next,
-                &scene.patches,
-                &scene.transforms,
-                &mut wide,
-            )
-            .unwrap();
-
-        assert_eq!(single.tracked(), wide.tracked());
-        assert!(!single.is_empty());
-        for index in single.tracked() {
-            let index: usize = *index as usize;
-            assert_eq!(single.transform(index), wide.transform(index));
-        }
-    }
-
-    #[test]
-    fn two_runs_of_the_same_tracker_agree_exactly() {
-        let levels: usize = 3;
-        let scene: Fixture = fixture(0.9, 0.4, levels);
-        let mut tracker: CpuPatchTracker<Pattern51> = tracker(scene.positions.len(), levels, 4);
-
-        let mut first: FlowResult = FlowResult::with_capacity(scene.positions.len());
-        let mut second: FlowResult = FlowResult::with_capacity(scene.positions.len());
-        for out in [&mut first, &mut second] {
-            tracker
-                .track(
-                    &scene.prev,
-                    &scene.next,
-                    &scene.patches,
-                    &scene.transforms,
-                    out,
-                )
-                .unwrap();
-        }
-        assert_eq!(first.tracked(), second.tracked());
-        for index in first.tracked() {
-            let index: usize = *index as usize;
-            assert_eq!(first.transform(index), second.transform(index));
-        }
-    }
-
-    #[test]
-    fn more_keypoints_than_capacity_is_refused() {
-        let levels: usize = 1;
-        let scene: Fixture = fixture(0.0, 0.0, levels);
-        let mut tracker: CpuPatchTracker<Pattern51> = tracker(2, levels, 1);
-        let mut out: FlowResult = FlowResult::with_capacity(scene.positions.len());
-        let error = tracker
-            .track(
-                &scene.prev,
-                &scene.next,
-                &scene.patches,
-                &scene.transforms,
-                &mut out,
-            )
-            .unwrap_err();
-        assert_eq!(
-            error,
-            TrackerError::CapacityExceeded {
-                offered: scene.positions.len(),
-                capacity: 2
-            }
-        );
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(12))]
-
-        /// Any shift up to the pattern's radius (3.5 px for `Pattern51`) is
-        /// recovered, with the interpolation bias documented on
-        /// [`sub_pixel_shift_error`] as the tolerance.
-        #[test]
-        fn any_shift_within_the_pattern_radius_is_recovered(
-            dx in -3.5f32..3.5,
-            dy in -3.5f32..3.5,
-        ) {
-            let (median, worst, tracked, total) = sub_pixel_shift_error(dx, dy);
-            prop_assert!(tracked * 4 >= total * 3, "tracked {tracked} of {total}");
-            prop_assert!(median < 0.05, "median error {median} for ({dx}, {dy})");
-            prop_assert!(worst < 0.2, "worst error {worst} for ({dx}, {dy})");
-        }
-    }
-    /// A patch set shallower than the tracker used to index past the end of its
-    /// validity array; it is a typed error now (decision D32).
-    #[test]
-    fn a_shallow_patch_set_is_refused() {
-        for threads in [1, 4] {
-            let levels: usize = 3;
-            let scene: Fixture = fixture(0.0, 0.0, levels);
-            let mut shallow: PatchSoA<Pattern51> = PatchSoA::new(scene.positions.len(), 1).unwrap();
-            shallow.build(&scene.prev, &scene.positions, None).unwrap();
-
-            let mut tracker: CpuPatchTracker<Pattern51> =
-                tracker(scene.positions.len(), levels, threads);
-            let mut out: FlowResult = FlowResult::with_capacity(scene.positions.len());
-            let error = tracker
-                .track(
-                    &scene.prev,
-                    &scene.next,
-                    &shallow,
-                    &scene.transforms,
-                    &mut out,
-                )
-                .unwrap_err();
-            assert_eq!(
-                error,
-                TrackerError::LevelMismatch {
-                    what: "the patch set",
-                    expected: levels + 1,
-                    actual: 1
-                }
-            );
-        }
-    }
-
-    /// A pyramid shallower than the tracker is refused too, on either side.
-    #[test]
-    fn a_shallow_pyramid_is_refused() {
-        let levels: usize = 3;
-        let scene: Fixture = fixture(0.0, 0.0, levels);
-        let shallow: PyramidU16 = pyramid_of(&shifted_image(160, 160, 0.0, 0.0), 1);
-        let mut tracker: CpuPatchTracker<Pattern51> = tracker(scene.positions.len(), levels, 1);
-        let mut out: FlowResult = FlowResult::with_capacity(scene.positions.len());
-        let error = tracker
-            .track(
-                &shallow,
-                &scene.next,
-                &scene.patches,
-                &scene.transforms,
-                &mut out,
-            )
-            .unwrap_err();
-        assert_eq!(
-            error,
-            TrackerError::LevelMismatch {
-                what: "the previous pyramid",
-                expected: levels + 1,
-                actual: 2
-            }
-        );
-    }
-
-    /// A selection mask shorter than the positions used to index past its end.
-    #[test]
-    fn a_short_selection_mask_is_refused() {
-        let levels: usize = 1;
-        let scene: Fixture = fixture(0.0, 0.0, levels);
-        let mut patches: PatchSoA<Pattern51> =
-            PatchSoA::new(scene.positions.len(), levels + 1).unwrap();
-        let short: Vec<bool> = vec![true; 2];
-        let error = patches
-            .build(&scene.prev, &scene.positions, Some(&short))
-            .unwrap_err();
-        assert_eq!(
-            error,
-            TrackerError::LengthMismatch {
-                first_name: "positions",
-                first: scene.positions.len(),
-                second_name: "selection flags",
-                second: 2,
-            }
-        );
-    }
-
-    /// More positions than the patch storage holds is a typed error too.
-    #[test]
-    fn more_positions_than_patch_capacity_is_refused() {
-        let levels: usize = 1;
-        let scene: Fixture = fixture(0.0, 0.0, levels);
-        let mut patches: PatchSoA<Pattern51> = PatchSoA::new(2, levels + 1).unwrap();
-        let error = patches
-            .build(&scene.prev, &scene.positions, None)
-            .unwrap_err();
-        assert_eq!(
-            error,
-            TrackerError::CapacityExceeded {
-                offered: scene.positions.len(),
-                capacity: 2
-            }
-        );
-    }
-
-    /// The warp storage is six flat arrays; the round trip through them is exact.
-    /// A capacity past the ceiling is refused before a byte is allocated.
-    ///
-    /// `Vec::with_capacity(2^63)` panics with `capacity overflow`, and a panic in
-    /// here reaches Python as a `PanicException` that ordinary `except Exception`
-    /// handlers do not catch (decision D32). The ceiling is what makes the
-    /// request answerable instead.
-    #[test]
-    fn a_capacity_over_the_ceiling_is_refused() {
-        for capacity in [MAX_CAPACITY + 1, 1 << 40, usize::MAX / 2, usize::MAX] {
-            assert_eq!(
-                PatchSoA::<Pattern51>::new(capacity, 4).unwrap_err(),
-                TrackerError::CapacityTooLarge {
-                    capacity,
-                    ceiling: MAX_CAPACITY,
-                }
-            );
-            assert_eq!(
-                CpuPatchTracker::<Pattern51>::new(capacity, 4, 5, 0.04, WorkPool::new(1).unwrap())
-                    .unwrap_err(),
-                TrackerError::CapacityTooLarge {
-                    capacity,
-                    ceiling: MAX_CAPACITY,
-                }
-            );
-        }
-    }
-
-    /// A pyramid deeper than the ceiling is refused before the allocation.
-    ///
-    /// `optical_flow_levels = 10^12` sized a `Vec` of 6e17 floats. A `Vec` whose
-    /// length fits in a `usize` but whose bytes do not exist does not panic — the
-    /// allocator handler **aborts** the process, taking the Python interpreter
-    /// with it, so this is checked rather than attempted.
-    #[test]
-    fn more_levels_than_the_ceiling_is_refused() {
-        for num_levels in [MAX_LEVELS + 1, 1_000_000_000_001, usize::MAX] {
-            assert_eq!(
-                PatchSoA::<Pattern51>::new(3000, num_levels).unwrap_err(),
-                TrackerError::TooManyLevels {
-                    num_levels,
-                    ceiling: MAX_LEVELS,
-                }
-            );
-        }
-    }
-
-    /// The two ceilings bound every buffer product, in `usize` and in `u32`.
-    ///
-    /// This is what makes [`TrackerError::BufferShapeOverflow`] unreachable
-    /// today: it is the guard that fires if either ceiling is ever raised past
-    /// the point where a product wraps, and this test is the proof that it does
-    /// not have to fire now.
-    #[test]
-    fn the_ceilings_bound_every_buffer_product() {
-        let flags: usize = MAX_LEVELS.checked_mul(MAX_CAPACITY).unwrap();
-        let taps: usize = flags.checked_mul(Pattern51::SIZE).unwrap();
-        let jacobians: usize = taps.checked_mul(3).unwrap();
-        assert!(
-            jacobians <= u32::MAX as usize,
-            "{jacobians} elements would wrap a 32-bit usize"
-        );
-    }
-
-    /// The ceiling is well clear of anything the port runs.
-    #[test]
-    fn the_default_budget_is_far_under_the_ceiling() {
-        // `FrontendOptions::default().max_keypoints` is 3000.
-        const { assert!(MAX_CAPACITY > 300 * 3000) };
-        let patches: PatchSoA<Pattern51> = PatchSoA::new(3000, 4).unwrap();
-        assert_eq!(patches.capacity(), 3000);
-        assert_eq!(patches.num_levels(), 4);
-    }
-
-    #[test]
-    fn flow_transforms_round_trip_through_the_soa_arrays() {
-        let mut transforms: FlowTransforms = FlowTransforms::default();
-        let warps: [AffineCompact2f; 3] = [
-            AffineCompact2f::at(Vector2::new(1.0, 2.0)),
-            AffineCompact2f {
-                linear: Matrix2::new(0.5, -0.25, 0.25, 0.5),
-                translation: Vector2::new(-3.0, 4.5),
-            },
-            AffineCompact2f::identity(),
-        ];
-        for warp in &warps {
-            transforms.push(warp);
-        }
-        assert_eq!(transforms.len(), 3);
-        for (index, warp) in warps.iter().enumerate() {
-            assert_eq!(transforms.get(index), *warp);
-            assert_eq!(transforms.translation(index), warp.translation);
-            assert_eq!(transforms.coefficients(index), warp.coefficients());
-        }
-        // One coefficient of every warp is contiguous, which is the point.
-        assert_eq!(transforms.translations_x(), &[1.0, -3.0, 0.0]);
-        assert_eq!(transforms.translations_y(), &[2.0, 4.5, 0.0]);
-
-        transforms.remove(1);
-        assert_eq!(transforms.len(), 2);
-        assert_eq!(transforms.get(1), warps[2]);
-        transforms.insert(1, &warps[1]);
-        assert_eq!(transforms.get(1), warps[1]);
-        transforms.set(0, &warps[2]);
-        assert_eq!(transforms.get(0), warps[2]);
-    }
-    /// A second [`PatchTracker`] implementation, written only against the public
-    /// API, proving a backend outside this module can publish results.
-    ///
-    /// It reports every input as tracked, at the guess it was given, through
-    /// [`FlowResult::reset`], [`FlowResult::set_track`] and
-    /// [`FlowResult::finish`]; the bulk path through [`FlowResult::parts_mut`]
-    /// and [`FlowTransforms::coefficients_mut`] is what [`CpuPatchTracker`]
-    /// itself uses, so both halves of the writing surface are exercised.
-    #[derive(Debug, Default)]
-    struct EchoTracker {
-        capacity: usize,
-        num_levels: usize,
-    }
-
-    impl PatchTracker for EchoTracker {
-        type Pattern = Pattern51;
-        type Pyramid = PyramidU16;
-        type Patches = PatchSoA<Pattern51>;
-
-        fn capacity(&self) -> usize {
-            self.capacity
-        }
-
-        fn num_levels(&self) -> usize {
-            self.num_levels
-        }
-
-        fn make_patches(&self) -> Result<PatchSoA<Pattern51>, TrackerError> {
-            PatchSoA::new(self.capacity, self.num_levels)
-        }
-
-        fn track(
-            &mut self,
-            _prev: &PyramidU16,
-            _next: &PyramidU16,
-            patches: &PatchSoA<Pattern51>,
-            transforms_in: &FlowTransforms,
-            out: &mut FlowResult,
-        ) -> Result<(), TrackerError> {
-            let count: usize = transforms_in.len();
-            if count != patches.len() {
-                return Err(TrackerError::LengthMismatch {
-                    first_name: "patches",
-                    first: patches.len(),
-                    second_name: "transforms",
-                    second: count,
-                });
-            }
-            out.reset(count);
-            for index in 0..count {
-                out.set_track(index, true, &transforms_in.get(index));
-            }
-            // The bulk path over the same buffers, to prove it is reachable.
-            let (valid, transforms) = out.parts_mut();
-            let [m00, ..] = transforms.coefficients_mut();
-            assert_eq!(m00.len(), valid.len().max(m00.len()));
-            out.finish(count);
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn a_second_backend_can_publish_results_through_the_public_api() {
-        let levels: usize = 3;
-        let scene: Fixture = fixture(0.7, -1.2, levels);
-        let mut echo: EchoTracker = EchoTracker {
-            capacity: scene.positions.len(),
-            num_levels: levels + 1,
-        };
-        let mut out: FlowResult = FlowResult::default();
-        echo.track(
-            &scene.prev,
-            &scene.next,
-            &scene.patches,
-            &scene.transforms,
-            &mut out,
-        )
-        .unwrap();
-
-        assert_eq!(out.len(), scene.positions.len());
-        for index in out.tracked() {
-            let index: usize = *index as usize;
-            assert!(out.is_valid(index));
-            assert_eq!(out.transform(index), scene.transforms.get(index));
-        }
-    }
-
-    /// The write sequence is usable on its own: reset, set, finish.
-    #[test]
-    fn the_flow_result_writing_surface_compacts_what_it_is_given() {
-        let mut out: FlowResult = FlowResult::default();
-        out.reset(5);
-        assert!(out.is_empty());
-        out.set_track(1, true, &AffineCompact2f::at(Vector2::new(3.0, 4.0)));
-        out.set_track(4, true, &AffineCompact2f::at(Vector2::new(-1.0, 0.5)));
-        out.set_track(2, false, &AffineCompact2f::identity());
-        out.finish(5);
-
-        assert_eq!(out.tracked(), &[1, 4]);
-        assert_eq!(out.transform(1).translation, Vector2::new(3.0, 4.0));
-        assert_eq!(out.transform(4).translation, Vector2::new(-1.0, 0.5));
-        assert!(!out.is_valid(0));
-        assert!(!out.is_valid(2));
-
-        // A reset clears the survivors without dropping the allocation.
-        out.reset(3);
-        assert!(out.tracked().is_empty());
-        assert!(!out.is_valid(1));
-    }
 }
