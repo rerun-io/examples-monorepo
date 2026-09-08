@@ -97,6 +97,20 @@ pub enum VioError {
         /// Timestamp of the rejected sample.
         t_ns: i64,
     },
+    /// A sample carries a value that is not a number.
+    ///
+    /// basalt does not check: its samples come from a device driver. Here they
+    /// come from a caller, and one non-finite component reaches both
+    /// preintegrators and poisons every state after it with nothing to undo it —
+    /// so it is bad input, refused at the boundary (D32), not a NaN the
+    /// estimator is asked to survive.
+    #[error("imu sample at {t_ns} ns has a non-finite {field}")]
+    NonFiniteImu {
+        /// Timestamp of the rejected sample.
+        t_ns: i64,
+        /// Which of `gyro` and `accel` carries it.
+        field: &'static str,
+    },
     /// The frameset does not hold one image per configured camera.
     #[error("expected {expected} images, got {actual}")]
     CameraCountMismatch {
@@ -264,6 +278,14 @@ impl<S: lie::LieScalar> Vio<S> {
         self.last_stats.as_deref()
     }
 
+    /// The last inertial timestamp accepted, or `None` before the first sample.
+    ///
+    /// The frontier [`check_imu_sample`] measures against; a caller pushing a
+    /// batch reads it to check the whole batch before pushing any of it.
+    pub fn last_imu_t_ns(&self) -> Option<i64> {
+        self.last_imu_t_ns
+    }
+
     /// Add one IMU sample: `gyro` in rad/s, `accel` in m/s², both in the rig
     /// frame, uncalibrated (the static bias calibration is applied inside).
     ///
@@ -271,17 +293,10 @@ impl<S: lie::LieScalar> Vio<S> {
     ///
     /// # Errors
     ///
-    /// [`VioError::NonMonotonicImu`] on a duplicate or out-of-order timestamp,
-    /// never a silent reorder.
+    /// Whatever [`check_imu_sample`] refuses: a duplicate or out-of-order
+    /// timestamp, never a silent reorder, and a non-finite component.
     pub fn push_imu(&mut self, t_ns: i64, gyro: [f64; 3], accel: [f64; 3]) -> Result<(), VioError> {
-        if let Some(previous_t_ns) = self.last_imu_t_ns
-            && t_ns <= previous_t_ns
-        {
-            return Err(VioError::NonMonotonicImu {
-                previous_t_ns,
-                t_ns,
-            });
-        }
+        check_imu_sample(t_ns, &gyro, &accel, self.last_imu_t_ns)?;
         let sample: imu::ImuSample = imu::ImuSample {
             t_ns,
             gyro: Vector3::new(gyro[0], gyro[1], gyro[2]),
@@ -566,6 +581,42 @@ impl<S: lie::LieScalar> Vio<S> {
 ///
 /// [`VioError::CameraCountMismatch`], [`VioError::StrideTooSmall`],
 /// [`VioError::ImageSizeOverflow`] or [`VioError::ShortImage`].
+/// The rule every inertial sample meets, wherever it enters.
+///
+/// `previous_t_ns` is the frontier it must follow: [`Vio::last_imu_t_ns`] for
+/// the first sample of a batch, and the sample before it for the rest. It is a
+/// free function so a caller holding a whole batch can decide the batch before
+/// pushing any of it — a batch that pushed as it went would leave the samples
+/// before the bad one behind and move the frontier past them, and the caller
+/// could then neither retry the batch nor correct it.
+///
+/// # Errors
+///
+/// [`VioError::NonMonotonicImu`] on a timestamp that does not strictly follow
+/// the frontier, and [`VioError::NonFiniteImu`] on a component that is not a
+/// number.
+pub fn check_imu_sample(
+    t_ns: i64,
+    gyro: &[f64; 3],
+    accel: &[f64; 3],
+    previous_t_ns: Option<i64>,
+) -> Result<(), VioError> {
+    if let Some(previous_t_ns) = previous_t_ns
+        && t_ns <= previous_t_ns
+    {
+        return Err(VioError::NonMonotonicImu {
+            previous_t_ns,
+            t_ns,
+        });
+    }
+    for (field, values) in [("gyro", gyro), ("accel", accel)] {
+        if !values.iter().all(|value| value.is_finite()) {
+            return Err(VioError::NonFiniteImu { t_ns, field });
+        }
+    }
+    Ok(())
+}
+
 fn check_frameset(images: &[ImageView<'_>], camera_count: usize) -> Result<(), VioError> {
     if images.len() != camera_count {
         return Err(VioError::CameraCountMismatch {
@@ -725,6 +776,30 @@ mod tests {
                 t_ns: 5
             })
         );
+    }
+
+    /// A component that is not a number is bad input, not a value to integrate:
+    /// it reaches both preintegrators and there is nothing that undoes it (D32).
+    #[test]
+    fn a_non_finite_imu_sample_is_rejected() {
+        let mut vio: Vio<f32> = pipeline();
+        assert_eq!(
+            vio.push_imu(5, [0.0, f64::NAN, 0.0], [0.0; 3]),
+            Err(VioError::NonFiniteImu {
+                t_ns: 5,
+                field: "gyro"
+            })
+        );
+        assert_eq!(
+            vio.push_imu(5, [0.0; 3], [f64::NEG_INFINITY, 0.0, 0.0]),
+            Err(VioError::NonFiniteImu {
+                t_ns: 5,
+                field: "accel"
+            })
+        );
+        // The guard is the only thing that moved, so the same timestamp is
+        // still the one the next sample has to take.
+        assert!(vio.push_imu(5, [0.0; 3], [0.0; 3]).is_ok());
     }
 
     #[test]

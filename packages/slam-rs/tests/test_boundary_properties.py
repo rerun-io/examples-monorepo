@@ -77,7 +77,17 @@ def test_an_increasing_batch_is_accepted(pipeline: PipelineFactory, start: int, 
 
 @settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(start=starts, steps=gaps, index=positions)
-def test_a_batch_that_repeats_one_timestamp_is_rejected(pipeline: PipelineFactory, start: int, steps: list[int], index: int) -> None:
+def test_a_batch_that_repeats_one_timestamp_keeps_none_of_it(pipeline: PipelineFactory, start: int, steps: list[int], index: int) -> None:
+    """A rejected batch is rejected whole, wherever the bad sample sits in it.
+
+    The batch used to be pushed sample by sample and to return at the first
+    refusal, so the samples before it stayed and the frontier moved past them:
+    the caller could then neither retry the batch nor correct it, because its own
+    first samples had become too old. The state that says so is the frontier, and
+    what reads it is the same batch, corrected: it is accepted here from its very
+    first sample, which it could not be if anything of the rejected one had been
+    kept.
+    """
     times: NDArray[np.int64] = increasing(start, steps)  # at least two samples
     position: int = 1 + index % (len(times) - 1)
     broken: NDArray[np.int64] = times.copy()
@@ -85,6 +95,42 @@ def test_a_batch_that_repeats_one_timestamp_is_rejected(pipeline: PipelineFactor
     vio: _core.Vio = pipeline(2)
     with pytest.raises(ValueError, match="does not follow"):
         vio.push_imu_batch(broken, zeros(len(broken)), zeros(len(broken)))
+    vio.push_imu_batch(times, zeros(len(times)), zeros(len(times)))
+
+
+def test_a_rejected_batch_leaves_the_frontier_where_it_was(pipeline: PipelineFactory) -> None:
+    """Codex's case verbatim: ``[10, 20, 20, 30]`` raised at the duplicate and kept 10 and 20.
+
+    Retrying either of them then failed as older than a frontier the caller never
+    asked for, which is how the partial commit was found.
+    """
+    vio: _core.Vio = pipeline(2)
+    with pytest.raises(ValueError, match="does not follow"):
+        vio.push_imu_batch(np.array([10, 20, 20, 30], dtype=np.int64), zeros(4), zeros(4))
+    vio.push_imu(10, [0.0, 0.0, 0.0], [0.0, 0.0, 9.81])
+    vio.push_imu(20, [0.0, 0.0, 0.0], [0.0, 0.0, 9.81])
+
+
+@settings(max_examples=MAX_EXAMPLES, deadline=None)
+@given(start=starts, steps=gaps, index=positions, component=st.sampled_from([np.nan, np.inf, -np.inf]))
+def test_a_batch_carrying_a_value_that_is_not_a_number_keeps_none_of_it(
+    pipeline: PipelineFactory, start: int, steps: list[int], index: int, component: float
+) -> None:
+    """One non-finite component refuses the batch, and refuses it whole.
+
+    A NaN reaches both preintegrators and poisons every state after it with
+    nothing to undo it, so it is bad input rather than a value the estimator is
+    asked to survive (D32) — and being bad input, it has to be found before the
+    batch is pushed, or it takes the samples before it down with it.
+    """
+    times: NDArray[np.int64] = increasing(start, steps)
+    position: int = index % len(times)
+    gyro: NDArray[np.float64] = zeros(len(times))
+    gyro[position, index % 3] = component
+    vio: _core.Vio = pipeline(2)
+    with pytest.raises(ValueError, match="non-finite gyro"):
+        vio.push_imu_batch(times, gyro, zeros(len(times)))
+    vio.push_imu_batch(times, zeros(len(times)), zeros(len(times)))
 
 
 @settings(max_examples=MAX_EXAMPLES, deadline=None)

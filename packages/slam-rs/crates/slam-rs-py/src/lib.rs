@@ -155,6 +155,10 @@ impl Vio {
     }
 
     /// Add `n` IMU samples at once: `t_ns` is `int64[n]`, `gyro` and `accel` are `float64[n, 3]`.
+    ///
+    /// All or nothing: a batch the core would refuse anywhere is refused whole,
+    /// so the estimator is left where it was and the batch can be corrected and
+    /// pushed again.
     fn push_imu_batch(
         &mut self,
         py: Python<'_>,
@@ -174,6 +178,19 @@ impl Vio {
             )));
         }
         py.detach(|| {
+            // All or nothing. Pushing as it goes leaves the samples before a bad
+            // one in the estimator and the frontier past them, so the caller can
+            // neither retry the batch nor correct it: `[10, 20, 20, 30]` raised
+            // at the duplicate and then refused 10 and 20 as too old (Codex, S9
+            // review). The whole batch is decided first, each sample against the
+            // one before it and the frontier.
+            let mut previous_t_ns: Option<i64> = self.inner.last_imu_t_ns();
+            for ((&t, gyro_sample), accel_sample) in
+                times.iter().zip(gyro_rows.iter()).zip(accel_rows.iter())
+            {
+                slam_rs::check_imu_sample(t, gyro_sample, accel_sample, previous_t_ns)?;
+                previous_t_ns = Some(t);
+            }
             for ((&t, &gyro_sample), &accel_sample) in
                 times.iter().zip(gyro_rows.iter()).zip(accel_rows.iter())
             {

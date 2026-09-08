@@ -190,7 +190,11 @@ class Vio:
     @property
     def camera_count(self) -> int: ...
     def push_imu(self, t_ns: int, gyro: Sequence[float], accel: Sequence[float]) -> None:
-        """Add one uncalibrated IMU sample; raises ``ValueError`` unless ``t_ns`` follows the last one."""
+        """Add one uncalibrated IMU sample.
+
+        Raises ``ValueError`` unless ``t_ns`` strictly follows the last sample
+        and every component is finite.
+        """
 
     def push_imu_batch(
         self,
@@ -198,7 +202,12 @@ class Vio:
         gyro: Float64[ndarray, "n_samples 3"],
         accel: Float64[ndarray, "n_samples 3"],
     ) -> None:
-        """Add a batch of samples; raises ``ValueError`` unless the timestamps follow the last one."""
+        """Add a batch of samples, all or nothing.
+
+        Raises what :meth:`push_imu` raises, for any sample of the batch, and
+        keeps none of it when it does: the estimator is left where it was, so the
+        batch can be corrected and pushed again.
+        """
 
     def track(self, t_ns: int, images: Sequence[UInt8[ndarray, "h w"]]) -> VioResult:
         """Process one frameset of ``camera_count`` C-contiguous ``(h, w)`` uint8 images.
