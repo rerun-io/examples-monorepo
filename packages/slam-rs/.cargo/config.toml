@@ -1,0 +1,6 @@
+# opt-level=3 crashes rustc's LLVM (BranchProbabilityInfo) while compiling faer
+# on aarch64. The override predates faer leaving the graph — no crate here
+# depends on it any more — and is kept until it is re-tested on an aarch64 host,
+# because kornia-rs, which is still a dependency, carries the same workaround.
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-Copt-level=2"]
