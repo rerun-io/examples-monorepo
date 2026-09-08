@@ -180,6 +180,19 @@ class VioStage:
             assert frame is not None, f"frameset {held.t_ns} tracked without the keypoints it tracked on"
             self.logger.log(result, snapshot, frame, self.lockstep.elapsed_ms[-1])
 
+    def refuse_lost_framesets(self) -> None:
+        """Stop the run when a frameset never got the inertial samples that cover it.
+
+        Every frameset either produced a pose or is still held (D17); one still
+        held at the end of a segment is a lost frameset, not a count to print,
+        and both tools that drive this stage end on the same rule.
+
+        Raises:
+            SystemExit: If any frameset is still held.
+        """
+        if self.pending:
+            raise SystemExit(f"{len(self.pending)} framesets never got the inertial samples that cover them")
+
     def summary(self) -> str:
         """One line on what the stage did, for the end of a replay.
 
@@ -334,10 +347,7 @@ def main(config: Config) -> None:
         # The per-frameset segments show where the run had got to; these show
         # where it went, at every cursor and for one copy of each path.
         stage.logger.log_complete_paths()
-        if stage.pending:
-            # Every frameset either produced a pose or is still held; a held one
-            # at the end of the segment is a lost frameset, not a count to print.
-            raise SystemExit(f"{len(stage.pending)} framesets never got the inertial samples that cover them")
+        stage.refuse_lost_framesets()
 
         # Exports carry the absolute device clock, the one every basalt CSV and
         # every gt.csv sidecar uses. Writing video_time here would produce a file

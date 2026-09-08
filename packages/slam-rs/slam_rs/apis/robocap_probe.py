@@ -54,9 +54,8 @@ from scipy.spatial.transform import Rotation
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from slam_rs import _core
-from slam_rs.apis.replay import log_imu
+from slam_rs.apis.replay import JPEG_QUALITY, VioStage, _log_calibration, log_imu
 from slam_rs.catalog_feed import (
-    RIG_ENTITY,
     TIMELINE,
     CameraCalib,
     Frameset,
@@ -69,7 +68,7 @@ from slam_rs.frontend_log import camera_entity
 from slam_rs.reference import ImuParameters, ReferenceManifest, RobocapSession, load_manifest
 from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_trajectory, write_trajectory
-from slam_rs.vio_log import VioLogger, log_rig, vio_blueprint
+from slam_rs.vio_log import VioLogger, vio_blueprint
 
 FRAMESET_TOLERANCE_NS: int = 1_000_000
 """How far a camera's frame may sit from the anchor camera's and still be the same capture.
@@ -78,8 +77,6 @@ basalt's ``dataset_io_robocap.cpp`` value. The rig's six cameras are triggered
 together but time-stamped per device, so the spread inside one frameset is tens
 of microseconds and the gap between framesets is 33 ms.
 """
-JPEG_QUALITY: int = 85
-"""Quality of the logged frames; a 640x360 grayscale frame lands around 18 kB."""
 
 
 @dataclass(slots=True)
@@ -220,15 +217,14 @@ def main(config: Config) -> None:
         )
         print(f"camera offset {offset_ns} ns applied to the frames; capture_start_time_ns {feed.capture_start_time_ns} NOT added (video_time is the device clock)")
 
-        rr.log("/", rr.ViewCoordinates.RUB, static=True)
-        log_rig(feed.cameras, RIG_ENTITY, pinhole_child="/pinhole")
+        _log_calibration(feed.cameras)
         rr.send_blueprint(vio_blueprint(feed.cameras))
-        lockstep: Lockstep = Lockstep(vio=_core.Vio(calibration, flow_config))
-        logger: VioLogger = VioLogger(
-            cameras=feed.cameras,
-            ground_truth=empty_trajectory(),
-            cpp=cpp,
-            frame_t_ns=feed.frame_t_ns,
+        # The same drive `replay --stage vio` runs: the D17 hold, the D32
+        # invariant asserts and the rows at the held frameset's own time are one
+        # contract, not two copies of one.
+        stage: VioStage = VioStage(
+            lockstep=Lockstep(vio=_core.Vio(calibration, flow_config)),
+            logger=VioLogger(cameras=feed.cameras, ground_truth=empty_trajectory(), cpp=cpp, frame_t_ns=feed.frame_t_ns),
         )
 
         replayed: int = 0
@@ -243,16 +239,11 @@ def main(config: Config) -> None:
             if config.log_frames:
                 for camera, image in zip(feed.cameras, frameset.images, strict=True):
                     rr.log(f"{camera_entity(camera.index)}/image", rr.Image(image, color_model="L").compress(jpeg_quality=JPEG_QUALITY))
-            for held, result in lockstep.push(frameset):
-                rr.set_time(TIMELINE, duration=np.timedelta64(held.t_ns, "ns"))
-                snapshot: _core.VioSnapshot | None = lockstep.vio.snapshot()
-                frame: _core.FlowFrame | None = lockstep.vio.flow_frame()
-                assert snapshot is not None, f"frameset {held.t_ns} tracked without a window snapshot"
-                assert frame is not None, f"frameset {held.t_ns} tracked without the keypoints it tracked on"
-                logger.log(result, snapshot, frame, lockstep.elapsed_ms[-1])
+            stage.run(frameset)
         elapsed: float = time.monotonic() - started
-        logger.log_complete_paths()
+        stage.logger.log_complete_paths()
 
+        lockstep: Lockstep = stage.lockstep
         tracked: int = len(lockstep.elapsed_ms)
         print(
             f"{replayed} framesets fed, {tracked} tracked, {lockstep.retries} refused and retried, "
@@ -271,17 +262,18 @@ def main(config: Config) -> None:
                 f"(median {np.median(lockstep.elapsed_ms):.1f}, max {np.max(lockstep.elapsed_ms):.1f}), "
                 f"{1e-3 * float(np.sum(lockstep.elapsed_ms)):.1f} s of the wall"
             )
-        if lockstep.pending:
-            raise SystemExit(f"{len(lockstep.pending)} framesets never got the inertial samples that cover them")
+        estimate: Trajectory = stage.logger.estimated()
 
-        estimate: Trajectory = logger.estimated()
-        write_trajectory(output_csv, estimate)
-        print(f"{len(estimate)} tracked poses -> {output_csv} (the device clock, as basalt's CSVs carry it)")
-        if len(estimate) == 0:
-            print("no ATE: the estimator reported no tracked pose")
-            return
-        print(f"vs basalt C++, {coverage(cpp, estimate):.1%} of its span covered")
-        agreement: AteResult = ate(estimate, cpp)
-        print(agreement.summary())
-        first_pose: Float64[ndarray, " 3"] = estimate.position_m[0]
-        print(f"first estimated pose at {int(estimate.t_ns[0])} ns, position {first_pose.round(4).tolist()}")
+    # The feed's own in-process catalog server is what the `with` holds, and
+    # nothing below reads a frameset: the export and the ATE happen with it shut.
+    stage.refuse_lost_framesets()
+    write_trajectory(output_csv, estimate)
+    print(f"{len(estimate)} tracked poses -> {output_csv} (the device clock, as basalt's CSVs carry it)")
+    if len(estimate) == 0:
+        print("no ATE: the estimator reported no tracked pose")
+        return
+    print(f"vs basalt C++, {coverage(cpp, estimate):.1%} of its span covered")
+    agreement: AteResult = ate(estimate, cpp)
+    print(agreement.summary())
+    first_pose: Float64[ndarray, " 3"] = estimate.position_m[0]
+    print(f"first estimated pose at {int(estimate.t_ns[0])} ns, position {first_pose.round(4).tolist()}")
