@@ -41,7 +41,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -112,7 +112,7 @@ fn observations(flow: &OracleFlow) -> Arc<FlowObservations> {
 /// Nothing is asserted about the numbers: this is the measurement the report
 /// quotes, and a long clip has to finish to produce it. The integer decisions
 /// are counted the same way — the first break is what matters, not a panic at it.
-fn compare<S: LieScalar>(oracle: &Oracle, run: &OracleRun, clip: &PathBuf, out: Option<PathBuf>) {
+fn compare<S: LieScalar>(oracle: &Oracle, run: &OracleRun, clip: &Path, out: Option<PathBuf>) {
     let described: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(clip.join("clip.json")).unwrap()).unwrap();
     let dataset: String = described["dataset_name"].as_str().unwrap().to_string();
