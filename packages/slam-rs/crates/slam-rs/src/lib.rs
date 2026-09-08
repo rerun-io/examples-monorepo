@@ -6,12 +6,18 @@
 //! bindings in `slam-rs-py`; `slam-rs-cli` is a placeholder binary whose only
 //! working subcommand is `version`.
 
+pub mod ba_base;
 pub mod calib;
 pub mod camera;
 pub mod config;
+pub mod eigen;
 pub mod frontend;
 pub mod image;
+pub mod imu;
+pub mod landmark;
 pub mod lie;
+pub mod linearize;
+pub mod marg;
 pub mod pyramid;
 pub mod types;
 
