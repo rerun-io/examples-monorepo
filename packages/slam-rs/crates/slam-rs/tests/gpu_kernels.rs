@@ -55,7 +55,7 @@ fn the_gpu_pyramid_is_bit_exact_with_the_cpu() {
     let mut cpu: PyramidU16 = cpu_builder.allocate(960, 960, LEVELS).unwrap();
     cpu_builder.build(0, &image, &mut cpu).unwrap();
 
-    let client = gpu_client();
+    let client = gpu_client().unwrap();
     let mut gpu_builder = GpuPyramidBuilder::new(client, &[[0.0, 0.0]]);
     let mut gpu = gpu_builder.allocate(960, 960, LEVELS).unwrap();
     gpu_builder.build(0, &image, &mut gpu).unwrap();
@@ -104,7 +104,7 @@ fn the_gpu_pyramid_is_bit_exact_with_the_cpu() {
 /// is refused the way every other unbuildable one is.
 #[test]
 fn a_pyramid_of_one_level_is_refused_rather_than_allocated_empty() {
-    let builder = GpuPyramidBuilder::new(gpu_client(), &[[0.0, 0.0]]);
+    let builder = GpuPyramidBuilder::new(gpu_client().unwrap(), &[[0.0, 0.0]]);
     let refused = builder.allocate(64, 48, 0);
     assert!(
         matches!(
@@ -133,7 +133,7 @@ fn a_strided_frame_uploads_its_rows_and_not_its_padding() {
     let mut cpu: PyramidU16 = cpu_builder.allocate(64, 48, LEVELS).unwrap();
     cpu_builder.build(0, &strided, &mut cpu).unwrap();
 
-    let mut gpu_builder = GpuPyramidBuilder::new(gpu_client(), &[[0.0, 0.0]]);
+    let mut gpu_builder = GpuPyramidBuilder::new(gpu_client().unwrap(), &[[0.0, 0.0]]);
     let mut gpu = gpu_builder.allocate(64, 48, LEVELS).unwrap();
     gpu_builder.build(0, &strided, &mut gpu).unwrap();
 
@@ -153,7 +153,7 @@ fn a_reused_pyramid_carries_only_the_newest_frame() {
     let first: ImageU16 = textured_image(128, 96, 0.0, 0.0);
     let second: ImageU16 = textured_image(128, 96, 7.0, -3.0);
 
-    let mut gpu_builder = GpuPyramidBuilder::new(gpu_client(), &[[0.0, 0.0]]);
+    let mut gpu_builder = GpuPyramidBuilder::new(gpu_client().unwrap(), &[[0.0, 0.0]]);
     let mut gpu = gpu_builder.allocate(128, 96, LEVELS).unwrap();
     gpu_builder.build(0, &first, &mut gpu).unwrap();
     gpu_builder.build(0, &second, &mut gpu).unwrap();
@@ -182,7 +182,7 @@ fn the_gpu_patch_build_matches_the_cpu_within_tolerance() {
     let mut cpu: PyramidU16 = cpu_builder.allocate(512, 512, LEVELS).unwrap();
     cpu_builder.build(0, &image, &mut cpu).unwrap();
 
-    let client = gpu_client();
+    let client = gpu_client().unwrap();
     let mut gpu_builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
     let mut gpu = gpu_builder.allocate(512, 512, LEVELS).unwrap();
     gpu_builder.build(0, &image, &mut gpu).unwrap();
@@ -288,7 +288,7 @@ fn the_gpu_tracker_recovers_the_same_shift_as_the_cpu() {
         .unwrap();
 
     // ── the GPU lane
-    let client = gpu_client();
+    let client = gpu_client().unwrap();
     let mut gpu_builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
     let mut gpu_prev = gpu_builder.allocate(512, 512, LEVELS).unwrap();
     let mut gpu_next = gpu_builder.allocate(512, 512, LEVELS).unwrap();
@@ -440,7 +440,7 @@ fn the_gpu_corner_scan_is_exact_against_kornia() {
     for (width, height) in [(960usize, 240usize), (512, 192)] {
         let image: ImageU16 = cornered_image(width, height);
         let mut cpu: CpuCornerScan = CpuCornerScan::default();
-        let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client());
+        let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap());
         cpu.scan(0, &image).unwrap();
         gpu.scan(0, &image).unwrap();
 
@@ -456,7 +456,7 @@ fn a_reused_corner_scan_carries_only_the_newest_frame() {
     let first: ImageU16 = cornered_image(512, 128);
     let second: ImageU16 = ImageU16::zeros(512, 128).unwrap();
 
-    let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client());
+    let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap());
     gpu.scan(0, &first).unwrap();
     assert!(
         !gpu.band(3, 44, 5).unwrap().is_empty(),
@@ -482,7 +482,7 @@ fn a_reused_corner_scan_carries_only_the_newest_frame() {
 #[test]
 fn the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing() {
     let frames: [ImageU16; 2] = [cornered_image(960, 240), cornered_image(512, 192)];
-    let client = gpu_client();
+    let client = gpu_client().unwrap();
 
     // The lane the frontend runs: one builder, one scanner, one client, the
     // level-0 table between them.
@@ -570,7 +570,7 @@ fn the_per_frame_path_holds_the_pool_flat() {
     /// anywhere under a quarter of a gigabyte green.
     const RESERVED_CEILING: u64 = 96 * 1024 * 1024;
 
-    let client = gpu_client();
+    let client = gpu_client().unwrap();
     let mut builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
     let mut scanner: GpuCornerScan<_> = GpuCornerScan::new(client.clone());
     scanner.share_level0(builder.level0_table());
@@ -631,5 +631,146 @@ fn the_per_frame_path_holds_the_pool_flat() {
 /// host, the portable lane without `cubecl-wgpu/spirv` fails exactly here.
 #[test]
 fn the_runtime_stores_every_element_width_the_kernels_bind() {
-    slam_rs::gpu::probe_storage(&gpu_client()).unwrap();
+    slam_rs::gpu::probe_storage(&gpu_client().unwrap()).unwrap();
+}
+
+/// A host with no GPU is a typed error, in a subprocess that really has none.
+///
+/// The failure the review reproduced: with `CUDA_VISIBLE_DEVICES=` a one-frame
+/// GPU replay raised `pyo3_runtime.PanicException: ... RecvError`, because
+/// CubeCL unwraps its own bring-up on its worker thread and the process's
+/// documented contract is a `ValueError` and never a Rust panic (decision D32).
+/// It cannot be tested in-process — a client is a per-process singleton and the
+/// environment is read once — so each case re-runs *this test binary* with one
+/// variable changed and reads what the child printed.
+///
+/// The child asserts, so a child that stopped reaching the probe fails rather
+/// than passing quietly; the parent additionally refuses any child whose output
+/// carries the word `panicked`.
+mod absent_gpu {
+    use std::process::{Command, Output};
+
+    /// Names the child answers to, so the parent can tell it which case to run.
+    const CASE: &str = "SLAM_RS_ABSENT_GPU_CASE";
+
+    /// Run this test binary again as the child of `case`, with `variable` set.
+    ///
+    /// `--test-threads=1` and `--nocapture` so the child's `println!` reaches
+    /// the parent whatever the harness would otherwise do with it.
+    fn child(test: &str, case: &str, variable: (&str, &str)) -> String {
+        let exe: std::path::PathBuf = std::env::current_exe().unwrap();
+        let output: Output = Command::new(exe)
+            .args(["--exact", test, "--nocapture", "--test-threads=1"])
+            .env(CASE, case)
+            .env(variable.0, variable.1)
+            .output()
+            .unwrap();
+        let text: String = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "the {case} child failed:\n{text}");
+        // `panicked at` is rustc's own header and nothing else prints it; the
+        // word alone appears in `ClientPanicked`'s message, which is the typed
+        // error one of these cases is asserting it got.
+        assert!(
+            !text.contains("panicked at"),
+            "the {case} child panicked instead of returning an error:\n{text}"
+        );
+        text
+    }
+
+    /// The case this process is the child of, or `None` if it is the parent.
+    fn case() -> Option<String> {
+        std::env::var(CASE).ok()
+    }
+
+    /// Why this host has no client — `unwrap_err` cannot say it, because a
+    /// `ComputeClient` is not `Debug`.
+    fn client_error() -> slam_rs::gpu::GpuError {
+        match slam_rs::gpu::gpu_client() {
+            Err(error) => error,
+            Ok(_) => panic!("this child was supposed to have no GPU, and it built a client"),
+        }
+    }
+
+    /// `CUDA_VISIBLE_DEVICES=`: the driver is healthy and no device is visible.
+    #[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
+    #[test]
+    fn a_cuda_host_with_no_visible_device_is_a_typed_error() {
+        const NAME: &str = "absent_gpu::a_cuda_host_with_no_visible_device_is_a_typed_error";
+        if case().is_some() {
+            let error: slam_rs::gpu::GpuError = client_error();
+            assert_eq!(
+                error,
+                slam_rs::gpu::GpuError::NoDevice {
+                    runtime: "CUDA",
+                    count: 0
+                }
+            );
+            println!("CHILD {error}");
+            return;
+        }
+        let text: String = child(NAME, "no-device", ("CUDA_VISIBLE_DEVICES", ""));
+        assert!(
+            text.contains("CHILD the CUDA driver reports 0 devices"),
+            "{text}"
+        );
+    }
+
+    /// No Vulkan ICD: the loader enumerates nothing and wgpu has no adapter.
+    #[cfg(feature = "gpu-wgpu")]
+    #[test]
+    fn a_wgpu_host_with_no_adapter_is_a_typed_error() {
+        const NAME: &str = "absent_gpu::a_wgpu_host_with_no_adapter_is_a_typed_error";
+        if case().is_some() {
+            let error: slam_rs::gpu::GpuError = client_error();
+            assert_eq!(
+                error,
+                slam_rs::gpu::GpuError::NoAdapter { backend: "vulkan" }
+            );
+            println!("CHILD {error}");
+            return;
+        }
+        let text: String = child(
+            NAME,
+            "no-adapter",
+            ("VK_DRIVER_FILES", "/nonexistent/no-such-icd.json"),
+        );
+        assert!(
+            text.contains("CHILD wgpu found no vulkan adapter"),
+            "{text}"
+        );
+    }
+
+    /// `CUBECL_WGPU_DEFAULT_DEVICE` naming an index the host does not have.
+    ///
+    /// The case the adapter probe cannot see: cubecl-wgpu selects by
+    /// enumeration here rather than by power preference, and panics on its own
+    /// thread. It is what the `catch_unwind` in `gpu_client` is for, and it is
+    /// the only test that exercises it.
+    #[cfg(feature = "gpu-wgpu")]
+    #[test]
+    fn a_wgpu_device_index_past_the_end_is_a_typed_error() {
+        const NAME: &str = "absent_gpu::a_wgpu_device_index_past_the_end_is_a_typed_error";
+        if case().is_some() {
+            let error: slam_rs::gpu::GpuError = client_error();
+            assert_eq!(
+                error,
+                slam_rs::gpu::GpuError::ClientPanicked { runtime: "wgpu" }
+            );
+            println!("CHILD {error}");
+            return;
+        }
+        let text: String = child(
+            NAME,
+            "bad-index",
+            ("CUBECL_WGPU_DEFAULT_DEVICE", "DiscreteGpu(99)"),
+        );
+        assert!(
+            text.contains("CHILD building the wgpu client panicked"),
+            "{text}"
+        );
+    }
 }

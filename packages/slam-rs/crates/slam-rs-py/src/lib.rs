@@ -124,7 +124,11 @@ impl Vio {
     /// CubeCL on this host's GPU instead of the CPU port (decision D21). The
     /// default is the CPU, which is what every accuracy reference was produced
     /// on; a build without the `gpu` cargo feature refuses `gpu=True` rather
-    /// than ignoring it.
+    /// than ignoring it, and so does a build that has the feature on a host
+    /// with no usable GPU — a missing driver library, a driver that will not
+    /// initialise, no visible device, no adapter — each a `ValueError` naming
+    /// what is absent rather than the `PanicException` CubeCL's own unwrapped
+    /// bring-up produces (decision D32).
     #[new]
     #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None, gpu = false))]
     fn new(

@@ -53,6 +53,18 @@ cubecl = "0.10"
 cubecl-cuda = "0.10"
 cubecl-wgpu = { version = "0.10", features = ["spirv"] }
 
+# What the availability probe reads before any CubeCL client is constructed:
+# CubeCL 0.10 unwraps its own bring-up, so the only way an absent GPU becomes a
+# typed error rather than a panic is to ask the runtimes themselves first. Both
+# are already in the graph — `cudarc` under `cubecl-cuda`, `wgpu` under
+# `cubecl-wgpu` — and both are declared here with a feature subset of what those
+# two ask for, so naming them adds no crate and changes no compiled feature set.
+# `libloading` is what the probe dlopens with, which is what cudarc does before
+# it panics.
+cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "fallback-dynamic-loading"] }
+libloading = "0.9"
+wgpu = { version = "29", default-features = false }
+
 # The estimator must never panic on data: errors are typed and returned.
 [workspace.lints.clippy]
 unwrap_used = "deny"

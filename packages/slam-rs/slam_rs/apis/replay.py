@@ -101,7 +101,8 @@ class Config:
 
     The default is the CPU port, which is what every reference number was
     produced on. A core built without the ``gpu`` cargo feature refuses this
-    rather than quietly running on the CPU.
+    rather than quietly running on the CPU, and so does a host with no usable
+    GPU: the run stops with one sentence naming what is absent.
     """
 
 
@@ -350,10 +351,16 @@ def main(config: Config) -> None:
             rr.send_blueprint(frontend_blueprint(feed.cameras))
         elif config.stage == "vio":
             truth: Trajectory | None = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
+            # Everything this constructor refuses is the caller's own request —
+            # a configuration this port does not run, or ``--gpu`` on a host
+            # with no driver, no device or no adapter — so it is one sentence
+            # and a non-zero exit rather than a traceback through the feed.
+            try:
+                vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment), gpu=config.gpu)
+            except ValueError as error:
+                raise SystemExit(f"replay: {error}") from error
             stage = VioStage(
-                lockstep=Lockstep(
-                    vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment), gpu=config.gpu)
-                ),
+                lockstep=Lockstep(vio=vio),
                 logger=VioLogger(
                     cameras=feed.cameras,
                     ground_truth=truth if truth is not None else empty_trajectory(),

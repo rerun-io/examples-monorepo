@@ -24,16 +24,18 @@ workspace = true
 gpu-core = ["dep:cubecl"]
 # The CubeCL GPU frontend on the NVIDIA lane. Off by default: the CPU port is
 # what the fleet installs and what the pixi lock covers.
-gpu = ["gpu-core", "dep:cubecl-cuda"]
+gpu = ["gpu-core", "dep:cubecl-cuda", "dep:cudarc", "dep:libloading"]
 # The same kernels through wgpu (Vulkan / Metal / DX12), for the Spark, the
 # Pi 5 and the cap. Only the client line differs; `slam-rs-wgpu-test` — not a
 # `cargo check` — is what keeps that true.
-gpu-wgpu = ["gpu-core", "dep:cubecl-wgpu"]
+gpu-wgpu = ["gpu-core", "dep:cubecl-wgpu", "dep:wgpu"]
 
 [dependencies]
 cubecl = { workspace = true, optional = true }
 cubecl-cuda = { workspace = true, optional = true }
 cubecl-wgpu = { workspace = true, optional = true }
+cudarc = { workspace = true, optional = true }
+libloading = { workspace = true, optional = true }
 kornia-image = { workspace = true }
 kornia-imgproc = { workspace = true }
 log = { workspace = true }
@@ -42,6 +44,7 @@ rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+wgpu = { workspace = true, optional = true }
 
 [dev-dependencies]
 approx = { workspace = true }

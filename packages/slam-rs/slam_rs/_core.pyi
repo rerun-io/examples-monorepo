@@ -193,7 +193,12 @@ class Vio:
         CubeCL on this host's GPU instead of the CPU port. The default is the
         CPU, which is what every accuracy reference was produced on. A core
         built without the ``gpu`` cargo feature raises ``ValueError`` for
-        ``gpu=True`` rather than quietly running on the CPU.
+        ``gpu=True`` rather than quietly running on the CPU, and so does a host
+        that has the feature and no GPU to run it on: a missing driver library,
+        a driver that will not initialise, no visible device and no graphics
+        adapter each raise ``ValueError`` naming what is absent. None of them is
+        a ``PanicException``, which is what CubeCL's own unwrapped bring-up
+        would otherwise produce.
 
         Raises ``ValueError`` on everything :class:`OpticalFlow` refuses, and on
         a config asking for a path this port does not have:
