@@ -6,7 +6,8 @@ they arrive, before the frameset that brought them, and produces the pose a run
 that had the samples all along would have produced. ``_core`` proves that for
 one frameset (``test_import.py``); what is proved here is that
 :class:`slam_rs.tracking.Lockstep` — the one loop both drivers use — really does
-hold it, and that the hold cannot grow.
+hold it, that the hold cannot grow, and that a run whose framesets were never
+covered still says so.
 
 The rig and the pipeline are :mod:`conftest` fixtures, which pytest injects; the
 factory aliases below are declared here rather than imported from another test
@@ -16,22 +17,29 @@ module in this directory therefore stands alone.
 
 import hashlib
 from collections.abc import Callable
+from pathlib import Path
 from typing import TypeAlias
 
 import numpy as np
 import pytest
+import rerun as rr
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
 from slam_rs import _core
-from slam_rs.catalog_feed import Frameset, ImuStream
+from slam_rs.apis.replay import VioStage
+from slam_rs.catalog_feed import CameraCalib, Frameset, ImuStream
 from slam_rs.tracking import MAX_HELD_FRAMESETS, Lockstep
+from slam_rs.trajectory import empty_trajectory
+from slam_rs.vio_log import VioLogger
 
 FRAME_PERIOD_NS: int = 33_000_000
 """One 30 Hz frameset to the next."""
 IMU_PERIOD_NS: int = 1_000_000
 """Synthetic IMU period: 1 kHz."""
 
+CameraFactory: TypeAlias = Callable[[int, float], CameraCalib]
+"""One camera of the synthetic rig, by rig index and baseline in metres."""
 PipelineFactory: TypeAlias = Callable[[int], _core.Vio]
 """The whole pipeline on a rig of the given camera count."""
 TextureFactory: TypeAlias = Callable[[int, int], UInt8[ndarray, "h w"]]
@@ -116,3 +124,31 @@ def test_the_hold_never_grows_past_one_refused_frameset(pipeline: PipelineFactor
         assert list(lockstep.push(frameset(step, texture, nothing))) == []
     with pytest.raises(ValueError, match=f"frameset {MAX_HELD_FRAMESETS * FRAME_PERIOD_NS} takes the hold to 3 framesets"):
         list(lockstep.push(frameset(MAX_HELD_FRAMESETS, texture, nothing)))
+
+
+def test_a_run_that_never_tracked_still_reports_what_it_held(
+    pipeline: PipelineFactory, camera: CameraFactory, texture: TextureFactory, tmp_path: Path
+) -> None:
+    """The run that most needs the diagnostic is the one that used to suppress it.
+
+    A replay whose framesets are never covered has no timings, so a summary
+    guarded on them printed nothing at all — and the held framesets are what the
+    reader needed to see.
+    """
+    rr.init("slam-rs-tracking-test", recording_id="never-tracked")
+    rr.save(tmp_path / "never-tracked.rrd")
+    stage: VioStage = VioStage(
+        lockstep=Lockstep(vio=pipeline(2)),
+        logger=VioLogger(
+            cameras=(camera(0, 0.0), camera(1, 0.1)),
+            ground_truth=empty_trajectory(),
+            cpp=empty_trajectory(),
+            frame_t_ns=np.zeros(1, dtype=np.int64),
+        ),
+    )
+    stage.run(frameset(0, texture, np.zeros(0, dtype=np.int64)))
+    rr.disconnect()
+
+    assert not stage.elapsed_ms
+    assert "nothing tracked" in stage.summary()
+    assert "NEVER COVERED BY THE IMU at [0]" in stage.summary()

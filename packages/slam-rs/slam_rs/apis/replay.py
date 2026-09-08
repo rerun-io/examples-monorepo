@@ -127,6 +127,8 @@ class FrontendStage:
 
     def summary(self) -> str:
         """One line on what the stage did, for the end of a replay."""
+        if not self.elapsed_ms:
+            return "frontend: no frameset reached it"
         return (
             f"frontend: {self.flow.last_keypoint_id} keypoint ids handed out, "
             f"{np.mean(self.elapsed_ms):.1f} ms per frameset "
@@ -177,10 +179,17 @@ class VioStage:
             self.logger.log(result, snapshot, frame, self.lockstep.elapsed_ms[-1])
 
     def summary(self) -> str:
-        """One line on what the stage did, for the end of a replay."""
+        """One line on what the stage did, for the end of a replay.
+
+        The empty case is this stage's own to report: the run that tracked
+        nothing is the one whose held framesets most need naming, and a caller
+        that guarded the call on ``elapsed_ms`` suppressed exactly that line.
+        """
         unresolved: str = ""
         if self.pending:
             unresolved = f", {len(self.pending)} FRAMESETS NEVER COVERED BY THE IMU at {[held.t_ns for held in self.pending]}"
+        if not self.elapsed_ms:
+            return f"vio: {self.lockstep.imu_samples} IMU samples pushed, nothing tracked{unresolved}"
         return (
             f"vio: {self.lockstep.imu_samples} IMU samples pushed, {len(self.elapsed_ms)} tracked, "
             f"{self.lockstep.retries} retries, {np.mean(self.elapsed_ms):.1f} ms per frameset "
@@ -251,7 +260,7 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
 
     elapsed: float = time.monotonic() - started
     print(f"{replayed} framesets in {elapsed:.1f} s ({replayed / max(elapsed, 1e-9):.1f} fps)")
-    if stage is not None and stage.elapsed_ms:
+    if stage is not None:
         print(stage.summary())
     return replayed
 
