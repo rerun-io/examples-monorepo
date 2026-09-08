@@ -71,10 +71,15 @@ use crate::image::ImageU16;
 use crate::pyramid::{Pyramid, PyramidU16};
 
 /// The increment guard at `frame_to_frame_optical_flow.h:425`.
-const MAX_INCREMENT_INFINITY_NORM: f32 = 1e6;
+///
+/// `pub(crate)` so the GPU lane's kernels alias it rather than re-declaring the
+/// number: the two lanes have no compiler coupling otherwise.
+pub(crate) const MAX_INCREMENT_INFINITY_NORM: f32 = 1e6;
 
 /// `const int filter_margin = 2` (`frame_to_frame_optical_flow.h:430`).
-const FILTER_MARGIN: f32 = 2.0;
+///
+/// `pub(crate)` for the same reason as [`MAX_INCREMENT_INFINITY_NORM`].
+pub(crate) const FILTER_MARGIN: f32 = 2.0;
 
 /// The most keypoints a tracker may be sized for.
 ///

@@ -94,13 +94,21 @@ pub const TILE_W: u32 = 32;
 /// Cube height on the pyramid kernel.
 pub const TILE_H: u32 = 8;
 
+// The three numbers below are the CPU lane's own, aliased rather than
+// re-declared: a kernel that drifted from its reference by a constant would
+// still compile, and `FILTER_LANES` below already shows the shape.
 /// `border` on every patch tap, `PATCH_BORDER` (`patch.h:87`).
-const PATCH_BORDER: f32 = 2.0;
+const PATCH_BORDER: f32 = crate::frontend::patch::PATCH_BORDER;
 /// `const int filter_margin = 2` (`frame_to_frame_optical_flow.h:430`).
-const FILTER_MARGIN: f32 = 2.0;
+const FILTER_MARGIN: f32 = crate::frontend::tracker::FILTER_MARGIN;
 /// The increment guard at `frame_to_frame_optical_flow.h:425`.
-const MAX_INCREMENT_INFINITY_NORM: f32 = 1e6;
-/// `Sophus::Constants<float>::epsilon()`.
+const MAX_INCREMENT_INFINITY_NORM: f32 = crate::frontend::tracker::MAX_INCREMENT_INFINITY_NORM;
+/// `Sophus::Constants<float>::epsilon()`, which is what
+/// `<f32 as LieScalar>::sophus_epsilon()` returns.
+///
+/// Spelled out because `sophus_epsilon` is a trait **method** and a `const` here
+/// cannot call one; an associated `const` on `LieScalar` would let this alias it
+/// the way the three above do.
 const SOPHUS_EPSILON: f32 = 1e-5;
 
 // ── the pyramid ──────────────────────────────────────────────────────────────
