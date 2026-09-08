@@ -756,7 +756,7 @@ fn the_gpu_corner_scan_is_exact_against_kornia() {
     for (width, height) in [(960usize, 240usize), (512, 192)] {
         let image: ImageU16 = cornered_image(width, height);
         let mut cpu: CpuCornerScan = CpuCornerScan::default();
-        let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap());
+        let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
         cpu.scan(0, &image).unwrap();
         gpu.scan(0, &image).unwrap();
 
@@ -769,7 +769,7 @@ fn the_gpu_corner_scan_is_exact_against_kornia() {
 /// lane returns, rather than caching an empty one and reporting success (D32).
 #[test]
 fn a_gpu_band_before_a_scan_is_refused() {
-    let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap());
+    let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
     assert_eq!(
         gpu.band(band_at(0, 0, 0, 32, 5)).unwrap_err(),
         DetectError::NotScanned
@@ -783,7 +783,7 @@ fn a_reused_corner_scan_carries_only_the_newest_frame() {
     let first: ImageU16 = cornered_image(512, 128);
     let second: ImageU16 = ImageU16::zeros(512, 128).unwrap();
 
-    let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap());
+    let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
     gpu.scan(0, &first).unwrap();
     assert!(
         !gpu.band(band_at(0, 0, 3, 44, 5)).unwrap().is_empty(),
@@ -814,10 +814,10 @@ fn the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing() {
     // The lane the frontend runs: one builder, one scanner, one client, the
     // level-0 table between them.
     let mut builder = GpuPyramidBuilder::new(client.clone(), &[[0.0, 0.0]]);
-    let mut shared: GpuCornerScan<_> = GpuCornerScan::new(client.clone());
+    let mut shared: GpuCornerScan<_> = GpuCornerScan::new(client.clone()).unwrap();
     shared.share_level0(builder.level0_table());
     // The lane before this change: the scanner uploads its own copy.
-    let mut alone: GpuCornerScan<_> = GpuCornerScan::new(client);
+    let mut alone: GpuCornerScan<_> = GpuCornerScan::new(client).unwrap();
 
     let mut pyramids: Vec<_> = frames
         .iter()
@@ -936,7 +936,7 @@ fn the_whole_gpu_path_holds_the_pool_flat() {
 
     let client = gpu_client().unwrap();
     let mut builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
-    let mut scanner: GpuCornerScan<_> = GpuCornerScan::new(client.clone());
+    let mut scanner: GpuCornerScan<_> = GpuCornerScan::new(client.clone()).unwrap();
     scanner.share_level0(builder.level0_table());
     let mut tracker: GpuPatchTracker<Pattern51, _> = GpuPatchTracker::new(
         client.clone(),

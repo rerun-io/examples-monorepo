@@ -105,28 +105,44 @@ pub struct GpuCornerScan<R: Runtime> {
 
 impl<R: Runtime> GpuCornerScan<R> {
     /// A scanner on `client`, with the ring uploaded.
-    pub fn new(client: ComputeClient<R>) -> Self {
-        let mut ring: Vec<u32> = Vec::with_capacity(32);
-        for offsets in [FAST_RING_ROW, FAST_RING_COLUMN] {
-            for offset in offsets {
-                ring.push((offset + RING_BIAS as i32) as u32);
-            }
-        }
-        Self {
-            ring: client.create_from_slice(u32::as_bytes(&ring)),
-            level0: Level0Table::default(),
-            uploads: 0,
-            packed: Vec::new(),
-            buffers: Vec::new(),
-            buffer_allocations: 0,
-            kept: None,
-            mask: None,
-            words: 0,
-            width: 0,
-            height: 0,
-            bands: BandCache::default(),
-            client,
-        }
+    ///
+    /// Fallible because the upload is a device operation like any other:
+    /// `create_from_slice` **panics** inside CubeCL's own client when the worker
+    /// submission fails, so a constructor with no error channel is a path from a
+    /// dying device to an unwind through the caller (decision D32).
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError::DeviceLost`] when the upload panics instead of returning.
+    pub fn new(client: ComputeClient<R>) -> Result<Self, GpuError> {
+        guarded(
+            GpuError::DeviceLost {
+                what: "corner scan setup",
+            },
+            || {
+                let mut ring: Vec<u32> = Vec::with_capacity(32);
+                for offsets in [FAST_RING_ROW, FAST_RING_COLUMN] {
+                    for offset in offsets {
+                        ring.push((offset + RING_BIAS as i32) as u32);
+                    }
+                }
+                Ok(Self {
+                    ring: client.create_from_slice(u32::as_bytes(&ring)),
+                    level0: Level0Table::default(),
+                    uploads: 0,
+                    packed: Vec::new(),
+                    buffers: Vec::new(),
+                    buffer_allocations: 0,
+                    kept: None,
+                    mask: None,
+                    words: 0,
+                    width: 0,
+                    height: 0,
+                    bands: BandCache::default(),
+                    client,
+                })
+            },
+        )
     }
 
     /// Read level 0 out of `table` rather than uploading the frame.

@@ -372,35 +372,44 @@ impl<R: Runtime> Pyramid for GpuPyramid<R> {
     /// The one synchronising call on a [`GpuPyramid`], and nothing on the
     /// per-frame path uses it: it exists because the trait's forward half is how
     /// generic code — and the tolerance tests — read a pyramid a GPU backend
-    /// owns.
+    /// owns. Being off the per-frame path is also why it carries its own guard
+    /// rather than sitting inside a stage's: a download panics rather than
+    /// returning when the device is gone (decision D32).
     fn copy_level_into(&self, level: usize, out: &mut ImageU16) -> Result<(), PyramidError> {
-        let Some(&geometry) = self.levels.get(level) else {
-            return Err(PyramidError::NoSuchLevel {
-                level,
-                num_levels: self.levels.len(),
-            });
-        };
-        let (handle, length) = self.buffer_of(&geometry);
-        let bytes = self
-            .client
-            .read_one(handle.clone())
-            .map_err(|error| super::read_failed("a pyramid level", &error))?;
-        let expected: usize = length * size_of::<u16>();
-        if bytes.len() != expected {
-            return Err(PyramidError::ShortDeviceRead {
-                level,
-                actual: bytes.len(),
-                expected,
-            });
-        }
-        let pixels: &[u16] = u16::from_bytes(&bytes);
-        *out = ImageU16::zeros(geometry.width, geometry.height)?;
-        for y in 0..geometry.height {
-            let start: usize = geometry.base + y * geometry.width;
-            out.row_mut(y)
-                .copy_from_slice(&pixels[start..start + geometry.width]);
-        }
-        Ok(())
+        guarded(
+            GpuError::DeviceLost {
+                what: "a pyramid level read",
+            },
+            || {
+                let Some(&geometry) = self.levels.get(level) else {
+                    return Err(PyramidError::NoSuchLevel {
+                        level,
+                        num_levels: self.levels.len(),
+                    });
+                };
+                let (handle, length) = self.buffer_of(&geometry);
+                let bytes = self
+                    .client
+                    .read_one(handle.clone())
+                    .map_err(|error| super::read_failed("a pyramid level", &error))?;
+                let expected: usize = length * size_of::<u16>();
+                if bytes.len() != expected {
+                    return Err(PyramidError::ShortDeviceRead {
+                        level,
+                        actual: bytes.len(),
+                        expected,
+                    });
+                }
+                let pixels: &[u16] = u16::from_bytes(&bytes);
+                *out = ImageU16::zeros(geometry.width, geometry.height)?;
+                for y in 0..geometry.height {
+                    let start: usize = geometry.base + y * geometry.width;
+                    out.row_mut(y)
+                        .copy_from_slice(&pixels[start..start + geometry.width]);
+                }
+                Ok(())
+            },
+        )
     }
 }
 

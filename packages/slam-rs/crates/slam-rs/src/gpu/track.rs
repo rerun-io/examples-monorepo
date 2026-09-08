@@ -56,7 +56,10 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
     /// # Errors
     ///
     /// As [`GpuPatches::new`]: every buffer product is checked against the
-    /// `usize` range and the two ceilings before anything is allocated.
+    /// `usize` range and the two ceilings before anything is allocated, and the
+    /// three allocations run inside the module's guard, so a device that dies
+    /// under them is [`super::GpuError::DeviceLost`] and not an unwind through
+    /// the caller (decision D32).
     pub fn new(
         client: ComputeClient<R>,
         capacity: usize,
@@ -64,22 +67,29 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
         max_iterations: usize,
         max_recovered_dist2: f32,
     ) -> Result<Self, TrackerError> {
-        let backward_patches: GpuPatches<P, R> =
-            GpuPatches::new(client.clone(), capacity, num_levels)?;
-        let transform_bytes: usize = TRANSFORM_RUNS * capacity * size_of::<f32>();
-        Ok(Self {
-            capacity,
-            num_levels,
-            max_iterations,
-            max_recovered_dist2,
-            backward_patches,
-            backward: client.empty(transform_bytes),
-            result: client.empty(transform_bytes),
-            staging: vec![0.0; TRANSFORM_RUNS * capacity],
-            offset_x: vec![0.0; capacity],
-            offset_y: vec![0.0; capacity],
-            client,
-        })
+        guarded(
+            GpuError::DeviceLost {
+                what: "tracker allocation",
+            },
+            || {
+                let backward_patches: GpuPatches<P, R> =
+                    GpuPatches::new(client.clone(), capacity, num_levels)?;
+                let transform_bytes: usize = TRANSFORM_RUNS * capacity * size_of::<f32>();
+                Ok(Self {
+                    capacity,
+                    num_levels,
+                    max_iterations,
+                    max_recovered_dist2,
+                    backward_patches,
+                    backward: client.empty(transform_bytes),
+                    result: client.empty(transform_bytes),
+                    staging: vec![0.0; TRANSFORM_RUNS * capacity],
+                    offset_x: vec![0.0; capacity],
+                    offset_y: vec![0.0; capacity],
+                    client,
+                })
+            },
+        )
     }
 }
 
