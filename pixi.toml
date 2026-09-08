@@ -2505,6 +2505,54 @@ simplecv = { path = "packages/simplecv", editable = true }
 # that misses this line leaves the Mac a release behind with no gate to say so.
 rerun-sdk = { version = "==0.37.0", extras = ["catalog"] } # pin-bump: hold
 
+# ── The CubeCL GPU lane ──────────────────────────────────────────────────
+# `cargo build --features gpu` needs a CUDA runtime at *run* time, not a
+# toolkit: `cubecl-cuda` compiles kernels through NVRTC and the code it
+# generates `#include`s `cuda_runtime.h`. Without both packages the client
+# still constructs, every launch "succeeds", and every download comes back as
+# a buffer of zeros — a worker-thread panic that reaches the caller as data
+# (round 1's report; decision D32 is why the tolerance tests are the guard).
+#
+# linux-64 only, and no named CUDA platform: `cuda-version 13.0` only
+# *constrains* `__cuda >= 13`, so nothing here needs the virtual package at
+# solve time, and every other lane stays out of the CUDA solve entirely. The
+# cargo feature is still off by default, so `slam-rs` and `slam-rs-dev` are
+# untouched — this environment is what runs the GPU gates.
+[feature.slam-rs-gpu]
+platforms = ["linux-64"]
+
+[feature.slam-rs-gpu.dependencies]
+cuda-nvrtc = "13.0.*"
+cuda-cudart-dev = "13.0.*"
+
+[feature.slam-rs-gpu.activation.env]
+# `CUDA_PATH` is where cudarc looks for the headers NVRTC compiles against;
+# `LD_LIBRARY_PATH` is how `libnvrtc.so` is found, because cudarc dlopens it.
+CUDA_PATH = "${CONDA_PREFIX}/targets/x86_64-linux"
+LD_LIBRARY_PATH = "${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
+[feature.slam-rs-gpu.tasks.slam-rs-gpu-build]
+cmd = "cargo build --release -p slam-rs-py --features gpu && cp target/release/lib_core.so slam_rs/_core.so"
+cwd = "packages/slam-rs"
+
+[feature.slam-rs-gpu.tasks.slam-rs-gpu-test]
+cmd = "cargo test --workspace --features slam-rs/gpu"
+cwd = "packages/slam-rs"
+
+[feature.slam-rs-gpu.tasks.slam-rs-gpu-clippy]
+cmd = "cargo clippy --workspace --all-targets --features slam-rs/gpu -- -D warnings"
+cwd = "packages/slam-rs"
+
+# The portable lane the Spark, the Pi 5 and the cap will run. Kept honest here
+# so a kernel that only compiles on NVRTC cannot land.
+[feature.slam-rs-gpu.tasks.slam-rs-wgpu-check]
+cmd = "cargo check -p slam-rs --features gpu-wgpu"
+cwd = "packages/slam-rs"
+
+[feature.slam-rs-gpu.tasks.slam-rs-wgpu-test]
+cmd = "cargo test -p slam-rs --features gpu-wgpu --test gpu_kernels"
+cwd = "packages/slam-rs"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # mamma — streaming multiview body capture (causal MAMMA pipeline)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3310,6 +3358,19 @@ slam-rs-dev = { features = [
     "slam-rs",
     "dev",
 ], solve-group = "slam-rs", no-default-feature = true }
+slam-rs-gpu = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "slam-rs",
+    "slam-rs-gpu",
+], solve-group = "slam-rs-gpu", no-default-feature = true }
+slam-rs-gpu-dev = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "slam-rs",
+    "slam-rs-gpu",
+    "dev",
+], solve-group = "slam-rs-gpu", no-default-feature = true }
 slam-rs-osx = { features = [
     "slam-rs",
     "slam-rs-osx",
