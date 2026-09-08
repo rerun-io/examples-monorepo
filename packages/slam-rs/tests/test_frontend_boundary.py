@@ -18,6 +18,7 @@ from typing import TypeAlias, cast
 
 import numpy as np
 import pytest
+from fixture_types import CameraFactory, FrontendFactory, PipelineFactory, TextureFactory
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 from jaxtyping import Float32, Int64, UInt8
@@ -35,10 +36,6 @@ camera_counts = st.integers(min_value=2, max_value=3)
 wrong_sizes = st.integers(min_value=1, max_value=400)
 """Frame sides on both sides of the synthetic rig's, so cropped and enlarged frames are both generated."""
 
-CameraFactory: TypeAlias = Callable[[int, float], CameraCalib]
-FrontendFactory: TypeAlias = Callable[[int], _core.OpticalFlow]
-PipelineFactory: TypeAlias = Callable[[int], _core.Vio]
-TextureFactory: TypeAlias = Callable[[int, int], UInt8[ndarray, "h w"]]
 EntryPoint: TypeAlias = Callable[[int, list[UInt8[ndarray, "h w"]]], object]
 """One frameset into a boundary call: ``(t_ns, images)``."""
 EntryFactory: TypeAlias = Callable[[int], EntryPoint]

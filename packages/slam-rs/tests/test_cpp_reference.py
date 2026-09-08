@@ -21,29 +21,13 @@ import pytest
 
 from slam_rs import reference_bundle
 from slam_rs.catalog_feed import Frameset, LocalSegment, open_segment
-from slam_rs.reference import CppAte, ReferenceManifest, ReferenceSegment, load_manifest
+from slam_rs.reference import SMOKE_SEGMENTS, CppAte, ReferenceManifest, ReferenceSegment
 from slam_rs.trajectory import AteResult, Trajectory, ate, read_trajectory
 
-SMOKE_SEGMENTS: tuple[str, ...] = (
-    "msd-index__MIO_others__MIO10_short_2_panorama",
-    "msd-g2__MGO_others__MGO09_short_1_updown",
-)
-"""The two segments whose trajectory, pixel digests and ground truth are all committed."""
 RMSE_TOLERANCE_CM: float = 0.005
 """Rounding slack when reproducing a published centimetre figure."""
 WALL_TOLERANCE_S: float = 0.001
 """Rounding slack on the manifest's copy of the run's wall time, which is recorded to the millisecond."""
-
-
-@pytest.fixture(scope="module")
-def manifest() -> ReferenceManifest:
-    """The checked-in reference manifest."""
-    return load_manifest()
-
-
-def _committed(manifest: ReferenceManifest, segment: ReferenceSegment, relative: Path) -> Path:
-    """A fixture path resolved against the package root."""
-    return manifest.package_root / relative
 
 
 def _assert_reproduces(result: AteResult, expected: CppAte, segment_id: str) -> None:
@@ -57,7 +41,7 @@ def _assert_reproduces(result: AteResult, expected: CppAte, segment_id: str) -> 
 
 def test_every_segment_has_a_reference_run(manifest: ReferenceManifest) -> None:
     for segment in manifest.segments:
-        run: Path = _committed(manifest, segment, segment.reference.run_json)
+        run: Path = manifest.package_root / segment.reference.run_json
         assert run.is_file(), segment.segment_id
         # The manifest's own claims must match the run it points at.
         recorded: dict[str, Any] = json.loads(run.read_text())
@@ -94,7 +78,7 @@ def test_the_vendored_configs_are_the_ones_the_cpp_runs_used(manifest: Reference
     compared: int = 0
     for segment in manifest.segments:
         vendored: dict[str, Any] = json.loads(manifest.vio_config_text(segment.dataset_name))["value0"]
-        recorded: dict[str, Any] = json.loads(_committed(manifest, segment, segment.reference.run_json).read_text())["vio_config"]
+        recorded: dict[str, Any] = json.loads((manifest.package_root / segment.reference.run_json).read_text())["vio_config"]
         # The run names the config by its path inside the fork; the manifest names
         # this repository's copy of that same file.
         assert Path(recorded["path"]) == Path(segment.reference.vio_config), segment.segment_id
@@ -127,11 +111,11 @@ def test_the_committed_run_manifests_carry_the_bundles_configuration(manifest: R
     """
     compared: list[str] = []
     for segment in manifest.segments:
-        resolved: reference_bundle.BundleFile = reference_bundle.resolve(segment.segment_id, "run.json")
+        resolved: reference_bundle.BundleFile = reference_bundle.resolve(segment.segment_id, reference_bundle.RUN_JSON)
         if not resolved.available:
             continue
         original: dict[str, Any] = json.loads(resolved.path.read_text())["vio_config"]
-        committed: dict[str, Any] = json.loads(_committed(manifest, segment, segment.reference.run_json).read_text())["vio_config"]
+        committed: dict[str, Any] = json.loads((manifest.package_root / segment.reference.run_json).read_text())["vio_config"]
         assert original["json"] == committed["json"], segment.segment_id
         assert original["path"] == committed["path"], segment.segment_id
         compared.append(segment.segment_id)
@@ -145,9 +129,9 @@ def test_only_the_long_tier_is_bundle_only(manifest: ReferenceManifest) -> None:
     for segment in manifest.segments:
         if segment.reference.bundle_only:
             # Committed instead: a README saying where the trajectory lives.
-            assert (_committed(manifest, segment, segment.reference.run_json).parent / "README").is_file()
+            assert ((manifest.package_root / segment.reference.run_json).parent / "README").is_file()
         else:
-            assert _committed(manifest, segment, segment.reference.trajectory_csv).is_file()
+            assert (manifest.package_root / segment.reference.trajectory_csv).is_file()
 
 
 def test_the_gate_policy_matches_what_basalt_can_actually_do(manifest: ReferenceManifest) -> None:
@@ -186,8 +170,8 @@ def test_the_smoke_tier_numbers_reproduce_offline(manifest: ReferenceManifest, s
     """The published smoke figures, from committed files only: no NAS, no catalog."""
     segment: ReferenceSegment = manifest.by_id(segment_id)
     assert segment.reference.gt_csv_fixture is not None
-    estimate: Trajectory = read_trajectory(_committed(manifest, segment, segment.reference.trajectory_csv))
-    truth: Trajectory = read_trajectory(_committed(manifest, segment, segment.reference.gt_csv_fixture))
+    estimate: Trajectory = read_trajectory(manifest.package_root / segment.reference.trajectory_csv)
+    truth: Trajectory = read_trajectory(manifest.package_root / segment.reference.gt_csv_fixture)
     assert len(truth) == segment.gt.num_poses
     _assert_reproduces(ate(estimate, truth), segment.reference.expected_cpp_ate, segment_id)
 
@@ -196,7 +180,7 @@ def test_the_committed_gt_fixtures_are_the_sidecars_the_runs_used(manifest: Refe
     """The committed ``gt.csv`` copies name the same NAS path the C++ runs read."""
     for segment_id in SMOKE_SEGMENTS:
         segment: ReferenceSegment = manifest.by_id(segment_id)
-        recorded: dict[str, Any] = json.loads(_committed(manifest, segment, segment.reference.run_json).read_text())
+        recorded: dict[str, Any] = json.loads((manifest.package_root / segment.reference.run_json).read_text())
         assert Path(recorded["ate_vs_gt"]["gt_csv"]) == segment.gt_csv
 
 
@@ -205,7 +189,7 @@ def test_the_committed_frame_digests_cover_every_camera_frame(manifest: Referenc
     """One digest per (frameset, camera), on the absolute clock, and nothing repeated."""
     segment: ReferenceSegment = manifest.by_id(segment_id)
     assert segment.reference.frames_sha256 is not None
-    digests: dict[tuple[int, int], str] = _read_frame_digests(_committed(manifest, segment, segment.reference.frames_sha256))
+    digests: dict[tuple[int, int], str] = _read_frame_digests(manifest.package_root / segment.reference.frames_sha256)
     assert len(digests) == segment.capture.num_frames * segment.capture.num_cameras
     timestamps: set[int] = {t_ns for t_ns, _ in digests}
     assert len(timestamps) == segment.capture.num_frames
@@ -216,7 +200,7 @@ def test_the_committed_frame_digests_cover_every_camera_frame(manifest: Referenc
     assert max(timestamps) <= segment.capture.start_time_ns + segment.capture.duration_ns
     assert {camera for _, camera in digests} == set(range(segment.capture.num_cameras))
     assert all(len(digest) == 64 for digest in digests.values())
-    recorded: dict[str, Any] = json.loads(_committed(manifest, segment, segment.reference.run_json).read_text())
+    recorded: dict[str, Any] = json.loads((manifest.package_root / segment.reference.run_json).read_text())
     assert recorded["outputs"]["frame_hashes"] == len(digests)
 
 
@@ -234,7 +218,7 @@ def _read_frame_digests(path: Path) -> dict[tuple[int, int], str]:
 def test_the_long_tier_trajectories_resolve_through_the_bundle(manifest: ReferenceManifest) -> None:
     """Present or not, the resolution has to name a path and a reason."""
     for segment in manifest.in_tier("long"):
-        resolved = reference_bundle.resolve(segment.segment_id, "basalt_traj.csv")
+        resolved = reference_bundle.resolve(segment.segment_id, reference_bundle.TRAJECTORY_CSV)
         assert resolved.path.name == "basalt_traj.csv"
         assert resolved.path.parent.name == segment.segment_id
         if not resolved.available:
@@ -242,7 +226,7 @@ def test_the_long_tier_trajectories_resolve_through_the_bundle(manifest: Referen
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("segment_id", [segment_id for segment_id in SMOKE_SEGMENTS])
+@pytest.mark.parametrize("segment_id", SMOKE_SEGMENTS)
 def test_a_redecode_reproduces_the_cpp_pixel_digests(manifest: ReferenceManifest, segment_id: str) -> None:
     """The feed hands the core byte-identical pixels to what the C++ reference consumed.
 
@@ -253,14 +237,14 @@ def test_a_redecode_reproduces_the_cpp_pixel_digests(manifest: ReferenceManifest
     if not segment.base_path.is_file():
         pytest.skip(f"{segment.base_path} is not mounted on this host")
     assert segment.reference.frames_sha256 is not None
-    expected: dict[tuple[int, int], str] = _read_frame_digests(_committed(manifest, segment, segment.reference.frames_sha256))
+    expected: dict[tuple[int, int], str] = _read_frame_digests(manifest.package_root / segment.reference.frames_sha256)
 
     compared: int = 0
     frameset: Frameset
     with open_segment(LocalSegment(base_rrd=segment.base_path), segment.imu) as feed:
         offset: int = feed.capture_start_time_ns
         for frameset in feed.framesets():
-            for camera, digest in zip(feed.cameras, frameset.image_sha256, strict=True):
+            for camera, digest in zip(feed.cameras, frameset.image_digests(), strict=True):
                 key: tuple[int, int] = (frameset.t_ns + offset, camera.index)
                 assert key in expected, f"{segment_id}: the reference has no frame at {key}"
                 assert digest == expected[key], f"{segment_id}: pixels differ at {key}"
@@ -274,12 +258,12 @@ def test_every_committed_trajectory_reproduces_its_published_ate(manifest: Refer
     checked: list[str] = []
     for segment in manifest.segments:
         if segment.reference.bundle_only:
-            resolved = reference_bundle.resolve(segment.segment_id, "basalt_traj.csv")
+            resolved = reference_bundle.resolve(segment.segment_id, reference_bundle.TRAJECTORY_CSV)
             if not resolved.available:
                 continue
             trajectory_path: Path = resolved.path
         else:
-            trajectory_path = _committed(manifest, segment, segment.reference.trajectory_csv)
+            trajectory_path = manifest.package_root / segment.reference.trajectory_csv
         if not segment.gt_csv.is_file():
             continue
         estimate: Trajectory = read_trajectory(trajectory_path)
@@ -298,7 +282,7 @@ def test_the_committed_trajectories_match_their_recorded_digest(manifest: Refere
     for segment in manifest.segments:
         if segment.reference.bundle_only:
             continue
-        path: Path = _committed(manifest, segment, segment.reference.trajectory_csv)
+        path: Path = manifest.package_root / segment.reference.trajectory_csv
         assert hashlib.sha256(path.read_bytes()).hexdigest() == segment.reference.trajectory_sha256, segment.segment_id
 
 
@@ -310,7 +294,7 @@ def test_the_committed_gt_fixture_matches_the_nas_sidecar(manifest: ReferenceMan
         assert segment.reference.gt_csv_fixture is not None
         if not segment.gt_csv.is_file():
             pytest.skip(f"{segment.gt_csv} is not mounted on this host")
-        committed: Trajectory = read_trajectory(_committed(manifest, segment, segment.reference.gt_csv_fixture))
+        committed: Trajectory = read_trajectory(manifest.package_root / segment.reference.gt_csv_fixture)
         on_nas: Trajectory = read_trajectory(segment.gt_csv)
         np.testing.assert_array_equal(committed.t_ns, on_nas.t_ns)
         np.testing.assert_array_equal(committed.position_m, on_nas.position_m)

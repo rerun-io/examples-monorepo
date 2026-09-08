@@ -159,7 +159,11 @@ def gate_clips(manifest: ReferenceManifest) -> list[GatedClip]:
 
 @dataclass(slots=True, frozen=True)
 class References:
-    """One segment's two reference trajectories, or why it cannot be gated here."""
+    """One segment's two reference trajectories, both on the absolute device clock.
+
+    Why a segment *cannot* be gated is :func:`missing_reference`'s answer, given
+    before either trajectory is read.
+    """
 
     cpp: Trajectory
     """The basalt C++ trajectory, on the absolute device clock."""
@@ -306,11 +310,11 @@ def clip_failures(clip: GatedClip, run: SegmentRun, available: References, again
     )
     # Speed is a clause of every policy: a run that does not diverge but takes
     # three times as long has not matched the thing it is a port of (D58, D59).
-    allowed_s: float = SPEED_TOLERANCE * cpp_wall_s(clip, run)
+    cpp_s: float = cpp_wall_s(clip, run)
+    allowed_s: float = SPEED_TOLERANCE * cpp_s
     if run.wall_s > allowed_s:
         failures.append(
-            f"{run.wall_s:.2f} s against the C++'s {cpp_wall_s(clip, run):.2f} s, "
-            f"gate is {SPEED_TOLERANCE}x = {allowed_s:.2f} s ({run.wall_s / cpp_wall_s(clip, run):.2f}x)"
+            f"{run.wall_s:.2f} s against the C++'s {cpp_s:.2f} s, gate is {SPEED_TOLERANCE}x = {allowed_s:.2f} s ({run.wall_s / cpp_s:.2f}x)"
         )
     return failures
 

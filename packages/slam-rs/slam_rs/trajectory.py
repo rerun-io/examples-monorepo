@@ -26,8 +26,6 @@ ASSOCIATION_TOLERANCE_NS: int = 5_000_000
 """Largest timestamp gap a reference pose and a candidate pose may be associated across."""
 MIN_ASSOCIATED_POSES: int = 10
 """Fewest associations the gate accepts before it calls the comparison meaningless."""
-COUNT_SLACK: float = 0.02
-"""Largest relative pose-count difference the gate tolerates."""
 CSV_HEADER: str = "#timestamp [ns], p_x, p_y, p_z, q_w, q_x, q_y, q_z"
 """Header basalt's own writer emits, and the one :func:`write_trajectory` reproduces."""
 
@@ -249,9 +247,13 @@ def ate(estimate: Trajectory, reference: Trajectory, tolerance_ns: int = ASSOCIA
     The alignment fixes the scale at 1: a visual-inertial estimator is metric, so
     a fitted scale would hide a real error.
 
-    Whether the result is meaningful is :func:`passes_gate`'s question, not this
-    one's — a two-pose comparison returns a number here and fails the gate there,
-    exactly as the fork orders it.
+    Whether the result is meaningful is the gate's question, not this one's: a
+    two-pose comparison returns a number here and
+    :func:`slam_rs.reference.d60_failures` rejects it there. This needs an
+    association and not a pose count, so an estimate on another clock has
+    nothing to align however many poses it carries: both fleet tools take the
+    refusal's own sentence as a row rather than a traceback, because which clock
+    a trajectory landed on is a fact about that machine.
 
     Args:
         estimate: Trajectory under test, whose poses drive the association.
@@ -322,23 +324,3 @@ def extent_m(trajectory: Trajectory) -> float:
     if len(trajectory) == 0:
         return 0.0
     return float(np.linalg.norm(trajectory.position_m.max(axis=0) - trajectory.position_m.min(axis=0)))
-
-
-def passes_gate(
-    result: AteResult,
-    tolerance_m: float,
-    count_slack: float = COUNT_SLACK,
-    min_associated: int = MIN_ASSOCIATED_POSES,
-) -> bool:
-    """The basalt fork's PASS criteria, ported verbatim.
-
-    Args:
-        result: Statistics from :func:`ate`.
-        tolerance_m: Largest ATE RMSE the gate accepts, in metres.
-        count_slack: Largest relative pose-count difference the gate accepts.
-        min_associated: Fewest associated poses that make the comparison meaningful.
-
-    Returns:
-        True when the run passes all three criteria.
-    """
-    return result.n_associated >= min_associated and result.rmse_m < tolerance_m and result.count_delta <= count_slack

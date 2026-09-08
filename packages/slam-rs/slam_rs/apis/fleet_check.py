@@ -25,7 +25,6 @@ from slam_rs import _core
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb
 from slam_rs.reference import (
     GT_BAND_RATIO,
-    MANIFEST_PATH,
     MIN_TRACKED_POSES,
     SMOKE_SEGMENTS,
     CppAte,
@@ -65,7 +64,7 @@ class ClipResult:
     peak_rss_mb: float
     """Peak resident set this process reached, which is what a 2 GB device is judged on."""
     # What D60's clauses are decided from, beyond the numbers a row prints. The
-    # JSON the chart reads is :class:`ClipJson`, not this value, so a clause
+    # JSON the chart reads is :data:`CLIP_JSON_KEYS`, not this value, so a clause
     # input is not a column until it is named there.
     gate_policy: GatePolicy
     """How hard D60 lets this clip be gated; a ``no_divergence`` clip gates loss and extent alone."""
@@ -82,10 +81,8 @@ class ClipResult:
     unscored: str | None
     """Why nothing could be scored, or None where it was; the sentence :func:`~slam_rs.trajectory.ate` refused the pair with.
 
-    D60's pose floor is not the only way a clip goes unscored. ``ate`` needs an
-    association and not a pose count, so an estimate on another clock clears the
-    floor and still has nothing to align — which is a fact about this machine and
-    therefore a row, not a traceback (S22 review round 2).
+    D60's pose floor is not the only way a clip goes unscored; see ``ate`` for
+    why a refusal is a row here.
     """
 
     @property
@@ -255,61 +252,34 @@ def measure(manifest: ReferenceManifest, segment: ReferenceSegment, gpu: bool = 
     )
 
 
-@dataclass(slots=True, frozen=True)
-class ClipJson:
-    """One clip as the fleet chart reads it: the same field names, in the same order.
+CLIP_JSON_KEYS: tuple[str, ...] = (
+    "segment_id",
+    "framesets",
+    "tracked",
+    "lost",
+    "cpp_rmse_cm",
+    "gt_rmse_cm",
+    "cpp_gt_band_cm",
+    "wall_s",
+    "cpp_wall_s",
+    "peak_rss_mb",
+    "gt_allowed_cm",
+    "cpp_wall_ratio",
+    "verdict",
+)
+"""The clip keys the fleet chart reads, in the order it reads them.
 
-    A separate value from :class:`ClipResult` on purpose. The row carries what a
-    verdict is decided from, which grows as D60 is read more carefully; the JSON
-    is a consumer contract, and a new clause input must not become a new column
-    by accident.
-    """
-
-    segment_id: str
-    """Manifest id of the clip that ran."""
-    framesets: int
-    """Framesets fed to the estimator."""
-    tracked: int
-    """Poses it reported."""
-    lost: int
-    """Framesets never covered by inertial samples (D17)."""
-    cpp_rmse_cm: float
-    """ATE against the basalt C++ trajectory."""
-    gt_rmse_cm: float
-    """ATE against the ``gt.csv`` sidecar."""
-    cpp_gt_band_cm: tuple[float, float]
-    """The C++'s own ground-truth error in its two precisions (D60)."""
-    wall_s: float
-    """Wall time of the feed loop."""
-    cpp_wall_s: float
-    """What the C++ took over the same footage, on one x86-64 host."""
-    peak_rss_mb: float
-    """Peak resident set this process reached."""
-    gt_allowed_cm: float
-    """Ground-truth error D60 allows on this clip."""
-    cpp_wall_ratio: float
-    """Times the C++'s wall this run took."""
-    verdict: str
-    """``pass``, or every clause this clip missed."""
+A selection of :class:`ClipResult` and not a dump of it, on purpose: the row
+carries what a verdict is decided from, which grows as D60 is read more
+carefully, and the JSON is a consumer contract — a new clause input must not
+become a new column by accident. Each name is a :class:`ClipResult` field or
+one of its properties, and its docstring there is the column's meaning.
+"""
 
 
-def clip_json(clip: ClipResult) -> ClipJson:
+def clip_json(clip: ClipResult) -> dict[str, object]:
     """One measured clip in the shape the chart reads."""
-    return ClipJson(
-        segment_id=clip.segment_id,
-        framesets=clip.framesets,
-        tracked=clip.tracked,
-        lost=clip.lost,
-        cpp_rmse_cm=clip.cpp_rmse_cm,
-        gt_rmse_cm=clip.gt_rmse_cm,
-        cpp_gt_band_cm=clip.cpp_gt_band_cm,
-        wall_s=clip.wall_s,
-        cpp_wall_s=clip.cpp_wall_s,
-        peak_rss_mb=clip.peak_rss_mb,
-        gt_allowed_cm=clip.gt_allowed_cm,
-        cpp_wall_ratio=clip.cpp_wall_ratio,
-        verdict=clip.verdict,
-    )
+    return {key: getattr(clip, key) for key in CLIP_JSON_KEYS}
 
 
 Lane: TypeAlias = Literal["cpu", "cuda", "wgpu"]
@@ -349,14 +319,8 @@ def this_lane(gpu: bool) -> Lane:
 class Config:
     """Run the reference smoke clips on this machine and report the D60 verdict."""
 
-    manifest: Path = MANIFEST_PATH
-    """Reference manifest; ``--artifact-root`` is usually the flag a machine without the NAS wants instead."""
     artifact_root: Path | None = None
-    """Read every recording and sidecar from ``<root>/<segment id>/`` instead of the manifest's own NAS paths.
-
-    What a machine without the NAS points at: one directory, no manifest copy
-    and no ``sed``.
-    """
+    """Read every recording and sidecar from one directory per segment; see :func:`slam_rs.reference.relocate`."""
     segments: tuple[str, ...] = SMOKE_SEGMENTS
     """Clips to run, in order; naming none of them is refused rather than run as a pass."""
     output_json: Path = Path("fleet_check.json")
@@ -366,7 +330,7 @@ class Config:
 
     Which lane produced a row is a fact about the run and not about the machine
     or the clip, so it is written as the JSON's own ``lane`` key beside
-    ``machine`` and ``clips`` — :class:`ClipJson` is a consumer contract and
+    ``machine`` and ``clips`` — :data:`CLIP_JSON_KEYS` is a consumer contract and
     gains nothing. The key's value is the runtime, not the flag:
     :func:`this_lane`.
     """
@@ -397,7 +361,7 @@ def main(config: Config) -> None:
     # Before any file is opened: a `--gpu` run has no lane to report on a core
     # built without a GPU feature, and that costs nothing to say here.
     lane: Lane = this_lane(config.gpu)
-    manifest: ReferenceManifest = load_manifest(config.manifest, config.artifact_root)
+    manifest: ReferenceManifest = load_manifest(artifact_root=config.artifact_root)
     # Every id resolved before the first replay, not one at a time inside the
     # loop: `--segments <410 s clip> typo` used to pay that clip and then reach
     # the typo (S22 review).
@@ -416,7 +380,7 @@ def main(config: Config) -> None:
         payload: dict[str, object] = {
             "machine": asdict(machine),
             "lane": lane,
-            "clips": [asdict(clip_json(clip)) for clip in results],
+            "clips": [clip_json(clip) for clip in results],
         }
         config.output_json.write_text(json.dumps(payload, indent=2))
     missed: list[ClipResult] = [clip for clip in results if clip.failures]

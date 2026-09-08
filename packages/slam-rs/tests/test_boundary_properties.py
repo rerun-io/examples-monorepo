@@ -9,11 +9,11 @@ per entry point; what is left here is the IMU clock and the determinism of a run
 which only the estimator has.
 """
 
-from collections.abc import Callable
-from typing import TypeAlias, cast
+from typing import cast
 
 import numpy as np
 import pytest
+from fixture_types import FRAME_PERIOD_NS, IMU_PERIOD_NS, PipelineFactory, TextureFactory, gravity_batch
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 from jaxtyping import Float64, Int64, UInt8
@@ -27,16 +27,6 @@ MAX_EXAMPLES: int = 50
 gaps = st.lists(st.integers(min_value=1, max_value=10**6), min_size=1, max_size=20)
 starts = st.integers(min_value=-(10**9), max_value=10**9)
 positions = st.integers(min_value=0, max_value=1000)
-FRAME_PERIOD_NS: int = 33_000_000
-"""Synthetic frame period: about 30 Hz."""
-IMU_PERIOD_NS: int = 1_000_000
-"""Synthetic IMU period: 1 kHz, the Index device's own rate."""
-
-PipelineFactory: TypeAlias = Callable[[int], _core.Vio]
-"""The whole pipeline on a rig of the given camera count; a :mod:`conftest` fixture."""
-TextureFactory: TypeAlias = Callable[[int, int], UInt8[ndarray, "h w"]]
-"""The synthetic scene, shifted by whole pixels in x and y."""
-
 
 def increasing(start: int, steps: list[int]) -> NDArray[np.int64]:
     """Timestamps that strictly increase from ``start`` by the given positive steps."""
@@ -189,7 +179,7 @@ def test_two_runs_over_the_same_input_agree_exactly(pipeline: PipelineFactory, t
         for index, images in enumerate(frames):
             t_ns: int = index * FRAME_PERIOD_NS
             samples: Int64[ndarray, " n_samples"] = np.arange(t_ns, t_ns + FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
-            vio.push_imu_batch(samples, zeros(len(samples)), np.tile(np.array([0.0, 0.0, 9.81]), (len(samples), 1)))
+            vio.push_imu_batch(samples, *gravity_batch(samples))
             poses.append(vio.track(t_ns, images).world_from_rig)
         runs.append(poses)
     assert len(runs[0]) == len(frames)

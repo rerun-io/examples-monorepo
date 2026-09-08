@@ -17,48 +17,18 @@ and :func:`manifest` — five suites read the frozen reference set and parsing i
 once a session is both cheaper and one account of what "the manifest" means.
 """
 
-from collections.abc import Callable
 from pathlib import Path
-from typing import NamedTuple, TypeAlias
 
 import numpy as np
 import pytest
 import rerun.experimental as rx
+from fixture_types import FRAME, CameraFactory, FrontendFactory, PipelineFactory, RigFactory, Row, Rows, RowsReader, TextureFactory
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
 
 from slam_rs import _core
 from slam_rs.catalog_feed import TIMELINE, CameraCalib, ImuCalib
 from slam_rs.reference import ReferenceManifest, load_manifest
-
-FRAME: int = 200
-"""Synthetic frame size: four whole 50-pixel detection cells per side."""
-
-CameraFactory: TypeAlias = Callable[[int, float], CameraCalib]
-"""One camera of the synthetic rig, by rig index and baseline in metres."""
-RigFactory: TypeAlias = Callable[[int], _core.Calibration]
-"""A calibration for a rig of the given camera count."""
-FrontendFactory: TypeAlias = Callable[[int], _core.OpticalFlow]
-"""A frontend on a rig of the given camera count."""
-PipelineFactory: TypeAlias = Callable[[int], _core.Vio]
-"""The whole pipeline on a rig of the given camera count."""
-TextureFactory: TypeAlias = Callable[[int, int], UInt8[ndarray, "h w"]]
-"""The synthetic scene, shifted by whole pixels in x and y."""
-
-
-class Row(NamedTuple):
-    """One logged row of one entity, as it comes back out of the file."""
-
-    t_ns: int
-    """Where on ``video_time`` the row sits, in nanoseconds."""
-    values: dict[str, list]
-    """The components this row set, by their short name (``Points2D:positions`` and such)."""
-
-
-Rows: TypeAlias = dict[str, list[Row]]
-"""Per entity path, its rows in ``video_time`` order."""
-RowsReader: TypeAlias = Callable[[Path], Rows]
-"""Reads back what a logger wrote: every non-static row of a recording, by entity path."""
 
 
 @pytest.fixture(scope="session")
@@ -78,7 +48,6 @@ def camera() -> CameraFactory:
             index=index,
             width=FRAME,
             height=FRAME,
-            frequency_hz=30.0,
             fx=100.0,
             fy=100.0,
             cx=FRAME / 2,
@@ -87,7 +56,6 @@ def camera() -> CameraFactory:
             distortion=np.zeros(4, dtype=np.float64),
             distortion_valid_radius=None,
             imu_T_cam=imu_T_cam,
-            image_rotation_cw_deg=0,
         )
 
     return build

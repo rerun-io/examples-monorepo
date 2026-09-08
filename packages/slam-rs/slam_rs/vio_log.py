@@ -1,7 +1,11 @@
-"""Rerun logging for the estimator: three trajectories, the keyframe window, the landmarks and the counters.
+"""Rerun logging for the estimator: the input rung, three trajectories, the keyframe window, the landmarks and the counters.
 
 All Rerun logging is Python (D03), so the core returns arrays and this module
-decides what they look like. The estimate is logged under ``/world/runs/slam_rs``,
+decides what they look like. It holds the whole drawn account of a replay — the
+rig's static geometry, the frames and the inertial samples the estimator is fed
+(:func:`log_frameset_inputs`), the drive that tracks them (:class:`VioStage`)
+and what the estimator decided — so the two tools that replay a segment draw one
+rung rather than two copies of one, and ``apis/`` is CLIs over it. The estimate is logged under ``/world/runs/slam_rs``,
 beside the dataset's own ``/world/runs/gt``, and the basalt C++ reference under
 ``/world/runs/basalt_cpp``: the three trajectories are then one 3D view with
 three colours, and the viewer's own entity tree says which is which.
@@ -46,6 +50,7 @@ because there the camera is what is being drawn.
 """
 
 from dataclasses import dataclass, field
+from typing import Literal, TypeAlias
 
 import numpy as np
 import rerun as rr
@@ -56,9 +61,24 @@ from scipy.spatial.transform import Rotation
 from simplecv.ops.umeyama import SimilarityTransform
 
 from slam_rs import _core
-from slam_rs.catalog_feed import TIMELINE, CameraCalib
-from slam_rs.frontend_log import camera_entity, log_keypoints, track_colors
+from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream, SegmentFeed
+from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints, track_colors
+from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES, Association, AteResult, Trajectory, associate, ate, rigid_alignment
+
+FrameMode: TypeAlias = Literal["downscaled", "jpeg", "off"]
+"""How a replay's input rung draws the frames it was fed.
+
+``downscaled`` is half resolution and uncompressed, which is enough to see what
+a segment is; ``jpeg`` is full resolution, which is what a stage that tracks
+needs, because its keypoints are in the pixels of the frame it tracked and not
+of a downscaled copy; ``off`` logs no image at all, which is how a tool measures
+the estimator without paying for the encode.
+"""
+IMAGE_DOWNSCALE: int = 2
+"""Divisor of the ``downscaled`` mode: the viewer does not need full-resolution pixels to show what was fed."""
+JPEG_QUALITY: int = 85
+"""Quality of the full-resolution frames the tracking stages log; 960x960 grayscale lands around 38 kB."""
 
 RUN_ENTITY: str = "/world/runs/slam_rs"
 """Where this run's estimate goes, beside the dataset's own ``/world/runs/gt``."""
@@ -155,6 +175,27 @@ def at_frameset_cadence(trajectory: Trajectory, frame_t_ns: Int64[ndarray, " n_f
         t_ns=trajectory.t_ns[keep],
         position_m=trajectory.position_m[keep],
         quaternion_wxyz=trajectory.quaternion_wxyz[keep],
+    )
+
+
+def inverted(alignment: SimilarityTransform) -> SimilarityTransform:
+    """The rigid alignment the other way round.
+
+    :func:`slam_rs.trajectory.ate` solves the reference onto the estimate, which
+    is the direction its residuals are measured in; a run's subtree is drawn in
+    the reference's frame, which is this direction. Rigid only — the scale is
+    fixed at one, so the inverse is the transposed rotation.
+
+    Args:
+        alignment: A rigid alignment, ``scale == 1``.
+
+    Returns:
+        The alignment mapping the destination frame back into the source's.
+    """
+    return SimilarityTransform(
+        dst_R_src=alignment.dst_R_src.T,
+        dst_t_src=-alignment.dst_R_src.T @ alignment.dst_t_src,
+        scale=1.0,
     )
 
 
@@ -309,8 +350,11 @@ class VioLogger:
             # the run cost 1.64 s over a 4,648-frameset clip to draw a segment
             # from the last two poses.
             estimated: Trajectory = self.estimated()
-            self._log_ate(estimated)
-            log_alignment(RUN_ENTITY, alignment_onto(estimated, self.ground_truth))
+            # The ATE against the ground truth has already solved this alignment,
+            # in the direction its own residuals are measured in; drawing it is
+            # that solution inverted, not a second association and a second SVD.
+            against_truth: AteResult | None = self._log_ate(estimated)
+            log_alignment(RUN_ENTITY, IDENTITY if against_truth is None else inverted(against_truth.alignment))
 
     def estimated(self) -> Trajectory:
         """Everything reported so far, on the replay's ``video_time`` clock."""
@@ -427,18 +471,170 @@ class VioLogger:
         for stage, milliseconds in snapshot.timings_ms.items():
             rr.log(f"{VIO_STATS_ENTITY}/stage_ms/{stage}", rr.Scalars(milliseconds))
 
-    def _log_ate(self, estimated: Trajectory) -> None:
+    def _log_ate(self, estimated: Trajectory) -> AteResult | None:
         """Log the rigid-aligned error of everything reported so far, against both references.
 
         Args:
             estimated: Everything reported so far.
+
+        Returns:
+            The error against the ground truth, whose alignment is also what
+            places the run's subtree, or None where too few poses associated for
+            either number to mean anything.
         """
+        scored: AteResult | None = None
         for name, reference in (("gt", self.ground_truth), ("cpp", self.cpp)):
             if len(reference) == 0 or len(estimated) < MIN_ASSOCIATED_POSES:
                 continue
             result: AteResult = ate(estimated, reference)
             if result.n_associated >= MIN_ASSOCIATED_POSES:
                 rr.log(f"{VIO_STATS_ENTITY}/ate_cm/{name}", rr.Scalars(100.0 * result.rmse_m))
+                if name == "gt":
+                    scored = result
+        return scored
+
+
+def log_calibration(cameras: tuple[CameraCalib, ...]) -> None:
+    """Log the rig's static geometry so the images sit in the right place in 3D.
+
+    The ``Pinhole`` goes on the ``pinhole`` child, which is the dataset's own
+    layout: the images and the keypoints hang under it, so they are the pixels of
+    the camera that projects them.
+    """
+    rr.log("/", rr.ViewCoordinates.RUB, static=True)
+    log_rig(cameras, RIG_ENTITY, pinhole_child="/pinhole")
+
+
+@dataclass(slots=True)
+class VioStage:
+    """The whole pipeline over one segment, and the Rerun layer it draws.
+
+    The estimator, its logger and its timings only ever exist together, on
+    ``--stage vio``.
+    """
+
+    lockstep: Lockstep
+    """The estimator and the D17 hold, which the V2 gate drives the same way."""
+    logger: VioLogger
+    """Where the trajectories, the window, the landmarks and the counters go."""
+
+    @property
+    def elapsed_ms(self) -> list[float]:
+        """Wall time each ``track`` call that tracked took, in frameset order."""
+        return self.lockstep.elapsed_ms
+
+    @property
+    def pending(self) -> list[Frameset]:
+        """Framesets still held for want of the inertial samples that cover them."""
+        return self.lockstep.pending
+
+    def run(self, frameset: Frameset) -> None:
+        """Track the frameset and everything its samples now cover, and log each one.
+
+        Args:
+            frameset: The frameset to track, with the samples since the previous one.
+        """
+        for held, result in self.lockstep.push(frameset):
+            # The rows belong at the frameset's own time, which is the caller's
+            # cursor for all but a retried one.
+            rr.set_time(TIMELINE, duration=np.timedelta64(held.t_ns, "ns"))
+            # Both are present on a frameset that tracked — the snapshot because it
+            # measured, the keypoints because the frontend accepted it — so a
+            # missing one is a broken invariant, not a rung to skip (D32).
+            snapshot: _core.VioSnapshot | None = self.lockstep.vio.snapshot()
+            frame: _core.FlowFrame | None = self.lockstep.vio.flow_frame()
+            assert snapshot is not None, f"frameset {held.t_ns} tracked without a window snapshot"
+            assert frame is not None, f"frameset {held.t_ns} tracked without the keypoints it tracked on"
+            self.logger.log(result, snapshot, frame, self.lockstep.elapsed_ms[-1])
+
+    def refuse_lost_framesets(self) -> None:
+        """Stop the run when a frameset never got the inertial samples that cover it.
+
+        Every frameset either produced a pose or is still held (D17); one still
+        held at the end of a segment is a lost frameset, not a count to print,
+        and both tools that drive this stage end on the same rule.
+
+        Raises:
+            SystemExit: If any frameset is still held.
+        """
+        if self.pending:
+            raise SystemExit(f"{len(self.pending)} framesets never got the inertial samples that cover them")
+
+    def summary(self) -> str:
+        """One line on what the stage did, for the end of a replay.
+
+        The empty case is this stage's own to report: the run that tracked
+        nothing is the one whose held framesets most need naming, and a caller
+        that guarded the call on ``elapsed_ms`` suppressed exactly that line.
+        """
+        unresolved: str = ""
+        if self.pending:
+            unresolved = f", {len(self.pending)} FRAMESETS NEVER COVERED BY THE IMU at {[held.t_ns for held in self.pending]}"
+        if not self.elapsed_ms:
+            return f"vio: {self.lockstep.imu_samples} IMU samples pushed, nothing tracked{unresolved}"
+        return (
+            f"vio: {self.lockstep.imu_samples} IMU samples pushed, {len(self.elapsed_ms)} tracked, "
+            f"{self.lockstep.retries} retries, {np.mean(self.elapsed_ms):.1f} ms per frameset "
+            f"(median {np.median(self.elapsed_ms):.1f}, max {np.max(self.elapsed_ms):.1f})"
+            f"{unresolved}"
+        )
+
+
+def log_imu(imu: ImuStream) -> None:
+    """Log one frameset's inertial samples, one column per channel.
+
+    Two ``send_columns`` calls instead of a ``set_time`` and two ``log`` calls per
+    sample — about 57 samples a frameset at 1 kHz, so 171 calls become 2, and the
+    frameset's inertial rung goes from 0.446 ms to 0.037 ms. The rows are the
+    same rows: each timestamp still carries its three components, which is what
+    the partition says.
+
+    Args:
+        imu: The samples since the previous frameset, on the ``video_time`` clock.
+    """
+    if not len(imu):
+        return
+    times: rr.TimeColumn = rr.TimeColumn(TIMELINE, duration=imu.t_ns.astype("timedelta64[ns]"))
+    components: int = imu.gyro_rad_s.shape[1]
+    for entity, channel in ((f"{IMU_ENTITY}/gyro", imu.gyro_rad_s), (f"{IMU_ENTITY}/accel", imu.accel_m_s2)):
+        rr.send_columns(entity, indexes=[times], columns=rr.Scalars.columns(scalars=channel.reshape(-1)).partition([components] * len(imu)))
+
+
+def log_frameset_inputs(feed: SegmentFeed, frameset: Frameset, mode: FrameMode) -> None:
+    """Log what the estimator is fed for one frameset, at the frameset's own time.
+
+    Every replay draws this rung whether or not a stage consumes it, and the two
+    tools that drive a stage draw the same one: a channel added here reaches both
+    rather than one of them.
+
+    Args:
+        feed: The open feed, for the cameras the images belong to.
+        frameset: The frameset, with the inertial samples since the previous one.
+        mode: How to draw the frames; see :data:`FrameMode`.
+    """
+    # The samples are what the estimator is fed, so they are logged in every
+    # stage whether or not one consumes them.
+    log_imu(frameset.imu)
+    rr.set_time(TIMELINE, duration=np.timedelta64(frameset.t_ns, "ns"))
+    for camera, image in zip(feed.cameras, frameset.images, strict=True):
+        entity: str = f"{camera_entity(camera.index)}/image"
+        if mode == "downscaled":
+            small: UInt8[ndarray, "h w"] = np.ascontiguousarray(image[::IMAGE_DOWNSCALE, ::IMAGE_DOWNSCALE])
+            rr.log(entity, rr.Image(small, color_model="L"))
+        elif mode == "jpeg":
+            # Full resolution, or the keypoints would sit two pixels off the
+            # corner they were computed on; JPEG keeps a whole segment small.
+            # The encode costs 3.9 ms a frameset on the replay thread and is
+            # deliberate: no lane that reports a wall time comes through here,
+            # because the V2 gate drives the feed and `Vio` itself with
+            # nothing logged.
+            rr.log(entity, rr.Image(image, color_model="L").compress(jpeg_quality=JPEG_QUALITY))
+    if frameset.ground_truth is not None:
+        pose_wxyz: Float64[ndarray, " 7"] = frameset.ground_truth
+        rr.log(
+            RIG_ENTITY,
+            rr.Transform3D(translation=pose_wxyz[0:3], quaternion=rr.Quaternion(xyzw=np.roll(pose_wxyz[3:7], -1))),
+        )
 
 
 def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
@@ -478,7 +674,7 @@ def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
     Returns:
         A blueprint with the panels collapsed, so the frame is all content.
     """
-    views: list[rrb.View] = [rrb.Spatial2DView(origin=camera_entity(camera.index), name=f"cam {camera.index:02d}") for camera in cameras]
+    views: list[rrb.View] = camera_views(cameras)
     trail: rrb.VisibleTimeRanges = rrb.VisibleTimeRanges(
         rrb.VisibleTimeRange(TIMELINE, start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.cursor_relative())
     )

@@ -7,15 +7,17 @@ needs none of that: the verdict a clip's numbers earn, and how the row reads.
 
 import json
 import math
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
+from fixture_types import never
 
 from slam_rs import _core
 from slam_rs.apis import fleet_check
-from slam_rs.apis.fleet_check import ClipResult, Config, clip_json, main, measure, this_lane
+from slam_rs.apis.fleet_check import CLIP_JSON_KEYS, ClipResult, Config, clip_json, main, measure, this_lane
 from slam_rs.machine import Machine
 from slam_rs.reference import (
     MANIFEST_PATH,
@@ -29,22 +31,6 @@ from slam_rs.reference import (
 from slam_rs.tracking import SegmentRun
 from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, empty_trajectory, shift_clock, write_trajectory
 
-CLIP_JSON_KEYS: tuple[str, ...] = (
-    "segment_id",
-    "framesets",
-    "tracked",
-    "lost",
-    "cpp_rmse_cm",
-    "gt_rmse_cm",
-    "cpp_gt_band_cm",
-    "wall_s",
-    "cpp_wall_s",
-    "peak_rss_mb",
-    "gt_allowed_cm",
-    "cpp_wall_ratio",
-    "verdict",
-)
-"""The clip keys the fleet chart reads, in the order it reads them: a consumer contract, not a dump of the row."""
 CLOCK_GAP_NS: int = 10_433_867_587_166
 """What the Index smoke segment's two clocks are apart: ``video_time`` zero against the device clock every basalt CSV uses.
 
@@ -179,10 +165,7 @@ def test_a_clip_the_estimator_never_tracked_is_a_row_and_not_a_traceback(
     NaN, the JSON keeps its keys, and the run exits non-zero.
     """
 
-    def never(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("`ate` was called on a run below D60's pose floor")
-
-    monkeypatch.setattr(fleet_check, "ate", never)
+    monkeypatch.setattr(fleet_check, "ate", never("`ate` was called on a run below D60's pose floor"))
     monkeypatch.setattr(
         fleet_check, "run_segment", lambda *_args, **_kwargs: SegmentRun(estimate=empty_trajectory(), framesets=412, lost=412, wall_s=1.0)
     )
@@ -200,12 +183,12 @@ def test_a_clip_the_estimator_never_tracked_is_a_row_and_not_a_traceback(
 
     output: Path = tmp_path / "fleet_check.json"
     with pytest.raises(SystemExit, match="is not a trajectory"):
-        main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1],), output_json=output))
+        main(Config(segments=(SMOKE_SEGMENTS[1],), output_json=output))
     written: dict = json.loads(output.read_text())
     assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)
     assert written["clips"][0]["verdict"].startswith("fail:")
     # NaN is what the chart's own `f"{value:.2f}"` reads; None is what it cannot.
-    assert math.isnan(asdict(clip_json(dead))["cpp_rmse_cm"])
+    assert math.isnan(cast("float", clip_json(dead)["cpp_rmse_cm"]))
 
 
 def test_an_estimate_on_another_clock_is_a_row_and_not_a_traceback(
@@ -245,7 +228,7 @@ def test_an_estimate_on_another_clock_is_a_row_and_not_a_traceback(
 
     output: Path = tmp_path / "fleet_check.json"
     with pytest.raises(SystemExit, match="no pose associated within"):
-        main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1],), output_json=output))
+        main(Config(segments=(SMOKE_SEGMENTS[1],), output_json=output))
     written: dict = json.loads(output.read_text())
     assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)
     assert "no pose associated within" in written["clips"][0]["verdict"]
@@ -263,10 +246,7 @@ def test_a_reference_trajectory_that_is_not_here_is_refused_before_the_replay(
     """
     monkeypatch.setenv("SLAM_RS_REFERENCE_DIR", str(tmp_path))
 
-    def never(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("the replay was paid for before the reference was checked")
-
-    monkeypatch.setattr("slam_rs.apis.fleet_check.run_segment", never)
+    monkeypatch.setattr(fleet_check, "run_segment", never("the replay was paid for before the reference was checked"))
     segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENTS[1])
     absent: ReferenceSegment = replace(segment, reference=replace(segment.reference, bundle_only=True))
     with pytest.raises(FileNotFoundError, match="is not in SLAM_RS_REFERENCE_DIR"):
@@ -280,12 +260,9 @@ def test_an_unknown_segment_id_is_refused_before_the_first_replay(monkeypatch: p
     the manifest's own selector error names the id and the ten it has.
     """
 
-    def never(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("a clip was measured before every id was resolved")
-
-    monkeypatch.setattr(fleet_check, "measure", never)
+    monkeypatch.setattr(fleet_check, "measure", never("a clip was measured before every id was resolved"))
     with pytest.raises(ValueError, match="MIO10_typo.*MIO10_short_2_panorama"):
-        main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1], "MIO10_typo"), output_json=tmp_path / "fleet_check.json"))
+        main(Config(segments=(SMOKE_SEGMENTS[1], "MIO10_typo"), output_json=tmp_path / "fleet_check.json"))
 
 
 def test_a_partial_corpus_is_refused_before_the_first_replay(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -298,13 +275,10 @@ def test_a_partial_corpus_is_refused_before_the_first_replay(monkeypatch: pytest
     sidecar and the second does not, and nothing is replayed.
     """
 
-    def never(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("a replay was paid for before every scoring input was opened")
-
-    monkeypatch.setattr(fleet_check, "run_segment", never)
+    monkeypatch.setattr(fleet_check, "run_segment", never("a replay was paid for before every scoring input was opened"))
     write_trajectory(tmp_path / SMOKE_SEGMENTS[0] / "gt.csv", empty_trajectory())
     with pytest.raises(FileNotFoundError, match=f"{SMOKE_SEGMENTS[1]}.*is not a file on this machine"):
-        main(Config(manifest=MANIFEST_PATH, artifact_root=tmp_path, segments=SMOKE_SEGMENTS, output_json=tmp_path / "fleet_check.json"))
+        main(Config(artifact_root=tmp_path, segments=SMOKE_SEGMENTS, output_json=tmp_path / "fleet_check.json"))
 
 
 def test_the_first_clips_evidence_survives_a_directory_that_is_not_there_yet(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -316,7 +290,7 @@ def test_the_first_clips_evidence_survives_a_directory_that_is_not_there_yet(mon
     """
     monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment, _gpu: PASSING)
     output: Path = tmp_path / "out" / "fleet_check.json"
-    main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1],), output_json=output))
+    main(Config(segments=(SMOKE_SEGMENTS[1],), output_json=output))
     written: dict = json.loads(output.read_text())
     assert list(written) == ["machine", "lane", "clips"]
     assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)
@@ -325,14 +299,14 @@ def test_the_first_clips_evidence_survives_a_directory_that_is_not_there_yet(mon
 def test_the_lane_is_on_the_json_and_the_clip_columns_are_not(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A GPU row and a CPU row differ in the run, not in the clip's columns.
 
-    The chart reads :class:`~slam_rs.apis.fleet_check.ClipJson` as a contract, so
-    the lane cannot be a thirteenth column of it; it is one key beside
-    ``machine``.
+    The chart reads :data:`~slam_rs.apis.fleet_check.CLIP_JSON_KEYS` as a
+    contract, so the lane cannot be a thirteenth column of it; it is one key
+    beside ``machine``.
     """
     monkeypatch.setattr(_core, "gpu_backend", "wgpu")
     monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment, _gpu: PASSING)
     output: Path = tmp_path / "fleet_check.json"
-    main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1],), output_json=output, gpu=True))
+    main(Config(segments=(SMOKE_SEGMENTS[1],), output_json=output, gpu=True))
     written: dict = json.loads(output.read_text())
     assert written["lane"] == "wgpu"
     assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)
@@ -370,14 +344,11 @@ def test_a_gpu_run_on_a_core_without_a_gpu_feature_is_refused_before_any_file_is
     manifest is even read.
     """
 
-    def never(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("a clip was measured on a core that has no GPU lane")
-
     monkeypatch.setattr(_core, "gpu_backend", None)
-    monkeypatch.setattr(fleet_check, "measure", never)
+    monkeypatch.setattr(fleet_check, "measure", never("a clip was measured on a core that has no GPU lane"))
     output: Path = tmp_path / "fleet_check.json"
     with pytest.raises(ValueError, match="built with a GPU cargo feature"):
-        main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1],), output_json=output, gpu=True))
+        main(Config(segments=(SMOKE_SEGMENTS[1],), output_json=output, gpu=True))
     assert not output.exists()
 
 
@@ -389,13 +360,10 @@ def test_an_empty_segment_selection_is_refused_rather_than_read_as_a_pass(monkey
     even created (S24 review).
     """
 
-    def never(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("a run with no clip selected reached the manifest")
-
-    monkeypatch.setattr(fleet_check, "load_manifest", never)
+    monkeypatch.setattr(fleet_check, "load_manifest", never("a run with no clip selected reached the manifest"))
     output: Path = tmp_path / "fleet_check.json"
     with pytest.raises(ValueError, match="--segments named no clip"):
-        main(Config(manifest=MANIFEST_PATH, segments=(), output_json=output))
+        main(Config(segments=(), output_json=output))
     assert not output.exists()
 
 

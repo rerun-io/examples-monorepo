@@ -20,6 +20,10 @@ BUNDLE_DIR_VARIABLE: str = "SLAM_RS_REFERENCE_DIR"
 """Environment variable naming the bundle root."""
 DEFAULT_BUNDLE_DIR: Path = Path(__file__).resolve().parents[1] / "data" / "reference"
 """Where the bundle is looked for when the variable is unset; gitignored."""
+TRAJECTORY_CSV: str = "basalt_traj.csv"
+"""The C++ trajectory inside a segment's bundle directory, named as basalt writes it."""
+RUN_JSON: str = "run.json"
+"""The run record beside it: what the C++ was configured with and what it measured."""
 
 
 @dataclass(slots=True, frozen=True)

@@ -7,7 +7,8 @@ the evidence behind a row can be re-run rather than re-derived.
 **The protocol**, which is the part that matters more than the code:
 
 * **No decoder and no Rerun.** The framesets are replayed out of an ``.npz``
-  dumped once, so the number is the estimator's and not AV1's.
+  dumped once by ``tests/tools/dump_clip.py --npz``, so the number is the
+  estimator's and not AV1's.
 * **One pinned core** (``--pin-core``). The lane runs single-threaded by
   contract (D31), and on this host an unpinned run drifts by more than the
   differences being measured. The GPU lane's CubeCL worker thread shares that
@@ -24,9 +25,10 @@ the evidence behind a row can be re-run rather than re-derived.
 * **Never set ``CUBECL_DEBUG_LOG``** while timing: it turns on Vulkan validation
   layers and costs 30x per launch.
 
-The dump is what ``images``/``t_ns``/``imu_counts``/``imu_t``/``imu_g``/``imu_a``
-/``safe_radius`` name in it, plus a sibling ``<dump>.calib.pkl`` holding the
-feed's ``cameras`` and ``imu`` dataclasses:
+The dump is what ``tests/tools/dump_clip.py --npz`` writes:
+``images``/``t_ns``/``imu_counts``/``imu_t``/``imu_g``/``imu_a``/``safe_radius``
+in the ``.npz``, plus a sibling ``<dump>.calib.pkl`` holding the feed's own
+``cameras`` and ``imu`` dataclasses:
 
 .. code-block:: text
 
@@ -53,7 +55,8 @@ from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
 from slam_rs import _core
-from slam_rs.catalog_feed import CameraCalib, ImuCalib
+from slam_rs.catalog_feed import CameraCalib, Frameset, ImuCalib, ImuStream
+from slam_rs.tracking import Lockstep
 
 Lane: TypeAlias = Literal["cpu", "gpu"]
 """Which frontend backend a round runs: the ported CPU one, or the CubeCL one."""
@@ -247,9 +250,11 @@ def load_framesets(dump: Path, limit: int | None) -> Framesets:
 def run_lane(lane: Lane, round_index: int, framesets: Framesets, config: _core.VioConfig) -> LaneRound:
     """Replay every frameset through a fresh ``Vio`` on ``lane`` and time each call.
 
-    A frameset the estimator refuses for want of IMU is retried on the next
-    call, exactly as ``replay.py`` does, so the timings cover the same work a
-    real run does.
+    The drive is :class:`slam_rs.tracking.Lockstep`, the one a real replay and
+    the V2 gate use, so the D17 hold a refused frameset costs is the hold they
+    pay and not a second account of it — including its bound on how deep the
+    hold may go. The timings are its own ``elapsed_ms``: the ``track`` call
+    alone, nothing around it.
 
     Args:
         lane: Which frontend backend to build.
@@ -261,40 +266,32 @@ def run_lane(lane: Lane, round_index: int, framesets: Framesets, config: _core.V
         The round's per-call timings, wall time and CPU samples.
     """
     calibration: _core.Calibration = _core.Calibration.from_catalog(framesets.cameras, framesets.imu)
-    vio = _core.Vio(calibration, config, gpu=lane == "gpu")
+    lockstep: Lockstep = Lockstep(vio=_core.Vio(calibration, config, gpu=lane == "gpu"))
 
     sampler: CpuSampler = CpuSampler()
     sampler.start()
-    elapsed: list[float] = []
     started: float = time.monotonic()
-    pending: list[int] = []
     for index in range(len(framesets.t_ns)):
         low, high = int(framesets.imu_offsets[index]), int(framesets.imu_offsets[index + 1])
-        if high > low:
-            vio.push_imu_batch(
-                framesets.imu_t[low:high],
-                np.ascontiguousarray(framesets.imu_gyro[low:high]),
-                np.ascontiguousarray(framesets.imu_accel[low:high]),
-            )
-        pending.append(index)
-        while pending:
-            held: int = pending[0]
-            frames: list[UInt8[ndarray, "height width"]] = [
-                np.ascontiguousarray(framesets.images[held, camera]) for camera in range(framesets.images.shape[1])
-            ]
-            call_started: float = time.perf_counter()
-            result = vio.track(int(framesets.t_ns[held]), frames)
-            elapsed.append(1e3 * (time.perf_counter() - call_started))
-            if result.status != _core.VioStatus.Tracking:
-                break
-            pending.pop(0)
+        frameset: Frameset = Frameset(
+            t_ns=int(framesets.t_ns[index]),
+            images=[np.ascontiguousarray(framesets.images[index, camera]) for camera in range(framesets.images.shape[1])],
+            imu=ImuStream(
+                t_ns=framesets.imu_t[low:high],
+                gyro_rad_s=np.ascontiguousarray(framesets.imu_gyro[low:high]),
+                accel_m_s2=np.ascontiguousarray(framesets.imu_accel[low:high]),
+            ),
+            ground_truth=None,
+        )
+        for _held, _result in lockstep.push(frameset):
+            pass
     wall_s: float = time.monotonic() - started
     sampler.stop.set()
     sampler.join(timeout=1.0)
     return LaneRound(
         lane=lane,
         round_index=round_index,
-        track_ms=np.asarray(elapsed, dtype=np.float64),
+        track_ms=np.asarray(lockstep.elapsed_ms, dtype=np.float64),
         wall_s=wall_s,
         cpu_pct=np.asarray(sampler.samples or [0.0], dtype=np.float64),
     )

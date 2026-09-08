@@ -43,34 +43,27 @@ fact about the recording rather than about this tool, so the manifest states it
 :attr:`slam_rs.catalog_feed.SegmentFeed.export_offset_ns`.
 """
 
-import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import rerun as rr
 from jaxtyping import Float64
 from numpy import ndarray
-from scipy.spatial.transform import Rotation
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from slam_rs import _core
-from slam_rs.apis.replay import JPEG_QUALITY, VioStage, _log_calibration, log_imu
 from slam_rs.catalog_feed import (
-    TIMELINE,
-    CameraCalib,
     Frameset,
     LocalSegment,
     RigProfile,
     open_segment,
 )
-from slam_rs.frontend_log import camera_entity
-from slam_rs.reference import MANIFEST_PATH, ImuParameters, ReferenceManifest, RobocapSession, load_manifest
-from slam_rs.tracking import Lockstep, robocap_cpp_trajectory, robocap_estimator_files
+from slam_rs.reference import ReferenceManifest, RobocapSession, load_manifest
+from slam_rs.tracking import Lockstep, check_calibration_matches_recording, robocap_cpp_trajectory, robocap_estimator_files
 from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_trajectory, shift_clock, write_trajectory
-from slam_rs.vio_log import VioLogger, vio_blueprint
+from slam_rs.vio_log import FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
 
 
 @dataclass(slots=True)
@@ -79,18 +72,24 @@ class Config:
 
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
     """Viewer, save and headless behaviour."""
-    manifest: Path = MANIFEST_PATH
-    """Reference manifest; ``--artifact-root`` is usually the flag a machine without the NAS wants instead."""
     artifact_root: Path | None = None
-    """Read every recording and sidecar from ``<root>/<segment id>/`` instead of the manifest's own NAS paths.
-
-    What a machine without the NAS points at: one directory, no manifest copy
-    and no ``sed``.
-    """
+    """Read every recording and sidecar from one directory per segment; see :func:`slam_rs.reference.relocate`."""
     session: str = "s00000021"
-    """RoboCap session id from ``reference_segments.toml``."""
+    """RoboCap session id from ``reference_segments.toml``.
+
+    Session 21 and not the fleet tool's 15: this lane draws a recording, and 21
+    is the long one (154.9 s, 4,648 framesets) whose repeated loop is where a
+    yaw offset or a scale error would show. Session 15 is the fleet default
+    because it is the one with a C++ wall measured on the cap, which is what a
+    runtime row is read against.
+    """
     seconds: float = 90.0
-    """Replay this many seconds of video time from the first frameset; 0 replays the whole session."""
+    """Replay this many seconds of video time from the first frameset; 0 replays the whole session.
+
+    The span the S17 evidence was measured over — 2,700 of session 21's
+    framesets, 10.40 cm against the C++ — and about 550 MB of ``.rrd``. The
+    whole session is a viewer recording nobody opens.
+    """
     output_csv: Path | None = None
     """Where the estimated trajectory is written; defaults to ``data/robocap-<session>/slam_rs.csv``."""
     log_frames: bool = True
@@ -99,89 +98,13 @@ class Config:
     """Longest time window of encoded samples fetched in one round trip."""
 
 
-def check_calibration_matches_recording(
-    basalt: _core.Calibration, cameras: tuple[CameraCalib, ...], imu: ImuParameters, downscale: int
-) -> None:
-    """Refuse a C++ calibration that is not the rig the recording and the manifest describe.
-
-    Everything the file carries is compared, not just the resolution: the lenses
-    and the extrinsics come from the same Kalibr tree by different routes — the
-    fork's converter for the file, the ``dataforge`` conversion for the recording
-    — and a route that drifted would otherwise show up only as a few centimetres
-    of trajectory error nobody could attribute. The recording's native statics
-    are scaled here the way the converter scales them.
-
-    The inertial half is checked against the manifest for the same reason by a
-    different route: this lane configures the *estimator* from the file and the
-    *feed* from the manifest's frozen Kalibr values, so a re-conversion that
-    moved one and not the other would split them silently. The file's own
-    ``cam_time_offset_ns`` must be zero, because the feed is what applies that
-    offset (to the frames, not the IMU) and a file carrying it too would apply it
-    twice.
-
-    Args:
-        basalt: The calibration read from basalt's own JSON.
-        cameras: The feed's cameras, already scaled to ``downscale``.
-        imu: The manifest's frozen IMU parameters, which configure the feed.
-        downscale: The factor both were scaled by.
-
-    Raises:
-        ValueError: If the camera count, a resolution, an intrinsic, a distortion
-            coefficient, an extrinsic, the IMU model or the clock offset disagrees.
-    """
-    if basalt.camera_count != len(cameras):
-        raise ValueError(f"basalt's calibration has {basalt.camera_count} cameras, the feed selected {len(cameras)}")
-    expected: tuple[tuple[int, int], ...] = tuple((camera.width, camera.height) for camera in cameras)
-    if tuple(basalt.resolution) != expected:
-        raise ValueError(f"basalt's calibration is {list(basalt.resolution)}, the feed decodes {list(expected)} at downscale {downscale}")
-    # `Calibration` exposes no intrinsics accessor, so the comparison goes through
-    # the round trip its own `to_json` writes, which is basalt's shape.
-    written: dict[str, Any] = json.loads(basalt.to_json())["value0"]
-    for camera, lens, extrinsic in zip(cameras, written["intrinsics"], written["T_imu_cam"], strict=True):
-        if lens["camera_type"] != camera.model:
-            raise ValueError(f"cam {camera.index}: basalt's model is {lens['camera_type']!r}, the recording gives {camera.model!r}")
-        values: dict[str, float] = lens["intrinsics"]
-        for name, mine in (("fx", camera.fx), ("fy", camera.fy), ("cx", camera.cx), ("cy", camera.cy)):
-            # float32 statics on the recording against float64 in the JSON: a
-            # thousandth of a pixel is rounding, a hundredth is a different rig.
-            if abs(values[name] - mine) > 1e-2:
-                raise ValueError(f"cam {camera.index}: basalt's {name} is {values[name]}, the recording gives {mine} at downscale {downscale}")
-        # The distortion is resolution-invariant, so it is compared as stored and
-        # to float32's own precision rather than to a pixel's.
-        for number, mine in enumerate(camera.distortion.tolist(), start=1):
-            if abs(values[f"k{number}"] - mine) > 1e-6:
-                raise ValueError(f"cam {camera.index}: basalt's k{number} is {values[f'k{number}']}, the recording gives {mine}")
-        translation: Float64[ndarray, " 3"] = np.array([extrinsic["px"], extrinsic["py"], extrinsic["pz"]], dtype=np.float64)
-        offset_m: float = float(np.abs(translation - camera.imu_T_cam[:3, 3]).max())
-        if offset_m > 1e-4:
-            raise ValueError(f"cam {camera.index}: basalt places it {1e3 * offset_m:.3f} mm from where the recording does")
-        written_rotation: Rotation = Rotation.from_quat([extrinsic["qx"], extrinsic["qy"], extrinsic["qz"], extrinsic["qw"]])
-        turn_deg: float = float(np.degrees((written_rotation * Rotation.from_matrix(camera.imu_T_cam[:3, :3]).inv()).magnitude()))
-        if turn_deg > 1e-2:
-            raise ValueError(f"cam {camera.index}: basalt turns it {turn_deg:.4f} deg from where the recording does")
-    for name, mine in (
-        ("imu_update_rate", imu.rate_hz),
-        ("gyro_noise_std", imu.gyro_noise_std),
-        ("accel_noise_std", imu.accel_noise_std),
-        ("gyro_bias_std", imu.gyro_bias_std),
-        ("accel_bias_std", imu.accel_bias_std),
-    ):
-        # A rate is one number, a noise density is one per axis and all three are
-        # the same number, which is how Kalibr writes an isotropic model.
-        theirs: list[float] = written[name] if isinstance(written[name], list) else [written[name]]
-        if any(abs(value - mine) > 1e-12 for value in theirs):
-            raise ValueError(f"basalt's {name} is {written[name]}, the manifest gives {mine}")
-    if written["cam_time_offset_ns"] != 0:
-        raise ValueError(f"basalt's calibration carries cam_time_offset_ns {written['cam_time_offset_ns']}; the feed applies that offset, so the file must not")
-
-
 def main(config: Config) -> None:
     """Replay one RoboCap session, log it, write the trajectory and report the agreement.
 
     Args:
         config: Parsed CLI options.
     """
-    manifest: ReferenceManifest = load_manifest(config.manifest, config.artifact_root)
+    manifest: ReferenceManifest = load_manifest(artifact_root=config.artifact_root)
     session: RobocapSession = manifest.robocap.session(config.session)
     offset_ns: int = manifest.robocap.imu.cam_time_offset_ns
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / f"robocap-{session.session_id}" / "slam_rs.csv"
@@ -213,7 +136,7 @@ def main(config: Config) -> None:
             f"NOT added (video_time is the device clock), so the export shifts by {feed.export_offset_ns} ns"
         )
 
-        _log_calibration(feed.cameras)
+        log_calibration(feed.cameras)
         rr.send_blueprint(vio_blueprint(feed.cameras))
         # The same drive `replay --stage vio` runs: the D17 hold, the D32
         # invariant asserts and the rows at the held frameset's own time are one
@@ -225,16 +148,13 @@ def main(config: Config) -> None:
 
         replayed: int = 0
         started: float = time.monotonic()
+        mode: FrameMode = "jpeg" if config.log_frames else "off"
         frameset: Frameset
         for frameset in feed.framesets(last_ns):
             if frameset.t_ns > last_ns:
                 break
             replayed += 1
-            log_imu(frameset.imu)
-            rr.set_time(TIMELINE, duration=np.timedelta64(frameset.t_ns, "ns"))
-            if config.log_frames:
-                for camera, image in zip(feed.cameras, frameset.images, strict=True):
-                    rr.log(f"{camera_entity(camera.index)}/image", rr.Image(image, color_model="L").compress(jpeg_quality=JPEG_QUALITY))
+            log_frameset_inputs(feed, frameset, mode)
             stage.run(frameset)
         elapsed: float = time.monotonic() - started
         stage.logger.log_complete_paths()
