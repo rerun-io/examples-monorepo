@@ -8,8 +8,8 @@ use super::kernels::{self, MASK_BITS, RING_BIAS};
 use super::pyramid::{Level0, Level0Table};
 use super::{GpuError, guarded};
 use crate::frontend::detect::{
-    CornerScan, DetectError, FAST_BORDER, FAST_RING_COLUMN, FAST_RING_ROW, block_filter_end,
-    opencv_corner_score,
+    BandCache, BandRequest, CornerScan, DetectError, FAST_BORDER, FAST_RING_COLUMN, FAST_RING_ROW,
+    block_filter_end, opencv_corner_score,
 };
 use crate::image::ImageU16;
 
@@ -25,17 +25,6 @@ struct ScanBuffers {
     pixels: usize,
     /// Mask words these were sized for.
     mask_len: usize,
-}
-
-/// One row band at one threshold, already filtered out of the candidate image.
-#[derive(Debug)]
-struct Band {
-    /// First row of the band.
-    y: usize,
-    /// Threshold it was filtered at.
-    threshold: i32,
-    /// Candidates over the whole width, row-major, carrying OpenCV's score.
-    corners: Vec<FastCorner>,
 }
 
 /// The GPU corner scanner.
@@ -111,7 +100,7 @@ pub struct GpuCornerScan<R: Runtime> {
     width: usize,
     height: usize,
     /// Bands already filtered out of `kept`, in the order they were asked for.
-    bands: Vec<Band>,
+    bands: BandCache,
 }
 
 impl<R: Runtime> GpuCornerScan<R> {
@@ -135,7 +124,7 @@ impl<R: Runtime> GpuCornerScan<R> {
             words: 0,
             width: 0,
             height: 0,
-            bands: Vec::new(),
+            bands: BandCache::default(),
             client,
         }
     }
@@ -196,40 +185,43 @@ impl<R: Runtime> GpuCornerScan<R> {
         // whole-frame narrowing pass on the host.
         super::upload_frame(&self.client, image, &mut self.packed)
     }
+}
 
-    /// One row's candidates over `threshold`, appended in column order.
-    ///
-    /// The bitmask says where to look: one word per thirty-two columns, and
-    /// `trailing_zeros` walks only the bits that are set, so a row of 960
-    /// columns costs thirty word loads plus one score load per candidate.
-    ///
-    /// `scores` and `bits` are the downloaded buffers, sliced by the caller
-    /// once per band rather than re-cast per row.
-    fn filter_row(
-        &self,
-        scores: &[u8],
-        bits: &[u32],
-        y: usize,
-        threshold: u8,
-        out: &mut Vec<FastCorner>,
-    ) {
-        let row: &[u8] = &scores[y * self.width..(y + 1) * self.width];
-        let words: &[u32] = &bits[y * self.words..(y + 1) * self.words];
-        for (index, word) in words.iter().enumerate() {
-            let mut bits: u32 = *word;
-            while bits != 0 {
-                let bit: usize = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                let x: usize = index * MASK_BITS + bit;
-                let score: u8 = row[x];
-                if score > threshold {
-                    out.push(FastCorner {
-                        xy: [x as f32, y as f32],
-                        // The response kornia reports is `score / 255`, which
-                        // `opencv_corner_score` turns back into `score - 1`.
-                        response: opencv_corner_score(f32::from(score) / 255.0),
-                    });
-                }
+/// One row's candidates over `threshold`, appended in column order.
+///
+/// The bitmask says where to look: one word per thirty-two columns, and
+/// `trailing_zeros` walks only the bits that are set, so a row of 960 columns
+/// costs thirty word loads plus one score load per candidate.
+///
+/// `scores` and `bits` are the downloaded buffers, sliced by the caller once per
+/// band rather than re-cast per row; `width` and `stride` are the frame's row
+/// length in pixels and in mask words. Free rather than a method because
+/// [`CornerScan::band`] calls it with the band cache mutably borrowed.
+fn filter_row(
+    scores: &[u8],
+    bits: &[u32],
+    width: usize,
+    stride: usize,
+    y: usize,
+    threshold: u8,
+    out: &mut Vec<FastCorner>,
+) {
+    let row: &[u8] = &scores[y * width..(y + 1) * width];
+    let words: &[u32] = &bits[y * stride..(y + 1) * stride];
+    for (index, word) in words.iter().enumerate() {
+        let mut bits: u32 = *word;
+        while bits != 0 {
+            let bit: usize = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let x: usize = index * MASK_BITS + bit;
+            let score: u8 = row[x];
+            if score > threshold {
+                out.push(FastCorner {
+                    xy: [x as f32, y as f32],
+                    // The response kornia reports is `score / 255`, which
+                    // `opencv_corner_score` turns back into `score - 1`.
+                    response: opencv_corner_score(f32::from(score) / 255.0),
+                });
             }
         }
     }
@@ -351,45 +343,32 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         )
     }
 
-    fn band(
-        &mut self,
-        y: usize,
-        rows: usize,
-        threshold: i32,
-    ) -> Result<&[FastCorner], DetectError> {
-        if let Some(index) = self
-            .bands
-            .iter()
-            .position(|band| band.y == y && band.threshold == threshold)
-        {
-            return Ok(&self.bands[index].corners);
-        }
-        // The same refusal the CPU lane returns: a band before a scan is a
-        // programming error, not an empty frame.
+    fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], DetectError> {
+        // The same refusal the CPU lane returns, and asked in the same place: a
+        // band before a scan is a programming error, not an empty frame.
         let (Some(kept), Some(mask)) = (self.kept.as_ref(), self.mask.as_ref()) else {
             return Err(DetectError::NotScanned);
         };
         // `row_start = rows.start.max(margin)`, `row_end = rows.end.min(height -
         // margin)` (`fast.rs:495-498`).
-        let first: usize = y.max(FAST_BORDER);
-        let last: usize = (y + rows).min(self.height.saturating_sub(FAST_BORDER));
-        let mut corners: Vec<FastCorner> = Vec::new();
-        // A threshold at or over 255 admits nothing: the score is a `u8`.
-        if let Ok(bound) = u8::try_from(threshold.max(0)) {
-            let scores: &[u8] = kept;
-            let bits: &[u32] = u32::from_bytes(mask);
-            for row in first..last {
-                self.filter_row(scores, bits, row, bound, &mut corners);
-            }
-        }
-        self.bands.push(Band {
-            y,
-            threshold,
-            corners,
-        });
-        // Either the band the search found or the one just pushed.
-        let last_index: usize = self.bands.len() - 1;
-        Ok(&self.bands[last_index].corners)
+        let first: usize = request.y.max(FAST_BORDER);
+        let last: usize = (request.y + request.rows).min(self.height.saturating_sub(FAST_BORDER));
+        let (width, stride): (usize, usize) = (self.width, self.words);
+        let threshold: i32 = request.threshold;
+        Ok(self
+            .bands
+            .get_or_insert_with(request.row, request.rung, || {
+                let mut corners: Vec<FastCorner> = Vec::new();
+                // A threshold at or over 255 admits nothing: the score is a `u8`.
+                if let Ok(bound) = u8::try_from(threshold.max(0)) {
+                    let scores: &[u8] = kept;
+                    let bits: &[u32] = u32::from_bytes(mask);
+                    for row in first..last {
+                        filter_row(scores, bits, width, stride, row, bound, &mut corners);
+                    }
+                }
+                corners
+            }))
     }
 }
 

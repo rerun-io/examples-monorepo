@@ -379,14 +379,78 @@ pub const LOWEST_THRESHOLD_RUNG: i32 = 1;
 /// in-block local-maximum filter on at `width >= 800` and aligns its sixteen-lane
 /// blocks to the image's own left margin (`fast.rs:517`, `:524`), so a cell-sized
 /// copy would detect a different set.
-#[derive(Debug)]
-struct Band {
-    /// Top of the cell row the band was scanned for.
-    y: usize,
-    /// Threshold rung it was scanned at.
-    threshold: i32,
-    /// Candidates over the whole width, row-major, already carrying OpenCV's score.
-    corners: Vec<FastCorner>,
+///
+/// Both scanners hold one of these, which is why it lives here beside the trait
+/// that documents the key rather than twice in the two backends.
+#[derive(Debug, Default)]
+pub(crate) struct BandCache {
+    /// `slots[rung][row]`, `None` until that band has been produced.
+    ///
+    /// Indexed rather than searched: `detect_keypoints_with_cells` asks 361
+    /// cells x up to 5 rungs per camera per frameset, and a linear scan of a
+    /// list that grows to `rows x rungs` cost about 86,000 comparisons for
+    /// nothing on a 960x960 frame.
+    slots: Vec<Vec<Option<Vec<FastCorner>>>>,
+}
+
+impl BandCache {
+    /// Drop every band, keeping the two outer allocations.
+    pub(crate) fn clear(&mut self) {
+        for rows in &mut self.slots {
+            for slot in rows.iter_mut() {
+                *slot = None;
+            }
+        }
+    }
+
+    /// Bands currently held, for `Debug`.
+    pub(crate) fn len(&self) -> usize {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|slot| slot.is_some())
+            .count()
+    }
+
+    /// The band at `(row, rung)`, produced by `scan` the first time it is asked
+    /// for and read out of the cache afterwards.
+    pub(crate) fn get_or_insert_with(
+        &mut self,
+        row: usize,
+        rung: usize,
+        scan: impl FnOnce() -> Vec<FastCorner>,
+    ) -> &[FastCorner] {
+        if self.slots.len() <= rung {
+            self.slots.resize_with(rung + 1, Vec::new);
+        }
+        let rows: &mut Vec<Option<Vec<FastCorner>>> = &mut self.slots[rung];
+        if rows.len() <= row {
+            rows.resize_with(row + 1, || None);
+        }
+        rows[row].get_or_insert_with(scan)
+    }
+}
+
+/// Which band the detector wants, and where the cache keeps it.
+///
+/// `row` and `rung` are the cell-grid row index and the threshold-ladder rung
+/// index — two loop counters [`detect_keypoints_with_cells`] already has — and
+/// they are the cache's key, so a lookup is an index and not a search. `y`,
+/// `rows` and `threshold` are what producing the band costs; they are a function
+/// of the key for as long as one frame's grid stands, which is the invariant
+/// [`CornerScan::band`] states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BandRequest {
+    /// Cell-grid row index, the cache's first key.
+    pub row: usize,
+    /// Threshold-ladder rung index, the cache's second key.
+    pub rung: usize,
+    /// First row of the band, in image coordinates.
+    pub y: usize,
+    /// Rows the band covers.
+    pub rows: usize,
+    /// FAST threshold the band is scanned at.
+    pub threshold: i32,
 }
 
 /// The frontend's corner-candidate stage: one frame in, row bands of FAST
@@ -422,25 +486,26 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
     /// backend cannot size its buffers.
     fn scan(&mut self, camera: usize, image: &ImageU16) -> Result<(), DetectError>;
 
-    /// The candidates of the `rows` rows starting at `y`, at `threshold`.
+    /// The candidates of `request`'s band.
     ///
     /// Row-major over the **whole image width**, each carrying OpenCV's integer
     /// `cornerScore` as its response — the ordering and the score
     /// [`detect_keypoints_with_cells`] then reads.
     ///
-    /// Both implementations cache on `(y, threshold)` and **not** on `rows`,
-    /// which also decides the result. That is sound only because `rows` is the
-    /// cell grid's row height, constant between two [`CornerScan::scan`] calls:
-    /// [`detect_keypoints_with_cells`] derives the grid once per frame and
-    /// clears the cache at the entry. An implementation that wants to be asked
-    /// for two different `rows` within one frame has to put `rows` in the key.
+    /// Both implementations key their band cache on `(row, rung)` and **not**
+    /// on `rows`, which also decides the result. That is sound only because
+    /// `rows` is the cell grid's row height, constant between two
+    /// [`CornerScan::scan`] calls: [`detect_keypoints_with_cells`] derives the
+    /// grid once per frame and clears the cache at the entry. An implementation
+    /// that wants to be asked for two different `rows` under one key has to put
+    /// `rows` in the key.
     ///
     /// # Errors
     ///
-    /// [`DetectError`] when the band cannot be produced; a CPU backend cannot
-    /// fail here, a device one can.
-    fn band(&mut self, y: usize, rows: usize, threshold: i32)
-    -> Result<&[FastCorner], DetectError>;
+    /// [`DetectError::NotScanned`] when no frame has been scanned: a band before
+    /// a scan is a programming error on both lanes, not an empty frame
+    /// (decision D32). A device backend can also fail on the read.
+    fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], DetectError>;
 }
 
 /// The CPU [`CornerScan`]: kornia's `fast_detect_rect_u8`, one sweep per
@@ -470,7 +535,7 @@ pub struct CpuCornerScan {
     height: usize,
     /// The [`Band`]s this frame has already scanned, in the order they were
     /// first asked for.
-    bands: Vec<Band>,
+    bands: BandCache,
 }
 
 /// `kornia_image::Image` is not `Debug`, so the geometry is what this prints.
@@ -532,31 +597,23 @@ impl CornerScan for CpuCornerScan {
         Ok(())
     }
 
-    fn band(
-        &mut self,
-        y: usize,
-        rows: usize,
-        threshold: i32,
-    ) -> Result<&[FastCorner], DetectError> {
+    fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], DetectError> {
         let Some(gray) = self.gray.as_ref() else {
             return Err(DetectError::NotScanned);
         };
-        let index: usize = match self
+        let width: usize = self.width;
+        Ok(self
             .bands
-            .iter()
-            .position(|band| band.y == y && band.threshold == threshold)
-        {
-            Some(index) => index,
-            None => {
-                let corners: Vec<FastCorner> = fast_detect_rect_u8(
+            .get_or_insert_with(request.row, request.rung, || {
+                fast_detect_rect_u8(
                     gray,
                     KorniaRect {
                         x: 0,
-                        y,
-                        w: self.width,
-                        h: rows,
+                        y: request.y,
+                        w: width,
+                        h: request.rows,
                     },
-                    threshold as f32,
+                    request.threshold as f32,
                     FAST_ARC_LENGTH,
                     FAST_BORDER,
                 )
@@ -565,17 +622,8 @@ impl CornerScan for CpuCornerScan {
                     xy: corner.xy,
                     response: opencv_corner_score(corner.response),
                 })
-                .collect();
-                self.bands.push(Band {
-                    y,
-                    threshold,
-                    corners,
-                });
-                self.bands.len() - 1
-            }
-        };
-        // Either the band the search found or the one just pushed.
-        Ok(&self.bands[index].corners)
+                .collect()
+            }))
     }
 }
 
@@ -813,6 +861,8 @@ pub fn detect_keypoints_with_cells(
 
             let mut points_added: usize = 0;
             let mut threshold: i32 = config.max_threshold;
+            // The ladder's position, which with `row` is the band cache's key.
+            let mut rung: usize = 0;
             while points_added < config.num_points_cell && threshold >= lowest_rung {
                 // `cv::FAST` on the `PATCH_SIZE` sub-image detects at
                 // sub-coordinates `[3, PATCH_SIZE - 3)`; the same rectangle in
@@ -832,8 +882,13 @@ pub fn detect_keypoints_with_cells(
                     // to: `{x + 3, y + 3, cell - 6, cell - 6}` keeps rows
                     // `[y + 3, y + cell - 3)` whatever `x` is, and the kernel
                     // only ever emits columns `[3, width - 3)`.
-                    let band: &[FastCorner] =
-                        scanner.band(y + FAST_BORDER, grid.cell - 2 * FAST_BORDER, threshold)?;
+                    let band: &[FastCorner] = scanner.band(BandRequest {
+                        row,
+                        rung,
+                        y: y + FAST_BORDER,
+                        rows: grid.cell - 2 * FAST_BORDER,
+                        threshold,
+                    })?;
                     candidates.extend(
                         band.iter()
                             .filter(|corner| corner.xy[0] >= first && corner.xy[0] < last)
@@ -877,6 +932,7 @@ pub fn detect_keypoints_with_cells(
                 }
 
                 threshold /= 2;
+                rung += 1;
             }
 
             y += grid.cell;
@@ -916,7 +972,14 @@ mod tests {
     #[test]
     fn a_band_before_a_scan_is_refused() {
         let mut scanner: CpuCornerScan = CpuCornerScan::default();
-        assert_eq!(scanner.band(0, 32, 5).unwrap_err(), DetectError::NotScanned);
+        let request: BandRequest = BandRequest {
+            row: 0,
+            rung: 0,
+            y: 0,
+            rows: 32,
+            threshold: 5,
+        };
+        assert_eq!(scanner.band(request).unwrap_err(), DetectError::NotScanned);
     }
 
     fn dotted_image(width: usize, height: usize, spacing: usize) -> ImageU16 {

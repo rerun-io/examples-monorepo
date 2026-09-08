@@ -21,7 +21,7 @@
 
 use kornia_imgproc::features::FastCorner;
 use nalgebra::Vector2;
-use slam_rs::frontend::detect::{CornerScan, CpuCornerScan, DetectError};
+use slam_rs::frontend::detect::{BandRequest, CornerScan, CpuCornerScan, DetectError};
 use slam_rs::frontend::parallel::WorkPool;
 use slam_rs::frontend::patch::OpticalFlowPatch;
 use slam_rs::frontend::patterns::{Pattern, Pattern51};
@@ -39,6 +39,19 @@ use slam_rs::pyramid::{CpuPyramidBuilder, Pyramid, PyramidBuilder, PyramidError,
 mod common;
 
 use common::{cornered_image, grid_positions, textured_image};
+
+/// One band of a 50-pixel cell grid, keyed the way
+/// `detect_keypoints_with_cells` keys it: `row` is the grid row and `rung` the
+/// place on the threshold ladder, and the cache is indexed by the pair.
+fn band_at(row: usize, rung: usize, y: usize, rows: usize, threshold: i32) -> BandRequest {
+    BandRequest {
+        row,
+        rung,
+        y,
+        rows,
+        threshold,
+    }
+}
 
 /// The keypoint budget both lanes are sized for, well over what the grid needs.
 const MAX_KEYPOINTS: usize = 1024;
@@ -573,10 +586,11 @@ fn bands_agree(
     label: &str,
 ) -> usize {
     let mut total: usize = 0;
-    for band_y in (3..height - 3).step_by(50) {
-        for threshold in [40i32, 20, 10, 5, 1] {
-            let want: Vec<FastCorner> = reference.band(band_y, 44, threshold).unwrap().to_vec();
-            let got: &[FastCorner] = actual.band(band_y, 44, threshold).unwrap();
+    for (row, band_y) in (3..height - 3).step_by(50).enumerate() {
+        for (rung, threshold) in [40i32, 20, 10, 5, 1].into_iter().enumerate() {
+            let request: BandRequest = band_at(row, rung, band_y, 44, threshold);
+            let want: Vec<FastCorner> = reference.band(request).unwrap().to_vec();
+            let got: &[FastCorner] = actual.band(request).unwrap();
             assert_eq!(
                 got.len(),
                 want.len(),
@@ -624,7 +638,10 @@ fn the_gpu_corner_scan_is_exact_against_kornia() {
 #[test]
 fn a_gpu_band_before_a_scan_is_refused() {
     let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap());
-    assert_eq!(gpu.band(0, 32, 5).unwrap_err(), DetectError::NotScanned);
+    assert_eq!(
+        gpu.band(band_at(0, 0, 0, 32, 5)).unwrap_err(),
+        DetectError::NotScanned
+    );
 }
 
 /// The scanner is reused frame after frame, so the second frame's bands must be
@@ -637,12 +654,12 @@ fn a_reused_corner_scan_carries_only_the_newest_frame() {
     let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap());
     gpu.scan(0, &first).unwrap();
     assert!(
-        !gpu.band(3, 44, 5).unwrap().is_empty(),
+        !gpu.band(band_at(0, 0, 3, 44, 5)).unwrap().is_empty(),
         "the textured frame has corners"
     );
     gpu.scan(0, &second).unwrap();
     assert!(
-        gpu.band(3, 44, 5).unwrap().is_empty(),
+        gpu.band(band_at(0, 0, 3, 44, 5)).unwrap().is_empty(),
         "a black frame has none"
     );
 }
@@ -823,7 +840,7 @@ fn the_whole_gpu_path_holds_the_pool_flat() {
             builder.build(camera, frame, &mut pyramids[camera]).unwrap();
             scanner.scan(camera, frame).unwrap();
             // One band, so the download and the host-side walk run too.
-            scanner.band(3, 44, 20).unwrap();
+            scanner.band(band_at(0, 0, 3, 44, 20)).unwrap();
         }
         // The patch build and the tracking call are the other two per-frame
         // allocations, and neither ran here before: camera 0's pyramid is the
