@@ -8,8 +8,8 @@ core through a PyO3 extension module.
 The whole pipeline runs from Python: `_core.Vio` consumes IMU samples and
 framesets and reports a pose, and `tools/apps/replay.py --stage vio` draws the
 estimate against the ground truth and against the basalt C++ reference on the
-same frames. On the smoke segment it is 1.41 cm from the C++ trajectory and
-1.64 cm from ground truth, where the C++ itself is 1.43 cm.
+same frames. On the smoke segment it is 0.31 cm from the C++ trajectory and
+1.50 cm from ground truth, where the C++ itself is 1.43 cm.
 
 ## Core modules
 
