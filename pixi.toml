@@ -2391,9 +2391,10 @@ description = "Push edited layer files into the running catalog (append --datase
 # ═══════════════════════════════════════════════════════════════════════════
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile". The core
 # is CPU-only pure Rust, so this lists the plain subdirs and no named CUDA
-# platform; osx-arm64 waits for a Mac lane.
+# platform; `osx-arm64` is reachable only through `slam-rs-osx` below, since the
+# two catalog features the linux environments compose are linux-only.
 [feature.slam-rs]
-platforms = ["linux-64", "linux-aarch64"]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
 [feature.slam-rs.dependencies]
 python = "3.12.*"
@@ -2417,6 +2418,21 @@ PYREFLY_TARGET = "slam_rs tools tests"
 # .pth already looks (the dpvo / mast3r-slam in-place pattern).
 [feature.slam-rs.tasks.slam-rs-build]
 cmd = "cargo build --release -p slam-rs-py && cp target/release/lib_core.so slam_rs/_core.so"
+cwd = "packages/slam-rs"
+inputs = [
+    "packages/slam-rs/Cargo.toml",
+    "packages/slam-rs/Cargo.lock",
+    "packages/slam-rs/.cargo/config.toml",
+    "packages/slam-rs/crates/*/Cargo.toml",
+    "packages/slam-rs/crates/*/src/**/*.rs",
+]
+outputs = ["packages/slam-rs/slam_rs/_core.so"]
+description = "Build the Rust VIO core and install slam_rs._core in place"
+
+# macOS writes the cdylib as `lib_core.dylib`; the import name keeps the `.so`
+# suffix, which is what CPython looks for on macOS as well as on Linux.
+[feature.slam-rs.target.osx-arm64.tasks.slam-rs-build]
+cmd = "cargo build --release -p slam-rs-py && cp target/release/lib_core.dylib slam_rs/_core.so"
 cwd = "packages/slam-rs"
 inputs = [
     "packages/slam-rs/Cargo.toml",
@@ -2456,6 +2472,37 @@ cmd = "pytest -q"
 depends-on = ["slam-rs-build"]
 cwd = "packages/slam-rs"
 description = "Build the core, then run the package tests"
+
+# ── the macOS lane ───────────────────────────────────────────────────────
+# The linux environments get their runtime stack from `catalog-common` and
+# `rerun-prerelease`, and both are linux-only on purpose: eighteen of the twenty
+# environments that compose them also compose `cuda`. Widening them was tried
+# first and `pixi lock` refused, for one reason worth writing down: the
+# `dataloader` extra on `rerun-sdk` requires `torchvision`, and on `osx-arm64`
+# no published torchvision builds against the torch that the conda solve pins,
+# so the environment is unsatisfiable. slam-rs imports no torchvision, so the
+# macOS lane restates what the package actually loads and asks `rerun-sdk` for
+# the `catalog` extra alone. The duplication with `catalog-common` is the price
+# of not making nineteen other environments solve for a platform none of them
+# runs on.
+[feature.slam-rs-osx]
+platforms = ["osx-arm64"]
+
+[feature.slam-rs-osx.dependencies]
+av = "*"
+py-opencv = "*"
+numpy = "*"
+pyserde = ">=0.31.2,<0.32"
+jaxtyping = "*"
+typing_extensions = ">=4.1.0,<4.16.0"
+scipy = "*"
+tqdm = "*"
+# simplecv declares it, and the conda build spares uv a Rust source build.
+hf-transfer = "*"
+
+[feature.slam-rs-osx.pypi-dependencies]
+simplecv = { path = "packages/simplecv", editable = true }
+rerun-sdk = { version = "==0.37.0", extras = ["catalog"] }
 
 # ═══════════════════════════════════════════════════════════════════════════
 # mamma — streaming multiview body capture (causal MAMMA pipeline)
@@ -3262,6 +3309,15 @@ slam-rs-dev = { features = [
     "slam-rs",
     "dev",
 ], solve-group = "slam-rs", no-default-feature = true }
+slam-rs-osx = { features = [
+    "slam-rs",
+    "slam-rs-osx",
+], solve-group = "slam-rs-osx", no-default-feature = true }
+slam-rs-osx-dev = { features = [
+    "slam-rs",
+    "slam-rs-osx",
+    "dev",
+], solve-group = "slam-rs-osx", no-default-feature = true }
 mamma = { features = [
     "common",
     "cuda",
