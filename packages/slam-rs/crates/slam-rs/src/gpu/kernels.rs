@@ -1423,8 +1423,21 @@ fn fast_score_kernel(
     // the bus and saves a whole-frame pass on the host, which measured the
     // larger of the two.
     let center = u32::cast_from(frame[slot]) >> 8u32;
+    // `#[unroll]` on all three loops below, and not for the sake of this card.
+    // `dark` and `bright` are indexed dynamically (`dark[(k + i) % 16]`) from
+    // loops with comptime bounds, so a rolled kernel cannot keep them in
+    // registers: 16 x 4 B x 2 arrays x 256 units is 32 kB of local memory per
+    // cube in the frame's hottest kernel, plus seventeen uncoalesced global
+    // loads per pixel. Unrolled, every index is a literal and both arrays fit
+    // in registers. On a 5090 at 7-11 % utilisation this changes nothing
+    // measurable and nothing should be concluded from measuring it here; it is
+    // for the shared-LPDDR targets the portable lane exists for, where
+    // `Robocap.md`'s Pi 5 lesson is that a memory-bound kernel loses to the CPU
+    // outright. The corner-scan equality tests on both lanes are what say it
+    // changed no value.
     let mut dark = Array::<u32>::new(16usize);
     let mut bright = Array::<u32>::new(16usize);
+    #[unroll]
     for k in 0..16usize {
         let row = y + usize::cast_from(ring[k]) - RING_BIAS;
         let column = x + usize::cast_from(ring[16usize + k]) - RING_BIAS;
@@ -1446,10 +1459,12 @@ fn fast_score_kernel(
     // the canonical FAST-9 structure and the order kornia sums it in.
     let mut dark_score: u32 = 0u32;
     let mut bright_score: u32 = 0u32;
+    #[unroll]
     for step in 0..8usize {
         let k = 2usize * step;
         let mut core_dark = dark[(k + 1usize) % 16usize];
         let mut core_bright = bright[(k + 1usize) % 16usize];
+        #[unroll]
         for i in 2..9usize {
             core_dark = min(core_dark, dark[(k + i) % 16usize]);
             core_bright = min(core_bright, bright[(k + i) % 16usize]);
