@@ -397,6 +397,14 @@ pixi run -e slam-rs-dev --frozen slam-rs-wgpu-test   # the same kernels through 
 pixi run -e slam-rs-dev --frozen slam-rs-wgpu-build  # a core whose `--gpu` is wgpu
 ```
 
+On macOS the same three tasks run from the mac lane's environment, which is
+where that platform's `slam-rs` features are solved, and Metal is the backend
+`AutoGraphicsApi` picks there:
+
+```bash
+pixi run -e slam-rs-osx-dev --frozen slam-rs-wgpu-test   # the same kernels through Metal
+```
+
 ### The portable lane, and the two silent failures
 
 `gpu-wgpu` builds the same kernels through `cubecl-wgpu`, which is what the
