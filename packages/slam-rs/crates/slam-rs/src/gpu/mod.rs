@@ -394,11 +394,13 @@ const CUDA_LIBRARIES: [&str; 2] = ["cuda", "nvrtc"];
 /// list `panic_no_lib_found` prints, so the probe and the loader can only ever
 /// disagree about *when* the answer is taken, never about what it is.
 ///
-/// A parameter rather than the constant, because the absence cannot be created
-/// on a host that runs this lane: pixi links every binary here with a `RUNPATH`
-/// into the environment's own `lib`, which the loader searches after
-/// `LD_LIBRARY_PATH` and which an empty `LD_LIBRARY_PATH` therefore does not
-/// remove. The unit test asks for a name no host has instead.
+/// A parameter rather than the constant so a unit test can ask for a name no
+/// host has. The real absence is made in a child process instead
+/// (`a_cuda_host_that_cannot_load_nvrtc_is_a_typed_error`): emptying
+/// `LD_LIBRARY_PATH` is not enough here, because pixi links every binary in the
+/// environment with an absolute `RUNPATH` into the environment's own `lib`,
+/// which the loader searches after `LD_LIBRARY_PATH`; the child is started
+/// through `ld.so --inhibit-rpath ''` so that route is closed too.
 #[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
 fn first_missing_library(libraries: &[&'static str]) -> Option<GpuError> {
     libraries.iter().find_map(|library| {
@@ -824,13 +826,12 @@ mod tests {
 
     /// A library cudarc would panic on is a typed error naming it.
     ///
-    /// The absence is made by asking for a name no host has, not by emptying
-    /// `LD_LIBRARY_PATH`: every binary this environment links carries a
-    /// `RUNPATH` into the environment's own `lib`, which the loader searches
-    /// after `LD_LIBRARY_PATH` and which emptying it does not remove
-    /// (measured — the child built a client). The two libraries this lane does
-    /// need are asserted present in the same test, so a host that has lost one
-    /// fails here rather than in the mapping.
+    /// The mapping, asked for a name no host has; the real absence is a child
+    /// process that has genuinely lost `libnvrtc`
+    /// (`a_cuda_host_that_cannot_load_nvrtc_is_a_typed_error`, which had to
+    /// inhibit the binary's own `RUNPATH` to make it lose it). The two
+    /// libraries this lane does need are asserted present in the same test, so
+    /// a host that has lost one fails here rather than in the mapping.
     #[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
     #[test]
     fn a_library_the_runtime_cannot_load_is_a_typed_error() {

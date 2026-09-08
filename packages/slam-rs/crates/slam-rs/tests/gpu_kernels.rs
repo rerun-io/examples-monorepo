@@ -924,18 +924,51 @@ mod absent_gpu {
     /// Names the child answers to, so the parent can tell it which case to run.
     const CASE: &str = "SLAM_RS_ABSENT_GPU_CASE";
 
-    /// Run this test binary again as the child of `case`, with `variable` set.
+    /// Run this test binary again as the child of `case`, with `variables` set.
     ///
     /// `--test-threads=1` and `--nocapture` so the child's `println!` reaches
     /// the parent whatever the harness would otherwise do with it.
-    fn child(test: &str, case: &str, variable: (&str, &str)) -> String {
+    fn child(test: &str, case: &str, variables: &[(&str, &str)]) -> String {
         let exe: std::path::PathBuf = std::env::current_exe().unwrap();
-        let output: Output = Command::new(exe)
+        run(Command::new(exe), test, case, variables)
+    }
+
+    /// The same child, started through the dynamic loader with **its own
+    /// `RUNPATH` inhibited**.
+    ///
+    /// One case needs a library to be genuinely unfindable, and emptying
+    /// `LD_LIBRARY_PATH` does not do it here: pixi links every binary in this
+    /// environment with an absolute `RUNPATH` into the environment's own `lib`,
+    /// which the loader searches *after* `LD_LIBRARY_PATH` and which therefore
+    /// answers the `dlopen` anyway (measured — the child built a client). What
+    /// defeats it is `ld.so --inhibit-rpath ''`: the empty name is the main
+    /// executable's own, and cudarc's `dlopen` is made by the executable, so
+    /// that is exactly the one object that must lose its `RUNPATH`. `None` when
+    /// the loader is not where this architecture keeps it, which is a skip and
+    /// not a pass.
+    fn child_without_runpath(test: &str, case: &str, variables: &[(&str, &str)]) -> Option<String> {
+        let loader: &str = ["/lib64/ld-linux-x86-64.so.2", "/lib/ld-linux-aarch64.so.1"]
+            .into_iter()
+            .find(|path| std::path::Path::new(path).exists())?;
+        let exe: std::path::PathBuf = std::env::current_exe().unwrap();
+        let mut command: Command = Command::new(loader);
+        command.args([
+            std::ffi::OsStr::new("--inhibit-rpath"),
+            std::ffi::OsStr::new(""),
+            exe.as_os_str(),
+        ]);
+        Some(run(command, test, case, variables))
+    }
+
+    /// Run `command` as the child of `case` and return everything it printed.
+    fn run(mut command: Command, test: &str, case: &str, variables: &[(&str, &str)]) -> String {
+        command
             .args(["--exact", test, "--nocapture", "--test-threads=1"])
-            .env(CASE, case)
-            .env(variable.0, variable.1)
-            .output()
-            .unwrap();
+            .env(CASE, case);
+        for (name, value) in variables {
+            command.env(name, value);
+        }
+        let output: Output = command.output().unwrap();
         let text: String = format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
@@ -985,7 +1018,7 @@ mod absent_gpu {
             println!("CHILD {error}");
             return;
         }
-        let text: String = child(NAME, "no-device", ("CUDA_VISIBLE_DEVICES", ""));
+        let text: String = child(NAME, "no-device", &[("CUDA_VISIBLE_DEVICES", "")]);
         assert!(
             text.contains("CHILD the CUDA driver reports 0 devices"),
             "{text}"
@@ -1011,7 +1044,7 @@ mod absent_gpu {
         let text: String = child(
             NAME,
             "no-adapter",
-            ("VK_DRIVER_FILES", "/nonexistent/no-such-icd.json"),
+            &[("VK_DRIVER_FILES", "/nonexistent/no-such-icd.json")],
         );
         assert!(
             text.contains("CHILD wgpu found no vulkan adapter"),
@@ -1019,6 +1052,61 @@ mod absent_gpu {
         );
         // The probe answers this one too.
         assert!(!panicked(&text), "the no-adapter child panicked:\n{text}");
+    }
+
+    /// A library cudarc `dlopen`s that cannot be found, in a child that really
+    /// cannot find it.
+    ///
+    /// cudarc `panic_no_lib_found`s when none of its name candidates resolves,
+    /// which is a panic on the caller's thread before any of this crate's code
+    /// runs, so the probe opens the two libraries itself first. Making that
+    /// true needs the child to lose `libnvrtc` for real: `LD_LIBRARY_PATH` is
+    /// pointed at a directory that holds no libraries, `CUDA_PATH` is emptied,
+    /// and the binary's own `RUNPATH` — an absolute path into the pixi
+    /// environment's `lib`, which the loader searches after `LD_LIBRARY_PATH`
+    /// and which is why emptying that variable alone changed nothing — is
+    /// inhibited by starting the child through `ld.so`. `libcuda` stays
+    /// findable in `/usr/lib/<triple>` where the driver package puts it, so the
+    /// library the probe names is `nvrtc`, which is the one that has to come
+    /// from the environment.
+    #[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
+    #[test]
+    fn a_cuda_host_that_cannot_load_nvrtc_is_a_typed_error() {
+        const NAME: &str = "absent_gpu::a_cuda_host_that_cannot_load_nvrtc_is_a_typed_error";
+        if case().is_some() {
+            let error: slam_rs::gpu::GpuError = client_error();
+            assert_eq!(
+                error,
+                slam_rs::gpu::GpuError::MissingLibrary { library: "nvrtc" }
+            );
+            println!("CHILD {error}");
+            return;
+        }
+        let empty: std::path::PathBuf = std::env::temp_dir();
+        let Some(text) = child_without_runpath(
+            NAME,
+            "missing-library",
+            &[
+                ("LD_LIBRARY_PATH", &empty.to_string_lossy()),
+                ("CUDA_PATH", ""),
+            ],
+        ) else {
+            println!(
+                "SKIPPED: no dynamic loader at a path this test knows, so the child's own
+                RUNPATH cannot be inhibited and libnvrtc cannot be taken away from it"
+            );
+            return;
+        };
+        assert!(
+            text.contains("CHILD the GPU runtime needs the nvrtc shared library"),
+            "{text}"
+        );
+        // The probe answers this one, so nothing panicked: cudarc never reached
+        // its own `panic_no_lib_found`.
+        assert!(
+            !panicked(&text),
+            "the missing-library child panicked:\n{text}"
+        );
     }
 
     /// `CUBECL_WGPU_DEFAULT_DEVICE` naming an index the host does not have.
@@ -1043,7 +1131,7 @@ mod absent_gpu {
         let text: String = child(
             NAME,
             "bad-index",
-            ("CUBECL_WGPU_DEFAULT_DEVICE", "DiscreteGpu(99)"),
+            &[("CUBECL_WGPU_DEFAULT_DEVICE", "DiscreteGpu(99)")],
         );
         assert!(
             text.contains("CHILD building the wgpu client panicked"),
