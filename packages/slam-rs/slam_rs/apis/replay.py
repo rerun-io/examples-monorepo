@@ -30,36 +30,25 @@ from typing import Literal, TypeAlias
 
 import numpy as np
 import rerun as rr
-from jaxtyping import Float64, UInt8
-from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from slam_rs import _core
 from slam_rs.catalog_feed import (
     DEFAULT_WINDOW_S,
-    IMU_ENTITY,
-    RIG_ENTITY,
-    TIMELINE,
-    CameraCalib,
     Frameset,
-    ImuStream,
     LocalSegment,
     SegmentFeed,
     open_segment,
 )
-from slam_rs.frontend_log import FrontendLogger, camera_entity, frontend_blueprint
+from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
 from slam_rs.reference import MANIFEST_PATH, SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment, flow_config, load_manifest
 from slam_rs.reference_bundle import BundleFile
 from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import Trajectory, ate, coverage, empty_trajectory, read_trajectory, shift_clock, write_trajectory
-from slam_rs.vio_log import VioLogger, log_rig, vio_blueprint
+from slam_rs.vio_log import FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
 """Default segment: the 7.6 s rotation-dominated panorama from the smoke tier."""
-IMAGE_DOWNSCALE: int = 2
-"""Images are logged at half resolution: the viewer does not need full-resolution pixels to show what was fed."""
-JPEG_QUALITY: int = 85
-"""Quality of the full-resolution frames the frontend stage logs; 960x960 grayscale lands around 38 kB."""
 
 Stage: TypeAlias = Literal["input", "frontend", "vio"]
 """How far a replay runs: the estimator's inputs, the optical-flow frontend over them, or the whole pipeline."""
@@ -111,17 +100,6 @@ class Config:
     """
 
 
-def _log_calibration(cameras: tuple[CameraCalib, ...]) -> None:
-    """Log the rig's static geometry so the images sit in the right place in 3D.
-
-    The ``Pinhole`` goes on the ``pinhole`` child, which is the dataset's own
-    layout: the images and the keypoints hang under it, so they are the pixels of
-    the camera that projects them.
-    """
-    rr.log("/", rr.ViewCoordinates.RUB, static=True)
-    log_rig(cameras, RIG_ENTITY, pinhole_child="/pinhole")
-
-
 @dataclass(slots=True)
 class FrontendStage:
     """The optical-flow frontend over one segment, and the Rerun layer it draws.
@@ -159,81 +137,6 @@ class FrontendStage:
         )
 
 
-@dataclass(slots=True)
-class VioStage:
-    """The whole pipeline over one segment, and the Rerun layer it draws.
-
-    The estimator, its logger and its timings only ever exist together, on
-    ``--stage vio``.
-    """
-
-    lockstep: Lockstep
-    """The estimator and the D17 hold, which the V2 gate drives the same way."""
-    logger: VioLogger
-    """Where the trajectories, the window, the landmarks and the counters go."""
-
-    @property
-    def elapsed_ms(self) -> list[float]:
-        """Wall time each ``track`` call that tracked took, in frameset order."""
-        return self.lockstep.elapsed_ms
-
-    @property
-    def pending(self) -> list[Frameset]:
-        """Framesets still held for want of the inertial samples that cover them."""
-        return self.lockstep.pending
-
-    def run(self, frameset: Frameset) -> None:
-        """Track the frameset and everything its samples now cover, and log each one.
-
-        Args:
-            frameset: The frameset to track, with the samples since the previous one.
-        """
-        for held, result in self.lockstep.push(frameset):
-            # The rows belong at the frameset's own time, which is the caller's
-            # cursor for all but a retried one.
-            rr.set_time(TIMELINE, duration=np.timedelta64(held.t_ns, "ns"))
-            # Both are present on a frameset that tracked — the snapshot because it
-            # measured, the keypoints because the frontend accepted it — so a
-            # missing one is a broken invariant, not a rung to skip (D32).
-            snapshot: _core.VioSnapshot | None = self.lockstep.vio.snapshot()
-            frame: _core.FlowFrame | None = self.lockstep.vio.flow_frame()
-            assert snapshot is not None, f"frameset {held.t_ns} tracked without a window snapshot"
-            assert frame is not None, f"frameset {held.t_ns} tracked without the keypoints it tracked on"
-            self.logger.log(result, snapshot, frame, self.lockstep.elapsed_ms[-1])
-
-    def refuse_lost_framesets(self) -> None:
-        """Stop the run when a frameset never got the inertial samples that cover it.
-
-        Every frameset either produced a pose or is still held (D17); one still
-        held at the end of a segment is a lost frameset, not a count to print,
-        and both tools that drive this stage end on the same rule.
-
-        Raises:
-            SystemExit: If any frameset is still held.
-        """
-        if self.pending:
-            raise SystemExit(f"{len(self.pending)} framesets never got the inertial samples that cover them")
-
-    def summary(self) -> str:
-        """One line on what the stage did, for the end of a replay.
-
-        The empty case is this stage's own to report: the run that tracked
-        nothing is the one whose held framesets most need naming, and a caller
-        that guarded the call on ``elapsed_ms`` suppressed exactly that line.
-        """
-        unresolved: str = ""
-        if self.pending:
-            unresolved = f", {len(self.pending)} FRAMESETS NEVER COVERED BY THE IMU at {[held.t_ns for held in self.pending]}"
-        if not self.elapsed_ms:
-            return f"vio: {self.lockstep.imu_samples} IMU samples pushed, nothing tracked{unresolved}"
-        return (
-            f"vio: {self.lockstep.imu_samples} IMU samples pushed, {len(self.elapsed_ms)} tracked, "
-            f"{self.lockstep.retries} retries, {np.mean(self.elapsed_ms):.1f} ms per frameset "
-            f"(median {np.median(self.elapsed_ms):.1f}, max {np.max(self.elapsed_ms):.1f})"
-            f"{unresolved}"
-        )
-
-
 def _cpp_trajectory(manifest: ReferenceManifest, segment: ReferenceSegment, capture_start_time_ns: int) -> Trajectory:
     """The basalt C++ reference for one segment, moved onto the replay's ``video_time`` clock.
 
@@ -245,26 +148,6 @@ def _cpp_trajectory(manifest: ReferenceManifest, segment: ReferenceSegment, capt
         print(f"no C++ trajectory to compare against: {resolved.reason}")
         return empty_trajectory()
     return shift_clock(read_trajectory(resolved.path), -capture_start_time_ns)
-
-
-def log_imu(imu: ImuStream) -> None:
-    """Log one frameset's inertial samples, one column per channel.
-
-    Two ``send_columns`` calls instead of a ``set_time`` and two ``log`` calls per
-    sample — about 57 samples a frameset at 1 kHz, so 171 calls become 2, and the
-    frameset's inertial rung goes from 0.446 ms to 0.037 ms. The rows are the
-    same rows: each timestamp still carries its three components, which is what
-    the partition says.
-
-    Args:
-        imu: The samples since the previous frameset, on the ``video_time`` clock.
-    """
-    if not len(imu):
-        return
-    times: rr.TimeColumn = rr.TimeColumn(TIMELINE, duration=imu.t_ns.astype("timedelta64[ns]"))
-    components: int = imu.gyro_rad_s.shape[1]
-    for entity, channel in ((f"{IMU_ENTITY}/gyro", imu.gyro_rad_s), (f"{IMU_ENTITY}/accel", imu.accel_m_s2)):
-        rr.send_columns(entity, indexes=[times], columns=rr.Scalars.columns(scalars=channel.reshape(-1)).partition([components] * len(imu)))
 
 
 def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage | None) -> int:
@@ -284,38 +167,14 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
     # converts one to the other, so this loop and `tracking._drive` cannot
     # disagree about which frameset a count ends on.
     stop_ns: int | None = feed.stop_ns_after(config.max_framesets)
+    # The stage that tracks needs the pixels its keypoints were computed on.
+    mode: FrameMode = "downscaled" if config.stage == "input" else "jpeg"
     frameset: Frameset
     for frameset in feed.framesets(stop_ns):
         if config.max_framesets is not None and replayed >= config.max_framesets:
             break
         replayed += 1
-
-        # The samples are what the estimator is fed, so they are logged in every
-        # stage whether or not one consumes them.
-        log_imu(frameset.imu)
-        rr.set_time(TIMELINE, duration=np.timedelta64(frameset.t_ns, "ns"))
-
-        for camera, image in zip(feed.cameras, frameset.images, strict=True):
-            entity: str = f"{camera_entity(camera.index)}/image"
-            if config.stage == "input":
-                small: UInt8[ndarray, "h w"] = np.ascontiguousarray(image[::IMAGE_DOWNSCALE, ::IMAGE_DOWNSCALE])
-                rr.log(entity, rr.Image(small, color_model="L"))
-            else:
-                # Full resolution, or the keypoints would sit two pixels off the
-                # corner they were computed on; JPEG keeps a whole segment small.
-                # The encode costs 3.9 ms a frameset on the replay thread and is
-                # deliberate: no lane that reports a wall time comes through here,
-                # because the V2 gate drives the feed and `Vio` itself with
-                # nothing logged.
-                rr.log(entity, rr.Image(image, color_model="L").compress(jpeg_quality=JPEG_QUALITY))
-
-        if frameset.ground_truth is not None:
-            pose_wxyz: Float64[ndarray, " 7"] = frameset.ground_truth
-            rr.log(
-                "/world/rig_00",
-                rr.Transform3D(translation=pose_wxyz[0:3], quaternion=rr.Quaternion(xyzw=np.roll(pose_wxyz[3:7], -1))),
-            )
-
+        log_frameset_inputs(feed, frameset, mode)
         if stage is not None:
             stage.run(frameset)
 
@@ -346,7 +205,7 @@ def main(config: Config) -> None:
             f"{len(feed.cameras)} cameras, {len(feed.frame_t_ns)} framesets, ground truth "
             f"{'attached' if feed.has_ground_truth else 'absent'}, clock offset {feed.capture_start_time_ns} ns"
         )
-        _log_calibration(feed.cameras)
+        log_calibration(feed.cameras)
         stage: FrontendStage | VioStage | None = None
         if config.stage == "frontend":
             stage = FrontendStage(

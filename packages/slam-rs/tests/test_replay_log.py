@@ -21,8 +21,8 @@ from fixture_types import IMU_PERIOD_NS, Rows, RowsReader
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 
-from slam_rs.apis.replay import IMU_ENTITY, log_imu
-from slam_rs.catalog_feed import TIMELINE, ImuStream
+from slam_rs.catalog_feed import IMU_ENTITY, TIMELINE, ImuStream
+from slam_rs.vio_log import log_imu
 
 SAMPLES: int = 33
 """One 30 Hz frameset's worth of samples."""

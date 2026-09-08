@@ -57,20 +57,17 @@ from scipy.spatial.transform import Rotation
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from slam_rs import _core
-from slam_rs.apis.replay import JPEG_QUALITY, VioStage, _log_calibration, log_imu
 from slam_rs.catalog_feed import (
-    TIMELINE,
     CameraCalib,
     Frameset,
     LocalSegment,
     RigProfile,
     open_segment,
 )
-from slam_rs.frontend_log import camera_entity
 from slam_rs.reference import MANIFEST_PATH, ImuParameters, ReferenceManifest, RobocapSession, load_manifest
 from slam_rs.tracking import Lockstep, robocap_cpp_trajectory, robocap_estimator_files
 from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_trajectory, shift_clock, write_trajectory
-from slam_rs.vio_log import VioLogger, vio_blueprint
+from slam_rs.vio_log import FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
 
 
 @dataclass(slots=True)
@@ -209,7 +206,7 @@ def main(config: Config) -> None:
             f"NOT added (video_time is the device clock), so the export shifts by {feed.export_offset_ns} ns"
         )
 
-        _log_calibration(feed.cameras)
+        log_calibration(feed.cameras)
         rr.send_blueprint(vio_blueprint(feed.cameras))
         # The same drive `replay --stage vio` runs: the D17 hold, the D32
         # invariant asserts and the rows at the held frameset's own time are one
@@ -221,16 +218,13 @@ def main(config: Config) -> None:
 
         replayed: int = 0
         started: float = time.monotonic()
+        mode: FrameMode = "jpeg" if config.log_frames else "off"
         frameset: Frameset
         for frameset in feed.framesets(last_ns):
             if frameset.t_ns > last_ns:
                 break
             replayed += 1
-            log_imu(frameset.imu)
-            rr.set_time(TIMELINE, duration=np.timedelta64(frameset.t_ns, "ns"))
-            if config.log_frames:
-                for camera, image in zip(feed.cameras, frameset.images, strict=True):
-                    rr.log(f"{camera_entity(camera.index)}/image", rr.Image(image, color_model="L").compress(jpeg_quality=JPEG_QUALITY))
+            log_frameset_inputs(feed, frameset, mode)
             stage.run(frameset)
         elapsed: float = time.monotonic() - started
         stage.logger.log_complete_paths()

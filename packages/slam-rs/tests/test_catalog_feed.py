@@ -10,7 +10,7 @@ from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from slam_rs import _core
-from slam_rs.apis.replay import Config, VioStage, _cpp_trajectory, _replay
+from slam_rs.apis.replay import Config, _cpp_trajectory, _replay
 from slam_rs.catalog_feed import (
     CHILD_FROM_PARENT,
     CameraCalib,
@@ -31,7 +31,7 @@ from slam_rs.catalog_feed import (
 from slam_rs.reference import SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment, flow_config
 from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import AteResult, Trajectory, associate, ate, read_trajectory, shift_clock, write_trajectory
-from slam_rs.vio_log import VioLogger
+from slam_rs.vio_log import VioLogger, VioStage
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
 """The 7.6 s two-camera segment the smoke tier runs on."""

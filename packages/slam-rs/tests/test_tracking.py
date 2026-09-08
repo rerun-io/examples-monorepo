@@ -26,12 +26,11 @@ from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
 from slam_rs import _core, tracking
-from slam_rs.apis.replay import VioStage
 from slam_rs.catalog_feed import Frameset, ImuStream
 from slam_rs.reference import ReferenceManifest
 from slam_rs.tracking import MAX_HELD_FRAMESETS, Lockstep, robocap_cpp_trajectory, robocap_estimator_files
 from slam_rs.trajectory import Trajectory, empty_trajectory
-from slam_rs.vio_log import VioLogger
+from slam_rs.vio_log import VioLogger, VioStage
 
 
 def frameset(step: int, texture: TextureFactory, sample_t_ns: Int64[ndarray, " n_samples"]) -> Frameset:
