@@ -176,9 +176,13 @@ impl<R: Runtime> GpuCornerScan<R> {
         // with two sources inside one call is how they come apart.
         let (width, height): (usize, usize) = (image.width(), image.height());
         let pixels: usize = width * height;
-        let shared: Option<Level0> = self
-            .level0
-            .lock()
+        let locked = self.level0.lock();
+        if locked.is_err() {
+            log::warn!(
+                "the shared level-0 table is poisoned: camera {camera} uploads its frame twice from here on"
+            );
+        }
+        let shared: Option<Level0> = locked
             .ok()
             .and_then(|table| table.get(camera).cloned().flatten())
             .filter(|level0| level0.width == width && level0.height == height);
@@ -376,19 +380,18 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         {
             return Ok(&self.bands[index].corners);
         }
+        // The same refusal the CPU lane returns: a band before a scan is a
+        // programming error, not an empty frame.
+        let (Some(kept), Some(mask)) = (self.kept.as_ref(), self.mask.as_ref()) else {
+            return Err(DetectError::NotScanned);
+        };
         // `row_start = rows.start.max(margin)`, `row_end = rows.end.min(height -
         // margin)` (`fast.rs:495-498`).
         let first: usize = y.max(FAST_BORDER);
         let last: usize = (y + rows).min(self.height.saturating_sub(FAST_BORDER));
         let mut corners: Vec<FastCorner> = Vec::new();
-        // A threshold at or over 255 admits nothing: the score is a `u8`. And
-        // no scan has run means no rows to walk, which `first..last` already
-        // says on a zero geometry.
-        if let (Ok(bound), Some(kept), Some(mask)) = (
-            u8::try_from(threshold.max(0)),
-            self.kept.as_ref(),
-            self.mask.as_ref(),
-        ) {
+        // A threshold at or over 255 admits nothing: the score is a `u8`.
+        if let Ok(bound) = u8::try_from(threshold.max(0)) {
             let scores: &[u8] = kept;
             let bits: &[u32] = u32::from_bytes(mask);
             for row in first..last {

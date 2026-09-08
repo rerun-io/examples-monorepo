@@ -837,6 +837,23 @@ impl<S: lie::LieScalar> Vio<S> {
     /// `num_features / Σ inverse-depth`, or `optical_flow_matching_default_depth`
     /// when the sum is not positive. Only computed when the config asks for
     /// `REPROJ_AVG_DEPTH`, which every shipped config does.
+    ///
+    /// **The reduction is `f64` on both instantiations because the C++ one is**
+    /// (D42): `computeProjections` is called with `Scalar2 = double`
+    /// (`ba_base.cpp:540,558`), so every `proj` is widened to `Vector4d` on the
+    /// way into the vector, and `:592-593` declares `avg_invdepth` and
+    /// `num_features` as `double` whatever `Scalar` is. `to_f64()` here is that
+    /// `cast<double>`, and the division follows it.
+    ///
+    /// One deviation, and it is on the way **out**: C++ carries the guess as a
+    /// `double` from the queue (`vio_estimator.h:108`) into
+    /// `OpticalFlowBase::depth_guess` (`optical_flow.h:164`), while the port's
+    /// frontend holds it as `f32` (`FrameToFrameOpticalFlow::depth_guess`), so
+    /// the quotient is rounded once here. The guess only seeds the KLT's
+    /// matching window, and the f64 backend lane reproduces the C++ trajectory
+    /// to 2.5e-13 m over 4,095 framesets with the same rounding in place, so it
+    /// reaches no decision on the shipped path; widening the frontend's field is
+    /// the fix if one ever does.
     fn publish_depth_guess(&mut self) -> Result<(), VioError> {
         if self.estimator.ba.calib.t_i_c.is_empty()
             || self.frontend.config().optical_flow_matching_guess_type

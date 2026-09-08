@@ -83,7 +83,8 @@ expect_used = "deny"
 # reference.
 #
 # `2`, not `3`: `.cargo/config.toml` records opt-level 3 crashing rustc's LLVM
-# while compiling faer on aarch64.
+# while compiling faer on aarch64. faer has since left the graph; the override
+# there is kept until an aarch64 host re-tests it, and this level follows it.
 [profile.dev]
 opt-level = 2
 

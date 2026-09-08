@@ -264,6 +264,11 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
                 .client
                 .read_one(self.result.clone())
                 .map_err(|error| super::read_failed("the tracker result", &error))?;
+            // `<`, where every sibling download checks `!=`: `self.result` is
+            // allocated at `capacity` and read whole, while `expected` is sized by
+            // `count`, so a full frame returns more bytes than this call reads
+            // (28,672 against 700 on the tracker's own tolerance test). What an
+            // incomplete runtime does — return fewer — is what this refuses.
             let expected: usize = TRANSFORM_RUNS * count * size_of::<f32>();
             if bytes.len() < expected {
                 return Err(TrackerError::LengthMismatch {

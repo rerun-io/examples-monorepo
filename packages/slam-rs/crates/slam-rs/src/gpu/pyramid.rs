@@ -327,6 +327,10 @@ impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
                         width: level0.width,
                         height: level0.height,
                     });
+                } else {
+                    log::warn!(
+                        "the shared level-0 table is poisoned: camera {camera} uploads its frame twice from here on"
+                    );
                 }
 
                 for level in 1..out.levels.len() {

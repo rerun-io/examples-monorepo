@@ -23,11 +23,13 @@
 //! and the model's includes the landmarks' own gain — it is positive at
 //! `inc = 0` (pr10-linearize.md finding 1). Nothing here "fixes" that.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use nalgebra::{DMatrix, DVector, Vector3};
 
-use super::{EstimatorError, LmDamping, SqrtKeypointVio, StageTimings, VEE_FACTOR};
+use super::{
+    EstimatorError, LmDamping, SqrtKeypointVio, StageTimings, VEE_FACTOR, fixed_keyframes,
+};
 use crate::duration_ns;
 use crate::imu::{ImuLinData, IntegratedImuMeasurement, Matrix9};
 use crate::lie::{LieScalar, eigen_maxi};
@@ -202,17 +204,13 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             lin_data: imu_lin,
             measurements: imu_meas.iter().map(|(t, meas)| (*t, meas)).collect(),
         };
-        let fixed_kfs: BTreeSet<FrameId> = if config.vio_fix_long_term_keyframes {
-            ltkfs.clone()
-        } else {
-            BTreeSet::new()
-        };
         let inputs: LinearizationInputs<'_, S> = LinearizationInputs {
             marg: Some(marg_data),
             imu: Some(&imu_input),
             used_frames: None,
             lost_landmarks: None,
-            fixed_frames: Some(&fixed_kfs),
+            // `:1258`: the same set `marginalize` builds at `:924`.
+            fixed_frames: fixed_keyframes(config, ltkfs),
         };
 
         // `:1268-1274`: one linearizer for the whole frame; the outer loop
@@ -257,6 +255,9 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                     for t_ns in ltkfs {
                         let Some((idx, size)) = aom.get(*t_ns) else {
                             // `:1397-1399`: C++ prints "[UNEXPECTED]" and skips.
+                            log::warn!(
+                                "[UNEXPECTED] long-term keyframe {t_ns} ns is not in the ordering"
+                            );
                             continue;
                         };
                         for row in idx..(idx + size) {

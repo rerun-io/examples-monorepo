@@ -21,7 +21,7 @@
 
 use kornia_imgproc::features::FastCorner;
 use nalgebra::Vector2;
-use slam_rs::frontend::detect::{CornerScan, CpuCornerScan};
+use slam_rs::frontend::detect::{CornerScan, CpuCornerScan, DetectError};
 use slam_rs::frontend::parallel::WorkPool;
 use slam_rs::frontend::patch::OpticalFlowPatch;
 use slam_rs::frontend::patterns::{Pattern, Pattern51};
@@ -616,6 +616,14 @@ fn the_gpu_corner_scan_is_exact_against_kornia() {
         let total: usize = bands_agree(&mut cpu, &mut gpu, height, &format!("{width}x{height}"));
         println!("{width}x{height}: {total} corners over every band and rung, identical");
     }
+}
+
+/// The GPU lane refuses a band before a scan with the same typed error the CPU
+/// lane returns, rather than caching an empty one and reporting success (D32).
+#[test]
+fn a_gpu_band_before_a_scan_is_refused() {
+    let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap());
+    assert_eq!(gpu.band(0, 32, 5).unwrap_err(), DetectError::NotScanned);
 }
 
 /// The scanner is reused frame after frame, so the second frame's bands must be

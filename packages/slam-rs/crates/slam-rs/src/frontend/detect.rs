@@ -140,6 +140,15 @@ pub enum DetectError {
     #[cfg(feature = "gpu-core")]
     #[error(transparent)]
     Gpu(#[from] crate::gpu::GpuError),
+    /// [`CornerScan::band`] was asked for corners before [`CornerScan::scan`]
+    /// ran on this frame.
+    ///
+    /// Unreachable: [`detect_keypoints_with_cells`] scans the frame before it
+    /// walks a single band. It is a typed error on **both** lanes rather than
+    /// an empty band because a detector that reports success and finds nothing
+    /// is exactly the failure decision D32 exists to make impossible.
+    #[error("a corner band was asked for before the frame was scanned")]
+    NotScanned,
     /// The 8-bit view could not be built over the bytes written for it.
     ///
     /// Unreachable: the loop that fills those bytes writes exactly
@@ -530,11 +539,7 @@ impl CornerScan for CpuCornerScan {
         threshold: i32,
     ) -> Result<&[FastCorner], DetectError> {
         let Some(gray) = self.gray.as_ref() else {
-            return Err(DetectError::GrayViewRefused {
-                width: self.width,
-                height: self.height,
-                actual: 0,
-            });
+            return Err(DetectError::NotScanned);
         };
         let index: usize = match self
             .bands
@@ -904,6 +909,16 @@ mod tests {
     /// square's edge scores the same 255, and OpenCV's strictly-greater
     /// suppression then kills the whole plateau — a real image has no such ties,
     /// and neither does this one.
+    /// A band asked for before the frame was scanned is a programming error on
+    /// both lanes, and it is the same typed error on both:
+    /// `detect_keypoints_with_cells` scans first, so an empty band here would
+    /// be a detector that reports success and finds nothing (D32).
+    #[test]
+    fn a_band_before_a_scan_is_refused() {
+        let mut scanner: CpuCornerScan = CpuCornerScan::default();
+        assert_eq!(scanner.band(0, 32, 5).unwrap_err(), DetectError::NotScanned);
+    }
+
     fn dotted_image(width: usize, height: usize, spacing: usize) -> ImageU16 {
         let mut image: ImageU16 = ImageU16::zeros(width, height).unwrap();
         for y in 0..height {

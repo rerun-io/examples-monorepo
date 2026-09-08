@@ -34,7 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::Vector3;
 
-use super::{EstimatorError, SqrtKeypointVio, WindowRole, duration_ns};
+use super::{EstimatorError, SqrtKeypointVio, WindowRole, duration_ns, fixed_keyframes};
 use crate::config::KeyframeMargCriteria;
 use crate::landmark::eigen_norm3;
 use crate::lie::{LieScalar, Se3};
@@ -236,7 +236,8 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             schedule: &schedule,
             imu_lin_data: Some(self.imu_lin_data()),
             lost_landmarks: Some(lost_landmarks),
-            fixed_frames: None,
+            // `:924`: the same set `optimize` builds at `:1258`.
+            fixed_frames: fixed_keyframes(&self.config, &self.ltkfs),
             options: MarginalizeOptions {
                 marg_lost_landmarks: self.config.vio_marg_lost_landmarks,
                 keep_nullspace_marg_data: keep_nullspace,
@@ -602,6 +603,34 @@ mod tests {
     /// Every keyframe well tracked, so nothing to marginalize on the ratio.
     fn all_connected(vio: &SqrtKeypointVio<f64>) -> BTreeMap<FrameId, usize> {
         vio.kf_ids.iter().map(|t_ns| (*t_ns, 10)).collect()
+    }
+
+    /// `fixed_kfs` reaches **both** linearizations. C++ builds it at `:924`
+    /// for the marginalization and at `:1258` for the optimization, so with
+    /// `vio_fix_long_term_keyframes` on a long-term keyframe's pose Jacobians
+    /// are zeroed in the prior it computes as well as in the increment it
+    /// solves. No shipped config sets the flag and nothing in the VIO calls
+    /// `take_long_term_keyframe`, so this is the only coverage.
+    #[test]
+    fn a_long_term_keyframe_is_fixed_in_both_linearizations() {
+        let mut vio: SqrtKeypointVio<f64> =
+            a_window_of_keyframes(KeyframeMargCriteria::Default, FLAT);
+        vio.take_long_term_keyframe();
+        vio.demote_long_term_keyframe();
+        assert!(!vio.ltkfs.is_empty());
+
+        assert_eq!(
+            fixed_keyframes(&vio.config, &vio.ltkfs),
+            None,
+            "the shipped config leaves every keyframe free"
+        );
+
+        vio.config.vio_fix_long_term_keyframes = true;
+        assert_eq!(
+            fixed_keyframes(&vio.config, &vio.ltkfs),
+            Some(&vio.ltkfs),
+            "the flag fixes the long-term keyframes"
+        );
     }
 
     /// `takeLongTermKeyframe()` (`:124-127`) and the demotion it asks for

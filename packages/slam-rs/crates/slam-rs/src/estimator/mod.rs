@@ -1409,6 +1409,26 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     }
 }
 
+/// `fixed_kfs`: the keyframes whose pose Jacobians a linearization zeroes.
+///
+/// C++ builds the same set twice — `:924` for the marginalization's own
+/// linearization and `:1258` for the optimization's — so with
+/// `vio_fix_long_term_keyframes` on the long-term keyframes are fixed in the
+/// prior the window computes as well as in the increment it solves. `None` and
+/// an empty set mean the same thing to
+/// [`LinearizationAbsQR`](crate::linearize::LinearizationAbsQR); `None` is what
+/// the flag being off says.
+fn fixed_keyframes<'a>(
+    config: &VioConfig,
+    ltkfs: &'a BTreeSet<FrameId>,
+) -> Option<&'a BTreeSet<FrameId>> {
+    if config.vio_fix_long_term_keyframes {
+        Some(ltkfs)
+    } else {
+        None
+    }
+}
+
 /// `AffineCompact2f::translation().cast<Scalar>()` (`:437`).
 fn cast_pixel<S: LieScalar>(pixel: &Vector2<f32>) -> Vector2<S> {
     Vector2::new(
