@@ -191,7 +191,9 @@ def main(config: Config) -> None:
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / f"robocap-{session.session_id}" / "slam_rs.csv"
     calibration: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
     flow_config: _core.VioConfig = _core.VioConfig.from_json((manifest.package_root / manifest.robocap.vio_config).read_text())
-    cpp: Trajectory = read_rig_trajectory(session.slam_path, offset_ns)
+    # The layer is on the recording's own `video_time`; the trajectory clock is
+    # that plus the camera offset, which is what the frames get too.
+    cpp: Trajectory = shift_clock(read_rig_trajectory(session.slam_path), offset_ns)
     print(f"{session.segment_id}: basalt C++ {len(cpp)} poses from {session.slam_path.name} (expected {session.basalt_num_poses})")
     print(f"basalt calibration {manifest.robocap.calibration} at downscale {manifest.robocap.downscale}: {list(calibration.resolution)}")
     print(f"basalt config {manifest.robocap.vio_config}: safe radius {flow_config.optical_flow_image_safe_radius} px")

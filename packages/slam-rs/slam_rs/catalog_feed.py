@@ -1181,16 +1181,17 @@ def open_segment(
         yield _build_feed(dataset, dataset, source.segment_id, parameters, profile, frame_stride, window_s)
 
 
-def read_rig_trajectory(rrd: Path, shift_ns: int = 0) -> Trajectory:
-    """Every rig pose on one ``.rrd`` layer, shifted onto the clock the caller works in.
+def read_rig_trajectory(rrd: Path) -> Trajectory:
+    """Every rig pose on one ``.rrd`` layer, on the ``video_time`` the layer stores.
 
     The RoboCap ``slam`` layer is a trajectory and nothing else, on the same
     ``video_time`` as the base layer it sits beside, so it is read the way the
-    ground-truth layer is and then moved by the same offset the frames are.
+    ground-truth layer is. Moving it onto another clock is the caller's own step
+    (:func:`slam_rs.trajectory.shift_clock`) rather than a parameter here: reading
+    a layer and moving a clock are two things.
 
     Args:
         rrd: Layer holding the rig's ``Transform3D`` rows.
-        shift_ns: Added to every timestamp; the camera-to-IMU offset for RoboCap.
 
     Returns:
         The whole trajectory, oldest pose first.
@@ -1206,4 +1207,4 @@ def read_rig_trajectory(rrd: Path, shift_ns: int = 0) -> Trajectory:
         found: Trajectory | None = _read_ground_truth(dataset, segment_ids[0], -(2**62), 2**62)
     if found is None:
         raise ValueError(f"{rrd} carries no {RIG_ENTITY} Transform3D rows")
-    return shift_clock(found, shift_ns)
+    return found

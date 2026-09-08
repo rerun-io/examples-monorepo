@@ -34,6 +34,7 @@ from slam_rs.catalog_feed import (
     select_cameras,
 )
 from slam_rs.reference import ImuParameters, ReferenceManifest, RobocapSession, load_manifest
+from slam_rs.trajectory import shift_clock
 
 
 @pytest.fixture(scope="module")
@@ -401,7 +402,7 @@ def test_the_feed_opens_the_real_robocap_rig(manifest: ReferenceManifest) -> Non
     session: RobocapSession = manifest.robocap.session("s00000015")
     if not session.base_path.is_file() or not session.slam_path.is_file():
         pytest.skip(f"{session.base_path} is not on this machine")
-    cpp = read_rig_trajectory(session.slam_path, manifest.robocap.imu.cam_time_offset_ns)
+    cpp = shift_clock(read_rig_trajectory(session.slam_path), manifest.robocap.imu.cam_time_offset_ns)
     assert len(cpp) == session.basalt_num_poses
 
     with open_segment(LocalSegment(base_rrd=session.base_path), manifest.robocap.imu, profile=robocap_profile(manifest)) as feed:
