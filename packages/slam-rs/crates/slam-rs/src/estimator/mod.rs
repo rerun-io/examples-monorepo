@@ -152,7 +152,7 @@ impl std::fmt::Display for WindowRole {
 /// **Which errors leave the window where** is a property of the call site, not
 /// of the variant, and is set out under "Where an error leaves the window" in
 /// the module header.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum EstimatorError {
     /// `vio_linearization_type` is not `ABS_QR`, or `vio_sqrt_marg` is false:
     /// the other five combinations are out of scope (D13).
@@ -177,6 +177,35 @@ pub enum EstimatorError {
         max_states: i32,
         /// `vio_max_kfs`.
         max_kfs: i32,
+    },
+    /// A scalar the estimator divides by or takes the square root of is zero,
+    /// negative or not finite: an observation or IMU standard deviation, the IMU
+    /// update rate, or a damping bound.
+    #[error("{field} must be positive and finite, got {value}")]
+    NonPositiveScalar {
+        /// The config or calibration field, spelled as the struct spells it.
+        field: &'static str,
+        /// What it holds, in the estimator's own scalar widened to `f64`.
+        value: f64,
+    },
+    /// An initial prior weight is negative or not finite. Zero is a free gauge
+    /// direction, which is a choice a caller may make; a negative weight has no
+    /// square root and an infinite one has no prior.
+    #[error("{field} must be non-negative and finite, got {value}")]
+    NegativeScalar {
+        /// The config field, spelled as the struct spells it.
+        field: &'static str,
+        /// What it holds.
+        value: f64,
+    },
+    /// The damping bounds cross, so no `lambda` satisfies both (`:1415`,
+    /// `:1595`).
+    #[error("vio_lm_lambda_min {min} must not exceed vio_lm_lambda_max {max}")]
+    DampingRangeReversed {
+        /// `vio_lm_lambda_min`.
+        min: f64,
+        /// `vio_lm_lambda_max`.
+        max: f64,
     },
     /// The rig has fewer than the two cameras `optical_flow.h:210` requires,
     /// its intrinsics and extrinsics disagree, or a frameset carries a
@@ -591,6 +620,70 @@ pub struct SqrtKeypointVio<S: LieScalar> {
     last_marginalized: Vec<FrameId>,
 }
 
+/// Every live scalar the estimator's own arithmetic needs, checked before any
+/// of that arithmetic runs.
+///
+/// The estimator divides by the two bias deviations (`:226`) and by the squared
+/// observation deviation (`ba_base.cpp:181`), takes the square root of the IMU
+/// rate (`calibration.hpp:186`) and of the three initial prior weights
+/// (`:87-93`), and compares `lambda` against both damping bounds (`:1415`,
+/// `:1595`). basalt does all of it unchecked, on numbers that reach it from a
+/// device driver and a file it ships; here they reach it from a caller, so a
+/// value outside its domain is bad input refused at the boundary (D32) rather
+/// than a NaN or an infinity in a live prior. The `VioConfig` and `Calibration`
+/// parsers stay syntax-only: what a number has to be is a property of the
+/// arithmetic that reads it, and `Calibration` is also the frontend's.
+///
+/// The Nielsen escalation factor is not here: it is the compile-time
+/// [`VEE_FACTOR`], not a config field.
+fn validate_scalars<S: LieScalar>(
+    calibration: &Calibration<S>,
+    config: &VioConfig,
+) -> Result<(), EstimatorError> {
+    let positive = |field: &'static str, value: f64| -> Result<(), EstimatorError> {
+        if value.is_finite() && value > 0.0 {
+            Ok(())
+        } else {
+            Err(EstimatorError::NonPositiveScalar { field, value })
+        }
+    };
+
+    positive("imu_update_rate", calibration.imu_update_rate.to_f64())?;
+    for (field, deviations) in [
+        ("gyro_noise_std", &calibration.gyro_noise_std),
+        ("accel_noise_std", &calibration.accel_noise_std),
+        ("gyro_bias_std", &calibration.gyro_bias_std),
+        ("accel_bias_std", &calibration.accel_bias_std),
+    ] {
+        for deviation in deviations.iter() {
+            positive(field, deviation.to_f64())?;
+        }
+    }
+    positive("vio_obs_std_dev", config.vio_obs_std_dev)?;
+    positive("vio_obs_huber_thresh", config.vio_obs_huber_thresh)?;
+    positive("vio_lm_lambda_initial", config.vio_lm_lambda_initial)?;
+    positive("vio_lm_lambda_min", config.vio_lm_lambda_min)?;
+    positive("vio_lm_lambda_max", config.vio_lm_lambda_max)?;
+
+    for (field, value) in [
+        ("vio_init_pose_weight", config.vio_init_pose_weight),
+        ("vio_init_ba_weight", config.vio_init_ba_weight),
+        ("vio_init_bg_weight", config.vio_init_bg_weight),
+    ] {
+        if !(value.is_finite() && value >= 0.0) {
+            return Err(EstimatorError::NegativeScalar { field, value });
+        }
+    }
+
+    if config.vio_lm_lambda_min > config.vio_lm_lambda_max {
+        return Err(EstimatorError::DampingRangeReversed {
+            min: config.vio_lm_lambda_min,
+            max: config.vio_lm_lambda_max,
+        });
+    }
+    Ok(())
+}
+
 impl<S: LieScalar> SqrtKeypointVio<S> {
     /// `SqrtKeypointVioEstimator(g, calib, config)` (`:57-117`).
     ///
@@ -605,8 +698,11 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     ///
     /// [`EstimatorError`] when the config asks for a path this port does not
     /// have, when it enables realtime frame dropping, when the window sizes are
-    /// not positive, when the rig has fewer than two cameras, or when a camera
-    /// model has no projection.
+    /// not positive, when the rig has fewer than two cameras, when a camera
+    /// model has no projection, or when any scalar its own arithmetic divides
+    /// by, takes the square root of or compares against is outside its domain:
+    /// `NonPositiveScalar`, `NegativeScalar` and `DampingRangeReversed` name
+    /// the field and the value.
     pub fn new(
         g: Vector3<S>,
         calibration: Calibration<S>,
@@ -646,6 +742,8 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 actual: calibration.intrinsics.len(),
             });
         }
+
+        validate_scalars(&calibration, &config)?;
 
         let noise: ImuNoise<S> = ImuNoise::from_calibration(&calibration);
         let gyro_bias_sqrt_weight: Vector3<S> = calibration.gyro_bias_std.map(|v| S::one() / v);
@@ -1424,6 +1522,145 @@ mod tests {
     /// The rig is one list of cameras, and
     /// [`SqrtKeypointVio::triangulate_unconnected`] indexes the projections and
     /// the extrinsics with the same id.
+    /// D32 at the API boundary: every scalar the estimator's own arithmetic
+    /// divides by, takes the square root of or compares against is checked
+    /// before any of that arithmetic runs.
+    ///
+    /// basalt runs it anyway: a negative `vio_init_pose_weight` puts a NaN on
+    /// the prior's diagonal (`:87-93`), a zero bias deviation an infinity in the
+    /// bias weight (`:226`), a negative `imu_update_rate` a NaN in both IMU
+    /// covariances (`calibration.hpp:186`), and a zero `vio_obs_std_dev` an
+    /// infinity in every Huber weight (`ba_base.cpp:181`). Every shipped
+    /// fixture is inside every domain, which is why no oracle lane can see
+    /// this.
+    ///
+    /// The values are the estimator's own scalar widened back to `f64`, so the
+    /// calibration probes use numbers `f32` holds exactly.
+    #[test]
+    fn a_scalar_outside_its_domain_is_refused_before_the_estimator_exists() {
+        let refuse_config = |mutate: &dyn Fn(&mut VioConfig)| -> EstimatorError {
+            let mut config: VioConfig = VioConfig::from_json_str(CONFIG).unwrap();
+            mutate(&mut config);
+            SqrtKeypointVio::<f32>::with_default_gravity(
+                Calibration::<f64>::from_json_str(CALIB).unwrap().cast(),
+                config,
+            )
+            .unwrap_err()
+        };
+        let refuse_calibration = |mutate: &dyn Fn(&mut Calibration<f64>)| -> EstimatorError {
+            let mut calibration: Calibration<f64> = Calibration::from_json_str(CALIB).unwrap();
+            mutate(&mut calibration);
+            SqrtKeypointVio::<f32>::with_default_gravity(
+                calibration.cast(),
+                VioConfig::from_json_str(CONFIG).unwrap(),
+            )
+            .unwrap_err()
+        };
+
+        // The shipped pair, which every domain accepts.
+        estimator();
+
+        // The three initial prior weights, whose square roots the prior is.
+        assert_eq!(
+            refuse_config(&|config| config.vio_init_pose_weight = -1.0),
+            EstimatorError::NegativeScalar {
+                field: "vio_init_pose_weight",
+                value: -1.0,
+            }
+        );
+        assert_eq!(
+            refuse_config(&|config| config.vio_init_ba_weight = f64::NEG_INFINITY),
+            EstimatorError::NegativeScalar {
+                field: "vio_init_ba_weight",
+                value: f64::NEG_INFINITY,
+            }
+        );
+        assert_eq!(
+            refuse_config(&|config| config.vio_init_bg_weight = f64::INFINITY),
+            EstimatorError::NegativeScalar {
+                field: "vio_init_bg_weight",
+                value: f64::INFINITY,
+            }
+        );
+
+        // The reprojection cost's two scalars.
+        assert_eq!(
+            refuse_config(&|config| config.vio_obs_std_dev = 0.0),
+            EstimatorError::NonPositiveScalar {
+                field: "vio_obs_std_dev",
+                value: 0.0,
+            }
+        );
+        assert_eq!(
+            refuse_config(&|config| config.vio_obs_huber_thresh = -1.0),
+            EstimatorError::NonPositiveScalar {
+                field: "vio_obs_huber_thresh",
+                value: -1.0,
+            }
+        );
+
+        // The damping: three positive bounds, and they must not cross.
+        assert_eq!(
+            refuse_config(&|config| config.vio_lm_lambda_initial = f64::INFINITY),
+            EstimatorError::NonPositiveScalar {
+                field: "vio_lm_lambda_initial",
+                value: f64::INFINITY,
+            }
+        );
+        assert_eq!(
+            refuse_config(&|config| config.vio_lm_lambda_min = 0.0),
+            EstimatorError::NonPositiveScalar {
+                field: "vio_lm_lambda_min",
+                value: 0.0,
+            }
+        );
+        assert_eq!(
+            refuse_config(&|config| {
+                config.vio_lm_lambda_min = 1.0;
+                config.vio_lm_lambda_max = 0.5;
+            }),
+            EstimatorError::DampingRangeReversed { min: 1.0, max: 0.5 }
+        );
+
+        // The IMU rate and the four deviations, one probe each.
+        assert_eq!(
+            refuse_calibration(&|calibration| calibration.imu_update_rate = -200.0),
+            EstimatorError::NonPositiveScalar {
+                field: "imu_update_rate",
+                value: -200.0,
+            }
+        );
+        assert_eq!(
+            refuse_calibration(&|calibration| calibration.gyro_bias_std.y = 0.0),
+            EstimatorError::NonPositiveScalar {
+                field: "gyro_bias_std",
+                value: 0.0,
+            }
+        );
+        assert_eq!(
+            refuse_calibration(&|calibration| calibration.accel_bias_std.z = -0.5),
+            EstimatorError::NonPositiveScalar {
+                field: "accel_bias_std",
+                value: -0.5,
+            }
+        );
+        assert_eq!(
+            refuse_calibration(&|calibration| calibration.accel_noise_std.x = f64::INFINITY),
+            EstimatorError::NonPositiveScalar {
+                field: "accel_noise_std",
+                value: f64::INFINITY,
+            }
+        );
+        // A NaN cannot be compared with `assert_eq!`; it is refused as well.
+        assert!(matches!(
+            refuse_calibration(&|calibration| calibration.gyro_noise_std.x = f64::NAN),
+            EstimatorError::NonPositiveScalar {
+                field: "gyro_noise_std",
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn a_rig_whose_intrinsics_and_extrinsics_disagree_is_refused() {
         let config: VioConfig = VioConfig::from_json_str(CONFIG).unwrap();
