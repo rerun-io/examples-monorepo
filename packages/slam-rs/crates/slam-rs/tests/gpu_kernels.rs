@@ -718,39 +718,97 @@ fn the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing() {
     assert_eq!(shared.frame_uploads(), 1);
 }
 
-/// The per-frame path keeps CubeCL's pool bounded.
+/// The whole GPU path keeps CubeCL's pool bounded: it plateaus and holds flat.
 ///
-/// The lane held 670 MiB to 1.4 GiB over idle for about 6 MB of pyramids and
-/// patch storage, which is irrelevant on a 32 GB card and decisive on the cap's
-/// shared 8 GB. The cause is not the data: `cubecl-cuda` sizes its pools from
-/// the device — `max_page_size = total / 4`, then `MemoryConfiguration::SubSlices`
-/// lays a geometric ladder of pools down to 8 MB pages — and `RuntimeOptions`
-/// is built inside `DeviceService::init`, so a client cannot ask for anything
-/// smaller. What a caller controls is how many allocations per frame it hands
-/// the pool and how many distinct sizes they come in. This measures that, over
-/// enough framesets that a leak would show, and holds the reserved bytes to a
-/// ceiling the 8 GB lane can afford.
+/// **Bounded pool growth, not zero device allocations** — the distinction
+/// matters and the earlier version of this test could not tell them apart.
+/// CubeCL 0.10's only host-to-device write is `create*`
+/// (`cubecl-runtime/src/client.rs`: `create_from_slice`, `create`, the tensor
+/// forms, and `empty`; there is no write into an existing handle), so three
+/// allocations are unavoidably per-frame: the frame upload per camera
+/// (`GpuPyramidBuilder::build`), the positions buffer per patch build
+/// (`GpuPatches::upload_staging`) and the transform buffer per tracking call
+/// (`GpuPatchTracker::track`). What the design can promise is that the pool
+/// they come out of stops growing, and that is what this measures.
+///
+/// It matters because the lane held 670 MiB to 1.4 GiB over idle for about
+/// 6 MB of pyramids and patch storage, which is irrelevant on a 32 GB card and
+/// decisive on the cap's shared 8 GB. The cause is not the data:
+/// `cubecl-cuda` sizes its pools from the device — `max_page_size = total / 4`,
+/// then `MemoryConfiguration::SubSlices` lays a geometric ladder of pools down
+/// to 8 MB pages — and `RuntimeOptions` is built inside `DeviceService::init`,
+/// so a client cannot ask for anything smaller. What a caller controls is how
+/// many allocations per frame it hands the pool and how many distinct sizes
+/// they come in.
+///
+/// So the drive is the **whole** path — pyramid, corner scan and its band walk,
+/// patch build and the KLT tracker, two cameras, 200 framesets — and the
+/// assertion is that after a warm-up both the reserved bytes and the bytes in
+/// use are *constant*, not merely under a ceiling. A ceiling alone passed while
+/// each of the three per-frame allocations went unexercised.
 #[test]
-fn the_per_frame_path_holds_the_pool_flat() {
+fn the_whole_gpu_path_holds_the_pool_flat() {
     const FRAMES: usize = 200;
-    /// Twice the larger of the two lanes' measured plateaus — 31.35 MiB on
-    /// CUDA, 40.00 on wgpu — rather than the 256 MiB it started at, which was
-    /// six to eight times them and would have called a leak that plateaued
-    /// anywhere under a quarter of a gigabyte green.
-    const RESERVED_CEILING: u64 = 96 * 1024 * 1024;
+    /// Framesets the pool may still be growing over.
+    ///
+    /// Measured: on both lanes there is no growth to wait out at all — the
+    /// first frameset already reads the plateau (156.74 / 40.00 MiB reserved,
+    /// 18.51 MiB in use, 21 allocations) and every one of the 200 reads the
+    /// same. Ten is kept anyway, because a runtime whose first frames opened a
+    /// pool page would otherwise fail this on its bring-up rather than on a
+    /// leak, and ten framesets is still far too few for one to hide in.
+    const WARM_UP: usize = 10;
+    /// Twice the larger of the two lanes' measured plateaus: **156.74 MiB** on
+    /// CUDA and 40.00 on wgpu, driving the whole path.
+    ///
+    /// It is the weaker of the two ceilings and deliberately so. Reserved bytes
+    /// are the pool's page ladder, and `cubecl-cuda` sizes that ladder from the
+    /// **device** — `max_page_size = total / 4` on this 32 GB card — so the same
+    /// code on the cap's shared 8 GB reserves a different number for the same
+    /// work. What is portable is `IN_USE_CEILING` below and, above everything,
+    /// the flatness.
+    const RESERVED_CEILING: u64 = 320 * 1024 * 1024;
+    /// Half again the payload both lanes hold: **18.51 MiB**, identical on CUDA
+    /// and on wgpu, for two 960x960 four-level pyramids, the scanner's three
+    /// per-camera buffers, two patch sets at a 1,024-keypoint capacity and the
+    /// tracker's result buffers. Unlike the reserved figure this is the data
+    /// itself, so it is the same on any device and a leak of any size shows in
+    /// it.
+    const IN_USE_CEILING: u64 = 32 * 1024 * 1024;
 
     let client = gpu_client().unwrap();
     let mut builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
     let mut scanner: GpuCornerScan<_> = GpuCornerScan::new(client.clone());
     scanner.share_level0(builder.level0_table());
+    let mut tracker: GpuPatchTracker<Pattern51, _> = GpuPatchTracker::new(
+        client.clone(),
+        MAX_KEYPOINTS,
+        LEVELS + 1,
+        MAX_ITERATIONS,
+        MAX_RECOVERED_DIST2,
+    )
+    .unwrap();
+    let mut patches: GpuPatches<Pattern51, _> = tracker.make_patches().unwrap();
+    let mut result: FlowResult = FlowResult::with_capacity(MAX_KEYPOINTS);
 
+    // Two cameras of the same geometry, as a stereo rig is: the mixed-geometry
+    // case is what `the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing`
+    // drives, and one geometry is the harder test for a *leak*, because nothing
+    // here can be blamed on a cache that keeps missing.
     let frames: [ImageU16; 2] = [cornered_image(960, 960), cornered_image(960, 960)];
     let mut pyramids: Vec<_> = frames
         .iter()
-        .map(|frame| builder.allocate(frame.width(), frame.height(), 3).unwrap())
+        .map(|frame| {
+            builder
+                .allocate(frame.width(), frame.height(), LEVELS)
+                .unwrap()
+        })
         .collect();
+    let positions: PointsSoA = grid_positions(960);
+    let guesses: FlowTransforms = guesses_at(&positions);
 
-    let mut worst: u64 = 0;
+    let mut reserved: Vec<u64> = Vec::with_capacity(FRAMES);
+    let mut in_use: Vec<u64> = Vec::with_capacity(FRAMES);
     for frame_index in 0..FRAMES {
         for (camera, frame) in frames.iter().enumerate() {
             builder.build(camera, frame, &mut pyramids[camera]).unwrap();
@@ -758,34 +816,75 @@ fn the_per_frame_path_holds_the_pool_flat() {
             // One band, so the download and the host-side walk run too.
             scanner.band(3, 44, 20).unwrap();
         }
+        // The patch build and the tracking call are the other two per-frame
+        // allocations, and neither ran here before: camera 0's pyramid is the
+        // source and camera 1's the target, which is one frame pair per
+        // frameset through the whole KLT.
+        let (previous, next) = pyramids.split_at_mut(1);
+        patches.build(&previous[0], &positions, None).unwrap();
+        tracker
+            .track(&previous[0], &next[0], &patches, &guesses, &mut result)
+            .unwrap();
         // `.unwrap()`, not `if let Ok`: a runtime that stops reporting its
-        // memory usage would leave `worst` at zero and this test — the only one
+        // memory usage would leave these at zero and this test — the only one
         // that would catch unbounded device growth — passing having measured
         // nothing.
         let usage = client.memory_usage().unwrap();
-        worst = worst.max(usage.bytes_reserved);
-        if frame_index == 0 || frame_index == 9 || frame_index + 1 == FRAMES {
+        reserved.push(usage.bytes_reserved);
+        in_use.push(usage.bytes_in_use);
+        if frame_index < 3 || frame_index == WARM_UP || frame_index + 1 == FRAMES {
             println!(
-                "frame {}: {} allocs, {:.2} MiB in use, {:.2} MiB reserved",
+                "frameset {}: {} allocs, {:.2} MiB in use, {:.2} MiB reserved, {} tracked",
                 frame_index + 1,
                 usage.number_allocs,
                 usage.bytes_in_use as f64 / (1024.0 * 1024.0),
                 usage.bytes_reserved as f64 / (1024.0 * 1024.0),
+                result.len(),
             );
         }
     }
+
+    let plateau_reserved: u64 = reserved[WARM_UP];
+    let plateau_in_use: u64 = in_use[WARM_UP];
     println!(
-        "worst reserved over {FRAMES} framesets: {:.2} MiB",
-        worst as f64 / (1024.0 * 1024.0)
+        "plateau after {WARM_UP} framesets: {:.2} MiB reserved, {:.2} MiB in use; \
+         worst over {FRAMES}: {:.2} / {:.2} MiB",
+        plateau_reserved as f64 / (1024.0 * 1024.0),
+        plateau_in_use as f64 / (1024.0 * 1024.0),
+        reserved.iter().copied().max().unwrap_or(0) as f64 / (1024.0 * 1024.0),
+        in_use.iter().copied().max().unwrap_or(0) as f64 / (1024.0 * 1024.0),
     );
     assert!(
-        worst > 0,
-        "the runtime reported no reserved bytes at all over {FRAMES} framesets"
+        plateau_reserved > 0 && plateau_in_use > 0,
+        "the runtime reported no memory at all over {FRAMES} framesets"
+    );
+    for (frame_index, (&held, &used)) in
+        reserved.iter().zip(in_use.iter()).enumerate().skip(WARM_UP)
+    {
+        assert_eq!(
+            held,
+            plateau_reserved,
+            "reserved bytes moved at frameset {} ({held} against the plateau's \
+             {plateau_reserved}), so the pool is still growing",
+            frame_index + 1
+        );
+        assert_eq!(
+            used,
+            plateau_in_use,
+            "bytes in use moved at frameset {} ({used} against the plateau's \
+             {plateau_in_use}), so a per-frame buffer is not being freed",
+            frame_index + 1
+        );
+    }
+    assert!(
+        plateau_reserved < RESERVED_CEILING,
+        "CubeCL reserved {plateau_reserved} bytes over {FRAMES} framesets of the \
+         whole path on two 960x960 cameras, against a ceiling of {RESERVED_CEILING}"
     );
     assert!(
-        worst < RESERVED_CEILING,
-        "CubeCL reserved {worst} bytes over {FRAMES} framesets of two 960x960 cameras, \
-         against a ceiling of {RESERVED_CEILING}"
+        plateau_in_use < IN_USE_CEILING,
+        "the whole path holds {plateau_in_use} bytes of device data, against a \
+         ceiling of {IN_USE_CEILING}"
     );
 }
 

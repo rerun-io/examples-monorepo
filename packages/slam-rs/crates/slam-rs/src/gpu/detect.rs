@@ -68,7 +68,9 @@ pub struct GpuCornerScan<R: Runtime> {
     /// is meant to keep at zero.
     uploads: usize,
     /// A repack buffer for a frame whose stride exceeds its width, reused
-    /// between frames so the per-frame path allocates nothing (D49).
+    /// between frames so this stage reaches the **host** allocator not at all
+    /// (D49). The device side is a different promise and a weaker one: see
+    /// [`super`]'s "Residency".
     packed: Vec<u16>,
     /// The dense score image, the candidate image and the column bitmask, per
     /// camera: allocated once per camera geometry rather than once per frame.

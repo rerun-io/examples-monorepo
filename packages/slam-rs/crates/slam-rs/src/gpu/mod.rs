@@ -36,6 +36,24 @@
 //! per call, never per
 //! kernel (`Robocap.md`, "Kernel-design rules learned").
 //!
+//! What that buys is **bounded pool growth, not zero device allocations**, and
+//! the difference is worth stating plainly because the design cannot deliver
+//! the stronger claim. CubeCL 0.10's only host-to-device write is `create*`
+//! (`create_from_slice`, `create`, the tensor forms and `empty` —
+//! `cubecl-runtime`'s client has no write into an existing handle), so three
+//! allocations are per-frame by construction: the frame upload per camera
+//! ([`GpuPyramidBuilder`]'s `build`), the positions buffer per patch build
+//! ([`GpuPatches`]) and the transform buffer per tracking call
+//! ([`GpuPatchTracker`]). Routing them through a persistent buffer would not
+//! remove them — the upload still allocates and a device copy is added — which
+//! is why the level-0 change kept its `create_from_slice` and moved only the
+//! *big* allocation off the per-frame path. So the promise is that the pool
+//! they come out of plateaus and holds flat, and
+//! `the_whole_gpu_path_holds_the_pool_flat` is what says so: over 200 framesets
+//! of the whole path, reserved bytes and bytes in use are constant from the
+//! first frameset (156.74 / 40.00 MiB reserved on CUDA / wgpu, 18.51 MiB in use
+//! on both).
+//!
 //! ## Level parity, and why there are two pyramid buffers
 //!
 //! Every level of a pyramid is a flat `u16` buffer with stride equal to its
