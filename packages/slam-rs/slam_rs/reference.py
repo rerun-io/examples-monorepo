@@ -1,10 +1,16 @@
-"""The frozen reference set, read from ``reference_segments.toml``.
+"""The frozen reference set, read from ``reference_segments.toml``, and the gate's thresholds.
 
 The manifest is the single place that says which segments the accuracy work runs
 on, where their layers live, what the catalog is expected to report about them,
 which decode path produces the pixels, and which IMU noise numbers the estimator
 is tuned with. The catalog carries none of the last two, and the decode path
 alone moves ATE by centimetres, so a run is not reproducible without them.
+
+The V2 tolerances (:data:`ATE_VS_CPP_CM`, :data:`GT_RATIO`,
+:data:`SPEED_TOLERANCE`, :data:`DIVERGENCE_FACTOR`) sit here rather than in the
+gate test, because they are the milestone's verdict and it is decided from
+measurement: when S15 settles what a meaningful accuracy band is, one table
+changes.
 """
 
 import tomllib
@@ -46,6 +52,17 @@ GT_SOURCE_BY_NAME: dict[str, GroundTruthSource] = {"lighthouse": "lighthouse", "
 """Ground-truth measurement systems the two MSD devices use."""
 GATE_POLICY_BY_NAME: dict[str, GatePolicy] = {"tight": "tight", "standard": "standard", "no_divergence": "no_divergence"}
 """Valid gate policies, in decreasing strictness."""
+
+ATE_VS_CPP_CM: float = 2.0
+"""Largest ATE RMSE against the basalt C++ trajectory the V2 gate accepts (D14's first rung)."""
+GT_RATIO: float = 1.2
+"""How much worse than the C++'s own ground-truth error on the same footage the port may be (D14)."""
+SPEED_TOLERANCE: float = 1.2
+"""How much slower than the C++ single-thread wall on the same footage the port's replay may be (D58)."""
+DIVERGENCE_FACTOR: float = 10.0
+"""How much larger than the ground truth's extent a ``no_divergence`` run's may be (D36)."""
+MIN_TRACKED_POSES: int = 10
+"""Fewest poses that make a run a trajectory at all, rather than a comparison of noise."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -176,6 +193,10 @@ class CppReferenceRun:
     """basalt VIO config the run used, relative to the fork."""
     optical_flow_image_safe_radius: float
     """``config.optical_flow_image_safe_radius`` for this device; 472 on Index, 340 on G2."""
+    expected_cpp_wall_s: float
+    """The C++ feed loop's wall for the whole segment: decode plus VIO, one thread, nothing logged."""
+    hold_out: bool
+    """True where tuning may not look at this segment (C56); the gate still runs it."""
     run_json: Path
     """Full run manifest, relative to the package root; always committed."""
     trajectory_sha256: str
@@ -402,6 +423,9 @@ def _reference_run(block: dict[str, Any], segment_id: str) -> CppReferenceRun:
         use_double=bool(block["use_double"]),
         vio_config=block["vio_config"],
         optical_flow_image_safe_radius=float(block["optical_flow_image_safe_radius"]),
+        expected_cpp_wall_s=float(block["expected_cpp_wall_s"]),
+        # Absent on the eight segments tuning may look at; C56 named the two.
+        hold_out=bool(block.get("hold_out", False)),
         run_json=Path(block["run_json"]),
         trajectory_sha256=block["trajectory_sha256"],
         bundle_only=bool(block["bundle_only"]),

@@ -640,30 +640,52 @@ pixi run -e slam-rs-dev --frozen python tools/apps/replay.py \
 
 ## The V2 gate
 
-`tests/test_v2_gate.py` is the accuracy milestone (D14, D35, D36). Per reference
-segment, driving `_core.Vio` and the feed directly with nothing logged:
+`tests/test_v2_gate.py` is the milestone (D14, D35, D36, D58). Per gated clip,
+driving `_core.Vio` and the feed directly with nothing logged:
 
+* every frameset resolved: one refused for want of IMU is held and tracked again
+  once the samples arrive, and anything still held when the clip ends is a lost
+  frameset (D17);
 * ATE RMSE against the basalt C++ trajectory fed the same decoded pixels, at most
   2 cm — D14's first rung, which tightens toward 1 cm as parity improves;
 * ATE RMSE against the `gt.csv` sidecar, at most 1.2x what the C++ itself scored
-  on that segment, which the manifest carries;
-* every frameset resolved: one refused for want of IMU is held and tracked again
-  once the samples arrive, and anything still held when the segment ends is a
-  lost frameset (D17).
+  on the same footage;
+* speed: the replay's own feed loop — decode plus `track`, nothing logged, the
+  loop the C++ reference timed and recorded as `run.feed_wall_time_s` — within
+  1.2x the C++ single-thread wall for the same footage (D58). Never left off: a
+  port several times slower is not a port of the thing. Every row prints
+  `wall x.xx s, C++ y.yy s, ratio z.zz`.
 
 The association is driven by the estimate — each of its poses takes the nearest
 reference pose within 5 ms — because that is how the manifest's own C++ numbers
 were produced. The `no_divergence` pair (`MGO01_low_light`, `MGO13_sudden_movements`)
-gates only on a bounded, finite run: basalt itself sits at 43 cm and 78 cm there,
-and two legitimate decode paths of the same C++ estimator already differ by 18
-to 32 cm, so a tolerance would measure noise. A second test runs the smoke
-segment twice and diffs the CSVs byte for byte, which is what Offline mode's
-"no queue state reaches a decision" means (D17).
+gates the frameset and speed clauses plus a bounded, finite run: basalt itself
+sits at 43 cm and 78 cm there, and two legitimate decode paths of the same C++
+estimator already differ by 18 to 32 cm, so a tolerance would measure noise. A
+second test runs the smoke segment twice and diffs the CSVs byte for byte, which
+is what Offline mode's "no queue state reaches a decision" means (D17).
+
+The four tolerances live in `slam_rs/reference.py` (`ATE_VS_CPP_CM`, `GT_RATIO`,
+`SPEED_TOLERANCE`, `DIVERGENCE_FACTOR`), not in the test: they are the
+milestone's verdict, and S15 decides them from measurement.
+
+The lanes are D59's iteration rule. The default is the **iteration set** — MIO10
+whole plus the first ten seconds of one two-camera and one four-camera clip,
+about 1,650 framesets — because finding out at the end of a ten-clip run that
+everything failed is the way not to iterate. Either lane runs **shortest clip
+first** and asserts each clip as soon as it is measured, so the first clip that
+misses stops the run with its own row printed and is the one that gets fixed.
 
 ```bash
-cd packages/slam-rs && pytest -m slow -q tests/test_v2_gate.py            # the smoke segment
-SLAM_RS_V2_ALL=1 pytest -m slow -q -s tests/test_v2_gate.py               # all ten
+cd packages/slam-rs
+pytest -m slow -q -s tests/test_v2_gate.py                    # the iteration set
+SLAM_RS_V2_ALL=1 pytest -m slow -q -s tests/test_v2_gate.py   # all ten, whole, shortest first
+SLAM_RS_V2_WINDOW_S=5 SLAM_RS_V2_ALL=1 pytest -m slow -q -s tests/test_v2_gate.py   # all ten, first 5 s each
 ```
+
+`SLAM_RS_V2_WINDOW_S` cuts every clip to its first N seconds and recomputes the
+C++'s own ground-truth error over exactly that span, so a windowed run is gated
+against the budget it actually had.
 
 ## Tests
 

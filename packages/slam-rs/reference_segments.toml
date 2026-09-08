@@ -25,9 +25,19 @@
 
 # `[segment.reference]` pins the basalt C++ run this port is measured against:
 # the fork commit that produced it, the deterministic settings, the committed
-# trajectory (or a bundle-only marker for the two long segments), and the C++
-# ATE against the `gt.csv` sidecar. `gate_policy` says how hard that segment may
-# be gated -- see the README.
+# trajectory (or a bundle-only marker for the two long segments), the C++ ATE
+# against the `gt.csv` sidecar, and its single-thread wall. `gate_policy` says
+# how hard that segment may be gated -- see the README.
+#
+# `expected_cpp_wall_s` is the `run.feed_wall_time_s` of the run manifest beside
+# it: the decode-plus-VIO feed loop with nothing logged, on `pablo-dl-server`,
+# one TBB thread. The port's own replay of the same footage must land within
+# `SPEED_TOLERANCE` of it (D58), so a port that is several times slower fails the
+# gate rather than passing it quietly.
+#
+# `hold_out = true` marks a segment tuning may not look at (C56): the gate still
+# runs it and prints its row, and its numbers are a check on work done without
+# it.
 
 schema_version = 3
 catalog_url = "rerun+http://dgx-spark:9988"
@@ -90,6 +100,7 @@ num_threads = 1
 use_double = false
 vio_config = "data/msd/msdmi_config.json"
 optical_flow_image_safe_radius = 472.0
+expected_cpp_wall_s = 7.674
 run_json = "tests/reference/msd/msd-index__MIO_others__MIO10_short_2_panorama/run.json"
 trajectory_sha256 = "19df37cecb08a2ea8687fdc6b8a5d44f07c4cb3040e6ae4a20d9bced682a125d"
 bundle_only = false
@@ -152,6 +163,7 @@ num_threads = 1
 use_double = false
 vio_config = "data/msd/msdmi_config.json"
 optical_flow_image_safe_radius = 472.0
+expected_cpp_wall_s = 81.984
 run_json = "tests/reference/msd/msd-index__MIO_others__MIO07_mapping_easy/run.json"
 trajectory_sha256 = "66641879339e0bf585f0487ff5289472240672746e0bed496816604139ad5d73"
 bundle_only = false
@@ -212,6 +224,7 @@ num_threads = 1
 use_double = false
 vio_config = "data/msd/msdmi_config.json"
 optical_flow_image_safe_radius = 472.0
+expected_cpp_wall_s = 121.119
 run_json = "tests/reference/msd/msd-index__MIO_others__MIO04_hand_shooter_hard/run.json"
 trajectory_sha256 = "104165a3102a3e5af086e8a5b213442d70afd3fd2611f2727a1eab5511345145"
 bundle_only = false
@@ -272,6 +285,7 @@ num_threads = 1
 use_double = false
 vio_config = "data/msd/msdmi_config.json"
 optical_flow_image_safe_radius = 472.0
+expected_cpp_wall_s = 442.962
 run_json = "tests/reference/msd/msd-index__MIO_others__MIO14_moving_props/run.json"
 trajectory_sha256 = "68b4157d379967b1126a10592d42a02458625bf05fb3c2ee59495a90b824bb5e"
 bundle_only = true
@@ -332,6 +346,7 @@ num_threads = 1
 use_double = false
 vio_config = "data/msd/msdmi_config.json"
 optical_flow_image_safe_radius = 472.0
+expected_cpp_wall_s = 741.223
 run_json = "tests/reference/msd/msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_fight_2/run.json"
 trajectory_sha256 = "19ccc1638147418b7f2385f1d69e2b85787626942f5193927929de51e3722e96"
 bundle_only = true
@@ -392,6 +407,7 @@ num_threads = 1
 use_double = false
 vio_config = "data/msd/msdmg_config.json"
 optical_flow_image_safe_radius = 340.0
+expected_cpp_wall_s = 3.192
 run_json = "tests/reference/msd/msd-g2__MGO_others__MGO09_short_1_updown/run.json"
 trajectory_sha256 = "ae893a3d1aacf56c8ee8d6e5fd353eb7765a19c8075dfe00a9b410c741fab346"
 bundle_only = false
@@ -454,6 +470,7 @@ num_threads = 1
 use_double = false
 vio_config = "data/msd/msdmg_config.json"
 optical_flow_image_safe_radius = 340.0
+expected_cpp_wall_s = 39.647
 run_json = "tests/reference/msd/msd-g2__MGO_others__MGO07_mapping_easy/run.json"
 trajectory_sha256 = "94a5d506c39d368e1f4cd13040d1fb8cb698ba02ab99064488e4fd1e45afb2c8"
 bundle_only = false
@@ -514,6 +531,8 @@ num_threads = 1
 use_double = false
 vio_config = "data/msd/msdmg_config.json"
 optical_flow_image_safe_radius = 340.0
+expected_cpp_wall_s = 63.676
+hold_out = true
 run_json = "tests/reference/msd/msd-g2__MGO_others__MGO14_flickering_light/run.json"
 trajectory_sha256 = "eabf539fb507dd9d443ab55eedcce58998840ac3d8f0406d63557b2ed2cee850"
 bundle_only = false
@@ -574,6 +593,7 @@ num_threads = 1
 use_double = false
 vio_config = "data/msd/msdmg_config.json"
 optical_flow_image_safe_radius = 340.0
+expected_cpp_wall_s = 98.728
 run_json = "tests/reference/msd/msd-g2__MGO_others__MGO01_low_light/run.json"
 trajectory_sha256 = "fcbddaf825cdb8358f0a99cf9038b6dff0b00b800125df7f06784805e4f61b14"
 bundle_only = false
@@ -634,6 +654,8 @@ num_threads = 1
 use_double = false
 vio_config = "data/msd/msdmg_config.json"
 optical_flow_image_safe_radius = 340.0
+expected_cpp_wall_s = 83.352
+hold_out = true
 run_json = "tests/reference/msd/msd-g2__MGO_others__MGO13_sudden_movements/run.json"
 trajectory_sha256 = "9aabe18d53cf62475f1f92bf5b6ae41e72eb070b46c30157dab94042151794dd"
 bundle_only = false

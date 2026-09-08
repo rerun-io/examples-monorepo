@@ -31,6 +31,8 @@ SMOKE_SEGMENTS: tuple[str, ...] = (
 """The two segments whose trajectory, pixel digests and ground truth are all committed."""
 RMSE_TOLERANCE_CM: float = 0.005
 """Rounding slack when reproducing a published centimetre figure."""
+WALL_TOLERANCE_S: float = 0.001
+"""Rounding slack on the manifest's copy of the run's wall time, which is recorded to the millisecond."""
 
 
 @pytest.fixture(scope="module")
@@ -66,6 +68,8 @@ def test_every_segment_has_a_reference_run(manifest: ReferenceManifest) -> None:
         assert recorded["capture"]["num_frames"] == segment.capture.num_frames
         assert recorded["run"]["poses"] == segment.reference.expected_cpp_ate.total
         assert recorded["run"]["status"] == "ok"
+        # The wall the speed clause is measured against is this run's own.
+        assert recorded["run"]["feed_wall_time_s"] == pytest.approx(segment.reference.expected_cpp_wall_s, abs=WALL_TOLERANCE_S)
         assert recorded["outputs"]["trajectory_sha256"] == segment.reference.trajectory_sha256
         # The IMU model the C++ run was tuned with is the one the manifest freezes.
         assert recorded["imu"]["gyro_noise_std"] == segment.imu.gyro_noise_std
