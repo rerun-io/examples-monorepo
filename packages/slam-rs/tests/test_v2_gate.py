@@ -34,6 +34,10 @@ cuts every clip to its first N seconds, with the C++'s own ground-truth error
 recomputed over exactly that span rather than taken from the manifest's
 whole-clip figure.
 
+Whichever lane runs, it asserts **every** clip it names, both hold-outs included
+(C56): a clip whose artifacts are not on this host fails the lane instead of
+being stepped over, and only a host that holds none of them skips.
+
 The tolerances live in :mod:`slam_rs.reference`, not here: they are the
 milestone's verdict and S15 decides them from measurement.
 
@@ -41,16 +45,19 @@ The gate drives :class:`slam_rs._core.Vio` through :class:`slam_rs.tracking.Lock
 and the feed directly rather than the replay tool: what is gated is the pipeline
 and the manifest, not the Rerun rung over them. Nothing here logs.
 
-Everything is ``slow`` and skips cleanly when the NAS is not mounted.
+The measuring tests are ``slow`` and skip cleanly on a host without the corpus;
+the two that check which clips the lane refuses to leave out are not — they
+decide against a relocated manifest of empty files and need no NAS.
 """
 
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 import pytest
+from _pytest.outcomes import Skipped
 from jaxtyping import Float64
 from numpy import ndarray
 
@@ -239,33 +246,40 @@ class References:
     """The ``gt.csv`` sidecar, on the same clock."""
 
 
-def references(manifest: ReferenceManifest, segment: ReferenceSegment) -> References | None:
-    """One segment's C++ trajectory and ground-truth sidecar, or None with a printed reason.
+def missing_reference(manifest: ReferenceManifest, segment: ReferenceSegment) -> str | None:
+    """Why this segment cannot be gated on this host, or None when it can be.
 
-    None rather than a skip, because the clips are gated in one loop: a machine
-    that holds nine of the ten should gate the nine rather than report the whole
-    set as skipped.
+    A reason is not a licence to leave the segment out: every clip the lane names
+    is measured and asserted, both hold-outs included (C56), so one absent
+    artifact fails the lane. Only a host that holds none of them — a checkout
+    without the NAS mount — skips, and says so.
 
     Args:
         manifest: The reference set the segment came from.
         segment: The segment about to be gated.
 
     Returns:
-        Both references, or None when either is not on this host.
+        The first artifact that is not on this host, or None when all three are.
     """
-    missing: str | None = None
     if not segment.base_path.is_file():
-        missing = f"{segment.base_path} is not mounted"
-    elif not segment.gt_csv.is_file():
-        missing = f"{segment.gt_csv} is not mounted"
-    else:
-        resolved: BundleFile = manifest.cpp_trajectory(segment)
-        if not resolved.available:
-            missing = str(resolved.reason)
-        else:
-            return References(cpp=read_trajectory(resolved.path), truth=read_trajectory(segment.gt_csv))
-    print(f"{segment.segment_id}: not gated, {missing}")
-    return None
+        return f"{segment.base_path} is not mounted"
+    if not segment.gt_csv.is_file():
+        return f"{segment.gt_csv} is not mounted"
+    resolved: BundleFile = manifest.cpp_trajectory(segment)
+    return None if resolved.available else str(resolved.reason)
+
+
+def references(manifest: ReferenceManifest, segment: ReferenceSegment) -> References:
+    """One segment's C++ trajectory and ground-truth sidecar, on the absolute device clock.
+
+    Args:
+        manifest: The reference set the segment came from.
+        segment: A segment :func:`missing_reference` has passed.
+
+    Returns:
+        Both reference trajectories, read from this host.
+    """
+    return References(cpp=read_trajectory(manifest.cpp_trajectory(segment).path), truth=read_trajectory(segment.gt_csv))
 
 
 def cpp_gt_error_cm(clip: GatedClip, run: SegmentRun, available: References) -> float:
@@ -356,12 +370,17 @@ def test_every_gated_clip_meets_the_v2_numbers(manifest: ReferenceManifest) -> N
     of a table produced an hour later. A green run prints the whole table, which
     is the milestone's own record.
     """
-    measured: int = 0
-    for clip in gate_clips(manifest):
-        available: References | None = references(manifest, clip.segment)
-        if available is None:
-            continue
-        measured += 1
+    clips: list[GatedClip] = gate_clips(manifest)
+    missing: dict[str, str] = {clip.name: reason for clip in clips if (reason := missing_reference(manifest, clip.segment)) is not None}
+    if len(missing) == len(clips):
+        pytest.skip("no clip of this lane is on this host: " + "; ".join(missing.values()))
+    # Anything short of the whole lane is a failure, not a quiet row: a run that
+    # skipped a segment has not gated the milestone the lane claims (C56).
+    assert not missing, "the lane asserts every clip it names, hold-outs included (C56); these are not on this host:\n" + "\n".join(
+        f"  {name}: {reason}" for name, reason in missing.items()
+    )
+    for clip in clips:
+        available: References = references(manifest, clip.segment)
         run: SegmentRun = run_segment(manifest, clip.segment, window_s=clip.window_s)
         if len(run.estimate) < MIN_TRACKED_POSES:
             pytest.fail(f"{clip.name}: {len(run.estimate)} poses over {run.framesets} framesets is not a trajectory")
@@ -376,8 +395,79 @@ def test_every_gated_clip_meets_the_v2_numbers(manifest: ReferenceManifest) -> N
         )
         failures: list[str] = clip_failures(clip, run, available, against_cpp, against_gt)
         assert not failures, f"{clip.name}:\n" + "\n".join(failures)
-    if measured == 0:
-        pytest.skip("no reference segment is on this host")
+
+
+def relocated(manifest: ReferenceManifest, root: Path, absent: frozenset[str] = frozenset()) -> ReferenceManifest:
+    """The reference set with every artifact moved under ``root``, and the named segments' left out.
+
+    Empty files, because what is under test is which clips the lane refuses to
+    leave out — a decision it makes before it opens anything. That is also why
+    this needs no NAS: a host that holds the corpus and one that does not must
+    take the same decision.
+
+    Args:
+        manifest: The real reference set, whose ten segments are kept whole apart
+            from where their three artifacts sit.
+        root: Directory the artifacts are written into, one subdirectory each.
+        absent: Segment ids to leave without any artifact at all.
+
+    Returns:
+        The same manifest against the relocated corpus.
+    """
+    segments: list[ReferenceSegment] = []
+    for segment in manifest.segments:
+        directory: Path = root / segment.segment_id
+        directory.mkdir(parents=True, exist_ok=True)
+        for name in ("base.rrd", "gt.rrd", "gt.csv", "basalt_traj.csv"):
+            if segment.segment_id not in absent:
+                (directory / name).write_text("")
+        segments.append(
+            replace(
+                segment,
+                base_url=f"file://{directory / 'base.rrd'}",
+                gt_url=f"file://{directory / 'gt.rrd'}",
+                gt_csv=directory / "gt.csv",
+                # Absolute, so the manifest's own package root drops out of the
+                # join, and committed, so the bundle is not consulted either.
+                reference=replace(segment.reference, bundle_only=False, trajectory_csv=directory / "basalt_traj.csv"),
+            )
+        )
+    return replace(manifest, segments=tuple(segments))
+
+
+def test_a_clip_whose_reference_is_missing_fails_the_lane_rather_than_leaving_it_out(
+    manifest: ReferenceManifest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C56: the all-ten lane asserts all ten, so one absent artifact is a red run.
+
+    The bug this guards passed the lane on one to nine segments: a segment whose
+    trajectory was not on the host printed a line and was stepped over, and the
+    run reported success without it — including for a hold-out, which is the
+    whole point of having one.
+    """
+    monkeypatch.setenv(ALL_SEGMENTS_VARIABLE, "1")
+    corpus: ReferenceManifest = relocated(manifest, tmp_path, absent=frozenset({SMOKE_SEGMENT}))
+    assert len(gate_clips(corpus)) == len(manifest.segments)
+    try:
+        test_every_gated_clip_meets_the_v2_numbers(corpus)
+    except AssertionError as refusal:
+        assert SMOKE_SEGMENT in str(refusal), f"the refusal does not name the clip it could not measure: {refusal}"
+        assert "C56" in str(refusal)
+    except Skipped as skipped:
+        # A skip here is the bug in its other shape: a red run reported green.
+        pytest.fail(f"one absent artifact skipped the lane instead of failing it: {skipped}")
+    else:
+        pytest.fail(f"the lane passed without ever measuring {SMOKE_SEGMENT}")
+
+
+def test_a_host_that_holds_no_clip_of_the_lane_skips_it(
+    manifest: ReferenceManifest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Total absence — a checkout without the NAS mount — is the one skip left, and it says so."""
+    monkeypatch.setenv(ALL_SEGMENTS_VARIABLE, "1")
+    corpus: ReferenceManifest = relocated(manifest, tmp_path, absent=frozenset(segment.segment_id for segment in manifest.segments))
+    with pytest.raises(Skipped, match="no clip of this lane is on this host"):
+        test_every_gated_clip_meets_the_v2_numbers(corpus)
 
 
 @pytest.mark.slow
