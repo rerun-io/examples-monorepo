@@ -1209,7 +1209,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
                 }
             }
             self.pyramid_builder
-                .build(image, &mut self.staging[index])?;
+                .build(index, image, &mut self.staging[index])?;
         }
         Ok(())
     }
@@ -1397,6 +1397,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         if budget > 0 {
             detect_keypoints_with_cells(
                 &images[camera],
+                camera,
                 &self.detection_grids[camera],
                 &Occupancy {
                     counts: &self.cells[camera],

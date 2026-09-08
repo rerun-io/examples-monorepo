@@ -5,6 +5,7 @@ use cubecl::prelude::*;
 use kornia_imgproc::features::FastCorner;
 
 use super::kernels::{self, MASK_BITS, RING_BIAS};
+use super::pyramid::{Level0, Level0Table};
 use crate::frontend::detect::{CornerScan, DetectError, opencv_corner_score};
 use crate::image::ImageU16;
 
@@ -52,6 +53,15 @@ pub struct GpuCornerScan<R: Runtime> {
     client: ComputeClient<R>,
     /// The biased ring, uploaded once.
     ring: cubecl::server::Handle,
+    /// Level 0 of each camera's pyramid, as the builder published it. When the
+    /// entry for the camera being scanned matches the frame's geometry the
+    /// score kernel reads it and this stage uploads nothing at all; otherwise
+    /// — a scanner with no builder beside it, which is how the tolerance tests
+    /// drive it — the frame goes up here.
+    level0: Level0Table,
+    /// Frames this scanner has uploaded itself, which the shared level-0 path
+    /// is meant to keep at zero.
+    uploads: usize,
     /// A repack buffer for a frame whose stride exceeds its width, reused
     /// between frames so the per-frame path allocates nothing (D49).
     packed: Vec<u16>,
@@ -78,6 +88,8 @@ impl<R: Runtime> GpuCornerScan<R> {
         }
         Self {
             ring: client.create_from_slice(u32::as_bytes(&ring)),
+            level0: Level0Table::default(),
+            uploads: 0,
             packed: Vec::new(),
             kept: Vec::new(),
             mask: Vec::new(),
@@ -87,6 +99,63 @@ impl<R: Runtime> GpuCornerScan<R> {
             bands: Vec::new(),
             client,
         }
+    }
+
+    /// Read level 0 out of `table` rather than uploading the frame.
+    ///
+    /// Wired by [`super::cuda_backends`], which builds the scanner and the
+    /// pyramid builder on one client: they are handed the same pixels, so
+    /// sharing them is the difference between one upload per camera per
+    /// frameset and two.
+    pub fn share_level0(&mut self, table: Level0Table) {
+        self.level0 = table;
+    }
+
+    /// Frames this scanner uploaded itself. Zero once
+    /// [`GpuCornerScan::share_level0`] is wired to a builder that runs first.
+    pub fn frame_uploads(&self) -> usize {
+        self.uploads
+    }
+
+    /// The buffer the score kernel reads for camera `camera`, and its length.
+    ///
+    /// The pyramid's own level 0 when the builder published one of this
+    /// geometry; a fresh upload otherwise. The geometry check is what makes the
+    /// fallback safe rather than hopeful: a stale entry from another frame size
+    /// is refused instead of read.
+    fn frame(&mut self, camera: usize, image: &ImageU16) -> (cubecl::server::Handle, usize) {
+        let shared: Option<Level0> = self
+            .level0
+            .lock()
+            .ok()
+            .and_then(|table| table.get(camera).cloned().flatten())
+            .filter(|level0| level0.width == self.width && level0.height == self.height);
+        if let Some(level0) = shared {
+            return (level0.handle, level0.len);
+        }
+
+        let pixels: usize = self.width * self.height;
+        self.uploads += 1;
+        // The frame goes up as `u16` and the `>> 8` the detector reads happens
+        // on the device: the extra 0.9 MB over the bus costs less than a
+        // whole-frame narrowing pass on the host. A frame whose stride exceeds
+        // its width is repacked row by row, as the pyramid's staging does.
+        if image.stride() == self.width {
+            return (
+                self.client
+                    .create_from_slice(u16::as_bytes(&image.data()[..pixels])),
+                pixels,
+            );
+        }
+        self.packed.clear();
+        self.packed.reserve(pixels);
+        for y in 0..self.height {
+            self.packed.extend_from_slice(image.row(y));
+        }
+        (
+            self.client.create_from_slice(u16::as_bytes(&self.packed)),
+            pixels,
+        )
     }
 
     /// One row's candidates over `threshold`, appended in column order.
@@ -118,7 +187,7 @@ impl<R: Runtime> GpuCornerScan<R> {
 }
 
 impl<R: Runtime> CornerScan for GpuCornerScan<R> {
-    fn scan(&mut self, image: &ImageU16) -> Result<(), DetectError> {
+    fn scan(&mut self, camera: usize, image: &ImageU16) -> Result<(), DetectError> {
         self.bands.clear();
         self.width = image.width();
         self.height = image.height();
@@ -126,27 +195,13 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         self.words = self.width.div_ceil(MASK_BITS);
         let mask_len: usize = self.words * self.height;
 
-        // The frame goes up as `u16` and the `>> 8` the detector reads happens on
-        // the device: the extra 0.9 MB over the bus costs less than a
-        // whole-frame narrowing pass on the host. A frame whose stride exceeds
-        // its width is repacked row by row, as the pyramid's staging does.
-        let handle: cubecl::server::Handle = if image.stride() == self.width {
-            self.client
-                .create_from_slice(u16::as_bytes(&image.data()[..pixels]))
-        } else {
-            self.packed.clear();
-            self.packed.reserve(pixels);
-            for y in 0..self.height {
-                self.packed.extend_from_slice(image.row(y));
-            }
-            self.client.create_from_slice(u16::as_bytes(&self.packed))
-        };
+        let (handle, handle_len): (cubecl::server::Handle, usize) = self.frame(camera, image);
         let score: cubecl::server::Handle = self.client.empty(pixels);
         let kept: cubecl::server::Handle = self.client.empty(pixels);
         let mask: cubecl::server::Handle = self.client.empty(mask_len * size_of::<u32>());
         kernels::launch_fast_score::<R>(
             &self.client,
-            (&handle, pixels),
+            (&handle, handle_len),
             (&self.ring, 32),
             (&score, pixels),
             self.width,
@@ -243,6 +298,7 @@ impl<R: Runtime> std::fmt::Debug for GpuCornerScan<R> {
             .field("width", &self.width)
             .field("height", &self.height)
             .field("bands", &self.bands.len())
+            .field("uploads", &self.uploads)
             .finish()
     }
 }

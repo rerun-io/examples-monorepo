@@ -91,12 +91,12 @@ fn the_gpu_pyramid_is_bit_exact_with_the_cpu() {
 
     let mut cpu_builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
     let mut cpu: PyramidU16 = cpu_builder.allocate(960, 960, LEVELS).unwrap();
-    cpu_builder.build(&image, &mut cpu).unwrap();
+    cpu_builder.build(0, &image, &mut cpu).unwrap();
 
     let client = cuda_client();
     let mut gpu_builder = GpuPyramidBuilder::new(client, &[[0.0, 0.0]]);
     let mut gpu = gpu_builder.allocate(960, 960, LEVELS).unwrap();
-    gpu_builder.build(&image, &mut gpu).unwrap();
+    gpu_builder.build(0, &image, &mut gpu).unwrap();
 
     assert_eq!(gpu.num_levels(), cpu.num_levels());
     let mut expected: ImageU16 = ImageU16::default();
@@ -144,11 +144,11 @@ fn a_strided_frame_uploads_its_rows_and_not_its_padding() {
 
     let mut cpu_builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
     let mut cpu: PyramidU16 = cpu_builder.allocate(64, 48, LEVELS).unwrap();
-    cpu_builder.build(&strided, &mut cpu).unwrap();
+    cpu_builder.build(0, &strided, &mut cpu).unwrap();
 
     let mut gpu_builder = GpuPyramidBuilder::new(cuda_client(), &[[0.0, 0.0]]);
     let mut gpu = gpu_builder.allocate(64, 48, LEVELS).unwrap();
-    gpu_builder.build(&strided, &mut gpu).unwrap();
+    gpu_builder.build(0, &strided, &mut gpu).unwrap();
 
     let mut expected: ImageU16 = ImageU16::default();
     let mut actual: ImageU16 = ImageU16::default();
@@ -168,12 +168,12 @@ fn a_reused_pyramid_carries_only_the_newest_frame() {
 
     let mut gpu_builder = GpuPyramidBuilder::new(cuda_client(), &[[0.0, 0.0]]);
     let mut gpu = gpu_builder.allocate(128, 96, LEVELS).unwrap();
-    gpu_builder.build(&first, &mut gpu).unwrap();
-    gpu_builder.build(&second, &mut gpu).unwrap();
+    gpu_builder.build(0, &first, &mut gpu).unwrap();
+    gpu_builder.build(0, &second, &mut gpu).unwrap();
 
     let mut cpu_builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
     let mut cpu: PyramidU16 = cpu_builder.allocate(128, 96, LEVELS).unwrap();
-    cpu_builder.build(&second, &mut cpu).unwrap();
+    cpu_builder.build(0, &second, &mut cpu).unwrap();
 
     let mut expected: ImageU16 = ImageU16::default();
     let mut actual: ImageU16 = ImageU16::default();
@@ -210,12 +210,12 @@ fn the_gpu_patch_build_matches_the_cpu_within_tolerance() {
 
     let mut cpu_builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
     let mut cpu: PyramidU16 = cpu_builder.allocate(512, 512, LEVELS).unwrap();
-    cpu_builder.build(&image, &mut cpu).unwrap();
+    cpu_builder.build(0, &image, &mut cpu).unwrap();
 
     let client = cuda_client();
     let mut gpu_builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
     let mut gpu = gpu_builder.allocate(512, 512, LEVELS).unwrap();
-    gpu_builder.build(&image, &mut gpu).unwrap();
+    gpu_builder.build(0, &image, &mut gpu).unwrap();
 
     let mut patches: GpuPatches<Pattern51, _> =
         GpuPatches::new(client, MAX_KEYPOINTS, LEVELS + 1).unwrap();
@@ -288,8 +288,8 @@ fn the_gpu_tracker_recovers_the_same_shift_as_the_cpu() {
     let mut cpu_builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
     let mut cpu_prev: PyramidU16 = cpu_builder.allocate(512, 512, LEVELS).unwrap();
     let mut cpu_next: PyramidU16 = cpu_builder.allocate(512, 512, LEVELS).unwrap();
-    cpu_builder.build(&first, &mut cpu_prev).unwrap();
-    cpu_builder.build(&second, &mut cpu_next).unwrap();
+    cpu_builder.build(0, &first, &mut cpu_prev).unwrap();
+    cpu_builder.build(0, &second, &mut cpu_next).unwrap();
     let mut cpu_tracker: CpuPatchTracker<Pattern51> = CpuPatchTracker::new(
         MAX_KEYPOINTS,
         LEVELS + 1,
@@ -321,8 +321,8 @@ fn the_gpu_tracker_recovers_the_same_shift_as_the_cpu() {
     let mut gpu_builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
     let mut gpu_prev = gpu_builder.allocate(512, 512, LEVELS).unwrap();
     let mut gpu_next = gpu_builder.allocate(512, 512, LEVELS).unwrap();
-    gpu_builder.build(&first, &mut gpu_prev).unwrap();
-    gpu_builder.build(&second, &mut gpu_next).unwrap();
+    gpu_builder.build(0, &first, &mut gpu_prev).unwrap();
+    gpu_builder.build(0, &second, &mut gpu_next).unwrap();
     let mut gpu_tracker: GpuPatchTracker<Pattern51, _> = GpuPatchTracker::new(
         client.clone(),
         MAX_KEYPOINTS,
@@ -450,8 +450,8 @@ fn the_gpu_corner_scan_is_exact_against_kornia() {
         let image: ImageU16 = cornered_image(width, height);
         let mut cpu: CpuCornerScan = CpuCornerScan::default();
         let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(cuda_client());
-        cpu.scan(&image).unwrap();
-        gpu.scan(&image).unwrap();
+        cpu.scan(0, &image).unwrap();
+        gpu.scan(0, &image).unwrap();
 
         // The row bands the detector asks for: one per grid row of a 50-pixel
         // cell, at every rung of the shipped ladder.
@@ -490,14 +490,85 @@ fn a_reused_corner_scan_carries_only_the_newest_frame() {
     let second: ImageU16 = ImageU16::zeros(512, 128).unwrap();
 
     let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(cuda_client());
-    gpu.scan(&first).unwrap();
+    gpu.scan(0, &first).unwrap();
     assert!(
         !gpu.band(3, 44, 5).unwrap().is_empty(),
         "the textured frame has corners"
     );
-    gpu.scan(&second).unwrap();
+    gpu.scan(0, &second).unwrap();
     assert!(
         gpu.band(3, 44, 5).unwrap().is_empty(),
         "a black frame has none"
     );
+}
+
+/// The detector reads the pyramid's level 0, and uploads nothing.
+///
+/// The corner scanner and the pyramid builder are handed the same pixels once
+/// per camera per frameset — the detector's input *is* level 0
+/// (`keypoints.cpp:152`, `image_pyr.h:73`) — and until the camera index reached
+/// both seams the GPU scanner had no way to know that, so it uploaded the frame
+/// a second time. This is the test that the sharing is exact rather than merely
+/// cheaper: the same corners at every rung, from a scanner that uploaded zero
+/// frames, on two cameras of different geometry so the per-camera table is
+/// actually indexed.
+#[test]
+fn the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing() {
+    let frames: [ImageU16; 2] = [cornered_image(960, 240), cornered_image(512, 192)];
+    let client = cuda_client();
+
+    // The lane the frontend runs: one builder, one scanner, one client, the
+    // level-0 table between them.
+    let mut builder = GpuPyramidBuilder::new(client.clone(), &[[0.0, 0.0]]);
+    let mut shared: GpuCornerScan<_> = GpuCornerScan::new(client.clone());
+    shared.share_level0(builder.level0_table());
+    // The lane before this change: the scanner uploads its own copy.
+    let mut alone: GpuCornerScan<_> = GpuCornerScan::new(client);
+
+    let mut pyramids: Vec<_> = frames
+        .iter()
+        .map(|frame| builder.allocate(frame.width(), frame.height(), 3).unwrap())
+        .collect();
+    for (camera, frame) in frames.iter().enumerate() {
+        builder.build(camera, frame, &mut pyramids[camera]).unwrap();
+    }
+    for (camera, frame) in frames.iter().enumerate() {
+        shared.scan(camera, frame).unwrap();
+        alone.scan(camera, frame).unwrap();
+        let mut total: usize = 0;
+        for band_y in (3..frame.height() - 3).step_by(50) {
+            for threshold in [40i32, 20, 10, 5, 1] {
+                let expected: Vec<FastCorner> = alone.band(band_y, 44, threshold).unwrap().to_vec();
+                let actual: &[FastCorner] = shared.band(band_y, 44, threshold).unwrap();
+                assert_eq!(
+                    actual.len(),
+                    expected.len(),
+                    "camera {camera} band {band_y} threshold {threshold}"
+                );
+                for (got, want) in actual.iter().zip(expected.iter()) {
+                    assert_eq!((got.xy, got.response), (want.xy, want.response));
+                }
+                total += expected.len();
+            }
+        }
+        println!(
+            "camera {camera} ({}x{}): {total} corners identical, uploads shared {} / alone {}",
+            frame.width(),
+            frame.height(),
+            shared.frame_uploads(),
+            alone.frame_uploads()
+        );
+    }
+    assert_eq!(
+        shared.frame_uploads(),
+        0,
+        "the shared scanner uploaded a frame the pyramid had already put on the device"
+    );
+    assert_eq!(alone.frame_uploads(), frames.len());
+
+    // A frame whose geometry does not match the published entry is refused
+    // rather than read: the fallback upload is what keeps a stale table safe.
+    let odd: ImageU16 = cornered_image(256, 128);
+    shared.scan(0, &odd).unwrap();
+    assert_eq!(shared.frame_uploads(), 1);
 }

@@ -367,15 +367,22 @@ struct Band {
 /// across the interpreter's threads even though nothing here runs on more than
 /// one.
 pub trait CornerScan: std::fmt::Debug + Send + Sync {
-    /// Take one frame, discarding whatever the last one left.
+    /// Take camera `camera`'s frame, discarding whatever the last one left.
     ///
     /// Called once per camera per frameset, before any [`CornerScan::band`].
+    ///
+    /// `camera` is the frame's place in the frameset. It is here for the same
+    /// reason it is on [`crate::pyramid::PyramidBuilder::build`]: these are the
+    /// only two stages that read level 0, and on a device backend they read the
+    /// *same* pixels, so a scanner that knows which camera it was handed can
+    /// read the pyramid's own level 0 instead of uploading the frame a second
+    /// time. A host backend ignores it.
     ///
     /// # Errors
     ///
     /// [`DetectError`] when the geometry cannot be viewed as 8-bit, or a device
     /// backend cannot size its buffers.
-    fn scan(&mut self, image: &ImageU16) -> Result<(), DetectError>;
+    fn scan(&mut self, camera: usize, image: &ImageU16) -> Result<(), DetectError>;
 
     /// The candidates of the `rows` rows starting at `y`, at `threshold`.
     ///
@@ -426,7 +433,9 @@ impl std::fmt::Debug for CpuCornerScan {
 }
 
 impl CornerScan for CpuCornerScan {
-    fn scan(&mut self, image: &ImageU16) -> Result<(), DetectError> {
+    /// `_camera` is unused: the caller holds the frame and nothing here is
+    /// shared between cameras.
+    fn scan(&mut self, _camera: usize, image: &ImageU16) -> Result<(), DetectError> {
         // The bands are this image's; the previous frame's are stale.
         self.bands.clear();
         self.width = image.width();
@@ -668,6 +677,7 @@ fn suppress_non_maxima(
 #[allow(clippy::too_many_arguments)]
 pub fn detect_keypoints_with_cells(
     image: &ImageU16,
+    camera: usize,
     grid: &CellGrid,
     occupancy: &Occupancy<'_>,
     config: &DetectorConfig,
@@ -712,7 +722,7 @@ pub fn detect_keypoints_with_cells(
         scores,
         keep,
     } = scratch;
-    scanner.scan(image)?;
+    scanner.scan(camera, image)?;
 
     // `float dist_to_center = {full_x - img_raw.w / 2, ...}.norm()` — an integer
     // halving of the size, then a float subtraction (`keypoints.cpp:176`).
@@ -930,6 +940,7 @@ mod tests {
         let mut out: KeypointsData = KeypointsData::default();
         detect_keypoints_with_cells(
             &image,
+            0,
             &grid,
             &occupancy(&cells, &grid),
             &config(),
@@ -966,6 +977,7 @@ mod tests {
         config.num_points_cell = 2;
         detect_keypoints_with_cells(
             &image,
+            0,
             &grid,
             &occupancy(&cells, &grid),
             &config,
@@ -1008,6 +1020,7 @@ mod tests {
         floored.min_threshold = LOWEST_THRESHOLD_RUNG;
         detect_keypoints_with_cells(
             &blank,
+            0,
             &grid,
             &occupancy(&cells, &grid),
             &floored,
@@ -1024,6 +1037,7 @@ mod tests {
             bad.min_threshold = min_threshold;
             detect_keypoints_with_cells(
                 &blank,
+                0,
                 &grid,
                 &occupancy(&cells, &grid),
                 &bad,
@@ -1051,6 +1065,7 @@ mod tests {
         let mut out: KeypointsData = KeypointsData::default();
         detect_keypoints_with_cells(
             &image,
+            0,
             &grid,
             &occupancy(&cells, &grid),
             &config(),
@@ -1078,6 +1093,7 @@ mod tests {
         let empty: Vec<i32> = vec![0; grid.rows * grid.columns];
         detect_keypoints_with_cells(
             &image,
+            0,
             &grid,
             &occupancy(&empty, &grid),
             &config(),
@@ -1092,6 +1108,7 @@ mod tests {
         let full: Vec<i32> = vec![1; grid.rows * grid.columns];
         detect_keypoints_with_cells(
             &image,
+            0,
             &grid,
             &occupancy(&full, &grid),
             &config(),
@@ -1123,6 +1140,7 @@ mod tests {
         let mut out: KeypointsData = KeypointsData::default();
         detect_keypoints_with_cells(
             &image,
+            0,
             &grid,
             &occupancy(&cells, &grid),
             &config(),
@@ -1147,6 +1165,7 @@ mod tests {
         config.safe_radius = 40.0;
         detect_keypoints_with_cells(
             &image,
+            0,
             &grid,
             &occupancy(&cells, &grid),
             &config,
@@ -1176,6 +1195,7 @@ mod tests {
         let mut full: KeypointsData = KeypointsData::default();
         detect_keypoints_with_cells(
             &image,
+            0,
             &grid,
             &occupancy(&cells, &grid),
             &config(),
@@ -1190,6 +1210,7 @@ mod tests {
         let mut capped: KeypointsData = KeypointsData::default();
         detect_keypoints_with_cells(
             &image,
+            0,
             &grid,
             &occupancy(&cells, &grid),
             &config(),
@@ -1205,6 +1226,7 @@ mod tests {
         let mut none: KeypointsData = KeypointsData::default();
         detect_keypoints_with_cells(
             &image,
+            0,
             &grid,
             &occupancy(&cells, &grid),
             &config(),
@@ -1228,6 +1250,7 @@ mod tests {
         let mut out: KeypointsData = KeypointsData::default();
         let error = detect_keypoints_with_cells(
             &image,
+            0,
             &grid,
             &occupancy(&cells, &grid),
             &config(),
@@ -1261,6 +1284,7 @@ mod tests {
         let mut out: KeypointsData = KeypointsData::default();
         detect_keypoints_with_cells(
             &image,
+            0,
             &grid,
             &occupancy(&cells, &narrow),
             &config(),
@@ -1379,6 +1403,7 @@ mod tests {
         let mut out: KeypointsData = KeypointsData::default();
         detect_keypoints_with_cells(
             &image,
+            0,
             &grid,
             &occupancy(&cells, &grid),
             &config(),
@@ -1402,6 +1427,7 @@ mod tests {
         let mut out: KeypointsData = KeypointsData::default();
         let error = detect_keypoints_with_cells(
             &image,
+            0,
             &grid,
             &Occupancy {
                 counts: &cells,

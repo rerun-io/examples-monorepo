@@ -1353,7 +1353,9 @@ mod tests {
     fn pyramid_of(image: &ImageU16, levels: usize) -> PyramidU16 {
         let mut pyramid: PyramidU16 =
             PyramidU16::with_capacity(image.width(), image.height(), levels).unwrap();
-        CpuPyramidBuilder::new().build(image, &mut pyramid).unwrap();
+        CpuPyramidBuilder::new()
+            .build(0, image, &mut pyramid)
+            .unwrap();
         pyramid
     }
 

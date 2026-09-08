@@ -1,10 +1,44 @@
 //! The GPU [`PyramidBuilder`]: level 0 uploaded, every halving built on device.
 
+use std::sync::{Arc, Mutex};
+
 use cubecl::prelude::*;
 
 use super::kernels;
 use crate::image::ImageU16;
 use crate::pyramid::{Pyramid, PyramidError};
+
+/// Where one camera's level 0 sits on the device, for the stage that reads the
+/// same pixels.
+///
+/// The corner scanner and the pyramid builder are handed the *same* frame: the
+/// detector's input is level 0 of the pyramid this builder has just filled
+/// (`keypoints.cpp:152`, `image_pyr.h:73`). On the host that costs nothing —
+/// the caller still owns the image — but on a device it is a second upload of
+/// the whole frame. So the builder publishes level 0 here under the camera
+/// index [`crate::pyramid::PyramidBuilder::build`] gives it, and
+/// [`super::GpuCornerScan`] reads that instead. Cloning a `Handle` keeps the
+/// allocation alive, so a published entry is readable whatever happens to the
+/// pyramid afterwards.
+#[derive(Debug, Clone)]
+pub struct Level0 {
+    /// The buffer level 0 lives in: the whole `even` allocation, level 0 at
+    /// offset zero with a stride equal to its width.
+    pub(super) handle: cubecl::server::Handle,
+    /// Elements of that buffer, which is longer than level 0 alone.
+    pub(super) len: usize,
+    /// Level 0's width, checked against the frame the scanner was handed.
+    pub(super) width: usize,
+    /// Level 0's height, checked the same way.
+    pub(super) height: usize,
+}
+
+/// The per-camera level-0 table a builder and a scanner on one client share.
+///
+/// A `Mutex` rather than a `RefCell` because [`crate::frontend::detect::CornerScan`]
+/// is `Send + Sync`; it is taken twice per camera per frameset and never
+/// contended, both stages running on the frontend's own thread.
+pub type Level0Table = Arc<Mutex<Vec<Option<Level0>>>>;
 
 /// One level's place inside a [`GpuPyramid`]'s two buffers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +179,7 @@ pub struct GpuPyramidBuilder<R: Runtime> {
     client: ComputeClient<R>,
     pattern: Vec<[f32; 2]>,
     staging: Vec<u16>,
+    level0: Level0Table,
 }
 
 impl<R: Runtime> GpuPyramidBuilder<R> {
@@ -154,12 +189,20 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
             client,
             pattern: pattern.to_vec(),
             staging: Vec::new(),
+            level0: Level0Table::default(),
         }
     }
 
     /// The client, for the tracker that shares it.
     pub fn client(&self) -> ComputeClient<R> {
         self.client.clone()
+    }
+
+    /// The level-0 table this builder publishes into, for the corner scanner
+    /// that reads the same frames — see [`Level0`]. Handed over by
+    /// [`super::cuda_backends`] when it builds the two on one client.
+    pub fn level0_table(&self) -> Level0Table {
+        Arc::clone(&self.level0)
     }
 }
 
@@ -187,7 +230,12 @@ impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
     /// the frame is left in flight and the tracker's own launches queue behind
     /// it, so the whole frameset costs one wait per
     /// [`crate::frontend::tracker::PatchTracker::track`] call.
-    fn build(&mut self, img: &ImageU16, out: &mut GpuPyramid<R>) -> Result<(), PyramidError> {
+    fn build(
+        &mut self,
+        camera: usize,
+        img: &ImageU16,
+        out: &mut GpuPyramid<R>,
+    ) -> Result<(), PyramidError> {
         let Some(&level0) = out.levels.first() else {
             return Err(PyramidError::GeometryMismatch {
                 expected_width: 0,
@@ -219,6 +267,21 @@ impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
             self.staging[start..start + img.width()].copy_from_slice(img.row(y));
         }
         out.even = out.client.create_from_slice(u16::as_bytes(&self.staging));
+
+        // Level 0 is now on the device and the detector wants exactly it. A
+        // poisoned lock is left to fall through: the scanner then uploads its
+        // own copy, which is slower and correct.
+        if let Ok(mut table) = self.level0.lock() {
+            if table.len() <= camera {
+                table.resize(camera + 1, None);
+            }
+            table[camera] = Some(Level0 {
+                handle: out.even.clone(),
+                len: out.even_len,
+                width: level0.width,
+                height: level0.height,
+            });
+        }
 
         for level in 1..out.levels.len() {
             let source: Level = out.levels[level - 1];
@@ -305,6 +368,7 @@ impl<R: Runtime> std::fmt::Debug for GpuPyramidBuilder<R> {
         f.debug_struct("GpuPyramidBuilder")
             .field("taps", &self.pattern.len())
             .field("staging", &self.staging.len())
+            .field("level0_cameras", &self.level0.lock().map(|t| t.len()).ok())
             .finish()
     }
 }

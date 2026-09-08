@@ -82,7 +82,14 @@ pub trait PyramidBuilder {
     /// pixels out but can never borrow the storage.
     type Pyramid: Pyramid;
 
-    /// Fill `out` from `img`.
+    /// Fill `out` from `img`, camera `camera` of the rig.
+    ///
+    /// `camera` is the frame's place in the frameset, not a hint: a backend
+    /// whose pyramid lives on a device publishes level 0 under that index so
+    /// the detector's [`crate::frontend::detect::CornerScan`] — the only other
+    /// stage that reads the same pixels — can read the copy already there
+    /// rather than upload a second one. A backend that keeps its levels in host
+    /// memory ignores it, because the caller still holds `img`.
     ///
     /// # Errors
     ///
@@ -90,7 +97,12 @@ pub trait PyramidBuilder {
     /// (The dossier's sketch has this infallible; a `Result` is what keeps the
     /// mismatch from being a panic on a rayon worker inside the released-GIL
     /// region, which aborts the process — decision D32.)
-    fn build(&mut self, img: &ImageU16, out: &mut Self::Pyramid) -> Result<(), PyramidError>;
+    fn build(
+        &mut self,
+        camera: usize,
+        img: &ImageU16,
+        out: &mut Self::Pyramid,
+    ) -> Result<(), PyramidError>;
 
     /// Allocate a pyramid this builder can fill for a `width` x `height` frame
     /// with `num_levels` halvings on top of level 0.
@@ -313,7 +325,15 @@ impl PyramidBuilder for CpuPyramidBuilder {
     }
 
     /// `ManagedImagePyr::setFromImage`, `image_pyr.h:70-80`.
-    fn build(&mut self, img: &ImageU16, out: &mut PyramidU16) -> Result<(), PyramidError> {
+    ///
+    /// `_camera` is unused here: the levels are host memory and the caller
+    /// still holds `img`, so the detector reads the frame itself.
+    fn build(
+        &mut self,
+        _camera: usize,
+        img: &ImageU16,
+        out: &mut PyramidU16,
+    ) -> Result<(), PyramidError> {
         let Some(level0) = out.levels.first() else {
             return Err(PyramidError::GeometryMismatch {
                 expected_width: 0,
@@ -562,7 +582,9 @@ mod tests {
     fn build(image: &ImageU16, num_levels: usize) -> PyramidU16 {
         let mut pyramid: PyramidU16 =
             PyramidU16::with_capacity(image.width(), image.height(), num_levels).unwrap();
-        CpuPyramidBuilder::new().build(image, &mut pyramid).unwrap();
+        CpuPyramidBuilder::new()
+            .build(0, image, &mut pyramid)
+            .unwrap();
         pyramid
     }
 
@@ -681,7 +703,7 @@ mod tests {
         let mut pyramid: PyramidU16 = PyramidU16::with_capacity(32, 24, 2).unwrap();
         let image: ImageU16 = random_image(32, 25, 4);
         assert_eq!(
-            CpuPyramidBuilder::new().build(&image, &mut pyramid),
+            CpuPyramidBuilder::new().build(0, &image, &mut pyramid),
             Err(PyramidError::GeometryMismatch {
                 expected_width: 32,
                 expected_height: 24,
@@ -696,7 +718,7 @@ mod tests {
         let image: ImageU16 = random_image(96, 64, 5);
         let mut pyramid: PyramidU16 = PyramidU16::with_capacity(96, 64, 3).unwrap();
         let mut builder: CpuPyramidBuilder = CpuPyramidBuilder::with_capacity(96, 64).unwrap();
-        builder.build(&image, &mut pyramid).unwrap();
+        builder.build(0, &image, &mut pyramid).unwrap();
         let pointers: Vec<*const u16> = each_level(&pyramid)
             .iter()
             .map(|level| level.data().as_ptr())
@@ -709,7 +731,7 @@ mod tests {
         let scratch_capacity: usize = builder.scratch.capacity();
         for seed in 6..12 {
             builder
-                .build(&random_image(96, 64, seed), &mut pyramid)
+                .build(0, &random_image(96, 64, seed), &mut pyramid)
                 .unwrap();
         }
         let after: Vec<*const u16> = each_level(&pyramid)

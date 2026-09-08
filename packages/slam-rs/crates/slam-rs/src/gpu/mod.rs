@@ -45,7 +45,7 @@ mod track;
 
 pub use detect::GpuCornerScan;
 pub use patches::GpuPatches;
-pub use pyramid::{GpuPyramid, GpuPyramidBuilder};
+pub use pyramid::{GpuPyramid, GpuPyramidBuilder, Level0, Level0Table};
 pub use track::GpuPatchTracker;
 
 /// What can go wrong bringing up or running a GPU backend.
@@ -135,12 +135,14 @@ pub fn cuda_backends<P: crate::frontend::patterns::Pattern>(
         max_iterations,
         max_recovered_dist2,
     )?;
-    let scanner: GpuCornerScan<CudaRuntime> = GpuCornerScan::new(client.clone());
-    Ok((
-        GpuPyramidBuilder::new(client, P::OFFSETS),
-        tracker,
-        Box::new(scanner),
-    ))
+    let builder: CudaPyramidBuilder = GpuPyramidBuilder::new(client.clone(), P::OFFSETS);
+    let mut scanner: GpuCornerScan<CudaRuntime> = GpuCornerScan::new(client);
+    // The two stages are handed the same frame, so they read the same upload:
+    // the builder publishes level 0 per camera and the scanner reads it. This
+    // is the one line that makes it one upload per camera per frameset instead
+    // of two (see [`Level0`]).
+    scanner.share_level0(builder.level0_table());
+    Ok((builder, tracker, Box::new(scanner)))
 }
 
 /// A [`cubecl_wgpu::WgpuRuntime`] client on the default device.
