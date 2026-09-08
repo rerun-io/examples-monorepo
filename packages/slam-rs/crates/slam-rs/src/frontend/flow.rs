@@ -210,11 +210,6 @@ impl Keypoints {
         self.index_of(id).map(|index| self.transforms.get(index))
     }
 
-    /// The response stored for `id`, or `None`.
-    pub fn response(&self, id: KeypointId) -> Option<f32> {
-        self.index_of(id).map(|index| self.responses[index])
-    }
-
     /// The warp at `index`, in id order.
     ///
     /// # Panics
@@ -980,11 +975,6 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     /// If `camera` is past the end of the rig.
     pub fn essential(&self, camera: usize) -> Matrix4<f32> {
         self.essential[camera]
-    }
-
-    /// The port-specific options this frontend was built with.
-    pub fn options(&self) -> FrontendOptions {
-        self.options
     }
 
     /// The configuration this frontend runs.

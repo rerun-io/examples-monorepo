@@ -404,17 +404,6 @@ impl<P: Pattern> OpticalFlowPatch<P> {
     ) -> bool {
         patch_residual::<P, Src>(&self.data, 1, source, transform, residual)
     }
-
-    /// `inc = -H_se2_inv_J_se2_T * res` (`frame_to_frame_optical_flow.h:419`).
-    #[inline]
-    pub fn increment(&self, residual: &[f32]) -> Vector3<f32> {
-        patch_increment::<P>(
-            self.h_se2_inv_j_se2_t.as_flattened(),
-            1,
-            MAX_PATTERN_SIZE,
-            residual,
-        )
-    }
 }
 
 /// [`OpticalFlowPatch::residual`] over a strided `data` array.

@@ -306,18 +306,6 @@ impl CpuPyramidBuilder {
     pub fn new() -> Self {
         Self::default()
     }
-
-    /// A builder whose scratch buffer already covers a `width` x `height` frame.
-    ///
-    /// # Errors
-    ///
-    /// [`PyramidError::ScratchTooLarge`] when that frame would need a scratch
-    /// buffer bigger than one allocation may be.
-    pub fn with_capacity(width: usize, height: usize) -> Result<Self, PyramidError> {
-        Ok(Self {
-            scratch: vec![0; scratch_len(width, height)?],
-        })
-    }
 }
 
 impl PyramidBuilder for CpuPyramidBuilder {
@@ -570,11 +558,13 @@ mod tests {
     fn random_image(width: usize, height: usize, seed: u64) -> ImageU16 {
         let mut image: ImageU16 = ImageU16::zeros(width, height).unwrap();
         let mut state: u64 = seed | 1;
-        for pixel in image.data_mut() {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1);
-            *pixel = (state >> 32) as u16;
+        for y in 0..height {
+            for pixel in image.row_mut(y) {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                *pixel = (state >> 32) as u16;
+            }
         }
         image
     }
@@ -633,7 +623,9 @@ mod tests {
         // The kernel sums to 256 and the rounding is `(v * 256 + 128) >> 8`,
         // so a constant image is a fixed point at every level.
         let mut image: ImageU16 = ImageU16::zeros(32, 32).unwrap();
-        image.data_mut().fill(4_242);
+        for y in 0..image.height() {
+            image.row_mut(y).fill(4_242);
+        }
         let pyramid: PyramidU16 = build(&image, 3);
         for level in each_level(&pyramid) {
             assert!(level.data().iter().all(|pixel| *pixel == 4_242));
@@ -686,11 +678,11 @@ mod tests {
 
     /// A frame size whose scratch buffer cannot be allocated is an error, not
     /// an abort. `usize::MAX * 2` wraps; `max_elements::<i32>() + 1` fits a
-    /// `usize` but not one allocation. Neither call reaches the `vec!`.
+    /// `usize` but not one allocation. Neither reaches the `vec!` `build` sizes.
     #[test]
     fn an_unallocatable_scratch_is_an_error_not_an_abort() {
         assert_eq!(
-            CpuPyramidBuilder::with_capacity(usize::MAX, 4).err(),
+            scratch_len(usize::MAX, 4).err(),
             Some(PyramidError::ScratchTooLarge {
                 width: usize::MAX,
                 height: 4
@@ -698,7 +690,7 @@ mod tests {
         );
         let too_wide: usize = crate::image::max_elements::<i32>() + 1;
         assert_eq!(
-            CpuPyramidBuilder::with_capacity(too_wide, 2).err(),
+            scratch_len(too_wide, 2).err(),
             Some(PyramidError::ScratchTooLarge {
                 width: too_wide,
                 height: 2
@@ -725,7 +717,9 @@ mod tests {
     fn rebuilding_allocates_nothing() {
         let image: ImageU16 = random_image(96, 64, 5);
         let mut pyramid: PyramidU16 = PyramidU16::with_capacity(96, 64, 3).unwrap();
-        let mut builder: CpuPyramidBuilder = CpuPyramidBuilder::with_capacity(96, 64).unwrap();
+        // `new`'s scratch is empty; the first `build` sizes it, and the pointers
+        // are captured after that build, so this still measures re-use.
+        let mut builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
         builder.build(0, &image, &mut pyramid).unwrap();
         let pointers: Vec<*const u16> = each_level(&pyramid)
             .iter()
@@ -936,8 +930,10 @@ mod tests {
 
             // Our own subsample over the same values, held in `u16` with no shift.
             let mut ours: ImageU16 = ImageU16::zeros(width, height).unwrap();
-            for (pixel, byte) in ours.data_mut().iter_mut().zip(bytes.iter()) {
-                *pixel = u16::from(*byte);
+            for (y, row) in bytes.chunks_exact(width).enumerate() {
+                for (pixel, byte) in ours.row_mut(y).iter_mut().zip(row) {
+                    *pixel = u16::from(*byte);
+                }
             }
             let mut got: ImageU16 = ImageU16::zeros(width / 2, height / 2).unwrap();
             let mut scratch: Vec<i32> = vec![0; scratch_len(width, height).unwrap()];

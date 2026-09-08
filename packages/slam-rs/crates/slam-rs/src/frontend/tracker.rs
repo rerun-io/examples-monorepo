@@ -218,6 +218,9 @@ impl Clone for PointsSoA {
     }
 }
 
+// Nothing asks a point list, a warp list or a patch set whether it is empty:
+// they are sized to a capacity at construction and read by index.
+#[allow(clippy::len_without_is_empty)]
 impl PointsSoA {
     /// An empty list with room for `capacity` points.
     pub fn with_capacity(capacity: usize) -> Self {
@@ -230,11 +233,6 @@ impl PointsSoA {
     /// Points held.
     pub fn len(&self) -> usize {
         self.x.len()
-    }
-
-    /// Whether the list is empty.
-    pub fn is_empty(&self) -> bool {
-        self.x.is_empty()
     }
 
     /// Drop every point, keeping the allocation.
@@ -325,6 +323,7 @@ impl Clone for FlowTransforms {
     }
 }
 
+#[allow(clippy::len_without_is_empty)]
 impl FlowTransforms {
     /// An empty list with room for `capacity` warps.
     pub fn with_capacity(capacity: usize) -> Self {
@@ -341,11 +340,6 @@ impl FlowTransforms {
     /// Warps held.
     pub fn len(&self) -> usize {
         self.m00.len()
-    }
-
-    /// Whether the list is empty.
-    pub fn is_empty(&self) -> bool {
-        self.m00.is_empty()
     }
 
     /// Drop every warp, keeping the allocation.
@@ -498,6 +492,7 @@ impl FlowTransforms {
 /// Split from [`PatchTracker`] so a backend can pair its own patch storage with
 /// its own pyramid: `build` is the "sample every patch at every level" stage the
 /// GPU wants as one kernel, and the tracker consumes the result.
+#[allow(clippy::len_without_is_empty)]
 pub trait SourcePatches {
     /// The pyramid representation these patches are sampled from.
     type Pyramid: Pyramid;
@@ -520,11 +515,6 @@ pub trait SourcePatches {
 
     /// Patches currently filled.
     fn len(&self) -> usize;
-
-    /// Whether no patch is filled.
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 
     /// The level-0 source position of one patch.
     ///
@@ -552,8 +542,6 @@ pub struct PatchSoA<P: Pattern> {
     h_inv_jt: Vec<f32>,
     /// `valid[level * capacity + patch]`.
     valid: Vec<bool>,
-    /// `mean[level * capacity + patch]`.
-    mean: Vec<f32>,
     pattern: std::marker::PhantomData<P>,
 }
 
@@ -602,7 +590,6 @@ impl<P: Pattern> PatchSoA<P> {
             data: vec![0.0; taps],
             h_inv_jt: vec![0.0; jacobians],
             valid: vec![false; flags],
-            mean: vec![0.0; flags],
             pattern: std::marker::PhantomData,
         })
     }
@@ -624,15 +611,6 @@ impl<P: Pattern> PatchSoA<P> {
     /// If `level` or `patch` is past the end.
     pub fn valid(&self, level: usize, patch: usize) -> bool {
         self.valid[level * self.capacity + patch]
-    }
-
-    /// The mean of one patch at one level (`patch.h:129`).
-    ///
-    /// # Panics
-    ///
-    /// If `level` or `patch` is past the end.
-    pub fn mean(&self, level: usize, patch: usize) -> f32 {
-        self.mean[level * self.capacity + patch]
     }
 
     /// Offset of tap 0 of one patch's `data` at one level; taps are `capacity` apart.
@@ -713,7 +691,7 @@ impl<P: Pattern> SourcePatches for PatchSoA<P> {
                 let position: Vector2<f32> = positions.get(index) / scale;
                 let data_offset: usize = self.data_offset(level, index);
                 let jacobian_offset: usize = self.jacobian_offset(level, index);
-                let (mean, valid) = build_patch::<P, ImageU16>(
+                let (_mean, valid) = build_patch::<P, ImageU16>(
                     image,
                     &position,
                     &mut self.data[data_offset..],
@@ -722,7 +700,6 @@ impl<P: Pattern> SourcePatches for PatchSoA<P> {
                     self.capacity,
                     P::SIZE * self.capacity,
                 );
-                self.mean[level * self.capacity + index] = mean;
                 self.valid[level * self.capacity + index] = valid;
             }
         }
@@ -799,11 +776,6 @@ impl FlowResult {
     /// If `index` is past the end.
     pub fn transform(&self, index: usize) -> AffineCompact2f {
         self.transforms.get(index)
-    }
-
-    /// The tracked warps, structure-of-arrays, one entry per input.
-    pub fn transforms(&self) -> &FlowTransforms {
-        &self.transforms
     }
 
     /// The input indices that survived, ascending.
