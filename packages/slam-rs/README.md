@@ -344,6 +344,7 @@ schedule, the Levenberg-Marquardt loop and the estimator's own state machine.
 | `slam_rs/` | The Python package: stubs, Tyro entry points under `apis/`. |
 | `tools/` | Thin CLI shims over `slam_rs/apis/`. |
 | `reference_segments.toml` | The frozen reference set (below). |
+| `configs/` | The basalt VIO configs the reference runs used, vendored from the fork. |
 | `tests/reference/` | Checked-in basalt C++ trajectories the gate tests reproduce. |
 | `slam_rs/reference_bundle.py` | Resolves the two long-tier artifacts kept out of git. |
 
@@ -366,11 +367,13 @@ pixi run -e slam-rs-dev --frozen slam-rs-version    # print the core version
 ## Python API
 
 ```python
+from pathlib import Path
+
 from slam_rs import _core
 
 calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)  # the feed's dataclasses
-config = _core.VioConfig()                       # basalt's own defaults
-config.optical_flow_image_safe_radius = 472.0    # the one per-device frontend field
+config = _core.VioConfig.from_json(Path("configs/msdmi_config.json").read_text())  # the file the C++ ran
+config.optical_flow_image_safe_radius = 472.0    # settable per device, though the shipped file carries it
 
 vio = _core.Vio(calibration, config, threads=1)
 vio.push_imu_batch(t_ns, gyro, accel)     # int64[n], float64[n, 3], float64[n, 3], uncalibrated
@@ -480,13 +483,18 @@ storage URLs of the `base` and `gt` layers with their registered size and schema
 digest, the `gt.csv` sidecar, the capture and ground-truth properties the catalog
 reports, the frozen decode path and the frozen IMU noise model. A `[[dataset]]`
 block per catalog dataset pins the rig geometry — per-camera resolution and image
-rotation — and a `[robocap]` section adds session 15, which has no ground truth
-and is gated against basalt's own output instead.
+rotation — and names the basalt VIO config its segments run with; a `[robocap]`
+section adds session 15, which has no ground truth and is gated against basalt's
+own output instead.
 
-Three things are frozen because the catalog cannot carry them and each one moves
+Four things are frozen because the catalog cannot carry them and each one moves
 the numbers: the IMU noise densities and update rate (basalt's `msd*_calib.json`),
-the camera-to-IMU time offset (0 for MSD, 14,902,432 ns for RoboCap), and the
-decode path (`cpu_gray8_dav1d_1thread`, worth about 5 cm of ATE against NVDEC RGB).
+the camera-to-IMU time offset (0 for MSD, 14,902,432 ns for RoboCap), the decode
+path (`cpu_gray8_dav1d_1thread`, worth about 5 cm of ATE against NVDEC RGB), and
+the VIO config, vendored under `configs/` — basalt's constructor defaults are not
+its shipped files (`vio_marg_lost_landmarks`) and the difference was worth up to
+12 cm (C72), so `slam_rs.reference.flow_config` reads the dataset's file and
+asserts the manifest's image safe radius against it.
 
 ```python
 from slam_rs.reference import load_manifest

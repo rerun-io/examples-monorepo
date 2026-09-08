@@ -80,6 +80,65 @@ def test_every_segment_has_a_reference_run(manifest: ReferenceManifest) -> None:
         assert recorded["deterministic"]["use_double"] is segment.reference.use_double
 
 
+def test_the_vendored_configs_are_the_ones_the_cpp_runs_used(manifest: ReferenceManifest) -> None:
+    """Every ``config.*`` key of every C++ run, against the file the port loads.
+
+    The run manifests embed the whole configuration document the C++ binary read,
+    so this compares documents rather than the four fields the run summarises and
+    the one the binding exposes: a key the Rust struct does not model yet is
+    compared here too. What it stops from coming back is C72 — the Python path
+    built ``_core.VioConfig()``, basalt's constructor defaults, which differ from
+    the shipped MSD files in ``vio_marg_lost_landmarks`` and put the port 1.41 to
+    12.05 cm from the C++ instead of 0.31 to 5.19 cm.
+    """
+    compared: int = 0
+    for segment in manifest.segments:
+        vendored: dict[str, Any] = json.loads(manifest.vio_config_text(segment.dataset_name))["value0"]
+        recorded: dict[str, Any] = json.loads(_committed(manifest, segment, segment.reference.run_json).read_text())["vio_config"]
+        # The run names the config by its path inside the fork; the manifest names
+        # this repository's copy of that same file.
+        assert Path(recorded["path"]) == Path(segment.reference.vio_config), segment.segment_id
+        assert Path(recorded["path"]).name == manifest.dataset(segment.dataset_name).vio_config.name, segment.segment_id
+        assert set(vendored) == set(recorded["json"]), segment.segment_id
+        differing: dict[str, tuple[Any, Any]] = {
+            key: (value, recorded["json"][key]) for key, value in vendored.items() if value != recorded["json"][key]
+        }
+        assert not differing, f"{segment.segment_id}: vendored config disagrees with the C++ run, (vendored, run) = {differing}"
+        # Named rather than left implicit: this is the key the constructor's
+        # defaults get wrong, and the reason this test exists.
+        assert vendored["config.vio_marg_lost_landmarks"] is True, segment.segment_id
+        assert vendored["config.optical_flow_image_safe_radius"] == segment.reference.optical_flow_image_safe_radius, segment.segment_id
+        compared += len(vendored)
+    # Ten runs, 68 keys each: the whole document, every time.
+    assert compared == 10 * 68
+
+
+def test_the_committed_run_manifests_carry_the_bundles_configuration(manifest: ReferenceManifest) -> None:
+    """Where the reference bundle is on this host, its run manifests agree with the committed ones.
+
+    The committed ``run.json`` copies are what
+    :func:`test_the_vendored_configs_are_the_ones_the_cpp_runs_used` compares
+    against, and they are editable text in this repository. The bundle holds the
+    originals the C++ runs wrote, so this closes the loop for whichever segments
+    the bundle root on this host holds — the two long-tier runs were re-run into a
+    second root, so which segments resolve depends on where
+    ``SLAM_RS_REFERENCE_DIR`` points. Only the configuration is compared: the
+    long-tier copies carry fewer summary keys than the committed ones.
+    """
+    compared: list[str] = []
+    for segment in manifest.segments:
+        resolved: reference_bundle.BundleFile = reference_bundle.resolve(segment.segment_id, "run.json")
+        if not resolved.available:
+            continue
+        original: dict[str, Any] = json.loads(resolved.path.read_text())["vio_config"]
+        committed: dict[str, Any] = json.loads(_committed(manifest, segment, segment.reference.run_json).read_text())["vio_config"]
+        assert original["json"] == committed["json"], segment.segment_id
+        assert original["path"] == committed["path"], segment.segment_id
+        compared.append(segment.segment_id)
+    if not compared:
+        pytest.skip(f"no run manifest resolves through {reference_bundle.bundle_root()}")
+
+
 def test_only_the_long_tier_is_bundle_only(manifest: ReferenceManifest) -> None:
     bundled: set[str] = {s.segment_id for s in manifest.segments if s.reference.bundle_only}
     assert bundled == {s.segment_id for s in manifest.in_tier("long")}

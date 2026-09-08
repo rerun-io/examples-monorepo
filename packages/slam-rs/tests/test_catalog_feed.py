@@ -273,7 +273,7 @@ def test_a_replay_export_associates_with_the_ground_truth_sidecar(tmp_path: Path
         truth: Trajectory | None = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
         assert truth is not None
         stage: VioStage = VioStage(
-            lockstep=Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(segment))),
+            lockstep=Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment))),
             logger=VioLogger(
                 cameras=feed.cameras,
                 ground_truth=truth,

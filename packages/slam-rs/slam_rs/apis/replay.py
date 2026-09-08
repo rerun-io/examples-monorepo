@@ -289,14 +289,14 @@ def main(config: Config) -> None:
         stage: FrontendStage | VioStage | None = None
         if config.stage == "frontend":
             stage = FrontendStage(
-                flow=_core.OpticalFlow(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(segment)),
+                flow=_core.OpticalFlow(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment)),
                 logger=FrontendLogger(len(feed.cameras), feed.segment_id),
             )
             rr.send_blueprint(frontend_blueprint(feed.cameras))
         elif config.stage == "vio":
             truth: Trajectory | None = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
             stage = VioStage(
-                lockstep=Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(segment))),
+                lockstep=Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment))),
                 logger=VioLogger(
                     cameras=feed.cameras,
                     ground_truth=truth if truth is not None else empty_trajectory(),

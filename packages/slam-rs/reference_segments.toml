@@ -16,6 +16,15 @@
 # bias random walks, the update rate or the camera time offset; the values are
 # basalt's own MSD calibration (`data/msd/msd*_calib.json`).
 #
+# Each `[[dataset]]` names the basalt VIO config its segments run with, vendored
+# under `configs/` from the fork's `data/msd/`. It is the whole configuration and
+# not one device field: `msd{mi,mg}_config.json` set `vio_marg_lost_landmarks =
+# true` where basalt's constructor says `false`, so a run built from the
+# constructor's defaults is a different estimator from the C++ reference's
+# (C72). `flow_config` reads the file and asserts the segment's
+# `optical_flow_image_safe_radius` against it; a test compares the vendored copy
+# with the configuration every C++ `run.json` embeds, key by key.
+#
 # Layers live on the NAS, one `.rrd` per segment per layer, plus a EuRoC-style
 # `gt.csv` sidecar. Two clocks are in play and confusing them costs every
 # association: the `video_time` index is relative, and the sidecar (like every
@@ -39,7 +48,7 @@
 # runs it and prints its row, and its numbers are a check on work done without
 # it.
 
-schema_version = 3
+schema_version = 4
 catalog_url = "rerun+http://dgx-spark:9988"
 
 # Landscape, unrotated: the Index stores its two fisheye cameras as captured.
@@ -49,6 +58,7 @@ entry_id = "18D2C8A5D1E6B2217c6d7f028ca47884"
 num_cameras = 2
 camera_resolution_wh = [[960, 960], [960, 960]]
 image_rotation_cw_deg = [0, 0]
+vio_config = "configs/msdmi_config.json"
 
 # Portrait: the G2 video is stored rotated (cam0/cam1 90 degrees clockwise,
 # cam2/cam3 270), with the catalog intrinsics and extrinsics rotated to match.
@@ -59,6 +69,7 @@ entry_id = "18D2CC37925CE0376257837ab3439f34"
 num_cameras = 4
 camera_resolution_wh = [[480, 640], [480, 640], [480, 640], [480, 640]]
 image_rotation_cw_deg = [90, 90, 270, 270]
+vio_config = "configs/msdmg_config.json"
 
 # rotation-dominated panorama; 8 s, catches gross frontend or IMU sign errors in seconds
 [[segment]]

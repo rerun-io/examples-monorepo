@@ -1,19 +1,23 @@
 """The reference manifest parses, is internally consistent, and still matches the catalog."""
 
+import json
 import socket
 import urllib.parse
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
 from beartype.roar import BeartypeException
 
+from slam_rs import _core
 from slam_rs.reference import (
     DECODE_PATH_BY_NAME,
     MANIFEST_PATH,
     TIER_BY_NAME,
     ReferenceManifest,
     ReferenceSegment,
+    flow_config,
     load_manifest,
 )
 
@@ -29,7 +33,7 @@ def manifest() -> ReferenceManifest:
 
 def test_the_manifest_holds_ten_segments(manifest: ReferenceManifest) -> None:
     assert len(manifest.segments) == 10
-    assert manifest.schema_version == 3
+    assert manifest.schema_version == 4
 
 
 def test_every_segment_carries_both_layer_fingerprints(manifest: ReferenceManifest) -> None:
@@ -140,6 +144,60 @@ def test_robocap_is_session_fifteen_with_no_ground_truth(manifest: ReferenceMani
 def test_the_robocap_fixtures_are_checked_in(manifest: ReferenceManifest) -> None:
     for relative in (manifest.robocap.fixtures.golden, manifest.robocap.fixtures.candidate):
         assert (manifest.package_root / relative).is_file()
+
+
+def test_flow_config_loads_the_datasets_own_basalt_config(manifest: ReferenceManifest) -> None:
+    """What the estimator is built with is the file, not basalt's constructor defaults.
+
+    The difference is one key — ``vio_marg_lost_landmarks``, true in both MSD
+    files and false in the constructor (C72) — so the assertion is on the config
+    the binding hands back, written out again, rather than on the manifest's own
+    text: a ``flow_config`` that quietly stopped reading the file would pass a
+    test that only compared the JSON on disk.
+    """
+    default: str = _core.VioConfig().to_json()
+    for segment in manifest.segments:
+        config: _core.VioConfig = flow_config(manifest, segment)
+        assert config.optical_flow_image_safe_radius == segment.reference.optical_flow_image_safe_radius
+        loaded: dict[str, Any] = json.loads(config.to_json())["value0"]
+        assert loaded["config.vio_marg_lost_landmarks"] is True, segment.segment_id
+        assert json.loads(default)["value0"]["config.vio_marg_lost_landmarks"] is False
+        assert config.to_json() != default, segment.segment_id
+    # The two devices differ in the radius and the port sees that difference.
+    radii: set[float] = {flow_config(manifest, segment).optical_flow_image_safe_radius for segment in manifest.segments}
+    assert radii == {472.0, 340.0}
+
+
+def test_flow_config_refuses_a_radius_the_config_disagrees_with(tmp_path: Path) -> None:
+    """A manifest radius the file does not carry stops the run instead of being written over it."""
+    broken: Path = tmp_path / "radius.toml"
+    # The config paths are made absolute: the copy is read from tmp_path, where
+    # there is no `configs/` directory beside it.
+    broken.write_text(
+        MANIFEST_PATH.read_text()
+        .replace('vio_config = "configs/', f'vio_config = "{MANIFEST_PATH.parent}/configs/')
+        .replace("optical_flow_image_safe_radius = 472.0", "optical_flow_image_safe_radius = 400.0", 1)
+    )
+    manifest: ReferenceManifest = load_manifest(broken)
+    changed: ReferenceSegment = next(s for s in manifest.segments if s.reference.optical_flow_image_safe_radius == 400.0)
+    with pytest.raises(ValueError, match="optical_flow_image_safe_radius"):
+        flow_config(manifest, changed)
+    # Every other segment still builds, so the refusal is about the one that disagrees.
+    for segment in manifest.segments:
+        if segment.segment_id != changed.segment_id:
+            assert flow_config(manifest, segment).optical_flow_image_safe_radius == segment.reference.optical_flow_image_safe_radius
+
+
+def test_every_dataset_names_a_vendored_config_that_parses(manifest: ReferenceManifest) -> None:
+    """Both files are checked in beside the manifest and are basalt's own shape."""
+    for dataset in manifest.datasets:
+        path: Path = manifest.package_root / dataset.vio_config
+        assert path.is_file(), dataset.name
+        assert path.parent == manifest.package_root / "configs"
+        text: str = manifest.vio_config_text(dataset.name)
+        assert text == path.read_text()
+        radius: float = json.loads(text)["value0"]["config.optical_flow_image_safe_radius"]
+        assert _core.VioConfig.from_json(text).optical_flow_image_safe_radius == radius, dataset.name
 
 
 def test_an_unknown_tier_is_rejected(tmp_path: Path) -> None:

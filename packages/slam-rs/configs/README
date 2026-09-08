@@ -1,0 +1,11 @@
+basalt VIO configs, vendored from the fork's `data/msd/`.
+
+Each `[[dataset]]` in `../reference_segments.toml` names the file its segments
+run with, and `slam_rs.reference.flow_config` reads it -- the C++ reference runs
+were driven with these files, and basalt's constructor defaults are a different
+estimator (`vio_marg_lost_landmarks`, C72).
+
+`tests/test_cpp_reference.py` compares each file, key by key, with the
+configuration every C++ `run.json` embeds, so a stale copy fails a test. The
+byte-identical copies under `crates/slam-rs/tests/fixtures/` serve the Rust
+crate's own config tests.

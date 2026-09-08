@@ -133,10 +133,13 @@ class SegmentRun:
     """Wall time the feed loop took: decode plus ``track``, nothing logged."""
 
 
-def run_segment(segment: ReferenceSegment, window_s: float | None = None, max_framesets: int | None = None) -> SegmentRun:
+def run_segment(
+    manifest: ReferenceManifest, segment: ReferenceSegment, window_s: float | None = None, max_framesets: int | None = None
+) -> SegmentRun:
     """Drive one reference clip through :class:`slam_rs._core.Vio`.
 
     Args:
+        manifest: The reference set, which resolves the dataset's basalt config.
         segment: Manifest entry naming the layers, the IMU model and the device's
             image safe radius.
         window_s: Stop after this many seconds of the clip; None replays it whole.
@@ -158,7 +161,7 @@ def run_segment(segment: ReferenceSegment, window_s: float | None = None, max_fr
         # The hold-and-retry rule is the pipeline's contract, not the tool's, so
         # the gate drives the same :class:`slam_rs.tracking.Lockstep` the replay
         # tool does (D17); what the gate does not import is the Rerun rung.
-        lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(segment)))
+        lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment)))
         started: float = time.monotonic()
         for frameset in feed.framesets():
             if max_framesets is not None and replayed >= max_framesets:
@@ -359,7 +362,7 @@ def test_every_gated_clip_meets_the_v2_numbers(manifest: ReferenceManifest) -> N
         if available is None:
             continue
         measured += 1
-        run: SegmentRun = run_segment(clip.segment, window_s=clip.window_s)
+        run: SegmentRun = run_segment(manifest, clip.segment, window_s=clip.window_s)
         if len(run.estimate) < MIN_TRACKED_POSES:
             pytest.fail(f"{clip.name}: {len(run.estimate)} poses over {run.framesets} framesets is not a trajectory")
         against_cpp: AteResult = ate(run.estimate, available.cpp)
@@ -392,7 +395,7 @@ def test_offline_mode_is_bit_reproducible(manifest: ReferenceManifest, tmp_path:
     written: list[Path] = []
     for run in range(2):
         path: Path = tmp_path / f"run_{run}.csv"
-        write_trajectory(path, run_segment(segment, max_framesets=100).estimate)
+        write_trajectory(path, run_segment(manifest, segment, max_framesets=100).estimate)
         written.append(path)
     assert written[0].read_bytes() == written[1].read_bytes(), "two Offline-mode runs over the same input disagreed"
     assert len(read_trajectory(written[0])) > MIN_ASSOCIATED_POSES

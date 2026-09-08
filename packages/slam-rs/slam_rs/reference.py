@@ -2,9 +2,11 @@
 
 The manifest is the single place that says which segments the accuracy work runs
 on, where their layers live, what the catalog is expected to report about them,
-which decode path produces the pixels, and which IMU noise numbers the estimator
-is tuned with. The catalog carries none of the last two, and the decode path
-alone moves ATE by centimetres, so a run is not reproducible without them.
+which decode path produces the pixels, which basalt VIO config the estimator runs
+and which IMU noise numbers it is tuned with. The catalog carries none of the last
+three; the decode path alone moves ATE by centimetres and the config's own
+``vio_marg_lost_landmarks`` was worth up to 12 cm (C72), so a run is not
+reproducible without them.
 
 The V2 tolerances (:data:`ATE_VS_CPP_CM`, :data:`GT_RATIO`,
 :data:`SPEED_TOLERANCE`, :data:`DIVERGENCE_FACTOR`) sit here rather than in the
@@ -117,7 +119,7 @@ class LayerFingerprint:
 
 @dataclass(slots=True, frozen=True)
 class DatasetProperties:
-    """The rig geometry shared by every segment of one dataset.
+    """The rig geometry and basalt config shared by every segment of one dataset.
 
     Calibration is byte-identical across a dataset's segments (33/33 for
     ``msd-index``, 15/15 for ``msd-g2``), so it is recorded once per dataset and
@@ -134,6 +136,8 @@ class DatasetProperties:
     """Per-camera ``(width, height)``, in rig order; the decoded array is ``(height, width)``."""
     image_rotation_cw_deg: tuple[int, ...]
     """Per-camera clockwise rotation already baked into the stored images and the calibration."""
+    vio_config: Path
+    """basalt VIO config this dataset's segments run with, relative to the manifest; vendored from the fork's ``data/msd/``."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -255,26 +259,6 @@ class ReferenceSegment:
         return Path(self.gt_url.removeprefix("file://"))
 
 
-def flow_config(segment: ReferenceSegment) -> _core.VioConfig:
-    """basalt's defaults with the one field the manifest freezes per device.
-
-    Every other field of basalt's shipped configs is already the default the C++
-    constructor sets; the image safe radius is a property of the device — 472 on
-    Index, 340 on G2 — and the manifest carries it per segment. The replay tool
-    and the V2 gate both build their estimator from this, so neither can drive a
-    segment with the other's radius.
-
-    Args:
-        segment: The manifest entry naming the device's safe radius.
-
-    Returns:
-        The config to build an estimator or a frontend for that segment with.
-    """
-    config: _core.VioConfig = _core.VioConfig()
-    config.optical_flow_image_safe_radius = segment.reference.optical_flow_image_safe_radius
-    return config
-
-
 @dataclass(slots=True, frozen=True)
 class TrajectoryFixtures:
     """The checked-in basalt C++ outputs a gate test reproduces its numbers from."""
@@ -353,6 +337,20 @@ class ReferenceManifest:
                 return dataset
         raise KeyError(f"{name!r} is not in the reference set; have {[d.name for d in self.datasets]}")
 
+    def vio_config_text(self, dataset_name: str) -> str:
+        """The basalt VIO config one dataset's segments run with, as its file's own text.
+
+        Args:
+            dataset_name: Catalog dataset name.
+
+        Returns:
+            The vendored file's text, ready for :meth:`slam_rs._core.VioConfig.from_json`.
+
+        Raises:
+            KeyError: If the manifest has no such dataset.
+        """
+        return (self.package_root / self.dataset(dataset_name).vio_config).read_text()
+
     def by_id(self, segment_id: str) -> ReferenceSegment:
         """The segment with this id.
 
@@ -387,6 +385,45 @@ class ReferenceManifest:
         path: Path = self.package_root / segment.reference.trajectory_csv
         reason: str | None = None if path.is_file() else f"{path} is committed in the manifest but missing from this checkout"
         return BundleFile(path=path, reason=reason)
+
+
+def flow_config(manifest: ReferenceManifest, segment: ReferenceSegment) -> _core.VioConfig:
+    """The basalt config the C++ reference ran this segment's dataset with.
+
+    basalt's constructor defaults are not its shipped files: ``msdmi_config.json``
+    and ``msdmg_config.json`` set ``vio_marg_lost_landmarks`` to true where the
+    constructor says false (``crates/slam-rs/src/config.rs:25``, pinned by that
+    crate's own test). That one key is a different estimator — with the
+    constructor's defaults the port sat 1.41 to 12.05 cm from the C++ on the
+    reference clips, with the dataset's config 0.31 to 5.19 cm (C72) — so the
+    file is read rather than reconstructed.
+
+    Nothing is written on top of it. The manifest's per-device
+    ``optical_flow_image_safe_radius`` is asserted against the file instead, so a
+    manifest and a config that disagree stop the run rather than one of them
+    silently winning. The replay tool and the V2 gate both build their estimator
+    from here, so neither can drive a segment with another one's configuration.
+
+    Args:
+        manifest: The reference set the segment came from, which resolves the
+            dataset's config file.
+        segment: The segment about to be replayed.
+
+    Returns:
+        The config to build an estimator or a frontend for that segment with.
+
+    Raises:
+        ValueError: If the file's image safe radius is not the one the manifest
+            froze for this segment.
+    """
+    config: _core.VioConfig = _core.VioConfig.from_json(manifest.vio_config_text(segment.dataset_name))
+    frozen: float = segment.reference.optical_flow_image_safe_radius
+    if config.optical_flow_image_safe_radius != frozen:
+        raise ValueError(
+            f"{segment.segment_id}: {manifest.dataset(segment.dataset_name).vio_config} sets "
+            f"optical_flow_image_safe_radius = {config.optical_flow_image_safe_radius}, the manifest freezes {frozen}"
+        )
+    return config
 
 
 def _imu(block: dict[str, Any]) -> ImuParameters:
@@ -469,6 +506,7 @@ def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
                 num_cameras=int(entry["num_cameras"]),
                 camera_resolution_wh=resolutions,
                 image_rotation_cw_deg=rotations,
+                vio_config=Path(entry["vio_config"]),
             )
         )
     segments: list[ReferenceSegment] = []
