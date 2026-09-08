@@ -459,6 +459,13 @@ def decode_gray(mp4_bytes: bytes) -> Iterator[UInt8[ndarray, "h w"]]:
     shift of up to 17 LSB. dav1d pads each row, so the plane's ``line_size``
     exceeds the frame width and the visible columns are sliced out.
 
+    The plane is read through the buffer protocol and the visible columns are
+    copied once (T06): ``bytes(plane)`` used to copy the padded plane first, at
+    0.751 ms a frame against 0.677 ms. The copy is explicit rather than
+    :func:`numpy.ascontiguousarray`, which would return the slice untouched on a
+    frame the decoder did not pad — a view into memory the decoder reuses for the
+    next frame.
+
     Args:
         mp4_bytes: MP4 produced by :func:`wrap_mp4`.
 
@@ -473,8 +480,8 @@ def decode_gray(mp4_bytes: bytes) -> Iterator[UInt8[ndarray, "h w"]]:
         for frame in container.decode(stream):
             gray = frame.reformat(format="gray8")
             plane = gray.planes[0]
-            padded: UInt8[ndarray, "h stride"] = np.frombuffer(bytes(plane), dtype=np.uint8).reshape(gray.height, plane.line_size)
-            yield np.ascontiguousarray(padded[:, : gray.width])
+            padded: UInt8[ndarray, "h stride"] = np.frombuffer(plane, dtype=np.uint8).reshape(gray.height, plane.line_size)
+            yield padded[:, : gray.width].copy()
 
 
 @dataclass(slots=True, frozen=True)
