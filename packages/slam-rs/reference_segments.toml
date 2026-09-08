@@ -761,12 +761,19 @@ cam_time_offset_ns = 14902432
 
 # The two sessions S17 measured. `basalt_num_poses` is the pose count on the
 # session's own `slam` layer, which is also its complete frameset count.
+# `expected_cpp_wall_s` is optional and only session 15 has one: 88.91 s is what
+# the C++ took over the same 1,588 framesets at 30 fps with its own Rerun
+# logging on, measured on **cap A** (Pablo's vault note, S20 §2) — the one place
+# the port and the C++ ran on the same silicon. Like the MSD segments' own
+# `expected_cpp_wall_s` it is a reference wall from one machine, so on any other
+# machine the ratio to it is a fact about that machine.
 [[robocap.session]]
 session_id = "s00000015"
 segment_id = "robocap__f408193e6447b3b0__s00000015"
 base_url = "file:///mnt/nas/datasets/robocap/rrd/base/robocap__f408193e6447b3b0__s00000015.rrd"
 slam_url = "file:///mnt/nas/datasets/robocap/rrd/slam/robocap__f408193e6447b3b0__s00000015.rrd"
 basalt_num_poses = 1588
+expected_cpp_wall_s = 88.91
 
 [[robocap.session]]
 session_id = "s00000021"

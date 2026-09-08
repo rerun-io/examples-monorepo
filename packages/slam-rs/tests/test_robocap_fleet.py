@@ -117,3 +117,17 @@ def test_the_real_session_replays_on_this_machine_and_agrees_with_the_cpp(manife
     assert len(estimate) == row.tracked
     assert row.ms_per_frameset > 0.0
     assert row.cross_platform_ate_cm is None
+    # The manifest's own measured C++ wall, not a None the report has to fill in.
+    assert row.cpp_wall_s == 88.91
+
+
+def test_the_only_session_with_a_measured_cpp_wall_is_the_one_that_has_one(manifest: ReferenceManifest) -> None:
+    """A column the tool can never fill teaches the next reader that the measurement does not exist.
+
+    The 88.91 s was measured once, on cap A, and had been typed into the report
+    by hand while ``measure`` wrote ``None`` unconditionally. Session 21 has no
+    C++ wall and still says so.
+    """
+    assert manifest.robocap.session("s00000015").expected_cpp_wall_s == 88.91
+    assert manifest.robocap.session("s00000021").expected_cpp_wall_s is None
+

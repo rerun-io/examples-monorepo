@@ -327,6 +327,15 @@ class RobocapSession:
     """Storage URL of the ``slam`` layer, which holds the basalt C++ trajectory."""
     basalt_num_poses: int
     """Poses on the ``slam`` layer, which is also the session's complete frameset count."""
+    expected_cpp_wall_s: float | None
+    """The C++ feed loop's wall over the whole session, where one was measured; None where none was.
+
+    Only session 15 has one, and it was measured on cap A rather than on an
+    x86-64 host: 88.91 s for its 1,588 framesets at 30 fps with basalt's own
+    Rerun logging on. The manifest comment names the machine, because — as with
+    the MSD segments' own ``expected_cpp_wall_s`` — the ratio a row prints
+    against it is a fact about the machine the row was measured on.
+    """
 
     @property
     def fleet_id(self) -> str:
@@ -689,6 +698,8 @@ def _robocap(robocap_block: dict[str, Any]) -> RobocapReference:
                 base_url=block["base_url"],
                 slam_url=block["slam_url"],
                 basalt_num_poses=int(block["basalt_num_poses"]),
+                # Absent on every session but the one whose C++ wall was measured.
+                expected_cpp_wall_s=float(block["expected_cpp_wall_s"]) if "expected_cpp_wall_s" in block else None,
             )
             for block in robocap_block["session"]
         ),

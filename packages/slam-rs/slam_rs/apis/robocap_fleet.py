@@ -67,7 +67,12 @@ class RobocapRow:
     ms_per_frameset: float
     """That wall divided by the framesets fed — what one four-camera frameset costs here."""
     cpp_wall_s: float | None
-    """What the C++ took over the same footage **on this machine**, where that is known; None elsewhere."""
+    """What the C++ took over the same footage, where a wall has been measured for this session; None where none has.
+
+    The manifest names the machine it was measured on — cap A for session 15 —
+    so on any other machine this is the reference wall and not this host's, the
+    same reading the MSD rows' own C++ wall gets.
+    """
     realtime_factor_15fps: float
     """The 15 fps budget divided by :attr:`ms_per_frameset`: at or above 1.0 the machine keeps up."""
     realtime_factor_30fps: float
@@ -154,7 +159,7 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
             cpp_median_cm=100.0 * against_cpp.median_m,
             wall_s=run.wall_s,
             ms_per_frameset=ms_per_frameset,
-            cpp_wall_s=None,
+            cpp_wall_s=session.expected_cpp_wall_s,
             realtime_factor_15fps=BUDGET_15FPS_MS / ms_per_frameset,
             realtime_factor_30fps=BUDGET_30FPS_MS / ms_per_frameset,
             peak_rss_mb=this_peak_rss_mb(),
