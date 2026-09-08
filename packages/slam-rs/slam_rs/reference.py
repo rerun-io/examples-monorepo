@@ -41,14 +41,23 @@ the answer by 32 cm and 18 cm — on MGO01 the ordering even flips. A tolerance
 there would measure noise, so those two only gate "kept tracking, did not
 diverge".
 """
-DecodePath: TypeAlias = Literal["cpu_gray8_dav1d_1thread"]
-"""Frozen pixel provenance. Only the single-threaded dav1d ``gray8`` path is gated in V0."""
+DecodePath: TypeAlias = Literal["cpu_gray8_dav1d_1thread", "cpu_gray8_swscale_area_downscale3"]
+"""Frozen pixel provenance.
+
+The MSD gate is frozen on the single-threaded dav1d ``gray8`` path (D28). RoboCap's
+H.264 streams are decoded on the same one decoder thread but reformatted straight to
+``gray8`` at a third of their size in one ``swscale`` call with ``SWS_AREA``, which is
+the operation the C++ RoboCap reader performs.
+"""
 GroundTruthSource: TypeAlias = Literal["lighthouse", "mocap"]
 """How a segment's ground-truth rig poses were measured."""
 
 TIER_BY_NAME: dict[str, Tier] = {"smoke": "smoke", "accuracy": "accuracy", "long": "long"}
 """Valid tier names, in increasing cost order; the lookup is also how a manifest string becomes a :data:`Tier`."""
-DECODE_PATH_BY_NAME: dict[str, DecodePath] = {"cpu_gray8_dav1d_1thread": "cpu_gray8_dav1d_1thread"}
+DECODE_PATH_BY_NAME: dict[str, DecodePath] = {
+    "cpu_gray8_dav1d_1thread": "cpu_gray8_dav1d_1thread",
+    "cpu_gray8_swscale_area_downscale3": "cpu_gray8_swscale_area_downscale3",
+}
 """Decode paths a gate may be frozen on."""
 GT_SOURCE_BY_NAME: dict[str, GroundTruthSource] = {"lighthouse": "lighthouse", "mocap": "mocap"}
 """Ground-truth measurement systems the two MSD devices use."""
@@ -297,29 +306,19 @@ class TrajectoryFixtures:
 
 
 @dataclass(slots=True, frozen=True)
-class RobocapReference:
-    """RoboCap session 15: agreement with basalt C++ on a hard fisheye rig, with no ground truth."""
+class RobocapSession:
+    """One RoboCap recording session: where its two layers are and how long the C++ ran on it."""
 
     session_id: str
     """Recorder session, e.g. ``s00000015``."""
-    device_id: str
-    """Capture device the session came from."""
     segment_id: str
     """Segment id, which is also the ``.rrd`` file stem on the NAS."""
     base_url: str
     """Storage URL of the ``base`` layer: video, IMU and calibration."""
     slam_url: str
-    """Storage URL of the ``slam`` layer, which holds the basalt trajectory."""
-    has_ground_truth: bool
-    """Always false: RoboCap has no measured ground truth."""
-    decode_path: DecodePath
-    """Frozen decode path that produced the gated pixels."""
+    """Storage URL of the ``slam`` layer, which holds the basalt C++ trajectory."""
     basalt_num_poses: int
-    """Poses on the ``slam`` layer."""
-    imu: ImuParameters
-    """Frozen IMU noise model, from the device's Kalibr calibration."""
-    fixtures: TrajectoryFixtures
-    """Checked-in basalt outputs for this session."""
+    """Poses on the ``slam`` layer, which is also the session's complete frameset count."""
 
     @property
     def base_path(self) -> Path:
@@ -330,6 +329,49 @@ class RobocapReference:
     def slam_path(self) -> Path:
         """Local filesystem path behind :attr:`slam_url`."""
         return Path(self.slam_url.removeprefix("file://"))
+
+
+@dataclass(slots=True, frozen=True)
+class RobocapReference:
+    """RoboCap: agreement with basalt C++ on a hard fisheye rig, with no ground truth.
+
+    Everything the C++ lane was configured with lives here, because the port has
+    to be fed the same configuration to be measured against it (C72): the four
+    cameras of six, the downscale, and basalt's own calibration and VIO config
+    files as the fork's converter and ``robocap_vit.toml`` produced them.
+    """
+
+    device_id: str
+    """Capture device every session came from; the calibration is per device."""
+    has_ground_truth: bool
+    """Always false: RoboCap has no measured ground truth."""
+    decode_path: DecodePath
+    """Frozen decode path that produced the C++ pixels."""
+    camera_names: tuple[str, ...]
+    """The cameras the C++ ran, by their ``name`` static, in the calibration's own order."""
+    downscale: int
+    """Integer factor the C++ reader downscaled both frames and intrinsics by."""
+    vio_config: str
+    """basalt VIO config the C++ ran, relative to the package root."""
+    calibration: str
+    """basalt calibration the C++ ran, at :attr:`downscale`, relative to the package root."""
+    imu: ImuParameters
+    """Frozen IMU noise model, from the device's Kalibr calibration."""
+    sessions: tuple[RobocapSession, ...]
+    """The measured sessions, in manifest order."""
+    fixtures: TrajectoryFixtures
+    """Checked-in basalt outputs for session 15."""
+
+    def session(self, session_id: str) -> RobocapSession:
+        """The session with this id.
+
+        Raises:
+            KeyError: If the manifest has no such session.
+        """
+        for session in self.sessions:
+            if session.session_id == session_id:
+                return session
+        raise KeyError(f"{session_id!r} is not a RoboCap session in the manifest; have {[s.session_id for s in self.sessions]}")
 
 
 @dataclass(slots=True, frozen=True)
@@ -373,6 +415,14 @@ class ReferenceManifest:
             KeyError: If the manifest has no such dataset.
         """
         return (self.package_root / self.dataset(dataset_name).vio_config).read_text()
+
+    def robocap_vio_config_text(self) -> str:
+        """The basalt VIO config the C++ RoboCap runs used, as its file's own text."""
+        return (self.package_root / self.robocap.vio_config).read_text()
+
+    def robocap_calibration_text(self) -> str:
+        """The basalt calibration the C++ RoboCap runs used, as its file's own text."""
+        return (self.package_root / self.robocap.calibration).read_text()
 
     def by_id(self, segment_id: str) -> ReferenceSegment:
         """The segment with this id.
@@ -579,15 +629,24 @@ def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
     if robocap_block["decode_path"] not in DECODE_PATH_BY_NAME:
         raise ValueError(f"robocap: unknown decode path {robocap_block['decode_path']!r}")
     robocap: RobocapReference = RobocapReference(
-        session_id=robocap_block["session_id"],
         device_id=robocap_block["device_id"],
-        segment_id=robocap_block["segment_id"],
-        base_url=robocap_block["base_url"],
-        slam_url=robocap_block["slam_url"],
         has_ground_truth=bool(robocap_block["has_ground_truth"]),
         decode_path=DECODE_PATH_BY_NAME[robocap_block["decode_path"]],
-        basalt_num_poses=int(robocap_block["basalt_num_poses"]),
+        camera_names=tuple(str(name) for name in robocap_block["camera_names"]),
+        downscale=int(robocap_block["downscale"]),
+        vio_config=str(robocap_block["vio_config"]),
+        calibration=str(robocap_block["calibration"]),
         imu=_imu(robocap_block["imu"]),
+        sessions=tuple(
+            RobocapSession(
+                session_id=block["session_id"],
+                segment_id=block["segment_id"],
+                base_url=block["base_url"],
+                slam_url=block["slam_url"],
+                basalt_num_poses=int(block["basalt_num_poses"]),
+            )
+            for block in robocap_block["session"]
+        ),
         fixtures=TrajectoryFixtures(
             golden=Path(fixtures_block["golden"]),
             candidate=Path(fixtures_block["candidate"]),

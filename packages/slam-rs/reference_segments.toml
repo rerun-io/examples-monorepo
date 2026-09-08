@@ -60,7 +60,7 @@
 # runs it and prints its row, and its numbers are a check on work done without
 # it.
 
-schema_version = 5
+schema_version = 6
 catalog_url = "rerun+http://dgx-spark:9988"
 
 # Landscape, unrotated: the Index stores its two fisheye cameras as captured.
@@ -709,24 +709,33 @@ gyro_bias_std = 0.0001
 accel_bias_std = 0.001
 cam_time_offset_ns = 0
 
-# RoboCap session 15: the hard six-camera fisheye rig and the deployment target.
-# It has no ground truth, so its metric is agreement with the basalt C++ output
-# rather than ATE against GT. Two basalt references exist: the `slam` layer on
-# the NAS (1,588 poses, the persisted 4-camera 640x360 replay) and the checked-in
-# fixture pair under `tests/reference/robocap-s15/`.
+# RoboCap: the hard six-camera fisheye rig and the deployment target. It has no
+# ground truth, so its metric is agreement with the basalt C++ output rather than
+# ATE against GT. The `slam` layer beside each base layer on the NAS **is** the
+# C++ golden run: session 15's layer, moved onto the CSV clock by
+# `imu.cam_time_offset_ns`, reproduces `tests/reference/robocap-s15/traj_s15_vga.csv`
+# pose for pose (0.000000 cm rmse, quaternion within float32 rounding), while the
+# catalog-fed C++ run in the reference bundle sits 9.70 cm away. So the C++ lane
+# to reproduce is `basalt_vio` on the raw session files: four of the six cameras,
+# `swscale` AREA downscale 3 to 640x360 on gray8, the Kalibr calibration
+# converted at that downscale, `deterministic=1` on one thread in f32.
 #
 # RoboCap is not registered on any running catalog server; both layers are read
 # from the NAS `.rrd` files, served in process, so there are no layer
 # fingerprints to record.
 [robocap]
-session_id = "s00000015"
 device_id = "f408193e6447b3b0"
-segment_id = "robocap__f408193e6447b3b0__s00000015"
-base_url = "file:///mnt/nas/datasets/robocap/rrd/base/robocap__f408193e6447b3b0__s00000015.rrd"
-slam_url = "file:///mnt/nas/datasets/robocap/rrd/slam/robocap__f408193e6447b3b0__s00000015.rrd"
 has_ground_truth = false
-decode_path = "cpu_gray8_dav1d_1thread"
-basalt_num_poses = 1588
+decode_path = "cpu_gray8_swscale_area_downscale3"
+# The four cameras the C++ ran, in the calibration's own order: the two eye
+# cameras are excluded. These are the `name` statics on the rig's camera nodes,
+# which sit at cam_04, cam_00, cam_01 and cam_05 respectively.
+camera_names = ["left", "left_front", "right_front", "right"]
+downscale = 3
+# basalt's own files, as `python/robocap_vit.toml` and
+# `scripts/basalt_convert_robocap_calib.py --downscale 3` produced them.
+vio_config = "configs/msdmo_config.json"
+calibration = "configs/robocap_calib_downscale3.json"
 
 [robocap.imu]
 rate_hz = 200.0
@@ -735,6 +744,22 @@ accel_noise_std = 0.005955224218014
 gyro_bias_std = 3.445397083168e-05
 accel_bias_std = 0.0001963150489218
 cam_time_offset_ns = 14902432
+
+# The two sessions S17 measured. `basalt_num_poses` is the pose count on the
+# session's own `slam` layer, which is also its complete frameset count.
+[[robocap.session]]
+session_id = "s00000015"
+segment_id = "robocap__f408193e6447b3b0__s00000015"
+base_url = "file:///mnt/nas/datasets/robocap/rrd/base/robocap__f408193e6447b3b0__s00000015.rrd"
+slam_url = "file:///mnt/nas/datasets/robocap/rrd/slam/robocap__f408193e6447b3b0__s00000015.rrd"
+basalt_num_poses = 1588
+
+[[robocap.session]]
+session_id = "s00000021"
+segment_id = "robocap__f408193e6447b3b0__s00000021"
+base_url = "file:///mnt/nas/datasets/robocap/rrd/base/robocap__f408193e6447b3b0__s00000021.rrd"
+slam_url = "file:///mnt/nas/datasets/robocap/rrd/slam/robocap__f408193e6447b3b0__s00000021.rrd"
+basalt_num_poses = 4648
 
 # Checked-in basalt C++ outputs for session 15, copied from the fork's gate run.
 # `golden` is the machine-local trajectory the fork gates against; `candidate` is

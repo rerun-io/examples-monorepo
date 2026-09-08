@@ -35,7 +35,7 @@ def manifest() -> ReferenceManifest:
 
 def test_the_manifest_holds_ten_segments(manifest: ReferenceManifest) -> None:
     assert len(manifest.segments) == 10
-    assert manifest.schema_version == 5
+    assert manifest.schema_version == 6
 
 
 def test_every_segment_carries_the_c_plus_plus_precision_band(manifest: ReferenceManifest) -> None:
@@ -149,12 +149,27 @@ def test_the_msd_imu_block_is_basalts(manifest: ReferenceManifest) -> None:
         assert segment.imu.cam_time_offset_ns == 0
 
 
-def test_robocap_is_session_fifteen_with_no_ground_truth(manifest: ReferenceManifest) -> None:
-    assert manifest.robocap.session_id == "s00000015"
+def test_robocap_carries_two_sessions_and_no_ground_truth(manifest: ReferenceManifest) -> None:
+    assert [session.session_id for session in manifest.robocap.sessions] == ["s00000015", "s00000021"]
     assert manifest.robocap.has_ground_truth is False
-    assert manifest.robocap.basalt_num_poses == 1588
+    assert manifest.robocap.session("s00000015").basalt_num_poses == 1588
+    assert manifest.robocap.session("s00000021").basalt_num_poses == 4648
     assert manifest.robocap.imu.cam_time_offset_ns == 14_902_432
     assert manifest.robocap.imu.rate_hz == 200.0
+
+
+def test_robocap_names_the_configuration_the_cpp_ran(manifest: ReferenceManifest) -> None:
+    """The four cameras, the downscale and basalt's own two files, all present."""
+    assert manifest.robocap.camera_names == ("left", "left_front", "right_front", "right")
+    assert manifest.robocap.downscale == 3
+    assert manifest.robocap.decode_path == "cpu_gray8_swscale_area_downscale3"
+    assert "config.vio_marg_lost_landmarks" in manifest.robocap_vio_config_text()
+    assert '"camera_type": "kb4"' in manifest.robocap_calibration_text()
+
+
+def test_an_unknown_robocap_session_names_the_ones_there_are(manifest: ReferenceManifest) -> None:
+    with pytest.raises(KeyError, match="s00000099.*s00000015"):
+        manifest.robocap.session("s00000099")
 
 
 def test_the_robocap_fixtures_are_checked_in(manifest: ReferenceManifest) -> None:

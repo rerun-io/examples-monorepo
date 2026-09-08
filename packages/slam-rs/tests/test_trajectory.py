@@ -238,8 +238,8 @@ def test_it_reproduces_the_forks_robocap_gate_numbers() -> None:
     candidate: Trajectory = read_trajectory(manifest.package_root / manifest.robocap.fixtures.candidate)
     result: AteResult = ate(candidate, golden)
     assert result.n_associated == manifest.robocap.fixtures.expected_associated
-    assert result.n_estimate == manifest.robocap.basalt_num_poses
-    assert result.n_reference == manifest.robocap.basalt_num_poses
+    assert result.n_estimate == manifest.robocap.session("s00000015").basalt_num_poses
+    assert result.n_reference == manifest.robocap.session("s00000015").basalt_num_poses
     assert result.rmse_m * 100 == pytest.approx(manifest.robocap.fixtures.expected_ate_rmse_cm, abs=0.005)
     assert result.count_delta == 0.0
     assert passes_gate(result, tolerance_m=0.05)

@@ -17,6 +17,17 @@ Three decisions are frozen here because each one silently changes the numbers:
   edges land on frames that are keyframes in *every* camera, so a window decodes
   standalone. Decimated AV1 decode is a known upstream hazard: every frame is
   decoded and ``frame_stride`` only decides which framesets are yielded.
+* **Rig shape.** A rig is not always four hardware-synced cameras fed at their
+  stored resolution on one IMU clock. :class:`RigProfile` carries the four things
+  that differ and default to what MSD is: which cameras of the rig are fed and in
+  what order, the integer downscale applied to frames *and* intrinsics, whether
+  the accelerometer has to be interpolated onto the gyroscope's clock, and how
+  far apart two cameras' frames may be and still be one frameset.
+* **Clocks.** ``video_time`` is the IMU's clock. Frames and ground truth reach it
+  by adding ``cam_time_offset_ns``, which is what "added to a camera timestamp to
+  reach the IMU clock" means and what basalt's own RoboCap reader does
+  (``frameset_t = median(camera_t) + kCameraToImuOffsetNs``, the IMU untouched).
+  MSD's offset is zero, so every MSD number is unchanged by this.
 * **Geometry.** ``Pinhole:image_from_camera`` is column-major, ``Pinhole:resolution``
   is ``(width, height)`` while the decoded array is ``(height, width)``, and the
   camera ``Transform3D`` is ``ChildFromParent`` — that is ``cam_T_imu``, and it is
@@ -76,8 +87,13 @@ class CameraStatics:
     what lets them be tested without a catalog.
     """
 
-    camera_model: str
-    """``camera_model`` string on the camera node, e.g. ``kb4`` or ``pinhole-radtan8``."""
+    camera_model: str | None
+    """``camera_model`` string on the camera node, or None where the writer logged none.
+
+    Nothing here reads it — the projection model comes from
+    :attr:`distortion_model` — so a recording without it is read, not refused.
+    The RoboCap conversion predates the field.
+    """
     distortion_model: str
     """``simplecv.components.DistortionModel``, e.g. ``kannala_brandt``."""
     distortion_coefficients: Float64[ndarray, " n_slots"]
@@ -224,6 +240,30 @@ SegmentSource: TypeAlias = LocalSegment | CatalogSegment
 """Where a feed gets its data; the rest of the module does not care which."""
 
 
+@dataclass(slots=True, frozen=True)
+class RigProfile:
+    """How one rig's recording has to be read, where reading it whole is wrong.
+
+    The default is MSD: every camera the rig declares, at its stored resolution,
+    on one hardware-synced clock, with both inertial channels already paired.
+    RoboCap is none of those, and each departure is a number a caller must state
+    rather than a branch the feed guesses.
+    """
+
+    camera_names: tuple[str, ...] | None = None
+    """Cameras to feed, by their ``name`` static, in the order the estimator gets them; None feeds every camera in rig order."""
+    downscale: int = 1
+    """Integer factor applied to the decoded frames and to the intrinsics; 1 feeds the stored resolution."""
+    interpolate_accel_onto_gyro: bool = False
+    """Interpolate the accelerometer onto the gyroscope's timestamps instead of requiring one shared clock."""
+    frameset_tolerance_ns: int = 0
+    """How far a camera's frame may sit from the anchor camera's and still join that frameset; 0 demands identical timestamps."""
+
+
+MSD_RIG: RigProfile = RigProfile()
+"""The Monado SLAM Dataset rigs: every camera, native resolution, one clock, paired inertial channels."""
+
+
 def rotate_pinhole_clockwise(
     fx: float, fy: float, cx: float, cy: float, width: int, height: int, rotation_cw_deg: int
 ) -> tuple[float, float, float, float]:
@@ -261,7 +301,20 @@ def rotate_pinhole_clockwise(
     raise ValueError(f"image rotation must be 0, 90, 180 or 270 degrees clockwise; got {rotation_cw_deg}")
 
 
-def camera_calib(index: int, statics: CameraStatics, frequency_hz: float) -> CameraCalib:
+def scale_principal_point(value: float, downscale: int) -> float:
+    """One principal-point coordinate at ``1 / downscale`` of its resolution.
+
+    The pixel's own centre is what scales, not its index: a pixel at ``c`` covers
+    ``[c, c + 1)`` whose centre is ``c + 0.5``, and the downscaled pixel centre
+    ``(c + 0.5) / d`` is at index ``(c + 0.5) / d - 0.5``. This is the convention
+    the fork's ``basalt_convert_robocap_calib.py`` writes, and reproducing it from
+    the recording's own native statics returns that file's digits exactly
+    (``tests/test_catalog_feed.py``).
+    """
+    return (value + 0.5) / downscale - 0.5
+
+
+def camera_calib(index: int, statics: CameraStatics, frequency_hz: float, downscale: int = 1) -> CameraCalib:
     """Apply the catalog-to-estimator mapping rules to one camera's statics.
 
     The rules, each of which has cost someone a wrong trajectory: reshape
@@ -270,18 +323,26 @@ def camera_calib(index: int, statics: CameraStatics, frequency_hz: float) -> Cam
     rather than truncating it, and invert the ``ChildFromParent`` transform to get
     ``imu_T_cam``.
 
+    A ``downscale`` above one scales the resolution and the intrinsics to the
+    frames the feed will actually decode, KB4's resolution-invariant coefficients
+    untouched.
+
     Args:
         index: Camera index on the rig.
         statics: Raw static components of the camera node.
         frequency_hz: Nominal frame rate for this segment.
+        downscale: Integer factor the frames are decoded at.
 
     Returns:
         The camera calibration in the estimator's conventions.
 
     Raises:
         ValueError: If the distortion model is unknown, the coefficient tail is
-            non-zero, or the transform relation is not ``ChildFromParent``.
+            non-zero, the transform relation is not ``ChildFromParent``, or
+            ``downscale`` is below one.
     """
+    if downscale < 1:
+        raise ValueError(f"cam_{index:02d}: downscale must be at least 1; got {downscale}")
     if statics.distortion_model not in _MODEL_BY_DISTORTION:
         raise ValueError(f"cam_{index:02d}: unsupported distortion model {statics.distortion_model!r}, known: {sorted(_MODEL_BY_DISTORTION)}")
     model: CameraModelName = _MODEL_BY_DISTORTION[statics.distortion_model][0]
@@ -302,13 +363,13 @@ def camera_calib(index: int, statics: CameraStatics, frequency_hz: float) -> Cam
     imu_T_cam[:3, 3] = -cam_R_imu.T @ statics.transform_translation
     return CameraCalib(
         index=index,
-        width=int(statics.resolution_wh[0]),
-        height=int(statics.resolution_wh[1]),
+        width=int(statics.resolution_wh[0]) // downscale,
+        height=int(statics.resolution_wh[1]) // downscale,
         frequency_hz=frequency_hz,
-        fx=float(k_matrix[0, 0]),
-        fy=float(k_matrix[1, 1]),
-        cx=float(k_matrix[0, 2]),
-        cy=float(k_matrix[1, 2]),
+        fx=float(k_matrix[0, 0]) / downscale,
+        fy=float(k_matrix[1, 1]) / downscale,
+        cx=scale_principal_point(float(k_matrix[0, 2]), downscale),
+        cy=scale_principal_point(float(k_matrix[1, 2]), downscale),
         model=model,
         distortion=statics.distortion_coefficients[:n_coeffs].copy(),
         distortion_valid_radius=statics.distortion_valid_radius,
@@ -406,7 +467,7 @@ def read_camera_statics(statics: pa.Table, entity: str) -> CameraStatics:
     optional_radius: str = f"{entity}:distortion_valid_radius"
     optional_rotation: str = f"{entity}:image_rotation_cw_deg"
     return CameraStatics(
-        camera_model=_static_string(statics, f"{entity}:camera_model"),
+        camera_model=_static_string(statics, f"{entity}:camera_model") if f"{entity}:camera_model" in statics.column_names else None,
         distortion_model=_static_string(statics, f"{entity}/pinhole:simplecv.components.DistortionModel"),
         distortion_coefficients=_static_values(statics, f"{entity}/pinhole:simplecv.components.DistortionCoefficients"),
         image_from_camera=_static_values(statics, f"{entity}/pinhole:Pinhole:image_from_camera"),
@@ -451,7 +512,7 @@ def wrap_mp4(samples: list[bytes], keyframes: list[bool], fps: int, codec: Catal
     return buffer.getvalue()
 
 
-def decode_gray(mp4_bytes: bytes) -> Iterator[UInt8[ndarray, "h w"]]:
+def decode_gray(mp4_bytes: bytes, downscale: int = 1) -> Iterator[UInt8[ndarray, "h w"]]:
     """Decode an in-memory MP4 to C-contiguous ``gray8`` frames, one decoder thread.
 
     ``reformat(format="gray8")`` performs the limited-to-full range expansion the
@@ -466,19 +527,40 @@ def decode_gray(mp4_bytes: bytes) -> Iterator[UInt8[ndarray, "h w"]]:
     frame the decoder did not pad — a view into memory the decoder reuses for the
     next frame.
 
+    A ``downscale`` above one asks the same ``swscale`` call for the smaller frame
+    with ``SWS_AREA``: one conversion, colour and size together, which is the
+    operation basalt's own RoboCap reader performs
+    (``cpu_gray8_swscale_area_downscale3``). Converting first and resampling
+    afterwards is a second, different filter and a different trajectory.
+
     Args:
         mp4_bytes: MP4 produced by :func:`wrap_mp4`.
+        downscale: Integer factor to shrink each frame by.
 
     Yields:
         One grayscale image per frame, in decode order.
+
+    Raises:
+        ValueError: If ``downscale`` is below one.
     """
+    if downscale < 1:
+        raise ValueError(f"downscale must be at least 1; got {downscale}")
     container: av.container.InputContainer = av.open(BytesIO(mp4_bytes), mode="r")
     with container:
         stream = container.streams.video[0]
         stream.thread_count = 1
         stream.thread_type = "NONE"
         for frame in container.decode(stream):
-            gray = frame.reformat(format="gray8")
+            gray = (
+                frame.reformat(format="gray8")
+                if downscale == 1
+                else frame.reformat(
+                    width=max(frame.width // downscale, 1),
+                    height=max(frame.height // downscale, 1),
+                    format="gray8",
+                    interpolation="AREA",
+                )
+            )
             plane = gray.planes[0]
             padded: UInt8[ndarray, "h stride"] = np.frombuffer(plane, dtype=np.uint8).reshape(gray.height, plane.line_size)
             yield padded[:, : gray.width].copy()
@@ -486,12 +568,22 @@ def decode_gray(mp4_bytes: bytes) -> Iterator[UInt8[ndarray, "h w"]]:
 
 @dataclass(slots=True, frozen=True)
 class _VideoIndex:
-    """Per-camera frame timing, read without touching a single encoded sample."""
+    """Frameset timing, read without touching a single encoded sample.
 
-    t_ns: Int64[ndarray, " n_frames"]
-    """Frame timestamps on ``video_time``, shared by every camera on a hardware-synced rig."""
-    keyframe: Bool[ndarray, " n_frames"]
-    """True where the frame is a keyframe in every camera, so a window may start there."""
+    A frameset is one row: its ``video_time``, and the frame each fed camera
+    contributes to it. On a hardware-synced rig fed whole that is the identity —
+    frameset ``i`` is frame ``i`` of every camera — and on RoboCap it is the
+    nearest-match table basalt's reader builds.
+    """
+
+    t_ns: Int64[ndarray, " n_framesets"]
+    """Frameset timestamps on ``video_time``: the median of the frames in each one."""
+    frame_index: Int64[ndarray, "n_framesets n_cameras"]
+    """Which frame of each fed camera belongs to each frameset, non-decreasing down each column."""
+    camera_t_ns: tuple[Int64[ndarray, " n_frames"], ...]
+    """Every fed camera's own frame timestamps, in the order they are fed."""
+    keyframe: Bool[ndarray, " n_framesets"]
+    """True where each fed camera's frame in this frameset is a keyframe, so a window may start there."""
     codec: CatalogCodecName
     """Codec of the elementary stream."""
     fps: int
@@ -511,7 +603,17 @@ class SegmentFeed:
     capture_start_time_ns: int
     """``property:capture:start_time_ns``: add it to a ``video_time`` to reach the absolute device clock."""
     frame_t_ns: Int64[ndarray, " n_frames"]
-    """Timestamp of every frameset in the segment, before ``frame_stride`` is applied."""
+    """Timestamp of every frameset on the inertial clock, before ``frame_stride`` is applied.
+
+    That is ``video_time`` plus :attr:`ImuCalib.cam_time_offset_ns`, which is the
+    clock the estimator, the exported trajectory and every basalt CSV are on.
+    """
+    camera_positions: tuple[int, ...]
+    """Rig index of each fed camera, in the order a frameset's images arrive."""
+    downscale: int
+    """Integer factor the frames are decoded at; the calibration is already scaled to match."""
+    interpolate_accel: bool
+    """Whether the accelerometer is interpolated onto the gyroscope's clock on every read."""
     frame_stride: int
     """Yield every n-th frameset. Every frame is still decoded: decimated AV1 decode is unreliable."""
     dataset: DatasetEntry
@@ -519,7 +621,7 @@ class SegmentFeed:
     gt_dataset: DatasetEntry | None
     """Dataset the ground-truth poses come from; None when the source has no ``gt`` layer."""
     index: _VideoIndex
-    """Frame timing and codec, shared by all cameras."""
+    """Frameset timing, the per-camera frames behind it, and the codec."""
     window_ns: int
     """Longest time window fetched in one round trip."""
 
@@ -529,14 +631,22 @@ class SegmentFeed:
         return self.gt_dataset is not None
 
     def imu_between(self, first_ns: int, last_ns: int) -> ImuStream:
-        """Every inertial sample with ``first_ns <= t <= last_ns``, on the ``video_time`` clock."""
-        return _read_imu(self.dataset, self.segment_id, self.imu.cam_time_offset_ns, first_ns, last_ns)
+        """Every inertial sample with ``first_ns <= t <= last_ns``, on the inertial clock."""
+        return _read_imu(self.dataset, self.segment_id, self.interpolate_accel, first_ns, last_ns)
 
     def ground_truth_between(self, first_ns: int, last_ns: int) -> Trajectory | None:
-        """Ground-truth rig poses with ``first_ns <= t <= last_ns``, or None without a ``gt`` layer."""
+        """Ground-truth rig poses over ``[first_ns, last_ns]`` of the inertial clock, or None without a ``gt`` layer.
+
+        The layer stores them on ``video_time``, like the frames, so the window is
+        asked for in that clock and the answer comes back in the inertial one.
+        """
         if self.gt_dataset is None:
             return None
-        return _read_ground_truth(self.gt_dataset, self.segment_id, first_ns, last_ns)
+        offset_ns: int = self.imu.cam_time_offset_ns
+        found: Trajectory | None = _read_ground_truth(self.gt_dataset, self.segment_id, first_ns - offset_ns, last_ns - offset_ns)
+        if found is None or offset_ns == 0:
+            return found
+        return Trajectory(t_ns=found.t_ns + offset_ns, position_m=found.position_m, quaternion_wxyz=found.quaternion_wxyz)
 
     def framesets(self) -> Iterator[Frameset]:
         """Decode the segment and yield one frameset at a time.
@@ -570,8 +680,8 @@ class SegmentFeed:
         margin_ns: int = max(2 * frame_period_ns + 2 * imu_period_ns, 2_000_000)
         emitted_imu_t_ns: int = -(2**62)
         for start, stop in _window_bounds(self.index, self.window_ns):
-            window_first_ns: int = int(self.index.t_ns[start])
-            window_last_ns: int = int(self.index.t_ns[stop - 1])
+            window_first_ns: int = int(self.frame_t_ns[start])
+            window_last_ns: int = int(self.frame_t_ns[stop - 1])
             window_imu: ImuStream = self.imu_between(window_first_ns - margin_ns, window_last_ns + margin_ns)
             if len(window_imu) and emitted_imu_t_ns > -(2**62) and int(window_imu.t_ns[0]) > emitted_imu_t_ns + 1:
                 raise ValueError(
@@ -580,24 +690,36 @@ class SegmentFeed:
                 )
             window_gt: Trajectory | None = self.ground_truth_between(window_first_ns - margin_ns, window_last_ns + margin_ns)
 
-            muxed: list[bytes] = [
-                wrap_mp4(*self._fetch_samples(camera.index, start, stop), fps=self.index.fps, codec=self.index.codec) for camera in self.cameras
-            ]
-            decoders: list[Iterator[UInt8[ndarray, "h w"]]] = [decode_gray(window) for window in muxed]
-            for frame_index in range(start, stop):
+            first_frame: list[int] = [int(self.index.frame_index[start, position]) for position in range(len(self.cameras))]
+            decoders: list[Iterator[UInt8[ndarray, "h w"]]] = []
+            for position in range(len(self.cameras)):
+                samples, keyframes = self._fetch_samples(position, start, stop)
+                decoders.append(decode_gray(wrap_mp4(samples, keyframes, fps=self.index.fps, codec=self.index.codec), self.downscale))
+            # One frame per camera resident, and one decode cursor per camera: a
+            # camera that contributes no frame to this frameset still has its own
+            # frames decoded in order, because dropping one breaks the next.
+            decoded: list[UInt8[ndarray, "h w"] | None] = [None] * len(self.cameras)
+            cursor: list[int] = [position - 1 for position in first_frame]
+            for frameset_index in range(start, stop):
                 images: list[UInt8[ndarray, "h w"]] = []
-                for camera, decoder in zip(self.cameras, decoders, strict=True):
-                    image: UInt8[ndarray, "h w"] | None = next(decoder, None)
-                    if image is None:
-                        raise ValueError(f"{self.segment_id}: cam_{camera.index:02d} ran out of frames at index {frame_index}")
-                    if image.shape != (camera.height, camera.width):
+                for position, (camera, decoder) in enumerate(zip(self.cameras, decoders, strict=True)):
+                    wanted: int = int(self.index.frame_index[frameset_index, position])
+                    while cursor[position] < wanted:
+                        image: UInt8[ndarray, "h w"] | None = next(decoder, None)
+                        if image is None:
+                            raise ValueError(f"{self.segment_id}: cam_{camera.index:02d} ran out of frames at its frame {cursor[position] + 1}")
+                        decoded[position] = image
+                        cursor[position] += 1
+                    current: UInt8[ndarray, "h w"] | None = decoded[position]
+                    assert current is not None, f"cam_{camera.index:02d} has no frame for frameset {frameset_index}"
+                    if current.shape != (camera.height, camera.width):
                         raise ValueError(
-                            f"{self.segment_id}: cam_{camera.index:02d} decoded {image.shape}, calibration says {(camera.height, camera.width)}"
+                            f"{self.segment_id}: cam_{camera.index:02d} decoded {current.shape}, calibration says {(camera.height, camera.width)}"
                         )
-                    images.append(image)
-                if frame_index % self.frame_stride:
+                    images.append(current)
+                if frameset_index % self.frame_stride:
                     continue
-                t_ns: int = int(self.frame_t_ns[frame_index])
+                t_ns: int = int(self.frame_t_ns[frameset_index])
                 lead_index: int = int(np.searchsorted(window_imu.t_ns, t_ns, side="right"))
                 lead_ns: int = int(window_imu.t_ns[min(lead_index, len(window_imu) - 1)]) if len(window_imu) else t_ns
                 frame_imu: ImuStream = window_imu.between(emitted_imu_t_ns, max(lead_ns, t_ns))
@@ -619,11 +741,20 @@ class SegmentFeed:
                     ground_truth=_nearest_pose(window_gt, t_ns),
                 )
 
-    def _fetch_samples(self, camera_index: int, start: int, stop: int) -> tuple[list[bytes], list[bool]]:
-        """Encoded samples and keyframe flags of one camera over the frame range ``[start, stop)``."""
+    def _fetch_samples(self, position: int, start: int, stop: int) -> tuple[list[bytes], list[bool]]:
+        """Encoded samples and keyframe flags of one fed camera, over the framesets ``[start, stop)``.
+
+        The range is contiguous in that camera's own frames, from the frame the
+        first frameset takes to the frame the last one does, so the decoder gets
+        every frame the ones it must produce depend on.
+        """
+        camera_index: int = self.camera_positions[position]
+        camera_t_ns: Int64[ndarray, " n_frames"] = self.index.camera_t_ns[position]
+        first_frame: int = int(self.index.frame_index[start, position])
+        last_frame: int = int(self.index.frame_index[stop - 1, position])
         entity: str = f"{RIG_ENTITY}/cam_{camera_index:02d}/pinhole/video"
-        first_ns: int = int(self.index.t_ns[start])
-        last_ns: int = int(self.index.t_ns[stop - 1])
+        first_ns: int = int(camera_t_ns[first_frame])
+        last_ns: int = int(camera_t_ns[last_frame])
         table: pa.Table = (
             self.dataset.filter_segments([self.segment_id])
             .filter_contents(entity)
@@ -633,8 +764,10 @@ class SegmentFeed:
             .to_arrow_table()
         )
         times: Int64[ndarray, " n_window"] = np.asarray(table[TIMELINE].combine_chunks().cast(pa.int64()))
-        if not np.array_equal(times, self.index.t_ns[start:stop]):
-            raise ValueError(f"{self.segment_id}: cam_{camera_index:02d} returned {len(times)} samples for frames [{start}, {stop})")
+        if not np.array_equal(times, camera_t_ns[first_frame : last_frame + 1]):
+            raise ValueError(
+                f"{self.segment_id}: cam_{camera_index:02d} returned {len(times)} samples for its frames [{first_frame}, {last_frame}]"
+            )
         # Arrow has no list<u8> -> binary cast, so slice the child buffer by the list
         # offsets. large_list keeps 64-bit offsets: one camera of a multi-hour session
         # exceeds the default int32's 2 GiB.
@@ -664,12 +797,65 @@ def _window_bounds(index: _VideoIndex, window_ns: int) -> list[tuple[int, int]]:
     return bounds
 
 
-def _read_video_index(dataset: DatasetEntry, segment_id: str, camera_count: int) -> _VideoIndex:
-    """Frame timestamps, shared keyframes and codec, fetched without any sample bytes."""
+def match_framesets(camera_t_ns: Sequence[Int64[ndarray, " n_frames"]], tolerance_ns: int) -> tuple[Int64[ndarray, " n_framesets"], Int64[ndarray, "n_framesets n_cameras"]]:
+    """Group frames into framesets the way basalt's multi-camera reader does.
+
+    Camera 0 is the anchor. Every other camera advances to the frame nearest the
+    anchor's, and the frameset exists only if every camera has one within
+    ``tolerance_ns``. Its timestamp is the median of the frames in it, which for
+    an even number of cameras is the lower middle plus half the gap to the upper
+    one — the arithmetic is basalt's, and reproducing it exactly is what makes the
+    port's frameset times equal the C++'s to the nanosecond.
+
+    Args:
+        camera_t_ns: Each fed camera's frame timestamps, in time order.
+        tolerance_ns: How far a frame may sit from the anchor's and still join it.
+
+    Returns:
+        The frameset timestamps, and the frame each camera contributes to each.
+
+    Raises:
+        ValueError: If no camera was given, or no frameset is complete.
+    """
+    if not camera_t_ns:
+        raise ValueError("a frameset needs at least one camera")
+    cursors: list[int] = [0] * len(camera_t_ns)
+    t_ns: list[int] = []
+    rows: list[list[int]] = []
+    for anchor_index, anchor_t_ns in enumerate(camera_t_ns[0].tolist()):
+        row: list[int] = [anchor_index]
+        for position in range(1, len(camera_t_ns)):
+            times: Int64[ndarray, " n_frames"] = camera_t_ns[position]
+            index: int = cursors[position]
+            if index >= len(times):
+                break
+            while index + 1 < len(times) and abs(int(times[index + 1]) - anchor_t_ns) <= abs(int(times[index]) - anchor_t_ns):
+                index += 1
+            if abs(int(times[index]) - anchor_t_ns) > tolerance_ns:
+                # A camera already past the anchor keeps its frame for the next
+                # anchor; one that fell behind can never catch this anchor again.
+                if int(times[index]) < anchor_t_ns:
+                    cursors[position] = index + 1
+                break
+            cursors[position] = index
+            row.append(index)
+        if len(row) != len(camera_t_ns):
+            continue
+        members: list[int] = sorted(int(camera_t_ns[position][frame]) for position, frame in enumerate(row))
+        middle: int = len(members) // 2
+        t_ns.append(members[middle] if len(members) % 2 else members[middle - 1] + (members[middle] - members[middle - 1]) // 2)
+        rows.append(row)
+    if not rows:
+        raise ValueError(f"no frameset has all {len(camera_t_ns)} cameras within {tolerance_ns} ns of camera 0")
+    return np.array(t_ns, dtype=np.int64), np.array(rows, dtype=np.int64)
+
+
+def _read_video_index(dataset: DatasetEntry, segment_id: str, camera_positions: Sequence[int], tolerance_ns: int) -> _VideoIndex:
+    """Frameset timing, per-camera frames, shared keyframes and codec, fetched without any sample bytes."""
     per_camera_times: list[Int64[ndarray, " n_frames"]] = []
-    shared_keyframe: Bool[ndarray, " n_frames"] | None = None
+    per_camera_keyframe: list[Bool[ndarray, " n_frames"]] = []
     codec_fourcc: int | None = None
-    for camera_index in range(camera_count):
+    for camera_index in camera_positions:
         entity: str = f"{RIG_ENTITY}/cam_{camera_index:02d}/pinhole/video"
         table: pa.Table = (
             dataset.filter_segments([segment_id])
@@ -679,21 +865,39 @@ def _read_video_index(dataset: DatasetEntry, segment_id: str, camera_count: int)
             .to_arrow_table()
         )
         per_camera_times.append(np.asarray(table[TIMELINE].combine_chunks().cast(pa.int64())))
-        keyframe: Bool[ndarray, " n_frames"] = np.asarray(table[1].combine_chunks().is_valid().to_numpy(zero_copy_only=False), dtype=bool)
-        shared_keyframe = keyframe if shared_keyframe is None else (shared_keyframe & keyframe)
+        per_camera_keyframe.append(np.asarray(table[1].combine_chunks().is_valid().to_numpy(zero_copy_only=False), dtype=bool))
         codec_fourcc = int(table[2].combine_chunks().drop_null().flatten()[0].as_py())
-    if shared_keyframe is None or codec_fourcc is None:
-        raise ValueError(f"{segment_id}: the rig reports {camera_count} cameras, so no video columns were read")
-    for camera_index, times in enumerate(per_camera_times[1:], start=1):
-        # MSD is hardware-synced: a frameset is "all cameras at the same video_time".
-        # Keep the assertion rather than a nearest-match synchroniser.
-        if not np.array_equal(times, per_camera_times[0]):
-            raise ValueError(f"{segment_id}: cam_{camera_index:02d} timestamps differ from cam_00; this rig needs a frameset matcher")
-    frame_t_ns: Int64[ndarray, " n_frames"] = per_camera_times[0]
-    if len(frame_t_ns) < 2:
-        raise ValueError(f"{segment_id}: {len(frame_t_ns)} frames is not a segment")
-    fps: int = max(1, round((len(frame_t_ns) - 1) * 1e9 / float(frame_t_ns[-1] - frame_t_ns[0])))
-    return _VideoIndex(t_ns=frame_t_ns, keyframe=shared_keyframe, codec=catalog_codec_name(codec_fourcc), fps=fps)
+    if codec_fourcc is None:
+        raise ValueError(f"{segment_id}: no camera was selected, so no video columns were read")
+    if tolerance_ns == 0:
+        # MSD is hardware-synced: a frameset is "all cameras at the same
+        # video_time", and the identity table is what a matcher would return.
+        for position, times in enumerate(per_camera_times[1:], start=1):
+            if not np.array_equal(times, per_camera_times[0]):
+                raise ValueError(
+                    f"{segment_id}: cam_{camera_positions[position]:02d} timestamps differ from cam_{camera_positions[0]:02d}; "
+                    f"this rig needs RigProfile.frameset_tolerance_ns"
+                )
+        frameset_t_ns: Int64[ndarray, " n_framesets"] = per_camera_times[0]
+        frame_index: Int64[ndarray, "n_framesets n_cameras"] = np.tile(
+            np.arange(len(frameset_t_ns), dtype=np.int64).reshape(-1, 1), (1, len(per_camera_times))
+        )
+    else:
+        frameset_t_ns, frame_index = match_framesets(per_camera_times, tolerance_ns)
+    if len(frameset_t_ns) < 2:
+        raise ValueError(f"{segment_id}: {len(frameset_t_ns)} framesets is not a segment")
+    keyframe: Bool[ndarray, " n_framesets"] = np.ones(len(frameset_t_ns), dtype=bool)
+    for position, flags in enumerate(per_camera_keyframe):
+        keyframe &= flags[frame_index[:, position]]
+    fps: int = max(1, round((len(frameset_t_ns) - 1) * 1e9 / float(frameset_t_ns[-1] - frameset_t_ns[0])))
+    return _VideoIndex(
+        t_ns=frameset_t_ns,
+        frame_index=frame_index,
+        camera_t_ns=tuple(per_camera_times),
+        keyframe=keyframe,
+        codec=catalog_codec_name(codec_fourcc),
+        fps=fps,
+    )
 
 
 def _nearest_pose(trajectory: Trajectory | None, t_ns: int, tolerance_ns: int = ASSOCIATION_TOLERANCE_NS) -> Float64[ndarray, " 7"] | None:
@@ -712,8 +916,12 @@ def _nearest_pose(trajectory: Trajectory | None, t_ns: int, tolerance_ns: int = 
     return np.concatenate([trajectory.position_m[nearest], trajectory.quaternion_wxyz[nearest]])
 
 
-def _read_imu(dataset: DatasetEntry, segment_id: str, cam_time_offset_ns: int, first_ns: int, last_ns: int) -> ImuStream:
-    """Gyroscope and accelerometer over one time window, asserted paired on one clock."""
+def _read_imu(dataset: DatasetEntry, segment_id: str, interpolate_accel: bool, first_ns: int, last_ns: int) -> ImuStream:
+    """Gyroscope and accelerometer over one time window, on the gyroscope's clock.
+
+    ``video_time`` **is** the inertial clock, so nothing is shifted here; the
+    frames come to it (:attr:`SegmentFeed.frame_t_ns`).
+    """
     table: pa.Table = (
         dataset.filter_segments([segment_id])
         .filter_contents([f"{IMU_ENTITY}/gyro", f"{IMU_ENTITY}/accel"])
@@ -732,16 +940,55 @@ def _read_imu(dataset: DatasetEntry, segment_id: str, cam_time_offset_ns: int, f
         streams[sensor] = (row_t_ns[valid], values)
     gyro_t_ns: Int64[ndarray, " n_samples"] = streams["gyro"][0]
     accel_t_ns: Int64[ndarray, " n_samples"] = streams["accel"][0]
-    # MSD logs both sensors on identical timestamps. A rig that does not (RoboCap)
-    # needs the accelerometer interpolated onto the gyro clock before it gets here,
-    # so the core only ever sees the paired form.
-    if not np.array_equal(gyro_t_ns, accel_t_ns):
-        raise ValueError(
-            f"{segment_id}: {len(gyro_t_ns)} gyro and {len(accel_t_ns)} accel samples are not on identical timestamps; pair them before feeding"
-        )
     if gyro_t_ns.size and not bool(np.all(np.diff(gyro_t_ns) > 0)):
         raise ValueError(f"{segment_id}: IMU timestamps are not strictly increasing")
-    return ImuStream(t_ns=gyro_t_ns + cam_time_offset_ns, gyro_rad_s=streams["gyro"][1], accel_m_s2=streams["accel"][1])
+    # MSD logs both sensors on identical timestamps, so pairing is an assertion.
+    # RoboCap's two channels run on their own clocks (10,745 gyro against 10,751
+    # accel on session 15), and basalt's reader interpolates the accelerometer
+    # onto the gyroscope's timestamps; the core only ever sees the paired form.
+    if not interpolate_accel:
+        if not np.array_equal(gyro_t_ns, accel_t_ns):
+            raise ValueError(
+                f"{segment_id}: {len(gyro_t_ns)} gyro and {len(accel_t_ns)} accel samples are not on identical timestamps; pair them before feeding"
+            )
+        return ImuStream(t_ns=gyro_t_ns, gyro_rad_s=streams["gyro"][1], accel_m_s2=streams["accel"][1])
+    return pair_accel_onto_gyro(gyro_t_ns, streams["gyro"][1], accel_t_ns, streams["accel"][1])
+
+
+def pair_accel_onto_gyro(
+    gyro_t_ns: Int64[ndarray, " n_gyro"],
+    gyro_rad_s: Float64[ndarray, "n_gyro 3"],
+    accel_t_ns: Int64[ndarray, " n_accel"],
+    accel_m_s2: Float64[ndarray, "n_accel 3"],
+) -> ImuStream:
+    """Linearly interpolate the accelerometer onto the gyroscope's timestamps.
+
+    A gyroscope sample outside the accelerometer's own span is dropped rather
+    than held at an endpoint: ``numpy.interp`` clamps, which would feed the
+    estimator a constant acceleration over a stretch it has no measurement for.
+    This is basalt's rule for RoboCap, whose file reader skips a gyroscope sample
+    that has no accelerometer sample on both sides of it.
+
+    Args:
+        gyro_t_ns: Gyroscope timestamps, strictly increasing.
+        gyro_rad_s: Angular velocity, rad/s.
+        accel_t_ns: Accelerometer timestamps, strictly increasing.
+        accel_m_s2: Linear acceleration, m/s^2.
+
+    Returns:
+        One stream on the gyroscope's clock, covering only the overlap.
+
+    Raises:
+        ValueError: If either channel is empty, so the overlap cannot exist.
+    """
+    if gyro_t_ns.size == 0 or accel_t_ns.size == 0:
+        raise ValueError(f"pairing needs both channels; got {gyro_t_ns.size} gyro and {accel_t_ns.size} accel samples")
+    inside: Bool[ndarray, " n_gyro"] = (gyro_t_ns >= accel_t_ns[0]) & (gyro_t_ns <= accel_t_ns[-1])
+    paired_t_ns: Int64[ndarray, " n_paired"] = gyro_t_ns[inside]
+    interpolated: Float64[ndarray, "n_paired 3"] = np.column_stack(
+        [np.interp(paired_t_ns, accel_t_ns, accel_m_s2[:, axis]) for axis in range(accel_m_s2.shape[1])]
+    )
+    return ImuStream(t_ns=paired_t_ns, gyro_rad_s=gyro_rad_s[inside], accel_m_s2=interpolated)
 
 
 def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, last_ns: int) -> Trajectory | None:
@@ -771,15 +1018,49 @@ def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, la
     )
 
 
+def select_cameras(statics: pa.Table, camera_count: int, camera_names: tuple[str, ...] | None) -> tuple[int, ...]:
+    """Rig indices of the named cameras, in the caller's order.
+
+    Names are read from each camera node's ``name`` static and compared with
+    hyphens normalised to underscores, because the rig writes ``left-front``
+    where basalt's driver spells it ``left_front``.
+
+    Args:
+        statics: Single-row table holding every camera node's statics.
+        camera_count: Cameras the rig declares.
+        camera_names: Names to feed in order, or None for every camera in rig order.
+
+    Returns:
+        One rig index per fed camera.
+
+    Raises:
+        ValueError: If a name is asked for that the recording does not carry, or
+            two cameras answer to the same name.
+    """
+    if camera_names is None:
+        return tuple(range(camera_count))
+    by_name: dict[str, int] = {}
+    for position in range(camera_count):
+        name: str = _static_string(statics, f"{RIG_ENTITY}/cam_{position:02d}:name").replace("-", "_")
+        if name in by_name:
+            raise ValueError(f"cameras cam_{by_name[name]:02d} and cam_{position:02d} are both named {name!r}")
+        by_name[name] = position
+    missing: list[str] = [name for name in camera_names if name not in by_name]
+    if missing:
+        raise ValueError(f"the recording has no camera named {missing}; it carries {sorted(by_name)}")
+    return tuple(by_name[name] for name in camera_names)
+
+
 def _build_feed(
     sensor_dataset: DatasetEntry,
     gt_dataset: DatasetEntry | None,
     segment_id: str,
     parameters: ImuParameters,
+    profile: RigProfile,
     frame_stride: int,
     window_s: float,
 ) -> SegmentFeed:
-    """Read calibration, IMU, ground truth and frame timing for one segment."""
+    """Read calibration, IMU, ground truth and frameset timing for one segment."""
     if frame_stride < 1:
         raise ValueError(f"frame_stride must be at least 1; got {frame_stride}")
     rig_statics: pa.Table = sensor_dataset.filter_segments([segment_id]).filter_contents([RIG_ENTITY, IMU_ENTITY]).reader(index=None).to_arrow_table()
@@ -787,16 +1068,18 @@ def _build_feed(
     if reference != "imu_00":
         raise ValueError(f"{segment_id}: rig reference is {reference!r}, but the feed assumes the IMU is the rig frame")
     camera_count: int = int(_static_values(rig_statics, f"{RIG_ENTITY}:num_cameras")[0])
-    camera_entities: list[str] = [f"{RIG_ENTITY}/cam_{position:02d}" for position in range(camera_count)]
+    rig_entities: list[str] = [f"{RIG_ENTITY}/cam_{position:02d}" for position in range(camera_count)]
     camera_statics: pa.Table = (
         sensor_dataset.filter_segments([segment_id])
-        .filter_contents(camera_entities + [f"{entity}/pinhole" for entity in camera_entities])
+        .filter_contents(rig_entities + [f"{entity}/pinhole" for entity in rig_entities])
         .reader(index=None)
         .to_arrow_table()
     )
-    index: _VideoIndex = _read_video_index(sensor_dataset, segment_id, camera_count)
+    camera_positions: tuple[int, ...] = select_cameras(camera_statics, camera_count, profile.camera_names)
+    index: _VideoIndex = _read_video_index(sensor_dataset, segment_id, camera_positions, profile.frameset_tolerance_ns)
     cameras: tuple[CameraCalib, ...] = tuple(
-        camera_calib(position, read_camera_statics(camera_statics, entity), float(index.fps)) for position, entity in enumerate(camera_entities)
+        camera_calib(position, read_camera_statics(camera_statics, rig_entities[position]), float(index.fps), profile.downscale)
+        for position in camera_positions
     )
     imu_T_body: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
     imu_T_body[:3, :3] = _static_values(rig_statics, f"{IMU_ENTITY}:Transform3D:mat3x3").reshape(3, 3, order="F")
@@ -809,7 +1092,10 @@ def _build_feed(
         cameras=cameras,
         imu=imu_calib(parameters, imu_T_body),
         capture_start_time_ns=_static_int(properties, "property:capture:start_time_ns"),
-        frame_t_ns=index.t_ns,
+        frame_t_ns=index.t_ns + parameters.cam_time_offset_ns,
+        camera_positions=camera_positions,
+        downscale=profile.downscale,
+        interpolate_accel=profile.interpolate_accel_onto_gyro,
         frame_stride=frame_stride,
         dataset=sensor_dataset,
         gt_dataset=gt_dataset,
@@ -822,6 +1108,7 @@ def _build_feed(
 def open_segment(
     source: SegmentSource,
     parameters: ImuParameters,
+    profile: RigProfile = MSD_RIG,
     frame_stride: int = 1,
     window_s: float = DEFAULT_WINDOW_S,
 ) -> Iterator[SegmentFeed]:
@@ -835,6 +1122,7 @@ def open_segment(
     Args:
         source: Where the segment lives.
         parameters: Frozen IMU parameters, normally from the reference manifest.
+        profile: How this rig has to be read; the default is what MSD is.
         frame_stride: Yield every n-th frameset; every frame is still decoded.
         window_s: Longest time window fetched in one round trip.
 
@@ -855,7 +1143,35 @@ def open_segment(
             segment_ids: list[str] = list(base.segment_ids())
             if len(segment_ids) != 1:
                 raise ValueError(f"{source.base_rrd} holds {len(segment_ids)} segments; the feed reads one")
-            yield _build_feed(base, ground_truth, segment_ids[0], parameters, frame_stride, window_s)
+            yield _build_feed(base, ground_truth, segment_ids[0], parameters, profile, frame_stride, window_s)
     else:
         dataset: DatasetEntry = CatalogClient(source.url).get_dataset(source.dataset_name)
-        yield _build_feed(dataset, dataset, source.segment_id, parameters, frame_stride, window_s)
+        yield _build_feed(dataset, dataset, source.segment_id, parameters, profile, frame_stride, window_s)
+
+
+def read_rig_trajectory(rrd: Path, shift_ns: int = 0) -> Trajectory:
+    """Every rig pose on one ``.rrd`` layer, shifted onto the clock the caller works in.
+
+    The RoboCap ``slam`` layer is a trajectory and nothing else, on the same
+    ``video_time`` as the base layer it sits beside, so it is read the way the
+    ground-truth layer is and then moved by the same offset the frames are.
+
+    Args:
+        rrd: Layer holding the rig's ``Transform3D`` rows.
+        shift_ns: Added to every timestamp; the camera-to-IMU offset for RoboCap.
+
+    Returns:
+        The whole trajectory, oldest pose first.
+
+    Raises:
+        ValueError: If the file does not hold exactly one segment, or holds no rig poses.
+    """
+    with rr.server.Server(datasets={"layer": [str(rrd)]}) as server:
+        dataset: DatasetEntry = server.client().get_dataset("layer")
+        segment_ids: list[str] = list(dataset.segment_ids())
+        if len(segment_ids) != 1:
+            raise ValueError(f"{rrd} holds {len(segment_ids)} segments; a trajectory layer holds one")
+        found: Trajectory | None = _read_ground_truth(dataset, segment_ids[0], -(2**62), 2**62)
+    if found is None:
+        raise ValueError(f"{rrd} carries no {RIG_ENTITY} Transform3D rows")
+    return Trajectory(t_ns=found.t_ns + shift_ns, position_m=found.position_m, quaternion_wxyz=found.quaternion_wxyz)
