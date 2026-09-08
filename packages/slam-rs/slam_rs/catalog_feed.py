@@ -58,7 +58,7 @@ from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name
 
 from slam_rs.reference import ImuParameters, RobocapReference
-from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, shift_clock
+from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, empty_trajectory, shift_clock
 
 RIG_ENTITY: str = "/world/rig_00"
 """Rig node of the ``exoego:v2`` tree; its reference frame is the IMU."""
@@ -684,17 +684,20 @@ class SegmentFeed:
         """Every inertial sample with ``first_ns <= t <= last_ns``, on the inertial clock."""
         return _read_imu(self.dataset, self.segment_id, self.profile.interpolate_accel_onto_gyro, first_ns, last_ns)
 
-    def ground_truth_between(self, first_ns: int, last_ns: int) -> Trajectory | None:
-        """Ground-truth rig poses over ``[first_ns, last_ns]`` of the inertial clock, or None without a ``gt`` layer.
+    def ground_truth_between(self, first_ns: int, last_ns: int) -> Trajectory:
+        """Ground-truth rig poses over ``[first_ns, last_ns]`` of the inertial clock.
 
         The layer stores them on ``video_time``, like the frames, so the window is
         asked for in that clock and the answer comes back in the inertial one.
+        Empty where there is nothing to give: no ``gt`` layer at all, or a window
+        the layer does not cover. Whether the segment *has* a layer is
+        :attr:`has_ground_truth`, which is the distinction a caller acts on;
+        callers of this test :func:`len`.
         """
         if self.gt_dataset is None:
-            return None
+            return empty_trajectory()
         offset_ns: int = self.imu.cam_time_offset_ns
-        found: Trajectory | None = _read_ground_truth(self.gt_dataset, self.segment_id, first_ns - offset_ns, last_ns - offset_ns)
-        return found if found is None else shift_clock(found, offset_ns)
+        return shift_clock(_read_ground_truth(self.gt_dataset, self.segment_id, first_ns - offset_ns, last_ns - offset_ns), offset_ns)
 
     def framesets(self, stop_ns: int | None = None) -> Iterator[Frameset]:
         """Decode the segment and yield one frameset at a time.
@@ -750,7 +753,7 @@ class SegmentFeed:
                     f"{self.segment_id}: inertial gap at the window starting {window_first_ns} ns — "
                     f"the read begins at {int(window_imu.t_ns[0])} but the last emitted sample was {emitted_imu_t_ns}"
                 )
-            window_gt: Trajectory | None = self.ground_truth_between(window_first_ns - margin_ns, window_last_ns + margin_ns)
+            window_gt: Trajectory = self.ground_truth_between(window_first_ns - margin_ns, window_last_ns + margin_ns)
 
             decoders: list[Iterator[UInt8[ndarray, "h w"]]] = []
             for position in range(len(self.cameras)):
@@ -1089,7 +1092,7 @@ def _read_video_index(dataset: DatasetEntry, segment_id: str, camera_positions: 
     )
 
 
-def _nearest_pose(trajectory: Trajectory | None, t_ns: int, tolerance_ns: int = ASSOCIATION_TOLERANCE_NS) -> Float64[ndarray, " 7"] | None:
+def _nearest_pose(trajectory: Trajectory, t_ns: int, tolerance_ns: int = ASSOCIATION_TOLERANCE_NS) -> Float64[ndarray, " 7"] | None:
     """The pose closest in time to ``t_ns`` as ``[tx, ty, tz, qw, qx, qy, qz]``, or None if none is close enough.
 
     The tolerance is the gate's own association tolerance. Without it a frameset
@@ -1097,7 +1100,7 @@ def _nearest_pose(trajectory: Trajectory | None, t_ns: int, tolerance_ns: int = 
     Index smoke segment the ground truth starts 17.5 ms after ``video_time`` zero,
     so the very first frameset has no truth and must say so rather than borrow one.
     """
-    if trajectory is None or len(trajectory) == 0:
+    if len(trajectory) == 0:
         return None
     nearest: int = int(np.abs(trajectory.t_ns - t_ns).argmin())
     if abs(int(trajectory.t_ns[nearest]) - t_ns) > tolerance_ns:
@@ -1201,8 +1204,13 @@ def pair_accel_onto_gyro(
     return ImuStream(t_ns=paired_t_ns, gyro_rad_s=gyro_rad_s[inside], accel_m_s2=interpolated)
 
 
-def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, last_ns: int) -> Trajectory | None:
-    """Ground-truth rig poses over one window on ``video_time``, converted from Rerun's XYZW to w-first."""
+def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, last_ns: int) -> Trajectory:
+    """Ground-truth rig poses over one window on ``video_time``, converted from Rerun's XYZW to w-first.
+
+    Empty when the layer carries no rig transform at all and when this window
+    holds no pose: the two are the same answer to "what is the truth here", and
+    the layer's own absence is :attr:`SegmentFeed.has_ground_truth`.
+    """
     table: pa.Table = (
         dataset.filter_segments([segment_id])
         .filter_contents([RIG_ENTITY])
@@ -1213,13 +1221,13 @@ def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, la
     translation_column: str = f"{RIG_ENTITY}:Transform3D:translation"
     quaternion_column: str = f"{RIG_ENTITY}:Transform3D:quaternion"
     if translation_column not in table.column_names or quaternion_column not in table.column_names:
-        return None
+        return empty_trajectory()
     row_t_ns: Int64[ndarray, " n_rows"] = np.asarray(table[TIMELINE].combine_chunks().cast(pa.int64()))
     translations: pa.Array = table[translation_column].combine_chunks()
     valid: Bool[ndarray, " n_rows"] = translations.is_valid().to_numpy(zero_copy_only=False)
     position_m: Float64[ndarray, "n_poses 3"] = _flat_float(translations).reshape(-1, 3)
     if position_m.shape[0] == 0:
-        return None
+        return empty_trajectory()
     quaternion_xyzw: Float64[ndarray, "n_poses 4"] = _flat_float(table[quaternion_column].combine_chunks()).reshape(-1, 4)
     return Trajectory(
         t_ns=row_t_ns[valid],
@@ -1386,7 +1394,7 @@ def read_rig_trajectory(rrd: Path) -> Trajectory:
         segment_ids: list[str] = list(dataset.segment_ids())
         if len(segment_ids) != 1:
             raise ValueError(f"{rrd} holds {len(segment_ids)} segments; a trajectory layer holds one")
-        found: Trajectory | None = _read_ground_truth(dataset, segment_ids[0], -(2**62), 2**62)
-    if found is None:
+        found: Trajectory = _read_ground_truth(dataset, segment_ids[0], -(2**62), 2**62)
+    if len(found) == 0:
         raise ValueError(f"{rrd} carries no {RIG_ENTITY} Transform3D rows")
     return found

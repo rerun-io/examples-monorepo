@@ -214,7 +214,7 @@ def main(config: Config) -> None:
             )
             rr.send_blueprint(frontend_blueprint(feed.cameras))
         elif config.stage == "vio":
-            truth: Trajectory | None = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
+            truth: Trajectory = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
             # Everything this constructor refuses is the caller's own request —
             # a configuration this port does not run, or ``--gpu`` on a host
             # with no driver, no device or no adapter — so it is one sentence
@@ -227,7 +227,7 @@ def main(config: Config) -> None:
                 lockstep=Lockstep(vio=vio),
                 logger=VioLogger(
                     cameras=feed.cameras,
-                    ground_truth=truth if truth is not None else empty_trajectory(),
+                    ground_truth=truth,
                     cpp=_cpp_trajectory(manifest, segment, feed.capture_start_time_ns),
                     frame_t_ns=feed.frame_t_ns,
                 ),

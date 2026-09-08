@@ -266,8 +266,8 @@ def test_the_smoke_segment_decodes_from_the_nas(manifest: ReferenceManifest) -> 
         assert feed.stop_ns_after(1) == int(feed.frame_t_ns[0])
         assert whole_imu.gyro_rad_s.shape == (len(whole_imu), 3)
         assert whole_imu.accel_m_s2.shape == (len(whole_imu), 3)
-        whole_gt: Trajectory | None = feed.ground_truth_between(-(2**62), 2**62)
-        assert whole_gt is not None
+        whole_gt: Trajectory = feed.ground_truth_between(-(2**62), 2**62)
+        assert len(whole_gt)
         assert len(whole_gt) == segment.gt.num_poses
 
         digests: list[str] = []
@@ -340,8 +340,8 @@ def test_the_absolute_clock_matches_the_ground_truth_sidecar(manifest: Reference
     assert len(sidecar) == segment.gt.num_poses
 
     with open_segment(LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path), segment.imu) as feed:
-        relative: Trajectory | None = feed.ground_truth_between(-(2**62), 2**62)
-        assert relative is not None
+        relative: Trajectory = feed.ground_truth_between(-(2**62), 2**62)
+        assert len(relative)
         absolute: Trajectory = shift_clock(relative, feed.capture_start_time_ns)
 
     # Exact, not approximate: video_time + capture.start_time_ns is the sidecar's
@@ -371,8 +371,8 @@ def test_a_replay_export_associates_with_the_ground_truth_sidecar(manifest: Refe
 
     config: Config = Config(rr_config=RerunTyroConfig(headless=True), segment=SMOKE_SEGMENT, stage="vio", max_framesets=40)
     with open_segment(LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path), segment.imu) as feed:
-        truth: Trajectory | None = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
-        assert truth is not None
+        truth: Trajectory = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
+        assert len(truth)
         stage: VioStage = VioStage(
             lockstep=Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment))),
             logger=VioLogger(
