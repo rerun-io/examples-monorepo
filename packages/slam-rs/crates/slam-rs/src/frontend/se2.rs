@@ -118,7 +118,7 @@ impl<S: LieScalar> AffineCompact2<S> {
 /// * The small-angle branch triggers at `Sophus::Constants<S>::epsilon()`
 ///   (`common.hpp:166`, `:182-186`): `1e-10` in `f64` and `1e-5` in `f32`, both
 ///   far larger than the machine epsilon `nalgebra` would pick, which is why
-///   [`LieScalar::sophus_epsilon`] exists.
+///   [`LieScalar::SOPHUS_EPSILON`] exists.
 /// * The translation is `V(theta) * upsilon` written out as two scalar
 ///   expressions (`se2.hpp:626-628`), not as a matrix product.
 #[inline]
@@ -133,7 +133,7 @@ pub fn se2_exp<S: LieScalar>(tangent: &Vector3<S>) -> AffineCompact2<S> {
     let imaginary: S = sin_theta / length;
 
     let (sin_theta_by_theta, one_minus_cos_theta_by_theta): (S, S) =
-        if theta.abs() < S::sophus_epsilon() {
+        if theta.abs() < S::SOPHUS_EPSILON {
             let theta_sq: S = theta * theta;
             (
                 one - S::from_literal(1.0 / 6.0) * theta_sq,
@@ -196,7 +196,7 @@ mod tests {
     /// from `Sophus::Constants` rather than from the machine epsilon.
     #[test]
     fn the_small_angle_branch_is_the_one_that_survives_the_cancellation() {
-        let boundary: f64 = f64::sophus_epsilon();
+        let boundary: f64 = f64::SOPHUS_EPSILON;
         let series: AffineCompact2<f64> = se2_exp(&Vector3::new(1.0, 2.0, boundary * 0.999));
         let closed: AffineCompact2<f64> = se2_exp(&Vector3::new(1.0, 2.0, boundary * 1.001));
         // `x = 1 * sin(t)/t - 2 * (1 - cos t)/t`, so the series carries `-2 * t/2`.
@@ -207,7 +207,7 @@ mod tests {
         );
         assert_eq!(closed.translation.x, 1.0);
 
-        let boundary: f32 = f32::sophus_epsilon();
+        let boundary: f32 = f32::SOPHUS_EPSILON;
         let series: AffineCompact2f = se2_exp(&Vector3::new(1.0, 2.0, boundary * 0.999));
         let closed: AffineCompact2f = se2_exp(&Vector3::new(1.0, 2.0, boundary * 1.001));
         assert_abs_diff_eq!(series.translation.x, 1.0 - boundary * 0.999, epsilon = 1e-9);

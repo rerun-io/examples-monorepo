@@ -38,11 +38,15 @@ use nalgebra::{
 /// small-angle branch, so it is not used.
 pub trait LieScalar: RealField + Copy {
     /// `Sophus::Constants<Scalar>::epsilon()`.
-    fn sophus_epsilon() -> Self;
+    ///
+    /// A `const` rather than a method so a context with no value to call it on
+    /// can still name it: `gpu::kernels` aliases it the way it aliases
+    /// `PATCH_BORDER`, instead of re-declaring `1e-5`.
+    const SOPHUS_EPSILON: Self;
 
     /// `Sophus::Constants<Scalar>::epsilonSqrt()`.
     fn sophus_epsilon_sqrt() -> Self {
-        Self::sophus_epsilon().sqrt()
+        Self::SOPHUS_EPSILON.sqrt()
     }
 
     /// `Eigen::NumTraits<Scalar>::dummy_precision()`: `1e-12` in double and
@@ -136,9 +140,7 @@ pub trait LieScalar: RealField + Copy {
 }
 
 impl LieScalar for f64 {
-    fn sophus_epsilon() -> Self {
-        1e-10
-    }
+    const SOPHUS_EPSILON: Self = 1e-10;
 
     fn eigen_dummy_precision() -> Self {
         1e-12
@@ -174,9 +176,7 @@ impl LieScalar for f64 {
 }
 
 impl LieScalar for f32 {
-    fn sophus_epsilon() -> Self {
-        1e-5
-    }
+    const SOPHUS_EPSILON: Self = 1e-5;
 
     fn eigen_dummy_precision() -> Self {
         1e-5
@@ -326,7 +326,7 @@ impl<S: LieScalar> So3<S> {
     /// Jacobian, so the two must be computed together.
     pub fn exp_and_theta(omega: &Vector3<S>) -> (Self, S) {
         let theta_sq: S = omega.norm_squared();
-        let epsilon: S = S::sophus_epsilon();
+        let epsilon: S = S::SOPHUS_EPSILON;
 
         let (theta, imag_factor, real_factor): (S, S, S) = if theta_sq < epsilon * epsilon {
             let theta_po4: S = theta_sq * theta_sq;
@@ -374,7 +374,7 @@ impl<S: LieScalar> So3<S> {
         let q = self.quaternion.as_ref();
         let squared_n: S = q.vector().norm_squared();
         let w: S = q.w;
-        let epsilon: S = S::sophus_epsilon();
+        let epsilon: S = S::SOPHUS_EPSILON;
 
         let (two_atan_nbyw_by_n, theta): (S, S) = if squared_n < epsilon * epsilon {
             // A unit quaternion with a vanishing vector part has |w| ~ 1, so the
@@ -713,7 +713,7 @@ pub fn right_jacobian_so3<S: LieScalar>(phi: &Vector3<S>) -> Matrix3<S> {
     let phi_hat2: Matrix3<S> = phi_hat * phi_hat;
 
     let mut j: Matrix3<S> = Matrix3::identity();
-    if phi_norm2 > S::sophus_epsilon() {
+    if phi_norm2 > S::SOPHUS_EPSILON {
         let phi_norm: S = phi_norm2.sqrt();
         let phi_norm3: S = phi_norm2 * phi_norm;
         j -= phi_hat * ((c::<S>(1.0) - phi_norm.cos()) / phi_norm2);
@@ -784,7 +784,7 @@ fn inverse_jacobian_second_order_term<S: LieScalar>(
     phi_hat2: &Matrix3<S>,
     phi_norm2: S,
 ) -> Matrix3<S> {
-    if phi_norm2 <= S::sophus_epsilon() {
+    if phi_norm2 <= S::SOPHUS_EPSILON {
         // Taylor expansion around 0.
         return phi_hat2 / c::<S>(12.0);
     }
@@ -810,7 +810,7 @@ fn inverse_jacobian_second_order_term<S: LieScalar>(
 fn sophus_left_jacobian_so3<S: LieScalar>(omega: &Vector3<S>, theta: S) -> Matrix3<S> {
     let theta_sq: S = theta * theta;
     let big_omega: Matrix3<S> = So3::hat(omega);
-    let epsilon: S = S::sophus_epsilon();
+    let epsilon: S = S::SOPHUS_EPSILON;
 
     if theta_sq < epsilon * epsilon {
         Matrix3::identity() + big_omega * c::<S>(0.5)
@@ -826,7 +826,7 @@ fn sophus_left_jacobian_so3<S: LieScalar>(omega: &Vector3<S>, theta: S) -> Matri
 fn sophus_left_jacobian_inv_so3<S: LieScalar>(omega: &Vector3<S>, theta: S) -> Matrix3<S> {
     let theta_sq: S = theta * theta;
     let big_omega: Matrix3<S> = So3::hat(omega);
-    let epsilon: S = S::sophus_epsilon();
+    let epsilon: S = S::SOPHUS_EPSILON;
 
     let identity: Matrix3<S> = Matrix3::identity();
     if theta_sq < epsilon * epsilon {
