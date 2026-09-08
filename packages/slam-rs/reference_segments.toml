@@ -60,7 +60,7 @@
 # runs it and prints its row, and its numbers are a check on work done without
 # it.
 
-schema_version = 6
+schema_version = 7
 catalog_url = "rerun+http://dgx-spark:9988"
 
 # Landscape, unrotated: the Index stores its two fisheye cameras as captured.
@@ -732,6 +732,13 @@ decode_path = "cpu_gray8_swscale_area_downscale3"
 # which sit at cam_04, cam_00, cam_01 and cam_05 respectively.
 camera_names = ["left", "left_front", "right_front", "right"]
 downscale = 3
+# The rig's six cameras are triggered together but time-stamped per device, so a
+# frameset's frames sit tens of microseconds apart where two framesets sit 33 ms
+# apart; this is `dataset_io_robocap.cpp`'s own tolerance. The two inertial
+# channels run on their own clocks, which basalt pairs by interpolating the
+# accelerometer onto the gyroscope's timestamps.
+frameset_tolerance_ns = 1000000
+interpolate_accel_onto_gyro = true
 # basalt's own files, as `python/robocap_vit.toml` and
 # `scripts/basalt_convert_robocap_calib.py --downscale 3` produced them.
 vio_config = "configs/msdmo_config.json"

@@ -70,14 +70,6 @@ from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_trajectory, write_trajectory
 from slam_rs.vio_log import VioLogger, vio_blueprint
 
-FRAMESET_TOLERANCE_NS: int = 1_000_000
-"""How far a camera's frame may sit from the anchor camera's and still be the same capture.
-
-basalt's ``dataset_io_robocap.cpp`` value. The rig's six cameras are triggered
-together but time-stamped per device, so the spread inside one frameset is tens
-of microseconds and the gap between framesets is 33 ms.
-"""
-
 
 @dataclass(slots=True)
 class Config:
@@ -102,8 +94,8 @@ def robocap_profile(manifest: ReferenceManifest) -> RigProfile:
     return RigProfile(
         camera_names=manifest.robocap.camera_names,
         downscale=manifest.robocap.downscale,
-        interpolate_accel_onto_gyro=True,
-        frameset_tolerance_ns=FRAMESET_TOLERANCE_NS,
+        interpolate_accel_onto_gyro=manifest.robocap.interpolate_accel_onto_gyro,
+        frameset_tolerance_ns=manifest.robocap.frameset_tolerance_ns,
     )
 
 

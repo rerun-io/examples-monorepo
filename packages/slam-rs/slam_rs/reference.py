@@ -351,6 +351,10 @@ class RobocapReference:
     """The cameras the C++ ran, by their ``name`` static, in the calibration's own order."""
     downscale: int
     """Integer factor the C++ reader downscaled both frames and intrinsics by."""
+    frameset_tolerance_ns: int
+    """How far a camera's frame may sit from the anchor camera's and still be the same capture."""
+    interpolate_accel_onto_gyro: bool
+    """Whether the accelerometer has to be interpolated onto the gyroscope's timestamps."""
     vio_config: str
     """basalt VIO config the C++ ran, relative to the package root."""
     calibration: str
@@ -626,6 +630,8 @@ def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
         decode_path=DECODE_PATH_BY_NAME[robocap_block["decode_path"]],
         camera_names=tuple(str(name) for name in robocap_block["camera_names"]),
         downscale=int(robocap_block["downscale"]),
+        frameset_tolerance_ns=int(robocap_block["frameset_tolerance_ns"]),
+        interpolate_accel_onto_gyro=bool(robocap_block["interpolate_accel_onto_gyro"]),
         vio_config=str(robocap_block["vio_config"]),
         calibration=str(robocap_block["calibration"]),
         imu=_imu(robocap_block["imu"]),

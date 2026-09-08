@@ -35,7 +35,7 @@ def manifest() -> ReferenceManifest:
 
 def test_the_manifest_holds_ten_segments(manifest: ReferenceManifest) -> None:
     assert len(manifest.segments) == 10
-    assert manifest.schema_version == 6
+    assert manifest.schema_version == 7
 
 
 def test_every_segment_carries_the_c_plus_plus_precision_band(manifest: ReferenceManifest) -> None:
@@ -159,10 +159,14 @@ def test_robocap_carries_two_sessions_and_no_ground_truth(manifest: ReferenceMan
 
 
 def test_robocap_names_the_configuration_the_cpp_ran(manifest: ReferenceManifest) -> None:
-    """The four cameras, the downscale and basalt's own two files, all present."""
+    """The four cameras, the downscale, the two rig rules and basalt's own two files, all present."""
     assert manifest.robocap.camera_names == ("left", "left_front", "right_front", "right")
     assert manifest.robocap.downscale == 3
     assert manifest.robocap.decode_path == "cpu_gray8_swscale_area_downscale3"
+    # basalt's `dataset_io_robocap.cpp` tolerance, and the pairing its reader does
+    # because the two inertial channels are on their own clocks.
+    assert manifest.robocap.frameset_tolerance_ns == 1_000_000
+    assert manifest.robocap.interpolate_accel_onto_gyro is True
     assert "config.vio_marg_lost_landmarks" in (manifest.package_root / manifest.robocap.vio_config).read_text()
     assert '"camera_type": "kb4"' in (manifest.package_root / manifest.robocap.calibration).read_text()
 

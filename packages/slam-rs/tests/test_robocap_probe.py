@@ -359,12 +359,16 @@ def test_the_matcher_needs_a_camera() -> None:
 
 
 def test_the_profile_comes_from_the_manifest_not_the_code(manifest: ReferenceManifest) -> None:
-    """One place says what the C++ ran, and the profile only reads it."""
+    """One place says what the C++ ran, and the profile only reads it.
+
+    All four fields, each against the manifest's own value: the tolerance and the
+    pairing rule were constants in the tool, which left the claim half true.
+    """
     profile = robocap_profile(manifest)
-    assert profile.camera_names == ("left", "left_front", "right_front", "right")
-    assert profile.downscale == 3
-    assert profile.interpolate_accel_onto_gyro is True
-    assert profile.frameset_tolerance_ns == 1_000_000
+    assert profile.camera_names == manifest.robocap.camera_names == ("left", "left_front", "right_front", "right")
+    assert profile.downscale == manifest.robocap.downscale == 3
+    assert profile.interpolate_accel_onto_gyro is manifest.robocap.interpolate_accel_onto_gyro is True
+    assert profile.frameset_tolerance_ns == manifest.robocap.frameset_tolerance_ns == 1_000_000
 
 
 def test_the_pairing_boundary_is_typed() -> None:
