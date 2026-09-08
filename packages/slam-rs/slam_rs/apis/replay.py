@@ -351,9 +351,11 @@ def main(config: Config) -> None:
 
         # Exports carry the absolute device clock, the one every basalt CSV and
         # every gt.csv sidecar uses. Writing video_time here would produce a file
-        # that associates with none of them.
+        # that associates with none of them. How far that is from video_time is
+        # the recording's own fact (`SegmentFeed.export_offset_ns`), which is why
+        # the RoboCap probe can share this rule instead of stating its own.
         estimate: Trajectory = stage.logger.estimated()
-        write_trajectory(output_csv, shift_clock(estimate, feed.capture_start_time_ns))
+        write_trajectory(output_csv, shift_clock(estimate, feed.export_offset_ns))
         print(f"{len(estimate)} tracked poses -> {output_csv} (absolute ns)")
         if len(estimate) == 0:
             print("no ATE: the estimator reported no tracked pose")

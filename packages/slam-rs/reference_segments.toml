@@ -60,7 +60,7 @@
 # runs it and prints its row, and its numbers are a check on work done without
 # it.
 
-schema_version = 7
+schema_version = 8
 catalog_url = "rerun+http://dgx-spark:9988"
 
 # Landscape, unrotated: the Index stores its two fisheye cameras as captured.
@@ -739,6 +739,11 @@ downscale = 3
 # accelerometer onto the gyroscope's timestamps.
 frameset_tolerance_ns = 1000000
 interpolate_accel_onto_gyro = true
+# The recorder stamps the device clock on the video timeline itself, where MSD
+# stamps time since `property:capture:start_time_ns`. So an exported trajectory
+# adds nothing here, and that is the clock the basalt CSVs beside the sessions
+# carry.
+video_time_is_absolute = true
 # basalt's own files, as `python/robocap_vit.toml` and
 # `scripts/basalt_convert_robocap_calib.py --downscale 3` produced them.
 vio_config = "configs/msdmo_config.json"

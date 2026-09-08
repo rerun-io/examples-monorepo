@@ -164,6 +164,8 @@ def test_the_smoke_segment_decodes_from_the_nas() -> None:
         assert len(feed.cameras) == segment.capture.num_cameras
         assert len(feed.frame_t_ns) == segment.capture.num_frames
         assert feed.capture_start_time_ns == segment.capture.start_time_ns
+        # MSD's video_time is relative to that, so an export has to add it back.
+        assert feed.export_offset_ns == segment.capture.start_time_ns
         for camera in feed.cameras:
             assert (camera.width, camera.height) == (960, 960)
             assert camera.model == "kb4"

@@ -20,9 +20,11 @@ from slam_rs import _core
 from slam_rs.apis.robocap_probe import check_calibration_matches_recording, robocap_profile
 from slam_rs.catalog_feed import (
     CHILD_FROM_PARENT,
+    MSD_RIG,
     CameraCalib,
     CameraStatics,
     LocalSegment,
+    RigProfile,
     camera_calib,
     match_framesets,
     open_segment,
@@ -369,6 +371,10 @@ def test_the_profile_comes_from_the_manifest_not_the_code(manifest: ReferenceMan
     assert profile.downscale == manifest.robocap.downscale == 3
     assert profile.interpolate_accel_onto_gyro is manifest.robocap.interpolate_accel_onto_gyro is True
     assert profile.frameset_tolerance_ns == manifest.robocap.frameset_tolerance_ns == 1_000_000
+    assert profile.video_time_is_absolute is manifest.robocap.video_time_is_absolute is True
+    # What MSD is, and what every default in the feed means: the other state of
+    # each of the five, so the profile is a statement and not a shape.
+    assert RigProfile(camera_names=None, downscale=1, interpolate_accel_onto_gyro=False, frameset_tolerance_ns=0, video_time_is_absolute=False) == MSD_RIG
 
 
 def test_the_pairing_boundary_is_typed() -> None:
@@ -412,3 +418,5 @@ def test_the_feed_opens_the_real_robocap_rig(manifest: ReferenceManifest) -> Non
         assert [image.shape for image in frameset.images] == [(360, 640)] * 4
         assert len(frameset.imu) > 0
         assert frameset.ground_truth is None
+        # video_time is the device clock here, so the export adds nothing to it.
+        assert feed.export_offset_ns == 0

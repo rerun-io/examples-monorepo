@@ -355,6 +355,8 @@ class RobocapReference:
     """How far a camera's frame may sit from the anchor camera's and still be the same capture."""
     interpolate_accel_onto_gyro: bool
     """Whether the accelerometer has to be interpolated onto the gyroscope's timestamps."""
+    video_time_is_absolute: bool
+    """Whether ``video_time`` is already the device clock the C++ trajectories are on."""
     vio_config: str
     """basalt VIO config the C++ ran, relative to the package root."""
     calibration: str
@@ -632,6 +634,7 @@ def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
         downscale=int(robocap_block["downscale"]),
         frameset_tolerance_ns=int(robocap_block["frameset_tolerance_ns"]),
         interpolate_accel_onto_gyro=bool(robocap_block["interpolate_accel_onto_gyro"]),
+        video_time_is_absolute=bool(robocap_block["video_time_is_absolute"]),
         vio_config=str(robocap_block["vio_config"]),
         calibration=str(robocap_block["calibration"]),
         imu=_imu(robocap_block["imu"]),

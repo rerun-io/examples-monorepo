@@ -265,6 +265,13 @@ class RigProfile:
     """Interpolate the accelerometer onto the gyroscope's timestamps instead of requiring one shared clock."""
     frameset_tolerance_ns: int = 0
     """How far a camera's frame may sit from the anchor camera's and still join that frameset; 0 demands identical timestamps."""
+    video_time_is_absolute: bool = False
+    """Whether ``video_time`` already **is** the device clock, so an export adds nothing to it.
+
+    False is MSD, whose ``video_time`` is relative to
+    ``property:capture:start_time_ns``; RoboCap records the device clock itself,
+    and that is what every basalt CSV beside it carries.
+    """
 
 
 MSD_RIG: RigProfile = RigProfile()
@@ -609,6 +616,14 @@ class SegmentFeed:
     """IMU calibration, noise model included."""
     capture_start_time_ns: int
     """``property:capture:start_time_ns``: add it to a ``video_time`` to reach the absolute device clock."""
+    export_offset_ns: int
+    """What an exported trajectory adds to its ``video_time`` stamps to land on the clock the C++ CSVs use.
+
+    :attr:`capture_start_time_ns` on a rig whose ``video_time`` is relative to it,
+    and zero on one that records the device clock directly
+    (:attr:`RigProfile.video_time_is_absolute`). The rule is the recording's, not
+    the tool's: two tools reading it from the feed cannot disagree about it.
+    """
     frame_t_ns: Int64[ndarray, " n_frames"]
     """Timestamp of every frameset on the inertial clock, before ``frame_stride`` is applied.
 
@@ -1099,11 +1114,13 @@ def _build_feed(
     properties: pa.Table = (
         sensor_dataset.filter_segments([segment_id]).filter_contents(["/__properties", "/__properties/**"]).reader(index=None).to_arrow_table()
     )
+    capture_start_time_ns: int = _static_int(properties, "property:capture:start_time_ns")
     return SegmentFeed(
         segment_id=segment_id,
         cameras=cameras,
         imu=imu_calib(parameters, imu_T_body),
-        capture_start_time_ns=_static_int(properties, "property:capture:start_time_ns"),
+        capture_start_time_ns=capture_start_time_ns,
+        export_offset_ns=0 if profile.video_time_is_absolute else capture_start_time_ns,
         frame_t_ns=index.t_ns + parameters.cam_time_offset_ns,
         camera_positions=camera_positions,
         rig_cameras=camera_count,

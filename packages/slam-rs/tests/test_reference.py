@@ -35,7 +35,7 @@ def manifest() -> ReferenceManifest:
 
 def test_the_manifest_holds_ten_segments(manifest: ReferenceManifest) -> None:
     assert len(manifest.segments) == 10
-    assert manifest.schema_version == 7
+    assert manifest.schema_version == 8
 
 
 def test_every_segment_carries_the_c_plus_plus_precision_band(manifest: ReferenceManifest) -> None:
@@ -167,6 +167,9 @@ def test_robocap_names_the_configuration_the_cpp_ran(manifest: ReferenceManifest
     # because the two inertial channels are on their own clocks.
     assert manifest.robocap.frameset_tolerance_ns == 1_000_000
     assert manifest.robocap.interpolate_accel_onto_gyro is True
+    # The recorder stamps the device clock on the video timeline, so an export
+    # adds nothing; MSD's `video_time` is relative to its capture start.
+    assert manifest.robocap.video_time_is_absolute is True
     assert "config.vio_marg_lost_landmarks" in (manifest.package_root / manifest.robocap.vio_config).read_text()
     assert '"camera_type": "kb4"' in (manifest.package_root / manifest.robocap.calibration).read_text()
 

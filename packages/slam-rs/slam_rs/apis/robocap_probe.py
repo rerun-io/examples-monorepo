@@ -37,7 +37,10 @@ Everything that lane was configured with is fed here rather than derived (C72):
 
 The exported CSV carries that clock directly. ``capture_start_time_ns`` is **not**
 added, because RoboCap's ``video_time`` is already the device clock the C++ wrote
-its trajectory on — unlike MSD, whose ``video_time`` is relative to it.
+its trajectory on — unlike MSD, whose ``video_time`` is relative to it. That is a
+fact about the recording rather than about this tool, so the manifest states it
+(``video_time_is_absolute``) and both tools export through the feed's own
+:attr:`slam_rs.catalog_feed.SegmentFeed.export_offset_ns`.
 """
 
 import json
@@ -67,7 +70,7 @@ from slam_rs.catalog_feed import (
 from slam_rs.frontend_log import camera_entity
 from slam_rs.reference import ImuParameters, ReferenceManifest, RobocapSession, load_manifest
 from slam_rs.tracking import Lockstep
-from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_trajectory, write_trajectory
+from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_trajectory, shift_clock, write_trajectory
 from slam_rs.vio_log import VioLogger, vio_blueprint
 
 
@@ -96,6 +99,7 @@ def robocap_profile(manifest: ReferenceManifest) -> RigProfile:
         downscale=manifest.robocap.downscale,
         interpolate_accel_onto_gyro=manifest.robocap.interpolate_accel_onto_gyro,
         frameset_tolerance_ns=manifest.robocap.frameset_tolerance_ns,
+        video_time_is_absolute=manifest.robocap.video_time_is_absolute,
     )
 
 
@@ -207,7 +211,10 @@ def main(config: Config) -> None:
             f"{feed.cameras[0].width}x{feed.cameras[0].height}, {len(feed.frame_t_ns)} framesets over "
             f"{(int(feed.frame_t_ns[-1]) - first_ns) / 1e9:.1f} s, replaying the first {replayed_ns / 1e9:.1f} s"
         )
-        print(f"camera offset {offset_ns} ns applied to the frames; capture_start_time_ns {feed.capture_start_time_ns} NOT added (video_time is the device clock)")
+        print(
+            f"camera offset {offset_ns} ns applied to the frames; capture_start_time_ns {feed.capture_start_time_ns} "
+            f"NOT added (video_time is the device clock), so the export shifts by {feed.export_offset_ns} ns"
+        )
 
         _log_calibration(feed.cameras)
         rr.send_blueprint(vio_blueprint(feed.cameras))
@@ -255,11 +262,14 @@ def main(config: Config) -> None:
                 f"{1e-3 * float(np.sum(lockstep.elapsed_ms)):.1f} s of the wall"
             )
         estimate: Trajectory = stage.logger.estimated()
+        # What the recording says its own clock is, not what this tool assumes:
+        # zero here, `capture_start_time_ns` on MSD, and one rule for both tools.
+        export_offset_ns: int = feed.export_offset_ns
 
     # The feed's own in-process catalog server is what the `with` holds, and
     # nothing below reads a frameset: the export and the ATE happen with it shut.
     stage.refuse_lost_framesets()
-    write_trajectory(output_csv, estimate)
+    write_trajectory(output_csv, shift_clock(estimate, export_offset_ns))
     print(f"{len(estimate)} tracked poses -> {output_csv} (the device clock, as basalt's CSVs carry it)")
     if len(estimate) == 0:
         print("no ATE: the estimator reported no tracked pose")
