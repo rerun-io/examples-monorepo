@@ -322,10 +322,10 @@ def test_a_missing_robocap_table_is_a_typed_error(tmp_path: Path) -> None:
         load_manifest(broken)
 
 
-def test_a_duplicate_segment_id_is_rejected(tmp_path: Path) -> None:
+def test_a_duplicate_segment_id_is_rejected(manifest: ReferenceManifest, tmp_path: Path) -> None:
     text: str = MANIFEST_PATH.read_text()
-    first: ReferenceSegment = load_manifest().segments[0]
-    second: ReferenceSegment = load_manifest().segments[1]
+    first: ReferenceSegment = manifest.segments[0]
+    second: ReferenceSegment = manifest.segments[1]
     broken: Path = tmp_path / "duplicate.toml"
     broken.write_text(text.replace(f'segment_id = "{second.segment_id}"', f'segment_id = "{first.segment_id}"', 1))
     with pytest.raises(ValueError, match="duplicate segment ids"):

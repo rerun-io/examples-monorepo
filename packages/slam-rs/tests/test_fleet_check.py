@@ -12,6 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from fixture_types import never
 
 from slam_rs import _core
 from slam_rs.apis import fleet_check
@@ -179,10 +180,7 @@ def test_a_clip_the_estimator_never_tracked_is_a_row_and_not_a_traceback(
     NaN, the JSON keeps its keys, and the run exits non-zero.
     """
 
-    def never(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("`ate` was called on a run below D60's pose floor")
-
-    monkeypatch.setattr(fleet_check, "ate", never)
+    monkeypatch.setattr(fleet_check, "ate", never("`ate` was called on a run below D60's pose floor"))
     monkeypatch.setattr(
         fleet_check, "run_segment", lambda *_args, **_kwargs: SegmentRun(estimate=empty_trajectory(), framesets=412, lost=412, wall_s=1.0)
     )
@@ -263,10 +261,7 @@ def test_a_reference_trajectory_that_is_not_here_is_refused_before_the_replay(
     """
     monkeypatch.setenv("SLAM_RS_REFERENCE_DIR", str(tmp_path))
 
-    def never(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("the replay was paid for before the reference was checked")
-
-    monkeypatch.setattr("slam_rs.apis.fleet_check.run_segment", never)
+    monkeypatch.setattr(fleet_check, "run_segment", never("the replay was paid for before the reference was checked"))
     segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENTS[1])
     absent: ReferenceSegment = replace(segment, reference=replace(segment.reference, bundle_only=True))
     with pytest.raises(FileNotFoundError, match="is not in SLAM_RS_REFERENCE_DIR"):
@@ -280,10 +275,7 @@ def test_an_unknown_segment_id_is_refused_before_the_first_replay(monkeypatch: p
     the manifest's own selector error names the id and the ten it has.
     """
 
-    def never(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("a clip was measured before every id was resolved")
-
-    monkeypatch.setattr(fleet_check, "measure", never)
+    monkeypatch.setattr(fleet_check, "measure", never("a clip was measured before every id was resolved"))
     with pytest.raises(ValueError, match="MIO10_typo.*MIO10_short_2_panorama"):
         main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1], "MIO10_typo"), output_json=tmp_path / "fleet_check.json"))
 
@@ -298,10 +290,7 @@ def test_a_partial_corpus_is_refused_before_the_first_replay(monkeypatch: pytest
     sidecar and the second does not, and nothing is replayed.
     """
 
-    def never(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("a replay was paid for before every scoring input was opened")
-
-    monkeypatch.setattr(fleet_check, "run_segment", never)
+    monkeypatch.setattr(fleet_check, "run_segment", never("a replay was paid for before every scoring input was opened"))
     write_trajectory(tmp_path / SMOKE_SEGMENTS[0] / "gt.csv", empty_trajectory())
     with pytest.raises(FileNotFoundError, match=f"{SMOKE_SEGMENTS[1]}.*is not a file on this machine"):
         main(Config(manifest=MANIFEST_PATH, artifact_root=tmp_path, segments=SMOKE_SEGMENTS, output_json=tmp_path / "fleet_check.json"))
@@ -370,11 +359,8 @@ def test_a_gpu_run_on_a_core_without_a_gpu_feature_is_refused_before_any_file_is
     manifest is even read.
     """
 
-    def never(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("a clip was measured on a core that has no GPU lane")
-
     monkeypatch.setattr(_core, "gpu_backend", None)
-    monkeypatch.setattr(fleet_check, "measure", never)
+    monkeypatch.setattr(fleet_check, "measure", never("a clip was measured on a core that has no GPU lane"))
     output: Path = tmp_path / "fleet_check.json"
     with pytest.raises(ValueError, match="built with a GPU cargo feature"):
         main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1],), output_json=output, gpu=True))
@@ -389,10 +375,7 @@ def test_an_empty_segment_selection_is_refused_rather_than_read_as_a_pass(monkey
     even created (S24 review).
     """
 
-    def never(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("a run with no clip selected reached the manifest")
-
-    monkeypatch.setattr(fleet_check, "load_manifest", never)
+    monkeypatch.setattr(fleet_check, "load_manifest", never("a run with no clip selected reached the manifest"))
     output: Path = tmp_path / "fleet_check.json"
     with pytest.raises(ValueError, match="--segments named no clip"):
         main(Config(manifest=MANIFEST_PATH, segments=(), output_json=output))

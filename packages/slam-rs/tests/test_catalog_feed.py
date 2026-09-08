@@ -28,7 +28,7 @@ from slam_rs.catalog_feed import (
     imu_calib,
     open_segment,
 )
-from slam_rs.reference import SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment, flow_config, load_manifest
+from slam_rs.reference import SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment, flow_config
 from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import AteResult, Trajectory, associate, ate, read_trajectory, shift_clock, write_trajectory
 from slam_rs.vio_log import VioLogger
@@ -177,8 +177,7 @@ def test_the_msd_g2_rotation_arithmetic() -> None:
         _rotate_pinhole_clockwise(1.0, 2.0, 3.0, 4.0, 8, 6, 45)
 
 
-def test_the_imu_calibration_carries_the_manifests_frozen_numbers() -> None:
-    manifest: ReferenceManifest = load_manifest()
+def test_the_imu_calibration_carries_the_manifests_frozen_numbers(manifest: ReferenceManifest) -> None:
     segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
     calib = imu_calib(segment.imu, np.eye(4))
     assert calib.frequency_hz == 1000.0
@@ -234,9 +233,8 @@ def test_a_rig_whose_cameras_disagree_on_the_codec_names_both() -> None:
 
 
 @pytest.mark.slow
-def test_the_smoke_segment_decodes_from_the_nas() -> None:
+def test_the_smoke_segment_decodes_from_the_nas(manifest: ReferenceManifest) -> None:
     """One real segment end to end: frame count, shape, dtype and paired IMU timestamps."""
-    manifest: ReferenceManifest = load_manifest()
     segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
     if not segment.base_path.is_file():
         pytest.skip(f"{segment.base_path} is not mounted on this host")
@@ -293,9 +291,8 @@ def test_the_smoke_segment_decodes_from_the_nas() -> None:
 
 
 @pytest.mark.slow
-def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample() -> None:
+def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample(manifest: ReferenceManifest) -> None:
     """Cutting the segment into 2 s windows must reproduce the pixels and the inertial stream exactly."""
-    manifest: ReferenceManifest = load_manifest()
     segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
     if not segment.base_path.is_file():
         pytest.skip(f"{segment.base_path} is not mounted on this host")
@@ -334,9 +331,8 @@ def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample() -> No
 
 
 @pytest.mark.slow
-def test_the_absolute_clock_matches_the_ground_truth_sidecar() -> None:
+def test_the_absolute_clock_matches_the_ground_truth_sidecar(manifest: ReferenceManifest) -> None:
     """The feed's ground truth, shifted by the capture start time, is the ``gt.csv`` sidecar."""
-    manifest: ReferenceManifest = load_manifest()
     segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
     if not segment.base_path.is_file() or not segment.gt_csv.is_file():
         pytest.skip(f"{segment.base_path} or {segment.gt_csv} is not mounted on this host")
@@ -361,7 +357,7 @@ def test_the_absolute_clock_matches_the_ground_truth_sidecar() -> None:
 
 
 @pytest.mark.slow
-def test_a_replay_export_associates_with_the_ground_truth_sidecar(tmp_path: Path) -> None:
+def test_a_replay_export_associates_with_the_ground_truth_sidecar(manifest: ReferenceManifest, tmp_path: Path) -> None:
     """The replay's own export path, end to end, lands on the sidecar's clock.
 
     Forty framesets of the smoke segment through the whole pipeline: enough for
@@ -369,7 +365,6 @@ def test_a_replay_export_associates_with_the_ground_truth_sidecar(tmp_path: Path
     Written with ``video_time`` the file associates with **nothing**, which is
     the regression being pinned.
     """
-    manifest: ReferenceManifest = load_manifest()
     segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
     if not segment.base_path.is_file() or not segment.gt_csv.is_file():
         pytest.skip(f"{segment.base_path} or {segment.gt_csv} is not mounted on this host")

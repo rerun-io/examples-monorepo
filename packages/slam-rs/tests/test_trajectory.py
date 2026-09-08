@@ -11,7 +11,7 @@ from jaxtyping import Float64, Int64
 from numpy import ndarray
 from simplecv.ops.umeyama import SimilarityTransform, umeyama_alignment
 
-from slam_rs.reference import ReferenceManifest, load_manifest
+from slam_rs.reference import ReferenceManifest
 from slam_rs.trajectory import (
     ASSOCIATION_TOLERANCE_NS,
     AteResult,
@@ -214,9 +214,8 @@ def test_coverage_is_the_overlapping_fraction_of_the_reference_span() -> None:
     assert coverage(reference, _trajectory(t_ns[5:], positions[5:])) == pytest.approx(0.5)
 
 
-def test_it_reproduces_the_forks_robocap_gate_numbers() -> None:
+def test_it_reproduces_the_forks_robocap_gate_numbers(manifest: ReferenceManifest) -> None:
     """The checked-in basalt outputs must still give 0.13 cm over 1,588 associated poses."""
-    manifest: ReferenceManifest = load_manifest()
     golden: Trajectory = read_trajectory(manifest.package_root / manifest.robocap.fixtures.golden)
     candidate: Trajectory = read_trajectory(manifest.package_root / manifest.robocap.fixtures.candidate)
     result: AteResult = ate(candidate, golden)

@@ -13,37 +13,19 @@ not on the typechecker's search path and every module in this directory stands
 alone.
 """
 
-from collections.abc import Callable
 from pathlib import Path
-from typing import NamedTuple, TypeAlias
 
 import numpy as np
 import rerun as rr
+from fixture_types import IMU_PERIOD_NS, Rows, RowsReader
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 
 from slam_rs.apis.replay import IMU_ENTITY, log_imu
 from slam_rs.catalog_feed import TIMELINE, ImuStream
 
-IMU_PERIOD_NS: int = 1_000_000
-"""Synthetic IMU period: 1 kHz, the Index device's own rate."""
 SAMPLES: int = 33
 """One 30 Hz frameset's worth of samples."""
-
-
-class Row(NamedTuple):
-    """One logged row of one entity, as it comes back out of the file."""
-
-    t_ns: int
-    """Where on ``video_time`` the row sits, in nanoseconds."""
-    values: dict[str, list]
-    """The components this row set, by their short name."""
-
-
-Rows: TypeAlias = dict[str, list[Row]]
-"""Per entity path, its rows in ``video_time`` order."""
-RowsReader: TypeAlias = Callable[[Path], Rows]
-"""Reads back what a logger wrote: every non-static row of a recording, by entity path."""
 
 
 def stream() -> ImuStream:

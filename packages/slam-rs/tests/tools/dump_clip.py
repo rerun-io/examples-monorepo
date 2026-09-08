@@ -199,10 +199,7 @@ def main(config: Config) -> None:
         ValueError: If the segment is not in the manifest or its dataset has no fork calibration.
     """
     manifest: ReferenceManifest = load_manifest()
-    matches: list[ReferenceSegment] = [segment for segment in manifest.segments if segment.segment_id == config.segment]
-    if not matches:
-        raise ValueError(f"{config.segment} is not in the manifest")
-    segment: ReferenceSegment = matches[0]
+    segment: ReferenceSegment = manifest.by_id(config.segment)
     if segment.dataset_name not in DEVICE_CALIBRATION:
         raise ValueError(f"{segment.dataset_name} has no fork calibration file")
     fork_file: dict[str, Any] = json.loads((FIXTURES / DEVICE_CALIBRATION[segment.dataset_name]).read_text())["value0"]
@@ -214,7 +211,7 @@ def main(config: Config) -> None:
     dumped: int = 0
 
     with open_segment(
-        LocalSegment(base_rrd=Path(segment.base_url.removeprefix("file://")), gt_rrd=None),
+        LocalSegment(base_rrd=segment.base_path, gt_rrd=None),
         segment.imu,
         window_s=config.window_s,
     ) as feed:

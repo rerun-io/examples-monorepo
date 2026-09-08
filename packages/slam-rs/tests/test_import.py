@@ -8,45 +8,16 @@ synthetic rig, so the whole file stays inside the default, seconds-long suite;
 the reference segments are the V2 gate's business.
 """
 
-from collections.abc import Callable
-from typing import TypeAlias, cast
+from typing import cast
 
 import numpy as np
 import pytest
+from fixture_types import FRAME, FRAME_PERIOD_NS, IMU_PERIOD_NS, PipelineFactory, RigFactory, TextureFactory, gravity_batch
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from numpy.typing import NDArray
 
 from slam_rs import _core
-from slam_rs.catalog_feed import CameraCalib
-
-FRAME: int = 200
-"""Side of the synthetic frame, which is the size the fixture rig is calibrated for."""
-IMU_PERIOD_NS: int = 1_000_000
-"""Synthetic IMU period: 1 kHz, the Index device's own rate."""
-FRAME_PERIOD_NS: int = 33_000_000
-"""Synthetic frame period: about 30 Hz."""
-
-CameraFactory: TypeAlias = Callable[[int, float], CameraCalib]
-"""One camera of the synthetic rig, by rig index and baseline in metres."""
-PipelineFactory: TypeAlias = Callable[[int], _core.Vio]
-"""The whole pipeline on a rig of the given camera count."""
-RigFactory: TypeAlias = Callable[[int], _core.Calibration]
-"""A calibration for a rig of the given camera count."""
-TextureFactory: TypeAlias = Callable[[int, int], UInt8[ndarray, "h w"]]
-"""The synthetic scene, shifted by whole pixels in x and y."""
-
-
-def gravity_batch(t_ns: Int64[ndarray, " n_samples"]) -> tuple[Float64[ndarray, "n_samples 3"], Float64[ndarray, "n_samples 3"]]:
-    """A still IMU: no rotation, and gravity along the rig's z axis.
-
-    Args:
-        t_ns: Sample timestamps, which only fix the batch's length here.
-
-    Returns:
-        The gyroscope and accelerometer blocks, C-contiguous.
-    """
-    return np.zeros((len(t_ns), 3), dtype=np.float64), np.tile(np.array([0.0, 0.0, 9.81]), (len(t_ns), 1))
 
 
 def test_core_reports_a_version() -> None:

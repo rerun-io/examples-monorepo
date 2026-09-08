@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from fixture_types import never
 
 from slam_rs.apis import robocap_fleet
 from slam_rs.apis.robocap_fleet import BUDGET_15FPS_MS, BUDGET_30FPS_MS, Config, RobocapRow, main, measure
@@ -115,10 +116,7 @@ def test_a_scoring_input_that_is_not_here_is_refused_before_the_replay(
     both are opened before the estimator is fed anything.
     """
 
-    def never(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("the session replayed before its scoring inputs were opened")
-
-    monkeypatch.setattr(robocap_fleet, "run_robocap", never)
+    monkeypatch.setattr(robocap_fleet, "run_robocap", never("the session replayed before its scoring inputs were opened"))
     session: RobocapSession = manifest.robocap.session("s00000015")
     absent: RobocapSession = replace(session, slam_url=f"file://{tmp_path / 'slam.rrd'}")
     with pytest.raises(FileNotFoundError, match="slam.rrd is not a file on this machine"):
