@@ -251,8 +251,9 @@ def main(config: Config) -> None:
         )
         if tracked:
             # The estimator alone, so the wall above can be read as decode plus
-            # logging plus this. The C++ wall in `run.json` is decode plus its own
-            # estimator with nothing logged.
+            # logging plus this. The C++ wall this lane is read against — the
+            # manifest's 88.91 s for session 15 — is decode plus its own
+            # estimator with basalt's Rerun logging **on**, measured on cap A.
             print(
                 f"Vio.track {np.mean(lockstep.elapsed_ms):.1f} ms per frameset "
                 f"(median {np.median(lockstep.elapsed_ms):.1f}, max {np.max(lockstep.elapsed_ms):.1f}), "

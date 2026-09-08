@@ -12,8 +12,13 @@ rig costs a few centimetres.
 Nothing is logged and no viewer is contacted, which is what lets the same run
 happen on the cap — a Buildroot appliance with no repository, no compiler and no
 Rerun viewer, reached through a pack. The per-frameset cost this prints is
-therefore the estimator plus the decode and nothing else, which is the shape of
-measurement the C++'s own walls are.
+therefore the estimator plus the decode and nothing else.
+
+That is **not** the shape of the C++ wall it is read against: the manifest's
+88.91 s for session 15 was measured on cap A with basalt's own Rerun logging on,
+at 30 fps over four cameras. So the ratio a row prints compares a wall with
+nothing logged against a wall with logging, which is the conservative direction
+for the port — the C++ was carrying work this run does not.
 
 The two budgets a row is read against are the cap's, because the cap is where
 this has to run live one day: **66.7 ms** per frameset at 15 fps and **33.3 ms**

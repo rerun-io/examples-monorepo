@@ -3,9 +3,14 @@
 The tool this covers runs on machines with no NAS, no repository and — on the cap
 — no pixi and no viewer, so what is under test is the part that needs none of
 that: the budget arithmetic a row reports, how the row reads, and the two facts
-about the machine it carries beside the numbers. The replay itself is the same
-:func:`slam_rs.tracking.run_robocap` the probe drives and the ``slow`` test below
-is what runs it on the real rig.
+about the machine it carries beside the numbers. The replay itself is
+:func:`slam_rs.tracking.run_robocap`, which the probe does **not** drive: the
+probe owns its own loop, because of the Rerun rung, and what the two share is
+the estimator's two files and the clock rule
+(:func:`slam_rs.tracking.robocap_estimator_files`,
+:func:`slam_rs.tracking.robocap_cpp_trajectory`). Putting both on one loop
+behind an observer is a deferred follow-up. The ``slow`` test below is what runs
+this one on the real rig.
 """
 
 import json
