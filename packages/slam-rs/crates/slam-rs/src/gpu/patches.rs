@@ -5,6 +5,7 @@ use nalgebra::Vector2;
 
 use super::kernels::{self, PatchShape, PositionBases};
 use super::pyramid::GpuPyramid;
+use super::{GpuError, guarded};
 use crate::frontend::patterns::Pattern;
 use crate::frontend::tracker::{MAX_CAPACITY, MAX_LEVELS, PointsSoA, SourcePatches, TrackerError};
 use crate::pyramid::Pyramid;
@@ -367,15 +368,22 @@ impl<P: Pattern, R: Runtime> SourcePatches for GpuPatches<P, R> {
         positions: &PointsSoA,
         selected: Option<&[bool]>,
     ) -> Result<(), TrackerError> {
-        self.accept(positions.len(), selected, pyramid.num_levels())?;
-        for index in 0..positions.len() {
-            self.host.set(index, positions.get(index));
-        }
-        // `accept` has set `len`, which is what the runs are now strided by.
-        self.upload_positions(positions, selected);
-        let bases: PositionBases = self.bases();
-        self.launch_build(pyramid, bases);
-        Ok(())
+        guarded(
+            GpuError::DeviceLost {
+                what: "patch build",
+            },
+            || {
+                self.accept(positions.len(), selected, pyramid.num_levels())?;
+                for index in 0..positions.len() {
+                    self.host.set(index, positions.get(index));
+                }
+                // `accept` has set `len`, which is what the runs are now strided by.
+                self.upload_positions(positions, selected);
+                let bases: PositionBases = self.bases();
+                self.launch_build(pyramid, bases);
+                Ok(())
+            },
+        )
     }
 
     fn len(&self) -> usize {

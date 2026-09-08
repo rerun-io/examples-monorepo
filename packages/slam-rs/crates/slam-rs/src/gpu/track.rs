@@ -6,6 +6,7 @@ use cubecl::prelude::*;
 use super::kernels::{self, PositionBases};
 use super::patches::GpuPatches;
 use super::pyramid::GpuPyramid;
+use super::{GpuError, guarded};
 use crate::frontend::patterns::Pattern;
 use crate::frontend::tracker::{
     FlowResult, FlowTransforms, PatchTracker, SourcePatches, TrackerError,
@@ -96,7 +97,12 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
     }
 
     fn make_patches(&self) -> Result<GpuPatches<P, R>, TrackerError> {
-        GpuPatches::new(self.client.clone(), self.capacity, self.num_levels)
+        guarded(
+            GpuError::DeviceLost {
+                what: "patch allocation",
+            },
+            || GpuPatches::new(self.client.clone(), self.capacity, self.num_levels),
+        )
     }
 
     /// `trackPoints` (`frame_to_frame_optical_flow.h:294-375`) on the device.
@@ -108,176 +114,182 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
         transforms_in: &FlowTransforms,
         out: &mut FlowResult,
     ) -> Result<(), TrackerError> {
-        let count: usize = transforms_in.len();
-        if count != patches.len() {
-            return Err(TrackerError::LengthMismatch {
-                first_name: "patches",
-                first: patches.len(),
-                second_name: "transforms",
-                second: count,
-            });
-        }
-        if count > self.capacity {
-            return Err(TrackerError::CapacityExceeded {
-                offered: count,
-                capacity: self.capacity,
-            });
-        }
-        if patches.num_levels() < self.num_levels {
-            return Err(TrackerError::LevelMismatch {
-                what: "the patch set",
-                expected: self.num_levels,
-                actual: patches.num_levels(),
-            });
-        }
-        for (what, pyramid) in [("the previous pyramid", prev), ("the next pyramid", next)] {
-            if pyramid.num_levels() < self.num_levels {
-                return Err(TrackerError::LevelMismatch {
-                    what,
-                    expected: self.num_levels,
-                    actual: pyramid.num_levels(),
+        // The one call per frameset that waits on the device, and the one the
+        // frontend makes with the GIL released: a lost device panics inside
+        // CubeCL's own client, and the guard is what turns that into this
+        // method's error rather than a `PanicException` in Python (decision D32).
+        guarded(GpuError::DeviceLost { what: "tracker" }, || {
+            let count: usize = transforms_in.len();
+            if count != patches.len() {
+                return Err(TrackerError::LengthMismatch {
+                    first_name: "patches",
+                    first: patches.len(),
+                    second_name: "transforms",
+                    second: count,
                 });
             }
-        }
-
-        out.reset(count);
-        if count == 0 {
-            out.finish(0);
-            return Ok(());
-        }
-
-        // ── the forward pass's inputs: the source warps and the guesses.
-        for index in 0..count {
-            let coefficients: [f32; 6] = transforms_in.coefficients(index);
-            for (run, value) in coefficients.into_iter().enumerate() {
-                self.staging[run * count + index] = value;
+            if count > self.capacity {
+                return Err(TrackerError::CapacityExceeded {
+                    offered: count,
+                    capacity: self.capacity,
+                });
             }
-        }
-        self.staging[6 * count..TRANSFORM_RUNS * count].fill(0.0);
-        // A local, not a field beside `backward` and `result`. Those two are
-        // `client.empty` once at construction and reused; this one is a
-        // host-to-device write, and `create_from_slice` is the only one CubeCL
-        // 0.10 has, so a fresh buffer is allocated on every call whatever holds
-        // it — and as a field it also meant one allocation at construction that
-        // no path ever read (the first call replaced it, and a `count == 0` call
-        // returns before touching it). Measured: this form costs about 0.05 ms
-        // of the lane's 5.9 and an `Option` field about 0.14, both inside this
-        // host's drift and above its 0.02 ms pair-to-pair floor.
-        let forward: cubecl::server::Handle = self
-            .client
-            .create_from_slice(f32::as_bytes(&self.staging[..TRANSFORM_RUNS * count]));
+            if patches.num_levels() < self.num_levels {
+                return Err(TrackerError::LevelMismatch {
+                    what: "the patch set",
+                    expected: self.num_levels,
+                    actual: patches.num_levels(),
+                });
+            }
+            for (what, pyramid) in [("the previous pyramid", prev), ("the next pyramid", next)] {
+                if pyramid.num_levels() < self.num_levels {
+                    return Err(TrackerError::LevelMismatch {
+                        what,
+                        expected: self.num_levels,
+                        actual: pyramid.num_levels(),
+                    });
+                }
+            }
 
-        // `off = source position - guess` (`:339`), which the backward guess
-        // adds back (`:357`). Both terms are on the host already, so the offset
-        // rides along in the backward patch set's positions buffer instead of
-        // costing a kernel.
-        let guess_x: &[f32] = transforms_in.translations_x();
-        let guess_y: &[f32] = transforms_in.translations_y();
-        for index in 0..count {
-            let source = patches.position(index);
-            self.offset_x[index] = source.x - guess_x[index];
-            self.offset_y[index] = source.y - guess_y[index];
-        }
+            out.reset(count);
+            if count == 0 {
+                out.finish(0);
+                return Ok(());
+            }
 
-        // `shape.count` is `patches.len()`, which the guard above proved equal
-        // to `count`.
-        let shape = patches.shape();
-        let forward_view = (&forward, TRANSFORM_RUNS * count);
+            // ── the forward pass's inputs: the source warps and the guesses.
+            for index in 0..count {
+                let coefficients: [f32; 6] = transforms_in.coefficients(index);
+                for (run, value) in coefficients.into_iter().enumerate() {
+                    self.staging[run * count + index] = value;
+                }
+            }
+            self.staging[6 * count..TRANSFORM_RUNS * count].fill(0.0);
+            // A local, not a field beside `backward` and `result`. Those two are
+            // `client.empty` once at construction and reused; this one is a
+            // host-to-device write, and `create_from_slice` is the only one CubeCL
+            // 0.10 has, so a fresh buffer is allocated on every call whatever holds
+            // it — and as a field it also meant one allocation at construction that
+            // no path ever read (the first call replaced it, and a `count == 0` call
+            // returns before touching it). Measured: this form costs about 0.05 ms
+            // of the lane's 5.9 and an `Option` field about 0.14, both inside this
+            // host's drift and above its 0.02 ms pair-to-pair floor.
+            let forward: cubecl::server::Handle = self
+                .client
+                .create_from_slice(f32::as_bytes(&self.staging[..TRANSFORM_RUNS * count]));
 
-        // ── forward: `trackPoint(pyr_1, pyr_2, transform_1, transform_2)` (`:349`).
-        kernels::launch_klt::<R>(
-            &self.client,
-            next.buffers(),
-            next.meta(),
-            patches.store(),
-            forward_view,
-            forward_view,
-            shape,
-            self.max_iterations,
-            true,
-        );
+            // `off = source position - guess` (`:339`), which the backward guess
+            // adds back (`:357`). Both terms are on the host already, so the offset
+            // rides along in the backward patch set's positions buffer instead of
+            // costing a kernel.
+            let guess_x: &[f32] = transforms_in.translations_x();
+            let guess_y: &[f32] = transforms_in.translations_y();
+            for index in 0..count {
+                let source = patches.position(index);
+                self.offset_x[index] = source.x - guess_x[index];
+                self.offset_y[index] = source.y - guess_y[index];
+            }
 
-        // ── the backward source patches, from `next` at the forward result.
-        self.backward_patches
-            .accept(count, None, next.num_levels())?;
-        self.backward_patches
-            .upload_offsets(&self.offset_x[..count], &self.offset_y[..count]);
-        kernels::launch_prepare_backward::<R>(
-            &self.client,
-            forward_view,
-            self.backward_patches.position_buffer(),
-            (&self.backward, TRANSFORM_RUNS * count),
-            count,
-            self.backward_patches.offset_bases(),
-        );
-        // The backward patches sit at the forward translations, which live in
-        // runs 4 and 5 of the forward buffer, with its validity flag as the
-        // selection mask — `patches.build(next, forward, Some(forward_valid))`
-        // in the CPU tracker, without the round trip.
-        self.backward_patches.launch_build_from(
-            next,
-            forward_view,
-            PositionBases {
-                x: 4 * count,
-                y: 5 * count,
-                selected: 6 * count,
-            },
-        );
+            // `shape.count` is `patches.len()`, which the guard above proved equal
+            // to `count`.
+            let shape = patches.shape();
+            let forward_view = (&forward, TRANSFORM_RUNS * count);
 
-        // ── backward: `trackPoint(pyr_2, pyr_1, transform_2, recovered)` (`:359`).
-        let backward_view = (&self.backward, TRANSFORM_RUNS * count);
-        kernels::launch_klt::<R>(
-            &self.client,
-            prev.buffers(),
-            prev.meta(),
-            self.backward_patches.store(),
-            backward_view,
-            backward_view,
-            shape,
-            self.max_iterations,
-            false,
-        );
+            // ── forward: `trackPoint(pyr_1, pyr_2, transform_1, transform_2)` (`:349`).
+            kernels::launch_klt::<R>(
+                &self.client,
+                next.buffers(),
+                next.meta(),
+                patches.store(),
+                forward_view,
+                forward_view,
+                shape,
+                self.max_iterations,
+                true,
+            );
 
-        // ── `dist2 = (t1 - t1_recovered).squaredNorm() < max` (`:362`).
-        kernels::launch_finish::<R>(
-            &self.client,
-            forward_view,
-            backward_view,
-            patches.position_buffer(),
-            (&self.result, TRANSFORM_RUNS * count),
-            count,
-            patches.bases(),
-            self.max_recovered_dist2,
-        );
+            // ── the backward source patches, from `next` at the forward result.
+            self.backward_patches
+                .accept(count, None, next.num_levels())?;
+            self.backward_patches
+                .upload_offsets(&self.offset_x[..count], &self.offset_y[..count]);
+            kernels::launch_prepare_backward::<R>(
+                &self.client,
+                forward_view,
+                self.backward_patches.position_buffer(),
+                (&self.backward, TRANSFORM_RUNS * count),
+                count,
+                self.backward_patches.offset_bases(),
+            );
+            // The backward patches sit at the forward translations, which live in
+            // runs 4 and 5 of the forward buffer, with its validity flag as the
+            // selection mask — `patches.build(next, forward, Some(forward_valid))`
+            // in the CPU tracker, without the round trip.
+            self.backward_patches.launch_build_from(
+                next,
+                forward_view,
+                PositionBases {
+                    x: 4 * count,
+                    y: 5 * count,
+                    selected: 6 * count,
+                },
+            );
 
-        // ── the one wait of the call.
-        let bytes = self
-            .client
-            .read_one(self.result.clone())
-            .map_err(|error| super::read_failed("the tracker result", &error))?;
-        let expected: usize = TRANSFORM_RUNS * count * size_of::<f32>();
-        if bytes.len() < expected {
-            return Err(TrackerError::LengthMismatch {
-                first_name: "result bytes expected",
-                first: expected,
-                second_name: "returned",
-                second: bytes.len(),
-            });
-        }
-        let values: &[f32] = f32::from_bytes(&bytes);
-        let (valid, transforms) = out.parts_mut();
-        let [m00, m01, m10, m11, tx, ty] = transforms.coefficients_mut();
-        for index in 0..count {
-            m00[index] = values[index];
-            m01[index] = values[count + index];
-            m10[index] = values[2 * count + index];
-            m11[index] = values[3 * count + index];
-            tx[index] = values[4 * count + index];
-            ty[index] = values[5 * count + index];
-            valid[index] = values[6 * count + index] != 0.0;
-        }
-        out.finish(count);
-        Ok(())
+            // ── backward: `trackPoint(pyr_2, pyr_1, transform_2, recovered)` (`:359`).
+            let backward_view = (&self.backward, TRANSFORM_RUNS * count);
+            kernels::launch_klt::<R>(
+                &self.client,
+                prev.buffers(),
+                prev.meta(),
+                self.backward_patches.store(),
+                backward_view,
+                backward_view,
+                shape,
+                self.max_iterations,
+                false,
+            );
+
+            // ── `dist2 = (t1 - t1_recovered).squaredNorm() < max` (`:362`).
+            kernels::launch_finish::<R>(
+                &self.client,
+                forward_view,
+                backward_view,
+                patches.position_buffer(),
+                (&self.result, TRANSFORM_RUNS * count),
+                count,
+                patches.bases(),
+                self.max_recovered_dist2,
+            );
+
+            // ── the one wait of the call.
+            let bytes = self
+                .client
+                .read_one(self.result.clone())
+                .map_err(|error| super::read_failed("the tracker result", &error))?;
+            let expected: usize = TRANSFORM_RUNS * count * size_of::<f32>();
+            if bytes.len() < expected {
+                return Err(TrackerError::LengthMismatch {
+                    first_name: "result bytes expected",
+                    first: expected,
+                    second_name: "returned",
+                    second: bytes.len(),
+                });
+            }
+            let values: &[f32] = f32::from_bytes(&bytes);
+            let (valid, transforms) = out.parts_mut();
+            let [m00, m01, m10, m11, tx, ty] = transforms.coefficients_mut();
+            for index in 0..count {
+                m00[index] = values[index];
+                m01[index] = values[count + index];
+                m10[index] = values[2 * count + index];
+                m11[index] = values[3 * count + index];
+                tx[index] = values[4 * count + index];
+                ty[index] = values[5 * count + index];
+                valid[index] = values[6 * count + index] != 0.0;
+            }
+            out.finish(count);
+            Ok(())
+        })
     }
 }
 

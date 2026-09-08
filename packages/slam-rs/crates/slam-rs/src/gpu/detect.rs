@@ -6,6 +6,7 @@ use kornia_imgproc::features::FastCorner;
 
 use super::kernels::{self, MASK_BITS, RING_BIAS};
 use super::pyramid::{Level0, Level0Table};
+use super::{GpuError, guarded};
 use crate::frontend::detect::{
     CornerScan, DetectError, FAST_BORDER, FAST_RING_COLUMN, FAST_RING_ROW, block_filter_end,
     opencv_corner_score,
@@ -248,109 +249,118 @@ impl<R: Runtime> GpuCornerScan<R> {
 
 impl<R: Runtime> CornerScan for GpuCornerScan<R> {
     fn scan(&mut self, camera: usize, image: &ImageU16) -> Result<(), DetectError> {
-        self.bands.clear();
-        self.width = image.width();
-        self.height = image.height();
-        let pixels: usize = self.width * self.height;
-        self.words = self.width.div_ceil(MASK_BITS);
-        let mask_len: usize = self.words * self.height;
+        guarded(
+            GpuError::DeviceLost {
+                what: "corner scan",
+            },
+            || {
+                self.bands.clear();
+                self.width = image.width();
+                self.height = image.height();
+                let pixels: usize = self.width * self.height;
+                self.words = self.width.div_ceil(MASK_BITS);
+                let mask_len: usize = self.words * self.height;
 
-        let (handle, handle_len): (cubecl::server::Handle, usize) = self.frame(camera, image);
-        if self.buffers.len() <= camera {
-            self.buffers.resize_with(camera + 1, || None);
-        }
-        let slot: &mut Option<ScanBuffers> = &mut self.buffers[camera];
-        let fits: bool = slot
-            .as_ref()
-            .is_some_and(|buffers| buffers.pixels == pixels && buffers.mask_len == mask_len);
-        let buffers: &ScanBuffers = match slot {
-            Some(existing) if fits => existing,
-            slot => {
-                self.buffer_allocations += 1;
-                slot.insert(ScanBuffers {
-                    score: self.client.empty(pixels),
-                    kept: self.client.empty(pixels),
-                    mask: self.client.empty(mask_len * size_of::<u32>()),
-                    pixels,
-                    mask_len,
-                })
-            }
-        };
-        let (score, kept, mask) = (
-            buffers.score.clone(),
-            buffers.kept.clone(),
-            buffers.mask.clone(),
-        );
-        kernels::launch_fast_score::<R>(
-            &self.client,
-            (&handle, handle_len),
-            (&self.ring, 32),
-            (&score, pixels),
-            self.width,
-            self.height,
-            FAST_BORDER,
-        );
-        let (filtered_end, use_filter): (usize, bool) = block_filter_end(self.width);
-        kernels::launch_fast_localmax::<R>(
-            &self.client,
-            (&score, pixels),
-            (&kept, pixels),
-            self.width,
-            self.height,
-            FAST_BORDER,
-            filtered_end,
-            use_filter,
-        );
-        kernels::launch_fast_mask::<R>(
-            &self.client,
-            (&kept, pixels),
-            (&mask, mask_len),
-            self.width,
-            self.height,
-            self.words,
-        );
-
-        // One read for both, so one synchronisation for the frame — and the
-        // fallible form of it: `client.read` is `read_sync(..).expect("TODO")`,
-        // and a panic here would unwind out of the frontend with the GIL
-        // detached (decision D32).
-        let reads: Vec<cubecl::bytes::Bytes> = cubecl::reader::read_sync(
-            self.client.read_async(vec![kept, mask]),
-        )
-        .map_err(|error| super::read_failed("the candidate image and its bitmask", &error))?;
-        // One buffer per handle, in the order they were asked for; anything else
-        // is the runtime breaking its own contract rather than short data.
-        let Ok([kept_bytes, mask_bytes]) = <[cubecl::bytes::Bytes; 2]>::try_from(reads) else {
-            return Err(super::GpuError::DeviceReadFailed {
-                what: "the corner scan's two buffers",
-            }
-            .into());
-        };
-        // Checked one buffer at a time, so a short read says which one was
-        // short: summing the two lengths made that unsayable.
-        for (what, actual, expected) in [
-            ("the candidate image", kept_bytes.len(), pixels),
-            (
-                "the candidate bitmask",
-                mask_bytes.len(),
-                mask_len * size_of::<u32>(),
-            ),
-        ] {
-            if actual != expected {
-                return Err(super::GpuError::ShortRead {
-                    what,
-                    actual,
-                    expected,
+                let (handle, handle_len): (cubecl::server::Handle, usize) =
+                    self.frame(camera, image);
+                if self.buffers.len() <= camera {
+                    self.buffers.resize_with(camera + 1, || None);
                 }
-                .into());
-            }
-        }
-        // Held, not copied: the read already owns host memory of exactly this
-        // length, and on CUDA it may be pinned, which is where the band walk
-        // wants to read from anyway.
-        self.kept = Some(kept_bytes);
-        self.mask = Some(mask_bytes);
-        Ok(())
+                let slot: &mut Option<ScanBuffers> = &mut self.buffers[camera];
+                let fits: bool = slot.as_ref().is_some_and(|buffers| {
+                    buffers.pixels == pixels && buffers.mask_len == mask_len
+                });
+                let buffers: &ScanBuffers = match slot {
+                    Some(existing) if fits => existing,
+                    slot => {
+                        self.buffer_allocations += 1;
+                        slot.insert(ScanBuffers {
+                            score: self.client.empty(pixels),
+                            kept: self.client.empty(pixels),
+                            mask: self.client.empty(mask_len * size_of::<u32>()),
+                            pixels,
+                            mask_len,
+                        })
+                    }
+                };
+                let (score, kept, mask) = (
+                    buffers.score.clone(),
+                    buffers.kept.clone(),
+                    buffers.mask.clone(),
+                );
+                kernels::launch_fast_score::<R>(
+                    &self.client,
+                    (&handle, handle_len),
+                    (&self.ring, 32),
+                    (&score, pixels),
+                    self.width,
+                    self.height,
+                    FAST_BORDER,
+                );
+                let (filtered_end, use_filter): (usize, bool) = block_filter_end(self.width);
+                kernels::launch_fast_localmax::<R>(
+                    &self.client,
+                    (&score, pixels),
+                    (&kept, pixels),
+                    self.width,
+                    self.height,
+                    FAST_BORDER,
+                    filtered_end,
+                    use_filter,
+                );
+                kernels::launch_fast_mask::<R>(
+                    &self.client,
+                    (&kept, pixels),
+                    (&mask, mask_len),
+                    self.width,
+                    self.height,
+                    self.words,
+                );
+
+                // One read for both, so one synchronisation for the frame — and the
+                // fallible form of it: `client.read` is `read_sync(..).expect("TODO")`,
+                // and a panic here would unwind out of the frontend with the GIL
+                // detached (decision D32).
+                let reads: Vec<cubecl::bytes::Bytes> =
+                    cubecl::reader::read_sync(self.client.read_async(vec![kept, mask])).map_err(
+                        |error| super::read_failed("the candidate image and its bitmask", &error),
+                    )?;
+                // One buffer per handle, in the order they were asked for; anything else
+                // is the runtime breaking its own contract rather than short data.
+                let Ok([kept_bytes, mask_bytes]) = <[cubecl::bytes::Bytes; 2]>::try_from(reads)
+                else {
+                    return Err(super::GpuError::DeviceReadFailed {
+                        what: "the corner scan's two buffers",
+                    }
+                    .into());
+                };
+                // Checked one buffer at a time, so a short read says which one was
+                // short: summing the two lengths made that unsayable.
+                for (what, actual, expected) in [
+                    ("the candidate image", kept_bytes.len(), pixels),
+                    (
+                        "the candidate bitmask",
+                        mask_bytes.len(),
+                        mask_len * size_of::<u32>(),
+                    ),
+                ] {
+                    if actual != expected {
+                        return Err(super::GpuError::ShortRead {
+                            what,
+                            actual,
+                            expected,
+                        }
+                        .into());
+                    }
+                }
+                // Held, not copied: the read already owns host memory of exactly this
+                // length, and on CUDA it may be pinned, which is where the band walk
+                // wants to read from anyway.
+                self.kept = Some(kept_bytes);
+                self.mask = Some(mask_bytes);
+                Ok(())
+            },
+        )
     }
 
     fn band(

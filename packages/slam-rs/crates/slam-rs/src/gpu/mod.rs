@@ -112,6 +112,26 @@ pub enum GpuError {
         /// Which buffer.
         what: &'static str,
     },
+    /// A GPU stage panicked instead of returning an error.
+    ///
+    /// The other half of [`GpuError::DeviceReadFailed`], and it exists because
+    /// mapping the reads was not enough: CubeCL 0.10 unwraps a **failed worker
+    /// submission** inside its own client (`cubecl-runtime`'s `client.rs`), so
+    /// on a device that is gone the upload, the launch and the read all panic
+    /// on the calling thread rather than hand back a `ServerError` there is
+    /// anything to map. Every stage on the per-frame path therefore runs inside
+    /// the module's `guarded`, and this is what the caller gets instead of an unwind
+    /// through the released GIL and a `PanicException` in Python (decision
+    /// D32). The panic's own message is logged where it is caught, because this
+    /// enum is `Copy` and cannot carry it.
+    #[error(
+        "the GPU {what} failed on the device; the log carries the runtime's own \
+         message, and the CPU frontend runs without a GPU"
+    )]
+    DeviceLost {
+        /// Which stage was running.
+        what: &'static str,
+    },
     /// The runtime cannot store an element width the kernels bind.
     ///
     /// See [`probe_storage`]: both of this backend's bring-up failures are
@@ -496,6 +516,66 @@ fn read_failed(what: &'static str, error: &cubecl::server::ServerError) -> GpuEr
     GpuError::DeviceReadFailed { what }
 }
 
+/// Run `stage`, turning a panic inside it into `fault`.
+///
+/// The seam between CubeCL's panics and decision D32. A `ServerError` on a
+/// download is mapped by [`read_failed`], but that is only the half of the
+/// failure CubeCL returns: `cubecl-runtime`'s client unwraps a failed worker
+/// submission, so on a lost device `create_from_slice`, a launch and a read all
+/// **panic** on the calling thread. On the per-frame path that unwind crosses
+/// the released GIL and reaches Python as a `PanicException`, past
+/// `process_frame`'s transactional restore; on the bring-up path it is the
+/// `RecvError` the review reproduced. Both land here as the typed error the
+/// caller already documents.
+///
+/// It costs nothing on the path that does not panic — `catch_unwind` is a
+/// landing pad the happy path never enters — and the interleaved A/B in the
+/// report's "Review fixes (round 2)" is the measurement rather than the claim.
+fn guarded<T, E: From<GpuError>>(
+    fault: GpuError,
+    stage: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        #[cfg(test)]
+        fire_if_armed();
+        stage()
+    }));
+    match outcome {
+        Ok(result) => result,
+        Err(payload) => {
+            let reason: &str = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("no message");
+            log::warn!("{fault}: the runtime's own message was: {reason}");
+            Err(fault.into())
+        }
+    }
+}
+
+// Armed by a test to panic where a lost device would (test-only). The failure
+// `guarded` is for cannot be produced on a healthy card — a device that is gone,
+// or a staging allocation refused under memory pressure — so one thread-local
+// flag stands in for it, read at the top of the guarded region, which is where
+// the runtime would raise it. A doc comment cannot sit on a macro invocation.
+#[cfg(test)]
+thread_local! {
+    static STAGE_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Panic if a test armed this thread, and disarm it.
+#[cfg(test)]
+fn fire_if_armed() {
+    STAGE_FAULT.with(|armed| assert!(!armed.replace(false), "the device is gone"));
+}
+
+/// Make the next guarded stage on this thread panic (test-only).
+#[cfg(test)]
+fn arm_stage_fault() {
+    STAGE_FAULT.with(|armed| armed.set(true));
+}
+
 /// Refuse a runtime that cannot store an element width the kernels bind.
 ///
 /// Both of this backend's bring-up failures are **silent**, and neither is
@@ -601,6 +681,8 @@ pub fn wgpu_client() -> cubecl::prelude::ComputeClient<cubecl_wgpu::WgpuRuntime>
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     /// A read that fails is a typed error at every boundary, never a panic.
@@ -637,6 +719,40 @@ mod tests {
                 "the stage error dropped what failed: {message}"
             );
         }
+    }
+
+    /// A panic inside a stage is a typed error, not an unwind into Python.
+    ///
+    /// What a lost device does to a per-frame call, on the real stage and the
+    /// real client: `arm_stage_fault` panics where the runtime would, at the
+    /// top of the guarded region, and what comes back is the stage's own error
+    /// type. The unguarded call on either side of it is the control — the path
+    /// works, so the middle line is measuring the guard and not a broken build.
+    #[test]
+    fn a_panic_inside_a_stage_is_a_typed_error() {
+        use crate::pyramid::PyramidBuilder;
+
+        let mut builder: GpuPyramidBuilder<GpuRuntime> =
+            GpuPyramidBuilder::new(gpu_client().unwrap(), &[[0.0, 0.0]]);
+        let mut pyramid: GpuPyramid<GpuRuntime> = builder.allocate(64, 64, 2).unwrap();
+        let image: crate::image::ImageU16 = crate::image::ImageU16::zeros(64, 64).unwrap();
+        builder.build(0, &image, &mut pyramid).unwrap();
+
+        arm_stage_fault();
+        let error: crate::pyramid::PyramidError =
+            builder.build(0, &image, &mut pyramid).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                crate::pyramid::PyramidError::Gpu(GpuError::DeviceLost {
+                    what: "pyramid build"
+                })
+            ),
+            "a panicking stage gave {error}"
+        );
+
+        // One call, and only that one: the flag is consumed where it fires.
+        builder.build(0, &image, &mut pyramid).unwrap();
     }
 
     /// A library cudarc would panic on is a typed error naming it.
