@@ -283,7 +283,7 @@ class VioLogger:
         self._log_paths(estimated)
         self._log_window(snapshot)
         self._log_landmarks(snapshot)
-        self._log_scalars(result, snapshot, elapsed_ms)
+        self._log_scalars(snapshot, elapsed_ms)
         if self.framesets % ATE_EVERY == 0:
             self._log_ate(estimated)
             log_alignment(RUN_ENTITY, alignment_onto(estimated, self.ground_truth))
@@ -349,11 +349,16 @@ class VioLogger:
             rr.Points3D(snapshot.landmark_positions, colors=track_colors(snapshot.landmark_hosts), radii=0.008),
         )
 
-    def _log_scalars(self, result: _core.VioResult, snapshot: _core.VioSnapshot, elapsed_ms: float) -> None:
-        """Log the counters the time-series view plots."""
-        rr.log(f"{RUN_ENTITY}/velocity", rr.Scalars(result.velocity))
-        rr.log(f"{RUN_ENTITY}/gyro_bias", rr.Scalars(result.gyro_bias))
-        rr.log(f"{RUN_ENTITY}/accel_bias", rr.Scalars(result.accel_bias))
+    def _log_scalars(self, snapshot: _core.VioSnapshot, elapsed_ms: float) -> None:
+        """Log the counters the time-series views plot.
+
+        The estimator's velocity and its two biases used to be logged here, under
+        the 3D subtree, where no view could reach them. Plotting them would take
+        three more views and not one — metres a second, radians a second and
+        metres a second squared share no axis, which is the mixing C73's split
+        into seven views undid — so they are dropped instead; the pose they
+        belong to is on the trajectory either way.
+        """
         rr.log(f"{VIO_STATS_ENTITY}/num_landmarks", rr.Scalars(float(len(snapshot.landmark_ids))))
         rr.log(f"{VIO_STATS_ENTITY}/num_observations", rr.Scalars(float(snapshot.num_observations)))
         rr.log(f"{VIO_STATS_ENTITY}/num_keyframes", rr.Scalars(float(len(snapshot.kf_ids))))
