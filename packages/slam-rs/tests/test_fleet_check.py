@@ -14,6 +14,8 @@ from typing import cast
 import numpy as np
 import pytest
 from fixture_types import never
+from jaxtyping import Float64, Int64
+from numpy import ndarray
 
 from slam_rs import _core
 from slam_rs.apis import fleet_check
@@ -232,6 +234,59 @@ def test_an_estimate_on_another_clock_is_a_row_and_not_a_traceback(
     written: dict = json.loads(output.read_text())
     assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)
     assert "no pose associated within" in written["clips"][0]["verdict"]
+    assert math.isnan(written["clips"][0]["gt_rmse_cm"])
+
+
+def test_a_non_finite_estimate_is_a_row_and_not_an_alignment_traceback(
+    manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A diverged estimator is what a fleet lane exists to find, and it used to be a traceback.
+
+    An estimate whose positions carry a NaN clears D60's pose floor and
+    associates on the references' clock, so a row was built by aligning it — and
+    :func:`~slam_rs.trajectory.rigid_alignment` hands the covariance to
+    ``np.linalg.svd``, which raises ``LinAlgError: SVD did not converge``. That
+    is not the :class:`ValueError` the association case is caught as, so the clip
+    left no row and the JSON the chart reads was never written: the machine that
+    diverged is the one machine this tool reported nothing about. Finiteness is
+    tested before the alignment, the clause names it, both errors read as NaN,
+    the JSON keeps its keys, and the run exits non-zero.
+    """
+    poses: int = MIN_TRACKED_POSES
+    t_ns: Int64[ndarray, " n"] = np.arange(poses, dtype=np.int64) * 20_000_000
+    reference: Trajectory = Trajectory(
+        t_ns=t_ns, position_m=np.arange(3 * poses, dtype=np.float64).reshape(poses, 3), quaternion_wxyz=np.zeros((poses, 4))
+    )
+    positions: Float64[ndarray, "n 3"] = np.arange(3 * poses, dtype=np.float64).reshape(poses, 3).copy()
+    positions[4, 1] = np.nan
+    monkeypatch.setattr(fleet_check, "read_trajectory", lambda _path: reference)
+    monkeypatch.setattr(
+        fleet_check,
+        "run_segment",
+        lambda *_args, **_kwargs: SegmentRun(
+            estimate=Trajectory(t_ns=t_ns, position_m=positions, quaternion_wxyz=np.zeros((poses, 4))), framesets=poses, lost=0, wall_s=1.0
+        ),
+    )
+    monkeypatch.setattr(fleet_check, "ate", never("an estimate with a non-finite position was handed to the alignment"))
+    segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENTS[1])
+
+    diverged: ClipResult = measure(manifest, segment)
+    assert diverged.tracked == poses
+    assert diverged.poses_finite is False
+    assert diverged.unscored is not None
+    assert "1 of 10 estimated positions is not finite" in diverged.unscored
+    assert diverged.failures == (diverged.unscored,)
+    assert diverged.verdict.startswith("fail: ")
+    assert math.isnan(diverged.cpp_rmse_cm)
+    assert math.isnan(diverged.gt_rmse_cm)
+    assert diverged.cpp_associated == 0
+
+    output: Path = tmp_path / "fleet_check.json"
+    with pytest.raises(SystemExit, match="is not finite"):
+        main(Config(segments=(SMOKE_SEGMENTS[1],), output_json=output))
+    written: dict = json.loads(output.read_text())
+    assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)
+    assert "is not finite" in written["clips"][0]["verdict"]
     assert math.isnan(written["clips"][0]["gt_rmse_cm"])
 
 

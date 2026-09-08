@@ -48,7 +48,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, get_args
 
 import numpy as np
 from jaxtyping import Float64, Int64, UInt8
@@ -302,7 +302,18 @@ def main(config: Config) -> None:
 
     Args:
         config: Parsed CLI options.
+
+    Raises:
+        ValueError: If ``--lanes`` names no backend to measure, or if the dump
+            was decoded at a different optical-flow safe radius than the config
+            sets, which would compare two frontends rather than two lanes.
     """
+    # Before the affinity call and before the dump: an empty selection measured
+    # nothing, printed a zero-lane header and then reached `config.lanes[0]` —
+    # the lane every ratio is read against — as an `IndexError`, which the shim
+    # does not turn into a sentence (S25 review).
+    if not config.lanes:
+        raise ValueError(f"--lanes named no backend to measure; the lanes are {', '.join(get_args(Lane))}")
     if config.pin_core is not None:
         os.sched_setaffinity(0, {config.pin_core})
     framesets: Framesets = load_framesets(config.dump, config.limit)

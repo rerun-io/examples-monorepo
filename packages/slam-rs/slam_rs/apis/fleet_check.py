@@ -19,8 +19,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
 
-import numpy as np
-
 from slam_rs import _core
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb
 from slam_rs.reference import (
@@ -36,7 +34,7 @@ from slam_rs.reference import (
 )
 from slam_rs.reference_bundle import BundleFile
 from slam_rs.tracking import SegmentRun, run_segment
-from slam_rs.trajectory import AteResult, Trajectory, ate, extent_m, read_trajectory
+from slam_rs.trajectory import AteResult, Trajectory, ate, extent_m, nonfinite_position_text, read_trajectory
 
 
 @dataclass(slots=True, frozen=True)
@@ -191,8 +189,8 @@ def measure(manifest: ReferenceManifest, segment: ReferenceSegment, gpu: bool = 
         The clip's numbers, with the peak resident set the process has reached.
         A run that could not be scored carries NaN for both errors and the reason
         on :attr:`ClipResult.unscored`, and the verdict says so: below D60's pose
-        floor, or with poses enough to score and none of them on the references'
-        clock.
+        floor, with a position that is not finite, or with poses enough to score
+        and none of them on the references' clock.
 
     Raises:
         FileNotFoundError: If either scoring input cannot be read here
@@ -213,8 +211,15 @@ def measure(manifest: ReferenceManifest, segment: ReferenceSegment, gpu: bool = 
     scored: bool = tracked >= MIN_TRACKED_POSES
     against_cpp: AteResult | None = None
     against_gt: AteResult | None = None
-    unscored: str | None = None
-    if scored:
+    # Finiteness before the alignment, not after it: a NaN position reaches
+    # `np.linalg.svd` inside `rigid_alignment` as `LinAlgError`, which the
+    # `ValueError` below does not catch, so the clip left no row and this
+    # tool's whole output — the JSON `main` writes after every clip — was
+    # never written for the machine that diverged (S25 review). Below the
+    # floor the clause is the floor's, which stands alone.
+    nonfinite: str | None = nonfinite_position_text(run.estimate)
+    unscored: str | None = nonfinite if scored else None
+    if scored and nonfinite is None:
         try:
             against_cpp = ate(run.estimate, cpp)
             against_gt = ate(run.estimate, truth)
@@ -247,7 +252,7 @@ def measure(manifest: ReferenceManifest, segment: ReferenceSegment, gpu: bool = 
         cpp_associated=against_cpp.n_associated if against_cpp is not None else 0,
         extent_m=extent_m(run.estimate),
         truth_extent_m=extent_m(truth),
-        poses_finite=bool(np.isfinite(run.estimate.position_m).all()),
+        poses_finite=nonfinite is None,
         unscored=unscored,
     )
 

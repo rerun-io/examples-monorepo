@@ -683,6 +683,11 @@ class SegmentFeed:
         the layer does not cover. Whether the segment *has* a layer is
         :attr:`has_ground_truth`, which is the distinction a caller acts on;
         callers of this test :func:`len`.
+
+        Raises:
+            ValueError: If the layer's translation and rotation are not valid on
+                the same rows, so no pose can be read off it
+                (:func:`_rig_trajectory`).
         """
         if self.gt_dataset is None:
             return empty_trajectory()
@@ -1199,17 +1204,56 @@ def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, la
         .filter(col(TIMELINE).cast(pa.int64()).between(lit(first_ns), lit(last_ns)))
         .to_arrow_table()
     )
+    return _rig_trajectory(table, segment_id)
+
+
+def _rig_trajectory(table: pa.Table, segment_id: str) -> Trajectory:
+    """One window of the ``gt`` layer's rig transforms as a trajectory, Rerun's XYZW converted to w-first.
+
+    Empty when the layer carries neither component and when the window holds no
+    pose at all.
+
+    Args:
+        table: The window's rows, one Rerun ``Transform3D`` per row.
+        segment_id: Which segment the rows came from, for the refusal below.
+
+    Returns:
+        The poses the window carries, on ``video_time``.
+
+    Raises:
+        ValueError: If the two components are not valid on the same rows. A pose
+            is one row's translation and that same row's rotation, and the two
+            components are read by dropping each column's own nulls — so two
+            masks with equal counts on different rows flatten to equal lengths
+            and every pose silently takes another row's rotation. Rerun stores
+            components independently and lets either one be logged or cleared
+            alone, so the layout is one a valid recording can hold; a refusal
+            naming the row is the only reading of it that cannot be wrong
+            (S25 review).
+    """
     translation_column: str = f"{RIG_ENTITY}:Transform3D:translation"
     quaternion_column: str = f"{RIG_ENTITY}:Transform3D:quaternion"
     if translation_column not in table.column_names or quaternion_column not in table.column_names:
         return empty_trajectory()
     row_t_ns: Int64[ndarray, " n_rows"] = np.asarray(table[TIMELINE].combine_chunks().cast(pa.int64()))
     translations: pa.Array = table[translation_column].combine_chunks()
+    quaternions: pa.Array = table[quaternion_column].combine_chunks()
     valid: Bool[ndarray, " n_rows"] = translations.is_valid().to_numpy(zero_copy_only=False)
+    quaternion_valid: Bool[ndarray, " n_rows"] = quaternions.is_valid().to_numpy(zero_copy_only=False)
+    if not np.array_equal(valid, quaternion_valid):
+        disagreeing: Int64[ndarray, " n_disagreeing"] = np.flatnonzero(valid != quaternion_valid)
+        raise ValueError(
+            f"{segment_id}: {disagreeing.size} of {row_t_ns.size} rig rows carry a translation without a quaternion or "
+            f"a quaternion without a translation, the first at {int(row_t_ns[disagreeing[0]])} ns; a pose needs both, "
+            f"and reading each component off its own rows would give it another row's rotation"
+        )
+    # One mask for the timestamps and both components: each column's own null
+    # removal drops exactly `valid`'s false rows, because the two masks are
+    # equal by here.
     position_m: Float64[ndarray, "n_poses 3"] = _flat_float(translations).reshape(-1, 3)
     if position_m.shape[0] == 0:
         return empty_trajectory()
-    quaternion_xyzw: Float64[ndarray, "n_poses 4"] = _flat_float(table[quaternion_column].combine_chunks()).reshape(-1, 4)
+    quaternion_xyzw: Float64[ndarray, "n_poses 4"] = _flat_float(quaternions).reshape(-1, 4)
     return Trajectory(
         t_ns=row_t_ns[valid],
         position_m=position_m,

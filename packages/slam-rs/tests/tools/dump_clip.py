@@ -207,8 +207,16 @@ def main(config: Config) -> None:
         config: Parsed CLI options.
 
     Raises:
-        ValueError: If the segment is not in the manifest or its dataset has no fork calibration.
+        ValueError: If ``--npz`` was asked for with no frameset to bundle, if the
+            segment is not in the manifest, or if its dataset has no fork
+            calibration.
     """
+    # Before the manifest, the catalog and the output directory: zero framesets
+    # was accepted, every non-NPZ side file was written, and then `np.stack` on
+    # the empty image list raised out of NumPy — leaving a directory that reads
+    # as a clip and holds no frameset (S25 review).
+    if config.npz and config.max_framesets == 0:
+        raise ValueError("--max-framesets 0 with --npz has no frameset to bundle; the bench dump needs at least one")
     manifest: ReferenceManifest = load_manifest()
     segment: ReferenceSegment = manifest.by_id(config.segment)
     if segment.dataset_name not in DEVICE_CALIBRATION:

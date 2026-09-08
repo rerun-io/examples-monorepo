@@ -1,15 +1,20 @@
-"""The bench harness's schedule and its best-of-medians rule.
+"""The bench harness's schedule, its best-of-medians rule and the selection it refuses.
 
-Both are the protocol rather than the plumbing: the interleave is what cancels
-host drift, and taking the best of the per-round medians is what makes a row
-reproduce. Neither needs a GPU, a dump or a core, so they are checked here in
-milliseconds.
+The first two are the protocol rather than the plumbing: the interleave is what
+cancels host drift, and taking the best of the per-round medians is what makes a
+row reproduce. None of the three needs a GPU, a dump or a core, so they are
+checked here in milliseconds.
 """
+
+import os
+from pathlib import Path
 
 import numpy as np
 import pytest
+from fixture_types import never
 
-from slam_rs.apis.bench_track import Lane, LaneRound, best_median_ms, interleave
+from slam_rs.apis import bench_track
+from slam_rs.apis.bench_track import Config, Lane, LaneRound, best_median_ms, interleave, main
 
 
 def test_the_schedule_runs_every_lane_once_per_round() -> None:
@@ -64,3 +69,20 @@ def test_a_lane_with_no_rounds_is_refused() -> None:
     """An empty lane has no figure, and saying so beats reporting zero."""
     with pytest.raises(ValueError, match="no rounds"):
         best_median_ms([])
+
+
+def test_an_empty_lane_selection_is_refused_before_any_file_or_affinity_work(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """``--lanes`` with nothing after it measured nothing and ended in a traceback.
+
+    The empty tuple survived every hop: the process was pinned, the dump and the
+    config were read, a zero-lane header was printed, and only the summary's
+    ``config.lanes[0]`` — the lane every ratio is read against — raised
+    ``IndexError: tuple index out of range``. :func:`slam_rs.apis.run` converts
+    ``ValueError`` and ``FileNotFoundError`` only, so a mistyped selection
+    reached the operator as a traceback after the input work (S25 review).
+    """
+
+    monkeypatch.setattr(bench_track, "load_framesets", never("a dump was read for a run with no lane to measure"))
+    monkeypatch.setattr(os, "sched_setaffinity", never("a core was pinned for a run with no lane to measure"))
+    with pytest.raises(ValueError, match="--lanes named no backend.*cpu, gpu"):
+        main(Config(dump=tmp_path / "clip.npz", config=tmp_path / "msdmi_config.json", lanes=(), pin_core=3))
