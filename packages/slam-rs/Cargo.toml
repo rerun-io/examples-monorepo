@@ -26,9 +26,20 @@ serde = { version = "1", features = ["derive"] }
 # which is exactly the kind of difference the accuracy gate must not measure.
 serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "2"
+# The frontend's only parallelism. Used through `frontend::parallel::WorkPool`,
+# which builds an explicitly sized pool: the ambient global pool is forbidden
+# (decision D31), because its width would decide the reduction shape.
+rayon = "1"
 # dev-only
 approx = "0.5"
 proptest = "1"
+# A runtime dependency from the frontend on: `kornia_imgproc::features::
+# fast_detect_rect_u8` is the FAST kernel behind basalt's grid detector
+# (decision D09, D20). It doubles as the pyramid's test oracle (`pyrdown_u8`,
+# decision D08). Pinned by exact git rev with default features off; kornia's
+# CUDA features are never enabled, because GPU work here is CubeCL only (T04).
+kornia-image = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
+kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
 
 # The estimator must never panic on data: errors are typed and returned.
 [workspace.lints.clippy]
