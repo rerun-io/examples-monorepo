@@ -64,7 +64,37 @@ pub const EDGE_THRESHOLD: f32 = 19.0;
 
 /// The Bresenham radius `cv::FAST` and kornia both skip at a border
 /// (`cells.rs:151`, `fast.rs:494`).
-const FAST_BORDER: usize = 3;
+pub const FAST_BORDER: usize = 3;
+
+/// kornia's Bresenham ring: ring point `k` sits `FAST_RING_ROW[k]` rows and
+/// [`FAST_RING_COLUMN`]`[k]` columns from the centre (`fast.rs:489-490`).
+pub const FAST_RING_ROW: [i32; 16] = [0, 1, 2, 3, 3, 3, 2, 1, 0, -1, -2, -3, -3, -3, -2, -1];
+/// The column half of [`FAST_RING_ROW`]'s ring.
+pub const FAST_RING_COLUMN: [i32; 16] = [3, 3, 2, 1, 0, -1, -2, -3, -3, -3, -2, -1, 0, 1, 2, 3];
+
+/// Lanes in one block of kornia's in-block local-maximum filter (`fast.rs:539`).
+pub const FAST_FILTER_LANES: usize = 16;
+
+/// The width at which kornia turns that filter on (`fast.rs:517`).
+const FAST_FILTER_WIDTH: usize = 800;
+
+/// Where kornia's local-maximum filter stops, and whether it runs at all.
+///
+/// The filter keeps a candidate only when its score beats both neighbours
+/// *inside its own sixteen-lane block*, the blocks are aligned to the image's
+/// own left margin, and the scalar tail past the last whole block is
+/// unfiltered — kornia's SIMD loop runs while `x + 16 <= width - margin`
+/// (`fast.rs:524`). So the alignment and the tail are part of the corner set,
+/// not an implementation detail, and this is the one place that arithmetic
+/// lives: the CPU sweep gets it from kornia itself, and the GPU kernel and
+/// `tests/fast_model.rs` read it here rather than each spelling it out.
+pub fn block_filter_end(width: usize) -> (usize, bool) {
+    let blocks: usize = width.saturating_sub(2 * FAST_BORDER) / FAST_FILTER_LANES;
+    (
+        FAST_BORDER + blocks * FAST_FILTER_LANES,
+        width >= FAST_FILTER_WIDTH,
+    )
+}
 
 /// `cv::FAST`'s default segment length, `FastFeatureDetector::TYPE_9_16`.
 const FAST_ARC_LENGTH: usize = 9;
@@ -98,24 +128,15 @@ pub enum DetectError {
         /// Cells the buffer holds.
         actual: usize,
     },
-    /// A device download returned the wrong number of bytes.
+    /// A GPU scanner's device read failed, or came back the wrong length.
     ///
-    /// Only a GPU scanner produces this. A CubeCL runtime whose CUDA
-    /// installation is incomplete panics on its own worker thread and hands back
-    /// a short buffer rather than an error, and reading that as a candidate
-    /// image would quietly detect nothing (decision D32).
-    #[error("reading the candidate image returned {actual} bytes, expected {expected}")]
-    DeviceRead {
-        /// Bytes the frame's geometry needs.
-        expected: usize,
-        /// Bytes the device returned.
-        actual: usize,
-    },
-    /// A GPU scanner's device read failed.
-    ///
-    /// The download itself came back as an error rather than as short data, so
-    /// there is no length to report; the runtime's reason is logged where the
-    /// error is mapped (decision D32).
+    /// Only a GPU scanner produces this, and it is one variant rather than
+    /// several because an incomplete CubeCL runtime fails every way at once: it
+    /// panics on its own worker thread, the launch reports success, and the
+    /// download comes back short or as zeros. The [`crate::gpu::GpuError`]
+    /// inside names which buffer and whether the read failed or was short;
+    /// reading either as a candidate image would quietly detect nothing
+    /// (decision D32).
     #[cfg(feature = "gpu")]
     #[error(transparent)]
     Gpu(#[from] crate::gpu::GpuError),
@@ -397,6 +418,13 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
     /// Row-major over the **whole image width**, each carrying OpenCV's integer
     /// `cornerScore` as its response — the ordering and the score
     /// [`detect_keypoints_with_cells`] then reads.
+    ///
+    /// Both implementations cache on `(y, threshold)` and **not** on `rows`,
+    /// which also decides the result. That is sound only because `rows` is the
+    /// cell grid's row height, constant between two [`CornerScan::scan`] calls:
+    /// [`detect_keypoints_with_cells`] derives the grid once per frame and
+    /// clears the cache at the entry. An implementation that wants to be asked
+    /// for two different `rows` within one frame has to put `rows` in the key.
     ///
     /// # Errors
     ///

@@ -4,7 +4,7 @@
 use cubecl::prelude::*;
 
 use super::kernels::{self, PositionBases};
-use super::patches::{GpuPatches, OFFSET_RUN, SELECTED_RUN};
+use super::patches::GpuPatches;
 use super::pyramid::GpuPyramid;
 use crate::frontend::patterns::Pattern;
 use crate::frontend::tracker::{
@@ -169,11 +169,9 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
             self.offset_y[index] = source.y - guess_y[index];
         }
 
-        let shape = {
-            let mut shape = patches.shape();
-            shape.count = count;
-            shape
-        };
+        // `shape.count` is `patches.len()`, which the guard above proved equal
+        // to `count`.
+        let shape = patches.shape();
         let forward_view = (&self.forward, TRANSFORM_RUNS * count);
 
         // ── forward: `trackPoint(pyr_1, pyr_2, transform_1, transform_2)` (`:349`).
@@ -197,18 +195,13 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
             &self.offset_x[..count],
             &self.offset_y[..count],
         );
-        let capacity: usize = self.backward_patches.capacity();
         kernels::launch_prepare_backward::<R>(
             &self.client,
             forward_view,
             self.backward_patches.position_buffer(),
             (&self.backward, TRANSFORM_RUNS * count),
             count,
-            PositionBases {
-                x: OFFSET_RUN * capacity,
-                y: (OFFSET_RUN + 1) * capacity,
-                selected: SELECTED_RUN * capacity,
-            },
+            self.backward_patches.offset_bases(),
         );
         // The backward patches sit at the forward translations, which live in
         // runs 4 and 5 of the forward buffer, with its validity flag as the

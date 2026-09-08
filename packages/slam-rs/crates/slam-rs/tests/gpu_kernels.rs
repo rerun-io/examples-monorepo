@@ -17,10 +17,9 @@
 //! These run only under `--features gpu` and need a working CubeCL runtime;
 //! `cargo test --features gpu` is the gate.
 #![cfg(feature = "gpu")]
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kornia_imgproc::features::FastCorner;
-use nalgebra::Vector2;
 use slam_rs::frontend::detect::{CornerScan, CpuCornerScan};
 use slam_rs::frontend::parallel::WorkPool;
 use slam_rs::frontend::patch::OpticalFlowPatch;
@@ -31,7 +30,11 @@ use slam_rs::frontend::tracker::{
 };
 use slam_rs::gpu::{GpuCornerScan, GpuPatchTracker, GpuPatches, GpuPyramidBuilder, gpu_client};
 use slam_rs::image::ImageU16;
-use slam_rs::pyramid::{CpuPyramidBuilder, Pyramid, PyramidBuilder, PyramidU16};
+use slam_rs::pyramid::{CpuPyramidBuilder, Pyramid, PyramidBuilder, PyramidError, PyramidU16};
+
+mod common;
+
+use common::{cornered_image, grid_positions, textured_image};
 
 /// The keypoint budget both lanes are sized for, well over what the grid needs.
 const MAX_KEYPOINTS: usize = 1024;
@@ -39,47 +42,6 @@ const MAX_KEYPOINTS: usize = 1024;
 const MAX_ITERATIONS: usize = 5;
 /// `optical_flow_max_recovered_dist2` in every shipped config.
 const MAX_RECOVERED_DIST2: f32 = 0.09;
-
-/// Twelve plane waves between 16 and 56 pixels, in fixed pseudo-random
-/// directions and phases: the same band-limited field the CPU tracker's tests
-/// use, so a shift really does survive down the pyramid and every patch's
-/// `H_se2` is well conditioned.
-fn texture(x: f64, y: f64) -> f64 {
-    const WAVES: [(f64, f64, f64); 12] = [
-        (16.0, 0.031, 0.11),
-        (19.0, 0.187, 0.37),
-        (23.0, 0.311, 0.63),
-        (27.0, 0.451, 0.05),
-        (31.0, 0.077, 0.81),
-        (35.0, 0.229, 0.29),
-        (39.0, 0.383, 0.55),
-        (43.0, 0.497, 0.73),
-        (47.0, 0.143, 0.19),
-        (51.0, 0.271, 0.91),
-        (54.0, 0.419, 0.43),
-        (56.0, 0.353, 0.67),
-    ];
-    let mut total: f64 = 0.0;
-    for (wavelength, direction, phase) in WAVES {
-        let angle: f64 = std::f64::consts::TAU * direction;
-        let projection: f64 = x * angle.cos() + y * angle.sin();
-        total += (std::f64::consts::TAU * (projection / wavelength + phase)).sin();
-    }
-    total / WAVES.len() as f64
-}
-
-/// The texture rendered into a `u16` image, shifted by `(dx, dy)`.
-fn textured_image(width: usize, height: usize, dx: f32, dy: f32) -> ImageU16 {
-    let mut image: ImageU16 = ImageU16::zeros(width, height).unwrap();
-    for y in 0..height {
-        for x in 0..width {
-            let value: f64 = texture(x as f64 - f64::from(dx), y as f64 - f64::from(dy));
-            let scaled: f64 = (value * 0.4 + 0.5) * 65535.0;
-            image.set(x, y, scaled.clamp(0.0, 65535.0) as u16);
-        }
-    }
-    image
-}
 
 /// The pyramid geometry the shipped msd configs run: `optical_flow_levels = 3`
 /// on a 960x960 frame, so four levels.
@@ -130,6 +92,31 @@ fn the_gpu_pyramid_is_bit_exact_with_the_cpu() {
             expected.height()
         );
     }
+}
+
+/// A pyramid of level 0 alone is refused rather than allocated empty.
+///
+/// With `optical_flow_levels = 0` the odd buffer holds no level, and
+/// `client.empty(0)` is a zero-sized allocation that wgpu rejects at
+/// validation — on cubecl's own worker thread, where a panic reaches the caller
+/// as data rather than as an error. That is the failure mode `probe_storage`
+/// exists to prevent, reachable through a config value instead, so the geometry
+/// is refused the way every other unbuildable one is.
+#[test]
+fn a_pyramid_of_one_level_is_refused_rather_than_allocated_empty() {
+    let builder = GpuPyramidBuilder::new(gpu_client(), &[[0.0, 0.0]]);
+    let refused = builder.allocate(64, 48, 0);
+    assert!(
+        matches!(
+            refused,
+            Err(PyramidError::TooSmall {
+                width: 64,
+                height: 48,
+                num_levels: 0
+            })
+        ),
+        "a single-level pyramid was accepted: {refused:?}"
+    );
 }
 
 /// A frame whose stride is wider than its width — dav1d's shape — must upload
@@ -184,23 +171,6 @@ fn a_reused_pyramid_carries_only_the_newest_frame() {
     }
 }
 
-/// A grid of source positions well inside a `size` x `size` frame, spaced so no
-/// two patches overlap and every one is far enough from the border for the
-/// coarsest level's 52-tap pattern.
-fn grid_positions(size: usize) -> PointsSoA {
-    let mut positions: PointsSoA = PointsSoA::with_capacity(256);
-    let mut y: usize = 96;
-    while y + 96 < size {
-        let mut x: usize = 96;
-        while x + 96 < size {
-            positions.push(Vector2::new(x as f32 + 0.37, y as f32 - 0.21));
-            x += 71;
-        }
-        y += 71;
-    }
-    positions
-}
-
 #[test]
 fn the_gpu_patch_build_matches_the_cpu_within_tolerance() {
     let image: ImageU16 = textured_image(512, 512, 0.0, 0.0);
@@ -221,6 +191,7 @@ fn the_gpu_patch_build_matches_the_cpu_within_tolerance() {
         GpuPatches::new(client, MAX_KEYPOINTS, LEVELS + 1).unwrap();
     patches.build(&gpu, &positions, None).unwrap();
     let store: Vec<f32> = patches.read_store().unwrap();
+    let layout = patches.layout();
 
     let mut worst_data: f32 = 0.0;
     let mut worst_jacobian: f32 = 0.0;
@@ -233,16 +204,16 @@ fn the_gpu_patch_build_matches_the_cpu_within_tolerance() {
             let reference: OpticalFlowPatch<Pattern51> =
                 OpticalFlowPatch::new(&level_image, positions.get(patch) / scale);
             assert_eq!(
-                patches.valid_in(&store, level, patch),
+                store[layout.valid(level, patch)] != 0.0,
                 reference.valid,
                 "validity differs at level {level}, patch {patch}"
             );
             for tap in 0..Pattern51::SIZE {
                 worst_data = worst_data
-                    .max((patches.data_in(&store, level, tap, patch) - reference.data[tap]).abs());
+                    .max((store[layout.data(level, tap, patch)] - reference.data[tap]).abs());
                 for row in 0..3 {
                     let expected: f32 = reference.h_se2_inv_j_se2_t[row][tap];
-                    let actual: f32 = patches.jacobian_in(&store, level, row, tap, patch);
+                    let actual: f32 = store[layout.jacobian(level, row, tap, patch)];
                     worst_jacobian = worst_jacobian.max((actual - expected).abs());
                     jacobian_scale = jacobian_scale.max(expected.abs());
                 }
@@ -418,22 +389,42 @@ fn the_gpu_tracker_recovers_the_same_shift_as_the_cpu() {
     );
 }
 
-/// A textured 8-bit field with fine detail, so FAST has plenty to find: the
-/// smooth plane-wave texture above gives almost no corners.
-fn cornered_image(width: usize, height: usize) -> ImageU16 {
-    let mut image: ImageU16 = ImageU16::zeros(width, height).unwrap();
-    let mut state: u32 = 0x1234_5678;
-    for y in 0..height {
-        for x in 0..width {
-            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            let wave: i32 = ((x as f64 / 11.0).sin() * 60.0 + (y as f64 / 7.0).cos() * 50.0) as i32;
-            let noise: i32 = (state >> 24) as i32 / 4;
-            // The detector reads `pixel >> 8`, so the 8-bit value goes in the
-            // high byte.
-            image.set(x, y, ((128 + wave + noise).clamp(0, 255) as u16) << 8);
+/// Every band the detector asks for, at every rung of the shipped ladder, from
+/// two scanners — and the count of corners they agreed on.
+///
+/// One per grid row of a 50-pixel cell, which is the shape
+/// `detect_keypoints_with_cells` drives. Written once because both corner tests
+/// need exactly it: the "exact against kornia" one and the "reads the pyramid"
+/// one, which would otherwise drift into checking different amounts.
+fn bands_agree(
+    reference: &mut impl CornerScan,
+    actual: &mut impl CornerScan,
+    height: usize,
+    label: &str,
+) -> usize {
+    let mut total: usize = 0;
+    for band_y in (3..height - 3).step_by(50) {
+        for threshold in [40i32, 20, 10, 5, 1] {
+            let want: Vec<FastCorner> = reference.band(band_y, 44, threshold).unwrap().to_vec();
+            let got: &[FastCorner] = actual.band(band_y, 44, threshold).unwrap();
+            assert_eq!(
+                got.len(),
+                want.len(),
+                "{label} band {band_y} threshold {threshold}: {} corners against {}",
+                got.len(),
+                want.len()
+            );
+            for (index, (got, want)) in got.iter().zip(want.iter()).enumerate() {
+                assert_eq!(
+                    (got.xy, got.response),
+                    (want.xy, want.response),
+                    "{label} band {band_y} threshold {threshold}, corner {index}"
+                );
+            }
+            total += want.len();
         }
     }
-    image
+    total
 }
 
 /// The GPU corner scanner is **exact**, not within a tolerance.
@@ -453,31 +444,7 @@ fn the_gpu_corner_scan_is_exact_against_kornia() {
         cpu.scan(0, &image).unwrap();
         gpu.scan(0, &image).unwrap();
 
-        // The row bands the detector asks for: one per grid row of a 50-pixel
-        // cell, at every rung of the shipped ladder.
-        let mut total: usize = 0;
-        for band_y in (3..height - 3).step_by(50) {
-            for threshold in [40i32, 20, 10, 5, 1] {
-                let expected: Vec<FastCorner> = cpu.band(band_y, 44, threshold).unwrap().to_vec();
-                let actual: &[FastCorner] = gpu.band(band_y, 44, threshold).unwrap();
-                assert_eq!(
-                    actual.len(),
-                    expected.len(),
-                    "{width}x{height} band {band_y} threshold {threshold}: \
-                     GPU {} corners, kornia {}",
-                    actual.len(),
-                    expected.len()
-                );
-                for (index, (got, want)) in actual.iter().zip(expected.iter()).enumerate() {
-                    assert_eq!(
-                        (got.xy, got.response),
-                        (want.xy, want.response),
-                        "{width}x{height} band {band_y} threshold {threshold}, corner {index}"
-                    );
-                }
-                total += expected.len();
-            }
-        }
+        let total: usize = bands_agree(&mut cpu, &mut gpu, height, &format!("{width}x{height}"));
         println!("{width}x{height}: {total} corners over every band and rung, identical");
     }
 }
@@ -535,22 +502,12 @@ fn the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing() {
     for (camera, frame) in frames.iter().enumerate() {
         shared.scan(camera, frame).unwrap();
         alone.scan(camera, frame).unwrap();
-        let mut total: usize = 0;
-        for band_y in (3..frame.height() - 3).step_by(50) {
-            for threshold in [40i32, 20, 10, 5, 1] {
-                let expected: Vec<FastCorner> = alone.band(band_y, 44, threshold).unwrap().to_vec();
-                let actual: &[FastCorner] = shared.band(band_y, 44, threshold).unwrap();
-                assert_eq!(
-                    actual.len(),
-                    expected.len(),
-                    "camera {camera} band {band_y} threshold {threshold}"
-                );
-                for (got, want) in actual.iter().zip(expected.iter()) {
-                    assert_eq!((got.xy, got.response), (want.xy, want.response));
-                }
-                total += expected.len();
-            }
-        }
+        let total: usize = bands_agree(
+            &mut alone,
+            &mut shared,
+            frame.height(),
+            &format!("camera {camera}"),
+        );
         println!(
             "camera {camera} ({}x{}): {total} corners identical, uploads shared {} / alone {}",
             frame.width(),
@@ -565,6 +522,25 @@ fn the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing() {
         "the shared scanner uploaded a frame the pyramid had already put on the device"
     );
     assert_eq!(alone.frame_uploads(), frames.len());
+
+    // And each camera's three device buffers are allocated once for the life of
+    // the scanner, not once per frameset. A one-slot geometry cache holds only
+    // for a rig whose cameras are all the same size; on this one — 960x240 next
+    // to 512x192, which is why the test drives two — every scan missed and
+    // re-allocated 4 MB, the pool churn step 1b removed.
+    let allocations: usize = shared.buffer_allocations();
+    assert_eq!(allocations, frames.len(), "one geometry, one allocation");
+    for _ in 0..3 {
+        for (camera, frame) in frames.iter().enumerate() {
+            shared.scan(camera, frame).unwrap();
+        }
+    }
+    assert_eq!(
+        shared.buffer_allocations(),
+        allocations,
+        "three more framesets of the same rig re-allocated the scan buffers"
+    );
+    assert_eq!(shared.frame_uploads(), 0);
 
     // A frame whose geometry does not match the published entry is refused
     // rather than read: the fallback upload is what keeps a stale table safe.
@@ -588,10 +564,11 @@ fn the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing() {
 #[test]
 fn the_per_frame_path_holds_the_pool_flat() {
     const FRAMES: usize = 200;
-    /// Two 960x960 four-level pyramids are 4.7 MB and the scan buffers 3.9 MB.
-    /// A pool that reuses its pages sits far under this; one that grows a page
-    /// per frame passes it before frame twenty.
-    const RESERVED_CEILING: u64 = 256 * 1024 * 1024;
+    /// Twice the larger of the two lanes' measured plateaus — 31.35 MiB on
+    /// CUDA, 40.00 on wgpu — rather than the 256 MiB it started at, which was
+    /// six to eight times them and would have called a leak that plateaued
+    /// anywhere under a quarter of a gigabyte green.
+    const RESERVED_CEILING: u64 = 96 * 1024 * 1024;
 
     let client = gpu_client();
     let mut builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
@@ -612,17 +589,20 @@ fn the_per_frame_path_holds_the_pool_flat() {
             // One band, so the download and the host-side walk run too.
             scanner.band(3, 44, 20).unwrap();
         }
-        if let Ok(usage) = client.memory_usage() {
-            worst = worst.max(usage.bytes_reserved);
-            if frame_index == 0 || frame_index == 9 || frame_index + 1 == FRAMES {
-                println!(
-                    "frame {}: {} allocs, {:.2} MiB in use, {:.2} MiB reserved",
-                    frame_index + 1,
-                    usage.number_allocs,
-                    usage.bytes_in_use as f64 / (1024.0 * 1024.0),
-                    usage.bytes_reserved as f64 / (1024.0 * 1024.0),
-                );
-            }
+        // `.unwrap()`, not `if let Ok`: a runtime that stops reporting its
+        // memory usage would leave `worst` at zero and this test — the only one
+        // that would catch unbounded device growth — passing having measured
+        // nothing.
+        let usage = client.memory_usage().unwrap();
+        worst = worst.max(usage.bytes_reserved);
+        if frame_index == 0 || frame_index == 9 || frame_index + 1 == FRAMES {
+            println!(
+                "frame {}: {} allocs, {:.2} MiB in use, {:.2} MiB reserved",
+                frame_index + 1,
+                usage.number_allocs,
+                usage.bytes_in_use as f64 / (1024.0 * 1024.0),
+                usage.bytes_reserved as f64 / (1024.0 * 1024.0),
+            );
         }
     }
     println!(
@@ -630,8 +610,13 @@ fn the_per_frame_path_holds_the_pool_flat() {
         worst as f64 / (1024.0 * 1024.0)
     );
     assert!(
+        worst > 0,
+        "the runtime reported no reserved bytes at all over {FRAMES} framesets"
+    );
+    assert!(
         worst < RESERVED_CEILING,
-        "CubeCL reserved {worst} bytes over {FRAMES} framesets of two 960x960 cameras"
+        "CubeCL reserved {worst} bytes over {FRAMES} framesets of two 960x960 cameras, \
+         against a ceiling of {RESERVED_CEILING}"
     );
 }
 

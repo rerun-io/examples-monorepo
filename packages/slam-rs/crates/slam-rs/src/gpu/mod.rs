@@ -53,21 +53,13 @@ mod pyramid;
 mod track;
 
 pub use detect::GpuCornerScan;
-pub use patches::GpuPatches;
+pub use patches::{GpuPatches, StoreLayout};
 pub use pyramid::{GpuPyramid, GpuPyramidBuilder, Level0, Level0Table};
 pub use track::GpuPatchTracker;
 
 /// What can go wrong bringing up or running a GPU backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GpuError {
-    /// The device has no room for a buffer this geometry needs.
-    #[error("a {what} buffer of {elements} elements does not fit in a usize")]
-    BufferShapeOverflow {
-        /// Which buffer.
-        what: &'static str,
-        /// Elements asked for.
-        elements: usize,
-    },
     /// A device read came back with the wrong number of bytes.
     ///
     /// The one failure mode a CubeCL backend has that a CPU one does not: a
@@ -284,10 +276,10 @@ pub fn probe_storage<R: cubecl::prelude::Runtime>(
             .read_one(target)
             .map_err(|error| read_failed("the storage probe", &error))?;
         if bytes.len() != expected {
-            return Err(GpuError::StorageRoundTrip {
-                width,
-                wrong: count,
-                count,
+            return Err(GpuError::ShortRead {
+                what: "the storage probe",
+                actual: bytes.len(),
+                expected,
             });
         }
         let wrong: usize = N::from_bytes(&bytes)

@@ -756,6 +756,15 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     /// tracker itself, and `scanner` is the detector's corner stage — the three
     /// are independent, so a backend may replace any subset of them.
     ///
+    /// `scanner` is a trait object where the other two are type parameters, and
+    /// that asymmetry is deliberate rather than a leftover: a third parameter
+    /// would have to be spelled at every `FrameToFrameOpticalFlow<..>` in the
+    /// crate and in both [`crate::FrontendLane`] arms, and the scanner is
+    /// entered once per camera per frameset — the ~1.8 k `band` calls inside a
+    /// frame go through [`DetectorScratch`], not through this seam. The price
+    /// is that [`CornerScan`] must be `Send + Sync` and `DetectorScratch` hand-
+    /// writes `Default`.
+    ///
     /// # Errors
     ///
     /// As [`FrameToFrameOpticalFlow::new`], plus

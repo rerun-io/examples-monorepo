@@ -6,20 +6,11 @@ use kornia_imgproc::features::FastCorner;
 
 use super::kernels::{self, MASK_BITS, RING_BIAS};
 use super::pyramid::{Level0, Level0Table};
-use crate::frontend::detect::{CornerScan, DetectError, opencv_corner_score};
+use crate::frontend::detect::{
+    CornerScan, DetectError, FAST_BORDER, FAST_RING_COLUMN, FAST_RING_ROW, block_filter_end,
+    opencv_corner_score,
+};
 use crate::image::ImageU16;
-
-/// The ring margin `fast_detect_rect_u8` clamps to on every side.
-const MARGIN: usize = 3;
-
-/// kornia's Bresenham ring, `fast.rs:489-490`.
-const RING_ROW: [i32; 16] = [0, 1, 2, 3, 3, 3, 2, 1, 0, -1, -2, -3, -3, -3, -2, -1];
-/// The column half of the same ring.
-const RING_COLUMN: [i32; 16] = [3, 3, 2, 1, 0, -1, -2, -3, -3, -3, -2, -1, 0, 1, 2, 3];
-
-/// The width at which kornia turns its in-block local-maximum filter on
-/// (`fast.rs:517`).
-const FILTER_WIDTH: usize = 800;
 
 /// The three device buffers one frame geometry needs, kept between frames.
 struct ScanBuffers {
@@ -79,8 +70,16 @@ pub struct GpuCornerScan<R: Runtime> {
     /// A repack buffer for a frame whose stride exceeds its width, reused
     /// between frames so the per-frame path allocates nothing (D49).
     packed: Vec<u16>,
-    /// The dense score image, the candidate image and the column bitmask,
-    /// allocated once per geometry rather than once per frame.
+    /// The dense score image, the candidate image and the column bitmask, per
+    /// camera: allocated once per camera geometry rather than once per frame.
+    ///
+    /// Indexed by camera because `scan` runs once per camera per frameset, so
+    /// one slot only holds for a rig whose cameras are all the same size — on a
+    /// mixed-geometry rig, which the port supports deliberately, every scan
+    /// missed and the three `client.empty` calls came back every camera every
+    /// frameset. `the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing`
+    /// drives 960x240 next to 512x192 and asserts the allocation count does not
+    /// move across framesets.
     ///
     /// Every one of the three kernels writes every element of its output in
     /// range — the score kernel zeroes the margin, the filter writes each pixel
@@ -88,7 +87,10 @@ pub struct GpuCornerScan<R: Runtime> {
     /// frame's candidate, and `a_reused_corner_scan_carries_only_the_newest_frame`
     /// is the test that says so. Three `client.empty` calls per camera per
     /// frameset were the largest source of pool churn in the lane.
-    buffers: Option<ScanBuffers>,
+    buffers: Vec<Option<ScanBuffers>>,
+    /// Times the three device buffers have been allocated, which a rig of one
+    /// geometry keeps at one.
+    buffer_allocations: usize,
     /// The candidate image, one byte per pixel, as it came back.
     kept: Vec<u8>,
     /// One bit per column of `kept`, thirty-two to a word.
@@ -105,7 +107,7 @@ impl<R: Runtime> GpuCornerScan<R> {
     /// A scanner on `client`, with the ring uploaded.
     pub fn new(client: ComputeClient<R>) -> Self {
         let mut ring: Vec<u32> = Vec::with_capacity(32);
-        for offsets in [RING_ROW, RING_COLUMN] {
+        for offsets in [FAST_RING_ROW, FAST_RING_COLUMN] {
             for offset in offsets {
                 ring.push((offset + RING_BIAS as i32) as u32);
             }
@@ -115,7 +117,8 @@ impl<R: Runtime> GpuCornerScan<R> {
             level0: Level0Table::default(),
             uploads: 0,
             packed: Vec::new(),
-            buffers: None,
+            buffers: Vec::new(),
+            buffer_allocations: 0,
             kept: Vec::new(),
             mask: Vec::new(),
             words: 0,
@@ -142,6 +145,14 @@ impl<R: Runtime> GpuCornerScan<R> {
         self.uploads
     }
 
+    /// Times the score, candidate and bitmask buffers have been allocated.
+    ///
+    /// One per camera geometry for the life of the scanner; anything that grows
+    /// with the frameset count is the pool churn step 1b removed coming back.
+    pub fn buffer_allocations(&self) -> usize {
+        self.buffer_allocations
+    }
+
     /// The buffer the score kernel reads for camera `camera`, and its length.
     ///
     /// The pyramid's own level 0 when the builder published one of this
@@ -149,23 +160,27 @@ impl<R: Runtime> GpuCornerScan<R> {
     /// fallback safe rather than hopeful: a stale entry from another frame size
     /// is refused instead of read.
     fn frame(&mut self, camera: usize, image: &ImageU16) -> (cubecl::server::Handle, usize) {
+        // `image` is the authority on the geometry, not `self.width`/`self.height`:
+        // those are the same frame's, set by `scan` two lines up, and one fact
+        // with two sources inside one call is how they come apart.
+        let (width, height): (usize, usize) = (image.width(), image.height());
+        let pixels: usize = width * height;
         let shared: Option<Level0> = self
             .level0
             .lock()
             .ok()
             .and_then(|table| table.get(camera).cloned().flatten())
-            .filter(|level0| level0.width == self.width && level0.height == self.height);
+            .filter(|level0| level0.width == width && level0.height == height);
         if let Some(level0) = shared {
-            return (level0.handle, level0.len);
+            return (level0.handle, pixels);
         }
 
-        let pixels: usize = self.width * self.height;
         self.uploads += 1;
         // The frame goes up as `u16` and the `>> 8` the detector reads happens
         // on the device: the extra 0.9 MB over the bus costs less than a
         // whole-frame narrowing pass on the host. A frame whose stride exceeds
         // its width is repacked row by row, as the pyramid's staging does.
-        if image.stride() == self.width {
+        if image.stride() == width {
             return (
                 self.client
                     .create_from_slice(u16::as_bytes(&image.data()[..pixels])),
@@ -174,7 +189,7 @@ impl<R: Runtime> GpuCornerScan<R> {
         }
         self.packed.clear();
         self.packed.reserve(pixels);
-        for y in 0..self.height {
+        for y in 0..height {
             self.packed.extend_from_slice(image.row(y));
         }
         (
@@ -221,25 +236,25 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         let mask_len: usize = self.words * self.height;
 
         let (handle, handle_len): (cubecl::server::Handle, usize) = self.frame(camera, image);
-        let fits: bool = self
-            .buffers
+        if self.buffers.len() <= camera {
+            self.buffers.resize_with(camera + 1, || None);
+        }
+        let slot: &mut Option<ScanBuffers> = &mut self.buffers[camera];
+        let fits: bool = slot
             .as_ref()
             .is_some_and(|buffers| buffers.pixels == pixels && buffers.mask_len == mask_len);
-        if !fits {
-            self.buffers = Some(ScanBuffers {
-                score: self.client.empty(pixels),
-                kept: self.client.empty(pixels),
-                mask: self.client.empty(mask_len * size_of::<u32>()),
-                pixels,
-                mask_len,
-            });
-        }
-        // Unreachable: the branch above has just filled it.
-        let Some(buffers) = self.buffers.as_ref() else {
-            return Err(DetectError::DeviceRead {
-                expected: pixels,
-                actual: 0,
-            });
+        let buffers: &ScanBuffers = match slot {
+            Some(existing) if fits => existing,
+            slot => {
+                self.buffer_allocations += 1;
+                slot.insert(ScanBuffers {
+                    score: self.client.empty(pixels),
+                    kept: self.client.empty(pixels),
+                    mask: self.client.empty(mask_len * size_of::<u32>()),
+                    pixels,
+                    mask_len,
+                })
+            }
         };
         let (score, kept, mask) = (
             buffers.score.clone(),
@@ -253,20 +268,18 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
             (&score, pixels),
             self.width,
             self.height,
-            MARGIN,
+            FAST_BORDER,
         );
-        // kornia's SIMD loop runs while `x + 16 <= width - margin`, so the whole
-        // blocks end here and the scalar tail past it is unfiltered.
-        let blocks: usize = self.width.saturating_sub(2 * MARGIN) / 16;
+        let (filtered_end, use_filter): (usize, bool) = block_filter_end(self.width);
         kernels::launch_fast_localmax::<R>(
             &self.client,
             (&score, pixels),
             (&kept, pixels),
             self.width,
             self.height,
-            MARGIN,
-            MARGIN + blocks * 16,
-            self.width >= FILTER_WIDTH,
+            FAST_BORDER,
+            filtered_end,
+            use_filter,
         );
         kernels::launch_fast_mask::<R>(
             &self.client,
@@ -281,27 +294,36 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         // fallible form of it: `client.read` is `read_sync(..).expect("TODO")`,
         // and a panic here would unwind out of the frontend with the GIL
         // detached (decision D32).
-        let mut reads: Vec<cubecl::bytes::Bytes> = cubecl::reader::read_sync(
+        let reads: Vec<cubecl::bytes::Bytes> = cubecl::reader::read_sync(
             self.client.read_async(vec![kept, mask]),
         )
         .map_err(|error| super::read_failed("the candidate image and its bitmask", &error))?;
-        let Some(mask_bytes) = reads.pop() else {
-            return Err(DetectError::DeviceRead {
-                expected: mask_len * size_of::<u32>(),
-                actual: 0,
-            });
+        // One buffer per handle, in the order they were asked for; anything else
+        // is the runtime breaking its own contract rather than short data.
+        let Ok([kept_bytes, mask_bytes]) = <[cubecl::bytes::Bytes; 2]>::try_from(reads) else {
+            return Err(super::GpuError::DeviceReadFailed {
+                what: "the corner scan's two buffers",
+            }
+            .into());
         };
-        let Some(kept_bytes) = reads.pop() else {
-            return Err(DetectError::DeviceRead {
-                expected: pixels,
-                actual: 0,
-            });
-        };
-        if kept_bytes.len() != pixels || mask_bytes.len() != mask_len * size_of::<u32>() {
-            return Err(DetectError::DeviceRead {
-                expected: pixels + mask_len * size_of::<u32>(),
-                actual: kept_bytes.len() + mask_bytes.len(),
-            });
+        // Checked one buffer at a time, so a short read says which one was
+        // short: summing the two lengths made that unsayable.
+        for (what, actual, expected) in [
+            ("the candidate image", kept_bytes.len(), pixels),
+            (
+                "the candidate bitmask",
+                mask_bytes.len(),
+                mask_len * size_of::<u32>(),
+            ),
+        ] {
+            if actual != expected {
+                return Err(super::GpuError::ShortRead {
+                    what,
+                    actual,
+                    expected,
+                }
+                .into());
+            }
         }
         self.kept.clear();
         self.kept.extend_from_slice(&kept_bytes);
@@ -325,8 +347,8 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         }
         // `row_start = rows.start.max(margin)`, `row_end = rows.end.min(height -
         // margin)` (`fast.rs:495-498`).
-        let first: usize = y.max(MARGIN);
-        let last: usize = (y + rows).min(self.height.saturating_sub(MARGIN));
+        let first: usize = y.max(FAST_BORDER);
+        let last: usize = (y + rows).min(self.height.saturating_sub(FAST_BORDER));
         let mut corners: Vec<FastCorner> = Vec::new();
         // A threshold at or over 255 admits nothing: the score is a `u8`.
         if let Ok(bound) = u8::try_from(threshold.max(0)) {

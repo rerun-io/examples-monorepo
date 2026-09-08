@@ -76,6 +76,15 @@ use cubecl::prelude::*;
 /// pattern and the reductions stay inside one cube.
 pub const TAP_UNITS: u32 = 64;
 
+/// [`TAP_UNITS`] as the `#[comptime]` length every per-patch shared array is
+/// declared with.
+///
+/// The nine arrays below are indexed by unit, so raising `TAP_UNITS` for a
+/// pattern larger than 52 taps while they stayed at a literal 64 would have
+/// units 64.. writing past every one of them, under `launch_unchecked` and with
+/// no test that would say so. Off one constant, the coupling is the compiler's.
+const TAP_SLOTS: usize = TAP_UNITS as usize;
+
 /// Cube width on the pyramid kernel, the 32x8 tile the CubeCL-versus-CUDA test
 /// settled on.
 pub const TILE_W: u32 = 32;
@@ -487,11 +496,11 @@ fn patch_build_kernel(
         terminate!();
     }
 
-    let mut values = SharedMemory::<f32>::new(64usize);
-    let mut grad_x = SharedMemory::<f32>::new(64usize);
-    let mut grad_y = SharedMemory::<f32>::new(64usize);
-    let mut grad_t = SharedMemory::<f32>::new(64usize);
-    let mut okflag = SharedMemory::<usize>::new(64usize);
+    let mut values = SharedMemory::<f32>::new(TAP_SLOTS);
+    let mut grad_x = SharedMemory::<f32>::new(TAP_SLOTS);
+    let mut grad_y = SharedMemory::<f32>::new(TAP_SLOTS);
+    let mut grad_t = SharedMemory::<f32>::new(TAP_SLOTS);
+    let mut okflag = SharedMemory::<usize>::new(TAP_SLOTS);
     let mut red = SharedMemory::<f32>::new(16usize);
 
     // `const Scalar scale = 1 << level` (`frame_to_frame_optical_flow.h:384`).
@@ -760,11 +769,11 @@ fn klt_kernel(
     let row_stride = taps * capacity;
     let pattern = num_levels * 4usize;
 
-    let mut residual = SharedMemory::<f32>::new(64usize);
-    let mut product_0 = SharedMemory::<f32>::new(64usize);
-    let mut product_1 = SharedMemory::<f32>::new(64usize);
-    let mut product_2 = SharedMemory::<f32>::new(64usize);
-    let mut okflag = SharedMemory::<usize>::new(64usize);
+    let mut residual = SharedMemory::<f32>::new(TAP_SLOTS);
+    let mut product_0 = SharedMemory::<f32>::new(TAP_SLOTS);
+    let mut product_1 = SharedMemory::<f32>::new(TAP_SLOTS);
+    let mut product_2 = SharedMemory::<f32>::new(TAP_SLOTS);
+    let mut okflag = SharedMemory::<usize>::new(TAP_SLOTS);
     // 0..6 the running warp, 6 the tap sum, 7 the in-bounds tap count,
     // 8 the level scale.
     let mut state = SharedMemory::<f32>::new(16usize);
@@ -1218,6 +1227,13 @@ fn probe_kernel<N: Numeric>(src: &Array<N>, dst: &mut Array<N>, count: usize) {
 }
 
 /// Copy `count` elements of type `N` from `src` to `dst`.
+///
+/// The one launcher here that keeps CubeCL's bounds checks — `launch`, not
+/// `launch_unchecked`. It runs once per process, off the per-frame path, and it
+/// is the kernel whose whole job is to prove the runtime is sound: bounds checks
+/// off is the wrong shape for that, and 256 elements cost nothing either way.
+/// The `unsafe` that remains is `ArrayArg::from_raw_parts`, which every launcher
+/// needs to name a handle's element count, not the launch.
 pub(super) fn launch_probe<N: Numeric, R: Runtime>(
     client: &ComputeClient<R>,
     src: (&cubecl::server::Handle, usize),
@@ -1225,7 +1241,7 @@ pub(super) fn launch_probe<N: Numeric, R: Runtime>(
     count: usize,
 ) {
     unsafe {
-        probe_kernel::launch_unchecked::<N, R>(
+        probe_kernel::launch::<N, R>(
             client,
             CubeCount::Static((count as u32).div_ceil(LINEAR_UNITS), 1, 1),
             CubeDim {
@@ -1436,6 +1452,13 @@ fn fast_score_kernel(
     score[slot] = u8::cast_from(max(dark_score, bright_score));
 }
 
+/// Lanes per block of kornia's local-maximum filter, off the CPU detector's own
+/// constant so the kernel and the host cannot disagree about the block
+/// alignment that decides the corner set.
+const FILTER_LANES: usize = crate::frontend::detect::FAST_FILTER_LANES;
+/// The last lane of a block, which has no right-hand neighbour to beat.
+const FILTER_LAST: usize = FILTER_LANES - 1;
+
 /// kornia's in-block local-maximum filter (`fast.rs:539-553`).
 ///
 /// Turned on at `width >= 800`, where dense-corner images emit so many
@@ -1468,13 +1491,13 @@ fn fast_localmax_kernel(
     let value = u32::cast_from(score[slot]);
     let mut survivor = value;
     if use_filter == 1usize && x >= margin && x < filtered_end {
-        let lane = (x - margin) % 16usize;
+        let lane = (x - margin) % FILTER_LANES;
         let mut left: u32 = 0u32;
         if lane != 0usize {
             left = u32::cast_from(score[slot - 1usize]);
         }
         let mut right: u32 = 0u32;
-        if lane != 15usize {
+        if lane != FILTER_LAST {
             right = u32::cast_from(score[slot + 1usize]);
         }
         if value <= left || value <= right {

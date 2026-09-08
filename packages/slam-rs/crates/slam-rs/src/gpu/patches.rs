@@ -14,8 +14,13 @@ use crate::pyramid::Pyramid;
 /// The three sections [`kernels`] documents, in one allocation so the per-patch
 /// kernels need one binding for all of it: `data`, then `H^-1 J^T`, then the
 /// per-level validity flag. Every section has the patch index fast-varying.
+///
+/// Public because a downloaded `store` is a flat `Vec<f32>` and something has
+/// to say where a coefficient sits in it: the tolerance tests read it through
+/// [`GpuPatches::layout`] rather than through one accessor per section on the
+/// shipped type.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct StoreLayout {
+pub struct StoreLayout {
     /// Patch slots, the stride between two taps of one row.
     pub capacity: usize,
     /// Pattern taps.
@@ -31,23 +36,27 @@ impl StoreLayout {
     }
 
     /// Elements in the whole buffer.
-    pub(super) fn len(&self) -> usize {
+    ///
+    /// `elements` rather than `len`: a layout is never empty, so the `len`/
+    /// `is_empty` pair a public `len` implies would be a method that always
+    /// answers `false`.
+    pub fn elements(&self) -> usize {
         // data + three Jacobian rows + one flag per (level, patch)
         4 * self.data_len() + self.num_levels * self.capacity
     }
 
     /// Index of `data[level][tap][patch]`.
-    pub(super) fn data(&self, level: usize, tap: usize, patch: usize) -> usize {
+    pub fn data(&self, level: usize, tap: usize, patch: usize) -> usize {
         (level * self.taps + tap) * self.capacity + patch
     }
 
     /// Index of `h_inv_jt[level][row][tap][patch]`.
-    pub(super) fn jacobian(&self, level: usize, row: usize, tap: usize, patch: usize) -> usize {
+    pub fn jacobian(&self, level: usize, row: usize, tap: usize, patch: usize) -> usize {
         self.data_len() + ((level * 3 + row) * self.taps + tap) * self.capacity + patch
     }
 
     /// Index of `valid[level][patch]`.
-    pub(super) fn valid(&self, level: usize, patch: usize) -> usize {
+    pub fn valid(&self, level: usize, patch: usize) -> usize {
         4 * self.data_len() + level * self.capacity + patch
     }
 }
@@ -153,7 +162,7 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
 
     /// The `store` buffer and its element count.
     pub(super) fn store(&self) -> (&cubecl::server::Handle, usize) {
-        (&self.store, self.layout.len())
+        (&self.store, self.layout.elements())
     }
 
     /// The positions buffer and its element count.
@@ -167,6 +176,20 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
             x: 0,
             y: self.layout.capacity,
             selected: SELECTED_RUN * self.layout.capacity,
+        }
+    }
+
+    /// Where the kernels find the backward pass's guess offsets.
+    ///
+    /// Beside [`GpuPatches::bases`] so the positions buffer's run layout stays
+    /// one module's knowledge: the tracker asks for the offsets rather than
+    /// rebuilding them out of `OFFSET_RUN` and the capacity.
+    pub(super) fn offset_bases(&self) -> PositionBases {
+        let capacity: usize = self.layout.capacity;
+        PositionBases {
+            x: OFFSET_RUN * capacity,
+            y: (OFFSET_RUN + 1) * capacity,
+            selected: SELECTED_RUN * capacity,
         }
     }
 
@@ -305,7 +328,7 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
             .client
             .read_one(self.store.clone())
             .map_err(|error| super::read_failed("the patch store", &error))?;
-        let expected: usize = self.layout.len() * size_of::<f32>();
+        let expected: usize = self.layout.elements() * size_of::<f32>();
         if bytes.len() != expected {
             return Err(TrackerError::LengthMismatch {
                 first_name: "store bytes expected",
@@ -317,27 +340,9 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
         Ok(f32::from_bytes(&bytes).to_vec())
     }
 
-    /// Whether one patch at one level may be tracked, read out of a downloaded
-    /// `store`.
-    pub fn valid_in(&self, store: &[f32], level: usize, patch: usize) -> bool {
-        store[self.layout.valid(level, patch)] != 0.0
-    }
-
-    /// One tap of `data`, read out of a downloaded `store`.
-    pub fn data_in(&self, store: &[f32], level: usize, tap: usize, patch: usize) -> f32 {
-        store[self.layout.data(level, tap, patch)]
-    }
-
-    /// One element of `H^-1 J^T`, read out of a downloaded `store`.
-    pub fn jacobian_in(
-        &self,
-        store: &[f32],
-        level: usize,
-        row: usize,
-        tap: usize,
-        patch: usize,
-    ) -> f32 {
-        store[self.layout.jacobian(level, row, tap, patch)]
+    /// Where each coefficient of a downloaded [`GpuPatches::read_store`] sits.
+    pub fn layout(&self) -> StoreLayout {
+        self.layout
     }
 }
 

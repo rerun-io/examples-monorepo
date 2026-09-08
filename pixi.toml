@@ -2531,13 +2531,28 @@ cuda-cudart-dev = "13.0.*"
 CUDA_PATH = "${CONDA_PREFIX}/targets/x86_64-linux"
 LD_LIBRARY_PATH = "${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
+# `$CORE_CDYLIB`, not a hardcoded `lib_core.so`: the one per-platform token in
+# the build (C106) stays one, so the day the portable lane reaches macOS —
+# where cargo writes `lib_core.dylib` — this task does not silently fail.
+# `inputs`/`outputs` as `slam-rs-build` has them, so a no-op build is a no-op.
 [feature.slam-rs-gpu.tasks.slam-rs-gpu-build]
-cmd = "cargo build --release -p slam-rs-py --features gpu && cp target/release/lib_core.so slam_rs/_core.so"
+cmd = "cargo build --release -p slam-rs-py --features gpu && cp target/release/$CORE_CDYLIB slam_rs/_core.so"
 cwd = "packages/slam-rs"
+inputs = [
+    "packages/slam-rs/Cargo.toml",
+    "packages/slam-rs/Cargo.lock",
+    "packages/slam-rs/.cargo/config.toml",
+    "packages/slam-rs/crates/*/Cargo.toml",
+    "packages/slam-rs/crates/*/build.rs",
+    "packages/slam-rs/crates/*/src/**/*.rs",
+]
+outputs = ["packages/slam-rs/slam_rs/_core.so"]
+description = "Build the Rust VIO core with the CUDA CubeCL frontend and install it in place"
 
 [feature.slam-rs-gpu.tasks.slam-rs-gpu-test]
 cmd = "cargo test --workspace --features slam-rs/gpu"
 cwd = "packages/slam-rs"
+description = "Run every Rust test with the CUDA CubeCL frontend, including the per-kernel tolerance suite"
 
 # Clippy plus `cargo doc`: nine intra-doc links in `src/gpu/` had rotted with
 # nothing to notice, because a broken link is a `cargo doc` warning and no gate
@@ -2545,22 +2560,35 @@ cwd = "packages/slam-rs"
 [feature.slam-rs-gpu.tasks.slam-rs-gpu-clippy]
 cmd = "cargo clippy --workspace --all-targets --features slam-rs/gpu -- -D warnings && RUSTDOCFLAGS='-D rustdoc::broken_intra_doc_links' cargo doc -p slam-rs --features gpu --no-deps"
 cwd = "packages/slam-rs"
+description = "Lint the CUDA CubeCL lane and check the seam's intra-doc links"
 
 # The portable lane the Spark, the Pi 5 and the cap will run. Kept honest here
 # so a kernel that only compiles on NVRTC cannot land.
 [feature.slam-rs-gpu.tasks.slam-rs-wgpu-check]
 cmd = "cargo check -p slam-rs --features gpu-wgpu"
 cwd = "packages/slam-rs"
+description = "Type-check the portable wgpu lane (a green check proves nothing at runtime: see slam-rs-wgpu-test)"
 
 [feature.slam-rs-gpu.tasks.slam-rs-wgpu-test]
 cmd = "cargo test -p slam-rs --features gpu-wgpu --test gpu_kernels"
 cwd = "packages/slam-rs"
+description = "Run the per-kernel tolerance suite through wgpu on this host's Vulkan adapter"
 
 # The same core on the portable lane, for measuring it: `--gpu` then selects
 # wgpu rather than CUDA, because the runtime is what the feature picks.
 [feature.slam-rs-gpu.tasks.slam-rs-wgpu-build]
-cmd = "cargo build --release -p slam-rs-py --features gpu-wgpu && cp target/release/lib_core.so slam_rs/_core.so"
+cmd = "cargo build --release -p slam-rs-py --features gpu-wgpu && cp target/release/$CORE_CDYLIB slam_rs/_core.so"
 cwd = "packages/slam-rs"
+inputs = [
+    "packages/slam-rs/Cargo.toml",
+    "packages/slam-rs/Cargo.lock",
+    "packages/slam-rs/.cargo/config.toml",
+    "packages/slam-rs/crates/*/Cargo.toml",
+    "packages/slam-rs/crates/*/build.rs",
+    "packages/slam-rs/crates/*/src/**/*.rs",
+]
+outputs = ["packages/slam-rs/slam_rs/_core.so"]
+description = "Build the Rust VIO core with the portable wgpu CubeCL frontend and install it in place"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # mamma — streaming multiview body capture (causal MAMMA pipeline)

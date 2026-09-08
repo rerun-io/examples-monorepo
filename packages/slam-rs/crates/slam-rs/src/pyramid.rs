@@ -67,7 +67,7 @@ const KERNEL: [i32; 5] = [1, 4, 6, 4, 1];
 /// `image_pyr.h:110` reaches two rows above the first output row without a
 /// bounds check; in C++ that is out-of-range for a two-row image. The port
 /// refuses the geometry at construction instead (decision D32).
-const MIN_SIDE: usize = 3;
+pub(crate) const MIN_SIDE: usize = 3;
 
 /// The stage seam: build every level of one camera's pyramid in one call.
 ///

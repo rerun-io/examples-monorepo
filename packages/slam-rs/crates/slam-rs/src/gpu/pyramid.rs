@@ -6,7 +6,7 @@ use cubecl::prelude::*;
 
 use super::kernels;
 use crate::image::ImageU16;
-use crate::pyramid::{Pyramid, PyramidError};
+use crate::pyramid::{MIN_SIDE, Pyramid, PyramidError};
 
 /// Where one camera's level 0 sits on the device, for the stage that reads the
 /// same pixels.
@@ -22,11 +22,11 @@ use crate::pyramid::{Pyramid, PyramidError};
 /// pyramid afterwards.
 #[derive(Debug, Clone)]
 pub struct Level0 {
-    /// The buffer level 0 lives in: the whole `even` allocation, level 0 at
-    /// offset zero with a stride equal to its width.
+    /// The upload buffer, which is the frame and nothing else: since the upload
+    /// became exactly as long as the frame (round 2, step 1b) this is `width *
+    /// height` `u16` with a stride equal to the width, and a device copy is
+    /// what puts the same pixels at the front of the pyramid's even allocation.
     pub(super) handle: cubecl::server::Handle,
-    /// Elements of that buffer, which is longer than level 0 alone.
-    pub(super) len: usize,
     /// Level 0's width, checked against the frame the scanner was handed.
     pub(super) width: usize,
     /// Level 0's height, checked the same way.
@@ -84,7 +84,8 @@ impl<R: Runtime> GpuPyramid<R> {
     /// # Errors
     ///
     /// [`PyramidError::TooSmall`] when a level would be under the 5-tap
-    /// kernel's reach, as the CPU pyramid refuses it.
+    /// kernel's reach, as the CPU pyramid refuses it, and for `num_levels == 0`,
+    /// which the CPU pyramid accepts and this one cannot allocate.
     fn new(
         client: ComputeClient<R>,
         width: usize,
@@ -92,8 +93,23 @@ impl<R: Runtime> GpuPyramid<R> {
         num_levels: usize,
         pattern: &[[f32; 2]],
     ) -> Result<Self, PyramidError> {
+        // A pyramid of level 0 alone leaves the odd buffer with no level in it,
+        // and `client.empty(0)` is a zero-sized allocation wgpu rejects at
+        // validation — on cubecl's worker thread, so the launch would report
+        // success and every read come back as zeros. Refused here rather than
+        // discovered there; the CPU pyramid accepts it because nothing it
+        // allocates can be empty.
+        if num_levels == 0 {
+            return Err(PyramidError::TooSmall {
+                width,
+                height,
+                num_levels,
+            });
+        }
         for level in 0..num_levels {
-            if (width >> level) < 3 || (height >> level) < 3 {
+            // The same refusal `PyramidU16::with_capacity` makes, off the same
+            // constant, so the two lanes cannot drift on what geometry is legal.
+            if (width >> level) < MIN_SIDE || (height >> level) < MIN_SIDE {
                 return Err(PyramidError::TooSmall {
                     width,
                     height,
@@ -292,7 +308,6 @@ impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
             }
             table[camera] = Some(Level0 {
                 handle: upload,
-                len: pixels,
                 width: level0.width,
                 height: level0.height,
             });

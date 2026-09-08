@@ -6,13 +6,17 @@
 //! detector's threshold ladder, and it is checked here against kornia itself at
 //! five rungs and two widths, so a kornia bump that moved the candidate set
 //! would fail before any GPU test ran.
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kornia_image::{Image, ImageSize};
 use kornia_imgproc::features::{FastCorner, Rect as KorniaRect, fast_detect_rect_u8};
+use slam_rs::frontend::detect::{
+    FAST_BORDER, FAST_FILTER_LANES, FAST_RING_COLUMN, FAST_RING_ROW, block_filter_end,
+};
 
-const RP: [i32; 16] = [0, 1, 2, 3, 3, 3, 2, 1, 0, -1, -2, -3, -3, -3, -2, -1];
-const CP: [i32; 16] = [3, 3, 2, 1, 0, -1, -2, -3, -3, -3, -2, -1, 0, 1, 2, 3];
+mod common;
+
+use common::cornered_bytes;
 
 /// `corner_score_9_scalar` (`kornia fast.rs:838`).
 fn corner_score_9(gray: &[u8], width: usize, x: usize, y: usize) -> u8 {
@@ -20,7 +24,10 @@ fn corner_score_9(gray: &[u8], width: usize, x: usize, y: usize) -> u8 {
     let mut dark = [0i32; 16];
     let mut bright = [0i32; 16];
     for k in 0..16 {
-        let p = i32::from(gray[(y as i32 + RP[k]) as usize * width + (x as i32 + CP[k]) as usize]);
+        let p = i32::from(
+            gray[(y as i32 + FAST_RING_ROW[k]) as usize * width
+                + (x as i32 + FAST_RING_COLUMN[k]) as usize],
+        );
         dark[k] = (center - p).max(0);
         bright[k] = (p - center).max(0);
     }
@@ -45,32 +52,20 @@ fn corner_score_9(gray: &[u8], width: usize, x: usize, y: usize) -> u8 {
     dark_score.max(bright_score) as u8
 }
 
-fn textured(width: usize, height: usize) -> Vec<u8> {
-    let mut out = vec![0u8; width * height];
-    let mut state: u32 = 0x1234_5678;
-    for y in 0..height {
-        for x in 0..width {
-            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            let wave = ((x as f64 / 11.0).sin() * 60.0 + (y as f64 / 7.0).cos() * 50.0) as i32;
-            let noise = ((state >> 24) as i32) / 4;
-            out[y * width + x] = (128 + wave + noise).clamp(0, 255) as u8;
-        }
-    }
-    out
-}
-
 #[test]
 fn the_model_reproduces_kornia() {
     for width in [960usize, 512] {
         let height = 240usize;
-        let bytes = textured(width, height);
+        // The same field the GPU corner tests run, so the two say the same
+        // thing about the same pixels.
+        let bytes = cornered_bytes(width, height);
         let gray: Image<u8, 1> =
             Image::from_size_slice(ImageSize { width, height }, &bytes).unwrap();
-        let margin = 3usize;
+        let margin = FAST_BORDER;
         let col_end = width - margin;
-        let use_filter = width >= 800;
-        let blocks = (col_end - margin) / 16;
-        let filtered_end = margin + blocks * 16;
+        // kornia's block alignment and its unfiltered tail, from the one place
+        // the port keeps them: the GPU kernel is launched off the same call.
+        let (filtered_end, use_filter) = block_filter_end(width);
 
         let mut scores = vec![0u8; width * height];
         for y in margin..height - margin {
@@ -88,13 +83,13 @@ fn the_model_reproduces_kornia() {
                         continue;
                     }
                     let keep = if use_filter && x < filtered_end {
-                        let lane = (x - margin) % 16;
+                        let lane = (x - margin) % FAST_FILTER_LANES;
                         let left = if lane == 0 {
                             0
                         } else {
                             scores[y * width + x - 1]
                         };
-                        let right = if lane == 15 {
+                        let right = if lane == FAST_FILTER_LANES - 1 {
                             0
                         } else {
                             scores[y * width + x + 1]
