@@ -188,6 +188,11 @@ class Vio:
         message left on stderr, which is the only account of a case the probe did
         not know to ask about.
 
+        ``threads`` is **inert on the GPU lane**: only the CPU patch tracker
+        reads it and the GPU tracker holds no work pool. It is accepted rather
+        than refused alongside ``gpu=True`` so one call site can select either
+        lane.
+
         Raises ``ValueError`` on everything :class:`OpticalFlow` refuses, and on
         a config asking for a path this port does not have:
         ``vio_linearization_type`` other than ``ABS_QR``, ``vio_sqrt_marg``
