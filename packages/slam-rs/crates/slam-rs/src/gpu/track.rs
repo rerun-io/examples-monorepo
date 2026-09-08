@@ -25,6 +25,10 @@ const TRANSFORM_RUNS: usize = 7;
 /// back to the host in between — the backward pass reads the forward result
 /// where it lies — so the only download is the packed result, seven `f32` per
 /// keypoint.
+///
+/// The buffers a call needs are allocated once at construction and reused; the
+/// one exception is the forward pass's inputs, which arrive from the host and so
+/// must be a fresh `create_from_slice` every call.
 pub struct GpuPatchTracker<P: Pattern, R: Runtime> {
     client: ComputeClient<R>,
     capacity: usize,
@@ -33,8 +37,6 @@ pub struct GpuPatchTracker<P: Pattern, R: Runtime> {
     max_recovered_dist2: f32,
     /// Backward source patches, built from `next` at the forward result.
     backward_patches: GpuPatches<P, R>,
-    /// The forward pass's inputs, then its results in place.
-    forward: cubecl::server::Handle,
     /// The backward pass's inputs, then its results in place.
     backward: cubecl::server::Handle,
     /// The combined result the host downloads.
@@ -70,7 +72,6 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
             max_iterations,
             max_recovered_dist2,
             backward_patches,
-            forward: client.empty(transform_bytes),
             backward: client.empty(transform_bytes),
             result: client.empty(transform_bytes),
             staging: vec![0.0; TRANSFORM_RUNS * capacity],
@@ -153,7 +154,16 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
             }
         }
         self.staging[6 * count..TRANSFORM_RUNS * count].fill(0.0);
-        self.forward = self
+        // A local, not a field beside `backward` and `result`. Those two are
+        // `client.empty` once at construction and reused; this one is a
+        // host-to-device write, and `create_from_slice` is the only one CubeCL
+        // 0.10 has, so a fresh buffer is allocated on every call whatever holds
+        // it — and as a field it also meant one allocation at construction that
+        // no path ever read (the first call replaced it, and a `count == 0` call
+        // returns before touching it). Measured: this form costs about 0.05 ms
+        // of the lane's 5.9 and an `Option` field about 0.14, both inside this
+        // host's drift and above its 0.02 ms pair-to-pair floor.
+        let forward: cubecl::server::Handle = self
             .client
             .create_from_slice(f32::as_bytes(&self.staging[..TRANSFORM_RUNS * count]));
 
@@ -172,7 +182,7 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
         // `shape.count` is `patches.len()`, which the guard above proved equal
         // to `count`.
         let shape = patches.shape();
-        let forward_view = (&self.forward, TRANSFORM_RUNS * count);
+        let forward_view = (&forward, TRANSFORM_RUNS * count);
 
         // ── forward: `trackPoint(pyr_1, pyr_2, transform_1, transform_2)` (`:349`).
         kernels::launch_klt::<R>(
