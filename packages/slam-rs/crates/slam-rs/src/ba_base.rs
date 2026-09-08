@@ -393,8 +393,8 @@ fn jacobi_svd_4x4_full_v<S: LieScalar>(a: &Matrix4<S>) -> Option<(Vector4<S>, Ma
 /// A Jacobi rotation `(c, s)`, `Eigen::JacobiRotation`
 /// (`Eigen/src/Jacobi/Jacobi.h:30-84`), real scalars only.
 ///
-/// Shared with the linearization stage, whose landmark damping stores six of
-/// them to undo (`landmark_block_abs_dynamic.hpp:533`); `makeGivens` lives in
+/// Shared with the linearization stage, whose Givens QR path rotates with them
+/// (`landmark_block_abs_dynamic.hpp:429-439`); `makeGivens` lives in
 /// [`crate::linearize`] next to its only caller.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct JacobiRotation<S: LieScalar> {
@@ -943,14 +943,12 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
     /// for block (`:379-388`); the port returns
     /// [`crate::linearize::LinearizeError::MargOrderMismatch`] through the
     /// caller.
-    /// The prior's own shape: `H` as wide as its ordering, `b` as long as `H`
-    /// is tall, and — in the squared form, where `H` is a Hessian rather than a
-    /// Jacobian — square.
+    /// The prior's own shape: `H` as wide as its ordering and `b` as long as
+    /// `H` is tall.
     ///
     /// C++ asserts only the width (`ba_base.cpp:379`, `:444`) and indexes the
-    /// rest; a prior with an empty `b` reaches `mld.b[k]` and a squared prior
-    /// that is not square reaches `mld.H(i, j)` past its end. Neither may be a
-    /// panic here (decision D32).
+    /// rest; a prior with an empty `b` reaches `mld.b[k]` past its end, which
+    /// may not be a panic here (decision D32).
     fn check_marg_prior_shape(mld: &MargLinData<S>) -> Result<(), BaError> {
         let marg_size: usize = mld.order.total_size();
         if mld.h.ncols() != marg_size {
@@ -1805,8 +1803,8 @@ mod tests {
     /// the algebra written out in `ba_base.cpp:390-419`.
     ///
     /// The prior is a quadratic in the drift since its own linearization point,
-    /// so all three have to use the same `delta`, and the square-root form has
-    /// to square `H` where the squared form does not.
+    /// so all three have to use the same `delta`, and each squares `J_m` on its
+    /// own way to a Hessian.
     #[test]
     fn the_marginalization_prior_helpers_agree() {
         let mut rng: u64 = 0x9e37_79b9_7f4a_7c15;

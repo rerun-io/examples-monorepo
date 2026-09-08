@@ -124,14 +124,6 @@ pub enum MargError {
         /// Rows of the vector.
         rhs: usize,
     },
-    /// A squared form was handed a non-square `H`.
-    #[error("the squared system is {rows}x{cols}, which is not square")]
-    NotSquare {
-        /// Rows of `H`.
-        rows: usize,
-        /// Columns of `H`.
-        cols: usize,
-    },
     /// The prior's ordering disagrees with the window's, which C++ asserts
     /// block by block (`sqrt_keypoint_vio.cpp:736`, `:758-759`).
     #[error("the marginalization prior's ordering does not match the window at frame {frame_id}")]
@@ -176,24 +168,6 @@ pub enum MargError {
         frame_id: FrameId,
         /// Its block size.
         size: usize,
-    },
-    /// The nullspace check was handed a prior with no blocks, where C++ divides
-    /// by `num_trans == 0` (`sqrt_ba_base.cpp:96`). [`check_eigenvalues`]
-    /// answers that same prior with the empty spectrum instead, because it
-    /// never reads the ordering at all.
-    #[error("the prior's ordering is empty")]
-    EmptyPriorOrder,
-    /// The control direction handed to [`check_marg_nullspace`] is not as long
-    /// as the prior's ordering. C++ builds it with `inc_random.setRandom()`
-    /// (`sqrt_ba_base.cpp:158`), so the length cannot be wrong there; the port
-    /// takes it as a parameter to keep the diagnostic reproducible, and then
-    /// has to check it.
-    #[error("the nullspace probe direction is {actual} long, not {expected}")]
-    ProbeLengthMismatch {
-        /// Rows the prior's ordering covers.
-        expected: usize,
-        /// Rows the probe has.
-        actual: usize,
     },
     /// A schedule set names a frame the marginalization ordering does not hold
     /// as the kind of block that set is about — a pose block for
