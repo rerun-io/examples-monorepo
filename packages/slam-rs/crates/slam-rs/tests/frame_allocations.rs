@@ -287,11 +287,13 @@ fn copying_the_warp_arrays_costs_nothing_once_warm() {
 /// those allocations is kornia's, not the port's: `fast_detect_rect_u8` returns a
 /// fresh `Vec<FastCorner>` (`features/cells.rs:141`) and the row kernel it calls
 /// allocates one `Vec` **per image row** of the region
-/// (`features/fast.rs:465`, the `row_cap` buffer). The detector runs that once
-/// per grid cell per rung of the threshold ladder, over two detection passes, so
-/// the count is `cells x rungs x rows-per-cell x passes` and depends on how many
-/// cells fall all the way down the ladder — which is why a *textured* frame here
-/// costs a few hundred and the flat frame in the next test costs a few thousand.
+/// (`features/fast.rs:465`, the `row_cap` buffer). The detector scans one
+/// whole-width band per **cell row** per rung of the threshold ladder — every
+/// cell of a grid row filters its own columns out of the same band, see `Band`
+/// in `frontend::detect` — over two detection passes, so the count is
+/// `cell rows x rungs x rows-per-band x passes` and depends on how many rows
+/// fall all the way down the ladder, which is why a *textured* frame here costs
+/// a few hundred and the flat frame in the next test costs a few thousand.
 ///
 /// The next test is the attribution: a frame that finds **no keypoints at all**
 /// costs more than a textured one, so nothing on the port's own per-frame path —
@@ -317,14 +319,15 @@ fn a_steady_state_frame_reports_its_allocation_count() {
     }
 
     let grid = flow.occupancy_grid();
-    let cells: usize = ((grid.x_stop - grid.x_start) / grid.cell + 1)
-        * ((grid.y_stop - grid.y_start) / grid.cell + 1);
+    // One band per cell row, not one scan per cell: the columns are filtered
+    // out of a scan the whole grid row shares.
+    let rows: usize = (grid.y_stop - grid.y_start) / grid.cell + 1;
     // 40, 20, 10, 5.
     let ladder: usize = 4;
-    // One `Vec` per row of the cell's inner region, plus the returned one, each
-    // allocated and freed, over two detection passes.
-    let rows_per_cell: usize = grid.cell - 6;
-    let bound: usize = cells * ladder * (rows_per_cell + 1) * 2 * 2 + 512;
+    // One `Vec` per row of the band, which spans the cell's inner region, plus
+    // the returned one, each allocated and freed, over two detection passes.
+    let rows_per_band: usize = grid.cell - 2 * 3;
+    let bound: usize = rows * ladder * (rows_per_band + 1) * 2 * 2 + 512;
 
     let mut counts: Vec<usize> = Vec::new();
     for (step, images) in frames.iter().enumerate().skip(3) {
@@ -339,7 +342,7 @@ fn a_steady_state_frame_reports_its_allocation_count() {
     assert!(
         counts.iter().all(|count| *count <= bound),
         "a steady-state frame reached the allocator {counts:?} times, over the \
-         structural bound of {bound} for {cells} cells"
+         structural bound of {bound} for {rows} cell rows"
     );
 }
 
