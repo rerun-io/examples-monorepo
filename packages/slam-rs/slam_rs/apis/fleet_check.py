@@ -36,21 +36,31 @@ class Machine:
     """What the machine calls itself."""
     arch: str
     """``platform.machine()``: the port is built for ``x86_64`` and ``aarch64``."""
-    glibc: str
+    libc: str
     """The C library the compiled core is linked against, which is what limits where a pack can go."""
     cores: int
     """Cores visible to the process; the estimator runs single-threaded, the decode does not."""
 
 
+def this_libc() -> str:
+    """The C library this machine offers, in the terms that decide where a compiled core can travel.
+
+    ``CS_GNU_LIBC_VERSION`` is a glibc name and macOS raises ``ValueError`` on
+    it rather than returning ``None``, so it has to be looked up before it is
+    asked for. Where there is no glibc the answer is the macOS release, because
+    that is what the extension binds ``libSystem`` from.
+    """
+    if "CS_GNU_LIBC_VERSION" in os.confstr_names:
+        version: str | None = os.confstr("CS_GNU_LIBC_VERSION")
+        if version is not None:
+            return version.removeprefix("glibc ")
+    macos: str = platform.mac_ver()[0]
+    return f"libSystem, macOS {macos}" if macos else "unknown"
+
+
 def this_machine() -> Machine:
     """What this host is, as a row names it."""
-    glibc: str | None = os.confstr("CS_GNU_LIBC_VERSION")
-    return Machine(
-        hostname=platform.node(),
-        arch=platform.machine(),
-        glibc="unknown" if glibc is None else glibc.removeprefix("glibc "),
-        cores=os.cpu_count() or 0,
-    )
+    return Machine(hostname=platform.node(), arch=platform.machine(), libc=this_libc(), cores=os.cpu_count() or 0)
 
 
 @dataclass(slots=True, frozen=True)
@@ -111,7 +121,7 @@ class ClipResult:
     def row(self, machine: Machine) -> str:
         """This clip as one row of the fleet table, the machine it ran on first."""
         return (
-            f"| {machine.hostname} | {machine.arch} | {machine.glibc} | {machine.cores} | {self.segment_id} "
+            f"| {machine.hostname} | {machine.arch} | {machine.libc} | {machine.cores} | {self.segment_id} "
             f"| {self.framesets}/{self.tracked}/{self.lost} | {self.cpp_rmse_cm:.2f} "
             f"| {self.gt_rmse_cm:.2f} (allowed {self.gt_allowed_cm:.2f}) | {self.verdict} "
             f"| {self.wall_s:.2f} | {self.cpp_wall_ratio:.2f}x | {self.peak_rss_mb:.0f} |"
@@ -174,7 +184,7 @@ def main(config: Config) -> None:
     """
     manifest: ReferenceManifest = load_manifest(config.manifest)
     machine: Machine = this_machine()
-    print(f"{machine.hostname}: {machine.arch}, glibc {machine.glibc}, {machine.cores} cores")
+    print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores")
     results: list[ClipResult] = []
     for segment_id in config.segments:
         results.append(measure(manifest, manifest.by_id(segment_id)))

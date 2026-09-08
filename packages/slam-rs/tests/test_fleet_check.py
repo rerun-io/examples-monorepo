@@ -5,9 +5,14 @@ and — on the pack target — no pixi, so what is under test here is the part t
 needs none of that: the verdict a clip's numbers earn, and how the row reads.
 """
 
-from slam_rs.apis.fleet_check import ClipResult, Machine
+import os
+import platform
 
-MACHINE: Machine = Machine(hostname="pablo-rpi", arch="aarch64", glibc="2.36", cores=4)
+import pytest
+
+from slam_rs.apis.fleet_check import ClipResult, Machine, this_libc
+
+MACHINE: Machine = Machine(hostname="pablo-rpi", arch="aarch64", libc="2.36", cores=4)
 """A four-core Pi, which is the smallest machine that runs a full install."""
 PASSING: ClipResult = ClipResult(
     segment_id="msd-index__MIO_others__MIO10_short_2_panorama",
@@ -65,3 +70,17 @@ def test_the_row_carries_the_machine_beside_the_numbers() -> None:
     assert cells[9] == "30.00"
     assert cells[10] == "3.91x"
     assert cells[11] == "512"
+
+
+def test_a_machine_without_glibc_still_names_its_c_library(monkeypatch: pytest.MonkeyPatch) -> None:
+    """macOS has no ``CS_GNU_LIBC_VERSION`` and raises on the name, so the row says ``libSystem``.
+
+    The row's third cell is what limits where a compiled core can be carried,
+    which on Linux is the glibc version and on macOS is the system release the
+    extension binds ``libSystem`` from. Asking for the glibc name on a Mac is a
+    ``ValueError``, not a ``None``, so the name has to be looked up before it is
+    asked for.
+    """
+    monkeypatch.setattr(os, "confstr_names", {})
+    monkeypatch.setattr(platform, "mac_ver", lambda: ("26.5.1", ("", "", ""), "arm64"))
+    assert this_libc() == "libSystem, macOS 26.5.1"
