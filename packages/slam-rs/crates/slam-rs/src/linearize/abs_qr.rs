@@ -166,14 +166,18 @@ impl<S: LieScalar> DensePartial<S> {
         }
     }
 
-    /// Record that `columns` are about to be written, keeping the list ascending.
+    /// Record that `columns` have been written, keeping the list ascending.
+    ///
+    /// Every column is in range, so this indexes rather than absorbing an
+    /// out-of-range one (decision D32): [`Self::accumulate`] marks only a block
+    /// [`LandmarkBlock::add_dense_h_b`] has accepted, whose check is
+    /// `padding_idx <= h.ncols()`, and a block's `active_cols` are clamped to
+    /// its `padding_idx`; [`Self::join`] marks a partial of the same ordering.
     fn mark(&mut self, columns: &[usize]) {
         let mut added: bool = false;
         for &column in columns {
-            if let Some(slot) = self.written.get_mut(column) {
-                added |= !*slot;
-                *slot = true;
-            }
+            added |= !self.written[column];
+            self.written[column] = true;
         }
         if added {
             self.columns.clear();
@@ -192,6 +196,24 @@ impl<S: LieScalar> DensePartial<S> {
         }
         self.columns.clear();
         self.written.fill(false);
+    }
+
+    /// Add one landmark block's `(H, b)` and record the columns it wrote.
+    ///
+    /// The two halves belong together: [`Self::mark`] records what a join and a
+    /// reset will touch and [`LandmarkBlock::add_dense_h_b`] is what writes it,
+    /// so a drift between them would leave coefficients no join adds and no
+    /// reset clears — a silently wrong reduction that no test would catch.
+    /// Marking **after** the add is what makes every column in range: the add is
+    /// the check on the block's layout.
+    fn accumulate(
+        &mut self,
+        block: &LandmarkBlock<S>,
+        scratch: &mut DenseHbScratch<S>,
+    ) -> Result<(), LinearizeError> {
+        block.add_dense_h_b(&mut self.h, &mut self.b, scratch)?;
+        self.mark(block.active_cols());
+        Ok(())
     }
 
     /// `H_ += b.H_; b_ += b.b_` (`:532-535`), over the right side's columns.
@@ -660,8 +682,7 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             &mut |i: usize, acc: &mut DensePartial<S>| {
                 let block: &LandmarkBlock<S> =
                     blocks.get(i).ok_or(LinearizeError::LayoutOverflow)?;
-                acc.mark(block.active_cols());
-                block.add_dense_h_b(&mut acc.h, &mut acc.b, &mut leaf_scratch)
+                acc.accumulate(block, &mut leaf_scratch)
             },
             &DensePartial::join,
         )?;

@@ -3,8 +3,10 @@
 //! Ported from `thirdparty/basalt-headers/include/basalt/image/image_pyr.h`.
 //! `subsample` (`image_pyr.h:99-140`) is reproduced operation for operation:
 //! a separable 5-tap `[1, 4, 6, 4, 1]` Gaussian with BORDER_REFLECT_101
-//! extrapolation, integer accumulation in a transposed `i32` scratch buffer,
-//! and one rounding at the very end, `(val + (1 << 7)) >> 8` (`image_pyr.h:135`).
+//! extrapolation, integer accumulation in an `i32` scratch buffer laid out
+//! row-major over `dst_height` x `src_width` — which reproduces C++'s
+//! transposed *arithmetic*, not its layout, see [`subsample`] — and one
+//! rounding at the very end, `(val + (1 << 7)) >> 8` (`image_pyr.h:135`).
 //! Every level of a 960x960 frame must match the C++ byte for byte; the fixture
 //! test at the bottom of this file checks exactly that against dumps produced
 //! by the fork.
@@ -314,10 +316,7 @@ impl PyramidBuilder for CpuPyramidBuilder {
         // because the source may be strided and the level never is.
         let target: &mut ImageU16 = &mut out.levels[0];
         for y in 0..img.height() {
-            let width: usize = img.width();
-            let source: &[u16] = &img.data()[y * img.stride()..y * img.stride() + width];
-            let stride: usize = target.stride();
-            target.data_mut()[y * stride..y * stride + width].copy_from_slice(source);
+            target.row_mut(y).copy_from_slice(img.row(y));
         }
 
         // `for (i = 0; i < num_levels; i++) subsample(lvl(i), lvl_internal(i + 1))`.
@@ -336,9 +335,10 @@ impl PyramidBuilder for CpuPyramidBuilder {
 /// Scratch elements `subsample` needs at level 0, which is its largest use.
 ///
 /// `ManagedImage<int> tmp(img_sub.h, img.w)` (`image_pyr.h:105`) is
-/// `img.w * (img.h / 2)` integers, transposed. A saturating product would turn
-/// an impossible geometry into a `vec!` that aborts the process, so the
-/// overflow and the `isize::MAX`-byte allocation cap are both typed errors.
+/// `img.w * (img.h / 2)` integers whichever way they are laid out; [`subsample`]
+/// holds them row-major over `dst_height` x `src_width`. A saturating product
+/// would turn an impossible geometry into a `vec!` that aborts the process, so
+/// the overflow and the `isize::MAX`-byte allocation cap are both typed errors.
 fn scratch_len(width: usize, height: usize) -> Result<usize, PyramidError> {
     let len: usize = width
         .checked_mul(height >> 1)
@@ -427,24 +427,42 @@ fn subsample(src: &ImageU16, dst: &mut ImageU16, scratch: &mut [i32]) {
     // Horizontal convolution, `image_pyr.h:123-139`. `tmp.h` is `src_width`, so
     // the reflection is about the **source** width whichever way `tmp` is laid
     // out.
-    let dst_stride: usize = dst.stride();
     for r in 0..dst_height {
         let band: &[i32] = &scratch[r * src_width..(r + 1) * src_width];
-        let out: &mut [u16] = &mut dst.data_mut()[r * dst_stride..r * dst_stride + dst_width];
-        for (c, pixel) in out.iter_mut().enumerate() {
-            let col2: i64 = 2 * c as i64;
-            let columns: [usize; 5] = [
-                (col2 - 2).unsigned_abs() as usize,
-                (col2 - 1).unsigned_abs() as usize,
-                col2 as usize,
-                border101(col2 + 1, src_width as i64) as usize,
-                border101(col2 + 2, src_width as i64) as usize,
-            ];
-            let value: i32 = KERNEL[0] * band[columns[0]]
-                + KERNEL[1] * band[columns[1]]
-                + KERNEL[2] * band[columns[2]]
-                + KERNEL[3] * band[columns[3]]
-                + KERNEL[4] * band[columns[4]];
+        for (c, pixel) in dst.row_mut(r).iter_mut().enumerate() {
+            // An interior column's five taps are the contiguous window
+            // `band[2c - 2 ..= 2c + 2]`. The reflection only bites at `c == 0`,
+            // where C++ takes `abs` of a negative index, and at the last column
+            // or two, where `2c + 2` runs past `src_width - 1`; peeling those
+            // out keeps the two `border101` calls and their four casts off the
+            // 230,400 interior columns of a level-0 pass.
+            let value: i32 = match (2 * c)
+                .checked_sub(2)
+                .and_then(|first| band.get(first..)?.first_chunk::<5>())
+            {
+                Some(window) => {
+                    KERNEL[0] * window[0]
+                        + KERNEL[1] * window[1]
+                        + KERNEL[2] * window[2]
+                        + KERNEL[3] * window[3]
+                        + KERNEL[4] * window[4]
+                }
+                None => {
+                    let col2: i64 = 2 * c as i64;
+                    let columns: [usize; 5] = [
+                        (col2 - 2).unsigned_abs() as usize,
+                        (col2 - 1).unsigned_abs() as usize,
+                        col2 as usize,
+                        border101(col2 + 1, src_width as i64) as usize,
+                        border101(col2 + 2, src_width as i64) as usize,
+                    ];
+                    KERNEL[0] * band[columns[0]]
+                        + KERNEL[1] * band[columns[1]]
+                        + KERNEL[2] * band[columns[2]]
+                        + KERNEL[3] * band[columns[3]]
+                        + KERNEL[4] * band[columns[4]]
+                }
+            };
             // `T val = ((val_int + (1 << 7)) >> 8)` (`image_pyr.h:135`). The
             // accumulator peaks at 65535 * 16 * 16, so the shift lands back in
             // `u16` exactly and the cast never truncates.
@@ -478,7 +496,7 @@ mod tests {
 
     /// A direct 5x5 convolution with true reflect-101 borders and basalt's
     /// single rounding. Independent of [`subsample`]: no separability, no
-    /// transposed accumulator, no `abs`/`border101` split.
+    /// accumulator, no `abs`/`border101` split.
     fn subsample_naive(src: &ImageU16) -> ImageU16 {
         let width: usize = src.width() >> 1;
         let height: usize = src.height() >> 1;
@@ -888,9 +906,9 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(24))]
 
-        /// The separable, transposed, `abs`/`border101` implementation and a
-        /// direct 5x5 convolution with true reflect-101 borders agree bit for
-        /// bit, on even and odd sizes alike.
+        /// The separable, `abs`/`border101` implementation with its
+        /// row-major accumulator and a direct 5x5 convolution with true
+        /// reflect-101 borders agree bit for bit, on even and odd sizes alike.
         #[test]
         fn subsample_matches_a_naive_5x5_convolution(
             width in 3usize..40,

@@ -246,6 +246,16 @@ impl ImageU16 {
         &self.data[y * self.stride..y * self.stride + self.width]
     }
 
+    /// One row, `width` pixels long, mutably.
+    ///
+    /// # Panics
+    ///
+    /// If `y >= height`. Callers on the frontend path index rows they have
+    /// already bounds-checked; this is the checked accessor for everyone else.
+    pub fn row_mut(&mut self, y: usize) -> &mut [u16] {
+        &mut self.data[y * self.stride..y * self.stride + self.width]
+    }
+
     /// The pixel at `(x, y)`, or `None` outside the image.
     pub fn get(&self, x: usize, y: usize) -> Option<u16> {
         if x < self.width && y < self.height {

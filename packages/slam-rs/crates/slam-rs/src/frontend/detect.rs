@@ -13,12 +13,18 @@
 //! with ceil-division cells while basalt centres the grid and stops one cell
 //! early. Rather than accept different cell boundaries, this wrapper keeps
 //! basalt's geometry and calls kornia's **rectangle** entry point
-//! [`fast_detect_rect_u8`] once per cell (`cells.rs:141`), which is the layer the
-//! inventory recommends for "basalt-style consumers that already own a grid
-//! walker" (`cells.rs:20-22`). The rectangle is shrunk by the FAST ring radius on
-//! every side, because `cv::FAST` on a `PATCH_SIZE`-square sub-image detects only
-//! at sub-coordinates `[3, PATCH_SIZE - 3)`; a rectangle over the whole cell
-//! would detect in a three-pixel band the C++ never looks at.
+//! [`fast_detect_rect_u8`] (`cells.rs:141`), which is the layer the inventory
+//! recommends for "basalt-style consumers that already own a grid walker"
+//! (`cells.rs:20-22`). The rectangle is shrunk by the FAST ring radius on every
+//! side, because `cv::FAST` on a `PATCH_SIZE`-square sub-image detects only at
+//! sub-coordinates `[3, PATCH_SIZE - 3)`; a rectangle over the whole cell would
+//! detect in a three-pixel band the C++ never looks at.
+//!
+//! That entry point scans **whole rows** whatever columns the rectangle asks
+//! for, so the call is made once per `(cell row, threshold)` over the whole
+//! width and each cell filters its own columns out of the result — see [`Band`],
+//! which also records why a cell-sized crop is not the same detection
+//! (kornia turns its in-block local-maximum filter on at `width >= 800`).
 //!
 //! **The scores are the same quantity, off by one.** At `arc_length == 9` kornia
 //! returns `corner_score_9_scalar(...) / 255.0` (`fast.rs:705-711`, `:838-873`):
@@ -90,6 +96,21 @@ pub enum DetectError {
         /// Cells that shape needs.
         expected: usize,
         /// Cells the buffer holds.
+        actual: usize,
+    },
+    /// The 8-bit view could not be built over the bytes written for it.
+    ///
+    /// Unreachable: the loop that fills those bytes writes exactly
+    /// `width * height` of them. It is a typed error rather than an early `Ok`
+    /// because reporting success with no keypoints would turn a future geometry
+    /// slip into an empty detector instead of a loud one (decision D32).
+    #[error("a {width}x{height} 8-bit view over {actual} bytes was refused")]
+    GrayViewRefused {
+        /// Row length the view was asked for.
+        width: usize,
+        /// Row count the view was asked for.
+        height: usize,
+        /// Bytes offered.
         actual: usize,
     },
 }
@@ -440,43 +461,51 @@ fn suppress_non_maxima(
 /// whatever `x` is, and the kernel only ever emits columns `[3, width - 3)`. So
 /// one call per `(y, threshold)` produces the union of the nineteen per-cell
 /// calls it replaces, corner for corner and in the same row-major order.
-fn band_index(
-    bands: &mut Vec<Band>,
+///
+/// The cache key is `(y, threshold)` although `cell` and `gray` decide the
+/// result too; they are constant over a call because `bands` is cleared at the
+/// entry to [`detect_keypoints_with_cells`].
+fn band_corners<'a>(
+    bands: &'a mut Vec<Band>,
     gray: &Image<u8, 1>,
     y: usize,
     cell: usize,
     threshold: i32,
-) -> usize {
-    if let Some(index) = bands
+) -> &'a [FastCorner] {
+    let index: usize = match bands
         .iter()
         .position(|band| band.y == y && band.threshold == threshold)
     {
-        return index;
-    }
-    let corners: Vec<FastCorner> = fast_detect_rect_u8(
-        gray,
-        KorniaRect {
-            x: 0,
-            y: y + FAST_BORDER,
-            w: gray.width(),
-            h: cell - 2 * FAST_BORDER,
-        },
-        threshold as f32,
-        FAST_ARC_LENGTH,
-        FAST_BORDER,
-    )
-    .into_iter()
-    .map(|corner| FastCorner {
-        xy: corner.xy,
-        response: opencv_corner_score(corner.response),
-    })
-    .collect();
-    bands.push(Band {
-        y,
-        threshold,
-        corners,
-    });
-    bands.len() - 1
+        Some(index) => index,
+        None => {
+            let corners: Vec<FastCorner> = fast_detect_rect_u8(
+                gray,
+                KorniaRect {
+                    x: 0,
+                    y: y + FAST_BORDER,
+                    w: gray.width(),
+                    h: cell - 2 * FAST_BORDER,
+                },
+                threshold as f32,
+                FAST_ARC_LENGTH,
+                FAST_BORDER,
+            )
+            .into_iter()
+            .map(|corner| FastCorner {
+                xy: corner.xy,
+                response: opencv_corner_score(corner.response),
+            })
+            .collect();
+            bands.push(Band {
+                y,
+                threshold,
+                corners,
+            });
+            bands.len() - 1
+        }
+    };
+    // Either the band the search found or the one just pushed.
+    &bands[index].corners
 }
 
 /// `detectKeypointsWithCells` (`keypoints.cpp:132-205`).
@@ -506,8 +535,10 @@ fn band_index(
 /// # Errors
 ///
 /// [`DetectError::OccupancyShapeOverflow`] when the declared shape does not fit
-/// in a `usize`, or [`DetectError::OccupancyTooSmall`] when the counts buffer is
-/// shorter than the shape it was declared with.
+/// in a `usize`, [`DetectError::OccupancyTooSmall`] when the counts buffer is
+/// shorter than the shape it was declared with, or
+/// [`DetectError::GrayViewRefused`] on an 8-bit view the image geometry should
+/// have made impossible.
 #[allow(clippy::too_many_arguments)]
 pub fn detect_keypoints_with_cells(
     image: &ImageU16,
@@ -560,10 +591,12 @@ pub fn detect_keypoints_with_cells(
             .bytes
             .extend(image.row(y).iter().map(|pixel| (*pixel >> 8) as u8));
     }
-    let Ok(gray) = Image::<u8, 1>::from_size_slice(ImageSize { width, height }, &scratch.bytes)
-    else {
-        return Ok(());
-    };
+    let gray: Image<u8, 1> = Image::from_size_slice(ImageSize { width, height }, &scratch.bytes)
+        .map_err(|_| DetectError::GrayViewRefused {
+            width,
+            height,
+            actual: scratch.bytes.len(),
+        })?;
 
     // `float dist_to_center = {full_x - img_raw.w / 2, ...}.norm()` — an integer
     // halving of the size, then a float subtraction (`keypoints.cpp:176`).
@@ -601,15 +634,16 @@ pub fn detect_keypoints_with_cells(
                     // `fast_detect_rect_u8` clamps the rectangle to the ring
                     // margin on every side (`cells.rs:12-15`); the columns this
                     // cell keeps out of its row band are that clamp.
-                    let first: f32 = (x + FAST_BORDER).max(FAST_BORDER) as f32;
+                    let first: f32 = (x + FAST_BORDER) as f32;
+                    // The right clamp is the one a caller-supplied grid can
+                    // need: `x + cell` may reach past the image, where the left
+                    // edge cannot — `x + 3` is a `usize`.
                     let last: f32 =
                         (x + grid.cell - FAST_BORDER).min(width.saturating_sub(FAST_BORDER)) as f32;
-                    let index: usize =
-                        band_index(&mut scratch.bands, &gray, y, grid.cell, threshold);
+                    let band: &[FastCorner] =
+                        band_corners(&mut scratch.bands, &gray, y, grid.cell, threshold);
                     scratch.corners.extend(
-                        scratch.bands[index]
-                            .corners
-                            .iter()
+                        band.iter()
                             .filter(|corner| corner.xy[0] >= first && corner.xy[0] < last)
                             .copied(),
                     );
