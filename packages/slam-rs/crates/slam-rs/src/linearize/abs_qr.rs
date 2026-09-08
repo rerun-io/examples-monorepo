@@ -144,6 +144,12 @@ pub struct LinearizationAbsQR<S: LieScalar> {
 /// rest is `+0.0` on both sides of a join and `+0.0` after a reset, so keeping
 /// the square but touching only `columns` is the same arithmetic; see
 /// [`LandmarkBlock::active_cols`] for why `+= +0.0` here is the identity.
+///
+/// This partial is the one destination that argument holds for: it is created
+/// zeroed and [`Self::reset`] puts back `+0.0`, never `-0.0`, so no coefficient
+/// a skipped write would have changed exists. A block whose own columns are not
+/// the identity to skip — [`LandmarkBlock::active_writeback_is_exact`] — is
+/// added at full width instead.
 struct DensePartial<S: LieScalar> {
     /// The partial `H`, full size, zero outside `columns` x `columns`.
     h: DMatrix<S>,
@@ -170,13 +176,13 @@ impl<S: LieScalar> DensePartial<S> {
     ///
     /// Every column is in range, so this indexes rather than absorbing an
     /// out-of-range one (decision D32): [`Self::accumulate`] marks only a block
-    /// [`LandmarkBlock::add_dense_h_b`] has accepted, whose check is
-    /// `padding_idx <= h.ncols()`, and a block's `active_cols` are inside its
+    /// the writeback has accepted, whose check is `padding_idx <= h.ncols()`,
+    /// and both a block's `active_cols` and its `pose_columns` are inside its
     /// own `padding_idx` ([`LandmarkBlock::allocate`] refuses a pose block that
     /// is not); [`Self::join`] marks a partial of the same ordering.
-    fn mark(&mut self, columns: &[usize]) {
+    fn mark(&mut self, columns: impl IntoIterator<Item = usize>) {
         let mut added: bool = false;
-        for &column in columns {
+        for column in columns {
             added |= !self.written[column];
             self.written[column] = true;
         }
@@ -202,18 +208,29 @@ impl<S: LieScalar> DensePartial<S> {
     /// Add one landmark block's `(H, b)` and record the columns it wrote.
     ///
     /// The two halves belong together: [`Self::mark`] records what a join and a
-    /// reset will touch and [`LandmarkBlock::add_dense_h_b`] is what writes it,
-    /// so a drift between them would leave coefficients no join adds and no
-    /// reset clears — a silently wrong reduction that no test would catch.
-    /// Marking **after** the add is what makes every column in range: the add is
-    /// the check on the block's layout.
+    /// reset will touch and the writeback is what writes it, so a drift between
+    /// them would leave coefficients no join adds and no reset clears — a
+    /// silently wrong reduction that no test would catch. Marking **after** the
+    /// add is what makes every column in range: the add is the check on the
+    /// block's layout.
+    ///
+    /// Which of the two writebacks runs is the block's own answer: the observed
+    /// columns when skipping the rest is the identity, the full width when it is
+    /// not, and then every column is marked because the full width writes every
+    /// column — a NaN spread into a column the block never observed is part of
+    /// the sum basalt takes (decision D32).
     fn accumulate(
         &mut self,
         block: &LandmarkBlock<S>,
         scratch: &mut DenseHbScratch<S>,
     ) -> Result<(), LinearizeError> {
-        block.add_dense_h_b(&mut self.h, &mut self.b, scratch)?;
-        self.mark(block.active_cols());
+        if block.active_writeback_is_exact() {
+            block.add_dense_h_b_active(&mut self.h, &mut self.b, scratch)?;
+            self.mark(block.active_cols().iter().copied());
+        } else {
+            block.add_dense_h_b(&mut self.h, &mut self.b, scratch)?;
+            self.mark(block.pose_columns());
+        }
         Ok(())
     }
 
@@ -225,7 +242,7 @@ impl<S: LieScalar> DensePartial<S> {
             }
             self.b[j] += right.b[j];
         }
-        self.mark(&right.columns);
+        self.mark(right.columns.iter().copied());
     }
 }
 
@@ -906,5 +923,129 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
     /// The slot a (host, target) pair's relative pose lives in.
     pub fn relative_pose_slot(&self, host: TimeCamId, target: TimeCamId) -> Option<usize> {
         self.rel_pose_index.get(&(host, target)).copied()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use crate::calib::{CameraModel, PinholeParams};
+    use crate::camera::CameraEnum;
+    use crate::lie::So3;
+    use crate::types::LandmarkId;
+    use nalgebra::{Vector2, Vector3};
+
+    /// A two-frame ordering with one landmark hosted in the first frame and seen
+    /// in both cameras, the second observation non-finite.
+    ///
+    /// `Landmark::add_observation` accepts that keypoint, the residual and its
+    /// Huber weight carry the NaN past the Jacobian checks of
+    /// `linearize_landmark`, and the QR spreads it across whole rows.
+    fn a_block_carrying_a_nan() -> LandmarkBlock<f64> {
+        let mut aom: AbsOrderMap = AbsOrderMap::new();
+        for frame in 0..2i64 {
+            aom.push(frame, POSE_SIZE).unwrap();
+        }
+        let host: TimeCamId = TimeCamId::new(0, 0);
+        let mut lm: Landmark<f64> =
+            Landmark::new(LandmarkId(7), host, Vector2::new(0.01, -0.02), 0.25);
+        lm.obs.insert(host, Vector2::new(505.0, 510.0));
+        lm.obs
+            .insert(TimeCamId::new(0, 1), Vector2::new(f64::NAN, 512.0));
+
+        let rel: Vec<RelPoseLin<f64>> = vec![
+            RelPoseLin {
+                t_t_h: Matrix4::identity(),
+                d_rel_d_h: Matrix6::zeros(),
+                d_rel_d_t: Matrix6::zeros(),
+            },
+            RelPoseLin {
+                t_t_h: Se3::<f64>::new(So3::identity(), Vector3::new(0.1, 0.0, 0.0)).matrix(),
+                d_rel_d_h: Matrix6::identity(),
+                d_rel_d_t: -Matrix6::identity(),
+            },
+        ];
+        let model: CameraModel<f64> = CameraModel::Pinhole(PinholeParams {
+            fx: 379.0,
+            fy: 379.0,
+            cx: 505.0,
+            cy: 510.0,
+        });
+        let cameras: Vec<CameraEnum<f64>> = vec![
+            CameraEnum::from_model(&model).unwrap(),
+            CameraEnum::from_model(&model).unwrap(),
+        ];
+        let options: LandmarkBlockOptions<f64> = LandmarkBlockOptions {
+            huber_parameter: 0.5,
+            obs_std_dev: 2.0,
+            ..Default::default()
+        };
+
+        let mut block: LandmarkBlock<f64> = LandmarkBlock::allocate(
+            lm.id,
+            &lm,
+            &|_, target: TimeCamId| Some(usize::from(target.cam_id == 1)),
+            &aom,
+            false,
+        )
+        .unwrap();
+        block
+            .linearize_landmark(&lm, &rel, &cameras, &options)
+            .unwrap();
+        block.perform_qr(&options).unwrap();
+        block
+    }
+
+    /// The reduction adds a non-finite block at full width, bit for bit with the
+    /// system the C++ path writes, and marks every column it wrote.
+    ///
+    /// Skipping the block's unobserved columns would drop those NaNs — the
+    /// reduced camera system would come out finite where basalt's is not
+    /// (decision D32) — and leave coefficients no join adds and no reset clears.
+    #[test]
+    fn a_non_finite_block_is_reduced_at_full_width() {
+        let block: LandmarkBlock<f64> = a_block_carrying_a_nan();
+        let n: usize = block.pose_columns().len();
+        let mut scratch: DenseHbScratch<f64> = DenseHbScratch::default();
+
+        let mut h: DMatrix<f64> = DMatrix::zeros(n, n);
+        let mut b: DVector<f64> = DVector::zeros(n);
+        block.add_dense_h_b(&mut h, &mut b, &mut scratch).unwrap();
+        assert!(
+            h.iter().any(|value| value.is_nan()),
+            "the fixture was supposed to carry a NaN into H"
+        );
+        assert!(
+            (POSE_SIZE..n).any(|column| h[(column, column)].is_nan()),
+            "and past the columns the block observes"
+        );
+
+        let mut partial: DensePartial<f64> = DensePartial::zeros(n);
+        partial.accumulate(&block, &mut scratch).unwrap();
+        for i in 0..n {
+            for j in 0..n {
+                assert_eq!(
+                    partial.h[(i, j)].to_bits(),
+                    h[(i, j)].to_bits(),
+                    "H({i}, {j})"
+                );
+            }
+            assert_eq!(partial.b[i].to_bits(), b[i].to_bits(), "b({i})");
+        }
+
+        // The join and the reset go over `columns`, so the fallback has to have
+        // marked the whole width it wrote.
+        assert_eq!(partial.columns, (0..n).collect::<Vec<usize>>());
+        partial.reset();
+        assert!(
+            partial
+                .h
+                .iter()
+                .chain(partial.b.iter())
+                .all(|value| value.to_bits() == 0.0f64.to_bits()),
+            "the reset left a coefficient behind"
+        );
     }
 }

@@ -69,10 +69,10 @@ impl<S: LieScalar> Default for LandmarkBlockOptions<S> {
 /// same order — and which vectorises, where the dot product does not.
 #[derive(Debug)]
 pub struct DenseHbScratch<S: LieScalar> {
-    /// The `Q2` rows of `storage` over the active columns then the residual,
+    /// The `Q2` rows of `storage` over the written columns then the residual,
     /// row-major so one row is contiguous.
     rows: Vec<S>,
-    /// One row of `H` plus its `b`, one coefficient per active column.
+    /// One row of `H` plus its `b`, one coefficient per written column.
     acc: Vec<S>,
 }
 
@@ -162,9 +162,14 @@ pub struct LandmarkBlock<S: LieScalar> {
     /// writes nothing at all — `:137` skips it for want of a relative pose, and
     /// its `abs_t_idx` is the `0` sentinel of `:74`, which is a column of
     /// whichever frame the ordering puts first — so it is left out.
-    /// [`Self::add_dense_h_b`] is the only reader, and
+    /// [`Self::add_dense_h_b_active`] is the only reader, and
     /// `dense_h_b_touches_only_observed_columns` and
     /// `a_dropped_observation_writes_no_columns` pin the invariant.
+    ///
+    /// The "cannot move a zero column off zero" step is finite arithmetic: a
+    /// reflection whose coefficients are non-finite writes NaN everywhere,
+    /// which is why [`Self::active_writeback_is_exact`] checks rather than
+    /// assumes.
     active_cols: Vec<usize>,
     /// The landmark this block belongs to.
     lm_id: LandmarkId,
@@ -839,13 +844,25 @@ impl<S: LieScalar> LandmarkBlock<S> {
         Ok(())
     }
 
-    /// The pose columns [`Self::add_dense_h_b`] writes; see the field.
+    /// The pose columns [`Self::add_dense_h_b_active`] writes; see the field.
     pub fn active_cols(&self) -> &[usize] {
         &self.active_cols
     }
 
+    /// Every pose column of the dense system, `0..padding_idx`: what
+    /// [`Self::add_dense_h_b`] writes.
+    pub fn pose_columns(&self) -> std::ops::Range<usize> {
+        0..self.padding_idx
+    }
+
     /// `add_dense_H_b(H, b)` (`:494-500`): `H += JᵀJ`, `b += Jᵀr` over the same
     /// `Q₂` rows.
+    ///
+    /// **Full width**: every column of `0..padding_idx` is written, as the C++
+    /// writes it, because `h` and `b` are the caller's and this method knows
+    /// nothing about what is in them. [`Self::add_dense_h_b_active`] is the same
+    /// sum over the observed columns only, for the one caller that owns its
+    /// destination and can prove the rest is the identity.
     ///
     /// Both sums run over the block's rows in increasing order, one output
     /// coefficient at a time. Eigen calls its general matrix product here, whose
@@ -858,6 +875,70 @@ impl<S: LieScalar> LandmarkBlock<S> {
         b: &mut DVector<S>,
         scratch: &mut DenseHbScratch<S>,
     ) -> Result<(), LinearizeError> {
+        self.check_dense_h_b_size(h, b)?;
+        // The cold path — the tests and the reduction's non-finite fallback —
+        // so the column list is built here rather than kept in `scratch`.
+        let columns: Vec<usize> = self.pose_columns().collect();
+        self.add_dense_h_b_over(&columns, h, b, scratch);
+        Ok(())
+    }
+
+    /// [`Self::add_dense_h_b`] over [`Self::active_cols`] only.
+    ///
+    /// Bit-identical to the full width when the destination holds `+0.0` at
+    /// every column this block does not observe and
+    /// [`Self::active_writeback_is_exact`] holds; the dense reduction is the one
+    /// caller that can say both, on its own accumulators.
+    pub(crate) fn add_dense_h_b_active(
+        &self,
+        h: &mut DMatrix<S>,
+        b: &mut DVector<S>,
+        scratch: &mut DenseHbScratch<S>,
+    ) -> Result<(), LinearizeError> {
+        self.check_dense_h_b_size(h, b)?;
+        self.add_dense_h_b_over(&self.active_cols, h, b, scratch);
+        Ok(())
+    }
+
+    /// Whether the skip [`Self::add_dense_h_b_active`] makes is the identity on
+    /// a destination that is `+0.0` outside [`Self::active_cols`].
+    ///
+    /// The skipped writes are `x += Σ (a * 0)` over the columns the block does
+    /// not observe. That is `x += ±0.0`, which leaves a `+0.0` `x` alone — but
+    /// only while every factor is finite and those columns really are zero.
+    /// Neither is free: [`Landmark::add_observation`] accepts a non-finite
+    /// keypoint, the Huber weight carries the NaN past the Jacobian checks of
+    /// [`Self::linearize_landmark`], and the Householder reflections of
+    /// [`super::eigen_qr`] act on whole rows, which spreads it into columns the
+    /// block never observed. One pass over the `Q₂` rows decides both, and a
+    /// block that fails takes the full-width path so those NaNs are written
+    /// (decision D32: NaN handling mirrors basalt).
+    pub(crate) fn active_writeback_is_exact(&self) -> bool {
+        let rows: usize = self.num_q2rows();
+        let mut active = self.active_cols.iter().copied().peekable();
+        for column in self.pose_columns() {
+            if active.next_if_eq(&column).is_some() {
+                for r in 0..rows {
+                    if !self.storage[(3 + r, column)].to_f64().is_finite() {
+                        return false;
+                    }
+                }
+            } else {
+                // `-0.0 == 0.0`, which is what this wants: either zero makes
+                // every product `±0.0`.
+                for r in 0..rows {
+                    if self.storage[(3 + r, column)] != S::zero() {
+                        return false;
+                    }
+                }
+            }
+        }
+        // The residual column, the other factor of `b`.
+        (0..rows).all(|r| self.storage[(3 + r, self.res_idx)].to_f64().is_finite())
+    }
+
+    /// C++ asserts the destination is big enough (`:496`); a typed error here.
+    fn check_dense_h_b_size(&self, h: &DMatrix<S>, b: &DVector<S>) -> Result<(), LinearizeError> {
         if h.nrows() < self.padding_idx
             || h.ncols() < self.padding_idx
             || b.nrows() < self.padding_idx
@@ -867,19 +948,25 @@ impl<S: LieScalar> LandmarkBlock<S> {
                 found: h.nrows().min(b.nrows()),
             });
         }
+        Ok(())
+    }
+
+    /// The sum itself, over `columns` — ascending, inside `0..padding_idx`.
+    fn add_dense_h_b_over(
+        &self,
+        columns: &[usize],
+        h: &mut DMatrix<S>,
+        b: &mut DVector<S>,
+        scratch: &mut DenseHbScratch<S>,
+    ) {
         let rows: usize = self.num_q2rows();
-        // Only the observed pose columns: everywhere else `Q2Jp` is exactly
-        // zero, so the C++'s `H(i, j) += 0` and `b(i) += 0` are the identity —
-        // `h` and `b` start at `+0.0` and an IEEE sum is `-0.0` only when both
-        // its operands are, so no accumulator here can be the one value `+= 0`
-        // would have changed. See [`Self::active_cols`].
-        let live: usize = self.active_cols.len();
-        // `[ the active columns | the residual ]`, one contiguous row per `Q2`
-        // row; see [`DenseHbScratch`] for why the transpose is worth its copy.
+        let live: usize = columns.len();
+        // `[ the columns | the residual ]`, one contiguous row per `Q2` row;
+        // see [`DenseHbScratch`] for why the transpose is worth its copy.
         let width: usize = live + 1;
         scratch.rows.clear();
         scratch.rows.resize(rows * width, S::zero());
-        for (slot, &column) in self.active_cols.iter().enumerate() {
+        for (slot, &column) in columns.iter().enumerate() {
             for r in 0..rows {
                 scratch.rows[r * width + slot] = self.storage[(3 + r, column)];
             }
@@ -890,7 +977,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
 
         scratch.acc.clear();
         scratch.acc.resize(width, S::zero());
-        for (slot, &i) in self.active_cols.iter().enumerate() {
+        for (slot, &i) in columns.iter().enumerate() {
             scratch.acc.fill(S::zero());
             for r in 0..rows {
                 let row: &[S] = &scratch.rows[r * width..(r + 1) * width];
@@ -899,12 +986,11 @@ impl<S: LieScalar> LandmarkBlock<S> {
                     *acc += factor * value;
                 }
             }
-            for (&j, &acc) in self.active_cols.iter().zip(scratch.acc.iter()) {
+            for (&j, &acc) in columns.iter().zip(scratch.acc.iter()) {
                 h[(i, j)] += acc;
             }
             b[i] += scratch.acc[live];
         }
-        Ok(())
     }
 
     /// `addJp_diag2(res)` (`:345-356`): the squared column norms of the pose
@@ -1174,14 +1260,14 @@ mod tests {
         assert_dense_h_b_is_the_full_loop(&block);
     }
 
-    /// The system `add_dense_h_b` writes over `active_cols` equals the one a
-    /// loop over the whole `padding_idx` square produces, coefficient by
-    /// coefficient. Both tests of the skip rest on this.
+    /// The system `add_dense_h_b_active` writes over `active_cols` equals the
+    /// one a loop over the whole `padding_idx` square produces, coefficient by
+    /// coefficient and **bit for bit**. Both tests of the skip rest on this.
     fn assert_dense_h_b_is_the_full_loop(block: &LandmarkBlock<f64>) {
         let mut h: DMatrix<f64> = DMatrix::zeros(block.padding_idx, block.padding_idx);
         let mut b: DVector<f64> = DVector::zeros(block.padding_idx);
         block
-            .add_dense_h_b(&mut h, &mut b, &mut DenseHbScratch::default())
+            .add_dense_h_b_active(&mut h, &mut b, &mut DenseHbScratch::default())
             .unwrap();
         let rows: usize = block.num_q2rows();
         for i in 0..block.padding_idx {
@@ -1190,14 +1276,86 @@ mod tests {
                 for r in 0..rows {
                     acc += block.storage[(3 + r, i)] * block.storage[(3 + r, j)];
                 }
-                assert_eq!(h[(i, j)], acc, "H({i}, {j})");
+                assert_eq!(h[(i, j)].to_bits(), acc.to_bits(), "H({i}, {j})");
             }
             let mut acc: f64 = 0.0;
             for r in 0..rows {
                 acc += block.storage[(3 + r, i)] * block.storage[(3 + r, block.res_idx)];
             }
-            assert_eq!(b[i], acc, "b({i})");
+            assert_eq!(b[i].to_bits(), acc.to_bits(), "b({i})");
         }
+    }
+
+    /// The public writeback writes every column, whatever the destination holds.
+    ///
+    /// `-0.0 + (+0.0)` is `+0.0`, so a destination coefficient at `-0.0` tells
+    /// the two paths apart where no value comparison can: the full width writes
+    /// it and the sign goes, the skip leaves it. This is the contract a caller
+    /// who owns `h` and `b` gets, and the reason the skip is not it.
+    #[test]
+    fn the_public_writeback_covers_a_negative_zero_destination() {
+        let (aom, lm, rel) = fixture(4);
+        let mut block: LandmarkBlock<f64> =
+            LandmarkBlock::allocate(lm.id, &lm, &index, &aom, false).unwrap();
+        block
+            .linearize_landmark(&lm, &rel, &cameras(), &options())
+            .unwrap();
+        block.perform_qr(&options()).unwrap();
+        // Both observations are in frame 0: columns `6..24` are the skipped ones.
+        assert_eq!(block.active_cols, (0..POSE_SIZE).collect::<Vec<usize>>());
+
+        let n: usize = block.padding_idx;
+        let mut h: DMatrix<f64> = DMatrix::from_element(n, n, -0.0);
+        let mut b: DVector<f64> = DVector::from_element(n, -0.0);
+        block
+            .add_dense_h_b(&mut h, &mut b, &mut DenseHbScratch::default())
+            .unwrap();
+
+        for i in 0..n {
+            for j in 0..n {
+                if i < POSE_SIZE && j < POSE_SIZE {
+                    continue;
+                }
+                // The block contributes `+/-0.0` here, and `-0.0 + 0.0 = +0.0`.
+                assert_eq!(h[(i, j)].to_bits(), 0.0f64.to_bits(), "H({i}, {j})");
+            }
+            if i >= POSE_SIZE {
+                assert_eq!(b[i].to_bits(), 0.0f64.to_bits(), "b({i})");
+            }
+        }
+    }
+
+    /// A block carrying a non-finite observation is not one the skip may take.
+    ///
+    /// `Landmark::add_observation` accepts the keypoint, the Huber weight
+    /// carries the NaN past the Jacobian checks, and the Householder spreads it
+    /// across whole rows — including the columns this block never observed. The
+    /// reduction's answer to that is the full-width path
+    /// (`a_non_finite_block_is_reduced_at_full_width` in `abs_qr`); this pins
+    /// the two facts underneath it.
+    #[test]
+    fn a_non_finite_observation_spreads_past_the_observed_columns() {
+        let (aom, mut lm, rel) = fixture(4);
+        lm.obs
+            .insert(TimeCamId::new(0, 1), Vector2::new(f64::NAN, 512.0));
+        let mut block: LandmarkBlock<f64> =
+            LandmarkBlock::allocate(lm.id, &lm, &index, &aom, false).unwrap();
+        block
+            .linearize_landmark(&lm, &rel, &cameras(), &options())
+            .unwrap();
+        block.perform_qr(&options()).unwrap();
+
+        assert!(
+            !block.active_writeback_is_exact(),
+            "a NaN block must not take the skip"
+        );
+        let spread: bool = (POSE_SIZE..block.padding_idx).any(|column| {
+            (0..block.num_q2rows()).any(|r| !block.storage[(3 + r, column)].is_finite())
+        });
+        assert!(
+            spread,
+            "the QR was supposed to spread the NaN off the block's own columns"
+        );
     }
 
     /// A measurement dropped during marginalization writes no pose columns.
