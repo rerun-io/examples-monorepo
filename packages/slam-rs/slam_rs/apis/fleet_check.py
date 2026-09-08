@@ -17,9 +17,11 @@ import json
 import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Literal, TypeAlias
 
 import numpy as np
 
+from slam_rs import _core
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb
 from slam_rs.reference import (
     GT_BAND_RATIO,
@@ -310,6 +312,39 @@ def clip_json(clip: ClipResult) -> ClipJson:
     )
 
 
+Lane: TypeAlias = Literal["cpu", "cuda", "wgpu"]
+"""Which frontend measured a row: the CPU port, or the GPU runtime the core was built with."""
+
+
+def this_lane(gpu: bool) -> Lane:
+    """The lane this core runs a clip on, named after the runtime rather than the flag.
+
+    ``--gpu`` does not say which GPU: the NVIDIA ``gpu`` feature and the portable
+    ``gpu-wgpu`` one are two builds of one source behind the same flag, and they
+    do not agree on every clip, so a row labelled ``gpu`` has lost the first
+    thing its reader asks. The extension reports the feature it was compiled with
+    (:data:`slam_rs._core.gpu_backend`) and the lane is that name.
+
+    Args:
+        gpu: Whether the run was asked for the GPU frontend.
+
+    Returns:
+        ``cpu`` for the CPU port, or the compiled-in runtime's own name.
+
+    Raises:
+        ValueError: If the GPU frontend was asked of a core built without a GPU
+            cargo feature. :class:`slam_rs._core.Vio` refuses such a run too;
+            asking here is what keeps the refusal ahead of the manifest and the
+            first replay.
+    """
+    if not gpu:
+        return "cpu"
+    backend: Lane | None = _core.gpu_backend
+    if backend is None:
+        raise ValueError("--gpu needs a core built with a GPU cargo feature; this one has none (slam-rs-gpu-build for CUDA, slam-rs-wgpu-build for wgpu)")
+    return backend
+
+
 @dataclass(slots=True)
 class Config:
     """Run the reference smoke clips on this machine and report the D60 verdict."""
@@ -323,7 +358,7 @@ class Config:
     and no ``sed``.
     """
     segments: tuple[str, ...] = SMOKE_SEGMENTS
-    """Clips to run, in order."""
+    """Clips to run, in order; naming none of them is refused rather than run as a pass."""
     output_json: Path = Path("fleet_check.json")
     """Where the machine's facts and every clip's numbers are written."""
     gpu: bool = False
@@ -332,7 +367,8 @@ class Config:
     Which lane produced a row is a fact about the run and not about the machine
     or the clip, so it is written as the JSON's own ``lane`` key beside
     ``machine`` and ``clips`` — :class:`ClipJson` is a consumer contract and
-    gains nothing.
+    gains nothing. The key's value is the runtime, not the flag:
+    :func:`this_lane`.
     """
 
 
@@ -347,11 +383,20 @@ def main(config: Config) -> None:
         config: Parsed CLI options.
 
     Raises:
-        ValueError: If ``--segments`` names an id the manifest does not have.
+        ValueError: If ``--segments`` names no clip at all, if it names an id the
+            manifest does not have, or if ``--gpu`` was asked of a core built
+            without a GPU cargo feature (:func:`this_lane`).
         FileNotFoundError: If any named clip's scoring inputs cannot be read
-            here. Both are decided before the first replay.
+            here. All of them are decided before the first replay.
         SystemExit: If any clip missed a D60 clause.
     """
+    # An empty selection used to validate nothing, write no JSON and return zero,
+    # which a script reads as this machine having passed (S24 review).
+    if not config.segments:
+        raise ValueError("--segments named no clip; a run that measures nothing is not a pass")
+    # Before any file is opened: a `--gpu` run has no lane to report on a core
+    # built without a GPU feature, and that costs nothing to say here.
+    lane: Lane = this_lane(config.gpu)
     manifest: ReferenceManifest = load_manifest(config.manifest, config.artifact_root)
     # Every id resolved before the first replay, not one at a time inside the
     # loop: `--segments <410 s clip> typo` used to pay that clip and then reach
@@ -362,7 +407,6 @@ def main(config: Config) -> None:
     for segment in segments:
         check_scoring_inputs(manifest, segment)
     machine: Machine = this_machine()
-    lane: str = "gpu" if config.gpu else "cpu"
     print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores, {lane} lane")
     config.output_json.parent.mkdir(parents=True, exist_ok=True)
     results: list[ClipResult] = []

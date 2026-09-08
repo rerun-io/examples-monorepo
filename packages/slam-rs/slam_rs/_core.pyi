@@ -5,7 +5,7 @@ exact: no ``Any``, and every array carries its dtype.
 """
 
 from collections.abc import Sequence
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from jaxtyping import Bool, Float32, Float64, Int32, Int64, UInt8
 from numpy import ndarray
@@ -13,6 +13,16 @@ from numpy import ndarray
 from slam_rs.catalog_feed import CameraCalib, ImuCalib
 
 __version__: str
+
+gpu_backend: Literal["cuda", "wgpu"] | None
+"""Which GPU runtime this build's frontend carries, or None for the CPU-only default build.
+
+The ``gpu`` and ``gpu-wgpu`` cargo features are two builds of one source behind
+one ``gpu=True``, so no argument says which is running. This does, and it is
+what a fleet row's lane is named from
+(:func:`slam_rs.apis.fleet_check.this_lane`). ``None`` is the build the fleet
+installs, whose ``gpu=True`` is refused.
+"""
 
 class VioStatus:
     """How far the estimator has got.

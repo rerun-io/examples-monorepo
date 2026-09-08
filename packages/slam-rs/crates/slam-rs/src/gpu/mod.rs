@@ -328,6 +328,17 @@ const RUNTIME_NAME: &str = "CUDA";
 #[cfg(feature = "gpu-wgpu")]
 const RUNTIME_NAME: &str = "wgpu";
 
+/// The same runtime as the name a machine reads: the cargo feature's own word,
+/// lowercase, which is what a fleet row's `lane` says and what a chart groups on
+/// ([`crate::GPU_BACKEND`]). Kept beside [`RUNTIME_NAME`] rather than derived
+/// from it, because that one is prose in a sentence a person reads.
+#[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
+pub const BACKEND_NAME: &str = "cuda";
+
+/// The same runtime as the name a machine reads: the portable lane's.
+#[cfg(feature = "gpu-wgpu")]
+pub const BACKEND_NAME: &str = "wgpu";
+
 /// Refuse a host that cannot run this lane, before any CubeCL client exists.
 ///
 /// The NVIDIA arm. Three questions in the order that makes each answerable:

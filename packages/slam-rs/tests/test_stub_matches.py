@@ -148,6 +148,17 @@ def test_the_version_attribute_is_declared() -> None:
     assert "__version__" in _stub_module_names()
 
 
+def test_the_gpu_backend_names_a_runtime_the_stub_declares() -> None:
+    """The one module attribute whose *value* is a contract, not only its type.
+
+    A fleet row's lane is this string (``slam_rs.apis.fleet_check.this_lane``), so
+    a third GPU feature that forgot to name itself here would label its rows with
+    something no consumer knows. ``None`` is the CPU-only default build.
+    """
+    assert "gpu_backend" in _stub_module_names()
+    assert _core.gpu_backend in (None, "cuda", "wgpu")
+
+
 def test_every_declared_module_name_exists_at_runtime() -> None:
     missing: list[str] = [name for name in sorted(_stub_module_names()) if not hasattr(_core, name)]
     assert not missing, f"declared in _core.pyi but absent from the extension: {missing}"

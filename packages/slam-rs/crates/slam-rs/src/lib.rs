@@ -44,6 +44,25 @@ use serde::{Deserialize, Serialize};
 /// Version of the core, as declared in `crates/slam-rs/Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Which GPU runtime this build's frontend carries, or `None` for the CPU-only
+/// default.
+///
+/// The `gpu` and `gpu-wgpu` features are two builds of one source behind one
+/// `gpu: bool`, so nothing a caller can pass says which of them it is running.
+/// This is that fact, and it is read on the Python side (`_core.gpu_backend`) to
+/// name the lane a fleet row was measured on — which the two lanes need, because
+/// they do not agree on every clip.
+///
+/// [`gpu::BACKEND_NAME`] is the same name; this wrapper is what a build without
+/// the feature can still answer.
+#[cfg(feature = "gpu-core")]
+pub const GPU_BACKEND: Option<&str> = Some(gpu::BACKEND_NAME);
+
+/// Which GPU runtime this build's frontend carries: none, this being the
+/// off-by-default CPU port the fleet installs.
+#[cfg(not(feature = "gpu-core"))]
+pub const GPU_BACKEND: Option<&str> = None;
+
 /// Elapsed nanoseconds, saturating rather than panicking on an absurd clock.
 ///
 /// The one place a stage mark is taken: the estimator's six
