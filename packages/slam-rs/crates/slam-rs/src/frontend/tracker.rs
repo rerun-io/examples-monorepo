@@ -142,7 +142,7 @@ pub enum TrackerError {
     /// Carried here rather than returned separately because
     /// `FrameToFrameOpticalFlow::with_backends` takes an already-built tracker,
     /// so the construction of a device backend has one error path (decision D32).
-    #[cfg(feature = "gpu")]
+    #[cfg(feature = "gpu-core")]
     #[error(transparent)]
     Gpu(#[from] crate::gpu::GpuError),
     /// A tracker was asked for more pyramid levels than [`MAX_LEVELS`].

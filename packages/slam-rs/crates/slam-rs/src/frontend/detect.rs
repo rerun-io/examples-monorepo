@@ -137,7 +137,7 @@ pub enum DetectError {
     /// inside names which buffer and whether the read failed or was short;
     /// reading either as a candidate image would quietly detect nothing
     /// (decision D32).
-    #[cfg(feature = "gpu")]
+    #[cfg(feature = "gpu-core")]
     #[error(transparent)]
     Gpu(#[from] crate::gpu::GpuError),
     /// The 8-bit view could not be built over the bytes written for it.

@@ -16,7 +16,7 @@
 //!
 //! These run only under `--features gpu` and need a working CubeCL runtime;
 //! `cargo test --features gpu` is the gate.
-#![cfg(feature = "gpu")]
+#![cfg(feature = "gpu-core")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kornia_imgproc::features::FastCorner;

@@ -113,6 +113,11 @@ pub enum GpuError {
 }
 
 /// The NVIDIA runtime, so nothing outside this module names `cubecl_cuda`.
+///
+/// This and [`cuda_client`] are the only two items on the `gpu` feature rather
+/// than on `gpu-core`: they are what `cubecl-cuda` is for, and keeping them
+/// apart is what lets a `gpu-wgpu` build carry neither the crate nor its
+/// codegen.
 #[cfg(feature = "gpu")]
 pub type CudaRuntime = cubecl_cuda::CudaRuntime;
 
@@ -143,10 +148,11 @@ pub type GpuRuntime = cubecl_wgpu::WgpuRuntime;
 
 /// A client on this build's runtime.
 ///
-/// The whole of what selecting a backend costs. Select the adapter with
+/// The whole of what selecting a backend costs — a cargo feature, and this
+/// function is the only place it is read. Select the adapter with
 /// `CUBECL_WGPU_DEFAULT_DEVICE` on the portable lane; `WGPU_BACKEND` and
 /// `WGPU_ADAPTER_NAME` are ignored by cubecl-wgpu.
-#[cfg(feature = "gpu")]
+#[cfg(feature = "gpu-core")]
 pub fn gpu_client() -> cubecl::prelude::ComputeClient<GpuRuntime> {
     #[cfg(feature = "gpu-wgpu")]
     {
@@ -159,15 +165,15 @@ pub fn gpu_client() -> cubecl::prelude::ComputeClient<GpuRuntime> {
 }
 
 /// The pyramid builder of this build's lane.
-#[cfg(feature = "gpu")]
+#[cfg(feature = "gpu-core")]
 pub type LanePyramidBuilder = GpuPyramidBuilder<GpuRuntime>;
 
 /// The patch tracker of this build's lane.
-#[cfg(feature = "gpu")]
+#[cfg(feature = "gpu-core")]
 pub type LanePatchTracker<P> = GpuPatchTracker<P, GpuRuntime>;
 
 /// The three stage backends `FrameToFrameOpticalFlow::with_backends` takes.
-#[cfg(feature = "gpu")]
+#[cfg(feature = "gpu-core")]
 pub type LaneBackends<P> = (
     LanePyramidBuilder,
     LanePatchTracker<P>,
@@ -187,7 +193,7 @@ pub type LaneBackends<P> = (
 /// [`crate::frontend::tracker::TrackerError`] when the capacity or the level
 /// count is over its ceiling, or a buffer's element count does not fit a
 /// `usize` — the same refusals the CPU tracker makes.
-#[cfg(feature = "gpu")]
+#[cfg(feature = "gpu-core")]
 pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
     capacity: usize,
     num_levels: usize,
@@ -251,7 +257,7 @@ fn read_failed(what: &'static str, error: &cubecl::server::ServerError) -> GpuEr
 /// # Errors
 ///
 /// [`GpuError::StorageRoundTrip`] naming the width that did not survive.
-#[cfg(feature = "gpu")]
+#[cfg(feature = "gpu-core")]
 pub fn probe_storage<R: cubecl::prelude::Runtime>(
     client: &cubecl::prelude::ComputeClient<R>,
 ) -> Result<(), GpuError> {

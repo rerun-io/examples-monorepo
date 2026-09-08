@@ -18,8 +18,17 @@ pub mod config;
 pub(crate) mod eigen_blas;
 pub mod estimator;
 pub mod frontend;
-#[cfg(feature = "gpu")]
+#[cfg(feature = "gpu-core")]
 pub mod gpu;
+
+// `gpu-core` is the kernels and the seam; a runtime comes from `gpu` (CUDA) or
+// `gpu-wgpu`. Enabled on its own there would be no client to build one on, and
+// the failure would be a wall of missing items rather than a sentence.
+#[cfg(all(feature = "gpu-core", not(any(feature = "gpu", feature = "gpu-wgpu"))))]
+compile_error!(
+    "feature `gpu-core` carries the CubeCL kernels but no runtime: enable \
+     `gpu` for the NVIDIA lane or `gpu-wgpu` for the portable one"
+);
 pub mod image;
 pub mod imu;
 pub mod landmark;
@@ -235,7 +244,7 @@ pub enum FrontendLane {
     /// The CPU pyramid builder and patch tracker.
     Cpu(frontend::flow::FrameToFrameOpticalFlow<frontend::patterns::Pattern51>),
     /// The CubeCL pyramid builder and patch tracker.
-    #[cfg(feature = "gpu")]
+    #[cfg(feature = "gpu-core")]
     Gpu(
         frontend::flow::FrameToFrameOpticalFlow<
             frontend::patterns::Pattern51,
@@ -250,7 +259,7 @@ macro_rules! on_lane {
     ($lane:expr, |$flow:ident| $body:expr) => {
         match $lane {
             FrontendLane::Cpu($flow) => $body,
-            #[cfg(feature = "gpu")]
+            #[cfg(feature = "gpu-core")]
             FrontendLane::Gpu($flow) => $body,
         }
     };
@@ -261,7 +270,7 @@ impl FrontendLane {
     pub fn backend(&self) -> Backend {
         match self {
             Self::Cpu(_) => Backend::Cpu,
-            #[cfg(feature = "gpu")]
+            #[cfg(feature = "gpu-core")]
             Self::Gpu(_) => Backend::Gpu,
         }
     }
@@ -372,7 +381,7 @@ fn build_frontend(
         Backend::Cpu => Ok(FrontendLane::Cpu(
             frontend::flow::FrameToFrameOpticalFlow::new(config.clone(), calibration, options)?,
         )),
-        #[cfg(feature = "gpu")]
+        #[cfg(feature = "gpu-core")]
         Backend::Gpu => {
             let num_levels: usize = config.optical_flow_levels as usize + 1;
             let (pyramid, tracker, scanner) = gpu::gpu_backends::<frontend::patterns::Pattern51>(
@@ -393,7 +402,7 @@ fn build_frontend(
                 )?,
             ))
         }
-        #[cfg(not(feature = "gpu"))]
+        #[cfg(not(feature = "gpu-core"))]
         Backend::Gpu => Err(VioError::GpuUnavailable),
     }
 }
