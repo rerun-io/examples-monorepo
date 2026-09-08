@@ -13,12 +13,15 @@ from slam_rs import _core
 from slam_rs.apis.replay import Config, _cpp_trajectory, _replay
 from slam_rs.catalog_feed import (
     CHILD_FROM_PARENT,
+    RIG_ENTITY,
+    TIMELINE,
     CameraCalib,
     CameraStatics,
     Frameset,
     ImuStream,
     LocalSegment,
     SegmentFeed,
+    _rig_trajectory,
     _shared_codec,
     _static_int,
     _static_string,
@@ -230,6 +233,79 @@ def test_a_rig_whose_cameras_disagree_on_the_codec_names_both() -> None:
     assert _shared_codec([(0, "av1"), (2, "av1")], SMOKE_SEGMENT) == "av1"
     with pytest.raises(ValueError, match="cam_02 is h264 where cam_00 is av1"):
         _shared_codec([(0, "av1"), (2, "h264")], SMOKE_SEGMENT)
+
+
+def _transform_rows(
+    t_ns: list[int], translations: list[list[float] | None], quaternions: list[list[float] | None]
+) -> pa.Table:
+    """One window of the ``gt`` layer, with each component present on the rows the caller names.
+
+    Rerun nests a component's instances one list deep, so a row carrying one
+    translation is ``[[x, y, z]]`` and a row carrying none is null — which is what
+    component-level logging or a clear produces, and the two components need not
+    be null on the same rows.
+
+    Args:
+        t_ns: ``video_time`` of each row.
+        translations: Per row, the rig position in metres, or None where the row carries no translation.
+        quaternions: Per row, the XYZW rotation, or None where the row carries no quaternion.
+
+    Returns:
+        The window in the shape the reader hands :func:`_rig_trajectory`.
+    """
+    return pa.table(
+        {
+            TIMELINE: pa.array(t_ns, type=pa.int64()),
+            f"{RIG_ENTITY}:Transform3D:translation": pa.array(
+                [None if value is None else [value] for value in translations], type=pa.list_(pa.list_(pa.float64(), 3))
+            ),
+            f"{RIG_ENTITY}:Transform3D:quaternion": pa.array(
+                [None if value is None else [value] for value in quaternions], type=pa.list_(pa.list_(pa.float64(), 4))
+            ),
+        }
+    )
+
+
+def test_a_ground_truth_window_reads_both_components_off_the_same_rows() -> None:
+    """A pose is a translation and a rotation from one row, and the reader used to pair them by position.
+
+    The timestamps came from the translation column's validity mask while the
+    quaternion column was flattened with its own null removal, so two components
+    valid on *different* rows still flattened to the same length and the pose at
+    ``t0`` was handed ``t1``'s rotation: a plausible layout — component-level
+    logging or a clear writes it, and the public ``--gt-rrd`` path reads it —
+    silently attached a rotation from the wrong time to every pose (S25 review).
+    """
+    aligned: Trajectory = _rig_trajectory(
+        _transform_rows(
+            [10, 20, 30],
+            [[1.0, 0.0, 0.0], None, [3.0, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0, 1.0], None, [0.0, 0.0, 1.0, 0.0]],
+        ),
+        SMOKE_SEGMENT,
+    )
+    np.testing.assert_array_equal(aligned.t_ns, np.array([10, 30], dtype=np.int64))
+    np.testing.assert_array_equal(aligned.position_m[:, 0], np.array([1.0, 3.0]))
+    # w-first in memory, from Rerun's XYZW on the wire.
+    np.testing.assert_array_equal(aligned.quaternion_wxyz[:, 0], np.array([1.0, 0.0]))
+
+    # Two masks, two valid rows each, one row in common: the counts match, so
+    # nothing downstream could notice the swap.
+    with pytest.raises(ValueError, match=f"{SMOKE_SEGMENT}: 2 of 3 rig rows.*translation.*quaternion.*first at 10 ns"):
+        _rig_trajectory(
+            _transform_rows(
+                [10, 20, 30],
+                [[1.0, 0.0, 0.0], None, [3.0, 0.0, 0.0]],
+                [None, [0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 0.0]],
+            ),
+            SMOKE_SEGMENT,
+        )
+
+
+def test_a_ground_truth_window_with_no_pose_in_it_is_empty() -> None:
+    """A window the layer does not cover is the same answer as a layer that is not there."""
+    assert len(_rig_trajectory(_transform_rows([10, 20], [None, None], [None, None]), SMOKE_SEGMENT)) == 0
+    assert len(_rig_trajectory(pa.table({TIMELINE: pa.array([10], type=pa.int64())}), SMOKE_SEGMENT)) == 0
 
 
 @pytest.mark.slow
