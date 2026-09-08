@@ -396,6 +396,25 @@ fn build_frontend(
     options: frontend::flow::FrontendOptions,
     backend: Backend,
 ) -> Result<FrontendLane, VioError> {
+    // The two counts a backend-specific arm casts to `usize` to size its
+    // buffers, checked here rather than after the cast: the GPU arm's
+    // `optical_flow_levels as usize + 1` panics on `-1` in a debug build and
+    // wraps to zero in a release one, either way before
+    // `FrameToFrameOpticalFlow::with_backends` can run the frontend's own
+    // refusal. Both arms return that refusal now, on the same field and value,
+    // and no device is constructed for a config no backend can run.
+    for (field, value) in [
+        ("optical_flow_levels", config.optical_flow_levels),
+        (
+            "optical_flow_max_iterations",
+            config.optical_flow_max_iterations,
+        ),
+    ] {
+        if value < 0 {
+            return Err(frontend::flow::FrontendError::NegativeConfig { field, value }.into());
+        }
+    }
+
     match backend {
         Backend::Cpu => Ok(FrontendLane::Cpu(
             frontend::flow::FrameToFrameOpticalFlow::new(config.clone(), calibration, options)?,

@@ -44,9 +44,10 @@ use std::path::PathBuf;
 
 use nalgebra::Vector3;
 
+use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::{FrontendError, FrontendOptions};
 use slam_rs::lie::So3;
-use slam_rs::{ImageView, Vio, VioError, VioResult, VioStatus};
+use slam_rs::{Backend, ImageView, Vio, VioError, VioResult, VioStatus};
 
 mod common;
 use common::{IMU, ORACLE, OracleFrame, OracleState, Pgm, run_named};
@@ -97,6 +98,41 @@ fn pipeline() -> Vio<f32> {
         },
     )
     .unwrap()
+}
+
+/// A config field that counts cannot be negative, and the refusal is the same
+/// on both backends because it happens before either one is looked at.
+///
+/// The GPU arm sizes its device buffers with `optical_flow_levels as usize + 1`
+/// and `optical_flow_max_iterations as usize`, so it used to cast `-1` — a
+/// debug-build panic, and in release a wrap to `usize::MAX` that asked the
+/// device for a pyramid it cannot hold and reported *that* instead of the
+/// frontend's own `NegativeConfig`. The CPU arm validated first. The check is
+/// ahead of the branch now, so both arms refuse the same field with the same
+/// value, and no device is constructed for a config no backend can run.
+#[test]
+fn a_negative_config_count_is_refused_on_both_lanes_before_any_cast() {
+    let options = || FrontendOptions {
+        threads: 1,
+        ..FrontendOptions::default()
+    };
+    for field in ["optical_flow_levels", "optical_flow_max_iterations"] {
+        for backend in [Backend::Cpu, Backend::Gpu] {
+            let mut config: VioConfig = common::config();
+            match field {
+                "optical_flow_levels" => config.optical_flow_levels = -1,
+                _ => config.optical_flow_max_iterations = -1,
+            }
+            let refused: VioError =
+                Vio::<f32>::with_backend(config, common::calibration(), options(), backend)
+                    .unwrap_err();
+            assert_eq!(
+                refused,
+                VioError::Frontend(FrontendError::NegativeConfig { field, value: -1 }),
+                "{backend:?} refused {field} = -1 as {refused}"
+            );
+        }
+    }
 }
 
 /// A read PGM as the byte view `Vio::track` takes.
