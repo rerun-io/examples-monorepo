@@ -21,14 +21,9 @@ import pytest
 
 from slam_rs import reference_bundle
 from slam_rs.catalog_feed import Frameset, LocalSegment, open_segment
-from slam_rs.reference import CppAte, ReferenceManifest, ReferenceSegment, load_manifest
+from slam_rs.reference import SMOKE_SEGMENTS, CppAte, ReferenceManifest, ReferenceSegment, load_manifest
 from slam_rs.trajectory import AteResult, Trajectory, ate, read_trajectory
 
-SMOKE_SEGMENTS: tuple[str, ...] = (
-    "msd-index__MIO_others__MIO10_short_2_panorama",
-    "msd-g2__MGO_others__MGO09_short_1_updown",
-)
-"""The two segments whose trajectory, pixel digests and ground truth are all committed."""
 RMSE_TOLERANCE_CM: float = 0.005
 """Rounding slack when reproducing a published centimetre figure."""
 WALL_TOLERANCE_S: float = 0.001
@@ -242,7 +237,7 @@ def test_the_long_tier_trajectories_resolve_through_the_bundle(manifest: Referen
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("segment_id", [segment_id for segment_id in SMOKE_SEGMENTS])
+@pytest.mark.parametrize("segment_id", SMOKE_SEGMENTS)
 def test_a_redecode_reproduces_the_cpp_pixel_digests(manifest: ReferenceManifest, segment_id: str) -> None:
     """The feed hands the core byte-identical pixels to what the C++ reference consumed.
 

@@ -37,13 +37,13 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from slam_rs import _core
 from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream, LocalSegment, SegmentFeed, open_segment
 from slam_rs.frontend_log import FrontendLogger, camera_entity, frontend_blueprint
-from slam_rs.reference import MANIFEST_PATH, ReferenceManifest, ReferenceSegment, flow_config, load_manifest
+from slam_rs.reference import MANIFEST_PATH, SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment, flow_config, load_manifest
 from slam_rs.reference_bundle import BundleFile
 from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import Trajectory, ate, coverage, empty_trajectory, read_trajectory, shift_clock, write_trajectory
 from slam_rs.vio_log import VioLogger, log_rig, vio_blueprint
 
-SMOKE_SEGMENT: str = "msd-index__MIO_others__MIO10_short_2_panorama"
+SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
 """Default segment: the 7.6 s rotation-dominated panorama from the smoke tier."""
 IMU_ENTITY: str = f"{RIG_ENTITY}/imu_00"
 """Where the inertial input is drawn, under the rig it belongs to."""

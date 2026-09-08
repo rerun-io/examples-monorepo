@@ -28,12 +28,12 @@ from slam_rs.catalog_feed import (
     imu_calib,
     open_segment,
 )
-from slam_rs.reference import ReferenceManifest, ReferenceSegment, flow_config, load_manifest
+from slam_rs.reference import SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment, flow_config, load_manifest
 from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import AteResult, Trajectory, associate, ate, read_trajectory, shift_clock, write_trajectory
 from slam_rs.vio_log import VioLogger
 
-SMOKE_SEGMENT: str = "msd-index__MIO_others__MIO10_short_2_panorama"
+SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
 """The 7.6 s two-camera segment the smoke tier runs on."""
 
 
