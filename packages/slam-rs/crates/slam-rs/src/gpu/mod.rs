@@ -477,7 +477,10 @@ pub type LaneBackends<P> = (
 ///
 /// [`crate::frontend::tracker::TrackerError`] when the capacity or the level
 /// count is over its ceiling, or a buffer's element count does not fit a
-/// `usize` — the same refusals the CPU tracker makes.
+/// `usize` — the same refusals the CPU tracker makes; whatever [`gpu_client`]
+/// refuses this host for; [`GpuError::StorageRoundTrip`] from
+/// [`probe_storage`]; and [`GpuError::ClientPanicked`] if anything from the
+/// client to the returned backends panics instead of returning.
 #[cfg(feature = "gpu-core")]
 pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
     capacity: usize,
@@ -485,27 +488,39 @@ pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
     max_iterations: usize,
     max_recovered_dist2: f32,
 ) -> Result<LaneBackends<P>, crate::frontend::tracker::TrackerError> {
-    // Before anything else: a host with no driver, no device or no adapter is a
-    // typed error rather than a panic on cubecl's worker thread, and a runtime
-    // that cannot store these widths produces zeros rather than an error — a
-    // trajectory made of zeros being worse than a refusal.
-    let client = gpu_client()?;
-    probe_storage(&client)?;
-    let tracker: LanePatchTracker<P> = GpuPatchTracker::new(
-        client.clone(),
-        capacity,
-        num_levels,
-        max_iterations,
-        max_recovered_dist2,
-    )?;
-    let builder: LanePyramidBuilder = GpuPyramidBuilder::new(client.clone(), P::OFFSETS);
-    let mut scanner: GpuCornerScan<GpuRuntime> = GpuCornerScan::new(client);
-    // The two stages are handed the same frame, so they read the same upload:
-    // the builder publishes level 0 per camera and the scanner reads it. This
-    // is the one line that makes it one upload per camera per frameset instead
-    // of two (see [`Level0`]).
-    scanner.share_level0(builder.level0_table());
-    Ok((builder, tracker, Box::new(scanner)))
+    // The guard is around the whole of it, not around the client alone: from
+    // here to the returned backends every line allocates, launches or reads on
+    // the device, and CubeCL panics rather than returning an error when one of
+    // those meets a device that is not there (decision D32).
+    guarded(
+        GpuError::ClientPanicked {
+            runtime: RUNTIME_NAME,
+        },
+        || -> Result<LaneBackends<P>, crate::frontend::tracker::TrackerError> {
+            // Before anything else: a host with no driver, no device or no
+            // adapter is a typed error rather than a panic on cubecl's worker
+            // thread, and a runtime that cannot store these widths produces
+            // zeros rather than an error — a trajectory made of zeros being
+            // worse than a refusal.
+            let client = gpu_client()?;
+            probe_storage(&client)?;
+            let tracker: LanePatchTracker<P> = GpuPatchTracker::new(
+                client.clone(),
+                capacity,
+                num_levels,
+                max_iterations,
+                max_recovered_dist2,
+            )?;
+            let builder: LanePyramidBuilder = GpuPyramidBuilder::new(client.clone(), P::OFFSETS);
+            let mut scanner: GpuCornerScan<GpuRuntime> = GpuCornerScan::new(client);
+            // The two stages are handed the same frame, so they read the same
+            // upload: the builder publishes level 0 per camera and the scanner
+            // reads it. This is the one line that makes it one upload per camera
+            // per frameset instead of two (see [`Level0`]).
+            scanner.share_level0(builder.level0_table());
+            Ok((builder, tracker, Box::new(scanner)))
+        },
+    )
 }
 
 /// A failed device read as a typed error, with the runtime's own reason logged.
@@ -539,7 +554,7 @@ fn guarded<T, E: From<GpuError>>(
 ) -> Result<T, E> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         #[cfg(test)]
-        fire_if_armed();
+        fire_if_armed(GUARDED_REGION);
         stage()
     }));
     match outcome {
@@ -556,26 +571,42 @@ fn guarded<T, E: From<GpuError>>(
     }
 }
 
-// Armed by a test to panic where a lost device would (test-only). The failure
-// `guarded` is for cannot be produced on a healthy card — a device that is gone,
-// or a staging allocation refused under memory pressure — so one thread-local
-// flag stands in for it, read at the top of the guarded region, which is where
-// the runtime would raise it. A doc comment cannot sit on a macro invocation.
+// Where a test can make this module panic as a lost device would (test-only).
+// The failure `guarded` is for cannot be produced on a healthy card — a device
+// that is gone, or a staging allocation refused under memory pressure — so one
+// thread-local stands in for it. It names a site rather than being a bare flag
+// because two questions need asking separately: what a panic inside a guarded
+// region does, and what one inside the storage probe does, the probe being what
+// the re-review found running outside the guard. A doc comment cannot sit on a
+// macro invocation.
 #[cfg(test)]
 thread_local! {
-    static STAGE_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAULT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
 }
 
-/// Panic if a test armed this thread, and disarm it.
+/// A fault site: the inside of a guarded region.
 #[cfg(test)]
-fn fire_if_armed() {
-    STAGE_FAULT.with(|armed| assert!(!armed.replace(false), "the device is gone"));
+const GUARDED_REGION: &str = "a guarded region";
+
+/// A fault site: [`probe_storage`], which allocates, launches and reads.
+#[cfg(test)]
+const STORAGE_PROBE: &str = "the storage probe";
+
+/// Panic if a test armed `site`, and disarm it.
+#[cfg(test)]
+fn fire_if_armed(site: &'static str) {
+    FAULT.with(|armed| {
+        if armed.get() == Some(site) {
+            armed.set(None);
+            panic!("the device is gone");
+        }
+    });
 }
 
-/// Make the next guarded stage on this thread panic (test-only).
+/// Make the next arrival at `site` panic (test-only).
 #[cfg(test)]
-fn arm_stage_fault() {
-    STAGE_FAULT.with(|armed| armed.set(true));
+fn arm_fault_at(site: &'static str) {
+    FAULT.with(|armed| armed.set(Some(site)));
 }
 
 /// Refuse a runtime that cannot store an element width the kernels bind.
@@ -608,6 +639,12 @@ pub fn probe_storage<R: cubecl::prelude::Runtime>(
     client: &cubecl::prelude::ComputeClient<R>,
 ) -> Result<(), GpuError> {
     use cubecl::prelude::CubeElement;
+
+    // This function allocates, launches and reads, and until this round it ran
+    // outside every catch: the fault site is here so a test can say that it no
+    // longer does (test-only).
+    #[cfg(test)]
+    fire_if_armed(STORAGE_PROBE);
 
     /// One width: a pattern no zeroing or truncation reproduces.
     fn round_trip<N, R>(
@@ -729,7 +766,7 @@ mod tests {
     /// A panic inside a stage is a typed error, not an unwind into Python.
     ///
     /// What a lost device does to a per-frame call, on the real stage and the
-    /// real client: `arm_stage_fault` panics where the runtime would, at the
+    /// real client: `arm_fault_at` panics where the runtime would, at the
     /// top of the guarded region, and what comes back is the stage's own error
     /// type. The unguarded call on either side of it is the control — the path
     /// works, so the middle line is measuring the guard and not a broken build.
@@ -743,7 +780,7 @@ mod tests {
         let image: crate::image::ImageU16 = crate::image::ImageU16::zeros(64, 64).unwrap();
         builder.build(0, &image, &mut pyramid).unwrap();
 
-        arm_stage_fault();
+        arm_fault_at(GUARDED_REGION);
         let error: crate::pyramid::PyramidError =
             builder.build(0, &image, &mut pyramid).unwrap_err();
         assert!(
@@ -758,6 +795,31 @@ mod tests {
 
         // One call, and only that one: the flag is consumed where it fires.
         builder.build(0, &image, &mut pyramid).unwrap();
+    }
+
+    /// A panic anywhere in the bring-up is a typed error, not an unwind.
+    ///
+    /// The re-review's second gap: the guard ended at the client, and
+    /// `probe_storage` and the three backend constructors — which allocate,
+    /// launch and read — ran after it. The fault is armed at the storage probe,
+    /// which is inside the region only if `gpu_backends` guards the whole of
+    /// what it does, and what comes back is the constructor's own error type.
+    #[test]
+    fn a_panic_after_the_client_is_built_is_a_typed_error() {
+        arm_fault_at(STORAGE_PROBE);
+        let error: crate::frontend::tracker::TrackerError =
+            gpu_backends::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                crate::frontend::tracker::TrackerError::Gpu(GpuError::ClientPanicked { .. })
+            ),
+            "a panic in the storage probe gave {error}"
+        );
+
+        // And the same call with nothing armed builds the three backends, so
+        // what the line above measures is the guard.
+        gpu_backends::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0).unwrap();
     }
 
     /// A library cudarc would panic on is a typed error naming it.
