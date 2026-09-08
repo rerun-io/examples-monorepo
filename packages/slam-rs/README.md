@@ -27,9 +27,10 @@ The core is being filled in stage by stage, bottom up. What is in it today:
 | `landmark` | `StereographicParam` (`project`/`unproject` and both Jacobians), the three-parameter `Landmark` with its backup pair, and `LandmarkDatabase`: the host->target->landmark adjacency, the `min_num_obs = 2` sweep and `remove_keyframes`. Landmarks live in one id-sorted `Vec` behind a `BTreeMap` index rather than a per-landmark hash map, and every map is a `BTreeMap`, so iteration order is reproducible (D31). |
 | `ba_base` | `BundleAdjustmentBase`: the two window state maps, `get_pose_state_with_lin`, basalt's Huber-weighted `compute_error` with optional outlier collection, `compute_projections`, `compute_delta`, `backup`/`restore`, the reprojection residual and its three Jacobians from `ba_utils.h`, `computeRelPose`, and DLT `triangulate` over a ported Eigen `JacobiSVD`. |
 | `imu` | Preintegration: `IntegratedImuMeasurement<S>` with basalt's midpoint propagation, covariance and bias-Jacobian recurrences, the 9-vector residual and its Jacobians, the LDLT square-root inverse covariance, the between-frames accumulation loop, gravity initialisation, and the 15-row IMU block the estimator whitens. |
-| `frontend` | The optical-flow frontend: `patterns` (Pattern24/52/51/50 from `patterns.h`), `se2` (`AffineCompact2` and `Sophus::SE2::exp`), `ldlt` (Eigen's pivoted LDLT at 3x3), `patch` (the streaming inverse-compositional patch build), `tracker` (`PatchSoA`, `FlowTransforms`, the `SourcePatches`/`PatchTracker` stage traits and `CpuPatchTracker`), `detect` (basalt's centred cell grid over kornia-rs's FAST plus OpenCV's suppression), `flow` (`FrameToFrameOpticalFlow`, generic over the builder and tracker) and `parallel` (the explicit thread budget). |
-| `linearize` | The square-root linearization: `LandmarkBlock` (basalt's `[ J_p \| pad \| J_l \| r ]` buffer, the layout arithmetic of `landmark_block_abs_dynamic.hpp:83-96`, the Huber-weighted residual rows, three Householder reflections, the six-Givens damping stack, back-substitution with its exact model cost change) and `LinearizationAbsQR`, which owns the blocks, the IMU blocks and the marginalization prior and produces `H`, `b`, `Q2Jp`, `Q2r` and `l_diff`. Eigen's `makeHouseholder`, `applyHouseholderOnTheLeft` and `makeGivens` are ported coefficient for coefficient rather than delegated to nalgebra's equivalents (D44). |
-| `marg` | Square-root marginalization. `MargHelper`'s three routines from `marg_helper.cpp` — the rank-revealing flat Householder QR of `marginalizeHelperSqrtToSqrt` (the only one the shipped path uses), and the two Schur-complement forms — plus the `marginalize()` mechanics of `sqrt_keypoint_vio.cpp:896-1178` given an explicit keep/marginalize schedule, and `checkMargNullspace`/`checkEigenvalues` returning values instead of printing. Eigen's pivoted LDLT at dynamic size (D41) and its complete orthogonal decomposition, `ColPivHouseholderQR` included, are ported rather than substituted: they are what decides the rank of a deficient block. |
+| `frontend` | The optical-flow frontend: `patterns` (Pattern52/51 from `patterns.h`; the other two are unreachable on every shipped config), `se2` (`AffineCompact2` and `Sophus::SE2::exp`), `ldlt` (Eigen's pivoted LDLT at 3x3), `patch` (the streaming inverse-compositional patch build), `tracker` (`PatchSoA`, `FlowTransforms`, the `SourcePatches`/`PatchTracker` stage traits and `CpuPatchTracker`), `detect` (basalt's centred cell grid over kornia-rs's FAST plus OpenCV's suppression), `flow` (`FrameToFrameOpticalFlow`, generic over the builder and tracker) and `parallel` (the explicit thread budget). |
+| `linearize` | The square-root linearization: `LandmarkBlock` (basalt's `[ J_p \| pad \| J_l \| r ]` buffer, the layout arithmetic of `landmark_block_abs_dynamic.hpp:83-96`, the Huber-weighted residual rows, three Householder reflections, back-substitution with its exact model cost change) and `LinearizationAbsQR`, which owns the blocks, the IMU blocks and the marginalization prior and produces `H`, `b`, `Q2Jp`, `Q2r` and `l_diff`. No damping and no Jacobian scaling: the fork comments every call site out and the port carries none of it (D34, D68). Eigen's `makeHouseholder` and `applyHouseholderOnTheLeft` are ported coefficient for coefficient rather than delegated to nalgebra's equivalents (D44). |
+| `marg` | Square-root marginalization: `MargHelper`'s rank-revealing flat Householder QR, `marginalizeHelperSqrtToSqrt` — the one routine of the three the shipped path reaches — plus the `marginalize()` mechanics of `sqrt_keypoint_vio.cpp:896-1178` given an explicit keep/marginalize schedule. The two squared-form routines, the complete orthogonal decomposition they inverted the marginalized block with, and `checkMargNullspace`/`checkEigenvalues` are **not** ported: `SqrtKeypointVio::new` refuses `vio_sqrt_marg` off, so nothing on any shipped config reaches them (D68). |
+| `eigen` | The Eigen ports, in one place, each reproducing Eigen's **operation order** rather than only its result: `qr` (`makeHouseholder`, `applyHouseholderOnTheLeft`, `makeGivens` and the `Redux.h` traversals), `ldlt` (the pivoted LDLT at dynamic size, D41, which the LM step solves through), `svd` (the Jacobi SVD the DLT triangulation needs) and `blas` (the `gemv` associations the other three call). Not "numerics utilities" to be swapped for nalgebra's (D44): the last bit reaches a rank test, a finite check and a triangulation gate. |
 | `estimator` | The Offline sliding-window driver: `process_frame` (cover, initialise, measure, optimise, marginalize), `schedule` (basalt's keyframe vote, the lazy keyframe budget and the keep/marginalize sets `marg` is given) and `optimize` (the Levenberg-Marquardt loop, with the per-frame `lambda` reset, the `lambda · diag(H)` damping and the shared 7-iteration budget). |
 
 Two conventions in `ba_base` are basalt deviating from its own papers, and the
@@ -65,9 +66,10 @@ small visual-odometry problems (two and three frames, two cameras, three to six
 landmarks with two to four observations each, two of them carrying a
 marginalization prior with both of their first frames frozen at their
 linearization point) with, per landmark block, the layout numbers, the
-linearization error, the whole `storage` buffer after `linearizeLandmark`, after
-`performQR`, after `setLandmarkDamping(lambda)` and after
-`setLandmarkDamping(0)` undoes it, the `Q2Jp`/`Q2r` and `JtJ`/`Jtr` exports, and
+linearization error, the whole `storage` buffer after `linearizeLandmark` and
+after `performQR` (the damped and undamped buffers are in the file too, read by
+nothing since D68 dropped the damping stack), the `Q2Jp`/`Q2r` and `JtJ`/`Jtr`
+exports, and
 what `backSubstitute` leaves behind - plus, per problem, what
 `LinearizationAbsQR` returns through its public interface: the error, the dense
 `H` and `b`, the stacked `Q2Jp`/`Q2r` and the total `l_diff`; and
@@ -216,7 +218,7 @@ sort, with no QR preconditioner. It is worth porting because basalt gates
 landmark acceptance on `0 < inv_dist < 3`, where a borderline point either exists
 or does not.
 
-### Marginalization, and the two places a rank decision is load-bearing
+### Marginalization, and where a rank decision is load-bearing
 
 `marginalizeHelperSqrtToSqrt` is one flat, rank-revealing Householder QR over
 the stacked `[J_marg | J_keep]`, columns permuted **marginalized first**
@@ -257,35 +259,19 @@ inputs — in *opposite directions* in the two precisions on the same `9x2`
 problem — which is why the traversal is a parameter of `make_householder` and
 named at every call site.
 
-The other rank decision is Eigen's complete orthogonal decomposition, which the
-two squared routines invert the marginalized block with
-(`marg_helper.cpp:99-100`) after basalt tried and rejected `ldlt`, `fullPivLu`,
-`colPivHouseholderQr` and a Jacobi-SVD pseudo-inverse — the last one with a
-"DO NOT USE!!!". It is ported, not substituted, `ColPivHouseholderQR` and all:
-the LAPACK norm-downdate with its own `sqrt(epsilon)` recompute threshold, the
-`bug 941` non-zero-pivot rule, the `Z` reflectors, and `rank()` as
-`|pivot| > |maxpivot| * epsilon * diagonalSize`. On the fixture's rank-deficient
-blocks the ported pseudo-inverse reproduces Eigen's to **2.0e-16** — one ulp.
-Two departures are documented in the source and neither reaches a rank
-comparison: Eigen applies `Qᵀ` through a blocked `HouseholderSequence` once the
-sequence is at least 48 long, and its triangular solves are blocked kernels;
-both are plain loops here, the same product-kernel association residue D50
-already accepted.
-
-`Eigen::LDLT` is ported at dynamic size for the same reason it was ported at 9x9
-for the IMU (decision D41): `marginalizeHelperSqToSqrt` takes the square root of
-a reduced Hessian that is *rank deficient exactly when it matters*, and what
-comes out is decided by Eigen's pivot-on-the-un-updated-diagonal rule and by the
-`vectorD().array().max(0)` clamp at `:204`.
-
-One quantity in that routine does not reach ulp level and the reason is
-arithmetic, not a formula. On a rank-deficient reduced Hessian the last LDLT
-pivot is cancellation noise — `4.4e-16` against a matrix whose other eigenvalues
-are order one — and `:229` divides `b` by its root, `2.1e-8`, because that is far
-above the `sqrt(min())` floor it guards with. Noise over noise: the port and the
-C++ agree on that entry to `2.5e-9` rather than to an ulp. Nothing consumes it
-alone — the estimator only ever sees `J_mᵀJ_m` and `J_mᵀr_m`, and on that same
-case `J_mᵀr_m` agrees **exactly**.
+`MargHelper`'s other two routines decide rank a second way, and the port
+carries neither. They invert the marginalized block with Eigen's complete
+orthogonal decomposition (`marg_helper.cpp:99-100`, which basalt reached after
+trying and rejecting `ldlt`, `fullPivLu`, `colPivHouseholderQr` and a Jacobi-SVD
+pseudo-inverse — the last one with a "DO NOT USE!!!") and take the square root
+of the reduced Hessian through `Eigen::LDLT`. Both were ported, COD and all, and
+D68 removed them: they are the squared form basalt keeps behind `vio_sqrt_marg`
+as its 2019 baseline, `SqrtKeypointVio::new` refuses that flag off, and no
+shipped config reaches either. `marg_oracle.json` still carries their outputs as
+the C++ emitted them; nothing reads those entries. Eigen's pivoted LDLT is still
+ported at dynamic size, for the reason D41 gave and for the one live consumer
+left: `LDLT::solve` is where the LM increment comes from, and the increment
+reaches a threshold comparison.
 
 Finally, one shape makes basalt read out of range. When the marginalized block
 consumes every row of rank, `total_rank == marg_rank == rows` and `:320-323` asks
@@ -308,15 +294,14 @@ ICCV 2021 paper's own statement that the Givens damping stack is not used in the
 sliding-window VIO. Levenberg-Marquardt damping enters through
 `H.diagonal() * lambda` in the dense solve instead (`:1415-1417`).
 
-The port implements all five anyway - `set_pose_damping`,
-`set_landmark_damping`, `scale_jl_cols`, `scale_jp_cols`, `get_jp_diag2` - and
-calls none of them from its own driver, so the hook is real if a parity gap ever
-points at it. There is one live entry: `backSubstitute` calls
-`setLandmarkDamping(0)` on itself (`landmark_block_abs_dynamic.hpp:310`) before
-it computes the model cost change, and with no rotations stored that reduces to
-zeroing the damping diagonal. The six-Givens stack and its LIFO un-apply are
-pinned against the C++ fixture rather than against a live run, because a live run
-never reaches them.
+The port carries none of it (D68). The five methods it used to implement -
+`set_pose_damping`, `set_landmark_damping`, `scale_jl_cols`, `scale_jp_cols`,
+`get_jp_diag2` - together with the six-Givens stack and its LIFO un-apply, were
+reachable from no driver and pinned only against the C++ fixture, because a live
+run never reaches them. `backSubstitute`'s own `setLandmarkDamping(0)`
+(`landmark_block_abs_dynamic.hpp:310`) has nothing to undo here: `storage`
+starts zeroed, both QR paths stop at `num_rows - 3`, so the three damping rows
+are provably still zero when the model cost change is computed.
 
 One consequence of that same code path changes what `l_diff` means. With the
 optimal landmark increment substituted in, the first three rows of `Q^T J inc`
