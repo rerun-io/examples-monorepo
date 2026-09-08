@@ -149,6 +149,11 @@ site-package-path = [
     ".pixi/envs/slam-evals-dev/lib/python3.10/site-packages",
     ".pixi/envs/slam-rs-dev/lib/python3.12/site-packages",
     ".pixi/envs/slam-rs-dev/lib/python3.12/site-packages/rerun_sdk",
+    # The macOS lane of the same package: on a Mac the linux-only `slam-rs-dev`
+    # above does not exist, and a path that does not exist is skipped, so both
+    # can be listed and each machine finds the one it has.
+    ".pixi/envs/slam-rs-osx-dev/lib/python3.12/site-packages",
+    ".pixi/envs/slam-rs-osx-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/sapiens2-pose-dev/lib/python3.12/site-packages",
     ".pixi/envs/sapiens2-pose-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/sapiens-coco133-pose-dev/lib/python3.12/site-packages",
