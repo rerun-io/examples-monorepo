@@ -38,7 +38,7 @@ use slam_rs::lie::LieScalar;
 use slam_rs::{ImageView, Vio, VioResult, VioStatus};
 
 mod common;
-use common::{Clip, Pgm, config_for, read_pgm};
+use common::{Clip, ClipScalar, Pgm, config_for, read_pgm};
 
 /// One inertial sample of `imu.csv`.
 struct ImuRow {
@@ -196,7 +196,7 @@ fn replay<S: LieScalar>(
     );
 }
 
-/// The whole clip, in the precision `SLAM_RS_CLIP_SCALAR` names.
+/// The whole clip, in the precision [`ClipScalar::from_env`] selects.
 #[test]
 fn the_whole_clip_replays_into_a_trajectory_csv() {
     let Some(directory) = std::env::var_os("SLAM_RS_CLIP_DIR").map(PathBuf::from) else {
@@ -211,10 +211,10 @@ fn the_whole_clip_replays_into_a_trajectory_csv() {
     let imu: Vec<ImuRow> = read_imu(&directory.join("imu.csv"));
     assert_eq!(imu.len(), clip.imu_samples);
 
-    let scalar: String = std::env::var("SLAM_RS_CLIP_SCALAR").unwrap_or_else(|_| "f32".to_string());
+    let scalar: ClipScalar = ClipScalar::from_env(ClipScalar::F32);
     let out: PathBuf = std::env::var_os("SLAM_RS_CLIP_OUT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| directory.join(format!("slam_rs_{scalar}.csv")));
+        .unwrap_or_else(|| directory.join(format!("slam_rs_{}.csv", scalar.rust_name())));
     let stats: Option<PathBuf> = std::env::var_os("SLAM_RS_CLIP_STATS").map(PathBuf::from);
     // The clip's own `calib.json` unless another file in it is named: the
     // provenance of the calibration is itself a perturbation worth measuring,
@@ -222,18 +222,22 @@ fn the_whole_clip_replays_into_a_trajectory_csv() {
     let calibration: PathBuf = directory
         .join(std::env::var("SLAM_RS_CLIP_CALIB").unwrap_or_else(|_| "calib.json".to_string()));
     println!(
-        "{} ({} calibration from {}, {} cameras, {} framesets, {} inertial samples), {scalar}",
+        "{} ({} calibration from {}, {} cameras, {} framesets, {} inertial samples), {}",
         clip.segment_id,
         clip.calibration_source,
         calibration.display(),
         clip.num_cameras,
         clip.framesets,
-        clip.imu_samples
+        clip.imu_samples,
+        scalar.rust_name()
     );
     let streamed: bool = std::env::var("SLAM_RS_CLIP_IMU").is_ok_and(|mode| mode == "streamed");
-    match scalar.as_str() {
-        "f32" => replay::<f32>(&clip, &directory, &imu, &calibration, streamed, &out, stats),
-        "f64" => replay::<f64>(&clip, &directory, &imu, &calibration, streamed, &out, stats),
-        other => panic!("SLAM_RS_CLIP_SCALAR is f32 or f64, not {other}"),
+    match scalar {
+        ClipScalar::F32 => {
+            replay::<f32>(&clip, &directory, &imu, &calibration, streamed, &out, stats);
+        }
+        ClipScalar::F64 => {
+            replay::<f64>(&clip, &directory, &imu, &calibration, streamed, &out, stats);
+        }
     }
 }

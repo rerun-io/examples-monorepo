@@ -292,6 +292,15 @@ pub struct UnifiedParams<S> {
 /// The six variants are the ones that appear in shipped calibration files.
 /// basalt's variant also holds `fisheye624`, which no reference calibration
 /// uses; it is left out until a dataset needs it.
+///
+/// **Three of the six parse and are then refused.** `ds`, `eucm` and `ucm`
+/// have no projection in this port — D13 keeps the pinhole, kb4 and
+/// pinhole-radtan8 the shipped rigs use — so
+/// [`crate::camera::CameraEnum::from_model`] answers them with
+/// `CameraError::UnsupportedModel`. They are modelled here rather than left to
+/// serde so that a EuRoC-shaped calibration reports *which* model cannot be
+/// used, instead of a parse error naming a field; `euroc_ds_calib.json` is the
+/// fixture that pins it.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "camera_type", content = "intrinsics")]
 pub enum CameraModel<S> {

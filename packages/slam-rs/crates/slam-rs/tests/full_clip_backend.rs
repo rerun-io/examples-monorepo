@@ -416,7 +416,8 @@ fn compare<S: LieScalar>(
     )
 }
 
-/// The whole clip's backend replay, in the precision `SLAM_RS_ORACLE_SCALAR` names.
+/// The whole clip's backend replay, in the precision
+/// [`common::ClipScalar::from_env`] selects.
 #[test]
 fn the_whole_clip_backend_follows_the_cpp() {
     let Some(dump) = std::env::var_os("SLAM_RS_ORACLE_JSON").map(PathBuf::from) else {
@@ -439,16 +440,14 @@ fn the_whole_clip_backend_follows_the_cpp() {
         oracle.runs.len(),
         oracle.flow.len()
     );
-    let scalar: String =
-        std::env::var("SLAM_RS_ORACLE_SCALAR").unwrap_or_else(|_| "double".to_string());
-    let run: &OracleRun = common::run_named(&oracle, &scalar);
+    let scalar: common::ClipScalar = common::ClipScalar::from_env(common::ClipScalar::F64);
+    let run: &OracleRun = common::run_named(&oracle, scalar.cpp_name());
     let out: Option<PathBuf> = std::env::var_os("SLAM_RS_ORACLE_OUT").map(PathBuf::from);
-    let (worst_m, integer_breaks): (f64, usize) = match scalar.as_str() {
-        "double" => compare::<f64>(&oracle, run, &clip, out),
-        "float" => compare::<f32>(&oracle, run, &clip, out),
-        other => panic!("SLAM_RS_ORACLE_SCALAR is double or float, not {other}"),
+    let (worst_m, integer_breaks): (f64, usize) = match scalar {
+        common::ClipScalar::F64 => compare::<f64>(&oracle, run, &clip, out),
+        common::ClipScalar::F32 => compare::<f32>(&oracle, run, &clip, out),
     };
-    if scalar == "double" {
+    if scalar == common::ClipScalar::F64 {
         assert!(
             worst_m <= F64_IDENTITY_M,
             "the backend left basalt's by {worst_m:.4e} m over {} framesets, past {F64_IDENTITY_M:.0e}",

@@ -69,6 +69,58 @@ pub fn calibration_text(name: &str) -> &'static str {
     }
 }
 
+/// Which precision a whole-clip lane runs.
+///
+/// Two lanes select it and, historically, with two vocabularies:
+/// `SLAM_RS_CLIP_SCALAR=f32|f64` for the port's own frontend and
+/// `SLAM_RS_ORACLE_SCALAR=float|double` for the backend replay, so a reader
+/// running both over one clip had to remember which file wanted which word.
+/// [`Self::from_env`] takes either variable and either vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipScalar {
+    F32,
+    F64,
+}
+
+impl ClipScalar {
+    /// `SLAM_RS_CLIP_SCALAR` first, then `SLAM_RS_ORACLE_SCALAR`, then
+    /// `default`. `f32` and `float` mean the same thing, as do `f64` and
+    /// `double`.
+    ///
+    /// # Panics
+    ///
+    /// On a value that is none of the four.
+    pub fn from_env(default: Self) -> Self {
+        for name in ["SLAM_RS_CLIP_SCALAR", "SLAM_RS_ORACLE_SCALAR"] {
+            let Ok(value) = std::env::var(name) else {
+                continue;
+            };
+            return match value.as_str() {
+                "f32" | "float" => Self::F32,
+                "f64" | "double" => Self::F64,
+                other => panic!("{name} is f32/float or f64/double, not {other}"),
+            };
+        }
+        default
+    }
+
+    /// `"f32"` or `"f64"`, which is what a written CSV's name carries.
+    pub fn rust_name(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::F64 => "f64",
+        }
+    }
+
+    /// `"float"` or `"double"`, which is how the C++ dump keys its runs.
+    pub fn cpp_name(self) -> &'static str {
+        match self {
+            Self::F32 => "float",
+            Self::F64 => "double",
+        }
+    }
+}
+
 /// What `tests/tools/dump_clip.py` writes beside the pixels.
 ///
 /// Both whole-clip lanes read this file — one through its own frontend, one

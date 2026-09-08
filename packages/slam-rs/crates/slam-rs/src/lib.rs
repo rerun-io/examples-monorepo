@@ -474,8 +474,6 @@ pub struct Vio<S: lie::LieScalar = f32> {
     frames: Vec<image::ImageU16>,
     /// `img->masks`, always empty here: masks come from Monado.
     masks: Vec<frontend::detect::Masks>,
-    /// The last IMU timestamp accepted, for the ordering check.
-    last_imu_t_ns: Option<i64>,
     /// Cameras in the rig; every frameset must carry exactly this many.
     camera_count: usize,
     /// The last frameset's timestamp, `t_ns` in the frontend (`:172`).
@@ -532,7 +530,6 @@ impl<S: lie::LieScalar> Vio<S> {
             calib_f32,
             frames: Vec::new(),
             masks: vec![frontend::detect::Masks::default(); camera_count],
-            last_imu_t_ns: None,
             camera_count,
             last_frame_t_ns: None,
             last_stats: None,
@@ -572,9 +569,12 @@ impl<S: lie::LieScalar> Vio<S> {
     /// The last inertial timestamp accepted, or `None` before the first sample.
     ///
     /// The frontier [`check_imu_sample`] measures against; a caller pushing a
-    /// batch reads it to check the whole batch before pushing any of it.
+    /// batch reads it to check the whole batch before pushing any of it. It is
+    /// the estimator's own frontier, not a second copy: `push_imu` hands every
+    /// accepted sample to both preintegrators, so the two could only differ by
+    /// a bug.
     pub fn last_imu_t_ns(&self) -> Option<i64> {
-        self.last_imu_t_ns
+        self.estimator.newest_imu_t_ns()
     }
 
     /// Add one IMU sample: `gyro` in rad/s, `accel` in m/s², both in the rig
@@ -587,7 +587,7 @@ impl<S: lie::LieScalar> Vio<S> {
     /// Whatever [`check_imu_sample`] refuses: a duplicate or out-of-order
     /// timestamp, never a silent reorder, and a non-finite component.
     pub fn push_imu(&mut self, t_ns: i64, gyro: [f64; 3], accel: [f64; 3]) -> Result<(), VioError> {
-        check_imu_sample(t_ns, &gyro, &accel, self.last_imu_t_ns)?;
+        check_imu_sample(t_ns, &gyro, &accel, self.last_imu_t_ns())?;
         let sample: imu::ImuSample = imu::ImuSample {
             t_ns,
             gyro: Vector3::new(gyro[0], gyro[1], gyro[2]),
@@ -595,7 +595,6 @@ impl<S: lie::LieScalar> Vio<S> {
         };
         self.frontend_imu.push_back(sample);
         self.estimator.push_imu(sample);
-        self.last_imu_t_ns = Some(t_ns);
         Ok(())
     }
 

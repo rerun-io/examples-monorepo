@@ -741,9 +741,12 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     /// Samples must arrive in order; a sample that does not follow the last one
     /// **accepted** is dropped rather than reordered, because the integration
     /// reads the stream strictly forward. "Accepted" is
-    /// `Self::newest_imu_t_ns`, not the queue's back: the newest sample may
+    /// [`Self::newest_imu_t_ns`], not the queue's back: the newest sample may
     /// already sit in `Self::pending`, leaving the queue empty and an older
-    /// sample free to slot in behind it. The static bias calibration
+    /// sample free to slot in behind it. The drop is reachable only from a
+    /// direct `SqrtKeypointVio` user, which is `tests/vio_oracle.rs`:
+    /// [`Vio::push_imu`](crate::Vio::push_imu) refuses the same sample with a
+    /// typed error before it gets here. The static bias calibration
     /// (`calib_bias.hpp:101-107`) is applied when the sample is popped, as
     /// `:298-299` does, not here.
     pub fn push_imu(&mut self, sample: ImuSample) {
@@ -770,6 +773,12 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     /// may push the missing samples and retry the same frameset.
     pub fn imu_covers_frame(&self, t_ns: i64) -> bool {
         self.newest_imu_t_ns.is_some_and(|newest| newest > t_ns)
+    }
+
+    /// The newest inertial timestamp accepted, or `None` before the first
+    /// sample.
+    pub fn newest_imu_t_ns(&self) -> Option<i64> {
+        self.newest_imu_t_ns
     }
 
     /// Whether the window has a state (`initialized`, `:233`).
