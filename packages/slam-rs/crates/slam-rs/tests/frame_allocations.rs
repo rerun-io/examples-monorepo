@@ -45,6 +45,7 @@ use nalgebra::Vector3;
 
 use slam_rs::calib::{CalibAccelBias, CalibGyroBias, Calibration, CameraModel, PinholeParams};
 use slam_rs::config::{MatchingGuessType, VioConfig};
+use slam_rs::frontend::detect::CellGrid;
 use slam_rs::frontend::flow::{
     FlowFrame, FrameToFrameOpticalFlow, FrontendOptions, Keypoints, PosePrediction,
 };
@@ -281,19 +282,37 @@ fn copying_the_warp_arrays_costs_nothing_once_warm() {
     assert_eq!(destination, source);
 }
 
+/// The structural bound on one frame's allocator calls, from the band scans.
+///
+/// The detector scans one whole-width band per **cell row** per rung of the
+/// threshold ladder — every cell of a grid row filters its own columns out of
+/// the same band, see `Band` in `frontend::detect` — over one detection pass per
+/// camera. Each scan costs one `Vec` per row of the band, allocated and freed
+/// (`features/fast.rs:465`, the `row_cap` buffer), plus the one
+/// `fast_detect_rect_u8` returns (`features/cells.rs:141`); 512 is the slack for
+/// everything else a frame touches.
+///
+/// The count is `cameras x cell rows x rungs x rows-per-band`, which is the
+/// **worst** frame: the one where no cell ever fills, so every row is scanned at
+/// every rung. A textured frame scans far fewer bands, which is why the flat
+/// frame below is the one this bounds tightly. A detector that scanned per
+/// **cell** instead — the shape this replaced — would multiply the band term by
+/// `grid.columns` and fail it.
+fn band_scan_bound(grid: &CellGrid, cameras: usize) -> usize {
+    let rows: usize = (grid.y_stop - grid.y_start) / grid.cell + 1;
+    // 40, 20, 10, 5.
+    let ladder: usize = 4;
+    let rows_per_band: usize = grid.cell - 2 * 3;
+    cameras * rows * ladder * (rows_per_band + 1) * 2 + 512
+}
+
 /// What a whole steady-state frame costs, and where that goes.
 ///
 /// A frame is **not** allocation-free and is not claimed to be. Every one of
-/// those allocations is kornia's, not the port's: `fast_detect_rect_u8` returns a
-/// fresh `Vec<FastCorner>` (`features/cells.rs:141`) and the row kernel it calls
-/// allocates one `Vec` **per image row** of the region
-/// (`features/fast.rs:465`, the `row_cap` buffer). The detector scans one
-/// whole-width band per **cell row** per rung of the threshold ladder — every
-/// cell of a grid row filters its own columns out of the same band, see `Band`
-/// in `frontend::detect` — over two detection passes, so the count is
-/// `cell rows x rungs x rows-per-band x passes` and depends on how many rows
-/// fall all the way down the ladder, which is why a *textured* frame here costs
-/// a few hundred and the flat frame in the next test costs a few thousand.
+/// those allocations is kornia's, not the port's, and [`band_scan_bound`] is
+/// where they come from. A *textured* frame here costs a few hundred, because
+/// most cells are full and never ask for a band; the flat frame in the next test
+/// asks for all of them and costs a few thousand.
 ///
 /// The next test is the attribution: a frame that finds **no keypoints at all**
 /// costs more than a textured one, so nothing on the port's own per-frame path —
@@ -318,16 +337,8 @@ fn a_steady_state_frame_reports_its_allocation_count() {
             .unwrap();
     }
 
-    let grid = flow.occupancy_grid();
-    // One band per cell row, not one scan per cell: the columns are filtered
-    // out of a scan the whole grid row shares.
-    let rows: usize = (grid.y_stop - grid.y_start) / grid.cell + 1;
-    // 40, 20, 10, 5.
-    let ladder: usize = 4;
-    // One `Vec` per row of the band, which spans the cell's inner region, plus
-    // the returned one, each allocated and freed, over two detection passes.
-    let rows_per_band: usize = grid.cell - 2 * 3;
-    let bound: usize = rows * ladder * (rows_per_band + 1) * 2 * 2 + 512;
+    let grid: CellGrid = flow.occupancy_grid();
+    let bound: usize = band_scan_bound(&grid, 2);
 
     let mut counts: Vec<usize> = Vec::new();
     for (step, images) in frames.iter().enumerate().skip(3) {
@@ -342,7 +353,8 @@ fn a_steady_state_frame_reports_its_allocation_count() {
     assert!(
         counts.iter().all(|count| *count <= bound),
         "a steady-state frame reached the allocator {counts:?} times, over the \
-         structural bound of {bound} for {rows} cell rows"
+         structural bound of {bound} for {} cell rows",
+        (grid.y_stop - grid.y_start) / grid.cell + 1
     );
 }
 
@@ -351,7 +363,13 @@ fn a_steady_state_frame_reports_its_allocation_count() {
 /// If the per-frame allocations came from the keypoints — growing the id, warp
 /// and response arrays, or the snapshot copying them — this would be near zero.
 /// It is not: it is the same order as the textured frame, which is what pins the
-/// cost on the detector's per-cell `Vec` rather than on anything the port owns.
+/// cost on the detector's band scans rather than on anything the port owns.
+///
+/// This frame is also the one [`band_scan_bound`] is tight on: no cell ever
+/// fills, so every cell row is scanned at every rung of the ladder and the count
+/// is the whole band term. That is what makes the upper bound here a regression
+/// test and the textured one only a ceiling — a per-cell scan multiplies this
+/// frame's count by the grid's column count and fails.
 #[test]
 fn a_frame_that_finds_nothing_costs_the_same_order() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> =
@@ -384,7 +402,15 @@ fn a_frame_that_finds_nothing_costs_the_same_order() {
     assert!(
         counted.total() > 1_000,
         "a frame with no keypoints at all cost only {counted:?}, so the \
-         detector's per-cell allocation is not the dominant source after all"
+         detector's band scans are not the dominant source after all"
+    );
+    let bound: usize = band_scan_bound(&flow.occupancy_grid(), 2);
+    assert!(
+        counted.total() <= bound,
+        "the frame that scans every band reached the allocator {} times, over \
+         the structural bound of {bound}: the detector is scanning more than one \
+         band per cell row and rung",
+        counted.total()
     );
 }
 
