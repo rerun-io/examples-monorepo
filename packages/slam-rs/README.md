@@ -30,6 +30,7 @@ The core is being filled in stage by stage, bottom up. What is in it today:
 | `frontend` | The optical-flow frontend: `patterns` (Pattern24/52/51/50 from `patterns.h`), `se2` (`AffineCompact2` and `Sophus::SE2::exp`), `ldlt` (Eigen's pivoted LDLT at 3x3), `patch` (the streaming inverse-compositional patch build), `tracker` (`PatchSoA`, `FlowTransforms`, the `SourcePatches`/`PatchTracker` stage traits and `CpuPatchTracker`), `detect` (basalt's centred cell grid over kornia-rs's FAST plus OpenCV's suppression), `flow` (`FrameToFrameOpticalFlow`, generic over the builder and tracker) and `parallel` (the explicit thread budget). |
 | `linearize` | The square-root linearization: `LandmarkBlock` (basalt's `[ J_p \| pad \| J_l \| r ]` buffer, the layout arithmetic of `landmark_block_abs_dynamic.hpp:83-96`, the Huber-weighted residual rows, three Householder reflections, the six-Givens damping stack, back-substitution with its exact model cost change) and `LinearizationAbsQR`, which owns the blocks, the IMU blocks and the marginalization prior and produces `H`, `b`, `Q2Jp`, `Q2r` and `l_diff`. Eigen's `makeHouseholder`, `applyHouseholderOnTheLeft` and `makeGivens` are ported coefficient for coefficient rather than delegated to nalgebra's equivalents (D44). |
 | `marg` | Square-root marginalization. `MargHelper`'s three routines from `marg_helper.cpp` — the rank-revealing flat Householder QR of `marginalizeHelperSqrtToSqrt` (the only one the shipped path uses), and the two Schur-complement forms — plus the `marginalize()` mechanics of `sqrt_keypoint_vio.cpp:896-1178` given an explicit keep/marginalize schedule, and `checkMargNullspace`/`checkEigenvalues` returning values instead of printing. Eigen's pivoted LDLT at dynamic size (D41) and its complete orthogonal decomposition, `ColPivHouseholderQR` included, are ported rather than substituted: they are what decides the rank of a deficient block. |
+| `estimator` | The Offline sliding-window driver: `process_frame` (cover, initialise, measure, optimise, marginalize), `schedule` (basalt's keyframe vote, the lazy keyframe budget and the keep/marginalize sets `marg` is given) and `optimize` (the Levenberg-Marquardt loop, with the per-frame `lambda` reset, the `lambda · diag(H)` damping and the shared 7-iteration budget). |
 
 Two conventions in `ba_base` are basalt deviating from its own papers, and the
 port keeps **both** halves of each. The reprojection residual is `pi(...) - z`,
@@ -331,8 +332,13 @@ residual `Q1^T r` already is. A port that dropped the constant would make every
 Levenberg-Marquardt gain ratio wrong in the same direction, which still
 converges, only worse.
 
-Still to come: the sliding-window driver — the keyframe and marginalization
-schedule, the Levenberg-Marquardt loop and the estimator's own state machine.
+None of that is still to come: the sliding-window driver, its keyframe and
+marginalization schedule and this Levenberg-Marquardt loop are the `estimator`
+module (`schedule.rs`, `optimize.rs`), and every reference number in this README
+is what they produce. What is not ported is realtime mode — basalt's two threads
+joined by bounded queues. Offline mode runs the frontend and then the estimator
+to completion in the calling thread, which is what makes a repeat run over the
+same input bit-identical (D17).
 
 ## Layout
 
@@ -389,8 +395,10 @@ Spark's: conda-forge ships both packages at 13.0 there through the `sbsa` arm
 variant, whose header directory is `targets/sbsa-linux`, which is the one thing
 `CUDA_PATH` has to say per target.
 
-The portable lane's four tasks need no CUDA package at all, so they live in the
-base feature and run from `slam-rs`/`slam-rs-dev` on Linux and from
+The portable lane's four tasks are not in that environment, and the difference
+is the point of the split: `gpu-wgpu` links no NVIDIA crate, so they need no CUDA
+package and live in the base feature, where every Linux platform the package
+declares can run them — from `slam-rs`/`slam-rs-dev` on Linux and from
 `slam-rs-osx`/`slam-rs-osx-dev` on the Mac:
 
 ```bash
@@ -404,18 +412,7 @@ pixi run -e slam-rs-dev --frozen slam-rs-wgpu-build      # a core whose `--gpu` 
 so an item the `gpu` feature keeps alive and this lane does not is dead code
 nobody sees.
 
-The **portable** lane's three tasks are not in it, and the difference is the
-point of the split: `gpu-wgpu` links no NVIDIA crate, so those tasks need no
-CUDA package and live in the base feature, where every Linux platform the
-package declares can run them.
-
-```bash
-pixi run -e slam-rs-dev --frozen slam-rs-wgpu-check  # the portable lane still compiles
-pixi run -e slam-rs-dev --frozen slam-rs-wgpu-test   # the same kernels through wgpu
-pixi run -e slam-rs-dev --frozen slam-rs-wgpu-build  # a core whose `--gpu` is wgpu
-```
-
-On macOS the same three tasks run from the mac lane's environment, which is
+On macOS the same four tasks run from the mac lane's environment, which is
 where that platform's `slam-rs` features are solved, and Metal is the backend
 `AutoGraphicsApi` picks there:
 
@@ -634,8 +631,9 @@ digest, the `gt.csv` sidecar, the capture and ground-truth properties the catalo
 reports, the frozen decode path and the frozen IMU noise model. A `[[dataset]]`
 block per catalog dataset pins the rig geometry — per-camera resolution and image
 rotation — and names the basalt VIO config its segments run with; a `[robocap]`
-section adds session 15, which has no ground truth and is gated against basalt's
-own output instead.
+section adds the two RoboCap sessions, 15 (1,588 framesets) and 21 (4,648),
+which have no ground truth and are gated against basalt's own output instead.
+Only session 15 carries a reference wall, measured on the cap itself.
 
 Four things are frozen because the catalog cannot carry them and each one moves
 the numbers: the IMU noise densities and update rate (basalt's `msd*_calib.json`),

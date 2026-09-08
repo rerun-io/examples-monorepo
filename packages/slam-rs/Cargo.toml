@@ -30,10 +30,6 @@ thiserror = "2"
 # which builds an explicitly sized pool: the ambient global pool is forbidden
 # (decision D31), because its width would decide the reduction shape.
 rayon = "1"
-# The marginalization QR and the final dense solve will use faer, pinned to
-# kornia-rs's exact version so the graph never holds two copies (decision D07).
-# Declared now, used by the linearization PR; nothing depends on it yet.
-faer = "=0.24.4"
 # dev-only
 approx = "0.5"
 proptest = "1"
