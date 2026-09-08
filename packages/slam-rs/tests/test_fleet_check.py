@@ -7,8 +7,9 @@ needs none of that: the verdict a clip's numbers earn, and how the row reads.
 
 import json
 import math
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
@@ -16,7 +17,7 @@ from fixture_types import never
 
 from slam_rs import _core
 from slam_rs.apis import fleet_check
-from slam_rs.apis.fleet_check import ClipResult, Config, clip_json, main, measure, this_lane
+from slam_rs.apis.fleet_check import CLIP_JSON_KEYS, ClipResult, Config, clip_json, main, measure, this_lane
 from slam_rs.machine import Machine
 from slam_rs.reference import (
     MANIFEST_PATH,
@@ -30,22 +31,6 @@ from slam_rs.reference import (
 from slam_rs.tracking import SegmentRun
 from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, empty_trajectory, shift_clock, write_trajectory
 
-CLIP_JSON_KEYS: tuple[str, ...] = (
-    "segment_id",
-    "framesets",
-    "tracked",
-    "lost",
-    "cpp_rmse_cm",
-    "gt_rmse_cm",
-    "cpp_gt_band_cm",
-    "wall_s",
-    "cpp_wall_s",
-    "peak_rss_mb",
-    "gt_allowed_cm",
-    "cpp_wall_ratio",
-    "verdict",
-)
-"""The clip keys the fleet chart reads, in the order it reads them: a consumer contract, not a dump of the row."""
 CLOCK_GAP_NS: int = 10_433_867_587_166
 """What the Index smoke segment's two clocks are apart: ``video_time`` zero against the device clock every basalt CSV uses.
 
@@ -203,7 +188,7 @@ def test_a_clip_the_estimator_never_tracked_is_a_row_and_not_a_traceback(
     assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)
     assert written["clips"][0]["verdict"].startswith("fail:")
     # NaN is what the chart's own `f"{value:.2f}"` reads; None is what it cannot.
-    assert math.isnan(asdict(clip_json(dead))["cpp_rmse_cm"])
+    assert math.isnan(cast("float", clip_json(dead)["cpp_rmse_cm"]))
 
 
 def test_an_estimate_on_another_clock_is_a_row_and_not_a_traceback(
@@ -314,9 +299,9 @@ def test_the_first_clips_evidence_survives_a_directory_that_is_not_there_yet(mon
 def test_the_lane_is_on_the_json_and_the_clip_columns_are_not(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A GPU row and a CPU row differ in the run, not in the clip's columns.
 
-    The chart reads :class:`~slam_rs.apis.fleet_check.ClipJson` as a contract, so
-    the lane cannot be a thirteenth column of it; it is one key beside
-    ``machine``.
+    The chart reads :data:`~slam_rs.apis.fleet_check.CLIP_JSON_KEYS` as a
+    contract, so the lane cannot be a thirteenth column of it; it is one key
+    beside ``machine``.
     """
     monkeypatch.setattr(_core, "gpu_backend", "wgpu")
     monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment, _gpu: PASSING)
