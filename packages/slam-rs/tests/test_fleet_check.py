@@ -7,10 +7,12 @@ needs none of that: the verdict a clip's numbers earn, and how the row reads.
 
 import os
 import platform
+import resource
+from types import SimpleNamespace
 
 import pytest
 
-from slam_rs.apis.fleet_check import ClipResult, Machine, this_libc
+from slam_rs.apis.fleet_check import ClipResult, Machine, this_libc, this_peak_rss_mb
 
 MACHINE: Machine = Machine(hostname="pablo-rpi", arch="aarch64", libc="2.36", cores=4)
 """A four-core Pi, which is the smallest machine that runs a full install."""
@@ -84,3 +86,19 @@ def test_a_machine_without_glibc_still_names_its_c_library(monkeypatch: pytest.M
     monkeypatch.setattr(os, "confstr_names", {})
     monkeypatch.setattr(platform, "mac_ver", lambda: ("26.5.1", ("", "", ""), "arm64"))
     assert this_libc() == "libSystem, macOS 26.5.1"
+
+
+def test_the_peak_resident_set_is_megabytes_on_both_kinds_of_machine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``ru_maxrss`` counts kilobytes on Linux and bytes on macOS, and the pack target is judged on the number.
+
+    The clip that fits in 2 GB is the whole question on the constrained device,
+    so a row reading 382,544 MB on a Mac is not a cosmetic slip: it is the one
+    figure that decides whether the pack can go anywhere.
+    """
+    half_a_gigabyte: int = 512 * 1024 * 1024
+    monkeypatch.setattr(resource, "getrusage", lambda _who: SimpleNamespace(ru_maxrss=half_a_gigabyte // 1024))
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    assert this_peak_rss_mb() == 512.0
+    monkeypatch.setattr(resource, "getrusage", lambda _who: SimpleNamespace(ru_maxrss=half_a_gigabyte))
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    assert this_peak_rss_mb() == 512.0

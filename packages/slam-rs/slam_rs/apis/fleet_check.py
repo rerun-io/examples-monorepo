@@ -58,6 +58,17 @@ def this_libc() -> str:
     return f"libSystem, macOS {macos}" if macos else "unknown"
 
 
+def this_peak_rss_mb() -> float:
+    """The largest resident set this process has held, in megabytes.
+
+    ``ru_maxrss`` counts kilobytes on Linux and bytes on macOS. The unit cannot
+    be guessed, because on the constrained target this number is the whole
+    question.
+    """
+    peak: int = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return peak / (1024.0 * 1024.0) if platform.system() == "Darwin" else peak / 1024.0
+
+
 def this_machine() -> Machine:
     """What this host is, as a row names it."""
     return Machine(hostname=platform.node(), arch=platform.machine(), libc=this_libc(), cores=os.cpu_count() or 0)
@@ -153,7 +164,7 @@ def measure(manifest: ReferenceManifest, segment: ReferenceSegment) -> ClipResul
         cpp_gt_band_cm=(expected.rmse_cm, expected.rmse_cm_f64),
         wall_s=run.wall_s,
         cpp_wall_s=segment.reference.expected_cpp_wall_s,
-        peak_rss_mb=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0,
+        peak_rss_mb=this_peak_rss_mb(),
     )
 
 
