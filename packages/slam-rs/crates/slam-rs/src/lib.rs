@@ -18,6 +18,9 @@ pub mod config;
 pub(crate) mod eigen_blas;
 pub mod estimator;
 pub mod frontend;
+/// The CubeCL GPU frontend backend (decision D21), behind the `gpu` feature.
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod image;
 pub mod imu;
 pub mod landmark;
@@ -139,6 +142,13 @@ pub enum VioError {
         /// Which of `gyro` and `accel` carries it.
         field: &'static str,
     },
+    /// A GPU backend was asked for in a build without the `gpu` feature.
+    ///
+    /// The variant exists in every build so the Python surface and its stub
+    /// carry the same signature whether or not the feature is on: asking for a
+    /// backend that is not compiled in is a refusal, not a missing argument.
+    #[error("this build has no GPU backend; rebuild with the `gpu` cargo feature")]
+    GpuUnavailable,
     /// The frameset does not hold one image per configured camera.
     #[error("expected {expected} images, got {actual}")]
     CameraCountMismatch {
@@ -217,9 +227,204 @@ pub enum VioError {
 /// The frontend is `f32` throughout, as `FrameToFrameOpticalFlow<float,
 /// Pattern51>` is; the estimator's scalar is the type parameter, and `f32` is
 /// the shipped precision the reference lane runs (Q07).
+/// Which frontend backend a [`Vio`] runs.
+///
+/// The stage traits make the choice a construction-time one (decision D21): the
+/// CPU implementations stay in the crate permanently and a GPU build only adds a
+/// second pair. `Cpu` is the default everywhere — the fleet's installs, the
+/// gates and the accuracy references all run it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Backend {
+    /// The ported CPU frontend.
+    #[default]
+    Cpu,
+    /// The CubeCL frontend on this host's GPU.
+    ///
+    /// Available only in a build with the `gpu` feature; [`Vio::with_backend`]
+    /// returns [`VioError::GpuUnavailable`] otherwise, so the Python surface
+    /// carries the same signature either way.
+    Gpu,
+}
+
+/// The frontend of a [`Vio`], on whichever backend it was built for.
+///
+/// A two-arm enum rather than a type parameter on [`Vio`]: the estimator is
+/// already generic over its scalar, the dispatch happens once per frameset, and
+/// every method below returns a type neither backend owns — so the whole cost of
+/// the choice is this forwarding.
+// 2.8 kB against 3.2 kB, and a pipeline holds exactly one, so boxing a variant
+// would buy an indirection on the per-frame path and nothing else.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
+pub enum FrontendLane {
+    /// The CPU pyramid builder and patch tracker.
+    Cpu(frontend::flow::FrameToFrameOpticalFlow<frontend::patterns::Pattern51>),
+    /// The CubeCL pyramid builder and patch tracker.
+    #[cfg(feature = "gpu")]
+    Gpu(
+        frontend::flow::FrameToFrameOpticalFlow<
+            frontend::patterns::Pattern51,
+            gpu::CudaPyramidBuilder,
+            gpu::CudaPatchTracker<frontend::patterns::Pattern51>,
+        >,
+    ),
+}
+
+/// Run the same expression against whichever backend the lane holds.
+macro_rules! on_lane {
+    ($lane:expr, |$flow:ident| $body:expr) => {
+        match $lane {
+            FrontendLane::Cpu($flow) => $body,
+            #[cfg(feature = "gpu")]
+            FrontendLane::Gpu($flow) => $body,
+        }
+    };
+}
+
+impl FrontendLane {
+    /// Which backend this lane runs.
+    pub fn backend(&self) -> Backend {
+        match self {
+            Self::Cpu(_) => Backend::Cpu,
+            #[cfg(feature = "gpu")]
+            Self::Gpu(_) => Backend::Gpu,
+        }
+    }
+
+    /// `FrameToFrameOpticalFlow::check_frameset`.
+    ///
+    /// # Errors
+    ///
+    /// What the frontend refuses: a frameset of the wrong shape or a timestamp
+    /// that does not follow the last one.
+    pub fn check_frameset(
+        &self,
+        t_ns: i64,
+        sizes: impl ExactSizeIterator<Item = (usize, usize)>,
+    ) -> Result<(), frontend::flow::FrontendError> {
+        on_lane!(self, |flow| flow.check_frameset(t_ns, sizes))
+    }
+
+    /// `FrameToFrameOpticalFlow::process_frame`.
+    ///
+    /// # Errors
+    ///
+    /// What the frontend refuses, plus a device failure on the GPU lane.
+    pub fn process_frame(
+        &mut self,
+        t_ns: i64,
+        images: &[image::ImageU16],
+        prediction: &frontend::flow::PosePrediction,
+        masks: &[frontend::detect::Masks],
+    ) -> Result<&frontend::flow::FlowFrame, frontend::flow::FrontendError> {
+        on_lane!(self, |flow| flow
+            .process_frame(t_ns, images, prediction, masks))
+    }
+
+    /// What the last frame's phases cost.
+    pub fn timings(&self) -> frontend::flow::FlowTimings {
+        on_lane!(self, |flow| flow.timings())
+    }
+
+    /// The last committed frame's tracked keypoints.
+    pub fn frame(&self) -> &frontend::flow::FlowFrame {
+        on_lane!(self, |flow| flow.frame())
+    }
+
+    /// The config the frontend was built from.
+    pub fn config(&self) -> &config::VioConfig {
+        on_lane!(self, |flow| flow.config())
+    }
+
+    /// Cameras in the rig.
+    pub fn camera_count(&self) -> usize {
+        on_lane!(self, |flow| flow.camera_count())
+    }
+
+    /// Framesets committed so far.
+    pub fn frame_counter(&self) -> u64 {
+        on_lane!(self, |flow| flow.frame_counter())
+    }
+
+    /// The high-water mark of the keypoint id space.
+    pub fn last_keypoint_id(&self) -> u64 {
+        on_lane!(self, |flow| flow.last_keypoint_id())
+    }
+
+    /// The same mark as it stood before the last committed frameset.
+    pub fn last_keypoint_id_before_frame(&self) -> u64 {
+        on_lane!(self, |flow| flow.last_keypoint_id_before_frame())
+    }
+
+    /// One camera's occupancy counts.
+    pub fn cell_counts(&self, camera: usize) -> &[i32] {
+        on_lane!(self, |flow| flow.cell_counts(camera))
+    }
+
+    /// The occupancy grid's geometry.
+    pub fn occupancy_grid(&self) -> frontend::detect::CellGrid {
+        on_lane!(self, |flow| flow.occupancy_grid())
+    }
+
+    /// The last committed frameset's timestamp, `None` before the first.
+    pub fn t_ns(&self) -> Option<i64> {
+        on_lane!(self, |flow| flow.t_ns())
+    }
+
+    /// The average scene depth the KLT's matching guess uses.
+    pub fn depth_guess(&self) -> f32 {
+        on_lane!(self, |flow| flow.depth_guess())
+    }
+
+    /// Publish a new average scene depth.
+    pub fn set_depth_guess(&mut self, depth: f32) {
+        on_lane!(self, |flow| flow.set_depth_guess(depth));
+    }
+}
+
+/// Build the frontend lane a [`Backend`] names.
+///
+/// The CPU arm is `FrameToFrameOpticalFlow::new`. The GPU arm makes the two
+/// CubeCL stage backends on one shared client and hands them to
+/// `with_backends`, which is the whole of what selecting a backend costs.
+fn build_frontend(
+    config: &config::VioConfig,
+    calibration: &calib::Calibration<f64>,
+    options: frontend::flow::FrontendOptions,
+    backend: Backend,
+) -> Result<FrontendLane, VioError> {
+    match backend {
+        Backend::Cpu => Ok(FrontendLane::Cpu(
+            frontend::flow::FrameToFrameOpticalFlow::new(config.clone(), calibration, options)?,
+        )),
+        #[cfg(feature = "gpu")]
+        Backend::Gpu => {
+            let num_levels: usize = config.optical_flow_levels as usize + 1;
+            let (pyramid, tracker) = gpu::cuda_backends::<frontend::patterns::Pattern51>(
+                options.max_keypoints,
+                num_levels,
+                config.optical_flow_max_iterations as usize,
+                config.optical_flow_max_recovered_dist2,
+            )
+            .map_err(frontend::flow::FrontendError::from)?;
+            Ok(FrontendLane::Gpu(
+                frontend::flow::FrameToFrameOpticalFlow::with_backends(
+                    config.clone(),
+                    calibration,
+                    options,
+                    pyramid,
+                    tracker,
+                )?,
+            ))
+        }
+        #[cfg(not(feature = "gpu"))]
+        Backend::Gpu => Err(VioError::GpuUnavailable),
+    }
+}
+
 #[derive(Debug)]
 pub struct Vio<S: lie::LieScalar = f32> {
-    frontend: frontend::flow::FrameToFrameOpticalFlow<frontend::patterns::Pattern51>,
+    frontend: FrontendLane,
     estimator: estimator::SqrtKeypointVio<S>,
     /// The frontend's own IMU buffer (D24). The same samples reach the
     /// estimator through its own queue.
@@ -267,9 +472,24 @@ impl<S: lie::LieScalar> Vio<S> {
         calibration: calib::Calibration<f64>,
         options: frontend::flow::FrontendOptions,
     ) -> Result<Self, VioError> {
+        Self::with_backend(config, calibration, options, Backend::Cpu)
+    }
+
+    /// The same pipeline on a named frontend backend (decision D21).
+    ///
+    /// # Errors
+    ///
+    /// As [`Vio::new`], plus [`VioError::GpuUnavailable`] when `Gpu` is asked
+    /// for and this build has no `gpu` feature, and [`VioError::Frontend`] when
+    /// the device cannot size the frontend's buffers.
+    pub fn with_backend(
+        config: config::VioConfig,
+        calibration: calib::Calibration<f64>,
+        options: frontend::flow::FrontendOptions,
+        backend: Backend,
+    ) -> Result<Self, VioError> {
         let camera_count: usize = calibration.t_i_c.len();
-        let frontend: frontend::flow::FrameToFrameOpticalFlow<frontend::patterns::Pattern51> =
-            frontend::flow::FrameToFrameOpticalFlow::new(config.clone(), &calibration, options)?;
+        let frontend: FrontendLane = build_frontend(&config, &calibration, options, backend)?;
         let calib_f32: calib::Calibration<f32> = calibration.cast();
         let frontend_noise: imu::ImuNoise<f64> = imu::ImuNoise::from_calibration(&calibration);
         let estimator: estimator::SqrtKeypointVio<S> =
@@ -298,10 +518,13 @@ impl<S: lie::LieScalar> Vio<S> {
     }
 
     /// The frontend, for callers that want the tracked keypoints.
-    pub fn frontend(
-        &self,
-    ) -> &frontend::flow::FrameToFrameOpticalFlow<frontend::patterns::Pattern51> {
+    pub fn frontend(&self) -> &FrontendLane {
         &self.frontend
+    }
+
+    /// Which frontend backend this pipeline runs.
+    pub fn backend(&self) -> Backend {
+        self.frontend.backend()
     }
 
     /// What the frontend lane cost on the last frameset that ran it.

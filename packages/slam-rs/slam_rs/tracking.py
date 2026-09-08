@@ -181,7 +181,11 @@ def _drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, ma
 
 
 def run_segment(
-    manifest: ReferenceManifest, segment: ReferenceSegment, window_s: float | None = None, max_framesets: int | None = None
+    manifest: ReferenceManifest,
+    segment: ReferenceSegment,
+    window_s: float | None = None,
+    max_framesets: int | None = None,
+    gpu: bool = False,
 ) -> SegmentRun:
     """Drive one MSD reference clip through :class:`slam_rs._core.Vio`.
 
@@ -191,6 +195,9 @@ def run_segment(
             image safe radius.
         window_s: Stop after this many seconds of the clip; None replays it whole.
         max_framesets: Stop after this many framesets; None replays the clip.
+        gpu: Run the frontend's pyramid, patch build and KLT tracker on the GPU
+            through CubeCL instead of the CPU port. Every reference number was
+            produced on the CPU, so this is off by default.
 
     Returns:
         What :func:`_drive` produced over that clip.
@@ -198,7 +205,7 @@ def run_segment(
     source: LocalSegment = LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path)
     feed: SegmentFeed
     with open_segment(source, segment.imu) as feed:
-        lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment)))
+        lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment), gpu=gpu))
         return _drive(feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets)
 
 

@@ -1,0 +1,310 @@
+//! The GPU [`PyramidBuilder`]: level 0 uploaded, every halving built on device.
+
+use cubecl::prelude::*;
+
+use super::kernels;
+use crate::image::ImageU16;
+use crate::pyramid::{Pyramid, PyramidError};
+
+/// One level's place inside a [`GpuPyramid`]'s two buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Level {
+    /// Offset of pixel `(0, 0)` inside the buffer this level lives in.
+    base: usize,
+    /// Row length, which is also the stride: levels are packed without padding.
+    width: usize,
+    /// Row count.
+    height: usize,
+    /// `false` for buffer `a`, `true` for buffer `b`; the level index's parity.
+    odd: bool,
+}
+
+/// One camera's pyramid, resident on the device.
+///
+/// Two `u16` allocations rather than one, because a subsample that read and
+/// wrote the same allocation would need CubeCL to bind it as both a
+/// `const __restrict__` input and an output, which WGSL refuses; level `l` goes
+/// to `a` when `l` is even and `b` when it is odd, and no kernel ever reads the
+/// buffer it writes.
+///
+/// The `meta` buffer beside them carries the level geometry and the sampling
+/// pattern the per-patch kernels read (see [`kernels`]); it is written once,
+/// when the pyramid is allocated, and never touched per frame.
+pub struct GpuPyramid<R: Runtime> {
+    client: ComputeClient<R>,
+    levels: Vec<Level>,
+    even: cubecl::server::Handle,
+    even_len: usize,
+    odd: cubecl::server::Handle,
+    odd_len: usize,
+    meta: cubecl::server::Handle,
+    meta_len: usize,
+}
+
+impl<R: Runtime> GpuPyramid<R> {
+    /// Allocate every level for a `width` x `height` frame and write `meta`.
+    ///
+    /// `num_levels` is basalt's, so the pyramid holds `num_levels + 1` levels
+    /// (0 through `num_levels`), matching [`crate::pyramid::PyramidU16`].
+    ///
+    /// # Errors
+    ///
+    /// [`PyramidError::TooSmall`] when a level would be under the 5-tap
+    /// kernel's reach, as the CPU pyramid refuses it.
+    fn new(
+        client: ComputeClient<R>,
+        width: usize,
+        height: usize,
+        num_levels: usize,
+        pattern: &[[f32; 2]],
+    ) -> Result<Self, PyramidError> {
+        for level in 0..num_levels {
+            if (width >> level) < 3 || (height >> level) < 3 {
+                return Err(PyramidError::TooSmall {
+                    width,
+                    height,
+                    num_levels,
+                });
+            }
+        }
+        let mut levels: Vec<Level> = Vec::with_capacity(num_levels + 1);
+        let mut lengths: [usize; 2] = [0, 0];
+        for level in 0..=num_levels {
+            let odd: bool = level % 2 == 1;
+            let (level_width, level_height): (usize, usize) = (width >> level, height >> level);
+            let slot: &mut usize = &mut lengths[usize::from(odd)];
+            levels.push(Level {
+                base: *slot,
+                width: level_width,
+                height: level_height,
+                odd,
+            });
+            *slot += level_width * level_height;
+        }
+
+        // The `meta` layout `kernels` documents: four floats per level, then the
+        // pattern. Level bases stay under 2^24, where `f32` is still exact.
+        let mut meta: Vec<f32> = Vec::with_capacity((num_levels + 1) * 4 + pattern.len() * 2);
+        for level in &levels {
+            meta.push(level.base as f32);
+            meta.push(level.width as f32);
+            meta.push(level.height as f32);
+            meta.push(f32::from(u8::from(level.odd)));
+        }
+        for tap in pattern {
+            meta.push(tap[0]);
+            meta.push(tap[1]);
+        }
+
+        Ok(Self {
+            levels,
+            even: client.empty(lengths[0] * size_of::<u16>()),
+            even_len: lengths[0],
+            odd: client.empty(lengths[1] * size_of::<u16>()),
+            odd_len: lengths[1],
+            meta: client.create_from_slice(f32::as_bytes(&meta)),
+            meta_len: meta.len(),
+            client,
+        })
+    }
+
+    /// The two pixel buffers and their element counts, as the launchers want them.
+    pub(super) fn buffers(
+        &self,
+    ) -> (
+        &cubecl::server::Handle,
+        usize,
+        &cubecl::server::Handle,
+        usize,
+    ) {
+        (&self.even, self.even_len, &self.odd, self.odd_len)
+    }
+
+    /// The `meta` buffer and its element count.
+    pub(super) fn meta(&self) -> (&cubecl::server::Handle, usize) {
+        (&self.meta, self.meta_len)
+    }
+
+    /// The handle and element count of the buffer level `level` lives in.
+    fn buffer_of(&self, level: &Level) -> (&cubecl::server::Handle, usize) {
+        if level.odd {
+            (&self.odd, self.odd_len)
+        } else {
+            (&self.even, self.even_len)
+        }
+    }
+}
+
+/// The GPU [`PyramidBuilder`].
+///
+/// Holds the client, the pattern the per-patch kernels need in every pyramid's
+/// `meta`, and a contiguous host staging buffer for level 0 — a frame may be
+/// strided, a level never is, and one upload of a packed buffer beats one
+/// upload per row.
+pub struct GpuPyramidBuilder<R: Runtime> {
+    client: ComputeClient<R>,
+    pattern: Vec<[f32; 2]>,
+    staging: Vec<u16>,
+}
+
+impl<R: Runtime> GpuPyramidBuilder<R> {
+    /// A builder on `client` for a frontend using `pattern`.
+    pub fn new(client: ComputeClient<R>, pattern: &[[f32; 2]]) -> Self {
+        Self {
+            client,
+            pattern: pattern.to_vec(),
+            staging: Vec::new(),
+        }
+    }
+
+    /// The client, for the tracker that shares it.
+    pub fn client(&self) -> ComputeClient<R> {
+        self.client.clone()
+    }
+}
+
+impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
+    type Pyramid = GpuPyramid<R>;
+
+    fn allocate(
+        &self,
+        width: usize,
+        height: usize,
+        num_levels: usize,
+    ) -> Result<GpuPyramid<R>, PyramidError> {
+        GpuPyramid::new(
+            self.client.clone(),
+            width,
+            height,
+            num_levels,
+            &self.pattern,
+        )
+    }
+
+    /// `ManagedImagePyr::setFromImage` (`image_pyr.h:70-80`) on the device.
+    ///
+    /// One upload for level 0 and one launch per halving. No synchronisation:
+    /// the frame is left in flight and the tracker's own launches queue behind
+    /// it, so the whole frameset costs one wait per
+    /// [`crate::frontend::tracker::PatchTracker::track`] call.
+    fn build(&mut self, img: &ImageU16, out: &mut GpuPyramid<R>) -> Result<(), PyramidError> {
+        let Some(&level0) = out.levels.first() else {
+            return Err(PyramidError::GeometryMismatch {
+                expected_width: 0,
+                expected_height: 0,
+                width: img.width(),
+                height: img.height(),
+            });
+        };
+        if level0.width != img.width() || level0.height != img.height() {
+            return Err(PyramidError::GeometryMismatch {
+                expected_width: level0.width,
+                expected_height: level0.height,
+                width: img.width(),
+                height: img.height(),
+            });
+        }
+
+        // `create_from_slice` is CubeCL 0.10's only host-to-device write and it
+        // allocates a buffer the size of the slice, so the upload has to be the
+        // whole `even` allocation: level 0 at the front, and past it the levels
+        // the subsample launches below overwrite. That makes the tail's contents
+        // irrelevant, so the staging buffer is filled once and only its level-0
+        // prefix is rewritten per frame. The cost is one host copy of level 0
+        // and `even_len - width * height` extra uploaded pixels — 6 % on a
+        // 960x960 four-level pyramid, measured rather than assumed.
+        self.staging.resize(out.even_len, 0);
+        for y in 0..img.height() {
+            let start: usize = y * img.width();
+            self.staging[start..start + img.width()].copy_from_slice(img.row(y));
+        }
+        out.even = out.client.create_from_slice(u16::as_bytes(&self.staging));
+
+        for level in 1..out.levels.len() {
+            let source: Level = out.levels[level - 1];
+            let target: Level = out.levels[level];
+            let (src, src_len) = out.buffer_of(&source);
+            let (dst, dst_len) = out.buffer_of(&target);
+            kernels::launch_subsample::<R>(
+                &out.client,
+                src,
+                src_len,
+                dst,
+                dst_len,
+                source.base,
+                source.width,
+                source.height,
+                target.base,
+                target.width,
+                target.height,
+            );
+        }
+        Ok(())
+    }
+}
+
+impl<R: Runtime> Pyramid for GpuPyramid<R> {
+    fn num_levels(&self) -> usize {
+        self.levels.len()
+    }
+
+    fn level_size(&self, level: usize) -> Option<(usize, usize, usize)> {
+        self.levels
+            .get(level)
+            .map(|level| (level.width, level.height, level.width))
+    }
+
+    /// Download one level.
+    ///
+    /// The one synchronising call on a [`GpuPyramid`], and nothing on the
+    /// per-frame path uses it: it exists because the trait's forward half is how
+    /// generic code — and the tolerance tests — read a pyramid a GPU backend
+    /// owns.
+    fn copy_level_into(&self, level: usize, out: &mut ImageU16) -> Result<(), PyramidError> {
+        let Some(&geometry) = self.levels.get(level) else {
+            return Err(PyramidError::NoSuchLevel {
+                level,
+                num_levels: self.levels.len(),
+            });
+        };
+        let (handle, length) = self.buffer_of(&geometry);
+        let bytes = self.client.read_one_unchecked(handle.clone());
+        let expected: usize = length * size_of::<u16>();
+        if bytes.len() != expected {
+            return Err(PyramidError::ShortDeviceRead {
+                level,
+                actual: bytes.len(),
+                expected,
+            });
+        }
+        let pixels: &[u16] = u16::from_bytes(&bytes);
+        *out = ImageU16::zeros(geometry.width, geometry.height)?;
+        for y in 0..geometry.height {
+            let start: usize = geometry.base + y * geometry.width;
+            out.row_mut(y)
+                .copy_from_slice(&pixels[start..start + geometry.width]);
+        }
+        Ok(())
+    }
+}
+
+/// `ComputeClient` is not `Debug`, so both types print their geometry instead of
+/// deriving it.
+impl<R: Runtime> std::fmt::Debug for GpuPyramid<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GpuPyramid")
+            .field("levels", &self.levels)
+            .field("even_len", &self.even_len)
+            .field("odd_len", &self.odd_len)
+            .finish()
+    }
+}
+
+impl<R: Runtime> std::fmt::Debug for GpuPyramidBuilder<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GpuPyramidBuilder")
+            .field("taps", &self.pattern.len())
+            .field("staging", &self.staging.len())
+            .finish()
+    }
+}

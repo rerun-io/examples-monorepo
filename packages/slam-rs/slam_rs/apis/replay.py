@@ -96,6 +96,13 @@ class Config:
     """Longest time window fetched from the catalog in one round trip."""
     output_csv: Path | None = None
     """Where the estimated trajectory is written; defaults to ``data/<segment>/slam_rs.csv``."""
+    gpu: bool = False
+    """Run the frontend's pyramid, patch build and KLT tracker on the GPU through CubeCL.
+
+    The default is the CPU port, which is what every reference number was
+    produced on. A core built without the ``gpu`` cargo feature refuses this
+    rather than quietly running on the CPU.
+    """
 
 
 def _log_calibration(cameras: tuple[CameraCalib, ...]) -> None:
@@ -344,7 +351,9 @@ def main(config: Config) -> None:
         elif config.stage == "vio":
             truth: Trajectory | None = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
             stage = VioStage(
-                lockstep=Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment))),
+                lockstep=Lockstep(
+                    vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment), gpu=config.gpu)
+                ),
                 logger=VioLogger(
                     cameras=feed.cameras,
                     ground_truth=truth if truth is not None else empty_trajectory(),

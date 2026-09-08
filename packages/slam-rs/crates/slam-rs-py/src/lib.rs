@@ -20,9 +20,8 @@ use slam_rs::frontend::flow::{
     FlowFrame as CoreFlowFrame, FrameToFrameOpticalFlow, FrontendError, FrontendOptions,
     PosePrediction,
 };
-use slam_rs::frontend::patterns::Pattern51;
 use slam_rs::image::ImageU16;
-use slam_rs::{ImageView, VioError};
+use slam_rs::{Backend, FrontendLane, ImageView, VioError};
 
 /// Map any core error onto `ValueError`, which is what every refusal here is.
 fn value_error<E: std::fmt::Display>(error: E) -> PyErr {
@@ -121,22 +120,36 @@ impl Vio {
     /// catalog's own dataclasses through [`Calibration::from_catalog`]. The
     /// estimator runs in single precision, which is the precision every
     /// reference run was produced at (`use-double` false).
+    /// `gpu` runs the frontend's pyramid, patch build and KLT tracker through
+    /// CubeCL on this host's GPU instead of the CPU port (decision D21). The
+    /// default is the CPU, which is what every accuracy reference was produced
+    /// on; a build without the `gpu` cargo feature refuses `gpu=True` rather
+    /// than ignoring it.
     #[new]
-    #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None))]
+    #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None, gpu = false))]
     fn new(
         calibration: PyRef<'_, Calibration>,
         config: PyRef<'_, VioConfig>,
         threads: usize,
         max_keypoints: Option<usize>,
+        gpu: bool,
     ) -> PyResult<Self> {
+        let backend: Backend = if gpu { Backend::Gpu } else { Backend::Cpu };
         Ok(Self {
-            inner: slam_rs::Vio::new(
+            inner: slam_rs::Vio::with_backend(
                 config.inner.clone(),
                 calibration.inner.clone(),
                 frontend_options(threads, max_keypoints),
+                backend,
             )
             .map_err(value_error)?,
         })
+    }
+
+    /// Whether the frontend runs on the GPU.
+    #[getter]
+    fn gpu(&self) -> bool {
+        self.inner.backend() == Backend::Gpu
     }
 
     /// Cameras this estimator expects in every frameset.
@@ -980,7 +993,7 @@ impl FlowFrame {
 /// the wrong pattern.
 #[pyclass(module = "slam_rs._core")]
 pub struct OpticalFlow {
-    inner: FrameToFrameOpticalFlow<Pattern51>,
+    inner: FrontendLane,
     /// The widened frameset, reused so a steady stream never reallocates.
     images: Vec<ImageU16>,
 }
@@ -999,12 +1012,16 @@ impl OpticalFlow {
         threads: usize,
         max_keypoints: Option<usize>,
     ) -> PyResult<Self> {
-        let inner: FrameToFrameOpticalFlow<Pattern51> = FrameToFrameOpticalFlow::new(
-            config.inner.clone(),
-            &calibration.inner,
-            frontend_options(threads, max_keypoints),
-        )
-        .map_err(value_error)?;
+        // The standalone frontend is the CPU lane: the GPU choice belongs on
+        // `Vio`, which is what a caller runs a whole pipeline through.
+        let inner: FrontendLane = FrontendLane::Cpu(
+            FrameToFrameOpticalFlow::new(
+                config.inner.clone(),
+                &calibration.inner,
+                frontend_options(threads, max_keypoints),
+            )
+            .map_err(value_error)?,
+        );
         let cameras: usize = inner.camera_count();
         Ok(Self {
             inner,
@@ -1121,10 +1138,7 @@ impl From<ProcessError> for PyErr {
 /// its own as an `Option` — `None` until the first frameset commits — and this
 /// runs only after a commit, so taking the value the caller passed keeps the
 /// Python-facing `FlowFrame.t_ns` a plain `int` with no impossible branch.
-fn flow_frame(
-    flow: &FrameToFrameOpticalFlow<Pattern51>,
-    t_ns: i64,
-) -> Result<FlowFrame, ProcessError> {
+fn flow_frame(flow: &FrontendLane, t_ns: i64) -> Result<FlowFrame, ProcessError> {
     let previous_last_id: u64 = flow.last_keypoint_id_before_frame();
     let grid: CellGrid = flow.occupancy_grid();
     let frame: &CoreFlowFrame = flow.frame();

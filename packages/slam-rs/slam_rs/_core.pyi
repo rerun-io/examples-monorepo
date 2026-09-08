@@ -185,8 +185,15 @@ class Vio:
         *,
         threads: int = 1,
         max_keypoints: int | None = None,
+        gpu: bool = False,
     ) -> None:
         """Build the pipeline for one rig; basalt's own files arrive through ``from_json``.
+
+        ``gpu`` runs the frontend's pyramid, patch build and KLT tracker through
+        CubeCL on this host's GPU instead of the CPU port. The default is the
+        CPU, which is what every accuracy reference was produced on. A core
+        built without the ``gpu`` cargo feature raises ``ValueError`` for
+        ``gpu=True`` rather than quietly running on the CPU.
 
         Raises ``ValueError`` on everything :class:`OpticalFlow` refuses, and on
         a config asking for a path this port does not have:
@@ -196,6 +203,9 @@ class Vio:
 
     @property
     def camera_count(self) -> int: ...
+    @property
+    def gpu(self) -> bool:
+        """Whether the frontend runs on the GPU."""
     def push_imu(self, t_ns: int, gyro: Sequence[float], accel: Sequence[float]) -> None:
         """Add one uncalibrated IMU sample.
 

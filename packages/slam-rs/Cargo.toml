@@ -45,6 +45,14 @@ proptest = "1"
 kornia-image = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
 kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
 
+# The GPU phase (decision D21, V4). CubeCL 0.10 stable: one kernel source, the
+# runtime a type parameter. `cubecl-cuda` is the NVIDIA lane and `cubecl-wgpu`
+# the portable one; both are optional, so the default build of every crate here
+# is the CPU port with no GPU dependency in the graph at all.
+cubecl = "0.10"
+cubecl-cuda = "0.10"
+cubecl-wgpu = "0.10"
+
 # The estimator must never panic on data: errors are typed and returned.
 [workspace.lints.clippy]
 unwrap_used = "deny"

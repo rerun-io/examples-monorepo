@@ -184,6 +184,22 @@ pub enum PyramidError {
     /// The level geometry does not fit in memory.
     #[error("level geometry is not representable: {0}")]
     Image(#[from] ImageError),
+    /// A device download returned the wrong number of bytes.
+    ///
+    /// Only a GPU backend produces this. A CubeCL runtime whose CUDA
+    /// installation is incomplete panics on its own worker thread and hands
+    /// back a short buffer rather than an error, and reading that as pixels
+    /// would quietly give a black pyramid; every download is length-checked and
+    /// a short one is refused here instead (decision D32).
+    #[error("reading level {level} returned {actual} bytes, expected {expected}")]
+    ShortDeviceRead {
+        /// Level asked for.
+        level: usize,
+        /// Bytes the device returned.
+        actual: usize,
+        /// Bytes the level's geometry needs.
+        expected: usize,
+    },
 }
 
 /// One camera's pyramid: level 0 plus `num_levels` halvings, each a flat buffer.
