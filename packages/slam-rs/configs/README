@@ -8,8 +8,8 @@ estimator (`vio_marg_lost_landmarks`, C72).
 
 `tests/test_cpp_reference.py` compares each file, key by key, with the
 configuration every C++ `run.json` embeds, so a stale copy fails a test. The
-byte-identical copies under `crates/slam-rs/tests/fixtures/` serve the Rust
-crate's own config tests.
+Rust crate's config tests read these same files -- `crates/slam-rs/src/config.rs`
+includes them and `tests/common/mod.rs` reads them through `configs()`.
 
 The RoboCap pair is named by the `[robocap]` block instead of by a `[[dataset]]`:
 `msdmo_config.json`, the config `python/robocap_vit.toml` runs, and

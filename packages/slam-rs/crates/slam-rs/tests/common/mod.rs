@@ -34,12 +34,19 @@ pub fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
+/// `packages/slam-rs/configs`, the shipped VIO configs.
+///
+/// The crate reads the package's files rather than a copy of its own: these are
+/// the ones `reference_segments.toml` names and the C++ reference runs loaded,
+/// so a lane that drifted from them would compare against a config nothing ran.
+pub fn configs() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../configs")
+}
+
 /// The MSDMI config, which every VIO lane and the whole-pipeline test share.
 pub fn config() -> VioConfig {
-    VioConfig::from_json_str(
-        &std::fs::read_to_string(fixtures().join("msdmi_config.json")).unwrap(),
-    )
-    .unwrap()
+    VioConfig::from_json_str(&std::fs::read_to_string(configs().join("msdmi_config.json")).unwrap())
+        .unwrap()
 }
 
 /// The MSDMI calibration, always `f64`: the estimator casts it to its own
@@ -174,7 +181,7 @@ pub fn config_for(dataset_name: &str) -> VioConfig {
         "msd-g2" => "msdmg_config.json",
         other => panic!("no VIO config is pinned for {other}"),
     };
-    VioConfig::from_json_str(&std::fs::read_to_string(fixtures().join(file)).unwrap()).unwrap()
+    VioConfig::from_json_str(&std::fs::read_to_string(configs().join(file)).unwrap()).unwrap()
 }
 
 /// A fixed-size matrix flattened **row major**, which is how every C++ dump

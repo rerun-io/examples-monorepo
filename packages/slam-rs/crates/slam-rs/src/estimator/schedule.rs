@@ -495,7 +495,7 @@ mod tests {
     use crate::types::{PoseStateWithLin, PoseVelBiasState, PoseVelBiasStateWithLin};
 
     const CALIB: &str = include_str!("../../tests/fixtures/msdmi_calib.json");
-    const CONFIG: &str = include_str!("../../tests/fixtures/msdmi_config.json");
+    const CONFIG: &str = include_str!("../../../../configs/msdmi_config.json");
 
     /// Six keyframes all facing the same way: the default criterion never
     /// reads the azimuth.

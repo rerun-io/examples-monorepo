@@ -411,7 +411,7 @@ fn everywhere<S: LieScalar>(_proj: &Vector2<S>) -> bool {
 /// (`frame_to_frame_optical_flow.h:508-511`, which masks the black corners of a
 /// fisheye). The radius is a config field, 472 for msd-index, 340 for msd-g2 and
 /// 388 for the Odyssey config RoboCap runs
-/// (`fixtures/msdmi_config.json`, `msdmg_config.json`, `msdmo_config.json`).
+/// (`configs/msdmi_config.json`, `msdmg_config.json`, `msdmo_config.json`).
 fn on_sensor<S: LieScalar>(
     rig: &RigCamera<S>,
     safe_radius: f64,

@@ -972,13 +972,14 @@ mod tests {
         }
     }
 
+    /// The package's own MSDMI config, the file `reference_segments.toml` names
+    /// and the C++ reference runs loaded.
+    const MSDMI_CONFIG: &str = include_str!("../../../configs/msdmi_config.json");
+
     fn pipeline() -> Vio<f32> {
         let directory: std::path::PathBuf =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-        let config: config::VioConfig = config::VioConfig::from_json_str(
-            &std::fs::read_to_string(directory.join("msdmi_config.json")).unwrap(),
-        )
-        .unwrap();
+        let config: config::VioConfig = config::VioConfig::from_json_str(MSDMI_CONFIG).unwrap();
         let calibration: calib::Calibration<f64> = calib::Calibration::from_json_str(
             &std::fs::read_to_string(directory.join("msdmi_calib.json")).unwrap(),
         )
@@ -1026,10 +1027,7 @@ mod tests {
     fn realtime_frame_dropping_is_refused() {
         let directory: std::path::PathBuf =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-        let mut config: config::VioConfig = config::VioConfig::from_json_str(
-            &std::fs::read_to_string(directory.join("msdmi_config.json")).unwrap(),
-        )
-        .unwrap();
+        let mut config: config::VioConfig = config::VioConfig::from_json_str(MSDMI_CONFIG).unwrap();
         config.vio_enforce_realtime = true;
         let calibration: calib::Calibration<f64> = calib::Calibration::from_json_str(
             &std::fs::read_to_string(directory.join("msdmi_calib.json")).unwrap(),

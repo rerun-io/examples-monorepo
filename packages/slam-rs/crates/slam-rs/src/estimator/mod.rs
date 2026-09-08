@@ -1401,7 +1401,7 @@ mod tests {
     use crate::config::VioConfig;
 
     const CALIB: &str = include_str!("../../tests/fixtures/msdmi_calib.json");
-    const CONFIG: &str = include_str!("../../tests/fixtures/msdmi_config.json");
+    const CONFIG: &str = include_str!("../../../../configs/msdmi_config.json");
 
     /// The fixture rig and config, `f32` as the shipped lane runs.
     fn estimator() -> SqrtKeypointVio<f32> {

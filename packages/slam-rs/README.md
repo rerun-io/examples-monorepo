@@ -46,8 +46,9 @@ reductions are a different matter: they replace
 than a fold - see the `linearize` module.
 
 Every convention is quoted against the C++ it comes from, file and line, in the
-doc comments. `crates/slam-rs/tests/fixtures/` holds the shipped basalt config
-and calibration JSON the parsers are tested against, unmodified, plus four
+doc comments. `crates/slam-rs/tests/fixtures/` holds the shipped basalt
+calibration JSON the parsers are tested against, unmodified - the VIO configs
+they run with are the package's own `configs/`, read from there - plus four
 fixtures produced by the C++ fork itself: `pyramid/`, the first frame of the
 smoke reference segment as a PGM next to the four pyramid levels the fork builds
 from it, which the pyramid is checked against byte for byte;

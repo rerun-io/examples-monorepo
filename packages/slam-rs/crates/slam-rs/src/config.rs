@@ -35,7 +35,10 @@
 //!
 //! ## The fixtures
 //!
-//! `tests/fixtures/` holds `default_config.json` plus the three MSD configs.
+//! The three MSD configs the tests parse are the package's own
+//! `configs/*.json`, the files `reference_segments.toml` names and the C++
+//! reference runs were driven with; `tests/fixtures/` holds only
+//! `default_config.json`, which no lane runs.
 //! `msdmi` (Valve Index) and `msdmg` (HP Reverb G2) are the reference datasets;
 //! `msdmo` (Samsung Odyssey+) is here because the RoboCap driver reuses it —
 //! `python/robocap_vit.toml:8` sets `config-path="data/msd/msdmo_config.json"`,
@@ -373,9 +376,9 @@ mod tests {
     use super::*;
 
     const DEFAULT_JSON: &str = include_str!("../tests/fixtures/default_config.json");
-    const MSDMI_JSON: &str = include_str!("../tests/fixtures/msdmi_config.json");
-    const MSDMG_JSON: &str = include_str!("../tests/fixtures/msdmg_config.json");
-    const MSDMO_JSON: &str = include_str!("../tests/fixtures/msdmo_config.json");
+    const MSDMI_JSON: &str = include_str!("../../../configs/msdmi_config.json");
+    const MSDMG_JSON: &str = include_str!("../../../configs/msdmg_config.json");
+    const MSDMO_JSON: &str = include_str!("../../../configs/msdmo_config.json");
 
     fn every_fixture() -> [(&'static str, &'static str); 4] {
         [

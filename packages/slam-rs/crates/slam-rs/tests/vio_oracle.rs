@@ -72,7 +72,7 @@
 //! `basalt_vio_oracle` on the fork's `slam-rs-reference` branch, over the first
 //! 60 framesets of the smoke reference segment
 //! `msd-index__MIO_others__MIO10_short_2_panorama` with
-//! `tests/fixtures/msdmi_config.json` and `msdmi_calib.json`, driving the real
+//! `configs/msdmi_config.json` and `tests/fixtures/msdmi_calib.json`, driving the real
 //! threaded pipeline in lockstep with one TBB worker. The IMU window is
 //! `tests/fixtures/vio/imu.json`, the same samples on the same clock. The PGM
 //! frames are **not** committed (107 MB); only the frontend needs them, which is
