@@ -40,10 +40,6 @@ pub struct LandmarkBlockOptions<S: LieScalar> {
     pub huber_parameter: S,
     /// Standard deviation of the reprojection error, in pixels (`:43`).
     pub obs_std_dev: S,
-    /// `1 / (eps + ‖col‖)` rather than ceres' `1 / (1 + ‖col‖)` (`:47`). Only
-    /// [`LandmarkBlock::scale_jl_cols`] reads it, and nothing on the shipped VIO
-    /// path calls that.
-    pub jacobi_scaling_eps: S,
 }
 
 impl<S: LieScalar> Default for LandmarkBlockOptions<S> {
@@ -54,7 +50,6 @@ impl<S: LieScalar> Default for LandmarkBlockOptions<S> {
             use_valid_projections_only: true,
             huber_parameter: S::zero(),
             obs_std_dev: S::one(),
-            jacobi_scaling_eps: c::<S>(1e-6),
         }
     }
 }
@@ -146,10 +141,6 @@ struct BlockObservation {
 pub struct LandmarkBlock<S: LieScalar> {
     /// `storage` (`:530`): `[ J_p | pad | J_l | r ]`, `num_rows` x `num_cols`.
     storage: DMatrix<S>,
-    /// `Jl_col_scale` (`:532`), all ones unless [`Self::scale_jl_cols`] ran.
-    jl_col_scale: Vector3<S>,
-    /// `damping_rotations` (`:533`), six of them when damping is applied.
-    damping_rotations: Vec<JacobiRotation<S>>,
     /// One entry per observation, in `lm.obs` order.
     observations: Vec<BlockObservation>,
     /// The pose columns the observations write into, ascending and deduplicated.
@@ -324,8 +315,6 @@ impl<S: LieScalar> LandmarkBlock<S> {
 
         Ok(Self {
             storage: DMatrix::zeros(num_rows, num_cols),
-            jl_col_scale: Vector3::repeat(S::one()),
-            damping_rotations: Vec::with_capacity(6),
             observations,
             active_cols,
             lm_id,
@@ -381,9 +370,8 @@ impl<S: LieScalar> LandmarkBlock<S> {
         cameras: &[CameraEnum<S>],
         options: &LandmarkBlockOptions<S>,
     ) -> Result<S, LinearizeError> {
-        // `storage.setZero()` and the damping bookkeeping (`:115-117`).
+        // `storage.setZero()` (`:115-117`).
         self.storage.fill(S::zero());
-        self.damping_rotations.clear();
 
         let mut error_sum: S = S::zero();
 
@@ -579,106 +567,20 @@ impl<S: LieScalar> LandmarkBlock<S> {
         }
     }
 
-    /// `setLandmarkDamping(lambda)` (`:216-250`): put `sqrt(lambda)` on the
-    /// landmark diagonal and rotate it away with six Givens rotations, keeping
-    /// them so the next call can undo them.
-    ///
-    /// **Not called on the shipped VIO path** (decision D34): the four lines
-    /// that would call it are commented out at `sqrt_keypoint_vio.cpp:1373-1377`,
-    /// which the ICCV 2021 paper's own §3.5 confirms. The only live entry is
-    /// `setLandmarkDamping(0)` from inside [`Self::back_substitute`] (`:310`),
-    /// which — with no rotations stored — reduces to zeroing the damping
-    /// diagonal (`:232-233`). The machinery is implemented anyway, because the
-    /// hook has to be real if a parity gap ever points at it.
-    ///
-    /// The rotations are un-applied in **reverse order** (`:224-229`), LIFO;
-    /// calling this twice without the undo corrupts the block (trap 10).
-    pub fn set_landmark_damping(&mut self, lambda: S) -> Result<(), LinearizeError> {
-        if self.state != LandmarkBlockState::Marginalized {
-            return Err(LinearizeError::WrongState {
-                expected: LandmarkBlockState::Marginalized,
-                found: self.state,
-            });
-        }
-        if lambda < S::zero() {
-            return Err(LinearizeError::NegativeDamping);
-        }
-
-        if !self.damping_rotations.is_empty() {
-            // `:220-230`.
-            for n in (0..3usize).rev() {
-                for m in (0..=n).rev() {
-                    let Some(rot) = self.damping_rotations.pop() else {
-                        // Unreachable: the vector holds exactly six rotations
-                        // whenever it is non-empty (`:221`).
-                        return Err(LinearizeError::DampingStackCorrupt);
-                    };
-                    apply_rotation_on_the_left(
-                        &mut self.storage,
-                        self.num_rows - 3 + n - m,
-                        n,
-                        rot.adjoint(),
-                    );
-                }
-            }
-        }
-
-        if lambda == S::zero() {
-            // `:232-233`.
-            for n in 0..3 {
-                self.storage[(self.num_rows - 3 + n, self.lm_idx + n)] = S::zero();
-            }
-            return Ok(());
-        }
-
-        // `:235`: the scale must be usable, or the damped block is nonsense.
-        if !self.jl_col_scale.iter().all(|v| v.to_f64().is_finite()) {
-            return Err(LinearizeError::NonFiniteColumnScale);
-        }
-
-        // `:237`.
-        let sqrt_lambda: S = lambda.sqrt();
-        for n in 0..3 {
-            self.storage[(self.num_rows - 3 + n, self.lm_idx + n)] = sqrt_lambda;
-        }
-
-        // `:242-248`: three, then two, then one — six in all.
-        for n in 0..3usize {
-            for m in 0..=n {
-                let row: usize = self.num_rows - 3 + n - m;
-                let rot: JacobiRotation<S> = make_givens(
-                    self.storage[(n, self.lm_idx + n)],
-                    self.storage[(row, self.lm_idx + n)],
-                );
-                self.damping_rotations.push(rot);
-                apply_rotation_on_the_left(&mut self.storage, row, n, rot);
-            }
-        }
-        Ok(())
-    }
-
-    /// Whether damping rotations are currently applied, `hasLandmarkDamping`
-    /// (`:383`).
-    pub fn has_landmark_damping(&self) -> bool {
-        !self.damping_rotations.is_empty()
-    }
-
     /// `backSubstitute(pose_inc, l_diff)` (`:253-327`): recover this landmark's
     /// increment from the pose increment, add its share of the model cost
     /// change, and apply it.
     ///
-    /// Four behaviours worth naming:
+    /// Two behaviours worth naming:
     ///
     /// * a singular `Q1Jl` is **warned about and skipped**, not an error
     ///   (`:263-269`, trap 11), and an unusually small determinant only warns;
-    /// * damping is undone **before** the model cost change is computed
-    ///   (`:310`), so `Q1Jl` is read twice — once damped, for the solve, once
-    ///   undamped, for `Q1Jl * inc`. The port copies the damped 3x3 before
-    ///   undamping, which is what C++'s lazy `triangularView` does implicitly;
-    /// * the increment is scaled by `Jl_col_scale` **after** the cost change
-    ///   (`:322-323`);
     /// * the inverse distance is **projected**, not clamped:
     ///   `max(0, inv_dist + inc[2])` (`:326`, trap 12).
+    ///
+    /// C++ also undoes the damping before the model cost change (`:310`) and
+    /// scales the increment by `Jl_col_scale` after it (`:322-323`); the port
+    /// carries neither, because nothing damps or scales (D34, D68).
     ///
     /// `pose_inc` must be `aom.total_size` long (`:259`).
     pub fn back_substitute(
@@ -693,7 +595,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
                 found: self.state,
             });
         }
-        // `if (is_fixed_) return` (`:256`) — before the damping is undone.
+        // `if (is_fixed_) return` (`:256`).
         if self.is_fixed {
             return Ok(());
         }
@@ -705,7 +607,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
         }
 
         // `Q1Jl` (`:261`), the upper triangle of the 3x3 at the top of the
-        // landmark columns, read while the damping is still applied.
+        // landmark columns.
         let mut q1jl: Matrix3<S> = Matrix3::zeros();
         for r in 0..3 {
             for col in r..3 {
@@ -759,9 +661,11 @@ impl<S: LieScalar> LandmarkBlock<S> {
         }
         inc = -inc;
 
-        // `setLandmarkDamping(0)` (`:310`): undo the damping before the model
-        // cost change, which is what makes `l_diff` the *undamped* prediction.
-        self.set_landmark_damping(S::zero())?;
+        // `:310` calls `setLandmarkDamping(0)` here, to undo the damping before
+        // the model cost change. The port has no damping (D34, D68) and the
+        // three damping rows are provably still zero — `storage` starts zeroed,
+        // the observations fill rows `0..2*obs`, and both QR paths stop at
+        // `num_rows - 3` — so there is nothing to undo.
 
         // `QJinc = storage.topLeftCorner(num_rows - 3, padding_idx) * pose_inc`
         // (`:313`), then `QJinc.head<3>() += Q1Jl * inc` (`:316`) with `Q1Jl`
@@ -790,10 +694,8 @@ impl<S: LieScalar> LandmarkBlock<S> {
         }
         *l_diff -= diff;
 
-        // `:322-326`.
-        for k in 0..3 {
-            inc[k] *= self.jl_col_scale[k];
-        }
+        // `:322-326`, without `:322-323`'s `Jl_col_scale` multiply: the scale
+        // is all ones with nothing to scale the columns (D68).
         lm.direction[0] += inc[0];
         lm.direction[1] += inc[1];
         let updated: S = lm.inv_dist + inc[2];
@@ -993,115 +895,6 @@ impl<S: LieScalar> LandmarkBlock<S> {
         }
     }
 
-    /// `addJp_diag2(res)` (`:345-356`): the squared column norms of the pose
-    /// Jacobians, before the QR.
-    ///
-    /// Feeds the Jacobian scaling, which the shipped VIO path does not use
-    /// (`sqrt_keypoint_vio.cpp:1307-1311` is commented out, decision D34).
-    /// C++ walks `res_idx_by_abs_pose_`, a frame -> residual-row-index map built
-    /// at allocation (`:78-79`); the port walks the observations directly and
-    /// adds both the host and the target contribution of each, which visits the
-    /// same (row, column-block) pairs.
-    pub fn add_jp_diag2(&self, res: &mut DVector<S>) -> Result<(), LinearizeError> {
-        if self.state != LandmarkBlockState::Linearized {
-            return Err(LinearizeError::WrongState {
-                expected: LandmarkBlockState::Linearized,
-                found: self.state,
-            });
-        }
-        if res.nrows() < self.padding_idx {
-            return Err(LinearizeError::StackedSystemSize {
-                expected: self.padding_idx,
-                found: res.nrows(),
-            });
-        }
-        for (i, obs) in self.observations.iter().enumerate() {
-            if obs.rel_pose.is_none() {
-                continue;
-            }
-            // The host offset always, the target offset only when it is a
-            // different block: C++'s map keys on the frame, so a landmark
-            // observed in its own host frame contributes once.
-            let offsets: [usize; 2] = [obs.abs_h_idx, obs.abs_t_idx];
-            let distinct: usize = if obs.abs_t_idx == obs.abs_h_idx { 1 } else { 2 };
-            for &offset in offsets.iter().take(distinct) {
-                for col in 0..POSE_SIZE {
-                    let mut acc: S = S::zero();
-                    for r in 0..2 {
-                        let v: S = self.storage[(2 * i + r, offset + col)];
-                        acc += v * v;
-                    }
-                    res[offset + col] += acc;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// `scaleJl_cols()` (`:363-372`): normalise the three landmark columns and
-    /// remember the scale for [`Self::back_substitute`].
-    ///
-    /// Dead on the shipped VIO path (`sqrt_keypoint_vio.cpp:1313-1317`),
-    /// implemented because the hook has to be real (decision D34).
-    pub fn scale_jl_cols(
-        &mut self,
-        options: &LandmarkBlockOptions<S>,
-    ) -> Result<(), LinearizeError> {
-        if self.state != LandmarkBlockState::Linearized {
-            return Err(LinearizeError::WrongState {
-                expected: LandmarkBlockState::Linearized,
-                found: self.state,
-            });
-        }
-        let rows: usize = self.num_q2rows();
-        for col in 0..3 {
-            // `colwise().norm()` over a strided column: the sequential fold of
-            // `Redux.h:174-192`, then Eigen's `sqrt`.
-            let mut sum: S = S::zero();
-            for r in 0..rows {
-                let v: S = self.storage[(r, self.lm_idx + col)];
-                sum += v * v;
-            }
-            self.jl_col_scale[col] = S::one() / (options.jacobi_scaling_eps + sum.sqrt());
-        }
-        for col in 0..3 {
-            for r in 0..rows {
-                self.storage[(r, self.lm_idx + col)] *= self.jl_col_scale[col];
-            }
-        }
-        Ok(())
-    }
-
-    /// `scaleJp_cols(jacobian_scaling)` (`:374-381`): scale the pose columns of
-    /// the `Q₂` rows.
-    ///
-    /// Dead on the shipped VIO path (`sqrt_keypoint_vio.cpp:1367-1371`).
-    /// C++ asserts the block is undamped (`:378`) because the scaling excludes
-    /// the damping rows.
-    pub fn scale_jp_cols(&mut self, jacobian_scaling: &DVector<S>) -> Result<(), LinearizeError> {
-        if self.state != LandmarkBlockState::Marginalized {
-            return Err(LinearizeError::WrongState {
-                expected: LandmarkBlockState::Marginalized,
-                found: self.state,
-            });
-        }
-        if self.has_landmark_damping() {
-            return Err(LinearizeError::ScalingDampedBlock);
-        }
-        if jacobian_scaling.nrows() < self.padding_idx {
-            return Err(LinearizeError::StackedSystemSize {
-                expected: self.padding_idx,
-                found: jacobian_scaling.nrows(),
-            });
-        }
-        for r in 0..self.num_q2rows() {
-            for k in 0..self.padding_idx {
-                self.storage[(r, k)] *= jacobian_scaling[k];
-            }
-        }
-        Ok(())
-    }
-
     /// `numQ2rows()` (`:426`): `num_rows - 3`, the rows the reduced camera
     /// system takes. Note this counts the `Q₁` rows too — the name is basalt's.
     pub fn num_q2rows(&self) -> usize {
@@ -1221,8 +1014,8 @@ mod tests {
     }
 
     /// `add_dense_h_b` reads only the observed pose columns, and the rest of
-    /// `0..padding_idx` really is zero — through the linearization, the QR and
-    /// the landmark damping, which is the whole life of a block.
+    /// `0..padding_idx` really is zero — through the linearization and the QR,
+    /// which is the whole life of a block.
     ///
     /// The optimization that skips them is only the identity because of this:
     /// a column of zeros makes every product `+/-0.0`, so the accumulator stays
@@ -1252,8 +1045,6 @@ mod tests {
         zero_after(&block, "linearizeLandmark");
         block.perform_qr(&options()).unwrap();
         zero_after(&block, "performQR");
-        block.set_landmark_damping(1e-3).unwrap();
-        zero_after(&block, "setLandmarkDamping");
 
         // And the dense system it produces is the one the whole `padding_idx`
         // loop would have produced.
@@ -1364,8 +1155,8 @@ mod tests {
     /// so nothing ever writes at its `abs_t_idx` — which is the `0` sentinel of
     /// `:74`, another frame's first column. The block here is hosted in frame 1,
     /// so that sentinel is not the host's own offset and the two are told apart:
-    /// columns `0..6` stay zero through the linearization, the QR and the
-    /// damping, and the dense system is the full loop's either way.
+    /// columns `0..6` stay zero through the linearization and the QR, and the
+    /// dense system is the full loop's either way.
     #[test]
     fn a_dropped_observation_writes_no_columns() {
         let (aom, _, rel) = fixture(4);
@@ -1391,7 +1182,6 @@ mod tests {
             .linearize_landmark(&lm, &rel, &cameras(), &options())
             .unwrap();
         block.perform_qr(&options()).unwrap();
-        block.set_landmark_damping(1e-3).unwrap();
 
         for column in (0..block.padding_idx).filter(|column| !live.contains(column)) {
             for row in 0..block.num_rows {
@@ -1468,20 +1258,8 @@ mod tests {
             .unwrap();
         assert_eq!(block.state(), LandmarkBlockState::Linearized);
 
-        // `setLandmarkDamping` asserts `Marginalized` (`:217`).
-        assert!(matches!(
-            block.set_landmark_damping(0.0).unwrap_err(),
-            LinearizeError::WrongState { .. }
-        ));
-
         block.perform_qr(&options()).unwrap();
         assert_eq!(block.state(), LandmarkBlockState::Marginalized);
-
-        // `:218`: lambda must not be negative.
-        assert_eq!(
-            block.set_landmark_damping(-1.0).unwrap_err(),
-            LinearizeError::NegativeDamping
-        );
 
         // `:259`: the increment is the whole ordering.
         let mut l_diff: f64 = 0.0;
@@ -1494,16 +1272,6 @@ mod tests {
                 expected: POSE_SIZE,
                 found: 3,
             }
-        );
-
-        // `:378`: scaling a damped block is refused.
-        block.set_landmark_damping(1e-3).unwrap();
-        assert!(block.has_landmark_damping());
-        assert_eq!(
-            block
-                .scale_jp_cols(&DVector::from_element(POSE_SIZE, 1.0))
-                .unwrap_err(),
-            LinearizeError::ScalingDampedBlock
         );
     }
 

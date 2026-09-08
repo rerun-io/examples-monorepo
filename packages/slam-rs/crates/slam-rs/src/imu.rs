@@ -1250,57 +1250,6 @@ impl<S: LieScalar> ImuBlock<S> {
         }
     }
 
-    /// Scale the two pose column blocks, `scaleJp_cols` (`imu_block.hpp:131-143`).
-    ///
-    /// Dead on the shipped VIO path (`sqrt_keypoint_vio.cpp:1367-1371` is
-    /// commented out, decision D34).
-    pub fn scale_jp_cols(
-        &mut self,
-        start_idx: usize,
-        end_idx: usize,
-        jacobian_scaling: &DVector<S>,
-    ) {
-        let size: usize = POSE_VEL_BIAS_SIZE;
-        for (block_col, col_offset) in [(0, start_idx), (size, end_idx)] {
-            // `usize::MAX + 15` wraps in release and panics in debug: check the
-            // sum itself, not just its result (decision D32).
-            if col_offset
-                .checked_add(size)
-                .is_none_or(|end| end > jacobian_scaling.nrows())
-            {
-                continue;
-            }
-            for i in 0..size {
-                for j in 0..size {
-                    self.jp[(i, block_col + j)] *= jacobian_scaling[col_offset + j];
-                }
-            }
-        }
-    }
-
-    /// The squared column norms of the two pose blocks, `addJp_diag2`
-    /// (`imu_block.hpp:145-157`). Feeds the Jacobian scaling, dead on the
-    /// shipped path (D34).
-    pub fn add_jp_diag2(&self, start_idx: usize, end_idx: usize, res: &mut DVector<S>) {
-        let size: usize = POSE_VEL_BIAS_SIZE;
-        for (block_col, col_offset) in [(0, start_idx), (size, end_idx)] {
-            if col_offset
-                .checked_add(size)
-                .is_none_or(|end| end > res.nrows())
-            {
-                continue;
-            }
-            for j in 0..size {
-                let mut acc: S = S::zero();
-                for i in 0..size {
-                    let v: S = self.jp[(i, block_col + j)];
-                    acc += v * v;
-                }
-                res[col_offset + j] += acc;
-            }
-        }
-    }
-
     /// This factor's share of the model cost change, `backSubstitute`
     /// (`imu_block.hpp:159-183`).
     ///
@@ -2848,14 +2797,6 @@ mod tests {
         // The first state's block is untouched.
         assert_eq!(q2jp.columns(0, size).norm(), 0.0);
 
-        // `addJp_diag2`.
-        let mut diag2: DVector<f64> = DVector::zeros(total);
-        block.add_jp_diag2(start_idx, end_idx, &mut diag2);
-        for col in 0..total {
-            let want: f64 = q2jp.column(col).norm_squared();
-            assert_abs_diff_eq!(diag2[col], want, epsilon = 1e-9 * want.max(1.0));
-        }
-
         // `backSubstitute`: the model cost change of the scattered system.
         let inc: DVector<f64> =
             DVector::from_iterator(total, (0..total).map(|_| rng.uniform() / 100.0));
@@ -2867,54 +2808,9 @@ mod tests {
         assert_abs_diff_eq!(l_diff, want, epsilon = 1e-12 * want.abs().max(1.0));
 
         // Offsets that do not fit are ignored, not a panic (decision D32).
-        // The check is per column block, so one block can be written while the
-        // other is skipped; here neither fits.
-        let mut small: DVector<f64> = DVector::zeros(size);
-        block.add_jp_diag2(usize::MAX, size, &mut small);
-        assert_eq!(small.norm(), 0.0);
         let mut l_diff: f64 = 0.0;
         block.back_substitute(0, total, &inc, &mut l_diff);
         assert_eq!(l_diff, 0.0);
-    }
-
-    /// `scaleJp_cols` (`imu_block.hpp:131-143`) scales the two pose blocks, and
-    /// nothing on the shipped VIO path calls it (decision D34).
-    #[test]
-    fn scaling_the_imu_pose_columns_scales_both_blocks() {
-        let mut rng: Rng = Rng::new(0x5eed_00e2);
-        let trajectory: Trajectory = Trajectory::new(&mut rng);
-        let bg: Vector3<f64> = rng.vector3() / 100.0;
-        let ba: Vector3<f64> = rng.vector3() / 10.0;
-        let samples: Vec<ImuSample> = biased_samples(&trajectory, &bg, &ba);
-        let meas: IntegratedImuMeasurement<f64> = integrate_all(0, &bg, &ba, &samples);
-        let end_t_ns: i64 = meas.get_dt_ns();
-        let state0: PoseVelBiasState<f64> =
-            PoseVelBiasState::new(0, trajectory.pose(0), trajectory.trans_vel_world(0), bg, ba);
-        let state1: PoseVelBiasState<f64> = PoseVelBiasState::new(
-            end_t_ns,
-            trajectory.pose(end_t_ns),
-            trajectory.trans_vel_world(end_t_ns),
-            bg,
-            ba,
-        );
-        let block: ImuBlock<f64> = ImuBlock::linearize(
-            &meas,
-            &lin_data(),
-            &PoseVelBiasStateWithLin::new(state0, false),
-            &PoseVelBiasStateWithLin::new(state1, false),
-        );
-
-        let size: usize = POSE_VEL_BIAS_SIZE;
-        let mut scaled: ImuBlock<f64> = block;
-        let scaling: DVector<f64> =
-            DVector::from_iterator(2 * size, (0..2 * size).map(|k| 1.0 + k as f64));
-        scaled.scale_jp_cols(0, size, &scaling);
-        for row in 0..size {
-            for col in 0..2 * size {
-                assert_eq!(scaled.jp[(row, col)], block.jp[(row, col)] * scaling[col]);
-            }
-        }
-        assert_eq!(scaled.r, block.r);
     }
 
     /// A frozen linearization point changes only the residual *value*, not the

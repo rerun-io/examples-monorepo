@@ -24,9 +24,7 @@ use crate::lie::{LieScalar, Se3};
 use crate::linearize::landmark_block::{DenseHbScratch, LandmarkBlock, LandmarkBlockOptions};
 use crate::linearize::reduce::{deterministic_reduce, deterministic_reduce_scalar};
 use crate::linearize::{LinearizeError, RelPoseLin};
-use crate::types::{
-    AbsOrderMap, FrameId, LandmarkId, MargLinData, POSE_SIZE, POSE_VEL_BIAS_SIZE, TimeCamId,
-};
+use crate::types::{AbsOrderMap, FrameId, LandmarkId, MargLinData, POSE_VEL_BIAS_SIZE, TimeCamId};
 
 /// `LinearizationBase<Scalar, POSE_SIZE>::Options` (`linearization_base.hpp:23-26`),
 /// without the `linearization_type` field: only `ABS_QR` is ported (decision D13).
@@ -125,14 +123,6 @@ pub struct LinearizationAbsQR<S: LieScalar> {
     imu_blocks: Vec<ImuBlock<S>>,
     /// `aom` (`:119`).
     aom: AbsOrderMap,
-    /// `num_cameras = frame_poses.size()` (`:113`).
-    num_cameras: usize,
-    /// `pose_damping_diagonal` (`:129`).
-    pose_damping_diagonal: S,
-    /// `pose_damping_diagonal_sqrt` (`:130`).
-    pose_damping_diagonal_sqrt: S,
-    /// `marg_scaling` (`:132`), empty unless [`Self::scale_jp_cols`] ran.
-    marg_scaling: DVector<S>,
 }
 
 /// One subtree's partial `(H, b)` of the dense reduction, and the columns it holds.
@@ -193,18 +183,6 @@ impl<S: LieScalar> DensePartial<S> {
         }
     }
 
-    /// Back to the identity, zeroing only what was written.
-    fn reset(&mut self) {
-        for &j in &self.columns {
-            for &i in &self.columns {
-                self.h[(i, j)] = S::zero();
-            }
-            self.b[j] = S::zero();
-        }
-        self.columns.clear();
-        self.written.fill(false);
-    }
-
     /// Add one landmark block's `(H, b)` and record the columns it wrote.
     ///
     /// The two halves belong together: [`Self::mark`] records what a join and a
@@ -232,6 +210,17 @@ impl<S: LieScalar> DensePartial<S> {
             self.mark(block.pose_columns());
         }
         Ok(())
+    }
+    /// Back to the identity, zeroing only what was written.
+    fn reset(&mut self) {
+        for &j in &self.columns {
+            for &i in &self.columns {
+                self.h[(i, j)] = S::zero();
+            }
+            self.b[j] = S::zero();
+        }
+        self.columns.clear();
+        self.written.fill(false);
     }
 
     /// `H_ += b.H_; b_ += b.b_` (`:532-535`), over the right side's columns.
@@ -279,9 +268,6 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             }
         }
         let rel_pose_lin: Vec<RelPoseLin<S>> = vec![RelPoseLin::default(); rel_pose_pairs.len()];
-
-        // `:113`.
-        let num_cameras: usize = estimator.frame_poses.len();
 
         // `:115-127`. The database already keeps its landmarks id-sorted, so the
         // `std::sort` of `:127` is the iteration order here.
@@ -383,10 +369,6 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             imu_meta,
             imu_blocks: Vec::new(),
             aom: aom.clone(),
-            num_cameras,
-            pose_damping_diagonal: S::zero(),
-            pose_damping_diagonal_sqrt: S::zero(),
-            marg_scaling: DVector::zeros(0),
         })
     }
 
@@ -413,9 +395,6 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         inputs: &LinearizationInputs<'_, S>,
     ) -> Result<(S, bool), LinearizeError> {
         // `:201-204`.
-        self.pose_damping_diagonal = S::zero();
-        self.pose_damping_diagonal_sqrt = S::zero();
-        self.marg_scaling = DVector::zeros(0);
 
         // 1. the relative poses (`:207-241`).
         for (i, (tcid_h, tcid_t)) in self.rel_pose_pairs.iter().enumerate() {
@@ -550,126 +529,6 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         Ok(())
     }
 
-    /// `setPoseDamping(lambda)` (`:289-295`).
-    ///
-    /// Not called on the shipped VIO path (`sqrt_keypoint_vio.cpp:1361-1365`),
-    /// decision D34.
-    pub fn set_pose_damping(&mut self, lambda: S) -> Result<(), LinearizeError> {
-        if lambda < S::zero() {
-            return Err(LinearizeError::NegativeDamping);
-        }
-        self.pose_damping_diagonal = lambda;
-        self.pose_damping_diagonal_sqrt = lambda.sqrt();
-        Ok(())
-    }
-
-    /// `hasPoseDamping()` (`linearization_abs_qr.hpp:66`).
-    pub fn has_pose_damping(&self) -> bool {
-        self.pose_damping_diagonal > S::zero()
-    }
-
-    /// `setLandmarkDamping(lambda)` (`:452-460`).
-    ///
-    /// Not called on the shipped VIO path (`sqrt_keypoint_vio.cpp:1373-1377`),
-    /// decision D34; exposed because the hook has to be real.
-    pub fn set_landmark_damping(&mut self, lambda: S) -> Result<(), LinearizeError> {
-        for block in &mut self.landmark_blocks {
-            block.set_landmark_damping(lambda)?;
-        }
-        Ok(())
-    }
-
-    /// `scaleJl_cols()` (`:382-390`). Dead on the shipped path (D34).
-    pub fn scale_jl_cols(&mut self) -> Result<(), LinearizeError> {
-        let options: LandmarkBlockOptions<S> = self.options.lb_options;
-        for block in &mut self.landmark_blocks {
-            block.scale_jl_cols(&options)?;
-        }
-        Ok(())
-    }
-
-    /// `scaleJp_cols(jacobian_scaling)` (`:392-450`). Dead on the shipped path
-    /// (D34).
-    ///
-    /// Only the `if (true)` branch of `:403-411` is ported: with absolute poses
-    /// the scaling goes into the landmark blocks. The `else` at `:412-435` is
-    /// the relative-pose parameterization, which is not in this port (D13).
-    /// The marginalization prior is not scaled in place; the scale is remembered
-    /// and applied where the prior is used (`:442-449`).
-    pub fn scale_jp_cols(
-        &mut self,
-        jacobian_scaling: &DVector<S>,
-        inputs: &LinearizationInputs<'_, S>,
-    ) -> Result<(), LinearizeError> {
-        for block in &mut self.landmark_blocks {
-            block.scale_jp_cols(jacobian_scaling)?;
-        }
-        for (block, meta) in self.imu_blocks.iter_mut().zip(self.imu_meta.iter()) {
-            block.scale_jp_cols(meta.start_idx, meta.end_idx, jacobian_scaling);
-        }
-        if let Some(marg) = inputs.marg {
-            // `:445`: applied once.
-            if self.marg_scaling.nrows() != 0 {
-                return Err(LinearizeError::ScalingDampedBlock);
-            }
-            self.marg_scaling = jacobian_scaling.rows(0, marg.h.ncols()).into_owned();
-        }
-        Ok(())
-    }
-
-    /// `getJp_diag2()` (`:323-380`): the squared column norms of the whole
-    /// problem's pose Jacobians, which feed the Jacobian scaling.
-    ///
-    /// **Reduction site 3 of 4** (`:354`). Dead on the shipped path (D34).
-    /// Note the marginalization prior contributes its own column norms
-    /// (`:370-377`) and the pose damping deliberately does not (`:360-365`).
-    pub fn get_jp_diag2(
-        &self,
-        inputs: &LinearizationInputs<'_, S>,
-    ) -> Result<DVector<S>, LinearizeError> {
-        let total: usize = self.aom.total_size();
-        let mut res: DVector<S> = DVector::zeros(total);
-        let mut scratch: Vec<Option<DVector<S>>> = Vec::new();
-        let blocks: &[LandmarkBlock<S>] = &self.landmark_blocks;
-        deterministic_reduce::<DVector<S>, LinearizeError>(
-            blocks.len(),
-            &mut res,
-            &mut scratch,
-            &|| DVector::zeros(total),
-            &|value: &mut DVector<S>| value.fill(S::zero()),
-            &mut |i: usize, acc: &mut DVector<S>| {
-                blocks
-                    .get(i)
-                    .ok_or(LinearizeError::LayoutOverflow)?
-                    .add_jp_diag2(acc)
-            },
-            &|left: &mut DVector<S>, right: &DVector<S>| {
-                for k in 0..left.nrows() {
-                    left[k] += right[k];
-                }
-            },
-        )?;
-        for (block, meta) in self.imu_blocks.iter().zip(self.imu_meta.iter()) {
-            block.add_jp_diag2(meta.start_idx, meta.end_idx, &mut res);
-        }
-        if let Some(marg) = inputs.marg {
-            let marg_size: usize = marg.h.ncols();
-            for j in 0..marg_size {
-                let mut acc: S = S::zero();
-                for i in 0..marg.h.nrows() {
-                    let v: S = if self.marg_scaling.nrows() > 0 {
-                        marg.h[(i, j)] * self.marg_scaling[j]
-                    } else {
-                        marg.h[(i, j)]
-                    };
-                    acc += v * v;
-                }
-                res[j] += acc;
-            }
-        }
-        Ok(res)
-    }
-
     /// `get_dense_H_b(H, b)` (`:511-563`): the reduced camera system.
     ///
     /// **Reduction site 4 of 4** (`:550`). C++ gives every TBB task its own full
@@ -679,8 +538,9 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
     /// **depth** rather than one per task — the same sum, `ceil(log2 n)`
     /// matrices instead of `n`.
     ///
-    /// The order of the three additions after the landmark blocks is basalt's:
-    /// IMU (`:553`), pose damping (`:556`), marginalization prior (`:559`).
+    /// The order of the additions after the landmark blocks is basalt's: IMU
+    /// (`:553`), then the marginalization prior (`:559`). `:556`'s pose damping
+    /// is not one of them (D68).
     pub fn get_dense_h_b(
         &self,
         estimator: &BundleAdjustmentBase<S>,
@@ -711,19 +571,9 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             block.add_dense_h_b(meta.start_idx, meta.end_idx, &mut h, &mut b);
         }
 
-        // `add_dense_H_b_pose_damping` (`:595-598`).
-        if self.has_pose_damping() {
-            for i in 0..opt_size {
-                h[(i, i)] += self.pose_damping_diagonal;
-            }
-        }
-
-        // `add_dense_H_b_marg_prior` (`:600-631`).
+        // `add_dense_H_b_marg_prior` (`:600-631`). `:595-598`'s pose-damping
+        // diagonal is not here: nothing sets it (D68).
         if let Some(marg) = inputs.marg {
-            // `:605`: scaling is not supported here in C++ either.
-            if self.marg_scaling.nrows() != 0 {
-                return Err(LinearizeError::ScalingDampedBlock);
-            }
             estimator.linearize_marg_prior(marg, &self.aom, &mut h, &mut b)?;
         }
 
@@ -734,15 +584,9 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
     /// system the marginalization of stage S7 consumes.
     ///
     /// The row budget, in this order (`:464-482`): the landmark blocks'
-    /// `num_rows_Q2r`, then 15 rows per IMU interval, then `aom.total_size` rows
-    /// of pose damping if it is set, then the marginalization prior's rows.
-    ///
-    /// **Deviation kept.** The damping rows are sized `aom.total_size` (`:465`,
-    /// `:475`) but written `num_cameras * POSE_SIZE` wide (`:567-569`). With
-    /// 15-dof states in the window those two differ, so C++ would write a
-    /// shorter diagonal than it reserved. Pose damping is never set on the
-    /// shipped path, so this has no effect; the port reproduces both numbers
-    /// rather than quietly picking one.
+    /// `num_rows_Q2r`, then 15 rows per IMU interval, then the marginalization
+    /// prior's rows. C++ reserves `aom.total_size` rows of pose damping between
+    /// the last two; nothing sets it (D68), so the port has no such rows.
     pub fn get_dense_q2jp_q2r(
         &self,
         estimator: &BundleAdjustmentBase<S>,
@@ -753,11 +597,6 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
 
         let imu_start_idx: usize = total_size;
         total_size += self.imu_meta.len() * POSE_VEL_BIAS_SIZE;
-
-        let damping_start_idx: usize = total_size;
-        if self.has_pose_damping() {
-            total_size += poses_size;
-        }
 
         let marg_start_idx: usize = total_size;
         if let Some(marg) = inputs.marg {
@@ -783,14 +622,6 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             start_idx += POSE_VEL_BIAS_SIZE;
         }
 
-        // `get_dense_Q2Jp_Q2r_pose_damping` (`:565-571`).
-        if self.has_pose_damping() {
-            let width: usize = (self.num_cameras * POSE_SIZE).min(poses_size);
-            for i in 0..width {
-                q2jp[(damping_start_idx + i, i)] = self.pose_damping_diagonal_sqrt;
-            }
-        }
-
         // `get_dense_Q2Jp_Q2r_marg_prior` (`:573-593`), trap 8: the prior's
         // residual is re-anchored at the current state as `H * delta + b`.
         if let Some(marg) = inputs.marg {
@@ -806,11 +637,7 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             let (marg_rows, marg_cols) = (marg.h.nrows(), marg.h.ncols());
             for i in 0..marg_rows {
                 for j in 0..marg_cols {
-                    q2jp[(marg_start_idx + i, j)] = if self.marg_scaling.nrows() > 0 {
-                        marg.h[(i, j)] * self.marg_scaling[j]
-                    } else {
-                        marg.h[(i, j)]
-                    };
+                    q2jp[(marg_start_idx + i, j)] = marg.h[(i, j)];
                 }
                 let mut acc: S = S::zero();
                 for j in 0..marg_cols {
@@ -872,13 +699,7 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         if let Some(marg) = inputs.marg {
             let marg_size: usize = marg.h.ncols();
             let marg_pose_inc: DVector<S> = pose_inc.rows(0, marg_size).into_owned();
-            let scaling: Option<&DVector<S>> = if self.marg_scaling.nrows() > 0 {
-                Some(&self.marg_scaling)
-            } else {
-                None
-            };
-            l_diff +=
-                estimator.compute_marg_prior_model_cost_change(marg, scaling, &marg_pose_inc)?;
+            l_diff += estimator.compute_marg_prior_model_cost_change(marg, &marg_pose_inc)?;
         }
 
         Ok(l_diff)
@@ -931,7 +752,7 @@ mod tests {
     use crate::calib::{CameraModel, PinholeParams};
     use crate::camera::CameraEnum;
     use crate::lie::So3;
-    use crate::types::LandmarkId;
+    use crate::types::{LandmarkId, POSE_SIZE};
     use nalgebra::{Vector2, Vector3};
 
     /// A two-frame ordering with one landmark hosted in the first frame and seen

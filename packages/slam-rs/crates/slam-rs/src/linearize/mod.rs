@@ -18,18 +18,12 @@
 //! l_diff= lqr.back_substitute(inc)     // :1454   landmark increments + model cost change
 //! ```
 //!
-//! **What the shipped path does not call** (decision D34). `setPoseDamping`,
-//! `scaleJl_cols`, `scaleJp_cols`, `getJp_diag2` and `setLandmarkDamping` are all
-//! commented out in `optimize()` — at `:1307-1317` (the Jacobian scaling),
-//! `:1361-1377` (both dampings) and `:1461-1463` (undoing the scaling) — which
-//! matches the ICCV 2021 paper's own statement that the Givens damping stack is
-//! not used in the sliding-window VIO. Damping enters through the
+//! **No damping and no Jacobian scaling** (D34, D68). `setPoseDamping`,
+//! `setLandmarkDamping`, `scaleJl_cols`, `scaleJp_cols` and `getJp_diag2` are
+//! commented out in the fork's own `optimize()` — `:1307-1317`, `:1361-1377`
+//! and `:1461-1463` — so the port omits them. Damping enters through the
 //! `H.diagonal() * lambda` of the dense solve instead (`:1415-1417`), which is
-//! stage S8's business. All five are implemented here anyway and none of them is
-//! called by this module's own driver: the only live entry into the damping code
-//! is [`LandmarkBlock::set_landmark_damping`] with `lambda = 0` from inside
-//! `back_substitute` (`landmark_block_abs_dynamic.hpp:310`), where — with no
-//! rotations stored — it reduces to zeroing the damping diagonal.
+//! the estimator's business.
 //!
 //! **Determinism.** basalt uses `tbb::parallel_deterministic_reduce` at four
 //! sites where the summation order changes the answer
@@ -43,9 +37,10 @@
 //! the tree, pinned bit for bit against the fork's own TBB by
 //! `tests/fixtures/linearize/tbb_reduce_oracle.json`, and all four sites go
 //! through it: [`LinearizationAbsQR::linearize_problem`],
-//! [`LinearizationAbsQR::back_substitute`], [`LinearizationAbsQR::get_jp_diag2`]
-//! and [`LinearizationAbsQR::get_dense_h_b`]. A rayon version has to reproduce
-//! the same tree; `par_chunks` with an ordered merge does not.
+//! [`LinearizationAbsQR::back_substitute`] and
+//! [`LinearizationAbsQR::get_dense_h_b`] — the fourth, `getJp_diag2` (`:354`),
+//! is not ported (D68). A rayon version has to reproduce the same tree;
+//! `par_chunks` with an ordered merge does not.
 
 mod abs_qr;
 pub(crate) mod eigen_qr;
@@ -293,18 +288,6 @@ pub enum LinearizeError {
         /// What the block was.
         found: LandmarkBlockState,
     },
-    /// `setLandmarkDamping` was given a negative lambda (`:218` asserts).
-    #[error("landmark damping must not be negative")]
-    NegativeDamping,
-    /// The damping rotations were not a complete set of six (`:221` asserts).
-    #[error("the damping rotation stack is corrupt")]
-    DampingStackCorrupt,
-    /// `Jl_col_scale` is not finite (`:235` asserts).
-    #[error("the landmark column scale is not finite")]
-    NonFiniteColumnScale,
-    /// `scaleJp_cols` was called on a damped block (`:378` asserts).
-    #[error("cannot scale the pose columns of a damped block")]
-    ScalingDampedBlock,
     /// A stacked system was handed in at the wrong size.
     #[error("stacked system has {found} rows or columns, expected {expected}")]
     StackedSystemSize {

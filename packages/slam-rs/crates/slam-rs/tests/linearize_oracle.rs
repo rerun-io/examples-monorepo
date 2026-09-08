@@ -94,7 +94,6 @@ struct Case {
     scalar: String,
     huber_thresh: f64,
     obs_std_dev: f64,
-    damping_lambda: f64,
     t_i_c: Vec<Pose>,
     kb4_params: Vec<f64>,
     frames: Vec<Frame>,
@@ -165,8 +164,6 @@ struct Block {
     error: f64,
     storage_pre: Vec<f64>,
     storage_post: Vec<f64>,
-    storage_damped: Vec<f64>,
-    storage_undamped: Vec<f64>,
     q2jp: Vec<f64>,
     q2r: Vec<f64>,
     #[serde(rename = "block_H")]
@@ -445,34 +442,6 @@ fn check_case<S: LieScalar + Serialize + DeserializeOwned>(case: &Case, toleranc
             &format!("{name}: block H"),
         );
         cmp.close_slice(b.as_slice(), &want.block_b, &format!("{name}: block b"));
-
-        // The damping stack, on a copy: set, then undo (trap 10). Nothing on
-        // the shipped path calls this (D34), which is why it is only ever
-        // checked against the fixture.
-        let mut damped: LandmarkBlock<S> = block.clone();
-        damped
-            .set_landmark_damping(S::from_literal(case.damping_lambda))
-            .unwrap();
-        assert!(
-            damped.has_landmark_damping(),
-            "{name}: damping not recorded"
-        );
-        cmp.close_matrix(
-            damped.storage(),
-            &want.storage_damped,
-            want.num_rows,
-            want.num_cols,
-            &format!("{name}: storage_damped"),
-        );
-        damped.set_landmark_damping(S::zero()).unwrap();
-        assert!(!damped.has_landmark_damping(), "{name}: damping not undone");
-        cmp.close_matrix(
-            damped.storage(),
-            &want.storage_undamped,
-            want.num_rows,
-            want.num_cols,
-            &format!("{name}: storage_undamped"),
-        );
 
         // The per-block back substitution, on copies of both the block and the
         // landmark, so the driver-level pass below still starts from the

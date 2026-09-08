@@ -403,13 +403,6 @@ pub(crate) struct JacobiRotation<S: LieScalar> {
 }
 
 impl<S: LieScalar> JacobiRotation<S> {
-    /// `adjoint()` (`Jacobi.h:65-68`), which for a real rotation is the
-    /// transpose. This is what un-applies a stored damping rotation
-    /// (`landmark_block_abs_dynamic.hpp:226`).
-    pub(crate) fn adjoint(self) -> Self {
-        self.transpose()
-    }
-
     /// `transpose()` (`Jacobi.h:60-63`).
     fn transpose(self) -> Self {
         Self {
@@ -1075,14 +1068,16 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
     /// The prior's share of the model cost change,
     /// `computeMargPriorModelCostChange` (`ba_base.cpp:467-528`).
     ///
-    /// `l_diff = -(J inc)ᵀ (J delta + r + 0.5 (J inc))` (`:519-522`). Note the
-    /// asymmetry the comment at `:503-507` spells out:
-    /// the Jacobian scaling multiplies `H` where it meets `inc`, but **not**
-    /// where it meets `delta`, because `delta` was never scaled.
+    /// `l_diff = -(J inc)ᵀ (J delta + r + 0.5 (J inc))` (`:519-522`).
+    ///
+    /// C++ takes a `marg_scaling` vector and multiplies `H` by it where it
+    /// meets `inc` but **not** where it meets `delta` (the asymmetry `:503-507`
+    /// spells out, because `delta` was never scaled). The port takes no such
+    /// vector: only the Jacobian scaling could produce one and nothing scales
+    /// (D68).
     pub fn compute_marg_prior_model_cost_change(
         &self,
         mld: &MargLinData<S>,
-        marg_scaling: Option<&DVector<S>>,
         marg_pose_inc: &DVector<S>,
     ) -> Result<S, BaError> {
         let marg_size: usize = mld.order.total_size();
@@ -1093,27 +1088,7 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
                 total_size: marg_size,
             });
         }
-        // C++ builds `marg_scaling` from `jacobian_scaling.head(marg_size)`
-        // (`linearization_abs_qr.cpp:448`), so it is always long enough there;
-        // a caller that hands in a shorter one would index past its end
-        // (`ba_base.cpp:513`).
-        if let Some(scaling) = marg_scaling {
-            if scaling.nrows() < marg_size {
-                return Err(BaError::MargPriorSize {
-                    cols: scaling.nrows(),
-                    total_size: marg_size,
-                });
-            }
-        }
         let delta: DVector<S> = self.compute_delta(&mld.order)?;
-
-        // `:512-513`.
-        let mut scaled_inc: DVector<S> = marg_pose_inc.clone();
-        if let Some(scaling) = marg_scaling {
-            for i in 0..marg_size {
-                scaled_inc[i] *= scaling[i];
-            }
-        }
 
         // `:519-522`; `:524` is the squared arm, which the port has no prior
         // for (D68).
@@ -1124,7 +1099,7 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
             let mut j_inc: S = S::zero();
             for j in 0..marg_size {
                 b_jdelta += mld.h[(k, j)] * delta[j];
-                j_inc += mld.h[(k, j)] * scaled_inc[j];
+                j_inc += mld.h[(k, j)] * marg_pose_inc[j];
             }
             b_jdelta += mld.b[k];
             l_diff -= j_inc * (b_jdelta + c::<S>(0.5) * j_inc);
@@ -1902,7 +1877,7 @@ mod tests {
         let inc: DVector<f64> =
             DVector::from_iterator(POSE_SIZE, (0..POSE_SIZE).map(|_| next() / 10.0));
         let l_diff: f64 = estimator
-            .compute_marg_prior_model_cost_change(&mld, None, &inc)
+            .compute_marg_prior_model_cost_change(&mld, &inc)
             .unwrap();
         let j_inc: DVector<f64> = &j * &inc;
         let want_l_diff: f64 = -(j_inc.transpose() * (&j_delta + &r_vec + 0.5 * &j_inc))[(0, 0)];
@@ -1910,22 +1885,6 @@ mod tests {
             l_diff,
             want_l_diff,
             epsilon = 1e-12 * want_l_diff.abs().max(1.0)
-        );
-
-        // The Jacobian scaling multiplies `H` where it meets `inc` and **not**
-        // where it meets `delta` (`:503-507`).
-        let scaling: DVector<f64> =
-            DVector::from_iterator(POSE_SIZE, (0..POSE_SIZE).map(|k| 1.0 + k as f64));
-        let scaled: f64 = estimator
-            .compute_marg_prior_model_cost_change(&mld, Some(&scaling), &inc)
-            .unwrap();
-        let j_inc_scaled: DVector<f64> = &j * inc.component_mul(&scaling);
-        let want_scaled: f64 =
-            -(j_inc_scaled.transpose() * (&j_delta + &r_vec + 0.5 * &j_inc_scaled))[(0, 0)];
-        assert_abs_diff_eq!(
-            scaled,
-            want_scaled,
-            epsilon = 1e-12 * want_scaled.abs().max(1.0)
         );
 
         // An ordering the window disagrees with is rejected (`:383-388`).
@@ -1951,9 +1910,8 @@ mod tests {
             BaError::MargPriorSize { .. }
         ));
 
-        // Two shapes C++ indexes without asserting, each of which would be a
-        // panic here (decision D32): a residual that is not as long as `H` is
-        // tall, and a scaling vector shorter than the prior.
+        // A shape C++ indexes without asserting, which would be a panic here
+        // (decision D32): a residual that is not as long as `H` is tall.
         let empty_b: MargLinData<f64> = MargLinData {
             order: order.clone(),
             h: j,
@@ -1967,16 +1925,10 @@ mod tests {
                 &mut DMatrix::zeros(POSE_SIZE, POSE_SIZE),
                 &mut DVector::zeros(POSE_SIZE),
             ),
-            estimator.compute_marg_prior_model_cost_change(&empty_b, None, &inc),
+            estimator.compute_marg_prior_model_cost_change(&empty_b, &inc),
         ] {
             assert!(matches!(outcome, Err(BaError::MargPriorSize { .. })));
         }
-
-        let short_scaling: DVector<f64> = DVector::from_element(1, 1.0);
-        assert!(matches!(
-            estimator.compute_marg_prior_model_cost_change(&mld, Some(&short_scaling), &inc),
-            Err(BaError::MargPriorSize { .. })
-        ));
     }
 
     #[test]
