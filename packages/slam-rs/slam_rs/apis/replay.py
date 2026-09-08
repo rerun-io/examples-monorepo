@@ -45,6 +45,8 @@ from slam_rs.vio_log import VioLogger, log_rig, vio_blueprint
 
 SMOKE_SEGMENT: str = "msd-index__MIO_others__MIO10_short_2_panorama"
 """Default segment: the 7.6 s rotation-dominated panorama from the smoke tier."""
+IMU_ENTITY: str = f"{RIG_ENTITY}/imu_00"
+"""Where the inertial input is drawn, under the rig it belongs to."""
 IMAGE_DOWNSCALE: int = 2
 """Images are logged at half resolution: the viewer does not need full-resolution pixels to show what was fed."""
 JPEG_QUALITY: int = 85
@@ -209,10 +211,6 @@ def _cpp_trajectory(manifest: ReferenceManifest, segment: ReferenceSegment, capt
         print(f"no C++ trajectory to compare against: {resolved.reason}")
         return empty_trajectory()
     return shift_clock(read_trajectory(resolved.path), -capture_start_time_ns)
-
-
-IMU_ENTITY: str = f"{RIG_ENTITY}/imu_00"
-"""Where the inertial input is drawn, under the rig it belongs to."""
 
 
 def log_imu(imu: ImuStream) -> None:
