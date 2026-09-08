@@ -44,17 +44,20 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import rerun as rr
 from jaxtyping import Float64
 from numpy import ndarray
+from scipy.spatial.transform import Rotation
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from slam_rs import _core
 from slam_rs.apis.replay import log_imu
 from slam_rs.catalog_feed import (
     RIG_ENTITY,
+    TIMELINE,
     CameraCalib,
     Frameset,
     LocalSegment,
@@ -63,7 +66,7 @@ from slam_rs.catalog_feed import (
     read_rig_trajectory,
 )
 from slam_rs.frontend_log import camera_entity
-from slam_rs.reference import ReferenceManifest, RobocapSession, load_manifest
+from slam_rs.reference import ImuParameters, ReferenceManifest, RobocapSession, load_manifest
 from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_trajectory, write_trajectory
 from slam_rs.vio_log import VioLogger, log_rig, vio_blueprint
@@ -107,23 +110,35 @@ def robocap_profile(manifest: ReferenceManifest) -> RigProfile:
     )
 
 
-def check_calibration_matches_recording(basalt: _core.Calibration, cameras: tuple[CameraCalib, ...], downscale: int) -> None:
-    """Refuse a C++ calibration that is not the rig the recording describes.
+def check_calibration_matches_recording(
+    basalt: _core.Calibration, cameras: tuple[CameraCalib, ...], imu: ImuParameters, downscale: int
+) -> None:
+    """Refuse a C++ calibration that is not the rig the recording and the manifest describe.
 
-    The intrinsics are compared, not just the resolution: the two come from the
-    same Kalibr tree by different routes — the fork's converter for the file, the
-    ``dataforge`` conversion for the recording — and a route that drifted would
-    otherwise show up only as a few centimetres of trajectory error nobody could
-    attribute. The recording's native statics are scaled here the way the
-    converter scales them.
+    Everything the file carries is compared, not just the resolution: the lenses
+    and the extrinsics come from the same Kalibr tree by different routes — the
+    fork's converter for the file, the ``dataforge`` conversion for the recording
+    — and a route that drifted would otherwise show up only as a few centimetres
+    of trajectory error nobody could attribute. The recording's native statics
+    are scaled here the way the converter scales them.
+
+    The inertial half is checked against the manifest for the same reason by a
+    different route: this lane configures the *estimator* from the file and the
+    *feed* from the manifest's frozen Kalibr values, so a re-conversion that
+    moved one and not the other would split them silently. The file's own
+    ``cam_time_offset_ns`` must be zero, because the feed is what applies that
+    offset (to the frames, not the IMU) and a file carrying it too would apply it
+    twice.
 
     Args:
         basalt: The calibration read from basalt's own JSON.
         cameras: The feed's cameras, already scaled to ``downscale``.
+        imu: The manifest's frozen IMU parameters, which configure the feed.
         downscale: The factor both were scaled by.
 
     Raises:
-        ValueError: If the camera count, a resolution or an intrinsic disagrees.
+        ValueError: If the camera count, a resolution, an intrinsic, a distortion
+            coefficient, an extrinsic, the IMU model or the clock offset disagrees.
     """
     if basalt.camera_count != len(cameras):
         raise ValueError(f"basalt's calibration has {basalt.camera_count} cameras, the feed selected {len(cameras)}")
@@ -132,13 +147,43 @@ def check_calibration_matches_recording(basalt: _core.Calibration, cameras: tupl
         raise ValueError(f"basalt's calibration is {list(basalt.resolution)}, the feed decodes {list(expected)} at downscale {downscale}")
     # `Calibration` exposes no intrinsics accessor, so the comparison goes through
     # the round trip its own `to_json` writes, which is basalt's shape.
-    written: list[dict[str, float]] = [entry["intrinsics"] for entry in json.loads(basalt.to_json())["value0"]["intrinsics"]]
-    for camera, values in zip(cameras, written, strict=True):
+    written: dict[str, Any] = json.loads(basalt.to_json())["value0"]
+    for camera, lens, extrinsic in zip(cameras, written["intrinsics"], written["T_imu_cam"], strict=True):
+        if lens["camera_type"] != camera.model:
+            raise ValueError(f"cam {camera.index}: basalt's model is {lens['camera_type']!r}, the recording gives {camera.model!r}")
+        values: dict[str, float] = lens["intrinsics"]
         for name, mine in (("fx", camera.fx), ("fy", camera.fy), ("cx", camera.cx), ("cy", camera.cy)):
             # float32 statics on the recording against float64 in the JSON: a
             # thousandth of a pixel is rounding, a hundredth is a different rig.
             if abs(values[name] - mine) > 1e-2:
                 raise ValueError(f"cam {camera.index}: basalt's {name} is {values[name]}, the recording gives {mine} at downscale {downscale}")
+        # The distortion is resolution-invariant, so it is compared as stored and
+        # to float32's own precision rather than to a pixel's.
+        for number, mine in enumerate(camera.distortion.tolist(), start=1):
+            if abs(values[f"k{number}"] - mine) > 1e-6:
+                raise ValueError(f"cam {camera.index}: basalt's k{number} is {values[f'k{number}']}, the recording gives {mine}")
+        translation: Float64[ndarray, " 3"] = np.array([extrinsic["px"], extrinsic["py"], extrinsic["pz"]], dtype=np.float64)
+        offset_m: float = float(np.abs(translation - camera.imu_T_cam[:3, 3]).max())
+        if offset_m > 1e-4:
+            raise ValueError(f"cam {camera.index}: basalt places it {1e3 * offset_m:.3f} mm from where the recording does")
+        written_rotation: Rotation = Rotation.from_quat([extrinsic["qx"], extrinsic["qy"], extrinsic["qz"], extrinsic["qw"]])
+        turn_deg: float = float(np.degrees((written_rotation * Rotation.from_matrix(camera.imu_T_cam[:3, :3]).inv()).magnitude()))
+        if turn_deg > 1e-2:
+            raise ValueError(f"cam {camera.index}: basalt turns it {turn_deg:.4f} deg from where the recording does")
+    for name, mine in (
+        ("imu_update_rate", imu.rate_hz),
+        ("gyro_noise_std", imu.gyro_noise_std),
+        ("accel_noise_std", imu.accel_noise_std),
+        ("gyro_bias_std", imu.gyro_bias_std),
+        ("accel_bias_std", imu.accel_bias_std),
+    ):
+        # A rate is one number, a noise density is one per axis and all three are
+        # the same number, which is how Kalibr writes an isotropic model.
+        theirs: list[float] = written[name] if isinstance(written[name], list) else [written[name]]
+        if any(abs(value - mine) > 1e-12 for value in theirs):
+            raise ValueError(f"basalt's {name} is {written[name]}, the manifest gives {mine}")
+    if written["cam_time_offset_ns"] != 0:
+        raise ValueError(f"basalt's calibration carries cam_time_offset_ns {written['cam_time_offset_ns']}; the feed applies that offset, so the file must not")
 
 
 def main(config: Config) -> None:
@@ -151,8 +196,8 @@ def main(config: Config) -> None:
     session: RobocapSession = manifest.robocap.session(config.session)
     offset_ns: int = manifest.robocap.imu.cam_time_offset_ns
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / f"robocap-{session.session_id}" / "slam_rs.csv"
-    calibration: _core.Calibration = _core.Calibration.from_json(manifest.robocap_calibration_text())
-    flow_config: _core.VioConfig = _core.VioConfig.from_json(manifest.robocap_vio_config_text())
+    calibration: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
+    flow_config: _core.VioConfig = _core.VioConfig.from_json((manifest.package_root / manifest.robocap.vio_config).read_text())
     cpp: Trajectory = read_rig_trajectory(session.slam_path, offset_ns)
     print(f"{session.segment_id}: basalt C++ {len(cpp)} poses from {session.slam_path.name} (expected {session.basalt_num_poses})")
     print(f"basalt calibration {manifest.robocap.calibration} at downscale {manifest.robocap.downscale}: {list(calibration.resolution)}")
@@ -164,12 +209,12 @@ def main(config: Config) -> None:
         profile=robocap_profile(manifest),
         window_s=config.window_s,
     ) as feed:
-        check_calibration_matches_recording(calibration, feed.cameras, manifest.robocap.downscale)
+        check_calibration_matches_recording(calibration, feed.cameras, manifest.robocap.imu, manifest.robocap.downscale)
         first_ns: int = int(feed.frame_t_ns[0])
         last_ns: int = int(feed.frame_t_ns[-1]) if config.seconds <= 0.0 else first_ns + int(config.seconds * 1e9)
         replayed_ns: int = min(int(feed.frame_t_ns[-1]), last_ns) - first_ns
         print(
-            f"{len(feed.cameras)} of 6 cameras {manifest.robocap.camera_names} at rig positions {feed.camera_positions}, "
+            f"{len(feed.cameras)} of the rig's {feed.rig_cameras} cameras {manifest.robocap.camera_names} at rig positions {feed.camera_positions}, "
             f"{feed.cameras[0].width}x{feed.cameras[0].height}, {len(feed.frame_t_ns)} framesets over "
             f"{(int(feed.frame_t_ns[-1]) - first_ns) / 1e9:.1f} s, replaying the first {replayed_ns / 1e9:.1f} s"
         )
@@ -194,12 +239,12 @@ def main(config: Config) -> None:
                 break
             replayed += 1
             log_imu(frameset.imu)
-            rr.set_time("video_time", duration=np.timedelta64(frameset.t_ns, "ns"))
+            rr.set_time(TIMELINE, duration=np.timedelta64(frameset.t_ns, "ns"))
             if config.log_frames:
                 for camera, image in zip(feed.cameras, frameset.images, strict=True):
                     rr.log(f"{camera_entity(camera.index)}/image", rr.Image(image, color_model="L").compress(jpeg_quality=JPEG_QUALITY))
             for held, result in lockstep.push(frameset):
-                rr.set_time("video_time", duration=np.timedelta64(held.t_ns, "ns"))
+                rr.set_time(TIMELINE, duration=np.timedelta64(held.t_ns, "ns"))
                 snapshot: _core.VioSnapshot | None = lockstep.vio.snapshot()
                 frame: _core.FlowFrame | None = lockstep.vio.flow_frame()
                 assert snapshot is not None, f"frameset {held.t_ns} tracked without a window snapshot"

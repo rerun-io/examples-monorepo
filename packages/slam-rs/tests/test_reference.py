@@ -163,8 +163,8 @@ def test_robocap_names_the_configuration_the_cpp_ran(manifest: ReferenceManifest
     assert manifest.robocap.camera_names == ("left", "left_front", "right_front", "right")
     assert manifest.robocap.downscale == 3
     assert manifest.robocap.decode_path == "cpu_gray8_swscale_area_downscale3"
-    assert "config.vio_marg_lost_landmarks" in manifest.robocap_vio_config_text()
-    assert '"camera_type": "kb4"' in manifest.robocap_calibration_text()
+    assert "config.vio_marg_lost_landmarks" in (manifest.package_root / manifest.robocap.vio_config).read_text()
+    assert '"camera_type": "kb4"' in (manifest.package_root / manifest.robocap.calibration).read_text()
 
 
 def test_an_unknown_robocap_session_names_the_ones_there_are(manifest: ReferenceManifest) -> None:

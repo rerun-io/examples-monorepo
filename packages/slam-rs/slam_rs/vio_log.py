@@ -295,16 +295,20 @@ class VioLogger:
         self.estimate_position_m.append(pose[0:3].copy())
         self.estimate_quaternion_wxyz.append(np.roll(pose[3:7], 1).copy())
 
-        estimated: Trajectory = self.estimated()
         rr.log(f"{RUN_ENTITY}/rig", rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7])))
         # The estimator's own frontend output, on the frontend rung's paths and
         # in its palette (:func:`slam_rs.frontend_log.log_keypoints`).
         log_keypoints(frame)
-        self._log_paths(estimated)
+        self._log_paths()
         self._log_window(snapshot)
         self._log_landmarks(snapshot)
         self._log_scalars(snapshot, elapsed_ms)
         if self.framesets % ATE_EVERY == 0:
+            # The only two readers of the whole estimate, and the reason it is
+            # not built every frameset: three arrays over lists that grow with
+            # the run cost 1.64 s over a 4,648-frameset clip to draw a segment
+            # from the last two poses.
+            estimated: Trajectory = self.estimated()
             self._log_ate(estimated)
             log_alignment(RUN_ENTITY, alignment_onto(estimated, self.ground_truth))
 
@@ -338,7 +342,7 @@ class VioLogger:
                 continue
             rr.log(entity, rr.LineStrips3D([trajectory.position_m], colors=(*color, ROUTE_ALPHA), radii=ROUTE_RADIUS_M), static=True)
 
-    def _log_paths(self, estimated: Trajectory) -> None:
+    def _log_paths(self) -> None:
         """Draw the segment each of the three trajectories gained at this cursor.
 
         One two-point strip a line a frameset, ending on the newest pose at or
@@ -348,12 +352,14 @@ class VioLogger:
         run entities' alignment transforms are what bring the three together in
         the dataset's world.
 
-        Args:
-            estimated: Everything reported so far, the newest pose last.
+        The estimate's segment is taken from the two poses this run last
+        appended, not from :meth:`estimated`: a segment needs two poses, not the
+        whole trajectory rebuilt behind them.
         """
-        t_ns: int = int(estimated.t_ns[-1])
-        if len(estimated) >= 2:
-            rr.log(f"{RUN_ENTITY}/trajectory", rr.LineStrips3D([estimated.position_m[-2:]], colors=ESTIMATE_COLOR, radii=0.004))
+        t_ns: int = self.estimate_t_ns[-1]
+        if len(self.estimate_position_m) >= 2:
+            segment: Float64[ndarray, "2 3"] = np.array(self.estimate_position_m[-2:], dtype=np.float64)
+            rr.log(f"{RUN_ENTITY}/trajectory", rr.LineStrips3D([segment], colors=ESTIMATE_COLOR, radii=0.004))
         for entity, trajectory, color in ((GT_ENTITY, self.ground_truth_strip, GT_COLOR), (CPP_ENTITY, self.cpp_strip, CPP_TRAJECTORY_COLOR)):
             drawn: int = int(np.searchsorted(trajectory.t_ns, t_ns, side="right"))
             if drawn >= 2:

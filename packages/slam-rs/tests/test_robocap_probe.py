@@ -6,6 +6,7 @@ the cameras, and frames fed at a third of the resolution the recording stores.
 """
 
 import json
+from dataclasses import replace
 
 import numpy as np
 import pyarrow as pa
@@ -13,10 +14,13 @@ import pytest
 from beartype.roar import BeartypeException
 from jaxtyping import Float64, Int64
 from numpy import ndarray
+from scipy.spatial.transform import Rotation
 
 from slam_rs import _core
 from slam_rs.apis.robocap_probe import check_calibration_matches_recording, robocap_profile
 from slam_rs.catalog_feed import (
+    CHILD_FROM_PARENT,
+    CameraCalib,
     CameraStatics,
     LocalSegment,
     camera_calib,
@@ -27,10 +31,7 @@ from slam_rs.catalog_feed import (
     scale_principal_point,
     select_cameras,
 )
-from slam_rs.reference import ReferenceManifest, RobocapSession, load_manifest
-
-CHILD_FROM_PARENT: int = 2
-"""``TransformRelation.ChildFromParent``, the relation ``log_pinhole`` writes."""
+from slam_rs.reference import ImuParameters, ReferenceManifest, RobocapSession, load_manifest
 
 
 @pytest.fixture(scope="module")
@@ -47,8 +48,44 @@ ROBOCAP_INTRINSICS: tuple[tuple[float, float, float, float], ...] = (
     (630.6917724609375, 628.777587890625, 946.6721801757812, 539.53125),
     (612.0897827148438, 608.9950561523438, 967.4310913085938, 551.28759765625),
 )
-ROBOCAP_KB4: tuple[float, ...] = (0.05310669541358948, 0.017954021692276, -0.005361607763916254, 0.0005696203443221748)
-"""The ``left`` camera's KB4 coefficients, which no downscale touches."""
+ROBOCAP_KB4: tuple[tuple[float, float, float, float], ...] = (
+    (0.05310669541358948, 0.017954021692276, -0.00536160776391625, 0.00056962034432217),
+    (0.06166616827249527, -0.0210909266024828, 0.0371633879840374, -0.013518619351089),
+    (0.07725944370031357, -0.06258341670036316, 0.08006518334150314, -0.02879575826227665),
+    (0.07467304170131683, 0.0116525636985898, -0.00467674527317286, 0.00134803401306272),
+)
+"""Each fed camera's KB4 coefficients as the recording carries them; no downscale touches them."""
+ROBOCAP_IMU_T_CAM: tuple[tuple[float, ...], ...] = (
+    (0.11399778805101912, -0.08575139322056138, 0.01508625718898565)
+    + (0.02437430433928967, -0.10791313648223877, 0.9938614964485168)
+    + (0.9846004247665405, 0.17474322021007538, -0.00517362076789141)
+    + (-0.17311225831508636, 0.9786825776100159, 0.11051056534051895),
+    (0.03477445441432928, 0.00997360635818159, -0.0064599738573613)
+    + (-0.9994690418243408, 0.00405994756147265, 0.03232910111546516)
+    + (0.03183514997363091, -0.08968588709831238, 0.9954611659049988)
+    + (0.0069409841671586, 0.9959618449211121, 0.089509017765522),
+    (-0.05141922995087802, 0.0107788254374653, -0.00630683517106816)
+    + (-0.999871015548706, -0.01601020060479641, -0.0012666096445173)
+    + (-0.00030042274738662, -0.06020709872245789, 0.9981858730316162)
+    + (-0.01605741493403912, 0.998057484626770, 0.06019452586770058),
+    (-0.12514879125479297, -0.09818661029737424, 0.00357639240882723)
+    + (0.02767287567257881, 0.09491033107042313, -0.9951010942459106)
+    + (-0.9824655652046204, 0.1861988753080368, -0.00956229493021965)
+    + (0.18437914550304413, 0.9779171943664551, 0.09839878976345062),
+)
+"""Each fed camera's ``imu_T_cam`` as the recording gives it: translation, then the rotation row by row.
+
+Frozen from session 15 the way the intrinsics above are, so the cross-check is
+read against the rig rather than against the file it is checking.
+"""
+
+
+def imu_T_cam(camera: int) -> Float64[ndarray, "4 4"]:
+    """One fed camera's pose in the IMU frame, from :data:`ROBOCAP_IMU_T_CAM`."""
+    pose: Float64[ndarray, "4 4"] = np.eye(4)
+    pose[:3, 3] = ROBOCAP_IMU_T_CAM[camera][:3]
+    pose[:3, :3] = np.array(ROBOCAP_IMU_T_CAM[camera][3:]).reshape(3, 3)
+    return pose
 
 
 def robocap_statics(
@@ -56,16 +93,40 @@ def robocap_statics(
     fy: float = 626.1504516601562,
     cx: float = 999.440185546875,
     cy: float = 539.0486450195312,
+    camera: int = 0,
+    distortion: tuple[float, float, float, float] | None = None,
+    turn_deg: float = 0.0,
+    shift_m: float = 0.0,
 ) -> CameraStatics:
-    """One RoboCap camera's statics as the recording carries them: native 1920x1080, KB4."""
+    """One RoboCap camera's statics as the recording carries them: native 1920x1080, KB4.
+
+    Args:
+        fx: Focal length along image x, native pixels.
+        fy: Focal length along image y, native pixels.
+        cx: Principal point x, native pixels.
+        cy: Principal point y, native pixels.
+        camera: Which fed camera's frozen distortion and extrinsics to carry.
+        distortion: KB4 coefficients to store instead of that camera's own.
+        turn_deg: Rotate the camera this far about x, for the refusal cases.
+        shift_m: Move the camera this far along x, for the refusal cases.
+
+    Returns:
+        The statics as :func:`slam_rs.catalog_feed.read_camera_statics` reads them:
+        column-major matrices and the ``ChildFromParent`` relation, so the stored
+        transform is ``cam_T_imu`` and the feed inverts it.
+    """
+    drifted: Float64[ndarray, "4 4"] = imu_T_cam(camera)
+    drifted[:3, :3] = Rotation.from_euler("x", turn_deg, degrees=True).as_matrix() @ drifted[:3, :3]
+    drifted[0, 3] += shift_m
+    cam_T_imu: Float64[ndarray, "4 4"] = np.linalg.inv(drifted)
     return CameraStatics(
         camera_model=None,
         distortion_model="kannala_brandt",
-        distortion_coefficients=np.array([*ROBOCAP_KB4, 0.0, 0.0, 0.0, 0.0]),
+        distortion_coefficients=np.array([*(distortion if distortion is not None else ROBOCAP_KB4[camera]), 0.0, 0.0, 0.0, 0.0]),
         image_from_camera=np.array([fx, 0.0, 0.0, 0.0, fy, 0.0, cx, cy, 1.0]),
         resolution_wh=np.array([1920.0, 1080.0]),
-        transform_mat3x3=np.eye(3).reshape(-1, order="F"),
-        transform_translation=np.zeros(3),
+        transform_mat3x3=cam_T_imu[:3, :3].reshape(-1, order="F"),
+        transform_translation=cam_T_imu[:3, 3],
         transform_relation=CHILD_FROM_PARENT,
         distortion_valid_radius=None,
         image_rotation_cw_deg=0,
@@ -157,7 +218,7 @@ def test_downscaling_the_recording_reproduces_basalts_own_calibration(manifest: 
     wrote the file, the ``dataforge`` conversion wrote the statics — so this is
     the check that the port is fed the rig the C++ was fed.
     """
-    basalt: _core.Calibration = _core.Calibration.from_json(manifest.robocap_calibration_text())
+    basalt: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
     assert list(basalt.resolution) == [(640, 360)] * 4
 
     calib = camera_calib(0, robocap_statics(), 30.0, manifest.robocap.downscale)
@@ -182,23 +243,67 @@ def test_a_downscale_below_one_is_refused() -> None:
         camera_calib(0, robocap_statics(), 30.0, 0)
 
 
-def test_the_probe_refuses_a_calibration_that_is_not_the_recordings_rig(manifest: ReferenceManifest) -> None:
-    """A calibration for another resolution, or another lens, stops the run."""
-    basalt: _core.Calibration = _core.Calibration.from_json(manifest.robocap_calibration_text())
-    at_three = tuple(camera_calib(number, robocap_statics(*values), 30.0, 3) for number, values in enumerate(ROBOCAP_INTRINSICS))
-    check_calibration_matches_recording(basalt, at_three, 3)
+def robocap_rig(downscale: int = 3) -> tuple[CameraCalib, ...]:
+    """The four fed cameras as the recording gives them, scaled by ``downscale``."""
+    return tuple(camera_calib(number, robocap_statics(*values, camera=number), 30.0, downscale) for number, values in enumerate(ROBOCAP_INTRINSICS))
 
-    at_two = tuple(camera_calib(number, robocap_statics(*values), 30.0, 2) for number, values in enumerate(ROBOCAP_INTRINSICS))
+
+def test_the_probe_refuses_a_calibration_that_is_not_the_recordings_rig(manifest: ReferenceManifest) -> None:
+    """A calibration for another resolution, another lens or another rig geometry stops the run."""
+    basalt: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
+    at_three: tuple[CameraCalib, ...] = robocap_rig()
+    check_calibration_matches_recording(basalt, at_three, manifest.robocap.imu, 3)
+
     with pytest.raises(ValueError, match=r"basalt's calibration is \[\(640, 360\).*the feed decodes \[\(960, 540\)"):
-        check_calibration_matches_recording(basalt, at_two, 2)
+        check_calibration_matches_recording(basalt, robocap_rig(downscale=2), manifest.robocap.imu, 2)
 
     with pytest.raises(ValueError, match="the feed selected 3"):
-        check_calibration_matches_recording(basalt, at_three[:3], 3)
+        check_calibration_matches_recording(basalt, at_three[:3], manifest.robocap.imu, 3)
 
     moved = ROBOCAP_INTRINSICS[0][:2] + (1200.0, ROBOCAP_INTRINSICS[0][3])
     shifted = (camera_calib(0, robocap_statics(*moved), 30.0, 3), *at_three[1:])
     with pytest.raises(ValueError, match="cam 0: basalt's cx is 332.81.*the recording gives 399.66"):
-        check_calibration_matches_recording(basalt, shifted, 3)
+        check_calibration_matches_recording(basalt, shifted, manifest.robocap.imu, 3)
+
+
+def test_the_probe_refuses_a_lens_or_a_rig_geometry_that_drifted(manifest: ReferenceManifest) -> None:
+    """The distortion and the extrinsics are compared too: a drifted route is a refusal, not a bias.
+
+    A conversion that moved a coefficient or a camera would otherwise show up
+    only as a few centimetres of trajectory error nobody could attribute to it.
+    """
+    basalt: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
+    at_three: tuple[CameraCalib, ...] = robocap_rig()
+
+    bent = ROBOCAP_KB4[0][:1] + (ROBOCAP_KB4[0][1] + 1e-4,) + ROBOCAP_KB4[0][2:]
+    with pytest.raises(ValueError, match="cam 0: basalt's k2 is"):
+        lens = (camera_calib(0, robocap_statics(*ROBOCAP_INTRINSICS[0], distortion=bent), 30.0, 3), *at_three[1:])
+        check_calibration_matches_recording(basalt, lens, manifest.robocap.imu, 3)
+
+    with pytest.raises(ValueError, match="cam 0: basalt places it 1.000 mm from where the recording does"):
+        shifted = (camera_calib(0, robocap_statics(*ROBOCAP_INTRINSICS[0], shift_m=1e-3), 30.0, 3), *at_three[1:])
+        check_calibration_matches_recording(basalt, shifted, manifest.robocap.imu, 3)
+
+    with pytest.raises(ValueError, match="cam 0: basalt turns it 0.1000 deg from where the recording does"):
+        turned = (camera_calib(0, robocap_statics(*ROBOCAP_INTRINSICS[0], turn_deg=0.1), 30.0, 3), *at_three[1:])
+        check_calibration_matches_recording(basalt, turned, manifest.robocap.imu, 3)
+
+
+def test_the_probe_refuses_a_calibration_whose_imu_is_not_the_manifests(manifest: ReferenceManifest) -> None:
+    """The estimator reads the file's noise model and the feed reads the manifest's: they must be one model."""
+    basalt: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
+    at_three: tuple[CameraCalib, ...] = robocap_rig()
+
+    louder: ImuParameters = replace(manifest.robocap.imu, gyro_noise_std=2.0 * manifest.robocap.imu.gyro_noise_std)
+    with pytest.raises(ValueError, match="basalt's gyro_noise_std is"):
+        check_calibration_matches_recording(basalt, at_three, louder, 3)
+
+    # The offset belongs to the feed, which adds it to the frames; a file that
+    # carried it too would move every frameset twice.
+    document: dict = json.loads((manifest.package_root / manifest.robocap.calibration).read_text())
+    document["value0"]["cam_time_offset_ns"] = manifest.robocap.imu.cam_time_offset_ns
+    with pytest.raises(ValueError, match="carries cam_time_offset_ns 14902432"):
+        check_calibration_matches_recording(_core.Calibration.from_json(json.dumps(document)), at_three, manifest.robocap.imu, 3)
 
 
 # --- the frameset matcher ----------------------------------------------------

@@ -416,14 +416,6 @@ class ReferenceManifest:
         """
         return (self.package_root / self.dataset(dataset_name).vio_config).read_text()
 
-    def robocap_vio_config_text(self) -> str:
-        """The basalt VIO config the C++ RoboCap runs used, as its file's own text."""
-        return (self.package_root / self.robocap.vio_config).read_text()
-
-    def robocap_calibration_text(self) -> str:
-        """The basalt calibration the C++ RoboCap runs used, as its file's own text."""
-        return (self.package_root / self.robocap.calibration).read_text()
-
     def by_id(self, segment_id: str) -> ReferenceSegment:
         """The segment with this id.
 

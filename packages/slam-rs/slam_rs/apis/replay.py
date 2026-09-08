@@ -170,7 +170,7 @@ class VioStage:
         for held, result in self.lockstep.push(frameset):
             # The rows belong at the frameset's own time, which is the caller's
             # cursor for all but a retried one.
-            rr.set_time("video_time", duration=np.timedelta64(held.t_ns, "ns"))
+            rr.set_time(TIMELINE, duration=np.timedelta64(held.t_ns, "ns"))
             # Both are present on a frameset that tracked — the snapshot because it
             # measured, the keypoints because the frontend accepted it — so a
             # missing one is a broken invariant, not a rung to skip (D32).
@@ -255,7 +255,7 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
         # The samples are what the estimator is fed, so they are logged in every
         # stage whether or not one consumes them.
         log_imu(frameset.imu)
-        rr.set_time("video_time", duration=np.timedelta64(frameset.t_ns, "ns"))
+        rr.set_time(TIMELINE, duration=np.timedelta64(frameset.t_ns, "ns"))
 
         for camera, image in zip(feed.cameras, frameset.images, strict=True):
             entity: str = f"{camera_entity(camera.index)}/image"

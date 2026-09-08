@@ -11,6 +11,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from slam_rs import _core
 from slam_rs.apis.replay import Config, VioStage, _cpp_trajectory, _replay
 from slam_rs.catalog_feed import (
+    CHILD_FROM_PARENT,
     CameraCalib,
     CameraStatics,
     Frameset,
@@ -34,7 +35,7 @@ SMOKE_SEGMENT: str = "msd-index__MIO_others__MIO10_short_2_panorama"
 def _kb4_statics(
     distortion_model: str = "kannala_brandt",
     distortion_coefficients: Float64[ndarray, " n_slots"] | None = None,
-    transform_relation: int = 2,
+    transform_relation: int = CHILD_FROM_PARENT,
     distortion_valid_radius: float | None = None,
     image_rotation_cw_deg: int = 0,
 ) -> CameraStatics:

@@ -617,6 +617,8 @@ class SegmentFeed:
     """
     camera_positions: tuple[int, ...]
     """Rig index of each fed camera, in the order a frameset's images arrive."""
+    rig_cameras: int
+    """Cameras the rig declares, of which :attr:`camera_positions` are the fed ones."""
     downscale: int
     """Integer factor the frames are decoded at; the calibration is already scaled to match."""
     interpolate_accel: bool
@@ -695,7 +697,6 @@ class SegmentFeed:
                 )
             window_gt: Trajectory | None = self.ground_truth_between(window_first_ns - margin_ns, window_last_ns + margin_ns)
 
-            first_frame: list[int] = [int(self.index.frame_index[start, position]) for position in range(len(self.cameras))]
             decoders: list[Iterator[UInt8[ndarray, "h w"]]] = []
             for position in range(len(self.cameras)):
                 samples, keyframes = self._fetch_samples(position, start, stop)
@@ -704,7 +705,7 @@ class SegmentFeed:
             # camera that contributes no frame to this frameset still has its own
             # frames decoded in order, because dropping one breaks the next.
             decoded: list[UInt8[ndarray, "h w"] | None] = [None] * len(self.cameras)
-            cursor: list[int] = [position - 1 for position in first_frame]
+            cursor: list[int] = [int(self.index.frame_index[start, position]) - 1 for position in range(len(self.cameras))]
             for frameset_index in range(start, stop):
                 images: list[UInt8[ndarray, "h w"]] = []
                 for position, (camera, decoder) in enumerate(zip(self.cameras, decoders, strict=True)):
@@ -733,8 +734,11 @@ class SegmentFeed:
                     emitted_imu_t_ns = int(frame_imu.t_ns[-1])
                 # Per camera first, because that is the unit the C++ reference
                 # records; the frameset digest is then built from those, which
-                # also avoids hashing every pixel twice.
-                image_sha256: tuple[str, ...] = tuple(hashlib.sha256(image.tobytes()).hexdigest() for image in images)
+                # also avoids hashing every pixel twice. The array's own buffer
+                # is hashed rather than a `tobytes()` copy of it — the same bytes
+                # and the same digest, and a non-contiguous frame would raise
+                # here rather than be hashed in a different order.
+                image_sha256: tuple[str, ...] = tuple(hashlib.sha256(image).hexdigest() for image in images)
                 digest = hashlib.sha256(np.int64(t_ns).tobytes())
                 for camera_digest in image_sha256:
                     digest.update(bytes.fromhex(camera_digest))
@@ -1102,6 +1106,7 @@ def _build_feed(
         capture_start_time_ns=_static_int(properties, "property:capture:start_time_ns"),
         frame_t_ns=index.t_ns + parameters.cam_time_offset_ns,
         camera_positions=camera_positions,
+        rig_cameras=camera_count,
         downscale=profile.downscale,
         interpolate_accel=profile.interpolate_accel_onto_gyro,
         frame_stride=frame_stride,
@@ -1182,4 +1187,4 @@ def read_rig_trajectory(rrd: Path, shift_ns: int = 0) -> Trajectory:
         found: Trajectory | None = _read_ground_truth(dataset, segment_ids[0], -(2**62), 2**62)
     if found is None:
         raise ValueError(f"{rrd} carries no {RIG_ENTITY} Transform3D rows")
-    return Trajectory(t_ns=found.t_ns + shift_ns, position_m=found.position_m, quaternion_wxyz=found.quaternion_wxyz)
+    return shift_clock(found, shift_ns)
