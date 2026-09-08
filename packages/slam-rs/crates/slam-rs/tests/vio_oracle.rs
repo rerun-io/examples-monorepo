@@ -91,7 +91,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, LazyLock};
 
-use nalgebra::{Vector2, Vector3};
+use nalgebra::Vector3;
 
 use slam_rs::config::VioConfig;
 use slam_rs::estimator::{
@@ -99,7 +99,7 @@ use slam_rs::estimator::{
 };
 use slam_rs::imu::ImuSample;
 use slam_rs::lie::LieScalar;
-use slam_rs::types::{FrameId, KeypointId};
+use slam_rs::types::FrameId;
 
 mod common;
 use common::{IMU, ORACLE, OracleFlow, OracleLm, OracleRun, run_named};
@@ -182,19 +182,6 @@ fn window<S: LieScalar>(config: VioConfig) -> SqrtKeypointVio<S> {
     estimator
 }
 
-fn observations(flow: &OracleFlow) -> Arc<FlowObservations> {
-    let mut out: FlowObservations = FlowObservations::new(flow.t_ns, flow.cameras.len());
-    for (cam_id, points) in flow.cameras.iter().enumerate() {
-        let Some(slot) = out.cameras.get_mut(cam_id) else {
-            continue;
-        };
-        for point in points {
-            slot.insert(KeypointId(point.id), Vector2::new(point.x, point.y));
-        }
-    }
-    Arc::new(out)
-}
-
 // ── the comparison ────────────────────────────────────────────────────────
 
 /// `|a − b| / max(1, |b|)`, so a quantity near zero is compared absolutely and
@@ -266,7 +253,7 @@ fn compare<S: LieScalar>(run: &OracleRun, gate: LmGate) -> Worst {
         assert_eq!(flow.t_ns, expected.t_ns, "frame {index}: timestamp");
 
         let outcome: FrameOutcome<S> = estimator
-            .process_frame(observations(flow))
+            .process_frame(common::observations(flow))
             .unwrap_or_else(|error| panic!("frame {index} ({}) refused: {error}", expected.t_ns));
         let FrameOutcome::Measured(stats) = outcome else {
             panic!("frame {index} ({}) reported NeedMoreImu", expected.t_ns);
@@ -509,12 +496,12 @@ fn compare<S: LieScalar>(run: &OracleRun, gate: LmGate) -> Worst {
 
         Worst::take(
             &mut worst.prior_h,
-            frobenius(estimator.marg_data().h.iter().copied()),
+            common::frobenius(estimator.marg_data().h.iter().copied()),
             expected.marg_digest.h_frobenius,
         );
         Worst::take(
             &mut worst.prior_b,
-            frobenius(estimator.marg_data().b.iter().copied()),
+            common::frobenius(estimator.marg_data().b.iter().copied()),
             expected.marg_digest.b_norm,
         );
 
@@ -698,11 +685,6 @@ fn lm_prefix<S: LieScalar>(
     at
 }
 
-/// `‖·‖_F` over any coefficient sequence, which on a vector is `‖·‖`.
-fn frobenius<S: LieScalar>(values: impl Iterator<Item = S>) -> f64 {
-    values.map(|v| v.to_f64() * v.to_f64()).sum::<f64>().sqrt()
-}
-
 // ── the gates ─────────────────────────────────────────────────────────────
 
 /// Both lanes' agreement, in the three groups the `f32` lane has to
@@ -788,7 +770,7 @@ fn a_repeat_run_is_bit_identical() {
         .flow
         .iter()
         .take(ORACLE_FRAMESETS)
-        .map(observations)
+        .map(common::observations)
         .collect();
 
     let first: Vec<Trace> = drive(&flow);

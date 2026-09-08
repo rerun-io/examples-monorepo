@@ -32,31 +32,13 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use serde::Deserialize;
-
 use slam_rs::calib::Calibration;
-use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::FrontendOptions;
 use slam_rs::lie::LieScalar;
 use slam_rs::{ImageView, Vio, VioResult, VioStatus};
 
 mod common;
-use common::{Pgm, read_pgm};
-
-/// What `dump_clip.py` writes beside the pixels.
-#[derive(Debug, Deserialize)]
-struct Clip {
-    segment_id: String,
-    dataset_name: String,
-    /// Added to a frameset timestamp to reach the absolute device clock.
-    capture_start_time_ns: i64,
-    /// `catalog` (the values the C++ was pushed) or `fixture` (the fork file's doubles).
-    calibration_source: String,
-    num_cameras: usize,
-    framesets: usize,
-    frame_t_ns: Vec<i64>,
-    imu_samples: usize,
-}
+use common::{Clip, Pgm, config_for, read_pgm};
 
 /// One inertial sample of `imu.csv`.
 struct ImuRow {
@@ -82,25 +64,6 @@ fn read_imu(path: &Path) -> Vec<ImuRow> {
             }
         })
         .collect()
-}
-
-/// The VIO config of the device the clip was captured on, from the committed
-/// fixtures, or the file `SLAM_RS_CLIP_CONFIG` names.
-///
-/// The override exists because a config field is an input like any other: the
-/// reference runs load `data/msd/msd*_config.json`, and a lane that builds a
-/// default config instead differs from them by whatever that file overrides.
-fn config_for(dataset_name: &str) -> VioConfig {
-    if let Some(path) = std::env::var_os("SLAM_RS_CLIP_CONFIG") {
-        return VioConfig::from_json_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    }
-    let file: &str = match dataset_name {
-        "msd-index" => "msdmi_config.json",
-        "msd-g2" => "msdmg_config.json",
-        other => panic!("no VIO config is pinned for {other}"),
-    };
-    VioConfig::from_json_str(&std::fs::read_to_string(common::fixtures().join(file)).unwrap())
-        .unwrap()
 }
 
 /// Drive one precision over the whole clip and write the trajectory, and the
@@ -243,9 +206,7 @@ fn the_whole_clip_replays_into_a_trajectory_csv() {
         );
         return;
     };
-    let clip: Clip =
-        serde_json::from_str(&std::fs::read_to_string(directory.join("clip.json")).unwrap())
-            .unwrap();
+    let clip: Clip = Clip::read(&directory);
     assert_eq!(clip.frame_t_ns.len(), clip.framesets);
     let imu: Vec<ImuRow> = read_imu(&directory.join("imu.csv"));
     assert_eq!(imu.len(), clip.imu_samples);

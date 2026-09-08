@@ -42,9 +42,7 @@ use slam_rs::camera::{
 };
 use slam_rs::lie::LieScalar;
 
-const MSDMI: &str = include_str!("fixtures/msdmi_calib.json");
-const MSDMG: &str = include_str!("fixtures/msdmg_calib.json");
-const ROBOCAP: &str = include_str!("fixtures/robocap-basalt-calib.json");
+mod common;
 
 /// `computeRpmax()` for the Odyssey+ test intrinsics, taken from the C++ oracle
 /// fixture (`camera_oracle.json`, camera `radtan8_odyssey_computed_rpmax`).
@@ -374,7 +372,10 @@ fn basalt_radtan8<S: TestConstants>() -> PinholeRadtan8<S> {
 /// Every kb4 in the shipped calibrations, with the resolution of its images.
 fn shipped_kb4<S: TestConstants>() -> Vec<(KannalaBrandt4<S>, RigCamera<S>, f64)> {
     let mut cameras: Vec<(KannalaBrandt4<S>, RigCamera<S>, f64)> = Vec::new();
-    for (text, safe_radius) in [(MSDMI, MSDMI_SAFE_RADIUS), (ROBOCAP, ROBOCAP_SAFE_RADIUS)] {
+    for (text, safe_radius) in [
+        (common::calibration_text("msdmi"), MSDMI_SAFE_RADIUS),
+        (common::calibration_text("robocap"), ROBOCAP_SAFE_RADIUS),
+    ] {
         let calibration: Calibration<S> = Calibration::from_json_str(text).unwrap();
         for rig in RigCamera::from_calibration(&calibration).unwrap() {
             match rig.model {
@@ -388,7 +389,8 @@ fn shipped_kb4<S: TestConstants>() -> Vec<(KannalaBrandt4<S>, RigCamera<S>, f64)
 
 /// The four msd-g2 cameras, each with the `rpmax` its calibration carries.
 fn shipped_radtan8<S: TestConstants>() -> Vec<(PinholeRadtan8<S>, RigCamera<S>, f64)> {
-    let calibration: Calibration<S> = Calibration::from_json_str(MSDMG).unwrap();
+    let calibration: Calibration<S> =
+        Calibration::from_json_str(common::calibration_text("msdmg")).unwrap();
     RigCamera::from_calibration(&calibration)
         .unwrap()
         .into_iter()
@@ -543,9 +545,21 @@ fn shipped_kb4_unproject_jacobians() {
 fn the_round_trip_is_exact_inside_the_safe_radius() {
     let mut worst_by_camera: Vec<(String, f64)> = Vec::new();
     for (label, text, safe_radius) in [
-        ("msdmi", MSDMI, MSDMI_SAFE_RADIUS),
-        ("msdmg", MSDMG, MSDMG_SAFE_RADIUS),
-        ("robocap", ROBOCAP, ROBOCAP_SAFE_RADIUS),
+        (
+            "msdmi",
+            common::calibration_text("msdmi"),
+            MSDMI_SAFE_RADIUS,
+        ),
+        (
+            "msdmg",
+            common::calibration_text("msdmg"),
+            MSDMG_SAFE_RADIUS,
+        ),
+        (
+            "robocap",
+            common::calibration_text("robocap"),
+            ROBOCAP_SAFE_RADIUS,
+        ),
     ] {
         let calibration: Calibration<f64> = Calibration::from_json_str(text).unwrap();
         for (index, rig) in RigCamera::from_calibration(&calibration)
@@ -606,7 +620,8 @@ fn the_round_trip_is_exact_inside_the_safe_radius() {
 /// widen the iteration; it is not a defect of the port.
 #[test]
 fn msd_g2_cam2_does_not_invert_inside_the_safe_radius() {
-    let calibration: Calibration<f64> = Calibration::from_json_str(MSDMG).unwrap();
+    let calibration: Calibration<f64> =
+        Calibration::from_json_str(common::calibration_text("msdmg")).unwrap();
     let rig: RigCamera<f64> = RigCamera::from_calibration(&calibration).unwrap()[2];
 
     let point: Vector4<f64> = Vector4::new(-9.1, 7.6, 4.25, 1.0);
@@ -643,7 +658,8 @@ fn msd_g2_cam2_does_not_invert_inside_the_safe_radius() {
 /// frontend never asks; the estimator stage must keep it that way.
 #[test]
 fn robocap_cam1_inverts_backwards_outside_the_safe_radius() {
-    let calibration: Calibration<f64> = Calibration::from_json_str(ROBOCAP).unwrap();
+    let calibration: Calibration<f64> =
+        Calibration::from_json_str(common::calibration_text("robocap")).unwrap();
     let rig: RigCamera<f64> = RigCamera::from_calibration(&calibration).unwrap()[1];
 
     let point: Vector4<f64> = Vector4::new(-9.0, -4.3, 1.5, 1.0);

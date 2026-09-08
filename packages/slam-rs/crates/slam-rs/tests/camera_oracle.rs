@@ -35,10 +35,9 @@ use slam_rs::camera::{
     Camera, CameraEnum, KannalaBrandt4, Pinhole, PinholeRadtan8, UnprojectJacobians,
 };
 
+mod common;
+
 const ORACLE: &str = include_str!("fixtures/camera_oracle.json");
-const MSDMI: &str = include_str!("fixtures/msdmi_calib.json");
-const MSDMG: &str = include_str!("fixtures/msdmg_calib.json");
-const ROBOCAP: &str = include_str!("fixtures/robocap-basalt-calib.json");
 
 /// Agreement with the C++ number, per coefficient, relative to `max(|want|, 1)`.
 const TOLERANCE: f64 = 1e-15;
@@ -224,17 +223,6 @@ fn assert_within_ulps(limit: u64, what: &str, actual: &[f32], expected: &[Option
     }
 }
 
-/// Row-major readout of a Jacobian, the layout the fixture writes.
-fn row_major<const R: usize, const C: usize>(m: &SMatrix<f64, R, C>) -> Vec<f64> {
-    let mut values: Vec<f64> = Vec::with_capacity(R * C);
-    for row in 0..R {
-        for column in 0..C {
-            values.push(m[(row, column)]);
-        }
-    }
-    values
-}
-
 /// Replay one `f64` oracle camera through the port.
 fn check<const N: usize, Cam>(entry: &OracleCamera, camera: &Cam)
 where
@@ -262,12 +250,12 @@ where
         assert_matches(&format!("{what}: proj"), proj.as_slice(), &point.proj);
         assert_matches(
             &format!("{what}: d_proj_d_p3d"),
-            &row_major(&d_proj_d_p3d),
+            &common::row_major(&d_proj_d_p3d),
             point.d_proj_d_p3d.as_ref().unwrap(),
         );
         assert_matches(
             &format!("{what}: d_proj_d_param"),
-            &row_major(&d_proj_d_param),
+            &common::row_major(&d_proj_d_param),
             point.d_proj_d_param.as_ref().unwrap(),
         );
 
@@ -302,7 +290,7 @@ where
         camera.unproject_with_jacobians(&proj, &mut bearing, Some(&mut d_p3d_d_proj), None);
         assert_matches(
             &format!("{} point {index}: d_p3d_d_proj", entry.name),
-            &row_major(&d_p3d_d_proj),
+            &common::row_major(&d_p3d_d_proj),
             expected,
         );
     }
@@ -375,11 +363,11 @@ fn radtan8_matches_the_cpp() {
 #[test]
 fn the_oracle_cameras_are_the_shipped_calibrations() {
     let pairs: [(&str, &str, usize); 5] = [
-        ("kb4_msdmi_cam0", MSDMI, 0),
-        ("kb4_robocap_cam0", ROBOCAP, 0),
-        ("kb4_robocap_cam1", ROBOCAP, 1),
-        ("radtan8_msdmg_cam0", MSDMG, 0),
-        ("radtan8_msdmg_cam2", MSDMG, 2),
+        ("kb4_msdmi_cam0", common::calibration_text("msdmi"), 0),
+        ("kb4_robocap_cam0", common::calibration_text("robocap"), 0),
+        ("kb4_robocap_cam1", common::calibration_text("robocap"), 1),
+        ("radtan8_msdmg_cam0", common::calibration_text("msdmg"), 0),
+        ("radtan8_msdmg_cam2", common::calibration_text("msdmg"), 2),
     ];
     for (name, text, index) in pairs {
         let entry: OracleCamera = camera(name);

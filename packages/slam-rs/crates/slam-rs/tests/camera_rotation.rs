@@ -44,7 +44,8 @@ use serde::Deserialize;
 use slam_rs::calib::{Calibration, CameraModel};
 use slam_rs::camera::{Camera, PinholeRadtan8};
 
-const MSDMG: &str = include_str!("fixtures/msdmg_calib.json");
+mod common;
+
 const RUN: &str =
     include_str!("../../../tests/reference/msd/msd-g2__MGO_others__MGO09_short_1_updown/run.json");
 
@@ -112,7 +113,8 @@ fn rotate_pixel(uv: &Vector2<f64>, width: f64, height: f64, degrees: f64) -> Vec
 }
 
 fn shipped_cameras() -> Vec<(PinholeRadtan8<f64>, [u32; 2])> {
-    let calibration: Calibration<f64> = Calibration::from_json_str(MSDMG).unwrap();
+    let calibration: Calibration<f64> =
+        Calibration::from_json_str(common::calibration_text("msdmg")).unwrap();
     calibration
         .intrinsics
         .iter()

@@ -3,22 +3,29 @@
 //! Integration tests are separate crates, so a `tests/common/mod.rs` declared
 //! with `mod common;` is the only way to share code between them. Each test
 //! binary compiles its own copy and uses part of it, which is why the module
-//! allows dead code: the alternative is a `cfg` per item per test.
+//! allows dead code: the alternative is a `cfg` per item per test. The
+//! `unwrap`/`expect` allows are the module's own rather than each including
+//! binary's, because a fixture that does not parse is a broken checkout and
+//! panicking on it is the report.
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::expect_used, clippy::unwrap_used)]
 
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
-use nalgebra::{DMatrix, DVector, Vector2, Vector3, Vector6};
+use nalgebra::{DMatrix, DVector, SMatrix, Vector2, Vector3, Vector6};
 use serde::Deserialize;
 use slam_rs::calib::{Calibration, CameraModel, Kb4Params};
 use slam_rs::config::VioConfig;
+use slam_rs::estimator::FlowObservations;
 use slam_rs::frontend::tracker::PointsSoA;
 use slam_rs::image::ImageU16;
 use slam_rs::lie::{LieScalar, Se3};
+use slam_rs::types::KeypointId;
 
 const MSDMI: &str = include_str!("../fixtures/msdmi_calib.json");
+const MSDMG: &str = include_str!("../fixtures/msdmg_calib.json");
+const ROBOCAP: &str = include_str!("../fixtures/robocap-basalt-calib.json");
 
 // ── the fixture directory and the two files every VIO lane reads ───────────
 
@@ -42,6 +49,115 @@ pub fn calibration() -> Calibration<f64> {
         &std::fs::read_to_string(fixtures().join("msdmi_calib.json")).unwrap(),
     )
     .unwrap()
+}
+
+/// One of the three shipped calibrations by name, compiled in.
+///
+/// Read at compile time rather than through [`fixtures`], because five test
+/// binaries want the *text* — `Calibration::from_json_str` is what several of
+/// them are testing — and each had its own `include_str!` of the same file.
+///
+/// # Panics
+///
+/// On a name that is not one of the three.
+pub fn calibration_text(name: &str) -> &'static str {
+    match name {
+        "msdmi" => MSDMI,
+        "msdmg" => MSDMG,
+        "robocap" => ROBOCAP,
+        other => panic!("no calibration fixture named {other}"),
+    }
+}
+
+/// What `tests/tools/dump_clip.py` writes beside the pixels.
+///
+/// Both whole-clip lanes read this file — one through its own frontend, one
+/// replaying the C++'s flow stream — so the shape and the dataset-to-config
+/// table live here rather than once typed and once as a `serde_json::Value`.
+#[derive(Debug, Deserialize)]
+pub struct Clip {
+    pub segment_id: String,
+    pub dataset_name: String,
+    /// Added to a frameset timestamp to reach the absolute device clock.
+    pub capture_start_time_ns: i64,
+    /// `catalog` (the values the C++ was pushed) or `fixture` (the fork file's
+    /// doubles).
+    pub calibration_source: String,
+    pub num_cameras: usize,
+    pub framesets: usize,
+    pub frame_t_ns: Vec<i64>,
+    pub imu_samples: usize,
+}
+
+impl Clip {
+    /// `clip.json` from a directory `dump_clip.py` wrote.
+    ///
+    /// # Panics
+    ///
+    /// When the file is missing or does not parse.
+    pub fn read(directory: &Path) -> Self {
+        let path: PathBuf = directory.join("clip.json");
+        let text: String = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        serde_json::from_str(&text).unwrap()
+    }
+}
+
+/// The VIO config of the device a clip was captured on, from the committed
+/// fixtures, or the file `SLAM_RS_CLIP_CONFIG` names.
+///
+/// The override exists because a config field is an input like any other: the
+/// reference runs load `data/msd/msd*_config.json`, and a lane that builds a
+/// default config instead differs from them by whatever that file overrides.
+///
+/// # Panics
+///
+/// On a dataset with no pinned config.
+pub fn config_for(dataset_name: &str) -> VioConfig {
+    if let Some(path) = std::env::var_os("SLAM_RS_CLIP_CONFIG") {
+        return VioConfig::from_json_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    }
+    let file: &str = match dataset_name {
+        "msd-index" => "msdmi_config.json",
+        "msd-g2" => "msdmg_config.json",
+        other => panic!("no VIO config is pinned for {other}"),
+    };
+    VioConfig::from_json_str(&std::fs::read_to_string(fixtures().join(file)).unwrap()).unwrap()
+}
+
+/// A fixed-size matrix flattened **row major**, which is how every C++ dump
+/// prints one.
+pub fn row_major<const R: usize, const C: usize, S: LieScalar>(m: &SMatrix<S, R, C>) -> Vec<f64> {
+    let mut out: Vec<f64> = Vec::with_capacity(R * C);
+    for r in 0..R {
+        for c in 0..C {
+            out.push(m[(r, c)].to_f64());
+        }
+    }
+    out
+}
+
+/// `‖·‖_F` over any coefficient sequence, which on a vector is `‖·‖`.
+pub fn frobenius<S: LieScalar>(values: impl Iterator<Item = S>) -> f64 {
+    values.map(|v| v.to_f64() * v.to_f64()).sum::<f64>().sqrt()
+}
+
+/// The C++ frontend's keypoints for one frameset, as the estimator takes them.
+///
+/// Both lanes that replay `OracleFlow` need exactly this, and an id the
+/// insertion order would collide on cannot happen: the dump's ids are unique
+/// per camera.
+pub fn observations(flow: &OracleFlow) -> Arc<FlowObservations> {
+    let mut out: FlowObservations = FlowObservations::new(flow.t_ns, flow.cameras.len());
+    for (camera, points) in flow.cameras.iter().enumerate() {
+        let Some(slot) = out.cameras.get_mut(camera) else {
+            continue;
+        };
+        for point in points {
+            slot.insert(KeypointId(point.id), Vector2::new(point.x, point.y));
+        }
+    }
+    Arc::new(out)
 }
 
 // ── the PGM framesets ─────────────────────────────────────────────

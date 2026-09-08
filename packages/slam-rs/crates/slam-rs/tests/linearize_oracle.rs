@@ -64,11 +64,11 @@ use slam_rs::linearize::{
 };
 use slam_rs::types::{AbsOrderMap, LandmarkId, MargLinData, PoseStateWithLin, TimeCamId};
 
-mod common;
 use common::Compare;
 
+mod common;
+
 const ORACLE: &str = include_str!("fixtures/linearize/linearize_oracle.json");
-const MSDMI: &str = include_str!("fixtures/msdmi_calib.json");
 
 /// Agreement with the C++ number in `f64`, relative to the array's own scale.
 ///
@@ -227,7 +227,8 @@ fn rebuild<S: LieScalar + Serialize + DeserializeOwned>(case: &Case) -> Rebuilt<
     // (resolution, IMU noise); the rig and the intrinsics come from the fixture,
     // which carries `KannalaBrandtCamera4::getTestProjections()[0]` cast to this
     // scalar.
-    let mut calib: Calibration<S> = Calibration::from_json_str(MSDMI).unwrap();
+    let mut calib: Calibration<S> =
+        Calibration::from_json_str(common::calibration_text("msdmi")).unwrap();
     calib.t_i_c = case
         .t_i_c
         .iter()

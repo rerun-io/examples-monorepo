@@ -84,9 +84,9 @@ use slam_rs::landmark::{Landmark, StereographicParam};
 use slam_rs::lie::{LieScalar, Se3, So3};
 use slam_rs::types::{LandmarkId, TimeCamId};
 
+mod common;
+
 const ORACLE: &str = include_str!("fixtures/lmdb/lmdb_oracle.json");
-const MSDMI: &str = include_str!("fixtures/msdmi_calib.json");
-const MSDMG: &str = include_str!("fixtures/msdmg_calib.json");
 
 /// Agreement with the C++ number, per coefficient, relative to `max(|want|, 1)`.
 const TOLERANCE: f64 = 1e-12;
@@ -266,18 +266,6 @@ fn matrix4<S: LieScalar>(values: &[f64]) -> Matrix4<S> {
     m
 }
 
-fn row_major<S: LieScalar, const R: usize, const C: usize>(
-    m: &nalgebra::SMatrix<S, R, C>,
-) -> Vec<S> {
-    let mut out: Vec<S> = Vec::with_capacity(R * C);
-    for r in 0..R {
-        for c in 0..C {
-            out.push(m[(r, c)]);
-        }
-    }
-    out
-}
-
 // ─── the stereographic chart ───────────────────────────────────────────────
 
 fn check_stereographic<S: LieScalar>(entries: &[&OracleStereographic], tolerance: f64) {
@@ -296,7 +284,7 @@ fn check_stereographic<S: LieScalar>(entries: &[&OracleStereographic], tolerance
         );
         close_all(
             &format!("{label} d_project_d_p3d"),
-            &row_major(&d_project),
+            &common::row_major(&d_project),
             &entry.d_project_d_p3d,
             tolerance,
         );
@@ -319,7 +307,7 @@ fn check_stereographic<S: LieScalar>(entries: &[&OracleStereographic], tolerance
         );
         close_all(
             &format!("{label} d_unproject_d_proj"),
-            &row_major(&d_unproject),
+            &common::row_major(&d_unproject),
             &entry.d_unproject_d_proj,
             tolerance,
         );
@@ -444,13 +432,13 @@ fn check_linearize<S: LieScalar>(entries: &[&OracleLinearize], tolerance: f64) {
         }
         close_all(
             &format!("{label} d_res_d_xi"),
-            &row_major(&d_res_d_xi),
+            &common::row_major(&d_res_d_xi),
             &entry.d_res_d_xi,
             tolerance,
         );
         close_all(
             &format!("{label} d_res_d_p"),
-            &row_major(&d_res_d_p),
+            &common::row_major(&d_res_d_p),
             &entry.d_res_d_p,
             tolerance,
         );
@@ -497,8 +485,10 @@ fn linearize_point_matches_the_cpp_in_float() {
 #[test]
 fn the_oracle_cameras_are_the_shipped_calibrations() {
     let oracle: Oracle = oracle();
-    let msdmi: Calibration<f64> = Calibration::from_json_str(MSDMI).unwrap();
-    let msdmg: Calibration<f64> = Calibration::from_json_str(MSDMG).unwrap();
+    let msdmi: Calibration<f64> =
+        Calibration::from_json_str(common::calibration_text("msdmi")).unwrap();
+    let msdmg: Calibration<f64> =
+        Calibration::from_json_str(common::calibration_text("msdmg")).unwrap();
     for entry in &oracle.linearize_point {
         let want: Vec<f64> = match entry.name.as_str() {
             "kb4_msdmi_cam0" => msdmi.intrinsics[0].params(),
@@ -568,7 +558,12 @@ fn check_triangulate<S: LieScalar>(entries: &[&OracleTriangulate], tolerance: f6
         // the C++ built from. Without this the comparison below would not
         // separate a pose that differs from a DLT that differs.
         let p2: nalgebra::Matrix3x4<S> = t_0_1.inverse().matrix3x4();
-        close_all_finite(&format!("{label} p2"), &row_major(&p2), &entry.p2, 0.0);
+        close_all_finite(
+            &format!("{label} p2"),
+            &common::row_major(&p2),
+            &entry.p2,
+            0.0,
+        );
 
         let f0: Vector3<S> = vector3(&entry.f0);
         let f1: Vector3<S> = vector3(&entry.f1);

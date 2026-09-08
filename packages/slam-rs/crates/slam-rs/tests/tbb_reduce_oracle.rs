@@ -28,6 +28,8 @@
 use serde::Deserialize;
 use slam_rs::linearize::deterministic_reduce_scalar_for_tests;
 
+mod common;
+
 const ORACLE: &str = include_str!("fixtures/linearize/tbb_reduce_oracle.json");
 
 #[derive(Debug, Deserialize)]

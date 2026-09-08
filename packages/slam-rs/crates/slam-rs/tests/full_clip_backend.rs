@@ -48,18 +48,16 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Instant;
 
-use nalgebra::{Vector2, Vector3};
+use nalgebra::Vector3;
 use serde::Deserialize;
 
 use slam_rs::calib::Calibration;
 use slam_rs::config::VioConfig;
-use slam_rs::estimator::{FlowObservations, FrameOutcome, SqrtKeypointVio};
+use slam_rs::estimator::{FrameOutcome, SqrtKeypointVio};
 use slam_rs::imu::ImuSample;
 use slam_rs::lie::{LieScalar, So3};
-use slam_rs::types::KeypointId;
 
 mod common;
 use common::{Oracle, OracleFlow, OracleFrame, OracleRun, OracleState};
@@ -88,11 +86,6 @@ struct Divergence {
     rotation_deg: f64,
 }
 
-/// The 2-norm of a sequence, which is the Frobenius norm for a matrix's values.
-fn norm<S: LieScalar>(values: impl Iterator<Item = S>) -> f64 {
-    values.map(|v| v.to_f64() * v.to_f64()).sum::<f64>().sqrt()
-}
-
 /// The C++'s newest state at this frameset.
 fn newest(frame: &OracleFrame) -> &OracleState {
     frame
@@ -107,20 +100,6 @@ fn newest(frame: &OracleFrame) -> &OracleState {
         })
 }
 
-/// The C++'s `OpticalFlowResult` for one frameset, as the estimator takes it.
-fn observations(flow: &OracleFlow) -> Arc<FlowObservations> {
-    let mut out: FlowObservations = FlowObservations::new(flow.t_ns, flow.cameras.len());
-    for (camera, points) in flow.cameras.iter().enumerate() {
-        let Some(slot) = out.cameras.get_mut(camera) else {
-            continue;
-        };
-        for point in points {
-            slot.insert(KeypointId(point.id), Vector2::new(point.x, point.y));
-        }
-    }
-    Arc::new(out)
-}
-
 /// Replay the whole flow stream and report where the two windows parted.
 ///
 /// The numbers come back for the caller to gate: this is the measurement the report
@@ -132,21 +111,11 @@ fn compare<S: LieScalar>(
     clip: &Path,
     out: Option<PathBuf>,
 ) -> (f64, usize) {
-    let described: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(clip.join("clip.json")).unwrap()).unwrap();
-    let dataset: String = described["dataset_name"].as_str().unwrap().to_string();
+    let described: common::Clip = common::Clip::read(clip);
     // The oracle's frameset clock is the clip's `video_time`; every basalt CSV,
     // `gt.csv` included, is on the absolute device clock.
-    let start_time_ns: i64 = described["capture_start_time_ns"].as_i64().unwrap();
-    let config_file: &str = match dataset.as_str() {
-        "msd-index" => "msdmi_config.json",
-        "msd-g2" => "msdmg_config.json",
-        other => panic!("no VIO config is pinned for {other}"),
-    };
-    let config: VioConfig = VioConfig::from_json_str(
-        &std::fs::read_to_string(common::fixtures().join(config_file)).unwrap(),
-    )
-    .unwrap();
+    let start_time_ns: i64 = described.capture_start_time_ns;
+    let config: VioConfig = common::config_for(&described.dataset_name);
     let calibration: Calibration<f64> =
         Calibration::from_json_str(&std::fs::read_to_string(clip.join("calib.json")).unwrap())
             .unwrap();
@@ -186,7 +155,7 @@ fn compare<S: LieScalar>(
             .unwrap_or_else(|| panic!("no flow stream for frame {index}"));
         assert_eq!(flow.t_ns, expected.t_ns, "frame {index}: timestamp");
         let FrameOutcome::Measured(stats) = estimator
-            .process_frame(observations(flow))
+            .process_frame(common::observations(flow))
             .unwrap_or_else(|error| panic!("frame {index} ({}) refused: {error}", expected.t_ns))
         else {
             panic!("frame {index} ({}) reported NeedMoreImu", expected.t_ns);
@@ -284,8 +253,8 @@ fn compare<S: LieScalar>(
                 "frameset {index} (t={}): prior rust |H|_F {:.10e} |b| {:.10e} {}x{}, c++ {:.10e} \
                  {:.10e} {}x{}; marg {}",
                 expected.t_ns,
-                norm(estimator.marg_data().h.iter().copied()),
-                norm(estimator.marg_data().b.iter().copied()),
+                common::frobenius(estimator.marg_data().h.iter().copied()),
+                common::frobenius(estimator.marg_data().b.iter().copied()),
                 estimator.marg_data().h.nrows(),
                 estimator.marg_data().h.ncols(),
                 expected.marg_digest.h_frobenius,

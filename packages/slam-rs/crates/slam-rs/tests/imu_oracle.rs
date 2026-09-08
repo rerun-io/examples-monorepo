@@ -36,10 +36,12 @@
 // what makes them evidence.
 #![allow(clippy::excessive_precision)]
 
-use nalgebra::{SMatrix, Vector3};
+use nalgebra::Vector3;
 use serde::Deserialize;
 use slam_rs::imu::{ImuSample, IntegratedImuMeasurement, Matrix9, gravity_from_first_accel};
 use slam_rs::lie::{LieScalar, So3};
+
+mod common;
 
 const ORACLE: &str = include_str!("fixtures/imu/imu_oracle.json");
 
@@ -166,16 +168,6 @@ fn assert_close(name: &str, run: &str, got: &[f64], want: &[f64], tolerance: f64
     }
 }
 
-fn row_major<const R: usize, const C: usize, S: LieScalar>(m: &SMatrix<S, R, C>) -> Vec<f64> {
-    let mut out: Vec<f64> = Vec::with_capacity(R * C);
-    for r in 0..R {
-        for c in 0..C {
-            out.push(m[(r, c)].to_f64());
-        }
-    }
-    out
-}
-
 fn check_run<S: LieScalar>(
     run: &OracleRun,
     tolerance: f64,
@@ -226,18 +218,24 @@ fn check_run<S: LieScalar>(
         tolerance,
     );
 
-    assert_close("cov", name, &row_major(meas.get_cov()), &run.cov, tolerance);
+    assert_close(
+        "cov",
+        name,
+        &common::row_major(meas.get_cov()),
+        &run.cov,
+        tolerance,
+    );
     assert_close(
         "d_state_d_ba",
         name,
-        &row_major(meas.get_d_state_d_ba()),
+        &common::row_major(meas.get_d_state_d_ba()),
         &run.d_state_d_ba,
         tolerance,
     );
     assert_close(
         "d_state_d_bg",
         name,
-        &row_major(meas.get_d_state_d_bg()),
+        &common::row_major(meas.get_d_state_d_bg()),
         &run.d_state_d_bg,
         tolerance,
     );
@@ -248,7 +246,7 @@ fn check_run<S: LieScalar>(
         assert_close(
             "cov_inv",
             name,
-            &row_major(&meas.get_cov_inv()),
+            &common::row_major(&meas.get_cov_inv()),
             &run.cov_inv,
             whitening_tolerance,
         );
@@ -257,7 +255,7 @@ fn check_run<S: LieScalar>(
     // A zero in the C++ information matrix is a direction the measurement does
     // not have, and it has to be an exact zero here too — on every run,
     // conditioning or not.
-    let got_inverse: Vec<f64> = row_major(&meas.get_cov_inv());
+    let got_inverse: Vec<f64> = common::row_major(&meas.get_cov_inv());
     for (index, want) in run.cov_inv.iter().enumerate() {
         if *want == 0.0 {
             assert_eq!(
@@ -274,14 +272,14 @@ fn check_run<S: LieScalar>(
     assert_close(
         "sqrt_cov_inv",
         name,
-        &row_major(&meas.get_cov_inv_sqrt()),
+        &common::row_major(&meas.get_cov_inv_sqrt()),
         &run.sqrt_cov_inv,
         whitening_tolerance,
     );
     // A zero in the C++ whitening is a rank-deficient direction, and it has to
     // be an exact zero here too: a relative tolerance against zero would hide
     // exactly the 1e26 weight this fixture exists to catch.
-    let got_whitening: Vec<f64> = row_major(&meas.get_cov_inv_sqrt());
+    let got_whitening: Vec<f64> = common::row_major(&meas.get_cov_inv_sqrt());
     for (index, want) in run.sqrt_cov_inv.iter().enumerate() {
         if *want == 0.0 {
             assert_eq!(
