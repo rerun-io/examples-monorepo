@@ -19,7 +19,9 @@
 #![cfg(feature = "gpu")]
 #![allow(clippy::unwrap_used)]
 
+use kornia_imgproc::features::FastCorner;
 use nalgebra::Vector2;
+use slam_rs::frontend::detect::{CornerScan, CpuCornerScan};
 use slam_rs::frontend::parallel::WorkPool;
 use slam_rs::frontend::patch::OpticalFlowPatch;
 use slam_rs::frontend::patterns::{Pattern, Pattern51};
@@ -27,7 +29,7 @@ use slam_rs::frontend::se2::AffineCompact2f;
 use slam_rs::frontend::tracker::{
     CpuPatchTracker, FlowResult, FlowTransforms, PatchSoA, PatchTracker, PointsSoA, SourcePatches,
 };
-use slam_rs::gpu::{GpuPatchTracker, GpuPatches, GpuPyramidBuilder, cuda_client};
+use slam_rs::gpu::{GpuCornerScan, GpuPatchTracker, GpuPatches, GpuPyramidBuilder, cuda_client};
 use slam_rs::image::ImageU16;
 use slam_rs::pyramid::{CpuPyramidBuilder, Pyramid, PyramidBuilder, PyramidU16};
 
@@ -413,5 +415,89 @@ fn the_gpu_tracker_recovers_the_same_shift_as_the_cpu() {
     assert!(
         agreed * 100 >= count * 98,
         "the two lanes agreed on the converged flag for {agreed} of {count} patches"
+    );
+}
+
+/// A textured 8-bit field with fine detail, so FAST has plenty to find: the
+/// smooth plane-wave texture above gives almost no corners.
+fn cornered_image(width: usize, height: usize) -> ImageU16 {
+    let mut image: ImageU16 = ImageU16::zeros(width, height).unwrap();
+    let mut state: u32 = 0x1234_5678;
+    for y in 0..height {
+        for x in 0..width {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let wave: i32 = ((x as f64 / 11.0).sin() * 60.0 + (y as f64 / 7.0).cos() * 50.0) as i32;
+            let noise: i32 = (state >> 24) as i32 / 4;
+            // The detector reads `pixel >> 8`, so the 8-bit value goes in the
+            // high byte.
+            image.set(x, y, ((128 + wave + noise).clamp(0, 255) as u16) << 8);
+        }
+    }
+    image
+}
+
+/// The GPU corner scanner is **exact**, not within a tolerance.
+///
+/// kornia's candidate test at threshold `t` is the same statement as
+/// `corner_score_9 > t`, and its in-block local-maximum filter compares raw
+/// scores, so one dense score image answers every rung of the ladder. That is
+/// what `tests/fast_model.rs` establishes on the CPU against kornia itself;
+/// this checks that the two CubeCL kernels implement the same thing, corner for
+/// corner, response for response, and in the same row-major order.
+#[test]
+fn the_gpu_corner_scan_is_exact_against_kornia() {
+    for (width, height) in [(960usize, 240usize), (512, 192)] {
+        let image: ImageU16 = cornered_image(width, height);
+        let mut cpu: CpuCornerScan = CpuCornerScan::default();
+        let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(cuda_client());
+        cpu.scan(&image).unwrap();
+        gpu.scan(&image).unwrap();
+
+        // The row bands the detector asks for: one per grid row of a 50-pixel
+        // cell, at every rung of the shipped ladder.
+        let mut total: usize = 0;
+        for band_y in (3..height - 3).step_by(50) {
+            for threshold in [40i32, 20, 10, 5, 1] {
+                let expected: Vec<FastCorner> = cpu.band(band_y, 44, threshold).unwrap().to_vec();
+                let actual: &[FastCorner] = gpu.band(band_y, 44, threshold).unwrap();
+                assert_eq!(
+                    actual.len(),
+                    expected.len(),
+                    "{width}x{height} band {band_y} threshold {threshold}: \
+                     GPU {} corners, kornia {}",
+                    actual.len(),
+                    expected.len()
+                );
+                for (index, (got, want)) in actual.iter().zip(expected.iter()).enumerate() {
+                    assert_eq!(
+                        (got.xy, got.response),
+                        (want.xy, want.response),
+                        "{width}x{height} band {band_y} threshold {threshold}, corner {index}"
+                    );
+                }
+                total += expected.len();
+            }
+        }
+        println!("{width}x{height}: {total} corners over every band and rung, identical");
+    }
+}
+
+/// The scanner is reused frame after frame, so the second frame's bands must be
+/// the second frame's.
+#[test]
+fn a_reused_corner_scan_carries_only_the_newest_frame() {
+    let first: ImageU16 = cornered_image(512, 128);
+    let second: ImageU16 = ImageU16::zeros(512, 128).unwrap();
+
+    let mut gpu: GpuCornerScan<_> = GpuCornerScan::new(cuda_client());
+    gpu.scan(&first).unwrap();
+    assert!(
+        !gpu.band(3, 44, 5).unwrap().is_empty(),
+        "the textured frame has corners"
+    );
+    gpu.scan(&second).unwrap();
+    assert!(
+        gpu.band(3, 44, 5).unwrap().is_empty(),
+        "a black frame has none"
     );
 }

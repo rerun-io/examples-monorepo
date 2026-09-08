@@ -104,6 +104,19 @@ pub enum DetectError {
     /// `width * height` of them. It is a typed error rather than an early `Ok`
     /// because reporting success with no keypoints would turn a future geometry
     /// slip into an empty detector instead of a loud one (decision D32).
+    /// A device download returned the wrong number of bytes.
+    ///
+    /// Only a GPU scanner produces this. A CubeCL runtime whose CUDA
+    /// installation is incomplete panics on its own worker thread and hands back
+    /// a short buffer rather than an error, and reading that as a candidate
+    /// image would quietly detect nothing (decision D32).
+    #[error("reading the candidate image returned {actual} bytes, expected {expected}")]
+    DeviceRead {
+        /// Bytes the frame's geometry needs.
+        expected: usize,
+        /// Bytes the device returned.
+        actual: usize,
+    },
     #[error("a {width}x{height} 8-bit view over {actual} bytes was refused")]
     GrayViewRefused {
         /// Row length the view was asked for.
@@ -338,24 +351,196 @@ struct Band {
     corners: Vec<FastCorner>,
 }
 
-/// The 8-bit view of the frame the detector reads, reused between frames.
+/// The frontend's corner-candidate stage: one frame in, row bands of FAST
+/// candidates out.
+///
+/// The fourth stage seam, alongside the pyramid builder, the patch tracker and
+/// the residual accumulator. It is cut here because this is the only place the
+/// detector touches an image at all: everything above it —  the cell grid, the
+/// threshold ladder, the per-cell budget, the non-maximum suppression, the
+/// response ordering and the three filters — is arithmetic on the candidate
+/// list, and [`detect_keypoints_with_cells`] keeps all of it.
+///
+/// `band` is `&mut self` because an implementation caches: the nineteen cells of
+/// one grid row at one rung all ask for the same sweep. `Send + Sync` because
+/// the PyO3 wrapper holds a whole pipeline in a `pyclass`, which is shared
+/// across the interpreter's threads even though nothing here runs on more than
+/// one.
+pub trait CornerScan: std::fmt::Debug + Send + Sync {
+    /// Take one frame, discarding whatever the last one left.
+    ///
+    /// Called once per camera per frameset, before any [`CornerScan::band`].
+    ///
+    /// # Errors
+    ///
+    /// [`DetectError`] when the geometry cannot be viewed as 8-bit, or a device
+    /// backend cannot size its buffers.
+    fn scan(&mut self, image: &ImageU16) -> Result<(), DetectError>;
+
+    /// The candidates of the `rows` rows starting at `y`, at `threshold`.
+    ///
+    /// Row-major over the **whole image width**, each carrying OpenCV's integer
+    /// `cornerScore` as its response — the ordering and the score
+    /// [`detect_keypoints_with_cells`] then reads.
+    ///
+    /// # Errors
+    ///
+    /// [`DetectError`] when the band cannot be produced; a CPU backend cannot
+    /// fail here, a device one can.
+    fn band(&mut self, y: usize, rows: usize, threshold: i32)
+    -> Result<&[FastCorner], DetectError>;
+}
+
+/// The CPU [`CornerScan`]: kornia's `fast_detect_rect_u8`, one sweep per
+/// `(row band, threshold)`.
 ///
 /// basalt copies each cell into its own `cv::Mat` with `sub_img_raw(x, y) >> 8`
 /// (`keypoints.cpp:152-157`); one whole-image shift produces the same bytes and
 /// lets every cell be a zero-copy rectangle over it.
-#[derive(Debug, Default)]
-pub struct DetectorScratch {
+/// `Image` owns its pixels — `from_size_slice` is `data.to_vec()` — so the
+/// narrowed frame is built **once per frame** and kept. Rebuilding the view per
+/// band call instead copies the whole frame forty times a frameset, which
+/// measured 40.1 ms against 9.4 ms on MIO07/1500 with every value unchanged.
+#[derive(Default)]
+pub struct CpuCornerScan {
+    /// The narrowed frame, `None` until the first [`CornerScan::scan`].
+    gray: Option<Image<u8, 1>>,
+    /// The narrowing's staging buffer, reused between frames.
     bytes: Vec<u8>,
-    corners: Vec<FastCorner>,
+    width: usize,
+    height: usize,
     /// The [`Band`]s this frame has already scanned, in the order they were
     /// first asked for.
     bands: Vec<Band>,
+}
+
+/// `kornia_image::Image` is not `Debug`, so the geometry is what this prints.
+impl std::fmt::Debug for CpuCornerScan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CpuCornerScan")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("bands", &self.bands.len())
+            .finish()
+    }
+}
+
+impl CornerScan for CpuCornerScan {
+    fn scan(&mut self, image: &ImageU16) -> Result<(), DetectError> {
+        // The bands are this image's; the previous frame's are stale.
+        self.bands.clear();
+        self.width = image.width();
+        self.height = image.height();
+        // `sub_ptr[x] = (sub_img_raw(x, y) >> 8)` (`keypoints.cpp:156`), once.
+        self.bytes.clear();
+        self.bytes.reserve(self.width * self.height);
+        for y in 0..self.height {
+            // One `extend` per row, not one `push` per pixel: the capacity check
+            // a `push` carries is what stops the narrowing from vectorising.
+            self.bytes
+                .extend(image.row(y).iter().map(|pixel| (*pixel >> 8) as u8));
+        }
+        self.gray = Some(
+            Image::from_size_slice(
+                ImageSize {
+                    width: self.width,
+                    height: self.height,
+                },
+                &self.bytes,
+            )
+            .map_err(|_| DetectError::GrayViewRefused {
+                width: self.width,
+                height: self.height,
+                actual: self.bytes.len(),
+            })?,
+        );
+        Ok(())
+    }
+
+    fn band(
+        &mut self,
+        y: usize,
+        rows: usize,
+        threshold: i32,
+    ) -> Result<&[FastCorner], DetectError> {
+        let Some(gray) = self.gray.as_ref() else {
+            return Err(DetectError::GrayViewRefused {
+                width: self.width,
+                height: self.height,
+                actual: self.bytes.len(),
+            });
+        };
+        let index: usize = match self
+            .bands
+            .iter()
+            .position(|band| band.y == y && band.threshold == threshold)
+        {
+            Some(index) => index,
+            None => {
+                let corners: Vec<FastCorner> = fast_detect_rect_u8(
+                    gray,
+                    KorniaRect {
+                        x: 0,
+                        y,
+                        w: self.width,
+                        h: rows,
+                    },
+                    threshold as f32,
+                    FAST_ARC_LENGTH,
+                    FAST_BORDER,
+                )
+                .into_iter()
+                .map(|corner| FastCorner {
+                    xy: corner.xy,
+                    response: opencv_corner_score(corner.response),
+                })
+                .collect();
+                self.bands.push(Band {
+                    y,
+                    threshold,
+                    corners,
+                });
+                self.bands.len() - 1
+            }
+        };
+        // Either the band the search found or the one just pushed.
+        Ok(&self.bands[index].corners)
+    }
+}
+
+/// The detector's per-frame working set: the corner scanner plus the buffers
+/// [`detect_keypoints_with_cells`] filters and suppresses in.
+#[derive(Debug)]
+pub struct DetectorScratch {
+    scanner: Box<dyn CornerScan>,
+    corners: Vec<FastCorner>,
     /// One cell's FAST scores, local coordinates, zero where there is no
     /// candidate. Kept zero between calls so only the entries a cell writes are
     /// touched, rather than the whole grid.
     scores: Vec<f32>,
     /// Which of a cell's candidates survived suppression, in candidate order.
     keep: Vec<bool>,
+}
+
+impl Default for DetectorScratch {
+    fn default() -> Self {
+        Self::with_scanner(Box::new(CpuCornerScan::default()))
+    }
+}
+
+impl DetectorScratch {
+    /// A working set over a caller-supplied corner scanner.
+    ///
+    /// This is how a GPU backend enters the detector: the scanner is the only
+    /// part of it that reads pixels.
+    pub fn with_scanner(scanner: Box<dyn CornerScan>) -> Self {
+        Self {
+            scanner,
+            corners: Vec::new(),
+            scores: Vec::new(),
+            keep: Vec::new(),
+        }
+    }
 }
 
 /// kornia's normalised FAST score as OpenCV's integer `cornerScore`.
@@ -449,62 +634,6 @@ fn suppress_non_maxima(
     });
 }
 
-/// The band for one cell row at one threshold, scanned on the first cell that
-/// asks for it and reused by the rest of that row.
-///
-/// The scan is `fast_detect_rect_u8` over the **whole width** at the same row
-/// range a cell's own rectangle would have given it: the cell rectangle
-/// `{x + 3, y + 3, cell - 6, cell - 6}` clamps to rows `[y + 3, y + cell - 3)`
-/// whatever `x` is, and the kernel only ever emits columns `[3, width - 3)`. So
-/// one call per `(y, threshold)` produces the union of the nineteen per-cell
-/// calls it replaces, corner for corner and in the same row-major order.
-///
-/// The cache key is `(y, threshold)` although `cell` and `gray` decide the
-/// result too; they are constant over a call because `bands` is cleared at the
-/// entry to [`detect_keypoints_with_cells`].
-fn band_corners<'a>(
-    bands: &'a mut Vec<Band>,
-    gray: &Image<u8, 1>,
-    y: usize,
-    cell: usize,
-    threshold: i32,
-) -> &'a [FastCorner] {
-    let index: usize = match bands
-        .iter()
-        .position(|band| band.y == y && band.threshold == threshold)
-    {
-        Some(index) => index,
-        None => {
-            let corners: Vec<FastCorner> = fast_detect_rect_u8(
-                gray,
-                KorniaRect {
-                    x: 0,
-                    y: y + FAST_BORDER,
-                    w: gray.width(),
-                    h: cell - 2 * FAST_BORDER,
-                },
-                threshold as f32,
-                FAST_ARC_LENGTH,
-                FAST_BORDER,
-            )
-            .into_iter()
-            .map(|corner| FastCorner {
-                xy: corner.xy,
-                response: opencv_corner_score(corner.response),
-            })
-            .collect();
-            bands.push(Band {
-                y,
-                threshold,
-                corners,
-            });
-            bands.len() - 1
-        }
-    };
-    // Either the band the search found or the one just pushed.
-    &bands[index].corners
-}
-
 /// `detectKeypointsWithCells` (`keypoints.cpp:132-205`).
 ///
 /// `grid` is **the detected image's own** geometry, as the C++ derives it from
@@ -575,25 +704,15 @@ pub fn detect_keypoints_with_cells(
         return Ok(());
     }
 
-    // The bands are this image's; the previous frame's are stale.
-    scratch.bands.clear();
-
-    // `sub_ptr[x] = (sub_img_raw(x, y) >> 8)` (`keypoints.cpp:156`), once.
-    scratch.bytes.clear();
-    scratch.bytes.reserve(width * height);
-    for y in 0..height {
-        // One `extend` per row, not one `push` per pixel: the capacity check a
-        // `push` carries is what stops the narrowing from vectorising.
-        scratch
-            .bytes
-            .extend(image.row(y).iter().map(|pixel| (*pixel >> 8) as u8));
-    }
-    let gray: Image<u8, 1> = Image::from_size_slice(ImageSize { width, height }, &scratch.bytes)
-        .map_err(|_| DetectError::GrayViewRefused {
-            width,
-            height,
-            actual: scratch.bytes.len(),
-        })?;
+    // Every field is taken apart here because the band the scanner lends is
+    // borrowed while the candidate list it feeds is written.
+    let DetectorScratch {
+        scanner,
+        corners: candidates,
+        scores,
+        keep,
+    } = scratch;
+    scanner.scan(image)?;
 
     // `float dist_to_center = {full_x - img_raw.w / 2, ...}.norm()` — an integer
     // halving of the size, then a float subtraction (`keypoints.cpp:176`).
@@ -626,7 +745,7 @@ pub fn detect_keypoints_with_cells(
                 // `cv::FAST` on the `PATCH_SIZE` sub-image detects at
                 // sub-coordinates `[3, PATCH_SIZE - 3)`; the same rectangle in
                 // whole-image coordinates is the cell shrunk by the ring radius.
-                scratch.corners.clear();
+                candidates.clear();
                 if grid.cell > 2 * FAST_BORDER {
                     // `fast_detect_rect_u8` clamps the rectangle to the ring
                     // margin on every side (`cells.rs:12-15`); the columns this
@@ -637,29 +756,26 @@ pub fn detect_keypoints_with_cells(
                     // edge cannot — `x + 3` is a `usize`.
                     let last: f32 =
                         (x + grid.cell - FAST_BORDER).min(width.saturating_sub(FAST_BORDER)) as f32;
+                    // The row band a cell's own rectangle would have clamped
+                    // to: `{x + 3, y + 3, cell - 6, cell - 6}` keeps rows
+                    // `[y + 3, y + cell - 3)` whatever `x` is, and the kernel
+                    // only ever emits columns `[3, width - 3)`.
                     let band: &[FastCorner] =
-                        band_corners(&mut scratch.bands, &gray, y, grid.cell, threshold);
-                    scratch.corners.extend(
+                        scanner.band(y + FAST_BORDER, grid.cell - 2 * FAST_BORDER, threshold)?;
+                    candidates.extend(
                         band.iter()
                             .filter(|corner| corner.xy[0] >= first && corner.xy[0] < last)
                             .copied(),
                     );
-                    suppress_non_maxima(
-                        &mut scratch.corners,
-                        &mut scratch.scores,
-                        &mut scratch.keep,
-                        x,
-                        y,
-                        grid.cell,
-                    );
+                    suppress_non_maxima(candidates, scores, keep, x, y, grid.cell);
                 }
-                scratch.corners.sort_by(|a, b| {
+                candidates.sort_by(|a, b| {
                     b.response
                         .partial_cmp(&a.response)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
 
-                for corner in &scratch.corners {
+                for corner in candidates.iter() {
                     if points_added >= config.num_points_cell || out.corners.len() >= max_corners {
                         break;
                     }

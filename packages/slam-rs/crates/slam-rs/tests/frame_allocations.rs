@@ -45,7 +45,7 @@ use nalgebra::Vector3;
 
 use slam_rs::calib::{CalibAccelBias, CalibGyroBias, Calibration, CameraModel, PinholeParams};
 use slam_rs::config::{MatchingGuessType, VioConfig};
-use slam_rs::frontend::detect::CellGrid;
+use slam_rs::frontend::detect::{CellGrid, CpuCornerScan};
 use slam_rs::frontend::flow::{
     FlowFrame, FrameToFrameOpticalFlow, FrontendOptions, Keypoints, PosePrediction,
 };
@@ -493,6 +493,7 @@ fn a_restored_frame_costs_no_more_than_a_successful_one() {
             calls: 0,
             fail_from: 8,
         },
+        Box::new(CpuCornerScan::default()),
     )
     .unwrap();
 

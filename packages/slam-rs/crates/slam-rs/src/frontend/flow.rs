@@ -64,8 +64,9 @@ use crate::camera::{CameraError, RigCamera};
 use crate::config::{MatchingGuessType, VioConfig};
 use crate::duration_ns;
 use crate::frontend::detect::{
-    CellGrid, DetectError, DetectorConfig, DetectorScratch, KeypointsData, LOWEST_THRESHOLD_RUNG,
-    MAX_CELLS, Masks, Occupancy, Rect, detect_keypoints_with_cells,
+    CellGrid, CornerScan, CpuCornerScan, DetectError, DetectorConfig, DetectorScratch,
+    KeypointsData, LOWEST_THRESHOLD_RUNG, MAX_CELLS, Masks, Occupancy, Rect,
+    detect_keypoints_with_cells,
 };
 use crate::frontend::parallel::{MAX_THREADS, WorkPool};
 use crate::frontend::patterns::Pattern;
@@ -642,6 +643,7 @@ impl<P: Pattern> FrameToFrameOpticalFlow<P, CpuPyramidBuilder, CpuPatchTracker<P
             options,
             CpuPyramidBuilder::new(),
             tracker,
+            Box::new(CpuCornerScan::default()),
         )
     }
 }
@@ -750,8 +752,9 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     /// Build a frontend on caller-supplied stages.
     ///
     /// This is the seam a GPU backend enters through: `builder` and `tracker` are
-    /// any pair whose pyramid types agree, and the patch storage comes from the
-    /// tracker itself.
+    /// any pair whose pyramid types agree, the patch storage comes from the
+    /// tracker itself, and `scanner` is the detector's corner stage — the three
+    /// are independent, so a backend may replace any subset of them.
     ///
     /// # Errors
     ///
@@ -765,6 +768,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         options: FrontendOptions,
         builder: B,
         tracker: T,
+        scanner: Box<dyn CornerScan>,
     ) -> Result<Self, FrontendError> {
         Self::validate_config(&config)?;
         Self::validate_options(&options)?;
@@ -873,7 +877,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             result: FlowResult::default(),
             tracked_ids: Vec::new(),
             tracked: FlowTransforms::default(),
-            detector: DetectorScratch::default(),
+            detector: DetectorScratch::with_scanner(scanner),
             detected: KeypointsData::default(),
             new_cam0: Keypoints::default(),
             to_remove: Vec::new(),
@@ -2512,6 +2516,7 @@ mod tests {
             },
             CpuPyramidBuilder::new(),
             tracker,
+            Box::new(CpuCornerScan::default()),
         )
         .unwrap_err();
         assert_eq!(
@@ -2600,6 +2605,7 @@ mod tests {
                 FrontendOptions::default(),
                 CpuPyramidBuilder::new(),
                 tracker,
+                Box::new(CpuCornerScan::default()),
             )
             .unwrap_err();
             assert_eq!(error, expected);
@@ -2732,6 +2738,7 @@ mod tests {
                 calls: std::cell::Cell::new(0),
                 fail_on,
             },
+            Box::new(CpuCornerScan::default()),
         )
         .unwrap()
     }

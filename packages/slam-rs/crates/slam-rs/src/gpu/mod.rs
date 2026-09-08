@@ -37,11 +37,13 @@
 //! twice; separate reads and writes cost one uniform branch per sample site and
 //! are correct on every runtime.
 
+mod detect;
 mod kernels;
 mod patches;
 mod pyramid;
 mod track;
 
+pub use detect::GpuCornerScan;
 pub use patches::GpuPatches;
 pub use pyramid::{GpuPyramid, GpuPyramidBuilder};
 pub use track::GpuPatchTracker;
@@ -97,8 +99,16 @@ pub fn cuda_client() -> cubecl::prelude::ComputeClient<CudaRuntime> {
     cubecl_cuda::CudaRuntime::client(&cubecl_cuda::CudaDevice::default())
 }
 
-/// The pair of stage backends `FrameToFrameOpticalFlow::with_backends` needs,
-/// on one shared NVIDIA client.
+/// The three stage backends `FrameToFrameOpticalFlow::with_backends` takes.
+#[cfg(feature = "gpu")]
+pub type CudaBackends<P> = (
+    CudaPyramidBuilder,
+    CudaPatchTracker<P>,
+    Box<dyn crate::frontend::detect::CornerScan>,
+);
+
+/// The three stage backends `FrameToFrameOpticalFlow::with_backends` needs, on
+/// one shared NVIDIA client.
 ///
 /// One client for both stages is what keeps a pyramid and the patches it feeds
 /// on the same device queue, so the frontend synchronises once per
@@ -116,7 +126,7 @@ pub fn cuda_backends<P: crate::frontend::patterns::Pattern>(
     num_levels: usize,
     max_iterations: usize,
     max_recovered_dist2: f32,
-) -> Result<(CudaPyramidBuilder, CudaPatchTracker<P>), crate::frontend::tracker::TrackerError> {
+) -> Result<CudaBackends<P>, crate::frontend::tracker::TrackerError> {
     let client = cuda_client();
     let tracker: CudaPatchTracker<P> = GpuPatchTracker::new(
         client.clone(),
@@ -125,7 +135,12 @@ pub fn cuda_backends<P: crate::frontend::patterns::Pattern>(
         max_iterations,
         max_recovered_dist2,
     )?;
-    Ok((GpuPyramidBuilder::new(client, P::OFFSETS), tracker))
+    let scanner: GpuCornerScan<CudaRuntime> = GpuCornerScan::new(client.clone());
+    Ok((
+        GpuPyramidBuilder::new(client, P::OFFSETS),
+        tracker,
+        Box::new(scanner),
+    ))
 }
 
 /// A [`cubecl_wgpu::WgpuRuntime`] client on the default device.
