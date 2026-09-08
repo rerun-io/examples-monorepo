@@ -25,21 +25,24 @@ import numpy as np
 import pytest
 import rerun as rr
 import rerun.blueprint as rrb
+import rerun.experimental as rx
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
 from slam_rs import _core, vio_log
-from slam_rs.catalog_feed import TIMELINE, CameraCalib
+from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CameraCalib
 from slam_rs.trajectory import AteResult, Trajectory, ate, empty_trajectory
 from slam_rs.vio_log import (
     CPP_ENTITY,
     GT_ENTITY,
     IDENTITY,
+    IMAGE_PLANE_M,
     RUN_ENTITY,
     VIO_STATS_ENTITY,
     VioLogger,
     alignment_onto,
     frustum_strip,
+    log_rig,
     vio_blueprint,
 )
 
@@ -173,6 +176,45 @@ def test_a_deeper_frustum_is_the_same_shape_scaled(camera: CameraFactory) -> Non
     near: Float64[ndarray, "10 3"] = frustum_strip(camera(0, 0.0), depth_m=0.05)
     far: Float64[ndarray, "10 3"] = frustum_strip(camera(0, 0.0), depth_m=0.5)
     np.testing.assert_allclose(10.0 * near, far, atol=1e-12)
+
+
+def image_planes(recording: Path) -> dict[str, float]:
+    """Every ``Pinhole``'s image-plane distance in one recording, by entity path.
+
+    Read off the static chunks, which is why this is not :func:`conftest.read_rows`:
+    a rig's geometry is logged once and for all time, not at a cursor.
+    """
+    planes: dict[str, float] = {}
+    for chunk in rx.RrdReader(recording).stream().collect().stream():
+        batch = chunk.to_record_batch()
+        if "Pinhole:image_plane_distance" in batch.schema.names:
+            planes[chunk.entity_path] = batch.column("Pinhole:image_plane_distance").to_pylist()[0][0]
+    return planes
+
+
+def test_every_rig_camera_pins_its_frustum_to_one_size(camera: CameraFactory, tmp_path: Path) -> None:
+    """Both drawn rigs name the image-plane distance, so a frustum keeps its size all replay.
+
+    Rerun's own default is a heuristic on the scene bounds, so the frusta grew as
+    the landmarks came in. Both call shapes are checked because both are drawn:
+    the estimated run's rig puts the ``Pinhole`` on the camera itself, and the
+    dataset's own rig — :func:`slam_rs.apis.replay._log_calibration` — puts it on
+    the ``pinhole`` child the images hang under.
+    """
+    output: Path = tmp_path / "rig.rrd"
+    rr.init("slam-rs-vio-log-test", recording_id=f"rig-{tmp_path.name}")
+    rr.save(output)
+    log_rig((camera(0, 0.0), camera(1, 0.1)), f"{RUN_ENTITY}/rig")
+    log_rig((camera(0, 0.0), camera(1, 0.1)), RIG_ENTITY, pinhole_child="/pinhole")
+    rr.disconnect()
+    # Float32 in the file, so approximately 0.1 is the most the component can say.
+    assert image_planes(output) == pytest.approx(
+        {
+            f"{prefix}/cam_{index:02d}{child}": IMAGE_PLANE_M
+            for prefix, child in ((f"{RUN_ENTITY}/rig", ""), (RIG_ENTITY, "/pinhole"))
+            for index in range(2)
+        }
+    )
 
 
 def test_every_tracked_frameset_writes_the_rung(logged: Logged) -> None:

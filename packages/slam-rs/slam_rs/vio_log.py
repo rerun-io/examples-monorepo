@@ -84,6 +84,8 @@ MARGINALIZED_COLOR: tuple[int, int, int, int] = (255, 90, 90, 70)
 
 FRUSTUM_DEPTH_M: float = 0.08
 """How far a window frame's wireframe extends, metres. An orientation marker, not a claim about range."""
+IMAGE_PLANE_M: float = 0.1
+"""How far a rig camera's ``Pinhole`` frustum extends, metres: Rerun's default grows with the scene, so they changed size as landmarks came in."""
 ATE_EVERY: int = 30
 """Framesets between two ATE-so-far points: about one a second, and each costs a rigid alignment."""
 
@@ -206,7 +208,12 @@ def log_rig(cameras: tuple[CameraCalib, ...], entity_prefix: str, pinhole_child:
         )
         rr.log(
             f"{node}{pinhole_child}",
-            rr.Pinhole(image_from_camera=image_from_camera, resolution=[camera.width, camera.height], camera_xyz=rr.ViewCoordinates.RDF),
+            rr.Pinhole(
+                image_from_camera=image_from_camera,
+                resolution=[camera.width, camera.height],
+                camera_xyz=rr.ViewCoordinates.RDF,
+                image_plane_distance=IMAGE_PLANE_M,
+            ),
             static=True,
         )
 
