@@ -51,7 +51,10 @@ kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864
 # is the CPU port with no GPU dependency in the graph at all.
 cubecl = "0.10"
 cubecl-cuda = "0.10"
-cubecl-wgpu = { version = "0.10", features = ["spirv"] }
+# No `features` here: which shader compiler cubecl-wgpu builds is decided per
+# target in `crates/slam-rs/Cargo.toml`, because `spirv` and `msl` are not the
+# same lane on the same platform (see the two target sections there).
+cubecl-wgpu = "0.10"
 
 # What the availability probe reads before any CubeCL client is constructed:
 # CubeCL 0.10 unwraps its own bring-up, so the only way an absent GPU becomes a
