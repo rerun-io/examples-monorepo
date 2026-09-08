@@ -26,7 +26,7 @@ from jaxtyping import Float64
 from numpy import ndarray
 
 from slam_rs import _core
-from slam_rs.catalog_feed import DEFAULT_WINDOW_S, Frameset, LocalSegment, RigProfile, SegmentFeed, open_segment
+from slam_rs.catalog_feed import DEFAULT_WINDOW_S, Frameset, LocalSegment, RigProfile, SegmentFeed, open_segment, read_rig_trajectory
 from slam_rs.reference import ReferenceManifest, ReferenceSegment, RobocapSession, flow_config
 from slam_rs.trajectory import Trajectory, shift_clock
 
@@ -196,6 +196,46 @@ def run_segment(
         return _drive(feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets)
 
 
+def robocap_cpp_trajectory(manifest: ReferenceManifest, session: RobocapSession) -> Trajectory:
+    """The basalt C++ trajectory for one RoboCap session, on the clock the frames are on.
+
+    The ``slam`` layer sits on the recording's own ``video_time``; the trajectory
+    clock is that plus the camera offset, which is what the frames got too. Both
+    the probe's Rerun rung and the fleet row score against this trajectory, so
+    the offset is applied here once: MSD's equivalent is a manifest accessor
+    (:meth:`ReferenceManifest.cpp_trajectory`) and the RoboCap lane was the only
+    reference restating the rule per caller.
+
+    Args:
+        manifest: The reference set, which carries the camera offset.
+        session: The session whose ``slam`` layer is read.
+
+    Returns:
+        The C++ poses on the trajectory clock every basalt CSV beside them uses.
+    """
+    return shift_clock(read_rig_trajectory(session.slam_path), manifest.robocap.imu.cam_time_offset_ns)
+
+
+def robocap_estimator_files(manifest: ReferenceManifest) -> tuple[_core.Calibration, _core.VioConfig]:
+    """The calibration and the VIO config basalt itself ran the RoboCap lane with (C72).
+
+    From the two files rather than from the recording, because the number this
+    lane earns is agreement with the C++ and a differently derived configuration
+    would be measuring something else.
+    :func:`slam_rs.apis.robocap_probe.check_calibration_matches_recording` is
+    what asserts the two describe one rig.
+
+    Args:
+        manifest: The reference set, which names both files relative to the package root.
+
+    Returns:
+        The calibration at the manifest's downscale, and the flow config.
+    """
+    calibration: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
+    flow: _core.VioConfig = _core.VioConfig.from_json((manifest.package_root / manifest.robocap.vio_config).read_text())
+    return calibration, flow
+
+
 def run_robocap(manifest: ReferenceManifest, session: RobocapSession, seconds: float = 0.0, window_s: float = DEFAULT_WINDOW_S) -> SegmentRun:
     """Drive one RoboCap session through :class:`slam_rs._core.Vio`, nothing logged.
 
@@ -216,8 +256,9 @@ def run_robocap(manifest: ReferenceManifest, session: RobocapSession, seconds: f
     Returns:
         What :func:`_drive` produced over that session.
     """
-    calibration: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
-    flow: _core.VioConfig = _core.VioConfig.from_json((manifest.package_root / manifest.robocap.vio_config).read_text())
+    calibration: _core.Calibration
+    flow: _core.VioConfig
+    calibration, flow = robocap_estimator_files(manifest)
     feed: SegmentFeed
     with open_segment(LocalSegment(base_rrd=session.base_path), manifest.robocap.imu, profile=RigProfile.from_robocap(manifest.robocap), window_s=window_s) as feed:
         stop_ns: int | None = None if seconds <= 0.0 else int(feed.frame_t_ns[0]) + int(seconds * 1e9)

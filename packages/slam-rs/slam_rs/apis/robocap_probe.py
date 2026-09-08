@@ -65,11 +65,10 @@ from slam_rs.catalog_feed import (
     LocalSegment,
     RigProfile,
     open_segment,
-    read_rig_trajectory,
 )
 from slam_rs.frontend_log import camera_entity
 from slam_rs.reference import MANIFEST_PATH, ImuParameters, ReferenceManifest, RobocapSession, load_manifest
-from slam_rs.tracking import Lockstep
+from slam_rs.tracking import Lockstep, robocap_cpp_trajectory, robocap_estimator_files
 from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_trajectory, shift_clock, write_trajectory
 from slam_rs.vio_log import VioLogger, vio_blueprint
 
@@ -180,11 +179,10 @@ def main(config: Config) -> None:
     session: RobocapSession = manifest.robocap.session(config.session)
     offset_ns: int = manifest.robocap.imu.cam_time_offset_ns
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / f"robocap-{session.session_id}" / "slam_rs.csv"
-    calibration: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
-    flow_config: _core.VioConfig = _core.VioConfig.from_json((manifest.package_root / manifest.robocap.vio_config).read_text())
-    # The layer is on the recording's own `video_time`; the trajectory clock is
-    # that plus the camera offset, which is what the frames get too.
-    cpp: Trajectory = shift_clock(read_rig_trajectory(session.slam_path), offset_ns)
+    calibration: _core.Calibration
+    flow_config: _core.VioConfig
+    calibration, flow_config = robocap_estimator_files(manifest)
+    cpp: Trajectory = robocap_cpp_trajectory(manifest, session)
     print(f"{session.segment_id}: basalt C++ {len(cpp)} poses from {session.slam_path.name} (expected {session.basalt_num_poses})")
     print(f"basalt calibration {manifest.robocap.calibration} at downscale {manifest.robocap.downscale}: {list(calibration.resolution)}")
     print(f"basalt config {manifest.robocap.vio_config}: safe radius {flow_config.optical_flow_image_safe_radius} px")

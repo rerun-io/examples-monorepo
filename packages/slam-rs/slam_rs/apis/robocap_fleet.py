@@ -25,11 +25,10 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from slam_rs.catalog_feed import read_rig_trajectory
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb, this_temperature_c
 from slam_rs.reference import MANIFEST_PATH, ReferenceManifest, RobocapSession, load_manifest
-from slam_rs.tracking import SegmentRun, run_robocap
-from slam_rs.trajectory import AteResult, Trajectory, ate, read_trajectory, shift_clock, write_trajectory
+from slam_rs.tracking import SegmentRun, robocap_cpp_trajectory, run_robocap
+from slam_rs.trajectory import AteResult, Trajectory, ate, read_trajectory, write_trajectory
 
 BUDGET_15FPS_MS: float = 1e3 / 15.0
 """What one four-camera frameset may cost for the cap to keep up at 15 fps."""
@@ -138,10 +137,7 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
     before: float | None = this_temperature_c()
     run: SegmentRun = run_robocap(manifest, session, seconds=config.seconds, window_s=config.window_s)
     after: float | None = this_temperature_c()
-    # The layer sits on the recording's own `video_time`; the trajectory clock is
-    # that plus the camera offset, which is what the frames got too.
-    cpp: Trajectory = shift_clock(read_rig_trajectory(session.slam_path), manifest.robocap.imu.cam_time_offset_ns)
-    against_cpp: AteResult = ate(run.estimate, cpp)
+    against_cpp: AteResult = ate(run.estimate, robocap_cpp_trajectory(manifest, session))
     across: float | None = None
     if config.reference_csv is not None:
         across = 100.0 * ate(run.estimate, read_trajectory(config.reference_csv)).rmse_m
