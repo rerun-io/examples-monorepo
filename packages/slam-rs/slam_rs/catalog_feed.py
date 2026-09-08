@@ -38,10 +38,9 @@ Three decisions are frozen here because each one silently changes the numbers:
 
 import hashlib
 import math
-from collections.abc import Buffer, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from fractions import Fraction
 from io import BytesIO
 from os import PathLike
 from pathlib import Path
@@ -55,7 +54,7 @@ from datafusion import col, lit
 from jaxtyping import Bool, Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
-from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name
+from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name, wrap_mp4
 
 from slam_rs.reference import ImuParameters, RobocapReference
 from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, empty_trajectory, shift_clock
@@ -517,44 +516,6 @@ def read_camera_statics(statics: pa.Table, entity: str) -> CameraStatics:
         transform_relation=int(_static_values(statics, f"{entity}:Transform3D:relation")[0]),
         distortion_valid_radius=float(_static_values(statics, optional_radius)[0]) if optional_radius in statics.column_names else None,
     )
-
-
-def wrap_mp4(samples: Sequence[Buffer], keyframes: list[bool], fps: int, codec: CatalogCodecName) -> bytes:
-    """Mux pre-encoded samples into an in-memory MP4 with positional pts, no re-encode.
-
-    ``simplecv.rerun_dataloader`` has the same function, but importing it drags in
-    torchcodec and torchvision, which this CPU lane deliberately does not install.
-
-    Args:
-        samples: Encoded video samples in decode order, as anything with a
-            buffer — ``bytes``, or a view into the column they were read from —
-            because ``av.Packet`` copies into its own buffer either way and a
-            ``bytes`` copy on the way in is one full copy of the window's
-            encoded bytes per camera for nothing. The first must be a keyframe.
-        keyframes: Keyframe flag per sample.
-        fps: Frame rate written into the muxed track and its time base.
-        codec: Codec of the pre-encoded samples.
-
-    Returns:
-        The complete MP4 file as bytes.
-    """
-    buffer: BytesIO = BytesIO()
-    # Pin the track timescale to fps: the muxer otherwise picks 15360 without
-    # rescaling our positional pts, and the track then claims a ~0.1 s duration.
-    with av.open(buffer, "w", format="mp4", options={"video_track_timescale": str(fps)}) as container:
-        stream = container.add_mux_stream(codec, rate=fps, width=16, height=16)
-        stream.time_base = Fraction(1, fps)
-        for sample_index, (sample, is_keyframe) in enumerate(zip(samples, keyframes, strict=True)):
-            # PyAV's stub says `bytes`; the constructor takes any buffer and
-            # copies into the packet's own (`av.Packet(memoryview)` is documented).
-            packet: av.Packet = av.Packet(sample)  # pyrefly: ignore[bad-argument-type]
-            packet.pts = packet.dts = sample_index
-            packet.duration = 1
-            packet.time_base = stream.time_base
-            packet.stream = stream
-            packet.is_keyframe = is_keyframe
-            container.mux(packet)
-    return buffer.getvalue()
 
 
 def decode_gray(mp4_bytes: bytes, downscale: int = 1) -> Iterator[UInt8[ndarray, "h w"]]:

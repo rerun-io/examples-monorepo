@@ -20,12 +20,9 @@ slower than this segment-wide torchcodec/NVDEC path.
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from fractions import Fraction
-from io import BytesIO
 from time import perf_counter
 from typing import TypeAlias
 
-import av
 import numpy as np
 import pyarrow as pa
 import torch
@@ -36,7 +33,7 @@ from rerun.experimental.dataloader import ColumnDecoder, DecodeRequest, FieldBat
 from torch import Tensor
 from torchcodec.decoders import VideoDecoder
 
-from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name
+from simplecv.catalog_video_codec import catalog_codec_name, wrap_mp4
 
 TimedeltaNs: TypeAlias = Shaped[ndarray, " n_samples"]
 """Sample timestamps in timeline order, dtype ``timedelta64[ns]`` (jaxtyping has no timedelta dtype)."""
@@ -93,40 +90,6 @@ def open_segment_decoder(
         num_ffmpeg_threads=0,
     )
     return times, samples, keyframes, decoder
-
-
-def wrap_mp4(samples: list[bytes], keyframes: list[bool], fps: int, codec: CatalogCodecName) -> bytes:
-    """Mux pre-encoded samples into an in-memory MP4 with positional pts (no re-encode).
-
-    ``add_mux_stream`` muxes without instantiating an encoder. The nominal 16x16
-    stream dimensions are irrelevant: decoders read the real dimensions from the
-    bitstream (parameter sets travel in-band).
-
-    Args:
-        samples: Encoded video samples in decode order.
-        keyframes: Keyframe flag per sample.
-        fps: Frame rate for the muxed track and its time base.
-        codec: Codec name of the pre-encoded samples.
-
-    Returns:
-        The complete MP4 file as bytes.
-    """
-    buffer: BytesIO = BytesIO()
-    # Pin the mp4 track timescale to fps: the muxer otherwise picks its own (15360)
-    # without rescaling our positional pts, and the track then claims a ~0.1s
-    # duration. Index-seeking decoders never notice; timestamp readers do.
-    with av.open(buffer, "w", format="mp4", options={"video_track_timescale": str(fps)}) as container:
-        stream = container.add_mux_stream(codec, rate=fps, width=16, height=16)
-        stream.time_base = Fraction(1, fps)
-        for sample_index, (sample, is_keyframe) in enumerate(zip(samples, keyframes, strict=True)):
-            packet: av.Packet = av.Packet(sample)
-            packet.pts = packet.dts = sample_index
-            packet.duration = 1
-            packet.time_base = stream.time_base
-            packet.stream = stream
-            packet.is_keyframe = is_keyframe
-            container.mux(packet)
-    return buffer.getvalue()
 
 
 class SegmentNvdecDecoder(ColumnDecoder[FrameRgbChw]):
