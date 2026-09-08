@@ -89,7 +89,9 @@ impl<R: Runtime> GpuPyramid<R> {
     ///
     /// [`PyramidError::TooSmall`] when a level would be under the 5-tap
     /// kernel's reach, as the CPU pyramid refuses it, and for `num_levels == 0`,
-    /// which the CPU pyramid accepts and this one cannot allocate.
+    /// which the CPU pyramid accepts and this one cannot allocate;
+    /// [`GpuError::BufferTooLong`] when a pyramid buffer would be longer than
+    /// the `u32` its device metadata indexes it with.
     fn new(
         client: ComputeClient<R>,
         width: usize,
@@ -136,18 +138,37 @@ impl<R: Runtime> GpuPyramid<R> {
             *slot += level_width * level_height;
         }
 
-        // The `meta` layout `kernels` documents: four floats per level, then the
-        // pattern. Level bases stay under 2^24, where `f32` is still exact.
-        let mut meta: Vec<f32> = Vec::with_capacity((num_levels + 1) * 4 + pattern.len() * 2);
+        // Every integer in `meta` is an index into one of these two buffers —
+        // a base, a width, a height — so refusing a buffer longer than a `u32`
+        // refuses every field of every level at once, and the casts below are
+        // exact by that check rather than by hope.
+        for pixels in lengths {
+            if u32::try_from(pixels).is_err() {
+                return Err(GpuError::BufferTooLong { pixels }.into());
+            }
+        }
+
+        // The `meta` layout `kernels` documents: four integers per level, then
+        // the pattern taps as their bit patterns. `u32` and not `f32`, because
+        // a base is an index the kernels add to a pixel offset and `f32` holds
+        // only every second integer above 2^24: a 4097x4097 frame puts level 2
+        // at base 16,785,409, which `f32` stores as 16,785,408, and every
+        // level-2 sample then read one pixel early on both lanes with nothing
+        // reporting it (the S25 review). The taps ride in the same buffer as
+        // bits rather than in a second one because both per-patch kernels are at
+        // the six-buffer ceiling `kernels` documents and a seventh binding is a
+        // question on every device the portable lane runs on, while a bitcast is
+        // one instruction on all three of its shader compilers.
+        let mut meta: Vec<u32> = Vec::with_capacity((num_levels + 1) * 4 + pattern.len() * 2);
         for level in &levels {
-            meta.push(level.base as f32);
-            meta.push(level.width as f32);
-            meta.push(level.height as f32);
-            meta.push(f32::from(u8::from(level.odd)));
+            meta.push(level.base as u32);
+            meta.push(level.width as u32);
+            meta.push(level.height as u32);
+            meta.push(u32::from(level.odd));
         }
         for tap in pattern {
-            meta.push(tap[0]);
-            meta.push(tap[1]);
+            meta.push(tap[0].to_bits());
+            meta.push(tap[1].to_bits());
         }
 
         Ok(Self {
@@ -156,7 +177,7 @@ impl<R: Runtime> GpuPyramid<R> {
             even_len: lengths[0],
             odd: client.empty(lengths[1] * size_of::<u16>()),
             odd_len: lengths[1],
-            meta: client.create_from_slice(f32::as_bytes(&meta)),
+            meta: client.create_from_slice(u32::as_bytes(&meta)),
             meta_len: meta.len(),
             client,
         })

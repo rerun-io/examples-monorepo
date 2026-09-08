@@ -31,14 +31,14 @@ use slam_rs::frontend::tracker::{
 };
 use slam_rs::gpu::{
     GpuCornerScan, GpuPatchTracker, GpuPatches, GpuPyramid, GpuPyramidBuilder, GpuRuntime,
-    gpu_client,
+    StoreLayout, gpu_client,
 };
 use slam_rs::image::ImageU16;
 use slam_rs::pyramid::{CpuPyramidBuilder, Pyramid, PyramidBuilder, PyramidError, PyramidU16};
 
 mod common;
 
-use common::{cornered_image, grid_positions, textured_image};
+use common::{cornered_image, grid_positions, texture, textured_image};
 
 /// One band of a 50-pixel cell grid, keyed the way
 /// `detect_keypoints_with_cells` keys it: `row` is the grid row and `rung` the
@@ -186,6 +186,81 @@ fn a_reused_pyramid_carries_only_the_newest_frame() {
     assert_levels_equal(&cpu, &gpu, "the second frame of a reused pyramid");
 }
 
+/// Every patch of every level against the CPU reference, and how many were valid.
+///
+/// Written once because two fixtures need exactly it — the 512x512 tolerance
+/// one and the 4097x4097 one whose level-2 base is past `f32`'s integers — and
+/// a copy each would be two places for the bounds to drift apart in. The
+/// tolerances are the file's, and their reasons are on the assertions.
+fn assert_patches_agree(
+    cpu: &PyramidU16,
+    patches: &GpuPatches<Pattern51, GpuRuntime>,
+    positions: &PointsSoA,
+    label: &str,
+) -> usize {
+    let count: usize = positions.len();
+    let store: Vec<f32> = patches.read_store().unwrap();
+    let layout: StoreLayout = patches.layout();
+
+    let mut valid: usize = 0;
+    let mut worst_data: f32 = 0.0;
+    let mut worst_jacobian: f32 = 0.0;
+    let mut jacobian_scale: f32 = 0.0;
+    let mut level_image: ImageU16 = ImageU16::default();
+    for level in 0..cpu.num_levels() {
+        cpu.copy_level_into(level, &mut level_image).unwrap();
+        let scale: f32 = (1u32 << level) as f32;
+        for patch in 0..count {
+            let reference: OpticalFlowPatch<Pattern51> =
+                OpticalFlowPatch::new(&level_image, positions.get(patch) / scale);
+            assert_eq!(
+                store[layout.valid(level, patch)] != 0.0,
+                reference.valid,
+                "{label}: validity differs at level {level}, patch {patch}"
+            );
+            valid += usize::from(reference.valid);
+            for tap in 0..Pattern51::SIZE {
+                worst_data = worst_data
+                    .max((store[layout.data(level, tap, patch)] - reference.data[tap]).abs());
+                for row in 0..3 {
+                    let expected: f32 = reference.h_se2_inv_j_se2_t[row][tap];
+                    let actual: f32 = store[layout.jacobian(level, row, tap, patch)];
+                    worst_jacobian = worst_jacobian.max((actual - expected).abs());
+                    jacobian_scale = jacobian_scale.max(expected.abs());
+                }
+            }
+        }
+    }
+
+    println!(
+        "{label} patch build: data max-abs-diff {worst_data:.3e}, H^-1 J^T \
+         max-abs-diff {worst_jacobian:.3e} on a largest coefficient of \
+         {jacobian_scale:.3e} ({:.2e} relative), over {count} patches x {} taps \
+         x {} levels, {valid} of them valid",
+        worst_jacobian / jacobian_scale,
+        Pattern51::SIZE,
+        cpu.num_levels()
+    );
+    // The taps are mean-normalised, so `data` sits near 1 and an absolute bound
+    // is a relative one. Fused multiply-add is the whole difference.
+    assert!(
+        worst_data < 1e-5,
+        "{label}: patch data max-abs-diff {worst_data} over {count} patches x {} \
+         taps x {} levels",
+        Pattern51::SIZE,
+        cpu.num_levels()
+    );
+    // `H^-1 J^T` inherits `H`'s conditioning, so the bound is relative to the
+    // largest coefficient the reference produced on this texture.
+    assert!(
+        worst_jacobian < 1e-3 * jacobian_scale,
+        "{label}: H^-1 J^T max-abs-diff {worst_jacobian} against a largest \
+         coefficient of {jacobian_scale} ({:.2e} relative)",
+        worst_jacobian / jacobian_scale
+    );
+    valid
+}
+
 #[test]
 fn the_gpu_patch_build_matches_the_cpu_within_tolerance() {
     let image: ImageU16 = textured_image(512, 512, 0.0, 0.0);
@@ -205,60 +280,117 @@ fn the_gpu_patch_build_matches_the_cpu_within_tolerance() {
     let mut patches: GpuPatches<Pattern51, _> =
         GpuPatches::new(client, MAX_KEYPOINTS, LEVELS + 1).unwrap();
     patches.build(&gpu, &positions, None).unwrap();
-    let store: Vec<f32> = patches.read_store().unwrap();
-    let layout = patches.layout();
+    assert_patches_agree(&cpu, &patches, &positions, "512x512");
+}
 
-    let mut worst_data: f32 = 0.0;
-    let mut worst_jacobian: f32 = 0.0;
-    let mut jacobian_scale: f32 = 0.0;
-    let mut level_image: ImageU16 = ImageU16::default();
-    for level in 0..=LEVELS {
-        cpu.copy_level_into(level, &mut level_image).unwrap();
-        let scale: f32 = (1u32 << level) as f32;
-        for patch in 0..count {
-            let reference: OpticalFlowPatch<Pattern51> =
-                OpticalFlowPatch::new(&level_image, positions.get(patch) / scale);
-            assert_eq!(
-                store[layout.valid(level, patch)] != 0.0,
-                reference.valid,
-                "validity differs at level {level}, patch {patch}"
-            );
-            for tap in 0..Pattern51::SIZE {
-                worst_data = worst_data
-                    .max((store[layout.data(level, tap, patch)] - reference.data[tap]).abs());
-                for row in 0..3 {
-                    let expected: f32 = reference.h_se2_inv_j_se2_t[row][tap];
-                    let actual: f32 = store[layout.jacobian(level, row, tap, patch)];
-                    worst_jacobian = worst_jacobian.max((actual - expected).abs());
-                    jacobian_scale = jacobian_scale.max(expected.abs());
-                }
-            }
+/// [`textured_image`]'s field at 16.8 M pixels, in a fraction of the time.
+///
+/// `textured_image` costs twelve `sin` per pixel, which is seconds at
+/// 4097x4097, and this is the only fixture that needs a frame that big. The
+/// same texture is sampled along each axis once and the field is the product of
+/// the two, so it costs one multiply per pixel, keeps a gradient in both axes —
+/// a patch with a singular `H` would be dropped by both lanes and compare
+/// vacuously — and stays an exact translation of itself under `(dx, dy)`, which
+/// is what the tracking half of the fixture measures.
+fn separable_image(width: usize, height: usize, dx: f32, dy: f32) -> ImageU16 {
+    let column: Vec<f64> = (0..width)
+        .map(|x| 0.5 + 0.4 * texture(x as f64 - f64::from(dx), 0.0))
+        .collect();
+    let row: Vec<f64> = (0..height)
+        .map(|y| 0.5 + 0.4 * texture(0.0, y as f64 - f64::from(dy)))
+        .collect();
+    let mut image: ImageU16 = ImageU16::zeros(width, height).unwrap();
+    for (y, vertical) in row.iter().enumerate() {
+        let scaled: f64 = vertical * 65535.0;
+        for (x, horizontal) in column.iter().enumerate() {
+            image.set(x, y, (horizontal * scaled).clamp(0.0, 65535.0) as u16);
         }
     }
+    image
+}
 
+/// A level base past `2^24` reaches the kernels as the integer it is.
+///
+/// The level bases go to the device in the metadata array both per-patch
+/// kernels read. They were `f32` there, and `f32` holds only every second
+/// integer above `2^24`: a 4097x4097 frame puts level 2 — the second level of
+/// the even buffer — at base `4097 * 4097 = 16,785,409`, which `f32` stores as
+/// 16,785,408, so every level-2 sample read one pixel early on both lanes with
+/// nothing anywhere reporting it.
+///
+/// `the_gpu_pyramid_is_bit_exact_with_the_cpu` cannot see it and no bigger
+/// version of it could: `copy_level_into` downloads with the **host** side's
+/// exact base and never reads the device's metadata at all. So this is the
+/// fixture that reads it, the only way a caller can — through the two kernels
+/// that index with it — at the smallest geometry whose alternating-buffer base
+/// is past the bound, and at the same tolerances every other fixture here uses.
+#[test]
+fn a_level_base_past_f32_precision_reaches_the_kernels_exactly() {
+    // Odd times odd is the point, not the size: `f32`'s spacing at this
+    // magnitude is 2, so an even product this big is still exact and only an
+    // odd one rounds. 4097 x 4097 is the smallest square that is both.
+    const SIDE: usize = 4097;
+    const SHIFT: f32 = 2.75;
+    assert_eq!(SIDE * SIDE, 16_785_409);
+    assert_ne!(
+        (SIDE * SIDE) as f32 as usize,
+        SIDE * SIDE,
+        "an f32 base of {} would have been exact, so this fixture measures nothing",
+        SIDE * SIDE
+    );
+
+    let started: std::time::Instant = std::time::Instant::now();
+    let first: ImageU16 = separable_image(SIDE, SIDE, 0.0, 0.0);
+    let second: ImageU16 = separable_image(SIDE, SIDE, SHIFT, -1.5);
+    // Patches well inside the frame at every level: level 3 is 512x512, so a
+    // level-0 position must stay under 4064 to keep its taps in bounds there.
+    let mut positions: PointsSoA = PointsSoA::with_capacity(32);
+    for row in 0..5 {
+        for column in 0..5 {
+            positions.push(Vector2::new(
+                200.0 + 900.0 * column as f32 + 0.37,
+                200.0 + 900.0 * row as f32 - 0.21,
+            ));
+        }
+    }
+    let count: usize = positions.len();
+
+    // ── the patch build, which reads the base once per level per patch
+    let mut cpu_builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
+    let mut cpu: PyramidU16 = cpu_builder.allocate(SIDE, SIDE, LEVELS).unwrap();
+    cpu_builder.build(0, &first, &mut cpu).unwrap();
+    assert_eq!(cpu.level_size(2), Some((1024, 1024, 1024)));
+
+    let client = gpu_client().unwrap();
+    let mut gpu_builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
+    let mut gpu = gpu_builder.allocate(SIDE, SIDE, LEVELS).unwrap();
+    gpu_builder.build(0, &first, &mut gpu).unwrap();
+    let mut patches: GpuPatches<Pattern51, _> =
+        GpuPatches::new(client, MAX_KEYPOINTS, LEVELS + 1).unwrap();
+    patches.build(&gpu, &positions, None).unwrap();
+    let valid: usize = assert_patches_agree(&cpu, &patches, &positions, "4097x4097");
+    // A patch that fell out of bounds is `-1` on both lanes and would agree
+    // whatever the base said, so the fixture states that none did.
+    assert_eq!(
+        valid,
+        count * (LEVELS + 1),
+        "the fixture compares {valid} valid patches of {}",
+        count * (LEVELS + 1)
+    );
+
+    // ── one KLT step, which reads it once per level per iteration
+    let guesses: FlowTransforms = guesses_at(&positions);
+    let (cpu_result, gpu_result) = track_both_lanes(SIDE, &first, &second, &positions, &guesses);
+    let tracked: usize = (0..count)
+        .filter(|&index| gpu_result.is_valid(index))
+        .count();
+    assert_eq!(tracked, count, "{tracked} of {count} patches survived");
+    let worst: f32 = assert_lanes_agree(&cpu_result, &gpu_result, count, "4097x4097");
     println!(
-        "patch build: data max-abs-diff {worst_data:.3e}, H^-1 J^T max-abs-diff \
-         {worst_jacobian:.3e} on a largest coefficient of {jacobian_scale:.3e} \
-         ({:.2e} relative), over {count} patches x {} taps x {} levels",
-        worst_jacobian / jacobian_scale,
-        Pattern51::SIZE,
-        LEVELS + 1
-    );
-    // The taps are mean-normalised, so `data` sits near 1 and an absolute bound
-    // is a relative one. Fused multiply-add is the whole difference.
-    assert!(
-        worst_data < 1e-5,
-        "patch data max-abs-diff {worst_data} over {count} patches x {} taps x {} levels",
-        Pattern51::SIZE,
-        LEVELS + 1
-    );
-    // `H^-1 J^T` inherits `H`'s conditioning, so the bound is relative to the
-    // largest coefficient the reference produced on this texture.
-    assert!(
-        worst_jacobian < 1e-3 * jacobian_scale,
-        "H^-1 J^T max-abs-diff {worst_jacobian} against a largest coefficient of \
-         {jacobian_scale} ({:.2e} relative)",
-        worst_jacobian / jacobian_scale
+        "4097x4097 (level-2 base {}): {tracked} patches tracked, worst lane gap \
+         {worst:.3e} px, whole fixture {:.1} s",
+        SIDE * SIDE,
+        started.elapsed().as_secs_f64()
     );
 }
 

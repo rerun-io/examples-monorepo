@@ -22,18 +22,29 @@
 //!
 //! ## The `meta` array
 //!
-//! One `f32` buffer carries a pyramid's level geometry and the sampling
+//! One `u32` buffer carries a pyramid's level geometry and the sampling
 //! pattern, so no stage needs a seventh binding (§12.3: at most six buffers per
-//! stage, which is also wgpu's floor). Integers up to `2^24` are exact in
-//! `f32` and the largest value stored is a level base offset under a million.
+//! stage, which is also wgpu's floor).
+//!
+//! `u32` and not `f32`, because a level base is an **index**: it is added to a
+//! pixel offset here, and above `2^24` an `f32` holds only every second
+//! integer. A 4097x4097 frame puts level 2's base at 16,785,409, which `f32`
+//! stores as 16,785,408, and every level-2 sample read one pixel early on both
+//! lanes with nothing reporting it (the S25 review). WGSL has no `u16` or `u8`
+//! but it does have `u32`, so this is the one exact carrier all three shader
+//! compilers store natively. The pattern taps are the only genuinely
+//! fractional values in the array, and they ride in it as their bit patterns
+//! rather than in a binding of their own: a bitcast is one instruction
+//! everywhere, and a seventh buffer is a portability question on every device
+//! the portable lane runs on.
 //!
 //! ```text
 //! meta[level * 4 + 0]  base offset of the level inside its buffer, in pixels
 //! meta[level * 4 + 1]  width
 //! meta[level * 4 + 2]  height
 //! meta[level * 4 + 3]  0 = buffer `a`, 1 = buffer `b`  (the level's parity)
-//! meta[levels * 4 + tap * 2 + 0]  pattern tap x
-//! meta[levels * 4 + tap * 2 + 1]  pattern tap y
+//! meta[levels * 4 + tap * 2 + 0]  pattern tap x, as `f32::to_bits`
+//! meta[levels * 4 + tap * 2 + 1]  pattern tap y, as `f32::to_bits`
 //! ```
 //!
 //! ## The `store` array
@@ -469,7 +480,7 @@ fn ldlt_solve3(mat: &Array<f32>, transpositions: &Array<usize>, rhs: &mut Array<
 fn patch_build_kernel(
     pyramid_a: &Array<u16>,
     pyramid_b: &Array<u16>,
-    meta: &Array<f32>,
+    meta: &Array<u32>,
     positions: &Array<f32>,
     store: &mut Array<f32>,
     capacity: usize,
@@ -519,8 +530,8 @@ fn patch_build_kernel(
     let pattern = num_levels * 4usize;
 
     if tap < taps {
-        let tap_x = meta[pattern + tap * 2usize];
-        let tap_y = meta[pattern + tap * 2usize + 1usize];
+        let tap_x = f32::reinterpret(meta[pattern + tap * 2usize]);
+        let tap_y = f32::reinterpret(meta[pattern + tap * 2usize + 1usize]);
         let px = pos_x + tap_x;
         let py = pos_y + tap_y;
         if in_bounds(px, py, PATCH_BORDER, width, height) {
@@ -752,7 +763,7 @@ fn compose_se2_exp(state: &mut SharedMemory<f32>, t0: f32, t1: f32, theta: f32) 
 fn klt_kernel(
     pyramid_a: &Array<u16>,
     pyramid_b: &Array<u16>,
-    meta: &Array<f32>,
+    meta: &Array<u32>,
     store: &Array<f32>,
     // One binding, read and written, not two views of the same buffer. Every
     // caller passes the same handle for both roles — the C++ composes the warp
@@ -793,8 +804,8 @@ fn klt_kernel(
     if tap == 0usize {
         let guess_x = transforms[4usize * count + patch];
         let guess_y = transforms[5usize * count + patch];
-        let level0_width = f32::cast_from(usize::cast_from(meta[1usize]));
-        let level0_height = f32::cast_from(usize::cast_from(meta[2usize]));
+        let level0_width = f32::cast_from(meta[1usize]);
+        let level0_height = f32::cast_from(meta[2usize]);
         let mut inside = true;
         if check_guess_bounds == 1usize
             && (guess_x < 0.0f32
@@ -848,8 +859,8 @@ fn klt_kernel(
             // `residual(img, transform * pattern2, res)` (`patch.h:168-202`),
             // with the warp applied per tap.
             if sampling && tap < taps {
-                let tap_x = meta[pattern + tap * 2usize];
-                let tap_y = meta[pattern + tap * 2usize + 1usize];
+                let tap_x = f32::reinterpret(meta[pattern + tap * 2usize]);
+                let tap_y = f32::reinterpret(meta[pattern + tap * 2usize + 1usize]);
                 let warped_x = state[0usize] * tap_x + state[1usize] * tap_y + state[4usize];
                 let warped_y = state[2usize] * tap_x + state[3usize] * tap_y + state[5usize];
                 if in_bounds(warped_x, warped_y, PATCH_BORDER, width, height) {
@@ -1013,7 +1024,7 @@ fn prepare_backward_kernel(
     offset_x_base: usize,
     offset_y_base: usize,
 ) {
-    let index = usize::cast_from(ABSOLUTE_POS_X);
+    let index = usize::cast_from(ABSOLUTE_POS);
     if index >= count {
         terminate!();
     }
@@ -1043,7 +1054,7 @@ fn finish_kernel(
     pos_y_base: usize,
     max_recovered_dist2: f32,
 ) {
-    let index = usize::cast_from(ABSOLUTE_POS_X);
+    let index = usize::cast_from(ABSOLUTE_POS);
     if index >= count {
         terminate!();
     }
@@ -1105,10 +1116,35 @@ fn tile_2d(width: usize, height: usize) -> (CubeCount, CubeDim) {
     )
 }
 
-/// The dispatch every per-element bookkeeping kernel uses: one unit per element.
+/// Cubes per dispatch dimension a WebGPU implementation must allow, and the
+/// number every one of them stops at.
+///
+/// wgpu reports its adapter's own `max_compute_workgroups_per_dimension` and on
+/// every adapter measured that is exactly this floor, so the portable lane
+/// treats it as the limit rather than as a minimum. CUDA's own limit on the
+/// first axis is 2^31 - 1, far above anything here.
+const MAX_CUBES_PER_DIM: u32 = 65_535;
+
+/// The dispatch every per-element bookkeeping kernel uses: one unit per element,
+/// found through [`ABSOLUTE_POS`].
+///
+/// Two dimensions rather than one, because a single row of cubes reaches only
+/// `65,535 * 256 = 2^24` elements and the frame copy is one unit per **pixel**:
+/// a 4097x4097 frame is 16,785,409 of them, and the portable lane failed that
+/// dispatch at validation — a wgpu error on its own thread, so the caller saw a
+/// panicking read rather than a refusal. Both compilers flatten `ABSOLUTE_POS`
+/// as `z * cubes_x * units * cubes_y + y * cubes_x * units + x`, so the second
+/// row is a continuation of the first and the mapping is the same dense
+/// enumeration either way. Anything under the ceiling — every shipped frame and
+/// every keypoint buffer — still dispatches exactly one row, unchanged.
 fn linear_1d(count: usize) -> (CubeCount, CubeDim) {
+    let cubes: u32 = (count as u32).div_ceil(LINEAR_UNITS);
     (
-        CubeCount::Static((count as u32).div_ceil(LINEAR_UNITS), 1, 1),
+        CubeCount::Static(
+            cubes.min(MAX_CUBES_PER_DIM),
+            cubes.div_ceil(MAX_CUBES_PER_DIM),
+            1,
+        ),
         CubeDim {
             x: LINEAR_UNITS,
             y: 1,
@@ -1266,7 +1302,7 @@ pub(super) fn launch_klt<R: Runtime>(
 /// frame.
 #[cube(launch, launch_unchecked)]
 fn probe_kernel<N: Numeric>(src: &Array<N>, dst: &mut Array<N>, count: usize) {
-    let index = usize::cast_from(ABSOLUTE_POS_X);
+    let index = usize::cast_from(ABSOLUTE_POS);
     if index >= count {
         terminate!();
     }

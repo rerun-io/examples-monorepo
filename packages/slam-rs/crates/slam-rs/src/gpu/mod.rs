@@ -132,6 +132,24 @@ pub enum GpuError {
         /// Which stage was running.
         what: &'static str,
     },
+    /// A pyramid buffer is longer than the `u32` its device metadata carries.
+    ///
+    /// The metadata array is `u32` because a level base is an **index**: the
+    /// per-patch kernels add it to a pixel offset, so it has to arrive exactly,
+    /// and every field in that array is an index into one of the two pyramid
+    /// buffers. Refusing a buffer past `u32::MAX` therefore refuses every field
+    /// at once. Nothing on this lane can reach it — that buffer would be 8 GB of
+    /// `u16`, past every device's binding limit — but a silent truncation is a
+    /// wrong trajectory rather than a refusal, and this lane does not do that
+    /// (decision D32).
+    #[error(
+        "a pyramid buffer of {pixels} pixels is past the u32 its device metadata \
+         carries, so the kernels could not index it"
+    )]
+    BufferTooLong {
+        /// Pixels the buffer would have held.
+        pixels: usize,
+    },
     /// The runtime cannot store an element width the kernels bind.
     ///
     /// See [`probe_storage`]: both of this backend's bring-up failures are
