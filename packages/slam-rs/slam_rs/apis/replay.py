@@ -267,6 +267,10 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
             else:
                 # Full resolution, or the keypoints would sit two pixels off the
                 # corner they were computed on; JPEG keeps a whole segment small.
+                # The encode costs 3.9 ms a frameset on the replay thread and is
+                # deliberate: no lane that reports a wall time comes through here,
+                # because the V2 gate drives the feed and `Vio` itself with
+                # nothing logged.
                 rr.log(entity, rr.Image(image, color_model="L").compress(jpeg_quality=JPEG_QUALITY))
 
         if frameset.ground_truth is not None:
