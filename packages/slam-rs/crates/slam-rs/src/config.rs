@@ -5,8 +5,10 @@
 //! unmodified. The on-disk shape is cereal's: a `{"value0": {...}}` wrapper
 //! whose keys are prefixed `config.` (`src/utils/vio_config.cpp:131-180`).
 //!
-//! Every field the ABS_QR path reads is modelled, including the `mapper_*`
-//! block, which the estimator never touches but every shipped file carries.
+//! Every field the ABS_QR path reads is modelled. The seventeen
+//! `config.mapper_*` keys every shipped file carries are not: D13 puts the
+//! mapper out of scope, nothing here reads them, and they round-trip through
+//! [`VioConfig::unknown`] like any other key the struct does not model.
 //!
 //! ## Unknown keys are warned about, never fatal
 //!
@@ -15,7 +17,10 @@
 //! `config.vio_lm_pose_damping_variant`, which the C++ struct commented out
 //! (`vio_config.h:84-85`, `vio_config.cpp:86-87,96-97`). Cereal ignores them;
 //! `#[serde(deny_unknown_fields)]` would reject every reference config, so
-//! unknown keys are collected and logged instead.
+//! unknown keys are collected and logged instead. The `mapper_*` block is
+//! collected the same way but **not** warned about: it is out of scope by
+//! decision, and listing seventeen expected keys would bury the one that is a
+//! typo.
 //!
 //! ## `Default` is the C++ constructor, not `default_config.json`
 //!
@@ -258,60 +263,13 @@ pub struct VioConfig {
     #[serde(rename = "config.vio_kf_marg_criteria")]
     pub vio_kf_marg_criteria: KeyframeMargCriteria,
 
-    // ── mapper (parsed, never read by the VIO path) ─────────────────────
-    /// Mapper reprojection standard deviation.
-    #[serde(rename = "config.mapper_obs_std_dev")]
-    pub mapper_obs_std_dev: f64,
-    /// Mapper Huber threshold.
-    #[serde(rename = "config.mapper_obs_huber_thresh")]
-    pub mapper_obs_huber_thresh: f64,
-    /// Mapper detections per frame.
-    #[serde(rename = "config.mapper_detection_num_points")]
-    pub mapper_detection_num_points: i32,
-    /// Mapper frames to match against.
-    #[serde(rename = "config.mapper_num_frames_to_match")]
-    pub mapper_num_frames_to_match: f64,
-    /// Mapper match acceptance threshold.
-    #[serde(rename = "config.mapper_frames_to_match_threshold")]
-    pub mapper_frames_to_match_threshold: f64,
-    /// Mapper minimum matches.
-    #[serde(rename = "config.mapper_min_matches")]
-    pub mapper_min_matches: f64,
-    /// Mapper RANSAC threshold.
-    #[serde(rename = "config.mapper_ransac_threshold")]
-    pub mapper_ransac_threshold: f64,
-    /// Mapper minimum track length.
-    #[serde(rename = "config.mapper_min_track_length")]
-    pub mapper_min_track_length: f64,
-    /// Mapper descriptor distance cap.
-    #[serde(rename = "config.mapper_max_hamming_distance")]
-    pub mapper_max_hamming_distance: f64,
-    /// Mapper second-best ratio test.
-    #[serde(rename = "config.mapper_second_best_test_ratio")]
-    pub mapper_second_best_test_ratio: f64,
-    /// Mapper bag-of-words bit width.
-    #[serde(rename = "config.mapper_bow_num_bits")]
-    pub mapper_bow_num_bits: i32,
-    /// Mapper minimum triangulation baseline.
-    #[serde(rename = "config.mapper_min_triangulation_dist")]
-    pub mapper_min_triangulation_dist: f64,
-    /// Mapper factor weighting switch.
-    #[serde(rename = "config.mapper_no_factor_weights")]
-    pub mapper_no_factor_weights: bool,
-    /// Whether the mapper builds factors at all.
-    #[serde(rename = "config.mapper_use_factors")]
-    pub mapper_use_factors: bool,
-    /// Mapper LM switch.
-    #[serde(rename = "config.mapper_use_lm")]
-    pub mapper_use_lm: bool,
-    /// Mapper damping floor.
-    #[serde(rename = "config.mapper_lm_lambda_min")]
-    pub mapper_lm_lambda_min: f64,
-    /// Mapper damping ceiling.
-    #[serde(rename = "config.mapper_lm_lambda_max")]
-    pub mapper_lm_lambda_max: f64,
-
     /// Keys the struct does not model, kept so a round trip loses nothing.
+    ///
+    /// Every shipped file carries seventeen `config.mapper_*` keys and the four
+    /// the C++ struct commented out; none of them reaches a VIO decision (D13
+    /// puts the mapper out of scope), so they live here rather than as fields.
+    /// `to_json_string` writes them back unchanged, which is what keeps the
+    /// round trip lossless.
     #[serde(flatten)]
     pub unknown: BTreeMap<String, serde_json::Value>,
 }
@@ -369,24 +327,6 @@ impl Default for VioConfig {
             vio_kf_marg_feature_ratio: 0.1,
             vio_kf_marg_criteria: KeyframeMargCriteria::Default,
 
-            mapper_obs_std_dev: 0.25,
-            mapper_obs_huber_thresh: 1.5,
-            mapper_detection_num_points: 800,
-            mapper_num_frames_to_match: 30.0,
-            mapper_frames_to_match_threshold: 0.04,
-            mapper_min_matches: 20.0,
-            mapper_ransac_threshold: 5e-5,
-            mapper_min_track_length: 5.0,
-            mapper_max_hamming_distance: 70.0,
-            mapper_second_best_test_ratio: 1.2,
-            mapper_bow_num_bits: 16,
-            mapper_min_triangulation_dist: 0.07,
-            mapper_no_factor_weights: false,
-            mapper_use_factors: true,
-            mapper_use_lm: true,
-            mapper_lm_lambda_min: 1e-32,
-            mapper_lm_lambda_max: 1e3,
-
             unknown: BTreeMap::new(),
         }
     }
@@ -401,8 +341,16 @@ impl VioConfig {
     pub fn from_json_str(text: &str) -> Result<Self, ConfigError> {
         let wrapper: Value0<Self> = serde_json::from_str(text)?;
         let config: Self = wrapper.value0;
-        if !config.unknown.is_empty() {
-            let names: Vec<&str> = config.unknown.keys().map(String::as_str).collect();
+        // The `config.mapper_*` block is out of scope by decision, not by
+        // oversight, so it is not what this warning is for: it would bury the
+        // one key that is a typo under seventeen that are expected.
+        let names: Vec<&str> = config
+            .unknown
+            .keys()
+            .map(String::as_str)
+            .filter(|name| !name.starts_with("config.mapper_"))
+            .collect();
+        if !names.is_empty() {
             log::warn!(
                 "vio config: ignoring {} unmodelled key(s): {}",
                 names.len(),
@@ -516,11 +464,30 @@ mod tests {
         assert_eq!(patched, shipped);
     }
 
-    /// The four keys the C++ struct commented out are still in every shipped
-    /// file and must not be fatal (`vio_config.cpp:86-87,96-97`).
+    /// What every shipped file carries that the struct does not model: the four
+    /// keys the C++ struct commented out (`vio_config.cpp:86-87,96-97`) and the
+    /// seventeen `config.mapper_*` keys D13 puts out of scope. Neither may be
+    /// fatal, and the list is exact so a *new* unmodelled key is a red test.
     #[test]
-    fn the_four_retired_keys_are_tolerated_and_listed() {
-        let retired: [&str; 4] = [
+    fn the_unmodelled_keys_are_tolerated_and_listed() {
+        let expected: [&str; 21] = [
+            "config.mapper_bow_num_bits",
+            "config.mapper_detection_num_points",
+            "config.mapper_frames_to_match_threshold",
+            "config.mapper_lm_lambda_max",
+            "config.mapper_lm_lambda_min",
+            "config.mapper_max_hamming_distance",
+            "config.mapper_min_matches",
+            "config.mapper_min_track_length",
+            "config.mapper_min_triangulation_dist",
+            "config.mapper_no_factor_weights",
+            "config.mapper_num_frames_to_match",
+            "config.mapper_obs_huber_thresh",
+            "config.mapper_obs_std_dev",
+            "config.mapper_ransac_threshold",
+            "config.mapper_second_best_test_ratio",
+            "config.mapper_use_factors",
+            "config.mapper_use_lm",
             "config.vio_filter_iteration",
             "config.vio_lm_landmark_damping_variant",
             "config.vio_lm_pose_damping_variant",
@@ -529,8 +496,28 @@ mod tests {
         for (name, text) in every_fixture() {
             let config: VioConfig = VioConfig::from_json_str(text).unwrap();
             let seen: Vec<&str> = config.unknown.keys().map(String::as_str).collect();
-            assert_eq!(seen, retired, "{name} carries different unknown keys");
+            assert_eq!(seen, expected, "{name} carries different unknown keys");
         }
+    }
+
+    /// A `mapper_*` value survives the round trip byte for byte, which is what
+    /// makes dropping the seventeen fields free: `_core.to_json_string`
+    /// (`slam-rs-py/src/lib.rs`) writes a config back for a C++ run to read.
+    #[test]
+    fn a_mapper_key_survives_the_round_trip() {
+        let config: VioConfig = VioConfig::from_json_str(MSDMI_JSON).unwrap();
+        let Some(value) = config.unknown.get("config.mapper_ransac_threshold") else {
+            panic!("the shipped file carries config.mapper_ransac_threshold");
+        };
+        assert_eq!(value.as_f64(), Some(5e-5));
+
+        let text: String = config.to_json_string().unwrap();
+        let reread: VioConfig = VioConfig::from_json_str(&text).unwrap();
+        assert_eq!(reread, config, "every key, modelled or not");
+        assert_eq!(
+            reread.unknown.get("config.mapper_ransac_threshold"),
+            Some(value)
+        );
     }
 
     /// A key nobody has ever heard of is warned about, not rejected.
