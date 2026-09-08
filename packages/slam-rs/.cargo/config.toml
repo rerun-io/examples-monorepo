@@ -3,3 +3,10 @@
 # with the estimator.
 [target.aarch64-unknown-linux-gnu]
 rustflags = ["-Copt-level=2"]
+
+# On macOS the CPython symbols an extension module calls are resolved at load
+# time by the interpreter that imports it, so the cdylib has to be linked with
+# them left undefined. maturin and setuptools-rust pass these flags for you;
+# a plain `cargo build` does not, and the link fails on ~200 `_Py*` symbols.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
