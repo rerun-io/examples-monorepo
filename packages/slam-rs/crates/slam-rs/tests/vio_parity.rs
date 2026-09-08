@@ -44,9 +44,9 @@ use std::path::PathBuf;
 
 use nalgebra::Vector3;
 
-use slam_rs::frontend::flow::FrontendOptions;
+use slam_rs::frontend::flow::{FrontendError, FrontendOptions};
 use slam_rs::lie::So3;
-use slam_rs::{ImageView, Vio, VioResult, VioStatus};
+use slam_rs::{ImageView, Vio, VioError, VioResult, VioStatus};
 
 mod common;
 use common::{IMU, ORACLE, OracleFrame, OracleState, Pgm, run_named};
@@ -69,6 +69,9 @@ const ROTATION_TOLERANCE_DEG: f64 = 1.0;
 
 /// Framesets `tests/fixtures/flow/frames/` carries.
 const COMMITTED_FRAMESETS: usize = 3;
+
+/// Side of the square frame the wrong-size probe offers; the rig's is 960.
+const CROPPED_SIDE: usize = 64;
 
 /// The last of them, `ORACLE.flow[2].t_ns`.
 const LAST_COMMITTED_T_NS: i64 = 37_012_000;
@@ -217,6 +220,84 @@ fn push_imu_through(vio: &mut Vio<f32>, next: usize, horizon: i64) -> usize {
         index += 1;
     }
     index
+}
+
+/// A frameset that is not the size the calibration gives its cameras is refused
+/// **before** anything moves, so the corrected frameset behind it takes the
+/// trajectory it would have taken on its own.
+///
+/// The frontend checks the size itself and undoes its own passes, but by the
+/// time it looks, `track` has already spent the frontend's preintegration on the
+/// interval (`frame_to_frame_optical_flow.h:157-201` eats the buffer to seed the
+/// KLT), and that cannot be spent again: the retry then predicts from a shorter
+/// interval and the run parts from a clean one by ~6e-8 m within a few
+/// framesets. The first frameset cannot show it — there is no state to predict
+/// from yet — so the probe is made against all three, initialized or not.
+#[test]
+fn a_wrong_size_frameset_is_refused_without_moving_the_pipeline() {
+    let directory: PathBuf = common::fixtures().join("flow/frames");
+    let cameras: usize = common::calibration().t_i_c.len();
+    let rasters: Vec<Vec<Pgm>> = (0..COMMITTED_FRAMESETS)
+        .map(|frame| {
+            (0..cameras)
+                .map(|camera| common::read_pgm(&directory, frame, camera))
+                .collect()
+        })
+        .collect();
+
+    // Nothing is ever refused: the reference run.
+    let mut clean: Vio<f32> = pipeline();
+    push_imu_through(&mut clean, 0, COMMITTED_IMU_HORIZON_NS);
+    let wanted: Vec<VioResult> = rasters
+        .iter()
+        .enumerate()
+        .map(|(frame, raster)| {
+            let views: Vec<ImageView<'_>> = raster.iter().map(view).collect();
+            clean.track(ORACLE.flow[frame].t_ns, &views).unwrap()
+        })
+        .collect();
+
+    // A cropped frameset is offered before each of them, and corrected.
+    let cropped: Vec<u8> = vec![0; CROPPED_SIDE * CROPPED_SIDE];
+    let wrong: Vec<ImageView<'_>> = (0..cameras)
+        .map(|_| ImageView {
+            width: CROPPED_SIDE,
+            height: CROPPED_SIDE,
+            stride: CROPPED_SIDE,
+            data: &cropped,
+        })
+        .collect();
+    let mut probed: Vio<f32> = pipeline();
+    push_imu_through(&mut probed, 0, COMMITTED_IMU_HORIZON_NS);
+    let mut got: Vec<VioResult> = Vec::new();
+    for (frame, raster) in rasters.iter().enumerate() {
+        let t_ns: i64 = ORACLE.flow[frame].t_ns;
+
+        let before: u64 = fingerprint(&probed);
+        let refused: VioError = probed.track(t_ns, &wrong).unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                VioError::Frontend(FrontendError::FrameSizeMismatch { .. })
+            ),
+            "frame {frame}: the cropped frameset was refused as {refused}, not for its size"
+        );
+        assert_eq!(
+            fingerprint(&probed),
+            before,
+            "frame {frame}: the refused frameset moved the pipeline"
+        );
+
+        let views: Vec<ImageView<'_>> = raster.iter().map(view).collect();
+        got.push(probed.track(t_ns, &views).unwrap());
+    }
+
+    assert_eq!(got, wanted, "the corrected run took a different trajectory");
+    assert_eq!(
+        fingerprint(&probed),
+        fingerprint(&clean),
+        "the two runs agree on the poses but not on the rest of the pipeline"
+    );
 }
 
 /// A frameset the IMU does not yet cover leaves the **whole** pipeline

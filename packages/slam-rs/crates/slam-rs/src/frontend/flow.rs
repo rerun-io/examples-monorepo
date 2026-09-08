@@ -966,6 +966,69 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         self.depth_guess = depth;
     }
 
+    /// Everything a frameset must be before [`Self::process_frame`] touches
+    /// anything: the clock, the camera count, and each image's size.
+    ///
+    /// `sizes` is one `(width, height)` per camera, in rig order. It is a
+    /// precondition rather than the first lines of `process_frame` because a
+    /// caller that owns more than the frontend has to be able to ask it first:
+    /// [`slam_rs::Vio::track`](crate::Vio::track) runs the frontend's own IMU
+    /// preintegration before this call, and a preintegration spent on a frameset
+    /// that is then refused cannot be spent again (D17). `process_frame` still
+    /// runs it, so the frontend's own entry point keeps the guarantee alone.
+    ///
+    /// # Errors
+    ///
+    /// [`FrontendError::NonMonotonicFrameset`] when the frameset does not follow
+    /// the last accepted one, [`FrontendError::CameraCountMismatch`] on the
+    /// wrong width, and [`FrontendError::FrameSizeMismatch`] when an image is
+    /// not the size the calibration gives that camera.
+    pub fn check_frameset(
+        &self,
+        t_ns: i64,
+        sizes: impl ExactSizeIterator<Item = (usize, usize)>,
+    ) -> Result<(), FrontendError> {
+        // Tracking is frame to frame, so a frameset that does not follow the last
+        // one has no previous frame of its own; basalt never sees one because its
+        // `processingLoop` reads a monotonic queue.
+        if let Some(previous_t_ns) = self.t_ns
+            && t_ns <= previous_t_ns
+        {
+            return Err(FrontendError::NonMonotonicFrameset {
+                previous_t_ns,
+                t_ns,
+            });
+        }
+        let num_cams: usize = self.cameras.len();
+        if sizes.len() != num_cams {
+            return Err(FrontendError::CameraCountMismatch {
+                expected: num_cams,
+                actual: sizes.len(),
+            });
+        }
+        // The geometry is the calibration's from here on: the camera model
+        // projects with the calibrated intrinsics, the detection grid is derived
+        // from the calibrated size, and the occupancy matrix is allocated from
+        // it. A frame of another size is not a smaller view of the same scene —
+        // its pixels mean different bearings — so it is refused rather than
+        // tracked against geometry it does not belong to. basalt never checks:
+        // its `img_data` comes from the device the calibration describes.
+        for (camera, (actual_width, actual_height)) in sizes.enumerate() {
+            let expected_width: usize = self.cameras[camera].width() as usize;
+            let expected_height: usize = self.cameras[camera].height() as usize;
+            if actual_width != expected_width || actual_height != expected_height {
+                return Err(FrontendError::FrameSizeMismatch {
+                    camera,
+                    expected_width,
+                    expected_height,
+                    actual_width,
+                    actual_height,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// `processFrame` (`frame_to_frame_optical_flow.h:203-292`).
     ///
     /// `images` holds one frame per camera, already widened to 16 bits.
@@ -1000,44 +1063,10 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         prediction: &PosePrediction,
         masks: &[Masks],
     ) -> Result<&FlowFrame, FrontendError> {
-        // Tracking is frame to frame, so a frameset that does not follow the last
-        // one has no previous frame of its own; basalt never sees one because its
-        // `processingLoop` reads a monotonic queue.
-        if let Some(previous_t_ns) = self.t_ns
-            && t_ns <= previous_t_ns
-        {
-            return Err(FrontendError::NonMonotonicFrameset {
-                previous_t_ns,
-                t_ns,
-            });
-        }
-        let num_cams: usize = self.cameras.len();
-        if images.len() != num_cams {
-            return Err(FrontendError::CameraCountMismatch {
-                expected: num_cams,
-                actual: images.len(),
-            });
-        }
-        // The geometry is the calibration's from here on: the camera model
-        // projects with the calibrated intrinsics, the detection grid is derived
-        // from the calibrated size, and the occupancy matrix is allocated from
-        // it. A frame of another size is not a smaller view of the same scene —
-        // its pixels mean different bearings — so it is refused rather than
-        // tracked against geometry it does not belong to. basalt never checks:
-        // its `img_data` comes from the device the calibration describes.
-        for (camera, image) in images.iter().enumerate() {
-            let expected_width: usize = self.cameras[camera].width() as usize;
-            let expected_height: usize = self.cameras[camera].height() as usize;
-            if image.width() != expected_width || image.height() != expected_height {
-                return Err(FrontendError::FrameSizeMismatch {
-                    camera,
-                    expected_width,
-                    expected_height,
-                    actual_width: image.width(),
-                    actual_height: image.height(),
-                });
-            }
-        }
+        self.check_frameset(
+            t_ns,
+            images.iter().map(|image| (image.width(), image.height())),
+        )?;
 
         // The frame in flight, built where nothing else can see it.
         self.build_staging(images)?;

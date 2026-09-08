@@ -301,21 +301,33 @@ impl<S: lie::LieScalar> Vio<S> {
     /// once the samples arrive, and the result is the one a run that had them
     /// all along would have produced (D17).
     ///
+    /// A refused frameset leaves the pipeline exactly as the last accepted one
+    /// did, whether it is refused for want of samples or because it is not a
+    /// frameset this rig can take: every rule is checked before anything moves,
+    /// so a caller may correct it and call again.
+    ///
     /// # Errors
     ///
-    /// [`VioError`] when the frameset is the wrong width or geometry, or when
-    /// the frontend or the estimator refuses it.
+    /// [`VioError`] when the frameset is the wrong width or geometry, is not the
+    /// size the calibration gives its cameras, does not follow the last accepted
+    /// frameset, or when the estimator refuses it.
     pub fn track(&mut self, t_ns: i64, images: &[ImageView<'_>]) -> Result<VioResult, VioError> {
+        // Every refusal is decided here, before **any** mutation, and the
+        // coverage test is one of them. Everything below moves the pipeline
+        // forward irreversibly — the frontend's own preintegrator eats its
+        // buffer to seed the KLT, then the frontend swaps its pyramids and
+        // advances its clock and counter, then the estimator eats its own queue
+        // — so a rule checked halfway down spends what a retry needs: it would
+        // make `NeedMoreImu` a status the caller cannot act on, and a corrected
+        // frame a different trajectory from the one it belongs to. The buffer
+        // geometry is this level's (the widening reads it); the clock and the
+        // calibrated frame sizes are the frontend's own precondition, which
+        // `process_frame` still re-runs for callers that hold it directly; the
+        // coverage predicate is the estimator's, and `process_frame` still runs
+        // it as its second line.
         check_frameset(images, self.camera_count)?;
-
-        // D17: the coverage test comes before **any** mutation. Everything
-        // below moves the pipeline forward irreversibly — the frontend swaps
-        // its pyramids, advances `t_ns` and the frame counter, and both
-        // preintegrators eat their buffers — so asking the estimator after all
-        // that would make `NeedMoreImu` a status the caller cannot act on: the
-        // retry would track the frameset against itself. The predicate is the
-        // estimator's own, and `process_frame` still runs it as its second
-        // line.
+        self.frontend
+            .check_frameset(t_ns, images.iter().map(|image| (image.width, image.height)))?;
         if !self.estimator.imu_covers_frame(t_ns) {
             return Ok(self.result(VioStatus::NeedMoreImu, t_ns));
         }

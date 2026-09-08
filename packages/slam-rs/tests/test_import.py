@@ -252,9 +252,9 @@ def test_a_frameset_of_the_wrong_width_raises_value_error(pipeline: PipelineFact
 def test_a_frame_that_is_not_the_calibrated_size_is_refused(pipeline: PipelineFactory, texture: TextureFactory) -> None:
     """The calibration is the geometry: a cropped frame means other bearings.
 
-    The rule is the frontend's, and the frontend runs only on a frameset the
-    buffered IMU covers, so the samples come first: without them ``track``
-    answers ``NeedMoreImu`` before looking at a pixel (D17).
+    Every rule ``track`` has is decided before anything moves, so this one does
+    not need the inertial samples either; they are pushed because the refusal a
+    covered frameset gets is the one the retry below depends on.
     """
     vio: _core.Vio = pipeline(2)
     samples: Int64[ndarray, " n_samples"] = np.arange(0, FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
@@ -262,3 +262,35 @@ def test_a_frame_that_is_not_the_calibrated_size_is_refused(pipeline: PipelineFa
     vio.push_imu_batch(samples, gyro, accel)
     with pytest.raises(ValueError, match=f"the calibration is for {FRAME}x{FRAME} frames"):
         vio.track(0, [texture(0, 0), np.zeros((64, 64), dtype=np.uint8)])
+
+
+def test_a_refused_frameset_and_its_retry_are_the_clean_run_bit_for_bit(pipeline: PipelineFactory, texture: TextureFactory) -> None:
+    """The binding's promise, over a whole run: a refusal costs the trajectory nothing.
+
+    A cropped frameset is offered before every good one and then corrected. The
+    frontend undoes its own passes, but the refusal has to be decided before
+    ``track`` spends the frontend's own preintegration on the interval, which is
+    not undone: with that check behind it, the corrected retry parted from a
+    clean run by 6e-8 m in the pose by the seventh frameset. Twelve framesets, so
+    the probe lands both before the estimator has a state and after.
+    """
+    frames: int = 12
+    cropped: UInt8[ndarray, "h w"] = np.zeros((64, 64), dtype=np.uint8)
+    runs: list[list[Float64[ndarray, " 16"]]] = []
+    for probe in (False, True):
+        vio: _core.Vio = pipeline(2)
+        states: list[Float64[ndarray, " 16"]] = []
+        for index in range(frames):
+            t_ns: int = index * FRAME_PERIOD_NS
+            samples: Int64[ndarray, " n_samples"] = np.arange(t_ns, t_ns + FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
+            gyro, accel = gravity_batch(samples)
+            vio.push_imu_batch(samples, gyro, accel)
+            images: list[UInt8[ndarray, "h w"]] = [texture(index, 0), texture(index + 1, 0)]
+            if probe:
+                with pytest.raises(ValueError, match=f"the calibration is for {FRAME}x{FRAME} frames"):
+                    vio.track(t_ns, [images[0], cropped])
+            result: _core.VioResult = vio.track(t_ns, images)
+            states.append(np.concatenate([result.world_from_rig, result.velocity, result.gyro_bias, result.accel_bias]))
+        runs.append(states)
+    for index, (clean, probed) in enumerate(zip(runs[0], runs[1], strict=True)):
+        np.testing.assert_array_equal(probed, clean, err_msg=f"frameset {index}: the pose, velocity or a bias moved with a refusal before it")
