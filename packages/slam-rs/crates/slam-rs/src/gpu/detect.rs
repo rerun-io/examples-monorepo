@@ -91,10 +91,18 @@ pub struct GpuCornerScan<R: Runtime> {
     /// Times the three device buffers have been allocated, which a rig of one
     /// geometry keeps at one.
     buffer_allocations: usize,
-    /// The candidate image, one byte per pixel, as it came back.
-    kept: Vec<u8>,
-    /// One bit per column of `kept`, thirty-two to a word.
-    mask: Vec<u32>,
+    /// The candidate image, one byte per pixel, as it came back — the device
+    /// read's own buffer, not a copy of it.
+    ///
+    /// `cubecl::bytes::Bytes` is owned, `Send + Sync` and derefs to `[u8]`, so
+    /// there is nothing a `Vec` adds except the copy: `extend_from_slice` of
+    /// the candidate image and the bitmask was 0.92 + 0.115 MB per camera per
+    /// frameset — **2.07 MB per two-camera frameset** — on top of a read that
+    /// had already handed back owned host memory. `None` before the first scan.
+    kept: Option<cubecl::bytes::Bytes>,
+    /// One bit per column of `kept`, thirty-two to a word; likewise the read's
+    /// own buffer, cast to `u32` once per band rather than copied.
+    mask: Option<cubecl::bytes::Bytes>,
     /// Words per row of `mask`.
     words: usize,
     width: usize,
@@ -119,8 +127,8 @@ impl<R: Runtime> GpuCornerScan<R> {
             packed: Vec::new(),
             buffers: Vec::new(),
             buffer_allocations: 0,
-            kept: Vec::new(),
-            mask: Vec::new(),
+            kept: None,
+            mask: None,
             words: 0,
             width: 0,
             height: 0,
@@ -203,9 +211,19 @@ impl<R: Runtime> GpuCornerScan<R> {
     /// The bitmask says where to look: one word per thirty-two columns, and
     /// `trailing_zeros` walks only the bits that are set, so a row of 960
     /// columns costs thirty word loads plus one score load per candidate.
-    fn filter_row(&self, y: usize, threshold: u8, out: &mut Vec<FastCorner>) {
-        let row: &[u8] = &self.kept[y * self.width..(y + 1) * self.width];
-        let words: &[u32] = &self.mask[y * self.words..(y + 1) * self.words];
+    ///
+    /// `scores` and `bits` are the downloaded buffers, sliced by the caller
+    /// once per band rather than re-cast per row.
+    fn filter_row(
+        &self,
+        scores: &[u8],
+        bits: &[u32],
+        y: usize,
+        threshold: u8,
+        out: &mut Vec<FastCorner>,
+    ) {
+        let row: &[u8] = &scores[y * self.width..(y + 1) * self.width];
+        let words: &[u32] = &bits[y * self.words..(y + 1) * self.words];
         for (index, word) in words.iter().enumerate() {
             let mut bits: u32 = *word;
             while bits != 0 {
@@ -325,10 +343,11 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                 .into());
             }
         }
-        self.kept.clear();
-        self.kept.extend_from_slice(&kept_bytes);
-        self.mask.clear();
-        self.mask.extend_from_slice(u32::from_bytes(&mask_bytes));
+        // Held, not copied: the read already owns host memory of exactly this
+        // length, and on CUDA it may be pinned, which is where the band walk
+        // wants to read from anyway.
+        self.kept = Some(kept_bytes);
+        self.mask = Some(mask_bytes);
         Ok(())
     }
 
@@ -350,10 +369,18 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         let first: usize = y.max(FAST_BORDER);
         let last: usize = (y + rows).min(self.height.saturating_sub(FAST_BORDER));
         let mut corners: Vec<FastCorner> = Vec::new();
-        // A threshold at or over 255 admits nothing: the score is a `u8`.
-        if let Ok(bound) = u8::try_from(threshold.max(0)) {
+        // A threshold at or over 255 admits nothing: the score is a `u8`. And
+        // no scan has run means no rows to walk, which `first..last` already
+        // says on a zero geometry.
+        if let (Ok(bound), Some(kept), Some(mask)) = (
+            u8::try_from(threshold.max(0)),
+            self.kept.as_ref(),
+            self.mask.as_ref(),
+        ) {
+            let scores: &[u8] = kept;
+            let bits: &[u32] = u32::from_bytes(mask);
             for row in first..last {
-                self.filter_row(row, bound, &mut corners);
+                self.filter_row(scores, bits, row, bound, &mut corners);
             }
         }
         self.bands.push(Band {
