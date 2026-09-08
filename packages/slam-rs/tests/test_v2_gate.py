@@ -34,9 +34,10 @@ failed is the way not to iterate. ``SLAM_RS_V2_ALL=1`` runs all ten whole.
 Either way the clips run **shortest first** and each one's clauses are asserted
 as soon as it is measured, so the first clip that misses stops the run with its
 own row printed and is the one that gets fixed. ``SLAM_RS_V2_WINDOW_S=<seconds>``
-cuts every clip to its first N seconds, with the C++'s own ground-truth error
-recomputed over exactly that span rather than taken from the manifest's
-whole-clip figure.
+cuts every clip to its first N seconds, with the ``f32`` member of the C++'s own
+ground-truth band recomputed over exactly that span rather than taken from the
+manifest's whole-clip figure. Only that member is recomputed — the ``f64`` one
+stays the whole clip's — so a windowed row names the span each member covers.
 
 Whichever lane runs, it asserts **every** clip it names, both hold-outs included
 (C56): a clip whose artifacts are not on this host fails the lane instead of
@@ -318,6 +319,27 @@ def cpp_gt_band_cm(clip: GatedClip, run: SegmentRun, available: References) -> t
     return 100.0 * ate(span, available.truth).rmse_m, expected.rmse_cm_f64
 
 
+def band_text(clip: GatedClip, band: tuple[float, float]) -> str:
+    """The band as a row prints it, each member named for the span it covers.
+
+    A windowed clip's two members are of different spans — the ``f32``
+    recomputed over the window, the ``f64`` the manifest's whole-clip figure —
+    and two bare numbers read as one span's band, which is what the labels are
+    for: ``MGO07``'s windowed ``[f32 window 0.95, f64 whole 2.08]`` is not
+    2.08 cm of drift in ten seconds.
+
+    Args:
+        clip: The clip, which says whether it was cut.
+        band: The C++'s ``f32`` and ``f64`` ground-truth RMSE in centimetres.
+
+    Returns:
+        The labelled band, in centimetres.
+    """
+    if clip.window_s is None:
+        return f"[f32 {band[0]:.2f}, f64 {band[1]:.2f}]"
+    return f"[f32 window {band[0]:.2f}, f64 whole {band[1]:.2f}]"
+
+
 def replayed_s(run: SegmentRun) -> float:
     """Sensor seconds the run's own trajectory spans, whole clip or window."""
     return float(run.estimate.t_ns[-1] - run.estimate.t_ns[0]) * 1e-9
@@ -375,7 +397,7 @@ def clip_failures(clip: GatedClip, run: SegmentRun, available: References, again
         if against_gt.rmse_m * 100.0 > allowed_cm:
             failures.append(
                 f"{against_gt.rmse_m * 100:.2f} cm from ground truth, gate is {GT_BAND_RATIO}x the worst of the "
-                f"C++'s own band [{band[0]:.2f}, {band[1]:.2f}] cm = {allowed_cm:.2f} cm"
+                f"C++'s own band {band_text(clip, band)} cm = {allowed_cm:.2f} cm"
             )
     # Speed is a clause of every policy: a run that does not diverge but takes
     # three times as long has not matched the thing it is a port of (D58, D59).
@@ -414,14 +436,14 @@ def test_every_gated_clip_meets_the_v2_numbers(manifest: ReferenceManifest) -> N
         against_cpp: AteResult = ate(run.estimate, available.cpp)
         against_gt: AteResult = ate(run.estimate, available.truth)
         expected_s: float = cpp_wall_s(clip, run)
-        band = cpp_gt_band_cm(clip, run, available)
+        band: tuple[float, float] = cpp_gt_band_cm(clip, run, available)
         bound: str = (
             f"bound {ATE_VS_CPP_CM:.0f} cm" if replayed_s(run) < PATH_BOUND_MAX_CLIP_S else f"no bound, {replayed_s(run):.0f} s clip"
         )
         print(
             f"{clip.name}: {len(run.estimate)}/{run.framesets} tracked, "
             f"vs C++ {against_cpp.rmse_m * 100:.2f} cm ({bound}), "
-            f"vs GT {against_gt.rmse_m * 100:.2f} cm (band [{band[0]:.2f}, {band[1]:.2f}], "
+            f"vs GT {against_gt.rmse_m * 100:.2f} cm (band {band_text(clip, band)}, "
             f"allowed {GT_BAND_RATIO * max(band):.2f}), "
             f"wall {run.wall_s:.2f} s, C++ {expected_s:.2f} s, ratio {run.wall_s / expected_s:.2f}"
         )
@@ -500,6 +522,18 @@ def test_a_host_that_holds_no_clip_of_the_lane_skips_it(
     corpus: ReferenceManifest = relocated(manifest, tmp_path, absent=frozenset(segment.segment_id for segment in manifest.segments))
     with pytest.raises(Skipped, match="no clip of this lane is on this host"):
         test_every_gated_clip_meets_the_v2_numbers(corpus)
+
+
+def test_a_windowed_row_names_which_band_member_covers_the_window(manifest: ReferenceManifest) -> None:
+    """The row labels both band members, because a windowed clip's two are of different spans (D60).
+
+    This needs no corpus: what is under test is how the row reads. Two bare
+    numbers would say the ``f64`` figure was measured over the window too, when
+    it is the whole clip's and only the ``f32`` one was recomputed.
+    """
+    segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
+    assert band_text(GatedClip(segment=segment, window_s=10.0), (0.95, 2.08)) == "[f32 window 0.95, f64 whole 2.08]"
+    assert band_text(GatedClip(segment=segment, window_s=None), (1.43, 1.43)) == "[f32 1.43, f64 1.43]"
 
 
 @pytest.mark.slow
