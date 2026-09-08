@@ -321,6 +321,11 @@ class RobocapSession:
     """Poses on the ``slam`` layer, which is also the session's complete frameset count."""
 
     @property
+    def fleet_id(self) -> str:
+        """Short form a fleet row names this session by: ``robocap-s15`` for ``s00000015``."""
+        return f"robocap-s{int(self.session_id.removeprefix('s'))}"
+
+    @property
     def base_path(self) -> Path:
         """Local filesystem path behind :attr:`base_url`."""
         return Path(self.base_url.removeprefix("file://"))
