@@ -2539,8 +2539,11 @@ cwd = "packages/slam-rs"
 cmd = "cargo test --workspace --features slam-rs/gpu"
 cwd = "packages/slam-rs"
 
+# Clippy plus `cargo doc`: nine intra-doc links in `src/gpu/` had rotted with
+# nothing to notice, because a broken link is a `cargo doc` warning and no gate
+# ran it. Ten seconds, and it is the only check on the seam's own documentation.
 [feature.slam-rs-gpu.tasks.slam-rs-gpu-clippy]
-cmd = "cargo clippy --workspace --all-targets --features slam-rs/gpu -- -D warnings"
+cmd = "cargo clippy --workspace --all-targets --features slam-rs/gpu -- -D warnings && RUSTDOCFLAGS='-D rustdoc::broken_intra_doc_links' cargo doc -p slam-rs --features gpu --no-deps"
 cwd = "packages/slam-rs"
 
 # The portable lane the Spark, the Pi 5 and the cap will run. Kept honest here

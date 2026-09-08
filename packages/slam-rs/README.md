@@ -418,6 +418,18 @@ passes on it, with the pyramid and the corner scan bit-exact; whole-clip ATE is
 2.085 cm on MIO07 and 2.295 cm on MGO07, the same numbers as the other two
 lanes.
 
+**It is not gate-clean.** Over the ten reference clips whole, the wgpu lane is
+inside the C++'s own precision band on nine and **reads 11.98 cm against an
+allowed 10.63 on `MIO14_moving_props`** — a D60 failure on one of the ten,
+written up rather than smoothed over. Nothing points at a wrong kernel: every
+tolerance test passes on Vulkan, the pyramid and the corner scan are bit-exact,
+and the worst lane-to-lane tracked position over the fixture is 3.1e-5 px.
+MIO14 is the 410 s clip S15 identified as chaotic and D60 was built around —
+the C++'s own two precisions differ by 2.3 cm on it — so the reading is that
+the band is not wide enough to hold a third backend there. It is still a gate
+failure, and **the portable lane is not anyone's default until MIO14 is
+understood** (`reports/pr22-gpu-round2.md`, next step 1).
+
 ## Python API
 
 ```python

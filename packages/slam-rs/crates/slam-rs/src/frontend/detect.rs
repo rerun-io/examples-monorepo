@@ -98,12 +98,6 @@ pub enum DetectError {
         /// Cells the buffer holds.
         actual: usize,
     },
-    /// The 8-bit view could not be built over the bytes written for it.
-    ///
-    /// Unreachable: the loop that fills those bytes writes exactly
-    /// `width * height` of them. It is a typed error rather than an early `Ok`
-    /// because reporting success with no keypoints would turn a future geometry
-    /// slip into an empty detector instead of a loud one (decision D32).
     /// A device download returned the wrong number of bytes.
     ///
     /// Only a GPU scanner produces this. A CubeCL runtime whose CUDA
@@ -117,6 +111,20 @@ pub enum DetectError {
         /// Bytes the device returned.
         actual: usize,
     },
+    /// A GPU scanner's device read failed.
+    ///
+    /// The download itself came back as an error rather than as short data, so
+    /// there is no length to report; the runtime's reason is logged where the
+    /// error is mapped (decision D32).
+    #[cfg(feature = "gpu")]
+    #[error(transparent)]
+    Gpu(#[from] crate::gpu::GpuError),
+    /// The 8-bit view could not be built over the bytes written for it.
+    ///
+    /// Unreachable: the loop that fills those bytes writes exactly
+    /// `width * height` of them. It is a typed error rather than an early `Ok`
+    /// because reporting success with no keypoints would turn a future geometry
+    /// slip into an empty detector instead of a loud one (decision D32).
     #[error("a {width}x{height} 8-bit view over {actual} bytes was refused")]
     GrayViewRefused {
         /// Row length the view was asked for.

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "Visual-inertial odometry core: no Python, no Rerun, no GPU."
+description = "Visual-inertial odometry core: no Python, no Rerun; the GPU frontend is an off-by-default cargo feature."
 
 [lib]
 name = "slam_rs"

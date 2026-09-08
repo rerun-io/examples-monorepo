@@ -251,7 +251,10 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
         );
 
         // ── the one wait of the call.
-        let bytes = self.client.read_one_unchecked(self.result.clone());
+        let bytes = self
+            .client
+            .read_one(self.result.clone())
+            .map_err(|error| super::read_failed("the tracker result", &error))?;
         let expected: usize = TRANSFORM_RUNS * count * size_of::<f32>();
         if bytes.len() < expected {
             return Err(TrackerError::LengthMismatch {

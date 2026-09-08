@@ -1,5 +1,11 @@
-//! The CubeCL frontend backend: the pyramid, the patch build and the KLT
-//! tracker on the GPU, behind the stage traits the CPU port already exposes.
+//! The CubeCL frontend backend (decision D21), behind the `gpu` feature: the
+//! pyramid, the patch build, the corner scan and the KLT tracker on the GPU,
+//! behind the stage traits the CPU port already exposes.
+//!
+// The `gpu` feature and D21 are said here rather than as an outer doc line on
+// `pub mod gpu;`: an outer fragment makes rustdoc resolve this whole block in
+// the crate root's scope, where none of the names below are in scope, and every
+// link in the header broke silently because `cargo doc` was not a gate.
 //!
 //! ## The seam
 //!
@@ -11,11 +17,13 @@
 //!
 //! ## The runtime is a type parameter
 //!
-//! Every type here is generic over `R: Runtime` and every kernel is one source.
-//! The only NVIDIA-specific line in the crate is [`cuda_client`]; the wgpu lane
-//! is [`wgpu_client`], the same code with another client, kept compiling by
-//! `cargo check --features gpu-wgpu` so the Spark, the Pi 5 and the cap are a
-//! client-line change rather than a port.
+//! Every type here is generic over `R: Runtime` and every kernel is one source;
+//! [`GpuRuntime`] carries which one this build picked. A compiling portable
+//! lane proves nothing — round 1's `cargo check --features gpu-wgpu` was green
+//! while every kernel returned zeros — so the claim is checked by running:
+//! `slam-rs-wgpu-test` puts the same tolerance tests through Vulkan, and
+//! [`probe_storage`] refuses at construction any runtime whose device copy of a
+//! known pattern does not survive.
 //!
 //! ## Residency
 //!
@@ -24,7 +32,8 @@
 //! live between frames, so the previous frame's pyramid is already where the
 //! tracker needs it. Per frameset the host uploads each camera's level 0 and
 //! the keypoint positions, and downloads one packed result array per
-//! [`PatchTracker::track`] call — one synchronisation per call, never per
+//! [`crate::frontend::tracker::PatchTracker::track`] call — one synchronisation
+//! per call, never per
 //! kernel (`Robocap.md`, "Kernel-design rules learned").
 //!
 //! ## Level parity, and why there are two pyramid buffers
@@ -75,6 +84,24 @@ pub enum GpuError {
         /// Bytes the geometry needs.
         expected: usize,
     },
+    /// A device read failed outright, rather than returning the wrong length.
+    ///
+    /// cubecl's convenience readers panic on a `ServerError` — `read_one_unchecked`
+    /// is `read_sync(..).unwrap()` and `read` is `.expect("TODO")` — and a panic
+    /// on the per-frame path unwinds out of the frontend while the GIL is
+    /// detached, past `process_frame`'s transactional restore, so Python would
+    /// see a `PanicException` instead of the documented error and a caller that
+    /// continued would be tracking against a half-committed frontend. Every
+    /// download therefore takes the fallible variant and lands here (decision
+    /// D32). What fails this way is a lost device or a staging allocation
+    /// refused under memory pressure — the cap's shared-8 GB regime, not a
+    /// healthy card; the runtime's own reason is logged where it is mapped,
+    /// because this enum is `Copy` and cannot carry it.
+    #[error("reading {what} from the device failed")]
+    DeviceReadFailed {
+        /// Which buffer.
+        what: &'static str,
+    },
     /// The runtime cannot store an element width the kernels bind.
     ///
     /// See [`probe_storage`]: both of this backend's bring-up failures are
@@ -99,8 +126,8 @@ pub type CudaRuntime = cubecl_cuda::CudaRuntime;
 
 /// A [`CudaRuntime`] client on the default device.
 ///
-/// The one NVIDIA-specific line in the crate; [`wgpu_client`] is the same code
-/// with another client.
+/// The one NVIDIA-specific line in the crate; `wgpu_client` — which only a
+/// `gpu-wgpu` build has — is the same code with another client.
 #[cfg(feature = "gpu")]
 pub fn cuda_client() -> cubecl::prelude::ComputeClient<CudaRuntime> {
     use cubecl::prelude::Runtime;
@@ -197,6 +224,16 @@ pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
     Ok((builder, tracker, Box::new(scanner)))
 }
 
+/// A failed device read as a typed error, with the runtime's own reason logged.
+///
+/// [`GpuError`] is `Copy`, so it cannot carry the `ServerError`'s reason and
+/// backtrace; the warning is where they are kept, and the returned variant is
+/// what the stage errors carry to the caller.
+fn read_failed(what: &'static str, error: &cubecl::server::ServerError) -> GpuError {
+    log::warn!("reading {what} from the device failed: {error}");
+    GpuError::DeviceReadFailed { what }
+}
+
 /// Refuse a runtime that cannot store an element width the kernels bind.
 ///
 /// Both of this backend's bring-up failures are **silent**, and neither is
@@ -243,7 +280,9 @@ pub fn probe_storage<R: cubecl::prelude::Runtime>(
         let source: cubecl::server::Handle = client.create_from_slice(N::as_bytes(pattern));
         let target: cubecl::server::Handle = client.empty(expected);
         kernels::launch_probe::<N, R>(client, (&source, count), (&target, count), count);
-        let bytes = client.read_one_unchecked(target);
+        let bytes = client
+            .read_one(target)
+            .map_err(|error| read_failed("the storage probe", &error))?;
         if bytes.len() != expected {
             return Err(GpuError::StorageRoundTrip {
                 width,
@@ -296,4 +335,45 @@ pub fn probe_storage<R: cubecl::prelude::Runtime>(
 pub fn wgpu_client() -> cubecl::prelude::ComputeClient<cubecl_wgpu::WgpuRuntime> {
     use cubecl::prelude::Runtime;
     cubecl_wgpu::WgpuRuntime::client(&cubecl_wgpu::WgpuDevice::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A read that fails is a typed error at every boundary, never a panic.
+    ///
+    /// The failure this is about cannot be forced from a test: a `ServerError`
+    /// on a download means a lost device or a staging allocation refused under
+    /// memory pressure, and neither is reachable from a healthy card. What is
+    /// testable — and what the per-frame path actually depends on — is that the
+    /// mapping produces a variant the stage errors carry, so the unwinding a
+    /// panicking read would do through the released GIL (decision D32) cannot
+    /// happen.
+    #[test]
+    fn a_failed_device_read_is_a_typed_error_at_every_stage() {
+        let what: &str = "the tracker result";
+        let error: cubecl::server::ServerError = cubecl::server::ServerError::Generic {
+            reason: "the device is gone".to_owned(),
+            backtrace: cubecl::backtrace::BackTrace::default(),
+        };
+        assert_eq!(
+            read_failed(what, &error),
+            GpuError::DeviceReadFailed { what }
+        );
+
+        // The three stages a download sits in each carry it, so the error
+        // reaches the Python boundary as the documented `ValueError`.
+        let tracker: crate::frontend::tracker::TrackerError =
+            GpuError::DeviceReadFailed { what }.into();
+        let pyramid: crate::pyramid::PyramidError = GpuError::DeviceReadFailed { what }.into();
+        let detect: crate::frontend::detect::DetectError =
+            GpuError::DeviceReadFailed { what }.into();
+        for message in [tracker.to_string(), pyramid.to_string(), detect.to_string()] {
+            assert!(
+                message.contains(what),
+                "the stage error dropped what failed: {message}"
+            );
+        }
+    }
 }

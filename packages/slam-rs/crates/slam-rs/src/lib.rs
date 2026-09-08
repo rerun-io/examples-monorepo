@@ -18,7 +18,6 @@ pub mod config;
 pub(crate) mod eigen_blas;
 pub mod estimator;
 pub mod frontend;
-/// The CubeCL GPU frontend backend (decision D21), behind the `gpu` feature.
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod image;
@@ -203,30 +202,6 @@ pub enum VioError {
     Imu(#[from] imu::ImuError),
 }
 
-/// The estimator, driven one frameset at a time (D17, D24).
-///
-/// One `track` call is basalt's whole pipeline for one frameset, in the calling
-/// thread and in basalt's order:
-///
-/// 1. the frontend's own preintegration over `(t_prev, t_now]` and the pose
-///    prediction it feeds the KLT (`frame_to_frame_optical_flow.h:138-152`) —
-///    the estimator runs a **second, independent** preintegrator (D24) and the
-///    two are deliberately not shared;
-/// 2. `processFrame`, which produces the tracked keypoints;
-/// 3. the estimator's own IMU consumption and `measure`, which optimises and
-///    marginalizes;
-/// 4. the two feedback values basalt pushes back to the frontend: the newest
-///    state, and — because every shipped config sets
-///    `optical_flow_matching_guess_type = REPROJ_AVG_DEPTH` — the average scene
-///    depth from `computeProjections` (`sqrt_keypoint_vio.cpp:583-604`).
-///
-/// Nothing about arrival order can reach a decision: there are no queues, no
-/// drops (`vio_enforce_realtime` is refused) and no threads, which is what makes
-/// a repeat run bit-identical.
-///
-/// The frontend is `f32` throughout, as `FrameToFrameOpticalFlow<float,
-/// Pattern51>` is; the estimator's scalar is the type parameter, and `f32` is
-/// the shipped precision the reference lane runs (Q07).
 /// Which frontend backend a [`Vio`] runs.
 ///
 /// The stage traits make the choice a construction-time one (decision D21): the
@@ -423,6 +398,30 @@ fn build_frontend(
     }
 }
 
+/// The estimator, driven one frameset at a time (D17, D24).
+///
+/// One `track` call is basalt's whole pipeline for one frameset, in the calling
+/// thread and in basalt's order:
+///
+/// 1. the frontend's own preintegration over `(t_prev, t_now]` and the pose
+///    prediction it feeds the KLT (`frame_to_frame_optical_flow.h:138-152`) —
+///    the estimator runs a **second, independent** preintegrator (D24) and the
+///    two are deliberately not shared;
+/// 2. `processFrame`, which produces the tracked keypoints;
+/// 3. the estimator's own IMU consumption and `measure`, which optimises and
+///    marginalizes;
+/// 4. the two feedback values basalt pushes back to the frontend: the newest
+///    state, and — because every shipped config sets
+///    `optical_flow_matching_guess_type = REPROJ_AVG_DEPTH` — the average scene
+///    depth from `computeProjections` (`sqrt_keypoint_vio.cpp:583-604`).
+///
+/// Nothing about arrival order can reach a decision: there are no queues, no
+/// drops (`vio_enforce_realtime` is refused) and no threads, which is what makes
+/// a repeat run bit-identical.
+///
+/// The frontend is `f32` throughout, as `FrameToFrameOpticalFlow<float,
+/// Pattern51>` is; the estimator's scalar is the type parameter, and `f32` is
+/// the shipped precision the reference lane runs (Q07).
 #[derive(Debug)]
 pub struct Vio<S: lie::LieScalar = f32> {
     frontend: FrontendLane,

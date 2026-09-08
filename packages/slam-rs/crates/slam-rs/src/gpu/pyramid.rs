@@ -169,7 +169,7 @@ impl<R: Runtime> GpuPyramid<R> {
     }
 }
 
-/// The GPU [`PyramidBuilder`].
+/// The GPU [`crate::pyramid::PyramidBuilder`].
 ///
 /// Holds the client, the pattern the per-patch kernels need in every pyramid's
 /// `meta`, and a repack buffer used only by a frame whose stride exceeds its
@@ -200,7 +200,7 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
 
     /// The level-0 table this builder publishes into, for the corner scanner
     /// that reads the same frames — see [`Level0`]. Handed over by
-    /// [`super::cuda_backends`] when it builds the two on one client.
+    /// [`super::gpu_backends`] when it builds the two on one client.
     pub fn level0_table(&self) -> Level0Table {
         Arc::clone(&self.level0)
     }
@@ -346,7 +346,10 @@ impl<R: Runtime> Pyramid for GpuPyramid<R> {
             });
         };
         let (handle, length) = self.buffer_of(&geometry);
-        let bytes = self.client.read_one_unchecked(handle.clone());
+        let bytes = self
+            .client
+            .read_one(handle.clone())
+            .map_err(|error| super::read_failed("a pyramid level", &error))?;
         let expected: usize = length * size_of::<u16>();
         if bytes.len() != expected {
             return Err(PyramidError::ShortDeviceRead {

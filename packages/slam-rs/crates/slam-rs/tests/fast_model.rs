@@ -1,5 +1,11 @@
-//! Scratch: is kornia's FAST candidate set exactly
-//! `corner_score_9 > threshold` after an in-block local-max filter?
+//! kornia's FAST candidate set is exactly `corner_score_9 > threshold` after an
+//! in-block local-max filter.
+//!
+//! The one CPU-gate guard on the model the GPU corner kernel translates: it is
+//! that equivalence which lets one dense score image answer every rung of the
+//! detector's threshold ladder, and it is checked here against kornia itself at
+//! five rungs and two widths, so a kornia bump that moved the candidate set
+//! would fail before any GPU test ran.
 #![allow(clippy::unwrap_used)]
 
 use kornia_image::{Image, ImageSize};

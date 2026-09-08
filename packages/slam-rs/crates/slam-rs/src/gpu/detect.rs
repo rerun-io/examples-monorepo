@@ -128,7 +128,7 @@ impl<R: Runtime> GpuCornerScan<R> {
 
     /// Read level 0 out of `table` rather than uploading the frame.
     ///
-    /// Wired by [`super::cuda_backends`], which builds the scanner and the
+    /// Wired by [`super::gpu_backends`], which builds the scanner and the
     /// pyramid builder on one client: they are handed the same pixels, so
     /// sharing them is the difference between one upload per camera per
     /// frameset and two.
@@ -277,8 +277,14 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
             self.words,
         );
 
-        // One read for both, so one synchronisation for the frame.
-        let mut reads = self.client.read(vec![kept, mask]);
+        // One read for both, so one synchronisation for the frame — and the
+        // fallible form of it: `client.read` is `read_sync(..).expect("TODO")`,
+        // and a panic here would unwind out of the frontend with the GIL
+        // detached (decision D32).
+        let mut reads: Vec<cubecl::bytes::Bytes> = cubecl::reader::read_sync(
+            self.client.read_async(vec![kept, mask]),
+        )
+        .map_err(|error| super::read_failed("the candidate image and its bitmask", &error))?;
         let Some(mask_bytes) = reads.pop() else {
             return Err(DetectError::DeviceRead {
                 expected: mask_len * size_of::<u32>(),

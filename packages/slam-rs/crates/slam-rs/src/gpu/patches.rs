@@ -298,9 +298,13 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
     ///
     /// [`TrackerError::LengthMismatch`] when the device returns the wrong
     /// number of bytes, which is what an incomplete CubeCL runtime does instead
-    /// of failing (decision D32).
+    /// of failing, and [`super::GpuError::DeviceReadFailed`] when the read
+    /// itself fails (decision D32).
     pub fn read_store(&self) -> Result<Vec<f32>, TrackerError> {
-        let bytes = self.client.read_one_unchecked(self.store.clone());
+        let bytes = self
+            .client
+            .read_one(self.store.clone())
+            .map_err(|error| super::read_failed("the patch store", &error))?;
         let expected: usize = self.layout.len() * size_of::<f32>();
         if bytes.len() != expected {
             return Err(TrackerError::LengthMismatch {
