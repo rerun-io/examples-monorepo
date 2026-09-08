@@ -2472,6 +2472,47 @@ depends-on = ["slam-rs-build"]
 cwd = "packages/slam-rs"
 description = "Build the core, then run the package tests"
 
+# ── Portable GPU lane (wgpu) ──────────────────────────────────────────────
+# These tasks need no CUDA package: since the `gpu-core` split the `gpu-wgpu`
+# cargo feature links no NVIDIA crate, and the only run-time need is the
+# host's own Vulkan driver, which no conda package provides. So they live in
+# the base feature and run from `slam-rs`/`slam-rs-dev` on every Linux
+# platform the package declares. The CUDA lane keeps `slam-rs-gpu` because
+# cubecl-cuda JIT-compiles with NVRTC and needs the CUDA runtime headers.
+# The portable lane the Spark, the Pi 5 and the cap will run. Kept honest here
+# so a kernel that only compiles on NVRTC cannot land.
+[feature.slam-rs.tasks.slam-rs-wgpu-check]
+cmd = "cargo check -p slam-rs --features gpu-wgpu"
+cwd = "packages/slam-rs"
+description = "Type-check the portable wgpu lane (a green check proves nothing at runtime: see slam-rs-wgpu-test)"
+
+# `--list | grep -c` first, and it is not decoration: this suite is
+# `#![cfg(feature = "gpu-core")]` and the task selects `gpu-wgpu`, so a feature
+# rename that stops the two matching compiles the file away and `cargo test`
+# reports "ok. 0 passed" — a green gate that ran nothing. It happened once,
+# splitting `gpu-core` out of `gpu`, and the count is what caught it. `grep -c`
+# exits non-zero on no matches, so an empty binary fails before it runs.
+[feature.slam-rs.tasks.slam-rs-wgpu-test]
+cmd = "cargo test -p slam-rs --features gpu-wgpu --test gpu_kernels -- --list | grep -c ': test' && cargo test -p slam-rs --features gpu-wgpu --test gpu_kernels"
+cwd = "packages/slam-rs"
+description = "Run the per-kernel tolerance suite through wgpu on this host's Vulkan adapter"
+
+# The same core on the portable lane, for measuring it: `--gpu` then selects
+# wgpu rather than CUDA, because the runtime is what the feature picks.
+[feature.slam-rs.tasks.slam-rs-wgpu-build]
+cmd = "cargo build --release -p slam-rs-py --features gpu-wgpu && cp target/release/$CORE_CDYLIB slam_rs/_core.so"
+cwd = "packages/slam-rs"
+inputs = [
+    "packages/slam-rs/Cargo.toml",
+    "packages/slam-rs/Cargo.lock",
+    "packages/slam-rs/.cargo/config.toml",
+    "packages/slam-rs/crates/*/Cargo.toml",
+    "packages/slam-rs/crates/*/build.rs",
+    "packages/slam-rs/crates/*/src/**/*.rs",
+]
+outputs = ["packages/slam-rs/slam_rs/_core.so"]
+description = "Build the Rust VIO core with the portable wgpu CubeCL frontend and install it in place"
+
 # ── the macOS lane ───────────────────────────────────────────────────────
 # The linux environments get their runtime stack from `catalog-common` and
 # `rerun-prerelease`, and both are linux-only on purpose: eighteen of the twenty
@@ -2561,40 +2602,6 @@ description = "Run every Rust test with the CUDA CubeCL frontend, including the 
 cmd = "cargo clippy --workspace --all-targets --features slam-rs/gpu -- -D warnings && RUSTDOCFLAGS='-D rustdoc::broken_intra_doc_links' cargo doc -p slam-rs --features gpu --no-deps"
 cwd = "packages/slam-rs"
 description = "Lint the CUDA CubeCL lane and check the seam's intra-doc links"
-
-# The portable lane the Spark, the Pi 5 and the cap will run. Kept honest here
-# so a kernel that only compiles on NVRTC cannot land.
-[feature.slam-rs-gpu.tasks.slam-rs-wgpu-check]
-cmd = "cargo check -p slam-rs --features gpu-wgpu"
-cwd = "packages/slam-rs"
-description = "Type-check the portable wgpu lane (a green check proves nothing at runtime: see slam-rs-wgpu-test)"
-
-# `--list | grep -c` first, and it is not decoration: this suite is
-# `#![cfg(feature = "gpu-core")]` and the task selects `gpu-wgpu`, so a feature
-# rename that stops the two matching compiles the file away and `cargo test`
-# reports "ok. 0 passed" — a green gate that ran nothing. It happened once,
-# splitting `gpu-core` out of `gpu`, and the count is what caught it. `grep -c`
-# exits non-zero on no matches, so an empty binary fails before it runs.
-[feature.slam-rs-gpu.tasks.slam-rs-wgpu-test]
-cmd = "cargo test -p slam-rs --features gpu-wgpu --test gpu_kernels -- --list | grep -c ': test' && cargo test -p slam-rs --features gpu-wgpu --test gpu_kernels"
-cwd = "packages/slam-rs"
-description = "Run the per-kernel tolerance suite through wgpu on this host's Vulkan adapter"
-
-# The same core on the portable lane, for measuring it: `--gpu` then selects
-# wgpu rather than CUDA, because the runtime is what the feature picks.
-[feature.slam-rs-gpu.tasks.slam-rs-wgpu-build]
-cmd = "cargo build --release -p slam-rs-py --features gpu-wgpu && cp target/release/$CORE_CDYLIB slam_rs/_core.so"
-cwd = "packages/slam-rs"
-inputs = [
-    "packages/slam-rs/Cargo.toml",
-    "packages/slam-rs/Cargo.lock",
-    "packages/slam-rs/.cargo/config.toml",
-    "packages/slam-rs/crates/*/Cargo.toml",
-    "packages/slam-rs/crates/*/build.rs",
-    "packages/slam-rs/crates/*/src/**/*.rs",
-]
-outputs = ["packages/slam-rs/slam_rs/_core.so"]
-description = "Build the Rust VIO core with the portable wgpu CubeCL frontend and install it in place"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # mamma — streaming multiview body capture (causal MAMMA pipeline)
