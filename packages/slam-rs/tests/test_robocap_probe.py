@@ -261,7 +261,7 @@ def test_the_feeds_pixels_are_the_cpp_lanes_pixels(manifest: ReferenceManifest) 
         for frameset in feed.framesets(last_ns):
             if int(frameset.t_ns) > last_ns:
                 break
-            for camera, digest in zip(feed.cameras, frameset.image_sha256, strict=True):
+            for camera, digest in zip(feed.cameras, frameset.image_digests(), strict=True):
                 key: tuple[int, int] = (int(frameset.t_ns), camera.index)
                 assert key in expected, f"the C++ lane has no frame at {key}"
                 assert digest == expected[key], f"cam_{camera.index:02d} at {key[0]} ns: the feed's pixels are not the C++ lane's"

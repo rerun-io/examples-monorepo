@@ -224,7 +224,7 @@ def main(config: Config) -> None:
             for index, image in enumerate(frameset.images):
                 write_pgm(config.output / f"frame_{dumped:03d}_cam{index}.pgm", image)
             absolute_ns: int = frameset.t_ns + feed.capture_start_time_ns
-            frame_lines.extend(f"{absolute_ns},{index},{digest}" for index, digest in enumerate(frameset.image_sha256))
+            frame_lines.extend(f"{absolute_ns},{index},{digest}" for index, digest in enumerate(frameset.image_digests()))
             for t_ns, gyro, accel in zip(frameset.imu.t_ns.tolist(), frameset.imu.gyro_rad_s.tolist(), frameset.imu.accel_m_s2.tolist(), strict=True):
                 imu_lines.append(f"{t_ns}," + ",".join(repr(value) for value in [*gyro, *accel]))
             frame_t_ns.append(frameset.t_ns)

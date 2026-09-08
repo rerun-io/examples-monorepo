@@ -244,7 +244,7 @@ def test_a_redecode_reproduces_the_cpp_pixel_digests(manifest: ReferenceManifest
     with open_segment(LocalSegment(base_rrd=segment.base_path), segment.imu) as feed:
         offset: int = feed.capture_start_time_ns
         for frameset in feed.framesets():
-            for camera, digest in zip(feed.cameras, frameset.image_sha256, strict=True):
+            for camera, digest in zip(feed.cameras, frameset.image_digests(), strict=True):
                 key: tuple[int, int] = (frameset.t_ns + offset, camera.index)
                 assert key in expected, f"{segment_id}: the reference has no frame at {key}"
                 assert digest == expected[key], f"{segment_id}: pixels differ at {key}"

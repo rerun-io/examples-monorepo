@@ -194,15 +194,6 @@ class Frameset:
     """Shared capture timestamp of every image, on the ``video_time`` clock."""
     images: list[UInt8[ndarray, "h w"]]
     """One C-contiguous grayscale image per camera, in rig camera order."""
-    image_sha256: tuple[str, ...]
-    """Digest of each camera's gray8 bytes, in the same order as :attr:`images`.
-
-    This is the unit the basalt C++ reference records in its ``frames.sha256``
-    (one ``t_ns,cam_index,sha256`` line per decoded frame), so the two decoders
-    can be compared frame by frame rather than only in aggregate.
-    """
-    sha256: str
-    """Digest of the timestamp and the per-camera digests: one value per frameset."""
     imu: ImuStream
     """Inertial samples since the previous frameset, running one sample past :attr:`t_ns`.
 
@@ -212,6 +203,38 @@ class Frameset:
     """
     ground_truth: Float64[ndarray, " 7"] | None
     """Nearest ground-truth pose as ``[tx, ty, tz, qw, qx, qy, qz]``, or None without a ``gt`` layer."""
+
+    def image_digests(self) -> tuple[str, ...]:
+        """Digest of each camera's gray8 bytes, in the same order as :attr:`images`.
+
+        This is the unit the basalt C++ reference records in its
+        ``frames.sha256`` (one ``t_ns,cam_index,sha256`` line per decoded frame),
+        so the two decoders can be compared frame by frame rather than only in
+        aggregate. Only the pixel-parity tests and the clip dumper ask for it,
+        which is why it is hashed on demand rather than in the feed loop: that
+        loop is what a gate's wall time and every fleet row's realtime factor
+        measure, and 0.68 ms a frameset of SHA-256 over 2x960x960 is decode plus
+        `track` and something else.
+
+        The array's own buffer is hashed rather than a ``tobytes()`` copy of it —
+        the same bytes and the same digest, and a non-contiguous frame raises
+        here rather than being hashed in a different order.
+
+        Returns:
+            One hex digest per camera.
+        """
+        return tuple(hashlib.sha256(image).hexdigest() for image in self.images)
+
+    def digest(self) -> str:
+        """Digest of the timestamp and the per-camera digests: one value per frameset.
+
+        Returns:
+            One hex digest for the whole frameset.
+        """
+        rolled = hashlib.sha256(np.int64(self.t_ns).tobytes())
+        for camera_digest in self.image_digests():
+            rolled.update(bytes.fromhex(camera_digest))
+        return rolled.hexdigest()
 
 
 @dataclass(slots=True, frozen=True)
@@ -790,21 +813,9 @@ class SegmentFeed:
                 frame_imu: ImuStream = window_imu.between(emitted_imu_t_ns, max(lead_ns, t_ns))
                 if len(frame_imu):
                     emitted_imu_t_ns = int(frame_imu.t_ns[-1])
-                # Per camera first, because that is the unit the C++ reference
-                # records; the frameset digest is then built from those, which
-                # also avoids hashing every pixel twice. The array's own buffer
-                # is hashed rather than a `tobytes()` copy of it — the same bytes
-                # and the same digest, and a non-contiguous frame would raise
-                # here rather than be hashed in a different order.
-                image_sha256: tuple[str, ...] = tuple(hashlib.sha256(image).hexdigest() for image in images)
-                digest = hashlib.sha256(np.int64(t_ns).tobytes())
-                for camera_digest in image_sha256:
-                    digest.update(bytes.fromhex(camera_digest))
                 yield Frameset(
                     t_ns=t_ns,
                     images=images,
-                    image_sha256=image_sha256,
-                    sha256=digest.hexdigest(),
                     imu=frame_imu,
                     ground_truth=_nearest_pose(window_gt, t_ns),
                 )

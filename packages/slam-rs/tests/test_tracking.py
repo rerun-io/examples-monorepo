@@ -15,7 +15,6 @@ module, because ``tests`` is not on the typechecker's search path and every
 module in this directory therefore stands alone.
 """
 
-import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -46,12 +45,9 @@ def frameset(step: int, texture: TextureFactory, sample_t_ns: Int64[ndarray, " n
     """
     images: list[UInt8[ndarray, "h w"]] = [texture(step, 0), texture(step + 1, 0)]
     gyro_rad_s, accel_m_s2 = gravity_batch(sample_t_ns)
-    digests: tuple[str, ...] = tuple(hashlib.sha256(image.tobytes()).hexdigest() for image in images)
     return Frameset(
         t_ns=step * FRAME_PERIOD_NS,
         images=images,
-        image_sha256=digests,
-        sha256=hashlib.sha256("".join(digests).encode()).hexdigest(),
         imu=ImuStream(t_ns=sample_t_ns, gyro_rad_s=gyro_rad_s, accel_m_s2=accel_m_s2),
         ground_truth=None,
     )

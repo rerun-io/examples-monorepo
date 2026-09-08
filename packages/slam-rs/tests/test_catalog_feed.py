@@ -282,7 +282,7 @@ def test_the_smoke_segment_decodes_from_the_nas(manifest: ReferenceManifest) -> 
             if frameset.ground_truth is not None:
                 assert frameset.ground_truth.shape == (7,)
                 with_truth += 1
-            digests.append(frameset.sha256)
+            digests.append(frameset.digest())
         assert len(digests) == segment.capture.num_frames
         # Ground truth starts 17.5 ms into the segment, so only the first frameset
         # is without it; a frameset outside the truth's span reports None rather
@@ -303,7 +303,7 @@ def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample(manifes
             per_frameset: list[tuple[int, str]] = []
             emitted: list[Int64[ndarray, " n"]] = []
             for frameset in feed.framesets():
-                per_frameset.append((frameset.t_ns, frameset.sha256))
+                per_frameset.append((frameset.t_ns, frameset.digest()))
                 emitted.append(frameset.imu.t_ns)
             digests[window_s] = per_frameset
             imu_t_ns[window_s] = np.concatenate(emitted)
@@ -316,7 +316,7 @@ def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample(manifes
     first_ns: int = digests[2.0][0][0]
     bounded_ns: int = first_ns + 2_500_000_000
     with open_segment(LocalSegment(base_rrd=segment.base_path), segment.imu, window_s=2.0) as feed:
-        bounded: list[tuple[int, str]] = [(frameset.t_ns, frameset.sha256) for frameset in feed.framesets(bounded_ns)]
+        bounded: list[tuple[int, str]] = [(frameset.t_ns, frameset.digest()) for frameset in feed.framesets(bounded_ns)]
     assert bounded == digests[2.0][: len(bounded)]
     assert bounded_ns <= bounded[-1][0] < bounded_ns + 2_000_000_000
     assert len(bounded) < len(digests[2.0])
