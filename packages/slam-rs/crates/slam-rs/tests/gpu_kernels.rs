@@ -20,6 +20,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use kornia_imgproc::features::FastCorner;
+use nalgebra::Vector2;
 use slam_rs::frontend::detect::{CornerScan, CpuCornerScan};
 use slam_rs::frontend::parallel::WorkPool;
 use slam_rs::frontend::patch::OpticalFlowPatch;
@@ -247,20 +248,38 @@ fn the_gpu_patch_build_matches_the_cpu_within_tolerance() {
     );
 }
 
-#[test]
-fn the_gpu_tracker_recovers_the_same_shift_as_the_cpu() {
-    const SHIFT: f32 = 2.75;
-    let first: ImageU16 = textured_image(512, 512, 0.0, 0.0);
-    let second: ImageU16 = textured_image(512, 512, SHIFT, -1.5);
-    let positions: PointsSoA = grid_positions(512);
-    let count: usize = positions.len();
+/// How far apart the two lanes' tracked positions may sit, in pixels.
+///
+/// 1e-3, ten times the worst any fixture in this file measures and ten times
+/// below the 1e-2 it used to allow. What is measured, CUDA / wgpu, in pixels:
+/// the grid shift 4.316e-5 / 3.146e-5, the border margin 9.832e-5 / 7.780e-5,
+/// a bad guess 1.526e-5 / 2.158e-5. The factor of ten is not slack for the
+/// backend: it is the room a *different* fixture — another texture, another
+/// shift, another adapter — may need for the same cause, which is that NVRTC
+/// contracts `a * b + c` into a fused multiply-add and the host does not. A
+/// change that needs more than this is a change in the arithmetic, not in the
+/// rounding.
+const LANE_POSITION_BOUND: f32 = 1e-3;
 
+/// One frame pair through both lanes, from the same patches and the same guesses.
+///
+/// The five seam tests below differ only in the frames, the positions and the
+/// guesses; every one of them needs both lanes driven identically from the same
+/// inputs, and a copy each would be five places for the two lanes to drift
+/// apart in.
+fn track_both_lanes(
+    size: usize,
+    first: &ImageU16,
+    second: &ImageU16,
+    positions: &PointsSoA,
+    guesses: &FlowTransforms,
+) -> (FlowResult, FlowResult) {
     // ── the CPU lane
     let mut cpu_builder: CpuPyramidBuilder = CpuPyramidBuilder::new();
-    let mut cpu_prev: PyramidU16 = cpu_builder.allocate(512, 512, LEVELS).unwrap();
-    let mut cpu_next: PyramidU16 = cpu_builder.allocate(512, 512, LEVELS).unwrap();
-    cpu_builder.build(0, &first, &mut cpu_prev).unwrap();
-    cpu_builder.build(0, &second, &mut cpu_next).unwrap();
+    let mut cpu_prev: PyramidU16 = cpu_builder.allocate(size, size, LEVELS).unwrap();
+    let mut cpu_next: PyramidU16 = cpu_builder.allocate(size, size, LEVELS).unwrap();
+    cpu_builder.build(0, first, &mut cpu_prev).unwrap();
+    cpu_builder.build(0, second, &mut cpu_next).unwrap();
     let mut cpu_tracker: CpuPatchTracker<Pattern51> = CpuPatchTracker::new(
         MAX_KEYPOINTS,
         LEVELS + 1,
@@ -270,30 +289,19 @@ fn the_gpu_tracker_recovers_the_same_shift_as_the_cpu() {
     )
     .unwrap();
     let mut cpu_patches: PatchSoA<Pattern51> = cpu_tracker.make_patches().unwrap();
-    cpu_patches.build(&cpu_prev, &positions, None).unwrap();
-    let mut guesses: FlowTransforms = FlowTransforms::with_capacity(count);
-    guesses.resize(count);
-    for index in 0..count {
-        guesses.set(index, &AffineCompact2f::at(positions.get(index)));
-    }
+    cpu_patches.build(&cpu_prev, positions, None).unwrap();
     let mut cpu_result: FlowResult = FlowResult::with_capacity(MAX_KEYPOINTS);
     cpu_tracker
-        .track(
-            &cpu_prev,
-            &cpu_next,
-            &cpu_patches,
-            &guesses,
-            &mut cpu_result,
-        )
+        .track(&cpu_prev, &cpu_next, &cpu_patches, guesses, &mut cpu_result)
         .unwrap();
 
     // ── the GPU lane
     let client = gpu_client().unwrap();
     let mut gpu_builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
-    let mut gpu_prev = gpu_builder.allocate(512, 512, LEVELS).unwrap();
-    let mut gpu_next = gpu_builder.allocate(512, 512, LEVELS).unwrap();
-    gpu_builder.build(0, &first, &mut gpu_prev).unwrap();
-    gpu_builder.build(0, &second, &mut gpu_next).unwrap();
+    let mut gpu_prev = gpu_builder.allocate(size, size, LEVELS).unwrap();
+    let mut gpu_next = gpu_builder.allocate(size, size, LEVELS).unwrap();
+    gpu_builder.build(0, first, &mut gpu_prev).unwrap();
+    gpu_builder.build(0, second, &mut gpu_next).unwrap();
     let mut gpu_tracker: GpuPatchTracker<Pattern51, _> = GpuPatchTracker::new(
         client.clone(),
         MAX_KEYPOINTS,
@@ -303,17 +311,63 @@ fn the_gpu_tracker_recovers_the_same_shift_as_the_cpu() {
     )
     .unwrap();
     let mut gpu_patches: GpuPatches<Pattern51, _> = gpu_tracker.make_patches().unwrap();
-    gpu_patches.build(&gpu_prev, &positions, None).unwrap();
+    gpu_patches.build(&gpu_prev, positions, None).unwrap();
     let mut gpu_result: FlowResult = FlowResult::with_capacity(MAX_KEYPOINTS);
     gpu_tracker
-        .track(
-            &gpu_prev,
-            &gpu_next,
-            &gpu_patches,
-            &guesses,
-            &mut gpu_result,
-        )
+        .track(&gpu_prev, &gpu_next, &gpu_patches, guesses, &mut gpu_result)
         .unwrap();
+    (cpu_result, gpu_result)
+}
+
+/// Guesses that say "the point has not moved", which is what the frontend hands
+/// the tracker when it has no pose prediction.
+fn guesses_at(positions: &PointsSoA) -> FlowTransforms {
+    let mut guesses: FlowTransforms = FlowTransforms::with_capacity(positions.len());
+    guesses.resize(positions.len());
+    for index in 0..positions.len() {
+        guesses.set(index, &AffineCompact2f::at(positions.get(index)));
+    }
+    guesses
+}
+
+/// Every patch's outcome flag on the two lanes, and the worst shared position.
+///
+/// The flag is asserted **exactly**, not as a fraction: these fixtures are built
+/// so no patch sits on a threshold, and a lane that starts disagreeing about
+/// whether a track survived is the failure these tests exist to catch.
+fn assert_lanes_agree(cpu: &FlowResult, gpu: &FlowResult, count: usize, label: &str) -> f32 {
+    let mut worst: f32 = 0.0;
+    for index in 0..count {
+        assert_eq!(
+            cpu.is_valid(index),
+            gpu.is_valid(index),
+            "{label}: patch {index} survived on one lane and not the other \
+             (CPU {}, GPU {})",
+            cpu.is_valid(index),
+            gpu.is_valid(index)
+        );
+        if cpu.is_valid(index) {
+            let difference = cpu.transform(index).translation - gpu.transform(index).translation;
+            worst = worst.max(difference.norm());
+        }
+    }
+    assert!(
+        worst < LANE_POSITION_BOUND,
+        "{label}: positions differ by up to {worst} px between the lanes, \
+         against a bound of {LANE_POSITION_BOUND}"
+    );
+    worst
+}
+
+#[test]
+fn the_gpu_tracker_recovers_the_same_shift_as_the_cpu() {
+    const SHIFT: f32 = 2.75;
+    let first: ImageU16 = textured_image(512, 512, 0.0, 0.0);
+    let second: ImageU16 = textured_image(512, 512, SHIFT, -1.5);
+    let positions: PointsSoA = grid_positions(512);
+    let count: usize = positions.len();
+    let guesses: FlowTransforms = guesses_at(&positions);
+    let (cpu_result, gpu_result) = track_both_lanes(512, &first, &second, &positions, &guesses);
 
     // ── the shift both lanes must find, before they are compared with each other
     //
@@ -356,37 +410,152 @@ fn the_gpu_tracker_recovers_the_same_shift_as_the_cpu() {
     );
 
     // ── the two lanes against each other
-    let mut agreed: usize = 0;
-    let mut worst_position: f32 = 0.0;
-    for index in 0..count {
-        if cpu_result.is_valid(index) == gpu_result.is_valid(index) {
-            agreed += 1;
-        }
-        if cpu_result.is_valid(index) && gpu_result.is_valid(index) {
-            let difference =
-                cpu_result.transform(index).translation - gpu_result.transform(index).translation;
-            worst_position = worst_position.max(difference.norm());
-        }
-    }
+    //
+    // A Gauss-Newton fixed point reached from the same start converges to the
+    // same place; fused multiply-add moves the last steps, not the answer. Every
+    // patch here is far from the border and every one survives, so the flag is
+    // asserted exactly rather than as a fraction — the cases where it may be
+    // decided by a threshold have their own tests below.
+    let worst_position: f32 = assert_lanes_agree(&cpu_result, &gpu_result, count, "grid shift");
     println!(
         "tracker: {tracked} of {count} kept, worst recovered shift GPU {worst_shift:.4} px \
-         / CPU {worst_cpu_shift:.4} px, worst lane-to-lane position \
-         {worst_position:.3e} px, converged flag agreed on {agreed} of {count}"
+         / CPU {worst_cpu_shift:.4} px, worst lane-to-lane position {worst_position:.3e} px"
     );
-    // A Gauss-Newton fixed point reached from the same start converges to the
-    // same place; fused multiply-add moves the last steps, not the answer.
+}
+
+/// A track onto an unrelated frame fails on both lanes, and fails the same way.
+///
+/// The CPU suite's `a_mismatched_pair_is_rejected` at the seam: the
+/// forward-backward gate (`frame_to_frame_optical_flow.h:362-364`) is what
+/// rejects a track onto an image the patch is not in, and it is the one exit
+/// the grid fixture above never takes. A backend that let a failed track
+/// through — or that failed a different set of patches from the CPU's — would
+/// put keypoints on nothing and pass every other test in this file. The
+/// rejection is not trivial: `the_gpu_tracker_recovers_the_same_shift_as_the_cpu`
+/// puts these same patches and these same guesses through both lanes against a
+/// *shifted* frame and keeps all 25.
+#[test]
+fn both_lanes_reject_a_track_onto_an_unrelated_frame() {
+    let first: ImageU16 = textured_image(512, 512, 0.0, 0.0);
+    // A different field, not a shift of the first: `cornered_image` is one LCG
+    // plus a much shorter wave, so nothing in it correlates with the plane-wave
+    // texture the patches were built on.
+    let unrelated: ImageU16 = cornered_image(512, 512);
+    let positions: PointsSoA = grid_positions(512);
+    let count: usize = positions.len();
+    let guesses: FlowTransforms = guesses_at(&positions);
+    let (cpu_result, gpu_result) = track_both_lanes(512, &first, &unrelated, &positions, &guesses);
+
+    let worst: f32 = assert_lanes_agree(&cpu_result, &gpu_result, count, "unrelated frame");
+    println!(
+        "unrelated frame: {} of {count} survived on each lane, worst lane-to-lane \
+         position {worst:.3e} px",
+        cpu_result.len()
+    );
+    // The CPU suite's own bound on this fixture, restated here because a lane
+    // pair that agreed on keeping everything would agree and be wrong.
     assert!(
-        worst_position < 0.01,
-        "positions differ by up to {worst_position} px between the lanes"
+        cpu_result.len() * 4 < count,
+        "{} of {count} tracks survived an unrelated image",
+        cpu_result.len()
     );
-    // The flag can differ only where a patch sits on a threshold — the tap
-    // count, the increment norm, the two-pixel border — so the bound is a
-    // fraction, not equality (decisions D09/D45: corner and track choice moves
-    // trajectories, and that is what the clip-level gate measures).
+}
+
+/// Patches on both sides of the border margin get the same verdict on both lanes.
+///
+/// Two thresholds meet near an edge and the grid fixture is built to stay away
+/// from both: the patch build needs its 52 taps in range at every level, and
+/// each Gauss-Newton step needs the new centre `FILTER_MARGIN = 2` pixels inside
+/// *that level's* image (`frame_to_frame_optical_flow.h:430`). At the coarsest
+/// of four levels a 512-pixel frame is 64 wide, so the margin is 16 full-
+/// resolution pixels; this walks a column from 4 to 60 pixels from the left
+/// edge, which crosses it, and asserts the two lanes take the same branch at
+/// every one.
+#[test]
+fn both_lanes_agree_at_the_border_margin() {
+    let first: ImageU16 = textured_image(512, 512, 0.0, 0.0);
+    let second: ImageU16 = textured_image(512, 512, 0.75, -0.25);
+    let mut positions: PointsSoA = PointsSoA::with_capacity(256);
+    let mut x: usize = 4;
+    while x <= 60 {
+        let mut y: usize = 96;
+        while y + 96 < 512 {
+            positions.push(Vector2::new(x as f32 + 0.37, y as f32 - 0.21));
+            y += 71;
+        }
+        x += 2;
+    }
+    let count: usize = positions.len();
+    let guesses: FlowTransforms = guesses_at(&positions);
+    let (cpu_result, gpu_result) = track_both_lanes(512, &first, &second, &positions, &guesses);
+
+    let worst: f32 = assert_lanes_agree(&cpu_result, &gpu_result, count, "border margin");
+    // Both sides of the threshold have to be represented, or the test is only
+    // checking one branch under a name that promises two.
+    let survivors: usize = cpu_result.len();
+    println!(
+        "border margin: {survivors} of {count} survived on each lane, worst \
+         lane-to-lane position {worst:.3e} px"
+    );
     assert!(
-        agreed * 100 >= count * 98,
-        "the two lanes agreed on the converged flag for {agreed} of {count} patches"
+        survivors > 0 && survivors < count,
+        "the border column put {survivors} of {count} patches through, so one \
+         side of the margin is untested"
     );
+}
+
+/// A guess far from the truth converges — or fails — the same way on both lanes.
+///
+/// Two shapes in one fixture, because they take different exits. A guess
+/// displaced between 4 and 28 pixels is inside the frame and straddles what
+/// four pyramid levels recover from this texture, so it is the tracker's own
+/// convergence that decides and it decides both ways; a guess at a negative
+/// coordinate is refused before any level runs (`optical_flow.h:346`, the
+/// `t2(0) >= 0 && ... < w` gate). Both lanes must take all three exits
+/// identically.
+#[test]
+fn both_lanes_agree_on_a_bad_initial_guess() {
+    let first: ImageU16 = textured_image(512, 512, 0.0, 0.0);
+    let second: ImageU16 = textured_image(512, 512, 1.25, 0.5);
+    let positions: PointsSoA = grid_positions(512);
+    let count: usize = positions.len();
+    let mut guesses: FlowTransforms = FlowTransforms::with_capacity(count);
+    guesses.resize(count);
+    for index in 0..count {
+        let displaced: Vector2<f32> = if index % 4 == 0 {
+            // Outside the frame entirely: the pre-track bound, not the tracker.
+            Vector2::new(-8.0, -8.0)
+        } else {
+            let offset: f32 = 4.0 + 6.0 * (index % 5) as f32;
+            positions.get(index) + Vector2::new(offset, -offset)
+        };
+        guesses.set(index, &AffineCompact2f::at(displaced));
+    }
+    let (cpu_result, gpu_result) = track_both_lanes(512, &first, &second, &positions, &guesses);
+
+    let worst: f32 = assert_lanes_agree(&cpu_result, &gpu_result, count, "bad guess");
+    println!(
+        "bad guess: {} of {count} survived on each lane, worst lane-to-lane \
+         position {worst:.3e} px",
+        cpu_result.len()
+    );
+    // Both sides of convergence have to be represented: every patch here is one
+    // the grid fixture tracks from a correct guess, so a fixture where none
+    // recovers would only be testing the refusal.
+    assert!(
+        !cpu_result.is_empty() && cpu_result.len() < count,
+        "the bad-guess column put {} of {count} patches through, so one side of \
+         convergence is untested",
+        cpu_result.len()
+    );
+    // The out-of-frame quarter must be refused on both lanes; `assert_lanes_agree`
+    // has already made the two agree, so asserting the CPU's is asserting both.
+    for index in (0..count).step_by(4) {
+        assert!(
+            !cpu_result.is_valid(index),
+            "patch {index} was guessed outside the frame and tracked anyway"
+        );
+    }
 }
 
 /// Every band the detector asks for, at every rung of the shipped ladder, from
