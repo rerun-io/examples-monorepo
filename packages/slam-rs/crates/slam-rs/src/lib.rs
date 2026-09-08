@@ -571,16 +571,6 @@ impl<S: lie::LieScalar> Vio<S> {
     }
 }
 
-/// The frameset geometry checks [`Vio::track`] runs before it widens anything.
-///
-/// Caller-controlled `width`, `height` and `stride`: an unchecked
-/// `stride * height` panics in debug and wraps to an accepted zero in release,
-/// so the product is checked (D32).
-///
-/// # Errors
-///
-/// [`VioError::CameraCountMismatch`], [`VioError::StrideTooSmall`],
-/// [`VioError::ImageSizeOverflow`] or [`VioError::ShortImage`].
 /// The rule every inertial sample meets, wherever it enters.
 ///
 /// `previous_t_ns` is the frontier it must follow: [`Vio::last_imu_t_ns`] for
@@ -617,6 +607,16 @@ pub fn check_imu_sample(
     Ok(())
 }
 
+/// The frameset geometry checks [`Vio::track`] runs before it widens anything.
+///
+/// Caller-controlled `width`, `height` and `stride`: an unchecked
+/// `stride * height` panics in debug and wraps to an accepted zero in release,
+/// so the product is checked (D32).
+///
+/// # Errors
+///
+/// [`VioError::CameraCountMismatch`], [`VioError::StrideTooSmall`],
+/// [`VioError::ImageSizeOverflow`] or [`VioError::ShortImage`].
 fn check_frameset(images: &[ImageView<'_>], camera_count: usize) -> Result<(), VioError> {
     if images.len() != camera_count {
         return Err(VioError::CameraCountMismatch {
