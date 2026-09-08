@@ -4,7 +4,10 @@
 //! asserts: every integer decision identical, `f64` agreeing to 3.1e-10. This
 //! file asks the question sixty framesets cannot answer — whether that identity
 //! survives four thousand of them — so it takes the same oracle dump produced
-//! for a whole clip and reports rather than asserts. The dump is
+//! for a whole clip. In `double` it is D60's identity lane and asserts
+//! [`F64_IDENTITY_M`] with no integer break; in `float` it measures and reports,
+//! because the f32 pair is 3.3 mm apart with the LM step count breaking, which
+//! is basalt's own conditioning and not a fault (S15 §2.3). The dump is
 //!
 //! ```bash
 //! build/basalt_vio_oracle <clip-dir> <clip-dir>/calib.json data/msd/msdmi_config.json \
@@ -33,9 +36,12 @@
 //!   cargo test --release --test full_clip_backend -- --nocapture
 //! ```
 //!
-//! Without `SLAM_RS_ORACLE_JSON` the test prints why and passes: the dump is
-//! about a hundred megabytes for a four-thousand-frameset clip and is not
-//! committed.
+//! Without `SLAM_RS_ORACLE_JSON` the test prints why and passes, so the default
+//! suite stays fast: the gated dump is `MIO07`'s, 174 MB for its 4,095
+//! framesets, and it is a **bundle** artifact rather than a repository one. It
+//! sits at `/tmp/s15-clips/MIO07/vio_oracle_full.json` on `pablo-dl-server`
+//! beside the clip `dump_clip.py` wrote, and both are rebuilt with the two
+//! commands above when that directory is gone.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -57,6 +63,14 @@ use slam_rs::types::KeypointId;
 
 mod common;
 use common::{Oracle, OracleFlow, OracleFrame, OracleRun, OracleState};
+
+/// How far the f64 backend may sit from basalt's over a whole clip (D60's identity lane).
+///
+/// Measured over all 4,095 framesets of `MIO07`: 7.2e-12 m worst, with every
+/// integer decision identical (S15 §2.3). This is that number rounded up, so the
+/// lane fails on a real difference and never on rounding — `MGO14`'s dump does
+/// fail it, at frameset 905, which is the difference C76 named and left open.
+const F64_IDENTITY_M: f64 = 1e-11;
 
 /// The clip's inertial window in the fork's own shape, which is what
 /// `dump_clip.py` writes beside the pixels for the oracle to read.
@@ -109,10 +123,15 @@ fn observations(flow: &OracleFlow) -> Arc<FlowObservations> {
 
 /// Replay the whole flow stream and report where the two windows parted.
 ///
-/// Nothing is asserted about the numbers: this is the measurement the report
+/// The numbers come back for the caller to gate: this is the measurement the report
 /// quotes, and a long clip has to finish to produce it. The integer decisions
 /// are counted the same way — the first break is what matters, not a panic at it.
-fn compare<S: LieScalar>(oracle: &Oracle, run: &OracleRun, clip: &Path, out: Option<PathBuf>) {
+fn compare<S: LieScalar>(
+    oracle: &Oracle,
+    run: &OracleRun,
+    clip: &Path,
+    out: Option<PathBuf>,
+) -> (f64, usize) {
     let described: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(clip.join("clip.json")).unwrap()).unwrap();
     let dataset: String = described["dataset_name"].as_str().unwrap().to_string();
@@ -422,6 +441,10 @@ fn compare<S: LieScalar>(oracle: &Oracle, run: &OracleRun, clip: &Path, out: Opt
         std::fs::write(&path, poses).unwrap();
         println!("trajectory -> {}", path.display());
     }
+    (
+        worst.position_m,
+        integer_breaks.values().map(|(count, _)| count).sum(),
+    )
 }
 
 /// The whole clip's backend replay, in the precision `SLAM_RS_ORACLE_SCALAR` names.
@@ -451,9 +474,22 @@ fn the_whole_clip_backend_follows_the_cpp() {
         std::env::var("SLAM_RS_ORACLE_SCALAR").unwrap_or_else(|_| "double".to_string());
     let run: &OracleRun = common::run_named(&oracle, &scalar);
     let out: Option<PathBuf> = std::env::var_os("SLAM_RS_ORACLE_OUT").map(PathBuf::from);
-    match scalar.as_str() {
+    let (worst_m, integer_breaks): (f64, usize) = match scalar.as_str() {
         "double" => compare::<f64>(&oracle, run, &clip, out),
         "float" => compare::<f32>(&oracle, run, &clip, out),
         other => panic!("SLAM_RS_ORACLE_SCALAR is double or float, not {other}"),
+    };
+    if scalar == "double" {
+        assert!(
+            worst_m <= F64_IDENTITY_M,
+            "the backend left basalt's by {worst_m:.4e} m over {} framesets, past {F64_IDENTITY_M:.0e}",
+            run.frames.len()
+        );
+        assert_eq!(
+            integer_breaks,
+            0,
+            "the two windows took different discrete decisions over {} framesets",
+            run.frames.len()
+        );
     }
 }
