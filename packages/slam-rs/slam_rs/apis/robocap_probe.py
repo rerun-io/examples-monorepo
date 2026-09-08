@@ -231,7 +231,7 @@ def main(config: Config) -> None:
         replayed: int = 0
         started: float = time.monotonic()
         frameset: Frameset
-        for frameset in feed.framesets():
+        for frameset in feed.framesets(last_ns):
             if frameset.t_ns > last_ns:
                 break
             replayed += 1

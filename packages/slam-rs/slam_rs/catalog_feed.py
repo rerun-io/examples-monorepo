@@ -673,7 +673,7 @@ class SegmentFeed:
         found: Trajectory | None = _read_ground_truth(self.gt_dataset, self.segment_id, first_ns - offset_ns, last_ns - offset_ns)
         return found if found is None else shift_clock(found, offset_ns)
 
-    def framesets(self) -> Iterator[Frameset]:
+    def framesets(self, stop_ns: int | None = None) -> Iterator[Frameset]:
         """Decode the segment and yield one frameset at a time.
 
         Video, inertial samples and ground truth are all fetched one window at a
@@ -685,6 +685,18 @@ class SegmentFeed:
 
         Each frameset carries the inertial samples since the previous one, running
         one sample past its own timestamp, and the nearest ground-truth pose.
+
+        A caller that stops early states where, because the fetch is a window
+        ahead of what it yields: a consumer breaking out of the loop has already
+        paid for a whole window of encoded samples — 30 s x 30 fps x 4 cameras of
+        1080p on a RoboCap run — that nothing will read.
+
+        Args:
+            stop_ns: Last frameset time worth reading, on the inertial clock; a
+                window opening past it is not fetched at all. None reads to the
+                end of the segment. Framesets up to the end of the window that
+                covers it are still yielded, because a window is the unit that is
+                read.
 
         Yields:
             Framesets in time order, every :attr:`frame_stride`-th one.
@@ -706,6 +718,8 @@ class SegmentFeed:
         emitted_imu_t_ns: int = -(2**62)
         for start, stop in _window_bounds(self.index, self.window_ns):
             window_first_ns: int = int(self.frame_t_ns[start])
+            if stop_ns is not None and window_first_ns > stop_ns:
+                break
             window_last_ns: int = int(self.frame_t_ns[stop - 1])
             window_imu: ImuStream = self.imu_between(window_first_ns - margin_ns, window_last_ns + margin_ns)
             if len(window_imu) and emitted_imu_t_ns > -(2**62) and int(window_imu.t_ns[0]) > emitted_imu_t_ns + 1:

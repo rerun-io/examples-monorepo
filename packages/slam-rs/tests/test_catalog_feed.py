@@ -221,6 +221,17 @@ def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample() -> No
     assert digests[60.0] == digests[2.0]
     assert len(digests[60.0]) == segment.capture.num_frames
 
+    # A bounded read is the same read, stopped: the same rows in the same order,
+    # and no window opening past the bound is fetched at all — with 2 s windows
+    # over a 7.6 s segment, a bound at 2.5 s leaves the last two windows unread.
+    first_ns: int = digests[2.0][0][0]
+    bounded_ns: int = first_ns + 2_500_000_000
+    with open_segment(LocalSegment(base_rrd=segment.base_path), segment.imu, window_s=2.0) as feed:
+        bounded: list[tuple[int, str]] = [(frameset.t_ns, frameset.sha256) for frameset in feed.framesets(bounded_ns)]
+    assert bounded == digests[2.0][: len(bounded)]
+    assert bounded_ns <= bounded[-1][0] < bounded_ns + 2_000_000_000
+    assert len(bounded) < len(digests[2.0])
+
     # The inertial samples handed out across window boundaries must form one
     # stream: strictly increasing, no sample delivered twice, and the same set
     # whatever the window size. A window that failed to reach back would drop
