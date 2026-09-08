@@ -160,7 +160,25 @@ def shift_clock(trajectory: Trajectory, offset_ns: int) -> Trajectory:
 
     Returns:
         The same poses on the shifted clock. Positions and rotations are shared, not copied.
+
+    Raises:
+        ValueError: If the shift would take a timestamp out of int64. Timestamps
+            are exact integers because a nanosecond clock past 2**53 is not one
+            in a float, and the same choice leaves the last representable
+            timestamp one addition from ``-2**63``: int64 addition wraps it to
+            the other end of the clock in silence, which reads as a run that
+            tracked a different window rather than as a failed conversion
+            (S25 review).
     """
+    # Which end of the clock the shift can leave is the offset's sign, and an
+    # empty trajectory has no timestamp to move at all.
+    if len(trajectory) != 0:
+        extreme: int = int(trajectory.t_ns.max() if offset_ns > 0 else trajectory.t_ns.min())
+        if not -(2**63) <= extreme + offset_ns < 2**63:
+            raise ValueError(
+                f"a timestamp of {extreme} ns cannot be shifted by {offset_ns} ns: the result leaves the int64 clock, "
+                f"and int64 addition would wrap it to the other end instead of failing"
+            )
     return Trajectory(
         t_ns=trajectory.t_ns + np.int64(offset_ns),
         position_m=trajectory.position_m,
@@ -327,8 +345,14 @@ def coverage(reference: Trajectory, candidate: Trajectory) -> float:
 
     Returns:
         Overlap of the two time spans divided by the reference span, clamped to
-        ``[0, 1]``; ``0.0`` when the reference has no extent.
+        ``[0, 1]``; ``0.0`` when the reference has no extent, and when either
+        trajectory has no pose at all.
     """
+    # Either side empty is that documented zero and not an `IndexError` out of
+    # `t_ns[-1]`: a segment with no `gt` layer spans nothing to cover, and a
+    # machine that tracked nothing covers nothing of it (S25 review).
+    if len(reference) == 0 or len(candidate) == 0:
+        return 0.0
     reference_span_ns: int = int(reference.t_ns[-1] - reference.t_ns[0])
     if reference_span_ns <= 0:
         return 0.0

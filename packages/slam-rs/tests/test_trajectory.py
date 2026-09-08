@@ -19,6 +19,7 @@ from slam_rs.trajectory import (
     associate,
     ate,
     coverage,
+    empty_trajectory,
     read_trajectory,
     rigid_alignment,
     shift_clock,
@@ -212,6 +213,51 @@ def test_coverage_is_the_overlapping_fraction_of_the_reference_span() -> None:
     assert coverage(reference, reference) == pytest.approx(1.0)
     assert coverage(reference, _trajectory(t_ns[:6], positions[:6])) == pytest.approx(0.5)
     assert coverage(reference, _trajectory(t_ns[5:], positions[5:])) == pytest.approx(0.5)
+
+
+def test_coverage_is_zero_when_either_trajectory_has_no_pose() -> None:
+    """The documented ``0.0`` and not an ``IndexError``: a run that produced nothing covers nothing.
+
+    Both indexes — ``reference.t_ns[-1]`` for the span and ``candidate.t_ns[-1]``
+    for the overlap — were read before anything was checked, so an empty
+    reference (a segment with no ``gt`` layer) and an empty candidate (a machine
+    that tracked nothing) both raised ``IndexError: index -1 is out of bounds``
+    where :func:`~slam_rs.trajectory.associate` and
+    :func:`~slam_rs.trajectory.ate` refuse their empty cases in one sentence
+    (S25 review).
+    """
+    t_ns: Int64[ndarray, " 3"] = np.arange(3, dtype=np.int64) * 1_000_000_000
+    populated: Trajectory = _trajectory(t_ns, np.zeros((3, 3), dtype=np.float64))
+    assert coverage(empty_trajectory(), populated) == 0.0
+    assert coverage(populated, empty_trajectory()) == 0.0
+    assert coverage(empty_trajectory(), empty_trajectory()) == 0.0
+    # The populated pair still measures what it measured.
+    assert coverage(populated, populated) == pytest.approx(1.0)
+
+
+def test_shift_clock_refuses_an_offset_that_would_leave_the_int64_clock() -> None:
+    """A wrapped timestamp is not a clock conversion, and int64 addition wraps in silence.
+
+    ``t_ns`` is int64 because a nanosecond clock past 2**53 is not exact in a
+    float, and the same choice makes the last representable timestamp one
+    addition away from ``-2**63``: the pose would move backwards across the whole
+    clock, associate with nothing and be read as a machine that tracked the
+    wrong window. Shipped manifest clocks are nowhere near the boundary, which is
+    exactly why the failure would arrive unannounced (S25 review).
+    """
+    positions: Float64[ndarray, "2 3"] = np.zeros((2, 3), dtype=np.float64)
+    latest: Trajectory = _trajectory(np.array([0, 2**63 - 1], dtype=np.int64), positions)
+    with pytest.raises(ValueError, match="9223372036854775807 ns cannot be shifted by 1 ns"):
+        shift_clock(latest, 1)
+    earliest: Trajectory = _trajectory(np.array([-(2**63), 0], dtype=np.int64), positions)
+    with pytest.raises(ValueError, match="-9223372036854775808 ns cannot be shifted by -1 ns"):
+        shift_clock(earliest, -1)
+    # The boundary itself is a shift, not a margin: the two offsets that land
+    # exactly on the ends are still made.
+    assert int(shift_clock(_trajectory(np.array([2**63 - 2], dtype=np.int64), positions[:1]), 1).t_ns[0]) == 2**63 - 1
+    assert int(shift_clock(_trajectory(np.array([-(2**63) + 1], dtype=np.int64), positions[:1]), -1).t_ns[0]) == -(2**63)
+    # An empty trajectory has no timestamp to shift and none to refuse.
+    assert len(shift_clock(empty_trajectory(), 2**62)) == 0
 
 
 def test_it_reproduces_the_forks_robocap_gate_numbers(manifest: ReferenceManifest) -> None:
