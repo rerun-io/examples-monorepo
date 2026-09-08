@@ -171,6 +171,28 @@ def test_a_gyroscope_sample_the_accelerometer_does_not_cover_is_dropped() -> Non
     assert len(paired) == len(paired.gyro_rad_s) == len(paired.accel_m_s2)
 
 
+def test_two_channels_that_do_not_overlap_are_refused() -> None:
+    """basalt errors rather than deliver an empty stream (`dataset_io_robocap.cpp:496`).
+
+    The two channels have their own clocks, so a segment whose accelerometer
+    stops before its gyroscope starts pairs to nothing. Returning that silently
+    fed the estimator a rig with no inertial data at all.
+    """
+    with pytest.raises(ValueError, match=r"gyroscope spans 1000\.\.2000 ns and the accelerometer 10\.\.20 ns"):
+        pair_accel_onto_gyro(
+            np.array([1000, 2000], dtype=np.int64),
+            np.ones((2, 3)),
+            np.array([10, 20], dtype=np.int64),
+            np.ones((2, 3)),
+        )
+
+
+def test_one_accelerometer_sample_is_not_enough_to_interpolate() -> None:
+    """`raw_accel.size() < 2` is basalt's own bar (`dataset_io_robocap.cpp:473`)."""
+    with pytest.raises(ValueError, match="two accelerometer samples"):
+        pair_accel_onto_gyro(np.array([10], dtype=np.int64), np.ones((1, 3)), np.array([10], dtype=np.int64), np.ones((1, 3)))
+
+
 def test_pairing_an_empty_channel_says_which_one() -> None:
     with pytest.raises(ValueError, match="0 gyro"):
         pair_accel_onto_gyro(np.array([], dtype=np.int64), np.zeros((0, 3)), np.array([1], dtype=np.int64), np.ones((1, 3)))
@@ -452,6 +474,28 @@ def test_the_profile_comes_from_the_manifest_not_the_code(manifest: ReferenceMan
     # What MSD is, and what every default in the feed means: the other state of
     # each of the five, so the profile is a statement and not a shape.
     assert RigProfile(camera_names=None, downscale=1, interpolate_accel_onto_gyro=False, frameset_tolerance_ns=0, video_time_is_absolute=False) == MSD_RIG
+
+
+def test_a_profile_with_no_frames_left_is_refused_on_construction() -> None:
+    """The downscale is checked where it is stated, before a byte is read.
+
+    `_build_feed` reads the whole video index off the recording before it builds
+    the first `CameraCalib`, which is where the downscale used to be validated.
+    """
+    with pytest.raises(ValueError, match="downscale must be at least 1; got 0"):
+        RigProfile(downscale=0)
+    with pytest.raises(ValueError, match="downscale must be at least 1; got -3"):
+        replace(robocap_profile(load_manifest()), downscale=-3)
+
+
+def test_a_downscale_that_leaves_no_frame_is_refused() -> None:
+    """A downscale past the frame's own width gives a camera zero pixels wide.
+
+    ``decode_gray`` clamps its target to one pixel, so the calibration and the
+    frames would disagree about the size of the image the estimator is given.
+    """
+    with pytest.raises(ValueError, match=r"downscale 2000 leaves nothing of the 1920x1080 frame"):
+        camera_calib(0, robocap_statics(), 30.0, 2000)
 
 
 def test_the_pairing_boundary_is_typed() -> None:

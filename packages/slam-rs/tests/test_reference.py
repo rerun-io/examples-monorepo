@@ -245,6 +245,23 @@ def test_an_unknown_tier_is_rejected(tmp_path: Path) -> None:
         load_manifest(broken)
 
 
+def test_a_missing_robocap_key_is_a_typed_error(tmp_path: Path) -> None:
+    """The loader promises `ValueError`; direct indexing raised a bare `KeyError`."""
+    broken: Path = tmp_path / "no-downscale.toml"
+    broken.write_text(MANIFEST_PATH.read_text().replace("downscale = 3\n", "", 1))
+    with pytest.raises(ValueError, match=r"\[robocap\] table is missing the key 'downscale'"):
+        load_manifest(broken)
+
+
+def test_a_missing_robocap_table_is_a_typed_error(tmp_path: Path) -> None:
+    """The `[robocap]` block runs to the end of the file, so cutting it off removes it."""
+    broken: Path = tmp_path / "no-robocap.toml"
+    text: str = MANIFEST_PATH.read_text()
+    broken.write_text(text[: text.index("[robocap]")])
+    with pytest.raises(ValueError, match=r"has no \[robocap\] table"):
+        load_manifest(broken)
+
+
 def test_a_duplicate_segment_id_is_rejected(tmp_path: Path) -> None:
     text: str = MANIFEST_PATH.read_text()
     first: ReferenceSegment = load_manifest().segments[0]

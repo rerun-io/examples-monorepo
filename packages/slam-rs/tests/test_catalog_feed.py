@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 import pytest
 from jaxtyping import Float64, Int64
 from numpy import ndarray
@@ -18,6 +19,10 @@ from slam_rs.catalog_feed import (
     ImuStream,
     LocalSegment,
     SegmentFeed,
+    _static_int,
+    _static_string,
+    _static_values,
+    _video_codec,
     camera_calib,
     imu_calib,
     open_segment,
@@ -148,6 +153,40 @@ def test_the_imu_calibration_carries_the_manifests_frozen_numbers() -> None:
     assert calib.accel_noise_std == 0.016
     assert calib.cam_time_offset_ns == 0
     np.testing.assert_array_equal(calib.imu_T_body, np.eye(4))
+
+
+def test_a_static_table_with_no_rows_names_the_entity() -> None:
+    """A recording whose rig node carries no statics reached `statics[column][0]`.
+
+    Row zero of an empty table is an `IndexError` out of pyarrow with nothing in
+    it that says which entity was being read.
+    """
+    empty: pa.Table = pa.table({"/rig:num_cameras": pa.array([], type=pa.list_(pa.float64()))})
+    with pytest.raises(ValueError, match="/rig:num_cameras has no rows"):
+        _static_values(empty, "/rig:num_cameras")
+    with pytest.raises(ValueError, match="/rig:reference has no rows"):
+        _static_string(pa.table({"/rig:reference": pa.array([], type=pa.string())}), "/rig:reference")
+    with pytest.raises(ValueError, match="property:capture:start_time_ns has no rows"):
+        _static_int(pa.table({"property:capture:start_time_ns": pa.array([], type=pa.int64())}), "property:capture:start_time_ns")
+
+
+def test_a_video_stream_with_no_codec_names_the_entity() -> None:
+    """The codec is read from row zero of this camera's non-null codecs; both can be empty."""
+    entity: str = "/rig/cam_00/pinhole/video"
+    columns: list[str] = ["video_time", f"{entity}:VideoStream:is_keyframe", f"{entity}:VideoStream:codec"]
+    no_rows: pa.Table = pa.table({name: pa.array([], type=pa.int64()) for name in columns})
+    with pytest.raises(ValueError, match=f"{entity}: the recording carries no video samples"):
+        _video_codec(no_rows, entity)
+
+    no_codec: pa.Table = pa.table(
+        {
+            columns[0]: pa.array([1, 2], type=pa.int64()),
+            columns[1]: pa.array([None, None], type=pa.int64()),
+            columns[2]: pa.array([None, None], type=pa.list_(pa.uint32())),
+        }
+    )
+    with pytest.raises(ValueError, match=f"{entity}: the video stream carries no codec"):
+        _video_codec(no_codec, entity)
 
 
 @pytest.mark.slow

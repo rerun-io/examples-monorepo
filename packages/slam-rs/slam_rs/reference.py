@@ -551,6 +551,53 @@ def _reference_run(block: dict[str, Any], segment_id: str) -> CppReferenceRun:
     )
 
 
+def _robocap(robocap_block: dict[str, Any]) -> RobocapReference:
+    """The `[robocap]` table: the one rig whose reference is a C++ trajectory, not ground truth.
+
+    Args:
+        robocap_block: The parsed ``[robocap]`` table.
+
+    Returns:
+        What the C++ lane ran, so one place says it and the tools only read it.
+
+    Raises:
+        KeyError: If a key is missing; `load_manifest` names the table around it.
+        ValueError: If the decode path is unknown.
+    """
+    fixtures_block: dict[str, Any] = robocap_block["fixtures"]
+    if robocap_block["decode_path"] not in DECODE_PATH_BY_NAME:
+        raise ValueError(f"robocap: unknown decode path {robocap_block['decode_path']!r}")
+    return RobocapReference(
+        device_id=robocap_block["device_id"],
+        has_ground_truth=bool(robocap_block["has_ground_truth"]),
+        decode_path=DECODE_PATH_BY_NAME[robocap_block["decode_path"]],
+        camera_names=tuple(str(name) for name in robocap_block["camera_names"]),
+        downscale=int(robocap_block["downscale"]),
+        frameset_tolerance_ns=int(robocap_block["frameset_tolerance_ns"]),
+        interpolate_accel_onto_gyro=bool(robocap_block["interpolate_accel_onto_gyro"]),
+        video_time_is_absolute=bool(robocap_block["video_time_is_absolute"]),
+        vio_config=str(robocap_block["vio_config"]),
+        calibration=str(robocap_block["calibration"]),
+        imu=_imu(robocap_block["imu"]),
+        sessions=tuple(
+            RobocapSession(
+                session_id=block["session_id"],
+                segment_id=block["segment_id"],
+                base_url=block["base_url"],
+                slam_url=block["slam_url"],
+                basalt_num_poses=int(block["basalt_num_poses"]),
+            )
+            for block in robocap_block["session"]
+        ),
+        fixtures=TrajectoryFixtures(
+            golden=Path(fixtures_block["golden"]),
+            candidate=Path(fixtures_block["candidate"]),
+            expected_ate_rmse_cm=float(fixtures_block["expected_ate_rmse_cm"]),
+            expected_associated=int(fixtures_block["expected_associated"]),
+        ),
+    )
+
+
 def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
     """Parse the reference manifest.
 
@@ -562,7 +609,8 @@ def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
         validated against their literal alphabets.
 
     Raises:
-        ValueError: If a tier, decode path or ground-truth source is unknown, or a segment id repeats.
+        ValueError: If a tier, decode path or ground-truth source is unknown, a
+            segment id repeats, or the ``[robocap]`` table is absent or missing a key.
     """
     document: dict[str, Any] = tomllib.loads(path.read_text())
     datasets: list[DatasetProperties] = []
@@ -622,39 +670,12 @@ def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
     if len(set(identifiers)) != len(identifiers):
         raise ValueError(f"duplicate segment ids in {path}: {sorted({i for i in identifiers if identifiers.count(i) > 1})}")
 
-    robocap_block: dict[str, Any] = document["robocap"]
-    fixtures_block: dict[str, Any] = robocap_block["fixtures"]
-    if robocap_block["decode_path"] not in DECODE_PATH_BY_NAME:
-        raise ValueError(f"robocap: unknown decode path {robocap_block['decode_path']!r}")
-    robocap: RobocapReference = RobocapReference(
-        device_id=robocap_block["device_id"],
-        has_ground_truth=bool(robocap_block["has_ground_truth"]),
-        decode_path=DECODE_PATH_BY_NAME[robocap_block["decode_path"]],
-        camera_names=tuple(str(name) for name in robocap_block["camera_names"]),
-        downscale=int(robocap_block["downscale"]),
-        frameset_tolerance_ns=int(robocap_block["frameset_tolerance_ns"]),
-        interpolate_accel_onto_gyro=bool(robocap_block["interpolate_accel_onto_gyro"]),
-        video_time_is_absolute=bool(robocap_block["video_time_is_absolute"]),
-        vio_config=str(robocap_block["vio_config"]),
-        calibration=str(robocap_block["calibration"]),
-        imu=_imu(robocap_block["imu"]),
-        sessions=tuple(
-            RobocapSession(
-                session_id=block["session_id"],
-                segment_id=block["segment_id"],
-                base_url=block["base_url"],
-                slam_url=block["slam_url"],
-                basalt_num_poses=int(block["basalt_num_poses"]),
-            )
-            for block in robocap_block["session"]
-        ),
-        fixtures=TrajectoryFixtures(
-            golden=Path(fixtures_block["golden"]),
-            candidate=Path(fixtures_block["candidate"]),
-            expected_ate_rmse_cm=float(fixtures_block["expected_ate_rmse_cm"]),
-            expected_associated=int(fixtures_block["expected_associated"]),
-        ),
-    )
+    if "robocap" not in document:
+        raise ValueError(f"{path}: the manifest has no [robocap] table")
+    try:
+        robocap: RobocapReference = _robocap(document["robocap"])
+    except KeyError as missing:
+        raise ValueError(f"{path}: the [robocap] table is missing the key {missing}") from missing
     return ReferenceManifest(
         schema_version=int(document["schema_version"]),
         catalog_url=document["catalog_url"],

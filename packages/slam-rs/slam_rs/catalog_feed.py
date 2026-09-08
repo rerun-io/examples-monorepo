@@ -274,6 +274,17 @@ class RigProfile:
     and that is what every basalt CSV beside it carries.
     """
 
+    def __post_init__(self) -> None:
+        """Refuse a profile the feed cannot honour, before anything reads a recording with it.
+
+        Raises:
+            ValueError: If ``downscale`` is below one or ``frameset_tolerance_ns`` is negative.
+        """
+        if self.downscale < 1:
+            raise ValueError(f"downscale must be at least 1; got {self.downscale}")
+        if self.frameset_tolerance_ns < 0:
+            raise ValueError(f"frameset_tolerance_ns cannot be negative; got {self.frameset_tolerance_ns}")
+
 
 MSD_RIG: RigProfile = RigProfile()
 """The Monado SLAM Dataset rigs: every camera, native resolution, one clock, paired inertial channels."""
@@ -358,6 +369,10 @@ def camera_calib(index: int, statics: CameraStatics, frequency_hz: float, downsc
     """
     if downscale < 1:
         raise ValueError(f"cam_{index:02d}: downscale must be at least 1; got {downscale}")
+    width: int = int(statics.resolution_wh[0])
+    height: int = int(statics.resolution_wh[1])
+    if width // downscale < 1 or height // downscale < 1:
+        raise ValueError(f"cam_{index:02d}: downscale {downscale} leaves nothing of the {width}x{height} frame")
     if statics.distortion_model not in _MODEL_BY_DISTORTION:
         raise ValueError(f"cam_{index:02d}: unsupported distortion model {statics.distortion_model!r}, known: {sorted(_MODEL_BY_DISTORTION)}")
     model: CameraModelName = _MODEL_BY_DISTORTION[statics.distortion_model][0]
@@ -378,8 +393,8 @@ def camera_calib(index: int, statics: CameraStatics, frequency_hz: float, downsc
     imu_T_cam[:3, 3] = -cam_R_imu.T @ statics.transform_translation
     return CameraCalib(
         index=index,
-        width=int(statics.resolution_wh[0]) // downscale,
-        height=int(statics.resolution_wh[1]) // downscale,
+        width=width // downscale,
+        height=height // downscale,
         frequency_hz=frequency_hz,
         fx=float(k_matrix[0, 0]) / downscale,
         fy=float(k_matrix[1, 1]) / downscale,
@@ -432,6 +447,8 @@ def _static_values(statics: pa.Table, column: str) -> Float64[ndarray, " n"]:
     """One static list component as a flat float64 array."""
     if column not in statics.column_names:
         raise ValueError(f"static column {column} is missing")
+    if statics.num_rows == 0:
+        raise ValueError(f"static column {column} has no rows")
     cell: pa.Scalar = statics[column][0]
     if not cell.is_valid:
         raise ValueError(f"static column {column} is null")
@@ -442,6 +459,8 @@ def _static_string(statics: pa.Table, column: str) -> str:
     """One static string component, bare or wrapped in a single-element list."""
     if column not in statics.column_names:
         raise ValueError(f"static column {column} is missing")
+    if statics.num_rows == 0:
+        raise ValueError(f"static column {column} has no rows")
     cell: pa.Scalar = statics[column][0]
     if not cell.is_valid:
         raise ValueError(f"static column {column} is null")
@@ -460,6 +479,8 @@ def _static_int(statics: pa.Table, column: str) -> int:
     """
     if column not in statics.column_names:
         raise ValueError(f"static column {column} is missing")
+    if statics.num_rows == 0:
+        raise ValueError(f"static column {column} has no rows")
     cell: pa.Scalar = statics[column][0]
     if not cell.is_valid:
         raise ValueError(f"static column {column} is null")
@@ -933,11 +954,37 @@ def match_framesets(camera_t_ns: Sequence[Int64[ndarray, " n_frames"]], toleranc
     return np.array(t_ns, dtype=np.int64), np.array(rows, dtype=np.int64)
 
 
+def _video_codec(table: pa.Table, entity: str) -> CatalogCodecName:
+    """The codec every sample of one camera's stream is in.
+
+    ``VideoStream:codec`` is logged once, as a static, so the value is row zero
+    of the non-null codecs — and a recording that carries neither the samples nor
+    the codec has to say which camera it was asked about rather than raise an
+    index error out of pyarrow.
+
+    Args:
+        table: The three columns ``_read_video_index`` selects: the timeline, ``is_keyframe``, ``codec``.
+        entity: The camera's video entity path, for the error.
+
+    Returns:
+        The codec name the sample wrapper needs.
+
+    Raises:
+        ValueError: If the stream has no samples or carries no codec.
+    """
+    if table.num_rows == 0:
+        raise ValueError(f"{entity}: the recording carries no video samples")
+    codecs: pa.Array = table[2].combine_chunks().drop_null().flatten()
+    if len(codecs) == 0:
+        raise ValueError(f"{entity}: the video stream carries no codec, so its samples cannot be decoded")
+    return catalog_codec_name(int(codecs[0].as_py()))
+
+
 def _read_video_index(dataset: DatasetEntry, segment_id: str, camera_positions: Sequence[int], tolerance_ns: int) -> _VideoIndex:
     """Frameset timing, per-camera frames, shared keyframes and codec, fetched without any sample bytes."""
     per_camera_times: list[Int64[ndarray, " n_frames"]] = []
     per_camera_keyframe: list[Bool[ndarray, " n_frames"]] = []
-    codec_fourcc: int | None = None
+    codec: CatalogCodecName | None = None
     for camera_index in camera_positions:
         entity: str = f"{RIG_ENTITY}/cam_{camera_index:02d}/pinhole/video"
         table: pa.Table = (
@@ -949,8 +996,8 @@ def _read_video_index(dataset: DatasetEntry, segment_id: str, camera_positions: 
         )
         per_camera_times.append(np.asarray(table[TIMELINE].combine_chunks().cast(pa.int64())))
         per_camera_keyframe.append(np.asarray(table[1].combine_chunks().is_valid().to_numpy(zero_copy_only=False), dtype=bool))
-        codec_fourcc = int(table[2].combine_chunks().drop_null().flatten()[0].as_py())
-    if codec_fourcc is None:
+        codec = _video_codec(table, entity)
+    if codec is None:
         raise ValueError(f"{segment_id}: no camera was selected, so no video columns were read")
     if tolerance_ns == 0:
         # MSD is hardware-synced: a frameset is "all cameras at the same
@@ -978,7 +1025,7 @@ def _read_video_index(dataset: DatasetEntry, segment_id: str, camera_positions: 
         frame_index=frame_index,
         camera_t_ns=tuple(per_camera_times),
         keyframe=keyframe,
-        codec=catalog_codec_name(codec_fourcc),
+        codec=codec,
         fps=fps,
     )
 
@@ -1062,11 +1109,22 @@ def pair_accel_onto_gyro(
         One stream on the gyroscope's clock, covering only the overlap.
 
     Raises:
-        ValueError: If either channel is empty, so the overlap cannot exist.
+        ValueError: If a channel is too short to interpolate with, or the two
+            spans do not overlap, so the paired stream would be empty.
     """
-    if gyro_t_ns.size == 0 or accel_t_ns.size == 0:
-        raise ValueError(f"pairing needs both channels; got {gyro_t_ns.size} gyro and {accel_t_ns.size} accel samples")
+    if gyro_t_ns.size == 0 or accel_t_ns.size < 2:
+        raise ValueError(
+            f"pairing needs a gyroscope sample and two accelerometer samples to interpolate between; "
+            f"got {gyro_t_ns.size} gyro and {accel_t_ns.size} accel samples"
+        )
     inside: Bool[ndarray, " n_gyro"] = (gyro_t_ns >= accel_t_ns[0]) & (gyro_t_ns <= accel_t_ns[-1])
+    if not bool(inside.any()):
+        # basalt errors instead of handing the estimator an empty inertial stream
+        # (`dataset_io_robocap.cpp:496`); a rig with no IMU is not this rig.
+        raise ValueError(
+            f"the two inertial channels do not overlap, so nothing pairs: the gyroscope spans "
+            f"{int(gyro_t_ns[0])}..{int(gyro_t_ns[-1])} ns and the accelerometer {int(accel_t_ns[0])}..{int(accel_t_ns[-1])} ns"
+        )
     paired_t_ns: Int64[ndarray, " n_paired"] = gyro_t_ns[inside]
     interpolated: Float64[ndarray, "n_paired 3"] = np.column_stack(
         [np.interp(paired_t_ns, accel_t_ns, accel_m_s2[:, axis]) for axis in range(accel_m_s2.shape[1])]
