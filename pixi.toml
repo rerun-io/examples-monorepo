@@ -2412,28 +2412,25 @@ slam-rs = { path = "packages/slam-rs", editable = true }
 [feature.slam-rs.activation.env]
 PACKAGE_DIR = "packages/slam-rs"
 PYREFLY_TARGET = "slam_rs tools tests"
+# cargo decides the cdylib's prefix and suffix from the target and no rustflag
+# renames it, so the one filename that differs per platform is a variable rather
+# than a second copy of the build task. Not a `lib_core.*` glob: that would also
+# match the `lib_core.d` dep-info file cargo writes beside it.
+CORE_CDYLIB = "lib_core.so"
+
+# macOS writes the cdylib as `lib_core.dylib`; the import name keeps the `.so`
+# suffix, which is what CPython looks for on macOS as well as on Linux. A
+# target-scoped activation env merges with the feature's, so `PACKAGE_DIR` and
+# `PYREFLY_TARGET` are still set here.
+[feature.slam-rs.target.osx-arm64.activation.env]
+CORE_CDYLIB = "lib_core.dylib"
 
 # ── Rust build + gates ───────────────────────────────────────────────────
 # cargo never runs during `pixi lock`/`pixi install`: the extension is built by
 # this task and dropped next to the Python sources, where hatchling's editable
 # .pth already looks (the dpvo / mast3r-slam in-place pattern).
 [feature.slam-rs.tasks.slam-rs-build]
-cmd = "cargo build --release -p slam-rs-py && cp target/release/lib_core.so slam_rs/_core.so"
-cwd = "packages/slam-rs"
-inputs = [
-    "packages/slam-rs/Cargo.toml",
-    "packages/slam-rs/Cargo.lock",
-    "packages/slam-rs/.cargo/config.toml",
-    "packages/slam-rs/crates/*/Cargo.toml",
-    "packages/slam-rs/crates/*/src/**/*.rs",
-]
-outputs = ["packages/slam-rs/slam_rs/_core.so"]
-description = "Build the Rust VIO core and install slam_rs._core in place"
-
-# macOS writes the cdylib as `lib_core.dylib`; the import name keeps the `.so`
-# suffix, which is what CPython looks for on macOS as well as on Linux.
-[feature.slam-rs.target.osx-arm64.tasks.slam-rs-build]
-cmd = "cargo build --release -p slam-rs-py && cp target/release/lib_core.dylib slam_rs/_core.so"
+cmd = "cargo build --release -p slam-rs-py && cp target/release/$CORE_CDYLIB slam_rs/_core.so"
 cwd = "packages/slam-rs"
 inputs = [
     "packages/slam-rs/Cargo.toml",
