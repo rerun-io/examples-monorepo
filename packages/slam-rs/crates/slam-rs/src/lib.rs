@@ -286,6 +286,8 @@ macro_rules! on_lane {
 }
 
 impl FrontendLane {
+    // ── the seven [`Vio`] drives ──────────────────────────────────────────
+
     /// Which backend this lane runs.
     pub fn backend(&self) -> Backend {
         match self {
@@ -340,6 +342,13 @@ impl FrontendLane {
         on_lane!(self, |flow| flow.config())
     }
 
+    /// Publish a new average scene depth.
+    pub fn set_depth_guess(&mut self, depth: f32) {
+        on_lane!(self, |flow| flow.set_depth_guess(depth));
+    }
+
+    // ── the rest, which only `slam-rs-py`'s standalone `OpticalFlow` reads ─
+
     /// Cameras in the rig.
     pub fn camera_count(&self) -> usize {
         on_lane!(self, |flow| flow.camera_count())
@@ -373,11 +382,6 @@ impl FrontendLane {
     /// The last committed frameset's timestamp, `None` before the first.
     pub fn t_ns(&self) -> Option<i64> {
         on_lane!(self, |flow| flow.t_ns())
-    }
-
-    /// Publish a new average scene depth.
-    pub fn set_depth_guess(&mut self, depth: f32) {
-        on_lane!(self, |flow| flow.set_depth_guess(depth));
     }
 }
 
@@ -850,9 +854,11 @@ impl<S: lie::LieScalar> Vio<S> {
     /// reaches no decision on the shipped path; widening the frontend's field is
     /// the fix if one ever does.
     fn publish_depth_guess(&mut self) -> Result<(), VioError> {
-        if self.estimator.ba.calib.t_i_c.is_empty()
-            || self.frontend.config().optical_flow_matching_guess_type
-                != config::MatchingGuessType::ReprojAvgDepth
+        // No `t_i_c.is_empty()` clause: `SqrtKeypointVio::new` refuses a rig of
+        // fewer than two cameras and is the only way to build the estimator a
+        // `Vio` holds, so the rig cannot be empty here.
+        if self.frontend.config().optical_flow_matching_guess_type
+            != config::MatchingGuessType::ReprojAvgDepth
         {
             return Ok(());
         }

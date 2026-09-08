@@ -407,7 +407,7 @@ fn the_whitening_is_idempotent_on_the_observable_directions() {
     }
 }
 
-/// The `singular` run, spelled out: this is the case the review caught.
+/// The `singular` run, spelled out: a rank-deficient covariance.
 #[test]
 fn a_rank_deficient_covariance_whitens_to_zero_position_weight() {
     let oracle: Oracle = serde_json::from_str(ORACLE).unwrap();
@@ -441,7 +441,7 @@ fn a_rank_deficient_covariance_whitens_to_zero_position_weight() {
     assert!((m[(0, 6)] - 869.56521739130437).abs() <= 1e-9);
 }
 
-/// The re-review's case: one 5 ms sample from a *rotating*, accelerating rig.
+/// One 5 ms sample from a *rotating*, accelerating rig.
 ///
 /// The covariance is rank deficient here too, but which direction loses its
 /// pivot is decided by the last bits of `SO3::matrix()`. nalgebra builds a

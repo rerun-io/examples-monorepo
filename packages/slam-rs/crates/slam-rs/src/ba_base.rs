@@ -509,7 +509,11 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
     ///
     /// Sequential in this stage. The body is a fold over `host_frames` in index
     /// order, so a `par_chunks` with a fixed-order merge is a drop-in that does
-    /// not change the sum (decision D31).
+    /// not change the sum (decision D31). **That is the only reason
+    /// `host_frame_error` is a separate function** — one host frame's
+    /// partial sum is what a parallel task would own. It is not inlined here so
+    /// the shape stays the C++'s (`ba_base.cpp:141-193` is a TBB lambda), and
+    /// D65 freezes the parallel path out of this stage.
     pub fn compute_error(
         &self,
         mut outliers: Option<&mut BTreeMap<LandmarkId, Vec<(TimeCamId, S)>>>,

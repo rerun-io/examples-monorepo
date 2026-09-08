@@ -599,9 +599,8 @@ fn a_window_that_disagrees_with_the_prior_is_refused() {
 /// C++ never checks any of them — `:1090-1112` erases what the sets name in
 /// order, with `frame_states.at()` throwing and `frame_poses.erase()` silently
 /// doing nothing — so a schedule that disagrees with the window took effect
-/// before it was noticed. These are the cases the S7 review reproduced; the
-/// re-review's refused demotion is a *valid* schedule over a window that is not
-/// frozen, and has its own test.
+/// before it was noticed. Eight ways it can disagree are covered here; a
+/// *valid* schedule over a window that is not frozen is the neighbouring test.
 #[test]
 fn an_invalid_schedule_is_refused_before_anything_changes() {
     let unknown: FrameId = 999;

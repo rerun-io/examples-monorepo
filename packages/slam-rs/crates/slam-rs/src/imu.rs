@@ -818,7 +818,7 @@ static ANTIPARALLEL_WARNING: std::sync::Once = std::sync::Once::new();
 /// When the signs disagree the two rotations differ by twice the branch's
 /// deficit angle, bounded by `2·sqrt(2·dummy_precision)`: **2.83e-6 rad in
 /// `f64`, 8.94e-3 rad in `f32`**. Measured worst cases on the sweep are 9.9e-7
-/// and 9.8e-4, and the reviewer's own random inputs reached 2.3e-6 and 2.2e-3.
+/// and 9.8e-4; a second sweep of random inputs reached 2.3e-6 and 2.2e-3.
 /// It is *Eigen* that is the inaccurate side: over the sweep its own tilt error
 /// reaches 9.9e-7 (`f64`) and 9.9e-4 (`f32`) where the closed form stays at
 /// 1.4e-9 and 3.2e-4. That is still a parity gap against the C++ reference, and

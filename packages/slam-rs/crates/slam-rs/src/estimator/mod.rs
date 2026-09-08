@@ -45,6 +45,50 @@
 //! the VIO calls it. The visualization payloads (`:643-663`) become
 //! [`SqrtKeypointVio::snapshot`], which returns values; the Rerun rung that logs
 //! them is stage S9's (D03).
+//!
+//! ## Where an error leaves the window
+//!
+//! Three classes, and only the first is retryable. The class is the **call site**, not the variant:
+//! [`EstimatorError::BundleAdjustment`] and [`EstimatorError::State`] are each raised from more
+//! than one, and the sites fall in different classes.
+//!
+//! 1. **Raised before anything moves**, so the estimator is untouched and the
+//!    caller may retry with a corrected input: [`EstimatorError::CameraCountMismatch`]
+//!    and [`EstimatorError::NonMonotonicFrame`] from [`SqrtKeypointVio::process_frame`]'s
+//!    validation, and [`EstimatorError::UnsupportedPath`], [`EstimatorError::EnforceRealtime`],
+//!    [`EstimatorError::EmptyWindow`] and one [`EstimatorError::BundleAdjustment`] site from
+//!    [`SqrtKeypointVio::new`]: [`BaError::Camera`], raised while
+//!    [`BundleAdjustmentBase::new`] resolves the rig's projection models
+//!    (`ba_base.rs:647`, `camera.rs:1058`), which returns before an estimator
+//!    exists at all, so a corrected calibration may be passed to a new one.
+//! 2. **Raised after the IMU queue was consumed but before the new state was
+//!    filed.** [`EstimatorError::ImuQueueRanDry`] and [`EstimatorError::Imu`] come out of the
+//!    preintegration loops, which have already popped samples; and
+//!    [`EstimatorError::PreviousStateMissing`] comes out of `measure`'s prediction, after
+//!    the same pops. The window still holds the frames it did, but the samples
+//!    that interval needed are gone, so the same frameset can never be
+//!    integrated again: not retryable either.
+//! 3. **Raised after the new state, its observations and its preintegration
+//!    were inserted** — every remaining variant, and all but one of the sites
+//!    inside `measure`: the window-invariant breaks, `NumericallyInvalid` from
+//!    the LM loop, and anything `Linearize`, `Marginalize`, `BundleAdjustment`,
+//!    `Landmark` or `State` refuses there. The window has advanced by one
+//!    frameset while `prev_frame` has not, so retrying the same frameset would
+//!    file its observations twice.
+//!
+//!    One class-3 site sits before `measure`: `process_frame`'s initialization
+//!    pushes the first ordering entry (`:281-283`) after it has filed the first
+//!    state, so its [`EstimatorError::State`] would leave that same advanced window. It
+//!    cannot fire — the push is the first into a fresh [`AbsOrderMap`], with
+//!    nothing for `DuplicateFrame` to collide with and a fixed
+//!    `POSE_VEL_BIAS_SIZE` that cannot overflow the offset — and stays a `?`
+//!    because D32 leaves no room for the `unwrap` that would replace it.
+//!
+//! basalt has one answer to classes 2 and 3: it resets the whole estimator
+//! (`proc_func`'s `return false`, `scheduleResetState` at `:120-195`), which
+//! this port does not have. A caller that sees one of them must rebuild the
+//! estimator. Stage S9's Realtime mode is where the reset belongs (D5 of the S8
+//! simplify list).
 
 mod optimize;
 mod schedule;
@@ -105,48 +149,9 @@ impl std::fmt::Display for WindowRole {
 /// `.at()`, or a `return false` that makes `proc_func` reset the whole state.
 /// Under D32 none of them may panic on data, so each becomes a variant here.
 ///
-/// **Where the window is left, per error.** Three classes, and only the first
-/// is retryable. The class is the **call site**, not the variant:
-/// [`Self::BundleAdjustment`] and [`Self::State`] are each raised from more
-/// than one, and the sites fall in different classes.
-///
-/// 1. **Raised before anything moves**, so the estimator is untouched and the
-///    caller may retry with a corrected input: [`Self::CameraCountMismatch`]
-///    and [`Self::NonMonotonicFrame`] from [`SqrtKeypointVio::process_frame`]'s
-///    validation, and [`Self::UnsupportedPath`], [`Self::EnforceRealtime`],
-///    [`Self::EmptyWindow`] and one [`Self::BundleAdjustment`] site from
-///    [`SqrtKeypointVio::new`]: [`BaError::Camera`], raised while
-///    [`BundleAdjustmentBase::new`] resolves the rig's projection models
-///    (`ba_base.rs:647`, `camera.rs:1058`), which returns before an estimator
-///    exists at all, so a corrected calibration may be passed to a new one.
-/// 2. **Raised after the IMU queue was consumed but before the new state was
-///    filed.** [`Self::ImuQueueRanDry`] and [`Self::Imu`] come out of the
-///    preintegration loops, which have already popped samples; and
-///    [`Self::PreviousStateMissing`] comes out of `measure`'s prediction, after
-///    the same pops. The window still holds the frames it did, but the samples
-///    that interval needed are gone, so the same frameset can never be
-///    integrated again: not retryable either.
-/// 3. **Raised after the new state, its observations and its preintegration
-///    were inserted** — every remaining variant, and all but one of the sites
-///    inside `measure`: the window-invariant breaks, `NumericallyInvalid` from
-///    the LM loop, and anything `Linearize`, `Marginalize`, `BundleAdjustment`,
-///    `Landmark` or `State` refuses there. The window has advanced by one
-///    frameset while `prev_frame` has not, so retrying the same frameset would
-///    file its observations twice.
-///
-///    One class-3 site sits before `measure`: `process_frame`'s initialization
-///    pushes the first ordering entry (`:281-283`) after it has filed the first
-///    state, so its [`Self::State`] would leave that same advanced window. It
-///    cannot fire — the push is the first into a fresh [`AbsOrderMap`], with
-///    nothing for `DuplicateFrame` to collide with and a fixed
-///    `POSE_VEL_BIAS_SIZE` that cannot overflow the offset — and stays a `?`
-///    because D32 leaves no room for the `unwrap` that would replace it.
-///
-/// basalt has one answer to classes 2 and 3: it resets the whole estimator
-/// (`proc_func`'s `return false`, `scheduleResetState` at `:120-195`), which
-/// this port does not have. A caller that sees one of them must rebuild the
-/// estimator. Stage S9's Realtime mode is where the reset belongs (D5 of the S8
-/// simplify list).
+/// **Which errors leave the window where** is a property of the call site, not
+/// of the variant, and is set out under "Where an error leaves the window" in
+/// the module header.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EstimatorError {
     /// `vio_linearization_type` is not `ABS_QR`, or `vio_sqrt_marg` is false:
@@ -860,7 +865,8 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             })
             .collect();
 
-        let mut landmarks: Vec<SnapshotLandmark<S>> = Vec::new();
+        let mut landmarks: Vec<SnapshotLandmark<S>> =
+            Vec::with_capacity(self.ba.lmdb.num_landmarks());
         for lm in self.ba.lmdb.landmarks() {
             let Ok(host) = self.ba.get_pose_state_with_lin(lm.host_kf_id.frame_id) else {
                 continue;

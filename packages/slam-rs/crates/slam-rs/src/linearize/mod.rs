@@ -82,9 +82,11 @@ use crate::types::{CamId, FrameId, LandmarkId};
 /// This is one step of `performQRHouseholder`
 /// (`landmark_block_abs_dynamic.hpp:445-453`), with Eigen's `makeHouseholder`
 /// and `applyHouseholderOnTheLeft` arithmetic ported rather than nalgebra's
-/// (see `crate::eigen::qr` for why). Exposed because the marginalization QR of
-/// `marg_helper.cpp:293-317` drives the same primitive over a wider matrix, and
-/// because the ported `test_qr.cpp` builds a full QR out of it.
+/// (see `crate::eigen::qr` for why). It is a **test-facing** primitive: the
+/// only caller is `tests/linearize_reference.rs`, where the ported `test_qr.cpp`
+/// builds a full QR out of it. (`marg/helper.rs` drives the same Eigen
+/// primitive over a wider matrix, but calls `make_householder` and
+/// `apply_householder_on_the_left_block` directly.)
 ///
 /// Allocates two scratch vectors per call; the landmark block preallocates
 /// instead, because it runs three of these per landmark per iteration.

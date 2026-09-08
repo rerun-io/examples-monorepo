@@ -832,13 +832,13 @@ fn the_huber_cost_matches_the_cpp_in_float() {
     check_huber::<f32>(&entries, 0.0);
 
     // Named explicitly, so a regression on this one case is unmissable.
-    let reviewers_case: &OracleHuber = entries
+    let named_case: &OracleHuber = entries
         .iter()
         .find(|e| e.res == vec![10.125, 9.625])
         .unwrap();
     let res: Vector2<f32> = Vector2::new(10.125, 9.625);
     let (_, cost) = huber_cost(&res, res.norm(), 1.0, 0.5);
-    assert_eq!(f64::from(cost), reviewers_case.cost);
+    assert_eq!(f64::from(cost), named_case.cost);
     // The C++ `%.17g` printout of that float, to every figure.
     assert_eq!(f64::from(cost), 53.879_341_125_488_281);
     // And what the reassociated form returns instead, which must NOT be it.

@@ -101,7 +101,8 @@ fn the_reduction_reproduces_tbbs_association_bit_for_bit() {
     assert_eq!(fold_disagreements, 90);
 }
 
-/// The one case the review measured, spelled out: `f32 [2²⁴, 1, 1, 1]`.
+/// The case that shows the tree is not a fold, spelled out:
+/// `f32 [2²⁴, 1, 1, 1]`, where `2²⁴ + 1` is not representable.
 #[test]
 fn the_four_element_tree_is_not_a_left_fold() {
     let values: [f32; 4] = [16_777_216.0, 1.0, 1.0, 1.0];
