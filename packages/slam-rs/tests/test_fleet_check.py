@@ -6,15 +6,18 @@ needs none of that: the verdict a clip's numbers earn, and how the row reads.
 """
 
 import json
-from dataclasses import replace
+import math
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
 
 from slam_rs.apis import fleet_check
-from slam_rs.apis.fleet_check import ClipResult, Config, main, measure
+from slam_rs.apis.fleet_check import ClipResult, Config, clip_json, main, measure
 from slam_rs.machine import Machine
-from slam_rs.reference import MANIFEST_PATH, PATH_BOUND_MAX_CLIP_S, SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment
+from slam_rs.reference import MANIFEST_PATH, PATH_BOUND_MAX_CLIP_S, SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment, pose_floor_text
+from slam_rs.tracking import SegmentRun
+from slam_rs.trajectory import empty_trajectory
 
 CLIP_JSON_KEYS: tuple[str, ...] = (
     "segment_id",
@@ -131,6 +134,60 @@ def test_a_handful_of_associated_poses_is_not_a_comparison() -> None:
     """``ate`` returns a number for two poses on purpose; the floor is what makes it a verdict."""
     thin: ClipResult = replace(PASSING, cpp_associated=3)
     assert "only 3 poses associated with the C++ run" in thin.failures[0]
+
+
+def test_a_run_below_the_pose_floor_is_not_a_trajectory_at_all() -> None:
+    """D60's first clause, which the fleet row did not have: three poses is not a trajectory.
+
+    The gate has always refused a run this short in these words, and a fleet row
+    used to reach the association floor instead and call it "only 3 poses
+    associated with the C++ run" — a verdict about the comparison, where the
+    finding is about the run. Below the floor nothing was scored, so the two
+    errors are not numbers.
+    """
+    dead: ClipResult = replace(PASSING, tracked=3, cpp_associated=3, cpp_rmse_cm=math.nan, gt_rmse_cm=math.nan)
+    assert dead.failures == (pose_floor_text(tracked=3, framesets=412),)
+    assert dead.verdict == "fail: 3 poses over 412 framesets is not a trajectory"
+
+
+def test_a_clip_the_estimator_never_tracked_is_a_row_and_not_a_traceback(
+    manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A machine where the port produces nothing has to report that, which is the whole purpose of the tool.
+
+    ``ate`` refuses a run with no pose — there is nothing to align — so a row
+    built by calling it first was a traceback on exactly the machine the fleet
+    lane exists to find. The verdict is D60's pose floor, the two errors read as
+    NaN, the JSON keeps its keys, and the run exits non-zero.
+    """
+
+    def never(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("`ate` was called on a run below D60's pose floor")
+
+    monkeypatch.setattr(fleet_check, "ate", never)
+    monkeypatch.setattr(
+        fleet_check, "run_segment", lambda *_args, **_kwargs: SegmentRun(estimate=empty_trajectory(), framesets=412, lost=412, wall_s=1.0)
+    )
+    # Neither reference is opened for its numbers here, and this keeps the case
+    # runnable on a machine with no corpus at all.
+    monkeypatch.setattr(fleet_check, "read_trajectory", lambda _path: empty_trajectory())
+    segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENTS[1])
+
+    dead: ClipResult = measure(manifest, segment)
+    assert dead.tracked == 0
+    assert dead.failures == (pose_floor_text(tracked=0, framesets=412),)
+    assert math.isnan(dead.cpp_rmse_cm)
+    assert math.isnan(dead.gt_rmse_cm)
+    assert dead.cpp_associated == 0
+
+    output: Path = tmp_path / "fleet_check.json"
+    with pytest.raises(SystemExit, match="is not a trajectory"):
+        main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1],), output_json=output))
+    written: dict = json.loads(output.read_text())
+    assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)
+    assert written["clips"][0]["verdict"].startswith("fail:")
+    # NaN is what the chart's own `f"{value:.2f}"` reads; None is what it cannot.
+    assert math.isnan(asdict(clip_json(dead))["cpp_rmse_cm"])
 
 
 def test_a_reference_trajectory_that_is_not_here_is_refused_before_the_replay(

@@ -20,12 +20,31 @@ from slam_rs.reference import (
     CppAte,
     ReferenceManifest,
     ReferenceSegment,
+    d60_failures,
     flow_config,
     load_manifest,
 )
 
 CATALOG_CONNECT_TIMEOUT_S: float = 3.0
 """How long the slow test waits for the catalog before it skips."""
+GATED_TEN_CLIP_RUN: dict[str, tuple[int, float, float]] = {
+    "msd-g2__MGO_others__MGO09_short_1_updown": (107, 0.31, 0.77),
+    "msd-index__MIO_others__MIO10_short_2_panorama": (412, 0.31, 1.50),
+    "msd-g2__MGO_others__MGO07_mapping_easy": (1596, 0.63, 2.29),
+    "msd-g2__MGO_others__MGO14_flickering_light": (2887, 1.21, 8.73),
+    "msd-g2__MGO_others__MGO13_sudden_movements": (3735, 1.83, 79.05),
+    "msd-index__MIO_others__MIO07_mapping_easy": (4095, 1.27, 2.08),
+    "msd-g2__MGO_others__MGO01_low_light": (4255, 1.19, 42.75),
+    "msd-index__MIO_others__MIO04_hand_shooter_hard": (6119, 5.19, 19.86),
+    "msd-index__MIO_others__MIO14_moving_props": (22117, 5.51, 8.73),
+    "msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_fight_2": (31577, 2.91, 38.53),
+}
+"""The V2 milestone's own ten-clip run, from ``reports/pr16-v2-ten-gated.txt``: framesets, cm from the C++, cm from ground truth.
+
+Every clip tracked every frameset it was fed and lost none, so one count is the
+whole row. The verdict this run earned is what any change to
+:func:`~slam_rs.reference.d60_failures` has to reproduce.
+"""
 
 
 def test_the_manifest_holds_ten_segments(manifest: ReferenceManifest) -> None:
@@ -231,6 +250,40 @@ def test_every_dataset_names_a_vendored_config_that_parses(manifest: ReferenceMa
         assert text == path.read_text()
         radius: float = json.loads(text)["value0"]["config.optical_flow_image_safe_radius"]
         assert _core.VioConfig.from_json(text).optical_flow_image_safe_radius == radius, dataset.name
+
+
+def test_the_gated_ten_clip_run_still_earns_the_verdict_it_earned(manifest: ReferenceManifest) -> None:
+    """The V2 milestone, replayed through the shared verdict rather than the estimator.
+
+    D60's clauses are conditional and its inputs grow — the tracked-pose floor
+    joined them here — so the numbers the milestone was declared on are the
+    oracle: every one of the ten still passes, and none of them passes for a
+    reason it did not pass for then. The policy, the C++'s own band and the
+    replayed span come from the manifest, so only the port's own measurements are
+    typed in.
+    """
+    for segment_id, (framesets, cpp_rmse_cm, gt_rmse_cm) in GATED_TEN_CLIP_RUN.items():
+        segment: ReferenceSegment = manifest.by_id(segment_id)
+        expected: CppAte = segment.reference.expected_cpp_ate
+        assert (
+            d60_failures(
+                gate_policy=segment.reference.gate_policy,
+                framesets=framesets,
+                tracked=framesets,
+                lost=0,
+                associated=framesets,
+                replayed_s=segment.capture.duration_ns * 1e-9,
+                cpp_rmse_cm=cpp_rmse_cm,
+                gt_rmse_cm=gt_rmse_cm,
+                band=(expected.rmse_cm, expected.rmse_cm_f64),
+                # The two `no_divergence` clips are the only ones that read an
+                # extent, and both stayed inside the truth's own.
+                extent_m=1.0,
+                truth_extent_m=1.0,
+                poses_finite=True,
+            )
+            == []
+        ), segment_id
 
 
 def test_an_unknown_tier_is_rejected(tmp_path: Path) -> None:

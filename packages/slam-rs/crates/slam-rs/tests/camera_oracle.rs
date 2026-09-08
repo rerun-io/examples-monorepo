@@ -24,7 +24,7 @@
 //! same expressions in the same order but are free to contract `a * b + c` into
 //! an FMA differently. The `f32` pass asks for **exact equality on x86-64**,
 //! which is where the fixture was produced and where the two agree bit for bit;
-//! see [`F32_TOLERANCE`] for the band the other targets get.
+//! see [`F32_ULP_LIMIT`] for the band the other targets get.
 
 #![allow(clippy::unwrap_used)]
 
@@ -50,7 +50,8 @@ const TOLERANCE: f64 = 1e-15;
 /// bit-equality.
 const UNPROJECT_TOLERANCE: f64 = 1e-12;
 
-/// What the `f32` pass allows: exact on `x86_64`, two ULP anywhere else.
+/// What the `f32` pass allows, counted in ULP: bit-exact on `x86_64`, two ULP
+/// anywhere else.
 ///
 /// The fixture is a dump the C++ produced on `x86_64`, so exact equality there
 /// is a statement about the port. Elsewhere it is a statement about a second
@@ -62,13 +63,12 @@ const UNPROJECT_TOLERANCE: f64 = 1e-12;
 /// just close enough"), and two ULP is four orders of magnitude tighter than the
 /// centimetre the trajectory gate reads.
 ///
-/// The band is relative to [`assert_within`]'s `max(|want|, 1)` scale, so below
-/// unit magnitude it is looser than two ULP of the value itself.
-const F32_TOLERANCE: f64 = if cfg!(target_arch = "x86_64") {
-    0.0
-} else {
-    2.0 * f32::EPSILON as f64
-};
+/// ULP and not an absolute band, because an absolute band is not the limit it
+/// claims to be: `2 * f32::EPSILON` on [`assert_within`]'s `max(|want|, 1)`
+/// scale is 2.4e-7, which at that 0.236 bearing is sixteen ULP and near zero is
+/// unbounded in ULP. [`ulp_check`] is the comparison, and
+/// [`the_f32_comparator_counts_ulps`] is the test of it.
+const F32_ULP_LIMIT: u64 = if cfg!(target_arch = "x86_64") { 0 } else { 2 };
 
 #[derive(Debug, Deserialize)]
 struct Oracle {
@@ -149,6 +149,79 @@ fn assert_within(tolerance: f64, what: &str, actual: &[f64], expected: &[Option<
 #[track_caller]
 fn assert_matches(what: &str, actual: &[f64], expected: &[Option<f64>]) {
     assert_within(TOLERANCE, what, actual, expected);
+}
+
+/// Where a finite `f32` sits in the ordered sequence of every `f32`, as an
+/// integer: neighbouring representable numbers are one apart, `-0.0` and `+0.0`
+/// are one point, and a pair straddling zero counts through it.
+fn ordinal(value: f32) -> i64 {
+    let bits: u32 = value.to_bits();
+    if bits >> 31 == 0 {
+        i64::from(bits)
+    } else {
+        -i64::from(bits & 0x7fff_ffff)
+    }
+}
+
+/// How many representable `f32` values apart two numbers are — their ULP
+/// distance. A non-finite number on either side is `u64::MAX`, which no limit
+/// this oracle runs with accepts.
+fn ulp_distance(got: f32, want: f32) -> u64 {
+    if !got.is_finite() || !want.is_finite() {
+        return u64::MAX;
+    }
+    (ordinal(got) - ordinal(want)).unsigned_abs()
+}
+
+/// Every coefficient within `limit` ULP of the C++ `float`, and non-finite
+/// exactly where the C++ is non-finite.
+///
+/// A value rather than an assertion so the comparison itself can be tested; the
+/// message names the ULP distance, which is the number a limit is read against.
+fn ulp_check(
+    limit: u64,
+    what: &str,
+    actual: &[f32],
+    expected: &[Option<f64>],
+) -> Result<(), String> {
+    if actual.len() != expected.len() {
+        return Err(format!(
+            "{what}: {} coefficients against basalt's {}",
+            actual.len(),
+            expected.len()
+        ));
+    }
+    for (index, (got, want)) in actual.iter().zip(expected.iter()).enumerate() {
+        match want {
+            // Exact: the fixture prints the C++ `float`, so the `f64` it parses
+            // as is that `float` widened and narrows back to it.
+            Some(want) => {
+                let want: f32 = *want as f32;
+                let distance: u64 = ulp_distance(*got, want);
+                if distance > limit {
+                    return Err(format!(
+                        "{what}[{index}]: got {got}, basalt says {want}, {distance} ULP apart, limit {limit}"
+                    ));
+                }
+            }
+            None => {
+                if got.is_finite() {
+                    return Err(format!(
+                        "{what}[{index}]: got {got}, basalt says a non-finite number"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [`ulp_check`] as an assertion.
+#[track_caller]
+fn assert_within_ulps(limit: u64, what: &str, actual: &[f32], expected: &[Option<f64>]) {
+    if let Err(message) = ulp_check(limit, what, actual, expected) {
+        panic!("{message}");
+    }
 }
 
 /// Row-major readout of a Jacobian, the layout the fixture writes.
@@ -326,7 +399,7 @@ fn the_oracle_cameras_are_the_shipped_calibrations() {
 }
 
 /// The `f32` instantiation reproduces the C++ `float` build pixel and bearing on
-/// all ten cameras: exactly on `x86_64`, inside [`F32_TOLERANCE`] elsewhere.
+/// all ten cameras: bit for bit on `x86_64`, within [`F32_ULP_LIMIT`] elsewhere.
 ///
 /// The bearing is the point of this test. Getting the pixel right leaves the
 /// unprojection free to drift: it took reproducing Eigen's 2x2 inverse
@@ -354,11 +427,10 @@ fn the_f32_instantiation_matches_the_cpp() {
                 point.valid,
                 "{what}: validity"
             );
-            let widened: Vec<f64> = proj.iter().map(|value| f64::from(*value)).collect();
-            assert_within(
-                F32_TOLERANCE,
+            assert_within_ulps(
+                F32_ULP_LIMIT,
                 &format!("{what}: proj"),
-                &widened,
+                proj.as_slice(),
                 &point.proj,
             );
 
@@ -368,17 +440,109 @@ fn the_f32_instantiation_matches_the_cpp() {
                 point.unproject_valid,
                 "{what}: unprojection validity"
             );
-            let widened: Vec<f64> = bearing.iter().map(|value| f64::from(*value)).collect();
-            assert_within(
-                F32_TOLERANCE,
+            assert_within_ulps(
+                F32_ULP_LIMIT,
                 &format!("{what}: unproject"),
-                &widened,
+                bearing.as_slice(),
                 &point.unproject,
             );
             checked += 1;
         }
     }
     assert_eq!(checked, 300);
+}
+
+/// The comparison the `f32` pass makes, on values whose ULP distance is known.
+///
+/// The band this replaced was `2 * f32::EPSILON` scaled by `max(|want|, 1)`: at
+/// the documented 0.236 bearing that is 2.4e-7 against a 1.5e-8 ULP — sixteen of
+/// them — and at 1e-6 it is five orders of magnitude looser still, so a real
+/// three-ULP regression passed off the reference host. One and two ULP are what
+/// the Mac's own difference is inside; three is a regression, on either side of
+/// zero and at any magnitude.
+#[test]
+fn the_f32_comparator_counts_ulps() {
+    // The limit the oracle pass runs with: bit-exact where the fixture was
+    // produced, two ULP on a second toolchain.
+    #[cfg(target_arch = "x86_64")]
+    assert_eq!(F32_ULP_LIMIT, 0);
+    #[cfg(not(target_arch = "x86_64"))]
+    assert_eq!(F32_ULP_LIMIT, 2);
+
+    for anchor in [0.236_f32, -0.236, 1e-6, -1e-6, 1.0, -1.0] {
+        let want: Vec<Option<f64>> = vec![Some(f64::from(anchor))];
+        assert!(
+            ulp_check(2, "same", &[anchor], &want).is_ok(),
+            "{anchor} against itself"
+        );
+        for steps in [1_i64, -1, 2, -2] {
+            let moved: f32 = step_ulps(anchor, steps);
+            assert_eq!(
+                ulp_distance(moved, anchor),
+                steps.unsigned_abs(),
+                "{anchor} moved {steps}"
+            );
+            assert!(
+                ulp_check(2, "inside", &[moved], &want).is_ok(),
+                "{anchor} moved {steps} ULP"
+            );
+            // The x86-64 limit is bit equality, so one ULP already misses it.
+            assert!(
+                ulp_check(0, "exact", &[moved], &want).is_err(),
+                "{anchor} moved {steps} ULP, limit 0"
+            );
+        }
+        for steps in [3_i64, -3] {
+            let moved: f32 = step_ulps(anchor, steps);
+            let refused: String = ulp_check(2, "outside", &[moved], &want).unwrap_err();
+            assert!(
+                refused.contains("3 ULP apart, limit 2"),
+                "{anchor} moved {steps} ULP: {refused}"
+            );
+        }
+    }
+
+    // Zero: the two signed zeros are one number, and a pair straddling zero
+    // counts through it rather than through the whole negative range.
+    assert_eq!(ulp_distance(0.0, -0.0), 0);
+    assert!(ulp_check(0, "signed zero", &[-0.0], &[Some(0.0)]).is_ok());
+    assert_eq!(ulp_distance(step_ulps(0.0, 1), step_ulps(0.0, -1)), 2);
+    assert!(
+        ulp_check(
+            2,
+            "across zero",
+            &[step_ulps(0.0, 1)],
+            &[Some(f64::from(step_ulps(0.0, -1)))]
+        )
+        .is_ok()
+    );
+    assert!(
+        ulp_check(
+            2,
+            "across zero",
+            &[step_ulps(0.0, 2)],
+            &[Some(f64::from(step_ulps(0.0, -2)))]
+        )
+        .is_err()
+    );
+
+    // A non-finite number is not a near miss, in either direction, and is
+    // accepted only where the C++ is non-finite too.
+    assert!(ulp_check(2, "not a number", &[f32::NAN], &[Some(0.236)]).is_err());
+    assert!(ulp_check(2, "infinite", &[f32::INFINITY], &[Some(0.236)]).is_err());
+    assert!(ulp_check(2, "finite", &[0.236], &[None]).is_err());
+    assert!(ulp_check(0, "both non-finite", &[f32::NAN], &[None]).is_ok());
+}
+
+/// `value` moved `steps` representable `f32` values along the number line, the
+/// inverse of [`ordinal`]: how the case above builds a number a known ULP away.
+fn step_ulps(value: f32, steps: i64) -> f32 {
+    let moved: i64 = ordinal(value) + steps;
+    if moved >= 0 {
+        f32::from_bits(moved as u32)
+    } else {
+        f32::from_bits((-moved) as u32 | 0x8000_0000)
+    }
 }
 
 /// Pixels handed straight to `unproject`, including the singular Newton case.

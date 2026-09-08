@@ -14,6 +14,7 @@ port is a port.
 """
 
 import json
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from slam_rs.machine import Machine, this_machine, this_peak_rss_mb
 from slam_rs.reference import (
     GT_BAND_RATIO,
     MANIFEST_PATH,
+    MIN_TRACKED_POSES,
     SMOKE_SEGMENTS,
     CppAte,
     GatePolicy,
@@ -49,9 +51,9 @@ class ClipResult:
     lost: int
     """Framesets still held when the clip ended, so never covered by inertial samples (D17)."""
     cpp_rmse_cm: float
-    """ATE against the basalt C++ trajectory on the same footage."""
+    """ATE against the basalt C++ trajectory on the same footage; NaN where the run was below D60's pose floor and never scored."""
     gt_rmse_cm: float
-    """ATE against the ``gt.csv`` sidecar."""
+    """ATE against the ``gt.csv`` sidecar; NaN on the same runs :attr:`cpp_rmse_cm` is."""
     cpp_gt_band_cm: tuple[float, float]
     """The C++'s own ground-truth error on this clip, in its ``f32`` and ``f64`` precisions (D60)."""
     wall_s: float
@@ -99,6 +101,7 @@ class ClipResult:
             d60_failures(
                 gate_policy=self.gate_policy,
                 framesets=self.framesets,
+                tracked=self.tracked,
                 lost=self.lost,
                 associated=self.cpp_associated,
                 replayed_s=self.replayed_s,
@@ -135,6 +138,8 @@ def measure(manifest: ReferenceManifest, segment: ReferenceSegment) -> ClipResul
 
     Returns:
         The clip's numbers, with the peak resident set the process has reached.
+        A run below D60's pose floor carries NaN for both errors: it was not
+        scored, and the verdict says so.
 
     Raises:
         FileNotFoundError: If the C++ trajectory is not on this machine, with the
@@ -147,24 +152,29 @@ def measure(manifest: ReferenceManifest, segment: ReferenceSegment) -> ClipResul
     if not reference.available:
         raise FileNotFoundError(reference.reason)
     run: SegmentRun = run_segment(manifest, segment)
-    against_cpp: AteResult = ate(run.estimate, read_trajectory(reference.path))
+    tracked: int = len(run.estimate)
     truth: Trajectory = read_trajectory(segment.gt_csv)
-    against_gt: AteResult = ate(run.estimate, truth)
+    # A run below the floor is not scored at all: `ate` has no pose to align and
+    # raises, and a machine that tracked nothing is precisely the machine this
+    # tool exists to report on. The floor is the verdict (D60, `d60_failures`).
+    scored: bool = tracked >= MIN_TRACKED_POSES
+    against_cpp: AteResult | None = ate(run.estimate, read_trajectory(reference.path)) if scored else None
+    against_gt: AteResult | None = ate(run.estimate, truth) if scored else None
     expected: CppAte = segment.reference.expected_cpp_ate
     return ClipResult(
         segment_id=segment.segment_id,
         framesets=run.framesets,
-        tracked=len(run.estimate),
+        tracked=tracked,
         lost=run.lost,
-        cpp_rmse_cm=100.0 * against_cpp.rmse_m,
-        gt_rmse_cm=100.0 * against_gt.rmse_m,
+        cpp_rmse_cm=100.0 * against_cpp.rmse_m if against_cpp is not None else math.nan,
+        gt_rmse_cm=100.0 * against_gt.rmse_m if against_gt is not None else math.nan,
         cpp_gt_band_cm=(expected.rmse_cm, expected.rmse_cm_f64),
         wall_s=run.wall_s,
         cpp_wall_s=segment.reference.expected_cpp_wall_s,
         peak_rss_mb=this_peak_rss_mb(),
         gate_policy=segment.reference.gate_policy,
-        replayed_s=float(run.estimate.t_ns[-1] - run.estimate.t_ns[0]) * 1e-9 if len(run.estimate) else 0.0,
-        cpp_associated=against_cpp.n_associated,
+        replayed_s=float(run.estimate.t_ns[-1] - run.estimate.t_ns[0]) * 1e-9 if tracked else 0.0,
+        cpp_associated=against_cpp.n_associated if against_cpp is not None else 0,
         extent_m=extent_m(run.estimate),
         truth_extent_m=extent_m(truth),
         poses_finite=bool(np.isfinite(run.estimate.position_m).all()),

@@ -492,10 +492,28 @@ def band_cm_text(band: tuple[float, float]) -> str:
     return f"[f32 {band[0]:.2f}, f64 {band[1]:.2f}]"
 
 
+def pose_floor_text(*, tracked: int, framesets: int) -> str:
+    """D60's tracked-pose floor as a row prints it: a run this short is not a trajectory.
+
+    The one sentence for the V2 gate and for a fleet row, because a machine that
+    tracked nothing is what the fleet lane exists to find and the two must not
+    report it differently.
+
+    Args:
+        tracked: Poses the estimator reported.
+        framesets: Framesets it was fed.
+
+    Returns:
+        The clause, ready for a verdict.
+    """
+    return f"{tracked} poses over {framesets} framesets is not a trajectory"
+
+
 def d60_failures(
     *,
     gate_policy: GatePolicy,
     framesets: int,
+    tracked: int,
     lost: int,
     associated: int,
     replayed_s: float,
@@ -520,12 +538,18 @@ def d60_failures(
     are written once: a fleet row that applied the bounds unconditionally called
     a healthy machine broken on any clip but the two smoke ones.
 
+    The tracked-pose floor is the first clause and the only one that stands
+    alone: a run below it was never scored, so it has no error to report and the
+    rest of D60 has nothing to read.
+
     Speed is **not** here. It is a clause of the gate (D58) and a fact about the
     machine on a fleet row, because the C++ wall was measured on one host.
 
     Args:
         gate_policy: How hard D60 lets this clip be gated.
         framesets: Framesets fed to the estimator.
+        tracked: Poses the estimator reported; below :data:`MIN_TRACKED_POSES`
+            nothing else is read, because a run that short was never scored.
         lost: Framesets that never got the inertial samples covering them (D17).
         associated: Estimate poses that found a C++ pose inside the tolerance.
         replayed_s: Sensor seconds the estimate spans, whole clip or window.
@@ -541,6 +565,11 @@ def d60_failures(
     Returns:
         One line per missed clause; empty when the clip passes.
     """
+    # First, and alone: :func:`slam_rs.trajectory.ate` needs a pose to align, so
+    # a caller below the floor has no error to hand over and neither error is a
+    # number. Both callers therefore stop at the floor as well.
+    if tracked < MIN_TRACKED_POSES:
+        return [pose_floor_text(tracked=tracked, framesets=framesets)]
     failures: list[str] = []
     if lost:
         failures.append(f"{lost} of {framesets} framesets never got the inertial samples that cover them")

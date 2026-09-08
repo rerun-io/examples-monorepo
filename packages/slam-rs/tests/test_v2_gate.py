@@ -76,6 +76,7 @@ from slam_rs.reference import (
     band_cm_text,
     d60_failures,
     load_manifest,
+    pose_floor_text,
 )
 from slam_rs.reference_bundle import BundleFile
 from slam_rs.tracking import SegmentRun, run_segment
@@ -291,6 +292,7 @@ def clip_failures(clip: GatedClip, run: SegmentRun, available: References, again
     failures: list[str] = d60_failures(
         gate_policy=clip.segment.reference.gate_policy,
         framesets=run.framesets,
+        tracked=len(run.estimate),
         lost=run.lost,
         associated=against_cpp.n_associated,
         replayed_s=replayed_s(run),
@@ -335,7 +337,11 @@ def test_every_gated_clip_meets_the_v2_numbers(manifest: ReferenceManifest) -> N
         available: References = references(manifest, clip.segment)
         run: SegmentRun = run_segment(manifest, clip.segment, window_s=clip.window_s)
         if len(run.estimate) < MIN_TRACKED_POSES:
-            pytest.fail(f"{clip.name}: {len(run.estimate)} poses over {run.framesets} framesets is not a trajectory")
+            # The sentence is the shared verdict's own
+            # (:func:`slam_rs.reference.pose_floor_text`), so a dead run reads
+            # the same here and on a fleet row; the branch is because `ate` has
+            # no pose to align below the floor and raises instead of scoring.
+            pytest.fail(f"{clip.name}: {pose_floor_text(tracked=len(run.estimate), framesets=run.framesets)}")
         against_cpp: AteResult = ate(run.estimate, available.cpp)
         against_gt: AteResult = ate(run.estimate, available.truth)
         expected_s: float = cpp_wall_s(clip, run)
