@@ -13,8 +13,10 @@ from beartype.roar import BeartypeException
 from slam_rs import _core
 from slam_rs.reference import (
     DECODE_PATH_BY_NAME,
+    GT_BAND_RATIO,
     MANIFEST_PATH,
     TIER_BY_NAME,
+    CppAte,
     ReferenceManifest,
     ReferenceSegment,
     flow_config,
@@ -33,7 +35,21 @@ def manifest() -> ReferenceManifest:
 
 def test_the_manifest_holds_ten_segments(manifest: ReferenceManifest) -> None:
     assert len(manifest.segments) == 10
-    assert manifest.schema_version == 4
+    assert manifest.schema_version == 5
+
+
+def test_every_segment_carries_the_c_plus_plus_precision_band(manifest: ReferenceManifest) -> None:
+    """Both members of the band the ground-truth clause gates against (D60).
+
+    The gate can only be as tight as the reference is repeatable, so the
+    allowance it computes may never fall below what the C++ itself scored in
+    either precision — a band member left at zero, or a ratio below one, would
+    gate the port against a number basalt does not meet.
+    """
+    for segment in manifest.segments:
+        band: CppAte = segment.reference.expected_cpp_ate
+        assert band.rmse_cm > 0.0 and band.rmse_cm_f64 > 0.0, segment.segment_id
+        assert GT_BAND_RATIO * max(band.rmse_cm, band.rmse_cm_f64) >= max(band.rmse_cm, band.rmse_cm_f64), segment.segment_id
 
 
 def test_every_segment_carries_both_layer_fingerprints(manifest: ReferenceManifest) -> None:

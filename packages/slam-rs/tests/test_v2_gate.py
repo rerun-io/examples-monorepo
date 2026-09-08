@@ -9,10 +9,14 @@ produced:
 * every frameset resolved: one refused for want of IMU is held and tracked again
   once the samples arrive, and anything still held when the clip ends is a lost
   frameset (D17);
-* against the basalt C++ trajectory fed the same decoded pixels, which is the
-  parity claim and starts at 2 cm (D14; the ladder tightens toward 1 cm);
-* against the ``gt.csv`` sidecar, which must be within 1.2x what the C++ itself
-  scored on the same footage;
+* against the basalt C++ trajectory fed the same decoded pixels, at most 2 cm —
+  but only on clips shorter than :data:`~slam_rs.reference.PATH_BOUND_MAX_CLIP_S`
+  seconds, because past that the C++ does not meet 2 cm against its own other
+  precision either (D60);
+* against the ``gt.csv`` sidecar, inside the C++'s own precision band on the same
+  footage — its ``f32`` and ``f64`` runs, one flag apart — or within
+  :data:`~slam_rs.reference.GT_BAND_RATIO` of the band's worst member, which is
+  the same rule written once because the ratio is above one (D60);
 * speed: the replay's own feed loop — decode plus ``track``, nothing logged, the
   loop the C++ reference timed — within 1.2x the C++ single-thread wall for the
   same footage (D58). A port several times slower is not a port of the thing,
@@ -66,9 +70,11 @@ from slam_rs.catalog_feed import LocalSegment, SegmentFeed, open_segment
 from slam_rs.reference import (
     ATE_VS_CPP_CM,
     DIVERGENCE_FACTOR,
-    GT_RATIO,
+    GT_BAND_RATIO,
     MIN_TRACKED_POSES,
+    PATH_BOUND_MAX_CLIP_S,
     SPEED_TOLERANCE,
+    CppAte,
     ReferenceManifest,
     ReferenceSegment,
     flow_config,
@@ -282,12 +288,20 @@ def references(manifest: ReferenceManifest, segment: ReferenceSegment) -> Refere
     return References(cpp=read_trajectory(manifest.cpp_trajectory(segment).path), truth=read_trajectory(segment.gt_csv))
 
 
-def cpp_gt_error_cm(clip: GatedClip, run: SegmentRun, available: References) -> float:
-    """What the C++ scored against ground truth over the footage this run replayed.
+def cpp_gt_band_cm(clip: GatedClip, run: SegmentRun, available: References) -> tuple[float, float]:
+    """The C++'s own ground-truth error on this footage, in both of its precisions (D60).
 
-    The manifest's figure is the whole clip's. A windowed run has to be compared
-    with what the C++ scored over the same span, or a clip whose error grows late
-    would be gated against a budget it never had (D59).
+    The band is the same C++ code on the same pixels with one flag changed, and
+    it is what "as accurate as basalt" can mean at all: 0.0015 cm wide on
+    ``MGO14`` and 2.3 cm wide on the 410-second ``MIO14``.
+
+    A windowed run recomputes the ``f32`` member over exactly the span it
+    replayed, or a clip whose error grows late would be gated against a budget it
+    never had (D59). The ``f64`` member is the manifest's whole-clip figure,
+    **unscaled**: only the ``f32`` trajectory is a reference artifact, so there is
+    nothing to recompute a window from. That makes a windowed band as wide as the
+    whole clip's rather than tighter, which is why a window is an iteration lane
+    and the milestone is read off the whole clips.
 
     Args:
         clip: The clip, which says whether it was cut.
@@ -295,12 +309,18 @@ def cpp_gt_error_cm(clip: GatedClip, run: SegmentRun, available: References) -> 
         available: The two reference trajectories.
 
     Returns:
-        The C++'s own ground-truth RMSE in centimetres.
+        The C++'s ``f32`` and ``f64`` ground-truth RMSE in centimetres.
     """
+    expected: CppAte = clip.segment.reference.expected_cpp_ate
     if clip.window_s is None:
-        return clip.segment.reference.expected_cpp_ate.rmse_cm
+        return expected.rmse_cm, expected.rmse_cm_f64
     span: Trajectory = between(available.cpp, int(run.estimate.t_ns[0]), int(run.estimate.t_ns[-1]))
-    return 100.0 * ate(span, available.truth).rmse_m
+    return 100.0 * ate(span, available.truth).rmse_m, expected.rmse_cm_f64
+
+
+def replayed_s(run: SegmentRun) -> float:
+    """Sensor seconds the run's own trajectory spans, whole clip or window."""
+    return float(run.estimate.t_ns[-1] - run.estimate.t_ns[0]) * 1e-9
 
 
 def cpp_wall_s(clip: GatedClip, run: SegmentRun) -> float:
@@ -342,13 +362,20 @@ def clip_failures(clip: GatedClip, run: SegmentRun, available: References, again
         if extent_m(run.estimate) > DIVERGENCE_FACTOR * extent_m(available.truth):
             failures.append(f"spans {extent_m(run.estimate):.1f} m against the truth's {extent_m(available.truth):.1f} m")
     else:
-        if against_cpp.rmse_m * 100.0 > ATE_VS_CPP_CM:
+        # The path bound only where the C++ meets it itself: past about a hundred
+        # seconds its own two precisions are 4.24 cm apart, so 2 cm there would
+        # gate the clip's length (D60).
+        if replayed_s(run) < PATH_BOUND_MAX_CLIP_S and against_cpp.rmse_m * 100.0 > ATE_VS_CPP_CM:
             failures.append(f"{against_cpp.rmse_m * 100:.2f} cm from the C++ trajectory, gate is {ATE_VS_CPP_CM:.0f} cm")
-        cpp_gt_cm: float = cpp_gt_error_cm(clip, run, available)
-        if against_gt.rmse_m * 100.0 > GT_RATIO * cpp_gt_cm:
+        # Inside the C++'s own band, or within GT_BAND_RATIO of its worst member,
+        # whichever is looser — which is the second alone, because the ratio is
+        # above one and the band's worst member is its upper end.
+        allowed_cm: float = GT_BAND_RATIO * max(cpp_gt_band_cm(clip, run, available))
+        if against_gt.rmse_m * 100.0 > allowed_cm:
+            band: tuple[float, float] = cpp_gt_band_cm(clip, run, available)
             failures.append(
-                f"{against_gt.rmse_m * 100:.2f} cm from ground truth, gate is {GT_RATIO}x "
-                f"the C++'s own {cpp_gt_cm:.2f} cm = {GT_RATIO * cpp_gt_cm:.2f} cm"
+                f"{against_gt.rmse_m * 100:.2f} cm from ground truth, gate is {GT_BAND_RATIO}x the worst of the "
+                f"C++'s own band [{band[0]:.2f}, {band[1]:.2f}] cm = {allowed_cm:.2f} cm"
             )
     # Speed is a clause of every policy: a run that does not diverge but takes
     # three times as long has not matched the thing it is a port of (D58, D59).
@@ -387,10 +414,15 @@ def test_every_gated_clip_meets_the_v2_numbers(manifest: ReferenceManifest) -> N
         against_cpp: AteResult = ate(run.estimate, available.cpp)
         against_gt: AteResult = ate(run.estimate, available.truth)
         expected_s: float = cpp_wall_s(clip, run)
+        band = cpp_gt_band_cm(clip, run, available)
+        bound: str = (
+            f"bound {ATE_VS_CPP_CM:.0f} cm" if replayed_s(run) < PATH_BOUND_MAX_CLIP_S else f"no bound, {replayed_s(run):.0f} s clip"
+        )
         print(
             f"{clip.name}: {len(run.estimate)}/{run.framesets} tracked, "
-            f"vs C++ {against_cpp.rmse_m * 100:.2f} cm, vs GT {against_gt.rmse_m * 100:.2f} cm "
-            f"(C++ scored {cpp_gt_error_cm(clip, run, available):.2f} cm), "
+            f"vs C++ {against_cpp.rmse_m * 100:.2f} cm ({bound}), "
+            f"vs GT {against_gt.rmse_m * 100:.2f} cm (band [{band[0]:.2f}, {band[1]:.2f}], "
+            f"allowed {GT_BAND_RATIO * max(band):.2f}), "
             f"wall {run.wall_s:.2f} s, C++ {expected_s:.2f} s, ratio {run.wall_s / expected_s:.2f}"
         )
         failures: list[str] = clip_failures(clip, run, available, against_cpp, against_gt)

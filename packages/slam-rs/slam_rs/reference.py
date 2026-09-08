@@ -8,11 +8,11 @@ three; the decode path alone moves ATE by centimetres and the config's own
 ``vio_marg_lost_landmarks`` was worth up to 12 cm (C72), so a run is not
 reproducible without them.
 
-The V2 tolerances (:data:`ATE_VS_CPP_CM`, :data:`GT_RATIO`,
-:data:`SPEED_TOLERANCE`, :data:`DIVERGENCE_FACTOR`) sit here rather than in the
-gate test, because they are the milestone's verdict and it is decided from
-measurement: when S15 settles what a meaningful accuracy band is, one table
-changes.
+The V2 tolerances (:data:`ATE_VS_CPP_CM`, :data:`PATH_BOUND_MAX_CLIP_S`,
+:data:`GT_BAND_RATIO`, :data:`SPEED_TOLERANCE`, :data:`DIVERGENCE_FACTOR`) sit
+here rather than in the gate test, because they are the milestone's verdict and
+it is decided from measurement: S15 measured the band and D60 is what this table
+now says.
 """
 
 import tomllib
@@ -57,8 +57,24 @@ GATE_POLICY_BY_NAME: dict[str, GatePolicy] = {"tight": "tight", "standard": "sta
 
 ATE_VS_CPP_CM: float = 2.0
 """Largest ATE RMSE against the basalt C++ trajectory the V2 gate accepts (D14's first rung)."""
-GT_RATIO: float = 1.2
-"""How much worse than the C++'s own ground-truth error on the same footage the port may be (D14)."""
+PATH_BOUND_MAX_CLIP_S: float = 100.0
+"""Longest replayed span :data:`ATE_VS_CPP_CM` is asked of (D60).
+
+Past about a hundred seconds the C++ does not meet 2 cm against **itself**:
+changing nothing but the floating-point width moves basalt's own `MIO14` (410 s)
+trajectory by 4.24 cm rmse (S15 §1). A bound the reference cannot meet measures
+the clip's length, not the port, so on longer clips the ground-truth band below
+is the whole accuracy verdict.
+"""
+GT_BAND_RATIO: float = 1.2
+"""How far outside the C++'s own precision band the port's ground-truth error may sit (D60).
+
+The band is `[rmse_cm, rmse_cm_f64]`: the same C++ code on the same pixels with
+one flag changed. It is 0.0015 cm wide on `MGO14` and 2.3 cm wide on `MIO14`, so
+"inside the band" alone would gate the tight clips on rounding; the rule is
+therefore this multiple of the band's worst member, which contains the band
+itself.
+"""
 SPEED_TOLERANCE: float = 1.2
 """How much slower than the C++ single-thread wall on the same footage the port's replay may be (D58)."""
 DIVERGENCE_FACTOR: float = 10.0
@@ -163,6 +179,13 @@ class CppAte:
 
     rmse_cm: float
     """Rigid-aligned RMSE, centimetres."""
+    rmse_cm_f64: float
+    """The same, from the same run in double precision: `use-double 1`, one thread, the same pixels.
+
+    The other member of the C++'s own precision band (D60). One flag apart from
+    :attr:`rmse_cm`, and the distance between the two is what basalt's answer is
+    worth on that clip: 0.0015 cm on `MGO14`, 2.3 cm on the 410-second `MIO14`.
+    """
     max_cm: float
     """Largest residual, centimetres."""
     median_cm: float
@@ -471,6 +494,7 @@ def _reference_run(block: dict[str, Any], segment_id: str) -> CppReferenceRun:
         gt_csv_fixture=Path(block["gt_csv_fixture"]) if "gt_csv_fixture" in block else None,
         expected_cpp_ate=CppAte(
             rmse_cm=float(ate_block["rmse_cm"]),
+            rmse_cm_f64=float(ate_block["rmse_cm_f64"]),
             max_cm=float(ate_block["max_cm"]),
             median_cm=float(ate_block["median_cm"]),
             associated=int(ate_block["associated"]),

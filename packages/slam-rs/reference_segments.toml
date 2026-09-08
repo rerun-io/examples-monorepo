@@ -38,6 +38,18 @@
 # against the `gt.csv` sidecar, and its single-thread wall. `gate_policy` says
 # how hard that segment may be gated -- see the README.
 #
+# `[segment.reference.expected_cpp_ate]` carries that error twice: `rmse_cm` is
+# the reference run itself (`use-double 0`), `rmse_cm_f64` is the same code on
+# the same pixels with `use-double 1`, one thread and `deterministic 1`. The two
+# are the C++'s own precision band (D60) and their distance is what basalt's
+# answer is worth on that clip: 0.0005 cm on MGO09, 2.30 cm on the 410-second
+# MIO14, where changing nothing but the floating-point width also moves its
+# trajectory by 4.24 cm rmse. The port's ground-truth error is gated against that
+# band and not against a single number, because a single number claims a
+# precision the reference does not have. Every f64 value here was measured on
+# this decode path with `slam_rs.trajectory.ate`, the same call that produced the
+# f32 column, and each run's f32 twin reproduced `rmse_cm` exactly.
+#
 # `expected_cpp_wall_s` is the `run.feed_wall_time_s` of the run manifest beside
 # it: the decode-plus-VIO feed loop with nothing logged, on `pablo-dl-server`,
 # one TBB thread. The port's own replay of the same footage must land within
@@ -48,7 +60,7 @@
 # runs it and prints its row, and its numbers are a check on work done without
 # it.
 
-schema_version = 4
+schema_version = 5
 catalog_url = "rerun+http://dgx-spark:9988"
 
 # Landscape, unrotated: the Index stores its two fisheye cameras as captured.
@@ -121,6 +133,7 @@ gt_csv_fixture = "tests/reference/msd/msd-index__MIO_others__MIO10_short_2_panor
 
 [segment.reference.expected_cpp_ate]
 rmse_cm = 1.427751
+rmse_cm_f64 = 1.427823
 max_cm = 3.688551
 median_cm = 1.140685
 associated = 411
@@ -182,6 +195,7 @@ trajectory_csv = "tests/reference/msd/msd-index__MIO_others__MIO07_mapping_easy/
 
 [segment.reference.expected_cpp_ate]
 rmse_cm = 2.391717
+rmse_cm_f64 = 2.536595
 max_cm = 7.165734
 median_cm = 1.805338
 associated = 4094
@@ -243,6 +257,7 @@ trajectory_csv = "tests/reference/msd/msd-index__MIO_others__MIO04_hand_shooter_
 
 [segment.reference.expected_cpp_ate]
 rmse_cm = 19.238481
+rmse_cm_f64 = 19.291964
 max_cm = 45.759902
 median_cm = 14.858707
 associated = 6118
@@ -304,6 +319,7 @@ trajectory_csv = "msd-index__MIO_others__MIO14_moving_props/basalt_traj.csv"
 
 [segment.reference.expected_cpp_ate]
 rmse_cm = 8.861614
+rmse_cm_f64 = 6.556824
 max_cm = 18.028181
 median_cm = 8.384531
 associated = 21969
@@ -365,6 +381,7 @@ trajectory_csv = "msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_f
 
 [segment.reference.expected_cpp_ate]
 rmse_cm = 37.976171
+rmse_cm_f64 = 37.936851
 max_cm = 84.843701
 median_cm = 33.382882
 associated = 31576
@@ -428,6 +445,7 @@ gt_csv_fixture = "tests/reference/msd/msd-g2__MGO_others__MGO09_short_1_updown/g
 
 [segment.reference.expected_cpp_ate]
 rmse_cm = 0.812082
+rmse_cm_f64 = 0.812563
 max_cm = 1.710338
 median_cm = 0.403854
 associated = 107
@@ -489,6 +507,7 @@ trajectory_csv = "tests/reference/msd/msd-g2__MGO_others__MGO07_mapping_easy/bas
 
 [segment.reference.expected_cpp_ate]
 rmse_cm = 2.075976
+rmse_cm_f64 = 2.076249
 max_cm = 4.669990
 median_cm = 1.769015
 associated = 1596
@@ -551,6 +570,7 @@ trajectory_csv = "tests/reference/msd/msd-g2__MGO_others__MGO14_flickering_light
 
 [segment.reference.expected_cpp_ate]
 rmse_cm = 8.587941
+rmse_cm_f64 = 8.589355
 max_cm = 18.404963
 median_cm = 7.132659
 associated = 2887
@@ -612,6 +632,7 @@ trajectory_csv = "tests/reference/msd/msd-g2__MGO_others__MGO01_low_light/basalt
 
 [segment.reference.expected_cpp_ate]
 rmse_cm = 42.925818
+rmse_cm_f64 = 42.919445
 max_cm = 113.670573
 median_cm = 37.044695
 associated = 4255
@@ -674,6 +695,7 @@ trajectory_csv = "tests/reference/msd/msd-g2__MGO_others__MGO13_sudden_movements
 
 [segment.reference.expected_cpp_ate]
 rmse_cm = 77.971586
+rmse_cm_f64 = 77.970558
 max_cm = 120.581903
 median_cm = 79.325404
 associated = 3735

@@ -655,9 +655,16 @@ driving `_core.Vio` and the feed directly with nothing logged:
   once the samples arrive, and anything still held when the clip ends is a lost
   frameset (D17);
 * ATE RMSE against the basalt C++ trajectory fed the same decoded pixels, at most
-  2 cm — D14's first rung, which tightens toward 1 cm as parity improves;
-* ATE RMSE against the `gt.csv` sidecar, at most 1.2x what the C++ itself scored
-  on the same footage;
+  2 cm — and only where the C++ meets that against itself, which is clips under
+  `PATH_BOUND_MAX_CLIP_S` = 100 seconds of replayed footage: on the 410-second
+  `MIO14` its own two precisions are 4.24 cm apart, so a 2 cm bound there would
+  gate the clip's length rather than the port (D60);
+* ATE RMSE against the `gt.csv` sidecar, inside **the C++'s own precision band**
+  — `rmse_cm` and `rmse_cm_f64` in the manifest, the same code on the same pixels
+  with `use-double` flipped — or within `GT_BAND_RATIO` = 1.2 of the band's worst
+  member, whichever is looser, which is the second alone since the ratio is above
+  one. The band is 0.0005 cm wide on `MGO09` and 2.3 cm wide on `MIO14`, so
+  "inside the band" on its own would gate the tight clips on rounding (D60);
 * speed: the replay's own feed loop — decode plus `track`, nothing logged, the
   loop the C++ reference timed and recorded as `run.feed_wall_time_s` — within
   1.2x the C++ single-thread wall for the same footage (D58). Never left off: a
@@ -673,9 +680,14 @@ estimator already differ by 18 to 32 cm, so a tolerance would measure noise. A
 second test runs the smoke segment twice and diffs the CSVs byte for byte, which
 is what Offline mode's "no queue state reaches a decision" means (D17).
 
-The four tolerances live in `slam_rs/reference.py` (`ATE_VS_CPP_CM`, `GT_RATIO`,
-`SPEED_TOLERANCE`, `DIVERGENCE_FACTOR`), not in the test: they are the
-milestone's verdict, and S15 decides them from measurement.
+The tolerances live in `slam_rs/reference.py` (`ATE_VS_CPP_CM`,
+`PATH_BOUND_MAX_CLIP_S`, `GT_BAND_RATIO`, `SPEED_TOLERANCE`,
+`DIVERGENCE_FACTOR`), not in the test: they are the milestone's verdict, and S15
+measured what a meaningful band is (D60).
+
+Every row prints what it was judged on: `tracked, vs C++ <cm> (bound 2 cm | no
+bound, <n> s clip), vs GT <cm> (band [f32, f64], allowed <cm>), wall, C++ wall,
+ratio`.
 
 The lanes are D59's iteration rule. The default is the **iteration set** — MIO10
 whole plus the first ten seconds of one two-camera and one four-camera clip,
