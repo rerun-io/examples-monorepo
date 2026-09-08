@@ -753,8 +753,13 @@ fn klt_kernel(
     pyramid_b: &Array<u16>,
     meta: &Array<f32>,
     store: &Array<f32>,
-    transforms_in: &Array<f32>,
-    out: &mut Array<f32>,
+    // One binding, read and written, not two views of the same buffer. Every
+    // caller passes the same handle for both roles — the C++ composes the warp
+    // in place (`:399`) — and wgpu refuses a buffer bound `STORAGE_READ_ONLY`
+    // and `STORAGE_READ_WRITE` in one dispatch, which is a validation error on
+    // any adapter whose pool does not merge the two slices into one binding.
+    // The cap's Mali G610 is that adapter.
+    transforms: &mut Array<f32>,
     capacity: usize,
     taps: usize,
     num_levels: usize,
@@ -785,8 +790,8 @@ fn klt_kernel(
     let mut alive = SharedMemory::<usize>::new(4usize);
 
     if tap == 0usize {
-        let guess_x = transforms_in[4usize * count + patch];
-        let guess_y = transforms_in[5usize * count + patch];
+        let guess_x = transforms[4usize * count + patch];
+        let guess_y = transforms[5usize * count + patch];
         let level0_width = f32::cast_from(usize::cast_from(meta[1usize]));
         let level0_height = f32::cast_from(usize::cast_from(meta[2usize]));
         let mut inside = true;
@@ -965,25 +970,27 @@ fn klt_kernel(
     if tap == 0usize {
         if alive[2usize] == 1usize {
             // `transform.linear = old_linear * transform.linear` (`:399`).
-            let o00 = transforms_in[patch];
-            let o01 = transforms_in[count + patch];
-            let o10 = transforms_in[2usize * count + patch];
-            let o11 = transforms_in[3usize * count + patch];
-            out[patch] = o00 * state[0usize] + o01 * state[2usize];
-            out[count + patch] = o00 * state[1usize] + o01 * state[3usize];
-            out[2usize * count + patch] = o10 * state[0usize] + o11 * state[2usize];
-            out[3usize * count + patch] = o10 * state[1usize] + o11 * state[3usize];
-            out[4usize * count + patch] = state[4usize];
-            out[5usize * count + patch] = state[5usize];
-            out[6usize * count + patch] = f32::cast_from(alive[0usize]);
+            // Read into locals before the first write: the four coefficients
+            // are at the indices the composed warp overwrites.
+            let o00 = transforms[patch];
+            let o01 = transforms[count + patch];
+            let o10 = transforms[2usize * count + patch];
+            let o11 = transforms[3usize * count + patch];
+            transforms[patch] = o00 * state[0usize] + o01 * state[2usize];
+            transforms[count + patch] = o00 * state[1usize] + o01 * state[3usize];
+            transforms[2usize * count + patch] = o10 * state[0usize] + o11 * state[2usize];
+            transforms[3usize * count + patch] = o10 * state[1usize] + o11 * state[3usize];
+            transforms[4usize * count + patch] = state[4usize];
+            transforms[5usize * count + patch] = state[5usize];
+            transforms[6usize * count + patch] = f32::cast_from(alive[0usize]);
         } else {
-            out[patch] = 1.0f32;
-            out[count + patch] = 0.0f32;
-            out[2usize * count + patch] = 0.0f32;
-            out[3usize * count + patch] = 1.0f32;
-            out[4usize * count + patch] = 0.0f32;
-            out[5usize * count + patch] = 0.0f32;
-            out[6usize * count + patch] = 0.0f32;
+            transforms[patch] = 1.0f32;
+            transforms[count + patch] = 0.0f32;
+            transforms[2usize * count + patch] = 0.0f32;
+            transforms[3usize * count + patch] = 1.0f32;
+            transforms[4usize * count + patch] = 0.0f32;
+            transforms[5usize * count + patch] = 0.0f32;
+            transforms[6usize * count + patch] = 0.0f32;
         }
     }
 }
@@ -1212,8 +1219,7 @@ pub(super) fn launch_klt<R: Runtime>(
     ),
     meta: Buffer<'_>,
     store: Buffer<'_>,
-    transforms_in: Buffer<'_>,
-    out: Buffer<'_>,
+    transforms: Buffer<'_>,
     shape: PatchShape,
     max_iterations: usize,
     check_guess_bounds: bool,
@@ -1231,8 +1237,7 @@ pub(super) fn launch_klt<R: Runtime>(
             ArrayArg::from_raw_parts(pyramid.2.clone(), pyramid.3),
             ArrayArg::from_raw_parts(meta.0.clone(), meta.1),
             ArrayArg::from_raw_parts(store.0.clone(), store.1),
-            ArrayArg::from_raw_parts(transforms_in.0.clone(), transforms_in.1),
-            ArrayArg::from_raw_parts(out.0.clone(), out.1),
+            ArrayArg::from_raw_parts(transforms.0.clone(), transforms.1),
             shape.capacity,
             shape.taps,
             shape.num_levels,

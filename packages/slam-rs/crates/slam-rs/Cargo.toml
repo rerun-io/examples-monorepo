@@ -28,7 +28,24 @@ gpu = ["gpu-core", "dep:cubecl-cuda", "dep:cudarc", "dep:libloading"]
 # The same kernels through wgpu (Vulkan / Metal / DX12), for the Spark, the
 # Pi 5 and the cap. Only the client line differs; `slam-rs-wgpu-test` — not a
 # `cargo check` — is what keeps that true.
-gpu-wgpu = ["gpu-core", "dep:cubecl-wgpu", "dep:wgpu"]
+#
+# `exclusive-memory-only` — one wgpu buffer per handle instead of slices of a
+# shared page — is not a tuning choice, it is what makes the lane correct on
+# the cap. cubecl-wgpu 0.10 aligns its memory pool to the adapter's
+# `min_uniform_buffer_offset_alignment` (`runtime.rs:292`) and then binds those
+# slices as *storage* buffers, so on any adapter whose
+# `min_storage_buffer_offset_alignment` is the larger of the two, every slice
+# past the first is an invalid binding. The RK3588's Mali G610 asks for 64 and
+# gets slices on 32: five of the eleven tolerance tests died there with
+# "Buffer offset 139744 does not respect device's requested
+# min_storage_buffer_offset_alignment limit 64", and none of them can, because
+# the pool alignment is decided inside `create_server` and `RuntimeOptions`
+# carries no override.
+#
+# It costs nothing here: the per-frame path holds fifteen long-lived
+# allocations, so there is nothing for a shared page to save, and the plateau
+# drops from 40 MiB to 12 — which is the direction the 8 GB targets want.
+gpu-wgpu = ["gpu-core", "dep:cubecl-wgpu", "dep:wgpu", "cubecl-wgpu/exclusive-memory-only"]
 
 [dependencies]
 cubecl = { workspace = true, optional = true }
