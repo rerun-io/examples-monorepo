@@ -217,12 +217,10 @@ def main(config: Config) -> None:
             truth: Trajectory = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
             # Everything this constructor refuses is the caller's own request —
             # a configuration this port does not run, or ``--gpu`` on a host
-            # with no driver, no device or no adapter — so it is one sentence
-            # and a non-zero exit rather than a traceback through the feed.
-            try:
-                vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment), gpu=config.gpu)
-            except ValueError as error:
-                raise SystemExit(f"replay: {error}") from error
+            # with no driver, no device or no adapter — and the shim
+            # (:func:`slam_rs.apis.run`) is what turns it into one sentence and a
+            # non-zero exit rather than a traceback through the feed.
+            vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment), gpu=config.gpu)
             stage = VioStage(
                 lockstep=Lockstep(vio=vio),
                 logger=VioLogger(
