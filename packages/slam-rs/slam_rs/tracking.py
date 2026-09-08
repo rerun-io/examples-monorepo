@@ -8,10 +8,13 @@ on it, and both have to hold and retry identically or the gate stops measuring
 the tool. It therefore lives here once, and :class:`Lockstep` is what both
 drive.
 
-:func:`run_segment` is the loop over that hold with nothing logged — the one the
-C++ reference timed — and it is here for the same reason: the V2 gate reads its
+:func:`_drive` is the loop over that hold with nothing logged — the one the C++
+reference timed — and it is here for the same reason: the V2 gate reads its
 numbers and :mod:`slam_rs.apis.fleet_check` reports them from another machine, so
 the two must feed the estimator identically or they are measuring different runs.
+:func:`run_segment` drives it over an MSD clip and :func:`run_robocap` over a
+RoboCap session, and the second exists because the fleet has to replay a
+four-camera fisheye rig on a device with no viewer and no repository.
 """
 
 import time
@@ -23,8 +26,8 @@ from jaxtyping import Float64
 from numpy import ndarray
 
 from slam_rs import _core
-from slam_rs.catalog_feed import Frameset, LocalSegment, SegmentFeed, open_segment
-from slam_rs.reference import ReferenceManifest, ReferenceSegment, flow_config
+from slam_rs.catalog_feed import DEFAULT_WINDOW_S, Frameset, LocalSegment, RigProfile, SegmentFeed, open_segment
+from slam_rs.reference import ReferenceManifest, ReferenceSegment, RobocapSession, flow_config
 from slam_rs.trajectory import Trajectory, shift_clock
 
 MAX_HELD_FRAMESETS: int = 2
@@ -123,10 +126,55 @@ class SegmentRun:
     """Wall time the feed loop took: decode plus ``track``, nothing logged."""
 
 
+def _drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max_framesets: int | None = None) -> SegmentRun:
+    """Feed one open segment through the estimator with nothing logged, and time it.
+
+    This is the loop the C++ reference timed, so the wall starts with the first
+    frameset and not with opening the segment, and nothing between the two calls
+    logs, encodes or draws. The poses come back on the absolute device clock the
+    **feed** names: ``video_time`` plus ``capture_start_time_ns`` on MSD, and
+    ``video_time`` unchanged on a rig that records the device clock itself.
+
+    Args:
+        feed: An open segment, already configured for its rig.
+        lockstep: The estimator to drive, already built from that rig's calibration and config.
+        stop_ns: Stop before a frameset past this feed timestamp; None replays the segment.
+        max_framesets: Stop after this many framesets; None replays the segment.
+
+    Returns:
+        The estimated trajectory, the two counts the gate reads, and the wall time.
+    """
+    t_ns: list[int] = []
+    positions: list[Float64[ndarray, " 3"]] = []
+    quaternions: list[Float64[ndarray, " 4"]] = []
+    replayed: int = 0
+    started: float = time.monotonic()
+    for frameset in feed.framesets(stop_ns):
+        if max_framesets is not None and replayed >= max_framesets:
+            break
+        if stop_ns is not None and frameset.t_ns > stop_ns:
+            break
+        replayed += 1
+        for _tracked, result in lockstep.push(frameset):
+            pose: Float64[ndarray, " 7"] = result.world_from_rig
+            t_ns.append(result.t_ns)
+            positions.append(pose[0:3].copy())
+            quaternions.append(np.roll(pose[3:7], 1).copy())
+    wall_s: float = time.monotonic() - started
+    estimate: Trajectory = Trajectory(
+        t_ns=np.array(t_ns, dtype=np.int64),
+        position_m=np.array(positions, dtype=np.float64).reshape(-1, 3),
+        quaternion_wxyz=np.array(quaternions, dtype=np.float64).reshape(-1, 4),
+    )
+    # Whatever is still held never got samples covering it, so it produced no
+    # pose: that, and only that, is a lost frameset.
+    return SegmentRun(estimate=shift_clock(estimate, feed.export_offset_ns), framesets=replayed, lost=len(lockstep.pending), wall_s=wall_s)
+
+
 def run_segment(
     manifest: ReferenceManifest, segment: ReferenceSegment, window_s: float | None = None, max_framesets: int | None = None
 ) -> SegmentRun:
-    """Drive one reference clip through :class:`slam_rs._core.Vio`.
+    """Drive one MSD reference clip through :class:`slam_rs._core.Vio`.
 
     Args:
         manifest: The reference set, which resolves the dataset's basalt config.
@@ -136,40 +184,49 @@ def run_segment(
         max_framesets: Stop after this many framesets; None replays the clip.
 
     Returns:
-        The estimated trajectory, the two counts the gate reads, and the wall
-        time of the feed loop — which starts once the segment is open, because
-        that is the loop the C++ reference timed.
+        What :func:`_drive` produced over that clip.
     """
     source: LocalSegment = LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path)
-    window_ns: int | None = None if window_s is None else int(window_s * 1e9)
-    t_ns: list[int] = []
-    positions: list[Float64[ndarray, " 3"]] = []
-    quaternions: list[Float64[ndarray, " 4"]] = []
-    replayed: int = 0
     feed: SegmentFeed
     with open_segment(source, segment.imu) as feed:
         lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment)))
-        started: float = time.monotonic()
-        for frameset in feed.framesets():
-            if max_framesets is not None and replayed >= max_framesets:
-                break
-            if window_ns is not None and frameset.t_ns > window_ns:
-                break
-            replayed += 1
-            for _tracked, result in lockstep.push(frameset):
-                pose: Float64[ndarray, " 7"] = result.world_from_rig
-                t_ns.append(result.t_ns)
-                positions.append(pose[0:3].copy())
-                quaternions.append(np.roll(pose[3:7], 1).copy())
-        wall_s: float = time.monotonic() - started
-        offset_ns: int = feed.capture_start_time_ns
-    # Whatever is still held never got samples covering it, so it produced no
-    # pose: that, and only that, is a lost frameset.
-    lost: int = len(lockstep.pending)
-    # Exports and both references are on the absolute device clock.
-    estimate: Trajectory = Trajectory(
-        t_ns=np.array(t_ns, dtype=np.int64),
-        position_m=np.array(positions, dtype=np.float64).reshape(-1, 3),
-        quaternion_wxyz=np.array(quaternions, dtype=np.float64).reshape(-1, 4),
+        return _drive(feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets)
+
+
+def robocap_profile(manifest: ReferenceManifest) -> RigProfile:
+    """How the RoboCap rig has to be read, from the manifest's record of the C++ lane."""
+    return RigProfile(
+        camera_names=manifest.robocap.camera_names,
+        downscale=manifest.robocap.downscale,
+        interpolate_accel_onto_gyro=manifest.robocap.interpolate_accel_onto_gyro,
+        frameset_tolerance_ns=manifest.robocap.frameset_tolerance_ns,
+        video_time_is_absolute=manifest.robocap.video_time_is_absolute,
     )
-    return SegmentRun(estimate=shift_clock(estimate, offset_ns), framesets=replayed, lost=lost, wall_s=wall_s)
+
+
+def run_robocap(manifest: ReferenceManifest, session: RobocapSession, seconds: float = 0.0, window_s: float = DEFAULT_WINDOW_S) -> SegmentRun:
+    """Drive one RoboCap session through :class:`slam_rs._core.Vio`, nothing logged.
+
+    The estimator is configured from basalt's **own** two files rather than from
+    the recording (C72), because the number this run earns is agreement with the
+    C++ and a differently derived configuration would be measuring something
+    else. :func:`slam_rs.apis.robocap_probe.check_calibration_matches_recording`
+    is what asserts the two describe one rig; this loop is the same replay with
+    the Rerun rung and that check removed, which is what lets it run on a device
+    with no viewer and no repository.
+
+    Args:
+        manifest: The reference set, which carries the RoboCap lane's configuration.
+        session: The session to replay.
+        seconds: Replay this much video time from the first frameset; 0 replays the whole session.
+        window_s: Longest time window of encoded samples fetched in one round trip.
+
+    Returns:
+        What :func:`_drive` produced over that session.
+    """
+    calibration: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
+    flow: _core.VioConfig = _core.VioConfig.from_json((manifest.package_root / manifest.robocap.vio_config).read_text())
+    feed: SegmentFeed
+    with open_segment(LocalSegment(base_rrd=session.base_path), manifest.robocap.imu, profile=robocap_profile(manifest), window_s=window_s) as feed:
+        stop_ns: int | None = None if seconds <= 0.0 else int(feed.frame_t_ns[0]) + int(seconds * 1e9)
+        return _drive(feed, Lockstep(vio=_core.Vio(calibration, flow)), stop_ns)

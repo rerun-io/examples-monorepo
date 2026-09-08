@@ -63,13 +63,12 @@ from slam_rs.catalog_feed import (
     CameraCalib,
     Frameset,
     LocalSegment,
-    RigProfile,
     open_segment,
     read_rig_trajectory,
 )
 from slam_rs.frontend_log import camera_entity
 from slam_rs.reference import ImuParameters, ReferenceManifest, RobocapSession, load_manifest
-from slam_rs.tracking import Lockstep
+from slam_rs.tracking import Lockstep, robocap_profile
 from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_trajectory, shift_clock, write_trajectory
 from slam_rs.vio_log import VioLogger, vio_blueprint
 
@@ -90,17 +89,6 @@ class Config:
     """Log the four camera images. Off measures the estimator's wall time without the JPEG encode."""
     window_s: float = 30.0
     """Longest time window of encoded samples fetched in one round trip."""
-
-
-def robocap_profile(manifest: ReferenceManifest) -> RigProfile:
-    """How the RoboCap rig has to be read, from the manifest's record of the C++ lane."""
-    return RigProfile(
-        camera_names=manifest.robocap.camera_names,
-        downscale=manifest.robocap.downscale,
-        interpolate_accel_onto_gyro=manifest.robocap.interpolate_accel_onto_gyro,
-        frameset_tolerance_ns=manifest.robocap.frameset_tolerance_ns,
-        video_time_is_absolute=manifest.robocap.video_time_is_absolute,
-    )
 
 
 def check_calibration_matches_recording(

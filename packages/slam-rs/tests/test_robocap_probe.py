@@ -18,7 +18,7 @@ from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
 from slam_rs import _core
-from slam_rs.apis.robocap_probe import check_calibration_matches_recording, robocap_profile
+from slam_rs.apis.robocap_probe import check_calibration_matches_recording
 from slam_rs.catalog_feed import (
     CHILD_FROM_PARENT,
     MSD_RIG,
@@ -36,6 +36,7 @@ from slam_rs.catalog_feed import (
     select_cameras,
 )
 from slam_rs.reference import ImuParameters, ReferenceManifest, RobocapSession, load_manifest
+from slam_rs.tracking import robocap_profile
 from slam_rs.trajectory import shift_clock
 
 
