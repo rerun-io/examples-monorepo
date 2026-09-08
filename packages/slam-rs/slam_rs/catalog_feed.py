@@ -634,10 +634,13 @@ class SegmentFeed:
     """Rig index of each fed camera, in the order a frameset's images arrive."""
     rig_cameras: int
     """Cameras the rig declares, of which :attr:`camera_positions` are the fed ones."""
-    downscale: int
-    """Integer factor the frames are decoded at; the calibration is already scaled to match."""
-    interpolate_accel: bool
-    """Whether the accelerometer is interpolated onto the gyroscope's clock on every read."""
+    profile: RigProfile
+    """How this rig had to be read, exactly as the caller stated it.
+
+    Held rather than copied field by field: a rig knob is one declaration, and a
+    feed that carried its own copy of two of them made the profile three
+    declarations, of which only one is the caller's.
+    """
     frame_stride: int
     """Yield every n-th frameset. Every frame is still decoded: decimated AV1 decode is unreliable."""
     dataset: DatasetEntry
@@ -656,7 +659,7 @@ class SegmentFeed:
 
     def imu_between(self, first_ns: int, last_ns: int) -> ImuStream:
         """Every inertial sample with ``first_ns <= t <= last_ns``, on the inertial clock."""
-        return _read_imu(self.dataset, self.segment_id, self.interpolate_accel, first_ns, last_ns)
+        return _read_imu(self.dataset, self.segment_id, self.profile.interpolate_accel_onto_gyro, first_ns, last_ns)
 
     def ground_truth_between(self, first_ns: int, last_ns: int) -> Trajectory | None:
         """Ground-truth rig poses over ``[first_ns, last_ns]`` of the inertial clock, or None without a ``gt`` layer.
@@ -715,7 +718,7 @@ class SegmentFeed:
             decoders: list[Iterator[UInt8[ndarray, "h w"]]] = []
             for position in range(len(self.cameras)):
                 samples, keyframes = self._fetch_samples(position, start, stop)
-                decoders.append(decode_gray(wrap_mp4(samples, keyframes, fps=self.index.fps, codec=self.index.codec), self.downscale))
+                decoders.append(decode_gray(wrap_mp4(samples, keyframes, fps=self.index.fps, codec=self.index.codec), self.profile.downscale))
             # One frame per camera resident, and one decode cursor per camera: a
             # camera that contributes no frame to this frameset still has its own
             # frames decoded in order, because dropping one breaks the next.
@@ -1124,8 +1127,7 @@ def _build_feed(
         frame_t_ns=index.t_ns + parameters.cam_time_offset_ns,
         camera_positions=camera_positions,
         rig_cameras=camera_count,
-        downscale=profile.downscale,
-        interpolate_accel=profile.interpolate_accel_onto_gyro,
+        profile=profile,
         frame_stride=frame_stride,
         dataset=sensor_dataset,
         gt_dataset=gt_dataset,

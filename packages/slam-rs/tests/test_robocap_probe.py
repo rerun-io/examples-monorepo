@@ -406,6 +406,10 @@ def test_the_feed_opens_the_real_robocap_rig(manifest: ReferenceManifest) -> Non
 
     with open_segment(LocalSegment(base_rrd=session.base_path), manifest.robocap.imu, profile=robocap_profile(manifest)) as feed:
         assert feed.camera_positions == (4, 0, 1, 5)
+        assert feed.rig_cameras == 6
+        # The feed reads its rig knobs off the profile it was given, so what the
+        # manifest says and what the feed does are one statement.
+        assert feed.profile == robocap_profile(manifest)
         assert [(camera.width, camera.height) for camera in feed.cameras] == [(640, 360)] * 4
         assert all(camera.model == "kb4" for camera in feed.cameras)
         assert all(len(camera.distortion) == 4 for camera in feed.cameras)
