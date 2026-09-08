@@ -141,7 +141,7 @@ struct BlockObservation {
 /// **Storage order.** C++'s buffer is `Eigen::RowMajor` (`:530`); nalgebra's
 /// `DMatrix` is column major. Nothing here depends on the layout — every loop
 /// is written out — but it is why `makeHouseholder`'s reduction is a sequential
-/// fold rather than a vectorised one (see [`super::eigen_qr`]).
+/// fold rather than a vectorised one (see `super::eigen_qr`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LandmarkBlock<S: LieScalar> {
     /// `storage` (`:530`): `[ J_p | pad | J_l | r ]`, `num_rows` x `num_cols`.
@@ -844,7 +844,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
         Ok(())
     }
 
-    /// The pose columns [`Self::add_dense_h_b_active`] writes; see the field.
+    /// The pose columns `Self::add_dense_h_b_active` writes; see the field.
     pub fn active_cols(&self) -> &[usize] {
         &self.active_cols
     }
@@ -860,7 +860,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
     ///
     /// **Full width**: every column of `0..padding_idx` is written, as the C++
     /// writes it, because `h` and `b` are the caller's and this method knows
-    /// nothing about what is in them. [`Self::add_dense_h_b_active`] is the same
+    /// nothing about what is in them. `Self::add_dense_h_b_active` is the same
     /// sum over the observed columns only, for the one caller that owns its
     /// destination and can prove the rest is the identity.
     ///

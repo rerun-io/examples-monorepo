@@ -53,7 +53,7 @@
 //!   hundred flops against the ~10⁸ the frontend spends on the same frame.
 //! * **The LDLT is Eigen's, ported.** `Eigen::LDLT` is not available as a
 //!   dependency, and it is not interchangeable with a textbook pivoted LDLT:
-//!   see [`ldlt_in_place`] for the two properties — pivoting on the *un-updated*
+//!   see `ldlt_in_place` for the two properties — pivoting on the *un-updated*
 //!   diagonal, and a tiny negative pivot on a dependent direction — that decide
 //!   what a *singular* covariance whitens to. Getting them wrong puts an
 //!   information weight of `1e26` on an unobservable direction where basalt puts

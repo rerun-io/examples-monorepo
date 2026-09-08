@@ -106,7 +106,7 @@ pub trait LieScalar: RealField + Copy {
     /// four floats. `tools/marg_norm_probe.cpp` on the fork prints both sizes
     /// from `packet_traits` itself rather than trusting the flag reading.
     ///
-    /// This is the loop bound of [`crate::linearize::eigen_qr::contiguous_squared_norm`],
+    /// This is the loop bound of `crate::linearize::eigen_qr::contiguous_squared_norm`,
     /// which is Eigen's vectorised `redux` for a contiguous column segment.
     const EIGEN_PACKET_SIZE: usize;
 

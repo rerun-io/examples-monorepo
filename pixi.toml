@@ -2598,8 +2598,12 @@ description = "Run every Rust test with the CUDA CubeCL frontend, including the 
 # Clippy plus `cargo doc`: nine intra-doc links in `src/gpu/` had rotted with
 # nothing to notice, because a broken link is a `cargo doc` warning and no gate
 # ran it. Ten seconds, and it is the only check on the seam's own documentation.
+# `private_intra_doc_links` is denied beside the broken ones because a public
+# item linking to a private one renders as **plain text** in the published docs:
+# the link is not broken, it is silently dropped, which is the same rot with no
+# warning to grep for.
 [feature.slam-rs-gpu.tasks.slam-rs-gpu-clippy]
-cmd = "cargo clippy --workspace --all-targets --features slam-rs/gpu -- -D warnings && RUSTDOCFLAGS='-D rustdoc::broken_intra_doc_links' cargo doc -p slam-rs --features gpu --no-deps"
+cmd = "cargo clippy --workspace --all-targets --features slam-rs/gpu -- -D warnings && RUSTDOCFLAGS='-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links' cargo doc -p slam-rs --features gpu --no-deps"
 cwd = "packages/slam-rs"
 description = "Lint the CUDA CubeCL lane and check the seam's intra-doc links"
 

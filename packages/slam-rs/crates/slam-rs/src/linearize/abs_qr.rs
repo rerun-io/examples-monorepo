@@ -401,7 +401,7 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
     ///    (`:229-232`) — first-estimate Jacobians, trap 7;
     /// 2. the landmark blocks, a `parallel_deterministic_reduce` in C++
     ///    (**site 1 of 4**, `:262`), reproduced here through
-    ///    [`crate::linearize::reduce`], which is TBB's balanced join tree and
+    ///    `crate::linearize::reduce`, which is TBB's balanced join tree and
     ///    not a fold;
     /// 3. the IMU blocks (`:266-268`) and then the marginalization prior
     ///    (`:270-274`), both serial in C++ too.
@@ -675,7 +675,7 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
     /// **Reduction site 4 of 4** (`:550`). C++ gives every TBB task its own full
     /// `total_size` x `total_size` partial and adds them at the joins
     /// (`:513-542`); the port walks the same join tree through
-    /// [`crate::linearize::reduce`], which reuses one accumulator per recursion
+    /// `crate::linearize::reduce`, which reuses one accumulator per recursion
     /// **depth** rather than one per task — the same sum, `ceil(log2 n)`
     /// matrices instead of `n`.
     ///

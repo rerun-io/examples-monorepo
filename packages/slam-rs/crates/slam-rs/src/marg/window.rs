@@ -434,7 +434,7 @@ fn run_helper<S: LieScalar>(
 ///   `:1120-1133`, after the `states_to_marg_vel_bias` frames have been demoted
 ///   into `frame_poses` and the `poses_to_marg` frames removed. The port
 ///   computes the same set from the schedule instead
-///   ([`new_prior_ordering`]) so that `:1145`'s width check can run before the
+///   (`new_prior_ordering`) so that `:1145`'s width check can run before the
 ///   first mutation.
 pub fn marginalize<S: LieScalar>(
     estimator: &mut BundleAdjustmentBase<S>,

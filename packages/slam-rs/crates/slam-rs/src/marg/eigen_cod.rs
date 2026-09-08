@@ -384,7 +384,7 @@ impl<S: LieScalar> Cod<S> {
     /// `CompleteOrthogonalDecomposition::rows()` is the *factorized matrix's*
     /// row count. The port returns [`MargError::RhsLengthMismatch`] instead: a
     /// short right-hand side used to index past the end of it through the
-    /// unchecked [`BlockSpan`] built from `rows` rather than from the argument
+    /// unchecked `BlockSpan` built from `rows` rather than from the argument
     /// (decision D32).
     pub fn solve(&self, rhs: &DMatrix<S>) -> Result<DMatrix<S>, MargError> {
         let rows: usize = self.cpqr.qr.nrows();

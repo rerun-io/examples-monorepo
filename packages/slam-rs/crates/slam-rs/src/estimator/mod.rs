@@ -16,7 +16,7 @@
 //!   (`:263-355`): initialise from one accelerometer sample if this is the first
 //!   frame, preintegrate the IMU samples that fall in `(prev_t, curr_t]`, then
 //!   `measure`.
-//! * [`SqrtKeypointVio::measure`] (`:422-575`) predicts the new state, files the
+//! * `SqrtKeypointVio::measure` (`:422-575`) predicts the new state, files the
 //!   observations, votes on a keyframe, triangulates what the window does not
 //!   yet know, and calls `optimize_and_marg`.
 //! * `optimize` (`optimize.rs`, `:1201-1639`) is the Levenberg–Marquardt loop
@@ -753,8 +753,8 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     /// Samples must arrive in order; a sample that does not follow the last one
     /// **accepted** is dropped rather than reordered, because the integration
     /// reads the stream strictly forward. "Accepted" is
-    /// [`Self::newest_imu_t_ns`], not the queue's back: the newest sample may
-    /// already sit in [`Self::pending`], leaving the queue empty and an older
+    /// `Self::newest_imu_t_ns`, not the queue's back: the newest sample may
+    /// already sit in `Self::pending`, leaving the queue empty and an older
     /// sample free to slot in behind it. The static bias calibration
     /// (`calib_bias.hpp:101-107`) is applied when the sample is popped, as
     /// `:298-299` does, not here.
@@ -775,7 +775,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     /// consumed and the integration loop pops again (`:322-328`). The newest
     /// accepted sample is never popped past — the skip loop stops at the
     /// previous frameset and the integration loop at this one, both below it —
-    /// so this reads [`Self::newest_imu_t_ns`] rather than walking the queue.
+    /// so this reads `Self::newest_imu_t_ns` rather than walking the queue.
     ///
     /// [`Vio::track`](crate::Vio::track) runs this **before** the frontend, so
     /// a refused frameset leaves the whole pipeline untouched and the caller
@@ -918,7 +918,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     /// (`:263-296`, D17 of papers-part2 §13: there is no other initialization
     /// stage), preintegrates `(prev_t, curr_t]` into one measurement with the
     /// **previous state's** biases as the linearization point (`:302-304`), and
-    /// calls [`Self::measure`].
+    /// calls `Self::measure`.
     ///
     /// Returns [`FrameOutcome::NeedMoreImu`] and leaves everything untouched
     /// when the buffer does not yet reach past `frame.t_ns`: basalt blocks on

@@ -238,7 +238,7 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
 ///
 /// The plain Schur complement, with the marginalized block inverted through
 /// Eigen's complete orthogonal decomposition (`:99-100`) — see
-/// [`crate::marg::eigen_cod`] for why that specific decomposition is ported
+/// `crate::marg::eigen_cod` for why that specific decomposition is ported
 /// rather than substituted.
 ///
 /// `abs_H` is permuted **keep first** and then overwritten in place: the

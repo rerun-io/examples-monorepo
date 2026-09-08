@@ -251,7 +251,7 @@ pub type GpuRuntime = cubecl_wgpu::WgpuRuntime;
 /// `PanicException`, against [`crate::Vio`]'s documented contract that a
 /// refusal is a `ValueError` and never a Rust panic (decision D32).
 ///
-/// 1. [`probe_availability`] asks the runtime's **own** fallible API — cudarc's
+/// 1. `probe_availability` asks the runtime's **own** fallible API — cudarc's
 ///    `init` and device count, wgpu's `request_adapter` — before any client
 ///    exists, so the common failures name what is missing.
 /// 2. The construction itself runs inside `catch_unwind`, because a probe can

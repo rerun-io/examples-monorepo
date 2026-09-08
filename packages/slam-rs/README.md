@@ -381,13 +381,21 @@ cubecl's own worker thread; the per-kernel tolerance tests are what catch it
 pixi run -e slam-rs-gpu-dev --frozen slam-rs-gpu-build   # cargo build --features gpu
 pixi run -e slam-rs-gpu-dev --frozen slam-rs-gpu-test    # cargo test --features slam-rs/gpu
 pixi run -e slam-rs-gpu-dev --frozen slam-rs-gpu-clippy  # clippy with the feature, -D warnings
-pixi run -e slam-rs-gpu-dev --frozen slam-rs-wgpu-check  # the portable lane still compiles
-pixi run -e slam-rs-gpu-dev --frozen slam-rs-wgpu-test   # the same kernels through wgpu
-pixi run -e slam-rs-gpu-dev --frozen slam-rs-wgpu-build  # a core whose `--gpu` is wgpu
 ```
 
 The environment is linux-64 only and its own solve group, so no other lane in
 the workspace enters a CUDA solve.
+
+The **portable** lane's three tasks are not in it, and the difference is the
+point of the split: `gpu-wgpu` links no NVIDIA crate, so those tasks need no
+CUDA package and live in the base feature, where every Linux platform the
+package declares can run them.
+
+```bash
+pixi run -e slam-rs-dev --frozen slam-rs-wgpu-check  # the portable lane still compiles
+pixi run -e slam-rs-dev --frozen slam-rs-wgpu-test   # the same kernels through wgpu
+pixi run -e slam-rs-dev --frozen slam-rs-wgpu-build  # a core whose `--gpu` is wgpu
+```
 
 ### The portable lane, and the two silent failures
 

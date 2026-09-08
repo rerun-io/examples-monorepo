@@ -22,7 +22,7 @@
 //!
 //! That entry point scans **whole rows** whatever columns the rectangle asks
 //! for, so the call is made once per `(cell row, threshold)` over the whole
-//! width and each cell filters its own columns out of the result — see [`Band`],
+//! width and each cell filters its own columns out of the result — see `Band`,
 //! which also records why a cell-sized crop is not the same detection
 //! (kornia turns its in-block local-maximum filter on at `width >= 800`).
 //!
@@ -42,7 +42,7 @@
 //! edge where the C++ emits only the local peaks — on a synthetic image of flat
 //! bright squares the port produced sixteen corners where `cv::FAST` produces
 //! **none**, because every candidate there ties with its neighbour.
-//! [`suppress_non_maxima`] reproduces OpenCV's rule exactly: a candidate survives
+//! `suppress_non_maxima` reproduces OpenCV's rule exactly: a candidate survives
 //! only when its score is **strictly greater** than all eight neighbours', a
 //! neighbour that is not itself a candidate scoring zero. Strictness on both
 //! sides is why a plateau of equal scores yields nothing, which is OpenCV's

@@ -5,7 +5,7 @@
 //! a separable 5-tap `[1, 4, 6, 4, 1]` Gaussian with BORDER_REFLECT_101
 //! extrapolation, integer accumulation in an `i32` scratch buffer laid out
 //! row-major over `dst_height` x `src_width` — which reproduces C++'s
-//! transposed *arithmetic*, not its layout, see [`subsample`] — and one
+//! transposed *arithmetic*, not its layout, see `subsample` — and one
 //! rounding at the very end, `(val + (1 << 7)) >> 8` (`image_pyr.h:135`).
 //! Every level of a 960x960 frame must match the C++ byte for byte; the fixture
 //! test at the bottom of this file checks exactly that against dumps produced

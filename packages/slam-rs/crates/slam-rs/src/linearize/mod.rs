@@ -39,7 +39,7 @@
 //! `blocked_range(0, n)` with grainsize 1 splits at `begin + size / 2` until a
 //! range holds one element and then joins up a balanced tree, so four elements
 //! reduce as `(x0 + x1) + (x2 + x3)`. In `f32` with `[2²⁴, 1, 1, 1]` that is
-//! `16777218` where a fold gives `16777216`. The [`reduce`] module reproduces
+//! `16777218` where a fold gives `16777216`. The `reduce` module reproduces
 //! the tree, pinned bit for bit against the fork's own TBB by
 //! `tests/fixtures/linearize/tbb_reduce_oracle.json`, and all four sites go
 //! through it: [`LinearizationAbsQR::linearize_problem`],
@@ -55,7 +55,7 @@ mod reduce;
 pub use abs_qr::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
 pub use landmark_block::{DenseHbScratch, LandmarkBlock, LandmarkBlockOptions, LandmarkBlockState};
 
-/// [`reduce::deterministic_reduce_scalar`] with the error type erased, so the
+/// `reduce::deterministic_reduce_scalar` with the error type erased, so the
 /// fixture test in `tests/tbb_reduce_oracle.rs` can drive the association
 /// directly.
 ///
@@ -88,7 +88,7 @@ use crate::types::{CamId, FrameId, LandmarkId};
 /// This is one step of `performQRHouseholder`
 /// (`landmark_block_abs_dynamic.hpp:445-453`), with Eigen's `makeHouseholder`
 /// and `applyHouseholderOnTheLeft` arithmetic ported rather than nalgebra's
-/// (see [`eigen_qr`] for why). Exposed because the marginalization QR of
+/// (see `eigen_qr` for why). Exposed because the marginalization QR of
 /// `marg_helper.cpp:293-317` drives the same primitive over a wider matrix, and
 /// because the ported `test_qr.cpp` builds a full QR out of it.
 ///

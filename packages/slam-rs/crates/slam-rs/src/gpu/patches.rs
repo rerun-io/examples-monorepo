@@ -11,7 +11,7 @@ use crate::pyramid::Pyramid;
 
 /// Layout of the one `store` buffer a patch set owns.
 ///
-/// The three sections [`kernels`] documents, in one allocation so the per-patch
+/// The three sections `kernels` documents, in one allocation so the per-patch
 /// kernels need one binding for all of it: `data`, then `H^-1 J^T`, then the
 /// per-level validity flag. Every section has the patch index fast-varying.
 ///

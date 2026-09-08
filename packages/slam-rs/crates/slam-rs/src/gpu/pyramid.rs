@@ -65,7 +65,7 @@ pub(super) struct Level {
 /// buffer it writes.
 ///
 /// The `meta` buffer beside them carries the level geometry and the sampling
-/// pattern the per-patch kernels read (see [`kernels`]); it is written once,
+/// pattern the per-patch kernels read (see `kernels`); it is written once,
 /// when the pyramid is allocated, and never touched per frame.
 pub struct GpuPyramid<R: Runtime> {
     client: ComputeClient<R>,
