@@ -292,8 +292,8 @@ def cpp_gt_band_cm(clip: GatedClip, run: SegmentRun, available: References) -> t
     """The C++'s own ground-truth error on this footage, in both of its precisions (D60).
 
     The band is the same C++ code on the same pixels with one flag changed, and
-    it is what "as accurate as basalt" can mean at all: 0.0015 cm wide on
-    ``MGO14`` and 2.3 cm wide on the 410-second ``MIO14``.
+    it is what "as accurate as basalt" can mean at all: 0.00007 cm wide on
+    ``MIO10`` and 2.3 cm wide on the 410-second ``MIO14``.
 
     A windowed run recomputes the ``f32`` member over exactly the span it
     replayed, or a clip whose error grows late would be gated against a budget it

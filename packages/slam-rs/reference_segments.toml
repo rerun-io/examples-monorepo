@@ -42,7 +42,7 @@
 # the reference run itself (`use-double 0`), `rmse_cm_f64` is the same code on
 # the same pixels with `use-double 1`, one thread and `deterministic 1`. The two
 # are the C++'s own precision band (D60) and their distance is what basalt's
-# answer is worth on that clip: 0.0005 cm on MGO09, 2.30 cm on the 410-second
+# answer is worth on that clip: 0.00007 cm on MIO10, 2.30 cm on the 410-second
 # MIO14, where changing nothing but the floating-point width also moves its
 # trajectory by 4.24 cm rmse. The port's ground-truth error is gated against that
 # band and not against a single number, because a single number claims a

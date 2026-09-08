@@ -663,7 +663,7 @@ driving `_core.Vio` and the feed directly with nothing logged:
   — `rmse_cm` and `rmse_cm_f64` in the manifest, the same code on the same pixels
   with `use-double` flipped — or within `GT_BAND_RATIO` = 1.2 of the band's worst
   member, whichever is looser, which is the second alone since the ratio is above
-  one. The band is 0.0005 cm wide on `MGO09` and 2.3 cm wide on `MIO14`, so
+  one. The band is 0.00007 cm wide on `MIO10` and 2.3 cm wide on `MIO14`, so
   "inside the band" on its own would gate the tight clips on rounding (D60);
 * speed: the replay's own feed loop — decode plus `track`, nothing logged, the
   loop the C++ reference timed and recorded as `run.feed_wall_time_s` — within

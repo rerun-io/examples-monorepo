@@ -70,7 +70,7 @@ GT_BAND_RATIO: float = 1.2
 """How far outside the C++'s own precision band the port's ground-truth error may sit (D60).
 
 The band is `[rmse_cm, rmse_cm_f64]`: the same C++ code on the same pixels with
-one flag changed. It is 0.0015 cm wide on `MGO14` and 2.3 cm wide on `MIO14`, so
+one flag changed. It is 0.00007 cm wide on `MIO10` and 2.3 cm wide on `MIO14`, so
 "inside the band" alone would gate the tight clips on rounding; the rule is
 therefore this multiple of the band's worst member, which contains the band
 itself.
@@ -184,7 +184,7 @@ class CppAte:
 
     The other member of the C++'s own precision band (D60). One flag apart from
     :attr:`rmse_cm`, and the distance between the two is what basalt's answer is
-    worth on that clip: 0.0015 cm on `MGO14`, 2.3 cm on the 410-second `MIO14`.
+    worth on that clip: 0.00007 cm on `MIO10`, 2.3 cm on the 410-second `MIO14`.
     """
     max_cm: float
     """Largest residual, centimetres."""
