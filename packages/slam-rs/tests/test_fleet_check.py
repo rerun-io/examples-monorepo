@@ -183,7 +183,7 @@ def test_a_clip_the_estimator_never_tracked_is_a_row_and_not_a_traceback(
 
     output: Path = tmp_path / "fleet_check.json"
     with pytest.raises(SystemExit, match="is not a trajectory"):
-        main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1],), output_json=output))
+        main(Config(segments=(SMOKE_SEGMENTS[1],), output_json=output))
     written: dict = json.loads(output.read_text())
     assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)
     assert written["clips"][0]["verdict"].startswith("fail:")
@@ -228,7 +228,7 @@ def test_an_estimate_on_another_clock_is_a_row_and_not_a_traceback(
 
     output: Path = tmp_path / "fleet_check.json"
     with pytest.raises(SystemExit, match="no pose associated within"):
-        main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1],), output_json=output))
+        main(Config(segments=(SMOKE_SEGMENTS[1],), output_json=output))
     written: dict = json.loads(output.read_text())
     assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)
     assert "no pose associated within" in written["clips"][0]["verdict"]
@@ -262,7 +262,7 @@ def test_an_unknown_segment_id_is_refused_before_the_first_replay(monkeypatch: p
 
     monkeypatch.setattr(fleet_check, "measure", never("a clip was measured before every id was resolved"))
     with pytest.raises(ValueError, match="MIO10_typo.*MIO10_short_2_panorama"):
-        main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1], "MIO10_typo"), output_json=tmp_path / "fleet_check.json"))
+        main(Config(segments=(SMOKE_SEGMENTS[1], "MIO10_typo"), output_json=tmp_path / "fleet_check.json"))
 
 
 def test_a_partial_corpus_is_refused_before_the_first_replay(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -278,7 +278,7 @@ def test_a_partial_corpus_is_refused_before_the_first_replay(monkeypatch: pytest
     monkeypatch.setattr(fleet_check, "run_segment", never("a replay was paid for before every scoring input was opened"))
     write_trajectory(tmp_path / SMOKE_SEGMENTS[0] / "gt.csv", empty_trajectory())
     with pytest.raises(FileNotFoundError, match=f"{SMOKE_SEGMENTS[1]}.*is not a file on this machine"):
-        main(Config(manifest=MANIFEST_PATH, artifact_root=tmp_path, segments=SMOKE_SEGMENTS, output_json=tmp_path / "fleet_check.json"))
+        main(Config(artifact_root=tmp_path, segments=SMOKE_SEGMENTS, output_json=tmp_path / "fleet_check.json"))
 
 
 def test_the_first_clips_evidence_survives_a_directory_that_is_not_there_yet(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -290,7 +290,7 @@ def test_the_first_clips_evidence_survives_a_directory_that_is_not_there_yet(mon
     """
     monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment, _gpu: PASSING)
     output: Path = tmp_path / "out" / "fleet_check.json"
-    main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1],), output_json=output))
+    main(Config(segments=(SMOKE_SEGMENTS[1],), output_json=output))
     written: dict = json.loads(output.read_text())
     assert list(written) == ["machine", "lane", "clips"]
     assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)
@@ -306,7 +306,7 @@ def test_the_lane_is_on_the_json_and_the_clip_columns_are_not(monkeypatch: pytes
     monkeypatch.setattr(_core, "gpu_backend", "wgpu")
     monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment, _gpu: PASSING)
     output: Path = tmp_path / "fleet_check.json"
-    main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1],), output_json=output, gpu=True))
+    main(Config(segments=(SMOKE_SEGMENTS[1],), output_json=output, gpu=True))
     written: dict = json.loads(output.read_text())
     assert written["lane"] == "wgpu"
     assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)
@@ -348,7 +348,7 @@ def test_a_gpu_run_on_a_core_without_a_gpu_feature_is_refused_before_any_file_is
     monkeypatch.setattr(fleet_check, "measure", never("a clip was measured on a core that has no GPU lane"))
     output: Path = tmp_path / "fleet_check.json"
     with pytest.raises(ValueError, match="built with a GPU cargo feature"):
-        main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1],), output_json=output, gpu=True))
+        main(Config(segments=(SMOKE_SEGMENTS[1],), output_json=output, gpu=True))
     assert not output.exists()
 
 
@@ -363,7 +363,7 @@ def test_an_empty_segment_selection_is_refused_rather_than_read_as_a_pass(monkey
     monkeypatch.setattr(fleet_check, "load_manifest", never("a run with no clip selected reached the manifest"))
     output: Path = tmp_path / "fleet_check.json"
     with pytest.raises(ValueError, match="--segments named no clip"):
-        main(Config(manifest=MANIFEST_PATH, segments=(), output_json=output))
+        main(Config(segments=(), output_json=output))
     assert not output.exists()
 
 

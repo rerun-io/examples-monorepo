@@ -32,7 +32,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb, this_temperature_c
-from slam_rs.reference import MANIFEST_PATH, ReferenceManifest, RobocapSession, load_manifest
+from slam_rs.reference import ReferenceManifest, RobocapSession, load_manifest
 from slam_rs.tracking import SegmentRun, robocap_cpp_trajectory, run_robocap
 from slam_rs.trajectory import AteResult, Trajectory, ate, read_trajectory, write_trajectory
 
@@ -123,8 +123,6 @@ class RobocapRow:
 class Config:
     """Replay one RoboCap session on this machine, with nothing logged."""
 
-    manifest: Path = MANIFEST_PATH
-    """Reference manifest; ``--artifact-root`` is usually the flag a machine without the NAS wants instead."""
     artifact_root: Path | None = None
     """Read every recording and sidecar from one directory per segment; see :func:`slam_rs.reference.relocate`."""
     session: str = "s00000015"
@@ -231,7 +229,7 @@ def main(config: Config) -> None:
             accuracy number to report but a run that went wrong. Both outputs
             are written first: the cost they carry was measured.
     """
-    manifest: ReferenceManifest = load_manifest(config.manifest, config.artifact_root)
+    manifest: ReferenceManifest = load_manifest(artifact_root=config.artifact_root)
     session: RobocapSession = manifest.robocap.session(config.session)
     machine: Machine = this_machine()
     print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores")

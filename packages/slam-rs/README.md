@@ -395,15 +395,14 @@ Spark's: conda-forge ships both packages at 13.0 there through the `sbsa` arm
 variant, whose header directory is `targets/sbsa-linux`, which is the one thing
 `CUDA_PATH` has to say per target.
 
-The portable lane's four tasks are not in that environment, and the difference
+The portable lane's three tasks are not in that environment, and the difference
 is the point of the split: `gpu-wgpu` links no NVIDIA crate, so they need no CUDA
 package and live in the base feature, where every Linux platform the package
 declares can run them — from `slam-rs`/`slam-rs-dev` on Linux and from
 `slam-rs-osx`/`slam-rs-osx-dev` on the Mac:
 
 ```bash
-pixi run -e slam-rs-dev --frozen slam-rs-wgpu-check      # the portable lane still compiles
-pixi run -e slam-rs-dev --frozen slam-rs-wgpu-clippy     # and is warning-clean, tests included
+pixi run -e slam-rs-dev --frozen slam-rs-wgpu-clippy     # the portable lane compiles and is warning-clean, tests included
 pixi run -e slam-rs-dev --frozen slam-rs-wgpu-test       # the same kernels, on this host's GPU
 pixi run -e slam-rs-dev --frozen slam-rs-wgpu-build      # a core whose `--gpu` is wgpu
 ```
@@ -412,7 +411,7 @@ pixi run -e slam-rs-dev --frozen slam-rs-wgpu-build      # a core whose `--gpu` 
 so an item the `gpu` feature keeps alive and this lane does not is dead code
 nobody sees.
 
-On macOS the same four tasks run from the mac lane's environment, which is
+On macOS the same three tasks run from the mac lane's environment, which is
 where that platform's `slam-rs` features are solved, and Metal is the backend
 `AutoGraphicsApi` picks there:
 

@@ -41,7 +41,7 @@ from slam_rs.catalog_feed import (
     open_segment,
 )
 from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
-from slam_rs.reference import MANIFEST_PATH, SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment, flow_config, load_manifest
+from slam_rs.reference import SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment, flow_config, load_manifest
 from slam_rs.reference_bundle import BundleFile
 from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import Trajectory, ate, coverage, empty_trajectory, read_trajectory, shift_clock, write_trajectory
@@ -60,8 +60,6 @@ class Config:
 
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
     """Viewer, save and headless behaviour."""
-    manifest: Path = MANIFEST_PATH
-    """Reference manifest; ``--artifact-root`` is usually the flag a machine without the NAS wants instead."""
     artifact_root: Path | None = None
     """Read every recording and sidecar from one directory per segment; see :func:`slam_rs.reference.relocate`."""
     stage: Stage = "input"
@@ -191,7 +189,7 @@ def main(config: Config) -> None:
     Args:
         config: Parsed CLI options.
     """
-    manifest: ReferenceManifest = load_manifest(config.manifest, config.artifact_root)
+    manifest: ReferenceManifest = load_manifest(artifact_root=config.artifact_root)
     segment: ReferenceSegment = manifest.by_id(config.segment)
     source: LocalSegment = LocalSegment(
         base_rrd=config.rrd if config.rrd is not None else segment.base_path,

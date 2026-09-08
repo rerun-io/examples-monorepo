@@ -25,7 +25,7 @@ from fixture_types import never
 from slam_rs.apis import robocap_fleet
 from slam_rs.apis.robocap_fleet import BUDGET_15FPS_MS, BUDGET_30FPS_MS, Config, RobocapRow, main, measure
 from slam_rs.machine import Machine, this_machine
-from slam_rs.reference import MANIFEST_PATH, ReferenceManifest, RobocapSession
+from slam_rs.reference import ReferenceManifest, RobocapSession
 from slam_rs.tracking import SegmentRun
 from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, empty_trajectory, shift_clock
 
@@ -100,7 +100,7 @@ def test_both_outputs_survive_a_directory_that_is_not_there_yet(
     """A run that measured 52.9 s of video must not lose it to a missing ``out/``."""
     monkeypatch.setattr(robocap_fleet, "measure", lambda *_args: (ROW, empty_trajectory()))
     output: Path = tmp_path / "out" / "robocap_fleet.json"
-    main(Config(manifest=MANIFEST_PATH, output_json=output))
+    main(Config(output_json=output))
     assert json.loads(output.read_text())["segment_id"] == "robocap-s15"
     assert output.with_suffix(".csv").is_file()
 
@@ -169,7 +169,7 @@ def test_an_estimate_on_another_clock_is_a_row_and_not_a_traceback(
     monkeypatch.setattr(robocap_fleet, "measure", lambda *_args: (row, estimate))
     output: Path = tmp_path / "robocap_fleet.json"
     with pytest.raises(SystemExit, match="no pose associated within"):
-        main(Config(manifest=MANIFEST_PATH, output_json=output))
+        main(Config(output_json=output))
     written: dict = json.loads(output.read_text())
     assert math.isnan(written["cpp_rmse_cm"])
     assert "no pose associated within" in written["unscored"]

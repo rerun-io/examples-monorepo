@@ -25,7 +25,6 @@ from slam_rs import _core
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb
 from slam_rs.reference import (
     GT_BAND_RATIO,
-    MANIFEST_PATH,
     MIN_TRACKED_POSES,
     SMOKE_SEGMENTS,
     CppAte,
@@ -320,8 +319,6 @@ def this_lane(gpu: bool) -> Lane:
 class Config:
     """Run the reference smoke clips on this machine and report the D60 verdict."""
 
-    manifest: Path = MANIFEST_PATH
-    """Reference manifest; ``--artifact-root`` is usually the flag a machine without the NAS wants instead."""
     artifact_root: Path | None = None
     """Read every recording and sidecar from one directory per segment; see :func:`slam_rs.reference.relocate`."""
     segments: tuple[str, ...] = SMOKE_SEGMENTS
@@ -364,7 +361,7 @@ def main(config: Config) -> None:
     # Before any file is opened: a `--gpu` run has no lane to report on a core
     # built without a GPU feature, and that costs nothing to say here.
     lane: Lane = this_lane(config.gpu)
-    manifest: ReferenceManifest = load_manifest(config.manifest, config.artifact_root)
+    manifest: ReferenceManifest = load_manifest(artifact_root=config.artifact_root)
     # Every id resolved before the first replay, not one at a time inside the
     # loop: `--segments <410 s clip> typo` used to pay that clip and then reach
     # the typo (S22 review).

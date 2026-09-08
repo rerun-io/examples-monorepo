@@ -60,7 +60,7 @@ from slam_rs.catalog_feed import (
     RigProfile,
     open_segment,
 )
-from slam_rs.reference import MANIFEST_PATH, ReferenceManifest, RobocapSession, load_manifest
+from slam_rs.reference import ReferenceManifest, RobocapSession, load_manifest
 from slam_rs.tracking import Lockstep, check_calibration_matches_recording, robocap_cpp_trajectory, robocap_estimator_files
 from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_trajectory, shift_clock, write_trajectory
 from slam_rs.vio_log import FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
@@ -72,14 +72,24 @@ class Config:
 
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
     """Viewer, save and headless behaviour."""
-    manifest: Path = MANIFEST_PATH
-    """Reference manifest; ``--artifact-root`` is usually the flag a machine without the NAS wants instead."""
     artifact_root: Path | None = None
     """Read every recording and sidecar from one directory per segment; see :func:`slam_rs.reference.relocate`."""
     session: str = "s00000021"
-    """RoboCap session id from ``reference_segments.toml``."""
+    """RoboCap session id from ``reference_segments.toml``.
+
+    Session 21 and not the fleet tool's 15: this lane draws a recording, and 21
+    is the long one (154.9 s, 4,648 framesets) whose repeated loop is where a
+    yaw offset or a scale error would show. Session 15 is the fleet default
+    because it is the one with a C++ wall measured on the cap, which is what a
+    runtime row is read against.
+    """
     seconds: float = 90.0
-    """Replay this many seconds of video time from the first frameset; 0 replays the whole session."""
+    """Replay this many seconds of video time from the first frameset; 0 replays the whole session.
+
+    The span the S17 evidence was measured over — 2,700 of session 21's
+    framesets, 10.40 cm against the C++ — and about 550 MB of ``.rrd``. The
+    whole session is a viewer recording nobody opens.
+    """
     output_csv: Path | None = None
     """Where the estimated trajectory is written; defaults to ``data/robocap-<session>/slam_rs.csv``."""
     log_frames: bool = True
@@ -94,7 +104,7 @@ def main(config: Config) -> None:
     Args:
         config: Parsed CLI options.
     """
-    manifest: ReferenceManifest = load_manifest(config.manifest, config.artifact_root)
+    manifest: ReferenceManifest = load_manifest(artifact_root=config.artifact_root)
     session: RobocapSession = manifest.robocap.session(config.session)
     offset_ns: int = manifest.robocap.imu.cam_time_offset_ns
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / f"robocap-{session.session_id}" / "slam_rs.csv"
