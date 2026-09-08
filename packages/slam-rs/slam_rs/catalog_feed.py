@@ -38,7 +38,7 @@ Three decisions are frozen here because each one silently changes the numbers:
 
 import hashlib
 import math
-from collections.abc import Iterator, Sequence
+from collections.abc import Buffer, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from fractions import Fraction
@@ -519,14 +519,18 @@ def read_camera_statics(statics: pa.Table, entity: str) -> CameraStatics:
     )
 
 
-def wrap_mp4(samples: list[bytes], keyframes: list[bool], fps: int, codec: CatalogCodecName) -> bytes:
+def wrap_mp4(samples: Sequence[Buffer], keyframes: list[bool], fps: int, codec: CatalogCodecName) -> bytes:
     """Mux pre-encoded samples into an in-memory MP4 with positional pts, no re-encode.
 
     ``simplecv.rerun_dataloader`` has the same function, but importing it drags in
     torchcodec and torchvision, which this CPU lane deliberately does not install.
 
     Args:
-        samples: Encoded video samples in decode order; the first must be a keyframe.
+        samples: Encoded video samples in decode order, as anything with a
+            buffer — ``bytes``, or a view into the column they were read from —
+            because ``av.Packet`` copies into its own buffer either way and a
+            ``bytes`` copy on the way in is one full copy of the window's
+            encoded bytes per camera for nothing. The first must be a keyframe.
         keyframes: Keyframe flag per sample.
         fps: Frame rate written into the muxed track and its time base.
         codec: Codec of the pre-encoded samples.
@@ -541,7 +545,9 @@ def wrap_mp4(samples: list[bytes], keyframes: list[bool], fps: int, codec: Catal
         stream = container.add_mux_stream(codec, rate=fps, width=16, height=16)
         stream.time_base = Fraction(1, fps)
         for sample_index, (sample, is_keyframe) in enumerate(zip(samples, keyframes, strict=True)):
-            packet: av.Packet = av.Packet(sample)
+            # PyAV's stub says `bytes`; the constructor takes any buffer and
+            # copies into the packet's own (`av.Packet(memoryview)` is documented).
+            packet: av.Packet = av.Packet(sample)  # pyrefly: ignore[bad-argument-type]
             packet.pts = packet.dts = sample_index
             packet.duration = 1
             packet.time_base = stream.time_base
@@ -820,7 +826,7 @@ class SegmentFeed:
                     ground_truth=_nearest_pose(window_gt, t_ns),
                 )
 
-    def _fetch_samples(self, position: int, start: int, stop: int) -> tuple[list[bytes], list[bool]]:
+    def _fetch_samples(self, position: int, start: int, stop: int) -> tuple[list[UInt8[ndarray, " n_sample_bytes"]], list[bool]]:
         """Encoded samples and keyframe flags of one fed camera, over the framesets ``[start, stop)``.
 
         The range is contiguous in that camera's own frames, from the frame the
@@ -853,7 +859,10 @@ class SegmentFeed:
         blobs: pa.LargeListArray = table[1].combine_chunks().cast(pa.list_(pa.large_list(pa.uint8()))).flatten()
         data: UInt8[ndarray, " n_bytes"] = blobs.values.to_numpy(zero_copy_only=True)
         offsets: Int64[ndarray, " n_offsets"] = blobs.offsets.to_numpy(zero_copy_only=True)
-        samples: list[bytes] = [data[begin:end].tobytes() for begin, end in zip(offsets[:-1], offsets[1:], strict=True)]
+        # Views into the column, not copies of it: `av.Packet` takes any buffer
+        # and copies into its own, so a `tobytes()` here would be a second copy
+        # of every encoded byte. The views keep `data` alive while they live.
+        samples: list[UInt8[ndarray, " n_sample_bytes"]] = [data[begin:end] for begin, end in zip(offsets[:-1], offsets[1:], strict=True)]
         # is_keyframe is logged only on keyframes, so its validity is the flag.
         keyframes: list[bool] = table[2].combine_chunks().is_valid().to_pylist()
         return samples, keyframes
