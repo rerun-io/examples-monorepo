@@ -25,24 +25,21 @@
 //! `sqrt_keypoint_vio.cpp:767-880`, the `states_to_remove` count and the
 //! keyframe bookkeeping are not ported here.
 //!
-//! **Why the QR and not the Schur complement.** With `vio_sqrt_marg` on — every
-//! shipped configuration — the prior is stored as a Jacobian `J_m` and a
-//! residual `r_m` rather than as `H` and `b`, and marginalizing is one flat,
-//! rank-revealing Householder QR over the stacked
+//! **Why the QR and not the Schur complement.** The prior is stored as a
+//! Jacobian `J_m` and a residual `r_m` rather than as `H` and `b`, and
+//! marginalizing is one flat, rank-revealing Householder QR over the stacked
 //! `[J_marg | J_keep]` (papers-part2 §12). Squaring the system to eliminate a
 //! block would square its condition number, which is the whole point of the
-//! square-root formulation; the QR never forms `JᵀJ` at all.
+//! square-root formulation; the QR never forms `JᵀJ` at all. basalt keeps the
+//! squared form behind `vio_sqrt_marg` as the 2019 baseline the 2021 paper
+//! compared against; the port carries only the square-root form, because
+//! `SqrtKeypointVio::new` refuses the flag off (D68).
 
-mod eigen_cod;
 pub(crate) mod eigen_ldlt;
 mod helper;
 mod window;
 
-pub use eigen_cod::Cod;
-pub use helper::{
-    ReducedSystem, marginalize_helper_sq_to_sq, marginalize_helper_sq_to_sqrt,
-    marginalize_helper_sqrt_to_sqrt,
-};
+pub use helper::{ReducedSystem, marginalize_helper_sqrt_to_sqrt};
 pub use window::{
     MarginalizeInputs, MarginalizeOptions, MarginalizeOutput, MarginalizeSchedule, NullspaceCheck,
     check_eigenvalues, check_marg_nullspace, marginalize,

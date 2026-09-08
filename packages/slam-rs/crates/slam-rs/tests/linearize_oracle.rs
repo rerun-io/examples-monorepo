@@ -146,7 +146,6 @@ struct OracleObs {
 
 #[derive(Debug, Deserialize)]
 struct Marg {
-    is_sqrt: bool,
     rows: usize,
     cols: usize,
     order: Vec<OrderEntry>,
@@ -316,7 +315,6 @@ fn rebuild<S: LieScalar + Serialize + DeserializeOwned>(case: &Case) -> Rebuilt<
             }
         }
         MargLinData {
-            is_sqrt: m.is_sqrt,
             order,
             h,
             b: DVector::from_iterator(m.rows, m.b.iter().map(|v| S::from_literal(*v))),

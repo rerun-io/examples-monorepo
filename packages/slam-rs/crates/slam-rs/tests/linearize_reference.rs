@@ -175,12 +175,7 @@ fn vo_problem_with_marg(num_frames: usize, seed: u64) -> Problem {
         pose.apply_inc(&(rng.vector6() / 100.0));
     }
 
-    problem.marg = Some(MargLinData {
-        is_sqrt: true,
-        order,
-        h,
-        b,
-    });
+    problem.marg = Some(MargLinData { order, h, b });
     problem
 }
 

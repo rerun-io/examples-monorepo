@@ -660,7 +660,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             BundleAdjustmentBase::new(calibration, obs_std_dev, huber_thresh)?;
 
         let mut marg_data: MargLinData<S> = MargLinData {
-            is_sqrt: config.vio_sqrt_marg,
             order: AbsOrderMap::new(),
             h: DMatrix::zeros(POSE_VEL_BIAS_SIZE, POSE_VEL_BIAS_SIZE),
             b: DVector::zeros(POSE_VEL_BIAS_SIZE),
@@ -678,7 +677,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 
         // `:80-84`: the debug copy starts at the same shape with **no** prior.
         let nullspace_marg_data: MargLinData<S> = MargLinData {
-            is_sqrt: marg_data.is_sqrt,
             order: AbsOrderMap::new(),
             h: DMatrix::zeros(POSE_VEL_BIAS_SIZE, POSE_VEL_BIAS_SIZE),
             b: DVector::zeros(POSE_VEL_BIAS_SIZE),

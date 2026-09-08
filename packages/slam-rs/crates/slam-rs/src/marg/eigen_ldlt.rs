@@ -159,50 +159,16 @@ impl<S: LieScalar> EigenLdlt<S> {
         }
     }
 
-    /// `vectorD()` (`LDLT.h:141`): the diagonal of the packed factor.
-    pub(crate) fn vector_d(&self) -> DVector<S> {
-        let size: usize = self.transpositions.len();
-        DVector::from_iterator(size, (0..size).map(|i| self.mat[(i, i)]))
-    }
-
-    /// `transpositionsP() * m` on the left of a dense matrix
-    /// (`ProductEvaluators.h:1194-1200`, `Side == OnTheLeft`, not transposed):
-    /// swap rows `k` and `t[k]` for **ascending** `k`.
-    pub(crate) fn apply_transpositions_left(&self, m: &mut DMatrix<S>) {
-        for (k, &j) in self.transpositions.iter().enumerate() {
-            if j != k {
-                m.swap_rows(k, j);
-            }
-        }
-    }
-
-    /// The same on a vector, `transpositionsP() * marg_b` (`marg_helper.cpp:223`).
+    /// `transpositionsP() * v` on the left of a vector: swap rows `k` and
+    /// `t[k]` for **ascending** `k` (`ProductEvaluators.h:1194-1200`,
+    /// `Side == OnTheLeft`, not transposed), which is the first step of
+    /// [`Self::solve_vec`].
     pub(crate) fn apply_transpositions_left_vec(&self, v: &mut DVector<S>) {
         for (k, &j) in self.transpositions.iter().enumerate() {
             if j != k {
                 v.swap_rows(k, j);
             }
         }
-    }
-
-    /// `matrixU() * m` (`marg_helper.cpp:214`), where `matrixU()` is
-    /// `m_matrix.adjoint().triangularView<UnitUpper>()` (`LDLT.h:134`): unit
-    /// diagonal, and `U(i, j) = L(j, i)` above it.
-    pub(crate) fn matrix_u_times(&self, m: &DMatrix<S>) -> DMatrix<S> {
-        let size: usize = self.transpositions.len();
-        let cols: usize = m.ncols();
-        let mut out: DMatrix<S> = DMatrix::zeros(size, cols);
-        for i in 0..size {
-            for j in 0..cols {
-                // `U(i, i) = 1`, then the strict upper part.
-                let mut acc: S = m[(i, j)];
-                for k in (i + 1)..size {
-                    acc += self.mat[(k, i)] * m[(k, j)];
-                }
-                out[(i, j)] = acc;
-            }
-        }
-        out
     }
 
     /// `matrixL().solveInPlace(v)` (`marg_helper.cpp:224`): the unit-lower
@@ -385,7 +351,7 @@ mod tests {
                 l[(i, j)] = ldlt.mat[(i, j)];
             }
         }
-        let d: DVector<f64> = ldlt.vector_d();
+        let d: DVector<f64> = DVector::from_iterator(size, (0..size).map(|i| ldlt.mat[(i, i)]));
         let mut ldlt_product: DMatrix<f64> = DMatrix::zeros(size, size);
         for i in 0..size {
             for j in 0..size {
@@ -560,6 +526,6 @@ mod tests {
     fn an_all_zero_matrix_leaves_identity_transpositions() {
         let ldlt: EigenLdlt<f64> = EigenLdlt::new(DMatrix::zeros(4, 4));
         assert_eq!(ldlt.transpositions, vec![0, 1, 2, 3]);
-        assert_eq!(ldlt.vector_d(), DVector::zeros(4));
+        assert!((0..4).all(|i| ldlt.mat[(i, i)] == 0.0));
     }
 }

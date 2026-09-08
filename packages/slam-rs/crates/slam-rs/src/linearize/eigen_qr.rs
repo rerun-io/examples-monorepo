@@ -61,9 +61,8 @@ use crate::lie::LieScalar;
 /// rows, cols)` in Eigen's spelling.
 ///
 /// Four indices travel together through
-/// [`apply_householder_on_the_left_block`] and
-/// [`apply_householder_on_the_right_block`]; naming them as one value is what
-/// keeps those signatures readable.
+/// [`apply_householder_on_the_left_block`]; naming them as one value is what
+/// keeps that signature readable.
 ///
 /// **Contract: the span must lie inside the matrix**, and the two functions
 /// index without re-checking, because they run once per column of a QR sweep;
@@ -182,10 +181,11 @@ pub(crate) fn make_householder<S: LieScalar>(
 /// (`Householder.h:74-85`): the `numeric_limits::min()` test, the sign of
 /// `beta`, the division that makes the essential part, and `tau`.
 ///
-/// `tail` reads coefficient `i` of the tail, which is a column for
-/// [`make_householder`] and a row for [`make_householder_row`] — the only thing
-/// the two entry points do differently, apart from computing their own
-/// `tail_sq_norm`.
+/// `tail` reads coefficient `i` of the tail, which [`make_householder`] takes
+/// down a column. C++ has a second entry point that takes it along a row, for
+/// the complete orthogonal decomposition's `Z` reflectors
+/// (`CompleteOrthogonalDecomposition.h:487`); the port had one too until the
+/// squared-form marginalization it served went (D68).
 fn reflector_from_tail<S: LieScalar>(
     c0: S,
     tail_sq_norm: S,
@@ -356,107 +356,6 @@ pub(crate) fn apply_householder_on_the_left_vec<S: LieScalar>(
     v[start] -= tau * tmp;
     for (i, e) in essential.iter().enumerate().take(len - 1) {
         v[start + 1 + i] -= (tau * *e) * tmp;
-    }
-}
-
-/// `makeHouseholder` over a **row** segment `storage.row(row).segment(col_start, len)`.
-///
-/// Same arithmetic as [`make_householder`], different traversal: the complete
-/// orthogonal decomposition builds its `Z` reflectors out of rows
-/// (`CompleteOrthogonalDecomposition.h:487`).
-///
-/// The reduction stays **sequential** and takes no [`ColumnRedux`], because a
-/// row of a column-major matrix has an inner stride of `rows`: `traits<Block>`
-/// gives a one-row block `InnerStrideAtCompileTime = Dynamic`, so it carries no
-/// `PacketAccessBit` and `LinearTraversal` folds it left to right
-/// (`Redux.h:236-244`) — the mirror of what the landmark block's row-major
-/// *columns* get.
-pub(crate) fn make_householder_row<S: LieScalar>(
-    storage: &DMatrix<S>,
-    row: usize,
-    col_start: usize,
-    len: usize,
-    essential: &mut [S],
-) -> (S, S) {
-    let mut tail_sq_norm: S = S::zero();
-    for i in 1..len {
-        let v: S = storage[(row, col_start + i)];
-        tail_sq_norm += v * v;
-    }
-    reflector_from_tail(
-        storage[(row, col_start)],
-        tail_sq_norm,
-        len,
-        essential,
-        |i| storage[(row, col_start + 1 + i)],
-    )
-}
-
-/// `applyHouseholderOnTheRight` (`Householder.h:137-150`), real scalars, over
-/// `storage.block(row_start, col_start, rows, cols)`.
-///
-/// The mirror of [`apply_householder_on_the_left_block`]: the reflector acts on
-/// the block's **columns**, `tmp` is a column of `rows` entries, and the rank
-/// one update is `tau * tmp * essentialᵀ` with the scalar folded into the left
-/// factor. Used only by the complete orthogonal decomposition
-/// (`CompleteOrthogonalDecomposition.h:491-492`).
-pub(crate) fn apply_householder_on_the_right_block<S: LieScalar>(
-    storage: &mut DMatrix<S>,
-    span: BlockSpan,
-    essential: &[S],
-    tau: S,
-    work: &mut [S],
-) {
-    let BlockSpan {
-        row_start,
-        rows,
-        col_start,
-        cols,
-    } = span;
-    debug_assert!(
-        row_start + rows <= storage.nrows() && col_start + cols <= storage.ncols(),
-        "span {span:?} outside a {}x{} matrix",
-        storage.nrows(),
-        storage.ncols()
-    );
-    if cols == 1 {
-        // `:139-140`.
-        let factor: S = S::one() - tau;
-        for i in 0..rows {
-            storage[(row_start + i, col_start)] *= factor;
-        }
-        return;
-    }
-    if tau == S::zero() {
-        // `:141`.
-        return;
-    }
-
-    // `tmp.noalias() = right * essential` (`:145`).
-    for (i, slot) in work.iter_mut().enumerate().take(rows) {
-        let mut acc: S = S::zero();
-        for (j, e) in essential.iter().enumerate().take(cols - 1) {
-            acc += storage[(row_start + i, col_start + 1 + j)] * *e;
-        }
-        *slot = acc;
-    }
-
-    // `tmp += this->col(0)` (`:146`).
-    for (i, slot) in work.iter_mut().enumerate().take(rows) {
-        *slot += storage[(row_start + i, col_start)];
-    }
-
-    // `this->col(0) -= tau * tmp` (`:147`).
-    for i in 0..rows {
-        storage[(row_start + i, col_start)] -= tau * work[i];
-    }
-
-    // `right.noalias() -= tau * tmp * essential.adjoint()` (`:148`).
-    for i in 0..rows {
-        let scale: S = tau * work[i];
-        for (j, e) in essential.iter().enumerate().take(cols - 1) {
-            storage[(row_start + i, col_start + 1 + j)] -= scale * *e;
-        }
     }
 }
 

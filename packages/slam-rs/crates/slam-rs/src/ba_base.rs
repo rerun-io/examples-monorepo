@@ -972,12 +972,6 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
                 total_size: mld.h.nrows(),
             });
         }
-        if !mld.is_sqrt && mld.h.nrows() != marg_size {
-            return Err(BaError::MargPriorSize {
-                cols: mld.h.nrows(),
-                total_size: marg_size,
-            });
-        }
         Ok(())
     }
 
@@ -1024,53 +1018,34 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
 
         let delta: DVector<S> = self.compute_delta(&mld.order)?;
 
-        if mld.is_sqrt {
-            // `:427-431`.
-            let rows: usize = mld.h.nrows();
-            // `H_delta = mld.H * delta`, reused by both `b` and the error.
-            let mut h_delta: DVector<S> = DVector::zeros(rows);
-            for i in 0..rows {
-                let mut acc: S = S::zero();
-                for j in 0..marg_size {
-                    acc += mld.h[(i, j)] * delta[j];
-                }
-                h_delta[i] = acc;
+        // `:427-431`. C++ takes the squared arm at `:433-437` when the prior
+        // is not a square root; the port has no such prior (D68).
+        let rows: usize = mld.h.nrows();
+        // `H_delta = mld.H * delta`, reused by both `b` and the error.
+        let mut h_delta: DVector<S> = DVector::zeros(rows);
+        for i in 0..rows {
+            let mut acc: S = S::zero();
+            for j in 0..marg_size {
+                acc += mld.h[(i, j)] * delta[j];
             }
-            for i in 0..marg_size {
-                for j in 0..marg_size {
-                    let mut acc: S = S::zero();
-                    for k in 0..rows {
-                        acc += mld.h[(k, i)] * mld.h[(k, j)];
-                    }
-                    abs_h[(i, j)] += acc;
-                }
+            h_delta[i] = acc;
+        }
+        for i in 0..marg_size {
+            for j in 0..marg_size {
                 let mut acc: S = S::zero();
                 for k in 0..rows {
-                    acc += mld.h[(k, i)] * (mld.b[k] + h_delta[k]);
+                    acc += mld.h[(k, i)] * mld.h[(k, j)];
                 }
-                abs_b[i] += acc;
+                abs_h[(i, j)] += acc;
             }
-            // `delta^T H^T (0.5 H delta + b)` (`:431`).
-            Ok(prior_error(&h_delta, &h_delta, &mld.b, rows))
-        } else {
-            // `:433-437`.
-            let mut h_delta: DVector<S> = DVector::zeros(marg_size);
-            for i in 0..marg_size {
-                let mut acc: S = S::zero();
-                for j in 0..marg_size {
-                    acc += mld.h[(i, j)] * delta[j];
-                }
-                h_delta[i] = acc;
+            let mut acc: S = S::zero();
+            for k in 0..rows {
+                acc += mld.h[(k, i)] * (mld.b[k] + h_delta[k]);
             }
-            for i in 0..marg_size {
-                for j in 0..marg_size {
-                    abs_h[(i, j)] += mld.h[(i, j)];
-                }
-                abs_b[i] += h_delta[i] + mld.b[i];
-            }
-            // `delta^T (0.5 H delta + b)` (`:437`).
-            Ok(prior_error(&delta, &h_delta, &mld.b, marg_size))
+            abs_b[i] += acc;
         }
+        // `delta^T H^T (0.5 H delta + b)` (`:431`).
+        Ok(prior_error(&h_delta, &h_delta, &mld.b, rows))
     }
 
     /// The prior's cost at the current state, `computeMargPriorError`
@@ -1092,19 +1067,16 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
             }
             h_delta[i] = acc;
         }
-        if mld.is_sqrt {
-            // `:461`.
-            return Ok(prior_error(&h_delta, &h_delta, &mld.b, rows));
-        }
-        // `:463`.
-        Ok(prior_error(&delta, &h_delta, &mld.b, rows.min(marg_size)))
+        // `:461`; `:463` is the squared arm, which the port has no prior for
+        // (D68).
+        Ok(prior_error(&h_delta, &h_delta, &mld.b, rows))
     }
 
     /// The prior's share of the model cost change,
     /// `computeMargPriorModelCostChange` (`ba_base.cpp:467-528`).
     ///
-    /// `l_diff = -(J inc)ᵀ (J delta + r + 0.5 (J inc))` in square-root form
-    /// (`:519-522`). Note the asymmetry the comment at `:503-507` spells out:
+    /// `l_diff = -(J inc)ᵀ (J delta + r + 0.5 (J inc))` (`:519-522`). Note the
+    /// asymmetry the comment at `:503-507` spells out:
     /// the Jacobian scaling multiplies `H` where it meets `inc`, but **not**
     /// where it meets `delta`, because `delta` was never scaled.
     pub fn compute_marg_prior_model_cost_change(
@@ -1143,33 +1115,21 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
             }
         }
 
+        // `:519-522`; `:524` is the squared arm, which the port has no prior
+        // for (D68).
         let rows: usize = mld.h.nrows();
-        if mld.is_sqrt {
-            // `:519-522`.
-            let mut l_diff: S = S::zero();
-            for k in 0..rows {
-                let mut b_jdelta: S = S::zero();
-                let mut j_inc: S = S::zero();
-                for j in 0..marg_size {
-                    b_jdelta += mld.h[(k, j)] * delta[j];
-                    j_inc += mld.h[(k, j)] * scaled_inc[j];
-                }
-                b_jdelta += mld.b[k];
-                l_diff -= j_inc * (b_jdelta + c::<S>(0.5) * j_inc);
+        let mut l_diff: S = S::zero();
+        for k in 0..rows {
+            let mut b_jdelta: S = S::zero();
+            let mut j_inc: S = S::zero();
+            for j in 0..marg_size {
+                b_jdelta += mld.h[(k, j)] * delta[j];
+                j_inc += mld.h[(k, j)] * scaled_inc[j];
             }
-            Ok(l_diff)
-        } else {
-            // `:524`: `-inc . (H (delta + 0.5 inc) + b)`.
-            let mut l_diff: S = S::zero();
-            for i in 0..rows.min(marg_size) {
-                let mut acc: S = S::zero();
-                for j in 0..marg_size {
-                    acc += mld.h[(i, j)] * (delta[j] + c::<S>(0.5) * scaled_inc[j]);
-                }
-                l_diff -= scaled_inc[i] * (acc + mld.b[i]);
-            }
-            Ok(l_diff)
+            b_jdelta += mld.b[k];
+            l_diff -= j_inc * (b_jdelta + c::<S>(0.5) * j_inc);
         }
+        Ok(l_diff)
     }
 
     /// Save every state and every landmark parameter, `backup`
@@ -1907,7 +1867,6 @@ mod tests {
         }
         let r_vec: DVector<f64> = DVector::from_iterator(rows, (0..rows).map(|_| next()));
         let mld: MargLinData<f64> = MargLinData {
-            is_sqrt: true,
             order: order.clone(),
             h: j.clone(),
             b: r_vec.clone(),
@@ -1969,30 +1928,6 @@ mod tests {
             epsilon = 1e-12 * want_scaled.abs().max(1.0)
         );
 
-        // The squared form (`:433-437`), on a square prior.
-        let square: DMatrix<f64> = want_h.clone();
-        let squared: MargLinData<f64> = MargLinData {
-            is_sqrt: false,
-            order: order.clone(),
-            h: square.clone(),
-            b: DVector::from_iterator(POSE_SIZE, (0..POSE_SIZE).map(|_| next())),
-        };
-        let mut h2: DMatrix<f64> = DMatrix::zeros(POSE_SIZE, POSE_SIZE);
-        let mut b2: DVector<f64> = DVector::zeros(POSE_SIZE);
-        let error2: f64 = estimator
-            .linearize_marg_prior(&squared, &aom, &mut h2, &mut b2)
-            .unwrap();
-        assert_eq!(h2, square);
-        let want_b2: DVector<f64> = &square * &delta + &squared.b;
-        assert_abs_diff_eq!(b2, want_b2, epsilon = 1e-12 * want_b2.norm().max(1.0));
-        let want_error2: f64 =
-            (delta.transpose() * (0.5 * (&square * &delta) + &squared.b))[(0, 0)];
-        assert_abs_diff_eq!(
-            error2,
-            want_error2,
-            epsilon = 1e-12 * want_error2.abs().max(1.0)
-        );
-
         // An ordering the window disagrees with is rejected (`:383-388`).
         let mut wrong: AbsOrderMap = AbsOrderMap::new();
         wrong.push(0, POSE_VEL_BIAS_SIZE).unwrap();
@@ -2007,24 +1942,21 @@ mod tests {
 
         // And a prior whose matrix does not match its own ordering (`:379`).
         let ragged: MargLinData<f64> = MargLinData {
-            is_sqrt: true,
             order: order.clone(),
             h: DMatrix::zeros(rows, POSE_SIZE - 1),
-            b: r_vec.clone(),
+            b: r_vec,
         };
         assert!(matches!(
             estimator.compute_marg_prior_error(&ragged).unwrap_err(),
             BaError::MargPriorSize { .. }
         ));
 
-        // Three shapes C++ indexes without asserting, each of which would be a
+        // Two shapes C++ indexes without asserting, each of which would be a
         // panic here (decision D32): a residual that is not as long as `H` is
-        // tall, a squared prior that is not square, and a scaling vector shorter
-        // than the prior.
+        // tall, and a scaling vector shorter than the prior.
         let empty_b: MargLinData<f64> = MargLinData {
-            is_sqrt: true,
             order: order.clone(),
-            h: j.clone(),
+            h: j,
             b: DVector::zeros(0),
         };
         for outcome in [
@@ -2039,17 +1971,6 @@ mod tests {
         ] {
             assert!(matches!(outcome, Err(BaError::MargPriorSize { .. })));
         }
-
-        let not_square: MargLinData<f64> = MargLinData {
-            is_sqrt: false,
-            order: order.clone(),
-            h: j.clone(),
-            b: r_vec,
-        };
-        assert!(matches!(
-            estimator.compute_marg_prior_error(&not_square),
-            Err(BaError::MargPriorSize { .. })
-        ));
 
         let short_scaling: DVector<f64> = DVector::from_element(1, 1.0);
         assert!(matches!(

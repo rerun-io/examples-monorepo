@@ -1,33 +1,24 @@
 //! `MargHelper<Scalar>` (`include/basalt/vi_estimator/marg_helper.h`,
-//! `src/vi_estimator/marg_helper.cpp`): the three routines that turn a linear
-//! system over `keep ∪ marg` into an equivalent one over `keep` alone.
+//! `src/vi_estimator/marg_helper.cpp`): the routine that turns a linear system
+//! over `keep ∪ marg` into an equivalent one over `keep` alone.
 //!
-//! | routine | input | output | C++ |
-//! |---|---|---|---|
-//! | [`marginalize_helper_sqrt_to_sqrt`] | `Q₂J_p`, `Q₂r` | `J_m`, `r_m` | `marg_helper.cpp:247-327` |
-//! | [`marginalize_helper_sq_to_sqrt`] | `H`, `b` | `J_m`, `r_m` | `:120-244` |
-//! | [`marginalize_helper_sq_to_sq`] | `H`, `b` | `H_m`, `b_m` | `:42-117` |
+//! [`marginalize_helper_sqrt_to_sqrt`] takes `Q₂J_p`, `Q₂r` to `J_m`, `r_m`
+//! (`marg_helper.cpp:247-327`), and it is the only one of the C++'s three the
+//! port carries: the linearization is `ABS_QR` and `vio_sqrt_marg` is on in
+//! every shipped configuration, so `marginalize()` takes the
+//! `is_lin_sqrt && marg_data.is_sqrt` branch (`sqrt_keypoint_vio.cpp:1071-1073`)
+//! and `SqrtKeypointVio::new` refuses the flag off (D68).
 //!
-//! Only the first is on the shipped path (decision D13): `vio_sqrt_marg` is on
-//! by default and the linearization is `ABS_QR`, so `marginalize()` takes the
-//! `is_lin_sqrt && marg_data.is_sqrt` branch (`sqrt_keypoint_vio.cpp:1071-1073`).
-//! The third is reachable with `vio_sqrt_marg = false`; the second needs a
-//! square linearization *and* a square-root prior, which no shipped
-//! configuration selects, and is here because `test_qr.cpp`'s
-//! `RankDefLeastSquares` drives it.
+//! **It consumes its input.** C++ takes `MatX&` and ends with
+//! `abs_H.resize(0, 0)` (`:325-326`); the port takes the matrices **by value**,
+//! which says the same thing in a way the compiler checks.
 //!
-//! **All three consume their input.** C++ takes `MatX&` and ends with
-//! `abs_H.resize(0, 0)` (`:115-116`, `:242-243`, `:325-326`); the port takes the
-//! matrices **by value**, which says the same thing in a way the compiler
-//! checks.
-//!
-//! **The two permutation conventions are not the same, and the difference is
-//! the whole design.** `sqrt_to_sqrt` orders the columns **marg first**
-//! (`:259-273`) so that a flat QR sweeping left to right eliminates the
-//! marginalized variables before it reaches the kept ones, and the rows below
-//! the marginalized rank are exactly the prior. The two square forms order
-//! **keep first** (`:52-66`, `:137-151`) because they take a Schur complement,
-//! which wants the block to invert in the bottom-right corner.
+//! **The columns are permuted marg first** (`:259-273`), so that a flat QR
+//! sweeping left to right eliminates the marginalized variables before it
+//! reaches the kept ones and the rows below the marginalized rank are exactly
+//! the prior. The C++'s two squared forms permuted keep first because they took
+//! a Schur complement, which wanted the block to invert in the bottom-right
+//! corner.
 
 use std::collections::BTreeSet;
 
@@ -39,16 +30,14 @@ use crate::linearize::eigen_qr::{
     make_householder,
 };
 use crate::marg::MargError;
-use crate::marg::eigen_cod::Cod;
-use crate::marg::eigen_ldlt::EigenLdlt;
 
-/// What a marginalization helper returns: the reduced system over the kept
-/// variables, in whichever form the routine produces.
+/// What the marginalization helper returns: the reduced system over the kept
+/// variables, as a square-root prior.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReducedSystem<S: LieScalar> {
-    /// `marg_sqrt_H` (`J_m`) or `marg_H`, depending on the routine.
+    /// `marg_sqrt_H` (`J_m`).
     pub h: DMatrix<S>,
-    /// `marg_sqrt_b` (`r_m`) or `marg_b`.
+    /// `marg_sqrt_b` (`r_m`).
     pub b: DVector<S>,
 }
 
@@ -234,163 +223,6 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
     Ok(ReducedSystem { h, b })
 }
 
-/// `MargHelper::marginalizeHelperSqToSq` (`marg_helper.cpp:42-117`).
-///
-/// The plain Schur complement, with the marginalized block inverted through
-/// Eigen's complete orthogonal decomposition (`:99-100`) — see
-/// `crate::marg::eigen_cod` for why that specific decomposition is ported
-/// rather than substituted.
-///
-/// `abs_H` is permuted **keep first** and then overwritten in place: the
-/// top-right corner becomes `H_km H_mm⁺` (`:103`), and the reduced system is
-/// `H_kk − (H_km H_mm⁺) H_mk`, `b_k − (H_km H_mm⁺) b_m` (`:112-113`).
-pub fn marginalize_helper_sq_to_sq<S: LieScalar>(
-    abs_h: DMatrix<S>,
-    abs_b: DVector<S>,
-    idx_to_keep: &BTreeSet<usize>,
-    idx_to_marg: &BTreeSet<usize>,
-) -> Result<ReducedSystem<S>, MargError> {
-    let (h, b) = schur_complement(abs_h, abs_b, idx_to_keep, idx_to_marg)?;
-    Ok(ReducedSystem { h, b })
-}
-
-/// `MargHelper::marginalizeHelperSqToSqrt` (`marg_helper.cpp:120-244`).
-///
-/// The same Schur complement as [`marginalize_helper_sq_to_sq`], followed by a
-/// square root of the reduced Hessian through Eigen's pivoted LDLT (`:202-231`):
-///
-/// ```text
-/// marg_H  = Pᵀ L D Lᵀ P          so   J_m = sqrt(D) Lᵀ P     (:212-215)
-/// marg_b  = J_mᵀ r_m             so   r_m = sqrt(D)⁻¹ L⁻¹ P marg_b   (:223-231)
-/// ```
-///
-/// `sqrt(D)` clamps negative pivots to zero (`:204`), and a root at or below
-/// `sqrt(numeric_limits::min())` zeroes the matching entry of `r_m` instead of
-/// dividing by it (`:229-230`) — the rank-deficient case, and the reason
-/// decision D41 insists on Eigen's own LDLT here.
-pub fn marginalize_helper_sq_to_sqrt<S: LieScalar>(
-    abs_h: DMatrix<S>,
-    abs_b: DVector<S>,
-    idx_to_keep: &BTreeSet<usize>,
-    idx_to_marg: &BTreeSet<usize>,
-) -> Result<ReducedSystem<S>, MargError> {
-    let (marg_h, marg_b) = schur_complement(abs_h, abs_b, idx_to_keep, idx_to_marg)?;
-    let keep_size: usize = marg_h.nrows();
-
-    // `:202`.
-    let ldlt: EigenLdlt<S> = EigenLdlt::new(marg_h);
-
-    // `:204`: `vectorD().array().max(0).sqrt()`.
-    let vector_d: DVector<S> = ldlt.vector_d();
-    let d_sqrt: DVector<S> =
-        DVector::from_iterator(keep_size, vector_d.iter().map(|d| d.max(S::zero()).sqrt()));
-
-    // `:212-215`: `sqrt(D) · U · P`, built right to left.
-    let mut h: DMatrix<S> = DMatrix::identity(keep_size, keep_size);
-    ldlt.apply_transpositions_left(&mut h);
-    h = ldlt.matrix_u_times(&h);
-    for i in 0..keep_size {
-        for j in 0..keep_size {
-            h[(i, j)] = d_sqrt[i] * h[(i, j)];
-        }
-    }
-
-    // `:223-224`.
-    let mut b: DVector<S> = marg_b;
-    ldlt.apply_transpositions_left_vec(&mut b);
-    ldlt.solve_unit_lower_in_place(&mut b);
-
-    // `:228-231`: negative roots are already clamped, and a root close to zero
-    // zeroes `b` rather than dividing by it.
-    let floor: S = S::min_positive().sqrt();
-    for i in 0..b.nrows() {
-        if d_sqrt[i] > floor {
-            b[i] /= d_sqrt[i];
-        } else {
-            b[i] = S::zero();
-        }
-    }
-
-    Ok(ReducedSystem { h, b })
-}
-
-/// The shared body of `:44-113` and `:129-200`, which are the same statements
-/// twice over in the C++.
-///
-/// Returns `(marg_H, marg_b)`, both over the kept variables.
-fn schur_complement<S: LieScalar>(
-    abs_h: DMatrix<S>,
-    abs_b: DVector<S>,
-    idx_to_keep: &BTreeSet<usize>,
-    idx_to_marg: &BTreeSet<usize>,
-) -> Result<(DMatrix<S>, DVector<S>), MargError> {
-    let total: usize = abs_h.ncols();
-    let (keep_size, marg_size) = check_indices(idx_to_keep, idx_to_marg, total)?;
-    if abs_h.nrows() != total {
-        return Err(MargError::NotSquare {
-            rows: abs_h.nrows(),
-            cols: total,
-        });
-    }
-    if abs_b.nrows() != total {
-        return Err(MargError::RhsLengthMismatch {
-            rows: total,
-            rhs: abs_b.nrows(),
-        });
-    }
-
-    // `:68-74`: `pt = p.transpose()`, `abs_b.applyOnTheLeft(pt)`,
-    // `abs_H.applyOnTheLeft(pt)`, `abs_H.applyOnTheRight(p)`. Both work out to
-    // `new[i] = old[indices[i]]` on each axis.
-    // **keep first**, then marg, both in ascending index order because C++
-    // walks a `std::set` (`:52-66`).
-    let indices: Vec<usize> = idx_to_keep
-        .iter()
-        .chain(idx_to_marg.iter())
-        .copied()
-        .collect();
-    let h: DMatrix<S> = DMatrix::from_fn(total, total, |i, j| abs_h[(indices[i], indices[j])]);
-    let b: DVector<S> = DVector::from_fn(total, |i, _| abs_b[indices[i]]);
-
-    // `:99-100`.
-    let h_mm: DMatrix<S> = h
-        .view((keep_size, keep_size), (marg_size, marg_size))
-        .into_owned();
-    let h_mm_inv: DMatrix<S> = Cod::new(&h_mm).pseudo_inverse();
-
-    // `:103`: `abs_H.topRightCorner(keep_size, marg_size) *= H_mm_inv`.
-    let mut h_km_inv: DMatrix<S> = DMatrix::zeros(keep_size, marg_size);
-    for i in 0..keep_size {
-        for j in 0..marg_size {
-            let mut acc: S = S::zero();
-            for k in 0..marg_size {
-                acc += h[(i, keep_size + k)] * h_mm_inv[(k, j)];
-            }
-            h_km_inv[(i, j)] = acc;
-        }
-    }
-
-    // `:109-113`.
-    let mut marg_h: DMatrix<S> = DMatrix::zeros(keep_size, keep_size);
-    let mut marg_b: DVector<S> = DVector::zeros(keep_size);
-    for i in 0..keep_size {
-        for j in 0..keep_size {
-            let mut acc: S = S::zero();
-            for k in 0..marg_size {
-                acc += h_km_inv[(i, k)] * h[(keep_size + k, j)];
-            }
-            marg_h[(i, j)] = h[(i, j)] - acc;
-        }
-        let mut acc: S = S::zero();
-        for k in 0..marg_size {
-            acc += h_km_inv[(i, k)] * b[keep_size + k];
-        }
-        marg_b[i] = b[i] - acc;
-    }
-
-    Ok((marg_h, marg_b))
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -472,40 +304,6 @@ mod tests {
             }
         }
 
-        /// The three routines agree on a full-rank problem: the two square-root
-        /// forms squared, and the squared form itself.
-        #[test]
-        fn the_three_routines_agree_on_a_full_rank_problem(
-            values in prop::collection::vec(-1.5f64..1.5, 96..97),
-        ) {
-            let rows: usize = 16;
-            let cols: usize = 6;
-            let j: DMatrix<f64> = random_jacobian(&values, rows, cols);
-            let r: DVector<f64> = DVector::from_fn(rows, |i, _| values[(i * 5 + 1) % values.len()]);
-            let h: DMatrix<f64> = j.transpose() * &j;
-            let b: DVector<f64> = j.transpose() * &r;
-
-            let (keep_set, marg_set) = index_sets(&[2, 3, 4, 5], &[0, 1]);
-
-            let qr = marginalize_helper_sqrt_to_sqrt(j, r, &keep_set, &marg_set).unwrap();
-            let sq_sqrt =
-                marginalize_helper_sq_to_sqrt(h.clone(), b.clone(), &keep_set, &marg_set).unwrap();
-            let sq = marginalize_helper_sq_to_sq(h, b, &keep_set, &marg_set).unwrap();
-
-            let qr_h: DMatrix<f64> = qr.h.transpose() * &qr.h;
-            let qr_b: DVector<f64> = qr.h.transpose() * &qr.b;
-            let ss_h: DMatrix<f64> = sq_sqrt.h.transpose() * &sq_sqrt.h;
-            let ss_b: DVector<f64> = sq_sqrt.h.transpose() * &sq_sqrt.b;
-            let scale: f64 = sq.h.iter().fold(0.0f64, |a, v| a.max(v.abs())).max(1.0);
-            for i in 0..4 {
-                for jj in 0..4 {
-                    prop_assert!((qr_h[(i, jj)] - sq.h[(i, jj)]).abs() < 1e-8 * scale);
-                    prop_assert!((ss_h[(i, jj)] - sq.h[(i, jj)]).abs() < 1e-8 * scale);
-                }
-                prop_assert!((qr_b[i] - sq.b[i]).abs() < 1e-8 * scale);
-                prop_assert!((ss_b[i] - sq.b[i]).abs() < 1e-8 * scale);
-            }
-        }
     }
 
     /// The index checks are typed errors, not out-of-range reads.

@@ -794,9 +794,6 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         // `get_dense_Q2Jp_Q2r_marg_prior` (`:573-593`), trap 8: the prior's
         // residual is re-anchored at the current state as `H * delta + b`.
         if let Some(marg) = inputs.marg {
-            if !marg.is_sqrt {
-                return Err(LinearizeError::MargPriorNotSqrt);
-            }
             // The prior's columns are written into the *first* `marg_cols`
             // columns of the stacked system (`:587-589`), which is only correct
             // if its ordering is the window's prefix. `linearizeMargPrior`

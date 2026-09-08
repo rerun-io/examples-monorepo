@@ -1,5 +1,5 @@
-//! The marginalization helper and the complete orthogonal decomposition
-//! against basalt's own C++, coefficient for coefficient.
+//! The marginalization helper against basalt's own C++, coefficient for
+//! coefficient.
 //!
 //! `fixtures/marg/marg_oracle.json` is the output of `tools/marg_oracle.cpp` on
 //! the fork's `slam-rs-reference` branch (target `basalt_marg_oracle`), built
@@ -20,25 +20,23 @@
 //! | `wide_window` | 40x27, marg = one 6-dof pose + a 9-dof vel/bias tail | past the LDLT panel width, in the window's real shape |
 //! | `marg_exhausts_rank` | 3x5, marg 3 | the degenerate shape where the C++ reads out of range |
 //!
-//! Each case carries the problem as plain numbers — `j`, `r`, and `sq_h`/`sq_b`
-//! as **Eigen** formed `JᵀJ` and `Jᵀr`, so the two squared routines start from
-//! the same bytes the C++ used rather than from a Rust re-multiplication — the
-//! index split, the three routines' reduced `(H, b)`, and the complete
-//! orthogonal decomposition's rank and minimum-norm solution for the original
-//! problem, the marginalized block's pseudo-inverse, and each reduced system.
+//! Each case carries the problem as plain numbers — `j`, `r`, the index split
+//! and the reduced `(H, b)`. The fixture also carries the two squared routines'
+//! output, the complete orthogonal decomposition's rank, pseudo-inverse and
+//! minimum-norm solutions; nothing reads those entries any more, because the
+//! squared form and the decomposition it needed went with D68. The fixture is
+//! left as the C++ emitted it.
 //!
 //! **Tolerances, and what they measure.** The flat QR of
 //! `marginalizeHelperSqrtToSqrt` is Eigen's `makeHouseholder` and
 //! `applyHouseholderOnTheLeft` in Eigen's order, so what is left is the
 //! association inside Eigen's `gemv` kernel, the residue decision D50 already
-//! measured for the landmark blocks. The two squared routines add a
-//! pseudo-inverse and two `gemm`s on top of that. The constants below are the
-//! measured agreement, not an aspiration; see the report for the exact figures.
+//! measured for the landmark blocks. The constant below is the measured
+//! agreement, not an aspiration; see the report for the exact figures.
 //!
-//! **What must be exact.** The rank decisions: `sqrt_to_sqrt`'s
-//! `|beta| > sqrt(epsilon)` test (`marg_helper.cpp:301`) and the complete
-//! orthogonal decomposition's `rank()` (`ColPivHouseholderQR.h:261-268`). Those
-//! are integer outcomes and are asserted as equalities.
+//! **What must be exact.** The rank decision: `|beta| > sqrt(epsilon)`
+//! (`marg_helper.cpp:301`). That is an integer outcome and is asserted as an
+//! equality.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -48,10 +46,7 @@ use std::sync::LazyLock;
 use nalgebra::{DMatrix, DVector};
 use serde::Deserialize;
 use slam_rs::lie::LieScalar;
-use slam_rs::marg::{
-    Cod, ReducedSystem, marginalize_helper_sq_to_sq, marginalize_helper_sq_to_sqrt,
-    marginalize_helper_sqrt_to_sqrt,
-};
+use slam_rs::marg::{ReducedSystem, marginalize_helper_sqrt_to_sqrt};
 
 mod common;
 use common::Compare;
@@ -73,26 +68,15 @@ struct Case {
     idx_to_marg: Vec<usize>,
     j: Vec<f64>,
     r: Vec<f64>,
-    sq_h: Vec<f64>,
-    sq_b: Vec<f64>,
     rank_threshold: f64,
     #[serde(default)]
     beta_probe: Option<f64>,
     #[serde(default)]
     beta_probe_accepted: Option<bool>,
-    full_rank: usize,
-    full_solution: Vec<f64>,
-    h_mm_rank: usize,
-    h_mm_size: usize,
     keep_size: usize,
-    h_mm: Vec<f64>,
-    h_mm_pinv: Vec<f64>,
     sqrt_to_sqrt_out_of_range: bool,
     #[serde(default)]
     sqrt_to_sqrt: Option<Reduced>,
-    sq_to_sqrt: Reduced,
-    sq_to_sqrt_squared: Reduced,
-    sq_to_sq: Reduced,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,8 +85,6 @@ struct Reduced {
     cols: usize,
     h: Vec<f64>,
     b: Vec<f64>,
-    rank: usize,
-    solution: Vec<f64>,
 }
 
 /// The fixture, parsed once for the whole binary.
@@ -113,28 +95,12 @@ static ORACLE: LazyLock<Oracle> = LazyLock::new(|| {
 
 // ─── comparison ────────────────────────────────────────────────────────────
 
-/// How close the port has to be, per quantity.
-///
-/// One number covers everything except `marginalizeHelperSqToSqrt`'s residual,
-/// which needs its own; see [`Tolerances::sq_to_sqrt_b`].
+/// How close the port has to be.
 #[derive(Debug, Clone, Copy)]
 struct Tolerances {
-    /// Every reduced matrix, every residual, the pseudo-inverse and the
-    /// minimum-norm solutions: two to three ulps of the array's own scale.
+    /// The reduced matrix and its residual: two to three ulps of the array's
+    /// own scale.
     general: f64,
-    /// `marginalizeHelperSqToSqrt`'s `r_m` when the reduced Hessian is rank
-    /// deficient (`marg_helper.cpp:223-231`).
-    ///
-    /// The last LDLT pivot of a deficient `marg_H` is cancellation noise —
-    /// `4.4e-16` against a matrix whose other eigenvalues are order 1 — and
-    /// `sqrt` of it is `2.1e-8`, comfortably above the `sqrt(min())` floor at
-    /// `:229`, so basalt **divides**. The entry that comes out is noise over
-    /// noise, and the two sides agree on it to `2.5e-9` rather than to an ulp.
-    /// Nothing consumes it on its own: the estimator only ever sees
-    /// `J_mᵀ J_m` and `J_mᵀ r_m`, and those are checked against the squared
-    /// routine's own output at [`Tolerances::general`] in
-    /// [`check_case`] — `J_mᵀ r_m` agrees **exactly** on this case.
-    sq_to_sqrt_b: f64,
 }
 
 // ─── rebuilding one case in the target scalar ──────────────────────────────
@@ -159,20 +125,15 @@ fn index_set(values: &[usize]) -> BTreeSet<usize> {
 
 // ─── the tests ─────────────────────────────────────────────────────────────
 
-/// Everything one case asserts, in one scalar.
-/// `general` and `sq_to_sqrt_b` carry the two tolerances of [`Tolerances`], so
-/// each quantity is checked against its own and every case adds to the same
+/// Everything one case asserts, in one scalar. Every case adds to the same
 /// worst-case record.
-fn check_case<S: LieScalar>(case: &Case, general: &mut Compare, sq_to_sqrt_b: &mut Compare) {
+fn check_case<S: LieScalar>(case: &Case, general: &mut Compare) {
     let label = |what: &str| format!("{} {} {what}", case.name, case.scalar);
     let keep: BTreeSet<usize> = index_set(&case.idx_to_keep);
     let marg: BTreeSet<usize> = index_set(&case.idx_to_marg);
 
     let j: DMatrix<S> = matrix_of::<S>(&case.j, case.rows, case.cols);
     let r: DVector<S> = vector_of::<S>(&case.r);
-    let sq_h: DMatrix<S> = matrix_of::<S>(&case.sq_h, case.cols, case.cols);
-    let sq_b: DVector<S> = vector_of::<S>(&case.sq_b);
-
     // The rank threshold is a property of the scalar, not of the data
     // (`marg_helper.cpp:284`), and both sides must agree on it exactly.
     assert_eq!(
@@ -202,20 +163,6 @@ fn check_case<S: LieScalar>(case: &Case, general: &mut Compare, sq_to_sqrt_b: &m
             "{}: rows the QR left",
             label("sqrt_to_sqrt")
         );
-        // The reduced system's own rank, through the ported decomposition.
-        let reduced: Cod<S> = Cod::new(&got.h);
-        assert_eq!(
-            reduced.rank(),
-            want.rank,
-            "{}: rank of the reduced system",
-            label("sqrt_to_sqrt")
-        );
-        let solution: DVector<S> = reduced.solve_vec(&got.b).unwrap();
-        general.close_slice(
-            solution.as_slice(),
-            &want.solution,
-            &label("sqrt_to_sqrt.solution"),
-        );
     } else {
         // The C++ reads out of range on this shape; the port must not.
         assert!(case.sqrt_to_sqrt_out_of_range);
@@ -238,126 +185,32 @@ fn check_case<S: LieScalar>(case: &Case, general: &mut Compare, sq_to_sqrt_b: &m
         }
         assert_eq!(got.b[0], S::zero());
     }
-
-    // The marginalized block's pseudo-inverse, which is what the two squared
-    // routines consume (`:99-100`, `:184-185`).
-    let h_mm: DMatrix<S> = matrix_of::<S>(&case.h_mm, case.h_mm_size, case.h_mm_size);
-    let cod: Cod<S> = Cod::new(&h_mm);
-    assert_eq!(
-        cod.rank(),
-        case.h_mm_rank,
-        "{}: rank of the marginalized block",
-        label("h_mm")
-    );
-    general.close_matrix(
-        &cod.pseudo_inverse(),
-        &case.h_mm_pinv,
-        case.h_mm_size,
-        case.h_mm_size,
-        &label("h_mm_pinv"),
-    );
-
-    // `marginalizeHelperSqToSqrt` (`:120-244`).
-    {
-        let got: ReducedSystem<S> =
-            marginalize_helper_sq_to_sqrt(sq_h.clone(), sq_b.clone(), &keep, &marg).unwrap();
-        let want: &Reduced = &case.sq_to_sqrt;
-        general.close_matrix(
-            &got.h,
-            &want.h,
-            want.rows,
-            want.cols,
-            &label("sq_to_sqrt.h"),
-        );
-        sq_to_sqrt_b.close_slice(got.b.as_slice(), &want.b, &label("sq_to_sqrt.b"));
-
-        // What the estimator actually consumes: the square root squared. The
-        // rank-deficient row that the coefficient comparison above has to be
-        // lenient about contributes nothing here, which is the point.
-        let squared: DMatrix<S> = got.h.transpose() * &got.h;
-        let squared_b: DVector<S> = got.h.transpose() * &got.b;
-        general.close_matrix(
-            &squared,
-            &case.sq_to_sq.h,
-            case.sq_to_sq.rows,
-            case.sq_to_sq.cols,
-            &label("sq_to_sqrt.h^T h"),
-        );
-        general.close_slice(
-            squared_b.as_slice(),
-            &case.sq_to_sq.b,
-            &label("sq_to_sqrt.h^T b"),
-        );
-    }
-
-    // `marginalizeHelperSqToSq` (`:42-117`).
-    {
-        let got: ReducedSystem<S> =
-            marginalize_helper_sq_to_sq(sq_h.clone(), sq_b.clone(), &keep, &marg).unwrap();
-        let want: &Reduced = &case.sq_to_sq;
-        general.close_matrix(&got.h, &want.h, want.rows, want.cols, &label("sq_to_sq.h"));
-        general.close_slice(got.b.as_slice(), &want.b, &label("sq_to_sq.b"));
-        assert_eq!(
-            Cod::new(&got.h).rank(),
-            want.rank,
-            "{}: rank of the reduced system",
-            label("sq_to_sq")
-        );
-    }
-
-    // The whole problem's minimum-norm least-squares solution, the
-    // `original_solution` of `test_qr.cpp:48`.
-    let full: Cod<S> = Cod::new(&j);
-    assert_eq!(full.rank(), case.full_rank, "{}: rank", label("full"));
-    general.close_slice(
-        full.solve_vec(&r).unwrap().as_slice(),
-        &case.full_solution,
-        &label("full_solution"),
-    );
 }
 
 /// Every case of one precision, and the worst relative difference over all of
 /// them.
 fn run_all<S: LieScalar>(scalar: &str, tols: Tolerances) {
     let mut general: Compare = Compare::new(tols.general);
-    let mut sq_to_sqrt_b: Compare = Compare::new(tols.sq_to_sqrt_b);
     let mut seen: usize = 0;
     for case in ORACLE.cases.iter().filter(|c| c.scalar == scalar) {
-        check_case::<S>(case, &mut general, &mut sq_to_sqrt_b);
+        check_case::<S>(case, &mut general);
         seen += 1;
     }
     assert_eq!(seen, 9, "every {scalar} case ran");
-    let worst: &Compare = if sq_to_sqrt_b.worst > general.worst {
-        &sq_to_sqrt_b
-    } else {
-        &general
-    };
     println!(
         "worst {scalar} relative difference {:e} at {}",
-        worst.worst, worst.worst_what
+        general.worst, general.worst_what
     );
 }
 
 #[test]
 fn the_helper_matches_the_cpp_in_double() {
-    run_all::<f64>(
-        "f64",
-        Tolerances {
-            general: 1e-14,
-            sq_to_sqrt_b: 1e-8,
-        },
-    );
+    run_all::<f64>("f64", Tolerances { general: 1e-14 });
 }
 
 #[test]
 fn the_helper_matches_the_cpp_in_float() {
-    run_all::<f32>(
-        "f32",
-        Tolerances {
-            general: 5e-6,
-            sq_to_sqrt_b: 5e-6,
-        },
-    );
+    run_all::<f32>("f32", Tolerances { general: 5e-6 });
 }
 
 /// The rank threshold decides these three cases and nothing else does.
@@ -461,97 +314,4 @@ fn reproduce_threshold_relation<S: LieScalar>(
     );
     assert_eq!(ours_e.b, ours_b.b, "{scalar}");
     assert_ne!(ours_e.h, ours_a.h, "{scalar}: above the threshold differs");
-}
-
-/// `test/src/test_qr.cpp`'s `RankDefLeastSquares` (`:38-83`), ported.
-///
-/// basalt builds a rank-deficient `10x6` least-squares problem
-/// (`J.col(1) = J.col(4)`), marginalizes `{0, 1}` three different ways, and
-/// asserts the three minimum-norm solutions over the kept `{2, 3, 4, 5}` agree:
-///
-/// ```text
-/// EXPECT_TRUE(sol_qr.isApprox(sol_sc));         // :80
-/// EXPECT_TRUE(sol_qr.isApprox(sol_sqrt_sc2));   // :81
-/// ```
-///
-/// `isApprox` is a **relative** comparison whose default precision is
-/// `NumTraits<Scalar>::dummy_precision()` — `1e-12` in double, `1e-5` in float
-/// (`DenseBase.h:351-352` for the default, `NumTraits.h:236,241` for the
-/// values) — and whose test is
-/// `‖a − b‖² ≤ prec² · min(‖a‖², ‖b‖²)` (`Fuzzy.h:23-27`), i.e.
-/// `‖a − b‖ ≤ prec · min(‖a‖, ‖b‖)`. basalt passes no precision
-/// (`test_qr.cpp:80-81`), so that is the tolerance, and it is what is used
-/// here — on the port's own three solutions rather than on the fixture's.
-///
-/// It is about 15,000 times tighter than the `sqrt(epsilon)` this test used
-/// before the S7 review.
-#[test]
-fn rank_def_least_squares() {
-    let oracle: &Oracle = &ORACLE;
-    let case: &Case = oracle
-        .cases
-        .iter()
-        .find(|c| c.name == "rank_def_least_squares" && c.scalar == "f64")
-        .expect("basalt's own case is in the fixture");
-
-    let keep: BTreeSet<usize> = index_set(&case.idx_to_keep);
-    let marg: BTreeSet<usize> = index_set(&case.idx_to_marg);
-    assert_eq!(case.idx_to_marg, vec![0, 1], "basalt's own index sets");
-    assert_eq!(case.idx_to_keep, vec![2, 3, 4, 5]);
-
-    let j: DMatrix<f64> = matrix_of::<f64>(&case.j, case.rows, case.cols);
-    let r: DVector<f64> = vector_of::<f64>(&case.r);
-    let sq_h: DMatrix<f64> = matrix_of::<f64>(&case.sq_h, case.cols, case.cols);
-    let sq_b: DVector<f64> = vector_of::<f64>(&case.sq_b);
-
-    // `:46-51`: the whole problem is rank deficient, and the decomposition
-    // says so.
-    let full: Cod<f64> = Cod::new(&j);
-    assert_eq!(full.rank(), 5, "one dependent column of six");
-    assert_eq!(full.rank(), case.full_rank);
-
-    // `:63-78`, the QR version.
-    let qr: ReducedSystem<f64> = marginalize_helper_sqrt_to_sqrt(j, r, &keep, &marg).unwrap();
-    let sol_qr: DVector<f64> = Cod::new(&qr.h).solve_vec(&qr.b).unwrap();
-
-    // `:46-61`, the SC version.
-    let sc: ReducedSystem<f64> =
-        marginalize_helper_sq_to_sq(sq_h.clone(), sq_b.clone(), &keep, &marg).unwrap();
-    let sol_sc: DVector<f64> = Cod::new(&sc.h).solve_vec(&sc.b).unwrap();
-
-    // `:23-44`, the square-root SC version, and its squared form.
-    let sqrt_sc: ReducedSystem<f64> =
-        marginalize_helper_sq_to_sqrt(sq_h, sq_b, &keep, &marg).unwrap();
-    let squared: DMatrix<f64> = sqrt_sc.h.transpose() * &sqrt_sc.h;
-    let squared_b: DVector<f64> = sqrt_sc.h.transpose() * &sqrt_sc.b;
-    let sol_sqrt_sc2: DVector<f64> = Cod::new(&squared).solve_vec(&squared_b).unwrap();
-
-    // `:80-81`, with Eigen's `isApprox` default precision.
-    let prec: f64 = <f64 as LieScalar>::eigen_dummy_precision();
-    assert_eq!(prec, 1e-12, "NumTraits<double>::dummy_precision()");
-    let is_approx = |a: &DVector<f64>, b: &DVector<f64>| -> bool {
-        (a - b).norm() <= prec * a.norm().min(b.norm())
-    };
-    assert!(
-        is_approx(&sol_qr, &sol_sc),
-        "sol_qr {sol_qr:?} vs sol_sc {sol_sc:?}"
-    );
-    assert!(
-        is_approx(&sol_qr, &sol_sqrt_sc2),
-        "sol_qr {sol_qr:?} vs sol_sqrt_sc2 {sol_sqrt_sc2:?}"
-    );
-
-    // And each agrees with what the C++ printed for it.
-    let mut cmp: Compare = Compare::new(1e-13);
-    cmp.close_slice(
-        sol_qr.as_slice(),
-        &case.sqrt_to_sqrt.as_ref().unwrap().solution,
-        "sol_qr",
-    );
-    cmp.close_slice(sol_sc.as_slice(), &case.sq_to_sq.solution, "sol_sc");
-    cmp.close_slice(
-        sol_sqrt_sc2.as_slice(),
-        &case.sq_to_sqrt_squared.solution,
-        "sol_sqrt_sc2",
-    );
 }

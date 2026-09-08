@@ -212,12 +212,7 @@ fn build_window(seed: u64, prior_covers_state0: bool) -> Window {
 
     Window {
         estimator,
-        marg: MargLinData {
-            is_sqrt: true,
-            order,
-            h,
-            b,
-        },
+        marg: MargLinData { order, h, b },
         imu_meas,
     }
 }
@@ -370,7 +365,6 @@ fn marginalizing_a_keyframe_shrinks_the_window() {
     );
     assert_eq!(window.marg.h.ncols(), window.marg.order.total_size());
     assert_eq!(window.marg.b.nrows(), window.marg.h.nrows());
-    assert!(window.marg.is_sqrt, "the prior stays in square-root form");
 }
 
 /// The prior really is the marginal of the window it came from.
@@ -962,71 +956,24 @@ fn a_malformed_prior_is_refused_by_the_diagnostics() {
         })
     );
 
-    // A *squared* prior of the right width but the wrong height: the quadratic
-    // `xᵀHx` does not close (`:180-186`).
-    let mut oblong: MargLinData<f64> = window.marg.clone();
-    oblong.is_sqrt = false;
-    oblong.h = DMatrix::zeros(size - 1, size);
-    oblong.b = DVector::zeros(size);
-    assert_eq!(
-        check_marg_nullspace(&oblong, &window.estimator, &random),
-        Err(MargError::NotSquare {
-            rows: size - 1,
-            cols: size
-        })
-    );
-
-    // ...and the same matrix through `checkEigenvalues`, which hands it
-    // straight to the eigensolver (`:225`).
-    assert_eq!(
-        check_eigenvalues(&oblong),
-        Err(MargError::NotSquare {
-            rows: size - 1,
-            cols: size
-        })
-    );
-
-    // A squared prior of the right shape but a short residual.
-    let mut square_short_b: MargLinData<f64> = window.marg.clone();
-    square_short_b.is_sqrt = false;
-    square_short_b.h = DMatrix::zeros(size, size);
-    square_short_b.b = DVector::zeros(2);
-    assert_eq!(
-        check_marg_nullspace(&square_short_b, &window.estimator, &random),
-        Err(MargError::RhsLengthMismatch { rows: size, rhs: 2 })
-    );
-
-    // The well-shaped prior still works, in both forms.
+    // The well-shaped prior still works.
     assert!(check_marg_nullspace(&window.marg, &window.estimator, &random).is_ok());
     assert!(check_eigenvalues(&window.marg).is_ok());
-    let squared: MargLinData<f64> = MargLinData {
-        is_sqrt: false,
-        order: window.marg.order.clone(),
-        h: window.marg.h.transpose() * &window.marg.h,
-        b: window.marg.h.transpose() * &window.marg.b,
-    };
-    assert!(check_marg_nullspace(&squared, &window.estimator, &random).is_ok());
-    assert!(check_eigenvalues(&squared).is_ok());
 }
 
 /// `checkEigenvalues` on the two empty priors a window really holds before its
 /// first marginalization, neither of which either eigensolver defines (see
 /// `check_eigenvalues`).
 ///
-/// `MargLinData::default()` is the live one, 0x0, in both prior forms. The
-/// debug copy's is the other shape: no rows over a real ordering's width, which
-/// squares to that many zero eigenvalues.
+/// `MargLinData::default()` is the live one, 0x0. The debug copy's is the other
+/// shape: no rows over a real ordering's width, which squares to that many zero
+/// eigenvalues.
 #[test]
 fn an_empty_prior_has_no_eigenvalues() {
-    for is_sqrt in [false, true] {
-        assert_eq!(
-            check_eigenvalues(&MargLinData::<f64> {
-                is_sqrt,
-                ..Default::default()
-            }),
-            Ok(DVector::zeros(0))
-        );
-    }
+    assert_eq!(
+        check_eigenvalues(&MargLinData::<f64>::default()),
+        Ok(DVector::zeros(0))
+    );
 
     let window: Window = build_window(0xB018, false);
     let size: usize = window.marg.order.total_size();

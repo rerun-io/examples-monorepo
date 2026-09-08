@@ -386,10 +386,6 @@ pub enum LinearizeError {
         /// The frame that disagrees.
         frame_id: FrameId,
     },
-    /// The marginalization prior is not square-root form, which the QR path
-    /// asserts (`linearization_abs_qr.cpp:578`).
-    #[error("the QR linearization needs a square-root marginalization prior")]
-    MargPriorNotSqrt,
     /// Something the bundle-adjustment base refused.
     #[error(transparent)]
     Ba(#[from] BaError),

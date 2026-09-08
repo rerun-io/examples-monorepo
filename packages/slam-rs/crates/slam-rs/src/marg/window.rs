@@ -29,9 +29,7 @@ use crate::ba_base::{BaError, BundleAdjustmentBase};
 use crate::imu::{ImuLinData, IntegratedImuMeasurement};
 use crate::lie::{LieScalar, So3};
 use crate::linearize::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
-use crate::marg::helper::{
-    ReducedSystem, marginalize_helper_sq_to_sq, marginalize_helper_sqrt_to_sqrt,
-};
+use crate::marg::helper::{ReducedSystem, marginalize_helper_sqrt_to_sqrt};
 use crate::marg::{MargError, ScheduleSet};
 use crate::types::{
     AbsOrderMap, FrameId, LandmarkId, MargLinData, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseStateWithLin,
@@ -338,14 +336,13 @@ fn split_indices(
     Ok((idx_to_keep, idx_to_marg))
 }
 
-/// Linearize the window over `aom` with `prior` included, and return whichever
-/// dense form the prior's own representation calls for
-/// (`sqrt_keypoint_vio.cpp:905-942`).
+/// Linearize the window over `aom` with `prior` included and export the
+/// stacked square-root system (`sqrt_keypoint_vio.cpp:905-942`).
 ///
-/// Only `ABS_QR` is ported (decision D13), so `isLinearizationSqrt` is
-/// constantly true and the branch at `:935-939` is decided by
-/// `marg_data.is_sqrt` alone: a square-root prior takes `get_dense_Q2Jp_Q2r`,
-/// a squared one takes `get_dense_H_b`.
+/// The branch at `:935-939` chooses `get_dense_Q2Jp_Q2r` for a square-root
+/// prior and `get_dense_H_b` for a squared one. Only `ABS_QR` is ported
+/// (decision D13) and only a square-root prior can exist (D68), so the port
+/// takes the first unconditionally.
 fn linearize_for_marginalization<S: LieScalar>(
     estimator: &BundleAdjustmentBase<S>,
     aom: &AbsOrderMap,
@@ -371,11 +368,7 @@ fn linearize_for_marginalization<S: LieScalar>(
     // `:932`.
     lqr.perform_qr()?;
     // `:935-939`.
-    let (h, b) = if prior.is_sqrt {
-        lqr.get_dense_q2jp_q2r(estimator, &lin_inputs)?
-    } else {
-        lqr.get_dense_h_b(estimator, &lin_inputs)?
-    };
+    let (h, b) = lqr.get_dense_q2jp_q2r(estimator, &lin_inputs)?;
     Ok(LinearizedWindow {
         h,
         b,
@@ -394,27 +387,6 @@ struct LinearizedWindow<S: LieScalar> {
     error: S,
     /// Whether every landmark block held finite Jacobians.
     numerically_valid: bool,
-}
-
-/// Run the helper the prior's representation calls for
-/// (`sqrt_keypoint_vio.cpp:1071-1080`).
-///
-/// `marginalizeHelperSqToSqrt` is the third branch there and is unreachable in
-/// this port: it needs a squared linearization with a square-root prior, and
-/// only `ABS_QR` is ported. It is still exercised by the oracle and by
-/// `test_qr.cpp`'s `RankDefLeastSquares`.
-fn run_helper<S: LieScalar>(
-    is_sqrt: bool,
-    h: DMatrix<S>,
-    b: DVector<S>,
-    idx_to_keep: &BTreeSet<usize>,
-    idx_to_marg: &BTreeSet<usize>,
-) -> Result<ReducedSystem<S>, MargError> {
-    if is_sqrt {
-        marginalize_helper_sqrt_to_sqrt(h, b, idx_to_keep, idx_to_marg)
-    } else {
-        marginalize_helper_sq_to_sq(h, b, idx_to_keep, idx_to_marg)
-    }
 }
 
 /// `SqrtKeypointVioEstimator::marginalize` from `:896` to `:1178`.
@@ -517,11 +489,6 @@ pub fn marginalize<S: LieScalar>(
             // local copy and assigns the field at the end of `marginalize`,
             // where `:1186`'s `logMargNullspace()` assigns the new one.
             let mut prior: MargLinData<S> = MargLinData {
-                // `:1042` and `:1051` both branch on `marg_data.is_sqrt`, not
-                // on the debug copy's own flag: the dense form the linearizer
-                // exports and the helper that reduces it are chosen by the
-                // *live* prior's representation.
-                is_sqrt: marg_data.is_sqrt,
                 order: marg_data.order.clone(),
                 h: nullspace.h.clone(),
                 b: nullspace.b.clone(),
@@ -534,8 +501,7 @@ pub fn marginalize<S: LieScalar>(
             }
             let debug: LinearizedWindow<S> =
                 linearize_for_marginalization(estimator, &aom, &prior, imu_input.as_ref(), inputs)?;
-            Some(run_helper(
-                marg_data.is_sqrt,
+            Some(marginalize_helper_sqrt_to_sqrt(
                 debug.h,
                 debug.b,
                 &idx_to_keep,
@@ -546,13 +512,8 @@ pub fn marginalize<S: LieScalar>(
     };
 
     // `:1069-1083`.
-    let reduced: ReducedSystem<S> = run_helper(
-        marg_data.is_sqrt,
-        live.h,
-        live.b,
-        &idx_to_keep,
-        &idx_to_marg,
-    )?;
+    let reduced: ReducedSystem<S> =
+        marginalize_helper_sqrt_to_sqrt(live.h, live.b, &idx_to_keep, &idx_to_marg)?;
 
     // The linearization is done with the window; everything from here mutates.
     drop(imu_input);
@@ -628,7 +589,6 @@ pub fn marginalize<S: LieScalar>(
     // `:1174-1178`: the same re-anchoring on the debug copy, with the same
     // delta, and then the order.
     if let (Some(nullspace), Some(reduced_ns)) = (nullspace_marg_data, nullspace_reduced) {
-        nullspace.is_sqrt = marg_data.is_sqrt;
         nullspace.h = reduced_ns.h;
         nullspace.b = reduced_ns.b;
         subtract_h_delta(&mut nullspace.b, &nullspace.h, &delta);
@@ -740,30 +700,14 @@ pub fn check_marg_nullspace<S: LieScalar>(
             actual: inc_random.nrows(),
         });
     }
-    // The two shapes `:165-176` and `:180-195` then rely on and C++ does not
-    // assert (decision D32). A square-root prior needs `b` as tall as `H`, or
-    // `Hᵀb` is not formed; a squared one needs `H` square as well as
-    // `marg_size` wide, or the quadratic `xᵀHx` does not close.
-    if mld.is_sqrt {
-        if mld.b.nrows() != mld.h.nrows() {
-            return Err(MargError::RhsLengthMismatch {
-                rows: mld.h.nrows(),
-                rhs: mld.b.nrows(),
-            });
-        }
-    } else {
-        if mld.h.nrows() != marg_size {
-            return Err(MargError::NotSquare {
-                rows: mld.h.nrows(),
-                cols: marg_size,
-            });
-        }
-        if mld.b.nrows() != marg_size {
-            return Err(MargError::RhsLengthMismatch {
-                rows: marg_size,
-                rhs: mld.b.nrows(),
-            });
-        }
+    // The shape `:165-176` then relies on and C++ does not assert (decision
+    // D32): the square-root prior needs `b` as tall as `H`, or `Hᵀb` is not
+    // formed.
+    if mld.b.nrows() != mld.h.nrows() {
+        return Err(MargError::RhsLengthMismatch {
+            rows: mld.h.nrows(),
+            rhs: mld.b.nrows(),
+        });
     }
 
     // `:82-96`: the mean translation over the prior's blocks.
@@ -830,11 +774,7 @@ pub fn check_marg_nullspace<S: LieScalar>(
     // `:165-176`: the squared form, always in double.
     let h_d: DMatrix<f64> = mld.h.map(|v| v.to_f64());
     let b_d: DVector<f64> = mld.b.map(|v| v.to_f64());
-    let (h, b): (DMatrix<f64>, DVector<f64>) = if mld.is_sqrt {
-        (h_d.transpose() * &h_d, h_d.transpose() * &b_d)
-    } else {
-        (h_d, b_d)
-    };
+    let (h, b): (DMatrix<f64>, DVector<f64>) = (h_d.transpose() * &h_d, h_d.transpose() * &b_d);
 
     let mut xhx: [f64; 7] = [0.0; 7];
     let mut xb: [f64; 7] = [0.0; 7];
@@ -902,17 +842,7 @@ fn translation_of<S: LieScalar>(
 /// is the prior the estimator holds before its first marginalization.
 pub fn check_eigenvalues<S: LieScalar>(mld: &MargLinData<S>) -> Result<DVector<f64>, MargError> {
     let h_d: DMatrix<f64> = mld.h.map(|v| v.to_f64());
-    let h: DMatrix<f64> = if mld.is_sqrt {
-        h_d.transpose() * &h_d
-    } else {
-        if h_d.nrows() != h_d.ncols() {
-            return Err(MargError::NotSquare {
-                rows: h_d.nrows(),
-                cols: h_d.ncols(),
-            });
-        }
-        h_d
-    };
+    let h: DMatrix<f64> = h_d.transpose() * &h_d;
     if h.ncols() == 0 {
         return Ok(DVector::zeros(0));
     }
