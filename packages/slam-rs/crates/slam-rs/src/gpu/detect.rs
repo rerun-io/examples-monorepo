@@ -193,24 +193,8 @@ impl<R: Runtime> GpuCornerScan<R> {
         self.uploads += 1;
         // The frame goes up as `u16` and the `>> 8` the detector reads happens
         // on the device: the extra 0.9 MB over the bus costs less than a
-        // whole-frame narrowing pass on the host. A frame whose stride exceeds
-        // its width is repacked row by row, as the pyramid's staging does.
-        if image.stride() == width {
-            return (
-                self.client
-                    .create_from_slice(u16::as_bytes(&image.data()[..pixels])),
-                pixels,
-            );
-        }
-        self.packed.clear();
-        self.packed.reserve(pixels);
-        for y in 0..height {
-            self.packed.extend_from_slice(image.row(y));
-        }
-        (
-            self.client.create_from_slice(u16::as_bytes(&self.packed)),
-            pixels,
-        )
+        // whole-frame narrowing pass on the host.
+        super::upload_frame(&self.client, image, &mut self.packed)
     }
 
     /// One row's candidates over `threshold`, appended in column order.

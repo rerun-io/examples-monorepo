@@ -642,6 +642,43 @@ fn arm_fault_at(site: &'static str) {
 ///   produces nothing. Measured on this host: the pyramid came back all zeros
 ///   and the detector found no corners, with no error anywhere.
 ///
+/// One frame on the device, and how many pixels it holds.
+///
+/// `create_from_slice` is CubeCL 0.10's only host-to-device write, it allocates
+/// a buffer the size of the slice, and it copies the payload **twice** on the
+/// host before the bus sees it (`slice.to_vec()`, then
+/// `Bytes::from_bytes_vec(data.to_vec())` inside `do_create_from_slices`). So
+/// the upload is exactly as long as the frame and nothing more: an unstrided
+/// frame goes straight out of the caller's buffer with no staging copy at all,
+/// and only a strided one — dav1d's shape — is repacked row by row into
+/// `scratch`, which the caller owns so the per-frame path never allocates.
+///
+/// Both the pyramid builder's level-0 upload and the corner scanner's own frame
+/// upload are this, which is why it is here and not in either.
+#[cfg(feature = "gpu-core")]
+pub(super) fn upload_frame<R: cubecl::prelude::Runtime>(
+    client: &cubecl::prelude::ComputeClient<R>,
+    image: &crate::image::ImageU16,
+    scratch: &mut Vec<u16>,
+) -> (cubecl::server::Handle, usize) {
+    use cubecl::prelude::CubeElement;
+
+    let (width, height): (usize, usize) = (image.width(), image.height());
+    let pixels: usize = width * height;
+    if image.stride() == width {
+        return (
+            client.create_from_slice(u16::as_bytes(&image.data()[..pixels])),
+            pixels,
+        );
+    }
+    scratch.clear();
+    scratch.reserve(pixels);
+    for y in 0..height {
+        scratch.extend_from_slice(image.row(y));
+    }
+    (client.create_from_slice(u16::as_bytes(scratch)), pixels)
+}
+
 /// So the check is the one thing that cannot lie: write a known pattern, copy
 /// it **on the device**, read it back. Four widths, 256 elements each, once at
 /// construction — microseconds, and it is what a fleet machine whose driver

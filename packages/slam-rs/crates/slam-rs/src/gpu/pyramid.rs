@@ -285,28 +285,13 @@ impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
                     });
                 }
 
-                // `create_from_slice` is CubeCL 0.10's only host-to-device write, it
-                // allocates a buffer the size of the slice, and it copies the payload
-                // **twice** on the host before the bus sees it (`slice.to_vec()`, then
-                // `Bytes::from_bytes_vec(data.to_vec())` inside `do_create_from_slices`).
-                // So the upload is exactly as long as the frame and nothing more: an
-                // unstrided frame goes straight out of the caller's buffer with no
-                // staging copy at all, and only a strided one is repacked. Level 0 then
-                // reaches the front of the even allocation through one device copy,
-                // which costs microseconds and lets that allocation be made once at
-                // `allocate` instead of replaced every frame.
-                let pixels: usize = level0.width * level0.height;
-                let upload: cubecl::server::Handle = if img.stride() == level0.width {
-                    out.client
-                        .create_from_slice(u16::as_bytes(&img.data()[..pixels]))
-                } else {
-                    self.staging.clear();
-                    self.staging.reserve(pixels);
-                    for y in 0..img.height() {
-                        self.staging.extend_from_slice(img.row(y));
-                    }
-                    out.client.create_from_slice(u16::as_bytes(&self.staging))
-                };
+                // Level 0 reaches the front of the even allocation through one
+                // device copy off the upload buffer, which costs microseconds and
+                // lets that allocation be made once at `allocate` instead of
+                // replaced every frame. `upload_frame` is what puts the frame
+                // there, and its doc is where the copy count lives.
+                let (upload, pixels): (cubecl::server::Handle, usize) =
+                    super::upload_frame(&out.client, img, &mut self.staging);
                 kernels::launch_copy_level0::<R>(
                     &out.client,
                     (&upload, pixels),

@@ -7,7 +7,9 @@ use super::kernels::{self, PatchShape, PositionBases};
 use super::pyramid::GpuPyramid;
 use super::{GpuError, guarded};
 use crate::frontend::patterns::Pattern;
-use crate::frontend::tracker::{MAX_CAPACITY, MAX_LEVELS, PointsSoA, SourcePatches, TrackerError};
+use crate::frontend::tracker::{
+    PointsSoA, SourcePatches, TrackerError, check_patch_inputs, checked_patch_shape,
+};
 use crate::pyramid::Pyramid;
 
 /// Layout of the one `store` buffer a patch set owns.
@@ -109,37 +111,25 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
     ///
     /// # Errors
     ///
-    /// The same shape checks [`crate::frontend::tracker::PatchSoA::new`] makes,
-    /// so a GPU tracker refuses exactly what the CPU one refuses rather than
-    /// asking the device for a buffer no allocation could hold.
+    /// Whatever the frontend's `checked_patch_shape` refuses, which is what
+    /// [`crate::frontend::tracker::PatchSoA::new`] refuses: a GPU tracker turns
+    /// down exactly what the CPU one turns down rather than asking the device
+    /// for a buffer no allocation could hold. Only the last product differs —
+    /// this lane folds `4 * taps + flags` into one buffer.
     pub fn new(
         client: ComputeClient<R>,
         capacity: usize,
         num_levels: usize,
     ) -> Result<Self, TrackerError> {
-        if capacity > MAX_CAPACITY {
-            return Err(TrackerError::CapacityTooLarge {
-                capacity,
-                ceiling: MAX_CAPACITY,
-            });
-        }
-        if num_levels > MAX_LEVELS {
-            return Err(TrackerError::TooManyLevels {
-                num_levels,
-                ceiling: MAX_LEVELS,
-            });
-        }
-        let overflow = || TrackerError::BufferShapeOverflow {
-            capacity,
-            num_levels,
-            taps: P::SIZE,
-        };
-        let flags: usize = num_levels.checked_mul(capacity).ok_or_else(overflow)?;
-        let taps: usize = flags.checked_mul(P::SIZE).ok_or_else(overflow)?;
+        let (flags, taps): (usize, usize) = checked_patch_shape(capacity, num_levels, P::SIZE)?;
         let elements: usize = taps
             .checked_mul(4)
             .and_then(|body| body.checked_add(flags))
-            .ok_or_else(overflow)?;
+            .ok_or(TrackerError::BufferShapeOverflow {
+                capacity,
+                num_levels,
+                taps: P::SIZE,
+            })?;
 
         let layout: StoreLayout = StoreLayout {
             capacity,
@@ -300,29 +290,13 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
         selected: Option<&[bool]>,
         pyramid_levels: usize,
     ) -> Result<(), TrackerError> {
-        if count > self.layout.capacity {
-            return Err(TrackerError::CapacityExceeded {
-                offered: count,
-                capacity: self.layout.capacity,
-            });
-        }
-        if let Some(flags) = selected
-            && flags.len() < count
-        {
-            return Err(TrackerError::LengthMismatch {
-                first_name: "positions",
-                first: count,
-                second_name: "selection flags",
-                second: flags.len(),
-            });
-        }
-        if pyramid_levels < self.layout.num_levels {
-            return Err(TrackerError::LevelMismatch {
-                what: "the pyramid",
-                expected: self.layout.num_levels,
-                actual: pyramid_levels,
-            });
-        }
+        check_patch_inputs(
+            count,
+            self.layout.capacity,
+            selected,
+            pyramid_levels,
+            self.layout.num_levels,
+        )?;
         self.len = count;
         Ok(())
     }

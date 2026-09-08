@@ -487,6 +487,148 @@ impl FlowTransforms {
     }
 }
 
+/// The four preconditions of [`PatchTracker::track`], checked before any
+/// mutation.
+///
+/// Both lanes call this rather than each spelling the four out: the seam exists
+/// to keep them interchangeable, and a fifth check added to one lane and not the
+/// other would be invisible.
+///
+/// # Errors
+///
+/// [`TrackerError::LengthMismatch`] when the patch set and the guesses disagree,
+/// [`TrackerError::CapacityExceeded`] above the tracker's capacity, and
+/// [`TrackerError::LevelMismatch`] when the patch set or either pyramid is
+/// shallower than the tracker. The patch set is built by the caller, so its
+/// depth is an input like any other: a one-level `PatchSoA` in a two-level
+/// tracker used to index past the end of `valid`.
+pub(crate) fn check_track_inputs(
+    count: usize,
+    patches_len: usize,
+    patch_levels: usize,
+    prev_levels: usize,
+    next_levels: usize,
+    capacity: usize,
+    num_levels: usize,
+) -> Result<(), TrackerError> {
+    if count != patches_len {
+        return Err(TrackerError::LengthMismatch {
+            first_name: "patches",
+            first: patches_len,
+            second_name: "transforms",
+            second: count,
+        });
+    }
+    if count > capacity {
+        return Err(TrackerError::CapacityExceeded {
+            offered: count,
+            capacity,
+        });
+    }
+    if patch_levels < num_levels {
+        return Err(TrackerError::LevelMismatch {
+            what: "the patch set",
+            expected: num_levels,
+            actual: patch_levels,
+        });
+    }
+    for (what, levels) in [
+        ("the previous pyramid", prev_levels),
+        ("the next pyramid", next_levels),
+    ] {
+        if levels < num_levels {
+            return Err(TrackerError::LevelMismatch {
+                what,
+                expected: num_levels,
+                actual: levels,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The element counts a patch set of this shape needs: `(flags, taps)`.
+///
+/// `flags` is one entry per (level, patch) and `taps` is `flags * P::SIZE`; each
+/// constructor forms its own last product from them, which is the part the two
+/// lanes do differently (the CPU one wants three Jacobian arrays, the GPU one
+/// folds `4 * taps + flags` into a single buffer). The ceilings and the
+/// `checked_mul` ladder are the part that must not drift.
+///
+/// # Errors
+///
+/// [`TrackerError::CapacityTooLarge`] above [`MAX_CAPACITY`],
+/// [`TrackerError::TooManyLevels`] above [`MAX_LEVELS`], and
+/// [`TrackerError::BufferShapeOverflow`] when a count does not fit a `usize`.
+pub(crate) fn checked_patch_shape(
+    capacity: usize,
+    num_levels: usize,
+    taps_per_patch: usize,
+) -> Result<(usize, usize), TrackerError> {
+    if capacity > MAX_CAPACITY {
+        return Err(TrackerError::CapacityTooLarge {
+            capacity,
+            ceiling: MAX_CAPACITY,
+        });
+    }
+    if num_levels > MAX_LEVELS {
+        return Err(TrackerError::TooManyLevels {
+            num_levels,
+            ceiling: MAX_LEVELS,
+        });
+    }
+    let overflow = || TrackerError::BufferShapeOverflow {
+        capacity,
+        num_levels,
+        taps: taps_per_patch,
+    };
+    let flags: usize = num_levels.checked_mul(capacity).ok_or_else(overflow)?;
+    let taps: usize = flags.checked_mul(taps_per_patch).ok_or_else(overflow)?;
+    Ok((flags, taps))
+}
+
+/// The three preconditions of [`SourcePatches::build`], checked before any
+/// mutation, on both lanes for the same reason as [`check_track_inputs`].
+///
+/// # Errors
+///
+/// [`TrackerError::CapacityExceeded`] when the positions do not fit,
+/// [`TrackerError::LengthMismatch`] when the selection mask is shorter than the
+/// positions, and [`TrackerError::LevelMismatch`] when the pyramid is shallower
+/// than the patch set.
+pub(crate) fn check_patch_inputs(
+    count: usize,
+    capacity: usize,
+    selected: Option<&[bool]>,
+    pyramid_levels: usize,
+    num_levels: usize,
+) -> Result<(), TrackerError> {
+    if count > capacity {
+        return Err(TrackerError::CapacityExceeded {
+            offered: count,
+            capacity,
+        });
+    }
+    if let Some(flags) = selected
+        && flags.len() < count
+    {
+        return Err(TrackerError::LengthMismatch {
+            first_name: "positions",
+            first: count,
+            second_name: "selection flags",
+            second: flags.len(),
+        });
+    }
+    if pyramid_levels < num_levels {
+        return Err(TrackerError::LevelMismatch {
+            what: "the pyramid",
+            expected: num_levels,
+            actual: pyramid_levels,
+        });
+    }
+    Ok(())
+}
+
 /// The source patches of one camera, whatever holds them.
 ///
 /// Split from [`PatchTracker`] so a backend can pair its own patch storage with
@@ -553,33 +695,18 @@ impl<P: Pattern> PatchSoA<P> {
     ///
     /// # Errors
     ///
-    /// [`TrackerError::CapacityTooLarge`] above [`MAX_CAPACITY`],
-    /// [`TrackerError::TooManyLevels`] above [`MAX_LEVELS`], and
-    /// [`TrackerError::BufferShapeOverflow`] when a buffer's element count does
-    /// not fit in a `usize`. All three are checked before anything is allocated:
-    /// the products below reach `Vec` as a length, and a `Vec` too long to exist
-    /// panics rather than returning (decision D32).
+    /// Whatever the crate's `checked_patch_shape` refuses. All of it is checked before
+    /// anything is allocated: the products below reach `Vec` as a length, and a
+    /// `Vec` too long to exist panics rather than returning (decision D32).
     pub fn new(capacity: usize, num_levels: usize) -> Result<Self, TrackerError> {
-        if capacity > MAX_CAPACITY {
-            return Err(TrackerError::CapacityTooLarge {
+        let (flags, taps): (usize, usize) = checked_patch_shape(capacity, num_levels, P::SIZE)?;
+        let jacobians: usize = taps
+            .checked_mul(3)
+            .ok_or(TrackerError::BufferShapeOverflow {
                 capacity,
-                ceiling: MAX_CAPACITY,
-            });
-        }
-        if num_levels > MAX_LEVELS {
-            return Err(TrackerError::TooManyLevels {
                 num_levels,
-                ceiling: MAX_LEVELS,
-            });
-        }
-        let overflow = || TrackerError::BufferShapeOverflow {
-            capacity,
-            num_levels,
-            taps: P::SIZE,
-        };
-        let flags: usize = num_levels.checked_mul(capacity).ok_or_else(overflow)?;
-        let taps: usize = flags.checked_mul(P::SIZE).ok_or_else(overflow)?;
-        let jacobians: usize = taps.checked_mul(3).ok_or_else(overflow)?;
+                taps: P::SIZE,
+            })?;
         let mut positions: PointsSoA = PointsSoA::with_capacity(capacity);
         positions.resize(capacity);
         Ok(Self {
@@ -648,29 +775,13 @@ impl<P: Pattern> SourcePatches for PatchSoA<P> {
         selected: Option<&[bool]>,
     ) -> Result<(), TrackerError> {
         let count: usize = positions.len();
-        if count > self.capacity {
-            return Err(TrackerError::CapacityExceeded {
-                offered: count,
-                capacity: self.capacity,
-            });
-        }
-        if let Some(flags) = selected
-            && flags.len() < count
-        {
-            return Err(TrackerError::LengthMismatch {
-                first_name: "positions",
-                first: count,
-                second_name: "selection flags",
-                second: flags.len(),
-            });
-        }
-        if pyramid.num_levels() < self.num_levels {
-            return Err(TrackerError::LevelMismatch {
-                what: "the pyramid",
-                expected: self.num_levels,
-                actual: pyramid.num_levels(),
-            });
-        }
+        check_patch_inputs(
+            count,
+            self.capacity,
+            selected,
+            pyramid.num_levels(),
+            self.num_levels,
+        )?;
         self.len = count;
 
         for level in 0..self.num_levels {
@@ -985,39 +1096,15 @@ impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
         out: &mut FlowResult,
     ) -> Result<(), TrackerError> {
         let count: usize = transforms_in.len();
-        if count != patches.len() {
-            return Err(TrackerError::LengthMismatch {
-                first_name: "patches",
-                first: patches.len(),
-                second_name: "transforms",
-                second: count,
-            });
-        }
-        if count > self.capacity {
-            return Err(TrackerError::CapacityExceeded {
-                offered: count,
-                capacity: self.capacity,
-            });
-        }
-        // The patch set is built by the caller, so its depth is an input like any
-        // other: a one-level `PatchSoA` in a two-level tracker used to index past
-        // the end of `valid`.
-        if patches.num_levels() < self.num_levels {
-            return Err(TrackerError::LevelMismatch {
-                what: "the patch set",
-                expected: self.num_levels,
-                actual: patches.num_levels(),
-            });
-        }
-        for (what, pyramid) in [("the previous pyramid", prev), ("the next pyramid", next)] {
-            if pyramid.num_levels() < self.num_levels {
-                return Err(TrackerError::LevelMismatch {
-                    what,
-                    expected: self.num_levels,
-                    actual: pyramid.num_levels(),
-                });
-            }
-        }
+        check_track_inputs(
+            count,
+            patches.len(),
+            patches.num_levels(),
+            prev.num_levels(),
+            next.num_levels(),
+            self.capacity,
+            self.num_levels,
+        )?;
 
         out.reset(count);
 
