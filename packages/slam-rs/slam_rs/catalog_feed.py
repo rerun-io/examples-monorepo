@@ -861,6 +861,41 @@ def _window_bounds(index: _VideoIndex, window_ns: int) -> list[tuple[int, int]]:
     return bounds
 
 
+def _frame_nearest_anchor(times: Int64[ndarray, " n_frames"], cursor: int, anchor_t_ns: int, tolerance_ns: int) -> tuple[int | None, int]:
+    """The frame one camera contributes to one anchor, and where its cursor goes if the frameset falls.
+
+    The camera walks forward from ``cursor`` while the next frame is no farther
+    from the anchor than the current one — ties take the later frame, which is
+    basalt's ``<=`` (``dataset_io_robocap.cpp:422-426``) — and contributes that
+    frame if it sits within ``tolerance_ns`` (inclusive, ``:427``).
+
+    When it does not, the cursor moves only if that nearest frame is *earlier*
+    than the anchor (``:428``): such a frame is farther from every later anchor
+    still, so no anchor can ever take it, while a camera running ahead keeps its
+    frame for the next anchor. The returned cursor is therefore where this camera
+    stands once the frameset falls; a caller whose frameset stands ignores it and
+    moves the cursor past the frame it took (``selected + 1``, ``:439``).
+
+    Args:
+        times: The camera's frame timestamps, in time order.
+        cursor: The first frame no earlier frameset has consumed.
+        anchor_t_ns: Camera 0's frame timestamp.
+        tolerance_ns: How far a frame may sit from the anchor's and still join it.
+
+    Returns:
+        The frame this camera contributes, or ``None`` if it has none within the
+        tolerance, and the cursor this camera stands on if the frameset falls.
+    """
+    index: int = cursor
+    if index >= len(times):
+        return None, cursor
+    while index + 1 < len(times) and abs(int(times[index + 1]) - anchor_t_ns) <= abs(int(times[index]) - anchor_t_ns):
+        index += 1
+    if abs(int(times[index]) - anchor_t_ns) > tolerance_ns:
+        return None, (index + 1 if int(times[index]) < anchor_t_ns else cursor)
+    return index, cursor
+
+
 def match_framesets(camera_t_ns: Sequence[Int64[ndarray, " n_frames"]], tolerance_ns: int) -> tuple[Int64[ndarray, " n_framesets"], Int64[ndarray, "n_framesets n_cameras"]]:
     """Group frames into framesets the way basalt's multi-camera reader does.
 
@@ -916,17 +951,11 @@ def match_framesets(camera_t_ns: Sequence[Int64[ndarray, " n_frames"]], toleranc
         # once the whole frameset stands.
         selected: list[int] = list(cursors)
         for position in range(1, len(camera_t_ns)):
-            times: Int64[ndarray, " n_frames"] = camera_t_ns[position]
-            index: int = cursors[position]
-            if index >= len(times):
-                break
-            while index + 1 < len(times) and abs(int(times[index + 1]) - anchor_t_ns) <= abs(int(times[index]) - anchor_t_ns):
-                index += 1
-            if abs(int(times[index]) - anchor_t_ns) > tolerance_ns:
-                # A camera already past the anchor keeps its frame for the next
-                # anchor; one that fell behind can never catch this anchor again.
-                if int(times[index]) < anchor_t_ns:
-                    cursors[position] = index + 1
+            # The cursor this camera stands on if the frameset falls: a camera that
+            # fell behind can never catch this anchor again, one running ahead keeps
+            # its frame. On the frameset standing, that value is where it already was.
+            index, cursors[position] = _frame_nearest_anchor(camera_t_ns[position], cursors[position], anchor_t_ns, tolerance_ns)
+            if index is None:
                 break
             selected[position] = index
             row.append(index)

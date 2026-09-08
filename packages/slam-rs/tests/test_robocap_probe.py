@@ -26,6 +26,7 @@ from slam_rs.catalog_feed import (
     CameraStatics,
     LocalSegment,
     RigProfile,
+    _frame_nearest_anchor,
     camera_calib,
     match_framesets,
     open_segment,
@@ -409,7 +410,7 @@ def test_a_camera_that_misses_the_anchor_drops_the_frameset() -> None:
     assert frame_index.tolist() == [[0, 0], [2, 1]]
 
 
-def test_a_frame_belongs_to_one_frameset(manifest: ReferenceManifest) -> None:
+def test_a_frame_belongs_to_one_frameset() -> None:
     """basalt consumes the frame it took, so the next anchor cannot have it again.
 
     Cursors move to ``selected + 1`` once every camera is inside the tolerance
@@ -425,11 +426,32 @@ def test_a_frame_belongs_to_one_frameset(manifest: ReferenceManifest) -> None:
     assert frame_index.tolist() == [[0, 0]]
 
 
+def test_a_camera_selected_for_an_incomplete_frameset_keeps_its_frame() -> None:
+    """A provisional selection is thrown away with the frameset it was for.
+
+    The C++ moves the cursors only after ``complete``
+    (`dataset_io_robocap.cpp:439`), so a camera picked for a frameset that then
+    fell keeps its frame. Anchor 100 takes camera 1's 150 (|150 - 100| = 50, the
+    inclusive edge) but camera 2's only frame is 200, which is 100 away, so the
+    frameset falls. Anchor 200 then takes camera 1's 150 (index 0, again the
+    inclusive edge) and camera 2's 200 (index 0): one frameset, whose three-camera
+    median of (200, 150, 200) is 200 — the matcher adds no offset of its own, the
+    caller applies ``cam_time_offset_ns``. Committing camera 1's selection after
+    anchor 100 would exhaust that camera and leave the rig with no frameset.
+    """
+    anchors: Int64[ndarray, " 2"] = np.array([100, 200], dtype=np.int64)
+    cameras: list[Int64[ndarray, " 1"]] = [np.array([150], dtype=np.int64), np.array([200], dtype=np.int64)]
+    t_ns, frame_index = match_framesets([anchors, *cameras], 50)
+
+    assert t_ns.tolist() == [200]
+    assert frame_index.tolist() == [[1, 0, 0]]
+
+
 def test_a_frame_the_anchor_is_too_early_for_waits_for_the_next_anchor() -> None:
     """A camera ahead of the anchor keeps its frame; one behind it is consumed.
 
     The C++ advances the cursor past the nearest frame only when that frame is
-    *earlier* than the anchor (`dataset_io_robocap.cpp:437`), because a late
+    *earlier* than the anchor (`dataset_io_robocap.cpp:428`), because a late
     camera's frame is still the right partner for the anchor after this one.
     """
     anchors: Int64[ndarray, " 2"] = np.array([100, 200], dtype=np.int64)
@@ -438,6 +460,33 @@ def test_a_frame_the_anchor_is_too_early_for_waits_for_the_next_anchor() -> None
 
     assert t_ns.tolist() == [195]
     assert frame_index.tolist() == [[1, 0]]
+
+
+def test_a_frame_no_later_anchor_can_reach_is_consumed_on_the_spot() -> None:
+    """The one matcher rule whose effect never reaches the output, tested where it lives.
+
+    `dataset_io_robocap.cpp:428` moves a camera's cursor past its nearest frame
+    when that frame is out of tolerance *and* earlier than the anchor. Anchors
+    only increase, so such a frame is farther from every later anchor still and
+    no frameset can ever take it. That also makes the rule invisible in
+    `match_framesets`'s output: leaving the cursor on the stale frame costs only
+    the nearest-frame walk, which re-reaches the same frame at the next anchor.
+    So it is pinned on the per-camera step instead, hand-computed:
+
+    * frames (0, 1000), cursor 0, anchor 100, tolerance 20 — the walk stays on 0
+      (|1000 - 100| = 900 is no closer than |0 - 100| = 100), 100 > 20 drops the
+      frameset, and 0 < 100, so the cursor moves to 1 and 0 is gone.
+    * frame (200) alone, same anchor — 100 > 20 drops it too, but 200 > 100, so
+      the cursor stays on 0 and 200 waits for the next anchor.
+    * frames (90, 110), same anchor — the walk ties onto 110, |110 - 100| = 10 is
+      inside the tolerance, and the cursor stays where it was: the caller commits
+      ``selected + 1`` only once the whole frameset stands.
+    * cursor 1 on a one-frame camera — exhausted, and it stays exhausted.
+    """
+    assert _frame_nearest_anchor(np.array([0, 1000], dtype=np.int64), 0, 100, 20) == (None, 1)
+    assert _frame_nearest_anchor(np.array([200], dtype=np.int64), 0, 100, 20) == (None, 0)
+    assert _frame_nearest_anchor(np.array([90, 110], dtype=np.int64), 0, 100, 20) == (1, 0)
+    assert _frame_nearest_anchor(np.array([0], dtype=np.int64), 1, 100, 20) == (None, 1)
 
 
 def test_the_tolerance_is_inclusive() -> None:
@@ -459,7 +508,7 @@ def test_a_tie_takes_the_later_frame() -> None:
 def test_interior_drops_are_allowed_one_in_a_thousand() -> None:
     """A run that drops more interior framesets than basalt tolerates is not a run.
 
-    `dataset_io_robocap.cpp:457` allows ``max(1, ceil(interior * 0.001))``
+    `dataset_io_robocap.cpp:458` allows ``max(1, ceil(interior * 0.001))``
     incomplete framesets whose anchor lies inside every camera's own span; more
     than that is a rig whose cameras are not the same recording.
     """
@@ -473,6 +522,46 @@ def test_interior_drops_are_allowed_one_in_a_thousand() -> None:
         match_framesets([anchors, np.array([990, 1310], dtype=np.int64)], 50)
 
 
+def test_the_drop_allowance_rounds_up_past_a_thousand_anchors() -> None:
+    """Past a thousand interior anchors the ceil, not the floor of one, sets the bar.
+
+    The allowance is ``max(1, ceil(interior * 0.001))``
+    (`dataset_io_robocap.cpp:458`), so 1,001 interior anchors allow
+    ceil(1.001) = 2 drops. The anchors here are 0, 100, ... 100,000 and the
+    partner is the same list minus two of its interior frames, which keeps its
+    first and last frame and therefore keeps all 1,001 anchors interior: 999
+    framesets stand, two interior anchors drop, and the run is accepted. Removing
+    a third makes 3 > 2 and the rig is refused. Truncation instead of a ceil, or
+    ``max(1, ...)`` alone, would allow one and refuse the accepted case.
+    """
+    anchors: Int64[ndarray, " 1001"] = np.arange(1001, dtype=np.int64) * 100
+    two_missing: Int64[ndarray, " 999"] = np.delete(anchors, [300, 600])
+    t_ns, _ = match_framesets([anchors, two_missing], 50)
+    assert t_ns.tolist() == two_missing.tolist()
+
+    three_missing: Int64[ndarray, " 998"] = np.delete(anchors, [300, 600, 900])
+    with pytest.raises(ValueError, match="3 of 1001 interior framesets are incomplete, more than the 2"):
+        match_framesets([anchors, three_missing], 50)
+
+
+def test_only_a_drop_inside_every_cameras_span_counts_against_the_run() -> None:
+    """An anchor no camera could partner is not the rig's fault, and is not counted.
+
+    Both counters are gated on ``overlap_start <= anchor <= overlap_end``
+    (`dataset_io_robocap.cpp:410` for the anchors, `:436` for the drops). The
+    anchors here are 0, 10, 20, 30, 40 and the one partner has 20 and 30, so the
+    overlap is [20, 30]: two interior anchors, both complete, and the misses at
+    0, 10 and 40 are exterior. Counting those would be 3 drops of 5 anchors
+    against an allowance of max(1, ceil(0.005)) = 1, and this rig — a partner
+    camera that simply started late and stopped early — would be refused.
+    """
+    anchors: Int64[ndarray, " 5"] = np.array([0, 10, 20, 30, 40], dtype=np.int64)
+    t_ns, frame_index = match_framesets([anchors, np.array([20, 30], dtype=np.int64)], 1)
+
+    assert t_ns.tolist() == [20, 30]
+    assert frame_index.tolist() == [[2, 0], [3, 1]]
+
+
 def test_frameset_timestamps_must_strictly_increase() -> None:
     """Two anchors on one timestamp would file two framesets under one time."""
     with pytest.raises(ValueError, match="frameset timestamps are not strictly increasing: 100 follows 100"):
@@ -480,7 +569,7 @@ def test_frameset_timestamps_must_strictly_increase() -> None:
 
 
 def test_a_camera_with_no_frames_is_named() -> None:
-    """basalt refuses the rig rather than the frameset (`dataset_io_robocap.cpp:821`)."""
+    """basalt refuses the rig rather than the frameset (`dataset_io_robocap.cpp:380`)."""
     with pytest.raises(ValueError, match="camera 1 has no frames"):
         match_framesets([np.array([100, 200], dtype=np.int64), np.array([], dtype=np.int64)], 50)
 
