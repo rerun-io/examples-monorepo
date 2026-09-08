@@ -85,6 +85,8 @@ class Logged(NamedTuple):
     """``video_time`` of every frameset that tracked, in order."""
     logger: VioLogger
     """The logger that produced them, for its accumulated estimate."""
+    recording: Path
+    """The ``.rrd`` itself, for the rows :func:`conftest.read_rows` drops: the static ones."""
 
 
 def straight_line(t_ns: Int64[ndarray, " n"]) -> Trajectory:
@@ -143,8 +145,11 @@ def drive(
         assert frame is not None
         logger.log(result, snapshot, frame, elapsed_ms=1.5)
         tracked.append(t_ns)
+    # What a replay ends with, and the other half of the segment form: the rows
+    # above are one segment each, these are the whole paths, static.
+    logger.log_complete_paths()
     rr.disconnect()
-    return Logged(rows=read_rows(output), tracked=tracked, logger=logger)
+    return Logged(rows=read_rows(output), tracked=tracked, logger=logger, recording=output)
 
 
 @pytest.fixture
@@ -192,6 +197,20 @@ def image_planes(recording: Path) -> dict[str, float]:
     return planes
 
 
+def static_path_lengths(recording: Path) -> dict[str, int]:
+    """Every static line strip in one recording: how many points it has, by entity path.
+
+    Static like the rig geometry above and read the same way, because
+    :func:`conftest.read_rows` drops exactly the rows this asks about.
+    """
+    lengths: dict[str, int] = {}
+    for chunk in rx.RrdReader(recording).stream().collect().stream():
+        batch = chunk.to_record_batch()
+        if chunk.is_static and "LineStrips3D:strips" in batch.schema.names:
+            lengths[chunk.entity_path] = len(batch.column("LineStrips3D:strips").to_pylist()[0][0])
+    return lengths
+
+
 def test_every_rig_camera_pins_its_frustum_to_one_size(camera: CameraFactory, tmp_path: Path) -> None:
     """Both drawn rigs name the image-plane distance, so a frustum keeps its size all replay.
 
@@ -218,16 +237,18 @@ def test_every_rig_camera_pins_its_frustum_to_one_size(camera: CameraFactory, tm
 
 
 def test_every_tracked_frameset_writes_the_rung(logged: Logged) -> None:
-    """One row per tracked frameset on each of the rung's entities, at its own time."""
+    """One row per tracked frameset on each of the rung's entities, at its own time.
+
+    The three ``trajectory`` entities are not here: they are drawn one segment at
+    a time and a line with no second pose yet writes nothing, which is what the
+    two path tests below pin.
+    """
     assert len(logged.tracked) >= FRAMESETS - 2, "only the framesets before the first covered one may fail to track"
     for entity in (
         f"{RUN_ENTITY}/rig",
-        f"{RUN_ENTITY}/trajectory",
         f"{RUN_ENTITY}/window",
         f"{RUN_ENTITY}/marginalized",
         f"{RUN_ENTITY}/landmarks",
-        f"{GT_ENTITY}/trajectory",
-        f"{CPP_ENTITY}/trajectory",
         f"{VIO_STATS_ENTITY}/num_landmarks",
         f"{VIO_STATS_ENTITY}/lm_iterations",
         f"{VIO_STATS_ENTITY}/lm_error_before",
@@ -244,20 +265,42 @@ def test_every_tracked_frameset_writes_the_rung(logged: Logged) -> None:
     assert max(faded) > 0, "the marginalized layer never drew a frame the last marginalization removed"
 
 
-def test_the_estimated_path_grows_by_one_pose_a_frameset(logged: Logged) -> None:
-    """The strip is the whole path so far, which is what makes the three lines comparable."""
-    lengths: list[int] = [len(values["LineStrips3D:strips"][0]) for _, values in logged.rows[f"{RUN_ENTITY}/trajectory"]]
-    assert lengths == list(range(1, len(logged.tracked) + 1))
+def test_the_estimated_path_gains_one_segment_a_frameset(logged: Logged) -> None:
+    """Each frameset writes the pair of poses it joined, not the path so far.
+
+    The whole path is what a viewer shows, and it is the view's visible time
+    range that assembles it (:func:`slam_rs.vio_log.vio_blueprint`); the rows
+    themselves are two points each, which is what makes the rung linear. The
+    first tracked frameset has one pose and no pair, so it writes no row.
+    """
+    rows: list[Row] = logged.rows[f"{RUN_ENTITY}/trajectory"]
+    assert [t_ns for t_ns, _ in rows] == logged.tracked[1:]
+    assert [len(values["LineStrips3D:strips"][0]) for _, values in rows] == [2] * len(rows)
     assert len(logged.logger.estimated()) == len(logged.tracked)
 
 
-def test_a_reference_is_drawn_up_to_the_cursor_and_no_further(logged: Logged) -> None:
+def test_a_reference_segment_ends_at_the_cursor_and_no_further(logged: Logged) -> None:
     """A reference known in advance still stops where the estimate has got to."""
     for entity in (f"{GT_ENTITY}/trajectory", f"{CPP_ENTITY}/trajectory"):
-        for t_ns, values in logged.rows[entity]:
+        rows: list[Row] = logged.rows[entity]
+        # One reference pose every frame interval, from zero, so a cursor before
+        # the second one has no segment to draw.
+        assert [t_ns for t_ns, _ in rows] == [t_ns for t_ns in logged.tracked if t_ns >= FRAME_INTERVAL_NS], entity
+        for t_ns, values in rows:
             drawn: list = values["LineStrips3D:strips"][0]
-            # One reference pose every frame interval, from zero, inclusive.
-            assert len(drawn) == t_ns // FRAME_INTERVAL_NS + 1, entity
+            assert len(drawn) == 2, entity
+            # The reference runs along +x at 1 m/s from zero, so the pose the
+            # segment ends on is the cursor's own time in seconds — never the
+            # one after it.
+            assert drawn[-1][0] == pytest.approx(t_ns / 1e9), entity
+
+
+def test_the_whole_paths_are_logged_once_at_the_end(logged: Logged) -> None:
+    """One static row per path, so a viewer opened at any cursor sees where each run went."""
+    strips: dict[str, int] = static_path_lengths(logged.recording)
+    assert sorted(strips) == sorted([f"{RUN_ENTITY}/path", f"{GT_ENTITY}/path", f"{CPP_ENTITY}/path"])
+    assert strips[f"{RUN_ENTITY}/path"] == len(logged.tracked)
+    assert strips[f"{GT_ENTITY}/path"] == strips[f"{CPP_ENTITY}/path"] == FRAMESETS
 
 
 def test_the_plotted_ate_is_the_estimate_driven_one(
@@ -370,6 +413,30 @@ def test_the_blueprint_covers_the_world_the_cameras_and_the_counters(camera: Cam
         "ATE (cm)",
     ]
     assert blueprint.collapse_panels
+
+
+def test_only_the_three_paths_reach_back_to_the_start_of_the_recording(camera: CameraFactory) -> None:
+    """The segments become a path because the view says so — and only for the paths.
+
+    Without the override Rerun's default for a 3D view is latest-at, and each
+    two-point strip would render alone. With it on the view instead of on these
+    three entities, every frameset's window frusta and landmarks would be drawn
+    at once as well.
+    """
+    world: rrb.View = views_of(vio_blueprint((camera(0, 0.0), camera(1, 0.1))).root_container)[0]
+    assert sorted(str(entity) for entity in world.visualizer_overrides) == [
+        f"{CPP_ENTITY}/trajectory",
+        f"{GT_ENTITY}/trajectory",
+        f"{RUN_ENTITY}/trajectory",
+    ]
+    reaching_back: rrb.VisibleTimeRanges = rrb.VisibleTimeRanges(
+        rrb.VisibleTimeRange(TIMELINE, start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.cursor_relative())
+    )
+    for override in world.visualizer_overrides.values():
+        assert isinstance(override, rrb.VisibleTimeRanges)
+        assert override.ranges is not None
+        assert reaching_back.ranges is not None
+        assert override.ranges.as_arrow_array() == reaching_back.ranges.as_arrow_array()
 
 
 def test_every_logged_counter_sits_in_exactly_one_time_series_view(logged: Logged, camera: CameraFactory) -> None:

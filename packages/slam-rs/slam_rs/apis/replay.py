@@ -331,6 +331,9 @@ def main(config: Config) -> None:
         _replay(feed, config, stage)
         if not isinstance(stage, VioStage):
             return
+        # The per-frameset segments show where the run had got to; these show
+        # where it went, at every cursor and for one copy of each path.
+        stage.logger.log_complete_paths()
         if stage.pending:
             # Every frameset either produced a pose or is still held; a held one
             # at the end of the segment is a lost frameset, not a count to print.

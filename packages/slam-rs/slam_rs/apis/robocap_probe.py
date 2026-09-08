@@ -184,7 +184,6 @@ def main(config: Config) -> None:
             ground_truth=empty_trajectory(),
             cpp=cpp,
             frame_t_ns=feed.frame_t_ns,
-            incremental_paths=True,
         )
 
         replayed: int = 0

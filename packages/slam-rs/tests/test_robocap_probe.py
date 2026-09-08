@@ -101,8 +101,9 @@ def test_a_gyroscope_sample_the_accelerometer_does_not_cover_is_dropped() -> Non
     accel_t_ns: Int64[ndarray, " 2"] = np.array([50, 150], dtype=np.int64)
     paired = pair_accel_onto_gyro(gyro_t_ns, np.ones((5, 3)), accel_t_ns, np.array([[1.0, 1.0, 1.0], [3.0, 3.0, 3.0]]))
 
-    assert paired.t_ns.tolist() == [60, 110, 150] or paired.t_ns.tolist() == [60, 110]
-    assert paired.t_ns.min() >= 50 and paired.t_ns.max() <= 150
+    # The result is a subset of the gyroscope's own timestamps, so 10 and 210 are
+    # dropped and 150 — an accelerometer time — was never a candidate.
+    assert paired.t_ns.tolist() == [60, 110]
     assert len(paired) == len(paired.gyro_rad_s) == len(paired.accel_m_s2)
 
 
@@ -124,8 +125,15 @@ def test_the_named_cameras_come_back_in_the_callers_order() -> None:
 
 
 def test_a_hyphenated_name_matches_the_underscored_one() -> None:
-    """The rig writes ``left-front`` where basalt's driver spells it ``left_front``."""
-    assert select_cameras(camera_name_statics(["left-front", "right-front"]), 2, ("left_front",)) == (0,)
+    """The rig writes ``left-front`` where basalt's driver spells it ``left_front``.
+
+    Both sides are normalised, so a manifest that spells a camera the way the
+    recording itself does selects it rather than being refused.
+    """
+    statics: pa.Table = camera_name_statics(["left-front", "right-front"])
+    assert select_cameras(statics, 2, ("left_front",)) == (0,)
+    assert select_cameras(statics, 2, ("left-front",)) == (0,)
+    assert select_cameras(camera_name_statics(["left_front", "right_front"]), 2, ("left-front",)) == (0,)
 
 
 def test_a_camera_that_is_not_there_names_the_ones_that_are() -> None:

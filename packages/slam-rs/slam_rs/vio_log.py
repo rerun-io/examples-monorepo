@@ -10,14 +10,22 @@ The comparison is the point of the rung. Ground truth and the C++ trajectory are
 both known before the replay starts, so they are drawn **up to the cursor** just
 as the estimate is: at any time in the timeline the three lines have seen exactly
 the same interval, which is what makes a divergence readable rather than a matter
-of where the eye starts. That costs one re-logged strip per frameset, quadratic
-in the frameset count, so each of the three is drawn at the frameset cadence
-(:func:`at_frameset_cadence`): the ground truth runs at 917 Hz against 54 Hz of
-framesets, and re-logging it whole cost 17.20 MB of the smoke recording's 54.13
-MB of rows — 17x the estimate's own strip — to draw a line no viewer can
-resolve. Thinned, the three strips are 1.04 MB each over the 412-frameset smoke
-segment and about 100 MB each over a 4,000-frameset one, so a long segment still
-wants ``--max-framesets``.
+of where the eye starts. Each frameset logs the one segment its line gained, and
+:func:`vio_blueprint` gives the three ``trajectory`` entities a visible time
+range running from the start of the recording to the cursor, which is what turns
+those segments back into the path so far — Rerun's default for a view that is
+not a time series is latest-at, under which a two-point strip renders alone. The
+rung is then linear in the frameset count, where re-logging each whole strip was
+quadratic: the ground truth alone cost 17.20 MB of the smoke recording's 54.13 MB
+of rows, and a 4,000-frameset segment paid about 100 MB a line.
+
+The two references are still thinned to the frameset cadence
+(:func:`at_frameset_cadence`), which is also what makes a segment a segment: the
+ground truth runs at 917 Hz against 54 Hz of framesets, so an unthinned line
+costs 17x the estimate's rows to draw what no viewer can resolve.
+:meth:`VioLogger.log_complete_paths` puts each whole path in once, static, at the
+end of a replay, so a viewer that opens the file anywhere still sees where each
+run went.
 
 The three do not start in one frame. basalt initialises its world at the identity
 with gravity along z, while the ground truth is in the capture rig's own frame,
@@ -48,7 +56,7 @@ from scipy.spatial.transform import Rotation
 from simplecv.ops.umeyama import SimilarityTransform
 
 from slam_rs import _core
-from slam_rs.catalog_feed import CameraCalib
+from slam_rs.catalog_feed import TIMELINE, CameraCalib
 from slam_rs.frontend_log import camera_entity, log_keypoints, track_colors
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES, Association, AteResult, Trajectory, associate, ate, rigid_alignment
 
@@ -88,6 +96,10 @@ IMAGE_PLANE_M: float = 0.1
 """How far a rig camera's ``Pinhole`` frustum extends, metres: Rerun's default grows with the scene, so they changed size as landmarks came in."""
 ATE_EVERY: int = 30
 """Framesets between two ATE-so-far points: about one a second, and each costs a rigid alignment."""
+ROUTE_ALPHA: int = 40
+"""How opaque a whole path is (:meth:`VioLogger.log_complete_paths`) beside the trail drawn up to the cursor."""
+ROUTE_RADIUS_M: float = 0.0015
+"""How thick a whole path is, metres: under half the trail's, so the two read as one line and its ghost."""
 
 IDENTITY: SimilarityTransform = SimilarityTransform(dst_R_src=np.eye(3), dst_t_src=np.zeros(3), scale=1.0)
 """The alignment a run carries before enough of it has been associated with the ground truth."""
@@ -124,8 +136,9 @@ def at_frameset_cadence(trajectory: Trajectory, frame_t_ns: Int64[ndarray, " n_f
 
     Only what is **drawn** is thinned. The ATE and the alignment are computed
     against the whole reference, because there the truth's own density is the
-    thing being measured against; the strip is re-logged once per frameset, so
-    every pose in it is paid for a second time on every later frameset.
+    thing being measured against; a line drawn one segment a frameset can only
+    move by one pose a frameset, so the poses between them would never be drawn
+    at all.
 
     Args:
         trajectory: The reference to thin; an empty one comes back unchanged.
@@ -250,19 +263,8 @@ class VioLogger:
     """The C++ trajectory thinned the same way."""
     previous_strips: dict[int, Float64[ndarray, " 10 3"]] = field(default_factory=dict)
     """The last frameset's window wireframes by timestamp: where a marginalized frame is drawn from."""
-    drawn_reference: dict[str, int] = field(default_factory=dict)
-    """How much of each reference strip the segment form has drawn, by entity."""
     framesets: int = 0
     """Framesets logged, which paces the ATE-so-far."""
-    incremental_paths: bool = False
-    """Draw each frameset's own new path segment instead of the whole path so far.
-
-    Re-logging the whole strip every frameset costs the square of the frameset
-    count: a 412-frameset smoke segment pays 85,000 points and a 2,700-frameset
-    RoboCap clip would pay 3.6 million, per trajectory. The segment form is
-    linear, and :meth:`log_complete_paths` puts each whole path in once at the
-    end so a viewer still shows both of them at every cursor.
-    """
 
     def __post_init__(self) -> None:
         """Log the estimated rig's static geometry, precompute the window wireframe and thin the references."""
@@ -315,11 +317,17 @@ class VioLogger:
         )
 
     def log_complete_paths(self) -> None:
-        """Log each whole path once, static, so both are visible at every cursor.
+        """Log each whole path once, static, so all three are visible at every cursor.
 
-        The per-frameset segments show where the run had got to; these show where
-        it went. Static rows have no timestamp, so they cost one copy of each
-        path however long the clip is.
+        The per-frameset segments show where each run had got to; these show
+        where it went. Static rows have no timestamp, so they cost one copy of
+        each path however long the clip is.
+
+        They are drawn faded and thin (:data:`ROUTE_ALPHA`,
+        :data:`ROUTE_RADIUS_M`) for the same reason the frames the last
+        marginalization removed are: two things in one place have to be told
+        apart. At full colour and radius the route covers the trail exactly, and
+        a cursor halfway through a clip looks like a cursor at the end of it.
         """
         for entity, trajectory, color in (
             (f"{RUN_ENTITY}/path", self.estimated(), ESTIMATE_COLOR),
@@ -328,36 +336,28 @@ class VioLogger:
         ):
             if len(trajectory) < 2:
                 continue
-            rr.log(entity, rr.LineStrips3D([trajectory.position_m], colors=color, radii=0.004), static=True)
+            rr.log(entity, rr.LineStrips3D([trajectory.position_m], colors=(*color, ROUTE_ALPHA), radii=ROUTE_RADIUS_M), static=True)
 
     def _log_paths(self, estimated: Trajectory) -> None:
-        """Draw the three trajectories, each up to the current cursor.
+        """Draw the segment each of the three trajectories gained at this cursor.
 
-        Each is logged in its own frame; the run entities' alignment transforms
-        are what bring the three together in the dataset's world.
+        One two-point strip a line a frameset, ending on the newest pose at or
+        before the cursor: the view's visible time range (:func:`vio_blueprint`)
+        is what accumulates them into the path so far, and a reference that has
+        no second pose yet draws nothing. Each is logged in its own frame; the
+        run entities' alignment transforms are what bring the three together in
+        the dataset's world.
 
         Args:
             estimated: Everything reported so far, the newest pose last.
         """
         t_ns: int = int(estimated.t_ns[-1])
-        if self.incremental_paths:
-            # One segment per frameset, from the previous pose to this one. The
-            # strips accumulate in a view whose visible time range reaches back
-            # to the start of the recording; `log_complete_paths` covers the rest.
-            if len(estimated) >= 2:
-                rr.log(f"{RUN_ENTITY}/trajectory", rr.LineStrips3D([estimated.position_m[-2:]], colors=ESTIMATE_COLOR, radii=0.004))
-            for entity, trajectory, color in ((GT_ENTITY, self.ground_truth_strip, GT_COLOR), (CPP_ENTITY, self.cpp_strip, CPP_TRAJECTORY_COLOR)):
-                drawn: int = int(np.searchsorted(trajectory.t_ns, t_ns, side="right"))
-                if drawn >= 2 and drawn > self.drawn_reference.get(entity, 0):
-                    rr.log(f"{entity}/trajectory", rr.LineStrips3D([trajectory.position_m[max(drawn - 2, 0) : drawn]], colors=color, radii=0.004))
-                self.drawn_reference[entity] = drawn
-            return
-        rr.log(f"{RUN_ENTITY}/trajectory", rr.LineStrips3D([estimated.position_m], colors=ESTIMATE_COLOR, radii=0.004))
+        if len(estimated) >= 2:
+            rr.log(f"{RUN_ENTITY}/trajectory", rr.LineStrips3D([estimated.position_m[-2:]], colors=ESTIMATE_COLOR, radii=0.004))
         for entity, trajectory, color in ((GT_ENTITY, self.ground_truth_strip, GT_COLOR), (CPP_ENTITY, self.cpp_strip, CPP_TRAJECTORY_COLOR)):
-            if len(trajectory) == 0:
-                continue
-            drawn = int(np.searchsorted(trajectory.t_ns, t_ns, side="right"))
-            rr.log(f"{entity}/trajectory", rr.LineStrips3D([trajectory.position_m[:drawn]], colors=color, radii=0.004))
+            drawn: int = int(np.searchsorted(trajectory.t_ns, t_ns, side="right"))
+            if drawn >= 2:
+                rr.log(f"{entity}/trajectory", rr.LineStrips3D([trajectory.position_m[drawn - 2 : drawn]], colors=color, radii=0.004))
 
     def _log_window(self, snapshot: _core.VioSnapshot) -> None:
         """Draw a frustum wireframe at every window pose, coloured by what the frame is."""
@@ -457,6 +457,15 @@ def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
     so height is what a trace can least spare. Narrowing the views also shrinks
     each legend, because a view of one magnitude holds few series.
 
+    The three trajectories are logged one segment a frameset, so each of them
+    carries a visible time range reaching from the start of the recording to the
+    cursor: without it Rerun's default for a 3D view is latest-at, under which
+    each segment renders alone. The range goes on the three entities rather than
+    on the view, because everything else the view holds — the window frusta, the
+    strips of the frames the last marginalization removed, the landmarks — is a
+    whole state re-logged every frameset, and a window reaching back to the start
+    would draw every copy of it at once.
+
     Args:
         cameras: The rig's cameras, in rig order.
 
@@ -464,10 +473,17 @@ def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
         A blueprint with the panels collapsed, so the frame is all content.
     """
     views: list[rrb.View] = [rrb.Spatial2DView(origin=camera_entity(camera.index), name=f"cam {camera.index:02d}") for camera in cameras]
+    trail: rrb.VisibleTimeRanges = rrb.VisibleTimeRanges(
+        rrb.VisibleTimeRange(TIMELINE, start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.cursor_relative())
+    )
     return rrb.Blueprint(
         rrb.Vertical(
             rrb.Horizontal(
-                rrb.Spatial3DView(origin="/world", name="world"),
+                rrb.Spatial3DView(
+                    origin="/world",
+                    name="world",
+                    overrides={f"{run}/trajectory": trail for run in (RUN_ENTITY, GT_ENTITY, CPP_ENTITY)},
+                ),
                 rrb.Vertical(*views),
                 column_shares=[2, 1],
             ),

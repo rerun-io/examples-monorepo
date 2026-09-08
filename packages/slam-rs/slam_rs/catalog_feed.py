@@ -57,7 +57,7 @@ from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name
 
 from slam_rs.reference import ImuParameters
-from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory
+from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, shift_clock
 
 RIG_ENTITY: str = "/world/rig_00"
 """Rig node of the ``exoego:v2`` tree; its reference frame is the IMU."""
@@ -651,9 +651,7 @@ class SegmentFeed:
             return None
         offset_ns: int = self.imu.cam_time_offset_ns
         found: Trajectory | None = _read_ground_truth(self.gt_dataset, self.segment_id, first_ns - offset_ns, last_ns - offset_ns)
-        if found is None or offset_ns == 0:
-            return found
-        return Trajectory(t_ns=found.t_ns + offset_ns, position_m=found.position_m, quaternion_wxyz=found.quaternion_wxyz)
+        return found if found is None else shift_clock(found, offset_ns)
 
     def framesets(self) -> Iterator[Frameset]:
         """Decode the segment and yield one frameset at a time.
@@ -1030,8 +1028,9 @@ def select_cameras(statics: pa.Table, camera_count: int, camera_names: tuple[str
     """Rig indices of the named cameras, in the caller's order.
 
     Names are read from each camera node's ``name`` static and compared with
-    hyphens normalised to underscores, because the rig writes ``left-front``
-    where basalt's driver spells it ``left_front``.
+    hyphens normalised to underscores **on both sides**, because the rig writes
+    ``left-front`` where basalt's driver spells it ``left_front`` and a caller
+    may reasonably spell it either way.
 
     Args:
         statics: Single-row table holding every camera node's statics.
@@ -1053,10 +1052,11 @@ def select_cameras(statics: pa.Table, camera_count: int, camera_names: tuple[str
         if name in by_name:
             raise ValueError(f"cameras cam_{by_name[name]:02d} and cam_{position:02d} are both named {name!r}")
         by_name[name] = position
-    missing: list[str] = [name for name in camera_names if name not in by_name]
+    wanted: tuple[str, ...] = tuple(name.replace("-", "_") for name in camera_names)
+    missing: list[str] = [name for name, key in zip(camera_names, wanted, strict=True) if key not in by_name]
     if missing:
         raise ValueError(f"the recording has no camera named {missing}; it carries {sorted(by_name)}")
-    return tuple(by_name[name] for name in camera_names)
+    return tuple(by_name[key] for key in wanted)
 
 
 def _build_feed(
