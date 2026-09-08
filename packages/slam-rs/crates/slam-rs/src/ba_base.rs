@@ -289,9 +289,16 @@ pub fn linearize_point<S: LieScalar>(
 ///
 /// **Deviation.** On a non-finite input Eigen sets `InvalidInput` and returns
 /// with `m_matrixV` never written (`JacobiSVD.h:721-727`); basalt then reads it,
-/// which is undefined behaviour. The port returns an all-NaN vector, which the
-/// same acceptance gate rejects.
-pub fn triangulate<S: LieScalar>(f0: &Vector3<S>, f1: &Vector3<S>, t_0_1: &Se3<S>) -> Vector4<S> {
+/// which is undefined behaviour. There is no value to reproduce, so the port
+/// returns `None` — for that, and for a homogeneous vector whose spatial part
+/// has no direction to normalise. Both used to come back as an all-NaN or
+/// part-infinite vector that the acceptance gate above then rejected, which
+/// made a number the control flow.
+pub fn triangulate<S: LieScalar>(
+    f0: &Vector3<S>,
+    f1: &Vector3<S>,
+    t_0_1: &Se3<S>,
+) -> Option<Vector4<S>> {
     // `P1.setIdentity()`, `P2 = T_0_1.inverse().matrix3x4()` (`ba_base.h:98-100`).
     let p1: nalgebra::Matrix3x4<S> = {
         let mut m: nalgebra::Matrix3x4<S> = nalgebra::Matrix3x4::zeros();
@@ -311,12 +318,15 @@ pub fn triangulate<S: LieScalar>(f0: &Vector3<S>, f1: &Vector3<S>, t_0_1: &Se3<S
     a.row_mut(3)
         .copy_from(&(p2.row(2) * f1[1] - p2.row(1) * f1[2]));
 
-    let Some((_, v)) = jacobi_svd_4x4_full_v(&a) else {
-        return Vector4::from_element(S::from_literal(f64::NAN));
-    };
+    let (_, v) = jacobi_svd_4x4_full_v(&a)?;
 
     let mut world_point: Vector4<S> = v.column(3).into_owned();
     let norm: S = norm3(world_point[0], world_point[1], world_point[2]);
+    // A homogeneous vector with no spatial part has no direction: dividing by
+    // its norm used to hand the caller `[NaN, NaN, NaN, inf]`.
+    if norm <= S::zero() {
+        return None;
+    }
     for i in 0..4 {
         world_point[i] /= norm;
     }
@@ -326,7 +336,7 @@ pub fn triangulate<S: LieScalar>(f0: &Vector3<S>, f1: &Vector3<S>, t_0_1: &Se3<S
     if dot < S::zero() {
         world_point = -world_point;
     }
-    world_point
+    Some(world_point)
 }
 
 // ─── the Huber-weighted cost of one observation ───────────────────────────
@@ -1170,7 +1180,7 @@ mod tests {
             let point1: Vector3<f64> = point0 - Vector3::new(0.1, 0.0, 0.0);
             let f0: Vector3<f64> = point0.normalize();
             let f1: Vector3<f64> = point1.normalize();
-            let result: Vector4<f64> = triangulate(&f0, &f1, &t_0_1);
+            let result: Vector4<f64> = triangulate(&f0, &f1, &t_0_1).unwrap();
             assert_abs_diff_eq!(result.fixed_rows::<3>(0).norm(), 1.0, epsilon = 1e-12);
             // The homogeneous point is `[unit direction, 1/|point|]`.
             let recovered: Vector3<f64> = result.fixed_rows::<3>(0) / result[3];
@@ -1184,19 +1194,30 @@ mod tests {
         let t_0_1: Se3<f64> = Se3::new(So3::identity(), Vector3::new(0.1, 0.0, 0.0));
         let f0: Vector3<f64> = Vector3::new(0.0, 0.0, 1.0);
         let f1: Vector3<f64> = Vector3::new(0.0, 0.0, 1.0);
-        let result: Vector4<f64> = triangulate(&f0, &f1, &t_0_1);
+        let result: Vector4<f64> = triangulate(&f0, &f1, &t_0_1).unwrap();
         assert_abs_diff_eq!(result[3], 0.0, epsilon = 1e-12);
     }
 
+    /// A refusal is `None`, not four NaNs: Eigen leaves `m_matrixV`
+    /// uninitialized on `InvalidInput` and basalt reads it, so there is no
+    /// value to reproduce here — only a landmark that does not exist.
     #[test]
     fn a_non_finite_input_is_rejected_instead_of_read_uninitialized() {
         let t_0_1: Se3<f64> = Se3::new(So3::identity(), Vector3::new(0.1, 0.0, 0.0));
-        let bad: Vector4<f64> = triangulate(
-            &Vector3::new(f64::NAN, 0.0, 1.0),
-            &Vector3::new(0.0, 0.0, 1.0),
-            &t_0_1,
+        assert_eq!(
+            triangulate(
+                &Vector3::new(f64::NAN, 0.0, 1.0),
+                &Vector3::new(0.0, 0.0, 1.0),
+                &t_0_1,
+            ),
+            None
         );
-        assert!(bad.iter().all(|v| v.is_nan()));
+        // The homogeneous vector the DLT selects has no direction to normalise:
+        // the same refusal, one step later.
+        assert_eq!(
+            triangulate::<f64>(&Vector3::zeros(), &Vector3::zeros(), &Se3::identity()),
+            None
+        );
     }
 
     // ─── the window ────────────────────────────────────────────────────────
@@ -1768,7 +1789,9 @@ mod tests {
             let point1: Vector3<f64> = t_0_1.inverse() * point0;
             let f0: Vector3<f64> = point0.normalize();
             let f1: Vector3<f64> = point1.normalize();
-            let result: Vector4<f64> = triangulate(&f0, &f1, &t_0_1);
+            let Some(result): Option<Vector4<f64>> = triangulate(&f0, &f1, &t_0_1) else {
+                return Err(TestCaseError::fail("the DLT refused a well-conditioned pair"));
+            };
             prop_assert!(result[3] > 0.0);
             let recovered: Vector3<f64> = result.fixed_rows::<3>(0) / result[3];
             prop_assert!((recovered - point0).norm() <= 1e-7 * point0.norm());

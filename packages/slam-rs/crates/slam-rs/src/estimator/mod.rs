@@ -1417,12 +1417,16 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                         continue;
                     }
 
-                    // `:526-543`.
-                    let triangulated: Vector4<S> = triangulate(
+                    // `:526-543`. A refused DLT skips this pair, as an
+                    // unprojection the camera rejects does: where basalt reads
+                    // Eigen's uninitialized `V`, the port has no value at all.
+                    let Some(triangulated): Option<Vector4<S>> = triangulate(
                         &Vector3::new(p0_3d[0], p0_3d[1], p0_3d[2]),
                         &Vector3::new(p1_3d[0], p1_3d[1], p1_3d[2]),
                         &t_0_1,
-                    );
+                    ) else {
+                        continue;
+                    };
                     let finite: bool = triangulated.iter().all(|v| v.is_finite());
                     // What decides this gate is the triangulated value's own
                     // reduction order (D47), not the comparison.

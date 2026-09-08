@@ -567,7 +567,11 @@ fn check_triangulate<S: LieScalar>(entries: &[&OracleTriangulate], tolerance: f6
 
         let f0: Vector3<S> = vector3(&entry.f0);
         let f1: Vector3<S> = vector3(&entry.f1);
-        let got: Vector4<S> = triangulate(&f0, &f1, &t_0_1);
+        // Every oracle entry is a finite DLT, accepted or not, so a refusal
+        // here is the port disagreeing with the C++ about whether the
+        // triangulation happened at all.
+        let got: Vector4<S> = triangulate(&f0, &f1, &t_0_1)
+            .unwrap_or_else(|| panic!("{label}: the port refused a triangulation the C++ ran"));
         close_all(
             &format!("{label} result"),
             got.as_slice(),
