@@ -305,6 +305,25 @@ def coverage(reference: Trajectory, candidate: Trajectory) -> float:
     return float(np.clip(overlap_ns / reference_span_ns, 0.0, 1.0))
 
 
+def extent_m(trajectory: Trajectory) -> float:
+    """The diagonal of a trajectory's bounding box, metres; ``0.0`` when it has no pose.
+
+    What a ``no_divergence`` clip is gated on (D60 clause 5): where basalt itself
+    is near failure a tolerance measures noise, so the run has to have stayed
+    bounded and nothing more. The V2 gate and the fleet tool both read it, which
+    is why it lives beside :func:`ate` rather than in either of them.
+
+    Args:
+        trajectory: The trajectory to measure.
+
+    Returns:
+        The bounding box's diagonal in metres.
+    """
+    if len(trajectory) == 0:
+        return 0.0
+    return float(np.linalg.norm(trajectory.position_m.max(axis=0) - trajectory.position_m.min(axis=0)))
+
+
 def passes_gate(
     result: AteResult,
     tolerance_m: float,

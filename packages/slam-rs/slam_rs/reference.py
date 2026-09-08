@@ -22,6 +22,7 @@ from typing import Any, Literal, TypeAlias
 
 from slam_rs import _core, reference_bundle
 from slam_rs.reference_bundle import BundleFile
+from slam_rs.trajectory import MIN_ASSOCIATED_POSES
 
 MANIFEST_PATH: Path = Path(__file__).resolve().parents[1] / "reference_segments.toml"
 """The checked-in manifest, beside the package rather than inside it."""
@@ -90,6 +91,13 @@ DIVERGENCE_FACTOR: float = 10.0
 """How much larger than the ground truth's extent a ``no_divergence`` run's may be (D36)."""
 MIN_TRACKED_POSES: int = 10
 """Fewest poses that make a run a trajectory at all, rather than a comparison of noise."""
+SMOKE_SEGMENTS: tuple[str, ...] = ("msd-g2__MGO_others__MGO09_short_1_updown", "msd-index__MIO_others__MIO10_short_2_panorama")
+"""Both smoke clips, the four-camera 3 s one first: a broken machine says so sooner.
+
+The ids live here rather than in the tool that runs them: the V2 gate, the fleet
+tool and both suites name the same two clips, and a string spelled in four
+modules is a manifest id nobody can rename.
+"""
 
 
 @dataclass(slots=True, frozen=True)
@@ -461,6 +469,96 @@ class ReferenceManifest:
         path: Path = self.package_root / segment.reference.trajectory_csv
         reason: str | None = None if path.is_file() else f"{path} is committed in the manifest but missing from this checkout"
         return BundleFile(path=path, reason=reason)
+
+
+def band_cm_text(band: tuple[float, float]) -> str:
+    """The C++'s own precision band as a row prints it, in centimetres.
+
+    Args:
+        band: The C++'s ``f32`` and ``f64`` ground-truth RMSE in centimetres.
+
+    Returns:
+        The band, both members labelled by the precision that produced them.
+    """
+    return f"[f32 {band[0]:.2f}, f64 {band[1]:.2f}]"
+
+
+def d60_failures(
+    *,
+    gate_policy: GatePolicy,
+    framesets: int,
+    lost: int,
+    associated: int,
+    replayed_s: float,
+    cpp_rmse_cm: float,
+    gt_rmse_cm: float,
+    band: tuple[float, float],
+    extent_m: float,
+    truth_extent_m: float,
+    poses_finite: bool,
+    band_text: str | None = None,
+) -> list[str]:
+    """Every D60 accuracy clause one replayed clip misses, in the order D60 states them.
+
+    D60's rule is not "two error bounds": each bound is conditional, and the two
+    conditions are what a second implementation gets wrong. The 2 cm path bound
+    applies only under :data:`PATH_BOUND_MAX_CLIP_S` seconds, because past that
+    the C++ does not meet it against its own other precision (`MIO14`: 4.24 cm).
+    A ``no_divergence`` clip gates neither error at all — basalt itself sits at
+    43 cm and 78 cm there and two of its own decode paths differ by 18 to 32 cm —
+    and gates a finite, bounded run instead. Both the V2 gate and
+    :mod:`slam_rs.apis.fleet_check` read the verdict off these clauses, so they
+    are written once: a fleet row that applied the bounds unconditionally called
+    a healthy machine broken on any clip but the two smoke ones.
+
+    Speed is **not** here. It is a clause of the gate (D58) and a fact about the
+    machine on a fleet row, because the C++ wall was measured on one host.
+
+    Args:
+        gate_policy: How hard D60 lets this clip be gated.
+        framesets: Framesets fed to the estimator.
+        lost: Framesets that never got the inertial samples covering them (D17).
+        associated: Estimate poses that found a C++ pose inside the tolerance.
+        replayed_s: Sensor seconds the estimate spans, whole clip or window.
+        cpp_rmse_cm: ATE against the basalt C++ trajectory on the same footage.
+        gt_rmse_cm: ATE against the ``gt.csv`` sidecar.
+        band: The C++'s own ground-truth error in its ``f32`` and ``f64`` precisions.
+        extent_m: Diagonal of the estimate's bounding box.
+        truth_extent_m: The same for the ground truth, which bounds a ``no_divergence`` run.
+        poses_finite: Whether every estimated position is finite.
+        band_text: How the band prints; :func:`band_cm_text` when a caller has no
+            labelled form of its own (a windowed gate row does).
+
+    Returns:
+        One line per missed clause; empty when the clip passes.
+    """
+    failures: list[str] = []
+    if lost:
+        failures.append(f"{lost} of {framesets} framesets never got the inertial samples that cover them")
+    if associated < MIN_ASSOCIATED_POSES:
+        failures.append(f"only {associated} poses associated with the C++ run")
+    if gate_policy == "no_divergence":
+        # basalt itself is near failure here, so only a bounded run is asserted.
+        if not poses_finite:
+            failures.append("a pose is not finite")
+        if extent_m > DIVERGENCE_FACTOR * truth_extent_m:
+            failures.append(f"spans {extent_m:.1f} m against the truth's {truth_extent_m:.1f} m")
+        return failures
+    # The path bound only where the C++ meets it itself: past about a hundred
+    # seconds its own two precisions are 4.24 cm apart, so 2 cm there would gate
+    # the clip's length (D60).
+    if replayed_s < PATH_BOUND_MAX_CLIP_S and cpp_rmse_cm > ATE_VS_CPP_CM:
+        failures.append(f"{cpp_rmse_cm:.2f} cm from the C++ trajectory, gate is {ATE_VS_CPP_CM:.0f} cm")
+    # Inside the C++'s own band, or within GT_BAND_RATIO of its worst member,
+    # whichever is looser — which is the second alone, because the ratio is above
+    # one and the band's worst member is its upper end.
+    allowed_cm: float = GT_BAND_RATIO * max(band)
+    if gt_rmse_cm > allowed_cm:
+        failures.append(
+            f"{gt_rmse_cm:.2f} cm from ground truth, gate is {GT_BAND_RATIO}x the worst of the "
+            f"C++'s own band {band_text if band_text is not None else band_cm_text(band)} cm = {allowed_cm:.2f} cm"
+        )
+    return failures
 
 
 def flow_config(manifest: ReferenceManifest, segment: ReferenceSegment) -> _core.VioConfig:

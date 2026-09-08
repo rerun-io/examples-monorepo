@@ -35,16 +35,9 @@ from slam_rs.catalog_feed import (
     scale_principal_point,
     select_cameras,
 )
-from slam_rs.reference import ImuParameters, ReferenceManifest, RobocapSession, load_manifest
+from slam_rs.reference import ImuParameters, ReferenceManifest, RobocapSession
 from slam_rs.tracking import robocap_profile
 from slam_rs.trajectory import shift_clock
-
-
-@pytest.fixture(scope="module")
-def manifest() -> ReferenceManifest:
-    """The frozen reference set."""
-    return load_manifest()
-
 
 # The four fed cameras' native intrinsics exactly as the recording carries them,
 # in the C++'s order. float32 statics, so the digits stop where float32 does.
@@ -602,7 +595,7 @@ def test_the_profile_comes_from_the_manifest_not_the_code(manifest: ReferenceMan
     assert RigProfile(camera_names=None, downscale=1, interpolate_accel_onto_gyro=False, frameset_tolerance_ns=0, video_time_is_absolute=False) == MSD_RIG
 
 
-def test_a_profile_with_no_frames_left_is_refused_on_construction() -> None:
+def test_a_profile_with_no_frames_left_is_refused_on_construction(manifest: ReferenceManifest) -> None:
     """The downscale is checked where it is stated, before a byte is read.
 
     `_build_feed` reads the whole video index off the recording before it builds
@@ -611,7 +604,7 @@ def test_a_profile_with_no_frames_left_is_refused_on_construction() -> None:
     with pytest.raises(ValueError, match="downscale must be at least 1; got 0"):
         RigProfile(downscale=0)
     with pytest.raises(ValueError, match="downscale must be at least 1; got -3"):
-        replace(robocap_profile(load_manifest()), downscale=-3)
+        replace(robocap_profile(manifest), downscale=-3)
 
 
 def test_a_downscale_that_leaves_no_frame_is_refused() -> None:

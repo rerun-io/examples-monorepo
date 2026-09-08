@@ -5,19 +5,40 @@ and — on the pack target — no pixi, so what is under test here is the part t
 needs none of that: the verdict a clip's numbers earn, and how the row reads.
 """
 
+import json
 import os
 import platform
 import resource
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from slam_rs.apis.fleet_check import ClipResult, Machine, this_libc, this_peak_rss_mb
+from slam_rs.apis import fleet_check
+from slam_rs.apis.fleet_check import ClipResult, Config, Machine, main, measure, this_libc, this_peak_rss_mb
+from slam_rs.reference import MANIFEST_PATH, PATH_BOUND_MAX_CLIP_S, SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment
 
+CLIP_JSON_KEYS: tuple[str, ...] = (
+    "segment_id",
+    "framesets",
+    "tracked",
+    "lost",
+    "cpp_rmse_cm",
+    "gt_rmse_cm",
+    "cpp_gt_band_cm",
+    "wall_s",
+    "cpp_wall_s",
+    "peak_rss_mb",
+    "gt_allowed_cm",
+    "cpp_wall_ratio",
+    "verdict",
+)
+"""The clip keys the fleet chart reads, in the order it reads them: a consumer contract, not a dump of the row."""
 MACHINE: Machine = Machine(hostname="pablo-rpi", arch="aarch64", libc="2.36", cores=4)
 """A four-core Pi, which is the smallest machine that runs a full install."""
 PASSING: ClipResult = ClipResult(
-    segment_id="msd-index__MIO_others__MIO10_short_2_panorama",
+    segment_id=SMOKE_SEGMENTS[1],
     framesets=412,
     tracked=412,
     lost=0,
@@ -27,6 +48,12 @@ PASSING: ClipResult = ClipResult(
     wall_s=30.0,
     cpp_wall_s=7.674,
     peak_rss_mb=512.0,
+    gate_policy="tight",
+    replayed_s=7.6,
+    cpp_associated=412,
+    extent_m=3.4,
+    truth_extent_m=3.4,
+    poses_finite=True,
 )
 """The smoke clip as this host measures it, on a machine four times slower."""
 
@@ -46,8 +73,6 @@ def test_a_clip_inside_the_bands_passes_wherever_it_ran() -> None:
 
 def test_every_clause_a_machine_can_miss_is_named_in_its_own_row() -> None:
     """A lost frameset, a path error and a ground-truth error outside the band."""
-    from dataclasses import replace
-
     lost: ClipResult = replace(PASSING, tracked=410, lost=2)
     assert lost.verdict.startswith("fail")
     assert "2 of 412" in lost.failures[0]
@@ -102,3 +127,76 @@ def test_the_peak_resident_set_is_megabytes_on_both_kinds_of_machine(monkeypatch
     monkeypatch.setattr(resource, "getrusage", lambda _who: SimpleNamespace(ru_maxrss=half_a_gigabyte))
     monkeypatch.setattr(platform, "system", lambda: "Darwin")
     assert this_peak_rss_mb() == 512.0
+
+
+def test_a_clip_longer_than_the_path_bound_allows_is_not_held_to_two_centimetres() -> None:
+    """D60 clause 4: past about a hundred seconds the C++ misses 2 cm against its own other precision.
+
+    ``MIO14_moving_props`` is 410 s and the C++'s two precisions are 4.24 cm
+    apart on it, so a 5.5 cm path error there is the clip's length, not the
+    port. The gate has always guarded the bound this way
+    (:data:`~slam_rs.reference.PATH_BOUND_MAX_CLIP_S`); a fleet row measured by
+    ``--segments`` had not.
+    """
+    long_clip: ClipResult = replace(PASSING, replayed_s=410.5, cpp_rmse_cm=5.51, gt_rmse_cm=8.73, cpp_gt_band_cm=(8.86, 6.56))
+    assert long_clip.replayed_s > PATH_BOUND_MAX_CLIP_S
+    assert long_clip.verdict == "pass"
+    short_clip: ClipResult = replace(long_clip, replayed_s=99.0)
+    assert "5.51 cm from the C++ trajectory" in short_clip.failures[0]
+
+
+def test_a_no_divergence_clip_gates_a_bounded_path_and_nothing_else() -> None:
+    """D60 clause 5: on ``MGO01_low_light`` the C++ binary itself gets 43 cm, so a tolerance measures noise.
+
+    The clip has to keep tracking and stay bounded. Reporting it 42 cm from
+    ground truth as a failure calls a working port broken, which is what a fleet
+    row run with ``--segments`` used to do.
+    """
+    low_light: ClipResult = replace(PASSING, gate_policy="no_divergence", cpp_rmse_cm=68.0, gt_rmse_cm=42.75, extent_m=3.4, truth_extent_m=3.4)
+    assert low_light.verdict == "pass"
+    adrift: ClipResult = replace(low_light, extent_m=340.0)
+    assert "spans 340.0 m against the truth's 3.4 m" in adrift.failures[0]
+    infinite: ClipResult = replace(low_light, poses_finite=False)
+    assert infinite.failures == ("a pose is not finite",)
+
+
+def test_a_handful_of_associated_poses_is_not_a_comparison() -> None:
+    """``ate`` returns a number for two poses on purpose; the floor is what makes it a verdict."""
+    thin: ClipResult = replace(PASSING, cpp_associated=3)
+    assert "only 3 poses associated with the C++ run" in thin.failures[0]
+
+
+def test_a_reference_trajectory_that_is_not_here_is_refused_before_the_replay(
+    manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The manifest says why it cannot be read; paying a 410 s replay to reach a bare ``FileNotFoundError`` does not.
+
+    The two long-tier segments keep their trajectory in the machine-local
+    reference bundle, and the pack carries two of ten, so a fleet machine meets
+    this whenever it names a clip whose reference did not ship.
+    """
+    monkeypatch.setenv("SLAM_RS_REFERENCE_DIR", str(tmp_path))
+
+    def never(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the replay was paid for before the reference was checked")
+
+    monkeypatch.setattr("slam_rs.apis.fleet_check.run_segment", never)
+    segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENTS[1])
+    absent: ReferenceSegment = replace(segment, reference=replace(segment.reference, bundle_only=True))
+    with pytest.raises(FileNotFoundError, match="is not in SLAM_RS_REFERENCE_DIR"):
+        measure(manifest, absent)
+
+
+def test_the_first_clips_evidence_survives_a_directory_that_is_not_there_yet(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The JSON is the whole point of the run, and it is written after every clip.
+
+    On a 2 GB device the second clip is what the kernel may refuse, so the first
+    clip's row has to be on disk already — and it is not, if the last line of the
+    run is what discovers that ``out/`` does not exist.
+    """
+    monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment: PASSING)
+    output: Path = tmp_path / "out" / "fleet_check.json"
+    main(Config(manifest=MANIFEST_PATH, segments=(SMOKE_SEGMENTS[1],), output_json=output))
+    written: dict = json.loads(output.read_text())
+    assert list(written) == ["machine", "clips"]
+    assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)

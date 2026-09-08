@@ -12,7 +12,9 @@ back a fresh calibration or frontend, so a test may mutate what it is given.
 Fixtures rather than a module the tests import from each other: pytest injects
 these, so no test module has to be on another one's import path. That is also
 where :func:`read_rows` belongs — the two logging suites check their rungs
-against a real recording, and one reader means one account of what a row is.
+against a real recording, and one reader means one account of what a row is,
+and :func:`manifest` — five suites read the frozen reference set and parsing it
+once a session is both cheaper and one account of what "the manifest" means.
 """
 
 from collections.abc import Callable
@@ -27,6 +29,7 @@ from numpy import ndarray
 
 from slam_rs import _core
 from slam_rs.catalog_feed import TIMELINE, CameraCalib, ImuCalib
+from slam_rs.reference import ReferenceManifest, load_manifest
 
 FRAME: int = 200
 """Synthetic frame size: four whole 50-pixel detection cells per side."""
@@ -56,6 +59,12 @@ Rows: TypeAlias = dict[str, list[Row]]
 """Per entity path, its rows in ``video_time`` order."""
 RowsReader: TypeAlias = Callable[[Path], Rows]
 """Reads back what a logger wrote: every non-static row of a recording, by entity path."""
+
+
+@pytest.fixture(scope="session")
+def manifest() -> ReferenceManifest:
+    """The frozen reference set, parsed once for the whole session."""
+    return load_manifest()
 
 
 @pytest.fixture(scope="session")

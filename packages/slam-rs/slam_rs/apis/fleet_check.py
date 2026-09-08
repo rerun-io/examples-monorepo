@@ -20,12 +20,22 @@ import resource
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from slam_rs.reference import ATE_VS_CPP_CM, GT_BAND_RATIO, MANIFEST_PATH, CppAte, ReferenceManifest, ReferenceSegment, load_manifest
-from slam_rs.tracking import SegmentRun, run_segment
-from slam_rs.trajectory import AteResult, Trajectory, ate, read_trajectory
+import numpy as np
 
-SMOKE_SEGMENTS: tuple[str, ...] = ("msd-g2__MGO_others__MGO09_short_1_updown", "msd-index__MIO_others__MIO10_short_2_panorama")
-"""Both smoke clips, the four-camera 3 s one first: a broken machine says so sooner."""
+from slam_rs.reference import (
+    GT_BAND_RATIO,
+    MANIFEST_PATH,
+    SMOKE_SEGMENTS,
+    CppAte,
+    GatePolicy,
+    ReferenceManifest,
+    ReferenceSegment,
+    d60_failures,
+    load_manifest,
+)
+from slam_rs.reference_bundle import BundleFile
+from slam_rs.tracking import SegmentRun, run_segment
+from slam_rs.trajectory import AteResult, Trajectory, ate, extent_m, read_trajectory
 
 
 @dataclass(slots=True, frozen=True)
@@ -98,6 +108,21 @@ class ClipResult:
     """What the C++ took over the same footage, measured on one x86-64 host."""
     peak_rss_mb: float
     """Peak resident set this process reached, which is what a 2 GB device is judged on."""
+    # What D60's clauses are decided from, beyond the numbers a row prints. The
+    # JSON the chart reads is :class:`ClipJson`, not this value, so a clause
+    # input is not a column until it is named there.
+    gate_policy: GatePolicy
+    """How hard D60 lets this clip be gated; a ``no_divergence`` clip gates loss and extent alone."""
+    replayed_s: float
+    """Sensor seconds the estimate spans, which is what decides whether the 2 cm path bound applies."""
+    cpp_associated: int
+    """Estimate poses that found a C++ pose inside the association tolerance."""
+    extent_m: float
+    """Diagonal of the estimate's bounding box, metres."""
+    truth_extent_m: float
+    """The same for the ground truth, which is what a ``no_divergence`` run is bounded against."""
+    poses_finite: bool
+    """Whether every estimated position is finite."""
 
     @property
     def gt_allowed_cm(self) -> float:
@@ -111,18 +136,28 @@ class ClipResult:
 
     @property
     def failures(self) -> tuple[str, ...]:
-        """Every D60 clause these numbers miss, in the order D60 states them; both default clips are far under :data:`~slam_rs.reference.PATH_BOUND_MAX_CLIP_S` seconds, which is what makes the 2 cm path bound apply."""
-        failures: list[str] = []
-        if self.lost:
-            failures.append(f"{self.lost} of {self.framesets} framesets never got the inertial samples that cover them")
-        if self.cpp_rmse_cm > ATE_VS_CPP_CM:
-            failures.append(f"{self.cpp_rmse_cm:.2f} cm from the C++ trajectory, gate is {ATE_VS_CPP_CM:.0f} cm")
-        if self.gt_rmse_cm > self.gt_allowed_cm:
-            failures.append(
-                f"{self.gt_rmse_cm:.2f} cm from ground truth, gate is {GT_BAND_RATIO}x the worse of the C++'s own "
-                f"[f32 {self.cpp_gt_band_cm[0]:.2f}, f64 {self.cpp_gt_band_cm[1]:.2f}] cm = {self.gt_allowed_cm:.2f} cm"
+        """Every D60 clause these numbers miss, through the gate's own clause builder.
+
+        The rule is :func:`slam_rs.reference.d60_failures` and not a second copy
+        of it: a row is read on a machine that may have been given any clip by
+        ``--segments``, so the conditions on the two error bounds — the clip's
+        length and its gate policy — decide the verdict as much as the numbers do.
+        """
+        return tuple(
+            d60_failures(
+                gate_policy=self.gate_policy,
+                framesets=self.framesets,
+                lost=self.lost,
+                associated=self.cpp_associated,
+                replayed_s=self.replayed_s,
+                cpp_rmse_cm=self.cpp_rmse_cm,
+                gt_rmse_cm=self.gt_rmse_cm,
+                band=self.cpp_gt_band_cm,
+                extent_m=self.extent_m,
+                truth_extent_m=self.truth_extent_m,
+                poses_finite=self.poses_finite,
             )
-        return tuple(failures)
+        )
 
     @property
     def verdict(self) -> str:
@@ -148,9 +183,19 @@ def measure(manifest: ReferenceManifest, segment: ReferenceSegment) -> ClipResul
 
     Returns:
         The clip's numbers, with the peak resident set the process has reached.
+
+    Raises:
+        FileNotFoundError: If the C++ trajectory is not on this machine, with the
+            manifest's own sentence about why — the two long-tier segments keep
+            theirs in a bundle and the pack carries two of the ten.
     """
+    # Before the replay, not after it: a 410 s clip is a long way to travel to
+    # reach a bare FileNotFoundError from the CSV reader.
+    reference: BundleFile = manifest.cpp_trajectory(segment)
+    if not reference.available:
+        raise FileNotFoundError(reference.reason)
     run: SegmentRun = run_segment(manifest, segment)
-    against_cpp: AteResult = ate(run.estimate, read_trajectory(manifest.cpp_trajectory(segment).path))
+    against_cpp: AteResult = ate(run.estimate, read_trajectory(reference.path))
     truth: Trajectory = read_trajectory(segment.gt_csv)
     against_gt: AteResult = ate(run.estimate, truth)
     expected: CppAte = segment.reference.expected_cpp_ate
@@ -165,6 +210,69 @@ def measure(manifest: ReferenceManifest, segment: ReferenceSegment) -> ClipResul
         wall_s=run.wall_s,
         cpp_wall_s=segment.reference.expected_cpp_wall_s,
         peak_rss_mb=this_peak_rss_mb(),
+        gate_policy=segment.reference.gate_policy,
+        replayed_s=float(run.estimate.t_ns[-1] - run.estimate.t_ns[0]) * 1e-9 if len(run.estimate) else 0.0,
+        cpp_associated=against_cpp.n_associated,
+        extent_m=extent_m(run.estimate),
+        truth_extent_m=extent_m(truth),
+        poses_finite=bool(np.isfinite(run.estimate.position_m).all()),
+    )
+
+
+@dataclass(slots=True, frozen=True)
+class ClipJson:
+    """One clip as the fleet chart reads it: the same field names, in the same order.
+
+    A separate value from :class:`ClipResult` on purpose. The row carries what a
+    verdict is decided from, which grows as D60 is read more carefully; the JSON
+    is a consumer contract, and a new clause input must not become a new column
+    by accident.
+    """
+
+    segment_id: str
+    """Manifest id of the clip that ran."""
+    framesets: int
+    """Framesets fed to the estimator."""
+    tracked: int
+    """Poses it reported."""
+    lost: int
+    """Framesets never covered by inertial samples (D17)."""
+    cpp_rmse_cm: float
+    """ATE against the basalt C++ trajectory."""
+    gt_rmse_cm: float
+    """ATE against the ``gt.csv`` sidecar."""
+    cpp_gt_band_cm: tuple[float, float]
+    """The C++'s own ground-truth error in its two precisions (D60)."""
+    wall_s: float
+    """Wall time of the feed loop."""
+    cpp_wall_s: float
+    """What the C++ took over the same footage, on one x86-64 host."""
+    peak_rss_mb: float
+    """Peak resident set this process reached."""
+    gt_allowed_cm: float
+    """Ground-truth error D60 allows on this clip."""
+    cpp_wall_ratio: float
+    """Times the C++'s wall this run took."""
+    verdict: str
+    """``pass``, or every clause this clip missed."""
+
+
+def clip_json(clip: ClipResult) -> ClipJson:
+    """One measured clip in the shape the chart reads."""
+    return ClipJson(
+        segment_id=clip.segment_id,
+        framesets=clip.framesets,
+        tracked=clip.tracked,
+        lost=clip.lost,
+        cpp_rmse_cm=clip.cpp_rmse_cm,
+        gt_rmse_cm=clip.gt_rmse_cm,
+        cpp_gt_band_cm=clip.cpp_gt_band_cm,
+        wall_s=clip.wall_s,
+        cpp_wall_s=clip.cpp_wall_s,
+        peak_rss_mb=clip.peak_rss_mb,
+        gt_allowed_cm=clip.gt_allowed_cm,
+        cpp_wall_ratio=clip.cpp_wall_ratio,
+        verdict=clip.verdict,
     )
 
 
@@ -196,14 +304,12 @@ def main(config: Config) -> None:
     manifest: ReferenceManifest = load_manifest(config.manifest)
     machine: Machine = this_machine()
     print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores")
+    config.output_json.parent.mkdir(parents=True, exist_ok=True)
     results: list[ClipResult] = []
     for segment_id in config.segments:
         results.append(measure(manifest, manifest.by_id(segment_id)))
         print(results[-1].row(machine))
-        payload: dict[str, object] = {
-            "machine": asdict(machine),
-            "clips": [asdict(clip) | {"gt_allowed_cm": clip.gt_allowed_cm, "cpp_wall_ratio": clip.cpp_wall_ratio, "verdict": clip.verdict} for clip in results],
-        }
+        payload: dict[str, object] = {"machine": asdict(machine), "clips": [asdict(clip_json(clip)) for clip in results]}
         config.output_json.write_text(json.dumps(payload, indent=2))
     missed: list[ClipResult] = [clip for clip in results if clip.failures]
     if missed:

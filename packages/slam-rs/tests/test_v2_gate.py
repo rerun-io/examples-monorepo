@@ -65,15 +65,16 @@ from _pytest.outcomes import Skipped
 
 from slam_rs.reference import (
     ATE_VS_CPP_CM,
-    DIVERGENCE_FACTOR,
     GT_BAND_RATIO,
     MIN_TRACKED_POSES,
     PATH_BOUND_MAX_CLIP_S,
+    SMOKE_SEGMENTS,
     SPEED_TOLERANCE,
     CppAte,
     ReferenceManifest,
     ReferenceSegment,
-    load_manifest,
+    band_cm_text,
+    d60_failures,
 )
 from slam_rs.reference_bundle import BundleFile
 from slam_rs.tracking import SegmentRun, run_segment
@@ -82,11 +83,12 @@ from slam_rs.trajectory import (
     AteResult,
     Trajectory,
     ate,
+    extent_m,
     read_trajectory,
     write_trajectory,
 )
 
-SMOKE_SEGMENT: str = "msd-index__MIO_others__MIO10_short_2_panorama"
+SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
 """The 7.6 s, 412-frameset clip the iteration set starts from."""
 ITERATION_SET: tuple[tuple[str, float | None], ...] = (
     (SMOKE_SEGMENT, None),
@@ -125,13 +127,6 @@ class GatedClip:
         return max(1, round(covered * self.segment.capture.num_frames))
 
 
-def extent_m(trajectory: Trajectory) -> float:
-    """The diagonal of a trajectory's bounding box, metres; ``0.0`` when it has no pose."""
-    if len(trajectory) == 0:
-        return 0.0
-    return float(np.linalg.norm(trajectory.position_m.max(axis=0) - trajectory.position_m.min(axis=0)))
-
-
 def between(trajectory: Trajectory, first_ns: int, last_ns: int) -> Trajectory:
     """The poses inside a closed time span, on the trajectory's own clock."""
     keep: slice = slice(int(np.searchsorted(trajectory.t_ns, first_ns, side="left")), int(np.searchsorted(trajectory.t_ns, last_ns, side="right")))
@@ -158,12 +153,6 @@ def gate_clips(manifest: ReferenceManifest) -> list[GatedClip]:
             for segment_id, default_window_s in ITERATION_SET
         ]
     return sorted(clips, key=lambda clip: clip.expected_framesets)
-
-
-@pytest.fixture(scope="module")
-def manifest() -> ReferenceManifest:
-    """The frozen reference set."""
-    return load_manifest()
 
 
 @dataclass(slots=True, frozen=True)
@@ -259,7 +248,7 @@ def band_text(clip: GatedClip, band: tuple[float, float]) -> str:
         The labelled band, in centimetres.
     """
     if clip.window_s is None:
-        return f"[f32 {band[0]:.2f}, f64 {band[1]:.2f}]"
+        return band_cm_text(band)
     return f"[f32 window {band[0]:.2f}, f64 whole {band[1]:.2f}]"
 
 
@@ -295,33 +284,23 @@ def clip_failures(clip: GatedClip, run: SegmentRun, available: References, again
     Returns:
         One line per failed clause; empty when the clip passes.
     """
-    failures: list[str] = []
-    if run.lost:
-        failures.append(f"{run.lost} of {run.framesets} framesets never got the inertial samples that cover them")
-    if against_cpp.n_associated < MIN_ASSOCIATED_POSES:
-        failures.append(f"only {against_cpp.n_associated} poses associated with the C++ run")
-    if clip.segment.reference.gate_policy == "no_divergence":
-        # basalt itself is near failure here, so only a bounded run is asserted.
-        if not np.isfinite(run.estimate.position_m).all():
-            failures.append("a pose is not finite")
-        if extent_m(run.estimate) > DIVERGENCE_FACTOR * extent_m(available.truth):
-            failures.append(f"spans {extent_m(run.estimate):.1f} m against the truth's {extent_m(available.truth):.1f} m")
-    else:
-        # The path bound only where the C++ meets it itself: past about a hundred
-        # seconds its own two precisions are 4.24 cm apart, so 2 cm there would
-        # gate the clip's length (D60).
-        if replayed_s(run) < PATH_BOUND_MAX_CLIP_S and against_cpp.rmse_m * 100.0 > ATE_VS_CPP_CM:
-            failures.append(f"{against_cpp.rmse_m * 100:.2f} cm from the C++ trajectory, gate is {ATE_VS_CPP_CM:.0f} cm")
-        # Inside the C++'s own band, or within GT_BAND_RATIO of its worst member,
-        # whichever is looser — which is the second alone, because the ratio is
-        # above one and the band's worst member is its upper end.
-        band: tuple[float, float] = cpp_gt_band_cm(clip, run, available)
-        allowed_cm: float = GT_BAND_RATIO * max(band)
-        if against_gt.rmse_m * 100.0 > allowed_cm:
-            failures.append(
-                f"{against_gt.rmse_m * 100:.2f} cm from ground truth, gate is {GT_BAND_RATIO}x the worst of the "
-                f"C++'s own band {band_text(clip, band)} cm = {allowed_cm:.2f} cm"
-            )
+    band: tuple[float, float] = cpp_gt_band_cm(clip, run, available)
+    # The accuracy clauses are :func:`slam_rs.reference.d60_failures` — the gate
+    # and the fleet tool read one rule, or the two measure different milestones.
+    failures: list[str] = d60_failures(
+        gate_policy=clip.segment.reference.gate_policy,
+        framesets=run.framesets,
+        lost=run.lost,
+        associated=against_cpp.n_associated,
+        replayed_s=replayed_s(run),
+        cpp_rmse_cm=against_cpp.rmse_m * 100.0,
+        gt_rmse_cm=against_gt.rmse_m * 100.0,
+        band=band,
+        extent_m=extent_m(run.estimate),
+        truth_extent_m=extent_m(available.truth),
+        poses_finite=bool(np.isfinite(run.estimate.position_m).all()),
+        band_text=band_text(clip, band),
+    )
     # Speed is a clause of every policy: a run that does not diverge but takes
     # three times as long has not matched the thing it is a port of (D58, D59).
     allowed_s: float = SPEED_TOLERANCE * cpp_wall_s(clip, run)

@@ -205,8 +205,11 @@ def main(config: Config) -> None:
     estimate: Trajectory
     row, estimate = measure(manifest, session, config.seconds, config.window_s, config.reference_csv)
     output_csv: Path = config.output_csv if config.output_csv is not None else config.output_json.with_suffix(".csv")
-    write_trajectory(output_csv, estimate)
+    # Above both writes: a run that spent 52.9 s of video must not lose it to a
+    # directory that is not there. `write_trajectory` makes its own parents,
+    # which is why the CSV used to work by accident when the two shared one.
     config.output_json.parent.mkdir(parents=True, exist_ok=True)
+    write_trajectory(output_csv, estimate)
     config.output_json.write_text(json.dumps(asdict(row), indent=2) + "\n")
     print(row.row())
     print(

@@ -8,15 +8,17 @@ about the machine it carries beside the numbers. The replay itself is the same
 is what runs it on the real rig.
 """
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from slam_rs.apis import robocap_fleet
 from slam_rs.apis.fleet_check import Machine
-from slam_rs.apis.robocap_fleet import FRAMESET_BUDGET_MS, RobocapRow, measure, this_temperature_c
-from slam_rs.reference import ReferenceManifest, RobocapSession, load_manifest
-from slam_rs.trajectory import Trajectory
+from slam_rs.apis.robocap_fleet import FRAMESET_BUDGET_MS, Config, RobocapRow, main, measure, this_temperature_c
+from slam_rs.reference import MANIFEST_PATH, ReferenceManifest, RobocapSession
+from slam_rs.trajectory import Trajectory, empty_trajectory
 
 CAP: Machine = Machine(hostname="robocap_f403b0", arch="aarch64", libc="2.41", cores=8)
 """The RK3588 cap, which is the machine every budget in this module is for."""
@@ -98,14 +100,24 @@ def test_a_machine_with_no_thermal_zones_reports_none(tmp_path: Path) -> None:
     assert this_temperature_c(tmp_path) is None
 
 
-def test_the_session_is_named_the_way_a_fleet_row_names_it() -> None:
+def test_the_session_is_named_the_way_a_fleet_row_names_it(manifest: ReferenceManifest) -> None:
     """``s00000015`` in the manifest is ``robocap-s15`` in a row, for both sessions."""
-    manifest: ReferenceManifest = load_manifest()
     assert [session.fleet_id for session in manifest.robocap.sessions] == ["robocap-s15", "robocap-s21"]
 
 
+def test_both_outputs_survive_a_directory_that_is_not_there_yet(
+    manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A run that measured 52.9 s of video must not lose it to a missing ``out/``."""
+    monkeypatch.setattr(robocap_fleet, "measure", lambda *_args: (ROW, empty_trajectory()))
+    output: Path = tmp_path / "out" / "robocap_fleet.json"
+    main(Config(manifest=MANIFEST_PATH, output_json=output))
+    assert json.loads(output.read_text())["segment_id"] == "robocap-s15"
+    assert output.with_suffix(".csv").is_file()
+
+
 @pytest.mark.slow
-def test_the_real_session_replays_on_this_machine_and_agrees_with_the_cpp() -> None:
+def test_the_real_session_replays_on_this_machine_and_agrees_with_the_cpp(manifest: ReferenceManifest) -> None:
     """The first second of session 15 off the NAS, scored against the C++ layer beside it.
 
     A second is thirty framesets, which is enough to prove the lane end to end —
@@ -113,8 +125,9 @@ def test_the_real_session_replays_on_this_machine_and_agrees_with_the_cpp() -> N
     is read and associated — without paying the whole 52.9 s clip in the test
     suite. The accuracy figure the fleet reports comes from the whole clip.
     """
-    manifest: ReferenceManifest = load_manifest()
     session: RobocapSession = manifest.robocap.session("s00000015")
+    if not session.base_path.is_file():
+        pytest.skip(f"{session.base_path} is not mounted on this host")
     row: RobocapRow
     estimate: Trajectory
     row, estimate = measure(manifest, session, seconds=1.0, window_s=5.0, reference_csv=None)

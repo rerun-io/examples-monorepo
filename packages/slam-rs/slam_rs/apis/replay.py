@@ -37,7 +37,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from slam_rs import _core
 from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream, LocalSegment, SegmentFeed, open_segment
 from slam_rs.frontend_log import FrontendLogger, camera_entity, frontend_blueprint
-from slam_rs.reference import ReferenceManifest, ReferenceSegment, flow_config, load_manifest
+from slam_rs.reference import MANIFEST_PATH, ReferenceManifest, ReferenceSegment, flow_config, load_manifest
 from slam_rs.reference_bundle import BundleFile
 from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import Trajectory, ate, coverage, empty_trajectory, read_trajectory, shift_clock, write_trajectory
@@ -62,6 +62,8 @@ class Config:
 
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
     """Viewer, save and headless behaviour."""
+    manifest: Path = MANIFEST_PATH
+    """Reference manifest; a machine without the NAS runs a copy with the artifact prefix rewritten."""
     stage: Stage = "input"
     """``input`` logs what the estimator is fed, ``frontend`` runs the optical flow over it, ``vio`` runs the whole pipeline.
 
@@ -314,7 +316,7 @@ def main(config: Config) -> None:
     Args:
         config: Parsed CLI options.
     """
-    manifest: ReferenceManifest = load_manifest()
+    manifest: ReferenceManifest = load_manifest(config.manifest)
     segment: ReferenceSegment = manifest.by_id(config.segment)
     source: LocalSegment = LocalSegment(
         base_rrd=config.rrd if config.rrd is not None else segment.base_path,
