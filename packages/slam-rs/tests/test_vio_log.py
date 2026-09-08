@@ -301,20 +301,58 @@ def test_a_run_without_references_still_logs_everything_else(pipeline: PipelineF
     assert logger.window_strip.shape == (10, 3)
 
 
-def view_origins(node: rrb.Container | rrb.View) -> list[str]:
-    """Every view origin under one blueprint node, in layout order."""
+def views_of(node: rrb.Container | rrb.View) -> list[rrb.View]:
+    """Every view under one blueprint node, in layout order."""
     if isinstance(node, rrb.api.Container):
-        return [origin for child in node.contents for origin in view_origins(child)]
-    return [str(node.origin)]
+        return [view for child in node.contents for view in views_of(child)]
+    return [node]
 
 
 def test_the_blueprint_covers_the_world_the_cameras_and_the_counters(camera: CameraFactory) -> None:
-    """One 3D view, one 2D view per camera, one time-series view, panels collapsed."""
+    """One 3D view, one 2D view per camera, one time-series view per unit, panels collapsed."""
     blueprint: rrb.Blueprint = vio_blueprint((camera(0, 0.0), camera(1, 0.1)))
-    assert view_origins(blueprint.root_container) == [
+    views: list[rrb.View] = views_of(blueprint.root_container)
+    assert [str(view.origin) for view in views] == [
         "/world",
         "/world/rig_00/cam_00/pinhole",
         "/world/rig_00/cam_01/pinhole",
-        VIO_STATS_ENTITY,
+        *[VIO_STATS_ENTITY] * 7,
+    ]
+    assert [str(view.name) for view in views[3:]] == [
+        "counts",
+        "keyframes & LM steps",
+        "timing (ms)",
+        "solve stages (ms)",
+        "LM cost",
+        "LM damping",
+        "ATE (cm)",
     ]
     assert blueprint.collapse_panels
+
+
+def test_every_logged_counter_sits_in_exactly_one_time_series_view(logged: Logged, camera: CameraFactory) -> None:
+    """A scalar nobody put in a view is the bug this partition is checked to catch.
+
+    One view per unit only stays readable while every scalar is in one: a new
+    counter with no view of its own would otherwise fall back into whichever
+    axis Rerun's own ``$origin/**`` default reached it through, which is how the
+    LM cost came to flatten thirteen other series.
+
+    The ATE is added by hand because it is logged every
+    :data:`slam_rs.vio_log.ATE_EVERY` framesets and this drive is shorter than
+    that, so the recording carries no row of it to read back.
+    """
+    counters: set[str] = {entity for entity in logged.rows if entity.startswith(VIO_STATS_ENTITY)}
+    counters |= {f"{VIO_STATS_ENTITY}/ate_cm/gt", f"{VIO_STATS_ENTITY}/ate_cm/cpp"}
+    blueprint: rrb.Blueprint = vio_blueprint((camera(0, 0.0), camera(1, 0.1)))
+    plotted: list[str] = []
+    for view in views_of(blueprint.root_container):
+        if str(view.origin) != VIO_STATS_ENTITY:
+            continue
+        # ``contents`` is a query expression in general; the narrowing is what
+        # says these views name their entities one by one rather than globbing.
+        contents: object = view.contents
+        assert isinstance(contents, list), f"{view.name} does not list its entities"
+        plotted += [str(entity) for entity in contents]
+    assert sorted(plotted) == sorted(set(plotted)), "a counter is plotted in two views, so it is drawn against two axes"
+    assert set(plotted) == counters, "every logged counter is plotted exactly once, and nothing else is"

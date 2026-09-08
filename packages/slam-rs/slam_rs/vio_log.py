@@ -360,7 +360,10 @@ class VioLogger:
         rr.log(f"{VIO_STATS_ENTITY}/lm_iterations", rr.Scalars(float(snapshot.lm_iterations)))
         rr.log(f"{VIO_STATS_ENTITY}/lm_lambda", rr.Scalars(snapshot.lm_lambda))
         # The cost the frame started and ended the LM loop at: the pair is the
-        # convergence trace, and it is only readable beside the damping.
+        # convergence trace, and :func:`vio_blueprint` gives it an axis of its
+        # own. Both are negative on most frames, which is basalt's own convention
+        # and not a sign error: the marginalization prior term deliberately drops
+        # the 1/2 r^T r (``crates/slam-rs/src/estimator/optimize.rs:71``, D20).
         rr.log(f"{VIO_STATS_ENTITY}/lm_error_before", rr.Scalars(snapshot.lm_error_before))
         rr.log(f"{VIO_STATS_ENTITY}/lm_error_after", rr.Scalars(snapshot.lm_error_after))
         rr.log(f"{VIO_STATS_ENTITY}/track_ms", rr.Scalars(elapsed_ms))
@@ -384,6 +387,25 @@ class VioLogger:
 def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
     """One 3D view of the world, the camera images beside it, and the counters below.
 
+    The counters are one time-series view per magnitude rather than one view for
+    all of them. Rerun gives a view a single y-axis, and the widest series in it
+    sets the scale for every other: with all fifteen in one view the LM cost's
+    -68,000 left the landmark counts, the millisecond stage times and the
+    centimetre ATE as one flat line on the zero, and the legend named seven of
+    the fifteen. One axis per magnitude is the only lever there is, so the split
+    follows what the smoke segment actually measures — counts in the hundreds,
+    keyframes and LM steps in single digits, the frame and its two dominant
+    stages in tens of milliseconds, the four remaining stages in fractions of
+    one, the cost in tens of thousands, the damping over seven decades, and the
+    ATE in centimetres.
+
+    The seven sit in a row across the band the single view had, so the world view
+    and the two camera views keep exactly the space they had. At 1920x1080 that
+    is 274x250 each, where a two-row grid in the same band would be 135 px tall:
+    a plot spends its first ~60 vertical pixels on the time axis and its labels,
+    so height is what a trace can least spare. Narrowing the views also shrinks
+    each legend, because a view of one magnitude holds few series.
+
     Args:
         cameras: The rig's cameras, in rig order.
 
@@ -398,7 +420,45 @@ def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
                 rrb.Vertical(*views),
                 column_shares=[2, 1],
             ),
-            rrb.TimeSeriesView(origin=VIO_STATS_ENTITY, name="estimator"),
+            rrb.Horizontal(
+                rrb.TimeSeriesView(
+                    origin=VIO_STATS_ENTITY,
+                    contents=[f"{VIO_STATS_ENTITY}/num_landmarks", f"{VIO_STATS_ENTITY}/num_observations"],
+                    name="counts",
+                ),
+                rrb.TimeSeriesView(
+                    origin=VIO_STATS_ENTITY,
+                    contents=[f"{VIO_STATS_ENTITY}/num_keyframes", f"{VIO_STATS_ENTITY}/lm_iterations"],
+                    name="keyframes & LM steps",
+                ),
+                rrb.TimeSeriesView(
+                    origin=VIO_STATS_ENTITY,
+                    contents=[f"{VIO_STATS_ENTITY}/track_ms", f"{VIO_STATS_ENTITY}/stage_ms/measure", f"{VIO_STATS_ENTITY}/stage_ms/solver"],
+                    name="timing (ms)",
+                ),
+                # Naming the stages rather than globbing ``stage_ms/**`` is what
+                # makes a stage nobody gave a view a failing test rather than a
+                # flat line: ``test_vio_log`` reads this partition off the views.
+                rrb.TimeSeriesView(
+                    origin=VIO_STATS_ENTITY,
+                    contents=[f"{VIO_STATS_ENTITY}/stage_ms/{stage}" for stage in ("back_substitution", "error", "linearize", "marginalize")],
+                    name="solve stages (ms)",
+                ),
+                rrb.TimeSeriesView(
+                    origin=VIO_STATS_ENTITY,
+                    contents=[f"{VIO_STATS_ENTITY}/lm_error_before", f"{VIO_STATS_ENTITY}/lm_error_after"],
+                    name="LM cost",
+                ),
+                # The damping is its own view because it is not a cost: it runs
+                # from 1e-5 to 74 on this segment, which the cost's own axis
+                # would put on the zero line just as flatly.
+                rrb.TimeSeriesView(origin=VIO_STATS_ENTITY, contents=[f"{VIO_STATS_ENTITY}/lm_lambda"], name="LM damping"),
+                rrb.TimeSeriesView(
+                    origin=VIO_STATS_ENTITY,
+                    contents=[f"{VIO_STATS_ENTITY}/ate_cm/gt", f"{VIO_STATS_ENTITY}/ate_cm/cpp"],
+                    name="ATE (cm)",
+                ),
+            ),
             row_shares=[3, 1],
         ),
         collapse_panels=True,
