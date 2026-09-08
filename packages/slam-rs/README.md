@@ -340,7 +340,7 @@ schedule, the Levenberg-Marquardt loop and the estimator's own state machine.
 |---|---|
 | `crates/slam-rs` | The core (`slam_rs` lib). No Python, no Rerun, no GPU. |
 | `crates/slam-rs-py` | PyO3 `cdylib` built in place as `slam_rs/_core.so`. |
-| `crates/slam-rs-cli` | `slam-rs` binary: runs the core with no Python at all. |
+| `crates/slam-rs-cli` | `slam-rs` binary: a placeholder. `version` is the only subcommand that does anything; a replay runs through the Python tools. |
 | `slam_rs/` | The Python package: stubs, Tyro entry points under `apis/`. |
 | `tools/` | Thin CLI shims over `slam_rs/apis/`. |
 | `reference_segments.toml` | The frozen reference set (below). |

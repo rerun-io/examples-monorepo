@@ -1,4 +1,9 @@
-//! Native runner for the slam-rs core: the estimator without any Python.
+//! Placeholder CLI for the slam-rs core.
+//!
+//! `version` is the only subcommand that does anything. Replay runs through the
+//! Python tools — `tools/apps/replay.py`, which own the catalog feed, the decode
+//! and the evaluation — so a Python-free replay would need all three ported and
+//! nothing has asked for one.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -10,7 +15,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "slam-rs",
     version,
-    about = "Run the slam-rs VIO core without Python"
+    about = "Placeholder CLI for the slam-rs core: only `version` does anything, and replay runs through the Python tools"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -21,7 +26,8 @@ struct Cli {
 enum Command {
     /// Print the version of the core.
     Version,
-    /// Replay a recorded sequence and write the estimated trajectory.
+    /// Not implemented: a placeholder. Replay a sequence with the Python tool
+    /// `tools/apps/replay.py --stage vio` instead.
     Replay {
         /// Directory of grayscale frames, one file per frameset.
         #[arg(long)]
@@ -41,13 +47,19 @@ fn main() -> ExitCode {
             println!("slam-rs {}", slam_rs::VERSION);
             ExitCode::SUCCESS
         }
-        // The estimator is not ported yet. Fail loudly: a zero status here would
-        // let a script read a missing or stale trajectory as a finished replay.
+        // A placeholder, and it stays one: the feed, the decode and the
+        // evaluation a replay needs are Python's. Fail loudly rather than
+        // exiting zero, which would let a script read a missing or stale
+        // trajectory as a finished replay.
         Command::Replay { frames, imu, out } => {
-            eprintln!("error: replay is not implemented yet; it would:");
-            eprintln!("  read framesets from {}", frames.display());
-            eprintln!("  read imu samples from {}", imu.display());
-            eprintln!("  write the trajectory to {}", out.display());
+            eprintln!("error: this CLI is a placeholder and replay is not implemented;");
+            eprintln!("  the replay tool is Python: tools/apps/replay.py --stage vio");
+            eprintln!(
+                "  nothing was read from {} or {}, and nothing was written to {}",
+                frames.display(),
+                imu.display(),
+                out.display()
+            );
             ExitCode::FAILURE
         }
     }

@@ -3,7 +3,8 @@
 //! The crate is deliberately free of Python, Rerun and GPU code: it consumes
 //! grayscale images and IMU samples and returns plain values. Python plumbing
 //! (catalog feed, evaluation, logging) lives in the `slam_rs` package and the
-//! bindings in `slam-rs-py`; a native runner lives in `slam-rs-cli`.
+//! bindings in `slam-rs-py`; `slam-rs-cli` is a placeholder binary whose only
+//! working subcommand is `version`.
 //!
 //! [`Vio`] is the Offline driver (D17): [`Vio::push_imu`] buffers samples and
 //! [`Vio::track`] runs the frontend and then the estimator to completion in the
