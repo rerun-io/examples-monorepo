@@ -414,8 +414,24 @@ def _flat_float(column: pa.Array) -> Float64[ndarray, " n_values"]:
     return np.asarray(values.to_numpy(zero_copy_only=False), dtype=np.float64)
 
 
-def _static_values(statics: pa.Table, column: str) -> Float64[ndarray, " n"]:
-    """One static list component as a flat float64 array."""
+def _static_cell(statics: pa.Table, column: str) -> pa.Scalar:
+    """Row zero of one static component column.
+
+    A static is logged once, so row zero is the value — but a rig node that
+    carries no statics at all reached ``statics[column][0]`` as an ``IndexError``
+    out of pyarrow with nothing in it that says which component was being read.
+    The three readers below differ only in what they make of the cell.
+
+    Args:
+        statics: Single-row table from ``filter_contents(...).reader(index=None)``.
+        column: Component column name, e.g. ``/world/rig_00:reference``.
+
+    Returns:
+        The cell, valid.
+
+    Raises:
+        ValueError: If the column is absent, the table has no rows, or the cell is null.
+    """
     if column not in statics.column_names:
         raise ValueError(f"static column {column} is missing")
     if statics.num_rows == 0:
@@ -423,19 +439,22 @@ def _static_values(statics: pa.Table, column: str) -> Float64[ndarray, " n"]:
     cell: pa.Scalar = statics[column][0]
     if not cell.is_valid:
         raise ValueError(f"static column {column} is null")
-    return np.asarray(cell.values.to_pylist(), dtype=np.float64).ravel()
+    return cell
+
+
+def _static_scalar(cell: pa.Scalar) -> object:
+    """The one Python value in a static cell, whether or not Rerun wrapped it in a list."""
+    return cell.values.to_pylist()[0] if isinstance(cell, pa.ListScalar | pa.LargeListScalar) else cell.as_py()
+
+
+def _static_values(statics: pa.Table, column: str) -> Float64[ndarray, " n"]:
+    """One static list component as a flat float64 array."""
+    return np.asarray(_static_cell(statics, column).values.to_pylist(), dtype=np.float64).ravel()
 
 
 def _static_string(statics: pa.Table, column: str) -> str:
     """One static string component, bare or wrapped in a single-element list."""
-    if column not in statics.column_names:
-        raise ValueError(f"static column {column} is missing")
-    if statics.num_rows == 0:
-        raise ValueError(f"static column {column} has no rows")
-    cell: pa.Scalar = statics[column][0]
-    if not cell.is_valid:
-        raise ValueError(f"static column {column} is null")
-    value: object = cell.values.to_pylist()[0] if isinstance(cell, pa.ListScalar | pa.LargeListScalar) else cell.as_py()
+    value: object = _static_scalar(_static_cell(statics, column))
     if not isinstance(value, str):
         raise ValueError(f"static column {column} is not a string: {value!r}")
     return value
@@ -448,14 +467,7 @@ def _static_int(statics: pa.Table, column: str) -> int:
     margin to 2^53 is only three decades and the whole point of this value is that
     it is added to timestamps that must stay exact.
     """
-    if column not in statics.column_names:
-        raise ValueError(f"static column {column} is missing")
-    if statics.num_rows == 0:
-        raise ValueError(f"static column {column} has no rows")
-    cell: pa.Scalar = statics[column][0]
-    if not cell.is_valid:
-        raise ValueError(f"static column {column} is null")
-    value: object = cell.values.to_pylist()[0] if isinstance(cell, pa.ListScalar | pa.LargeListScalar) else cell.as_py()
+    value: object = _static_scalar(_static_cell(statics, column))
     if not isinstance(value, int):
         raise ValueError(f"static column {column} is not an integer: {value!r}")
     return value
