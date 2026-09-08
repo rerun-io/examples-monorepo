@@ -2554,23 +2554,35 @@ rerun-sdk = { version = "==0.37.0", extras = ["catalog"] } # pin-bump: hold
 # a buffer of zeros — a worker-thread panic that reaches the caller as data
 # (round 1's report; decision D32 is why the tolerance tests are the guard).
 #
-# linux-64 only, and no named CUDA platform: `cuda-version 13.0` only
+# Both Linux subdirs and no named CUDA platform: `cuda-version 13.0` only
 # *constrains* `__cuda >= 13`, so nothing here needs the virtual package at
 # solve time, and every other lane stays out of the CUDA solve entirely. The
 # cargo feature is still off by default, so `slam-rs` and `slam-rs-dev` are
 # untouched — this environment is what runs the GPU gates.
+#
+# `linux-aarch64` is the Spark's lane (NVIDIA GB10, driver 580.126.09):
+# conda-forge ships both packages for that subdir at 13.0 through the `sbsa`
+# arm variant, which is also why the header directory is named differently
+# there and `CUDA_PATH` is per target below.
 [feature.slam-rs-gpu]
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.slam-rs-gpu.dependencies]
 cuda-nvrtc = "13.0.*"
 cuda-cudart-dev = "13.0.*"
 
 [feature.slam-rs-gpu.activation.env]
-# `CUDA_PATH` is where cudarc looks for the headers NVRTC compiles against;
 # `LD_LIBRARY_PATH` is how `libnvrtc.so` is found, because cudarc dlopens it.
-CUDA_PATH = "${CONDA_PREFIX}/targets/x86_64-linux"
+# The same on both subdirs; `CUDA_PATH` is not, so it is target-scoped, and a
+# target activation env merges with this one rather than replacing it.
 LD_LIBRARY_PATH = "${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
+# `CUDA_PATH` is where cudarc looks for the headers NVRTC compiles against.
+[feature.slam-rs-gpu.target.linux-64.activation.env]
+CUDA_PATH = "${CONDA_PREFIX}/targets/x86_64-linux"
+
+[feature.slam-rs-gpu.target.linux-aarch64.activation.env]
+CUDA_PATH = "${CONDA_PREFIX}/targets/sbsa-linux"
 
 # `$CORE_CDYLIB`, not a hardcoded `lib_core.so`: the one per-platform token in
 # the build (C106) stays one, so the day the portable lane reaches macOS —
