@@ -275,6 +275,10 @@ impl<S: LieScalar> Default for IntegratedImuMeasurement<S> {
     }
 }
 
+/// One calibrated sample as the two producer loops pop them: `(t_ns, gyro,
+/// accel)`, the shape `accumulate_to` carries its pending sample in.
+pub type Popped<S> = (i64, Vector3<S>, Vector3<S>);
+
 impl<S: LieScalar> IntegratedImuMeasurement<S> {
     /// An empty measurement starting at `start_t_ns`, linearized about the two
     /// biases (`preintegration.h:133-139`).
@@ -453,80 +457,64 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
     ///
     /// The three parts, in order:
     ///
-    /// 1. Skip while `sample.t_ns <= t0_ns` (`:315-320`).
-    /// 2. Integrate while `sample.t_ns <= t1_ns` (`:322-328`).
-    /// 3. If the accumulated interval still ends before `t1_ns`, take the first
-    ///    sample *after* `t1_ns`, **retime it to `t1_ns` and integrate it with
-    ///    its own accel and gyro** (`:330-336`, and the same code with the
-    ///    comment "Pretend last IMU sample before now happened now" at
-    ///    `frame_to_frame_optical_flow.h:194-198`). There is **no
+    /// 1. Skip while `sample.t_ns <= skip_past_ns` (`:315-320`).
+    /// 2. Integrate while `sample.t_ns <= until_ns` (`:322-328`).
+    /// 3. If the accumulated interval still ends before `until_ns`, take the
+    ///    first sample *after* it, **retime that sample to `until_ns` and
+    ///    integrate it with its own accel and gyro** (`:330-336`, and the same
+    ///    code with the comment "Pretend last IMU sample before now happened
+    ///    now" at `frame_to_frame_optical_flow.h:194-198`). There is **no
     ///    interpolation**: the values integrated over that last partial step are
-    ///    the later sample's, not a blend. The port does none either.
+    ///    the later sample's, not a blend. The port does none either. basalt
+    ///    restores the timestamp afterwards, so the sample is still available to
+    ///    the next frame at its own time — which is why it comes back out.
     ///
-    /// The C++ reads from a queue and cannot see a reordered sample; here the
-    /// whole slice is checked for strictly increasing timestamps up front, and a
-    /// duplicate or backwards sample is [`ImuError::NonMonotonicSample`].
-    pub fn integrate_between(
+    /// `pending` is the one sample already popped, C++'s loop-local `data`
+    /// (`:296`); it is taken by value and the new one returned, so the caller's
+    /// own `&mut self` is free for `pop`. An empty `pending` is primed from
+    /// `pop` first, as both call sites did inline.
+    ///
+    /// **Both producers drive this**: the estimator's own preintegration and
+    /// the second, independent one the frontend keeps (D24). They differ only
+    /// in where the samples come from and in the noise, which is what `pop` and
+    /// `noise` are; the per-sample arithmetic is
+    /// [`Self::integrate_calibrated`] either way.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::integrate_calibrated`] refuses.
+    pub fn accumulate_to(
         &mut self,
-        samples: &[ImuSample],
-        t0_ns: i64,
-        t1_ns: i64,
+        pending: Option<Popped<S>>,
+        mut pop: impl FnMut() -> Option<Popped<S>>,
+        skip_past_ns: i64,
+        until_ns: i64,
         noise: &ImuNoise<S>,
-    ) -> Result<(), ImuError> {
-        if t1_ns <= t0_ns {
-            return Err(ImuError::NonMonotonicFrames { t0_ns, t1_ns }); // `:307-313`
-        }
-        if t0_ns != self.start_t_ns {
-            return Err(ImuError::StartTimeMismatch {
-                start_t_ns: self.start_t_ns,
-                t0_ns,
-            });
-        }
-        let mut previous_t_ns: Option<i64> = None;
-        for sample in samples {
-            if let Some(previous_t_ns) = previous_t_ns
-                && sample.t_ns <= previous_t_ns
-            {
-                return Err(ImuError::NonMonotonicSample {
-                    previous_t_ns,
-                    t_ns: sample.t_ns,
-                });
+    ) -> Result<Option<Popped<S>>, ImuError> {
+        let mut pending: Option<Popped<S>> = pending.or_else(&mut pop);
+
+        // `:315-320`: discard everything at or before the previous frameset.
+        while let Some((t_ns, _, _)) = pending {
+            if t_ns > skip_past_ns {
+                break;
             }
-            previous_t_ns = Some(sample.t_ns);
+            pending = pop();
         }
-
-        let mut index: usize = 0;
-        while index < samples.len() && samples[index].t_ns <= t0_ns {
-            index += 1; // `:315-320`
+        // `:322-328`: integrate everything up to and including the frameset.
+        while let Some((t_ns, gyro, accel)) = pending {
+            if t_ns > until_ns {
+                break;
+            }
+            self.integrate_calibrated(t_ns, &accel, &gyro, &noise.accel_cov, &noise.gyro_cov)?;
+            pending = pop();
         }
-        while index < samples.len() && samples[index].t_ns <= t1_ns {
-            self.integrate(&samples[index], &noise.accel_cov, &noise.gyro_cov)?; // `:323`
-            index += 1;
+        // `:330-336`: close the interval exactly on the frameset.
+        if self.start_t_ns + self.get_dt_ns() < until_ns
+            && let Some((_, gyro, accel)) = pending
+        {
+            self.integrate_calibrated(until_ns, &accel, &gyro, &noise.accel_cov, &noise.gyro_cov)?;
         }
-
-        let end_t_ns: i64 =
-            self.start_t_ns
-                .checked_add(self.get_dt_ns())
-                .ok_or(ImuError::TimestampOverflow {
-                    a_ns: self.start_t_ns,
-                    b_ns: self.get_dt_ns(),
-                })?;
-        if end_t_ns < t1_ns {
-            // `:330-336`. C++ ends the estimator when the queue is empty here;
-            // a short measurement would be silently wrong, so this is an error.
-            let sample: &ImuSample = samples
-                .get(index)
-                .ok_or(ImuError::MissingSampleAfterFrame { t1_ns })?;
-            self.integrate(
-                &ImuSample {
-                    t_ns: t1_ns,
-                    ..*sample
-                },
-                &noise.accel_cov,
-                &noise.gyro_cov,
-            )?;
-        }
-        Ok(())
+        Ok(pending)
     }
 
     /// Predict the state at the end of the interval (`preintegration.h:174-181`).
@@ -2430,104 +2418,6 @@ mod tests {
                 previous_t_ns: 0,
                 t_ns: 0
             })
-        );
-    }
-
-    /// `integrate_between` reproduces `sqrt_keypoint_vio.cpp:315-336`: samples at
-    /// or before `t0` are skipped, samples through `t1` are integrated, and the
-    /// interval is closed by the first sample *after* `t1` retimed to `t1` with
-    /// its own measurement values — no interpolation.
-    #[test]
-    fn integrate_between_matches_the_between_frames_loop() {
-        let noise: ImuNoise<f64> = noise_from_std_dev();
-        let mut samples: Vec<ImuSample> = Vec::new();
-        for k in 0..8 {
-            samples.push(ImuSample {
-                t_ns: k * 1_000_000,
-                gyro: Vector3::new(0.01 * k as f64, 0.0, 0.0),
-                accel: Vector3::new(0.0, 0.1 * k as f64, 9.81),
-            });
-        }
-        let t0_ns: i64 = 1_000_000;
-        let t1_ns: i64 = 4_500_000;
-
-        let mut between: IntegratedImuMeasurement<f64> =
-            IntegratedImuMeasurement::new(t0_ns, &Vector3::zeros(), &Vector3::zeros());
-        between
-            .integrate_between(&samples, t0_ns, t1_ns, &noise)
-            .unwrap();
-
-        // By hand: skip index 0 and 1 (`t <= t0`), integrate 2, 3 and 4
-        // (`t <= t1`), then close with index 5 retimed to `t1`.
-        let mut expected: IntegratedImuMeasurement<f64> =
-            IntegratedImuMeasurement::new(t0_ns, &Vector3::zeros(), &Vector3::zeros());
-        for sample in &samples[2..=4] {
-            expected
-                .integrate(sample, &noise.accel_cov, &noise.gyro_cov)
-                .unwrap();
-        }
-        expected
-            .integrate(
-                &ImuSample {
-                    t_ns: t1_ns,
-                    ..samples[5]
-                },
-                &noise.accel_cov,
-                &noise.gyro_cov,
-            )
-            .unwrap();
-        assert_eq!(between, expected);
-        assert_eq!(between.get_dt_ns(), t1_ns - t0_ns);
-
-        // No closing step is needed when a sample lands exactly on `t1`.
-        let mut exact: IntegratedImuMeasurement<f64> =
-            IntegratedImuMeasurement::new(t0_ns, &Vector3::zeros(), &Vector3::zeros());
-        exact
-            .integrate_between(&samples, t0_ns, 4_000_000, &noise)
-            .unwrap();
-        assert_eq!(exact.get_dt_ns(), 4_000_000 - t0_ns);
-    }
-
-    /// The five ways `integrate_between` refuses.
-    #[test]
-    fn integrate_between_rejects_bad_intervals() {
-        let noise: ImuNoise<f64> = noise_from_std_dev();
-        let sample = |t_ns: i64| ImuSample {
-            t_ns,
-            gyro: Vector3::zeros(),
-            accel: Vector3::new(0.0, 0.0, 9.81),
-        };
-        let meas = || IntegratedImuMeasurement::<f64>::new(0, &Vector3::zeros(), &Vector3::zeros());
-
-        assert_eq!(
-            meas().integrate_between(&[sample(1)], 0, 0, &noise),
-            Err(ImuError::NonMonotonicFrames { t0_ns: 0, t1_ns: 0 })
-        );
-        assert_eq!(
-            meas().integrate_between(&[sample(1)], 5, 10, &noise),
-            Err(ImuError::StartTimeMismatch {
-                start_t_ns: 0,
-                t0_ns: 5
-            })
-        );
-        assert_eq!(
-            meas().integrate_between(&[sample(2), sample(2)], 0, 10, &noise),
-            Err(ImuError::NonMonotonicSample {
-                previous_t_ns: 2,
-                t_ns: 2
-            })
-        );
-        assert_eq!(
-            meas().integrate_between(&[sample(3), sample(1)], 0, 10, &noise),
-            Err(ImuError::NonMonotonicSample {
-                previous_t_ns: 3,
-                t_ns: 1
-            })
-        );
-        // Nothing after `t1` to close the interval with.
-        assert_eq!(
-            meas().integrate_between(&[sample(2), sample(4)], 0, 10, &noise),
-            Err(ImuError::MissingSampleAfterFrame { t1_ns: 10 })
         );
     }
 

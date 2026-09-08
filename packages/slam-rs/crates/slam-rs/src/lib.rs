@@ -458,7 +458,7 @@ pub struct Vio<S: lie::LieScalar = f32> {
     /// estimator through its own queue.
     frontend_imu: std::collections::VecDeque<imu::ImuSample>,
     /// The frontend's already-popped sample, `processImu`'s `data` (`:169`).
-    frontend_pending: Option<imu::ImuSample>,
+    frontend_pending: Option<imu::Popped<f64>>,
     /// `latest_state` (`frame_to_frame_optical_flow.h:141-146`), which doubles
     /// as basalt's `first_state_arrived` (`:143`): `None` until the estimator
     /// has published one. `predicted_state` (`:150`) is a member there and a
@@ -761,46 +761,23 @@ impl<S: lie::LieScalar> Vio<S> {
         let prev_t_ns: i64 = self.last_frame_t_ns.unwrap_or(-1);
         let mut pim: imu::IntegratedImuMeasurement<f64> =
             imu::IntegratedImuMeasurement::new(prev_t_ns, &latest.bias_gyro, &latest.bias_accel);
-        if self.frontend_pending.is_none() {
-            self.frontend_pending = self.frontend_pop();
-        }
-        while let Some(sample) = self.frontend_pending {
-            if sample.t_ns > prev_t_ns {
-                break;
-            }
-            self.frontend_pending = self.frontend_pop();
-        }
-        while let Some(sample) = self.frontend_pending {
-            if sample.t_ns > curr_t_ns {
-                break;
-            }
-            pim.integrate(
-                &sample,
-                &self.frontend_noise.accel_cov,
-                &self.frontend_noise.gyro_cov,
-            )?;
-            self.frontend_pending = self.frontend_pop();
-        }
-        // `:195-198`: "Pretend last IMU sample before now happened now".
-        if pim.get_start_t_ns() + pim.get_dt_ns() < curr_t_ns
-            && let Some(sample) = self.frontend_pending
-        {
-            let retimed: imu::ImuSample = imu::ImuSample {
-                t_ns: curr_t_ns,
-                ..sample
-            };
-            pim.integrate(
-                &retimed,
-                &self.frontend_noise.accel_cov,
-                &self.frontend_noise.gyro_cov,
-            )?;
-        }
+        // `:190-198`, the same three-part loop the estimator's own
+        // preintegration runs, through `IntegratedImuMeasurement::accumulate_to`.
+        let noise: imu::ImuNoise<f64> = self.frontend_noise;
+        let pending: Option<imu::Popped<f64>> = self.frontend_pending.take();
+        self.frontend_pending = pim.accumulate_to(
+            pending,
+            || self.frontend_pop(),
+            prev_t_ns,
+            curr_t_ns,
+            &noise,
+        )?;
         Ok(pim)
     }
 
     /// One sample off the frontend's buffer, calibrated in `f32` and cast back
     /// to `f64` (`frame_to_frame_optical_flow.h:171-178`).
-    fn frontend_pop(&mut self) -> Option<imu::ImuSample> {
+    fn frontend_pop(&mut self) -> Option<imu::Popped<f64>> {
         let sample: imu::ImuSample = self.frontend_imu.pop_front()?;
         let accel: Vector3<f32> = self
             .calib_f32
@@ -810,11 +787,7 @@ impl<S: lie::LieScalar> Vio<S> {
             .calib_f32
             .calib_gyro_bias
             .calibrated(&sample.gyro.cast());
-        Some(imu::ImuSample {
-            t_ns: sample.t_ns,
-            gyro: gyro.cast(),
-            accel: accel.cast(),
-        })
+        Some((sample.t_ns, gyro.cast(), accel.cast()))
     }
 
     /// `opt_flow_state_queue->push(data)` (`sqrt_keypoint_vio.cpp:620`).

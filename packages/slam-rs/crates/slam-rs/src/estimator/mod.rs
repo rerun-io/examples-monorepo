@@ -104,7 +104,7 @@ use crate::camera::CameraEnum;
 use crate::config::{LinearizationType, VioConfig};
 use crate::duration_ns;
 use crate::imu::{
-    ImuError, ImuLinData, ImuNoise, ImuSample, IntegratedImuMeasurement, gravity,
+    ImuError, ImuLinData, ImuNoise, ImuSample, IntegratedImuMeasurement, Popped, gravity,
     gravity_from_first_accel,
 };
 use crate::landmark::{Landmark, LandmarkError, StereographicParam};
@@ -1012,42 +1012,18 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             let mut pim: IntegratedImuMeasurement<S> =
                 IntegratedImuMeasurement::new(prev.t_ns, &bias_gyro, &bias_accel);
 
-            // `:315-320`: discard everything at or before the previous frameset.
-            while let Some((t_ns, _, _)) = self.pending {
-                if t_ns > prev.t_ns {
-                    break;
-                }
-                self.pending = self.pop_calibrated();
-            }
-            // `:322-328`: integrate everything up to and including the frameset.
-            while let Some((t_ns, gyro, accel)) = self.pending {
-                if t_ns > frame.t_ns {
-                    break;
-                }
-                pim.integrate_calibrated(
-                    t_ns,
-                    &accel,
-                    &gyro,
-                    &self.noise.accel_cov,
-                    &self.noise.gyro_cov,
-                )?;
-                self.pending = self.pop_calibrated();
-            }
-            // `:330-336`: close the interval exactly on the frameset by
-            // re-stamping the next sample. basalt restores the timestamp
-            // afterwards, so the sample is still available to the next frame at
-            // its own time.
-            if pim.get_start_t_ns() + pim.get_dt_ns() < frame.t_ns
-                && let Some((_, gyro, accel)) = self.pending
-            {
-                pim.integrate_calibrated(
-                    frame.t_ns,
-                    &accel,
-                    &gyro,
-                    &self.noise.accel_cov,
-                    &self.noise.gyro_cov,
-                )?;
-            }
+            // `:315-336`, the loop `IntegratedImuMeasurement::accumulate_to`
+            // owns for both preintegrators.
+            let noise: ImuNoise<S> = self.noise;
+            let pending: Option<Popped<S>> = self.pending.take();
+            let (skip_past_ns, until_ns): (i64, i64) = (prev.t_ns, frame.t_ns);
+            self.pending = pim.accumulate_to(
+                pending,
+                || self.pop_calibrated(),
+                skip_past_ns,
+                until_ns,
+                &noise,
+            )?;
             meas = Some(pim);
         }
 
