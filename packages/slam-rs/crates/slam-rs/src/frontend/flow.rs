@@ -25,10 +25,11 @@
 //! * **The GUI bookkeeping.** `tracking_guesses`, `matching_guesses` and
 //!   `recall_guesses` (`optical_flow.h:110-112`) are only filled when `show_gui`
 //!   is set and are never read by the estimator.
-//! * **`pyramid_levels`.** `FrameToFrameOpticalFlow` never writes it; only
-//!   `MultiscaleFrameToFrameOpticalFlow` does (`:57-59`). The field is on
-//!   [`Keypoints`] so the shape of the output does not change when that variant
-//!   arrives, and it stays empty here.
+//! * **`OpticalFlowResult::pyramid_levels`.** Only
+//!   `MultiscaleFrameToFrameOpticalFlow` writes it (`:57-59`), and that variant
+//!   is out of scope, so [`Keypoints`] does not carry the field: it was always
+//!   empty, and a `Vec` cloned twice per frameset for a variant that does not
+//!   exist is storage nothing fills or reads.
 //!
 //! ## Five places the port does not match the C++ exactly
 //!
@@ -164,15 +165,13 @@ pub struct Keypoints {
     /// thing as the C++'s two maps. The value itself is OpenCV's integer
     /// `cornerScore`, which is what the C++ records.
     pub responses: Vec<f32>,
-    /// `OpticalFlowResult::pyramid_levels`, always empty for this variant.
-    pub pyramid_levels: Vec<u32>,
 }
 
 /// `Clone` by hand for the sake of `clone_from`.
 ///
 /// `#[derive(Clone)]` writes only `clone`; the default `clone_from` is
-/// `*self = source.clone()`, which drops all four buffers and allocates four
-/// more — sixteen allocations and sixteen frees per stereo frame once
+/// `*self = source.clone()`, which drops every buffer and allocates as many
+/// again — sixteen allocations and sixteen frees per stereo frame once
 /// [`FrameToFrameOpticalFlow::process_frame`] takes its snapshot and again if it
 /// has to restore. Copying field by field lets `Vec::clone_from` overwrite in
 /// place, and `FlowTransforms` does the same one level down.
@@ -182,7 +181,6 @@ impl Clone for Keypoints {
             ids: self.ids.clone(),
             transforms: self.transforms.clone(),
             responses: self.responses.clone(),
-            pyramid_levels: self.pyramid_levels.clone(),
         }
     }
 
@@ -190,7 +188,6 @@ impl Clone for Keypoints {
         self.ids.clone_from(&source.ids);
         self.transforms.clone_from(&source.transforms);
         self.responses.clone_from(&source.responses);
-        self.pyramid_levels.clone_from(&source.pyramid_levels);
     }
 }
 
@@ -228,7 +225,6 @@ impl Keypoints {
         self.ids.clear();
         self.transforms.clear();
         self.responses.clear();
-        self.pyramid_levels.clear();
     }
 
     /// `transforms->keypoints[cam][id] = kp`: insert or overwrite.
