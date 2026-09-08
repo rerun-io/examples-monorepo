@@ -224,10 +224,10 @@ pub enum GpuError {
 
 /// The NVIDIA runtime, so nothing outside this module names `cubecl_cuda`.
 ///
-/// This and [`cuda_client`] are the only two items on the `gpu` feature rather
-/// than on `gpu-core`: they are what `cubecl-cuda` is for, and keeping them
-/// apart is what lets a `gpu-wgpu` build carry neither the crate nor its
-/// codegen.
+/// This and the module's `cuda_client` are the only two items on the `gpu`
+/// feature rather than on `gpu-core`: they are what `cubecl-cuda` is for, and
+/// keeping them apart is what lets a `gpu-wgpu` build carry neither the crate
+/// nor its codegen.
 #[cfg(feature = "gpu")]
 pub type CudaRuntime = cubecl_cuda::CudaRuntime;
 
@@ -235,8 +235,14 @@ pub type CudaRuntime = cubecl_cuda::CudaRuntime;
 ///
 /// The one NVIDIA-specific line in the crate; `wgpu_client` — which only a
 /// `gpu-wgpu` build has — is the same code with another client.
+///
+/// Private, and that is the fix the re-review asked for: it constructs a client
+/// without probing this host and without a panic guard, so a public one was a
+/// second door into exactly the failure [`gpu_client`] exists to close. The only
+/// way to a client from outside this module is [`gpu_client`], which is
+/// fallible.
 #[cfg(feature = "gpu")]
-pub fn cuda_client() -> cubecl::prelude::ComputeClient<CudaRuntime> {
+fn cuda_client() -> cubecl::prelude::ComputeClient<CudaRuntime> {
     use cubecl::prelude::Runtime;
     cubecl_cuda::CudaRuntime::client(&cubecl_cuda::CudaDevice::default())
 }
@@ -673,8 +679,11 @@ pub fn probe_storage<R: cubecl::prelude::Runtime>(
 /// The portable lane: Vulkan on the Spark and the Pi 5, Metal on macOS. Select
 /// the adapter with `CUBECL_WGPU_DEFAULT_DEVICE`; `WGPU_BACKEND` and
 /// `WGPU_ADAPTER_NAME` are ignored by cubecl-wgpu.
+///
+/// Private for the reason `cuda_client` is: unprobed and unguarded, and
+/// [`gpu_client`] is the only public way to a client.
 #[cfg(feature = "gpu-wgpu")]
-pub fn wgpu_client() -> cubecl::prelude::ComputeClient<cubecl_wgpu::WgpuRuntime> {
+fn wgpu_client() -> cubecl::prelude::ComputeClient<cubecl_wgpu::WgpuRuntime> {
     use cubecl::prelude::Runtime;
     cubecl_wgpu::WgpuRuntime::client(&cubecl_wgpu::WgpuDevice::default())
 }
