@@ -192,14 +192,11 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
         // ── the backward source patches, from `next` at the forward result.
         self.backward_patches
             .accept(count, None, next.num_levels())?;
-        let mut positions = crate::frontend::tracker::PointsSoA::with_capacity(count);
-        positions.resize(count);
-        self.backward_patches.upload_positions(
-            &positions,
-            None,
-            Some((&self.offset_x[..count], &self.offset_y[..count])),
+        self.backward_patches.upload_offsets(
+            count,
+            &self.offset_x[..count],
+            &self.offset_y[..count],
         );
-        let backward_bases: PositionBases = self.backward_patches.bases();
         let capacity: usize = self.backward_patches.capacity();
         kernels::launch_prepare_backward::<R>(
             &self.client,
@@ -249,7 +246,7 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
             patches.position_buffer(),
             (&self.result, TRANSFORM_RUNS * count),
             count,
-            backward_bases,
+            patches.bases(),
             self.max_recovered_dist2,
         );
 

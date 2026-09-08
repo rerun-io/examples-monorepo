@@ -52,6 +52,9 @@ pub struct GpuCornerScan<R: Runtime> {
     client: ComputeClient<R>,
     /// The biased ring, uploaded once.
     ring: cubecl::server::Handle,
+    /// A repack buffer for a frame whose stride exceeds its width, reused
+    /// between frames so the per-frame path allocates nothing (D49).
+    packed: Vec<u16>,
     /// The candidate image, one byte per pixel, as it came back.
     kept: Vec<u8>,
     /// One bit per column of `kept`, thirty-two to a word.
@@ -75,6 +78,7 @@ impl<R: Runtime> GpuCornerScan<R> {
         }
         Self {
             ring: client.create_from_slice(u32::as_bytes(&ring)),
+            packed: Vec::new(),
             kept: Vec::new(),
             mask: Vec::new(),
             words: 0,
@@ -130,11 +134,12 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
             self.client
                 .create_from_slice(u16::as_bytes(&image.data()[..pixels]))
         } else {
-            let mut packed: Vec<u16> = Vec::with_capacity(pixels);
+            self.packed.clear();
+            self.packed.reserve(pixels);
             for y in 0..self.height {
-                packed.extend_from_slice(image.row(y));
+                self.packed.extend_from_slice(image.row(y));
             }
-            self.client.create_from_slice(u16::as_bytes(&packed))
+            self.client.create_from_slice(u16::as_bytes(&self.packed))
         };
         let score: cubecl::server::Handle = self.client.empty(pixels);
         let kept: cubecl::server::Handle = self.client.empty(pixels);

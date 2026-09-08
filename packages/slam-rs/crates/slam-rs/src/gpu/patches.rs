@@ -180,19 +180,8 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
         }
     }
 
-    /// Upload the positions, the selection flags and the backward pass's guess
-    /// offsets in one call.
-    ///
-    /// `offsets` is `source position - guess` per patch, which the backward pass
-    /// adds back to the forward result (`frame_to_frame_optical_flow.h:357`).
-    /// It is computed here rather than on the device because both terms are
-    /// already on the host and this buffer is uploaded anyway.
-    pub(super) fn upload_positions(
-        &mut self,
-        positions: &PointsSoA,
-        selected: Option<&[bool]>,
-        offsets: Option<(&[f32], &[f32])>,
-    ) {
+    /// Upload the source positions and the selection flags.
+    fn upload_positions(&mut self, positions: &PointsSoA, selected: Option<&[bool]>) {
         let capacity: usize = self.layout.capacity;
         let count: usize = positions.len();
         self.staging.fill(0.0);
@@ -202,12 +191,33 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
             let on: bool = selected.is_none_or(|flags| flags[index]);
             self.staging[SELECTED_RUN * capacity + index] = f32::from(u8::from(on));
         }
-        if let Some((x, y)) = offsets {
-            self.staging[OFFSET_RUN * capacity..OFFSET_RUN * capacity + count]
-                .copy_from_slice(&x[..count]);
-            self.staging[(OFFSET_RUN + 1) * capacity..(OFFSET_RUN + 1) * capacity + count]
-                .copy_from_slice(&y[..count]);
+        self.upload_staging();
+    }
+
+    /// Upload only the backward pass's guess offsets, with an all-selected mask.
+    ///
+    /// The offset is `source position - guess` per patch, which the backward
+    /// pass adds back to the forward result
+    /// (`frame_to_frame_optical_flow.h:357`). It is computed on the host because
+    /// both terms are already there, and it rides in this buffer because the
+    /// build needs the buffer anyway. The position runs stay zero on purpose: a
+    /// backward build reads its positions out of the *forward result*, on the
+    /// device, so nothing would look at them.
+    pub(super) fn upload_offsets(&mut self, count: usize, offset_x: &[f32], offset_y: &[f32]) {
+        let capacity: usize = self.layout.capacity;
+        self.staging.fill(0.0);
+        for index in 0..count {
+            self.staging[SELECTED_RUN * capacity + index] = 1.0;
         }
+        self.staging[OFFSET_RUN * capacity..OFFSET_RUN * capacity + count]
+            .copy_from_slice(&offset_x[..count]);
+        self.staging[(OFFSET_RUN + 1) * capacity..(OFFSET_RUN + 1) * capacity + count]
+            .copy_from_slice(&offset_y[..count]);
+        self.upload_staging();
+    }
+
+    /// Replace the device positions buffer with the staging buffer's contents.
+    fn upload_staging(&mut self) {
         self.positions = self.client.create_from_slice(f32::as_bytes(&self.staging));
     }
 
@@ -341,7 +351,7 @@ impl<P: Pattern, R: Runtime> SourcePatches for GpuPatches<P, R> {
         for index in 0..positions.len() {
             self.host.set(index, positions.get(index));
         }
-        self.upload_positions(positions, selected, None);
+        self.upload_positions(positions, selected);
         let bases: PositionBases = self.bases();
         self.launch_build(pyramid, bases);
         Ok(())
