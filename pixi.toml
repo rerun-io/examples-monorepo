@@ -2437,6 +2437,7 @@ inputs = [
     "packages/slam-rs/Cargo.lock",
     "packages/slam-rs/.cargo/config.toml",
     "packages/slam-rs/crates/*/Cargo.toml",
+    "packages/slam-rs/crates/*/build.rs",
     "packages/slam-rs/crates/*/src/**/*.rs",
 ]
 outputs = ["packages/slam-rs/slam_rs/_core.so"]
