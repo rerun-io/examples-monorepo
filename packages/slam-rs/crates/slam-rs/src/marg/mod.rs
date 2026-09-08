@@ -1,5 +1,5 @@
-//! Square-root marginalization: the rank-revealing QR helper, the sliding
-//! window mechanics that drive it, and the two prior diagnostics.
+//! Square-root marginalization: the rank-revealing QR helper and the sliding
+//! window mechanics that drive it.
 //!
 //! Ported from `include/basalt/vi_estimator/marg_helper.h`,
 //! `src/vi_estimator/marg_helper.cpp`, the second half of
@@ -41,8 +41,7 @@ mod window;
 
 pub use helper::{ReducedSystem, marginalize_helper_sqrt_to_sqrt};
 pub use window::{
-    MarginalizeInputs, MarginalizeOptions, MarginalizeOutput, MarginalizeSchedule, NullspaceCheck,
-    check_eigenvalues, check_marg_nullspace, marginalize,
+    MarginalizeInputs, MarginalizeOptions, MarginalizeOutput, MarginalizeSchedule, marginalize,
 };
 
 use crate::ba_base::BaError;

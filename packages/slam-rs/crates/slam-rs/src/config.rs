@@ -193,10 +193,13 @@ pub struct VioConfig {
     /// Tracked-keypoint ratio below which a new keyframe is made.
     #[serde(rename = "config.vio_new_kf_keypoints_thresh")]
     pub vio_new_kf_keypoints_thresh: f32,
-    /// Estimator debug output.
+    /// Estimator debug output. Parsed because every shipped JSON carries it,
+    /// and read by nothing: in C++ it gates console prints and the nullspace
+    /// and eigenvalue diagnostics, which the port does not carry (D68).
     #[serde(rename = "config.vio_debug")]
     pub vio_debug: bool,
-    /// Nullspace and eigenvalue logging.
+    /// Nullspace and eigenvalue logging. Parsed and read by nothing, for the
+    /// same reason as [`Self::vio_debug`].
     #[serde(rename = "config.vio_extended_logging")]
     pub vio_extended_logging: bool,
     /// Reprojection standard deviation in pixels; the residual weight is its

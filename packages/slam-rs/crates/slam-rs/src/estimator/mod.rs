@@ -66,7 +66,7 @@ use crate::imu::{
 use crate::landmark::{Landmark, LandmarkError, StereographicParam};
 use crate::lie::{LieScalar, Se3};
 use crate::linearize::LinearizeError;
-use crate::marg::{MargError, NullspaceCheck};
+use crate::marg::MargError;
 use crate::types::{
     AbsOrderMap, FrameId, KeypointId, LandmarkId, MargLinData, POSE_VEL_BIAS_SIZE,
     PoseVelBiasState, PoseVelBiasStateWithLin, PoseVelState, StateError, TimeCamId,
@@ -413,11 +413,6 @@ pub struct FrameStats<S: LieScalar> {
     pub termination: LmTermination,
     /// The marginalization, when the trigger of `:717` fired.
     pub marginalization: Option<MarginalizationStats>,
-    /// `logMargNullspace` (`:670-681`), present only with `vio_debug` or
-    /// `vio_extended_logging`.
-    pub nullspace: Option<NullspaceCheck>,
-    /// `checkMargEigenvalues()` (`:695`), ascending, under the same gate.
-    pub nullspace_eigenvalues: Option<Vec<f64>>,
     /// Wall-clock stage marks; see [`StageTimings`].
     pub timings: StageTimings,
 }
@@ -547,8 +542,6 @@ pub struct SqrtKeypointVio<S: LieScalar> {
     num_points_kf: BTreeMap<FrameId, usize>,
     /// `marg_data` (`:221`), the square-root prior.
     marg_data: MargLinData<S>,
-    /// `nullspace_marg_data` (`:224`), the prior-free copy the diagnostics read.
-    nullspace_marg_data: MargLinData<S>,
     /// `gyro_bias_sqrt_weight` (`:226`), `1 / gyro_bias_std`.
     gyro_bias_sqrt_weight: Vector3<S>,
     /// `accel_bias_sqrt_weight` (`:226`).
@@ -675,13 +668,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         }
         marg_data.h[(5, 5)] = pose_weight_sqrt;
 
-        // `:80-84`: the debug copy starts at the same shape with **no** prior.
-        let nullspace_marg_data: MargLinData<S> = MargLinData {
-            order: AbsOrderMap::new(),
-            h: DMatrix::zeros(POSE_VEL_BIAS_SIZE, POSE_VEL_BIAS_SIZE),
-            b: DVector::zeros(POSE_VEL_BIAS_SIZE),
-        };
-
         Ok(Self {
             ba,
             prev_frame: None,
@@ -699,7 +685,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             prev_opt_flow_res: BTreeMap::new(),
             num_points_kf: BTreeMap::new(),
             marg_data,
-            nullspace_marg_data,
             gyro_bias_sqrt_weight,
             accel_bias_sqrt_weight,
             max_states: config.vio_max_states.unsigned_abs() as usize,
@@ -819,11 +804,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     /// The live marginalization prior.
     pub fn marg_data(&self) -> &MargLinData<S> {
         &self.marg_data
-    }
-
-    /// The prior-free debug copy the nullspace diagnostics read.
-    pub fn nullspace_marg_data(&self) -> &MargLinData<S> {
-        &self.nullspace_marg_data
     }
 
     /// `num_points_kf` (`:218`), landmarks hosted per keyframe when it was
@@ -1221,7 +1201,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             self.marginalize(&num_points_connected, &lost_landmarks)?;
         timings.marginalize_ns = marg.elapsed_ns;
         timings.measure_ns = duration_ns(started);
-        let (nullspace, nullspace_eigenvalues) = marg.nullspace.unzip();
 
         // `:1642-1653`, read off the window the two stages above left behind.
         Ok(FrameStats {
@@ -1241,8 +1220,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             lm,
             termination,
             marginalization: marg.marginalization,
-            nullspace,
-            nullspace_eigenvalues,
             timings,
         })
     }

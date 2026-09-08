@@ -39,10 +39,9 @@ use crate::config::KeyframeMargCriteria;
 use crate::landmark::eigen_norm3;
 use crate::lie::{LieScalar, Se3};
 use crate::marg::{
-    MarginalizeInputs, MarginalizeOptions, MarginalizeSchedule, NullspaceCheck, check_eigenvalues,
-    check_marg_nullspace, marginalize as marginalize_window,
+    MarginalizeInputs, MarginalizeOptions, MarginalizeSchedule, marginalize as marginalize_window,
 };
-use crate::types::{FrameId, LandmarkId, MargLinData};
+use crate::types::{FrameId, LandmarkId};
 
 /// Which pass of the criterion chose a keyframe for eviction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,9 +112,6 @@ pub struct MarginalizationStats {
 pub(super) struct MarginalizationOutcome {
     /// The marginalization itself.
     pub marginalization: Option<MarginalizationStats>,
-    /// `logMargNullspace` (`:670-681`) and `checkMargEigenvalues` (`:695`),
-    /// which run together under one `vio_debug || vio_extended_logging` gate.
-    pub nullspace: Option<(NullspaceCheck, Vec<f64>)>,
     /// `StageTimings::marginalize_ns`.
     pub elapsed_ns: u64,
 }
@@ -140,9 +136,8 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     }
 
     /// `marginalize(num_points_connected, lost_landmaks)` (`:707-1198`),
-    /// returning what it did, the nullspace check when `vio_debug` or
-    /// `vio_extended_logging` asked for one, and how long it took. Every
-    /// component is `None`/zero when the trigger of `:717` did not fire.
+    /// returning what it did and how long it took. Every component is
+    /// `None`/zero when the trigger of `:717` did not fire.
     ///
     /// # Errors
     ///
@@ -229,9 +224,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             states_to_marg_all,
             states_to_marg_vel_bias,
         };
-        // `:1015-1065`: the debug copy is only built under the same gate that
-        // logs it.
-        let keep_nullspace: bool = self.config.vio_debug || self.config.vio_extended_logging;
         let inputs: MarginalizeInputs<'_, S> = MarginalizeInputs {
             schedule: &schedule,
             imu_lin_data: Some(self.imu_lin_data()),
@@ -240,18 +232,11 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             fixed_frames: fixed_keyframes(&self.config, &self.ltkfs),
             options: MarginalizeOptions {
                 marg_lost_landmarks: self.config.vio_marg_lost_landmarks,
-                keep_nullspace_marg_data: keep_nullspace,
             },
-        };
-        let nullspace_slot: Option<&mut MargLinData<S>> = if keep_nullspace {
-            Some(&mut self.nullspace_marg_data)
-        } else {
-            None
         };
         let output = marginalize_window(
             &mut self.ba,
             &mut self.marg_data,
-            nullspace_slot,
             &mut self.imu_meas,
             &inputs,
         )?;
@@ -288,41 +273,10 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             prior_order: self.marg_data.order.iter().collect(),
         };
 
-        // `:1180-1184`, `:670-681`.
-        let nullspace: Option<(NullspaceCheck, Vec<f64>)> = if keep_nullspace {
-            Some(self.log_marg_nullspace()?)
-        } else {
-            None
-        };
         Ok(MarginalizationOutcome {
             marginalization: Some(marginalization),
-            nullspace,
             elapsed_ns: duration_ns(mark),
         })
-    }
-
-    /// `logMargNullspace()` (`:670-681`).
-    ///
-    /// `:672`'s `nullspace_marg_data.order = marg_data.order` already happened:
-    /// [`crate::marg::marginalize`] assigns it beside the debug prior's `H` and
-    /// `b` under the same condition, so the pair this reads is consistent. The
-    /// control direction is a parameter of [`check_marg_nullspace`] rather than
-    /// `inc_random.setRandom()` (`sqrt_ba_base.cpp:158`), which is
-    /// `rand()`-seeded and not reproducible; a fixed direction keeps the
-    /// diagnostic deterministic (D17).
-    fn log_marg_nullspace(&self) -> Result<(NullspaceCheck, Vec<f64>), EstimatorError> {
-        let width: usize = self.nullspace_marg_data.order.total_size();
-        let mut direction: nalgebra::DVector<f64> = nalgebra::DVector::zeros(width);
-        for (i, slot) in direction.iter_mut().enumerate() {
-            // A fixed, non-degenerate direction: the diagnostic normalizes it
-            // per probe, so only its non-alignment with the gauge directions
-            // matters.
-            *slot = 1.0 / f64::from(u32::try_from(i).unwrap_or(u32::MAX) + 1);
-        }
-        let check: NullspaceCheck =
-            check_marg_nullspace(&self.nullspace_marg_data, &self.ba, &direction)?;
-        let eigenvalues: nalgebra::DVector<f64> = check_eigenvalues(&self.nullspace_marg_data)?;
-        Ok((check, eigenvalues.iter().copied().collect()))
     }
 
     /// `KF_MARG_DEFAULT` (`:814-868`).

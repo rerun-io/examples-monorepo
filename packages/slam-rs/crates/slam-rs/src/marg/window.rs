@@ -23,11 +23,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nalgebra::{DMatrix, DVector, Matrix3, Vector3};
+use nalgebra::{DMatrix, DVector};
 
 use crate::ba_base::{BaError, BundleAdjustmentBase};
 use crate::imu::{ImuLinData, IntegratedImuMeasurement};
-use crate::lie::{LieScalar, So3};
+use crate::lie::LieScalar;
 use crate::linearize::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
 use crate::marg::helper::{ReducedSystem, marginalize_helper_sqrt_to_sqrt};
 use crate::marg::{MargError, ScheduleSet};
@@ -65,9 +65,6 @@ pub struct MarginalizeSchedule {
 pub struct MarginalizeOptions {
     /// `config.vio_marg_lost_landmarks` (`:1116`).
     pub marg_lost_landmarks: bool,
-    /// `config.vio_debug || config.vio_extended_logging` (`:1012`, `:1174`):
-    /// run the whole linearization a second time against `nullspace_marg_data`.
-    pub keep_nullspace_marg_data: bool,
 }
 
 /// Everything `marginalize()` needs besides the window itself.
@@ -411,7 +408,6 @@ struct LinearizedWindow<S: LieScalar> {
 pub fn marginalize<S: LieScalar>(
     estimator: &mut BundleAdjustmentBase<S>,
     marg_data: &mut MargLinData<S>,
-    mut nullspace_marg_data: Option<&mut MargLinData<S>>,
     imu_meas: &mut BTreeMap<i64, IntegratedImuMeasurement<S>>,
     inputs: &MarginalizeInputs<'_, S>,
 ) -> Result<MarginalizeOutput<S>, MargError> {
@@ -476,40 +472,6 @@ pub fn marginalize<S: LieScalar>(
             total_size: marg_order_new.total_size(),
         });
     }
-
-    // `:1012-1064`: the debug copy. A second full linearization against the
-    // *previous* nullspace prior, so the two can be compared without the
-    // fixed-linearization bookkeeping the live prior carries.
-    let nullspace_reduced: Option<ReducedSystem<S>> = match nullspace_marg_data.as_deref_mut() {
-        Some(nullspace) if inputs.options.keep_nullspace_marg_data => {
-            // `:1021`: `nullspace_marg_data.order = marg_data.order`, the
-            // order *before* `:1137` replaces it, so the second linearization
-            // runs against the same variables the live one does. C++ writes it
-            // into `nullspace_marg_data` itself; the port carries it in this
-            // local copy and assigns the field at the end of `marginalize`,
-            // where `:1186`'s `logMargNullspace()` assigns the new one.
-            let mut prior: MargLinData<S> = MargLinData {
-                order: marg_data.order.clone(),
-                h: nullspace.h.clone(),
-                b: nullspace.b.clone(),
-            };
-            if prior.h.ncols() != prior.order.total_size() {
-                // The very first marginalization has an empty nullspace prior;
-                // basalt linearizes with an empty `MargLinData` too.
-                prior.h = DMatrix::zeros(0, prior.order.total_size());
-                prior.b = DVector::zeros(0);
-            }
-            let debug: LinearizedWindow<S> =
-                linearize_for_marginalization(estimator, &aom, &prior, imu_input.as_ref(), inputs)?;
-            Some(marginalize_helper_sqrt_to_sqrt(
-                debug.h,
-                debug.b,
-                &idx_to_keep,
-                &idx_to_marg,
-            )?)
-        }
-        _ => None,
-    };
 
     // `:1069-1083`.
     let reduced: ReducedSystem<S> =
@@ -586,23 +548,6 @@ pub fn marginalize<S: LieScalar>(
     let delta: DVector<S> = estimator.compute_delta(&marg_data.order)?;
     subtract_h_delta(&mut marg_data.b, &marg_data.h, &delta);
 
-    // `:1174-1178`: the same re-anchoring on the debug copy, with the same
-    // delta, and then the order.
-    if let (Some(nullspace), Some(reduced_ns)) = (nullspace_marg_data, nullspace_reduced) {
-        nullspace.h = reduced_ns.h;
-        nullspace.b = reduced_ns.b;
-        subtract_h_delta(&mut nullspace.b, &nullspace.h, &delta);
-        // `:1186` calls `logMargNullspace()`, whose **first** statement is
-        // `nullspace_marg_data.order = marg_data.order` (`:672`) — the *new*
-        // order, since `:1137` has already replaced it — before
-        // `checkMargNullspace()` and `checkMargEigenvalues()` read the pair.
-        // So the debug prior's order does not lag: it is the same ordering the
-        // live prior just got. (C++ also assigns the *old* order at `:1021`,
-        // for the second linearization; the port carries that one in the local
-        // `prior` above, which is the same value at the same point.)
-        nullspace.order = marg_data.order.clone();
-    }
-
     Ok(MarginalizeOutput {
         aom,
         idx_to_keep,
@@ -631,222 +576,4 @@ fn subtract_h_delta<S: LieScalar>(b: &mut DVector<S>, h: &DMatrix<S>, delta: &DV
         }
         b[i] -= acc;
     }
-}
-
-// ─── the two diagnostics ───────────────────────────────────────────────────
-
-/// What [`check_marg_nullspace`] measured, one entry per probe direction.
-///
-/// C++ prints these and returns `xHx + xb` (`sqrt_ba_base.cpp:197-207`); the
-/// port returns all three, because the two halves say different things — `xHx`
-/// is spurious information on an unobservable direction, `xb` is a spurious
-/// gradient — and a caller that only wants basalt's number can read
-/// [`Self::total`].
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct NullspaceCheck {
-    /// `xHx`: `incᵀ H inc` for x, y, z, roll, pitch, yaw and the random probe,
-    /// in that order (`:180-186`).
-    pub xhx: [f64; 7],
-    /// `xb`: `incᵀ b` for the same seven (`:189-195`).
-    pub xb: [f64; 7],
-}
-
-impl NullspaceCheck {
-    /// `xHx + xb`, what `checkNullspace` returns (`:207`).
-    pub fn total(&self) -> [f64; 7] {
-        let mut out: [f64; 7] = [0.0; 7];
-        for (i, slot) in out.iter_mut().enumerate() {
-            *slot = self.xhx[i] + self.xb[i];
-        }
-        out
-    }
-}
-
-/// `SqrtBundleAdjustmentBase::checkNullspace`
-/// (`src/vi_estimator/sqrt_ba_base.cpp:42-208`).
-///
-/// Builds the six increments that *should* lie in the prior's null space —
-/// three global translations and three global rotations about the translation
-/// centroid — normalizes each, and reports how much information the prior has
-/// accumulated along them. For a visual-inertial problem only yaw is truly
-/// unobservable: gravity fixes roll and pitch, so those two are expected to
-/// carry information. A seventh, random, direction is the control.
-///
-/// **The rotational increments rotate translations and velocities too**
-/// (`:125-142`), because poses are cam-to-world with a left increment, so a
-/// world-frame rotation moves both. The centre of rotation is the mean
-/// translation rather than the origin, "for better numerics" (`:117-121`).
-///
-/// `inc_random` replaces C++'s `inc_random.setRandom()` (`:158`): it is a
-/// parameter so the diagnostic is reproducible, and it is normalized here as
-/// C++ normalizes it. Everything runs in `f64` whatever the estimator's scalar
-/// is, as `:165-176` does.
-pub fn check_marg_nullspace<S: LieScalar>(
-    mld: &MargLinData<S>,
-    estimator: &BundleAdjustmentBase<S>,
-    inc_random: &DVector<f64>,
-) -> Result<NullspaceCheck, MargError> {
-    // `:52`.
-    let marg_size: usize = mld.order.total_size();
-    if mld.h.ncols() != marg_size {
-        return Err(MargError::PriorWidthMismatch {
-            cols: mld.h.ncols(),
-            total_size: marg_size,
-        });
-    }
-    if inc_random.nrows() != marg_size {
-        return Err(MargError::ProbeLengthMismatch {
-            expected: marg_size,
-            actual: inc_random.nrows(),
-        });
-    }
-    // The shape `:165-176` then relies on and C++ does not assert (decision
-    // D32): the square-root prior needs `b` as tall as `H`, or `Hᵀb` is not
-    // formed.
-    if mld.b.nrows() != mld.h.nrows() {
-        return Err(MargError::RhsLengthMismatch {
-            rows: mld.h.nrows(),
-            rhs: mld.b.nrows(),
-        });
-    }
-
-    // `:82-96`: the mean translation over the prior's blocks.
-    let mut mean_trans: Vector3<f64> = Vector3::zeros();
-    let mut num_trans: usize = 0;
-    for (frame_id, _, size) in mld.order.iter() {
-        mean_trans += translation_of(estimator, frame_id, size)?;
-        num_trans += 1;
-    }
-    if num_trans == 0 {
-        return Err(MargError::EmptyPriorOrder);
-    }
-    mean_trans /= num_trans as f64;
-
-    // `:98`.
-    let eps: f64 = 0.01;
-
-    let mut inc: [DVector<f64>; 6] = std::array::from_fn(|_| DVector::zeros(marg_size));
-
-    // `:101-144`.
-    for (frame_id, offset, size) in mld.order.iter() {
-        for (axis, vector) in inc.iter_mut().enumerate() {
-            vector[offset + axis] = eps;
-        }
-
-        let trans: Vector3<f64> = translation_of(estimator, frame_id, size)? - mean_trans;
-
-        // `:125-126`: `J = -SO3::hat(trans) * eps`, one column per rotation.
-        let j: Matrix3<f64> = -So3::<f64>::hat(&trans) * eps;
-        for axis in 0..3 {
-            for row in 0..3 {
-                inc[3 + axis][offset + row] = j[(row, axis)];
-            }
-        }
-
-        if size == POSE_VEL_BIAS_SIZE {
-            // `:129-141`.
-            let Some(state) = estimator.frame_states.get(&frame_id) else {
-                return Err(MargError::FrameNotInWindow { frame_id });
-            };
-            let vel: Vector3<f64> = state.state_lin().vel_w_i.map(|v| v.to_f64());
-            let j_vel: Matrix3<f64> = -So3::<f64>::hat(&vel) * eps;
-            for axis in 0..3 {
-                for row in 0..3 {
-                    inc[3 + axis][offset + POSE_SIZE + row] = j_vel[(row, axis)];
-                }
-            }
-        }
-    }
-
-    // `:146-151`.
-    for vector in &mut inc {
-        let norm: f64 = vector.norm();
-        if norm > 0.0 {
-            *vector /= norm;
-        }
-    }
-    let mut random: DVector<f64> = inc_random.clone();
-    let random_norm: f64 = random.norm();
-    if random_norm > 0.0 {
-        random /= random_norm;
-    }
-
-    // `:165-176`: the squared form, always in double.
-    let h_d: DMatrix<f64> = mld.h.map(|v| v.to_f64());
-    let b_d: DVector<f64> = mld.b.map(|v| v.to_f64());
-    let (h, b): (DMatrix<f64>, DVector<f64>) = (h_d.transpose() * &h_d, h_d.transpose() * &b_d);
-
-    let mut xhx: [f64; 7] = [0.0; 7];
-    let mut xb: [f64; 7] = [0.0; 7];
-    for (i, vector) in inc.iter().chain(std::iter::once(&random)).enumerate() {
-        let hv: DVector<f64> = &h * vector;
-        xhx[i] = vector.dot(&hv);
-        xb[i] = vector.dot(&b);
-    }
-
-    Ok(NullspaceCheck { xhx, xb })
-}
-
-/// The linearization-point translation of one block, `getPoseLin().translation()`
-/// or `getStateLin().T_w_i.translation()` (`sqrt_ba_base.cpp:85-93`).
-fn translation_of<S: LieScalar>(
-    estimator: &BundleAdjustmentBase<S>,
-    frame_id: FrameId,
-    size: usize,
-) -> Result<Vector3<f64>, MargError> {
-    match size {
-        POSE_SIZE => {
-            let Some(pose) = estimator.frame_poses.get(&frame_id) else {
-                return Err(MargError::FrameNotInWindow { frame_id });
-            };
-            Ok(pose.pose_lin().translation.map(|v| v.to_f64()))
-        }
-        POSE_VEL_BIAS_SIZE => {
-            let Some(state) = estimator.frame_states.get(&frame_id) else {
-                return Err(MargError::FrameNotInWindow { frame_id });
-            };
-            Ok(state.state_lin().t_w_i.translation.map(|v| v.to_f64()))
-        }
-        // `:91-93`: C++ prints and aborts.
-        size => Err(MargError::UnexpectedBlockSize { frame_id, size }),
-    }
-}
-
-/// `SqrtBundleAdjustmentBase::checkEigenvalues`
-/// (`src/vi_estimator/sqrt_ba_base.cpp:210-233`).
-///
-/// The eigenvalues of `JᵀJ` in ascending order, computed in `f64` whatever the
-/// estimator's scalar is and on the *squared* matrix deliberately, "to easily
-/// notice if we have negative EVs (numerically)" (`:212-214`).
-///
-/// **One substitution.** C++ uses `Eigen::SelfAdjointEigenSolver`, whose
-/// tridiagonalisation-plus-implicit-QL is not ported; this is nalgebra's
-/// symmetric eigendecomposition with the values sorted ascending as Eigen sorts
-/// them. Unlike the LDLT (decision D41) and the complete orthogonal
-/// decomposition, nothing downstream branches on the result: `checkEigenvalues`
-/// is called once, with `verbose = false`, and its output goes into a statistics
-/// log (`sqrt_keypoint_vio.cpp:690`).
-///
-/// A squared prior that is not square is refused rather than handed to the
-/// eigensolver, which asserts on it. The square-root branch cannot be
-/// non-square: `HᵀH` is square whatever `H` is.
-///
-/// **A prior over no variables answers with the empty spectrum**, rather than
-/// with an error, because that is the answer: a 0x0 matrix has no eigenvalues.
-/// Neither library defines the empty problem — nalgebra asserts in its
-/// symmetric tridiagonalisation, and Eigen's `SelfAdjointEigenSolver` falls
-/// past its `n == 1` shortcut into `maxCoeff()` of an empty matrix
-/// (`Eigenvalues/SelfAdjointEigenSolver.h:437`), which `DenseBase::redux`
-/// asserts against (`Core/Redux.h:445`) — so the check has to happen here
-/// (decision D32). It is reachable: `MargLinData::default()` is public, and it
-/// is the prior the estimator holds before its first marginalization.
-pub fn check_eigenvalues<S: LieScalar>(mld: &MargLinData<S>) -> Result<DVector<f64>, MargError> {
-    let h_d: DMatrix<f64> = mld.h.map(|v| v.to_f64());
-    let h: DMatrix<f64> = h_d.transpose() * &h_d;
-    if h.ncols() == 0 {
-        return Ok(DVector::zeros(0));
-    }
-    let mut values: DVector<f64> = h.symmetric_eigenvalues();
-    values.as_mut_slice().sort_by(f64::total_cmp);
-    Ok(values)
 }

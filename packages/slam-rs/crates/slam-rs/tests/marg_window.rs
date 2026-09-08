@@ -22,14 +22,10 @@
 //! | `the_prior_is_the_schur_complement_of_the_window` | `J_mᵀJ_m` is the dense Schur complement of the same system, and the two agree on the kept variables' optimum |
 //! | `the_prior_is_re_anchored_on_the_delta` | `marg_data.b -= marg_data.H * delta` (`:1170-1172`, trap 8) against the un-anchored residual the helper returned |
 //! | `the_prior_error_is_the_quadratic_at_the_delta` | `computeMargPriorError` after `applyInc` equals the quadratic model evaluated at the accumulated delta |
-//! | `the_prior_has_the_gauge_directions_in_its_nullspace` | `checkMargNullspace`: a visual-only prior carries no information along a global translation or rotation |
 //! | `a_window_that_disagrees_with_the_prior_is_refused` | the ordering assertions of `:736` and `:758-759` |
 //! | `an_invalid_schedule_is_refused_before_anything_changes` | eight broken schedules, each a typed error with the window bit-identical afterwards |
 //! | `a_window_that_is_not_frozen_is_refused_before_anything_changes` | a valid schedule over a block that is not at its linearization point, either kind, refused with the window bit-identical afterwards |
 //! | `a_frozen_demoted_state_marginalizes` | the control: the same schedule, and the demotion it performs |
-//! | `a_malformed_prior_is_refused_by_the_diagnostics` | the shapes `checkNullspace` and `checkEigenvalues` rely on and C++ does not assert |
-//! | `an_empty_prior_has_no_eigenvalues` | `checkEigenvalues` on the two empty priors a window holds before its first marginalization, where both eigensolvers assert |
-//! | `the_nullspace_debug_copy_follows_the_live_prior` | the debug prior's `H`, `b` **and** order (`:672`, called at `:1186`) |
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -43,8 +39,7 @@ use slam_rs::landmark::{Landmark, StereographicParam};
 use slam_rs::lie::{Se3, So3};
 use slam_rs::marg::{
     MargError, MarginalizeInputs, MarginalizeOptions, MarginalizeOutput, MarginalizeSchedule,
-    NullspaceCheck, ScheduleSet, check_eigenvalues, check_marg_nullspace, marginalize,
-    marginalize_helper_sqrt_to_sqrt,
+    ScheduleSet, marginalize, marginalize_helper_sqrt_to_sqrt,
 };
 use slam_rs::types::{
     AbsOrderMap, FrameId, LandmarkId, MargLinData, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseStateWithLin,
@@ -83,8 +78,7 @@ fn pose_at(index: usize, rng: &mut Rng) -> Se3<f64> {
 /// sees: a steady-state prior over both keyframes **and** the state that
 /// entered it last (`sqrt_keypoint_vio.cpp:1120-1133` produces exactly that),
 /// and an empty prior over the keyframes alone, which is what a window looks
-/// like before the first state has been marginalized. The second shape is the
-/// one whose prior is purely visual, so it is the one with a gauge nullspace.
+/// like before the first state has been marginalized.
 fn build_window(seed: u64, prior_covers_state0: bool) -> Window {
     let mut rng: Rng = Rng::new(seed);
 
@@ -244,7 +238,6 @@ fn demote_state1() -> MarginalizeSchedule {
 fn try_run(
     window: &mut Window,
     sched: &MarginalizeSchedule,
-    nullspace: Option<&mut MargLinData<f64>>,
     options: MarginalizeOptions,
 ) -> Result<MarginalizeOutput<f64>, MargError> {
     let inputs: MarginalizeInputs<'_, f64> = MarginalizeInputs {
@@ -257,14 +250,13 @@ fn try_run(
     marginalize(
         &mut window.estimator,
         &mut window.marg,
-        nullspace,
         &mut window.imu_meas,
         &inputs,
     )
 }
 
 fn run(window: &mut Window, options: MarginalizeOptions) -> MarginalizeOutput<f64> {
-    try_run(window, &schedule(), None, options).expect("the synthetic window marginalizes")
+    try_run(window, &schedule(), options).expect("the synthetic window marginalizes")
 }
 
 /// The whole window, every coefficient of it: `f64`'s `Debug` is the shortest
@@ -580,81 +572,6 @@ fn the_prior_error_is_the_quadratic_at_the_delta() {
     assert!(e1 > 0.0, "moving away from the linearization point costs");
 }
 
-/// `checkMargNullspace` (`sqrt_ba_base.cpp:42-208`): the gauge directions.
-///
-/// The window here is visual-only — no IMU factors and an empty starting prior
-/// — so the marginalized information is invariant under a global rigid motion
-/// of every frame and every landmark. Marginalizing does not change that: the
-/// prior is the full cost minimized over the variables that left, and moving
-/// all of them together leaves it alone. So all six probes — three
-/// translations and three rotations, **yaw included** — must carry orders of
-/// magnitude less information than a random direction of the same length.
-///
-/// In the real estimator gravity fixes roll and pitch and only yaw stays in the
-/// nullspace; that is a property of the IMU factors, not of the marginalization,
-/// and it is why basalt's own comment says "for VIO only yaw rotation shift is
-/// in nullspace" (`:55-57`).
-#[test]
-fn the_prior_has_the_gauge_directions_in_its_nullspace() {
-    let mut window: Window = build_window(0xB010, false);
-    assert_eq!(window.marg.h.nrows(), 0, "the window starts with no prior");
-
-    run(&mut window, MarginalizeOptions::default());
-    assert!(window.marg.h.nrows() > 0, "and gains one");
-
-    let size: usize = window.marg.order.total_size();
-    // The control direction, standing in for C++'s `inc_random.setRandom()`
-    // (`:158`), made reproducible.
-    let mut rng: Rng = Rng::new(0xC0FFEE);
-    let random: DVector<f64> = DVector::from_fn(size, |_, _| rng.symmetric());
-
-    let check: NullspaceCheck =
-        check_marg_nullspace(&window.marg, &window.estimator, &random).unwrap();
-
-    let control: f64 = check.xhx[6];
-    assert!(
-        control > 1e-3,
-        "the control direction is informative: {control}"
-    );
-    let names: [&str; 6] = ["x", "y", "z", "roll", "pitch", "yaw"];
-    for (i, name) in names.iter().enumerate() {
-        assert!(
-            check.xhx[i] < 1e-6 * control,
-            "{name}: xHx {} against a control of {control}",
-            check.xhx[i]
-        );
-        // `b == Jᵀr`, so the same directions are in its left nullspace (`:188`).
-        assert!(
-            check.xb[i].abs() < 1e-4 * check.xb[6].abs().max(1.0),
-            "{name}: xb {}",
-            check.xb[i]
-        );
-    }
-    // `checkNullspace` returns the sum of the two (`:207`).
-    let total: [f64; 7] = check.total();
-    for (i, value) in total.iter().enumerate() {
-        assert_eq!(*value, check.xhx[i] + check.xb[i]);
-    }
-
-    // `checkEigenvalues` (`:210-233`): the information matrix is positive
-    // semi-definite, and it is singular in exactly the gauge directions.
-    let eigenvalues: DVector<f64> = check_eigenvalues(&window.marg).unwrap();
-    assert_eq!(eigenvalues.nrows(), size);
-    for i in 1..size {
-        assert!(
-            eigenvalues[i] >= eigenvalues[i - 1],
-            "ascending, as Eigen sorts"
-        );
-    }
-    let largest: f64 = eigenvalues[size - 1];
-    assert!(largest > 0.0);
-    let tiny: usize = eigenvalues.iter().filter(|v| **v < 1e-9 * largest).count();
-    assert!(
-        tiny >= 6,
-        "at least the six gauge directions are unconstrained, found {tiny}: {eigenvalues:?}"
-    );
-}
-
 /// The ordering assertions of `:736` and `:758-759` are typed errors here.
 ///
 /// The schedule's own relationships to the window are
@@ -670,68 +587,9 @@ fn a_window_that_disagrees_with_the_prior_is_refused() {
     window.marg.h = DMatrix::zeros(0, POSE_SIZE + POSE_VEL_BIAS_SIZE);
     window.marg.b = DVector::zeros(0);
     assert_eq!(
-        try_run(
-            &mut window,
-            &schedule(),
-            None,
-            MarginalizeOptions::default()
-        ),
+        try_run(&mut window, &schedule(), MarginalizeOptions::default()),
         Err(MargError::PriorOrderMismatch { frame_id: KF1 })
     );
-}
-
-/// The debug copy, `nullspace_marg_data` (`:1012-1064`, `:1174-1178`).
-#[test]
-fn the_nullspace_debug_copy_follows_the_live_prior() {
-    let pristine: Window = build_window(0xB014, false);
-    let mut window: Window = pristine.clone();
-    let mut nullspace: MargLinData<f64> = MargLinData::default();
-    try_run(
-        &mut window,
-        &schedule(),
-        Some(&mut nullspace),
-        MarginalizeOptions {
-            marg_lost_landmarks: false,
-            keep_nullspace_marg_data: true,
-        },
-    )
-    .unwrap();
-
-    // `:1186` calls `logMargNullspace()`, whose first statement is
-    // `nullspace_marg_data.order = marg_data.order` (`:672`) — the *new* order,
-    // the one `:1137` has just given the live prior — before
-    // `checkMargNullspace()` reads the pair. So the two orders agree by the
-    // time `marginalize` returns, and the debug prior is a consistent
-    // `(order, H, b)` triple that [`check_marg_nullspace`] accepts.
-    assert_eq!(nullspace.order, window.marg.order);
-    assert_eq!(nullspace.h.ncols(), nullspace.order.total_size());
-    let probe: DVector<f64> = DVector::zeros(nullspace.order.total_size());
-    assert!(check_marg_nullspace(&nullspace, &window.estimator, &probe).is_ok());
-
-    // On the first marginalization the debug prior starts empty, so the second
-    // linearization sees exactly what the live one did and the two agree
-    // coefficient for coefficient.
-    assert_eq!(nullspace.h.nrows(), window.marg.h.nrows());
-    assert_eq!(nullspace.h.ncols(), window.marg.h.ncols());
-    for i in 0..nullspace.h.nrows() {
-        for j in 0..nullspace.h.ncols() {
-            assert_eq!(nullspace.h[(i, j)], window.marg.h[(i, j)]);
-        }
-        assert_eq!(nullspace.b[i], window.marg.b[i]);
-    }
-
-    // Without the flag nothing is written: the same window, marginalized again
-    // from the pristine copy with the default options.
-    let mut untouched: Window = pristine;
-    let mut empty: MargLinData<f64> = MargLinData::default();
-    try_run(
-        &mut untouched,
-        &schedule(),
-        Some(&mut empty),
-        MarginalizeOptions::default(),
-    )
-    .unwrap();
-    assert_eq!(empty, MargLinData::default());
 }
 
 /// Every relationship the schedule is supposed to have with the window, broken
@@ -839,16 +697,9 @@ fn an_invalid_schedule_is_refused_before_anything_changes() {
 
     for (name, sched, want) in cases {
         let mut window: Window = pristine.clone();
-        let mut nullspace: MargLinData<f64> = MargLinData::default();
-        let got = try_run(
-            &mut window,
-            &sched,
-            Some(&mut nullspace),
-            MarginalizeOptions::default(),
-        );
+        let got = try_run(&mut window, &sched, MarginalizeOptions::default());
         assert_eq!(got.err(), Some(want), "{name}");
         assert_eq!(before, window_debug(&window), "{name}: the window changed");
-        assert_eq!(nullspace, MargLinData::default(), "{name}: the debug prior");
     }
 }
 
@@ -863,19 +714,12 @@ fn an_invalid_schedule_is_refused_before_anything_changes() {
 fn a_window_that_is_not_frozen_is_refused_before_anything_changes() {
     let refused = |window: &mut Window, sched: &MarginalizeSchedule, frame_id: FrameId| {
         let before: String = window_debug(window);
-        let mut nullspace: MargLinData<f64> = MargLinData::default();
-        let got = try_run(
-            window,
-            sched,
-            Some(&mut nullspace),
-            MarginalizeOptions::default(),
-        );
+        let got = try_run(window, sched, MarginalizeOptions::default());
         assert_eq!(
             got.err(),
             Some(MargError::Ba(BaError::NotLinearized { frame_id }))
         );
         assert_eq!(before, window_debug(window), "the window changed");
-        assert_eq!(nullspace, MargLinData::default(), "the debug prior");
     };
 
     // The demoted state: `STATE1` is a free variable in the fixture, and
@@ -906,13 +750,8 @@ fn a_frozen_demoted_state_marginalizes() {
         .set_linearized()
         .unwrap();
 
-    try_run(
-        &mut window,
-        &demote_state1(),
-        None,
-        MarginalizeOptions::default(),
-    )
-    .expect("freezing STATE1 makes the demotion schedule marginalize");
+    try_run(&mut window, &demote_state1(), MarginalizeOptions::default())
+        .expect("freezing STATE1 makes the demotion schedule marginalize");
 
     // `STATE1` kept its pose and lost its velocity and biases, so it is a
     // 6-row block of the new prior, behind `KF1` and ahead of `STATE2`.
@@ -923,62 +762,6 @@ fn a_frozen_demoted_state_marginalizes() {
         Some((POSE_SIZE, POSE_SIZE)),
         "the demoted block"
     );
-}
-
-/// The two diagnostics on priors whose shapes do not close
-/// (`sqrt_ba_base.cpp:52` asserts only the width).
-#[test]
-fn a_malformed_prior_is_refused_by_the_diagnostics() {
-    let mut window: Window = build_window(0xB016, false);
-    run(&mut window, MarginalizeOptions::default());
-    let size: usize = window.marg.order.total_size();
-    let random: DVector<f64> = DVector::zeros(size);
-
-    // A probe direction that is not as long as the prior's ordering; C++ builds
-    // it with `setRandom()` (`:158`), so it cannot be wrong there.
-    assert_eq!(
-        check_marg_nullspace(&window.marg, &window.estimator, &DVector::zeros(size - 1)),
-        Err(MargError::ProbeLengthMismatch {
-            expected: size,
-            actual: size - 1
-        })
-    );
-
-    // A square-root prior whose residual is shorter than its Jacobian: `Hᵀb`
-    // is not formed (`:170`).
-    let mut short_b: MargLinData<f64> = window.marg.clone();
-    short_b.b = DVector::zeros(1);
-    assert_eq!(
-        check_marg_nullspace(&short_b, &window.estimator, &random),
-        Err(MargError::RhsLengthMismatch {
-            rows: short_b.h.nrows(),
-            rhs: 1
-        })
-    );
-
-    // The well-shaped prior still works.
-    assert!(check_marg_nullspace(&window.marg, &window.estimator, &random).is_ok());
-    assert!(check_eigenvalues(&window.marg).is_ok());
-}
-
-/// `checkEigenvalues` on the two empty priors a window really holds before its
-/// first marginalization, neither of which either eigensolver defines (see
-/// `check_eigenvalues`).
-///
-/// `MargLinData::default()` is the live one, 0x0. The debug copy's is the other
-/// shape: no rows over a real ordering's width, which squares to that many zero
-/// eigenvalues.
-#[test]
-fn an_empty_prior_has_no_eigenvalues() {
-    assert_eq!(
-        check_eigenvalues(&MargLinData::<f64>::default()),
-        Ok(DVector::zeros(0))
-    );
-
-    let window: Window = build_window(0xB018, false);
-    let size: usize = window.marg.order.total_size();
-    assert_eq!(window.marg.h.shape(), (0, size), "the debug copy's shape");
-    assert_eq!(check_eigenvalues(&window.marg), Ok(DVector::zeros(size)));
 }
 
 // ─── helpers ───────────────────────────────────────────────────────────────
