@@ -250,8 +250,19 @@ class VioLogger:
     """The C++ trajectory thinned the same way."""
     previous_strips: dict[int, Float64[ndarray, " 10 3"]] = field(default_factory=dict)
     """The last frameset's window wireframes by timestamp: where a marginalized frame is drawn from."""
+    drawn_reference: dict[str, int] = field(default_factory=dict)
+    """How much of each reference strip the segment form has drawn, by entity."""
     framesets: int = 0
     """Framesets logged, which paces the ATE-so-far."""
+    incremental_paths: bool = False
+    """Draw each frameset's own new path segment instead of the whole path so far.
+
+    Re-logging the whole strip every frameset costs the square of the frameset
+    count: a 412-frameset smoke segment pays 85,000 points and a 2,700-frameset
+    RoboCap clip would pay 3.6 million, per trajectory. The segment form is
+    linear, and :meth:`log_complete_paths` puts each whole path in once at the
+    end so a viewer still shows both of them at every cursor.
+    """
 
     def __post_init__(self) -> None:
         """Log the estimated rig's static geometry, precompute the window wireframe and thin the references."""
@@ -303,6 +314,22 @@ class VioLogger:
             quaternion_wxyz=np.array(self.estimate_quaternion_wxyz, dtype=np.float64).reshape(-1, 4),
         )
 
+    def log_complete_paths(self) -> None:
+        """Log each whole path once, static, so both are visible at every cursor.
+
+        The per-frameset segments show where the run had got to; these show where
+        it went. Static rows have no timestamp, so they cost one copy of each
+        path however long the clip is.
+        """
+        for entity, trajectory, color in (
+            (f"{RUN_ENTITY}/path", self.estimated(), ESTIMATE_COLOR),
+            (f"{GT_ENTITY}/path", self.ground_truth_strip, GT_COLOR),
+            (f"{CPP_ENTITY}/path", self.cpp_strip, CPP_TRAJECTORY_COLOR),
+        ):
+            if len(trajectory) < 2:
+                continue
+            rr.log(entity, rr.LineStrips3D([trajectory.position_m], colors=color, radii=0.004), static=True)
+
     def _log_paths(self, estimated: Trajectory) -> None:
         """Draw the three trajectories, each up to the current cursor.
 
@@ -312,12 +339,24 @@ class VioLogger:
         Args:
             estimated: Everything reported so far, the newest pose last.
         """
-        rr.log(f"{RUN_ENTITY}/trajectory", rr.LineStrips3D([estimated.position_m], colors=ESTIMATE_COLOR, radii=0.004))
         t_ns: int = int(estimated.t_ns[-1])
+        if self.incremental_paths:
+            # One segment per frameset, from the previous pose to this one. The
+            # strips accumulate in a view whose visible time range reaches back
+            # to the start of the recording; `log_complete_paths` covers the rest.
+            if len(estimated) >= 2:
+                rr.log(f"{RUN_ENTITY}/trajectory", rr.LineStrips3D([estimated.position_m[-2:]], colors=ESTIMATE_COLOR, radii=0.004))
+            for entity, trajectory, color in ((GT_ENTITY, self.ground_truth_strip, GT_COLOR), (CPP_ENTITY, self.cpp_strip, CPP_TRAJECTORY_COLOR)):
+                drawn: int = int(np.searchsorted(trajectory.t_ns, t_ns, side="right"))
+                if drawn >= 2 and drawn > self.drawn_reference.get(entity, 0):
+                    rr.log(f"{entity}/trajectory", rr.LineStrips3D([trajectory.position_m[max(drawn - 2, 0) : drawn]], colors=color, radii=0.004))
+                self.drawn_reference[entity] = drawn
+            return
+        rr.log(f"{RUN_ENTITY}/trajectory", rr.LineStrips3D([estimated.position_m], colors=ESTIMATE_COLOR, radii=0.004))
         for entity, trajectory, color in ((GT_ENTITY, self.ground_truth_strip, GT_COLOR), (CPP_ENTITY, self.cpp_strip, CPP_TRAJECTORY_COLOR)):
             if len(trajectory) == 0:
                 continue
-            drawn: int = int(np.searchsorted(trajectory.t_ns, t_ns, side="right"))
+            drawn = int(np.searchsorted(trajectory.t_ns, t_ns, side="right"))
             rr.log(f"{entity}/trajectory", rr.LineStrips3D([trajectory.position_m[:drawn]], colors=color, radii=0.004))
 
     def _log_window(self, snapshot: _core.VioSnapshot) -> None:

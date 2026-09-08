@@ -119,7 +119,14 @@ class CameraCalib:
     """One camera as the estimator wants it: metric intrinsics and ``imu_T_cam``."""
 
     index: int
-    """Camera index on the rig, matching the order of a frameset's images."""
+    """Camera number the estimator knows this camera by, matching the order of a frameset's images.
+
+    On a rig fed whole that is also the rig index. Where
+    :attr:`RigProfile.camera_names` feeds a subset it is the position in that
+    list, and :attr:`SegmentFeed.camera_positions` maps it back to the rig — so
+    the keypoints, the images and the blueprint views all speak the estimator's
+    numbering and only the catalog reads speak the rig's.
+    """
     width: int
     """Decoded frame width in pixels."""
     height: int
@@ -703,18 +710,19 @@ class SegmentFeed:
             for frameset_index in range(start, stop):
                 images: list[UInt8[ndarray, "h w"]] = []
                 for position, (camera, decoder) in enumerate(zip(self.cameras, decoders, strict=True)):
+                    rig_camera: int = self.camera_positions[position]
                     wanted: int = int(self.index.frame_index[frameset_index, position])
                     while cursor[position] < wanted:
                         image: UInt8[ndarray, "h w"] | None = next(decoder, None)
                         if image is None:
-                            raise ValueError(f"{self.segment_id}: cam_{camera.index:02d} ran out of frames at its frame {cursor[position] + 1}")
+                            raise ValueError(f"{self.segment_id}: cam_{rig_camera:02d} ran out of frames at its frame {cursor[position] + 1}")
                         decoded[position] = image
                         cursor[position] += 1
                     current: UInt8[ndarray, "h w"] | None = decoded[position]
-                    assert current is not None, f"cam_{camera.index:02d} has no frame for frameset {frameset_index}"
+                    assert current is not None, f"cam_{rig_camera:02d} has no frame for frameset {frameset_index}"
                     if current.shape != (camera.height, camera.width):
                         raise ValueError(
-                            f"{self.segment_id}: cam_{camera.index:02d} decoded {current.shape}, calibration says {(camera.height, camera.width)}"
+                            f"{self.segment_id}: cam_{rig_camera:02d} decoded {current.shape}, calibration says {(camera.height, camera.width)}"
                         )
                     images.append(current)
                 if frameset_index % self.frame_stride:
@@ -1078,8 +1086,8 @@ def _build_feed(
     camera_positions: tuple[int, ...] = select_cameras(camera_statics, camera_count, profile.camera_names)
     index: _VideoIndex = _read_video_index(sensor_dataset, segment_id, camera_positions, profile.frameset_tolerance_ns)
     cameras: tuple[CameraCalib, ...] = tuple(
-        camera_calib(position, read_camera_statics(camera_statics, rig_entities[position]), float(index.fps), profile.downscale)
-        for position in camera_positions
+        camera_calib(number, read_camera_statics(camera_statics, rig_entities[position]), float(index.fps), profile.downscale)
+        for number, position in enumerate(camera_positions)
     )
     imu_T_body: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
     imu_T_body[:3, :3] = _static_values(rig_statics, f"{IMU_ENTITY}:Transform3D:mat3x3").reshape(3, 3, order="F")
