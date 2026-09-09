@@ -1,0 +1,15 @@
+[package]
+name = "slam-rs-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Native runner for the slam-rs core, usable with no Python at all."
+
+[[bin]]
+name = "slam-rs"
+path = "src/main.rs"
+
+[dependencies]
+slam-rs = { workspace = true }
+clap = { workspace = true }

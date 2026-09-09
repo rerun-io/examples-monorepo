@@ -1,0 +1,64 @@
+# slam-rs Cargo workspace: a pure-Rust VIO core, its PyO3 extension module and a
+# native CLI. Self-contained with a committed lockfile, like
+# packages/gsplat-rust-renderer, and never built during `pixi lock` /
+# `pixi install` — the `slam-rs-build` pixi task compiles it explicitly.
+[workspace]
+resolver = "3"
+members = ["crates/slam-rs", "crates/slam-rs-py", "crates/slam-rs-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+slam-rs = { path = "crates/slam-rs" }
+clap = { version = "4", features = ["derive"] }
+log = "0.4"
+nalgebra = "0.35"
+numpy = "0.29"
+pyo3 = "0.29"
+serde = { version = "1", features = ["derive"] }
+# `float_roundtrip` makes the JSON float parser correctly rounded, like the
+# `strtod` cereal uses on the C++ side. Without it several calibration and
+# config values land one ulp off the double basalt reads from the same file,
+# which is exactly the kind of difference the accuracy gate must not measure.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+thiserror = "2"
+# dev-only
+approx = "0.5"
+proptest = "1"
+
+# The estimator must never panic on data: errors are typed and returned.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+# The test suite is dominated by two things an unoptimized build makes ten
+# times slower than they need to be: 960x960 KLT pyramids, and the oracle
+# replays of a dense LM loop. Optimizing the dev and test profiles moved
+# `cargo test -p slam-rs` from 15.1 s to 0.74 s and the whole-pipeline test
+# from 14.2 s to 0.31 s, which is what lets that test and the whole
+# 60-frameset oracle window run in the default lane. A cold build costs 31 s
+# once.
+#
+# Floating-point semantics do not depend on the optimization level — rustc
+# never contracts or reassociates — and every oracle fixture still compares
+# exactly, which is the evidence for that here rather than an appeal to the
+# reference.
+#
+# `2`, not `3`: `.cargo/config.toml` records opt-level 3 crashing rustc's LLVM
+# while compiling faer on aarch64. faer has since left the graph; the override
+# there is kept until an aarch64 host re-tests it, and this level follows it.
+[profile.dev]
+opt-level = 2
+
+[profile.test]
+opt-level = 2
+
+# kornia-rs' release profile: the hot loops are small functions that have to
+# inline across crate boundaries.
+[profile.release]
+lto = "thin"
+codegen-units = 1
