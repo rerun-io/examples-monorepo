@@ -9,7 +9,10 @@
 pub mod calib;
 pub mod camera;
 pub mod config;
+pub mod frontend;
+pub mod image;
 pub mod lie;
+pub mod pyramid;
 pub mod types;
 
 /// Version of the core, as declared in `crates/slam-rs/Cargo.toml`.
