@@ -406,10 +406,10 @@ the band might not hold a third backend there. That was an untested explanation,
 not grounds to widen the gate.
 
 **Resolution, D71 (2026-09-09).** The finite predicate was faulty, but fixing it
-leaves all 22,117 MIO14 poses byte-identical. Native sin/cos error near zero is
-amplified by the SE(2) translation factor's division by theta. Bounded small-angle
-polynomials bring the full replay to **9.48 cm against the unchanged 10.63 cm
-limit**, with every frameset tracked. The nine other historical reference results
+leaves all 22,117 MIO14 poses byte-identical. Native sine error near zero is
+amplified by the SE(2) translation factor's division by theta. The small-angle sine
+polynomial with native cosine gives **9.72 cm versus GT** (sin+cos: **9.48 cm**),
+below the unchanged **10.63 cm limit**, with every frameset tracked. The nine other historical reference results
 are not a new ten-clip gate run; the targeted regression evidence is in D71.
 
 ## Where the portable lane runs
@@ -770,9 +770,9 @@ against 10.63 cm allowed. D71 records its later correction.
 
 ## D71 — wgpu finite check and small-angle trigonometry
 
-Decision, 2026-09-09: classify GPU floats by exponent bits, and use degree-9 sin
-and degree-10 cos Taylor polynomials for `|theta| <= 0.5` in the SE(2) update.
-Keep native trig outside that interval, and keep the CPU lane unchanged.
+Decision, 2026-09-09: classify GPU floats by exponent bits, and use a degree-9 sine
+Taylor polynomial for `|theta| <= 0.5` in the SE(2) update. Cosine stays native;
+sine is native outside that interval. Keep the CPU lane unchanged.
 
 The device probe proved `value * 0 == 0` accepts uploaded and device-generated
 NaN and both infinities. CubeCL 0.10's constant-operand optimizer replaces a
@@ -782,18 +782,20 @@ as the permanent device regression. This is a real defect, but correcting it
 leaves the full MIO14 trajectory byte-identical: **11.982561 cm versus GT** and
 **4.551881 cm versus C++**.
 
-The next probe measured native sin absolute error up to 1.86e-7 over ±0.001.
+The next probe measured native sin error up to 1.86e-7 (257 ULP) over ±0.001.
 An absolute bound is insufficient here: above the 1e-5 small-angle cutoff, the
-SE(2) translation factor divides normalized sin by theta. The polynomials match
-CPU sin/cos exactly on that dense interval and stay within one ULP on the wider
-regression grid. Their truncation errors on ±0.5 are below f32 rounding. The
+SE(2) translation factor divides normalized sin by theta. The sine polynomial stays
+within one ULP on the regression grid; native cosine stays within two ULP.
+The sine truncation error on ±0.5 is below f32 rounding. The
 normalization and SE(2) translation formulas stay unchanged.
 
-This one change brings MIO14 to **9.482019 cm versus GT**, below **10.633937 cm**,
+The original sin+cos change brings MIO14 to **9.482019 cm versus GT**, below **10.633937 cm**,
 and **6.665221 cm versus C++**. All **22,117/22,117** framesets track, with no
 retries, in **437.9 s (50.5 fps)**. The reproduced CPU run reads 8.734170 cm
 versus GT in 499.4 s. The long-clip gate uses the GT band; the short-clip C++ path
-bound does not apply to MIO14. No gate threshold was changed.
+bound does not apply to MIO14. S29-G's sine-only ablation gives **9.716469 cm versus
+GT** and **3.076043 cm versus C++**, with all 22,117 framesets tracked; the cosine
+polynomial is unnecessary for this measured gate and was removed. No gate threshold was changed.
 
 Localization found finite differences before any track-set change: the original
 lane first exceeds a 0.001 px position gap at frame 50, camera 0, keypoint 478;

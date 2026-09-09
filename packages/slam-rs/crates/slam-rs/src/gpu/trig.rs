@@ -1,4 +1,7 @@
-//! Small-angle trigonometry for the SE(2) translation factors.
+//! Small-angle sine for the SE(2) translation factors.
+//! Division by theta amplifies native sine's measured 257-ULP error; native
+//! cosine stays within 2 ULP and needs no polynomial. MIO14 GT ATE was 9.48 cm
+//! with sin+cos polynomials and 9.72 cm with sine only (10.63 cm allowed).
 use cubecl::prelude::*;
 
 /// Preserve relative accuracy near zero, where the SE(2) update divides by theta.
@@ -13,22 +16,5 @@ pub(crate) fn sin(theta: f32) -> f32 {
         theta + theta * square * polynomial
     } else {
         f32::sin(theta)
-    }
-}
-
-/// Taylor remainder is below 6e-13 on this interval, below f32 rounding.
-#[cube]
-pub(crate) fn cos(theta: f32) -> f32 {
-    if f32::abs(theta) <= 0.5f32 {
-        let square = theta * theta;
-        let polynomial = -0.5f32
-            + square
-                * (1.0f32 / 24.0f32
-                    + square
-                        * (-1.0f32 / 720.0f32
-                            + square * (1.0f32 / 40320.0f32 - square * (1.0f32 / 3628800.0f32))));
-        1.0f32 + square * polynomial
-    } else {
-        f32::cos(theta)
     }
 }

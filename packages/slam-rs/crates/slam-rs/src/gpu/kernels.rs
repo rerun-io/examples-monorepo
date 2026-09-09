@@ -697,12 +697,13 @@ fn patch_build_kernel(
 /// `SO2(cos, sin)` constructor **normalises** by `hypot`, the `V` factor divides
 /// by the *normalised* components, and the small-angle branch is Sophus's
 /// Taylor series below `Constants<float>::epsilon()`. `hypot` is spelled
-/// `sqrt(c*c + s*s)` here. Small-angle sin/cos use bounded polynomials because
-/// native absolute error is amplified by division by theta (D71). Normalization
+/// `sqrt(c*c + s*s)` here. Only sine uses a bounded polynomial: division by theta
+/// amplifies its measured 257-ULP native error; native cosine stays within 2 ULP.
+/// MIO14 GT ATE is 9.48 cm with sin+cos and 9.72 cm with sine only (D71). Normalization
 /// and fused multiply-add can still differ from the CPU by an ulp.
 #[cube]
 fn compose_se2_exp(state: &mut SharedMemory<f32>, t0: f32, t1: f32, theta: f32) {
-    let cos_theta = trig::cos(theta);
+    let cos_theta = f32::cos(theta);
     let sin_theta = trig::sin(theta);
     let length = f32::sqrt(cos_theta * cos_theta + sin_theta * sin_theta);
     let real = cos_theta / length;

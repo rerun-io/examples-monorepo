@@ -1283,7 +1283,7 @@ fn small_angle_probe(
     let i = ABSOLUTE_POS;
     if i < input.len() {
         output[2 * i] = trig::sin(input[i]);
-        output[2 * i + 1] = trig::cos(input[i]);
+        output[2 * i + 1] = f32::cos(input[i]); // Native cosine is what ships.
     }
 }
 

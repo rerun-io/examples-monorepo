@@ -178,8 +178,9 @@ decision is load-bearing: [the frontend](docs/design-notes.md#the-frontend-and-t
 | GPU | discrete NVIDIA | 1.4x on a 5090 through Vulkan |
 | GPU | shared-memory SoCs | slower than the CPU lane, so a portability result there, not a speed one |
 
-D71 closes the measured MIO14 accuracy miss: small-angle GPU trigonometry brings
-`MIO14_moving_props` from 11.98 to **9.48 cm**, below the unchanged **10.63 cm**
+D71 closes the measured MIO14 accuracy miss: the small-angle GPU sine polynomial
+with native cosine brings `MIO14_moving_props` from 11.98 to **9.72 cm versus GT**
+(sin+cos polynomials: **9.48 cm**), below the unchanged **10.63 cm**
 limit. The separate finite-check fix alone leaves that trajectory byte-identical.
 The four short benchmark clips retain their GT ATE within 0.0011 cm, and the CPU
 MIO10 trajectory stays byte-identical. These are targeted replay results, not a
