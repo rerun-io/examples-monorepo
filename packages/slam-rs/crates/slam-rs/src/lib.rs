@@ -22,13 +22,12 @@ pub mod frontend;
 #[cfg(feature = "gpu-core")]
 pub mod gpu;
 
-// `gpu-core` is the kernels and the seam; a runtime comes from `gpu` (CUDA) or
-// `gpu-wgpu`. Enabled on its own there would be no client to build one on, and
+// `gpu-core` is the kernels and the seam; the runtime comes from `gpu-wgpu`. Enabled on its own there would be no client to build one on, and
 // the failure would be a wall of missing items rather than a sentence.
-#[cfg(all(feature = "gpu-core", not(any(feature = "gpu", feature = "gpu-wgpu"))))]
+#[cfg(all(feature = "gpu-core", not(feature = "gpu-wgpu")))]
 compile_error!(
     "feature `gpu-core` carries the CubeCL kernels but no runtime: enable \
-     `gpu` for the NVIDIA lane or `gpu-wgpu` for the portable one"
+     `gpu-wgpu` for the wgpu runtime"
 );
 pub mod image;
 pub mod imu;

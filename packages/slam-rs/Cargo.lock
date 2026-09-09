@@ -3221,12 +3221,9 @@ version = "0.1.0"
 dependencies = [
  "approx",
  "cubecl",
- "cubecl-cuda",
  "cubecl-wgpu",
- "cudarc",
  "kornia-image",
  "kornia-imgproc",
- "libloading 0.9.0",
  "log",
  "nalgebra",
  "proptest",

@@ -8,7 +8,7 @@
 //! same one: **every reduction over pattern taps runs on unit 0 in ascending
 //! tap order** (decision D21's "reductions by hand", decision D31's fixed
 //! order), so a repeat run is bit-identical and the only differences from the
-//! CPU are the ones NVRTC's contraction of `a * b + c` introduces.
+//! CPU are the ones shader contraction of `a * b + c` introduces.
 //!
 //! ## One cube per patch
 //!
@@ -99,7 +99,7 @@ const TAP_SLOTS: usize = TAP_UNITS as usize;
 /// Units per cube on the per-element bookkeeping kernels.
 const LINEAR_UNITS: u32 = 256;
 
-/// Cube width on the pyramid kernel, the 32x8 tile the CubeCL-versus-CUDA test
+/// Cube width on the pyramid kernel, the 32x8 tile the kernel comparison test
 /// settled on.
 pub const TILE_W: u32 = 32;
 /// Cube height on the pyramid kernel.
@@ -1084,7 +1084,7 @@ fn finish_kernel(
 // and the shape checks the stage traits already make are what put every index
 // in range (`Robocap.md`, "Kernel-design rules learned"). The per-kernel
 // tolerance tests, which assert the pyramid **bit-exact** against the CPU, are
-// what validates that claim on every `cargo test --features gpu`. The one
+// what validates that claim on every `cargo test --features gpu-wgpu`. The one
 // exception is [`launch_probe`], which is off that path and says why.
 
 /// A device buffer and the element count the kernel will see in it.
@@ -1099,7 +1099,7 @@ pub(super) type Buffer<'a> = (&'a cubecl::server::Handle, usize);
 /// [`TILE_W`] x [`TILE_H`] tiles.
 ///
 /// Two-dimensional cube dims with `ABSOLUTE_POS_X`/`_Y` rather than a linear
-/// index and a `div`/`mod`, which is the layout the CubeCL-versus-CUDA
+/// index and a `div`/`mod`, which is the layout the kernel comparison
 /// measurement settled on.
 fn tile_2d(width: usize, height: usize) -> (CubeCount, CubeDim) {
     (
@@ -1121,8 +1121,7 @@ fn tile_2d(width: usize, height: usize) -> (CubeCount, CubeDim) {
 ///
 /// wgpu reports its adapter's own `max_compute_workgroups_per_dimension` and on
 /// every adapter measured that is exactly this floor, so the portable lane
-/// treats it as the limit rather than as a minimum. CUDA's own limit on the
-/// first axis is 2^31 - 1, far above anything here.
+/// treats it as the limit rather than as a minimum.
 const MAX_CUBES_PER_DIM: u32 = 65_535;
 
 /// The dispatch every per-element bookkeeping kernel uses: one unit per element,
@@ -1339,7 +1338,7 @@ pub(super) fn launch_probe<N: Numeric, R: Runtime>(
 /// Copy `count` pixels from the upload buffer to the front of `dst`.
 ///
 /// [`probe_kernel`] instantiated at `u16`, not a second kernel: the body was
-/// the same three lines, so a copy kernel of its own meant two NVRTC and two
+/// the same three lines, so a copy kernel of its own meant two
 /// SPIR-V modules compiled for one copy. `launch_unchecked` here where
 /// [`launch_probe`] takes the checked one — this is the per-frame path.
 pub(super) fn launch_copy_level0<R: Runtime>(

@@ -14,8 +14,7 @@ crate-type = ["cdylib"]
 
 [features]
 # Forwarded so the pixi build task can turn the CubeCL frontend on without
-# naming the core crate: `cargo build --release -p slam-rs-py --features gpu`.
-gpu = ["slam-rs/gpu"]
+# naming the core crate: `cargo build --release -p slam-rs-py --features gpu-wgpu`.
 gpu-wgpu = ["slam-rs/gpu-wgpu"]
 
 [dependencies]

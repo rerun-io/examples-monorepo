@@ -1192,10 +1192,7 @@ fn wrong_type(what: &str, name: &str, expected: &str) -> PyErr {
 #[pymodule]
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", slam_rs::VERSION)?;
-    // Which GPU runtime this extension was compiled with, so a caller can say
-    // `cuda` or `wgpu` rather than `gpu`: the two are separate builds of one
-    // source and `Vio(gpu=True)` cannot tell them apart. `None` here is the CPU
-    // port, whose `gpu=True` is refused.
+    // Report the wgpu runtime, or None for a CPU-only build.
     module.add("gpu_backend", slam_rs::GPU_BACKEND)?;
     module.add_class::<Vio>()?;
     module.add_class::<VioResult>()?;

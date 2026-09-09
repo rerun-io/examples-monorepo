@@ -206,8 +206,8 @@ pub enum PyramidError {
     Gpu(#[from] crate::gpu::GpuError),
     /// A device download returned the wrong number of bytes.
     ///
-    /// Only a GPU backend produces this. A CubeCL runtime whose CUDA
-    /// installation is incomplete panics on its own worker thread and hands
+    /// Only a GPU backend produces this. A CubeCL runtime whose shader
+    /// compilation fails panics on its own worker thread and hands
     /// back a short buffer rather than an error, and reading that as pixels
     /// would quietly give a black pyramid; every download is length-checked and
     /// a short one is refused here instead (decision D32).

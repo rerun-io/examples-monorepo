@@ -287,7 +287,7 @@ def clip_json(clip: ClipResult) -> dict[str, object]:
     return {key: getattr(clip, key) for key in CLIP_JSON_KEYS}
 
 
-Lane: TypeAlias = Literal["cpu", "cuda", "wgpu"]
+Lane: TypeAlias = Literal["cpu", "wgpu"]
 """Which frontend measured a row: the CPU port, or the GPU runtime the core was built with."""
 
 
@@ -316,7 +316,7 @@ def this_lane(gpu: bool) -> Lane:
         return "cpu"
     backend: Lane | None = _core.gpu_backend
     if backend is None:
-        raise ValueError("--gpu needs a core built with a GPU cargo feature; this one has none (slam-rs-gpu-build for CUDA, slam-rs-wgpu-build for wgpu)")
+        raise ValueError("--gpu needs a core built with a GPU cargo feature; this one has none (slam-rs-wgpu-build for wgpu)")
     return backend
 
 

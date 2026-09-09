@@ -14,7 +14,7 @@ from slam_rs.catalog_feed import CameraCalib, ImuCalib
 
 __version__: str
 
-gpu_backend: Literal["cuda", "wgpu"] | None
+gpu_backend: Literal["wgpu"] | None
 """Which GPU runtime this build's frontend carries, or None for the CPU-only default build.
 
 The ``gpu`` and ``gpu-wgpu`` cargo features are two builds of one source behind

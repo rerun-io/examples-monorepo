@@ -1,8 +1,8 @@
-//! The CubeCL frontend backend (decision D21), behind the `gpu` feature: the
+//! The CubeCL frontend backend (decision D21), behind the `gpu-wgpu` feature: the
 //! pyramid, the patch build, the corner scan and the KLT tracker on the GPU,
 //! behind the stage traits the CPU port already exposes.
 //!
-// The `gpu` feature and D21 are said here rather than as an outer doc line on
+// The `gpu-wgpu` feature and D21 are said here rather than as an outer doc line on
 // `pub mod gpu;`: an outer fragment makes rustdoc resolve this whole block in
 // the crate root's scope, where none of the names below are in scope, and every
 // link in the header broke silently because `cargo doc` was not a gate.
@@ -51,8 +51,7 @@
 //! they come out of plateaus and holds flat, and
 //! `the_whole_gpu_path_holds_the_pool_flat` is what says so: over 200 framesets
 //! of the whole path, reserved bytes and bytes in use are constant from the
-//! first frameset (156.74 / 40.00 MiB reserved on CUDA / wgpu, 18.51 MiB in use
-//! on both).
+//! first frameset (40.00 MiB reserved on wgpu, 18.51 MiB in use).
 //!
 //! ## Level parity, and why there are two pyramid buffers
 //!
@@ -81,7 +80,7 @@ pub enum GpuError {
     /// A device read came back with the wrong number of bytes.
     ///
     /// The one failure mode a CubeCL backend has that a CPU one does not: a
-    /// runtime whose CUDA installation is incomplete panics on its own worker
+    /// runtime whose shader compilation fails panics on its own worker
     /// thread and hands back a buffer of zeros rather than an error, so every
     /// download is length-checked and a short one is refused here instead of
     /// being read as data (decision D32).
@@ -152,7 +151,7 @@ pub enum GpuError {
     },
     /// The runtime cannot store an element width the kernels bind.
     ///
-    /// See [`probe_storage`]: both of this backend's bring-up failures are
+    /// See [`probe_storage`]: shader compilation failures can be
     /// silent, and this is what turns them into an error.
     #[error(
         "this runtime does not store {width}-bit elements: a device copy of a \
@@ -166,53 +165,9 @@ pub enum GpuError {
         /// Elements copied.
         count: usize,
     },
-    /// A shared library the runtime loads at run time is not on the loader path.
-    ///
-    /// cudarc `dlopen`s `libcuda` and `libnvrtc` on first use and **panics**
-    /// (`panic_no_lib_found`) when none of its name candidates resolves, so the
-    /// probe opens them itself first. `libcudart` is not in the list on purpose:
-    /// nothing dlopens it — what the CUDA lane needs from `cuda-cudart-dev` is
-    /// the `cuda_runtime.h` NVRTC's generated code includes, and a missing
-    /// header is a compile error the runtime reports rather than a loader panic.
-    #[error(
-        "the GPU runtime needs the {library} shared library, which is not on the \
-         loader path: install it and put its directory on LD_LIBRARY_PATH, or run \
-         the CPU frontend, which needs no GPU"
-    )]
-    MissingLibrary {
-        /// The library's cudarc name — `cuda` for the driver, `nvrtc` for the compiler.
-        library: &'static str,
-    },
-    /// The GPU driver refused to initialise.
-    #[error(
-        "the {runtime} driver did not initialise (error {code}): this host has no \
-         usable GPU driver, so run the CPU frontend, which needs none"
-    )]
-    DriverUnavailable {
-        /// Which runtime asked.
-        runtime: &'static str,
-        /// The driver's own status code, for the reason its own docs give.
-        code: i32,
-    },
-    /// The driver initialised and reported no devices.
-    ///
-    /// What `CUDA_VISIBLE_DEVICES=` produces, and what a container started
-    /// without `--gpus` produces.
-    #[error(
-        "the {runtime} driver reports {count} devices: nothing is visible to run \
-         on — check CUDA_VISIBLE_DEVICES — or run the CPU frontend, which needs \
-         no device"
-    )]
-    NoDevice {
-        /// Which runtime asked.
-        runtime: &'static str,
-        /// Devices the driver reported.
-        count: i32,
-    },
     /// No wgpu adapter for the backend this build runs on.
     ///
-    /// The portable lane's equivalent of [`GpuError::NoDevice`]: the Vulkan
-    /// loader found no ICD, or the device it found does not present an adapter.
+    /// The Vulkan loader found no ICD, or the device has no adapter.
     #[error(
         "wgpu found no {backend} adapter on this host: install a {backend} driver, \
          or run the CPU frontend, which needs no adapter"
@@ -240,41 +195,6 @@ pub enum GpuError {
     },
 }
 
-/// The NVIDIA runtime, so nothing outside this module names `cubecl_cuda`.
-///
-/// This and the module's `cuda_client` are the only two items on the `gpu`
-/// feature rather than on `gpu-core`: they are what `cubecl-cuda` is for, and
-/// keeping them apart is what lets a `gpu-wgpu` build carry neither the crate
-/// nor its codegen.
-#[cfg(feature = "gpu")]
-pub type CudaRuntime = cubecl_cuda::CudaRuntime;
-
-/// A [`CudaRuntime`] client on the default device.
-///
-/// The one NVIDIA-specific line in the crate; `wgpu_client` — which only a
-/// `gpu-wgpu` build has — is the same code with another client.
-///
-/// Private: it constructs a client without probing this host and without a
-/// panic guard, so a public one would be a second door into exactly the failure
-/// [`gpu_client`] exists to close. The only way to a client from outside this
-/// module is [`gpu_client`], which is fallible.
-#[cfg(feature = "gpu")]
-fn cuda_client() -> cubecl::prelude::ComputeClient<CudaRuntime> {
-    use cubecl::prelude::Runtime;
-    cubecl_cuda::CudaRuntime::client(&cubecl_cuda::CudaDevice::default())
-}
-
-/// The runtime this build's GPU lane runs on.
-///
-/// CUDA when only `gpu` is enabled and wgpu when `gpu-wgpu` is. Every type in
-/// the crate outside this file names [`GpuRuntime`], never a concrete runtime,
-/// so moving a host onto the portable lane is a cargo feature rather than a
-/// port — and `cargo test --features gpu-wgpu` runs the same per-kernel
-/// tolerance tests through Vulkan, which is what makes that claim checkable
-/// rather than merely compiled.
-#[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
-pub type GpuRuntime = CudaRuntime;
-
 /// The runtime this build's GPU lane runs on: the portable one.
 #[cfg(feature = "gpu-wgpu")]
 pub type GpuRuntime = cubecl_wgpu::WgpuRuntime;
@@ -286,17 +206,11 @@ pub type GpuRuntime = cubecl_wgpu::WgpuRuntime;
 /// `CUBECL_WGPU_DEFAULT_DEVICE` on the portable lane; `WGPU_BACKEND` and
 /// `WGPU_ADAPTER_NAME` are ignored by cubecl-wgpu.
 ///
-/// Fallible, and in this order, because **CubeCL 0.10 unwraps its own
-/// bring-up**: `CudaRuntime::client` unwraps the driver's initialisation and
-/// `cubecl-wgpu` expects an adapter, and both do it on the runtime's own worker
-/// thread, so the caller gets a `RecvError` panic rather than an error. On a
-/// host with `CUDA_VISIBLE_DEVICES=` that reached Python as a
-/// `PanicException`, against [`crate::Vio`]'s documented contract that a
-/// refusal is a `ValueError` and never a Rust panic (decision D32).
+/// CubeCL 0.10 expects an adapter on its worker thread, so bring-up can
+/// panic instead of returning an error (decision D32).
 ///
-/// 1. `probe_availability` asks the runtime's **own** fallible API — cudarc's
-///    `init` and device count, wgpu's `request_adapter` — before any client
-///    exists, so the common failures name what is missing.
+/// 1. `probe_availability` asks wgpu's fallible `request_adapter` API before
+///    any client exists, so common failures name what is missing.
 /// 2. The construction itself runs inside the module's `guarded`, because a
 ///    probe can only anticipate what it knows to ask.
 ///
@@ -314,8 +228,7 @@ pub type GpuRuntime = cubecl_wgpu::WgpuRuntime;
 ///
 /// # Errors
 ///
-/// [`GpuError::MissingLibrary`], [`GpuError::DriverUnavailable`],
-/// [`GpuError::NoDevice`] or [`GpuError::NoAdapter`] from the probe, and
+/// [`GpuError::NoAdapter`] from the probe, and
 /// [`GpuError::ClientPanicked`] from anything it did not anticipate.
 #[cfg(feature = "gpu-core")]
 pub fn gpu_client() -> Result<cubecl::prelude::ComputeClient<GpuRuntime>, GpuError> {
@@ -324,122 +237,17 @@ pub fn gpu_client() -> Result<cubecl::prelude::ComputeClient<GpuRuntime>, GpuErr
         GpuError::ClientPanicked {
             runtime: RUNTIME_NAME,
         },
-        || {
-            #[cfg(feature = "gpu-wgpu")]
-            {
-                Ok(wgpu_client())
-            }
-            #[cfg(not(feature = "gpu-wgpu"))]
-            {
-                Ok(cuda_client())
-            }
-        },
+        || Ok(wgpu_client()),
     )
 }
-
-/// What this build's lane is called in an error a user reads.
-#[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
-const RUNTIME_NAME: &str = "CUDA";
 
 /// What this build's lane is called in an error a user reads.
 #[cfg(feature = "gpu-wgpu")]
 const RUNTIME_NAME: &str = "wgpu";
 
-/// The same runtime as the name a machine reads: the cargo feature's own word,
-/// lowercase, which is what a fleet row's `lane` says and what a chart groups on
-/// ([`crate::GPU_BACKEND`]). Kept beside `RUNTIME_NAME` rather than derived from
-/// it, because that one is prose in a sentence a person reads. Not a link:
-/// `RUNTIME_NAME` is private, and a public item linking to a private one renders
-/// as plain text, which the doc gate denies.
-#[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
-pub const BACKEND_NAME: &str = "cuda";
-
 /// The same runtime as the name a machine reads: the portable lane's.
 #[cfg(feature = "gpu-wgpu")]
 pub const BACKEND_NAME: &str = "wgpu";
-
-/// Refuse a host that cannot run this lane, before any CubeCL client exists.
-///
-/// The NVIDIA arm. Three questions in the order that makes each answerable:
-/// cudarc `dlopen`s `libcuda` and `libnvrtc` and **panics** when it cannot find
-/// them, so they are opened here first; then `cuInit`, which is what
-/// `CudaRuntime::client` unwraps; then the device count, which is what
-/// `CUDA_VISIBLE_DEVICES=` empties while leaving the driver perfectly healthy.
-///
-/// # Errors
-///
-/// [`GpuError::MissingLibrary`], [`GpuError::DriverUnavailable`] or
-/// [`GpuError::NoDevice`], each naming what a user can act on.
-#[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
-fn probe_availability() -> Result<(), GpuError> {
-    if let Some(missing) = first_missing_library(&CUDA_LIBRARIES) {
-        return Err(missing);
-    }
-    // `CUDA_ERROR_NO_DEVICE` is what `CUDA_VISIBLE_DEVICES=` produces here: the
-    // driver is loaded and healthy and `cuInit` itself refuses, so it is the
-    // device error and not the driver one. The count below covers the other
-    // shape, where initialisation succeeds and nothing is visible.
-    cudarc::driver::result::init().map_err(|error| {
-        log::warn!("cuInit failed: {error}");
-        if error.0 == cudarc::driver::sys::CUresult::CUDA_ERROR_NO_DEVICE {
-            GpuError::NoDevice {
-                runtime: RUNTIME_NAME,
-                count: 0,
-            }
-        } else {
-            GpuError::DriverUnavailable {
-                runtime: RUNTIME_NAME,
-                code: error.0 as i32,
-            }
-        }
-    })?;
-    let count: i32 = cudarc::driver::result::device::get_count().map_err(|error| {
-        log::warn!("cuDeviceGetCount failed: {error}");
-        GpuError::DriverUnavailable {
-            runtime: RUNTIME_NAME,
-            code: error.0 as i32,
-        }
-    })?;
-    if count > 0 {
-        Ok(())
-    } else {
-        Err(GpuError::NoDevice {
-            runtime: RUNTIME_NAME,
-            count,
-        })
-    }
-}
-
-/// The libraries cudarc loads at run time, in the order the probe asks for them.
-///
-/// `libcuda` is the driver `cuInit` lives in and `libnvrtc` is the compiler
-/// every kernel here goes through; cudarc `dlopen`s both on first use and
-/// `panic_no_lib_found`s when none of its name candidates resolves.
-#[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
-const CUDA_LIBRARIES: [&str; 2] = ["cuda", "nvrtc"];
-
-/// The first of `libraries` that cudarc's own name candidates cannot open.
-///
-/// The candidates come from `cudarc::get_lib_name_candidates`, which is the
-/// list `panic_no_lib_found` prints, so the probe and the loader can only ever
-/// disagree about *when* the answer is taken, never about what it is.
-///
-/// A parameter rather than the constant so a unit test can ask for a name no
-/// host has. The real absence is made in a child process instead
-/// (`a_cuda_host_that_cannot_load_nvrtc_is_a_typed_error`): emptying
-/// `LD_LIBRARY_PATH` is not enough here, because pixi links every binary in the
-/// environment with an absolute `RUNPATH` into the environment's own `lib`,
-/// which the loader searches after `LD_LIBRARY_PATH`; the child is started
-/// through `ld.so --inhibit-rpath ''` so that route is closed too.
-#[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
-fn first_missing_library(libraries: &[&'static str]) -> Option<GpuError> {
-    libraries.iter().find_map(|library| {
-        let loadable: bool = cudarc::get_lib_name_candidates(library)
-            .iter()
-            .any(|candidate| unsafe { libloading::Library::new(candidate) }.is_ok());
-        (!loadable).then_some(GpuError::MissingLibrary { library })
-    })
-}
 
 /// Refuse a host that cannot run this lane, before any CubeCL client exists.
 ///
@@ -653,16 +461,12 @@ fn arm_fault_at(site: &'static str) {
 
 /// Refuse a runtime that cannot store an element width the kernels bind.
 ///
-/// Both of this backend's bring-up failures are **silent**, and neither is
+/// Shader compilation failures can be **silent**, and are not
 /// visible in `client.properties()`, which describes the device rather than the
 /// compiler that will run on it:
 ///
-/// * A CUDA install without `cuda-nvrtc` / `cuda-cudart-dev` panics on cubecl's
-///   own worker thread. The client still constructs, every launch reports
-///   success, and every read comes back as zeros.
 /// * `cubecl-wgpu`'s **WGSL** compiler panics on `u16` and `u8` —
-///   "U16 is not a valid WgpuElement" — on the same worker thread, with the
-///   same result. The pyramid is `u16` and the candidate image is `u8`, so on
+///   "U16 is not a valid WgpuElement" — on the worker thread, returning zeros. The pyramid is `u16` and the candidate image is `u8`, so on
 ///   the portable lane without `cubecl-wgpu/spirv` every kernel here silently
 ///   produces nothing. Measured on this host: the pyramid came back all zeros
 ///   and the detector found no corners, with no error anywhere.
@@ -803,7 +607,7 @@ pub fn probe_storage<R: cubecl::prelude::Runtime>(
 /// the adapter with `CUBECL_WGPU_DEFAULT_DEVICE`; `WGPU_BACKEND` and
 /// `WGPU_ADAPTER_NAME` are ignored by cubecl-wgpu.
 ///
-/// Private for the reason `cuda_client` is: unprobed and unguarded, and
+/// Private because it is unprobed and unguarded, and
 /// [`gpu_client`] is the only public way to a client.
 #[cfg(feature = "gpu-wgpu")]
 fn wgpu_client() -> cubecl::prelude::ComputeClient<cubecl_wgpu::WgpuRuntime> {
@@ -1055,30 +859,5 @@ mod tests {
         // Both reads succeed unarmed, so the two lines above are the guards.
         pyramid.copy_level_into(0, &mut level).unwrap();
         patches.read_store().unwrap();
-    }
-
-    /// A library cudarc would panic on is a typed error naming it.
-    ///
-    /// The mapping, asked for a name no host has; the real absence is a child
-    /// process that has genuinely lost `libnvrtc`
-    /// (`a_cuda_host_that_cannot_load_nvrtc_is_a_typed_error`, which had to
-    /// inhibit the binary's own `RUNPATH` to make it lose it). The two
-    /// libraries this lane does need are asserted present in the same test, so
-    /// a host that has lost one fails here rather than in the mapping.
-    #[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
-    #[test]
-    fn a_library_the_runtime_cannot_load_is_a_typed_error() {
-        assert_eq!(
-            first_missing_library(&["slam-rs-no-such-library"]),
-            Some(GpuError::MissingLibrary {
-                library: "slam-rs-no-such-library"
-            })
-        );
-        assert_eq!(first_missing_library(&CUDA_LIBRARIES), None);
-        // And the message says what to do about it, because it is what a user
-        // on a fleet machine reads instead of a panic.
-        let message: String = GpuError::MissingLibrary { library: "nvrtc" }.to_string();
-        assert!(message.contains("nvrtc"), "{message}");
-        assert!(message.contains("LD_LIBRARY_PATH"), "{message}");
     }
 }
