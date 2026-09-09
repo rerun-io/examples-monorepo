@@ -11,6 +11,32 @@ estimate against the ground truth and against the basalt C++ reference on the
 same frames. On the smoke segment it is 0.31 cm from the C++ trajectory and
 1.50 cm from ground truth, where the C++ itself is 1.43 cm.
 
+## How data gets in and out
+
+The library reads one thing: a recording in the dataforge rig schema. One base
+`.rrd` per sequence carries the rig calibration, one video stream per camera and
+the IMU stream. Ground truth and results are separate layer files that stack onto
+the same entity paths.
+
+Raw data, whatever its files look like (an EuRoC folder, a ROS bag, a vendor
+SDK), is converted into that recording once, with a dataforge ingester. After
+that every tool reads the same bytes: the viewer, this estimator, the C++
+reference.
+
+- One sequence: `tools/apps/replay.py --stage vio --rrd base.rrd [--gt-rrd gt.rrd]`.
+  The feed serves the files from an in-process server; no catalog server is
+  needed.
+- Many sequences: register the base and layer files on a catalog server and
+  address them by segment id through the reference manifest.
+
+The estimate comes back the same way: a trajectory CSV, and a Rerun recording
+that layers the estimated poses, the landmarks and the window onto the input,
+beside the ground truth and the C++ run.
+
+In code the contract is three calls: `Calibration` is the rig, `Vio.push_imu`
+takes one IMU sample, `Vio.track` takes one synchronized frameset of `uint8`
+images. The feed is the only adapter between the recording and those calls.
+
 ## Core modules
 
 The core is being filled in stage by stage, bottom up. What is in it today:
