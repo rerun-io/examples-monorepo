@@ -426,7 +426,7 @@ allowed 10.63 on `MIO14_moving_props`** — a D60 failure on one of the ten,
 written up rather than smoothed over. Nothing points at a wrong kernel: every
 tolerance test passes on Vulkan, the pyramid and the corner scan are bit-exact,
 and the worst lane-to-lane tracked position over the fixture is 3.1e-5 px.
-MIO14 is the 410 s clip S15 identified as chaotic and D60 was built around —
+MIO14 is the 410 s clip the accuracy-band pass identified as chaotic and D60 was built around —
 the C++'s own two precisions differ by 2.3 cm on it — so the reading is that
 the band is not wide enough to hold a third backend there. It is still a gate
 failure, and **the portable lane is not anyone's default until MIO14 is
@@ -434,7 +434,7 @@ understood** (`reports/pr22-gpu-round2.md`, next step 1).
 
 ## Where the portable lane runs
 
-Measured device by device in S23 (`reports/pr23-portable.md`), the two smoke
+Measured device by device in the portability run (`reports/pr23-portable.md`), the two smoke
 clips and the eleven per-kernel tolerance tests on each:
 
 | device | driver → compiler | tolerance suite | the lane |
@@ -743,7 +743,7 @@ the test's own module docstring.
 
 The tolerances live in `slam_rs/reference.py` (`ATE_VS_CPP_CM`,
 `PATH_BOUND_MAX_CLIP_S`, `GT_BAND_RATIO`, `SPEED_TOLERANCE`,
-`DIVERGENCE_FACTOR`), not in the test: they are the milestone's verdict, and S15
+`DIVERGENCE_FACTOR`), not in the test: they are the milestone's verdict, and the accuracy-band pass
 measured what a meaningful band is (D60). Every row prints what it was judged on:
 `tracked, vs C++ <cm> (bound 2 cm | no bound, <n> s clip), vs GT <cm> (band [f32,
 f64], allowed <cm>), wall, C++ wall, ratio`.
@@ -777,3 +777,22 @@ pixi run -e slam-rs-dev --frozen tests   # fast
 cd packages/slam-rs && pytest -m slow -q # NAS + catalog
 ```
 
+## Decision references
+
+The `Dnn` tags in this file and in the README name the project's recorded design decisions. What each one decided, in one line:
+
+- **D09** — FAST detection reuses kornia's grid-cell detector behind a thin wrapper
+- **D14** — Accuracy gate: trajectory-level, against basalt C++ on the same decode path, plus ground truth
+- **D17** — Threading: Offline (lockstep) mode first; Realtime mode is an enum value reserved for later
+- **D31** — Deterministic reductions and the thread budget have an explicit Rust mapping
+- **D32** — Panic policy: the core never panics on data; NaN handling mirrors basalt
+- **D34** — The shipped VIO path has the landmark and pose damping machinery disabled; the port mirrors that
+- **D35** — Numeric gate ladder adopted from the paper dossier
+- **D36** — Gate policy per reference segment: tight, standard, no-divergence
+- **D41** — Eigen's pivoted LDLT semantics are load-bearing and are ported exactly
+- **D44** — Rotation matrices in numerically sensitive paths use Eigen's `toRotationMatrix` operation order
+- **D58** — Runtime parity is part of the stopping line; two parallel stages open
+- **D59** — The iteration loop: one or two short clips, fail-fast on the ten, speed is a gate clause
+- **D60** — The V2 accuracy gate, on the evidence: ground truth inside the C++'s own precision band, the path bound only where the C++ meets it itself, speed on every clip
+- **D64** — Reaffirmed for the GPU lanes: no bit-accuracy; the bar is accuracy inside the band and faster than the CPU lane on the same machine
+- **D68** — The three unreachable blocks go: squared-form marginalization, nullspace diagnostics, the D34 damping stack
