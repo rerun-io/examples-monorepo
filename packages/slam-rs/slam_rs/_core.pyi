@@ -5,11 +5,209 @@ exact: no ``Any``, and every array carries its dtype.
 """
 
 from collections.abc import Sequence
+from typing import ClassVar
 
-from jaxtyping import Float32, Int32, Int64, UInt8
+from jaxtyping import Bool, Float32, Float64, Int32, Int64, UInt8
 from numpy import ndarray
 
+from slam_rs.catalog_feed import CameraCalib, ImuCalib
+
 __version__: str
+
+class VioStatus:
+    """How far the estimator has got.
+
+    Offline mode has exactly these two states: a measured frameset always has a
+    state and an uncovered one never does, so there is no third, "initialising"
+    status to branch on.
+
+    A PyO3 enum, not a ``enum.Enum``: it carries no ``name`` or ``value``, it is
+    unhashable, and ``VioStatus(1)`` raises ``TypeError``. It does convert to
+    ``int`` and compares equal both to its own variants and to their ordinals.
+    """
+
+    NeedMoreImu: ClassVar[VioStatus]
+    Tracking: ClassVar[VioStatus]
+    __hash__: ClassVar[None]
+
+    def __int__(self) -> int: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __repr__(self) -> str: ...
+
+class VioResult:
+    """What one :meth:`Vio.track` call produced."""
+
+    @property
+    def status(self) -> VioStatus: ...
+    @property
+    def t_ns(self) -> int: ...
+    @property
+    def world_from_rig(self) -> Float64[ndarray, " 7"]:
+        """``[tx, ty, tz, qx, qy, qz, qw]``, metres and a unit quaternion (xyzw)."""
+
+    @property
+    def velocity(self) -> Float64[ndarray, " 3"]:
+        """Rig velocity in the world frame, m/s."""
+
+    @property
+    def gyro_bias(self) -> Float64[ndarray, " 3"]:
+        """Gyroscope bias estimate, rad/s."""
+
+    @property
+    def accel_bias(self) -> Float64[ndarray, " 3"]:
+        """Accelerometer bias estimate, m/s^2."""
+
+    def __repr__(self) -> str: ...
+
+class VioSnapshot:
+    """The estimator's window, its landmarks and the last measured frame's statistics.
+
+    The window is the 15-dof states followed by the pose-only blocks, each oldest
+    first; :attr:`window_keyframe` and :attr:`window_long_term` say what each
+    frame is, :attr:`kf_ids` is the keyframes as an id list, and
+    :attr:`marginalized` is what the last marginalization removed. Everything is
+    a copy, so a snapshot stays valid across the next :meth:`Vio.track`.
+    """
+
+    @property
+    def t_ns(self) -> int:
+        """Frameset timestamp of the newest state in the window."""
+
+    @property
+    def window_t_ns(self) -> Int64[ndarray, " n_frames"]: ...
+    @property
+    def window_poses(self) -> Float64[ndarray, "n_frames 7"]:
+        """``[tx, ty, tz, qx, qy, qz, qw]`` per window frame, metres and a unit quaternion (xyzw)."""
+
+    @property
+    def window_keyframe(self) -> Bool[ndarray, " n_frames"]:
+        """Whether each window frame is a keyframe, as the estimator itself answers it."""
+
+    @property
+    def window_long_term(self) -> Bool[ndarray, " n_frames"]:
+        """Whether each window frame is a long-term keyframe."""
+
+    @property
+    def kf_ids(self) -> Int64[ndarray, " n_keyframes"]:
+        """The keyframes' timestamps, oldest first."""
+
+    @property
+    def marginalized(self) -> Int64[ndarray, " n_marginalized"]:
+        """Frames the last marginalization removed from the window."""
+
+    @property
+    def landmark_ids(self) -> Int64[ndarray, " n_landmarks"]:
+        """Landmark ids, which are the ids of the keypoints that spawned them."""
+
+    @property
+    def landmark_hosts(self) -> Int64[ndarray, " n_landmarks"]:
+        """Timestamp of the keyframe hosting each landmark."""
+
+    @property
+    def landmark_positions(self) -> Float64[ndarray, "n_landmarks 3"]:
+        """Landmark positions in the world frame, metres."""
+
+    @property
+    def lm_iterations(self) -> int:
+        """Levenberg-Marquardt steps the last frame took; the rejected ones are the rest."""
+
+    @property
+    def lm_lambda(self) -> float:
+        """Damping the last step solved with; ``0.0`` when no step ran."""
+
+    @property
+    def lm_error_before(self) -> float:
+        """Total cost before the first step; ``0.0`` when no step ran."""
+
+    @property
+    def lm_error_after(self) -> float:
+        """Total cost after the last step; ``0.0`` when no step ran."""
+
+    @property
+    def num_observations(self) -> int:
+        """Landmark observations the window holds."""
+
+    @property
+    def timings_ms(self) -> dict[str, float]:
+        """Wall time each stage took on the last frame, in milliseconds.
+
+        The estimator's six — ``back_substitution``, ``error``, ``linearize``,
+        ``marginalize``, ``measure``, ``solver`` — and the frontend lane's four:
+        ``frontend_pyramid``, ``frontend_detect``, ``frontend_track`` and
+        ``frontend_imu``. They do not sum to the frame: what happens between the
+        phases is nobody's stage.
+        """
+
+    def __repr__(self) -> str: ...
+
+class Vio:
+    """basalt's VIO pipeline, driven one frameset at a time.
+
+    Offline mode (D17): the frontend and the backend run to completion in the
+    calling thread, so every result is final and a repeat run over the same
+    input is bit-identical.
+
+    The refusals are the ones :class:`OpticalFlow` makes — a value the core
+    refuses is a ``ValueError``, an object of the wrong type a ``TypeError`` and
+    an integer outside the parameter's own type an ``OverflowError`` — never a
+    Rust panic.
+    """
+
+    def __init__(
+        self,
+        calibration: Calibration,
+        config: VioConfig,
+        *,
+        threads: int = 1,
+        max_keypoints: int | None = None,
+    ) -> None:
+        """Build the pipeline for one rig; basalt's own files arrive through ``from_json``.
+
+        Raises ``ValueError`` on everything :class:`OpticalFlow` refuses, and on
+        a config asking for a path this port does not have:
+        ``vio_linearization_type`` other than ``ABS_QR``, ``vio_sqrt_marg``
+        false, or ``vio_enforce_realtime``, which Offline mode cannot honour.
+        """
+
+    @property
+    def camera_count(self) -> int: ...
+    def push_imu(self, t_ns: int, gyro: Sequence[float], accel: Sequence[float]) -> None:
+        """Add one uncalibrated IMU sample.
+
+        Raises ``ValueError`` unless ``t_ns`` strictly follows the last sample
+        and every component is finite.
+        """
+
+    def push_imu_batch(
+        self,
+        t_ns: Int64[ndarray, " n_samples"],
+        gyro: Float64[ndarray, "n_samples 3"],
+        accel: Float64[ndarray, "n_samples 3"],
+    ) -> None:
+        """Add a batch of samples, all or nothing.
+
+        Raises what :meth:`push_imu` raises, for any sample of the batch, and
+        keeps none of it when it does: the estimator is left where it was, so the
+        batch can be corrected and pushed again.
+        """
+
+    def track(self, t_ns: int, images: Sequence[UInt8[ndarray, "h w"]]) -> VioResult:
+        """Process one frameset of ``camera_count`` C-contiguous ``(h, w)`` uint8 images.
+
+        Raises ``ValueError`` on a bad dtype, rank or layout, on the wrong number
+        of images, unless every image is the size the calibration gives its
+        camera, and unless ``t_ns`` is strictly after the last accepted frameset.
+        On a GPU lane a device that dies mid-run raises ``ValueError`` here as
+        well, never a ``PanicException``.
+        """
+
+    def snapshot(self) -> VioSnapshot | None:
+        """The window and the last measured frame, or None before the first one."""
+
+    def flow_frame(self) -> FlowFrame | None:
+        """The keypoints the frontend tracked on the last accepted frameset, or None before the first."""
+
+    def __repr__(self) -> str: ...
 
 class VioConfig:
     """basalt's ``VioConfig``, as ``data/**/*_config.json`` carries it."""
@@ -35,6 +233,10 @@ class Calibration:
     @staticmethod
     def from_json(text: str) -> Calibration:
         """Read one of basalt's calibration files."""
+
+    @staticmethod
+    def from_catalog(cameras: Sequence[CameraCalib], imu: ImuCalib) -> Calibration:
+        """Build the calibration from the feed's dataclasses; ``imu.imu_T_body`` is unused."""
 
     def to_json(self) -> str:
         """Write the calibration back in basalt's shape, ``value0`` wrapper and all."""

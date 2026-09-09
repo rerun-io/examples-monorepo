@@ -236,3 +236,22 @@ def test_a_static_method_is_static_on_both_sides() -> None:
             is_static: bool = isinstance(vars(getattr(_core, class_name)).get(name), staticmethod)
             assert declared_static == is_static, f"{class_name}.{name}: stub static={declared_static}, runtime static={is_static}"
 
+
+def test_vio_status_behaves_as_the_stub_describes() -> None:
+    """The stub calls VioStatus a plain PyO3 class; hold it to exactly that contract."""
+    status: _core.VioStatus = _core.VioStatus.NeedMoreImu
+    assert int(status) == 0
+    assert int(_core.VioStatus.Tracking) == 1
+    assert status == _core.VioStatus.NeedMoreImu
+    assert status != _core.VioStatus.Tracking
+    assert repr(status) == "VioStatus.NeedMoreImu"
+    # Not an enum.Enum: no name/value, unhashable, not constructible.
+    assert not hasattr(status, "name")
+    assert not hasattr(status, "value")
+    with pytest.raises(TypeError):
+        hash(status)
+    # Routed through a Callable: the stub declares no constructor arguments, so a
+    # direct `VioStatus(1)` is a static error — which is exactly the promise here.
+    constructor: Callable[..., object] = _core.VioStatus
+    with pytest.raises(TypeError):
+        constructor(1)
