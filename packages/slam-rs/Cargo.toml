@@ -37,31 +37,20 @@ proptest = "1"
 # fast_detect_rect_u8` is the FAST kernel behind basalt's grid detector
 # (decision D09, D20). It doubles as the pyramid's test oracle (`pyrdown_u8`,
 # decision D08). Pinned by exact git rev with default features off; kornia's
-# CUDA features are never enabled, because GPU work here is CubeCL only (T04).
+# GPU features are disabled; GPU work here uses CubeCL (T04).
 kornia-image = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
 kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
 
-# The GPU phase (decision D21, V4). CubeCL 0.10 stable: one kernel source, the
-# runtime a type parameter. `cubecl-cuda` is the NVIDIA lane and `cubecl-wgpu`
-# the portable one; both are optional, so the default build of every crate here
-# is the CPU port with no GPU dependency in the graph at all.
+# The GPU phase (decision D21, D70). CubeCL 0.10 stable with the optional
+# wgpu runtime; the default CPU build has no GPU dependency.
 cubecl = "0.10"
-cubecl-cuda = "0.10"
 # No `features` here: which shader compiler cubecl-wgpu builds is decided per
 # target in `crates/slam-rs/Cargo.toml`, because `spirv` and `msl` are not the
 # same lane on the same platform (see the two target sections there).
 cubecl-wgpu = "0.10"
 
-# What the availability probe reads before any CubeCL client is constructed:
-# CubeCL 0.10 unwraps its own bring-up, so the only way an absent GPU becomes a
-# typed error rather than a panic is to ask the runtimes themselves first. Both
-# are already in the graph — `cudarc` under `cubecl-cuda`, `wgpu` under
-# `cubecl-wgpu` — and both are declared here with a feature subset of what those
-# two ask for, so naming them adds no crate and changes no compiled feature set.
-# `libloading` is what the probe dlopens with, which is what cudarc does before
-# it panics.
-cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "fallback-dynamic-loading"] }
-libloading = "0.9"
+# Probe wgpu before constructing a CubeCL client, whose bring-up can panic.
+# This feature subset adds nothing to cubecl-wgpu's compiled feature set.
 wgpu = { version = "29", default-features = false }
 
 # The estimator must never panic on data: errors are typed and returned.

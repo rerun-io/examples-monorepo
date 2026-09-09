@@ -322,35 +322,10 @@ same input bit-identical (D17).
 
 ## The GPU lane
 
-The CubeCL frontend is an off-by-default cargo feature, so every gate in the
-[README](../README.md#tests-and-gates) is the CPU port and the fleet's installs
-never see a GPU dependency. Its gates run
-in their own environment, `slam-rs-gpu-dev`, which adds the two conda packages
-`cubecl-cuda` needs at **run** time — `cuda-nvrtc` (it compiles kernels through
-NVRTC) and `cuda-cudart-dev` (the code NVRTC generates `#include`s
-`cuda_runtime.h`) — and sets `CUDA_PATH` and `LD_LIBRARY_PATH` for them. Without
-both, the client still constructs, every launch reports success and every
-download comes back as a buffer of zeros, because the failure is a panic on
-cubecl's own worker thread; the per-kernel tolerance tests are what catch it
-(decision D32).
-
-```bash
-pixi run -e slam-rs-gpu-dev --frozen slam-rs-gpu-build   # cargo build --features gpu
-pixi run -e slam-rs-gpu-dev --frozen slam-rs-gpu-test    # cargo test --features slam-rs/gpu
-pixi run -e slam-rs-gpu-dev --frozen slam-rs-gpu-clippy  # clippy with the feature, -D warnings
-```
-
-The environment is `linux-64` and `linux-aarch64`, in its own solve group, so no
-other lane in the workspace enters a CUDA solve. The aarch64 subdir is the
-Spark's: conda-forge ships both packages at 13.0 there through the `sbsa` arm
-variant, whose header directory is `targets/sbsa-linux`, which is the one thing
-`CUDA_PATH` has to say per target.
-
-The portable lane's three tasks are not in that environment, and the difference
-is the point of the split: `gpu-wgpu` links no NVIDIA crate, so they need no CUDA
-package and live in the base feature, where every Linux platform the package
-declares can run them — from `slam-rs`/`slam-rs-dev` on Linux and from
-`slam-rs-osx`/`slam-rs-osx-dev` on the Mac:
+The CubeCL frontend is the off-by-default `gpu-wgpu` cargo feature. The wgpu
+runtime (Vulkan / Metal / DX12) is the only GPU lane. Its tasks run from
+`slam-rs`/`slam-rs-dev` on Linux and `slam-rs-osx`/`slam-rs-osx-dev` on macOS.
+The default build remains CPU-only.
 
 ```bash
 pixi run -e slam-rs-dev --frozen slam-rs-wgpu-clippy     # the portable lane compiles and is warning-clean, tests included
@@ -358,9 +333,8 @@ pixi run -e slam-rs-dev --frozen slam-rs-wgpu-test       # the same kernels, on 
 pixi run -e slam-rs-dev --frozen slam-rs-wgpu-build      # a core whose `--gpu` is wgpu
 ```
 
-`slam-rs-clippy` does not cover that second one: it lints the default features,
-so an item the `gpu` feature keeps alive and this lane does not is dead code
-nobody sees.
+`slam-rs-clippy` lints the default features; `slam-rs-wgpu-clippy` checks the
+GPU code and its tests with warnings denied.
 
 On macOS the same three tasks run from the mac lane's environment, which is
 where that platform's `slam-rs` features are solved, and Metal is the backend
@@ -420,17 +394,23 @@ passes on it, with the pyramid and the corner scan bit-exact; whole-clip ATE is
 2.085 cm on MIO07 and 2.295 cm on MGO07, the same numbers as the other two
 lanes.
 
-**It is not gate-clean.** Over the ten reference clips whole, the wgpu lane is
-inside the C++'s own precision band on nine and **reads 11.98 cm against an
+**Historical D66 result: not gate-clean.** Over the ten reference clips whole, the wgpu lane was
+inside the C++'s own precision band on nine and **read 11.98 cm against an
 allowed 10.63 on `MIO14_moving_props`** — a D60 failure on one of the ten,
-written up rather than smoothed over. Nothing points at a wrong kernel: every
-tolerance test passes on Vulkan, the pyramid and the corner scan are bit-exact,
-and the worst lane-to-lane tracked position over the fixture is 3.1e-5 px.
+written up rather than smoothed over. At that point, every
+tolerance test passed on Vulkan, the pyramid and the corner scan were bit-exact,
+and the worst lane-to-lane tracked position over the fixture was 3.1e-5 px.
 MIO14 is the 410 s clip the accuracy-band pass identified as chaotic and D60 was built around —
-the C++'s own two precisions differ by 2.3 cm on it — so the reading is that
-the band is not wide enough to hold a third backend there. It is still a gate
-failure, and **the portable lane is not anyone's default until MIO14 is
-understood**.
+the C++'s own two precisions differ by 2.3 cm on it — so the reading was that
+the band might not hold a third backend there. That was an untested explanation,
+not grounds to widen the gate.
+
+**Resolution, D71 (2026-09-09).** The finite predicate was faulty, but fixing it
+leaves all 22,117 MIO14 poses byte-identical. Native sine error near zero is
+amplified by the SE(2) translation factor's division by theta. The small-angle sine
+polynomial with native cosine gives **9.72 cm versus GT** (sin+cos: **9.48 cm**),
+below the unchanged **10.63 cm limit**, with every frameset tracked. The nine other historical reference results
+are not a new ten-clip gate run; the targeted regression evidence is in D71.
 
 ## Where the portable lane runs
 
@@ -777,6 +757,70 @@ pixi run -e slam-rs-dev --frozen tests   # fast
 cd packages/slam-rs && pytest -m slow -q # NAS + catalog
 ```
 
+## D70 — one GPU runtime: the CUDA lane is removed; wgpu is the GPU lane
+
+Decision, 2026-09-09: use wgpu as the only GPU runtime. Remove the CUDA cargo
+feature, runtime, dependencies, Pixi environments and tasks. Keep `gpu-core`,
+`gpu-wgpu` and the shared kernels unchanged. The default build is CPU-only.
+
+Earlier CUDA measurements and failure accounts below and above are historical;
+the CUDA lane was removed on 2026-09-09. D64's tolerance requirement still
+applies. At removal, D66's MIO14 moving-props exception was unchanged: 11.98 cm
+against 10.63 cm allowed. D71 records its later correction.
+
+## D71 — wgpu finite check and small-angle trigonometry
+
+Decision, 2026-09-09: classify GPU floats by exponent bits, and use a degree-9 sine
+Taylor polynomial for `|theta| <= 0.5` in the SE(2) update. Cosine stays native;
+sine is native outside that interval. Keep the CPU lane unchanged.
+
+The device probe proved `value * 0 == 0` accepts uploaded and device-generated
+NaN and both infinities. CubeCL 0.10's constant-operand optimizer replaces a
+multiply by constant zero with zero. The replacement tests whether the exponent
+bits are all ones; both patch validity and increment validity use the same helper
+as the permanent device regression. This is a real defect, but correcting it
+leaves the full MIO14 trajectory byte-identical: **11.982561 cm versus GT** and
+**4.551881 cm versus C++**.
+
+The next probe measured native sin error up to 1.86e-7 (257 ULP) over ±0.001.
+An absolute bound is insufficient here: above the 1e-5 small-angle cutoff, the
+SE(2) translation factor divides normalized sin by theta. The sine polynomial stays
+within one ULP on the regression grid; native cosine stays within two ULP.
+The sine truncation error on ±0.5 is below f32 rounding. The
+normalization and SE(2) translation formulas stay unchanged.
+
+The original sin+cos change brings MIO14 to **9.482019 cm versus GT**, below **10.633937 cm**,
+and **6.665221 cm versus C++**. All **22,117/22,117** framesets track, with no
+retries, in **437.9 s (50.5 fps)**. The reproduced CPU run reads 8.734170 cm
+versus GT in 499.4 s. The long-clip gate uses the GT band; the short-clip C++ path
+bound does not apply to MIO14. S29-G's sine-only ablation gives **9.716469 cm versus
+GT** and **3.076043 cm versus C++**, with all 22,117 framesets tracked; the cosine
+polynomial is unnecessary for this measured gate and was removed. No gate threshold was changed.
+
+Localization found finite differences before any track-set change: the original
+lane first exceeds a 0.001 px position gap at frame 50, camera 0, keypoint 478;
+IDs first differ at frame 149. No nonfinite or outside-image output appears in
+the 1,100-frame reduced run. Landmark and observation counts initially match,
+while LM cost differs from frame 4. Later newly allocated IDs need not identify
+the same physical point across lanes. The scalar correction closes the measured
+miss; it does not make every frontend value closer to CPU.
+
+All **20 GPU kernel tests** and GPU all-target Clippy pass. The MIO10 CPU bench
+CSV is byte-identical. The four GPU bench trajectories change from pose 4, with
+maximum position shifts of 0.29–2.35 mm and GT ATE changes below 0.0011 cm:
+
+| Clip | Before GT ATE (cm) | After GT ATE (cm) |
+|---|---:|---:|
+| MIO10 | 1.503795 | 1.503822 |
+| MIO11 | 2.495883 | 2.496897 |
+| MGO10 | 0.881272 | 0.881638 |
+| MGO11 | 2.244357 | 2.244077 |
+
+MIO10 also passes its 1.713388 cm GT limit. The other three bench clips have no
+precision-band entry in the ten-clip manifest. These checks establish the local
+MIO14 correction and short-clip regression behavior, not a fresh all-device or
+ten-clip gate. The GPU stays opt-in and the default build stays CPU-only.
+
 ## Decision references
 
 The `Dnn` tags in this file and in the README name the project's recorded design decisions. What each one decided, in one line:
@@ -796,3 +840,5 @@ The `Dnn` tags in this file and in the README name the project's recorded design
 - **D60** — The V2 accuracy gate, on the evidence: ground truth inside the C++'s own precision band, the path bound only where the C++ meets it itself, speed on every clip
 - **D64** — Reaffirmed for the GPU lanes: no bit-accuracy; the bar is accuracy inside the band and faster than the CPU lane on the same machine
 - **D68** — The three unreachable blocks go: squared-form marginalization, nullspace diagnostics, the D34 damping stack
+- **D70** — One GPU runtime: the CUDA lane is removed; wgpu is the GPU lane (2026-09-09)
+- **D71** — Exponent-bit finite classification and bounded small-angle trig; the MIO14 replay passes its unchanged accuracy limit (2026-09-09)

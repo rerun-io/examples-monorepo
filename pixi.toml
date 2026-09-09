@@ -2476,23 +2476,10 @@ depends-on = ["slam-rs-build"]
 cwd = "packages/slam-rs"
 description = "Build the core, then run the package tests"
 
-# ── Portable GPU lane (wgpu) ──────────────────────────────────────────────
-# These tasks need no CUDA package: since the `gpu-core` split the `gpu-wgpu`
-# cargo feature links no NVIDIA crate, and the only run-time need is the
-# host's own Vulkan driver, which no conda package provides. So they live in
-# the base feature and run from `slam-rs`/`slam-rs-dev` on every Linux
-# platform the package declares. The CUDA lane keeps `slam-rs-gpu` because
-# cubecl-cuda JIT-compiles with NVRTC and needs the CUDA runtime headers.
-# The portable lane the Spark, the Pi 5 and the cap will run: kept honest here so
-# a kernel that only compiles on NVRTC cannot land. Clippy is the only gate it
-# needs — it compiles everything `cargo check` does and then some, so a separate
-# check task was the same work under a second name.
-# The portable lane's own `-D warnings`, which `slam-rs-clippy` cannot be: that
-# one lints the default features, so an item the `gpu` feature keeps alive and
-# this lane does not is invisible to it. One was — the CUDA-only
-# `child_without_runpath` test helper, dead code here — and `--all-targets` is
-# what catches it, because it is in a test rather than in the library (S24
-# review).
+# ── GPU lane (wgpu) ──────────────────────────────────────────────────────
+# The GPU runtime uses the host graphics driver and runs from the base feature.
+# Clippy checks GPU code and tests with warnings denied; the default lane
+# does not compile these optional modules.
 [feature.slam-rs.tasks.slam-rs-wgpu-clippy]
 cmd = "cargo clippy -p slam-rs --features gpu-wgpu --all-targets -- -D warnings"
 cwd = "packages/slam-rs"
@@ -2502,7 +2489,7 @@ description = "Lint the portable wgpu lane, tests included, with warnings denied
 # `#![cfg(feature = "gpu-core")]` and the task selects `gpu-wgpu`, so a feature
 # rename that stops the two matching compiles the file away and `cargo test`
 # reports "ok. 0 passed" — a green gate that ran nothing. It happened once,
-# splitting `gpu-core` out of `gpu`, and the count is what caught it. `grep -c`
+# splitting out `gpu-core`, and the count is what caught it. `grep -c`
 # exits non-zero on no matches, so an empty binary fails before it runs.
 [feature.slam-rs.tasks.slam-rs-wgpu-test]
 cmd = "cargo test -p slam-rs --features gpu-wgpu --test gpu_kernels -- --list | grep -c ': test' && cargo test -p slam-rs --features gpu-wgpu --test gpu_kernels"
@@ -2510,7 +2497,7 @@ cwd = "packages/slam-rs"
 description = "Run the per-kernel tolerance suite through wgpu on this host's Vulkan adapter"
 
 # The same core on the portable lane, for measuring it: `--gpu` then selects
-# wgpu rather than CUDA, because the runtime is what the feature picks.
+# wgpu, the only GPU runtime (D70).
 [feature.slam-rs.tasks.slam-rs-wgpu-build]
 cmd = "cargo build --release -p slam-rs-py --features gpu-wgpu && cp target/release/$CORE_CDYLIB slam_rs/_core.so"
 cwd = "packages/slam-rs"
@@ -2557,82 +2544,6 @@ simplecv = { path = "packages/simplecv", editable = true }
 # pin-bump: hold — the macOS lane restates `common`'s exact pin, so a Rerun bump
 # that misses this line leaves the Mac a release behind with no gate to say so.
 rerun-sdk = { version = "==0.37.0", extras = ["catalog"] } # pin-bump: hold
-
-# ── The CubeCL GPU lane ──────────────────────────────────────────────────
-# `cargo build --features gpu` needs a CUDA runtime at *run* time, not a
-# toolkit: `cubecl-cuda` compiles kernels through NVRTC and the code it
-# generates `#include`s `cuda_runtime.h`. Without both packages the client
-# still constructs, every launch "succeeds", and every download comes back as
-# a buffer of zeros — a worker-thread panic that reaches the caller as data
-# (round 1's report; decision D32 is why the tolerance tests are the guard).
-#
-# Both Linux subdirs and no named CUDA platform: `cuda-version 13.0` only
-# *constrains* `__cuda >= 13`, so nothing here needs the virtual package at
-# solve time, and every other lane stays out of the CUDA solve entirely. The
-# cargo feature is still off by default, so `slam-rs` and `slam-rs-dev` are
-# untouched — this environment is what runs the GPU gates.
-#
-# `linux-aarch64` is the Spark's lane (NVIDIA GB10, driver 580.126.09):
-# conda-forge ships both packages for that subdir at 13.0 through the `sbsa`
-# arm variant, which is also why the header directory is named differently
-# there and `CUDA_PATH` is per target below.
-[feature.slam-rs-gpu]
-platforms = ["linux-64", "linux-aarch64"]
-
-[feature.slam-rs-gpu.dependencies]
-cuda-nvrtc = "13.0.*"
-cuda-cudart-dev = "13.0.*"
-
-[feature.slam-rs-gpu.activation.env]
-# `LD_LIBRARY_PATH` is how `libnvrtc.so` is found, because cudarc dlopens it.
-# The same on both subdirs; `CUDA_PATH` is not, so it is target-scoped, and a
-# target activation env merges with this one rather than replacing it.
-LD_LIBRARY_PATH = "${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-
-# `CUDA_PATH` is where cudarc looks for the headers NVRTC compiles against.
-[feature.slam-rs-gpu.target.linux-64.activation.env]
-CUDA_PATH = "${CONDA_PREFIX}/targets/x86_64-linux"
-
-[feature.slam-rs-gpu.target.linux-aarch64.activation.env]
-CUDA_PATH = "${CONDA_PREFIX}/targets/sbsa-linux"
-
-# `$CORE_CDYLIB`, not a hardcoded `lib_core.so`: the one per-platform token in
-# the build (C106) stays one, so the day the portable lane reaches macOS —
-# where cargo writes `lib_core.dylib` — this task does not silently fail.
-# `inputs`/`outputs` as `slam-rs-build` has them, so a no-op build is a no-op.
-[feature.slam-rs-gpu.tasks.slam-rs-gpu-build]
-cmd = "cargo build --release -p slam-rs-py --features gpu && cp target/release/$CORE_CDYLIB slam_rs/_core.so"
-cwd = "packages/slam-rs"
-inputs = [
-    "packages/slam-rs/Cargo.toml",
-    "packages/slam-rs/Cargo.lock",
-    "packages/slam-rs/.cargo/config.toml",
-    "packages/slam-rs/crates/*/Cargo.toml",
-    "packages/slam-rs/crates/*/build.rs",
-    "packages/slam-rs/crates/*/src/**/*.rs",
-]
-outputs = ["packages/slam-rs/slam_rs/_core.so"]
-description = "Build the Rust VIO core with the CUDA CubeCL frontend and install it in place"
-
-[feature.slam-rs-gpu.tasks.slam-rs-gpu-test]
-cmd = "cargo test --workspace --features slam-rs/gpu"
-cwd = "packages/slam-rs"
-description = "Run every Rust test with the CUDA CubeCL frontend, including the per-kernel tolerance suite"
-
-# Clippy plus `cargo doc`: nine intra-doc links in `src/gpu/` had rotted with
-# nothing to notice, because a broken link is a `cargo doc` warning and no gate
-# ran it. Ten seconds, and it is the only check on the seam's own documentation.
-# `private_intra_doc_links` is denied beside the broken ones because a public
-# item linking to a private one renders as **plain text** in the published docs:
-# the link is not broken, it is silently dropped, which is the same rot with no
-# warning to grep for. `redundant_explicit_links` joins them for the reason the
-# gate exists at all: it was firing on `frontend::flow` and the gate returned
-# success, because a lint that is only a warning is one nobody reads (S24
-# review).
-[feature.slam-rs-gpu.tasks.slam-rs-gpu-clippy]
-cmd = "cargo clippy --workspace --all-targets --features slam-rs/gpu -- -D warnings && RUSTDOCFLAGS='-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links -D rustdoc::redundant_explicit_links' cargo doc -p slam-rs --features gpu --no-deps"
-cwd = "packages/slam-rs"
-description = "Lint the CUDA CubeCL lane and check the seam's intra-doc links"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # mamma — streaming multiview body capture (causal MAMMA pipeline)
@@ -3439,19 +3350,6 @@ slam-rs-dev = { features = [
     "slam-rs",
     "dev",
 ], solve-group = "slam-rs", no-default-feature = true }
-slam-rs-gpu = { features = [
-    "catalog-common",
-    "rerun-prerelease",
-    "slam-rs",
-    "slam-rs-gpu",
-], solve-group = "slam-rs-gpu", no-default-feature = true }
-slam-rs-gpu-dev = { features = [
-    "catalog-common",
-    "rerun-prerelease",
-    "slam-rs",
-    "slam-rs-gpu",
-    "dev",
-], solve-group = "slam-rs-gpu", no-default-feature = true }
 slam-rs-osx = { features = [
     "slam-rs",
     "slam-rs-osx",

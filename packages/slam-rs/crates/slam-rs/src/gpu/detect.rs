@@ -365,7 +365,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                     }
                 }
                 // Held, not copied: the read already owns host memory of exactly this
-                // length, and on CUDA it may be pinned, which is where the band walk
+                // length, which is where the band walk
                 // wants to read from anyway.
                 self.kept = Some(kept_bytes);
                 self.mask = Some(mask_bytes);

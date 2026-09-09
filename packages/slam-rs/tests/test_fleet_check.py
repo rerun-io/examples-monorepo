@@ -368,22 +368,13 @@ def test_the_lane_is_on_the_json_and_the_clip_columns_are_not(monkeypatch: pytes
 
 
 def test_the_lane_names_the_gpu_runtime_this_core_was_built_with() -> None:
-    """``gpu`` was two lanes under one name, and the JSON is where that fact was lost.
-
-    The CUDA build and the portable wgpu build are the same source and the same
-    ``--gpu`` flag, so a row that says only ``gpu`` cannot say which backend
-    produced its numbers — which is the first thing a reader of a cross-machine
-    chart asks, since the two lanes differ on MIO14. The extension reports the
-    runtime it was compiled with and the lane is that name.
-    """
-    assert _core.gpu_backend in (None, "cuda", "wgpu")
+    """Fleet rows name the runtime reported by the extension."""
+    assert _core.gpu_backend in (None, "wgpu")
     assert this_lane(gpu=False) == "cpu"
 
 
-def test_each_gpu_build_reports_its_own_backend_as_the_lane(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Both GPU lanes, from the one core this suite has: the name comes from the build, not the flag."""
-    monkeypatch.setattr(_core, "gpu_backend", "cuda")
-    assert this_lane(gpu=True) == "cuda"
+def test_wgpu_build_reports_its_backend_as_the_lane(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lane name comes from the build, not the flag."""
     assert this_lane(gpu=False) == "cpu"
     monkeypatch.setattr(_core, "gpu_backend", "wgpu")
     assert this_lane(gpu=True) == "wgpu"

@@ -14,20 +14,11 @@ path = "src/lib.rs"
 workspace = true
 
 [features]
-# The kernels, the stage backends and the seam — everything that is not a
-# runtime. Internal: enable `gpu` or `gpu-wgpu`, which both turn it on. It
-# exists so the portable lane does not pull the NVIDIA one: `gpu-wgpu` used to
-# be `["gpu", "dep:cubecl-wgpu"]`, which put `cubecl-cuda` and cudarc and the
-# CUDA C++ codegen into every Pi 5, cap and Mac build, where `cuda_client` is
-# dead code that still compiles — on hosts where the CubeCL notes record a 195 s
-# Rust build for a trivial kernel.
+# The kernels, stage backends and seam. Internal: enable `gpu-wgpu` to
+# select the runtime as well.
 gpu-core = ["dep:cubecl"]
-# The CubeCL GPU frontend on the NVIDIA lane. Off by default: the CPU port is
-# what the fleet installs and what the pixi lock covers.
-gpu = ["gpu-core", "dep:cubecl-cuda", "dep:cudarc", "dep:libloading"]
-# The same kernels through wgpu (Vulkan / Metal / DX12), for the Spark, the
-# Pi 5 and the cap. Only the client line differs; `slam-rs-wgpu-test` — not a
-# `cargo check` — is what keeps that true.
+# The CubeCL frontend through wgpu (Vulkan / Metal / DX12), off by default.
+# `slam-rs-wgpu-test` checks the kernels on the device.
 #
 # `exclusive-memory-only` — one wgpu buffer per handle instead of slices of a
 # shared page — is not a tuning choice, it is what makes the lane correct on
@@ -49,9 +40,6 @@ gpu-wgpu = ["gpu-core", "dep:cubecl-wgpu", "dep:wgpu", "cubecl-wgpu/exclusive-me
 
 [dependencies]
 cubecl = { workspace = true, optional = true }
-cubecl-cuda = { workspace = true, optional = true }
-cudarc = { workspace = true, optional = true }
-libloading = { workspace = true, optional = true }
 kornia-image = { workspace = true }
 kornia-imgproc = { workspace = true }
 log = { workspace = true }

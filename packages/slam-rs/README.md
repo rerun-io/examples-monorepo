@@ -44,13 +44,11 @@ pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --rrd b
 In a shell without `DISPLAY`, pass `--rr-config.headless` or the spawned viewer
 wedges the recording stream. A long segment still wants `--max-framesets`.
 
-The GPU frontend is an off-by-default cargo feature, in two lanes. CUDA through
-CubeCL, in its own environment; the portable `gpu-wgpu` lane, which links no
-NVIDIA crate, from the base one. Both write the same in-place
-`slam_rs/_core.so`, and `--gpu` runs whichever is in it:
+The GPU frontend is the off-by-default `gpu-wgpu` cargo feature, through
+CubeCL and wgpu (Vulkan / Metal / DX12). It writes the in-place
+`slam_rs/_core.so`; `--gpu` selects that frontend.
 
 ```bash
-pixi run -e slam-rs-gpu-dev --frozen slam-rs-gpu-build    # cargo build --features gpu
 pixi run -e slam-rs-dev     --frozen slam-rs-wgpu-build   # a core whose `--gpu` is wgpu
 pixi run -e slam-rs-dev     --frozen python tools/apps/replay.py --stage vio --gpu
 ```
@@ -175,15 +173,18 @@ decision is load-bearing: [the frontend](docs/design-notes.md#the-frontend-and-t
 | lane | on what | reads |
 |---|---|---|
 | CPU | the smoke segment | 0.31 cm from the C++ trajectory, 1.50 cm from ground truth, where the C++ itself is 1.43 cm |
-| GPU, either backend | the two smoke clips | the same as the CPU lane's: 0.31 cm against the basalt C++ trajectory, 0.77 and 1.50 cm against ground truth |
-| GPU, either backend | the seven machines of the fleet run (x86-64, Grace, Pi 5, RK3588, Jetson, Mac) | the same on every device that runs it |
-| GPU | discrete NVIDIA | 1.6x on a 5090 through CUDA, 1.4x through Vulkan |
+| GPU, wgpu | the two smoke clips | the same as the CPU lane's: 0.31 cm against the basalt C++ trajectory, 0.77 and 1.50 cm against ground truth |
+| GPU, wgpu | the seven machines of the fleet run (x86-64, Grace, Pi 5, RK3588, Jetson, Mac) | the same on every device that runs it |
+| GPU | discrete NVIDIA | 1.4x on a 5090 through Vulkan |
 | GPU | shared-memory SoCs | slower than the CPU lane, so a portability result there, not a speed one |
 
-The portable lane is not gate-clean: over the ten reference clips whole it is
-inside the C++'s own precision band on nine and reads 11.98 cm against an allowed
-10.63 on `MIO14_moving_props`, a D60 failure on one of the ten, so **the portable
-lane is not anyone's default until MIO14 is understood**.
+D71 closes the measured MIO14 accuracy miss: the small-angle GPU sine polynomial
+with native cosine brings `MIO14_moving_props` from 11.98 to **9.72 cm versus GT**
+(sin+cos polynomials: **9.48 cm**), below the unchanged **10.63 cm**
+limit. The separate finite-check fix alone leaves that trajectory byte-identical.
+The four short benchmark clips retain their GT ATE within 0.0011 cm, and the CPU
+MIO10 trajectory stays byte-identical. These are targeted replay results, not a
+fresh ten-clip or all-device gate run. The default build remains CPU-only.
 
 Design notes — what the precision band is and why (D60), and the fleet table:
 [the portable lane](docs/design-notes.md#the-portable-lane-and-the-two-silent-failures),
@@ -202,13 +203,10 @@ pixi run -e slam-rs-dev --frozen slam-rs-rust-test  # cargo test --workspace
 pixi run -e slam-rs-dev --frozen slam-rs-version    # print the core version
 ```
 
-The CUDA lane's gates run in `slam-rs-gpu-dev`. The portable lane's need no CUDA
-package and run from the base feature on every Linux platform the package
+The wgpu lane's gates run from the base feature on every Linux platform the package
 declares, and from `slam-rs-osx-dev` on the Mac, where Metal is the backend:
 
 ```bash
-pixi run -e slam-rs-gpu-dev --frozen slam-rs-gpu-test     # cargo test --features slam-rs/gpu
-pixi run -e slam-rs-gpu-dev --frozen slam-rs-gpu-clippy   # clippy with the feature, -D warnings
 pixi run -e slam-rs-dev     --frozen slam-rs-wgpu-clippy  # the portable lane compiles and is warning-clean, tests included
 pixi run -e slam-rs-dev     --frozen slam-rs-wgpu-test    # the same kernels, on this host's GPU
 pixi run -e slam-rs-osx-dev --frozen slam-rs-wgpu-test    # the same kernels through Metal
@@ -243,12 +241,11 @@ with its entity trees, every clause of [the V2 gate](docs/design-notes.md#the-v2
 
 Not in this stack, in the order they are likely to matter:
 
-- **GPU speed.** The GPU frontend is at accuracy parity everywhere its driver runs
-  and faster only on discrete NVIDIA (1.6x on a 5090 through CUDA, 1.4x through
-  Vulkan); on shared-memory SoCs it is slower than the CPU lane. The kernels were
-  written for correctness first. Two references for the next pass: Brush, whose
-  CubeCL kernels run the same source on CUDA, Vulkan and Metal, and cuVSLAM, whose
-  `cuda_kernels/` shows the kernel set a production tracker settles on.
+- **GPU speed.** D71 brings MIO14 moving props within its accuracy limit.
+  The GPU frontend is faster only on
+  discrete NVIDIA (1.4x on a 5090 through Vulkan); on shared-memory SoCs it is
+  slower than the CPU lane. The kernels were written for correctness first.
+  Brush's portable CubeCL kernels are a reference for the next pass.
 - **More datasets.** `msd-odyssey` should run as is. Camera-only datasets (Assembly101,
   HO-Cap, the WildCap sets) need basalt's vision-only estimator ported beside the
   VIO. Aria recordings need the fisheye624 camera model.
@@ -260,5 +257,3 @@ Not in this stack, in the order they are likely to matter:
 - **Less code.** Under the tolerance requirement (D60, D64) the Lie groups and the camera
   models could come from kornia-rs and the Eigen-order QR, LDLT and SVD from nalgebra;
   the ten-clip gate decides. About 2,800 lines.
-- **One GPU runtime.** The CUDA lane is optional and isolated; dropping it leaves the
-  portable wgpu lane and removes one environment and two CUDA packages.

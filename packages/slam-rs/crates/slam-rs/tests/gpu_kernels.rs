@@ -8,17 +8,18 @@
 //!   the GPU and the separable two-pass form on the CPU are the same sum of
 //!   `u32` terms with one rounding at the end, so anything but equality is a
 //!   bug, not a rounding.
-//! * the patch build and the tracker are **not** exact, for one reason: NVRTC
+//! * the patch build and the tracker are **not** exact, for one reason: the shader compiler
 //!   contracts `a * b + c` into a fused multiply-add, which the CPU does not.
 //!   Contraction only ever raises the accuracy of a term, but it changes the
 //!   bits, and a Gauss-Newton fixed point amplifies the change until the
 //!   iteration converges. The bounds below are what that costs.
 //!
-//! These run only under `--features gpu` and need a working CubeCL runtime;
-//! `cargo test --features gpu` is the gate.
+//! These run only under `--features gpu-wgpu` and need a working CubeCL runtime;
+//! `cargo test --features gpu-wgpu` is the gate.
 #![cfg(feature = "gpu-core")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use cubecl::frontend::CompilationArg;
 use kornia_imgproc::features::FastCorner;
 use nalgebra::Vector2;
 use slam_rs::frontend::detect::{BandRequest, CornerScan, CpuCornerScan, DetectError};
@@ -37,6 +38,9 @@ use slam_rs::image::ImageU16;
 use slam_rs::pyramid::{CpuPyramidBuilder, Pyramid, PyramidBuilder, PyramidError, PyramidU16};
 
 mod common;
+
+#[path = "../src/gpu/finite.rs"]
+mod finite;
 
 use common::{cornered_image, grid_positions, texture, textured_image};
 
@@ -397,11 +401,11 @@ fn a_level_base_past_f32_precision_reaches_the_kernels_exactly() {
 /// How far apart the two lanes' tracked positions may sit, in pixels.
 ///
 /// 1e-3, ten times the worst any fixture in this file measures and ten times
-/// below the 1e-2 it used to allow. What is measured, CUDA / wgpu, in pixels:
-/// the grid shift 4.316e-5 / 3.146e-5, the border margin 9.832e-5 / 7.780e-5,
-/// a bad guess 1.526e-5 / 2.158e-5. The factor of ten is not slack for the
+/// below the 1e-2 it used to allow. What is measured on wgpu, in pixels:
+/// the grid shift 3.146e-5, the border margin 7.780e-5,
+/// a bad guess 2.158e-5. The factor of ten is not slack for the
 /// backend: it is the room a *different* fixture — another texture, another
-/// shift, another adapter — may need for the same cause, which is that NVRTC
+/// shift, another adapter — may need for the same cause, which is that the shader compiler
 /// contracts `a * b + c` into a fused multiply-add and the host does not. A
 /// change that needs more than this is a change in the arithmetic, not in the
 /// rounding.
@@ -889,15 +893,8 @@ fn the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing() {
 /// (`GpuPatchTracker::track`). What the design can promise is that the pool
 /// they come out of stops growing, and that is what this measures.
 ///
-/// It matters because the lane held 670 MiB to 1.4 GiB over idle for about
-/// 6 MB of pyramids and patch storage, which is irrelevant on a 32 GB card and
-/// decisive on the cap's shared 8 GB. The cause is not the data:
-/// `cubecl-cuda` sizes its pools from the device — `max_page_size = total / 4`,
-/// then `MemoryConfiguration::SubSlices` lays a geometric ladder of pools down
-/// to 8 MB pages — and `RuntimeOptions` is built inside `DeviceService::init`,
-/// so a client cannot ask for anything smaller. What a caller controls is how
-/// many allocations per frame it hands the pool and how many distinct sizes
-/// they come in.
+/// Pool growth matters on shared-memory devices. The caller controls the
+/// number of per-frame allocations and their sizes.
 ///
 /// So the drive is the **whole** path — pyramid, corner scan and its band walk,
 /// patch build and the KLT tracker, two cameras, 200 framesets — and the
@@ -909,25 +906,11 @@ fn the_whole_gpu_path_holds_the_pool_flat() {
     const FRAMES: usize = 200;
     /// Framesets the pool may still be growing over.
     ///
-    /// Measured: on both lanes there is no growth to wait out at all — the
-    /// first frameset already reads the plateau (156.74 / 40.00 MiB reserved,
-    /// 18.51 MiB in use, 21 allocations) and every one of the 200 reads the
-    /// same. Ten is kept anyway, because a runtime whose first frames opened a
-    /// pool page would otherwise fail this on its bring-up rather than on a
-    /// leak, and ten framesets is still far too few for one to hide in.
+    /// Ten frames allow the pool to settle before checking for leaks.
     const WARM_UP: usize = 10;
-    /// Twice the larger of the two lanes' measured plateaus: **156.74 MiB** on
-    /// CUDA and 40.00 on wgpu, driving the whole path.
-    ///
-    /// It is the weaker of the two ceilings and deliberately so. Reserved bytes
-    /// are the pool's page ladder, and `cubecl-cuda` sizes that ladder from the
-    /// **device** — `max_page_size = total / 4` on this 32 GB card — so the same
-    /// code on the cap's shared 8 GB reserves a different number for the same
-    /// work. What is portable is `IN_USE_CEILING` below and, above everything,
-    /// the flatness.
+    /// Keep the existing reserved-byte ceiling; flatness is the stronger gate.
     const RESERVED_CEILING: u64 = 320 * 1024 * 1024;
-    /// Half again the payload both lanes hold: **18.51 MiB**, identical on CUDA
-    /// and on wgpu, for two 960x960 four-level pyramids, the scanner's three
+    /// Half again the measured payload: **18.51 MiB** on wgpu, for two 960x960 four-level pyramids, the scanner's three
     /// per-camera buffers, two patch sets at a 1,024-keypoint capacity and the
     /// tracker's result buffers. Unlike the reserved figure this is the data
     /// itself, so it is the same on any device and a leak of any size shows in
@@ -1049,8 +1032,7 @@ fn the_whole_gpu_path_holds_the_pool_flat() {
 /// This runtime stores every element width the kernels bind.
 ///
 /// The one test that would fire on a fleet machine before any of the others
-/// mean anything. Both of the backend's bring-up failures — a CUDA install
-/// without nvrtc/cudart, and `cubecl-wgpu`'s WGSL compiler on `u16`/`u8` —
+/// mean anything. The `cubecl-wgpu` WGSL compiler on `u16`/`u8` can
 /// panic on cubecl's own worker thread, so the launch reports success and every
 /// read comes back as zeros. `probe_storage` copies a known pattern on the
 /// device and refuses the runtime if it does not survive; measured on this
@@ -1062,8 +1044,7 @@ fn the_runtime_stores_every_element_width_the_kernels_bind() {
 
 /// A host with no GPU is a typed error, in a subprocess that really has none.
 ///
-/// The failure this closes: with `CUDA_VISIBLE_DEVICES=` a one-frame GPU replay
-/// raised `pyo3_runtime.PanicException: ... RecvError`, because
+/// A missing adapter must not raise `pyo3_runtime.PanicException`, even though
 /// CubeCL unwraps its own bring-up on its worker thread and the process's
 /// documented contract is a `ValueError` and never a Rust panic (decision D32).
 /// It cannot be tested in-process — a client is a per-process singleton and the
@@ -1072,7 +1053,7 @@ fn the_runtime_stores_every_element_width_the_kernels_bind() {
 ///
 /// The child asserts, so a child that stopped reaching the probe fails rather
 /// than passing quietly; each case additionally says whether rustc's own
-/// `panicked at` belongs in the child's output — for the two the probe answers
+/// `panicked at` belongs in the child's output — for the case the probe answers
 /// it must not appear, and for the one that reaches cubecl's own unwrap it
 /// must, because the caught panic's message is the only account of a failure no
 /// probe anticipated.
@@ -1089,38 +1070,6 @@ mod absent_gpu {
     fn child(test: &str, case: &str, variables: &[(&str, &str)]) -> String {
         let exe: std::path::PathBuf = std::env::current_exe().unwrap();
         run(Command::new(exe), test, case, variables)
-    }
-
-    /// The same child, started through the dynamic loader with **its own
-    /// `RUNPATH` inhibited**.
-    ///
-    /// One case needs a library to be genuinely unfindable, and emptying
-    /// `LD_LIBRARY_PATH` does not do it here: pixi links every binary in this
-    /// environment with an absolute `RUNPATH` into the environment's own `lib`,
-    /// which the loader searches *after* `LD_LIBRARY_PATH` and which therefore
-    /// answers the `dlopen` anyway (measured — the child built a client). What
-    /// defeats it is `ld.so --inhibit-rpath ''`: the empty name is the main
-    /// executable's own, and cudarc's `dlopen` is made by the executable, so
-    /// that is exactly the one object that must lose its `RUNPATH`. `None` when
-    /// the loader is not where this architecture keeps it, which is a skip and
-    /// not a pass.
-    ///
-    /// The same `cfg` as its one caller: only the NVIDIA lane has a library to
-    /// take away, and without the `cfg` this is dead code on the portable lane,
-    /// where `clippy --all-targets -D warnings` refuses it.
-    #[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
-    fn child_without_runpath(test: &str, case: &str, variables: &[(&str, &str)]) -> Option<String> {
-        let loader: &str = ["/lib64/ld-linux-x86-64.so.2", "/lib/ld-linux-aarch64.so.1"]
-            .into_iter()
-            .find(|path| std::path::Path::new(path).exists())?;
-        let exe: std::path::PathBuf = std::env::current_exe().unwrap();
-        let mut command: Command = Command::new(loader);
-        command.args([
-            std::ffi::OsStr::new("--inhibit-rpath"),
-            std::ffi::OsStr::new(""),
-            exe.as_os_str(),
-        ]);
-        Some(run(command, test, case, variables))
     }
 
     /// Run `command` as the child of `case` and return everything it printed.
@@ -1164,7 +1113,7 @@ mod absent_gpu {
         }
     }
 
-    /// The shape all four cases share, run once as the child and once as the
+    /// The shape both cases share, run once as the child and once as the
     /// parent.
     ///
     /// In the child: the client's error is `expected`, and it is printed with
@@ -1172,7 +1121,7 @@ mod absent_gpu {
     /// the child, its output contains `expected_text`, and whether rustc's own
     /// `panicked at` appears is exactly `expect_panic` — the two questions each
     /// shim's doc answers for its own case. `None` from `spawn` is a skip and
-    /// not a pass (see `child_without_runpath` for the one case that can).
+    /// not a pass.
     fn assert_absent_gpu_case(
         expected: slam_rs::gpu::GpuError,
         expected_text: &str,
@@ -1197,23 +1146,6 @@ mod absent_gpu {
         );
     }
 
-    /// `CUDA_VISIBLE_DEVICES=`: the driver is healthy and no device is visible.
-    #[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
-    #[test]
-    fn a_cuda_host_with_no_visible_device_is_a_typed_error() {
-        const NAME: &str = "absent_gpu::a_cuda_host_with_no_visible_device_is_a_typed_error";
-        // The probe answers this one, so nothing panics anywhere.
-        assert_absent_gpu_case(
-            slam_rs::gpu::GpuError::NoDevice {
-                runtime: "CUDA",
-                count: 0,
-            },
-            "CHILD the CUDA driver reports 0 devices",
-            false,
-            || Some(child(NAME, "no-device", &[("CUDA_VISIBLE_DEVICES", "")])),
-        );
-    }
-
     /// No Vulkan ICD: the loader enumerates nothing and wgpu has no adapter.
     #[cfg(feature = "gpu-wgpu")]
     #[test]
@@ -1230,47 +1162,6 @@ mod absent_gpu {
                     "no-adapter",
                     &[("VK_DRIVER_FILES", "/nonexistent/no-such-icd.json")],
                 ))
-            },
-        );
-    }
-
-    /// A library cudarc `dlopen`s that cannot be found, in a child that really
-    /// cannot find it.
-    ///
-    /// cudarc `panic_no_lib_found`s when none of its name candidates resolves,
-    /// which is a panic on the caller's thread before any of this crate's code
-    /// runs, so the probe opens the two libraries itself first. Making that
-    /// true needs the child to lose `libnvrtc` for real: `LD_LIBRARY_PATH` is
-    /// pointed at a directory that holds no libraries, `CUDA_PATH` is emptied,
-    /// and the binary's own `RUNPATH` — an absolute path into the pixi
-    /// environment's `lib`, which the loader searches after `LD_LIBRARY_PATH`
-    /// and which is why emptying that variable alone changed nothing — is
-    /// inhibited by starting the child through `ld.so`. `libcuda` stays
-    /// findable in `/usr/lib/<triple>` where the driver package puts it, so the
-    /// library the probe names is `nvrtc`, which is the one that has to come
-    /// from the environment.
-    #[cfg(all(feature = "gpu", not(feature = "gpu-wgpu")))]
-    #[test]
-    fn a_cuda_host_that_cannot_load_nvrtc_is_a_typed_error() {
-        const NAME: &str = "absent_gpu::a_cuda_host_that_cannot_load_nvrtc_is_a_typed_error";
-        // The probe answers this one, so nothing panics: cudarc never reaches
-        // its own `panic_no_lib_found`. `None` from the spawn means no dynamic
-        // loader at a path this test knows, so the child's own RUNPATH cannot
-        // be inhibited and libnvrtc cannot be taken away from it — a skip.
-        assert_absent_gpu_case(
-            slam_rs::gpu::GpuError::MissingLibrary { library: "nvrtc" },
-            "CHILD the GPU runtime needs the nvrtc shared library",
-            false,
-            || {
-                let empty: std::path::PathBuf = std::env::temp_dir();
-                child_without_runpath(
-                    NAME,
-                    "missing-library",
-                    &[
-                        ("LD_LIBRARY_PATH", &empty.to_string_lossy()),
-                        ("CUDA_PATH", ""),
-                    ],
-                )
             },
         );
     }
@@ -1302,4 +1193,121 @@ mod absent_gpu {
             },
         );
     }
+}
+
+#[cubecl::prelude::cube(launch_unchecked)]
+fn finite_probe(input: &cubecl::prelude::Array<f32>, output: &mut cubecl::prelude::Array<u32>) {
+    use cubecl::prelude::*;
+    let i = ABSOLUTE_POS;
+    if i < 12 {
+        let mut value = input[i];
+        if i >= 9 {
+            value = input[i] / input[4];
+        }
+        output[i] = u32::cast_from(finite::is_finite(value));
+    }
+}
+
+#[test]
+// The production helper must classify uploaded values and runtime device division.
+fn finite_predicates_match_ieee_classification() {
+    use cubecl::prelude::*;
+    let values = [
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        -0.0,
+        0.0,
+        1.0,
+        f32::MAX,
+        f32::MIN_POSITIVE,
+        f32::from_bits(1),
+        0.0,
+        1.0,
+        -1.0,
+    ];
+    let client = gpu_client().unwrap();
+    let input = client.create_from_slice(f32::as_bytes(&values));
+    let output = client.empty(12 * size_of::<u32>());
+    unsafe {
+        finite_probe::launch_unchecked::<GpuRuntime>(
+            &client,
+            CubeCount::Static(1, 1, 1),
+            CubeDim::new_1d(32),
+            ArrayArg::from_raw_parts(input, 12),
+            ArrayArg::from_raw_parts(output.clone(), 12),
+        );
+    }
+    let bytes = client.read_one(output).unwrap();
+    let classifications = u32::from_bytes(&bytes);
+    for (i, classification) in classifications.iter().enumerate() {
+        let expected = (3..9).contains(&i);
+        assert_eq!(
+            *classification,
+            u32::from(expected),
+            "production bit classification at {i}"
+        );
+    }
+}
+
+#[path = "../src/gpu/trig.rs"]
+mod trig;
+
+#[cubecl::prelude::cube(launch_unchecked)]
+fn small_angle_probe(
+    input: &cubecl::prelude::Array<f32>,
+    output: &mut cubecl::prelude::Array<f32>,
+) {
+    use cubecl::prelude::*;
+    let i = ABSOLUTE_POS;
+    if i < input.len() {
+        output[2 * i] = trig::sin(input[i]);
+        output[2 * i + 1] = f32::cos(input[i]); // Native cosine is what ships.
+    }
+}
+
+/// SE(2) divides sin(theta) by theta: absolute-error-only trig is insufficient.
+#[test]
+fn small_angle_trig_stays_within_two_ulps_of_the_cpu() {
+    use cubecl::prelude::*;
+    let mut values = Vec::new();
+    for extent in [0.001f32, 0.5] {
+        for i in 0..=1024 {
+            values.push((i as f32 / 512.0 - 1.0) * extent);
+        }
+    }
+    let client = gpu_client().unwrap();
+    let input = client.create_from_slice(f32::as_bytes(&values));
+    let output = client.empty(values.len() * 2 * size_of::<f32>());
+    unsafe {
+        small_angle_probe::launch_unchecked::<GpuRuntime>(
+            &client,
+            CubeCount::Static(values.len().div_ceil(256) as u32, 1, 1),
+            CubeDim::new_1d(256),
+            ArrayArg::from_raw_parts(input, values.len()),
+            ArrayArg::from_raw_parts(output.clone(), values.len() * 2),
+        );
+    }
+    let bytes = client.read_one(output).unwrap();
+    let actual = f32::from_bytes(&bytes);
+    let mut worst = [0u32; 2];
+    for (i, theta) in values.iter().enumerate() {
+        for (operation, expected) in [theta.sin(), theta.cos()].iter().enumerate() {
+            let measured = actual[2 * i + operation];
+            assert!(measured.is_finite());
+            // Same-sign floats have monotonic bit patterns. Zero signs are equivalent.
+            let ulps = if measured == *expected {
+                0
+            } else {
+                assert_eq!(measured.is_sign_negative(), expected.is_sign_negative());
+                measured.to_bits().abs_diff(expected.to_bits())
+            };
+            worst[operation] = worst[operation].max(ulps);
+            assert!(
+                ulps <= 2,
+                "theta={theta:e}, operation={operation}, GPU={measured:e}, CPU={expected:e}, ulps={ulps}"
+            );
+        }
+    }
+    println!("small-angle sin/cos maximum ULP errors: {worst:?}");
 }
