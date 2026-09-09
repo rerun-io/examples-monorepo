@@ -50,8 +50,9 @@ class PolycamCameraData:
     t_21: float
     t_22: float
     t_23: float
-    timestamp: int
     width: int
+    # Polycam exports from 2026-09 onward omit the timestamp; the keyframe filename still carries it.
+    timestamp: int = 0
     neighbors: list[int] = field(default_factory=list)  # default value is an empty list
 
     def __post_init__(self) -> None:
