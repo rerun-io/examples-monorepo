@@ -1,7 +1,7 @@
 # slam-rs
 
 <p align="center">
-  <img src="media/slam-rs-github.gif" alt="slam-rs replaying a Monado SLAM Dataset clip in Rerun: the estimated trajectory against ground truth and the basalt C++ run, the landmarks, the rig, and the tracked keypoints on the camera frames" width="960" />
+  <img src="media/slam-rs-github.gif" alt="slam-rs replaying a Monado SLAM Dataset clip in Rerun: the estimated trajectory against ground truth and the basalt C++ run, the landmarks, the rig, and the tracked keypoints on the camera frames" width="800" />
 </p>
 
 Visual-inertial odometry with a Rust core. The estimator is a port of the
