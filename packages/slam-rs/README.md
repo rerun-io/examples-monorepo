@@ -16,7 +16,8 @@ the reference set and the gates: [docs/design-notes.md](docs/design-notes.md).
 
 ## Run it
 
-Every command runs from the repository root. Install the environment and build
+The pixi tasks run from anywhere in the repository; the `python tools/...`
+commands below run from `packages/slam-rs`. Install the environment and build
 the core:
 
 ```bash
@@ -29,6 +30,7 @@ default) logs only what the estimator is fed, and `--stage frontend` runs the
 optical flow over it and draws its keypoints beside the C++ fork's:
 
 ```bash
+cd packages/slam-rs
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio   # the smoke segment, in a viewer
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --rr-config.headless --rr-config.save data/replay-vio.rrd
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --segment <segment-id>       # another reference segment
@@ -143,7 +145,7 @@ Design notes — the accessors field by field, every refusal and its ceiling, an
 |---|---|
 | `lie` | `So3`/`Se3` over any `f32`/`f64` scalar: Sophus's `exp`/`log`, the adjoint, basalt's four SO(3) Jacobians and the decoupled SE(3) pair. |
 | `types` | `TimeCamId`, `KeypointId`/`LandmarkId`, `AbsOrderMap`, the three pose states and the two fixed-linearization wrappers. |
-| `config` | basalt's `VioConfig`, read straight from `data/**/*_config.json`. |
+| `config` | basalt's `VioConfig`, read straight from `configs/*_config.json`. |
 | `calib` | basalt's `Calibration`: extrinsics, the six shipped camera models, the 9- and 12-parameter IMU bias calibrations. |
 | `camera` | `pinhole`, `kb4` and `pinhole-radtan8` with basalt's 4-D homogeneous `project`/`unproject` and their analytic Jacobians. |
 | `image` | `ImageU16`: an owned flat 16-bit frame with an explicit row stride, and `interp`/`interp_grad`/`in_bounds` from `image.h`. |
@@ -170,7 +172,7 @@ decision is load-bearing: [the frontend](docs/design-notes.md#the-frontend-and-t
 |---|---|---|
 | CPU | the smoke segment | 0.31 cm from the C++ trajectory, 1.50 cm from ground truth, where the C++ itself is 1.43 cm |
 | GPU, either backend | the two smoke clips | the same as the CPU lane's: 0.31 cm against the basalt C++ trajectory, 0.77 and 1.50 cm against ground truth |
-| GPU, either backend | the seven devices measured device by device in S23 | the same on every device that runs it |
+| GPU, either backend | the seven machines of the fleet run (x86-64, Grace, Pi 5, RK3588, Jetson, Mac) | the same on every device that runs it |
 | GPU | discrete NVIDIA | 1.6x on a 5090 through CUDA, 1.4x through Vulkan |
 | GPU | shared-memory SoCs | slower than the CPU lane, so a portability result there, not a speed one |
 
