@@ -454,7 +454,7 @@ def test_a_replay_export_associates_with_the_ground_truth_sidecar(manifest: Refe
             logger=VioLogger(
                 cameras=feed.cameras,
                 ground_truth=truth,
-                cpp=_cpp_trajectory(manifest, segment, feed.capture_start_time_ns),
+                cpp=_cpp_trajectory(manifest, segment, feed.capture_start_time_ns, feed.segment_id),
                 frame_t_ns=feed.frame_t_ns,
             ),
         )
