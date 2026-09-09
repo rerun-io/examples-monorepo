@@ -41,7 +41,7 @@ GATED_TEN_CLIP_RUN: dict[str, tuple[int, float, float]] = {
     "msd-index__MIO_others__MIO14_moving_props": (22117, 5.51, 8.73),
     "msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_fight_2": (31577, 2.91, 38.53),
 }
-"""The V2 milestone's own ten-clip run, from ``reports/pr16-v2-ten-gated.txt``: framesets, cm from the C++, cm from ground truth.
+"""The V2 milestone's own ten-clip run: framesets, cm from the C++, cm from ground truth.
 
 Every clip tracked every frameset it was fed and lost none, so one count is the
 whole row. The verdict this run earned is what any change to

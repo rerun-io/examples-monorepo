@@ -16,10 +16,10 @@
 //! machine-local.
 //!
 //! ```bash
-//! SLAM_RS_CLIP_DIR=/tmp/s15-clips/MIO07 \
+//! SLAM_RS_CLIP_DIR=<clip-dir> \
 //! SLAM_RS_CLIP_SCALAR=f64 \
-//! SLAM_RS_CLIP_OUT=/tmp/s15-clips/MIO07/slam_rs_f64.csv \
-//! SLAM_RS_CLIP_STATS=/tmp/s15-clips/MIO07/slam_rs_f64_stats.csv \
+//! SLAM_RS_CLIP_OUT=<clip-dir>/slam_rs_f64.csv \
+//! SLAM_RS_CLIP_STATS=<clip-dir>/slam_rs_f64_stats.csv \
 //!   cargo test --release --test full_clip -- --nocapture
 //! ```
 //!
