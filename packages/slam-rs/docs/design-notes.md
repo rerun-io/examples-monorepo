@@ -322,35 +322,10 @@ same input bit-identical (D17).
 
 ## The GPU lane
 
-The CubeCL frontend is an off-by-default cargo feature, so every gate in the
-[README](../README.md#tests-and-gates) is the CPU port and the fleet's installs
-never see a GPU dependency. Its gates run
-in their own environment, `slam-rs-gpu-dev`, which adds the two conda packages
-`cubecl-cuda` needs at **run** time — `cuda-nvrtc` (it compiles kernels through
-NVRTC) and `cuda-cudart-dev` (the code NVRTC generates `#include`s
-`cuda_runtime.h`) — and sets `CUDA_PATH` and `LD_LIBRARY_PATH` for them. Without
-both, the client still constructs, every launch reports success and every
-download comes back as a buffer of zeros, because the failure is a panic on
-cubecl's own worker thread; the per-kernel tolerance tests are what catch it
-(decision D32).
-
-```bash
-pixi run -e slam-rs-gpu-dev --frozen slam-rs-gpu-build   # cargo build --features gpu
-pixi run -e slam-rs-gpu-dev --frozen slam-rs-gpu-test    # cargo test --features slam-rs/gpu
-pixi run -e slam-rs-gpu-dev --frozen slam-rs-gpu-clippy  # clippy with the feature, -D warnings
-```
-
-The environment is `linux-64` and `linux-aarch64`, in its own solve group, so no
-other lane in the workspace enters a CUDA solve. The aarch64 subdir is the
-Spark's: conda-forge ships both packages at 13.0 there through the `sbsa` arm
-variant, whose header directory is `targets/sbsa-linux`, which is the one thing
-`CUDA_PATH` has to say per target.
-
-The portable lane's three tasks are not in that environment, and the difference
-is the point of the split: `gpu-wgpu` links no NVIDIA crate, so they need no CUDA
-package and live in the base feature, where every Linux platform the package
-declares can run them — from `slam-rs`/`slam-rs-dev` on Linux and from
-`slam-rs-osx`/`slam-rs-osx-dev` on the Mac:
+The CubeCL frontend is the off-by-default `gpu-wgpu` cargo feature. The wgpu
+runtime (Vulkan / Metal / DX12) is the only GPU lane. Its tasks run from
+`slam-rs`/`slam-rs-dev` on Linux and `slam-rs-osx`/`slam-rs-osx-dev` on macOS.
+The default build remains CPU-only.
 
 ```bash
 pixi run -e slam-rs-dev --frozen slam-rs-wgpu-clippy     # the portable lane compiles and is warning-clean, tests included
@@ -358,9 +333,8 @@ pixi run -e slam-rs-dev --frozen slam-rs-wgpu-test       # the same kernels, on 
 pixi run -e slam-rs-dev --frozen slam-rs-wgpu-build      # a core whose `--gpu` is wgpu
 ```
 
-`slam-rs-clippy` does not cover that second one: it lints the default features,
-so an item the `gpu` feature keeps alive and this lane does not is dead code
-nobody sees.
+`slam-rs-clippy` lints the default features; `slam-rs-wgpu-clippy` checks the
+GPU code and its tests with warnings denied.
 
 On macOS the same three tasks run from the mac lane's environment, which is
 where that platform's `slam-rs` features are solved, and Metal is the backend
@@ -777,6 +751,17 @@ pixi run -e slam-rs-dev --frozen tests   # fast
 cd packages/slam-rs && pytest -m slow -q # NAS + catalog
 ```
 
+## D70 — one GPU runtime: the CUDA lane is removed; wgpu is the GPU lane
+
+Decision, 2026-09-09: use wgpu as the only GPU runtime. Remove the CUDA cargo
+feature, runtime, dependencies, Pixi environments and tasks. Keep `gpu-core`,
+`gpu-wgpu` and the shared kernels unchanged. The default build is CPU-only.
+
+Earlier CUDA measurements and failure accounts below and above are historical;
+the CUDA lane was removed on 2026-09-09. D64's tolerance requirement still
+applies. D66's MIO14 moving-props exception is unchanged: 11.98 cm against
+10.63 cm allowed. It is now the GPU lane's only documented accuracy exception.
+
 ## Decision references
 
 The `Dnn` tags in this file and in the README name the project's recorded design decisions. What each one decided, in one line:
@@ -796,3 +781,4 @@ The `Dnn` tags in this file and in the README name the project's recorded design
 - **D60** — The V2 accuracy gate, on the evidence: ground truth inside the C++'s own precision band, the path bound only where the C++ meets it itself, speed on every clip
 - **D64** — Reaffirmed for the GPU lanes: no bit-accuracy; the bar is accuracy inside the band and faster than the CPU lane on the same machine
 - **D68** — The three unreachable blocks go: squared-form marginalization, nullspace diagnostics, the D34 damping stack
+- **D70** — One GPU runtime: the CUDA lane is removed; wgpu is the GPU lane (2026-09-09)
