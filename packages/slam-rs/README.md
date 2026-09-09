@@ -837,3 +837,27 @@ catalog, and skip when neither is reachable:
 pixi run -e slam-rs-dev --frozen tests   # fast
 cd packages/slam-rs && pytest -m slow -q # NAS + catalog
 ```
+
+## What is next
+
+Not in this stack, in the order they are likely to matter:
+
+- **GPU speed.** The GPU frontend is at accuracy parity everywhere its driver runs
+  and faster only on discrete NVIDIA (1.6x on a 5090 through CUDA, 1.4x through
+  Vulkan); on shared-memory SoCs it is slower than the CPU lane. The kernels were
+  written for correctness first. Two references for the next pass: Brush, whose
+  CubeCL kernels run the same source on CUDA, Vulkan and Metal, and cuVSLAM, whose
+  `cuda_kernels/` shows the kernel set a production tracker settles on.
+- **More datasets.** `msd-odyssey` should run as is. Camera-only datasets (Assembly101,
+  HO-Cap, the WildCap sets) need basalt's vision-only estimator ported beside the
+  VIO. Aria recordings need the fisheye624 camera model.
+- **Results as a catalog layer.** One layer per segment with the estimated poses, the
+  landmarks and the keypoints on the base recording's entity paths, registered beside
+  the ground truth, so a run is browsed in the viewer, not in a CSV.
+- **A catalog URL on the command line.** The feed reads the catalog already; the replay
+  tool only reaches it through manifest entries.
+- **Less code.** Under the tolerance requirement (D60, D64) the Lie groups and the camera
+  models could come from kornia-rs and the Eigen-order QR, LDLT and SVD from nalgebra;
+  the ten-clip gate decides. About 2,800 lines.
+- **One GPU runtime.** The CUDA lane is optional and isolated; dropping it leaves the
+  portable wgpu lane and removes one environment and two CUDA packages.
