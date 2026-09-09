@@ -64,6 +64,7 @@
 //! are correct on every runtime.
 
 mod detect;
+mod finite;
 mod kernels;
 mod patches;
 mod pyramid;

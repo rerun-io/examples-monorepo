@@ -80,6 +80,8 @@
 
 use cubecl::prelude::*;
 
+use super::finite::is_finite;
+
 /// Units per cube on the per-patch kernels.
 ///
 /// One unit per pattern tap, rounded up to two warps: the largest pattern is 52
@@ -295,16 +297,6 @@ fn interp_grad_into(
     let px1y2 = at(image, base, stride, ix + 1usize, iy + 2usize);
     let res_py = ddx * ddy * px0y1 + ddx * dy * px0y2 + dx * ddy * px1y1 + dx * dy * px1y2;
     grad_y[slot] = 0.5f32 * (res_py - res_my);
-}
-
-/// Whether a value is neither infinite nor NaN, without a `classify`.
-///
-/// `v * 0` is `0` for every finite `v` and `NaN` for an infinity or a NaN, and
-/// `NaN == 0` is false. Same predicate as `f32::is_finite`, in two operations
-/// every runtime has.
-#[cube]
-fn is_finite(value: f32) -> bool {
-    value * 0.0f32 == 0.0f32
 }
 
 // ── Eigen's pivoted LDLT at size three ───────────────────────────────────────

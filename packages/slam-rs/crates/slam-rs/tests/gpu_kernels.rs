@@ -39,6 +39,9 @@ use slam_rs::pyramid::{CpuPyramidBuilder, Pyramid, PyramidBuilder, PyramidError,
 
 mod common;
 
+#[path = "../src/gpu/finite.rs"]
+mod finite;
+
 use common::{cornered_image, grid_positions, texture, textured_image};
 
 /// One band of a 50-pixel cell grid, keyed the way
@@ -1192,6 +1195,8 @@ mod absent_gpu {
     }
 }
 
+// Self-equality is intentional: this probe measures NaN comparison semantics.
+#[allow(clippy::eq_op)]
 #[cubecl::prelude::cube(launch_unchecked)]
 fn finite_probe(input: &cubecl::prelude::Array<f32>, output: &mut cubecl::prelude::Array<u32>) {
     use cubecl::prelude::*;
@@ -1203,8 +1208,8 @@ fn finite_probe(input: &cubecl::prelude::Array<f32>, output: &mut cubecl::prelud
         }
         let a = value * 0.0f32 == 0.0f32;
         let b = value == value;
-        let c = f32::abs(value) <= 3.4028234663852886e38f32;
-        let d = (u32::reinterpret(value) & 0x7f800000u32) != 0x7f800000u32;
+        let c = f32::abs(value) <= f32::new(f32::MAX);
+        let d = finite::is_finite(value);
         output[i] = u32::cast_from(a)
             | (u32::cast_from(b) << 1)
             | (u32::cast_from(c) << 2)
@@ -1213,6 +1218,8 @@ fn finite_probe(input: &cubecl::prelude::Array<f32>, output: &mut cubecl::prelud
 }
 
 #[test]
+// The arithmetic column is diagnostic only; the shared production helper must
+// classify both uploaded values and results of runtime device division.
 fn finite_predicates_match_ieee_classification() {
     use cubecl::prelude::*;
     let values = [
@@ -1256,7 +1263,10 @@ fn finite_predicates_match_ieee_classification() {
     }
     for (i, mask) in masks.iter().enumerate() {
         let expected = (3..9).contains(&i);
-        assert_eq!(mask & 8 != 0, expected, "bit classification at {i}");
-        assert_eq!(mask & 1 != 0, expected, "production predicate at {i}");
+        assert_eq!(
+            mask & 8 != 0,
+            expected,
+            "production bit classification at {i}"
+        );
     }
 }
