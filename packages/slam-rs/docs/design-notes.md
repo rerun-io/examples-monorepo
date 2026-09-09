@@ -394,17 +394,23 @@ passes on it, with the pyramid and the corner scan bit-exact; whole-clip ATE is
 2.085 cm on MIO07 and 2.295 cm on MGO07, the same numbers as the other two
 lanes.
 
-**It is not gate-clean.** Over the ten reference clips whole, the wgpu lane is
-inside the C++'s own precision band on nine and **reads 11.98 cm against an
+**Historical D66 result: not gate-clean.** Over the ten reference clips whole, the wgpu lane was
+inside the C++'s own precision band on nine and **read 11.98 cm against an
 allowed 10.63 on `MIO14_moving_props`** — a D60 failure on one of the ten,
-written up rather than smoothed over. Nothing points at a wrong kernel: every
-tolerance test passes on Vulkan, the pyramid and the corner scan are bit-exact,
-and the worst lane-to-lane tracked position over the fixture is 3.1e-5 px.
+written up rather than smoothed over. At that point, every
+tolerance test passed on Vulkan, the pyramid and the corner scan were bit-exact,
+and the worst lane-to-lane tracked position over the fixture was 3.1e-5 px.
 MIO14 is the 410 s clip the accuracy-band pass identified as chaotic and D60 was built around —
-the C++'s own two precisions differ by 2.3 cm on it — so the reading is that
-the band is not wide enough to hold a third backend there. It is still a gate
-failure, and **the portable lane is not anyone's default until MIO14 is
-understood**.
+the C++'s own two precisions differ by 2.3 cm on it — so the reading was that
+the band might not hold a third backend there. That was an untested explanation,
+not grounds to widen the gate.
+
+**Resolution, D71 (2026-09-09).** The finite predicate was faulty, but fixing it
+leaves all 22,117 MIO14 poses byte-identical. Native sin/cos error near zero is
+amplified by the SE(2) translation factor's division by theta. Bounded small-angle
+polynomials bring the full replay to **9.48 cm against the unchanged 10.63 cm
+limit**, with every frameset tracked. The nine other historical reference results
+are not a new ten-clip gate run; the targeted regression evidence is in D71.
 
 ## Where the portable lane runs
 
@@ -759,8 +765,59 @@ feature, runtime, dependencies, Pixi environments and tasks. Keep `gpu-core`,
 
 Earlier CUDA measurements and failure accounts below and above are historical;
 the CUDA lane was removed on 2026-09-09. D64's tolerance requirement still
-applies. D66's MIO14 moving-props exception is unchanged: 11.98 cm against
-10.63 cm allowed. It is now the GPU lane's only documented accuracy exception.
+applies. At removal, D66's MIO14 moving-props exception was unchanged: 11.98 cm
+against 10.63 cm allowed. D71 records its later correction.
+
+## D71 — wgpu finite check and small-angle trigonometry
+
+Decision, 2026-09-09: classify GPU floats by exponent bits, and use degree-9 sin
+and degree-10 cos Taylor polynomials for `|theta| <= 0.5` in the SE(2) update.
+Keep native trig outside that interval, and keep the CPU lane unchanged.
+
+The device probe proved `value * 0 == 0` accepts uploaded and device-generated
+NaN and both infinities. CubeCL 0.10's constant-operand optimizer replaces a
+multiply by constant zero with zero. The replacement tests whether the exponent
+bits are all ones; both patch validity and increment validity use the same helper
+as the permanent device regression. This is a real defect, but correcting it
+leaves the full MIO14 trajectory byte-identical: **11.982561 cm versus GT** and
+**4.551881 cm versus C++**.
+
+The next probe measured native sin absolute error up to 1.86e-7 over ±0.001.
+An absolute bound is insufficient here: above the 1e-5 small-angle cutoff, the
+SE(2) translation factor divides normalized sin by theta. The polynomials match
+CPU sin/cos exactly on that dense interval and stay within one ULP on the wider
+regression grid. Their truncation errors on ±0.5 are below f32 rounding. The
+normalization and SE(2) translation formulas stay unchanged.
+
+This one change brings MIO14 to **9.482019 cm versus GT**, below **10.633937 cm**,
+and **6.665221 cm versus C++**. All **22,117/22,117** framesets track, with no
+retries, in **437.9 s (50.5 fps)**. The reproduced CPU run reads 8.734170 cm
+versus GT in 499.4 s. The long-clip gate uses the GT band; the short-clip C++ path
+bound does not apply to MIO14. No gate threshold was changed.
+
+Localization found finite differences before any track-set change: the original
+lane first exceeds a 0.001 px position gap at frame 50, camera 0, keypoint 478;
+IDs first differ at frame 149. No nonfinite or outside-image output appears in
+the 1,100-frame reduced run. Landmark and observation counts initially match,
+while LM cost differs from frame 4. Later newly allocated IDs need not identify
+the same physical point across lanes. The scalar correction closes the measured
+miss; it does not make every frontend value closer to CPU.
+
+All **20 GPU kernel tests** and GPU all-target Clippy pass. The MIO10 CPU bench
+CSV is byte-identical. The four GPU bench trajectories change from pose 4, with
+maximum position shifts of 0.29–2.35 mm and GT ATE changes below 0.0011 cm:
+
+| Clip | Before GT ATE (cm) | After GT ATE (cm) |
+|---|---:|---:|
+| MIO10 | 1.503795 | 1.503822 |
+| MIO11 | 2.495883 | 2.496897 |
+| MGO10 | 0.881272 | 0.881638 |
+| MGO11 | 2.244357 | 2.244077 |
+
+MIO10 also passes its 1.713388 cm GT limit. The other three bench clips have no
+precision-band entry in the ten-clip manifest. These checks establish the local
+MIO14 correction and short-clip regression behavior, not a fresh all-device or
+ten-clip gate. The GPU stays opt-in and the default build stays CPU-only.
 
 ## Decision references
 
@@ -782,3 +839,4 @@ The `Dnn` tags in this file and in the README name the project's recorded design
 - **D64** — Reaffirmed for the GPU lanes: no bit-accuracy; the bar is accuracy inside the band and faster than the CPU lane on the same machine
 - **D68** — The three unreachable blocks go: squared-form marginalization, nullspace diagnostics, the D34 damping stack
 - **D70** — One GPU runtime: the CUDA lane is removed; wgpu is the GPU lane (2026-09-09)
+- **D71** — Exponent-bit finite classification and bounded small-angle trig; the MIO14 replay passes its unchanged accuracy limit (2026-09-09)

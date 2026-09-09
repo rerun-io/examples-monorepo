@@ -178,10 +178,12 @@ decision is load-bearing: [the frontend](docs/design-notes.md#the-frontend-and-t
 | GPU | discrete NVIDIA | 1.4x on a 5090 through Vulkan |
 | GPU | shared-memory SoCs | slower than the CPU lane, so a portability result there, not a speed one |
 
-The GPU lane's only documented accuracy exception is unchanged (D66): over the ten reference clips whole it is
-inside the C++'s own precision band on nine and reads 11.98 cm against an allowed
-10.63 on `MIO14_moving_props`, a D60 failure on one of the ten, so **the GPU
-lane is not anyone's default until MIO14 is understood**.
+D71 closes the measured MIO14 accuracy miss: small-angle GPU trigonometry brings
+`MIO14_moving_props` from 11.98 to **9.48 cm**, below the unchanged **10.63 cm**
+limit. The separate finite-check fix alone leaves that trajectory byte-identical.
+The four short benchmark clips retain their GT ATE within 0.0011 cm, and the CPU
+MIO10 trajectory stays byte-identical. These are targeted replay results, not a
+fresh ten-clip or all-device gate run. The default build remains CPU-only.
 
 Design notes — what the precision band is and why (D60), and the fleet table:
 [the portable lane](docs/design-notes.md#the-portable-lane-and-the-two-silent-failures),
@@ -238,8 +240,8 @@ with its entity trees, every clause of [the V2 gate](docs/design-notes.md#the-v2
 
 Not in this stack, in the order they are likely to matter:
 
-- **GPU speed.** The GPU frontend has the unchanged D66 accuracy exception on
-  MIO14 moving props (11.98 cm against 10.63 cm allowed). It is faster only on
+- **GPU speed.** D71 brings MIO14 moving props within its accuracy limit.
+  The GPU frontend is faster only on
   discrete NVIDIA (1.4x on a 5090 through Vulkan); on shared-memory SoCs it is
   slower than the CPU lane. The kernels were written for correctness first.
   Brush's portable CubeCL kernels are a reference for the next pass.
