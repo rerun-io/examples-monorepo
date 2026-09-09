@@ -196,6 +196,14 @@ pub enum PyramidError {
     /// The level geometry does not fit in memory.
     #[error("level geometry is not representable: {0}")]
     Image(#[from] ImageError),
+    /// A GPU backend's device read failed.
+    ///
+    /// Carried here for the same reason [`crate::frontend::tracker::TrackerError`]
+    /// carries it: the download in `copy_level_into` can fail on the device, and
+    /// the trait's caller must get a typed error rather than a panic (D32).
+    #[cfg(feature = "gpu-core")]
+    #[error(transparent)]
+    Gpu(#[from] crate::gpu::GpuError),
     /// A device download returned the wrong number of bytes.
     ///
     /// Only a GPU backend produces this. A CubeCL runtime whose CUDA

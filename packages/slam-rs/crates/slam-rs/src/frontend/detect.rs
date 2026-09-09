@@ -128,6 +128,18 @@ pub enum DetectError {
         /// Cells the buffer holds.
         actual: usize,
     },
+    /// A GPU scanner's device read failed, or came back the wrong length.
+    ///
+    /// Only a GPU scanner produces this, and it is one variant rather than
+    /// several because an incomplete CubeCL runtime fails every way at once: it
+    /// panics on its own worker thread, the launch reports success, and the
+    /// download comes back short or as zeros. The [`crate::gpu::GpuError`]
+    /// inside names which buffer and whether the read failed or was short;
+    /// reading either as a candidate image would quietly detect nothing
+    /// (decision D32).
+    #[cfg(feature = "gpu-core")]
+    #[error(transparent)]
+    Gpu(#[from] crate::gpu::GpuError),
     /// [`CornerScan::band`] was asked for corners before [`CornerScan::scan`]
     /// ran on this frame.
     ///

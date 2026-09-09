@@ -5,6 +5,12 @@
 //! (catalog feed, evaluation, logging) lives in the `slam_rs` package and the
 //! bindings in `slam-rs-py`; `slam-rs-cli` is a placeholder binary whose only
 //! working subcommand is `version`.
+//!
+//! [`Vio`] is the Offline driver (D17): [`Vio::push_imu`] buffers samples and
+//! [`Vio::track`] runs the frontend and then the estimator to completion in the
+//! calling thread, so every result is final and a repeat run over the same input
+//! is bit-identical. Realtime mode — basalt's two threads joined by bounded
+//! queues — is stage S10's.
 
 pub mod ba_base;
 pub mod calib;
@@ -13,6 +19,17 @@ pub mod config;
 pub mod eigen;
 pub mod estimator;
 pub mod frontend;
+#[cfg(feature = "gpu-core")]
+pub mod gpu;
+
+// `gpu-core` is the kernels and the seam; a runtime comes from `gpu` (CUDA) or
+// `gpu-wgpu`. Enabled on its own there would be no client to build one on, and
+// the failure would be a wall of missing items rather than a sentence.
+#[cfg(all(feature = "gpu-core", not(any(feature = "gpu", feature = "gpu-wgpu"))))]
+compile_error!(
+    "feature `gpu-core` carries the CubeCL kernels but no runtime: enable \
+     `gpu` for the NVIDIA lane or `gpu-wgpu` for the portable one"
+);
 pub mod image;
 pub mod imu;
 pub mod landmark;
@@ -27,6 +44,25 @@ use serde::{Deserialize, Serialize};
 
 /// Version of the core, as declared in `crates/slam-rs/Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Which GPU runtime this build's frontend carries, or `None` for the CPU-only
+/// default.
+///
+/// The `gpu` and `gpu-wgpu` features are two builds of one source behind one
+/// `gpu: bool`, so nothing a caller can pass says which of them it is running.
+/// This is that fact, and it is read on the Python side (`_core.gpu_backend`) to
+/// name the lane a fleet row was measured on — which the two lanes need, because
+/// they do not agree on every clip.
+///
+/// [`gpu::BACKEND_NAME`] is the same name; this wrapper is what a build without
+/// the feature can still answer.
+#[cfg(feature = "gpu-core")]
+pub const GPU_BACKEND: Option<&str> = Some(gpu::BACKEND_NAME);
+
+/// Which GPU runtime this build's frontend carries: none, this being the
+/// off-by-default CPU port the fleet installs.
+#[cfg(not(feature = "gpu-core"))]
+pub const GPU_BACKEND: Option<&str> = None;
 
 /// Elapsed nanoseconds, saturating rather than panicking on an absurd clock.
 ///
@@ -227,6 +263,15 @@ pub enum Backend {
 pub enum FrontendLane {
     /// The CPU pyramid builder and patch tracker.
     Cpu(frontend::flow::FrameToFrameOpticalFlow<frontend::patterns::Pattern51>),
+    /// The CubeCL pyramid builder and patch tracker.
+    #[cfg(feature = "gpu-core")]
+    Gpu(
+        frontend::flow::FrameToFrameOpticalFlow<
+            frontend::patterns::Pattern51,
+            gpu::LanePyramidBuilder,
+            gpu::LanePatchTracker<frontend::patterns::Pattern51>,
+        >,
+    ),
 }
 
 /// Run the same expression against whichever backend the lane holds.
@@ -234,6 +279,8 @@ macro_rules! on_lane {
     ($lane:expr, |$flow:ident| $body:expr) => {
         match $lane {
             FrontendLane::Cpu($flow) => $body,
+            #[cfg(feature = "gpu-core")]
+            FrontendLane::Gpu($flow) => $body,
         }
     };
 }
@@ -245,6 +292,8 @@ impl FrontendLane {
     pub fn backend(&self) -> Backend {
         match self {
             Self::Cpu(_) => Backend::Cpu,
+            #[cfg(feature = "gpu-core")]
+            Self::Gpu(_) => Backend::Gpu,
         }
     }
 
@@ -370,6 +419,28 @@ fn build_frontend(
         Backend::Cpu => Ok(FrontendLane::Cpu(
             frontend::flow::FrameToFrameOpticalFlow::new(config.clone(), calibration, options)?,
         )),
+        #[cfg(feature = "gpu-core")]
+        Backend::Gpu => {
+            let num_levels: usize = config.optical_flow_levels as usize + 1;
+            let (pyramid, tracker, scanner) = gpu::gpu_backends::<frontend::patterns::Pattern51>(
+                options.max_keypoints,
+                num_levels,
+                config.optical_flow_max_iterations as usize,
+                config.optical_flow_max_recovered_dist2,
+            )
+            .map_err(frontend::flow::FrontendError::from)?;
+            Ok(FrontendLane::Gpu(
+                frontend::flow::FrameToFrameOpticalFlow::with_backends(
+                    config.clone(),
+                    calibration,
+                    options,
+                    pyramid,
+                    tracker,
+                    scanner,
+                )?,
+            ))
+        }
+        #[cfg(not(feature = "gpu-core"))]
         Backend::Gpu => Err(VioError::GpuUnavailable),
     }
 }

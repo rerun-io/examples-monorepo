@@ -51,7 +51,7 @@
 # f32 column, and each run's f32 twin reproduced `rmse_cm` exactly.
 #
 # `expected_cpp_wall_s` is the `run.feed_wall_time_s` of the run manifest beside
-# it: the decode-plus-VIO feed loop with nothing logged, on `pablo-dl-server`,
+# it: the decode-plus-VIO feed loop with nothing logged, on the reference host (a 32-core x86-64 workstation),
 # one TBB thread. The port's own replay of the same footage must land within
 # `SPEED_TOLERANCE` of it (D58), so a port that is several times slower fails the
 # gate rather than passing it quietly.
