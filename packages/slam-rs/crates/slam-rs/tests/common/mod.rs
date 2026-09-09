@@ -11,12 +11,16 @@
 #![allow(dead_code, clippy::expect_used, clippy::unwrap_used)]
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock};
 
-use nalgebra::{DMatrix, DVector, SMatrix, Vector3, Vector6};
+use nalgebra::{DMatrix, DVector, SMatrix, Vector2, Vector3, Vector6};
+use serde::Deserialize;
 use slam_rs::calib::{Calibration, CameraModel, Kb4Params};
 use slam_rs::config::VioConfig;
+use slam_rs::estimator::FlowObservations;
 use slam_rs::image::ImageU16;
 use slam_rs::lie::{LieScalar, Se3};
+use slam_rs::types::KeypointId;
 
 const MSDMI: &str = include_str!("../fixtures/msdmi_calib.json");
 const MSDMG: &str = include_str!("../fixtures/msdmg_calib.json");
@@ -71,6 +75,114 @@ pub fn calibration_text(name: &str) -> &'static str {
     }
 }
 
+/// Which precision a whole-clip lane runs.
+///
+/// Two lanes select it and, historically, with two vocabularies:
+/// `SLAM_RS_CLIP_SCALAR=f32|f64` for the port's own frontend and
+/// `SLAM_RS_ORACLE_SCALAR=float|double` for the backend replay, so a reader
+/// running both over one clip had to remember which file wanted which word.
+/// [`Self::from_env`] takes either variable and either vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipScalar {
+    F32,
+    F64,
+}
+
+impl ClipScalar {
+    /// `SLAM_RS_CLIP_SCALAR` first, then `SLAM_RS_ORACLE_SCALAR`, then
+    /// `default`. `f32` and `float` mean the same thing, as do `f64` and
+    /// `double`.
+    ///
+    /// # Panics
+    ///
+    /// On a value that is none of the four.
+    pub fn from_env(default: Self) -> Self {
+        for name in ["SLAM_RS_CLIP_SCALAR", "SLAM_RS_ORACLE_SCALAR"] {
+            let Ok(value) = std::env::var(name) else {
+                continue;
+            };
+            return match value.as_str() {
+                "f32" | "float" => Self::F32,
+                "f64" | "double" => Self::F64,
+                other => panic!("{name} is f32/float or f64/double, not {other}"),
+            };
+        }
+        default
+    }
+
+    /// `"f32"` or `"f64"`, which is what a written CSV's name carries.
+    pub fn rust_name(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::F64 => "f64",
+        }
+    }
+
+    /// `"float"` or `"double"`, which is how the C++ dump keys its runs.
+    pub fn cpp_name(self) -> &'static str {
+        match self {
+            Self::F32 => "float",
+            Self::F64 => "double",
+        }
+    }
+}
+
+/// What `tests/tools/dump_clip.py` writes beside the pixels.
+///
+/// Both whole-clip lanes read this file — one through its own frontend, one
+/// replaying the C++'s flow stream — so the shape and the dataset-to-config
+/// table live here rather than once typed and once as a `serde_json::Value`.
+#[derive(Debug, Deserialize)]
+pub struct Clip {
+    pub segment_id: String,
+    pub dataset_name: String,
+    /// Added to a frameset timestamp to reach the absolute device clock.
+    pub capture_start_time_ns: i64,
+    /// `catalog` (the values the C++ was pushed) or `fixture` (the fork file's
+    /// doubles).
+    pub calibration_source: String,
+    pub num_cameras: usize,
+    pub framesets: usize,
+    pub frame_t_ns: Vec<i64>,
+    pub imu_samples: usize,
+}
+
+impl Clip {
+    /// `clip.json` from a directory `dump_clip.py` wrote.
+    ///
+    /// # Panics
+    ///
+    /// When the file is missing or does not parse.
+    pub fn read(directory: &Path) -> Self {
+        let path: PathBuf = directory.join("clip.json");
+        let text: String = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        serde_json::from_str(&text).unwrap()
+    }
+}
+
+/// The VIO config of the device a clip was captured on, from the committed
+/// fixtures, or the file `SLAM_RS_CLIP_CONFIG` names.
+///
+/// The override exists because a config field is an input like any other: the
+/// reference runs load `data/msd/msd*_config.json`, and a lane that builds a
+/// default config instead differs from them by whatever that file overrides.
+///
+/// # Panics
+///
+/// On a dataset with no pinned config.
+pub fn config_for(dataset_name: &str) -> VioConfig {
+    if let Some(path) = std::env::var_os("SLAM_RS_CLIP_CONFIG") {
+        return VioConfig::from_json_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    }
+    let file: &str = match dataset_name {
+        "msd-index" => "msdmi_config.json",
+        "msd-g2" => "msdmg_config.json",
+        other => panic!("no VIO config is pinned for {other}"),
+    };
+    VioConfig::from_json_str(&std::fs::read_to_string(configs().join(file)).unwrap()).unwrap()
+}
+
 /// A fixed-size matrix flattened **row major**, which is how every C++ dump
 /// prints one.
 pub fn row_major<const R: usize, const C: usize, S: LieScalar>(m: &SMatrix<S, R, C>) -> Vec<f64> {
@@ -86,6 +198,23 @@ pub fn row_major<const R: usize, const C: usize, S: LieScalar>(m: &SMatrix<S, R,
 /// `‖·‖_F` over any coefficient sequence, which on a vector is `‖·‖`.
 pub fn frobenius<S: LieScalar>(values: impl Iterator<Item = S>) -> f64 {
     values.map(|v| v.to_f64() * v.to_f64()).sum::<f64>().sqrt()
+}
+
+///
+/// Both lanes that replay `OracleFlow` need exactly this, and an id the
+/// insertion order would collide on cannot happen: the dump's ids are unique
+/// per camera.
+pub fn observations(flow: &OracleFlow) -> Arc<FlowObservations> {
+    let mut out: FlowObservations = FlowObservations::new(flow.t_ns, flow.cameras.len());
+    for (camera, points) in flow.cameras.iter().enumerate() {
+        let Some(slot) = out.cameras.get_mut(camera) else {
+            continue;
+        };
+        for point in points {
+            slot.insert(KeypointId(point.id), Vector2::new(point.x, point.y));
+        }
+    }
+    Arc::new(out)
 }
 
 // ── the PGM framesets ─────────────────────────────────────────────
@@ -264,6 +393,162 @@ pub fn pyramid_of(image: &ImageU16, levels: usize) -> PyramidU16 {
         .build(0, image, &mut pyramid)
         .expect("the geometry the pyramid was allocated for");
     pyramid
+}
+
+// ── the VIO oracle fixture ─────────────────────────────────────
+
+/// `tools/vio_oracle.cpp`'s dump: one run per precision, plus the C++
+/// frontend's keypoints per frameset. Both VIO lanes read it, so the shape
+/// lives here even though `vio_parity` reads only part of it.
+#[derive(Debug, Deserialize)]
+pub struct Oracle {
+    pub runs: Vec<OracleRun>,
+    pub flow: Vec<OracleFlow>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OracleRun {
+    pub scalar: String,
+    pub frames: Vec<OracleFrame>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OracleFlow {
+    pub t_ns: i64,
+    pub cameras: Vec<Vec<OraclePoint>>,
+}
+
+/// One tracked keypoint of the C++ frontend's `OpticalFlowResult`.
+///
+/// The fixture also carries the warp's four `linear` coefficients so a reader
+/// can see the whole `AffineCompact2f`; the estimator reads only the
+/// translation, so they are not deserialized.
+#[derive(Debug, Deserialize)]
+pub struct OraclePoint {
+    pub id: u64,
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OracleFrame {
+    pub frame: usize,
+    pub t_ns: i64,
+    pub states: Vec<OracleState>,
+    pub poses: Vec<OraclePose>,
+    pub kf_ids: Vec<i64>,
+    pub ltkfs: Vec<i64>,
+    pub num_points_kf: Vec<(i64, i64)>,
+    pub last_state_t_ns: i64,
+    pub frames_after_kf: i32,
+    pub opt_started: bool,
+    pub num_landmarks: usize,
+    pub num_observations: usize,
+    pub num_imu_meas: usize,
+    pub marg_order: Vec<(i64, usize, usize)>,
+    pub marg_digest: OracleDigest,
+    pub marg: Option<OracleMarg>,
+    pub lm: Vec<OracleLm>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OracleState {
+    pub t_ns: i64,
+    pub q: [f64; 4],
+    pub t: [f64; 3],
+    pub vel: [f64; 3],
+    pub bg: [f64; 3],
+    pub ba: [f64; 3],
+    pub linearized: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OraclePose {
+    pub t_ns: i64,
+    pub q: [f64; 4],
+    pub t: [f64; 3],
+    pub linearized: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OracleDigest {
+    pub rows: usize,
+    pub cols: usize,
+    pub h_frobenius: f64,
+    pub b_norm: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OracleMarg {
+    pub states_to_remove: usize,
+    pub last_state_to_marg: i64,
+    pub poses_to_marg: Vec<i64>,
+    pub states_to_marg_all: Vec<i64>,
+    pub states_to_marg_vel_bias: Vec<i64>,
+    pub kfs_to_marg: Vec<i64>,
+    pub idx_to_keep: usize,
+    pub idx_to_marg: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OracleLm {
+    pub it: i32,
+    pub backtrack: i32,
+    pub error_before: f64,
+    pub error_after: f64,
+    pub vision_error: f64,
+    pub imu_error: f64,
+    pub bg_error: f64,
+    pub ba_error: f64,
+    pub marg_prior_error: f64,
+    pub l_diff: f64,
+    pub f_diff: f64,
+    pub lambda: f64,
+    pub step_norminf: f64,
+    pub solve_attempts: u32,
+    pub step_is_valid: bool,
+    pub step_is_successful: bool,
+}
+
+/// One uncalibrated IMU sample of `vio/imu.json`, as the fixture writes it.
+#[derive(Debug, Deserialize)]
+pub struct ImuRow {
+    pub t_ns: i64,
+    pub gyro: [f64; 3],
+    pub accel: [f64; 3],
+}
+
+#[derive(Debug, Deserialize)]
+struct ImuFixture {
+    imu: Vec<ImuRow>,
+}
+
+/// The 1.55 MB oracle, parsed once per test binary: five lanes read it and
+/// `serde_json` is otherwise the slowest thing in them.
+pub static ORACLE: LazyLock<Oracle> = LazyLock::new(|| {
+    let path: PathBuf = fixtures().join("vio/vio_oracle.json");
+    let text: String = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+    serde_json::from_str(&text).expect("vio_oracle.json does not match the expected shape")
+});
+
+/// The 1,077 uncalibrated samples of the window, in capture order.
+pub static IMU: LazyLock<Vec<ImuRow>> = LazyLock::new(|| {
+    let path: PathBuf = fixtures().join("vio/imu.json");
+    let text: String = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+    let fixture: ImuFixture =
+        serde_json::from_str(&text).expect("imu.json does not match the expected shape");
+    fixture.imu
+});
+
+/// The run of one precision, `"double"` or `"float"`.
+pub fn run_named<'a>(oracle: &'a Oracle, scalar: &str) -> &'a OracleRun {
+    oracle
+        .runs
+        .iter()
+        .find(|run| run.scalar == scalar)
+        .unwrap_or_else(|| panic!("the fixture has no {scalar} run"))
 }
 
 /// `KannalaBrandtCamera4<Scalar>::getTestProjections()[0]`

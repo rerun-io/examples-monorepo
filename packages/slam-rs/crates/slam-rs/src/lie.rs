@@ -222,6 +222,17 @@ pub(crate) fn c<S: LieScalar>(value: f64) -> S {
     S::from_literal(value)
 }
 
+/// `numext::maxi(a, b)` (`Core/MathFunctions.h`), which is what `cwiseMax`
+/// applies coefficient by coefficient.
+///
+/// `(a < b ? b : a)`, so a NaN on the left survives and `f32::max`'s
+/// NaN-suppressing behaviour is wrong here. `sqrt_keypoint_vio.cpp:1415` sends
+/// the result straight into the damped diagonal, so a NaN that Eigen keeps and
+/// Rust would drop changes whether the solve retries.
+pub(crate) fn eigen_maxi<S: LieScalar>(a: S, b: S) -> S {
+    if a < b { b } else { a }
+}
+
 /// A rotation, stored as a unit quaternion exactly as `Sophus::SO3` does.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct So3<S: LieScalar> {
@@ -866,6 +877,13 @@ mod tests {
             2.0
         );
         assert_eq!(f64::eigen_predux(&[1.0, 2.0]), 3.0);
+    }
+
+    #[test]
+    fn eigen_maxi_keeps_a_nan_on_the_left() {
+        assert!(eigen_maxi(f64::NAN, 1.0).is_nan());
+        assert_eq!(eigen_maxi(1.0f64, f64::NAN), 1.0);
+        assert_eq!(f64::NAN.max(1.0), 1.0, "std::f64::max is the other way");
     }
 
     fn config() -> ProptestConfig {
