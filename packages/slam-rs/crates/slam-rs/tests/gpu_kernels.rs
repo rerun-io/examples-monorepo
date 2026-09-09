@@ -1195,8 +1195,6 @@ mod absent_gpu {
     }
 }
 
-// Self-equality is intentional: this probe measures NaN comparison semantics.
-#[allow(clippy::eq_op)]
 #[cubecl::prelude::cube(launch_unchecked)]
 fn finite_probe(input: &cubecl::prelude::Array<f32>, output: &mut cubecl::prelude::Array<u32>) {
     use cubecl::prelude::*;
@@ -1206,20 +1204,12 @@ fn finite_probe(input: &cubecl::prelude::Array<f32>, output: &mut cubecl::prelud
         if i >= 9 {
             value = input[i] / input[4];
         }
-        let a = value * 0.0f32 == 0.0f32;
-        let b = value == value;
-        let c = f32::abs(value) <= f32::new(f32::MAX);
-        let d = finite::is_finite(value);
-        output[i] = u32::cast_from(a)
-            | (u32::cast_from(b) << 1)
-            | (u32::cast_from(c) << 2)
-            | (u32::cast_from(d) << 3);
+        output[i] = u32::cast_from(finite::is_finite(value));
     }
 }
 
 #[test]
-// The arithmetic column is diagnostic only; the shared production helper must
-// classify both uploaded values and results of runtime device division.
+// The production helper must classify uploaded values and runtime device division.
 fn finite_predicates_match_ieee_classification() {
     use cubecl::prelude::*;
     let values = [
@@ -1249,23 +1239,12 @@ fn finite_predicates_match_ieee_classification() {
         );
     }
     let bytes = client.read_one(output).unwrap();
-    let masks = u32::from_bytes(&bytes);
-    for (i, mask) in masks.iter().enumerate() {
-        let value = if i >= 9 {
-            values[i] / values[4]
-        } else {
-            values[i]
-        };
-        println!(
-            "finite probe {i}: {value:?}, cpu={}, mask={mask:04b}",
-            value.is_finite()
-        );
-    }
-    for (i, mask) in masks.iter().enumerate() {
+    let classifications = u32::from_bytes(&bytes);
+    for (i, classification) in classifications.iter().enumerate() {
         let expected = (3..9).contains(&i);
         assert_eq!(
-            mask & 8 != 0,
-            expected,
+            *classification,
+            u32::from(expected),
             "production bit classification at {i}"
         );
     }
