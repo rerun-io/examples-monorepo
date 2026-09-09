@@ -104,8 +104,8 @@ impl VioResult {
 ///
 /// Offline mode: the frontend and the backend run to completion in the calling
 /// thread, so every `track` result is final and a repeat run over the same input
-/// is bit-identical. The GIL is released around the whole call, so a decoder
-/// thread keeps running while the frameset is tracked.
+/// is bit-identical. The GIL is released around frontend and estimator compute,
+/// so a decoder thread keeps running while the frameset is tracked.
 #[pyclass(module = "slam_rs._core")]
 pub struct Vio {
     inner: slam_rs::Vio<f32>,
@@ -228,9 +228,10 @@ impl Vio {
 
     /// Process one frameset: `images` holds one `uint8[h, w]` array per camera.
     ///
-    /// The pixels are copied out of numpy while the GIL is held — one copy — and
-    /// the whole pipeline then runs without it. A frameset the core refuses
-    /// leaves the estimator exactly as the last accepted one did.
+    /// On the GPU lane, pixels widen directly into reused core storage while
+    /// the GIL is held. Computation then runs without a NumPy borrow. The CPU
+    /// lane copies the bytes before detaching. A refused frameset leaves the
+    /// estimator exactly as the last accepted one did.
     ///
     /// On a GPU lane a device that dies mid-run is a `ValueError` here as well:
     /// CubeCL panics on a lost device rather than returning an error, and every
@@ -242,6 +243,38 @@ impl Vio {
         t_ns: i64,
         images: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<VioResult> {
+        if self.inner.backend() == slam_rs::Backend::Gpu {
+            let arrays: Vec<PyReadonlyArray2<'_, u8>> = images
+                .iter()
+                .enumerate()
+                .map(|(index, image)| {
+                    let array = gray_array(image, index)?;
+                    gray_pixels(&array, index)?;
+                    Ok(array)
+                })
+                .collect::<PyResult<_>>()?;
+            let views: Vec<ImageView<'_>> = arrays
+                .iter()
+                .enumerate()
+                .map(|(index, array)| {
+                    let (data, width, height) = gray_pixels(array, index)?;
+                    Ok(ImageView {
+                        width,
+                        height,
+                        stride: width,
+                        data,
+                    })
+                })
+                .collect::<PyResult<_>>()?;
+            let prepared = self
+                .inner
+                .prepare_track(t_ns, &views)
+                .map_err(value_error)?;
+            drop(views);
+            drop(arrays);
+            let inner = py.detach(|| prepared.finish()).map_err(value_error)?;
+            return Ok(VioResult { inner });
+        }
         let mut frames: Vec<GrayImage> = Vec::with_capacity(images.len());
         for (index, image) in images.iter().enumerate() {
             frames.push(gray_image(image, index)?);
@@ -599,10 +632,8 @@ where
 
 /// Borrow one `uint8[h, w]` array out of Python: rank and dtype checked.
 ///
-/// The two consumers differ only in what they do with the bytes — [`Vio::track`]
-/// copies them into a `Vec`, [`OpticalFlow::process`] widens them straight into a
-/// reused [`ImageU16`] — so the checks live here and neither repeats them. The
-/// layout is [`gray_pixels`]' half of the same pair.
+/// Consumers either copy the bytes or widen them into reused [`ImageU16`]
+/// storage. The layout is [`gray_pixels`]' half of the same pair.
 fn gray_array<'py>(
     object: &Bound<'py, PyAny>,
     index: usize,

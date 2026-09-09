@@ -661,6 +661,17 @@ pub(crate) fn check_patch_inputs(
 /// GPU wants as one kernel, and the tracker consumes the result.
 #[allow(clippy::len_without_is_empty)]
 pub trait SourcePatches {
+    /// Prepare source storage before tracker inputs are uploaded. A synchronous
+    /// backend builds immediately; a device tracker may defer the patch kernel.
+    fn prepare(
+        &mut self,
+        pyramid: &Self::Pyramid,
+        positions: &PointsSoA,
+        selected: Option<&[bool]>,
+    ) -> Result<(), TrackerError> {
+        self.build(pyramid, positions, selected)
+    }
+
     /// The pyramid representation these patches are sampled from.
     type Pyramid: Pyramid;
 
@@ -987,6 +998,20 @@ impl FlowResult {
 /// concrete pyramid or patch storage, so the CPU implementation here and a later
 /// CubeCL one can be swapped without touching the driver (§12.1).
 pub trait PatchTracker {
+    /// Track source patches prepared by [`SourcePatches::prepare`].
+    /// Device implementations can upload all inputs before launching the source
+    /// patch kernel; synchronous implementations keep their ordinary path.
+    fn track_prepared(
+        &mut self,
+        prev: &Self::Pyramid,
+        next: &Self::Pyramid,
+        patches: &Self::Patches,
+        transforms_in: &FlowTransforms,
+        out: &mut FlowResult,
+    ) -> Result<(), TrackerError> {
+        self.track(prev, next, patches, transforms_in, out)
+    }
+
     /// The sampling pattern this tracker was built for.
     type Pattern: Pattern;
 

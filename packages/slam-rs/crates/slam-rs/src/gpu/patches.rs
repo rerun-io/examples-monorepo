@@ -362,6 +362,24 @@ impl<P: Pattern, R: Runtime> SourcePatches for GpuPatches<P, R> {
         positions: &PointsSoA,
         selected: Option<&[bool]>,
     ) -> Result<(), TrackerError> {
+        self.prepare(pyramid, positions, selected)?;
+        guarded(
+            GpuError::DeviceLost {
+                what: "patch build",
+            },
+            || {
+                self.launch_build(pyramid, self.bases());
+                Ok(())
+            },
+        )
+    }
+
+    fn prepare(
+        &mut self,
+        pyramid: &GpuPyramid<R>,
+        positions: &PointsSoA,
+        selected: Option<&[bool]>,
+    ) -> Result<(), TrackerError> {
         guarded(
             GpuError::DeviceLost {
                 what: "patch build",
@@ -373,8 +391,6 @@ impl<P: Pattern, R: Runtime> SourcePatches for GpuPatches<P, R> {
                 }
                 // `accept` has set `len`, which is what the runs are now strided by.
                 self.upload_positions(positions, selected);
-                let bases: PositionBases = self.bases();
-                self.launch_build(pyramid, bases);
                 Ok(())
             },
         )

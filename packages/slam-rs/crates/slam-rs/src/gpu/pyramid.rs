@@ -230,6 +230,7 @@ pub struct GpuPyramidBuilder<R: Runtime> {
     pattern: Vec<[f32; 2]>,
     staging: Vec<u16>,
     level0: Level0Table,
+    prepared: Vec<Option<Level0>>,
 }
 
 impl<R: Runtime> GpuPyramidBuilder<R> {
@@ -240,6 +241,7 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
             pattern: pattern.to_vec(),
             staging: Vec::new(),
             level0: Level0Table::default(),
+            prepared: Vec::new(),
         }
     }
 
@@ -258,6 +260,27 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
 
 impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
     type Pyramid = GpuPyramid<R>;
+    const PREPARE_IMAGES: bool = true;
+
+    fn prepare_images(&mut self, images: &[ImageU16]) -> Result<(), PyramidError> {
+        guarded(
+            GpuError::DeviceLost {
+                what: "frameset uploads",
+            },
+            || {
+                self.prepared.resize_with(images.len(), || None);
+                for (slot, image) in self.prepared.iter_mut().zip(images) {
+                    let (handle, _) = super::upload_frame(&self.client, image, &mut self.staging);
+                    *slot = Some(Level0 {
+                        handle,
+                        width: image.width(),
+                        height: image.height(),
+                    });
+                }
+                Ok(())
+            },
+        )
+    }
 
     fn allocate(
         &self,
@@ -321,7 +344,14 @@ impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
                 // replaced every frame. `upload_frame` is what puts the frame
                 // there, and its doc is where the copy count lives.
                 let (upload, pixels): (cubecl::server::Handle, usize) =
-                    super::upload_frame(&out.client, img, &mut self.staging);
+                    match self.prepared.get_mut(camera).and_then(Option::take) {
+                        Some(frame)
+                            if frame.width == img.width() && frame.height == img.height() =>
+                        {
+                            (frame.handle, frame.width * frame.height)
+                        }
+                        _ => super::upload_frame(&out.client, img, &mut self.staging),
+                    };
                 kernels::launch_copy_level0::<R>(
                     &out.client,
                     (&upload, pixels),

@@ -502,6 +502,30 @@ pub struct Vio<S: lie::LieScalar = f32> {
     frontend_timings: FrontendTimings,
 }
 
+/// A validated frameset whose pixels are owned by the pipeline.
+///
+/// The mutable borrow prevents another call from replacing those pixels before
+/// computation finishes. No source image borrow is retained.
+pub struct PreparedTrack<'a, S: lie::LieScalar> {
+    vio: &'a mut Vio<S>,
+    t_ns: i64,
+    prediction: Option<frontend::flow::PosePrediction>,
+}
+
+impl<S: lie::LieScalar> PreparedTrack<'_, S> {
+    /// Finish tracking, or return the unchanged IMU-coverage refusal.
+    ///
+    /// # Errors
+    ///
+    /// The frontend or estimator errors returned by [`Vio::track`].
+    pub fn finish(self) -> Result<VioResult, VioError> {
+        match self.prediction {
+            Some(prediction) => self.vio.finish_track(self.t_ns, &prediction),
+            None => Ok(self.vio.result(VioStatus::NeedMoreImu, self.t_ns)),
+        }
+    }
+}
+
 impl<S: lie::LieScalar> Vio<S> {
     /// Build the pipeline from basalt's own config and calibration (D18).
     ///
@@ -635,6 +659,22 @@ impl<S: lie::LieScalar> Vio<S> {
     /// size the calibration gives its cameras, does not follow the last accepted
     /// frameset, or when the estimator refuses it.
     pub fn track(&mut self, t_ns: i64, images: &[ImageView<'_>]) -> Result<VioResult, VioError> {
+        self.prepare_track(t_ns, images)?.finish()
+    }
+
+    /// Validate and widen borrowed pixels before releasing their owner.
+    ///
+    /// Checks, IMU prediction and widening run in the same order as [`Self::track`].
+    /// The returned value borrows only this pipeline, not `images`.
+    ///
+    /// # Errors
+    ///
+    /// The input and IMU prediction errors returned by [`Self::track`].
+    pub fn prepare_track(
+        &mut self,
+        t_ns: i64,
+        images: &[ImageView<'_>],
+    ) -> Result<PreparedTrack<'_, S>, VioError> {
         // Every refusal is decided here, before **any** mutation, and the
         // coverage test is one of them. Everything below moves the pipeline
         // forward irreversibly — the frontend's own preintegrator eats its
@@ -652,7 +692,11 @@ impl<S: lie::LieScalar> Vio<S> {
         self.frontend
             .check_frameset(t_ns, images.iter().map(|image| (image.width, image.height)))?;
         if !self.estimator.imu_covers_frame(t_ns) {
-            return Ok(self.result(VioStatus::NeedMoreImu, t_ns));
+            return Ok(PreparedTrack {
+                vio: self,
+                t_ns,
+                prediction: None,
+            });
         }
 
         // `frame_to_frame_optical_flow.h:138-152`: the prediction the KLT is
@@ -682,8 +726,20 @@ impl<S: lie::LieScalar> Vio<S> {
         for (frame, view) in self.frames.iter_mut().zip(images.iter()) {
             frame.fill_from_u8_strided(view.data, view.width, view.height, view.stride)?;
         }
+        Ok(PreparedTrack {
+            vio: self,
+            t_ns,
+            prediction: Some(prediction),
+        })
+    }
+
+    fn finish_track(
+        &mut self,
+        t_ns: i64,
+        prediction: &frontend::flow::PosePrediction,
+    ) -> Result<VioResult, VioError> {
         self.frontend
-            .process_frame(t_ns, &self.frames, &prediction, &self.masks)?;
+            .process_frame(t_ns, &self.frames, prediction, &self.masks)?;
         let flow: frontend::flow::FlowTimings = self.frontend.timings();
         self.frontend_timings.pyramid_ns = flow.pyramid_ns;
         self.frontend_timings.detect_ns = flow.detect_ns;

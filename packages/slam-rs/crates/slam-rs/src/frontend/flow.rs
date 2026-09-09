@@ -1203,8 +1203,17 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
                     None => self.staging.push(fresh),
                 }
             }
-            self.pyramid_builder
-                .build(index, image, &mut self.staging[index])?;
+            if !B::PREPARE_IMAGES {
+                self.pyramid_builder
+                    .build(index, image, &mut self.staging[index])?;
+            }
+        }
+        if B::PREPARE_IMAGES {
+            self.pyramid_builder.prepare_images(images)?;
+            for (index, image) in images.iter().enumerate() {
+                self.pyramid_builder
+                    .build(index, image, &mut self.staging[index])?;
+            }
         }
         Ok(())
     }
@@ -1289,8 +1298,9 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             &self.staging[cam1]
         };
         let mark: std::time::Instant = std::time::Instant::now();
-        self.patches.build(source_pyramid, &self.positions, None)?;
-        self.tracker.track(
+        self.patches
+            .prepare(source_pyramid, &self.positions, None)?;
+        self.tracker.track_prepared(
             source_pyramid,
             &self.staging[cam2],
             &self.patches,

@@ -115,7 +115,6 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
         )
     }
 
-    /// `trackPoints` (`frame_to_frame_optical_flow.h:294-375`) on the device.
     fn track(
         &mut self,
         prev: &GpuPyramid<R>,
@@ -123,6 +122,32 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
         patches: &GpuPatches<P, R>,
         transforms_in: &FlowTransforms,
         out: &mut FlowResult,
+    ) -> Result<(), TrackerError> {
+        self.track_inner(prev, next, patches, transforms_in, out, false)
+    }
+
+    fn track_prepared(
+        &mut self,
+        prev: &GpuPyramid<R>,
+        next: &GpuPyramid<R>,
+        patches: &GpuPatches<P, R>,
+        transforms_in: &FlowTransforms,
+        out: &mut FlowResult,
+    ) -> Result<(), TrackerError> {
+        self.track_inner(prev, next, patches, transforms_in, out, true)
+    }
+}
+
+impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
+    /// `trackPoints` (`frame_to_frame_optical_flow.h:294-375`) on the device.
+    fn track_inner(
+        &mut self,
+        prev: &GpuPyramid<R>,
+        next: &GpuPyramid<R>,
+        patches: &GpuPatches<P, R>,
+        transforms_in: &FlowTransforms,
+        out: &mut FlowResult,
+        build_source: bool,
     ) -> Result<(), TrackerError> {
         // The one call per frameset that waits on the device, and the one the
         // frontend makes with the GIL released: a lost device panics inside
@@ -184,6 +209,14 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
             let shape = patches.shape();
             let forward_view = (&forward, TRANSFORM_RUNS * count);
 
+            self.backward_patches
+                .accept(count, None, next.num_levels())?;
+            self.backward_patches
+                .upload_offsets(&self.offset_x[..count], &self.offset_y[..count]);
+            if build_source {
+                patches.launch_build(prev, patches.bases());
+            }
+
             // ── forward: `trackPoint(pyr_1, pyr_2, transform_1, transform_2)` (`:349`).
             kernels::launch_klt::<R>(
                 &self.client,
@@ -197,10 +230,6 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
             );
 
             // ── the backward source patches, from `next` at the forward result.
-            self.backward_patches
-                .accept(count, None, next.num_levels())?;
-            self.backward_patches
-                .upload_offsets(&self.offset_x[..count], &self.offset_y[..count]);
             kernels::launch_prepare_backward::<R>(
                 &self.client,
                 forward_view,
@@ -249,16 +278,17 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
             );
 
             // ── the one wait of the call.
+            let expected: usize = TRANSFORM_RUNS * count * size_of::<f32>();
+            let result = self
+                .result
+                .clone()
+                .offset_end(self.result.size_in_used() - expected as u64);
             let bytes = self
                 .client
-                .read_one(self.result.clone())
+                .read_one(result)
                 .map_err(|error| super::read_failed("the tracker result", &error))?;
-            // `<`, where every sibling download checks `!=`: `self.result` is
-            // allocated at `capacity` and read whole, while `expected` is sized by
-            // `count`, so a full frame returns more bytes than this call reads
-            // (28,672 against 700 on the tracker's own tolerance test). What an
-            // incomplete runtime does — return fewer — is what this refuses.
-            let expected: usize = TRANSFORM_RUNS * count * size_of::<f32>();
+            // The kernel packs by count; the unused capacity tail stays on the
+            // device. Keep the short-read refusal before decoding any values.
             if bytes.len() < expected {
                 return Err(TrackerError::LengthMismatch {
                     first_name: "result bytes expected",

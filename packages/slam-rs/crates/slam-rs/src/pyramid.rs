@@ -76,6 +76,14 @@ pub(crate) const MIN_SIDE: usize = 3;
 /// signature. The output is a `&mut` parameter, never a return value, so the
 /// caller owns the allocation and the per-frame path never allocates.
 pub trait PyramidBuilder {
+    /// Whether images are uploaded together before any pyramid dispatch.
+    const PREPARE_IMAGES: bool = false;
+
+    /// Prepare this frameset's uploads after all pyramid allocations.
+    fn prepare_images(&mut self, _images: &[ImageU16]) -> Result<(), PyramidError> {
+        Ok(())
+    }
+
     /// The pyramid representation this builder fills.
     ///
     /// Bounded by [`Pyramid`], so generic code can read geometry and copy
