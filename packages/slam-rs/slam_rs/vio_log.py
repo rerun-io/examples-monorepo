@@ -710,7 +710,7 @@ def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
                 # flat line: ``test_vio_log`` reads this partition off the views.
                 rrb.TimeSeriesView(
                     origin=VIO_STATS_ENTITY,
-                    contents=[f"{VIO_STATS_ENTITY}/stage_ms/{stage}" for stage in ("back_substitution", "error", "linearize", "marginalize")],
+                    contents=[f"{VIO_STATS_ENTITY}/stage_ms/{stage}" for stage in ("back_substitution", "error", "linearize", "predict", "keyframe", "optimize", "marginalize")],
                     name="solve stages (ms)",
                 ),
                 # The frontend's four in their own view for the same reason the
@@ -719,7 +719,7 @@ def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
                 # is a fiftieth of one, and one axis for both hides the smaller.
                 rrb.TimeSeriesView(
                     origin=VIO_STATS_ENTITY,
-                    contents=[f"{VIO_STATS_ENTITY}/stage_ms/frontend_{stage}" for stage in ("pyramid", "detect", "track", "imu")],
+                    contents=[f"{VIO_STATS_ENTITY}/stage_ms/frontend_{stage}" for stage in ("pyramid", "detect", "track", "stereo", "imu")],
                     name="frontend stages (ms)",
                 ),
                 rrb.TimeSeriesView(
