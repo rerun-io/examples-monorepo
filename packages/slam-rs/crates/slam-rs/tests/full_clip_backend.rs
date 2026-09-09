@@ -29,17 +29,17 @@
 //! nothing else.
 //!
 //! ```bash
-//! SLAM_RS_CLIP_DIR=/tmp/s15-clips/MIO07 \
-//! SLAM_RS_ORACLE_JSON=/tmp/s15-clips/MIO07/vio_oracle_full.json \
+//! SLAM_RS_CLIP_DIR=<clip-dir> \
+//! SLAM_RS_ORACLE_JSON=<clip-dir>/vio_oracle_full.json \
 //! SLAM_RS_ORACLE_SCALAR=double \
-//! SLAM_RS_ORACLE_OUT=/tmp/s15-clips/MIO07/slam_rs_backend_f64.csv \
+//! SLAM_RS_ORACLE_OUT=<clip-dir>/slam_rs_backend_f64.csv \
 //!   cargo test --release --test full_clip_backend -- --nocapture
 //! ```
 //!
 //! Without `SLAM_RS_ORACLE_JSON` the test prints why and passes, so the default
 //! suite stays fast: the gated dump is `MIO07`'s, 174 MB for its 4,095
 //! framesets, and it is a **bundle** artifact rather than a repository one. It
-//! sits at `/tmp/s15-clips/MIO07/vio_oracle_full.json` on `pablo-dl-server`
+//! sits at `<clip-dir>/vio_oracle_full.json` on the host that produced it
 //! beside the clip `dump_clip.py` wrote, and both are rebuilt with the two
 //! commands above when that directory is gone.
 

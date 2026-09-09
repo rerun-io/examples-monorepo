@@ -251,7 +251,7 @@ class CatalogSegment:
     """A segment read from a running catalog server."""
 
     url: str
-    """Catalog URL, e.g. ``rerun+http://dgx-spark:9988``."""
+    """Catalog URL, e.g. ``rerun+http://<host>:9988``."""
     dataset_name: str
     """Dataset entry name on that server."""
     segment_id: str
