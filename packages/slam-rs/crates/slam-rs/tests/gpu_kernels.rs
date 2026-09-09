@@ -19,6 +19,7 @@
 #![cfg(feature = "gpu-core")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use cubecl::frontend::CompilationArg;
 use kornia_imgproc::features::FastCorner;
 use nalgebra::Vector2;
 use slam_rs::frontend::detect::{BandRequest, CornerScan, CpuCornerScan, DetectError};
@@ -1188,5 +1189,74 @@ mod absent_gpu {
                 ))
             },
         );
+    }
+}
+
+#[cubecl::prelude::cube(launch_unchecked)]
+fn finite_probe(input: &cubecl::prelude::Array<f32>, output: &mut cubecl::prelude::Array<u32>) {
+    use cubecl::prelude::*;
+    let i = ABSOLUTE_POS;
+    if i < 12 {
+        let mut value = input[i];
+        if i >= 9 {
+            value = input[i] / input[4];
+        }
+        let a = value * 0.0f32 == 0.0f32;
+        let b = value == value;
+        let c = f32::abs(value) <= 3.4028234663852886e38f32;
+        let d = (u32::reinterpret(value) & 0x7f800000u32) != 0x7f800000u32;
+        output[i] = u32::cast_from(a)
+            | (u32::cast_from(b) << 1)
+            | (u32::cast_from(c) << 2)
+            | (u32::cast_from(d) << 3);
+    }
+}
+
+#[test]
+fn finite_predicates_match_ieee_classification() {
+    use cubecl::prelude::*;
+    let values = [
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        -0.0,
+        0.0,
+        1.0,
+        f32::MAX,
+        f32::MIN_POSITIVE,
+        f32::from_bits(1),
+        0.0,
+        1.0,
+        -1.0,
+    ];
+    let client = gpu_client().unwrap();
+    let input = client.create_from_slice(f32::as_bytes(&values));
+    let output = client.empty(12 * size_of::<u32>());
+    unsafe {
+        finite_probe::launch_unchecked::<GpuRuntime>(
+            &client,
+            CubeCount::Static(1, 1, 1),
+            CubeDim::new_1d(32),
+            ArrayArg::from_raw_parts(input, 12),
+            ArrayArg::from_raw_parts(output.clone(), 12),
+        );
+    }
+    let bytes = client.read_one(output).unwrap();
+    let masks = u32::from_bytes(&bytes);
+    for (i, mask) in masks.iter().enumerate() {
+        let value = if i >= 9 {
+            values[i] / values[4]
+        } else {
+            values[i]
+        };
+        println!(
+            "finite probe {i}: {value:?}, cpu={}, mask={mask:04b}",
+            value.is_finite()
+        );
+    }
+    for (i, mask) in masks.iter().enumerate() {
+        let expected = (3..9).contains(&i);
+        assert_eq!(mask & 8 != 0, expected, "bit classification at {i}");
+        assert_eq!(mask & 1 != 0, expected, "production predicate at {i}");
     }
 }
