@@ -69,6 +69,7 @@ mod kernels;
 mod patches;
 mod pyramid;
 mod track;
+mod trig;
 
 pub use detect::GpuCornerScan;
 pub use patches::{GpuPatches, StoreLayout};
