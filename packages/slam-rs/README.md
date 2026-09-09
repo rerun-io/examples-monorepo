@@ -1,9 +1,5 @@
 # slam-rs
 
-<p align="center">
-  <img src="media/slam-rs-github.gif" alt="slam-rs replaying a four-camera Monado SLAM Dataset clip: the estimated trajectory on the ground truth, the landmark cloud and the rig in 3D, the four fisheye frames with tracked keypoints, and the estimator's per-frame statistics" width="960" />
-</p>
-
 Visual-inertial odometry with a Rust core. The estimator is a port of the
 basalt VIO fork: pure Rust, CPU first, N-camera from the start. Python owns the
 plumbing — catalog feed, decode, evaluation and Rerun logging — and talks to the
