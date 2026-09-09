@@ -9,6 +9,8 @@ test is the feed. The rig's own calibration arithmetic and the two real-recordin
 tests are in ``test_robocap_probe``.
 """
 
+from dataclasses import replace
+
 import numpy as np
 import pyarrow as pa
 import pytest
@@ -17,11 +19,14 @@ from jaxtyping import Float64, Int64
 from numpy import ndarray
 
 from slam_rs.catalog_feed import (
+    MSD_RIG,
+    RigProfile,
     _frame_nearest_anchor,
     match_framesets,
     pair_accel_onto_gyro,
     select_cameras,
 )
+from slam_rs.reference import ReferenceManifest
 
 
 def camera_name_statics(names: list[str]) -> pa.Table:
@@ -376,3 +381,32 @@ def test_a_rig_no_frameset_survives_says_so() -> None:
 def test_the_matcher_needs_a_camera() -> None:
     with pytest.raises(ValueError, match="at least one camera"):
         match_framesets([], 1_000)
+
+
+def test_the_profile_comes_from_the_manifest_not_the_code(manifest: ReferenceManifest) -> None:
+    """One place says what the C++ ran, and the profile only reads it.
+
+    All four fields, each against the manifest's own value: the tolerance and the
+    pairing rule were constants in the tool, which left the claim half true.
+    """
+    profile = RigProfile.from_robocap(manifest.robocap)
+    assert profile.camera_names == manifest.robocap.camera_names == ("left", "left_front", "right_front", "right")
+    assert profile.downscale == manifest.robocap.downscale == 3
+    assert profile.interpolate_accel_onto_gyro is manifest.robocap.interpolate_accel_onto_gyro is True
+    assert profile.frameset_tolerance_ns == manifest.robocap.frameset_tolerance_ns == 1_000_000
+    assert profile.video_time_is_absolute is manifest.robocap.video_time_is_absolute is True
+    # What MSD is, and what every default in the feed means: the other state of
+    # each of the five, so the profile is a statement and not a shape.
+    assert RigProfile(camera_names=None, downscale=1, interpolate_accel_onto_gyro=False, frameset_tolerance_ns=0, video_time_is_absolute=False) == MSD_RIG
+
+
+def test_a_profile_with_no_frames_left_is_refused_on_construction(manifest: ReferenceManifest) -> None:
+    """The downscale is checked where it is stated, before a byte is read.
+
+    `_build_feed` reads the whole video index off the recording before it builds
+    the first `CameraCalib`, which is where the downscale used to be validated.
+    """
+    with pytest.raises(ValueError, match="downscale must be at least 1; got 0"):
+        RigProfile(downscale=0)
+    with pytest.raises(ValueError, match="downscale must be at least 1; got -3"):
+        replace(RigProfile.from_robocap(manifest.robocap), downscale=-3)
