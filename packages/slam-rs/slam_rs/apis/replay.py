@@ -126,12 +126,17 @@ class FrontendStage:
         )
 
 
-def _cpp_trajectory(manifest: ReferenceManifest, segment: ReferenceSegment, capture_start_time_ns: int) -> Trajectory:
+def _cpp_trajectory(manifest: ReferenceManifest, segment: ReferenceSegment, capture_start_time_ns: int, replayed_segment_id: str) -> Trajectory:
     """The basalt C++ reference for one segment, moved onto the replay's ``video_time`` clock.
 
-    Empty, with one printed line, when the trajectory is not on this machine: the
-    two long-tier segments keep theirs in the reference bundle.
+    Empty, with one printed line, when the trajectory is not on this machine (the
+    two long-tier segments keep theirs in the reference bundle), or when ``--rrd``
+    replays another segment than the manifest entry: a C++ run of one clip says
+    nothing about another, and associating the two only fails.
     """
+    if replayed_segment_id != segment.segment_id:
+        print(f"no C++ comparison: the recording is {replayed_segment_id}, the C++ run is {segment.segment_id}")
+        return empty_trajectory()
     resolved: BundleFile = manifest.cpp_trajectory(segment)
     if not resolved.available:
         print(f"no C++ trajectory to compare against: {resolved.reason}")
@@ -215,7 +220,7 @@ def main(config: Config) -> None:
                 logger=VioLogger(
                     cameras=feed.cameras,
                     ground_truth=truth,
-                    cpp=_cpp_trajectory(manifest, segment, feed.capture_start_time_ns),
+                    cpp=_cpp_trajectory(manifest, segment, feed.capture_start_time_ns, feed.segment_id),
                     frame_t_ns=feed.frame_t_ns,
                 ),
             )
