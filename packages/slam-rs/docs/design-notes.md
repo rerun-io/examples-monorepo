@@ -430,17 +430,17 @@ MIO14 is the 410 s clip the accuracy-band pass identified as chaotic and D60 was
 the C++'s own two precisions differ by 2.3 cm on it — so the reading is that
 the band is not wide enough to hold a third backend there. It is still a gate
 failure, and **the portable lane is not anyone's default until MIO14 is
-understood** (`reports/pr22-gpu-round2.md`, next step 1).
+understood**.
 
 ## Where the portable lane runs
 
-Measured device by device in the portability run (`reports/pr23-portable.md`), the two smoke
+Measured device by device in the portability run, the two smoke
 clips and the eleven per-kernel tolerance tests on each:
 
 | device | driver → compiler | tolerance suite | the lane |
 |---|---|---|---|
 | RTX 5090 (this host) | Vulkan → SPIR-V | 11/11 | works, 1.1x faster than its CPU lane on the smoke clips |
-| RTX 3060 (pablo-ubuntu) | Vulkan → SPIR-V | 11/11 | works, 1.08x faster on the four-camera clip, a wash on the two-camera one |
+| RTX 3060 (Ubuntu 22.04 desktop) | Vulkan → SPIR-V | 11/11 | works, 1.08x faster on the four-camera clip, a wash on the two-camera one |
 | Apple M4 (Mac mini) | Metal → MSL | 11/11 | works, **2.3x slower** than the M4's CPU lane |
 | NVIDIA GB10 (Spark) | Vulkan → SPIR-V | 11/11 | works, 1.08x faster |
 | Mali G610 (RoboCap cap, RK3588) | Vulkan 1.3.276 → SPIR-V | 11/11 | works, **2.2x slower** than the cap's CPU lane |
@@ -453,7 +453,7 @@ lane's: 0.31 cm against the basalt C++ trajectory, 0.77 and 1.50 cm against
 ground truth on the two clips. **On a shared-memory SoC the GPU lane is slower
 than the CPU port**, so it is a portability result there, not a speed one.
 How much either GPU lane pays is the host's business as much as the card's: on
-pablo-ubuntu, where a mid-range RTX 3060 sits beside a 2017 Zen 1 CPU, the
+the Ubuntu desktop, where a mid-range RTX 3060 sits beside a 2017 Zen 1 CPU, the
 per-frameset frontend is **2.06x** faster on CUDA and 1.19x on the portable lane
 against that CPU port — the widest gap measured, on a card slower than this
 host's.
