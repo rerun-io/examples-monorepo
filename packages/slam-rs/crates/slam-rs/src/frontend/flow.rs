@@ -564,18 +564,19 @@ pub struct FrameToFrameOpticalFlow<
 /// nothing in `process_frame` reads them, which is what keeps the frame
 /// bit-reproducible (D17), exactly as the estimator's own `StageTimings` are.
 ///
-/// The three do not add up to the frame: the cell counts, the epipolar filter
-/// and the bookkeeping between them are nobody's stage. Each names the work it
-/// names — the pyramid build, the FAST detection, and every KLT call, which is
-/// the frame-to-frame track plus the stereo match of the new keypoints.
+/// These do not add up to the frame: cell counts and other bookkeeping
+/// remain outside the measured stages. Stereo includes cross-camera matching
+/// and the epipolar filter.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FlowTimings {
     /// Building this frame's pyramids, every camera.
     pub pyramid_ns: u64,
     /// `detectKeypointsWithCells`, every camera.
     pub detect_ns: u64,
-    /// Every `trackPoints` call: frame to frame, then camera 0 into the others.
+    /// Temporal `trackPoints` calls only.
     pub track_ns: u64,
+    /// Cross-camera matching and epipolar filtering.
+    pub stereo_ns: u64,
 }
 
 /// The state one `processFrame` mutates, kept so a failed frame can be undone.
@@ -1176,7 +1177,9 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         }
 
         self.add_points(images)?;
+        let mark: std::time::Instant = std::time::Instant::now();
         self.filter_points();
+        self.timings.stereo_ns += duration_ns(mark);
         Ok(())
     }
 
@@ -1307,7 +1310,9 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             &self.guesses,
             &mut self.result,
         )?;
-        self.timings.track_ns += duration_ns(mark);
+        if tracking {
+            self.timings.track_ns += duration_ns(mark);
+        }
 
         for slot in self.result.tracked() {
             let slot: usize = *slot as usize;
@@ -1509,6 +1514,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
 
         // `for (i = 1; i < getNumCams(); i++) trackPoints(pyr0, pyri, kpts0, ...)`
         // (`:643-654`). With one camera there is nothing to match into (trap 17).
+        let mark: std::time::Instant = std::time::Instant::now();
         for camera in 1..self.cameras.len() {
             self.ids.clear();
             self.source.clear();
@@ -1520,6 +1526,8 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             self.run_track_points(0, camera, &t_c0_ci, false)?;
             self.add_keypoints(camera);
         }
+
+        self.timings.stereo_ns += duration_ns(mark);
 
         // `if (!config.optical_flow_detection_nonoverlap) continue;` (`:657-664`).
         if self.config.optical_flow_detection_nonoverlap {

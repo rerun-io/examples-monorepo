@@ -104,8 +104,10 @@ pub struct FrontendTimings {
     pub pyramid_ns: u64,
     /// FAST detection with cells, every camera.
     pub detect_ns: u64,
-    /// Every KLT call: frame to frame, then camera 0 into the others.
+    /// Temporal KLT calls only.
     pub track_ns: u64,
+    /// Cross-camera matching and epipolar filtering.
+    pub stereo_ns: u64,
     /// Preintegrating the samples since the previous frameset into the KLT's prediction.
     pub imu_ns: u64,
 }
@@ -744,6 +746,7 @@ impl<S: lie::LieScalar> Vio<S> {
         self.frontend_timings.pyramid_ns = flow.pyramid_ns;
         self.frontend_timings.detect_ns = flow.detect_ns;
         self.frontend_timings.track_ns = flow.track_ns;
+        self.frontend_timings.stereo_ns = flow.stereo_ns;
         self.last_frame_t_ns = Some(t_ns);
 
         // The estimator reads only the ids and the observed pixels

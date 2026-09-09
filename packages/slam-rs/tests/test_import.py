@@ -141,6 +141,12 @@ def test_the_pipeline_tracks_a_shifted_scene_and_reports_its_window(pipeline: Pi
         result: _core.VioResult = vio.track(t_ns, [texture(index, 0), texture(index + 1, 0)])
         if result.status == _core.VioStatus.Tracking:
             tracked += 1
+            current: _core.VioSnapshot | None = vio.snapshot()
+            assert current is not None
+            is_keyframe: bool = t_ns in current.kf_ids
+            assert (current.timings_ms["keyframe"] > 0.0) == is_keyframe
+            assert current.timings_ms["optimize"] >= sum(current.timings_ms[key] for key in ("linearize", "solver", "back_substitution", "error"))
+            assert current.timings_ms["measure"] >= sum(current.timings_ms[key] for key in ("keyframe", "optimize", "marginalize"))
     assert tracked >= frames - 2, "only the framesets before the first covered one may fail to track"
 
     snapshot: _core.VioSnapshot | None = vio.snapshot()
@@ -169,7 +175,7 @@ def test_the_pipeline_tracks_a_shifted_scene_and_reports_its_window(pipeline: Pi
     # The four LM scalars the Rerun rung logs, in the types the stub declares.
     assert isinstance(snapshot.lm_iterations, int)
     assert all(isinstance(value, float) for value in (snapshot.lm_lambda, snapshot.lm_error_before, snapshot.lm_error_after))
-    # The estimator's six stages and the frontend lane's four, in one map.
+    # Estimator and frontend stage durations share one public map.
     assert set(snapshot.timings_ms) == {
         "back_substitution",
         "error",
@@ -177,6 +183,10 @@ def test_the_pipeline_tracks_a_shifted_scene_and_reports_its_window(pipeline: Pi
         "marginalize",
         "measure",
         "solver",
+        "predict",
+        "keyframe",
+        "optimize",
+        "frontend_stereo",
         "frontend_pyramid",
         "frontend_detect",
         "frontend_track",
