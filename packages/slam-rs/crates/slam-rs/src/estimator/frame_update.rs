@@ -115,6 +115,19 @@ impl FrameUpdateOutcome {
     }
 }
 
+/// One (host camera, target camera) pair's relative pose and its Jacobian with
+/// respect to the target, evaluated once per linearization.
+///
+/// The host is a landmark's `host_kf_id`; the target frame is the newest state,
+/// so the camera id is all that distinguishes one target from another.
+#[derive(Debug, Clone, Copy)]
+struct RelPose<S: LieScalar> {
+    host: TimeCamId,
+    target_cam: usize,
+    t_t_h: Matrix4<S>,
+    d_rel_d_t: Matrix6<S>,
+}
+
 /// Everything one [`SqrtKeypointVio::frame_update`] works in that outlives the
 /// call.
 ///
@@ -142,6 +155,9 @@ pub(super) struct FrameUpdateScratch<S: LieScalar> {
     solve: EigenLdlt<S>,
     /// The increment [`damped_solve`] writes and the loop then negates.
     increment: DVector<S>,
+    /// The pairs [`linearize_state`] has already evaluated, kept for its
+    /// capacity across framesets and cleared at the top of every call.
+    rel_poses: Vec<RelPose<S>>,
 }
 
 impl<S: LieScalar> Default for FrameUpdateScratch<S> {
@@ -157,6 +173,7 @@ impl<S: LieScalar> Default for FrameUpdateScratch<S> {
             imu_b: DVector::zeros(IMU_BLOCK_SIZE),
             solve: EigenLdlt::empty(),
             increment: DVector::zeros(POSE_VEL_BIAS_SIZE),
+            rel_poses: Vec::new(),
         }
     }
 }
@@ -227,6 +244,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             ref mut imu_b,
             ref mut solve,
             ref mut increment,
+            ref mut rel_poses,
         } = *frame_scratch;
         let Some(meas) = imu_meas.get(&prev_t_ns) else {
             // Unreachable: the same lookup succeeded above and nothing since has
@@ -239,7 +257,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 
         let mark: std::time::Instant = std::time::Instant::now();
         let (mut error_total, _): (S, S) = linearize_state(
-            ba, meas, &imu_lin, prev_t_ns, t_ns, &options, h, b, imu_h, imu_b,
+            ba, meas, &imu_lin, prev_t_ns, t_ns, &options, h, b, imu_h, imu_b, rel_poses,
         )?;
         timings.linearize_ns += duration_ns(mark);
 
@@ -290,6 +308,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             let mark: std::time::Instant = std::time::Instant::now();
             let (error_after, imu_after): (S, S) = linearize_state(
                 ba, meas, &imu_lin, prev_t_ns, t_ns, &options, h_trial, b_trial, imu_h, imu_b,
+                rel_poses,
             )?;
             timings.error_ns += duration_ns(mark);
 
@@ -360,6 +379,22 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     }
 }
 
+/// What [`linearize_state`] already evaluated for this pair, if anything.
+///
+/// A linear scan and a copy out: the entries are two fixed-size matrices, the
+/// list is a handful long, and a map would cost a hash or a tree walk per
+/// observation to answer the same question.
+fn pair_of<S: LieScalar>(
+    pairs: &[RelPose<S>],
+    host: TimeCamId,
+    target_cam: usize,
+) -> Option<(Matrix4<S>, Matrix6<S>)> {
+    pairs
+        .iter()
+        .find(|pair| pair.host == host && pair.target_cam == target_cam)
+        .map(|pair| (pair.t_t_h, pair.d_rel_d_t))
+}
+
 /// Fill `h` and `b` with the newest state's normal equations at its current
 /// value, and return `(the cost there, the IMU factor's share of it)`.
 ///
@@ -382,9 +417,13 @@ fn linearize_state<S: LieScalar>(
     b: &mut DVector<S>,
     imu_h: &mut DMatrix<S>,
     imu_b: &mut DVector<S>,
+    rel_poses: &mut Vec<RelPose<S>>,
 ) -> Result<(S, S), EstimatorError> {
     h.fill(S::zero());
     b.fill(S::zero());
+    // Emptied, not dropped: the entries belong to the point being linearized,
+    // the allocation to the frame update.
+    rel_poses.clear();
     let mut error: S = S::zero();
 
     // The target's pose is one state's, so it is resolved once rather than per
@@ -416,6 +455,15 @@ fn linearize_state<S: LieScalar>(
             // pose means.
             let (t_t_h, d_rel_d_t): (Matrix4<S>, Matrix6<S>) = if tcid_h == tcid_t {
                 (Matrix4::identity(), Matrix6::zeros())
+            } else if let Some(hit) = pair_of(rel_poses, tcid_h, cam_id) {
+                // Once per pair per linearization, as
+                // `LinearizationAbsQR::linearize_problem` evaluates its
+                // `rel_pose_pairs` once (`linearize/abs_qr.rs`): no pose moves
+                // inside one call, so every landmark hosted by the same
+                // keyframe camera has the same answer. The window holds at most
+                // `max_kfs` hosts times the rig's cameras, and the landmark and
+                // camera accumulation order is untouched.
+                hit
             } else {
                 let state_h = ba.get_pose_state_with_lin(tcid_h.frame_id)?;
                 let t_i_c_h: &Se3<S> = ba.calib.t_i_c.get(tcid_h.cam_id).ok_or(
@@ -449,7 +497,14 @@ fn linearize_state<S: LieScalar>(
                         None,
                     );
                 }
-                (rel.matrix(), d_rel_d_t)
+                let pair: (Matrix4<S>, Matrix6<S>) = (rel.matrix(), d_rel_d_t);
+                rel_poses.push(RelPose {
+                    host: tcid_h,
+                    target_cam: cam_id,
+                    t_t_h: pair.0,
+                    d_rel_d_t: pair.1,
+                });
+                pair
             };
 
             let mut res: Vector2<S> = Vector2::zeros();
@@ -949,6 +1004,7 @@ mod tests {
             let mut b: DVector<f64> = DVector::zeros(POSE_VEL_BIAS_SIZE);
             let mut imu_h: DMatrix<f64> = DMatrix::zeros(IMU_BLOCK_SIZE, IMU_BLOCK_SIZE);
             let mut imu_b: DVector<f64> = DVector::zeros(IMU_BLOCK_SIZE);
+            let mut rel_poses: Vec<RelPose<f64>> = Vec::new();
             let (total, imu_error) = linearize_state(
                 &vio.ba,
                 &meas,
@@ -960,6 +1016,7 @@ mod tests {
                 &mut b,
                 &mut imu_h,
                 &mut imu_b,
+                &mut rel_poses,
             )
             .unwrap();
             let gradient: Vector15<f64> =
