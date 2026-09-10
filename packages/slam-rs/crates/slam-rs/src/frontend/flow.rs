@@ -538,8 +538,9 @@ pub struct FrameToFrameOpticalFlow<
     /// keypoint needs this after the download.
     ids: Vec<Vec<KeypointId>>,
     /// The source warps of the pass being submitted, in the same order (`:300`,
-    /// `:307`). One buffer for the batch: it is consumed before the next pass
-    /// overwrites it.
+    /// `:307`). One buffer for the batch: a temporal pass overwrites it before
+    /// the next one, and every stereo pass of a frameset tracks the same
+    /// camera-0 keypoints, so they share one copy of it.
     source: FlowTransforms,
     /// Which entries of `ids[lane]` survived the `masks1` test and were offered
     /// to the tracker; the lane's index space is this vector's.
@@ -1316,12 +1317,9 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         // the track has succeeded, so a refused frame does not lose the camera's
         // keypoints.
         self.ids[camera].clear();
-        self.source.clear();
         let source: &Keypoints = &self.frame.cameras[camera];
         self.ids[camera].extend_from_slice(&source.ids);
-        for index in 0..source.len() {
-            self.source.push(&source.transforms.get(index));
-        }
+        self.source.clone_from(&source.transforms);
 
         self.submit_track_points(camera, camera, camera, t_c1_c2, true)
     }
@@ -1662,14 +1660,17 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         // writes camera *i* alone, so the whole rig is launched before any of it
         // is downloaded.
         let mark: std::time::Instant = std::time::Instant::now();
+        if self.cameras.len() > 1 {
+            // Every match in this batch tracks the *same* keypoints — camera
+            // 0's new ones — into a different destination, and
+            // `submit_track_points` only reads the source warps, so the copy
+            // happens once here rather than once per camera.
+            self.source.clone_from(&self.new_cam0.transforms);
+        }
         for camera in 1..self.cameras.len() {
             let lane: usize = camera - 1;
             self.ids[lane].clear();
-            self.source.clear();
             self.ids[lane].extend_from_slice(&self.new_cam0.ids);
-            for index in 0..self.new_cam0.len() {
-                self.source.push(&self.new_cam0.transforms.get(index));
-            }
             let t_c0_ci: Se3<f32> = self.calib.t_i_c[0].inverse() * self.calib.t_i_c[camera];
             self.submit_track_points(lane, 0, camera, &t_c0_ci, false)?;
         }
