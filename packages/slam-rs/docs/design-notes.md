@@ -1371,9 +1371,10 @@ on each other:
   the host and are applied to the downloaded keys afterwards.
 
 So each phase launches the whole rig and downloads it once.
-`PatchTracker::submit_prepared` and `collect` split the tracker's five launches
-from its download, `CornerScan::prepare_cells` answers every camera's selection
-at once, and `cell_select` is the mask-independent half of the device gate that
+`PatchTracker::submit_prepared` returns a pass index into reusable batch-owned
+result slots on both backends; `collect` fills those slots after the GPU
+tracker's five launches. `CornerScan::submit_cells` and `take_cells` batch the
+camera selections, and `cell_select` is the mask-independent half of the device gate that
 lets the frontend ask for a camera's selection before the frameset has masked it.
 A batch's passes share every intermediate buffer — the source and backward patch
 stores, the backward transforms — and may, because the device stream is ordered:
@@ -1447,12 +1448,11 @@ the FAST kernels on one that skips.
 D77 left the frontend at three synchronising reads a detecting frameset and named
 the next one to remove: the cell selection's, which came after the temporal
 tracks only because `should_detect` is decided from them. It is gone, and the
-mechanism is general — a `ReadRelay` (`gpu/mod.rs`) that one stage stages
-launched handles on and the next stage to synchronise appends to its own
-`read_async`, handing the tail back. `gpu_backends` shares one between the
-corner scanner and the tracker, the same wiring and for the same reason as the
-level-0 table: both stages are on one client and one frameset, so the difference
-between sharing and not is a whole read.
+transfer lives in `gpu/selection_batch.rs`. The factory gives the scanner a
+private, non-cloneable producer endpoint and the tracker a consumer endpoint on
+the same client. The tracker appends the launched handles to its own
+`read_async` and returns the tail. As with the level-0 table, both stages are on
+one client and one frameset, so sharing saves a whole read.
 
 **Camera 0's selection is launched at the top of the frameset**, before the
 temporal tracks and before anything about the frameset is known, and its keys
@@ -1463,7 +1463,7 @@ FAST kernels are wasted GPU work — no extra read either way, because a framese
 that skips `add_points` never asks for them. The **other** cameras' selections
 only feed the non-overlap pass, so they are launched behind the cross-camera
 matches and ride *that* download; nothing is left for a read of its own.
-`CornerScan::prepare_cells` splits into `submit_cells` (launch, stage) and
+The former preparation call is now `CornerScan::submit_cells` (launch, stage) and
 `take_cells` (take the tail, or download it here when nothing carried it — the
 first frameset of a run, which has no temporal pass).
 
@@ -1473,20 +1473,42 @@ half (D77), and the mixed-geometry and `num_points_cell != 1` fallbacks still
 take the band walk. Trajectories are byte- and state-identical to D77's on both
 clips.
 
-**A relay hands bytes to the stage that launched them, or to nobody.** Every
-staging carries a `RelayTag` — an owner from a process-wide counter, plus that
-owner's frameset number — and the download hands the tail back under the same
-tag, so `take_cells` decodes a delivery only when it answers its own launches.
-Two scanners staging on one relay therefore cost the loser a read, where an
-untagged single slot would have let it decode the other's buffers in its own
-camera order: wrong keypoints, and nothing in the values to say so. `gpu_backends`
-gives each frontend its own relay, which is the wiring but not a lifetime the
-type can state; the tag is three integer comparisons a frameset and makes the
-crossing impossible instead of merely unused. The generation is what refuses a
-delivery left from an earlier frameset of the same scanner, which is the state a
-refused frameset leaves behind. `two_scanners_on_one_relay_each_take_their_own_keys`
-(`tests/gpu_detect.rs`) is the regression: two scanners, one relay, one collect,
-each checked against an independent scan of its own frames.
+**One producer owns each selection generation.** The transfer is one state:
+`Empty`, `Pending { generation, handles }`, or `Ready { generation, bytes }`.
+A new submission invalidates the prior generation before its first fallible
+launch. There is no owner counter or cross-owner delivery rule. The public
+`GpuCornerScan::share_reads` wiring takes the tracker itself and checks that its
+client matches; callers cannot clone or acquire the private endpoints.
+
+Each camera has one workspace containing reusable scan/key allocations, host
+key scratch, and `Empty`/`Pending`/`Ready` selection state. A batch becomes ready
+only after every returned key buffer validates. Submission or read failure
+invalidates the generation and readiness while keeping allocations. With no
+temporal passes, the first frameset downloads its own pending handles; a
+standalone scanner uses that same explicit path. A consumed selection is spent
+once. Retry and stale-generation tests replace the former two-producer test,
+whose competing ownership the narrowed wiring no longer permits.
+
+The driver keeps each pass's result index, destination camera, source IDs, and
+offered-index map in one reusable record. Both CPU and GPU batches own reusable
+results, read through the index returned by submission. Stereo passes still
+share one copy of camera 0's source warps.
+
+The shared `frontend/cell.rs` owns cell dimensions, column-major enumeration,
+the threshold sequence, eligibility, mask folding, and the packed-key codec.
+`frontend/detect/band.rs` owns CPU scanning, caching, and suppression; the small
+`frontend/detect.rs` coordinator applies occupancy, capacity, and output order.
+`SelectionStatus::Unsupported` takes the band fallback; `Selected` with the wrong
+number of keys now returns `DetectError::SelectionLength`. That malformed-output
+refusal is a deliberate behavior change. Valid-input output is unchanged.
+
+GPU layout after the split: `gpu/mod.rs` contains exports, lane aliases, and
+factory wiring; `runtime.rs` holds bring-up, guarded errors, and storage probes;
+`submission.rs` owns queue accounting, uploads, and blocking reads. Kernel
+families and their launchers are under `gpu/kernels/{pyramid,sampling,patch,track,
+fast,cell_select}.rs`, with shared layouts and dispatch dimensions in `layout.rs`.
+The fixed-order 3x3 LDLT stays with patch construction. These moves preserve
+expressions, specialization constants, dispatch dimensions, and launch order.
 
 ### The two orders that were tried and lost
 
