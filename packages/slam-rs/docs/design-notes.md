@@ -821,6 +821,92 @@ precision-band entry in the ten-clip manifest. These checks establish the local
 MIO14 correction and short-clip regression behavior, not a fresh all-device or
 ten-clip gate. The GPU stays opt-in and the default build stays CPU-only.
 
+## D72 — the detector picks each grid cell's corner on the device
+
+Decision, 2026-09-09: on the GPU lane, pick one corner per detection grid cell in
+a CubeCL kernel and download one packed key per cell, instead of downloading the
+candidate image and its bitmask and walking them on the host. Keep the band walk
+as the reference and as the fallback. The CPU lane is unchanged.
+
+The band path downloaded 0.92 MB of candidate image plus 0.115 MB of bitmask per
+camera — **2.07 MB per two-camera frameset** on MIO10 — and then did all of the
+selection on the host: a row band per cell row and rung, a column filter, OpenCV's
+non-maximum suppression per cell, a sort and three gates. The three FAST kernels
+were 0.04 ms of that; the stage was **1.45 ms**.
+
+Only the floor of the threshold ladder decides the winner, and that is exact
+rather than an approximation. A candidate at rung `t` is `kept > t`;
+`suppress_non_maxima` kills a pixel only through an in-window neighbour scoring at
+least as much, and such a neighbour is itself a candidate at every rung the pixel
+is. Suppression therefore does not depend on the rung, and the ladder only admits
+survivors in descending score. With `optical_flow_detection_num_points_cell = 1`,
+which every shipped config sets, the cell's outcome is the best survivor over the
+floor that clears `safe_radius`, the masks and `EDGE_THRESHOLD`.
+
+`fast_cell_select_kernel` is one cube per cell over that cell's own window, with
+the same zero rim the host scratch grid gives a neighbour outside the window, and
+a shared tree reduction over the packed key
+`((255 - score) << 24) | (y << 12) | x`. Integer minimum is associative,
+commutative and exact, so the tree is the host's own total order — score
+descending, then row, then column, which is what the row-major band walk and a
+stable sort produce — and a subgroup fast path would agree with it bit for bit.
+Readback is 361 x 4 B per camera against 1,036,800.
+
+The masks stay on the host and are exact there: `cam0OverlapCellsMasksForCam`
+pushes `cell` x `cell` rectangles at the cell origins and a cell's candidates lie
+strictly inside it, so a cell is wholly masked or wholly clear. The guard is at
+the camera level — a rectangle that does not name one cell of *this* camera's
+grid, which the mixed-geometry rigs the port supports deliberately produce, sends
+the whole camera down the band path. So do `num_points_cell != 1`, a cell no wider
+than the FAST ring and a frame 4,096 pixels or more on a side.
+
+MIO10, three interleaved rounds against main + timers (44cbdb0f) on one core:
+
+| Core | frontend_detect ms | track median ms | ATE vs GT cm | tracked/lost | identical |
+|---|---:|---:|---:|---:|---|
+| base | 1.466 | 5.151 | 1.504 | 412/0 | — |
+| this | 0.589 | 4.372 | 1.504 | 412/0 | byte and state |
+
+MGO09, four 640x480 cameras, one round: `frontend_detect` 2.233 ms against
+2.241, unchanged; `track_ms` 16.904 against 13.165; ATE vs GT 0.770 against a
+0.847 band; 107/0 tracked; byte and state identical. **The stage does not move
+on that rig**, and that says where the rest of the time is: the kernels are
+microseconds and the readback is now 432 B per camera, so what 2.24 ms buys is
+four device round trips. One trip per camera is the floor this shape has.
+
+A hoisted variant that launched every camera and read them all in **one**
+download was written, measured and dropped. It is right in isolation — 0.502 ms
+against 0.822 for two 960x960 cameras through the scanner alone, and 0.74-0.84
+against 1.01-1.04 per frameset through the whole frontend in one process — and
+it is wrong under the gate, twice: `frontend_detect` 1.418 and 1.422 ms against
+this shape's 0.589, with `track_ms` −8.4% and −8.8% against −15.1%. A counter on
+the scanner rules out the obvious explanation: through the real frontend the
+batch answered every selection and none fell back. What moves with it is the
+estimator — `measure` 2.070 against the base's 2.431 in the same interleaved
+run, which no detector change can cause — so the harness is attributing
+something the stage timers cannot separate. The finding is recorded rather than
+shipped: on a four-camera rig the trip count is still the lever, and a variant
+that keeps the single download but leaves the wait where this shape leaves it is
+the one to try next.
+
+`tests/gpu_detect.rs` is the exactness gate rather than the A/B run: the whole of
+`detectKeypointsWithCells` runs twice over the committed 960x960 MIO10 frames —
+through the band walk and through the device selection — and the two
+`KeypointsData` are equal corner for corner and response for response, on both
+cameras, empty and half-occupied, at three safe radii, under cell-aligned masks
+and one that straddles a boundary, at three budgets, and on three clamped grids.
+It is a separate test binary because `the_whole_gpu_path_holds_the_pool_flat`
+asserts an exactly flat CubeCL pool and every test in one binary shares one
+client.
+
+Two CubeCL traps cost a debugging pass each. A **named** integer constant stays
+comptime inside `#[cube]`: seeding a `let mut` from one makes a const variable,
+and `stride /= 2` on it panics the expansion on cubecl's own worker thread — the
+launch reports success and the buffer comes back as zeros, which is the failure
+mode D32 exists for. The sentinel key is spelled as a literal with a
+`const _: () = assert!(..)` pinning it to the host's constant, and the reduction
+stride is comptime per unrolled step.
+
 ## Decision references
 
 The `Dnn` tags in this file and in the README name the project's recorded design decisions. What each one decided, in one line:
@@ -842,3 +928,4 @@ The `Dnn` tags in this file and in the README name the project's recorded design
 - **D68** — The three unreachable blocks go: squared-form marginalization, nullspace diagnostics, the D34 damping stack
 - **D70** — One GPU runtime: the CUDA lane is removed; wgpu is the GPU lane (2026-09-09)
 - **D71** — Exponent-bit finite classification and bounded small-angle trig; the MIO14 replay passes its unchanged accuracy limit (2026-09-09)
+- **D72** — The GPU detector picks one corner per grid cell on the device; the candidate image never comes back (2026-09-09)
