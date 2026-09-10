@@ -1482,7 +1482,8 @@ one on MGO09.
 | MIO10 | 1.530 ms | **1.429** | −0.102 (−6.7 %) | 1.553 cm both | 0/0 | byte + state |
 | MGO09 | 2.282 ms | **2.197** | −0.086 (−3.8 %) | 0.978 cm both | 0/0 | byte + state |
 
-MIO10 clears the 1.439 ms speed target on every round (1.429, 1.432, 1.447).
+MIO10's median clears the 1.439 ms speed target, as do two of its three rounds
+(1.429, 1.432, 1.447 — the third misses by 0.008 ms).
 Reads per frameset 3 → **2** while detecting, 1 → 1 while not.
 
 The next thing in the seam is the **uploads**, not the reads: eleven a
