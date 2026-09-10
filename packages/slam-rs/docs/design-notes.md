@@ -195,7 +195,9 @@ inverse depth of a landmark at `inv_dist = 1e-7`, and in `f64` it made a
 landmark exactly 1/3 m away normalise to `2.9999999999999996` instead of `3.0`,
 which basalt's `inv_dist < 3` gate **accepts** where the C++ rejects. Sixteen of
 the 32 boundary cases in the fixture are there because the summation order
-decides them on its own.
+decides them on its own. Since D79 the triangulation takes its reductions and its
+null vector from nalgebra, so those boundary cases are compared with the C++ only
+where its `inv_dist` stands clear of the gate; the rest are recorded, not asserted.
 
 The packet widths are fixed by the fork's own build flags — a trailing
 `-march=nocona` overrides the earlier `-march=native`, so the reference binary
@@ -205,12 +207,12 @@ The remaining ports follow decision D44's rule: an elementary operation whose ro
 reach a threshold comparison is ported in Eigen's or Sophus's operation order,
 not delegated to nalgebra's equivalent.
 
-The DLT's 4x4 SVD is a step-for-step port of Eigen's `JacobiSVD`, not a call into
-nalgebra's: a 4x4 with `ComputeFullV` takes Eigen's square path, so the whole
-algorithm is the scaling, the sweep of 2x2 real Jacobi rotations and the final
-sort, with no QR preconditioner. It is worth porting because basalt gates
-landmark acceptance on `0 < inv_dist < 3`, where a borderline point either exists
-or does not.
+The DLT's 4x4 SVD **was** a step-for-step port of Eigen's `JacobiSVD` until D79,
+for the same reason: basalt gates landmark acceptance on `0 < inv_dist < 3`, where
+a borderline point either exists or does not. It is nalgebra's SVD now, computed
+in f64 so the smallest singular value keeps its accuracy through the cancellation
+in the DLT rows; a borderline landmark can land on the other side of the gate
+from the C++, and the catalog's ATE, not the C++'s decision, is what judges that.
 
 ### Marginalization, and where a rank decision is load-bearing
 
