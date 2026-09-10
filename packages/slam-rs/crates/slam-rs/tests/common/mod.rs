@@ -28,7 +28,7 @@ const MSDMG: &str = include_str!("../fixtures/msdmg_calib.json");
     dead_code,
     reason = "used by camera_jacobians; other binaries compile a subset"
 )]
-const ROBOCAP: &str = include_str!("../fixtures/robocap-basalt-calib.json");
+const ROBOCAP: &str = include_str!("../fixtures/robocap_calib.json");
 
 // ── the fixture directory and the two files every VIO lane reads ───────────
 
