@@ -34,8 +34,7 @@
 //! range holds one element and then joins up a balanced tree, so four elements
 //! reduce as `(x0 + x1) + (x2 + x3)`. In `f32` with `[2²⁴, 1, 1, 1]` that is
 //! `16777218` where a fold gives `16777216`. The `reduce` module reproduces
-//! the tree, pinned bit for bit against the fork's own TBB by
-//! `tests/fixtures/linearize/tbb_reduce_oracle.json`, and all four sites go
+//! the deterministic fixed-shape tree, not a left fold. All four sites go
 //! through it: [`LinearizationAbsQR::linearize_problem`],
 //! [`LinearizationAbsQR::back_substitute`] and
 //! [`LinearizationAbsQR::get_dense_h_b`] — the fourth, `getJp_diag2` (`:354`),
