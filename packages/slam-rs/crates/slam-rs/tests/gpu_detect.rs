@@ -78,7 +78,7 @@ impl CornerScan for CountingScan {
         image: &ImageU16,
         select: &CellSelect,
         out: &mut Vec<u32>,
-    ) -> Result<(), DetectError> {
+    ) -> Result<slam_rs::frontend::cell::SelectionStatus, DetectError> {
         self.selections.fetch_add(1, Ordering::Relaxed);
         self.inner.select_cells(camera, image, select, out)
     }
