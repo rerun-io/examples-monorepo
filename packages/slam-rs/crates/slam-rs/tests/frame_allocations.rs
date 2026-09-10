@@ -703,7 +703,7 @@ fn the_estimators_per_frame_cost_does_not_grow_with_the_lm_step_count() {
     assert!(
         slope <= CALLS_PER_STEP,
         "the estimator reaches the allocator {slope:.1} times per LM step, over the \
-         {CALLS_PER_STEP} the per-step path is allowed: a buffer the loop used to \
-         allocate per step is being allocated again"
+         {CALLS_PER_STEP} the per-step path is allowed: the inner LM step allocates \
+         noticeably more than it did (this is a bulk gate; one small buffer can hide under it)"
     );
 }

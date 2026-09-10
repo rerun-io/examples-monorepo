@@ -890,7 +890,7 @@ layout the port already models in `ColumnRedux::Strided`. It touches every
 reader of `storage` and is not a local change.
 
 **Gate.** MIO10, three interleaved rounds against `44cbdb0f`: median
-5.081 → 4.645 ms, `measure` 2.443 → 2.049, ATE vs ground truth 1.504 cm
+5.140 → 4.733 ms, `measure` 2.451 → 2.108, ATE vs ground truth 1.504 cm
 unchanged, zero lost framesets, and every candidate trajectory and state digest
 byte-identical to the baseline's. `tests/frame_allocations.rs` gates the
 allocation half: zero allocator calls on a warm dense reduction, and a
