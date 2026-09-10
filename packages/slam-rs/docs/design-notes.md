@@ -1055,7 +1055,7 @@ one stage where the two are furthest apart.
 every basalt file and `VioConfig::default` leave it — the frameset always
 detects, which is basalt's schedule byte for byte. Above zero the frameset
 detects only when camera 0 holds fewer than that fraction of the keypoints the
-last **detecting** frameset ended with. `configs/profiles/fast.json` sets `0.7`;
+last **detecting** frameset ended with. `configs/profiles/fast.json` sets `0.85`;
 nothing else does.
 
 **Why the key is `port.` and not `config.`.** basalt has no field for it, and the
@@ -1078,10 +1078,19 @@ move it.
 
 **The keyframe coupling, measured.** The vote is
 `connected[0] / (connected[0] + unconnected[0]) < 0.7` and the unconnected
-observations are the freshly detected keypoints, so gating detection could have
-starved the vote. It does not at `0.7`: MIO10's post-warmup cadence goes 7.04 ->
+observations are all observed ids absent from the landmark database, including
+carried tracks that failed triangulation or whose landmarks were removed.
+Those tracks can still vote on skipped-detection frames, so gating detection
+alone does not imply keyframe starvation; at `0.7`, MIO10's post-warmup cadence goes 7.04 ->
 7.33 frames per keyframe and MGO09's stays at 6.71, both inside the 5-9 band the
 later scheduling work is priced against.
+
+**Why 0.85, not 0.7 (MIO07, 2026-09-10).** `0.7` passed MIO10 (ATE 1.447 cm) and MGO09 but
+failed the 76 s MIO07: 2.624 cm against a 2.29 cm band, while the LM cap alone read 2.093 and
+`0.7` without the cap read 2.682 — the gate, not the cap, accumulates drift over a long clip.
+`0.85` reads 2.201 cm on MIO07 (3.858 ms median against the cap-only 4.073) and is what the
+fast profile ships; `0.7`'s MIO10 numbers above stand as measured. Short clips do not see this
+class of regression; MIO07 must be run once per schedule lever.
 
 **Why 0.7 and not 0.5.** Both clear the gate. `0.5` is faster — MIO10 median
 2.337 ms against `0.7`'s 2.980, from a 3.549 ms stack — but it detects only
