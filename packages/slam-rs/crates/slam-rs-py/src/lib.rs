@@ -545,14 +545,6 @@ impl VioSnapshot {
         self.num_observations
     }
 
-    /// Wall time each stage took on the last frame, milliseconds.
-    ///
-    /// The estimator's six, and the frontend lane's four under a
-    /// `frontend_` prefix: the pyramid build, the FAST detection, every KLT
-    /// call, and the preintegration that seeds the KLT. The four are the same
-    /// kind of measurement as the six and are read the same way, which is why
-    /// they come back in one map; they do not add up to the frame, because the
-    /// bookkeeping between the phases is nobody's stage.
     /// What D76's frame update did with this frameset: `not_attempted`,
     /// `taken`, or `declined_<precondition>`. A clip whose median frame is slow
     /// with the knob on says which precondition refused it here.
@@ -561,6 +553,19 @@ impl VioSnapshot {
         self.frame_update
     }
 
+    /// Wall time each stage took on the last frame, milliseconds.
+    ///
+    /// The estimator's nine — `predict`, `keyframe`, `optimize`, `linearize`,
+    /// `solver`, `back_substitution`, `error`, `marginalize`, `measure` — and
+    /// the frontend lane's five under a `frontend_` prefix: the pyramid build,
+    /// the FAST detection, the temporal KLT calls, the cross-camera stereo
+    /// match, and the preintegration that seeds the KLT. The five are the same
+    /// kind of measurement as the nine and are read the same way, which is why
+    /// they come back in one map. They do not add up to the frame: the timers
+    /// nest — `optimize` covers `linearize`, `solver`, `back_substitution` and
+    /// `error`, and `measure` covers `keyframe`, `optimize`, `marginalize` and
+    /// state prediction — and the bookkeeping between the phases is nobody's
+    /// stage. `slam_rs/_core.pyi` carries the same contract for Python readers.
     #[getter]
     fn timings_ms(&self) -> std::collections::BTreeMap<&'static str, f64> {
         [
