@@ -11,7 +11,7 @@
 //! estimator is basalt's, frame for frame.
 //!
 //! Everything numeric is borrowed rather than restated: the residual and its
-//! pose Jacobian are [`linearize_point`] and [`compute_rel_pose`], the robust
+//! pose Jacobian are [`linearize_point`] and [`linearize_relative_pose`], the robust
 //! weight is the landmark block's own [`compute_error_weight`], the IMU factor is
 //! [`ImuBlock::linearize`], and the damped solve is [`damped_solve`] — the same
 //! Eigen LDLT the window solve runs. The damping policy is
@@ -46,12 +46,12 @@ use nalgebra::{DMatrix, DVector, Matrix2x6, Matrix4, Matrix6, Vector2, Vector6};
 
 use super::optimize::{LmIteration, LmTermination, SolveOutcome, damped_solve};
 use super::{EstimatorError, SqrtKeypointVio, StageTimings, lm_converged};
-use crate::ba_base::{BundleAdjustmentBase, LinearizePointOut, compute_rel_pose, linearize_point};
+use crate::ba_base::{BundleAdjustmentBase, LinearizePointOut, linearize_point};
 use crate::duration_ns;
 use crate::eigen::ldlt::EigenLdlt;
 use crate::imu::{ImuBlock, ImuLinData, IntegratedImuMeasurement};
 use crate::lie::{LieScalar, Se3, eigen_maxi};
-use crate::linearize::{LandmarkBlockOptions, compute_error_weight};
+use crate::linearize::{LandmarkBlockOptions, compute_error_weight, linearize_relative_pose};
 use crate::types::{
     FrameId, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseVelBiasStateWithLin, TimeCamId, Vector15,
 };
@@ -479,24 +479,14 @@ fn linearize_state<S: LieScalar>(
                     },
                 )?;
                 let mut d_rel_d_t: Matrix6<S> = Matrix6::zeros();
-                let mut rel: Se3<S> = compute_rel_pose(
-                    state_h.pose_lin(),
+                let rel: Se3<S> = linearize_relative_pose(
+                    &state_h,
+                    &state_t,
                     t_i_c_h,
-                    state_t.pose_lin(),
                     t_i_c_t,
                     None,
                     Some(&mut d_rel_d_t),
                 );
-                if state_h.is_linearized() || state_t.is_linearized() {
-                    rel = compute_rel_pose(
-                        state_h.pose(),
-                        t_i_c_h,
-                        state_t.pose(),
-                        t_i_c_t,
-                        None,
-                        None,
-                    );
-                }
                 let pair: (Matrix4<S>, Matrix6<S>) = (rel.matrix(), d_rel_d_t);
                 rel_poses.push(RelPose {
                     host: tcid_h,
@@ -596,6 +586,7 @@ mod tests {
     use nalgebra::{Vector3, Vector4};
 
     use super::*;
+    use crate::ba_base::compute_rel_pose;
     use crate::calib::Calibration;
     use crate::camera::CameraEnum;
     use crate::config::VioConfig;

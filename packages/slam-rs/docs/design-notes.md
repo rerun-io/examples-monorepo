@@ -1189,7 +1189,10 @@ velocity, both biases) against exactly two factor groups:
 * every observation the newest frameset filed on a landmark the window already
   hosts, with the landmark, its host keyframe and every older state **held**.
   The residual is `linearize_point`, the relative pose and its target Jacobian
-  are `compute_rel_pose`, and the Huber weight is the landmark block's own
+  are prepared by `linearize::linearize_relative_pose`: Jacobians at the
+  linearization point, then only the transform at the current state if either
+  end is frozen. The frame path omits the host Jacobian; both callers retain
+  their identity-pair shortcut and pair cache. The Huber weight is the landmark block's own
   `compute_error_weight`, now a free function both paths call — there is one
   reprojection model in the crate, not two;
 * the IMU factor from the previous state, built by the same `ImuBlock::linearize`
