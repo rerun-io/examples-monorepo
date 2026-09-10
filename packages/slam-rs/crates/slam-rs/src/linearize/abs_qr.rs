@@ -151,6 +151,20 @@ struct DensePartial<S: LieScalar> {
     written: Vec<bool>,
     /// The same set ascending, which is the order `h`'s column-major storage wants.
     columns: Vec<usize>,
+    /// The same set again as `(start, length)` runs of consecutive columns.
+    ///
+    /// [`Reducible::reset`] and [`Reducible::join`] between them are the whole
+    /// cost of the reduction's interior — 54 joins and 54 resets over 55
+    /// landmark blocks — and both touch `columns` x `columns` of a column-major
+    /// square. Walking `columns` reaches every coefficient through a `usize`
+    /// out of a `Vec`, which LLVM has to treat as a gather, plus a bounds check
+    /// per coefficient. The set is almost never scattered: a landmark's own
+    /// columns are two runs of six, and a subtree's union saturates towards the
+    /// contiguous `0..opt_size`. Holding the runs turns both operations into
+    /// slice work on `h`'s own storage. It is the same set, so the same
+    /// coefficients are touched, and both operations are elementwise, so no sum
+    /// is reassociated.
+    runs: Vec<(usize, usize)>,
 }
 
 impl<S: LieScalar> DensePartial<S> {
@@ -161,6 +175,7 @@ impl<S: LieScalar> DensePartial<S> {
             b: DVector::zeros(n),
             written: vec![false; n],
             columns: Vec::with_capacity(n),
+            runs: Vec::new(),
         }
     }
 
@@ -179,6 +194,7 @@ impl<S: LieScalar> DensePartial<S> {
             self.h.fill(S::zero());
             self.b.fill(S::zero());
             self.columns.clear();
+            self.runs.clear();
             self.written.fill(false);
         } else {
             *self = Self::zeros(n);
@@ -201,8 +217,18 @@ impl<S: LieScalar> DensePartial<S> {
         }
         if added {
             self.columns.clear();
-            self.columns
-                .extend((0..self.written.len()).filter(|&i| self.written[i]));
+            self.runs.clear();
+            for column in 0..self.written.len() {
+                if !self.written[column] {
+                    continue;
+                }
+                self.columns.push(column);
+                match self.runs.last_mut() {
+                    // Consecutive with the run being built, so extend it.
+                    Some((start, length)) if *start + *length == column => *length += 1,
+                    _ => self.runs.push((column, 1)),
+                }
+            }
         }
     }
 
@@ -245,23 +271,61 @@ impl<S: LieScalar> Reducible for DensePartial<S> {
 
     /// Back to the identity, zeroing only what was written.
     fn reset(&mut self) {
-        for &j in &self.columns {
-            for &i in &self.columns {
-                self.h[(i, j)] = S::zero();
+        let stride: usize = self.h.nrows();
+        {
+            let h: &mut [S] = self.h.as_mut_slice();
+            for &(first_col, cols) in &self.runs {
+                for column in first_col..(first_col + cols) {
+                    let base: usize = column * stride;
+                    for &(first_row, rows) in &self.runs {
+                        h[(base + first_row)..(base + first_row + rows)].fill(S::zero());
+                    }
+                }
             }
-            self.b[j] = S::zero();
+        }
+        {
+            let b: &mut [S] = self.b.as_mut_slice();
+            for &(first, length) in &self.runs {
+                b[first..(first + length)].fill(S::zero());
+            }
         }
         self.columns.clear();
+        self.runs.clear();
         self.written.fill(false);
     }
 
     /// `H_ += b.H_; b_ += b.b_` (`:532-535`), over the right side's columns.
     fn join(&mut self, right: &Self) {
-        for &j in &right.columns {
-            for &i in &right.columns {
-                self.h[(i, j)] += right.h[(i, j)];
+        debug_assert_eq!(self.h.nrows(), right.h.nrows());
+        let stride: usize = self.h.nrows();
+        {
+            let destination: &mut [S] = self.h.as_mut_slice();
+            let source: &[S] = right.h.as_slice();
+            for &(first_col, cols) in &right.runs {
+                for column in first_col..(first_col + cols) {
+                    let base: usize = column * stride;
+                    for &(first_row, rows) in &right.runs {
+                        let lo: usize = base + first_row;
+                        let target: &mut [S] = &mut destination[lo..(lo + rows)];
+                        for (slot, value) in target.iter_mut().zip(source[lo..(lo + rows)].iter()) {
+                            *slot += *value;
+                        }
+                    }
+                }
             }
-            self.b[j] += right.b[j];
+        }
+        {
+            let destination: &mut [S] = self.b.as_mut_slice();
+            let source: &[S] = right.b.as_slice();
+            for &(first, length) in &right.runs {
+                let target: &mut [S] = &mut destination[first..(first + length)];
+                for (slot, value) in target
+                    .iter_mut()
+                    .zip(source[first..(first + length)].iter())
+                {
+                    *slot += *value;
+                }
+            }
         }
         self.mark(right.columns.iter().copied());
     }
