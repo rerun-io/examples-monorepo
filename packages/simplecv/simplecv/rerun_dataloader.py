@@ -1,8 +1,12 @@
-"""GPU video decoding for the Rerun catalog dataloader.
+"""GPU video decoding, and stored-packet relay, for the Rerun catalog dataloader.
 
 Import this module explicitly: it needs ``rerun-sdk``'s ``dataloader`` extra,
 which only the catalog lanes install, so it must never be re-exported from
 ``simplecv/__init__.py``.
+
+``relay_video_stream`` shares the segment-wide packet query with the decoder but
+never decodes: a tool that wants the source video in its own recording re-logs
+the catalog's samples instead of re-encoding decoded frames.
 
 Upstream's video decoder (rerun-io/reality PR #2893) wraps each sample's
 keyframe window into its own in-memory MP4 and is slower than dav1d — no
@@ -25,8 +29,9 @@ from typing import TypeAlias
 
 import numpy as np
 import pyarrow as pa
+import rerun as rr
 import torch
-from jaxtyping import Shaped, UInt8
+from jaxtyping import Int64, Shaped, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry, DatasetView
 from rerun.experimental.dataloader import ColumnDecoder, DecodeRequest, FieldBatch
@@ -62,6 +67,29 @@ def open_segment_decoder(
         samples with their keyframe flags (relayable as a Rerun VideoStream),
         and the decoder over the whole segment.
     """
+    times, samples, keyframes, codec_value = read_segment_packets(dataset, segment_id, entity, timeline)
+    decoder: VideoDecoder = VideoDecoder(
+        wrap_mp4(samples, keyframes, fps, codec=catalog_codec_name(codec_value)),
+        device=device,
+        seek_mode="exact",
+        num_ffmpeg_threads=0,
+    )
+    return times, samples, keyframes, decoder
+
+
+def read_segment_packets(dataset: DatasetEntry, segment_id: str, entity: str, timeline: str) -> tuple[TimedeltaNs, list[bytes], list[bool], int]:
+    """Materialize one segment's whole ``VideoStream`` column in a single reader query.
+
+    Args:
+        dataset: Rerun catalog dataset entry holding the segment.
+        segment_id: Segment whose packets are fetched.
+        entity: Entity path of the ``VideoStream`` column, without a leading slash.
+        timeline: Index timeline the packets are read on.
+
+    Returns:
+        The sample timestamps (timedelta64[ns], timeline order), the raw video
+        samples, their keyframe flags, and the stream's codec FourCC.
+    """
     view: DatasetView = dataset.filter_segments(segment_id).filter_contents(entity)
     # No .sort(timeline): the reader already yields (segment, index)-ordered rows, and a
     # client-side SortExec re-materializes the blob columns (~4x the query wall time).
@@ -83,13 +111,46 @@ def open_segment_decoder(
     codec_column: pa.Array = table[3].combine_chunks().flatten()
     if len(codec_column) == 0:
         raise ValueError(f"video codec is missing for {entity} in segment {segment_id}")
-    decoder: VideoDecoder = VideoDecoder(
-        wrap_mp4(samples, keyframes, fps, codec=catalog_codec_name(int(codec_column[0].as_py()))),
-        device=device,
-        seek_mode="exact",
-        num_ffmpeg_threads=0,
-    )
-    return times, samples, keyframes, decoder
+    return times, samples, keyframes, int(codec_column[0].as_py())
+
+
+def relay_video_stream(dataset: DatasetEntry, segment_id: str, entity: str, timeline: str, start_ns: int, end_ns: int) -> int:
+    """Log the catalog's stored video packets for [keyframe-before-start, end] as a Rerun VideoStream at ``entity`` on ``timeline``; return the number of samples logged.
+
+    Relaying the stored samples keeps the source resolution and bitrate that a
+    re-encoded per-frame image throws away, and costs the viewer one decode of
+    the bytes the catalog already holds.
+
+    Args:
+        dataset: Rerun catalog dataset entry holding the segment.
+        segment_id: Segment whose packets are relayed.
+        entity: Entity path the ``VideoStream`` is logged at, without a leading
+            slash. Use the catalog's own video path so the relayed stream lines
+            up with a future layer registration.
+        timeline: Index timeline the packets are read and re-logged on.
+        start_ns: First nanosecond of the window of interest. The relay opens at
+            the last keyframe at or before it, because a decoder cannot start
+            mid-GOP.
+        end_ns: Last nanosecond of the window, inclusive.
+
+    Returns:
+        The number of samples logged.
+    """
+    times, samples, keyframes, codec_value = read_segment_packets(dataset, segment_id, entity, timeline)
+    times_ns: Int64[ndarray, " n_samples"] = times.astype("timedelta64[ns]").astype(np.int64)
+    keyframe_indices: Int64[ndarray, " n_keyframes"] = np.flatnonzero(np.asarray(keyframes, dtype=bool))
+    if len(keyframe_indices) == 0:
+        raise ValueError(f"{entity} in segment {segment_id} has no keyframe, so no window can be decoded")
+    # A decoder must start on a keyframe, so the window opens at the last one at or before
+    # start_ns — or at the stream's first, when the window opens before every keyframe.
+    anchors: Int64[ndarray, " n_anchors"] = keyframe_indices[times_ns[keyframe_indices] <= start_ns]
+    first: int = int(anchors[-1]) if len(anchors) else int(keyframe_indices[0])
+    last: int = int(np.searchsorted(times_ns, end_ns, side="right"))
+    rr.log(entity, rr.VideoStream(codec=rr.VideoCodec(codec_value)), static=True)
+    for index in range(first, last):
+        rr.set_time(timeline, duration=np.timedelta64(int(times_ns[index]), "ns"))
+        rr.log(entity, rr.VideoStream.from_fields(sample=samples[index], is_keyframe=keyframes[index]))
+    return max(0, last - first)
 
 
 class SegmentNvdecDecoder(ColumnDecoder[FrameRgbChw]):

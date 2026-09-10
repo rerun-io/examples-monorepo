@@ -2,9 +2,10 @@
 
 The tool reads four calibrated outward-facing rig videos and the rig pose through the Rerun PyTorch dataloader,
 which samples one ``video_time`` grid across all of them, and predicts per-view metric depth on the native fisheye
-images. It logs the original views in 2D and same-axis, distortion-free pinhole twins whose remapped z-depth
-unprojects natively in Rerun. The pinhole twins also provide valid inputs to the shared TSDF fuser. The tool never
-registers a catalog layer.
+images. It relays the catalog's stored fisheye video packets for the processed window instead of re-encoding the
+decoded frames, and logs same-axis, distortion-free pinhole twins whose remapped z-depth unprojects natively in
+Rerun. The pinhole twins also provide valid inputs to the shared TSDF fuser. The tool never registers a catalog
+layer.
 """
 
 from __future__ import annotations
@@ -166,7 +167,11 @@ def rescaled_fisheye(camera: Fisheye62Parameters, *, width: int, height: int) ->
 
 
 def create_rig_depth_catalog_blueprint(cams: tuple[str, ...]) -> rrb.Blueprint:
-    """Lay out native pinhole depth, rectified 2D grids, and secondary fisheye views."""
+    """Lay out native pinhole depth, rectified 2D grids, and secondary fisheye views.
+
+    Each fisheye view is rooted at the source camera's ``pinhole``, the space the
+    relayed ``VideoStream`` shares with the calibrated fisheye frustum.
+    """
     rectified_cams: list[str] = [_rectified_camera_entity(cam) for cam in cams]
     rectified_images: list[rrb.Spatial2DView] = [
         rrb.Spatial2DView(origin=f"{RIG_PATH}/{cam}/pinhole/image", name=f"{cam} rectified image") for cam in rectified_cams
@@ -175,7 +180,7 @@ def create_rig_depth_catalog_blueprint(cams: tuple[str, ...]) -> rrb.Blueprint:
         rrb.Spatial2DView(origin=f"{RIG_PATH}/{cam}/pinhole/depth", name=f"{cam} rectified depth") for cam in rectified_cams
     ]
     fisheye_images: list[rrb.Spatial2DView] = [
-        rrb.Spatial2DView(origin=f"{RIG_PATH}/{cam}/rig_depth/image", name=f"{cam} fisheye image") for cam in cams
+        rrb.Spatial2DView(origin=f"{RIG_PATH}/{cam}/pinhole", contents="$origin/**", name=f"{cam} fisheye video") for cam in cams
     ]
     exclusions: list[str] = [f"- $origin/rig_00/{cam}/rig_depth/**" for cam in cams]
     rectified_tab = rrb.Vertical(
@@ -183,7 +188,7 @@ def create_rig_depth_catalog_blueprint(cams: tuple[str, ...]) -> rrb.Blueprint:
         rrb.Grid(*rectified_depths, grid_columns=2, name="rectified metric depth"),
         name="rectified pinhole twins",
     )
-    fisheye_tab = rrb.Grid(*fisheye_images, grid_columns=2, name="original fisheye RGB")
+    fisheye_tab = rrb.Grid(*fisheye_images, grid_columns=2, name="source fisheye video")
     return rrb.Blueprint(
         rrb.Horizontal(
             rrb.Spatial3DView(origin="world", name="moving rig + native depth + TSDF", contents=["$origin/**", *exclusions]),
@@ -259,7 +264,7 @@ def main(config: RigDepthCatalogConfig) -> None:
         RerunIterableDataset,
         SegmentMetadata,
     )
-    from simplecv.rerun_dataloader import TimedNvdecDecoder
+    from simplecv.rerun_dataloader import TimedNvdecDecoder, relay_video_stream
 
     from monopriors.apis.stereo_catalog import read_fisheye_camera, read_static
 
@@ -351,6 +356,12 @@ def main(config: RigDepthCatalogConfig) -> None:
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
     log_rig_static(rig)
     rr.send_blueprint(create_rig_depth_catalog_blueprint(config.cams))
+    # Relay the stored packets rather than re-encoding what the dataloader decoded: the source
+    # resolution and frame rate for a fraction of the bytes a per-frameset JPEG costs. This is an
+    # independent query on the same column the dataloader's NVDEC decoders read.
+    for cam in config.cams:
+        relayed: int = relay_video_stream(dataset, config.segment_id, f"{RIG_PATH}/{cam}/pinhole/video", TIMELINE, start_ns, end_ns)
+        print(f"relayed {relayed} {cam} video samples")
 
     predictor: BaseRigDepthPredictor = config.predictor.setup(device="cuda")
     fuser: Open3DFuser | None = (
@@ -418,7 +429,6 @@ def main(config: RigDepthCatalogConfig) -> None:
                 fisheye_path: str = f"{RIG_PATH}/{cam}/rig_depth"
                 rectified_cam: str = _rectified_camera_entity(cam)
                 pinhole_path: str = f"{RIG_PATH}/{rectified_cam}/pinhole"
-                rr.log(f"{fisheye_path}/image", rr.Image(images[view_index]).compress(jpeg_quality=85))
                 rr.log(
                     f"{fisheye_path}/depth",
                     rr.Image(_depth_colormap(depth[view_index], config.fusion_max_depth_m)).compress(jpeg_quality=85),

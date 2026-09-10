@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pyarrow as pa
 import pytest
+import rerun as rr
 import torch
 from jaxtyping import UInt8
 from rerun.catalog import DatasetEntry
@@ -68,3 +69,39 @@ def test_segment_nvdec_decoder_decodes_a_fetch_block_across_segments(monkeypatch
     assert decoded[2] is not None
     assert int(decoded[0][0, 0, 0]) == 1
     assert int(decoded[2][0, 0, 0]) == 11
+
+
+def test_relay_video_stream_opens_at_the_keyframe_before_the_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A decoder cannot start mid-GOP, so the relay backs up to the previous keyframe."""
+    times: np.ndarray = np.arange(0, 8, dtype=np.int64).astype("timedelta64[ns]")
+    samples: list[bytes] = [bytes([index]) for index in range(8)]
+    keyframes: list[bool] = [index % 4 == 0 for index in range(8)]
+
+    def read_packets(
+        _dataset: DatasetEntry, _segment_id: str, _entity: str, _timeline: str
+    ) -> tuple[np.ndarray, list[bytes], list[bool], int]:
+        """Stand in for the catalog reader query."""
+        return times, samples, keyframes, rr.VideoCodec.H264.value
+
+    logged: list[tuple[str, object, dict[str, object]]] = []
+    timed: list[np.timedelta64] = []
+    monkeypatch.setattr(rerun_dataloader, "read_segment_packets", read_packets)
+    monkeypatch.setattr(rr, "log", lambda entity_path, archetype, **kwargs: logged.append((entity_path, archetype, kwargs)))
+    monkeypatch.setattr(rr, "set_time", lambda _timeline, *, duration: timed.append(duration))
+    dataset: DatasetEntry = object.__new__(DatasetEntry)
+
+    relayed: int = rerun_dataloader.relay_video_stream(dataset, "segment-a", "world/cam/video", "video_time", 6, 7)
+
+    assert relayed == 4, "the window [6, 7] opens at the keyframe at t=4"
+    assert timed == [np.timedelta64(t_ns, "ns") for t_ns in (4, 5, 6, 7)]
+    entity_paths, archetypes, keywords = zip(*logged, strict=True)
+    assert entity_paths == ("world/cam/video",) * 5
+    assert [kwargs.get("static", False) for kwargs in keywords] == [True, False, False, False, False]
+    codec = {batch.component_descriptor().component: batch for batch in archetypes[0].as_component_batches()}
+    assert codec["VideoStream:codec"].as_arrow_array().to_pylist() == [rr.VideoCodec.H264.value]
+    relayed_samples = [
+        {batch.component_descriptor().component: batch for batch in archetype.as_component_batches()} for archetype in archetypes[1:]
+    ]
+    assert [bytes(fields["VideoStream:sample"].as_arrow_array().to_pylist()[0]) for fields in relayed_samples] == samples[4:8]
+    keyframe_flags = [fields["VideoStream:is_keyframe"].as_arrow_array().to_pylist() for fields in relayed_samples]
+    assert keyframe_flags == [[True], [False], [False], [False]], "only the anchor packet is a keyframe"
