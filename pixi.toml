@@ -2485,14 +2485,19 @@ cmd = "cargo clippy -p slam-rs --features gpu-wgpu --all-targets -- -D warnings"
 cwd = "packages/slam-rs"
 description = "Lint the portable wgpu lane, tests included, with warnings denied"
 
-# `--list | grep -c` first, and it is not decoration: this suite is
+# `--list | grep -c` first, and it is not decoration: both suites are
 # `#![cfg(feature = "gpu-core")]` and the task selects `gpu-wgpu`, so a feature
-# rename that stops the two matching compiles the file away and `cargo test`
+# rename that stops the two matching compiles the files away and `cargo test`
 # reports "ok. 0 passed" — a green gate that ran nothing. It happened once,
 # splitting out `gpu-core`, and the count is what caught it. `grep -c`
 # exits non-zero on no matches, so an empty binary fails before it runs.
+#
+# `gpu_detect` is a second binary rather than more tests in `gpu_kernels`
+# because `the_whole_gpu_path_holds_the_pool_flat` asserts an exactly flat
+# CubeCL pool and every test in one binary shares one client; cargo runs
+# binaries one after another, which is what keeps both deterministic.
 [feature.slam-rs.tasks.slam-rs-wgpu-test]
-cmd = "cargo test -p slam-rs --features gpu-wgpu --test gpu_kernels -- --list | grep -c ': test' && cargo test -p slam-rs --features gpu-wgpu --test gpu_kernels"
+cmd = "cargo test -p slam-rs --features gpu-wgpu --test gpu_kernels -- --list | grep -c ': test' && cargo test -p slam-rs --features gpu-wgpu --test gpu_detect -- --list | grep -c ': test' && cargo test -p slam-rs --features gpu-wgpu --test gpu_kernels --test gpu_detect"
 cwd = "packages/slam-rs"
 description = "Run the per-kernel tolerance suite through wgpu on this host's Vulkan adapter"
 
