@@ -49,8 +49,20 @@ def test_no_vendored_config_carries_a_port_key() -> None:
         assert all(key.startswith("config.") for key in values), dataset.name
 
 
-def test_an_invented_port_key_is_rejected(tmp_path: Path) -> None:
-    """The ``port.`` namespace is an allowlist, not an escape hatch for typos."""
+@pytest.mark.parametrize(
+    ("overlay", "rejected"),
+    [
+        pytest.param('{"port.redetect_survivor_ration": 0.5}', "port.redetect_survivor_ration", id="invented-port-key"),
+        pytest.param('{"config.misspelled_iterations": 4}', "config.misspelled_iterations", id="unknown-config-key"),
+    ],
+)
+def test_an_unknown_overlay_key_is_rejected(tmp_path: Path, overlay: str, rejected: str) -> None:
+    """Neither namespace is an escape hatch for a typo.
+
+    ``port.`` is an allowlist rather than an open namespace (D75), and a
+    ``config.`` key the Rust schema does not carry is refused the same way: a
+    misspelled knob names itself instead of silently doing nothing.
+    """
     manifest: ReferenceManifest = load_manifest()
     dataset: DatasetProperties = manifest.datasets[0]
     config_path: Path = tmp_path / dataset.vio_config
@@ -58,19 +70,6 @@ def test_an_invented_port_key_is_rejected(tmp_path: Path) -> None:
     config_path.write_text((manifest.package_root / dataset.vio_config).read_text())
     profiles: Path = tmp_path / "configs/profiles"
     profiles.mkdir()
-    (profiles / "fast.json").write_text('{"port.redetect_survivor_ration": 0.5}')
-    with pytest.raises(KeyError, match="port.redetect_survivor_ration"):
-        replace(manifest, package_root=tmp_path).vio_config_text(dataset.name, profile="fast")
-
-
-def test_unknown_overlay_key_is_rejected(tmp_path: Path) -> None:
-    manifest: ReferenceManifest = load_manifest()
-    dataset: DatasetProperties = manifest.datasets[0]
-    config_path: Path = tmp_path / dataset.vio_config
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text((manifest.package_root / dataset.vio_config).read_text())
-    profiles: Path = tmp_path / "configs/profiles"
-    profiles.mkdir()
-    (profiles / "fast.json").write_text('{"config.misspelled_iterations": 4}')
-    with pytest.raises(KeyError, match="config.misspelled_iterations"):
+    (profiles / "fast.json").write_text(overlay)
+    with pytest.raises(KeyError, match=rejected):
         replace(manifest, package_root=tmp_path).vio_config_text(dataset.name, profile="fast")
