@@ -252,9 +252,10 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
     /// Replace the device positions buffer with this call's runs of the staging
     /// buffer, which is as long as the capacity but only filled to `len`.
     fn upload_staging(&mut self) {
-        self.positions = self
-            .client
-            .create_from_slice(f32::as_bytes(&self.staging[..POSITION_RUNS * self.len]));
+        self.positions = super::seam::UPLOAD.measure(|| {
+            self.client
+                .create_from_slice(f32::as_bytes(&self.staging[..POSITION_RUNS * self.len]))
+        });
     }
 
     /// Sample every filled patch at every level of `pyramid`, without waiting.

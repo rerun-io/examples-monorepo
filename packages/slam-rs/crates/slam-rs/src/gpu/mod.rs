@@ -68,6 +68,7 @@ mod finite;
 mod kernels;
 mod patches;
 mod pyramid;
+pub mod seam;
 mod track;
 mod trig;
 
@@ -498,7 +499,8 @@ pub(super) fn upload_frame<R: cubecl::prelude::Runtime>(
     let pixels: usize = width * height;
     if image.stride() == width {
         return (
-            client.create_from_slice(u16::as_bytes(&image.data()[..pixels])),
+            seam::UPLOAD
+                .measure(|| client.create_from_slice(u16::as_bytes(&image.data()[..pixels]))),
             pixels,
         );
     }
@@ -507,7 +509,10 @@ pub(super) fn upload_frame<R: cubecl::prelude::Runtime>(
     for y in 0..height {
         scratch.extend_from_slice(image.row(y));
     }
-    (client.create_from_slice(u16::as_bytes(scratch)), pixels)
+    (
+        seam::UPLOAD.measure(|| client.create_from_slice(u16::as_bytes(scratch))),
+        pixels,
+    )
 }
 
 /// So the check is the one thing that cannot lie: write a known pattern, copy
