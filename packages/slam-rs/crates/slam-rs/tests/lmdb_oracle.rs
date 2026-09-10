@@ -47,23 +47,47 @@
 //! Tolerances. The `f64` pass asks for `1e-12` relative, and the `f32` pass for
 //! **exact equality** on the stereographic chart and on `linearize_point`, where
 //! the port and the C++ evaluate the same expressions in the same order.
-//! `triangulate` is the exception in both precisions: it runs a whole Jacobi SVD
-//! sweep, and the port's is a step-for-step reimplementation of Eigen's rather
-//! than Eigen itself, so one rotation applied in a different grouping moves the
-//! null vector by an ulp. It is bit-equal on nine of the ten cases in `f64` and
-//! within `1e-15` on the tenth, and within `1e-7` in `f32`. What must not move is
-//! basalt's `accepted` decision, and that is asserted exactly, on four cases
-//! placed on the gate on purpose.
+//! `triangulate` is the exception in both precisions, and since S33 item 1 it is
+//! a wider one: the DLT null space now comes from `nalgebra::linalg::SVD`'s
+//! implicit-shift decomposition, computed in `f64` whatever `S` is, rather than
+//! from a port of Eigen's Jacobi sweep. Two different decompositions of the same
+//! matrix agree on the null *space* and not on its last bits, so the vectors
+//! part company a few ulps in — measured worst over these 84 cases, `1.6e-14`
+//! relative in `f64` and `2.5e-6` in `f32`, the `f32` figure being the C++'s own
+//! single-precision sweep error rather than the port's, which no longer has one.
+//!
+//! **What that costs, and what it does not.** basalt's `accepted` decision is
+//! still asserted exactly wherever the C++'s own `inv_dist` sits further from a
+//! gate than that disagreement. It cannot be asserted on a case that sits
+//! *inside* it, and the whole `triangulate_boundary` sweep does by construction:
+//! 32 points placed within an ulp of `inv_dist = 3`, half of them chosen because
+//! a summation order alone flips them. That sweep still pins the vector, the
+//! straddle and the `order_decides` count; it can no longer pin which side of
+//! the gate an ulp-wide case lands on, and nothing can, because the two
+//! decompositions are each accurate to better than that margin. The accuracy
+//! reference for those landmarks is the ten-clip ATE gate.
 //!
 //! Three ulp-level findings came out of this fixture and changed the port:
 //! `So3 * Vector3` now sums Sophus's three terms in Sophus's order (`lie.rs`);
-//! `head<3>().norm()` sums in Eigen's order, which is `(a + b) + c` in `f64` and
-//! `a + (b + c)` in `f32` ([`LieScalar::eigen_redux3`]); and `compute_error`
+//! `head<3>().norm()` summed in Eigen's order, which is `(a + b) + c` in `f64`
+//! and `a + (b + c)` in `f32` ([`LieScalar::eigen_redux3`]); and `compute_error`
 //! scales the residual **row** before the dot product, as C++'s left-associative
 //! `*` does. Without the first, `triangulate` was an ulp off in `f64`; without
 //! the second, `proj[2]` for a landmark at `inv_dist = 1e-7` was an ulp off in
 //! `f32` and a landmark exactly 1/3 m away was **accepted** where C++ rejects it;
 //! without the third, one observation's cost was 4e-6 off in `f32`.
+//!
+//! S33 kept the third and retired the other two. The point action is
+//! kornia-algebra's now (item 3), so `So3 * Vector3` is glam's
+//! `p (w² - b·b) + b (2 (p·b)) + (b x p) 2w` and not Sophus's three terms; what
+//! the finding predicted is what the fixture still measures, one ulp in the DLT
+//! input pose's translation column and nothing else (see
+//! [`P2_TOLERANCE_F64`]). The residual and landmark sites call `Vector3::norm`
+//! (item 2), whose fold happens to be Eigen's in `f64` and is one ulp away from
+//! it in `f32` ([`NORM_TOLERANCE_F32`], [`PROJ_TOLERANCE_F32`]). Both findings
+//! are still real and still recorded — the fixture pins `eigen_redux3` itself
+//! bit for bit, and the reduction still runs in the keyframe-eviction baseline —
+//! they are simply no longer what these two paths are built on.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 // The literal below is a C++ `%.17g` printout of a float, carried over verbatim
@@ -79,7 +103,6 @@ use serde::Deserialize;
 use slam_rs::ba_base::{LinearizePointOut, huber_cost, linearize_point, triangulate};
 use slam_rs::calib::Calibration;
 use slam_rs::camera::{CameraEnum, KannalaBrandt4, PinholeRadtan8};
-use slam_rs::eigen::norm3;
 use slam_rs::landmark::{Landmark, StereographicParam};
 use slam_rs::lie::{LieScalar, Se3, So3};
 use slam_rs::types::{LandmarkId, TimeCamId};
@@ -91,13 +114,51 @@ const ORACLE: &str = include_str!("fixtures/lmdb/lmdb_oracle.json");
 /// Agreement with the C++ number, per coefficient, relative to `max(|want|, 1)`.
 const TOLERANCE: f64 = 1e-12;
 
-/// The same for the DLT, whose Jacobi sweep is a reimplementation rather than a
-/// call into Eigen; see the module docs. Nine of the ten cases are bit-equal;
-/// the `rotated` one differs by one ulp in the first coefficient.
-const TRIANGULATE_TOLERANCE_F64: f64 = 1e-15;
+/// The same for the DLT, whose null vector comes from a different decomposition
+/// than the C++'s (S33 item 1); see the module docs. Measured worst over the ten
+/// named cases and the 32 boundary cases: `1.6e-14` (`tiny_baseline`, whose
+/// sub-millimetre baseline is the worst-conditioned `A` in the fixture).
+const TRIANGULATE_TOLERANCE_F64: f64 = 5e-14;
 
-/// And in `f32`, where the sweep accumulates its rotations in single precision.
-const TRIANGULATE_TOLERANCE_F32: f64 = 1e-7;
+/// The DLT's input pose, `T_0_1.inverse().matrix3x4()`, against the C++'s.
+///
+/// This was bit-equal in both precisions, and it is here so that the comparison
+/// of the *result* below separates "the pose differs" from "the DLT differs".
+/// S33 routed `So3 * Vector3` through `kornia-algebra`, whose action is glam's
+/// `p (w² - b·b) + b (2 (p·b)) + (b x p) 2w` rather than Sophus's
+/// `p + w uv + b x uv`, so `Se3::inverse`'s translation — and only that column
+/// of the 3x4 — moves by an ulp. Measured worst: `5.6e-17` in `f64` and
+/// `1.5e-8` in `f32`, both one ulp of the coefficient. The rotation block is
+/// still bit-equal, and the constants are one order above what was measured, so
+/// the assertion still separates the two failures it was written to separate.
+const P2_TOLERANCE_F64: f64 = 1e-15;
+
+/// The same in `f32`.
+const P2_TOLERANCE_F32: f64 = 1e-7;
+
+/// `Vector3::norm` against the C++'s three-coefficient Eigen tree, in `f32`.
+///
+/// nalgebra folds the three squares left to right; Eigen's `f32` path takes the
+/// scalar unroller's `a + (b + c)` (see [`LieScalar::eigen_redux3`], which still
+/// serves the keyframe-eviction baseline). Measured worst over the 32 probes:
+/// `1.19e-7`, one `f32` ulp. In `f64` the two orders coincide and the norm is
+/// still asserted bit for bit.
+const NORM_TOLERANCE_F32: f64 = 1e-6;
+
+/// The same one-ulp norm difference reaching `proj[2] = inv_dist / |p|`
+/// (`ba_utils.h:113-116`) in `f32`.
+///
+/// Measured worst over the ten cases: `7.1e-15` absolute, on the landmark at
+/// `inv_dist = 1e-7` — about 0.6 ulp of that coefficient's own magnitude. The
+/// bound is ten of them. `res` and both Jacobians stay bit-exact in `f32`; only
+/// this one coefficient reads a norm.
+const PROJ_TOLERANCE_F32: f64 = 1e-13;
+
+/// And in `f32`, where the *C++* accumulated its Jacobi rotations in single
+/// precision and the port now solves the 4x4 in `f64` and rounds once. Measured
+/// worst: `2.5e-6` (`far`), which is 20 `f32` ulps of the C++'s answer, not of
+/// the port's.
+const TRIANGULATE_TOLERANCE_F32: f64 = 1e-5;
 
 #[derive(Debug, Deserialize)]
 struct Oracle {
@@ -383,7 +444,11 @@ fn camera_from<S: LieScalar>(entry: &OracleLinearize) -> CameraEnum<S> {
     }
 }
 
-fn check_linearize<S: LieScalar>(entries: &[&OracleLinearize], tolerance: f64) {
+fn check_linearize<S: LieScalar>(
+    entries: &[&OracleLinearize],
+    tolerance: f64,
+    proj_tolerance: f64,
+) {
     assert!(!entries.is_empty());
     for entry in entries {
         let label: String = format!(
@@ -448,7 +513,7 @@ fn check_linearize<S: LieScalar>(entries: &[&OracleLinearize], tolerance: f64) {
             &format!("{label} proj"),
             &proj.as_slice()[..3],
             &entry.proj[..3],
-            tolerance,
+            proj_tolerance,
         );
     }
 }
@@ -462,12 +527,15 @@ fn linearize_point_matches_the_cpp_in_double() {
         .filter(|e| e.scalar == "f64")
         .collect();
     assert_eq!(entries.len(), 10);
-    check_linearize::<f64>(&entries, TOLERANCE);
+    check_linearize::<f64>(&entries, TOLERANCE, TOLERANCE);
 }
 
-/// Exact in `f32`: the residual path is the stereographic unprojection, one 4x4
-/// matrix-vector product and the camera model, and all three already match the
-/// C++ bit for bit in single precision (`camera_oracle.rs`).
+/// Exact in `f32` on the residual and both Jacobians: that path is the
+/// stereographic unprojection, one 4x4 matrix-vector product and the camera
+/// model, and all three match the C++ bit for bit in single precision
+/// (`camera_oracle.rs`). `proj[2]` alone divides by `|p|` and carries
+/// [`PROJ_TOLERANCE_F32`] since S33 replaced the Eigen reduction with
+/// `Vector3::norm`.
 #[test]
 fn linearize_point_matches_the_cpp_in_float() {
     let oracle: Oracle = oracle();
@@ -477,7 +545,7 @@ fn linearize_point_matches_the_cpp_in_float() {
         .filter(|e| e.scalar == "f32")
         .collect();
     assert_eq!(entries.len(), 10);
-    check_linearize::<f32>(&entries, 0.0);
+    check_linearize::<f32>(&entries, 0.0, PROJ_TOLERANCE_F32);
 }
 
 /// Both reference calibrations really are the cameras the oracle was built with,
@@ -548,21 +616,26 @@ fn pose_from<S: LieScalar>(entry: &OracleTriangulate) -> Se3<S> {
     )
 }
 
-fn check_triangulate<S: LieScalar>(entries: &[&OracleTriangulate], tolerance: f64) {
+fn check_triangulate<S: LieScalar>(
+    entries: &[&OracleTriangulate],
+    tolerance: f64,
+    p2_tolerance: f64,
+) {
     assert!(!entries.is_empty());
     for entry in entries {
         let label: String = format!("triangulate {} {}", entry.name, entry.scalar);
         let t_0_1: Se3<S> = pose_from(entry);
 
-        // The reconstruction is exact: the 3x4 the DLT builds from is the one
-        // the C++ built from. Without this the comparison below would not
-        // separate a pose that differs from a DLT that differs.
+        // The 3x4 the DLT builds from is the one the C++ built from, to
+        // [`P2_TOLERANCE_F64`] / [`P2_TOLERANCE_F32`]. Without this the
+        // comparison below would not separate a pose that differs from a DLT
+        // that differs.
         let p2: nalgebra::Matrix3x4<S> = t_0_1.inverse().matrix3x4();
         close_all_finite(
             &format!("{label} p2"),
             &common::row_major(&p2),
             &entry.p2,
-            0.0,
+            p2_tolerance,
         );
 
         let f0: Vector3<S> = vector3(&entry.f0);
@@ -579,12 +652,26 @@ fn check_triangulate<S: LieScalar>(entries: &[&OracleTriangulate], tolerance: f6
             tolerance,
         );
 
-        // basalt's acceptance gate (`sqrt_keypoint_vio.cpp:534`). This is the
-        // decision the port must reproduce exactly, whatever the last ulps do.
+        // basalt's acceptance gate (`sqrt_keypoint_vio.cpp:534`). Reproduced
+        // exactly wherever the C++'s own `inv_dist` stands further from a gate
+        // than the two decompositions disagree; on a case that sits inside that
+        // band the gate is decided by bits neither implementation owns, and the
+        // assertion above — that the vectors agree to `tolerance` — is the whole
+        // of what can be checked. See the module docs.
         let accepted: bool = got.iter().all(|v| v.to_f64().is_finite())
             && got[3] > S::zero()
             && got[3] < S::from_literal(3.0);
-        assert_eq!(accepted, entry.accepted, "{label}: acceptance");
+        let decidable: bool = match entry.result[3] {
+            Some(inv_dist) => {
+                let band: f64 = tolerance * inv_dist.abs().max(1.0);
+                (inv_dist - 3.0).abs() > band && inv_dist.abs() > band
+            }
+            // A non-finite `inv_dist` is on no gate at all.
+            None => true,
+        };
+        if decidable {
+            assert_eq!(accepted, entry.accepted, "{label}: acceptance");
+        }
     }
 }
 
@@ -597,7 +684,7 @@ fn triangulate_matches_the_cpp_in_double() {
         .filter(|e| e.scalar == "f64")
         .collect();
     assert_eq!(entries.len(), 10);
-    check_triangulate::<f64>(&entries, TRIANGULATE_TOLERANCE_F64);
+    check_triangulate::<f64>(&entries, TRIANGULATE_TOLERANCE_F64, P2_TOLERANCE_F64);
 }
 
 #[test]
@@ -609,7 +696,7 @@ fn triangulate_matches_the_cpp_in_float() {
         .filter(|e| e.scalar == "f32")
         .collect();
     assert_eq!(entries.len(), 10);
-    check_triangulate::<f32>(&entries, TRIANGULATE_TOLERANCE_F32);
+    check_triangulate::<f32>(&entries, TRIANGULATE_TOLERANCE_F32, P2_TOLERANCE_F32);
 }
 
 /// The three cases that sit on basalt's `inv_dist < 3` gate really do straddle
@@ -666,7 +753,7 @@ fn the_bearing_sign_flip_fires() {
 
 // ─── the three-coefficient reduction order ─────────────────────────────────
 
-fn check_norm3<S: LieScalar>(entries: &[&OracleNorm3], left_assoc: bool) {
+fn check_norm3<S: LieScalar>(entries: &[&OracleNorm3], left_assoc: bool, norm_tolerance: f64) {
     assert!(!entries.is_empty());
     let mut discriminating: usize = 0;
     for entry in entries {
@@ -682,12 +769,14 @@ fn check_norm3<S: LieScalar>(entries: &[&OracleNorm3], left_assoc: bool) {
             Some(entry.squared_norm),
             0.0,
         );
-        // And the square root the residual path actually calls.
+        // And the square root the residual path actually calls, which since S33
+        // is `Vector3::norm` rather than a port of Eigen's three-coefficient
+        // tree; see the constants.
         close(
             &format!("{label} norm"),
-            norm3(x, y, z).to_f64(),
+            Vector3::new(x, y, z).norm().to_f64(),
             Some(entry.norm),
-            0.0,
+            norm_tolerance,
         );
 
         if entry.discriminating {
@@ -726,7 +815,7 @@ fn the_three_coefficient_reduction_is_left_associated_in_double() {
     let oracle: Oracle = oracle();
     let entries: Vec<&OracleNorm3> = oracle.norm3.iter().filter(|e| e.scalar == "f64").collect();
     assert_eq!(entries.len(), 32);
-    check_norm3::<f64>(&entries, true);
+    check_norm3::<f64>(&entries, true, 0.0);
 }
 
 /// `f32`: `Packet4f` is four floats, wider than the expression, so the aligned
@@ -737,7 +826,7 @@ fn the_three_coefficient_reduction_is_right_associated_in_float() {
     let oracle: Oracle = oracle();
     let entries: Vec<&OracleNorm3> = oracle.norm3.iter().filter(|e| e.scalar == "f32").collect();
     assert_eq!(entries.len(), 32);
-    check_norm3::<f32>(&entries, false);
+    check_norm3::<f32>(&entries, false, NORM_TOLERANCE_F32);
 }
 
 /// The two precisions really do disagree about the order, which is the whole
@@ -863,7 +952,7 @@ fn the_boundary_sweep_matches_the_cpp_in_double() {
         .filter(|e| e.scalar == "f64")
         .collect();
     assert_eq!(entries.len(), 32);
-    check_triangulate::<f64>(&entries, TRIANGULATE_TOLERANCE_F64);
+    check_triangulate::<f64>(&entries, TRIANGULATE_TOLERANCE_F64, P2_TOLERANCE_F64);
     let accepted: usize = entries.iter().filter(|e| e.accepted).count();
     assert!(
         (1..entries.len()).contains(&accepted),
@@ -885,7 +974,7 @@ fn the_boundary_sweep_matches_the_cpp_in_float() {
         .filter(|e| e.scalar == "f32")
         .collect();
     assert_eq!(entries.len(), 32);
-    check_triangulate::<f32>(&entries, TRIANGULATE_TOLERANCE_F32);
+    check_triangulate::<f32>(&entries, TRIANGULATE_TOLERANCE_F32, P2_TOLERANCE_F32);
     let accepted: usize = entries.iter().filter(|e| e.accepted).count();
     assert!((1..entries.len()).contains(&accepted));
     assert_eq!(entries.iter().filter(|e| e.order_decides).count(), 16);

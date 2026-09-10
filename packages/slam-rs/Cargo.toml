@@ -41,6 +41,13 @@ proptest = "1"
 kornia-image = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
 kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
 
+# SO(3)'s exp, log, matrix, inverse and action, at the same pinned rev. Already
+# in the lockfile as a dependency of `kornia-imgproc`; naming it here makes the
+# edge direct. `crate::lie` routes `So3` through `SO3F32`/`SO3F64` and keeps the
+# rest — SE(3), the decoupled pair, `apply_inc`, the four basalt Jacobians —
+# because upstream's are `f32`-only or coupled (S33 audit A, row 5).
+kornia-algebra = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
+
 # The GPU phase (decision D21, D70). CubeCL 0.10 stable with the optional
 # wgpu runtime; the default CPU build has no GPU dependency.
 cubecl = "0.10"

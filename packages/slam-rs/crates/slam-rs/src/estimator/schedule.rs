@@ -36,7 +36,6 @@ use nalgebra::Vector3;
 
 use super::{EstimatorError, SqrtKeypointVio, WindowRole, duration_ns, fixed_keyframes};
 use crate::config::KeyframeMargCriteria;
-use crate::eigen::norm3;
 use crate::lie::{LieScalar, Se3};
 use crate::marg::{
     MarginalizeInputs, MarginalizeOptions, MarginalizeSchedule, marginalize as marginalize_window,
@@ -363,10 +362,10 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 for other in &candidates {
                     let there: Vector3<S> = self.keyframe_pose(*other)?.translation;
                     let d: Vector3<S> = here - there;
-                    denom += S::one() / (norm3(d[0], d[1], d[2]) + S::from_literal(1e-5));
+                    denom += S::one() / (d.norm() + S::from_literal(1e-5));
                 }
                 let d: Vector3<S> = here - last_translation;
-                let score: S = norm3(d[0], d[1], d[2]).sqrt() * denom;
+                let score: S = d.norm().sqrt() * denom;
                 if score < min_score {
                     min_score = score;
                     min_score_id = Some(*frame_id);

@@ -3222,6 +3222,7 @@ dependencies = [
  "approx",
  "cubecl",
  "cubecl-wgpu",
+ "kornia-algebra",
  "kornia-image",
  "kornia-imgproc",
  "log",

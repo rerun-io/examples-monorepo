@@ -42,6 +42,7 @@ gpu-wgpu = ["gpu-core", "dep:cubecl-wgpu", "dep:wgpu", "cubecl-wgpu/exclusive-me
 cubecl = { workspace = true, optional = true }
 kornia-image = { workspace = true }
 kornia-imgproc = { workspace = true }
+kornia-algebra = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }
 rayon = { workspace = true }

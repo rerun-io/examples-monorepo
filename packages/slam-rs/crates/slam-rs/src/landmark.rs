@@ -36,7 +36,6 @@ use std::marker::PhantomData;
 
 use nalgebra::{Matrix2x4, Matrix4x2, Vector2, Vector4};
 
-use crate::eigen::norm3;
 use crate::lie::{LieScalar, c};
 use crate::types::{FrameId, LandmarkId, TimeCamId};
 
@@ -60,7 +59,7 @@ impl<S: LieScalar> StereographicParam<S> {
     #[inline]
     pub fn project(p3d: &Vector4<S>) -> Vector2<S> {
         // `p3d.template head<3>().norm()` (`:80`) — the name `sqrt` is basalt's.
-        let sqrt: S = norm3(p3d[0], p3d[1], p3d[2]);
+        let sqrt: S = p3d.fixed_rows::<3>(0).norm();
         let norm: S = p3d[2] + sqrt;
         let norm_inv: S = S::one() / norm;
         Vector2::new(p3d[0] * norm_inv, p3d[1] * norm_inv)
@@ -70,7 +69,7 @@ impl<S: LieScalar> StereographicParam<S> {
     /// (`stereographic_param.hpp:86-103`).
     #[inline]
     pub fn project_with_jacobian(p3d: &Vector4<S>, d_r_d_p: &mut Matrix2x4<S>) -> Vector2<S> {
-        let sqrt: S = norm3(p3d[0], p3d[1], p3d[2]);
+        let sqrt: S = p3d.fixed_rows::<3>(0).norm();
         let norm: S = p3d[2] + sqrt;
         let norm_inv: S = S::one() / norm;
         let res: Vector2<S> = Vector2::new(p3d[0] * norm_inv, p3d[1] * norm_inv);

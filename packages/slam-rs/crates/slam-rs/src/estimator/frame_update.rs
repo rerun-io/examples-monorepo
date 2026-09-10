@@ -716,7 +716,7 @@ mod tests {
                     LandmarkId(next_id),
                     host,
                     StereographicParam::project(&point),
-                    1.0 / crate::eigen::norm3(point[0], point[1], point[2]),
+                    1.0 / point.fixed_rows::<3>(0).norm(),
                 );
                 next_id += 1;
 

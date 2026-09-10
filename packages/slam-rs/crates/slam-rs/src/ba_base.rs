@@ -41,9 +41,6 @@ use nalgebra::{
 
 use crate::calib::Calibration;
 use crate::camera::{CameraEnum, CameraError};
-use crate::eigen::blas::redux_contiguous;
-use crate::eigen::norm3;
-use crate::eigen::svd::jacobi_svd_4x4_full_v;
 use crate::landmark::{Landmark, LandmarkDatabase, LandmarkError, StereographicParam};
 use crate::lie::{LieScalar, Se3, So3, c};
 use crate::types::{
@@ -241,7 +238,7 @@ pub fn linearize_point<S: LieScalar>(
         // (`ba_utils.h:113-116`), before the observation is subtracted.
         proj[0] = res[0];
         proj[1] = res[1];
-        proj[2] = p_t_3d[3] / norm3(p_t_3d[0], p_t_3d[1], p_t_3d[2]);
+        proj[2] = p_t_3d[3] / p_t_3d.fixed_rows::<3>(0).norm();
     }
 
     // `res -= kpt_obs` (`ba_utils.h:117`) — the flipped sign.
@@ -275,6 +272,14 @@ pub fn linearize_point<S: LieScalar>(
 
 // ─── triangulation ─────────────────────────────────────────────────────────
 
+/// The implicit-shift sweep budget [`triangulate`] gives its 4x4 SVD.
+///
+/// nalgebra treats `0` as "iterate until convergence"; a tracker that has to
+/// return a frame in a few milliseconds cannot. Four rows converge in a handful
+/// of sweeps, so this is a refusal threshold rather than a tuning knob — a
+/// matrix that reaches it is degenerate, and `None` is the honest answer.
+const SVD_MAX_ITERATIONS: usize = 64;
+
 /// `triangulate(f0, f1, T_0_1)` (`ba_base.h:89-116`): the DLT, returning a
 /// homogeneous `[unit direction (3), inverse distance]` in frame 0.
 ///
@@ -287,11 +292,24 @@ pub fn linearize_point<S: LieScalar>(
 /// every coefficient is finite and `0 < inv_dist < 3`
 /// (`sqrt_keypoint_vio.cpp:534`), i.e. no further than 1/3 m.
 ///
-/// **Deviation.** On a non-finite input Eigen sets `InvalidInput` and returns
+/// **Deviations from the C++.** Two, both about what a refusal is.
+///
+/// The 4x4 null space comes from [`nalgebra::linalg::SVD`] rather than from a
+/// port of Eigen's `JacobiSVD` sweep, and it is computed in `f64` whatever `S`
+/// is: the DLT rows of a `Vio<f32>` are differences of same-order products, so
+/// the smallest singular value is the one quantity in the whole estimator that
+/// is built out of cancellation, and its vector is the answer. Promoting costs
+/// one 4x4 solve per new landmark and nothing else. The decomposition is
+/// `try_new_unordered`, with the smallest singular value found by an explicit
+/// scan: the sorting constructor panics on a NaN singular value, and the
+/// unsorted one lets the non-finite check below stay the only refusal path.
+///
+/// On a non-finite input Eigen sets `InvalidInput` and returns
 /// with `m_matrixV` never written (`JacobiSVD.h:721-727`); basalt then reads it,
 /// which is undefined behaviour. There is no value to reproduce, so the port
-/// returns `None` — for that, and for a homogeneous vector whose spatial part
-/// has no direction to normalise. Both used to come back as an all-NaN or
+/// returns `None` — for that, for a decomposition that does not converge inside
+/// its iteration budget, and for a homogeneous vector whose spatial part has no
+/// direction to normalise. All three used to come back as an all-NaN or
 /// part-infinite vector that the acceptance gate above then rejected, which
 /// made a number the control flow.
 pub fn triangulate<S: LieScalar>(
@@ -318,10 +336,41 @@ pub fn triangulate<S: LieScalar>(
     a.row_mut(3)
         .copy_from(&(p2.row(2) * f1[1] - p2.row(1) * f1[2]));
 
-    let (_, v) = jacobi_svd_4x4_full_v(&a)?;
+    let wide: Matrix4<f64> = a.map(|value| value.to_f64());
+    if wide.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
 
-    let mut world_point: Vector4<S> = v.column(3).into_owned();
-    let norm: S = norm3(world_point[0], world_point[1], world_point[2]);
+    // `max_niter` bounds the total implicit-shift sweeps: a 4x4 that has not
+    // converged in `SVD_MAX_ITERATIONS` is not going to, and a landmark that
+    // does not exist is a better answer than an unbounded loop in the tracker.
+    let svd: nalgebra::SVD<f64, nalgebra::U4, nalgebra::U4> =
+        nalgebra::SVD::try_new_unordered(wide, false, true, f64::EPSILON, SVD_MAX_ITERATIONS)?;
+    if svd.singular_values.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    // A DLT whose largest singular value is zero carries no constraint at all —
+    // two zero bearing vectors build a zero `A` — so *every* direction is a null
+    // direction and the one the decomposition happens to return is fabricated.
+    // Eigen's sweep refused this by leaving `V` the identity and handing back its
+    // last column, `[0, 0, 0, 1]`, whose spatial part then failed to normalise;
+    // the rank is the thing that was being tested, so it is tested directly.
+    if svd.singular_values.max() <= 0.0 {
+        return None;
+    }
+    // The null vector is the right-singular vector of the *smallest* singular
+    // value, and `v_t` holds the right-singular vectors as its **rows**. The
+    // decomposition is unordered, so the row is found rather than assumed.
+    let mut smallest: usize = 0;
+    for i in 1..4 {
+        if svd.singular_values[i] < svd.singular_values[smallest] {
+            smallest = i;
+        }
+    }
+    let v_t: nalgebra::Matrix4<f64> = svd.v_t?;
+
+    let mut world_point: Vector4<S> = v_t.row(smallest).transpose().map(|value| c::<S>(value));
+    let norm: S = world_point.fixed_rows::<3>(0).norm();
     // A homogeneous vector with no spatial part has no direction: dividing by
     // its norm used to hand the caller `[NaN, NaN, NaN, inf]`.
     if norm <= S::zero() {
@@ -922,19 +971,21 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
 /// Hessian form (`:437`, `:463`) writes `deltaᵀ (½ H delta + b)`, so the `lhs`
 /// is `delta` itself.
 ///
-/// The outer `(1×n)·(n×1)` is Eigen's `InnerProduct` in all four, which is
-/// `(lhs.transpose().cwiseProduct(rhs)).sum()`
-/// (`ProductEvaluators.h`, `generic_product_impl<..., InnerProduct>`), so the
-/// fold is [`redux_contiguous`]'s packet tree and not a left fold: the two
-/// differ in `f32`, and this value enters `error_total` whose difference across
-/// an increment is the LM accept test.
+/// The outer `(1×n)·(n×1)` is Eigen's `InnerProduct` in all four. Its fold used
+/// to be a port of Eigen's packet tree, because the value enters `error_total`
+/// whose difference across an increment is the LM accept test and D44 wanted
+/// that difference to be the C++'s; since S33 it is a left fold over an
+/// iterator, which materialises nothing — the summand is formed one coefficient
+/// at a time from the three vectors, as it was before.
 fn prior_error<S: LieScalar>(
     lhs: &DVector<S>,
     h_delta: &DVector<S>,
     b: &DVector<S>,
     n: usize,
 ) -> S {
-    redux_contiguous(n, |i| lhs[i] * (c::<S>(0.5) * h_delta[i] + b[i]))
+    (0..n).fold(S::zero(), |acc, i| {
+        acc + lhs[i] * (c::<S>(0.5) * h_delta[i] + b[i])
+    })
 }
 
 #[cfg(test)]
@@ -1212,8 +1263,8 @@ mod tests {
             ),
             None
         );
-        // The homogeneous vector the DLT selects has no direction to normalise:
-        // the same refusal, one step later.
+        // Two zero bearing vectors build a zero `A`: rank zero, so no direction
+        // is more null than any other and there is no landmark to report.
         assert_eq!(
             triangulate::<f64>(&Vector3::zeros(), &Vector3::zeros(), &Se3::identity()),
             None
