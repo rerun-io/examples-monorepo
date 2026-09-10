@@ -399,12 +399,12 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
         let mut bytes: Vec<cubecl::bytes::Bytes> = if reads.is_empty() {
             Vec::new()
         } else {
-            {
-                let read = super::seam::READ_TRACK
-                    .measure(|| cubecl::reader::read_sync(self.client.read_async(reads)));
-                super::drained(&self.client);
-                read.map_err(|error| super::read_failed("the tracker result", &error))?
-            }
+            super::read_blocking(
+                &self.client,
+                reads,
+                "the tracker result",
+                &super::seam::READ_TRACK,
+            )?
         };
         if let Some(tag) = staged.filter(|_| bytes.len() >= lanes) {
             let tail: Vec<cubecl::bytes::Bytes> = bytes.split_off(lanes);

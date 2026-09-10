@@ -579,6 +579,21 @@ thread_local! {
 /// address identifies their device's queue. A stale address can only retain an
 /// old count and cause an early flush. Runtime type separates backend types.
 /// Each device must have one producer thread; a read resets only that device.
+/// Which device's queue a count belongs to: the runtime type, and the address
+/// of the properties every clone of that device's client shares.
+#[cfg(feature = "gpu-core")]
+type QueueKey = (std::any::TypeId, usize);
+
+/// `client`'s device, as [`QUEUED`] keys one. Both the reservation and the
+/// drain have to agree on it exactly, so neither spells it out.
+#[cfg(feature = "gpu-core")]
+fn queue_key<R: cubecl::prelude::Runtime>(client: &cubecl::prelude::ComputeClient<R>) -> QueueKey {
+    (
+        std::any::TypeId::of::<R>(),
+        std::ptr::from_ref(client.properties()) as usize,
+    )
+}
+
 #[cfg(feature = "gpu-core")]
 pub(super) fn reserve<R: cubecl::prelude::Runtime>(
     client: &cubecl::prelude::ComputeClient<R>,
@@ -588,10 +603,7 @@ pub(super) fn reserve<R: cubecl::prelude::Runtime>(
         tasks < CHANNEL_TASKS,
         "split stages larger than the queue budget"
     );
-    let key = (
-        std::any::TypeId::of::<R>(),
-        std::ptr::from_ref(client.properties()) as usize,
-    );
+    let key: QueueKey = queue_key(client);
     QUEUED.with(|queues| {
         let mut queues = queues.borrow_mut();
         let index = queues
@@ -618,10 +630,7 @@ pub(super) fn reserve<R: cubecl::prelude::Runtime>(
 /// A blocking read has consumed this producer's outstanding tasks on this device.
 #[cfg(feature = "gpu-core")]
 pub(super) fn drained<R: cubecl::prelude::Runtime>(client: &cubecl::prelude::ComputeClient<R>) {
-    let key = (
-        std::any::TypeId::of::<R>(),
-        std::ptr::from_ref(client.properties()) as usize,
-    );
+    let key: QueueKey = queue_key(client);
     QUEUED.with(|queues| {
         if let Some((_, count)) = queues.borrow_mut().iter_mut().find(|(id, _)| *id == key) {
             *count = 0;
@@ -647,6 +656,64 @@ pub(super) fn empty<R: cubecl::prelude::Runtime>(
 fn read_failed(what: &'static str, error: &cubecl::server::ServerError) -> GpuError {
     log::warn!("reading {what} from the device failed: {error}");
     GpuError::DeviceReadFailed { what }
+}
+
+/// The download itself, or the `ServerError` a lost device returns when a test
+/// armed [`BLOCKING_READ`].
+///
+/// Its own function so the injection cannot reach past the read into the queue
+/// accounting [`read_blocking`] does after it, which is what the test is about.
+#[cfg(feature = "gpu-core")]
+fn download<R: cubecl::prelude::Runtime>(
+    client: &cubecl::prelude::ComputeClient<R>,
+    handles: Vec<cubecl::server::Handle>,
+) -> Result<Vec<cubecl::bytes::Bytes>, cubecl::server::ServerError> {
+    #[cfg(test)]
+    if armed(BLOCKING_READ) {
+        return Err(cubecl::server::ServerError::Generic {
+            reason: "the device is gone".to_owned(),
+            backtrace: cubecl::backtrace::BackTrace::default(),
+        });
+    }
+    cubecl::reader::read_sync(client.read_async(handles))
+}
+
+/// One blocking download of every handle at once, and the protocol around it.
+///
+/// Four per-frame stages wait on the device — the corner scan's candidate image
+/// and bitmask, the two cell-key reads, and the tracker batch's packed results
+/// (D78) — and each has to do the same three things in the same order: block on
+/// the **fallible** `read_sync` rather than `client.read`, which is
+/// `read_sync(..).expect("TODO")` and would unwind out of the frontend with the
+/// GIL detached (D32); tell [`drained`] this producer's queued tasks are gone;
+/// and turn a `ServerError` into the typed [`GpuError::DeviceReadFailed`] the
+/// stage error carries. Here so the queue accounting and the failure mapping
+/// cannot drift apart one stage at a time.
+///
+/// What each buffer *is* stays with the stage that asked for it: how many
+/// buffers it expects, how long each must be, whether a relay delivery answered
+/// instead (D78), and where a test arms a panicking read.
+///
+/// `meter` is the seam counter of the stage that **issued** the read, not of
+/// whoever's data the buffers hold — a tracker download that carries the corner
+/// scanner's keys is one tracker read (D78).
+#[cfg(feature = "gpu-core")]
+pub(super) fn read_blocking<R: cubecl::prelude::Runtime>(
+    client: &cubecl::prelude::ComputeClient<R>,
+    handles: Vec<cubecl::server::Handle>,
+    what: &'static str,
+    meter: &seam::Meter,
+) -> Result<Vec<cubecl::bytes::Bytes>, GpuError> {
+    let outcome: Result<Vec<cubecl::bytes::Bytes>, cubecl::server::ServerError> =
+        meter.measure(|| {
+            let bytes = download(client, handles);
+            // Unconditional, and inside the meter: the wait consumed this
+            // producer's tasks whether the download answered or failed, and a
+            // count left standing would flush the next stage early.
+            drained(client);
+            bytes
+        });
+    outcome.map_err(|error| read_failed(what, &error))
 }
 
 /// Run `stage`, turning a panic inside it into `fault`.
@@ -715,6 +782,39 @@ const STORAGE_PROBE: &str = "the storage probe";
 /// a half-finished scan leaves behind.
 #[cfg(test)]
 const CORNER_SCAN_READ: &str = "the corner scan's read";
+
+/// A fault site: the blocking read's own download. Unlike the sites above this
+/// one is not a panic — [`read_blocking`] turns it into the `ServerError` a
+/// lost device returns — because what it is armed for is the queue accounting
+/// that runs *after* a failed read.
+#[cfg(test)]
+const BLOCKING_READ: &str = "the blocking read";
+
+/// Whether a test armed `site`, disarming it. The caller decides what the fault
+/// means; [`fire_if_armed`] panics, [`download`] returns an error.
+#[cfg(test)]
+fn armed(site: &'static str) -> bool {
+    FAULT.with(|fault| {
+        let hit: bool = fault.get() == Some(site);
+        if hit {
+            fault.set(None);
+        }
+        hit
+    })
+}
+
+/// Tasks this producer has outstanding on `client`'s device (test-only).
+#[cfg(test)]
+fn queued_tasks<R: cubecl::prelude::Runtime>(client: &cubecl::prelude::ComputeClient<R>) -> usize {
+    let key: QueueKey = queue_key(client);
+    QUEUED.with(|queues| {
+        queues
+            .borrow()
+            .iter()
+            .find(|(id, _)| *id == key)
+            .map_or(0, |(_, count)| *count)
+    })
+}
 
 /// Panic if a test armed `site`, and disarm it.
 #[cfg(test)]
@@ -930,6 +1030,47 @@ mod tests {
                 "the stage error dropped what failed: {message}"
             );
         }
+    }
+
+    /// A failed download still empties this producer's queue accounting.
+    ///
+    /// Every blocking read tells [`drained`] the device's queued tasks are
+    /// gone, and it does so whether the download answered or returned a
+    /// `ServerError`: the wait consumed them, the answer did not. A count left
+    /// standing after a failed read would make the next stage flush for tasks
+    /// that are not there — a second synchronisation a frameset, on a device
+    /// that is slow rather than lost (D77).
+    ///
+    /// The `ServerError` cannot be produced on a healthy card, so one armed
+    /// fault stands in for it *at the read*, which is the only place it can be
+    /// armed without reaching past the accounting under test.
+    #[test]
+    fn a_failed_blocking_read_still_drains_the_queue() {
+        let client = gpu_client().unwrap();
+        let handle: cubecl::server::Handle = empty(&client, 256);
+        assert!(
+            queued_tasks(&client) > 0,
+            "the allocation reserved no task, so the drain below proves nothing"
+        );
+
+        let what: &str = "the tracker result";
+        arm_fault_at(BLOCKING_READ);
+        assert_eq!(
+            read_blocking(&client, vec![handle.clone()], what, &seam::READ_TRACK).unwrap_err(),
+            GpuError::DeviceReadFailed { what }
+        );
+        assert_eq!(
+            queued_tasks(&client),
+            0,
+            "a failed read left this producer's tasks outstanding"
+        );
+
+        // Unarmed the same read answers and drains, so the lines above measure
+        // the failure path and not a read that never ran.
+        let second: cubecl::server::Handle = empty(&client, 256);
+        assert!(queued_tasks(&client) > 0);
+        read_blocking(&client, vec![second], what, &seam::READ_TRACK).unwrap();
+        assert_eq!(queued_tasks(&client), 0);
     }
 
     /// A panic inside a stage is a typed error, not an unwind into Python.

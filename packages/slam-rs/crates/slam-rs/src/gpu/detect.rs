@@ -469,21 +469,13 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                 #[cfg(test)]
                 super::fire_if_armed(super::CORNER_SCAN_READ);
 
-                // One read for both, so one synchronisation for the frame — and the
-                // fallible form of it: `client.read` is `read_sync(..).expect("TODO")`,
-                // and a panic here would unwind out of the frontend with the GIL
-                // detached (decision D32).
-                let reads: Vec<cubecl::bytes::Bytes> = super::seam::READ_DETECT
-                    .measure(|| {
-                        let read = cubecl::reader::read_sync(
-                            self.client.read_async(vec![handles.kept, handles.mask]),
-                        );
-                        super::drained(&self.client);
-                        read
-                    })
-                    .map_err(|error| {
-                        super::read_failed("the candidate image and its bitmask", &error)
-                    })?;
+                // One read for both, so one synchronisation for the frame.
+                let reads: Vec<cubecl::bytes::Bytes> = super::read_blocking(
+                    &self.client,
+                    vec![handles.kept, handles.mask],
+                    "the candidate image and its bitmask",
+                    &super::seam::READ_DETECT,
+                )?;
                 // One buffer per handle, in the order they were asked for; anything else
                 // is the runtime breaking its own contract rather than short data.
                 let Ok([kept_bytes, mask_bytes]) = <[cubecl::bytes::Bytes; 2]>::try_from(reads)
@@ -561,12 +553,12 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                 #[cfg(test)]
                 super::fire_if_armed(super::CORNER_SCAN_READ);
 
-                let reads: Vec<cubecl::bytes::Bytes> = {
-                    let read = super::seam::READ_DETECT
-                        .measure(|| cubecl::reader::read_sync(self.client.read_async(vec![best])));
-                    super::drained(&self.client);
-                    read.map_err(|error| super::read_failed("the cell winner keys", &error))?
-                };
+                let reads: Vec<cubecl::bytes::Bytes> = super::read_blocking(
+                    &self.client,
+                    vec![best],
+                    "the cell winner keys",
+                    &super::seam::READ_DETECT,
+                )?;
                 let Ok([keys]) = <[cubecl::bytes::Bytes; 1]>::try_from(reads) else {
                     return Err(super::GpuError::DeviceReadFailed {
                         what: "the cell winner buffer",
@@ -657,10 +649,12 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                             .iter()
                             .map(|(_, best, _)| best.clone())
                             .collect();
-                        let read = super::seam::READ_DETECT
-                            .measure(|| cubecl::reader::read_sync(self.client.read_async(handles)));
-                        super::drained(&self.client);
-                        read.map_err(|error| super::read_failed("the cell winner keys", &error))?
+                        super::read_blocking(
+                            &self.client,
+                            handles,
+                            "the cell winner keys",
+                            &super::seam::READ_DETECT,
+                        )?
                     }
                 };
                 if reads.len() != self.submitted.len() {
