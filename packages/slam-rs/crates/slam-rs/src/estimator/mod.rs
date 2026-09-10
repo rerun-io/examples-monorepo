@@ -1343,7 +1343,11 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             self.frames_after_kf += 1;
         }
 
-        let keyframe_ns: u64 = if took_keyframe { duration_ns(keyframe_started) } else { 0 };
+        let keyframe_ns: u64 = if took_keyframe {
+            duration_ns(keyframe_started)
+        } else {
+            0
+        };
 
         // `:555-563`: every landmark this frameset did not see, in any camera.
         let mut lost_landmarks: BTreeSet<LandmarkId> = BTreeSet::new();
