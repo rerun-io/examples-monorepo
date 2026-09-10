@@ -35,9 +35,11 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from slam_rs import _core
 from slam_rs.catalog_feed import (
     DEFAULT_WINDOW_S,
+    CatalogSegment,
     Frameset,
     LocalSegment,
     SegmentFeed,
+    SegmentSource,
     open_segment,
 )
 from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
@@ -80,6 +82,13 @@ class Config:
     """
     gt_rrd: Path | None = None
     """Ground-truth ``.rrd`` for ``--rrd``; the manifest's own path is used when neither is given."""
+    catalog: str | None = None
+    """Read ``--segment`` from this catalog server instead of the manifest's file paths, e.g. ``rerun+http://dgx-spark:9988``.
+
+    The ground truth comes from the same dataset's layer on the server, so a
+    machine with no NAS mount replays a reference segment from its id alone.
+    Exclusive with ``--rrd`` and ``--gt-rrd``, which name a second source.
+    """
     max_framesets: int | None = None
     """Stop after this many framesets; None replays the whole segment."""
     frame_stride: int = 1
@@ -198,12 +207,21 @@ def main(config: Config) -> None:
     """
     manifest: ReferenceManifest = load_manifest(artifact_root=config.artifact_root)
     segment: ReferenceSegment = manifest.by_id(config.segment)
-    source: LocalSegment = LocalSegment(
-        base_rrd=config.rrd if config.rrd is not None else segment.base_path,
-        gt_rrd=config.gt_rrd if config.gt_rrd is not None else (None if config.rrd is not None else segment.gt_path),
-    )
+    source: SegmentSource
+    origin: str
+    if config.catalog is not None:
+        if config.rrd is not None or config.gt_rrd is not None:
+            raise ValueError("--catalog and --rrd/--gt-rrd name two sources for one replay; pass one of them")
+        source = CatalogSegment(url=config.catalog, dataset_name=segment.dataset_name, segment_id=segment.segment_id)
+        origin = config.catalog
+    else:
+        source = LocalSegment(
+            base_rrd=config.rrd if config.rrd is not None else segment.base_path,
+            gt_rrd=config.gt_rrd if config.gt_rrd is not None else (None if config.rrd is not None else segment.gt_path),
+        )
+        origin = str(source.base_rrd)
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / segment.segment_id / "slam_rs.csv"
-    print(f"replaying {segment.segment_id} ({segment.tier} tier) from {source.base_rrd}")
+    print(f"replaying {segment.segment_id} ({segment.tier} tier) from {origin}")
 
     with open_segment(source, segment.imu, frame_stride=config.frame_stride, window_s=config.window_s) as feed:
         print(
