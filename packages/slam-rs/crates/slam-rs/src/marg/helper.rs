@@ -85,16 +85,9 @@ fn check_indices(
 /// rows `[marg_rank, total_rank)` against the kept columns (`:322-323`) — the
 /// part of the residual the marginalized variables can no longer explain.
 ///
-/// **The rank threshold is `sqrt(numeric_limits<Scalar>::epsilon())` on the raw
-/// `beta`** (`:284`, `:301`), not a relative test against the largest pivot.
-/// It is absolute, so it depends on the units the problem is scaled in — that
-/// is basalt's choice, and reproducing the C++'s decision on a column that
-/// lands on it is what makes two runs agree.
-///
-/// The Householder vector is written into the column and read back from it in
-/// C++ (`makeHouseholderInPlace`, then `Q2Jp.col(k).tail(...)` as the essential
-/// part, `:299-306`); the port keeps it in a scratch vector, which holds the
-/// same coefficients, and zeroes the column exactly where `:313` does.
+/// The rank policy uses the absolute threshold `sqrt(epsilon)` on `beta`.
+/// It therefore depends on the units of the scaled problem. A rejected
+/// column is zeroed without advancing the rank.
 pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
     mut q2jp: DMatrix<S>,
     mut q2r: DVector<S>,
@@ -140,14 +133,7 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
         let remaining_rows: usize = rows - base;
         let remaining_cols: usize = cols - k - 1;
 
-        // `:299`, `makeHouseholderInPlace` on `Q2Jp.col(k).tail(remainingRows)`.
-        //
-        // `Q2Jp` is `MatX`, i.e. column-major, so that segment is contiguous and
-        // its `squaredNorm()` takes Eigen's vectorised reduction — not the
-        // sequential fold a row-major landmark column takes. The difference
-        // reaches the `|beta| > sqrt(epsilon)` test three lines down: on the
-        // review's `9x2` problem the sequential fold accepts a column `f32`
-        // Eigen rejects and rejects one `f64` Eigen accepts.
+        // Reflect this column; the resulting diagonal determines its rank.
         let (h_coeff, beta) = make_householder(&q2jp, k, base, remaining_rows, &mut essential);
 
         if beta.abs() > rank_threshold {

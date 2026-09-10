@@ -939,13 +939,8 @@ impl<S: LieScalar> Camera<S> for PinholeRadtan8<S> {
     /// `pinhole_radtan8_camera.hpp:597-669`: five Newton steps on `distort`,
     /// stopping early when the residual falls under `epsilonSqrt`.
     ///
-    /// The 2x2 inverse inside the loop is written out because it has to round
-    /// like Eigen's, not like nalgebra's: Eigen takes **one** reciprocal of the
-    /// determinant and multiplies each cofactor by it
-    /// (`eigen/Eigen/src/LU/InverseImpl.h:66-83`, determinant at
-    /// `Determinant.h:40-44`), while `Matrix2::try_inverse` divides each
-    /// coefficient by the determinant. The two differ by a rounding step, which
-    /// is worth 4e-5 of bearing in `f32` on the msd-g2 cam2 calibration.
+    /// The 2x2 inverse uses one reciprocal of the determinant, shared by
+    /// the four cofactors.
     ///
     /// A singular Jacobian is not special-cased either. `1 / 0` is an infinity,
     /// the iterate becomes NaN, and the final `rp2 <= rpmax^2` comparison is
