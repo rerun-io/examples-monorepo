@@ -270,11 +270,14 @@ impl<S: LieScalar> EigenLdlt<S> {
                 }
             }
             // The trailing update (`TriangularSolverVector.h:104-113`): one
-            // `general_matrix_vector_product<ColMajor>` with `alpha = -1`, which
-            // accumulates each output coefficient from a fresh zero rather than
-            // rounding into `v` once per column, as a
-            // `for j { for i { v[i] -= v[j] * L(i, j) } }` loop would.
-            // `gemv` is that product.
+            // `general_matrix_vector_product<ColMajor>` with `alpha = -1` and
+            // `beta = 1`, and nalgebra's `gemv` is that product. It walks the
+            // columns (`blas_uninit.rs:157-173`): the first column's `axcpy`
+            // carries `beta`, so with `beta = 1` it accumulates into `v` like
+            // every later column's does. That is the association a
+            // `for j { for i { v[i] -= v[j] * L(i, j) } }` loop has — one
+            // rounding into `v` per column, in column order — which is what
+            // this call is here to keep.
             let r: usize = size - end_block;
             if r > 0 {
                 // The `rhs` is the panel just substituted and the `res` the

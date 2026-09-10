@@ -77,12 +77,17 @@
 //! `f32` and a landmark exactly 1/3 m away was **accepted** where C++ rejects it;
 //! without the third, one observation's cost was 4e-6 off in `f32`.
 //!
-//! S33 kept the first and the third and retired the second at the residual and
-//! landmark sites: they call `Vector3::norm`, whose fold happens to be Eigen's
-//! in `f64` and is one ulp away from it in `f32`. The finding is still real and
-//! still recorded — the fixture pins `eigen_redux3` itself bit for bit, and the
-//! reduction still runs in the keyframe-eviction baseline — it is simply no
-//! longer what the residual path is built on.
+//! S33 kept the third and retired the other two. The point action is
+//! kornia-algebra's now (item 3), so `So3 * Vector3` is glam's
+//! `p (w² - b·b) + b (2 (p·b)) + (b x p) 2w` and not Sophus's three terms; what
+//! the finding predicted is what the fixture still measures, one ulp in the DLT
+//! input pose's translation column and nothing else (see
+//! [`P2_TOLERANCE_F64`]). The residual and landmark sites call `Vector3::norm`
+//! (item 2), whose fold happens to be Eigen's in `f64` and is one ulp away from
+//! it in `f32` ([`NORM_TOLERANCE_F32`], [`PROJ_TOLERANCE_F32`]). Both findings
+//! are still real and still recorded — the fixture pins `eigen_redux3` itself
+//! bit for bit, and the reduction still runs in the keyframe-eviction baseline —
+//! they are simply no longer what these two paths are built on.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 // The literal below is a C++ `%.17g` printout of a float, carried over verbatim

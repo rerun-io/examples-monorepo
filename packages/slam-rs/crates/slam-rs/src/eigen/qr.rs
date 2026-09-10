@@ -741,7 +741,11 @@ mod tests {
 
     /// One case of [`contiguous_squared_norm`] against the bits Eigen produced
     /// for it, decoded from `column` and compared to `expected` — bit for bit
-    /// when `ulps` is zero, otherwise within that many `S` epsilons of it.
+    /// when `ulps` is zero, otherwise within that many ulps *of `expected`*,
+    /// which is `eps(S)` times the binade `expected` sits in and not `eps(S)`
+    /// times `expected` itself: at the `f32` case's 5.07 the two differ by
+    /// 1.27x, so the distance below is the literal number of representable
+    /// values between the two answers.
     fn assert_contiguous<S: LieScalar>(column: &[S], expected: S, ulps: f64) {
         let len: usize = column.len();
         // A wide matrix, so the reduced column is neither the first nor the
@@ -759,10 +763,12 @@ mod tests {
             );
             return;
         }
-        let bound: f64 = ulps * S::default_epsilon().to_f64() * expected.to_f64().abs();
+        let want: f64 = expected.to_f64();
+        let ulp: f64 = S::default_epsilon().to_f64() * want.abs().log2().floor().exp2();
+        let distance: f64 = (got.to_f64() - want).abs() / ulp;
         assert!(
-            (got.to_f64() - expected.to_f64()).abs() <= bound,
-            "len {len}: got {got:?}, Eigen {expected:?} (bound {bound})"
+            distance <= ulps,
+            "len {len}: got {got:?}, Eigen {expected:?} ({distance} ulps, allowed {ulps})"
         );
     }
 
@@ -845,7 +851,7 @@ mod tests {
                 f32::from_bits(0xbf05_df74),
             ],
             f32::from_bits(0x40a2_1e1a),
-            2.0,
+            1.0,
         );
     }
 
@@ -858,13 +864,13 @@ mod tests {
     /// anything, the way the optical-flow parity test treats its frame
     /// directory; the inline cases above cover the branches on every run.
     ///
-    /// The sweep asked for the bits until S33 and now asks for `2 (n - 1)`
-    /// epsilons on a column of `n` coefficients. That is not a slackened
-    /// constant: every summand here is a square, so the terms are all
-    /// non-negative and *any* summation order of `n` of them agrees with any
-    /// other to within `(n - 1)` epsilons relative. A failure at this bound is
-    /// therefore still a real disagreement about the sum and not about its
-    /// association.
+    /// The sweep asked for the bits until S33 and now asks for `2 (n - 1)` ulps
+    /// on a column of `n` coefficients. That is not a slackened constant: every
+    /// summand here is a square, so the terms are all non-negative and *any*
+    /// summation order of `n` of them agrees with any other to within
+    /// `(n - 1)` epsilons relative, and one epsilon relative is at most two
+    /// ulps at the answer. A failure at this bound is therefore still a real
+    /// disagreement about the sum and not about its association.
     #[test]
     fn the_contiguous_reduction_reproduces_eigen_over_the_whole_sweep() {
         let Ok(path) = std::env::var("SLAM_RS_MARG_NORM_SWEEP") else {
