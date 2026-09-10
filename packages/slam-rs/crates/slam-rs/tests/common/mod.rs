@@ -830,3 +830,6 @@ pub fn pyramid_of(image: &ImageU16, levels: usize) -> PyramidU16 {
         .expect("the geometry the pyramid was allocated for");
     pyramid
 }
+
+#[cfg(feature = "gpu-core")]
+pub mod gpu;

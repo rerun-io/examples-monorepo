@@ -1038,7 +1038,8 @@ image and sees the same zero rim, not that the answer changes.
 
 It is a separate test binary because `the_whole_gpu_path_holds_the_pool_flat`
 asserts an exactly flat CubeCL pool and every test in one binary shares one
-client.
+client. The pool test now runs alone in `gpu_pool` so parallel tests in
+`gpu_kernels` cannot keep allocations alive beyond its warm-up.
 
 Two CubeCL traps cost a debugging pass each. A **named** integer constant stays
 comptime inside `#[cube]`: seeding a `let mut` from one makes a const variable,
