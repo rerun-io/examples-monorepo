@@ -13,10 +13,12 @@ behind an observer is a deferred follow-up. The ``slow`` test below is what runs
 this one on the real rig.
 """
 
+import hashlib
 import json
 import math
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pytest
@@ -27,7 +29,7 @@ from numpy import ndarray
 from slam_rs.apis import robocap_fleet
 from slam_rs.apis.robocap_fleet import BUDGET_15FPS_MS, BUDGET_30FPS_MS, Config, RobocapRow, main, measure
 from slam_rs.machine import Machine, this_machine
-from slam_rs.reference import ReferenceManifest, RobocapSession
+from slam_rs.reference import ReferenceManifest, RobocapSession, profiled_config_text
 from slam_rs.tracking import SegmentRun
 from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, empty_trajectory, shift_clock
 
@@ -96,9 +98,7 @@ def test_the_session_is_named_the_way_a_fleet_row_names_it(manifest: ReferenceMa
     assert [session.fleet_id for session in manifest.robocap.sessions] == ["robocap-s15", "robocap-s21"]
 
 
-def test_both_outputs_survive_a_directory_that_is_not_there_yet(
-    manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_both_outputs_survive_a_directory_that_is_not_there_yet(manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A run that measured 52.9 s of video must not lose it to a missing ``out/``."""
     monkeypatch.setattr(robocap_fleet, "measure", lambda *_args: (ROW, empty_trajectory()))
     output: Path = tmp_path / "out" / "robocap_fleet.json"
@@ -272,3 +272,19 @@ def test_the_only_session_with_a_measured_cpp_wall_is_the_one_that_has_one(manif
     assert manifest.robocap.session("s00000015").expected_cpp_wall_s == 88.91
     assert manifest.robocap.session("s00000021").expected_cpp_wall_s is None
 
+
+@pytest.mark.parametrize("profile", ["reference", "fast"])
+def test_result_carries_the_profile_and_resolved_config(
+    profile: Literal["reference", "fast"],
+    manifest: ReferenceManifest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The exported session identifies the config used under either profile."""
+    monkeypatch.setattr(robocap_fleet, "measure", lambda *_args: (ROW, empty_trajectory()))
+    output: Path = tmp_path / "robocap.json"
+    main(Config(profile=profile, output_json=output))
+    written: dict = json.loads(output.read_text())
+    resolved: str = profiled_config_text(manifest.package_root / manifest.robocap.vio_config, profile, manifest.package_root / "configs/profiles")
+    assert written["profile"] == profile
+    assert written["config_sha256"] == hashlib.sha256(resolved.encode("utf-8")).hexdigest()

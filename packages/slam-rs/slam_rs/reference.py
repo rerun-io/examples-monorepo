@@ -15,6 +15,7 @@ it is decided from measurement: S15 measured the band and D60 is what this table
 now says.
 """
 
+import hashlib
 import json
 import tomllib
 from dataclasses import dataclass, replace
@@ -65,6 +66,7 @@ GT_SOURCE_BY_NAME: dict[str, GroundTruthSource] = {"lighthouse": "lighthouse", "
 """Ground-truth measurement systems the two MSD devices use."""
 GATE_POLICY_BY_NAME: dict[str, GatePolicy] = {"tight": "tight", "standard": "standard", "no_divergence": "no_divergence"}
 """Valid gate policies, in decreasing strictness."""
+
 
 def _one_of[LiteralName: str](value: object, allowed: dict[str, LiteralName], what: str, where: str) -> LiteralName:
     """Narrow one manifest string into its literal alphabet, or say what the alphabet is.
@@ -654,6 +656,18 @@ reproduces basalt's behaviour for every path that does not. Listing them here
 keeps :func:`profiled_config_text`'s typo check: a key that is neither in the
 base document nor in this set is still a ``KeyError``.
 """
+
+
+def config_text_sha256(text: str) -> str:
+    """Identify the resolved configuration without changing its serialization.
+
+    Args:
+        text: The exact text returned by :func:`profiled_config_text`.
+
+    Returns:
+        The hexadecimal SHA-256 of the text encoded as UTF-8.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def profiled_config_text(path: Path, profile: str = "reference", profiles: Path = MANIFEST_PATH.parent / "configs/profiles") -> str:

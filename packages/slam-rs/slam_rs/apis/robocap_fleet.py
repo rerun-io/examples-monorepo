@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Literal
 
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb, this_temperature_c
-from slam_rs.reference import ReferenceManifest, RobocapSession, load_manifest
+from slam_rs.reference import ReferenceManifest, RobocapSession, config_text_sha256, load_manifest, profiled_config_text
 from slam_rs.tracking import SegmentRun, robocap_cpp_trajectory, run_robocap
 from slam_rs.trajectory import AteResult, Trajectory, ate, nonfinite_position_text, read_trajectory, write_trajectory
 
@@ -232,6 +232,8 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
 def main(config: Config) -> None:
     """Replay the session, print its row, and write the trajectory and the JSON.
 
+    The result carries the profile and the resolved configuration SHA-256 once.
+
     Args:
         config: Parsed CLI options.
 
@@ -245,6 +247,10 @@ def main(config: Config) -> None:
     machine: Machine = this_machine()
     print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores")
     print(f"{session.segment_id}: {session.base_path.name} against {session.slam_path.name} ({session.basalt_num_poses} C++ poses)")
+    config_digest: str = config_text_sha256(
+        profiled_config_text(manifest.package_root / manifest.robocap.vio_config, config.profile, manifest.package_root / "configs/profiles")
+    )
+    print(f"profile={config.profile} config_sha256={config_digest}")
     started: float = time.monotonic()
     row: RobocapRow
     estimate: Trajectory
@@ -255,7 +261,7 @@ def main(config: Config) -> None:
     # which is why the CSV used to work by accident when the two shared one.
     config.output_json.parent.mkdir(parents=True, exist_ok=True)
     write_trajectory(output_csv, estimate)
-    config.output_json.write_text(json.dumps(asdict(row), indent=2) + "\n")
+    config.output_json.write_text(json.dumps({"profile": config.profile, "config_sha256": config_digest, **asdict(row)}, indent=2) + "\n")
     print(row.row())
     print(
         f"{row.tracked} tracked poses -> {output_csv}; {row.cpp_rmse_cm:.2f} cm rmse / {row.cpp_max_cm:.2f} max / "

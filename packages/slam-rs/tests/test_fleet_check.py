@@ -5,11 +5,12 @@ and — on the pack target — no pixi, so what is under test here is the part t
 needs none of that: the verdict a clip's numbers earn, and how the row reads.
 """
 
+import hashlib
 import json
 import math
 from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import numpy as np
 import pytest
@@ -347,7 +348,7 @@ def test_the_first_clips_evidence_survives_a_directory_that_is_not_there_yet(mon
     output: Path = tmp_path / "out" / "fleet_check.json"
     main(Config(segments=(SMOKE_SEGMENTS[1],), output_json=output))
     written: dict = json.loads(output.read_text())
-    assert list(written) == ["machine", "lane", "clips"]
+    assert list(written) == ["machine", "lane", "profile", "config_sha256", "clips"]
     assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)
 
 
@@ -380,9 +381,7 @@ def test_wgpu_build_reports_its_backend_as_the_lane(monkeypatch: pytest.MonkeyPa
     assert this_lane(gpu=True) == "wgpu"
 
 
-def test_a_gpu_run_on_a_core_without_a_gpu_feature_is_refused_before_any_file_is_read(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_a_gpu_run_on_a_core_without_a_gpu_feature_is_refused_before_any_file_is_read(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A CPU-only core has no GPU lane to name, and the refusal is worth nothing after a replay.
 
     :class:`slam_rs._core.Vio` refuses ``gpu=True`` on such a core anyway; asking
@@ -434,3 +433,31 @@ def test_the_gpu_flag_reaches_the_estimator_and_nothing_else_does(monkeypatch: p
     measure(manifest, segment, True)
     measure(manifest, segment)
     assert seen == [True, False]
+
+
+@pytest.mark.parametrize("profile", ["reference", "fast"])
+def test_run_provenance_is_outside_clip_columns(
+    profile: Literal["reference", "fast"],
+    manifest: ReferenceManifest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Both profiles identify the result and each dataset's resolved config."""
+    monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment, _gpu, *, profile: PASSING)
+    output: Path = tmp_path / "fleet.json"
+    main(Config(segments=SMOKE_SEGMENTS, profile=profile, output_json=output))
+    written: dict = json.loads(output.read_text())
+    expected: dict[str, str] = {
+        manifest.by_id(segment).dataset_name: hashlib.sha256(
+            manifest.vio_config_text(manifest.by_id(segment).dataset_name, profile).encode("utf-8")
+        ).hexdigest()
+        for segment in SMOKE_SEGMENTS
+    }
+    assert written["profile"] == profile
+    assert written["config_sha256"] == expected
+    assert all(list(clip) == list(CLIP_JSON_KEYS) for clip in written["clips"])
+    printed: str = capsys.readouterr().out
+    assert f"profile={profile}" in printed
+    for digest in expected.values():
+        assert printed.count(digest) == 1

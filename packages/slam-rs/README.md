@@ -333,8 +333,6 @@ Not in this branch, in the order they are likely to matter:
   (0.98 cm against a 0.85 cm band); the 53 s `MGO07` passes by 0.08 cm.
 - **A second core.** One core was the rule for this branch. The between-keyframes
   solve and the frontend's host work are independent enough to overlap.
-- **Run provenance.** Every tool's output should carry the profile name and the
-  overlay's digest, so an archived number says which profile produced it.
 - **The Python seam.** 0.14 ms a frameset between the feed and `Vio.track`,
   fixed across clips: a tenth of a fast `MIO10` call.
 - **More datasets.** Camera-only datasets (Assembly101, HO-Cap, the WildCap sets)

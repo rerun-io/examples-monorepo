@@ -29,6 +29,7 @@ from slam_rs.reference import (
     GatePolicy,
     ReferenceManifest,
     ReferenceSegment,
+    config_text_sha256,
     d60_failures,
     load_manifest,
 )
@@ -174,7 +175,9 @@ def check_scoring_inputs(manifest: ReferenceManifest, segment: ReferenceSegment)
     return reference.path, segment.gt_csv
 
 
-def measure(manifest: ReferenceManifest, segment: ReferenceSegment, gpu: bool = False, profile: Literal["reference", "fast"] = "reference") -> ClipResult:
+def measure(
+    manifest: ReferenceManifest, segment: ReferenceSegment, gpu: bool = False, profile: Literal["reference", "fast"] = "reference"
+) -> ClipResult:
     """Run one clip through the estimator and score it against both references.
 
     Args:
@@ -349,7 +352,8 @@ def main(config: Config) -> None:
 
     The JSON is rewritten after every clip rather than at the end: on a 2 GB
     device the second clip is what the kernel may refuse, and the first clip's
-    evidence has to survive it.
+    evidence has to survive it. Profile identity is run-level metadata, with
+    one resolved configuration SHA-256 per measured dataset in JSON and stdout.
 
     Args:
         config: Parsed CLI options.
@@ -379,15 +383,21 @@ def main(config: Config) -> None:
     for segment in segments:
         check_scoring_inputs(manifest, segment)
     machine: Machine = this_machine()
-    print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores, {lane} lane")
+    print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores, {lane} lane, profile={config.profile}")
     config.output_json.parent.mkdir(parents=True, exist_ok=True)
+    config_digests: dict[str, str] = {}
     results: list[ClipResult] = []
     for segment in segments:
+        if segment.dataset_name not in config_digests:
+            config_digests[segment.dataset_name] = config_text_sha256(manifest.vio_config_text(segment.dataset_name, config.profile))
+            print(f"CONFIG dataset={segment.dataset_name} config_sha256={config_digests[segment.dataset_name]}")
         results.append(measure(manifest, segment, config.gpu, profile=config.profile))
         print(results[-1].row(machine))
         payload: dict[str, object] = {
             "machine": asdict(machine),
             "lane": lane,
+            "profile": config.profile,
+            "config_sha256": config_digests,
             "clips": [clip_json(clip) for clip in results],
         }
         config.output_json.write_text(json.dumps(payload, indent=2))
