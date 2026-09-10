@@ -17,7 +17,11 @@
 //! | `blas` | `GeneralMatrixVector.h`, and the three-coefficient reductions | the LDLT solves and the prior's cost |
 //! | `qr` | `Householder.h`, `Jacobi.h`'s `makeGivens`, `Redux.h` | the landmark blocks' QR and the marginalization's flat QR |
 //! | `ldlt` | `LDLT.h`, `TriangularSolverVector.h` | the LM step's solve |
-//! | `svd` | `JacobiSVD.h`, `RealSvd2x2.h`, `Jacobi.h`'s `makeJacobi` | the DLT triangulation |
+//!
+//! The 4x4 `JacobiSVD` port left in S33: `crate::ba_base::triangulate` calls
+//! [`nalgebra::linalg::SVD`] and promotes the solve to `f64`, so the DLT null
+//! vector is now more accurate than the C++'s rather than identical to it. The
+//! Givens half of `Eigen::JacobiRotation` moved to [`qr`] with its callers.
 //!
 //! Two members of the family live elsewhere on purpose: `LieScalar::eigen_maxi`
 //! and `LieScalar::eigen_redux3` are per-scalar constants and reductions, so
@@ -27,6 +31,5 @@
 pub(crate) mod blas;
 pub(crate) mod ldlt;
 pub(crate) mod qr;
-pub(crate) mod svd;
 
 pub use blas::norm3;

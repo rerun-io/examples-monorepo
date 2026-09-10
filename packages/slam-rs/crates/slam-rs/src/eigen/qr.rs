@@ -54,7 +54,6 @@
 use nalgebra::{DMatrix, DVector};
 
 use super::blas::redux_contiguous;
-use super::svd::JacobiRotation;
 use crate::lie::LieScalar;
 
 /// The sub-block a reflection acts on, `storage.block(row_start, col_start,
@@ -383,6 +382,23 @@ pub(crate) fn apply_householder_on_the_left_vec<S: LieScalar>(
     for (i, e) in essential.iter().enumerate().take(len - 1) {
         v[start + 1 + i] -= (tau * *e) * tmp;
     }
+}
+
+/// A Jacobi rotation `(c, s)`, `Eigen::JacobiRotation`
+/// (`Eigen/src/Jacobi/Jacobi.h:30-84`), real scalars only.
+///
+/// Only the Givens half of Eigen's type survives: [`make_givens`] builds one and
+/// [`apply_rotation_on_the_left`] applies it, which is the rotation basalt's
+/// landmark QR uses (`landmark_block_abs_dynamic.hpp:429-439`). The
+/// `makeJacobi`/`transpose`/`operator*` half left with the hand-rolled 4x4
+/// `JacobiSVD`, now that `crate::ba_base::triangulate` calls
+/// [`nalgebra::linalg::SVD`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct JacobiRotation<S: LieScalar> {
+    /// The cosine.
+    pub(crate) c: S,
+    /// The sine.
+    pub(crate) s: S,
 }
 
 /// `JacobiRotation::makeGivens(p, q)`, the real specialization

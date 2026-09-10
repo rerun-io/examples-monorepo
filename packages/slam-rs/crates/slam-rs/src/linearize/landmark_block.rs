@@ -12,10 +12,9 @@ use nalgebra::{DMatrix, DVector, Matrix2x3, Matrix2x6, Matrix3, Vector2, Vector3
 use crate::ba_base::{LinearizePointOut, linearize_point};
 use crate::camera::CameraEnum;
 use crate::eigen::qr::{
-    ColumnRedux, apply_householder_on_the_left, apply_rotation_on_the_left, make_givens,
-    make_householder,
+    ColumnRedux, JacobiRotation, apply_householder_on_the_left, apply_rotation_on_the_left,
+    make_givens, make_householder,
 };
-use crate::eigen::svd::JacobiRotation;
 use crate::landmark::Landmark;
 use crate::lie::{LieScalar, c};
 use crate::linearize::{LinearizeError, RelPoseLin};

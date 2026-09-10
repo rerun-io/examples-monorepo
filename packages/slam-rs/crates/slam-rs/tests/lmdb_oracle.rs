@@ -47,13 +47,25 @@
 //! Tolerances. The `f64` pass asks for `1e-12` relative, and the `f32` pass for
 //! **exact equality** on the stereographic chart and on `linearize_point`, where
 //! the port and the C++ evaluate the same expressions in the same order.
-//! `triangulate` is the exception in both precisions: it runs a whole Jacobi SVD
-//! sweep, and the port's is a step-for-step reimplementation of Eigen's rather
-//! than Eigen itself, so one rotation applied in a different grouping moves the
-//! null vector by an ulp. It is bit-equal on nine of the ten cases in `f64` and
-//! within `1e-15` on the tenth, and within `1e-7` in `f32`. What must not move is
-//! basalt's `accepted` decision, and that is asserted exactly, on four cases
-//! placed on the gate on purpose.
+//! `triangulate` is the exception in both precisions, and since S33 item 1 it is
+//! a wider one: the DLT null space now comes from `nalgebra::linalg::SVD`'s
+//! implicit-shift decomposition, computed in `f64` whatever `S` is, rather than
+//! from a port of Eigen's Jacobi sweep. Two different decompositions of the same
+//! matrix agree on the null *space* and not on its last bits, so the vectors
+//! part company a few ulps in — measured worst over these 84 cases, `1.6e-14`
+//! relative in `f64` and `2.5e-6` in `f32`, the `f32` figure being the C++'s own
+//! single-precision sweep error rather than the port's, which no longer has one.
+//!
+//! **What that costs, and what it does not.** basalt's `accepted` decision is
+//! still asserted exactly wherever the C++'s own `inv_dist` sits further from a
+//! gate than that disagreement. It cannot be asserted on a case that sits
+//! *inside* it, and the whole `triangulate_boundary` sweep does by construction:
+//! 32 points placed within an ulp of `inv_dist = 3`, half of them chosen because
+//! a summation order alone flips them. That sweep still pins the vector, the
+//! straddle and the `order_decides` count; it can no longer pin which side of
+//! the gate an ulp-wide case lands on, and nothing can, because the two
+//! decompositions are each accurate to better than that margin. The accuracy
+//! reference for those landmarks is the ten-clip ATE gate.
 //!
 //! Three ulp-level findings came out of this fixture and changed the port:
 //! `So3 * Vector3` now sums Sophus's three terms in Sophus's order (`lie.rs`);
@@ -91,13 +103,17 @@ const ORACLE: &str = include_str!("fixtures/lmdb/lmdb_oracle.json");
 /// Agreement with the C++ number, per coefficient, relative to `max(|want|, 1)`.
 const TOLERANCE: f64 = 1e-12;
 
-/// The same for the DLT, whose Jacobi sweep is a reimplementation rather than a
-/// call into Eigen; see the module docs. Nine of the ten cases are bit-equal;
-/// the `rotated` one differs by one ulp in the first coefficient.
-const TRIANGULATE_TOLERANCE_F64: f64 = 1e-15;
+/// The same for the DLT, whose null vector comes from a different decomposition
+/// than the C++'s (S33 item 1); see the module docs. Measured worst over the ten
+/// named cases and the 32 boundary cases: `1.6e-14` (`tiny_baseline`, whose
+/// sub-millimetre baseline is the worst-conditioned `A` in the fixture).
+const TRIANGULATE_TOLERANCE_F64: f64 = 5e-14;
 
-/// And in `f32`, where the sweep accumulates its rotations in single precision.
-const TRIANGULATE_TOLERANCE_F32: f64 = 1e-7;
+/// And in `f32`, where the *C++* accumulated its Jacobi rotations in single
+/// precision and the port now solves the 4x4 in `f64` and rounds once. Measured
+/// worst: `2.5e-6` (`far`), which is 20 `f32` ulps of the C++'s answer, not of
+/// the port's.
+const TRIANGULATE_TOLERANCE_F32: f64 = 1e-5;
 
 #[derive(Debug, Deserialize)]
 struct Oracle {
@@ -579,12 +595,26 @@ fn check_triangulate<S: LieScalar>(entries: &[&OracleTriangulate], tolerance: f6
             tolerance,
         );
 
-        // basalt's acceptance gate (`sqrt_keypoint_vio.cpp:534`). This is the
-        // decision the port must reproduce exactly, whatever the last ulps do.
+        // basalt's acceptance gate (`sqrt_keypoint_vio.cpp:534`). Reproduced
+        // exactly wherever the C++'s own `inv_dist` stands further from a gate
+        // than the two decompositions disagree; on a case that sits inside that
+        // band the gate is decided by bits neither implementation owns, and the
+        // assertion above — that the vectors agree to `tolerance` — is the whole
+        // of what can be checked. See the module docs.
         let accepted: bool = got.iter().all(|v| v.to_f64().is_finite())
             && got[3] > S::zero()
             && got[3] < S::from_literal(3.0);
-        assert_eq!(accepted, entry.accepted, "{label}: acceptance");
+        let decidable: bool = match entry.result[3] {
+            Some(inv_dist) => {
+                let band: f64 = tolerance * inv_dist.abs().max(1.0);
+                (inv_dist - 3.0).abs() > band && inv_dist.abs() > band
+            }
+            // A non-finite `inv_dist` is on no gate at all.
+            None => true,
+        };
+        if decidable {
+            assert_eq!(accepted, entry.accepted, "{label}: acceptance");
+        }
     }
 }
 
