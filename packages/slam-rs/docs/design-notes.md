@@ -1116,7 +1116,7 @@ milliseconds buy a joint solve the frame did not need.
 every basalt file and `VioConfig::default` leave it — `measure` runs the joint
 solve on every frameset, which is basalt's schedule byte for byte. Above zero, a
 frameset that did **not** take a keyframe runs a *frame update* instead, capped at
-that many LM steps. `configs/profiles/fast.json` sets `2`; nothing else does. One
+that many LM steps. `configs/profiles/fast.json` sets `5`; nothing else does. One
 knob rather than a `bool` plus a count: the two cannot then be set against each
 other, and a zero cap can only mean "off". The key is `port.` for D75's reason —
 basalt has no field for it and the vendored `configs/*.json` stay the documents
@@ -1174,4 +1174,44 @@ build per joint solve: the non-keyframe `measure` should be the 0.097 ms
 marginalization plus ~0.05 ms, against 1.519 ms today, for a median gain near
 1.3 ms and an amortized `measure` near 0.3 ms. The accuracy band is 1.654 cm on
 MIO10 against 1.447 today — 14% of headroom.
+
+**Measured, MIO10, three A/B rounds against the accepted stack.** Median
+**2.945 -> 1.311 ms**, `measure` **1.520 -> 0.183**, ATE vs GT **1.447 -> 1.551 cm**
+against 1.654 allowed, zero lost framesets, and the three candidate rounds
+identical to each other in both the trajectory and the state digest. The
+projection was 1.3 ms of median and it is 1.63; the frame update itself is 0.054
+of `optimize`'s 0.061 ms, an order below the 0.30 ms the plan priced it at.
+
+**`config.vio_max_iterations` goes back to basalt's 7, and that is part of this
+lever.** D74 cut it to 4 because every frameset paid for the window solve. At one
+frameset in 7.65 the trade is a different one: eight steps on 13% of framesets
+cost about 0.1 ms of mean and nothing on the median, and they are worth
+**0.146 cm** of MIO10 ATE — 1.697 cm at the old cap against 1.551 at basalt's.
+Nothing else recovered that: five frame-update steps score the same as two
+(1.697 against 1.698), so the gap was never the frame update's own convergence.
+
+**What the accuracy costs, and the one structural fix that did not pay.** MGO09,
+four cameras, 107 framesets: median **8.654 -> 2.000 ms** but ATE
+**0.757 -> 0.960 cm** against 0.8466 allowed — **out of band, and the open item
+this lever leaves behind**. The mechanism I could name is that `marginalize`
+freezes `last_state_to_marg` — the state one frameset behind the newest — at the
+end of the same `measure`, so with the joint solve at keyframes only a state
+enters the FEJ prior having had exactly one frame update. Freeing that state too,
+a 30-unknown two-state solve over `k−1` and `k` (cuVSLAM's own
+`soft_inertial_pnp.cpp` shape; the prior orders neither, so it still contributes
+no gradient), was built and measured: **MGO09 0.960 -> 0.927 cm and MIO10 1.551 ->
+1.549**, for **0.158 ms** of MIO10 median (1.311 -> 1.469, which is the difference
+between meeting the plan's 1.439 ms MIO10 target and missing it). 16% of the MGO09
+gap for 12% of the frame: rejected, and recorded here so it is not rebuilt. What
+is left of the gap is the landmarks and the seven keyframe poses standing still
+between keyframes, which is the lever itself and not a detail of it.
+
+**Two other things measured and not kept.** `config.vio_max_states` is not
+independently tunable: at 5 the window's own invariants break and marginalization
+fails with "landmark block host frame ... is not in the absolute ordering" — the
+overshoot argument in `estimator/schedule.rs` assumes a state leaves after three
+framesets while keyframes are six apart. And the A/B harness builds into a
+`CARGO_TARGET_DIR` shared by every worker on the host, so a concurrent build gets
+copied out as yours; one MGO09 measurement here was a different branch's binary
+before the cores were pre-placed from a private target directory.
 - **D76** — The fast profile runs the joint solve at keyframes and a 15-dof fixed-landmark update on the framesets between (2026-09-10)

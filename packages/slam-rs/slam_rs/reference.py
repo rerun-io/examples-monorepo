@@ -643,7 +643,7 @@ def d60_failures(
     return failures
 
 
-PORT_CONFIG_KEYS: frozenset[str] = frozenset({"port.redetect_survivor_ratio"})
+PORT_CONFIG_KEYS: frozenset[str] = frozenset({"port.redetect_survivor_ratio", "port.frame_update_max_iterations"})
 """Overlay keys the port adds to basalt's document, which no vendored config carries.
 
 ``configs/*.json`` are the files the C++ reference runs read, key for key

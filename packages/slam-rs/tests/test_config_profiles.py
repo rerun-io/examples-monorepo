@@ -15,21 +15,23 @@ def test_reference_profile_preserves_vendored_text() -> None:
         assert manifest.vio_config_text(dataset.name) == (manifest.package_root / dataset.vio_config).read_text()
 
 
-def test_fast_profile_changes_only_the_lm_cap_and_the_redetect_gate() -> None:
-    """The two keys the fast profile owns, and nothing else moves.
+def test_fast_profile_changes_only_the_lm_cap_and_the_two_port_gates() -> None:
+    """The three keys the fast profile owns, and nothing else moves.
 
-    ``port.redetect_survivor_ratio`` is not one of basalt's: it is the port's own
-    redetect-on-demand gate (D75), so it is absent from every vendored file and
-    the overlay is the only thing that ever sets it.
+    Neither ``port.`` key is one of basalt's: they are the port's own
+    redetect-on-demand gate (D75) and its keyframe-gated joint solve (D76), so
+    both are absent from every vendored file and the overlay is the only thing
+    that ever sets them.
     """
     manifest: ReferenceManifest = load_manifest()
     for dataset in manifest.datasets:
         reference: dict = json.loads((manifest.package_root / dataset.vio_config).read_text())
         fast: dict = json.loads(manifest.vio_config_text(dataset.name, profile="fast"))
-        assert fast["value0"].pop("config.vio_max_iterations") == 4
+        assert fast["value0"].pop("config.vio_max_iterations") == 7
         assert reference["value0"].pop("config.vio_max_iterations") == 7
         assert fast["value0"].pop("port.redetect_survivor_ratio") == 0.7
-        assert "port.redetect_survivor_ratio" not in reference["value0"]
+        assert fast["value0"].pop("port.frame_update_max_iterations") == 5
+        assert not (set(reference["value0"]) & PORT_CONFIG_KEYS)
         assert fast == reference
 
 
