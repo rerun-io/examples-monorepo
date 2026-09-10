@@ -1411,6 +1411,21 @@ half (D77), and the mixed-geometry and `num_points_cell != 1` fallbacks still
 take the band walk. Trajectories are byte- and state-identical to D77's on both
 clips.
 
+**A relay hands bytes to the stage that launched them, or to nobody.** Every
+staging carries a `RelayTag` — an owner from a process-wide counter, plus that
+owner's frameset number — and the download hands the tail back under the same
+tag, so `take_cells` decodes a delivery only when it answers its own launches.
+Two scanners staging on one relay therefore cost the loser a read, where an
+untagged single slot would have let it decode the other's buffers in its own
+camera order: wrong keypoints, and nothing in the values to say so. `gpu_backends`
+gives each frontend its own relay, which is the wiring but not a lifetime the
+type can state; the tag is three integer comparisons a frameset and makes the
+crossing impossible instead of merely unused. The generation is what refuses a
+delivery left from an earlier frameset of the same scanner, which is the state a
+refused frameset leaves behind. `two_scanners_on_one_relay_each_take_their_own_keys`
+(`tests/gpu_detect.rs`) is the regression: two scanners, one relay, one collect,
+each checked against an independent scan of its own frames.
+
 ### The two orders that were tried and lost
 
 Both measured in the in-process rig (`tests/gpu_seam_bench.rs`, now with

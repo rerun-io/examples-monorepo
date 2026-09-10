@@ -757,6 +757,101 @@ fn the_tracker_download_carries_the_scanner_keys() {
     }
 }
 
+/// Two scanners on one relay each get their own keys.
+///
+/// The relay holds one staging and one delivery, so a second scanner staging
+/// over the first, and the tracker then carrying only the second's buffers, is
+/// the sequence where an untagged delivery would be decoded by the first
+/// scanner in its own camera order: wrong keypoints, silently. The shipped
+/// wiring gives each frontend its own relay ([`slam_rs::gpu::gpu_backends`]),
+/// which the type cannot state, so the tag is what makes the crossing
+/// impossible — the loser pays for a read, which is all it pays.
+///
+/// Different frames in the two scanners, and per camera, so any crossing at all
+/// shows up against the independent scans.
+#[test]
+fn two_scanners_on_one_relay_each_take_their_own_keys() {
+    let config: DetectorConfig = detector_config(472.0);
+    let first: [ImageU16; 2] = [mio10_frame(0, 0), mio10_frame(1, 1)];
+    let second: [ImageU16; 2] = [mio10_frame(2, 1), mio10_frame(2, 0)];
+    let grid: CellGrid = CellGrid::new(first[0].width(), first[0].height(), 50).unwrap();
+    let selects: Vec<Option<CellSelect>> = first
+        .iter()
+        .map(|image| slam_rs::frontend::detect::cell_select(image, &grid, &config))
+        .collect();
+    assert!(
+        selects.iter().all(Option::is_some),
+        "the rig is device shaped"
+    );
+
+    // What each set of frames answers on a scanner that shares nothing.
+    let mut want: Vec<Vec<Vec<u32>>> = Vec::new();
+    for images in [&first, &second] {
+        let mut alone: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+        alone.submit_cells(images, &selects).unwrap();
+        alone.take_cells().unwrap();
+        let mut keys_per_camera: Vec<Vec<u32>> = Vec::new();
+        for (camera, image) in images.iter().enumerate() {
+            let mut keys: Vec<u32> = Vec::new();
+            alone
+                .select_cells(camera, image, &selects[camera].unwrap(), &mut keys)
+                .unwrap();
+            assert!(!keys.is_empty(), "camera {camera} took the device path");
+            keys_per_camera.push(keys);
+        }
+        want.push(keys_per_camera);
+    }
+    for (camera, (one, two)) in want[0].iter().zip(&want[1]).enumerate() {
+        assert_ne!(
+            one, two,
+            "camera {camera} holds the same frame in both scanners"
+        );
+    }
+
+    // Both scanners and the tracker on one relay, which only this test does.
+    let relay: ReadRelay = ReadRelay::default();
+    let mut one: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+    let mut two: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+    let mut tracker: GpuPatchTracker<Pattern51, _> =
+        GpuPatchTracker::new(gpu_client().unwrap(), 512, 4, 5, 4.0, 2).unwrap();
+    one.share_reads(relay.clone());
+    two.share_reads(relay.clone());
+    tracker.share_reads(relay.clone());
+
+    one.submit_cells(&first, &selects).unwrap();
+    two.submit_cells(&second, &selects).unwrap();
+    assert_eq!(relay.waiting(), 2, "the second staging replaced the first");
+    tracker.collect(&mut []).unwrap();
+    assert_eq!(relay.carried(), 2, "the collect carried the second's keys");
+
+    // The scanner whose staging was replaced asks first, and must refuse a
+    // delivery that answers the other's launches: its own keys, out of a read
+    // it makes here, and the other's delivery left where it was.
+    one.take_cells().unwrap();
+    for (camera, image) in first.iter().enumerate() {
+        let mut keys: Vec<u32> = Vec::new();
+        one.select_cells(camera, image, &selects[camera].unwrap(), &mut keys)
+            .unwrap();
+        assert_eq!(
+            keys, want[0][camera],
+            "camera {camera} of the scanner whose staging was replaced"
+        );
+    }
+    assert_eq!(relay.carried(), 2, "the other scanner's delivery is intact");
+
+    two.take_cells().unwrap();
+    for (camera, image) in second.iter().enumerate() {
+        let mut keys: Vec<u32> = Vec::new();
+        two.select_cells(camera, image, &selects[camera].unwrap(), &mut keys)
+            .unwrap();
+        assert_eq!(
+            keys, want[1][camera],
+            "camera {camera} of the scanner the download carried"
+        );
+    }
+    assert_eq!(relay.carried(), 0, "which its own scanner then took");
+}
+
 /// A prepared selection is spent by the call that reads it, and a camera the
 /// batch skipped still answers for itself.
 ///

@@ -116,6 +116,11 @@ pub struct GpuCornerScan<R: Runtime> {
     /// the tracker's temporal read, on the lane [`super::gpu_backends`] builds
     /// (D78). Unshared by default, which makes `take_cells` read for itself.
     reads: super::ReadRelay,
+    /// This scanner's identity on [`GpuCornerScan::reads`] and the frameset it
+    /// last staged: `submit_cells` stages under it and `take_cells` takes only
+    /// a delivery that carries it, so a relay another scanner also stages on
+    /// costs a read rather than handing over that scanner's keys.
+    tag: super::RelayTag,
     /// Times the three device buffers have been allocated, which a rig of one
     /// geometry keeps at one.
     buffer_allocations: usize,
@@ -173,6 +178,7 @@ impl<R: Runtime> GpuCornerScan<R> {
                     prepared_keys: Vec::new(),
                     submitted: Vec::new(),
                     reads: super::ReadRelay::default(),
+                    tag: super::RelayTag::new(),
                     buffer_allocations: 0,
                     kept: None,
                     mask: None,
@@ -611,7 +617,9 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                         self.submitted.push((camera, best, cells));
                     }
                 }
+                self.tag = self.tag.next();
                 self.reads.stage(
+                    self.tag,
                     self.submitted
                         .iter()
                         .map(|(_, best, _)| best.clone())
@@ -634,9 +642,11 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                 what: "corner cell selection",
             },
             || {
-                // `take_delivered` also drops anything still staged, so the read
-                // below cannot be made twice over the same handles.
-                let reads: Vec<cubecl::bytes::Bytes> = match self.reads.take_delivered() {
+                // `take_delivered` also drops this scanner's own staging, so
+                // the read below cannot be made twice over the same handles;
+                // and a delivery tagged for another scanner or an earlier
+                // frameset of this one leaves it, so this reads for itself.
+                let reads: Vec<cubecl::bytes::Bytes> = match self.reads.take_delivered(self.tag) {
                     Some(bytes) => bytes,
                     None => {
                         #[cfg(test)]

@@ -397,6 +397,12 @@ pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
 /// pixels. A stage that finds nothing here downloads for itself, which is what
 /// the first frameset of a run — no temporal pass, so no `collect` — does.
 ///
+/// Every staging carries its stager's [`RelayTag`], and a delivery carries the
+/// tag of the staging it answers, so a stage takes its **own** bytes or none:
+/// two scanners sharing one relay each get their own keys, at the price of the
+/// read the loser was avoiding. Nothing here relies on `gpu_backends`'s one
+/// relay per frontend, which is a lifetime the type cannot state.
+///
 /// A `Mutex` for the reason [`Level0Table`] is one: [`crate::frontend::detect::CornerScan`]
 /// is `Send + Sync`, and this is taken twice a frameset by two stages on the
 /// frontend's own thread, never contended. A poisoned lock is not an error
@@ -406,39 +412,91 @@ pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
 #[derive(Debug, Clone, Default)]
 pub struct ReadRelay(std::sync::Arc<std::sync::Mutex<RelayInner>>);
 
-/// [`ReadRelay`]'s contents: at most one frameset's worth, in one direction.
+/// Which stage staged a set of buffers, and for which frameset.
+///
+/// The relay holds one staging and one delivery, so without this a second
+/// producer's delivery is indistinguishable from your own and
+/// [`crate::frontend::detect::CornerScan::take_cells`] would decode another
+/// camera order's keys as its own — wrong keypoints, not a wasted read. `owner`
+/// separates the instances and `generation` separates that instance's framesets,
+/// which is what refuses a delivery left over from a submission that failed.
+#[cfg(feature = "gpu-core")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelayTag {
+    /// The staging instance, from a process-wide counter: two scanners built in
+    /// either order, on any thread, never share one.
+    owner: u64,
+    /// Framesets this owner has staged.
+    generation: u64,
+}
+
+#[cfg(feature = "gpu-core")]
+impl RelayTag {
+    /// A tag no other live stage holds, for a stage's first frameset.
+    pub(super) fn new() -> Self {
+        static OWNERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        Self {
+            // Wrapping needs 2^64 stage constructions; the counter is only ever
+            // compared for equality, so ordering can be the weakest there is.
+            owner: OWNERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            generation: 0,
+        }
+    }
+
+    /// The same owner, one frameset on.
+    pub(super) fn next(self) -> Self {
+        Self {
+            owner: self.owner,
+            generation: self.generation.wrapping_add(1),
+        }
+    }
+}
+
+/// [`ReadRelay`]'s contents: at most one frameset's worth, in one direction,
+/// each side tagged with the stage it belongs to.
 #[cfg(feature = "gpu-core")]
 #[derive(Debug, Default)]
 struct RelayInner {
-    /// Launched and waiting for someone to download.
-    staged: Vec<cubecl::server::Handle>,
-    /// What a download left for the stage that staged it.
-    delivered: Option<Vec<cubecl::bytes::Bytes>>,
+    /// Launched and waiting for someone to download, and whose they are.
+    staged: Option<(RelayTag, Vec<cubecl::server::Handle>)>,
+    /// What a download left, tagged with the staging it answers.
+    delivered: Option<(RelayTag, Vec<cubecl::bytes::Bytes>)>,
 }
 
 #[cfg(feature = "gpu-core")]
 impl ReadRelay {
-    /// Offer `handles` to the next download, replacing anything unclaimed:
-    /// there is one producer and one frameset in flight.
-    pub(super) fn stage(&self, handles: Vec<cubecl::server::Handle>) {
+    /// Offer `handles` to the next download as `tag`'s, replacing anything
+    /// unclaimed: there is one frameset in flight, and a stage whose staging is
+    /// replaced still holds its own handles and reads them itself.
+    ///
+    /// Only `tag`'s own delivery is dropped. Another owner's is still that
+    /// owner's to take, and dropping it would cost it a read it cannot repeat.
+    pub(super) fn stage(&self, tag: RelayTag, handles: Vec<cubecl::server::Handle>) {
         if let Ok(mut inner) = self.0.lock() {
-            inner.staged = handles;
-            inner.delivered = None;
+            inner.staged = (!handles.is_empty()).then_some((tag, handles));
+            if inner
+                .delivered
+                .as_ref()
+                .is_some_and(|(stale, _)| stale.owner == tag.owner)
+            {
+                inner.delivered = None;
+            }
         }
     }
 
-    /// Take what was staged, to append to a download this stage is making.
-    pub(super) fn take_staged(&self) -> Vec<cubecl::server::Handle> {
-        self.0
-            .lock()
-            .map(|mut inner| std::mem::take(&mut inner.staged))
-            .unwrap_or_default()
+    /// Take what was staged and whose it is, to append to a download this stage
+    /// is making. `None` when nothing is waiting.
+    pub(super) fn take_staged(&self) -> Option<(RelayTag, Vec<cubecl::server::Handle>)> {
+        self.0.lock().ok().and_then(|mut inner| inner.staged.take())
     }
 
-    /// Leave a download's tail for the stage that staged it.
-    pub(super) fn deliver(&self, bytes: Vec<cubecl::bytes::Bytes>) {
+    /// Leave a download's tail for the stage whose `tag` it answers.
+    ///
+    /// One slot: a second download's tail replaces a tail nobody took, and its
+    /// owner then reads for itself rather than decoding these bytes.
+    pub(super) fn deliver(&self, tag: RelayTag, bytes: Vec<cubecl::bytes::Bytes>) {
         if let Ok(mut inner) = self.0.lock() {
-            inner.delivered = Some(bytes);
+            inner.delivered = Some((tag, bytes));
         }
     }
 
@@ -450,7 +508,15 @@ impl ReadRelay {
     /// a second test thread moves under the assertion.
     #[must_use]
     pub fn waiting(&self) -> usize {
-        self.0.lock().map(|inner| inner.staged.len()).unwrap_or(0)
+        self.0
+            .lock()
+            .map(|inner| {
+                inner
+                    .staged
+                    .as_ref()
+                    .map_or(0, |(_, handles)| handles.len())
+            })
+            .unwrap_or(0)
     }
 
     /// Buffers a download left here and the stager has not taken yet.
@@ -458,16 +524,34 @@ impl ReadRelay {
     pub fn carried(&self) -> usize {
         self.0
             .lock()
-            .map(|inner| inner.delivered.as_ref().map_or(0, Vec::len))
+            .map(|inner| inner.delivered.as_ref().map_or(0, |(_, bytes)| bytes.len()))
             .unwrap_or(0)
     }
 
-    /// Take the bytes a download left, or `None` when none did — a stage that
+    /// The bytes a download left for `tag`, or `None` when the delivery is
+    /// another stage's, another frameset's, or was never made — a stage that
     /// gets `None` still holds its own handles and reads them itself.
-    pub(super) fn take_delivered(&self) -> Option<Vec<cubecl::bytes::Bytes>> {
+    pub(super) fn take_delivered(&self, tag: RelayTag) -> Option<Vec<cubecl::bytes::Bytes>> {
         self.0.lock().ok().and_then(|mut inner| {
-            inner.staged.clear();
-            inner.delivered.take()
+            // `tag`'s handles are either in the delivery below or about to be
+            // read by the caller, so no later download may read them again.
+            // A staging of another owner's stays: it is theirs to be carried.
+            if inner
+                .staged
+                .as_ref()
+                .is_some_and(|(staged, _)| *staged == tag)
+            {
+                inner.staged = None;
+            }
+            match inner.delivered.take() {
+                Some((delivered, bytes)) if delivered == tag => Some(bytes),
+                // Put a mismatched delivery back rather than dropping it: its
+                // owner has not taken it yet.
+                other => {
+                    inner.delivered = other;
+                    None
+                }
+            }
         })
     }
 }

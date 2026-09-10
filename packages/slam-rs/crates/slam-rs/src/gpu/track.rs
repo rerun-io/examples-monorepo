@@ -390,9 +390,12 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
         // instead of one each (D78). Taken **before** the empty-read shortcut,
         // so a frameset whose every lane offered nothing still carries them.
         let lanes: usize = reads.len();
-        let relayed: Vec<cubecl::server::Handle> = self.reads.take_staged();
-        let carried: usize = relayed.len();
-        reads.extend(relayed);
+        // The tag comes back with the tail, so the bytes are handed to the
+        // stage that staged them and to no other (see [`super::RelayTag`]).
+        let staged: Option<super::RelayTag> = self.reads.take_staged().map(|(tag, handles)| {
+            reads.extend(handles);
+            tag
+        });
         let mut bytes: Vec<cubecl::bytes::Bytes> = if reads.is_empty() {
             Vec::new()
         } else {
@@ -403,9 +406,9 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                 read.map_err(|error| super::read_failed("the tracker result", &error))?
             }
         };
-        if carried != 0 && bytes.len() >= lanes {
+        if let Some(tag) = staged.filter(|_| bytes.len() >= lanes) {
             let tail: Vec<cubecl::bytes::Bytes> = bytes.split_off(lanes);
-            self.reads.deliver(tail);
+            self.reads.deliver(tag, tail);
         }
 
         let mut read: usize = 0;
