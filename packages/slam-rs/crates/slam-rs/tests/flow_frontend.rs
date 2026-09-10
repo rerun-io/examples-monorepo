@@ -224,6 +224,171 @@ fn a_skipped_frameset_leaves_no_camera_detected() {
     }
 }
 
+/// Remove exact old positions while leaving other corners available to detect.
+fn masks_leaving(frame: &FlowFrame, survivors: usize) -> [Masks; 1] {
+    [Masks {
+        masks: (survivors..frame.cameras[0].len())
+            .map(|index| {
+                let position = frame.cameras[0].transforms.translation(index);
+                Rect {
+                    x: position.x - 0.25,
+                    y: position.y - 0.25,
+                    w: 0.5,
+                    h: 0.5,
+                }
+            })
+            .collect(),
+    }]
+}
+
+#[test]
+fn redetection_resumes_only_below_the_survivor_threshold() {
+    for offset in [-1, 0, 1] {
+        let mut flow = gated_frontend(2, 0.5);
+        let images = [dotted_image(0), dotted_image(0)];
+        flow.process_frame(0, &images, &PosePrediction::default(), &[])
+            .unwrap();
+        let count = flow.frame().cameras[0].len();
+        assert!(count >= 4 && count % 2 == 0);
+        let survivors = (count as isize / 2 + offset) as usize;
+        let masks = masks_leaving(flow.frame(), survivors);
+        let watermark = flow.last_keypoint_id();
+        flow.process_frame(1, &images, &PosePrediction::default(), &masks)
+            .unwrap();
+        assert_eq!(
+            flow.frame().cameras[0]
+                .ids
+                .iter()
+                .filter(|id| id.0 < watermark)
+                .count(),
+            survivors
+        );
+        assert_eq!(
+            flow.last_keypoint_id() > watermark,
+            offset < 0,
+            "offset {offset}"
+        );
+    }
+}
+
+#[test]
+fn redetection_resumes_on_the_frameset_that_loses_every_track() {
+    let mut flow = gated_frontend(2, 0.5);
+    let images = [dotted_image(0), dotted_image(0)];
+    flow.process_frame(0, &images, &PosePrediction::default(), &[])
+        .unwrap();
+    let watermark = flow.last_keypoint_id();
+    assert!(watermark > 0);
+    let masks = masks_leaving(flow.frame(), 0);
+    flow.process_frame(1, &images, &PosePrediction::default(), &masks)
+        .unwrap();
+    assert!(!flow.frame().cameras[0].is_empty());
+    assert!(
+        flow.frame().cameras[0]
+            .ids
+            .iter()
+            .all(|id| id.0 >= watermark)
+    );
+}
+
+#[test]
+fn redetection_uses_the_latest_post_detection_count() {
+    let mut flow = gated_frontend(2, 0.5);
+    let images = [dotted_image(0), dotted_image(0)];
+    let initial_mask = [Masks {
+        masks: vec![Rect {
+            x: 60.0,
+            y: 0.0,
+            w: WIDTH as f32,
+            h: HEIGHT as f32,
+        }],
+    }];
+    flow.process_frame(0, &images, &PosePrediction::default(), &initial_mask)
+        .unwrap();
+    let initial = flow.frame().cameras[0].len();
+    assert!(initial >= 2);
+    let masks = masks_leaving(flow.frame(), 1);
+    let watermark = flow.last_keypoint_id();
+    flow.process_frame(1, &images, &PosePrediction::default(), &masks)
+        .unwrap();
+    assert!(flow.last_keypoint_id() > watermark);
+    let replenished = flow.frame().cameras[0].len();
+    assert!(replenished > 2 * initial);
+    // Above the original baseline's threshold, below the replenished one's.
+    let masks = masks_leaving(flow.frame(), initial);
+    let watermark = flow.last_keypoint_id();
+    flow.process_frame(2, &images, &PosePrediction::default(), &masks)
+        .unwrap();
+    assert!(flow.last_keypoint_id() > watermark);
+    // Keeping all post-detection tracks must skip, even after replenishment.
+    let watermark = flow.last_keypoint_id();
+    flow.process_frame(3, &images, &PosePrediction::default(), &[])
+        .unwrap();
+    assert_eq!(flow.last_keypoint_id(), watermark);
+}
+
+#[test]
+fn redetection_resumes_after_an_empty_initial_detection() {
+    let mut flow = gated_frontend(2, 0.5);
+    let blank = [
+        ImageU16::zeros(WIDTH, HEIGHT).unwrap(),
+        ImageU16::zeros(WIDTH, HEIGHT).unwrap(),
+    ];
+    flow.process_frame(0, &blank, &PosePrediction::default(), &[])
+        .unwrap();
+    assert_eq!(flow.last_keypoint_id(), 0);
+    let images = [dotted_image(0), dotted_image(0)];
+    flow.process_frame(1, &images, &PosePrediction::default(), &[])
+        .unwrap();
+    assert!(!flow.frame().cameras[0].is_empty());
+    let masks = masks_leaving(flow.frame(), 0);
+    let watermark = flow.last_keypoint_id();
+    flow.process_frame(2, &images, &PosePrediction::default(), &masks)
+        .unwrap();
+    assert!(flow.last_keypoint_id() > watermark);
+}
+
+#[test]
+fn redetection_keeps_its_baseline_after_a_rejected_frameset() {
+    let images = [dotted_image(0), dotted_image(0)];
+    let mut clean = gated_frontend(2, 0.5);
+    let mut faulty = failing_frontend_with_ratio(3, 0.5);
+    clean
+        .process_frame(0, &images, &PosePrediction::default(), &[])
+        .unwrap();
+    faulty
+        .process_frame(0, &images, &PosePrediction::default(), &[])
+        .unwrap();
+    let committed = faulty.frame().clone();
+    let watermark = faulty.last_keypoint_id();
+    let masks = masks_leaving(&committed, 1);
+    assert!(
+        faulty
+            .process_frame(1, &images, &PosePrediction::default(), &masks)
+            .is_err()
+    );
+    assert_eq!(faulty.frame(), &committed);
+    assert_eq!(faulty.last_keypoint_id(), watermark);
+    // An unchanged retry skips: a zeroed baseline would incorrectly detect.
+    faulty
+        .process_frame(1, &images, &PosePrediction::default(), &[])
+        .unwrap();
+    clean
+        .process_frame(1, &images, &PosePrediction::default(), &[])
+        .unwrap();
+    assert_eq!(faulty.last_keypoint_id(), watermark);
+    let masks = masks_leaving(faulty.frame(), 1);
+    faulty
+        .process_frame(2, &images, &PosePrediction::default(), &masks)
+        .unwrap();
+    clean
+        .process_frame(2, &images, &PosePrediction::default(), &masks)
+        .unwrap();
+    assert!(faulty.last_keypoint_id() > watermark);
+    assert_eq!(faulty.frame(), clean.frame());
+    assert_eq!(faulty.last_keypoint_id(), clean.last_keypoint_id());
+}
+
 /// `updateCellCounts` / `addKeypoint` / `removeKeypoint` (`:707-749`) keep
 /// `cells` equal to the number of keypoints in each grid cell — except where
 /// `addKeypoints` deliberately double-counts, which cannot happen on camera 0.
@@ -1120,7 +1285,17 @@ impl PatchTracker for FailingTracker {
 fn failing_frontend(
     fail_on: usize,
 ) -> FrameToFrameOpticalFlow<Pattern51, CpuPyramidBuilder, FailingTracker> {
-    let config: VioConfig = config();
+    failing_frontend_with_ratio(fail_on, 0.0)
+}
+
+fn failing_frontend_with_ratio(
+    fail_on: usize,
+    ratio: f32,
+) -> FrameToFrameOpticalFlow<Pattern51, CpuPyramidBuilder, FailingTracker> {
+    let config = VioConfig {
+        port_redetect_survivor_ratio: ratio,
+        ..config()
+    };
     let options: FrontendOptions = FrontendOptions::default();
     let inner: CpuPatchTracker<Pattern51> = cpu_tracker(&config, options.max_keypoints);
     FrameToFrameOpticalFlow::with_backends(

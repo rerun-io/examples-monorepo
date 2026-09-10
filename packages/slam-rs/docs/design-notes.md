@@ -1078,8 +1078,10 @@ move it.
 
 **The keyframe coupling, measured.** The vote is
 `connected[0] / (connected[0] + unconnected[0]) < 0.7` and the unconnected
-observations are the freshly detected keypoints, so gating detection could have
-starved the vote. It does not at `0.7`: MIO10's post-warmup cadence goes 7.04 ->
+observations are all observed ids absent from the landmark database, including
+carried tracks that failed triangulation or whose landmarks were removed.
+Those tracks can still vote on skipped-detection frames, so gating detection
+alone does not imply keyframe starvation; at `0.7`, MIO10's post-warmup cadence goes 7.04 ->
 7.33 frames per keyframe and MGO09's stays at 6.71, both inside the 5-9 band the
 later scheduling work is priced against.
 
