@@ -25,6 +25,7 @@
 //! the first CPU commit so a GPU backend arrives as a new [`tracker::PatchTracker`]
 //! rather than a rewrite.
 
+pub mod cell;
 pub mod detect;
 pub mod flow;
 

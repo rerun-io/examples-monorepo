@@ -7,6 +7,7 @@ use kornia_imgproc::features::FastCorner;
 use super::kernels::{self, MASK_BITS, RING_BIAS};
 use super::pyramid::{Level0, Level0Table};
 use super::{GpuError, guarded};
+use crate::frontend::cell::SelectionStatus;
 use crate::frontend::detect::{
     BandCache, BandRequest, CellSelect, CornerScan, DetectError, FAST_BORDER, FAST_RING_COLUMN,
     FAST_RING_ROW, block_filter_end, opencv_corner_score,
@@ -252,8 +253,7 @@ impl<R: Runtime> GpuCornerScan<R> {
         select: &CellSelect,
     ) -> Option<(cubecl::server::Handle, usize)> {
         let grid: &crate::frontend::detect::CellGrid = &select.grid;
-        let cells_x: usize = (grid.x_stop - grid.x_start) / grid.cell + 1;
-        let cells_y: usize = (grid.y_stop - grid.y_start) / grid.cell + 1;
+        let (cells_x, cells_y) = grid.dimensions();
         let ceiling: usize = kernels::MAX_CUBES_PER_DIM as usize;
         if cells_x > ceiling || cells_y > ceiling {
             return None;
@@ -514,7 +514,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         image: &ImageU16,
         select: &CellSelect,
         out: &mut Vec<u32>,
-    ) -> Result<(), DetectError> {
+    ) -> Result<SelectionStatus, DetectError> {
         out.clear();
         // Spent, not read twice: an entry left behind would answer a later
         // frameset with this one's corners.
@@ -522,7 +522,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
             if matches!(std::mem::take(&mut workspace.selection), Selection::Ready(ready) if ready == *select)
             {
                 out.extend_from_slice(&workspace.host_keys);
-                return Ok(());
+                return Ok(SelectionStatus::Selected);
             }
         }
         guarded(
@@ -531,7 +531,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
             },
             || {
                 let Some((best, cells)) = self.launch_selection(camera, image, select) else {
-                    return Ok(());
+                    return Ok(SelectionStatus::Unsupported);
                 };
 
                 #[cfg(test)]
@@ -553,7 +553,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                 // into a buffer the detector owns and reuses, against a
                 // `Bytes` the next frame would replace anyway.
                 out.extend_from_slice(checked_keys(&keys, cells)?);
-                Ok(())
+                Ok(SelectionStatus::Selected)
             },
         )
     }
