@@ -1,52 +1,6 @@
-//! basalt's own VIO configuration, read with serde.
-//!
-//! One file drives both the C++ reference run and the Rust port (decision D18),
-//! so this deserializes `data/default_config.json` and `data/msd/*_config.json`
-//! unmodified. The on-disk shape is cereal's: a `{"value0": {...}}` wrapper
-//! whose keys are prefixed `config.` (`src/utils/vio_config.cpp:131-180`).
-//!
-//! Every field the ABS_QR path reads is modelled. The seventeen
-//! `config.mapper_*` keys every shipped file carries are not: D13 puts the
-//! mapper out of scope, nothing here reads them, and they round-trip through
-//! [`VioConfig::unknown`] like any other key the struct does not model.
-//!
-//! ## Unknown keys are warned about, never fatal
-//!
-//! All four shipped JSONs carry `config.vio_outlier_threshold`,
-//! `config.vio_filter_iteration`, `config.vio_lm_landmark_damping_variant` and
-//! `config.vio_lm_pose_damping_variant`, which the C++ struct commented out
-//! (`vio_config.h:84-85`, `vio_config.cpp:86-87,96-97`). Cereal ignores them;
-//! `#[serde(deny_unknown_fields)]` would reject every reference config, so
-//! unknown keys are collected and logged instead. The `mapper_*` block is
-//! collected the same way but **not** warned about: it is out of scope by
-//! decision, and listing seventeen expected keys would bury the one that is a
-//! typo.
-//!
-//! ## `Default` is the C++ constructor, not `default_config.json`
-//!
-//! [`VioConfig::default`] reproduces `VioConfig::VioConfig()`
-//! (`src/utils/vio_config.cpp:47-128`), because that is what basalt uses for any
-//! key a JSON omits. The shipped `default_config.json` is *not* the same file:
-//! it sets `vio_marg_lost_landmarks` to `true` where the constructor says
-//! `false` (`vio_config.cpp:105`), and its
-//! `optical_flow_recall_max_patch_norms` are (nearly) a quarter of the
-//! constructor's. Both discrepancies are pinned by a test rather than papered
-//! over — see `config_default_json_disagrees_with_the_cpp_constructor`.
-//!
-//! ## The fixtures
-//!
-//! The three MSD configs the tests parse are the package's own
-//! `configs/*.json`, the files `reference_segments.toml` names and the C++
-//! reference runs were driven with; `tests/fixtures/` holds only
-//! `default_config.json`, which no lane runs.
-//! `msdmi` (Valve Index) and `msdmg` (HP Reverb G2) are the reference datasets;
-//! `msdmo` (Samsung Odyssey+) is here because the RoboCap driver reuses it —
-//! `python/robocap_vit.toml:8` sets `config-path="data/msd/msdmo_config.json"`,
-//! so the RoboCap gate ran with the Odyssey+ config and its
-//! `optical_flow_image_safe_radius` of 388, not a RoboCap-specific one. The
-//! three MSD files differ from each other in that one field alone.
-
-use std::collections::BTreeMap;
+//! VIO configuration shared by the Rust core and Python entry points.
+//! Missing fields retain their defaults; unknown fields are errors.
+//! The JSON object is wrapped in `value0`, with `config.` and `port.` keys.
 
 use serde::{Deserialize, Serialize};
 
@@ -100,25 +54,6 @@ pub enum ConfigError {
     Parse(#[from] serde_json::Error),
 }
 
-/// Whether [`VioConfig::port_redetect_survivor_ratio`] is at its off value.
-///
-/// The port's own key is skipped when it is off, so a basalt document still
-/// round-trips to exactly the keys it arrived with and a C++ run reading a
-/// config the port wrote back never meets a key cereal has no field for.
-#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde's predicate shape")]
-fn redetect_is_off(ratio: &f32) -> bool {
-    *ratio == 0.0
-}
-
-/// Whether [`VioConfig::port_frame_update_max_iterations`] is at its off value.
-///
-/// See [`redetect_is_off`]: the port's own keys stay out of a basalt document
-/// while they are off.
-#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde's predicate shape")]
-fn frame_update_is_off(iterations: &i32) -> bool {
-    *iterations <= 0
-}
-
 /// cereal's outer wrapper: every basalt JSON is one object under `value0`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Value0<T> {
@@ -131,7 +66,7 @@ struct Value0<T> {
 /// The scalar widths follow the C++ exactly (`float` vs `double` vs `int`), so a
 /// value that is `float` there cannot silently gain precision here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct VioConfig {
     // ── frontend ────────────────────────────────────────────────────────
     /// Which optical-flow implementation runs; only `frame_to_frame` is ported.
@@ -204,21 +139,10 @@ pub struct VioConfig {
     // ── the port's own knobs ────────────────────────────────────────────
     /// Survivor fraction below which a frameset detects; `0` detects always (D75).
     ///
-    /// The one key here that basalt has no counterpart for, which is why it is
-    /// spelled `port.` instead of `config.`: the vendored `configs/*.json` are
-    /// the files the C++ reference runs read, so nothing writes a key into them
-    /// that the C++ never saw, and this one is carried by a profile overlay
-    /// alone (`configs/profiles/fast.json`). `0.0` — the value every basalt file
-    /// leaves it at, and [`VioConfig::default`]'s — is basalt's own behaviour:
-    /// `addPoints` on every frameset. Above zero the frameset detects only once
-    /// camera 0 holds fewer than this fraction of the keypoints the last
-    /// detecting frameset left it with, which is cuVSLAM's rule. Anything not
-    /// finite and above zero reads as `0`, so a garbled value detects rather
-    /// than silently stopping.
-    #[serde(
-        rename = "port.redetect_survivor_ratio",
-        skip_serializing_if = "redetect_is_off"
-    )]
+    /// Zero detects on every frameset. Above zero, detect when camera 0 retains
+    /// fewer than this fraction of the keypoints from the last detection.
+    /// Non-finite or non-positive values use zero.
+    #[serde(rename = "port.redetect_survivor_ratio")]
     pub port_redetect_survivor_ratio: f32,
     /// LM steps the non-keyframe frame update gets; `0` solves the whole window
     /// on every frameset (D76).
@@ -232,10 +156,7 @@ pub struct VioConfig {
     /// **six** trials — accepted and backtracked together — not five; the two
     /// caps mean the same thing on purpose. Carried by the profile overlay alone
     /// (`configs/profiles/fast.json`); the `port.` spelling is D75's.
-    #[serde(
-        rename = "port.frame_update_max_iterations",
-        skip_serializing_if = "frame_update_is_off"
-    )]
+    #[serde(rename = "port.frame_update_max_iterations")]
     pub port_frame_update_max_iterations: i32,
 
     // ── estimator ───────────────────────────────────────────────────────
@@ -321,16 +242,6 @@ pub struct VioConfig {
     /// Which keyframe-removal rule applies.
     #[serde(rename = "config.vio_kf_marg_criteria")]
     pub vio_kf_marg_criteria: KeyframeMargCriteria,
-
-    /// Keys the struct does not model, kept so a round trip loses nothing.
-    ///
-    /// Every shipped file carries seventeen `config.mapper_*` keys and the four
-    /// the C++ struct commented out; none of them reaches a VIO decision (D13
-    /// puts the mapper out of scope), so they live here rather than as fields.
-    /// `to_json_string` writes them back unchanged, which is what keeps the
-    /// round trip lossless.
-    #[serde(flatten)]
-    pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for VioConfig {
@@ -388,38 +299,15 @@ impl Default for VioConfig {
             vio_fix_long_term_keyframes: false,
             vio_kf_marg_feature_ratio: 0.1,
             vio_kf_marg_criteria: KeyframeMargCriteria::Default,
-
-            unknown: BTreeMap::new(),
         }
     }
 }
 
 impl VioConfig {
-    /// Read one of basalt's config files.
-    ///
-    /// Missing keys keep their [`VioConfig::default`] value, as cereal does when
-    /// it loads onto a default-constructed struct; unknown keys are collected
-    /// into [`VioConfig::unknown`] and logged once at warning level.
+    /// Read a wrapped config. Missing keys keep their defaults; unknown keys fail.
     pub fn from_json_str(text: &str) -> Result<Self, ConfigError> {
         let wrapper: Value0<Self> = serde_json::from_str(text)?;
-        let config: Self = wrapper.value0;
-        // The `config.mapper_*` block is out of scope by decision, not by
-        // oversight, so it is not what this warning is for: it would bury the
-        // one key that is a typo under seventeen that are expected.
-        let names: Vec<&str> = config
-            .unknown
-            .keys()
-            .map(String::as_str)
-            .filter(|name| !name.starts_with("config.mapper_"))
-            .collect();
-        if !names.is_empty() {
-            log::warn!(
-                "vio config: ignoring {} unmodelled key(s): {}",
-                names.len(),
-                names.join(", ")
-            );
-        }
-        Ok(config)
+        Ok(wrapper.value0)
     }
 
     /// Write the config back in basalt's shape, wrapper and all.
@@ -434,14 +322,19 @@ mod tests {
 
     use super::*;
 
-    const DEFAULT_JSON: &str = include_str!("../tests/fixtures/default_config.json");
+    #[test]
+    fn an_unknown_key_is_refused() {
+        let text = r#"{"value0":{"config.not_a_real_field":3}}"#;
+        let error = VioConfig::from_json_str(text).unwrap_err();
+        assert!(error.to_string().contains("config.not_a_real_field"));
+    }
+
     const MSDMI_JSON: &str = include_str!("../../../configs/msdmi_config.json");
     const MSDMG_JSON: &str = include_str!("../../../configs/msdmg_config.json");
     const MSDMO_JSON: &str = include_str!("../../../configs/msdmo_config.json");
 
-    fn every_fixture() -> [(&'static str, &'static str); 4] {
+    fn every_fixture() -> [(&'static str, &'static str); 3] {
         [
-            ("default_config.json", DEFAULT_JSON),
             ("msdmi_config.json", MSDMI_JSON),
             ("msdmg_config.json", MSDMG_JSON),
             ("msdmo_config.json", MSDMO_JSON),
@@ -484,127 +377,15 @@ mod tests {
         assert_eq!(normalised, index);
     }
 
-    /// `Default` follows the C++ constructor, so it must differ from
-    /// `default_config.json` in exactly two fields
-    /// (`vio_config.cpp:71,105` vs `default_config.json:24-29,55`).
+    /// Even disabled port knobs are written explicitly.
     #[test]
-    fn config_default_json_disagrees_with_the_cpp_constructor() {
-        let shipped: VioConfig = VioConfig::from_json_str(DEFAULT_JSON).unwrap();
-        let constructed: VioConfig = VioConfig::default();
-
-        assert!(!constructed.vio_marg_lost_landmarks);
-        assert!(shipped.vio_marg_lost_landmarks);
-
-        assert_eq!(
-            constructed.optical_flow_recall_max_patch_norms,
-            vec![1.74, 0.96, 0.99, 0.44]
-        );
-        assert_eq!(
-            shipped.optical_flow_recall_max_patch_norms,
-            vec![0.435, 0.24, 0.24, 0.11]
-        );
-        // Three of the four are exactly a quarter of the constructor's value;
-        // the third is 0.24 where a quarter of 0.99 would be 0.2475. Pinned so
-        // the near-pattern is never "tidied" into an exact one.
-        let quarters: Vec<f32> = constructed
-            .optical_flow_recall_max_patch_norms
-            .iter()
-            .map(|v| v / 4.0)
-            .collect();
-        assert_eq!(quarters, vec![0.435, 0.24, 0.2475, 0.11]);
-        assert!(
-            (shipped.optical_flow_recall_max_patch_norms[2] - quarters[2]).abs() > 1e-4,
-            "the third recall norm is the one that is not a quarter"
-        );
-
-        // Nothing else moves: patching those two fields makes them equal, up to
-        // the unknown keys the JSON carries and the constructor cannot.
-        let mut patched: VioConfig = constructed;
-        patched.vio_marg_lost_landmarks = true;
-        patched.optical_flow_recall_max_patch_norms = vec![0.435, 0.24, 0.24, 0.11];
-        patched.unknown = shipped.unknown.clone();
-        assert_eq!(patched, shipped);
-    }
-
-    /// What every shipped file carries that the struct does not model: the four
-    /// keys the C++ struct commented out (`vio_config.cpp:86-87,96-97`) and the
-    /// seventeen `config.mapper_*` keys D13 puts out of scope. Neither may be
-    /// fatal, and the list is exact so a *new* unmodelled key is a red test.
-    #[test]
-    fn the_unmodelled_keys_are_tolerated_and_listed() {
-        let expected: [&str; 21] = [
-            "config.mapper_bow_num_bits",
-            "config.mapper_detection_num_points",
-            "config.mapper_frames_to_match_threshold",
-            "config.mapper_lm_lambda_max",
-            "config.mapper_lm_lambda_min",
-            "config.mapper_max_hamming_distance",
-            "config.mapper_min_matches",
-            "config.mapper_min_track_length",
-            "config.mapper_min_triangulation_dist",
-            "config.mapper_no_factor_weights",
-            "config.mapper_num_frames_to_match",
-            "config.mapper_obs_huber_thresh",
-            "config.mapper_obs_std_dev",
-            "config.mapper_ransac_threshold",
-            "config.mapper_second_best_test_ratio",
-            "config.mapper_use_factors",
-            "config.mapper_use_lm",
-            "config.vio_filter_iteration",
-            "config.vio_lm_landmark_damping_variant",
-            "config.vio_lm_pose_damping_variant",
-            "config.vio_outlier_threshold",
-        ];
-        for (name, text) in every_fixture() {
-            let config: VioConfig = VioConfig::from_json_str(text).unwrap();
-            let seen: Vec<&str> = config.unknown.keys().map(String::as_str).collect();
-            assert_eq!(seen, expected, "{name} carries different unknown keys");
-        }
-    }
-
-    /// A `mapper_*` value survives the round trip byte for byte, which is what
-    /// makes dropping the seventeen fields free: `_core.to_json_string`
-    /// (`slam-rs-py/src/lib.rs`) writes a config back for a C++ run to read.
-    #[test]
-    fn a_mapper_key_survives_the_round_trip() {
-        let config: VioConfig = VioConfig::from_json_str(MSDMI_JSON).unwrap();
-        let Some(value) = config.unknown.get("config.mapper_ransac_threshold") else {
-            panic!("the shipped file carries config.mapper_ransac_threshold");
-        };
-        assert_eq!(value.as_f64(), Some(5e-5));
-
-        let text: String = config.to_json_string().unwrap();
-        let reread: VioConfig = VioConfig::from_json_str(&text).unwrap();
-        assert_eq!(reread, config, "every key, modelled or not");
-        assert_eq!(
-            reread.unknown.get("config.mapper_ransac_threshold"),
-            Some(value)
-        );
-    }
-
-    /// The port's own keys are off in every shipped file, and off they are
-    /// invisible: a basalt document round-trips to exactly the keys it arrived
-    /// with, so a C++ run reading a config the port wrote back never meets one
-    /// (D75, D76).
-    #[test]
-    fn the_port_knobs_are_off_and_unwritten_in_every_shipped_config() {
-        for (name, text) in every_fixture() {
-            let config: VioConfig = VioConfig::from_json_str(text).unwrap();
-            assert_eq!(config.port_redetect_survivor_ratio, 0.0, "{name}");
-            assert_eq!(config.port_frame_update_max_iterations, 0, "{name}");
-            let written: String = config.to_json_string().unwrap();
-            for key in [
-                "port.redetect_survivor_ratio",
-                "port.frame_update_max_iterations",
-            ] {
-                assert!(
-                    !written.contains(key),
-                    "{name} wrote {key} back into a basalt document"
-                );
-                // Not an unknown key either: it is modelled, so a file that
-                // does carry it is not merely tolerated.
-                assert!(!config.unknown.contains_key(key));
-            }
+    fn the_port_knobs_are_written_in_every_shipped_config() {
+        for (_, text) in every_fixture() {
+            let config = VioConfig::from_json_str(text).unwrap();
+            let written: serde_json::Value =
+                serde_json::from_str(&config.to_json_string().unwrap()).unwrap();
+            assert_eq!(written["value0"]["port.redetect_survivor_ratio"], 0.0);
+            assert_eq!(written["value0"]["port.frame_update_max_iterations"], 0);
         }
     }
 
@@ -630,20 +411,6 @@ mod tests {
         assert!(written.contains("port.redetect_survivor_ratio"));
         assert!(written.contains("port.frame_update_max_iterations"));
         assert_eq!(VioConfig::from_json_str(&written).unwrap(), config);
-    }
-
-    /// A key nobody has ever heard of is warned about, not rejected.
-    #[test]
-    fn an_invented_key_is_ignored() {
-        let text: &str = r#"{"value0": {"config.vio_max_kfs": 9, "config.not_a_real_field": 3}}"#;
-        let config: VioConfig = VioConfig::from_json_str(text).unwrap();
-        assert_eq!(config.vio_max_kfs, 9);
-        // Everything absent falls back to the constructor value.
-        assert_eq!(config.vio_max_states, 3);
-        assert_eq!(
-            config.unknown.keys().collect::<Vec<_>>(),
-            ["config.not_a_real_field"]
-        );
     }
 
     #[test]
