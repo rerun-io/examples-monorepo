@@ -900,7 +900,30 @@ the one to try next.
 through the band walk and through the device selection — and the two
 `KeypointsData` are equal corner for corner and response for response, on both
 cameras, empty and half-occupied, at three safe radii, under cell-aligned masks
-and one that straddles a boundary, at three budgets, and on three clamped grids.
+and one that straddles a boundary, at three budgets, over four camera slots
+through one reused scanner, and on three frames whose width is not a whole
+number of cells. Two ladders that step past their own minimum — 40/6 and 32/5 —
+are in it because equality there is what the last-rung fix buys: the same frame
+detected at a rung of 6 yields 62 corners against the real ladder's 54, so a
+device handed `min_threshold` is separable from one handed the last rung, and
+the test asserts that gap before asserting the equality.
+
+The GPU scanner is wrapped in a counting one, because equality alone cannot tell
+the two paths apart — a device path that quietly never engaged agrees with the
+host walk perfectly — so every case says which path it meant. That is what makes
+the three fallbacks assertions rather than assumptions: a straddling mask, a
+`num_points_cell` of 2 and a frame `CELL_KEY_LIMIT` pixels wide each have to
+report zero selections and a nonzero band count.
+
+The clamps are their own case. `CellGrid::new` floors and centres, so no grid it
+derives has a cell that runs past the image and neither strict clamp in the
+kernel would ever run; the detector takes its grid from the caller, so the test
+supplies two — a last column and row that overhang, and a last column whose
+candidate window is empty and must come back as the sentinel. The clamped columns
+lie past `width - EDGE_THRESHOLD - 1`, so no corner can come out of them on
+either lane: what the equality proves there is that the device stays inside the
+image and sees the same zero rim, not that the answer changes.
+
 It is a separate test binary because `the_whole_gpu_path_holds_the_pool_flat`
 asserts an exactly flat CubeCL pool and every test in one binary shares one
 client.

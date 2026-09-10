@@ -22,9 +22,13 @@
 #![cfg(feature = "gpu-core")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use slam_rs::frontend::detect::{
-    CellGrid, CornerScan, CpuCornerScan, DetectorConfig, DetectorScratch, KeypointsData, Masks,
-    Occupancy, Rect, detect_keypoints_with_cells,
+    BandRequest, CELL_KEY_LIMIT, CellGrid, CellSelect, CornerScan, CpuCornerScan, DetectError,
+    DetectorConfig, DetectorScratch, FAST_BORDER, FastCorner, KeypointsData, Masks, Occupancy,
+    Rect, detect_keypoints_with_cells, threshold_rungs,
 };
 use slam_rs::gpu::{GpuCornerScan, gpu_client};
 use slam_rs::image::ImageU16;
@@ -42,6 +46,50 @@ fn detector_config(safe_radius: f32) -> DetectorConfig {
         max_threshold: 40,
         safe_radius,
     }
+}
+
+/// A scanner that records which of the detector's two paths it was asked for.
+///
+/// Equality on its own cannot tell them apart: a device path that quietly never
+/// engaged agrees with the host walk perfectly, and every check here would pass
+/// while measuring nothing. So each one says which path it meant.
+#[derive(Debug)]
+struct CountingScan {
+    inner: Box<dyn CornerScan>,
+    bands: Arc<AtomicUsize>,
+    selections: Arc<AtomicUsize>,
+}
+
+impl CornerScan for CountingScan {
+    fn scan(&mut self, camera: usize, image: &ImageU16) -> Result<(), DetectError> {
+        self.inner.scan(camera, image)
+    }
+
+    fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], DetectError> {
+        self.bands.fetch_add(1, Ordering::Relaxed);
+        self.inner.band(request)
+    }
+
+    fn select_cells(
+        &mut self,
+        camera: usize,
+        image: &ImageU16,
+        select: &CellSelect,
+        out: &mut Vec<u32>,
+    ) -> Result<(), DetectError> {
+        self.selections.fetch_add(1, Ordering::Relaxed);
+        self.inner.select_cells(camera, image, select, out)
+    }
+}
+
+/// What one equality check saw.
+struct Agreement {
+    /// Corners both lanes produced, cell scan order for cell scan order.
+    corners: usize,
+    /// Band sweeps the GPU scanner was asked for: nonzero means the walk ran.
+    bands: usize,
+    /// Cell selections it was asked for: nonzero means the device path ran.
+    selections: usize,
 }
 
 /// One camera's detection, from a scanner of the caller's choosing.
@@ -96,7 +144,7 @@ fn detection_agrees(
     masks: &Masks,
     budget: usize,
     label: &str,
-) -> usize {
+) -> Agreement {
     let want: KeypointsData = detect_with(
         Box::new(CpuCornerScan::default()),
         image,
@@ -106,8 +154,14 @@ fn detection_agrees(
         masks,
         budget,
     );
+    let bands: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+    let selections: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let got: KeypointsData = detect_with(
-        Box::new(GpuCornerScan::new(gpu_client().unwrap()).unwrap()),
+        Box::new(CountingScan {
+            inner: Box::new(GpuCornerScan::new(gpu_client().unwrap()).unwrap()),
+            bands: Arc::clone(&bands),
+            selections: Arc::clone(&selections),
+        }),
         image,
         grid,
         counts,
@@ -126,7 +180,11 @@ fn detection_agrees(
         assert_eq!(got, want, "{label}: corner {index}");
     }
     assert_eq!(got.responses, want.responses, "{label}: responses");
-    want.corners.len()
+    Agreement {
+        corners: want.corners.len(),
+        bands: bands.load(Ordering::Relaxed),
+        selections: selections.load(Ordering::Relaxed),
+    }
 }
 
 /// The three framesets of MIO10 the flow fixtures carry, as the detector sees
@@ -153,7 +211,7 @@ fn the_gpu_cell_selection_matches_the_host_walk_on_a_real_frameset() {
 
         // Nothing tracked yet: every cell of the grid is detected in.
         let empty: Vec<i32> = vec![0; cells];
-        let found: usize = detection_agrees(
+        let agreed: Agreement = detection_agrees(
             &image,
             &grid,
             &empty,
@@ -163,8 +221,15 @@ fn the_gpu_cell_selection_matches_the_host_walk_on_a_real_frameset() {
             &format!("cam{camera} empty"),
         );
         assert!(
-            found > 30,
-            "cam{camera} found only {found} corners, which would make the equality vacuous"
+            agreed.corners > 30,
+            "cam{camera} found only {} corners, which would make the equality vacuous",
+            agreed.corners
+        );
+        assert!(
+            agreed.selections > 0 && agreed.bands == 0,
+            "cam{camera} did not take the device path: {} selections, {} bands",
+            agreed.selections,
+            agreed.bands
         );
 
         // Half the cells already hold a feature, which is the steady state: the
@@ -247,7 +312,7 @@ fn the_gpu_cell_selection_applies_the_same_gates() {
         w: grid.cell as f32,
         h: grid.cell as f32,
     });
-    detection_agrees(
+    let refused: Agreement = detection_agrees(
         &image,
         &grid,
         &counts,
@@ -256,6 +321,11 @@ fn the_gpu_cell_selection_applies_the_same_gates() {
         4096,
         "a mask across a cell boundary",
     );
+    assert_eq!(
+        refused.selections, 0,
+        "a straddling mask has to send the whole camera down the band walk"
+    );
+    assert!(refused.bands > 0, "and the band walk has to have run");
 
     // The port's own cap, checked where the C++ checks its cell budget: the
     // truncation must fall in the same place in the same scan order.
@@ -275,12 +345,14 @@ fn the_gpu_cell_selection_applies_the_same_gates() {
 /// A frame whose width is not a whole number of cells, and one shorter than it
 /// is wide.
 ///
-/// The right and bottom clamps are the two the cell window carries and the two
-/// a square 960x960 frame never exercises: `min(x + cell - 3, width - 3)` bites
-/// only where the last cell runs past the image, and kornia's in-block filter is
-/// on at 960 and off at 512, which changes the candidate set the selection reads.
+/// Not the clamps — [`CellGrid::new`] floors and centres, so every grid it
+/// derives ends inside its image and the kernel's two strict clamps never run.
+/// What these three do exercise is the other half of the geometry: kornia's
+/// in-block local-maximum filter is on at 960 and off at 512, and a width that
+/// is not a whole number of cells moves the grid's own start, both of which
+/// change the candidate set the selection reads.
 #[test]
-fn the_gpu_cell_selection_matches_the_host_walk_on_clamped_grids() {
+fn the_gpu_cell_selection_matches_the_host_walk_on_uneven_frames() {
     for (width, height, cell) in [
         (960usize, 240usize, 50usize),
         (512, 192, 32),
@@ -288,8 +360,11 @@ fn the_gpu_cell_selection_matches_the_host_walk_on_clamped_grids() {
     ] {
         let image: ImageU16 = cornered_image(width, height);
         let grid: CellGrid = CellGrid::new(width, height, cell).unwrap();
+        // The precondition the clamp test below needs and this one does not
+        // have: `CellGrid::new` cannot produce a cell that runs past the image.
+        assert!(grid.x_stop + cell <= width && grid.y_stop + cell <= height);
         let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
-        let found: usize = detection_agrees(
+        let agreed: Agreement = detection_agrees(
             &image,
             &grid,
             &counts,
@@ -298,6 +373,259 @@ fn the_gpu_cell_selection_matches_the_host_walk_on_clamped_grids() {
             4096,
             &format!("{width}x{height} cell {cell}"),
         );
-        assert!(found > 0, "{width}x{height} found nothing to compare");
+        assert!(
+            agreed.corners > 0,
+            "{width}x{height} found nothing to compare"
+        );
+        assert!(agreed.selections > 0, "{width}x{height} took the band walk");
+    }
+}
+
+/// A grid the detector's **caller** supplies, rather than one `CellGrid::new`
+/// derives from an image.
+///
+/// The occupancy matrix `detect_with` sizes from `rows` and `columns` has to
+/// cover every cell the walk visits, or the cells fall out of it instead of
+/// being detected in.
+fn caller_grid(
+    x_start: usize,
+    x_stop: usize,
+    y_start: usize,
+    y_stop: usize,
+    cell: usize,
+) -> CellGrid {
+    CellGrid {
+        cell,
+        x_start,
+        x_stop,
+        y_start,
+        y_stop,
+        columns: (x_stop - x_start) / cell + 1,
+        rows: (y_stop - y_start) / cell + 1,
+    }
+}
+
+/// Grids whose last cell runs past the image, which is where the clamps bite.
+///
+/// The frontend derives its grid with `CellGrid::new`, whose last cell always
+/// ends inside the frame, so `min(x + cell - 3, width - 3)` and the same down
+/// the side are dead there. The detector takes the grid from its caller, and
+/// these are the two shapes that reach them: a last column and a last row that
+/// overhang while still holding pixels inside `EDGE_THRESHOLD`, and a last
+/// column whose whole window is empty, which the device has to report as the
+/// no-winner sentinel and the host as nothing at all.
+///
+/// What the equality proves is that the device stays inside the image and sees
+/// the same zero rim; the clamped columns themselves are past
+/// `width - EDGE_THRESHOLD - 1`, so no corner can come out of them on either
+/// lane whatever the clamp does.
+#[test]
+fn the_gpu_cell_selection_matches_the_host_walk_on_overhanging_cells() {
+    let (width, height, cell): (usize, usize, usize) = (200, 150, 50);
+    let image: ImageU16 = cornered_image(width, height);
+
+    // Cells at x = 20, 70, 120, 170 and y = 10, 60, 110: the last column ends at
+    // 220 and the last row at 160, both past the frame.
+    let overhanging: CellGrid = caller_grid(20, 170, 10, 110, cell);
+    assert!(
+        overhanging.x_stop + cell > width,
+        "the last column has to run past the right edge"
+    );
+    assert!(
+        overhanging.y_stop + cell > height,
+        "the last row has to run past the bottom edge"
+    );
+    assert!(
+        overhanging.x_stop + FAST_BORDER < width - FAST_BORDER,
+        "and its window still has to hold candidates"
+    );
+
+    // Cells at x = 47, 97, 147, 197: the last column's window is [200, 197),
+    // which is empty, and the cell has to come back as the sentinel.
+    let empty_window: CellGrid = caller_grid(47, 197, 0, 100, cell);
+    assert!(
+        empty_window.x_stop + FAST_BORDER >= width - FAST_BORDER,
+        "the last column's candidate window has to be empty"
+    );
+
+    for (grid, label) in [
+        (overhanging, "an overhanging last column and row"),
+        (empty_window, "an empty last candidate window"),
+    ] {
+        let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
+        let agreed: Agreement = detection_agrees(
+            &image,
+            &grid,
+            &counts,
+            &detector_config(0.0),
+            &Masks::default(),
+            4096,
+            label,
+        );
+        assert!(agreed.corners > 0, "{label} found nothing to compare");
+        assert!(agreed.selections > 0, "{label} took the band walk");
+    }
+}
+
+/// The ladder's last rung is what the device is handed, not `min_threshold`.
+///
+/// `40/6` visits 40, 20, 10 and stops, because the next halving is 5 and the
+/// floor is 6; `32/5` visits 32, 16, 8. A device handed the configured minimum
+/// would admit a cell's best survivor scoring between the two — a corner the
+/// host walk never sees. The `admitted` run below is exactly that ladder, and
+/// asserting it finds strictly more corners is what stops this from passing
+/// vacuously.
+#[test]
+fn the_gpu_cell_selection_stops_at_the_last_rung_the_walk_visits() {
+    let image: ImageU16 = mio10_frame(0, 0);
+    let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
+    let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
+
+    for (max_threshold, min_threshold, last_rung) in [(40i32, 6i32, 10i32), (32, 5, 8)] {
+        let config: DetectorConfig = DetectorConfig {
+            max_threshold,
+            min_threshold,
+            ..detector_config(472.0)
+        };
+        assert_eq!(threshold_rungs(&config).last(), Some(last_rung));
+
+        // The ladder that stops at the configured minimum instead: one rung, at
+        // `min_threshold`. This is what a device given the wrong bound detects.
+        let at_the_minimum: DetectorConfig = DetectorConfig {
+            max_threshold: min_threshold,
+            ..config
+        };
+        assert_eq!(threshold_rungs(&at_the_minimum).last(), Some(min_threshold));
+        let admitted: usize = detect_with(
+            Box::new(CpuCornerScan::default()),
+            &image,
+            &grid,
+            &counts,
+            &at_the_minimum,
+            &Masks::default(),
+            4096,
+        )
+        .corners
+        .len();
+
+        let label: String = format!("ladder {max_threshold}/{min_threshold}");
+        let agreed: Agreement = detection_agrees(
+            &image,
+            &grid,
+            &counts,
+            &config,
+            &Masks::default(),
+            4096,
+            &label,
+        );
+        assert!(agreed.selections > 0, "{label} took the band walk");
+        assert!(
+            admitted > agreed.corners,
+            "{label}: a rung at {min_threshold} admits {admitted} corners against the last \
+             rung's {}, so the two bounds are not separable on this frame",
+            agreed.corners
+        );
+    }
+}
+
+/// A frame a packed key cannot name takes the band walk.
+///
+/// The key keeps twelve bits each for the row and the column, so
+/// [`CELL_KEY_LIMIT`] pixels on a side is where the device path has to give up
+/// rather than lose a coordinate. The guard is on the frame, not on the grid, so
+/// a wide short frame is enough to reach it.
+#[test]
+fn a_frame_at_the_key_limit_takes_the_band_walk() {
+    let (width, height, cell): (usize, usize, usize) = (CELL_KEY_LIMIT, 96, 32);
+    let image: ImageU16 = cornered_image(width, height);
+    let grid: CellGrid = CellGrid::new(width, height, cell).unwrap();
+    let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
+    let agreed: Agreement = detection_agrees(
+        &image,
+        &grid,
+        &counts,
+        &detector_config(0.0),
+        &Masks::default(),
+        4096,
+        "a frame at the key limit",
+    );
+    assert_eq!(
+        agreed.selections, 0,
+        "{width} pixels wide is past what a packed key can name"
+    );
+    assert!(agreed.bands > 0, "so the band walk has to have run");
+    assert!(agreed.corners > 0, "and it has to have found something");
+}
+
+/// More than one point per cell takes the band walk.
+///
+/// The exactness argument is a one-point-per-cell argument: with a larger budget
+/// the ladder decides how many corners a cell contributes and one key cannot say.
+#[test]
+fn a_budget_over_one_point_per_cell_takes_the_band_walk() {
+    let image: ImageU16 = mio10_frame(1, 0);
+    let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
+    let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
+    let config: DetectorConfig = DetectorConfig {
+        num_points_cell: 2,
+        ..detector_config(472.0)
+    };
+    let agreed: Agreement = detection_agrees(
+        &image,
+        &grid,
+        &counts,
+        &config,
+        &Masks::default(),
+        4096,
+        "two points per cell",
+    );
+    assert_eq!(agreed.selections, 0, "two points per cell is the band walk");
+    assert!(agreed.bands > 0, "so the band walk has to have run");
+    assert!(agreed.corners > 0, "and it has to have found something");
+}
+
+/// One scanner, four camera slots.
+///
+/// The device path keeps a key buffer per camera beside the three the band path
+/// keeps, and the frontend calls the detector with the frameset's own camera
+/// index — so a rig with four cameras reaches slot 3. The scratch is reused
+/// across the four calls, which is what the frontend does and what makes the
+/// per-camera buffers a thing that can be got wrong.
+#[test]
+fn the_gpu_cell_selection_holds_for_every_camera_slot() {
+    let config: DetectorConfig = detector_config(472.0);
+    let mut host: DetectorScratch = DetectorScratch::default();
+    let mut device: DetectorScratch =
+        DetectorScratch::with_scanner(Box::new(GpuCornerScan::new(gpu_client().unwrap()).unwrap()));
+
+    for camera in 0..4 {
+        // Two frames alternating, so consecutive slots hold different pixels.
+        let image: ImageU16 = mio10_frame(camera % 2, camera % 2);
+        let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
+        let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
+        let occupancy: Occupancy<'_> = Occupancy {
+            counts: &counts,
+            rows: grid.rows,
+            columns: grid.columns,
+        };
+        let mut want: KeypointsData = KeypointsData::default();
+        let mut got: KeypointsData = KeypointsData::default();
+        for (scratch, out) in [(&mut host, &mut want), (&mut device, &mut got)] {
+            detect_keypoints_with_cells(
+                &image,
+                camera,
+                &grid,
+                &occupancy,
+                &config,
+                &Masks::default(),
+                4096,
+                scratch,
+                out,
+            )
+            .unwrap();
+        }
+        assert!(!want.corners.is_empty(), "camera {camera} found nothing");
+        assert_eq!(got.corners, want.corners, "camera {camera}: corners");
+        assert_eq!(got.responses, want.responses, "camera {camera}: responses");
     }
 }
