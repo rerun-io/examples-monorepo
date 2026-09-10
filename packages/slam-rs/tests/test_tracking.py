@@ -16,6 +16,7 @@ module in this directory therefore stands alone.
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -166,3 +167,20 @@ def test_the_estimator_is_configured_from_basalts_own_two_files(manifest: Refere
     assert flow.optical_flow_image_safe_radius > 0.0
     # The text handed back is the one the config came from: a digest over it names what the estimator read.
     assert _core.VioConfig.from_json(config_text).to_json() == flow.to_json()
+
+
+def test_robocap_estimator_files_hand_back_the_very_string_they_parsed(manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The RoboCap config text is the one string ``VioConfig.from_json`` received, and the profile reaches it."""
+    parsed: list[str] = []
+
+    class RecordingVioConfig:
+        @staticmethod
+        def from_json(text: str) -> _core.VioConfig:
+            parsed.append(text)
+            return _core.VioConfig.from_json(text)
+
+    monkeypatch.setattr(tracking, "_core", SimpleNamespace(VioConfig=RecordingVioConfig, Calibration=_core.Calibration))
+    config_text: str
+    _calibration, _flow, config_text = robocap_estimator_files(manifest, profile="fast")
+    assert parsed == [config_text]
+    assert '"port.redetect_survivor_ratio"' in config_text

@@ -293,7 +293,12 @@ def test_result_carries_the_profile_and_the_runs_config_digest(
     resolved: str = profiled_config_text(manifest.package_root / manifest.robocap.vio_config, profile, manifest.package_root / "configs/profiles")
     assert robocap_estimator_files(manifest, profile=profile)[2] == resolved
     digest: str = hashlib.sha256(f"robocap:{profile}".encode()).hexdigest()
-    monkeypatch.setattr(robocap_fleet, "measure", lambda *_args: (replace(ROW, config_sha256=digest), empty_trajectory()))
+
+    def measured(_manifest: ReferenceManifest, _session: RobocapSession, received: Config, _machine: Machine) -> tuple[RobocapRow, Trajectory]:
+        assert received.profile == profile
+        return replace(ROW, config_sha256=digest), empty_trajectory()
+
+    monkeypatch.setattr(robocap_fleet, "measure", measured)
     output: Path = tmp_path / "robocap.json"
     main(Config(profile=profile, output_json=output))
     written: dict = json.loads(output.read_text())

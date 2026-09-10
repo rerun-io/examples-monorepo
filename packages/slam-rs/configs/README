@@ -2,7 +2,7 @@ basalt VIO configs, vendored from the fork's `data/msd/`, and the RoboCap
 calibration its converter wrote.
 
 Each `[[dataset]]` in `../reference_segments.toml` names the file its segments
-run with, and `slam_rs.reference.flow_config` reads it -- the C++ reference runs
+run with, and `slam_rs.reference.resolved_flow_config` reads it -- the C++ reference runs
 were driven with these files, and basalt's constructor defaults are a different
 estimator (`vio_marg_lost_landmarks`, C72).
 

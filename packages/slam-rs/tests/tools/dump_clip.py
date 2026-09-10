@@ -51,7 +51,7 @@ from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
 from slam_rs.catalog_feed import CameraCalib, Frameset, LocalSegment, SegmentFeed, open_segment
-from slam_rs.reference import ReferenceManifest, ReferenceSegment, flow_config, load_manifest
+from slam_rs.reference import ReferenceManifest, ReferenceSegment, load_manifest, resolved_flow_config
 
 FIXTURES: Path = Path(__file__).resolve().parents[2] / "crates/slam-rs/tests/fixtures"
 """Where the fork's own MSD calibration files sit in this repository."""
@@ -288,7 +288,7 @@ def main(config: Config) -> None:
             imu_t=np.concatenate(bundle_imu_t),
             imu_g=np.concatenate(bundle_imu_gyro),
             imu_a=np.concatenate(bundle_imu_accel),
-            safe_radius=np.int64(flow_config(manifest, segment).optical_flow_image_safe_radius),
+            safe_radius=np.int64(resolved_flow_config(manifest, segment)[0].optical_flow_image_safe_radius),
         )
         # The dataclasses the feed built, because `bench_track` compares lanes on
         # the calibration the reference ran and not on a second derivation of it.

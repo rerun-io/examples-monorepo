@@ -41,7 +41,7 @@ from slam_rs.catalog_feed import (
     open_segment,
 )
 from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
-from slam_rs.reference import SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment, flow_config, load_manifest
+from slam_rs.reference import SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment, load_manifest, resolved_flow_config
 from slam_rs.reference_bundle import BundleFile
 from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import Trajectory, ate, coverage, empty_trajectory, read_trajectory, shift_clock, write_trajectory
@@ -212,9 +212,11 @@ def main(config: Config) -> None:
         )
         log_calibration(feed.cameras)
         stage: FrontendStage | VioStage | None = None
+        vio_config: _core.VioConfig
         if config.stage == "frontend":
+            vio_config, _config_text = resolved_flow_config(manifest, segment, profile=config.profile)
             stage = FrontendStage(
-                flow=_core.OpticalFlow(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment, profile=config.profile)),
+                flow=_core.OpticalFlow(_core.Calibration.from_catalog(feed.cameras, feed.imu), vio_config),
                 logger=FrontendLogger(len(feed.cameras), feed.segment_id),
             )
             rr.send_blueprint(frontend_blueprint(feed.cameras))
@@ -225,7 +227,8 @@ def main(config: Config) -> None:
             # with no driver, no device or no adapter — and the shim
             # (:func:`slam_rs.apis.run`) is what turns it into one sentence and a
             # non-zero exit rather than a traceback through the feed.
-            vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment, profile=config.profile), gpu=config.gpu)
+            vio_config, _config_text = resolved_flow_config(manifest, segment, profile=config.profile)
+            vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), vio_config, gpu=config.gpu)
             stage = VioStage(
                 lockstep=Lockstep(vio=vio),
                 logger=VioLogger(

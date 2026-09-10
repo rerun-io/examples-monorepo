@@ -604,7 +604,7 @@ offset (0 for MSD, 14,902,432 ns for RoboCap), the decode path
 (`cpu_gray8_dav1d_1thread`, worth about 5 cm of ATE against NVDEC RGB), and the
 VIO config, vendored under `configs/` — basalt's constructor defaults are not its
 shipped files, and `vio_marg_lost_landmarks` alone was worth up to 12 cm (C72),
-so `slam_rs.reference.flow_config` reads the dataset's file and asserts the
+so `slam_rs.reference.resolved_flow_config` reads the dataset's file and asserts the
 manifest's image safe radius against it. `slam_rs.reference`'s module docstring
 carries the rest of the account, including where the V2 tolerances live and why.
 

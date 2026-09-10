@@ -459,9 +459,11 @@ def test_run_provenance_is_the_runs_own_digest_outside_clip_columns(
     so the digest has to come out of it; a tool that resolved the file again
     could name a config the estimator never read.
     """
+    requested: str = profile
     digests: dict[str, str] = {}
 
     def record(_manifest: ReferenceManifest, segment: ReferenceSegment, *, gpu: bool, profile: str) -> SegmentRun:
+        assert profile == requested
         digest: str = hashlib.sha256(f"{segment.dataset_name}:{profile}".encode()).hexdigest()
         digests[segment.dataset_name] = digest
         return SegmentRun(estimate=empty_trajectory(), framesets=412, lost=412, wall_s=1.0, config_sha256=digest)
@@ -493,3 +495,5 @@ def test_a_config_that_changes_during_a_run_stops_it(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(fleet_check, "run_segment", record)
     with pytest.raises(RuntimeError, match="the config changed during the run"):
         main(Config(segments=(SMOKE_SEGMENTS[1], SMOKE_SEGMENTS[1]), output_json=tmp_path / "fleet.json"))
+    # The first clip's JSON stands; the conflicting second clip was never written under the first digest.
+    assert len(json.loads((tmp_path / "fleet.json").read_text())["clips"]) == 1

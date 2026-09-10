@@ -744,11 +744,6 @@ def resolved_flow_config(
     return config, text
 
 
-def flow_config(manifest: ReferenceManifest, segment: ReferenceSegment, profile: Literal["reference", "fast"] = "reference") -> _core.VioConfig:
-    """:func:`resolved_flow_config` for a caller that records no provenance, such as the replay tool."""
-    return resolved_flow_config(manifest, segment, profile=profile)[0]
-
-
 def _imu(block: dict[str, Any]) -> ImuParameters:
     """One ``[*.imu]`` table."""
     return ImuParameters(

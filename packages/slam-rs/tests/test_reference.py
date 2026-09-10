@@ -6,13 +6,14 @@ import socket
 import urllib.parse
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pytest
 from beartype.roar import BeartypeException
 
-from slam_rs import _core
+from slam_rs import _core, reference
 from slam_rs.reference import (
     DECODE_PATH_BY_NAME,
     GATE_POLICY_BY_NAME,
@@ -24,7 +25,6 @@ from slam_rs.reference import (
     ReferenceManifest,
     ReferenceSegment,
     d60_failures,
-    flow_config,
     load_manifest,
     resolved_flow_config,
 )
@@ -220,32 +220,55 @@ def test_flow_config_loads_the_datasets_own_basalt_config(manifest: ReferenceMan
     The difference is one key — ``vio_marg_lost_landmarks``, true in both MSD
     files and false in the constructor (C72) — so the assertion is on the config
     the binding hands back, written out again, rather than on the manifest's own
-    text: a ``flow_config`` that quietly stopped reading the file would pass a
+    text: a ``resolved_flow_config`` that quietly stopped reading the file would pass a
     test that only compared the JSON on disk.
     """
     default: str = _core.VioConfig().to_json()
     for segment in manifest.segments:
-        config: _core.VioConfig = flow_config(manifest, segment)
+        config: _core.VioConfig
+        config, _text = resolved_flow_config(manifest, segment)
         assert config.optical_flow_image_safe_radius == segment.reference.optical_flow_image_safe_radius
         loaded: dict[str, Any] = json.loads(config.to_json())["value0"]
         assert loaded["config.vio_marg_lost_landmarks"] is True, segment.segment_id
         assert json.loads(default)["value0"]["config.vio_marg_lost_landmarks"] is False
         assert config.to_json() != default, segment.segment_id
     # The two devices differ in the radius and the port sees that difference.
-    radii: set[float] = {flow_config(manifest, segment).optical_flow_image_safe_radius for segment in manifest.segments}
+    radii: set[float] = {resolved_flow_config(manifest, segment)[0].optical_flow_image_safe_radius for segment in manifest.segments}
     assert radii == {472.0, 340.0}
 
 
-def test_resolved_flow_config_hands_back_the_text_it_parsed(manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The text beside the config is the one the config came from, byte for byte, so a digest over it names what the estimator read."""
+def test_resolved_flow_config_hands_back_the_very_string_it_parsed(manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The text beside the config is the one string ``VioConfig.from_json`` received, not a second read of the file.
+
+    Every read returns a different text here, so a function that resolved the
+    file twice could not hand back what it parsed; and the parse is recorded
+    through the module's own ``_core`` name, so the string is compared byte for
+    byte rather than through a re-serialization that would hide whitespace.
+    """
+    reads: list[int] = []
     original = ReferenceManifest.vio_config_text
-    monkeypatch.setattr(ReferenceManifest, "vio_config_text", lambda self, name, profile="reference": original(self, name, profile) + "\n")
+
+    def differing(self: ReferenceManifest, name: str, profile: str = "reference") -> str:
+        reads.append(len(reads))
+        return original(self, name, profile) + "\n" * len(reads)
+
+    parsed: list[str] = []
+
+    class RecordingVioConfig:
+        @staticmethod
+        def from_json(text: str) -> _core.VioConfig:
+            parsed.append(text)
+            return _core.VioConfig.from_json(text)
+
+    monkeypatch.setattr(ReferenceManifest, "vio_config_text", differing)
+    monkeypatch.setattr(reference, "_core", SimpleNamespace(VioConfig=RecordingVioConfig))
     segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENTS[1])
     config: _core.VioConfig
     text: str
     config, text = resolved_flow_config(manifest, segment)
-    assert text.endswith("}\n\n")  # the file's own newline, then the one the patch added
-    assert text == manifest.vio_config_text(segment.dataset_name)
+    assert parsed == [text]
+    assert reads == [0]
+    assert text != manifest.vio_config_text(segment.dataset_name)
     assert config.to_json() == _core.VioConfig.from_json(text).to_json()
 
 
@@ -262,11 +285,11 @@ def test_flow_config_refuses_a_radius_the_config_disagrees_with(tmp_path: Path) 
     manifest: ReferenceManifest = load_manifest(broken)
     changed: ReferenceSegment = next(s for s in manifest.segments if s.reference.optical_flow_image_safe_radius == 400.0)
     with pytest.raises(ValueError, match="optical_flow_image_safe_radius"):
-        flow_config(manifest, changed)
+        resolved_flow_config(manifest, changed)
     # Every other segment still builds, so the refusal is about the one that disagrees.
     for segment in manifest.segments:
         if segment.segment_id != changed.segment_id:
-            assert flow_config(manifest, segment).optical_flow_image_safe_radius == segment.reference.optical_flow_image_safe_radius
+            assert resolved_flow_config(manifest, segment)[0].optical_flow_image_safe_radius == segment.reference.optical_flow_image_safe_radius
 
 
 def test_every_dataset_names_a_vendored_config_that_parses(manifest: ReferenceManifest) -> None:
