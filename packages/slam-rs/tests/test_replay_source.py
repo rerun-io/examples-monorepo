@@ -13,20 +13,24 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from slam_rs.apis import replay
 from slam_rs.apis.replay import Config, main
 from slam_rs.catalog_feed import CatalogSegment, LocalSegment, SegmentSource
-from slam_rs.reference import SMOKE_SEGMENTS, ReferenceManifest
+from slam_rs.reference import SMOKE_SEGMENTS, ImuParameters, ReferenceManifest
 
 CATALOG: str = "rerun+http://dgx-spark:9988"
+UNLISTED: str = "msd-g2__MGO_others__MGO11_short_3_backandforth"
+"""A catalog segment of a known dataset that the reference set does not list."""
 
 
 class _Opened(Exception):
     """Raised by the stand-in feed so ``main`` stops once the source is chosen."""
 
 
-def _capture_source(monkeypatch: pytest.MonkeyPatch) -> list[SegmentSource]:
+def _capture_source(monkeypatch: pytest.MonkeyPatch, parameters: list[ImuParameters] | None = None) -> list[SegmentSource]:
     seen: list[SegmentSource] = []
 
-    def opened(source: SegmentSource, *_args: object, **_kwargs: object) -> None:
+    def opened(source: SegmentSource, imu: ImuParameters, *_args: object, **_kwargs: object) -> None:
         seen.append(source)
+        if parameters is not None:
+            parameters.append(imu)
         raise _Opened
 
     monkeypatch.setattr(replay, "open_segment", opened)
@@ -56,4 +60,30 @@ def test_a_catalog_and_a_file_are_two_sources_and_refused(manifest: ReferenceMan
     seen: list[SegmentSource] = _capture_source(monkeypatch)
     with pytest.raises(ValueError, match="two sources"):
         main(Config(rr_config=RerunTyroConfig(headless=True), segment=SMOKE_SEGMENTS[1], catalog=CATALOG, rrd=tmp_path / "base.rrd"))
+    assert seen == []
+
+
+def test_an_unlisted_catalog_segment_takes_its_datasets_parameters(manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any segment of a known dataset replays from the catalog with that dataset's IMU model; no manifest entry is needed."""
+    parameters: list[ImuParameters] = []
+    seen: list[SegmentSource] = _capture_source(monkeypatch, parameters)
+    with pytest.raises(_Opened):
+        main(Config(rr_config=RerunTyroConfig(headless=True), segment=UNLISTED, catalog=CATALOG))
+    assert seen == [CatalogSegment(url=CATALOG, dataset_name="msd-g2", segment_id=UNLISTED)]
+    assert parameters == [next(s.imu for s in manifest.segments if s.dataset_name == "msd-g2")]
+
+
+def test_an_unlisted_segment_without_a_catalog_is_refused_with_the_way_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The manifest has files only for the reference set; the refusal names --catalog."""
+    seen: list[SegmentSource] = _capture_source(monkeypatch)
+    with pytest.raises(ValueError, match="not in the reference set.*--catalog"):
+        main(Config(rr_config=RerunTyroConfig(headless=True), segment=UNLISTED))
+    assert seen == []
+
+
+def test_a_catalog_segment_of_an_unknown_dataset_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dataset the manifest has no config or IMU model for cannot be replayed, catalog or not."""
+    seen: list[SegmentSource] = _capture_source(monkeypatch)
+    with pytest.raises(ValueError, match="'msd-nowhere' is not in the reference set"):
+        main(Config(rr_config=RerunTyroConfig(headless=True), segment="msd-nowhere__X__Y", catalog=CATALOG))
     assert seen == []
