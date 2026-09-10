@@ -354,12 +354,13 @@ fn linearize_state<S: LieScalar>(
                 continue;
             };
             let tcid_h: TimeCamId = lm.host_kf_id;
-            let camera = cameras
-                .get(cam_id)
-                .ok_or(crate::linearize::LinearizeError::UnknownCamera {
-                    cam_id,
-                    camera_count: cameras.len(),
-                })?;
+            let camera =
+                cameras
+                    .get(cam_id)
+                    .ok_or(crate::linearize::LinearizeError::UnknownCamera {
+                        cam_id,
+                        camera_count: cameras.len(),
+                    })?;
 
             // `linearization_abs_qr.cpp:207-241`: the Jacobian at the
             // linearization point, the value at the current state when either
@@ -392,7 +393,14 @@ fn linearize_state<S: LieScalar>(
                     Some(&mut d_rel_d_t),
                 );
                 if state_h.is_linearized() || state_t.is_linearized() {
-                    rel = compute_rel_pose(state_h.pose(), t_i_c_h, state_t.pose(), t_i_c_t, None, None);
+                    rel = compute_rel_pose(
+                        state_h.pose(),
+                        t_i_c_h,
+                        state_t.pose(),
+                        t_i_c_t,
+                        None,
+                        None,
+                    );
                 }
                 (rel.matrix(), d_rel_d_t)
             };
@@ -417,7 +425,10 @@ fn linearize_state<S: LieScalar>(
             }
             // `:153-163`: zeroed, never fatal.
             if !d_res_d_xi.iter().all(|v| v.to_f64().is_finite()) {
-                log::warn!("d_res_d_xi is not valid in the frame update, lm = {:?}", lm.id);
+                log::warn!(
+                    "d_res_d_xi is not valid in the frame update, lm = {:?}",
+                    lm.id
+                );
                 d_res_d_xi.fill(S::zero());
             }
 
@@ -445,20 +456,22 @@ fn linearize_state<S: LieScalar>(
     // The IMU factor over `(prev, t_ns]`, with the previous state held: its
     // 30x30 system's trailing corner is the newest state's, which is what
     // deleting a fixed variable's rows and columns comes to.
-    let start_state: &PoseVelBiasStateWithLin<S> = ba.frame_states.get(&prev_t_ns).ok_or(
-        EstimatorError::ImuFactorStateMissing {
-            start_t_ns: prev_t_ns,
-            end_t_ns: t_ns,
-            missing_t_ns: prev_t_ns,
-        },
-    )?;
-    let end_state: &PoseVelBiasStateWithLin<S> = ba.frame_states.get(&t_ns).ok_or(
-        EstimatorError::ImuFactorStateMissing {
-            start_t_ns: prev_t_ns,
-            end_t_ns: t_ns,
-            missing_t_ns: t_ns,
-        },
-    )?;
+    let start_state: &PoseVelBiasStateWithLin<S> =
+        ba.frame_states
+            .get(&prev_t_ns)
+            .ok_or(EstimatorError::ImuFactorStateMissing {
+                start_t_ns: prev_t_ns,
+                end_t_ns: t_ns,
+                missing_t_ns: prev_t_ns,
+            })?;
+    let end_state: &PoseVelBiasStateWithLin<S> =
+        ba.frame_states
+            .get(&t_ns)
+            .ok_or(EstimatorError::ImuFactorStateMissing {
+                start_t_ns: prev_t_ns,
+                end_t_ns: t_ns,
+                missing_t_ns: t_ns,
+            })?;
     let block: ImuBlock<S> = ImuBlock::linearize(meas, imu_lin, start_state, end_state);
     imu_h.fill(S::zero());
     imu_b.fill(S::zero());
@@ -472,4 +485,303 @@ fn linearize_state<S: LieScalar>(
     error += block.error;
 
     Ok((error, block.error))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use nalgebra::{Vector3, Vector4};
+
+    use super::*;
+    use crate::calib::Calibration;
+    use crate::camera::CameraEnum;
+    use crate::config::VioConfig;
+    use crate::imu::{ImuNoise, ImuSample};
+    use crate::landmark::{Landmark, StereographicParam};
+    use crate::lie::So3;
+    use crate::types::{LandmarkId, PoseStateWithLin, PoseVelBiasState};
+
+    const CALIB: &str = include_str!("../../tests/fixtures/msdmi_calib.json");
+    const CONFIG: &str = include_str!("../../../../configs/msdmi_config.json");
+
+    /// The host keyframe, the previous state and the newest state.
+    const HOST_T_NS: i64 = 0;
+    /// See [`HOST_T_NS`].
+    const PREV_T_NS: i64 = 20_000_000;
+    /// See [`HOST_T_NS`].
+    const CURRENT_T_NS: i64 = 40_000_000;
+
+    /// A window whose IMU factor and whose observations both point at one pose.
+    ///
+    /// The host keyframe sits at the origin and hosts twelve landmarks two
+    /// metres out. The truth is *defined* as the preintegration's prediction from
+    /// the previous state, so the IMU residual is zero there, and every pixel is
+    /// the projection of a landmark through that same pose, so the reprojection
+    /// residual is zero there too. The global minimum is therefore the truth at
+    /// cost zero, which is what makes this a known answer rather than a
+    /// regression baseline.
+    ///
+    /// Returns the estimator with the newest state left **at** the truth, and the
+    /// truth beside it.
+    fn a_window(iterations: i32) -> (SqrtKeypointVio<f64>, PoseVelBiasState<f64>) {
+        let mut config: VioConfig = VioConfig::from_json_str(CONFIG).unwrap();
+        config.port_frame_update_max_iterations = iterations;
+        let calibration: Calibration<f64> = Calibration::from_json_str(CALIB).unwrap();
+        let gravity: Vector3<f64> = Vector3::new(0.0, 0.0, -9.81);
+        let mut vio: SqrtKeypointVio<f64> =
+            SqrtKeypointVio::new(gravity, calibration, config).unwrap();
+
+        // The host keyframe, frozen as a marginalized pose block is.
+        vio.kf_ids.insert(HOST_T_NS);
+        vio.ba.frame_poses.insert(
+            HOST_T_NS,
+            PoseStateWithLin::new(HOST_T_NS, Se3::identity(), true),
+        );
+
+        // The previous state, half a metre along `x` and looking the same way.
+        let zero: Vector3<f64> = Vector3::zeros();
+        let previous: PoseVelBiasState<f64> = PoseVelBiasState::new(
+            PREV_T_NS,
+            Se3::new(So3::identity(), Vector3::new(0.5, 0.0, 0.0)),
+            Vector3::new(0.1, 0.0, 0.0),
+            zero,
+            zero,
+        );
+        vio.ba
+            .frame_states
+            .insert(PREV_T_NS, PoseVelBiasStateWithLin::new(previous, false));
+
+        // One preintegrated interval over the 20 ms between them, folded sample
+        // by sample at the rig's own rate and with the rig's own noise, exactly
+        // as `process_frame` folds it: a single wide step leaves the covariance
+        // stiff enough that the whitened problem has no significant digits left.
+        // Gravity is cancelled, so the motion is the previous velocity plus a
+        // small turn.
+        let noise: ImuNoise<f64> = ImuNoise::from_calibration(&vio.ba.calib);
+        let mut meas: IntegratedImuMeasurement<f64> =
+            IntegratedImuMeasurement::new(PREV_T_NS, &zero, &zero);
+        let step_ns: i64 = (1e9 / vio.ba.calib.imu_update_rate) as i64;
+        let mut t_ns: i64 = PREV_T_NS + step_ns;
+        while t_ns <= CURRENT_T_NS {
+            meas.integrate(
+                &ImuSample {
+                    t_ns,
+                    gyro: Vector3::new(0.05, -0.03, 0.02),
+                    accel: Vector3::new(0.0, 0.0, 9.81),
+                },
+                &noise.accel_cov,
+                &noise.gyro_cov,
+            )
+            .unwrap();
+            t_ns += step_ns;
+        }
+        let predicted = meas.predict_state(&previous.pose_vel_state(), &gravity);
+        let truth: PoseVelBiasState<f64> = PoseVelBiasState::new(
+            CURRENT_T_NS,
+            predicted.t_w_i,
+            predicted.vel_w_i,
+            previous.bias_gyro,
+            previous.bias_accel,
+        );
+        vio.imu_meas.insert(PREV_T_NS, meas);
+        vio.ba
+            .frame_states
+            .insert(CURRENT_T_NS, PoseVelBiasStateWithLin::new(truth, false));
+        vio.last_state_t_ns = CURRENT_T_NS;
+        vio.opt_started = true;
+
+        // Twelve landmarks in a grid two metres in front of the host camera,
+        // each observed by every camera that can see it — at the pixel the truth
+        // projects it to, which is what makes the truth a zero-cost point.
+        let cameras: Vec<CameraEnum<f64>> = vio.ba.cameras().to_vec();
+        let host: TimeCamId = TimeCamId::new(HOST_T_NS, 0);
+        let mut next_id: u64 = 0;
+        for row in -1..=1_i32 {
+            for column in -2..=1_i32 {
+                let point: Vector4<f64> =
+                    Vector4::new(f64::from(column) * 0.3, f64::from(row) * 0.3, 2.0, 0.0);
+                let landmark: Landmark<f64> = Landmark::new(
+                    LandmarkId(next_id),
+                    host,
+                    StereographicParam::project(&point),
+                    1.0 / crate::eigen::norm3(point[0], point[1], point[2]),
+                );
+                next_id += 1;
+
+                let mut filed: bool = false;
+                for (cam_id, camera) in cameras.iter().enumerate() {
+                    let rel: Se3<f64> = compute_rel_pose(
+                        &Se3::identity(),
+                        &vio.ba.calib.t_i_c[host.cam_id],
+                        &truth.t_w_i,
+                        &vio.ba.calib.t_i_c[cam_id],
+                        None,
+                        None,
+                    );
+                    let mut pixel: Vector2<f64> = Vector2::zeros();
+                    let visible: bool = linearize_point(
+                        &Vector2::zeros(),
+                        &landmark,
+                        &rel.matrix(),
+                        camera,
+                        &mut pixel,
+                        &mut LinearizePointOut::default(),
+                    );
+                    if !visible {
+                        continue;
+                    }
+                    if !filed {
+                        vio.ba.lmdb.add_landmark(landmark.id, &landmark);
+                        filed = true;
+                    }
+                    vio.ba
+                        .lmdb
+                        .add_observation(TimeCamId::new(CURRENT_T_NS, cam_id), landmark.id, pixel)
+                        .unwrap();
+                }
+            }
+        }
+        assert!(
+            vio.ba.lmdb.num_observations() >= 12,
+            "the fixture has to give the pose something to see: {}",
+            vio.ba.lmdb.num_observations()
+        );
+
+        (vio, truth)
+    }
+
+    /// How far the recovered state may sit from the truth: the fixture's minimum
+    /// is exact, so this is convergence and not agreement. Measured from the
+    /// perturbation below, which converges in three LM steps
+    /// (2.0e6 -> 9.1e-2 -> 5.3e-9 -> 3.6e-17): 2.1e-13 m, 3.6e-15 rad and
+    /// 1.9e-11 m/s.
+    const CONVERGENCE_TOLERANCE: f64 = 1e-9;
+
+    /// The known answer: a state pushed off a zero-cost minimum comes back to it.
+    ///
+    /// Both factor groups agree at the truth by construction, so the frame update
+    /// has one thing to find and the assertion is against that value rather than
+    /// against a recorded run.
+    #[test]
+    fn the_frame_update_recovers_a_state_pushed_off_a_zero_cost_minimum() {
+        let (mut vio, truth) = a_window(5);
+        let mut perturbation: Vector15<f64> = Vector15::zeros();
+        perturbation
+            .fixed_rows_mut::<3>(0)
+            .copy_from(&Vector3::new(0.02, -0.015, 0.01));
+        perturbation
+            .fixed_rows_mut::<3>(3)
+            .copy_from(&Vector3::new(0.004, 0.006, -0.003));
+        perturbation
+            .fixed_rows_mut::<3>(6)
+            .copy_from(&Vector3::new(0.05, -0.04, 0.03));
+        vio.ba
+            .frame_states
+            .get_mut(&CURRENT_T_NS)
+            .unwrap()
+            .apply_inc(&perturbation);
+
+        let (lm, _, _) = vio.frame_update(CURRENT_T_NS).unwrap().unwrap();
+        assert!(!lm.is_empty(), "the loop has to take at least one step");
+        let last = lm.last().unwrap();
+        assert!(
+            last.error_after < 1e-12,
+            "the minimum is exact, so the cost has to reach it: {}",
+            last.error_after
+        );
+        assert!(
+            lm.iter().all(|step| step.accepted),
+            "a quadratic with an exact minimum should not need a backtrack"
+        );
+
+        let recovered: &PoseVelBiasState<f64> = vio.ba.frame_states[&CURRENT_T_NS].state();
+        let position: f64 = (recovered.t_w_i.translation - truth.t_w_i.translation).norm();
+        let rotation: f64 = (recovered.t_w_i.rotation * truth.t_w_i.rotation.inverse())
+            .log()
+            .norm();
+        let velocity: f64 = (recovered.vel_w_i - truth.vel_w_i).norm();
+        assert!(position < CONVERGENCE_TOLERANCE, "position {position}");
+        assert!(rotation < CONVERGENCE_TOLERANCE, "rotation {rotation}");
+        assert!(velocity < CONVERGENCE_TOLERANCE, "velocity {velocity}");
+    }
+
+    /// The step cap is the knob's, and it counts accepted and backtracked steps
+    /// together as `vio_max_iterations` does (D12).
+    #[test]
+    fn the_knob_caps_the_steps() {
+        for cap in 1..=3_i32 {
+            let (mut vio, _) = a_window(cap);
+            let mut perturbation: Vector15<f64> = Vector15::zeros();
+            perturbation
+                .fixed_rows_mut::<3>(0)
+                .copy_from(&Vector3::new(0.2, -0.15, 0.1));
+            vio.ba
+                .frame_states
+                .get_mut(&CURRENT_T_NS)
+                .unwrap()
+                .apply_inc(&perturbation);
+            let (lm, _, _) = vio.frame_update(CURRENT_T_NS).unwrap().unwrap();
+            assert!(
+                i32::try_from(lm.len()).unwrap() <= cap + 1,
+                "cap {cap} took {} steps",
+                lm.len()
+            );
+        }
+    }
+
+    /// A frameset the frame update cannot serve goes back to the joint solve
+    /// rather than being solved wrong, and every test reads the window alone.
+    #[test]
+    fn a_frameset_without_its_imu_factor_is_declined() {
+        // No preintegration joining the two states.
+        let (mut vio, _) = a_window(2);
+        vio.imu_meas.clear();
+        assert!(vio.frame_update(CURRENT_T_NS).unwrap().is_none());
+
+        // A frameset that is not the newest state.
+        let (mut vio, _) = a_window(2);
+        assert!(vio.frame_update(PREV_T_NS).unwrap().is_none());
+
+        // No previous state to hold.
+        let (mut vio, _) = a_window(2);
+        vio.ba.frame_states.remove(&PREV_T_NS);
+        assert!(vio.frame_update(CURRENT_T_NS).unwrap().is_none());
+
+        // A prior that orders the newest state: its gradient would not be zero.
+        let (mut vio, _) = a_window(2);
+        vio.marg_data
+            .order
+            .push(CURRENT_T_NS, POSE_VEL_BIAS_SIZE)
+            .unwrap();
+        assert!(vio.frame_update(CURRENT_T_NS).unwrap().is_none());
+    }
+
+    /// Offline mode lets nothing but the data reach a decision: the same window
+    /// solved twice gives the same state, coefficient for coefficient.
+    #[test]
+    fn a_repeat_frame_update_is_bit_identical() {
+        /// The state the solve left behind and the trail it took to get there.
+        type Solved = (PoseVelBiasState<f64>, Vec<(i32, f64, f64, bool)>);
+        let solve = || -> Solved {
+            let (mut vio, _) = a_window(3);
+            let mut perturbation: Vector15<f64> = Vector15::zeros();
+            perturbation
+                .fixed_rows_mut::<3>(0)
+                .copy_from(&Vector3::new(0.02, -0.015, 0.01));
+            vio.ba
+                .frame_states
+                .get_mut(&CURRENT_T_NS)
+                .unwrap()
+                .apply_inc(&perturbation);
+            let (lm, _, _) = vio.frame_update(CURRENT_T_NS).unwrap().unwrap();
+            (
+                *vio.ba.frame_states[&CURRENT_T_NS].state(),
+                lm.iter()
+                    .map(|step| (step.iteration, step.error_after, step.l_diff, step.accepted))
+                    .collect(),
+            )
+        };
+        assert_eq!(solve(), solve());
+    }
 }

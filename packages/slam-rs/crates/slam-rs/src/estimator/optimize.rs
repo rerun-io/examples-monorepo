@@ -172,10 +172,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     /// (`:1300-1303`), [`EstimatorError::FrameNotInOrdering`] where `:1468`
     /// and `:1472` read the ordering with `.at()`, and the linearization's own
     /// errors.
-    pub(super) fn optimize(
-        &mut self,
-        t_ns: i64,
-    ) -> Result<SolveOutcome<S>, EstimatorError> {
+    pub(super) fn optimize(&mut self, t_ns: i64) -> Result<SolveOutcome<S>, EstimatorError> {
         let mut lm: Vec<LmIteration<S>> = Vec::new();
         let mut timings: StageTimings = StageTimings::default();
         // `:1207`: five states have to accumulate before the first

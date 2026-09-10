@@ -118,8 +118,8 @@ use crate::types::{
 };
 
 use frame_update::FrameUpdateScratch;
-use optimize::{OptimizeScratch, SolveOutcome};
 pub use optimize::{LmIteration, LmTermination};
+use optimize::{OptimizeScratch, SolveOutcome};
 use schedule::MarginalizationOutcome;
 pub use schedule::{EvictionReason, KeyframeEviction, MarginalizationStats};
 
