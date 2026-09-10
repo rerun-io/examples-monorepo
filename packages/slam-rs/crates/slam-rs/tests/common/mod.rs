@@ -352,6 +352,13 @@ pub struct OracleFrame {
     pub num_imu_meas: usize,
     pub marg_order: Vec<(i64, usize, usize)>,
     pub marg_digest: OracleDigest,
+    /// The prior itself, row by row, on the framesets `tools/vio_oracle.cpp`
+    /// dumps it: every tenth, so frames 0, 10, 20, 30, 40 and 50 of each lane.
+    #[serde(default)]
+    pub marg_h: Option<Vec<Vec<f64>>>,
+    /// The prior's right-hand side on those same framesets.
+    #[serde(default)]
+    pub marg_b: Option<Vec<f64>>,
     pub marg: Option<OracleMarg>,
     pub lm: Vec<OracleLm>,
 }

@@ -1617,12 +1617,25 @@ upstream for the rest to follow.
 
 Bit-exact oracle assertions that the swapped arithmetic broke became measured
 tolerances, each with its worst observed value in the comment. The one
-substantive rewrite is the marginalization prior's shape in `vio_oracle.rs`: on
-seven of sixty f32 framesets the QR finds one more rank than the C++ because a
-gauge-null direction sits on the `sqrt(f32::EPSILON)` threshold; the assertion
-now states the invariant the equality stood in for — no rank lost, at most one
-row gained, and a surplus row's norm below 1e-2 against a 0.35 floor for real
-constraints (measured 8.8e-4 and 9.2e-4).
+substantive rewrite is the marginalization prior's shape assertion in
+`vio_oracle.rs`: on seven of sixty f32 framesets the QR finds one more rank than
+the C++ because a gauge-null direction sits on the `sqrt(f32::EPSILON)`
+threshold. The row count is now a shape bound and nothing more — the C++'s, or
+one more row — and what the equality stood in for is asserted on what the prior
+*represents*, which no shape can hide. Every frameset: the prior constrains no
+more directions than the C++'s prior has rows, counted as singular values above
+1e-5 of the largest (over both lanes and all 120 framesets the smallest ratio
+either keeps is 1.3e-5 and the largest it discards 5.2e-7; the surplus row's own
+direction sits at 5.7e-15 to 1.6e-14, against 4.4e-5 for the weakest constraint
+of the same frameset). And on the six framesets per lane whose C++ prior
+`tools/vio_oracle.cpp` dumps in full — frameset 10 is one of the seven — the
+information `H^T H` and the term `H^T b` against the C++'s own, whitened by the
+C++'s information so every direction is compared at its own scale rather than
+the loudest one's: measured worst 3.7e-7 in f64 and 1.1e-1 in f32, against
+constants 5e-6 and 3e-1. Below 1 is the point of the f32 constant, because a
+prior that loses one of the C++'s directions scores exactly 1 whatever that
+direction's size; two unit tests hold the comparison to that case and to a
+constraint hidden beside a zero row, which the row-norm surrogate passed.
 
 The gate for a change of this class (Pablo, the same day): MIO10 fast, three
 rounds, MIO07 fast and MGO07 fast on the A/B harness, ATE within the 1.1x band

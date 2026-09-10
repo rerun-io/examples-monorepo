@@ -91,7 +91,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, LazyLock};
 
-use nalgebra::Vector3;
+use nalgebra::{DMatrix, DVector, SymmetricEigen, Vector3};
 
 use slam_rs::config::VioConfig;
 use slam_rs::estimator::{
@@ -170,15 +170,39 @@ const CANCELLING_TOLERANCE_F32: f64 = 5e-1;
 /// `f64` run sees at those steps.
 const F32_ACCEPT_NOISE_ULPS: f64 = 64.0;
 
-/// The row norm below which a marginalization prior's row is a null direction
-/// rather than a constraint, used only where the `f32` lane keeps a row the C++
-/// discards (see the prior-shape assertion in `compare`).
+/// The share of a marginalization prior's largest singular value below which a
+/// direction carries no information.
 ///
-/// Measured over both lanes and all 120 framesets: the surplus rows are 8.8e-4
-/// and 9.2e-4, the smallest non-zero row either lane keeps anywhere is 0.35, and
-/// the largest is 1.3e4. The constant sits an order above the first group and
-/// 35 times below the second.
-const MARG_NULL_ROW_NORM: f64 = 1e-2;
+/// Two uses, one meaning: the threshold [`constrained_directions`] counts
+/// above, and the floor [`prior_deviation`] whitens with, so that a direction
+/// the C++'s prior leaves free is measured against the weakest constraint its
+/// QR would have kept rather than against zero.
+///
+/// Measured over both lanes and all 120 framesets: the smallest ratio either
+/// lane keeps is 1.3e-5 and the largest it discards is 5.2e-7, and on the seven
+/// `f32` framesets that keep a row the C++ does not, that row's direction sits
+/// at 5.7e-15 to 1.6e-14 — nine orders below the weakest constraint of the same
+/// frameset (4.4e-5). (Exactly-zero rows are a third thing: the 15x15 seed
+/// prior has five, and they are simply not directions.) The count the constant
+/// feeds is asserted one-sided, so a direction sitting on it can only lower
+/// that count, never raise it.
+const PRIOR_NULL_RATIO: f64 = 1e-5;
+
+/// How far the prior may stand from the C++'s in what it *represents* — the
+/// information `H^T H` and the term `H^T b`, whitened by the C++'s own
+/// information so that every direction is compared at its own scale — in `f64`.
+///
+/// Measured over the six framesets per lane whose C++ prior the fixture
+/// carries: 3.7e-7 on the information and 5.6e-10 on the term.
+const PRIOR_TOLERANCE_F64: f64 = 5e-6;
+
+/// The same in `f32`. Measured: 1.1e-1 on the information (frameset 10, in the
+/// directions the C++'s prior leaves free) and 3.3e-2 on the term, which is one
+/// of the accumulated-history quantities [`CANCELLING_TOLERANCE_F32`]
+/// describes. The constant is 2.8 times the first and, by construction, below
+/// 1: a prior that loses one of the C++'s directions outright scores exactly 1,
+/// whatever that direction's size.
+const PRIOR_TOLERANCE_F32: f64 = 3e-1;
 
 /// What `configs/profiles/fast.json` gives the frame update, so the lane the
 /// test drives is the lane the benchmark runs (D76).
@@ -236,6 +260,8 @@ struct Worst {
     step_norminf: f64,
     prior_h: f64,
     prior_b: f64,
+    prior_form: f64,
+    prior_rhs: f64,
 }
 
 impl Worst {
@@ -411,6 +437,7 @@ fn compare<S: LieScalar>(run: &OracleRun, gate: LmGate) -> Worst {
             expected.marg_digest.cols,
             "{where_}: prior columns"
         );
+
         // The row count is the *rank* the marginalizing QR found — how many
         // columns cleared `|beta| > sqrt(epsilon)` (`marg/helper.rs`) — and in
         // `f32` that threshold is 3.4e-4 with a gauge-null direction sitting on
@@ -420,42 +447,52 @@ fn compare<S: LieScalar>(run: &OracleRun, gate: LmGate) -> Worst {
         // direction now clears the threshold: 17x21 where the C++ has 16x21,
         // then 23x27 where it has 22x27. `f64` is unchanged on all 60.
         //
-        // What the exact assertion was standing in for is that the prior
-        // constrains the same subspace, so that is what is asserted: no rank is
-        // *lost*, and any surplus row is a null direction rather than a
-        // constraint. Measured over both lanes and all 120 framesets, the
-        // surplus rows have norm 8.8e-4 and 9.2e-4, against 0.35 for the
-        // smallest non-zero row either lane keeps anywhere and 1.3e4 for the
-        // largest — three and a half orders of separation, which is why
-        // [`MARG_NULL_ROW_NORM`] can sit between them. (Exactly-zero rows are a
-        // third thing and stay: the 15x15 seed prior has five of them, and
-        // there `rows` equals the C++'s, so nothing below is asked of it.)
+        // So the row count is asserted as a shape bound and nothing more — the
+        // C++'s, or the one extra row both lanes measure. What the dropped
+        // equality stood in for, that the prior holds the window to the same
+        // constraints, is two assertions below, neither of which can be
+        // satisfied by a zero or a dependent row.
         assert!(
             (expected.marg_digest.rows..=expected.marg_digest.rows + 1).contains(&prior.nrows()),
             "{where_}: prior rows {} outside the C++'s {} plus the one threshold flip",
             prior.nrows(),
             expected.marg_digest.rows
         );
-        let surplus: usize = prior.nrows() - expected.marg_digest.rows;
-        if surplus > 0 {
-            let mut norms: Vec<f64> = (0..prior.nrows())
-                .map(|i| {
-                    prior
-                        .row(i)
-                        .iter()
-                        .fold(S::zero(), |acc, v| acc + *v * *v)
-                        .sqrt()
-                        .to_f64()
-                })
-                .collect();
-            norms.sort_by(|a, b| a.partial_cmp(b).expect("a finite prior"));
-            for (i, norm) in norms.iter().take(surplus).enumerate() {
-                assert!(
-                    *norm < MARG_NULL_ROW_NORM,
-                    "{where_}: surplus prior row {i} has norm {norm:.3e}, a constraint rather \
-                     than a null direction"
-                );
-            }
+
+        // First, every frameset: the prior may not constrain more directions
+        // than the C++'s prior has rows, or the port is holding the window to
+        // something the C++ never wrote. Measured over both lanes and all 120
+        // framesets it never does, and on the seven that keep the extra row
+        // that row is dependent on the others — see [`PRIOR_NULL_RATIO`] for
+        // the spectrum it sits in.
+        let prior64: DMatrix<f64> = prior.map(|value| value.to_f64());
+        let constrained: usize = constrained_directions(&prior64);
+        assert!(
+            constrained <= expected.marg_digest.rows,
+            "{where_}: the prior constrains {constrained} directions, more than the {} rows the \
+             C++'s prior has",
+            expected.marg_digest.rows
+        );
+
+        // Then, on the framesets `tools/vio_oracle.cpp` dumps the prior itself
+        // for, the whole represented prior against the C++'s, shape and all —
+        // see [`prior_deviation`], which is what the two negative cases at the
+        // bottom of this file are about.
+        if let (Some(reference), Some(reference_rhs)) = (&expected.marg_h, &expected.marg_b) {
+            assert_eq!(
+                (reference.len(), reference_rhs.len()),
+                (expected.marg_digest.rows, expected.marg_digest.rows),
+                "{where_}: the fixture's own prior disagrees with its digest"
+            );
+            let reference: DMatrix<f64> =
+                DMatrix::from_fn(reference.len(), expected.marg_digest.cols, |row, column| {
+                    reference[row][column]
+                });
+            let reference_rhs: DVector<f64> = DVector::from_column_slice(reference_rhs);
+            let rhs: DVector<f64> = estimator.marg_data().b.map(|value| value.to_f64());
+            let (form, term) = prior_deviation(&prior64, &rhs, &reference, &reference_rhs);
+            worst.prior_form = worst.prior_form.max(form);
+            worst.prior_rhs = worst.prior_rhs.max(term);
         }
 
         // ── the floating agreement ────────────────────────────────────────
@@ -741,6 +778,72 @@ fn lm_prefix<S: LieScalar>(
     at
 }
 
+// ── what a square-root prior represents ───────────────────────────────────
+
+/// How many directions the prior actually constrains: its singular values
+/// above [`PRIOR_NULL_RATIO`] of the largest.
+///
+/// Shape-independent by construction — a zero row adds none and a dependent
+/// row adds none — which is what makes it comparable with a row count the C++
+/// produced with a different rank threshold.
+fn constrained_directions(prior: &DMatrix<f64>) -> usize {
+    let singular: DVector<f64> = prior.clone().singular_values();
+    let largest: f64 = singular.iter().copied().fold(0.0, f64::max);
+    singular
+        .iter()
+        .filter(|value| **value > PRIOR_NULL_RATIO * largest)
+        .count()
+}
+
+/// How far the prior `(H, b)` stands from the C++'s in what a square-root prior
+/// *represents*: the information `H^T H` and the term `H^T b` it adds to the
+/// window's normal equations. Returns the two deviations, information first.
+///
+/// Both are shape-independent, which the row count is not: an extra zero or
+/// dependent row leaves `H^T H` and `H^T b` where they were, and the rank
+/// threshold the two QRs disagree on cannot move them either.
+///
+/// Both are also **scale-aware in every direction, not just the loud ones**,
+/// which a norm of the difference is not. The comparison is done in the
+/// coordinates the C++'s own information whitens: with `W = V·diag(1/sigma)`
+/// from the reference's eigen decomposition, `W^T H_ref^T H_ref W` is the
+/// identity on every direction the C++ constrains, so the returned number is a
+/// *relative* deviation in the weakest direction as much as in the strongest.
+/// Two consequences the callers rely on:
+///
+/// * a prior that loses one of the C++'s directions outright scores exactly 1,
+///   whatever that direction's size, so any tolerance below 1 catches it;
+/// * a prior that adds a constraint where the C++ has none is measured against
+///   [`PRIOR_NULL_RATIO`] of the largest singular value — the floor the
+///   whitener uses where the reference has no information of its own — so it
+///   scores the square of how far above that floor it sits.
+fn prior_deviation(
+    prior: &DMatrix<f64>,
+    rhs: &DVector<f64>,
+    reference: &DMatrix<f64>,
+    reference_rhs: &DVector<f64>,
+) -> (f64, f64) {
+    let information: DMatrix<f64> = prior.transpose() * prior;
+    let reference_information: DMatrix<f64> = reference.transpose() * reference;
+    let term: DVector<f64> = prior.transpose() * rhs;
+    let reference_term: DVector<f64> = reference.transpose() * reference_rhs;
+
+    let eigen: SymmetricEigen<f64, nalgebra::Dyn> =
+        SymmetricEigen::new(reference_information.clone());
+    let floor: f64 =
+        PRIOR_NULL_RATIO * PRIOR_NULL_RATIO * eigen.eigenvalues.iter().copied().fold(0.0, f64::max);
+    let whitener: DMatrix<f64> = &eigen.eigenvectors
+        * DMatrix::from_diagonal(&eigen.eigenvalues.map(|value| 1.0 / value.max(floor).sqrt()));
+
+    let error: DMatrix<f64> =
+        &(whitener.transpose() * (information - &reference_information)) * &whitener;
+    let deviation: f64 = SymmetricEigen::new(error).eigenvalues.amax();
+
+    let residual: DVector<f64> = whitener.transpose() * (term - &reference_term);
+    let scale: f64 = (whitener.transpose() * reference_term).norm().max(1.0);
+    (deviation, residual.norm() / scale)
+}
+
 // ── the gates ─────────────────────────────────────────────────────────────
 
 /// Both lanes' agreement, in the three groups the `f32` lane has to
@@ -753,10 +856,19 @@ fn lm_prefix<S: LieScalar>(
 /// * `history` — the quantities that carry the prior's accumulated history:
 ///   the prior's own digest, the errors that include the prior's bilinear
 ///   form, and the damping that follows from their gain ratio.
+/// * `prior` — what the marginalization prior represents, whitened by the
+///   C++'s own information ([`prior_deviation`]).
 ///
-/// In `f64` the last two groups share one tolerance, so the split costs the
+/// In `f64` the middle two groups share one tolerance, so the split costs the
 /// stricter lane nothing.
-fn assert_worst(worst: &Worst, label: &str, pose: f64, window_local: f64, history: f64) {
+fn assert_worst(
+    worst: &Worst,
+    label: &str,
+    pose: f64,
+    window_local: f64,
+    history: f64,
+    prior: f64,
+) {
     assert!(
         worst.rotation <= pose && worst.translation <= pose,
         "{label} pose drifted: {worst:#?}"
@@ -782,6 +894,10 @@ fn assert_worst(worst: &Worst, label: &str, pose: f64, window_local: f64, histor
             && worst.prior_b <= history,
         "{label} prior-driven quantities drifted: {worst:#?}"
     );
+    assert!(
+        worst.prior_form <= prior && worst.prior_rhs <= prior,
+        "{label} prior represents different constraints: {worst:#?}"
+    );
 }
 
 #[test]
@@ -794,6 +910,7 @@ fn the_double_window_follows_the_cpp() {
         POSE_TOLERANCE_F64,
         ERROR_TOLERANCE_F64,
         ERROR_TOLERANCE_F64,
+        PRIOR_TOLERANCE_F64,
     );
 }
 
@@ -812,6 +929,94 @@ fn the_float_window_follows_the_cpp() {
         POSE_TOLERANCE_F32,
         ERROR_TOLERANCE_F32,
         CANCELLING_TOLERANCE_F32,
+        PRIOR_TOLERANCE_F32,
+    );
+}
+
+/// A miniature of the prior the fixture's framesets carry: four orthogonal
+/// constrained directions three decades apart, two columns nothing constrains,
+/// and a zero row — the seed prior has five of those.
+fn reference_prior() -> (DMatrix<f64>, DVector<f64>) {
+    let directions: [[f64; 6]; 4] = [
+        [1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+        [1.0, -1.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, -1.0, 0.0, 0.0],
+    ];
+    let singular: [f64; 4] = [1.0e4, 1.0e2, 1.0e1, 3.0];
+    let mut prior: DMatrix<f64> = DMatrix::zeros(5, 6);
+    for (row, (direction, sigma)) in directions.iter().zip(singular).enumerate() {
+        for (column, value) in direction.iter().enumerate() {
+            prior[(row, column)] = value * sigma * std::f64::consts::FRAC_1_SQRT_2;
+        }
+    }
+    (prior, DVector::from_vec(vec![1.0, -2.0, 0.5, 0.25, 0.0]))
+}
+
+/// A constraint the C++ does not have, added beside a row that was already
+/// zero, must fail [`prior_deviation`] — the case the row-norm surrogate this
+/// replaced could not see.
+///
+/// That surrogate allowed one surplus row and asked the smallest row norms to
+/// be null; here the smallest is the reference's own zero row, so it passed
+/// while the prior gained a real constraint. Both facts are asserted, so the
+/// case stays the case if anyone puts the shape check back. The constraint is
+/// 0.5 against a whitening floor of 0.1, so it scores 25 — 83 times the
+/// loosest lane tolerance.
+#[test]
+fn a_constraint_hidden_beside_a_zero_row_fails_the_prior_comparison() {
+    let (reference, reference_rhs) = reference_prior();
+    let mut candidate: DMatrix<f64> = reference.clone().insert_row(reference.nrows(), 0.0);
+    candidate[(reference.nrows(), 4)] = 0.5;
+    let rhs: DVector<f64> = reference_rhs.clone().insert_row(reference_rhs.nrows(), 0.0);
+
+    // What the shape said about it: one surplus row, and a smallest row norm of
+    // zero, from the row the reference already had.
+    assert_eq!(candidate.nrows(), reference.nrows() + 1);
+    let smallest: f64 = (0..candidate.nrows())
+        .map(|row| candidate.row(row).norm())
+        .fold(f64::INFINITY, f64::min);
+    assert_eq!(smallest, 0.0);
+
+    // The control first: the reference against itself is exactly equal.
+    let (same, _) = prior_deviation(&reference, &reference_rhs, &reference, &reference_rhs);
+    assert!(
+        same < PRIOR_TOLERANCE_F64,
+        "the reference moved: {same:.3e}"
+    );
+
+    let (deviation, _) = prior_deviation(&candidate, &rhs, &reference, &reference_rhs);
+    assert!(
+        deviation > PRIOR_TOLERANCE_F32,
+        "a 0.5 constraint in a direction the reference leaves free scored {deviation:.3e}, \
+         inside the loosest lane tolerance {PRIOR_TOLERANCE_F32:.1e}"
+    );
+}
+
+/// A prior that loses one of the C++'s directions must fail
+/// [`prior_deviation`] even when it keeps the row count and the Frobenius norm
+/// the digest compares — the second thing the shape assertion could not see.
+///
+/// It scores 1.0, as any lost direction does, which is 3.3 times the loosest
+/// lane tolerance; the reference's other three directions carry 1e8 times the
+/// lost one's information, so a norm of the difference would have scored 1.5e-9
+/// and passed.
+#[test]
+fn a_lost_direction_fails_the_prior_comparison_at_the_same_shape_and_norm() {
+    let (reference, reference_rhs) = reference_prior();
+    let mut candidate: DMatrix<f64> = reference.clone();
+    candidate.row_mut(3).fill(0.0);
+    candidate *= (reference.norm_squared() / candidate.norm_squared()).sqrt();
+
+    // What the shape and the digest say about it: nothing.
+    assert_eq!(candidate.shape(), reference.shape());
+    assert!((candidate.norm() - reference.norm()).abs() <= 1e-9 * reference.norm());
+
+    let (deviation, _) = prior_deviation(&candidate, &reference_rhs, &reference, &reference_rhs);
+    assert!(
+        deviation > PRIOR_TOLERANCE_F32,
+        "dropping the weakest of four constrained directions scored {deviation:.3e}, inside the \
+         loosest lane tolerance {PRIOR_TOLERANCE_F32:.1e}"
     );
 }
 
