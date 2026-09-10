@@ -1127,9 +1127,12 @@ milliseconds buy a joint solve the frame did not need.
 **The knob.** `port.frame_update_max_iterations`, `0` by default. At `0` — where
 every basalt file and `VioConfig::default` leave it — `measure` runs the joint
 solve on every frameset, which is basalt's schedule byte for byte. Above zero, a
-frameset that did **not** take a keyframe runs a *frame update* instead, capped at
-that many LM steps. `configs/profiles/fast.json` sets `5`; nothing else does. One
-knob rather than a `bool` plus a count: the two cannot then be set against each
+frameset that did **not** take a keyframe runs a *frame update* instead. The value
+is an **inclusive** iteration cap, the convention `vio_max_iterations` already
+follows on the joint solver, so it allows that many steps plus one:
+`configs/profiles/fast.json` sets `5`, which is a budget of **six** trials,
+accepted and backtracked together, and nothing else sets it. One knob rather
+than a `bool` plus a count: the two cannot then be set against each
 other, and a zero cap can only mean "off". The key is `port.` for D75's reason —
 basalt has no field for it and the vendored `configs/*.json` stay the documents
 the C++ reference runs read.
