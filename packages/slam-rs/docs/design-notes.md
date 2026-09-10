@@ -1453,6 +1453,15 @@ the ceiling actually sees. A carried read still drains the device it read from:
 `collect` resets the count for both stages' buffers, and a `take_cells` that was
 handed bytes makes no read and drains nothing.
 
+D77's regression bounds the staging phase alone, which runs before any of this.
+`the_queue_peak_of_a_whole_frameset_stays_below_the_channel_depth`
+(`tests/gpu_seam_bench.rs`) bounds a **whole frameset** of the shipped wiring
+instead — camera 0's selection ahead of the temporal passes, the tail behind the
+matches, both carried home — at two, four and eight cameras, twice the widest
+rig the configs carry. It is the reserved peak it bounds, so it holds for
+accounted submissions; an unaccounted one moves no counter and shows up as the
+spin the harness measures.
+
 ### What a read is worth, revised
 
 D77 measured 0.115 ms for one *added* empty read and this lever recovers about
