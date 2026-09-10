@@ -329,19 +329,21 @@ The default build remains CPU-only.
 
 ```bash
 pixi run -e slam-rs-dev --frozen slam-rs-wgpu-clippy     # the portable lane compiles and is warning-clean, tests included
-pixi run -e slam-rs-dev --frozen slam-rs-wgpu-test       # the same kernels, on this host's GPU
+pixi run -e slam-rs-dev --frozen slam-rs-wgpu-test       # workspace tests with wgpu; five nonempty GPU binary checks
+pixi run -e slam-rs-dev --frozen slam-rs-wgpu-doc        # rustdoc with warnings denied
 pixi run -e slam-rs-dev --frozen slam-rs-wgpu-build      # a core whose `--gpu` is wgpu
 ```
 
 `slam-rs-clippy` lints the default features; `slam-rs-wgpu-clippy` checks the
 GPU code and its tests with warnings denied.
 
-On macOS the same three tasks run from the mac lane's environment, which is
+On macOS the same four tasks run from the mac lane's environment, which is
 where that platform's `slam-rs` features are solved, and Metal is the backend
 `AutoGraphicsApi` picks there:
 
 ```bash
-pixi run -e slam-rs-osx-dev --frozen slam-rs-wgpu-test   # the same kernels through Metal
+pixi run -e slam-rs-osx-dev --frozen slam-rs-wgpu-doc    # rustdoc with warnings denied
+pixi run -e slam-rs-osx-dev --frozen slam-rs-wgpu-test   # workspace tests with wgpu through Metal
 ```
 
 ## The portable lane, and the two silent failures
@@ -386,8 +388,8 @@ pattern of all four widths, copies it **on the device**, reads it back, and
 refuses the runtime if it does not survive. Microseconds once, and it is what a
 fleet machine fails on instead of producing a trajectory out of zeros.
 
-Measured on this host (RTX 5090, MIO07/1500, three interleaved rounds): the
-portable lane runs at **7.153 ms** against CUDA's 6.005 and the CPU lane's
+Historical measurement, before D70 and the speed work of D72 to D78 (RTX 5090,
+MIO07/1500, three interleaved rounds): the portable lane ran at **7.153 ms** against CUDA's 6.005 and the CPU lane's
 9.384 — **1.31x** over the CPU, 19 % behind CUDA — and holds **+271 MiB** of
 device memory over idle against CUDA's +667. Every per-kernel tolerance test
 passes on it, with the pyramid and the corner scan bit-exact; whole-clip ATE is
@@ -414,8 +416,10 @@ are not a new ten-clip gate run; the targeted regression evidence is in D71.
 
 ## Where the portable lane runs
 
-Measured device by device in the portability run, the two smoke
-clips and the eleven per-kernel tolerance tests on each:
+Measured device by device in the portability run of 2026-09-08, before the speed
+work of D72 to D78, on the two smoke clips and the eleven per-kernel tolerance
+tests on each. The speed column is that branch's; the fast profile's numbers on
+the same devices are in [the next section](#the-fast-profile-across-the-fleet):
 
 | device | driver → compiler | tolerance suite | the lane |
 |---|---|---|---|
@@ -440,6 +444,42 @@ host's.
 
 Do not run `vulkaninfo` on the Pi 5: it hangs in uninterruptible sleep and
 wedges the box's I/O. The tolerance suite is the probe.
+
+## The fast profile across the fleet
+
+The three cleanup-gate clips on the S32 tip (`6da2fb78`), one pass per profile,
+unpinned, decode in the same process, tracker-call medians in ms for
+`MIO10` / `MIO07` / `MGO07`. The 5090's pinned, decode-free harness medians for
+the same tip are fast **1.38 / 1.39 / 2.10** against reference 5.1 / 5.7 / 10.2,
+with GT ATE 1.553 / 2.102 / 2.375 cm against 1.504 / 2.084 / 2.294; the catalog
+replays below time a different operating point and are compared only with each
+other.
+
+| device | backend | reference, ms | fast, ms | fast over reference | trajectory against the 5090 |
+|---|---|---|---|---|---|
+| RTX 5090, x86-64 | Vulkan | 3.97 / 4.81 / 6.95 | 2.01 / 2.68 / 3.13 | 1.98x / 1.80x / 2.22x | the baseline |
+| GB10 (Spark), aarch64 | Vulkan | 5.43 / 6.03 / 10.13 | 2.94 / 3.22 / 4.78 | 1.85x / 1.87x / 2.12x | byte-identical, both profiles |
+| RTX 3060, x86-64 | Vulkan | 20.6 / 21.9 / 33.7 | 14.7 / 14.9 / 20.2 | 1.40x / 1.47x / 1.67x | inside the band; last-bit drift, at most 0.02 cm of ATE |
+| Apple M4 (Mac mini), osx-arm64 | Metal | 22.2 / 22.7 / 25.0 | 18.8 / 18.6 / 21.2 | 1.18x / 1.22x / 1.18x | inside the band; at most 0.04 cm of ATE |
+
+Every row tracks every frameset and loses no pose. The RTX 3060 stayed at its
+idle clock (P8, 210 MHz) for the whole run, so its absolute numbers are that
+operating point, not the card's. The Pi 5 and the RK3588 cap have not run this
+tip: both were unreachable on the day.
+
+**Why the Mac is slow.** Two independent causes, measured on the M4 with the
+seam counters of `gpu/seam.rs` and the device timestamps. A synchronising read
+costs **7.05 ms** of host time on Metal — the slope over 0, 1, 2 and 4 empty
+four-byte reads a frameset — against 0.115 ms on the 5090, and the frontend
+makes two a frameset, so about 14 of the Mac's 19 ms is completion latency in
+`cubecl-wgpu`'s read path (flush, map a staging buffer, wake the poll thread,
+wait on its callback). Independently, the kernels run **4.31 ms** of device time
+a frameset against 0.44 on the 5090 (KLT 425 µs a launch against 49, the FAST
+score 293 against 12.5): the workgroup shapes were chosen on NVIDIA. Uploads are
+1.4 ms. The task ceiling has no effect from 1 to 64. What a fix would have to
+do: a lower-latency completion path gated to Metal, and per-adapter workgroup
+shapes chosen from the device properties at start-up, so the 5090's path stays
+untouched; the 5090 A/B harness remains the gate. Neither is started.
 
 ## Python API
 
@@ -564,7 +604,7 @@ offset (0 for MSD, 14,902,432 ns for RoboCap), the decode path
 (`cpu_gray8_dav1d_1thread`, worth about 5 cm of ATE against NVDEC RGB), and the
 VIO config, vendored under `configs/` — basalt's constructor defaults are not its
 shipped files, and `vio_marg_lost_landmarks` alone was worth up to 12 cm (C72),
-so `slam_rs.reference.flow_config` reads the dataset's file and asserts the
+so `slam_rs.reference.resolved_flow_config` reads the dataset's file and asserts the
 manifest's image safe radius against it. `slam_rs.reference`'s module docstring
 carries the rest of the account, including where the V2 tolerances live and why.
 
@@ -821,6 +861,196 @@ precision-band entry in the ten-clip manifest. These checks establish the local
 MIO14 correction and short-clip regression behavior, not a fresh all-device or
 ten-clip gate. The GPU stays opt-in and the default build stays CPU-only.
 
+## D73 — the estimator's per-frame scratch is the estimator's, and its hot loops walk columns
+
+Decision, 2026-09-10: hold the Levenberg-Marquardt loop's buffers on
+`SqrtKeypointVio` instead of allocating them per inner step, and write the three
+hot inner loops of the backend so that the coefficient they walk is the
+contiguous one. No arithmetic changes: every sum keeps its order, every product
+keeps its operand order, and the MIO10 trajectory stays byte-identical to the
+CPU lane's.
+
+**What the estimator was spending.** On MIO10 the `measure` stage was 2.443 ms of
+a 5.117 ms call (optimize 2.236, of which linearize 0.741 and solver 1.182,
+marginalize 0.147) on a window of 7 keyframes and 3 states — 87 pose parameters,
+~55 landmark blocks, seven inner LM steps on the median frame. That is a few
+MFLOP. Three things ate it, in this order:
+
+1. **Row-major loops over column-major storage.** `nalgebra`'s `DMatrix` is
+   column-major, and three loops indexed it with the column innermost:
+   `apply_householder_on_the_left_block`'s rank-1 update (`eigen/qr.rs`), the
+   `O(n³)` trailing update of Eigen's LDLT sweep (`eigen/ldlt.rs:338`), and both
+   of them at a stride of `nrows`. Interchanging them is free where the
+   operation is elementwise (the Householder update) and needs one accumulator
+   per output row where it is a reduction (the LDLT), which keeps each
+   coefficient's additions in their original order because the reduced index
+   becomes the outer loop. Worth 0.152 ms and 0.164 ms on MIO10, the two largest
+   single gains of the pass.
+2. **A hot loop the vectoriser refused.** `LandmarkBlock::add_dense_h_b_over`
+   was 31% of `optimize`'s self time and compiled to scalar `mulss`/`addss`: its
+   accumulator was a slice of runtime length, reached through the same
+   `&mut DenseHbScratch` as the row it multiplies, so the compiler had neither a
+   trip count nor a disjointness proof. A fixed `[S; 8]` local accumulator over
+   a row buffer padded to whole lanes gives it both. Worth 0.115 ms.
+3. **Per-step allocation.** `get_dense_h_b` took a fresh `opt_size`-square
+   accumulator, a fresh subtree partial per recursion depth and a fresh leaf
+   transpose on every call; `damped_solve` cloned the reduced system per damping
+   attempt and `EigenLdlt::new` allocated two more workspaces with it. Measured
+   with a counting allocator: **126.8 allocator calls per LM step**, 1,531 per
+   frameset. They are now a `DenseHbWorkspace`, an `EigenLdlt` and an increment
+   the estimator owns and resets, at 59.5 and 1,133.
+
+**Why pooling is not arithmetic.** The reduction resets every subtree buffer
+before a leaf writes it, and that reset restores exactly `+0.0` over the
+columns that were written; the accumulator it hands back is zeroed whole rather
+than by recorded column, because the IMU blocks, the prior and the
+fixed-keyframe pinning all write into it without recording anything. Eigen's
+LDLT is an in-place factorization, so the damped copy is the buffer the sweep
+consumes — writing it in place is what Eigen does, not a shortcut.
+
+**What did not pay, measured.** Pooling the landmark blocks across frames —
+~275 allocations and 182 kB of zeroing a frame — **regressed** MIO10 by
+0.074 ms and was dropped; a window whose landmark set shifts hands each pooled
+block to a different landmark, whose row count often differs, so the storage is
+replaced anyway and the shape test and the `Vec` rebuilds are what is left. The
+same reasoning retires the marginalization's permutation copy: `marginalize` is
+0.103 ms a frame after the Householder fix, no marginalization symbol appears in
+the top twenty of the native profile, and its copy is ~7 µs.
+
+**What is left, and where it is.** After the pass, `optimize` is 1.92 ms and its
+self time is `add_dense_h_b_over` 23%, `apply_householder_on_the_left_block`
+19%, the damped solve 17%, `linearize_problem` 12% and the dense reduction's
+joins and resets 8.5%. The Householder is the next lever and it needs the change
+this pass would not make: `LandmarkBlock::storage` is column-major here where
+basalt's is `Eigen::RowMajor`, so the reflection's long dimension — 92 columns —
+is the strided one and vectorising over its 3-to-5-row short dimension is most
+of what it can do. Making the block row-major would give both the dot product
+and the outer product a 92-long contiguous inner loop, and it would match the
+layout the port already models in `ColumnRedux::Strided`. It touches every
+reader of `storage` and is not a local change.
+
+**Gate.** MIO10, three interleaved rounds against `44cbdb0f`: median
+5.140 → 4.733 ms, `measure` 2.451 → 2.108, ATE vs ground truth 1.504 cm
+unchanged, zero lost framesets, and every candidate trajectory and state digest
+byte-identical to the baseline's. `tests/frame_allocations.rs` gates the
+allocation half: zero allocator calls on a warm dense reduction, and a
+slope-and-total bound per frameset that the pre-pooling code fails.
+## D72 — the detector picks each grid cell's corner on the device
+
+Decision, 2026-09-09: on the GPU lane, pick one corner per detection grid cell in
+a CubeCL kernel and download one packed key per cell, instead of downloading the
+candidate image and its bitmask and walking them on the host. Keep the band walk
+as the reference and as the fallback. The CPU lane is unchanged.
+
+The band path downloaded 0.92 MB of candidate image plus 0.115 MB of bitmask per
+camera — **2.07 MB per two-camera frameset** on MIO10 — and then did all of the
+selection on the host: a row band per cell row and rung, a column filter, OpenCV's
+non-maximum suppression per cell, a sort and three gates. The three FAST kernels
+were 0.04 ms of that; the stage was **1.45 ms**.
+
+Only the **last rung the ladder visits** decides the winner, and that is exact
+rather than an approximation. That rung is `max_threshold` halved until the next
+halving would fall under `max(min_threshold, 1)`, which for the shipped 40/5
+configs is 5 but for 40/6 is 10 — not the configured minimum, which a halving
+ladder need never reach. `threshold_rungs` is the one place it is computed, and
+the cell walk steps through the same iterator, so the two cannot drift; handing
+the device `min_threshold` instead would let it admit a corner scoring between
+the two that the walk never sees. A candidate at rung `t` is `kept > t`;
+`suppress_non_maxima` kills a pixel only through an in-window neighbour scoring at
+least as much, and such a neighbour is itself a candidate at every rung the pixel
+is. Suppression therefore does not depend on the rung, and the ladder only admits
+survivors in descending score. With `optical_flow_detection_num_points_cell = 1`,
+which every shipped config sets, the cell's outcome is the best survivor over
+that last rung which clears `safe_radius`, the masks and `EDGE_THRESHOLD`.
+
+`fast_cell_select_kernel` is one cube per cell over that cell's own window, with
+the same zero rim the host scratch grid gives a neighbour outside the window, and
+a shared tree reduction over the packed key
+`((255 - score) << 24) | (y << 12) | x`. Integer minimum is associative,
+commutative and exact, so the tree is the host's own total order — score
+descending, then row, then column, which is what the row-major band walk and a
+stable sort produce — and a subgroup fast path would agree with it bit for bit.
+Readback is 361 x 4 B per camera against 1,036,800.
+
+The masks stay on the host and are exact there: `cam0OverlapCellsMasksForCam`
+pushes `cell` x `cell` rectangles at the cell origins and a cell's candidates lie
+strictly inside it, so a cell is wholly masked or wholly clear. The guard is at
+the camera level — a rectangle that does not name one cell of *this* camera's
+grid, which the mixed-geometry rigs the port supports deliberately produce, sends
+the whole camera down the band path. So do `num_points_cell != 1`, a cell no wider
+than the FAST ring and a frame 4,096 pixels or more on a side.
+
+MIO10, three interleaved rounds against main + timers (44cbdb0f) on one core:
+
+| Core | frontend_detect ms | track median ms | ATE vs GT cm | tracked/lost | identical |
+|---|---:|---:|---:|---:|---|
+| base | 1.466 | 5.151 | 1.504 | 412/0 | — |
+| this | 0.589 | 4.372 | 1.504 | 412/0 | byte and state |
+
+MGO09, four 640x480 cameras, one round: `frontend_detect` 2.233 ms against
+2.241, unchanged; `track_ms` 16.904 against 13.165; ATE vs GT 0.770 against a
+0.847 band; 107/0 tracked; byte and state identical. **The stage does not move
+on that rig**, and that says where the rest of the time is: the kernels are
+microseconds and the readback is now 432 B per camera, so what 2.24 ms buys is
+four device round trips. One trip per camera is the floor this shape has.
+
+A hoisted variant that launched every camera and read them all in **one**
+download was written, measured and dropped. It is right in isolation — 0.502 ms
+against 0.822 for two 960x960 cameras through the scanner alone, and 0.74-0.84
+against 1.01-1.04 per frameset through the whole frontend in one process — and
+it is wrong under the gate, twice: `frontend_detect` 1.418 and 1.422 ms against
+this shape's 0.589, with `track_ms` −8.4% and −8.8% against −15.1%. A counter on
+the scanner rules out the obvious explanation: through the real frontend the
+batch answered every selection and none fell back. What moves with it is the
+estimator — `measure` 2.070 against the base's 2.431 in the same interleaved
+run, which no detector change can cause — so the harness is attributing
+something the stage timers cannot separate. The finding is recorded rather than
+shipped: on a four-camera rig the trip count is still the lever, and a variant
+that keeps the single download but leaves the wait where this shape leaves it is
+the one to try next.
+
+`tests/gpu_detect.rs` is the exactness gate rather than the A/B run: the whole of
+`detectKeypointsWithCells` runs twice over the committed 960x960 MIO10 frames —
+through the band walk and through the device selection — and the two
+`KeypointsData` are equal corner for corner and response for response, on both
+cameras, empty and half-occupied, at three safe radii, under cell-aligned masks
+and one that straddles a boundary, at three budgets, over four camera slots
+through one reused scanner, and on three frames whose width is not a whole
+number of cells. Two ladders that step past their own minimum — 40/6 and 32/5 —
+are in it because equality there is what the last-rung fix buys: the same frame
+detected at a rung of 6 yields 62 corners against the real ladder's 54, so a
+device handed `min_threshold` is separable from one handed the last rung, and
+the test asserts that gap before asserting the equality.
+
+The GPU scanner is wrapped in a counting one, because equality alone cannot tell
+the two paths apart — a device path that quietly never engaged agrees with the
+host walk perfectly — so every case says which path it meant. That is what makes
+the three fallbacks assertions rather than assumptions: a straddling mask, a
+`num_points_cell` of 2 and a frame `CELL_KEY_LIMIT` pixels wide each have to
+report zero selections and a nonzero band count.
+
+The clamps are their own case. `CellGrid::new` floors and centres, so no grid it
+derives has a cell that runs past the image and neither strict clamp in the
+kernel would ever run; the detector takes its grid from the caller, so the test
+supplies two — a last column and row that overhang, and a last column whose
+candidate window is empty and must come back as the sentinel. The clamped columns
+lie past `width - EDGE_THRESHOLD - 1`, so no corner can come out of them on
+either lane: what the equality proves there is that the device stays inside the
+image and sees the same zero rim, not that the answer changes.
+
+It is a separate test binary because `the_whole_gpu_path_holds_the_pool_flat`
+asserts an exactly flat CubeCL pool and every test in one binary shares one
+client. The pool test now runs alone in `gpu_pool` so parallel tests in
+`gpu_kernels` cannot keep allocations alive beyond its warm-up.
+
+Two CubeCL traps cost a debugging pass each. A **named** integer constant stays
+comptime inside `#[cube]`: seeding a `let mut` from one makes a const variable,
+and `stride /= 2` on it panics the expansion on cubecl's own worker thread — the
+launch reports success and the buffer comes back as zeros, which is the failure
+mode D32 exists for. The sentinel key is spelled as a literal with a
+`const _: () = assert!(..)` pinning it to the host's constant, and the reduction
+stride is comptime per unrolled step.
+
 ## Decision references
 
 The `Dnn` tags in this file and in the README name the project's recorded design decisions. What each one decided, in one line:
@@ -842,3 +1072,491 @@ The `Dnn` tags in this file and in the README name the project's recorded design
 - **D68** — The three unreachable blocks go: squared-form marginalization, nullspace diagnostics, the D34 damping stack
 - **D70** — One GPU runtime: the CUDA lane is removed; wgpu is the GPU lane (2026-09-09)
 - **D71** — Exponent-bit finite classification and bounded small-angle trig; the MIO14 replay passes its unchanged accuracy limit (2026-09-09)
+- **D72** — The GPU detector picks one corner per grid cell on the device; the candidate image never comes back (2026-09-09)
+- **D73** — The estimator's LM buffers live on the estimator and its hot loops walk columns; no arithmetic changes (2026-09-10)
+- **D74** — Speed profile: vendored configs stay C++-faithful; `configs/profiles/fast.json` overlays the knobs, `port.*` keys for the ones basalt has no field for (2026-09-10)
+- **D75** — Redetect on demand: the fast profile detects when camera 0 holds fewer than 85 % of the last detecting frameset's keypoints (2026-09-10)
+- **D76** — The fast profile solves the window at keyframes and the newest 15-dof state alone between them, falling back to the joint solve when that update declines (2026-09-10)
+- **D77** — The GPU frontend waits once per phase and reserves its queue budget before it enqueues (2026-09-10)
+- **D78** — One stage's download carries another's buffers: camera 0's cell selection rides the temporal tracks' read (2026-09-10)
+
+## D74 — Speed profile
+
+Vendored configs stay C++-faithful (D17), and the Rust default LM cap stays 7.
+Speed knobs live in `configs/profiles/fast.json`; the first sets
+`config.vio_max_iterations` to 4 (at most five LM steps with the inclusive loop).
+**D76 puts that one back to basalt's 7** once the joint solve runs at keyframes
+only: with the window solved one frameset in seven, the eight trials buy 0.146 cm
+of MIO10 ATE for about 0.1 ms of mean and nothing on the median.
+The benchmark and tracking tools opt in with `--profile fast`. The default
+`reference` profile is empty and preserves the vendored text. Unknown overlay
+keys raise `KeyError` so a typo cannot silently change the requested run.
+
+## D75 — Redetect on demand: the fast profile detects when camera 0 has lost tracks
+
+basalt calls `addPoints` on every frameset and tops up every empty grid cell
+(`frame_to_frame_optical_flow.h:637-666`, `frontend/flow.rs`). cuVSLAM instead
+detects only once its survivors fall under a fraction of what the last detection
+left it, and so pays detection about every fourth frame. On MIO10 that is the
+one stage where the two are furthest apart.
+
+**The knob.** `port.redetect_survivor_ratio`, `0.0` by default. At `0` — where
+every basalt file and `VioConfig::default` leave it — the frameset always
+detects, which is basalt's schedule byte for byte. Above zero the frameset
+detects only when camera 0 holds fewer than that fraction of the keypoints the
+last **detecting** frameset ended with. `configs/profiles/fast.json` sets `0.85`;
+nothing else does.
+
+**Why the key is `port.` and not `config.`.** basalt has no field for it, and the
+vendored `configs/*.json` are the documents the C++ reference runs read, key for
+key (`tests/test_cpp_reference.py::test_the_vendored_configs_are_the_ones_the_cpp_runs_used`).
+So no port-only key is written into them: the profile overlay inserts it,
+`slam_rs.reference.PORT_CONFIG_KEYS` allowlists it so a typo is still a
+`KeyError`, and `VioConfig` skips serializing it while it is off — a basalt
+document still round-trips to exactly the keys it arrived with.
+
+**One decision for the whole rig, taken on camera 0.** `add_points` is a unit:
+camera 0's detection, the cross-camera match that carries its new ids into
+cameras 1..n, and the non-overlap pass on those cameras. Gating it per camera
+would leave a rig half detected, with camera 0's new ids never matched onward.
+Camera 0 is also the only camera the keyframe vote reads (D21). The test is a
+pure function of the frameset's own state — this frame's camera-0 count, the
+count the last detecting frameset ended with, a config field — so a replay
+repeats it, and `FrameState` carries the baseline so a refused frameset does not
+move it.
+
+**The keyframe coupling, measured.** The vote is
+`connected[0] / (connected[0] + unconnected[0]) < 0.7` and the unconnected
+observations are all observed ids absent from the landmark database, including
+carried tracks that failed triangulation or whose landmarks were removed.
+Those tracks can still vote on skipped-detection frames, so gating detection
+alone does not imply keyframe starvation; at `0.7`, MIO10's post-warmup cadence goes 7.04 ->
+7.33 frames per keyframe and MGO09's stays at 6.71, both inside the 5-9 band the
+later scheduling work is priced against.
+
+**Why 0.85, not 0.7 (MIO07, 2026-09-10).** `0.7` passed MIO10 (ATE 1.447 cm) and MGO09 but
+failed the 76 s MIO07: 2.624 cm against a 2.29 cm band, while the LM cap alone read 2.093 and
+`0.7` without the cap read 2.682 — the gate, not the cap, accumulates drift over a long clip.
+`0.85` reads 2.201 cm on MIO07 (3.858 ms median against the cap-only 4.073) and is what the
+fast profile ships; `0.7`'s MIO10 numbers above stand as measured. Short clips do not see this
+class of regression; MIO07 must be run once per schedule lever.
+
+**Why 0.7 and not 0.5.** Both clear the gate. `0.5` is faster — MIO10 median
+2.337 ms against `0.7`'s 2.980, from a 3.549 ms stack — but it detects only
+every 6.6 framesets on MIO10 and every 23.5 on MGO09, which halves what the
+estimator sees: on MIO10 the mean landmark count goes 46.0 -> 25.7 and tracked
+keypoints 119.1 -> 58.4, and MGO09's keyframe cadence goes to 9.40. `0.7` detects every 2.9
+framesets on MIO10 and every 5.2 on MGO09, keeps 38.5 landmarks and 84.3 tracked
+keypoints, and is the only setting where **both** measured clips score better
+than the stack does: MIO10 1.447 cm against 1.525, MGO09 0.757 cm against 0.766.
+It gives 0.582 ms of the 0.3 ms this lever was asked for, and leaves the cadence
+the next lever is sized against where it was. The `0.5` numbers are recorded so
+the trade is re-openable once the wider clip set has been run — the clips with
+fast-dying tracks (MIO11, MIO07, MGO13) are where a halved landmark count would
+show, and they are not measured here.
+
+- **D74** — Speed profile: vendored configs stay C++-faithful; speed knobs live in `configs/profiles/fast.json`, opted into with `--profile fast` (2026-09-10)
+- **D75** — Redetect on demand: the fast profile skips `addPoints` until camera 0 falls under `port.redetect_survivor_ratio` of its last detection (2026-09-10)
+
+## D76 — The fast profile solves the window at keyframes and the newest state alone between them
+
+basalt is a fixed-lag smoother: `measure` re-linearizes and re-solves the whole
+sliding window — 7 keyframe pose blocks plus 3 states, ~87 unknowns — on **every**
+frameset (`estimator/mod.rs`, `optimize`), although the keyframe cadence on MIO10
+is 7.33 framesets. cuVSLAM instead solves only the newest pose against **fixed**
+landmarks every frame (`libs/pnp/multicam_pnp.cpp`, 0.064 ms; `soft_inertial_pnp`,
+0.450 ms) and runs bundle adjustment at keyframes only; ORB-SLAM makes the same
+split. That schedule is most of cuVSLAM's 4x on this clip: after wave 1 the
+estimator is 1.519 ms of a 2.974 ms MIO10 call and 6 of every 7 of those
+milliseconds buy a joint solve the frame did not need.
+
+**The knob.** `port.frame_update_max_iterations`, `0` by default. At `0` — where
+every basalt file and `VioConfig::default` leave it — `measure` runs the joint
+solve on every frameset, which is basalt's schedule byte for byte. Above zero, a
+frameset that did **not** take a keyframe runs a *frame update* instead. The value
+is an **inclusive** iteration cap, the convention `vio_max_iterations` already
+follows on the joint solver, so it allows that many steps plus one:
+`configs/profiles/fast.json` sets `5`, which is a budget of **six** trials,
+accepted and backtracked together, and nothing else sets it. One knob rather
+than a `bool` plus a count: the two cannot then be set against each
+other, and a zero cap can only mean "off". The key is `port.` for D75's reason —
+basalt has no field for it and the vendored `configs/*.json` stay the documents
+the C++ reference runs read.
+
+**What the frame update solves.** The 15 unknowns of the newest state (pose,
+velocity, both biases) against exactly two factor groups:
+
+* every observation the newest frameset filed on a landmark the window already
+  hosts, with the landmark, its host keyframe and every older state **held**.
+  The residual is `linearize_point`, the relative pose and its target Jacobian
+  are `compute_rel_pose`, and the Huber weight is the landmark block's own
+  `compute_error_weight`, now a free function both paths call — there is one
+  reprojection model in the crate, not two;
+* the IMU factor from the previous state, built by the same `ImuBlock::linearize`
+  the window solve uses. Its 30x30 `add_dense_h_b` is formed and the newest
+  state's 15x15 corner is taken, which is what holding the previous state means.
+
+The marginalization prior is **absent by construction, not by choice**: it can only
+contain blocks frozen at a linearization point (`compute_delta` refuses any other),
+and the newest state is appended unfrozen, so the prior's cost does not depend on
+the one variable the frame update moves. The code asserts this per frame and falls
+back to the joint solve if the prior ever does carry the newest state.
+
+The LM loop is the window loop's shape, constant for constant: `lambda` reset to
+`vio_lm_lambda_initial` every frame (D11), `lambda·diag(H)` damping with the same
+floor (D10), the iteration budget shared with backtracking (D12), the increment
+negated before it is applied (D13), Nielsen's update on an accept, and the same
+`1e-6`/`1e-4` convergence pair. The predicted decrease is
+`-(inc·b + 0.5·incᵀ H inc)`, which is what the window's `back_substitute`
+accumulates when nothing has been eliminated. `damping.lambda_vee` is shared with
+the window solve exactly as it is shared between framesets today.
+
+**What does not change.** Observations are filed into the landmark database before
+the keyframe vote, so a frame update still feeds the next joint solve everything it
+saw. The keyframe decision is unchanged (camera 0's connected ratio below
+`vio_new_kf_keypoints_thresh` and at least `vio_min_frames_after_kf` framesets
+since the last). `vio_marg_lost_landmarks` still culls from the frameset's own
+observations, never from whether the joint solve ran. **Marginalization keeps its
+own trigger and runs every frameset** — deferring it to keyframes grows the
+ordering by 15 unknowns per skipped frame, `get_dense_h_b` grows quadratically in
+that, and the keyframe solve costs more than the six skipped ones saved. Warmup is
+the joint solve's: the frame update runs only once `opt_started` is true.
+
+**The FEJ consequence, stated.** `marginalize` freezes `last_state_to_marg` at its
+current value and folds the window into the prior. Under this schedule that value
+is a frame update's, not a joint solve's, for the framesets between keyframes, so
+the prior is anchored at a point that saw its own observations and its own IMU
+factor but not the window's second-order coupling. This is the lever's whole risk
+and it is why the gate is ATE, measured, and not an argument.
+
+**Expected numbers, before measuring.** ~70 observations and one IMU factor per
+frame update against ~440 observations, 55 landmark blocks and an 87x87 dense
+build per joint solve: the non-keyframe `measure` should be the 0.097 ms
+marginalization plus ~0.05 ms, against 1.519 ms today, for a median gain near
+1.3 ms and an amortized `measure` near 0.3 ms. The accuracy band is 1.654 cm on
+MIO10 against 1.447 today — 14% of headroom.
+
+**Measured, MIO10, three A/B rounds against the accepted stack.** Median
+**2.945 -> 1.311 ms**, `measure` **1.520 -> 0.183**, ATE vs GT **1.447 -> 1.551 cm**
+against 1.654 allowed, zero lost framesets, and the three candidate rounds
+identical to each other in both the trajectory and the state digest. The
+projection was 1.3 ms of median and it is 1.63; the frame update itself is 0.054
+of `optimize`'s 0.061 ms, an order below the 0.30 ms the plan priced it at.
+
+**`config.vio_max_iterations` goes back to basalt's 7, and that is part of this
+lever.** D74 cut it to 4 because every frameset paid for the window solve. At one
+frameset in 7.65 the trade is a different one: eight steps on 13% of framesets
+cost about 0.1 ms of mean and nothing on the median, and they are worth
+**0.146 cm** of MIO10 ATE — 1.697 cm at the old cap against 1.551 at basalt's.
+Nothing else recovered that: five frame-update steps score the same as two
+(1.697 against 1.698), so the gap was never the frame update's own convergence.
+
+**What the accuracy costs, and the one structural fix that did not pay.** MGO09,
+four cameras, 107 framesets: median **8.654 -> 2.000 ms** but ATE
+**0.757 -> 0.960 cm** against 0.8466 allowed — **out of band, and the open item
+this lever leaves behind**. The mechanism I could name is that `marginalize`
+freezes `last_state_to_marg` — the state one frameset behind the newest — at the
+end of the same `measure`, so with the joint solve at keyframes only a state
+enters the FEJ prior having had exactly one frame update. Freeing that state too,
+a 30-unknown two-state solve over `k−1` and `k` (cuVSLAM's own
+`soft_inertial_pnp.cpp` shape; the prior orders neither, so it still contributes
+no gradient), was built and measured: **MGO09 0.960 -> 0.927 cm and MIO10 1.551 ->
+1.549**, for **0.158 ms** of MIO10 median (1.311 -> 1.469, which is the difference
+between meeting the plan's 1.439 ms MIO10 target and missing it). 16% of the MGO09
+gap for 12% of the frame: rejected, and recorded here so it is not rebuilt. What
+is left of the gap is the landmarks and the seven keyframe poses standing still
+between keyframes, which is the lever itself and not a detail of it.
+
+**Re-measured on the stack that shipped `port.redetect_survivor_ratio` at 0.85**
+(`redetect-r085`, wave 1's tip; the numbers above are against the 0.7 stack this
+branch was cut from). MIO10, three rounds: median **3.313 -> 1.995 ms**,
+`measure` **1.554 -> 0.196**, ATE **1.481 -> 1.553 cm** against 1.629 allowed,
+zero lost, the three rounds identical in trajectory and state digest, and the
+keyframe cadence (7.04), landmark count (44.1) and tracked keypoints (111.4 ->
+112.0) all where the joint solve left them — the schedule moves the solve, not
+the map. MGO09: **10.335 -> 3.679 ms**, ATE **0.766 -> 0.978** against 0.842.
+
+**Two other things measured and not kept.** `config.vio_max_states` is not
+independently tunable: at 5 the window's own invariants break and marginalization
+fails with "landmark block host frame ... is not in the absolute ordering" — the
+overshoot argument in `estimator/schedule.rs` assumes a state leaves after three
+framesets while keyframes are six apart. And the A/B harness builds into a
+`CARGO_TARGET_DIR` shared by every worker on the host, so a concurrent build gets
+copied out as yours; one MGO09 measurement here was a different branch's binary
+before the cores were pre-placed from a private target directory.
+
+**Every frameset now says what the frame update did with it.** `FrameStats`
+carries a `FrameUpdateOutcome` — `NotAttempted`, `Taken`, or `Declined` with the
+precondition that refused it — and the Python snapshot exposes its name. The five
+preconditions used to be five silent `Ok(None)`s, so "the update did not engage"
+and "the update engaged and was slow" looked identical from outside, and a
+mismeasured MIO07 row was read as an engagement bug for an hour. Measured with
+the names, `--profile fast`, whole clips: **MIO07 3,509 of 4,095 framesets taken
+and 586 keyframes, MGO09 87 of 107, MIO10 349 of 412 — and zero declines on any
+of the three.** The 586, 20 and 63 are exactly the keyframes.
+
+That result is what the `dt` equality deserves, and it is why it stays an
+equality. `IntegratedImuMeasurement::accumulate_to` integrates only samples at or
+before the frameset and then closes the interval **exactly** on it, so
+`get_start_t_ns() + get_dt_ns() == frame.t_ns` holds for every measurement
+`process_frame` files; `prev_t_ns + meas.get_dt_ns() == t_ns` is therefore the
+window's own predecessor linkage written as arithmetic, not a tolerance on IMU
+sample phase. A looser test would accept a preintegration that does not span the
+interval being solved over, which is the one way this solve can be silently
+wrong.
+
+**The four-camera algebra is not the MGO09 gap.** A landmark hosted by camera 0
+and observed by camera *i* forms its residual through a relative pose that
+carries a different `T_i_c` on the target side, and the held-landmark Jacobian
+w.r.t. the newest state is `compute_rel_pose`'s `d_rel_d_t` for that pair. Two
+independent tests on the four-camera MGO rig fixture — the one MGO09 replays —
+cover the two halves of that, and neither can stand in for the other:
+
+* the **known minimum** checks the residual. The zero-cost point is the
+  preintegration's own prediction and every pixel is a landmark projected
+  through it, so a state pushed off it has to come all the way back — cost below
+  `1e-12`, within `1e-9` m and rad. This is what the two-camera fixture already
+  did, and it cannot say anything about the Jacobian: the IMU factor alone puts
+  the minimum in the same place, so the state would return with the observations
+  dropped entirely;
+* the **vision gradient against a central finite difference** checks the
+  Jacobian, coordinate by coordinate, with the IMU contribution subtracted off
+  and in the same chart `apply_inc` moves the state through. The pose rows carry
+  the whole gradient and the velocity and bias rows are zero on both sides. Then
+  each observing camera is removed in turn and the gradient has to move, so a
+  camera silently contributing nothing cannot pass.
+
+Both were checked by mutation, and each caught the defect the other missed:
+forming the target side of the relative pose with camera 0's extrinsic instead
+of camera *i*'s leaves the known minimum at cost 4519 while the finite
+difference still agrees with its own wrong cost; scaling the non-host cameras'
+Jacobian by 1.05 leaves the known minimum reachable — Gauss-Newton descends on a
+slightly wrong Jacobian — while the finite difference reads 12,888 against the
+analytic 13,298. The per-camera loop order is `landmarks()` in id order and
+`cam_id` ascending, and the same window solved twice is bit-identical.
+
+So MGO09's 0.978 cm against 0.842 is the schedule — the landmarks and the seven
+keyframe poses standing still between keyframes — and the two-state variant above
+is the measure of how much of it a wider free block buys. What that does **not**
+settle is whether the whole 0.136 cm is the schedule; it settles that it is not
+the per-camera algebra, and enabling this on a four-camera rig through the shared
+`fast` profile is still a scope decision rather than a measurement.
+- **D76** — The fast profile runs the joint solve at keyframes and a 15-dof fixed-landmark update on the framesets between (2026-09-10)
+
+## D77 — The GPU frontend waits once per phase, and reserves its queue budget
+
+The device timestamps say every kernel of a two-camera MIO10 frameset is 0.44 ms
+of GPU time while the frontend spends 1.63 ms of host time. Counters at the seam
+(`gpu/seam.rs`, `tests/gpu_seam_bench.rs`) say where the rest of it was: **five
+synchronising reads, 1.51 ms**, against 0.15 ms in all eleven uploads and nothing
+measurable in the thirty-two launches.
+
+A read on this lane costs about **0.12 ms of host time before it has moved a
+byte** — measured by adding empty four-byte reads to a frameset, which cost
+0.115 ms each — because `read_async` reserves a staging buffer, submits, calls
+`map_async`, and then hands off twice to the runtime's polling thread. So a
+frameset's host cost is set by *how many reads it makes*, not by how much they
+carry, and `CUBECL_WGPU_MAX_TASKS` moves none of it (32 is already the best of
+1/2/4/8/16/32/64).
+
+Three of the five were removable because the passes they separated do not depend
+on each other:
+
+* the temporal tracks read only their own camera's two pyramids;
+* the cross-camera matches read camera 0's new keypoints and write camera *i*;
+* the cell selection reads the frame — the occupancy counts and the masks stay on
+  the host and are applied to the downloaded keys afterwards.
+
+So each phase launches the whole rig and downloads it once.
+`PatchTracker::submit_prepared` and `collect` split the tracker's five launches
+from its download, `CornerScan::prepare_cells` answers every camera's selection
+at once, and `cell_select` is the mask-independent half of the device gate that
+lets the frontend ask for a camera's selection before the frameset has masked it.
+A batch's passes share every intermediate buffer — the source and backward patch
+stores, the backward transforms — and may, because the device stream is ordered:
+pass *k*'s `finish` has read them before pass *k+1*'s kernels write them. Only
+the packed result is per lane, which is why `gpu_backends` takes a camera count.
+`a_batch_of_two_passes_answers_what_two_calls_do` is the test that would catch
+that ordering claim being wrong.
+
+The timing test runs alone, explicitly selected, so ordinary queue tests cannot
+compete with its measured framesets:
+
+```bash
+SLAM_RS_SEAM_BENCH=300 cargo test --release --features gpu-wgpu \
+  --test gpu_seam_bench -- --ignored --exact the_gpu_frontend_reports_its_host_seam --nocapture
+```
+
+### The spin the batch uncovered
+
+Batching made the **four-camera** lane 32 % slower, all of it inside the first
+launch of the second pass. CubeCL 0.10's client-to-server channel is 32 tasks
+deep (`CHANNEL_MAX_TASK`), and a producer that fills it does not block: it spins
+524,288 times, yields 4,096 times, then sleeps in 75 µs steps
+(`SPIN_BUDGET_CLIENT`). That is tuned for a producer and a server on different
+cores; this pipeline is pinned to one, so the spin is the server's own core and
+the queue cannot drain until the producer gives it up. A two-camera frameset
+enqueues 28 tasks between its downloads and stayed under the cliff by four; a
+four-camera frameset enqueues 56 and spent **2.9 ms a frameset spinning**.
+
+Flushing after every camera fixed it and cost 0.10 ms a frameset on the stereo
+lane, because the flush waits for the server and on one core that handoff is real
+even when the work is not. What the channel needs is a ceiling, not a rhythm: the
+submission module (`gpu/submission.rs`) reserves one task before each upload,
+allocation, or kernel launch. Meters in `gpu/seam.rs` only observe the producer
+thread; typed snapshot deltas never reset the submission budget.
+Pyramid preparation counts uploads when it submits them; builds consume those
+images without charging the upload again. Splitting builds into single-launch
+stages makes the count follow the actual geometry, with no fixed stage bound.
+A flush runs before a reservation would exceed 31 tasks, leaving the last slot
+of CubeCL 0.10.0's private `CHANNEL_MAX_TASK = 32` for the flush or read itself.
+
+The budget is per device on a producer thread, identified by the shared client
+properties address and runtime type. Each device must have one producer; this
+is not a multi-producer guarantee. A read resets only that device's count.
+The regression covers eight cameras with six and nine pyramid levels. Under
+this producer constraint, accounted frontend submissions stay at most 31
+between blocking calls, including on deeper pyramids and larger rigs.
+
+### Measured
+
+Fast profile, `--base wave2` (`60c01a33`), three interleaved rounds on MIO10 and
+one on MGO09. Trajectories are **byte-identical** to the base on both.
+
+| clip | base median | after | delta | ATE vs GT | lost |
+|---|---:|---:|---:|---:|---:|
+| MIO10 | 2.007 ms | **1.533** | −0.473 (−23.6 %) | 1.553 cm both | 0/0 |
+| MGO09 | 3.803 ms | **2.260** | −1.543 (−40.6 %) | 0.978 cm both | 0/0 |
+
+MIO10 stage medians: pyramid 0.143 → 0.142, detect 0.562 → 0.217, temporal track
+0.743 → 0.558, stereo 0.191 → 0.194. Reads per frameset 5 → 3 while detecting,
+2 → 1 while not.
+
+What is left in the frontend is still mostly the three reads: the in-process rig
+puts 0.73 of the two-camera frameset's 1.11 ms in them. The next read to remove
+is the cell selection's, which needs `should_detect` decided before the temporal
+tracks come back — a speculation that is free on a detecting frameset and costs
+the FAST kernels on one that skips.
+- **D77** — The GPU frontend waits once per phase instead of once per camera, and bounds the runtime queue so a four-camera rig does not spin (2026-09-10)
+
+## D78 — One stage's download carries another's buffers: the cell selection rides the temporal tracks
+
+D77 left the frontend at three synchronising reads a detecting frameset and named
+the next one to remove: the cell selection's, which came after the temporal
+tracks only because `should_detect` is decided from them. It is gone, and the
+mechanism is general — a `ReadRelay` (`gpu/mod.rs`) that one stage stages
+launched handles on and the next stage to synchronise appends to its own
+`read_async`, handing the tail back. `gpu_backends` shares one between the
+corner scanner and the tracker, the same wiring and for the same reason as the
+level-0 table: both stages are on one client and one frameset, so the difference
+between sharing and not is a whole read.
+
+**Camera 0's selection is launched at the top of the frameset**, before the
+temporal tracks and before anything about the frameset is known, and its keys
+come back inside `PatchTracker::collect`. That is a speculation: on MIO10's fast
+profile **79 % of framesets detect** (`added_points > 0`, 277 of 352
+post-warmup), so four times in five the keys are free and the fifth time the
+FAST kernels are wasted GPU work — no extra read either way, because a frameset
+that skips `add_points` never asks for them. The **other** cameras' selections
+only feed the non-overlap pass, so they are launched behind the cross-camera
+matches and ride *that* download; nothing is left for a read of its own.
+`CornerScan::prepare_cells` splits into `submit_cells` (launch, stage) and
+`take_cells` (take the tail, or download it here when nothing carried it — the
+first frameset of a run, which has no temporal pass).
+
+No arithmetic moves. The occupancy gate and the masks stay on the host and are
+still applied to the downloaded keys, `cell_select` is still the mask-independent
+half (D77), and the mixed-geometry and `num_points_cell != 1` fallbacks still
+take the band walk. Trajectories are byte- and state-identical to D77's on both
+clips.
+
+**A relay hands bytes to the stage that launched them, or to nobody.** Every
+staging carries a `RelayTag` — an owner from a process-wide counter, plus that
+owner's frameset number — and the download hands the tail back under the same
+tag, so `take_cells` decodes a delivery only when it answers its own launches.
+Two scanners staging on one relay therefore cost the loser a read, where an
+untagged single slot would have let it decode the other's buffers in its own
+camera order: wrong keypoints, and nothing in the values to say so. `gpu_backends`
+gives each frontend its own relay, which is the wiring but not a lifetime the
+type can state; the tag is three integer comparisons a frameset and makes the
+crossing impossible instead of merely unused. The generation is what refuses a
+delivery left from an earlier frameset of the same scanner, which is the state a
+refused frameset leaves behind. `two_scanners_on_one_relay_each_take_their_own_keys`
+(`tests/gpu_detect.rs`) is the regression: two scanners, one relay, one collect,
+each checked against an independent scan of its own frames.
+
+### The two orders that were tried and lost
+
+Both measured in the in-process rig (`tests/gpu_seam_bench.rs`, now with
+`SLAM_RS_SEAM_REDETECT=<ratio>` so the fast profile's gate is reachable), 400
+framesets, whole-frameset median in ms:
+
+| shape | 2 cam, every frameset detects | 2 cam, 18 % detect | 4 cam, every | 4 cam, 18 % |
+|---|---:|---:|---:|---:|
+| D77 | 1.258 | 0.887 | 2.735 | 1.653 |
+| **camera 0 up front, the rest behind the matches** | **1.205** | 0.971 | **2.455** | **1.582** |
+| every camera up front | 1.337 | 1.012 | 2.399 | 1.745 |
+| camera 0 up front, the rest *ahead* of the matches | 1.240 | 0.919 | 2.500 | 1.664 |
+
+Launching every camera up front loses because it puts 26 tasks in the
+two-camera phase and 52 in the four-camera one, so D77's queue ceiling flushes
+where the chosen shape does not. Launching the tail ahead of the matches rather
+than behind them loses by less and consistently, on all four cells.
+
+The speculated launches take no exemption from D77's rule. `launch_selection`'s
+three kernels, its key allocation and the frame upload the pyramid did not
+publish each reserve their own task before submitting it, so the selection at
+the top of the frameset is charged to the device's budget where it happens
+rather than after the fact — which is what makes the task counts above the ones
+the ceiling actually sees. A carried read still drains the device it read from:
+`collect` resets the count for both stages' buffers, and a `take_cells` that was
+handed bytes makes no read and drains nothing.
+
+D77's regression bounds the staging phase alone, which runs before any of this.
+`the_queue_peak_of_a_whole_frameset_stays_below_the_channel_depth`
+(`tests/gpu_seam_bench.rs`) bounds a **whole frameset** of the shipped wiring
+instead — camera 0's selection ahead of the temporal passes, the tail behind the
+matches, both carried home — at two, four and eight cameras, twice the widest
+rig the configs carry. It is the reserved peak it bounds, so it holds for
+accounted submissions; an unaccounted one moves no counter and shows up as the
+spin the harness measures.
+
+The queue regression remains an ordinary test. Run the ignored timing harness
+in a separate process, including for D78 comparisons:
+
+```bash
+SLAM_RS_SEAM_BENCH=300 cargo test --release --features gpu-wgpu \
+  --test gpu_seam_bench -- --ignored --exact the_gpu_frontend_reports_its_host_seam --nocapture
+```
+
+### What a read is worth, revised
+
+D77 measured 0.115 ms for one *added* empty read and this lever recovers about
+half of that per read removed: 0.053 ms in the rig, 0.10 ms on the clip. The
+difference is that a removed read does not take its GPU wait with it — the
+surviving read inherits it. So the seam's remaining cost is not "reads × 0.115":
+it is two fixed read costs plus the device work they wait on, and the clip's
+own detect stage went 0.214 → 0.008 ms while stereo went 0.193 → 0.298, which is
+that inheritance in the stage table.
+
+### Measured
+
+Fast profile, `--base wave3` (`c1f1a73a`), three interleaved rounds on MIO10 and
+one on MGO09.
+
+| clip | base median | after | delta | ATE vs GT | lost | identical |
+|---|---:|---:|---:|---:|---:|---|
+| MIO10 | 1.530 ms | **1.429** | −0.102 (−6.7 %) | 1.553 cm both | 0/0 | byte + state |
+| MGO09 | 2.282 ms | **2.197** | −0.086 (−3.8 %) | 0.978 cm both | 0/0 | byte + state |
+
+MIO10's median clears the 1.439 ms speed target, as do two of its three rounds
+(1.429, 1.432, 1.447 — the third misses by 0.008 ms).
+Reads per frameset 3 → **2** while detecting, 1 → 1 while not.
+
+The next thing in the seam is the **uploads**, not the reads: eleven a
+two-camera frameset for 0.174 ms, which is 0.016 ms each whether it carries
+1.84 MB of frame or a few hundred floats, so the cost is per call and nine of
+the eleven are the tracker's three-per-pass. Merging a pass's positions,
+forward transforms and backward offsets into one buffer with three regions —
+the kernels already take base offsets — would take eleven to five.
+- **D78** — One GPU stage's download carries another's buffers: camera 0's cell selection is launched at the top of the frameset and read back by the temporal tracks (2026-09-10)

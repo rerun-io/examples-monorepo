@@ -100,6 +100,25 @@ pub enum ConfigError {
     Parse(#[from] serde_json::Error),
 }
 
+/// Whether [`VioConfig::port_redetect_survivor_ratio`] is at its off value.
+///
+/// The port's own key is skipped when it is off, so a basalt document still
+/// round-trips to exactly the keys it arrived with and a C++ run reading a
+/// config the port wrote back never meets a key cereal has no field for.
+#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde's predicate shape")]
+fn redetect_is_off(ratio: &f32) -> bool {
+    *ratio == 0.0
+}
+
+/// Whether [`VioConfig::port_frame_update_max_iterations`] is at its off value.
+///
+/// See [`redetect_is_off`]: the port's own keys stay out of a basalt document
+/// while they are off.
+#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde's predicate shape")]
+fn frame_update_is_off(iterations: &i32) -> bool {
+    *iterations <= 0
+}
+
 /// cereal's outer wrapper: every basalt JSON is one object under `value0`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Value0<T> {
@@ -181,6 +200,43 @@ pub struct VioConfig {
     /// Per-level residual cap for accepting a recall.
     #[serde(rename = "config.optical_flow_recall_max_patch_norms")]
     pub optical_flow_recall_max_patch_norms: Vec<f32>,
+
+    // ── the port's own knobs ────────────────────────────────────────────
+    /// Survivor fraction below which a frameset detects; `0` detects always (D75).
+    ///
+    /// The one key here that basalt has no counterpart for, which is why it is
+    /// spelled `port.` instead of `config.`: the vendored `configs/*.json` are
+    /// the files the C++ reference runs read, so nothing writes a key into them
+    /// that the C++ never saw, and this one is carried by a profile overlay
+    /// alone (`configs/profiles/fast.json`). `0.0` — the value every basalt file
+    /// leaves it at, and [`VioConfig::default`]'s — is basalt's own behaviour:
+    /// `addPoints` on every frameset. Above zero the frameset detects only once
+    /// camera 0 holds fewer than this fraction of the keypoints the last
+    /// detecting frameset left it with, which is cuVSLAM's rule. Anything not
+    /// finite and above zero reads as `0`, so a garbled value detects rather
+    /// than silently stopping.
+    #[serde(
+        rename = "port.redetect_survivor_ratio",
+        skip_serializing_if = "redetect_is_off"
+    )]
+    pub port_redetect_survivor_ratio: f32,
+    /// LM steps the non-keyframe frame update gets; `0` solves the whole window
+    /// on every frameset (D76).
+    ///
+    /// `0` — every basalt file's value and [`VioConfig::default`]'s — is
+    /// basalt's own schedule: `optimize` runs the 87-unknown sliding window on
+    /// every frameset. Above zero a frameset that took no keyframe instead
+    /// solves the newest state's 15 unknowns against fixed landmarks and its IMU
+    /// factor, and the joint solve runs at keyframes only. The loop is the
+    /// window's, inclusive as `vio_max_iterations` is, so `5` is a budget of
+    /// **six** trials — accepted and backtracked together — not five; the two
+    /// caps mean the same thing on purpose. Carried by the profile overlay alone
+    /// (`configs/profiles/fast.json`); the `port.` spelling is D75's.
+    #[serde(
+        rename = "port.frame_update_max_iterations",
+        skip_serializing_if = "frame_update_is_off"
+    )]
+    pub port_frame_update_max_iterations: i32,
 
     // ── estimator ───────────────────────────────────────────────────────
     /// Which linearization runs.
@@ -303,6 +359,9 @@ impl Default for VioConfig {
             optical_flow_recall_update_patch_viewpoint: false,
             optical_flow_recall_max_patch_dist: 3.0,
             optical_flow_recall_max_patch_norms: vec![1.74, 0.96, 0.99, 0.44],
+
+            port_redetect_survivor_ratio: 0.0,
+            port_frame_update_max_iterations: 0,
 
             vio_linearization_type: LinearizationType::AbsQr,
             vio_sqrt_marg: true,
@@ -521,6 +580,56 @@ mod tests {
             reread.unknown.get("config.mapper_ransac_threshold"),
             Some(value)
         );
+    }
+
+    /// The port's own keys are off in every shipped file, and off they are
+    /// invisible: a basalt document round-trips to exactly the keys it arrived
+    /// with, so a C++ run reading a config the port wrote back never meets one
+    /// (D75, D76).
+    #[test]
+    fn the_port_knobs_are_off_and_unwritten_in_every_shipped_config() {
+        for (name, text) in every_fixture() {
+            let config: VioConfig = VioConfig::from_json_str(text).unwrap();
+            assert_eq!(config.port_redetect_survivor_ratio, 0.0, "{name}");
+            assert_eq!(config.port_frame_update_max_iterations, 0, "{name}");
+            let written: String = config.to_json_string().unwrap();
+            for key in [
+                "port.redetect_survivor_ratio",
+                "port.frame_update_max_iterations",
+            ] {
+                assert!(
+                    !written.contains(key),
+                    "{name} wrote {key} back into a basalt document"
+                );
+                // Not an unknown key either: it is modelled, so a file that
+                // does carry it is not merely tolerated.
+                assert!(!config.unknown.contains_key(key));
+            }
+        }
+    }
+
+    /// What `configs/profiles/fast.json` does to a vendored config: one key
+    /// added, everything else untouched, and it survives a round trip.
+    #[test]
+    fn the_port_knobs_survive_the_round_trip_when_a_profile_sets_them() {
+        let base: VioConfig = VioConfig::from_json_str(MSDMI_JSON).unwrap();
+        let overlaid: String = MSDMI_JSON.replace(
+            "\"value0\": {",
+            "\"value0\": {\"port.redetect_survivor_ratio\": 0.7, \"port.frame_update_max_iterations\": 2,",
+        );
+        let config: VioConfig = VioConfig::from_json_str(&overlaid).unwrap();
+        assert_eq!(config.port_redetect_survivor_ratio, 0.7);
+        assert_eq!(config.port_frame_update_max_iterations, 2);
+
+        let mut normalised: VioConfig = config.clone();
+        normalised.port_redetect_survivor_ratio = 0.0;
+        normalised.port_frame_update_max_iterations = 0;
+        assert_eq!(normalised, base, "the overlay moved something else");
+
+        let written: String = config.to_json_string().unwrap();
+        assert!(written.contains("port.redetect_survivor_ratio"));
+        assert!(written.contains("port.frame_update_max_iterations"));
+        assert_eq!(VioConfig::from_json_str(&written).unwrap(), config);
     }
 
     /// A key nobody has ever heard of is warned about, not rejected.

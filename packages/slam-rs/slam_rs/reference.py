@@ -15,6 +15,8 @@ it is decided from measurement: S15 measured the band and D60 is what this table
 now says.
 """
 
+import hashlib
+import json
 import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -64,6 +66,7 @@ GT_SOURCE_BY_NAME: dict[str, GroundTruthSource] = {"lighthouse": "lighthouse", "
 """Ground-truth measurement systems the two MSD devices use."""
 GATE_POLICY_BY_NAME: dict[str, GatePolicy] = {"tight": "tight", "standard": "standard", "no_divergence": "no_divergence"}
 """Valid gate policies, in decreasing strictness."""
+
 
 def _one_of[LiteralName: str](value: object, allowed: dict[str, LiteralName], what: str, where: str) -> LiteralName:
     """Narrow one manifest string into its literal alphabet, or say what the alphabet is.
@@ -457,19 +460,22 @@ class ReferenceManifest:
                 return dataset
         raise ValueError(f"{name!r} is not in the reference set; have {[d.name for d in self.datasets]}")
 
-    def vio_config_text(self, dataset_name: str) -> str:
+    def vio_config_text(self, dataset_name: str, profile: str = "reference") -> str:
         """The basalt VIO config one dataset's segments run with, as its file's own text.
 
         Args:
             dataset_name: Catalog dataset name.
+            profile: Named config overlay; reference preserves the original text.
 
         Returns:
-            The vendored file's text, ready for :meth:`slam_rs._core.VioConfig.from_json`.
+            The overlaid JSON (original file text for reference), ready for :meth:`slam_rs._core.VioConfig.from_json`.
 
         Raises:
             ValueError: If the manifest has no such dataset.
+            KeyError: If an overlay key is absent from the vendored config.
         """
-        return (self.package_root / self.dataset(dataset_name).vio_config).read_text()
+        path: Path = self.package_root / self.dataset(dataset_name).vio_config
+        return profiled_config_text(path, profile, path.parent / "profiles")
 
     def by_id(self, segment_id: str) -> ReferenceSegment:
         """The segment with this id.
@@ -639,8 +645,63 @@ def d60_failures(
     return failures
 
 
-def flow_config(manifest: ReferenceManifest, segment: ReferenceSegment) -> _core.VioConfig:
-    """The basalt config the C++ reference ran this segment's dataset with.
+PORT_CONFIG_KEYS: frozenset[str] = frozenset({"port.redetect_survivor_ratio", "port.frame_update_max_iterations"})
+"""Overlay keys the port adds to basalt's document, which no vendored config carries.
+
+``configs/*.json`` are the files the C++ reference runs read, key for key
+(``tests/test_cpp_reference.py``), so a knob basalt has no field for is never
+written into them: it is spelled ``port.`` instead of ``config.``, an overlay
+inserts it, and :class:`slam_rs._core.VioConfig` models it with a default that
+reproduces basalt's behaviour for every path that does not. Listing them here
+keeps :func:`profiled_config_text`'s typo check: a key that is neither in the
+base document nor in this set is still a ``KeyError``.
+"""
+
+
+def config_text_sha256(text: str) -> str:
+    """Identify the resolved configuration without changing its serialization.
+
+    Args:
+        text: The exact text returned by :func:`profiled_config_text`.
+
+    Returns:
+        The hexadecimal SHA-256 of the text encoded as UTF-8.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def profiled_config_text(path: Path, profile: str = "reference", profiles: Path = MANIFEST_PATH.parent / "configs/profiles") -> str:
+    """Read a config and apply a named overlay; empty overlays preserve its text.
+
+    Args:
+        path: Base config JSON.
+        profile: Overlay file stem.
+        profiles: Directory holding the flat config-key overlays.
+
+    Returns:
+        Config JSON with the overlay applied.
+
+    Raises:
+        KeyError: If an overlay key is neither in the base value0 namespace nor
+            one of :data:`PORT_CONFIG_KEYS`.
+    """
+    text: str = path.read_text()
+    overlay: dict = json.loads((profiles / f"{profile}.json").read_text())
+    if not overlay:
+        return text
+    document: dict = json.loads(text)
+    values: dict = document["value0"]
+    for key in overlay:
+        if key not in values and key not in PORT_CONFIG_KEYS:
+            raise KeyError(key)
+    values.update(overlay)
+    return json.dumps(document)
+
+
+def resolved_flow_config(
+    manifest: ReferenceManifest, segment: ReferenceSegment, profile: Literal["reference", "fast"] = "reference"
+) -> tuple[_core.VioConfig, str]:
+    """The basalt config the C++ reference ran this segment's dataset with, and the text it was parsed from.
 
     basalt's constructor defaults are not its shipped files: ``msdmi_config.json``
     and ``msdmg_config.json`` set ``vio_marg_lost_landmarks`` to true where the
@@ -650,7 +711,7 @@ def flow_config(manifest: ReferenceManifest, segment: ReferenceSegment) -> _core
     reference clips, with the dataset's config 0.31 to 5.19 cm (C72) — so the
     file is read rather than reconstructed.
 
-    Nothing is written on top of it. The manifest's per-device
+    An explicit speed profile overlays its keys. The manifest's per-device
     ``optical_flow_image_safe_radius`` is asserted against the file instead, so a
     manifest and a config that disagree stop the run rather than one of them
     silently winning. The replay tool and the V2 gate both build their estimator
@@ -660,22 +721,27 @@ def flow_config(manifest: ReferenceManifest, segment: ReferenceSegment) -> _core
         manifest: The reference set the segment came from, which resolves the
             dataset's config file.
         segment: The segment about to be replayed.
+        profile: Config overlay; reference preserves the C++ configuration.
 
     Returns:
-        The config to build an estimator or a frontend for that segment with.
+        The config to build an estimator or a frontend for that segment with,
+        and the exact text it was parsed from: a run's provenance digest is
+        taken over that text (:func:`config_text_sha256`), never over a second
+        read of the file.
 
     Raises:
         ValueError: If the file's image safe radius is not the one the manifest
             froze for this segment.
     """
-    config: _core.VioConfig = _core.VioConfig.from_json(manifest.vio_config_text(segment.dataset_name))
+    text: str = manifest.vio_config_text(segment.dataset_name, profile=profile)
+    config: _core.VioConfig = _core.VioConfig.from_json(text)
     frozen: float = segment.reference.optical_flow_image_safe_radius
     if config.optical_flow_image_safe_radius != frozen:
         raise ValueError(
             f"{segment.segment_id}: {manifest.dataset(segment.dataset_name).vio_config} sets "
             f"optical_flow_image_safe_radius = {config.optical_flow_image_safe_radius}, the manifest freezes {frozen}"
         )
-    return config
+    return config, text
 
 
 def _imu(block: dict[str, Any]) -> ImuParameters:

@@ -13,10 +13,12 @@ behind an observer is a deferred follow-up. The ``slow`` test below is what runs
 this one on the real rig.
 """
 
+import hashlib
 import json
 import math
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pytest
@@ -27,12 +29,14 @@ from numpy import ndarray
 from slam_rs.apis import robocap_fleet
 from slam_rs.apis.robocap_fleet import BUDGET_15FPS_MS, BUDGET_30FPS_MS, Config, RobocapRow, main, measure
 from slam_rs.machine import Machine, this_machine
-from slam_rs.reference import ReferenceManifest, RobocapSession
-from slam_rs.tracking import SegmentRun
+from slam_rs.reference import ReferenceManifest, RobocapSession, profiled_config_text
+from slam_rs.tracking import SegmentRun, robocap_estimator_files
 from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, empty_trajectory, shift_clock
 
 CAP: Machine = Machine(hostname="robocap_f403b0", arch="aarch64", libc="2.41", cores=8)
 """The RK3588 cap, which is the machine every budget in this module is for."""
+DIGEST: str = hashlib.sha256(b"the resolved config text").hexdigest()
+"""What a run reports as the digest of the config text its estimator was built from."""
 ROW: RobocapRow = RobocapRow(
     machine=CAP,
     segment_id="robocap-s15",
@@ -52,6 +56,7 @@ ROW: RobocapRow = RobocapRow(
     temp_c_after=51.8,
     cross_platform_ate_cm=0.004,
     unscored=None,
+    config_sha256=DIGEST,
 )
 """Session 15 at a round 100 ms per frameset, so the budget arithmetic is readable."""
 
@@ -96,9 +101,7 @@ def test_the_session_is_named_the_way_a_fleet_row_names_it(manifest: ReferenceMa
     assert [session.fleet_id for session in manifest.robocap.sessions] == ["robocap-s15", "robocap-s21"]
 
 
-def test_both_outputs_survive_a_directory_that_is_not_there_yet(
-    manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_both_outputs_survive_a_directory_that_is_not_there_yet(manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A run that measured 52.9 s of video must not lose it to a missing ``out/``."""
     monkeypatch.setattr(robocap_fleet, "measure", lambda *_args: (ROW, empty_trajectory()))
     output: Path = tmp_path / "out" / "robocap_fleet.json"
@@ -151,7 +154,9 @@ def test_an_estimate_on_another_clock_is_a_row_and_not_a_traceback(
     monkeypatch.setattr(
         robocap_fleet,
         "run_robocap",
-        lambda *_args, **_kwargs: SegmentRun(estimate=shift_clock(reference, 4_800_000_000_000), framesets=poses, lost=0, wall_s=3.0),
+        lambda *_args, **_kwargs: SegmentRun(
+            estimate=shift_clock(reference, 4_800_000_000_000), framesets=poses, lost=0, wall_s=3.0, config_sha256=DIGEST
+        ),
     )
     (tmp_path / "slam.rrd").write_bytes(b"")
     session: RobocapSession = replace(manifest.robocap.session("s00000015"), slam_url=f"file://{tmp_path / 'slam.rrd'}")
@@ -206,7 +211,11 @@ def test_a_non_finite_estimate_is_a_row_and_not_an_alignment_traceback(
         robocap_fleet,
         "run_robocap",
         lambda *_args, **_kwargs: SegmentRun(
-            estimate=Trajectory(t_ns=t_ns, position_m=positions, quaternion_wxyz=np.zeros((poses, 4))), framesets=poses, lost=0, wall_s=3.0
+            estimate=Trajectory(t_ns=t_ns, position_m=positions, quaternion_wxyz=np.zeros((poses, 4))),
+            framesets=poses,
+            lost=0,
+            wall_s=3.0,
+            config_sha256=DIGEST,
         ),
     )
     monkeypatch.setattr(robocap_fleet, "ate", never("an estimate with a non-finite position was handed to the alignment"))
@@ -272,3 +281,26 @@ def test_the_only_session_with_a_measured_cpp_wall_is_the_one_that_has_one(manif
     assert manifest.robocap.session("s00000015").expected_cpp_wall_s == 88.91
     assert manifest.robocap.session("s00000021").expected_cpp_wall_s is None
 
+
+@pytest.mark.parametrize("profile", ["reference", "fast"])
+def test_result_carries_the_profile_and_the_runs_config_digest(
+    profile: Literal["reference", "fast"],
+    manifest: ReferenceManifest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The exported digest is the run's own, and the run's text is the resolved file under either profile."""
+    resolved: str = profiled_config_text(manifest.package_root / manifest.robocap.vio_config, profile, manifest.package_root / "configs/profiles")
+    assert robocap_estimator_files(manifest, profile=profile)[2] == resolved
+    digest: str = hashlib.sha256(f"robocap:{profile}".encode()).hexdigest()
+
+    def measured(_manifest: ReferenceManifest, _session: RobocapSession, received: Config, _machine: Machine) -> tuple[RobocapRow, Trajectory]:
+        assert received.profile == profile
+        return replace(ROW, config_sha256=digest), empty_trajectory()
+
+    monkeypatch.setattr(robocap_fleet, "measure", measured)
+    output: Path = tmp_path / "robocap.json"
+    main(Config(profile=profile, output_json=output))
+    written: dict = json.loads(output.read_text())
+    assert written["profile"] == profile
+    assert written["config_sha256"] == digest

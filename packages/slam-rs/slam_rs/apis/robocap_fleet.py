@@ -30,6 +30,7 @@ import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Literal
 
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb, this_temperature_c
 from slam_rs.reference import ReferenceManifest, RobocapSession, load_manifest
@@ -104,6 +105,8 @@ class RobocapRow:
     ``cpp_`` fields NaN and :attr:`cross_platform_ate_cm` unmeasured while the
     cost beside them is still measured; see ``ate`` for why it is a row.
     """
+    config_sha256: str
+    """SHA-256 of the exact config text the run's estimator was built from."""
 
     def row(self) -> str:
         """This session as one row of the fleet's runtime-budget table."""
@@ -122,6 +125,9 @@ class RobocapRow:
 @dataclass(slots=True)
 class Config:
     """Replay one RoboCap session on this machine, with nothing logged."""
+
+    profile: Literal["reference", "fast"] = "reference"
+    """Config overlay applied before tracking."""
 
     artifact_root: Path | None = None
     """Read every recording and sidecar from one directory per segment; see :func:`slam_rs.reference.relocate`."""
@@ -173,7 +179,7 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
     cpp: Trajectory = robocap_cpp_trajectory(manifest, session)
     across_reference: Trajectory | None = None if config.reference_csv is None else read_trajectory(config.reference_csv)
     before: float | None = this_temperature_c()
-    run: SegmentRun = run_robocap(manifest, session, seconds=config.seconds, window_s=config.window_s)
+    run: SegmentRun = run_robocap(manifest, session, seconds=config.seconds, window_s=config.window_s, profile=config.profile)
     after: float | None = this_temperature_c()
     against_cpp: AteResult | None = None
     across: float | None = None
@@ -220,6 +226,7 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
             temp_c_after=after,
             cross_platform_ate_cm=across,
             unscored=unscored,
+            config_sha256=run.config_sha256,
         ),
         run.estimate,
     )
@@ -227,6 +234,8 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
 
 def main(config: Config) -> None:
     """Replay the session, print its row, and write the trajectory and the JSON.
+
+    The result carries the profile and the resolved configuration SHA-256 once.
 
     Args:
         config: Parsed CLI options.
@@ -245,13 +254,14 @@ def main(config: Config) -> None:
     row: RobocapRow
     estimate: Trajectory
     row, estimate = measure(manifest, session, config, machine)
+    print(f"profile={config.profile} config_sha256={row.config_sha256}")
     output_csv: Path = config.output_csv if config.output_csv is not None else config.output_json.with_suffix(".csv")
     # Above both writes: a run that spent 52.9 s of video must not lose it to a
     # directory that is not there. `write_trajectory` makes its own parents,
     # which is why the CSV used to work by accident when the two shared one.
     config.output_json.parent.mkdir(parents=True, exist_ok=True)
     write_trajectory(output_csv, estimate)
-    config.output_json.write_text(json.dumps(asdict(row), indent=2) + "\n")
+    config.output_json.write_text(json.dumps({"profile": config.profile, **asdict(row)}, indent=2) + "\n")
     print(row.row())
     print(
         f"{row.tracked} tracked poses -> {output_csv}; {row.cpp_rmse_cm:.2f} cm rmse / {row.cpp_max_cm:.2f} max / "

@@ -95,7 +95,8 @@ use nalgebra::Vector3;
 
 use slam_rs::config::VioConfig;
 use slam_rs::estimator::{
-    FlowObservations, FrameOutcome, FrameStats, LmIteration, SqrtKeypointVio, WindowSnapshot,
+    FlowObservations, FrameOutcome, FrameStats, FrameUpdateOutcome, LmIteration, SqrtKeypointVio,
+    WindowSnapshot,
 };
 use slam_rs::imu::ImuSample;
 use slam_rs::lie::LieScalar;
@@ -162,6 +163,10 @@ const CANCELLING_TOLERANCE_F32: f64 = 5e-1;
 /// that with room, and still two orders below the 1e-3-scale decrease the
 /// `f64` run sees at those steps.
 const F32_ACCEPT_NOISE_ULPS: f64 = 64.0;
+
+/// What `configs/profiles/fast.json` gives the frame update, so the lane the
+/// test drives is the lane the benchmark runs (D76).
+const FRAME_UPDATE_STEPS: i32 = 5;
 
 // ── loading ───────────────────────────────────────────────────────────────
 
@@ -770,11 +775,120 @@ fn a_repeat_run_is_bit_identical() {
     assert_eq!(first, second, "a repeat run differed");
 }
 
+/// D76: with `port.frame_update_max_iterations` on, a frameset that took no
+/// keyframe solves its own state and nothing else.
+///
+/// Three things are asserted, and the first is the one that matters: the
+/// schedule is still a pure function of the data, so two runs are bit-identical
+/// coefficient for coefficient. Then which branch each frameset took, read off
+/// `FrameStats::frame_update` rather than inferred from the length of its LM
+/// trail: `Taken` on every frameset the knob is eligible for, `NotAttempted`
+/// through the warmup and on every keyframe. The work the taken framesets cost
+/// is a separate assertion, because a cap the trail happens to respect is not
+/// evidence about which solver ran. What the schedule costs in accuracy is not
+/// a unit test's question: it is the A/B harness's, against ground truth on a
+/// whole clip.
+#[test]
+fn the_frame_update_lane_is_deterministic_and_takes_its_branch() {
+    let flow: Vec<Arc<FlowObservations>> = ORACLE
+        .flow
+        .iter()
+        .take(ORACLE_FRAMESETS)
+        .map(common::observations)
+        .collect();
+
+    let mut config: VioConfig = CONFIG.clone();
+    config.port_frame_update_max_iterations = FRAME_UPDATE_STEPS;
+    let first: Vec<Trace> = drive_with(config.clone(), &flow);
+    let second: Vec<Trace> = drive_with(config, &flow);
+    assert_eq!(first, second, "the frame update lane is not deterministic");
+
+    let joint: Vec<Trace> = drive(&flow);
+    // The frameset that starts the optimizer runs the joint solve on both lanes:
+    // `opt_started` is still false when the gate is read. It is the first with a
+    // trail at all, and every frameset after it is the frame update's to decline
+    // or take.
+    let warmup: usize = joint
+        .iter()
+        .position(|trace| !trace.lm.is_empty())
+        .expect("no frameset reached the optimizer");
+    let mut updated: usize = 0;
+    for (index, (trace, reference)) in first.iter().zip(joint.iter()).enumerate() {
+        // The two lanes agree on which framesets are keyframes over this
+        // segment, which is what lets the comparison below be per frameset.
+        assert_eq!(
+            trace.took_keyframe, reference.took_keyframe,
+            "{}",
+            trace.t_ns
+        );
+        // The gate is `knob > 0 && !took_keyframe && opt_started`, and
+        // `opt_started` is still false on the frameset that starts the
+        // optimizer, so everything up to and including it runs the joint solve
+        // on both lanes.
+        if index <= warmup || trace.took_keyframe {
+            assert_eq!(
+                trace.frame_update,
+                FrameUpdateOutcome::NotAttempted,
+                "frameset {} is warmup or a keyframe and still attempted the update",
+                trace.t_ns
+            );
+            continue;
+        }
+        assert_eq!(
+            trace.frame_update,
+            FrameUpdateOutcome::Taken,
+            "frameset {} did not take the frame update",
+            trace.t_ns
+        );
+        updated += 1;
+    }
+    assert!(
+        updated > 40,
+        "only {updated} framesets took the frame update"
+    );
+
+    // The work budget, which is a different question from which solver ran: a
+    // taken frameset stays inside the knob's inclusive cap.
+    let cap: usize = usize::try_from(FRAME_UPDATE_STEPS + 1).unwrap();
+    for trace in first
+        .iter()
+        .filter(|trace| trace.frame_update == FrameUpdateOutcome::Taken)
+    {
+        assert!(
+            trace.lm.len() <= cap,
+            "frameset {} took {} steps against a cap of {cap}",
+            trace.t_ns,
+            trace.lm.len()
+        );
+    }
+
+    let steps = |lane: &[Trace]| -> usize {
+        lane.iter()
+            .skip(warmup + 1)
+            .filter(|trace| !trace.took_keyframe)
+            .map(|trace| trace.lm.len())
+            .sum()
+    };
+    let joint_steps: usize = steps(&joint);
+    let update_steps: usize = steps(&first);
+    println!(
+        "{updated} framesets took the frame update: {update_steps} steps against the joint solve's {joint_steps}"
+    );
+    assert!(
+        update_steps * 2 < joint_steps,
+        "the frame update took {update_steps} steps against the joint solve's {joint_steps}"
+    );
+}
+
 /// What the determinism test compares: everything a caller can observe except
 /// the wall-clock timings, which are measurements and not decisions.
 #[derive(Debug, Clone, PartialEq)]
 struct Trace {
     t_ns: i64,
+    took_keyframe: bool,
+    /// What D76's frame update did with this frameset, as the estimator states
+    /// it: a decision, so a repeat run has to make the same one.
+    frame_update: FrameUpdateOutcome,
     kf_ids: Vec<FrameId>,
     ltkfs: Vec<FrameId>,
     landmarks: usize,
@@ -785,7 +899,11 @@ struct Trace {
 }
 
 fn drive(flow: &[Arc<FlowObservations>]) -> Vec<Trace> {
-    let mut estimator: SqrtKeypointVio<f32> = window(CONFIG.clone());
+    drive_with(CONFIG.clone(), flow)
+}
+
+fn drive_with(config: VioConfig, flow: &[Arc<FlowObservations>]) -> Vec<Trace> {
+    let mut estimator: SqrtKeypointVio<f32> = window(config);
     let mut traces: Vec<Trace> = Vec::new();
     for frame in flow {
         let outcome: FrameOutcome<f32> = estimator.process_frame(Arc::clone(frame)).unwrap();
@@ -796,6 +914,8 @@ fn drive(flow: &[Arc<FlowObservations>]) -> Vec<Trace> {
         let snapshot = estimator.snapshot();
         traces.push(Trace {
             t_ns: stats.t_ns,
+            took_keyframe: stats.took_keyframe,
+            frame_update: stats.frame_update,
             kf_ids: stats.kf_ids,
             ltkfs: stats.ltkfs,
             landmarks: stats.num_landmarks,

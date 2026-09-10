@@ -5,11 +5,12 @@ and — on the pack target — no pixi, so what is under test here is the part t
 needs none of that: the verdict a clip's numbers earn, and how the row reads.
 """
 
+import hashlib
 import json
 import math
 from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import numpy as np
 import pytest
@@ -41,6 +42,8 @@ The gap a machine lands on when it exports the wrong one of the two
 estimate that associates with nothing.
 """
 MACHINE: Machine = Machine(hostname="pablo-rpi", arch="aarch64", libc="2.36", cores=4)
+DIGEST: str = hashlib.sha256(b"the resolved config text").hexdigest()
+"""What a run reports as the digest of the config text its estimator was built from."""
 """A four-core Pi, which is the smallest machine that runs a full install."""
 PASSING: ClipResult = ClipResult(
     segment_id=SMOKE_SEGMENTS[1],
@@ -60,6 +63,7 @@ PASSING: ClipResult = ClipResult(
     truth_extent_m=3.4,
     poses_finite=True,
     unscored=None,
+    config_sha256=DIGEST,
 )
 """The smoke clip as this host measures it, on a machine four times slower."""
 
@@ -169,7 +173,9 @@ def test_a_clip_the_estimator_never_tracked_is_a_row_and_not_a_traceback(
 
     monkeypatch.setattr(fleet_check, "ate", never("`ate` was called on a run below D60's pose floor"))
     monkeypatch.setattr(
-        fleet_check, "run_segment", lambda *_args, **_kwargs: SegmentRun(estimate=empty_trajectory(), framesets=412, lost=412, wall_s=1.0)
+        fleet_check,
+        "run_segment",
+        lambda *_args, **_kwargs: SegmentRun(estimate=empty_trajectory(), framesets=412, lost=412, wall_s=1.0, config_sha256=DIGEST),
     )
     # Neither reference is opened for its numbers here, and this keeps the case
     # runnable on a machine with no corpus at all.
@@ -216,7 +222,9 @@ def test_an_estimate_on_another_clock_is_a_row_and_not_a_traceback(
     monkeypatch.setattr(
         fleet_check,
         "run_segment",
-        lambda *_args, **_kwargs: SegmentRun(estimate=shift_clock(reference, CLOCK_GAP_NS), framesets=poses, lost=0, wall_s=1.0),
+        lambda *_args, **_kwargs: SegmentRun(
+            estimate=shift_clock(reference, CLOCK_GAP_NS), framesets=poses, lost=0, wall_s=1.0, config_sha256=DIGEST
+        ),
     )
     segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENTS[1])
 
@@ -264,7 +272,11 @@ def test_a_non_finite_estimate_is_a_row_and_not_an_alignment_traceback(
         fleet_check,
         "run_segment",
         lambda *_args, **_kwargs: SegmentRun(
-            estimate=Trajectory(t_ns=t_ns, position_m=positions, quaternion_wxyz=np.zeros((poses, 4))), framesets=poses, lost=0, wall_s=1.0
+            estimate=Trajectory(t_ns=t_ns, position_m=positions, quaternion_wxyz=np.zeros((poses, 4))),
+            framesets=poses,
+            lost=0,
+            wall_s=1.0,
+            config_sha256=DIGEST,
         ),
     )
     monkeypatch.setattr(fleet_check, "ate", never("an estimate with a non-finite position was handed to the alignment"))
@@ -343,11 +355,11 @@ def test_the_first_clips_evidence_survives_a_directory_that_is_not_there_yet(mon
     clip's row has to be on disk already — and it is not, if the last line of the
     run is what discovers that ``out/`` does not exist.
     """
-    monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment, _gpu: PASSING)
+    monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment, _gpu, *, profile: PASSING)
     output: Path = tmp_path / "out" / "fleet_check.json"
     main(Config(segments=(SMOKE_SEGMENTS[1],), output_json=output))
     written: dict = json.loads(output.read_text())
-    assert list(written) == ["machine", "lane", "clips"]
+    assert list(written) == ["machine", "lane", "profile", "config_sha256", "clips"]
     assert list(written["clips"][0]) == list(CLIP_JSON_KEYS)
 
 
@@ -359,7 +371,7 @@ def test_the_lane_is_on_the_json_and_the_clip_columns_are_not(monkeypatch: pytes
     beside ``machine``.
     """
     monkeypatch.setattr(_core, "gpu_backend", "wgpu")
-    monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment, _gpu: PASSING)
+    monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment, _gpu, *, profile: PASSING)
     output: Path = tmp_path / "fleet_check.json"
     main(Config(segments=(SMOKE_SEGMENTS[1],), output_json=output, gpu=True))
     written: dict = json.loads(output.read_text())
@@ -380,9 +392,7 @@ def test_wgpu_build_reports_its_backend_as_the_lane(monkeypatch: pytest.MonkeyPa
     assert this_lane(gpu=True) == "wgpu"
 
 
-def test_a_gpu_run_on_a_core_without_a_gpu_feature_is_refused_before_any_file_is_read(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_a_gpu_run_on_a_core_without_a_gpu_feature_is_refused_before_any_file_is_read(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A CPU-only core has no GPU lane to name, and the refusal is worth nothing after a replay.
 
     :class:`slam_rs._core.Vio` refuses ``gpu=True`` on such a core anyway; asking
@@ -423,9 +433,10 @@ def test_the_gpu_flag_reaches_the_estimator_and_nothing_else_does(monkeypatch: p
     """
     seen: list[bool] = []
 
-    def record(_manifest: ReferenceManifest, _segment: ReferenceSegment, *, gpu: bool) -> SegmentRun:
+    def record(_manifest: ReferenceManifest, _segment: ReferenceSegment, *, gpu: bool, profile: str) -> SegmentRun:
+        assert profile == "reference"
         seen.append(gpu)
-        return SegmentRun(estimate=empty_trajectory(), framesets=412, lost=412, wall_s=1.0)
+        return SegmentRun(estimate=empty_trajectory(), framesets=412, lost=412, wall_s=1.0, config_sha256=DIGEST)
 
     monkeypatch.setattr(fleet_check, "run_segment", record)
     manifest: ReferenceManifest = fleet_check.load_manifest(MANIFEST_PATH)
@@ -433,3 +444,56 @@ def test_the_gpu_flag_reaches_the_estimator_and_nothing_else_does(monkeypatch: p
     measure(manifest, segment, True)
     measure(manifest, segment)
     assert seen == [True, False]
+
+
+@pytest.mark.parametrize("profile", ["reference", "fast"])
+def test_run_provenance_is_the_runs_own_digest_outside_clip_columns(
+    profile: Literal["reference", "fast"],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The exported digest is the one each run's estimator was built from, once per dataset, beside the profile.
+
+    ``run_segment`` is the only place that knows what text the estimator parsed,
+    so the digest has to come out of it; a tool that resolved the file again
+    could name a config the estimator never read.
+    """
+    requested: str = profile
+    digests: dict[str, str] = {}
+
+    def record(_manifest: ReferenceManifest, segment: ReferenceSegment, *, gpu: bool, profile: str) -> SegmentRun:
+        assert profile == requested
+        digest: str = hashlib.sha256(f"{segment.dataset_name}:{profile}".encode()).hexdigest()
+        digests[segment.dataset_name] = digest
+        return SegmentRun(estimate=empty_trajectory(), framesets=412, lost=412, wall_s=1.0, config_sha256=digest)
+
+    monkeypatch.setattr(fleet_check, "run_segment", record)
+    output: Path = tmp_path / "fleet.json"
+    with pytest.raises(SystemExit):
+        main(Config(segments=SMOKE_SEGMENTS, profile=profile, output_json=output))
+    written: dict = json.loads(output.read_text())
+    assert written["profile"] == profile
+    assert written["config_sha256"] == digests
+    assert all(list(clip) == list(CLIP_JSON_KEYS) for clip in written["clips"])
+    printed: str = capsys.readouterr().out
+    assert f"profile={profile}" in printed
+    for digest in digests.values():
+        assert printed.count(digest) == 1
+
+
+def test_a_config_that_changes_during_a_run_stops_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Two clips of one dataset built from different texts cannot share one digest in the JSON."""
+    seen: list[str] = []
+
+    def record(_manifest: ReferenceManifest, _segment: ReferenceSegment, *, gpu: bool, profile: str) -> SegmentRun:
+        seen.append(profile)
+        return SegmentRun(
+            estimate=empty_trajectory(), framesets=412, lost=412, wall_s=1.0, config_sha256=hashlib.sha256(str(len(seen)).encode()).hexdigest()
+        )
+
+    monkeypatch.setattr(fleet_check, "run_segment", record)
+    with pytest.raises(RuntimeError, match="the config changed during the run"):
+        main(Config(segments=(SMOKE_SEGMENTS[1], SMOKE_SEGMENTS[1]), output_json=tmp_path / "fleet.json"))
+    # The first clip's JSON stands; the conflicting second clip was never written under the first digest.
+    assert len(json.loads((tmp_path / "fleet.json").read_text())["clips"]) == 1

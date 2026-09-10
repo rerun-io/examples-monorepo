@@ -267,6 +267,25 @@ pub fn read_pgm(directory: &Path, frame: usize, camera: usize) -> Pgm {
     }
 }
 
+/// One committed MIO10 frameset as the frontend and the detector take it:
+/// 960x960, the msd-index rig's geometry, each PGM byte in the high half of a
+/// `u16`.
+///
+/// The GPU exactness gate and the host-seam bench drive the same three
+/// framesets, so the fixture location and the widening live here rather than
+/// once per binary. They stay separate binaries: D72 wants the shared CubeCL
+/// pool isolated per test process.
+pub fn mio10_frame(frame: usize, camera: usize) -> ImageU16 {
+    let pgm: Pgm = read_pgm(&fixtures().join("flow/frames"), frame, camera);
+    let mut image: ImageU16 = ImageU16::zeros(pgm.width, pgm.height).unwrap();
+    for y in 0..pgm.height {
+        for x in 0..pgm.width {
+            image.set(x, y, u16::from(pgm.pixels[y * pgm.width + x]) << 8);
+        }
+    }
+    image
+}
+
 /// How many consecutive framesets `directory` covers, up to `limit`: a
 /// frameset counts only when every camera's PGM is there.
 pub fn available_framesets(directory: &Path, cameras: usize, limit: usize) -> usize {
@@ -811,3 +830,6 @@ pub fn pyramid_of(image: &ImageU16, levels: usize) -> PyramidU16 {
         .expect("the geometry the pyramid was allocated for");
     pyramid
 }
+
+#[cfg(feature = "gpu-core")]
+pub mod gpu;

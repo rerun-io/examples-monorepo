@@ -68,6 +68,12 @@ mod finite;
 mod kernels;
 mod patches;
 mod pyramid;
+pub mod seam;
+mod submission;
+pub use submission::CHANNEL_TASKS;
+#[cfg(test)]
+use submission::queued_tasks;
+use submission::{drained, empty};
 mod track;
 mod trig;
 
@@ -311,9 +317,12 @@ pub type LaneBackends<P> = (
 /// one shared client.
 ///
 /// One client for both stages is what keeps a pyramid and the patches it feeds
-/// on the same device queue, so the frontend synchronises once per
-/// [`crate::frontend::tracker::PatchTracker::track`] call rather than once per
-/// stage.
+/// on the same device queue, so the frontend synchronises once per tracking
+/// **batch** rather than once per stage or once per camera.
+///
+/// `cameras` is the rig's camera count, which is how many tracking passes the
+/// tracker must be able to hold in flight at once
+/// ([`crate::frontend::tracker::PatchTracker::submit_prepared`]).
 ///
 /// # Errors
 ///
@@ -329,6 +338,7 @@ pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
     num_levels: usize,
     max_iterations: usize,
     max_recovered_dist2: f32,
+    cameras: usize,
 ) -> Result<LaneBackends<P>, crate::frontend::tracker::TrackerError> {
     // The guard is around the whole of it, not around the client alone: from
     // here to the returned backends every line allocates, launches or reads on
@@ -348,12 +358,13 @@ pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
             // worse than a refusal.
             let client = gpu_client()?;
             probe_storage(&client)?;
-            let tracker: LanePatchTracker<P> = GpuPatchTracker::new(
+            let mut tracker: LanePatchTracker<P> = GpuPatchTracker::new(
                 client.clone(),
                 capacity,
                 num_levels,
                 max_iterations,
                 max_recovered_dist2,
+                cameras,
             )?;
             let builder: LanePyramidBuilder = GpuPyramidBuilder::new(client.clone(), P::OFFSETS);
             let mut scanner: GpuCornerScan<GpuRuntime> = GpuCornerScan::new(client)?;
@@ -362,9 +373,192 @@ pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
             // reads it. This is the one line that makes it one upload per camera
             // per frameset instead of two (see [`Level0`]).
             scanner.share_level0(builder.level0_table());
+            // And the same again for the download: the scanner's cell keys ride
+            // the tracker's temporal read instead of paying for one of their own
+            // (see [`ReadRelay`]).
+            let relay: ReadRelay = ReadRelay::default();
+            scanner.share_reads(relay.clone());
+            tracker.share_reads(relay);
             Ok((builder, tracker, Box::new(scanner)))
         },
     )
+}
+
+/// Buffers one stage has launched, offered to whichever stage downloads next,
+/// and the bytes that download left behind.
+///
+/// A read on this lane costs about 0.12 ms of host time before it moves a byte
+/// (D77), so two buffers that no arithmetic connects are still worth **one**
+/// read between them. The corner scanner's cell keys and the tracker's temporal
+/// results are exactly that pair: the selection kernels read the frame alone,
+/// so they can be launched before the frameset has decided anything, and the
+/// tracker's `collect` was going to synchronise anyway. The scanner stages its
+/// handles here, `collect` appends them to its own download, and the scanner
+/// takes the tail (D78).
+///
+/// Shared explicitly by [`gpu_backends`] rather than kept in an ambient
+/// static like `QUEUED`: an over-count there drains early, which is only
+/// conservative, where a crossed relay would hand one frontend another's
+/// pixels. A stage that finds nothing here downloads for itself, which is what
+/// the first frameset of a run — no temporal pass, so no `collect` — does.
+///
+/// Every staging carries its stager's [`RelayTag`], and a delivery carries the
+/// tag of the staging it answers, so a stage takes its **own** bytes or none:
+/// two scanners sharing one relay each get their own keys, at the price of the
+/// read the loser was avoiding. Nothing here relies on `gpu_backends`'s one
+/// relay per frontend, which is a lifetime the type cannot state.
+///
+/// A `Mutex` for the reason [`Level0Table`] is one: [`crate::frontend::detect::CornerScan`]
+/// is `Send + Sync`, and this is taken twice a frameset by two stages on the
+/// frontend's own thread, never contended. A poisoned lock is not an error
+/// here — every method degrades to "nothing was staged", and the stager then
+/// reads for itself.
+#[cfg(feature = "gpu-core")]
+#[derive(Debug, Clone, Default)]
+pub struct ReadRelay(std::sync::Arc<std::sync::Mutex<RelayInner>>);
+
+/// Which stage staged a set of buffers, and for which frameset.
+///
+/// The relay holds one staging and one delivery, so without this a second
+/// producer's delivery is indistinguishable from your own and
+/// [`crate::frontend::detect::CornerScan::take_cells`] would decode another
+/// camera order's keys as its own — wrong keypoints, not a wasted read. `owner`
+/// separates the instances and `generation` separates that instance's framesets,
+/// which is what refuses a delivery left over from a submission that failed.
+#[cfg(feature = "gpu-core")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelayTag {
+    /// The staging instance, from a process-wide counter: two scanners built in
+    /// either order, on any thread, never share one.
+    owner: u64,
+    /// Framesets this owner has staged.
+    generation: u64,
+}
+
+#[cfg(feature = "gpu-core")]
+impl RelayTag {
+    /// A tag no other live stage holds, for a stage's first frameset.
+    pub(super) fn new() -> Self {
+        static OWNERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        Self {
+            // Wrapping needs 2^64 stage constructions; the counter is only ever
+            // compared for equality, so ordering can be the weakest there is.
+            owner: OWNERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            generation: 0,
+        }
+    }
+
+    /// The same owner, one frameset on.
+    pub(super) fn next(self) -> Self {
+        Self {
+            owner: self.owner,
+            generation: self.generation.wrapping_add(1),
+        }
+    }
+}
+
+/// [`ReadRelay`]'s contents: at most one frameset's worth, in one direction,
+/// each side tagged with the stage it belongs to.
+#[cfg(feature = "gpu-core")]
+#[derive(Debug, Default)]
+struct RelayInner {
+    /// Launched and waiting for someone to download, and whose they are.
+    staged: Option<(RelayTag, Vec<cubecl::server::Handle>)>,
+    /// What a download left, tagged with the staging it answers.
+    delivered: Option<(RelayTag, Vec<cubecl::bytes::Bytes>)>,
+}
+
+#[cfg(feature = "gpu-core")]
+impl ReadRelay {
+    /// Offer `handles` to the next download as `tag`'s, replacing anything
+    /// unclaimed: there is one frameset in flight, and a stage whose staging is
+    /// replaced still holds its own handles and reads them itself.
+    ///
+    /// Only `tag`'s own delivery is dropped. Another owner's is still that
+    /// owner's to take, and dropping it would cost it a read it cannot repeat.
+    pub(super) fn stage(&self, tag: RelayTag, handles: Vec<cubecl::server::Handle>) {
+        if let Ok(mut inner) = self.0.lock() {
+            inner.staged = (!handles.is_empty()).then_some((tag, handles));
+            if inner
+                .delivered
+                .as_ref()
+                .is_some_and(|(stale, _)| stale.owner == tag.owner)
+            {
+                inner.delivered = None;
+            }
+        }
+    }
+
+    /// Take what was staged and whose it is, to append to a download this stage
+    /// is making. `None` when nothing is waiting.
+    pub(super) fn take_staged(&self) -> Option<(RelayTag, Vec<cubecl::server::Handle>)> {
+        self.0.lock().ok().and_then(|mut inner| inner.staged.take())
+    }
+
+    /// Leave a download's tail for the stage whose `tag` it answers.
+    ///
+    /// One slot: a second download's tail replaces a tail nobody took, and its
+    /// owner then reads for itself rather than decoding these bytes.
+    pub(super) fn deliver(&self, tag: RelayTag, bytes: Vec<cubecl::bytes::Bytes>) {
+        if let Ok(mut inner) = self.0.lock() {
+            inner.delivered = Some((tag, bytes));
+        }
+    }
+
+    /// Handles launched and not yet downloaded by anyone.
+    ///
+    /// Public because it is the only deterministic way to see the mechanism
+    /// work: the values alone cannot tell a carried download from one the
+    /// stager made itself, and the seam counters are process-wide statics that
+    /// a second test thread moves under the assertion.
+    #[must_use]
+    pub fn waiting(&self) -> usize {
+        self.0
+            .lock()
+            .map(|inner| {
+                inner
+                    .staged
+                    .as_ref()
+                    .map_or(0, |(_, handles)| handles.len())
+            })
+            .unwrap_or(0)
+    }
+
+    /// Buffers a download left here and the stager has not taken yet.
+    #[must_use]
+    pub fn carried(&self) -> usize {
+        self.0
+            .lock()
+            .map(|inner| inner.delivered.as_ref().map_or(0, |(_, bytes)| bytes.len()))
+            .unwrap_or(0)
+    }
+
+    /// The bytes a download left for `tag`, or `None` when the delivery is
+    /// another stage's, another frameset's, or was never made — a stage that
+    /// gets `None` still holds its own handles and reads them itself.
+    pub(super) fn take_delivered(&self, tag: RelayTag) -> Option<Vec<cubecl::bytes::Bytes>> {
+        self.0.lock().ok().and_then(|mut inner| {
+            // `tag`'s handles are either in the delivery below or about to be
+            // read by the caller, so no later download may read them again.
+            // A staging of another owner's stays: it is theirs to be carried.
+            if inner
+                .staged
+                .as_ref()
+                .is_some_and(|(staged, _)| *staged == tag)
+            {
+                inner.staged = None;
+            }
+            match inner.delivered.take() {
+                Some((delivered, bytes)) if delivered == tag => Some(bytes),
+                // Put a mismatched delivery back rather than dropping it: its
+                // owner has not taken it yet.
+                other => {
+                    inner.delivered = other;
+                    None
+                }
+            }
+        })
+    }
 }
 
 /// A failed device read as a typed error, with the runtime's own reason logged.
@@ -375,6 +569,64 @@ pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
 fn read_failed(what: &'static str, error: &cubecl::server::ServerError) -> GpuError {
     log::warn!("reading {what} from the device failed: {error}");
     GpuError::DeviceReadFailed { what }
+}
+
+/// The download itself, or the `ServerError` a lost device returns when a test
+/// armed [`BLOCKING_READ`].
+///
+/// Its own function so the injection cannot reach past the read into the queue
+/// accounting [`read_blocking`] does after it, which is what the test is about.
+#[cfg(feature = "gpu-core")]
+fn download<R: cubecl::prelude::Runtime>(
+    client: &cubecl::prelude::ComputeClient<R>,
+    handles: Vec<cubecl::server::Handle>,
+) -> Result<Vec<cubecl::bytes::Bytes>, cubecl::server::ServerError> {
+    #[cfg(test)]
+    if armed(BLOCKING_READ) {
+        return Err(cubecl::server::ServerError::Generic {
+            reason: "the device is gone".to_owned(),
+            backtrace: cubecl::backtrace::BackTrace::default(),
+        });
+    }
+    cubecl::reader::read_sync(client.read_async(handles))
+}
+
+/// One blocking download of every handle at once, and the protocol around it.
+///
+/// Four per-frame stages wait on the device — the corner scan's candidate image
+/// and bitmask, the two cell-key reads, and the tracker batch's packed results
+/// (D78) — and each has to do the same three things in the same order: block on
+/// the **fallible** `read_sync` rather than `client.read`, which is
+/// `read_sync(..).expect("TODO")` and would unwind out of the frontend with the
+/// GIL detached (D32); tell [`drained`] this producer's queued tasks are gone;
+/// and turn a `ServerError` into the typed [`GpuError::DeviceReadFailed`] the
+/// stage error carries. Here so the queue accounting and the failure mapping
+/// cannot drift apart one stage at a time.
+///
+/// What each buffer *is* stays with the stage that asked for it: how many
+/// buffers it expects, how long each must be, whether a relay delivery answered
+/// instead (D78), and where a test arms a panicking read.
+///
+/// `meter` is the seam counter of the stage that **issued** the read, not of
+/// whoever's data the buffers hold — a tracker download that carries the corner
+/// scanner's keys is one tracker read (D78).
+#[cfg(feature = "gpu-core")]
+pub(super) fn read_blocking<R: cubecl::prelude::Runtime>(
+    client: &cubecl::prelude::ComputeClient<R>,
+    handles: Vec<cubecl::server::Handle>,
+    what: &'static str,
+    meter: &seam::Meter,
+) -> Result<Vec<cubecl::bytes::Bytes>, GpuError> {
+    let outcome: Result<Vec<cubecl::bytes::Bytes>, cubecl::server::ServerError> =
+        meter.measure(|| {
+            let bytes = download(client, handles);
+            // Unconditional, and inside the meter: the wait consumed this
+            // producer's tasks whether the download answered or failed, and a
+            // count left standing would flush the next stage early.
+            drained(client);
+            bytes
+        });
+    outcome.map_err(|error| read_failed(what, &error))
 }
 
 /// Run `stage`, turning a panic inside it into `fault`.
@@ -444,6 +696,26 @@ const STORAGE_PROBE: &str = "the storage probe";
 #[cfg(test)]
 const CORNER_SCAN_READ: &str = "the corner scan's read";
 
+/// A fault site: the blocking read's own download. Unlike the sites above this
+/// one is not a panic — [`read_blocking`] turns it into the `ServerError` a
+/// lost device returns — because what it is armed for is the queue accounting
+/// that runs *after* a failed read.
+#[cfg(test)]
+const BLOCKING_READ: &str = "the blocking read";
+
+/// Whether a test armed `site`, disarming it. The caller decides what the fault
+/// means; [`fire_if_armed`] panics, [`download`] returns an error.
+#[cfg(test)]
+fn armed(site: &'static str) -> bool {
+    FAULT.with(|fault| {
+        let hit: bool = fault.get() == Some(site);
+        if hit {
+            fault.set(None);
+        }
+        hit
+    })
+}
+
 /// Panic if a test armed `site`, and disarm it.
 #[cfg(test)]
 fn fire_if_armed(site: &'static str) {
@@ -498,7 +770,7 @@ pub(super) fn upload_frame<R: cubecl::prelude::Runtime>(
     let pixels: usize = width * height;
     if image.stride() == width {
         return (
-            client.create_from_slice(u16::as_bytes(&image.data()[..pixels])),
+            submission::upload(client, u16::as_bytes(&image.data()[..pixels])),
             pixels,
         );
     }
@@ -507,7 +779,7 @@ pub(super) fn upload_frame<R: cubecl::prelude::Runtime>(
     for y in 0..height {
         scratch.extend_from_slice(image.row(y));
     }
-    (client.create_from_slice(u16::as_bytes(scratch)), pixels)
+    (submission::upload(client, u16::as_bytes(scratch)), pixels)
 }
 
 /// So the check is the one thing that cannot lie: write a known pattern, copy
@@ -541,12 +813,13 @@ pub fn probe_storage<R: cubecl::prelude::Runtime>(
         let count: usize = pattern.len();
         let width: usize = size_of::<N>() * 8;
         let expected: usize = size_of_val(pattern);
-        let source: cubecl::server::Handle = client.create_from_slice(N::as_bytes(pattern));
-        let target: cubecl::server::Handle = client.empty(expected);
+        let source: cubecl::server::Handle = submission::upload(client, N::as_bytes(pattern));
+        let target: cubecl::server::Handle = empty(client, expected);
         kernels::launch_probe::<N, R>(client, (&source, count), (&target, count), count);
         let bytes = client
             .read_one(target)
             .map_err(|error| read_failed("the storage probe", &error))?;
+        drained(client);
         if bytes.len() != expected {
             return Err(GpuError::ShortRead {
                 what: "the storage probe",
@@ -659,6 +932,47 @@ mod tests {
         }
     }
 
+    /// A failed download still empties this producer's queue accounting.
+    ///
+    /// Every blocking read tells [`drained`] the device's queued tasks are
+    /// gone, and it does so whether the download answered or returned a
+    /// `ServerError`: the wait consumed them, the answer did not. A count left
+    /// standing after a failed read would make the next stage flush for tasks
+    /// that are not there — a second synchronisation a frameset, on a device
+    /// that is slow rather than lost (D77).
+    ///
+    /// The `ServerError` cannot be produced on a healthy card, so one armed
+    /// fault stands in for it *at the read*, which is the only place it can be
+    /// armed without reaching past the accounting under test.
+    #[test]
+    fn a_failed_blocking_read_still_drains_the_queue() {
+        let client = gpu_client().unwrap();
+        let handle: cubecl::server::Handle = empty(&client, 256);
+        assert!(
+            queued_tasks(&client) > 0,
+            "the allocation reserved no task, so the drain below proves nothing"
+        );
+
+        let what: &str = "the tracker result";
+        arm_fault_at(BLOCKING_READ);
+        assert_eq!(
+            read_blocking(&client, vec![handle.clone()], what, &seam::READ_TRACK).unwrap_err(),
+            GpuError::DeviceReadFailed { what }
+        );
+        assert_eq!(
+            queued_tasks(&client),
+            0,
+            "a failed read left this producer's tasks outstanding"
+        );
+
+        // Unarmed the same read answers and drains, so the lines above measure
+        // the failure path and not a read that never ran.
+        let second: cubecl::server::Handle = empty(&client, 256);
+        assert!(queued_tasks(&client) > 0);
+        read_blocking(&client, vec![second], what, &seam::READ_TRACK).unwrap();
+        assert_eq!(queued_tasks(&client), 0);
+    }
+
     /// A panic inside a stage is a typed error, not an unwind into Python.
     ///
     /// What a lost device does to a per-frame call, on the real stage and the
@@ -707,7 +1021,7 @@ mod tests {
     fn a_panic_after_the_client_is_built_is_a_typed_error() {
         arm_fault_at(GUARDED_REGION);
         let outer: crate::frontend::tracker::TrackerError =
-            gpu_backends::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0).unwrap_err();
+            gpu_backends::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0, 2).unwrap_err();
         assert!(
             matches!(
                 outer,
@@ -718,7 +1032,7 @@ mod tests {
 
         arm_fault_at(STORAGE_PROBE);
         let probe: crate::frontend::tracker::TrackerError =
-            gpu_backends::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0).unwrap_err();
+            gpu_backends::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0, 2).unwrap_err();
         assert!(
             matches!(
                 probe,
@@ -731,7 +1045,7 @@ mod tests {
 
         // And the same call with nothing armed builds the three backends, so
         // what the lines above measure is the guards.
-        gpu_backends::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0).unwrap();
+        gpu_backends::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0, 2).unwrap();
     }
 
     /// A panic in an exported constructor is a typed error, not an unwind.
@@ -774,7 +1088,7 @@ mod tests {
 
         arm_fault_at(GUARDED_REGION);
         let tracker: TrackerError =
-            GpuPatchTracker::<Pattern51, GpuRuntime>::new(client.clone(), 64, 4, 5, 4.0)
+            GpuPatchTracker::<Pattern51, GpuRuntime>::new(client.clone(), 64, 4, 5, 4.0, 2)
                 .unwrap_err();
         assert!(
             matches!(
@@ -788,7 +1102,7 @@ mod tests {
 
         GpuCornerScan::<GpuRuntime>::new(client.clone()).unwrap();
         GpuPatches::<Pattern51, GpuRuntime>::new(client.clone(), 64, 4).unwrap();
-        GpuPatchTracker::<Pattern51, GpuRuntime>::new(client, 64, 4, 5, 4.0).unwrap();
+        GpuPatchTracker::<Pattern51, GpuRuntime>::new(client, 64, 4, 5, 4.0, 2).unwrap();
     }
 
     /// A panic in the public storage probe is a typed error, not an unwind.

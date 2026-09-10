@@ -46,6 +46,7 @@ fact about the recording rather than about this tool, so the manifest states it
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import rerun as rr
@@ -69,6 +70,9 @@ from slam_rs.vio_log import FrameMode, VioLogger, VioStage, log_calibration, log
 @dataclass(slots=True)
 class Config:
     """Run the port on one RoboCap session against the basalt C++ trajectory beside it."""
+
+    profile: Literal["reference", "fast"] = "reference"
+    """Config overlay applied before tracking."""
 
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
     """Viewer, save and headless behaviour."""
@@ -110,7 +114,7 @@ def main(config: Config) -> None:
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / f"robocap-{session.session_id}" / "slam_rs.csv"
     calibration: _core.Calibration
     flow_config: _core.VioConfig
-    calibration, flow_config = robocap_estimator_files(manifest)
+    calibration, flow_config, _config_text = robocap_estimator_files(manifest, profile=config.profile)
     cpp: Trajectory = robocap_cpp_trajectory(manifest, session)
     print(f"{session.segment_id}: basalt C++ {len(cpp)} poses from {session.slam_path.name} (expected {session.basalt_num_poses})")
     print(f"basalt calibration {manifest.robocap.calibration} at downscale {manifest.robocap.downscale}: {list(calibration.resolution)}")

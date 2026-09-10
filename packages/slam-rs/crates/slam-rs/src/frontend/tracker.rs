@@ -150,6 +150,14 @@ pub enum TrackerError {
     #[cfg(feature = "gpu-core")]
     #[error(transparent)]
     Gpu(#[from] crate::gpu::GpuError),
+    /// More passes were put in flight at once than the tracker has result slots.
+    #[error("{submitted} tracking passes in flight against {lanes} result slots")]
+    TooManyPasses {
+        /// Passes submitted since the last collect, this one included.
+        submitted: usize,
+        /// Slots the tracker was built for, which is the rig's camera count.
+        lanes: usize,
+    },
     /// A tracker was asked for more pyramid levels than [`MAX_LEVELS`].
     #[error("a patch buffer over {num_levels} pyramid levels is over the ceiling of {ceiling}")]
     TooManyLevels {
@@ -1011,6 +1019,51 @@ pub trait PatchTracker {
     ) -> Result<(), TrackerError> {
         self.track(prev, next, patches, transforms_in, out)
     }
+
+    /// Start a pass whose result lands in `out` when [`PatchTracker::collect`]
+    /// runs.
+    ///
+    /// A device backend can hold several passes in flight and wait once for all
+    /// of them, which is what this is for: on the GPU lane a synchronising read
+    /// costs about 0.12 ms of host time whatever it carries, so the frameset's
+    /// cost is set by how many reads it makes and not by how much they move.
+    /// `out` is **not** filled until `collect`.
+    ///
+    /// The default runs the whole pass here and leaves `collect` nothing to do,
+    /// which is what a synchronous tracker wants.
+    ///
+    /// # Errors
+    ///
+    /// As [`PatchTracker::track`], plus [`TrackerError::TooManyPasses`] when
+    /// more passes are in flight than the tracker has slots.
+    fn submit_prepared(
+        &mut self,
+        prev: &Self::Pyramid,
+        next: &Self::Pyramid,
+        patches: &Self::Patches,
+        transforms_in: &FlowTransforms,
+        out: &mut FlowResult,
+    ) -> Result<(), TrackerError> {
+        self.track_prepared(prev, next, patches, transforms_in, out)
+    }
+
+    /// Finish every pass submitted since the last call, filling the first of
+    /// `outs` in submission order.
+    ///
+    /// # Errors
+    ///
+    /// [`TrackerError`] when a device read fails, or when `outs` is shorter
+    /// than the number of passes submitted.
+    fn collect(&mut self, outs: &mut [FlowResult]) -> Result<(), TrackerError> {
+        let _ = outs;
+        Ok(())
+    }
+
+    /// Drop whatever [`PatchTracker::submit_prepared`] has in flight.
+    ///
+    /// The frontend calls this when a frameset is refused between the submits
+    /// and the collect, so the next frameset starts an empty batch.
+    fn discard(&mut self) {}
 
     /// The sampling pattern this tracker was built for.
     type Pattern: Pattern;

@@ -47,11 +47,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Which GPU runtime this build's frontend carries, or `None` for the CPU-only
 /// default.
 ///
-/// The `gpu` and `gpu-wgpu` features are two builds of one source behind one
-/// `gpu: bool`, so nothing a caller can pass says which of them it is running.
-/// This is that fact, and it is read on the Python side (`_core.gpu_backend`) to
-/// name the lane a fleet row was measured on — which the two lanes need, because
-/// they do not agree on every clip.
+/// Nothing a caller can pass through `gpu: bool` names the runtime a build
+/// carries. This is that fact, and it is read on the Python side
+/// (`_core.gpu_backend`) to name the lane a fleet row was measured on.
 ///
 /// [`gpu::BACKEND_NAME`] is the same name; this wrapper is what a build without
 /// the feature can still answer.
@@ -171,12 +169,12 @@ pub enum VioError {
         /// Which of `gyro` and `accel` carries it.
         field: &'static str,
     },
-    /// A GPU backend was asked for in a build without the `gpu` feature.
+    /// A GPU backend was asked for in a build without the `gpu-wgpu` feature.
     ///
     /// The variant exists in every build so the Python surface and its stub
     /// carry the same signature whether or not the feature is on: asking for a
     /// backend that is not compiled in is a refusal, not a missing argument.
-    #[error("this build has no GPU backend; rebuild with the `gpu` cargo feature")]
+    #[error("this build has no GPU backend; rebuild with the `gpu-wgpu` cargo feature")]
     GpuUnavailable,
     /// The frameset does not hold one image per configured camera.
     #[error("expected {expected} images, got {actual}")]
@@ -245,7 +243,7 @@ pub enum Backend {
     Cpu,
     /// The CubeCL frontend on this host's GPU.
     ///
-    /// Available only in a build with the `gpu` feature; [`Vio::with_backend`]
+    /// Available only in a build with the `gpu-wgpu` feature; [`Vio::with_backend`]
     /// returns [`VioError::GpuUnavailable`] otherwise, so the Python surface
     /// carries the same signature either way.
     Gpu,
@@ -428,6 +426,7 @@ fn build_frontend(
                 num_levels,
                 config.optical_flow_max_iterations as usize,
                 config.optical_flow_max_recovered_dist2,
+                calibration.intrinsics.len(),
             )
             .map_err(frontend::flow::FrontendError::from)?;
             Ok(FrontendLane::Gpu(

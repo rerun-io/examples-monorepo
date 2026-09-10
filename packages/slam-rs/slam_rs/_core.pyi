@@ -17,11 +17,10 @@ __version__: str
 gpu_backend: Literal["wgpu"] | None
 """Which GPU runtime this build's frontend carries, or None for the CPU-only default build.
 
-The ``gpu`` and ``gpu-wgpu`` cargo features are two builds of one source behind
-one ``gpu=True``, so no argument says which is running. This does, and it is
-what a fleet row's lane is named from
-(:func:`slam_rs.apis.fleet_check.this_lane`). ``None`` is the build the fleet
-installs, whose ``gpu=True`` is refused.
+A core built with the ``gpu-wgpu`` cargo feature carries ``"wgpu"``; nothing a
+caller passes to ``gpu=True`` names the runtime, this does, and it is what a
+fleet row's lane is named from (:func:`slam_rs.apis.fleet_check.this_lane`).
+``None`` is the default build, whose ``gpu=True`` is refused.
 """
 
 class VioStatus:
@@ -138,6 +137,10 @@ class VioSnapshot:
         """Landmark observations the window holds."""
 
     @property
+    def frame_update(self) -> str:
+        """What the non-keyframe frame update did: ``not_attempted``, ``taken``, or ``declined_<precondition>``."""
+
+    @property
     def timings_ms(self) -> dict[str, float]:
         """Wall time each stage took on the last frame, in milliseconds.
 
@@ -186,7 +189,7 @@ class Vio:
         ``gpu`` runs the frontend's pyramid, patch build and KLT tracker through
         CubeCL on this host's GPU instead of the CPU port. The default is the
         CPU, which is what every accuracy reference was produced on. A core
-        built without the ``gpu`` cargo feature raises ``ValueError`` for
+        built without the ``gpu-wgpu`` cargo feature raises ``ValueError`` for
         ``gpu=True`` rather than quietly running on the CPU, and so does a host
         that has the feature and no GPU to run it on: a missing driver library,
         a driver that will not initialise, no visible device and no graphics

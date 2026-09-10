@@ -6,15 +6,19 @@ row reproduce. None of the three needs a GPU, a dump or a core, so they are
 checked here in milliseconds.
 """
 
+import hashlib
 import os
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pytest
 from fixture_types import never
 
 from slam_rs.apis import bench_track
-from slam_rs.apis.bench_track import Config, Lane, LaneRound, best_median_ms, interleave, main
+from slam_rs.apis.bench_track import Config, Framesets, Lane, LaneRound, best_median_ms, interleave, main
+from slam_rs.catalog_feed import ImuCalib
+from slam_rs.reference import SMOKE_SEGMENTS, ReferenceManifest, profiled_config_text
 
 
 def test_the_schedule_runs_every_lane_once_per_round() -> None:
@@ -86,3 +90,36 @@ def test_an_empty_lane_selection_is_refused_before_any_file_or_affinity_work(mon
     monkeypatch.setattr(os, "sched_setaffinity", never("a core was pinned for a run with no lane to measure"))
     with pytest.raises(ValueError, match="--lanes named no backend.*cpu, gpu"):
         main(Config(dump=tmp_path / "clip.npz", config=tmp_path / "msdmi_config.json", lanes=(), pin_core=3))
+
+
+@pytest.mark.parametrize("profile", ["reference", "fast"])
+def test_benchmark_records_identify_the_profile_and_one_resolved_config(
+    profile: Literal["reference", "fast"],
+    manifest: ReferenceManifest,
+    imu: ImuCalib,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """RESULT and BEST retain profile identity; CONFIG records the digest once."""
+    config_path: Path = manifest.package_root / manifest.dataset(manifest.by_id(SMOKE_SEGMENTS[1]).dataset_name).vio_config
+    framesets: Framesets = Framesets(
+        images=np.zeros((1, 1, 1, 1), dtype=np.uint8),
+        t_ns=np.zeros(1, dtype=np.int64),
+        imu_offsets=np.zeros(2, dtype=np.int64),
+        imu_t=np.zeros(0, dtype=np.int64),
+        imu_gyro=np.zeros((0, 3)),
+        imu_accel=np.zeros((0, 3)),
+        safe_radius=472.0,
+        cameras=(),
+        imu=imu,
+    )
+    monkeypatch.setattr(bench_track, "load_framesets", lambda *_args: framesets)
+    monkeypatch.setattr(bench_track, "run_lane", lambda lane, index, *_args: _round(lane, index, [1.0, 2.0]))
+    main(Config(dump=tmp_path / "clip.npz", config=config_path, profile=profile, lanes=("cpu",), rounds=2))
+    printed: str = capsys.readouterr().out
+    records: list[str] = [line for line in printed.splitlines() if line.startswith(("RESULT ", "BEST "))]
+    assert len(records) == 3
+    assert all(f"profile={profile}" in record for record in records)
+    digest: str = hashlib.sha256(profiled_config_text(config_path, profile).encode("utf-8")).hexdigest()
+    assert printed.count(f"config_sha256={digest}") == 1

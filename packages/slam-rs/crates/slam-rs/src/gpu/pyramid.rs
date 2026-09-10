@@ -182,11 +182,11 @@ impl<R: Runtime> GpuPyramid<R> {
 
         Ok(Self {
             levels,
-            even: client.empty(lengths[0] * size_of::<u16>()),
+            even: super::empty(&client, lengths[0] * size_of::<u16>()),
             even_len: lengths[0],
-            odd: client.empty(lengths[1] * size_of::<u16>()),
+            odd: super::empty(&client, lengths[1] * size_of::<u16>()),
             odd_len: lengths[1],
-            meta: client.create_from_slice(u32::as_bytes(&meta)),
+            meta: super::submission::upload(&client, u32::as_bytes(&meta)),
             meta_len: meta.len(),
             client,
         })
@@ -270,6 +270,7 @@ impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
             || {
                 self.prepared.resize_with(images.len(), || None);
                 for (slot, image) in self.prepared.iter_mut().zip(images) {
+                    // upload_frame reserves its task here, before any camera builds.
                     let (handle, _) = super::upload_frame(&self.client, image, &mut self.staging);
                     *slot = Some(Level0 {
                         handle,
@@ -378,6 +379,7 @@ impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
                     );
                 }
 
+                // Each launch reserves one task; deeper pyramids split at the queue ceiling.
                 for level in 1..out.levels.len() {
                     let source: Level = out.levels[level - 1];
                     let target: Level = out.levels[level];
@@ -431,6 +433,7 @@ impl<R: Runtime> Pyramid for GpuPyramid<R> {
                     .client
                     .read_one(handle.clone())
                     .map_err(|error| super::read_failed("a pyramid level", &error))?;
+                super::drained(&self.client);
                 let expected: usize = length * size_of::<u16>();
                 if bytes.len() != expected {
                     return Err(PyramidError::ShortDeviceRead {

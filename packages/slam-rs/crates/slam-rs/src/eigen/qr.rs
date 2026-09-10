@@ -297,14 +297,29 @@ pub(crate) fn apply_householder_on_the_left_block<S: LieScalar>(
         return;
     }
 
+    // `bottom` is `rows - 1` consecutive coefficients of each column, and a
+    // `DMatrix` is column-major, so it is one contiguous run per column. Both
+    // loops below walk it that way — through the slice rather than through
+    // `storage[(i, j)]`, which recomputes `j * nrows + i` and bounds-checks it
+    // per coefficient.
+    let nrows: usize = storage.nrows();
+    let tail: usize = rows - 1;
+    let essential: &[S] = &essential[..tail.min(essential.len())];
+
     // `tmp.noalias() = essential.adjoint() * bottom` (`:113`): one dot product
-    // per column, over the `rows - 1` rows below the first.
-    for (j, slot) in work.iter_mut().enumerate().take(cols) {
-        let mut acc: S = S::zero();
-        for (i, e) in essential.iter().enumerate().take(rows - 1) {
-            acc += *e * storage[(row_start + 1 + i, col_start + j)];
+    // per column, over the `rows - 1` rows below the first. The fold stays
+    // sequential and stays in this order — it is the one reduction here.
+    {
+        let data: &[S] = storage.as_slice();
+        for (j, slot) in work.iter_mut().enumerate().take(cols) {
+            let base: usize = (col_start + j) * nrows + row_start + 1;
+            let bottom: &[S] = &data[base..base + tail];
+            let mut acc: S = S::zero();
+            for (e, value) in essential.iter().zip(bottom.iter()) {
+                acc += *e * *value;
+            }
+            *slot = acc;
         }
-        *slot = acc;
     }
 
     // `tmp += this->row(0)` (`:114`).
@@ -320,10 +335,22 @@ pub(crate) fn apply_householder_on_the_left_block<S: LieScalar>(
     // `bottom.noalias() -= tau * essential * tmp` (`:116`): the outer product,
     // with the scalar folded into the left factor as C++'s left-associative
     // `*` does.
-    for (i, e) in essential.iter().enumerate().take(rows - 1) {
-        let scale: S = tau * *e;
-        for j in 0..cols {
-            storage[(row_start + 1 + i, col_start + j)] -= scale * work[j];
+    //
+    // Column outer, row inner. The product is elementwise — every coefficient
+    // is one `-= (tau * e_i) * tmp_j` and no coefficient is summed twice — so
+    // the loop order is free, and this one is the unit-stride one: `i` inner
+    // walks a column's contiguous run, where `j` inner strided by `nrows` and
+    // read a fresh cache line per coefficient. `tau * *e` is recomputed per
+    // column rather than hoisted into a scratch vector; it is the same product
+    // of the same two values, so the coefficient is unchanged.
+    {
+        let data: &mut [S] = storage.as_mut_slice();
+        for (j, &value) in work.iter().enumerate().take(cols) {
+            let base: usize = (col_start + j) * nrows + row_start + 1;
+            let bottom: &mut [S] = &mut data[base..base + tail];
+            for (target, e) in bottom.iter_mut().zip(essential.iter()) {
+                *target -= (tau * *e) * value;
+            }
         }
     }
 }

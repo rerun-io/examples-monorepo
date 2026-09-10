@@ -1,4 +1,8 @@
-//! What the frontend's per-frame path asks of the allocator, counted.
+//! What the per-frame paths ask of the allocator, counted.
+//!
+//! The frontend's first, then the estimator's: same counting allocator, same
+//! thread-scoped gate, and in both cases a claim that had to be measured
+//! rather than asserted in a comment.
 //!
 //! `cubecl-portability.md` §12.2 asks for no allocation on the per-frame path,
 //! because a GPU kernel cannot grow a buffer and because an allocator call
@@ -461,5 +465,245 @@ fn a_restored_frame_costs_no_more_than_a_successful_one() {
     assert_eq!(
         counts[2], 0,
         "a warm restore cost {counts:?} allocator calls"
+    );
+}
+
+// ── the estimator's per-frame path ────────────────────────────────────────
+
+/// Framesets the oracle fixture covers; the estimator walks all of them.
+const ESTIMATOR_FRAMESETS: usize = 60;
+
+/// Framesets before the first measurement.
+///
+/// `opt_started` flips at frameset 4, the second keyframe arrives at 7 and the
+/// prior reaches its 22x27 shape at 9, so by 20 the window is at its steady
+/// shape and every scratch buffer has reached its high-water mark.
+const ESTIMATOR_WARMUP: usize = 20;
+
+/// One estimator over the oracle fixture's calibration and config, with the
+/// whole inertial window pushed in advance — `vio_oracle::window`, which the
+/// integration tests cannot share because each has its own binary.
+fn estimator_window() -> slam_rs::estimator::SqrtKeypointVio<f32> {
+    let mut estimator: slam_rs::estimator::SqrtKeypointVio<f32> =
+        slam_rs::estimator::SqrtKeypointVio::with_default_gravity(
+            common::calibration().cast(),
+            common::config(),
+        )
+        .unwrap();
+    for row in common::IMU.iter() {
+        estimator.push_imu(slam_rs::imu::ImuSample {
+            t_ns: row.t_ns,
+            gyro: nalgebra::Vector3::from(row.gyro),
+            accel: nalgebra::Vector3::from(row.accel),
+        });
+    }
+    estimator
+}
+
+/// The dense reduction over a workspace that persists: zero, after the first.
+///
+/// This is the estimator's hottest allocation site made visible on its own.
+/// `get_dense_h_b` runs **once per inner Levenberg-Marquardt step** — two to
+/// eight times per frameset on this window, seven on the median MIO10 frame —
+/// and it used to take a fresh accumulator, a fresh subtree partial per
+/// recursion depth and a fresh leaf transpose every time: on a 55-landmark
+/// window seven `opt_size`-square matrices, or 38 allocations and their frees,
+/// per step. They are one `DenseHbWorkspace` now, and the assertion is that
+/// the second call over the same workspace reaches the allocator zero times.
+///
+/// The problem below is synthetic and small — three frames, twelve landmarks,
+/// each seen in every frame — because the count being asserted is zero and
+/// zero does not depend on the window's size. What it does need is a window
+/// whose reduction actually recurses, so the subtree partials at every depth
+/// are allocated on the first call and reused on the second.
+#[test]
+fn the_dense_reduction_allocates_nothing_after_its_first_call() {
+    let mut calibration: slam_rs::calib::Calibration<f32> = common::calibration().cast::<f32>();
+    calibration.t_i_c.truncate(2);
+    calibration.intrinsics.truncate(2);
+    let mut estimator: slam_rs::ba_base::BundleAdjustmentBase<f32> =
+        slam_rs::ba_base::BundleAdjustmentBase::new(calibration, 1.0, 1.0).unwrap();
+
+    let frames: [i64; 3] = [0, 1, 2];
+    let mut aom: slam_rs::types::AbsOrderMap = slam_rs::types::AbsOrderMap::new();
+    for (index, &t_ns) in frames.iter().enumerate() {
+        let pose: slam_rs::lie::Se3<f32> = slam_rs::lie::Se3::new(
+            slam_rs::lie::So3::identity(),
+            nalgebra::Vector3::new(0.01 * index as f32, 0.0, 0.0),
+        );
+        estimator.frame_poses.insert(
+            t_ns,
+            slam_rs::types::PoseStateWithLin::new(t_ns, pose, false),
+        );
+        aom.push(t_ns, slam_rs::types::POSE_SIZE).unwrap();
+    }
+
+    let host: slam_rs::types::TimeCamId = slam_rs::types::TimeCamId::new(frames[0], 0);
+    for index in 0..12u64 {
+        let id: slam_rs::types::LandmarkId = slam_rs::types::LandmarkId(index);
+        let direction: nalgebra::Vector2<f32> =
+            nalgebra::Vector2::new(0.01 * index as f32 - 0.05, -0.02);
+        let landmark: slam_rs::landmark::Landmark<f32> =
+            slam_rs::landmark::Landmark::new(id, host, direction, 0.25);
+        estimator.lmdb.add_landmark(id, &landmark);
+        for &t_ns in &frames {
+            estimator
+                .lmdb
+                .add_observation(
+                    slam_rs::types::TimeCamId::new(t_ns, 0),
+                    id,
+                    nalgebra::Vector2::new(500.0 + index as f32, 510.0),
+                )
+                .unwrap();
+        }
+    }
+
+    let inputs: slam_rs::linearize::LinearizationInputs<'_, f32> = Default::default();
+    let mut lqr: slam_rs::linearize::LinearizationAbsQR<f32> =
+        slam_rs::linearize::LinearizationAbsQR::new(
+            &estimator,
+            &aom,
+            slam_rs::linearize::LinearizationOptions::default(),
+            &inputs,
+        )
+        .unwrap();
+    lqr.linearize_problem(&estimator, &inputs).unwrap();
+    lqr.perform_qr().unwrap();
+
+    let mut workspace: slam_rs::linearize::DenseHbWorkspace<f32> = Default::default();
+    // The first call is allowed to allocate, and does: this is where every
+    // buffer reaches its size.
+    let (_, first) = measure(|| {
+        let _ = lqr
+            .get_dense_h_b_into(&estimator, &inputs, &mut workspace)
+            .unwrap();
+    });
+    for repeat in 0..3 {
+        let (_, again) = measure(|| {
+            let _ = lqr
+                .get_dense_h_b_into(&estimator, &inputs, &mut workspace)
+                .unwrap();
+        });
+        assert_eq!(
+            again.total(),
+            0,
+            "call {} over a warm workspace cost {again:?} (the first cost {first:?})",
+            repeat + 2,
+        );
+    }
+    println!("dense reduction: first call {first:?}, then zero");
+}
+
+/// What one steady-state frameset costs the estimator, and how that cost grows
+/// with the number of Levenberg-Marquardt steps it takes.
+///
+/// A frameset is **not** allocation-free and is not claimed to be: the landmark
+/// database is `BTreeMap`-shaped and every new observation can split a node,
+/// the LM trail is a `Vec<LmIteration>` inside a boxed `FrameStats`, and the
+/// marginalization builds its own square-root system — which on this window is
+/// every steady-state frameset, all forty of them marginalize. Measured here:
+/// 805 to 1,389 allocator calls, and the bound below is that with room.
+///
+/// The second assertion is the one that measures **this** change. The inner LM
+/// loop runs two to eight times per frameset (seven on the median MIO10 frame)
+/// and each pass used to take a fresh set of buffers:
+///
+/// | per inner step | allocations |
+/// |---|---:|
+/// | the dense reduction's accumulator (`DMatrix`, `DVector`, two `Vec`s) | 4 |
+/// | one subtree partial per recursion depth, `ceil(log2 55) = 6` | 24 |
+/// | the depth vector itself, grown to six | ~3 |
+/// | the leaf transpose buffers | 2 |
+/// | `h.clone()` per damping attempt | 1 |
+/// | `EigenLdlt`'s transpositions, `temp` and accumulator | 3 |
+/// | the right-hand side clone inside the solve | 1 |
+///
+/// All of them are now buffers the estimator owns and resets. Measured on this
+/// fixture, with the layout commits in and the pooling out (`9a248147`) and
+/// then with the pooling in: **126.8 allocator calls per LM step and 1,531 per
+/// frameset, down to 59.5 and 1,133**. What is left per step is
+/// `compute_delta` and the prior's `H · delta`, once each, and the IMU blocks.
+///
+/// The gate is a slope as well as a total, because the total is dominated by
+/// the per-frame database work: a per-step buffer coming back moves the slope
+/// long before it is visible in a mean.
+#[test]
+fn the_estimators_per_frame_cost_does_not_grow_with_the_lm_step_count() {
+    /// Measured on this fixture: 805 to 1,389 allocator calls per frameset.
+    const BOUND: usize = 1_600;
+    /// Measured slope: 59.5 allocator calls per LM step, against 126.8 before
+    /// the buffers were pooled, so this sits well inside the gap.
+    const CALLS_PER_STEP: f64 = 85.0;
+
+    let flow: Vec<std::sync::Arc<slam_rs::estimator::FlowObservations>> = common::ORACLE
+        .flow
+        .iter()
+        .take(ESTIMATOR_FRAMESETS)
+        .map(common::observations)
+        .collect();
+    let mut estimator = estimator_window();
+    for frame in flow.iter().take(ESTIMATOR_WARMUP) {
+        estimator
+            .process_frame(std::sync::Arc::clone(frame))
+            .unwrap();
+    }
+
+    let mut measured: Vec<(f64, f64)> = Vec::new();
+    for frame in flow.iter().skip(ESTIMATOR_WARMUP) {
+        let (outcome, counted) = measure(|| {
+            estimator
+                .process_frame(std::sync::Arc::clone(frame))
+                .unwrap()
+        });
+        let slam_rs::estimator::FrameOutcome::Measured(stats) = outcome else {
+            panic!("the fixture's inertial window is complete, so every frameset measures");
+        };
+        println!(
+            "frameset {}: {} LM steps, marginalized {}, {counted:?}",
+            stats.t_ns,
+            stats.lm.len(),
+            stats.marginalization.is_some(),
+        );
+        assert!(
+            counted.total() <= BOUND,
+            "a steady-state frameset with {} LM steps reached the allocator {counted:?} times, \
+             over the structural bound of {BOUND}",
+            stats.lm.len(),
+        );
+        measured.push((stats.lm.len() as f64, counted.total() as f64));
+    }
+
+    // Least squares on (LM steps, allocator calls). The fixture has to spread
+    // the step count or the slope is not identified: without that spread the
+    // total bound above would hold for a per-step allocation too.
+    let steps: Vec<f64> = measured.iter().map(|(x, _)| *x).collect();
+    let low: f64 = steps.iter().copied().fold(f64::INFINITY, f64::min);
+    let high: f64 = steps.iter().copied().fold(0.0, f64::max);
+    assert!(
+        high >= low + 4.0,
+        "the measured framesets took {low} to {high} LM steps, too narrow to \
+         tell a per-step allocation from a per-frame one"
+    );
+    let count: f64 = measured.len() as f64;
+    let mean_x: f64 = steps.iter().sum::<f64>() / count;
+    let mean_y: f64 = measured.iter().map(|(_, y)| *y).sum::<f64>() / count;
+    let covariance: f64 = measured
+        .iter()
+        .map(|(x, y)| (x - mean_x) * (y - mean_y))
+        .sum::<f64>();
+    let variance: f64 = steps
+        .iter()
+        .map(|x| (x - mean_x) * (x - mean_x))
+        .sum::<f64>();
+    let slope: f64 = covariance / variance;
+    println!(
+        "{count} framesets, {low}-{high} LM steps: {slope:.1} allocator calls per step, \
+         {mean_y:.0} mean per frameset"
+    );
+    assert!(
+        slope <= CALLS_PER_STEP,
+        "the estimator reaches the allocator {slope:.1} times per LM step, over the \
+         {CALLS_PER_STEP} the per-step path is allowed: the inner LM step allocates \
+         noticeably more than it did (this is a bulk gate; one small buffer can hide under it)"
     );
 }

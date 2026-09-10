@@ -56,6 +56,7 @@ from numpy import ndarray
 
 from slam_rs import _core
 from slam_rs.catalog_feed import CameraCalib, Frameset, ImuCalib, ImuStream
+from slam_rs.reference import config_text_sha256, profiled_config_text
 from slam_rs.tracking import Lockstep
 
 Lane: TypeAlias = Literal["cpu", "gpu"]
@@ -157,6 +158,8 @@ class Config:
     """The ``.npz`` of decoded framesets to replay; a sibling ``.calib.pkl`` carries the calibration."""
     config: Path
     """The basalt VIO config JSON the reference run used."""
+    profile: Literal["reference", "fast"] = "reference"
+    """Config overlay applied before tracking."""
     lanes: tuple[Lane, ...] = ("cpu", "gpu")
     """Backends to interleave, in the order each round runs them."""
     rounds: int = 3
@@ -300,6 +303,9 @@ def run_lane(lane: Lane, round_index: int, framesets: Framesets, config: _core.V
 def main(config: Config) -> None:
     """Run the interleaved schedule and print one row per round plus a summary.
 
+    RESULT and BEST carry the profile; CONFIG records the resolved text SHA-256
+    once for all lanes and rounds.
+
     Args:
         config: Parsed CLI options.
 
@@ -317,11 +323,11 @@ def main(config: Config) -> None:
     if config.pin_core is not None:
         os.sched_setaffinity(0, {config.pin_core})
     framesets: Framesets = load_framesets(config.dump, config.limit)
-    vio_config = _core.VioConfig.from_json(config.config.read_text())
+    resolved_config: str = profiled_config_text(config.config, config.profile)
+    vio_config: _core.VioConfig = _core.VioConfig.from_json(resolved_config)
     if vio_config.optical_flow_image_safe_radius != framesets.safe_radius:
         raise ValueError(
-            f"the dump was decoded at safe radius {framesets.safe_radius} and "
-            f"{config.config} sets {vio_config.optical_flow_image_safe_radius}"
+            f"the dump was decoded at safe radius {framesets.safe_radius} and {config.config} sets {vio_config.optical_flow_image_safe_radius}"
         )
     print(
         f"# {len(framesets.t_ns)} framesets x {framesets.images.shape[1]} cameras, "
@@ -329,12 +335,13 @@ def main(config: Config) -> None:
         f"core {os.sched_getaffinity(0) if config.pin_core is None else config.pin_core}"
     )
 
+    print(f"CONFIG profile={config.profile} config_sha256={config_text_sha256(resolved_config)}")
     measured: dict[Lane, list[LaneRound]] = {lane: [] for lane in config.lanes}
     for round_index, lane in interleave(config.lanes, config.rounds):
         entry: LaneRound = run_lane(lane, round_index, framesets, vio_config)
         measured[lane].append(entry)
         print(
-            f"RESULT label={config.label} lane={lane} round={round_index} "
+            f"RESULT label={config.label} lane={lane} profile={config.profile} round={round_index} "
             f"n={len(entry.track_ms)} wall={entry.wall_s:.1f} "
             f"median={entry.median_ms:.3f} mean={entry.track_ms.mean():.3f} "
             f"p95={np.percentile(entry.track_ms, 95):.3f} max={entry.track_ms.max():.3f} "
@@ -346,4 +353,6 @@ def main(config: Config) -> None:
     reference: float = best[config.lanes[0]]
     for lane in config.lanes:
         medians: str = " / ".join(f"{entry.median_ms:.3f}" for entry in measured[lane])
-        print(f"BEST lane={lane} best_median={best[lane]:.3f} rounds={medians} vs_{config.lanes[0]}={reference / best[lane]:.3f}x")
+        print(
+            f"BEST lane={lane} profile={config.profile} best_median={best[lane]:.3f} rounds={medians} vs_{config.lanes[0]}={reference / best[lane]:.3f}x"
+        )

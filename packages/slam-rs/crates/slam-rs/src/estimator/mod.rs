@@ -90,6 +90,7 @@
 //! estimator. Stage S9's Realtime mode is where the reset belongs (D5 of the S8
 //! simplify list).
 
+mod frame_update;
 mod optimize;
 mod schedule;
 
@@ -108,7 +109,7 @@ use crate::imu::{
     gravity_from_first_accel,
 };
 use crate::landmark::{Landmark, LandmarkError, StereographicParam};
-use crate::lie::{LieScalar, Se3};
+use crate::lie::{LieScalar, Se3, eigen_maxi};
 use crate::linearize::LinearizeError;
 use crate::marg::MargError;
 use crate::types::{
@@ -116,6 +117,9 @@ use crate::types::{
     PoseVelBiasState, PoseVelBiasStateWithLin, PoseVelState, StateError, TimeCamId,
 };
 
+pub use frame_update::{FrameUpdateDecline, FrameUpdateOutcome};
+use frame_update::{FrameUpdateResult, FrameUpdateScratch};
+use optimize::OptimizeScratch;
 pub use optimize::{LmIteration, LmTermination};
 use schedule::MarginalizationOutcome;
 pub use schedule::{EvictionReason, KeyframeEviction, MarginalizationStats};
@@ -453,6 +457,9 @@ pub struct FrameStats<S: LieScalar> {
     pub termination: LmTermination,
     /// The marginalization, when the trigger of `:717` fired.
     pub marginalization: Option<MarginalizationStats>,
+    /// What D76's frame update did with this frameset: never attempted, taken,
+    /// or refused by a named precondition.
+    pub frame_update: FrameUpdateOutcome,
     /// Wall-clock stage marks; see [`StageTimings`].
     pub timings: StageTimings,
 }
@@ -542,6 +549,51 @@ struct LmDamping<S: LieScalar> {
 /// (`sqrt_keypoint_vio.h:239-240`), not config fields.
 const VEE_FACTOR: f64 = 2.0;
 
+impl<S: LieScalar> LmDamping<S> {
+    /// `:1557-1562`: Nielsen's update after a step the objective accepted.
+    ///
+    /// `std::pow<Scalar>(x, 3)` deduces the exponent as `int`, so
+    /// `__promote_2<Scalar, int>` is `double` in both instantiations and the
+    /// power and the `1 −` happen in `double` before narrowing back — which is
+    /// why this is `to_f64().powf(3.0)` and not `x * x * x`. Both maxima are
+    /// `eigen_maxi` because `cwiseMax` is `numext::maxi`, which keeps a NaN on
+    /// the left where `f32::max` would drop it.
+    fn accept(&mut self, relative_decrease: S) {
+        let x: S = S::from_literal(2.0) * relative_decrease - S::one();
+        let gain: S = S::from_literal(1.0 - x.to_f64().powf(3.0));
+        let floor: S = S::one() / S::from_literal(3.0);
+        self.lambda *= eigen_maxi(floor, gain);
+        self.lambda = eigen_maxi(self.min_lambda, self.lambda);
+        self.lambda_vee = S::from_literal(VEE_FACTOR);
+    }
+
+    /// `:1585-1586`: the geometric escalation after a rejected step, which the
+    /// damped solve's own retry on a non-finite increment (`:1424-1425`) makes
+    /// with the same two lines.
+    fn escalate(&mut self) {
+        self.lambda = self.lambda_vee * self.lambda;
+        self.lambda_vee *= S::from_literal(VEE_FACTOR);
+    }
+
+    /// `:1595`: whether the escalation has taken the frame past `max_lambda`.
+    ///
+    /// Both loops ask it after the rollback, where C++ asks it; nothing between
+    /// the escalation and the question touches the damping.
+    fn exhausted(&self) -> bool {
+        self.lambda > self.max_lambda
+    }
+}
+
+/// `:1565-1568`: whether an accepted step is the last one the frame takes.
+///
+/// Both tolerances are hard-coded in C++ too. The window solve and D76's frame
+/// update ask this of their own `f_diff` and `step_norminf`, and there is one
+/// predicate so the two schedules cannot come to converge on different terms.
+fn lm_converged<S: LieScalar>(f_diff: S, step_norminf: S) -> bool {
+    (f_diff > S::zero() && f_diff < S::from_literal(optimize::FUNCTION_TOLERANCE))
+        || step_norminf < S::from_literal(optimize::STEP_TOLERANCE)
+}
+
 /// `SqrtKeypointVioEstimator<Scalar>` (`sqrt_keypoint_vio.h:50-248`).
 #[derive(Debug, Clone)]
 pub struct SqrtKeypointVio<S: LieScalar> {
@@ -624,6 +676,20 @@ pub struct SqrtKeypointVio<S: LieScalar> {
     newest_imu_t_ns: Option<i64>,
     /// Frames the last marginalization removed, for [`Self::snapshot`].
     last_marginalized: Vec<FrameId>,
+
+    /// The buffers [`Self::frame_update`]'s loop works in, kept across frames
+    /// for [`Self::scratch`]'s reason (D76).
+    frame_scratch: FrameUpdateScratch<S>,
+
+    /// The buffers [`Self::optimize`]'s inner loop works in, kept across
+    /// frames.
+    ///
+    /// Not state: every one of them is reset or overwritten before it is read,
+    /// so an estimator that dropped and rebuilt them each frame would compute
+    /// the same numbers. They are held because the loop runs seven times on the
+    /// median MIO10 frame and each pass wanted a fresh `87x87` reduced system, a
+    /// damped copy of it and the reduction's subtree partials.
+    scratch: OptimizeScratch<S>,
 }
 
 /// Every live scalar the estimator's own arithmetic needs, checked before any
@@ -815,6 +881,8 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             pending: None,
             newest_imu_t_ns: None,
             last_marginalized: Vec::new(),
+            frame_scratch: FrameUpdateScratch::default(),
+            scratch: OptimizeScratch::default(),
         })
     }
 
@@ -1288,9 +1356,27 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             }
         }
 
-        // `:566`.
+        // `:566`, plus D76's gate: above zero, `port.frame_update_max_iterations`
+        // moves the joint solve to the framesets that took a keyframe and gives
+        // the others the newest state alone. The frame update declines a
+        // frameset it cannot serve, and the joint solve owns the warmup.
         let optimize_started: std::time::Instant = std::time::Instant::now();
-        let (lm, termination, mut timings) = self.optimize(frame.t_ns)?;
+        let attempt_frame_update: bool =
+            self.config.port_frame_update_max_iterations > 0 && !took_keyframe && self.opt_started;
+        let updated: Option<FrameUpdateResult<S>> = if attempt_frame_update {
+            Some(self.frame_update(frame.t_ns)?)
+        } else {
+            None
+        };
+        let frame_update: FrameUpdateOutcome = match &updated {
+            None => FrameUpdateOutcome::NotAttempted,
+            Some(Ok(_)) => FrameUpdateOutcome::Taken,
+            Some(Err(decline)) => FrameUpdateOutcome::Declined(*decline),
+        };
+        let (lm, termination, mut timings) = match updated {
+            Some(Ok(outcome)) => outcome,
+            Some(Err(_)) | None => self.optimize(frame.t_ns)?,
+        };
         timings.optimize_ns = duration_ns(optimize_started);
         timings.predict_ns = predict_ns;
         timings.keyframe_ns = keyframe_ns;
@@ -1317,6 +1403,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             lm,
             termination,
             marginalization: marg.marginalization,
+            frame_update,
             timings,
         })
     }

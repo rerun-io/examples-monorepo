@@ -82,6 +82,8 @@ class ClipResult:
     D60's pose floor is not the only way a clip goes unscored; see ``ate`` for
     why a refusal is a row here.
     """
+    config_sha256: str
+    """SHA-256 of the exact config text the run's estimator was built from: run-level provenance, not a clip column."""
 
     @property
     def gt_allowed_cm(self) -> float:
@@ -174,10 +176,13 @@ def check_scoring_inputs(manifest: ReferenceManifest, segment: ReferenceSegment)
     return reference.path, segment.gt_csv
 
 
-def measure(manifest: ReferenceManifest, segment: ReferenceSegment, gpu: bool = False) -> ClipResult:
+def measure(
+    manifest: ReferenceManifest, segment: ReferenceSegment, gpu: bool = False, profile: Literal["reference", "fast"] = "reference"
+) -> ClipResult:
     """Run one clip through the estimator and score it against both references.
 
     Args:
+        profile: Config overlay; reference preserves the C++ configuration.
         manifest: The reference set, which resolves the dataset's config and the C++ trajectory.
         segment: The clip to run; its three artifacts must be on this machine.
         gpu: Put the frontend on this machine's GPU through CubeCL instead of the
@@ -203,7 +208,7 @@ def measure(manifest: ReferenceManifest, segment: ReferenceSegment, gpu: bool = 
     # costs nothing either.
     cpp: Trajectory = read_trajectory(cpp_csv)
     truth: Trajectory = read_trajectory(gt_csv)
-    run: SegmentRun = run_segment(manifest, segment, gpu=gpu)
+    run: SegmentRun = run_segment(manifest, segment, gpu=gpu, profile=profile)
     tracked: int = len(run.estimate)
     # A run below the floor is not scored at all: `ate` has no pose to align and
     # raises, and a machine that tracked nothing is precisely the machine this
@@ -254,6 +259,7 @@ def measure(manifest: ReferenceManifest, segment: ReferenceSegment, gpu: bool = 
         truth_extent_m=extent_m(truth),
         poses_finite=nonfinite is None,
         unscored=unscored,
+        config_sha256=run.config_sha256,
     )
 
 
@@ -294,11 +300,10 @@ Lane: TypeAlias = Literal["cpu", "wgpu"]
 def this_lane(gpu: bool) -> Lane:
     """The lane this core runs a clip on, named after the runtime rather than the flag.
 
-    ``--gpu`` does not say which GPU: the NVIDIA ``gpu`` feature and the portable
-    ``gpu-wgpu`` one are two builds of one source behind the same flag, and they
-    do not agree on every clip, so a row labelled ``gpu`` has lost the first
-    thing its reader asks. The extension reports the feature it was compiled with
-    (:data:`slam_rs._core.gpu_backend`) and the lane is that name.
+    ``--gpu`` does not say which runtime ran, and a row labelled ``gpu`` has
+    lost the first thing its reader asks. The extension reports the runtime it
+    was compiled with (:data:`slam_rs._core.gpu_backend`) and the lane is that
+    name.
 
     Args:
         gpu: Whether the run was asked for the GPU frontend.
@@ -324,6 +329,9 @@ def this_lane(gpu: bool) -> Lane:
 class Config:
     """Run the reference smoke clips on this machine and report the D60 verdict."""
 
+    profile: Literal["reference", "fast"] = "reference"
+    """Config overlay applied before tracking."""
+
     artifact_root: Path | None = None
     """Read every recording and sidecar from one directory per segment; see :func:`slam_rs.reference.relocate`."""
     segments: tuple[str, ...] = SMOKE_SEGMENTS
@@ -346,7 +354,8 @@ def main(config: Config) -> None:
 
     The JSON is rewritten after every clip rather than at the end: on a 2 GB
     device the second clip is what the kernel may refuse, and the first clip's
-    evidence has to survive it.
+    evidence has to survive it. Profile identity is run-level metadata, with
+    one resolved configuration SHA-256 per measured dataset in JSON and stdout.
 
     Args:
         config: Parsed CLI options.
@@ -376,15 +385,28 @@ def main(config: Config) -> None:
     for segment in segments:
         check_scoring_inputs(manifest, segment)
     machine: Machine = this_machine()
-    print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores, {lane} lane")
+    print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores, {lane} lane, profile={config.profile}")
     config.output_json.parent.mkdir(parents=True, exist_ok=True)
+    config_digests: dict[str, str] = {}
     results: list[ClipResult] = []
     for segment in segments:
-        results.append(measure(manifest, segment, config.gpu))
+        result: ClipResult = measure(manifest, segment, config.gpu, profile=config.profile)
+        results.append(result)
+        # The run's own digest, taken over the text its estimator was parsed
+        # from, so the JSON cannot name a config the estimator did not read.
+        if segment.dataset_name not in config_digests:
+            config_digests[segment.dataset_name] = result.config_sha256
+            print(f"CONFIG dataset={segment.dataset_name} config_sha256={result.config_sha256}")
+        elif config_digests[segment.dataset_name] != result.config_sha256:
+            raise RuntimeError(
+                f"{segment.dataset_name}: the config changed during the run ({config_digests[segment.dataset_name]} then {result.config_sha256})"
+            )
         print(results[-1].row(machine))
         payload: dict[str, object] = {
             "machine": asdict(machine),
             "lane": lane,
+            "profile": config.profile,
+            "config_sha256": config_digests,
             "clips": [clip_json(clip) for clip in results],
         }
         config.output_json.write_text(json.dumps(payload, indent=2))

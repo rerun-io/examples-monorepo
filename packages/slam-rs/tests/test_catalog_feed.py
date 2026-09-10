@@ -31,7 +31,7 @@ from slam_rs.catalog_feed import (
     imu_calib,
     open_segment,
 )
-from slam_rs.reference import SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment, flow_config
+from slam_rs.reference import SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment, resolved_flow_config
 from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import AteResult, Trajectory, associate, ate, read_trajectory, shift_clock, write_trajectory
 from slam_rs.vio_log import VioLogger, VioStage
@@ -156,6 +156,7 @@ def _rotate_pinhole_clockwise(
         return fy, fx, cy, (width - 1) - cx
     raise ValueError(f"image rotation must be 0, 90, 180 or 270 degrees clockwise; got {rotation_cw_deg}")
 
+
 def test_the_msd_g2_rotation_arithmetic() -> None:
     """basalt's landscape msd-g2 calibration, rotated, is the catalog's portrait calibration."""
     landscape_width: int = 640
@@ -235,9 +236,7 @@ def test_a_rig_whose_cameras_disagree_on_the_codec_names_both() -> None:
         _shared_codec([(0, "av1"), (2, "h264")], SMOKE_SEGMENT)
 
 
-def _transform_rows(
-    t_ns: list[int], translations: list[list[float] | None], quaternions: list[list[float] | None]
-) -> pa.Table:
+def _transform_rows(t_ns: list[int], translations: list[list[float] | None], quaternions: list[list[float] | None]) -> pa.Table:
     """One window of the ``gt`` layer, with each component present on the rows the caller names.
 
     Rerun nests a component's instances one list deep, so a row carrying one
@@ -450,7 +449,7 @@ def test_a_replay_export_associates_with_the_ground_truth_sidecar(manifest: Refe
         truth: Trajectory = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
         assert len(truth)
         stage: VioStage = VioStage(
-            lockstep=Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment))),
+            lockstep=Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), resolved_flow_config(manifest, segment)[0])),
             logger=VioLogger(
                 cameras=feed.cameras,
                 ground_truth=truth,

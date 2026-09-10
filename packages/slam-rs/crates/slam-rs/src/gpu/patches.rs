@@ -150,8 +150,8 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
                 Ok(Self {
                     layout,
                     len: 0,
-                    store: client.empty(elements * size_of::<f32>()),
-                    positions: client.empty(POSITION_RUNS * capacity * size_of::<f32>()),
+                    store: super::empty(&client, elements * size_of::<f32>()),
+                    positions: super::empty(&client, POSITION_RUNS * capacity * size_of::<f32>()),
                     host,
                     staging: vec![0.0; POSITION_RUNS * capacity],
                     pattern: std::marker::PhantomData,
@@ -252,9 +252,10 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
     /// Replace the device positions buffer with this call's runs of the staging
     /// buffer, which is as long as the capacity but only filled to `len`.
     fn upload_staging(&mut self) {
-        self.positions = self
-            .client
-            .create_from_slice(f32::as_bytes(&self.staging[..POSITION_RUNS * self.len]));
+        self.positions = super::submission::upload(
+            &self.client,
+            f32::as_bytes(&self.staging[..POSITION_RUNS * self.len]),
+        );
     }
 
     /// Sample every filled patch at every level of `pyramid`, without waiting.
@@ -332,6 +333,7 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
                     .client
                     .read_one(self.store.clone())
                     .map_err(|error| super::read_failed("the patch store", &error))?;
+                super::drained(&self.client);
                 let expected: usize = self.layout.elements() * size_of::<f32>();
                 if bytes.len() != expected {
                     return Err(TrackerError::LengthMismatch {

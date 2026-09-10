@@ -5,18 +5,23 @@
 </p>
 
 Visual-inertial odometry with a Rust core. The estimator is a port of the
-basalt VIO fork: pure Rust, CPU first, N-camera from the start. Python owns the
-plumbing — catalog feed, decode, evaluation and Rerun logging — and talks to the
-core through a PyO3 extension module, so the whole pipeline runs from Python:
+basalt VIO fork: pure Rust, N-camera from the start, with a CPU frontend and a
+portable GPU frontend through CubeCL and wgpu. Python owns the plumbing —
+catalog feed, decode, evaluation and Rerun logging — and talks to the core
+through a PyO3 extension module, so the whole pipeline runs from Python:
 `_core.Vio` consumes IMU samples and framesets and reports a pose, and
 `tools/apps/replay.py --stage vio` draws the estimate against the ground truth
-and against the basalt C++ reference on the same frames. On the smoke segment it
-is 0.31 cm from the C++ trajectory and 1.50 cm from ground truth, where the C++
-itself is 1.43 cm. The same code runs unchanged on `linux-64`, `linux-aarch64`
-and macOS `osx-arm64`.
+on the same frames. Two config profiles run on one code path. `reference`
+reproduces the C++ fork's estimator byte for byte; `fast` keeps its error within
+10 % of the reference's on each clip and makes the tracker call two to four times
+shorter. On the smoke segment the reference reads 1.50 cm from ground truth,
+where the C++ itself reads 1.43 cm; the fast profile reads 1.55 cm in 1.38 ms a
+frameset on an RTX 5090. The same code runs unchanged on `linux-64`,
+`linux-aarch64` and macOS `osx-arm64`.
 
 Design notes — the module-by-module account of the port, the full Python API,
-the reference set and the gates: [docs/design-notes.md](docs/design-notes.md).
+the reference set, the gates and every recorded decision:
+[docs/design-notes.md](docs/design-notes.md).
 
 ## Run it
 
@@ -46,11 +51,13 @@ wedges the recording stream. A long segment still wants `--max-framesets`.
 
 The GPU frontend is the off-by-default `gpu-wgpu` cargo feature, through
 CubeCL and wgpu (Vulkan / Metal / DX12). It writes the in-place
-`slam_rs/_core.so`; `--gpu` selects that frontend.
+`slam_rs/_core.so`; `--gpu` selects that frontend and `--profile fast` the
+speed profile:
 
 ```bash
-pixi run -e slam-rs-dev     --frozen slam-rs-wgpu-build   # a core whose `--gpu` is wgpu
-pixi run -e slam-rs-dev     --frozen python tools/apps/replay.py --stage vio --gpu
+pixi run -e slam-rs-dev --frozen slam-rs-wgpu-build   # a core whose `--gpu` is wgpu
+pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --gpu                 # the reference profile
+pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --gpu --profile fast  # the fast one
 ```
 
 Design notes: [the GPU lane](docs/design-notes.md#the-gpu-lane), and
@@ -59,6 +66,45 @@ Design notes: [the GPU lane](docs/design-notes.md#the-gpu-lane), and
 On macOS everything above runs from the mac lane's environment, which is where
 that platform's `slam-rs` features are solved: `-e slam-rs-osx-dev` in place of
 `-e slam-rs-dev`.
+
+## Two profiles
+
+The configs under `configs/` are the files the C++ reference runs read, key for
+key, and a test keeps them that way. A profile is a flat overlay in
+`configs/profiles/<name>.json` applied on top of one. `reference` is empty.
+`fast` is three keys:
+
+```json
+{"config.vio_max_iterations": 7, "port.redetect_survivor_ratio": 0.85, "port.frame_update_max_iterations": 5}
+```
+
+A key spelled `port.` is a knob basalt has no field for; absent, it reproduces
+basalt's behaviour. A key that is neither a basalt field nor a listed port key
+is a `KeyError`, so a typo cannot silently change a run. The fast profile changes
+two things about the schedule and nothing about the arithmetic:
+
+- **Detection on demand.** basalt tops up every empty grid cell on every
+  frameset. The fast profile detects only when camera 0 holds fewer than 85 % of
+  the keypoints the last detecting frameset ended with, which is cuVSLAM's
+  schedule.
+- **The window is solved at keyframes.** basalt re-solves the whole sliding
+  window on every frameset. The fast profile does so at keyframes only; between
+  them it solves the newest pose, velocity and biases against the held landmarks
+  and the IMU factor, five steps at most, and falls back to the joint solve when
+  that update declines. `VioSnapshot.frame_update` says which one ran.
+
+The gate is per clip: ATE against ground truth within 1.1x the reference
+profile's, and zero lost framesets. Fast trajectories are not byte-identical to
+reference ones, and not byte-identical across GPU vendors either. Reference
+trajectories are, on every Vulkan device measured; Metal differs in the last bit.
+
+Every tracking tool takes `--profile reference|fast`: `replay.py`,
+`bench_track.py`, `fleet_check.py` and `robocap_fleet.py`. In code,
+`slam_rs.reference.profiled_config_text(path, "fast")` returns the overlaid JSON.
+
+Design notes: [D74](docs/design-notes.md#d74--speed-profile) the profile,
+[D75](docs/design-notes.md#d75--redetect-on-demand-the-fast-profile-detects-when-camera-0-has-lost-tracks) detection on demand,
+[D76](docs/design-notes.md#d76--the-fast-profile-solves-the-window-at-keyframes-and-the-newest-state-alone-between-them) the keyframe-gated solve.
 
 ## How data gets in and out
 
@@ -80,7 +126,7 @@ reference.
 
 The estimate comes back the same way: a trajectory CSV, and a Rerun recording
 that layers the estimated poses, the landmarks and the window onto the input,
-beside the ground truth and the C++ run.
+beside the ground truth and, where the reference set has one, the C++ run.
 
 In code the contract is three calls: `Calibration` is the rig, `Vio.push_imu`
 takes one IMU sample, `Vio.track` takes one synchronized frameset of `uint8`
@@ -92,16 +138,18 @@ images. The feed is the only adapter between the recording and those calls.
 from pathlib import Path
 
 from slam_rs import _core
+from slam_rs.reference import profiled_config_text
 
 calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)  # the feed's dataclasses
 config = _core.VioConfig.from_json(Path("configs/msdmi_config.json").read_text())  # the file the C++ ran
+config = _core.VioConfig.from_json(profiled_config_text(Path("configs/msdmi_config.json"), "fast"))  # or with the overlay
 
-vio = _core.Vio(calibration, config, threads=1)
+vio = _core.Vio(calibration, config, threads=1, gpu=False)   # gpu=True runs the frontend on this host's GPU
 vio.push_imu_batch(t_ns, gyro, accel)     # int64[n], float64[n, 3], float64[n, 3], uncalibrated
 result = vio.track(t_ns, [left, right])   # uint8[h, w] per camera
 result.status, result.world_from_rig      # VioStatus, [tx ty tz qx qy qz qw]
 
-snapshot = vio.snapshot()   # None until a frameset has measured: the window, the landmarks, the LM numbers
+snapshot = vio.snapshot()   # None until a frameset has measured: the window, the landmarks, the LM numbers, the stage timers
 frame = vio.flow_frame()    # the keypoints of the last accepted frameset, or None
 ```
 
@@ -128,13 +176,13 @@ Design notes — the accessors field by field, every refusal and its ceiling, an
 
 | Path | What it is |
 |---|---|
-| `crates/slam-rs` | The core (`slam_rs` lib). No Python, no Rerun, no GPU. |
+| `crates/slam-rs` | The core (`slam_rs` lib). No Python, no Rerun; the GPU frontend is its `gpu-wgpu` feature. |
 | `crates/slam-rs-py` | PyO3 `cdylib` built in place as `slam_rs/_core.so`. |
 | `crates/slam-rs-cli` | `slam-rs` binary: a placeholder. `version` is the only subcommand that does anything; a replay runs through the Python tools. |
 | `slam_rs/` | The Python package: stubs, Tyro entry points under `apis/`. |
 | `tools/` | Thin CLI shims over `slam_rs/apis/`. |
 | `reference_segments.toml` | The frozen reference set. |
-| `configs/` | The basalt VIO configs the reference runs used, vendored from the fork. |
+| `configs/` | The basalt VIO configs the reference runs used, vendored from the fork, and the `profiles/` overlays. |
 | `tests/reference/` | Checked-in basalt C++ trajectories the gate tests reproduce. |
 | `slam_rs/reference_bundle.py` | Resolves the two long-tier artifacts kept out of git. |
 
@@ -147,7 +195,7 @@ Design notes — the accessors field by field, every refusal and its ceiling, an
 |---|---|
 | `lie` | `So3`/`Se3` over any `f32`/`f64` scalar: Sophus's `exp`/`log`, the adjoint, basalt's four SO(3) Jacobians and the decoupled SE(3) pair. |
 | `types` | `TimeCamId`, `KeypointId`/`LandmarkId`, `AbsOrderMap`, the three pose states and the two fixed-linearization wrappers. |
-| `config` | basalt's `VioConfig`, read straight from `configs/*_config.json`. |
+| `config` | basalt's `VioConfig`, read straight from `configs/*_config.json`, plus the `port.*` overlay keys the profiles set. |
 | `calib` | basalt's `Calibration`: extrinsics, the six shipped camera models, the 9- and 12-parameter IMU bias calibrations. |
 | `camera` | `pinhole`, `kb4` and `pinhole-radtan8` with basalt's 4-D homogeneous `project`/`unproject` and their analytic Jacobians. |
 | `image` | `ImageU16`: an owned flat 16-bit frame with an explicit row stride, and `interp`/`interp_grad`/`in_bounds` from `image.h`. |
@@ -155,11 +203,12 @@ Design notes — the accessors field by field, every refusal and its ceiling, an
 | `landmark` | `StereographicParam`, the three-parameter `Landmark`, and `LandmarkDatabase` with a reproducible iteration order (D31). |
 | `ba_base` | `BundleAdjustmentBase`: the window state maps, Huber-weighted `compute_error`, the reprojection residual and its three Jacobians, DLT `triangulate`. |
 | `imu` | Preintegration: basalt's midpoint propagation, the covariance and bias-Jacobian recurrences, the 9-vector residual, gravity initialisation. |
-| `frontend` | The optical-flow frontend: `patterns`, `se2`, `ldlt`, `patch`, `tracker`, `detect`, `flow` (`FrameToFrameOpticalFlow`) and `parallel`. |
+| `frontend` | The optical-flow frontend: `patterns`, `se2`, `ldlt`, `patch`, `tracker`, `detect`, `flow` (`FrameToFrameOpticalFlow`, with detection on demand) and `parallel`. |
+| `gpu` | The CubeCL frontend behind `gpu-wgpu`: the kernels, the per-cell corner selection, the patch and track stages, the `ReadRelay` that lets one stage's download carry another's buffers, and the seam counters. |
 | `linearize` | The square-root linearization: `LandmarkBlock` and `LinearizationAbsQR`, which produce `H`, `b`, `Q2Jp`, `Q2r` and `l_diff`. |
 | `marg` | Square-root marginalization: `MargHelper`'s rank-revealing flat Householder QR and `marginalizeHelperSqrtToSqrt`. |
 | `eigen` | The Eigen ports in one place — `qr`, `ldlt`, `svd`, `blas` — each reproducing Eigen's **operation order** rather than only its result (D44). |
-| `estimator` | The Offline sliding-window driver: `process_frame`, `schedule` (the keyframe vote and the keep/marginalize sets) and the Levenberg-Marquardt `optimize`. |
+| `estimator` | The Offline sliding-window driver: `process_frame`, `schedule` (the keyframe vote and the keep/marginalize sets), the Levenberg-Marquardt `optimize` over reused scratch, and `frame_update`, the fast profile's between-keyframes solve. |
 
 Design notes — what each module reproduces, quoted against the C++ it comes from
 ([Core modules](docs/design-notes.md#core-modules)), and the four stages where an ulp or a rank
@@ -170,25 +219,53 @@ decision is load-bearing: [the frontend](docs/design-notes.md#the-frontend-and-t
 
 ## Accuracy and speed
 
-| lane | on what | reads |
-|---|---|---|
-| CPU | the smoke segment | 0.31 cm from the C++ trajectory, 1.50 cm from ground truth, where the C++ itself is 1.43 cm |
-| GPU, wgpu | the two smoke clips | the same as the CPU lane's: 0.31 cm against the basalt C++ trajectory, 0.77 and 1.50 cm against ground truth |
-| GPU, wgpu | the seven machines of the fleet run (x86-64, Grace, Pi 5, RK3588, Jetson, Mac) | the same on every device that runs it |
-| GPU | discrete NVIDIA | 1.4x on a 5090 through Vulkan |
-| GPU | shared-memory SoCs | slower than the CPU lane, so a portability result there, not a speed one |
+Latency is the synchronous `Vio.track` call, one CPU core, decode excluded,
+median over the clip after the first 60 framesets. ATE is RMSE against ground
+truth after rigid alignment. On the RTX 5090 through Vulkan, wgpu frontend,
+three interleaved rounds each:
 
-D71 closes the measured MIO14 accuracy miss: the small-angle GPU sine polynomial
-with native cosine brings `MIO14_moving_props` from 11.98 to **9.72 cm versus GT**
-(sin+cos polynomials: **9.48 cm**), below the unchanged **10.63 cm**
-limit. The separate finite-check fix alone leaves that trajectory byte-identical.
-The four short benchmark clips retain their GT ATE within 0.0011 cm, and the CPU
-MIO10 trajectory stays byte-identical. These are targeted replay results, not a
-fresh ten-clip or all-device gate run. The default build remains CPU-only.
+| clip | cameras | length | reference: ms / cm | fast: ms / cm | cuVSLAM: ms / cm |
+|---|---:|---:|---|---|---|
+| `MIO10_short_2_panorama` (the smoke segment) | 2 | 7.6 s | 5.12 / 1.50 | 1.38 / 1.55 | 1.20 / 4.00 |
+| `MIO11_short_3_backandforth` | 2 | 11 s | 4.73 / 2.47 | 1.35 / 2.76 | 1.04 / 2.54 |
+| `MIO07_mapping_easy` | 2 | 76 s | 5.7 / 2.08 | 1.39 / 2.10 | 1.00 / 1.77 |
+| `MGO07_mapping_easy` | 4 | 53 s | 10.2 / 2.29 | 2.10 / 2.37 | — |
 
-Design notes — what the precision band is and why (D60), and the fleet table:
+cuVSLAM is NVIDIA's tracker in its offline Inertial mode on the same frames; its
+mode for the four-camera rig runs without the IMU and is not comparable, so that
+cell is blank. `MIO11` is the one clip of the four where the fast profile misses
+its band, by 0.04 cm.
+
+Over the whole catalog — 64 recordings, 316 minutes of video, one pass per
+profile — the fast profile is inside its 10 % band on 51, more accurate than the
+reference on 32, and loses no frameset on any; its tracker call is 2.0x
+(msd-index), 2.35x (msd-g2) and 2.7x (msd-odyssey) shorter at the median.
+Replaying the 156 minutes of msd-index end to end on one core, decode included,
+takes 63 minutes on the fast profile against 81 on the reference. The ten-clip
+gate's hardest clip, `MIO14_moving_props`, reads 9.72 cm on the reference (D71)
+and 6.37 cm on the fast profile.
+
+The same tip on the fleet, fast profile, tracker median in ms for
+`MIO10` / `MIO07` / `MGO07`, one unpinned pass with decode in the same process:
+
+| device | backend | fast, ms | fast over reference | trajectory against the 5090 |
+|---|---|---|---|---|
+| RTX 5090, x86-64 | Vulkan | 2.0 / 2.7 / 3.1 | 2.0x / 1.8x / 2.2x | the baseline |
+| GB10 (Spark), aarch64 | Vulkan | 2.9 / 3.2 / 4.8 | 1.85x / 1.9x / 2.1x | byte-identical, both profiles |
+| RTX 3060, x86-64 | Vulkan | 14.7 / 14.9 / 20.2 | 1.4x / 1.5x / 1.7x | inside the band, last-bit drift |
+| Apple M4 (Mac mini) | Metal | 18.8 / 18.6 / 21.2 | 1.2x / 1.2x / 1.2x | inside the band, within 0.04 cm |
+
+Every row tracks every frameset. The 3060 stayed at its idle clock for the run,
+so its numbers are that operating point, not the card's. The Mac is correct and
+slow for a measured reason: a synchronising read costs 7 ms of host time on
+Metal against 0.12 ms on the 5090, and the frontend makes two a frameset. The
+Pi 5 and the RK3588 cap have not run this tip.
+
+Design notes — the precision band (D60), the portability table and the fleet
+numbers with the Metal diagnosis:
 [the portable lane](docs/design-notes.md#the-portable-lane-and-the-two-silent-failures),
-[where it runs](docs/design-notes.md#where-the-portable-lane-runs).
+[where it runs](docs/design-notes.md#where-the-portable-lane-runs),
+[the fast profile across the fleet](docs/design-notes.md#the-fast-profile-across-the-fleet).
 
 ## Tests and gates
 
@@ -199,7 +276,7 @@ pixi run -e slam-rs-dev --frozen lint               # ruff
 pixi run -e slam-rs-dev --frozen typecheck          # pyrefly
 pixi run -e slam-rs-dev --frozen deadcode           # vulture
 pixi run -e slam-rs-dev --frozen slam-rs-clippy     # cargo clippy -D warnings
-pixi run -e slam-rs-dev --frozen slam-rs-rust-test  # cargo test --workspace
+pixi run -e slam-rs-dev --frozen slam-rs-rust-test  # cargo test --workspace (default features)
 pixi run -e slam-rs-dev --frozen slam-rs-version    # print the core version
 ```
 
@@ -208,14 +285,19 @@ declares, and from `slam-rs-osx-dev` on the Mac, where Metal is the backend:
 
 ```bash
 pixi run -e slam-rs-dev     --frozen slam-rs-wgpu-clippy  # the portable lane compiles and is warning-clean, tests included
-pixi run -e slam-rs-dev     --frozen slam-rs-wgpu-test    # the same kernels, on this host's GPU
-pixi run -e slam-rs-osx-dev --frozen slam-rs-wgpu-test    # the same kernels through Metal
+pixi run -e slam-rs-dev     --frozen slam-rs-wgpu-test    # workspace tests with wgpu; five nonempty GPU binary checks
+pixi run -e slam-rs-dev     --frozen slam-rs-wgpu-doc     # rustdoc with warnings denied
+pixi run -e slam-rs-osx-dev --frozen slam-rs-wgpu-doc     # the same strict docs through the Mac lane
+pixi run -e slam-rs-osx-dev --frozen slam-rs-wgpu-test    # workspace tests with wgpu through Metal
 ```
 
 The oracle lanes are the fixtures the C++ fork itself produced — pyramid, camera,
 IMU, landmark, linearization and marginalization, under
 `crates/slam-rs/tests/fixtures/`, plus the frontend's keypoint parity in
 `crates/slam-rs/tests/flow_parity.rs` — and they run inside `slam-rs-rust-test`.
+`crates/slam-rs/tests/vio_oracle.rs` pins the vendored configs to the ones the
+C++ runs used and the reference profile's LM trail to the C++'s;
+`tests/test_config_profiles.py` covers the overlays and their typo check.
 
 The smoke digest is checked in: `frames.sha256` and a copy of `gt.csv` under
 `tests/reference/msd/<segment>/` for the smoke pair, so that gate runs with no
@@ -239,16 +321,23 @@ with its entity trees, every clause of [the V2 gate](docs/design-notes.md#the-v2
 
 ## What is next
 
-Not in this stack, in the order they are likely to matter:
+Not in this branch, in the order they are likely to matter:
 
-- **GPU speed.** D71 brings MIO14 moving props within its accuracy limit.
-  The GPU frontend is faster only on
-  discrete NVIDIA (1.4x on a 5090 through Vulkan); on shared-memory SoCs it is
-  slower than the CPU lane. The kernels were written for correctness first.
-  Brush's portable CubeCL kernels are a reference for the next pass.
-- **More datasets.** `msd-odyssey` should run as is. Camera-only datasets (Assembly101,
-  HO-Cap, the WildCap sets) need basalt's vision-only estimator ported beside the
-  VIO. Aria recordings need the fisheye624 camera model.
+- **Metal.** The M4 runs the lane correctly and pays 7 ms per synchronising read
+  and ten times the 5090's device time per kernel. The fix is a lower-latency
+  completion path in the read routine, gated to Metal, and per-adapter workgroup
+  shapes chosen at start-up; the 5090 A/B harness stays the gate, so that path
+  is untouched.
+- **Four cameras on the fast profile.** The schedule knobs were tuned on
+  two-camera clips. `MGO09_short_1_updown`, 3 s long, is the one ten-clip miss
+  (0.98 cm against a 0.85 cm band); the 53 s `MGO07` passes by 0.08 cm.
+- **A second core.** One core was the rule for this branch. The between-keyframes
+  solve and the frontend's host work are independent enough to overlap.
+- **The Python seam.** 0.14 ms a frameset between the feed and `Vio.track`,
+  fixed across clips: a tenth of a fast `MIO10` call.
+- **More datasets.** Camera-only datasets (Assembly101, HO-Cap, the WildCap sets)
+  need basalt's vision-only estimator ported beside the VIO. Aria recordings need
+  the fisheye624 camera model.
 - **Results as a catalog layer.** One layer per segment with the estimated poses, the
   landmarks and the keypoints on the base recording's entity paths, registered beside
   the ground truth, so a run is browsed in the viewer, not in a CSV.

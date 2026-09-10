@@ -29,13 +29,15 @@ use std::collections::BTreeMap;
 use nalgebra::{DMatrix, DVector, Vector3};
 
 use super::{
-    EstimatorError, LmDamping, SqrtKeypointVio, StageTimings, VEE_FACTOR, fixed_keyframes,
+    EstimatorError, LmDamping, SqrtKeypointVio, StageTimings, fixed_keyframes, lm_converged,
 };
 use crate::duration_ns;
 use crate::eigen::ldlt::EigenLdlt;
 use crate::imu::{ImuLinData, IntegratedImuMeasurement, Matrix9};
 use crate::lie::{LieScalar, eigen_maxi};
-use crate::linearize::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
+use crate::linearize::{
+    DenseHbWorkspace, ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions,
+};
 use crate::types::{
     AbsOrderMap, FrameId, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseVelBiasState, PoseVelBiasStateWithLin,
     Vector9, Vector15,
@@ -44,15 +46,53 @@ use crate::types::{
 /// `max_num_iter` for the damped solve (`:1408`).
 const MAX_SOLVE_ATTEMPTS: u32 = 3;
 
+/// Everything one `optimize` call works in that outlives the call.
+///
+/// The estimator holds one and hands it to the loop, so the buffers survive
+/// from frame to frame; they are reset or fully overwritten before each read,
+/// which is what makes holding them a change of allocation and not of
+/// arithmetic. Kept as a struct rather than as loose fields so
+/// [`super::SqrtKeypointVio`] has one thing to name and the destructuring at
+/// the top of [`SqrtKeypointVio::optimize`] stays one line.
+#[derive(Debug, Clone)]
+pub(super) struct OptimizeScratch<S: LieScalar> {
+    /// The dense reduction's accumulator, subtree partials and leaf transpose.
+    pub(super) dense: DenseHbWorkspace<S>,
+    /// The damped solve's factorization, its working copy and the increment.
+    pub(super) solve: EigenLdlt<S>,
+    /// The increment [`damped_solve`] writes and the loop then negates.
+    pub(super) increment: DVector<S>,
+}
+
+impl<S: LieScalar> Default for OptimizeScratch<S> {
+    /// Empty buffers, sized on the first call. Written out rather than derived:
+    /// `#[derive(Default)]` would demand `S: Default`, which `LieScalar` does
+    /// not.
+    fn default() -> Self {
+        Self {
+            dense: DenseHbWorkspace::default(),
+            solve: EigenLdlt::empty(),
+            increment: DVector::zeros(0),
+        }
+    }
+}
+
 /// The two hard-coded convergence constants of `:1566`, which are **not**
 /// config fields.
-const FUNCTION_TOLERANCE: f64 = 1e-6;
+pub(super) const FUNCTION_TOLERANCE: f64 = 1e-6;
 /// See [`FUNCTION_TOLERANCE`].
-const STEP_TOLERANCE: f64 = 1e-4;
+pub(super) const STEP_TOLERANCE: f64 = 1e-4;
 
 /// `H.diagonal().segment<POSE_SIZE>(idx).array() = 1e20` (`:1400`), the value
 /// `vio_fix_long_term_keyframes` pins a long-term keyframe's rows with.
 const FIXED_KEYFRAME_WEIGHT: f64 = 1e20;
+
+/// What one solve leaves behind: the LM trail, why it stopped, and the stages
+/// it timed.
+///
+/// Named because two solves return it — the window's [`SqrtKeypointVio::optimize`]
+/// and the frame update of D76 — and `measure` takes whichever ran.
+pub(super) type SolveOutcome<S> = (Vec<LmIteration<S>>, LmTermination, StageTimings);
 
 /// Why the LM loop stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,10 +172,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     /// (`:1300-1303`), [`EstimatorError::FrameNotInOrdering`] where `:1468`
     /// and `:1472` read the ordering with `.at()`, and the linearization's own
     /// errors.
-    pub(super) fn optimize(
-        &mut self,
-        t_ns: i64,
-    ) -> Result<(Vec<LmIteration<S>>, LmTermination, StageTimings), EstimatorError> {
+    pub(super) fn optimize(&mut self, t_ns: i64) -> Result<SolveOutcome<S>, EstimatorError> {
         let mut lm: Vec<LmIteration<S>> = Vec::new();
         let mut timings: StageTimings = StageTimings::default();
         // `:1207`: five states have to accumulate before the first
@@ -152,12 +189,18 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         let Self {
             ref mut ba,
             ref mut damping,
+            ref mut scratch,
             ref marg_data,
             ref imu_meas,
             ref ltkfs,
             ref config,
             ..
         } = *self;
+        let OptimizeScratch {
+            ref mut dense,
+            ref mut solve,
+            ref mut increment,
+        } = *scratch;
 
         // `:1221-1242`: poses first, then states, both in ascending timestamp
         // order, and each entry checked against the prior's. C++ reads the prior
@@ -242,7 +285,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             while it <= config.vio_max_iterations && termination.is_none() {
                 let mark: std::time::Instant = std::time::Instant::now();
                 // `:1393`.
-                let (mut h, mut b) = lqr.get_dense_h_b(ba, &inputs)?;
+                let (h, b) = lqr.get_dense_h_b_into(ba, &inputs, dense)?;
                 // The reduced system is the ordering's: every `(idx, size)` in
                 // `aom` is a block of it, and every frame of the two maps has
                 // an entry, because `aom` was built from those maps above and
@@ -274,8 +317,8 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 }
 
                 // `:1408-1430`.
-                let (mut inc, inc_valid, solve_attempts): (DVector<S>, bool, u32) =
-                    damped_solve(&h, &b, damping);
+                let (inc_valid, solve_attempts): (bool, u32) =
+                    damped_solve(h, b, damping, solve, increment);
                 // `:1432`: C++ warns and carries on with the non-finite increment.
                 if !inc_valid {
                     log::warn!(
@@ -289,8 +332,9 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 
                 // `:1447-1454`, D13: negate, then back-substitute.
                 let mark: std::time::Instant = std::time::Instant::now();
-                inc = -inc;
-                let l_diff: S = lqr.back_substitute(ba, &inputs, &inc)?;
+                increment.neg_mut();
+                let inc: &DVector<S> = increment;
+                let l_diff: S = lqr.back_substitute(ba, &inputs, inc)?;
                 timings.back_substitution_ns += duration_ns(mark);
 
                 // `:1466-1474`.
@@ -376,22 +420,10 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 });
 
                 if accepted {
-                    // `:1557-1562`: Nielsen's update. `std::pow<Scalar>(x, 3)`
-                    // deduces the exponent as `int`, so `__promote_2<Scalar, int>`
-                    // is `double` in both instantiations and the power and the
-                    // `1 −` happen in `double` before narrowing back.
-                    let x: S = S::from_literal(2.0) * relative_decrease - S::one();
-                    let gain: S = S::from_literal(1.0 - x.to_f64().powf(3.0));
-                    let floor: S = S::one() / S::from_literal(3.0);
-                    damping.lambda *= eigen_maxi(floor, gain);
-                    damping.lambda = eigen_maxi(damping.min_lambda, damping.lambda);
-                    damping.lambda_vee = S::from_literal(VEE_FACTOR);
+                    damping.accept(relative_decrease);
                     it += 1;
 
-                    // `:1565-1568`, both constants hard-coded in C++ too.
-                    if (f_diff > S::zero() && f_diff < S::from_literal(FUNCTION_TOLERANCE))
-                        || step_norminf < S::from_literal(STEP_TOLERANCE)
-                    {
+                    if lm_converged(f_diff, step_norminf) {
                         termination = Some(LmTermination::Converged);
                     }
                     // `:1571`: leave the inner loop and re-linearize.
@@ -399,12 +431,11 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 }
 
                 // `:1585-1598`.
-                damping.lambda = damping.lambda_vee * damping.lambda;
-                damping.lambda_vee *= S::from_literal(VEE_FACTOR);
+                damping.escalate();
                 ba.restore();
                 it += 1;
                 backtrack += 1;
-                if damping.lambda > damping.max_lambda {
+                if damping.exhausted() {
                     termination = Some(LmTermination::MaxDamping);
                 }
             }
@@ -427,11 +458,13 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 /// `damping` rather than restored: every failed attempt raises it, the last one
 /// included, so three failures leave a `lambda` no attempt used and C++ records
 /// that one too.
-fn damped_solve<S: LieScalar>(
+pub(super) fn damped_solve<S: LieScalar>(
     h: &DMatrix<S>,
     b: &DVector<S>,
     damping: &mut LmDamping<S>,
-) -> (DVector<S>, bool, u32) {
+    ldlt: &mut EigenLdlt<S>,
+    inc: &mut DVector<S>,
+) -> (bool, u32) {
     let size: usize = h.nrows();
     let mut solve_attempts: u32 = 0;
     // `MAX_SOLVE_ATTEMPTS` is three, so the first solve always happens and the
@@ -439,21 +472,27 @@ fn damped_solve<S: LieScalar>(
     loop {
         // `:1415-1417`. `cwiseMax` is `numext::maxi`, so a NaN on the left
         // survives where `f32::max` would drop it.
-        let mut h_copy: DMatrix<S> = h.clone();
+        //
+        // Eigen factorizes in place over a copy of `H`; the copy is the
+        // factorization's own working buffer, written here rather than cloned,
+        // so a frame's three attempts share one `87x87` allocation instead of
+        // taking a fresh one each.
+        let copy: &mut DMatrix<S> = ldlt.working_copy(size);
+        copy.copy_from(h);
         for i in 0..size {
             let damped: S = eigen_maxi(h[(i, i)] * damping.lambda, damping.min_lambda);
-            h_copy[(i, i)] += damped;
+            copy[(i, i)] += damped;
         }
         // `:1419-1420`.
-        let inc: DVector<S> = EigenLdlt::new(h_copy).solve_vec(b);
+        ldlt.factor();
+        ldlt.solve_vec_into(b, inc);
         solve_attempts += 1;
         if inc.iter().all(|v| v.is_finite()) {
-            return (inc, true, solve_attempts);
+            return (true, solve_attempts);
         }
-        damping.lambda = damping.lambda_vee * damping.lambda;
-        damping.lambda_vee *= S::from_literal(VEE_FACTOR);
+        damping.escalate();
         if solve_attempts >= MAX_SOLVE_ATTEMPTS {
-            return (inc, false, solve_attempts);
+            return (false, solve_attempts);
         }
     }
 }
@@ -567,6 +606,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use crate::estimator::VEE_FACTOR;
     use crate::imu::ImuSample;
     use crate::lie::Se3;
     use crate::types::PoseVelBiasState;
@@ -590,7 +630,9 @@ mod tests {
         let h: DMatrix<f64> = DMatrix::identity(3, 3);
         let b: DVector<f64> = DVector::from_element(3, 1.0);
         let mut lm: LmDamping<f64> = damping(1e-4, 1e-32);
-        let (inc, valid, attempts) = damped_solve(&h, &b, &mut lm);
+        let mut ldlt: EigenLdlt<f64> = EigenLdlt::empty();
+        let mut inc: DVector<f64> = DVector::zeros(0);
+        let (valid, attempts) = damped_solve(&h, &b, &mut lm, &mut ldlt, &mut inc);
         assert!(valid);
         assert_eq!(attempts, 1);
         assert!(inc.iter().all(|v| v.is_finite()));
@@ -611,7 +653,9 @@ mod tests {
         let b: DVector<f64> = DVector::from_vec(vec![1.0, f64::NAN, 1.0]);
         let mut lm: LmDamping<f64> = damping(1e-4, 1e-32);
 
-        let (inc, valid, attempts) = damped_solve(&h, &b, &mut lm);
+        let mut ldlt: EigenLdlt<f64> = EigenLdlt::empty();
+        let mut inc: DVector<f64> = DVector::zeros(0);
+        let (valid, attempts) = damped_solve(&h, &b, &mut lm, &mut ldlt, &mut inc);
         assert!(!valid, "a NaN right-hand side has to fail: {inc:?}");
         assert_eq!(attempts, MAX_SOLVE_ATTEMPTS);
         assert_eq!(lm.lambda, 1e-4 * 64.0);
@@ -635,7 +679,9 @@ mod tests {
             lambda_vee: VEE_FACTOR as f32,
         };
 
-        let (inc, valid, attempts) = damped_solve(&h, &b, &mut lm);
+        let mut ldlt: EigenLdlt<f32> = EigenLdlt::empty();
+        let mut inc: DVector<f32> = DVector::zeros(0);
+        let (valid, attempts) = damped_solve(&h, &b, &mut lm, &mut ldlt, &mut inc);
         assert!(valid);
         assert_eq!(attempts, 2);
         assert!(inc[0].is_finite());

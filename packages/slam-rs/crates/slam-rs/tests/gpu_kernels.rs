@@ -42,31 +42,10 @@ mod common;
 #[path = "../src/gpu/finite.rs"]
 mod finite;
 
+use common::gpu::{
+    LEVELS, MAX_ITERATIONS, MAX_KEYPOINTS, MAX_RECOVERED_DIST2, band_at, guesses_at,
+};
 use common::{cornered_image, grid_positions, texture, textured_image};
-
-/// One band of a 50-pixel cell grid, keyed the way
-/// `detect_keypoints_with_cells` keys it: `row` is the grid row and `rung` the
-/// place on the threshold ladder, and the cache is indexed by the pair.
-fn band_at(row: usize, rung: usize, y: usize, rows: usize, threshold: i32) -> BandRequest {
-    BandRequest {
-        row,
-        rung,
-        y,
-        rows,
-        threshold,
-    }
-}
-
-/// The keypoint budget both lanes are sized for, well over what the grid needs.
-const MAX_KEYPOINTS: usize = 1024;
-/// `optical_flow_max_iterations` in every shipped config.
-const MAX_ITERATIONS: usize = 5;
-/// `optical_flow_max_recovered_dist2` in every shipped config.
-const MAX_RECOVERED_DIST2: f32 = 0.09;
-
-/// The pyramid geometry the shipped msd configs run: `optical_flow_levels = 3`
-/// on a 960x960 frame, so four levels.
-const LEVELS: usize = 3;
 
 /// `image`'s pyramid on both lanes, `LEVELS` deep and the same geometry.
 fn both_pyramids(image: &ImageU16) -> (PyramidU16, GpuPyramid<GpuRuntime>) {
@@ -458,6 +437,7 @@ fn track_both_lanes(
         LEVELS + 1,
         MAX_ITERATIONS,
         MAX_RECOVERED_DIST2,
+        1,
     )
     .unwrap();
     let mut gpu_patches: GpuPatches<Pattern51, _> = gpu_tracker.make_patches().unwrap();
@@ -467,17 +447,6 @@ fn track_both_lanes(
         .track(&gpu_prev, &gpu_next, &gpu_patches, guesses, &mut gpu_result)
         .unwrap();
     (cpu_result, gpu_result)
-}
-
-/// Guesses that say "the point has not moved", which is what the frontend hands
-/// the tracker when it has no pose prediction.
-fn guesses_at(positions: &PointsSoA) -> FlowTransforms {
-    let mut guesses: FlowTransforms = FlowTransforms::with_capacity(positions.len());
-    guesses.resize(positions.len());
-    for index in 0..positions.len() {
-        guesses.set(index, &AffineCompact2f::at(positions.get(index)));
-    }
-    guesses
 }
 
 /// Every patch's outcome flag on the two lanes, and the worst shared position.
@@ -880,155 +849,6 @@ fn the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing() {
     assert_eq!(shared.frame_uploads(), 1);
 }
 
-/// The whole GPU path keeps CubeCL's pool bounded: it plateaus and holds flat.
-///
-/// **Bounded pool growth, not zero device allocations** — the distinction
-/// matters and the earlier version of this test could not tell them apart.
-/// CubeCL 0.10's only host-to-device write is `create*`
-/// (`cubecl-runtime/src/client.rs`: `create_from_slice`, `create`, the tensor
-/// forms, and `empty`; there is no write into an existing handle), so three
-/// allocations are unavoidably per-frame: the frame upload per camera
-/// (`GpuPyramidBuilder::build`), the positions buffer per patch build
-/// (`GpuPatches::upload_staging`) and the transform buffer per tracking call
-/// (`GpuPatchTracker::track`). What the design can promise is that the pool
-/// they come out of stops growing, and that is what this measures.
-///
-/// Pool growth matters on shared-memory devices. The caller controls the
-/// number of per-frame allocations and their sizes.
-///
-/// So the drive is the **whole** path — pyramid, corner scan and its band walk,
-/// patch build and the KLT tracker, two cameras, 200 framesets — and the
-/// assertion is that after a warm-up both the reserved bytes and the bytes in
-/// use are *constant*, not merely under a ceiling. A ceiling alone passed while
-/// each of the three per-frame allocations went unexercised.
-#[test]
-fn the_whole_gpu_path_holds_the_pool_flat() {
-    const FRAMES: usize = 200;
-    /// Framesets the pool may still be growing over.
-    ///
-    /// Ten frames allow the pool to settle before checking for leaks.
-    const WARM_UP: usize = 10;
-    /// Keep the existing reserved-byte ceiling; flatness is the stronger gate.
-    const RESERVED_CEILING: u64 = 320 * 1024 * 1024;
-    /// Half again the measured payload: **18.51 MiB** on wgpu, for two 960x960 four-level pyramids, the scanner's three
-    /// per-camera buffers, two patch sets at a 1,024-keypoint capacity and the
-    /// tracker's result buffers. Unlike the reserved figure this is the data
-    /// itself, so it is the same on any device and a leak of any size shows in
-    /// it.
-    const IN_USE_CEILING: u64 = 32 * 1024 * 1024;
-
-    let client = gpu_client().unwrap();
-    let mut builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
-    let mut scanner: GpuCornerScan<_> = GpuCornerScan::new(client.clone()).unwrap();
-    scanner.share_level0(builder.level0_table());
-    let mut tracker: GpuPatchTracker<Pattern51, _> = GpuPatchTracker::new(
-        client.clone(),
-        MAX_KEYPOINTS,
-        LEVELS + 1,
-        MAX_ITERATIONS,
-        MAX_RECOVERED_DIST2,
-    )
-    .unwrap();
-    let mut patches: GpuPatches<Pattern51, _> = tracker.make_patches().unwrap();
-    let mut result: FlowResult = FlowResult::with_capacity(MAX_KEYPOINTS);
-
-    // Two cameras of the same geometry, as a stereo rig is: the mixed-geometry
-    // case is what `the_gpu_corner_scan_reads_the_pyramid_and_uploads_nothing`
-    // drives, and one geometry is the harder test for a *leak*, because nothing
-    // here can be blamed on a cache that keeps missing.
-    let frames: [ImageU16; 2] = [cornered_image(960, 960), cornered_image(960, 960)];
-    let mut pyramids: Vec<_> = frames
-        .iter()
-        .map(|frame| {
-            builder
-                .allocate(frame.width(), frame.height(), LEVELS)
-                .unwrap()
-        })
-        .collect();
-    let positions: PointsSoA = grid_positions(960);
-    let guesses: FlowTransforms = guesses_at(&positions);
-
-    let mut reserved: Vec<u64> = Vec::with_capacity(FRAMES);
-    let mut in_use: Vec<u64> = Vec::with_capacity(FRAMES);
-    for frame_index in 0..FRAMES {
-        for (camera, frame) in frames.iter().enumerate() {
-            builder.build(camera, frame, &mut pyramids[camera]).unwrap();
-            scanner.scan(camera, frame).unwrap();
-            // One band, so the download and the host-side walk run too.
-            scanner.band(band_at(0, 0, 3, 44, 20)).unwrap();
-        }
-        // The patch build and the tracking call are the other two per-frame
-        // allocations, and neither ran here before: camera 0's pyramid is the
-        // source and camera 1's the target, which is one frame pair per
-        // frameset through the whole KLT.
-        let (previous, next) = pyramids.split_at_mut(1);
-        patches.build(&previous[0], &positions, None).unwrap();
-        tracker
-            .track(&previous[0], &next[0], &patches, &guesses, &mut result)
-            .unwrap();
-        // `.unwrap()`, not `if let Ok`: a runtime that stops reporting its
-        // memory usage would leave these at zero and this test — the only one
-        // that would catch unbounded device growth — passing having measured
-        // nothing.
-        let usage = client.memory_usage().unwrap();
-        reserved.push(usage.bytes_reserved);
-        in_use.push(usage.bytes_in_use);
-        if frame_index < 3 || frame_index == WARM_UP || frame_index + 1 == FRAMES {
-            println!(
-                "frameset {}: {} allocs, {:.2} MiB in use, {:.2} MiB reserved, {} tracked",
-                frame_index + 1,
-                usage.number_allocs,
-                usage.bytes_in_use as f64 / (1024.0 * 1024.0),
-                usage.bytes_reserved as f64 / (1024.0 * 1024.0),
-                result.len(),
-            );
-        }
-    }
-
-    let plateau_reserved: u64 = reserved[WARM_UP];
-    let plateau_in_use: u64 = in_use[WARM_UP];
-    println!(
-        "plateau after {WARM_UP} framesets: {:.2} MiB reserved, {:.2} MiB in use; \
-         worst over {FRAMES}: {:.2} / {:.2} MiB",
-        plateau_reserved as f64 / (1024.0 * 1024.0),
-        plateau_in_use as f64 / (1024.0 * 1024.0),
-        reserved.iter().copied().max().unwrap_or(0) as f64 / (1024.0 * 1024.0),
-        in_use.iter().copied().max().unwrap_or(0) as f64 / (1024.0 * 1024.0),
-    );
-    assert!(
-        plateau_reserved > 0 && plateau_in_use > 0,
-        "the runtime reported no memory at all over {FRAMES} framesets"
-    );
-    for (frame_index, (&held, &used)) in
-        reserved.iter().zip(in_use.iter()).enumerate().skip(WARM_UP)
-    {
-        assert_eq!(
-            held,
-            plateau_reserved,
-            "reserved bytes moved at frameset {} ({held} against the plateau's \
-             {plateau_reserved}), so the pool is still growing",
-            frame_index + 1
-        );
-        assert_eq!(
-            used,
-            plateau_in_use,
-            "bytes in use moved at frameset {} ({used} against the plateau's \
-             {plateau_in_use}), so a per-frame buffer is not being freed",
-            frame_index + 1
-        );
-    }
-    assert!(
-        plateau_reserved < RESERVED_CEILING,
-        "CubeCL reserved {plateau_reserved} bytes over {FRAMES} framesets of the \
-         whole path on two 960x960 cameras, against a ceiling of {RESERVED_CEILING}"
-    );
-    assert!(
-        plateau_in_use < IN_USE_CEILING,
-        "the whole path holds {plateau_in_use} bytes of device data, against a \
-         ceiling of {IN_USE_CEILING}"
-    );
-}
-
 /// This runtime stores every element width the kernels bind.
 ///
 /// The one test that would fire on a fleet machine before any of the others
@@ -1310,4 +1130,126 @@ fn small_angle_trig_stays_within_two_ulps_of_the_cpu() {
         }
     }
     println!("small-angle sin/cos maximum ULP errors: {worst:?}");
+}
+
+/// Two passes in flight over **one** patch set answer what two separate calls do.
+///
+/// This is the claim the batched tracker rests on: a batch's passes share every
+/// intermediate buffer — the source and backward patch stores, the backward
+/// transforms — and may, because the device stream is ordered, so pass 0's
+/// `finish` has read them before pass 1's kernels write them. Only the packed
+/// result is per lane. If that ordering did not hold, the second `prepare` would
+/// corrupt the first pass and lane 0 would come back wrong; the reference here
+/// is the same two passes run one at a time, which is what the frontend did
+/// before D77.
+#[test]
+fn a_batch_of_two_passes_answers_what_two_calls_do() {
+    const SIZE: usize = 512;
+    let first: ImageU16 = textured_image(SIZE, SIZE, 0.0, 0.0);
+    let second: ImageU16 = textured_image(SIZE, SIZE, 2.75, -1.5);
+    let lane0: PointsSoA = grid_positions(SIZE);
+    // A different pass, so a batch that answered both lanes from one of them
+    // would be caught: half the patches, a quarter-pixel off the grid.
+    let mut lane1: PointsSoA = PointsSoA::default();
+    for index in (0..lane0.len()).step_by(2) {
+        let point = lane0.get(index);
+        lane1.push(Vector2::new(point.x + 0.25, point.y - 0.25));
+    }
+    let guesses: [FlowTransforms; 2] = [guesses_at(&lane0), guesses_at(&lane1)];
+    let points: [&PointsSoA; 2] = [&lane0, &lane1];
+
+    let client = gpu_client().unwrap();
+    let mut builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
+    let mut prev = builder.allocate(SIZE, SIZE, LEVELS).unwrap();
+    let mut next = builder.allocate(SIZE, SIZE, LEVELS).unwrap();
+    builder.build(0, &first, &mut prev).unwrap();
+    builder.build(0, &second, &mut next).unwrap();
+
+    let mut tracker: GpuPatchTracker<Pattern51, _> = GpuPatchTracker::new(
+        client.clone(),
+        MAX_KEYPOINTS,
+        LEVELS + 1,
+        MAX_ITERATIONS,
+        MAX_RECOVERED_DIST2,
+        2,
+    )
+    .unwrap();
+    let mut patches: GpuPatches<Pattern51, _> = tracker.make_patches().unwrap();
+
+    // ── one at a time, which is the reference
+    let mut alone: Vec<FlowResult> = Vec::new();
+    for lane in 0..2 {
+        let mut out: FlowResult = FlowResult::with_capacity(MAX_KEYPOINTS);
+        patches.prepare(&prev, points[lane], None).unwrap();
+        tracker
+            .track_prepared(&prev, &next, &patches, &guesses[lane], &mut out)
+            .unwrap();
+        alone.push(out);
+    }
+
+    // ── both launched, then one download
+    let mut batched: Vec<FlowResult> = (0..2)
+        .map(|_| FlowResult::with_capacity(MAX_KEYPOINTS))
+        .collect();
+    for lane in 0..2 {
+        patches.prepare(&prev, points[lane], None).unwrap();
+        tracker
+            .submit_prepared(&prev, &next, &patches, &guesses[lane], &mut batched[lane])
+            .unwrap();
+    }
+    tracker.collect(&mut batched).unwrap();
+
+    for lane in 0..2 {
+        assert_eq!(
+            batched[lane].tracked(),
+            alone[lane].tracked(),
+            "lane {lane} kept a different set out of the batch"
+        );
+        for index in 0..points[lane].len() {
+            assert_eq!(
+                batched[lane].is_valid(index),
+                alone[lane].is_valid(index),
+                "lane {lane}: patch {index} survived out of the batch and not alone"
+            );
+            if alone[lane].is_valid(index) {
+                assert_eq!(
+                    batched[lane].transform(index).translation,
+                    alone[lane].transform(index).translation,
+                    "lane {lane}: patch {index} moved"
+                );
+            }
+        }
+    }
+    assert_ne!(
+        alone[0].tracked().len(),
+        alone[1].tracked().len(),
+        "the two lanes tracked the same set, so crossing them would not show"
+    );
+}
+
+/// All uploads precede all builds, as in the frontend staging phase.
+#[test]
+fn prepared_pyramids_stay_below_the_runtime_channel_depth() {
+    for levels in [5, 8] {
+        // `allocate` takes the number of halvings: these are six and nine levels.
+        let client = gpu_client().unwrap();
+        let mut builder = GpuPyramidBuilder::new(client.clone(), &[[0.0, 0.0]]);
+        let images: Vec<_> = (0..8).map(|_| textured_image(960, 960, 0.0, 0.0)).collect();
+        let mut pyramids: Vec<_> = (0..8)
+            .map(|_| builder.allocate(960, 960, levels).unwrap())
+            .collect();
+        client.flush().unwrap();
+        slam_rs::gpu::seam::reset_queue_peak();
+        builder.prepare_images(&images).unwrap();
+        for (camera, (image, pyramid)) in images.iter().zip(&mut pyramids).enumerate() {
+            builder.build(camera, image, pyramid).unwrap();
+        }
+        let peak = slam_rs::gpu::seam::queue_peak();
+        assert!(
+            peak < slam_rs::gpu::CHANNEL_TASKS,
+            "eight cameras / {} levels queued {peak} tasks; leave room for the flush",
+            levels + 1
+        );
+        client.flush().unwrap();
+    }
 }
