@@ -58,6 +58,10 @@ const MAX_SOLVE_ATTEMPTS: u32 = 3;
 pub(super) struct OptimizeScratch<S: LieScalar> {
     /// The dense reduction's accumulator, subtree partials and leaf transpose.
     pub(super) dense: DenseHbWorkspace<S>,
+    /// The damped solve's factorization, its working copy and the increment.
+    pub(super) solve: EigenLdlt<S>,
+    /// The increment [`damped_solve`] writes and the loop then negates.
+    pub(super) increment: DVector<S>,
 }
 
 impl<S: LieScalar> Default for OptimizeScratch<S> {
@@ -67,6 +71,8 @@ impl<S: LieScalar> Default for OptimizeScratch<S> {
     fn default() -> Self {
         Self {
             dense: DenseHbWorkspace::default(),
+            solve: EigenLdlt::empty(),
+            increment: DVector::zeros(0),
         }
     }
 }
@@ -186,7 +192,11 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             ref config,
             ..
         } = *self;
-        let OptimizeScratch { ref mut dense } = *scratch;
+        let OptimizeScratch {
+            ref mut dense,
+            ref mut solve,
+            ref mut increment,
+        } = *scratch;
 
         // `:1221-1242`: poses first, then states, both in ascending timestamp
         // order, and each entry checked against the prior's. C++ reads the prior
@@ -303,8 +313,8 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 }
 
                 // `:1408-1430`.
-                let (mut inc, inc_valid, solve_attempts): (DVector<S>, bool, u32) =
-                    damped_solve(&h, &b, damping);
+                let (inc_valid, solve_attempts): (bool, u32) =
+                    damped_solve(h, b, damping, solve, increment);
                 // `:1432`: C++ warns and carries on with the non-finite increment.
                 if !inc_valid {
                     log::warn!(
@@ -318,8 +328,9 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 
                 // `:1447-1454`, D13: negate, then back-substitute.
                 let mark: std::time::Instant = std::time::Instant::now();
-                inc = -inc;
-                let l_diff: S = lqr.back_substitute(ba, &inputs, &inc)?;
+                increment.neg_mut();
+                let inc: &DVector<S> = increment;
+                let l_diff: S = lqr.back_substitute(ba, &inputs, inc)?;
                 timings.back_substitution_ns += duration_ns(mark);
 
                 // `:1466-1474`.
@@ -460,7 +471,9 @@ fn damped_solve<S: LieScalar>(
     h: &DMatrix<S>,
     b: &DVector<S>,
     damping: &mut LmDamping<S>,
-) -> (DVector<S>, bool, u32) {
+    ldlt: &mut EigenLdlt<S>,
+    inc: &mut DVector<S>,
+) -> (bool, u32) {
     let size: usize = h.nrows();
     let mut solve_attempts: u32 = 0;
     // `MAX_SOLVE_ATTEMPTS` is three, so the first solve always happens and the
@@ -468,21 +481,28 @@ fn damped_solve<S: LieScalar>(
     loop {
         // `:1415-1417`. `cwiseMax` is `numext::maxi`, so a NaN on the left
         // survives where `f32::max` would drop it.
-        let mut h_copy: DMatrix<S> = h.clone();
+        //
+        // Eigen factorizes in place over a copy of `H`; the copy is the
+        // factorization's own working buffer, written here rather than cloned,
+        // so a frame's three attempts share one `87x87` allocation instead of
+        // taking a fresh one each.
+        let copy: &mut DMatrix<S> = ldlt.working_copy(size);
+        copy.copy_from(h);
         for i in 0..size {
             let damped: S = eigen_maxi(h[(i, i)] * damping.lambda, damping.min_lambda);
-            h_copy[(i, i)] += damped;
+            copy[(i, i)] += damped;
         }
         // `:1419-1420`.
-        let inc: DVector<S> = EigenLdlt::new(h_copy).solve_vec(b);
+        ldlt.factor();
+        ldlt.solve_vec_into(b, inc);
         solve_attempts += 1;
         if inc.iter().all(|v| v.is_finite()) {
-            return (inc, true, solve_attempts);
+            return (true, solve_attempts);
         }
         damping.lambda = damping.lambda_vee * damping.lambda;
         damping.lambda_vee *= S::from_literal(VEE_FACTOR);
         if solve_attempts >= MAX_SOLVE_ATTEMPTS {
-            return (inc, false, solve_attempts);
+            return (false, solve_attempts);
         }
     }
 }
@@ -619,7 +639,9 @@ mod tests {
         let h: DMatrix<f64> = DMatrix::identity(3, 3);
         let b: DVector<f64> = DVector::from_element(3, 1.0);
         let mut lm: LmDamping<f64> = damping(1e-4, 1e-32);
-        let (inc, valid, attempts) = damped_solve(&h, &b, &mut lm);
+        let mut ldlt: EigenLdlt<f64> = EigenLdlt::empty();
+        let mut inc: DVector<f64> = DVector::zeros(0);
+        let (valid, attempts) = damped_solve(&h, &b, &mut lm, &mut ldlt, &mut inc);
         assert!(valid);
         assert_eq!(attempts, 1);
         assert!(inc.iter().all(|v| v.is_finite()));
@@ -640,7 +662,9 @@ mod tests {
         let b: DVector<f64> = DVector::from_vec(vec![1.0, f64::NAN, 1.0]);
         let mut lm: LmDamping<f64> = damping(1e-4, 1e-32);
 
-        let (inc, valid, attempts) = damped_solve(&h, &b, &mut lm);
+        let mut ldlt: EigenLdlt<f64> = EigenLdlt::empty();
+        let mut inc: DVector<f64> = DVector::zeros(0);
+        let (valid, attempts) = damped_solve(&h, &b, &mut lm, &mut ldlt, &mut inc);
         assert!(!valid, "a NaN right-hand side has to fail: {inc:?}");
         assert_eq!(attempts, MAX_SOLVE_ATTEMPTS);
         assert_eq!(lm.lambda, 1e-4 * 64.0);
@@ -664,7 +688,9 @@ mod tests {
             lambda_vee: VEE_FACTOR as f32,
         };
 
-        let (inc, valid, attempts) = damped_solve(&h, &b, &mut lm);
+        let mut ldlt: EigenLdlt<f32> = EigenLdlt::empty();
+        let mut inc: DVector<f32> = DVector::zeros(0);
+        let (valid, attempts) = damped_solve(&h, &b, &mut lm, &mut ldlt, &mut inc);
         assert!(valid);
         assert_eq!(attempts, 2);
         assert!(inc[0].is_finite());

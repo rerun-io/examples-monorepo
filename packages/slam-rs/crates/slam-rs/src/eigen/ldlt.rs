@@ -44,25 +44,84 @@ const TRIANGULAR_PANEL_WIDTH: usize = 8;
 pub(crate) struct EigenLdlt<S: LieScalar> {
     mat: DMatrix<S>,
     transpositions: Vec<usize>,
+    /// Eigen's own `m_temporary` (`LDLT.h:496`), held so a reused
+    /// factorization allocates nothing.
+    temp: Vec<S>,
+    /// The trailing update's accumulators, one per row below the pivot.
+    accumulator: Vec<S>,
 }
 
 impl<S: LieScalar> EigenLdlt<S> {
+    /// An unfactorized `0x0`, for a caller that reuses one factorization.
+    ///
+    /// Every buffer is sized by [`Self::working_copy`], so this allocates
+    /// nothing.
+    pub(crate) fn empty() -> Self {
+        Self {
+            mat: DMatrix::zeros(0, 0),
+            transpositions: Vec::new(),
+            temp: Vec::new(),
+            accumulator: Vec::new(),
+        }
+    }
+
+    /// The working copy, `size x size` and with **undefined contents**, for a
+    /// caller that fills it and then calls [`Self::factor`].
+    ///
+    /// This and `factor` are `new` split in two, so the Levenberg-Marquardt
+    /// step can write the damped matrix straight into the buffer the
+    /// factorization consumes: `sqrt_keypoint_vio.cpp:1415-1420` copies `H`,
+    /// adds `lambda * diag(H)` and factorizes, up to three times per inner
+    /// step, and Eigen's factorization is in place.
+    pub(crate) fn working_copy(&mut self, size: usize) -> &mut DMatrix<S> {
+        if self.mat.nrows() != size || self.mat.ncols() != size {
+            self.mat = DMatrix::zeros(size, size);
+        }
+        &mut self.mat
+    }
+
     /// `internal::ldlt_inplace<Lower>::unblocked` (`LDLT.h:280-382`).
     ///
     /// Only the lower triangle of `a` is read, as `LDLT<MatrixType, Lower>`
     /// reads. `a` is consumed because Eigen's is an in-place factorization and
     /// `marg_helper.cpp:202` hands it a `Ref` into `marg_H`, which is dead
     /// afterwards.
-    pub(crate) fn new(mut mat: DMatrix<S>) -> Self {
+    ///
+    /// The shipped Levenberg-Marquardt path does not use it: it reuses one
+    /// factorization through [`Self::working_copy`] and [`Self::factor`], which
+    /// are this constructor split in two. This spelling is what the tests
+    /// below and the ported reference drive.
+    #[cfg(test)]
+    pub(crate) fn new(mat: DMatrix<S>) -> Self {
+        let mut this: Self = Self {
+            mat,
+            transpositions: Vec::new(),
+            temp: Vec::new(),
+            accumulator: Vec::new(),
+        };
+        this.factor();
+        this
+    }
+
+    /// The sweep itself, over whatever [`Self::working_copy`] left in place.
+    pub(crate) fn factor(&mut self) {
+        let Self {
+            ref mut mat,
+            ref mut transpositions,
+            ref mut temp,
+            ref mut accumulator,
+        } = *self;
         let size: usize = mat.nrows().min(mat.ncols());
-        let mut transpositions: Vec<usize> = vec![0; size];
+        transpositions.clear();
+        transpositions.resize(size, 0);
         // Eigen passes one `temp` workspace through the whole sweep
         // (`m_temporary.resize(size)` at `:496`, then `temp.head(k)` at
         // `:336-338`); step `k` reads and writes its first `k` entries, so
         // hoisting it here changes no read and no write.
-        let mut temp: Vec<S> = vec![S::zero(); size];
-        // The trailing update's accumulators, one per row below the pivot.
-        let mut accumulator: Vec<S> = vec![S::zero(); size];
+        temp.clear();
+        temp.resize(size, S::zero());
+        accumulator.clear();
+        accumulator.resize(size, S::zero());
 
         for k in 0..size {
             // "Find largest diagonal element" (`:305-307`). `maxCoeff` reports
@@ -154,10 +213,7 @@ impl<S: LieScalar> EigenLdlt<S> {
                 for (j, entry) in transpositions.iter_mut().enumerate() {
                     *entry = j;
                 }
-                return Self {
-                    mat,
-                    transpositions,
-                };
+                return;
             }
 
             // `:359-360`. Eigen divides; it does not multiply by a reciprocal.
@@ -166,11 +222,6 @@ impl<S: LieScalar> EigenLdlt<S> {
                     mat[(i, k)] /= real_akk;
                 }
             }
-        }
-
-        Self {
-            mat,
-            transpositions,
         }
     }
 
@@ -327,11 +378,29 @@ impl<S: LieScalar> EigenLdlt<S> {
     /// factorizes the damped `H` and solves against the `b` that came out of
     /// the same `get_dense_H_b` (`sqrt_keypoint_vio.cpp:1393`, `:1419`), so the
     /// two agree by construction.
+    ///
+    /// Allocates its result; the shipped path calls [`Self::solve_vec_into`]
+    /// over a vector it keeps.
+    #[cfg(test)]
     pub(crate) fn solve_vec(&self, rhs: &DVector<S>) -> DVector<S> {
+        let mut dst: DVector<S> = DVector::zeros(rhs.nrows());
+        self.solve_vec_into(rhs, &mut dst);
+        dst
+    }
+
+    /// [`Self::solve_vec`] into a vector the caller keeps.
+    ///
+    /// `dst` is resized when it has to be and overwritten from `rhs` either
+    /// way, so its previous contents decide nothing.
+    pub(crate) fn solve_vec_into(&self, rhs: &DVector<S>, dst: &mut DVector<S>) {
         debug_assert_eq!(rhs.nrows(), self.transpositions.len());
-        let mut dst: DVector<S> = rhs.clone();
-        self.apply_transpositions_left_vec(&mut dst);
-        self.solve_unit_lower_in_place(&mut dst);
+        if dst.nrows() == rhs.nrows() {
+            dst.copy_from(rhs);
+        } else {
+            *dst = rhs.clone();
+        }
+        self.apply_transpositions_left_vec(dst);
+        self.solve_unit_lower_in_place(dst);
 
         let tolerance: S = S::min_positive();
         for i in 0..self.transpositions.len() {
@@ -343,9 +412,8 @@ impl<S: LieScalar> EigenLdlt<S> {
             }
         }
 
-        self.solve_unit_upper_in_place(&mut dst);
-        self.apply_transpositions_transpose_left_vec(&mut dst);
-        dst
+        self.solve_unit_upper_in_place(dst);
+        self.apply_transpositions_transpose_left_vec(dst);
     }
 }
 
