@@ -821,6 +821,81 @@ precision-band entry in the ten-clip manifest. These checks establish the local
 MIO14 correction and short-clip regression behavior, not a fresh all-device or
 ten-clip gate. The GPU stays opt-in and the default build stays CPU-only.
 
+## D73 — the estimator's per-frame scratch is the estimator's, and its hot loops walk columns
+
+Decision, 2026-09-10: hold the Levenberg-Marquardt loop's buffers on
+`SqrtKeypointVio` instead of allocating them per inner step, and write the three
+hot inner loops of the backend so that the coefficient they walk is the
+contiguous one. No arithmetic changes: every sum keeps its order, every product
+keeps its operand order, and the MIO10 trajectory stays byte-identical to the
+CPU lane's.
+
+**What the estimator was spending.** On MIO10 the `measure` stage was 2.443 ms of
+a 5.117 ms call (optimize 2.236, of which linearize 0.741 and solver 1.182,
+marginalize 0.147) on a window of 7 keyframes and 3 states — 87 pose parameters,
+~55 landmark blocks, seven inner LM steps on the median frame. That is a few
+MFLOP. Three things ate it, in this order:
+
+1. **Row-major loops over column-major storage.** `nalgebra`'s `DMatrix` is
+   column-major, and three loops indexed it with the column innermost:
+   `apply_householder_on_the_left_block`'s rank-1 update (`eigen/qr.rs`), the
+   `O(n³)` trailing update of Eigen's LDLT sweep (`eigen/ldlt.rs:338`), and both
+   of them at a stride of `nrows`. Interchanging them is free where the
+   operation is elementwise (the Householder update) and needs one accumulator
+   per output row where it is a reduction (the LDLT), which keeps each
+   coefficient's additions in their original order because the reduced index
+   becomes the outer loop. Worth 0.152 ms and 0.164 ms on MIO10, the two largest
+   single gains of the pass.
+2. **A hot loop the vectoriser refused.** `LandmarkBlock::add_dense_h_b_over`
+   was 31% of `optimize`'s self time and compiled to scalar `mulss`/`addss`: its
+   accumulator was a slice of runtime length, reached through the same
+   `&mut DenseHbScratch` as the row it multiplies, so the compiler had neither a
+   trip count nor a disjointness proof. A fixed `[S; 8]` local accumulator over
+   a row buffer padded to whole lanes gives it both. Worth 0.115 ms.
+3. **Per-step allocation.** `get_dense_h_b` took a fresh `opt_size`-square
+   accumulator, a fresh subtree partial per recursion depth and a fresh leaf
+   transpose on every call; `damped_solve` cloned the reduced system per damping
+   attempt and `EigenLdlt::new` allocated two more workspaces with it. Measured
+   with a counting allocator: **126.8 allocator calls per LM step**, 1,531 per
+   frameset. They are now a `DenseHbWorkspace`, an `EigenLdlt` and an increment
+   the estimator owns and resets, at 59.5 and 1,133.
+
+**Why pooling is not arithmetic.** The reduction resets every subtree buffer
+before a leaf writes it, and that reset restores exactly `+0.0` over the
+columns that were written; the accumulator it hands back is zeroed whole rather
+than by recorded column, because the IMU blocks, the prior and the
+fixed-keyframe pinning all write into it without recording anything. Eigen's
+LDLT is an in-place factorization, so the damped copy is the buffer the sweep
+consumes — writing it in place is what Eigen does, not a shortcut.
+
+**What did not pay, measured.** Pooling the landmark blocks across frames —
+~275 allocations and 182 kB of zeroing a frame — **regressed** MIO10 by
+0.074 ms and was dropped; a window whose landmark set shifts hands each pooled
+block to a different landmark, whose row count often differs, so the storage is
+replaced anyway and the shape test and the `Vec` rebuilds are what is left. The
+same reasoning retires the marginalization's permutation copy: `marginalize` is
+0.103 ms a frame after the Householder fix, no marginalization symbol appears in
+the top twenty of the native profile, and its copy is ~7 µs.
+
+**What is left, and where it is.** After the pass, `optimize` is 1.92 ms and its
+self time is `add_dense_h_b_over` 23%, `apply_householder_on_the_left_block`
+19%, the damped solve 17%, `linearize_problem` 12% and the dense reduction's
+joins and resets 8.5%. The Householder is the next lever and it needs the change
+this pass would not make: `LandmarkBlock::storage` is column-major here where
+basalt's is `Eigen::RowMajor`, so the reflection's long dimension — 92 columns —
+is the strided one and vectorising over its 3-to-5-row short dimension is most
+of what it can do. Making the block row-major would give both the dot product
+and the outer product a 92-long contiguous inner loop, and it would match the
+layout the port already models in `ColumnRedux::Strided`. It touches every
+reader of `storage` and is not a local change.
+
+**Gate.** MIO10, three interleaved rounds against `44cbdb0f`: median
+5.140 → 4.733 ms, `measure` 2.451 → 2.108, ATE vs ground truth 1.504 cm
+unchanged, zero lost framesets, and every candidate trajectory and state digest
+byte-identical to the baseline's. `tests/frame_allocations.rs` gates the
+allocation half: zero allocator calls on a warm dense reduction, and a
+slope-and-total bound per frameset that the pre-pooling code fails.
+
 ## Decision references
 
 The `Dnn` tags in this file and in the README name the project's recorded design decisions. What each one decided, in one line:
@@ -851,3 +926,4 @@ Speed knobs live in `configs/profiles/fast.json`; the first sets
 The benchmark and tracking tools opt in with `--profile fast`. The default
 `reference` profile is empty and preserves the vendored text. Unknown overlay
 keys raise `KeyError` so a typo cannot silently change the requested run.
+- **D73** — The estimator's LM buffers live on the estimator and its hot loops walk columns; no arithmetic changes (2026-09-10)

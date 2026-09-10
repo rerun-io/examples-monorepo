@@ -116,6 +116,7 @@ use crate::types::{
     PoseVelBiasState, PoseVelBiasStateWithLin, PoseVelState, StateError, TimeCamId,
 };
 
+use optimize::OptimizeScratch;
 pub use optimize::{LmIteration, LmTermination};
 use schedule::MarginalizationOutcome;
 pub use schedule::{EvictionReason, KeyframeEviction, MarginalizationStats};
@@ -624,6 +625,16 @@ pub struct SqrtKeypointVio<S: LieScalar> {
     newest_imu_t_ns: Option<i64>,
     /// Frames the last marginalization removed, for [`Self::snapshot`].
     last_marginalized: Vec<FrameId>,
+
+    /// The buffers [`Self::optimize`]'s inner loop works in, kept across
+    /// frames.
+    ///
+    /// Not state: every one of them is reset or overwritten before it is read,
+    /// so an estimator that dropped and rebuilt them each frame would compute
+    /// the same numbers. They are held because the loop runs seven times on the
+    /// median MIO10 frame and each pass wanted a fresh `87x87` reduced system, a
+    /// damped copy of it and the reduction's subtree partials.
+    scratch: OptimizeScratch<S>,
 }
 
 /// Every live scalar the estimator's own arithmetic needs, checked before any
@@ -815,6 +826,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             pending: None,
             newest_imu_t_ns: None,
             last_marginalized: Vec::new(),
+            scratch: OptimizeScratch::default(),
         })
     }
 
