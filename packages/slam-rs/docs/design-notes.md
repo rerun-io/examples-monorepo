@@ -386,8 +386,8 @@ pattern of all four widths, copies it **on the device**, reads it back, and
 refuses the runtime if it does not survive. Microseconds once, and it is what a
 fleet machine fails on instead of producing a trajectory out of zeros.
 
-Measured on this host (RTX 5090, MIO07/1500, three interleaved rounds): the
-portable lane runs at **7.153 ms** against CUDA's 6.005 and the CPU lane's
+Historical measurement, before D70 and the speed work of D72 to D78 (RTX 5090,
+MIO07/1500, three interleaved rounds): the portable lane ran at **7.153 ms** against CUDA's 6.005 and the CPU lane's
 9.384 — **1.31x** over the CPU, 19 % behind CUDA — and holds **+271 MiB** of
 device memory over idle against CUDA's +667. Every per-kernel tolerance test
 passes on it, with the pyramid and the corner scan bit-exact; whole-clip ATE is
@@ -414,8 +414,10 @@ are not a new ten-clip gate run; the targeted regression evidence is in D71.
 
 ## Where the portable lane runs
 
-Measured device by device in the portability run, the two smoke
-clips and the eleven per-kernel tolerance tests on each:
+Measured device by device in the portability run of 2026-09-08, before the speed
+work of D72 to D78, on the two smoke clips and the eleven per-kernel tolerance
+tests on each. The speed column is that branch's; the fast profile's numbers on
+the same devices are in [the next section](#the-fast-profile-across-the-fleet):
 
 | device | driver → compiler | tolerance suite | the lane |
 |---|---|---|---|
@@ -440,6 +442,42 @@ host's.
 
 Do not run `vulkaninfo` on the Pi 5: it hangs in uninterruptible sleep and
 wedges the box's I/O. The tolerance suite is the probe.
+
+## The fast profile across the fleet
+
+The three cleanup-gate clips on the S32 tip (`6da2fb78`), one pass per profile,
+unpinned, decode in the same process, tracker-call medians in ms for
+`MIO10` / `MIO07` / `MGO07`. The 5090's pinned, decode-free harness medians for
+the same tip are fast **1.38 / 1.39 / 2.10** against reference 5.1 / 5.7 / 10.2,
+with GT ATE 1.553 / 2.102 / 2.375 cm against 1.504 / 2.084 / 2.294; the catalog
+replays below time a different operating point and are compared only with each
+other.
+
+| device | backend | reference, ms | fast, ms | fast over reference | trajectory against the 5090 |
+|---|---|---|---|---|---|
+| RTX 5090, x86-64 | Vulkan | 3.97 / 4.81 / 6.95 | 2.01 / 2.68 / 3.13 | 1.98x / 1.80x / 2.22x | the baseline |
+| GB10 (Spark), aarch64 | Vulkan | 5.43 / 6.03 / 10.13 | 2.94 / 3.22 / 4.78 | 1.85x / 1.87x / 2.12x | byte-identical, both profiles |
+| RTX 3060, x86-64 | Vulkan | 20.6 / 21.9 / 33.7 | 14.7 / 14.9 / 20.2 | 1.40x / 1.47x / 1.67x | inside the band; last-bit drift, at most 0.02 cm of ATE |
+| Apple M4 (Mac mini), osx-arm64 | Metal | 22.2 / 22.7 / 25.0 | 18.8 / 18.6 / 21.2 | 1.18x / 1.22x / 1.18x | inside the band; at most 0.04 cm of ATE |
+
+Every row tracks every frameset and loses no pose. The RTX 3060 stayed at its
+idle clock (P8, 210 MHz) for the whole run, so its absolute numbers are that
+operating point, not the card's. The Pi 5 and the RK3588 cap have not run this
+tip: both were unreachable on the day.
+
+**Why the Mac is slow.** Two independent causes, measured on the M4 with the
+seam counters of `gpu/seam.rs` and the device timestamps. A synchronising read
+costs **7.05 ms** of host time on Metal — the slope over 0, 1, 2 and 4 empty
+four-byte reads a frameset — against 0.115 ms on the 5090, and the frontend
+makes two a frameset, so about 14 of the Mac's 19 ms is completion latency in
+`cubecl-wgpu`'s read path (flush, map a staging buffer, wake the poll thread,
+wait on its callback). Independently, the kernels run **4.31 ms** of device time
+a frameset against 0.44 on the 5090 (KLT 425 µs a launch against 49, the FAST
+score 293 against 12.5): the workgroup shapes were chosen on NVIDIA. Uploads are
+1.4 ms. The task ceiling has no effect from 1 to 64. What a fix would have to
+do: a lower-latency completion path gated to Metal, and per-adapter workgroup
+shapes chosen from the device properties at start-up, so the 5090's path stays
+untouched; the 5090 A/B harness remains the gate. Neither is started.
 
 ## Python API
 
@@ -1032,6 +1070,12 @@ The `Dnn` tags in this file and in the README name the project's recorded design
 - **D70** — One GPU runtime: the CUDA lane is removed; wgpu is the GPU lane (2026-09-09)
 - **D71** — Exponent-bit finite classification and bounded small-angle trig; the MIO14 replay passes its unchanged accuracy limit (2026-09-09)
 - **D72** — The GPU detector picks one corner per grid cell on the device; the candidate image never comes back (2026-09-09)
+- **D73** — The estimator's LM buffers live on the estimator and its hot loops walk columns; no arithmetic changes (2026-09-10)
+- **D74** — Speed profile: vendored configs stay C++-faithful; `configs/profiles/fast.json` overlays the knobs, `port.*` keys for the ones basalt has no field for (2026-09-10)
+- **D75** — Redetect on demand: the fast profile detects when camera 0 holds fewer than 85 % of the last detecting frameset's keypoints (2026-09-10)
+- **D76** — The fast profile solves the window at keyframes and the newest 15-dof state alone between them, falling back to the joint solve when that update declines (2026-09-10)
+- **D77** — The GPU frontend waits once per phase and reserves its queue budget before it enqueues (2026-09-10)
+- **D78** — One stage's download carries another's buffers: camera 0's cell selection rides the temporal tracks' read (2026-09-10)
 
 ## D74 — Speed profile
 
@@ -1044,7 +1088,6 @@ of MIO10 ATE for about 0.1 ms of mean and nothing on the median.
 The benchmark and tracking tools opt in with `--profile fast`. The default
 `reference` profile is empty and preserves the vendored text. Unknown overlay
 keys raise `KeyError` so a typo cannot silently change the requested run.
-- **D73** — The estimator's LM buffers live on the estimator and its hot loops walk columns; no arithmetic changes (2026-09-10)
 
 ## D75 — Redetect on demand: the fast profile detects when camera 0 has lost tracks
 
