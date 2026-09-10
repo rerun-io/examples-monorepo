@@ -1371,3 +1371,83 @@ is the cell selection's, which needs `should_detect` decided before the temporal
 tracks come back — a speculation that is free on a detecting frameset and costs
 the FAST kernels on one that skips.
 - **D77** — The GPU frontend waits once per phase instead of once per camera, and bounds the runtime queue so a four-camera rig does not spin (2026-09-10)
+
+## D78 — One stage's download carries another's buffers: the cell selection rides the temporal tracks
+
+D77 left the frontend at three synchronising reads a detecting frameset and named
+the next one to remove: the cell selection's, which came after the temporal
+tracks only because `should_detect` is decided from them. It is gone, and the
+mechanism is general — a `ReadRelay` (`gpu/mod.rs`) that one stage stages
+launched handles on and the next stage to synchronise appends to its own
+`read_async`, handing the tail back. `gpu_backends` shares one between the
+corner scanner and the tracker, the same wiring and for the same reason as the
+level-0 table: both stages are on one client and one frameset, so the difference
+between sharing and not is a whole read.
+
+**Camera 0's selection is launched at the top of the frameset**, before the
+temporal tracks and before anything about the frameset is known, and its keys
+come back inside `PatchTracker::collect`. That is a speculation: on MIO10's fast
+profile **79 % of framesets detect** (`added_points > 0`, 277 of 352
+post-warmup), so four times in five the keys are free and the fifth time the
+FAST kernels are wasted GPU work — no extra read either way, because a frameset
+that skips `add_points` never asks for them. The **other** cameras' selections
+only feed the non-overlap pass, so they are launched behind the cross-camera
+matches and ride *that* download; nothing is left for a read of its own.
+`CornerScan::prepare_cells` splits into `submit_cells` (launch, stage) and
+`take_cells` (take the tail, or download it here when nothing carried it — the
+first frameset of a run, which has no temporal pass).
+
+No arithmetic moves. The occupancy gate and the masks stay on the host and are
+still applied to the downloaded keys, `cell_select` is still the mask-independent
+half (D77), and the mixed-geometry and `num_points_cell != 1` fallbacks still
+take the band walk. Trajectories are byte- and state-identical to D77's on both
+clips.
+
+### The two orders that were tried and lost
+
+Both measured in the in-process rig (`tests/gpu_seam_bench.rs`, now with
+`SLAM_RS_SEAM_REDETECT=<ratio>` so the fast profile's gate is reachable), 400
+framesets, whole-frameset median in ms:
+
+| shape | 2 cam, every frameset detects | 2 cam, 18 % detect | 4 cam, every | 4 cam, 18 % |
+|---|---:|---:|---:|---:|
+| D77 | 1.258 | 0.887 | 2.735 | 1.653 |
+| **camera 0 up front, the rest behind the matches** | **1.205** | 0.971 | **2.455** | **1.582** |
+| every camera up front | 1.337 | 1.012 | 2.399 | 1.745 |
+| camera 0 up front, the rest *ahead* of the matches | 1.240 | 0.919 | 2.500 | 1.664 |
+
+Launching every camera up front loses because it puts 26 tasks in the
+two-camera phase and 52 in the four-camera one, so D77's queue ceiling flushes
+where the chosen shape does not. Launching the tail ahead of the matches rather
+than behind them loses by less and consistently, on all four cells.
+
+### What a read is worth, revised
+
+D77 measured 0.115 ms for one *added* empty read and this lever recovers about
+half of that per read removed: 0.053 ms in the rig, 0.10 ms on the clip. The
+difference is that a removed read does not take its GPU wait with it — the
+surviving read inherits it. So the seam's remaining cost is not "reads × 0.115":
+it is two fixed read costs plus the device work they wait on, and the clip's
+own detect stage went 0.214 → 0.008 ms while stereo went 0.193 → 0.298, which is
+that inheritance in the stage table.
+
+### Measured
+
+Fast profile, `--base wave3` (`c1f1a73a`), three interleaved rounds on MIO10 and
+one on MGO09.
+
+| clip | base median | after | delta | ATE vs GT | lost | identical |
+|---|---:|---:|---:|---:|---:|---|
+| MIO10 | 1.530 ms | **1.429** | −0.102 (−6.7 %) | 1.553 cm both | 0/0 | byte + state |
+| MGO09 | 2.282 ms | **2.197** | −0.086 (−3.8 %) | 0.978 cm both | 0/0 | byte + state |
+
+MIO10 clears the 1.439 ms speed target on every round (1.429, 1.432, 1.447).
+Reads per frameset 3 → **2** while detecting, 1 → 1 while not.
+
+The next thing in the seam is the **uploads**, not the reads: eleven a
+two-camera frameset for 0.174 ms, which is 0.016 ms each whether it carries
+1.84 MB of frame or a few hundred floats, so the cost is per call and nine of
+the eleven are the tracker's three-per-pass. Merging a pass's positions,
+forward transforms and backward offsets into one buffer with three regions —
+the kernels already take base offsets — would take eleven to five.
+- **D78** — One GPU stage's download carries another's buffers: camera 0's cell selection is launched at the top of the frameset and read back by the temporal tracks (2026-09-10)
