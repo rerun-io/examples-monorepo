@@ -834,14 +834,20 @@ selection on the host: a row band per cell row and rung, a column filter, OpenCV
 non-maximum suppression per cell, a sort and three gates. The three FAST kernels
 were 0.04 ms of that; the stage was **1.45 ms**.
 
-Only the floor of the threshold ladder decides the winner, and that is exact
-rather than an approximation. A candidate at rung `t` is `kept > t`;
+Only the **last rung the ladder visits** decides the winner, and that is exact
+rather than an approximation. That rung is `max_threshold` halved until the next
+halving would fall under `max(min_threshold, 1)`, which for the shipped 40/5
+configs is 5 but for 40/6 is 10 — not the configured minimum, which a halving
+ladder need never reach. `threshold_rungs` is the one place it is computed, and
+the cell walk steps through the same iterator, so the two cannot drift; handing
+the device `min_threshold` instead would let it admit a corner scoring between
+the two that the walk never sees. A candidate at rung `t` is `kept > t`;
 `suppress_non_maxima` kills a pixel only through an in-window neighbour scoring at
 least as much, and such a neighbour is itself a candidate at every rung the pixel
 is. Suppression therefore does not depend on the rung, and the ladder only admits
 survivors in descending score. With `optical_flow_detection_num_points_cell = 1`,
-which every shipped config sets, the cell's outcome is the best survivor over the
-floor that clears `safe_radius`, the masks and `EDGE_THRESHOLD`.
+which every shipped config sets, the cell's outcome is the best survivor over
+that last rung which clears `safe_radius`, the masks and `EDGE_THRESHOLD`.
 
 `fast_cell_select_kernel` is one cube per cell over that cell's own window, with
 the same zero rim the host scratch grid gives a neighbour outside the window, and

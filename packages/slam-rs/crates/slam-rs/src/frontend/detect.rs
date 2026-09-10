@@ -55,7 +55,11 @@
 //! parity gate seeds the tracker with the C++ keypoints for that reason.
 
 use kornia_image::{Image, ImageSize};
-use kornia_imgproc::features::{FastCorner, Rect as KorniaRect, fast_detect_rect_u8};
+use kornia_imgproc::features::{Rect as KorniaRect, fast_detect_rect_u8};
+
+/// kornia's FAST corner, re-exported because [`CornerScan::band`] hands it back:
+/// a backend outside this crate cannot implement the trait without naming it.
+pub use kornia_imgproc::features::FastCorner;
 
 use crate::image::ImageU16;
 
@@ -366,6 +370,27 @@ pub struct DetectorConfig {
 /// 1 and no further, rather than a wedged process (decision D32).
 pub const LOWEST_THRESHOLD_RUNG: i32 = 1;
 
+/// The thresholds [`detect_keypoints_with_cells`]'s ladder visits, in order.
+///
+/// `max_threshold`, then halved by integer division for as long as the value
+/// stays at or above the floor, which is `min_threshold` but never under
+/// [`LOWEST_THRESHOLD_RUNG`]. The shipped 40/5 configs give 40, 20, 10, 5; 40/6
+/// gives 40, 20, 10 and **not** 6, because the next halving is 5 and the ladder
+/// never visits the floor itself unless a halving happens to land on it. The
+/// sequence is empty when `max_threshold` is already under the floor.
+///
+/// One iterator rather than two expressions because both callers need it and
+/// they must not drift: the cell walk steps through it, and
+/// [`CornerScan::select_cells`] is handed its **last** value, which is the only
+/// rung that decides a one-point-per-cell winner. A device handed
+/// `min_threshold` instead would admit corners scoring between the two, which
+/// the walk never sees.
+pub fn threshold_rungs(config: &DetectorConfig) -> impl Iterator<Item = i32> {
+    let floor: i32 = config.min_threshold.max(LOWEST_THRESHOLD_RUNG);
+    std::iter::successors(Some(config.max_threshold), |threshold| Some(threshold / 2))
+        .take_while(move |threshold| *threshold >= floor)
+}
+
 /// One cell row's raw FAST candidates at one threshold, over the whole image width.
 ///
 /// `fast_detect_rect_u8` detects over **whole rows** and filters the result by
@@ -464,8 +489,9 @@ pub struct BandRequest {
 pub struct CellSelect {
     /// The detected image's own grid, as [`detect_keypoints_with_cells`] derives it.
     pub grid: CellGrid,
-    /// The rung the ladder stops at, which is the only one that decides the
-    /// winner (see [`CornerScan::select_cells`]).
+    /// The **last rung the ladder visits** ([`threshold_rungs`]), which is the
+    /// only one that decides the winner (see [`CornerScan::select_cells`]).
+    /// Not `min_threshold`: the halving ladder need never reach it.
     pub threshold: i32,
     /// `optical_flow_image_safe_radius`; `0` switches the gate off.
     pub safe_radius: f32,
@@ -560,14 +586,16 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
     /// minimum and its fields are the corner the host walk would have chosen;
     /// [`NO_CELL_WINNER`] means the cell has none.
     ///
-    /// **Only the ladder's floor is passed, and that is exact rather than an
-    /// approximation.** A candidate at rung `t` is `kept > t`; suppression kills
+    /// **Only the ladder's last rung is passed, and that is exact rather than
+    /// an approximation.** A candidate at rung `t` is `kept > t`; suppression kills
     /// `p` only through a neighbour whose score is at least `p`'s, and such a
     /// neighbour is a candidate at every rung `p` is — so surviving suppression
     /// does not depend on the rung, and the ladder only admits survivors in
     /// descending score. With `num_points_cell == 1` the whole ladder is
-    /// therefore "the best survivor over the floor", which is what this asks
-    /// for. A caller with a larger budget per cell must use [`CornerScan::band`].
+    /// therefore "the best survivor over the last rung it visits", which is what
+    /// this asks for — and that rung is [`threshold_rungs`]'s last value, not
+    /// `min_threshold`, which the ladder can step straight past. A caller with a
+    /// larger budget per cell must use [`CornerScan::band`].
     ///
     /// The masks are the caller's: a backend applies `safe_radius` and the edge
     /// margin, and the caller drops the cells its masks cover.
@@ -911,11 +939,12 @@ fn cell_masks(
 /// index falls outside `occupancy` is skipped too, where the C++ reads out of
 /// range.
 ///
-/// The threshold ladder is `max_threshold`, then repeatedly halved by integer
-/// division until it drops below `min_threshold` — 40, 20, 10, 5 for the shipped
-/// configs (`:160-188`) — and it stops early as soon as the cell's budget is full.
-/// The last rung is never below [`LOWEST_THRESHOLD_RUNG`], which is what makes the
-/// ladder finite for every `min_threshold`; basalt's own is not.
+/// The threshold ladder is [`threshold_rungs`]: `max_threshold`, then repeatedly
+/// halved by integer division until it would drop below `min_threshold` — 40, 20,
+/// 10, 5 for the shipped configs (`:160-188`) — and it stops early as soon as the
+/// cell's budget is full. The last rung is never below [`LOWEST_THRESHOLD_RUNG`],
+/// which is what makes the ladder finite for every `min_threshold`; basalt's own
+/// is not.
 /// Within one threshold the surviving corners are ordered by descending response
 /// (`:166-167`) and taken until the budget is met, each having to clear the safe
 /// radius (`:178`), the masks (`:179`) and `EDGE_THRESHOLD` (`:180`).
@@ -962,9 +991,13 @@ pub fn detect_keypoints_with_cells(
         });
     }
 
-    // The rung the ladder below stops at: the config's own, but never under
-    // `LOWEST_THRESHOLD_RUNG`, or halving never gets past zero.
-    let lowest_rung: i32 = config.min_threshold.max(LOWEST_THRESHOLD_RUNG);
+    // The last rung the cell walk below visits, which is also what the device
+    // path is handed (`threshold_rungs`). A ladder with no rung at all detects
+    // nothing: the walk's own loop would not run once, so returning here is the
+    // answer it would give, without touching the frame.
+    let Some(last_rung) = threshold_rungs(config).last() else {
+        return Ok(());
+    };
 
     let width: usize = image.width();
     let height: usize = image.height();
@@ -1010,7 +1043,7 @@ pub fn detect_keypoints_with_cells(
     if device_shaped {
         let select: CellSelect = CellSelect {
             grid: *grid,
-            threshold: lowest_rung,
+            threshold: last_rung,
             safe_radius: config.safe_radius,
         };
         scanner.select_cells(camera, image, &select, winners)?;
@@ -1078,10 +1111,12 @@ pub fn detect_keypoints_with_cells(
             }
 
             let mut points_added: usize = 0;
-            let mut threshold: i32 = config.max_threshold;
-            // The ladder's position, which with `row` is the band cache's key.
-            let mut rung: usize = 0;
-            while points_added < config.num_points_cell && threshold >= lowest_rung {
+            // `rung` is the ladder's position, which with `row` is the band
+            // cache's key.
+            for (rung, threshold) in threshold_rungs(config).enumerate() {
+                if points_added >= config.num_points_cell {
+                    break;
+                }
                 // `cv::FAST` on the `PATCH_SIZE` sub-image detects at
                 // sub-coordinates `[3, PATCH_SIZE - 3)`; the same rectangle in
                 // whole-image coordinates is the cell shrunk by the ring radius.
@@ -1148,9 +1183,6 @@ pub fn detect_keypoints_with_cells(
                     out.responses.push(corner.response);
                     points_added += 1;
                 }
-
-                threshold /= 2;
-                rung += 1;
             }
 
             y += grid.cell;
@@ -1406,6 +1438,58 @@ mod tests {
                 "min_threshold {min_threshold} detected a different number of corners than the floor"
             );
         }
+    }
+
+    /// The rungs the ladder visits, and the last of them.
+    ///
+    /// The last rung is **not** `min_threshold`: halving lands on 5 from 40 and
+    /// steps straight past 6, and a different maximum moves every rung. That
+    /// last value is what a device path is handed, so the two must be one
+    /// computation ([`threshold_rungs`]).
+    #[test]
+    fn the_ladder_halves_the_maximum_and_need_never_reach_the_minimum() {
+        let rungs = |max_threshold: i32, min_threshold: i32| -> Vec<i32> {
+            threshold_rungs(&DetectorConfig {
+                max_threshold,
+                min_threshold,
+                ..config()
+            })
+            .collect()
+        };
+        assert_eq!(rungs(40, 5), vec![40, 20, 10, 5]);
+        assert_eq!(rungs(40, 6), vec![40, 20, 10]);
+        assert_eq!(rungs(32, 5), vec![32, 16, 8]);
+        // The floor holds at `LOWEST_THRESHOLD_RUNG` whatever the config asks
+        // for, which is what makes the ladder finite.
+        assert_eq!(rungs(8, i32::MIN), vec![8, 4, 2, 1]);
+        // A maximum already under the floor is a ladder with no rung at all.
+        assert!(rungs(4, 5).is_empty());
+    }
+
+    /// A ladder with no rung detects nothing rather than detecting at some rung
+    /// nobody asked for.
+    #[test]
+    fn a_maximum_under_the_minimum_detects_nothing() {
+        let image: ImageU16 = dotted_image(200, 200, 16);
+        let grid: CellGrid = CellGrid::new(200, 200, 50).unwrap();
+        let cells: Vec<i32> = vec![0; grid.rows * grid.columns];
+        let mut scratch: DetectorScratch = DetectorScratch::default();
+        let mut out: KeypointsData = KeypointsData::default();
+        let mut empty_ladder: DetectorConfig = config();
+        empty_ladder.max_threshold = config().min_threshold - 1;
+        detect_keypoints_with_cells(
+            &image,
+            0,
+            &grid,
+            &occupancy(&cells, &grid),
+            &empty_ladder,
+            &Masks::default(),
+            BUDGET,
+            &mut scratch,
+            &mut out,
+        )
+        .unwrap();
+        assert!(out.is_empty());
     }
 
     /// The floor changes nothing for a config whose ladder already ends.

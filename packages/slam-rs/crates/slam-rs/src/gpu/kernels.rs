@@ -2024,7 +2024,8 @@ pub(super) struct CellSelectGeometry {
     pub cells_x: usize,
     /// Cells the grid walks down.
     pub cells_y: usize,
-    /// The ladder's floor, already clamped into the score's own `u8` range.
+    /// The last rung the host ladder visits, already clamped into the score's
+    /// own `u8` range.
     pub threshold: u32,
     /// `optical_flow_image_safe_radius`; `0` switches the gate off.
     pub safe_radius: f32,
