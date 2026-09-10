@@ -141,11 +141,20 @@ class VioSnapshot:
     def timings_ms(self) -> dict[str, float]:
         """Wall time each stage took on the last frame, in milliseconds.
 
-        The estimator's six — ``back_substitution``, ``error``, ``linearize``,
-        ``marginalize``, ``measure``, ``solver`` — and the frontend lane's four:
-        ``frontend_pyramid``, ``frontend_detect``, ``frontend_track`` and
-        ``frontend_imu``. They do not sum to the frame: what happens between the
-        phases is nobody's stage.
+        Estimator keys: ``predict``, ``keyframe``, ``optimize``, ``linearize``,
+        ``solver``, ``back_substitution``, ``error``, ``marginalize``, ``measure``.
+        Frontend keys: ``frontend_pyramid``, ``frontend_detect``,
+        ``frontend_track`` (temporal only; formerly included stereo),
+        ``frontend_stereo`` (cross-camera matching plus epipolar filter),
+        and ``frontend_imu`` (the frontend's motion preintegration).
+
+        ``keyframe`` includes decision and landmark initialization on keyframes,
+        and is zero otherwise. ``optimize`` contains ``linearize``, ``solver``,
+        ``back_substitution`` and ``error``. ``measure`` contains ``keyframe``,
+        ``optimize``, ``marginalize``, state prediction and untimed glue.
+        ``predict`` includes that state prediction plus IMU integration before
+        ``measure``; its integration portion is outside ``measure``. Timers
+        overlap and must not be summed as independent frame costs.
         """
 
     def __repr__(self) -> str: ...

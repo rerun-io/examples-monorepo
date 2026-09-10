@@ -66,7 +66,7 @@ pub const GPU_BACKEND: Option<&str> = None;
 /// Elapsed nanoseconds, saturating rather than panicking on an absurd clock.
 ///
 /// The one place a stage mark is taken: the estimator's six
-/// ([`estimator::StageTimings`]) and the frontend's three
+/// ([`estimator::StageTimings`]) and the frontend's
 /// ([`frontend::flow::FlowTimings`]) are the same measurement of different work.
 pub(crate) fn duration_ns(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
@@ -96,7 +96,7 @@ pub enum VioStatus {
 /// The three phases the frontend measures itself
 /// ([`frontend::flow::FlowTimings`]) and the preintegration [`Vio::track`] runs
 /// to seed the KLT with a pose prediction (D24) — the frontend's own inertial
-/// work, and no part of the estimator's six stages
+/// work, and no part of the estimator's stages
 /// ([`estimator::StageTimings`]). Reported, never compared, like those.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FrontendTimings {
@@ -104,8 +104,10 @@ pub struct FrontendTimings {
     pub pyramid_ns: u64,
     /// FAST detection with cells, every camera.
     pub detect_ns: u64,
-    /// Every KLT call: frame to frame, then camera 0 into the others.
+    /// Temporal KLT calls only.
     pub track_ns: u64,
+    /// Cross-camera matching and epipolar filtering.
+    pub stereo_ns: u64,
     /// Preintegrating the samples since the previous frameset into the KLT's prediction.
     pub imu_ns: u64,
 }
@@ -744,6 +746,7 @@ impl<S: lie::LieScalar> Vio<S> {
         self.frontend_timings.pyramid_ns = flow.pyramid_ns;
         self.frontend_timings.detect_ns = flow.detect_ns;
         self.frontend_timings.track_ns = flow.track_ns;
+        self.frontend_timings.stereo_ns = flow.stereo_ns;
         self.last_frame_t_ns = Some(t_ns);
 
         // The estimator reads only the ids and the observed pixels

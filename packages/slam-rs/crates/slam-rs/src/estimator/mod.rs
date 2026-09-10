@@ -396,6 +396,12 @@ pub enum FrameOutcome<S: LieScalar> {
 /// bit-reproducible (D17).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StageTimings {
+    /// IMU integration before measure plus state prediction and append inside it.
+    pub predict_ns: u64,
+    /// Keyframe decision and landmark initialization; zero on other frames.
+    pub keyframe_ns: u64,
+    /// The whole LM loop, including all four detailed optimization stages.
+    pub optimize_ns: u64,
     /// `linearizeProblem` plus `performQR`, summed over the LM iterations.
     pub linearize_ns: u64,
     /// `get_dense_H_b` plus the damped LDLT solve.
@@ -1040,6 +1046,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             return Ok(FrameOutcome::NeedMoreImu);
         }
 
+        let predict_started: std::time::Instant = std::time::Instant::now();
         if self.pending.is_none() {
             self.pending = self.pop_calibrated();
         }
@@ -1125,7 +1132,9 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             meas = Some(pim);
         }
 
-        let stats: FrameStats<S> = self.measure(Arc::clone(&frame), meas)?;
+        let integration_ns: u64 = duration_ns(predict_started);
+        let mut stats: FrameStats<S> = self.measure(Arc::clone(&frame), meas)?;
+        stats.timings.predict_ns += integration_ns;
         // `:354`, and only on success.
         self.prev_frame = Some(frame);
         Ok(FrameOutcome::Measured(Box::new(stats)))
@@ -1201,6 +1210,8 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             self.imu_meas.insert(pim.get_start_t_ns(), pim);
         }
 
+        let predict_ns: u64 = duration_ns(started);
+
         // `:444`.
         self.prev_opt_flow_res
             .insert(frame.t_ns, Arc::clone(&frame));
@@ -1239,6 +1250,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         // needed but `f32::max` semantics would be wrong. The threshold is a
         // `float` field widened to `Scalar`, which in the `f64` instantiation is
         // `0.699999988079071`, not `0.7`.
+        let keyframe_started: std::time::Instant = std::time::Instant::now();
         let total0: usize = connected[0] + unconnected_obs[0].len();
         let ratio: S = S::from_literal(connected[0] as f64) / S::from_literal(total0 as f64);
         let keyframe_vote: bool = ratio
@@ -1263,6 +1275,8 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             self.frames_after_kf += 1;
         }
 
+        let keyframe_ns: u64 = if took_keyframe { duration_ns(keyframe_started) } else { 0 };
+
         // `:555-563`: every landmark this frameset did not see, in any camera.
         let mut lost_landmarks: BTreeSet<LandmarkId> = BTreeSet::new();
         if self.config.vio_marg_lost_landmarks {
@@ -1275,7 +1289,11 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         }
 
         // `:566`.
+        let optimize_started: std::time::Instant = std::time::Instant::now();
         let (lm, termination, mut timings) = self.optimize(frame.t_ns)?;
+        timings.optimize_ns = duration_ns(optimize_started);
+        timings.predict_ns = predict_ns;
+        timings.keyframe_ns = keyframe_ns;
         let marg: MarginalizationOutcome =
             self.marginalize(&num_points_connected, &lost_landmarks)?;
         timings.marginalize_ns = marg.elapsed_ns;
