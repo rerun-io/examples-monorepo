@@ -1215,6 +1215,15 @@ gap for 12% of the frame: rejected, and recorded here so it is not rebuilt. What
 is left of the gap is the landmarks and the seven keyframe poses standing still
 between keyframes, which is the lever itself and not a detail of it.
 
+**Re-measured on the stack that shipped `port.redetect_survivor_ratio` at 0.85**
+(`redetect-r085`, wave 1's tip; the numbers above are against the 0.7 stack this
+branch was cut from). MIO10, three rounds: median **3.313 -> 1.995 ms**,
+`measure` **1.554 -> 0.196**, ATE **1.481 -> 1.553 cm** against 1.629 allowed,
+zero lost, the three rounds identical in trajectory and state digest, and the
+keyframe cadence (7.04), landmark count (44.1) and tracked keypoints (111.4 ->
+112.0) all where the joint solve left them — the schedule moves the solve, not
+the map. MGO09: **10.335 -> 3.679 ms**, ATE **0.766 -> 0.978** against 0.842.
+
 **Two other things measured and not kept.** `config.vio_max_states` is not
 independently tunable: at 5 the window's own invariants break and marginalization
 fails with "landmark block host frame ... is not in the absolute ordering" — the
