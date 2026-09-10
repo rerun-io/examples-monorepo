@@ -68,7 +68,7 @@ pub struct GpuPatchTracker<P: Pattern, R: Runtime> {
     /// Buffers another stage on this client launched and left for whichever
     /// download comes next; [`PatchTracker::collect`] appends them to its own,
     /// which is the corner scanner's cell keys arriving for free (D78).
-    reads: super::ReadRelay,
+    reads: super::selection_batch::Consumer,
 }
 
 impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
@@ -116,7 +116,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                     staging: vec![0.0; TRANSFORM_RUNS * capacity],
                     offset_x: vec![0.0; capacity],
                     offset_y: vec![0.0; capacity],
-                    reads: super::ReadRelay::default(),
+                    reads: super::selection_batch::endpoints().1,
                     client,
                 })
             },
@@ -129,7 +129,11 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
     /// buffers there, and a read on this lane costs 0.12 ms of host time before
     /// it moves a byte, so carrying them is free where a second read is not
     /// (D78).
-    pub fn share_reads(&mut self, relay: super::ReadRelay) {
+    pub(super) fn uses_client(&self, client: &ComputeClient<R>) -> bool {
+        std::ptr::eq(self.client.properties(), client.properties())
+    }
+
+    pub(super) fn share_reads(&mut self, relay: super::selection_batch::Consumer) {
         self.reads = relay;
     }
 }
@@ -391,8 +395,8 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
         // so a frameset whose every lane offered nothing still carries them.
         let lanes: usize = reads.len();
         // The tag comes back with the tail, so the bytes are handed to the
-        // stage that staged them and to no other (see [`super::RelayTag`]).
-        let staged: Option<super::RelayTag> = self.reads.take_staged().map(|(tag, handles)| {
+        // stage that staged them and to no other (the selection generation).
+        let staged: Option<u64> = self.reads.take_staged().map(|(tag, handles)| {
             reads.extend(handles);
             tag
         });

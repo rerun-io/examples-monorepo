@@ -89,7 +89,7 @@ pub static UPLOAD: Meter = Meter {
     value: &UPLOAD_VALUE,
 };
 /// The tracker batch's one download, which since D78 also carries whatever the
-/// corner scanner staged on the [`super::ReadRelay`] — so on the device lane
+/// corner scanner staged on the selection transfer — so on the device lane
 /// this is where a frameset's cell keys are counted too.
 pub static READ_TRACK: Meter = Meter {
     value: &READ_TRACK_VALUE,
