@@ -581,10 +581,10 @@ mod tests {
         let base: VioConfig = VioConfig::from_json_str(MSDMI_JSON).unwrap();
         let overlaid: String = MSDMI_JSON.replace(
             "\"value0\": {",
-            "\"value0\": {\"port.redetect_survivor_ratio\": 0.5,",
+            "\"value0\": {\"port.redetect_survivor_ratio\": 0.7,",
         );
         let config: VioConfig = VioConfig::from_json_str(&overlaid).unwrap();
-        assert_eq!(config.port_redetect_survivor_ratio, 0.5);
+        assert_eq!(config.port_redetect_survivor_ratio, 0.7);
 
         let mut normalised: VioConfig = config.clone();
         normalised.port_redetect_survivor_ratio = 0.0;

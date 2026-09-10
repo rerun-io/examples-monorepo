@@ -1042,4 +1042,60 @@ The benchmark and tracking tools opt in with `--profile fast`. The default
 `reference` profile is empty and preserves the vendored text. Unknown overlay
 keys raise `KeyError` so a typo cannot silently change the requested run.
 - **D73** — The estimator's LM buffers live on the estimator and its hot loops walk columns; no arithmetic changes (2026-09-10)
+
+## D75 — Redetect on demand: the fast profile detects when camera 0 has lost tracks
+
+basalt calls `addPoints` on every frameset and tops up every empty grid cell
+(`frame_to_frame_optical_flow.h:637-666`, `frontend/flow.rs`). cuVSLAM instead
+detects only once its survivors fall under a fraction of what the last detection
+left it, and so pays detection about every fourth frame. On MIO10 that is the
+one stage where the two are furthest apart.
+
+**The knob.** `port.redetect_survivor_ratio`, `0.0` by default. At `0` — where
+every basalt file and `VioConfig::default` leave it — the frameset always
+detects, which is basalt's schedule byte for byte. Above zero the frameset
+detects only when camera 0 holds fewer than that fraction of the keypoints the
+last **detecting** frameset ended with. `configs/profiles/fast.json` sets `0.7`;
+nothing else does.
+
+**Why the key is `port.` and not `config.`.** basalt has no field for it, and the
+vendored `configs/*.json` are the documents the C++ reference runs read, key for
+key (`tests/test_cpp_reference.py::test_the_vendored_configs_are_the_ones_the_cpp_runs_used`).
+So no port-only key is written into them: the profile overlay inserts it,
+`slam_rs.reference.PORT_CONFIG_KEYS` allowlists it so a typo is still a
+`KeyError`, and `VioConfig` skips serializing it while it is off — a basalt
+document still round-trips to exactly the keys it arrived with.
+
+**One decision for the whole rig, taken on camera 0.** `add_points` is a unit:
+camera 0's detection, the cross-camera match that carries its new ids into
+cameras 1..n, and the non-overlap pass on those cameras. Gating it per camera
+would leave a rig half detected, with camera 0's new ids never matched onward.
+Camera 0 is also the only camera the keyframe vote reads (D21). The test is a
+pure function of the frameset's own state — this frame's camera-0 count, the
+count the last detecting frameset ended with, a config field — so a replay
+repeats it, and `FrameState` carries the baseline so a refused frameset does not
+move it.
+
+**The keyframe coupling, measured.** The vote is
+`connected[0] / (connected[0] + unconnected[0]) < 0.7` and the unconnected
+observations are the freshly detected keypoints, so gating detection could have
+starved the vote. It does not at `0.7`: MIO10's post-warmup cadence goes 7.04 ->
+7.33 frames per keyframe and MGO09's stays at 6.71, both inside the 5-9 band the
+later scheduling work is priced against.
+
+**Why 0.7 and not 0.5.** Both clear the gate. `0.5` is faster — MIO10 median
+2.337 ms against `0.7`'s 2.980, from a 3.549 ms stack — but it detects only
+every 6.6 framesets on MIO10 and every 23.5 on MGO09, which halves what the
+estimator sees: on MIO10 the mean landmark count goes 46.0 -> 25.7 and tracked
+keypoints 119.1 -> 58.4, and MGO09's keyframe cadence goes to 9.40. `0.7` detects every 2.9
+framesets on MIO10 and every 5.2 on MGO09, keeps 38.5 landmarks and 84.3 tracked
+keypoints, and is the only setting where **both** measured clips score better
+than the stack does: MIO10 1.447 cm against 1.525, MGO09 0.757 cm against 0.766.
+It gives 0.582 ms of the 0.3 ms this lever was asked for, and leaves the cadence
+the next lever is sized against where it was. The `0.5` numbers are recorded so
+the trade is re-openable once the wider clip set has been run — the clips with
+fast-dying tracks (MIO11, MIO07, MGO13) are where a halved landmark count would
+show, and they are not measured here.
+
 - **D74** — Speed profile: vendored configs stay C++-faithful; speed knobs live in `configs/profiles/fast.json`, opted into with `--profile fast` (2026-09-10)
+- **D75** — Redetect on demand: the fast profile skips `addPoints` until camera 0 falls under `port.redetect_survivor_ratio` of its last detection (2026-09-10)

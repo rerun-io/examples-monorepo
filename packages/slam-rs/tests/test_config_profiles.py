@@ -28,7 +28,7 @@ def test_fast_profile_changes_only_the_lm_cap_and_the_redetect_gate() -> None:
         fast: dict = json.loads(manifest.vio_config_text(dataset.name, profile="fast"))
         assert fast["value0"].pop("config.vio_max_iterations") == 4
         assert reference["value0"].pop("config.vio_max_iterations") == 7
-        assert fast["value0"].pop("port.redetect_survivor_ratio") == 0.5
+        assert fast["value0"].pop("port.redetect_survivor_ratio") == 0.7
         assert "port.redetect_survivor_ratio" not in reference["value0"]
         assert fast == reference
 
