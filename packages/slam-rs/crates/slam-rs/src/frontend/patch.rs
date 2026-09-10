@@ -226,13 +226,13 @@ pub fn build_patch<P: Pattern, Src: PatchSource<f32>>(
 
     let mut h_se2: Matrix3<f32> = Matrix3::zeros();
     for i in 0..P::SIZE {
-        let row: [f32; 3] =
-            std::array::from_fn(|r| jacobian_transpose[r * jt_row_stride + i * jt_element_stride]);
-        for r in 0..3 {
-            for c in 0..3 {
-                h_se2[(r, c)] += row[r] * row[c];
-            }
-        }
+        let row: Vector3<f32> =
+            Vector3::from_fn(|r, _| jacobian_transpose[r * jt_row_stride + i * jt_element_stride]);
+        // `H += row row^T`. nalgebra walks the columns and does
+        // `h[(r, c)] += (1 · row[c]) · row[r]` where the nested loop below it
+        // did `row[r] · row[c]`, so the accumulation is bit-identical, not
+        // merely equivalent (S33 audit B, row 7).
+        h_se2.ger(1.0, &row, &row, 1.0);
     }
 
     let h_se2_inv: Matrix3<f32> = ldlt_inverse3(&h_se2);
