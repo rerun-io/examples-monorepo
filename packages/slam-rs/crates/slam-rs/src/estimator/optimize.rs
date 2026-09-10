@@ -29,7 +29,7 @@ use std::collections::BTreeMap;
 use nalgebra::{DMatrix, DVector, Vector3};
 
 use super::{
-    EstimatorError, LmDamping, SqrtKeypointVio, StageTimings, VEE_FACTOR, fixed_keyframes,
+    EstimatorError, LmDamping, SqrtKeypointVio, StageTimings, fixed_keyframes, lm_converged,
 };
 use crate::duration_ns;
 use crate::eigen::ldlt::EigenLdlt;
@@ -420,22 +420,10 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 });
 
                 if accepted {
-                    // `:1557-1562`: Nielsen's update. `std::pow<Scalar>(x, 3)`
-                    // deduces the exponent as `int`, so `__promote_2<Scalar, int>`
-                    // is `double` in both instantiations and the power and the
-                    // `1 −` happen in `double` before narrowing back.
-                    let x: S = S::from_literal(2.0) * relative_decrease - S::one();
-                    let gain: S = S::from_literal(1.0 - x.to_f64().powf(3.0));
-                    let floor: S = S::one() / S::from_literal(3.0);
-                    damping.lambda *= eigen_maxi(floor, gain);
-                    damping.lambda = eigen_maxi(damping.min_lambda, damping.lambda);
-                    damping.lambda_vee = S::from_literal(VEE_FACTOR);
+                    damping.accept(relative_decrease);
                     it += 1;
 
-                    // `:1565-1568`, both constants hard-coded in C++ too.
-                    if (f_diff > S::zero() && f_diff < S::from_literal(FUNCTION_TOLERANCE))
-                        || step_norminf < S::from_literal(STEP_TOLERANCE)
-                    {
+                    if lm_converged(f_diff, step_norminf) {
                         termination = Some(LmTermination::Converged);
                     }
                     // `:1571`: leave the inner loop and re-linearize.
@@ -443,12 +431,11 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 }
 
                 // `:1585-1598`.
-                damping.lambda = damping.lambda_vee * damping.lambda;
-                damping.lambda_vee *= S::from_literal(VEE_FACTOR);
+                damping.escalate();
                 ba.restore();
                 it += 1;
                 backtrack += 1;
-                if damping.lambda > damping.max_lambda {
+                if damping.exhausted() {
                     termination = Some(LmTermination::MaxDamping);
                 }
             }
@@ -503,8 +490,7 @@ pub(super) fn damped_solve<S: LieScalar>(
         if inc.iter().all(|v| v.is_finite()) {
             return (true, solve_attempts);
         }
-        damping.lambda = damping.lambda_vee * damping.lambda;
-        damping.lambda_vee *= S::from_literal(VEE_FACTOR);
+        damping.escalate();
         if solve_attempts >= MAX_SOLVE_ATTEMPTS {
             return (false, solve_attempts);
         }
@@ -620,6 +606,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use crate::estimator::VEE_FACTOR;
     use crate::imu::ImuSample;
     use crate::lie::Se3;
     use crate::types::PoseVelBiasState;

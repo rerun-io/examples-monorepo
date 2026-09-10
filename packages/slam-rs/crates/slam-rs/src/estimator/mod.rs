@@ -109,7 +109,7 @@ use crate::imu::{
     gravity_from_first_accel,
 };
 use crate::landmark::{Landmark, LandmarkError, StereographicParam};
-use crate::lie::{LieScalar, Se3};
+use crate::lie::{LieScalar, Se3, eigen_maxi};
 use crate::linearize::LinearizeError;
 use crate::marg::MargError;
 use crate::types::{
@@ -548,6 +548,51 @@ struct LmDamping<S: LieScalar> {
 /// `vee_factor` and `initial_vee`, both the compile-time constant 2.0
 /// (`sqrt_keypoint_vio.h:239-240`), not config fields.
 const VEE_FACTOR: f64 = 2.0;
+
+impl<S: LieScalar> LmDamping<S> {
+    /// `:1557-1562`: Nielsen's update after a step the objective accepted.
+    ///
+    /// `std::pow<Scalar>(x, 3)` deduces the exponent as `int`, so
+    /// `__promote_2<Scalar, int>` is `double` in both instantiations and the
+    /// power and the `1 −` happen in `double` before narrowing back — which is
+    /// why this is `to_f64().powf(3.0)` and not `x * x * x`. Both maxima are
+    /// `eigen_maxi` because `cwiseMax` is `numext::maxi`, which keeps a NaN on
+    /// the left where `f32::max` would drop it.
+    fn accept(&mut self, relative_decrease: S) {
+        let x: S = S::from_literal(2.0) * relative_decrease - S::one();
+        let gain: S = S::from_literal(1.0 - x.to_f64().powf(3.0));
+        let floor: S = S::one() / S::from_literal(3.0);
+        self.lambda *= eigen_maxi(floor, gain);
+        self.lambda = eigen_maxi(self.min_lambda, self.lambda);
+        self.lambda_vee = S::from_literal(VEE_FACTOR);
+    }
+
+    /// `:1585-1586`: the geometric escalation after a rejected step, which the
+    /// damped solve's own retry on a non-finite increment (`:1424-1425`) makes
+    /// with the same two lines.
+    fn escalate(&mut self) {
+        self.lambda = self.lambda_vee * self.lambda;
+        self.lambda_vee *= S::from_literal(VEE_FACTOR);
+    }
+
+    /// `:1595`: whether the escalation has taken the frame past `max_lambda`.
+    ///
+    /// Both loops ask it after the rollback, where C++ asks it; nothing between
+    /// the escalation and the question touches the damping.
+    fn exhausted(&self) -> bool {
+        self.lambda > self.max_lambda
+    }
+}
+
+/// `:1565-1568`: whether an accepted step is the last one the frame takes.
+///
+/// Both tolerances are hard-coded in C++ too. The window solve and D76's frame
+/// update ask this of their own `f_diff` and `step_norminf`, and there is one
+/// predicate so the two schedules cannot come to converge on different terms.
+fn lm_converged<S: LieScalar>(f_diff: S, step_norminf: S) -> bool {
+    (f_diff > S::zero() && f_diff < S::from_literal(optimize::FUNCTION_TOLERANCE))
+        || step_norminf < S::from_literal(optimize::STEP_TOLERANCE)
+}
 
 /// `SqrtKeypointVioEstimator<Scalar>` (`sqrt_keypoint_vio.h:50-248`).
 #[derive(Debug, Clone)]

@@ -14,8 +14,10 @@
 //! pose Jacobian are [`linearize_point`] and [`compute_rel_pose`], the robust
 //! weight is the landmark block's own [`compute_error_weight`], the IMU factor is
 //! [`ImuBlock::linearize`], and the damped solve is [`damped_solve`] — the same
-//! Eigen LDLT the window solve runs. There is one reprojection model in the
-//! crate.
+//! Eigen LDLT the window solve runs. The damping policy is
+//! [`LmDamping`](super::LmDamping)'s own and the convergence test is
+//! [`lm_converged`], so the two schedules cannot drift apart on either. There is
+//! one reprojection model in the crate.
 //!
 //! ## What is held, and why the prior is not here
 //!
@@ -33,8 +35,8 @@
 //! The window loop's shape, constant for constant: `lambda` reset to
 //! `vio_lm_lambda_initial` every frame (D11), `lambda·diag(H)` damping with the
 //! same floor (D10), the budget shared with backtracking (D12), the increment
-//! negated before it is applied (D13), Nielsen's update on an accept and the
-//! same hard-coded `1e-6`/`1e-4` convergence pair. One difference, and it is a
+//! negated before it is applied (D13), and the shared Nielsen update and
+//! `1e-6`/`1e-4` convergence pair above. One difference, and it is a
 //! simplification the window cannot make: with nothing eliminated, the model's
 //! predicted decrease is `−(inc·b + ½ incᵀ H inc)` in closed form, which is what
 //! `backSubstitute` accumulates block by block when there are no landmark
@@ -42,10 +44,8 @@
 
 use nalgebra::{DMatrix, DVector, Matrix2x6, Matrix4, Matrix6, Vector2, Vector6};
 
-use super::optimize::{
-    FUNCTION_TOLERANCE, LmIteration, LmTermination, STEP_TOLERANCE, SolveOutcome, damped_solve,
-};
-use super::{EstimatorError, SqrtKeypointVio, StageTimings, VEE_FACTOR};
+use super::optimize::{LmIteration, LmTermination, SolveOutcome, damped_solve};
+use super::{EstimatorError, SqrtKeypointVio, StageTimings, lm_converged};
 use crate::ba_base::{BundleAdjustmentBase, LinearizePointOut, compute_rel_pose, linearize_point};
 use crate::duration_ns;
 use crate::eigen::ldlt::EigenLdlt;
@@ -322,13 +322,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             });
 
             if accepted {
-                // `:1557-1562`: Nielsen's update, in `double` as C++ deduces it.
-                let x: S = S::from_literal(2.0) * relative_decrease - S::one();
-                let gain: S = S::from_literal(1.0 - x.to_f64().powf(3.0));
-                let floor: S = S::one() / S::from_literal(3.0);
-                damping.lambda *= eigen_maxi(floor, gain);
-                damping.lambda = eigen_maxi(damping.min_lambda, damping.lambda);
-                damping.lambda_vee = S::from_literal(VEE_FACTOR);
+                damping.accept(relative_decrease);
                 it += 1;
                 backtrack = 0;
 
@@ -338,18 +332,14 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 std::mem::swap(b, b_trial);
                 error_total = error_after;
 
-                // `:1565-1568`, both constants hard-coded in C++ too.
-                if (f_diff > S::zero() && f_diff < S::from_literal(FUNCTION_TOLERANCE))
-                    || step_norminf < S::from_literal(STEP_TOLERANCE)
-                {
+                if lm_converged(f_diff, step_norminf) {
                     termination = Some(LmTermination::Converged);
                 }
                 continue;
             }
 
             // `:1585-1598`.
-            damping.lambda = damping.lambda_vee * damping.lambda;
-            damping.lambda_vee *= S::from_literal(VEE_FACTOR);
+            damping.escalate();
             let Some(state) = ba.frame_states.get_mut(&t_ns) else {
                 // Unreachable, as above.
                 return Err(EstimatorError::PreviousStateMissing { t_ns });
@@ -357,7 +347,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             state.restore();
             it += 1;
             backtrack += 1;
-            if damping.lambda > damping.max_lambda {
+            if damping.exhausted() {
                 termination = Some(LmTermination::MaxDamping);
             }
         }
