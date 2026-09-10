@@ -43,12 +43,12 @@
 //! `par_chunks` with an ordered merge does not.
 
 mod abs_qr;
+mod dense_hb;
 mod landmark_block;
 mod reduce;
 
-pub use abs_qr::{
-    DenseHbWorkspace, ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions,
-};
+pub use abs_qr::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
+pub use dense_hb::DenseHbWorkspace;
 pub use landmark_block::{
     DenseHbScratch, LandmarkBlock, LandmarkBlockOptions, LandmarkBlockState, compute_error_weight,
 };
