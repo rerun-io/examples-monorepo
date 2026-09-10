@@ -1,1 +1,1 @@
-{"config.vio_max_iterations": 4}
+{"config.vio_max_iterations": 4, "port.redetect_survivor_ratio": 0.5}

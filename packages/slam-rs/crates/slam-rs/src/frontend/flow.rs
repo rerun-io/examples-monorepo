@@ -498,6 +498,10 @@ pub struct FrameToFrameOpticalFlow<
     cells: Vec<Vec<i32>>,
     /// `last_keypoint_id` (`optical_flow.h:174`), the global landmark id space.
     last_keypoint_id: u64,
+    /// Camera 0's keypoint count as the last **detecting** frameset left it,
+    /// which is what `port.redetect_survivor_ratio` measures survivors against
+    /// (D75). Zero until one frameset has detected.
+    last_detect_count: usize,
     /// `last_keypoint_id` as it stood before the last **committed** frameset,
     /// which is what makes "how many of these keypoints are new" answerable
     /// after the fact rather than only inside the call that produced them.
@@ -592,6 +596,7 @@ struct FrameState {
     cameras: Vec<Keypoints>,
     cells: Vec<Vec<i32>>,
     last_keypoint_id: u64,
+    last_detect_count: usize,
 }
 
 impl<P: Pattern> FrameToFrameOpticalFlow<P, CpuPyramidBuilder, CpuPatchTracker<P>> {
@@ -888,6 +893,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             },
             last_keypoint_id: 0,
             last_keypoint_id_before_frame: 0,
+            last_detect_count: 0,
             t_ns: None,
             frame_counter: 0,
             config,
@@ -1108,6 +1114,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         snapshot.cameras.clone_from(&self.frame.cameras);
         snapshot.cells.clone_from(&self.cells);
         snapshot.last_keypoint_id = self.last_keypoint_id;
+        snapshot.last_detect_count = self.last_detect_count;
 
         let outcome: Result<(), FrontendError> = self.run_passes(images, prediction, masks);
 
@@ -1127,6 +1134,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
                 self.frame.cameras.clone_from(&snapshot.cameras);
                 self.cells.clone_from(&snapshot.cells);
                 self.last_keypoint_id = snapshot.last_keypoint_id;
+                self.last_detect_count = snapshot.last_detect_count;
             }
         }
         self.snapshot = snapshot;
@@ -1176,7 +1184,10 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             }
         }
 
-        self.add_points(images)?;
+        if self.should_detect() {
+            self.add_points(images)?;
+            self.last_detect_count = self.frame.cameras[0].len();
+        }
         let mark: std::time::Instant = std::time::Instant::now();
         self.filter_points();
         self.timings.stereo_ns += duration_ns(mark);
@@ -1505,6 +1516,45 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             }
             y += cell;
         }
+    }
+
+    /// Whether this frameset runs [`FrameToFrameOpticalFlow::add_points`] at
+    /// all (D75).
+    ///
+    /// basalt detects on every frameset, and `port.redetect_survivor_ratio` at
+    /// its `0` default keeps that exactly — this returns `true` before anything
+    /// else is read. Above zero the frameset detects only once camera 0 has
+    /// fallen below that fraction of the count the last detecting frameset left
+    /// it with, which is cuVSLAM's `SelectKeyframe` rule (survivors under 41 %
+    /// of the last detection) rather than a fixed target count, so it needs no
+    /// per-rig tuning.
+    ///
+    /// **The whole frameset is gated, on camera 0 alone.** `add_points` is one
+    /// unit — camera 0's detection, the cross-camera match that carries its new
+    /// keypoints into cameras 1..n, and the non-overlap detection on those same
+    /// cameras — so gating it per camera would leave a rig half detected, with
+    /// camera 0's new ids never matched onward. Camera 0 is also the only camera
+    /// the keyframe vote reads (`estimator/mod.rs`, D21), so its survivor count
+    /// is the state this decision is about.
+    ///
+    /// Pure in the frameset's own state: this frame's camera-0 count, the count
+    /// the last detecting frameset ended with, and a config field. No timer, no
+    /// frame index, nothing the estimator fed back, so a replay repeats it.
+    fn should_detect(&self) -> bool {
+        let ratio: f32 = self.config.port_redetect_survivor_ratio;
+        // A ratio that is not a positive number is the knob switched off, NaN
+        // included: `x < NaN` is false, which would stop detection for good.
+        if !ratio.is_finite() || ratio <= 0.0 {
+            return true;
+        }
+        // Nothing has been detected yet, so there is no survivor fraction to
+        // take: the first frameset of a run, and the first after one that was
+        // refused before it detected.
+        if self.last_detect_count == 0 {
+            return true;
+        }
+        let survivors: f32 = self.frame.cameras[0].len() as f32;
+        survivors < ratio * self.last_detect_count as f32
     }
 
     /// `addPoints` (`:637-666`): detect on camera 0, match onward, then detect

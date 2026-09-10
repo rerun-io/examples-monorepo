@@ -123,6 +123,107 @@ fn the_keypoint_watermark_describes_the_committed_frame() {
     assert_eq!(flow.last_keypoint_id_before_frame(), after_first);
 }
 
+/// A frontend on the synthetic rig with the redetect gate set.
+fn gated_frontend(cameras: usize, ratio: f32) -> FrameToFrameOpticalFlow<Pattern51> {
+    let gated: VioConfig = VioConfig {
+        port_redetect_survivor_ratio: ratio,
+        ..config()
+    };
+    FrameToFrameOpticalFlow::new(gated, &rig(cameras), FrontendOptions::default()).unwrap()
+}
+
+/// The gate's default is basalt's schedule (D75): `addPoints` on every
+/// frameset, so every frameset hands out ids.
+///
+/// This is the control the two tests below are read against — without it, a
+/// gated run that detects rarely could not be told from a rig that has nothing
+/// left to detect.
+#[test]
+fn the_default_config_detects_on_every_frameset() {
+    assert_eq!(VioConfig::default().port_redetect_survivor_ratio, 0.0);
+    let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
+    let mut watermark: u64 = 0;
+    for shift in 0..6 {
+        let images: [ImageU16; 2] = [dotted_image(shift), dotted_image(shift)];
+        flow.process_frame(i64::from(shift), &images, &PosePrediction::default(), &[])
+            .unwrap();
+        assert!(
+            flow.last_keypoint_id() > watermark,
+            "frameset {shift} detected nothing"
+        );
+        watermark = flow.last_keypoint_id();
+    }
+}
+
+/// A ratio nothing can fall below detects once and then never again, which is
+/// what says the gate is really the only thing deciding.
+#[test]
+fn a_survivor_ratio_nothing_reaches_detects_only_on_the_first_frameset() {
+    let mut flow: FrameToFrameOpticalFlow<Pattern51> = gated_frontend(2, 1e-6);
+    let images: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
+    flow.process_frame(0, &images, &PosePrediction::default(), &[])
+        .unwrap();
+    let after_first: u64 = flow.last_keypoint_id();
+    assert!(after_first > 0, "the first frameset must detect");
+
+    for shift in 1..6 {
+        let moved: [ImageU16; 2] = [dotted_image(shift), dotted_image(shift)];
+        flow.process_frame(i64::from(shift), &moved, &PosePrediction::default(), &[])
+            .unwrap();
+        assert_eq!(
+            flow.last_keypoint_id(),
+            after_first,
+            "frameset {shift} detected while gated"
+        );
+    }
+}
+
+/// The gate is one decision for the whole rig, never a camera at a time: a
+/// skipped frameset leaves camera 1 with no new ids either, because the
+/// cross-camera match and the non-overlap pass are both inside `addPoints`.
+#[test]
+fn a_skipped_frameset_leaves_no_camera_detected() {
+    let mut flow: FrameToFrameOpticalFlow<Pattern51> = gated_frontend(3, 1e-6);
+    let images: [ImageU16; 3] = [dotted_image(0), dotted_image(0), dotted_image(0)];
+    flow.process_frame(0, &images, &PosePrediction::default(), &[])
+        .unwrap();
+    let mut known: Vec<Vec<KeypointId>> = flow
+        .frame()
+        .cameras
+        .iter()
+        .map(|camera| camera.ids.clone())
+        .collect();
+    assert!(known.iter().all(|ids| !ids.is_empty()));
+
+    for shift in 1..4 {
+        let moved: [ImageU16; 3] = [
+            dotted_image(shift),
+            dotted_image(shift),
+            dotted_image(shift),
+        ];
+        flow.process_frame(i64::from(shift), &moved, &PosePrediction::default(), &[])
+            .unwrap();
+        for (camera, ids) in flow.frame().cameras.iter().enumerate() {
+            let fresh: Vec<KeypointId> = ids
+                .ids
+                .iter()
+                .filter(|id| !known[camera].contains(id))
+                .copied()
+                .collect();
+            assert!(
+                fresh.is_empty(),
+                "camera {camera} gained {fresh:?} on a skipped frameset"
+            );
+        }
+        known = flow
+            .frame()
+            .cameras
+            .iter()
+            .map(|camera| camera.ids.clone())
+            .collect();
+    }
+}
+
 /// `updateCellCounts` / `addKeypoint` / `removeKeypoint` (`:707-749`) keep
 /// `cells` equal to the number of keypoints in each grid cell — except where
 /// `addKeypoints` deliberately double-counts, which cannot happen on camera 0.

@@ -643,6 +643,19 @@ def d60_failures(
     return failures
 
 
+PORT_CONFIG_KEYS: frozenset[str] = frozenset({"port.redetect_survivor_ratio"})
+"""Overlay keys the port adds to basalt's document, which no vendored config carries.
+
+``configs/*.json`` are the files the C++ reference runs read, key for key
+(``tests/test_cpp_reference.py``), so a knob basalt has no field for is never
+written into them: it is spelled ``port.`` instead of ``config.``, an overlay
+inserts it, and :class:`slam_rs._core.VioConfig` models it with a default that
+reproduces basalt's behaviour for every path that does not. Listing them here
+keeps :func:`profiled_config_text`'s typo check: a key that is neither in the
+base document nor in this set is still a ``KeyError``.
+"""
+
+
 def profiled_config_text(path: Path, profile: str = "reference", profiles: Path = MANIFEST_PATH.parent / "configs/profiles") -> str:
     """Read a config and apply a named overlay; empty overlays preserve its text.
 
@@ -655,7 +668,8 @@ def profiled_config_text(path: Path, profile: str = "reference", profiles: Path 
         Config JSON with the overlay applied.
 
     Raises:
-        KeyError: If an overlay key is absent from the base value0 namespace.
+        KeyError: If an overlay key is neither in the base value0 namespace nor
+            one of :data:`PORT_CONFIG_KEYS`.
     """
     text: str = path.read_text()
     overlay: dict = json.loads((profiles / f"{profile}.json").read_text())
@@ -664,7 +678,7 @@ def profiled_config_text(path: Path, profile: str = "reference", profiles: Path 
     document: dict = json.loads(text)
     values: dict = document["value0"]
     for key in overlay:
-        if key not in values:
+        if key not in values and key not in PORT_CONFIG_KEYS:
             raise KeyError(key)
     values.update(overlay)
     return json.dumps(document)
