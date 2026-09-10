@@ -1429,6 +1429,15 @@ two-camera phase and 52 in the four-camera one, so D77's queue ceiling flushes
 where the chosen shape does not. Launching the tail ahead of the matches rather
 than behind them loses by less and consistently, on all four cells.
 
+The speculated launches take no exemption from D77's rule. `launch_selection`'s
+three kernels, its key allocation and the frame upload the pyramid did not
+publish each reserve their own task before submitting it, so the selection at
+the top of the frameset is charged to the device's budget where it happens
+rather than after the fact — which is what makes the task counts above the ones
+the ceiling actually sees. A carried read still drains the device it read from:
+`collect` resets the count for both stages' buffers, and a `take_cells` that was
+handed bytes makes no read and drains nothing.
+
 ### What a read is worth, revised
 
 D77 measured 0.115 ms for one *added* empty read and this lever recovers about
