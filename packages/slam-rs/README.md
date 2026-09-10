@@ -276,7 +276,7 @@ pixi run -e slam-rs-dev --frozen lint               # ruff
 pixi run -e slam-rs-dev --frozen typecheck          # pyrefly
 pixi run -e slam-rs-dev --frozen deadcode           # vulture
 pixi run -e slam-rs-dev --frozen slam-rs-clippy     # cargo clippy -D warnings
-pixi run -e slam-rs-dev --frozen slam-rs-rust-test  # cargo test --workspace
+pixi run -e slam-rs-dev --frozen slam-rs-rust-test  # cargo test --workspace (default features)
 pixi run -e slam-rs-dev --frozen slam-rs-version    # print the core version
 ```
 
@@ -285,8 +285,10 @@ declares, and from `slam-rs-osx-dev` on the Mac, where Metal is the backend:
 
 ```bash
 pixi run -e slam-rs-dev     --frozen slam-rs-wgpu-clippy  # the portable lane compiles and is warning-clean, tests included
-pixi run -e slam-rs-dev     --frozen slam-rs-wgpu-test    # the same kernels, on this host's GPU
-pixi run -e slam-rs-osx-dev --frozen slam-rs-wgpu-test    # the same kernels through Metal
+pixi run -e slam-rs-dev     --frozen slam-rs-wgpu-test    # workspace tests with wgpu; five nonempty GPU binary checks
+pixi run -e slam-rs-dev     --frozen slam-rs-wgpu-doc     # rustdoc with warnings denied
+pixi run -e slam-rs-osx-dev --frozen slam-rs-wgpu-doc     # the same strict docs through the Mac lane
+pixi run -e slam-rs-osx-dev --frozen slam-rs-wgpu-test    # workspace tests with wgpu through Metal
 ```
 
 The oracle lanes are the fixtures the C++ fork itself produced — pyramid, camera,

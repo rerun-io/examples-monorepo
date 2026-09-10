@@ -2497,9 +2497,14 @@ description = "Lint the portable wgpu lane, tests included, with warnings denied
 # CubeCL pool and every test in one binary shares one client; cargo runs
 # binaries one after another, which is what keeps both deterministic.
 [feature.slam-rs.tasks.slam-rs-wgpu-test]
-cmd = "cargo test -p slam-rs --features gpu-wgpu --test gpu_kernels -- --list | grep -c ': test' && cargo test -p slam-rs --features gpu-wgpu --test gpu_detect -- --list | grep -c ': test' && cargo test -p slam-rs --features gpu-wgpu --test gpu_kernels --test gpu_detect"
+cmd = "cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_kernels -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_detect -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_seam_bench -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test frame_allocations -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_pool -- --list | grep -c ': test' && cargo test --locked --offline --workspace --features slam-rs/gpu-wgpu"
 cwd = "packages/slam-rs"
-description = "Run the per-kernel tolerance suite through wgpu on this host's Vulkan adapter"
+description = "Run workspace tests with wgpu, checking that all five GPU integration binaries contain tests"
+
+[feature.slam-rs.tasks.slam-rs-wgpu-doc]
+cmd = 'RUSTDOCFLAGS="-D warnings" cargo doc --locked --offline --no-deps -p slam-rs -p slam-rs-py --features slam-rs/gpu-wgpu'
+cwd = "packages/slam-rs"
+description = "Build wgpu Rust documentation with warnings denied"
 
 # The same core on the portable lane, for measuring it: `--gpu` then selects
 # wgpu, the only GPU runtime (D70).

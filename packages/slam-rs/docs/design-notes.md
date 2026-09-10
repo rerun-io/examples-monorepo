@@ -329,19 +329,21 @@ The default build remains CPU-only.
 
 ```bash
 pixi run -e slam-rs-dev --frozen slam-rs-wgpu-clippy     # the portable lane compiles and is warning-clean, tests included
-pixi run -e slam-rs-dev --frozen slam-rs-wgpu-test       # the same kernels, on this host's GPU
+pixi run -e slam-rs-dev --frozen slam-rs-wgpu-test       # workspace tests with wgpu; five nonempty GPU binary checks
+pixi run -e slam-rs-dev --frozen slam-rs-wgpu-doc        # rustdoc with warnings denied
 pixi run -e slam-rs-dev --frozen slam-rs-wgpu-build      # a core whose `--gpu` is wgpu
 ```
 
 `slam-rs-clippy` lints the default features; `slam-rs-wgpu-clippy` checks the
 GPU code and its tests with warnings denied.
 
-On macOS the same three tasks run from the mac lane's environment, which is
+On macOS the same four tasks run from the mac lane's environment, which is
 where that platform's `slam-rs` features are solved, and Metal is the backend
 `AutoGraphicsApi` picks there:
 
 ```bash
-pixi run -e slam-rs-osx-dev --frozen slam-rs-wgpu-test   # the same kernels through Metal
+pixi run -e slam-rs-osx-dev --frozen slam-rs-wgpu-doc    # rustdoc with warnings denied
+pixi run -e slam-rs-osx-dev --frozen slam-rs-wgpu-test   # workspace tests with wgpu through Metal
 ```
 
 ## The portable lane, and the two silent failures
@@ -844,7 +846,7 @@ the same physical point across lanes. The scalar correction closes the measured
 miss; it does not make every frontend value closer to CPU.
 
 All **20 GPU kernel tests** and GPU all-target Clippy pass. The MIO10 CPU bench
-CSV is byte-identical. The four GPU bench trajectories change from pose 4, with
+CSV is byte-identical. The five GPU bench trajectories change from pose 4, with
 maximum position shifts of 0.29–2.35 mm and GT ATE changes below 0.0011 cm:
 
 | Clip | Before GT ATE (cm) | After GT ATE (cm) |
