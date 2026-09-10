@@ -25,21 +25,8 @@
 //! `H.diagonal() * lambda` of the dense solve instead (`:1415-1417`), which is
 //! the estimator's business.
 //!
-//! **Determinism.** basalt uses `tbb::parallel_deterministic_reduce` at four
-//! sites where the summation order changes the answer
-//! (`linearization_abs_qr.cpp:262`, `:307`, `:354`, `:550`). Decision D31 asked
-//! for a fixed order at each; what it did not say is *which*, and a sequential
-//! fold is the wrong one. `parallel_deterministic_reduce` over
-//! `blocked_range(0, n)` with grainsize 1 splits at `begin + size / 2` until a
-//! range holds one element and then joins up a balanced tree, so four elements
-//! reduce as `(x0 + x1) + (x2 + x3)`. In `f32` with `[2²⁴, 1, 1, 1]` that is
-//! `16777218` where a fold gives `16777216`. The `reduce` module reproduces
-//! the deterministic fixed-shape tree, not a left fold. All four sites go
-//! through it: [`LinearizationAbsQR::linearize_problem`],
-//! [`LinearizationAbsQR::back_substitute`] and
-//! [`LinearizationAbsQR::get_dense_h_b`] — the fourth, `getJp_diag2` (`:354`),
-//! is not ported (D68). A rayon version has to reproduce the same tree;
-//! `par_chunks` with an ordered merge does not.
+//! **Determinism.** Reductions fold in landmark order, independent of the
+//! Rayon thread count. Repeated inputs produce bit-identical outputs.
 
 mod abs_qr;
 mod dense_hb;
@@ -107,14 +94,7 @@ pub fn reflect_column<S: LieScalar>(
     let mut work: Vec<S> = vec![S::zero(); storage.ncols()];
     // `performQRHouseholder`'s own reduction: the landmark block's `storage` is
     // `Eigen::RowMajor`, so the column is strided (see `crate::eigen::qr`).
-    let (tau, _beta) = crate::eigen::qr::make_householder(
-        storage,
-        col,
-        start,
-        len,
-        crate::eigen::qr::ColumnRedux::Strided,
-        &mut essential,
-    );
+    let (tau, _beta) = crate::eigen::qr::make_householder(storage, col, start, len, &mut essential);
     crate::eigen::qr::apply_householder_on_the_left(
         storage, start, len, &essential, tau, &mut work,
     );

@@ -12,8 +12,8 @@ use nalgebra::{DMatrix, DVector, Matrix2x3, Matrix2x6, Matrix3, Vector2, Vector3
 use crate::ba_base::{LinearizePointOut, linearize_point};
 use crate::camera::CameraEnum;
 use crate::eigen::qr::{
-    ColumnRedux, JacobiRotation, apply_householder_on_the_left, apply_rotation_on_the_left,
-    make_givens, make_householder,
+    JacobiRotation, apply_householder_on_the_left, apply_rotation_on_the_left, make_givens,
+    make_householder,
 };
 use crate::landmark::Landmark;
 use crate::lie::{LieScalar, c};
@@ -538,7 +538,6 @@ impl<S: LieScalar> LandmarkBlock<S> {
                 remaining_rows,
                 // `storage` stands for an `Eigen::RowMajor` matrix (`:530`), so
                 // its columns are strided and reduce sequentially.
-                ColumnRedux::Strided,
                 &mut self.work_essential,
             );
             apply_householder_on_the_left(

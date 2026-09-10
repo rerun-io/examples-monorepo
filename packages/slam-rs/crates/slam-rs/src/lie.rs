@@ -87,39 +87,6 @@ pub trait LieScalar: RealField + Copy {
     /// wins the `score < min_score` test.
     fn largest() -> Self;
 
-    /// Eigen's summation order for a **three**-coefficient reduction, such as
-    /// `v.head<3>().squaredNorm()`.
-    ///
-    /// The order is decided by `redux_traits` (`Eigen/src/Core/Redux.h:29-67`)
-    /// comparing `find_best_packet<Scalar, 3>` against the three coefficients,
-    /// so it is **not** the same in the two precisions:
-    ///
-    /// * `f64` — `Packet2d` is two doubles, so `LinearVectorizedTraversal`
-    ///   reduces one packet and folds the remainder in: `(a + b) + c`.
-    /// * `f32` — `Packet4f` is four floats, wider than the expression, so the
-    ///   aligned part is empty and the scalar `redux_novec_unroller` runs, which
-    ///   splits at `Length / 2` (`Redux.h:98-108`): `a + (b + c)`.
-    ///
-    /// Its one production caller left is the keyframe-eviction baseline in
-    /// `crate::estimator`: S33 replaced `head<3>().norm()` at the residual and
-    /// landmark sites with `Vector3::norm`, and this is what remains of the
-    /// three-coefficient tree.
-    ///
-    /// A sweep of 200,000 random vectors through the fork's own Eigen agrees
-    /// with exactly one order in each precision on every discriminating case
-    /// (48,359 of 200,000 in `f64`, 48,336 in `f32`) and with the other on none.
-    /// The packet widths come from the fork's build flags, where a trailing
-    /// `-march=nocona` overrides the earlier `-march=native` — so the reference
-    /// binary is SSE3, on every host, and this is not a property of the machine
-    /// the port happens to run on. The fixture `lmdb/lmdb_oracle.json` pins both
-    /// orders bit for bit.
-    ///
-    /// It matters: with the wrong order in `f64`, a landmark exactly 1/3 m away
-    /// normalises to `2.9999999999999996` instead of `3.0` and basalt's
-    /// `inv_dist < 3` gate (`sqrt_keypoint_vio.cpp:534`) accepts a landmark C++
-    /// rejects.
-    fn eigen_redux3(a: Self, b: Self, c: Self) -> Self;
-
     /// SO(3)'s exponential map at this precision, `kornia_algebra::lie::SO3F32::exp`
     /// or `SO3F64::exp`, in and out in basalt's `[qx, qy, qz, qw]` order.
     ///
@@ -185,11 +152,6 @@ impl LieScalar for f64 {
         Self::MAX
     }
 
-    /// One `Packet2d` plus the scalar remainder.
-    fn eigen_redux3(a: Self, b: Self, c: Self) -> Self {
-        (a + b) + c
-    }
-
     fn so3_exp(omega: &[Self; 3]) -> [Self; 4] {
         SO3F64::exp(Vec3F64::from_array(*omega)).to_array()
     }
@@ -234,11 +196,6 @@ impl LieScalar for f32 {
 
     fn largest() -> Self {
         Self::MAX
-    }
-
-    /// `Packet4f` is wider than three floats, so the scalar unroller runs.
-    fn eigen_redux3(a: Self, b: Self, c: Self) -> Self {
-        a + (b + c)
     }
 
     fn so3_exp(omega: &[Self; 3]) -> [Self; 4] {

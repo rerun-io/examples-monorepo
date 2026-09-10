@@ -1,56 +1,3 @@
-//! Eigen's Householder reflector and Givens rotation, ported coefficient for
-//! coefficient over a dense `DMatrix`.
-//!
-//! These are the two primitives the landmark block is built from
-//! (`landmark_block_abs_dynamic.hpp:429-454`, `:216-250`). nalgebra ships both
-//! (`linalg::householder::reflection_axis_mut`, `linalg::givens::GivensRotation`)
-//! and the ecosystem dossier maps them one-for-one onto the Eigen calls
-//! (rust-ecosystem-gaps §4), but neither is arithmetically identical:
-//!
-//! * `reflection_axis_mut` normalises the axis to unit length and returns the
-//!   *signed norm*, i.e. it builds `H = I - 2 v vᵀ` with `‖v‖ = 1`. Eigen's
-//!   `makeHouseholder` builds `H = I - tau v vᵀ` with `v = [1, essential]`, and
-//!   the essential part comes out of the division `tail / (c0 - beta)`
-//!   (`Householder.h:83`). The two are the same reflection in exact arithmetic
-//!   and different in the last bits, and the reflection is applied to the whole
-//!   block — the pose Jacobians and the residual column — so the difference
-//!   propagates into `Q₂ᵀJ_p`, into `H`, and from there into the increment.
-//! * `GivensRotation::cancel_y` computes `c = x/‖(x,y)‖`, `s = -y/‖(x,y)‖` from
-//!   one hypot; Eigen's real `makeGivens` (`Jacobi.h:205-233`) branches on
-//!   `|p| > |q|` and divides the smaller by the larger first, which is both more
-//!   accurate and a different rounding.
-//!
-//! Decision D44 says an elementary operation whose rounding can reach a
-//! threshold comparison is ported in Eigen's operation order rather than
-//! delegated to nalgebra, and here the whole point of the fixture is that these
-//! numbers reach `det(Q1Jl) == 0` and the Levenberg-Marquardt accept/reject
-//! test. So: **Eigen's arithmetic, ported; nalgebra's versions are not called.**
-//!
-//! **One reduction order is the whole of decision D47 again, and it is not the
-//! same at every call site.** `makeHouseholder` needs `tail.squaredNorm()` over
-//! a *column* of the matrix it is called on, and which `Redux.h` traversal that
-//! takes depends on the **C++** matrix's storage order:
-//!
-//! * the landmark block's `storage` is `Eigen::RowMajor`
-//!   (`landmark_block_abs_dynamic.hpp:530`), so its columns have an inner stride
-//!   of `num_cols`, carry no `PacketAccessBit`, and reduce through
-//!   `LinearTraversal` — a strictly sequential left fold (`Redux.h:236-244`) —
-//!   in **both** precisions;
-//! * basalt's marginalization matrices are plain `Eigen::Matrix<Scalar,
-//!   Dynamic, Dynamic>`, which is column-major, so a column segment is
-//!   *contiguous* and reduces through `LinearVectorizedTraversal`
-//!   (`Redux.h:274-325`): two packet accumulators, `predux` to fold the lanes,
-//!   then a scalar tail.
-//!
-//! The two disagree in the last bits, and the result reaches
-//! `|beta| > sqrt(epsilon)` (`marg_helper.cpp:284`) and
-//! `ColPivHouseholderQR::rank()`. [`ColumnRedux`] is therefore a parameter of
-//! [`make_householder`], named at every call site, and
-//! [`contiguous_squared_norm`] is the vectorised order. The measured agreement
-//! against the fork's own Eigen, and against every wrong order that was tried,
-//! is in the package README under "Marginalization, and the two places a rank
-//! decision is load-bearing".
-
 use nalgebra::{DMatrix, DVector};
 
 use crate::lie::LieScalar;
@@ -87,94 +34,18 @@ pub(crate) struct BlockSpan {
     pub(crate) cols: usize,
 }
 
-/// Which `Redux.h` traversal a column segment's `squaredNorm()` takes, which is
-/// decided by the **C++** matrix's storage order and not by nalgebra's.
-///
-/// Every `DMatrix` in this port is column-major whatever it stands for, so the
-/// distinction cannot be read off the Rust type; it has to be named where the
-/// reduction happens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ColumnRedux {
-    /// The C++ matrix is `Eigen::RowMajor`, so the column has an inner stride of
-    /// `cols`, no `PacketAccessBit`, and `LinearTraversal` folds it left to
-    /// right (`Redux.h:236-244`). The landmark block
-    /// (`landmark_block_abs_dynamic.hpp:530`).
-    Strided,
-    /// The C++ matrix is column-major, so the segment is contiguous and
-    /// `LinearVectorizedTraversal` runs (`Redux.h:274-325`). basalt's
-    /// marginalization matrices — `Q2Jp` in `marg_helper.cpp` and `m_qr` in
-    /// `ColPivHouseholderQR`.
-    ///
-    /// Since S33 both variants sum in an order that is nobody's Eigen: this one
-    /// is nalgebra's dot product ([`contiguous_squared_norm`]) and the other is
-    /// a left fold. They still differ from each other, and which one a call site
-    /// takes is still a property of the C++ matrix's storage order, so the
-    /// distinction is kept where basalt made it. Collapsing it is a separate
-    /// change with its own rank-boundary evidence.
-    Contiguous,
-}
-
-/// `squaredNorm()` over the **contiguous** column segment
-/// `storage.col(col).segment(start, len)`.
-///
-/// nalgebra's `norm_squared` over a view, which is one dot product of the
-/// segment with itself and allocates nothing. Until S33 this was Eigen's own
-/// vectorised `redux` tree, written out packet by packet, because `beta` is
-/// compared against `sqrt(epsilon)` in the marginalization QR and D44 wanted
-/// that comparison to land where the C++'s did; the package README records the
-/// shape sweep that pinned it. The rank *policy* is unchanged — see
-/// [`ColumnRedux`] and [`make_householder`] — only the association inside the
-/// sum.
-pub(crate) fn contiguous_squared_norm<S: LieScalar>(
-    storage: &DMatrix<S>,
-    col: usize,
-    start: usize,
-    len: usize,
-) -> S {
-    storage.column(col).rows(start, len).norm_squared()
-}
-
-/// `makeHouseholder` (`Householder.h:63-86`), real scalars, over
-/// `storage.col(col).segment(start, len)`.
-///
-/// Writes the `len - 1` coefficients of the essential part into `essential` and
-/// returns `(tau, beta)`. `beta` is what the reflected column's first
-/// coefficient would be. basalt's landmark QR names it and drops it
-/// (`:448-450`), because [`apply_householder_on_the_left`] recomputes the whole
-/// column; `crate::marg::helper` keeps it, and that is the rank test below.
-///
-/// The `tailSqNorm <= tol` branch (`:76-79`) is the already-reduced column:
-/// `tau = 0` makes the reflection the identity, which is what
-/// [`apply_householder_on_the_left`] then skips.
-///
-/// `redux` names which reduction `tail.squaredNorm()` (`:72`) takes; see the
-/// module docs and [`ColumnRedux`]. Getting it wrong moves `beta`, and `beta`
-/// is what the marginalization QR compares against `sqrt(epsilon)`.
+/// Construct a reflection from a column segment using a plain squared norm.
 pub(crate) fn make_householder<S: LieScalar>(
     storage: &DMatrix<S>,
     col: usize,
     start: usize,
     len: usize,
-    redux: ColumnRedux,
     essential: &mut [S],
 ) -> (S, S) {
-    // `tail.squaredNorm()` (`:72`) over `segment(start + 1, len - 1)`. The
-    // `size() == 1` guard of `:72` is the empty fold / zero length here, and
-    // `saturating_sub` and the empty-sum rule agree that a tail of no
-    // coefficients is zero.
-    let tail_sq_norm: S = match redux {
-        ColumnRedux::Strided => {
-            let mut acc: S = S::zero();
-            for i in 1..len {
-                let v: S = storage[(start + i, col)];
-                acc += v * v;
-            }
-            acc
-        }
-        ColumnRedux::Contiguous => {
-            contiguous_squared_norm(storage, col, start + 1, len.saturating_sub(1))
-        }
-    };
+    let tail_sq_norm: S = storage
+        .column(col)
+        .rows(start + 1, len.saturating_sub(1))
+        .norm_squared();
     reflector_from_tail(storage[(start, col)], tail_sq_norm, len, essential, |i| {
         storage[(start + 1 + i, col)]
     })
@@ -542,7 +413,7 @@ mod tests {
             }
             let mut essential: Vec<f64> = vec![0.0; len - 1];
             let (tau, beta) =
-                make_householder(&storage, 0, 0, len, ColumnRedux::Strided, &mut essential);
+                make_householder(&storage, 0, 0, len, &mut essential);
             let h: DMatrix<f64> = dense_reflection(len, &essential, tau);
             let reflected: nalgebra::DVector<f64> =
                 h * nalgebra::DVector::from_column_slice(&values);
@@ -570,7 +441,7 @@ mod tests {
             }
             let mut essential: Vec<f64> = vec![0.0; len - 1];
             let (tau, _) =
-                make_householder(&storage, 0, 0, len, ColumnRedux::Strided, &mut essential);
+                make_householder(&storage, 0, 0, len, &mut essential);
             let dense: DMatrix<f64> = dense_reflection(len, &essential, tau) * storage.clone();
             let mut work: Vec<f64> = vec![0.0; cols];
             apply_householder_on_the_left(&mut storage, 0, len, &essential, tau, &mut work);
@@ -617,7 +488,6 @@ mod tests {
                 col_start,
                 span.row_start,
                 span.rows,
-                ColumnRedux::Strided,
                 &mut essential,
             );
 
@@ -697,7 +567,6 @@ mod tests {
                 1,
                 span.row_start,
                 span.rows,
-                ColumnRedux::Strided,
                 &mut essential,
             );
             let mut work: Vec<f64> = vec![0.0; span.cols];

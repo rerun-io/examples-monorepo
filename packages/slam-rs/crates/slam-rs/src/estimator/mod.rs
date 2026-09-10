@@ -1521,7 +1521,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                     // three-coefficient reduction, whose order differs between
                     // the precisions (D47).
                     let t: Vector3<S> = t_0_1.translation;
-                    let baseline2: S = S::eigen_redux3(t[0] * t[0], t[1] * t[1], t[2] * t[2]);
+                    let baseline2: S = t[0] * t[0] + t[1] * t[1] + t[2] * t[2];
                     if baseline2 < min_triang_distance2 {
                         continue;
                     }

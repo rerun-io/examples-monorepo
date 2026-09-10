@@ -25,7 +25,7 @@ use std::collections::BTreeSet;
 use nalgebra::{DMatrix, DVector};
 
 use crate::eigen::qr::{
-    BlockSpan, ColumnRedux, apply_householder_on_the_left_block, apply_householder_on_the_left_vec,
+    BlockSpan, apply_householder_on_the_left_block, apply_householder_on_the_left_vec,
     make_householder,
 };
 use crate::lie::LieScalar;
@@ -148,14 +148,7 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
         // reaches the `|beta| > sqrt(epsilon)` test three lines down: on the
         // review's `9x2` problem the sequential fold accepts a column `f32`
         // Eigen rejects and rejects one `f64` Eigen accepts.
-        let (h_coeff, beta) = make_householder(
-            &q2jp,
-            k,
-            base,
-            remaining_rows,
-            ColumnRedux::Contiguous,
-            &mut essential,
-        );
+        let (h_coeff, beta) = make_householder(&q2jp, k, base, remaining_rows, &mut essential);
 
         if beta.abs() > rank_threshold {
             // `:302`.
