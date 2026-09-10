@@ -1156,7 +1156,7 @@ pub(super) fn launch_subsample<R: Runtime>(
     target: super::pyramid::Level,
 ) {
     let (cubes, units) = tile_2d(target.width, target.height);
-    super::seam::launch();
+    super::seam::launch(client);
     unsafe {
         subsample_kernel::launch_unchecked::<R>(
             client,
@@ -1214,7 +1214,7 @@ pub(super) fn launch_patch_build<R: Runtime>(
     shape: PatchShape,
     bases: PositionBases,
 ) {
-    super::seam::launch();
+    super::seam::launch(client);
     unsafe {
         patch_build_kernel::launch_unchecked::<R>(
             client,
@@ -1257,7 +1257,7 @@ pub(super) fn launch_klt<R: Runtime>(
     max_iterations: usize,
     check_guess_bounds: bool,
 ) {
-    super::seam::launch();
+    super::seam::launch(client);
     unsafe {
         klt_kernel::launch_unchecked::<R>(
             client,
@@ -1321,7 +1321,7 @@ pub(super) fn launch_probe<N: Numeric, R: Runtime>(
     count: usize,
 ) {
     let (cubes, units) = linear_1d(count);
-    super::seam::launch();
+    super::seam::launch(client);
     unsafe {
         probe_kernel::launch::<N, R>(
             client,
@@ -1347,7 +1347,7 @@ pub(super) fn launch_copy_level0<R: Runtime>(
     count: usize,
 ) {
     let (cubes, units) = linear_1d(count);
-    super::seam::launch();
+    super::seam::launch(client);
     unsafe {
         probe_kernel::launch_unchecked::<u16, R>(
             client,
@@ -1371,7 +1371,7 @@ pub(super) fn launch_prepare_backward<R: Runtime>(
     bases: PositionBases,
 ) {
     let (cubes, units) = linear_1d(count);
-    super::seam::launch();
+    super::seam::launch(client);
     unsafe {
         prepare_backward_kernel::launch_unchecked::<R>(
             client,
@@ -1400,7 +1400,7 @@ pub(super) fn launch_finish<R: Runtime>(
     max_recovered_dist2: f32,
 ) {
     let (cubes, units) = linear_1d(count);
-    super::seam::launch();
+    super::seam::launch(client);
     unsafe {
         finish_kernel::launch_unchecked::<R>(
             client,
@@ -1590,7 +1590,7 @@ pub(super) fn launch_fast_score<R: Runtime>(
     margin: usize,
 ) {
     let (cubes, units) = tile_2d(width, height);
-    super::seam::launch();
+    super::seam::launch(client);
     unsafe {
         fast_score_kernel::launch_unchecked::<R>(
             client,
@@ -1619,7 +1619,7 @@ pub(super) fn launch_fast_localmax<R: Runtime>(
     use_filter: bool,
 ) {
     let (cubes, units) = tile_2d(width, height);
-    super::seam::launch();
+    super::seam::launch(client);
     unsafe {
         fast_localmax_kernel::launch_unchecked::<R>(
             client,
@@ -1681,7 +1681,7 @@ pub(super) fn launch_fast_mask<R: Runtime>(
     words: usize,
 ) {
     let (cubes, units) = tile_2d(words, height);
-    super::seam::launch();
+    super::seam::launch(client);
     unsafe {
         fast_mask_kernel::launch_unchecked::<R>(
             client,
@@ -2052,7 +2052,7 @@ pub(super) fn launch_fast_cell_select<R: Runtime>(
     best: Buffer<'_>,
     geometry: CellSelectGeometry,
 ) {
-    super::seam::launch();
+    super::seam::launch(client);
     unsafe {
         fast_cell_select_kernel::launch_unchecked::<R>(
             client,

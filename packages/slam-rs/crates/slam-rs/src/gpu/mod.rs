@@ -373,71 +373,87 @@ pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
     )
 }
 
-/// Tasks CubeCL 0.10's client-to-server channel holds before a producer spins
-/// (`cubecl-common`'s `CHANNEL_MAX_TASK`).
+/// CubeCL 0.10.0's private `custom_channel::CHANNEL_MAX_TASK` is 32.
+/// Recheck this value when upgrading CubeCL; it is not exported by the runtime.
 #[cfg(feature = "gpu-core")]
-const CHANNEL_TASKS: usize = 32;
+pub const CHANNEL_TASKS: usize = 32;
 
-/// The most tasks one stage enqueues between two reports: a tracking pass's
-/// three uploads and six launches.
 #[cfg(feature = "gpu-core")]
-const STAGE_TASKS: usize = 9;
-
-/// Tasks handed to the runtime's server since the channel was last known empty.
-///
-/// One counter for the process, which is what the channel is: CubeCL caches one
-/// client per device, and this pipeline is single-threaded. A second frontend on
-/// another thread would make this over-count, which drains early — the safe
-/// direction.
-#[cfg(feature = "gpu-core")]
-static QUEUED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Record that a stage enqueued `tasks`, handing the queue to the runtime's
-/// server thread when another stage would not fit in it.
-///
-/// CubeCL 0.10's client-to-server channel is [`CHANNEL_TASKS`] deep, and a
-/// producer that fills it does not block: it spins for 524,288 iterations, then
-/// yields 4,096 times, then sleeps in 75 microsecond steps
-/// (`cubecl-common`'s `SPIN_BUDGET_CLIENT`). That is tuned for a producer and a
-/// server on different cores. This pipeline is pinned to one — the benchmark and
-/// the fleet both run it with a single-CPU affinity — so the spin is the
-/// server's own core and the queue cannot drain until the producer gives it up.
-///
-/// It only became reachable when the frontend stopped waiting per camera. A
-/// two-camera frameset enqueues 28 tasks between its downloads and stays under
-/// the cliff; a four-camera frameset enqueues 56, and fell off it hard enough to
-/// spend 2.9 ms a frameset spinning inside one launch. Reporting here keeps the
-/// queue under the ceiling at any camera count, at about one flush a frameset on
-/// a stereo rig and three on a four-camera one.
-///
-/// The flush is not extra work: it is the encoding and submission the next
-/// download would have paid for, moved earlier.
-///
-/// # Errors
-///
-/// [`GpuError::DeviceReadFailed`] when the runtime refuses the flush, which on
-/// this path means the device is gone.
-#[cfg(feature = "gpu-core")]
-pub(super) fn queued<R: cubecl::prelude::Runtime>(
-    client: &cubecl::prelude::ComputeClient<R>,
-    tasks: usize,
-) -> Result<(), GpuError> {
-    use std::sync::atomic::Ordering;
-
-    let total: usize = QUEUED.fetch_add(tasks, Ordering::Relaxed) + tasks;
-    if total + STAGE_TASKS < CHANNEL_TASKS {
-        return Ok(());
-    }
-    QUEUED.store(0, Ordering::Relaxed);
-    client
-        .flush()
-        .map_err(|error| read_failed("the queued launches", &error))
+thread_local! {
+    // One producer per device is required. Separate producer threads must not
+    // submit to the same device through this helper. This is a performance
+    // budget for the single-threaded frontend, not a concurrency guarantee.
+    static QUEUED: std::cell::RefCell<Vec<((std::any::TypeId, usize), usize)>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
 }
 
-/// The channel is empty: a download has waited for everything that was in it.
+/// Reserve a stage BEFORE it submits. Each upload, allocation and kernel is a
+/// one-task stage, so even a pyramid larger than the budget is split safely.
+/// Leave one channel slot for the blocking flush or download itself.
+///
+/// CubeCL clones share `utilities.properties` (0.10.0 `client.rs`), so its
+/// address identifies their device's queue. A stale address can only retain an
+/// old count and cause an early flush. Runtime type separates backend types.
+/// Each device must have one producer thread; a read resets only that device.
 #[cfg(feature = "gpu-core")]
-pub(super) fn drained() {
-    QUEUED.store(0, std::sync::atomic::Ordering::Relaxed);
+pub(super) fn reserve<R: cubecl::prelude::Runtime>(
+    client: &cubecl::prelude::ComputeClient<R>,
+    tasks: usize,
+) {
+    assert!(
+        tasks < CHANNEL_TASKS,
+        "split stages larger than the queue budget"
+    );
+    let key = (
+        std::any::TypeId::of::<R>(),
+        std::ptr::from_ref(client.properties()) as usize,
+    );
+    QUEUED.with(|queues| {
+        let mut queues = queues.borrow_mut();
+        let index = queues
+            .iter()
+            .position(|(id, _)| *id == key)
+            .unwrap_or_else(|| {
+                queues.push((key, 0));
+                queues.len() - 1
+            });
+        let count = &mut queues[index].1;
+        if *count + tasks >= CHANNEL_TASKS {
+            // Same failure contract as CubeCL's uploads and launches: guarded()
+            // at the public stage boundary converts this to a typed GPU error.
+            client
+                .flush()
+                .unwrap_or_else(|error| panic!("GPU queue flush failed: {error}"));
+            *count = 0;
+        }
+        *count += tasks;
+        seam::queue_reserved(*count);
+    });
+}
+
+/// A blocking read has consumed this producer's outstanding tasks on this device.
+#[cfg(feature = "gpu-core")]
+pub(super) fn drained<R: cubecl::prelude::Runtime>(client: &cubecl::prelude::ComputeClient<R>) {
+    let key = (
+        std::any::TypeId::of::<R>(),
+        std::ptr::from_ref(client.properties()) as usize,
+    );
+    QUEUED.with(|queues| {
+        if let Some((_, count)) = queues.borrow_mut().iter_mut().find(|(id, _)| *id == key) {
+            *count = 0;
+        }
+    });
+}
+
+/// Allocation also submits one initialize-memory task in CubeCL 0.10.0.
+#[cfg(feature = "gpu-core")]
+pub(super) fn empty<R: cubecl::prelude::Runtime>(
+    client: &cubecl::prelude::ComputeClient<R>,
+    bytes: usize,
+) -> cubecl::server::Handle {
+    reserve(client, 1);
+    client.empty(bytes)
 }
 
 /// A failed device read as a typed error, with the runtime's own reason logged.
@@ -571,8 +587,7 @@ pub(super) fn upload_frame<R: cubecl::prelude::Runtime>(
     let pixels: usize = width * height;
     if image.stride() == width {
         return (
-            seam::UPLOAD
-                .measure(|| client.create_from_slice(u16::as_bytes(&image.data()[..pixels]))),
+            seam::upload(client, u16::as_bytes(&image.data()[..pixels])),
             pixels,
         );
     }
@@ -581,10 +596,7 @@ pub(super) fn upload_frame<R: cubecl::prelude::Runtime>(
     for y in 0..height {
         scratch.extend_from_slice(image.row(y));
     }
-    (
-        seam::UPLOAD.measure(|| client.create_from_slice(u16::as_bytes(scratch))),
-        pixels,
-    )
+    (seam::upload(client, u16::as_bytes(scratch)), pixels)
 }
 
 /// So the check is the one thing that cannot lie: write a known pattern, copy
@@ -618,12 +630,13 @@ pub fn probe_storage<R: cubecl::prelude::Runtime>(
         let count: usize = pattern.len();
         let width: usize = size_of::<N>() * 8;
         let expected: usize = size_of_val(pattern);
-        let source: cubecl::server::Handle = client.create_from_slice(N::as_bytes(pattern));
-        let target: cubecl::server::Handle = client.empty(expected);
+        let source: cubecl::server::Handle = seam::upload(client, N::as_bytes(pattern));
+        let target: cubecl::server::Handle = empty(client, expected);
         kernels::launch_probe::<N, R>(client, (&source, count), (&target, count), count);
         let bytes = client
             .read_one(target)
             .map_err(|error| read_failed("the storage probe", &error))?;
+        drained(client);
         if bytes.len() != expected {
             return Err(GpuError::ShortRead {
                 what: "the storage probe",

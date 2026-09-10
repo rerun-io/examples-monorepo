@@ -72,7 +72,8 @@ pub static READ_TRACK: Meter = Meter::new();
 pub static READ_DETECT: Meter = Meter::new();
 
 /// Count one launch.
-pub fn launch() {
+pub fn launch<R: cubecl::prelude::Runtime>(client: &cubecl::prelude::ComputeClient<R>) {
+    super::reserve(client, 1);
     LAUNCH.count();
 }
 
@@ -104,4 +105,31 @@ pub fn line(framesets: u64) -> String {
         detect_reads as f64 / scale,
         detect_ns as f64 / scale / 1e6,
     )
+}
+
+thread_local! {
+    static PEAK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(super) fn queue_reserved(tasks: usize) {
+    PEAK.with(|peak| peak.set(peak.get().max(tasks)));
+}
+
+/// Largest reserved task count on any device on this producer thread.
+pub fn queue_peak() -> usize {
+    PEAK.with(|peak| peak.get())
+}
+
+/// Start a new queue measurement; does not change outstanding reservations.
+pub fn reset_queue_peak() {
+    PEAK.with(|peak| peak.set(0));
+}
+
+/// Reserve and measure the one task that uploads a host slice.
+pub(super) fn upload<R: cubecl::prelude::Runtime>(
+    client: &cubecl::prelude::ComputeClient<R>,
+    bytes: &[u8],
+) -> cubecl::server::Handle {
+    super::reserve(client, 1);
+    UPLOAD.measure(|| client.create_from_slice(bytes))
 }

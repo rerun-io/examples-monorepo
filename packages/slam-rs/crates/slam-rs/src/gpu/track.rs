@@ -98,7 +98,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                 // the first frameset, which a lane allocated on first use would
                 // break (`the_whole_gpu_path_holds_the_pool_flat`).
                 let results: Vec<cubecl::server::Handle> = (0..lanes.max(1))
-                    .map(|_| client.empty(transform_bytes))
+                    .map(|_| super::empty(&client, transform_bytes))
                     .collect();
                 Ok(Self {
                     capacity,
@@ -106,7 +106,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                     max_iterations,
                     max_recovered_dist2,
                     backward_patches,
-                    backward: client.empty(transform_bytes),
+                    backward: super::empty(&client, transform_bytes),
                     results,
                     pending: Vec::with_capacity(lanes.max(1)),
                     staging: vec![0.0; TRANSFORM_RUNS * capacity],
@@ -250,10 +250,10 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
             // returns before touching it). Measured: this form costs about 0.05 ms
             // of the lane's 5.9 and an `Option` field about 0.14, both inside this
             // host's drift and above its 0.02 ms pair-to-pair floor.
-            let forward: cubecl::server::Handle = super::seam::UPLOAD.measure(|| {
-                self.client
-                    .create_from_slice(f32::as_bytes(&self.staging[..TRANSFORM_RUNS * count]))
-            });
+            let forward: cubecl::server::Handle = super::seam::upload(
+                &self.client,
+                f32::as_bytes(&self.staging[..TRANSFORM_RUNS * count]),
+            );
 
             // `off = source position - guess` (`:339`), which the backward guess
             // adds back (`:357`). Both terms are on the host already, so the offset
@@ -339,9 +339,6 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                 patches.bases(),
                 self.max_recovered_dist2,
             );
-            // The caller's positions upload, this call's two uploads and its
-            // six launches.
-            super::queued(&self.client, 9)?;
             Ok(())
         })
     }
@@ -379,7 +376,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
             {
                 let read = super::seam::READ_TRACK
                     .measure(|| cubecl::reader::read_sync(self.client.read_async(reads)));
-                super::drained();
+                super::drained(&self.client);
                 read.map_err(|error| super::read_failed("the tracker result", &error))?
             }
         };

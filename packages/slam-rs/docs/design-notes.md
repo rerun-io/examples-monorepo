@@ -1294,7 +1294,7 @@ the per-camera algebra, and enabling this on a four-camera rig through the share
 `fast` profile is still a scope decision rather than a measurement.
 - **D76** — The fast profile runs the joint solve at keyframes and a 15-dof fixed-landmark update on the framesets between (2026-09-10)
 
-## D77 — The GPU frontend waits once per phase, and reports what it queued
+## D77 — The GPU frontend waits once per phase, and reserves its queue budget
 
 The device timestamps say every kernel of a two-camera MIO10 frameset is 0.44 ms
 of GPU time while the frontend spends 1.63 ms of host time. Counters at the seam
@@ -1345,11 +1345,19 @@ four-camera frameset enqueues 56 and spent **2.9 ms a frameset spinning**.
 Flushing after every camera fixed it and cost 0.10 ms a frameset on the stereo
 lane, because the flush waits for the server and on one core that handoff is real
 even when the work is not. What the channel needs is a ceiling, not a rhythm: the
-stages report what they enqueued (`gpu::queued`) and the seam flushes when
-another stage's nine tasks would not fit, with a download resetting the count
-because it has waited for everything in it. About one flush a frameset on a
-stereo rig, three on a four-camera one, and the queue never passes thirty-one at
-any camera count.
+seam reserves one task before each upload, allocation, or kernel launch.
+Pyramid preparation counts uploads when it submits them; builds consume those
+images without charging the upload again. Splitting builds into single-launch
+stages makes the count follow the actual geometry, with no fixed stage bound.
+A flush runs before a reservation would exceed 31 tasks, leaving the last slot
+of CubeCL 0.10.0's private `CHANNEL_MAX_TASK = 32` for the flush or read itself.
+
+The budget is per device on a producer thread, identified by the shared client
+properties address and runtime type. Each device must have one producer; this
+is not a multi-producer guarantee. A read resets only that device's count.
+The regression covers eight cameras with six and nine pyramid levels. Under
+this producer constraint, accounted frontend submissions stay at most 31
+between blocking calls, including on deeper pyramids and larger rigs.
 
 ### Measured
 

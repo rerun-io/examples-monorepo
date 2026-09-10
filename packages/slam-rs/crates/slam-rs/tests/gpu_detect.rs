@@ -718,9 +718,15 @@ fn a_prepared_selection_is_spent_once() {
         .unwrap();
     let mut again: Vec<u32> = Vec::new();
     scanner
-        .select_cells(0, &images[0], &select, &mut again)
+        .select_cells(0, &images[1], &select, &mut again)
         .unwrap();
-    assert_eq!(again, first, "the second read went back to the device");
+    let mut independent = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+    let mut expected = Vec::new();
+    independent
+        .select_cells(0, &images[1], &select, &mut expected)
+        .unwrap();
+    assert_ne!(expected, first, "the second image must have different keys");
+    assert_eq!(again, expected, "the second read must scan the new image");
 
     let mut second: Vec<u32> = Vec::new();
     scanner

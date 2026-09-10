@@ -152,7 +152,7 @@ impl<R: Runtime> GpuCornerScan<R> {
                     }
                 }
                 Ok(Self {
-                    ring: client.create_from_slice(u32::as_bytes(&ring)),
+                    ring: super::seam::upload(&client, u32::as_bytes(&ring)),
                     level0: Level0Table::default(),
                     uploads: 0,
                     packed: Vec::new(),
@@ -262,7 +262,7 @@ impl<R: Runtime> GpuCornerScan<R> {
             Some(existing) if fits => existing.clone(),
             slot => {
                 self.buffer_allocations += 1;
-                slot.insert((self.client.empty(cells * size_of::<u32>()), cells))
+                slot.insert((super::empty(&self.client, cells * size_of::<u32>()), cells))
                     .clone()
             }
         };
@@ -321,9 +321,9 @@ impl<R: Runtime> GpuCornerScan<R> {
             slot => {
                 self.buffer_allocations += 1;
                 slot.insert(ScanBuffers {
-                    score: self.client.empty(pixels),
-                    kept: self.client.empty(pixels),
-                    mask: self.client.empty(mask_len * size_of::<u32>()),
+                    score: super::empty(&self.client, pixels),
+                    kept: super::empty(&self.client, pixels),
+                    mask: super::empty(&self.client, mask_len * size_of::<u32>()),
                     pixels,
                     mask_len,
                 })
@@ -448,7 +448,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                         let read = cubecl::reader::read_sync(
                             self.client.read_async(vec![handles.kept, handles.mask]),
                         );
-                        super::drained();
+                        super::drained(&self.client);
                         read
                     })
                     .map_err(|error| {
@@ -534,7 +534,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                 let reads: Vec<cubecl::bytes::Bytes> = {
                     let read = super::seam::READ_DETECT
                         .measure(|| cubecl::reader::read_sync(self.client.read_async(vec![best])));
-                    super::drained();
+                    super::drained(&self.client);
                     read.map_err(|error| super::read_failed("the cell winner keys", &error))?
                 };
                 let Ok([keys]) = <[cubecl::bytes::Bytes; 1]>::try_from(reads) else {
@@ -576,9 +576,6 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                     if let Some((best, cells)) = self.launch_selection(camera, image, &select) {
                         self.prepared[camera] = Some(select);
                         launched.push((camera, best, cells));
-                        // Three launches, and the frame upload when the
-                        // pyramid did not publish one.
-                        super::queued(&self.client, 4)?;
                     }
                 }
                 if launched.is_empty() {
@@ -593,7 +590,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                 let reads: Vec<cubecl::bytes::Bytes> = {
                     let read = super::seam::READ_DETECT
                         .measure(|| cubecl::reader::read_sync(self.client.read_async(handles)));
-                    super::drained();
+                    super::drained(&self.client);
                     read.map_err(|error| super::read_failed("the cell winner keys", &error))?
                 };
                 if reads.len() != launched.len() {

@@ -1408,3 +1408,30 @@ fn a_batch_of_two_passes_answers_what_two_calls_do() {
         "the two lanes tracked the same set, so crossing them would not show"
     );
 }
+
+/// All uploads precede all builds, as in the frontend staging phase.
+#[test]
+fn prepared_pyramids_stay_below_the_runtime_channel_depth() {
+    for levels in [5, 8] {
+        // `allocate` takes the number of halvings: these are six and nine levels.
+        let client = gpu_client().unwrap();
+        let mut builder = GpuPyramidBuilder::new(client.clone(), &[[0.0, 0.0]]);
+        let images: Vec<_> = (0..8).map(|_| textured_image(960, 960, 0.0, 0.0)).collect();
+        let mut pyramids: Vec<_> = (0..8)
+            .map(|_| builder.allocate(960, 960, levels).unwrap())
+            .collect();
+        client.flush().unwrap();
+        slam_rs::gpu::seam::reset_queue_peak();
+        builder.prepare_images(&images).unwrap();
+        for (camera, (image, pyramid)) in images.iter().zip(&mut pyramids).enumerate() {
+            builder.build(camera, image, pyramid).unwrap();
+        }
+        let peak = slam_rs::gpu::seam::queue_peak();
+        assert!(
+            peak < slam_rs::gpu::CHANNEL_TASKS,
+            "eight cameras / {} levels queued {peak} tasks; leave room for the flush",
+            levels + 1
+        );
+        client.flush().unwrap();
+    }
+}
