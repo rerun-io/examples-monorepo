@@ -60,6 +60,61 @@ use crate::types::{
 /// [`ImuBlock::add_dense_h_b`] writes into.
 const IMU_BLOCK_SIZE: usize = 2 * POSE_VEL_BIAS_SIZE;
 
+/// Which precondition sent a frameset back to the joint solve.
+///
+/// [`SqrtKeypointVio::frame_update`] serves only a frameset whose newest state
+/// is genuinely joined to its predecessor by the preintegration the joint solve
+/// itself would use, and only while the prior leaves that state free. Naming
+/// each refusal is what makes "the update never engaged on this clip" a
+/// measurement rather than a guess: the variant travels out through
+/// [`FrameUpdateOutcome`] on every [`super::FrameStats`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameUpdateDecline {
+    /// The newest state in the window is not this frameset's.
+    NotNewest,
+    /// The newest state has no predecessor in the window.
+    NoPredecessor,
+    /// No preintegration in `imu_meas` starts at the predecessor.
+    NoImuFactor,
+    /// The preintegration that starts at the predecessor does not end at this
+    /// frameset, so it is not the factor that joins the two.
+    ImuIntervalGap,
+    /// The marginalization prior orders the newest state, so its gradient here
+    /// is not zero and a solve that omits it would be wrong.
+    PriorOrdersState,
+}
+
+/// What the frame update did with one frameset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameUpdateOutcome {
+    /// The knob is off, the frameset took a keyframe, or the warmup still owns
+    /// the window: [`SqrtKeypointVio::frame_update`] was never called.
+    NotAttempted,
+    /// The frame update solved this frameset.
+    Taken,
+    /// A precondition refused it and the joint solve ran instead.
+    Declined(FrameUpdateDecline),
+}
+
+/// Either the solve, or the precondition that refused the frameset.
+pub(super) type FrameUpdateResult<S> = Result<SolveOutcome<S>, FrameUpdateDecline>;
+
+impl FrameUpdateOutcome {
+    /// A stable name per outcome, for the Python snapshot and for logs.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotAttempted => "not_attempted",
+            Self::Taken => "taken",
+            Self::Declined(FrameUpdateDecline::NotNewest) => "declined_not_newest",
+            Self::Declined(FrameUpdateDecline::NoPredecessor) => "declined_no_predecessor",
+            Self::Declined(FrameUpdateDecline::NoImuFactor) => "declined_no_imu_factor",
+            Self::Declined(FrameUpdateDecline::ImuIntervalGap) => "declined_imu_interval_gap",
+            Self::Declined(FrameUpdateDecline::PriorOrdersState) => "declined_prior_orders_state",
+        }
+    }
+}
+
 /// Everything one [`SqrtKeypointVio::frame_update`] works in that outlives the
 /// call.
 ///
@@ -109,10 +164,12 @@ impl<S: LieScalar> Default for FrameUpdateScratch<S> {
 impl<S: LieScalar> SqrtKeypointVio<S> {
     /// Solve the newest state against fixed landmarks and its IMU factor.
     ///
-    /// `Ok(None)` means the frameset is not one this can serve — no previous
-    /// state, no IMU factor joining it to this one, or a prior that orders the
-    /// newest state — and the caller must run the joint solve instead. Every one
-    /// of those tests reads the window alone, so a replay repeats the choice.
+    /// `Err(FrameUpdateDecline)` means the frameset is not one this can serve —
+    /// no previous state, no IMU factor joining it to this one, or a prior that
+    /// orders the newest state — and the caller must run the joint solve
+    /// instead. Every one of those tests reads the window alone, so a replay
+    /// repeats the choice, and the variant is reported per frameset so a clip
+    /// where the update never engages says which precondition refused it.
     ///
     /// # Errors
     ///
@@ -122,26 +179,26 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     pub(super) fn frame_update(
         &mut self,
         t_ns: i64,
-    ) -> Result<Option<SolveOutcome<S>>, EstimatorError> {
+    ) -> Result<FrameUpdateResult<S>, EstimatorError> {
         // The newest state has to be this frameset's, and it has to have a
         // predecessor and the preintegration that joins them.
         if self.ba.frame_states.keys().next_back() != Some(&t_ns) {
-            return Ok(None);
+            return Ok(Err(FrameUpdateDecline::NotNewest));
         }
         let Some(prev_t_ns) = self.ba.frame_states.keys().rev().nth(1).copied() else {
-            return Ok(None);
+            return Ok(Err(FrameUpdateDecline::NoPredecessor));
         };
         let Some(meas) = self.imu_meas.get(&prev_t_ns) else {
-            return Ok(None);
+            return Ok(Err(FrameUpdateDecline::NoImuFactor));
         };
         if prev_t_ns.checked_add(meas.get_dt_ns()) != Some(t_ns) {
-            return Ok(None);
+            return Ok(Err(FrameUpdateDecline::ImuIntervalGap));
         }
         // The prior is a quadratic in blocks frozen at a linearization point and
         // the newest state is not one, so it cannot order it; if it ever does,
         // its gradient is not zero here and this solve would be wrong.
         if self.marg_data.order.get(t_ns).is_some() {
-            return Ok(None);
+            return Ok(Err(FrameUpdateDecline::PriorOrdersState));
         }
 
         let mut lm: Vec<LmIteration<S>> = Vec::new();
@@ -174,7 +231,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         let Some(meas) = imu_meas.get(&prev_t_ns) else {
             // Unreachable: the same lookup succeeded above and nothing since has
             // touched `imu_meas`.
-            return Ok(None);
+            return Ok(Err(FrameUpdateDecline::NoImuFactor));
         };
 
         // `:1249`, D11: the trust region has no memory across framesets.
@@ -305,7 +362,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             }
         }
 
-        Ok(Some((
+        Ok(Ok((
             lm,
             termination.unwrap_or(LmTermination::MaxIterations),
             timings,
@@ -504,6 +561,10 @@ mod tests {
 
     const CALIB: &str = include_str!("../../tests/fixtures/msdmi_calib.json");
     const CONFIG: &str = include_str!("../../../../configs/msdmi_config.json");
+    /// The four-camera MGO rig, which is what MGO09 replays.
+    const CALIB_4: &str = include_str!("../../tests/fixtures/msdmg_calib.json");
+    /// See [`CALIB_4`].
+    const CONFIG_4: &str = include_str!("../../../../configs/msdmg_config.json");
 
     /// The host keyframe, the previous state and the newest state.
     const HOST_T_NS: i64 = 0;
@@ -525,9 +586,19 @@ mod tests {
     /// Returns the estimator with the newest state left **at** the truth, and the
     /// truth beside it.
     fn a_window(iterations: i32) -> (SqrtKeypointVio<f64>, PoseVelBiasState<f64>) {
-        let mut config: VioConfig = VioConfig::from_json_str(CONFIG).unwrap();
+        a_window_on(CALIB, CONFIG, iterations)
+    }
+
+    /// [`a_window`] on a named rig, so the same known answer can be asked of a
+    /// two-camera and a four-camera window.
+    fn a_window_on(
+        calib: &str,
+        config: &str,
+        iterations: i32,
+    ) -> (SqrtKeypointVio<f64>, PoseVelBiasState<f64>) {
+        let mut config: VioConfig = VioConfig::from_json_str(config).unwrap();
         config.port_frame_update_max_iterations = iterations;
-        let calibration: Calibration<f64> = Calibration::from_json_str(CALIB).unwrap();
+        let calibration: Calibration<f64> = Calibration::from_json_str(calib).unwrap();
         let gravity: Vector3<f64> = Vector3::new(0.0, 0.0, -9.81);
         let mut vio: SqrtKeypointVio<f64> =
             SqrtKeypointVio::new(gravity, calibration, config).unwrap();
@@ -731,22 +802,75 @@ mod tests {
     }
 
     /// A frameset the frame update cannot serve goes back to the joint solve
-    /// rather than being solved wrong, and every test reads the window alone.
+    /// rather than being solved wrong, and each refusal names the precondition
+    /// that made it.
+    ///
+    /// The names are the load-bearing part: they are what
+    /// [`FrameUpdateOutcome`] carries out to `FrameStats` and to the Python
+    /// snapshot, so "the update never engaged on this clip" can be answered with
+    /// a count per precondition instead of a guess. Every test reads the window
+    /// alone, so a replay repeats the choice.
     #[test]
-    fn a_frameset_without_its_imu_factor_is_declined() {
+    fn every_refusal_names_its_precondition() {
         // No preintegration joining the two states.
         let (mut vio, _) = a_window(2);
         vio.imu_meas.clear();
-        assert!(vio.frame_update(CURRENT_T_NS).unwrap().is_none());
+        assert_eq!(
+            vio.frame_update(CURRENT_T_NS).unwrap().unwrap_err(),
+            FrameUpdateDecline::NoImuFactor
+        );
+
+        // A preintegration that starts at the predecessor but ends short of this
+        // frameset: it is not the factor the joint solve would use, and the
+        // interval it covers is not the one being solved over. One IMU sample of
+        // an interval is enough to see it.
+        let (mut vio, _) = a_window(2);
+        let short: IntegratedImuMeasurement<f64> = {
+            let noise = crate::imu::ImuNoise::from_calibration(&vio.ba.calib);
+            let zero: Vector3<f64> = Vector3::zeros();
+            let mut meas = IntegratedImuMeasurement::new(PREV_T_NS, &zero, &zero);
+            let step_ns: i64 = (1e9 / vio.ba.calib.imu_update_rate) as i64;
+            let mut t_ns: i64 = PREV_T_NS + step_ns;
+            while t_ns <= CURRENT_T_NS - step_ns {
+                meas.integrate(
+                    &ImuSample {
+                        t_ns,
+                        gyro: Vector3::zeros(),
+                        accel: Vector3::new(0.0, 0.0, 9.81),
+                    },
+                    &noise.accel_cov,
+                    &noise.gyro_cov,
+                )
+                .unwrap();
+                t_ns += step_ns;
+            }
+            meas
+        };
+        assert_eq!(
+            PREV_T_NS + short.get_dt_ns(),
+            CURRENT_T_NS - (1e9 / vio.ba.calib.imu_update_rate) as i64,
+            "the fixture has to end one IMU sample short of the frameset"
+        );
+        vio.imu_meas.insert(PREV_T_NS, short);
+        assert_eq!(
+            vio.frame_update(CURRENT_T_NS).unwrap().unwrap_err(),
+            FrameUpdateDecline::ImuIntervalGap
+        );
 
         // A frameset that is not the newest state.
         let (mut vio, _) = a_window(2);
-        assert!(vio.frame_update(PREV_T_NS).unwrap().is_none());
+        assert_eq!(
+            vio.frame_update(PREV_T_NS).unwrap().unwrap_err(),
+            FrameUpdateDecline::NotNewest
+        );
 
         // No previous state to hold.
         let (mut vio, _) = a_window(2);
         vio.ba.frame_states.remove(&PREV_T_NS);
-        assert!(vio.frame_update(CURRENT_T_NS).unwrap().is_none());
+        assert_eq!(
+            vio.frame_update(CURRENT_T_NS).unwrap().unwrap_err(),
+            FrameUpdateDecline::NoPredecessor
+        );
 
         // A prior that orders the newest state: its gradient would not be zero.
         let (mut vio, _) = a_window(2);
@@ -754,7 +878,68 @@ mod tests {
             .order
             .push(CURRENT_T_NS, POSE_VEL_BIAS_SIZE)
             .unwrap();
-        assert!(vio.frame_update(CURRENT_T_NS).unwrap().is_none());
+        assert_eq!(
+            vio.frame_update(CURRENT_T_NS).unwrap().unwrap_err(),
+            FrameUpdateDecline::PriorOrdersState
+        );
+    }
+
+    /// The four-camera rig: the held landmarks' Jacobians w.r.t. the newest state
+    /// are right for a non-host camera too.
+    ///
+    /// Every landmark here is hosted by camera 0 of the host keyframe and is
+    /// observed by whichever of the four cameras can see it, so the relative pose
+    /// each residual is formed through carries a different `T_i_c` on the target
+    /// side. Get one of those extrinsics or its `d_rel_d_t` wrong and the
+    /// perturbed state cannot return to a cost of zero, because the wrong
+    /// Jacobian points somewhere else. This is the check behind the MGO09 reading
+    /// in D76: the four-camera drift is the schedule, not a defect in the update's
+    /// per-camera algebra.
+    #[test]
+    fn the_frame_update_recovers_on_a_four_camera_rig() {
+        let (mut vio, truth) = a_window_on(CALIB_4, CONFIG_4, 5);
+        assert_eq!(vio.ba.cameras().len(), 4);
+        let observing: usize = (0..4)
+            .filter(|cam_id| {
+                vio.ba
+                    .lmdb
+                    .landmarks()
+                    .iter()
+                    .any(|lm| lm.obs.contains_key(&TimeCamId::new(CURRENT_T_NS, *cam_id)))
+            })
+            .count();
+        assert!(
+            observing >= 2,
+            "the fixture has to exercise a non-host camera: {observing} of 4 observe"
+        );
+
+        let mut perturbation: Vector15<f64> = Vector15::zeros();
+        perturbation
+            .fixed_rows_mut::<3>(0)
+            .copy_from(&Vector3::new(0.02, -0.015, 0.01));
+        perturbation
+            .fixed_rows_mut::<3>(3)
+            .copy_from(&Vector3::new(0.004, 0.006, -0.003));
+        vio.ba
+            .frame_states
+            .get_mut(&CURRENT_T_NS)
+            .unwrap()
+            .apply_inc(&perturbation);
+
+        let (lm, _, _) = vio.frame_update(CURRENT_T_NS).unwrap().unwrap();
+        let last = lm.last().unwrap();
+        assert!(
+            last.error_after < 1e-12,
+            "the minimum is exact on four cameras too: {}",
+            last.error_after
+        );
+        let recovered: &PoseVelBiasState<f64> = vio.ba.frame_states[&CURRENT_T_NS].state();
+        let position: f64 = (recovered.t_w_i.translation - truth.t_w_i.translation).norm();
+        let rotation: f64 = (recovered.t_w_i.rotation * truth.t_w_i.rotation.inverse())
+            .log()
+            .norm();
+        assert!(position < CONVERGENCE_TOLERANCE, "position {position}");
+        assert!(rotation < CONVERGENCE_TOLERANCE, "rotation {rotation}");
     }
 
     /// Offline mode lets nothing but the data reach a decision: the same window

@@ -117,9 +117,10 @@ use crate::types::{
     PoseVelBiasState, PoseVelBiasStateWithLin, PoseVelState, StateError, TimeCamId,
 };
 
-use frame_update::FrameUpdateScratch;
+pub use frame_update::{FrameUpdateDecline, FrameUpdateOutcome};
+use frame_update::{FrameUpdateResult, FrameUpdateScratch};
+use optimize::OptimizeScratch;
 pub use optimize::{LmIteration, LmTermination};
-use optimize::{OptimizeScratch, SolveOutcome};
 use schedule::MarginalizationOutcome;
 pub use schedule::{EvictionReason, KeyframeEviction, MarginalizationStats};
 
@@ -456,6 +457,9 @@ pub struct FrameStats<S: LieScalar> {
     pub termination: LmTermination,
     /// The marginalization, when the trigger of `:717` fired.
     pub marginalization: Option<MarginalizationStats>,
+    /// What D76's frame update did with this frameset: never attempted, taken,
+    /// or refused by a named precondition.
+    pub frame_update: FrameUpdateOutcome,
     /// Wall-clock stage marks; see [`StageTimings`].
     pub timings: StageTimings,
 }
@@ -1312,16 +1316,21 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         // the others the newest state alone. The frame update declines a
         // frameset it cannot serve, and the joint solve owns the warmup.
         let optimize_started: std::time::Instant = std::time::Instant::now();
-        let frame_update: bool =
+        let attempt_frame_update: bool =
             self.config.port_frame_update_max_iterations > 0 && !took_keyframe && self.opt_started;
-        let updated: Option<SolveOutcome<S>> = if frame_update {
-            self.frame_update(frame.t_ns)?
+        let updated: Option<FrameUpdateResult<S>> = if attempt_frame_update {
+            Some(self.frame_update(frame.t_ns)?)
         } else {
             None
         };
+        let frame_update: FrameUpdateOutcome = match &updated {
+            None => FrameUpdateOutcome::NotAttempted,
+            Some(Ok(_)) => FrameUpdateOutcome::Taken,
+            Some(Err(decline)) => FrameUpdateOutcome::Declined(*decline),
+        };
         let (lm, termination, mut timings) = match updated {
-            Some(outcome) => outcome,
-            None => self.optimize(frame.t_ns)?,
+            Some(Ok(outcome)) => outcome,
+            Some(Err(_)) | None => self.optimize(frame.t_ns)?,
         };
         timings.optimize_ns = duration_ns(optimize_started);
         timings.predict_ns = predict_ns;
@@ -1349,6 +1358,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             lm,
             termination,
             marginalization: marg.marginalization,
+            frame_update,
             timings,
         })
     }

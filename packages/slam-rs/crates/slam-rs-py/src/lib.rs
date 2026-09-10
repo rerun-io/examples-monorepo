@@ -360,6 +360,7 @@ pub struct VioSnapshot {
     lm_error_before: f64,
     lm_error_after: f64,
     num_observations: usize,
+    frame_update: &'static str,
     timings: slam_rs::estimator::StageTimings,
     frontend_timings: slam_rs::FrontendTimings,
 }
@@ -438,6 +439,7 @@ impl VioSnapshot {
                 .last()
                 .map_or(0.0, |step| f64::from(step.error_after)),
             num_observations: stats.num_observations,
+            frame_update: stats.frame_update.as_str(),
             timings: stats.timings,
             frontend_timings,
         })
@@ -551,6 +553,14 @@ impl VioSnapshot {
     /// kind of measurement as the six and are read the same way, which is why
     /// they come back in one map; they do not add up to the frame, because the
     /// bookkeeping between the phases is nobody's stage.
+    /// What D76's frame update did with this frameset: `not_attempted`,
+    /// `taken`, or `declined_<precondition>`. A clip whose median frame is slow
+    /// with the knob on says which precondition refused it here.
+    #[getter]
+    fn frame_update(&self) -> &'static str {
+        self.frame_update
+    }
+
     #[getter]
     fn timings_ms(&self) -> std::collections::BTreeMap<&'static str, f64> {
         [

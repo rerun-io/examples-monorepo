@@ -138,6 +138,10 @@ class VioSnapshot:
         """Landmark observations the window holds."""
 
     @property
+    def frame_update(self) -> str:
+        """What the non-keyframe frame update did: ``not_attempted``, ``taken``, or ``declined_<precondition>``."""
+
+    @property
     def timings_ms(self) -> dict[str, float]:
         """Wall time each stage took on the last frame, in milliseconds.
 

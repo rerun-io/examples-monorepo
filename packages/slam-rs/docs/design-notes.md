@@ -1232,4 +1232,39 @@ framesets while keyframes are six apart. And the A/B harness builds into a
 `CARGO_TARGET_DIR` shared by every worker on the host, so a concurrent build gets
 copied out as yours; one MGO09 measurement here was a different branch's binary
 before the cores were pre-placed from a private target directory.
+
+**Every frameset now says what the frame update did with it.** `FrameStats`
+carries a `FrameUpdateOutcome` — `NotAttempted`, `Taken`, or `Declined` with the
+precondition that refused it — and the Python snapshot exposes its name. The five
+preconditions used to be five silent `Ok(None)`s, so "the update did not engage"
+and "the update engaged and was slow" looked identical from outside, and a
+mismeasured MIO07 row was read as an engagement bug for an hour. Measured with
+the names, `--profile fast`, whole clips: **MIO07 3,509 of 4,095 framesets taken
+and 586 keyframes, MGO09 87 of 107, MIO10 349 of 412 — and zero declines on any
+of the three.** The 586, 20 and 63 are exactly the keyframes.
+
+That result is what the `dt` equality deserves, and it is why it stays an
+equality. `IntegratedImuMeasurement::accumulate_to` integrates only samples at or
+before the frameset and then closes the interval **exactly** on it, so
+`get_start_t_ns() + get_dt_ns() == frame.t_ns` holds for every measurement
+`process_frame` files; `prev_t_ns + meas.get_dt_ns() == t_ns` is therefore the
+window's own predecessor linkage written as arithmetic, not a tolerance on IMU
+sample phase. A looser test would accept a preintegration that does not span the
+interval being solved over, which is the one way this solve can be silently
+wrong.
+
+**The four-camera algebra is not the MGO09 gap.** A landmark hosted by camera 0
+and observed by camera *i* forms its residual through a relative pose that
+carries a different `T_i_c` on the target side, and the held-landmark Jacobian
+w.r.t. the newest state is `compute_rel_pose`'s `d_rel_d_t` for that pair. On the
+four-camera MGO rig fixture — the one MGO09 replays — a state pushed off the
+zero-cost minimum returns to a cost below `1e-12` and to within `1e-9` m and rad
+of the truth, with landmarks observed by more than one camera. A wrong extrinsic
+or a wrong Jacobian on the non-host camera cannot do that: it points the step
+somewhere else and the exact minimum becomes unreachable. The per-camera loop
+order is `landmarks()` in id order and `cam_id` ascending, and the same window
+solved twice is bit-identical. So MGO09's 0.978 cm against 0.842 is the schedule
+— the landmarks and the seven keyframe poses standing still between keyframes —
+and the two-state variant above is the measure of how much of it a wider free
+block buys.
 - **D76** — The fast profile runs the joint solve at keyframes and a 15-dof fixed-landmark update on the framesets between (2026-09-10)
