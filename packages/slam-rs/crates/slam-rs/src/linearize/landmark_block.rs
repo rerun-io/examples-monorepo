@@ -49,7 +49,18 @@ impl<S: LieScalar> Default for LandmarkBlockOptions<S> {
     }
 }
 
-/// The buffers [`LandmarkBlock::add_dense_h_b`] works in, reused across blocks.
+/// How many coefficients of one row of `H` are accumulated at a time.
+///
+/// The accumulator is a fixed-size array rather than a slice of the scratch
+/// buffer for two reasons, and both decide whether the loop vectorises: its
+/// length is a constant, so the body unrolls with no runtime trip count and no
+/// scalar tail, and it is a local, so the compiler can see that writing it
+/// cannot change the row it is reading. Written against `Q2Jp` — two pose
+/// blocks of six columns plus the residual on the median frame — eight is one
+/// SSE pair and holds a whole pose block plus its neighbour.
+const LANES: usize = 8;
+
+/// The buffer [`LandmarkBlock::add_dense_h_b`] works in, reused across blocks.
 ///
 /// `H += Q2Jp^T Q2Jp` is a dot product per coefficient down two columns of
 /// `storage`, and an `f32` sum cannot be reassociated, so the reduction over
@@ -60,18 +71,14 @@ impl<S: LieScalar> Default for LandmarkBlockOptions<S> {
 #[derive(Debug, Clone)]
 pub struct DenseHbScratch<S: LieScalar> {
     /// The `Q2` rows of `storage` over the written columns then the residual,
-    /// row-major so one row is contiguous.
+    /// row-major so one row is contiguous, and padded to a whole number of
+    /// [`LANES`] with `+0.0`.
     rows: Vec<S>,
-    /// One row of `H` plus its `b`, one coefficient per written column.
-    acc: Vec<S>,
 }
 
 impl<S: LieScalar> Default for DenseHbScratch<S> {
     fn default() -> Self {
-        Self {
-            rows: Vec::new(),
-            acc: Vec::new(),
-        }
+        Self { rows: Vec::new() }
     }
 }
 
@@ -859,34 +866,51 @@ impl<S: LieScalar> LandmarkBlock<S> {
         let rows: usize = self.num_q2rows();
         let live: usize = columns.len();
         // `[ the columns | the residual ]`, one contiguous row per `Q2` row;
-        // see [`DenseHbScratch`] for why the transpose is worth its copy.
+        // see [`DenseHbScratch`] for why the transpose is worth its copy. The
+        // row is padded to a whole number of [`LANES`] so every chunk below is
+        // a full one; the padding is `+0.0`, contributes `factor * 0.0` to a
+        // coefficient nothing reads, and is never written back.
         let width: usize = live + 1;
+        let stride: usize = width.div_ceil(LANES) * LANES;
         scratch.rows.clear();
-        scratch.rows.resize(rows * width, S::zero());
+        scratch.rows.resize(rows * stride, S::zero());
         for (slot, &column) in columns.iter().enumerate() {
             for r in 0..rows {
-                scratch.rows[r * width + slot] = self.storage[(3 + r, column)];
+                scratch.rows[r * stride + slot] = self.storage[(3 + r, column)];
             }
         }
         for r in 0..rows {
-            scratch.rows[r * width + live] = self.storage[(3 + r, self.res_idx)];
+            scratch.rows[r * stride + live] = self.storage[(3 + r, self.res_idx)];
         }
 
-        scratch.acc.clear();
-        scratch.acc.resize(width, S::zero());
+        let transposed: &[S] = &scratch.rows;
         for (slot, &i) in columns.iter().enumerate() {
-            scratch.acc.fill(S::zero());
-            for r in 0..rows {
-                let row: &[S] = &scratch.rows[r * width..(r + 1) * width];
-                let factor: S = row[slot];
-                for (acc, &value) in scratch.acc.iter_mut().zip(row.iter()) {
-                    *acc += factor * value;
+            for lo in (0..stride).step_by(LANES) {
+                // One row of `H` over `LANES` of its columns. Every coefficient
+                // still sums over the `Q2` rows in ascending row order — `r` is
+                // the loop below and each lane is touched once per row — so
+                // this is the same sum as one accumulator per column was, in
+                // the same order, over `LANES` columns at a time.
+                let mut partial: [S; LANES] = [S::zero(); LANES];
+                for r in 0..rows {
+                    let row: &[S] = &transposed[(r * stride)..((r + 1) * stride)];
+                    let factor: S = row[slot];
+                    let source: &[S] = &row[lo..(lo + LANES)];
+                    for (accumulator, &value) in partial.iter_mut().zip(source.iter()) {
+                        *accumulator += factor * value;
+                    }
+                }
+                let end: usize = (lo + LANES).min(width);
+                for (offset, &value) in partial.iter().enumerate().take(end - lo) {
+                    let j: usize = lo + offset;
+                    if j < live {
+                        h[(i, columns[j])] += value;
+                    } else {
+                        // `j == live`: the residual column.
+                        b[i] += value;
+                    }
                 }
             }
-            for (&j, &acc) in columns.iter().zip(scratch.acc.iter()) {
-                h[(i, j)] += acc;
-            }
-            b[i] += scratch.acc[live];
         }
     }
 
