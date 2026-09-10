@@ -568,11 +568,19 @@ fn flow_transforms_round_trip_through_the_soa_arrays() {
 /// itself uses, so both halves of the writing surface are exercised.
 #[derive(Debug, Default)]
 struct EchoTracker {
+    batch: slam_rs::frontend::tracker::TrackBatch,
     capacity: usize,
     num_levels: usize,
 }
 
 impl PatchTracker for EchoTracker {
+    fn batch(&self) -> &slam_rs::frontend::tracker::TrackBatch {
+        &self.batch
+    }
+    fn batch_mut(&mut self) -> &mut slam_rs::frontend::tracker::TrackBatch {
+        &mut self.batch
+    }
+
     type Pattern = Pattern51;
     type Pyramid = PyramidU16;
     type Patches = PatchSoA<Pattern51>;
@@ -589,14 +597,13 @@ impl PatchTracker for EchoTracker {
         PatchSoA::new(self.capacity, self.num_levels)
     }
 
-    fn track(
+    fn submit_prepared(
         &mut self,
         _prev: &PyramidU16,
         _next: &PyramidU16,
         patches: &PatchSoA<Pattern51>,
         transforms_in: &FlowTransforms,
-        out: &mut FlowResult,
-    ) -> Result<(), TrackerError> {
+    ) -> Result<usize, TrackerError> {
         let count: usize = transforms_in.len();
         if count != patches.len() {
             return Err(TrackerError::LengthMismatch {
@@ -606,6 +613,7 @@ impl PatchTracker for EchoTracker {
                 second: count,
             });
         }
+        let (pass, out) = self.batch.submit_slot(self.capacity);
         out.reset(count);
         for index in 0..count {
             out.set_track(index, true, &transforms_in.get(index));
@@ -615,7 +623,7 @@ impl PatchTracker for EchoTracker {
         let [m00, ..] = transforms.coefficients_mut();
         assert_eq!(m00.len(), valid.len().max(m00.len()));
         out.finish(count);
-        Ok(())
+        Ok(pass)
     }
 }
 
@@ -624,6 +632,7 @@ fn a_second_backend_can_publish_results_through_the_public_api() {
     let levels: usize = 3;
     let scene: Fixture = fixture(0.7, -1.2, levels);
     let mut echo: EchoTracker = EchoTracker {
+        batch: Default::default(),
         capacity: scene.positions.len(),
         num_levels: levels + 1,
     };

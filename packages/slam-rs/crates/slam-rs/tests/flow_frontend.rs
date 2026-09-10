@@ -17,8 +17,7 @@ use slam_rs::frontend::parallel::{MAX_THREADS, WorkPool};
 use slam_rs::frontend::patterns::{Pattern51, Pattern52};
 use slam_rs::frontend::se2::AffineCompact2f;
 use slam_rs::frontend::tracker::{
-    CpuPatchTracker, FlowResult, FlowTransforms, MAX_CAPACITY, MAX_LEVELS, PatchSoA, PatchTracker,
-    TrackerError,
+    CpuPatchTracker, FlowTransforms, MAX_CAPACITY, MAX_LEVELS, PatchSoA, PatchTracker, TrackerError,
 };
 use slam_rs::image::ImageU16;
 use slam_rs::lie::{Se3, So3};
@@ -1247,6 +1246,13 @@ struct FailingTracker {
 }
 
 impl PatchTracker for FailingTracker {
+    fn batch(&self) -> &slam_rs::frontend::tracker::TrackBatch {
+        self.inner.batch()
+    }
+    fn batch_mut(&mut self) -> &mut slam_rs::frontend::tracker::TrackBatch {
+        self.inner.batch_mut()
+    }
+
     type Pattern = Pattern51;
     type Pyramid = PyramidU16;
     type Patches = PatchSoA<Pattern51>;
@@ -1263,14 +1269,13 @@ impl PatchTracker for FailingTracker {
         self.inner.make_patches()
     }
 
-    fn track(
+    fn submit_prepared(
         &mut self,
         prev: &PyramidU16,
         next: &PyramidU16,
         patches: &PatchSoA<Pattern51>,
         transforms_in: &FlowTransforms,
-        out: &mut FlowResult,
-    ) -> Result<(), TrackerError> {
+    ) -> Result<usize, TrackerError> {
         self.calls.set(self.calls.get() + 1);
         if self.calls.get() == self.fail_on {
             return Err(TrackerError::CapacityExceeded {
@@ -1278,7 +1283,8 @@ impl PatchTracker for FailingTracker {
                 capacity: 0,
             });
         }
-        self.inner.track(prev, next, patches, transforms_in, out)
+        self.inner
+            .submit_prepared(prev, next, patches, transforms_in)
     }
 }
 

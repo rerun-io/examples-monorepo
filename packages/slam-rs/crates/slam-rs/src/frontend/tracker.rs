@@ -1000,6 +1000,30 @@ impl FlowResult {
     }
 }
 
+/// Reusable output slots owned by a tracking batch on either backend.
+#[derive(Debug, Default)]
+pub struct TrackBatch {
+    pub(crate) slots: Vec<FlowResult>,
+    submitted: usize,
+}
+
+impl TrackBatch {
+    /// Reserve a reusable result slot for a synchronous backend.
+    pub fn submit_slot(&mut self, capacity: usize) -> (usize, &mut FlowResult) {
+        let pass = self.submitted;
+        if pass == self.slots.len() {
+            self.slots.push(FlowResult::with_capacity(capacity));
+        }
+        self.submitted += 1;
+        (pass, &mut self.slots[pass])
+    }
+
+    /// Slot `pass` remains readable until the next submission reuses it.
+    pub fn result(&self, pass: usize) -> &FlowResult {
+        &self.slots[pass]
+    }
+}
+
 /// The frontend's tracking stage: one call moves a whole camera's patches.
 ///
 /// The trait takes the entire keypoint set, never one point, and names no
@@ -1020,50 +1044,42 @@ pub trait PatchTracker {
         self.track(prev, next, patches, transforms_in, out)
     }
 
-    /// Start a pass whose result lands in `out` when [`PatchTracker::collect`]
-    /// runs.
-    ///
-    /// A device backend can hold several passes in flight and wait once for all
-    /// of them, which is what this is for: on the GPU lane a synchronising read
-    /// costs about 0.12 ms of host time whatever it carries, so the frameset's
-    /// cost is set by how many reads it makes and not by how much they move.
-    /// `out` is **not** filled until `collect`.
-    ///
-    /// The default runs the whole pass here and leaves `collect` nothing to do,
-    /// which is what a synchronous tracker wants.
+    /// Reusable result storage owned by this backend.
+    fn batch(&self) -> &TrackBatch;
+    /// Mutable result storage used by the synchronous submission default.
+    fn batch_mut(&mut self) -> &mut TrackBatch;
+
+    /// Submit a pass and return its result slot. CPU backends fill it now;
+    /// device backends fill the same slot at collection.
     ///
     /// # Errors
-    ///
-    /// As [`PatchTracker::track`], plus [`TrackerError::TooManyPasses`] when
-    /// more passes are in flight than the tracker has slots.
+    /// As [`PatchTracker::track`], plus a backend's pass capacity limit.
     fn submit_prepared(
         &mut self,
         prev: &Self::Pyramid,
         next: &Self::Pyramid,
         patches: &Self::Patches,
         transforms_in: &FlowTransforms,
-        out: &mut FlowResult,
-    ) -> Result<(), TrackerError> {
-        self.track_prepared(prev, next, patches, transforms_in, out)
+    ) -> Result<usize, TrackerError>;
+
+    /// Read a result by the slot returned from submission, after collection.
+    fn result(&self, pass: usize) -> &FlowResult {
+        self.batch().result(pass)
     }
 
-    /// Finish every pass submitted since the last call, filling the first of
-    /// `outs` in submission order.
+    /// Finish every submitted pass, retaining results in the batch's slots.
     ///
     /// # Errors
-    ///
-    /// [`TrackerError`] when a device read fails, or when `outs` is shorter
-    /// than the number of passes submitted.
-    fn collect(&mut self, outs: &mut [FlowResult]) -> Result<(), TrackerError> {
-        let _ = outs;
+    /// A device download can fail.
+    fn collect(&mut self) -> Result<(), TrackerError> {
+        self.batch_mut().submitted = 0;
         Ok(())
     }
 
-    /// Drop whatever [`PatchTracker::submit_prepared`] has in flight.
-    ///
-    /// The frontend calls this when a frameset is refused between the submits
-    /// and the collect, so the next frameset starts an empty batch.
-    fn discard(&mut self) {}
+    /// Drop the current batch while retaining all result allocations.
+    fn discard(&mut self) {
+        self.batch_mut().submitted = 0;
+    }
 
     /// The sampling pattern this tracker was built for.
     type Pattern: Pattern;
@@ -1091,7 +1107,12 @@ pub trait PatchTracker {
         patches: &Self::Patches,
         transforms_in: &FlowTransforms,
         out: &mut FlowResult,
-    ) -> Result<(), TrackerError>;
+    ) -> Result<(), TrackerError> {
+        let pass = self.submit_prepared(prev, next, patches, transforms_in)?;
+        self.collect()?;
+        out.clone_from(self.result(pass));
+        Ok(())
+    }
 
     /// Keypoints this tracker can carry in one call.
     fn capacity(&self) -> usize;
@@ -1126,6 +1147,7 @@ pub struct CpuPatchTracker<P: Pattern> {
     forward_valid: Vec<bool>,
     /// The positions the backward patches are built at.
     backward_positions: PointsSoA,
+    batch: TrackBatch,
 }
 
 impl<P: Pattern> CpuPatchTracker<P> {
@@ -1164,6 +1186,7 @@ impl<P: Pattern> CpuPatchTracker<P> {
             forward,
             forward_valid: vec![false; capacity],
             backward_positions,
+            batch: TrackBatch::default(),
         })
     }
 
@@ -1174,6 +1197,13 @@ impl<P: Pattern> CpuPatchTracker<P> {
 }
 
 impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
+    fn batch(&self) -> &TrackBatch {
+        &self.batch
+    }
+    fn batch_mut(&mut self) -> &mut TrackBatch {
+        &mut self.batch
+    }
+
     type Pattern = P;
     type Pyramid = PyramidU16;
     type Patches = PatchSoA<P>;
@@ -1190,7 +1220,30 @@ impl<P: Pattern> PatchTracker for CpuPatchTracker<P> {
         PatchSoA::new(self.capacity, self.num_levels)
     }
 
-    fn track(
+    fn submit_prepared(
+        &mut self,
+        prev: &Self::Pyramid,
+        next: &Self::Pyramid,
+        patches: &Self::Patches,
+        transforms_in: &FlowTransforms,
+    ) -> Result<usize, TrackerError> {
+        let capacity = self.capacity();
+        let batch = self.batch_mut();
+        let pass = batch.submitted;
+        if pass == batch.slots.len() {
+            batch.slots.push(FlowResult::with_capacity(capacity));
+        }
+        let mut result = std::mem::take(&mut batch.slots[pass]);
+        let outcome = self.track_into(prev, next, patches, transforms_in, &mut result);
+        self.batch_mut().slots[pass] = result;
+        outcome?;
+        self.batch_mut().submitted += 1;
+        Ok(pass)
+    }
+}
+
+impl<P: Pattern> CpuPatchTracker<P> {
+    fn track_into(
         &mut self,
         prev: &PyramidU16,
         next: &PyramidU16,
