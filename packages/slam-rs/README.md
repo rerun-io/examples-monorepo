@@ -44,7 +44,7 @@ pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio   # the
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --rr-config.headless --rr-config.save data/replay-vio.rrd
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --segment <segment-id>       # another reference segment
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --rrd base.rrd --gt-rrd gt.rrd   # a recording of your own
-pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --catalog rerun+http://dgx-spark:9988   # from a catalog server, no NAS mount needed
+pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --catalog rerun+http://dgx-spark:9988 --segment <any-segment-id>   # from a catalog server: any segment of a known dataset, no NAS mount
 ```
 
 In a shell without `DISPLAY`, pass `--rr-config.headless` or the spawned viewer

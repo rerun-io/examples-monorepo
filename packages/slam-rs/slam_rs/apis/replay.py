@@ -43,7 +43,7 @@ from slam_rs.catalog_feed import (
     open_segment,
 )
 from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
-from slam_rs.reference import SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment, load_manifest, resolved_flow_config
+from slam_rs.reference import SMOKE_SEGMENTS, ImuParameters, ReferenceManifest, ReferenceSegment, load_manifest, resolved_flow_config
 from slam_rs.reference_bundle import BundleFile
 from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import Trajectory, ate, coverage, empty_trajectory, read_trajectory, shift_clock, write_trajectory
@@ -85,9 +85,12 @@ class Config:
     catalog: str | None = None
     """Read ``--segment`` from this catalog server instead of the manifest's file paths, e.g. ``rerun+http://dgx-spark:9988``.
 
-    The ground truth comes from the same dataset's layer on the server, so a
-    machine with no NAS mount replays a reference segment from its id alone.
-    Exclusive with ``--rrd`` and ``--gt-rrd``, which name a second source.
+    Any segment of a dataset the manifest knows replays this way, not only the
+    reference set: the IMU noise model and the basalt config are the dataset's,
+    and the server carries the rig calibration and the ground-truth layer. A
+    segment outside the reference set has no C++ run to compare with, so it is
+    scored against ground truth only. Exclusive with ``--rrd`` and ``--gt-rrd``,
+    which name a second source.
     """
     max_framesets: int | None = None
     """Stop after this many framesets; None replays the whole segment."""
@@ -206,33 +209,50 @@ def main(config: Config) -> None:
         config: Parsed CLI options.
     """
     manifest: ReferenceManifest = load_manifest(artifact_root=config.artifact_root)
-    segment: ReferenceSegment = manifest.by_id(config.segment)
+    listed: ReferenceSegment | None = next((s for s in manifest.segments if s.segment_id == config.segment), None)
+    dataset_name: str = listed.dataset_name if listed is not None else config.segment.split("__")[0]
+    # A segment outside the reference set takes its dataset's parameters: the IMU
+    # noise model and the basalt config are per device, and the catalog carries the
+    # rig and the ground truth itself. What it cannot have is a C++ run to compare with.
+    vio_config: _core.VioConfig
+    imu: ImuParameters
+    if listed is not None:
+        vio_config, _config_text = resolved_flow_config(manifest, listed, profile=config.profile)
+        imu = listed.imu
+    else:
+        vio_config = _core.VioConfig.from_json(manifest.vio_config_text(dataset_name, profile=config.profile))  # refuses an unknown dataset
+        imu = next(s.imu for s in manifest.segments if s.dataset_name == dataset_name)
     source: SegmentSource
     origin: str
     if config.catalog is not None:
         if config.rrd is not None or config.gt_rrd is not None:
             raise ValueError("--catalog and --rrd/--gt-rrd name two sources for one replay; pass one of them")
-        source = CatalogSegment(url=config.catalog, dataset_name=segment.dataset_name, segment_id=segment.segment_id)
+        source = CatalogSegment(url=config.catalog, dataset_name=dataset_name, segment_id=config.segment)
         origin = config.catalog
-    else:
+    elif listed is not None:
         source = LocalSegment(
-            base_rrd=config.rrd if config.rrd is not None else segment.base_path,
-            gt_rrd=config.gt_rrd if config.gt_rrd is not None else (None if config.rrd is not None else segment.gt_path),
+            base_rrd=config.rrd if config.rrd is not None else listed.base_path,
+            gt_rrd=config.gt_rrd if config.gt_rrd is not None else (None if config.rrd is not None else listed.gt_path),
         )
         origin = str(source.base_rrd)
-    output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / segment.segment_id / "slam_rs.csv"
-    print(f"replaying {segment.segment_id} ({segment.tier} tier) from {origin}")
+    else:
+        raise ValueError(
+            f"{config.segment!r} is not in the reference set, the only segments the manifest has files for; "
+            f"have {[s.segment_id for s in manifest.segments]}. With --catalog any segment of a known dataset replays from the server."
+        )
+    output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / config.segment / "slam_rs.csv"
+    print(
+        f"replaying {config.segment} ({f'{listed.tier} tier' if listed is not None else 'not in the reference set: ground truth only'}) from {origin}"
+    )
 
-    with open_segment(source, segment.imu, frame_stride=config.frame_stride, window_s=config.window_s) as feed:
+    with open_segment(source, imu, frame_stride=config.frame_stride, window_s=config.window_s) as feed:
         print(
             f"{len(feed.cameras)} cameras, {len(feed.frame_t_ns)} framesets, ground truth "
             f"{'attached' if feed.has_ground_truth else 'absent'}, clock offset {feed.capture_start_time_ns} ns"
         )
         log_calibration(feed.cameras)
         stage: FrontendStage | VioStage | None = None
-        vio_config: _core.VioConfig
         if config.stage == "frontend":
-            vio_config, _config_text = resolved_flow_config(manifest, segment, profile=config.profile)
             stage = FrontendStage(
                 flow=_core.OpticalFlow(_core.Calibration.from_catalog(feed.cameras, feed.imu), vio_config),
                 logger=FrontendLogger(len(feed.cameras), feed.segment_id),
@@ -245,14 +265,13 @@ def main(config: Config) -> None:
             # with no driver, no device or no adapter — and the shim
             # (:func:`slam_rs.apis.run`) is what turns it into one sentence and a
             # non-zero exit rather than a traceback through the feed.
-            vio_config, _config_text = resolved_flow_config(manifest, segment, profile=config.profile)
             vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), vio_config, gpu=config.gpu)
             stage = VioStage(
                 lockstep=Lockstep(vio=vio),
                 logger=VioLogger(
                     cameras=feed.cameras,
                     ground_truth=truth,
-                    cpp=_cpp_trajectory(manifest, segment, feed.capture_start_time_ns, feed.segment_id),
+                    cpp=_cpp_trajectory(manifest, listed, feed.capture_start_time_ns, feed.segment_id) if listed is not None else empty_trajectory(),
                     frame_t_ns=feed.frame_t_ns,
                 ),
             )
