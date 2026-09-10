@@ -556,9 +556,15 @@ pub struct FrameToFrameOpticalFlow<
     tracked: FlowTransforms,
     detector: DetectorScratch,
     /// The device cell selection each camera can take, or `None` where its shape
-    /// cannot ([`cell_select`]); rebuilt per detecting frameset so the whole rig
-    /// can be prepared in one device round trip.
+    /// cannot ([`cell_select`]); rebuilt at the top of every frameset, before
+    /// anything about it has been decided.
     cell_selects: Vec<Option<CellSelect>>,
+    /// [`FrameToFrameOpticalFlow::cell_selects`] narrowed to the cameras one
+    /// phase launches: camera 0 before the temporal tracks, the rest behind the
+    /// cross-camera matches, so each set rides a download that was happening
+    /// anyway (D78). A field rather than a local because it is rebuilt twice a
+    /// frameset and this module allocates once.
+    cell_selects_now: Vec<Option<CellSelect>>,
     detected: KeypointsData,
     /// The keypoints `addPointsForCamera(0)` produced, to be matched onward.
     new_cam0: Keypoints,
@@ -896,6 +902,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             tracked: FlowTransforms::default(),
             detector: DetectorScratch::with_scanner(scanner),
             cell_selects: vec![None; num_cams],
+            cell_selects_now: vec![None; num_cams],
             detected: KeypointsData::default(),
             new_cam0: Keypoints::default(),
             to_remove: Vec::new(),
@@ -1175,6 +1182,42 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         }
 
         let num_cams: usize = self.cameras.len();
+
+        // Camera 0's cell winners, launched here and downloaded by the temporal
+        // tracks below (D78). The selection kernels read the frame alone — the
+        // occupancy counts and the masks stay on the host and are applied to
+        // the downloaded keys — so there is nothing about this frameset they
+        // need to know, including whether it detects at all. That last part is
+        // the speculation: on a frameset that skips `add_points` these kernels
+        // are wasted GPU time, and what they buy on one that detects is a whole
+        // synchronising read, 0.12 ms of host time on this lane. Camera 0 alone
+        // because it is the only camera the match needs before it launches; the
+        // others go behind the matches, where another download is waiting.
+        let config: DetectorConfig = self.detector_config();
+        let Self {
+            cell_selects,
+            detection_grids,
+            ..
+        } = self;
+        for ((slot, image), grid) in cell_selects
+            .iter_mut()
+            .zip(images)
+            .zip(detection_grids.iter())
+        {
+            *slot = cell_select(image, grid, &config);
+        }
+        let mark: std::time::Instant = std::time::Instant::now();
+        self.cell_selects_now.clear();
+        self.cell_selects_now.resize(images.len(), None);
+        if let (Some(slot), Some(select)) = (
+            self.cell_selects_now.first_mut(),
+            self.cell_selects.first().copied(),
+        ) {
+            *slot = select;
+        }
+        self.detector.submit_cells(images, &self.cell_selects_now)?;
+        self.timings.detect_ns += duration_ns(mark);
+
         if self.t_ns.is_none() {
             for keypoints in &mut self.frame.cameras {
                 keypoints.clear();
@@ -1208,6 +1251,14 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
                 self.update_cell_counts(camera);
             }
         }
+
+        // Camera 0's keys, out of the download the tracks just made. On the
+        // first frameset of a run there was no track to carry them and this
+        // reads them itself, which is the read the detector used to make on
+        // every frameset.
+        let mark: std::time::Instant = std::time::Instant::now();
+        self.detector.take_cells()?;
+        self.timings.detect_ns += duration_ns(mark);
 
         if self.should_detect() {
             self.add_points(images)?;
@@ -1599,21 +1650,10 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     /// `addPoints` (`:637-666`): detect on camera 0, match onward, then detect
     /// again on the cameras that do not overlap camera 0.
     fn add_points(&mut self, images: &[ImageU16]) -> Result<(), FrontendError> {
-        // Every camera's cell winners in one device round trip, before the first
-        // of them is asked for. The selection kernels read the frame alone — the
-        // occupancy counts and the masks stay on the host and are applied to the
-        // keys afterwards — so a camera's can be launched before this frameset
-        // has decided anything about it, and what that saves is one wait per
-        // camera (D77). A backend without a device path prepares nothing and
-        // every `detect_keypoints_with_cells` answers for itself.
-        let config: DetectorConfig = self.detector_config();
-        for (camera, image) in images.iter().enumerate() {
-            self.cell_selects[camera] = cell_select(image, &self.detection_grids[camera], &config);
-        }
-        let mark: std::time::Instant = std::time::Instant::now();
-        self.detector.prepare_cells(images, &self.cell_selects)?;
-        self.timings.detect_ns += duration_ns(mark);
-
+        // Camera 0's cell winners are already on the host: `run_passes`
+        // launched them before the temporal tracks and the tracks' own download
+        // brought them back (D78). A backend without a device path prepared
+        // nothing and every `detect_keypoints_with_cells` answers for itself.
         self.add_points_for_camera(0, images)?;
 
         // `for (i = 1; i < getNumCams(); i++) trackPoints(pyr0, pyri, kpts0, ...)`
@@ -1633,6 +1673,24 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             let t_c0_ci: Se3<f32> = self.calib.t_i_c[0].inverse() * self.calib.t_i_c[camera];
             self.submit_track_points(lane, 0, camera, &t_c0_ci, false)?;
         }
+        self.timings.stereo_ns += duration_ns(mark);
+
+        // The other cameras' selections, launched behind the matches so the
+        // match download carries them too. Only the non-overlap pass below
+        // reads them, so a config without it launches nothing here.
+        let tail: bool = self.cameras.len() > 1 && self.config.optical_flow_detection_nonoverlap;
+        if tail {
+            let mark: std::time::Instant = std::time::Instant::now();
+            self.cell_selects_now.clear();
+            self.cell_selects_now.resize(images.len(), None);
+            for camera in 1..self.cell_selects_now.len().min(self.cell_selects.len()) {
+                self.cell_selects_now[camera] = self.cell_selects[camera];
+            }
+            self.detector.submit_cells(images, &self.cell_selects_now)?;
+            self.timings.detect_ns += duration_ns(mark);
+        }
+
+        let mark: std::time::Instant = std::time::Instant::now();
         if self.cameras.len() > 1 {
             self.tracker.collect(&mut self.results)?;
         }
@@ -1640,8 +1698,11 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             self.finish_track_points(camera - 1, camera);
             self.add_keypoints(camera);
         }
-
         self.timings.stereo_ns += duration_ns(mark);
+
+        let mark: std::time::Instant = std::time::Instant::now();
+        self.detector.take_cells()?;
+        self.timings.detect_ns += duration_ns(mark);
 
         // `if (!config.optical_flow_detection_nonoverlap) continue;` (`:657-664`).
         if self.config.optical_flow_detection_nonoverlap {

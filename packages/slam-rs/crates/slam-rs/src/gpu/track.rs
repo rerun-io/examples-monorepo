@@ -65,6 +65,10 @@ pub struct GpuPatchTracker<P: Pattern, R: Runtime> {
     offset_x: Vec<f32>,
     /// The `y` half of the same offset.
     offset_y: Vec<f32>,
+    /// Buffers another stage on this client launched and left for whichever
+    /// download comes next; [`PatchTracker::collect`] appends them to its own,
+    /// which is the corner scanner's cell keys arriving for free (D78).
+    reads: super::ReadRelay,
 }
 
 impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
@@ -112,10 +116,21 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                     staging: vec![0.0; TRANSFORM_RUNS * capacity],
                     offset_x: vec![0.0; capacity],
                     offset_y: vec![0.0; capacity],
+                    reads: super::ReadRelay::default(),
                     client,
                 })
             },
         )
+    }
+
+    /// Drain `relay` inside this tracker's own download.
+    ///
+    /// Wired by [`super::gpu_backends`]: the corner scanner stages its cell-key
+    /// buffers there, and a read on this lane costs 0.12 ms of host time before
+    /// it moves a byte, so carrying them is free where a second read is not
+    /// (D78).
+    pub fn share_reads(&mut self, relay: super::ReadRelay) {
+        self.reads = relay;
     }
 }
 
@@ -359,7 +374,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
         }
         // A pass that offered nothing launched nothing, so it has no buffer to
         // read; the download is over the lanes that do.
-        let reads: Vec<cubecl::server::Handle> = self
+        let mut reads: Vec<cubecl::server::Handle> = self
             .pending
             .iter()
             .enumerate()
@@ -370,7 +385,15 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                 handle.clone().offset_end(handle.size_in_used() - expected)
             })
             .collect();
-        let bytes: Vec<cubecl::bytes::Bytes> = if reads.is_empty() {
+        // Whatever another stage staged rides along on the tail, and the tail is
+        // handed back to it: one synchronisation for the frameset's two answers
+        // instead of one each (D78). Taken **before** the empty-read shortcut,
+        // so a frameset whose every lane offered nothing still carries them.
+        let lanes: usize = reads.len();
+        let relayed: Vec<cubecl::server::Handle> = self.reads.take_staged();
+        let carried: usize = relayed.len();
+        reads.extend(relayed);
+        let mut bytes: Vec<cubecl::bytes::Bytes> = if reads.is_empty() {
             Vec::new()
         } else {
             {
@@ -380,6 +403,10 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                 read.map_err(|error| super::read_failed("the tracker result", &error))?
             }
         };
+        if carried != 0 && bytes.len() >= lanes {
+            let tail: Vec<cubecl::bytes::Bytes> = bytes.split_off(lanes);
+            self.reads.deliver(tail);
+        }
 
         let mut read: usize = 0;
         for (lane, count) in self.pending.iter().enumerate() {

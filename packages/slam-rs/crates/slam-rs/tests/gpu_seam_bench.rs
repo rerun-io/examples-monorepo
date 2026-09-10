@@ -47,7 +47,17 @@ fn the_gpu_frontend_reports_its_host_seam() {
         return;
     };
 
-    let config = common::config();
+    let mut config = common::config();
+    // The vendored config detects on every frameset. `SLAM_RS_SEAM_REDETECT`
+    // puts the fast profile's gate on instead (D75), which is the mix that
+    // decides whether speculating a selection pays: a frameset that detects
+    // saves a read and one that skips wastes the FAST kernels.
+    if let Some(ratio) = std::env::var("SLAM_RS_SEAM_REDETECT")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+    {
+        config.port_redetect_survivor_ratio = ratio;
+    }
     // `SLAM_RS_SEAM_CAMERAS` widens the two-camera fixture rig by repeating its
     // cameras, which is how a four-camera rig's batch shape is reachable from
     // the committed 960x960 frames.
@@ -103,6 +113,9 @@ fn the_gpu_frontend_reports_its_host_seam() {
     let mut stereo: Vec<u64> = Vec::with_capacity(count);
     let mut whole: Vec<u64> = Vec::with_capacity(count);
     let mut keypoints: usize = 0;
+    // Framesets that ran `addPoints`, which is the only thing the speculated
+    // selection is for: the id space only grows where a corner was registered.
+    let mut detected: usize = 0;
     // The marginal cost of one more synchronising read, measured where the
     // frontend pays it: `SLAM_RS_SEAM_EXTRA=<k>` adds k four-byte reads to every
     // frameset, on the same client the frontend uses.
@@ -120,6 +133,7 @@ fn the_gpu_frontend_reports_its_host_seam() {
             slam_rs::gpu::seam::reset();
         }
         let images: &[ImageU16] = &frames[order[index % order.len()]];
+        let ids_before: u64 = flow.last_keypoint_id();
         let mark: std::time::Instant = std::time::Instant::now();
         let frame = flow
             .process_frame(
@@ -135,6 +149,9 @@ fn the_gpu_frontend_reports_its_host_seam() {
         let elapsed: u64 = mark.elapsed().as_nanos() as u64;
         keypoints = frame.cameras[0].len();
         if index >= warmup {
+            if flow.last_keypoint_id() != ids_before {
+                detected += 1;
+            }
             let timings = flow.timings();
             pyramid.push(timings.pyramid_ns);
             detect.push(timings.detect_ns);
@@ -145,7 +162,8 @@ fn the_gpu_frontend_reports_its_host_seam() {
     }
 
     println!(
-        "MIO10 {count} framesets, {cameras} cameras, {keypoints} keypoints on camera 0\n\
+        "MIO10 {count} framesets, {cameras} cameras, {keypoints} keypoints on camera 0, \
+         {detected} detected\n\
          medians ms: whole {:.3} = pyramid {:.3} + detect {:.3} + track {:.3} + stereo {:.3}\n\
          {}",
         median(&mut whole),

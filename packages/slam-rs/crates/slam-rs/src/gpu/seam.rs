@@ -5,7 +5,9 @@
 //! question these answer is where the rest goes: how many launches, uploads and
 //! synchronising reads a frameset makes, and how long the host sits in each.
 //! The answer that shaped D77 was **five reads, 1.51 ms**, against 0.15 ms in
-//! every upload and nothing measurable in the launches.
+//! every upload and nothing measurable in the launches; D78 took the count to
+//! two by letting one stage's download carry another's buffers, so the reads
+//! here are counted by whoever *issued* them, not by whose data they hold.
 //!
 //! Relaxed atomics and one `Instant` pair per upload or read: about 0.6 µs a
 //! frameset against the 1600 it measures. `tests/gpu_seam_bench.rs` is the rig
@@ -66,9 +68,13 @@ impl Meter {
 pub static LAUNCH: Meter = Meter::new();
 /// `create_from_slice`: a logical allocation and a host-to-device write.
 pub static UPLOAD: Meter = Meter::new();
-/// The tracker batch's one download.
+/// The tracker batch's one download, which since D78 also carries whatever the
+/// corner scanner staged on the [`super::ReadRelay`] — so on the device lane
+/// this is where a frameset's cell keys are counted too.
 pub static READ_TRACK: Meter = Meter::new();
-/// The corner scanner's cell-key download.
+/// A download the corner scanner made itself: the band path's candidate image,
+/// and the cell keys of a frameset no tracker read carried — the first frameset
+/// of a run, and a scanner with no relay wired.
 pub static READ_DETECT: Meter = Meter::new();
 
 /// Count one launch.

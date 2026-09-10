@@ -621,30 +621,46 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
         Ok(())
     }
 
-    /// Answer every camera of a frameset's [`CornerScan::select_cells`] in one
-    /// device round trip, before the frameset asks for any of them.
+    /// Launch the [`CornerScan::select_cells`] of every camera `selects` names,
+    /// and download none of them.
     ///
     /// `selects[camera]` is [`cell_select`]'s answer for that camera, `None`
-    /// where the shape cannot take the device path at all. What this saves is a
-    /// wait, not arithmetic: the selection kernels read the frame and nothing
-    /// else, so every camera's can be launched together and downloaded once,
-    /// where the per-camera call synchronises once per camera. A backend that
-    /// takes it must answer the matching [`CornerScan::select_cells`] with the
-    /// same keys it downloaded here, and one that does nothing leaves every
-    /// `select_cells` to answer for itself.
+    /// where the shape cannot take the device path — or where the caller does
+    /// not want that camera's selection yet. What this saves is a wait, not
+    /// arithmetic: the selection kernels read the frame and nothing else, so
+    /// they can be launched before the frameset has decided anything at all,
+    /// and the answer picked up by [`CornerScan::take_cells`] behind whatever
+    /// download comes next. A backend that takes it must answer the matching
+    /// [`CornerScan::select_cells`] with the same keys, and one that does
+    /// nothing leaves every `select_cells` to answer for itself.
     ///
-    /// Called once per detecting frameset. Whatever it prepared is spent by the
-    /// `select_cells` calls that follow and must not outlive them.
+    /// Called once or twice per frameset, and it **clears** what a previous
+    /// call left: whatever a `submit_cells` prepares is spent by the
+    /// `select_cells` calls of its own frameset and must not outlive them.
     ///
     /// # Errors
     ///
     /// Whatever the backend's own scan can fail with.
-    fn prepare_cells(
+    fn submit_cells(
         &mut self,
         images: &[ImageU16],
         selects: &[Option<CellSelect>],
     ) -> Result<(), DetectError> {
         let _ = (images, selects);
+        Ok(())
+    }
+
+    /// Take what [`CornerScan::submit_cells`] launched, downloading it here only
+    /// if nothing else already has.
+    ///
+    /// Called once after every `submit_cells`, and after the download the
+    /// caller expected to carry it. A no-op for a backend whose `submit_cells`
+    /// is one.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the backend's own download can fail with.
+    fn take_cells(&mut self) -> Result<(), DetectError> {
         Ok(())
     }
 }
@@ -655,7 +671,7 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
 /// Mask-independent on purpose: `cell_masks` decides the rest of the gate and is
 /// not known until the frameset has masked the camera, while the kernels this
 /// describes read the frame and nothing else. So this is what
-/// [`CornerScan::prepare_cells`] can be handed before the frameset has run, and
+/// [`CornerScan::submit_cells`] can be handed before the frameset has run, and
 /// [`detect_keypoints_with_cells`] applies the mask half itself.
 #[must_use]
 pub fn cell_select(
@@ -842,18 +858,27 @@ impl DetectorScratch {
         }
     }
 
-    /// [`CornerScan::prepare_cells`] on the scanner this holds, which is the
+    /// [`CornerScan::submit_cells`] on the scanner this holds, which is the
     /// only way to it from outside this module.
     ///
     /// # Errors
     ///
     /// Whatever the scanner's own preparation can fail with.
-    pub fn prepare_cells(
+    pub fn submit_cells(
         &mut self,
         images: &[ImageU16],
         selects: &[Option<CellSelect>],
     ) -> Result<(), DetectError> {
-        self.scanner.prepare_cells(images, selects)
+        self.scanner.submit_cells(images, selects)
+    }
+
+    /// [`CornerScan::take_cells`] on the scanner this holds.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the scanner's own download can fail with.
+    pub fn take_cells(&mut self) -> Result<(), DetectError> {
+        self.scanner.take_cells()
     }
 }
 
