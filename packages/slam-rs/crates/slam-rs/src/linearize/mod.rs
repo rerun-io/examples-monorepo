@@ -46,6 +46,9 @@ mod abs_qr;
 mod dense_hb;
 mod landmark_block;
 mod reduce;
+mod relative_pose;
+
+pub(crate) use relative_pose::linearize_relative_pose;
 
 pub use abs_qr::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
 pub use dense_hb::DenseHbWorkspace;
