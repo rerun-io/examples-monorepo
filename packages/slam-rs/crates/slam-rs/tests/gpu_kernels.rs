@@ -1188,32 +1188,32 @@ fn a_batch_of_two_passes_answers_what_two_calls_do() {
     }
 
     // ── both launched, then one download
-    let mut batched: Vec<FlowResult> = (0..2)
-        .map(|_| FlowResult::with_capacity(MAX_KEYPOINTS))
-        .collect();
+    let mut passes = Vec::new();
     for lane in 0..2 {
         patches.prepare(&prev, points[lane], None).unwrap();
-        tracker
-            .submit_prepared(&prev, &next, &patches, &guesses[lane], &mut batched[lane])
-            .unwrap();
+        passes.push(
+            tracker
+                .submit_prepared(&prev, &next, &patches, &guesses[lane])
+                .unwrap(),
+        );
     }
-    tracker.collect(&mut batched).unwrap();
+    tracker.collect().unwrap();
 
     for lane in 0..2 {
         assert_eq!(
-            batched[lane].tracked(),
+            tracker.result(passes[lane]).tracked(),
             alone[lane].tracked(),
             "lane {lane} kept a different set out of the batch"
         );
         for index in 0..points[lane].len() {
             assert_eq!(
-                batched[lane].is_valid(index),
+                tracker.result(passes[lane]).is_valid(index),
                 alone[lane].is_valid(index),
                 "lane {lane}: patch {index} survived out of the batch and not alone"
             );
             if alone[lane].is_valid(index) {
                 assert_eq!(
-                    batched[lane].transform(index).translation,
+                    tracker.result(passes[lane]).transform(index).translation,
                     alone[lane].transform(index).translation,
                     "lane {lane}: patch {index} moved"
                 );

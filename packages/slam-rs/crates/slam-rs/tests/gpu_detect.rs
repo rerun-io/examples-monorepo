@@ -32,7 +32,7 @@ use slam_rs::frontend::detect::{
 };
 use slam_rs::frontend::patterns::Pattern51;
 use slam_rs::frontend::tracker::PatchTracker;
-use slam_rs::gpu::{GpuCornerScan, GpuPatchTracker, ReadRelay, gpu_client};
+use slam_rs::gpu::{GpuCornerScan, GpuPatchTracker, gpu_client};
 use slam_rs::image::ImageU16;
 
 mod common;
@@ -78,7 +78,7 @@ impl CornerScan for CountingScan {
         image: &ImageU16,
         select: &CellSelect,
         out: &mut Vec<u32>,
-    ) -> Result<(), DetectError> {
+    ) -> Result<slam_rs::frontend::cell::SelectionStatus, DetectError> {
         self.selections.fetch_add(1, Ordering::Relaxed);
         self.inner.select_cells(camera, image, select, out)
     }
@@ -783,88 +783,40 @@ mod batch_lifecycle {
         let want = fixture.batch_keys(&mut alone);
 
         // And the same two cameras with the tracker's `collect` in between.
-        let relay: ReadRelay = ReadRelay::default();
         let mut scanner: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
         let mut tracker: GpuPatchTracker<Pattern51, _> =
             GpuPatchTracker::new(gpu_client().unwrap(), 512, 4, 5, 4.0, 2).unwrap();
-        scanner.share_reads(relay.clone());
-        tracker.share_reads(relay.clone());
+        scanner.share_reads(&mut tracker);
 
         scanner.submit_cells(images, selects).unwrap();
-        assert_eq!(relay.waiting(), 2, "both cameras are launched and unread");
-        assert_eq!(relay.carried(), 0, "nothing has downloaded them yet");
-        tracker.collect(&mut []).unwrap();
-        assert_eq!(relay.waiting(), 0, "the collect took the staged handles");
-        assert_eq!(relay.carried(), 2, "and left both cameras' keys behind");
+        let before = slam_rs::gpu::seam::snapshot();
+        tracker.collect().unwrap();
         scanner.take_cells().unwrap();
-        assert_eq!(relay.carried(), 0, "which the scanner then took");
+        let reads = slam_rs::gpu::seam::snapshot().delta(before);
+        assert_eq!(reads.read_track.calls, 1);
+        assert_eq!(reads.read_detect.calls, 0);
         assert_eq!(fixture.keys(&mut scanner), want, "through the relay");
     }
 
-    /// Two scanners on one relay each get their own keys.
-    ///
-    /// The relay holds one staging and one delivery, so a second scanner staging
-    /// over the first, and the tracker then carrying only the second's buffers, is
-    /// the sequence where an untagged delivery would be decoded by the first
-    /// scanner in its own camera order: wrong keypoints, silently. The shipped
-    /// wiring gives each frontend its own relay ([`slam_rs::gpu::gpu_backends`]),
-    /// which the type cannot state, so the tag is what makes the crossing
-    /// impossible — the loser pays for a read, which is all it pays.
-    ///
-    /// Different frames in the two scanners, and per camera, so any crossing at all
-    /// shows up against the independent scans.
+    /// Reusing a scanner discards the prior delivered generation.
     #[test]
-    fn two_scanners_on_one_relay_each_take_their_own_keys() {
+    fn a_retry_uses_only_the_new_generation() {
         let first = SelectionFixture::new([common::mio10_frame(0, 0), common::mio10_frame(1, 1)]);
         let second = SelectionFixture::new([common::mio10_frame(2, 1), common::mio10_frame(2, 0)]);
-
-        // What each set of frames answers on a scanner that shares nothing.
-        let mut want: Vec<Vec<Vec<u32>>> = Vec::new();
-        for fixture in [&first, &second] {
-            let mut alone = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
-            want.push(fixture.batch_keys(&mut alone));
-        }
-        for (camera, (one, two)) in want[0].iter().zip(&want[1]).enumerate() {
-            assert_ne!(
-                one, two,
-                "camera {camera} holds the same frame in both scanners"
-            );
-        }
-
-        // Both scanners and the tracker on one relay, which only this test does.
-        let relay: ReadRelay = ReadRelay::default();
-        let mut one: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
-        let mut two: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+        let mut alone = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+        let want = second.batch_keys(&mut alone);
+        let mut scanner = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
         let mut tracker: GpuPatchTracker<Pattern51, _> =
             GpuPatchTracker::new(gpu_client().unwrap(), 512, 4, 5, 4.0, 2).unwrap();
-        one.share_reads(relay.clone());
-        two.share_reads(relay.clone());
-        tracker.share_reads(relay.clone());
-
-        one.submit_cells(&first.images, &first.selects).unwrap();
-        two.submit_cells(&second.images, &second.selects).unwrap();
-        assert_eq!(relay.waiting(), 2, "the second staging replaced the first");
-        tracker.collect(&mut []).unwrap();
-        assert_eq!(relay.carried(), 2, "the collect carried the second's keys");
-
-        // The scanner whose staging was replaced asks first, and must refuse a
-        // delivery that answers the other's launches: its own keys, out of a read
-        // it makes here, and the other's delivery left where it was.
-        one.take_cells().unwrap();
-        assert_eq!(
-            first.keys(&mut one),
-            want[0],
-            "scanner whose staging was replaced"
-        );
-        assert_eq!(relay.carried(), 2, "the other scanner's delivery is intact");
-
-        two.take_cells().unwrap();
-        assert_eq!(
-            second.keys(&mut two),
-            want[1],
-            "scanner the download carried"
-        );
-        assert_eq!(relay.carried(), 0, "which its own scanner then took");
+        scanner.share_reads(&mut tracker);
+        scanner.submit_cells(&first.images, &first.selects).unwrap();
+        tracker.collect().unwrap();
+        scanner
+            .submit_cells(&second.images, &second.selects)
+            .unwrap();
+        tracker.collect().unwrap();
+        scanner.take_cells().unwrap();
+        assert_eq!(second.keys(&mut scanner), want);
     }
 
     /// A prepared selection is spent by the call that reads it, and a camera the

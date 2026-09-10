@@ -17,13 +17,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::{DMatrix, DVector, Matrix4, Matrix6};
 
-use crate::ba_base::{BundleAdjustmentBase, compute_rel_pose};
+use crate::ba_base::BundleAdjustmentBase;
 use crate::imu::{ImuBlock, ImuLinData, IntegratedImuMeasurement};
 use crate::landmark::Landmark;
 use crate::lie::{LieScalar, Se3};
 use crate::linearize::landmark_block::{LandmarkBlock, LandmarkBlockOptions};
 use crate::linearize::reduce::deterministic_reduce_scalar;
-use crate::linearize::{DenseHbWorkspace, LinearizeError, RelPoseLin};
+use crate::linearize::{DenseHbWorkspace, LinearizeError, RelPoseLin, linearize_relative_pose};
 use crate::types::{AbsOrderMap, FrameId, LandmarkId, MargLinData, POSE_VEL_BIAS_SIZE, TimeCamId};
 
 /// `LinearizationBase<Scalar, POSE_SIZE>::Options` (`linearization_base.hpp:23-26`),
@@ -323,10 +323,10 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             // `:219-221`: Jacobians at the linearization point.
             let mut d_rel_d_h: Matrix6<S> = Matrix6::zeros();
             let mut d_rel_d_t: Matrix6<S> = Matrix6::zeros();
-            let mut t_t_h: Se3<S> = compute_rel_pose(
-                state_h.pose_lin(),
+            let t_t_h: Se3<S> = linearize_relative_pose(
+                &state_h,
+                &state_t,
                 t_i_c_h,
-                state_t.pose_lin(),
                 t_i_c_t,
                 Some(&mut d_rel_d_h),
                 Some(&mut d_rel_d_t),
@@ -340,12 +340,6 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
                 if fixed.contains(&tcid_t.frame_id) {
                     d_rel_d_t = Matrix6::zeros();
                 }
-            }
-
-            // `:229-232`: the value, and only the value, at the current state.
-            if state_h.is_linearized() || state_t.is_linearized() {
-                t_t_h =
-                    compute_rel_pose(state_h.pose(), t_i_c_h, state_t.pose(), t_i_c_t, None, None);
             }
 
             rpl.t_t_h = t_t_h.matrix();
