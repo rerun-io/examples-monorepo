@@ -44,6 +44,7 @@ pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio   # the
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --rr-config.headless --rr-config.save data/replay-vio.rrd
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --segment <segment-id>       # another reference segment
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --rrd base.rrd --gt-rrd gt.rrd   # a recording of your own
+pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --catalog rerun+http://dgx-spark:9988   # from a catalog server, no NAS mount needed
 ```
 
 In a shell without `DISPLAY`, pass `--rr-config.headless` or the spawned viewer
@@ -341,8 +342,6 @@ Not in this branch, in the order they are likely to matter:
 - **Results as a catalog layer.** One layer per segment with the estimated poses, the
   landmarks and the keypoints on the base recording's entity paths, registered beside
   the ground truth, so a run is browsed in the viewer, not in a CSV.
-- **A catalog URL on the command line.** The feed reads the catalog already; the replay
-  tool only reaches it through manifest entries.
 - **Less code.** Under the tolerance requirement (D60, D64) the Lie groups and the camera
   models could come from kornia-rs and the Eigen-order QR, LDLT and SVD from nalgebra;
   the ten-clip gate decides. About 2,800 lines.
