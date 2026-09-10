@@ -21,18 +21,6 @@ use slam_rs::image::ImageU16;
 
 mod common;
 
-/// One committed MIO10 frame as the frontend takes it: 960x960, `u8 << 8`.
-fn mio10_frame(frame: usize, camera: usize) -> ImageU16 {
-    let pgm: common::Pgm = common::read_pgm(&common::fixtures().join("flow/frames"), frame, camera);
-    let mut image: ImageU16 = ImageU16::zeros(pgm.width, pgm.height).unwrap();
-    for y in 0..pgm.height {
-        for x in 0..pgm.width {
-            image.set(x, y, u16::from(pgm.pixels[y * pgm.width + x]) << 8);
-        }
-    }
-    image
-}
-
 /// The median of a copy of `values`, which is what a stage timer is reported as.
 fn median(values: &mut [u64]) -> f64 {
     values.sort_unstable();
@@ -113,7 +101,7 @@ fn the_gpu_frontend_reports_its_host_seam() {
     let frames: Vec<Vec<ImageU16>> = (0..3)
         .map(|frame| {
             (0..cameras)
-                .map(|camera| mio10_frame(frame, camera % 2))
+                .map(|camera| common::mio10_frame(frame, camera % 2))
                 .collect()
         })
         .collect();
@@ -238,7 +226,7 @@ fn the_queue_peak_of_a_whole_frameset_stays_below_the_channel_depth() {
         let frames: Vec<Vec<ImageU16>> = (0..3)
             .map(|frame| {
                 (0..cameras)
-                    .map(|camera| mio10_frame(frame, camera % 2))
+                    .map(|camera| common::mio10_frame(frame, camera % 2))
                     .collect()
             })
             .collect();

@@ -205,25 +205,12 @@ fn detection_agrees(
     }
 }
 
-/// The three framesets of MIO10 the flow fixtures carry, as the detector sees
-/// them: 960x960, the geometry the msd-index rig runs.
-fn mio10_frame(frame: usize, camera: usize) -> ImageU16 {
-    let pgm: common::Pgm = common::read_pgm(&common::fixtures().join("flow/frames"), frame, camera);
-    let mut image: ImageU16 = ImageU16::zeros(pgm.width, pgm.height).unwrap();
-    for y in 0..pgm.height {
-        for x in 0..pgm.width {
-            image.set(x, y, u16::from(pgm.pixels[y * pgm.width + x]) << 8);
-        }
-    }
-    image
-}
-
 /// Every cell of a real MIO10 frameset, both cameras, empty and half full.
 #[test]
 fn the_gpu_cell_selection_matches_the_host_walk_on_a_real_frameset() {
     let config: DetectorConfig = detector_config(472.0);
     for camera in 0..2 {
-        let image: ImageU16 = mio10_frame(0, camera);
+        let image: ImageU16 = common::mio10_frame(0, camera);
         let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
         let cells: usize = grid.rows * grid.columns;
 
@@ -271,7 +258,7 @@ fn the_gpu_cell_selection_matches_the_host_walk_on_a_real_frameset() {
 /// The gates the kernel took over, one at a time, and the budget the host keeps.
 #[test]
 fn the_gpu_cell_selection_applies_the_same_gates() {
-    let image: ImageU16 = mio10_frame(1, 0);
+    let image: ImageU16 = common::mio10_frame(1, 0);
     let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
     let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
 
@@ -495,7 +482,7 @@ fn the_gpu_cell_selection_matches_the_host_walk_on_overhanging_cells() {
 /// vacuously.
 #[test]
 fn the_gpu_cell_selection_stops_at_the_last_rung_the_walk_visits() {
-    let image: ImageU16 = mio10_frame(0, 0);
+    let image: ImageU16 = common::mio10_frame(0, 0);
     let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
     let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
 
@@ -581,7 +568,7 @@ fn a_frame_at_the_key_limit_takes_the_band_walk() {
 /// the ladder decides how many corners a cell contributes and one key cannot say.
 #[test]
 fn a_budget_over_one_point_per_cell_takes_the_band_walk() {
-    let image: ImageU16 = mio10_frame(1, 0);
+    let image: ImageU16 = common::mio10_frame(1, 0);
     let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
     let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
     let config: DetectorConfig = DetectorConfig {
@@ -618,7 +605,7 @@ fn the_gpu_cell_selection_holds_for_every_camera_slot() {
 
     for camera in 0..4 {
         // Two frames alternating, so consecutive slots hold different pixels.
-        let image: ImageU16 = mio10_frame(camera % 2, camera % 2);
+        let image: ImageU16 = common::mio10_frame(camera % 2, camera % 2);
         let grid: CellGrid = CellGrid::new(image.width(), image.height(), 50).unwrap();
         let counts: Vec<i32> = vec![0; grid.rows * grid.columns];
         let occupancy: Occupancy<'_> = Occupancy {
@@ -659,7 +646,7 @@ fn the_gpu_cell_selection_holds_for_every_camera_slot() {
 #[test]
 fn the_batched_preparation_answers_what_the_per_camera_call_does() {
     let config: DetectorConfig = detector_config(472.0);
-    let images: [ImageU16; 2] = [mio10_frame(0, 0), mio10_frame(1, 1)];
+    let images: [ImageU16; 2] = [common::mio10_frame(0, 0), common::mio10_frame(1, 1)];
     let grid: CellGrid = CellGrid::new(images[0].width(), images[0].height(), 50).unwrap();
     let selects: Vec<Option<CellSelect>> = images
         .iter()
@@ -711,7 +698,7 @@ fn the_batched_preparation_answers_what_the_per_camera_call_does() {
 #[test]
 fn the_tracker_download_carries_the_scanner_keys() {
     let config: DetectorConfig = detector_config(472.0);
-    let images: [ImageU16; 2] = [mio10_frame(0, 0), mio10_frame(1, 1)];
+    let images: [ImageU16; 2] = [common::mio10_frame(0, 0), common::mio10_frame(1, 1)];
     let grid: CellGrid = CellGrid::new(images[0].width(), images[0].height(), 50).unwrap();
     let selects: Vec<Option<CellSelect>> = images
         .iter()
@@ -772,8 +759,8 @@ fn the_tracker_download_carries_the_scanner_keys() {
 #[test]
 fn two_scanners_on_one_relay_each_take_their_own_keys() {
     let config: DetectorConfig = detector_config(472.0);
-    let first: [ImageU16; 2] = [mio10_frame(0, 0), mio10_frame(1, 1)];
-    let second: [ImageU16; 2] = [mio10_frame(2, 1), mio10_frame(2, 0)];
+    let first: [ImageU16; 2] = [common::mio10_frame(0, 0), common::mio10_frame(1, 1)];
+    let second: [ImageU16; 2] = [common::mio10_frame(2, 1), common::mio10_frame(2, 0)];
     let grid: CellGrid = CellGrid::new(first[0].width(), first[0].height(), 50).unwrap();
     let selects: Vec<Option<CellSelect>> = first
         .iter()
@@ -862,7 +849,7 @@ fn two_scanners_on_one_relay_each_take_their_own_keys() {
 #[test]
 fn a_prepared_selection_is_spent_once() {
     let config: DetectorConfig = detector_config(472.0);
-    let images: [ImageU16; 2] = [mio10_frame(0, 0), mio10_frame(1, 1)];
+    let images: [ImageU16; 2] = [common::mio10_frame(0, 0), common::mio10_frame(1, 1)];
     let grid: CellGrid = CellGrid::new(images[0].width(), images[0].height(), 50).unwrap();
     let select: CellSelect =
         slam_rs::frontend::detect::cell_select(&images[0], &grid, &config).unwrap();
