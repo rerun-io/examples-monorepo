@@ -61,6 +61,8 @@ impl<S: LieScalar> EigenLdlt<S> {
         // `:336-338`); step `k` reads and writes its first `k` entries, so
         // hoisting it here changes no read and no write.
         let mut temp: Vec<S> = vec![S::zero(); size];
+        // The trailing update's accumulators, one per row below the pivot.
+        let mut accumulator: Vec<S> = vec![S::zero(); size];
 
         for k in 0..size {
             // "Find largest diagonal element" (`:305-307`). `maxCoeff` reports
@@ -112,12 +114,31 @@ impl<S: LieScalar> EigenLdlt<S> {
                 }
                 mat[(k, k)] -= diagonal; // `:337`
                 if rs > 0 {
-                    for i in (k + 1)..size {
-                        let mut sum: S = S::zero();
-                        for (j, entry) in temp.iter().enumerate() {
-                            sum += mat[(i, j)] * *entry;
+                    // `:338`, one accumulator per trailing row instead of one
+                    // fold per row.
+                    //
+                    // Eigen's expression is `A(k+1.., 0..k) * temp`, a
+                    // matrix-vector product whose every output coefficient sums
+                    // over `j`. Row `i`'s additions still happen in ascending
+                    // `j` — `j` is the outer loop, so each `acc[i]` is touched
+                    // once per `j`, in order — so no sum is reassociated; what
+                    // changes is that the coefficients are read down a column
+                    // of the column-major factor, contiguously, rather than
+                    // across a row at a stride of `nrows`.
+                    let column_stride: usize = mat.nrows();
+                    let acc: &mut [S] = &mut accumulator[..rs];
+                    acc.fill(S::zero());
+                    let data: &[S] = mat.as_slice();
+                    for (j, entry) in temp.iter().enumerate() {
+                        let factor: S = *entry;
+                        let base: usize = j * column_stride + k + 1;
+                        let trailing: &[S] = &data[base..base + rs];
+                        for (slot, value) in acc.iter_mut().zip(trailing.iter()) {
+                            *slot += *value * factor;
                         }
-                        mat[(i, k)] -= sum; // `:338`
+                    }
+                    for (i, sum) in acc.iter().enumerate() {
+                        mat[(k + 1 + i, k)] -= *sum;
                     }
                 }
             }
