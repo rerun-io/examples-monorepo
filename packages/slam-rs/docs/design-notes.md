@@ -1099,3 +1099,79 @@ show, and they are not measured here.
 
 - **D74** — Speed profile: vendored configs stay C++-faithful; speed knobs live in `configs/profiles/fast.json`, opted into with `--profile fast` (2026-09-10)
 - **D75** — Redetect on demand: the fast profile skips `addPoints` until camera 0 falls under `port.redetect_survivor_ratio` of its last detection (2026-09-10)
+
+## D76 — The fast profile solves the window at keyframes and the newest state alone between them
+
+basalt is a fixed-lag smoother: `measure` re-linearizes and re-solves the whole
+sliding window — 7 keyframe pose blocks plus 3 states, ~87 unknowns — on **every**
+frameset (`estimator/mod.rs`, `optimize`), although the keyframe cadence on MIO10
+is 7.33 framesets. cuVSLAM instead solves only the newest pose against **fixed**
+landmarks every frame (`libs/pnp/multicam_pnp.cpp`, 0.064 ms; `soft_inertial_pnp`,
+0.450 ms) and runs bundle adjustment at keyframes only; ORB-SLAM makes the same
+split. That schedule is most of cuVSLAM's 4x on this clip: after wave 1 the
+estimator is 1.519 ms of a 2.974 ms MIO10 call and 6 of every 7 of those
+milliseconds buy a joint solve the frame did not need.
+
+**The knob.** `port.frame_update_max_iterations`, `0` by default. At `0` — where
+every basalt file and `VioConfig::default` leave it — `measure` runs the joint
+solve on every frameset, which is basalt's schedule byte for byte. Above zero, a
+frameset that did **not** take a keyframe runs a *frame update* instead, capped at
+that many LM steps. `configs/profiles/fast.json` sets `2`; nothing else does. One
+knob rather than a `bool` plus a count: the two cannot then be set against each
+other, and a zero cap can only mean "off". The key is `port.` for D75's reason —
+basalt has no field for it and the vendored `configs/*.json` stay the documents
+the C++ reference runs read.
+
+**What the frame update solves.** The 15 unknowns of the newest state (pose,
+velocity, both biases) against exactly two factor groups:
+
+* every observation the newest frameset filed on a landmark the window already
+  hosts, with the landmark, its host keyframe and every older state **held**.
+  The residual is `linearize_point`, the relative pose and its target Jacobian
+  are `compute_rel_pose`, and the Huber weight is the landmark block's own
+  `compute_error_weight`, now a free function both paths call — there is one
+  reprojection model in the crate, not two;
+* the IMU factor from the previous state, built by the same `ImuBlock::linearize`
+  the window solve uses. Its 30x30 `add_dense_h_b` is formed and the newest
+  state's 15x15 corner is taken, which is what holding the previous state means.
+
+The marginalization prior is **absent by construction, not by choice**: it can only
+contain blocks frozen at a linearization point (`compute_delta` refuses any other),
+and the newest state is appended unfrozen, so the prior's cost does not depend on
+the one variable the frame update moves. The code asserts this per frame and falls
+back to the joint solve if the prior ever does carry the newest state.
+
+The LM loop is the window loop's shape, constant for constant: `lambda` reset to
+`vio_lm_lambda_initial` every frame (D11), `lambda·diag(H)` damping with the same
+floor (D10), the iteration budget shared with backtracking (D12), the increment
+negated before it is applied (D13), Nielsen's update on an accept, and the same
+`1e-6`/`1e-4` convergence pair. The predicted decrease is
+`-(inc·b + 0.5·incᵀ H inc)`, which is what the window's `back_substitute`
+accumulates when nothing has been eliminated. `damping.lambda_vee` is shared with
+the window solve exactly as it is shared between framesets today.
+
+**What does not change.** Observations are filed into the landmark database before
+the keyframe vote, so a frame update still feeds the next joint solve everything it
+saw. The keyframe decision is unchanged (camera 0's connected ratio below
+`vio_new_kf_keypoints_thresh` and at least `vio_min_frames_after_kf` framesets
+since the last). `vio_marg_lost_landmarks` still culls from the frameset's own
+observations, never from whether the joint solve ran. **Marginalization keeps its
+own trigger and runs every frameset** — deferring it to keyframes grows the
+ordering by 15 unknowns per skipped frame, `get_dense_h_b` grows quadratically in
+that, and the keyframe solve costs more than the six skipped ones saved. Warmup is
+the joint solve's: the frame update runs only once `opt_started` is true.
+
+**The FEJ consequence, stated.** `marginalize` freezes `last_state_to_marg` at its
+current value and folds the window into the prior. Under this schedule that value
+is a frame update's, not a joint solve's, for the framesets between keyframes, so
+the prior is anchored at a point that saw its own observations and its own IMU
+factor but not the window's second-order coupling. This is the lever's whole risk
+and it is why the gate is ATE, measured, and not an argument.
+
+**Expected numbers, before measuring.** ~70 observations and one IMU factor per
+frame update against ~440 observations, 55 landmark blocks and an 87x87 dense
+build per joint solve: the non-keyframe `measure` should be the 0.097 ms
+marginalization plus ~0.05 ms, against 1.519 ms today, for a median gain near
+1.3 ms and an amortized `measure` near 0.3 ms. The accuracy band is 1.654 cm on
+MIO10 against 1.447 today — 14% of headroom.
+- **D76** — The fast profile runs the joint solve at keyframes and a 15-dof fixed-landmark update on the framesets between (2026-09-10)
