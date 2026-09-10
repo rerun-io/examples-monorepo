@@ -392,7 +392,7 @@ pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
 /// takes the tail (D78).
 ///
 /// Shared explicitly by [`gpu_backends`] rather than kept in an ambient
-/// static like [`QUEUED`]: an over-count there drains early, which is only
+/// static like `QUEUED`: an over-count there drains early, which is only
 /// conservative, where a crossed relay would hand one frontend another's
 /// pixels. A stage that finds nothing here downloads for itself, which is what
 /// the first frameset of a run — no temporal pass, so no `collect` — does.

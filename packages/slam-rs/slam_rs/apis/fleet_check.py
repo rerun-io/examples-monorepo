@@ -295,11 +295,10 @@ Lane: TypeAlias = Literal["cpu", "wgpu"]
 def this_lane(gpu: bool) -> Lane:
     """The lane this core runs a clip on, named after the runtime rather than the flag.
 
-    ``--gpu`` does not say which GPU: the NVIDIA ``gpu`` feature and the portable
-    ``gpu-wgpu`` one are two builds of one source behind the same flag, and they
-    do not agree on every clip, so a row labelled ``gpu`` has lost the first
-    thing its reader asks. The extension reports the feature it was compiled with
-    (:data:`slam_rs._core.gpu_backend`) and the lane is that name.
+    ``--gpu`` does not say which runtime ran, and a row labelled ``gpu`` has
+    lost the first thing its reader asks. The extension reports the runtime it
+    was compiled with (:data:`slam_rs._core.gpu_backend`) and the lane is that
+    name.
 
     Args:
         gpu: Whether the run was asked for the GPU frontend.

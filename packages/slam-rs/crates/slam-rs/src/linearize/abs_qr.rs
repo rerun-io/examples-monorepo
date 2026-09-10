@@ -339,8 +339,8 @@ impl<S: LieScalar> Reducible for DensePartial<S> {
 /// linearizer's own leaf scratch: seven `87x87` `f32` matrices on the median
 /// MIO10 frame. The Levenberg-Marquardt loop calls it **once per inner step** —
 /// seven times on that frame — and every one of those buffers is either zeroed
-/// on entry ([`DensePartial::reset_sized`]) or reset by the reduction before a
-/// leaf writes it ([`Reducible::reset`], which restores exactly `+0.0` over the
+/// on entry (`DensePartial::reset_sized`) or reset by the reduction before a
+/// leaf writes it (`Reducible::reset`, which restores exactly `+0.0` over the
 /// columns that were written), so a buffer that persists is the same
 /// arithmetic on the same values.
 ///

@@ -62,7 +62,7 @@ const IMU_BLOCK_SIZE: usize = 2 * POSE_VEL_BIAS_SIZE;
 
 /// Which precondition sent a frameset back to the joint solve.
 ///
-/// [`SqrtKeypointVio::frame_update`] serves only a frameset whose newest state
+/// `SqrtKeypointVio::frame_update` serves only a frameset whose newest state
 /// is genuinely joined to its predecessor by the preintegration the joint solve
 /// itself would use, and only while the prior leaves that state free. Naming
 /// each refusal is what makes "the update never engaged on this clip" a
@@ -88,7 +88,7 @@ pub enum FrameUpdateDecline {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameUpdateOutcome {
     /// The knob is off, the frameset took a keyframe, or the warmup still owns
-    /// the window: [`SqrtKeypointVio::frame_update`] was never called.
+    /// the window: `SqrtKeypointVio::frame_update` was never called.
     NotAttempted,
     /// The frame update solved this frameset.
     Taken,

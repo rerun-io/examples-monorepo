@@ -123,7 +123,7 @@ impl Vio {
     /// `gpu` runs the frontend's pyramid, patch build and KLT tracker through
     /// CubeCL on this host's GPU instead of the CPU port (decision D21). The
     /// default is the CPU, which is what every accuracy reference was produced
-    /// on; a build without the `gpu` cargo feature refuses `gpu=True` rather
+    /// on; a build without the `gpu-wgpu` cargo feature refuses `gpu=True` rather
     /// than ignoring it, and so does a build that has the feature on a host
     /// with no usable GPU — a missing driver library, a driver that will not
     /// initialise, no visible device, no adapter — each a `ValueError` naming
@@ -717,7 +717,7 @@ fn float64_triples(object: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<[f64; 
 /// basalt's `VioConfig`, as `data/**/*_config.json` carries it.
 ///
 /// A fresh instance is `VioConfig::VioConfig()`, the same defaults the C++
-/// constructor sets; [`VioConfig::from_json`] then overwrites whatever keys a
+/// constructor sets; `VioConfig::from_json` then overwrites whatever keys a
 /// file names, leaving the rest alone, as cereal does.
 #[pyclass(module = "slam_rs._core", skip_from_py_object)]
 #[derive(Debug, Clone)]
@@ -861,7 +861,7 @@ struct CameraKeypoints {
     num_new: usize,
 }
 
-/// What one [`OpticalFlow::process`] call produced.
+/// What one `OpticalFlow::process` call produced.
 #[pyclass(module = "slam_rs._core", frozen)]
 #[derive(Debug)]
 pub struct FlowFrame {
