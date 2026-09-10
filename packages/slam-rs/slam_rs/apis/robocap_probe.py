@@ -114,7 +114,7 @@ def main(config: Config) -> None:
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / f"robocap-{session.session_id}" / "slam_rs.csv"
     calibration: _core.Calibration
     flow_config: _core.VioConfig
-    calibration, flow_config = robocap_estimator_files(manifest, profile=config.profile)
+    calibration, flow_config, _config_text = robocap_estimator_files(manifest, profile=config.profile)
     cpp: Trajectory = robocap_cpp_trajectory(manifest, session)
     print(f"{session.segment_id}: basalt C++ {len(cpp)} poses from {session.slam_path.name} (expected {session.basalt_num_poses})")
     print(f"basalt calibration {manifest.robocap.calibration} at downscale {manifest.robocap.downscale}: {list(calibration.resolution)}")

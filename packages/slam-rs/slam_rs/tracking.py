@@ -30,7 +30,15 @@ from scipy.spatial.transform import Rotation
 
 from slam_rs import _core
 from slam_rs.catalog_feed import DEFAULT_WINDOW_S, CameraCalib, Frameset, LocalSegment, RigProfile, SegmentFeed, open_segment, read_rig_trajectory
-from slam_rs.reference import ImuParameters, ReferenceManifest, ReferenceSegment, RobocapSession, flow_config, profiled_config_text
+from slam_rs.reference import (
+    ImuParameters,
+    ReferenceManifest,
+    ReferenceSegment,
+    RobocapSession,
+    config_text_sha256,
+    profiled_config_text,
+    resolved_flow_config,
+)
 from slam_rs.trajectory import Trajectory, shift_clock
 
 MAX_HELD_FRAMESETS: int = 2
@@ -127,9 +135,15 @@ class SegmentRun:
     inertial samples covering them when the clip ended."""
     wall_s: float
     """Wall time the feed loop took: decode plus ``track``, nothing logged."""
+    config_sha256: str
+    """SHA-256 of the exact config text the estimator was built from (:func:`~slam_rs.reference.config_text_sha256`).
+
+    Taken where the text is parsed, so a tool that exports it cannot name a
+    config the estimator did not read.
+    """
 
 
-def _drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max_framesets: int | None = None) -> SegmentRun:
+def _drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max_framesets: int | None = None, *, config_sha256: str) -> SegmentRun:
     """Feed one open segment through the estimator with nothing logged, and time it.
 
     This is the loop the C++ reference timed, so the wall starts with the first
@@ -143,6 +157,7 @@ def _drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, ma
         lockstep: The estimator to drive, already built from that rig's calibration and config.
         stop_ns: Stop before a frameset past this feed timestamp; None replays the segment.
         max_framesets: Stop after this many framesets; None replays the segment.
+        config_sha256: Digest of the config text ``lockstep``'s estimator was built from, carried into the result.
 
     Returns:
         The estimated trajectory, the two counts the gate reads, and the wall time.
@@ -180,7 +195,13 @@ def _drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, ma
     )
     # Whatever is still held never got samples covering it, so it produced no
     # pose: that, and only that, is a lost frameset.
-    return SegmentRun(estimate=shift_clock(estimate, feed.export_offset_ns), framesets=replayed, lost=len(lockstep.pending), wall_s=wall_s)
+    return SegmentRun(
+        estimate=shift_clock(estimate, feed.export_offset_ns),
+        framesets=replayed,
+        lost=len(lockstep.pending),
+        wall_s=wall_s,
+        config_sha256=config_sha256,
+    )
 
 
 def run_segment(
@@ -210,8 +231,11 @@ def run_segment(
     source: LocalSegment = LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path)
     feed: SegmentFeed
     with open_segment(source, segment.imu) as feed:
-        lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment, profile=profile), gpu=gpu))
-        return _drive(feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets)
+        flow: _core.VioConfig
+        config_text: str
+        flow, config_text = resolved_flow_config(manifest, segment, profile=profile)
+        lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow, gpu=gpu))
+        return _drive(feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets, config_sha256=config_text_sha256(config_text))
 
 
 def robocap_cpp_trajectory(manifest: ReferenceManifest, session: RobocapSession) -> Trajectory:
@@ -234,7 +258,9 @@ def robocap_cpp_trajectory(manifest: ReferenceManifest, session: RobocapSession)
     return shift_clock(read_rig_trajectory(session.slam_path), manifest.robocap.imu.cam_time_offset_ns)
 
 
-def robocap_estimator_files(manifest: ReferenceManifest, profile: Literal["reference", "fast"] = "reference") -> tuple[_core.Calibration, _core.VioConfig]:
+def robocap_estimator_files(
+    manifest: ReferenceManifest, profile: Literal["reference", "fast"] = "reference"
+) -> tuple[_core.Calibration, _core.VioConfig, str]:
     """The calibration and the VIO config basalt itself ran the RoboCap lane with (C72).
 
     From the two files rather than from the recording, because the number this
@@ -248,16 +274,16 @@ def robocap_estimator_files(manifest: ReferenceManifest, profile: Literal["refer
         manifest: The reference set, which names both files relative to the package root.
 
     Returns:
-        The calibration at the manifest's downscale, and the flow config.
+        The calibration at the manifest's downscale, the flow config, and the
+        exact text the config was parsed from, which is what a run's provenance
+        digest is taken over.
     """
     calibration: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
-    flow: _core.VioConfig = _core.VioConfig.from_json(profiled_config_text(manifest.package_root / manifest.robocap.vio_config, profile, manifest.package_root / "configs/profiles"))
-    return calibration, flow
+    config_text: str = profiled_config_text(manifest.package_root / manifest.robocap.vio_config, profile, manifest.package_root / "configs/profiles")
+    return calibration, _core.VioConfig.from_json(config_text), config_text
 
 
-def check_calibration_matches_recording(
-    basalt: _core.Calibration, cameras: tuple[CameraCalib, ...], imu: ImuParameters, downscale: int
-) -> None:
+def check_calibration_matches_recording(basalt: _core.Calibration, cameras: tuple[CameraCalib, ...], imu: ImuParameters, downscale: int) -> None:
     """Refuse a C++ calibration that is not the rig the recording and the manifest describe.
 
     Everything the file carries is compared, not just the resolution: the lenses
@@ -328,10 +354,18 @@ def check_calibration_matches_recording(
         if any(abs(value - mine) > 1e-12 for value in theirs):
             raise ValueError(f"basalt's {name} is {written[name]}, the manifest gives {mine}")
     if written["cam_time_offset_ns"] != 0:
-        raise ValueError(f"basalt's calibration carries cam_time_offset_ns {written['cam_time_offset_ns']}; the feed applies that offset, so the file must not")
+        raise ValueError(
+            f"basalt's calibration carries cam_time_offset_ns {written['cam_time_offset_ns']}; the feed applies that offset, so the file must not"
+        )
 
 
-def run_robocap(manifest: ReferenceManifest, session: RobocapSession, seconds: float = 0.0, window_s: float = DEFAULT_WINDOW_S, profile: Literal["reference", "fast"] = "reference") -> SegmentRun:
+def run_robocap(
+    manifest: ReferenceManifest,
+    session: RobocapSession,
+    seconds: float = 0.0,
+    window_s: float = DEFAULT_WINDOW_S,
+    profile: Literal["reference", "fast"] = "reference",
+) -> SegmentRun:
     """Drive one RoboCap session through :class:`slam_rs._core.Vio`, nothing logged.
 
     The estimator is configured from basalt's **own** two files rather than from
@@ -355,9 +389,11 @@ def run_robocap(manifest: ReferenceManifest, session: RobocapSession, seconds: f
     """
     calibration: _core.Calibration
     flow: _core.VioConfig
-    calibration, flow = robocap_estimator_files(manifest, profile=profile)
+    calibration, flow, config_text = robocap_estimator_files(manifest, profile=profile)
     feed: SegmentFeed
-    with open_segment(LocalSegment(base_rrd=session.base_path), manifest.robocap.imu, profile=RigProfile.from_robocap(manifest.robocap), window_s=window_s) as feed:
+    with open_segment(
+        LocalSegment(base_rrd=session.base_path), manifest.robocap.imu, profile=RigProfile.from_robocap(manifest.robocap), window_s=window_s
+    ) as feed:
         check_calibration_matches_recording(calibration, feed.cameras, manifest.robocap.imu, manifest.robocap.downscale)
         stop_ns: int | None = None if seconds <= 0.0 else int(feed.frame_t_ns[0]) + int(seconds * 1e9)
-        return _drive(feed, Lockstep(vio=_core.Vio(calibration, flow)), stop_ns)
+        return _drive(feed, Lockstep(vio=_core.Vio(calibration, flow)), stop_ns, config_sha256=config_text_sha256(config_text))

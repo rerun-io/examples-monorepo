@@ -29,7 +29,6 @@ from slam_rs.reference import (
     GatePolicy,
     ReferenceManifest,
     ReferenceSegment,
-    config_text_sha256,
     d60_failures,
     load_manifest,
 )
@@ -83,6 +82,8 @@ class ClipResult:
     D60's pose floor is not the only way a clip goes unscored; see ``ate`` for
     why a refusal is a row here.
     """
+    config_sha256: str
+    """SHA-256 of the exact config text the run's estimator was built from: run-level provenance, not a clip column."""
 
     @property
     def gt_allowed_cm(self) -> float:
@@ -258,6 +259,7 @@ def measure(
         truth_extent_m=extent_m(truth),
         poses_finite=nonfinite is None,
         unscored=unscored,
+        config_sha256=run.config_sha256,
     )
 
 
@@ -388,10 +390,17 @@ def main(config: Config) -> None:
     config_digests: dict[str, str] = {}
     results: list[ClipResult] = []
     for segment in segments:
+        result: ClipResult = measure(manifest, segment, config.gpu, profile=config.profile)
+        results.append(result)
+        # The run's own digest, taken over the text its estimator was parsed
+        # from, so the JSON cannot name a config the estimator did not read.
         if segment.dataset_name not in config_digests:
-            config_digests[segment.dataset_name] = config_text_sha256(manifest.vio_config_text(segment.dataset_name, config.profile))
-            print(f"CONFIG dataset={segment.dataset_name} config_sha256={config_digests[segment.dataset_name]}")
-        results.append(measure(manifest, segment, config.gpu, profile=config.profile))
+            config_digests[segment.dataset_name] = result.config_sha256
+            print(f"CONFIG dataset={segment.dataset_name} config_sha256={result.config_sha256}")
+        elif config_digests[segment.dataset_name] != result.config_sha256:
+            raise RuntimeError(
+                f"{segment.dataset_name}: the config changed during the run ({config_digests[segment.dataset_name]} then {result.config_sha256})"
+            )
         print(results[-1].row(machine))
         payload: dict[str, object] = {
             "machine": asdict(machine),

@@ -18,6 +18,7 @@ from slam_rs.reference import (
     GATE_POLICY_BY_NAME,
     GT_BAND_RATIO,
     MANIFEST_PATH,
+    SMOKE_SEGMENTS,
     TIER_BY_NAME,
     CppAte,
     ReferenceManifest,
@@ -25,6 +26,7 @@ from slam_rs.reference import (
     d60_failures,
     flow_config,
     load_manifest,
+    resolved_flow_config,
 )
 
 CATALOG_CONNECT_TIMEOUT_S: float = 3.0
@@ -232,6 +234,19 @@ def test_flow_config_loads_the_datasets_own_basalt_config(manifest: ReferenceMan
     # The two devices differ in the radius and the port sees that difference.
     radii: set[float] = {flow_config(manifest, segment).optical_flow_image_safe_radius for segment in manifest.segments}
     assert radii == {472.0, 340.0}
+
+
+def test_resolved_flow_config_hands_back_the_text_it_parsed(manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The text beside the config is the one the config came from, byte for byte, so a digest over it names what the estimator read."""
+    original = ReferenceManifest.vio_config_text
+    monkeypatch.setattr(ReferenceManifest, "vio_config_text", lambda self, name, profile="reference": original(self, name, profile) + "\n")
+    segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENTS[1])
+    config: _core.VioConfig
+    text: str
+    config, text = resolved_flow_config(manifest, segment)
+    assert text.endswith("}\n\n")  # the file's own newline, then the one the patch added
+    assert text == manifest.vio_config_text(segment.dataset_name)
+    assert config.to_json() == _core.VioConfig.from_json(text).to_json()
 
 
 def test_flow_config_refuses_a_radius_the_config_disagrees_with(tmp_path: Path) -> None:

@@ -698,8 +698,10 @@ def profiled_config_text(path: Path, profile: str = "reference", profiles: Path 
     return json.dumps(document)
 
 
-def flow_config(manifest: ReferenceManifest, segment: ReferenceSegment, profile: Literal["reference", "fast"] = "reference") -> _core.VioConfig:
-    """The basalt config the C++ reference ran this segment's dataset with.
+def resolved_flow_config(
+    manifest: ReferenceManifest, segment: ReferenceSegment, profile: Literal["reference", "fast"] = "reference"
+) -> tuple[_core.VioConfig, str]:
+    """The basalt config the C++ reference ran this segment's dataset with, and the text it was parsed from.
 
     basalt's constructor defaults are not its shipped files: ``msdmi_config.json``
     and ``msdmg_config.json`` set ``vio_marg_lost_landmarks`` to true where the
@@ -722,20 +724,29 @@ def flow_config(manifest: ReferenceManifest, segment: ReferenceSegment, profile:
         profile: Config overlay; reference preserves the C++ configuration.
 
     Returns:
-        The config to build an estimator or a frontend for that segment with.
+        The config to build an estimator or a frontend for that segment with,
+        and the exact text it was parsed from: a run's provenance digest is
+        taken over that text (:func:`config_text_sha256`), never over a second
+        read of the file.
 
     Raises:
         ValueError: If the file's image safe radius is not the one the manifest
             froze for this segment.
     """
-    config: _core.VioConfig = _core.VioConfig.from_json(manifest.vio_config_text(segment.dataset_name, profile=profile))
+    text: str = manifest.vio_config_text(segment.dataset_name, profile=profile)
+    config: _core.VioConfig = _core.VioConfig.from_json(text)
     frozen: float = segment.reference.optical_flow_image_safe_radius
     if config.optical_flow_image_safe_radius != frozen:
         raise ValueError(
             f"{segment.segment_id}: {manifest.dataset(segment.dataset_name).vio_config} sets "
             f"optical_flow_image_safe_radius = {config.optical_flow_image_safe_radius}, the manifest freezes {frozen}"
         )
-    return config
+    return config, text
+
+
+def flow_config(manifest: ReferenceManifest, segment: ReferenceSegment, profile: Literal["reference", "fast"] = "reference") -> _core.VioConfig:
+    """:func:`resolved_flow_config` for a caller that records no provenance, such as the replay tool."""
+    return resolved_flow_config(manifest, segment, profile=profile)[0]
 
 
 def _imu(block: dict[str, Any]) -> ImuParameters:

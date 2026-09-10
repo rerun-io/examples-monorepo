@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Literal
 
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb, this_temperature_c
-from slam_rs.reference import ReferenceManifest, RobocapSession, config_text_sha256, load_manifest, profiled_config_text
+from slam_rs.reference import ReferenceManifest, RobocapSession, load_manifest
 from slam_rs.tracking import SegmentRun, robocap_cpp_trajectory, run_robocap
 from slam_rs.trajectory import AteResult, Trajectory, ate, nonfinite_position_text, read_trajectory, write_trajectory
 
@@ -105,6 +105,8 @@ class RobocapRow:
     ``cpp_`` fields NaN and :attr:`cross_platform_ate_cm` unmeasured while the
     cost beside them is still measured; see ``ate`` for why it is a row.
     """
+    config_sha256: str
+    """SHA-256 of the exact config text the run's estimator was built from."""
 
     def row(self) -> str:
         """This session as one row of the fleet's runtime-budget table."""
@@ -224,6 +226,7 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
             temp_c_after=after,
             cross_platform_ate_cm=across,
             unscored=unscored,
+            config_sha256=run.config_sha256,
         ),
         run.estimate,
     )
@@ -247,21 +250,18 @@ def main(config: Config) -> None:
     machine: Machine = this_machine()
     print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores")
     print(f"{session.segment_id}: {session.base_path.name} against {session.slam_path.name} ({session.basalt_num_poses} C++ poses)")
-    config_digest: str = config_text_sha256(
-        profiled_config_text(manifest.package_root / manifest.robocap.vio_config, config.profile, manifest.package_root / "configs/profiles")
-    )
-    print(f"profile={config.profile} config_sha256={config_digest}")
     started: float = time.monotonic()
     row: RobocapRow
     estimate: Trajectory
     row, estimate = measure(manifest, session, config, machine)
+    print(f"profile={config.profile} config_sha256={row.config_sha256}")
     output_csv: Path = config.output_csv if config.output_csv is not None else config.output_json.with_suffix(".csv")
     # Above both writes: a run that spent 52.9 s of video must not lose it to a
     # directory that is not there. `write_trajectory` makes its own parents,
     # which is why the CSV used to work by accident when the two shared one.
     config.output_json.parent.mkdir(parents=True, exist_ok=True)
     write_trajectory(output_csv, estimate)
-    config.output_json.write_text(json.dumps({"profile": config.profile, "config_sha256": config_digest, **asdict(row)}, indent=2) + "\n")
+    config.output_json.write_text(json.dumps({"profile": config.profile, **asdict(row)}, indent=2) + "\n")
     print(row.row())
     print(
         f"{row.tracked} tracked poses -> {output_csv}; {row.cpp_rmse_cm:.2f} cm rmse / {row.cpp_max_cm:.2f} max / "

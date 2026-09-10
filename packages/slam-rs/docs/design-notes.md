@@ -846,7 +846,7 @@ the same physical point across lanes. The scalar correction closes the measured
 miss; it does not make every frontend value closer to CPU.
 
 All **20 GPU kernel tests** and GPU all-target Clippy pass. The MIO10 CPU bench
-CSV is byte-identical. The five GPU bench trajectories change from pose 4, with
+CSV is byte-identical. The four GPU bench trajectories change from pose 4, with
 maximum position shifts of 0.29–2.35 mm and GT ATE changes below 0.0011 cm:
 
 | Clip | Before GT ATE (cm) | After GT ATE (cm) |
