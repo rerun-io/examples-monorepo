@@ -174,7 +174,7 @@ def check_scoring_inputs(manifest: ReferenceManifest, segment: ReferenceSegment)
     return reference.path, segment.gt_csv
 
 
-def measure(manifest: ReferenceManifest, segment: ReferenceSegment, gpu: bool = False, profile: Literal["reference", "fast"] = "reference") -> ClipResult:
+def measure(manifest: ReferenceManifest, segment: ReferenceSegment, gpu: bool = False, profile: Literal["reference", "fast"] = "reference", decoder: Literal["dav1d", "nvdec"] = "dav1d") -> ClipResult:
     """Run one clip through the estimator and score it against both references.
 
     Args:
@@ -204,7 +204,7 @@ def measure(manifest: ReferenceManifest, segment: ReferenceSegment, gpu: bool = 
     # costs nothing either.
     cpp: Trajectory = read_trajectory(cpp_csv)
     truth: Trajectory = read_trajectory(gt_csv)
-    run: SegmentRun = run_segment(manifest, segment, gpu=gpu, profile=profile)
+    run: SegmentRun = run_segment(manifest, segment, gpu=gpu, profile=profile, decoder=decoder)
     tracked: int = len(run.estimate)
     # A run below the floor is not scored at all: `ate` has no pose to align and
     # raises, and a machine that tracked nothing is precisely the machine this
@@ -325,6 +325,8 @@ def this_lane(gpu: bool) -> Lane:
 class Config:
     """Run the reference smoke clips on this machine and report the D60 verdict."""
 
+    decoder: Literal["dav1d", "nvdec"] = "dav1d"
+    """Opt-in evaluation decoder; dav1d preserves the reference default."""
     profile: Literal["reference", "fast"] = "reference"
     """Config overlay applied before tracking."""
 
@@ -384,7 +386,7 @@ def main(config: Config) -> None:
     config.output_json.parent.mkdir(parents=True, exist_ok=True)
     results: list[ClipResult] = []
     for segment in segments:
-        results.append(measure(manifest, segment, config.gpu, profile=config.profile))
+        results.append(measure(manifest, segment, config.gpu, profile=config.profile, decoder=config.decoder))
         print(results[-1].row(machine))
         payload: dict[str, object] = {
             "machine": asdict(machine),

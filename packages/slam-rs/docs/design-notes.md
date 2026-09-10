@@ -1468,3 +1468,44 @@ the eleven are the tracker's three-per-pass. Merging a pass's positions,
 forward transforms and backward offsets into one buffer with three regions —
 the kernels already take base offsets — would take eleven to five.
 - **D78** — One GPU stage's download carries another's buffers: camera 0's cell selection is launched at the top of the frameset and read back by the temporal tracks (2026-09-10)
+
+## D79 — An opt-in NVDEC feed keeps the reference pixels
+
+Evaluation can select `decoder="nvdec"`; the default remains `dav1d` and the
+`cpu_gray8_dav1d_1thread` reference contract does not change. Packet reads,
+in-memory MP4 wrapping, timestamps, frameset assembly and stride behavior are
+shared. Each camera has one decoder, advanced sequentially. Every encoded frame
+is decoded, including frames that the yield stride omits.
+
+PyAV 18.1.0's `av1_cuvid` with CUDA hardware acceleration downloads an NV12
+surface. Software fallback is disabled. The feed requires NV12 and passes it
+through the same gray8 reformat and padded-row copy as dav1d. This preserves
+limited-to-full expansion without an RGB conversion. The generic native `av1`
+context rejected packets on this host; selecting `av1_cuvid` works. No new
+package or dependency pin was needed. This option is AV1-only and fails explicitly
+if hardware decoding is unavailable.
+
+The full NAS clips MIO10 (412 × 2 cameras), MGO09 (107 × 4), and Odyssey MOO09
+(147 × 2) produced identical `frames.sha256` files, line for line: 1,546 camera
+frames, zero differing pixels. Portrait MGO09 stays `(640, 480)`. A GPU-marked
+integration test checks the first 20 MIO10 framesets through the feed and the
+benchmark loader. The checked-in fixture has hashes and trajectories, not
+encoded video, so the test reads the NAS clip.
+
+One CPU core (3), one decoder thread, decode-only wall time over prefetched MP4
+bytes, including initialization, YUV download and gray8 conversion:
+
+| Clip | dav1d ms/frameset | NVDEC ms/frameset | dav1d / NVDEC |
+|---|---:|---:|---:|
+| MIO10 | 3.400 | 3.082 | 1.103× |
+| MGO09 | 3.713 | 14.063 | 0.264× |
+| MOO09 | 1.723 | 5.124 | 0.336× |
+
+Identity is proven; a general speedup is not. The scratch catalog runner defaults
+to dav1d because NVDEC loses on the smaller rigs. Replay and fleet checking pass
+the decoder to the feed. `bench_track` accepts an RRD and decodes once before its
+tracker-only rounds; NPZ input is already decoded and rejects an NVDEC request.
+Long catalog recordings use the separate streaming runner, not this in-memory
+microbenchmark loader.
+
+- **D79** — Evaluation can opt into raw-luma NVDEC with byte-identical gray8 output; dav1d stays the default (2026-09-10)

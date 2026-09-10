@@ -12,6 +12,9 @@ Three decisions are frozen here because each one silently changes the numbers:
   expansion) is what recovers the original grayscale; the raw Y plane is off by
   up to 17 LSB. dav1d also pads rows, so the decoded plane's ``line_size``
   exceeds the frame width and the copy honours it.
+  Evaluation may opt into ``nvdec``: PyAV's ``av1_cuvid`` downloads the NV12
+  surface before the same gray8 conversion. No RGB intermediate is permitted;
+  dav1d remains the default and the reference contract.
 * **Round trips.** Video, IMU and ground truth for one time window arrive in one
   query each, and long segments are cut into windows on ``video_time`` whose
   edges land on frames that are keyframes in *every* camera, so a window decodes
@@ -50,6 +53,7 @@ import av
 import numpy as np
 import pyarrow as pa
 import rerun as rr
+from av.codec.hwaccel import HWAccel
 from datafusion import col, lit
 from jaxtyping import Bool, Float64, Int64, UInt8
 from numpy import ndarray
@@ -69,6 +73,9 @@ CHILD_FROM_PARENT: int = 2
 """``rr.TransformRelation.ChildFromParent``; the only relation the extrinsic inversion is valid for."""
 DEFAULT_WINDOW_S: float = 60.0
 """Time window a long segment is cut into: a 7.6 s two-camera segment is 8.5 MB, so a 2,000 s one is not one query."""
+
+Decoder: TypeAlias = Literal["dav1d", "nvdec"]
+"""Evaluation decoder; dav1d remains the frozen default."""
 
 CameraModelName: TypeAlias = Literal["kb4", "radtan8"]
 """Projection models V0 supports, named as basalt names them."""
@@ -518,7 +525,7 @@ def read_camera_statics(statics: pa.Table, entity: str) -> CameraStatics:
     )
 
 
-def decode_gray(mp4_bytes: bytes, downscale: int = 1) -> Iterator[UInt8[ndarray, "h w"]]:
+def decode_gray(mp4_bytes: bytes, downscale: int = 1, decoder: Decoder = "dav1d") -> Iterator[UInt8[ndarray, "h w"]]:
     """Decode an in-memory MP4 to C-contiguous ``gray8`` frames, one decoder thread.
 
     ``reformat(format="gray8")`` performs the limited-to-full range expansion the
@@ -542,6 +549,7 @@ def decode_gray(mp4_bytes: bytes, downscale: int = 1) -> Iterator[UInt8[ndarray,
     Args:
         mp4_bytes: MP4 produced by :func:`wrap_mp4`.
         downscale: Integer factor to shrink each frame by.
+        decoder: Opt-in NVDEC for AV1 evaluation, or the frozen dav1d path.
 
     Yields:
         One grayscale image per frame, in decode order.
@@ -556,7 +564,29 @@ def decode_gray(mp4_bytes: bytes, downscale: int = 1) -> Iterator[UInt8[ndarray,
         stream = container.streams.video[0]
         stream.thread_count = 1
         stream.thread_type = "NONE"
-        for frame in container.decode(stream):
+        if decoder == "nvdec":
+            if stream.codec_context.codec.name not in ("libdav1d", "av1"):
+                raise ValueError("nvdec evaluation requires an AV1 stream")
+            # Select CUVID explicitly: the default libdav1d has no HWConfig.
+            # PyAV downloads the reconstructed YUV surface, without an RGB
+            # conversion. Both paths then use exactly the same swscale call.
+            hardware = av.CodecContext.create("av1_cuvid", "r", hwaccel=HWAccel("cuda", allow_software_fallback=False))
+            assert isinstance(hardware, av.video.codeccontext.VideoCodecContext)
+            hardware.extradata = stream.codec_context.extradata
+            hardware.width = stream.codec_context.width
+            hardware.height = stream.codec_context.height
+            hardware.thread_count = 1
+            hardware.thread_type = "NONE"
+            if not hardware.is_hwaccel:
+                raise RuntimeError("AV1 NVDEC is unavailable; software fallback is disabled")
+            frames = (frame for packet in container.demux(stream) for frame in hardware.decode(packet))
+        elif decoder == "dav1d":
+            frames = container.decode(stream)
+        else:
+            raise ValueError(f"unknown decoder {decoder!r}")
+        for frame in frames:
+            if decoder == "nvdec" and frame.format.name != "nv12":
+                raise ValueError(f"NVDEC requires an 8-bit NV12 surface, got {frame.format.name}")
             gray = (
                 frame.reformat(format="gray8")
                 if downscale == 1
@@ -643,6 +673,9 @@ class SegmentFeed:
     """Frameset timing, the per-camera frames behind it, and the codec."""
     window_ns: int
     """Longest time window fetched in one round trip."""
+
+    decoder: Decoder = "dav1d"
+    """Opt-in evaluation decoder; each camera is advanced sequentially."""
 
     @property
     def has_ground_truth(self) -> bool:
@@ -753,7 +786,7 @@ class SegmentFeed:
             decoders: list[Iterator[UInt8[ndarray, "h w"]]] = []
             for position in range(len(self.cameras)):
                 samples, keyframes = self._fetch_samples(position, start, stop)
-                decoders.append(decode_gray(wrap_mp4(samples, keyframes, fps=self.index.fps, codec=self.index.codec), self.profile.downscale))
+                decoders.append(decode_gray(wrap_mp4(samples, keyframes, fps=self.index.fps, codec=self.index.codec), self.profile.downscale, self.decoder))
             # One frame per camera resident, and one decode cursor per camera: a
             # camera that contributes no frame to this frameset still has its own
             # frames decoded in order, because dropping one breaks the next.
@@ -1304,6 +1337,7 @@ def _build_feed(
     profile: RigProfile,
     frame_stride: int,
     window_s: float,
+    decoder: Decoder = "dav1d",
 ) -> SegmentFeed:
     """Read calibration, IMU, ground truth and frameset timing for one segment."""
     if frame_stride < 1:
@@ -1348,6 +1382,7 @@ def _build_feed(
         gt_dataset=gt_dataset,
         index=index,
         window_ns=int(window_s * 1e9),
+        decoder=decoder,
     )
 
 
@@ -1358,6 +1393,7 @@ def open_segment(
     profile: RigProfile = MSD_RIG,
     frame_stride: int = 1,
     window_s: float = DEFAULT_WINDOW_S,
+    decoder: Decoder = "dav1d",
 ) -> Iterator[SegmentFeed]:
     """Open one segment for reading, from local ``.rrd`` files or from a catalog server.
 
@@ -1372,6 +1408,7 @@ def open_segment(
         profile: How this rig has to be read; the default is what MSD is.
         frame_stride: Yield every n-th frameset; every frame is still decoded.
         window_s: Longest time window fetched in one round trip.
+        decoder: Evaluation decoder; the frozen dav1d path remains the default.
 
     Yields:
         The open feed.
@@ -1390,10 +1427,10 @@ def open_segment(
             segment_ids: list[str] = list(base.segment_ids())
             if len(segment_ids) != 1:
                 raise ValueError(f"{source.base_rrd} holds {len(segment_ids)} segments; the feed reads one")
-            yield _build_feed(base, ground_truth, segment_ids[0], parameters, profile, frame_stride, window_s)
+            yield _build_feed(base, ground_truth, segment_ids[0], parameters, profile, frame_stride, window_s, decoder)
     else:
         dataset: DatasetEntry = CatalogClient(source.url).get_dataset(source.dataset_name)
-        yield _build_feed(dataset, dataset, source.segment_id, parameters, profile, frame_stride, window_s)
+        yield _build_feed(dataset, dataset, source.segment_id, parameters, profile, frame_stride, window_s, decoder)
 
 
 def read_rig_trajectory(rrd: Path) -> Trajectory:

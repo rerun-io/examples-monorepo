@@ -6,9 +6,9 @@ the evidence behind a row can be re-run rather than re-derived.
 
 **The protocol**, which is the part that matters more than the code:
 
-* **No decoder and no Rerun.** The framesets are replayed out of an ``.npz``
-  dumped once by ``tests/tools/dump_clip.py --npz``, so the number is the
-  estimator's and not AV1's.
+* **No decoder inside timing and no Viewer.** Framesets are loaded from an
+  ``.npz`` dumped by ``tests/tools/dump_clip.py --npz``, or decoded once from
+  an MSD ``.rrd`` before the rounds. The number is the estimator's, not AV1's.
 * **One pinned core** (``--pin-core``). The lane runs single-threaded by
   contract (D31), and on this host an unpinned run drifts by more than the
   differences being measured. The GPU lane's CubeCL worker thread shares that
@@ -47,6 +47,7 @@ import statistics
 import threading
 import time
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Literal, TypeAlias, get_args
 
@@ -55,8 +56,8 @@ from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
 from slam_rs import _core
-from slam_rs.catalog_feed import CameraCalib, Frameset, ImuCalib, ImuStream
-from slam_rs.reference import profiled_config_text
+from slam_rs.catalog_feed import CameraCalib, Decoder, Frameset, ImuCalib, ImuStream, LocalSegment, open_segment
+from slam_rs.reference import load_manifest, profiled_config_text
 from slam_rs.tracking import Lockstep
 
 Lane: TypeAlias = Literal["cpu", "gpu"]
@@ -155,9 +156,11 @@ class Config:
     """Options for the slam-rs track benchmark."""
 
     dump: Path
-    """The ``.npz`` of decoded framesets to replay; a sibling ``.calib.pkl`` carries the calibration."""
+    """An MSD ``.rrd`` to decode once, or an ``.npz`` with sibling ``.calib.pkl`` calibration."""
     config: Path
     """The basalt VIO config JSON the reference run used."""
+    decoder: Decoder = "dav1d"
+    """Decoder for RRD input. NPZ input already contains decoded pixels."""
     profile: Literal["reference", "fast"] = "reference"
     """Config overlay applied before tracking."""
     lanes: tuple[Lane, ...] = ("cpu", "gpu")
@@ -212,16 +215,38 @@ def best_median_ms(rounds: list[LaneRound]) -> float:
     return min(entry.median_ms for entry in rounds)
 
 
-def load_framesets(dump: Path, limit: int | None) -> Framesets:
+def load_framesets(dump: Path, limit: int | None, decoder: Decoder = "dav1d", safe_radius: float = 0.0) -> Framesets:
     """Read a dumped segment and its calibration.
 
     Args:
         dump: The ``.npz`` written for a reference segment.
         limit: Replay only the first this many framesets, or all of them.
+        decoder: Decoder used for an RRD input; NPZ input has no decode step.
+        safe_radius: Tracker safe radius recorded for an RRD input.
 
     Returns:
         The framesets, with the IMU counts turned into offsets.
     """
+    if dump.suffix == ".rrd":
+        dataset_name: str = dump.stem.split("__")[0]
+        parameters = next(segment.imu for segment in load_manifest().segments if segment.dataset_name == dataset_name)
+        with open_segment(LocalSegment(dump), parameters, decoder=decoder) as feed:
+            decoded: list[Frameset] = list(islice(feed.framesets(feed.stop_ns_after(limit)), limit))
+            if not decoded:
+                raise ValueError("RRD input yielded no framesets")
+            return Framesets(
+                images=np.stack([frame.images for frame in decoded]),
+                t_ns=np.asarray([frame.t_ns for frame in decoded], dtype=np.int64),
+                imu_offsets=np.concatenate([[0], np.cumsum([len(frame.imu) for frame in decoded])]),
+                imu_t=np.concatenate([frame.imu.t_ns for frame in decoded]),
+                imu_gyro=np.concatenate([frame.imu.gyro_rad_s for frame in decoded]),
+                imu_accel=np.concatenate([frame.imu.accel_m_s2 for frame in decoded]),
+                safe_radius=safe_radius,
+                cameras=feed.cameras,
+                imu=feed.imu,
+            )
+    if decoder != "dav1d":
+        raise ValueError("--decoder nvdec requires an RRD input; NPZ pixels are already decoded")
     data = np.load(dump)
     # Our own dump, written beside the npz by the same tool that decoded it.
     with dump.with_suffix(dump.suffix + ".calib.pkl").open("rb") as handle:
@@ -319,8 +344,8 @@ def main(config: Config) -> None:
         raise ValueError(f"--lanes named no backend to measure; the lanes are {', '.join(get_args(Lane))}")
     if config.pin_core is not None:
         os.sched_setaffinity(0, {config.pin_core})
-    framesets: Framesets = load_framesets(config.dump, config.limit)
     vio_config = _core.VioConfig.from_json(profiled_config_text(config.config, config.profile))
+    framesets: Framesets = load_framesets(config.dump, config.limit, config.decoder, float(vio_config.optical_flow_image_safe_radius))
     if vio_config.optical_flow_image_safe_radius != framesets.safe_radius:
         raise ValueError(
             f"the dump was decoded at safe radius {framesets.safe_radius} and "

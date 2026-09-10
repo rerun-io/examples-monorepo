@@ -190,6 +190,7 @@ def run_segment(
     max_framesets: int | None = None,
     gpu: bool = False,
     profile: Literal["reference", "fast"] = "reference",
+    decoder: Literal["dav1d", "nvdec"] = "dav1d",
 ) -> SegmentRun:
     """Drive one MSD reference clip through :class:`slam_rs._core.Vio`.
 
@@ -209,7 +210,7 @@ def run_segment(
     """
     source: LocalSegment = LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path)
     feed: SegmentFeed
-    with open_segment(source, segment.imu) as feed:
+    with open_segment(source, segment.imu, decoder=decoder) as feed:
         lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment, profile=profile), gpu=gpu))
         return _drive(feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets)
 

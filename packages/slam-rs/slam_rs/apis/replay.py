@@ -88,6 +88,8 @@ class Config:
     """Longest time window fetched from the catalog in one round trip."""
     output_csv: Path | None = None
     """Where the estimated trajectory is written; defaults to ``data/<segment>/slam_rs.csv``."""
+    decoder: Literal["dav1d", "nvdec"] = "dav1d"
+    """Opt-in evaluation decoder; dav1d preserves the reference default."""
     profile: Literal["reference", "fast"] = "reference"
     """Config overlay applied before tracking."""
     gpu: bool = False
@@ -205,7 +207,7 @@ def main(config: Config) -> None:
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / segment.segment_id / "slam_rs.csv"
     print(f"replaying {segment.segment_id} ({segment.tier} tier) from {source.base_rrd}")
 
-    with open_segment(source, segment.imu, frame_stride=config.frame_stride, window_s=config.window_s) as feed:
+    with open_segment(source, segment.imu, frame_stride=config.frame_stride, window_s=config.window_s, decoder=config.decoder) as feed:
         print(
             f"{len(feed.cameras)} cameras, {len(feed.frame_t_ns)} framesets, ground truth "
             f"{'attached' if feed.has_ground_truth else 'absent'}, clock offset {feed.capture_start_time_ns} ns"
