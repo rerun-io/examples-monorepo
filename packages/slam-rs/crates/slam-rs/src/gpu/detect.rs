@@ -96,15 +96,26 @@ pub struct GpuCornerScan<R: Runtime> {
     /// count they were sized for: allocated once per camera grid, like
     /// [`GpuCornerScan::buffers`] and for the same reason.
     keys: Vec<Option<(cubecl::server::Handle, usize)>>,
-    /// What [`CornerScan::prepare_cells`] downloaded for each camera, and the
+    /// What [`CornerScan::submit_cells`] launched for each camera, and the
     /// selection it answers. `select_cells` spends the entry rather than
     /// reading it twice, so nothing here can outlive the frameset that filled
-    /// it: the next `prepare_cells` clears every slot first.
+    /// it: the next `submit_cells` clears every slot first.
     prepared: Vec<Option<CellSelect>>,
     /// The keys of [`GpuCornerScan::prepared`], in buffers the scanner keeps so
     /// a frameset's preparation reaches the host allocator only while a grid is
     /// growing.
     prepared_keys: Vec<Vec<u32>>,
+    /// The key buffers [`CornerScan::submit_cells`] launched into and
+    /// [`CornerScan::take_cells`] has still to decode: the camera, its buffer
+    /// and the cells it was sized for, in launch order.
+    ///
+    /// Kept here as well as staged on [`GpuCornerScan::reads`] so a
+    /// `take_cells` that finds no download waiting can make its own.
+    submitted: Vec<(usize, cubecl::server::Handle, usize)>,
+    /// Where the launched key buffers are offered to the next download —
+    /// the tracker's temporal read, on the lane [`super::gpu_backends`] builds
+    /// (D78). Unshared by default, which makes `take_cells` read for itself.
+    reads: super::ReadRelay,
     /// Times the three device buffers have been allocated, which a rig of one
     /// geometry keeps at one.
     buffer_allocations: usize,
@@ -160,6 +171,8 @@ impl<R: Runtime> GpuCornerScan<R> {
                     keys: Vec::new(),
                     prepared: Vec::new(),
                     prepared_keys: Vec::new(),
+                    submitted: Vec::new(),
+                    reads: super::ReadRelay::default(),
                     buffer_allocations: 0,
                     kept: None,
                     mask: None,
@@ -181,6 +194,17 @@ impl<R: Runtime> GpuCornerScan<R> {
     /// frameset and two.
     pub fn share_level0(&mut self, table: Level0Table) {
         self.level0 = table;
+    }
+
+    /// Offer this scanner's cell-key downloads to `relay`, which the tracker on
+    /// the same client drains inside its own read.
+    ///
+    /// Wired by [`super::gpu_backends`] for the same reason
+    /// [`GpuCornerScan::share_level0`] is: the two stages are on one client and
+    /// one frameset, so the difference between sharing this and not is one
+    /// synchronising read a frameset — 0.12 ms of host time on this lane (D78).
+    pub fn share_reads(&mut self, relay: super::ReadRelay) {
+        self.reads = relay;
     }
 
     /// Frames this scanner uploaded itself. Zero once
@@ -552,10 +576,14 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         )
     }
 
-    /// Every camera's selection launched together, then one download for all of
-    /// them: on this lane the wait is what a frameset pays for, not the 1.4 kB
-    /// each camera brings back (D77).
-    fn prepare_cells(
+    /// The named cameras' selections launched together and downloaded by
+    /// nobody: the handles go on the relay, and whichever stage reads next
+    /// carries them (D78).
+    ///
+    /// On this lane the wait is what a frameset pays for, not the 1.4 kB each
+    /// camera brings back, so this stage's whole job is to be launched early
+    /// enough that another stage's read can absorb it.
+    fn submit_cells(
         &mut self,
         images: &[ImageU16],
         selects: &[Option<CellSelect>],
@@ -563,54 +591,88 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         self.prepared.clear();
         self.prepared.resize(images.len(), None);
         self.prepared_keys.resize_with(images.len(), Vec::new);
+        self.submitted.clear();
         guarded(
             GpuError::DeviceLost {
                 what: "corner cell selection",
             },
             || {
-                let mut launched: Vec<(usize, cubecl::server::Handle, usize)> = Vec::new();
                 for (camera, image) in images.iter().enumerate() {
                     let Some(select) = selects.get(camera).copied().flatten() else {
                         continue;
                     };
                     if let Some((best, cells)) = self.launch_selection(camera, image, &select) {
                         self.prepared[camera] = Some(select);
-                        launched.push((camera, best, cells));
+                        self.submitted.push((camera, best, cells));
                         // Three launches, and the frame upload when the
                         // pyramid did not publish one.
                         super::queued(&self.client, 4)?;
                     }
                 }
-                if launched.is_empty() {
-                    return Ok(());
-                }
+                self.reads.stage(
+                    self.submitted
+                        .iter()
+                        .map(|(_, best, _)| best.clone())
+                        .collect(),
+                );
+                Ok(())
+            },
+        )
+    }
 
-                #[cfg(test)]
-                super::fire_if_armed(super::CORNER_SCAN_READ);
+    /// The keys of [`CornerScan::submit_cells`], out of the download that
+    /// carried them — or out of one made here when none did, which is the first
+    /// frameset of a run and any lane with no relay wired.
+    fn take_cells(&mut self) -> Result<(), DetectError> {
+        if self.submitted.is_empty() {
+            return Ok(());
+        }
+        let outcome: Result<(), DetectError> = guarded(
+            GpuError::DeviceLost {
+                what: "corner cell selection",
+            },
+            || {
+                // `take_delivered` also drops anything still staged, so the read
+                // below cannot be made twice over the same handles.
+                let reads: Vec<cubecl::bytes::Bytes> = match self.reads.take_delivered() {
+                    Some(bytes) => bytes,
+                    None => {
+                        #[cfg(test)]
+                        super::fire_if_armed(super::CORNER_SCAN_READ);
 
-                let handles: Vec<cubecl::server::Handle> =
-                    launched.iter().map(|(_, best, _)| best.clone()).collect();
-                let reads: Vec<cubecl::bytes::Bytes> = {
-                    let read = super::seam::READ_DETECT
-                        .measure(|| cubecl::reader::read_sync(self.client.read_async(handles)));
-                    super::drained();
-                    read.map_err(|error| super::read_failed("the cell winner keys", &error))?
+                        let handles: Vec<cubecl::server::Handle> = self
+                            .submitted
+                            .iter()
+                            .map(|(_, best, _)| best.clone())
+                            .collect();
+                        let read = super::seam::READ_DETECT
+                            .measure(|| cubecl::reader::read_sync(self.client.read_async(handles)));
+                        super::drained();
+                        read.map_err(|error| super::read_failed("the cell winner keys", &error))?
+                    }
                 };
-                if reads.len() != launched.len() {
-                    self.prepared.iter_mut().for_each(|slot| *slot = None);
+                if reads.len() != self.submitted.len() {
                     return Err(super::GpuError::DeviceReadFailed {
                         what: "the cell winner buffers",
                     }
                     .into());
                 }
-                for ((camera, _, cells), keys) in launched.iter().zip(reads.iter()) {
+                for ((camera, _, cells), keys) in self.submitted.iter().zip(reads.iter()) {
                     let keys: &[u32] = checked_keys(keys, *cells)?;
                     self.prepared_keys[*camera].clear();
                     self.prepared_keys[*camera].extend_from_slice(keys);
                 }
                 Ok(())
             },
-        )
+        );
+        // A download that did not arrive leaves no prepared entry behind: every
+        // `select_cells` of this frameset falls back to the band walk rather
+        // than reading the keys of the last one.
+        if outcome.is_err() {
+            self.prepared.iter_mut().for_each(|slot| *slot = None);
+        }
+        self.submitted.clear();
+        outcome
     }
 
     fn band(&mut self, request: BandRequest) -> Result<&[FastCorner], DetectError> {

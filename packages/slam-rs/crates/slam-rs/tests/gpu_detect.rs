@@ -30,7 +30,9 @@ use slam_rs::frontend::detect::{
     DetectorConfig, DetectorScratch, FAST_BORDER, FastCorner, KeypointsData, Masks, Occupancy,
     Rect, detect_keypoints_with_cells, threshold_rungs,
 };
-use slam_rs::gpu::{GpuCornerScan, gpu_client};
+use slam_rs::frontend::patterns::Pattern51;
+use slam_rs::frontend::tracker::PatchTracker;
+use slam_rs::gpu::{GpuCornerScan, GpuPatchTracker, ReadRelay, gpu_client};
 use slam_rs::image::ImageU16;
 
 mod common;
@@ -84,12 +86,17 @@ impl CornerScan for CountingScan {
     /// Forwarded, not defaulted: the trait's default prepares nothing, so a
     /// decorator that forgot this would silently take the device lane off the
     /// batched path and every equality below would still pass.
-    fn prepare_cells(
+    fn submit_cells(
         &mut self,
         images: &[ImageU16],
         selects: &[Option<CellSelect>],
     ) -> Result<(), DetectError> {
-        self.inner.prepare_cells(images, selects)
+        self.inner.submit_cells(images, selects)
+    }
+
+    /// Forwarded for the reason above: this is the half that downloads.
+    fn take_cells(&mut self) -> Result<(), DetectError> {
+        self.inner.take_cells()
     }
 }
 
@@ -643,8 +650,9 @@ fn the_gpu_cell_selection_holds_for_every_camera_slot() {
 
 /// The batched preparation answers exactly what the per-camera call does.
 ///
-/// [`CornerScan::prepare_cells`] launches every camera's selection at once and
-/// downloads them together, which is a scheduling change and must be nothing
+/// [`CornerScan::submit_cells`] launches every camera's selection at once and
+/// [`CornerScan::take_cells`] downloads them together, which is a scheduling
+/// change and must be nothing
 /// else: the keys it hands each camera have to be the ones that camera's own
 /// `select_cells` would have read. Two different MIO10 frames in the two camera
 /// slots, so a batch that crossed its cameras over would be caught.
@@ -678,7 +686,8 @@ fn the_batched_preparation_answers_what_the_per_camera_call_does() {
         alone.push(keys);
     }
 
-    scanner.prepare_cells(&images, &selects).unwrap();
+    scanner.submit_cells(&images, &selects).unwrap();
+    scanner.take_cells().unwrap();
     for (camera, image) in images.iter().enumerate() {
         let mut keys: Vec<u32> = Vec::new();
         scanner
@@ -689,10 +698,69 @@ fn the_batched_preparation_answers_what_the_per_camera_call_does() {
     assert_ne!(alone[0], alone[1], "the two cameras hold the same frame");
 }
 
+/// The scanner's keys come home inside the tracker's download.
+///
+/// The relay is the whole of D78: `submit_cells` launches and downloads
+/// nothing, and the next stage to synchronise is what brings the keys back —
+/// here a `collect` with no tracking pass in flight at all, which is the
+/// weakest form of the claim and so the sharpest test of it. A relay that
+/// dropped them would be invisible from the values alone, because `take_cells`
+/// reads for itself when nothing was delivered; so what is asserted is that the
+/// scanner made no read of its own, and that the keys are still the ones its
+/// own download would have given.
+#[test]
+fn the_tracker_download_carries_the_scanner_keys() {
+    let config: DetectorConfig = detector_config(472.0);
+    let images: [ImageU16; 2] = [mio10_frame(0, 0), mio10_frame(1, 1)];
+    let grid: CellGrid = CellGrid::new(images[0].width(), images[0].height(), 50).unwrap();
+    let selects: Vec<Option<CellSelect>> = images
+        .iter()
+        .map(|image| slam_rs::frontend::detect::cell_select(image, &grid, &config))
+        .collect();
+
+    // What the scanner answers when it downloads for itself: no relay wired.
+    let mut alone: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+    alone.submit_cells(&images, &selects).unwrap();
+    alone.take_cells().unwrap();
+    let mut want: Vec<Vec<u32>> = Vec::new();
+    for (camera, image) in images.iter().enumerate() {
+        let mut keys: Vec<u32> = Vec::new();
+        alone
+            .select_cells(camera, image, &selects[camera].unwrap(), &mut keys)
+            .unwrap();
+        assert!(!keys.is_empty(), "camera {camera} took the device path");
+        want.push(keys);
+    }
+
+    // And the same two cameras with the tracker's `collect` in between.
+    let relay: ReadRelay = ReadRelay::default();
+    let mut scanner: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+    let mut tracker: GpuPatchTracker<Pattern51, _> =
+        GpuPatchTracker::new(gpu_client().unwrap(), 512, 4, 5, 4.0, 2).unwrap();
+    scanner.share_reads(relay.clone());
+    tracker.share_reads(relay.clone());
+
+    scanner.submit_cells(&images, &selects).unwrap();
+    assert_eq!(relay.waiting(), 2, "both cameras are launched and unread");
+    assert_eq!(relay.carried(), 0, "nothing has downloaded them yet");
+    tracker.collect(&mut []).unwrap();
+    assert_eq!(relay.waiting(), 0, "the collect took the staged handles");
+    assert_eq!(relay.carried(), 2, "and left both cameras' keys behind");
+    scanner.take_cells().unwrap();
+    assert_eq!(relay.carried(), 0, "which the scanner then took");
+    for (camera, image) in images.iter().enumerate() {
+        let mut keys: Vec<u32> = Vec::new();
+        scanner
+            .select_cells(camera, image, &selects[camera].unwrap(), &mut keys)
+            .unwrap();
+        assert_eq!(keys, want[camera], "camera {camera} through the relay");
+    }
+}
+
 /// A prepared selection is spent by the call that reads it, and a camera the
 /// batch skipped still answers for itself.
 ///
-/// The keys are cached on the scanner between `prepare_cells` and the
+/// The keys are cached on the scanner between `take_cells` and the
 /// `select_cells` that takes them, so the thing that must not happen is a
 /// leftover answering a later frameset. Reading twice, and preparing a rig where
 /// only one camera is offered, are the two ways that could happen.
@@ -709,8 +777,9 @@ fn a_prepared_selection_is_spent_once() {
     let mut scanner: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
     // Only camera 0 is offered, so camera 1 has nothing prepared for it.
     scanner
-        .prepare_cells(&images, &[Some(select), None])
+        .submit_cells(&images, &[Some(select), None])
         .unwrap();
+    scanner.take_cells().unwrap();
 
     let mut first: Vec<u32> = Vec::new();
     scanner

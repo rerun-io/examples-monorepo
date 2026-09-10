@@ -353,7 +353,7 @@ pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
             // worse than a refusal.
             let client = gpu_client()?;
             probe_storage(&client)?;
-            let tracker: LanePatchTracker<P> = GpuPatchTracker::new(
+            let mut tracker: LanePatchTracker<P> = GpuPatchTracker::new(
                 client.clone(),
                 capacity,
                 num_levels,
@@ -368,9 +368,108 @@ pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
             // reads it. This is the one line that makes it one upload per camera
             // per frameset instead of two (see [`Level0`]).
             scanner.share_level0(builder.level0_table());
+            // And the same again for the download: the scanner's cell keys ride
+            // the tracker's temporal read instead of paying for one of their own
+            // (see [`ReadRelay`]).
+            let relay: ReadRelay = ReadRelay::default();
+            scanner.share_reads(relay.clone());
+            tracker.share_reads(relay);
             Ok((builder, tracker, Box::new(scanner)))
         },
     )
+}
+
+/// Buffers one stage has launched, offered to whichever stage downloads next,
+/// and the bytes that download left behind.
+///
+/// A read on this lane costs about 0.12 ms of host time before it moves a byte
+/// (D77), so two buffers that no arithmetic connects are still worth **one**
+/// read between them. The corner scanner's cell keys and the tracker's temporal
+/// results are exactly that pair: the selection kernels read the frame alone,
+/// so they can be launched before the frameset has decided anything, and the
+/// tracker's `collect` was going to synchronise anyway. The scanner stages its
+/// handles here, `collect` appends them to its own download, and the scanner
+/// takes the tail (D78).
+///
+/// Shared explicitly by [`gpu_backends`] rather than kept in a process-wide
+/// static like [`QUEUED`]: an over-count there drains early, which is only
+/// conservative, where a crossed relay would hand one frontend another's
+/// pixels. A stage that finds nothing here downloads for itself, which is what
+/// the first frameset of a run — no temporal pass, so no `collect` — does.
+///
+/// A `Mutex` for the reason [`Level0Table`] is one: [`crate::frontend::detect::CornerScan`]
+/// is `Send + Sync`, and this is taken twice a frameset by two stages on the
+/// frontend's own thread, never contended. A poisoned lock is not an error
+/// here — every method degrades to "nothing was staged", and the stager then
+/// reads for itself.
+#[cfg(feature = "gpu-core")]
+#[derive(Debug, Clone, Default)]
+pub struct ReadRelay(std::sync::Arc<std::sync::Mutex<RelayInner>>);
+
+/// [`ReadRelay`]'s contents: at most one frameset's worth, in one direction.
+#[cfg(feature = "gpu-core")]
+#[derive(Debug, Default)]
+struct RelayInner {
+    /// Launched and waiting for someone to download.
+    staged: Vec<cubecl::server::Handle>,
+    /// What a download left for the stage that staged it.
+    delivered: Option<Vec<cubecl::bytes::Bytes>>,
+}
+
+#[cfg(feature = "gpu-core")]
+impl ReadRelay {
+    /// Offer `handles` to the next download, replacing anything unclaimed:
+    /// there is one producer and one frameset in flight.
+    pub(super) fn stage(&self, handles: Vec<cubecl::server::Handle>) {
+        if let Ok(mut inner) = self.0.lock() {
+            inner.staged = handles;
+            inner.delivered = None;
+        }
+    }
+
+    /// Take what was staged, to append to a download this stage is making.
+    pub(super) fn take_staged(&self) -> Vec<cubecl::server::Handle> {
+        self.0
+            .lock()
+            .map(|mut inner| std::mem::take(&mut inner.staged))
+            .unwrap_or_default()
+    }
+
+    /// Leave a download's tail for the stage that staged it.
+    pub(super) fn deliver(&self, bytes: Vec<cubecl::bytes::Bytes>) {
+        if let Ok(mut inner) = self.0.lock() {
+            inner.delivered = Some(bytes);
+        }
+    }
+
+    /// Handles launched and not yet downloaded by anyone.
+    ///
+    /// Public because it is the only deterministic way to see the mechanism
+    /// work: the values alone cannot tell a carried download from one the
+    /// stager made itself, and the seam counters are process-wide statics that
+    /// a second test thread moves under the assertion.
+    #[must_use]
+    pub fn waiting(&self) -> usize {
+        self.0.lock().map(|inner| inner.staged.len()).unwrap_or(0)
+    }
+
+    /// Buffers a download left here and the stager has not taken yet.
+    #[must_use]
+    pub fn carried(&self) -> usize {
+        self.0
+            .lock()
+            .map(|inner| inner.delivered.as_ref().map_or(0, Vec::len))
+            .unwrap_or(0)
+    }
+
+    /// Take the bytes a download left, or `None` when none did — a stage that
+    /// gets `None` still holds its own handles and reads them itself.
+    pub(super) fn take_delivered(&self) -> Option<Vec<cubecl::bytes::Bytes>> {
+        self.0.lock().ok().and_then(|mut inner| {
+            inner.staged.clear();
+            inner.delivered.take()
+        })
+    }
 }
 
 /// Tasks CubeCL 0.10's client-to-server channel holds before a producer spins
