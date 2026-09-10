@@ -917,6 +917,7 @@ The `Dnn` tags in this file and in the README name the project's recorded design
 - **D68** — The three unreachable blocks go: squared-form marginalization, nullspace diagnostics, the D34 damping stack
 - **D70** — One GPU runtime: the CUDA lane is removed; wgpu is the GPU lane (2026-09-09)
 - **D71** — Exponent-bit finite classification and bounded small-angle trig; the MIO14 replay passes its unchanged accuracy limit (2026-09-09)
+- **D74** — Speed profile: vendored configs stay C++-faithful; speed knobs live in `configs/profiles/fast.json`, opted into with `--profile fast` (2026-09-10)
 
 ## D74 — Speed profile
 
