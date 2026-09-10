@@ -96,6 +96,15 @@ pub struct GpuCornerScan<R: Runtime> {
     /// count they were sized for: allocated once per camera grid, like
     /// [`GpuCornerScan::buffers`] and for the same reason.
     keys: Vec<Option<(cubecl::server::Handle, usize)>>,
+    /// What [`CornerScan::prepare_cells`] downloaded for each camera, and the
+    /// selection it answers. `select_cells` spends the entry rather than
+    /// reading it twice, so nothing here can outlive the frameset that filled
+    /// it: the next `prepare_cells` clears every slot first.
+    prepared: Vec<Option<CellSelect>>,
+    /// The keys of [`GpuCornerScan::prepared`], in buffers the scanner keeps so
+    /// a frameset's preparation reaches the host allocator only while a grid is
+    /// growing.
+    prepared_keys: Vec<Vec<u32>>,
     /// Times the three device buffers have been allocated, which a rig of one
     /// geometry keeps at one.
     buffer_allocations: usize,
@@ -149,6 +158,8 @@ impl<R: Runtime> GpuCornerScan<R> {
                     packed: Vec::new(),
                     buffers: Vec::new(),
                     keys: Vec::new(),
+                    prepared: Vec::new(),
+                    prepared_keys: Vec::new(),
                     buffer_allocations: 0,
                     kept: None,
                     mask: None,
@@ -217,6 +228,67 @@ impl<R: Runtime> GpuCornerScan<R> {
         // on the device: the extra 0.9 MB over the bus costs less than a
         // whole-frame narrowing pass on the host.
         super::upload_frame(&self.client, image, &mut self.packed)
+    }
+
+    /// This camera's candidate kernels and its cell selection, launched into the
+    /// camera's own key buffer; the handle and the cell count to read back.
+    ///
+    /// `None` when the grid needs more cubes in one dispatch dimension than a
+    /// WebGPU implementation must allow, which is the caller's signal to leave
+    /// the frame alone and let the band walk answer.
+    fn launch_selection(
+        &mut self,
+        camera: usize,
+        image: &ImageU16,
+        select: &CellSelect,
+    ) -> Option<(cubecl::server::Handle, usize)> {
+        let grid: &crate::frontend::detect::CellGrid = &select.grid;
+        let cells_x: usize = (grid.x_stop - grid.x_start) / grid.cell + 1;
+        let cells_y: usize = (grid.y_stop - grid.y_start) / grid.cell + 1;
+        let ceiling: usize = kernels::MAX_CUBES_PER_DIM as usize;
+        if cells_x > ceiling || cells_y > ceiling {
+            return None;
+        }
+        let cells: usize = cells_x * cells_y;
+        let (width, height): (usize, usize) = (image.width(), image.height());
+        let handles: ScanHandles = self.candidates(camera, image);
+
+        if self.keys.len() <= camera {
+            self.keys.resize_with(camera + 1, || None);
+        }
+        let slot: &mut Option<(cubecl::server::Handle, usize)> = &mut self.keys[camera];
+        let fits: bool = slot.as_ref().is_some_and(|(_, sized)| *sized == cells);
+        let (best, best_len): (cubecl::server::Handle, usize) = match slot {
+            Some(existing) if fits => existing.clone(),
+            slot => {
+                self.buffer_allocations += 1;
+                slot.insert((self.client.empty(cells * size_of::<u32>()), cells))
+                    .clone()
+            }
+        };
+
+        kernels::launch_fast_cell_select::<R>(
+            &self.client,
+            (&handles.kept, handles.pixels),
+            (&best, best_len),
+            kernels::CellSelectGeometry {
+                width,
+                height,
+                cell: grid.cell,
+                x_start: grid.x_start,
+                y_start: grid.y_start,
+                cells_x,
+                cells_y,
+                // The score is a `u8`, so a rung at or over 255 admits nothing
+                // and one under zero is every candidate.
+                threshold: select.threshold.clamp(0, 255) as u32,
+                safe_radius: select.safe_radius,
+                // `img_raw.w / 2` is an integer halving (`keypoints.cpp:176`).
+                centre_x: (width / 2) as f32,
+                centre_y: (height / 2) as f32,
+            },
+        );
+        Some((best, cells))
     }
 
     /// Level 0 in, the candidate image out: the two kernels both entry points
@@ -291,6 +363,20 @@ impl<R: Runtime> GpuCornerScan<R> {
     }
 }
 
+/// A downloaded key buffer as `u32`, refused when it is not the grid's length.
+fn checked_keys(keys: &cubecl::bytes::Bytes, cells: usize) -> Result<&[u32], DetectError> {
+    let expected: usize = cells * size_of::<u32>();
+    if keys.len() != expected {
+        return Err(super::GpuError::ShortRead {
+            what: "the cell winner keys",
+            actual: keys.len(),
+            expected,
+        }
+        .into());
+    }
+    Ok(u32::from_bytes(keys))
+}
+
 /// One row's candidates over `threshold`, appended in column order.
 ///
 /// The bitmask says where to look: one word per thirty-two columns, and
@@ -357,12 +443,15 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                 // fallible form of it: `client.read` is `read_sync(..).expect("TODO")`,
                 // and a panic here would unwind out of the frontend with the GIL
                 // detached (decision D32).
-                let reads: Vec<cubecl::bytes::Bytes> = cubecl::reader::read_sync(
-                    self.client.read_async(vec![handles.kept, handles.mask]),
-                )
-                .map_err(|error| {
-                    super::read_failed("the candidate image and its bitmask", &error)
-                })?;
+                let reads: Vec<cubecl::bytes::Bytes> = super::seam::READ_DETECT
+                    .measure(|| {
+                        cubecl::reader::read_sync(
+                            self.client.read_async(vec![handles.kept, handles.mask]),
+                        )
+                    })
+                    .map_err(|error| {
+                        super::read_failed("the candidate image and its bitmask", &error)
+                    })?;
                 // One buffer per handle, in the order they were asked for; anything else
                 // is the runtime breaking its own contract rather than short data.
                 let Ok([kept_bytes, mask_bytes]) = <[cubecl::bytes::Bytes; 2]>::try_from(reads)
@@ -422,12 +511,10 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
         out: &mut Vec<u32>,
     ) -> Result<(), DetectError> {
         out.clear();
-        let grid: &crate::frontend::detect::CellGrid = &select.grid;
-        let cells_x: usize = (grid.x_stop - grid.x_start) / grid.cell + 1;
-        let cells_y: usize = (grid.y_stop - grid.y_start) / grid.cell + 1;
-        let cells: usize = cells_x * cells_y;
-        let ceiling: usize = kernels::MAX_CUBES_PER_DIM as usize;
-        if cells_x > ceiling || cells_y > ceiling {
+        // Spent, not read twice: an entry left behind would answer a later
+        // frameset with this one's corners.
+        if self.prepared.get_mut(camera).and_then(Option::take) == Some(*select) {
+            out.extend_from_slice(&self.prepared_keys[camera]);
             return Ok(());
         }
         guarded(
@@ -435,70 +522,81 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                 what: "corner cell selection",
             },
             || {
-                let (width, height): (usize, usize) = (image.width(), image.height());
-                let handles: ScanHandles = self.candidates(camera, image);
-
-                if self.keys.len() <= camera {
-                    self.keys.resize_with(camera + 1, || None);
-                }
-                let slot: &mut Option<(cubecl::server::Handle, usize)> = &mut self.keys[camera];
-                let fits: bool = slot.as_ref().is_some_and(|(_, sized)| *sized == cells);
-                let (best, best_len): (cubecl::server::Handle, usize) = match slot {
-                    Some(existing) if fits => existing.clone(),
-                    slot => {
-                        self.buffer_allocations += 1;
-                        slot.insert((self.client.empty(cells * size_of::<u32>()), cells))
-                            .clone()
-                    }
+                let Some((best, cells)) = self.launch_selection(camera, image, select) else {
+                    return Ok(());
                 };
-
-                kernels::launch_fast_cell_select::<R>(
-                    &self.client,
-                    (&handles.kept, handles.pixels),
-                    (&best, best_len),
-                    kernels::CellSelectGeometry {
-                        width,
-                        height,
-                        cell: grid.cell,
-                        x_start: grid.x_start,
-                        y_start: grid.y_start,
-                        cells_x,
-                        cells_y,
-                        // The score is a `u8`, so a rung at or over 255 admits
-                        // nothing and one under zero is every candidate.
-                        threshold: select.threshold.clamp(0, 255) as u32,
-                        safe_radius: select.safe_radius,
-                        // `img_raw.w / 2` is an integer halving (`keypoints.cpp:176`).
-                        centre_x: (width / 2) as f32,
-                        centre_y: (height / 2) as f32,
-                    },
-                );
 
                 #[cfg(test)]
                 super::fire_if_armed(super::CORNER_SCAN_READ);
 
-                let reads: Vec<cubecl::bytes::Bytes> =
-                    cubecl::reader::read_sync(self.client.read_async(vec![best]))
-                        .map_err(|error| super::read_failed("the cell winner keys", &error))?;
+                let reads: Vec<cubecl::bytes::Bytes> = super::seam::READ_DETECT
+                    .measure(|| cubecl::reader::read_sync(self.client.read_async(vec![best])))
+                    .map_err(|error| super::read_failed("the cell winner keys", &error))?;
                 let Ok([keys]) = <[cubecl::bytes::Bytes; 1]>::try_from(reads) else {
                     return Err(super::GpuError::DeviceReadFailed {
                         what: "the cell winner buffer",
                     }
                     .into());
                 };
-                let expected: usize = cells * size_of::<u32>();
-                if keys.len() != expected {
-                    return Err(super::GpuError::ShortRead {
-                        what: "the cell winner keys",
-                        actual: keys.len(),
-                        expected,
-                    }
-                    .into());
-                }
                 // Copied rather than held, unlike the candidate image: 1.4 kB
                 // into a buffer the detector owns and reuses, against a
                 // `Bytes` the next frame would replace anyway.
-                out.extend_from_slice(u32::from_bytes(&keys));
+                out.extend_from_slice(checked_keys(&keys, cells)?);
+                Ok(())
+            },
+        )
+    }
+
+    /// Every camera's selection launched together, then one download for all of
+    /// them: on this lane the wait is what a frameset pays for, not the 1.4 kB
+    /// each camera brings back (D77).
+    fn prepare_cells(
+        &mut self,
+        images: &[ImageU16],
+        selects: &[Option<CellSelect>],
+    ) -> Result<(), DetectError> {
+        self.prepared.clear();
+        self.prepared.resize(images.len(), None);
+        self.prepared_keys.resize_with(images.len(), Vec::new);
+        guarded(
+            GpuError::DeviceLost {
+                what: "corner cell selection",
+            },
+            || {
+                let mut launched: Vec<(usize, cubecl::server::Handle, usize)> = Vec::new();
+                for (camera, image) in images.iter().enumerate() {
+                    let Some(select) = selects.get(camera).copied().flatten() else {
+                        continue;
+                    };
+                    if let Some((best, cells)) = self.launch_selection(camera, image, &select) {
+                        self.prepared[camera] = Some(select);
+                        launched.push((camera, best, cells));
+                    }
+                }
+                if launched.is_empty() {
+                    return Ok(());
+                }
+
+                #[cfg(test)]
+                super::fire_if_armed(super::CORNER_SCAN_READ);
+
+                let handles: Vec<cubecl::server::Handle> =
+                    launched.iter().map(|(_, best, _)| best.clone()).collect();
+                let reads: Vec<cubecl::bytes::Bytes> = super::seam::READ_DETECT
+                    .measure(|| cubecl::reader::read_sync(self.client.read_async(handles)))
+                    .map_err(|error| super::read_failed("the cell winner keys", &error))?;
+                if reads.len() != launched.len() {
+                    self.prepared.iter_mut().for_each(|slot| *slot = None);
+                    return Err(super::GpuError::DeviceReadFailed {
+                        what: "the cell winner buffers",
+                    }
+                    .into());
+                }
+                for ((camera, _, cells), keys) in launched.iter().zip(reads.iter()) {
+                    let keys: &[u32] = checked_keys(keys, *cells)?;
+                    self.prepared_keys[*camera].clear();
+                    self.prepared_keys[*camera].extend_from_slice(keys);
+                }
                 Ok(())
             },
         )

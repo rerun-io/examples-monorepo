@@ -80,6 +80,17 @@ impl CornerScan for CountingScan {
         self.selections.fetch_add(1, Ordering::Relaxed);
         self.inner.select_cells(camera, image, select, out)
     }
+
+    /// Forwarded, not defaulted: the trait's default prepares nothing, so a
+    /// decorator that forgot this would silently take the device lane off the
+    /// batched path and every equality below would still pass.
+    fn prepare_cells(
+        &mut self,
+        images: &[ImageU16],
+        selects: &[Option<CellSelect>],
+    ) -> Result<(), DetectError> {
+        self.inner.prepare_cells(images, selects)
+    }
 }
 
 /// What one equality check saw.
@@ -628,4 +639,93 @@ fn the_gpu_cell_selection_holds_for_every_camera_slot() {
         assert_eq!(got.corners, want.corners, "camera {camera}: corners");
         assert_eq!(got.responses, want.responses, "camera {camera}: responses");
     }
+}
+
+/// The batched preparation answers exactly what the per-camera call does.
+///
+/// [`CornerScan::prepare_cells`] launches every camera's selection at once and
+/// downloads them together, which is a scheduling change and must be nothing
+/// else: the keys it hands each camera have to be the ones that camera's own
+/// `select_cells` would have read. Two different MIO10 frames in the two camera
+/// slots, so a batch that crossed its cameras over would be caught.
+#[test]
+fn the_batched_preparation_answers_what_the_per_camera_call_does() {
+    let config: DetectorConfig = detector_config(472.0);
+    let images: [ImageU16; 2] = [mio10_frame(0, 0), mio10_frame(1, 1)];
+    let grid: CellGrid = CellGrid::new(images[0].width(), images[0].height(), 50).unwrap();
+    let selects: Vec<Option<CellSelect>> = images
+        .iter()
+        .map(|image| slam_rs::frontend::detect::cell_select(image, &grid, &config))
+        .collect();
+    assert!(
+        selects.iter().all(Option::is_some),
+        "the rig is device shaped"
+    );
+
+    // The selection's grid is the cells the walk visits, one less each way than
+    // the occupancy matrix: `x_stop` is the last cell's left edge.
+    let cells: usize = ((grid.x_stop - grid.x_start) / grid.cell + 1)
+        * ((grid.y_stop - grid.y_start) / grid.cell + 1);
+
+    let mut scanner: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+    let mut alone: Vec<Vec<u32>> = Vec::new();
+    for (camera, image) in images.iter().enumerate() {
+        let mut keys: Vec<u32> = Vec::new();
+        scanner
+            .select_cells(camera, image, &selects[camera].unwrap(), &mut keys)
+            .unwrap();
+        assert_eq!(keys.len(), cells, "camera {camera}");
+        alone.push(keys);
+    }
+
+    scanner.prepare_cells(&images, &selects).unwrap();
+    for (camera, image) in images.iter().enumerate() {
+        let mut keys: Vec<u32> = Vec::new();
+        scanner
+            .select_cells(camera, image, &selects[camera].unwrap(), &mut keys)
+            .unwrap();
+        assert_eq!(keys, alone[camera], "camera {camera} out of the batch");
+    }
+    assert_ne!(alone[0], alone[1], "the two cameras hold the same frame");
+}
+
+/// A prepared selection is spent by the call that reads it, and a camera the
+/// batch skipped still answers for itself.
+///
+/// The keys are cached on the scanner between `prepare_cells` and the
+/// `select_cells` that takes them, so the thing that must not happen is a
+/// leftover answering a later frameset. Reading twice, and preparing a rig where
+/// only one camera is offered, are the two ways that could happen.
+#[test]
+fn a_prepared_selection_is_spent_once() {
+    let config: DetectorConfig = detector_config(472.0);
+    let images: [ImageU16; 2] = [mio10_frame(0, 0), mio10_frame(1, 1)];
+    let grid: CellGrid = CellGrid::new(images[0].width(), images[0].height(), 50).unwrap();
+    let select: CellSelect =
+        slam_rs::frontend::detect::cell_select(&images[0], &grid, &config).unwrap();
+    let cells: usize = ((grid.x_stop - grid.x_start) / grid.cell + 1)
+        * ((grid.y_stop - grid.y_start) / grid.cell + 1);
+
+    let mut scanner: GpuCornerScan<_> = GpuCornerScan::new(gpu_client().unwrap()).unwrap();
+    // Only camera 0 is offered, so camera 1 has nothing prepared for it.
+    scanner
+        .prepare_cells(&images, &[Some(select), None])
+        .unwrap();
+
+    let mut first: Vec<u32> = Vec::new();
+    scanner
+        .select_cells(0, &images[0], &select, &mut first)
+        .unwrap();
+    let mut again: Vec<u32> = Vec::new();
+    scanner
+        .select_cells(0, &images[0], &select, &mut again)
+        .unwrap();
+    assert_eq!(again, first, "the second read went back to the device");
+
+    let mut second: Vec<u32> = Vec::new();
+    scanner
+        .select_cells(1, &images[1], &select, &mut second)
+        .unwrap();
+    assert_eq!(second.len(), cells);
+    assert_ne!(second, first, "camera 1 answered with camera 0's frame");
 }

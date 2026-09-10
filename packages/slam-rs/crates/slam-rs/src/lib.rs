@@ -428,6 +428,7 @@ fn build_frontend(
                 num_levels,
                 config.optical_flow_max_iterations as usize,
                 config.optical_flow_max_recovered_dist2,
+                calibration.intrinsics.len(),
             )
             .map_err(frontend::flow::FrontendError::from)?;
             Ok(FrontendLane::Gpu(

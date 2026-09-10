@@ -312,9 +312,12 @@ pub type LaneBackends<P> = (
 /// one shared client.
 ///
 /// One client for both stages is what keeps a pyramid and the patches it feeds
-/// on the same device queue, so the frontend synchronises once per
-/// [`crate::frontend::tracker::PatchTracker::track`] call rather than once per
-/// stage.
+/// on the same device queue, so the frontend synchronises once per tracking
+/// **batch** rather than once per stage or once per camera.
+///
+/// `cameras` is the rig's camera count, which is how many tracking passes the
+/// tracker must be able to hold in flight at once
+/// ([`crate::frontend::tracker::PatchTracker::submit_prepared`]).
 ///
 /// # Errors
 ///
@@ -330,6 +333,7 @@ pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
     num_levels: usize,
     max_iterations: usize,
     max_recovered_dist2: f32,
+    cameras: usize,
 ) -> Result<LaneBackends<P>, crate::frontend::tracker::TrackerError> {
     // The guard is around the whole of it, not around the client alone: from
     // here to the returned backends every line allocates, launches or reads on
@@ -355,6 +359,7 @@ pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
                 num_levels,
                 max_iterations,
                 max_recovered_dist2,
+                cameras,
             )?;
             let builder: LanePyramidBuilder = GpuPyramidBuilder::new(client.clone(), P::OFFSETS);
             let mut scanner: GpuCornerScan<GpuRuntime> = GpuCornerScan::new(client)?;
@@ -712,7 +717,7 @@ mod tests {
     fn a_panic_after_the_client_is_built_is_a_typed_error() {
         arm_fault_at(GUARDED_REGION);
         let outer: crate::frontend::tracker::TrackerError =
-            gpu_backends::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0).unwrap_err();
+            gpu_backends::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0, 2).unwrap_err();
         assert!(
             matches!(
                 outer,
@@ -723,7 +728,7 @@ mod tests {
 
         arm_fault_at(STORAGE_PROBE);
         let probe: crate::frontend::tracker::TrackerError =
-            gpu_backends::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0).unwrap_err();
+            gpu_backends::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0, 2).unwrap_err();
         assert!(
             matches!(
                 probe,
@@ -736,7 +741,7 @@ mod tests {
 
         // And the same call with nothing armed builds the three backends, so
         // what the lines above measure is the guards.
-        gpu_backends::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0).unwrap();
+        gpu_backends::<crate::frontend::patterns::Pattern51>(64, 3, 5, 4.0, 2).unwrap();
     }
 
     /// A panic in an exported constructor is a typed error, not an unwind.
@@ -779,7 +784,7 @@ mod tests {
 
         arm_fault_at(GUARDED_REGION);
         let tracker: TrackerError =
-            GpuPatchTracker::<Pattern51, GpuRuntime>::new(client.clone(), 64, 4, 5, 4.0)
+            GpuPatchTracker::<Pattern51, GpuRuntime>::new(client.clone(), 64, 4, 5, 4.0, 2)
                 .unwrap_err();
         assert!(
             matches!(
@@ -793,7 +798,7 @@ mod tests {
 
         GpuCornerScan::<GpuRuntime>::new(client.clone()).unwrap();
         GpuPatches::<Pattern51, GpuRuntime>::new(client.clone(), 64, 4).unwrap();
-        GpuPatchTracker::<Pattern51, GpuRuntime>::new(client, 64, 4, 5, 4.0).unwrap();
+        GpuPatchTracker::<Pattern51, GpuRuntime>::new(client, 64, 4, 5, 4.0, 2).unwrap();
     }
 
     /// A panic in the public storage probe is a typed error, not an unwind.

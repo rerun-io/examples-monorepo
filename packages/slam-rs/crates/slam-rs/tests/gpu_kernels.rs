@@ -458,6 +458,7 @@ fn track_both_lanes(
         LEVELS + 1,
         MAX_ITERATIONS,
         MAX_RECOVERED_DIST2,
+        1,
     )
     .unwrap();
     let mut gpu_patches: GpuPatches<Pattern51, _> = gpu_tracker.make_patches().unwrap();
@@ -927,6 +928,7 @@ fn the_whole_gpu_path_holds_the_pool_flat() {
         LEVELS + 1,
         MAX_ITERATIONS,
         MAX_RECOVERED_DIST2,
+        1,
     )
     .unwrap();
     let mut patches: GpuPatches<Pattern51, _> = tracker.make_patches().unwrap();
@@ -1310,4 +1312,99 @@ fn small_angle_trig_stays_within_two_ulps_of_the_cpu() {
         }
     }
     println!("small-angle sin/cos maximum ULP errors: {worst:?}");
+}
+
+/// Two passes in flight over **one** patch set answer what two separate calls do.
+///
+/// This is the claim the batched tracker rests on: a batch's passes share every
+/// intermediate buffer — the source and backward patch stores, the backward
+/// transforms — and may, because the device stream is ordered, so pass 0's
+/// `finish` has read them before pass 1's kernels write them. Only the packed
+/// result is per lane. If that ordering did not hold, the second `prepare` would
+/// corrupt the first pass and lane 0 would come back wrong; the reference here
+/// is the same two passes run one at a time, which is what the frontend did
+/// before D77.
+#[test]
+fn a_batch_of_two_passes_answers_what_two_calls_do() {
+    const SIZE: usize = 512;
+    let first: ImageU16 = textured_image(SIZE, SIZE, 0.0, 0.0);
+    let second: ImageU16 = textured_image(SIZE, SIZE, 2.75, -1.5);
+    let lane0: PointsSoA = grid_positions(SIZE);
+    // A different pass, so a batch that answered both lanes from one of them
+    // would be caught: half the patches, a quarter-pixel off the grid.
+    let mut lane1: PointsSoA = PointsSoA::default();
+    for index in (0..lane0.len()).step_by(2) {
+        let point = lane0.get(index);
+        lane1.push(Vector2::new(point.x + 0.25, point.y - 0.25));
+    }
+    let guesses: [FlowTransforms; 2] = [guesses_at(&lane0), guesses_at(&lane1)];
+    let points: [&PointsSoA; 2] = [&lane0, &lane1];
+
+    let client = gpu_client().unwrap();
+    let mut builder = GpuPyramidBuilder::new(client.clone(), Pattern51::OFFSETS);
+    let mut prev = builder.allocate(SIZE, SIZE, LEVELS).unwrap();
+    let mut next = builder.allocate(SIZE, SIZE, LEVELS).unwrap();
+    builder.build(0, &first, &mut prev).unwrap();
+    builder.build(0, &second, &mut next).unwrap();
+
+    let mut tracker: GpuPatchTracker<Pattern51, _> = GpuPatchTracker::new(
+        client.clone(),
+        MAX_KEYPOINTS,
+        LEVELS + 1,
+        MAX_ITERATIONS,
+        MAX_RECOVERED_DIST2,
+        2,
+    )
+    .unwrap();
+    let mut patches: GpuPatches<Pattern51, _> = tracker.make_patches().unwrap();
+
+    // ── one at a time, which is the reference
+    let mut alone: Vec<FlowResult> = Vec::new();
+    for lane in 0..2 {
+        let mut out: FlowResult = FlowResult::with_capacity(MAX_KEYPOINTS);
+        patches.prepare(&prev, points[lane], None).unwrap();
+        tracker
+            .track_prepared(&prev, &next, &patches, &guesses[lane], &mut out)
+            .unwrap();
+        alone.push(out);
+    }
+
+    // ── both launched, then one download
+    let mut batched: Vec<FlowResult> = (0..2)
+        .map(|_| FlowResult::with_capacity(MAX_KEYPOINTS))
+        .collect();
+    for lane in 0..2 {
+        patches.prepare(&prev, points[lane], None).unwrap();
+        tracker
+            .submit_prepared(&prev, &next, &patches, &guesses[lane], &mut batched[lane])
+            .unwrap();
+    }
+    tracker.collect(&mut batched).unwrap();
+
+    for lane in 0..2 {
+        assert_eq!(
+            batched[lane].tracked(),
+            alone[lane].tracked(),
+            "lane {lane} kept a different set out of the batch"
+        );
+        for index in 0..points[lane].len() {
+            assert_eq!(
+                batched[lane].is_valid(index),
+                alone[lane].is_valid(index),
+                "lane {lane}: patch {index} survived out of the batch and not alone"
+            );
+            if alone[lane].is_valid(index) {
+                assert_eq!(
+                    batched[lane].transform(index).translation,
+                    alone[lane].transform(index).translation,
+                    "lane {lane}: patch {index} moved"
+                );
+            }
+        }
+    }
+    assert_ne!(
+        alone[0].tracked().len(),
+        alone[1].tracked().len(),
+        "the two lanes tracked the same set, so crossing them would not show"
+    );
 }

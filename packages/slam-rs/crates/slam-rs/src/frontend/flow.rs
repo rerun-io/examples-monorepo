@@ -65,8 +65,8 @@ use crate::camera::{CameraError, RigCamera};
 use crate::config::{MatchingGuessType, VioConfig};
 use crate::duration_ns;
 use crate::frontend::detect::{
-    CellGrid, CornerScan, CpuCornerScan, DetectError, DetectorConfig, DetectorScratch,
-    KeypointsData, LOWEST_THRESHOLD_RUNG, MAX_CELLS, Masks, Occupancy, Rect,
+    CellGrid, CellSelect, CornerScan, CpuCornerScan, DetectError, DetectorConfig, DetectorScratch,
+    KeypointsData, LOWEST_THRESHOLD_RUNG, MAX_CELLS, Masks, Occupancy, Rect, cell_select,
     detect_keypoints_with_cells,
 };
 use crate::frontend::parallel::{MAX_THREADS, WorkPool};
@@ -530,24 +530,35 @@ pub struct FrameToFrameOpticalFlow<
     staging: Vec<B::Pyramid>,
     tracker: T,
     patches: T::Patches,
-    /// The source keypoint ids of the call in flight, in map order (`:299`, `:306`).
-    ids: Vec<KeypointId>,
-    /// The source warps, in the same order (`:300`, `:307`).
+    /// The source keypoint ids of each lane of the batch in flight, in map order
+    /// (`:299`, `:306`).
+    ///
+    /// Per lane rather than per call because a batch's passes are all launched
+    /// before any of them is read, and mapping a tracked slot back to its
+    /// keypoint needs this after the download.
+    ids: Vec<Vec<KeypointId>>,
+    /// The source warps of the pass being submitted, in the same order (`:300`,
+    /// `:307`). One buffer for the batch: it is consumed before the next pass
+    /// overwrites it.
     source: FlowTransforms,
-    /// Which entries of `ids` survived the `masks1` test and were offered to the
-    /// tracker; the tracker's index space is this vector's.
-    offered: Vec<usize>,
+    /// Which entries of `ids[lane]` survived the `masks1` test and were offered
+    /// to the tracker; the lane's index space is this vector's.
+    offered: Vec<Vec<usize>>,
     /// The source positions the forward patches are built at.
     positions: PointsSoA,
     /// `transform_2` once the depth guess has been applied (`:342`).
     guesses: FlowTransforms,
-    /// The tracker's dense output.
-    result: FlowResult,
+    /// The tracker's dense output, one per lane of the batch in flight.
+    results: Vec<FlowResult>,
     /// The ids that survived, in ascending source order, with their warps.
     tracked_ids: Vec<KeypointId>,
     /// The warps of [`FrameToFrameOpticalFlow::tracked_ids`].
     tracked: FlowTransforms,
     detector: DetectorScratch,
+    /// The device cell selection each camera can take, or `None` where its shape
+    /// cannot ([`cell_select`]); rebuilt per detecting frameset so the whole rig
+    /// can be prepared in one device round trip.
+    cell_selects: Vec<Option<CellSelect>>,
     detected: KeypointsData,
     /// The keypoints `addPointsForCamera(0)` produced, to be matched onward.
     new_cam0: Keypoints,
@@ -875,15 +886,16 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             snapshot: FrameState::default(),
             timings: FlowTimings::default(),
             pyramid_builder: builder,
-            ids: Vec::new(),
+            ids: vec![Vec::new(); num_cams],
             source: FlowTransforms::default(),
-            offered: Vec::new(),
+            offered: vec![Vec::new(); num_cams],
             positions: PointsSoA::default(),
             guesses: FlowTransforms::default(),
-            result: FlowResult::default(),
+            results: vec![FlowResult::default(); num_cams],
             tracked_ids: Vec::new(),
             tracked: FlowTransforms::default(),
             detector: DetectorScratch::with_scanner(scanner),
+            cell_selects: vec![None; num_cams],
             detected: KeypointsData::default(),
             new_cam0: Keypoints::default(),
             to_remove: Vec::new(),
@@ -1131,6 +1143,9 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
                 self.last_keypoint_id_before_frame = snapshot.last_keypoint_id;
             }
             Err(_) => {
+                // A frameset refused between the launches and the download
+                // leaves a batch in flight; the next one starts empty.
+                self.tracker.discard();
                 self.frame.cameras.clone_from(&snapshot.cameras);
                 self.cells.clone_from(&snapshot.cells);
                 self.last_keypoint_id = snapshot.last_keypoint_id;
@@ -1169,14 +1184,24 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             }
         } else {
             // `for (i) trackPoints(old_pyramid[i], pyramid[i], ..., T_c1_c2, i, i)`
-            // (`:261-271`).
+            // (`:261-271`), as one batch: every camera's pass is launched, then
+            // one download answers all of them. A camera's pass reads only its
+            // own two pyramids and writes only its own lane, so batching moves
+            // no arithmetic — it removes the per-camera wait, which on the GPU
+            // lane is the frameset's dominant host cost (D77).
             let t_i1: Se3<f32> = prediction.t_w_i_previous;
             let t_i2: Se3<f32> = prediction.t_w_i_current;
+            let mark: std::time::Instant = std::time::Instant::now();
             for camera in 0..num_cams {
                 let t_c1: Se3<f32> = t_i1 * self.calib.t_i_c[camera];
                 let t_c2: Se3<f32> = t_i2 * self.calib.t_i_c[camera];
                 let t_c1_c2: Se3<f32> = t_c1.inverse() * t_c2;
-                self.track_camera(camera, &t_c1_c2)?;
+                self.submit_camera(camera, &t_c1_c2)?;
+            }
+            self.tracker.collect(&mut self.results)?;
+            self.timings.track_ns += duration_ns(mark);
+            for camera in 0..num_cams {
+                self.finish_camera(camera);
             }
             // `for (i) updateCellCounts(i)` (`:277`).
             for camera in 0..num_cams {
@@ -1232,39 +1257,47 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         Ok(())
     }
 
-    /// One camera's frame-to-frame track: `trackPoints(..., cam, cam)` (`:267-270`).
-    fn track_camera(&mut self, camera: usize, t_c1_c2: &Se3<f32>) -> Result<(), FrontendError> {
+    /// One camera's frame-to-frame track launched into its own lane:
+    /// `trackPoints(..., cam, cam)` (`:267-270`) up to the download.
+    fn submit_camera(&mut self, camera: usize, t_c1_c2: &Se3<f32>) -> Result<(), FrontendError> {
         // Source and destination are the same slot (`:299-308`, `:371`), so the
         // ids and warps are copied out first — and the slot is only cleared once
         // the track has succeeded, so a refused frame does not lose the camera's
         // keypoints.
-        self.ids.clear();
+        self.ids[camera].clear();
         self.source.clear();
-        self.ids.extend_from_slice(&self.frame.cameras[camera].ids);
-        for index in 0..self.frame.cameras[camera].len() {
-            self.source
-                .push(&self.frame.cameras[camera].transforms.get(index));
+        let source: &Keypoints = &self.frame.cameras[camera];
+        self.ids[camera].extend_from_slice(&source.ids);
+        for index in 0..source.len() {
+            self.source.push(&source.transforms.get(index));
         }
 
-        self.run_track_points(camera, camera, t_c1_c2, true)?;
+        self.submit_track_points(camera, camera, camera, t_c1_c2, true)
+    }
 
+    /// The tail of `trackPoints` for one camera, once its lane has arrived.
+    fn finish_camera(&mut self, camera: usize) {
+        self.finish_track_points(camera, camera);
         self.frame.cameras[camera].clear();
         for (slot, id) in self.tracked_ids.iter().enumerate() {
             // `keypoint_map_2.insert(result.begin(), result.end())` (`:372`); the
             // cell counts are rebuilt afterwards by `updateCellCounts`.
             self.frame.cameras[camera].set(*id, &self.tracked.get(slot), NO_RESPONSE);
         }
-        Ok(())
     }
 
-    /// The body of `trackPoints` (`:294-375`) minus the map bookkeeping.
+    /// The launching half of `trackPoints` (`:294-375`): the mask test, the
+    /// guesses, the patch build and the tracker's own kernels, into `lane`.
     ///
-    /// Reads `ids` and `source`, writes `tracked_ids` and `tracked`. The caller
-    /// decides what to do with the survivors, because `trackPoints` serves two
-    /// purposes: carrying a camera's own keypoints forward in time, and matching
-    /// camera 0's new keypoints into camera *i*.
-    fn run_track_points(
+    /// Reads `ids[lane]` and `source`, writes `offered[lane]` and eventually
+    /// `results[lane]`. Split from [`FrameToFrameOpticalFlow::finish_track_points`]
+    /// because `trackPoints` serves two purposes — carrying a camera's own
+    /// keypoints forward in time, and matching camera 0's new keypoints into
+    /// camera *i* — and both run every camera of the frameset before reading any
+    /// of them.
+    fn submit_track_points(
         &mut self,
+        lane: usize,
         cam1: usize,
         cam2: usize,
         t_c1_c2: &Se3<f32>,
@@ -1275,11 +1308,9 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             || self.config.optical_flow_matching_guess_type != MatchingGuessType::SamePixel;
         let depth: f32 = self.depth_guess;
 
-        self.offered.clear();
+        self.offered[lane].clear();
         self.positions.clear();
         self.guesses.clear();
-        self.tracked_ids.clear();
-        self.tracked.clear();
 
         for index in 0..self.source.len() {
             let transform_1: AffineCompact2f = self.source.get(index);
@@ -1295,7 +1326,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             } else {
                 t1
             };
-            self.offered.push(index);
+            self.offered[lane].push(index);
             self.positions.push(t1);
             self.guesses.push(&AffineCompact2f {
                 linear: transform_1.linear,
@@ -1311,31 +1342,34 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         } else {
             &self.staging[cam1]
         };
-        let mark: std::time::Instant = std::time::Instant::now();
         self.patches
             .prepare(source_pyramid, &self.positions, None)?;
-        self.tracker.track_prepared(
+        self.tracker.submit_prepared(
             source_pyramid,
             &self.staging[cam2],
             &self.patches,
             &self.guesses,
-            &mut self.result,
+            &mut self.results[lane],
         )?;
-        if tracking {
-            self.timings.track_ns += duration_ns(mark);
-        }
+        Ok(())
+    }
 
-        for slot in self.result.tracked() {
+    /// The reading half of `trackPoints`: `masks2` over one collected lane,
+    /// leaving the survivors in `tracked_ids` and `tracked`.
+    fn finish_track_points(&mut self, lane: usize, cam2: usize) {
+        self.tracked_ids.clear();
+        self.tracked.clear();
+        for slot in self.results[lane].tracked() {
             let slot: usize = *slot as usize;
-            let transform: AffineCompact2f = self.result.transform(slot);
+            let transform: AffineCompact2f = self.results[lane].transform(slot);
             // `if (masks2.inBounds(t2.x(), t2.y())) continue;` (`:352`).
             if self.masks[cam2].in_bounds(transform.translation.x, transform.translation.y) {
                 continue;
             }
-            self.tracked_ids.push(self.ids[self.offered[slot]]);
+            self.tracked_ids
+                .push(self.ids[lane][self.offered[lane][slot]]);
             self.tracked.push(&transform);
         }
-        Ok(())
     }
 
     /// `updateCellCounts` (`:707-716`): rebuild one camera's occupancy from scratch.
@@ -1377,17 +1411,22 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     /// Detection is capped at the camera's remaining budget
     /// ([`FrontendOptions::max_keypoints`]), so the frame it produces is always
     /// one the tracker can carry next time.
+    /// `detectKeypointsWithCells`' own configuration, from this frontend's.
+    fn detector_config(&self) -> DetectorConfig {
+        DetectorConfig {
+            num_points_cell: self.config.optical_flow_detection_num_points_cell as usize,
+            min_threshold: self.config.optical_flow_detection_min_threshold,
+            max_threshold: self.config.optical_flow_detection_max_threshold,
+            safe_radius: self.config.optical_flow_image_safe_radius,
+        }
+    }
+
     fn add_points_for_camera(
         &mut self,
         camera: usize,
         images: &[ImageU16],
     ) -> Result<(), FrontendError> {
-        let config: DetectorConfig = DetectorConfig {
-            num_points_cell: self.config.optical_flow_detection_num_points_cell as usize,
-            min_threshold: self.config.optical_flow_detection_min_threshold,
-            max_threshold: self.config.optical_flow_detection_max_threshold,
-            safe_radius: self.config.optical_flow_image_safe_radius,
-        };
+        let config: DetectorConfig = self.detector_config();
         let budget: usize = self
             .options
             .max_keypoints
@@ -1560,20 +1599,45 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     /// `addPoints` (`:637-666`): detect on camera 0, match onward, then detect
     /// again on the cameras that do not overlap camera 0.
     fn add_points(&mut self, images: &[ImageU16]) -> Result<(), FrontendError> {
+        // Every camera's cell winners in one device round trip, before the first
+        // of them is asked for. The selection kernels read the frame alone — the
+        // occupancy counts and the masks stay on the host and are applied to the
+        // keys afterwards — so a camera's can be launched before this frameset
+        // has decided anything about it, and what that saves is one wait per
+        // camera (D77). A backend without a device path prepares nothing and
+        // every `detect_keypoints_with_cells` answers for itself.
+        let config: DetectorConfig = self.detector_config();
+        for (camera, image) in images.iter().enumerate() {
+            self.cell_selects[camera] = cell_select(image, &self.detection_grids[camera], &config);
+        }
+        let mark: std::time::Instant = std::time::Instant::now();
+        self.detector.prepare_cells(images, &self.cell_selects)?;
+        self.timings.detect_ns += duration_ns(mark);
+
         self.add_points_for_camera(0, images)?;
 
         // `for (i = 1; i < getNumCams(); i++) trackPoints(pyr0, pyri, kpts0, ...)`
         // (`:643-654`). With one camera there is nothing to match into (trap 17).
+        // One batch again: camera *i*'s match reads camera 0's new keypoints and
+        // writes camera *i* alone, so the whole rig is launched before any of it
+        // is downloaded.
         let mark: std::time::Instant = std::time::Instant::now();
         for camera in 1..self.cameras.len() {
-            self.ids.clear();
+            let lane: usize = camera - 1;
+            self.ids[lane].clear();
             self.source.clear();
-            self.ids.extend_from_slice(&self.new_cam0.ids);
+            self.ids[lane].extend_from_slice(&self.new_cam0.ids);
             for index in 0..self.new_cam0.len() {
                 self.source.push(&self.new_cam0.transforms.get(index));
             }
             let t_c0_ci: Se3<f32> = self.calib.t_i_c[0].inverse() * self.calib.t_i_c[camera];
-            self.run_track_points(0, camera, &t_c0_ci, false)?;
+            self.submit_track_points(lane, 0, camera, &t_c0_ci, false)?;
+        }
+        if self.cameras.len() > 1 {
+            self.tracker.collect(&mut self.results)?;
+        }
+        for camera in 1..self.cameras.len() {
+            self.finish_track_points(camera - 1, camera);
             self.add_keypoints(camera);
         }
 

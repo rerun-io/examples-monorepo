@@ -620,6 +620,66 @@ pub trait CornerScan: std::fmt::Debug + Send + Sync {
         out.clear();
         Ok(())
     }
+
+    /// Answer every camera of a frameset's [`CornerScan::select_cells`] in one
+    /// device round trip, before the frameset asks for any of them.
+    ///
+    /// `selects[camera]` is [`cell_select`]'s answer for that camera, `None`
+    /// where the shape cannot take the device path at all. What this saves is a
+    /// wait, not arithmetic: the selection kernels read the frame and nothing
+    /// else, so every camera's can be launched together and downloaded once,
+    /// where the per-camera call synchronises once per camera. A backend that
+    /// takes it must answer the matching [`CornerScan::select_cells`] with the
+    /// same keys it downloaded here, and one that does nothing leaves every
+    /// `select_cells` to answer for itself.
+    ///
+    /// Called once per detecting frameset. Whatever it prepared is spent by the
+    /// `select_cells` calls that follow and must not outlive them.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the backend's own scan can fail with.
+    fn prepare_cells(
+        &mut self,
+        images: &[ImageU16],
+        selects: &[Option<CellSelect>],
+    ) -> Result<(), DetectError> {
+        let _ = (images, selects);
+        Ok(())
+    }
+}
+
+/// The device selection [`detect_keypoints_with_cells`] would ask `camera` for,
+/// or `None` when nothing about the shape can take the device path.
+///
+/// Mask-independent on purpose: `cell_masks` decides the rest of the gate and is
+/// not known until the frameset has masked the camera, while the kernels this
+/// describes read the frame and nothing else. So this is what
+/// [`CornerScan::prepare_cells`] can be handed before the frameset has run, and
+/// [`detect_keypoints_with_cells`] applies the mask half itself.
+#[must_use]
+pub fn cell_select(
+    image: &ImageU16,
+    grid: &CellGrid,
+    config: &DetectorConfig,
+) -> Option<CellSelect> {
+    let (width, height): (usize, usize) = (image.width(), image.height());
+    let takes_device: bool = config.num_points_cell == 1
+        && grid.cell > 2 * FAST_BORDER
+        && width >= grid.cell
+        && height >= grid.cell
+        && width < CELL_KEY_LIMIT
+        && height < CELL_KEY_LIMIT;
+    if !takes_device {
+        return None;
+    }
+    Some(CellSelect {
+        grid: *grid,
+        // The **last** rung the cell walk visits, which is the only one that
+        // decides a one-point-per-cell winner.
+        threshold: threshold_rungs(config).last()?,
+        safe_radius: config.safe_radius,
+    })
 }
 
 /// The CPU [`CornerScan`]: kornia's `fast_detect_rect_u8`, one sweep per
@@ -780,6 +840,20 @@ impl DetectorScratch {
             masked: Vec::new(),
             winners: Vec::new(),
         }
+    }
+
+    /// [`CornerScan::prepare_cells`] on the scanner this holds, which is the
+    /// only way to it from outside this module.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the scanner's own preparation can fail with.
+    pub fn prepare_cells(
+        &mut self,
+        images: &[ImageU16],
+        selects: &[Option<CellSelect>],
+    ) -> Result<(), DetectError> {
+        self.scanner.prepare_cells(images, selects)
     }
 }
 
@@ -995,9 +1069,9 @@ pub fn detect_keypoints_with_cells(
     // path is handed (`threshold_rungs`). A ladder with no rung at all detects
     // nothing: the walk's own loop would not run once, so returning here is the
     // answer it would give, without touching the frame.
-    let Some(last_rung) = threshold_rungs(config).last() else {
+    if threshold_rungs(config).last().is_none() {
         return Ok(());
-    };
+    }
 
     let width: usize = image.width();
     let height: usize = image.height();
@@ -1035,17 +1109,9 @@ pub fn detect_keypoints_with_cells(
     // packed key can name; and masks this grid's cells decompose
     // ([`cell_masks`]). Anything else takes the band walk, which stays the
     // reference.
-    let device_shaped: bool = config.num_points_cell == 1
-        && grid.cell > 2 * FAST_BORDER
-        && width < CELL_KEY_LIMIT
-        && height < CELL_KEY_LIMIT
-        && cell_masks(masks, grid, cells_x, cells_y, masked);
-    if device_shaped {
-        let select: CellSelect = CellSelect {
-            grid: *grid,
-            threshold: last_rung,
-            safe_radius: config.safe_radius,
-        };
+    let shaped: Option<CellSelect> = cell_select(image, grid, config)
+        .filter(|_| cell_masks(masks, grid, cells_x, cells_y, masked));
+    if let Some(select) = shaped {
         scanner.select_cells(camera, image, &select, winners)?;
         if winners.len() == cells_x * cells_y {
             // `for (x = x_start; x <= x_stop; x += PATCH_SIZE) for (y = ...)`
