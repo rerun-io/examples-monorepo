@@ -790,7 +790,7 @@ mod batch_lifecycle {
 
         scanner.submit_cells(images, selects).unwrap();
         let before = slam_rs::gpu::seam::snapshot();
-        tracker.collect(&mut []).unwrap();
+        tracker.collect().unwrap();
         scanner.take_cells().unwrap();
         let reads = slam_rs::gpu::seam::snapshot().delta(before);
         assert_eq!(reads.read_track.calls, 1);
@@ -810,11 +810,11 @@ mod batch_lifecycle {
             GpuPatchTracker::new(gpu_client().unwrap(), 512, 4, 5, 4.0, 2).unwrap();
         scanner.share_reads(&mut tracker);
         scanner.submit_cells(&first.images, &first.selects).unwrap();
-        tracker.collect(&mut []).unwrap();
+        tracker.collect().unwrap();
         scanner
             .submit_cells(&second.images, &second.selects)
             .unwrap();
-        tracker.collect(&mut []).unwrap();
+        tracker.collect().unwrap();
         scanner.take_cells().unwrap();
         assert_eq!(second.keys(&mut scanner), want);
     }

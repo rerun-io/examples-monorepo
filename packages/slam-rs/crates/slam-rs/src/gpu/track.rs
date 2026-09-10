@@ -59,6 +59,7 @@ pub struct GpuPatchTracker<P: Pattern, R: Runtime> {
     /// The keypoint counts of the passes submitted since the last collect, in
     /// submission order, which is also their lane order.
     pending: Vec<usize>,
+    batch: crate::frontend::tracker::TrackBatch,
     /// The staging buffer the transform inputs are uploaded from.
     staging: Vec<f32>,
     /// `source position - guess` per patch, the offset the backward guess adds.
@@ -113,6 +114,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                     backward: super::empty(&client, transform_bytes),
                     results,
                     pending: Vec::with_capacity(lanes.max(1)),
+                    batch: crate::frontend::tracker::TrackBatch::default(),
                     staging: vec![0.0; TRANSFORM_RUNS * capacity],
                     offset_x: vec![0.0; capacity],
                     offset_y: vec![0.0; capacity],
@@ -139,6 +141,13 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
 }
 
 impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
+    fn batch(&self) -> &crate::frontend::tracker::TrackBatch {
+        &self.batch
+    }
+    fn batch_mut(&mut self) -> &mut crate::frontend::tracker::TrackBatch {
+        &mut self.batch
+    }
+
     type Pattern = P;
     type Pyramid = GpuPyramid<R>;
     type Patches = GpuPatches<P, R>;
@@ -168,8 +177,10 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
         transforms_in: &FlowTransforms,
         out: &mut FlowResult,
     ) -> Result<(), TrackerError> {
-        self.submit_inner(prev, next, patches, transforms_in, false)?;
-        self.collect(std::slice::from_mut(out))
+        let pass = self.submit_inner(prev, next, patches, transforms_in, false)?;
+        self.collect()?;
+        out.clone_from(self.result(pass));
+        Ok(())
     }
 
     fn track_prepared(
@@ -180,8 +191,10 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
         transforms_in: &FlowTransforms,
         out: &mut FlowResult,
     ) -> Result<(), TrackerError> {
-        self.submit_prepared(prev, next, patches, transforms_in, out)?;
-        self.collect(std::slice::from_mut(out))
+        let pass = self.submit_prepared(prev, next, patches, transforms_in)?;
+        self.collect()?;
+        out.clone_from(self.result(pass));
+        Ok(())
     }
 
     fn submit_prepared(
@@ -190,20 +203,19 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
         next: &GpuPyramid<R>,
         patches: &GpuPatches<P, R>,
         transforms_in: &FlowTransforms,
-        _out: &mut FlowResult,
-    ) -> Result<(), TrackerError> {
+    ) -> Result<usize, TrackerError> {
         self.submit_inner(prev, next, patches, transforms_in, true)
     }
 
     /// Every submitted pass's result in one download, decoded in order.
-    fn collect(&mut self, outs: &mut [FlowResult]) -> Result<(), TrackerError> {
+    fn collect(&mut self) -> Result<(), TrackerError> {
         // The one call per frameset that waits on the device, and the one the
         // frontend makes with the GIL released: a lost device panics inside
         // CubeCL's own client, and the guard is what turns that into this
         // method's error rather than a `PanicException` in Python (decision D32).
         let outcome: Result<(), TrackerError> =
             guarded(GpuError::DeviceLost { what: "tracker" }, || {
-                self.collect_inner(outs)
+                self.collect_inner()
             });
         self.pending.clear();
         outcome
@@ -224,7 +236,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
         patches: &GpuPatches<P, R>,
         transforms_in: &FlowTransforms,
         build_source: bool,
-    ) -> Result<(), TrackerError> {
+    ) -> Result<usize, TrackerError> {
         // Launches only, but they still reach the device, and a lost one panics
         // inside CubeCL's own client: the guard is what turns that into this
         // method's error rather than a `PanicException` through the released GIL
@@ -247,9 +259,14 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                     lanes: self.results.len(),
                 });
             }
+            if lane == self.batch.slots.len() {
+                self.batch
+                    .slots
+                    .push(FlowResult::with_capacity(self.capacity));
+            }
             self.pending.push(count);
             if count == 0 {
-                return Ok(());
+                return Ok(lane);
             }
 
             // ── the forward pass's inputs: the source warps and the guesses.
@@ -358,23 +375,15 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                 patches.bases(),
                 self.max_recovered_dist2,
             );
-            Ok(())
+            Ok(lane)
         })
     }
 
     /// The batch's one wait: every submitted lane's packed result downloaded
-    /// together, then decoded into `outs` in submission order.
-    fn collect_inner(&mut self, outs: &mut [FlowResult]) -> Result<(), TrackerError> {
-        if self.pending.len() > outs.len() {
-            return Err(TrackerError::LengthMismatch {
-                first_name: "submitted passes",
-                first: self.pending.len(),
-                second_name: "results offered",
-                second: outs.len(),
-            });
-        }
+    /// together, then decoded into the batch slots in submission order.
+    fn collect_inner(&mut self) -> Result<(), TrackerError> {
         for (lane, count) in self.pending.iter().enumerate() {
-            outs[lane].reset(*count);
+            self.batch.slots[lane].reset(*count);
         }
         // A pass that offered nothing launched nothing, so it has no buffer to
         // read; the download is over the lanes that do.
@@ -419,7 +428,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
         for (lane, count) in self.pending.iter().enumerate() {
             let count: usize = *count;
             if count == 0 {
-                outs[lane].finish(0);
+                self.batch.slots[lane].finish(0);
                 continue;
             }
             let expected: usize = TRANSFORM_RUNS * count * size_of::<f32>();
@@ -443,7 +452,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                 });
             }
             let values: &[f32] = f32::from_bytes(buffer);
-            let (valid, transforms) = outs[lane].parts_mut();
+            let (valid, transforms) = self.batch.slots[lane].parts_mut();
             let [m00, m01, m10, m11, tx, ty] = transforms.coefficients_mut();
             for index in 0..count {
                 m00[index] = values[index];
@@ -454,7 +463,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                 ty[index] = values[5 * count + index];
                 valid[index] = values[6 * count + index] != 0.0;
             }
-            outs[lane].finish(count);
+            self.batch.slots[lane].finish(count);
         }
         Ok(())
     }

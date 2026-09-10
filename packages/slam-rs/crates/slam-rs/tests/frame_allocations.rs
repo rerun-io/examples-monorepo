@@ -363,9 +363,7 @@ fn a_frame_that_finds_nothing_costs_the_same_order() {
 #[test]
 fn a_restored_frame_costs_no_more_than_a_successful_one() {
     use slam_rs::frontend::parallel::WorkPool;
-    use slam_rs::frontend::tracker::{
-        CpuPatchTracker, FlowResult, PatchSoA, PatchTracker, TrackerError,
-    };
+    use slam_rs::frontend::tracker::{CpuPatchTracker, PatchSoA, PatchTracker, TrackerError};
     use slam_rs::pyramid::{CpuPyramidBuilder, PyramidU16};
 
     #[derive(Debug)]
@@ -376,6 +374,13 @@ fn a_restored_frame_costs_no_more_than_a_successful_one() {
     }
 
     impl PatchTracker for FailingTracker {
+        fn batch(&self) -> &slam_rs::frontend::tracker::TrackBatch {
+            self.inner.batch()
+        }
+        fn batch_mut(&mut self) -> &mut slam_rs::frontend::tracker::TrackBatch {
+            self.inner.batch_mut()
+        }
+
         type Pattern = Pattern51;
         type Pyramid = PyramidU16;
         type Patches = PatchSoA<Pattern51>;
@@ -392,14 +397,13 @@ fn a_restored_frame_costs_no_more_than_a_successful_one() {
             self.inner.make_patches()
         }
 
-        fn track(
+        fn submit_prepared(
             &mut self,
             prev: &PyramidU16,
             next: &PyramidU16,
             patches: &PatchSoA<Pattern51>,
             transforms_in: &FlowTransforms,
-            out: &mut FlowResult,
-        ) -> Result<(), TrackerError> {
+        ) -> Result<usize, TrackerError> {
             self.calls += 1;
             if self.calls >= self.fail_from {
                 return Err(TrackerError::CapacityExceeded {
@@ -407,7 +411,8 @@ fn a_restored_frame_costs_no_more_than_a_successful_one() {
                     capacity: 0,
                 });
             }
-            self.inner.track(prev, next, patches, transforms_in, out)
+            self.inner
+                .submit_prepared(prev, next, patches, transforms_in)
         }
     }
 
