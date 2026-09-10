@@ -55,27 +55,6 @@ pub use landmark_block::{
     DenseHbScratch, LandmarkBlock, LandmarkBlockOptions, LandmarkBlockState, compute_error_weight,
 };
 
-/// `reduce::deterministic_reduce_scalar` with the error type erased, so the
-/// fixture test in `tests/tbb_reduce_oracle.rs` can drive the association
-/// directly.
-///
-/// The reduction itself is internal — it exists to be called at the four sites
-/// of [`LinearizationAbsQR`] — but the *association* is a claim about basalt
-/// that has to be checked against basalt, and an integration test cannot reach
-/// a private module.
-pub fn deterministic_reduce_scalar_for_tests<S: LieScalar>(
-    n: usize,
-    leaf: &mut dyn FnMut(usize, S) -> S,
-) -> S {
-    let result: Result<S, std::convert::Infallible> =
-        reduce::deterministic_reduce_scalar(n, &mut |index: usize, acc: S| Ok(leaf(index, acc)));
-    match result {
-        Ok(value) => value,
-        // Unreachable: the leaf above cannot fail.
-        Err(never) => match never {},
-    }
-}
-
 use nalgebra::{DMatrix, Matrix4, Matrix6};
 
 use crate::ba_base::BaError;

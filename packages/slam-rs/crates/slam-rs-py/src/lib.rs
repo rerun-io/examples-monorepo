@@ -610,7 +610,6 @@ fn frontend_options(threads: usize, max_keypoints: Option<usize>) -> FrontendOpt
     FrontendOptions {
         threads,
         max_keypoints: max_keypoints.unwrap_or(defaults.max_keypoints),
-        ..defaults
     }
 }
 

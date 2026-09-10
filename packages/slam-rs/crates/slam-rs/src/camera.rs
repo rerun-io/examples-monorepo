@@ -53,13 +53,6 @@
 //!   asserts (`:657-659`). The port returns
 //!   [`CameraError::UnprojectJacobianUnsupported`] rather than asserting.
 //!
-//! ## The oracle
-//!
-//! `tests/fixtures/camera_oracle.json` is what these same models return in C++
-//! for nine cameras and thirty points each, produced by `tools/camera_oracle.cpp`
-//! on the fork's `slam-rs-reference` branch; `tests/camera_oracle.rs` checks this
-//! module against it to 1e-15 relative.
-//!
 //! ## Scalars
 //!
 //! Generic over [`LieScalar`] (`f32` and `f64`) because the frontend runs `f32`
