@@ -343,7 +343,7 @@ def test_the_first_clips_evidence_survives_a_directory_that_is_not_there_yet(mon
     clip's row has to be on disk already — and it is not, if the last line of the
     run is what discovers that ``out/`` does not exist.
     """
-    monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment, _gpu: PASSING)
+    monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment, _gpu, *, profile: PASSING)
     output: Path = tmp_path / "out" / "fleet_check.json"
     main(Config(segments=(SMOKE_SEGMENTS[1],), output_json=output))
     written: dict = json.loads(output.read_text())
@@ -359,7 +359,7 @@ def test_the_lane_is_on_the_json_and_the_clip_columns_are_not(monkeypatch: pytes
     beside ``machine``.
     """
     monkeypatch.setattr(_core, "gpu_backend", "wgpu")
-    monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment, _gpu: PASSING)
+    monkeypatch.setattr(fleet_check, "measure", lambda _manifest, _segment, _gpu, *, profile: PASSING)
     output: Path = tmp_path / "fleet_check.json"
     main(Config(segments=(SMOKE_SEGMENTS[1],), output_json=output, gpu=True))
     written: dict = json.loads(output.read_text())
@@ -423,7 +423,8 @@ def test_the_gpu_flag_reaches_the_estimator_and_nothing_else_does(monkeypatch: p
     """
     seen: list[bool] = []
 
-    def record(_manifest: ReferenceManifest, _segment: ReferenceSegment, *, gpu: bool) -> SegmentRun:
+    def record(_manifest: ReferenceManifest, _segment: ReferenceSegment, *, gpu: bool, profile: str) -> SegmentRun:
+        assert profile == "reference"
         seen.append(gpu)
         return SegmentRun(estimate=empty_trajectory(), framesets=412, lost=412, wall_s=1.0)
 

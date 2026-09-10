@@ -56,6 +56,7 @@ from numpy import ndarray
 
 from slam_rs import _core
 from slam_rs.catalog_feed import CameraCalib, Frameset, ImuCalib, ImuStream
+from slam_rs.reference import profiled_config_text
 from slam_rs.tracking import Lockstep
 
 Lane: TypeAlias = Literal["cpu", "gpu"]
@@ -157,6 +158,8 @@ class Config:
     """The ``.npz`` of decoded framesets to replay; a sibling ``.calib.pkl`` carries the calibration."""
     config: Path
     """The basalt VIO config JSON the reference run used."""
+    profile: Literal["reference", "fast"] = "reference"
+    """Config overlay applied before tracking."""
     lanes: tuple[Lane, ...] = ("cpu", "gpu")
     """Backends to interleave, in the order each round runs them."""
     rounds: int = 3
@@ -317,7 +320,7 @@ def main(config: Config) -> None:
     if config.pin_core is not None:
         os.sched_setaffinity(0, {config.pin_core})
     framesets: Framesets = load_framesets(config.dump, config.limit)
-    vio_config = _core.VioConfig.from_json(config.config.read_text())
+    vio_config = _core.VioConfig.from_json(profiled_config_text(config.config, config.profile))
     if vio_config.optical_flow_image_safe_radius != framesets.safe_radius:
         raise ValueError(
             f"the dump was decoded at safe radius {framesets.safe_radius} and "

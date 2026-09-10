@@ -88,6 +88,8 @@ class Config:
     """Longest time window fetched from the catalog in one round trip."""
     output_csv: Path | None = None
     """Where the estimated trajectory is written; defaults to ``data/<segment>/slam_rs.csv``."""
+    profile: Literal["reference", "fast"] = "reference"
+    """Config overlay applied before tracking."""
     gpu: bool = False
     """Run the frontend's pyramid, patch build and KLT tracker on the GPU through CubeCL.
 
@@ -212,7 +214,7 @@ def main(config: Config) -> None:
         stage: FrontendStage | VioStage | None = None
         if config.stage == "frontend":
             stage = FrontendStage(
-                flow=_core.OpticalFlow(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment)),
+                flow=_core.OpticalFlow(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment, profile=config.profile)),
                 logger=FrontendLogger(len(feed.cameras), feed.segment_id),
             )
             rr.send_blueprint(frontend_blueprint(feed.cameras))
@@ -223,7 +225,7 @@ def main(config: Config) -> None:
             # with no driver, no device or no adapter — and the shim
             # (:func:`slam_rs.apis.run`) is what turns it into one sentence and a
             # non-zero exit rather than a traceback through the feed.
-            vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment), gpu=config.gpu)
+            vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment, profile=config.profile), gpu=config.gpu)
             stage = VioStage(
                 lockstep=Lockstep(vio=vio),
                 logger=VioLogger(

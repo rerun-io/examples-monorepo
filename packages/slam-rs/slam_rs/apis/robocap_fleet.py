@@ -30,6 +30,7 @@ import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Literal
 
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb, this_temperature_c
 from slam_rs.reference import ReferenceManifest, RobocapSession, load_manifest
@@ -123,6 +124,9 @@ class RobocapRow:
 class Config:
     """Replay one RoboCap session on this machine, with nothing logged."""
 
+    profile: Literal["reference", "fast"] = "reference"
+    """Config overlay applied before tracking."""
+
     artifact_root: Path | None = None
     """Read every recording and sidecar from one directory per segment; see :func:`slam_rs.reference.relocate`."""
     session: str = "s00000015"
@@ -173,7 +177,7 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
     cpp: Trajectory = robocap_cpp_trajectory(manifest, session)
     across_reference: Trajectory | None = None if config.reference_csv is None else read_trajectory(config.reference_csv)
     before: float | None = this_temperature_c()
-    run: SegmentRun = run_robocap(manifest, session, seconds=config.seconds, window_s=config.window_s)
+    run: SegmentRun = run_robocap(manifest, session, seconds=config.seconds, window_s=config.window_s, profile=config.profile)
     after: float | None = this_temperature_c()
     against_cpp: AteResult | None = None
     across: float | None = None

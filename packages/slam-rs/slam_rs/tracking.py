@@ -21,7 +21,7 @@ import json
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from jaxtyping import Float64
@@ -30,7 +30,7 @@ from scipy.spatial.transform import Rotation
 
 from slam_rs import _core
 from slam_rs.catalog_feed import DEFAULT_WINDOW_S, CameraCalib, Frameset, LocalSegment, RigProfile, SegmentFeed, open_segment, read_rig_trajectory
-from slam_rs.reference import ImuParameters, ReferenceManifest, ReferenceSegment, RobocapSession, flow_config
+from slam_rs.reference import ImuParameters, ReferenceManifest, ReferenceSegment, RobocapSession, flow_config, profiled_config_text
 from slam_rs.trajectory import Trajectory, shift_clock
 
 MAX_HELD_FRAMESETS: int = 2
@@ -189,10 +189,12 @@ def run_segment(
     window_s: float | None = None,
     max_framesets: int | None = None,
     gpu: bool = False,
+    profile: Literal["reference", "fast"] = "reference",
 ) -> SegmentRun:
     """Drive one MSD reference clip through :class:`slam_rs._core.Vio`.
 
     Args:
+        profile: Config overlay; reference preserves the C++ configuration.
         manifest: The reference set, which resolves the dataset's basalt config.
         segment: Manifest entry naming the layers, the IMU model and the device's
             image safe radius.
@@ -208,7 +210,7 @@ def run_segment(
     source: LocalSegment = LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path)
     feed: SegmentFeed
     with open_segment(source, segment.imu) as feed:
-        lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment), gpu=gpu))
+        lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow_config(manifest, segment, profile=profile), gpu=gpu))
         return _drive(feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets)
 
 
@@ -232,7 +234,7 @@ def robocap_cpp_trajectory(manifest: ReferenceManifest, session: RobocapSession)
     return shift_clock(read_rig_trajectory(session.slam_path), manifest.robocap.imu.cam_time_offset_ns)
 
 
-def robocap_estimator_files(manifest: ReferenceManifest) -> tuple[_core.Calibration, _core.VioConfig]:
+def robocap_estimator_files(manifest: ReferenceManifest, profile: Literal["reference", "fast"] = "reference") -> tuple[_core.Calibration, _core.VioConfig]:
     """The calibration and the VIO config basalt itself ran the RoboCap lane with (C72).
 
     From the two files rather than from the recording, because the number this
@@ -242,13 +244,14 @@ def robocap_estimator_files(manifest: ReferenceManifest) -> tuple[_core.Calibrat
     one rig, and every lane that reads these files calls it.
 
     Args:
+        profile: Config overlay; reference preserves the C++ configuration.
         manifest: The reference set, which names both files relative to the package root.
 
     Returns:
         The calibration at the manifest's downscale, and the flow config.
     """
     calibration: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
-    flow: _core.VioConfig = _core.VioConfig.from_json((manifest.package_root / manifest.robocap.vio_config).read_text())
+    flow: _core.VioConfig = _core.VioConfig.from_json(profiled_config_text(manifest.package_root / manifest.robocap.vio_config, profile, manifest.package_root / "configs/profiles"))
     return calibration, flow
 
 
@@ -328,7 +331,7 @@ def check_calibration_matches_recording(
         raise ValueError(f"basalt's calibration carries cam_time_offset_ns {written['cam_time_offset_ns']}; the feed applies that offset, so the file must not")
 
 
-def run_robocap(manifest: ReferenceManifest, session: RobocapSession, seconds: float = 0.0, window_s: float = DEFAULT_WINDOW_S) -> SegmentRun:
+def run_robocap(manifest: ReferenceManifest, session: RobocapSession, seconds: float = 0.0, window_s: float = DEFAULT_WINDOW_S, profile: Literal["reference", "fast"] = "reference") -> SegmentRun:
     """Drive one RoboCap session through :class:`slam_rs._core.Vio`, nothing logged.
 
     The estimator is configured from basalt's **own** two files rather than from
@@ -341,6 +344,7 @@ def run_robocap(manifest: ReferenceManifest, session: RobocapSession, seconds: f
     what this loop drops against the replay is the Rerun rung.
 
     Args:
+        profile: Config overlay; reference preserves the C++ configuration.
         manifest: The reference set, which carries the RoboCap lane's configuration.
         session: The session to replay.
         seconds: Replay this much video time from the first frameset; 0 replays the whole session.
@@ -351,7 +355,7 @@ def run_robocap(manifest: ReferenceManifest, session: RobocapSession, seconds: f
     """
     calibration: _core.Calibration
     flow: _core.VioConfig
-    calibration, flow = robocap_estimator_files(manifest)
+    calibration, flow = robocap_estimator_files(manifest, profile=profile)
     feed: SegmentFeed
     with open_segment(LocalSegment(base_rrd=session.base_path), manifest.robocap.imu, profile=RigProfile.from_robocap(manifest.robocap), window_s=window_s) as feed:
         check_calibration_matches_recording(calibration, feed.cameras, manifest.robocap.imu, manifest.robocap.downscale)

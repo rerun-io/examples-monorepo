@@ -134,7 +134,7 @@ Design notes — the accessors field by field, every refusal and its ceiling, an
 | `slam_rs/` | The Python package: stubs, Tyro entry points under `apis/`. |
 | `tools/` | Thin CLI shims over `slam_rs/apis/`. |
 | `reference_segments.toml` | The frozen reference set. |
-| `configs/` | The basalt VIO configs the reference runs used, vendored from the fork. |
+| `configs/` | The basalt VIO configs the reference runs used, vendored from the fork; tracking tools and the benchmark opt into `configs/profiles/fast.json` with `--profile fast`. |
 | `tests/reference/` | Checked-in basalt C++ trajectories the gate tests reproduce. |
 | `slam_rs/reference_bundle.py` | Resolves the two long-tier artifacts kept out of git. |
 

@@ -174,10 +174,11 @@ def check_scoring_inputs(manifest: ReferenceManifest, segment: ReferenceSegment)
     return reference.path, segment.gt_csv
 
 
-def measure(manifest: ReferenceManifest, segment: ReferenceSegment, gpu: bool = False) -> ClipResult:
+def measure(manifest: ReferenceManifest, segment: ReferenceSegment, gpu: bool = False, profile: Literal["reference", "fast"] = "reference") -> ClipResult:
     """Run one clip through the estimator and score it against both references.
 
     Args:
+        profile: Config overlay; reference preserves the C++ configuration.
         manifest: The reference set, which resolves the dataset's config and the C++ trajectory.
         segment: The clip to run; its three artifacts must be on this machine.
         gpu: Put the frontend on this machine's GPU through CubeCL instead of the
@@ -203,7 +204,7 @@ def measure(manifest: ReferenceManifest, segment: ReferenceSegment, gpu: bool = 
     # costs nothing either.
     cpp: Trajectory = read_trajectory(cpp_csv)
     truth: Trajectory = read_trajectory(gt_csv)
-    run: SegmentRun = run_segment(manifest, segment, gpu=gpu)
+    run: SegmentRun = run_segment(manifest, segment, gpu=gpu, profile=profile)
     tracked: int = len(run.estimate)
     # A run below the floor is not scored at all: `ate` has no pose to align and
     # raises, and a machine that tracked nothing is precisely the machine this
@@ -324,6 +325,9 @@ def this_lane(gpu: bool) -> Lane:
 class Config:
     """Run the reference smoke clips on this machine and report the D60 verdict."""
 
+    profile: Literal["reference", "fast"] = "reference"
+    """Config overlay applied before tracking."""
+
     artifact_root: Path | None = None
     """Read every recording and sidecar from one directory per segment; see :func:`slam_rs.reference.relocate`."""
     segments: tuple[str, ...] = SMOKE_SEGMENTS
@@ -380,7 +384,7 @@ def main(config: Config) -> None:
     config.output_json.parent.mkdir(parents=True, exist_ok=True)
     results: list[ClipResult] = []
     for segment in segments:
-        results.append(measure(manifest, segment, config.gpu))
+        results.append(measure(manifest, segment, config.gpu, profile=config.profile))
         print(results[-1].row(machine))
         payload: dict[str, object] = {
             "machine": asdict(machine),
