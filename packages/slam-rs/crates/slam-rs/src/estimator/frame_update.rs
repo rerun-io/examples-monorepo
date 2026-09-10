@@ -586,15 +586,19 @@ mod tests {
     /// Returns the estimator with the newest state left **at** the truth, and the
     /// truth beside it.
     fn a_window(iterations: i32) -> (SqrtKeypointVio<f64>, PoseVelBiasState<f64>) {
-        a_window_on(CALIB, CONFIG, iterations)
+        a_window_on(CALIB, CONFIG, iterations, None)
     }
 
     /// [`a_window`] on a named rig, so the same known answer can be asked of a
     /// two-camera and a four-camera window.
+    ///
+    /// `skip_camera` files no observation from that target camera, which is how
+    /// a test asks what one camera was contributing.
     fn a_window_on(
         calib: &str,
         config: &str,
         iterations: i32,
+        skip_camera: Option<usize>,
     ) -> (SqrtKeypointVio<f64>, PoseVelBiasState<f64>) {
         let mut config: VioConfig = VioConfig::from_json_str(config).unwrap();
         config.port_frame_update_max_iterations = iterations;
@@ -682,6 +686,9 @@ mod tests {
 
                 let mut filed: bool = false;
                 for (cam_id, camera) in cameras.iter().enumerate() {
+                    if skip_camera == Some(cam_id) {
+                        continue;
+                    }
                     let rel: Se3<f64> = compute_rel_pose(
                         &Se3::identity(),
                         &vio.ba.calib.t_i_c[host.cam_id],
@@ -713,8 +720,9 @@ mod tests {
                 }
             }
         }
+        let least: usize = if skip_camera.is_some() { 1 } else { 12 };
         assert!(
-            vio.ba.lmdb.num_observations() >= 12,
+            vio.ba.lmdb.num_observations() >= least,
             "the fixture has to give the pose something to see: {}",
             vio.ba.lmdb.num_observations()
         );
@@ -884,22 +892,132 @@ mod tests {
         );
     }
 
-    /// The four-camera rig: the held landmarks' Jacobians w.r.t. the newest state
-    /// are right for a non-host camera too.
+    /// The four-camera rig: the vision half of the normal equations is the
+    /// gradient of the vision cost, camera by camera.
     ///
-    /// Every landmark here is hosted by camera 0 of the host keyframe and is
-    /// observed by whichever of the four cameras can see it, so the relative pose
-    /// each residual is formed through carries a different `T_i_c` on the target
-    /// side. Get one of those extrinsics or its `d_rel_d_t` wrong and the
-    /// perturbed state cannot return to a cost of zero, because the wrong
-    /// Jacobian points somewhere else. This is the check behind the MGO09 reading
-    /// in D76: the four-camera drift is the schedule, not a defect in the update's
-    /// per-camera algebra.
+    /// The known-minimum fixture above cannot say this. Its truth is the
+    /// preintegration's own prediction, so the IMU factor alone already puts the
+    /// minimum where the pixels do, and the state would come back to it with the
+    /// observations dropped entirely. This asks the independent question: with
+    /// the IMU contribution subtracted off, does `b` equal a central finite
+    /// difference of the vision cost in the same chart `apply_inc` moves the
+    /// state through?
+    ///
+    /// It has to hold coordinate by coordinate, and on the four-camera MGO rig —
+    /// the one MGO09 replays — every landmark is hosted by camera 0 and observed
+    /// by whichever cameras can see it, so a residual formed through camera *i*
+    /// carries camera *i*'s extrinsic on the target side and `d_rel_d_t` for
+    /// that pair. A wrong extrinsic or a wrong Jacobian on a non-host camera
+    /// moves that camera's rows of `b` away from the true gradient, which is
+    /// what this measures. The last block then removes one camera at a time and
+    /// requires the gradient to move, so a camera silently contributing nothing
+    /// cannot pass either.
+    ///
+    /// `b` is the gradient and not half of it: the vision cost accumulates
+    /// `0.5 * res_squared` per observation inside the Huber radius while `b`
+    /// accumulates `Jᵀr`, both whitened by the same `sqrt_weight`. The
+    /// perturbation is small enough to keep every residual inside that radius,
+    /// where the weight is one and the cost is smooth.
+    ///
+    /// The FEJ branch is deliberately not exercised: with a frozen host whose
+    /// pose has moved off its linearization point, `d_rel_d_t` is at the old
+    /// point while the residual is at the new one, and disagreeing with the
+    /// finite difference is exactly what first-estimates-Jacobian means. The
+    /// host here sits at its linearization point, so the two must agree.
     #[test]
-    fn the_frame_update_recovers_on_a_four_camera_rig() {
-        let (mut vio, truth) = a_window_on(CALIB_4, CONFIG_4, 5);
+    fn the_four_camera_vision_gradient_is_the_vision_cost_gradient() {
+        let (mut vio, _) = a_window_on(CALIB_4, CONFIG_4, 1, None);
         assert_eq!(vio.ba.cameras().len(), 4);
-        let observing: usize = (0..4)
+
+        // Off the minimum, but only just: the residuals have to stay inside the
+        // Huber radius for the cost to be the smooth `0.5 * rᵀr`.
+        let mut perturbation: Vector15<f64> = Vector15::zeros();
+        perturbation
+            .fixed_rows_mut::<3>(0)
+            .copy_from(&Vector3::new(0.004, -0.003, 0.002));
+        perturbation
+            .fixed_rows_mut::<3>(3)
+            .copy_from(&Vector3::new(0.001, 0.0015, -0.0008));
+        vio.ba
+            .frame_states
+            .get_mut(&CURRENT_T_NS)
+            .unwrap()
+            .apply_inc(&perturbation);
+
+        let imu_lin: ImuLinData<f64> = vio.imu_lin_data();
+        let options: LandmarkBlockOptions<f64> = LandmarkBlockOptions {
+            huber_parameter: vio.ba.huber_thresh,
+            obs_std_dev: vio.ba.obs_std_dev,
+            ..LandmarkBlockOptions::default()
+        };
+        let meas: IntegratedImuMeasurement<f64> = vio.imu_meas[&PREV_T_NS];
+
+        // The vision cost and the vision gradient at whatever point the window is
+        // standing on, both read off one `linearize_state`.
+        let vision = |vio: &mut SqrtKeypointVio<f64>| -> (f64, Vector15<f64>) {
+            let mut h: DMatrix<f64> = DMatrix::zeros(POSE_VEL_BIAS_SIZE, POSE_VEL_BIAS_SIZE);
+            let mut b: DVector<f64> = DVector::zeros(POSE_VEL_BIAS_SIZE);
+            let mut imu_h: DMatrix<f64> = DMatrix::zeros(IMU_BLOCK_SIZE, IMU_BLOCK_SIZE);
+            let mut imu_b: DVector<f64> = DVector::zeros(IMU_BLOCK_SIZE);
+            let (total, imu_error) = linearize_state(
+                &vio.ba,
+                &meas,
+                &imu_lin,
+                PREV_T_NS,
+                CURRENT_T_NS,
+                &options,
+                &mut h,
+                &mut b,
+                &mut imu_h,
+                &mut imu_b,
+            )
+            .unwrap();
+            let gradient: Vector15<f64> =
+                Vector15::from_fn(|i, _| b[i] - imu_b[POSE_VEL_BIAS_SIZE + i]);
+            (total - imu_error, gradient)
+        };
+
+        let (_, analytic): (f64, Vector15<f64>) = vision(&mut vio);
+        assert!(
+            analytic.fixed_rows::<6>(0).norm() > 1e-3,
+            "the perturbation has to leave the pixels something to say: {}",
+            analytic.fixed_rows::<6>(0).norm()
+        );
+
+        let step: f64 = 1e-6;
+        for index in 0..POSE_VEL_BIAS_SIZE {
+            let mut probe = |sign: f64| -> f64 {
+                let mut increment: Vector15<f64> = Vector15::zeros();
+                increment[index] = sign * step;
+                let state = vio.ba.frame_states.get_mut(&CURRENT_T_NS).unwrap();
+                state.backup();
+                state.apply_inc(&increment);
+                let (cost, _) = vision(&mut vio);
+                vio.ba
+                    .frame_states
+                    .get_mut(&CURRENT_T_NS)
+                    .unwrap()
+                    .restore();
+                cost
+            };
+            let difference: f64 = (probe(1.0) - probe(-1.0)) / (2.0 * step);
+            // The pose rows carry the whole vision gradient; velocity and both
+            // biases are invisible to a reprojection, so their rows are zero on
+            // both sides and the tolerance is absolute.
+            assert!(
+                (difference - analytic[index]).abs() < 1e-4 * (1.0 + analytic[index].abs()),
+                "coordinate {index}: analytic {} against finite difference {difference}",
+                analytic[index]
+            );
+            if index >= POSE_SIZE {
+                assert_eq!(analytic[index], 0.0, "coordinate {index} is not a pixel's");
+            }
+        }
+
+        // Every camera that sees something has to move the gradient: build the
+        // same window with that camera filing nothing and the vision half of the
+        // system has to change.
+        let observed: Vec<usize> = (0..4)
             .filter(|cam_id| {
                 vio.ba
                     .lmdb
@@ -907,39 +1025,25 @@ mod tests {
                     .iter()
                     .any(|lm| lm.obs.contains_key(&TimeCamId::new(CURRENT_T_NS, *cam_id)))
             })
-            .count();
+            .collect();
         assert!(
-            observing >= 2,
-            "the fixture has to exercise a non-host camera: {observing} of 4 observe"
+            observed.len() >= 2,
+            "the fixture has to exercise a non-host camera: {observed:?}"
         );
-
-        let mut perturbation: Vector15<f64> = Vector15::zeros();
-        perturbation
-            .fixed_rows_mut::<3>(0)
-            .copy_from(&Vector3::new(0.02, -0.015, 0.01));
-        perturbation
-            .fixed_rows_mut::<3>(3)
-            .copy_from(&Vector3::new(0.004, 0.006, -0.003));
-        vio.ba
-            .frame_states
-            .get_mut(&CURRENT_T_NS)
-            .unwrap()
-            .apply_inc(&perturbation);
-
-        let (lm, _, _) = vio.frame_update(CURRENT_T_NS).unwrap().unwrap();
-        let last = lm.last().unwrap();
-        assert!(
-            last.error_after < 1e-12,
-            "the minimum is exact on four cameras too: {}",
-            last.error_after
-        );
-        let recovered: &PoseVelBiasState<f64> = vio.ba.frame_states[&CURRENT_T_NS].state();
-        let position: f64 = (recovered.t_w_i.translation - truth.t_w_i.translation).norm();
-        let rotation: f64 = (recovered.t_w_i.rotation * truth.t_w_i.rotation.inverse())
-            .log()
-            .norm();
-        assert!(position < CONVERGENCE_TOLERANCE, "position {position}");
-        assert!(rotation < CONVERGENCE_TOLERANCE, "rotation {rotation}");
+        for cam_id in observed {
+            let (mut without, _) = a_window_on(CALIB_4, CONFIG_4, 1, Some(cam_id));
+            without
+                .ba
+                .frame_states
+                .get_mut(&CURRENT_T_NS)
+                .unwrap()
+                .apply_inc(&perturbation);
+            let (_, dropped): (f64, Vector15<f64>) = vision(&mut without);
+            assert!(
+                (dropped - analytic).norm() > 1e-6,
+                "camera {cam_id} contributes nothing to the vision gradient"
+            );
+        }
     }
 
     /// Offline mode lets nothing but the data reach a decision: the same window

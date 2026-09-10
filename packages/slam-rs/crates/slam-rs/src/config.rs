@@ -227,9 +227,10 @@ pub struct VioConfig {
     /// basalt's own schedule: `optimize` runs the 87-unknown sliding window on
     /// every frameset. Above zero a frameset that took no keyframe instead
     /// solves the newest state's 15 unknowns against fixed landmarks and its IMU
-    /// factor, with at most this many LM steps (accepted and backtracked
-    /// together, as `vio_max_iterations` counts them), and the joint solve runs
-    /// at keyframes only. Carried by the profile overlay alone
+    /// factor, and the joint solve runs at keyframes only. The loop is the
+    /// window's, inclusive as `vio_max_iterations` is, so `5` is a budget of
+    /// **six** trials — accepted and backtracked together — not five; the two
+    /// caps mean the same thing on purpose. Carried by the profile overlay alone
     /// (`configs/profiles/fast.json`); the `port.` spelling is D75's.
     #[serde(
         rename = "port.frame_update_max_iterations",

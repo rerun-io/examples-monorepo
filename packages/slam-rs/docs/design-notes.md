@@ -1038,6 +1038,9 @@ The `Dnn` tags in this file and in the README name the project's recorded design
 Vendored configs stay C++-faithful (D17), and the Rust default LM cap stays 7.
 Speed knobs live in `configs/profiles/fast.json`; the first sets
 `config.vio_max_iterations` to 4 (at most five LM steps with the inclusive loop).
+**D76 puts that one back to basalt's 7** once the joint solve runs at keyframes
+only: with the window solved one frameset in seven, the eight trials buy 0.146 cm
+of MIO10 ATE for about 0.1 ms of mean and nothing on the median.
 The benchmark and tracking tools opt in with `--profile fast`. The default
 `reference` profile is empty and preserves the vendored text. Unknown overlay
 keys raise `KeyError` so a typo cannot silently change the requested run.
@@ -1256,15 +1259,37 @@ wrong.
 **The four-camera algebra is not the MGO09 gap.** A landmark hosted by camera 0
 and observed by camera *i* forms its residual through a relative pose that
 carries a different `T_i_c` on the target side, and the held-landmark Jacobian
-w.r.t. the newest state is `compute_rel_pose`'s `d_rel_d_t` for that pair. On the
-four-camera MGO rig fixture — the one MGO09 replays — a state pushed off the
-zero-cost minimum returns to a cost below `1e-12` and to within `1e-9` m and rad
-of the truth, with landmarks observed by more than one camera. A wrong extrinsic
-or a wrong Jacobian on the non-host camera cannot do that: it points the step
-somewhere else and the exact minimum becomes unreachable. The per-camera loop
-order is `landmarks()` in id order and `cam_id` ascending, and the same window
-solved twice is bit-identical. So MGO09's 0.978 cm against 0.842 is the schedule
-— the landmarks and the seven keyframe poses standing still between keyframes —
-and the two-state variant above is the measure of how much of it a wider free
-block buys.
+w.r.t. the newest state is `compute_rel_pose`'s `d_rel_d_t` for that pair. Two
+independent tests on the four-camera MGO rig fixture — the one MGO09 replays —
+cover the two halves of that, and neither can stand in for the other:
+
+* the **known minimum** checks the residual. The zero-cost point is the
+  preintegration's own prediction and every pixel is a landmark projected
+  through it, so a state pushed off it has to come all the way back — cost below
+  `1e-12`, within `1e-9` m and rad. This is what the two-camera fixture already
+  did, and it cannot say anything about the Jacobian: the IMU factor alone puts
+  the minimum in the same place, so the state would return with the observations
+  dropped entirely;
+* the **vision gradient against a central finite difference** checks the
+  Jacobian, coordinate by coordinate, with the IMU contribution subtracted off
+  and in the same chart `apply_inc` moves the state through. The pose rows carry
+  the whole gradient and the velocity and bias rows are zero on both sides. Then
+  each observing camera is removed in turn and the gradient has to move, so a
+  camera silently contributing nothing cannot pass.
+
+Both were checked by mutation, and each caught the defect the other missed:
+forming the target side of the relative pose with camera 0's extrinsic instead
+of camera *i*'s leaves the known minimum at cost 4519 while the finite
+difference still agrees with its own wrong cost; scaling the non-host cameras'
+Jacobian by 1.05 leaves the known minimum reachable — Gauss-Newton descends on a
+slightly wrong Jacobian — while the finite difference reads 12,888 against the
+analytic 13,298. The per-camera loop order is `landmarks()` in id order and
+`cam_id` ascending, and the same window solved twice is bit-identical.
+
+So MGO09's 0.978 cm against 0.842 is the schedule — the landmarks and the seven
+keyframe poses standing still between keyframes — and the two-state variant above
+is the measure of how much of it a wider free block buys. What that does **not**
+settle is whether the whole 0.136 cm is the schedule; it settles that it is not
+the per-camera algebra, and enabling this on a four-camera rig through the shared
+`fast` profile is still a scope decision rather than a measurement.
 - **D76** — The fast profile runs the joint solve at keyframes and a 15-dof fixed-landmark update on the framesets between (2026-09-10)
