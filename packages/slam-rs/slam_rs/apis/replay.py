@@ -208,17 +208,20 @@ def main(config: Config) -> None:
     manifest: ReferenceManifest = load_manifest(artifact_root=config.artifact_root)
     segment: ReferenceSegment = manifest.by_id(config.segment)
     source: SegmentSource
+    origin: str
     if config.catalog is not None:
         if config.rrd is not None or config.gt_rrd is not None:
             raise ValueError("--catalog and --rrd/--gt-rrd name two sources for one replay; pass one of them")
         source = CatalogSegment(url=config.catalog, dataset_name=segment.dataset_name, segment_id=segment.segment_id)
+        origin = config.catalog
     else:
         source = LocalSegment(
             base_rrd=config.rrd if config.rrd is not None else segment.base_path,
             gt_rrd=config.gt_rrd if config.gt_rrd is not None else (None if config.rrd is not None else segment.gt_path),
         )
+        origin = str(source.base_rrd)
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / segment.segment_id / "slam_rs.csv"
-    print(f"replaying {segment.segment_id} ({segment.tier} tier) from {config.catalog if config.catalog is not None else source.base_rrd}")
+    print(f"replaying {segment.segment_id} ({segment.tier} tier) from {origin}")
 
     with open_segment(source, segment.imu, frame_stride=config.frame_stride, window_s=config.window_s) as feed:
         print(
