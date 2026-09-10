@@ -35,9 +35,7 @@
 //!
 //! * **The essential matrix is per camera** (deviation X03). `optical_flow.h:210`
 //!   computes the cam0-cam1 matrix once and stores it under every index, which is
-//!   wrong for cameras 2 and up. [`FrontendOptions::epipolar_per_camera`] defaults
-//!   to the fix; set it to `false` for a C++-parity run. For a two-camera rig the
-//!   two agree exactly.
+//!   wrong for cameras 2 and up. Each camera uses its own relative pose.
 //! * **Image bounds come from each camera's own resolution.** basalt reads
 //!   `calib.resolution.at(0)` for the whole rig (`:108-109`, trap 16); msd-g2's
 //!   cameras are stored rotated and do not share one (decision D30). The
@@ -48,7 +46,6 @@
 //!   index falls outside the matrix is skipped where the C++ reads out of range.
 //! * **`getNumCams() >= 2` is not required** (trap 17). With one camera the
 //!   matching and filtering passes are skipped instead of indexing `T_i_c[1]`.
-//!   Asking for the C++ essential-matrix bug on a one-camera rig is refused.
 //! * **The second mask test moves one step later.** `trackPoints` tests
 //!   `masks2.inBounds` between the forward and the backward track (`:352`); here
 //!   the whole forward pass runs, then the whole backward pass, so the test is
@@ -97,9 +94,6 @@ pub const NO_RESPONSE: f32 = -1.0;
 /// JSON still round-trips byte for byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrontendOptions {
-    /// Compute `E[i]` from `T_c0_ci` per camera instead of reusing the cam0-cam1
-    /// matrix for every camera (deviation X03). `false` reproduces the C++ bug.
-    pub epipolar_per_camera: bool,
     /// Workers the tracking passes run on (decision D31). One is the
     /// deterministic reference lane; any value gives the same numbers.
     pub threads: usize,
@@ -121,7 +115,6 @@ pub struct FrontendOptions {
 impl Default for FrontendOptions {
     fn default() -> Self {
         Self {
-            epipolar_per_camera: true,
             threads: 1,
             // The shipped grid is 50 px over a 960x960 frame with one point per
             // cell, so 361 cells; 3000 leaves room for a finer grid and for the
@@ -382,12 +375,6 @@ pub enum FrontendError {
         config: usize,
         /// What the tracker was built for.
         tracker: usize,
-    },
-    /// The epipolar filter needs a second camera when the C++ bug is reproduced.
-    #[error("epipolar_per_camera = false needs at least two cameras, the rig has {cameras}")]
-    NeedsTwoCameras {
-        /// Cameras in the rig.
-        cameras: usize,
     },
     /// `optical_flow_detection_min_threshold` cannot stop the halving ladder.
     #[error(
@@ -828,25 +815,15 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         if num_cams == 0 {
             return Err(FrontendError::NoCameras);
         }
-        if !options.epipolar_per_camera && num_cams < 2 {
-            return Err(FrontendError::NeedsTwoCameras { cameras: num_cams });
-        }
-
-        // `E[i]` (`optical_flow.h:207-213`), from `T_c0_ci` per camera unless the
-        // C++ behaviour is asked for (deviation X03).
+        // Each essential matrix uses that camera's pose relative to camera 0.
         let essential: Vec<Matrix4<f32>> = (0..num_cams)
             .map(|index| {
-                if options.epipolar_per_camera && index == 0 {
+                if index == 0 {
                     // `T_c0_c0` has no baseline, so `t.normalized()` would be
                     // NaN; nothing reads index 0 either way (`:704`).
                     return Matrix4::zeros();
                 }
-                let other: usize = if options.epipolar_per_camera {
-                    index
-                } else {
-                    1
-                };
-                let t_i_j: Se3<f32> = calib.t_i_c[0].inverse() * calib.t_i_c[other];
+                let t_i_j: Se3<f32> = calib.t_i_c[0].inverse() * calib.t_i_c[index];
                 cast_matrix4(&compute_essential(&t_i_j.cast::<f64>()))
             })
             .collect();
