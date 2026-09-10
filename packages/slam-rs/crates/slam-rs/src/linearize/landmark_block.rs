@@ -184,6 +184,34 @@ pub struct LandmarkBlock<S: LieScalar> {
     work_essential: Vec<S>,
 }
 
+/// `compute_error_weight` (`:456-470`).
+///
+/// Returns `(weighted_error, weight)`. Note the Huber test is on the
+/// **squared** residual against the squared threshold, and that both are in
+/// raw pixels: the `1 / obs_std_dev` scaling happens afterwards (`:170-172`),
+/// which is the "effective 2 sigma" deviation of papers-part2 §13.
+///
+/// A free function rather than a method because the estimator's non-keyframe
+/// frame update weights its residuals with the same rule and the same
+/// association (D76), and one reprojection model in the crate means one Huber
+/// in the crate.
+pub fn compute_error_weight<S: LieScalar>(
+    res_squared: S,
+    options: &LandmarkBlockOptions<S>,
+) -> (S, S) {
+    if options.huber_parameter > S::zero() {
+        let huber_weight: S = if res_squared <= options.huber_parameter * options.huber_parameter {
+            S::one()
+        } else {
+            options.huber_parameter / res_squared.sqrt()
+        };
+        let error: S = c::<S>(0.5) * (c::<S>(2.0) - huber_weight) * huber_weight * res_squared;
+        (error, huber_weight)
+    } else {
+        (c::<S>(0.5) * res_squared, S::one())
+    }
+}
+
 impl<S: LieScalar> LandmarkBlock<S> {
     /// `allocateLandmark` (`:35-104`).
     ///
@@ -333,27 +361,6 @@ impl<S: LieScalar> LandmarkBlock<S> {
         })
     }
 
-    /// `compute_error_weight` (`:456-470`).
-    ///
-    /// Returns `(weighted_error, weight)`. Note the Huber test is on the
-    /// **squared** residual against the squared threshold, and that both are in
-    /// raw pixels: the `1 / obs_std_dev` scaling happens afterwards (`:170-172`),
-    /// which is the "effective 2 sigma" deviation of papers-part2 §13.
-    fn compute_error_weight(&self, res_squared: S, options: &LandmarkBlockOptions<S>) -> (S, S) {
-        if options.huber_parameter > S::zero() {
-            let huber_weight: S =
-                if res_squared <= options.huber_parameter * options.huber_parameter {
-                    S::one()
-                } else {
-                    options.huber_parameter / res_squared.sqrt()
-                };
-            let error: S = c::<S>(0.5) * (c::<S>(2.0) - huber_weight) * huber_weight * res_squared;
-            (error, huber_weight)
-        } else {
-            (c::<S>(0.5) * res_squared, S::one())
-        }
-    }
-
     /// `linearizeLandmark` (`:110-191`): fill the block at the current
     /// linearization point and return this landmark's share of the error.
     ///
@@ -456,7 +463,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
             // `:168-172`. `res.squaredNorm()` is a contiguous two-coefficient
             // reduction, so there is only one order to take.
             let res_squared: S = res[0] * res[0] + res[1] * res[1];
-            let (weighted_error, weight) = self.compute_error_weight(res_squared, options);
+            let (weighted_error, weight) = compute_error_weight(res_squared, options);
             let sqrt_weight: S = weight.sqrt() / options.obs_std_dev;
             error_sum += weighted_error / (options.obs_std_dev * options.obs_std_dev);
 
@@ -1386,22 +1393,19 @@ mod tests {
     /// than quadratically.
     #[test]
     fn the_huber_weight_crosses_at_the_threshold() {
-        let (aom, lm, _) = fixture(1);
-        let block: LandmarkBlock<f64> =
-            LandmarkBlock::allocate(lm.id, &lm, &index, &aom, false).unwrap();
         let opt: LandmarkBlockOptions<f64> = options();
         let delta: f64 = opt.huber_parameter;
 
-        let (error_in, weight_in) = block.compute_error_weight(0.25 * delta * delta, &opt);
+        let (error_in, weight_in) = compute_error_weight(0.25 * delta * delta, &opt);
         assert_eq!(weight_in, 1.0);
         assert_eq!(error_in, 0.5 * 0.25 * delta * delta);
 
         // Exactly at the threshold the comparison is `<=`, so the weight is one.
-        let (_, weight_at) = block.compute_error_weight(delta * delta, &opt);
+        let (_, weight_at) = compute_error_weight(delta * delta, &opt);
         assert_eq!(weight_at, 1.0);
 
         let res_squared: f64 = 4.0 * delta * delta;
-        let (error_out, weight_out) = block.compute_error_weight(res_squared, &opt);
+        let (error_out, weight_out) = compute_error_weight(res_squared, &opt);
         assert!((weight_out - 0.5).abs() < 1e-15, "{weight_out}");
         assert!((error_out - 0.5 * 1.5 * 0.5 * res_squared).abs() < 1e-15);
 
@@ -1410,7 +1414,7 @@ mod tests {
             huber_parameter: 0.0,
             ..opt
         };
-        let (error, weight) = block.compute_error_weight(res_squared, &plain);
+        let (error, weight) = compute_error_weight(res_squared, &plain);
         assert_eq!(weight, 1.0);
         assert_eq!(error, 0.5 * res_squared);
     }

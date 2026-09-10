@@ -79,13 +79,20 @@ impl<S: LieScalar> Default for OptimizeScratch<S> {
 
 /// The two hard-coded convergence constants of `:1566`, which are **not**
 /// config fields.
-const FUNCTION_TOLERANCE: f64 = 1e-6;
+pub(super) const FUNCTION_TOLERANCE: f64 = 1e-6;
 /// See [`FUNCTION_TOLERANCE`].
-const STEP_TOLERANCE: f64 = 1e-4;
+pub(super) const STEP_TOLERANCE: f64 = 1e-4;
 
 /// `H.diagonal().segment<POSE_SIZE>(idx).array() = 1e20` (`:1400`), the value
 /// `vio_fix_long_term_keyframes` pins a long-term keyframe's rows with.
 const FIXED_KEYFRAME_WEIGHT: f64 = 1e20;
+
+/// What one solve leaves behind: the LM trail, why it stopped, and the stages
+/// it timed.
+///
+/// Named because two solves return it — the window's [`SqrtKeypointVio::optimize`]
+/// and the frame update of D76 — and `measure` takes whichever ran.
+pub(super) type SolveOutcome<S> = (Vec<LmIteration<S>>, LmTermination, StageTimings);
 
 /// Why the LM loop stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,7 +175,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     pub(super) fn optimize(
         &mut self,
         t_ns: i64,
-    ) -> Result<(Vec<LmIteration<S>>, LmTermination, StageTimings), EstimatorError> {
+    ) -> Result<SolveOutcome<S>, EstimatorError> {
         let mut lm: Vec<LmIteration<S>> = Vec::new();
         let mut timings: StageTimings = StageTimings::default();
         // `:1207`: five states have to accumulate before the first
@@ -467,7 +474,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 /// `damping` rather than restored: every failed attempt raises it, the last one
 /// included, so three failures leave a `lambda` no attempt used and C++ records
 /// that one too.
-fn damped_solve<S: LieScalar>(
+pub(super) fn damped_solve<S: LieScalar>(
     h: &DMatrix<S>,
     b: &DVector<S>,
     damping: &mut LmDamping<S>,

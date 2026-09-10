@@ -90,6 +90,7 @@
 //! estimator. Stage S9's Realtime mode is where the reset belongs (D5 of the S8
 //! simplify list).
 
+mod frame_update;
 mod optimize;
 mod schedule;
 
@@ -116,7 +117,8 @@ use crate::types::{
     PoseVelBiasState, PoseVelBiasStateWithLin, PoseVelState, StateError, TimeCamId,
 };
 
-use optimize::OptimizeScratch;
+use frame_update::FrameUpdateScratch;
+use optimize::{OptimizeScratch, SolveOutcome};
 pub use optimize::{LmIteration, LmTermination};
 use schedule::MarginalizationOutcome;
 pub use schedule::{EvictionReason, KeyframeEviction, MarginalizationStats};
@@ -626,6 +628,10 @@ pub struct SqrtKeypointVio<S: LieScalar> {
     /// Frames the last marginalization removed, for [`Self::snapshot`].
     last_marginalized: Vec<FrameId>,
 
+    /// The buffers [`Self::frame_update`]'s loop works in, kept across frames
+    /// for [`Self::scratch`]'s reason (D76).
+    frame_scratch: FrameUpdateScratch<S>,
+
     /// The buffers [`Self::optimize`]'s inner loop works in, kept across
     /// frames.
     ///
@@ -826,6 +832,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             pending: None,
             newest_imu_t_ns: None,
             last_marginalized: Vec::new(),
+            frame_scratch: FrameUpdateScratch::default(),
             scratch: OptimizeScratch::default(),
         })
     }
@@ -1300,9 +1307,22 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             }
         }
 
-        // `:566`.
+        // `:566`, plus D76's gate: above zero, `port.frame_update_max_iterations`
+        // moves the joint solve to the framesets that took a keyframe and gives
+        // the others the newest state alone. The frame update declines a
+        // frameset it cannot serve, and the joint solve owns the warmup.
         let optimize_started: std::time::Instant = std::time::Instant::now();
-        let (lm, termination, mut timings) = self.optimize(frame.t_ns)?;
+        let frame_update: bool =
+            self.config.port_frame_update_max_iterations > 0 && !took_keyframe && self.opt_started;
+        let updated: Option<SolveOutcome<S>> = if frame_update {
+            self.frame_update(frame.t_ns)?
+        } else {
+            None
+        };
+        let (lm, termination, mut timings) = match updated {
+            Some(outcome) => outcome,
+            None => self.optimize(frame.t_ns)?,
+        };
         timings.optimize_ns = duration_ns(optimize_started);
         timings.predict_ns = predict_ns;
         timings.keyframe_ns = keyframe_ns;
