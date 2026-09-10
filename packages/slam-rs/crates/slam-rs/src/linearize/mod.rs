@@ -46,7 +46,9 @@ mod abs_qr;
 mod landmark_block;
 mod reduce;
 
-pub use abs_qr::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
+pub use abs_qr::{
+    DenseHbWorkspace, ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions,
+};
 pub use landmark_block::{DenseHbScratch, LandmarkBlock, LandmarkBlockOptions, LandmarkBlockState};
 
 /// `reduce::deterministic_reduce_scalar` with the error type erased, so the

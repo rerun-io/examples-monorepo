@@ -141,6 +141,7 @@ pub struct LinearizationAbsQR<S: LieScalar> {
 /// a skipped write would have changed exists. A block whose own columns are not
 /// the identity to skip — [`LandmarkBlock::active_writeback_is_exact`] — is
 /// added at full width instead.
+#[derive(Debug, Clone)]
 struct DensePartial<S: LieScalar> {
     /// The partial `H`, full size, zero outside `columns` x `columns`.
     h: DMatrix<S>,
@@ -160,6 +161,27 @@ impl<S: LieScalar> DensePartial<S> {
             b: DVector::zeros(n),
             written: vec![false; n],
             columns: Vec::with_capacity(n),
+        }
+    }
+
+    /// Back to the identity for an `n`-column ordering, reusing the buffers.
+    ///
+    /// [`Reducible::reset`] is the cheaper reset and is what the reduction's own
+    /// subtree buffers take; this one zeroes the whole square, because the
+    /// accumulator the reduction hands back is written by three more parties —
+    /// the IMU blocks, the marginalization prior and the caller that pins a
+    /// fixed keyframe's rows — none of which record the columns they touched.
+    /// The window's landmarks cover nearly every column of the ordering
+    /// anyway, so on the frame that matters the two resets zero the same
+    /// square; what this saves is the allocation, not the memset.
+    fn reset_sized(&mut self, n: usize) {
+        if self.b.nrows() == n {
+            self.h.fill(S::zero());
+            self.b.fill(S::zero());
+            self.columns.clear();
+            self.written.fill(false);
+        } else {
+            *self = Self::zeros(n);
         }
     }
 
@@ -242,6 +264,55 @@ impl<S: LieScalar> Reducible for DensePartial<S> {
             self.b[j] += right.b[j];
         }
         self.mark(right.columns.iter().copied());
+    }
+}
+
+/// The buffers [`LinearizationAbsQR::get_dense_h_b_into`] reduces in, held
+/// across calls and across frames.
+///
+/// One call over `n` landmark blocks needs the accumulator it returns plus
+/// `ceil(log2 n)` subtree partials, each a full `opt_size` square, and the
+/// linearizer's own leaf scratch: seven `87x87` `f32` matrices on the median
+/// MIO10 frame. The Levenberg-Marquardt loop calls it **once per inner step** —
+/// seven times on that frame — and every one of those buffers is either zeroed
+/// on entry ([`DensePartial::reset_sized`]) or reset by the reduction before a
+/// leaf writes it ([`Reducible::reset`], which restores exactly `+0.0` over the
+/// columns that were written), so a buffer that persists is the same
+/// arithmetic on the same values.
+///
+/// The window changes size, so the buffers are keyed on `opt_size` and dropped
+/// when it moves; that happens when a keyframe enters or leaves, not per frame.
+#[derive(Debug, Clone)]
+pub struct DenseHbWorkspace<S: LieScalar> {
+    /// What the reduction accumulates into and the caller reads.
+    accumulator: DensePartial<S>,
+    /// One subtree partial per recursion depth, as `deterministic_reduce` wants
+    /// them.
+    depths: Vec<Option<DensePartial<S>>>,
+    /// The per-block transpose buffer of [`LandmarkBlock::add_dense_h_b`].
+    leaf: DenseHbScratch<S>,
+}
+
+impl<S: LieScalar> Default for DenseHbWorkspace<S> {
+    fn default() -> Self {
+        Self {
+            accumulator: DensePartial::zeros(0),
+            depths: Vec::new(),
+            leaf: DenseHbScratch::default(),
+        }
+    }
+}
+
+impl<S: LieScalar> DenseHbWorkspace<S> {
+    /// Every buffer at the identity for an `n`-column ordering.
+    fn prepare(&mut self, n: usize) {
+        if self.accumulator.b.nrows() != n {
+            // A subtree partial is only ever built by `identity_like` off the
+            // accumulator, so dropping them here is what keeps the two agreeing
+            // on the ordering's width.
+            self.depths.clear();
+        }
+        self.accumulator.reset_sized(n);
     }
 }
 
@@ -555,32 +626,54 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         estimator: &BundleAdjustmentBase<S>,
         inputs: &LinearizationInputs<'_, S>,
     ) -> Result<(DMatrix<S>, DVector<S>), LinearizeError> {
+        let mut workspace: DenseHbWorkspace<S> = DenseHbWorkspace::default();
+        let (h, b) = self.get_dense_h_b_into(estimator, inputs, &mut workspace)?;
+        Ok((h.clone(), b.clone()))
+    }
+
+    /// [`Self::get_dense_h_b`] into buffers the caller keeps.
+    ///
+    /// The reduced system is the workspace's own accumulator, handed back by
+    /// reference: the Levenberg-Marquardt loop builds one per inner step and
+    /// throws it away, so nothing wants an owned copy. The caller may write
+    /// into both — `sqrt_keypoint_vio.cpp:1395-1406` pins a fixed keyframe's
+    /// rows in place — because the next call zeroes the whole square rather
+    /// than only the columns the reduction recorded.
+    pub fn get_dense_h_b_into<'w>(
+        &self,
+        estimator: &BundleAdjustmentBase<S>,
+        inputs: &LinearizationInputs<'_, S>,
+        workspace: &'w mut DenseHbWorkspace<S>,
+    ) -> Result<(&'w mut DMatrix<S>, &'w mut DVector<S>), LinearizeError> {
         let opt_size: usize = self.aom.total_size();
-        let mut accumulator: DensePartial<S> = DensePartial::zeros(opt_size);
-        let mut scratch: Vec<Option<DensePartial<S>>> = Vec::new();
+        workspace.prepare(opt_size);
+        let DenseHbWorkspace {
+            accumulator,
+            depths,
+            leaf,
+        } = workspace;
         let blocks: &[LandmarkBlock<S>] = &self.landmark_blocks;
-        let mut leaf_scratch: DenseHbScratch<S> = DenseHbScratch::default();
         deterministic_reduce::<DensePartial<S>, LinearizeError>(
             blocks.len(),
-            &mut accumulator,
-            &mut scratch,
+            accumulator,
+            depths,
             &mut |i: usize, acc: &mut DensePartial<S>| {
                 let block: &LandmarkBlock<S> =
                     blocks.get(i).ok_or(LinearizeError::LayoutOverflow)?;
-                acc.accumulate(block, &mut leaf_scratch)
+                acc.accumulate(block, leaf)
             },
         )?;
-        let DensePartial { mut h, mut b, .. } = accumulator;
+        let DensePartial { h, b, .. } = accumulator;
 
         // `add_dense_H_b_imu` (`:640-653`).
         for (block, meta) in self.imu_blocks.iter().zip(self.imu_meta.iter()) {
-            block.add_dense_h_b(meta.start_idx, meta.end_idx, &mut h, &mut b);
+            block.add_dense_h_b(meta.start_idx, meta.end_idx, h, b);
         }
 
         // `add_dense_H_b_marg_prior` (`:600-631`). `:595-598`'s pose-damping
         // diagonal is not here: nothing sets it (D68).
         if let Some(marg) = inputs.marg {
-            estimator.linearize_marg_prior(marg, &self.aom, &mut h, &mut b)?;
+            estimator.linearize_marg_prior(marg, &self.aom, h, b)?;
         }
 
         Ok((h, b))

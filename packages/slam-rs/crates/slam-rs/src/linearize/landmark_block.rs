@@ -57,7 +57,7 @@ impl<S: LieScalar> Default for LandmarkBlockOptions<S> {
 /// of one per coefficient turns the inner loop into `acc[j] += t * row[j]`,
 /// which each accumulator still walks in row order — the same additions in the
 /// same order — and which vectorises, where the dot product does not.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DenseHbScratch<S: LieScalar> {
     /// The `Q2` rows of `storage` over the written columns then the residual,
     /// row-major so one row is contiguous.

@@ -35,7 +35,9 @@ use crate::duration_ns;
 use crate::eigen::ldlt::EigenLdlt;
 use crate::imu::{ImuLinData, IntegratedImuMeasurement, Matrix9};
 use crate::lie::{LieScalar, eigen_maxi};
-use crate::linearize::{ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
+use crate::linearize::{
+    DenseHbWorkspace, ImuInput, LinearizationAbsQR, LinearizationInputs, LinearizationOptions,
+};
 use crate::types::{
     AbsOrderMap, FrameId, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseVelBiasState, PoseVelBiasStateWithLin,
     Vector9, Vector15,
@@ -43,6 +45,31 @@ use crate::types::{
 
 /// `max_num_iter` for the damped solve (`:1408`).
 const MAX_SOLVE_ATTEMPTS: u32 = 3;
+
+/// Everything one `optimize` call works in that outlives the call.
+///
+/// The estimator holds one and hands it to the loop, so the buffers survive
+/// from frame to frame; they are reset or fully overwritten before each read,
+/// which is what makes holding them a change of allocation and not of
+/// arithmetic. Kept as a struct rather than as loose fields so
+/// [`super::SqrtKeypointVio`] has one thing to name and the destructuring at
+/// the top of [`SqrtKeypointVio::optimize`] stays one line.
+#[derive(Debug, Clone)]
+pub(super) struct OptimizeScratch<S: LieScalar> {
+    /// The dense reduction's accumulator, subtree partials and leaf transpose.
+    pub(super) dense: DenseHbWorkspace<S>,
+}
+
+impl<S: LieScalar> Default for OptimizeScratch<S> {
+    /// Empty buffers, sized on the first call. Written out rather than derived:
+    /// `#[derive(Default)]` would demand `S: Default`, which `LieScalar` does
+    /// not.
+    fn default() -> Self {
+        Self {
+            dense: DenseHbWorkspace::default(),
+        }
+    }
+}
 
 /// The two hard-coded convergence constants of `:1566`, which are **not**
 /// config fields.
@@ -152,12 +179,14 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         let Self {
             ref mut ba,
             ref mut damping,
+            ref mut scratch,
             ref marg_data,
             ref imu_meas,
             ref ltkfs,
             ref config,
             ..
         } = *self;
+        let OptimizeScratch { ref mut dense } = *scratch;
 
         // `:1221-1242`: poses first, then states, both in ascending timestamp
         // order, and each entry checked against the prior's. C++ reads the prior
@@ -242,7 +271,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             while it <= config.vio_max_iterations && termination.is_none() {
                 let mark: std::time::Instant = std::time::Instant::now();
                 // `:1393`.
-                let (mut h, mut b) = lqr.get_dense_h_b(ba, &inputs)?;
+                let (h, b) = lqr.get_dense_h_b_into(ba, &inputs, dense)?;
                 // The reduced system is the ordering's: every `(idx, size)` in
                 // `aom` is a block of it, and every frame of the two maps has
                 // an entry, because `aom` was built from those maps above and
