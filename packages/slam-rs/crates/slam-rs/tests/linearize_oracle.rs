@@ -72,15 +72,20 @@ const ORACLE: &str = include_str!("fixtures/linearize/linearize_oracle.json");
 
 /// Agreement with the C++ number in `f64`, relative to the array's own scale.
 ///
-/// The measured worst case over all four problems is **6.3e-16**, three ulps:
-/// every formula is Eigen's, and what is left is the association inside Eigen's
-/// product kernels, which the port does not reproduce. The constant is two
-/// orders looser so a compiler or nalgebra bump does not turn a one-ulp drift
-/// into a failure.
-const TOLERANCE_F64: f64 = 1e-14;
+/// The measured worst case over all four problems is **4.9e-14**, on `b[3]` of
+/// `two_frames`. It was 6.3e-16 — three ulps — while every formula here was
+/// Eigen's; S33 routed `So3`'s point action through `kornia-algebra`, whose
+/// association differs from Sophus's in the last bit of every rotated point
+/// (`crate::lie`), and the residual each block reduces carries that difference
+/// into a sum with cancellation. Two orders is what the change cost; the
+/// constant stays two orders above the measurement so a compiler, a nalgebra or
+/// a kornia bump does not turn a one-ulp drift into a failure.
+const TOLERANCE_F64: f64 = 1e-12;
 
 /// And in `f32`, where the measured worst case is **1.4e-6** — about eleven
-/// ulps, and dominated by the sub-diagonal entries the QR drives to zero.
+/// ulps, and dominated by the sub-diagonal entries the QR drives to zero. The
+/// same S33 change does not move it: the `f32` noise floor is already three
+/// orders above an association difference.
 const TOLERANCE_F32: f64 = 5e-6;
 
 #[derive(Debug, Deserialize)]

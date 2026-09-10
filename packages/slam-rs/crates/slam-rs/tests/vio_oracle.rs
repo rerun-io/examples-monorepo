@@ -111,21 +111,26 @@ use common::{IMU, ORACLE, OracleFlow, OracleLm, OracleRun, run_named};
 ///
 /// The window they walk through: `opt_started` at frameset 4, the second
 /// keyframe at 7, both keyframe demotions at 4 and 9, the prior growing from
-/// 15x15 to 16x21 at 4 and to 22x27 at 9, the first `f32` LM-trail divergence
-/// at 9, and the keyframe eviction loop's first firing at 51.
+/// 15x15 to 16x21 at 4 and to 22x27 at 9 — one row wider on each in the `f32`
+/// lane, for the reason the prior-shape assertion in `compare` gives — the
+/// first `f32` LM-trail divergence at 9, and the keyframe eviction loop's first
+/// firing at 51.
 const ORACLE_FRAMESETS: usize = 60;
 
 /// Relative agreement on every pose, velocity and bias coefficient of the
-/// window, in `f64`. Measured worst over the 60 framesets: rotation 4.9e-13,
-/// translation 2.5e-13, velocity 9.2e-13, bias 1.3e-11.
+/// window, in `f64`. Measured worst over the 60 framesets: rotation 7.9e-13,
+/// translation 3.2e-13, velocity 1.1e-12, bias 2.1e-11 — each about 1.6x what
+/// it was before S33 routed `So3` through `kornia-algebra`, and still two
+/// orders inside the constant.
 const POSE_TOLERANCE_F64: f64 = 2e-10;
-/// The same in `f32`. Measured worst: rotation 8.4e-5, translation 7.8e-5,
-/// velocity 2.3e-4, bias 9.3e-4.
+/// The same in `f32`. Measured worst: rotation 5.4e-5, translation 7.4e-5,
+/// velocity 1.9e-4, bias 1.2e-3 — three of the four smaller after S33 and the
+/// fourth 1.3x larger, which is what a noise floor does under a re-rounding.
 const POSE_TOLERANCE_F32: f64 = 3e-3;
 /// Relative agreement in `f64` on the LM error terms, `l_diff`, `lambda` and
 /// the marginalization prior's Frobenius digest — the stricter lane needs no
-/// split between them. Measured worst: 3.1e-10 (`error_before`), and on the
-/// digest 1.5e-15 on `H` and 6.4e-11 on `b`.
+/// split between them. Measured worst: 3.3e-10 (`error_before`), and on the
+/// digest 3.1e-15 on `H` and 7.9e-11 on `b`.
 const ERROR_TOLERANCE_F64: f64 = 2e-9;
 /// The same in `f32`, over the trail prefix the two runs share, for the
 /// quantities one well-conditioned formula computes from the current window:
@@ -149,20 +154,31 @@ const ERROR_TOLERANCE_F32: f64 = 1e-2;
 /// 0.145 to 0.016 without moving any decision. The constant is 3.4 times the
 /// worse of the two measurements (0.145, `lambda` — whose Nielsen update cubes
 /// a ratio whose numerator is a noise-level `f_diff`); on the current tree the
-/// worst in the group is 0.121 (`error_before`), so it is a margin, not
-/// a bound anything derives.
+/// worst in the group is 0.155, `lambda` again, so it is a margin, not a bound
+/// anything derives.
 const CANCELLING_TOLERANCE_F32: f64 = 5e-1;
 
 /// How far an accept-or-converge decision may be inside the `f32` noise floor
 /// before the two LM trails are allowed to part company, in units of
 /// `f32::EPSILON · |error_before|`.
 ///
-/// The survey over the 60 framesets found 23 framesets where they do, and 21
-/// before one reduction order inside the prior's error changed; over both runs
-/// the widest deciding `f_diff` was 30.4 ulps and the narrowest −16.5. 64 is
+/// The survey over the 60 framesets found 23 framesets where they do, 21 before
+/// one reduction order inside the prior's error changed and 20 after S33 changed
+/// another; over those runs the widest deciding `f_diff` was 30.4 ulps and the
+/// narrowest −16.5. 64 is
 /// that with room, and still two orders below the 1e-3-scale decrease the
 /// `f64` run sees at those steps.
 const F32_ACCEPT_NOISE_ULPS: f64 = 64.0;
+
+/// The row norm below which a marginalization prior's row is a null direction
+/// rather than a constraint, used only where the `f32` lane keeps a row the C++
+/// discards (see the prior-shape assertion in `compare`).
+///
+/// Measured over both lanes and all 120 framesets: the surplus rows are 8.8e-4
+/// and 9.2e-4, the smallest non-zero row either lane keeps anywhere is 0.35, and
+/// the largest is 1.3e4. The constant sits an order above the first group and
+/// 35 times below the second.
+const MARG_NULL_ROW_NORM: f64 = 1e-2;
 
 /// What `configs/profiles/fast.json` gives the frame update, so the lane the
 /// test drives is the lane the benchmark runs (D76).
@@ -389,14 +405,58 @@ fn compare<S: LieScalar>(run: &OracleRun, gate: LmGate) -> Worst {
         // assertion in `optimize` depends on.
         let order: Vec<(i64, usize, usize)> = estimator.marg_data().order.iter().collect();
         assert_eq!(order, expected.marg_order, "{where_}: marg_data.order");
+        let prior: &nalgebra::DMatrix<S> = &estimator.marg_data().h;
         assert_eq!(
-            (
-                estimator.marg_data().h.nrows(),
-                estimator.marg_data().h.ncols()
-            ),
-            (expected.marg_digest.rows, expected.marg_digest.cols),
-            "{where_}: prior shape"
+            prior.ncols(),
+            expected.marg_digest.cols,
+            "{where_}: prior columns"
         );
+        // The row count is the *rank* the marginalizing QR found — how many
+        // columns cleared `|beta| > sqrt(epsilon)` (`marg/helper.rs`) — and in
+        // `f32` that threshold is 3.4e-4 with a gauge-null direction sitting on
+        // it. S33 routed `So3`'s point action through `kornia-algebra`, whose
+        // association differs from Sophus's in the last bit of every rotated
+        // point, and on seven of the 60 `f32` framesets (4 through 10) the
+        // direction now clears the threshold: 17x21 where the C++ has 16x21,
+        // then 23x27 where it has 22x27. `f64` is unchanged on all 60.
+        //
+        // What the exact assertion was standing in for is that the prior
+        // constrains the same subspace, so that is what is asserted: no rank is
+        // *lost*, and any surplus row is a null direction rather than a
+        // constraint. Measured over both lanes and all 120 framesets, the
+        // surplus rows have norm 8.8e-4 and 9.2e-4, against 0.35 for the
+        // smallest non-zero row either lane keeps anywhere and 1.3e4 for the
+        // largest — three and a half orders of separation, which is why
+        // [`MARG_NULL_ROW_NORM`] can sit between them. (Exactly-zero rows are a
+        // third thing and stay: the 15x15 seed prior has five of them, and
+        // there `rows` equals the C++'s, so nothing below is asked of it.)
+        assert!(
+            (expected.marg_digest.rows..=expected.marg_digest.rows + 1).contains(&prior.nrows()),
+            "{where_}: prior rows {} outside the C++'s {} plus the one threshold flip",
+            prior.nrows(),
+            expected.marg_digest.rows
+        );
+        let surplus: usize = prior.nrows() - expected.marg_digest.rows;
+        if surplus > 0 {
+            let mut norms: Vec<f64> = (0..prior.nrows())
+                .map(|i| {
+                    prior
+                        .row(i)
+                        .iter()
+                        .fold(S::zero(), |acc, v| acc + *v * *v)
+                        .sqrt()
+                        .to_f64()
+                })
+                .collect();
+            norms.sort_by(|a, b| a.partial_cmp(b).expect("a finite prior"));
+            for (i, norm) in norms.iter().take(surplus).enumerate() {
+                assert!(
+                    *norm < MARG_NULL_ROW_NORM,
+                    "{where_}: surplus prior row {i} has norm {norm:.3e}, a constraint rather \
+                     than a null direction"
+                );
+            }
+        }
 
         // ── the floating agreement ────────────────────────────────────────
         for (state, want) in snapshot.states.iter().zip(expected.states.iter()) {

@@ -115,6 +115,22 @@ const TOLERANCE: f64 = 1e-12;
 /// sub-millimetre baseline is the worst-conditioned `A` in the fixture).
 const TRIANGULATE_TOLERANCE_F64: f64 = 5e-14;
 
+/// The DLT's input pose, `T_0_1.inverse().matrix3x4()`, against the C++'s.
+///
+/// This was bit-equal in both precisions, and it is here so that the comparison
+/// of the *result* below separates "the pose differs" from "the DLT differs".
+/// S33 routed `So3 * Vector3` through `kornia-algebra`, whose action is glam's
+/// `p (w² - b·b) + b (2 (p·b)) + (b x p) 2w` rather than Sophus's
+/// `p + w uv + b x uv`, so `Se3::inverse`'s translation — and only that column
+/// of the 3x4 — moves by an ulp. Measured worst: `5.6e-17` in `f64` and
+/// `1.5e-8` in `f32`, both one ulp of the coefficient. The rotation block is
+/// still bit-equal, and the constants are one order above what was measured, so
+/// the assertion still separates the two failures it was written to separate.
+const P2_TOLERANCE_F64: f64 = 1e-15;
+
+/// The same in `f32`.
+const P2_TOLERANCE_F32: f64 = 1e-7;
+
 /// `Vector3::norm` against the C++'s three-coefficient Eigen tree, in `f32`.
 ///
 /// nalgebra folds the three squares left to right; Eigen's `f32` path takes the
@@ -595,21 +611,26 @@ fn pose_from<S: LieScalar>(entry: &OracleTriangulate) -> Se3<S> {
     )
 }
 
-fn check_triangulate<S: LieScalar>(entries: &[&OracleTriangulate], tolerance: f64) {
+fn check_triangulate<S: LieScalar>(
+    entries: &[&OracleTriangulate],
+    tolerance: f64,
+    p2_tolerance: f64,
+) {
     assert!(!entries.is_empty());
     for entry in entries {
         let label: String = format!("triangulate {} {}", entry.name, entry.scalar);
         let t_0_1: Se3<S> = pose_from(entry);
 
-        // The reconstruction is exact: the 3x4 the DLT builds from is the one
-        // the C++ built from. Without this the comparison below would not
-        // separate a pose that differs from a DLT that differs.
+        // The 3x4 the DLT builds from is the one the C++ built from, to
+        // [`P2_TOLERANCE_F64`] / [`P2_TOLERANCE_F32`]. Without this the
+        // comparison below would not separate a pose that differs from a DLT
+        // that differs.
         let p2: nalgebra::Matrix3x4<S> = t_0_1.inverse().matrix3x4();
         close_all_finite(
             &format!("{label} p2"),
             &common::row_major(&p2),
             &entry.p2,
-            0.0,
+            p2_tolerance,
         );
 
         let f0: Vector3<S> = vector3(&entry.f0);
@@ -658,7 +679,7 @@ fn triangulate_matches_the_cpp_in_double() {
         .filter(|e| e.scalar == "f64")
         .collect();
     assert_eq!(entries.len(), 10);
-    check_triangulate::<f64>(&entries, TRIANGULATE_TOLERANCE_F64);
+    check_triangulate::<f64>(&entries, TRIANGULATE_TOLERANCE_F64, P2_TOLERANCE_F64);
 }
 
 #[test]
@@ -670,7 +691,7 @@ fn triangulate_matches_the_cpp_in_float() {
         .filter(|e| e.scalar == "f32")
         .collect();
     assert_eq!(entries.len(), 10);
-    check_triangulate::<f32>(&entries, TRIANGULATE_TOLERANCE_F32);
+    check_triangulate::<f32>(&entries, TRIANGULATE_TOLERANCE_F32, P2_TOLERANCE_F32);
 }
 
 /// The three cases that sit on basalt's `inv_dist < 3` gate really do straddle
@@ -926,7 +947,7 @@ fn the_boundary_sweep_matches_the_cpp_in_double() {
         .filter(|e| e.scalar == "f64")
         .collect();
     assert_eq!(entries.len(), 32);
-    check_triangulate::<f64>(&entries, TRIANGULATE_TOLERANCE_F64);
+    check_triangulate::<f64>(&entries, TRIANGULATE_TOLERANCE_F64, P2_TOLERANCE_F64);
     let accepted: usize = entries.iter().filter(|e| e.accepted).count();
     assert!(
         (1..entries.len()).contains(&accepted),
@@ -948,7 +969,7 @@ fn the_boundary_sweep_matches_the_cpp_in_float() {
         .filter(|e| e.scalar == "f32")
         .collect();
     assert_eq!(entries.len(), 32);
-    check_triangulate::<f32>(&entries, TRIANGULATE_TOLERANCE_F32);
+    check_triangulate::<f32>(&entries, TRIANGULATE_TOLERANCE_F32, P2_TOLERANCE_F32);
     let accepted: usize = entries.iter().filter(|e| e.accepted).count();
     assert!((1..entries.len()).contains(&accepted));
     assert_eq!(entries.iter().filter(|e| e.order_decides).count(), 16);

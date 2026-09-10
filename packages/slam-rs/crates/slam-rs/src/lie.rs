@@ -1,11 +1,23 @@
 //! SO(3) and SE(3) with basalt's exact conventions.
 //!
-//! basalt builds on Sophus, so the port reproduces Sophus's `exp`/`log`
-//! (quaternion, atan-based log, `Constants<Scalar>::epsilon()` small-angle
-//! branches) and the group Jacobians basalt adds on top in
+//! basalt builds on Sophus, so the conventions are Sophus's throughout: the
+//! quaternion, the atan-based log, `Constants<Scalar>::epsilon()` small-angle
+//! branches, and the group Jacobians basalt adds on top in
 //! `thirdparty/basalt-headers/include/basalt/utils/sophus_utils.hpp`. No Rust
 //! crate carries the two inverse right/left Jacobians or the *decoupled* SE(3)
 //! convention, which is why this module exists (decision D06).
+//!
+//! **SO(3)'s six group operations are not ported.** `exp`, `log`, `matrix`,
+//! `inverse` and the action on a point come from `kornia_algebra::lie::SO3F32`
+//! and `SO3F64` through [`LieScalar`]'s five `so3_*` adapters (S33); the
+//! adjoint is the matrix. What this module still owns around them is what
+//! upstream does not have: the `theta` [`So3::exp_and_theta`] and
+//! [`So3::log_and_theta`] report, which is Sophus's convention and not the
+//! tangent's magnitude, the renormalization on composition, and everything
+//! SE(3). Upstream's small-angle thresholds differ from Sophus's in `f32`
+//! (1e-8 against 1e-5) and coincide in `f64`; across that gap the two Taylor
+//! forms agree to well under an `f32` ulp, so the branch moves and the value
+//! does not.
 //!
 //! Two conventions are load-bearing and easy to get wrong:
 //!
@@ -26,6 +38,7 @@
 //! difference is below the branch threshold, but reproducing each at its own
 //! call site keeps the port literal.
 
+use kornia_algebra::{SO3F32, SO3F64, Vec3AF32, Vec3F64};
 use nalgebra::{
     Matrix3, Matrix3x4, Matrix4, Matrix6, Quaternion, RealField, UnitQuaternion, Vector3, Vector6,
 };
@@ -107,6 +120,49 @@ pub trait LieScalar: RealField + Copy {
     /// rejects.
     fn eigen_redux3(a: Self, b: Self, c: Self) -> Self;
 
+    /// SO(3)'s exponential map at this precision, `kornia_algebra::lie::SO3F32::exp`
+    /// or `SO3F64::exp`, in and out in basalt's `[qx, qy, qz, qw]` order.
+    ///
+    /// The five `so3_*` methods exist because `kornia-algebra` has two concrete
+    /// SO(3) types where [`So3`] has one generic one, and the scalar trait is
+    /// where this port already dispatches on precision. They are an adapter, not
+    /// an interface: [`So3`] is the type to use. Arrays rather than
+    /// `nalgebra` values because that is what both sides already hand out —
+    /// `glam` is `[x, y, z, w]` and so is `Sophus`'s storage — so the conversion
+    /// is a move, not an allocation.
+    ///
+    /// Upstream's small-angle branch is `theta < 1e-8` in `f32` and `theta <
+    /// 1e-10` in `f64`, against Sophus's `theta < 1e-5` and `theta < 1e-10`. The
+    /// `f64` thresholds coincide; in `f32` the two Taylor forms agree to well
+    /// under an `f32` ulp across the gap, so the branch moves and the value does
+    /// not. What [`So3::exp_and_theta`] still owns is the *reported* `theta`,
+    /// which Sophus zeroes on its own branch and [`Se3::exp`] reads.
+    fn so3_exp(omega: &[Self; 3]) -> [Self; 4];
+
+    /// SO(3)'s logarithm, `SO3F32::log` or `SO3F64::log`, from `[qx, qy, qz, qw]`.
+    ///
+    /// Upstream folds `w < 0` by negating both parts before one `atan2`, where
+    /// Sophus folds it into `atan2(-n, -w)`; the two are the same expression.
+    /// See [`Self::so3_exp`] for the branch thresholds.
+    fn so3_log(quaternion_xyzw: &[Self; 4]) -> [Self; 3];
+
+    /// The 3x3 rotation matrix, `SO3F32::matrix` or `SO3F64::matrix`, **column
+    /// major**.
+    ///
+    /// `glam`'s `from_quat` is Eigen's `toRotationMatrix` coefficient for
+    /// coefficient — `1 - (yy + zz)` on the diagonal from the doubled
+    /// components, the same products off it — so this is bit-identical to the
+    /// port it replaced, and `imu_oracle.rs` still asserts which axis a
+    /// rank-deficient covariance puts its weight on exactly.
+    fn so3_matrix(quaternion_xyzw: &[Self; 4]) -> [Self; 9];
+
+    /// The group inverse, `SO3F32::inverse` or `SO3F64::inverse`: the conjugate
+    /// of a unit quaternion, which is what Sophus takes too.
+    fn so3_inverse(quaternion_xyzw: &[Self; 4]) -> [Self; 4];
+
+    /// The action on a point, `SO3F32 * Vec3AF32` or `SO3F64 * Vec3F64`.
+    fn so3_act(quaternion_xyzw: &[Self; 4], point: &[Self; 3]) -> [Self; 3];
+
     /// Exact-as-possible conversion of a literal, standing in for C++'s `Scalar(x)`.
     fn from_literal(value: f64) -> Self;
 
@@ -132,6 +188,28 @@ impl LieScalar for f64 {
     /// One `Packet2d` plus the scalar remainder.
     fn eigen_redux3(a: Self, b: Self, c: Self) -> Self {
         (a + b) + c
+    }
+
+    fn so3_exp(omega: &[Self; 3]) -> [Self; 4] {
+        SO3F64::exp(Vec3F64::from_array(*omega)).to_array()
+    }
+
+    fn so3_log(quaternion_xyzw: &[Self; 4]) -> [Self; 3] {
+        SO3F64::from_array(*quaternion_xyzw).log().to_array()
+    }
+
+    fn so3_matrix(quaternion_xyzw: &[Self; 4]) -> [Self; 9] {
+        SO3F64::from_array(*quaternion_xyzw)
+            .matrix()
+            .to_cols_array()
+    }
+
+    fn so3_inverse(quaternion_xyzw: &[Self; 4]) -> [Self; 4] {
+        SO3F64::from_array(*quaternion_xyzw).inverse().to_array()
+    }
+
+    fn so3_act(quaternion_xyzw: &[Self; 4], point: &[Self; 3]) -> [Self; 3] {
+        (SO3F64::from_array(*quaternion_xyzw) * Vec3F64::from_array(*point)).to_array()
     }
 
     fn from_literal(value: f64) -> Self {
@@ -161,6 +239,28 @@ impl LieScalar for f32 {
     /// `Packet4f` is wider than three floats, so the scalar unroller runs.
     fn eigen_redux3(a: Self, b: Self, c: Self) -> Self {
         a + (b + c)
+    }
+
+    fn so3_exp(omega: &[Self; 3]) -> [Self; 4] {
+        SO3F32::exp(Vec3AF32::from_array(*omega)).to_array()
+    }
+
+    fn so3_log(quaternion_xyzw: &[Self; 4]) -> [Self; 3] {
+        SO3F32::from_array(*quaternion_xyzw).log().to_array()
+    }
+
+    fn so3_matrix(quaternion_xyzw: &[Self; 4]) -> [Self; 9] {
+        SO3F32::from_array(*quaternion_xyzw)
+            .matrix()
+            .to_cols_array()
+    }
+
+    fn so3_inverse(quaternion_xyzw: &[Self; 4]) -> [Self; 4] {
+        SO3F32::from_array(*quaternion_xyzw).inverse().to_array()
+    }
+
+    fn so3_act(quaternion_xyzw: &[Self; 4], point: &[Self; 3]) -> [Self; 3] {
+        (SO3F32::from_array(*quaternion_xyzw) * Vec3AF32::from_array(*point)).to_array()
     }
 
     fn from_literal(value: f64) -> Self {
@@ -274,52 +374,51 @@ impl<S: LieScalar> So3<S> {
         Matrix3::new(zero, -v.z, v.y, v.z, zero, -v.x, -v.y, v.x, zero)
     }
 
-    /// The exponential map, ported from `Sophus/sophus/so3.hpp:716-751`.
+    /// The exponential map, `kornia_algebra::lie::SO3F32::exp` / `SO3F64::exp`.
     pub fn exp(omega: &Vector3<S>) -> Self {
-        Self::exp_and_theta(omega).0
+        Self::from_kornia_quaternion(S::so3_exp(&[omega.x, omega.y, omega.z]))
     }
 
     /// [`So3::exp`] plus `theta = |omega|`, which is zero on the Taylor branch.
     ///
     /// `Sophus::SO3::expAndTheta` (`Sophus/sophus/so3.hpp:716`) reports the same
     /// `theta` it branched on, and [`Se3::exp`] feeds it straight into the left
-    /// Jacobian, so the two must be computed together.
+    /// Jacobian, so the two travel together. The **rotation** is upstream's; the
+    /// `theta` is still Sophus's convention, including the zero it reports on its
+    /// own small-angle branch and the threshold it uses. Upstream branches
+    /// slightly earlier in `f32` ([`LieScalar::so3_exp`]), which moves nothing
+    /// but the last bits of the quaternion there, and `Se3::exp`'s left Jacobian
+    /// keeps reading exactly the `theta` it read before.
     pub fn exp_and_theta(omega: &Vector3<S>) -> (Self, S) {
         let theta_sq: S = omega.norm_squared();
         let epsilon: S = S::SOPHUS_EPSILON;
-
-        let (theta, imag_factor, real_factor): (S, S, S) = if theta_sq < epsilon * epsilon {
-            let theta_po4: S = theta_sq * theta_sq;
-            (
-                S::zero(),
-                c::<S>(0.5) - c::<S>(1.0 / 48.0) * theta_sq + c::<S>(1.0 / 3840.0) * theta_po4,
-                c::<S>(1.0) - c::<S>(1.0 / 8.0) * theta_sq + c::<S>(1.0 / 384.0) * theta_po4,
-            )
+        let theta: S = if theta_sq < epsilon * epsilon {
+            S::zero()
         } else {
-            let theta: S = theta_sq.sqrt();
-            let half_theta: S = c::<S>(0.5) * theta;
-            (theta, half_theta.sin() / theta, half_theta.cos())
+            theta_sq.sqrt()
         };
-
-        let quaternion: Quaternion<S> = Quaternion::new(
-            real_factor,
-            imag_factor * omega.x,
-            imag_factor * omega.y,
-            imag_factor * omega.z,
-        );
-        (
-            Self {
-                // The factors above already make this unit length; Sophus asserts
-                // it rather than normalizing (`so3.hpp:747-750`).
-                quaternion: UnitQuaternion::new_unchecked(quaternion),
-            },
-            theta,
-        )
+        (Self::exp(omega), theta)
     }
 
-    /// The logarithm, ported from `Sophus/sophus/so3.hpp:281-334`.
+    /// A `[qx, qy, qz, qw]` from `kornia-algebra` as an `So3`.
+    ///
+    /// `new_unchecked` because every upstream operation that produces one starts
+    /// from a unit quaternion and stays on the sphere to within rounding — the
+    /// same assumption Sophus makes when it asserts rather than normalises
+    /// (`so3.hpp:747-750`). The one place the assumption is not free is
+    /// composition, which is why [`So3::mul`] normalises.
+    #[inline]
+    fn from_kornia_quaternion(xyzw: [S; 4]) -> Self {
+        Self {
+            quaternion: UnitQuaternion::new_unchecked(Quaternion::new(
+                xyzw[3], xyzw[0], xyzw[1], xyzw[2],
+            )),
+        }
+    }
+
+    /// The logarithm, `kornia_algebra::lie::SO3F32::log` / `SO3F64::log`.
     pub fn log(&self) -> Vector3<S> {
-        self.log_and_theta().0
+        Vector3::from(S::so3_log(&self.quaternion_xyzw()))
     }
 
     /// [`So3::log`] plus Sophus's `theta`, which is **not** `|log|` on the
@@ -329,94 +428,76 @@ impl<S: LieScalar> So3<S> {
     /// rotation (`Sophus/sophus/so3.hpp:311`), i.e. second order in the vector
     /// part, while the tangent itself is first order. [`Se3::log`] passes that
     /// `theta` to the inverse left Jacobian, and substituting `|log|` there
-    /// moves it onto the ill-conditioned branch, so the pair travels together.
+    /// moves it onto the ill-conditioned branch, so the pair travels together
+    /// and the port keeps Sophus's branch and its threshold.
+    ///
+    /// Off that branch, `theta` is `2 atan2(n, w)` with the `w < 0` wrap folded
+    /// in, which is the *signed magnitude* of the tangent: Sophus computes it as
+    /// `two_atan_nbyw_by_n * n` and the tangent as `two_atan_nbyw_by_n * vec`,
+    /// so the two differ only by `|vec|`, and the sign is negative exactly when
+    /// `w < 0`. Taking it from the vector upstream returned is the same
+    /// quantity and leaves one implementation of the `atan2`, not two.
     pub fn log_and_theta(&self) -> (Vector3<S>, S) {
         let q = self.quaternion.as_ref();
         let squared_n: S = q.vector().norm_squared();
         let w: S = q.w;
         let epsilon: S = S::SOPHUS_EPSILON;
 
-        let (two_atan_nbyw_by_n, theta): (S, S) = if squared_n < epsilon * epsilon {
+        let tangent: Vector3<S> = self.log();
+        let theta: S = if squared_n < epsilon * epsilon {
             // A unit quaternion with a vanishing vector part has |w| ~ 1, so the
-            // division below is safe; Sophus asserts the same thing (`so3.hpp:306`).
-            let squared_w: S = w * w;
-            (
-                c::<S>(2.0) / w - c::<S>(2.0 / 3.0) * squared_n / (w * squared_w),
-                c::<S>(2.0) * squared_n / w,
-            )
+            // division is safe; Sophus asserts the same thing (`so3.hpp:306`).
+            c::<S>(2.0) * squared_n / w
+        } else if w < S::zero() {
+            // w < 0 means the rotation is past pi; Sophus wraps it to a negative
+            // angle rather than reporting the reflex one.
+            -tangent.norm()
         } else {
-            let n: S = squared_n.sqrt();
-            // w < 0 means theta > pi; folding the wrap into atan2 keeps |theta| <= pi.
-            let atan_nbyw: S = if w < S::zero() {
-                (-n).atan2(-w)
-            } else {
-                n.atan2(w)
-            };
-            let two_atan_nbyw_by_n: S = c::<S>(2.0) * atan_nbyw / n;
-            (two_atan_nbyw_by_n, two_atan_nbyw_by_n * n)
+            tangent.norm()
         };
-
-        (q.vector() * two_atan_nbyw_by_n, theta)
+        (tangent, theta)
     }
 
-    /// The inverse rotation.
+    /// The inverse rotation, `kornia_algebra::lie::SO3F32::inverse` /
+    /// `SO3F64::inverse` — the conjugate of a unit quaternion, which is what
+    /// Sophus takes too (`Sophus/sophus/so3.hpp:267-269`).
     ///
-    /// Sophus builds it as `SO3(unit_quaternion().conjugate())`
-    /// (`Sophus/sophus/so3.hpp:267-269`), and that constructor renormalizes
-    /// (`:548-553`), so this one does too. Conjugating only flips signs, so the
-    /// renormalization is a no-op here — it is kept for the same reason Sophus
-    /// keeps it: every path that produces an `So3` leaves it unit length.
+    /// Sophus's constructor then renormalizes (`:548-553`), so this one does
+    /// too. Conjugating only flips signs, so the renormalization is a no-op
+    /// here — it is kept for the same reason Sophus keeps it: every path that
+    /// produces an `So3` leaves it unit length.
     pub fn inverse(&self) -> Self {
+        let [x, y, z, w]: [S; 4] = S::so3_inverse(&self.quaternion_xyzw());
         Self {
-            quaternion: normalized(self.quaternion.conjugate().into_inner()),
+            quaternion: normalized(Quaternion::new(w, x, y, z)),
         }
     }
 
-    /// The rotation as a 3x3 matrix.
+    /// The rotation as a 3x3 matrix, `kornia_algebra::lie::SO3F32::matrix` /
+    /// `SO3F64::matrix`.
     ///
     /// `Sophus::SO3::matrix()` is `unit_quaternion().toRotationMatrix()`
-    /// (`Sophus/sophus/so3.hpp:257`), so this is Eigen's
+    /// (`Sophus/sophus/so3.hpp:257`), i.e. Eigen's
     /// `QuaternionBase::toRotationMatrix`
-    /// (`thirdparty/basalt-headers/thirdparty/eigen/Eigen/src/Geometry/Quaternion.h:646-678`)
-    /// written out in its own operation order rather than nalgebra's
-    /// `to_rotation_matrix`.
+    /// (`thirdparty/basalt-headers/thirdparty/eigen/Eigen/src/Geometry/Quaternion.h:646-678`).
+    /// Upstream's is `glam`'s `Mat3::from_quat`, which is **that formula
+    /// coefficient for coefficient**: `1 - (yy + zz)` on the diagonal from the
+    /// doubled components, the same products off it. So this is bit-identical to
+    /// the port it replaced, and it is worth saying why that matters here rather
+    /// than treating it as luck.
     ///
-    /// The two agree mathematically and disagree in the last bits: Eigen builds
-    /// each diagonal entry as `1 - (tyy + tzz)` from the doubled coefficients,
-    /// nalgebra as `ww + ii - jj - kk`, and the off-diagonal triple products
-    /// associate differently (`(2y)·x` against `(x·y)·2`). That is enough to
-    /// move a cancellation residue across zero: on one 5 ms `f32` IMU sample the
+    /// nalgebra's `to_rotation_matrix` builds each diagonal entry as
+    /// `ww + ii - jj - kk` and associates the off-diagonal triple products the
+    /// other way (`(x·y)·2` against `(2y)·x`). That is enough to move a
+    /// cancellation residue across zero: on one 5 ms `f32` IMU sample the
     /// preintegrated covariance is rank deficient in a different *direction*
     /// under the two roundings, and the whitening then puts its `1.15e18` weight
     /// on a different axis (`crates/slam-rs/tests/imu_oracle.rs`,
-    /// `rotating_singular_f32`).
+    /// `rotating_singular_f32`, which still asserts the axis exactly).
     pub fn matrix(&self) -> Matrix3<S> {
-        let q = self.quaternion.as_ref();
-        let two: S = c::<S>(2.0);
-        let tx: S = two * q.i;
-        let ty: S = two * q.j;
-        let tz: S = two * q.k;
-        let twx: S = tx * q.w;
-        let twy: S = ty * q.w;
-        let twz: S = tz * q.w;
-        let txx: S = tx * q.i;
-        let txy: S = ty * q.i;
-        let txz: S = tz * q.i;
-        let tyy: S = ty * q.j;
-        let tyz: S = tz * q.j;
-        let tzz: S = tz * q.k;
-        let one: S = S::one();
-        Matrix3::new(
-            one - (tyy + tzz),
-            txy - twz,
-            txz + twy,
-            txy + twz,
-            one - (txx + tzz),
-            tyz - twx,
-            txz - twy,
-            tyz + twx,
-            one - (txx + tyy),
-        )
+        // Both `glam` and nalgebra store column major, so the array transfers
+        // without a transpose.
+        Matrix3::from_column_slice(&S::so3_matrix(&self.quaternion_xyzw()))
     }
 }
 
@@ -452,30 +533,22 @@ fn normalized<S: LieScalar>(quaternion: Quaternion<S>) -> UnitQuaternion<S> {
 impl<S: LieScalar> std::ops::Mul<Vector3<S>> for So3<S> {
     type Output = Vector3<S>;
 
-    /// Rotate a point, `Sophus::SO3::operator*(Point)`
-    /// (`Sophus/sophus/so3.hpp:408-417`).
+    /// Rotate a point, `SO3F32 * Vec3AF32` / `SO3F64 * Vec3F64`.
     ///
-    /// Sophus writes this out rather than calling Eigen's `_transformVector`,
-    /// and the port writes out Sophus's:
-    ///
-    /// ```text
-    /// uv = 2 (q.vec x p);  result = p + q.w uv + q.vec x uv
-    /// ```
-    ///
-    /// nalgebra's `UnitQuaternion * Vector3` forms the same three terms but adds
-    /// them as `(uv w + cross) + p`, one association away from Sophus's
-    /// `(p + uv w) + cross`. That is a last-ulp difference in every rotated
-    /// point, and it reaches a threshold: `computeRelPose` rotates the baseline
-    /// (`ba_utils.h:50`) into the relative pose the DLT triangulates from, and
-    /// basalt accepts a landmark only when the result satisfies
-    /// `0 < inv_dist < 3` (`sqrt_keypoint_vio.cpp:534`). Decision D44's rule
-    /// applies, so the order is Sophus's.
+    /// `Sophus::SO3::operator*(Point)` (`Sophus/sophus/so3.hpp:408-417`) writes
+    /// the rotation out as `uv = 2 (q.vec x p); p + q.w uv + q.vec x uv`, and
+    /// the port reproduced that association because it reaches a threshold:
+    /// `computeRelPose` rotates the baseline (`ba_utils.h:50`) into the relative
+    /// pose the DLT triangulates from, and basalt accepts a landmark only when
+    /// the result satisfies `0 < inv_dist < 3` (`sqrt_keypoint_vio.cpp:534`).
+    /// That gate is still there and the association is no longer the C++'s:
+    /// upstream is `glam`'s `p (w² - b·b) + b (2 (p·b)) + (b x p) 2w`, which is
+    /// the same rotation for a unit quaternion and a different last bit. What
+    /// decides a borderline landmark now is the ten-clip ATE gate, not this
+    /// ulp — and `triangulate` itself no longer reproduces Eigen either (S33
+    /// item 1).
     fn mul(self, rhs: Vector3<S>) -> Vector3<S> {
-        let q: &Quaternion<S> = self.quaternion.as_ref();
-        let vec: Vector3<S> = q.vector().into_owned();
-        let mut uv: Vector3<S> = vec.cross(&rhs);
-        uv += uv;
-        rhs + uv * q.w + vec.cross(&uv)
+        Vector3::from(S::so3_act(&self.quaternion_xyzw(), &[rhs.x, rhs.y, rhs.z]))
     }
 }
 
@@ -901,6 +974,50 @@ mod tests {
             let j_right_inv: Matrix3<f64> = right_jacobian_inv_so3(&phi);
             assert_abs_diff_eq!(j_right_inv * j_right, Matrix3::identity(), epsilon = 1e-12);
         }
+    }
+
+    /// [`So3::log_and_theta`]'s three branches, which S33 re-derived.
+    ///
+    /// The tangent is `kornia-algebra`'s now, but `theta` is still Sophus's and
+    /// [`Se3::log`] feeds it to the inverse left Jacobian, so its two
+    /// conventions have to be pinned rather than inferred from the tangent:
+    ///
+    /// * **past pi** (`w < 0`) `theta` is *negative* — Sophus wraps rather than
+    ///   reporting the reflex angle — and the tangent is the wrapped one, so
+    ///   `theta = -|log|`;
+    /// * **near zero** `theta` is `2 n^2 / w`, second order in the vector part
+    ///   where the tangent is first order, so it is emphatically **not**
+    ///   `|log|`: at `|omega| = 1e-12` the tangent has norm 1e-12 and `theta` is
+    ///   5e-25.
+    ///
+    /// Everywhere else `theta` is `+|log|`, including exactly at pi, where
+    /// `w == 0` and Sophus's `w < 0` test is false.
+    #[test]
+    fn log_and_theta_keeps_sophus_two_conventions() {
+        let axis: Vector3<f64> = Vector3::new(0.0, 0.0, 1.0);
+
+        // Just under pi: theta is the angle, and positive.
+        let (log, theta) = So3::exp(&(axis * (std::f64::consts::PI - 1e-6))).log_and_theta();
+        assert_abs_diff_eq!(theta, std::f64::consts::PI - 1e-6, epsilon = 1e-12);
+        assert_abs_diff_eq!(theta, log.norm(), epsilon = 1e-15);
+
+        // Exactly at pi: w is zero, so the wrap does not fire.
+        let (log, theta) = So3::exp(&(axis * std::f64::consts::PI)).log_and_theta();
+        assert!(theta > 0.0, "at pi theta stays positive, got {theta}");
+        assert_abs_diff_eq!(theta, log.norm(), epsilon = 1e-15);
+
+        // Past pi: w < 0, the tangent wraps to |log| <= pi and theta is its
+        // negative.
+        let past: So3<f64> = So3::exp(&(axis * (std::f64::consts::PI + 0.5)));
+        assert!(past.quaternion_xyzw()[3] < 0.0, "the fixture must wrap");
+        let (log, theta) = past.log_and_theta();
+        assert_abs_diff_eq!(log.norm(), std::f64::consts::PI - 0.5, epsilon = 1e-12);
+        assert_abs_diff_eq!(theta, -log.norm(), epsilon = 1e-15);
+
+        // Near zero: theta is second order where the tangent is first.
+        let (log, theta) = So3::exp(&(axis * 1e-12)).log_and_theta();
+        assert_abs_diff_eq!(log.norm(), 1e-12, epsilon = 1e-24);
+        assert_abs_diff_eq!(theta, 5e-25, epsilon = 1e-27);
     }
 
     /// A long chain of compositions must not leak unit length.
