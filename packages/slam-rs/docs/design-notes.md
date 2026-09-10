@@ -24,7 +24,7 @@ The core is being filled in stage by stage, bottom up. What is in it today:
 | `frontend` | The optical-flow frontend: `patterns` (Pattern52/51 from `patterns.h`; the other two are unreachable on every shipped config), `se2` (`AffineCompact2` and `Sophus::SE2::exp`), `ldlt` (Eigen's pivoted LDLT at 3x3), `patch` (the streaming inverse-compositional patch build), `tracker` (`PatchSoA`, `FlowTransforms`, the `SourcePatches`/`PatchTracker` stage traits and `CpuPatchTracker`), `detect` (basalt's centred cell grid over kornia-rs's FAST plus OpenCV's suppression), `flow` (`FrameToFrameOpticalFlow`, generic over the builder and tracker) and `parallel` (the explicit thread budget). |
 | `linearize` | The square-root linearization: `LandmarkBlock` (basalt's `[ J_p \| pad \| J_l \| r ]` buffer, the layout arithmetic of `landmark_block_abs_dynamic.hpp:83-96`, the Huber-weighted residual rows, three Householder reflections, back-substitution with its exact model cost change) and `LinearizationAbsQR`, which owns the blocks, the IMU blocks and the marginalization prior and produces `H`, `b`, `Q2Jp`, `Q2r` and `l_diff`. No damping and no Jacobian scaling: the fork comments every call site out and the port carries none of it (D34, D68). Eigen's `makeHouseholder` and `applyHouseholderOnTheLeft` are ported coefficient for coefficient rather than delegated to nalgebra's equivalents (D44). |
 | `marg` | Square-root marginalization: `MargHelper`'s rank-revealing flat Householder QR, `marginalizeHelperSqrtToSqrt` — the one routine of the three the shipped path reaches — plus the `marginalize()` mechanics of `sqrt_keypoint_vio.cpp:896-1178` given an explicit keep/marginalize schedule. The two squared-form routines, the complete orthogonal decomposition they inverted the marginalized block with, and `checkMargNullspace`/`checkEigenvalues` are **not** ported: `SqrtKeypointVio::new` refuses `vio_sqrt_marg` off, so nothing on any shipped config reaches them (D68). |
-| `eigen` | The Eigen ports, in one place, each reproducing Eigen's **operation order** rather than only its result: `qr` (`makeHouseholder`, `applyHouseholderOnTheLeft`, `makeGivens` and the `Redux.h` traversals), `ldlt` (the pivoted LDLT at dynamic size, D41, which the LM step solves through), `svd` (the Jacobi SVD the DLT triangulation needs) and `blas` (the `gemv` associations the other three call). Not "numerics utilities" to be swapped for nalgebra's (D44): the last bit reaches a rank test, a finite check and a triangulation gate. |
+| `eigen` | What remains of the Eigen ports after D79: `qr` (`makeHouseholder`, `applyHouseholderOnTheLeft`, `makeGivens`, `JacobiRotation`) and `ldlt` (the pivoted LDLT at dynamic size, D41, which the LM step solves through). Their operation order is kept because their last bit reaches a rank test and a finite check; the Jacobi SVD and the BLAS-order reductions that used to live beside them come from nalgebra now (D79). |
 | `estimator` | The Offline sliding-window driver: `process_frame` (cover, initialise, measure, optimise, marginalize), `schedule` (basalt's keyframe vote, the lazy keyframe budget and the keep/marginalize sets `marg` is given) and `optimize` (the Levenberg-Marquardt loop, with the per-frame `lambda` reset, the `lambda · diag(H)` damping and the shared 7-iteration budget). |
 
 Two conventions in `ba_base` are basalt deviating from its own papers, and the
@@ -201,7 +201,7 @@ The packet widths are fixed by the fork's own build flags — a trailing
 `-march=nocona` overrides the earlier `-march=native`, so the reference binary
 is SSE3 on every host and this is a property of basalt, not of the machine.
 
-All three follow decision D44's rule: an elementary operation whose rounding can
+The remaining ports follow decision D44's rule: an elementary operation whose rounding can
 reach a threshold comparison is ported in Eigen's or Sophus's operation order,
 not delegated to nalgebra's equivalent.
 
@@ -1079,6 +1079,7 @@ The `Dnn` tags in this file and in the README name the project's recorded design
 - **D76** — The fast profile solves the window at keyframes and the newest 15-dof state alone between them, falling back to the joint solve when that update declines (2026-09-10)
 - **D77** — The GPU frontend waits once per phase and reserves its queue budget before it enqueues (2026-09-10)
 - **D78** — One stage's download carries another's buffers: camera 0's cell selection rides the temporal tracks' read (2026-09-10)
+- **D79** — Eigen's operation order is no longer a requirement: nalgebra and kornia-algebra do the arithmetic where they can; the gate is ATE on the catalog (2026-09-10)
 
 ## D74 — Speed profile
 
@@ -1584,4 +1585,48 @@ two-camera frameset for 0.174 ms, which is 0.016 ms each whether it carries
 the eleven are the tracker's three-per-pass. Merging a pass's positions,
 forward transforms and backward offsets into one buffer with three regions —
 the kernels already take base offsets — would take eleven to five.
-- **D78** — One GPU stage's download carries another's buffers: camera 0's cell selection is launched at the top of the frameset and read back by the temporal tracks (2026-09-10)
+
+## D79 — Eigen's operation order is no longer a requirement; the library does the arithmetic where it can
+
+Decision, 2026-09-10 (Pablo): the accuracy reference is ATE against ground truth
+on the catalog — D60's ten-clip gate and the fast profile's 1.1x band — not the
+C++ trajectory byte for byte. D44's rule, that an elementary operation whose
+rounding can reach a rank test, a finite check or a triangulation gate reproduces
+Eigen's operation order, is retired wherever a library routine does the job. The
+DLT triangulation takes its null vector from nalgebra's SVD, in f64 even for
+`Vio<f32>` so the cancellation in the smallest singular value stays accurate;
+the reductions in the LDLT, QR and prior code use nalgebra's `gemv`, `dot` and
+`norm` or plain iterator sums; SO(3)'s exp, log, matrix, inverse and action come
+from kornia-algebra (a direct dependency at the rev the workspace already pins;
+composition still renormalizes, and Sophus's `theta` conventions that
+`Se3::log` depends on stay ported); the patch Hessian's rank-one update is
+nalgebra's `ger`, which is bit-identical to the loop it replaced.
+
+What stays ported is what no library provides in the shape the estimator needs:
+the pivoted dynamic LDLT (D41), the Householder QR of the landmark blocks and the
+marginalization's rank-revealing QR, SE(3) with the decoupled pair and basalt's
+four SO(3) Jacobians and their inverses, and the square-root-marginalization LM
+itself. The two audits `s33-audit-numerics.md` and `s33-audit-frontend.md`
+(under `/tmp/fleet-artifacts/slam-rs/cuvslam/reports/kornia/`) record what
+kornia-rs lacks at rev e2148e8 — f64 SE(3) and cameras with Jacobians, a
+radtan8 model, a stride-aware u16 image path, a policy-configurable cell
+detector, any general QR or pivoted LDLT — and so what would have to grow
+upstream for the rest to follow.
+
+Bit-exact oracle assertions that the swapped arithmetic broke became measured
+tolerances, each with its worst observed value in the comment. The one
+substantive rewrite is the marginalization prior's shape in `vio_oracle.rs`: on
+seven of sixty f32 framesets the QR finds one more rank than the C++ because a
+gauge-null direction sits on the `sqrt(f32::EPSILON)` threshold; the assertion
+now states the invariant the equality stood in for — no rank lost, at most one
+row gained, and a surplus row's norm below 1e-2 against a 0.35 floor for real
+constraints (measured 8.8e-4 and 9.2e-4).
+
+The gate for a change of this class (Pablo, the same day): MIO10 fast, three
+rounds, MIO07 fast and MGO07 fast on the A/B harness, ATE within the 1.1x band
+with zero lost framesets and latency within noise; no reference-profile runs, no
+other clips; the ten-clip release gate runs once for the whole stack before a
+merge. Measured for this change against the #254 tip: MIO10 1.5527 -> 1.5532 cm,
+MIO07 2.1023 -> 2.0726 cm, MGO07 2.3749 -> 2.3746 cm, all framesets tracked;
+MIO10 median 1.333 -> 1.327 ms, MIO07 1.516 -> 1.419 ms. Net -289 lines,
+`eigen/svd.rs` and `eigen/blas.rs` gone.
