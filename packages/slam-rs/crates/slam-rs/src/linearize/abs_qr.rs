@@ -691,8 +691,11 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         inputs: &LinearizationInputs<'_, S>,
     ) -> Result<(DMatrix<S>, DVector<S>), LinearizeError> {
         let mut workspace: DenseHbWorkspace<S> = DenseHbWorkspace::default();
-        let (h, b) = self.get_dense_h_b_into(estimator, inputs, &mut workspace)?;
-        Ok((h.clone(), b.clone()))
+        self.get_dense_h_b_into(estimator, inputs, &mut workspace)?;
+        // The workspace is this call's own, so the assembled system moves out of
+        // it rather than being copied: the borrow above ends with the statement.
+        let DensePartial { h, b, .. } = workspace.accumulator;
+        Ok((h, b))
     }
 
     /// [`Self::get_dense_h_b`] into buffers the caller keeps.
