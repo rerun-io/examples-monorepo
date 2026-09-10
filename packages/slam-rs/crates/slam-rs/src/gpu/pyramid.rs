@@ -389,6 +389,8 @@ impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
                         target,
                     );
                 }
+                // One upload, the level-0 copy and a subsample per level above it.
+                super::queued(&out.client, 1 + out.levels.len())?;
                 Ok(())
             },
         )

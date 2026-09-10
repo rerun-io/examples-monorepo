@@ -48,14 +48,32 @@ fn the_gpu_frontend_reports_its_host_seam() {
     };
 
     let config = common::config();
-    let calibration = common::calibration();
+    // `SLAM_RS_SEAM_CAMERAS` widens the two-camera fixture rig by repeating its
+    // cameras, which is how a four-camera rig's batch shape is reachable from
+    // the committed 960x960 frames.
+    let cameras: usize = std::env::var("SLAM_RS_SEAM_CAMERAS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(2);
+    let mut calibration = common::calibration();
+    while calibration.intrinsics.len() < cameras {
+        let source: usize = calibration.intrinsics.len() % 2;
+        calibration.intrinsics.push(calibration.intrinsics[source]);
+        calibration.resolution.push(calibration.resolution[source]);
+        let mut pose = calibration.t_i_c[source];
+        pose.translation.x += 0.05 * (calibration.t_i_c.len() as f64);
+        calibration.t_i_c.push(pose);
+    }
+    calibration.intrinsics.truncate(cameras);
+    calibration.resolution.truncate(cameras);
+    calibration.t_i_c.truncate(cameras);
     let options: FrontendOptions = FrontendOptions::default();
     let (builder, tracker, scanner) = slam_rs::gpu::gpu_backends::<Pattern51>(
         options.max_keypoints,
         config.optical_flow_levels as usize + 1,
         config.optical_flow_max_iterations as usize,
         config.optical_flow_max_recovered_dist2,
-        2,
+        cameras,
     )
     .unwrap();
     let mut flow = FrameToFrameOpticalFlow::with_backends(
@@ -70,8 +88,12 @@ fn the_gpu_frontend_reports_its_host_seam() {
 
     // The three committed framesets, walked forward and back so consecutive
     // framesets are a real small motion rather than a jump.
-    let frames: Vec<[ImageU16; 2]> = (0..3)
-        .map(|frame| [mio10_frame(frame, 0), mio10_frame(frame, 1)])
+    let frames: Vec<Vec<ImageU16>> = (0..3)
+        .map(|frame| {
+            (0..cameras)
+                .map(|camera| mio10_frame(frame, camera % 2))
+                .collect()
+        })
         .collect();
     let order: [usize; 4] = [0, 1, 2, 1];
 
@@ -97,7 +119,7 @@ fn the_gpu_frontend_reports_its_host_seam() {
         if index == warmup {
             slam_rs::gpu::seam::reset();
         }
-        let images: &[ImageU16; 2] = &frames[order[index % order.len()]];
+        let images: &[ImageU16] = &frames[order[index % order.len()]];
         let mark: std::time::Instant = std::time::Instant::now();
         let frame = flow
             .process_frame(
@@ -123,7 +145,7 @@ fn the_gpu_frontend_reports_its_host_seam() {
     }
 
     println!(
-        "MIO10 {count} framesets, {keypoints} keypoints on camera 0\n\
+        "MIO10 {count} framesets, {cameras} cameras, {keypoints} keypoints on camera 0\n\
          medians ms: whole {:.3} = pyramid {:.3} + detect {:.3} + track {:.3} + stereo {:.3}\n\
          {}",
         median(&mut whole),

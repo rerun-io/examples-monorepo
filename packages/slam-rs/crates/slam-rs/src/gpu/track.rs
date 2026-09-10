@@ -339,6 +339,9 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                 patches.bases(),
                 self.max_recovered_dist2,
             );
+            // The caller's positions upload, this call's two uploads and its
+            // six launches.
+            super::queued(&self.client, 9)?;
             Ok(())
         })
     }
@@ -373,9 +376,12 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
         let bytes: Vec<cubecl::bytes::Bytes> = if reads.is_empty() {
             Vec::new()
         } else {
-            super::seam::READ_TRACK
-                .measure(|| cubecl::reader::read_sync(self.client.read_async(reads)))
-                .map_err(|error| super::read_failed("the tracker result", &error))?
+            {
+                let read = super::seam::READ_TRACK
+                    .measure(|| cubecl::reader::read_sync(self.client.read_async(reads)));
+                super::drained();
+                read.map_err(|error| super::read_failed("the tracker result", &error))?
+            }
         };
 
         let mut read: usize = 0;

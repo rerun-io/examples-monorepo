@@ -445,9 +445,11 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                 // detached (decision D32).
                 let reads: Vec<cubecl::bytes::Bytes> = super::seam::READ_DETECT
                     .measure(|| {
-                        cubecl::reader::read_sync(
+                        let read = cubecl::reader::read_sync(
                             self.client.read_async(vec![handles.kept, handles.mask]),
-                        )
+                        );
+                        super::drained();
+                        read
                     })
                     .map_err(|error| {
                         super::read_failed("the candidate image and its bitmask", &error)
@@ -529,9 +531,12 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                 #[cfg(test)]
                 super::fire_if_armed(super::CORNER_SCAN_READ);
 
-                let reads: Vec<cubecl::bytes::Bytes> = super::seam::READ_DETECT
-                    .measure(|| cubecl::reader::read_sync(self.client.read_async(vec![best])))
-                    .map_err(|error| super::read_failed("the cell winner keys", &error))?;
+                let reads: Vec<cubecl::bytes::Bytes> = {
+                    let read = super::seam::READ_DETECT
+                        .measure(|| cubecl::reader::read_sync(self.client.read_async(vec![best])));
+                    super::drained();
+                    read.map_err(|error| super::read_failed("the cell winner keys", &error))?
+                };
                 let Ok([keys]) = <[cubecl::bytes::Bytes; 1]>::try_from(reads) else {
                     return Err(super::GpuError::DeviceReadFailed {
                         what: "the cell winner buffer",
@@ -571,6 +576,9 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
                     if let Some((best, cells)) = self.launch_selection(camera, image, &select) {
                         self.prepared[camera] = Some(select);
                         launched.push((camera, best, cells));
+                        // Three launches, and the frame upload when the
+                        // pyramid did not publish one.
+                        super::queued(&self.client, 4)?;
                     }
                 }
                 if launched.is_empty() {
@@ -582,9 +590,12 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
 
                 let handles: Vec<cubecl::server::Handle> =
                     launched.iter().map(|(_, best, _)| best.clone()).collect();
-                let reads: Vec<cubecl::bytes::Bytes> = super::seam::READ_DETECT
-                    .measure(|| cubecl::reader::read_sync(self.client.read_async(handles)))
-                    .map_err(|error| super::read_failed("the cell winner keys", &error))?;
+                let reads: Vec<cubecl::bytes::Bytes> = {
+                    let read = super::seam::READ_DETECT
+                        .measure(|| cubecl::reader::read_sync(self.client.read_async(handles)));
+                    super::drained();
+                    read.map_err(|error| super::read_failed("the cell winner keys", &error))?
+                };
                 if reads.len() != launched.len() {
                     self.prepared.iter_mut().for_each(|slot| *slot = None);
                     return Err(super::GpuError::DeviceReadFailed {

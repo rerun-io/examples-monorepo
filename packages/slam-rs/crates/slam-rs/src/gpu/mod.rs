@@ -373,6 +373,73 @@ pub fn gpu_backends<P: crate::frontend::patterns::Pattern>(
     )
 }
 
+/// Tasks CubeCL 0.10's client-to-server channel holds before a producer spins
+/// (`cubecl-common`'s `CHANNEL_MAX_TASK`).
+#[cfg(feature = "gpu-core")]
+const CHANNEL_TASKS: usize = 32;
+
+/// The most tasks one stage enqueues between two reports: a tracking pass's
+/// three uploads and six launches.
+#[cfg(feature = "gpu-core")]
+const STAGE_TASKS: usize = 9;
+
+/// Tasks handed to the runtime's server since the channel was last known empty.
+///
+/// One counter for the process, which is what the channel is: CubeCL caches one
+/// client per device, and this pipeline is single-threaded. A second frontend on
+/// another thread would make this over-count, which drains early — the safe
+/// direction.
+#[cfg(feature = "gpu-core")]
+static QUEUED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Record that a stage enqueued `tasks`, handing the queue to the runtime's
+/// server thread when another stage would not fit in it.
+///
+/// CubeCL 0.10's client-to-server channel is [`CHANNEL_TASKS`] deep, and a
+/// producer that fills it does not block: it spins for 524,288 iterations, then
+/// yields 4,096 times, then sleeps in 75 microsecond steps
+/// (`cubecl-common`'s `SPIN_BUDGET_CLIENT`). That is tuned for a producer and a
+/// server on different cores. This pipeline is pinned to one — the benchmark and
+/// the fleet both run it with a single-CPU affinity — so the spin is the
+/// server's own core and the queue cannot drain until the producer gives it up.
+///
+/// It only became reachable when the frontend stopped waiting per camera. A
+/// two-camera frameset enqueues 28 tasks between its downloads and stays under
+/// the cliff; a four-camera frameset enqueues 56, and fell off it hard enough to
+/// spend 2.9 ms a frameset spinning inside one launch. Reporting here keeps the
+/// queue under the ceiling at any camera count, at about one flush a frameset on
+/// a stereo rig and three on a four-camera one.
+///
+/// The flush is not extra work: it is the encoding and submission the next
+/// download would have paid for, moved earlier.
+///
+/// # Errors
+///
+/// [`GpuError::DeviceReadFailed`] when the runtime refuses the flush, which on
+/// this path means the device is gone.
+#[cfg(feature = "gpu-core")]
+pub(super) fn queued<R: cubecl::prelude::Runtime>(
+    client: &cubecl::prelude::ComputeClient<R>,
+    tasks: usize,
+) -> Result<(), GpuError> {
+    use std::sync::atomic::Ordering;
+
+    let total: usize = QUEUED.fetch_add(tasks, Ordering::Relaxed) + tasks;
+    if total + STAGE_TASKS < CHANNEL_TASKS {
+        return Ok(());
+    }
+    QUEUED.store(0, Ordering::Relaxed);
+    client
+        .flush()
+        .map_err(|error| read_failed("the queued launches", &error))
+}
+
+/// The channel is empty: a download has waited for everything that was in it.
+#[cfg(feature = "gpu-core")]
+pub(super) fn drained() {
+    QUEUED.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// A failed device read as a typed error, with the runtime's own reason logged.
 ///
 /// [`GpuError`] is `Copy`, so it cannot carry the `ServerError`'s reason and
