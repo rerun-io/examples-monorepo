@@ -1293,3 +1293,81 @@ settle is whether the whole 0.136 cm is the schedule; it settles that it is not
 the per-camera algebra, and enabling this on a four-camera rig through the shared
 `fast` profile is still a scope decision rather than a measurement.
 - **D76** — The fast profile runs the joint solve at keyframes and a 15-dof fixed-landmark update on the framesets between (2026-09-10)
+
+## D77 — The GPU frontend waits once per phase, and reports what it queued
+
+The device timestamps say every kernel of a two-camera MIO10 frameset is 0.44 ms
+of GPU time while the frontend spends 1.63 ms of host time. Counters at the seam
+(`gpu/seam.rs`, `tests/gpu_seam_bench.rs`) say where the rest of it was: **five
+synchronising reads, 1.51 ms**, against 0.15 ms in all eleven uploads and nothing
+measurable in the thirty-two launches.
+
+A read on this lane costs about **0.12 ms of host time before it has moved a
+byte** — measured by adding empty four-byte reads to a frameset, which cost
+0.115 ms each — because `read_async` reserves a staging buffer, submits, calls
+`map_async`, and then hands off twice to the runtime's polling thread. So a
+frameset's host cost is set by *how many reads it makes*, not by how much they
+carry, and `CUBECL_WGPU_MAX_TASKS` moves none of it (32 is already the best of
+1/2/4/8/16/32/64).
+
+Three of the five were removable because the passes they separated do not depend
+on each other:
+
+* the temporal tracks read only their own camera's two pyramids;
+* the cross-camera matches read camera 0's new keypoints and write camera *i*;
+* the cell selection reads the frame — the occupancy counts and the masks stay on
+  the host and are applied to the downloaded keys afterwards.
+
+So each phase launches the whole rig and downloads it once.
+`PatchTracker::submit_prepared` and `collect` split the tracker's five launches
+from its download, `CornerScan::prepare_cells` answers every camera's selection
+at once, and `cell_select` is the mask-independent half of the device gate that
+lets the frontend ask for a camera's selection before the frameset has masked it.
+A batch's passes share every intermediate buffer — the source and backward patch
+stores, the backward transforms — and may, because the device stream is ordered:
+pass *k*'s `finish` has read them before pass *k+1*'s kernels write them. Only
+the packed result is per lane, which is why `gpu_backends` takes a camera count.
+`a_batch_of_two_passes_answers_what_two_calls_do` is the test that would catch
+that ordering claim being wrong.
+
+### The spin the batch uncovered
+
+Batching made the **four-camera** lane 32 % slower, all of it inside the first
+launch of the second pass. CubeCL 0.10's client-to-server channel is 32 tasks
+deep (`CHANNEL_MAX_TASK`), and a producer that fills it does not block: it spins
+524,288 times, yields 4,096 times, then sleeps in 75 µs steps
+(`SPIN_BUDGET_CLIENT`). That is tuned for a producer and a server on different
+cores; this pipeline is pinned to one, so the spin is the server's own core and
+the queue cannot drain until the producer gives it up. A two-camera frameset
+enqueues 28 tasks between its downloads and stayed under the cliff by four; a
+four-camera frameset enqueues 56 and spent **2.9 ms a frameset spinning**.
+
+Flushing after every camera fixed it and cost 0.10 ms a frameset on the stereo
+lane, because the flush waits for the server and on one core that handoff is real
+even when the work is not. What the channel needs is a ceiling, not a rhythm: the
+stages report what they enqueued (`gpu::queued`) and the seam flushes when
+another stage's nine tasks would not fit, with a download resetting the count
+because it has waited for everything in it. About one flush a frameset on a
+stereo rig, three on a four-camera one, and the queue never passes thirty-one at
+any camera count.
+
+### Measured
+
+Fast profile, `--base wave2` (`60c01a33`), three interleaved rounds on MIO10 and
+one on MGO09. Trajectories are **byte-identical** to the base on both.
+
+| clip | base median | after | delta | ATE vs GT | lost |
+|---|---:|---:|---:|---:|---:|
+| MIO10 | 2.007 ms | **1.533** | −0.473 (−23.6 %) | 1.553 cm both | 0/0 |
+| MGO09 | 3.803 ms | **2.260** | −1.543 (−40.6 %) | 0.978 cm both | 0/0 |
+
+MIO10 stage medians: pyramid 0.143 → 0.142, detect 0.562 → 0.217, temporal track
+0.743 → 0.558, stereo 0.191 → 0.194. Reads per frameset 5 → 3 while detecting,
+2 → 1 while not.
+
+What is left in the frontend is still mostly the three reads: the in-process rig
+puts 0.73 of the two-camera frameset's 1.11 ms in them. The next read to remove
+is the cell selection's, which needs `should_detect` decided before the temporal
+tracks come back — a speculation that is free on a detecting frameset and costs
+the FAST kernels on one that skips.
+- **D77** — The GPU frontend waits once per phase instead of once per camera, and bounds the runtime queue so a four-camera rig does not spin (2026-09-10)
