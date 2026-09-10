@@ -69,13 +69,20 @@
 //!
 //! Three ulp-level findings came out of this fixture and changed the port:
 //! `So3 * Vector3` now sums Sophus's three terms in Sophus's order (`lie.rs`);
-//! `head<3>().norm()` sums in Eigen's order, which is `(a + b) + c` in `f64` and
-//! `a + (b + c)` in `f32` ([`LieScalar::eigen_redux3`]); and `compute_error`
+//! `head<3>().norm()` summed in Eigen's order, which is `(a + b) + c` in `f64`
+//! and `a + (b + c)` in `f32` ([`LieScalar::eigen_redux3`]); and `compute_error`
 //! scales the residual **row** before the dot product, as C++'s left-associative
 //! `*` does. Without the first, `triangulate` was an ulp off in `f64`; without
 //! the second, `proj[2]` for a landmark at `inv_dist = 1e-7` was an ulp off in
 //! `f32` and a landmark exactly 1/3 m away was **accepted** where C++ rejects it;
 //! without the third, one observation's cost was 4e-6 off in `f32`.
+//!
+//! S33 kept the first and the third and retired the second at the residual and
+//! landmark sites: they call `Vector3::norm`, whose fold happens to be Eigen's
+//! in `f64` and is one ulp away from it in `f32`. The finding is still real and
+//! still recorded — the fixture pins `eigen_redux3` itself bit for bit, and the
+//! reduction still runs in the keyframe-eviction baseline — it is simply no
+//! longer what the residual path is built on.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 // The literal below is a C++ `%.17g` printout of a float, carried over verbatim
@@ -91,7 +98,6 @@ use serde::Deserialize;
 use slam_rs::ba_base::{LinearizePointOut, huber_cost, linearize_point, triangulate};
 use slam_rs::calib::Calibration;
 use slam_rs::camera::{CameraEnum, KannalaBrandt4, PinholeRadtan8};
-use slam_rs::eigen::norm3;
 use slam_rs::landmark::{Landmark, StereographicParam};
 use slam_rs::lie::{LieScalar, Se3, So3};
 use slam_rs::types::{LandmarkId, TimeCamId};
@@ -108,6 +114,24 @@ const TOLERANCE: f64 = 1e-12;
 /// named cases and the 32 boundary cases: `1.6e-14` (`tiny_baseline`, whose
 /// sub-millimetre baseline is the worst-conditioned `A` in the fixture).
 const TRIANGULATE_TOLERANCE_F64: f64 = 5e-14;
+
+/// `Vector3::norm` against the C++'s three-coefficient Eigen tree, in `f32`.
+///
+/// nalgebra folds the three squares left to right; Eigen's `f32` path takes the
+/// scalar unroller's `a + (b + c)` (see [`LieScalar::eigen_redux3`], which still
+/// serves the keyframe-eviction baseline). Measured worst over the 32 probes:
+/// `1.19e-7`, one `f32` ulp. In `f64` the two orders coincide and the norm is
+/// still asserted bit for bit.
+const NORM_TOLERANCE_F32: f64 = 1e-6;
+
+/// The same one-ulp norm difference reaching `proj[2] = inv_dist / |p|`
+/// (`ba_utils.h:113-116`) in `f32`.
+///
+/// Measured worst over the ten cases: `7.1e-15` absolute, on the landmark at
+/// `inv_dist = 1e-7` — about 0.6 ulp of that coefficient's own magnitude. The
+/// bound is ten of them. `res` and both Jacobians stay bit-exact in `f32`; only
+/// this one coefficient reads a norm.
+const PROJ_TOLERANCE_F32: f64 = 1e-13;
 
 /// And in `f32`, where the *C++* accumulated its Jacobi rotations in single
 /// precision and the port now solves the 4x4 in `f64` and rounds once. Measured
@@ -399,7 +423,11 @@ fn camera_from<S: LieScalar>(entry: &OracleLinearize) -> CameraEnum<S> {
     }
 }
 
-fn check_linearize<S: LieScalar>(entries: &[&OracleLinearize], tolerance: f64) {
+fn check_linearize<S: LieScalar>(
+    entries: &[&OracleLinearize],
+    tolerance: f64,
+    proj_tolerance: f64,
+) {
     assert!(!entries.is_empty());
     for entry in entries {
         let label: String = format!(
@@ -464,7 +492,7 @@ fn check_linearize<S: LieScalar>(entries: &[&OracleLinearize], tolerance: f64) {
             &format!("{label} proj"),
             &proj.as_slice()[..3],
             &entry.proj[..3],
-            tolerance,
+            proj_tolerance,
         );
     }
 }
@@ -478,12 +506,15 @@ fn linearize_point_matches_the_cpp_in_double() {
         .filter(|e| e.scalar == "f64")
         .collect();
     assert_eq!(entries.len(), 10);
-    check_linearize::<f64>(&entries, TOLERANCE);
+    check_linearize::<f64>(&entries, TOLERANCE, TOLERANCE);
 }
 
-/// Exact in `f32`: the residual path is the stereographic unprojection, one 4x4
-/// matrix-vector product and the camera model, and all three already match the
-/// C++ bit for bit in single precision (`camera_oracle.rs`).
+/// Exact in `f32` on the residual and both Jacobians: that path is the
+/// stereographic unprojection, one 4x4 matrix-vector product and the camera
+/// model, and all three match the C++ bit for bit in single precision
+/// (`camera_oracle.rs`). `proj[2]` alone divides by `|p|` and carries
+/// [`PROJ_TOLERANCE_F32`] since S33 replaced the Eigen reduction with
+/// `Vector3::norm`.
 #[test]
 fn linearize_point_matches_the_cpp_in_float() {
     let oracle: Oracle = oracle();
@@ -493,7 +524,7 @@ fn linearize_point_matches_the_cpp_in_float() {
         .filter(|e| e.scalar == "f32")
         .collect();
     assert_eq!(entries.len(), 10);
-    check_linearize::<f32>(&entries, 0.0);
+    check_linearize::<f32>(&entries, 0.0, PROJ_TOLERANCE_F32);
 }
 
 /// Both reference calibrations really are the cameras the oracle was built with,
@@ -696,7 +727,7 @@ fn the_bearing_sign_flip_fires() {
 
 // ─── the three-coefficient reduction order ─────────────────────────────────
 
-fn check_norm3<S: LieScalar>(entries: &[&OracleNorm3], left_assoc: bool) {
+fn check_norm3<S: LieScalar>(entries: &[&OracleNorm3], left_assoc: bool, norm_tolerance: f64) {
     assert!(!entries.is_empty());
     let mut discriminating: usize = 0;
     for entry in entries {
@@ -712,12 +743,14 @@ fn check_norm3<S: LieScalar>(entries: &[&OracleNorm3], left_assoc: bool) {
             Some(entry.squared_norm),
             0.0,
         );
-        // And the square root the residual path actually calls.
+        // And the square root the residual path actually calls, which since S33
+        // is `Vector3::norm` rather than a port of Eigen's three-coefficient
+        // tree; see the constants.
         close(
             &format!("{label} norm"),
-            norm3(x, y, z).to_f64(),
+            Vector3::new(x, y, z).norm().to_f64(),
             Some(entry.norm),
-            0.0,
+            norm_tolerance,
         );
 
         if entry.discriminating {
@@ -756,7 +789,7 @@ fn the_three_coefficient_reduction_is_left_associated_in_double() {
     let oracle: Oracle = oracle();
     let entries: Vec<&OracleNorm3> = oracle.norm3.iter().filter(|e| e.scalar == "f64").collect();
     assert_eq!(entries.len(), 32);
-    check_norm3::<f64>(&entries, true);
+    check_norm3::<f64>(&entries, true, 0.0);
 }
 
 /// `f32`: `Packet4f` is four floats, wider than the expression, so the aligned
@@ -767,7 +800,7 @@ fn the_three_coefficient_reduction_is_right_associated_in_float() {
     let oracle: Oracle = oracle();
     let entries: Vec<&OracleNorm3> = oracle.norm3.iter().filter(|e| e.scalar == "f32").collect();
     assert_eq!(entries.len(), 32);
-    check_norm3::<f32>(&entries, false);
+    check_norm3::<f32>(&entries, false, NORM_TOLERANCE_F32);
 }
 
 /// The two precisions really do disagree about the order, which is the whole

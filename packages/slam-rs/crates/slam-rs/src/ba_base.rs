@@ -41,8 +41,6 @@ use nalgebra::{
 
 use crate::calib::Calibration;
 use crate::camera::{CameraEnum, CameraError};
-use crate::eigen::blas::redux_contiguous;
-use crate::eigen::norm3;
 use crate::landmark::{Landmark, LandmarkDatabase, LandmarkError, StereographicParam};
 use crate::lie::{LieScalar, Se3, So3, c};
 use crate::types::{
@@ -240,7 +238,7 @@ pub fn linearize_point<S: LieScalar>(
         // (`ba_utils.h:113-116`), before the observation is subtracted.
         proj[0] = res[0];
         proj[1] = res[1];
-        proj[2] = p_t_3d[3] / norm3(p_t_3d[0], p_t_3d[1], p_t_3d[2]);
+        proj[2] = p_t_3d[3] / p_t_3d.fixed_rows::<3>(0).norm();
     }
 
     // `res -= kpt_obs` (`ba_utils.h:117`) — the flipped sign.
@@ -372,7 +370,7 @@ pub fn triangulate<S: LieScalar>(
     let v_t: nalgebra::Matrix4<f64> = svd.v_t?;
 
     let mut world_point: Vector4<S> = v_t.row(smallest).transpose().map(|value| c::<S>(value));
-    let norm: S = norm3(world_point[0], world_point[1], world_point[2]);
+    let norm: S = world_point.fixed_rows::<3>(0).norm();
     // A homogeneous vector with no spatial part has no direction: dividing by
     // its norm used to hand the caller `[NaN, NaN, NaN, inf]`.
     if norm <= S::zero() {
@@ -973,19 +971,21 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
 /// Hessian form (`:437`, `:463`) writes `deltaᵀ (½ H delta + b)`, so the `lhs`
 /// is `delta` itself.
 ///
-/// The outer `(1×n)·(n×1)` is Eigen's `InnerProduct` in all four, which is
-/// `(lhs.transpose().cwiseProduct(rhs)).sum()`
-/// (`ProductEvaluators.h`, `generic_product_impl<..., InnerProduct>`), so the
-/// fold is [`redux_contiguous`]'s packet tree and not a left fold: the two
-/// differ in `f32`, and this value enters `error_total` whose difference across
-/// an increment is the LM accept test.
+/// The outer `(1×n)·(n×1)` is Eigen's `InnerProduct` in all four. Its fold used
+/// to be a port of Eigen's packet tree, because the value enters `error_total`
+/// whose difference across an increment is the LM accept test and D44 wanted
+/// that difference to be the C++'s; since S33 it is a left fold over an
+/// iterator, which materialises nothing — the summand is formed one coefficient
+/// at a time from the three vectors, as it was before.
 fn prior_error<S: LieScalar>(
     lhs: &DVector<S>,
     h_delta: &DVector<S>,
     b: &DVector<S>,
     n: usize,
 ) -> S {
-    redux_contiguous(n, |i| lhs[i] * (c::<S>(0.5) * h_delta[i] + b[i]))
+    (0..n).fold(S::zero(), |acc, i| {
+        acc + lhs[i] * (c::<S>(0.5) * h_delta[i] + b[i])
+    })
 }
 
 #[cfg(test)]

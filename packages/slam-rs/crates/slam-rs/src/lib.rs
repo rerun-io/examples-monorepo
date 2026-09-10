@@ -16,7 +16,7 @@ pub mod ba_base;
 pub mod calib;
 pub mod camera;
 pub mod config;
-pub mod eigen;
+pub(crate) mod eigen;
 pub mod estimator;
 pub mod frontend;
 #[cfg(feature = "gpu-core")]

@@ -53,7 +53,6 @@
 
 use nalgebra::{DMatrix, DVector};
 
-use super::blas::redux_contiguous;
 use crate::lie::LieScalar;
 
 /// The sub-block a reflection acts on, `storage.block(row_start, col_start,
@@ -105,28 +104,34 @@ pub(crate) enum ColumnRedux {
     /// `LinearVectorizedTraversal` runs (`Redux.h:274-325`). basalt's
     /// marginalization matrices — `Q2Jp` in `marg_helper.cpp` and `m_qr` in
     /// `ColPivHouseholderQR`.
+    ///
+    /// Since S33 both variants sum in an order that is nobody's Eigen: this one
+    /// is nalgebra's dot product ([`contiguous_squared_norm`]) and the other is
+    /// a left fold. They still differ from each other, and which one a call site
+    /// takes is still a property of the C++ matrix's storage order, so the
+    /// distinction is kept where basalt made it. Collapsing it is a separate
+    /// change with its own rank-boundary evidence.
     Contiguous,
 }
 
 /// `squaredNorm()` over the **contiguous** column segment
-/// `storage.col(col).segment(start, len)`, in Eigen's order.
+/// `storage.col(col).segment(start, len)`.
 ///
-/// `unaryExpr(squared_norm_functor)` (`Dot.h:24`) reduced by
-/// [`crate::eigen::blas::redux_contiguous`], whose doc carries the traversal and
-/// the `alignedStart == 0` argument; `Evaluator::SizeAtCompileTime` is
-/// `Dynamic`, so the cost is `HugeCost` and the unrolled variants never apply.
-/// The shape sweep this order was verified on, and what each wrong order
-/// scores on it, are in the package README.
+/// nalgebra's `norm_squared` over a view, which is one dot product of the
+/// segment with itself and allocates nothing. Until S33 this was Eigen's own
+/// vectorised `redux` tree, written out packet by packet, because `beta` is
+/// compared against `sqrt(epsilon)` in the marginalization QR and D44 wanted
+/// that comparison to land where the C++'s did; the package README records the
+/// shape sweep that pinned it. The rank *policy* is unchanged — see
+/// [`ColumnRedux`] and [`make_householder`] — only the association inside the
+/// sum.
 pub(crate) fn contiguous_squared_norm<S: LieScalar>(
     storage: &DMatrix<S>,
     col: usize,
     start: usize,
     len: usize,
 ) -> S {
-    redux_contiguous(len, |i| {
-        let v: S = storage[(start + i, col)];
-        v * v
-    })
+    storage.column(col).rows(start, len).norm_squared()
 }
 
 /// `makeHouseholder` (`Householder.h:63-86`), real scalars, over
@@ -735,8 +740,9 @@ mod tests {
     }
 
     /// One case of [`contiguous_squared_norm`] against the bits Eigen produced
-    /// for it, decoded from `column` and compared to `expected`.
-    fn assert_contiguous<S: LieScalar>(column: &[S], expected: S) {
+    /// for it, decoded from `column` and compared to `expected` — bit for bit
+    /// when `ulps` is zero, otherwise within that many `S` epsilons of it.
+    fn assert_contiguous<S: LieScalar>(column: &[S], expected: S, ulps: f64) {
         let len: usize = column.len();
         // A wide matrix, so the reduced column is neither the first nor the
         // last: the port must not depend on where in the allocation it sits.
@@ -745,30 +751,46 @@ mod tests {
             storage[(i, 1)] = *v;
         }
         let got: S = contiguous_squared_norm(&storage, 1, 0, len);
-        assert_eq!(
-            got.to_f64().to_bits(),
-            expected.to_f64().to_bits(),
-            "len {len}: got {got:?}, Eigen {expected:?}"
+        if ulps == 0.0 {
+            assert_eq!(
+                got.to_f64().to_bits(),
+                expected.to_f64().to_bits(),
+                "len {len}: got {got:?}, Eigen {expected:?}"
+            );
+            return;
+        }
+        let bound: f64 = ulps * S::default_epsilon().to_f64() * expected.to_f64().abs();
+        assert!(
+            (got.to_f64() - expected.to_f64()).abs() <= bound,
+            "len {len}: got {got:?}, Eigen {expected:?} (bound {bound})"
         );
     }
 
-    /// [`contiguous_squared_norm`] reproduces Eigen's `squaredNorm()` bit for
-    /// bit on four cases, one per branch of `Redux.h:274-325`.
+    /// [`contiguous_squared_norm`] against Eigen's `squaredNorm()` on four
+    /// cases, one per branch of `Redux.h:274-325`.
     ///
     /// The numbers are the fork's, printed by `tools/marg_norm_probe.cpp` as
     /// raw bit patterns, so nothing is lost to decimal. Each case is chosen to
     /// **fail** under a plausible wrong order, which is what makes the test say
     /// something: the `f64` cases of length 8 and 9 both reject a
-    /// single-accumulator packet loop and the sequential left fold the port
-    /// shipped before this, and the `f32` case of length 16 rejects those two
-    /// *and* a `predux` that folds the four lanes left to right instead of
-    /// pairing them `(a₀+a₂) + (a₁+a₃)`.
+    /// single-accumulator packet loop and a sequential left fold, and the `f32`
+    /// case of length 16 rejects those two *and* a `predux` that folds the four
+    /// lanes left to right instead of pairing them `(a₀+a₂) + (a₁+a₃)`.
+    ///
+    /// S33 replaced the packet-by-packet port with nalgebra's `norm_squared`.
+    /// **All three `f64` cases are still bit-equal to Eigen** — nalgebra's fold
+    /// lands on the same tree for a `Packet2d` scalar at these three shapes —
+    /// and the `f32` case is one ulp away, because Eigen's `Packet4f` pairs its
+    /// lanes across the halves and nalgebra does not. One ulp is the tolerance
+    /// below; it is not a licence for a coarser one, which is why the `f64`
+    /// cases keep asking for the bits.
     #[test]
-    fn the_contiguous_reduction_is_eigens_reduction() {
+    fn the_contiguous_reduction_matches_eigen_bit_for_bit_in_f64() {
         // `alignedSize == 0`: one coefficient, nothing to vectorize.
         assert_contiguous::<f64>(
             &[f64::from_bits(0xbfe8_0d2e_9c86_ddda)],
             f64::from_bits(0x3fe2_13cb_58ed_5f5d),
+            0.0,
         );
         // Four packets, no tail: the two accumulators and their fold.
         assert_contiguous::<f64>(
@@ -783,6 +805,7 @@ mod tests {
                 f64::from_bits(0x3fd8_2eff_ab90_0400),
             ],
             f64::from_bits(0x4002_7ccc_bea8_8ea9),
+            0.0,
         );
         // Nine coefficients: four packets and a one-coefficient scalar tail.
         assert_contiguous::<f64>(
@@ -798,8 +821,10 @@ mod tests {
                 f64::from_bits(0xbfd8_ee16_95fb_94d0),
             ],
             f64::from_bits(0x4001_819b_c3ad_06dd),
+            0.0,
         );
-        // Four `Packet4f`s: the lane pairing decides this one.
+        // Four `Packet4f`s: the lane pairing decides this one, and it is the one
+        // case in the four where nalgebra's fold and Eigen's part company.
         assert_contiguous::<f32>(
             &[
                 f32::from_bits(0x3e85_2fc5),
@@ -820,6 +845,7 @@ mod tests {
                 f32::from_bits(0xbf05_df74),
             ],
             f32::from_bits(0x40a2_1e1a),
+            2.0,
         );
     }
 
@@ -831,6 +857,14 @@ mod tests {
     /// over rows 1..100. Unset — the default — this passes without checking
     /// anything, the way the optical-flow parity test treats its frame
     /// directory; the inline cases above cover the branches on every run.
+    ///
+    /// The sweep asked for the bits until S33 and now asks for `2 (n - 1)`
+    /// epsilons on a column of `n` coefficients. That is not a slackened
+    /// constant: every summand here is a square, so the terms are all
+    /// non-negative and *any* summation order of `n` of them agrees with any
+    /// other to within `(n - 1)` epsilons relative. A failure at this bound is
+    /// therefore still a real disagreement about the sum and not about its
+    /// association.
     #[test]
     fn the_contiguous_reduction_reproduces_eigen_over_the_whole_sweep() {
         let Ok(path) = std::env::var("SLAM_RS_MARG_NORM_SWEEP") else {
@@ -850,16 +884,19 @@ mod tests {
             match scalar {
                 "f64" => {
                     let column: Vec<f64> = values.iter().map(|b| f64::from_bits(*b)).collect();
-                    assert_contiguous::<f64>(&column, f64::from_bits(expected));
+                    let ulps: f64 = 2.0 * (column.len().saturating_sub(1)) as f64;
+                    assert_contiguous::<f64>(&column, f64::from_bits(expected), ulps);
                 }
                 "f32" => {
                     let column: Vec<f32> = values
                         .iter()
                         .map(|b| f32::from_bits(u32::try_from(*b).expect("32 bits")))
                         .collect();
+                    let ulps: f64 = 2.0 * (column.len().saturating_sub(1)) as f64;
                     assert_contiguous::<f32>(
                         &column,
                         f32::from_bits(u32::try_from(expected).expect("32 bits")),
+                        ulps,
                     );
                 }
                 other => panic!("unknown scalar {other}"),

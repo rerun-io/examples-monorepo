@@ -14,22 +14,29 @@
 //!
 //! | module | ported from | what needs it |
 //! |---|---|---|
-//! | `blas` | `GeneralMatrixVector.h`, and the three-coefficient reductions | the LDLT solves and the prior's cost |
 //! | `qr` | `Householder.h`, `Jacobi.h`'s `makeGivens`, `Redux.h` | the landmark blocks' QR and the marginalization's flat QR |
 //! | `ldlt` | `LDLT.h`, `TriangularSolverVector.h` | the LM step's solve |
 //!
-//! The 4x4 `JacobiSVD` port left in S33: `crate::ba_base::triangulate` calls
+//! Two of the four modules left in S33, once the last bit stopped being the
+//! reference. `blas` — Eigen's `gemv` blocking, its vectorised `redux` tree and
+//! `head<3>().norm()` — is gone: the LDLT's trailing updates are nalgebra
+//! `gemv`/`gemv_tr` over views, the QR's column norm is `norm_squared`, the
+//! prior's cost is a left fold over an iterator, and a three-coefficient norm is
+//! `Vector3::norm`. What decides an answer's *shape* — the LDLT's panel
+//! structure, the pivot on the un-updated diagonal, the QR's rank policy — is
+//! untouched; only the association inside one panel or one sum is now the
+//! library's.
+//!
+//! The 4x4 `JacobiSVD` port also left in S33: `crate::ba_base::triangulate` calls
 //! [`nalgebra::linalg::SVD`] and promotes the solve to `f64`, so the DLT null
 //! vector is now more accurate than the C++'s rather than identical to it. The
 //! Givens half of `Eigen::JacobiRotation` moved to [`qr`] with its callers.
 //!
-//! Two members of the family live elsewhere on purpose: `LieScalar::eigen_maxi`
-//! and `LieScalar::eigen_redux3` are per-scalar constants and reductions, so
-//! they sit on the trait that carries the packet width
-//! ([`crate::lie::LieScalar::EIGEN_PACKET_SIZE`]).
+//! Two members of the family live elsewhere on purpose: [`crate::lie::eigen_maxi`]
+//! and [`crate::lie::LieScalar::eigen_redux3`] are per-scalar constants and
+//! reductions, so they sit on the scalar trait. `eigen_redux3` has one
+//! production caller left — the keyframe-eviction baseline in
+//! `crate::estimator` — and outlives `blas` for that reason alone.
 
-pub(crate) mod blas;
 pub(crate) mod ldlt;
 pub(crate) mod qr;
-
-pub use blas::norm3;

@@ -21,15 +21,16 @@
 //! `vectorD` and the `matrixU() * P` product are elementary operations in
 //! Eigen's own order. The two triangular solves reproduce Eigen's panel
 //! structure (`TriangularSolverVector.h:30-113`,
-//! `EIGEN_TUNE_TRIANGULAR_PANEL_WIDTH = 8`) and route their trailing updates
-//! through [`crate::eigen::blas`], which ports the `gemv` association Eigen
-//! actually uses — stage S8 needed that, because `LDLT::solve` is where the LM
-//! increment comes from and the increment reaches a threshold comparison.
+//! `EIGEN_TUNE_TRIANGULAR_PANEL_WIDTH = 8`); their trailing updates are
+//! nalgebra's `gemv`/`gemv_tr` over views into the factor and into the two
+//! disjoint halves of the right-hand side. Until S33 they went through a port of
+//! Eigen's own `gemv` blocking, because the increment reaches a threshold
+//! comparison and D44 wanted the last bit; the panel *structure* is what decides
+//! the answer's shape and it is unchanged, the association inside one panel is
+//! now the library's.
 
-use nalgebra::{DMatrix, DVector};
+use nalgebra::{DMatrix, DVector, DVectorView, DVectorViewMut};
 
-use super::blas::{gemv_col_major_block, gemv_row_major_of_transpose, redux_contiguous};
-use crate::eigen::qr::BlockSpan;
 use crate::lie::LieScalar;
 
 /// Eigen's `EIGEN_TUNE_TRIANGULAR_PANEL_WIDTH` (`Eigen/src/Core/util/Macros.h`).
@@ -270,26 +271,23 @@ impl<S: LieScalar> EigenLdlt<S> {
             }
             // The trailing update (`TriangularSolverVector.h:104-113`): one
             // `general_matrix_vector_product<ColMajor>` with `alpha = -1`, which
-            // accumulates each output coefficient from a fresh zero. A
-            // `for j { for i { v[i] -= v[j] * L(i, j) } }` loop is a different
-            // value in `f32`, which is why this goes through [`super::blas`].
+            // accumulates each output coefficient from a fresh zero rather than
+            // rounding into `v` once per column, as a
+            // `for j { for i { v[i] -= v[j] * L(i, j) } }` loop would.
+            // `gemv` is that product.
             let r: usize = size - end_block;
             if r > 0 {
                 // The `rhs` is the panel just substituted and the `res` the
                 // trailing rows: two disjoint halves of `v` at `end_block`, so
-                // the kernel reads and writes it in place.
+                // the split is what lets one call read and write it in place.
                 let (substituted, trailing) = v.as_mut_slice().split_at_mut(end_block);
-                gemv_col_major_block(
-                    &self.mat,
-                    BlockSpan {
-                        row_start: end_block,
-                        rows: r,
-                        col_start: pi,
-                        cols: panel,
-                    },
-                    &substituted[pi..end_block],
-                    trailing,
+                let rhs: DVectorView<S> = DVectorView::from_slice(&substituted[pi..], panel);
+                let mut res: DVectorViewMut<S> = DVectorViewMut::from_slice(trailing, r);
+                res.gemv(
                     -S::one(),
+                    &self.mat.view((end_block, pi), (r, panel)),
+                    &rhs,
+                    S::one(),
                 );
             }
             pi = end_block;
@@ -324,17 +322,18 @@ impl<S: LieScalar> EigenLdlt<S> {
                 // The `res` is the panel and the `rhs` everything already
                 // substituted to its right: two disjoint halves of `v` at `pi`.
                 let (panel_rows, substituted) = v.as_mut_slice().split_at_mut(pi);
-                gemv_row_major_of_transpose(
-                    &self.mat,
-                    BlockSpan {
-                        row_start: start_row,
-                        rows: panel,
-                        col_start: pi,
-                        cols: r,
-                    },
-                    substituted,
-                    &mut panel_rows[start_row..pi],
+                let rhs: DVectorView<S> = DVectorView::from_slice(substituted, r);
+                let mut res: DVectorViewMut<S> =
+                    DVectorViewMut::from_slice(&mut panel_rows[start_row..], panel);
+                // `matrixL().adjoint()` is a `Transpose` of the column-major
+                // factor, so the block Eigen reads as `(i, j)` is stored at
+                // `(pi + j, start_row + i)`: the transposed product of the stored
+                // block, which is `gemv_tr`.
+                res.gemv_tr(
                     -S::one(),
+                    &self.mat.view((pi, start_row), (r, panel)),
+                    &rhs,
+                    S::one(),
                 );
             }
             // `Mode & UnitDiag`, so there is no division by the diagonal, and
@@ -344,8 +343,9 @@ impl<S: LieScalar> EigenLdlt<S> {
                 let s: usize = i + 1;
                 // `cjLhs.row(i).segment(s, k)` over the transposed view is
                 // `mat[(s + t, i)]`, contiguous in the column-major factor, so
-                // the `.sum()` is packet-accessible and vectorises.
-                let update: S = redux_contiguous(k, |t| self.mat[(s + t, i)] * v[s + t]);
+                // the inner product is a dot of two column segments and needs no
+                // temporary.
+                let update: S = self.mat.column(i).rows(s, k).dot(&v.rows(s, k));
                 v[i] -= update;
             }
             pi = start_row;

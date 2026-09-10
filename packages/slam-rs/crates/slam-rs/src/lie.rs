@@ -87,6 +87,11 @@ pub trait LieScalar: RealField + Copy {
     ///   aligned part is empty and the scalar `redux_novec_unroller` runs, which
     ///   splits at `Length / 2` (`Redux.h:98-108`): `a + (b + c)`.
     ///
+    /// Its one production caller left is the keyframe-eviction baseline in
+    /// `crate::estimator`: S33 replaced `head<3>().norm()` at the residual and
+    /// landmark sites with `Vector3::norm`, and this is what remains of the
+    /// three-coefficient tree.
+    ///
     /// A sweep of 200,000 random vectors through the fork's own Eigen agrees
     /// with exactly one order in each precision on every discriminating case
     /// (48,359 of 200,000 in `f64`, 48,336 in `f32`) and with the other on none.
@@ -101,36 +106,6 @@ pub trait LieScalar: RealField + Copy {
     /// `inv_dist < 3` gate (`sqrt_keypoint_vio.cpp:534`) accepts a landmark C++
     /// rejects.
     fn eigen_redux3(a: Self, b: Self, c: Self) -> Self;
-
-    /// The width of the widest Eigen packet for this scalar in the reference
-    /// build: `unpacket_traits<packet_traits<Scalar>::type>::size`.
-    ///
-    /// The reference `libbasalt.so` is SSE3 on every host — conda's `CXXFLAGS`
-    /// append `-march=nocona` after the CMakeLists' `-march=native`, and the
-    /// last `-march` wins — so a `Packet2d` holds two doubles and a `Packet4f`
-    /// four floats. `tools/marg_norm_probe.cpp` on the fork prints both sizes
-    /// from `packet_traits` itself rather than trusting the flag reading.
-    ///
-    /// This is the loop bound of `crate::eigen::qr::contiguous_squared_norm`,
-    /// which is Eigen's vectorised `redux` for a contiguous column segment.
-    const EIGEN_PACKET_SIZE: usize;
-
-    /// `predux` on a full packet of this scalar
-    /// (`Eigen/src/Core/arch/SSE/Reductions.h`).
-    ///
-    /// Not a plain fold: each architecture pairs the lanes the way its shuffle
-    /// instructions do, and the pairing is a different rounding.
-    ///
-    /// * `Packet2d` (`:265-272`) — `a + unpackhi(a, a)`, lane 0: `a₀ + a₁`.
-    /// * `Packet4f` (`:205-217`) — `a + movehl(a, a)` puts `(a₀+a₂, a₁+a₃)` in
-    ///   the low lanes, then SSE3's `movehdup` adds lane 1 into lane 0:
-    ///   `(a₀ + a₂) + (a₁ + a₃)`.
-    ///
-    /// **Contract: `lanes` is at least [`Self::EIGEN_PACKET_SIZE`] long**, and
-    /// an implementation reads exactly that many of them. The pairing is not
-    /// free choice: the package README records how a left fold over the lanes
-    /// scores against the fork's own Eigen on the shape sweep.
-    fn eigen_predux(lanes: &[Self]) -> Self;
 
     /// Exact-as-possible conversion of a literal, standing in for C++'s `Scalar(x)`.
     fn from_literal(value: f64) -> Self;
@@ -157,13 +132,6 @@ impl LieScalar for f64 {
     /// One `Packet2d` plus the scalar remainder.
     fn eigen_redux3(a: Self, b: Self, c: Self) -> Self {
         (a + b) + c
-    }
-
-    const EIGEN_PACKET_SIZE: usize = 2;
-
-    fn eigen_predux(lanes: &[Self]) -> Self {
-        // `Packet2d`: two lanes, so the sum is the only order there is.
-        lanes[0] + lanes[1]
     }
 
     fn from_literal(value: f64) -> Self {
@@ -193,14 +161,6 @@ impl LieScalar for f32 {
     /// `Packet4f` is wider than three floats, so the scalar unroller runs.
     fn eigen_redux3(a: Self, b: Self, c: Self) -> Self {
         a + (b + c)
-    }
-
-    const EIGEN_PACKET_SIZE: usize = 4;
-
-    fn eigen_predux(lanes: &[Self]) -> Self {
-        // `Packet4f`: `movehl` pairs lane 0 with lane 2 and lane 1 with lane 3
-        // before the two halves meet.
-        (lanes[0] + lanes[2]) + (lanes[1] + lanes[3])
     }
 
     fn from_literal(value: f64) -> Self {
@@ -849,35 +809,6 @@ mod tests {
 
     /// Keeps the whole Rust suite in the "runs in seconds" band.
     const CASES: u32 = 256;
-
-    /// The packet widths are the fork's SSE3 ones, whatever this machine is.
-    #[test]
-    fn the_packet_widths_are_the_forks() {
-        assert_eq!(f32::EIGEN_PACKET_SIZE, 4);
-        assert_eq!(f64::EIGEN_PACKET_SIZE, 2);
-    }
-
-    /// The two `predux` trees, spelled out on values whose sum is
-    /// order-dependent in `f32`: `1 + 2^-24` rounds away against `1` but
-    /// survives against `2^-24`.
-    #[test]
-    fn eigen_predux_pairs_the_lanes_across_the_halves() {
-        let tiny: f32 = f32::EPSILON / 2.0;
-        // (1 + 1) + (tiny + tiny) keeps both tiny terms; a left fold
-        // ((1 + 1) + tiny) + tiny loses them.
-        assert_eq!(
-            f32::eigen_predux(&[1.0, tiny, 1.0, tiny]),
-            2.0 + (tiny + tiny)
-        );
-        assert_eq!(
-            [1.0f32, tiny, 1.0f32, tiny]
-                .iter()
-                .copied()
-                .fold(0.0f32, |a, b| a + b),
-            2.0
-        );
-        assert_eq!(f64::eigen_predux(&[1.0, 2.0]), 3.0);
-    }
 
     #[test]
     fn eigen_maxi_keeps_a_nan_on_the_left() {
