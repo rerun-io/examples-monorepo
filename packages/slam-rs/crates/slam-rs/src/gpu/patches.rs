@@ -252,7 +252,7 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
     /// Replace the device positions buffer with this call's runs of the staging
     /// buffer, which is as long as the capacity but only filled to `len`.
     fn upload_staging(&mut self) {
-        self.positions = super::seam::upload(
+        self.positions = super::submission::upload(
             &self.client,
             f32::as_bytes(&self.staging[..POSITION_RUNS * self.len]),
         );

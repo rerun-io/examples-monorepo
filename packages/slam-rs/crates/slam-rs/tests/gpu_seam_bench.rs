@@ -4,13 +4,13 @@
 //! `SLAM_RS_SEAM_BENCH=<framesets>` runs the whole frontend on the device and
 //! prints the four stage timers beside the seam counters, so a change to the
 //! launch/wait shape can be read in one process without the A/B harness.
-//! Without the variable it prints why and passes. The queue-peak test below is
+//! The timing test is ignored unless selected explicitly. The queue-peak test is
 //! an assertion and always runs: the same rig, driven for its task counts
 //! rather than its timings.
 //!
 //! ```bash
 //! SLAM_RS_SEAM_BENCH=300 cargo test --release --features gpu-wgpu \
-//!   --test gpu_seam_bench -- --nocapture
+//!   --test gpu_seam_bench -- --ignored --exact the_gpu_frontend_reports_its_host_seam --nocapture
 //! ```
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(feature = "gpu-wgpu")]
@@ -49,6 +49,7 @@ fn widened(cameras: usize) -> slam_rs::calib::Calibration<f64> {
 }
 
 #[test]
+#[ignore = "timing harness: run alone with --ignored --exact"]
 fn the_gpu_frontend_reports_its_host_seam() {
     let Some(count) = std::env::var("SLAM_RS_SEAM_BENCH")
         .ok()
@@ -128,9 +129,10 @@ fn the_gpu_frontend_reports_its_host_seam() {
 
     // A tenth of the run is warm-up: the first frameset allocates every buffer.
     let warmup: usize = (count / 10).max(2);
+    let mut start = slam_rs::gpu::seam::snapshot();
     for index in 0..count + warmup {
         if index == warmup {
-            slam_rs::gpu::seam::reset();
+            start = slam_rs::gpu::seam::snapshot();
         }
         let images: &[ImageU16] = &frames[order[index % order.len()]];
         let ids_before: u64 = flow.last_keypoint_id();
@@ -171,7 +173,7 @@ fn the_gpu_frontend_reports_its_host_seam() {
         median(&mut detect),
         median(&mut track),
         median(&mut stereo),
-        slam_rs::gpu::seam::line(count as u64),
+        seam_line(slam_rs::gpu::seam::snapshot().delta(start), count as u64),
     );
 }
 
@@ -275,4 +277,26 @@ fn the_queue_peak_of_a_whole_frameset_stays_below_the_channel_depth() {
             order.len(),
         );
     }
+}
+
+/// Format the measured producer thread's delta per frameset.
+fn seam_line(delta: slam_rs::gpu::seam::Snapshot, framesets: u64) -> String {
+    let scale: f64 = framesets.max(1) as f64;
+    let (launches, _) = (delta.launch.calls, delta.launch.nanos);
+    let (uploads, upload_ns) = (delta.upload.calls, delta.upload.nanos);
+    let (track_reads, track_ns) = (delta.read_track.calls, delta.read_track.nanos);
+    let (detect_reads, detect_ns) = (delta.read_detect.calls, delta.read_detect.nanos);
+    format!(
+        "per frameset: {:.2} launches, {:.2} uploads ({:.3} ms), {:.2} reads ({:.3} ms) \
+         = {:.2} tracker ({:.3} ms) + {:.2} detector ({:.3} ms)",
+        launches as f64 / scale,
+        uploads as f64 / scale,
+        upload_ns as f64 / scale / 1e6,
+        (track_reads + detect_reads) as f64 / scale,
+        (track_ns + detect_ns) as f64 / scale / 1e6,
+        track_reads as f64 / scale,
+        track_ns as f64 / scale / 1e6,
+        detect_reads as f64 / scale,
+        detect_ns as f64 / scale / 1e6,
+    )
 }

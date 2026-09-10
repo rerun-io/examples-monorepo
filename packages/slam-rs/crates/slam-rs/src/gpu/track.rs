@@ -265,7 +265,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
             // returns before touching it). Measured: this form costs about 0.05 ms
             // of the lane's 5.9 and an `Option` field about 0.14, both inside this
             // host's drift and above its 0.02 ms pair-to-pair floor.
-            let forward: cubecl::server::Handle = super::seam::upload(
+            let forward: cubecl::server::Handle = super::submission::upload(
                 &self.client,
                 f32::as_bytes(&self.staging[..TRANSFORM_RUNS * count]),
             );

@@ -1376,6 +1376,14 @@ the packed result is per lane, which is why `gpu_backends` takes a camera count.
 `a_batch_of_two_passes_answers_what_two_calls_do` is the test that would catch
 that ordering claim being wrong.
 
+The timing test runs alone, explicitly selected, so ordinary queue tests cannot
+compete with its measured framesets:
+
+```bash
+SLAM_RS_SEAM_BENCH=300 cargo test --release --features gpu-wgpu \
+  --test gpu_seam_bench -- --ignored --exact the_gpu_frontend_reports_its_host_seam --nocapture
+```
+
 ### The spin the batch uncovered
 
 Batching made the **four-camera** lane 32 % slower, all of it inside the first
@@ -1391,7 +1399,9 @@ four-camera frameset enqueues 56 and spent **2.9 ms a frameset spinning**.
 Flushing after every camera fixed it and cost 0.10 ms a frameset on the stereo
 lane, because the flush waits for the server and on one core that handoff is real
 even when the work is not. What the channel needs is a ceiling, not a rhythm: the
-seam reserves one task before each upload, allocation, or kernel launch.
+submission module (`gpu/submission.rs`) reserves one task before each upload,
+allocation, or kernel launch. Meters in `gpu/seam.rs` only observe the producer
+thread; typed snapshot deltas never reset the submission budget.
 Pyramid preparation counts uploads when it submits them; builds consume those
 images without charging the upload again. Splitting builds into single-launch
 stages makes the count follow the actual geometry, with no fixed stage bound.
@@ -1507,6 +1517,14 @@ matches, both carried home — at two, four and eight cameras, twice the widest
 rig the configs carry. It is the reserved peak it bounds, so it holds for
 accounted submissions; an unaccounted one moves no counter and shows up as the
 spin the harness measures.
+
+The queue regression remains an ordinary test. Run the ignored timing harness
+in a separate process, including for D78 comparisons:
+
+```bash
+SLAM_RS_SEAM_BENCH=300 cargo test --release --features gpu-wgpu \
+  --test gpu_seam_bench -- --ignored --exact the_gpu_frontend_reports_its_host_seam --nocapture
+```
 
 ### What a read is worth, revised
 

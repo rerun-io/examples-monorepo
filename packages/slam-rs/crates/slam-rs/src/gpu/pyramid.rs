@@ -186,7 +186,7 @@ impl<R: Runtime> GpuPyramid<R> {
             even_len: lengths[0],
             odd: super::empty(&client, lengths[1] * size_of::<u16>()),
             odd_len: lengths[1],
-            meta: super::seam::upload(&client, u32::as_bytes(&meta)),
+            meta: super::submission::upload(&client, u32::as_bytes(&meta)),
             meta_len: meta.len(),
             client,
         })

@@ -9,108 +9,133 @@
 //! two by letting one stage's download carry another's buffers, so the reads
 //! here are counted by whoever *issued* them, not by whose data they hold.
 //!
-//! Relaxed atomics and one `Instant` pair per upload or read: about 0.6 µs a
-//! frameset against the 1600 it measures. `tests/gpu_seam_bench.rs` is the rig
-//! that prints them.
+//! Meters observe only the calling producer thread. Snapshots do not reset them;
+//! the isolated timing test formats their delta. Queue control lives in submission.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::cell::Cell;
+use std::thread::LocalKey;
 use std::time::Instant;
 
-/// How many times an operation ran, and the host time inside it.
+/// Calls and total host nanoseconds for one operation on one producer thread.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Measurement {
+    /// Number of operations.
+    pub calls: u64,
+    /// Total host duration in nanoseconds.
+    pub nanos: u64,
+}
+
+impl Measurement {
+    fn delta(self, start: Self) -> Self {
+        Self {
+            calls: self.calls - start.calls,
+            nanos: self.nanos - start.nanos,
+        }
+    }
+}
+
+/// Observational meter; its storage belongs to the calling producer thread.
 #[derive(Debug)]
 pub struct Meter {
-    calls: AtomicU64,
-    nanos: AtomicU64,
+    value: &'static LocalKey<Cell<Measurement>>,
 }
 
 impl Meter {
-    /// A meter at zero.
-    const fn new() -> Self {
-        Self {
-            calls: AtomicU64::new(0),
-            nanos: AtomicU64::new(0),
-        }
-    }
-
-    /// Run `body`, adding one call and the host time it took.
+    /// Run an operation and observe its duration without controlling submission.
     pub fn measure<T>(&self, body: impl FnOnce() -> T) -> T {
-        let mark: Instant = Instant::now();
-        let out: T = body();
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        self.nanos
-            .fetch_add(mark.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let mark = Instant::now();
+        let out = body();
+        let nanos = mark.elapsed().as_nanos() as u64;
+        self.value.with(|value| {
+            let old = value.get();
+            value.set(Measurement {
+                calls: old.calls + 1,
+                nanos: old.nanos + nanos,
+            });
+        });
         out
     }
 
-    /// Count one call whose host time is not worth an `Instant` pair.
+    /// Count an operation without timing it.
     pub fn count(&self) {
-        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.value.with(|value| {
+            let old = value.get();
+            value.set(Measurement {
+                calls: old.calls + 1,
+                ..old
+            });
+        });
     }
 
-    /// Calls and their total host nanoseconds.
-    #[must_use]
-    pub fn read(&self) -> (u64, u64) {
-        (
-            self.calls.load(Ordering::Relaxed),
-            self.nanos.load(Ordering::Relaxed),
-        )
+    fn snapshot(&self) -> Measurement {
+        self.value.with(Cell::get)
     }
+}
 
-    /// Back to zero, so a caller can bracket a measured run.
-    fn reset(&self) {
-        self.calls.store(0, Ordering::Relaxed);
-        self.nanos.store(0, Ordering::Relaxed);
-    }
+thread_local! {
+    static LAUNCH_VALUE: Cell<Measurement> = const { Cell::new(Measurement { calls: 0, nanos: 0 }) };
+    static UPLOAD_VALUE: Cell<Measurement> = const { Cell::new(Measurement { calls: 0, nanos: 0 }) };
+    static READ_TRACK_VALUE: Cell<Measurement> = const { Cell::new(Measurement { calls: 0, nanos: 0 }) };
+    static READ_DETECT_VALUE: Cell<Measurement> = const { Cell::new(Measurement { calls: 0, nanos: 0 }) };
 }
 
 /// Kernel launches. Counted only: the enqueue is inside its stage's own timer
 /// and measured under a millisecond for all thirty-two of a frameset together.
-pub static LAUNCH: Meter = Meter::new();
+pub static LAUNCH: Meter = Meter {
+    value: &LAUNCH_VALUE,
+};
 /// `create_from_slice`: a logical allocation and a host-to-device write.
-pub static UPLOAD: Meter = Meter::new();
+pub static UPLOAD: Meter = Meter {
+    value: &UPLOAD_VALUE,
+};
 /// The tracker batch's one download, which since D78 also carries whatever the
 /// corner scanner staged on the [`super::ReadRelay`] — so on the device lane
 /// this is where a frameset's cell keys are counted too.
-pub static READ_TRACK: Meter = Meter::new();
+pub static READ_TRACK: Meter = Meter {
+    value: &READ_TRACK_VALUE,
+};
 /// A download the corner scanner made itself: the band path's candidate image,
 /// and the cell keys of a frameset no tracker read carried — the first frameset
 /// of a run, and a scanner with no relay wired.
-pub static READ_DETECT: Meter = Meter::new();
+pub static READ_DETECT: Meter = Meter {
+    value: &READ_DETECT_VALUE,
+};
 
-/// Count one launch.
-pub fn launch<R: cubecl::prelude::Runtime>(client: &cubecl::prelude::ComputeClient<R>) {
-    super::reserve(client, 1);
-    LAUNCH.count();
+/// All seam observations on the current producer thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Snapshot {
+    /// Kernel launches.
+    pub launch: Measurement,
+    /// Host-to-device uploads.
+    pub upload: Measurement,
+    /// Downloads issued by the tracker.
+    pub read_track: Measurement,
+    /// Downloads issued by the detector.
+    pub read_detect: Measurement,
 }
 
-/// Every counter back to zero.
-pub fn reset() {
-    for meter in [&LAUNCH, &UPLOAD, &READ_TRACK, &READ_DETECT] {
-        meter.reset();
+impl Snapshot {
+    /// Subtract an earlier snapshot from the same producer thread.
+    #[must_use]
+    pub fn delta(self, start: Self) -> Self {
+        Self {
+            launch: self.launch.delta(start.launch),
+            upload: self.upload.delta(start.upload),
+            read_track: self.read_track.delta(start.read_track),
+            read_detect: self.read_detect.delta(start.read_detect),
+        }
     }
 }
 
-/// The whole seam over `framesets`, per frameset, on one line.
+/// Observe this producer thread without changing any counters or reservations.
 #[must_use]
-pub fn line(framesets: u64) -> String {
-    let scale: f64 = framesets.max(1) as f64;
-    let (launches, _) = LAUNCH.read();
-    let (uploads, upload_ns) = UPLOAD.read();
-    let (track_reads, track_ns) = READ_TRACK.read();
-    let (detect_reads, detect_ns) = READ_DETECT.read();
-    format!(
-        "per frameset: {:.2} launches, {:.2} uploads ({:.3} ms), {:.2} reads ({:.3} ms) \
-         = {:.2} tracker ({:.3} ms) + {:.2} detector ({:.3} ms)",
-        launches as f64 / scale,
-        uploads as f64 / scale,
-        upload_ns as f64 / scale / 1e6,
-        (track_reads + detect_reads) as f64 / scale,
-        (track_ns + detect_ns) as f64 / scale / 1e6,
-        track_reads as f64 / scale,
-        track_ns as f64 / scale / 1e6,
-        detect_reads as f64 / scale,
-        detect_ns as f64 / scale / 1e6,
-    )
+pub fn snapshot() -> Snapshot {
+    Snapshot {
+        launch: LAUNCH.snapshot(),
+        upload: UPLOAD.snapshot(),
+        read_track: READ_TRACK.snapshot(),
+        read_detect: READ_DETECT.snapshot(),
+    }
 }
 
 thread_local! {
@@ -131,11 +156,29 @@ pub fn reset_queue_peak() {
     PEAK.with(|peak| peak.set(0));
 }
 
-/// Reserve and measure the one task that uploads a host slice.
-pub(super) fn upload<R: cubecl::prelude::Runtime>(
-    client: &cubecl::prelude::ComputeClient<R>,
-    bytes: &[u8],
-) -> cubecl::server::Handle {
-    super::reserve(client, 1);
-    UPLOAD.measure(|| client.create_from_slice(bytes))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_deltas_are_non_destructive_and_thread_local() {
+        let start = snapshot();
+        LAUNCH.count();
+        UPLOAD.measure(|| ());
+        std::thread::spawn(|| {
+            LAUNCH.count();
+            READ_TRACK.count();
+        })
+        .join()
+        .unwrap_or_else(|_| panic!("meter producer panicked"));
+        let end = snapshot();
+        assert_eq!(snapshot(), end);
+        let delta = end.delta(start);
+        assert_eq!(delta.launch.calls, 1);
+        assert_eq!(delta.upload.calls, 1);
+        assert_eq!(delta.read_track.calls, 0);
+        assert_eq!(delta.read_detect.calls, 0);
+        LAUNCH.count();
+        assert_eq!(snapshot().delta(start).launch.calls, 2);
+    }
 }

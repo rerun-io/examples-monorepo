@@ -168,7 +168,7 @@ impl<R: Runtime> GpuCornerScan<R> {
                     }
                 }
                 Ok(Self {
-                    ring: super::seam::upload(&client, u32::as_bytes(&ring)),
+                    ring: super::submission::upload(&client, u32::as_bytes(&ring)),
                     level0: Level0Table::default(),
                     uploads: 0,
                     packed: Vec::new(),
