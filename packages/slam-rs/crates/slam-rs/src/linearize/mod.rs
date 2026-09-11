@@ -54,7 +54,7 @@ use crate::types::{CamId, FrameId, LandmarkId};
 /// This is one step of `performQRHouseholder`
 /// (`landmark_block_abs_dynamic.hpp:445-453`), with Eigen's `makeHouseholder`
 /// and `applyHouseholderOnTheLeft` arithmetic ported rather than nalgebra's
-/// (see `crate::eigen::qr` for why). It is a **test-facing** primitive: the
+/// (see `crate::qr` for why). It is a **test-facing** primitive: the
 /// only caller is `tests/linearize_reference.rs`, where the ported `test_qr.cpp`
 /// builds a full QR out of it. (`marg/helper.rs` drives the same Eigen
 /// primitive over a wider matrix, but calls `make_householder` and
@@ -90,14 +90,11 @@ pub fn reflect_column<S: LieScalar>(
     if len == 0 {
         return Ok(());
     }
-    let mut essential: Vec<S> = vec![S::zero(); len - 1];
-    let mut work: Vec<S> = vec![S::zero(); storage.ncols()];
+    let mut essential: Vec<S> = vec![S::zero(); len];
     // `performQRHouseholder`'s own reduction: the landmark block's `storage` is
-    // `Eigen::RowMajor`, so the column is strided (see `crate::eigen::qr`).
-    let (tau, _beta) = crate::eigen::qr::make_householder(storage, col, start, len, &mut essential);
-    crate::eigen::qr::apply_householder_on_the_left(
-        storage, start, len, &essential, tau, &mut work,
-    );
+    // `Eigen::RowMajor`, so the column is strided (see `crate::qr`).
+    let (tau, _beta) = crate::qr::make_householder(storage, col, start, len, &mut essential);
+    crate::qr::apply_householder_on_the_left(storage, start, len, &essential, tau);
     Ok(())
 }
 

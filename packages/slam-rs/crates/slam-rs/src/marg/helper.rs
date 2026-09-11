@@ -24,12 +24,12 @@ use std::collections::BTreeSet;
 
 use nalgebra::{DMatrix, DVector};
 
-use crate::eigen::qr::{
+use crate::lie::LieScalar;
+use crate::marg::MargError;
+use crate::qr::{
     BlockSpan, apply_householder_on_the_left_block, apply_householder_on_the_left_vec,
     make_householder,
 };
-use crate::lie::LieScalar;
-use crate::marg::MargError;
 
 /// What the marginalization helper returns: the reduced system over the kept
 /// variables, as a square-root prior.
@@ -122,8 +122,7 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
     let mut total_rank: usize = 0;
     // `tempVector.resize(cols + 1)` (`:290`): one scratch for the block and one
     // slot past the end for the right-hand side.
-    let mut temp: Vec<S> = vec![S::zero(); cols + 1];
-    let mut essential: Vec<S> = vec![S::zero(); rows.saturating_sub(1)];
+    let mut essential: Vec<S> = vec![S::zero(); rows];
 
     for k in 0..cols {
         if total_rank >= rows {
@@ -149,16 +148,15 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
                     col_start: k + 1,
                     cols: remaining_cols,
                 },
-                &essential[..remaining_rows.saturating_sub(1)],
+                &essential[..remaining_rows],
                 h_coeff,
-                &mut temp[k + 1..],
             );
             // `:306`: the same reflection on the residual, in lockstep.
             apply_householder_on_the_left_vec(
                 &mut q2r,
                 base,
                 remaining_rows,
-                &essential[..remaining_rows.saturating_sub(1)],
+                &essential[..remaining_rows],
                 h_coeff,
             );
             total_rank += 1;

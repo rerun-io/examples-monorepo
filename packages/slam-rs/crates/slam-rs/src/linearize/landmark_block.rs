@@ -11,13 +11,13 @@ use nalgebra::{DMatrix, DVector, Matrix2x3, Matrix2x6, Matrix3, Vector2, Vector3
 
 use crate::ba_base::{LinearizePointOut, linearize_point};
 use crate::camera::CameraEnum;
-use crate::eigen::qr::{
-    JacobiRotation, apply_householder_on_the_left, apply_rotation_on_the_left, make_givens,
-    make_householder,
-};
 use crate::landmark::Landmark;
 use crate::lie::{LieScalar, c};
 use crate::linearize::{LinearizeError, RelPoseLin};
+use crate::qr::{
+    JacobiRotation, apply_householder_on_the_left, apply_rotation_on_the_left, make_givens,
+    make_householder,
+};
 use crate::types::{AbsOrderMap, LandmarkId, POSE_SIZE, TimeCamId};
 
 /// `LandmarkBlock<Scalar>::Options` (`landmark_block.hpp:31-48`).
@@ -137,7 +137,7 @@ struct BlockObservation {
 /// **Storage order.** C++'s buffer is `Eigen::RowMajor` (`:530`); nalgebra's
 /// `DMatrix` is column major. Nothing here depends on the layout — every loop
 /// is written out — but it is why `makeHouseholder`'s reduction is a sequential
-/// fold rather than a vectorised one (see `crate::eigen::qr`).
+/// fold rather than a vectorised one (see `crate::qr`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LandmarkBlock<S: LieScalar> {
     /// `storage` (`:530`): `[ J_p | pad | J_l | r ]`, `num_rows` x `num_cols`.
@@ -176,9 +176,6 @@ pub struct LandmarkBlock<S: LieScalar> {
     num_cols: usize,
     /// `state` (`:547`).
     state: LandmarkBlockState,
-    /// The `tempVector1` of `performQRHouseholder` (`:442`), preallocated: the
-    /// per-observation and per-reflection paths must not allocate.
-    work_row: Vec<S>,
     /// The `tempVector2` of `:443`, the essential part of the reflector.
     work_essential: Vec<S>,
 }
@@ -355,7 +352,6 @@ impl<S: LieScalar> LandmarkBlock<S> {
             num_rows,
             num_cols,
             state: LandmarkBlockState::Allocated,
-            work_row: vec![S::zero(); num_cols],
             work_essential: vec![S::zero(); num_rows],
         })
     }
@@ -544,9 +540,8 @@ impl<S: LieScalar> LandmarkBlock<S> {
                 &mut self.storage,
                 k,
                 remaining_rows,
-                &self.work_essential[..remaining_rows.saturating_sub(1)],
+                &self.work_essential[..remaining_rows],
                 tau,
-                &mut self.work_row,
             );
         }
     }
@@ -818,7 +813,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
     /// Neither is free: [`Landmark::add_observation`] accepts a non-finite
     /// keypoint, the Huber weight carries the NaN past the Jacobian checks of
     /// [`Self::linearize_landmark`], and the Householder reflections of
-    /// `crate::eigen::qr`'s reflections act on whole rows, which spreads it into columns the
+    /// `crate::qr`'s reflections act on whole rows, which spreads it into columns the
     /// block never observed. One pass over the `Q₂` rows decides both, and a
     /// block that fails takes the full-width path so those NaNs are written
     /// (decision D32: NaN handling mirrors basalt).
