@@ -94,6 +94,14 @@ arguments or hide a single call should usually be inlined at the call site.
 
 **pyrefly** config is monorepo-wide in root `pyrefly.toml`; do not add `[tool.pyrefly]` to per-package `pyproject.toml`. When you add a package, register it in `pyrefly.toml` in **three** places: `search-path` and `site-package-path` (omit these and imports of the new module resolve to `missing-import`), and `project-includes` (omit it and the package's files aren't typechecked at all). For unavoidable stub false-positives from compiled/untyped deps (e.g. `depthai`), add a per-package `pyrefly-baseline.json` and wire it via `PYREFLY_EXTRA_ARGS = "--baseline pyrefly-baseline.json"` in `[feature.<name>.activation.env]` (see `simplecv`, `live-rerun`).
 
+## Serialization
+
+- pyserde for documents, never for bulk data. A JSON/TOML/YAML document that Python owns gets a `@serde` dataclass and `from_json`/`from_toml`; no hand-rolled `json.loads` plus key indexing. Arrays, trajectories, images and catalog columns never go through pyserde: npz, Parquet, Rerun, CSV.
+- Rust owns its formats. Documents produced or consumed by a Rust extension (slam-rs calibration, VioConfig) are parsed by the Rust serde derive; Python asks the extension for typed accessors instead of parsing `to_json()` output.
+- Decorator order and options: `@serde(type_check=coerce, deny_unknown_fields=True)` above `@dataclass(frozen=True, slots=True)`; coerce because `from_toml` does not widen `30` to `30.0`; deny unknown fields so a typo in a hand-edited file is an error. Cross-field checks go in `__post_init__` or a post-load validator; prefix pyserde errors with the file name. Literal errors may name the allowed values without the field name.
+- Properties do not serialise: a report with computed columns gets a flat report dataclass at the write boundary. Unscored numbers are `X | None` written as `null`, never NaN (orjson).
+- `tomli-w` and `orjson` are declared beside every `pyserde` declaration, including `common` (the conda `pyserde` ships no extras; without `tomli-w` even `from_toml` fails to import; `orjson` makes JSON fast). Arrays inside documents carry jaxtyping annotations; bare `np.ndarray` loses its dtype on round trip.
+
 ## Rerun Tools
 
 When adding or updating Tyro-facing Rerun CLIs, prefer the shared `RerunTyroConfig`

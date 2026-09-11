@@ -111,12 +111,12 @@ The library reads one thing: a recording in the dataforge rig schema. One base
 the IMU stream. Ground truth and results are separate layer files that stack onto
 the same entity paths.
 
-The catalog is the dataset source for replay and fleet checks. The manifest
-stores catalog identifiers, rig settings, and layer fingerprints; it stores no
-dataset file paths. Any msd-index / msd-g2 / msd-odyssey segment replays from the catalog.
+The catalog is the dataset source for replay and fleet checks. The gate
+stores segment selectors, sensor models, tiers, hold-outs and measured baselines;
+it stores no copied capture facts or layer fingerprints. Any msd-index / msd-g2 / msd-odyssey segment replays from the catalog.
 
 - Catalog replay: `tools/apps/replay.py --stage vio --segment <segment-id>`.
-  `--catalog` overrides the manifest URL.
+  `--catalog` overrides the gate URL.
 - Local replay: `tools/apps/replay.py --stage vio --rrd base.rrd [--gt-rrd gt.rrd]`.
   This explicit file pair runs through an in-process server.
 
@@ -344,3 +344,5 @@ Not in this branch, in the order they are likely to matter:
 - **Less code.** With ground-truth accuracy checks the Lie groups and the camera
   models could move further into kornia-rs. S34 already uses nalgebra for QR,
   the damped solve and SVD; the ground-truth gate checks further replacements.
+
+`gate.toml` beside this README holds the rigs’ sensor noise models that the catalog does not carry, gate tiers, hold-outs, decode paths, and measured lane/profile baselines. It also holds RoboCap rig and clock rules plus its one regression trajectory path. Camera geometry and capture facts come from the catalog.
