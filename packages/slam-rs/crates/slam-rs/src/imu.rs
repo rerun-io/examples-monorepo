@@ -38,9 +38,10 @@
 //!
 //! Two more, from the same reading:
 //!
-//! * `sqrt_cov_inv` is a **pseudo**-inverse square root: any LDLT pivot below
-//!   `numeric_limits<Scalar>::min()` is zeroed rather than producing an infinity
-//!   (`preintegration.h:313-319`).
+//! * The inverse covariance is formed through a guarded pivoted LDLT. Pivots
+//!   below the smallest positive normal value get zero weight. For singular
+//!   covariance this is a generalized inverse through congruence, not a
+//!   Moore-Penrose inverse, and it need not annihilate the null space.
 //! * Paper 1's Eq. (20) omits the `− v_i Δt` term. The code has it
 //!   (`preintegration.h:214`) and so does this port.
 //!
@@ -51,14 +52,9 @@
 //!   [`IntegratedImuMeasurement::get_cov_inv_sqrt`] recomputes the 9x9 LDLT on
 //!   every call instead, which needs no interior mutability and costs a few
 //!   hundred flops against the ~10⁸ the frontend spends on the same frame.
-//! * **The LDLT is Eigen's, ported.** `Eigen::LDLT` is not available as a
-//!   dependency, and it is not interchangeable with a textbook pivoted LDLT:
-//!   see `ldlt_in_place` for the two properties — pivoting on the *un-updated*
-//!   diagonal, and a tiny negative pivot on a dependent direction — that decide
-//!   what a *singular* covariance whitens to. Getting them wrong puts an
-//!   information weight of `1e26` on an unobservable direction where basalt puts
-//!   zero. `crates/slam-rs/tests/imu_oracle.rs` pins the factorization, the
-//!   whitening and the delta state against the C++ itself.
+//! * **The small pivoted LDLT stays local.** It pivots on the original diagonal,
+//!   then updates the selected column. Negative or tiny pivots get zero weight
+//!   during whitening, which keeps degenerate covariance finite.
 //! * **Jacobians are all-or-nothing.** C++ takes four nullable out-pointers;
 //!   every in-tree caller either asks for all of them or none
 //!   (`imu_block.hpp:41-48`), so the port has one plain method and one
@@ -749,17 +745,11 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
         &self.d_state_d_bg
     }
 
-    /// The square-root inverse covariance the estimator whitens with,
-    /// `get_sqrt_cov_inv()` (`preintegration.h:280-287`, computed at `:305-321`).
-    ///
-    /// `M = D^{-1/2} L^{-1} P` from the pivoted LDLT `P cov Pᵀ = L D Lᵀ`, so
-    /// `Mᵀ M = cov⁻¹`. A pivot below `numeric_limits<Scalar>::min()` gives a
-    /// zero row rather than an infinity (`:313-319`), which makes this a
-    /// pseudo-inverse — the empty measurement's covariance is exactly zero and
-    /// its factor is exactly zero too.
-    ///
-    /// C++ caches this behind a dirty flag; the port recomputes it. See the
-    /// module deviations.
+    /// Whitening factor `M = D⁺½ L⁻¹ P` for `P cov Pᵀ = L D Lᵀ`.
+    /// For SPD covariance, `Mᵀ M = cov⁻¹`. Rows with a pivot below the smallest
+    /// positive normal value are zeroed so degenerate covariance contributes
+    /// finite, zero weight in those factor coordinates. The singular result is
+    /// a generalized inverse through congruence, not a Moore-Penrose inverse.
     pub fn get_cov_inv_sqrt(&self) -> Matrix9<S> {
         // `:306-307`
         let mut mat: Matrix9<S> = self.cov;
@@ -946,42 +936,11 @@ fn axis_orthogonal_to_both<S: LieScalar>(v0: &Vector3<S>, v1: &Vector3<S>) -> Ve
     }
 }
 
-/// `Eigen::LDLT`'s in-place factorization of a 9x9 symmetric matrix, ported from
-/// `ldlt_inplace<Lower>::unblocked`
-/// (`thirdparty/basalt-headers/thirdparty/eigen/Eigen/src/Cholesky/LDLT.h:280-382`).
-///
-/// On return `mat` holds `D` on its diagonal and the strictly lower triangle of
-/// the unit lower `L`; the strict upper triangle is untouched leftover input,
-/// as in Eigen. The returned array is Eigen's `transpositionsP()`: applying
-/// `swap_rows(k, transpositions[k])` for ascending `k` builds the permutation
-/// `P` with `P A Pᵀ = L D Lᵀ`.
-///
-/// Two properties of *this* algorithm decide the whitening of a rank-deficient
-/// covariance, and neither survives a textbook right-looking LDLT:
-///
-/// * **The pivot is chosen on the un-updated diagonal.** Eigen delays the
-///   column updates (`:335-339`), so at step `k` the trailing diagonal still
-///   holds the *original* entries. That is why the Eigen source calls LDLT
-///   "not rank-revealing" (`:342-344`), and it changes which direction is
-///   eliminated first. For the covariance after one 5 ms sample with zero gyro
-///   and accelerometer, position and velocity are perfectly correlated
-///   (`p = ½ dt² a`, `v = dt a`), and Eigen eliminates the three *velocity*
-///   directions first, on their larger original variance.
-/// * **A dependent direction leaves a tiny negative pivot, not a zero.** With
-///   the velocity directions eliminated, the position pivots come out as
-///   `-1.6e-27` rather than `0`, and basalt's `vectorD()[i] < numeric_limits::min()`
-///   test (`preintegration.h:314`) — which a negative number passes — zeroes
-///   those rows of the factor. Pivoting the other way round leaves a tiny
-///   *positive* pivot instead, and `1/sqrt(tiny)` puts weights of order `1e26`
-///   on an unobservable direction.
-///
-/// Which side of zero the residue lands on is a property of the precision, not
-/// of the algorithm: the *same* case in `f32` leaves `+8.7e-19`, which is above
-/// `f32`'s `min()`, so basalt itself whitens those directions with a weight of
-/// `1.07e9`. The port reproduces that too, rather than deciding for basalt what
-/// a singular measurement ought to mean.
-///
-/// `crates/slam-rs/tests/imu_oracle.rs` pins all of it against the C++.
+/// Factor a symmetric 9x9 in place as `P A Pᵀ = L D Lᵀ`.
+/// Store D on the diagonal and unit-lower L below it. The upper triangle is
+/// unused. Apply the returned row swaps in ascending order to construct P.
+/// Select pivots from the original diagonal before updating the column.
+/// Whitening zeros negative and subnormal pivots instead of taking their roots.
 fn ldlt_in_place<S: LieScalar>(mat: &mut Matrix9<S>) -> [usize; POSE_VEL_SIZE] {
     let size: usize = POSE_VEL_SIZE;
     let mut transpositions: [usize; POSE_VEL_SIZE] = [0; POSE_VEL_SIZE];
@@ -2922,6 +2881,38 @@ mod tests {
             let state1: PoseVelState<f64> = meas.predict_state(&PoseVelState::default(), &g);
             prop_assert!((state1.vel_w_i - g * total).norm() <= 1e-12);
             prop_assert!((state1.t_w_i.translation - g * 0.5 * total * total).norm() <= 1e-12);
+        }
+
+        #[test]
+        fn random_spd_covariance_is_inverted(values in prop::collection::vec(-1.0f64..1.0, 81)) {
+            let g = Matrix9::from_row_slice(&values);
+            let a = g.transpose() * g + Matrix9::identity();
+            let mut meas = IntegratedImuMeasurement::new(0, &Vector3::zeros(), &Vector3::zeros());
+            meas.cov = a;
+            let inverse = meas.get_cov_inv();
+            let reference = a.try_inverse().unwrap();
+            prop_assert!((inverse - reference).norm() < 1e-10 * (1.0 + reference.norm()));
+        }
+
+        #[test]
+        fn rank_deficient_gram_covariance_has_a_generalized_inverse(
+            weights in prop::array::uniform4(0.25f64..4.0), shift in 0usize..9,
+        ) {
+            // Four independent rows and scaled duplicate columns. This tests
+            // oblique null directions without rounding GᵀG into full rank.
+            let mut g = Matrix9::zeros();
+            for i in 0..4 {
+                g[(i, i)] = weights[i];
+                g[(i, i + 4)] = 2.0 * weights[i];
+            }
+            g.swap_columns(0, shift);
+            let a = g.transpose() * g;
+            let mut meas = IntegratedImuMeasurement::new(0, &Vector3::zeros(), &Vector3::zeros());
+            meas.cov = a;
+            let inverse = meas.get_cov_inv();
+            prop_assert!(inverse.iter().all(|v| v.is_finite()));
+            prop_assert!((inverse - inverse.transpose()).norm() < 1e-12 * (1.0 + inverse.norm()));
+            prop_assert!((a * inverse * a - a).norm() < 1e-10 * (1.0 + a.norm()));
         }
 
         /// The covariance stays symmetric and positive semi-definite, and the

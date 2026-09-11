@@ -1,37 +1,15 @@
-//! Eigen's pivoted LDLT, specialised to the 3x3 the patch Hessian needs.
+//! Pivoted LDLT for a symmetric 3x3 patch Hessian.
 //!
-//! `setFromImage` inverts `H_se2` with `H_se2.ldlt().solveInPlace(H_se2_inv)`
-//! starting from the identity (`patch.h:151-154`). `nalgebra` has a Cholesky but
-//! no rank-revealing LDLT with symmetric pivoting, and the difference is not
-//! cosmetic: on a rank-deficient `H` Eigen's solve **zeroes** the rows whose
-//! pivot is below `numeric_limits<Scalar>::min()` instead of dividing by zero
-//! (`Eigen/src/Cholesky/LDLT.h:553-568`). A patch on a one-dimensional texture
-//! therefore comes out of the C++ with a finite, zero-valued `H^-1 J^T` — and so
-//! `valid == true` with an increment that can never move it — where a naive
-//! inverse would produce `inf`, fail the finiteness test at `patch.h:164` and
-//! drop the point. Decision D41 records the same finding on the IMU side.
-//!
-//! Ported step by step from the vendored Eigen 5.0.1 (`Eigen/Version:12`) in
-//! `thirdparty/basalt-headers/thirdparty/eigen`:
-//!
-//! * `internal::ldlt_inplace<Lower>::unblocked` (`LDLT.h:277-380`) — largest
-//!   remaining diagonal as pivot, symmetric transposition, delayed column
-//!   updates through `temp`, and `pivot_is_valid = |A_kk| > 0` (`:347`);
-//! * `_solve_impl_transposed` (`LDLT.h:543-577`) — permute, unit-lower forward
-//!   solve, the tolerance-guarded diagonal solve, unit-lower transposed back
-//!   solve, and the inverse permutation;
-//! * `transposition_matrix_product` (`ProductEvaluators.h:1179-1202`) — apply
-//!   `k` ascending, apply the transpose `k` descending.
-//!
-//! Only the `Lower` variant at size 3 is needed and only that is written.
+//! The solve zeros rows whose diagonal pivot has magnitude at most the smallest
+//! positive normal value. Degenerate patches thus retain finite, zero-weight
+//! directions instead of divisions by zero. For singular inputs the result is
+//! a generalized inverse through congruence, `Pᵀ L⁻ᵀ D⁺ L⁻¹ P`, not the
+//! Moore-Penrose inverse; it need not annihilate the null space.
 
 use nalgebra::Matrix3;
 
-/// `A^-1` through Eigen's pivoted LDLT, for a symmetric 3x3.
-///
-/// The strict lower triangle of `A` is the only part read, as Eigen's
-/// `LDLT<MatrixType, Lower>` reads (`LDLT.h:277`). For a rank-deficient `A` the
-/// result is the pseudo-inverse Eigen produces, not an infinity.
+/// Invert a symmetric patch Hessian, reading only its lower triangle.
+/// Singular diagonal pivots contribute zero in the factor coordinates.
 pub fn ldlt_inverse3(a: &Matrix3<f32>) -> Matrix3<f32> {
     let (mat, transpositions): (Matrix3<f32>, [usize; 3]) = ldlt_decompose3(a);
     let mut result: Matrix3<f32> = Matrix3::identity();
@@ -39,23 +17,16 @@ pub fn ldlt_inverse3(a: &Matrix3<f32>) -> Matrix3<f32> {
     result
 }
 
-/// `internal::ldlt_inplace<Lower>::unblocked` at size 3 (`LDLT.h:277-380`).
-///
-/// Returns the packed factor — unit-diagonal `L` in the strict lower triangle,
-/// `D` on the diagonal — and the transposition indices.
-// `k` is Eigen's pivot step: it indexes `transpositions`, the diagonal and two
-// triangles of `mat` at once, and the whole point is to follow `LDLT.h:303-378`
-// statement by statement.
+/// Pack unit-lower L and diagonal D, returning the symmetric pivot sequence.
+// A pivot step addresses the permutation and both matrix dimensions.
 #[allow(clippy::needless_range_loop)]
 fn ldlt_decompose3(a: &Matrix3<f32>) -> (Matrix3<f32>, [usize; 3]) {
     const SIZE: usize = 3;
     let mut mat: Matrix3<f32> = *a;
     let mut transpositions: [usize; SIZE] = [0; SIZE];
-    // `Workspace& temp`, the delayed-update scratch (`LDLT.h:333-337`).
     let mut temp: [f32; SIZE] = [0.0; SIZE];
 
     for k in 0..SIZE {
-        // "Find largest diagonal element" (`LDLT.h:305-307`). `maxCoeff` reports
         // the first index of the maximum, so ties take the earliest row.
         let mut biggest: usize = k;
         for i in (k + 1)..SIZE {
@@ -66,8 +37,6 @@ fn ldlt_decompose3(a: &Matrix3<f32>) -> (Matrix3<f32>, [usize; 3]) {
         transpositions[k] = biggest;
 
         if k != biggest {
-            // "apply the transposition while taking care to consider only the
-            // lower triangular part" (`LDLT.h:311-324`).
             for j in 0..k {
                 let swap: f32 = mat[(k, j)];
                 mat[(k, j)] = mat[(biggest, j)];
@@ -88,7 +57,6 @@ fn ldlt_decompose3(a: &Matrix3<f32>) -> (Matrix3<f32>, [usize; 3]) {
             }
         }
 
-        // `A00 | - | -; A10 | A11 | -; A20 | A21 | A22` (`LDLT.h:326-338`).
         if k > 0 {
             for i in 0..k {
                 temp[i] = mat[(i, i)] * mat[(k, i)];
@@ -107,14 +75,10 @@ fn ldlt_decompose3(a: &Matrix3<f32>) -> (Matrix3<f32>, [usize; 3]) {
             }
         }
 
-        // "we should only make sure that we do not introduce INF or NaN values"
-        // (`LDLT.h:340-361`): LAPACK's cutoff of exactly zero.
         let pivot: f32 = mat[(k, k)];
         let pivot_is_valid: bool = pivot.abs() > 0.0;
 
         if k == 0 && !pivot_is_valid {
-            // "The entire diagonal is zero, there is nothing more to do"
-            // (`LDLT.h:347-356`).
             for (j, transposition) in transpositions.iter_mut().enumerate() {
                 *transposition = j;
             }
@@ -131,21 +95,16 @@ fn ldlt_decompose3(a: &Matrix3<f32>) -> (Matrix3<f32>, [usize; 3]) {
     (mat, transpositions)
 }
 
-/// `LDLT::_solve_impl_transposed<true>` at size 3 (`LDLT.h:543-577`).
-///
-/// `rhs_and_result` is both the right-hand side and, on return, the solution, as
-/// `solveInPlace` leaves it (`LDLT.h:593-602`).
+/// Apply the permutation, forward solve, guarded diagonal solve and back solve.
 fn ldlt_solve3(mat: &Matrix3<f32>, transpositions: &[usize; 3], rhs_and_result: &mut Matrix3<f32>) {
     const SIZE: usize = 3;
 
-    // `dst = m_transpositions * rhs`: k ascending (`ProductEvaluators.h:1194-1201`).
     for (k, target) in transpositions.iter().enumerate() {
         if *target != k {
             rhs_and_result.swap_rows(k, *target);
         }
     }
 
-    // `matrixL().solveInPlace(dst)`: unit-lower forward substitution.
     for row in 1..SIZE {
         for column in 0..row {
             let factor: f32 = mat[(row, column)];
@@ -156,7 +115,6 @@ fn ldlt_solve3(mat: &Matrix3<f32>, transpositions: &[usize; 3], rhs_and_result: 
         }
     }
 
-    // "more precisely, use pseudo-inverse of D" (`LDLT.h:551-568`): the tolerance
     // is `numeric_limits<RealScalar>::min()`, the smallest positive normal.
     let tolerance: f32 = f32::MIN_POSITIVE;
     for i in 0..SIZE {
@@ -172,7 +130,6 @@ fn ldlt_solve3(mat: &Matrix3<f32>, transpositions: &[usize; 3], rhs_and_result: 
         }
     }
 
-    // `matrixL().transpose().solveInPlace(dst)`: unit-upper back substitution.
     for row in (0..SIZE).rev() {
         for column in (row + 1)..SIZE {
             // `L^T(row, column) == L(column, row)`.
@@ -184,7 +141,6 @@ fn ldlt_solve3(mat: &Matrix3<f32>, transpositions: &[usize; 3], rhs_and_result: 
         }
     }
 
-    // `dst = m_transpositions.transpose() * dst`: k descending.
     for k in (0..SIZE).rev() {
         let target: usize = transpositions[k];
         if target != k {
@@ -234,10 +190,8 @@ mod tests {
     }
 
     /// The reason this module exists: a singular `H` gives zeros, not infinities,
-    /// so `patch.h:164`'s finiteness test still passes (`LDLT.h:553-568`).
     #[test]
     fn a_rank_deficient_matrix_gives_zeros_not_infinities() {
-        // `g g^T` for `g = (2, 1, 0)`: rank one, positive semidefinite.
         let g: Vector3<f32> = Vector3::new(2.0, 1.0, 0.0);
         let a: Matrix3<f32> = g * g.transpose();
         let inverse: Matrix3<f32> = ldlt_inverse3(&a);
@@ -249,6 +203,23 @@ mod tests {
     fn an_all_zero_matrix_gives_all_zeros() {
         let inverse: Matrix3<f32> = ldlt_inverse3(&Matrix3::zeros());
         assert_eq!(inverse, Matrix3::zeros());
+    }
+
+    proptest! {
+        #[test]
+        fn a_rank_deficient_gram_has_a_generalized_inverse(
+            a in 0.25f32..4.0, b in 0.25f32..4.0, shift in 0usize..3,
+        ) {
+            // Duplicate scaled columns give a non-coordinate null direction.
+            // Powers of two keep that dependency exact in floating point.
+            let mut g = Matrix3::new(a, 0.0, 2.0 * a, 0.0, b, 0.0, 0.0, 0.0, 0.0);
+            g.swap_columns(0, shift);
+            let a = g.transpose() * g;
+            let inverse = ldlt_inverse3(&a);
+            prop_assert!(inverse.iter().all(|v| v.is_finite()));
+            prop_assert!((inverse - inverse.transpose()).norm() < 1e-5 * (1.0 + inverse.norm()));
+            prop_assert!((a * inverse * a - a).norm() < 1e-5 * (1.0 + a.norm()));
+        }
     }
 
     proptest! {
