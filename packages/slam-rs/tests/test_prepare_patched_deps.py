@@ -2,14 +2,18 @@
 
 import hashlib
 import io
+import json
+import os
+import shutil
 import subprocess
 import tarfile
+import urllib.error
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from slam_rs.apis.prepare_patched_deps import PatchedCrate, prepare
+from slam_rs.apis.prepare_patched_deps import CHANNEL_SHA256, PATCHED_CRATES, PatchedCrate, prepare
 
 
 @pytest.fixture
@@ -60,3 +64,37 @@ def test_applies_inside_ignored_git_target(tmp_path: Path, crate: PatchedCrate) 
     (tmp_path / '.gitignore').write_text('target/\n')
     prepare(crate, tmp_path, tmp_path / 'cargo')
     assert (tmp_path / 'target/patch/example-1.0/hello.txt').read_text() == 'after\n'
+
+
+@pytest.mark.skipif(shutil.which('cargo') is None, reason='real patch smoke test requires cargo on PATH')
+def test_real_patch_and_locked_cargo_resolution(tmp_path: Path) -> None:
+    """The shipped patch matches the fork and Cargo uses the prepared crate."""
+    package_dir: Path = Path(__file__).resolve().parents[1]
+    cargo_home: Path = Path(os.environ.get('CARGO_HOME', str(Path.home() / '.cargo')))
+    crate: PatchedCrate = PATCHED_CRATES[0]
+    patch: Path = tmp_path / crate.patch
+    patch.parent.mkdir(parents=True)
+    shutil.copyfile(package_dir / crate.patch, patch)
+    try:
+        # A fresh destination exercises extraction and the real patch even when
+        # the checkout already has a matching preparation marker.
+        prepare(crate, tmp_path, cargo_home)
+        prepare(crate, package_dir, cargo_home)
+    except (urllib.error.URLError, TimeoutError) as error:
+        pytest.skip(f'pinned crate archive is not cached and download is unavailable: {error}')
+    stem: str = f'{crate.name}-{crate.version}'
+    channel: Path = tmp_path / 'target/patch' / stem / 'src/device/handle/channel.rs'
+    assert hashlib.sha256(channel.read_bytes()).hexdigest() == CHANNEL_SHA256
+    result: subprocess.CompletedProcess[str] = subprocess.run(
+        # CubeCL is optional; select its lane so it appears in the resolved graph.
+        ['cargo', 'metadata', '--locked', '--offline', '--format-version', '1', '--features', 'slam-rs/gpu-wgpu'],
+        cwd=package_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    # Raw JSON is intentional here: this is a contract test of Cargo's output.
+    packages = [package for package in json.loads(result.stdout)['packages'] if package['name'] == crate.name]
+    assert len(packages) == 1
+    assert packages[0]['source'] is None
+    assert Path(packages[0]['manifest_path']).resolve() == (package_dir / 'target/patch' / stem / 'Cargo.toml').resolve()

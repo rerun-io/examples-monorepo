@@ -2472,8 +2472,14 @@ cmd = "cargo clippy --workspace --all-targets -- -D warnings"
 cwd = "packages/slam-rs"
 description = "Run clippy over the whole Rust workspace"
 
-[feature.slam-rs.tasks.slam-rs-rust-test]
+[feature.slam-rs.tasks.slam-rs-patch-test]
 depends-on = ["slam-rs-patch-deps"]
+cmd = "cargo test --locked --offline --manifest-path target/patch/cubecl-common-0.11.0-pre.3/Cargo.toml park"
+cwd = "packages/slam-rs"
+description = "Run the patched CubeCL channel park tests"
+
+[feature.slam-rs.tasks.slam-rs-rust-test]
+depends-on = ["slam-rs-patch-test"]
 cmd = "cargo test --workspace"
 cwd = "packages/slam-rs"
 description = "Run the Rust test suite (unit tests + proptest)"

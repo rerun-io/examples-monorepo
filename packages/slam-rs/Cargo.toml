@@ -5,6 +5,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/slam-rs", "crates/slam-rs-py", "crates/slam-rs-cli"]
+# Run the patched dependency's own unit tests as a standalone crate.
+exclude = ["target/patch/cubecl-common-0.11.0-pre.3"]
 
 [workspace.package]
 version = "0.1.0"

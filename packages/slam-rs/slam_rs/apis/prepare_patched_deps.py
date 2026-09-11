@@ -36,6 +36,10 @@ PATCHED_CRATES: tuple[PatchedCrate, ...] = (
 )
 
 
+# src/device/handle/channel.rs at CubeCL fork commit 93d463c9.
+CHANNEL_SHA256: str = '75e4b83cb12ad4bfa07b2e72c8e7fafdb363c00f98682174f03dafc8f5e849d7'
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     """Prepare the dependencies of this source checkout."""
