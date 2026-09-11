@@ -15,15 +15,18 @@ import json
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 import numpy as np
+import orjson
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
+from serde import coerce, serde
+from serde.json import to_json
 
 from slam_rs import _core
 from slam_rs.catalog_feed import CatalogSegment, Frameset, open_segment
-from slam_rs.reference import ReferenceManifest, ReferenceSegment, load_manifest, resolved_flow_config
+from slam_rs.reference import DecodePath, ReferenceManifest, ReferenceSegment, load_manifest, resolved_flow_config
 
 FIXTURES: Path = Path(__file__).resolve().parents[2] / "crates/slam-rs/tests/fixtures"
 """Directory holding MSD calibration JSON files."""
@@ -32,12 +35,39 @@ DEVICE_CALIBRATION: dict[str, str] = {"msd-index": "msdmi_calib.json", "msd-g2":
 """Catalog dataset to its calibration JSON with double-precision values."""
 
 
+@serde(type_check=coerce, deny_unknown_fields=True)
+@dataclass(slots=True, frozen=True)
+class ClipMetadata:
+    """Document metadata for bulk arrays stored separately."""
+
+    segment_id: str
+    """Catalog segment id."""
+    dataset_name: str
+    """Catalog dataset name."""
+    capture_start_time_ns: int
+    """Absolute capture clock offset."""
+    calibration_source: Literal["catalog", "fixture"]
+    """Calibration provenance."""
+    num_cameras: int
+    """Selected camera count."""
+    resolution_wh: tuple[tuple[int, int], ...]
+    """Camera widths and heights in rig order."""
+    framesets: int
+    """Dumped frameset count."""
+    frame_t_ns: list[int]
+    """Frame timestamps in nanoseconds."""
+    imu_samples: int
+    """Dumped inertial sample count."""
+    decode_path: DecodePath
+    """Pixel decode provenance."""
+
+
 @dataclass(slots=True)
 class Config:
     """Dump one reference segment's pixels, inertial samples and calibration."""
 
     segment: str
-    """Segment id from ``reference_segments.toml``."""
+    """Segment id from ``gate.toml``."""
     output: Path
     """Directory the clip is written to; created if missing."""
     calibration: Literal["catalog", "fixture"] = "catalog"
@@ -94,7 +124,7 @@ def main(config: Config) -> None:
 
     with open_segment(
         CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id),
-        segment.imu,
+        manifest.dataset(segment.dataset_name).imu,
         window_s=config.window_s,
     ) as feed:
         calibration_text: str
@@ -126,21 +156,21 @@ def main(config: Config) -> None:
             if dumped % 200 == 0:
                 print(f"{dumped} framesets", flush=True)
 
-        clip: dict[str, Any] = {
-            "segment_id": feed.segment_id,
-            "dataset_name": segment.dataset_name,
-            "capture_start_time_ns": feed.capture_start_time_ns,
-            "calibration_source": config.calibration,
-            "num_cameras": len(feed.cameras),
-            "resolution_wh": [[camera.width, camera.height] for camera in feed.cameras],
-            "framesets": dumped,
-            "frame_t_ns": frame_t_ns,
-            "imu_samples": len(imu_lines) - 1,
-            "decode_path": segment.decode_path,
-        }
+        clip: ClipMetadata = ClipMetadata(
+            segment_id=feed.segment_id,
+            dataset_name=segment.dataset_name,
+            capture_start_time_ns=feed.capture_start_time_ns,
+            calibration_source=config.calibration,
+            num_cameras=len(feed.cameras),
+            resolution_wh=tuple((camera.width, camera.height) for camera in feed.cameras),
+            framesets=dumped,
+            frame_t_ns=frame_t_ns,
+            imu_samples=len(imu_lines) - 1,
+            decode_path=segment.decode_path,
+        )
     (config.output / "imu.csv").write_text("\n".join(imu_lines) + "\n")
     (config.output / "frames.sha256").write_text("\n".join(frame_lines) + "\n")
-    (config.output / "clip.json").write_text(json.dumps(clip, indent=2) + "\n")
+    (config.output / "clip.json").write_text(to_json(clip, option=orjson.OPT_INDENT_2) + "\n")
     if config.npz:
         bundle: Path = config.output / "clip.npz"
         np.savez(
@@ -162,6 +192,6 @@ def main(config: Config) -> None:
             pickle.dump({"cameras": feed.cameras, "imu": feed.imu}, handle)
         print(f"clip.npz {np.stack(bundle_images).shape} + calib.pkl -> {bundle}")
     digest: str = hashlib.sha256((config.output / "frames.sha256").read_bytes()).hexdigest()
-    print(f"{dumped} framesets, {clip['imu_samples']} inertial samples -> {config.output}")
+    print(f"{dumped} framesets, {clip.imu_samples} inertial samples -> {config.output}")
     print(f"frames.sha256 {digest}")
 

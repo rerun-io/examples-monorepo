@@ -14,7 +14,7 @@ through a PyO3 extension module, so the whole pipeline runs from Python:
 on the same frames. `fast` is the default profile; `reference` selects the
 unmodified dataset configuration. Accuracy is ATE against catalog ground truth.
 Each lane/profile is compared with its measured baseline in
-`reference_segments.toml`. MIO10 GPU fast scores about 1.55 cm on the RTX 5090.
+`gate.toml`. MIO10 GPU fast scores about 1.55 cm on the RTX 5090.
 The same code runs on `linux-64`, `linux-aarch64`, and macOS `osx-arm64`.
 
 Design notes — the module-by-module account of the estimator, the full Python API,
@@ -111,12 +111,12 @@ The library reads one thing: a recording in the dataforge rig schema. One base
 the IMU stream. Ground truth and results are separate layer files that stack onto
 the same entity paths.
 
-The catalog is the dataset source for replay and fleet checks. The manifest
-stores catalog identifiers, rig settings, and layer fingerprints; it stores no
-dataset file paths. Any msd-index / msd-g2 / msd-odyssey segment replays from the catalog.
+The catalog is the dataset source for replay and fleet checks. The gate
+stores segment selectors, sensor models, tiers, hold-outs and measured baselines;
+it stores no copied capture facts or layer fingerprints. Any msd-index / msd-g2 / msd-odyssey segment replays from the catalog.
 
 - Catalog replay: `tools/apps/replay.py --stage vio --segment <segment-id>`.
-  `--catalog` overrides the manifest URL.
+  `--catalog` overrides the gate URL.
 - Local replay: `tools/apps/replay.py --stage vio --rrd base.rrd [--gt-rrd gt.rrd]`.
   This explicit file pair runs through an in-process server.
 
@@ -182,7 +182,7 @@ Design notes — the accessors field by field, every refusal and its ceiling, an
 | `crates/slam-rs-cli` | `slam-rs` binary: a placeholder. `version` is the only subcommand that does anything; a replay runs through the Python tools. |
 | `slam_rs/` | The Python package: stubs, Tyro entry points under `apis/`. |
 | `tools/` | Thin CLI shims over `slam_rs/apis/`. |
-| `reference_segments.toml` | Catalog schema 9: rigs, segments, ground-truth fingerprints, and lane baselines. |
+| `gate.toml` | Gate schema 10: sensor models, tiers, hold-outs, and lane baselines. |
 | `configs/` | Dataset VIO configurations and the `profiles/` overlays. |
 
 `Cargo.lock` is committed. `cargo` never runs during `pixi lock` or
@@ -219,7 +219,7 @@ decision is load-bearing: [the frontend](docs/design-notes.md#the-frontend-and-t
 ## Accuracy and speed
 
 The following tables record earlier profile comparisons. Current gate baselines
-are stored in `reference_segments.toml`.
+are stored in `gate.toml`.
 
 Latency is the synchronous `Vio.track` call, one CPU core, decode excluded,
 median over the clip after the first 60 framesets. ATE is RMSE against ground
@@ -344,3 +344,5 @@ Not in this branch, in the order they are likely to matter:
 - **Less code.** With ground-truth accuracy checks the Lie groups and the camera
   models could move further into kornia-rs. S34 already uses nalgebra for QR,
   the damped solve and SVD; the ground-truth gate checks further replacements.
+
+`gate.toml` beside this README holds the rigs’ sensor noise models that the catalog does not carry, gate tiers, hold-outs, decode paths, and measured lane/profile baselines. It also holds RoboCap rig and clock rules plus its one regression trajectory path. Camera geometry and capture facts come from the catalog.

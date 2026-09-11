@@ -15,10 +15,13 @@ import resource
 from dataclasses import dataclass
 from pathlib import Path
 
+from serde import coerce, serde
+
 THERMAL_ZONES: str = "sys/class/thermal/thermal_zone*/temp"
 """Where Linux publishes die temperatures, relative to the root; the cap has seven zones and a Mac has none."""
 
 
+@serde(type_check=coerce, deny_unknown_fields=True)
 @dataclass(slots=True, frozen=True)
 class Machine:
     """The host a row was measured on."""

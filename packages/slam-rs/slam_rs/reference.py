@@ -4,16 +4,19 @@ import hashlib
 import json
 import math
 import re
-import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal, TypeAlias
+from tomllib import TOMLDecodeError
+from typing import Literal, TypeAlias
+
+from serde import SerdeError, coerce, field, serde
+from serde.toml import from_toml
 
 from slam_rs import _core
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES
 
-MANIFEST_PATH: Path = Path(__file__).resolve().parents[1] / "reference_segments.toml"
-"""The checked-in manifest, beside the package rather than inside it."""
+MANIFEST_PATH: Path = Path(__file__).resolve().parents[1] / "gate.toml"
+"""The checked-in gate, beside the package rather than inside it."""
 
 Tier: TypeAlias = Literal["smoke", "release", "listed"]
 """Smoke checks, release checks, or additional listed segments."""
@@ -25,9 +28,6 @@ H.264 streams are decoded on the same one decoder thread but reformatted straigh
 ``gray8`` at a third of their size in one ``swscale`` call with ``SWS_AREA``, which is
 the combined area-resampling operation selected for RoboCap.
 """
-GroundTruthSource: TypeAlias = Literal["lighthouse", "mocap"]
-"""How a segment's ground-truth rig poses were measured."""
-
 TIER_BY_NAME: dict[str, Tier] = {"smoke": "smoke", "release": "release", "listed": "listed"}
 """Valid tier names, in increasing cost order; the lookup is also how a manifest string becomes a :data:`Tier`."""
 DECODE_PATH_BY_NAME: dict[str, DecodePath] = {
@@ -35,34 +35,6 @@ DECODE_PATH_BY_NAME: dict[str, DecodePath] = {
     "cpu_gray8_swscale_area_downscale3": "cpu_gray8_swscale_area_downscale3",
 }
 """Decode paths a gate may be frozen on."""
-GT_SOURCE_BY_NAME: dict[str, GroundTruthSource] = {"lighthouse": "lighthouse", "mocap": "mocap"}
-"""Ground-truth measurement systems the two MSD devices use."""
-
-
-def _one_of[LiteralName: str](value: object, allowed: dict[str, LiteralName], what: str, where: str) -> LiteralName:
-    """Narrow one manifest string into its literal alphabet, or say what the alphabet is.
-
-    Every one of these values is typed into the file by hand, so the message has
-    to carry the alphabet: a typo used to get a helpful sentence or an unhelpful
-    one depending on which of the four tables it was in.
-
-    Args:
-        value: The string the manifest carries.
-        allowed: The identity table for the literal type, e.g. :data:`TIER_BY_NAME`.
-        what: What the value names, for the error, e.g. ``"tier"``.
-        where: Which segment or table it was read from, for the error.
-
-    Returns:
-        The same string, typed as the literal it is.
-
-    Raises:
-        ValueError: If it is not one of the alphabet.
-    """
-    if not isinstance(value, str) or value not in allowed:
-        raise ValueError(f"{where}: unknown {what} {value!r}, expected one of {sorted(allowed)}")
-    return allowed[value]
-
-
 GATE_RATIO: float = 1.10
 """Largest allowed ratio to a matched accuracy or speed baseline."""
 DIVERGENCE_FACTOR: float = 10.0
@@ -78,6 +50,7 @@ modules is a manifest id nobody can rename.
 """
 
 
+@serde(type_check=coerce, deny_unknown_fields=True)
 @dataclass(slots=True, frozen=True)
 class ImuParameters:
     """Continuous-time IMU noise model and clock offset, in the estimator's units.
@@ -100,69 +73,23 @@ class ImuParameters:
     """Added to a camera timestamp to reach the IMU clock; zero for MSD."""
 
 
-@dataclass(slots=True, frozen=True)
-class CaptureProperties:
-    """What ``/__properties/capture`` reports for a segment."""
-
-    duration_ns: int
-    """Sensor time spanned by the segment."""
-    num_frames: int
-    """Frames per camera."""
-    num_cameras: int
-    """Cameras on the rig."""
-    start_time_ns: int
-    """Device-clock time of ``video_time`` zero; add it to reach the absolute export clock."""
-
-
-@dataclass(slots=True, frozen=True)
-class LayerFingerprint:
-    """What the catalog manifest reports about one registered layer.
-
-    Pinning these turns a silent re-conversion into a failing test: the property
-    columns alone would not notice a layer that grew, shrank or changed schema.
-    """
-
-    size_bytes: int
-    """Registered size of the layer's ``.rrd``."""
-    schema_sha256: str
-    """Hex digest of the layer's schema, as ``DatasetEntry.manifest()`` reports it."""
-
-
+@serde(type_check=coerce, deny_unknown_fields=True)
 @dataclass(slots=True, frozen=True)
 class DatasetProperties:
-    """The rig geometry and VIO config shared by every segment of one dataset.
+    """The sensor model and VIO config shared by every segment of one dataset.
 
-    Calibration is byte-identical across a dataset's segments (33/33 for
-    ``msd-index``, 15/15 for ``msd-g2``), so it is recorded once per dataset and
-    asserted rather than assumed.
+    The catalog supplies geometry; the gate supplies the sensor noise model.
     """
 
     name: str
     """Catalog dataset name."""
-    entry_id: str
-    """Catalog entry id."""
-    num_cameras: int
-    """Cameras on the rig."""
-    camera_resolution_wh: tuple[tuple[int, int], ...]
-    """Per-camera ``(width, height)``, in rig order; the decoded array is ``(height, width)``."""
-    image_rotation_cw_deg: tuple[int, ...]
-    """Per-camera clockwise rotation already baked into the stored images and the calibration."""
     imu: ImuParameters
     """Noise model from the rig calibration."""
     vio_config: Path
     """Dataset configuration path, relative to the manifest."""
 
 
-@dataclass(slots=True, frozen=True)
-class GroundTruthProperties:
-    """What ``/__properties/gt`` reports for a segment, on the ``gt`` layer."""
-
-    num_poses: int
-    """Ground-truth rig poses."""
-    source: GroundTruthSource
-    """Measurement system behind those poses."""
-
-
+@serde(type_check=coerce, deny_unknown_fields=True)
 @dataclass(slots=True, frozen=True)
 class Baseline:
     """A measured reference for one profile and lane."""
@@ -185,48 +112,41 @@ class Baseline:
     """Measurement date."""
 
 
+@serde(type_check=coerce, deny_unknown_fields=True)
 @dataclass(slots=True, frozen=True)
 class ReferenceSegment:
     """One frozen segment of the reference set."""
 
     dataset_name: str
     """Catalog dataset the segment belongs to."""
-    dataset_entry_id: str
-    """Catalog entry id of that dataset."""
     segment_id: str
     """Segment id, used to locate the recording on the catalog."""
-    hold_out: bool
-    """Whether this segment is excluded from tuning."""
-    baseline: tuple[Baseline, ...]
-    """Measurements by profile and execution lane."""
     tier: Tier
     """How often the segment runs."""
     decode_path: DecodePath
     """Frozen decode path that produced the gated pixels."""
-    capture: CaptureProperties
-    """Expected capture properties."""
-    gt: GroundTruthProperties
-    """Expected ground-truth properties."""
-    layers: dict[str, LayerFingerprint]
-    """Size and schema digest per layer name (``base``, ``gt``)."""
-    imu: ImuParameters
-    """Frozen IMU noise model for this device."""
+    hold_out: bool = False
+    """Whether this segment is excluded from tuning."""
+    baseline: tuple[Baseline, ...] = ()
+    """Measurements by profile and execution lane."""
 
     def baseline_for(self, lane: Literal["cpu", "gpu"], profile: Literal["reference", "fast"]) -> Baseline | None:
         """Return the unique baseline for this execution lane and profile."""
         return next((row for row in self.baseline if row.lane == lane and row.profile == profile), None)
 
 
+@serde(type_check=coerce, deny_unknown_fields=True)
 @dataclass(slots=True, frozen=True)
 class RobocapSession:
     """One catalog session and its optional regression reference."""
 
-    reference_csv: Path | None
-    """Optional regression trajectory, relative to the package."""
     session_id: str
     """Recorder session, e.g. ``s00000015``."""
     segment_id: str
     """Segment id, used to locate the recording on the catalog."""
+
+    reference_csv: Path | None = None
+    """Optional regression trajectory, relative to the package."""
 
     @property
     def fleet_id(self) -> str:
@@ -234,6 +154,7 @@ class RobocapSession:
         return f"robocap-s{int(self.session_id.removeprefix('s'))}"
 
 
+@serde(type_check=coerce, deny_unknown_fields=True)
 @dataclass(slots=True, frozen=True)
 class RobocapReference:
     """RoboCap rig parameters. This dataset has no ground truth."""
@@ -260,7 +181,7 @@ class RobocapReference:
     """Rig calibration selected for replay, at :attr:`downscale`, relative to the package root."""
     imu: ImuParameters
     """Frozen IMU noise model, from the device's Kalibr calibration."""
-    sessions: tuple[RobocapSession, ...]
+    sessions: tuple[RobocapSession, ...] = field(rename="session")
     """The measured sessions, in manifest order."""
 
     def session(self, session_id: str) -> RobocapSession:
@@ -284,6 +205,7 @@ class RobocapReference:
         return any(session.session_id == session_id for session in self.sessions)
 
 
+@serde(type_check=coerce, deny_unknown_fields=True)
 @dataclass(slots=True, frozen=True)
 class ReferenceManifest:
     """The whole reference set."""
@@ -291,14 +213,14 @@ class ReferenceManifest:
     schema_version: int
     """Manifest layout version; bumped when a field changes meaning."""
     catalog_url: str
-    """Catalog the MSD properties were read from, and that the slow test checks against."""
-    datasets: tuple[DatasetProperties, ...]
+    """Catalog used to resolve the gate segments."""
+    datasets: tuple[DatasetProperties, ...] = field(rename="dataset")
     """Rig geometry, one entry per catalog dataset the segments come from."""
-    segments: tuple[ReferenceSegment, ...]
+    segments: tuple[ReferenceSegment, ...] = field(rename="segment")
     """The ten MSD segments, in tier-then-dataset order."""
     robocap: RobocapReference
     """The RoboCap third reference."""
-    package_root: Path
+    package_root: Path = field(skip=True, default=MANIFEST_PATH.parent, compare=False)
     """Directory the manifest was read from; fixture paths are relative to it."""
 
     def dataset(self, name: str) -> DatasetProperties:
@@ -409,123 +331,37 @@ def resolved_flow_config(
     return config, text
 
 
-def _imu(block: dict[str, Any]) -> ImuParameters:
-    """One ``[*.imu]`` table."""
-    return ImuParameters(
-        rate_hz=float(block["rate_hz"]),
-        gyro_noise_std=float(block["gyro_noise_std"]),
-        accel_noise_std=float(block["accel_noise_std"]),
-        gyro_bias_std=float(block["gyro_bias_std"]),
-        accel_bias_std=float(block["accel_bias_std"]),
-        cam_time_offset_ns=int(block["cam_time_offset_ns"]),
-    )
-
-
-def _robocap(robocap_block: dict[str, Any]) -> RobocapReference:
-    """Read the RoboCap rig and catalog session table."""
-    return RobocapReference(
-        device_id=str(robocap_block["device_id"]),
-        has_ground_truth=bool(robocap_block["has_ground_truth"]),
-        decode_path=_one_of(robocap_block["decode_path"], DECODE_PATH_BY_NAME, "decode path", "robocap"),
-        camera_names=tuple(str(name) for name in robocap_block["camera_names"]),
-        downscale=int(robocap_block["downscale"]),
-        frameset_tolerance_ns=int(robocap_block["frameset_tolerance_ns"]),
-        interpolate_accel_onto_gyro=bool(robocap_block["interpolate_accel_onto_gyro"]),
-        video_time_is_absolute=bool(robocap_block["video_time_is_absolute"]),
-        vio_config=str(robocap_block["vio_config"]),
-        calibration=str(robocap_block["calibration"]),
-        imu=_imu(robocap_block["imu"]),
-        sessions=tuple(
-            RobocapSession(
-                reference_csv=Path(block["reference_csv"]) if "reference_csv" in block else None,
-                session_id=block["session_id"],
-                segment_id=block["segment_id"],
-            )
-            for block in robocap_block["session"]
-        ),
-    )
-
-
 def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
-    """Parse the catalog manifest and validate segment identifiers and rig properties."""
-    document: dict[str, Any] = tomllib.loads(path.read_text())
-    if document.get("schema_version") != 9:
-        raise ValueError(f"{path}: expected schema_version 9")
-    datasets: list[DatasetProperties] = []
-    for entry in document["dataset"]:
-        resolutions: tuple[tuple[int, int], ...] = tuple((int(pair[0]), int(pair[1])) for pair in entry["camera_resolution_wh"])
-        rotations: tuple[int, ...] = tuple(int(value) for value in entry["image_rotation_cw_deg"])
-        if len(resolutions) != entry["num_cameras"] or len(rotations) != entry["num_cameras"]:
-            raise ValueError(f"{entry['name']}: {entry['num_cameras']} cameras but {len(resolutions)} resolutions and {len(rotations)} rotations")
-        datasets.append(
-            DatasetProperties(
-                name=entry["name"],
-                entry_id=entry["entry_id"],
-                num_cameras=int(entry["num_cameras"]),
-                camera_resolution_wh=resolutions,
-                image_rotation_cw_deg=rotations,
-                vio_config=Path(entry["vio_config"]),
-                imu=_imu(entry["imu"]),
-            )
-        )
-    segments: list[ReferenceSegment] = []
-    for entry in document["segment"]:
-        identifier: str = entry["segment_id"]
-        tier: Tier = _one_of(entry["tier"], TIER_BY_NAME, "tier", identifier)
-        decode_path: DecodePath = _one_of(entry["decode_path"], DECODE_PATH_BY_NAME, "decode path", identifier)
-        source: GroundTruthSource = _one_of(entry["gt"]["source"], GT_SOURCE_BY_NAME, "ground-truth source", identifier)
-        baselines: tuple[Baseline, ...] = tuple(Baseline(**row) for row in entry.get("baseline", []))
+    """Deserialize the gate and validate relationships and finite baselines."""
+    try:
+        parsed: ReferenceManifest = from_toml(ReferenceManifest, path.read_text())
+    except (SerdeError, TOMLDecodeError) as error:
+        raise ValueError(f"{path}: {error}") from error
+    if parsed.schema_version != 10:
+        raise ValueError(f"{path}: expected schema_version 10")
+    identifiers: set[str] = set()
+    dataset_names: set[str] = {dataset.name for dataset in parsed.datasets}
+    for segment in parsed.segments:
+        where: str = f"{path}: [segment] {segment.segment_id}"
+        if segment.segment_id in identifiers:
+            raise ValueError(f"{where}: duplicate segment ids")
+        identifiers.add(segment.segment_id)
+        if segment.dataset_name not in dataset_names:
+            raise ValueError(f"{where}: unknown dataset {segment.dataset_name!r}")
         baseline_keys: set[tuple[str, str]] = set()
-        for baseline in baselines:
+        for baseline in segment.baseline:
             key: tuple[str, str] = (baseline.profile, baseline.lane)
             if key in baseline_keys:
-                raise ValueError(f"{identifier}: duplicate baseline {key}")
+                raise ValueError(f"{where}: [segment.baseline] duplicate baseline {key}")
             baseline_keys.add(key)
-            for name, value in (("gt_rmse_cm", baseline.gt_rmse_cm), ("median_tracker_ms", baseline.median_tracker_ms)):
+            for name, value in (
+                ("gt_rmse_cm", baseline.gt_rmse_cm),
+                ("median_tracker_ms", baseline.median_tracker_ms),
+                ("framesets", baseline.framesets),
+            ):
                 if not math.isfinite(value) or value <= 0.0:
-                    raise ValueError(f"{identifier}: baseline {key} {name} must be finite and positive")
-        segments.append(
-            ReferenceSegment(
-                dataset_name=entry["dataset_name"],
-                dataset_entry_id=next(d.entry_id for d in datasets if d.name == entry["dataset_name"]),
-                segment_id=entry["segment_id"],
-                tier=tier,
-                hold_out=bool(entry.get("hold_out", False)),
-                baseline=baselines,
-                decode_path=decode_path,
-                capture=CaptureProperties(
-                    duration_ns=int(entry["capture"]["duration_ns"]),
-                    num_frames=int(entry["capture"]["num_frames"]),
-                    num_cameras=int(entry["capture"]["num_cameras"]),
-                    start_time_ns=int(entry["capture"]["start_time_ns"]),
-                ),
-                gt=GroundTruthProperties(num_poses=int(entry["gt"]["num_poses"]), source=source),
-                layers={
-                    name: LayerFingerprint(size_bytes=int(block["size_bytes"]), schema_sha256=block["schema_sha256"])
-                    for name, block in entry["layers"].items()
-                },
-                imu=next(d.imu for d in datasets if d.name == entry["dataset_name"]),
-            )
-        )
-    identifiers: list[str] = [segment.segment_id for segment in segments]
-    if len(set(identifiers)) != len(identifiers):
-        raise ValueError(f"duplicate segment ids in {path}: {sorted({i for i in identifiers if identifiers.count(i) > 1})}")
-
-    if "robocap" not in document:
-        raise ValueError(f"{path}: the manifest has no [robocap] table")
-    try:
-        robocap: RobocapReference = _robocap(document["robocap"])
-    except KeyError as missing:
-        raise ValueError(f"{path}: the [robocap] table is missing the key {missing}") from missing
-    parsed: ReferenceManifest = ReferenceManifest(
-        schema_version=int(document["schema_version"]),
-        catalog_url=document["catalog_url"],
-        datasets=tuple(datasets),
-        segments=tuple(segments),
-        robocap=robocap,
-        package_root=path.parent,
-    )
-    return parsed
+                    raise ValueError(f"{where}: [segment.baseline] {key} {name} must be finite and positive")
+    return replace(parsed, package_root=path.parent)
 
 
 @dataclass(slots=True, frozen=True)

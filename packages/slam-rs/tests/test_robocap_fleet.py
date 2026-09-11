@@ -1,13 +1,15 @@
 """RoboCap regression agreement is reported without an accuracy gate."""
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
+from serde.json import to_json
 
 from slam_rs.apis import robocap_fleet
-from slam_rs.apis.robocap_fleet import Config, RobocapRow, measure, robocap_json
+from slam_rs.apis.robocap_fleet import Config, RobocapReport, RobocapRow, measure
 from slam_rs.machine import Machine
 from slam_rs.reference import ReferenceManifest, RobocapSession
 from slam_rs.tracking import SegmentRun
@@ -36,10 +38,10 @@ def test_reference_csv_is_scored_without_a_ground_truth_gate(manifest: Reference
     assert changed.ms_per_frameset == 400.0
     assert changed.realtime_factor_15fps == pytest.approx(1 / 6)
     assert changed.realtime_factor_30fps == pytest.approx(1 / 12)
-    payload: dict[str, object] = robocap_json(changed)
+    payload: dict[str, object] = json.loads(to_json(RobocapReport.from_row(changed, "fast")))
     assert payload["ms_per_frameset"] == 400.0
     assert list(payload) == [
-        "machine", "segment_id", "framesets", "tracked", "lost", "reference_rmse_cm", "reference_max_cm", "reference_median_cm",
+        "profile", "machine", "segment_id", "framesets", "tracked", "lost", "reference_rmse_cm", "reference_max_cm", "reference_median_cm",
         "wall_s", "ms_per_frameset", "realtime_factor_15fps", "realtime_factor_30fps", "peak_rss_mb", "temp_c_before", "temp_c_after",
         "cross_platform_ate_cm", "unscored", "config_sha256",
     ]
@@ -87,4 +89,6 @@ def test_scoring_refusal_preserves_outputs_and_cost(
     assert payload["wall_s"] == 2.0
     assert payload["ms_per_frameset"] == 100.0
     assert payload["unscored"] is not None
+    assert "NaN" not in output.read_text()
+    assert all(payload[name] is None for name in ("reference_rmse_cm", "reference_max_cm", "reference_median_cm"))
     assert output.with_suffix(".csv").exists()

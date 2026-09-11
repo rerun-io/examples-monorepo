@@ -45,7 +45,7 @@ class Config:
     are in the pixels of the frame they tracked, not of a downscaled copy of it.
     """
     segment: str = SMOKE_SEGMENT
-    """Segment id from ``reference_segments.toml``; also names the IMU parameters used for ``--rrd``."""
+    """Segment id from ``gate.toml``; also names the IMU parameters used for ``--rrd``."""
     rrd: Path | None = None
     """Local base recording; retains the selected dataset configuration and IMU model."""
     gt_rrd: Path | None = None
@@ -156,7 +156,7 @@ def main(config: Config) -> None:
     imu: ImuParameters
     if listed is not None:
         vio_config, _config_text = resolved_flow_config(manifest, listed, profile=config.profile)
-        imu = listed.imu
+        imu = manifest.dataset(listed.dataset_name).imu
     else:
         vio_config = _core.VioConfig.from_json(manifest.vio_config_text(dataset_name, profile=config.profile))  # refuses an unknown dataset
         imu = manifest.dataset(dataset_name).imu

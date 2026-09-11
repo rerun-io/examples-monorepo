@@ -528,3 +528,21 @@ def test_no_hostile_argument_reaches_python_as_a_panic(
     assert flow.process(2, good).num_tracks(0) > 0
     # And an estimator that still tracks: nothing above moved its clock.
     assert vio.track(1, good).status == _core.VioStatus.NeedMoreImu
+
+
+def test_calibration_accessors_copy_camera_geometry_and_imu(camera: CameraFactory, imu: ImuCalib) -> None:
+    cameras: tuple[CameraCalib, ...] = (camera(0, 0.0), camera(1, 0.12))
+    calibration: _core.Calibration = _core.Calibration.from_catalog(cameras, imu)
+    assert calibration.camera_models == ["kb4", "kb4"]
+    assert calibration.intrinsics == [[100.0, 100.0, 100.0, 100.0, 0.0, 0.0, 0.0, 0.0]] * 2
+    assert calibration.resolution == [(200, 200), (200, 200)]
+    np.testing.assert_array_equal(calibration.imu_T_cam[1], cameras[1].imu_T_cam)
+    assert calibration.imu_T_cam[1].dtype == np.float64
+    calibration.imu_T_cam[1][0, 3] = 9.0
+    assert calibration.imu_T_cam[1][0, 3] == 0.12
+    assert calibration.imu_update_rate == 1000.0
+    assert calibration.gyro_noise_std == [0.000282] * 3
+    assert calibration.accel_noise_std == [0.016] * 3
+    assert calibration.gyro_bias_std == [0.0001] * 3
+    assert calibration.accel_bias_std == [0.001] * 3
+    assert calibration.cam_time_offset_ns == 0

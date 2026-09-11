@@ -9,6 +9,7 @@ test is the feed. The rig's own calibration arithmetic and the two real-recordin
 tests are in ``test_robocap_probe``.
 """
 
+import os
 from dataclasses import replace
 
 import numpy as np
@@ -121,6 +122,7 @@ def test_pairing_an_empty_channel_says_which_one() -> None:
         pair_accel_onto_gyro(np.array([], dtype=np.int64), np.zeros((0, 3)), np.array([1], dtype=np.int64), np.ones((1, 3)))
     with pytest.raises(ValueError, match="0 accel"):
         pair_accel_onto_gyro(np.array([1], dtype=np.int64), np.ones((1, 3)), np.array([], dtype=np.int64), np.zeros((0, 3)))
+@pytest.mark.skipif(os.environ.get("PIXI_DEV_MODE") != "1", reason="beartype instrumentation requires PIXI_DEV_MODE=1")
 def test_the_pairing_boundary_is_typed() -> None:
     """float32 acceleration is a different array; beartype refuses it rather than upcasting."""
     with pytest.raises(BeartypeException):

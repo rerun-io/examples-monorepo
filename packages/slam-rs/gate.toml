@@ -1,20 +1,13 @@
-# Catalog replay set and measured ground-truth baselines.
-# video_time is relative on MSD; add capture.start_time_ns for the device clock.
-# RoboCap video_time is already absolute. Its camera offset is applied to frames.
-# The decode path is frozen: changing grayscale conversion moves ATE by about 5 cm.
-# IMU noise densities and random walks come from the MSD rigs' calibration.
-# smoke: MIO10/MGO09; release: MIO07/MGO07/MIO14; listed: the other five.
-# hold_out marks segments excluded from tuning. Baselines are keyed by profile/lane.
+# Rig sensor models absent from the catalog, and the tracking gate.
+# Tiers, hold-outs and lane/profile baselines define the gate.
+# RoboCap carries rig clock, camera and decoding quirks plus one regression trajectory.
+# IMU noise densities and random walks come from device calibration.
 
-schema_version = 9
+schema_version = 10
 catalog_url = "rerun+http://dgx-spark:9988"
 
 [[dataset]]
 name = "msd-index"
-entry_id = "18D2C8A5D1E6B2217c6d7f028ca47884"
-num_cameras = 2
-camera_resolution_wh = [[960, 960], [960, 960]]
-image_rotation_cw_deg = [0, 0]
 vio_config = "configs/msdmi_config.json"
 
 [dataset.imu]
@@ -27,10 +20,6 @@ cam_time_offset_ns = 0
 
 [[dataset]]
 name = "msd-g2"
-entry_id = "18D2CC37925CE0376257837ab3439f34"
-num_cameras = 4
-camera_resolution_wh = [[480, 640], [480, 640], [480, 640], [480, 640]]
-image_rotation_cw_deg = [90, 90, 270, 270]
 vio_config = "configs/msdmg_config.json"
 
 [dataset.imu]
@@ -43,10 +32,6 @@ cam_time_offset_ns = 0
 
 [[dataset]]
 name = "msd-odyssey"
-entry_id = "18D2CC386BA138886257837ab3439f47"
-num_cameras = 2
-camera_resolution_wh = [[640, 480], [640, 480]]
-image_rotation_cw_deg = [0, 0]
 vio_config = "configs/msdmo_config.json"
 
 [dataset.imu]
@@ -64,23 +49,9 @@ tier = "smoke"
 hold_out = false
 decode_path = "cpu_gray8_dav1d_1thread"
 
-[segment.capture]
-duration_ns = 7646127329
-num_frames = 412
-num_cameras = 2
-start_time_ns = 10433867587166
 
-[segment.gt]
-num_poses = 6998
-source = "lighthouse"
 
-[segment.layers.base]
-size_bytes = 5943287
-schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c9610064132"
 
-[segment.layers.gt]
-size_bytes = 547545
-schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [[segment.baseline]]
 profile = "fast"
@@ -109,23 +80,9 @@ tier = "release"
 hold_out = false
 decode_path = "cpu_gray8_dav1d_1thread"
 
-[segment.capture]
-duration_ns = 76009472425
-num_frames = 4095
-num_cameras = 2
-start_time_ns = 11352949516251
 
-[segment.gt]
-num_poses = 69600
-source = "lighthouse"
 
-[segment.layers.base]
-size_bytes = 60519130
-schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c9610064132"
 
-[segment.layers.gt]
-size_bytes = 6059638
-schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [[segment.baseline]]
 profile = "fast"
@@ -154,23 +111,9 @@ tier = "listed"
 hold_out = false
 decode_path = "cpu_gray8_dav1d_1thread"
 
-[segment.capture]
-duration_ns = 113411079341
-num_frames = 6119
-num_cameras = 2
-start_time_ns = 10723479976823
 
-[segment.gt]
-num_poses = 103789
-source = "lighthouse"
 
-[segment.layers.base]
-size_bytes = 100094801
-schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c9610064132"
 
-[segment.layers.gt]
-size_bytes = 9180481
-schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [[segment.baseline]]
 profile = "fast"
@@ -199,23 +142,9 @@ tier = "release"
 hold_out = false
 decode_path = "cpu_gray8_dav1d_1thread"
 
-[segment.capture]
-duration_ns = 410547359554
-num_frames = 22117
-num_cameras = 2
-start_time_ns = 25356462262424
 
-[segment.gt]
-num_poses = 374397
-source = "lighthouse"
 
-[segment.layers.base]
-size_bytes = 328435938
-schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c9610064132"
 
-[segment.layers.gt]
-size_bytes = 32687369
-schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [[segment.baseline]]
 profile = "fast"
@@ -244,23 +173,9 @@ tier = "listed"
 hold_out = false
 decode_path = "cpu_gray8_dav1d_1thread"
 
-[segment.capture]
-duration_ns = 585634144799
-num_frames = 31577
-num_cameras = 2
-start_time_ns = 8359447525796
 
-[segment.gt]
-num_poses = 535910
-source = "lighthouse"
 
-[segment.layers.base]
-size_bytes = 594406063
-schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c9610064132"
 
-[segment.layers.gt]
-size_bytes = 47783314
-schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [[segment.baseline]]
 profile = "fast"
@@ -289,23 +204,9 @@ tier = "smoke"
 hold_out = false
 decode_path = "cpu_gray8_dav1d_1thread"
 
-[segment.capture]
-duration_ns = 3578417141
-num_frames = 107
-num_cameras = 4
-start_time_ns = 6298736610267
 
-[segment.gt]
-num_poses = 3264
-source = "mocap"
 
-[segment.layers.base]
-size_bytes = 2679587
-schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26ba"
 
-[segment.layers.gt]
-size_bytes = 276750
-schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [[segment.baseline]]
 profile = "fast"
@@ -334,23 +235,9 @@ tier = "release"
 hold_out = false
 decode_path = "cpu_gray8_dav1d_1thread"
 
-[segment.capture]
-duration_ns = 53146662319
-num_frames = 1596
-num_cameras = 4
-start_time_ns = 5422527461389
 
-[segment.gt]
-num_poses = 48585
-source = "mocap"
 
-[segment.layers.base]
-size_bytes = 40448125
-schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26ba"
 
-[segment.layers.gt]
-size_bytes = 4234733
-schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [[segment.baseline]]
 profile = "fast"
@@ -379,23 +266,9 @@ tier = "listed"
 hold_out = true
 decode_path = "cpu_gray8_dav1d_1thread"
 
-[segment.capture]
-duration_ns = 96108306337
-num_frames = 2887
-num_cameras = 4
-start_time_ns = 9635655498771
 
-[segment.gt]
-num_poses = 87936
-source = "mocap"
 
-[segment.layers.base]
-size_bytes = 71019722
-schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26ba"
 
-[segment.layers.gt]
-size_bytes = 7752549
-schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [[segment.baseline]]
 profile = "fast"
@@ -424,23 +297,9 @@ tier = "listed"
 hold_out = false
 decode_path = "cpu_gray8_dav1d_1thread"
 
-[segment.capture]
-duration_ns = 141649952216
-num_frames = 4255
-num_cameras = 4
-start_time_ns = 9948743944192
 
-[segment.gt]
-num_poses = 129603
-source = "mocap"
 
-[segment.layers.base]
-size_bytes = 117658002
-schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26ba"
 
-[segment.layers.gt]
-size_bytes = 11475535
-schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [[segment.baseline]]
 profile = "fast"
@@ -469,23 +328,9 @@ tier = "listed"
 hold_out = true
 decode_path = "cpu_gray8_dav1d_1thread"
 
-[segment.capture]
-duration_ns = 124349056730
-num_frames = 3735
-num_cameras = 4
-start_time_ns = 9395346713678
 
-[segment.gt]
-num_poses = 113774
-source = "mocap"
 
-[segment.layers.base]
-size_bytes = 94639693
-schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26ba"
 
-[segment.layers.gt]
-size_bytes = 10042232
-schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
 [[segment.baseline]]
 profile = "fast"

@@ -70,7 +70,7 @@ def test_an_unlisted_catalog_segment_takes_its_datasets_parameters(manifest: Ref
     with pytest.raises(_Opened):
         main(Config(rr_config=RerunTyroConfig(headless=True), segment=UNLISTED, catalog=CATALOG))
     assert seen == [CatalogSegment(url=CATALOG, dataset_name="msd-g2", segment_id=UNLISTED)]
-    assert parameters == [next(s.imu for s in manifest.segments if s.dataset_name == "msd-g2")]
+    assert parameters == [manifest.dataset("msd-g2").imu]
 
 
 def test_an_unlisted_segment_uses_the_default_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
