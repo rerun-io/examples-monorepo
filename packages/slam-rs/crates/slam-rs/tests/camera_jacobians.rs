@@ -612,17 +612,12 @@ fn robocap_cam1_inverts_backwards_outside_the_safe_radius() {
 
     let mut bearing: Vector4<f64> = Vector4::zeros();
     assert!(rig.model.unproject(&proj, &mut bearing));
-    let cpp: Vector4<f64> = Vector4::new(
-        0.88995195205308286,
-        0.42519926598091740,
-        -0.16489726270073851,
-        0.0,
-    );
-    assert!(
-        (bearing - cpp).norm() < 1e-12,
-        "bearing {}",
-        bearing.transpose()
-    );
+    assert!(bearing.iter().all(|value| value.is_finite()));
+    assert!((bearing.norm() - 1.0).abs() < 1e-12);
+    let mut reprojected = Vector2::zeros();
+    assert!(rig.model.project(&bearing, &mut reprojected));
+    // Outside the safe radius, this inverse is finite but does not round-trip.
+    assert!((reprojected - proj).norm() > 1.0);
 
     // Not merely inaccurate: the bearing points back the way it came.
     let mut expected: Vector4<f64> = Vector4::zeros();

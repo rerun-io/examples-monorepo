@@ -40,7 +40,7 @@ const MAX_SOLVE_ATTEMPTS: u32 = 3;
 /// the top of [`SqrtKeypointVio::optimize`] stays one line.
 #[derive(Debug, Clone)]
 pub(super) struct OptimizeScratch<S: LieScalar> {
-    /// The dense reduction's accumulator, subtree partials and leaf transpose.
+    /// The dense accumulator and per-landmark transpose scratch.
     pub(super) dense: DenseHbWorkspace<S>,
     /// Reused double-precision storage for the scaled, damped normal matrix.
     pub(super) solve: DMatrix<f64>,
@@ -238,40 +238,45 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             lqr.perform_qr()?;
             timings.linearize_ns += duration_ns(mark);
 
-            // the inner loop shares `it` with the outer one.
+            // A rejected trial restores the state and leaves the factors unchanged.
+            // Assemble once; retries change only damping and solve scratch.
+            let mark: std::time::Instant = std::time::Instant::now();
+            let (h, b) = lqr.get_dense_h_b_into(ba, &inputs, dense)?;
+            // The reduced system is the ordering's: every `(idx, size)` in
+            // `aom` is a block of it, and every frame of the two maps has
+            // an entry, because `aom` was built from those maps above and
+            // nothing since has added or removed a frame. The three loops
+            // below index it under that invariant.
+            debug_assert_eq!(h.nrows(), aom.total_size());
+
+            if config.vio_fix_long_term_keyframes {
+                let weight: S = S::from_literal(FIXED_KEYFRAME_WEIGHT);
+                for t_ns in ltkfs {
+                    let Some((idx, size)) = aom.get(*t_ns) else {
+                        // Skip the unexpected missing entry.
+                        log::warn!(
+                            "[UNEXPECTED] long-term keyframe {t_ns} ns is not in the ordering"
+                        );
+                        continue;
+                    };
+                    for row in idx..(idx + size) {
+                        for col in 0..h.ncols() {
+                            h[(row, col)] = S::zero();
+                        }
+                        b[row] = S::zero();
+                    }
+                    for row in idx..(idx + POSE_SIZE) {
+                        h[(row, row)] = weight;
+                    }
+                }
+            }
+
+            timings.solver_ns += duration_ns(mark);
+
+            // The inner loop shares `it` with the outer one.
             let mut backtrack: i32 = 0;
             while it <= config.vio_max_iterations && termination.is_none() {
                 let mark: std::time::Instant = std::time::Instant::now();
-                let (h, b) = lqr.get_dense_h_b_into(ba, &inputs, dense)?;
-                // The reduced system is the ordering's: every `(idx, size)` in
-                // `aom` is a block of it, and every frame of the two maps has
-                // an entry, because `aom` was built from those maps above and
-                // nothing since has added or removed a frame. The three loops
-                // below index it under that invariant.
-                debug_assert_eq!(h.nrows(), aom.total_size());
-
-                if config.vio_fix_long_term_keyframes {
-                    let weight: S = S::from_literal(FIXED_KEYFRAME_WEIGHT);
-                    for t_ns in ltkfs {
-                        let Some((idx, size)) = aom.get(*t_ns) else {
-                            // Skip the unexpected missing entry.
-                            log::warn!(
-                                "[UNEXPECTED] long-term keyframe {t_ns} ns is not in the ordering"
-                            );
-                            continue;
-                        };
-                        for row in idx..(idx + size) {
-                            for col in 0..h.ncols() {
-                                h[(row, col)] = S::zero();
-                            }
-                            b[row] = S::zero();
-                        }
-                        for row in idx..(idx + POSE_SIZE) {
-                            h[(row, row)] = weight;
-                        }
-                    }
-                }
-
                 let (inc_valid, solve_attempts): (bool, u32) =
                     damped_solve(h, b, damping, solve, increment);
                 // Continue with the non-finite increment after exhausting retries.

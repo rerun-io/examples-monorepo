@@ -10,10 +10,7 @@ use nalgebra::{DMatrix, DVector};
 
 use crate::lie::LieScalar;
 use crate::marg::MargError;
-use crate::qr::{
-    BlockSpan, apply_householder_on_the_left_block, apply_householder_on_the_left_vec,
-    make_householder,
-};
+use crate::qr::{apply_householder_on_the_left, make_householder};
 
 /// What the marginalization helper returns: the reduced system over the kept
 /// variables, as a square-root prior.
@@ -113,22 +110,14 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
             q2jp[(base, k)] = beta;
             // the reflection acts on the trailing block that starts at row
             // `base`, column `k + 1`.
-            apply_householder_on_the_left_block(
-                &mut q2jp,
-                BlockSpan {
-                    row_start: base,
-                    rows: remaining_rows,
-                    col_start: k + 1,
-                    cols: remaining_cols,
-                },
+            apply_householder_on_the_left(
+                q2jp.view_mut((base, k + 1), (remaining_rows, remaining_cols)),
                 &essential[..remaining_rows],
                 h_coeff,
             );
             // the same reflection on the residual, in lockstep.
-            apply_householder_on_the_left_vec(
-                &mut q2r,
-                base,
-                remaining_rows,
+            apply_householder_on_the_left(
+                q2r.rows_mut(base, remaining_rows),
                 &essential[..remaining_rows],
                 h_coeff,
             );
@@ -176,6 +165,46 @@ mod tests {
 
     use super::*;
     use proptest::prelude::*;
+
+    // Generate distance from the threshold, so shrinking cannot cross it.
+    macro_rules! rank_boundary_properties {
+        ($name:ident, $scalar:ty) => {
+            proptest! {
+                #[test]
+                fn $name(distance in 0.01f64..0.49, above in any::<bool>(), residual in -4.0f64..4.0) {
+                    let threshold = <$scalar>::EPSILON.sqrt();
+                    let pivot = threshold * (1.0 + if above { distance as $scalar } else { -distance as $scalar });
+                    // Marginalize one direction and its duplicate. Keep a zero
+                    // column, the boundary pivot, and another direction plus its duplicate.
+                    let mut j = DMatrix::<$scalar>::zeros(6, 6);
+                    j[(0, 0)] = 2.0;
+                    j[(0, 1)] = 4.0;
+                    j[(1, 3)] = pivot;
+                    j[(2, 4)] = 3.0;
+                    j[(2, 5)] = 6.0;
+                    let r = DVector::from_vec(vec![1.0, residual as $scalar, 2.0, 0.0, 0.0, 0.0]);
+                    let reduced = marginalize_helper_sqrt_to_sqrt(j, r, &(2..6).collect(), &(0..2).collect()).unwrap();
+                    prop_assert_eq!(reduced.h.nrows(), 1 + usize::from(above));
+                    let h = reduced.h.transpose() * &reduced.h;
+                    let b = reduced.h.transpose() * &reduced.b;
+                    prop_assert_eq!(h[(0, 0)], 0.0);
+                    let expected = if above { pivot * pivot } else { 0.0 };
+                    prop_assert!((h[(1, 1)] - expected).abs() <= 16.0 * <$scalar>::EPSILON * pivot * pivot);
+                    let expected_b = if above { pivot * residual as $scalar } else { 0.0 };
+                    prop_assert!((b[1] - expected_b).abs() <= 16.0 * <$scalar>::EPSILON * pivot * (1.0 + residual.abs() as $scalar));
+                    for (row, col, value) in [(2, 2, 9.0), (2, 3, 18.0), (3, 2, 18.0), (3, 3, 36.0)] {
+                        prop_assert!((h[(row, col)] - value).abs() < 64.0 * <$scalar>::EPSILON * value);
+                    }
+                    prop_assert!((b[2] - 6.0).abs() < 64.0 * <$scalar>::EPSILON * 6.0);
+                    prop_assert!((b[3] - 12.0).abs() < 64.0 * <$scalar>::EPSILON * 12.0);
+                    let expected_residual = 4.0 + if above { (residual as $scalar).powi(2) } else { 0.0 };
+                    prop_assert!((reduced.b.norm_squared() - expected_residual).abs() < 128.0 * <$scalar>::EPSILON * (1.0 + expected_residual));
+                }
+            }
+        };
+    }
+    rank_boundary_properties!(rank_boundary_f32, f32);
+    rank_boundary_properties!(rank_boundary_f64, f64);
 
     fn index_sets(keep: &[usize], marg: &[usize]) -> (BTreeSet<usize>, BTreeSet<usize>) {
         (
