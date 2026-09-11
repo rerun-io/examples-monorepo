@@ -101,6 +101,13 @@ gets a `@serde` dataclass that states what the data is: a file on disk, an HTTP 
 a dataset's own JSON / YAML / pickle, a catalog row, a model's output dictionary. Fields
 are checked on the way in; the rest of the code holds typed objects, never dicts.
 
+- **The catalog comes first.** If data is registered on the Rerun catalog, it is read
+  from the catalog (`CatalogClient`, the dataloader, `rerun-catalog-queries` skill) and
+  never re-parsed from the raw files it was converted from, and it is never copied into a
+  document we own. pyserde has two places in that flow: at ingest, where a third-party
+  format is read once, typed, and written into the catalog; and for what the catalog
+  does not carry (our gate files, IMU noise models, run reports). A `[[dataset]]` fact
+  that the catalog can answer does not belong in a TOML file.
 - **Records yes, streams no.** A record you read whole goes through pyserde, arrays
   included: calibrations, hand models, keypoint rows, reports, whole-sequence pose
   tables. A stream you iterate does not: video frames, depth maps, masks, point clouds
