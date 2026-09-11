@@ -292,6 +292,42 @@ class Calibration:
     def resolution(self) -> list[tuple[int, int]]:
         """Each camera's ``(width, height)`` in pixels, in rig order."""
 
+    @property
+    def camera_models(self) -> list[Literal["pinhole", "kb4", "pinhole-radtan8", "ds", "eucm", "ucm"]]:
+        """Camera model names in rig order."""
+
+    @property
+    def intrinsics(self) -> list[list[float]]:
+        """fx, fy, cx, cy, then model-specific parameters per camera."""
+
+    @property
+    def imu_T_cam(self) -> list[Float64[ndarray, "4 4"]]:
+        """Copied camera-to-IMU matrices in rig order."""
+
+    @property
+    def imu_update_rate(self) -> float:
+        """IMU rate in Hz."""
+
+    @property
+    def gyro_noise_std(self) -> list[float]:
+        """Gyroscope noise density per axis."""
+
+    @property
+    def accel_noise_std(self) -> list[float]:
+        """Accelerometer noise density per axis."""
+
+    @property
+    def gyro_bias_std(self) -> list[float]:
+        """Gyroscope bias random walk per axis."""
+
+    @property
+    def accel_bias_std(self) -> list[float]:
+        """Accelerometer bias random walk per axis."""
+
+    @property
+    def cam_time_offset_ns(self) -> int:
+        """Camera clock offset in nanoseconds."""
+
     def __repr__(self) -> str: ...
 
 class FlowFrame:

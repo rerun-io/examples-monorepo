@@ -805,6 +805,78 @@ impl Calibration {
             .collect()
     }
 
+    /// Camera model names in rig order.
+    #[getter]
+    fn camera_models(&self) -> Vec<&'static str> {
+        self.inner
+            .intrinsics
+            .iter()
+            .map(|lens| lens.name())
+            .collect()
+    }
+
+    /// Per-camera parameters: fx, fy, cx, cy, then model-specific terms.
+    #[getter]
+    fn intrinsics(&self) -> Vec<Vec<f64>> {
+        self.inner
+            .intrinsics
+            .iter()
+            .map(|lens| lens.params())
+            .collect()
+    }
+
+    /// Camera-to-IMU transforms, copied as row-major float64[4, 4] arrays.
+    #[getter(imu_T_cam)]
+    fn imu_t_cam<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyArray2<f64>>>> {
+        self.inner
+            .t_i_c
+            .iter()
+            .map(|pose| {
+                let matrix = pose.matrix();
+                let values: Vec<f64> = (0..4)
+                    .flat_map(|row| (0..4).map(move |col| matrix[(row, col)]))
+                    .collect();
+                values.to_pyarray(py).reshape((4, 4))
+            })
+            .collect()
+    }
+
+    /// IMU sample rate in Hz.
+    #[getter]
+    fn imu_update_rate(&self) -> f64 {
+        self.inner.imu_update_rate
+    }
+
+    /// Gyroscope noise density per axis.
+    #[getter]
+    fn gyro_noise_std(&self) -> Vec<f64> {
+        self.inner.gyro_noise_std.as_slice().to_vec()
+    }
+
+    /// Accelerometer noise density per axis.
+    #[getter]
+    fn accel_noise_std(&self) -> Vec<f64> {
+        self.inner.accel_noise_std.as_slice().to_vec()
+    }
+
+    /// Gyroscope bias random walk per axis.
+    #[getter]
+    fn gyro_bias_std(&self) -> Vec<f64> {
+        self.inner.gyro_bias_std.as_slice().to_vec()
+    }
+
+    /// Accelerometer bias random walk per axis.
+    #[getter]
+    fn accel_bias_std(&self) -> Vec<f64> {
+        self.inner.accel_bias_std.as_slice().to_vec()
+    }
+
+    /// Offset added to camera timestamps to reach the IMU clock.
+    #[getter]
+    fn cam_time_offset_ns(&self) -> i64 {
+        self.inner.cam_time_offset_ns
+    }
+
     fn __repr__(&self) -> String {
         format!("Calibration(camera_count={})", self.inner.camera_count())
     }
