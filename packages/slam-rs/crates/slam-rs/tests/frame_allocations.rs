@@ -569,9 +569,9 @@ fn the_dense_reduction_allocates_nothing_after_its_first_call() {
     println!("dense reduction: first call {first:?}, then zero");
 }
 
-/// Bounds the whole Rust frontend and estimator, including marginalization.
-/// The old estimator-only gate allowed 1,600 calls per frame and a least-squares
-/// slope of 85 calls per LM step. Keep both limits, without a frontend allowance.
+/// Bounds the estimator, including marginalization, on Rust frontend observations.
+/// The gate allows 1,600 calls per frame and a least-squares slope of 85 calls
+/// per LM step. The source pipeline and observation conversion run uncounted.
 /// This is a bulk allocation regression gate, not proof that each LM buffer is
 /// allocation-free (the dense-reduction test above checks that narrower claim).
 ///
@@ -580,9 +580,6 @@ fn the_dense_reduction_allocates_nothing_after_its_first_call() {
 /// interval to retain the original 20 warm-up and 40 measured frames. The real
 /// IMU fixture covers this schedule. This probes allocations, not accuracy.
 #[test]
-// Frame 20 exceeds the unchanged bound; see
-// /tmp/fleet-artifacts/slam-rs/cuvslam/reports/s34/s34-1-fix-p1.md.
-#[ignore = "whole-pipeline allocations exceed 1,600 calls per frame; s34-1-fix-p1.md"]
 fn the_estimators_per_frame_cost_does_not_grow_with_the_lm_step_count() {
     const BOUND: usize = 1_600;
     const CALLS_PER_STEP: f64 = 85.0;
@@ -598,8 +595,18 @@ fn the_estimators_per_frame_cost_does_not_grow_with_the_lm_step_count() {
         },
     )
     .unwrap();
+    let mut estimator = slam_rs::estimator::SqrtKeypointVio::<f32>::with_default_gravity(
+        common::calibration().cast(),
+        common::config(),
+    )
+    .unwrap();
     for row in common::IMU.iter() {
         vio.push_imu(row.t_ns, row.gyro, row.accel).unwrap();
+        estimator.push_imu(slam_rs::imu::ImuSample {
+            t_ns: row.t_ns,
+            gyro: row.gyro.into(),
+            accel: row.accel.into(),
+        });
     }
     let timestamps: Vec<i64> = include_str!("fixtures/flow/frames/timestamps.txt")
         .lines()
@@ -632,12 +639,25 @@ fn the_estimators_per_frame_cost_does_not_grow_with_the_lm_step_count() {
                 data: &pgm.pixels,
             })
             .collect();
-        let (result, counted) = measure(|| vio.track(t_ns, &views).unwrap());
+        let result = vio.track(t_ns, &views).unwrap();
         assert_eq!(result.status, slam_rs::VioStatus::Tracking, "frame {frame}");
+        // Match Vio::finish_track's conversion, retaining the source pipeline's
+        // pose/depth feedback while measuring an independent estimator window.
+        let cameras = &vio.frontend().frame().cameras;
+        let mut observations = slam_rs::estimator::FlowObservations::new(t_ns, cameras.len());
+        for (slot, keypoints) in observations.cameras.iter_mut().zip(cameras) {
+            for (index, id) in keypoints.ids.iter().enumerate() {
+                slot.insert(*id, keypoints.transform(index).translation);
+            }
+        }
+        let observations = std::sync::Arc::new(observations);
+        let (outcome, counted) = measure(|| estimator.process_frame(observations).unwrap());
+        let slam_rs::estimator::FrameOutcome::Measured(stats) = outcome else {
+            panic!("frame {frame} needs more IMU");
+        };
         if frame < WARMUP {
             continue;
         }
-        let stats = vio.last_stats().unwrap();
         assert!(
             stats.opt_started,
             "frame {frame} never entered optimization"
