@@ -288,35 +288,24 @@ const SVD_MAX_ITERATIONS: usize = 64;
 /// `:103-107`, the null space comes from the last column of `V`, and the sign is
 /// flipped when the result points away from `f0` (`:113`).
 ///
-/// The caller decides what to do with the answer: basalt accepts it only when
-/// every coefficient is finite and `0 < inv_dist < 3`
-/// (`sqrt_keypoint_vio.cpp:534`), i.e. no further than 1/3 m.
+/// The caller accepts finite results with `0 < inv_dist < 3`, so the point
+/// must be farther than 1/3 m. Exactly parallel bearings carry no finite depth
+/// and are refused before decomposition.
 ///
-/// **Deviations from the C++.** Two, both about what a refusal is.
-///
-/// The 4x4 null space comes from [`nalgebra::linalg::SVD`] rather than from a
-/// port of Eigen's `JacobiSVD` sweep, and it is computed in `f64` whatever `S`
-/// is: the DLT rows of a `Vio<f32>` are differences of same-order products, so
-/// the smallest singular value is the one quantity in the whole estimator that
-/// is built out of cancellation, and its vector is the answer. Promoting costs
-/// one 4x4 solve per new landmark and nothing else. The decomposition is
-/// `try_new_unordered`, with the smallest singular value found by an explicit
-/// scan: the sorting constructor panics on a NaN singular value, and the
-/// unsorted one lets the non-finite check below stay the only refusal path.
-///
-/// On a non-finite input Eigen sets `InvalidInput` and returns
-/// with `m_matrixV` never written (`JacobiSVD.h:721-727`); basalt then reads it,
-/// which is undefined behaviour. There is no value to reproduce, so the port
-/// returns `None` — for that, for a decomposition that does not converge inside
-/// its iteration budget, and for a homogeneous vector whose spatial part has no
-/// direction to normalise. All three used to come back as an all-NaN or
-/// part-infinite vector that the acceptance gate above then rejected, which
-/// made a number the control flow.
+/// Compute the DLT null vector with nalgebra SVD in f64, including for f32
+/// inputs, to reduce cancellation error. Return None for invalid inputs,
+/// non-convergence, or a homogeneous vector with no spatial direction.
 pub fn triangulate<S: LieScalar>(
     f0: &Vector3<S>,
     f1: &Vector3<S>,
     t_0_1: &Se3<S>,
 ) -> Option<Vector4<S>> {
+    // Compare bearings in frame 0. An exact zero cross product is a point at
+    // infinity; SVD roundoff must not turn it into a tiny positive inverse depth.
+    let f1_in_0 = t_0_1.rotation * *f1;
+    if f0.cross(&f1_in_0).iter().all(|value| *value == S::zero()) {
+        return None;
+    }
     // `P1.setIdentity()`, `P2 = T_0_1.inverse().matrix3x4()` (`ba_base.h:98-100`).
     let p1: nalgebra::Matrix3x4<S> = {
         let mut m: nalgebra::Matrix3x4<S> = nalgebra::Matrix3x4::zeros();
@@ -352,9 +341,6 @@ pub fn triangulate<S: LieScalar>(
     // A DLT whose largest singular value is zero carries no constraint at all —
     // two zero bearing vectors build a zero `A` — so *every* direction is a null
     // direction and the one the decomposition happens to return is fabricated.
-    // Eigen's sweep refused this by leaving `V` the identity and handing back its
-    // last column, `[0, 0, 0, 1]`, whose spatial part then failed to normalise;
-    // the rank is the thing that was being tested, so it is tested directly.
     if svd.singular_values.max() <= 0.0 {
         return None;
     }
@@ -391,7 +377,7 @@ pub fn triangulate<S: LieScalar>(
 // ─── the Huber-weighted cost of one observation ───────────────────────────
 
 /// The weight and the cost `computeError` adds for one observation
-/// (`ba_base.cpp:179-182`), in the C++'s operation order.
+/// (`ba_base.cpp:179-182`), with a fixed row order.
 ///
 /// ```text
 /// huber_weight = e < huber_thresh ? 1 : huber_thresh / e
@@ -961,22 +947,8 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
     }
 }
 
-/// `lhsᵀ (½ H delta + b)` over the first `n` coefficients: the prior's cost at
-/// the current state, which all four prior-error sites compute.
-///
-/// The `lhs` is what tells the two forms apart. Square-root
-/// (`ba_base.cpp:431`, `:461`) writes `deltaᵀ Hᵀ (½ H delta + b)`, and `deltaᵀ
-/// Hᵀ` and `H delta` are the same coefficients, so `h_delta` is passed as both
-/// — Eigen evaluates the `ColMajor` `gemv` twice and gets the same bits.
-/// Hessian form (`:437`, `:463`) writes `deltaᵀ (½ H delta + b)`, so the `lhs`
-/// is `delta` itself.
-///
-/// The outer `(1×n)·(n×1)` is Eigen's `InnerProduct` in all four. Its fold used
-/// to be a port of Eigen's packet tree, because the value enters `error_total`
-/// whose difference across an increment is the LM accept test and D44 wanted
-/// that difference to be the C++'s; since S33 it is a left fold over an
-/// iterator, which materialises nothing — the summand is formed one coefficient
-/// at a time from the three vectors, as it was before.
+/// Evaluate the prior cost as `lhsᵀ (0.5 h_delta + b)`.
+/// The fixed left fold keeps repeated calls deterministic.
 fn prior_error<S: LieScalar>(
     lhs: &DVector<S>,
     h_delta: &DVector<S>,
@@ -1241,17 +1213,15 @@ mod tests {
     }
 
     #[test]
-    fn triangulate_at_infinity_has_zero_inverse_distance() {
+    fn triangulate_at_infinity_is_refused() {
         let t_0_1: Se3<f64> = Se3::new(So3::identity(), Vector3::new(0.1, 0.0, 0.0));
         let f0: Vector3<f64> = Vector3::new(0.0, 0.0, 1.0);
         let f1: Vector3<f64> = Vector3::new(0.0, 0.0, 1.0);
-        let result: Vector4<f64> = triangulate(&f0, &f1, &t_0_1).unwrap();
-        assert_abs_diff_eq!(result[3], 0.0, epsilon = 1e-12);
+        // S34: refuse the degenerate observation before SVD roundoff reaches the gate.
+        assert!(triangulate(&f0, &f1, &t_0_1).is_none());
     }
 
-    /// A refusal is `None`, not four NaNs: Eigen leaves `m_matrixV`
-    /// uninitialized on `InvalidInput` and basalt reads it, so there is no
-    /// value to reproduce here — only a landmark that does not exist.
+    /// Invalid triangulation inputs are refused explicitly.
     #[test]
     fn a_non_finite_input_is_rejected_instead_of_read_uninitialized() {
         let t_0_1: Se3<f64> = Se3::new(So3::identity(), Vector3::new(0.1, 0.0, 0.0));

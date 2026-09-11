@@ -4,7 +4,7 @@ use nalgebra::{DMatrix, DVector};
 
 use super::LinearizeError;
 use super::landmark_block::{DenseHbScratch, LandmarkBlock};
-use super::reduce::{Reducible, deterministic_reduce};
+use super::reduce::deterministic_reduce;
 use crate::lie::LieScalar;
 
 /// One subtree's partial `(H, b)` of the dense reduction, and the columns it holds.
@@ -34,7 +34,7 @@ struct DensePartial<S: LieScalar> {
     columns: Vec<usize>,
     /// The same set again as `(start, length)` runs of consecutive columns.
     ///
-    /// [`Reducible::reset`] and [`Reducible::join`] between them are the whole
+    /// `reset_sized` and addition between them are the whole
     /// cost of the reduction's interior — 54 joins and 54 resets over 55
     /// landmark blocks — and both touch `columns` x `columns` of a column-major
     /// square. Walking `columns` reaches every coefficient through a `usize`
@@ -62,7 +62,7 @@ impl<S: LieScalar> DensePartial<S> {
 
     /// Back to the identity for an `n`-column ordering, reusing the buffers.
     ///
-    /// [`Reducible::reset`] is the cheaper reset and is what the reduction's own
+    /// `reset_sized` is the cheaper reset and is what the reduction's own
     /// subtree buffers take; this one zeroes the whole square, because the
     /// accumulator the reduction hands back is written by three more parties —
     /// the IMU blocks, the marginalization prior and the caller that pins a
@@ -143,75 +143,6 @@ impl<S: LieScalar> DensePartial<S> {
     }
 }
 
-impl<S: LieScalar> Reducible for DensePartial<S> {
-    /// A second `opt_size`-wide accumulator, which is what C++'s split
-    /// constructor allocates per task (`:513-542`).
-    fn identity_like(&self) -> Self {
-        Self::zeros(self.b.nrows())
-    }
-
-    /// Back to the identity, zeroing only what was written.
-    fn reset(&mut self) {
-        let stride: usize = self.h.nrows();
-        {
-            let h: &mut [S] = self.h.as_mut_slice();
-            for &(first_col, cols) in &self.runs {
-                for column in first_col..(first_col + cols) {
-                    let base: usize = column * stride;
-                    for &(first_row, rows) in &self.runs {
-                        h[(base + first_row)..(base + first_row + rows)].fill(S::zero());
-                    }
-                }
-            }
-        }
-        {
-            let b: &mut [S] = self.b.as_mut_slice();
-            for &(first, length) in &self.runs {
-                b[first..(first + length)].fill(S::zero());
-            }
-        }
-        self.columns.clear();
-        self.runs.clear();
-        self.written.fill(false);
-    }
-
-    /// `H_ += b.H_; b_ += b.b_` (`:532-535`), over the right side's columns.
-    fn join(&mut self, right: &Self) {
-        debug_assert_eq!(self.h.nrows(), right.h.nrows());
-        let stride: usize = self.h.nrows();
-        {
-            let destination: &mut [S] = self.h.as_mut_slice();
-            let source: &[S] = right.h.as_slice();
-            for &(first_col, cols) in &right.runs {
-                for column in first_col..(first_col + cols) {
-                    let base: usize = column * stride;
-                    for &(first_row, rows) in &right.runs {
-                        let lo: usize = base + first_row;
-                        let target: &mut [S] = &mut destination[lo..(lo + rows)];
-                        for (slot, value) in target.iter_mut().zip(source[lo..(lo + rows)].iter()) {
-                            *slot += *value;
-                        }
-                    }
-                }
-            }
-        }
-        {
-            let destination: &mut [S] = self.b.as_mut_slice();
-            let source: &[S] = right.b.as_slice();
-            for &(first, length) in &right.runs {
-                let target: &mut [S] = &mut destination[first..(first + length)];
-                for (slot, value) in target
-                    .iter_mut()
-                    .zip(source[first..(first + length)].iter())
-                {
-                    *slot += *value;
-                }
-            }
-        }
-        self.mark(right.columns.iter().copied());
-    }
-}
-
 /// The buffers [`super::LinearizationAbsQR::get_dense_h_b_into`] reduces in, held
 /// across calls and across frames.
 ///
@@ -221,7 +152,7 @@ impl<S: LieScalar> Reducible for DensePartial<S> {
 /// MIO10 frame. The Levenberg-Marquardt loop calls it **once per inner step** —
 /// seven times on that frame — and every one of those buffers is either zeroed
 /// on entry (`DensePartial::reset_sized`) or reset by the reduction before a
-/// leaf writes it (`Reducible::reset`, which restores exactly `+0.0` over the
+/// leaf writes it (`reset_sized`, which restores exactly `+0.0` over the
 /// columns that were written), so a buffer that persists is the same
 /// arithmetic on the same values.
 ///
@@ -233,7 +164,6 @@ pub struct DenseHbWorkspace<S: LieScalar> {
     accumulator: DensePartial<S>,
     /// One subtree partial per recursion depth, as `deterministic_reduce` wants
     /// them.
-    depths: Vec<Option<DensePartial<S>>>,
     /// The per-block transpose buffer of [`LandmarkBlock::add_dense_h_b`].
     leaf: DenseHbScratch<S>,
 }
@@ -242,7 +172,6 @@ impl<S: LieScalar> Default for DenseHbWorkspace<S> {
     fn default() -> Self {
         Self {
             accumulator: DensePartial::zeros(0),
-            depths: Vec::new(),
             leaf: DenseHbScratch::default(),
         }
     }
@@ -251,12 +180,6 @@ impl<S: LieScalar> Default for DenseHbWorkspace<S> {
 impl<S: LieScalar> DenseHbWorkspace<S> {
     /// Every buffer at the identity for an `n`-column ordering.
     fn prepare(&mut self, n: usize) {
-        if self.accumulator.b.nrows() != n {
-            // A subtree partial is only ever built by `identity_like` off the
-            // accumulator, so dropping them here is what keeps the two agreeing
-            // on the ordering's width.
-            self.depths.clear();
-        }
         self.accumulator.reset_sized(n);
     }
 }
@@ -269,15 +192,10 @@ impl<S: LieScalar> DenseHbWorkspace<S> {
         blocks: &[LandmarkBlock<S>],
     ) -> Result<(&mut DMatrix<S>, &mut DVector<S>), LinearizeError> {
         self.prepare(opt_size);
-        let DenseHbWorkspace {
-            accumulator,
-            depths,
-            leaf,
-        } = self;
+        let DenseHbWorkspace { accumulator, leaf } = self;
         deterministic_reduce::<DensePartial<S>, LinearizeError>(
             blocks.len(),
             accumulator,
-            depths,
             &mut |i: usize, acc: &mut DensePartial<S>| {
                 let block: &LandmarkBlock<S> =
                     blocks.get(i).ok_or(LinearizeError::LayoutOverflow)?;
@@ -413,7 +331,7 @@ mod tests {
         // The join and the reset go over `columns`, so the fallback has to have
         // marked the whole width it wrote.
         assert_eq!(partial.columns, (0..n).collect::<Vec<usize>>());
-        partial.reset();
+        partial.reset_sized(partial.b.nrows());
         assert!(
             partial
                 .h

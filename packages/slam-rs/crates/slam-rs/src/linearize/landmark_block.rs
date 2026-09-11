@@ -11,13 +11,13 @@ use nalgebra::{DMatrix, DVector, Matrix2x3, Matrix2x6, Matrix3, Vector2, Vector3
 
 use crate::ba_base::{LinearizePointOut, linearize_point};
 use crate::camera::CameraEnum;
-use crate::eigen::qr::{
-    ColumnRedux, JacobiRotation, apply_householder_on_the_left, apply_rotation_on_the_left,
-    make_givens, make_householder,
-};
 use crate::landmark::Landmark;
 use crate::lie::{LieScalar, c};
 use crate::linearize::{LinearizeError, RelPoseLin};
+use crate::qr::{
+    JacobiRotation, apply_householder_on_the_left, apply_rotation_on_the_left, make_givens,
+    make_householder,
+};
 use crate::types::{AbsOrderMap, LandmarkId, POSE_SIZE, TimeCamId};
 
 /// `LandmarkBlock<Scalar>::Options` (`landmark_block.hpp:31-48`).
@@ -134,10 +134,8 @@ struct BlockObservation {
 /// num_cols    = res_idx + 1, asserted % 4 == 0 (:92-96)
 /// ```
 ///
-/// **Storage order.** C++'s buffer is `Eigen::RowMajor` (`:530`); nalgebra's
-/// `DMatrix` is column major. Nothing here depends on the layout — every loop
-/// is written out — but it is why `makeHouseholder`'s reduction is a sequential
-/// fold rather than a vectorised one (see `crate::eigen::qr`).
+/// Storage is column major. Each reflection updates views of the existing
+/// matrix using a preallocated unit-axis buffer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LandmarkBlock<S: LieScalar> {
     /// `storage` (`:530`): `[ J_p | pad | J_l | r ]`, `num_rows` x `num_cols`.
@@ -176,9 +174,6 @@ pub struct LandmarkBlock<S: LieScalar> {
     num_cols: usize,
     /// `state` (`:547`).
     state: LandmarkBlockState,
-    /// The `tempVector1` of `performQRHouseholder` (`:442`), preallocated: the
-    /// per-observation and per-reflection paths must not allocate.
-    work_row: Vec<S>,
     /// The `tempVector2` of `:443`, the essential part of the reflector.
     work_essential: Vec<S>,
 }
@@ -355,7 +350,6 @@ impl<S: LieScalar> LandmarkBlock<S> {
             num_rows,
             num_cols,
             state: LandmarkBlockState::Allocated,
-            work_row: vec![S::zero(); num_cols],
             work_essential: vec![S::zero(); num_rows],
         })
     }
@@ -536,18 +530,14 @@ impl<S: LieScalar> LandmarkBlock<S> {
                 self.lm_idx + k,
                 k,
                 remaining_rows,
-                // `storage` stands for an `Eigen::RowMajor` matrix (`:530`), so
-                // its columns are strided and reduce sequentially.
-                ColumnRedux::Strided,
                 &mut self.work_essential,
             );
             apply_householder_on_the_left(
                 &mut self.storage,
                 k,
                 remaining_rows,
-                &self.work_essential[..remaining_rows.saturating_sub(1)],
+                &self.work_essential[..remaining_rows],
                 tau,
-                &mut self.work_row,
             );
         }
     }
@@ -623,10 +613,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
             }
         }
 
-        // `abs(Q1Jl.determinant())` (`:263`). `TriangularView::determinant()` is
-        // `m_matrix.diagonal().prod()`, and that diagonal is strided, so Eigen
-        // takes the scalar unroller's `Length / 2` split — `d0 * (d1 * d2)` — in
-        // both precisions (`Redux.h:98-108`).
+        // The product of the triangular diagonal detects a singular landmark.
         let det: S = (q1jl[(0, 0)] * (q1jl[(1, 1)] * q1jl[(2, 2)])).abs();
         if det == S::zero() {
             // `:264-266`, trap 11: skip this landmark, keep the rest.
@@ -656,9 +643,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
             rhs[r] = self.storage[(r, self.res_idx)] + acc;
         }
 
-        // `-Q1Jl.solve(...)`: the upper-triangular back substitution, in Eigen's
-        // order — the dot product of the row's tail against the already solved
-        // tail of the solution, then one division.
+        // Back-substitute from the last row, then negate the solution.
         let mut inc: Vector3<S> = Vector3::zeros();
         for r in (0..3usize).rev() {
             let mut acc: S = S::zero();
@@ -774,11 +759,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
     /// sum over the observed columns only, for the one caller that owns its
     /// destination and can prove the rest is the identity.
     ///
-    /// Both sums run over the block's rows in increasing order, one output
-    /// coefficient at a time. Eigen calls its general matrix product here, whose
-    /// blocking may associate a long sum differently; over `num_rows - 3` rows —
-    /// at most a few tens — the difference is at the last bits and the fixture
-    /// measures it.
+    /// Sum each coefficient over rows in increasing order.
     pub fn add_dense_h_b(
         &self,
         h: &mut DMatrix<S>,
@@ -819,7 +800,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
     /// Neither is free: [`Landmark::add_observation`] accepts a non-finite
     /// keypoint, the Huber weight carries the NaN past the Jacobian checks of
     /// [`Self::linearize_landmark`], and the Householder reflections of
-    /// `crate::eigen::qr`'s reflections act on whole rows, which spreads it into columns the
+    /// `crate::qr`'s reflections act on whole rows, which spreads it into columns the
     /// block never observed. One pass over the `Q₂` rows decides both, and a
     /// block that fails takes the full-width path so those NaNs are written
     /// (decision D32: NaN handling mirrors basalt).

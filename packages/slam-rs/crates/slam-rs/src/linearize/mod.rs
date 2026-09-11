@@ -25,21 +25,8 @@
 //! `H.diagonal() * lambda` of the dense solve instead (`:1415-1417`), which is
 //! the estimator's business.
 //!
-//! **Determinism.** basalt uses `tbb::parallel_deterministic_reduce` at four
-//! sites where the summation order changes the answer
-//! (`linearization_abs_qr.cpp:262`, `:307`, `:354`, `:550`). Decision D31 asked
-//! for a fixed order at each; what it did not say is *which*, and a sequential
-//! fold is the wrong one. `parallel_deterministic_reduce` over
-//! `blocked_range(0, n)` with grainsize 1 splits at `begin + size / 2` until a
-//! range holds one element and then joins up a balanced tree, so four elements
-//! reduce as `(x0 + x1) + (x2 + x3)`. In `f32` with `[2²⁴, 1, 1, 1]` that is
-//! `16777218` where a fold gives `16777216`. The `reduce` module reproduces
-//! the deterministic fixed-shape tree, not a left fold. All four sites go
-//! through it: [`LinearizationAbsQR::linearize_problem`],
-//! [`LinearizationAbsQR::back_substitute`] and
-//! [`LinearizationAbsQR::get_dense_h_b`] — the fourth, `getJp_diag2` (`:354`),
-//! is not ported (D68). A rayon version has to reproduce the same tree;
-//! `par_chunks` with an ordered merge does not.
+//! **Determinism.** Reductions fold in landmark order, independent of the
+//! Rayon thread count. Repeated inputs produce bit-identical outputs.
 
 mod abs_qr;
 mod dense_hb;
@@ -64,17 +51,8 @@ use crate::types::{CamId, FrameId, LandmarkId};
 /// One Householder reflection: reduce `storage.col(col).segment(start, len)` and
 /// apply the reflection to every column of `storage.block(start, 0, len, ncols)`.
 ///
-/// This is one step of `performQRHouseholder`
-/// (`landmark_block_abs_dynamic.hpp:445-453`), with Eigen's `makeHouseholder`
-/// and `applyHouseholderOnTheLeft` arithmetic ported rather than nalgebra's
-/// (see `crate::eigen::qr` for why). It is a **test-facing** primitive: the
-/// only caller is `tests/linearize_reference.rs`, where the ported `test_qr.cpp`
-/// builds a full QR out of it. (`marg/helper.rs` drives the same Eigen
-/// primitive over a wider matrix, but calls `make_householder` and
-/// `apply_householder_on_the_left_block` directly.)
-///
-/// Allocates two scratch vectors per call; the landmark block preallocates
-/// instead, because it runs three of these per landmark per iteration.
+/// Uses nalgebra's unit-axis Householder primitive. This public test seam
+/// allocates scratch; landmark blocks reuse their preallocated axis buffer.
 pub fn reflect_column<S: LieScalar>(
     storage: &mut DMatrix<S>,
     col: usize,
@@ -103,21 +81,9 @@ pub fn reflect_column<S: LieScalar>(
     if len == 0 {
         return Ok(());
     }
-    let mut essential: Vec<S> = vec![S::zero(); len - 1];
-    let mut work: Vec<S> = vec![S::zero(); storage.ncols()];
-    // `performQRHouseholder`'s own reduction: the landmark block's `storage` is
-    // `Eigen::RowMajor`, so the column is strided (see `crate::eigen::qr`).
-    let (tau, _beta) = crate::eigen::qr::make_householder(
-        storage,
-        col,
-        start,
-        len,
-        crate::eigen::qr::ColumnRedux::Strided,
-        &mut essential,
-    );
-    crate::eigen::qr::apply_householder_on_the_left(
-        storage, start, len, &essential, tau, &mut work,
-    );
+    let mut essential: Vec<S> = vec![S::zero(); len];
+    let (tau, _beta) = crate::qr::make_householder(storage, col, start, len, &mut essential);
+    crate::qr::apply_householder_on_the_left(storage, start, len, &essential, tau);
     Ok(())
 }
 
