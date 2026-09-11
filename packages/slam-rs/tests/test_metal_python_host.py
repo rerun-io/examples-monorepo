@@ -6,8 +6,8 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from fixture_types import RigFactory, TextureFactory
-from jaxtyping import UInt8
+from fixture_types import IMU_PERIOD_NS, RigFactory, TextureFactory, gravity_batch
+from jaxtyping import Int64, UInt8
 from numpy import ndarray
 
 from slam_rs import _core
@@ -45,8 +45,8 @@ def run_probe(calibration_json: str, image_path: Path) -> None:
     image: UInt8[ndarray, "h w"] = np.load(image_path, allow_pickle=False)
     for step in range(12):
         t_ns: int = step * 50_000_000
-        for sample_ns in range(t_ns, t_ns + 50_000_000, 1_000_000):
-            vio.push_imu(sample_ns, [0.0, 0.0, 0.0], [0.0, 0.0, 9.81])
+        samples: Int64[ndarray, " n_samples"] = np.arange(t_ns, t_ns + 50_000_000, IMU_PERIOD_NS, dtype=np.int64)
+        vio.push_imu_batch(samples, *gravity_batch(samples))
         left: UInt8[ndarray, "h w"] = np.ascontiguousarray(np.roll(image, step, axis=1))
         right: UInt8[ndarray, "h w"] = np.ascontiguousarray(np.roll(image, step + 1, axis=1))
         vio.track(t_ns, [left, right])
