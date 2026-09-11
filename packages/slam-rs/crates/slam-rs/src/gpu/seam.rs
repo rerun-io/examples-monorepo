@@ -84,7 +84,7 @@ thread_local! {
 pub static LAUNCH: Meter = Meter {
     value: &LAUNCH_VALUE,
 };
-/// `create_from_slice`: a logical allocation and a host-to-device write.
+/// An owned byte copy, a logical allocation and a host-to-device write.
 pub static UPLOAD: Meter = Meter {
     value: &UPLOAD_VALUE,
 };

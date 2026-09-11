@@ -110,6 +110,24 @@ fn the_gpu_pyramid_is_bit_exact_with_the_cpu() {
     assert_levels_equal(&cpu, &gpu, "960x960");
 }
 
+#[test]
+fn prepared_gpu_pixels_survive_reusing_the_source_image() {
+    let mut image = textured_image(96, 96, 0.0, 0.0);
+    let mut builder = GpuPyramidBuilder::new(gpu_client().unwrap(), &[[0.0, 0.0]]);
+    let mut pyramid = builder.allocate(96, 96, 1).unwrap();
+    let expected = image.clone();
+    builder
+        .prepare_images(std::slice::from_ref(&image))
+        .unwrap();
+    image
+        .fill_from_u8_strided(&vec![0; 96 * 96], 96, 96, 96)
+        .unwrap();
+    builder.build(0, &image, &mut pyramid).unwrap();
+    let mut actual = ImageU16::default();
+    pyramid.copy_level_into(0, &mut actual).unwrap();
+    assert_eq!(actual.data(), expected.data());
+}
+
 /// A pyramid of level 0 alone is refused rather than allocated empty.
 ///
 /// With `optical_flow_levels = 0` the odd buffer holds no level, and

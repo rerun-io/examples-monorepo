@@ -115,7 +115,13 @@ pub(super) fn upload<R: cubecl::prelude::Runtime>(
     bytes: &[u8],
 ) -> cubecl::server::Handle {
     reserve(client, 1);
-    seam::UPLOAD.measure(|| client.create_from_slice(bytes))
+    seam::UPLOAD.measure(|| {
+        // Copy directly into aligned owned storage; create_from_slice copies
+        // through two Vecs before allocating this same aligned storage.
+        let mut data = cubecl::bytes::Bytes::from_elems(Vec::<u8>::new());
+        data.extend_from_byte_slice(bytes);
+        client.create(data)
+    })
 }
 
 /// A failed device read as a typed error, with the runtime's own reason logged.
@@ -188,11 +194,8 @@ pub(super) fn read_blocking<R: cubecl::prelude::Runtime>(
 
 /// One frame on the device, and how many pixels it holds.
 ///
-/// `create_from_slice` is CubeCL 0.10's only host-to-device write, it allocates
-/// a buffer the size of the slice, and it copies the payload **twice** on the
-/// host before the bus sees it (`slice.to_vec()`, then
-/// `Bytes::from_bytes_vec(data.to_vec())` inside `do_create_from_slices`). So
-/// the upload is exactly as long as the frame and nothing more: an unstrided
+/// The upload owns one aligned copy of the slice before submitting it to
+/// CubeCL. It is exactly as long as the frame and nothing more: an unstrided
 /// frame goes straight out of the caller's buffer with no staging copy at all,
 /// and only a strided one — dav1d's shape — is repacked row by row into
 /// `scratch`, which the caller owns so the per-frame path never allocates.

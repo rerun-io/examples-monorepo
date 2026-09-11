@@ -67,6 +67,7 @@ thread_local! {
     static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
     static REALLOCATIONS: Cell<usize> = const { Cell::new(0) };
     static DEALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    static ALLOCATED_BYTES: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Add one to `counter`, but only on a thread that is measuring.
@@ -90,6 +91,9 @@ struct Counting;
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         count(&ALLOCATIONS);
+        if COUNTING.try_with(Cell::get).unwrap_or(false) {
+            let _ = ALLOCATED_BYTES.try_with(|slot| slot.set(slot.get() + layout.size()));
+        }
         unsafe { System.alloc(layout) }
     }
 
@@ -100,6 +104,9 @@ unsafe impl GlobalAlloc for Counting {
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         count(&REALLOCATIONS);
+        if COUNTING.try_with(Cell::get).unwrap_or(false) {
+            let _ = ALLOCATED_BYTES.try_with(|slot| slot.set(slot.get() + new_size));
+        }
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
@@ -131,6 +138,7 @@ fn measure<T>(body: impl FnOnce() -> T) -> (T, Allocations) {
     ALLOCATIONS.set(0);
     REALLOCATIONS.set(0);
     DEALLOCATIONS.set(0);
+    ALLOCATED_BYTES.set(0);
     COUNTING.set(true);
     let value: T = body();
     COUNTING.set(false);
@@ -140,6 +148,31 @@ fn measure<T>(body: impl FnOnce() -> T) -> (T, Allocations) {
         deallocations: DEALLOCATIONS.get(),
     };
     (value, counted)
+}
+
+/// Preparing an image owns one pixel copy, with room for small queue metadata.
+#[cfg(feature = "gpu-wgpu")]
+#[test]
+fn preparing_a_gpu_image_allocates_only_one_pixel_copy() {
+    use slam_rs::gpu::{GpuPyramidBuilder, GpuRuntime, gpu_client};
+    use slam_rs::pyramid::PyramidBuilder;
+
+    let image = ImageU16::from_u8_strided(&vec![173; 960 * 960], 960, 960, 960).unwrap();
+    let mut builder: GpuPyramidBuilder<GpuRuntime> =
+        GpuPyramidBuilder::new(gpu_client().unwrap(), &[[0.0, 0.0]]);
+    builder
+        .prepare_images(std::slice::from_ref(&image))
+        .unwrap();
+    measure(|| {
+        builder
+            .prepare_images(std::slice::from_ref(&image))
+            .unwrap()
+    });
+    let bytes = ALLOCATED_BYTES.get();
+    assert!(
+        bytes < 960 * 960 * size_of::<u16>() + 16_384,
+        "allocated {bytes} bytes"
+    );
 }
 
 // ── the frontend under test ───────────────────────────────────────────────
