@@ -96,11 +96,49 @@ arguments or hide a single call should usually be inlined at the call site.
 
 ## Serialization
 
-- pyserde for documents, never for bulk data. A JSON/TOML/YAML document that Python owns gets a `@serde` dataclass and `from_json`/`from_toml`; no hand-rolled `json.loads` plus key indexing. Arrays, trajectories, images and catalog columns never go through pyserde: npz, Parquet, Rerun, CSV.
-- Rust owns its formats. Documents produced or consumed by a Rust extension (slam-rs calibration, VioConfig) are parsed by the Rust serde derive; Python asks the extension for typed accessors instead of parsing `to_json()` output.
-- Decorator order and options: `@serde(type_check=coerce, deny_unknown_fields=True)` above `@dataclass(frozen=True, slots=True)`; coerce because `from_toml` does not widen `30` to `30.0`; deny unknown fields so a typo in a hand-edited file is an error. Cross-field checks go in `__post_init__` or a post-load validator; prefix pyserde errors with the file name. Literal errors may name the allowed values without the field name.
-- Properties do not serialise: a report with computed columns gets a flat report dataclass at the write boundary. Unscored numbers are `X | None` written as `null`, never NaN (orjson).
-- `tomli-w` and `orjson` are declared beside every `pyserde` declaration, including `common` (the conda `pyserde` ships no extras; without `tomli-w` even `from_toml` fails to import; `orjson` makes JSON fast). Arrays inside documents carry jaxtyping annotations; bare `np.ndarray` loses its dtype on round trip.
+pyserde is the door through which data enters Python. Anything that crosses a boundary
+gets a `@serde` dataclass that states what the data is: a file on disk, an HTTP response,
+a dataset's own JSON / YAML / pickle, a catalog row, a model's output dictionary. Fields
+are checked on the way in; the rest of the code holds typed objects, never dicts.
+
+- **Records yes, streams no.** A record you read whole goes through pyserde, arrays
+  included: calibrations, hand models, keypoint rows, reports, whole-sequence pose
+  tables. A stream you iterate does not: video frames, depth maps, masks, point clouds
+  and trajectories live in their own containers (npz/npy, Parquet/Arrow, Rerun) and
+  pyserde carries only the metadata that names them. The test is the role of the data,
+  not its size.
+- **Arrays carry jaxtyping with an explicit dtype** (`Float32[ndarray, "n 3"]`, not
+  `Float[...]` or bare `ndarray`): that is what makes pyserde enforce dtype and shape on
+  load; generic `Float`/`Int` do not fix the width and a bare `ndarray` comes back as
+  float64.
+- **Formats for files we own:** JSON when a program writes it, TOML when a person edits
+  it. YAML and pickle only when a third party hands us that format (the MANO pickles are
+  model-asset adapters, not a precedent).
+- **Strictness is per schema.** Files we own: `deny_unknown_fields=True`, and
+  `type_check=coerce` for hand-written TOML (`from_toml` does not widen `30` to `30.0`;
+  machine-written JSON stays strict). Third-party formats we read partially: unknown
+  fields allowed, their schema is not ours to police.
+- **Validation lives at the door.** Types come from the class. Cross-field rules go in
+  `__post_init__` (pyserde runs it on load). Rules that need context live in one loader
+  that wraps `SerdeError` (and the parser's own error, e.g. `TOMLDecodeError`) into a
+  `ValueError` naming the source. Callers do not re-validate. Never catch a bare
+  `Exception` around a decode: beartype violations must propagate.
+- **Mechanics.** `@serde(...)` above `@dataclass(frozen=True, slots=True)`. Properties
+  do not serialise: a report with computed columns gets a flat report dataclass at the
+  write boundary. In our JSON outputs an unscored number is `X | None` written as `null`,
+  never NaN (orjson); inputs that legitimately carry non-finite cells keep their custom
+  field decoder. `tomli-w` and `orjson` are declared beside every `pyserde` declaration
+  (`common` and friends): without `tomli-w` even `from_toml` fails to import.
+- **Rust owns its formats.** Documents a Rust extension produces or consumes (slam-rs
+  `Calibration`, `VioConfig`; gsplat's scene files) are parsed by the Rust serde derive;
+  Python asks the extension for typed accessors instead of parsing `to_json()` output.
+  The one sanctioned text-level exception is `slam_rs.reference.profiled_config_text`,
+  which overlays profile keys onto the Rust-owned config JSON as text so the resolved
+  bytes stay hashable.
+- **Rollout.** No big-bang: convert a hand-rolled `json.load`/`yaml.safe_load` + dict
+  indexing site when you are already editing that file, plus one deliberate pass per
+  package when it has an owner. The full guidance with examples is in the
+  `python-conventions` skill.
 
 ## Rerun Tools
 
