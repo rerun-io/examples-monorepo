@@ -371,12 +371,9 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
 
     /// [`Self::get_dense_h_b`] into buffers the caller keeps.
     ///
-    /// The reduced system is the workspace's own accumulator, handed back by
-    /// reference: the Levenberg-Marquardt loop builds one per inner step and
-    /// throws it away, so nothing wants an owned copy. The caller may write
-    /// into both — pins a fixed keyframe's
-    /// rows in place — because the next call zeroes the whole square rather
-    /// than only the columns the reduction recorded.
+    /// The workspace lends its accumulator to the caller, which may pin fixed
+    /// keyframe rows in place. The next assembly clears the whole system.
+    /// LM retries reuse it until the next linearization.
     pub fn get_dense_h_b_into<'w>(
         &self,
         estimator: &BundleAdjustmentBase<S>,
