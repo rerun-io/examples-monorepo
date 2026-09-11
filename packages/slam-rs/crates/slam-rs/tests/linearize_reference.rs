@@ -1,8 +1,7 @@
 //! Linearization invariants checked against independent dense algebra.
 //! The dense Schur reference builds `[J_p | J_l]` and eliminates landmarks
 //! explicitly. Compare objective, Hessian, gradient, back-substitution and model
-//! cost decrease. Also check square-root reconstruction identities and QR versus
-//! Cholesky up to row signs, including rank-deficient QR cases.
+//! cost decrease. Also check square-root reconstruction identities.
 //!
 //! The seeded problem has six frames, two kb4 cameras and ten hosted landmarks
 //! per frame, observed across all images. Deterministic noise and fixed robust
@@ -461,83 +460,6 @@ fn vo_marg_sqrt_linearization() {
     let b_diff: f64 = (q2jp.transpose() * &q2r - &b).norm();
     assert!(h_diff <= 1e-3, "H differs by {h_diff}");
     assert!(b_diff <= 1e-5, "b differs by {b_diff}");
-}
-
-/// `QRvsLLT` and `QRvsLLTRankDef`, as the assertion they
-/// demonstrate: for a `10 x 6` `J`, the `R` of a Householder QR and the `Lᵀ` of
-/// the Cholesky of `JᵀJ` agree row by row up to a sign.
-///
-/// The QR is built from this port's own [`slam_rs`] Householder primitives, so
-/// the test is on the port, not on nalgebra.
-#[test]
-fn householder_qr_matches_the_cholesky_of_the_normal_equations() {
-    for (case, rank_deficient) in [("full rank", false), ("rank deficient", true)] {
-        let mut rng: Rng = Rng::new(0xfeed_1234);
-        let mut j: DMatrix<f64> = DMatrix::zeros(10, 6);
-        for r in 0..10 {
-            for c in 0..6 {
-                j[(r, c)] = rng.symmetric();
-            }
-        }
-        if rank_deficient {
-            // `J.col(2) = J.col(4)`.
-            let col4: DVector<f64> = j.column(4).into_owned();
-            j.set_column(2, &col4);
-        }
-
-        // The port has no standalone QR — the landmark block eliminates exactly
-        // three columns — so the reflections are driven here the way
-        // `performQRHouseholder` drives them.
-        let r_qr: DMatrix<f64> = householder_r(&j);
-        let ata: DMatrix<f64> = j.transpose() * &j;
-
-        if rank_deficient {
-            // For singular `JᵀJ`, QR still yields triangular `R` with `RᵀR = JᵀJ`.
-            let rtr: DMatrix<f64> = r_qr.transpose() * &r_qr;
-            assert!(
-                (&rtr - &ata).norm() <= 1e-9 * ata.norm(),
-                "{case}: RᵀR != JᵀJ"
-            );
-            continue;
-        }
-
-        let llt = ata.clone().cholesky().expect("full rank");
-        let u: DMatrix<f64> = llt.l().transpose();
-        for row in 0..6 {
-            // Up to the sign of the row, which is all a QR is free in.
-            let sign: f64 = if r_qr[(row, row)] * u[(row, row)] < 0.0 {
-                -1.0
-            } else {
-                1.0
-            };
-            for col in 0..6 {
-                let got: f64 = sign * r_qr[(row, col)];
-                assert!(
-                    (got - u[(row, col)]).abs() <= 1e-9 * u.norm(),
-                    "{case}: R[{row},{col}] = {got}, Lᵀ = {}",
-                    u[(row, col)]
-                );
-            }
-        }
-    }
-}
-
-/// The upper-triangular factor of a Householder QR, driven exactly as
-/// `performQRHouseholder` drives it, through the port's own primitives.
-fn householder_r(j: &DMatrix<f64>) -> DMatrix<f64> {
-    let rows: usize = j.nrows();
-    let cols: usize = j.ncols();
-    let mut work: DMatrix<f64> = j.clone();
-    for k in 0..cols {
-        slam_rs::linearize::reflect_column(&mut work, k, k, rows - k).unwrap();
-    }
-    let mut r: DMatrix<f64> = DMatrix::zeros(cols, cols);
-    for row in 0..cols {
-        for col in row..cols {
-            r[(row, col)] = work[(row, col)];
-        }
-    }
-    r
 }
 
 // ── properties ─────────────────────────────────────────────────────────────

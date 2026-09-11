@@ -18,55 +18,11 @@ pub use landmark_block::{
     DenseHbScratch, LandmarkBlock, LandmarkBlockOptions, LandmarkBlockState, compute_error_weight,
 };
 
-use nalgebra::{DMatrix, Matrix4, Matrix6};
+use nalgebra::{Matrix4, Matrix6};
 
 use crate::ba_base::BaError;
 use crate::lie::LieScalar;
 use crate::types::{CamId, FrameId, LandmarkId};
-
-/// One Householder reflection: reduce `storage.col(col).segment(start, len)` and
-/// apply the reflection to every column of `storage.block(start, 0, len, ncols)`.
-///
-/// Uses nalgebra's unit-axis Householder primitive. This public test seam
-/// allocates scratch; landmark blocks reuse their preallocated axis buffer.
-pub fn reflect_column<S: LieScalar>(
-    storage: &mut DMatrix<S>,
-    col: usize,
-    start: usize,
-    len: usize,
-) -> Result<(), LinearizeError> {
-    // This is a public boundary, so the range arithmetic is checked rather than
-    // assumed: `start + len` on a caller-supplied `start` wraps in release and
-    // would then pass a bounds test it should fail (decision D32).
-    let end: usize = start
-        .checked_add(len)
-        .ok_or(LinearizeError::LayoutOverflow)?;
-    if col >= storage.ncols() || end > storage.nrows() {
-        // The error carries the raw inputs. Summarising them — `end.max(col + 1)`
-        // was the first attempt — puts arithmetic on the *diagnostic* path,
-        // where `col = usize::MAX` then panics on its way to reporting that
-        // `col = usize::MAX` is out of range.
-        return Err(LinearizeError::ReflectionOutOfRange {
-            col,
-            start,
-            len,
-            rows: storage.nrows(),
-            cols: storage.ncols(),
-        });
-    }
-    if len == 0 {
-        return Ok(());
-    }
-    let mut essential: Vec<S> = vec![S::zero(); len];
-    let (active, _beta) = crate::qr::make_householder(storage, col, start, len, &mut essential);
-    let cols = storage.ncols();
-    crate::qr::apply_householder_on_the_left(
-        storage.view_mut((start, 0), (len, cols)),
-        &essential,
-        active,
-    );
-    Ok(())
-}
 
 /// `RelPoseLin<Scalar>` : one (host, target) pair's
 /// relative pose and the two 6x6 Jacobians of that pose against the two absolute
@@ -93,53 +49,6 @@ impl<S: LieScalar> Default for RelPoseLin<S> {
             d_rel_d_h: Matrix6::zeros(),
             d_rel_d_t: Matrix6::zeros(),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-
-    use super::*;
-    use nalgebra::DMatrix;
-
-    /// `reflect_column` is public, so its range arithmetic is checked: with
-    /// `start = usize::MAX` the sum wraps to a small number that would pass a
-    /// naive bounds test and then index out of range (decision D32).
-    #[test]
-    fn reflect_column_refuses_a_range_that_overflows() {
-        let mut m: DMatrix<f64> = DMatrix::identity(1, 1);
-        assert_eq!(
-            reflect_column(&mut m, 0, usize::MAX, 2).unwrap_err(),
-            LinearizeError::LayoutOverflow
-        );
-        // Out of range without overflowing is refused too.
-        assert!(matches!(
-            reflect_column(&mut m, 0, 0, 4).unwrap_err(),
-            LinearizeError::ReflectionOutOfRange { .. }
-        ));
-        assert!(matches!(
-            reflect_column(&mut m, 3, 0, 1).unwrap_err(),
-            LinearizeError::ReflectionOutOfRange { .. }
-        ));
-        // A column index at the top of the range is out of range like any
-        // other, and reporting it must not overflow on the way: the summarising
-        // `expected: end.max(col + 1)` this used to build panicked here.
-        assert_eq!(
-            reflect_column(&mut m, usize::MAX, 0, 1).unwrap_err(),
-            LinearizeError::ReflectionOutOfRange {
-                col: usize::MAX,
-                start: 0,
-                len: 1,
-                rows: 1,
-                cols: 1,
-            }
-        );
-        // A zero-length reflection is the identity, not an error: it is what a
-        // block with no rows left asks for.
-        let before: DMatrix<f64> = m.clone();
-        reflect_column(&mut m, 0, 0, 0).unwrap();
-        assert_eq!(m, before);
     }
 }
 
@@ -256,24 +165,6 @@ pub enum LinearizeError {
         frame: FrameId,
         /// The size the ordering gave it.
         size: usize,
-    },
-    /// [`reflect_column`] was asked for a column or a row range the matrix does
-    /// not have. The raw inputs are carried through rather than summarised, so
-    /// building the error cannot itself overflow.
-    #[error(
-        "a reflection of column {col}, rows {start}..+{len}, does not fit a {rows} x {cols} matrix"
-    )]
-    ReflectionOutOfRange {
-        /// The column asked for.
-        col: usize,
-        /// The first row of the range.
-        start: usize,
-        /// Its length.
-        len: usize,
-        /// Rows the matrix has.
-        rows: usize,
-        /// Columns the matrix has.
-        cols: usize,
     },
     /// A landmark block's buffer would not fit in memory. `DMatrix::zeros`
     /// multiplies the two dimensions unchecked.
