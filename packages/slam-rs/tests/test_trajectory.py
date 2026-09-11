@@ -257,3 +257,23 @@ def test_shift_clock_refuses_an_offset_that_would_leave_the_int64_clock() -> Non
     assert int(shift_clock(_trajectory(np.array([-(2**63) + 1], dtype=np.int64), positions[:1]), -1).t_ns[0]) == -(2**63)
     # An empty trajectory has no timestamp to shift and none to refuse.
     assert len(shift_clock(empty_trajectory(), 2**62)) == 0
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("bad_reference", [False, True])
+def test_ate_refuses_nonfinite_positions_before_alignment(value: float, bad_reference: bool) -> None:
+    from dataclasses import replace
+
+    from slam_rs.trajectory import ScoringResult, score_trajectory
+
+    finite: Trajectory = Trajectory(np.arange(20, dtype=np.int64), np.random.default_rng(3).normal(size=(20, 3)), np.tile([1.0, 0.0, 0.0, 0.0], (20, 1)))
+    bad: Trajectory = replace(finite, position_m=finite.position_m.copy())
+    bad.position_m[4, 0] = value
+    estimate: Trajectory = finite if bad_reference else bad
+    reference: Trajectory = bad if bad_reference else finite
+    message: str = "1 of 20 estimated positions is not finite, the first at 4 ns; there is nothing to align"
+    with pytest.raises(ValueError, match=message):
+        ate(estimate, reference)
+    scored: ScoringResult = score_trajectory(estimate, reference)
+    assert scored.result is None
+    assert scored.unscored == message

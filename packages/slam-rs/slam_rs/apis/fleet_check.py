@@ -24,7 +24,7 @@ from slam_rs.reference import (
     load_manifest,
 )
 from slam_rs.tracking import SegmentRun, run_segment
-from slam_rs.trajectory import AteResult, ate, extent_m, nonfinite_position_text
+from slam_rs.trajectory import AteResult, ScoringResult, extent_m, nonfinite_position_text, score_trajectory
 
 Lane: TypeAlias = Literal["cpu", "gpu"]
 
@@ -102,13 +102,8 @@ def measure(
     """Replay a catalog segment and associate estimates with ground truth."""
     check_scoring_inputs(manifest, segment, catalog)
     run: SegmentRun = run_segment(manifest, segment, gpu=gpu, profile=profile, catalog=catalog)
-    against_gt: AteResult | None = None
-    unscored: str | None = nonfinite_position_text(run.estimate)
-    if unscored is None:
-        try:
-            against_gt = ate(run.estimate, run.ground_truth)
-        except ValueError as error:
-            unscored = str(error)
+    scoring: ScoringResult = score_trajectory(run.estimate, run.ground_truth)
+    against_gt: AteResult | None = scoring.result
     lane: Lane = this_lane(gpu)
     baseline: Baseline | None = segment.baseline_for(lane, profile)
     return ClipResult(
@@ -130,7 +125,7 @@ def measure(
         wall_s=run.wall_s,
         peak_rss_mb=this_peak_rss_mb(),
         config_sha256=run.config_sha256,
-        unscored=unscored,
+        unscored=scoring.unscored,
         baseline=baseline,
     )
 

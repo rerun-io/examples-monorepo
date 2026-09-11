@@ -10,7 +10,7 @@ from typing import Literal
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb, this_temperature_c
 from slam_rs.reference import ReferenceManifest, RobocapSession, load_manifest
 from slam_rs.tracking import SegmentRun, run_robocap
-from slam_rs.trajectory import AteResult, Trajectory, ate, empty_trajectory, nonfinite_position_text, read_trajectory, write_trajectory
+from slam_rs.trajectory import AteResult, ScoringResult, Trajectory, empty_trajectory, read_trajectory, score_trajectory, write_trajectory
 
 BUDGET_15FPS_MS: float = 1e3 / 15.0
 """What one four-camera frameset may cost for the cap to keep up at 15 fps."""
@@ -123,30 +123,9 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
         manifest, session, seconds=config.seconds, window_s=config.window_s, profile=config.profile, catalog=config.catalog, gpu=config.gpu
     )
     after: float | None = this_temperature_c()
-    against_reference: AteResult | None = None
-    across: float | None = None
-    # Finiteness before the alignment, not after it: a NaN position reaches
-    # `np.linalg.svd` inside `rigid_alignment` as `LinAlgError`, which the
-    # `ValueError` below does not catch — so a diverged estimator lost the whole
-    # 52.9 s replay to a traceback, with no row, no trajectory and no JSON, on
-    # exactly the machine whose cost this lane exists to measure (S25 review).
-    unscored: str | None = nonfinite_position_text(run.estimate)
-    if unscored is None:
-        try:
-            against_reference = ate(run.estimate, reference) if len(reference) else None
-            across = 100.0 * against_reference.rmse_m if config.reference_csv is not None and against_reference is not None else None
-        except ValueError as association_failed:
-            # 52.9 s of video has already been paid for by here, and the wall,
-            # the budget and the temperatures it bought are the row's reason to
-            # exist — so an estimate that associates with nothing loses its
-            # agreement and not the run. The clause is the sentence `ate`
-            # refused with, tolerance and all; both numbers go, not the half
-            # that may have associated already. `ValueError` and not
-            # `Exception`, so a beartype violation still raises. `main` prints
-            # the row and then exits non-zero.
-            against_reference = None
-            across = None
-            unscored = str(association_failed)
+    scoring: ScoringResult = score_trajectory(run.estimate, reference if len(reference) else None)
+    against_reference: AteResult | None = scoring.result
+    across: float | None = 100.0 * against_reference.rmse_m if config.reference_csv is not None and against_reference is not None else None
     ms_per_frameset: float = 1e3 * run.wall_s / max(run.framesets, 1)
     return (
         RobocapRow(
@@ -166,7 +145,7 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
             temp_c_before=before,
             temp_c_after=after,
             cross_platform_ate_cm=across,
-            unscored=unscored,
+            unscored=scoring.unscored,
             config_sha256=run.config_sha256,
         ),
         run.estimate,

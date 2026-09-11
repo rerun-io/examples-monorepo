@@ -45,3 +45,35 @@ def test_catalog_robocap_regression_reference(manifest: ReferenceManifest) -> No
     assert row.lost == 0
     assert row.unscored is None
     assert np.isfinite(row.reference_rmse_cm)
+
+
+@pytest.mark.parametrize("failure", ["estimate", "reference", "clock", "no-reference"])
+def test_scoring_refusal_preserves_outputs_and_cost(
+    manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
+) -> None:
+    import json
+    from dataclasses import replace
+
+    truth: Trajectory = Trajectory(np.arange(20, dtype=np.int64), np.zeros((20, 3)), np.tile([1.0, 0.0, 0.0, 0.0], (20, 1)))
+    estimate: Trajectory = replace(truth, position_m=truth.position_m.copy())
+    if failure in ("estimate", "no-reference"):
+        estimate.position_m[3, 1] = np.nan
+    elif failure == "reference":
+        truth.position_m[3, 1] = np.inf
+    else:
+        estimate = replace(estimate, t_ns=estimate.t_ns + 100_000_000_000)
+    reference: Path = tmp_path / "reference.csv"
+    write_trajectory(reference, truth)
+    output: Path = tmp_path / "output.json"
+    run: SegmentRun = SegmentRun(estimate, 20, 0, 2.0, empty_trajectory(), 4.0, "a" * 64)
+    if failure == "no-reference":
+        manifest = replace(manifest, robocap=replace(manifest.robocap, sessions=(replace(manifest.robocap.sessions[0], reference_csv=None),)))
+    monkeypatch.setattr(robocap_fleet, "load_manifest", lambda: manifest)
+    monkeypatch.setattr(robocap_fleet, "run_robocap", lambda *_args, **_kwargs: run)
+    with pytest.raises(SystemExit, match="associated" if failure == "clock" else "not finite"):
+        robocap_fleet.main(Config(reference_csv=None if failure == "no-reference" else reference, output_json=output))
+    payload: dict[str, object] = json.loads(output.read_text())
+    assert payload["wall_s"] == 2.0
+    assert payload["ms_per_frameset"] == 100.0
+    assert payload["unscored"] is not None
+    assert output.with_suffix(".csv").exists()

@@ -259,8 +259,12 @@ def ate(estimate: Trajectory, reference: Trajectory, tolerance_ns: int = ASSOCIA
         The error statistics and the alignment that produced them.
 
     Raises:
-        ValueError: If no pose associates, which leaves nothing to compare.
+        ValueError: If positions are non-finite or no pose associates.
     """
+    for trajectory in (estimate, reference):
+        refusal: str | None = nonfinite_position_text(trajectory)
+        if refusal is not None:
+            raise ValueError(refusal)
     association: Association = associate(estimate, reference, tolerance_ns)
     source: Float64[ndarray, "n_associated 3"] = reference.position_m[association.candidate_index[association.matched]]
     target: Float64[ndarray, "n_associated 3"] = estimate.position_m[association.matched]
@@ -283,14 +287,8 @@ def ate(estimate: Trajectory, reference: Trajectory, tolerance_ns: int = ASSOCIA
 def nonfinite_position_text(trajectory: Trajectory) -> str | None:
     """Why an estimate cannot be aligned, when one of its positions is not finite; None when every one is.
 
-    :func:`ate` cannot refuse this itself in the shape its callers read:
-    :func:`rigid_alignment` hands the cross-covariance to ``np.linalg.svd``,
-    which raises ``LinAlgError: SVD did not converge`` on a NaN — not the
-    :class:`ValueError` a caller catches, and not a row. Both fleet tools
-    therefore ask this **before** the alignment, so a machine whose estimator
-    diverged is reported rather than lost to a traceback, which is the one
-    machine the fleet lane exists to find. The clause names the first offending
-    pose, because the timestamp is where a diverged run is read from.
+    The clause names the first offending pose and preserves the fleet row text.
+    ``ate`` checks both trajectories before association and SVD.
 
     Args:
         trajectory: The estimate about to be scored.
@@ -307,6 +305,33 @@ def nonfinite_position_text(trajectory: Trajectory) -> str | None:
         f"{int((~finite).sum())} of {len(trajectory)} estimated positions is not finite, "
         f"the first at {int(trajectory.t_ns[first])} ns; there is nothing to align"
     )
+
+
+@dataclass(slots=True, frozen=True)
+class ScoringResult:
+    """An optional score or a refusal, retained beside measured replay costs."""
+
+    result: AteResult | None
+    """Aligned error; absent when refused or no reference was requested."""
+    unscored: str | None
+    """Metric refusal; absent on success or a finite run with no reference."""
+
+
+def score_trajectory(estimate: Trajectory, reference: Trajectory | None) -> ScoringResult:
+    """Score a replay without discarding its measured cost on a metric refusal.
+
+    A missing reference is report-only: validate positions but do not score.
+    Acceptance thresholds belong to the caller.
+    """
+    try:
+        if reference is None:
+            refusal: str | None = nonfinite_position_text(estimate)
+            if refusal is not None:
+                raise ValueError(refusal)
+            return ScoringResult(None, None)
+        return ScoringResult(ate(estimate, reference), None)
+    except ValueError as error:
+        return ScoringResult(None, str(error))
 
 
 def coverage(reference: Trajectory, candidate: Trajectory) -> float:

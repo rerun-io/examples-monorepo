@@ -50,3 +50,20 @@ def test_scoring_uses_ground_truth_and_rejects_wrong_clock(
 def test_empty_selection_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="no clip"):
         main(Config(segments=(), output_json=tmp_path / "empty.json"))
+
+
+@pytest.mark.parametrize("bad_reference", [False, True])
+def test_nonfinite_scoring_keeps_costs_and_reports_refusal(
+    manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, bad_reference: bool
+) -> None:
+    finite: Trajectory = Trajectory(np.arange(20, dtype=np.int64), np.zeros((20, 3)), np.tile([1.0, 0.0, 0.0, 0.0], (20, 1)))
+    bad: Trajectory = replace(finite, position_m=finite.position_m.copy())
+    bad.position_m[3, 1] = np.nan
+    run: SegmentRun = SegmentRun(finite if bad_reference else bad, 20, 0, 2.0, bad if bad_reference else finite, 4.0, "a" * 64)
+    monkeypatch.setattr(fleet_check, "check_scoring_inputs", lambda *_args: None)
+    monkeypatch.setattr(fleet_check, "run_segment", lambda *_args, **_kwargs: run)
+    result: ClipResult = measure(manifest, manifest.segments[0])
+    assert result.wall_s == 2.0
+    assert result.measurement.median_tracker_ms == 4.0
+    assert result.unscored is not None and "first at 3 ns" in result.unscored
+    assert any(clause.startswith("scoring:") for clause in result.failures)
