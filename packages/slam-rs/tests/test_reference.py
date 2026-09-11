@@ -123,6 +123,14 @@ def test_the_msd_imu_block_is_basalts(manifest: ReferenceManifest) -> None:
         assert segment.imu.cam_time_offset_ns == 0
 
 
+def test_any_robocap_session_of_the_device_replays_without_a_reference(manifest: ReferenceManifest) -> None:
+    listed = manifest.robocap.session("s00000015")
+    assert listed.reference_csv is not None and manifest.robocap.is_listed("s00000015")
+    other = manifest.robocap.session("s00000099")
+    assert other.segment_id == f"robocap__{manifest.robocap.device_id}__s00000099"
+    assert other.reference_csv is None and not manifest.robocap.is_listed("s00000099")
+
+
 def test_robocap_carries_s15_and_no_ground_truth(manifest: ReferenceManifest) -> None:
     assert [session.session_id for session in manifest.robocap.sessions] == ["s00000015"]
     assert manifest.robocap.has_ground_truth is False
@@ -157,8 +165,8 @@ def test_a_selector_the_manifest_cannot_satisfy_is_a_typed_error(manifest: Refer
     """
     with pytest.raises(ValueError, match="MIO10_typo.*MIO10_short_2_panorama"):
         manifest.by_id("MIO10_typo")
-    with pytest.raises(ValueError, match="s00000099.*s00000015"):
-        manifest.robocap.session("s00000099")
+    with pytest.raises(ValueError, match="s15.*s00000015"):
+        manifest.robocap.session("s15")
     with pytest.raises(ValueError, match="msd-nope.*msd-index"):
         manifest.dataset("msd-nope")
 

@@ -3,6 +3,7 @@
 import hashlib
 import json
 import math
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -211,7 +212,6 @@ class ReferenceSegment:
     imu: ImuParameters
     """Frozen IMU noise model for this device."""
 
-
     def baseline_for(self, lane: Literal["cpu", "gpu"], profile: Literal["reference", "fast"]) -> Baseline | None:
         """Return the unique baseline for this execution lane and profile."""
         return next((row for row in self.baseline if row.lane == lane and row.profile == profile), None)
@@ -238,6 +238,8 @@ class RobocapSession:
 class RobocapReference:
     """RoboCap rig parameters. This dataset has no ground truth."""
 
+    device_id: str
+    """The device whose sessions the catalog holds: segment ids are ``robocap__<device_id>__<session_id>``."""
     has_ground_truth: bool
     """Always false: RoboCap has no measured ground truth."""
     decode_path: DecodePath
@@ -262,15 +264,24 @@ class RobocapReference:
     """The measured sessions, in manifest order."""
 
     def session(self, session_id: str) -> RobocapSession:
-        """The session with this id.
+        """The session with this id: the listed one, or any other session of this device on the catalog.
+
+        An unlisted session has no regression reference; the tools report it unscored.
 
         Raises:
-            ValueError: If the manifest has no such session.
+            ValueError: If the id is not shaped like a RoboCap session id.
         """
         for session in self.sessions:
             if session.session_id == session_id:
                 return session
-        raise ValueError(f"{session_id!r} is not a RoboCap session in the manifest; have {[s.session_id for s in self.sessions]}")
+        if re.fullmatch(r"s\d{8}", session_id) is None:
+            raise ValueError(
+                f"{session_id!r} is not a RoboCap session id (expected s00000015-style); listed: {[s.session_id for s in self.sessions]}"
+            )
+        return RobocapSession(reference_csv=None, session_id=session_id, segment_id=f"robocap__{self.device_id}__{session_id}")
+
+    def is_listed(self, session_id: str) -> bool:
+        return any(session.session_id == session_id for session in self.sessions)
 
 
 @dataclass(slots=True, frozen=True)
@@ -413,6 +424,7 @@ def _imu(block: dict[str, Any]) -> ImuParameters:
 def _robocap(robocap_block: dict[str, Any]) -> RobocapReference:
     """Read the RoboCap rig and catalog session table."""
     return RobocapReference(
+        device_id=str(robocap_block["device_id"]),
         has_ground_truth=bool(robocap_block["has_ground_truth"]),
         decode_path=_one_of(robocap_block["decode_path"], DECODE_PATH_BY_NAME, "decode path", "robocap"),
         camera_names=tuple(str(name) for name in robocap_block["camera_names"]),
@@ -557,7 +569,9 @@ def gate_failures(measurement: Measurement, baseline: Baseline | None) -> list[s
         failures.append(f"lost: {measurement.lost} of {measurement.framesets} framesets")
     if measurement.associated < MIN_ASSOCIATED_POSES:
         failures.append(f"associated: only {measurement.associated} poses matched ground truth")
-    if not measurement.poses_finite or not all(math.isfinite(value) for value in (measurement.gt_rmse_cm, measurement.extent_m, measurement.truth_extent_m, measurement.median_tracker_ms)):
+    if not measurement.poses_finite or not all(
+        math.isfinite(value) for value in (measurement.gt_rmse_cm, measurement.extent_m, measurement.truth_extent_m, measurement.median_tracker_ms)
+    ):
         failures.append("finite: poses and measurements must be finite")
     if measurement.extent_m > DIVERGENCE_FACTOR * measurement.truth_extent_m:
         failures.append(f"divergence: estimate spans {measurement.extent_m:.2f} m, truth {measurement.truth_extent_m:.2f} m")
