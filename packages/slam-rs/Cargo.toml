@@ -43,17 +43,17 @@ kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864
 # because upstream's are `f32`-only or coupled (S33 audit A, row 5).
 kornia-algebra = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
 
-# The GPU phase (decision D21, D70). CubeCL 0.10 stable with the optional
+# The GPU phase (decision D21, D70). CubeCL 0.11 prerelease with the optional
 # wgpu runtime; the default CPU build has no GPU dependency.
-cubecl = "0.10"
+cubecl = "=0.11.0-pre.3"
 # No `features` here: which shader compiler cubecl-wgpu builds is decided per
 # target in `crates/slam-rs/Cargo.toml`, because `spirv` and `msl` are not the
 # same lane on the same platform (see the two target sections there).
-cubecl-wgpu = "0.10"
+cubecl-wgpu = "=0.11.0-pre.3"
 
 # Probe wgpu before constructing a CubeCL client, whose bring-up can panic.
 # This feature subset adds nothing to cubecl-wgpu's compiled feature set.
-wgpu = { version = "29", default-features = false }
+wgpu = { version = "30", default-features = false }
 
 # The estimator must never panic on data: errors are typed and returned.
 [workspace.lints.clippy]

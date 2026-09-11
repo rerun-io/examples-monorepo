@@ -21,7 +21,8 @@ use cubecl::prelude::*;
 /// MIO14 GT ATE is 9.48 cm with sin+cos and 9.72 cm with sine only (D71). Normalization
 /// and fused multiply-add can still differ from the CPU by an ulp.
 #[cube]
-fn compose_se2_exp(state: &mut SharedMemory<f32>, t0: f32, t1: f32, theta: f32) {
+#[allow(clippy::assign_op_pattern)] // Preserve the floating-point addition order.
+fn compose_se2_exp(state: &mut Shared<[f32]>, t0: f32, t1: f32, theta: f32) {
     let cos_theta = f32::cos(theta);
     let sin_theta = trig::sin(theta);
     let length = f32::sqrt(cos_theta * cos_theta + sin_theta * sin_theta);
@@ -65,13 +66,13 @@ fn compose_se2_exp(state: &mut SharedMemory<f32>, t0: f32, t1: f32, theta: f32) 
     unused_assignments
 )]
 fn klt_kernel(
-    pyramid_a: &Array<u16>,
-    pyramid_b: &Array<u16>,
-    meta: &Array<u32>,
-    store: &Array<f32>,
+    pyramid_a: &[u16],
+    pyramid_b: &[u16],
+    meta: &[u32],
+    store: &[f32],
     // Compose the warp in place through one read/write binding. Binding the same
     // buffer separately as read-only and read/write is invalid on some wgpu adapters.
-    transforms: &mut Array<f32>,
+    transforms: &mut [f32],
     capacity: usize,
     taps: usize,
     num_levels: usize,
@@ -89,17 +90,17 @@ fn klt_kernel(
     let row_stride = taps * capacity;
     let pattern = num_levels * 4usize;
 
-    let mut residual = SharedMemory::<f32>::new(TAP_SLOTS);
-    let mut product_0 = SharedMemory::<f32>::new(TAP_SLOTS);
-    let mut product_1 = SharedMemory::<f32>::new(TAP_SLOTS);
-    let mut product_2 = SharedMemory::<f32>::new(TAP_SLOTS);
-    let mut okflag = SharedMemory::<usize>::new(TAP_SLOTS);
+    let mut residual = Shared::<[f32]>::new_slice(TAP_SLOTS);
+    let mut product_0 = Shared::<[f32]>::new_slice(TAP_SLOTS);
+    let mut product_1 = Shared::<[f32]>::new_slice(TAP_SLOTS);
+    let mut product_2 = Shared::<[f32]>::new_slice(TAP_SLOTS);
+    let mut okflag = Shared::<[usize]>::new_slice(TAP_SLOTS);
     // 0..6 the running warp, 6 the tap sum, 7 the in-bounds tap count,
     // 8 the level scale.
-    let mut state = SharedMemory::<f32>::new(16usize);
+    let mut state = Shared::<[f32]>::new_slice(16usize);
     // 0 the running validity, 1 whether this level was entered alive,
     // 2 whether the guess passed the bounds test at all.
-    let mut alive = SharedMemory::<usize>::new(4usize);
+    let mut alive = Shared::<[usize]>::new_slice(4usize);
 
     if tap == 0usize {
         let guess_x = transforms[4usize * count + patch];
@@ -115,7 +116,7 @@ fn klt_kernel(
         {
             inside = false;
         }
-        let mut entered: usize = 0usize;
+        let mut entered = 0usize;
         if inside {
             entered = 1usize;
         }
@@ -164,7 +165,7 @@ fn klt_kernel(
                 let warped_x = state[0usize] * tap_x + state[1usize] * tap_y + state[4usize];
                 let warped_y = state[2usize] * tap_x + state[3usize] * tap_y + state[5usize];
                 if in_bounds(warped_x, warped_y, PATCH_BORDER, width, height) {
-                    let mut sampled: f32 = 0.0f32;
+                    let mut sampled = 0.0f32;
                     if parity == 0usize {
                         sampled = interp(pyramid_a, base, width, warped_x, warped_y);
                     } else {
@@ -181,7 +182,7 @@ fn klt_kernel(
 
             if sampling && tap == 0usize {
                 let mut sum = 0.0f32;
-                let mut valid_points: u32 = 0u32;
+                let mut valid_points = 0u32;
                 for i in 0..taps {
                     if okflag[i] == 1usize {
                         sum += residual[i];
@@ -219,7 +220,7 @@ fn klt_kernel(
             sync_cube();
 
             if solving && tap == 0usize {
-                let mut residuals: u32 = 0u32;
+                let mut residuals = 0u32;
                 for i in 0..taps {
                     if okflag[i] == 1usize {
                         residuals += 1u32;
@@ -315,9 +316,9 @@ fn klt_kernel(
 #[cube(launch, launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 fn prepare_backward_kernel(
-    forward: &Array<f32>,
-    offsets: &Array<f32>,
-    out: &mut Array<f32>,
+    forward: &[f32],
+    offsets: &[f32],
+    out: &mut [f32],
     count: usize,
     offset_x_base: usize,
     offset_y_base: usize,
@@ -343,10 +344,10 @@ fn prepare_backward_kernel(
 // Use `!(dist2 < max)` so a NaN fails the distance guard.
 #[allow(clippy::too_many_arguments, clippy::neg_cmp_op_on_partial_ord)]
 fn finish_kernel(
-    forward: &Array<f32>,
-    backward: &Array<f32>,
-    positions: &Array<f32>,
-    out: &mut Array<f32>,
+    forward: &[f32],
+    backward: &[f32],
+    positions: &[f32],
+    out: &mut [f32],
     count: usize,
     pos_x_base: usize,
     pos_y_base: usize,
@@ -368,7 +369,7 @@ fn finish_kernel(
             ok = false;
         }
     }
-    let mut flag: f32 = 0.0f32;
+    let mut flag = 0.0f32;
     if ok {
         flag = 1.0f32;
     }
@@ -397,16 +398,12 @@ pub(crate) fn launch_klt<R: Runtime>(
         klt_kernel::launch_unchecked::<R>(
             client,
             CubeCount::Static(shape.count as u32, 1, 1),
-            CubeDim {
-                x: TAP_UNITS,
-                y: 1,
-                z: 1,
-            },
-            ArrayArg::from_raw_parts(pyramid.0.clone(), pyramid.1),
-            ArrayArg::from_raw_parts(pyramid.2.clone(), pyramid.3),
-            ArrayArg::from_raw_parts(meta.0.clone(), meta.1),
-            ArrayArg::from_raw_parts(store.0.clone(), store.1),
-            ArrayArg::from_raw_parts(transforms.0.clone(), transforms.1),
+            CubeDim::new_3d(TAP_UNITS, 1, 1),
+            BufferArg::from_raw_parts(pyramid.0.clone(), pyramid.1),
+            BufferArg::from_raw_parts(pyramid.2.clone(), pyramid.3),
+            BufferArg::from_raw_parts(meta.0.clone(), meta.1),
+            BufferArg::from_raw_parts(store.0.clone(), store.1),
+            BufferArg::from_raw_parts(transforms.0.clone(), transforms.1),
             shape.capacity,
             shape.taps,
             shape.num_levels,
@@ -434,9 +431,9 @@ pub(crate) fn launch_prepare_backward<R: Runtime>(
             client,
             cubes,
             units,
-            ArrayArg::from_raw_parts(forward.0.clone(), forward.1),
-            ArrayArg::from_raw_parts(offsets.0.clone(), offsets.1),
-            ArrayArg::from_raw_parts(out.0.clone(), out.1),
+            BufferArg::from_raw_parts(forward.0.clone(), forward.1),
+            BufferArg::from_raw_parts(offsets.0.clone(), offsets.1),
+            BufferArg::from_raw_parts(out.0.clone(), out.1),
             count,
             bases.x,
             bases.y,
@@ -463,10 +460,10 @@ pub(crate) fn launch_finish<R: Runtime>(
             client,
             cubes,
             units,
-            ArrayArg::from_raw_parts(forward.0.clone(), forward.1),
-            ArrayArg::from_raw_parts(backward.0.clone(), backward.1),
-            ArrayArg::from_raw_parts(positions.0.clone(), positions.1),
-            ArrayArg::from_raw_parts(out.0.clone(), out.1),
+            BufferArg::from_raw_parts(forward.0.clone(), forward.1),
+            BufferArg::from_raw_parts(backward.0.clone(), backward.1),
+            BufferArg::from_raw_parts(positions.0.clone(), positions.1),
+            BufferArg::from_raw_parts(out.0.clone(), out.1),
             count,
             bases.x,
             bases.y,

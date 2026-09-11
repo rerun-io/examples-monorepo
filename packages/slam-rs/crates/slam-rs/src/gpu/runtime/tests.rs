@@ -21,7 +21,7 @@ fn a_failed_device_read_is_a_typed_error_at_every_stage() {
     let what: &str = "the tracker result";
     let error: cubecl::server::ServerError = cubecl::server::ServerError::Generic {
         reason: "the device is gone".to_owned(),
-        backtrace: cubecl::backtrace::BackTrace::default(),
+        backtrace: Default::default(),
     };
     assert_eq!(
         read_failed(what, &error),

@@ -1016,7 +1016,7 @@ mod absent_gpu {
 }
 
 #[cubecl::prelude::cube(launch_unchecked)]
-fn finite_probe(input: &cubecl::prelude::Array<f32>, output: &mut cubecl::prelude::Array<u32>) {
+fn finite_probe(input: &[f32], output: &mut [u32]) {
     use cubecl::prelude::*;
     let i = ABSOLUTE_POS;
     if i < 12 {
@@ -1054,8 +1054,8 @@ fn finite_predicates_match_ieee_classification() {
             &client,
             CubeCount::Static(1, 1, 1),
             CubeDim::new_1d(32),
-            ArrayArg::from_raw_parts(input, 12),
-            ArrayArg::from_raw_parts(output.clone(), 12),
+            BufferArg::from_raw_parts(input, 12),
+            BufferArg::from_raw_parts(output.clone(), 12),
         );
     }
     let bytes = client.read_one(output).unwrap();
@@ -1074,10 +1074,7 @@ fn finite_predicates_match_ieee_classification() {
 mod trig;
 
 #[cubecl::prelude::cube(launch_unchecked)]
-fn small_angle_probe(
-    input: &cubecl::prelude::Array<f32>,
-    output: &mut cubecl::prelude::Array<f32>,
-) {
+fn small_angle_probe(input: &[f32], output: &mut [f32]) {
     use cubecl::prelude::*;
     let i = ABSOLUTE_POS;
     if i < input.len() {
@@ -1104,8 +1101,8 @@ fn small_angle_trig_stays_within_two_ulps_of_the_cpu() {
             &client,
             CubeCount::Static(values.len().div_ceil(256) as u32, 1, 1),
             CubeDim::new_1d(256),
-            ArrayArg::from_raw_parts(input, values.len()),
-            ArrayArg::from_raw_parts(output.clone(), values.len() * 2),
+            BufferArg::from_raw_parts(input, values.len()),
+            BufferArg::from_raw_parts(output.clone(), values.len() * 2),
         );
     }
     let bytes = client.read_one(output).unwrap();

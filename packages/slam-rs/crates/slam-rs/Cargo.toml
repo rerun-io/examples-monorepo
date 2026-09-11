@@ -22,8 +22,8 @@ gpu-core = ["dep:cubecl"]
 #
 # `exclusive-memory-only` — one wgpu buffer per handle instead of slices of a
 # shared page — is not a tuning choice, it is what makes the lane correct on
-# the cap. cubecl-wgpu 0.10 aligns its memory pool to the adapter's
-# `min_uniform_buffer_offset_alignment` (`runtime.rs:292`) and then binds those
+# the cap. cubecl-wgpu 0.11.0-pre.3 still aligns its memory pool to the adapter's
+# `min_uniform_buffer_offset_alignment` (`runtime.rs:307`) and then binds those
 # slices as *storage* buffers, so on any adapter whose
 # `min_storage_buffer_offset_alignment` is the larger of the two, every slice
 # past the first is an invalid binding. The RK3588's Mali G610 asks for 64 and
@@ -56,8 +56,8 @@ wgpu = { workspace = true, optional = true }
 # which of those compilers is *built* is a cargo feature, and the two the fleet
 # needs cannot both be on for one platform: `spirv` adds ash and a SPIR-V
 # assembler and only ever fires on a Vulkan adapter, while `msl`'s backend is
-# `#[cfg(target_os = "macos")]` inside cubecl-wgpu and never fires anywhere
-# else. So the choice is per **target**, not per cargo feature of ours: one
+# gated to Apple targets inside cubecl-wgpu. So the choice is per **target**,
+# not per cargo feature of ours: one
 # `--features gpu-wgpu` build line works on the Mac, the Spark, the Pi and the
 # cap, and no caller has to know which compiler its host will use.
 #
@@ -66,8 +66,10 @@ wgpu = { workspace = true, optional = true }
 # the Metal compiler is built, so a device that fails cubecl's family check
 # falls back to WGSL, which has no `u8`, and every kernel touching a bool stops
 # compiling. Our kernels bind no bool array (only `u8`, `u16`, `f32` and
-# `usize`), and cubecl-wgpu 0.10's Metal path has no family check — it takes
-# any Metal adapter — so the per-target form is safe and needs no flag.
+# `usize`). cubecl-wgpu 0.11.0-pre.3 requires Metal3, Apple7 or Mac2 family
+# support plus a successful MSL 3.2 canary (`backend/metal.rs:122`); otherwise
+# `AutoCompiler` falls back to WGSL (`compiler/base.rs:170`). Our storage probe
+# rejects that fallback, so the per-target form still needs no flag.
 #
 # WGSL is what is left if neither fires, and it is not a lane: its compiler has
 # no `u16` or `u8` and panics on cubecl's worker thread while every launch

@@ -32,7 +32,7 @@ fn reflect_low(twice: usize, k: usize) -> usize {
 #[cube]
 #[allow(clippy::too_many_arguments)]
 fn subsample_band(
-    src: &Array<u16>,
+    src: &[u16],
     row_base: usize,
     c0: usize,
     c1: usize,
@@ -54,8 +54,8 @@ fn subsample_band(
 #[cube(launch, launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 fn subsample_kernel(
-    src: &Array<u16>,
-    dst: &mut Array<u16>,
+    src: &[u16],
+    dst: &mut [u16],
     src_base: usize,
     src_width: usize,
     src_height: usize,
@@ -105,8 +105,8 @@ pub(crate) fn launch_subsample<R: Runtime>(
             client,
             cubes,
             units,
-            ArrayArg::from_raw_parts(src.0.clone(), src.1),
-            ArrayArg::from_raw_parts(dst.0.clone(), dst.1),
+            BufferArg::from_raw_parts(src.0.clone(), src.1),
+            BufferArg::from_raw_parts(dst.0.clone(), dst.1),
             source.base,
             source.width,
             source.height,

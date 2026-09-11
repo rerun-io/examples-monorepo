@@ -46,7 +46,7 @@ pub(crate) const SOPHUS_EPSILON: f32 = <f32 as crate::lie::LieScalar>::SOPHUS_EP
 /// A device buffer and the element count the kernel will see in it.
 ///
 /// Spelled once rather than at each of the launcher parameters below, all of
-/// which take exactly this: the count is a promise `ArrayArg::from_raw_parts`
+/// which take exactly this: the count is a promise `BufferArg::from_raw_parts`
 /// cannot check, so keeping it beside the handle is what makes the promise
 /// visible at the call site.
 pub(crate) type Buffer<'a> = (&'a cubecl::server::Handle, usize);
@@ -64,11 +64,7 @@ pub(crate) fn tile_2d(width: usize, height: usize) -> (CubeCount, CubeDim) {
             (height as u32).div_ceil(TILE_H),
             1,
         ),
-        CubeDim {
-            x: TILE_W,
-            y: TILE_H,
-            z: 1,
-        },
+        CubeDim::new_3d(TILE_W, TILE_H, 1),
     )
 }
 
@@ -100,11 +96,7 @@ pub(crate) fn linear_1d(count: usize) -> (CubeCount, CubeDim) {
             cubes.div_ceil(MAX_CUBES_PER_DIM),
             1,
         ),
-        CubeDim {
-            x: LINEAR_UNITS,
-            y: 1,
-            z: 1,
-        },
+        CubeDim::new_3d(LINEAR_UNITS, 1, 1),
     )
 }
 

@@ -167,11 +167,11 @@ fn ldlt_solve3(mat: &Array<f32>, transpositions: &Array<usize>, rhs: &mut Array<
 #[cube(launch, launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 fn patch_build_kernel(
-    pyramid_a: &Array<u16>,
-    pyramid_b: &Array<u16>,
-    meta: &Array<u32>,
-    positions: &Array<f32>,
-    store: &mut Array<f32>,
+    pyramid_a: &[u16],
+    pyramid_b: &[u16],
+    meta: &[u32],
+    positions: &[f32],
+    store: &mut [f32],
     capacity: usize,
     taps: usize,
     num_levels: usize,
@@ -200,12 +200,12 @@ fn patch_build_kernel(
         terminate!();
     }
 
-    let mut values = SharedMemory::<f32>::new(TAP_SLOTS);
-    let mut grad_x = SharedMemory::<f32>::new(TAP_SLOTS);
-    let mut grad_y = SharedMemory::<f32>::new(TAP_SLOTS);
-    let mut grad_t = SharedMemory::<f32>::new(TAP_SLOTS);
-    let mut okflag = SharedMemory::<usize>::new(TAP_SLOTS);
-    let mut red = SharedMemory::<f32>::new(16usize);
+    let mut values = Shared::<[f32]>::new_slice(TAP_SLOTS);
+    let mut grad_x = Shared::<[f32]>::new_slice(TAP_SLOTS);
+    let mut grad_y = Shared::<[f32]>::new_slice(TAP_SLOTS);
+    let mut grad_t = Shared::<[f32]>::new_slice(TAP_SLOTS);
+    let mut okflag = Shared::<[usize]>::new_slice(TAP_SLOTS);
+    let mut red = Shared::<[f32]>::new_slice(16usize);
 
     // `const Scalar scale = 1 << level`.
     let scale = f32::cast_from(1usize << level);
@@ -265,7 +265,7 @@ fn patch_build_kernel(
 
     if tap == 0usize {
         let mut sum = 0.0f32;
-        let mut valid_points: u32 = 0u32;
+        let mut valid_points = 0u32;
         let mut sum_x = 0.0f32;
         let mut sum_y = 0.0f32;
         let mut sum_t = 0.0f32;
@@ -358,7 +358,7 @@ fn patch_build_kernel(
         let value = values[tap];
         store[(level * taps + tap) * capacity + patch] = value;
         let finite = is_finite(p0) && is_finite(p1) && is_finite(p2) && is_finite(value);
-        let mut flag: usize = 0usize;
+        let mut flag = 0usize;
         if finite {
             flag = 1usize;
         }
@@ -376,7 +376,7 @@ fn patch_build_kernel(
                 finite = false;
             }
         }
-        let mut valid: f32 = 0.0f32;
+        let mut valid = 0.0f32;
         if red[1usize] > f32::new(f32::EPSILON) && finite {
             valid = 1.0f32;
         }
@@ -405,16 +405,12 @@ pub(crate) fn launch_patch_build<R: Runtime>(
         patch_build_kernel::launch_unchecked::<R>(
             client,
             CubeCount::Static(shape.count as u32, shape.num_levels as u32, 1),
-            CubeDim {
-                x: TAP_UNITS,
-                y: 1,
-                z: 1,
-            },
-            ArrayArg::from_raw_parts(pyramid.0.clone(), pyramid.1),
-            ArrayArg::from_raw_parts(pyramid.2.clone(), pyramid.3),
-            ArrayArg::from_raw_parts(meta.0.clone(), meta.1),
-            ArrayArg::from_raw_parts(positions.0.clone(), positions.1),
-            ArrayArg::from_raw_parts(store.0.clone(), store.1),
+            CubeDim::new_3d(TAP_UNITS, 1, 1),
+            BufferArg::from_raw_parts(pyramid.0.clone(), pyramid.1),
+            BufferArg::from_raw_parts(pyramid.2.clone(), pyramid.3),
+            BufferArg::from_raw_parts(meta.0.clone(), meta.1),
+            BufferArg::from_raw_parts(positions.0.clone(), positions.1),
+            BufferArg::from_raw_parts(store.0.clone(), store.1),
             shape.capacity,
             shape.taps,
             shape.num_levels,
