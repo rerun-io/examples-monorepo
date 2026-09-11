@@ -247,27 +247,30 @@ takes 63 minutes on the fast profile against 81 on the reference. The ten-clip
 gate's hardest clip, `MIO14_moving_props`, reads 9.72 cm on the reference (D71)
 and 6.37 cm on the fast profile.
 
-The same tip on the fleet, fast profile, tracker median in ms for
-`MIO10` / `MIO07` / `MGO07`, one unpinned pass with decode in the same process:
+The fleet's fast-profile tracker medians below are milliseconds for
+`MIO10` / `MIO07` / `MGO07`. Ratios compare GPU with CPU on the same host.
+The 5090 values are the reference rows in `gate.toml`; GB10 and M4 use the
+median of three matched runs per lane from S36. These are different measurement
+sessions, not a cross-machine timing budget.
 
-| device | backend | fast, ms | fast over reference | trajectory against the 5090 |
+| device | backend | GPU vs CPU fast medians, ms | CPU/GPU | ≥1.2x, accuracy in band |
 |---|---|---|---|---|
-| RTX 5090, x86-64 | Vulkan | 2.0 / 2.7 / 3.1 | 2.0x / 1.8x / 2.2x | the baseline |
-| GB10 (Spark), aarch64 | Vulkan | 2.9 / 3.2 / 4.8 | 1.85x / 1.9x / 2.1x | byte-identical, both profiles |
-| RTX 3060, x86-64 | Vulkan | 14.7 / 14.9 / 20.2 | 1.4x / 1.5x / 1.7x | inside the band, last-bit drift |
-| Apple M4 (Mac mini) | Metal | 18.8 / 18.6 / 21.2 | 1.2x / 1.2x / 1.2x | inside the band, within 0.04 cm |
+| RTX 5090, x86-64 | Vulkan | 2.02 / 2.70 / 3.08 vs 5.60 / 5.94 / 9.76 | 2.77x / 2.20x / 3.17x | pass; ten-clip ratios span 2.0–3.2x |
+| GB10 (Spark), aarch64 | Vulkan | 2.88 / 3.07 / 4.75 vs 5.35 / 5.42 / 9.00 | 1.86x / 1.76x / 1.90x | pass |
+| Apple M4 (Mac mini) | Metal | 4.59 / 4.76 / 5.97 vs 4.93 / 5.06 / 8.48 | 1.07x / 1.06x / 1.42x | MIO10 and MIO07 miss; MGO07 passes |
+| RTX 3060, x86-64 | Vulkan | not re-run since the S32 tip; box needs a driver reboot | — | not measured |
 
-Every row tracks every frameset. The 3060 stayed at its idle clock for the run,
-so its numbers are that operating point, not the card's. The Mac is correct and
-slow for a measured reason: a synchronising read costs 7 ms of host time on
-Metal against 0.12 ms on the 5090, and the frontend makes two a frameset. The
-Pi 5 and the RK3588 cap have not run this tip.
+The Metal lane's two sleeps are fixed: wgpu 30 replaces the HAL's 1 ms
+completion polling, and our CubeCL patch parks and wakes the idle device
+worker. The upload copy fix also ships. The Mac's two-camera clips still need
+about 0.5 ms less tracker time to meet the 1.2x margin. MIO14's unchanged Mac
+ATE is checked against its own host row. Passing that regression gate does not
+establish the GPU/CPU speed margin.
 
-Historical design notes — the portability table and the fleet
-numbers with the Metal diagnosis:
-[the portable lane](docs/design-notes.md#the-portable-lane-and-the-two-silent-failures),
-[where it runs](docs/design-notes.md#where-the-portable-lane-runs),
-[the fast profile across the fleet](docs/design-notes.md#the-fast-profile-across-the-fleet).
+See [S36 — the Metal lane's two sleeps](docs/design-notes.md#s36--the-metal-lanes-two-sleeps)
+for the reports, measured budget, rejected experiments and remaining work.
+The [S32 fleet table](docs/design-notes.md#the-fast-profile-across-the-fleet)
+remains as historical evidence.
 
 ## Tests and gates
 
@@ -301,7 +304,8 @@ consistency, exported clocks, and the smoke gate.
 The ground-truth gate requires zero lost framesets, at least
 `MIN_ASSOCIATED_POSES` estimate poses associated with ground truth, finite
 measurements, and an estimated extent no greater than `DIVERGENCE_FACTOR`
-times the truth's extent. With a matching baseline, RMSE must be at most
+times the truth's extent. The gate prefers a baseline for the host, lane and profile; if absent, it uses
+the first row for that lane/profile. With that baseline, RMSE must be at most
 `1.10 * baseline.gt_rmse_cm`. A missing lane/profile baseline prints "no baseline"
 and leaves accuracy ungated; tracking and validity clauses still apply.
 
@@ -322,15 +326,41 @@ The tiers are `smoke` (MIO10, MGO09), `release` (MIO07, MGO07, MIO14), and
 `listed` (the other five). The two hold-out flags remain excluded from tuning.
 The historical design notes are retained separately in `docs/design-notes.md`.
 
+### Patched dependencies
+
+`slam-rs-patch-deps` verifies the CubeCL archive SHA256, applies the checked-in
+channel park patch into `target/patch/`, and checks the prepared files on reuse.
+A process lock makes concurrent preparation safe. Cargo consumes that tree
+through `[patch.crates-io]`; the Pixi Cargo tasks prepare it first.
+
+Bare Cargo and rust-analyzer need this once per fresh checkout:
+
+```bash
+pixi run -e slam-rs-dev --frozen slam-rs-patch-deps
+# macOS: use -e slam-rs-osx-dev
+```
+
+`slam-rs-patch-test` resolves the prepared crate as a standalone package and
+runs offline. Fill each Cargo home's cache once from the package directory:
+
+```bash
+pixi run -e slam-rs-dev --frozen cargo fetch --locked --manifest-path target/patch/cubecl-common-0.11.0-pre.3/Cargo.toml
+pixi run -e slam-rs-dev --frozen slam-rs-patch-test
+```
+
+Use `slam-rs-osx-dev` on macOS. A missing `test-log` offline error means that
+cache is incomplete. The version-bump runbook is beside `[patch.crates-io]`
+in `Cargo.toml`.
+
 ## What is next
 
 Not in this branch, in the order they are likely to matter:
 
-- **Metal.** The M4 runs the lane correctly and pays 7 ms per synchronising read
-  and ten times the 5090's device time per kernel. The fix is a lower-latency
-  completion path in the read routine, gated to Metal, and per-adapter workgroup
-  shapes chosen at start-up; the 5090 A/B harness stays the gate, so that path
-  is untouched.
+- **Metal.** Close the two-camera 1.2x gap. Measure persistent staging and
+  in-place `ComputeClient::write` uploads, then the cold read hand-off. A
+  SIMD-local KLT reduction redesign is a later option; changed reduction order
+  must pass accuracy gates on every lane. Four KLT iterations and a simple
+  32-thread mapping were tested and rejected.
 - **A second core.** One core was the rule for this branch. The between-keyframes
   solve and the frontend's host work are independent enough to overlap.
 - **The Python seam.** 0.14 ms a frameset between the feed and `Vio.track`,
