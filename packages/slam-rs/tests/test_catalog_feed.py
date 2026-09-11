@@ -7,6 +7,7 @@ import pyarrow as pa
 import pytest
 from jaxtyping import Float64, Int64
 from numpy import ndarray
+from rerun.catalog import DatasetEntry
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from slam_rs import _core
@@ -440,3 +441,46 @@ def test_a_replay_export_associates_with_the_catalog_ground_truth(manifest: Refe
     # ground truth does not cover the whole segment.
     assert associate(read_trajectory(exported), sidecar).count == len(estimate) - 1
     assert associate(read_trajectory(relative_export), sidecar).count == 0
+
+
+@pytest.mark.parametrize("require_truth", [False, True])
+def test_catalog_resolution_batches_segments_by_dataset(monkeypatch: pytest.MonkeyPatch, require_truth: bool) -> None:
+    from unittest.mock import MagicMock
+
+    from slam_rs import catalog_feed
+    from slam_rs.catalog_feed import resolve_catalog_segments
+
+    client: MagicMock = MagicMock()
+    client.get_dataset.return_value = MagicMock(spec=DatasetEntry)
+    dataset: MagicMock = client.get_dataset.return_value
+    dataset.manifest.return_value.to_arrow_table.return_value = pa.table(
+        {"rerun_segment_id": ["first", "first", "second", "second"], "rerun_layer_name": ["base", "gt", "base", "gt"]}
+    )
+    monkeypatch.setattr(catalog_feed, "CatalogClient", lambda _url: client)
+    resolved: tuple[CatalogSegment, ...] = resolve_catalog_segments(
+        (CatalogSegment("test", "dataset", "first"), CatalogSegment("test", "dataset", "second")), require_ground_truth=require_truth
+    )
+    assert [source.segment_id for source in resolved] == ["first", "second"]
+    assert all(source.dataset is dataset and source.has_ground_truth for source in resolved)
+    client.get_dataset.assert_called_once_with("dataset")
+    dataset.manifest.assert_called_once_with()
+
+
+@pytest.mark.parametrize(("segment", "require_truth", "error"), [("missing", False, "absent from catalog"), ("present", True, "ground-truth layer absent")])
+def test_catalog_resolution_refuses_missing_inputs(monkeypatch: pytest.MonkeyPatch, segment: str, require_truth: bool, error: str) -> None:
+    from unittest.mock import MagicMock
+
+    from slam_rs import catalog_feed
+    from slam_rs.catalog_feed import resolve_catalog_segments
+
+    client: MagicMock = MagicMock()
+    client.get_dataset.return_value = MagicMock(spec=DatasetEntry)
+    client.get_dataset.return_value.manifest.return_value.to_arrow_table.return_value = pa.table(
+        {"rerun_segment_id": ["present"], "rerun_layer_name": ["base"]}
+    )
+    monkeypatch.setattr(catalog_feed, "CatalogClient", lambda _url: client)
+    with pytest.raises(ValueError, match=error):
+        resolve_catalog_segments((CatalogSegment("test", "dataset", segment),), require_ground_truth=require_truth)
+    available: CatalogSegment = resolve_catalog_segments((CatalogSegment("test", "dataset", "present"),))[0]
+    assert available.dataset is not None
+    assert not available.has_ground_truth

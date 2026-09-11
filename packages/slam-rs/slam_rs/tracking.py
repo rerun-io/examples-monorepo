@@ -188,9 +188,10 @@ def run_segment(
     gpu: bool = False,
     profile: Literal["reference", "fast"] = "fast",
     catalog: str | None = None,
+    source: CatalogSegment | None = None,
 ) -> SegmentRun:
     """Replay an MSD segment from the catalog with its dataset configuration."""
-    source: CatalogSegment = CatalogSegment(catalog or manifest.catalog_url, segment.dataset_name, segment.segment_id)
+    source = source or CatalogSegment(catalog or manifest.catalog_url, segment.dataset_name, segment.segment_id)
     feed: SegmentFeed
     with open_segment(source, segment.imu) as feed:
         flow: _core.VioConfig

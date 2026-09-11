@@ -37,14 +37,13 @@ Five decisions are frozen here because each one silently changes the numbers:
 """
 
 import hashlib
-import math
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import BytesIO
 from os import PathLike
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import TypeAlias
 
 import av
 import numpy as np
@@ -56,6 +55,40 @@ from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name, wrap_mp4
 
+from slam_rs.catalog_calibration import (
+    CHILD_FROM_PARENT as CHILD_FROM_PARENT,
+)
+from slam_rs.catalog_calibration import (
+    CameraCalib as CameraCalib,
+)
+from slam_rs.catalog_calibration import (
+    CameraModelName as CameraModelName,
+)
+from slam_rs.catalog_calibration import (
+    CameraStatics as CameraStatics,
+)
+from slam_rs.catalog_calibration import (
+    ImuCalib as ImuCalib,
+)
+from slam_rs.catalog_calibration import (
+    camera_calib as camera_calib,
+)
+from slam_rs.catalog_calibration import (
+    imu_calib as imu_calib,
+)
+from slam_rs.catalog_calibration import (
+    scale_principal_point as scale_principal_point,
+)
+from slam_rs.catalog_timing import (
+    ImuStream as ImuStream,
+)
+from slam_rs.catalog_timing import _frame_nearest_anchor as _frame_nearest_anchor
+from slam_rs.catalog_timing import (
+    match_framesets as match_framesets,
+)
+from slam_rs.catalog_timing import (
+    pair_accel_onto_gyro as pair_accel_onto_gyro,
+)
 from slam_rs.reference import ImuParameters, RobocapReference
 from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, empty_trajectory, shift_clock
 
@@ -65,125 +98,8 @@ IMU_ENTITY: str = "/world/rig_00/imu_00"
 """IMU node, whose transform is the identity because the IMU *is* the rig frame."""
 TIMELINE: str = "video_time"
 """The one index both datasets carry: nanoseconds since ``property:capture:start_time_ns``."""
-CHILD_FROM_PARENT: int = 2
-"""``rr.TransformRelation.ChildFromParent``; the only relation the extrinsic inversion is valid for."""
 DEFAULT_WINDOW_S: float = 60.0
 """Time window a long segment is cut into: a 7.6 s two-camera segment is 8.5 MB, so a 2,000 s one is not one query."""
-
-CameraModelName: TypeAlias = Literal["kb4", "radtan8"]
-"""Projection models V0 supports, using the accepted calibration names."""
-
-_MODEL_BY_DISTORTION: dict[str, tuple[CameraModelName, int]] = {"kannala_brandt": ("kb4", 4), "brown_conrady": ("radtan8", 8)}
-"""``simplecv.components.DistortionModel`` string to the model and the number of coefficients it uses."""
-
-
-@dataclass(slots=True, frozen=True)
-class CameraStatics:
-    """One camera node's static components, exactly as the catalog stores them.
-
-    This is the untouched read side: column-major matrices, ``(width, height)``
-    resolution, the raw relation code and the full fixed-width coefficient list.
-    :func:`camera_calib` is the only place the conversion rules live, which is
-    what lets them be tested without a catalog.
-    """
-
-    distortion_model: str
-    """``simplecv.components.DistortionModel``, e.g. ``kannala_brandt``.
-
-    The projection model comes from here and not from the camera node's own
-    ``camera_model`` string, which the RoboCap conversion predates and some
-    writers omit.
-    """
-    distortion_coefficients: Float64[ndarray, " n_slots"]
-    """Fixed-width coefficient list; the unused tail is zero."""
-    image_from_camera: Float64[ndarray, " 9"]
-    """``Pinhole:image_from_camera``, flat and **column-major**."""
-    resolution_wh: Float64[ndarray, " 2"]
-    """``Pinhole:resolution``, ``(width, height)`` in pixels."""
-    transform_mat3x3: Float64[ndarray, " 9"]
-    """Camera ``Transform3D:mat3x3``, flat and **column-major**."""
-    transform_translation: Float64[ndarray, " 3"]
-    """Camera ``Transform3D:translation``."""
-    transform_relation: int
-    """``Transform3D:relation``; must be :data:`CHILD_FROM_PARENT`."""
-    distortion_valid_radius: float | None
-    """The valid radius ``rpmax``; present on msd-g2 only."""
-
-
-@dataclass(slots=True, frozen=True)
-class CameraCalib:
-    """One camera as the estimator wants it: metric intrinsics and ``imu_T_cam``."""
-
-    index: int
-    """Camera number the estimator knows this camera by, matching the order of a frameset's images.
-
-    On a rig fed whole that is also the rig index. Where
-    :attr:`RigProfile.camera_names` feeds a subset it is the position in that
-    list, and :attr:`SegmentFeed.camera_positions` maps it back to the rig — so
-    the keypoints, the images and the blueprint views all speak the estimator's
-    numbering and only the catalog reads speak the rig's.
-    """
-    width: int
-    """Decoded frame width in pixels."""
-    height: int
-    """Decoded frame height in pixels."""
-    fx: float
-    """Focal length along image x, pixels."""
-    fy: float
-    """Focal length along image y, pixels."""
-    cx: float
-    """Principal point x, pixels."""
-    cy: float
-    """Principal point y, pixels."""
-    model: CameraModelName
-    """Projection model."""
-    distortion: Float64[ndarray, " n_coeffs"]
-    """Exactly the coefficients the model uses: 4 for kb4, ``k1 k2 p1 p2 k3 k4 k5 k6`` for radtan8."""
-    distortion_valid_radius: float | None
-    """The valid radius ``rpmax``, when the recording carries one."""
-    imu_T_cam: Float64[ndarray, "4 4"]
-    """Camera pose in the IMU frame: the inverse of the stored ``ChildFromParent`` transform."""
-
-
-@dataclass(slots=True, frozen=True)
-class ImuCalib:
-    """The IMU as the estimator wants it: noise model plus the body transform."""
-
-    frequency_hz: float
-    """Nominal update rate, from the reference manifest."""
-    gyro_noise_std: float
-    """Gyroscope noise density."""
-    accel_noise_std: float
-    """Accelerometer noise density."""
-    gyro_bias_std: float
-    """Gyroscope bias random walk."""
-    accel_bias_std: float
-    """Accelerometer bias random walk."""
-    cam_time_offset_ns: int
-    """Added to a camera timestamp to reach the IMU clock."""
-    imu_T_body: Float64[ndarray, "4 4"]
-    """Body pose in the IMU frame; the identity whenever the rig reference is the IMU."""
-
-
-@dataclass(slots=True, frozen=True)
-class ImuStream:
-    """A segment's paired inertial measurements on one clock."""
-
-    t_ns: Int64[ndarray, " n_samples"]
-    """Sample timestamps, strictly increasing."""
-    gyro_rad_s: Float64[ndarray, "n_samples 3"]
-    """Angular velocity, rad/s."""
-    accel_m_s2: Float64[ndarray, "n_samples 3"]
-    """Linear acceleration, m/s^2."""
-
-    def __len__(self) -> int:
-        return int(self.t_ns.shape[0])
-
-    def between(self, first_ns: int, last_ns: int) -> "ImuStream":
-        """The samples with ``first_ns < t <= last_ns``, half-open at the start."""
-        keep: Bool[ndarray, " n_samples"] = (self.t_ns > first_ns) & (self.t_ns <= last_ns)
-        return ImuStream(t_ns=self.t_ns[keep], gyro_rad_s=self.gyro_rad_s[keep], accel_m_s2=self.accel_m_s2[keep])
-
 
 @dataclass(slots=True, frozen=True)
 class Frameset:
@@ -246,6 +162,37 @@ class CatalogSegment:
     """Dataset entry name on that server."""
     segment_id: str
     """Segment within the dataset."""
+    dataset: DatasetEntry | None = None
+    """Resolved dataset handle; absent until availability has been checked."""
+    has_ground_truth: bool = False
+    """Whether the resolved segment has a ground-truth layer."""
+
+
+def resolve_catalog_segments(sources: Sequence[CatalogSegment], require_ground_truth: bool = False) -> tuple[CatalogSegment, ...]:
+    """Resolve segment availability with one manifest query per catalog dataset.
+
+    Resolved handles can be passed to ``open_segment`` without another lookup.
+    Ground-truth requirements are selected by the caller's scoring policy.
+    """
+    datasets: dict[tuple[str, str], DatasetEntry] = {}
+    layers: dict[tuple[str, str], dict[str, set[str]]] = {}
+    resolved: list[CatalogSegment] = []
+    for source in sources:
+        key: tuple[str, str] = (source.url, source.dataset_name)
+        if key not in datasets:
+            dataset: DatasetEntry = CatalogClient(source.url).get_dataset(source.dataset_name)
+            datasets[key] = dataset
+            layers[key] = {}
+            table: pa.Table = dataset.manifest().to_arrow_table().select(["rerun_segment_id", "rerun_layer_name"])
+            for row in table.to_pylist():
+                layers[key].setdefault(row["rerun_segment_id"], set()).add(row["rerun_layer_name"])
+        if source.segment_id not in layers[key]:
+            raise ValueError(f"{source.segment_id}: absent from catalog")
+        has_gt: bool = "gt" in layers[key][source.segment_id]
+        if require_ground_truth and not has_gt:
+            raise ValueError(f"{source.segment_id}: ground-truth layer absent")
+        resolved.append(replace(source, dataset=datasets[key], has_ground_truth=has_gt))
+    return tuple(resolved)
 
 
 SegmentSource: TypeAlias = LocalSegment | CatalogSegment
@@ -311,101 +258,6 @@ class RigProfile:
 
 MSD_RIG: RigProfile = RigProfile()
 """The Monado SLAM Dataset rigs: every camera, native resolution, one clock, paired inertial channels."""
-
-
-def scale_principal_point(value: float, downscale: int) -> float:
-    """Scale a principal-point coordinate by pixel centers.
-
-    A pixel at c has center c + 0.5. At downscale d its index becomes
-    (c + 0.5) / d - 0.5. This keeps calibration aligned with area-resampled pixels.
-    """
-    return (value + 0.5) / downscale - 0.5
-
-
-def camera_calib(index: int, statics: CameraStatics, downscale: int = 1) -> CameraCalib:
-    """Apply the catalog-to-estimator mapping rules to one camera's statics.
-
-    The rules, each of which has cost someone a wrong trajectory: reshape
-    ``image_from_camera`` column-major, read the resolution as ``(width, height)``,
-    map the distortion model string and assert the coefficient tail is zero
-    rather than truncating it, and invert the ``ChildFromParent`` transform to get
-    ``imu_T_cam``.
-
-    A ``downscale`` above one scales the resolution and the intrinsics to the
-    frames the feed will actually decode, KB4's resolution-invariant coefficients
-    untouched.
-
-    Args:
-        index: Camera index on the rig.
-        statics: Raw static components of the camera node.
-        downscale: Integer factor the frames are decoded at.
-
-    Returns:
-        The camera calibration in the estimator's conventions.
-
-    Raises:
-        ValueError: If the distortion model is unknown, the coefficient tail is
-            non-zero, the transform relation is not ``ChildFromParent``, or
-            ``downscale`` is below one.
-    """
-    if downscale < 1:
-        raise ValueError(f"cam_{index:02d}: downscale must be at least 1; got {downscale}")
-    width: int = int(statics.resolution_wh[0])
-    height: int = int(statics.resolution_wh[1])
-    if width // downscale < 1 or height // downscale < 1:
-        raise ValueError(f"cam_{index:02d}: downscale {downscale} leaves nothing of the {width}x{height} frame")
-    if statics.distortion_model not in _MODEL_BY_DISTORTION:
-        raise ValueError(f"cam_{index:02d}: unsupported distortion model {statics.distortion_model!r}, known: {sorted(_MODEL_BY_DISTORTION)}")
-    model: CameraModelName = _MODEL_BY_DISTORTION[statics.distortion_model][0]
-    n_coeffs: int = _MODEL_BY_DISTORTION[statics.distortion_model][1]
-    if statics.distortion_coefficients.shape[0] < n_coeffs:
-        raise ValueError(f"cam_{index:02d}: {model} needs {n_coeffs} coefficients, got {statics.distortion_coefficients.shape[0]}")
-    tail: Float64[ndarray, " n_tail"] = statics.distortion_coefficients[n_coeffs:]
-    # A "kannala_brandt" string does not imply KB4 — Aria's Fisheye624 carries the
-    # same string with eight live coefficients. Reject the tail, never truncate it.
-    if not np.allclose(tail, 0.0):
-        raise ValueError(f"cam_{index:02d}: {model} uses {n_coeffs} coefficients but the tail is non-zero: {tail.tolist()}")
-    if statics.transform_relation != CHILD_FROM_PARENT:
-        raise ValueError(f"cam_{index:02d}: Transform3D relation {statics.transform_relation} is not ChildFromParent({CHILD_FROM_PARENT})")
-    k_matrix: Float64[ndarray, "3 3"] = statics.image_from_camera.reshape(3, 3, order="F")
-    cam_R_imu: Float64[ndarray, "3 3"] = statics.transform_mat3x3.reshape(3, 3, order="F")
-    imu_T_cam: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
-    imu_T_cam[:3, :3] = cam_R_imu.T
-    imu_T_cam[:3, 3] = -cam_R_imu.T @ statics.transform_translation
-    return CameraCalib(
-        index=index,
-        width=width // downscale,
-        height=height // downscale,
-        fx=float(k_matrix[0, 0]) / downscale,
-        fy=float(k_matrix[1, 1]) / downscale,
-        cx=scale_principal_point(float(k_matrix[0, 2]), downscale),
-        cy=scale_principal_point(float(k_matrix[1, 2]), downscale),
-        model=model,
-        distortion=statics.distortion_coefficients[:n_coeffs].copy(),
-        distortion_valid_radius=statics.distortion_valid_radius,
-        imu_T_cam=imu_T_cam,
-    )
-
-
-def imu_calib(parameters: ImuParameters, imu_T_body: Float64[ndarray, "4 4"]) -> ImuCalib:
-    """Combine the manifest's frozen noise model with the recording's IMU transform.
-
-    Args:
-        parameters: Frozen IMU parameters from the reference manifest.
-        imu_T_body: Body pose in the IMU frame, the identity when the rig reference is the IMU.
-
-    Returns:
-        The IMU calibration the estimator is configured with.
-    """
-    return ImuCalib(
-        frequency_hz=parameters.rate_hz,
-        gyro_noise_std=parameters.gyro_noise_std,
-        accel_noise_std=parameters.accel_noise_std,
-        gyro_bias_std=parameters.gyro_bias_std,
-        accel_bias_std=parameters.accel_bias_std,
-        cam_time_offset_ns=parameters.cam_time_offset_ns,
-        imu_T_body=imu_T_body,
-    )
 
 
 def _flat_float(column: pa.Array) -> Float64[ndarray, " n_values"]:
@@ -836,110 +688,6 @@ def _window_bounds(index: _VideoIndex, window_ns: int) -> list[tuple[int, int]]:
     return bounds
 
 
-def _frame_nearest_anchor(times: Int64[ndarray, " n_frames"], cursor: int, anchor_t_ns: int, tolerance_ns: int) -> tuple[int | None, int]:
-    """Select a camera frame nearest the anchor, breaking ties towards the later frame.
-
-    Accept the inclusive tolerance. On an incomplete frameset, discard a selected
-    frame only if it is earlier than the anchor: it cannot serve a later anchor.
-    A future frame stays available. On completion, the caller advances past each
-    selected frame so no image is reused.
-
-    Args:
-        times: The camera's frame timestamps, in time order.
-        cursor: The first frame no earlier frameset has consumed.
-        anchor_t_ns: Camera 0's frame timestamp.
-        tolerance_ns: How far a frame may sit from the anchor's and still join it.
-
-    Returns:
-        The frame this camera contributes, or ``None`` if it has none within the
-        tolerance, and the cursor this camera stands on if the frameset falls.
-    """
-    index: int = cursor
-    if index >= len(times):
-        return None, cursor
-    while index + 1 < len(times) and abs(int(times[index + 1]) - anchor_t_ns) <= abs(int(times[index]) - anchor_t_ns):
-        index += 1
-    if abs(int(times[index]) - anchor_t_ns) > tolerance_ns:
-        return None, (index + 1 if int(times[index]) < anchor_t_ns else cursor)
-    return index, cursor
-
-
-def match_framesets(camera_t_ns: Sequence[Int64[ndarray, " n_frames"]], tolerance_ns: int) -> tuple[Int64[ndarray, " n_framesets"], Int64[ndarray, "n_framesets n_cameras"]]:
-    """Group camera frames around camera 0 anchors.
-
-    Every camera must have a nearest frame within the inclusive tolerance.
-    Use the median timestamp; for even counts, use the lower middle plus half
-    the integer gap. Complete framesets consume all selected images once.
-    Incomplete ones discard only frames earlier than the anchor.
-    Allow max(1, ceil(interior_anchors * 0.001)) incomplete interior anchors;
-    exterior anchors do not count against the rig.
-
-    Args:
-        camera_t_ns: Each fed camera's frame timestamps, in time order.
-        tolerance_ns: How far a frame may sit from the anchor's and still join it.
-
-    Returns:
-        The frameset timestamps, and the frame each camera contributes to each.
-
-    Raises:
-        ValueError: If no camera was given, a camera has no frames, the frameset
-            timestamps do not strictly increase, too many interior framesets are
-            incomplete, or no frameset is complete.
-    """
-    if not camera_t_ns:
-        raise ValueError("a frameset needs at least one camera")
-    for position, times in enumerate(camera_t_ns):
-        if times.size == 0:
-            raise ValueError(f"camera {position} has no frames, so it is not part of this recording")
-    # The span every camera covers: only an anchor inside it can be expected to
-    # have partners, so only a drop inside it counts against the run.
-    overlap_start: int = max(int(times[0]) for times in camera_t_ns)
-    overlap_end: int = min(int(times[-1]) for times in camera_t_ns)
-    cursors: list[int] = [0] * len(camera_t_ns)
-    t_ns: list[int] = []
-    rows: list[list[int]] = []
-    interior_anchors: int = 0
-    interior_drops: int = 0
-    for anchor_index, anchor_t_ns in enumerate(camera_t_ns[0].tolist()):
-        interior: bool = overlap_start <= anchor_t_ns <= overlap_end
-        interior_anchors += interior
-        row: list[int] = [anchor_index]
-        # Where each camera would land: commit these to the cursors only
-        # once the whole frameset stands.
-        selected: list[int] = list(cursors)
-        for position in range(1, len(camera_t_ns)):
-            # The cursor this camera stands on if the frameset falls: a camera that
-            # fell behind can never catch this anchor again, one running ahead keeps
-            # its frame. On the frameset standing, that value is where it already was.
-            index, cursors[position] = _frame_nearest_anchor(camera_t_ns[position], cursors[position], anchor_t_ns, tolerance_ns)
-            if index is None:
-                break
-            selected[position] = index
-            row.append(index)
-        if len(row) != len(camera_t_ns):
-            interior_drops += interior
-            continue
-        for position in range(1, len(camera_t_ns)):
-            cursors[position] = selected[position] + 1
-        members: list[int] = sorted(int(camera_t_ns[position][frame]) for position, frame in enumerate(row))
-        middle: int = len(members) // 2
-        frameset_t_ns: int = members[middle] if len(members) % 2 else members[middle - 1] + (members[middle] - members[middle - 1]) // 2
-        if t_ns and frameset_t_ns <= t_ns[-1]:
-            raise ValueError(f"frameset timestamps are not strictly increasing: {frameset_t_ns} follows {t_ns[-1]}")
-        t_ns.append(frameset_t_ns)
-        rows.append(row)
-    # Allow one interior drop per thousand anchors, with a minimum of one.
-    allowed_drops: int = max(1, math.ceil(interior_anchors * 0.001))
-    if interior_drops > allowed_drops:
-        raise ValueError(
-            f"{interior_drops} of {interior_anchors} interior framesets are incomplete, more than the {allowed_drops} "
-            f"basalt allows: the cameras are not one recording within {tolerance_ns} ns"
-        )
-    if not rows:
-        raise ValueError(f"no frameset has all {len(camera_t_ns)} cameras within {tolerance_ns} ns of camera 0")
-    return np.array(t_ns, dtype=np.int64), np.array(rows, dtype=np.int64)
-
-
 def _video_codec(table: pa.Table, entity: str) -> CatalogCodecName:
     """The codec every sample of one camera's stream is in.
 
@@ -1098,59 +846,6 @@ def _read_imu(dataset: DatasetEntry, segment_id: str, interpolate_accel: bool, f
             )
         return ImuStream(t_ns=gyro_t_ns, gyro_rad_s=streams["gyro"][1], accel_m_s2=streams["accel"][1])
     return pair_accel_onto_gyro(gyro_t_ns, streams["gyro"][1], accel_t_ns, streams["accel"][1])
-
-
-def pair_accel_onto_gyro(
-    gyro_t_ns: Int64[ndarray, " n_gyro"],
-    gyro_rad_s: Float64[ndarray, "n_gyro 3"],
-    accel_t_ns: Int64[ndarray, " n_accel"],
-    accel_m_s2: Float64[ndarray, "n_accel 3"],
-) -> ImuStream:
-    """Linearly interpolate the accelerometer onto the gyroscope's timestamps.
-
-    A gyroscope sample outside the accelerometer's own span is dropped rather
-    than held at an endpoint: ``numpy.interp`` clamps, which would feed the
-    estimator a constant acceleration over a stretch it has no measurement for.
-    Require accelerometer coverage on both sides of each retained gyroscope sample.
-
-    Args:
-        gyro_t_ns: Gyroscope timestamps, strictly increasing.
-        gyro_rad_s: Angular velocity, rad/s.
-        accel_t_ns: Accelerometer timestamps, non-decreasing; a repeated one keeps its first sample.
-        accel_m_s2: Linear acceleration, m/s^2.
-
-    Returns:
-        One stream on the gyroscope's clock, covering only the overlap.
-
-    Raises:
-        ValueError: If a channel is too short to interpolate with, or the two
-            spans do not overlap, so the paired stream would be empty.
-    """
-    # Deduplicate both channels before pairing, keeping the first
-    # sample of each equal-timestamp run. Keeping the second duplicate would
-    # change interpolation across the following gap.
-    first_of_run: Bool[ndarray, " n_accel"] = np.ones(accel_t_ns.size, dtype=bool)
-    first_of_run[1:] = np.diff(accel_t_ns) != 0
-    accel_t_ns = accel_t_ns[first_of_run]
-    accel_m_s2 = accel_m_s2[first_of_run]
-    if gyro_t_ns.size == 0 or accel_t_ns.size < 2:
-        raise ValueError(
-            f"pairing needs a gyroscope sample and two accelerometer samples to interpolate between; "
-            f"got {gyro_t_ns.size} gyro and {accel_t_ns.size} accel samples"
-        )
-    inside: Bool[ndarray, " n_gyro"] = (gyro_t_ns >= accel_t_ns[0]) & (gyro_t_ns <= accel_t_ns[-1])
-    if not bool(inside.any()):
-        # Refuse an empty inertial stream:
-        # this rig requires paired IMU measurements.
-        raise ValueError(
-            f"the two inertial channels do not overlap, so nothing pairs: the gyroscope spans "
-            f"{int(gyro_t_ns[0])}..{int(gyro_t_ns[-1])} ns and the accelerometer {int(accel_t_ns[0])}..{int(accel_t_ns[-1])} ns"
-        )
-    paired_t_ns: Int64[ndarray, " n_paired"] = gyro_t_ns[inside]
-    interpolated: Float64[ndarray, "n_paired 3"] = np.column_stack(
-        [np.interp(paired_t_ns, accel_t_ns, accel_m_s2[:, axis]) for axis in range(accel_m_s2.shape[1])]
-    )
-    return ImuStream(t_ns=paired_t_ns, gyro_rad_s=gyro_rad_s[inside], accel_m_s2=interpolated)
 
 
 def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, last_ns: int) -> Trajectory:
@@ -1353,10 +1048,9 @@ def open_segment(
                 raise ValueError(f"{source.base_rrd} holds {len(segment_ids)} segments; the feed reads one")
             yield _build_feed(base, ground_truth, segment_ids[0], parameters, profile, frame_stride, window_s)
     else:
-        dataset: DatasetEntry = CatalogClient(source.url).get_dataset(source.dataset_name)
-        layers: pa.Table = dataset.manifest().to_arrow_table()
-        has_gt: bool = any(
-            row["rerun_segment_id"] == source.segment_id and row["rerun_layer_name"] == "gt"
-            for row in layers.select(["rerun_segment_id", "rerun_layer_name"]).to_pylist()
+        resolved: CatalogSegment = source if source.dataset is not None else resolve_catalog_segments((source,))[0]
+        assert resolved.dataset is not None
+        yield _build_feed(
+            resolved.dataset, resolved.dataset if resolved.has_ground_truth else None,
+            resolved.segment_id, parameters, profile, frame_stride, window_s,
         )
-        yield _build_feed(dataset, dataset if has_gt else None, source.segment_id, parameters, profile, frame_stride, window_s)

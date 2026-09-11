@@ -7,10 +7,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
 
-import pyarrow as pa
-from rerun.catalog import CatalogClient, DatasetEntry
-
 from slam_rs import _core
+from slam_rs.catalog_feed import CatalogSegment, resolve_catalog_segments
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb
 from slam_rs.reference import (
     GATE_RATIO,
@@ -82,26 +80,20 @@ class ClipResult:
         return f"| {machine.hostname} | {self.segment_id} | {self.measurement.framesets}/{self.measurement.tracked}/{self.measurement.lost} | GT {self.measurement.gt_rmse_cm:.3f} cm | tracker {self.measurement.median_tracker_ms:.3f} ms; {speed} | {self.verdict} |"
 
 
-def check_scoring_inputs(manifest: ReferenceManifest, segment: ReferenceSegment, catalog: str | None = None) -> None:
-    """Require the catalog segment and its ground-truth layer before replay."""
-    dataset: DatasetEntry = CatalogClient(catalog or manifest.catalog_url).get_dataset(segment.dataset_name)
-    if segment.segment_id not in dataset.segment_ids():
-        raise ValueError(f"{segment.segment_id}: absent from catalog")
-    layers: pa.Table = dataset.manifest().to_arrow_table().select(["rerun_segment_id", "rerun_layer_name"])
-    if not any(row["rerun_segment_id"] == segment.segment_id and row["rerun_layer_name"] == "gt" for row in layers.to_pylist()):
-        raise ValueError(f"{segment.segment_id}: ground-truth layer absent")
-
-
 def measure(
     manifest: ReferenceManifest,
     segment: ReferenceSegment,
     gpu: bool = False,
     profile: Literal["reference", "fast"] = "fast",
     catalog: str | None = None,
+    source: CatalogSegment | None = None,
 ) -> ClipResult:
     """Replay a catalog segment and associate estimates with ground truth."""
-    check_scoring_inputs(manifest, segment, catalog)
-    run: SegmentRun = run_segment(manifest, segment, gpu=gpu, profile=profile, catalog=catalog)
+    if source is None:
+        source = resolve_catalog_segments((CatalogSegment(catalog or manifest.catalog_url, segment.dataset_name, segment.segment_id),), require_ground_truth=True)[0]
+    if not source.has_ground_truth:
+        raise ValueError(f"{segment.segment_id}: ground-truth layer absent")
+    run: SegmentRun = run_segment(manifest, segment, gpu=gpu, profile=profile, source=source)
     scoring: ScoringResult = score_trajectory(run.estimate, run.ground_truth)
     against_gt: AteResult | None = scoring.result
     lane: Lane = this_lane(gpu)
@@ -181,15 +173,17 @@ def main(config: Config) -> None:
     )
     if not segments:
         raise ValueError("--segments named no clip")
-    for segment in segments:
-        check_scoring_inputs(manifest, segment, config.catalog)
+    sources: tuple[CatalogSegment, ...] = resolve_catalog_segments(
+        tuple(CatalogSegment(config.catalog or manifest.catalog_url, segment.dataset_name, segment.segment_id) for segment in segments),
+        require_ground_truth=True,
+    )
     machine: Machine = this_machine()
     core_sha256: str = hashlib.sha256(Path(_core.__file__).read_bytes()).hexdigest()
     results: list[ClipResult] = []
     config_digests: dict[str, str] = {}
     config.output_json.parent.mkdir(parents=True, exist_ok=True)
-    for segment in segments:
-        result: ClipResult = measure(manifest, segment, config.gpu, config.profile, config.catalog)
+    for segment, source in zip(segments, sources, strict=True):
+        result: ClipResult = measure(manifest, segment, config.gpu, config.profile, source=source)
         if segment.dataset_name in config_digests and config_digests[segment.dataset_name] != result.config_sha256:
             raise RuntimeError(f"{segment.dataset_name}: configuration changed during replay")
         config_digests[segment.dataset_name] = result.config_sha256
