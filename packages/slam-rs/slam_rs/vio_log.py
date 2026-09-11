@@ -15,7 +15,7 @@ from slam_rs import _core
 from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream, SegmentFeed
 from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints, track_colors
 from slam_rs.tracking import Lockstep
-from slam_rs.trajectory import MIN_ASSOCIATED_POSES, Association, AteResult, Trajectory, associate, ate, rigid_alignment
+from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, Trajectory, ate
 
 FrameMode: TypeAlias = Literal["downscaled", "jpeg", "off"]
 """How a replay's input rung draws the frames it was fed.
@@ -65,32 +65,6 @@ ROUTE_RADIUS_M: float = 0.0015
 
 IDENTITY: SimilarityTransform = SimilarityTransform(dst_R_src=np.eye(3), dst_t_src=np.zeros(3), scale=1.0)
 """The alignment a run carries before enough of it has been associated with the ground truth."""
-
-
-def alignment_onto(source: Trajectory, target: Trajectory) -> SimilarityTransform:
-    """The rigid transform taking one trajectory into another's frame.
-
-    The association is driven by ``source`` — each of its poses takes the nearest
-    ``target`` pose within the tolerance — which is the convention the reference
-    manifest's own numbers were produced with.
-
-    Args:
-        source: Trajectory to move, e.g. the estimate.
-        target: Trajectory whose frame to move it into, e.g. the ground truth.
-
-    Returns:
-        The alignment, or the identity when too few poses associate for one to
-        mean anything.
-    """
-    if len(source) == 0 or len(target) == 0:
-        return IDENTITY
-    association: Association = associate(source, target)
-    if association.count < MIN_ASSOCIATED_POSES:
-        return IDENTITY
-    return rigid_alignment(
-        source.position_m[association.matched],
-        target.position_m[association.candidate_index[association.matched]],
-    )
 
 
 def at_frameset_cadence(trajectory: Trajectory, frame_t_ns: Int64[ndarray, " n_frames"]) -> Trajectory:
@@ -316,13 +290,13 @@ class VioLogger:
             rr.log(entity, rr.LineStrips3D([trajectory.position_m], colors=(*color, ROUTE_ALPHA), radii=ROUTE_RADIUS_M), static=True)
 
     def _log_paths(self) -> None:
-        """Draw the segment each of the three trajectories gained at this cursor.
+        """Draw the segment each trajectory gained at this cursor.
 
         One two-point strip a line a frameset, ending on the newest pose at or
         before the cursor: the view's visible time range (:func:`vio_blueprint`)
         is what accumulates them into the path so far, and a reference that has
         no second pose yet draws nothing. Each is logged in its own frame; the
-        run entities' alignment transforms are what bring the three together in
+        run entities' alignment transforms are what bring them together in
         the dataset's world.
 
         The estimate's segment is taken from the two poses this run last
@@ -333,10 +307,10 @@ class VioLogger:
         if len(self.estimate_position_m) >= 2:
             segment: Float64[ndarray, "2 3"] = np.array(self.estimate_position_m[-2:], dtype=np.float64)
             rr.log(f"{RUN_ENTITY}/trajectory", rr.LineStrips3D([segment], colors=ESTIMATE_COLOR, radii=0.004))
-        for entity, trajectory, color in ((GT_ENTITY, self.ground_truth_strip, GT_COLOR),):
-            drawn: int = int(np.searchsorted(trajectory.t_ns, t_ns, side="right"))
-            if drawn >= 2:
-                rr.log(f"{entity}/trajectory", rr.LineStrips3D([trajectory.position_m[drawn - 2 : drawn]], colors=color, radii=0.004))
+        drawn: int = int(np.searchsorted(self.ground_truth_strip.t_ns, t_ns, side="right"))
+        if drawn < 2:
+            return
+        rr.log(f"{GT_ENTITY}/trajectory", rr.LineStrips3D([self.ground_truth_strip.position_m[drawn - 2 : drawn]], colors=GT_COLOR, radii=0.004))
 
     def _log_window(self, snapshot: _core.VioSnapshot) -> None:
         """Draw a frustum wireframe at every window pose, coloured by what the frame is."""
@@ -401,7 +375,7 @@ class VioLogger:
             rr.log(f"{VIO_STATS_ENTITY}/stage_ms/{stage}", rr.Scalars(milliseconds))
 
     def _log_ate(self, estimated: Trajectory) -> AteResult | None:
-        """Log the rigid-aligned error of everything reported so far, against both references.
+        """Log the rigid-aligned error of everything reported so far, against ground truth.
 
         Args:
             estimated: Everything reported so far.
@@ -409,18 +383,15 @@ class VioLogger:
         Returns:
             The error against the ground truth, whose alignment is also what
             places the run's subtree, or None where too few poses associated for
-            either number to mean anything.
+            the number to mean anything.
         """
-        scored: AteResult | None = None
-        for name, reference in (("gt", self.ground_truth),):
-            if len(reference) == 0 or len(estimated) < MIN_ASSOCIATED_POSES:
-                continue
-            result: AteResult = ate(estimated, reference)
-            if result.n_associated >= MIN_ASSOCIATED_POSES:
-                rr.log(f"{VIO_STATS_ENTITY}/ate_cm/{name}", rr.Scalars(100.0 * result.rmse_m))
-                if name == "gt":
-                    scored = result
-        return scored
+        if len(self.ground_truth) == 0 or len(estimated) < MIN_ASSOCIATED_POSES:
+            return None
+        result: AteResult = ate(estimated, self.ground_truth)
+        if result.n_associated < MIN_ASSOCIATED_POSES:
+            return None
+        rr.log(f"{VIO_STATS_ENTITY}/ate_cm/gt", rr.Scalars(100.0 * result.rmse_m))
+        return result
 
 
 def log_calibration(cameras: tuple[CameraCalib, ...]) -> None:

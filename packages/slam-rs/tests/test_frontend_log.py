@@ -63,7 +63,7 @@ def replay(frontend: FrontendFactory, texture: TextureFactory, read_rows: RowsRe
 
     def run(tmp_path: Path, framesets: int, segment_id: str) -> ReplayResult:
         flow: _core.OpticalFlow = frontend(2)
-        logger: FrontendLogger = FrontendLogger(2, segment_id)
+        logger: FrontendLogger = FrontendLogger(2)
         tmp_path.mkdir(parents=True, exist_ok=True)
         output: Path = tmp_path / "frontend.rrd"
         rr.init("slam-rs-frontend-log-test", recording_id=f"{segment_id}-{framesets}")
