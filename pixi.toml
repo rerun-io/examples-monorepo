@@ -2451,6 +2451,11 @@ depends-on = ["slam-rs-patch-deps"]
 cmd = "cargo build --release -p slam-rs-py && cp target/release/$CORE_CDYLIB slam_rs/_core.so"
 cwd = "packages/slam-rs"
 inputs = [
+    "packages/slam-rs/patches/**",
+    "packages/slam-rs/slam_rs/apis/prepare_patched_deps.py",
+    "packages/slam-rs/tools/prepare_patched_deps.py",
+    "packages/slam-rs/target/patch/cubecl-common-0.11.0-pre.3/**",
+    "packages/slam-rs/target/patch/cubecl-common-0.11.0-pre.3/.prepared-sha256",
     "packages/slam-rs/Cargo.toml",
     "packages/slam-rs/Cargo.lock",
     "packages/slam-rs/.cargo/config.toml",
@@ -2532,6 +2537,11 @@ depends-on = ["slam-rs-patch-deps"]
 cmd = "cargo build --release -p slam-rs-py --features gpu-wgpu && cp target/release/$CORE_CDYLIB slam_rs/_core.so"
 cwd = "packages/slam-rs"
 inputs = [
+    "packages/slam-rs/patches/**",
+    "packages/slam-rs/slam_rs/apis/prepare_patched_deps.py",
+    "packages/slam-rs/tools/prepare_patched_deps.py",
+    "packages/slam-rs/target/patch/cubecl-common-0.11.0-pre.3/**",
+    "packages/slam-rs/target/patch/cubecl-common-0.11.0-pre.3/.prepared-sha256",
     "packages/slam-rs/Cargo.toml",
     "packages/slam-rs/Cargo.lock",
     "packages/slam-rs/.cargo/config.toml",
