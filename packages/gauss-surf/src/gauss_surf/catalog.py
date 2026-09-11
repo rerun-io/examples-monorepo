@@ -97,6 +97,25 @@ class SegmentReader:
         dataset: DatasetEntry = client.get_dataset(dataset_name)
         return cls(dataset, video_id)
 
+    @classmethod
+    def bind(cls, dataset: DatasetEntry, segment_row: dict[str, Any]) -> "SegmentReader":
+        """Bind a reader to a segment whose table row the caller already holds.
+
+        Batch stages read the whole segment table once and then process many
+        segments, so each reader reuses that row instead of rescanning the
+        table (about three seconds per scan on the 5,015-segment dataset).
+
+        Args:
+            dataset: Catalog dataset entry containing the segment.
+            segment_row: Segment-table row carrying ``rerun_segment_id``.
+
+        Returns:
+            A reader whose segment-table row is already resolved.
+        """
+        reader: SegmentReader = cls(dataset, str(segment_row["rerun_segment_id"]))
+        reader._cached_row = segment_row
+        return reader
+
     def row(self) -> dict[str, Any]:
         """Return the unique segment-table row, loading and caching it on first use."""
         if self._cached_row is not None:
