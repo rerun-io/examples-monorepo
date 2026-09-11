@@ -158,7 +158,7 @@ class Config:
     """The ``.npz`` of decoded framesets to replay; a sibling ``.calib.pkl`` carries the calibration."""
     config: Path
     """The basalt VIO config JSON the reference run used."""
-    profile: Literal["reference", "fast"] = "reference"
+    profile: Literal["reference", "fast"] = "fast"
     """Config overlay applied before tracking."""
     lanes: tuple[Lane, ...] = ("cpu", "gpu")
     """Backends to interleave, in the order each round runs them."""

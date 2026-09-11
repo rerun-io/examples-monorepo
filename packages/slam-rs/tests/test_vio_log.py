@@ -33,7 +33,6 @@ from slam_rs import _core, vio_log
 from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CameraCalib
 from slam_rs.trajectory import AteResult, Trajectory, ate, empty_trajectory
 from slam_rs.vio_log import (
-    CPP_ENTITY,
     GT_ENTITY,
     IDENTITY,
     IMAGE_PLANE_M,
@@ -97,7 +96,7 @@ def drive(
     rr.init("slam-rs-vio-log-test", recording_id=f"vio-log-{output.parent.name}")
     rr.save(output)
     frame_t_ns: Int64[ndarray, " n_frames"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
-    logger: VioLogger = VioLogger(cameras=cameras, ground_truth=references, cpp=references, frame_t_ns=frame_t_ns)
+    logger: VioLogger = VioLogger(cameras=cameras, ground_truth=references, frame_t_ns=frame_t_ns)
     tracked: list[int] = []
     for step in range(FRAMESETS):
         t_ns: int = step * FRAME_PERIOD_NS
@@ -252,7 +251,7 @@ def test_the_estimated_path_gains_one_segment_a_frameset(logged: Logged) -> None
 
 def test_a_reference_segment_ends_at_the_cursor_and_no_further(logged: Logged) -> None:
     """A reference known in advance still stops where the estimate has got to."""
-    for entity in (f"{GT_ENTITY}/trajectory", f"{CPP_ENTITY}/trajectory"):
+    for entity in (f"{GT_ENTITY}/trajectory",):
         rows: list[Row] = logged.rows[entity]
         # One reference pose every frame interval, from zero, so a cursor before
         # the second one has no segment to draw.
@@ -269,9 +268,9 @@ def test_a_reference_segment_ends_at_the_cursor_and_no_further(logged: Logged) -
 def test_the_whole_paths_are_logged_once_at_the_end(logged: Logged) -> None:
     """One static row per path, so a viewer opened at any cursor sees where each run went."""
     strips: dict[str, int] = static_path_lengths(logged.recording)
-    assert sorted(strips) == sorted([f"{RUN_ENTITY}/path", f"{GT_ENTITY}/path", f"{CPP_ENTITY}/path"])
+    assert sorted(strips) == sorted([f"{RUN_ENTITY}/path", f"{GT_ENTITY}/path"])
     assert strips[f"{RUN_ENTITY}/path"] == len(logged.tracked)
-    assert strips[f"{GT_ENTITY}/path"] == strips[f"{CPP_ENTITY}/path"] == FRAMESETS
+    assert strips[f"{GT_ENTITY}/path"] == FRAMESETS
 
 
 def test_the_plotted_ate_is_the_estimate_driven_one(
@@ -330,11 +329,6 @@ def test_too_short_a_run_carries_no_alignment() -> None:
     assert alignment_onto(long, empty_trajectory()) is IDENTITY
 
 
-def test_the_cpp_reference_is_placed_once_at_the_first_tracked_frameset(logged: Logged) -> None:
-    """Both it and the ground truth are known up front, so its alignment never changes."""
-    rows: list[Row] = logged.rows[CPP_ENTITY]
-    assert [row.t_ns for row in rows] == logged.tracked[:1]
-    assert "Transform3D:translation" in rows[0].values
 
 
 def test_the_keypoints_land_on_the_camera_images(logged: Logged) -> None:
@@ -350,7 +344,6 @@ def test_a_run_without_references_still_logs_everything_else(pipeline: PipelineF
     logger: VioLogger = VioLogger(
         cameras=(camera(0, 0.0), camera(1, 0.1)),
         ground_truth=empty_trajectory(),
-        cpp=empty_trajectory(),
         frame_t_ns=np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64),
     )
     assert len(logger.estimated()) == 0
@@ -397,7 +390,6 @@ def test_only_the_three_paths_reach_back_to_the_start_of_the_recording(camera: C
     """
     world: rrb.View = views_of(vio_blueprint((camera(0, 0.0), camera(1, 0.1))).root_container)[0]
     assert sorted(str(entity) for entity in world.visualizer_overrides) == [
-        f"{CPP_ENTITY}/trajectory",
         f"{GT_ENTITY}/trajectory",
         f"{RUN_ENTITY}/trajectory",
     ]
@@ -424,7 +416,7 @@ def test_every_logged_counter_sits_in_exactly_one_time_series_view(logged: Logge
     that, so the recording carries no row of it to read back.
     """
     counters: set[str] = {entity for entity in logged.rows if entity.startswith(VIO_STATS_ENTITY)}
-    counters |= {f"{VIO_STATS_ENTITY}/ate_cm/gt", f"{VIO_STATS_ENTITY}/ate_cm/cpp"}
+    counters |= {f"{VIO_STATS_ENTITY}/ate_cm/gt"}
     blueprint: rrb.Blueprint = vio_blueprint((camera(0, 0.0), camera(1, 0.1)))
     plotted: list[str] = []
     for view in views_of(blueprint.root_container):

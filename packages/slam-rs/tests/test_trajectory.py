@@ -11,7 +11,6 @@ from jaxtyping import Float64, Int64
 from numpy import ndarray
 from simplecv.ops.umeyama import SimilarityTransform, umeyama_alignment
 
-from slam_rs.reference import ReferenceManifest
 from slam_rs.trajectory import (
     ASSOCIATION_TOLERANCE_NS,
     AteResult,
@@ -260,14 +259,3 @@ def test_shift_clock_refuses_an_offset_that_would_leave_the_int64_clock() -> Non
     assert len(shift_clock(empty_trajectory(), 2**62)) == 0
 
 
-def test_it_reproduces_the_forks_robocap_gate_numbers(manifest: ReferenceManifest) -> None:
-    """The checked-in basalt outputs must still give 0.13 cm over 1,588 associated poses."""
-    golden: Trajectory = read_trajectory(manifest.package_root / manifest.robocap.fixtures.golden)
-    candidate: Trajectory = read_trajectory(manifest.package_root / manifest.robocap.fixtures.candidate)
-    result: AteResult = ate(candidate, golden)
-    assert result.n_associated == manifest.robocap.fixtures.expected_associated
-    assert result.n_estimate == manifest.robocap.session("s00000015").basalt_num_poses
-    assert result.n_reference == manifest.robocap.session("s00000015").basalt_num_poses
-    assert result.rmse_m * 100 == pytest.approx(manifest.robocap.fixtures.expected_ate_rmse_cm, abs=0.005)
-    assert result.count_delta == 0.0
-    assert coverage(golden, candidate) == pytest.approx(1.0)

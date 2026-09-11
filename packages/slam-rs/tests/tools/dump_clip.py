@@ -50,7 +50,7 @@ import tyro
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
-from slam_rs.catalog_feed import CameraCalib, Frameset, LocalSegment, SegmentFeed, open_segment
+from slam_rs.catalog_feed import CameraCalib, CatalogSegment, Frameset, SegmentFeed, open_segment
 from slam_rs.reference import ReferenceManifest, ReferenceSegment, load_manifest, resolved_flow_config
 
 FIXTURES: Path = Path(__file__).resolve().parents[2] / "crates/slam-rs/tests/fixtures"
@@ -235,7 +235,7 @@ def main(config: Config) -> None:
     dumped: int = 0
 
     with open_segment(
-        LocalSegment(base_rrd=segment.base_path, gt_rrd=None),
+        CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id),
         segment.imu,
         window_s=config.window_s,
     ) as feed:

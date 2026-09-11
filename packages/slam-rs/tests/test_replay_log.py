@@ -16,15 +16,12 @@ alone.
 from pathlib import Path
 
 import numpy as np
-import pytest
 import rerun as rr
 from fixture_types import IMU_PERIOD_NS, Rows, RowsReader
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 
-from slam_rs.apis.replay import _cpp_trajectory
 from slam_rs.catalog_feed import IMU_ENTITY, TIMELINE, ImuStream
-from slam_rs.reference import SMOKE_SEGMENTS, ReferenceManifest
 from slam_rs.vio_log import log_imu
 
 SAMPLES: int = 33
@@ -75,9 +72,3 @@ def test_a_frameset_without_samples_logs_nothing(tmp_path: Path, read_rows: Rows
     assert read_rows(output) == {}
 
 
-def test_the_cpp_reference_is_skipped_when_the_recording_is_another_segment(manifest: ReferenceManifest, capsys: pytest.CaptureFixture[str]) -> None:
-    """``--rrd`` on a clip the manifest entry does not describe gets no C++ comparison, not a failed association."""
-    segment = manifest.by_id(SMOKE_SEGMENTS[1])
-    assert len(_cpp_trajectory(manifest, segment, 0, "some-other-segment")) == 0
-    assert "no C++ comparison" in capsys.readouterr().out
-    assert len(_cpp_trajectory(manifest, segment, 0, segment.segment_id)) > 0

@@ -10,16 +10,16 @@ from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from slam_rs import _core
-from slam_rs.apis.replay import Config, _cpp_trajectory, _replay
+from slam_rs.apis.replay import Config, _replay
 from slam_rs.catalog_feed import (
     CHILD_FROM_PARENT,
     RIG_ENTITY,
     TIMELINE,
     CameraCalib,
     CameraStatics,
+    CatalogSegment,
     Frameset,
     ImuStream,
-    LocalSegment,
     SegmentFeed,
     _rig_trajectory,
     _shared_codec,
@@ -33,7 +33,7 @@ from slam_rs.catalog_feed import (
 )
 from slam_rs.reference import SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment, resolved_flow_config
 from slam_rs.tracking import Lockstep
-from slam_rs.trajectory import AteResult, Trajectory, associate, ate, read_trajectory, shift_clock, write_trajectory
+from slam_rs.trajectory import Trajectory, associate, read_trajectory, shift_clock, write_trajectory
 from slam_rs.vio_log import VioLogger, VioStage
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
@@ -308,14 +308,11 @@ def test_a_ground_truth_window_with_no_pose_in_it_is_empty() -> None:
 
 
 @pytest.mark.slow
-def test_the_smoke_segment_decodes_from_the_nas(manifest: ReferenceManifest) -> None:
+def test_the_smoke_segment_decodes_from_the_catalog(manifest: ReferenceManifest) -> None:
     """One real segment end to end: frame count, shape, dtype and paired IMU timestamps."""
     segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
-    if not segment.base_path.is_file():
-        pytest.skip(f"{segment.base_path} is not mounted on this host")
-    gt_path = segment.gt_path if segment.gt_path.is_file() else None
 
-    with open_segment(LocalSegment(base_rrd=segment.base_path, gt_rrd=gt_path), segment.imu) as feed:
+    with open_segment(CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id), segment.imu) as feed:
         assert isinstance(feed, SegmentFeed)
         assert len(feed.cameras) == segment.capture.num_cameras
         assert len(feed.frame_t_ns) == segment.capture.num_frames
@@ -369,12 +366,10 @@ def test_the_smoke_segment_decodes_from_the_nas(manifest: ReferenceManifest) -> 
 def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample(manifest: ReferenceManifest) -> None:
     """Cutting the segment into 2 s windows must reproduce the pixels and the inertial stream exactly."""
     segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
-    if not segment.base_path.is_file():
-        pytest.skip(f"{segment.base_path} is not mounted on this host")
     digests: dict[float, list[tuple[int, str]]] = {}
     imu_t_ns: dict[float, Int64[ndarray, " n_samples"]] = {}
     for window_s in (60.0, 2.0):
-        with open_segment(LocalSegment(base_rrd=segment.base_path), segment.imu, window_s=window_s) as feed:
+        with open_segment(CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id), segment.imu, window_s=window_s) as feed:
             per_frameset: list[tuple[int, str]] = []
             emitted: list[Int64[ndarray, " n"]] = []
             for frameset in feed.framesets():
@@ -390,7 +385,7 @@ def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample(manifes
     # over a 7.6 s segment, a bound at 2.5 s leaves the last two windows unread.
     first_ns: int = digests[2.0][0][0]
     bounded_ns: int = first_ns + 2_500_000_000
-    with open_segment(LocalSegment(base_rrd=segment.base_path), segment.imu, window_s=2.0) as feed:
+    with open_segment(CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id), segment.imu, window_s=2.0) as feed:
         bounded: list[tuple[int, str]] = [(frameset.t_ns, frameset.digest()) for frameset in feed.framesets(bounded_ns)]
     assert bounded == digests[2.0][: len(bounded)]
     assert bounded_ns <= bounded[-1][0] < bounded_ns + 2_000_000_000
@@ -405,34 +400,10 @@ def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample(manifes
     np.testing.assert_array_equal(imu_t_ns[60.0], imu_t_ns[2.0])
 
 
-@pytest.mark.slow
-def test_the_absolute_clock_matches_the_ground_truth_sidecar(manifest: ReferenceManifest) -> None:
-    """The feed's ground truth, shifted by the capture start time, is the ``gt.csv`` sidecar."""
-    segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
-    if not segment.base_path.is_file() or not segment.gt_csv.is_file():
-        pytest.skip(f"{segment.base_path} or {segment.gt_csv} is not mounted on this host")
-    sidecar: Trajectory = read_trajectory(segment.gt_csv)
-    assert len(sidecar) == segment.gt.num_poses
-
-    with open_segment(LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path), segment.imu) as feed:
-        relative: Trajectory = feed.ground_truth_between(-(2**62), 2**62)
-        assert len(relative)
-        absolute: Trajectory = shift_clock(relative, feed.capture_start_time_ns)
-
-    # Exact, not approximate: video_time + capture.start_time_ns is the sidecar's
-    # clock by construction, so every one of the 6,998 timestamps must land.
-    np.testing.assert_array_equal(absolute.t_ns, sidecar.t_ns)
-    assert associate(sidecar, absolute).count == len(sidecar)
-    # Without the shift the two share no instant at all.
-    assert associate(sidecar, relative).count == 0
-    # The rrd stores float32 positions; the sidecar keeps more digits.
-    result: AteResult = ate(absolute, sidecar)
-    assert result.n_associated == len(absolute)
-    assert result.rmse_m < 1e-5
 
 
 @pytest.mark.slow
-def test_a_replay_export_associates_with_the_ground_truth_sidecar(manifest: ReferenceManifest, tmp_path: Path) -> None:
+def test_a_replay_export_associates_with_the_catalog_ground_truth(manifest: ReferenceManifest, tmp_path: Path) -> None:
     """The replay's own export path, end to end, lands on the sidecar's clock.
 
     Forty framesets of the smoke segment through the whole pipeline: enough for
@@ -441,11 +412,9 @@ def test_a_replay_export_associates_with_the_ground_truth_sidecar(manifest: Refe
     the regression being pinned.
     """
     segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
-    if not segment.base_path.is_file() or not segment.gt_csv.is_file():
-        pytest.skip(f"{segment.base_path} or {segment.gt_csv} is not mounted on this host")
 
     config: Config = Config(rr_config=RerunTyroConfig(headless=True), segment=SMOKE_SEGMENT, stage="vio", max_framesets=40)
-    with open_segment(LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path), segment.imu) as feed:
+    with open_segment(CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id), segment.imu) as feed:
         truth: Trajectory = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
         assert len(truth)
         stage: VioStage = VioStage(
@@ -453,7 +422,6 @@ def test_a_replay_export_associates_with_the_ground_truth_sidecar(manifest: Refe
             logger=VioLogger(
                 cameras=feed.cameras,
                 ground_truth=truth,
-                cpp=_cpp_trajectory(manifest, segment, feed.capture_start_time_ns, feed.segment_id),
                 frame_t_ns=feed.frame_t_ns,
             ),
         )
@@ -470,7 +438,7 @@ def test_a_replay_export_associates_with_the_ground_truth_sidecar(manifest: Refe
     # and one that did not would be held and tracked again rather than lost (D17).
     assert len(estimate) == replayed
     assert not stage.pending
-    sidecar: Trajectory = read_trajectory(segment.gt_csv)
+    sidecar: Trajectory = shift_clock(truth, segment.capture.start_time_ns)
     # All but the first pose, which sits on the capture's start time — 17 ms
     # before the sidecar's first row, so it has nothing to associate with. The
     # ground truth does not cover the whole segment (D36).

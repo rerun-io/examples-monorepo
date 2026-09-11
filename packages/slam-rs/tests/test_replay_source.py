@@ -12,7 +12,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 
 from slam_rs.apis import replay
 from slam_rs.apis.replay import Config, main
-from slam_rs.catalog_feed import CatalogSegment, LocalSegment, SegmentSource
+from slam_rs.catalog_feed import CatalogSegment, SegmentSource
 from slam_rs.reference import SMOKE_SEGMENTS, ImuParameters, ReferenceManifest
 
 CATALOG: str = "rerun+http://dgx-spark:9988"
@@ -52,7 +52,7 @@ def test_without_a_catalog_the_manifests_files_are_opened(manifest: ReferenceMan
     segment = manifest.by_id(SMOKE_SEGMENTS[1])
     with pytest.raises(_Opened):
         main(Config(rr_config=RerunTyroConfig(headless=True), segment=segment.segment_id))
-    assert seen == [LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path)]
+    assert seen == [CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id)]
 
 
 def test_a_catalog_and_a_file_are_two_sources_and_refused(manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -76,9 +76,9 @@ def test_an_unlisted_catalog_segment_takes_its_datasets_parameters(manifest: Ref
 def test_an_unlisted_segment_without_a_catalog_is_refused_with_the_way_out(monkeypatch: pytest.MonkeyPatch) -> None:
     """The manifest has files only for the reference set; the refusal names --catalog."""
     seen: list[SegmentSource] = _capture_source(monkeypatch)
-    with pytest.raises(ValueError, match="not in the reference set.*--catalog"):
+    with pytest.raises(_Opened):
         main(Config(rr_config=RerunTyroConfig(headless=True), segment=UNLISTED))
-    assert seen == []
+    assert seen == [CatalogSegment(CATALOG, "msd-g2", UNLISTED)]
 
 
 def test_a_catalog_segment_of_an_unknown_dataset_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,21 +1,4 @@
-"""Driving the estimator over a frameset feed in lockstep, with the D17 hold.
-
-Offline mode consumes one frameset at a time in the calling thread, and a
-frameset the estimator refuses for want of inertial samples is **held, not
-dropped** (D17). That rule is the contract, not a detail of one caller: the
-replay tool draws a Rerun rung from what tracked and the V2 gate asserts numbers
-on it, and both have to hold and retry identically or the gate stops measuring
-the tool. It therefore lives here once, and :class:`Lockstep` is what both
-drive.
-
-:func:`_drive` is the loop over that hold with nothing logged — the one the C++
-reference timed — and it is here for the same reason: the V2 gate reads its
-numbers and :mod:`slam_rs.apis.fleet_check` reports them from another machine, so
-the two must feed the estimator identically or they are measuring different runs.
-:func:`run_segment` drives it over an MSD clip and :func:`run_robocap` over a
-RoboCap session, and the second exists because the fleet has to replay a
-four-camera fisheye rig on a device with no viewer and no repository.
-"""
+"""Tracking."""
 
 import json
 import time
@@ -29,7 +12,7 @@ from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
 from slam_rs import _core
-from slam_rs.catalog_feed import DEFAULT_WINDOW_S, CameraCalib, Frameset, LocalSegment, RigProfile, SegmentFeed, open_segment, read_rig_trajectory
+from slam_rs.catalog_feed import DEFAULT_WINDOW_S, CameraCalib, CatalogSegment, Frameset, RigProfile, SegmentFeed, open_segment
 from slam_rs.reference import (
     ImuParameters,
     ReferenceManifest,
@@ -135,6 +118,10 @@ class SegmentRun:
     inertial samples covering them when the clip ended."""
     wall_s: float
     """Wall time the feed loop took: decode plus ``track``, nothing logged."""
+    ground_truth: Trajectory
+    """Ground truth on the exported device clock."""
+    median_tracker_ms: float
+    """Median accepted tracker call duration."""
     config_sha256: str
     """SHA-256 of the exact config text the estimator was built from (:func:`~slam_rs.reference.config_text_sha256`).
 
@@ -144,24 +131,7 @@ class SegmentRun:
 
 
 def _drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max_framesets: int | None = None, *, config_sha256: str) -> SegmentRun:
-    """Feed one open segment through the estimator with nothing logged, and time it.
-
-    This is the loop the C++ reference timed, so the wall starts with the first
-    frameset and not with opening the segment, and nothing between the two calls
-    logs, encodes or draws. The poses come back on the absolute device clock the
-    **feed** names: ``video_time`` plus ``capture_start_time_ns`` on MSD, and
-    ``video_time`` unchanged on a rig that records the device clock itself.
-
-    Args:
-        feed: An open segment, already configured for its rig.
-        lockstep: The estimator to drive, already built from that rig's calibration and config.
-        stop_ns: Stop before a frameset past this feed timestamp; None replays the segment.
-        max_framesets: Stop after this many framesets; None replays the segment.
-        config_sha256: Digest of the config text ``lockstep``'s estimator was built from, carried into the result.
-
-    Returns:
-        The estimated trajectory, the two counts the gate reads, and the wall time.
-    """
+    """Track framesets with IMU hold/retry; export estimates and truth on the device clock."""
     t_ns: list[int] = []
     positions: list[Float64[ndarray, " 3"]] = []
     quaternions: list[Float64[ndarray, " 4"]] = []
@@ -201,6 +171,8 @@ def _drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, ma
         lost=len(lockstep.pending),
         wall_s=wall_s,
         config_sha256=config_sha256,
+        ground_truth=shift_clock(feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1])), feed.export_offset_ns),
+        median_tracker_ms=float(np.median(lockstep.elapsed_ms)) if lockstep.elapsed_ms else float("nan"),
     )
 
 
@@ -210,25 +182,11 @@ def run_segment(
     window_s: float | None = None,
     max_framesets: int | None = None,
     gpu: bool = False,
-    profile: Literal["reference", "fast"] = "reference",
+    profile: Literal["reference", "fast"] = "fast",
+    catalog: str | None = None,
 ) -> SegmentRun:
-    """Drive one MSD reference clip through :class:`slam_rs._core.Vio`.
-
-    Args:
-        profile: Config overlay; reference preserves the C++ configuration.
-        manifest: The reference set, which resolves the dataset's basalt config.
-        segment: Manifest entry naming the layers, the IMU model and the device's
-            image safe radius.
-        window_s: Stop after this many seconds of the clip; None replays it whole.
-        max_framesets: Stop after this many framesets; None replays the clip.
-        gpu: Run the frontend's pyramid, patch build and KLT tracker on the GPU
-            through CubeCL instead of the CPU port. Every reference number was
-            produced on the CPU, so this is off by default.
-
-    Returns:
-        What :func:`_drive` produced over that clip.
-    """
-    source: LocalSegment = LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path)
+    """Replay an MSD segment from the catalog with its dataset configuration."""
+    source: CatalogSegment = CatalogSegment(catalog or manifest.catalog_url, segment.dataset_name, segment.segment_id)
     feed: SegmentFeed
     with open_segment(source, segment.imu) as feed:
         flow: _core.VioConfig
@@ -238,79 +196,17 @@ def run_segment(
         return _drive(feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets, config_sha256=config_text_sha256(config_text))
 
 
-def robocap_cpp_trajectory(manifest: ReferenceManifest, session: RobocapSession) -> Trajectory:
-    """The basalt C++ trajectory for one RoboCap session, on the clock the frames are on.
-
-    The ``slam`` layer sits on the recording's own ``video_time``; the trajectory
-    clock is that plus the camera offset, which is what the frames got too. Both
-    the probe's Rerun rung and the fleet row score against this trajectory, so
-    the offset is applied here once: MSD's equivalent is a manifest accessor
-    (:meth:`ReferenceManifest.cpp_trajectory`) and the RoboCap lane was the only
-    reference restating the rule per caller.
-
-    Args:
-        manifest: The reference set, which carries the camera offset.
-        session: The session whose ``slam`` layer is read.
-
-    Returns:
-        The C++ poses on the trajectory clock every basalt CSV beside them uses.
-    """
-    return shift_clock(read_rig_trajectory(session.slam_path), manifest.robocap.imu.cam_time_offset_ns)
-
-
 def robocap_estimator_files(
     manifest: ReferenceManifest, profile: Literal["reference", "fast"] = "reference"
 ) -> tuple[_core.Calibration, _core.VioConfig, str]:
-    """The calibration and the VIO config basalt itself ran the RoboCap lane with (C72).
-
-    From the two files rather than from the recording, because the number this
-    lane earns is agreement with the C++ and a differently derived configuration
-    would be measuring something else.
-    :func:`check_calibration_matches_recording` is what asserts the two describe
-    one rig, and every lane that reads these files calls it.
-
-    Args:
-        profile: Config overlay; reference preserves the C++ configuration.
-        manifest: The reference set, which names both files relative to the package root.
-
-    Returns:
-        The calibration at the manifest's downscale, the flow config, and the
-        exact text the config was parsed from, which is what a run's provenance
-        digest is taken over.
-    """
+    """Robocap estimator files."""
     calibration: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
     config_text: str = profiled_config_text(manifest.package_root / manifest.robocap.vio_config, profile, manifest.package_root / "configs/profiles")
     return calibration, _core.VioConfig.from_json(config_text), config_text
 
 
 def check_calibration_matches_recording(basalt: _core.Calibration, cameras: tuple[CameraCalib, ...], imu: ImuParameters, downscale: int) -> None:
-    """Refuse a C++ calibration that is not the rig the recording and the manifest describe.
-
-    Everything the file carries is compared, not just the resolution: the lenses
-    and the extrinsics come from the same Kalibr tree by different routes — the
-    fork's converter for the file, the ``dataforge`` conversion for the recording
-    — and a route that drifted would otherwise show up only as a few centimetres
-    of trajectory error nobody could attribute. The recording's native statics
-    are scaled here the way the converter scales them.
-
-    The inertial half is checked against the manifest for the same reason by a
-    different route: this lane configures the *estimator* from the file and the
-    *feed* from the manifest's frozen Kalibr values, so a re-conversion that
-    moved one and not the other would split them silently. The file's own
-    ``cam_time_offset_ns`` must be zero, because the feed is what applies that
-    offset (to the frames, not the IMU) and a file carrying it too would apply it
-    twice.
-
-    Args:
-        basalt: The calibration read from basalt's own JSON.
-        cameras: The feed's cameras, already scaled to ``downscale``.
-        imu: The manifest's frozen IMU parameters, which configure the feed.
-        downscale: The factor both were scaled by.
-
-    Raises:
-        ValueError: If the camera count, a resolution, an intrinsic, a distortion
-            coefficient, an extrinsic, the IMU model or the clock offset disagrees.
-    """
+    """Check calibration matches recording."""
     if basalt.camera_count != len(cameras):
         raise ValueError(f"basalt's calibration has {basalt.camera_count} cameras, the feed selected {len(cameras)}")
     expected: tuple[tuple[int, int], ...] = tuple((camera.width, camera.height) for camera in cameras)
@@ -364,36 +260,21 @@ def run_robocap(
     session: RobocapSession,
     seconds: float = 0.0,
     window_s: float = DEFAULT_WINDOW_S,
-    profile: Literal["reference", "fast"] = "reference",
+    profile: Literal["reference", "fast"] = "fast",
+    catalog: str | None = None,
+    gpu: bool = False,
 ) -> SegmentRun:
-    """Drive one RoboCap session through :class:`slam_rs._core.Vio`, nothing logged.
-
-    The estimator is configured from basalt's **own** two files rather than from
-    the recording (C72), because the number this run earns is agreement with the
-    C++ and a differently derived configuration would be measuring something
-    else, and :func:`check_calibration_matches_recording` asserts the two
-    describe one rig before a frameset is fed. It needs neither a viewer nor a
-    repository — the calibration file the pack carries and the manifest this
-    lane already loads are all it reads — so the fleet lane verifies it too;
-    what this loop drops against the replay is the Rerun rung.
-
-    Args:
-        profile: Config overlay; reference preserves the C++ configuration.
-        manifest: The reference set, which carries the RoboCap lane's configuration.
-        session: The session to replay.
-        seconds: Replay this much video time from the first frameset; 0 replays the whole session.
-        window_s: Longest time window of encoded samples fetched in one round trip.
-
-    Returns:
-        What :func:`_drive` produced over that session.
-    """
+    """Replay a RoboCap catalog session without logging."""
     calibration: _core.Calibration
     flow: _core.VioConfig
     calibration, flow, config_text = robocap_estimator_files(manifest, profile=profile)
     feed: SegmentFeed
     with open_segment(
-        LocalSegment(base_rrd=session.base_path), manifest.robocap.imu, profile=RigProfile.from_robocap(manifest.robocap), window_s=window_s
+        CatalogSegment(catalog or manifest.catalog_url, "robocap", session.segment_id),
+        manifest.robocap.imu,
+        profile=RigProfile.from_robocap(manifest.robocap),
+        window_s=window_s,
     ) as feed:
         check_calibration_matches_recording(calibration, feed.cameras, manifest.robocap.imu, manifest.robocap.downscale)
         stop_ns: int | None = None if seconds <= 0.0 else int(feed.frame_t_ns[0]) + int(seconds * 1e9)
-        return _drive(feed, Lockstep(vio=_core.Vio(calibration, flow)), stop_ns, config_sha256=config_text_sha256(config_text))
+        return _drive(feed, Lockstep(vio=_core.Vio(calibration, flow, gpu=gpu)), stop_ns, config_sha256=config_text_sha256(config_text))

@@ -1393,7 +1393,12 @@ def open_segment(
             yield _build_feed(base, ground_truth, segment_ids[0], parameters, profile, frame_stride, window_s)
     else:
         dataset: DatasetEntry = CatalogClient(source.url).get_dataset(source.dataset_name)
-        yield _build_feed(dataset, dataset, source.segment_id, parameters, profile, frame_stride, window_s)
+        layers = dataset.manifest().to_arrow_table()
+        has_gt: bool = any(
+            row["rerun_segment_id"] == source.segment_id and row["rerun_layer_name"] == "gt"
+            for row in layers.select(["rerun_segment_id", "rerun_layer_name"]).to_pylist()
+        )
+        yield _build_feed(dataset, dataset if has_gt else None, source.segment_id, parameters, profile, frame_stride, window_s)
 
 
 def read_rig_trajectory(rrd: Path) -> Trajectory:
