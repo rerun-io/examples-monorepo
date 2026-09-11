@@ -53,10 +53,10 @@ wgpu = { workspace = true, optional = true }
 
 # `cubecl-wgpu` chooses its shader compiler from the adapter's backend at run
 # time — Vulkan takes SPIR-V, Metal takes MSL, anything else takes WGSL — but
-# which of those compilers is *built* is a cargo feature, and the two the fleet
-# needs cannot both be on for one platform: `spirv` adds ash and a SPIR-V
-# assembler and only ever fires on a Vulkan adapter, while `msl`'s backend is
-# gated to Apple targets inside cubecl-wgpu. So the choice is per **target**,
+# which of those compilers is *built* is a cargo feature. We select features
+# per target to avoid requiring the Vulkan SDK on macOS and compiling unused
+# shader backends. `msl` is gated to Apple targets inside cubecl-wgpu.
+# So the choice is per **target**,
 # not per cargo feature of ours: one
 # `--features gpu-wgpu` build line works on the Mac, the Spark, the Pi and the
 # cap, and no caller has to know which compiler its host will use.
