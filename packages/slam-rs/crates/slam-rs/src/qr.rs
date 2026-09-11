@@ -246,9 +246,13 @@ mod tests {
                         }
                     }
                     prop_assert_eq!(rank, 1 + usize::from(above));
+                    // An accepted pivot column is reflected to row `rank`; a rejected
+                    // one is left where it was, except that the lead column's
+                    // reflection swaps rows 0 and `lead_row`.
+                    let pivot_at: usize = if above { 1 } else if pivot_row == 0 { lead_row } else { pivot_row };
                     prop_assert!((storage.column(4).norm_squared() - (residual as $scalar).powi(2)).abs() <= 32.0 * <$scalar>::EPSILON * (1.0 + residual.abs() as $scalar).powi(2));
-                    prop_assert!((storage[(1, 3)].abs() - pivot).abs() <= 8.0 * <$scalar>::EPSILON * pivot);
-                    prop_assert!((storage[(1, 3)] * storage[(1, 4)] - pivot * residual as $scalar).abs() <= 32.0 * <$scalar>::EPSILON * pivot * (1.0 + residual.abs() as $scalar));
+                    prop_assert!((storage[(pivot_at, 3)].abs() - pivot).abs() <= 8.0 * <$scalar>::EPSILON * pivot);
+                    prop_assert!((storage[(pivot_at, 3)] * storage[(pivot_at, 4)] - pivot * residual as $scalar).abs() <= 32.0 * <$scalar>::EPSILON * pivot * (1.0 + residual.abs() as $scalar));
                 }
             }
         };
