@@ -614,7 +614,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
         }
 
         // The product of the triangular diagonal detects a singular landmark.
-        let det: S = (q1jl[(0, 0)] * (q1jl[(1, 1)] * q1jl[(2, 2)])).abs();
+        let det: S = (q1jl[(0, 0)] * q1jl[(1, 1)] * q1jl[(2, 2)]).abs();
         if det == S::zero() {
             // `:264-266`, trap 11: skip this landmark, keep the rest.
             log::warn!(

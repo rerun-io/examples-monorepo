@@ -271,10 +271,8 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
     ///    **linearization point** (`getPoseLin`) and then re-evaluated for its
     ///    value alone at the current state when either end is frozen
     ///    (`:229-232`) — first-estimate Jacobians, trap 7;
-    /// 2. the landmark blocks, a `parallel_deterministic_reduce` in C++
-    ///    (**site 1 of 4**, `:262`), reproduced here through
-    ///    `crate::linearize::reduce`, which is TBB's balanced join tree and
-    ///    not a fold;
+    /// 2. the landmark blocks, folded in landmark order through
+    ///    `crate::linearize::reduce`, deterministic and independent of thread count;
     /// 3. the IMU blocks (`:266-268`) and then the marginalization prior
     ///    (`:270-274`), both serial in C++ too.
     ///
@@ -347,11 +345,9 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             rpl.d_rel_d_t = d_rel_d_t;
         }
 
-        // 2. the landmark blocks. **Reduction site 1 of 4** (`:246-262`):
-        // `tbb::parallel_deterministic_reduce` over `[0, num_landmarks)`,
-        // summing the per-block error and ANDing the validity. The sum follows
-        // TBB's balanced join tree, not a left fold — see
-        // [`crate::linearize::reduce`]. The `&&` needs no order.
+        // 2. Fold errors in landmark order and AND the validity flags.
+        // The fold is deterministic and independent of thread count; see
+        // `crate::linearize::reduce`. The `&&` needs no order.
         let cameras = estimator.cameras();
         let lb_options: LandmarkBlockOptions<S> = self.options.lb_options;
         let blocks: &mut [LandmarkBlock<S>] = &mut self.landmark_blocks;
@@ -415,12 +411,9 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
 
     /// `get_dense_H_b(H, b)` (`:511-563`): the reduced camera system.
     ///
-    /// **Reduction site 4 of 4** (`:550`). C++ gives every TBB task its own full
-    /// `total_size` x `total_size` partial and adds them at the joins
-    /// (`:513-542`); the port walks the same join tree through
-    /// `crate::linearize::reduce`, which reuses one accumulator per recursion
-    /// **depth** rather than one per task — the same sum, `ceil(log2 n)`
-    /// matrices instead of `n`.
+    /// Fold landmark contributions in landmark order into one reusable dense
+    /// accumulator through `crate::linearize::reduce`. The fold is deterministic
+    /// and independent of thread count.
     ///
     /// The order of the additions after the landmark blocks is basalt's: IMU
     /// (`:553`), then the marginalization prior (`:559`). `:556`'s pose damping
@@ -561,9 +554,8 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             });
         }
 
-        // **Reduction site 2 of 4** (`:301-307`): TBB's join tree again, with
-        // the subtraction inside the leaf, exactly as `backSubstitute` mutates
-        // the accumulator it is handed (`:302`).
+        // Fold in landmark order, subtracting each block's change from the
+        // accumulator. The fold is deterministic and independent of thread count.
         let blocks: &mut [LandmarkBlock<S>] = &mut self.landmark_blocks;
         let ids: &[LandmarkId] = &self.landmark_ids;
         let lmdb: &mut crate::landmark::LandmarkDatabase<S> = &mut estimator.lmdb;

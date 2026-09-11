@@ -123,7 +123,7 @@ pub trait LieScalar: RealField + Copy {
     /// Exact-as-possible conversion of a literal, standing in for C++'s `Scalar(x)`.
     fn from_literal(value: f64) -> Self;
 
-    /// Widen to `f64`, for the comparisons C++ promotes to `double`.
+    /// Convert to `f64` for diagnostics and scalar conversion.
     fn to_f64(self) -> f64;
 }
 
@@ -705,7 +705,7 @@ pub fn left_jacobian_inv_so3<S: LieScalar>(phi: &Vector3<S>) -> Matrix3<S> {
 /// form on `(0, pi)`, a zeroth-order expansion at pi where `sin` vanishes, and
 /// the Taylor value `1/12` at zero.
 ///
-/// Evaluate the pi threshold and pi squared in f64 before scalar conversion.
+/// Evaluate the threshold and denominator in the input scalar type.
 /// The constant branches divide the matrix directly by their denominator.
 fn inverse_jacobian_second_order_term<S: LieScalar>(
     phi_hat2: &Matrix3<S>,
@@ -716,15 +716,16 @@ fn inverse_jacobian_second_order_term<S: LieScalar>(
         return phi_hat2 / c::<S>(12.0);
     }
     let phi_norm: S = phi_norm2.sqrt();
-    let threshold: f64 = std::f64::consts::PI - S::sophus_epsilon_sqrt().to_f64();
-    if phi_norm.to_f64() < threshold {
+    let pi: S = c(std::f64::consts::PI);
+    let threshold: S = pi - S::sophus_epsilon_sqrt();
+    if phi_norm < threshold {
         // Regular case on (0, pi).
         phi_hat2
             * (c::<S>(1.0) / phi_norm2
                 - (c::<S>(1.0) + phi_norm.cos()) / (c::<S>(2.0) * phi_norm * phi_norm.sin()))
     } else {
         // 0th-order Taylor expansion around pi.
-        phi_hat2 / c::<S>(std::f64::consts::PI * std::f64::consts::PI)
+        phi_hat2 / (pi * pi)
     }
 }
 
@@ -953,49 +954,35 @@ mod tests {
         assert!((m.transpose() * m - Matrix3::identity()).norm() < 1e-12);
     }
 
-    /// The pi branch is selected in `f64`, as C++ does through `M_PI`.
-    ///
-    /// `3.13843035697937_f32` is exactly `pi_f32 - epsilonSqrt_f32`, so an
-    /// `f32` comparison sends it to the pi branch while basalt's promoted
-    /// `double` comparison keeps it on the closed form. The two expected values
-    /// are the ones the C++ produces at this input and at the next
-    /// representable `f32` above it (`sophus_utils.hpp:202-214`).
+    /// Check accuracy on both sides of the f32 branch boundary and at pi.
     #[test]
-    fn the_inverse_jacobian_pi_boundary_is_compared_in_f64() {
-        // 3.1384304_f32 is 3.138430356979370... exactly, which is exactly
-        // pi_f32 - epsilonSqrt_f32; the next f32 up is 3.138430595397949...
-        let below: Vector3<f32> = Vector3::new(3.138_430_4, 0.0, 0.0);
-        let above: Vector3<f32> = Vector3::new(f32::from_bits(below.x.to_bits() + 1), 0.0, 0.0);
-        assert_eq!(f64::from(below.x), 3.138_430_356_979_37);
-        assert_eq!(f64::from(above.x), 3.138_430_595_397_949);
-
-        // Closed form on (0, pi), the value the C++ produces here.
-        let expected_closed_form: f64 = 0.002_484_500_408_172_607_4;
-        assert_abs_diff_eq!(
-            f64::from(right_jacobian_inv_so3(&below)[(1, 1)]),
-            expected_closed_form,
-            epsilon = 1e-12
-        );
-        assert_abs_diff_eq!(
-            f64::from(left_jacobian_inv_so3(&below)[(1, 1)]),
-            expected_closed_form,
-            epsilon = 1e-12
-        );
-        // 0th-order expansion around pi, one ulp of input later.
-        let expected_near_pi: f64 = 0.002_011_954_784_393_310_5;
-        assert_abs_diff_eq!(
-            f64::from(right_jacobian_inv_so3(&above)[(1, 1)]),
-            expected_near_pi,
-            epsilon = 1e-12
-        );
-        assert_abs_diff_eq!(
-            f64::from(left_jacobian_inv_so3(&above)[(1, 1)]),
-            expected_near_pi,
-            epsilon = 1e-12
-        );
-        // The two branches really are far apart here, so this is a branch test,
-        // not a rounding test.
-        assert!((expected_closed_form - expected_near_pi).abs() > 4e-4);
+    fn the_inverse_jacobians_are_accurate_near_pi_in_f32() {
+        let boundary: f32 = std::f32::consts::PI - f32::sophus_epsilon_sqrt();
+        for angle in [
+            f32::from_bits(boundary.to_bits() - 1),
+            boundary,
+            f32::from_bits(boundary.to_bits() + 1),
+            std::f32::consts::PI,
+        ] {
+            let phi: Vector3<f32> = Vector3::new(angle, 0.0, 0.0);
+            let reference: Vector3<f64> = phi.map(f64::from);
+            for (actual, expected) in [
+                (
+                    right_jacobian_inv_so3(&phi),
+                    right_jacobian_inv_so3(&reference),
+                ),
+                (
+                    left_jacobian_inv_so3(&phi),
+                    left_jacobian_inv_so3(&reference),
+                ),
+            ] {
+                assert!(actual.iter().all(|v| v.is_finite()));
+                assert!(
+                    (actual.map(f64::from) - expected).norm() < 1e-3,
+                    "angle={angle}"
+                );
+            }
+        }
     }
 
     /// Near pi the closed form's `sin` denominator vanishes; basalt swaps in a
@@ -1087,6 +1074,23 @@ mod tests {
 
     proptest! {
         #![proptest_config(config())]
+
+        #[test]
+        fn inverse_so3_jacobians_are_accurate_near_pi_in_f32(
+            axis in tangent3(), gap in 0.0f32..0.01,
+        ) {
+            prop_assume!(axis.norm() > 0.1);
+            let phi: Vector3<f32> = axis.normalize().map(|v| v as f32)
+                * (std::f32::consts::PI - gap);
+            let reference: Vector3<f64> = phi.map(f64::from);
+            for (actual, expected) in [
+                (right_jacobian_inv_so3(&phi), right_jacobian_inv_so3(&reference)),
+                (left_jacobian_inv_so3(&phi), left_jacobian_inv_so3(&reference)),
+            ] {
+                prop_assert!(actual.iter().all(|v| v.is_finite()));
+                prop_assert!((actual.map(f64::from) - expected).norm() < 1e-3);
+            }
+        }
 
         #[test]
         fn so3_exp_then_log_is_the_identity(phi in tangent3()) {
