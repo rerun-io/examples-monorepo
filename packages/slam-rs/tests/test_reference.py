@@ -25,11 +25,6 @@ def test_the_manifest_holds_ten_segments(manifest: ReferenceManifest) -> None:
     assert manifest.schema_version == 10
 
 
-
-
-
-
-
 def test_segment_ids_are_unique(manifest: ReferenceManifest) -> None:
     identifiers: list[str] = [segment.segment_id for segment in manifest.segments]
     assert len(set(identifiers)) == len(identifiers)
@@ -47,7 +42,6 @@ def test_the_tiers_are_the_ones_the_plan_names(manifest: ReferenceManifest) -> N
     assert len(manifest.in_tier("release")) == 3
     assert len(manifest.in_tier("listed")) == 5
     assert {segment.dataset_name for segment in manifest.in_tier("smoke")} == {"msd-index", "msd-g2"}
-
 
 
 def test_the_msd_imu_block_is_basalts(manifest: ReferenceManifest) -> None:
@@ -211,10 +205,6 @@ def test_a_duplicate_segment_id_is_rejected(manifest: ReferenceManifest, tmp_pat
         load_manifest(broken)
 
 
-
-
-
-
 def test_an_unsupported_manifest_schema_is_refused(tmp_path: Path) -> None:
     path: Path = tmp_path / "old.toml"
     path.write_text(MANIFEST_PATH.read_text().replace("schema_version = 10", "schema_version = 8"))
@@ -222,13 +212,18 @@ def test_an_unsupported_manifest_schema_is_refused(tmp_path: Path) -> None:
         load_manifest(path)
 
 
+def test_malformed_toml_is_refused_with_the_file_name(tmp_path: Path) -> None:
+    path = tmp_path / "gate.toml"
+    path.write_text("schema_version = 10\n[[dataset]\nname = 'broken'\n")
+    with pytest.raises(ValueError, match=str(path)):
+        load_manifest(path)
+
+
 def test_dataset_imu_covers_unlisted_odyssey_and_preserves_holdouts(manifest: ReferenceManifest) -> None:
     assert {dataset.name for dataset in manifest.datasets} == {"msd-index", "msd-g2", "msd-odyssey"}
     assert all(dataset.imu == manifest.datasets[0].imu for dataset in manifest.datasets)
-    assert all(manifest.dataset(segment.dataset_name).imu == manifest.dataset(segment.dataset_name).imu for segment in manifest.segments)
     assert sum(segment.hold_out for segment in manifest.segments) == 2
     assert {segment.segment_id.split("__")[-1].split("_")[0] for segment in manifest.in_tier("release")} == {"MIO07", "MGO07", "MIO14"}
-
 
 
 @pytest.mark.parametrize("field", ["gt_rmse_cm", "median_tracker_ms"])
@@ -262,11 +257,13 @@ def test_gate_round_trips_through_toml(manifest: ReferenceManifest) -> None:
     assert tomllib.loads(serialized) == tomllib.loads(MANIFEST_PATH.read_text())
 
 
-@pytest.mark.parametrize("replacement", ['typo = 1\n', 'schema_version = "invalid"\n'])
+@pytest.mark.parametrize("replacement", ["typo = 1\n", 'schema_version = "invalid"\n'])
 def test_gate_refuses_unknown_keys_and_wrong_types_with_path(tmp_path: Path, replacement: str) -> None:
     broken: Path = tmp_path / "broken-gate.toml"
     text: str = MANIFEST_PATH.read_text()
-    broken.write_text(text.replace("schema_version = 10\n", replacement if replacement.startswith("schema_version") else replacement + "schema_version = 10\n"))
+    broken.write_text(
+        text.replace("schema_version = 10\n", replacement if replacement.startswith("schema_version") else replacement + "schema_version = 10\n")
+    )
     with pytest.raises(ValueError, match="broken-gate.toml"):
         load_manifest(broken)
 

@@ -5,6 +5,7 @@ import json
 import math
 import re
 from dataclasses import dataclass, replace
+from tomllib import TOMLDecodeError
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -334,7 +335,7 @@ def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
     """Deserialize the gate and validate relationships and finite baselines."""
     try:
         parsed: ReferenceManifest = from_toml(ReferenceManifest, path.read_text())
-    except SerdeError as error:
+    except (SerdeError, TOMLDecodeError) as error:
         raise ValueError(f"{path}: {error}") from error
     if parsed.schema_version != 10:
         raise ValueError(f"{path}: expected schema_version 10")
@@ -353,7 +354,11 @@ def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
             if key in baseline_keys:
                 raise ValueError(f"{where}: [segment.baseline] duplicate baseline {key}")
             baseline_keys.add(key)
-            for name, value in (("gt_rmse_cm", baseline.gt_rmse_cm), ("median_tracker_ms", baseline.median_tracker_ms), ("framesets", baseline.framesets)):
+            for name, value in (
+                ("gt_rmse_cm", baseline.gt_rmse_cm),
+                ("median_tracker_ms", baseline.median_tracker_ms),
+                ("framesets", baseline.framesets),
+            ):
                 if not math.isfinite(value) or value <= 0.0:
                     raise ValueError(f"{where}: [segment.baseline] {key} {name} must be finite and positive")
     return replace(parsed, package_root=path.parent)
