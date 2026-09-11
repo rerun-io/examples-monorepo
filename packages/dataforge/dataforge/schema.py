@@ -19,6 +19,14 @@ EXOEGO_SCHEMA_VERSION: str = "exoego:v2"
 DATAFORGE_SCHEMA_VERSION: str = "dataforge:v1"
 """Value of the ``property:capture:schema`` recording property."""
 
+GT_RUN_SOURCE: str = "gt"
+"""Run source of the ground-truth trajectory and trail under ``/world/runs/``.
+
+Deliberately equal to ``paths.GT_LAYER``: the layer a converter writes and the
+run source it logs under name the same thing to a reader, even though one is a
+directory and the other an entity path component.
+"""
+
 
 def _index(value: int, kind: str) -> str:
     if value < 0:

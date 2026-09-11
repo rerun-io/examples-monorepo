@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from dataforge.identity import SequenceIdentity
-from dataforge.paths import BASE_LAYER, GT_LAYER, output_root, raw_root, rrd_path
+from dataforge.paths import BASE_LAYER, GT_LAYER, SIDECAR_DIR, output_root, raw_root, rrd_path, sidecar_path
 
 
 def test_output_root_defaults_to_package_local_data(monkeypatch) -> None:
@@ -29,5 +29,15 @@ def test_rrd_paths_are_layer_major() -> None:
     assert rrd_path(root, layer=GT_LAYER, identity=identity) == root / "gt" / f"{identity.recording_id}.rrd"
 
 
-def test_base_and_gt_are_sibling_layers() -> None:
-    assert (BASE_LAYER, GT_LAYER) == ("base", "gt")
+def test_sidecars_are_grouped_per_recording_and_are_not_a_layer() -> None:
+    """A sidecar is an *input* a derived layer rebuilds from, so it sits outside the layers.
+
+    Keyed by recording id rather than by layer, because one sequence's sidecars
+    serve every derived layer of it; ``register`` walks ``LAYERS`` and so never
+    sees this directory.
+    """
+    identity: SequenceIdentity = SequenceIdentity(dataset="msd-index", parts=("MIO_others", "MIO09"))
+    root: Path = Path("/out")
+
+    assert sidecar_path(root, identity, "gt.csv") == root / "sidecars" / identity.recording_id / "gt.csv"
+    assert SIDECAR_DIR not in (BASE_LAYER, GT_LAYER)

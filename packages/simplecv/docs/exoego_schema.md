@@ -52,6 +52,11 @@ world_T_cam  = world_T_rig @ rig_T_cam           # composes along the entity tre
   `rig_T_cam`; the reference camera's is identity).
 - A **tracking dropout** is encoded as a **NaN** `world_T_rig` on the rig node for
   that frame; the whole rig — and every child frustum — disappears for the gap.
+  A source-side pose a writer *repaired* to identity is a different thing and must
+  not be emitted as one: it keeps its translation and stays visible, and the count
+  belongs in that layer's properties (dataforge's msd reports `num_sanitized`),
+  because "the source wrote a degenerate rotation here" and "there was no pose
+  here" are claims a consumer has to be able to tell apart.
 
 ## 3. Entity tree
 
@@ -100,7 +105,26 @@ camera: a rig whose extrinsics are all expressed in its inertial frame states
 trivially states `"cam_00"`.
 
 Per camera, on `/world/rig_NN/cam_MM`: `name` (human stream label) and `kind`
-(`"rgb"` / `"grayscale"`, a best-effort content hint). The reference camera of a
+(`"rgb"` / `"grayscale"`, a best-effort content hint). Readers must also treat as
+optional the three further per-camera keys `camera_model`,
+`distortion_valid_radius` and `image_rotation_cw_deg`, which dataforge writes for
+the Monado SLAM Datasets.
+`camera_model` is the **dataset's own model tag**, copied through uninterpreted
+(e.g. `"kb4"` / `"pinhole-radtan8"`, basalt's names): this schema fixes no
+vocabulary for it, and a reader that does not recognise a tag falls back to the
+distortion component, which is authoritative. `distortion_valid_radius` is the
+radius in normalized image coordinates past which that model stops holding; a
+writer whose source states a non-positive radius must **omit the key** rather
+than emit it, because the formats that carry one (basalt's `rpmax`, whose
+non-positive value disables the check) mean "no limit" by it, and a reader
+seeing `0.0` would conclude the model holds nowhere.
+`image_rotation_cw_deg` is a **clockwise rotation of 90, 180 or 270 degrees that
+the writer already applied to this camera's encoded frames**, for a sensor
+mounted rolled: the intrinsics, the distortion and the `rig_T_cam` on the same
+node describe the rotated image, so a reader that only projects needs nothing
+from this key — it is there for one that relates the video back to the raw sensor
+readout. A writer that applied no rotation must **omit the key** rather than emit
+`0`, which would state a decision where none was made. The reference camera of a
 **multi-camera** rig gets a green frustum tint; single-camera rigs are untinted.
 
 ## 5. Ground-truth annotations (paths unchanged from v1)
@@ -141,8 +165,11 @@ When ingesting a recording:
 5. Timeline is `video_time` everywhere.
 6. Every non-camera peer sensor (`/world/rig_*/imu_*`, `/world/rig_*/mag_*`) has a
    static `Transform3D` (`rig_T_imu` / `rig_T_mag`) and a static `kind`
-   (`"imu"` / `"mag"`); a sensor node without its transform is an error, because a
-   reader then cannot place its samples in the rig frame. A magnetometer's `field`
+   (`"imu"` / `"mag"`). This is a **writer-side** rule for now — dataforge's
+   `logging_toolkit._log_sensor_node` is the only thing that enforces it, and no
+   reader rejects a recording that breaks it — but a sensor node without its
+   transform is still wrong, because a reader then cannot place its samples in
+   the rig frame. A magnetometer's `field`
    is in the sensor's native units, which are only known when it carries a `unit`
    AnyValue — treat an absent `unit` as uncalibrated counts, never as tesla. The
    optional `heading` child is derived, so a reader may ignore it entirely.

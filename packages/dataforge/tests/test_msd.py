@@ -1,76 +1,59 @@
-"""Monado SLAM Datasets: remote discovery, calibration, csv readers, and a full convert.
+"""Monado SLAM Datasets: the device table, the verbs, the skip rules and the blueprints.
 
-Nothing here touches the network. The one HF listing helper and ``hf_fetch`` are
-monkeypatched onto a synthetic sequence zip built in ``tmp_path``, so the convert
-test exercises the real archive reader, the real AV1 encoder and the real
-writers — only the transport is faked.
+Nothing here touches the network — the HF listing helper, ``hf_fetch`` and the
+revision lookup are stubbed onto ``msd_hub``'s synthetic sequence, so a convert
+exercises the real archive reader, the real AV1 encoder and the real writers with
+only the transport faked. What each layer *wrote* is read back next door in
+``test_msd_layers``; what is not MSD-specific is tested in ``test_archives``
+(the readers), ``test_basalt`` (the calibration) and ``test_euroc`` (the csvs).
 """
 
 from __future__ import annotations
 
-import json
 import os
-import shutil
-import subprocess
-import zipfile
-from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 
-import cv2
 import numpy as np
 import pyarrow as pa
 import pytest
 import rerun as rr
 import rerun.blueprint as rrb
-import serde.json
-from jaxtyping import Float64, UInt8
+from conftest import calibration_fixture, column_rows, read_back
+from jaxtyping import Float64
+from msd_hub import REVISION_SHA, SEQUENCE, FakeHub, build_hub, recording_properties
 from numpy import ndarray
-from scipy.spatial.transform import Rotation
-from simplecv.camera_parameters import (
-    BrownConradyDistortion,
-    Fisheye62Parameters,
-    KannalaBrandtDistortion,
-    PinholeParameters,
-)
 
-from dataforge import paths, schema, transports
-from dataforge.datasets import msd
+from dataforge import blueprints, paths, schema
+from dataforge.basalt import FollowFrame, follow_frame, load_calibration
+from dataforge.datasets import msd, msd_layers
 from dataforge.datasets.msd import (
     MSD_DEVICES,
-    BasaltPose,
-    CameraRow,
-    MsdCalibration,
     MsdConfig,
     MsdDataset,
     MsdDevice,
     MsdDeviceChoice,
     MsdSource,
-    TimestampedSamples,
     build_blueprint,
-    camera_parameters,
-    camera_views,
-    first_timestamp_ns,
-    open_member_reader,
-    read_camera_index,
-    read_numeric_csv,
+    follow_eye,
 )
+from dataforge.datasets.msd_layers import WORLD_UP_VIEW_COORDINATES
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import require_av1_nvenc, resolve_ffmpeg
-
-REVISION_SHA: str = "0123456789abcdef0123456789abcdef01234567"
-"""Fake resolved repo revision every test's ``repo_revision`` stub returns."""
 
 
 def test_every_device_is_one_catalog_dataset_named_after_it() -> None:
     devices: tuple[MsdDeviceChoice, ...] = ("index", "g2", "odyssey")
     assert [MsdConfig(device=device).name for device in devices] == ["msd-index", "msd-g2", "msd-odyssey"]
-    index: MsdDevice = MSD_DEVICES["index"]
-    assert (index.hf_dir, index.num_cameras, index.has_magnetometer, index.label) == ("MI_valve_index", 2, False, "valve-index")
-    g2: MsdDevice = MSD_DEVICES["g2"]
-    assert (g2.hf_dir, g2.num_cameras, g2.has_magnetometer, g2.label) == ("MG_reverb_g2", 4, True, "reverb-g2")
     # The calibration collections (MIC/MGC/MOC) are deliberately not convertible sequences.
     assert not any(collection.endswith("C_calibration") for device in MSD_DEVICES.values() for collection in device.collections)
+
+
+def test_every_device_declares_a_world_up_axis_and_names_its_gt_source() -> None:
+    for device, profile in MSD_DEVICES.items():
+        assert profile.world_up in WORLD_UP_VIEW_COORDINATES, device
+    # The Index is tracked by SteamVR Lighthouse; the other two by a MoCap rig.
+    assert MSD_DEVICES["index"].gt_source == "lighthouse"
+    assert {MSD_DEVICES[device].gt_source for device in ("g2", "odyssey")} == {"mocap"}
 
 
 def test_discover_groups_split_parts_and_orders_by_collection_then_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -87,6 +70,7 @@ def test_discover_groups_split_parts_and_orders_by_collection_then_sequence(monk
         ],
     }
     monkeypatch.setattr(msd, "list_collection_files", lambda repo_id, path, revision=None: listing.get(path, []))
+    monkeypatch.setattr(msd, "repo_revision", lambda repo_id, revision=None: REVISION_SHA)
 
     discovered: list[tuple[SequenceIdentity, MsdSource]] = MsdDataset(MsdConfig(device="index")).discover()
     keys: list[str] = [identity.sequence_key for identity, _ in discovered]
@@ -98,7 +82,7 @@ def test_discover_groups_split_parts_and_orders_by_collection_then_sequence(monk
     assert [Path(path).suffix for path in split.archive_paths] == [".z01", ".z02", ".zip"]
     assert split.archive_bytes == 7
     assert split.sequence == "MIPB08_long"
-    assert split.collection_path == "M_monado_datasets/MI_valve_index/MIP_playing/MIPB_beat_saber"
+    assert split.collection == "MIPB_beat_saber"
 
 
 def test_discover_ignores_collections_of_other_devices(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -109,417 +93,56 @@ def test_discover_ignores_collections_of_other_devices(monkeypatch: pytest.Monke
         return []
 
     monkeypatch.setattr(msd, "list_collection_files", listing)
+    monkeypatch.setattr(msd, "repo_revision", lambda repo_id, revision=None: REVISION_SHA)
     dataset: MsdDataset = MsdDataset(MsdConfig(device="g2"))
     assert dataset.discover() == []
     assert asked == ["M_monado_datasets/MG_reverb_g2/MGO_others"]
 
 
-# ── calibration ───────────────────────────────────────────────────────────
 
-KB4_CALIBRATION: str = """
-{"value0": {
-  "T_imu_cam": [
-    {"px": 0.069, "py": 0.121, "pz": 0.013, "qx": -0.0274, "qy": -0.0269, "qz": -0.7011, "qw": 0.7120},
-    {"px": 0.069, "py": -0.013, "pz": 0.013, "qx": 0.0207, "qy": 0.0331, "qz": -0.6987, "qw": 0.7144}
-  ],
-  "intrinsics": [
-    {"camera_type": "kb4", "intrinsics": {"fx": 420.5, "fy": 420.7, "cx": 469.5, "cy": 479.1,
-      "k1": 0.193, "k2": 0.042, "k3": -0.233, "k4": 0.095}},
-    {"camera_type": "kb4", "intrinsics": {"fx": 421.2, "fy": 421.5, "cx": 467.7, "cy": 484.5,
-      "k1": 0.190, "k2": 0.055, "k3": -0.249, "k4": 0.103}}
-  ],
-  "resolution": [[960, 960], [960, 960]],
-  "imu_update_rate": 1000.0,
-  "cam_time_offset_ns": 0,
-  "vignette": []
-}}
-"""
-"""A two-camera kb4 calibration in basalt's format, trimmed from the Valve Index file."""
+def eye_vector(batch: rr.components.Position3DBatch | rr.components.Vector3DBatch | None) -> list[float]:
+    """Read one three-component field back out of an ``EyeControls3D`` archetype.
 
-RADTAN8_CALIBRATION: str = """
-{"value0": {
-  "comment": "trimmed Reverb G2 calibration",
-  "T_imu_cam": [
-    {"px": -0.052, "py": 0.013, "pz": 0.006, "qx": -0.155, "qy": 0.034, "qz": 0.692, "qw": 0.704}
-  ],
-  "intrinsics": [
-    {"camera_type": "pinhole-radtan8", "intrinsics": {"fx": 269.7, "fy": 269.8, "cx": 322.6, "cy": 228.9,
-      "k1": 0.302, "k2": -0.021, "p1": -0.00025, "p2": 6.1e-05, "k3": 0.0158, "k4": 0.575, "k5": -0.063, "k6": 0.034,
-      "rpmax": 2.7276}}
-  ],
-  "resolution": [[640, 480]]
-}}
-"""
-"""A one-camera radtan8 calibration; ``rpmax`` and ``comment`` must be ignored, not rejected."""
-
-
-def test_kb4_becomes_a_fisheye_with_its_four_radial_terms() -> None:
-    calibration: MsdCalibration = serde.json.from_json(MsdCalibration, KB4_CALIBRATION)
-    camera: PinholeParameters | Fisheye62Parameters = camera_parameters(calibration, 1, name="cam1")
-    assert isinstance(camera, Fisheye62Parameters)
-    assert isinstance(camera.distortion, KannalaBrandtDistortion)
-    assert (camera.distortion.k1, camera.distortion.k2, camera.distortion.k3, camera.distortion.k4) == (0.190, 0.055, -0.249, 0.103)
-    assert (camera.intrinsics.width, camera.intrinsics.height) == (960, 960)
-    assert camera.intrinsics.fl_x == 421.2
-
-
-def test_radtan8_becomes_a_pinhole_with_brown_conrady_and_no_rpmax() -> None:
-    calibration: MsdCalibration = serde.json.from_json(MsdCalibration, RADTAN8_CALIBRATION)
-    camera: PinholeParameters | Fisheye62Parameters = camera_parameters(calibration, 0, name="cam0")
-    assert isinstance(camera, PinholeParameters)
-    assert isinstance(camera.distortion, BrownConradyDistortion)
-    assert (camera.distortion.k1, camera.distortion.k2, camera.distortion.p1, camera.distortion.p2) == (0.302, -0.021, -0.00025, 6.1e-05)
-    assert (camera.distortion.k3, camera.distortion.k4, camera.distortion.k5, camera.distortion.k6) == (0.0158, 0.575, -0.063, 0.034)
-    assert (camera.intrinsics.width, camera.intrinsics.height) == (640, 480)
-
-
-def test_extrinsics_are_the_camera_pose_in_the_rig_frame() -> None:
-    """``T_imu_cam`` is ``rig_T_cam``; the rig frame is the IMU frame."""
-    calibration: MsdCalibration = serde.json.from_json(MsdCalibration, KB4_CALIBRATION)
-    camera: PinholeParameters | Fisheye62Parameters = camera_parameters(calibration, 0, name="cam0")
-    pose: BasaltPose = calibration.value0.T_imu_cam[0]
-    expected_rig_R_cam: Float64[ndarray, "3 3"] = Rotation.from_quat([pose.qx, pose.qy, pose.qz, pose.qw]).as_matrix()
-    rig_R_cam: Float64[ndarray, "3 3"] = np.asarray(camera.extrinsics.world_R_cam, dtype=np.float64)
-    rig_t_cam: Float64[ndarray, "3"] = np.asarray(camera.extrinsics.world_t_cam, dtype=np.float64)
-    np.testing.assert_allclose(rig_R_cam, expected_rig_R_cam, atol=1e-12)
-    np.testing.assert_allclose(rig_t_cam, [pose.px, pose.py, pose.pz], atol=1e-12)
-
-
-# ── csv readers ───────────────────────────────────────────────────────────
-
-CAMERA_CSV: bytes = b"#timestamp [ns],filename\n13000000000000,13000000000000.png\n13000018518000,13000018518000.png\n"
-IMU_CSV: bytes = (
-    b"#timestamp [ns],w_RS_S_x [rad s^-1],w_RS_S_y [rad s^-1],w_RS_S_z [rad s^-1],"
-    b"a_RS_S_x [m s^-2],a_RS_S_y [m s^-2],a_RS_S_z [m s^-2]\n"
-    b"12999000000000,0.01,-0.02,0.03,0.1,-0.2,9.8\n"
-    b"12999001000000,0.011,-0.021,0.031,0.11,-0.21,9.81\n"
-)
-GT_CSV: bytes = (
-    b"#timestamp [ns], p_RS_R_x [m], p_RS_R_y [m], p_RS_R_z [m], q_RS_w [], q_RS_x [], q_RS_y [], q_RS_z []\n"
-    b"12998000000000,0.0,0.1,0.2,1.0,0.0,0.0,0.0\n"
-    b"12998001000000,0.01,0.11,0.21,1.0,0.0,0.0,0.0\n"
-)
-
-
-def test_camera_index_rows_carry_a_typed_stamp_and_filename() -> None:
-    rows: list[CameraRow] = read_camera_index(CAMERA_CSV)
-    assert [row.timestamp_ns for row in rows] == [13000000000000, 13000018518000]
-    assert rows[1].filename == "13000018518000.png"
-
-
-def test_numeric_csv_splits_the_clock_from_the_values() -> None:
-    samples: TimestampedSamples = read_numeric_csv(IMU_CSV, num_values=6)
-    assert samples.times_ns.dtype == np.int64
-    np.testing.assert_array_equal(samples.times_ns, [12999000000000, 12999001000000])
-    np.testing.assert_allclose(samples.values[0], [0.01, -0.02, 0.03, 0.1, -0.2, 9.8])
-    assert samples.values.shape == (2, 6)
-
-
-def test_a_single_row_numeric_csv_still_reads_as_a_table() -> None:
-    one_row: bytes = b"\n".join(IMU_CSV.splitlines()[:2]) + b"\n"
-    samples: TimestampedSamples = read_numeric_csv(one_row, num_values=6)
-    assert samples.times_ns.shape == (1,)
-    assert samples.values.shape == (1, 6)
-
-
-def test_gt_contributes_only_its_first_stamp_to_the_shared_origin() -> None:
-    # The gt layer is a separate rrd, but both layers must share t0, so the base
-    # converter reads gt's first row and nothing else.
-    assert first_timestamp_ns(GT_CSV) == 12998000000000
-
-
-def test_an_empty_csv_is_an_error_not_a_silent_zero() -> None:
-    with pytest.raises(ValueError, match="no data rows"):
-        first_timestamp_ns(b"#timestamp [ns], p_RS_R_x [m]\n")
-
-
-# ── archive member reader ─────────────────────────────────────────────────
-
-SEQUENCE: str = "MIO09_short_1_updown"
-"""Sequence stem of every synthetic archive below; also its top directory inside the zip."""
-
-
-FRAME_WIDTH: int = 192
-"""Frame width; NVENC refuses anything much smaller, so the fixture is not tiny."""
-FRAME_HEIGHT: int = 160
-"""Frame height, likewise above NVENC's minimum."""
-
-
-def png_frame(index: int) -> bytes:
-    """One grayscale PNG with a square that moves with ``index``, as MSD ships them.
-
-    Sensor-like noise is deliberate: a flat gradient compresses to a couple of
-    kilobytes, and the split-archive fixture below needs an archive that really
-    spans volumes.
+    Every field of the archetype is optional, so an unset one is a wiring failure
+    rather than a value worth asserting on.
     """
-    noise: UInt8[ndarray, "160 192"] = np.random.default_rng(index).integers(0, 96, (FRAME_HEIGHT, FRAME_WIDTH), dtype=np.uint8)
-    frame: UInt8[ndarray, "160 192"] = np.tile(np.linspace(0, 159, FRAME_WIDTH, dtype=np.uint8), (FRAME_HEIGHT, 1)) + noise
-    left: int = (index * 6) % (FRAME_WIDTH - 16)
-    frame[8:24, left : left + 16] = np.uint8(255 - (index * 11) % 256)
-    success, buffer = cv2.imencode(".png", frame)
-    assert success
-    return buffer.tobytes()
+    assert batch is not None, "the follow eye sets every field it is read for"
+    return [float(value) for value in batch.as_arrow_array().flatten().to_pylist()]
 
 
-@dataclass(frozen=True, slots=True)
-class StreamClocks:
-    """What the synthetic tree actually wrote, so assertions read it back rather than recompute it."""
+def test_the_follow_eye_chases_the_headset_from_behind_and_above() -> None:
+    """A chase camera: back along forward, up along up, aimed just ahead of the rig.
 
-    firsts: dict[str, int]
-    """First timestamp of every stream, by stream name (``cam0``, ``imu0``, ``mag0``, ``gt``)."""
-    lasts: dict[str, int]
-    """Last timestamp of every stream, same keys."""
-
-
-def sequence_tree(root: Path, *, num_cameras: int, num_frames: int, with_magnetometer: bool) -> StreamClocks:
-    """Write one synthetic ``<SEQ>/mav0/...`` tree and report the clock of every stream."""
-    base_ns: int = 13_000_000_000_000
-    firsts: dict[str, int] = {}
-    lasts: dict[str, int] = {}
-    for camera in range(num_cameras):
-        data_dir: Path = root / SEQUENCE / "mav0" / f"cam{camera}" / "data"
-        data_dir.mkdir(parents=True, exist_ok=True)
-        # Irregular steps around 18.5 ms (~54 fps), offset per camera: a real rig's clock.
-        stamps: list[int] = [base_ns + camera * 300_000 + index * 18_518_000 + (index * 7919) % 400_000 for index in range(num_frames)]
-        firsts[f"cam{camera}"] = stamps[0]
-        lasts[f"cam{camera}"] = stamps[-1]
-        rows: list[str] = ["#timestamp [ns],filename"]
-        for index, stamp in enumerate(stamps):
-            (data_dir / f"{stamp}.png").write_bytes(png_frame(index))
-            rows.append(f"{stamp},{stamp}.png")
-        (data_dir.parent / "data.csv").write_text("\n".join(rows) + "\n")
-        # A decoy the converter must ignore, exactly as the real archives ship it.
-        (data_dir.parent / "data.extra.csv").write_text("#timestamp [ns],exposure\n0,0\n")
-
-    imu_dir: Path = root / SEQUENCE / "mav0" / "imu0"
-    imu_dir.mkdir(parents=True, exist_ok=True)
-    imu_first: int = base_ns - 5_000_000
-    firsts["imu0"] = imu_first
-    lasts["imu0"] = imu_first + 59 * 1_000_000
-    imu_rows: list[str] = ["#timestamp [ns],w_RS_S_x [rad s^-1],w_RS_S_y [rad s^-1],w_RS_S_z [rad s^-1],a_RS_S_x [m s^-2],a_RS_S_y [m s^-2],a_RS_S_z [m s^-2]"]
-    for index in range(60):
-        stamp: int = imu_first + index * 1_000_000
-        imu_rows.append(f"{stamp},{0.01 * index},{-0.02 * index},{0.03 * index},{0.1},{-0.2},{9.81}")
-    (imu_dir / "data.csv").write_text("\n".join(imu_rows) + "\n")
-
-    if with_magnetometer:
-        mag_dir: Path = root / SEQUENCE / "mav0" / "mag0"
-        mag_dir.mkdir(parents=True, exist_ok=True)
-        mag_first: int = base_ns - 2_000_000
-        firsts["mag0"] = mag_first
-        lasts["mag0"] = mag_first + 5 * 20_000_000
-        mag_rows: list[str] = ["#timestamp [ns], x, y, z"]
-        for index in range(6):
-            mag_rows.append(f"{mag_first + index * 20_000_000},{300.0 + index},{-40.0},{12.0 * index}")
-        (mag_dir / "data.csv").write_text("\n".join(mag_rows) + "\n")
-
-    gt_dir: Path = root / SEQUENCE / "mav0" / "gt"
-    gt_dir.mkdir(parents=True, exist_ok=True)
-    # Earlier than every other stream on purpose: gt owns t0.
-    gt_first: int = base_ns - 9_000_000
-    firsts["gt"] = gt_first
-    # gt is not logged by the base layer, so its last stamp never bounds the duration.
-    gt_rows: list[str] = ["#timestamp [ns], p_RS_R_x [m], p_RS_R_y [m], p_RS_R_z [m], q_RS_w [], q_RS_x [], q_RS_y [], q_RS_z []"]
-    for index in range(40):
-        gt_rows.append(f"{gt_first + index * 1_000_000},{0.001 * index},0.0,0.0,1.0,0.0,0.0,0.0")
-    (gt_dir / "data.csv").write_text("\n".join(gt_rows) + "\n")
-    return StreamClocks(firsts=firsts, lasts=lasts)
-
-
-def test_plain_zip_reader_serves_csvs_and_frames_in_order(tmp_path: Path) -> None:
-    tree: Path = tmp_path / "tree"
-    sequence_tree(tree, num_cameras=2, num_frames=4, with_magnetometer=False)
-    archive: Path = tmp_path / f"{SEQUENCE}.zip"
-    shutil.make_archive(str(archive.with_suffix("")), "zip", root_dir=tree)
-
-    with open_member_reader([archive], tmp_path / "work") as reader:
-        rows: list[CameraRow] = read_camera_index(reader.csv_bytes(f"{SEQUENCE}/mav0/cam1/data.csv"))
-        members: list[str] = [f"{SEQUENCE}/mav0/cam1/data/{row.filename}" for row in rows]
-        frames: list[bytes] = list(reader.png_frames(members))
-    assert len(frames) == 4
-    assert all(frame.startswith(b"\x89PNG") for frame in frames)
-    assert frames == [png_frame(index) for index in range(4)]
-
-
-@pytest.mark.skipif(shutil.which("zip") is None, reason="needs Info-ZIP's zip to build a multi-volume fixture")
-def test_split_archive_reader_extracts_one_camera_at_a_time(tmp_path: Path) -> None:
-    """Python's zipfile cannot read a spanned archive at all, so 7-Zip does."""
-    tree: Path = tmp_path / "tree"
-    sequence_tree(tree, num_cameras=2, num_frames=12, with_magnetometer=False)
-    subprocess.run(["zip", "-q", "-0", "-r", "-s", "64k", str(tmp_path / f"{SEQUENCE}.zip"), SEQUENCE], cwd=tree, check=True)
-    volumes: list[Path] = sorted(tmp_path.glob(f"{SEQUENCE}.z*"))
-    assert len(volumes) > 1, "the fixture must really be split for this test to mean anything"
-    with pytest.raises(zipfile.BadZipFile):
-        zipfile.ZipFile(tmp_path / f"{SEQUENCE}.zip").read(f"{SEQUENCE}/mav0/cam0/data/{sorted((tree / SEQUENCE / 'mav0' / 'cam0' / 'data').iterdir())[0].name}")
-
-    work: Path = tmp_path / "work"
-    with open_member_reader(volumes, work) as reader:
-        rows: list[CameraRow] = read_camera_index(reader.csv_bytes(f"{SEQUENCE}/mav0/cam0/data.csv"))
-        frames: list[bytes] = list(reader.png_frames([f"{SEQUENCE}/mav0/cam0/data/{row.filename}" for row in rows]))
-    assert frames == [png_frame(index) for index in range(12)]
-    # The camera's extracted PNGs are gone again; peak scratch is one camera, not the sequence.
-    assert not list(work.rglob("*.png"))
-
-
-# ── a fake hub in tmp_path ────────────────────────────────────────────────
-
-
-@dataclass(frozen=True, slots=True)
-class FakeHub:
-    """One device's remote tree on disk, plus the scratch root a convert works in."""
-
-    remote: Path
-    """Mirror of the repo, so ``allow_patterns`` glob against real files."""
-    root: Path
-    """``MsdConfig.root``: where the fake fetch copies archives to."""
-    config: MsdConfig
-    """Config already pointed at ``root`` for this device."""
-    firsts: dict[str, int]
-    """First timestamp of every stream in the synthetic sequence, by stream name."""
-    lasts: dict[str, int]
-    """Last timestamp of every logged stream; ``gt`` is deliberately absent."""
-    fetched: list[tuple[str, ...]]
-    """``allow_patterns`` of every ``hf_fetch`` call, in order."""
-    archives: list[Path]
-    """The sequence's archive volume(s), as they land under ``root``."""
-
-
-def calibration_json(num_cameras: int, model: str) -> str:
-    """A basalt ``calibration.json`` for ``num_cameras`` identical cameras."""
-    terms: dict[str, float] = (
-        {"k1": 0.19, "k2": 0.04, "k3": -0.23, "k4": 0.09}
-        if model == "kb4"
-        else {"k1": 0.30, "k2": -0.02, "p1": -0.0002, "p2": 6e-05, "k3": 0.015, "k4": 0.57, "k5": -0.06, "k6": 0.03, "rpmax": 2.72}
-    )
-    # A real rotation per camera, so a test can tell rig_T_cam from its inverse.
-    quaternions_xyzw: Float64[ndarray, "n_cameras 4"] = Rotation.from_euler(
-        "xyz", [[0.1 + 0.05 * index, -0.2, 0.3 * index] for index in range(num_cameras)]
-    ).as_quat()
-    poses: list[dict[str, float]] = [
-        {
-            "px": 0.03 * index,
-            "py": 0.01,
-            "pz": 0.005,
-            "qx": float(quaternion[0]),
-            "qy": float(quaternion[1]),
-            "qz": float(quaternion[2]),
-            "qw": float(quaternion[3]),
-        }
-        for index, quaternion in enumerate(quaternions_xyzw)
-    ]
-    cameras: list[dict[str, object]] = [
-        {"camera_type": model, "intrinsics": {"fx": 60.0, "fy": 60.1, "cx": 48.0, "cy": 48.5, **terms}} for _ in range(num_cameras)
-    ]
-    value: dict[str, object] = {
-        "comment": "synthetic",
-        "T_imu_cam": poses,
-        "intrinsics": cameras,
-        "resolution": [[FRAME_WIDTH, FRAME_HEIGHT]] * num_cameras,
-        "imu_update_rate": 1000.0,
-    }
-    return json.dumps({"value0": value})
-
-
-def build_hub(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    device: MsdDeviceChoice = "index",
-    num_frames: int = 6,
-    archive_bytes: int | None = None,
-    raw_budget_gb: float = 50.0,
-    keep_raw: bool = False,
-) -> FakeHub:
-    """Build one synthetic sequence and wire the HF listing/fetch/revision stubs to it."""
-    profile: MsdDevice = MSD_DEVICES[device]
-    collection: str = profile.collections[0]
-    collection_path: str = f"M_monado_datasets/{profile.hf_dir}/{collection}"
-    remote: Path = tmp_path / "remote"
-    root: Path = tmp_path / "root"
-
-    tree: Path = tmp_path / "tree"
-    clocks: StreamClocks = sequence_tree(
-        tree, num_cameras=profile.num_cameras, num_frames=num_frames, with_magnetometer=profile.has_magnetometer
-    )
-    archive_dir: Path = remote / collection_path
-    archive_dir.mkdir(parents=True, exist_ok=True)
-    shutil.make_archive(str(archive_dir / SEQUENCE), "zip", root_dir=tree)
-
-    calibration_file: Path = remote / "M_monado_datasets" / profile.hf_dir / "extras" / "calibration.json"
-    calibration_file.parent.mkdir(parents=True, exist_ok=True)
-    calibration_file.write_text(calibration_json(profile.num_cameras, "kb4" if device == "index" else "pinhole-radtan8"))
-
-    size: int = archive_bytes if archive_bytes is not None else (archive_dir / f"{SEQUENCE}.zip").stat().st_size
-    listing: list[tuple[str, int]] = [(f"{collection_path}/{SEQUENCE}.zip", size), (f"{collection_path}/README.md", 12)]
-    fetched: list[tuple[str, ...]] = []
-
-    def fake_fetch(
-        repo_id: str, *, allow_patterns: Sequence[str], local_dir: Path, repo_type: str = "dataset", revision: str | None = None
-    ) -> Path:
-        fetched.append(tuple(allow_patterns))
-        for pattern in allow_patterns:
-            for match in sorted(remote.glob(pattern)):
-                destination: Path = Path(local_dir) / match.relative_to(remote)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(match, destination)
-        return Path(local_dir)
-
-    monkeypatch.setattr(msd, "list_collection_files", lambda repo_id, path, revision=None: listing if path == collection_path else [])
-    monkeypatch.setattr(transports, "hf_fetch", fake_fetch)
-    monkeypatch.setattr(msd, "repo_revision", lambda repo_id, revision=None: REVISION_SHA)
-    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "rrd"))
-
-    config: MsdConfig = MsdConfig(device=device, root=root, raw_budget_gb=raw_budget_gb, keep_raw=keep_raw)
-    return FakeHub(
-        remote=remote,
-        root=root,
-        config=config,
-        firsts=clocks.firsts,
-        lasts=clocks.lasts,
-        fetched=fetched,
-        archives=[root / f"{collection_path}/{SEQUENCE}.zip"],
-    )
-
-
-@pytest.fixture(scope="module")
-def nvenc() -> Path:
-    """The resolved ffmpeg, or a skip when this machine cannot encode AV1 on the GPU."""
-    ffmpeg: Path = resolve_ffmpeg()
-    try:
-        require_av1_nvenc(ffmpeg)
-    except RuntimeError as error:
-        pytest.skip(f"no av1_nvenc: {error}")
-    return ffmpeg
-
-
-def read_back(rrd: Path) -> rr.experimental.ChunkStore:
-    """Load a saved rrd the way a consumer does: reader → store → queryable views."""
-    return rr.experimental.ChunkStore.from_chunks(list(rr.experimental.RrdReader(rrd).stream()))
-
-
-def column_rows(store: rr.experimental.ChunkStore, column: str) -> pa.Table:
-    """Non-null rows of one component column, index-sorted."""
-    table: pa.Table = store.reader(index=schema.TIMELINE).to_arrow_table().sort_by(schema.TIMELINE)
-    return table.select([schema.TIMELINE, column]).drop_null()
-
-
-def capture_properties(store: rr.experimental.ChunkStore) -> dict[str, object]:
-    """The recording's ``property:capture:*`` values, unwrapped from their one-row lists.
-
-    Properties live on the static ``/__properties`` entity, off every index, so
-    they need their own content-filtered read.
+    The Index's frame goes in, so the numbers are readable by hand: 0.9 m back
+    along +z and 0.45 m up along -x is (-0.45, 0, -0.9), looking at 0.3 m ahead.
     """
-    table: pa.Table = store.reader(index=None, contents="/__properties/**").to_arrow_table()
-    row: dict[str, list[object] | None] = table.to_pylist()[0]
-    prefix: str = schema.capture_property("")
-    return {name.removeprefix(prefix): values[0] for name, values in row.items() if name.startswith(prefix) and values}
+    eye: rrb.EyeControls3D = follow_eye(FollowFrame(forward=(0.0, 0.0, 1.0), up=(-1.0, 0.0, 0.0)))
+
+    assert eye_vector(eye.position) == pytest.approx([-0.45, 0.0, -0.9], abs=1e-6)
+    assert eye_vector(eye.look_target) == pytest.approx([0.0, 0.0, 0.3], abs=1e-6)
+    assert eye_vector(eye.eye_up) == pytest.approx([-1.0, 0.0, 0.0], abs=1e-6)
+    kind: rrb.components.Eye3DKindBatch | None = eye.kind
+    spin_speed: rrb.components.AngularSpeedBatch | None = eye.spin_speed
+    assert kind is not None and spin_speed is not None
+    assert kind.as_arrow_array().to_pylist() == [rrb.Eye3DKind.FirstPerson.value]
+    assert spin_speed.as_arrow_array().to_pylist() == [0.0]
+
+
+
+FOLLOW_FRAME_AGREEMENT_DEG: float = 0.05
+"""How far a declared ``MSD_DEVICES`` axis may sit from the real calibration's.
+
+Far tighter than ``convert``'s 5 deg warning tolerance: the constants were read
+off these very files, so the only gap left is the three decimals they are
+rounded to.
+"""
 
 
 # ── download ──────────────────────────────────────────────────────────────
 
 
 def test_download_fetches_only_the_calibration_and_prints_the_plan(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc_ffmpeg: Path
 ) -> None:
     hub: FakeHub = build_hub(tmp_path, monkeypatch)
     MsdDataset(hub.config).download()
@@ -535,9 +158,44 @@ def test_download_fetches_only_the_calibration_and_prints_the_plan(
 # ── convert ───────────────────────────────────────────────────────────────
 
 
+def test_one_resolved_commit_serves_the_listing_the_fetches_and_the_rrd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
+) -> None:
+    """A branch name moves under a conversion; a sha cannot.
+
+    ``--revision main`` is only the input: listing a collection on ``main``,
+    fetching an archive on it minutes later and stamping a third answer into the
+    rrd could describe three different trees, and nothing in the rrd would say
+    so. Every hub call takes the resolved sha instead, and it is the sha the
+    recording reports.
+    """
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    monkeypatch.setattr(msd, "repo_revision", lambda repo_id, revision=None: REVISION_SHA)
+    dataset: MsdDataset = MsdDataset(replace(hub.config, revision="main"))
+    identity, source = dataset.discover()[0]
+
+    target: Path = dataset.convert(identity, source, force=False)
+
+    assert hub.revisions, "the listing and both fetches all go through the hub"
+    assert set(hub.revisions) == {REVISION_SHA}, f"a call used something other than the sha: {hub.revisions}"
+    assert recording_properties(read_back(target), "capture")["hf_revision"] == REVISION_SHA
+
+
+def test_a_revision_the_hub_resolves_to_nothing_stops_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without a sha there is no tree to name, so the conversion has nothing honest to record."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    monkeypatch.setattr(msd, "repo_revision", lambda repo_id, revision=None: None)
+    dataset: MsdDataset = MsdDataset(replace(hub.config, revision="no-such-branch"))
+
+    with pytest.raises(RuntimeError, match="no-such-branch"):
+        dataset.discover()
+
+
+
+
 @pytest.mark.parametrize("device", ["index", "g2"])
 def test_convert_writes_one_replayable_recording_and_deletes_the_raw(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device: MsdDeviceChoice, nvenc: Path
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device: MsdDeviceChoice, nvenc_ffmpeg: Path
 ) -> None:
     hub: FakeHub = build_hub(tmp_path, monkeypatch, device=device)
     dataset: MsdDataset = MsdDataset(hub.config)
@@ -552,20 +210,20 @@ def test_convert_writes_one_replayable_recording_and_deletes_the_raw(
     profile: MsdDevice = MSD_DEVICES[device]
 
     # t0 is gt's first stamp: it is earlier than every other stream in the fixture.
-    start_time_ns: int = hub.firsts["gt"]
-    assert start_time_ns == min(hub.firsts.values())
+    start_time_ns: int = hub.clocks.firsts["gt"]
+    assert start_time_ns == min(hub.clocks.firsts.values())
     for index in range(profile.num_cameras):
         samples: pa.Table = column_rows(store, f"{schema.video_path(0, index)}:VideoStream:sample")
         assert samples.num_rows == 6, f"cam{index} lost samples"
         first_ns: int = samples.column(schema.TIMELINE).combine_chunks().cast(pa.int64()).to_pylist()[0]
-        assert first_ns == hub.firsts[f"cam{index}"] - start_time_ns
+        assert first_ns == hub.clocks.firsts[f"cam{index}"] - start_time_ns
 
     assert column_rows(store, f"{schema.gyro_path(0, 0)}:Scalars:scalars").num_rows == 60
     assert column_rows(store, f"{schema.accel_path(0, 0)}:Scalars:scalars").num_rows == 60
     if profile.has_magnetometer:
         assert column_rows(store, f"{schema.field_path(0, 0)}:Scalars:scalars").num_rows == 6
 
-    capture: dict[str, object] = capture_properties(store)
+    capture: dict[str, object] = recording_properties(store, "capture")
     assert capture["start_time_ns"] == start_time_ns
     assert capture["num_cameras"] == profile.num_cameras
     assert capture["num_frames"] == 6
@@ -573,7 +231,7 @@ def test_convert_writes_one_replayable_recording_and_deletes_the_raw(
     assert capture["device_label"] == profile.label
     assert capture["collection"] == profile.collections[0]
     assert capture["hf_revision"] == REVISION_SHA
-    assert capture["duration_ns"] == max(hub.lasts.values()) - start_time_ns
+    assert capture["duration_ns"] == max(hub.clocks.lasts.values()) - start_time_ns
 
     # Raw is scratch: the archive and every temp mp4 are gone once the rrd exists.
     assert not hub.archives[0].exists()
@@ -581,7 +239,7 @@ def test_convert_writes_one_replayable_recording_and_deletes_the_raw(
     assert (hub.root / "M_monado_datasets" / profile.hf_dir / "extras" / "calibration.json").is_file()
 
 
-def test_keep_raw_leaves_the_archive_and_the_encoded_mp4s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_keep_raw_leaves_the_archive_and_the_encoded_mp4s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     hub: FakeHub = build_hub(tmp_path, monkeypatch, keep_raw=True)
     dataset: MsdDataset = MsdDataset(hub.config)
     identity, source = dataset.discover()[0]
@@ -598,7 +256,8 @@ def test_a_failed_encode_keeps_the_archive_and_clears_the_scratch(
     def explode(*arguments: object, **keywords: object) -> int:
         raise RuntimeError("nvenc fell over")
 
-    monkeypatch.setattr(msd, "encode_frames_to_mp4", explode)
+    # The encoder is the layer module's now, so that is where the failure is injected.
+    monkeypatch.setattr(msd_layers, "encode_frames_to_mp4", explode)
     dataset: MsdDataset = MsdDataset(hub.config)
     identity, source = dataset.discover()[0]
     with pytest.raises(RuntimeError, match="nvenc fell over"):
@@ -611,53 +270,183 @@ def test_a_failed_encode_keeps_the_archive_and_clears_the_scratch(
     assert "kept 0.0" in capsys.readouterr().out
 
 
-def test_an_existing_recording_is_skipped_without_fetching(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_sequence_with_both_layers_already_written_is_skipped_without_fetching(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     hub: FakeHub = build_hub(tmp_path, monkeypatch)
     dataset: MsdDataset = MsdDataset(hub.config)
     identity, source = dataset.discover()[0]
     target: Path = paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(b"already done")
+    for layer in (paths.BASE_LAYER, paths.GT_LAYER):
+        written: Path = paths.rrd_path(paths.output_root(), layer=layer, identity=identity)
+        written.parent.mkdir(parents=True, exist_ok=True)
+        written.write_bytes(b"already done")
 
     assert dataset.convert(identity, source, force=False) == target
     assert hub.fetched == []
 
 
-def test_the_logged_camera_node_carries_rig_T_cam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
-    """``T_imu_cam`` is the camera's pose in the rig frame, and that is what lands on the node.
+def test_a_world_up_the_data_disagrees_with_is_announced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc_ffmpeg: Path
+) -> None:
+    """A declared axis is a claim about the data; convert re-measures it every sequence."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    monkeypatch.setitem(MSD_DEVICES, "index", replace(MSD_DEVICES["index"], world_up="+z"))
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    dataset.convert(identity, source, force=False)
 
-    ``log_pinhole`` stores the child-from-parent step, so the recording holds
-    ``cam_T_rig``; inverting it must give back the calibration's pose.
+    output: str = capsys.readouterr().out
+    assert "declares world_up +z" in output
+    assert "measured +y" in output
+
+
+def test_a_follow_frame_the_calibration_disagrees_with_is_announced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc_ffmpeg: Path
+) -> None:
+    """A declared follow frame is a claim about the calibration; convert re-derives it."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    rolled: FollowFrame = FollowFrame(forward=MSD_DEVICES["index"].follow.forward, up=(0.0, 1.0, 0.0))
+    monkeypatch.setitem(MSD_DEVICES, "index", replace(MSD_DEVICES["index"], follow=rolled))
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    dataset.convert(identity, source, force=False)
+
+    output: str = capsys.readouterr().out
+    assert "follow frame" in output
+    assert "up off by 90.0 deg" in output, "a quarter-turn roll is what the tolerance exists to catch"
+
+
+def test_a_follow_frame_the_calibration_agrees_with_stays_quiet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc_ffmpeg: Path
+) -> None:
+    """The synthetic calibration is built from the Index's declared frame, so nothing is said."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    dataset.convert(identity, source, force=False)
+
+    assert "follow frame" not in capsys.readouterr().out
+
+
+# ── the layer rule ────────────────────────────────────────────────────────
+
+
+def gt_rows(gt_rrd: Path) -> tuple[list[int], list[list[float]]]:
+    """Every pose time and translation in a gt rrd, index-sorted.
+
+    What a gt rebuild has to reproduce exactly: same clock, same positions.
+    Read through the public reader, so it is what a consumer sees.
+    """
+    poses: pa.Table = column_rows(read_back(gt_rrd), f"{schema.rig_path(0)}:Transform3D:translation")
+    times_ns: list[int] = poses.column(schema.TIMELINE).combine_chunks().cast(pa.int64()).to_pylist()
+    return times_ns, [row[0] for row in poses.column(1).to_pylist()]
+
+
+def test_a_convert_publishes_the_gt_csv_verbatim_beside_the_two_rrds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
+) -> None:
+    """The archive is deleted, so the one member gt still needs is kept as a sidecar."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    dataset.convert(identity, source, force=False)
+
+    sidecar: Path = paths.sidecar_path(paths.output_root(), identity, msd.GT_SIDECAR_NAME)
+    assert sidecar.is_file(), f"no sidecar at {sidecar}"
+    assert sidecar == paths.output_root() / paths.SIDECAR_DIR / identity.recording_id / "gt.csv"
+    # Verbatim: byte for byte what the archive shipped, not re-serialized columns.
+    assert sidecar.read_bytes() == (tmp_path / "tree" / SEQUENCE / "mav0" / "gt" / "data.csv").read_bytes()
+
+
+def test_a_missing_gt_layer_is_rebuilt_from_the_sidecar_without_fetching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """This is what the sidecar is for: ``rm gt/*.rrd`` and a convert, no network, no encode.
+
+    The rebuilt layer has to be the *same* layer — it reads the same csv and the
+    same base rrd — so its rows are compared against the ones the full
+    conversion wrote, not merely counted.
     """
     hub: FakeHub = build_hub(tmp_path, monkeypatch)
     dataset: MsdDataset = MsdDataset(hub.config)
     identity, source = dataset.discover()[0]
-    target: Path = dataset.convert(identity, source, force=False)
+    base_target: Path = dataset.convert(identity, source, force=False)
+    gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
+    before: tuple[list[int], list[list[float]]] = gt_rows(gt_target)
+    base_bytes: bytes = base_target.read_bytes()
+    fetches: int = len(hub.fetched)
+    capsys.readouterr()
 
-    calibration: MsdCalibration = serde.json.from_json(
-        MsdCalibration, (hub.remote / "M_monado_datasets/MI_valve_index/extras/calibration.json").read_text()
-    )
-    store: rr.experimental.ChunkStore = read_back(target)
-    for index in range(2):
-        node: str = schema.cam_path(0, index)
-        row: dict[str, list[object]] = store.reader(index=None, contents=node).to_arrow_table().to_pylist()[0]
-        assert row[f"{node}:Transform3D:relation"][0] == rr.components.TransformRelation.ChildFromParent.value
-        cam_R_rig: Float64[ndarray, "3 3"] = np.asarray(row[f"{node}:Transform3D:mat3x3"][0], dtype=np.float64).reshape(3, 3).T
-        cam_t_rig: Float64[ndarray, "3"] = np.asarray(row[f"{node}:Transform3D:translation"][0], dtype=np.float64)
+    gt_target.unlink()
+    assert dataset.convert(identity, source, force=False) == base_target
 
-        pose: BasaltPose = calibration.value0.T_imu_cam[index]
-        rig_R_cam: Float64[ndarray, "3 3"] = Rotation.from_quat([pose.qx, pose.qy, pose.qz, pose.qw]).as_matrix()
-        rig_t_cam: Float64[ndarray, "3"] = np.array([pose.px, pose.py, pose.pz])
-        # float32 on the wire, so a loose tolerance is the honest one.
-        np.testing.assert_allclose(cam_R_rig.T, rig_R_cam, atol=1e-6)
-        np.testing.assert_allclose(-cam_R_rig.T @ cam_t_rig, rig_t_cam, atol=1e-6)
+    assert len(hub.fetched) == fetches, "base and the sidecar are on disk, so the archive is not fetched again"
+    assert gt_rows(gt_target) == before, "a rebuilt gt layer is the same layer"
+    assert base_target.read_bytes() == base_bytes, "rebuilding gt must not touch the base rrd"
+    assert "no fetch" in capsys.readouterr().out
+
+
+def test_a_missing_gt_layer_with_no_sidecar_falls_back_to_the_archive_and_says_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Without the sidecar there is nothing to rebuild from, and paying for the download is the only option."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    base_target: Path = dataset.convert(identity, source, force=False)
+    gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
+    sidecar: Path = paths.sidecar_path(paths.output_root(), identity, msd.GT_SIDECAR_NAME)
+    fetches: int = len(hub.fetched)
+    capsys.readouterr()
+
+    gt_target.unlink()
+    sidecar.unlink()
+    assert dataset.convert(identity, source, force=False) == base_target
+
+    assert len(hub.fetched) > fetches, "no sidecar means the archive is the only source left"
+    assert gt_target.is_file() and sidecar.is_file(), "the fallback republishes both"
+    assert "cannot be rebuilt" in capsys.readouterr().out
+
+
+def test_both_layers_and_the_sidecar_are_skipped_when_all_three_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
+) -> None:
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    base_target: Path = dataset.convert(identity, source, force=False)
+    fetches: int = len(hub.fetched)
+
+    assert dataset.convert(identity, source, force=False) == base_target
+    assert len(hub.fetched) == fetches, "everything exists, so nothing is downloaded"
+
+
+def test_force_republishes_both_layers_and_the_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
+    """``--force`` bypasses the skip checks and nothing else: all three come back."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    base_target: Path = dataset.convert(identity, source, force=False)
+    gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
+    sidecar: Path = paths.sidecar_path(paths.output_root(), identity, msd.GT_SIDECAR_NAME)
+    before: tuple[list[int], list[list[float]]] = gt_rows(gt_target)
+    fetches: int = len(hub.fetched)
+
+    assert dataset.convert(identity, source, force=True) == base_target
+
+    assert len(hub.fetched) > fetches, "a forced convert re-reads the archive"
+    for published in (base_target, gt_target, sidecar):
+        assert published.is_file(), f"{published} was not republished"
+        assert not list(published.parent.glob("*.tmp")), f"a staged temp survived beside {published}"
+    assert gt_rows(gt_target) == before, "the same inputs give the same layer"
+
+
 
 
 # ── raw budget ────────────────────────────────────────────────────────────
 
 
 def test_a_sequence_bigger_than_the_budget_is_an_announced_exception(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc_ffmpeg: Path
 ) -> None:
     # The Index and G2 long sessions are 66 GB and 55 GB of split archives: there is
     # no smaller unit to convert, so the budget warns and the sequence goes through.
@@ -691,7 +480,6 @@ def test_leftovers_that_would_breach_the_budget_stop_the_fetch(tmp_path: Path, m
 
 @pytest.mark.parametrize("device", ["index", "g2", "odyssey"])
 def test_both_blueprints_serialize_for_every_device_layout(tmp_path: Path, device: MsdDeviceChoice) -> None:
-    profile: MsdDevice = MSD_DEVICES[device]
     dataset: MsdDataset = MsdDataset(MsdConfig(device=device))
     default_path: Path = tmp_path / f"{device}.rbl"
     table_path: Path = tmp_path / f"{device}-table.rbl"
@@ -701,7 +489,6 @@ def test_both_blueprints_serialize_for_every_device_layout(tmp_path: Path, devic
 
     assert default_path.stat().st_size > 0
     assert table_path.stat().st_size > 0
-    assert [view.name for view in camera_views(profile.num_cameras)] == [f"cam{index}" for index in range(profile.num_cameras)]
 
 
 def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
@@ -719,9 +506,60 @@ def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
     return found
 
 
+@pytest.mark.parametrize("device", ["index", "g2", "odyssey"])
+def test_every_declared_follow_frame_is_two_orthogonal_unit_vectors(device: MsdDeviceChoice) -> None:
+    """The constants are typed in by hand from a calibration, so the invariant is checked here."""
+    follow: FollowFrame = MSD_DEVICES[device].follow
+    assert np.linalg.norm(follow.forward) == pytest.approx(1.0, abs=1e-3)
+    assert np.linalg.norm(follow.up) == pytest.approx(1.0, abs=1e-3)
+    assert float(np.dot(follow.forward, follow.up)) == pytest.approx(0.0, abs=1e-3)
+
+
+@pytest.mark.parametrize("device", ["index", "g2", "odyssey"])
+def test_every_declared_follow_frame_is_the_real_calibration_own(device: MsdDeviceChoice) -> None:
+    """The constants exist only because ``register`` has no sequence to derive them from.
+
+    That makes them a copy of a derivation, and a copy can rot: this reads the
+    device's **real** ``calibration.json`` and re-derives the pair. ``convert``
+    re-checks the same thing per sequence but only warns past 5 deg; here the two
+    must agree to 0.05 deg, because nothing but the constants' three decimals
+    separates them.
+    """
+    declared: FollowFrame = MSD_DEVICES[device].follow
+    derived: FollowFrame = follow_frame(load_calibration(calibration_fixture(device), expected_cameras=MSD_DEVICES[device].num_cameras))
+
+    for axis, (stated, real) in (("forward", (declared.forward, derived.forward)), ("up", (declared.up, derived.up))):
+        stated_xyz: Float64[ndarray, "3"] = np.asarray(stated, dtype=np.float64)
+        cosine: float = float(np.dot(stated_xyz, real) / np.linalg.norm(stated_xyz))
+        deviation_deg: float = float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
+        assert deviation_deg < FOLLOW_FRAME_AGREEMENT_DEG, f"{device}'s declared {axis} is {deviation_deg:.3f} deg off its calibration"
+
+
+@pytest.mark.parametrize("device", ["index", "g2", "odyssey"])
+def test_both_follow_views_are_oriented_by_the_device_own_frame(device: MsdDeviceChoice) -> None:
+    """Every headset carries its IMU differently, so one shared eye would tilt two of three."""
+    follow: FollowFrame = MSD_DEVICES[device].follow
+    dataset: MsdDataset = MsdDataset(MsdConfig(device=device))
+
+    for blueprint in (dataset.default_blueprint(), dataset.table_blueprint()):
+        view: rrb.View = next(each for each in blueprint_views(blueprint) if each.name == "Follow")
+        eye: object = view.properties["EyeControls3D"]
+        assert isinstance(eye, rrb.EyeControls3D)
+        assert eye_vector(eye.eye_up) == pytest.approx(list(follow.up), abs=1e-6)
+        assert eye_vector(eye.look_target) == pytest.approx([0.3 * axis for axis in follow.forward], abs=1e-6)
+        # Behind the headset and above it: the eye leans against forward and with up.
+        position: list[float] = eye_vector(eye.position)
+        assert float(np.dot(position, follow.forward)) < 0.0
+        assert float(np.dot(position, follow.up)) > 0.0
+
+
+UPRIGHT_FOLLOW: FollowFrame = FollowFrame(forward=(0.0, 0.0, 1.0), up=(0.0, -1.0, 0.0))
+"""A stand-in frame for the layout tests, which are about panes and not orientation."""
+
+
 def test_only_a_magnetometer_device_gets_the_third_plot_pane() -> None:
-    with_magnetometer: list[rrb.View] = blueprint_views(build_blueprint(4, has_magnetometer=True))
-    without: list[rrb.View] = blueprint_views(build_blueprint(2, has_magnetometer=False))
+    with_magnetometer: list[rrb.View] = blueprint_views(build_blueprint(4, has_magnetometer=True, follow=UPRIGHT_FOLLOW))
+    without: list[rrb.View] = blueprint_views(build_blueprint(2, has_magnetometer=False, follow=UPRIGHT_FOLLOW))
 
     assert [view.name for view in with_magnetometer if isinstance(view, rrb.TimeSeriesView)] == [
         "Gyroscope",
@@ -739,3 +577,26 @@ def test_only_a_magnetometer_device_gets_the_third_plot_pane() -> None:
     assert set(follow.visualizer_overrides) == {schema.trajectory_path("gt"), schema.trail_path("gt")}
     rig: rrb.View = next(view for view in without if view.name == "Rig")
     assert set(rig.visualizer_overrides) == {schema.trail_path("gt")}
+
+
+def test_the_two_3d_views_are_complementary_views_of_one_path() -> None:
+    """The overview hides the trail; the Follow view keeps the whole path as dim context.
+
+    Hiding the trajectory in the Follow view left the highlighted trail floating
+    with nothing to place it against, so the path stays and is overridden thin and
+    dim instead — context behind the highlight rather than a competing stroke.
+    """
+    views: list[rrb.View] = blueprint_views(build_blueprint(2, has_magnetometer=False, follow=UPRIGHT_FOLLOW))
+    rig: rrb.View = next(view for view in views if view.name == "Rig")
+    follow: rrb.View = next(view for view in views if view.name == "Follow")
+
+    assert rig.visualizer_overrides[schema.trail_path("gt")] == rrb.EntityBehavior(visible=False), "the overview still hides the trail"
+
+    dimmed: object = follow.visualizer_overrides[schema.trajectory_path("gt")]
+    assert isinstance(dimmed, rr.LineStrips3D), "the Follow view styles the path rather than hiding it"
+    assert dimmed.radii is not None and dimmed.colors is not None
+    assert dimmed.radii.as_arrow_array().to_pylist() == [-blueprints.DIM_TRAJECTORY_RADIUS_UI_POINTS], "thin, and in ui points"
+    packed: int = dimmed.colors.as_arrow_array().to_pylist()[0]
+    assert ((packed >> 24) & 0xFF, (packed >> 16) & 0xFF, (packed >> 8) & 0xFF) == blueprints.DIM_TRAJECTORY_COLOR
+    trail_override: object = follow.visualizer_overrides[schema.trail_path("gt")]
+    assert isinstance(trail_override, rrb.VisibleTimeRanges), "the trail is still the cursor-relative window"

@@ -7,12 +7,13 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from simplecv.data.ego.robocap_ego import CAMERA_DISPLAY_ORDER
 
-from dataforge import schema
+from dataforge import blueprints, schema
 from dataforge.datasets.robocap import (
     ACCEL_SCALE,
     CAMERA_TO_IMU_OFFSET_NS,
@@ -93,6 +94,42 @@ def test_blueprints_serialize_with_canonical_camera_order(tmp_path: Path) -> Non
     assert segment_path.stat().st_size > 0
     assert table_path.stat().st_size > 0
     assert schema.trail_path("basalt") == "/world/runs/basalt/trail"
+
+
+
+def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
+    """Every view in a blueprint, depth-first, whatever containers nest them."""
+    found: list[rrb.View] = []
+
+    def walk(node: rrb.View | rrb.Container) -> None:
+        if isinstance(node, rrb.View):
+            found.append(node)
+            return
+        for child in node.contents or ():
+            walk(child)
+
+    walk(blueprint.root_container)
+    return found
+
+
+def test_robocaps_follow_view_dims_its_basalt_path_like_every_rig_layout() -> None:
+    """The path/trail pair is one shared skeleton, so RoboCap gets the same treatment.
+
+    ``blueprints.rig_blueprint`` builds both datasets' layouts and takes the run
+    source as an argument, so a change to how the follow view separates the path
+    from the trail lands on RoboCap's ``basalt`` paths too. That is intended, and
+    asserted here rather than left to be noticed on the next viewer session.
+    """
+    views: list[rrb.View] = blueprint_views(build_blueprint(list(CAMERA_DISPLAY_ORDER)))
+
+    follow: rrb.View = next(view for view in views if view.name == "Follow")
+    dimmed: object = follow.visualizer_overrides[schema.trajectory_path("basalt")]
+    assert isinstance(dimmed, rr.LineStrips3D), "the Follow view styles the path rather than hiding it"
+    assert dimmed.radii is not None
+    assert dimmed.radii.as_arrow_array().to_pylist() == [-blueprints.DIM_TRAJECTORY_RADIUS_UI_POINTS]
+
+    rig: rrb.View = next(view for view in views if view.name == "Rig")
+    assert rig.visualizer_overrides[schema.trail_path("basalt")] == rrb.EntityBehavior(visible=False)
 
 
 def write_imu_db(db_path: Path) -> None:

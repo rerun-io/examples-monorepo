@@ -27,6 +27,15 @@ class Config:
     """Dataset whose rrds get registered; its registry key is the catalog dataset name."""
     catalog_url: str = "rerun+http://127.0.0.1:51235"
     """gRPC URL of a locally running ``rerun server`` catalog."""
+    replace: bool = False
+    """Re-register a layer the catalog already holds for a segment, instead of skipping it.
+
+    Registration is normally ``SKIP``, so re-running it over a corpus is cheap
+    and idempotent. But a regenerated layer — ``rm gt/*.rrd`` and a convert, per
+    README#the-layer-rule — is a *new file at a registered path*, and ``SKIP``
+    leaves the server serving the old registration: the rebuilt rrd stays
+    unregistered and nothing says so. ``--replace`` is what to use after a
+    rebuild."""
 
 
 def main(config: Config) -> None:
@@ -35,21 +44,18 @@ def main(config: Config) -> None:
     name: str = dataset_config.name
     output_root: Path = paths.output_root()
     paths_by_layer: dict[str, list[Path]] = {
-        layer: sorted((output_root / layer).glob(f"{name}__*.rrd")) for layer in (paths.BASE_LAYER, paths.GT_LAYER)
+        layer: sorted((output_root / layer).glob(f"{name}__*.rrd")) for layer in paths.LAYERS
     }
     if not paths_by_layer[paths.BASE_LAYER]:
         raise FileNotFoundError(f"no {paths.BASE_LAYER}-layer rrds for {name} under {output_root / paths.BASE_LAYER}")
 
     client: CatalogClient = CatalogClient(config.catalog_url)
     entry: DatasetEntry = client.create_dataset(name, exist_ok=True)
+    on_duplicate: OnDuplicateSegmentLayer = OnDuplicateSegmentLayer.REPLACE if config.replace else OnDuplicateSegmentLayer.SKIP
     for layer, rrd_paths in paths_by_layer.items():
         if not rrd_paths:
             continue  # a derived layer nobody has produced yet
-        entry.register(
-            [path.resolve().as_uri() for path in rrd_paths],
-            layer_name=layer,
-            on_duplicate=OnDuplicateSegmentLayer.SKIP,
-        ).wait()
+        entry.register([path.resolve().as_uri() for path in rrd_paths], layer_name=layer, on_duplicate=on_duplicate).wait()
 
     dataset: DataforgeDataset = dataset_config.setup()
     # Blueprints register once: every register_blueprint call adds a NEW entry to the
@@ -68,4 +74,5 @@ def main(config: Config) -> None:
             dataset.table_blueprint().save(name, str(temp_path))
         entry.register_blueprint(table_path.resolve().as_uri(), segment_table=True)
     counted: str = ", ".join(f"{len(found)} {layer}" for layer, found in paths_by_layer.items() if found)
-    print(f"registered {counted} rrds into '{name}' at {config.catalog_url}")
+    how: str = "replacing duplicates" if config.replace else "skipping duplicates"
+    print(f"registered {counted} rrds into '{name}' at {config.catalog_url} ({how})")

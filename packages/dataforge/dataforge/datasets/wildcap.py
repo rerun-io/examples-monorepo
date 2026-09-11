@@ -37,7 +37,7 @@ import av
 import rerun as rr
 import rerun.blueprint as rrb
 
-from dataforge import paths, schema, transports, writing
+from dataforge import blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import log_rig_node, log_video_stream
@@ -147,17 +147,14 @@ def build_blueprint(exo: list[str], ego: list[str], *, exo_page: int = 8, ego_pa
         The blueprint embedded at convert (real device names) and registered as
         the dataset default (index labels, see ``default_blueprint``).
     """
-    def view(name: str, rig: int, cam: int) -> rrb.Spatial2DView:
-        return rrb.Spatial2DView(name=name, origin=schema.pinhole_path(rig, cam), contents=f"{schema.pinhole_path(rig, cam)}/**")
-
     def paged(views: list[rrb.Spatial2DView], name: str, page: int) -> rrb.Container:
         if len(views) <= page:
             return rrb.Grid(*views, name=name)
         chunks: list[list[rrb.Spatial2DView]] = [views[start : start + page] for start in range(0, len(views), page)]
         return rrb.Tabs(*[rrb.Grid(*chunk, name=f"{name} {i * page + 1}-{i * page + len(chunk)}") for i, chunk in enumerate(chunks)], name=name)
 
-    ego_views: list[rrb.Spatial2DView] = [view(name, len(exo), cam) for cam, name in enumerate(ego)]
-    exo_views: list[rrb.Spatial2DView] = [view(name, rig, 0) for rig, name in enumerate(exo)]
+    ego_views: list[rrb.Spatial2DView] = [blueprints.camera_view(name, len(exo), cam) for cam, name in enumerate(ego)]
+    exo_views: list[rrb.Spatial2DView] = [blueprints.camera_view(name, rig, 0) for rig, name in enumerate(exo)]
     groups: list[rrb.Container] = [
         paged(views, name, page) for name, views, page in (("Ego", ego_views, ego_page), ("Exo", exo_views, exo_page)) if views
     ]
@@ -196,7 +193,7 @@ class WildcapDataset(DataforgeDataset[WildcapConfig, Path]):
     def table_blueprint(self) -> rrb.Blueprint:
         """Cheap preview card: the first exo camera's video, nothing else decoded."""
         return rrb.Blueprint(
-            rrb.Spatial2DView(name="exo 0", origin=schema.pinhole_path(0, 0), contents=f"{schema.pinhole_path(0, 0)}/**"),
+            blueprints.camera_view("exo 0", 0, 0),
             collapse_panels=True,
         )
 
@@ -234,7 +231,6 @@ class WildcapDataset(DataforgeDataset[WildcapConfig, Path]):
 
         with writing.atomic_recording(
             target,
-            application_id="dataforge",
             recording_id=identity.recording_id,
             default_blueprint=build_blueprint(
                 [video_path.stem for video_path in exo],

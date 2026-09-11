@@ -27,7 +27,7 @@ This module owns two layers:
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Literal
+from typing import Literal, TypeAlias
 
 import numpy as np
 from jaxtyping import Bool, Float
@@ -35,12 +35,23 @@ from numpy import ndarray
 
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, PinholeParameters
 
-#: Reserved sensor kinds describing image *content* (not projection model — a
-#: fisheye RGB camera is still ``"rgb"``). Only ``rgb``/``grayscale`` cameras are
-#: emitted by this package; ``depth``/``imu``/``mag`` name the peer sensors that slot
-#: in beside the cameras (e.g. ``/world/rig_00/imu_00``, ``/world/rig_00/mag_00``)
-#: without a vocabulary change — dataforge writes the latter two.
-SensorKind = Literal["rgb", "grayscale", "depth", "imu", "mag"]
+#: What a camera's images *contain* (not its projection model — a fisheye RGB
+#: camera is still ``"rgb"``). Only ``rgb``/``grayscale`` are emitted by this
+#: package; ``depth`` names an imaging sensor that slots in beside them.
+CameraKind: TypeAlias = Literal["rgb", "grayscale", "depth"]
+
+#: A non-imaging sensor beside the cameras (``/world/rig_00/imu_00``,
+#: ``/world/rig_00/mag_00``) — dataforge writes both. Split from
+#: :data:`CameraKind` because the two vocabularies are never interchangeable: a
+#: camera node carries a ``Pinhole`` and a ``kind`` from the first, a peer sensor
+#: carries an identity ``rig_T_sensor`` and a ``kind`` from the second, and one
+#: shared Literal let either writer be handed the other's word.
+PeerSensorKind: TypeAlias = Literal["imu", "mag"]
+
+#: Every kind a rig node may declare. Kept as the union of both so existing
+#: annotations still admit what they always did; new code should name whichever
+#: half it actually means.
+SensorKind: TypeAlias = CameraKind | PeerSensorKind
 
 #: Zero-padded width for rig/sensor entity indices (``rig_00``, ``cam_00``,
 #: ``imu_00``). Two digits so ids sort lexicographically for any realistic rig
@@ -64,12 +75,13 @@ class CameraSensor:
     ``log_pinhole`` / ``PinholeWithDistortion.from_camera`` already accept both.
     ``index`` selects the entity path ``cam_<NN>`` (zero-padded via
     :func:`entity_id`); ``name`` is the human role label (e.g. ``"left"``)
-    logged as metadata; ``kind`` is the image content (``"rgb"`` / ``"grayscale"``).
+    logged as metadata; ``kind`` is the image content, a :data:`CameraKind` —
+    a camera cannot be an ``"imu"``.
     """
 
     index: int
     name: str
-    kind: SensorKind
+    kind: CameraKind
     pinhole: PinholeParameters | Fisheye62Parameters
 
 
@@ -142,7 +154,7 @@ class Rig:
 _GRAYSCALE_NAME_HINTS: tuple[str, ...] = ("slam", "mono", "gray", "grey")
 
 
-def kind_for_name(name: str) -> SensorKind:
+def kind_for_name(name: str) -> CameraKind:
     """Best-effort image-content kind from a stream name (``rgb`` unless it looks
     like a SLAM/mono sensor). Metadata only — does not affect projection."""
     lowered: str = name.lower()
