@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 
 from slam_rs.apis import robocap_fleet
-from slam_rs.apis.robocap_fleet import Config, measure
+from slam_rs.apis.robocap_fleet import Config, RobocapRow, measure
 from slam_rs.machine import Machine
-from slam_rs.reference import ReferenceManifest
+from slam_rs.reference import ReferenceManifest, RobocapSession
 from slam_rs.tracking import SegmentRun
 from slam_rs.trajectory import Trajectory, empty_trajectory, write_trajectory
 
@@ -23,7 +23,9 @@ def test_reference_csv_is_scored_without_a_ground_truth_gate(manifest: Reference
     write_trajectory(path, truth)
     run: SegmentRun = SegmentRun(truth, 30, 0, 3.0, empty_trajectory(), 2.0, "a" * 64)
     monkeypatch.setattr(robocap_fleet, "run_robocap", lambda *_args, **_kwargs: run)
-    row, estimate = measure(manifest, manifest.robocap.sessions[0], Config(reference_csv=path), Machine("test", "x86_64", "test", 1))
+    measurement: tuple[RobocapRow, Trajectory] = measure(manifest, manifest.robocap.sessions[0], Config(reference_csv=path), Machine("test", "x86_64", "test", 1))
+    row: RobocapRow = measurement[0]
+    estimate: Trajectory = measurement[1]
     assert len(estimate) == 30
     assert row.reference_rmse_cm < 1e-8
     assert row.ms_per_frameset == 100.0
@@ -33,10 +35,12 @@ def test_reference_csv_is_scored_without_a_ground_truth_gate(manifest: Reference
 
 @pytest.mark.slow
 def test_catalog_robocap_regression_reference(manifest: ReferenceManifest) -> None:
-    session = manifest.robocap.session("s00000015")
+    session: RobocapSession = manifest.robocap.session("s00000015")
     if session.reference_csv is None:
         pytest.skip("RoboCap reference has not been recorded")
-    row, estimate = measure(manifest, session, Config(seconds=2.0), Machine("test", "x86_64", "test", 1))
+    measurement: tuple[RobocapRow, Trajectory] = measure(manifest, session, Config(seconds=2.0), Machine("test", "x86_64", "test", 1))
+    row: RobocapRow = measurement[0]
+    estimate: Trajectory = measurement[1]
     assert len(estimate) > 10
     assert row.lost == 0
     assert row.unscored is None

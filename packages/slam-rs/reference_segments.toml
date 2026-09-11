@@ -82,6 +82,26 @@ schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c961006413
 size_bytes = 547545
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 412
+gt_rmse_cm = 1.5531897910270267
+median_tracker_ms = 2.073256066069007
+measured_on = "2026-09-10"
+
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 412
+gt_rmse_cm = 1.548681936169996
+median_tracker_ms = 5.655172513797879
+measured_on = "2026-09-10"
+
 [[segment]]
 dataset_name = "msd-index"
 segment_id = "msd-index__MIO_others__MIO07_mapping_easy"
@@ -106,6 +126,26 @@ schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c961006413
 [segment.layers.gt]
 size_bytes = 6059638
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
+
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 4095
+gt_rmse_cm = 2.072640406461682
+median_tracker_ms = 2.624445129185915
+measured_on = "2026-09-10"
+
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 4095
+gt_rmse_cm = 2.1801766898055894
+median_tracker_ms = 5.923141725361347
+measured_on = "2026-09-10"
 
 [[segment]]
 dataset_name = "msd-index"
@@ -132,6 +172,26 @@ schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c961006413
 size_bytes = 9180481
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 6119
+gt_rmse_cm = 22.664559812491312
+median_tracker_ms = 2.7129510417580605
+measured_on = "2026-09-10"
+
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 6119
+gt_rmse_cm = 25.663163464972747
+median_tracker_ms = 5.402632988989353
+measured_on = "2026-09-10"
+
 [[segment]]
 dataset_name = "msd-index"
 segment_id = "msd-index__MIO_others__MIO14_moving_props"
@@ -156,6 +216,26 @@ schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c961006413
 [segment.layers.gt]
 size_bytes = 32687369
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
+
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 22117
+gt_rmse_cm = 5.56979899457329
+median_tracker_ms = 2.7664718218147755
+measured_on = "2026-09-10"
+
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 22117
+gt_rmse_cm = 7.958601191961034
+median_tracker_ms = 5.9913829900324345
+measured_on = "2026-09-10"
 
 [[segment]]
 dataset_name = "msd-index"
@@ -182,6 +262,26 @@ schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c961006413
 size_bytes = 47783314
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 31577
+gt_rmse_cm = 38.486029380937545
+median_tracker_ms = 2.9259631410241127
+measured_on = "2026-09-10"
+
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 31577
+gt_rmse_cm = 39.68529907290977
+median_tracker_ms = 8.378531318157911
+measured_on = "2026-09-10"
+
 [[segment]]
 dataset_name = "msd-g2"
 segment_id = "msd-g2__MGO_others__MGO09_short_1_updown"
@@ -206,6 +306,26 @@ schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26b
 [segment.layers.gt]
 size_bytes = 276750
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
+
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 107
+gt_rmse_cm = 0.9778872996833629
+median_tracker_ms = 3.257982898503542
+measured_on = "2026-09-10"
+
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 107
+gt_rmse_cm = 0.9777033763543805
+median_tracker_ms = 9.955622255802155
+measured_on = "2026-09-10"
 
 [[segment]]
 dataset_name = "msd-g2"
@@ -232,6 +352,26 @@ schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26b
 size_bytes = 4234733
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 1596
+gt_rmse_cm = 2.374600695982652
+median_tracker_ms = 3.0705055687576532
+measured_on = "2026-09-10"
+
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 1596
+gt_rmse_cm = 2.3741336097736867
+median_tracker_ms = 9.8024383187294
+measured_on = "2026-09-10"
+
 [[segment]]
 dataset_name = "msd-g2"
 segment_id = "msd-g2__MGO_others__MGO14_flickering_light"
@@ -256,6 +396,26 @@ schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26b
 [segment.layers.gt]
 size_bytes = 7752549
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
+
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 2887
+gt_rmse_cm = 8.62323091163306
+median_tracker_ms = 3.0115400440990925
+measured_on = "2026-09-10"
+
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 2887
+gt_rmse_cm = 8.601215033296246
+median_tracker_ms = 8.74363910406828
+measured_on = "2026-09-10"
 
 [[segment]]
 dataset_name = "msd-g2"
@@ -282,6 +442,26 @@ schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26b
 size_bytes = 11475535
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 4255
+gt_rmse_cm = 39.81602875299696
+median_tracker_ms = 3.012289758771658
+measured_on = "2026-09-10"
+
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 4255
+gt_rmse_cm = 39.82473558079779
+median_tracker_ms = 9.647301863878965
+measured_on = "2026-09-10"
+
 [[segment]]
 dataset_name = "msd-g2"
 segment_id = "msd-g2__MGO_others__MGO13_sudden_movements"
@@ -306,6 +486,26 @@ schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26b
 [segment.layers.gt]
 size_bytes = 10042232
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
+
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 3735
+gt_rmse_cm = 77.13771043361253
+median_tracker_ms = 2.9493123292922974
+measured_on = "2026-09-10"
+
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+framesets = 3735
+gt_rmse_cm = 77.15259016692208
+median_tracker_ms = 8.818400092422962
+measured_on = "2026-09-10"
 
 [robocap]
 device_id = "f408193e6447b3b0"

@@ -7,7 +7,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
 
-from rerun.catalog import CatalogClient
+import pyarrow as pa
+from rerun.catalog import CatalogClient, DatasetEntry
 
 from slam_rs import _core
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb
@@ -56,7 +57,7 @@ class ClipResult:
     """Measuring host."""
     lane: Lane
     """Execution lane."""
-    profile: str
+    profile: Literal["reference", "fast"]
     """Configuration overlay."""
 
     @property
@@ -114,11 +115,11 @@ class ClipResult:
 
 def check_scoring_inputs(manifest: ReferenceManifest, segment: ReferenceSegment, catalog: str | None = None) -> None:
     """Require the catalog segment and its ground-truth layer before replay."""
-    dataset = CatalogClient(catalog or manifest.catalog_url).get_dataset(segment.dataset_name)
+    dataset: DatasetEntry = CatalogClient(catalog or manifest.catalog_url).get_dataset(segment.dataset_name)
     if segment.segment_id not in dataset.segment_ids():
         raise ValueError(f"{segment.segment_id}: absent from catalog")
-    layers = dataset.manifest().to_arrow_table().select(["rerun_segment_id", "rerun_layer_name"]).to_pylist()
-    if not any(row["rerun_segment_id"] == segment.segment_id and row["rerun_layer_name"] == "gt" for row in layers):
+    layers: pa.Table = dataset.manifest().to_arrow_table().select(["rerun_segment_id", "rerun_layer_name"])
+    if not any(row["rerun_segment_id"] == segment.segment_id and row["rerun_layer_name"] == "gt" for row in layers.to_pylist()):
         raise ValueError(f"{segment.segment_id}: ground-truth layer absent")
 
 
@@ -169,7 +170,6 @@ CLIP_JSON_KEYS: tuple[str, ...] = (
     "tracked",
     "lost",
     "gt_rmse_cm",
-    "gt_associated",
     "wall_s",
     "peak_rss_mb",
     "gt_allowed_cm",
@@ -224,9 +224,13 @@ def main(config: Config) -> None:
     machine: Machine = this_machine()
     core_sha256: str = hashlib.sha256(Path(_core.__file__).read_bytes()).hexdigest()
     results: list[ClipResult] = []
+    config_digests: dict[str, str] = {}
     config.output_json.parent.mkdir(parents=True, exist_ok=True)
     for segment in segments:
         result: ClipResult = measure(manifest, segment, config.gpu, config.profile, config.catalog)
+        if segment.dataset_name in config_digests and config_digests[segment.dataset_name] != result.config_sha256:
+            raise RuntimeError(f"{segment.dataset_name}: configuration changed during replay")
+        config_digests[segment.dataset_name] = result.config_sha256
         results.append(result)
         print(result.row(machine), flush=True)
         payload: dict[str, object] = {
@@ -234,7 +238,7 @@ def main(config: Config) -> None:
             "lane": lane,
             "profile": config.profile,
             "core_sha256": core_sha256,
-            "config_sha256": {row.segment_id: row.config_sha256 for row in results},
+            "config_sha256": config_digests,
             "clips": [clip_json(row) for row in results],
         }
         config.output_json.write_text(json.dumps(payload, indent=2) + "\n")

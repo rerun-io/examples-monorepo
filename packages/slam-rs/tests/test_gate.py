@@ -97,8 +97,8 @@ def test_nonfinite_measurements_fail_without_a_baseline(value: float) -> None:
 
 @pytest.mark.slow
 def test_catalog_smoke_gate(manifest: ReferenceManifest) -> None:
-    from slam_rs.apis.fleet_check import measure
+    from slam_rs.apis.fleet_check import ClipResult, measure
 
     for segment in manifest.in_tier("smoke"):
-        result = measure(manifest, segment)
+        result: ClipResult = measure(manifest, segment)
         assert not result.failures, result.verdict

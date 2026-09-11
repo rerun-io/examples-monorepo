@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from slam_rs.apis import fleet_check
-from slam_rs.apis.fleet_check import CLIP_JSON_KEYS, Config, main, measure
+from slam_rs.apis.fleet_check import ClipResult, Config, main, measure
 from slam_rs.reference import ReferenceManifest
 from slam_rs.tracking import SegmentRun
 from slam_rs.trajectory import Trajectory, shift_clock
@@ -28,7 +28,7 @@ def test_scoring_uses_ground_truth_and_rejects_wrong_clock(
     )
     monkeypatch.setattr(fleet_check, "check_scoring_inputs", lambda *_args: None)
     monkeypatch.setattr(fleet_check, "run_segment", lambda *_args, **_kwargs: run)
-    result = measure(manifest, manifest.segments[0])
+    result: ClipResult = measure(manifest, manifest.segments[0])
     assert result.gt_associated == (30 if clock_offset == 0 else 0)
     assert bool(result.failures) == bool(clock_offset)
     output: Path = tmp_path / "new" / "fleet.json"
@@ -40,7 +40,11 @@ def test_scoring_uses_ground_truth_and_rejects_wrong_clock(
         main(config)
         assert result.gt_rmse_cm < 1e-10
         assert "no baseline" in replace(result, baseline=None).verdict
-    assert list(json.loads(output.read_text())["clips"][0]) == list(CLIP_JSON_KEYS)
+    assert set(json.loads(output.read_text())["clips"][0]) == {
+        "segment_id", "framesets", "tracked", "lost", "gt_rmse_cm", "wall_s", "peak_rss_mb",
+        "gt_allowed_cm", "baseline_gt_rmse_cm", "median_tracker_ms", "speed_gated", "verdict",
+    }
+    assert json.loads(output.read_text())["config_sha256"] == {manifest.segments[0].dataset_name: "a" * 64}
 
 
 def test_empty_selection_is_refused(tmp_path: Path) -> None:

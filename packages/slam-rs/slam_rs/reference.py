@@ -510,8 +510,8 @@ def gate_failures(
     baseline: Baseline | None,
     median_tracker_ms: float,
     hostname: str,
-    lane: str,
-    profile: str,
+    lane: Literal["cpu", "gpu"],
+    profile: Literal["reference", "fast"],
 ) -> list[str]:
     """Return each failed ground-truth, tracking, or same-host speed clause."""
     import math
