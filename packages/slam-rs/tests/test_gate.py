@@ -110,3 +110,21 @@ def test_host_baseline_preferred_with_reference_fallback(manifest: ReferenceMani
     assert result.speed_gated is present
     assert result.baseline_gt_rmse_cm == (30.0 if present else 10.0)
     assert result.gt_allowed_cm == (33.0 if present else 11.0)
+
+
+@pytest.mark.parametrize("suffix", ["", ".attlocal.net", ".office.example"])
+@given(error=st.sampled_from([30.0, 34.0]), cost=st.sampled_from([40.0, 45.0]))
+def test_host_suffix_preserves_baseline_and_gate(
+    manifest: ReferenceManifest, suffix: str, error: float, cost: float
+) -> None:
+    host_row: Baseline = replace(BASELINE, host="pablos-Mac-mini", gt_rmse_cm=30.0, median_tracker_ms=40.0)
+    segment = replace(manifest.segments[0], baseline=(BASELINE, host_row))
+    measurement: Measurement = replace(PASSING, hostname=f"pablos-Mac-mini{suffix}", gt_rmse_cm=error, median_tracker_ms=cost)
+    chosen: Baseline | None = segment.baseline_for("gpu", "fast", measurement.hostname)
+    assert chosen == host_row
+    result: ClipResult = ClipResult(segment.segment_id, measurement, 1.0, 1.0, "0" * 64, None, chosen)
+    assert result.gt_allowed_cm == 33.0
+    assert result.speed_gated
+    failures: list[str] = gate_failures(measurement, chosen)
+    assert any(message.startswith("accuracy:") for message in failures) == (error == 34.0)
+    assert any(message.startswith("speed:") for message in failures) == (cost == 45.0)

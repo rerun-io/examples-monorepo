@@ -295,3 +295,11 @@ def test_gate_refuses_an_unknown_dataset_with_table_and_path(tmp_path: Path) -> 
     broken.write_text(MANIFEST_PATH.read_text().replace('dataset_name = "msd-index"', 'dataset_name = "missing"', 1))
     with pytest.raises(ValueError, match="unknown-dataset.toml.*segment.*missing"):
         load_manifest(broken)
+
+
+@pytest.mark.parametrize("suffix", [".attlocal.net", ".office.example"])
+def test_dotted_baseline_host_is_rejected(tmp_path: Path, suffix: str) -> None:
+    path: Path = tmp_path / "dotted-host.toml"
+    path.write_text(MANIFEST_PATH.read_text().replace('host = "pablo-dl-server"', f'host = "pablo-dl-server{suffix}"', 1))
+    with pytest.raises(ValueError, match=r"dotted-host.toml.*host.*short.*no"):
+        load_manifest(path)

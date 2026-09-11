@@ -86,7 +86,7 @@ measured_on = "2026-09-11"
 [[segment.baseline]]
 profile = "fast"
 lane = "gpu"
-host = "pablos-Mac-mini.attlocal.net"
+host = "pablos-Mac-mini"
 core_sha256 = "f9e8de94c0d8487be97975aa2ae5074199dee3aeb7ea5686b56648e03ec46697"
 framesets = 412
 gt_rmse_cm = 1.5522034136049176
@@ -137,7 +137,7 @@ measured_on = "2026-09-11"
 [[segment.baseline]]
 profile = "fast"
 lane = "gpu"
-host = "pablos-Mac-mini.attlocal.net"
+host = "pablos-Mac-mini"
 core_sha256 = "f9e8de94c0d8487be97975aa2ae5074199dee3aeb7ea5686b56648e03ec46697"
 framesets = 4095
 gt_rmse_cm = 1.9568602203894594
@@ -219,7 +219,7 @@ measured_on = "2026-09-11"
 [[segment.baseline]]
 profile = "fast"
 lane = "gpu"
-host = "pablos-Mac-mini.attlocal.net"
+host = "pablos-Mac-mini"
 core_sha256 = "f9e8de94c0d8487be97975aa2ae5074199dee3aeb7ea5686b56648e03ec46697"
 framesets = 22117
 gt_rmse_cm = 6.760486560379599
@@ -301,7 +301,7 @@ measured_on = "2026-09-11"
 [[segment.baseline]]
 profile = "fast"
 lane = "gpu"
-host = "pablos-Mac-mini.attlocal.net"
+host = "pablos-Mac-mini"
 core_sha256 = "f9e8de94c0d8487be97975aa2ae5074199dee3aeb7ea5686b56648e03ec46697"
 framesets = 107
 gt_rmse_cm = 0.977432899968199
@@ -352,7 +352,7 @@ measured_on = "2026-09-11"
 [[segment.baseline]]
 profile = "fast"
 lane = "gpu"
-host = "pablos-Mac-mini.attlocal.net"
+host = "pablos-Mac-mini"
 core_sha256 = "f9e8de94c0d8487be97975aa2ae5074199dee3aeb7ea5686b56648e03ec46697"
 framesets = 1596
 gt_rmse_cm = 2.3730025688882708

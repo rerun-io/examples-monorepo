@@ -99,7 +99,7 @@ class Baseline:
     lane: Literal["gpu", "cpu"]
     """Execution lane."""
     host: str
-    """Host on which tracker time was measured."""
+    """Short host name on which tracker time was measured (no domain suffix)."""
     core_sha256: str
     """Digest of the measured extension."""
     framesets: int
@@ -135,7 +135,7 @@ class ReferenceSegment:
         reference: Baseline | None = None
         for row in self.baseline:
             if row.lane == lane and row.profile == profile:
-                if row.host == host:
+                if row.host == host.split(".")[0]:
                     return row
                 if reference is None:
                     reference = row
@@ -357,6 +357,8 @@ def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
             raise ValueError(f"{where}: unknown dataset {segment.dataset_name!r}")
         baseline_keys: set[tuple[str, str, str]] = set()
         for baseline in segment.baseline:
+            if "." in baseline.host:
+                raise ValueError(f"{where}: [segment.baseline] host {baseline.host!r} must be short (no domain suffix)")
             key: tuple[str, str, str] = (baseline.lane, baseline.profile, baseline.host)
             if key in baseline_keys:
                 raise ValueError(f"{where}: [segment.baseline] duplicate baseline {key}")
@@ -421,6 +423,6 @@ def gate_failures(measurement: Measurement, baseline: Baseline | None) -> list[s
     if baseline is not None:
         if measurement.gt_rmse_cm > GATE_RATIO * baseline.gt_rmse_cm:
             failures.append(f"accuracy: {measurement.gt_rmse_cm:.3f} cm exceeds {GATE_RATIO * baseline.gt_rmse_cm:.3f} cm")
-        if measurement.hostname == baseline.host and measurement.median_tracker_ms > GATE_RATIO * baseline.median_tracker_ms:
+        if measurement.hostname.split(".")[0] == baseline.host and measurement.median_tracker_ms > GATE_RATIO * baseline.median_tracker_ms:
             failures.append(f"speed: {measurement.median_tracker_ms:.3f} ms exceeds {GATE_RATIO * baseline.median_tracker_ms:.3f} ms")
     return failures

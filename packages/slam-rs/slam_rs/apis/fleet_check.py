@@ -62,7 +62,7 @@ class ClipResult:
     @property
     def speed_gated(self) -> bool:
         """Only measurements from the same host, lane, and profile gate speed."""
-        return self.baseline is not None and self.measurement.hostname == self.baseline.host
+        return self.baseline is not None and self.measurement.hostname.split(".")[0] == self.baseline.host
 
     @property
     def failures(self) -> tuple[str, ...]:

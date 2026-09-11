@@ -1,6 +1,7 @@
 """Synthetic scoring tests; no recording or external source is needed."""
 
 import json
+import platform
 from dataclasses import replace
 from pathlib import Path
 
@@ -32,10 +33,12 @@ def test_measure_rejects_mismatched_source_before_replay(
         measure(manifest, segment, source=source)
 
 
+@pytest.mark.parametrize("suffix", ["", ".attlocal.net", ".office.example"])
 @pytest.mark.parametrize("clock_offset", [0, 100_000_000_000])
 def test_scoring_uses_ground_truth_and_rejects_wrong_clock(
-    manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock_offset: int
+    manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock_offset: int, suffix: str
 ) -> None:
+    monkeypatch.setattr(platform, "node", lambda: f"pablos-Mac-mini{suffix}")
     truth: Trajectory = Trajectory(
         t_ns=np.arange(30, dtype=np.int64) * 10_000_000,
         position_m=np.random.default_rng(7).normal(size=(30, 3)),
@@ -68,6 +71,9 @@ def test_scoring_uses_ground_truth_and_rejects_wrong_clock(
         "gt_allowed_cm", "baseline_gt_rmse_cm", "median_tracker_ms", "speed_gated", "verdict",
     ]
     assert "NaN" not in output.read_text()
+    assert this_machine().hostname == "pablos-Mac-mini"
+    assert result.measurement.hostname == "pablos-Mac-mini"
+    assert json.loads(output.read_text())["machine"]["hostname"] == "pablos-Mac-mini"
     if clock_offset:
         assert json.loads(output.read_text())["clips"][0]["gt_rmse_cm"] is None
     assert json.loads(output.read_text())["config_sha256"] == {manifest.segments[0].dataset_name: "a" * 64}

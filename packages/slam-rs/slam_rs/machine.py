@@ -27,7 +27,7 @@ class Machine:
     """The host a row was measured on."""
 
     hostname: str
-    """What the machine calls itself."""
+    """Short host name, without a domain suffix."""
     arch: str
     """``platform.machine()``: the port is built for ``x86_64`` and ``aarch64``."""
     libc: str
@@ -65,7 +65,7 @@ def this_peak_rss_mb() -> float:
 
 def this_machine() -> Machine:
     """What this host is, as a row names it."""
-    return Machine(hostname=platform.node(), arch=platform.machine(), libc=this_libc(), cores=os.cpu_count() or 0)
+    return Machine(hostname=platform.node().split(".")[0], arch=platform.machine(), libc=this_libc(), cores=os.cpu_count() or 0)
 
 
 def this_temperature_c(root: Path = Path("/")) -> float | None:
