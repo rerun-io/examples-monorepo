@@ -20,7 +20,6 @@ from slam_rs.reference import (
 )
 
 
-
 def test_the_manifest_holds_ten_segments(manifest: ReferenceManifest) -> None:
     assert len(manifest.segments) == 10
     assert manifest.schema_version == 10
@@ -181,7 +180,7 @@ def test_every_dataset_names_a_vendored_config_that_parses(manifest: ReferenceMa
 def test_an_unknown_tier_is_rejected(tmp_path: Path) -> None:
     broken: Path = tmp_path / "broken.toml"
     broken.write_text(MANIFEST_PATH.read_text().replace('tier = "smoke"', 'tier = "sometimes"', 1))
-    with pytest.raises(ValueError, match="unknown tier"):
+    with pytest.raises(ValueError, match="broken.toml.*sometimes.*smoke.*release.*listed"):
         load_manifest(broken)
 
 
@@ -189,7 +188,7 @@ def test_a_missing_robocap_key_is_a_typed_error(tmp_path: Path) -> None:
     """The loader promises `ValueError`; direct indexing raised a bare `KeyError`."""
     broken: Path = tmp_path / "no-downscale.toml"
     broken.write_text(MANIFEST_PATH.read_text().replace("downscale = 3\n", "", 1))
-    with pytest.raises(ValueError, match=r"\[robocap\] table is missing the key 'downscale'"):
+    with pytest.raises(ValueError, match="no-downscale.toml.*downscale"):
         load_manifest(broken)
 
 
@@ -198,7 +197,7 @@ def test_a_missing_robocap_table_is_a_typed_error(tmp_path: Path) -> None:
     broken: Path = tmp_path / "no-robocap.toml"
     text: str = MANIFEST_PATH.read_text()
     broken.write_text(text[: text.index("[robocap]")])
-    with pytest.raises(ValueError, match=r"has no \[robocap\] table"):
+    with pytest.raises(ValueError, match="no-robocap.toml.*robocap"):
         load_manifest(broken)
 
 
@@ -251,3 +250,29 @@ def test_duplicate_baseline_is_rejected(tmp_path: Path) -> None:
     path.write_text(text[:end] + "\n" + text[start:end] + text[end:])
     with pytest.raises(ValueError, match="duplicate baseline"):
         load_manifest(path)
+
+
+def test_gate_round_trips_through_toml(manifest: ReferenceManifest) -> None:
+    import tomllib
+
+    from serde.toml import from_toml, to_toml
+
+    serialized: str = to_toml(manifest)
+    assert from_toml(ReferenceManifest, serialized) == manifest
+    assert tomllib.loads(serialized) == tomllib.loads(MANIFEST_PATH.read_text())
+
+
+@pytest.mark.parametrize("replacement", ['typo = 1\n', 'schema_version = "invalid"\n'])
+def test_gate_refuses_unknown_keys_and_wrong_types_with_path(tmp_path: Path, replacement: str) -> None:
+    broken: Path = tmp_path / "broken-gate.toml"
+    text: str = MANIFEST_PATH.read_text()
+    broken.write_text(text.replace("schema_version = 10\n", replacement if replacement.startswith("schema_version") else replacement + "schema_version = 10\n"))
+    with pytest.raises(ValueError, match="broken-gate.toml"):
+        load_manifest(broken)
+
+
+def test_gate_refuses_an_unknown_dataset_with_table_and_path(tmp_path: Path) -> None:
+    broken: Path = tmp_path / "unknown-dataset.toml"
+    broken.write_text(MANIFEST_PATH.read_text().replace('dataset_name = "msd-index"', 'dataset_name = "missing"', 1))
+    with pytest.raises(ValueError, match="unknown-dataset.toml.*segment.*missing"):
+        load_manifest(broken)
