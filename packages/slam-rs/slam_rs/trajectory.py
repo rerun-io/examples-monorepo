@@ -94,8 +94,7 @@ def empty_trajectory() -> Trajectory:
     """A trajectory with no poses.
 
     What a reference a run does not have looks like: a segment with no ``gt``
-    layer, or one whose basalt C++ trajectory lives in a bundle that is not on
-    this machine. Callers then test :func:`len` rather than ``None``, and the one
+    layer. Callers then test :func:`len` rather than ``None``, and the one
     array shape is right for :func:`numpy.concatenate`.
     """
     return Trajectory(t_ns=np.zeros(0, dtype=np.int64), position_m=np.zeros((0, 3)), quaternion_wxyz=np.zeros((0, 4)))

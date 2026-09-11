@@ -70,7 +70,7 @@ class RobocapRow:
     """Why no agreement could be measured, or None where it was; the sentence :func:`~slam_rs.trajectory.ate` refused the pair with.
 
     Accuracy is reported and not gated here, and a refusal leaves the three
-    ``cpp_`` fields NaN and :attr:`cross_platform_ate_cm` unmeasured while the
+    regression error fields NaN and :attr:`cross_platform_ate_cm` unmeasured while the
     cost beside them is still measured; see ``ate`` for why it is a row.
     """
     config_sha256: str

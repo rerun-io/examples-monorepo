@@ -1,4 +1,4 @@
-"""Replay."""
+"""Replay catalog or local recordings through the Rust core and log ground-truth comparisons."""
 
 import time
 from dataclasses import dataclass, field
@@ -51,15 +51,7 @@ class Config:
     gt_rrd: Path | None = None
     """Optional local ground-truth recording; requires --rrd."""
     catalog: str | None = None
-    """Read ``--segment`` from this catalog server instead of the manifest's file paths, e.g. ``rerun+http://dgx-spark:9988``.
-
-    Any segment of a dataset the manifest knows replays this way, not only the
-    reference set: the IMU noise model and the basalt config are the dataset's,
-    and the server carries the rig calibration and the ground-truth layer. A
-    segment outside the reference set has no reference run to compare with, so it is
-    scored against ground truth only. Exclusive with ``--rrd`` and ``--gt-rrd``,
-    which name a second source.
-    """
+    """Catalog URL override; defaults to the manifest. Exclusive with local recording files."""
     max_framesets: int | None = None
     """Stop after this many framesets; None replays the whole segment."""
     frame_stride: int = 1
@@ -73,8 +65,7 @@ class Config:
     gpu: bool = False
     """Run the frontend's pyramid, patch build and KLT tracker on the GPU through CubeCL.
 
-    The default is the CPU port, which is what every reference number was
-    produced on. A core built without the ``gpu`` cargo feature refuses this
+    The default is the CPU port. A core built without a GPU cargo feature refuses this
     rather than quietly running on the CPU, and so does a host with no usable
     GPU: the run stops with one sentence naming what is absent.
     """

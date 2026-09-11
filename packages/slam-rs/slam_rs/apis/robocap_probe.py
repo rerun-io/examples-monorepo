@@ -26,7 +26,7 @@ from slam_rs.vio_log import FrameMode, VioLogger, VioStage, log_calibration, log
 
 @dataclass(slots=True)
 class Config:
-    """Config."""
+    """Replay RoboCap from the catalog and report regression agreement."""
 
     profile: Literal["reference", "fast"] = "fast"
     """Config overlay applied before tracking."""
@@ -40,21 +40,9 @@ class Config:
     reference_csv: Path | None = None
     """Optional regression trajectory; defaults to the manifest."""
     session: str = "s00000015"
-    """RoboCap session id from ``reference_segments.toml``.
-
-    Session 21 and not the fleet tool's 15: this lane draws a recording, and 21
-    is the long one (154.9 s, 4,648 framesets) whose repeated loop is where a
-    yaw offset or a scale error would show. Session 15 is the fleet default
-    because it is the one with a reference wall measured on the cap, which is what a
-    runtime row is read against.
-    """
+    """RoboCap session id; defaults to s15."""
     seconds: float = 0.0
-    """Replay this many seconds of video time from the first frameset; 0 replays the whole session.
-
-    The span the S17 evidence was measured over — 2,700 of session 21's
-    framesets, 10.40 cm against the reference — and about 550 MB of ``.rrd``. The
-    whole session is a viewer recording nobody opens.
-    """
+    """Seconds from the first frameset; zero replays the full session."""
     output_csv: Path | None = None
     """Where the estimated trajectory is written; defaults to ``data/robocap-<session>/slam_rs.csv``."""
     log_frames: bool = True

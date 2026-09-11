@@ -85,7 +85,7 @@ def drive(
     Args:
         vio: The pipeline the framesets go through.
         cameras: The rig the logger draws.
-        references: Ground truth and C++ trajectory, the same line for both.
+        references: Synthetic ground-truth trajectory.
         texture: The scene each frameset is a shifted copy of.
         output: Where the ``.rrd`` is written.
         read_rows: Reads the recording back, from :mod:`conftest`.
@@ -340,7 +340,7 @@ def test_the_keypoints_land_on_the_camera_images(logged: Logged) -> None:
 
 
 def test_a_run_without_references_still_logs_everything_else(pipeline: PipelineFactory, camera: CameraFactory) -> None:
-    """A segment with no ground truth and no C++ trajectory draws neither line, and no ATE."""
+    """A segment with no ground truth draws neither line, and no ATE."""
     logger: VioLogger = VioLogger(
         cameras=(camera(0, 0.0), camera(1, 0.1)),
         ground_truth=empty_trajectory(),

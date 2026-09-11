@@ -1,4 +1,8 @@
-"""Tracking."""
+"""Track catalog framesets in order, holding frames until their IMU samples arrive.
+
+Replay and fleet measurements share this driver so they use the same frame,
+inertial, and timestamp handling. Returned trajectories use the device clock.
+"""
 
 import json
 import time
@@ -199,14 +203,27 @@ def run_segment(
 def robocap_estimator_files(
     manifest: ReferenceManifest, profile: Literal["reference", "fast"] = "reference"
 ) -> tuple[_core.Calibration, _core.VioConfig, str]:
-    """Robocap estimator files."""
+    """Read the RoboCap calibration and profiled configuration named by the manifest.
+
+    Returns:
+        Calibration, parsed VIO configuration, and the exact configuration text
+        used to identify the run.
+    """
     calibration: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
     config_text: str = profiled_config_text(manifest.package_root / manifest.robocap.vio_config, profile, manifest.package_root / "configs/profiles")
     return calibration, _core.VioConfig.from_json(config_text), config_text
 
 
 def check_calibration_matches_recording(basalt: _core.Calibration, cameras: tuple[CameraCalib, ...], imu: ImuParameters, downscale: int) -> None:
-    """Check calibration matches recording."""
+    """Require the file calibration and catalog statics to describe the same rig.
+
+    Intrinsics, distortion, extrinsics, and IMU parameters are compared at the
+    selected image scale. The estimator calibration must carry no camera time
+    offset because the feed has already applied it to the frame timestamps.
+
+    Raises:
+        ValueError: If any rig parameter differs beyond its storage precision.
+    """
     if basalt.camera_count != len(cameras):
         raise ValueError(f"basalt's calibration has {basalt.camera_count} cameras, the feed selected {len(cameras)}")
     expected: tuple[tuple[int, int], ...] = tuple((camera.width, camera.height) for camera in cameras)

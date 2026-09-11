@@ -70,5 +70,3 @@ def test_a_frameset_without_samples_logs_nothing(tmp_path: Path, read_rows: Rows
     log_imu(ImuStream(t_ns=np.zeros(0, dtype=np.int64), gyro_rad_s=np.zeros((0, 3)), accel_m_s2=np.zeros((0, 3))))
     rr.disconnect()
     assert read_rows(output) == {}
-
-

@@ -257,5 +257,3 @@ def test_shift_clock_refuses_an_offset_that_would_leave_the_int64_clock() -> Non
     assert int(shift_clock(_trajectory(np.array([-(2**63) + 1], dtype=np.int64), positions[:1]), -1).t_ns[0]) == -(2**63)
     # An empty trajectory has no timestamp to shift and none to refuse.
     assert len(shift_clock(empty_trajectory(), 2**62)) == 0
-
-

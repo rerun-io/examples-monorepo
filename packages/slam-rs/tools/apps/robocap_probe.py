@@ -1,4 +1,4 @@
-"""CLI shim: run the port on one RoboCap session against the basalt C++ trajectory."""
+"""CLI shim: run the port on one RoboCap session and report regression agreement."""
 
 from slam_rs.apis import run
 from slam_rs.apis.robocap_probe import Config, main

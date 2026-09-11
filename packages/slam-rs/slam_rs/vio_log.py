@@ -1,4 +1,4 @@
-"""Vio log."""
+"""Log VIO estimates, ground truth, rig geometry, and tracker statistics."""
 
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
@@ -234,7 +234,7 @@ class VioLogger:
     ground_truth: Trajectory
     """Ground truth for the whole segment, on ``video_time``; may be empty."""
     frame_t_ns: Int64[ndarray, " n_frames"]
-    """The segment's frameset times: the cadence the two references are drawn at."""
+    """The segment's frameset times: the cadence used to draw ground truth."""
     estimate_t_ns: list[int] = field(default_factory=list)
     """Timestamps of the poses reported so far, in replay order."""
     estimate_position_m: list[Float64[ndarray, " 3"]] = field(default_factory=list)
@@ -257,7 +257,7 @@ class VioLogger:
         self.ground_truth_strip = at_frameset_cadence(self.ground_truth, self.frame_t_ns)
 
     def log(self, result: _core.VioResult, snapshot: _core.VioSnapshot, frame: _core.FlowFrame, elapsed_ms: float) -> None:
-        """Log one tracked frameset: the keypoints, the three paths, the rig, the window, the landmarks and the counters.
+        """Log one tracked frameset: the keypoints, the estimated and ground-truth paths, the rig, the window, the landmarks and the counters.
 
         Args:
             result: What ``track`` returned; only called where it tracked.

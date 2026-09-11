@@ -168,8 +168,7 @@ def test_two_runs_over_the_same_input_agree_exactly(pipeline: PipelineFactory, t
     is the property that makes a reference run reproducible, and a scheduling
     dependency would break it by an ulp long before it broke an ATE gate.
 
-    The same claim over a real segment, byte for byte through the CSV writer, is
-    ``tests/test_v2_gate.py``'s; this one is fast and runs every commit.
+    Catalog replay accuracy is covered by the slow ground-truth gate.
     """
     frames: list[list[UInt8[ndarray, "h w"]]] = [[texture(shift, 0), texture(shift + 1, 0)] for shift in shifts]
     runs: list[list[Float64[ndarray, " 7"]]] = []
