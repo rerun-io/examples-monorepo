@@ -4,7 +4,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from slam_rs.reference import Baseline, ReferenceManifest, gate_failures
+from slam_rs.reference import Baseline, Measurement, ReferenceManifest, gate_failures
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES
 
 
@@ -19,7 +19,7 @@ from slam_rs.trajectory import MIN_ASSOCIATED_POSES
 )
 def test_each_clause_is_required(error: float, speed: float, lost: int, associated: int, finite: bool, extent: float, same_host: bool) -> None:
     baseline: Baseline = Baseline("fast", "gpu", "baseline-host", "0" * 64, 100, 10.0, 20.0, "2026-09-10")
-    failures: list[str] = gate_failures(
+    failures: list[str] = gate_failures(Measurement(
         framesets=100,
         tracked=100,
         lost=lost,
@@ -28,12 +28,11 @@ def test_each_clause_is_required(error: float, speed: float, lost: int, associat
         extent_m=extent,
         truth_extent_m=1.0,
         poses_finite=finite,
-        baseline=baseline,
         median_tracker_ms=speed,
         hostname="baseline-host" if same_host else "other",
         lane="gpu",
         profile="fast",
-    )
+    ), baseline)
     expected: set[str] = set()
     if error > 11.0:
         expected.add("accuracy")
@@ -55,7 +54,7 @@ def test_missing_or_other_lane_baseline_does_not_gate_accuracy_or_speed(matching
     baseline: Baseline | None = (
         Baseline("fast", "gpu" if matching else "cpu", "baseline-host", "0" * 64, 100, 10.0, 20.0, "2026-09-10") if has_baseline else None
     )
-    failures: list[str] = gate_failures(
+    failures: list[str] = gate_failures(Measurement(
         framesets=100,
         tracked=100,
         lost=0,
@@ -64,12 +63,11 @@ def test_missing_or_other_lane_baseline_does_not_gate_accuracy_or_speed(matching
         extent_m=1.0,
         truth_extent_m=1.0,
         poses_finite=True,
-        baseline=baseline,
         median_tracker_ms=100.0,
         hostname="baseline-host" if same_host else "other",
         lane="gpu",
         profile="fast",
-    )
+    ), baseline if matching else None)
     clauses: set[str] = {message.split(":")[0] for message in failures}
     assert ("accuracy" in clauses) == (matching and has_baseline)
     assert ("speed" in clauses) == (matching and same_host and has_baseline)
@@ -77,7 +75,8 @@ def test_missing_or_other_lane_baseline_does_not_gate_accuracy_or_speed(matching
 
 @given(value=st.sampled_from([float("nan"), float("inf"), float("-inf")]))
 def test_nonfinite_measurements_fail_without_a_baseline(value: float) -> None:
-    failures: list[str] = gate_failures(
+    baseline: Baseline | None = None
+    failures: list[str] = gate_failures(Measurement(
         framesets=100,
         tracked=100,
         lost=0,
@@ -86,12 +85,11 @@ def test_nonfinite_measurements_fail_without_a_baseline(value: float) -> None:
         extent_m=1.0,
         truth_extent_m=1.0,
         poses_finite=True,
-        baseline=None,
         median_tracker_ms=2.0,
         hostname="host",
         lane="gpu",
         profile="fast",
-    )
+    ), baseline)
     assert any(message.startswith("finite:") for message in failures)
 
 

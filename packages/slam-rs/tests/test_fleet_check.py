@@ -29,7 +29,7 @@ def test_scoring_uses_ground_truth_and_rejects_wrong_clock(
     monkeypatch.setattr(fleet_check, "check_scoring_inputs", lambda *_args: None)
     monkeypatch.setattr(fleet_check, "run_segment", lambda *_args, **_kwargs: run)
     result: ClipResult = measure(manifest, manifest.segments[0])
-    assert result.gt_associated == (30 if clock_offset == 0 else 0)
+    assert result.measurement.associated == (30 if clock_offset == 0 else 0)
     assert bool(result.failures) == bool(clock_offset)
     output: Path = tmp_path / "new" / "fleet.json"
     config: Config = Config(segments=(manifest.segments[0].segment_id,), output_json=output)
@@ -38,12 +38,12 @@ def test_scoring_uses_ground_truth_and_rejects_wrong_clock(
             main(config)
     else:
         main(config)
-        assert result.gt_rmse_cm < 1e-10
+        assert result.measurement.gt_rmse_cm < 1e-10
         assert "no baseline" in replace(result, baseline=None).verdict
-    assert set(json.loads(output.read_text())["clips"][0]) == {
+    assert list(json.loads(output.read_text())["clips"][0]) == [
         "segment_id", "framesets", "tracked", "lost", "gt_rmse_cm", "wall_s", "peak_rss_mb",
         "gt_allowed_cm", "baseline_gt_rmse_cm", "median_tracker_ms", "speed_gated", "verdict",
-    }
+    ]
     assert json.loads(output.read_text())["config_sha256"] == {manifest.segments[0].dataset_name: "a" * 64}
 
 

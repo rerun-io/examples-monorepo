@@ -2,12 +2,14 @@
 
 import hashlib
 import json
+import math
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 from slam_rs import _core
+from slam_rs.trajectory import MIN_ASSOCIATED_POSES
 
 MANIFEST_PATH: Path = Path(__file__).resolve().parents[1] / "reference_segments.toml"
 """The checked-in manifest, beside the package rather than inside it."""
@@ -60,6 +62,8 @@ def _one_of[LiteralName: str](value: object, allowed: dict[str, LiteralName], wh
     return allowed[value]
 
 
+GATE_RATIO: float = 1.10
+"""Largest allowed ratio to a matched accuracy or speed baseline."""
 DIVERGENCE_FACTOR: float = 10.0
 """Largest allowed ratio of estimated extent to ground-truth extent."""
 MIN_TRACKED_POSES: int = 10
@@ -206,6 +210,11 @@ class ReferenceSegment:
     """Size and schema digest per layer name (``base``, ``gt``)."""
     imu: ImuParameters
     """Frozen IMU noise model for this device."""
+
+
+    def baseline_for(self, lane: Literal["cpu", "gpu"], profile: Literal["reference", "fast"]) -> Baseline | None:
+        """Return the unique baseline for this execution lane and profile."""
+        return next((row for row in self.baseline if row.lane == lane and row.profile == profile), None)
 
 
 @dataclass(slots=True, frozen=True)
@@ -453,6 +462,16 @@ def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
         tier: Tier = _one_of(entry["tier"], TIER_BY_NAME, "tier", identifier)
         decode_path: DecodePath = _one_of(entry["decode_path"], DECODE_PATH_BY_NAME, "decode path", identifier)
         source: GroundTruthSource = _one_of(entry["gt"]["source"], GT_SOURCE_BY_NAME, "ground-truth source", identifier)
+        baselines: tuple[Baseline, ...] = tuple(Baseline(**row) for row in entry.get("baseline", []))
+        baseline_keys: set[tuple[str, str]] = set()
+        for baseline in baselines:
+            key: tuple[str, str] = (baseline.profile, baseline.lane)
+            if key in baseline_keys:
+                raise ValueError(f"{identifier}: duplicate baseline {key}")
+            baseline_keys.add(key)
+            for name, value in (("gt_rmse_cm", baseline.gt_rmse_cm), ("median_tracker_ms", baseline.median_tracker_ms)):
+                if not math.isfinite(value) or value <= 0.0:
+                    raise ValueError(f"{identifier}: baseline {key} {name} must be finite and positive")
         segments.append(
             ReferenceSegment(
                 dataset_name=entry["dataset_name"],
@@ -460,7 +479,7 @@ def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
                 segment_id=entry["segment_id"],
                 tier=tier,
                 hold_out=bool(entry.get("hold_out", False)),
-                baseline=tuple(Baseline(**row) for row in entry.get("baseline", [])),
+                baseline=baselines,
                 decode_path=decode_path,
                 capture=CaptureProperties(
                     duration_ns=int(entry["capture"]["duration_ns"]),
@@ -497,41 +516,52 @@ def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
     return parsed
 
 
-def gate_failures(
-    *,
-    framesets: int,
-    tracked: int,
-    lost: int,
-    associated: int,
-    gt_rmse_cm: float,
-    extent_m: float,
-    truth_extent_m: float,
-    poses_finite: bool,
-    baseline: Baseline | None,
-    median_tracker_ms: float,
-    hostname: str,
-    lane: Literal["cpu", "gpu"],
-    profile: Literal["reference", "fast"],
-) -> list[str]:
-    """Return each failed ground-truth, tracking, or same-host speed clause."""
-    import math
+@dataclass(slots=True, frozen=True)
+class Measurement:
+    """Measured inputs to the tracking, accuracy, and speed clauses."""
 
-    from slam_rs.trajectory import MIN_ASSOCIATED_POSES
+    framesets: int
+    """Framesets fed."""
+    tracked: int
+    """Estimated poses."""
+    lost: int
+    """Framesets left waiting for IMU."""
+    associated: int
+    """Estimate poses associated with ground truth."""
+    gt_rmse_cm: float
+    """Ground-truth ATE in centimetres."""
+    extent_m: float
+    """Estimated bounding-box diagonal."""
+    truth_extent_m: float
+    """Ground-truth bounding-box diagonal."""
+    poses_finite: bool
+    """Whether estimated positions are finite."""
+    median_tracker_ms: float
+    """Median accepted tracker call duration."""
+    hostname: str
+    """Measuring host."""
+    lane: Literal["cpu", "gpu"]
+    """Execution lane."""
+    profile: Literal["reference", "fast"]
+    """Configuration overlay."""
 
+
+def gate_failures(measurement: Measurement, baseline: Baseline | None) -> list[str]:
+    """Return failed clauses; the caller supplies the matched lane/profile baseline."""
     failures: list[str] = []
-    if tracked < MIN_TRACKED_POSES:
-        failures.append(f"tracked: {pose_floor_text(tracked=tracked, framesets=framesets)}")
-    if lost != 0:
-        failures.append(f"lost: {lost} of {framesets} framesets")
-    if associated < MIN_ASSOCIATED_POSES:
-        failures.append(f"associated: only {associated} poses matched ground truth")
-    if not poses_finite or not all(math.isfinite(value) for value in (gt_rmse_cm, extent_m, truth_extent_m, median_tracker_ms)):
+    if measurement.tracked < MIN_TRACKED_POSES:
+        failures.append(f"tracked: {pose_floor_text(tracked=measurement.tracked, framesets=measurement.framesets)}")
+    if measurement.lost != 0:
+        failures.append(f"lost: {measurement.lost} of {measurement.framesets} framesets")
+    if measurement.associated < MIN_ASSOCIATED_POSES:
+        failures.append(f"associated: only {measurement.associated} poses matched ground truth")
+    if not measurement.poses_finite or not all(math.isfinite(value) for value in (measurement.gt_rmse_cm, measurement.extent_m, measurement.truth_extent_m, measurement.median_tracker_ms)):
         failures.append("finite: poses and measurements must be finite")
-    if extent_m > DIVERGENCE_FACTOR * truth_extent_m:
-        failures.append(f"divergence: estimate spans {extent_m:.2f} m, truth {truth_extent_m:.2f} m")
-    if baseline is not None and baseline.lane == lane and baseline.profile == profile:
-        if gt_rmse_cm > 1.10 * baseline.gt_rmse_cm:
-            failures.append(f"accuracy: {gt_rmse_cm:.3f} cm exceeds {1.10 * baseline.gt_rmse_cm:.3f} cm")
-        if hostname == baseline.host and median_tracker_ms > 1.10 * baseline.median_tracker_ms:
-            failures.append(f"speed: {median_tracker_ms:.3f} ms exceeds {1.10 * baseline.median_tracker_ms:.3f} ms")
+    if measurement.extent_m > DIVERGENCE_FACTOR * measurement.truth_extent_m:
+        failures.append(f"divergence: estimate spans {measurement.extent_m:.2f} m, truth {measurement.truth_extent_m:.2f} m")
+    if baseline is not None:
+        if measurement.gt_rmse_cm > GATE_RATIO * baseline.gt_rmse_cm:
+            failures.append(f"accuracy: {measurement.gt_rmse_cm:.3f} cm exceeds {GATE_RATIO * baseline.gt_rmse_cm:.3f} cm")
+        if measurement.hostname == baseline.host and measurement.median_tracker_ms > GATE_RATIO * baseline.median_tracker_ms:
+            failures.append(f"speed: {measurement.median_tracker_ms:.3f} ms exceeds {GATE_RATIO * baseline.median_tracker_ms:.3f} ms")
     return failures
