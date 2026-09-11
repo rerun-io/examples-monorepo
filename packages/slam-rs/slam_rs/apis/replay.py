@@ -73,13 +73,7 @@ class Config:
     segment: str = SMOKE_SEGMENT
     """Segment id from ``reference_segments.toml``; also names the IMU parameters used for ``--rrd``."""
     rrd: Path | None = None
-    """Base-layer ``.rrd`` to replay instead of the manifest's, keeping ``--segment``'s IMU parameters.
-
-    The C++ overlay is drawn only where the replayed recording's own segment id —
-    the one inside the file, not the name the file is filed under — is the one the
-    dumps came from. So another recording's frames get no overlay however the
-    file is spelled, and this recording's own ``.rrd`` still gets one.
-    """
+    """Base-layer ``.rrd`` to replay instead of the manifest's, keeping ``--segment``'s IMU parameters."""
     gt_rrd: Path | None = None
     """Ground-truth ``.rrd`` for ``--rrd``; the manifest's own path is used when neither is given."""
     catalog: str | None = None

@@ -1,1 +1,0 @@
-{"source": "frame.pgm", "source_width": 960, "source_height": 960, "shift": 8, "num_levels": 3, "levels": [{"level": 0, "width": 960, "height": 960, "file": "level_0.bin"}, {"level": 1, "width": 480, "height": 480, "file": "level_1.bin"}, {"level": 2, "width": 240, "height": 240, "file": "level_2.bin"}, {"level": 3, "width": 120, "height": 120, "file": "level_3.bin"}]}

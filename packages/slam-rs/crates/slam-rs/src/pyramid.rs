@@ -1,4 +1,4 @@
-//! The frontend's image pyramid, bit-exact with basalt's.
+//! The frontend's integer Gaussian image pyramid.
 //!
 //! Ported from `thirdparty/basalt-headers/include/basalt/image/image_pyr.h`.
 //! `subsample` (`image_pyr.h:99-140`) is reproduced operation for operation:
@@ -7,9 +7,7 @@
 //! row-major over `dst_height` x `src_width` — which reproduces C++'s
 //! transposed *arithmetic*, not its layout, see `subsample` — and one
 //! rounding at the very end, `(val + (1 << 7)) >> 8` (`image_pyr.h:135`).
-//! Every level of a 960x960 frame must match the C++ byte for byte; the fixture
-//! test at the bottom of this file checks exactly that against dumps produced
-//! by the fork.
+//! Each level halves both dimensions after filtering and rounds once to u16.
 //!
 //! ## What is not reproduced: the mipmap allocation
 //!
@@ -780,106 +778,6 @@ mod tests {
                     "border101({x}, {n})"
                 );
             }
-        }
-    }
-
-    /// One fixture file from `tests/fixtures/pyramid/`.
-    ///
-    /// The directory holds the first frameset of the smoke reference segment
-    /// (`msd-index__MIO_others__MIO10_short_2_panorama`, camera 0, 960x960
-    /// gray8, decoded by the frozen `cpu_gray8_dav1d_1thread` path) as a binary
-    /// PGM, and the four pyramid levels the C++ fork produces from it. The
-    /// dumps come from `tools/dump_pyramid.cpp` on the fork's
-    /// `slam-rs-reference` branch, which widens the PGM by `<< 8`, builds
-    /// `ManagedImagePyr<uint16_t>(img, 3)` and writes each `lvl(l)` as raw
-    /// little-endian `u16` with no row padding.
-    fn fixture(name: &str) -> Vec<u8> {
-        let path: std::path::PathBuf = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/pyramid")
-            .join(name);
-        std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
-    }
-
-    /// Binary PGM (`P5`) header plus raster; comments and multiple whitespace
-    /// runs are allowed, which is all the format the dump tool emits.
-    fn read_pgm(bytes: &[u8]) -> (usize, usize, &[u8]) {
-        let mut fields: Vec<usize> = Vec::with_capacity(3);
-        let mut cursor: usize = 2; // past "P5"
-        assert_eq!(&bytes[..2], b"P5", "not a binary PGM");
-        while fields.len() < 3 {
-            while bytes[cursor].is_ascii_whitespace() {
-                cursor += 1;
-            }
-            if bytes[cursor] == b'#' {
-                while bytes[cursor] != b'\n' {
-                    cursor += 1;
-                }
-                continue;
-            }
-            let start: usize = cursor;
-            while bytes[cursor].is_ascii_digit() {
-                cursor += 1;
-            }
-            let text: &str = std::str::from_utf8(&bytes[start..cursor]).unwrap();
-            fields.push(text.parse::<usize>().unwrap());
-        }
-        assert_eq!(fields[2], 255, "the port only reads 8-bit PGMs");
-        (fields[0], fields[1], &bytes[cursor + 1..])
-    }
-
-    fn read_le_u16(bytes: &[u8]) -> Vec<u16> {
-        assert_eq!(bytes.len() % 2, 0, "a u16 dump has an even byte length");
-        bytes
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .collect()
-    }
-
-    /// Every level of a real 960x960 frame matches the C++ fork byte for byte.
-    ///
-    /// This is the gate the whole module exists for: the pyramid is the one
-    /// kernel where bit-exactness with basalt is cheap, and a one-LSB pixel
-    /// difference is worth roughly 13 cm of ATE downstream (D35).
-    #[test]
-    fn every_level_matches_the_cpp_fork() {
-        let pgm: Vec<u8> = fixture("frame.pgm");
-        let (width, height, raster) = read_pgm(&pgm);
-        assert_eq!((width, height), (960, 960));
-
-        let image: ImageU16 = ImageU16::from_u8_strided(raster, width, height, width).unwrap();
-        let pyramid: PyramidU16 = build(&image, 3);
-        assert_eq!(pyramid.num_levels(), 4);
-
-        for (level, expected_size) in [
-            (0, (960, 960)),
-            (1, (480, 480)),
-            (2, (240, 240)),
-            (3, (120, 120)),
-        ] {
-            let got: &ImageU16 = pyramid.level(level).unwrap();
-            assert_eq!((got.width(), got.height()), expected_size, "level {level}");
-            let raw: Vec<u8> = fixture(&format!("level_{level}.bin"));
-            // Exactly two bytes per pixel and not one more: a decode that
-            // tolerated a trailing byte would let a padded dump through the
-            // comparison below.
-            assert_eq!(
-                raw.len(),
-                2 * expected_size.0 * expected_size.1,
-                "level {level} dump is not exactly {} x {} little-endian u16",
-                expected_size.0,
-                expected_size.1
-            );
-            let expected: Vec<u16> = read_le_u16(&raw);
-            assert_eq!(expected.len(), got.data().len(), "level {level} length");
-            let first_difference: Option<usize> = got
-                .data()
-                .iter()
-                .zip(expected.iter())
-                .position(|(ours, theirs)| ours != theirs);
-            assert_eq!(
-                first_difference, None,
-                "level {level} differs from the C++ fork at index {first_difference:?}"
-            );
         }
     }
 

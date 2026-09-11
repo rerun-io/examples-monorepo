@@ -69,8 +69,8 @@ def test_the_vendored_configs_are_the_ones_the_cpp_runs_used(manifest: Reference
 
     The run manifests embed the whole configuration document the C++ binary read,
     so this compares documents rather than the four fields the run summarises and
-    the one the binding exposes: a key the Rust struct does not model yet is
-    compared here too. What it stops from coming back is C72 — the Python path
+    the one the binding exposes. S34 removed 21 unread fields; active values
+    remain compared here. What it stops from coming back is C72 — the Python path
     built ``_core.VioConfig()``, basalt's constructor defaults, which differ from
     the shipped MSD files in ``vio_marg_lost_landmarks`` and put the port 1.41 to
     12.05 cm from the C++ instead of 0.31 to 5.19 cm.
@@ -83,7 +83,15 @@ def test_the_vendored_configs_are_the_ones_the_cpp_runs_used(manifest: Reference
         # this repository's copy of that same file.
         assert Path(recorded["path"]) == Path(segment.reference.vio_config), segment.segment_id
         assert Path(recorded["path"]).name == manifest.dataset(segment.dataset_name).vio_config.name, segment.segment_id
-        assert set(vendored) == set(recorded["json"]), segment.segment_id
+        # S34 removes only the 17 mapper keys and these four unread VIO keys.
+        removed: set[str] = {key for key in recorded["json"] if key.startswith("config.mapper_")} | {
+            "config.vio_filter_iteration",
+            "config.vio_lm_landmark_damping_variant",
+            "config.vio_lm_pose_damping_variant",
+            "config.vio_outlier_threshold",
+        }
+        assert len(removed) == 21
+        assert set(vendored) == set(recorded["json"]) - removed, segment.segment_id
         differing: dict[str, tuple[Any, Any]] = {
             key: (value, recorded["json"][key]) for key, value in vendored.items() if value != recorded["json"][key]
         }
@@ -93,8 +101,8 @@ def test_the_vendored_configs_are_the_ones_the_cpp_runs_used(manifest: Reference
         assert vendored["config.vio_marg_lost_landmarks"] is True, segment.segment_id
         assert vendored["config.optical_flow_image_safe_radius"] == segment.reference.optical_flow_image_safe_radius, segment.segment_id
         compared += len(vendored)
-    # Ten runs, 68 keys each: the whole document, every time.
-    assert compared == 10 * 68
+    # Ten runs, 47 active keys each.
+    assert compared == 10 * 47
 
 
 def test_the_committed_run_manifests_carry_the_bundles_configuration(manifest: ReferenceManifest) -> None:

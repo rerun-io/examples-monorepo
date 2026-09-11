@@ -19,14 +19,8 @@
 //! n = 5:  (x0 + x1) + (x2 + (x3 + x4))
 //! ```
 //!
-//! In `f32` with `[2²⁴, 1, 1, 1]` the tree returns `16777218` and a left fold
-//! `16777216`, because `2²⁴ + 1` is not representable. Decision D31 said these
-//! four sites needed a fixed order; it did not say *which*, and a left fold is
-//! the wrong one. The rule here is pinned bit for bit against the fork's own
-//! TBB by `tests/fixtures/linearize/tbb_reduce_oracle.json`
-//! (`tools/tbb_reduce_probe.cpp` on `slam-rs-reference`): 120 cases, 90 of them
-//! inputs where the tree and a left fold disagree, and the probe records that
-//! the answer does not move between one thread and the machine's default.
+//! The reduction uses a deterministic fixed-shape tree, not a left fold.
+//! For `[2²⁴, 1, 1, 1]` in f32 it returns 16777218 instead of 16777216.
 //!
 //! A `rayon` version has to reproduce the same tree — `par_chunks` with a
 //! sequential merge does not, and neither does `reduce` over unspecified
@@ -50,7 +44,7 @@ pub(crate) type LeafResult<E> = Result<(), E>;
 /// itself, and `join` (`linearization_abs_qr.cpp:513-542`). Naming them on the
 /// accumulator instead of passing three closures per call is what keeps the
 /// recursion below to one shape for both accumulator types — and the shape is
-/// the contract the `tbb_reduce_oracle` fixture pins.
+/// the deterministic reduction contract.
 pub(crate) trait Reducible {
     /// A fresh identity of this accumulator's own shape, for the scratch buffer
     /// one recursion level down.
@@ -175,6 +169,16 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[test]
+    fn the_four_element_tree_is_not_a_left_fold() {
+        let values: [f32; 4] = [16_777_216.0, 1.0, 1.0, 1.0];
+        let tree =
+            deterministic_reduce_scalar::<f32, ()>(4, &mut |i, acc| Ok(acc + values[i])).unwrap();
+        let fold = values.iter().fold(0.0f32, |acc, v| acc + *v);
+        assert_eq!(tree, 16_777_218.0, "(x0 + x1) + (x2 + x3)");
+        assert_eq!(fold, 16_777_216.0, "((x0 + x1) + x2) + x3");
+    }
 
     impl Reducible for String {
         fn identity_like(&self) -> Self {

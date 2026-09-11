@@ -501,82 +501,23 @@ fn a_single_camera_rig_detects_and_skips_matching() {
     assert!(!frame.cameras[0].is_empty());
 }
 
-/// Deviation X03: `E[i]` from `T_c0_ci` per camera, or the C++'s cam0-cam1
-/// matrix everywhere. On a three-camera baseline rig the two differ for
-/// camera 2 and agree for camera 1.
+/// Each camera's epipolar constraint comes from its own pose.
 #[test]
-fn the_essential_matrix_is_per_camera_unless_the_cpp_bug_is_asked_for() {
-    let fixed: FrameToFrameOpticalFlow<Pattern51> = frontend(
-        3,
-        FrontendOptions {
-            epipolar_per_camera: true,
-            ..FrontendOptions::default()
-        },
-    );
-    let faithful: FrameToFrameOpticalFlow<Pattern51> = frontend(
-        3,
-        FrontendOptions {
-            epipolar_per_camera: false,
-            ..FrontendOptions::default()
-        },
-    );
-    assert_eq!(fixed.essential(1), faithful.essential(1));
-    assert_eq!(faithful.essential(2), faithful.essential(1));
-    // Camera 2's baseline is twice camera 1's, but `computeEssential`
-    // normalizes the translation, so a pure-translation rig gives the same
-    // matrix either way; the rotated rig below is what separates them.
-    assert_eq!(fixed.essential(2), fixed.essential(1));
-
-    // With camera 2 rotated, the two disagree.
-    let mut rotated: Calibration<f64> = rig(3);
+fn the_essential_matrix_is_per_camera() {
+    let translated = frontend(3, FrontendOptions::default());
+    assert_eq!(translated.essential(0), Matrix4::zeros());
+    // Translation is normalized, so collinear baselines have the same constraint.
+    assert_eq!(translated.essential(1), translated.essential(2));
+    let mut rotated = rig(3);
     rotated.t_i_c[2] = Se3::new(
         So3::exp(&Vector3::new(0.0, 0.4, 0.0)),
         Vector3::new(0.10, 0.0, 0.0),
     );
-    let fixed: FrameToFrameOpticalFlow<Pattern51> = FrameToFrameOpticalFlow::new(
-        config(),
-        &rotated,
-        FrontendOptions {
-            epipolar_per_camera: true,
-            ..FrontendOptions::default()
-        },
-    )
-    .unwrap();
-    let faithful: FrameToFrameOpticalFlow<Pattern51> = FrameToFrameOpticalFlow::new(
-        config(),
-        &rotated,
-        FrontendOptions {
-            epipolar_per_camera: false,
-            ..FrontendOptions::default()
-        },
-    )
-    .unwrap();
-    assert_ne!(fixed.essential(2), faithful.essential(2));
-    assert_eq!(faithful.essential(2), faithful.essential(1));
-}
-
-/// For a two-camera rig the flag makes no difference at all, which is what
-/// keeps a C++-parity run on msd-index unaffected either way.
-#[test]
-fn on_a_stereo_rig_the_epipolar_flag_changes_nothing() {
-    let fixed: FrameToFrameOpticalFlow<Pattern51> = frontend(
-        2,
-        FrontendOptions {
-            epipolar_per_camera: true,
-            ..FrontendOptions::default()
-        },
-    );
-    let faithful: FrameToFrameOpticalFlow<Pattern51> = frontend(
-        2,
-        FrontendOptions {
-            epipolar_per_camera: false,
-            ..FrontendOptions::default()
-        },
-    );
-    // Index 0 differs by construction and is never read; camera 1 is the
-    // one `filterPoints` uses, and there the two agree exactly.
-    assert_eq!(fixed.essential(1), faithful.essential(1));
-    assert_eq!(fixed.essential(0), Matrix4::zeros());
+    let flow =
+        FrameToFrameOpticalFlow::<Pattern51>::new(config(), &rotated, FrontendOptions::default())
+            .unwrap();
+    assert_eq!(flow.essential(1), translated.essential(1));
+    assert_ne!(flow.essential(2), flow.essential(1));
 }
 
 #[test]
@@ -892,20 +833,6 @@ fn identical_frames_at_negative_timestamps_keep_their_ids() {
         shared_per_start.windows(2).all(|pair| pair[0] == pair[1]),
         "negative timestamps tracked differently from zero: {shared_per_start:?}"
     );
-}
-
-#[test]
-fn the_cpp_essential_bug_needs_a_second_camera() {
-    let error = FrameToFrameOpticalFlow::<Pattern51>::new(
-        config(),
-        &rig(1),
-        FrontendOptions {
-            epipolar_per_camera: false,
-            ..FrontendOptions::default()
-        },
-    )
-    .unwrap_err();
-    assert_eq!(error, FrontendError::NeedsTwoCameras { cameras: 1 });
 }
 
 /// `keypoints.cpp:179`: a mask covering the frame leaves nothing to detect.

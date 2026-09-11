@@ -34,8 +34,7 @@
 //! range holds one element and then joins up a balanced tree, so four elements
 //! reduce as `(x0 + x1) + (x2 + x3)`. In `f32` with `[2²⁴, 1, 1, 1]` that is
 //! `16777218` where a fold gives `16777216`. The `reduce` module reproduces
-//! the tree, pinned bit for bit against the fork's own TBB by
-//! `tests/fixtures/linearize/tbb_reduce_oracle.json`, and all four sites go
+//! the deterministic fixed-shape tree, not a left fold. All four sites go
 //! through it: [`LinearizationAbsQR::linearize_problem`],
 //! [`LinearizationAbsQR::back_substitute`] and
 //! [`LinearizationAbsQR::get_dense_h_b`] — the fourth, `getJp_diag2` (`:354`),
@@ -55,27 +54,6 @@ pub use dense_hb::DenseHbWorkspace;
 pub use landmark_block::{
     DenseHbScratch, LandmarkBlock, LandmarkBlockOptions, LandmarkBlockState, compute_error_weight,
 };
-
-/// `reduce::deterministic_reduce_scalar` with the error type erased, so the
-/// fixture test in `tests/tbb_reduce_oracle.rs` can drive the association
-/// directly.
-///
-/// The reduction itself is internal — it exists to be called at the four sites
-/// of [`LinearizationAbsQR`] — but the *association* is a claim about basalt
-/// that has to be checked against basalt, and an integration test cannot reach
-/// a private module.
-pub fn deterministic_reduce_scalar_for_tests<S: LieScalar>(
-    n: usize,
-    leaf: &mut dyn FnMut(usize, S) -> S,
-) -> S {
-    let result: Result<S, std::convert::Infallible> =
-        reduce::deterministic_reduce_scalar(n, &mut |index: usize, acc: S| Ok(leaf(index, acc)));
-    match result {
-        Ok(value) => value,
-        // Unreachable: the leaf above cannot fail.
-        Err(never) => match never {},
-    }
-}
 
 use nalgebra::{DMatrix, Matrix4, Matrix6};
 

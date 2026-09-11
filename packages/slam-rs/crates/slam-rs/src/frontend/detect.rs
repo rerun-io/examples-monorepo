@@ -51,8 +51,7 @@
 //! What is left is genuinely different and is accepted, not worked around
 //! (decision D09, trap 2): `cv::FAST` walks the whole cell in one pass with its
 //! own three-row score ring, and `std::sort` (`keypoints.cpp:166`) is not stable
-//! while the sort here is, so ties inside a cell break differently. The C++
-//! parity gate seeds the tracker with the C++ keypoints for that reason.
+//! while the sort here is, so ties inside a cell retain their scan order.
 
 mod band;
 pub use super::cell::{

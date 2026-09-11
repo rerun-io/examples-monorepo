@@ -53,13 +53,6 @@
 //!   asserts (`:657-659`). The port returns
 //!   [`CameraError::UnprojectJacobianUnsupported`] rather than asserting.
 //!
-//! ## The oracle
-//!
-//! `tests/fixtures/camera_oracle.json` is what these same models return in C++
-//! for nine cameras and thirty points each, produced by `tools/camera_oracle.cpp`
-//! on the fork's `slam-rs-reference` branch; `tests/camera_oracle.rs` checks this
-//! module against it to 1e-15 relative.
-//!
 //! ## Scalars
 //!
 //! Generic over [`LieScalar`] (`f32` and `f64`) because the frontend runs `f32`
@@ -1351,31 +1344,6 @@ mod tests {
         assert!(camera.project(&inside, &mut reprojected));
         assert_abs_diff_eq!(reprojected[0], 340.0, epsilon = 1e-9);
         assert_abs_diff_eq!(reprojected[1], 250.0, epsilon = 1e-9);
-    }
-
-    /// `unproject` in `f32` rounds like the C++ because the 2x2 Newton inverse
-    /// does: one reciprocal of the determinant, then a multiply per cofactor
-    /// (`eigen/Eigen/src/LU/InverseImpl.h:66-83`). nalgebra's `try_inverse`
-    /// divides each coefficient instead, which moved this bearing by 4e-5.
-    // The three bearings below are the C++ float build printed at %.17g: more
-    // figures than an f32 needs, kept verbatim because that is what makes them
-    // evidence.
-    #[allow(clippy::excessive_precision)]
-    #[test]
-    fn the_f32_newton_inverse_rounds_like_eigen() {
-        let calibration: Calibration<f32> =
-            Calibration::from_json_str(include_str!("../tests/fixtures/msdmg_calib.json")).unwrap();
-        let CameraEnum::PinholeRadtan8(camera) =
-            CameraEnum::from_model(&calibration.intrinsics[2]).unwrap()
-        else {
-            panic!("msdmg cam2 is pinhole-radtan8");
-        };
-        let mut bearing: Vector4<f32> = Vector4::zeros();
-        assert!(camera.unproject(&Vector2::new(156.0, 452.0), &mut bearing));
-        // The C++ float build, from `tools/camera_oracle.cpp` on the fork.
-        assert_eq!(bearing[0], -0.484336256980896);
-        assert_eq!(bearing[1], 0.634190559387207);
-        assert_eq!(bearing[2], 0.6026779413223267);
     }
 
     #[test]

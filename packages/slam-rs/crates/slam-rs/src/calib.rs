@@ -29,7 +29,7 @@
 //! `msdmi_calib.json` (2 kb4 cameras, Valve Index), `msdmg_calib.json` (4
 //! pinhole-radtan8, HP Reverb G2), `euroc_ds_calib.json` (2 double-sphere, and
 //! the only shipped file with a vignette spline and mocap keys) and
-//! `robocap-basalt-calib.json` (4 kb4 at 960x540, the only one with non-default
+//! `robocap_calib.json` (4 kb4 at 960x540, the only one with non-default
 //! IMU noise).
 
 use std::collections::BTreeMap;
@@ -1025,14 +1025,14 @@ mod tests {
     const MSDMI: &str = include_str!("../tests/fixtures/msdmi_calib.json");
     const MSDMG: &str = include_str!("../tests/fixtures/msdmg_calib.json");
     const EUROC: &str = include_str!("../tests/fixtures/euroc_ds_calib.json");
-    const ROBOCAP: &str = include_str!("../tests/fixtures/robocap-basalt-calib.json");
+    const ROBOCAP: &str = include_str!("../tests/fixtures/robocap_calib.json");
 
     fn every_fixture() -> [(&'static str, &'static str); 4] {
         [
             ("msdmi_calib.json", MSDMI),
             ("msdmg_calib.json", MSDMG),
             ("euroc_ds_calib.json", EUROC),
-            ("robocap-basalt-calib.json", ROBOCAP),
+            ("robocap_calib.json", ROBOCAP),
         ]
     }
 

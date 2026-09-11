@@ -20,10 +20,7 @@ nalgebra = "0.35"
 numpy = "0.29"
 pyo3 = "0.29"
 serde = { version = "1", features = ["derive"] }
-# `float_roundtrip` makes the JSON float parser correctly rounded, like the
-# `strtod` cereal uses on the C++ side. Without it several calibration and
-# config values land one ulp off the double basalt reads from the same file,
-# which is exactly the kind of difference the accuracy gate must not measure.
+# Correctly rounded parsing preserves calibration and config values across JSON round trips.
 serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "2"
 # The frontend's only parallelism. Used through `frontend::parallel::WorkPool`,
@@ -33,18 +30,16 @@ rayon = "1"
 # dev-only
 approx = "0.5"
 proptest = "1"
-# A runtime dependency from the frontend on: `kornia_imgproc::features::
-# fast_detect_rect_u8` is the FAST kernel behind basalt's grid detector
-# (decision D09, D20). It doubles as the pyramid's test oracle (`pyrdown_u8`,
-# decision D08). Pinned by exact git rev with default features off; kornia's
-# GPU features are disabled; GPU work here uses CubeCL (T04).
+# FAST detection runs inside the frontend's grid. The pyramid tests also
+# compare with the independent `pyrdown_u8` kernel. Pin the revision and disable
+# upstream GPU features: this crate supplies its own CubeCL GPU implementation.
 kornia-image = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
 kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
 
 # SO(3)'s exp, log, matrix, inverse and action, at the same pinned rev. Already
 # in the lockfile as a dependency of `kornia-imgproc`; naming it here makes the
 # edge direct. `crate::lie` routes `So3` through `SO3F32`/`SO3F64` and keeps the
-# rest — SE(3), the decoupled pair, `apply_inc`, the four basalt Jacobians —
+# rest — SE(3), the decoupled pair, `apply_inc`, the four pose Jacobians —
 # because upstream's are `f32`-only or coupled (S33 audit A, row 5).
 kornia-algebra = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
 
@@ -65,18 +60,9 @@ wgpu = { version = "29", default-features = false }
 unwrap_used = "deny"
 expect_used = "deny"
 
-# The test suite is dominated by two things an unoptimized build makes ten
-# times slower than they need to be: 960x960 KLT pyramids, and the oracle
-# replays of a dense LM loop. Optimizing the dev and test profiles moved
-# `cargo test -p slam-rs` from 15.1 s to 0.74 s and the whole-pipeline test
-# from 14.2 s to 0.31 s, which is what lets that test and the whole
-# 60-frameset oracle window run in the default lane. A cold build costs 31 s
-# once.
-#
-# Floating-point semantics do not depend on the optimization level — rustc
-# never contracts or reassociates — and every oracle fixture still compares
-# exactly, which is the evidence for that here rather than an appeal to the
-# reference.
+# Optimize the image pyramids, KLT tracker and dense LM loop so complete
+# pipeline tests can run in the default suite. Keep the same optimization
+# level for dev and test builds.
 #
 # `2`, not `3`: `.cargo/config.toml` records opt-level 3 crashing rustc's LLVM
 # while compiling faer on aarch64. faer has since left the graph; the override
