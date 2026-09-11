@@ -1,11 +1,14 @@
 """Score catalog segments against ground truth and measured lane baselines."""
 
 import hashlib
-import json
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
+
+import orjson
+from serde import coerce, serde
+from serde.json import to_json
 
 from slam_rs import _core
 from slam_rs.catalog_feed import CatalogSegment, resolve_catalog_segments
@@ -124,22 +127,55 @@ def measure(
     )
 
 
-def clip_json(clip: ClipResult) -> dict[str, object]:
-    """The fleet JSON measurement contract, in its original field order."""
-    return {
-        "segment_id": clip.segment_id,
-        "framesets": clip.measurement.framesets,
-        "tracked": clip.measurement.tracked,
-        "lost": clip.measurement.lost,
-        "gt_rmse_cm": clip.measurement.gt_rmse_cm,
-        "wall_s": clip.wall_s,
-        "peak_rss_mb": clip.peak_rss_mb,
-        "gt_allowed_cm": clip.gt_allowed_cm,
-        "baseline_gt_rmse_cm": clip.baseline_gt_rmse_cm,
-        "median_tracker_ms": clip.measurement.median_tracker_ms,
-        "speed_gated": clip.speed_gated,
-        "verdict": clip.verdict,
-    }
+@serde(type_check=coerce, deny_unknown_fields=True)
+@dataclass(slots=True, frozen=True)
+class FleetClipReport:
+    """The twelve public fleet columns, in their original order."""
+
+    segment_id: str
+    """Catalog segment id."""
+    framesets: int
+    """Framesets fed."""
+    tracked: int
+    """Estimated poses."""
+    lost: int
+    """Framesets left waiting for IMU."""
+    gt_rmse_cm: float | None
+    """Ground-truth error, or null when unscored."""
+    wall_s: float
+    """Replay duration."""
+    peak_rss_mb: float
+    """Peak resident memory."""
+    gt_allowed_cm: float | None
+    """Error allowance from the matched baseline."""
+    baseline_gt_rmse_cm: float | None
+    """Matched baseline error."""
+    median_tracker_ms: float | None
+    """Median tracker cost, or null if unmeasured."""
+    speed_gated: bool
+    """Whether this host matches the baseline."""
+    verdict: str
+    """Gate verdict and any refusals."""
+
+
+@serde(type_check=coerce, deny_unknown_fields=True)
+@dataclass(slots=True, frozen=True)
+class FleetReport:
+    """Machine, run identity and measured clip reports."""
+
+    machine: Machine
+    """Measuring host."""
+    lane: Lane
+    """Execution lane."""
+    profile: Literal["reference", "fast"]
+    """Configuration overlay."""
+    core_sha256: str
+    """Extension digest."""
+    config_sha256: dict[str, str]
+    """Resolved configuration digests by dataset."""
+    clips: list[FleetClipReport]
+    """Completed clips in run order."""
+
 
 def this_lane(gpu: bool) -> Lane:
     """Refuse unsupported GPU requests before reading data."""
@@ -191,14 +227,30 @@ def main(config: Config) -> None:
         config_digests[segment.dataset_name] = result.config_sha256
         results.append(result)
         print(result.row(machine), flush=True)
-        payload: dict[str, object] = {
-            "machine": asdict(machine),
-            "lane": lane,
-            "profile": config.profile,
-            "core_sha256": core_sha256,
-            "config_sha256": config_digests,
-            "clips": [clip_json(row) for row in results],
-        }
-        config.output_json.write_text(json.dumps(payload, indent=2) + "\n")
+        report: FleetReport = FleetReport(
+            machine=machine,
+            lane=lane,
+            profile=config.profile,
+            core_sha256=core_sha256,
+            config_sha256=config_digests,
+            clips=[
+                FleetClipReport(
+                    segment_id=row.segment_id,
+                    framesets=row.measurement.framesets,
+                    tracked=row.measurement.tracked,
+                    lost=row.measurement.lost,
+                    gt_rmse_cm=row.measurement.gt_rmse_cm if math.isfinite(row.measurement.gt_rmse_cm) else None,
+                    wall_s=row.wall_s,
+                    peak_rss_mb=row.peak_rss_mb,
+                    gt_allowed_cm=row.gt_allowed_cm,
+                    baseline_gt_rmse_cm=row.baseline_gt_rmse_cm,
+                    median_tracker_ms=row.measurement.median_tracker_ms if math.isfinite(row.measurement.median_tracker_ms) else None,
+                    speed_gated=row.speed_gated,
+                    verdict=row.verdict,
+                )
+                for row in results
+            ],
+        )
+        config.output_json.write_text(to_json(report, option=orjson.OPT_INDENT_2) + "\n")
     if any(row.failures for row in results):
         raise SystemExit("\n".join(row.verdict for row in results if row.failures))

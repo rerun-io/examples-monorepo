@@ -61,6 +61,9 @@ def test_scoring_uses_ground_truth_and_rejects_wrong_clock(
         "segment_id", "framesets", "tracked", "lost", "gt_rmse_cm", "wall_s", "peak_rss_mb",
         "gt_allowed_cm", "baseline_gt_rmse_cm", "median_tracker_ms", "speed_gated", "verdict",
     ]
+    assert "NaN" not in output.read_text()
+    if clock_offset:
+        assert json.loads(output.read_text())["clips"][0]["gt_rmse_cm"] is None
     assert json.loads(output.read_text())["config_sha256"] == {manifest.segments[0].dataset_name: "a" * 64}
 
 

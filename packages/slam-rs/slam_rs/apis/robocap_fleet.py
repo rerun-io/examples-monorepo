@@ -1,11 +1,14 @@
 """Measure catalog RoboCap replay; regression agreement is reported, not gated."""
 
-import json
 import math
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+import orjson
+from serde import coerce, serde
+from serde.json import to_json
 
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb, this_temperature_c
 from slam_rs.reference import ReferenceManifest, RobocapSession, load_manifest
@@ -92,28 +95,75 @@ class RobocapRow:
         )
 
 
-def robocap_json(row: RobocapRow) -> dict[str, object]:
-    """Write the original fleet columns, including derived runtime budgets."""
-    return {
-        "machine": asdict(row.machine),
-        "segment_id": row.segment_id,
-        "framesets": row.framesets,
-        "tracked": row.tracked,
-        "lost": row.lost,
-        "reference_rmse_cm": row.reference_rmse_cm,
-        "reference_max_cm": row.reference_max_cm,
-        "reference_median_cm": row.reference_median_cm,
-        "wall_s": row.wall_s,
-        "ms_per_frameset": row.ms_per_frameset,
-        "realtime_factor_15fps": row.realtime_factor_15fps,
-        "realtime_factor_30fps": row.realtime_factor_30fps,
-        "peak_rss_mb": row.peak_rss_mb,
-        "temp_c_before": row.temp_c_before,
-        "temp_c_after": row.temp_c_after,
-        "cross_platform_ate_cm": row.cross_platform_ate_cm,
-        "unscored": row.unscored,
-        "config_sha256": row.config_sha256,
-    }
+@serde(type_check=coerce, deny_unknown_fields=True)
+@dataclass(slots=True, frozen=True)
+class RobocapReport:
+    """Flat RoboCap JSON with explicit runtime budgets and nullable scores."""
+
+    profile: Literal["reference", "fast"]
+    """Configuration overlay."""
+    machine: Machine
+    """Measured machine."""
+    segment_id: str
+    """Measured segment id."""
+    framesets: int
+    """Measured framesets."""
+    tracked: int
+    """Measured tracked."""
+    lost: int
+    """Measured lost."""
+    reference_rmse_cm: float | None
+    """Measured reference rmse cm."""
+    reference_max_cm: float | None
+    """Measured reference max cm."""
+    reference_median_cm: float | None
+    """Measured reference median cm."""
+    wall_s: float
+    """Measured wall s."""
+    ms_per_frameset: float
+    """Runtime budget computed at the write boundary."""
+    realtime_factor_15fps: float
+    """Runtime budget computed at the write boundary."""
+    realtime_factor_30fps: float
+    """Runtime budget computed at the write boundary."""
+    peak_rss_mb: float
+    """Measured peak rss mb."""
+    temp_c_before: float | None
+    """Measured temp c before."""
+    temp_c_after: float | None
+    """Measured temp c after."""
+    cross_platform_ate_cm: float | None
+    """Measured cross platform ate cm."""
+    unscored: str | None
+    """Measured unscored."""
+    config_sha256: str
+    """Measured config sha256."""
+
+    @classmethod
+    def from_row(cls, row: RobocapRow, profile: Literal["reference", "fast"]) -> "RobocapReport":
+        """Copy measured and derived values once at the document boundary."""
+        return cls(
+            profile=profile,
+            machine=row.machine,
+            segment_id=row.segment_id,
+            framesets=row.framesets,
+            tracked=row.tracked,
+            lost=row.lost,
+            reference_rmse_cm=row.reference_rmse_cm if math.isfinite(row.reference_rmse_cm) else None,
+            reference_max_cm=row.reference_max_cm if math.isfinite(row.reference_max_cm) else None,
+            reference_median_cm=row.reference_median_cm if math.isfinite(row.reference_median_cm) else None,
+            wall_s=row.wall_s,
+            ms_per_frameset=row.ms_per_frameset,
+            realtime_factor_15fps=row.realtime_factor_15fps,
+            realtime_factor_30fps=row.realtime_factor_30fps,
+            peak_rss_mb=row.peak_rss_mb,
+            temp_c_before=row.temp_c_before,
+            temp_c_after=row.temp_c_after,
+            cross_platform_ate_cm=row.cross_platform_ate_cm,
+            unscored=row.unscored,
+            config_sha256=row.config_sha256,
+        )
+
 
 @dataclass(slots=True)
 class Config:
@@ -203,7 +253,7 @@ def main(config: Config) -> None:
     # which is why the CSV used to work by accident when the two shared one.
     config.output_json.parent.mkdir(parents=True, exist_ok=True)
     write_trajectory(output_csv, estimate)
-    config.output_json.write_text(json.dumps({"profile": config.profile, **robocap_json(row)}, indent=2) + "\n")
+    config.output_json.write_text(to_json(RobocapReport.from_row(row, config.profile), option=orjson.OPT_INDENT_2) + "\n")
     print(row.row())
     print(
         f"{row.tracked} tracked poses -> {output_csv}; {row.reference_rmse_cm:.2f} cm rmse / {row.reference_max_cm:.2f} max / "
