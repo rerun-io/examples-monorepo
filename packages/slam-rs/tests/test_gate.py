@@ -87,3 +87,9 @@ def test_catalog_smoke_gate(manifest: ReferenceManifest) -> None:
     for segment in manifest.in_tier("smoke"):
         result: ClipResult = measure(manifest, segment)
         assert not result.failures, result.verdict
+
+
+@pytest.mark.parametrize("baseline", [replace(BASELINE, lane="cpu"), replace(BASELINE, profile="reference")])
+def test_mismatched_baseline_is_a_caller_error(baseline: Baseline) -> None:
+    with pytest.raises(ValueError, match=f"baseline {baseline.lane}/{baseline.profile}.*measurement gpu/fast"):
+        gate_failures(PASSING, baseline)

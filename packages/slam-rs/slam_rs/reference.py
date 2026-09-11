@@ -548,6 +548,8 @@ class Measurement:
 
 def gate_failures(measurement: Measurement, baseline: Baseline | None) -> list[str]:
     """Return failed clauses; the caller supplies the matched lane/profile baseline."""
+    if baseline is not None and (baseline.lane, baseline.profile) != (measurement.lane, measurement.profile):
+        raise ValueError(f"baseline {baseline.lane}/{baseline.profile} does not match measurement {measurement.lane}/{measurement.profile}")
     failures: list[str] = []
     if measurement.tracked < MIN_TRACKED_POSES:
         failures.append(f"tracked: {pose_floor_text(tracked=measurement.tracked, framesets=measurement.framesets)}")

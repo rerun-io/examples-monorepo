@@ -9,9 +9,26 @@ import pytest
 
 from slam_rs.apis import fleet_check
 from slam_rs.apis.fleet_check import ClipResult, Config, main, measure
-from slam_rs.reference import ReferenceManifest
+from slam_rs.catalog_feed import CatalogSegment
+from slam_rs.reference import ReferenceManifest, ReferenceSegment
 from slam_rs.tracking import SegmentRun
 from slam_rs.trajectory import Trajectory, shift_clock
+
+
+@pytest.mark.parametrize("wrong_dataset", [False, True])
+def test_measure_rejects_mismatched_source_before_replay(
+    manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, wrong_dataset: bool
+) -> None:
+    segment: ReferenceSegment = manifest.segments[0]
+    source: CatalogSegment = CatalogSegment(
+        "stub://catalog",
+        "other-dataset" if wrong_dataset else segment.dataset_name,
+        segment.segment_id if wrong_dataset else "other-segment",
+        has_ground_truth=True,
+    )
+    monkeypatch.setattr(fleet_check, "run_segment", lambda *_args, **_kwargs: pytest.fail("replayed mismatched source"))
+    with pytest.raises(ValueError, match=f"source {source.dataset_name}/{source.segment_id}.*segment {segment.dataset_name}/{segment.segment_id}"):
+        measure(manifest, segment, source=source)
 
 
 @pytest.mark.parametrize("clock_offset", [0, 100_000_000_000])

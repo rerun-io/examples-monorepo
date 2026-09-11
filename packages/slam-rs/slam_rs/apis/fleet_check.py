@@ -91,6 +91,8 @@ def measure(
     """Replay a catalog segment and associate estimates with ground truth."""
     if source is None:
         source = resolve_catalog_segments((CatalogSegment(catalog or manifest.catalog_url, segment.dataset_name, segment.segment_id),), require_ground_truth=True)[0]
+    if (source.dataset_name, source.segment_id) != (segment.dataset_name, segment.segment_id):
+        raise ValueError(f"source {source.dataset_name}/{source.segment_id} does not match segment {segment.dataset_name}/{segment.segment_id}")
     if not source.has_ground_truth:
         raise ValueError(f"{segment.segment_id}: ground-truth layer absent")
     run: SegmentRun = run_segment(manifest, segment, gpu=gpu, profile=profile, source=source)
