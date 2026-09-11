@@ -568,3 +568,147 @@ fn the_dense_reduction_allocates_nothing_after_its_first_call() {
     }
     println!("dense reduction: first call {first:?}, then zero");
 }
+
+/// Bounds the estimator, including marginalization, on Rust frontend observations.
+/// The gate allows 1,600 calls per frame and a least-squares slope of 85 calls
+/// per LM step. The source pipeline and observation conversion run uncounted.
+/// This is a bulk allocation regression gate, not proof that each LM buffer is
+/// allocation-free (the dense-reduction test above checks that narrower claim).
+///
+/// As in vio_pipeline's schedule probe, hold the last of the three shipped
+/// MIO10 raster framesets. Extend the eight shipped timestamps at the final
+/// interval to retain the original 20 warm-up and 40 measured frames. The real
+/// IMU fixture covers this schedule. This probes allocations, not accuracy.
+#[test]
+fn the_estimators_per_frame_cost_does_not_grow_with_the_lm_step_count() {
+    const BOUND: usize = 1_600;
+    const CALLS_PER_STEP: f64 = 85.0;
+    const WARMUP: usize = 20;
+    const FRAMESETS: usize = 60;
+
+    let mut vio = slam_rs::Vio::<f32>::new(
+        common::config(),
+        common::calibration(),
+        FrontendOptions {
+            threads: 1,
+            ..FrontendOptions::default()
+        },
+    )
+    .unwrap();
+    let mut estimator = slam_rs::estimator::SqrtKeypointVio::<f32>::with_default_gravity(
+        common::calibration().cast(),
+        common::config(),
+    )
+    .unwrap();
+    for row in common::IMU.iter() {
+        vio.push_imu(row.t_ns, row.gyro, row.accel).unwrap();
+        estimator.push_imu(slam_rs::imu::ImuSample {
+            t_ns: row.t_ns,
+            gyro: row.gyro.into(),
+            accel: row.accel.into(),
+        });
+    }
+    let timestamps: Vec<i64> = include_str!("fixtures/flow/frames/timestamps.txt")
+        .lines()
+        .map(|line| line.parse().unwrap())
+        .collect();
+    let last = timestamps.len() - 1;
+    let interval = timestamps[last] - timestamps[last - 1];
+    let directory = common::fixtures().join("flow/frames");
+    let rasters: Vec<Vec<common::Pgm>> = (0..3)
+        .map(|frame| {
+            (0..2)
+                .map(|camera| common::read_pgm(&directory, frame, camera))
+                .collect()
+        })
+        .collect();
+    let mut measured: Vec<(f64, f64)> = Vec::with_capacity(FRAMESETS - WARMUP);
+    let mut first_over_bound = None;
+    for frame in 0..FRAMESETS {
+        let t_ns = if frame <= last {
+            timestamps[frame]
+        } else {
+            timestamps[last] + (frame - last) as i64 * interval
+        };
+        let views: Vec<slam_rs::ImageView<'_>> = rasters[frame.min(2)]
+            .iter()
+            .map(|pgm| slam_rs::ImageView {
+                width: pgm.width,
+                height: pgm.height,
+                stride: pgm.width,
+                data: &pgm.pixels,
+            })
+            .collect();
+        let result = vio.track(t_ns, &views).unwrap();
+        assert_eq!(result.status, slam_rs::VioStatus::Tracking, "frame {frame}");
+        // Match Vio::finish_track's conversion, retaining the source pipeline's
+        // pose/depth feedback while measuring an independent estimator window.
+        let cameras = &vio.frontend().frame().cameras;
+        let mut observations = slam_rs::estimator::FlowObservations::new(t_ns, cameras.len());
+        for (slot, keypoints) in observations.cameras.iter_mut().zip(cameras) {
+            for (index, id) in keypoints.ids.iter().enumerate() {
+                slot.insert(*id, keypoints.transform(index).translation);
+            }
+        }
+        let observations = std::sync::Arc::new(observations);
+        let (outcome, counted) = measure(|| estimator.process_frame(observations).unwrap());
+        let slam_rs::estimator::FrameOutcome::Measured(stats) = outcome else {
+            panic!("frame {frame} needs more IMU");
+        };
+        if frame < WARMUP {
+            continue;
+        }
+        assert!(
+            stats.opt_started,
+            "frame {frame} never entered optimization"
+        );
+        assert!(!stats.lm.is_empty(), "frame {frame} took no LM steps");
+        println!(
+            "frame {frame}, t_ns {t_ns}: {} LM steps, marginalized {}, {counted:?}",
+            stats.lm.len(),
+            stats.marginalization.is_some(),
+        );
+        if counted.total() > BOUND && first_over_bound.is_none() {
+            first_over_bound = Some((frame, counted));
+        }
+        measured.push((stats.lm.len() as f64, counted.total() as f64));
+    }
+    assert_eq!(measured.len(), FRAMESETS - WARMUP);
+    // Least squares on (LM steps, allocator calls). The fixture has to spread
+    // the step count or the slope is not identified: without that spread the
+    // total bound above would hold for a per-step allocation too.
+    let steps: Vec<f64> = measured.iter().map(|(x, _)| *x).collect();
+    let low: f64 = steps.iter().copied().fold(f64::INFINITY, f64::min);
+    let high: f64 = steps.iter().copied().fold(0.0, f64::max);
+    assert!(
+        high >= low + 4.0,
+        "the measured framesets took {low} to {high} LM steps, too narrow to \
+         tell a per-step allocation from a per-frame one"
+    );
+    let count: f64 = measured.len() as f64;
+    let mean_x: f64 = steps.iter().sum::<f64>() / count;
+    let mean_y: f64 = measured.iter().map(|(_, y)| *y).sum::<f64>() / count;
+    let covariance: f64 = measured
+        .iter()
+        .map(|(x, y)| (x - mean_x) * (y - mean_y))
+        .sum::<f64>();
+    let variance: f64 = steps
+        .iter()
+        .map(|x| (x - mean_x) * (x - mean_x))
+        .sum::<f64>();
+    let slope: f64 = covariance / variance;
+    println!(
+        "{count} framesets, {low}-{high} LM steps: {slope:.1} allocator calls per step, \
+         {mean_y:.0} mean per frameset"
+    );
+    assert!(
+        first_over_bound.is_none(),
+        "steady-state frame exceeded {BOUND} allocator calls: {first_over_bound:?}"
+    );
+    assert!(
+        slope <= CALLS_PER_STEP,
+        "the estimator reaches the allocator {slope:.1} times per LM step, over the \
+         {CALLS_PER_STEP} the per-step path is allowed: the inner LM step allocates \
+         noticeably more than it did (this is a bulk gate; one small buffer can hide under it)"
+    );
+}
