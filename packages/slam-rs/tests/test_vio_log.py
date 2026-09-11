@@ -28,19 +28,19 @@ import rerun.experimental as rx
 from fixture_types import FRAME_PERIOD_NS, IMU_PERIOD_NS, CameraFactory, PipelineFactory, Row, Rows, RowsReader, TextureFactory, gravity_batch
 from jaxtyping import Float64, Int64
 from numpy import ndarray
+from simplecv.ops.umeyama import SimilarityTransform
 
 from slam_rs import _core, vio_log
 from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CameraCalib
 from slam_rs.trajectory import AteResult, Trajectory, ate, empty_trajectory
 from slam_rs.vio_log import (
     GT_ENTITY,
-    IDENTITY,
     IMAGE_PLANE_M,
     RUN_ENTITY,
     VIO_STATS_ENTITY,
     VioLogger,
-    alignment_onto,
     frustum_strip,
+    inverted,
     log_rig,
     vio_blueprint,
 )
@@ -315,20 +315,10 @@ def test_an_alignment_recovers_a_known_rigid_offset() -> None:
         position_m=source.position_m @ turn.T + offset,
         quaternion_wxyz=source.quaternion_wxyz,
     )
-    recovered = alignment_onto(source, target)
+    recovered: SimilarityTransform = inverted(ate(source, target).alignment)
     np.testing.assert_allclose(recovered.dst_R_src, turn, atol=1e-9)
     np.testing.assert_allclose(recovered.dst_t_src, offset, atol=1e-9)
     np.testing.assert_allclose(recovered.apply(source.position_m), target.position_m, atol=1e-9)
-
-
-def test_too_short_a_run_carries_no_alignment() -> None:
-    """Below the association floor the identity is honest: nothing has been measured yet."""
-    short: Trajectory = straight_line(np.arange(0, 3 * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64))
-    long: Trajectory = straight_line(np.arange(0, 40 * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64))
-    assert alignment_onto(short, long) is IDENTITY
-    assert alignment_onto(long, empty_trajectory()) is IDENTITY
-
-
 
 
 def test_the_keypoints_land_on_the_camera_images(logged: Logged) -> None:

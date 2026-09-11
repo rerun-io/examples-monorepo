@@ -402,3 +402,24 @@ def test_dataset_imu_covers_unlisted_odyssey_and_preserves_holdouts(manifest: Re
     odyssey = manifest.dataset("msd-odyssey")
     assert odyssey.camera_resolution_wh == ((640, 480), (640, 480))
     assert odyssey.image_rotation_cw_deg == (0, 0)
+
+
+@pytest.mark.parametrize("field", ["gt_rmse_cm", "median_tracker_ms"])
+@pytest.mark.parametrize("value", ["0.0", "-1.0", "nan", "inf", "-inf"])
+def test_invalid_baseline_measurement_is_rejected(tmp_path: Path, field: str, value: str) -> None:
+    import re
+
+    path: Path = tmp_path / "invalid-baseline.toml"
+    path.write_text(re.sub(rf"{field} = [^\n]+", f"{field} = {value}", MANIFEST_PATH.read_text(), count=1))
+    with pytest.raises(ValueError, match=field):
+        load_manifest(path)
+
+
+def test_duplicate_baseline_is_rejected(tmp_path: Path) -> None:
+    text: str = MANIFEST_PATH.read_text()
+    start: int = text.index("[[segment.baseline]]")
+    end: int = text.index("\n[", start + 1)
+    path: Path = tmp_path / "duplicate-baseline.toml"
+    path.write_text(text[:end] + "\n" + text[start:end] + text[end:])
+    with pytest.raises(ValueError, match="duplicate baseline"):
+        load_manifest(path)

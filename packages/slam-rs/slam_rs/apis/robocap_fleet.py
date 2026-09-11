@@ -10,7 +10,7 @@ from typing import Literal
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb, this_temperature_c
 from slam_rs.reference import ReferenceManifest, RobocapSession, load_manifest
 from slam_rs.tracking import SegmentRun, run_robocap
-from slam_rs.trajectory import AteResult, Trajectory, ate, empty_trajectory, nonfinite_position_text, read_trajectory, write_trajectory
+from slam_rs.trajectory import AteResult, ScoringResult, Trajectory, empty_trajectory, read_trajectory, score_trajectory, write_trajectory
 
 BUDGET_15FPS_MS: float = 1e3 / 15.0
 """What one four-camera frameset may cost for the cap to keep up at 15 fps."""
@@ -20,13 +20,7 @@ BUDGET_30FPS_MS: float = 1e3 / 30.0
 
 @dataclass(slots=True, frozen=True)
 class RobocapRow:
-    """One RoboCap session on one machine: what it agreed with, what it cost, how hot it got.
-
-    :attr:`ms_per_frameset` and the two realtime factors are stored rather than
-    derived because ``asdict`` is what the fleet chart reads and a property
-    would drop the columns; whoever builds a row owes it the invariant that all
-    three follow from :attr:`wall_s` and :attr:`framesets`.
-    """
+    """One RoboCap session: agreement, measured costs, and derived runtime budgets."""
 
     machine: Machine
     """The host this ran on, as a fleet row names it."""
@@ -46,12 +40,6 @@ class RobocapRow:
     """Median residual against the reference."""
     wall_s: float
     """Wall time of the feed loop: decode plus ``track``, nothing logged."""
-    ms_per_frameset: float
-    """That wall divided by the framesets fed — what one four-camera frameset costs here."""
-    realtime_factor_15fps: float
-    """The 15 fps budget divided by :attr:`ms_per_frameset`: at or above 1.0 the machine keeps up."""
-    realtime_factor_30fps: float
-    """The same against the 30 fps budget, which is the rate the session was recorded at."""
     peak_rss_mb: float
     """Peak resident set this process reached, which is what a constrained device is judged on."""
     temp_c_before: float | None
@@ -76,6 +64,21 @@ class RobocapRow:
     config_sha256: str
     """SHA-256 of the exact config text the run's estimator was built from."""
 
+    @property
+    def ms_per_frameset(self) -> float:
+        """Wall time divided by the framesets fed, in milliseconds."""
+        return 1e3 * self.wall_s / max(self.framesets, 1)
+
+    @property
+    def realtime_factor_15fps(self) -> float:
+        """The 15 fps budget divided by the measured cost per frameset."""
+        return BUDGET_15FPS_MS / self.ms_per_frameset
+
+    @property
+    def realtime_factor_30fps(self) -> float:
+        """The 30 fps budget divided by the measured cost per frameset."""
+        return BUDGET_30FPS_MS / self.ms_per_frameset
+
     def row(self) -> str:
         """This session as one row of the fleet's runtime-budget table."""
         temps: str = "—" if self.temp_c_before is None or self.temp_c_after is None else f"{self.temp_c_before:.1f} → {self.temp_c_after:.1f}"
@@ -88,6 +91,29 @@ class RobocapRow:
             f"| {self.peak_rss_mb:.0f} | {temps} |"
         )
 
+
+def robocap_json(row: RobocapRow) -> dict[str, object]:
+    """Write the original fleet columns, including derived runtime budgets."""
+    return {
+        "machine": asdict(row.machine),
+        "segment_id": row.segment_id,
+        "framesets": row.framesets,
+        "tracked": row.tracked,
+        "lost": row.lost,
+        "reference_rmse_cm": row.reference_rmse_cm,
+        "reference_max_cm": row.reference_max_cm,
+        "reference_median_cm": row.reference_median_cm,
+        "wall_s": row.wall_s,
+        "ms_per_frameset": row.ms_per_frameset,
+        "realtime_factor_15fps": row.realtime_factor_15fps,
+        "realtime_factor_30fps": row.realtime_factor_30fps,
+        "peak_rss_mb": row.peak_rss_mb,
+        "temp_c_before": row.temp_c_before,
+        "temp_c_after": row.temp_c_after,
+        "cross_platform_ate_cm": row.cross_platform_ate_cm,
+        "unscored": row.unscored,
+        "config_sha256": row.config_sha256,
+    }
 
 @dataclass(slots=True)
 class Config:
@@ -123,31 +149,9 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
         manifest, session, seconds=config.seconds, window_s=config.window_s, profile=config.profile, catalog=config.catalog, gpu=config.gpu
     )
     after: float | None = this_temperature_c()
-    against_reference: AteResult | None = None
-    across: float | None = None
-    # Finiteness before the alignment, not after it: a NaN position reaches
-    # `np.linalg.svd` inside `rigid_alignment` as `LinAlgError`, which the
-    # `ValueError` below does not catch — so a diverged estimator lost the whole
-    # 52.9 s replay to a traceback, with no row, no trajectory and no JSON, on
-    # exactly the machine whose cost this lane exists to measure (S25 review).
-    unscored: str | None = nonfinite_position_text(run.estimate)
-    if unscored is None:
-        try:
-            against_reference = ate(run.estimate, reference) if len(reference) else None
-            across = 100.0 * against_reference.rmse_m if config.reference_csv is not None and against_reference is not None else None
-        except ValueError as association_failed:
-            # 52.9 s of video has already been paid for by here, and the wall,
-            # the budget and the temperatures it bought are the row's reason to
-            # exist — so an estimate that associates with nothing loses its
-            # agreement and not the run. The clause is the sentence `ate`
-            # refused with, tolerance and all; both numbers go, not the half
-            # that may have associated already. `ValueError` and not
-            # `Exception`, so a beartype violation still raises. `main` prints
-            # the row and then exits non-zero.
-            against_reference = None
-            across = None
-            unscored = str(association_failed)
-    ms_per_frameset: float = 1e3 * run.wall_s / max(run.framesets, 1)
+    scoring: ScoringResult = score_trajectory(run.estimate, reference if len(reference) else None)
+    against_reference: AteResult | None = scoring.result
+    across: float | None = 100.0 * against_reference.rmse_m if config.reference_csv is not None and against_reference is not None else None
     return (
         RobocapRow(
             machine=machine,
@@ -159,14 +163,11 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
             reference_max_cm=100.0 * against_reference.max_m if against_reference is not None else math.nan,
             reference_median_cm=100.0 * against_reference.median_m if against_reference is not None else math.nan,
             wall_s=run.wall_s,
-            ms_per_frameset=ms_per_frameset,
-            realtime_factor_15fps=BUDGET_15FPS_MS / ms_per_frameset,
-            realtime_factor_30fps=BUDGET_30FPS_MS / ms_per_frameset,
             peak_rss_mb=this_peak_rss_mb(),
             temp_c_before=before,
             temp_c_after=after,
             cross_platform_ate_cm=across,
-            unscored=unscored,
+            unscored=scoring.unscored,
             config_sha256=run.config_sha256,
         ),
         run.estimate,
@@ -202,7 +203,7 @@ def main(config: Config) -> None:
     # which is why the CSV used to work by accident when the two shared one.
     config.output_json.parent.mkdir(parents=True, exist_ok=True)
     write_trajectory(output_csv, estimate)
-    config.output_json.write_text(json.dumps({"profile": config.profile, **asdict(row)}, indent=2) + "\n")
+    config.output_json.write_text(json.dumps({"profile": config.profile, **robocap_json(row)}, indent=2) + "\n")
     print(row.row())
     print(
         f"{row.tracked} tracked poses -> {output_csv}; {row.reference_rmse_cm:.2f} cm rmse / {row.reference_max_cm:.2f} max / "

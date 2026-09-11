@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 from fixture_types import never
-from tools.dump_clip import Config, main
 
+from slam_rs.apis import dump_clip
+from slam_rs.apis.dump_clip import Config, main
 from slam_rs.reference import SMOKE_SEGMENTS
-from tools import dump_clip
 
 
 def test_an_npz_dump_of_no_framesets_is_refused_before_the_feed_is_opened(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

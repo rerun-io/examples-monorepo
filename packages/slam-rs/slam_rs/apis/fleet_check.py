@@ -7,14 +7,22 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
 
-import pyarrow as pa
-from rerun.catalog import CatalogClient, DatasetEntry
-
 from slam_rs import _core
+from slam_rs.catalog_feed import CatalogSegment, resolve_catalog_segments
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb
-from slam_rs.reference import SMOKE_SEGMENTS, Baseline, ReferenceManifest, ReferenceSegment, Tier, gate_failures, load_manifest
+from slam_rs.reference import (
+    GATE_RATIO,
+    SMOKE_SEGMENTS,
+    Baseline,
+    Measurement,
+    ReferenceManifest,
+    ReferenceSegment,
+    Tier,
+    gate_failures,
+    load_manifest,
+)
 from slam_rs.tracking import SegmentRun, run_segment
-from slam_rs.trajectory import AteResult, ate, extent_m, nonfinite_position_text
+from slam_rs.trajectory import AteResult, ScoringResult, extent_m, nonfinite_position_text, score_trajectory
 
 Lane: TypeAlias = Literal["cpu", "gpu"]
 
@@ -25,40 +33,18 @@ class ClipResult:
 
     segment_id: str
     """Catalog segment id."""
-    framesets: int
-    """Framesets fed."""
-    tracked: int
-    """Estimated poses."""
-    lost: int
-    """Framesets left waiting for IMU."""
-    gt_rmse_cm: float
-    """Ground-truth ATE."""
-    gt_associated: int
-    """Estimate poses associated with ground truth."""
+    measurement: Measurement
+    """Measured inputs to the gate."""
     wall_s: float
     """Replay duration."""
-    median_tracker_ms: float
-    """Median accepted tracker call duration."""
     peak_rss_mb: float
     """Peak process memory."""
-    extent_m: float
-    """Estimated bounding-box diagonal."""
-    truth_extent_m: float
-    """Ground-truth bounding-box diagonal."""
-    poses_finite: bool
-    """Whether estimated positions are finite."""
-    unscored: str | None
-    """Scoring refusal, if any."""
     config_sha256: str
     """Resolved configuration digest."""
+    unscored: str | None
+    """Scoring refusal, if any."""
     baseline: Baseline | None
     """Matching lane/profile reference."""
-    hostname: str
-    """Measuring host."""
-    lane: Lane
-    """Execution lane."""
-    profile: Literal["reference", "fast"]
-    """Configuration overlay."""
 
     @property
     def baseline_gt_rmse_cm(self) -> float | None:
@@ -68,36 +54,17 @@ class ClipResult:
     @property
     def gt_allowed_cm(self) -> float | None:
         """Ten percent above the matching baseline."""
-        return None if self.baseline is None else 1.10 * self.baseline.gt_rmse_cm
+        return None if self.baseline is None else GATE_RATIO * self.baseline.gt_rmse_cm
 
     @property
     def speed_gated(self) -> bool:
         """Only measurements from the same host, lane, and profile gate speed."""
-        return (
-            self.baseline is not None
-            and self.hostname == self.baseline.host
-            and self.lane == self.baseline.lane
-            and self.profile == self.baseline.profile
-        )
+        return self.baseline is not None and self.measurement.hostname == self.baseline.host
 
     @property
     def failures(self) -> tuple[str, ...]:
         """All failed clauses, including any scoring refusal."""
-        failures: list[str] = gate_failures(
-            framesets=self.framesets,
-            tracked=self.tracked,
-            lost=self.lost,
-            associated=self.gt_associated,
-            gt_rmse_cm=self.gt_rmse_cm,
-            extent_m=self.extent_m,
-            truth_extent_m=self.truth_extent_m,
-            poses_finite=self.poses_finite,
-            baseline=self.baseline,
-            median_tracker_ms=self.median_tracker_ms,
-            hostname=self.hostname,
-            lane=self.lane,
-            profile=self.profile,
-        )
+        failures: list[str] = gate_failures(self.measurement, self.baseline)
         if self.unscored:
             failures.append(f"scoring: {self.unscored}")
         return tuple(failures)
@@ -110,17 +77,7 @@ class ClipResult:
     def row(self, machine: Machine) -> str:
         """One printable measurement row."""
         speed: str = "speed gated" if self.speed_gated else "speed not gated on this host"
-        return f"| {machine.hostname} | {self.segment_id} | {self.framesets}/{self.tracked}/{self.lost} | GT {self.gt_rmse_cm:.3f} cm | tracker {self.median_tracker_ms:.3f} ms; {speed} | {self.verdict} |"
-
-
-def check_scoring_inputs(manifest: ReferenceManifest, segment: ReferenceSegment, catalog: str | None = None) -> None:
-    """Require the catalog segment and its ground-truth layer before replay."""
-    dataset: DatasetEntry = CatalogClient(catalog or manifest.catalog_url).get_dataset(segment.dataset_name)
-    if segment.segment_id not in dataset.segment_ids():
-        raise ValueError(f"{segment.segment_id}: absent from catalog")
-    layers: pa.Table = dataset.manifest().to_arrow_table().select(["rerun_segment_id", "rerun_layer_name"])
-    if not any(row["rerun_segment_id"] == segment.segment_id and row["rerun_layer_name"] == "gt" for row in layers.to_pylist()):
-        raise ValueError(f"{segment.segment_id}: ground-truth layer absent")
+        return f"| {machine.hostname} | {self.segment_id} | {self.measurement.framesets}/{self.measurement.tracked}/{self.measurement.lost} | GT {self.measurement.gt_rmse_cm:.3f} cm | tracker {self.measurement.median_tracker_ms:.3f} ms; {speed} | {self.verdict} |"
 
 
 def measure(
@@ -129,61 +86,60 @@ def measure(
     gpu: bool = False,
     profile: Literal["reference", "fast"] = "fast",
     catalog: str | None = None,
+    source: CatalogSegment | None = None,
 ) -> ClipResult:
     """Replay a catalog segment and associate estimates with ground truth."""
-    check_scoring_inputs(manifest, segment, catalog)
-    run: SegmentRun = run_segment(manifest, segment, gpu=gpu, profile=profile, catalog=catalog)
-    against_gt: AteResult | None = None
-    unscored: str | None = nonfinite_position_text(run.estimate)
-    if unscored is None:
-        try:
-            against_gt = ate(run.estimate, run.ground_truth)
-        except ValueError as error:
-            unscored = str(error)
+    if source is None:
+        source = resolve_catalog_segments((CatalogSegment(catalog or manifest.catalog_url, segment.dataset_name, segment.segment_id),), require_ground_truth=True)[0]
+    if (source.dataset_name, source.segment_id) != (segment.dataset_name, segment.segment_id):
+        raise ValueError(f"source {source.dataset_name}/{source.segment_id} does not match segment {segment.dataset_name}/{segment.segment_id}")
+    if not source.has_ground_truth:
+        raise ValueError(f"{segment.segment_id}: ground-truth layer absent")
+    run: SegmentRun = run_segment(manifest, segment, gpu=gpu, profile=profile, source=source)
+    scoring: ScoringResult = score_trajectory(run.estimate, run.ground_truth)
+    against_gt: AteResult | None = scoring.result
     lane: Lane = this_lane(gpu)
-    baseline: Baseline | None = next((row for row in segment.baseline if row.profile == profile and row.lane == lane), None)
+    baseline: Baseline | None = segment.baseline_for(lane, profile)
     return ClipResult(
         segment_id=segment.segment_id,
-        framesets=run.framesets,
-        tracked=len(run.estimate),
-        lost=run.lost,
-        gt_rmse_cm=100.0 * against_gt.rmse_m if against_gt else math.nan,
-        gt_associated=against_gt.n_associated if against_gt else 0,
+        measurement=Measurement(
+            framesets=run.framesets,
+            tracked=len(run.estimate),
+            lost=run.lost,
+            associated=against_gt.n_associated if against_gt else 0,
+            gt_rmse_cm=100.0 * against_gt.rmse_m if against_gt else math.nan,
+            extent_m=extent_m(run.estimate),
+            truth_extent_m=extent_m(run.ground_truth),
+            poses_finite=nonfinite_position_text(run.estimate) is None,
+            median_tracker_ms=run.median_tracker_ms,
+            hostname=this_machine().hostname,
+            lane=lane,
+            profile=profile,
+        ),
         wall_s=run.wall_s,
-        median_tracker_ms=run.median_tracker_ms,
         peak_rss_mb=this_peak_rss_mb(),
-        extent_m=extent_m(run.estimate),
-        truth_extent_m=extent_m(run.ground_truth),
-        poses_finite=nonfinite_position_text(run.estimate) is None,
-        unscored=unscored,
         config_sha256=run.config_sha256,
+        unscored=scoring.unscored,
         baseline=baseline,
-        hostname=this_machine().hostname,
-        lane=lane,
-        profile=profile,
     )
 
 
-CLIP_JSON_KEYS: tuple[str, ...] = (
-    "segment_id",
-    "framesets",
-    "tracked",
-    "lost",
-    "gt_rmse_cm",
-    "wall_s",
-    "peak_rss_mb",
-    "gt_allowed_cm",
-    "baseline_gt_rmse_cm",
-    "median_tracker_ms",
-    "speed_gated",
-    "verdict",
-)
-
-
 def clip_json(clip: ClipResult) -> dict[str, object]:
-    """The fleet JSON measurement contract."""
-    return {key: getattr(clip, key) for key in CLIP_JSON_KEYS}
-
+    """The fleet JSON measurement contract, in its original field order."""
+    return {
+        "segment_id": clip.segment_id,
+        "framesets": clip.measurement.framesets,
+        "tracked": clip.measurement.tracked,
+        "lost": clip.measurement.lost,
+        "gt_rmse_cm": clip.measurement.gt_rmse_cm,
+        "wall_s": clip.wall_s,
+        "peak_rss_mb": clip.peak_rss_mb,
+        "gt_allowed_cm": clip.gt_allowed_cm,
+        "baseline_gt_rmse_cm": clip.baseline_gt_rmse_cm,
+        "median_tracker_ms": clip.measurement.median_tracker_ms,
+        "speed_gated": clip.speed_gated,
+        "verdict": clip.verdict,
+    }
 
 def this_lane(gpu: bool) -> Lane:
     """Refuse unsupported GPU requests before reading data."""
@@ -219,15 +175,17 @@ def main(config: Config) -> None:
     )
     if not segments:
         raise ValueError("--segments named no clip")
-    for segment in segments:
-        check_scoring_inputs(manifest, segment, config.catalog)
+    sources: tuple[CatalogSegment, ...] = resolve_catalog_segments(
+        tuple(CatalogSegment(config.catalog or manifest.catalog_url, segment.dataset_name, segment.segment_id) for segment in segments),
+        require_ground_truth=True,
+    )
     machine: Machine = this_machine()
     core_sha256: str = hashlib.sha256(Path(_core.__file__).read_bytes()).hexdigest()
     results: list[ClipResult] = []
     config_digests: dict[str, str] = {}
     config.output_json.parent.mkdir(parents=True, exist_ok=True)
-    for segment in segments:
-        result: ClipResult = measure(manifest, segment, config.gpu, config.profile, config.catalog)
+    for segment, source in zip(segments, sources, strict=True):
+        result: ClipResult = measure(manifest, segment, config.gpu, config.profile, source=source)
         if segment.dataset_name in config_digests and config_digests[segment.dataset_name] != result.config_sha256:
             raise RuntimeError(f"{segment.dataset_name}: configuration changed during replay")
         config_digests[segment.dataset_name] = result.config_sha256

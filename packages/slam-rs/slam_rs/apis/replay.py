@@ -189,7 +189,7 @@ def main(config: Config) -> None:
         if config.stage == "frontend":
             stage = FrontendStage(
                 flow=_core.OpticalFlow(_core.Calibration.from_catalog(feed.cameras, feed.imu), vio_config),
-                logger=FrontendLogger(len(feed.cameras), feed.segment_id),
+                logger=FrontendLogger(len(feed.cameras)),
             )
             rr.send_blueprint(frontend_blueprint(feed.cameras))
         elif config.stage == "vio":
@@ -223,8 +223,8 @@ def main(config: Config) -> None:
         if len(estimate) == 0:
             print("no ATE: the estimator reported no tracked pose")
             return
-        for name, reference in (("ground truth", stage.logger.ground_truth),):
-            if len(reference) == 0:
-                continue
-            print(f"vs {name}, {coverage(reference, estimate):.1%} of its span covered")
-            print(ate(estimate, reference).summary())
+        reference: Trajectory = stage.logger.ground_truth
+        if len(reference) == 0:
+            return
+        print(f"vs ground truth, {coverage(reference, estimate):.1%} of its span covered")
+        print(ate(estimate, reference).summary())

@@ -85,8 +85,6 @@ class FrontendLogger:
 
     camera_count: int
     """Cameras on the rig."""
-    source_segment: str
-    """Segment id the replayed recording carries."""
     trails: list[dict[int, list[tuple[float, float]]]] = field(init=False)
     """Per camera, the last :data:`TRAIL_LENGTH` positions of every live track."""
     def __post_init__(self) -> None:
