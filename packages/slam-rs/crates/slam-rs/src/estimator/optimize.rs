@@ -526,14 +526,7 @@ pub(super) fn damped_solve<S: LieScalar>(
 /// ordering but has no state is [`EstimatorError::ImuFactorStateMissing`],
 /// where C++ throws out of `states.at()`.
 ///
-/// **What is not Eigen's order.** `res.transpose() * cov_inv * res` is a
-/// `1×9 · 9×9 · 9×1` chain that Eigen dispatches through `gemv`, and the two
-/// bias terms are `1×3 · diag · 3×1` coefficient-based products. The bias terms
-/// are ported exactly — Eigen's small coefficient-based product is the left fold
-/// written below (`ProductEvaluators.h`, `etor_product_coeff_impl` recurses on
-/// `UnrollingIndex − 1` and adds the last term) — while the 9-dimensional chain
-/// is a plain pair of left folds where Eigen's kernel splits by packet. The
-/// oracle reports the three components separately for exactly this reason.
+/// Each quadratic form uses fixed-order folds over its residual coefficients.
 fn compute_imu_error<S: LieScalar>(
     aom: &AbsOrderMap,
     states: &BTreeMap<FrameId, PoseVelBiasStateWithLin<S>>,
@@ -582,8 +575,7 @@ fn compute_imu_error<S: LieScalar>(
             &start.bias_accel,
         );
         let cov_inv: Matrix9<S> = meas.get_cov_inv();
-        // `(0.5 · resᵀ) · cov_inv · res`, left to right as Eigen's expression
-        // tree evaluates it.
+        // Compute half the residual quadratic form.
         let mut row: [S; 9] = [S::zero(); 9];
         for (j, slot) in row.iter_mut().enumerate() {
             let mut acc: S = S::zero();

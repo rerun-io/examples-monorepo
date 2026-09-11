@@ -62,13 +62,8 @@ pub trait LieScalar: RealField + Copy {
         Self::SOPHUS_EPSILON.sqrt()
     }
 
-    /// `Eigen::NumTraits<Scalar>::dummy_precision()`: `1e-12` in double and
-    /// `1e-5` in float (`Eigen/src/Core/NumTraits.h`).
-    ///
-    /// Eigen's own fuzzy-comparison tolerance, several orders coarser than the
-    /// machine epsilon `RealField::default_epsilon` reports. It decides the
-    /// anti-parallel branch of `Quaternion::setFromTwoVectors`, which is how
-    /// basalt initialises orientation from the first accelerometer sample.
+    /// Near-antiparallel tolerance: 1e-12 for f64 and 1e-5 for f32.
+    /// This is coarser than machine epsilon to stabilize gravity initialization.
     fn eigen_dummy_precision() -> Self;
 
     /// `std::numeric_limits<Scalar>::min()`: the smallest positive normal value.
@@ -116,11 +111,6 @@ pub trait LieScalar: RealField + Copy {
     /// The 3x3 rotation matrix, `SO3F32::matrix` or `SO3F64::matrix`, **column
     /// major**.
     ///
-    /// `glam`'s `from_quat` is Eigen's `toRotationMatrix` coefficient for
-    /// coefficient — `1 - (yy + zz)` on the diagonal from the doubled
-    /// components, the same products off it — so this is bit-identical to the
-    /// port it replaced, and `imu_oracle.rs` still asserts which axis a
-    /// rank-deficient covariance puts its weight on exactly.
     fn so3_matrix(quaternion_xyzw: &[Self; 4]) -> [Self; 9];
 
     /// The group inverse, `SO3F32::inverse` or `SO3F64::inverse`: the conjugate
@@ -239,13 +229,8 @@ pub(crate) fn c<S: LieScalar>(value: f64) -> S {
     S::from_literal(value)
 }
 
-/// `numext::maxi(a, b)` (`Core/MathFunctions.h`), which is what `cwiseMax`
-/// applies coefficient by coefficient.
-///
-/// `(a < b ? b : a)`, so a NaN on the left survives and `f32::max`'s
-/// NaN-suppressing behaviour is wrong here. `sqrt_keypoint_vio.cpp:1415` sends
-/// the result straight into the damped diagonal, so a NaN that Eigen keeps and
-/// Rust would drop changes whether the solve retries.
+/// Return the larger value, preserving a NaN on the left.
+/// The damped solver must retry on invalid input rather than suppress its NaN.
 pub(crate) fn eigen_maxi<S: LieScalar>(a: S, b: S) -> S {
     if a < b { b } else { a }
 }
@@ -433,24 +418,6 @@ impl<S: LieScalar> So3<S> {
     /// The rotation as a 3x3 matrix, `kornia_algebra::lie::SO3F32::matrix` /
     /// `SO3F64::matrix`.
     ///
-    /// `Sophus::SO3::matrix()` is `unit_quaternion().toRotationMatrix()`
-    /// (`Sophus/sophus/so3.hpp:257`), i.e. Eigen's
-    /// `QuaternionBase::toRotationMatrix`
-    /// (`thirdparty/basalt-headers/thirdparty/eigen/Eigen/src/Geometry/Quaternion.h:646-678`).
-    /// Upstream's is `glam`'s `Mat3::from_quat`, which is **that formula
-    /// coefficient for coefficient**: `1 - (yy + zz)` on the diagonal from the
-    /// doubled components, the same products off it. So this is bit-identical to
-    /// the port it replaced, and it is worth saying why that matters here rather
-    /// than treating it as luck.
-    ///
-    /// nalgebra's `to_rotation_matrix` builds each diagonal entry as
-    /// `ww + ii - jj - kk` and associates the off-diagonal triple products the
-    /// other way (`(x·y)·2` against `(2y)·x`). That is enough to move a
-    /// cancellation residue across zero: on one 5 ms `f32` IMU sample the
-    /// preintegrated covariance is rank deficient in a different *direction*
-    /// under the two roundings, and the whitening then puts its `1.15e18` weight
-    /// on a different axis (`crates/slam-rs/tests/imu_oracle.rs`,
-    /// `rotating_singular_f32`, which still asserts the axis exactly).
     pub fn matrix(&self) -> Matrix3<S> {
         // Both `glam` and nalgebra store column major, so the array transfers
         // without a transpose.
@@ -492,18 +459,7 @@ impl<S: LieScalar> std::ops::Mul<Vector3<S>> for So3<S> {
 
     /// Rotate a point, `SO3F32 * Vec3AF32` / `SO3F64 * Vec3F64`.
     ///
-    /// `Sophus::SO3::operator*(Point)` (`Sophus/sophus/so3.hpp:408-417`) writes
-    /// the rotation out as `uv = 2 (q.vec x p); p + q.w uv + q.vec x uv`, and
-    /// the port reproduced that association because it reaches a threshold:
-    /// `computeRelPose` rotates the baseline (`ba_utils.h:50`) into the relative
-    /// pose the DLT triangulates from, and basalt accepts a landmark only when
-    /// the result satisfies `0 < inv_dist < 3` (`sqrt_keypoint_vio.cpp:534`).
-    /// That gate is still there and the association is no longer the C++'s:
-    /// upstream is `glam`'s `p (w² - b·b) + b (2 (p·b)) + (b x p) 2w`, which is
-    /// the same rotation for a unit quaternion and a different last bit. What
-    /// decides a borderline landmark now is the ten-clip ATE gate, not this
-    /// ulp — and `triangulate` itself no longer reproduces Eigen either (S33
-    /// item 1).
+    /// Rotate a point with the scalar-specific kornia quaternion action.
     fn mul(self, rhs: Vector3<S>) -> Vector3<S> {
         Vector3::from(S::so3_act(&self.quaternion_xyzw(), &[rhs.x, rhs.y, rhs.z]))
     }
@@ -614,10 +570,7 @@ impl<S: LieScalar> Se3<S> {
     /// The homogeneous 4x4 matrix, `Sophus::SE3::matrix()`
     /// (`Sophus/sophus/se3.hpp:275-280`).
     ///
-    /// The rotation block goes through [`So3::matrix`], i.e. Eigen's
-    /// `toRotationMatrix` operation order (decision D44), because this matrix
-    /// is what the reprojection residual multiplies its landmark by
-    /// (`ba_utils.h:94`).
+    /// The rotation block uses [`So3::matrix`]; the final column is translation.
     pub fn matrix(&self) -> Matrix4<S> {
         let mut res: Matrix4<S> = Matrix4::zeros();
         res.fixed_view_mut::<3, 3>(0, 0)
@@ -752,24 +705,8 @@ pub fn left_jacobian_inv_so3<S: LieScalar>(phi: &Vector3<S>) -> Matrix3<S> {
 /// form on `(0, pi)`, a zeroth-order expansion at pi where `sin` vanishes, and
 /// the Taylor value `1/12` at zero.
 ///
-/// Two details are about arithmetic width rather than mathematics, and both
-/// change which branch an `f32` input lands in:
-///
-/// * **The pi comparison happens in `f64`.** C++ writes
-///   `phi_norm < M_PI - Sophus::Constants<Scalar>::epsilonSqrt()`
-///   (`sophus_utils.hpp:202`). `M_PI` is a `double`, so the whole comparison is
-///   promoted to `double` even when `Scalar` is `float`. Doing it in `f32`
-///   moves the threshold by about 2e-8, and the single `f32` value
-///   `3.13843035697937` — which is exactly `pi_f32 - epsilonSqrt_f32` — then
-///   takes the pi branch where basalt takes the closed form, changing the
-///   result from 0.0024845 to 0.0020120.
-/// * **`M_PI * M_PI` is a `double` product** that Eigen rounds to `Scalar`
-///   only when it divides (`sophus_utils.hpp:214`). Squaring `pi_f32` instead
-///   gives a different last bit.
-///
-/// The matrix is divided rather than multiplied by a reciprocal in the two
-/// constant branches, because that is what the C++ does and the two differ by
-/// an ulp in `f32`.
+/// Evaluate the pi threshold and pi squared in f64 before scalar conversion.
+/// The constant branches divide the matrix directly by their denominator.
 fn inverse_jacobian_second_order_term<S: LieScalar>(
     phi_hat2: &Matrix3<S>,
     phi_norm2: S,

@@ -134,10 +134,8 @@ struct BlockObservation {
 /// num_cols    = res_idx + 1, asserted % 4 == 0 (:92-96)
 /// ```
 ///
-/// **Storage order.** C++'s buffer is `Eigen::RowMajor` (`:530`); nalgebra's
-/// `DMatrix` is column major. Nothing here depends on the layout — every loop
-/// is written out — but it is why `makeHouseholder`'s reduction is a sequential
-/// fold rather than a vectorised one (see `crate::qr`).
+/// Storage is column major. Each reflection updates views of the existing
+/// matrix using a preallocated unit-axis buffer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LandmarkBlock<S: LieScalar> {
     /// `storage` (`:530`): `[ J_p | pad | J_l | r ]`, `num_rows` x `num_cols`.
@@ -532,8 +530,6 @@ impl<S: LieScalar> LandmarkBlock<S> {
                 self.lm_idx + k,
                 k,
                 remaining_rows,
-                // `storage` stands for an `Eigen::RowMajor` matrix (`:530`), so
-                // its columns are strided and reduce sequentially.
                 &mut self.work_essential,
             );
             apply_householder_on_the_left(
@@ -617,10 +613,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
             }
         }
 
-        // `abs(Q1Jl.determinant())` (`:263`). `TriangularView::determinant()` is
-        // `m_matrix.diagonal().prod()`, and that diagonal is strided, so Eigen
-        // takes the scalar unroller's `Length / 2` split — `d0 * (d1 * d2)` — in
-        // both precisions (`Redux.h:98-108`).
+        // The product of the triangular diagonal detects a singular landmark.
         let det: S = (q1jl[(0, 0)] * (q1jl[(1, 1)] * q1jl[(2, 2)])).abs();
         if det == S::zero() {
             // `:264-266`, trap 11: skip this landmark, keep the rest.
@@ -650,9 +643,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
             rhs[r] = self.storage[(r, self.res_idx)] + acc;
         }
 
-        // `-Q1Jl.solve(...)`: the upper-triangular back substitution, in Eigen's
-        // order — the dot product of the row's tail against the already solved
-        // tail of the solution, then one division.
+        // Back-substitute from the last row, then negate the solution.
         let mut inc: Vector3<S> = Vector3::zeros();
         for r in (0..3usize).rev() {
             let mut acc: S = S::zero();
@@ -768,11 +759,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
     /// sum over the observed columns only, for the one caller that owns its
     /// destination and can prove the rest is the identity.
     ///
-    /// Both sums run over the block's rows in increasing order, one output
-    /// coefficient at a time. Eigen calls its general matrix product here, whose
-    /// blocking may associate a long sum differently; over `num_rows - 3` rows —
-    /// at most a few tens — the difference is at the last bits and the fixture
-    /// measures it.
+    /// Sum each coefficient over rows in increasing order.
     pub fn add_dense_h_b(
         &self,
         h: &mut DMatrix<S>,

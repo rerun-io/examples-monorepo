@@ -1517,18 +1517,14 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                     let t_i0_i1: Se3<S> = t_i0_inv * other_pose;
                     let t_0_1: Se3<S> = t_i_c0_inv * t_i0_i1 * self.ba.calib.t_i_c[tcido.cam_id];
 
-                    // `:524`: `squaredNorm()` on a 3-vector is Eigen's
-                    // three-coefficient reduction, whose order differs between
-                    // the precisions (D47).
+                    // Require enough squared translation baseline to triangulate.
                     let t: Vector3<S> = t_0_1.translation;
                     let baseline2: S = t[0] * t[0] + t[1] * t[1] + t[2] * t[2];
                     if baseline2 < min_triang_distance2 {
                         continue;
                     }
 
-                    // `:526-543`. A refused DLT skips this pair, as an
-                    // unprojection the camera rejects does: where basalt reads
-                    // Eigen's uninitialized `V`, the port has no value at all.
+                    // A refused DLT skips this observation pair.
                     let Some(triangulated): Option<Vector4<S>> = triangulate(
                         &Vector3::new(p0_3d[0], p0_3d[1], p0_3d[2]),
                         &Vector3::new(p1_3d[0], p1_3d[1], p1_3d[2]),

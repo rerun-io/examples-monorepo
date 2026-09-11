@@ -63,9 +63,7 @@
 //!   writes `state1.t_ns`, so the frontend's long-lived `predicted_state` keeps
 //!   whatever it held before (`frame_to_frame_optical_flow.h:149`). The port
 //!   returns a fresh state and fills in `state0.t_ns + dt_ns`.
-//! * **`gravity_from_first_accel` takes the null axis in closed form** rather
-//!   than through Eigen's `JacobiSVD`; the difference, and its bound, are on
-//!   that function.
+//! * **Gravity initialization uses a closed-form cross-product axis.**
 //! * **Asserts become typed errors or tests.** `propagateState` asserts
 //!   `data.t_ns > curr_state.t_ns` (`preintegration.h:79-80`); here that is
 //!   [`ImuError::NonMonotonicSample`] (decision D32). The residual's
@@ -755,10 +753,7 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
         let mut mat: Matrix9<S> = self.cov;
         let transpositions: [usize; POSE_VEL_SIZE] = ldlt_in_place(&mut mat);
 
-        // `:306` and `:309`: start from the identity, then apply the
-        // transpositions from the left in ascending order, which is what
-        // `transpositionsP() * I` evaluates to
-        // (`Eigen/src/Core/ProductEvaluators.h:1193-1200`).
+        // Apply the pivot permutation to the identity before solving with L.
         let mut m: Matrix9<S> = Matrix9::identity();
         for (k, pivot) in transpositions.iter().copied().enumerate() {
             if pivot != k {
@@ -807,57 +802,10 @@ static ANTIPARALLEL_WARNING: std::sync::Once = std::sync::Once::new();
 /// The initial orientation from one accelerometer sample
 /// (`src/vi_estimator/sqrt_keypoint_vio.cpp:277-278`).
 ///
-/// basalt zeroes the translation and sets the rotation to
-/// `Eigen::Quaternion::FromTwoVectors(data->accel, Vec3::UnitZ())`, so the
-/// measured specific force — which points "up" in the rig frame at rest — is
-/// rotated onto the world `+Z` axis and gravity ends up along `-Z`, matching
-/// [`gravity`]. Only roll and pitch are set; yaw is unobservable.
-///
-/// Ported from Eigen's `Quaternion::setFromTwoVectors`
-/// (`thirdparty/basalt-headers/thirdparty/eigen/Eigen/src/Geometry/Quaternion.h:686-726`),
-/// including the near-antiparallel branch at `:707-718`, which is reachable: a
-/// rig held upside down at initialisation reports `accel ≈ (0, 0, -9.81)`.
-///
-/// That branch needs an axis orthogonal to **both** input directions — Eigen
-/// solves `x·v0 = 0, x·v1 = 0` with a 2x3 `JacobiSVD` and takes `V.col(2)`
-/// (`:709-712`). The port takes `normalize(v0 × v1)`, which is the same null
-/// vector in closed form and, because `v1` is always `UnitZ` here, is computed
-/// without cancellation: `v0 × UnitZ = (v0.y, -v0.x, 0)`. An axis orthogonal to
-/// `v0` alone — what an earlier revision of this port used — leaves a real tilt
-/// error, not just a yaw offset.
-///
-/// # An accepted deviation, not a fixed one
-///
-/// `V.col(2)` is a null vector, so its **sign is arbitrary**, and Eigen's
-/// `JacobiSVD` does not pick the same one the closed form does. Over the probe's
-/// 64-point near-antiparallel sweep the two disagree on the sign in 17 of 64
-/// `f64` cases and 37 of 64 `f32` cases, with no pattern in the inputs — the
-/// choice comes out of the SVD's internal ordering, not out of the data.
-///
-/// When the signs disagree the two rotations differ by twice the branch's
-/// deficit angle, bounded by `2·sqrt(2·dummy_precision)`: **2.83e-6 rad in
-/// `f64`, 8.94e-3 rad in `f32`**. Measured worst cases on the sweep are 9.9e-7
-/// and 9.8e-4; a second sweep of random inputs reached 2.3e-6 and 2.2e-3.
-/// It is *Eigen* that is the inaccurate side: over the sweep its own tilt error
-/// reaches 9.9e-7 (`f64`) and 9.9e-4 (`f32`) where the closed form stays at
-/// 1.4e-9 and 3.2e-4. That is still a parity gap against the C++ reference, and
-/// the port does not hide it: the branch logs a warning the first time it fires,
-/// and `crates/slam-rs/tests/imu_oracle.rs`
-/// (`gravity_init_deviation_from_eigen_stays_within_its_bound`) pins the bound
-/// and the measured numbers against Eigen's own.
-///
-/// Reproducing Eigen exactly needs its `JacobiSVD` for a 2x3 with
-/// `ComputeFullV`, which for `rows < cols` runs a `ColPivHouseholderQR`
-/// preconditioner on the adjoint before the two-sided Jacobi sweep
-/// (`Eigen/src/SVD/JacobiSVD.h:36-44`, `:194-253`) — several hundred lines of
-/// Householder, pivoting and sign conventions that would each have to be
-/// bit-exact. That was assessed and deliberately not attempted; the branch only
-/// fires when a rig initialises within milliradians of upside down, and it sets
-/// yaw plus a bounded fraction of a degree of roll and pitch that the estimator
-/// re-estimates immediately.
-///
-/// Returns [`So3::identity`] for a zero or non-finite sample, which has no
-/// direction to align.
+/// Align measured specific force with world +Z. Only roll and pitch are
+/// observable. Near antiparallel inputs use a cross-product axis orthogonal
+/// to both directions; for exactly antiparallel inputs an arbitrary orthogonal
+/// axis resolves the unobservable yaw. Zero and non-finite samples return identity.
 pub fn gravity_from_first_accel<S: LieScalar>(accel: &Vector3<S>) -> So3<S> {
     let norm: S = accel.norm();
     if !norm.is_finite() || norm <= S::zero() {
@@ -868,8 +816,7 @@ pub fn gravity_from_first_accel<S: LieScalar>(accel: &Vector3<S>) -> So3<S> {
     let dot: S = v1.dot(&v0); // `:695`
 
     if dot < c::<S>(-1.0) + S::eigen_dummy_precision() {
-        // `:707-717`. This is the branch that is not bit-parity with Eigen; say
-        // so once, so a trajectory that starts here is explainable later.
+        // Report this ambiguous initial orientation once per process.
         ANTIPARALLEL_WARNING.call_once(|| {
             log::warn!(
                 "gravity initialisation took the near-antiparallel branch: the rig started \
@@ -887,8 +834,7 @@ pub fn gravity_from_first_accel<S: LieScalar>(accel: &Vector3<S>) -> So3<S> {
             axis.y * vector_scale,
             axis.z * vector_scale,
         );
-        // Eigen leaves the coefficients as computed; normalizing only removes
-        // the rounding of `sqrt(w2)² + (1 - w2)` against one.
+        // Normalize to remove rounding in the squared quaternion norm.
         return So3::from_unit_quaternion(nalgebra::UnitQuaternion::new_normalize(quaternion));
     }
 
@@ -905,15 +851,8 @@ pub fn gravity_from_first_accel<S: LieScalar>(accel: &Vector3<S>) -> So3<S> {
     So3::from_unit_quaternion(nalgebra::UnitQuaternion::new_normalize(quaternion))
 }
 
-/// A unit vector orthogonal to both `v0` and `v1`, Eigen's `V.col(2)` in closed
-/// form (`Quaternion.h:709-712`).
-///
-/// `v0 × v1` is the null vector of `[v0ᵀ; v1ᵀ]` whenever the two are
-/// independent. They coincide up to sign only when the rig is *exactly* upside
-/// down; the cross product then vanishes and the null space is the whole plane
-/// orthogonal to `v1`, of which Eigen's SVD returns `UnitX` for `v1 = UnitZ`.
-/// The fallback picks the same vector: the canonical axis with the smallest
-/// component in `v1`, projected off `v1`.
+/// A unit vector orthogonal to both inputs, using their cross product.
+/// For parallel inputs, project the least-aligned canonical axis off v1.
 fn axis_orthogonal_to_both<S: LieScalar>(v0: &Vector3<S>, v1: &Vector3<S>) -> Vector3<S> {
     let cross: Vector3<S> = v0.cross(v1);
     let norm: S = cross.norm();
@@ -1003,9 +942,7 @@ fn ldlt_in_place<S: LieScalar>(mat: &mut Matrix9<S>) -> [usize; POSE_VEL_SIZE] {
             }
         }
 
-        // `:345-346`. Eigen's cutoff is exactly zero, not an epsilon: LDLT is
-        // not rank-revealing, and the only thing this guard prevents is an
-        // infinity or a NaN (`:341-344`).
+        // Guard exact zero to avoid division by zero in the column update.
         let real_akk: S = mat[(k, k)];
         let pivot_is_valid: bool = real_akk.abs() > S::zero();
 
@@ -1019,7 +956,6 @@ fn ldlt_in_place<S: LieScalar>(mat: &mut Matrix9<S>) -> [usize; POSE_VEL_SIZE] {
             return transpositions;
         }
 
-        // `:359-360`. Eigen divides; it does not multiply by a reciprocal.
         if rs > 0 && pivot_is_valid {
             for i in (k + 1)..size {
                 mat[(i, k)] /= real_akk;

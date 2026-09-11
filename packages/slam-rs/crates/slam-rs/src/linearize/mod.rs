@@ -51,17 +51,8 @@ use crate::types::{CamId, FrameId, LandmarkId};
 /// One Householder reflection: reduce `storage.col(col).segment(start, len)` and
 /// apply the reflection to every column of `storage.block(start, 0, len, ncols)`.
 ///
-/// This is one step of `performQRHouseholder`
-/// (`landmark_block_abs_dynamic.hpp:445-453`), with Eigen's `makeHouseholder`
-/// and `applyHouseholderOnTheLeft` arithmetic ported rather than nalgebra's
-/// (see `crate::qr` for why). It is a **test-facing** primitive: the
-/// only caller is `tests/linearize_reference.rs`, where the ported `test_qr.cpp`
-/// builds a full QR out of it. (`marg/helper.rs` drives the same Eigen
-/// primitive over a wider matrix, but calls `make_householder` and
-/// `apply_householder_on_the_left_block` directly.)
-///
-/// Allocates two scratch vectors per call; the landmark block preallocates
-/// instead, because it runs three of these per landmark per iteration.
+/// Uses nalgebra's unit-axis Householder primitive. This public test seam
+/// allocates scratch; landmark blocks reuse their preallocated axis buffer.
 pub fn reflect_column<S: LieScalar>(
     storage: &mut DMatrix<S>,
     col: usize,
@@ -91,8 +82,6 @@ pub fn reflect_column<S: LieScalar>(
         return Ok(());
     }
     let mut essential: Vec<S> = vec![S::zero(); len];
-    // `performQRHouseholder`'s own reduction: the landmark block's `storage` is
-    // `Eigen::RowMajor`, so the column is strided (see `crate::qr`).
     let (tau, _beta) = crate::qr::make_householder(storage, col, start, len, &mut essential);
     crate::qr::apply_householder_on_the_left(storage, start, len, &essential, tau);
     Ok(())

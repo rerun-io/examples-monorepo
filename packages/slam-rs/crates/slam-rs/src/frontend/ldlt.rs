@@ -115,7 +115,7 @@ fn ldlt_solve3(mat: &Matrix3<f32>, transpositions: &[usize; 3], rhs_and_result: 
         }
     }
 
-    // is `numeric_limits<RealScalar>::min()`, the smallest positive normal.
+    // Zero subnormal pivots instead of dividing by them.
     let tolerance: f32 = f32::MIN_POSITIVE;
     for i in 0..SIZE {
         let d: f32 = mat[(i, i)];

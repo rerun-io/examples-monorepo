@@ -105,9 +105,7 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
         });
     }
 
-    // `:256-278`: **marg first**, then keep, and `Q2Jp.applyOnTheRight(p)`,
-    // which is `new.col(i) = old.col(indices[i])`
-    // (`ProductEvaluators.h:1150-1160`, `Side == OnTheRight`).
+    // Permute marginalized columns first: new column i is old column indices[i].
     let indices: Vec<usize> = idx_to_marg
         .iter()
         .chain(idx_to_keep.iter())
@@ -120,8 +118,7 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
     let rank_threshold: S = S::default_epsilon().sqrt();
     let mut marg_rank: usize = 0;
     let mut total_rank: usize = 0;
-    // `tempVector.resize(cols + 1)` (`:290`): one scratch for the block and one
-    // slot past the end for the right-hand side.
+    // Reuse a full unit-axis buffer for every reflection.
     let mut essential: Vec<S> = vec![S::zero(); rows];
 
     for k in 0..cols {
