@@ -1,6 +1,6 @@
 slam-rs JSON inputs: dataset VIO configurations and RoboCap calibration.
 
-Each dataset in ../reference_segments.toml selects one configuration. The
+Each dataset in ../gate.toml selects one configuration. The
 reference profile leaves it unchanged. The default fast profile applies the
 three keys in profiles/fast.json. tests/test_config_profiles.py checks overlays
 and rejects unknown keys. tests/test_reference.py checks that every named

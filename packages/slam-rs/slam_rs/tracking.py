@@ -193,7 +193,7 @@ def run_segment(
     """Replay an MSD segment from the catalog with its dataset configuration."""
     source = source or CatalogSegment(catalog or manifest.catalog_url, segment.dataset_name, segment.segment_id)
     feed: SegmentFeed
-    with open_segment(source, segment.imu) as feed:
+    with open_segment(source, manifest.dataset(segment.dataset_name).imu) as feed:
         flow: _core.VioConfig
         config_text: str
         flow, config_text = resolved_flow_config(manifest, segment, profile=profile)

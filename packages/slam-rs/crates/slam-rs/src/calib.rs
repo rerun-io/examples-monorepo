@@ -644,7 +644,7 @@ pub struct CameraParts<S> {
 ///
 /// The catalog carries intrinsics and extrinsics but not the noise model, the
 /// update rate or the time offset, which is why these five numbers are frozen
-/// in `reference_segments.toml` (decision D29).
+/// in `gate.toml` (decision D29).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImuParts<S> {
     /// Nominal update rate, Hz.

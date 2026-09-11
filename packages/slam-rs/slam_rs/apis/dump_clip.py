@@ -37,7 +37,7 @@ class Config:
     """Dump one reference segment's pixels, inertial samples and calibration."""
 
     segment: str
-    """Segment id from ``reference_segments.toml``."""
+    """Segment id from ``gate.toml``."""
     output: Path
     """Directory the clip is written to; created if missing."""
     calibration: Literal["catalog", "fixture"] = "catalog"
@@ -94,7 +94,7 @@ def main(config: Config) -> None:
 
     with open_segment(
         CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id),
-        segment.imu,
+        manifest.dataset(segment.dataset_name).imu,
         window_s=config.window_s,
     ) as feed:
         calibration_text: str

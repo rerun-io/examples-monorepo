@@ -545,7 +545,7 @@ accepts, and their objects configure the frontend.
 
 ## The reference set
 
-`reference_segments.toml` records catalog segments, dataset geometry, IMU noise,
+`gate.toml` records gate segments, IMU noise,
 clock offsets, decode paths, configuration files and measured baselines.
 The tiers are **smoke** for quick checks, **release** for the release set, and
 **listed** for additional catalog segments. RoboCap sessions carry rig and replay

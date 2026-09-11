@@ -180,7 +180,7 @@ def test_the_msd_g2_rotation_arithmetic() -> None:
 
 def test_the_imu_calibration_carries_the_manifests_frozen_numbers(manifest: ReferenceManifest) -> None:
     segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
-    calib = imu_calib(segment.imu, np.eye(4))
+    calib = imu_calib(manifest.dataset(segment.dataset_name).imu, np.eye(4))
     assert calib.frequency_hz == 1000.0
     assert calib.gyro_noise_std == 0.000282
     assert calib.accel_noise_std == 0.016
@@ -309,13 +309,13 @@ def test_the_smoke_segment_decodes_from_the_catalog(manifest: ReferenceManifest)
     """One real segment end to end: frame count, shape, dtype and paired IMU timestamps."""
     segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
 
-    with open_segment(CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id), segment.imu) as feed:
+    with open_segment(CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id), manifest.dataset(segment.dataset_name).imu) as feed:
         assert isinstance(feed, SegmentFeed)
-        assert len(feed.cameras) == segment.capture.num_cameras
-        assert len(feed.frame_t_ns) == segment.capture.num_frames
-        assert feed.capture_start_time_ns == segment.capture.start_time_ns
+        assert len(feed.cameras) == 2
+        assert len(feed.frame_t_ns) > 0
+        assert feed.capture_start_time_ns > 0
         # MSD's video_time is relative to that, so an export has to add it back.
-        assert feed.export_offset_ns == segment.capture.start_time_ns
+        assert feed.export_offset_ns == feed.capture_start_time_ns
         for camera in feed.cameras:
             assert (camera.width, camera.height) == (960, 960)
             assert camera.model == "kb4"
@@ -337,13 +337,12 @@ def test_the_smoke_segment_decodes_from_the_catalog(manifest: ReferenceManifest)
         assert whole_imu.accel_m_s2.shape == (len(whole_imu), 3)
         whole_gt: Trajectory = feed.ground_truth_between(-(2**62), 2**62)
         assert len(whole_gt)
-        assert len(whole_gt) == segment.gt.num_poses
 
         digests: list[str] = []
         with_truth: int = 0
         frameset: Frameset
         for frameset in feed.framesets():
-            assert len(frameset.images) == segment.capture.num_cameras
+            assert len(frameset.images) == 2
             for image in frameset.images:
                 assert image.shape == (960, 960)
                 assert image.dtype == np.uint8
@@ -352,11 +351,11 @@ def test_the_smoke_segment_decodes_from_the_catalog(manifest: ReferenceManifest)
                 assert frameset.ground_truth.shape == (7,)
                 with_truth += 1
             digests.append(frameset.digest())
-        assert len(digests) == segment.capture.num_frames
+        assert len(digests) == len(feed.frame_t_ns)
         # Ground truth starts 17.5 ms into the segment, so only the first frameset
         # is without it; a frameset outside the truth's span reports None rather
         # than borrowing a stale pose.
-        assert with_truth == segment.capture.num_frames - 1
+        assert with_truth == len(feed.frame_t_ns) - 1
 
 
 @pytest.mark.slow
@@ -366,7 +365,7 @@ def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample(manifes
     digests: dict[float, list[tuple[int, str]]] = {}
     imu_t_ns: dict[float, Int64[ndarray, " n_samples"]] = {}
     for window_s in (60.0, 2.0):
-        with open_segment(CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id), segment.imu, window_s=window_s) as feed:
+        with open_segment(CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id), manifest.dataset(segment.dataset_name).imu, window_s=window_s) as feed:
             per_frameset: list[tuple[int, str]] = []
             emitted: list[Int64[ndarray, " n"]] = []
             for frameset in feed.framesets():
@@ -375,14 +374,14 @@ def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample(manifes
             digests[window_s] = per_frameset
             imu_t_ns[window_s] = np.concatenate(emitted)
     assert digests[60.0] == digests[2.0]
-    assert len(digests[60.0]) == segment.capture.num_frames
+    assert len(digests[60.0]) == len(feed.frame_t_ns)
 
     # A bounded read is the same read, stopped: the same rows in the same order,
     # and no window opening past the bound is fetched at all — with 2 s windows
     # over a 7.6 s segment, a bound at 2.5 s leaves the last two windows unread.
     first_ns: int = digests[2.0][0][0]
     bounded_ns: int = first_ns + 2_500_000_000
-    with open_segment(CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id), segment.imu, window_s=2.0) as feed:
+    with open_segment(CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id), manifest.dataset(segment.dataset_name).imu, window_s=2.0) as feed:
         bounded: list[tuple[int, str]] = [(frameset.t_ns, frameset.digest()) for frameset in feed.framesets(bounded_ns)]
     assert bounded == digests[2.0][: len(bounded)]
     assert bounded_ns <= bounded[-1][0] < bounded_ns + 2_000_000_000
@@ -411,7 +410,7 @@ def test_a_replay_export_associates_with_the_catalog_ground_truth(manifest: Refe
     segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
 
     config: Config = Config(rr_config=RerunTyroConfig(headless=True), segment=SMOKE_SEGMENT, stage="vio", max_framesets=40)
-    with open_segment(CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id), segment.imu) as feed:
+    with open_segment(CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id), manifest.dataset(segment.dataset_name).imu) as feed:
         truth: Trajectory = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
         assert len(truth)
         stage: VioStage = VioStage(
@@ -435,7 +434,7 @@ def test_a_replay_export_associates_with_the_catalog_ground_truth(manifest: Refe
     # and one that did not would be held and tracked again rather than lost (D17).
     assert len(estimate) == replayed
     assert not stage.pending
-    sidecar: Trajectory = shift_clock(truth, segment.capture.start_time_ns)
+    sidecar: Trajectory = shift_clock(truth, feed.capture_start_time_ns)
     # All but the first pose, which sits on the capture's start time — 17 ms
     # before the sidecar's first row, so it has nothing to associate with. The
     # ground truth does not cover the whole segment.

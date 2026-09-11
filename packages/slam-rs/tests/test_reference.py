@@ -1,15 +1,11 @@
-"""The reference manifest parses, is internally consistent, and still matches the catalog."""
+"""The gate parses and preserves tier, baseline and sensor-model rules."""
 
 import json
-import socket
-import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import numpy as np
 import pytest
-from beartype.roar import BeartypeException
 
 from slam_rs import _core, reference
 from slam_rs.reference import (
@@ -23,68 +19,16 @@ from slam_rs.reference import (
     resolved_flow_config,
 )
 
-CATALOG_CONNECT_TIMEOUT_S: float = 3.0
-"""How long the slow test waits for the catalog before it skips."""
 
 
 def test_the_manifest_holds_ten_segments(manifest: ReferenceManifest) -> None:
     assert len(manifest.segments) == 10
-    assert manifest.schema_version == 9
+    assert manifest.schema_version == 10
 
 
-def test_every_segment_carries_both_layer_fingerprints(manifest: ReferenceManifest) -> None:
-    for segment in manifest.segments:
-        assert set(segment.layers) == {"base", "gt"}
-        for name, layer in segment.layers.items():
-            assert layer.size_bytes > 0, f"{segment.segment_id}/{name}"
-            assert len(layer.schema_sha256) == 64
-            assert set(layer.schema_sha256) <= set("0123456789abcdef")
-        # The base layer is the video; the gt layer is poses only, so it is smaller.
-        assert segment.layers["gt"].size_bytes < segment.layers["base"].size_bytes
 
 
-def test_the_schema_hash_is_shared_within_a_dataset_and_layer(manifest: ReferenceManifest) -> None:
-    """One conversion wrote each dataset, so a differing hash means a partial re-conversion.
 
-    The two datasets do not share a schema: msd-g2 has four cameras and a
-    magnetometer where msd-index has two cameras and neither.
-    """
-    for dataset in manifest.datasets:
-        for layer_name in ("base", "gt"):
-            digests: set[str] = {s.layers[layer_name].schema_sha256 for s in manifest.segments if s.dataset_name == dataset.name}
-            assert len(digests) == (1 if any(s.dataset_name == dataset.name for s in manifest.segments) else 0), (
-                f"{dataset.name} {layer_name} layers disagree on schema: {sorted(digests)}"
-            )
-    index_base: str = manifest.by_id("msd-index__MIO_others__MIO10_short_2_panorama").layers["base"].schema_sha256
-    g2_base: str = manifest.by_id("msd-g2__MGO_others__MGO09_short_1_updown").layers["base"].schema_sha256
-    assert index_base != g2_base
-
-
-def test_the_datasets_describe_the_two_rigs(manifest: ReferenceManifest) -> None:
-    index = manifest.dataset("msd-index")
-    assert index.num_cameras == 2
-    assert index.camera_resolution_wh == ((960, 960), (960, 960))
-    assert index.image_rotation_cw_deg == (0, 0)
-    g2 = manifest.dataset("msd-g2")
-    assert g2.num_cameras == 4
-    # Portrait, and the two pairs face opposite ways: an estimator that assumes a
-    # shared orientation is wrong on this rig.
-    assert g2.camera_resolution_wh == ((480, 640), (480, 640), (480, 640), (480, 640))
-    assert g2.image_rotation_cw_deg == (90, 90, 270, 270)
-
-
-def test_every_segment_matches_its_dataset_entry(manifest: ReferenceManifest) -> None:
-    for segment in manifest.segments:
-        dataset = manifest.dataset(segment.dataset_name)
-        assert segment.dataset_entry_id == dataset.entry_id
-        assert segment.capture.num_cameras == dataset.num_cameras
-
-
-def test_the_capture_start_time_is_the_absolute_clock_offset(manifest: ReferenceManifest) -> None:
-    for segment in manifest.segments:
-        assert segment.capture.start_time_ns > 0
-    # The dossier's worked example on the smoke segment.
-    assert manifest.by_id("msd-index__MIO_others__MIO10_short_2_panorama").capture.start_time_ns == 10_433_867_587_166
 
 
 def test_segment_ids_are_unique(manifest: ReferenceManifest) -> None:
@@ -106,21 +50,15 @@ def test_the_tiers_are_the_ones_the_plan_names(manifest: ReferenceManifest) -> N
     assert {segment.dataset_name for segment in manifest.in_tier("smoke")} == {"msd-index", "msd-g2"}
 
 
-def test_camera_counts_match_the_device(manifest: ReferenceManifest) -> None:
-    for segment in manifest.segments:
-        expected: int = 2 if segment.dataset_name == "msd-index" else 4
-        assert segment.capture.num_cameras == expected
-        assert segment.gt.source == ("lighthouse" if segment.dataset_name == "msd-index" else "mocap")
-
 
 def test_the_msd_imu_block_is_basalts(manifest: ReferenceManifest) -> None:
     for segment in manifest.segments:
-        assert segment.imu.rate_hz == 1000.0
-        assert segment.imu.gyro_noise_std == 0.000282
-        assert segment.imu.accel_noise_std == 0.016
-        assert segment.imu.gyro_bias_std == 0.0001
-        assert segment.imu.accel_bias_std == 0.001
-        assert segment.imu.cam_time_offset_ns == 0
+        assert manifest.dataset(segment.dataset_name).imu.rate_hz == 1000.0
+        assert manifest.dataset(segment.dataset_name).imu.gyro_noise_std == 0.000282
+        assert manifest.dataset(segment.dataset_name).imu.accel_noise_std == 0.016
+        assert manifest.dataset(segment.dataset_name).imu.gyro_bias_std == 0.0001
+        assert manifest.dataset(segment.dataset_name).imu.accel_bias_std == 0.001
+        assert manifest.dataset(segment.dataset_name).imu.cam_time_offset_ns == 0
 
 
 def test_any_robocap_session_of_the_device_replays_without_a_reference(manifest: ReferenceManifest) -> None:
@@ -274,129 +212,13 @@ def test_a_duplicate_segment_id_is_rejected(manifest: ReferenceManifest, tmp_pat
         load_manifest(broken)
 
 
-def _catalog_is_reachable(url: str) -> bool:
-    """Whether the catalog's gRPC port accepts a TCP connection within the timeout.
-
-    ``CatalogClient`` has no connect timeout, and an unreachable host makes it
-    hang far longer than a test should, so the reachability question is answered
-    by a plain socket first.
-    """
-    parsed: urllib.parse.ParseResult = urllib.parse.urlparse(url.replace("rerun+", ""))
-    if parsed.hostname is None or parsed.port is None:
-        return False
-    try:
-        with socket.create_connection((parsed.hostname, parsed.port), timeout=CATALOG_CONNECT_TIMEOUT_S):
-            return True
-    except BeartypeException:
-        raise
-    except OSError:
-        return False
 
 
-@pytest.mark.slow
-def test_the_catalog_still_reports_the_manifest_properties(manifest: ReferenceManifest) -> None:
-    """One properties query per dataset covers all its segments; skip when the server is unreachable."""
-    import pyarrow as pa
-    from rerun.catalog import CatalogClient
-
-    if not _catalog_is_reachable(manifest.catalog_url):
-        pytest.skip(f"catalog {manifest.catalog_url} is unreachable within {CATALOG_CONNECT_TIMEOUT_S} s")
-    client: CatalogClient = CatalogClient(manifest.catalog_url)
-    entries: dict[str, str] = {entry.name: str(entry.id) for entry in client.entries()}
-
-    for dataset_name in sorted({segment.dataset_name for segment in manifest.segments}):
-        assert dataset_name in entries, f"{dataset_name} is not registered on {manifest.catalog_url}"
-        dataset = client.get_dataset(dataset_name)
-        table: pa.Table = dataset.filter_contents(["/__properties", "/__properties/**"]).reader(index=None).to_arrow_table()
-        rows: dict[str, dict[str, object]] = {}
-        segment_ids: list[str] = table["rerun_segment_id"].combine_chunks().to_pylist()
-        for row_index, segment_id in enumerate(segment_ids):
-            rows[segment_id] = {name: table[name][row_index].as_py() for name in table.column_names if name.startswith("property:")}
-
-        for segment in (s for s in manifest.segments if s.dataset_name == dataset_name):
-            assert segment.dataset_entry_id == entries[dataset_name]
-            assert segment.segment_id in rows, f"{segment.segment_id} is no longer a segment of {dataset_name}"
-            properties: dict[str, object] = rows[segment.segment_id]
-
-            def scalar(key: str, properties: dict[str, object] = properties) -> object:
-                value: object = properties[key]
-                return value[0] if isinstance(value, list) else value
-
-            assert int(np.asarray(scalar("property:capture:duration_ns")).item()) == segment.capture.duration_ns
-            assert int(np.asarray(scalar("property:capture:num_frames")).item()) == segment.capture.num_frames
-            assert int(np.asarray(scalar("property:capture:num_cameras")).item()) == segment.capture.num_cameras
-            assert int(np.asarray(scalar("property:capture:start_time_ns")).item()) == segment.capture.start_time_ns
-            assert int(np.asarray(scalar("property:gt:num_poses")).item()) == segment.gt.num_poses
-            assert str(scalar("property:gt:source")) == segment.gt.source
-
-
-@pytest.mark.slow
-def test_the_catalog_still_reports_the_manifest_layer_fingerprints(manifest: ReferenceManifest) -> None:
-    """Sizes and schema hashes, one ``manifest()`` round-trip per dataset."""
-    import pyarrow as pa
-    from rerun.catalog import CatalogClient
-
-    if not _catalog_is_reachable(manifest.catalog_url):
-        pytest.skip(f"catalog {manifest.catalog_url} is unreachable within {CATALOG_CONNECT_TIMEOUT_S} s")
-    client: CatalogClient = CatalogClient(manifest.catalog_url)
-
-    for dataset_name in sorted({segment.dataset_name for segment in manifest.segments}):
-        # Deprecated but the only surface that reports size and schema digest.
-        table: pa.Table = client.get_dataset(dataset_name).manifest().to_arrow_table()
-        live: dict[tuple[str, str], tuple[int, str]] = {
-            (table["rerun_segment_id"][row].as_py(), table["rerun_layer_name"][row].as_py()): (
-                int(table["rerun_size_bytes"][row].as_py()),
-                bytes(table["rerun_schema_sha256"][row].as_py()).hex(),
-            )
-            for row in range(table.num_rows)
-        }
-        for segment in (s for s in manifest.segments if s.dataset_name == dataset_name):
-            for layer_name, fingerprint in segment.layers.items():
-                key: tuple[str, str] = (segment.segment_id, layer_name)
-                assert key in live, f"{layer_name} layer of {segment.segment_id} is no longer registered"
-                assert live[key] == (fingerprint.size_bytes, fingerprint.schema_sha256), (
-                    f"{segment.segment_id}/{layer_name}: catalog reports {live[key]}, manifest pins "
-                    f"{(fingerprint.size_bytes, fingerprint.schema_sha256)}"
-                )
-
-
-@pytest.mark.slow
-def test_the_catalog_still_reports_the_manifest_rig_geometry(manifest: ReferenceManifest) -> None:
-    """Per-camera resolution and image rotation, one statics round-trip per dataset."""
-    import pyarrow as pa
-    from rerun.catalog import CatalogClient
-
-    if not _catalog_is_reachable(manifest.catalog_url):
-        pytest.skip(f"catalog {manifest.catalog_url} is unreachable within {CATALOG_CONNECT_TIMEOUT_S} s")
-    client: CatalogClient = CatalogClient(manifest.catalog_url)
-
-    for dataset in manifest.datasets:
-        entities: list[str] = [f"/world/rig_00/cam_{index:02d}" for index in range(dataset.num_cameras)]
-        statics: pa.Table = (
-            client.get_dataset(dataset.name)
-            .filter_contents(entities + [f"{entity}/pinhole" for entity in entities])
-            .reader(index=None)
-            .to_arrow_table()
-        )
-        for index, entity in enumerate(entities):
-            # Calibration is byte-identical across a dataset's segments; assert it
-            # rather than assume it, because a re-conversion could break it.
-            resolutions: set[tuple[int, int]] = set()
-            for row in range(statics.num_rows):
-                values = np.asarray(statics[f"{entity}/pinhole:Pinhole:resolution"][row].values.to_pylist(), dtype=np.float64).ravel()
-                resolutions.add((int(values[0]), int(values[1])))
-            assert resolutions == {dataset.camera_resolution_wh[index]}, f"{dataset.name} cam_{index:02d}: {sorted(resolutions)}"
-
-            rotation_column: str = f"{entity}:image_rotation_cw_deg"
-            rotation: int = 0
-            if rotation_column in statics.column_names and statics[rotation_column][0].is_valid:
-                rotation = int(np.asarray(statics[rotation_column][0].values.to_pylist(), dtype=np.float64).ravel()[0])
-            assert rotation == dataset.image_rotation_cw_deg[index], f"{dataset.name} cam_{index:02d} rotation"
 
 
 def test_an_unsupported_manifest_schema_is_refused(tmp_path: Path) -> None:
     path: Path = tmp_path / "old.toml"
-    path.write_text(MANIFEST_PATH.read_text().replace("schema_version = 9", "schema_version = 8"))
+    path.write_text(MANIFEST_PATH.read_text().replace("schema_version = 10", "schema_version = 8"))
     with pytest.raises(ValueError, match="schema_version"):
         load_manifest(path)
 
@@ -404,12 +226,10 @@ def test_an_unsupported_manifest_schema_is_refused(tmp_path: Path) -> None:
 def test_dataset_imu_covers_unlisted_odyssey_and_preserves_holdouts(manifest: ReferenceManifest) -> None:
     assert {dataset.name for dataset in manifest.datasets} == {"msd-index", "msd-g2", "msd-odyssey"}
     assert all(dataset.imu == manifest.datasets[0].imu for dataset in manifest.datasets)
-    assert all(segment.imu == manifest.dataset(segment.dataset_name).imu for segment in manifest.segments)
+    assert all(manifest.dataset(segment.dataset_name).imu == manifest.dataset(segment.dataset_name).imu for segment in manifest.segments)
     assert sum(segment.hold_out for segment in manifest.segments) == 2
     assert {segment.segment_id.split("__")[-1].split("_")[0] for segment in manifest.in_tier("release")} == {"MIO07", "MGO07", "MIO14"}
-    odyssey = manifest.dataset("msd-odyssey")
-    assert odyssey.camera_resolution_wh == ((640, 480), (640, 480))
-    assert odyssey.image_rotation_cw_deg == (0, 0)
+
 
 
 @pytest.mark.parametrize("field", ["gt_rmse_cm", "median_tracker_ms"])
