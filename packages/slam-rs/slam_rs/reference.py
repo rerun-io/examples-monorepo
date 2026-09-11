@@ -428,6 +428,8 @@ def _robocap(robocap_block: dict[str, Any]) -> RobocapReference:
 def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
     """Parse the catalog manifest and validate segment identifiers and rig properties."""
     document: dict[str, Any] = tomllib.loads(path.read_text())
+    if document.get("schema_version") != 9:
+        raise ValueError(f"{path}: expected schema_version 9")
     datasets: list[DatasetProperties] = []
     for entry in document["dataset"]:
         resolutions: tuple[tuple[int, int], ...] = tuple((int(pair[0]), int(pair[1])) for pair in entry["camera_resolution_wh"])

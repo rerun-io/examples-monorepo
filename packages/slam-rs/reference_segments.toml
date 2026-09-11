@@ -3,6 +3,8 @@
 # RoboCap video_time is already absolute. Its camera offset is applied to frames.
 # The decode path is frozen: changing grayscale conversion moves ATE by about 5 cm.
 # IMU noise densities and random walks come from the MSD rigs' calibration.
+# smoke: MIO10/MGO09; release: MIO07/MGO07/MIO14; listed: the other five.
+# hold_out marks segments excluded from tuning. Baselines are keyed by profile/lane.
 
 schema_version = 9
 catalog_url = "rerun+http://dgx-spark:9988"

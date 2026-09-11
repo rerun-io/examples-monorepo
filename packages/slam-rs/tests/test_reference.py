@@ -384,3 +384,21 @@ def test_the_catalog_still_reports_the_manifest_rig_geometry(manifest: Reference
             if rotation_column in statics.column_names and statics[rotation_column][0].is_valid:
                 rotation = int(np.asarray(statics[rotation_column][0].values.to_pylist(), dtype=np.float64).ravel()[0])
             assert rotation == dataset.image_rotation_cw_deg[index], f"{dataset.name} cam_{index:02d} rotation"
+
+
+def test_an_unsupported_manifest_schema_is_refused(tmp_path: Path) -> None:
+    path: Path = tmp_path / "old.toml"
+    path.write_text(MANIFEST_PATH.read_text().replace("schema_version = 9", "schema_version = 8"))
+    with pytest.raises(ValueError, match="schema_version"):
+        load_manifest(path)
+
+
+def test_dataset_imu_covers_unlisted_odyssey_and_preserves_holdouts(manifest: ReferenceManifest) -> None:
+    assert {dataset.name for dataset in manifest.datasets} == {"msd-index", "msd-g2", "msd-odyssey"}
+    assert all(dataset.imu == manifest.datasets[0].imu for dataset in manifest.datasets)
+    assert all(segment.imu == manifest.dataset(segment.dataset_name).imu for segment in manifest.segments)
+    assert sum(segment.hold_out for segment in manifest.segments) == 2
+    assert {segment.segment_id.split("__")[-1].split("_")[0] for segment in manifest.in_tier("release")} == {"MIO07", "MGO07", "MIO14"}
+    odyssey = manifest.dataset("msd-odyssey")
+    assert odyssey.camera_resolution_wh == ((640, 480), (640, 480))
+    assert odyssey.image_rotation_cw_deg == (0, 0)
