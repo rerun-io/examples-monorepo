@@ -73,6 +73,16 @@ gt_rmse_cm = 1.5485685474815554
 median_tracker_ms = 5.595673341304064
 measured_on = "2026-09-10"
 
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "spark-9232"
+core_sha256 = "1623c1a27566195085de23dfce4079206b196fdce3ab3c25977f5fed2a73fd64"
+framesets = 412
+gt_rmse_cm = 1.5529520149042326
+median_tracker_ms = 2.6653200038708746
+measured_on = "2026-09-11"
+
 [[segment]]
 dataset_name = "msd-index"
 segment_id = "msd-index__MIO_others__MIO07_mapping_easy"
@@ -103,6 +113,16 @@ framesets = 4095
 gt_rmse_cm = 2.204437636028058
 median_tracker_ms = 5.943018011748791
 measured_on = "2026-09-10"
+
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "spark-9232"
+core_sha256 = "1623c1a27566195085de23dfce4079206b196fdce3ab3c25977f5fed2a73fd64"
+framesets = 4095
+gt_rmse_cm = 2.1142785579360597
+median_tracker_ms = 2.792225976008922
+measured_on = "2026-09-11"
 
 [[segment]]
 dataset_name = "msd-index"
@@ -166,6 +186,16 @@ gt_rmse_cm = 6.627831893039312
 median_tracker_ms = 5.983363371342421
 measured_on = "2026-09-10"
 
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "spark-9232"
+core_sha256 = "1623c1a27566195085de23dfce4079206b196fdce3ab3c25977f5fed2a73fd64"
+framesets = 22117
+gt_rmse_cm = 6.013535364329924
+median_tracker_ms = 2.8554160380735993
+measured_on = "2026-09-11"
+
 [[segment]]
 dataset_name = "msd-index"
 segment_id = "msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_fight_2"
@@ -228,6 +258,16 @@ gt_rmse_cm = 0.9774597452318616
 median_tracker_ms = 10.065324138849974
 measured_on = "2026-09-10"
 
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "spark-9232"
+core_sha256 = "1623c1a27566195085de23dfce4079206b196fdce3ab3c25977f5fed2a73fd64"
+framesets = 107
+gt_rmse_cm = 0.9776211447928401
+median_tracker_ms = 4.472988017369062
+measured_on = "2026-09-11"
+
 [[segment]]
 dataset_name = "msd-g2"
 segment_id = "msd-g2__MGO_others__MGO07_mapping_easy"
@@ -258,6 +298,16 @@ framesets = 1596
 gt_rmse_cm = 2.3729583686544053
 median_tracker_ms = 9.75686265155673
 measured_on = "2026-09-10"
+
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "spark-9232"
+core_sha256 = "1623c1a27566195085de23dfce4079206b196fdce3ab3c25977f5fed2a73fd64"
+framesets = 1596
+gt_rmse_cm = 2.3744948975377578
+median_tracker_ms = 4.621212981874123
+measured_on = "2026-09-11"
 
 [[segment]]
 dataset_name = "msd-g2"
