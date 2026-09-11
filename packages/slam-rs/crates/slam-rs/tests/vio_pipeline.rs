@@ -35,7 +35,7 @@ const LAST_COMMITTED_T_NS: i64 = 37_012_000;
 /// How far the IMU is pushed for the committed run: one frameset interval past
 /// [`LAST_COMMITTED_T_NS`].
 ///
-/// It has to reach *past* the last frameset. `:330-336` closes the last
+/// It has to reach *past* the last frameset. closes the last
 /// preintegration by re-stamping the first sample after the frameset, so a
 /// queue that stops on the frameset leaves the interval short and `track`
 /// reports `NeedMoreImu` for it.
@@ -159,8 +159,8 @@ fn check_pipeline<S: LieScalar>() {
     let estimator = vio.estimator();
     assert_eq!(estimator.snapshot().states.len(), COMMITTED_FRAMESETS);
     assert_eq!(estimator.last_state_t_ns(), LAST_COMMITTED_T_NS);
-    // The first frameset is always a keyframe (`sqrt_keypoint_vio.cpp:61`)
-    // and three framesets cannot reach `opt_started` (`:1207`).
+    // The first frameset is always a keyframe
+    // and three framesets cannot reach `opt_started`.
     let Some(stats) = vio.last_stats() else {
         panic!("three framesets measured, so the last one left stats");
     };
@@ -242,7 +242,7 @@ fn push_imu_through(vio: &mut Vio<f32>, next: usize, horizon: i64) -> usize {
 ///
 /// The frontend checks the size itself and undoes its own passes, but by the
 /// time it looks, `track` has already spent the frontend's preintegration on the
-/// interval (`frame_to_frame_optical_flow.h:157-201` eats the buffer to seed the
+/// interval ( eats the buffer to seed the
 /// KLT), and that cannot be spent again: the retry then predicts from a shorter
 /// interval and the run parts from a clean one by ~6e-8 m within a few
 /// framesets. The first frameset cannot show it — there is no state to predict
@@ -372,7 +372,7 @@ fn a_refused_frameset_is_retried_bit_identically() {
             "frame {frame}: the refused frameset moved the pipeline"
         );
 
-        // Up to the next frameset: past this one, so `:330-336` can close its
+        // Up to the next frameset: past this one, so can close its
         // preintegration, and not past the next, so the next is refused too.
         // The last horizon is the reference run's, so both runs end holding the
         // same samples.

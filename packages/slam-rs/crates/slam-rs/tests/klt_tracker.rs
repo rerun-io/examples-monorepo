@@ -158,23 +158,12 @@ fn an_integer_shift_is_recovered() {
     }
 }
 
-/// A sub-pixel shift, up to the pattern's own radius.
-///
-/// The tolerance is not the tracker's convergence — it converges to five
-/// decimal places in three iterations — but the **bias of the fixed point
-/// itself**. `interp` reconstructs the image bilinearly and `interpGrad`
-/// differentiates that reconstruction by central differences
-/// (`image.h:396-469`), so for a shift that is not a whole number of samples
-/// the residual vanishes not at the true shift but a little beside it.
-///
-/// The size of that displacement depends only on the **fractional** part of
-/// the shift, not on its magnitude: on this texture an exactly integer shift
-/// is recovered to `0.0000` px, a shift of 0.02 px to 0.0004, and a shift of
-/// half a pixel to 0.035 on the median patch and 0.13 on the worst — the same
-/// numbers whether the shift is 0.5 or 3.5 pixels. Shortening the texture's
-/// wavelengths raises the floor and lengthening them makes the patches
-/// ill-conditioned instead; basalt's C++ has the same property, because this
-/// is its arithmetic. The gate is therefore the median, with a cap on the tail.
+/// Subpixel tracking has interpolation bias as well as convergence error.
+/// Bilinear values and unit-step central-difference gradients can put the fixed
+/// point beside the true shift. The error depends on fractional shift: integer
+/// shifts recover exactly while half-pixel shifts are harder. Shorter texture
+/// wavelengths raise bias; longer ones weaken conditioning. Check the median
+/// and cap the tail instead of equating bias with optimizer convergence.
 fn sub_pixel_shift_error(dx: f32, dy: f32) -> (f32, f32, usize, usize) {
     let levels: usize = 3;
     let scene: Fixture = fixture(dx, dy, levels);
@@ -213,7 +202,7 @@ fn a_sub_pixel_shift_is_recovered() {
     assert!(worst < 0.2, "worst error {worst}");
 }
 
-/// The forward-backward gate (`frame_to_frame_optical_flow.h:362-364`) is
+/// The forward-backward gate is
 /// what rejects a track onto an unrelated image.
 #[test]
 fn a_mismatched_pair_is_rejected() {

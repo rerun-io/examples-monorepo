@@ -1,42 +1,13 @@
-//! SO(3) and SE(3) with basalt's exact conventions.
+//! SO(3), SE(3), group Jacobians and decoupled pose increments.
+//! SO(3) operations delegate to kornia-algebra through scalar adapters (S33).
+//! This module supplies reported-angle conventions, composition normalization,
+//! inverse Jacobians and SE(3) operations.
 //!
-//! basalt builds on Sophus, so the conventions are Sophus's throughout: the
-//! quaternion, the atan-based log, `Constants<Scalar>::epsilon()` small-angle
-//! branches, and the group Jacobians basalt adds on top in
-//! `thirdparty/basalt-headers/include/basalt/utils/sophus_utils.hpp`. No Rust
-//! crate carries the two inverse right/left Jacobians or the *decoupled* SE(3)
-//! convention, which is why this module exists (decision D06).
-//!
-//! **SO(3)'s six group operations are not ported.** `exp`, `log`, `matrix`,
-//! `inverse` and the action on a point come from `kornia_algebra::lie::SO3F32`
-//! and `SO3F64` through [`LieScalar`]'s five `so3_*` adapters (S33); the
-//! adjoint is the matrix. What this module still owns around them is what
-//! upstream does not have: the `theta` [`So3::exp_and_theta`] and
-//! [`So3::log_and_theta`] report, which is Sophus's convention and not the
-//! tangent's magnitude, the renormalization on composition, and everything
-//! SE(3). Upstream's small-angle thresholds differ from Sophus's in `f32`
-//! (1e-8 against 1e-5) and coincide in `f64`; across that gap the two Taylor
-//! forms agree to well under an `f32` ulp, so the branch moves and the value
-//! does not.
-//!
-//! Two conventions are load-bearing and easy to get wrong:
-//!
-//! * **Tangent order is translation first.** Sophus's `SE3::Tangent` is
-//!   `(upsilon, omega)` (`Sophus/sophus/se3.hpp:850`), and so is basalt's
-//!   decoupled pair `se3_expd`/`se3_logd` (`sophus_utils.hpp:62,82`).
-//! * **The pose increment is left-multiplied.** `PoseState::incPose` does
-//!   `t += inc[0..3]; R = exp(inc[3..6]) * R`
-//!   (`thirdparty/basalt-headers/include/basalt/imu/imu_types.h:96-99`), which
-//!   is neither the coupled nor the decoupled exponential — see
-//!   [`Se3::apply_inc`].
-//!
-//! Two *different* small-angle branches live here on purpose. [`Se3::exp`] and
-//! [`Se3::log`] need Sophus's own `SO3::leftJacobian`/`leftJacobianInverse`
-//! (`Sophus/sophus/so3.hpp:570,594`), whose Taylor branch stops one term
-//! earlier than basalt's own left Jacobian (`sophus_utils.hpp:312`), which
-//! [`left_jacobian_inv_so3`] inverts. The
-//! difference is below the branch threshold, but reproducing each at its own
-//! call site keeps the port literal.
+//! Tangents put translation first. Estimator updates add translation directly
+//! and left-multiply rotation by `exp(inc[3..6])`; every state block and prior
+//! uses this convention. Coupled SE(3) operations instead use a translation factor.
+//! Their small-angle Taylor branches stop one term earlier than the standalone
+//! SO(3) Jacobians, so each call retains its own formula.
 
 use kornia_algebra::{SO3F32, SO3F64, Vec3AF32, Vec3F64};
 use nalgebra::{
@@ -45,7 +16,7 @@ use nalgebra::{
 
 /// A scalar the Lie module can run in: `f32` and `f64`.
 ///
-/// The extra methods carry `Sophus::Constants<Scalar>` (`Sophus/sophus/common.hpp:165-196`),
+/// The extra methods carry `Sophus::Constants<Scalar>`,
 /// whose epsilon is `1e-10` in double and `1e-5` in float. `nalgebra`'s own
 /// `RealField::default_epsilon` is the machine epsilon and would move every
 /// small-angle branch, so it is not used.
@@ -66,39 +37,17 @@ pub trait LieScalar: RealField + Copy {
     /// This is coarser than machine epsilon to stabilize gravity initialization.
     fn eigen_dummy_precision() -> Self;
 
-    /// `std::numeric_limits<Scalar>::min()`: the smallest positive normal value.
-    ///
-    /// Not `RealField::min_value()`, which is the most *negative* finite value
-    /// despite its doc comment. basalt compares an LDLT pivot against this
-    /// constant to decide whether a direction is rank deficient
-    /// (`basalt-headers/include/basalt/imu/preintegration.h:314`), so the two
-    /// must mean the same thing.
+    /// Smallest positive normal scalar, used to give tiny LDLT pivots zero weight.
+    /// This is not the most negative finite value returned by `RealField::min_value`.
     fn min_positive() -> Self;
 
-    /// `std::numeric_limits<Scalar>::max()`: the largest finite value.
-    ///
-    /// basalt seeds both keyframe-eviction scores with it
-    /// (`sqrt_keypoint_vio.cpp:788`, `:842`) so the first candidate always
-    /// wins the `score < min_score` test.
+    /// Largest finite scalar, used to initialize eviction score minima.
     fn largest() -> Self;
 
-    /// SO(3)'s exponential map at this precision, `kornia_algebra::lie::SO3F32::exp`
-    /// or `SO3F64::exp`, in and out in basalt's `[qx, qy, qz, qw]` order.
-    ///
-    /// The five `so3_*` methods exist because `kornia-algebra` has two concrete
-    /// SO(3) types where [`So3`] has one generic one, and the scalar trait is
-    /// where this port already dispatches on precision. They are an adapter, not
-    /// an interface: [`So3`] is the type to use. Arrays rather than
-    /// `nalgebra` values because that is what both sides already hand out —
-    /// `glam` is `[x, y, z, w]` and so is `Sophus`'s storage — so the conversion
-    /// is a move, not an allocation.
-    ///
-    /// Upstream's small-angle branch is `theta < 1e-8` in `f32` and `theta <
-    /// 1e-10` in `f64`, against Sophus's `theta < 1e-5` and `theta < 1e-10`. The
-    /// `f64` thresholds coincide; in `f32` the two Taylor forms agree to well
-    /// under an `f32` ulp across the gap, so the branch moves and the value does
-    /// not. What [`So3::exp_and_theta`] still owns is the *reported* `theta`,
-    /// which Sophus zeroes on its own branch and [`Se3::exp`] reads.
+    /// SO(3) exponential through kornia-algebra, in `[qx, qy, qz, qw]` order.
+    /// The scalar adapters bridge concrete f32/f64 types without allocation.
+    /// Reported theta retains this module's small-angle convention even where the
+    /// underlying exponential uses a different Taylor threshold.
     fn so3_exp(omega: &[Self; 3]) -> [Self; 4];
 
     /// SO(3)'s logarithm, `SO3F32::log` or `SO3F64::log`, from `[qx, qy, qz, qw]`.
@@ -120,7 +69,7 @@ pub trait LieScalar: RealField + Copy {
     /// The action on a point, `SO3F32 * Vec3AF32` or `SO3F64 * Vec3F64`.
     fn so3_act(quaternion_xyzw: &[Self; 4], point: &[Self; 3]) -> [Self; 3];
 
-    /// Exact-as-possible conversion of a literal, standing in for C++'s `Scalar(x)`.
+    /// Convert a literal to the selected scalar as accurately as possible.
     fn from_literal(value: f64) -> Self;
 
     /// Convert to `f64` for diagnostics and scalar conversion.
@@ -219,11 +168,7 @@ impl LieScalar for f32 {
     }
 }
 
-/// `Scalar(x)` in C++: a literal in the caller's scalar type.
-///
-/// The crate's one spelling of it. `estimator/*`, `marg/*` and
-/// `linearize/abs_qr.rs` say `S::from_literal(...)` directly, which is the same
-/// call; everything with enough literals for the noise to matter imports this.
+/// A literal in the caller's scalar type, through `S::from_literal`.
 #[inline]
 pub(crate) fn c<S: LieScalar>(value: f64) -> S {
     S::from_literal(value)
@@ -260,13 +205,8 @@ impl<S: LieScalar> So3<S> {
         Self { quaternion }
     }
 
-    /// Normalize `(x, y, z, w)` into a rotation.
-    ///
-    /// basalt's cereal reader writes the four coefficients straight into the
-    /// quaternion without normalizing (`serialization/eigen_io.h:148-153`); the
-    /// port normalizes, so a calibration file that is a few ulps off unit length
-    /// still yields a valid rotation. Returns `None` for a zero-norm input,
-    /// which would otherwise produce NaNs.
+    /// Normalize `(x, y, z, w)` into a rotation, correcting small calibration drift.
+    /// Return `None` for a zero-norm quaternion rather than producing NaNs.
     pub fn from_quaternion_xyzw(x: S, y: S, z: S, w: S) -> Option<Self> {
         let quaternion: Quaternion<S> = Quaternion::new(w, x, y, z);
         if !quaternion.norm().is_finite() || quaternion.norm() <= S::zero() {
@@ -277,7 +217,7 @@ impl<S: LieScalar> So3<S> {
         })
     }
 
-    /// `Sophus::SO3::cast` (`Sophus/sophus/so3.hpp`): the same rotation in
+    /// `Sophus::SO3::cast` : the same rotation in
     /// another scalar.
     ///
     /// Sophus casts the four coefficients and hands them to the quaternion
@@ -301,10 +241,7 @@ impl<S: LieScalar> So3<S> {
         &self.quaternion
     }
 
-    /// The four coefficients in basalt's on-disk order, `(qx, qy, qz, qw)`.
-    ///
-    /// Eigen stores a quaternion `xyzw`, and cereal writes `so3().data()[0..3]`
-    /// followed by `[3]` (`serialization/eigen_io.h:150-153`).
+    /// Quaternion coefficients in JSON order `(qx, qy, qz, qw)`.
     pub fn quaternion_xyzw(&self) -> [S; 4] {
         let q = self.quaternion.as_ref();
         [q.i, q.j, q.k, q.w]
@@ -323,7 +260,7 @@ impl<S: LieScalar> So3<S> {
 
     /// [`So3::exp`] plus `theta = |omega|`, which is zero on the Taylor branch.
     ///
-    /// `Sophus::SO3::expAndTheta` (`Sophus/sophus/so3.hpp:716`) reports the same
+    /// `Sophus::SO3::expAndTheta` reports the same
     /// `theta` it branched on, and [`Se3::exp`] feeds it straight into the left
     /// Jacobian, so the two travel together. The **rotation** is upstream's; the
     /// `theta` is still Sophus's convention, including the zero it reports on its
@@ -347,7 +284,7 @@ impl<S: LieScalar> So3<S> {
     /// `new_unchecked` because every upstream operation that produces one starts
     /// from a unit quaternion and stays on the sphere to within rounding — the
     /// same assumption Sophus makes when it asserts rather than normalises
-    /// (`so3.hpp:747-750`). The one place the assumption is not free is
+    /// The one place the assumption is not free is
     /// composition, which is why [`So3::mul`] normalises.
     #[inline]
     fn from_kornia_quaternion(xyzw: [S; 4]) -> Self {
@@ -367,7 +304,7 @@ impl<S: LieScalar> So3<S> {
     /// Taylor branch.
     ///
     /// `Sophus::SO3::logAndTheta` returns `2 n^2 / w` for a near-identity
-    /// rotation (`Sophus/sophus/so3.hpp:311`), i.e. second order in the vector
+    /// rotation, i.e. second order in the vector
     /// part, while the tangent itself is first order. [`Se3::log`] passes that
     /// `theta` to the inverse left Jacobian, and substituting `|log|` there
     /// moves it onto the ill-conditioned branch, so the pair travels together
@@ -388,7 +325,7 @@ impl<S: LieScalar> So3<S> {
         let tangent: Vector3<S> = self.log();
         let theta: S = if squared_n < epsilon * epsilon {
             // A unit quaternion with a vanishing vector part has |w| ~ 1, so the
-            // division is safe; Sophus asserts the same thing (`so3.hpp:306`).
+            // division is safe; Sophus asserts the same thing.
             c::<S>(2.0) * squared_n / w
         } else if w < S::zero() {
             // w < 0 means the rotation is past pi; Sophus wraps it to a negative
@@ -402,9 +339,9 @@ impl<S: LieScalar> So3<S> {
 
     /// The inverse rotation, `kornia_algebra::lie::SO3F32::inverse` /
     /// `SO3F64::inverse` — the conjugate of a unit quaternion, which is what
-    /// Sophus takes too (`Sophus/sophus/so3.hpp:267-269`).
+    /// Sophus takes too.
     ///
-    /// Sophus's constructor then renormalizes (`:548-553`), so this one does
+    /// Sophus's constructor then renormalizes, so this one does
     /// too. Conjugating only flips signs, so the renormalization is a no-op
     /// here — it is kept for the same reason Sophus keeps it: every path that
     /// produces an `So3` leaves it unit length.
@@ -431,8 +368,8 @@ impl<S: LieScalar> std::ops::Mul for So3<S> {
     /// Compose two rotations, renormalizing the product.
     ///
     /// Sophus's `operator*` hands the raw quaternion product to the `SO3`
-    /// quaternion constructor (`Sophus/sophus/so3.hpp:378-389`), which calls
-    /// `normalize()` (`:548-553`, `:339-345`). `nalgebra`'s
+    /// quaternion constructor, which calls
+    /// `normalize()`. `nalgebra`'s
     /// `UnitQuaternion * UnitQuaternion` does not: it trusts the invariant and
     /// lets rounding accumulate. Over a long chain that matters — composing one
     /// small rotation 100,000 times in `f32` drifts the norm to 1.00105 without
@@ -444,7 +381,7 @@ impl<S: LieScalar> std::ops::Mul for So3<S> {
     }
 }
 
-/// `Sophus::SO3::normalize()` (`Sophus/sophus/so3.hpp:339-345`).
+/// `Sophus::SO3::normalize()`.
 ///
 /// Sophus refuses a quaternion shorter than its epsilon; here the inputs are
 /// always products or conjugates of unit quaternions, so the norm is within a
@@ -497,12 +434,8 @@ impl<S: LieScalar> Se3<S> {
         }
     }
 
-    /// The coupled exponential map, ported from `Sophus/sophus/se3.hpp:850-859`.
-    ///
-    /// The tangent is `(upsilon, omega)` and the translation is `V(omega)
-    /// upsilon`, so translation and rotation are **not** independent. basalt's
-    /// state increments use [`Se3::exp_decoupled`] and [`Se3::apply_inc`]
-    /// instead.
+    /// Coupled exponential: translation is `V(omega) upsilon`.
+    /// State updates use [`Se3::exp_decoupled`] and [`Se3::apply_inc`] instead.
     pub fn exp(tangent: &Vector6<S>) -> Self {
         let upsilon: Vector3<S> = tangent.fixed_rows::<3>(0).into_owned();
         let omega: Vector3<S> = tangent.fixed_rows::<3>(3).into_owned();
@@ -514,7 +447,7 @@ impl<S: LieScalar> Se3<S> {
         }
     }
 
-    /// The coupled logarithm, ported from `Sophus/sophus/se3.hpp:237-252`.
+    /// Coupled logarithm.
     pub fn log(&self) -> Vector6<S> {
         let (omega, theta) = self.rotation.log_and_theta();
         let v_inv: Matrix3<S> = sophus_left_jacobian_inv_so3(&omega, theta);
@@ -522,11 +455,7 @@ impl<S: LieScalar> Se3<S> {
         Vector6::new(upsilon.x, upsilon.y, upsilon.z, omega.x, omega.y, omega.z)
     }
 
-    /// basalt's decoupled exponential, `Sophus::se3_expd`
-    /// (`basalt-headers/include/basalt/utils/sophus_utils.hpp:82-89`).
-    ///
-    /// The head of the tangent becomes the translation directly; only the tail
-    /// goes through `SO3::exp`.
+    /// Decoupled exponential: tangent head becomes translation and the tail uses SO(3) exp.
     pub fn exp_decoupled(tangent: &Vector6<S>) -> Self {
         Self {
             rotation: So3::exp(&tangent.fixed_rows::<3>(3).into_owned()),
@@ -534,15 +463,8 @@ impl<S: LieScalar> Se3<S> {
         }
     }
 
-    /// basalt's decoupled logarithm, `Sophus::se3_logd`
-    /// (`basalt-headers/include/basalt/utils/sophus_utils.hpp:62-68`).
-    ///
-    /// No production caller: the estimator moves states with
-    /// [`Self::exp_decoupled`] and [`Self::apply_inc`] and never reads a
-    /// tangent back. It is kept as the ported pair's other half, and it is what
-    /// pins `exp_decoupled` — the round-trip proptests here and the
-    /// finite-difference Jacobians in `ba_base`'s tests take their tangents
-    /// through it.
+    /// Decoupled logarithm, inverse to [`Self::exp_decoupled`].
+    /// Used by round-trip and finite-difference tests; production updates do not read tangents back.
     pub fn log_decoupled(&self) -> Vector6<S> {
         let omega: Vector3<S> = self.rotation.log();
         Vector6::new(
@@ -568,7 +490,6 @@ impl<S: LieScalar> Se3<S> {
     }
 
     /// The homogeneous 4x4 matrix, `Sophus::SE3::matrix()`
-    /// (`Sophus/sophus/se3.hpp:275-280`).
     ///
     /// The rotation block uses [`So3::matrix`]; the final column is translation.
     pub fn matrix(&self) -> Matrix4<S> {
@@ -582,7 +503,7 @@ impl<S: LieScalar> Se3<S> {
     }
 
     /// The affine 3x4 matrix, `Sophus::SE3::matrix3x4()`
-    /// (`Sophus/sophus/se3.hpp:285-290`): `[R | t]`.
+    /// `[R | t]`.
     pub fn matrix3x4(&self) -> Matrix3x4<S> {
         let mut res: Matrix3x4<S> = Matrix3x4::zeros();
         res.fixed_view_mut::<3, 3>(0, 0)
@@ -601,10 +522,8 @@ impl<S: LieScalar> Se3<S> {
         }
     }
 
-    /// The adjoint, ported from `Sophus/sophus/se3.hpp:105-113`.
-    ///
-    /// With the `(upsilon, omega)` tangent order the blocks are
-    /// `[[R, hat(t) R], [0, R]]`, and `Adj(T) xi = log(T exp(xi) T^-1)`.
+    /// Adjoint for translation-first tangents: `[[R, hat(t) R], [0, R]]`.
+    /// It satisfies `Adj(T) xi = log(T exp(xi) T^-1)`.
     pub fn adjoint(&self) -> Matrix6<S> {
         let r: Matrix3<S> = self.rotation.matrix();
         let mut res: Matrix6<S> = Matrix6::zeros();
@@ -615,13 +534,8 @@ impl<S: LieScalar> Se3<S> {
         res
     }
 
-    /// basalt's pose increment, `PoseState::incPose`
-    /// (`basalt-headers/include/basalt/imu/imu_types.h:96-99`).
-    ///
-    /// `t += inc[0..3]` and `R = exp(inc[3..6]) R`: translation first, and the
-    /// rotation increment multiplies from the **left**. This is the single most
-    /// copied convention in the estimator — every state block, every Jacobian
-    /// column and the marginalization prior all assume it.
+    /// Pose increment: `t += inc[0..3]`, `R = exp(inc[3..6]) R`.
+    /// State blocks, Jacobians and priors all require this left-multiplied rotation convention.
     pub fn apply_inc(&mut self, inc: &Vector6<S>) {
         self.translation += inc.fixed_rows::<3>(0);
         self.rotation = So3::exp(&inc.fixed_rows::<3>(3).into_owned()) * self.rotation;
@@ -647,9 +561,7 @@ impl<S: LieScalar> std::ops::Mul<Vector3<S>> for Se3<S> {
     }
 }
 
-/// Right Jacobian of SO(3): `exp(phi + eps) ~ exp(phi) exp(J eps)`.
-///
-/// Ported from `basalt-headers/include/basalt/utils/sophus_utils.hpp:145-168`.
+/// Right SO(3) Jacobian: `exp(phi + eps) ~ exp(phi) exp(J eps)`.
 pub fn right_jacobian_so3<S: LieScalar>(phi: &Vector3<S>) -> Matrix3<S> {
     let phi_norm2: S = phi.norm_squared();
     let phi_hat: Matrix3<S> = So3::hat(phi);
@@ -669,12 +581,8 @@ pub fn right_jacobian_so3<S: LieScalar>(phi: &Vector3<S>) -> Matrix3<S> {
     j
 }
 
-/// Inverse right Jacobian of SO(3): `log(exp(phi) exp(eps)) ~ phi + J eps`.
-///
-/// Ported from `basalt-headers/include/basalt/utils/sophus_utils.hpp:180-216`.
-/// basalt asserts `|phi| <= pi` there; the port drops the assert (decision D32,
-/// the core never panics on data) and lets an over-rotated input take the same
-/// zeroth-order branch the C++ takes at exactly pi.
+/// Inverse right SO(3) Jacobian: `log(exp(phi) exp(eps)) ~ phi + J eps`.
+/// Over-rotated inputs use the same zeroth-order branch as pi, without panic (D32).
 pub fn right_jacobian_inv_so3<S: LieScalar>(phi: &Vector3<S>) -> Matrix3<S> {
     let phi_norm2: S = phi.norm_squared();
     let phi_hat: Matrix3<S> = So3::hat(phi);
@@ -685,10 +593,7 @@ pub fn right_jacobian_inv_so3<S: LieScalar>(phi: &Vector3<S>) -> Matrix3<S> {
     j
 }
 
-/// Inverse left Jacobian of SO(3): `log(exp(eps) exp(phi)) ~ phi + J eps`.
-///
-/// Ported from `basalt-headers/include/basalt/utils/sophus_utils.hpp:348-384`,
-/// with the same dropped assert as [`right_jacobian_inv_so3`].
+/// Inverse left SO(3) Jacobian: `log(exp(eps) exp(phi)) ~ phi + J eps`.
 pub fn left_jacobian_inv_so3<S: LieScalar>(phi: &Vector3<S>) -> Matrix3<S> {
     let phi_norm2: S = phi.norm_squared();
     let phi_hat: Matrix3<S> = So3::hat(phi);
@@ -699,14 +604,9 @@ pub fn left_jacobian_inv_so3<S: LieScalar>(phi: &Vector3<S>) -> Matrix3<S> {
     j
 }
 
-/// The `hat(phi)^2` term both inverse SO(3) Jacobians add.
-///
-/// The three branches are basalt's (`sophus_utils.hpp:191-215`): the closed
-/// form on `(0, pi)`, a zeroth-order expansion at pi where `sin` vanishes, and
-/// the Taylor value `1/12` at zero.
-///
-/// Evaluate the threshold and denominator in the input scalar type.
-/// The constant branches divide the matrix directly by their denominator.
+/// The `hat(phi)^2` term in both inverse SO(3) Jacobians.
+/// Use the closed form on `(0, pi)`, a zeroth-order expansion at pi where sine
+/// vanishes, and `1/12` at zero. Thresholds and denominators use the input scalar.
 fn inverse_jacobian_second_order_term<S: LieScalar>(
     phi_hat2: &Matrix3<S>,
     phi_norm2: S,
@@ -729,12 +629,8 @@ fn inverse_jacobian_second_order_term<S: LieScalar>(
     }
 }
 
-/// Sophus's own left Jacobian, `SO3::leftJacobian`
-/// (`Sophus/sophus/so3.hpp:570-591`).
-///
-/// Used only by [`Se3::exp`], because that is what `SE3::exp` calls. It differs
-/// from basalt's own left Jacobian (`sophus_utils.hpp:312-337`) in the Taylor
-/// branch, which stops at `I + Omega/2` instead of adding `Omega^2/6`.
+/// Left Jacobian for coupled [`Se3::exp`]. Its Taylor branch stops at
+/// `I + Omega/2`, unlike the standalone Jacobian's additional `Omega^2/6` term.
 fn sophus_left_jacobian_so3<S: LieScalar>(omega: &Vector3<S>, theta: S) -> Matrix3<S> {
     let theta_sq: S = theta * theta;
     let big_omega: Matrix3<S> = So3::hat(omega);
@@ -750,7 +646,7 @@ fn sophus_left_jacobian_so3<S: LieScalar>(omega: &Vector3<S>, theta: S) -> Matri
 }
 
 /// Sophus's own inverse left Jacobian, `SO3::leftJacobianInverse`
-/// (`Sophus/sophus/so3.hpp:594-620`). Used only by [`Se3::log`].
+/// Used only by [`Se3::log`].
 fn sophus_left_jacobian_inv_so3<S: LieScalar>(omega: &Vector3<S>, theta: S) -> Matrix3<S> {
     let theta_sq: S = theta * theta;
     let big_omega: Matrix3<S> = So3::hat(omega);
@@ -828,7 +724,7 @@ mod tests {
     /// The one value in this module checked by hand rather than against a
     /// finite difference: `SO3::exp([0.1, 0.2, 0.3])` under Sophus's formula
     /// `w = cos(theta/2)`, `v = sin(theta/2)/theta * omega`
-    /// (`Sophus/sophus/so3.hpp:735-741`) with `theta = |omega|`.
+    ///  with `theta = |omega|`.
     #[test]
     fn exp_matches_the_hand_computed_sophus_quaternion() {
         let rotation: So3<f64> = So3::exp(&Vector3::new(0.1, 0.2, 0.3));
@@ -918,7 +814,7 @@ mod tests {
     /// A long chain of compositions must not leak unit length.
     ///
     /// `nalgebra`'s `UnitQuaternion * UnitQuaternion` skips the renormalization
-    /// Sophus does on every product (`Sophus/sophus/so3.hpp:378-389`), and
+    /// Sophus does on every product, and
     /// 100,000 `f32` compositions of one small rotation take the norm to
     /// 1.0010456 without it — a rotation matrix off by 7e-3, which the
     /// estimator's window would carry straight into the residuals.
@@ -985,8 +881,7 @@ mod tests {
         }
     }
 
-    /// Near pi the closed form's `sin` denominator vanishes; basalt swaps in a
-    /// zeroth-order expansion (`sophus_utils.hpp:212-214`) and so do we.
+    /// Near pi, use a zeroth-order expansion to avoid the vanishing sine denominator.
     #[test]
     fn the_inverse_jacobians_stay_finite_at_pi() {
         let phi: Vector3<f64> = Vector3::new(std::f64::consts::PI, 0.0, 0.0);
@@ -1008,7 +903,7 @@ mod tests {
     }
 
     /// The decoupled exponential puts the tangent head into the translation
-    /// untouched, which the coupled one does not (`sophus_utils.hpp:82-89`).
+    /// untouched, which the coupled one does not.
     #[test]
     fn the_decoupled_exponential_differs_from_the_coupled_one() {
         let tangent: Vector6<f64> = Vector6::new(1.0, 0.0, 0.0, 0.0, 0.0, 1.0);
@@ -1024,7 +919,6 @@ mod tests {
 
     /// `apply_inc` is neither exponential: the rotation multiplies from the left
     /// and the translation is added in the world frame
-    /// (`basalt-headers/include/basalt/imu/imu_types.h:96-99`).
     #[test]
     fn apply_inc_left_multiplies_the_rotation() {
         let base: Se3<f64> = Se3::new(
@@ -1157,9 +1051,7 @@ mod tests {
             prop_assert!((right_jacobian_so3(&phi) * right_jacobian_inv_so3(&phi) - identity).norm() < 1e-11);
         }
 
-        /// basalt's `J_l(phi) = J_r(phi)^T` (`sophus_utils.hpp:145` vs `:312`),
-        /// which is what pins [`left_jacobian_inv_so3`]: the right-hand pair is
-        /// checked against finite differences and against each other above.
+        /// Check `J_l(phi) = J_r(phi)^T` alongside inverse and finite-difference identities.
         #[test]
         fn the_left_jacobian_is_the_right_jacobian_transposed(phi in tangent3()) {
             prop_assert!(

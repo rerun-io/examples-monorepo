@@ -150,7 +150,7 @@ def texture() -> TextureFactory:
     """One fixed blocky-noise scene, shifted by whole pixels.
 
     Blocky **noise**, not a lattice: a repeating pattern gives every corner the
-    same score, and basalt's suppression is strictly-greater-than, so a tie kills
+    same score, and the detector's suppression is strictly-greater-than, so a tie kills
     both sides and a perfectly regular scene detects almost nothing.
     """
 

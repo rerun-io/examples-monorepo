@@ -226,8 +226,8 @@ fn copying_the_warp_arrays_costs_nothing_once_warm() {
 /// threshold ladder — every cell of a grid row filters its own columns out of
 /// the same band, see `Band` in `frontend::detect` — over one detection pass per
 /// camera. Each scan costs one `Vec` per row of the band, allocated and freed
-/// (`features/fast.rs:465`, the `row_cap` buffer), plus the one
-/// `fast_detect_rect_u8` returns (`features/cells.rs:141`); 512 is the slack for
+/// (`features/fast.rs`, the `row_cap` buffer), plus the one
+/// `fast_detect_rect_u8` returns (`features/cells.rs`); 512 is the slack for
 /// everything else a frame touches.
 ///
 /// The count is `cameras x cell rows x rungs x rows-per-band`, which is the

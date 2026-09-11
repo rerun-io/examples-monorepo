@@ -113,30 +113,11 @@ pub struct Vio {
 
 #[pymethods]
 impl Vio {
-    /// Build the pipeline from basalt's own calibration and config.
-    ///
-    /// The two objects are the ones [`OpticalFlow`] takes: basalt's files arrive
-    /// through [`Calibration::from_json`] and [`VioConfig::from_json`], and the
-    /// catalog's own dataclasses through [`Calibration::from_catalog`]. The
-    /// estimator runs in single precision, which is the precision every
-    /// reference run was produced at (`use-double` false).
-    /// `gpu` runs the frontend's pyramid, patch build and KLT tracker through
-    /// CubeCL on this host's GPU instead of the CPU port (decision D21). The
-    /// default is the CPU, which is what every accuracy reference was produced
-    /// on; a build without the `gpu-wgpu` cargo feature refuses `gpu=True` rather
-    /// than ignoring it, and so does a build that has the feature on a host
-    /// with no usable GPU — a missing driver library, a driver that will not
-    /// initialise, no visible device, no adapter — each a `ValueError` naming
-    /// what is absent rather than the `PanicException` CubeCL's own unwrapped
-    /// bring-up produces (decision D32). A failure no probe anticipates is
-    /// caught rather than raised, so it is a `ValueError` too — with the
-    /// runtime's own panic message left on stderr, which is the only account of
-    /// a case the probe did not know to ask about.
-    ///
-    /// `threads` is **inert on the GPU lane**: it reaches
-    /// `FrontendOptions::threads`, which only `CpuPatchTracker::new` reads, and
-    /// the GPU tracker holds no work pool. It is accepted rather than refused
-    /// together with `gpu=True` so the same call site can select either lane.
+    /// Build an f32 pipeline from calibration and configuration.
+    /// Inputs can come from JSON or catalog dataclasses. CPU is the default; `gpu`
+    /// selects CubeCL frontend stages. Missing feature support or unusable runtime
+    /// returns `ValueError`, including caught runtime initialization panics (D32).
+    /// `threads` controls only the CPU pool and is accepted but inert with `gpu=True`.
     #[new]
     #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None, gpu = false))]
     fn new(
@@ -713,11 +694,7 @@ fn float64_triples(object: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<[f64; 
         .collect())
 }
 
-/// basalt's `VioConfig`, as `data/**/*_config.json` carries it.
-///
-/// A fresh instance is `VioConfig::VioConfig()`, the same defaults the C++
-/// constructor sets; `VioConfig::from_json` then overwrites whatever keys a
-/// file names, leaving the rest alone, as cereal does.
+/// VIO configuration read from JSON. Omitted keys retain constructor defaults.
 #[pyclass(module = "slam_rs._core", skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct VioConfig {
@@ -726,7 +703,7 @@ pub struct VioConfig {
 
 #[pymethods]
 impl VioConfig {
-    /// basalt's own defaults (`src/utils/vio_config.cpp:47-128`).
+    /// Default VIO configuration.
     #[new]
     fn new() -> Self {
         Self {
@@ -734,7 +711,7 @@ impl VioConfig {
         }
     }
 
-    /// Read one of basalt's config files; keys it omits keep their default.
+    /// Read configuration JSON, retaining defaults for omitted keys.
     #[staticmethod]
     fn from_json(text: &str) -> PyResult<Self> {
         Ok(Self {
@@ -742,7 +719,7 @@ impl VioConfig {
         })
     }
 
-    /// Write the config back in basalt's shape, `value0` wrapper and all.
+    /// Write configuration JSON with the `value0` wrapper.
     fn to_json(&self) -> PyResult<String> {
         self.inner.to_json_string().map_err(value_error)
     }
@@ -774,14 +751,9 @@ impl VioConfig {
     }
 }
 
-/// basalt's camera-IMU calibration: extrinsics, intrinsics and the noise model.
-///
-/// Either read from one of basalt's calibration files, or built from what the
-/// catalog feed reports. The second path takes
-/// `slam_rs.catalog_feed.CameraCalib` and `ImuCalib` field by field, so the
-/// catalog-to-basalt rules — the rotation-matrix check, the model names, the
-/// isotropic noise densities — stay in the Rust that is tested against basalt's
-/// own JSON rather than being written a second time in Python.
+/// Camera-IMU calibration: extrinsics, intrinsics and noise model.
+/// Read JSON or copy catalog dataclass fields into the same Rust implementation.
+/// Rotation validation, model names and isotropic noise conversion stay in one place.
 #[pyclass(module = "slam_rs._core", skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct Calibration {
@@ -790,7 +762,7 @@ pub struct Calibration {
 
 #[pymethods]
 impl Calibration {
-    /// Read one of basalt's calibration files.
+    /// Read calibration JSON.
     #[staticmethod]
     fn from_json(text: &str) -> PyResult<Self> {
         Ok(Self {
@@ -798,11 +770,8 @@ impl Calibration {
         })
     }
 
-    /// Build the calibration from the feed's dataclasses.
-    ///
-    /// `cameras` are `CameraCalib` in rig order and `imu` is an `ImuCalib`; only
-    /// the fields basalt models are read, so `ImuCalib.imu_T_body` is ignored —
-    /// the rig reference frame *is* the IMU on every recording the feed reads.
+    /// Build calibration from cameras in rig order and IMU fields.
+    /// `imu_T_body` is ignored because the recording rig frame is the IMU frame.
     #[staticmethod]
     fn from_catalog(cameras: Vec<Bound<'_, PyAny>>, imu: &Bound<'_, PyAny>) -> PyResult<Self> {
         let mut parts: Vec<CoreCameraParts<f64>> = Vec::with_capacity(cameras.len());
@@ -815,7 +784,7 @@ impl Calibration {
         })
     }
 
-    /// Write the calibration back in basalt's shape, `value0` wrapper and all.
+    /// Write calibration JSON with the `value0` wrapper.
     fn to_json(&self) -> PyResult<String> {
         self.inner.to_json_string().map_err(value_error)
     }
@@ -901,10 +870,7 @@ impl FlowFrame {
         self.grid.cell
     }
 
-    /// `(x_start, y_start)`: the top-left corner of cell `(0, 0)` in pixels.
-    ///
-    /// basalt centres the grid on the frame, so the leftover `width % cell` is
-    /// split between the two edges (`keypoints.cpp:140-144`).
+    /// Top-left grid origin; split leftover pixels between the two image edges.
     #[getter]
     fn cell_origin(&self) -> (usize, usize) {
         (self.grid.x_start, self.grid.y_start)
@@ -946,10 +912,7 @@ impl FlowFrame {
             .reshape((keypoints.ids.len(), 2, 3))
     }
 
-    /// One camera's occupancy counts: `int32[rows, columns]`.
-    ///
-    /// The grid is camera 0's, as basalt's is (`frame_to_frame_optical_flow.h:119`),
-    /// whatever the camera's own resolution is.
+    /// Occupancy counts with camera 0's grid shape, regardless of this camera's resolution.
     fn occupancy<'py>(
         &self,
         py: Python<'py>,
@@ -978,11 +941,8 @@ impl FlowFrame {
     }
 }
 
-/// basalt's `FrameToFrameOpticalFlow`, driven one frameset at a time.
-///
-/// Pattern 51 only: every shipped config sets `optical_flow_pattern = 51`, and a
-/// config asking for another one is refused rather than silently tracked with
-/// the wrong pattern.
+/// Frame-to-frame optical flow, driven one frameset at a time.
+/// Only Pattern51 is supported; other configured patterns are refused.
 #[pyclass(module = "slam_rs._core")]
 pub struct OpticalFlow {
     inner: FrontendLane,
@@ -992,10 +952,7 @@ pub struct OpticalFlow {
 
 #[pymethods]
 impl OpticalFlow {
-    /// Build a frontend for one rig.
-    ///
-    /// One of basalt's own files arrives through [`Calibration::from_json`] and
-    /// [`VioConfig::from_json`], so this takes the two classes only.
+    /// Build a frontend from calibration and configuration objects loaded through their JSON APIs.
     #[new]
     #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None))]
     fn new(
@@ -1189,10 +1146,7 @@ fn camera_parts(object: &Bound<'_, PyAny>, index: usize) -> PyResult<CoreCameraP
     })
 }
 
-/// One `slam_rs.catalog_feed.ImuCalib`, read attribute by attribute.
-///
-/// `imu_T_body` is not read: basalt's calibration has no such field, because the
-/// rig reference frame *is* the IMU on every recording the feed reads.
+/// Read catalog IMU fields. `imu_T_body` is unused because the rig frame is the IMU frame.
 fn imu_parts(object: &Bound<'_, PyAny>) -> PyResult<CoreImuParts<f64>> {
     let what: &str = "imu";
     Ok(CoreImuParts {

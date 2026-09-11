@@ -1,36 +1,19 @@
-//! The bundle-adjustment base: sliding-window state, the reprojection residual
-//! and DLT triangulation.
+//! The bundle-adjustment base: sliding-window state, reprojection residuals and DLT triangulation.
 //!
-//! Ported from `include/basalt/vi_estimator/ba_base.h`,
-//! `src/vi_estimator/ba_base.cpp` and `include/basalt/utils/ba_utils.h`.
-//! Everything the square-root linearizer needs before it starts building
-//! landmark blocks lives here: the two state maps, the landmark database, the
-//! per-observation residual with its three Jacobians, the relative pose that is
-//! hoisted per (host, target) pair, the error the Levenberg-Marquardt loop
-//! accepts or rejects on, and `backup`/`restore`.
+//! This module owns the state maps, landmark database, per-observation residuals,
+//! relative poses, objective cost and backup/restore operations.
 //!
-//! Three conventions are load-bearing, and each one is a documented deviation of
-//! basalt's code from its own papers (papers-part2 §13):
+//! Three conventions determine the estimator's updates:
+//! * The residual is `pi(...) - z`, opposite to Paper 1 Eq. (8). The solver
+//!   negates its increment before back-substitution. Changing either sign alone
+//!   reverses the update.
+//! * Huber weighting uses raw pixel residuals before division by `obs_std_dev^2`.
+//!   A 1 px threshold with a 0.5 px deviation is therefore a 2-sigma threshold.
+//! * Pose increments are decoupled and left-multiplied; the pose Jacobians
+//!   differentiate that increment.
 //!
-//! * **The residual sign is flipped.** Paper 1 Eq. (8) is `r = z - pi(...)`;
-//!   `ba_utils.h:117` computes `res -= kpt_obs`, i.e. `pi(...) - z`. `J^T J` does
-//!   not care, `J^T r` does, and basalt compensates by negating the increment at
-//!   `sqrt_keypoint_vio.cpp:1450` (`inc = -inc`). The port keeps **both** halves:
-//!   [`linearize_point`] returns basalt's sign, and the increment is negated
-//!   where basalt negates it (a later stage). Fixing one without the other
-//!   inverts the whole optimisation.
-//! * **Huber is applied to the raw pixel residual, `1/sigma` afterwards.**
-//!   `ba_base.cpp:179-182` compares `res.norm()` against `huber_thresh` in
-//!   pixels and only then divides by `obs_std_dev^2`. With the shipped
-//!   `vio_obs_huber_thresh = 1.0` px and `vio_obs_std_dev = 0.5` px, the
-//!   effective threshold is **2 sigma**, not 1.
-//! * **The pose increment is the decoupled, left-multiplied one**
-//!   (`imu_types.h:96-99`), which is what `d_res_d_xi` is taken with respect to.
-//!
-//! Parallelism: none in this stage. `compute_error` is written as a fixed-order
-//! fold over per-host-frame partial results, so the `threads` config field can
-//! later turn the middle line into a `par_chunks` over the same `Vec` with the
-//! same sequential merge and produce the same floating-point sum (decision D31).
+//! Error accumulation uses a fixed-order fold over host-frame partial results
+//! (decision D31). This keeps the floating-point sum deterministic.
 
 use std::collections::BTreeMap;
 
@@ -50,21 +33,18 @@ use crate::types::{
 
 /// What the bundle-adjustment base refuses to do.
 ///
-/// Each variant replaces a place where C++ aborts, asserts or indexes out of
-/// range. The estimator runs inside a released GIL where a panic aborts the
-/// process, so none of these may be a panic (decision D32, trap 15).
+/// Data errors must return typed errors: a panic while the estimator runs with
+/// the GIL released can abort the process (decision D32, trap 15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BaError {
     /// `getPoseStateWithLin` found the timestamp in neither map and called
-    /// `std::abort()` (`ba_base.h:131-142`).
+    /// `std::abort()`.
     #[error("no pose or state for frame {t_ns} ns")]
     UnknownFrame {
         /// The timestamp that was looked up.
         t_ns: FrameId,
     },
-    /// An image named a camera the calibration does not have; C++ indexes
-    /// `calib.T_i_c[cam_id]` and `calib.intrinsics[cam_id]` unchecked
-    /// (`ba_base.cpp:154-155`, `:188`).
+    /// An image names a camera absent from the calibration.
     #[error("camera {cam_id} is not in the calibration ({camera_count} cameras)")]
     UnknownCamera {
         /// The camera index that was asked for.
@@ -72,13 +52,10 @@ pub enum BaError {
         /// Cameras the calibration carries.
         camera_count: usize,
     },
-    /// The adjacency named a landmark the database does not hold, or a landmark
-    /// has no observation in a target the adjacency lists it under; C++ throws
-    /// from `at` (`ba_base.cpp:165-166`).
+    /// The adjacency names a missing landmark or an observation absent from its target.
     #[error("landmark {0:?} is missing from the database or from that target")]
     InconsistentLandmark(LandmarkId),
-    /// `computeDelta` met a block that is neither a pose nor a full state
-    /// (`ba_base.cpp:300`, `BASALT_ASSERT(false)`).
+    /// The delta computation met a block that is neither a pose nor a full state.
     #[error("frame {frame_id}: block size {size} is neither {POSE_SIZE} nor {POSE_VEL_BIAS_SIZE}")]
     UnexpectedBlockSize {
         /// The frame the ordering names.
@@ -86,15 +63,14 @@ pub enum BaError {
         /// The size it was given.
         size: usize,
     },
-    /// `computeDelta` met a block whose linearization point is not frozen
-    /// (`ba_base.cpp:294`, `:297`). Its delta would be meaningless.
+    /// The block is not frozen at its linearization point, so its delta is undefined.
     #[error("frame {frame_id} is in the marginalization ordering but is not linearized")]
     NotLinearized {
         /// The frame the ordering names.
         frame_id: FrameId,
     },
     /// The marginalization prior's matrix does not match its own ordering, or
-    /// the destination system is too small (`ba_base.cpp:379`, `:444` assert).
+    /// the destination system is too small (assert).
     #[error("marginalization prior has {cols} columns, expected {total_size}")]
     MargPriorSize {
         /// The prior's column count.
@@ -102,8 +78,7 @@ pub enum BaError {
         /// What its ordering says it should be.
         total_size: usize,
     },
-    /// The prior's ordering disagrees with the window's, which C++ asserts
-    /// block by block (`ba_base.cpp:383-388`).
+    /// The prior's ordering disagrees with the window's block ordering.
     #[error("frame {frame_id} has a different offset in the prior than in the window")]
     MargOrderMismatch {
         /// The frame that disagrees.
@@ -119,13 +94,10 @@ pub enum BaError {
 
 // ─── the relative pose, hoisted per (host, target) pair ────────────────────
 
-/// `computeRelPose` (`ba_utils.h:41-78`): the transform that takes a point in
-/// the host camera frame to the target camera frame, with its two 6x6 Jacobians.
+/// The host-camera to target-camera transform and its two 6x6 Jacobians.
 ///
-/// The composition is basalt's **decoupled** one (`:49-50`): the rotation is a
-/// plain product, but the translation is `R_t^-1 (t_h - t_t)` rather than
-/// anything `SE3::inverse` would produce. That is what makes the Jacobians below
-/// match the left-multiplied increment of `imu_types.h:96-99`.
+/// The composition is decoupled: rotation is a product, while translation is
+/// `R_t^-1 (t_h - t_t)`. Its Jacobians use the decoupled, left-multiplied increment.
 pub fn compute_rel_pose<S: LieScalar>(
     t_w_i_h: &Se3<S>,
     t_i_c_h: &Se3<S>,
@@ -136,7 +108,7 @@ pub fn compute_rel_pose<S: LieScalar>(
 ) -> Se3<S> {
     let tmp2: Se3<S> = t_i_c_t.inverse();
 
-    // `T_t_i_h_i` (`ba_utils.h:48-50`).
+    // `T_t_i_h_i`.
     let t_t_i_h_i: Se3<S> = Se3::new(
         t_w_i_t.rotation.inverse() * t_w_i_h.rotation,
         t_w_i_t.rotation.inverse() * (t_w_i_h.translation - t_w_i_t.translation),
@@ -147,7 +119,6 @@ pub fn compute_rel_pose<S: LieScalar>(
 
     if let Some(out) = d_rel_d_h {
         // `RR = blkdiag(R, R)` with `R = T_w_i_h.so3().inverse().matrix()`
-        // (`ba_utils.h:56-63`).
         let r: Matrix3<S> = t_w_i_h.rotation.inverse().matrix();
         let mut rr: Matrix6<S> = Matrix6::zeros();
         rr.fixed_view_mut::<3, 3>(0, 0).copy_from(&r);
@@ -156,7 +127,7 @@ pub fn compute_rel_pose<S: LieScalar>(
     }
 
     if let Some(out) = d_rel_d_t {
-        // `-T_i_c_t.inverse().Adj() * RR` (`ba_utils.h:67-74`).
+        // `-T_i_c_t.inverse().Adj() * RR`.
         let r: Matrix3<S> = t_w_i_t.rotation.inverse().matrix();
         let mut rr: Matrix6<S> = Matrix6::zeros();
         rr.fixed_view_mut::<3, 3>(0, 0).copy_from(&r);
@@ -169,12 +140,10 @@ pub fn compute_rel_pose<S: LieScalar>(
 
 // ─── the reprojection residual ─────────────────────────────────────────────
 
-/// Everything [`linearize_point`] can be asked to fill in besides the residual.
+/// Optional outputs of [`linearize_point`] besides the residual.
 ///
-/// C++ passes four raw pointers, three of them defaulted to null
-/// (`ba_utils.h:80-85`). One struct of options keeps the call sites honest and
-/// costs nothing: every field is a borrowed fixed-size matrix, so the residual
-/// path allocates nothing.
+/// Borrowed fixed-size matrices let callers request only the outputs they need
+/// without allocation.
 #[derive(Debug)]
 pub struct LinearizePointOut<'a, S: LieScalar> {
     /// `d_res_d_xi` (2x6): the residual against the relative-pose increment.
@@ -186,8 +155,7 @@ pub struct LinearizePointOut<'a, S: LieScalar> {
 }
 
 impl<S: LieScalar> Default for LinearizePointOut<'_, S> {
-    /// All four C++ pointers null: the residual only
-    /// (`ba_utils.h:83-85` default arguments).
+    /// Request only the residual.
     fn default() -> Self {
         Self {
             d_res_d_xi: None,
@@ -197,16 +165,12 @@ impl<S: LieScalar> Default for LinearizePointOut<'_, S> {
     }
 }
 
-/// `linearizePoint` (`ba_utils.h:80-138`): one observation's residual and, on
-/// request, its Jacobians.
+/// One observation's residual and optional Jacobians.
 ///
-/// The residual is `pi(T_t_h * q) - z` (`:94-117`) with `q` the homogeneous
-/// landmark `[unproject(direction), inv_dist]`. **The sign is basalt's, i.e.
-/// flipped relative to Paper 1 Eq. (8)** — see the module docs.
-///
-/// Returns `false` when the camera rejects the point or the pixel is not finite
-/// (`:97-98`), in which case `res` holds whatever the camera model wrote and the
-/// caller must ignore it, exactly as C++ does.
+/// The residual is `pi(T_t_h * q) - z`, where `q` is the homogeneous landmark
+/// `[unproject(direction), inv_dist]`. See the module docs for the sign convention.
+/// Returns `false` if the camera rejects the point or the pixel is non-finite.
+/// In that case the caller must ignore `res`, which may still have been written.
 pub fn linearize_point<S: LieScalar>(
     kpt_obs: &Vector2<S>,
     kpt_pos: &Landmark<S>,
@@ -216,7 +180,7 @@ pub fn linearize_point<S: LieScalar>(
     out: &mut LinearizePointOut<'_, S>,
 ) -> bool {
     // `StereographicParam::unproject(direction, &Jup)` then the inverse distance
-    // into the homogeneous slot (`ba_utils.h:89-92`).
+    // into the homogeneous slot.
     let mut jup: Matrix4x2<S> = Matrix4x2::zeros();
     let mut p_h_3d: Vector4<S> =
         StereographicParam::unproject_with_jacobian(&kpt_pos.direction, &mut jup);
@@ -226,7 +190,7 @@ pub fn linearize_point<S: LieScalar>(
 
     let mut jp: Matrix2x4<S> = Matrix2x4::zeros();
     let mut valid: bool = cam.project_with_jacobian(&p_t_3d, res, &mut jp);
-    // `valid &= res.array().isFinite().all()` (`ba_utils.h:98`).
+    // `valid &= res.array().isFinite().all()`.
     valid &= res[0].to_f64().is_finite() && res[1].to_f64().is_finite();
 
     if !valid {
@@ -234,18 +198,17 @@ pub fn linearize_point<S: LieScalar>(
     }
 
     if let Some(proj) = out.proj.as_deref_mut() {
-        // `proj.head<2>() = res` and the inverse depth in the target frame
-        // (`ba_utils.h:113-116`), before the observation is subtracted.
+        // Store the projection and inverse depth before subtracting the observation.
         proj[0] = res[0];
         proj[1] = res[1];
         proj[2] = p_t_3d[3] / p_t_3d.fixed_rows::<3>(0).norm();
     }
 
-    // `res -= kpt_obs` (`ba_utils.h:117`) — the flipped sign.
+    // `res -= kpt_obs` — the flipped sign.
     *res -= kpt_obs;
 
     if let Some(d_res_d_xi) = out.d_res_d_xi.as_deref_mut() {
-        // `d_point_d_xi` (4x6, `ba_utils.h:120-123`). The inverse-distance
+        // `d_point_d_xi` (4x6). The inverse-distance
         // scaling on the translation columns is what the homogeneous `q` costs.
         let mut d_point_d_xi: nalgebra::Matrix4x6<S> = nalgebra::Matrix4x6::zeros();
         let mut ident: Matrix3<S> = Matrix3::identity();
@@ -254,12 +217,12 @@ pub fn linearize_point<S: LieScalar>(
         d_point_d_xi
             .fixed_view_mut::<3, 3>(0, 3)
             .copy_from(&(-So3::hat(&Vector3::new(p_t_3d[0], p_t_3d[1], p_t_3d[2]))));
-        // `row(3).setZero()` (`:123`) — already zero from the constructor.
+        // `row(3).setZero()` — already zero from the constructor.
         *d_res_d_xi = jp * d_point_d_xi;
     }
 
     if let Some(d_res_d_p) = out.d_res_d_p.as_deref_mut() {
-        // `Jpp` (4x3, `ba_utils.h:129-132`).
+        // `Jpp` (4x3).
         let mut jpp: Matrix4x3<S> = Matrix4x3::zeros();
         let top: nalgebra::Matrix3x4<S> = t_t_h.fixed_view::<3, 4>(0, 0).into_owned();
         jpp.fixed_view_mut::<3, 2>(0, 0).copy_from(&(top * jup));
@@ -280,21 +243,16 @@ pub fn linearize_point<S: LieScalar>(
 /// matrix that reaches it is degenerate, and `None` is the honest answer.
 const SVD_MAX_ITERATIONS: usize = 64;
 
-/// `triangulate(f0, f1, T_0_1)` (`ba_base.h:89-116`): the DLT, returning a
-/// homogeneous `[unit direction (3), inverse distance]` in frame 0.
+/// DLT triangulation, returning `[unit direction (3), inverse distance]` in frame 0.
 ///
-/// `f0` and `f1` are the two bearing vectors, `T_0_1` the transform from frame 1
-/// to frame 0. The 4x4 `A` is built from the two projection matrices exactly as
-/// `:103-107`, the null space comes from the last column of `V`, and the sign is
-/// flipped when the result points away from `f0` (`:113`).
+/// `f0` and `f1` are bearing vectors; `T_0_1` maps frame 1 to frame 0.
+/// The 4x4 system is built from the two projection matrices. Its null vector is
+/// the last column of `V`, with sign chosen to point towards `f0`.
 ///
-/// The caller accepts finite results with `0 < inv_dist < 3`, so the point
-/// must be farther than 1/3 m. Exactly parallel bearings carry no finite depth
-/// and are refused before decomposition.
-///
-/// Compute the DLT null vector with nalgebra SVD in f64, including for f32
-/// inputs, to reduce cancellation error. Return None for invalid inputs,
-/// non-convergence, or a homogeneous vector with no spatial direction.
+/// The caller accepts finite results with `0 < inv_dist < 3`, so points must be
+/// farther than 1/3 m. Exactly parallel bearings are refused before decomposition.
+/// The SVD runs in f64 even for f32 inputs to reduce cancellation. Invalid inputs,
+/// non-convergence and vectors without a spatial direction return `None`.
 pub fn triangulate<S: LieScalar>(
     f0: &Vector3<S>,
     f1: &Vector3<S>,
@@ -306,7 +264,7 @@ pub fn triangulate<S: LieScalar>(
     if f0.cross(&f1_in_0).iter().all(|value| *value == S::zero()) {
         return None;
     }
-    // `P1.setIdentity()`, `P2 = T_0_1.inverse().matrix3x4()` (`ba_base.h:98-100`).
+    // `P1.setIdentity()`, `P2 = T_0_1.inverse().matrix3x4()`.
     let p1: nalgebra::Matrix3x4<S> = {
         let mut m: nalgebra::Matrix3x4<S> = nalgebra::Matrix3x4::zeros();
         m.fixed_view_mut::<3, 3>(0, 0)
@@ -366,7 +324,7 @@ pub fn triangulate<S: LieScalar>(
         world_point[i] /= norm;
     }
 
-    // `if (f0.dot(worldPoint.head<3>()) < 0) worldPoint *= -1` (`ba_base.h:113`).
+    // `if (f0.dot(worldPoint.head<3>()) < 0) worldPoint *= -1`.
     let dot: S = f0[0] * world_point[0] + f0[1] * world_point[1] + f0[2] * world_point[2];
     if dot < S::zero() {
         world_point = -world_point;
@@ -376,8 +334,7 @@ pub fn triangulate<S: LieScalar>(
 
 // ─── the Huber-weighted cost of one observation ───────────────────────────
 
-/// The weight and the cost `computeError` adds for one observation
-/// (`ba_base.cpp:179-182`), with a fixed row order.
+/// The robust weight and cost of one observation, accumulated in fixed order.
 ///
 /// ```text
 /// huber_weight = e < huber_thresh ? 1 : huber_thresh / e
@@ -385,19 +342,11 @@ pub fn triangulate<S: LieScalar>(
 /// cost         = 0.5 * (2 - huber_weight) * obs_weight * res^T * res
 /// ```
 ///
-/// `e` is `res.norm()` in **raw pixels**: the Huber comparison happens before
-/// the `1/sigma` scaling (papers-part2 §13 D14), so the shipped 1.0 px threshold
-/// against a 0.5 px sigma is an effective 2 sigma.
-///
-/// The last line is not `weight * (rx^2 + ry^2)`. C++'s `*` is left-associative,
-/// so the scalar factor multiplies `res.transpose()` — a **row expression whose
-/// two coefficients are each scaled** — and only then does the 1x2 by 2x1 product
-/// contract it against the unscaled column. Reassociating it to scale the dot
-/// product instead moves the last bits: at `res = [10.125, 9.625]` with
-/// `huber_thresh = 1` and `obs_std_dev = 0.5` in `f32`, C++ returns
-/// `53.879341125488281` and the reassociated form `53.879337310791016`. This is
-/// the cost the Levenberg-Marquardt accept test compares against its predicted
-/// decrease, so the difference is not cosmetic.
+/// `e` is the norm in raw pixels. Huber weighting precedes noise scaling, so
+/// 1 px at a 0.5 px deviation is a 2-sigma threshold.
+/// The scalar factor multiplies each row coefficient before contraction with
+/// the unscaled residual. Reassociating to scale the dot product changes rounding
+/// and can change the LM acceptance test near its threshold.
 #[inline]
 pub fn huber_cost<S: LieScalar>(res: &Vector2<S>, e: S, huber_thresh: S, obs_std_dev: S) -> (S, S) {
     let huber_weight: S = if e < huber_thresh {
@@ -415,7 +364,7 @@ pub fn huber_cost<S: LieScalar>(res: &Vector2<S>, e: S, huber_thresh: S, obs_std
 
 // ─── the sliding-window state ──────────────────────────────────────────────
 
-/// `BundleAdjustmentBase<Scalar>` (`ba_base.h:42-155`): the window the estimator
+/// `BundleAdjustmentBase<Scalar>` : the window the estimator
 /// optimises over.
 ///
 /// `frame_poses` holds keyframes as 6-dof pose blocks, `frame_states` the
@@ -424,26 +373,22 @@ pub fn huber_cost<S: LieScalar>(res: &Vector2<S>, e: S, huber_thresh: S, obs_std
 /// maps; [`Self::get_pose_state_with_lin`] hides which.
 #[derive(Debug, Clone)]
 pub struct BundleAdjustmentBase<S: LieScalar> {
-    /// Full states, newest frames (`ba_base.h:144`).
+    /// Full states, newest frames.
     pub frame_states: BTreeMap<FrameId, PoseVelBiasStateWithLin<S>>,
-    /// Pose-only blocks, keyframes (`ba_base.h:145`).
+    /// Pose-only blocks, keyframes.
     pub frame_poses: BTreeMap<FrameId, PoseStateWithLin<S>>,
-    /// The landmark database (`ba_base.h:148`).
+    /// The landmark database.
     pub lmdb: LandmarkDatabase<S>,
     /// `vio_obs_std_dev`, the pixel noise the residual is whitened by
-    /// (`ba_base.h:150`).
     pub obs_std_dev: S,
-    /// `vio_obs_huber_thresh`, in **raw pixels** (`ba_base.h:151`).
+    /// `vio_obs_huber_thresh`, in **raw pixels**.
     pub huber_thresh: S,
-    /// The rig calibration (`ba_base.h:153`).
+    /// The rig calibration.
     pub calib: Calibration<S>,
-    /// The projection models, resolved once from `calib.intrinsics`.
+    /// Projection models resolved once when the window is built.
     ///
-    /// C++ carries a `std::variant` per camera and `std::visit`s it at every
-    /// call site (`ba_base.cpp:162-188`); the port resolves the parsed
-    /// [`crate::calib::CameraModel`] into a [`CameraEnum`] when the window is
-    /// built, so a model this stage cannot project with is an error at
-    /// construction rather than inside the residual loop.
+    /// Resolving [`crate::calib::CameraModel`] into [`CameraEnum`] rejects unsupported
+    /// models at construction, before the residual loop.
     cameras: Vec<CameraEnum<S>>,
 }
 
@@ -471,14 +416,9 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
         &self.cameras
     }
 
-    /// The pose block for a timestamp, `getPoseStateWithLin`
-    /// (`ba_base.h:131-142`).
-    ///
-    /// `frame_poses` is searched first; a hit in `frame_states` is **promoted**
-    /// to a pose block, carrying the first six entries of its delta and its
-    /// `linearized` flag (`imu_types.h:205-212`). C++ prints to `cerr` and
-    /// `std::abort()`s when neither map has it; the port returns
-    /// [`BaError::UnknownFrame`].
+    /// Look up a pose block by timestamp, searching `frame_poses` first.
+    /// A full state is promoted to a pose block with its first six delta entries and
+    /// `linearized` flag. A timestamp in neither map returns [`BaError::UnknownFrame`].
     pub fn get_pose_state_with_lin(&self, t_ns: FrameId) -> Result<PoseStateWithLin<S>, BaError> {
         if let Some(pose) = self.frame_poses.get(&t_ns) {
             return Ok(*pose);
@@ -510,7 +450,7 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
         Ok((t_i_c, cam))
     }
 
-    /// `T_t_h` for one (host, target) pair (`ba_base.cpp:148-160`).
+    /// `T_t_h` for one (host, target) pair.
     ///
     /// The identity when host and target are the same image, which is why a
     /// landmark hosted and observed in the same frame costs nothing.
@@ -527,44 +467,24 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
         Ok(rel.matrix())
     }
 
-    /// The Huber-weighted reprojection error over the whole window, and how many
-    /// observations contributed, `computeError` (`ba_base.cpp:132-204`).
+    /// The window's Huber-weighted reprojection cost and contributing observation count.
     ///
-    /// Per observation (`:172-185`), with `e = |res|` in **raw pixels**:
+    /// With `e = |res|` in raw pixels, `huber_weight = min(1, huber_thresh / e)`
+    /// (with weight 1 at zero), `obs_weight = huber_weight / obs_std_dev^2`, and
+    /// `error += 0.5 * (2 - huber_weight) * obs_weight * res^T res`.
+    /// Huber weighting precedes noise scaling: 1 px at 0.5 px deviation is 2 sigma.
     ///
-    /// ```text
-    /// huber_weight = e < huber_thresh ? 1 : huber_thresh / e
-    /// obs_weight   = huber_weight / obs_std_dev^2
-    /// error       += 0.5 * (2 - huber_weight) * obs_weight * res^T res
-    /// ```
-    ///
-    /// The Huber comparison happens **before** the `1/sigma` scaling
-    /// (papers-part2 §13 D14), so the shipped 1.0 px threshold with a 0.5 px
-    /// sigma is an effective 2 sigma.
-    ///
-    /// With `outliers` given, every observation whose `e` exceeds
-    /// `outlier_threshold` is recorded as `(target, e)`, and an observation the
-    /// camera rejected as `(target, -1)`; both become `-2` when host and target
-    /// are the same image, which is `filterOutliers`' signal to delete the whole
-    /// landmark (`:176`, `:184`, `:268`).
-    ///
-    /// The returned count is the number of observations that produced a residual
-    /// at all. C++ does not return it; the port does, because the caller
-    /// otherwise cannot tell an error of zero from an empty window.
-    ///
-    /// Sequential in this stage. The body is a fold over `host_frames` in index
-    /// order, so a `par_chunks` with a fixed-order merge is a drop-in that does
-    /// not change the sum (decision D31). **That is the only reason
-    /// `host_frame_error` is a separate function** — one host frame's
-    /// partial sum is what a parallel task would own. It is not inlined here so
-    /// the shape stays the C++'s (`ba_base.cpp:141-193` is a TBB lambda), and
-    /// D65 freezes the parallel path out of this stage.
+    /// If `outliers` is supplied, residuals above the threshold record `(target, e)`;
+    /// rejected projections record `(target, -1)`. Both use `-2` when host and target
+    /// are the same image, signalling deletion of the whole landmark.
+    /// The count distinguishes zero error from a window with no valid observations.
+    /// Host-frame partial sums merge sequentially in index order (D31, D65).
     pub fn compute_error(
         &self,
         mut outliers: Option<&mut BTreeMap<LandmarkId, Vec<(TimeCamId, S)>>>,
         outlier_threshold: S,
     ) -> Result<(S, usize), BaError> {
-        // `host_frames` (`ba_base.cpp:136-137`), sorted here rather than in
+        // `host_frames`, sorted here rather than in
         // `unordered_map` order — see the `landmark` module docs.
         let host_frames: Vec<TimeCamId> = self.lmdb.host_kfs();
 
@@ -584,7 +504,7 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
     }
 
     /// One host frame's contribution to [`Self::compute_error`]: the body of the
-    /// TBB lambda (`ba_base.cpp:141-193`), with its own accumulator so the
+    /// TBB lambda, with its own accumulator so the
     /// fold above sees a fixed number of partial sums.
     fn host_frame_error(
         &self,
@@ -600,7 +520,7 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
         for (&tcid_t, ids) in targets {
             let t_t_h: Matrix4<S> = self.rel_pose_matrix(tcid_h, tcid_t)?;
             let (_, cam) = self.camera_of(tcid_t)?;
-            // `tcid_h != tcid_t ? e : -2` (`ba_base.cpp:176`, `:184`).
+            // `tcid_h != tcid_t ? e : -2`.
             let same_image: bool = tcid_h == tcid_t;
             for &kpt_id in ids {
                 let kpt_pos: &Landmark<S> = self
@@ -642,14 +562,10 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
         Ok((local_error, num_points))
     }
 
-    /// Where every landmark projects in the newest frame, `computeProjections`
-    /// (`ba_base.cpp:329-372`), one list per camera.
-    ///
-    /// Each entry is `[u, v, inverse depth in the target camera, landmark id]`:
-    /// the residual is evaluated against a **zero** observation (`:363`), so the
-    /// first two components are the projection itself, and the fourth slot is
-    /// overwritten with the id (`:365`). This is the visualisation payload, not
-    /// an optimisation quantity.
+    /// Project every landmark into the newest frame, returning one list per camera.
+    /// Each entry is `[u, v, inverse depth, landmark id]`. A zero observation leaves
+    /// the projection in the first two components; the id replaces the fourth.
+    /// This payload is for visualization, not optimization.
     pub fn compute_projections(
         &self,
         last_state_t_ns: FrameId,
@@ -695,11 +611,8 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
         Ok(data)
     }
 
-    /// The stacked deltas of the frames in a marginalization ordering,
-    /// `computeDelta` (`ba_base.cpp:288-303`).
-    ///
-    /// Every block must be frozen at its linearization point, or its delta means
-    /// nothing; C++ asserts (`:294`, `:297`), the port returns
+    /// Stack deltas in the marginalization ordering.
+    /// Every block must be frozen at its linearization point or this returns
     /// [`BaError::NotLinearized`].
     pub fn compute_delta(&self, marg_order: &AbsOrderMap) -> Result<DVector<S>, BaError> {
         // Validate every block **before** allocating. `AbsOrderMap::push` accepts
@@ -744,27 +657,15 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
         Ok(delta)
     }
 
-    /// The marginalization prior's contribution to `H` and `b`, and its current
-    /// cost, `linearizeMargPrior` (`ba_base.cpp:374-439`).
+    /// The marginalization prior's contribution to `H`, `b` and the current cost.
     ///
-    /// The prior is a quadratic in the drift since its own linearization point,
-    /// `P(x) = 0.5 ‖J (delta + x) + r‖²` (`:390-408`), so linearizing it at
-    /// `x = 0` gives Jacobian `J` and residual `J delta + r` — that
-    /// re-anchoring is trap 8, and its mirror is
-    /// `linearization_abs_qr.cpp:592`. The returned error **drops the constant
-    /// `0.5 rᵀr` term** (`:416-419`) and can therefore be negative; it is only
-    /// ever compared against itself across an increment.
-    ///
-    /// C++ asserts that the prior's ordering is a prefix of the window's, block
-    /// for block (`:379-388`); the port returns
-    /// [`crate::linearize::LinearizeError::MargOrderMismatch`] through the
-    /// caller.
-    /// The prior's own shape: `H` as wide as its ordering and `b` as long as
-    /// `H` is tall.
-    ///
-    /// C++ asserts only the width (`ba_base.cpp:379`, `:444`) and indexes the
-    /// rest; a prior with an empty `b` reaches `mld.b[k]` past its end, which
-    /// may not be a panic here (decision D32).
+    /// For `P(x) = 0.5 ‖J (delta + x) + r‖²`, linearization at zero has Jacobian `J`
+    /// and residual `J delta + r`. The returned cost omits `0.5 rᵀr`, so it can be
+    /// negative and must only be compared across increments of this same prior.
+    /// The prior ordering must be a block-for-block prefix of the window ordering;
+    /// a mismatch returns [`crate::linearize::LinearizeError::MargOrderMismatch`].
+    /// The matrix width and residual length must also agree with the prior ordering.
+    /// Shape checks prevent out-of-bounds reads (D32).
     fn check_marg_prior_shape(mld: &MargLinData<S>) -> Result<(), BaError> {
         let marg_size: usize = mld.order.total_size();
         if mld.h.ncols() != marg_size {
@@ -783,11 +684,10 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
     }
 
     /// The prior's ordering must be the window's prefix, block for block
-    /// (`ba_base.cpp:383-388`).
     ///
     /// Public because the square-root export needs it too: it writes the prior
     /// into the first columns of the stacked system
-    /// (`linearization_abs_qr.cpp:587-589`) without checking anything, which
+    ///  without checking anything, which
     /// would attach one frame's columns to another.
     pub fn check_marg_prior_order(
         &self,
@@ -814,7 +714,7 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
         abs_b: &mut DVector<S>,
     ) -> Result<S, BaError> {
         let marg_size: usize = mld.order.total_size();
-        // `:379`, and the shapes C++ indexes without asserting.
+        // Validate the prior's matrix and residual shapes before indexing.
         self.check_marg_prior_order(mld, aom)?;
         if abs_h.nrows() < marg_size || abs_h.ncols() < marg_size || abs_b.nrows() < marg_size {
             return Err(BaError::MargPriorSize {
@@ -825,8 +725,7 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
 
         let delta: DVector<S> = self.compute_delta(&mld.order)?;
 
-        // `:427-431`. C++ takes the squared arm at `:433-437` when the prior
-        // is not a square root; the port has no such prior (D68).
+        // Only square-root priors are supported (D68).
         let rows: usize = mld.h.nrows();
         // `H_delta = mld.H * delta`, reused by both `b` and the error.
         let mut h_delta: DVector<S> = DVector::zeros(rows);
@@ -851,16 +750,15 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
             }
             abs_b[i] += acc;
         }
-        // `delta^T H^T (0.5 H delta + b)` (`:431`).
+        // `delta^T H^T (0.5 H delta + b)`.
         Ok(prior_error(&h_delta, &h_delta, &mld.b, rows))
     }
 
     /// The prior's cost at the current state, `computeMargPriorError`
-    /// (`ba_base.cpp:441-465`).
     ///
     /// The same expression as [`Self::linearize_marg_prior`]'s error, without
     /// touching `H` or `b`; the constant `0.5 rᵀr` is dropped for the same
-    /// reason (`:452-455`), so this can be negative.
+    /// reason, so this can be negative.
     pub fn compute_marg_prior_error(&self, mld: &MargLinData<S>) -> Result<S, BaError> {
         let marg_size: usize = mld.order.total_size();
         Self::check_marg_prior_shape(mld)?;
@@ -874,21 +772,12 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
             }
             h_delta[i] = acc;
         }
-        // `:461`; `:463` is the squared arm, which the port has no prior for
-        // (D68).
         Ok(prior_error(&h_delta, &h_delta, &mld.b, rows))
     }
 
-    /// The prior's share of the model cost change,
-    /// `computeMargPriorModelCostChange` (`ba_base.cpp:467-528`).
-    ///
-    /// `l_diff = -(J inc)ᵀ (J delta + r + 0.5 (J inc))` (`:519-522`).
-    ///
-    /// C++ takes a `marg_scaling` vector and multiplies `H` by it where it
-    /// meets `inc` but **not** where it meets `delta` (the asymmetry `:503-507`
-    /// spells out, because `delta` was never scaled). The port takes no such
-    /// vector: only the Jacobian scaling could produce one and nothing scales
-    /// (D68).
+    /// The prior's contribution to the predicted cost change:
+    /// `l_diff = -(J inc)ᵀ (J delta + r + 0.5 (J inc))`.
+    /// No scaling vector is needed because Jacobian scaling is absent (D68).
     pub fn compute_marg_prior_model_cost_change(
         &self,
         mld: &MargLinData<S>,
@@ -904,8 +793,6 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
         }
         let delta: DVector<S> = self.compute_delta(&mld.order)?;
 
-        // `:519-522`; `:524` is the squared arm, which the port has no prior
-        // for (D68).
         let rows: usize = mld.h.nrows();
         let mut l_diff: S = S::zero();
         for k in 0..rows {
@@ -922,7 +809,6 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
     }
 
     /// Save every state and every landmark parameter, `backup`
-    /// (`ba_base.h:118-122`).
     pub fn backup(&mut self) {
         for state in self.frame_states.values_mut() {
             state.backup();
@@ -933,7 +819,7 @@ impl<S: LieScalar> BundleAdjustmentBase<S> {
         self.lmdb.backup();
     }
 
-    /// Undo the last increment everywhere, `restore` (`ba_base.h:124-128`).
+    /// Undo the last increment everywhere, `restore`.
     ///
     /// This is what a rejected Levenberg-Marquardt step runs.
     pub fn restore(&mut self) {
@@ -973,7 +859,7 @@ mod tests {
     const MSDMI: &str = include_str!("../tests/fixtures/msdmi_calib.json");
     const MSDMG: &str = include_str!("../tests/fixtures/msdmg_calib.json");
 
-    /// `TestConstants<double>` (`basalt-headers/test/include/test_utils.h:10-14`).
+    /// `TestConstants<double>`.
     const EPS_F64: f64 = 1e-8;
     const MAX_NORM_F64: f64 = 1e-3;
 
@@ -1007,7 +893,7 @@ mod tests {
         Se3::exp(&tangent)
     }
 
-    /// `test_jacobian` (`basalt-headers/test/include/test_utils.h:22-61`):
+    /// `test_jacobian` :
     /// central differences at `eps`, compared with `isApprox(max_norm)`, i.e.
     /// `|Jn - Ja| <= max_norm * min(|Jn|, |Ja|)`, with an all-zero special case.
     fn test_jacobian<const R: usize, const C: usize>(
@@ -1040,9 +926,9 @@ mod tests {
         );
     }
 
-    // ─── the ported C++ tests ──────────────────────────────────────────────
+    // Bundle-adjustment invariants.
 
-    /// `RelPoseTest` (`test/src/test_vio.cpp:289-330`), with the deterministic
+    /// `RelPoseTest`, with the deterministic
     /// tangents above in place of `Sophus::Vector6d::Random()`.
     #[test]
     fn rel_pose_jacobians_match_finite_differences() {
@@ -1076,22 +962,16 @@ mod tests {
         });
     }
 
-    /// `LinearizePointsTest` (`test/src/test_vio.cpp:332-398`).
-    ///
-    /// The C++ test uses `ExtendedUnifiedCamera`, which this port parses but
-    /// does not project with (`camera.rs`); the two shipped reference models —
-    /// msd-index cam0 (kb4) and msd-g2 cam0 (radtan8) — stand in, so the test
-    /// exercises the calibrations the estimator actually runs on. Everything
-    /// else follows the C++ line for line: the observation is manufactured by
-    /// projecting the landmark, so the residual is zero at the linearization
-    /// point, and both Jacobians go to `test_jacobian` at basalt's tolerances.
+    /// Check residual and pose/landmark Jacobians using the shipped kb4 and radtan8
+    /// models. Projecting the landmark constructs an observation with zero residual
+    /// at the linearization point; finite differences check both Jacobians.
     #[test]
     fn linearize_point_jacobians_match_finite_differences() {
         for (name, text) in [("kb4 msdmi cam0", MSDMI), ("radtan8 msdmg cam0", MSDMG)] {
             let calibration: Calibration<f64> = calib(text);
             let cam: CameraEnum<f64> = CameraEnum::from_model(&calibration.intrinsics[0]).unwrap();
 
-            // `cam.unproject(Vector2d::Random() * 50, point3d)` (`:338`).
+            // `cam.unproject(Vector2d::Random() * 50, point3d)`.
             let mut point3d: Vector4<f64> = Vector4::zeros();
             let centre: [f64; 4] = cam.focal_and_principal_point();
             assert!(cam.unproject(
@@ -1113,7 +993,7 @@ mod tests {
             let t_t_h_se3: Se3<f64> = t_w_t.inverse() * t_w_h;
             let t_t_h: Matrix4<f64> = t_t_h_se3.matrix();
 
-            // The observation is where the landmark actually lands (`:349-356`).
+            // The observation is where the landmark actually lands.
             let mut p_trans: Vector4<f64> = StereographicParam::unproject(&kpt_pos.direction);
             p_trans[3] = kpt_pos.inv_dist;
             p_trans = t_t_h * p_trans;
@@ -1137,8 +1017,7 @@ mod tests {
             ));
             assert_abs_diff_eq!(res.norm(), 0.0, epsilon = 1e-9);
 
-            // `d_res_d_xi` is taken against the **coupled** left-multiplied
-            // `se3_expd(x) * T_t_h` of the C++ test (`:370`).
+            // Differentiate the coupled left-multiplied update `se3_expd(x) * T_t_h` here.
             test_jacobian(&format!("{name} d_res_d_xi"), &d_res_d_xi, |x| {
                 let moved: Matrix4<f64> = (Se3::exp(x) * t_t_h_se3).matrix();
                 let mut res: Vector2<f64> = Vector2::zeros();
@@ -1343,7 +1222,7 @@ mod tests {
             // Recomputed from the landmarks, without touching `compute_error`'s
             // machinery: project each landmark into each target and apply
             // `0.5 * (2 - w) * (w / sigma^2) * |r|^2` with `w` the raw-pixel
-            // Huber weight (`ba_base.cpp:179-182`).
+            // Huber weight.
             let mut want: f64 = 0.0;
             let mut count: usize = 0;
             let mut downweighted: usize = 0;
@@ -1584,7 +1463,7 @@ mod tests {
         assert_eq!(cost32, 1.0);
 
         // The threshold is on the raw pixel norm, before `1/sigma`
-        // (papers-part2 §13 D14): a residual of exactly the threshold is *not*
+        // (papers-part2 §13 ): a residual of exactly the threshold is *not*
         // downweighted only because the comparison is strict `<`.
         let at: Vector2<f64> = Vector2::new(1.0, 0.0);
         assert_eq!(huber_cost(&at, at.norm(), 1.0, 0.5).0, 1.0);
@@ -1593,7 +1472,7 @@ mod tests {
     }
 
     /// The three marginalization-prior helpers agree with each other and with
-    /// the algebra written out in `ba_base.cpp:390-419`.
+    /// the algebra written out in.
     ///
     /// The prior is a quadratic in the drift since its own linearization point,
     /// so all three have to use the same `delta`, and each squares `J_m` on its
@@ -1647,7 +1526,6 @@ mod tests {
             .linearize_marg_prior(&mld, &aom, &mut h, &mut b)
             .unwrap();
 
-        // `:427-431`.
         let want_h: DMatrix<f64> = j.transpose() * &j;
         let want_b: DVector<f64> = j.transpose() * (&r_vec + &j * &delta);
         let j_delta: DVector<f64> = &j * &delta;
@@ -1664,7 +1542,7 @@ mod tests {
         let error_only: f64 = estimator.compute_marg_prior_error(&mld).unwrap();
         assert_eq!(error_only, error);
 
-        // `computeMargPriorModelCostChange` (`:519-522`).
+        // `computeMargPriorModelCostChange`.
         let inc: DVector<f64> =
             DVector::from_iterator(POSE_SIZE, (0..POSE_SIZE).map(|_| next() / 10.0));
         let l_diff: f64 = estimator
@@ -1678,7 +1556,7 @@ mod tests {
             epsilon = 1e-12 * want_l_diff.abs().max(1.0)
         );
 
-        // An ordering the window disagrees with is rejected (`:383-388`).
+        // An ordering the window disagrees with is rejected.
         let mut wrong: AbsOrderMap = AbsOrderMap::new();
         wrong.push(0, POSE_VEL_BIAS_SIZE).unwrap();
         let mut h3: DMatrix<f64> = DMatrix::zeros(POSE_SIZE, POSE_SIZE);
@@ -1690,7 +1568,7 @@ mod tests {
             BaError::MargOrderMismatch { frame_id: 0 }
         );
 
-        // And a prior whose matrix does not match its own ordering (`:379`).
+        // And a prior whose matrix does not match its own ordering.
         let ragged: MargLinData<f64> = MargLinData {
             order: order.clone(),
             h: DMatrix::zeros(rows, POSE_SIZE - 1),
@@ -1701,8 +1579,7 @@ mod tests {
             BaError::MargPriorSize { .. }
         ));
 
-        // A shape C++ indexes without asserting, which would be a panic here
-        // (decision D32): a residual that is not as long as `H` is tall.
+        // A residual whose length differs from the matrix height must be refused (D32).
         let empty_b: MargLinData<f64> = MargLinData {
             order: order.clone(),
             h: j,

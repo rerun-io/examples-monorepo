@@ -4,8 +4,8 @@
   <img src="media/slam-rs-github.gif" alt="slam-rs replaying a Monado SLAM Dataset clip in Rerun: the estimated trajectory against ground truth, the landmarks, the rig, and the tracked keypoints on the camera frames" width="800" />
 </p>
 
-Visual-inertial odometry with a Rust core. The estimator is a port of the
-basalt VIO fork: pure Rust, N-camera from the start, with a CPU frontend and a
+Visual-inertial odometry with a Rust core and support for multiple cameras,
+a CPU frontend and a
 portable GPU frontend through CubeCL and wgpu. Python owns the plumbing —
 catalog feed, decode, evaluation and Rerun logging — and talks to the core
 through a PyO3 extension module, so the whole pipeline runs from Python:
@@ -17,7 +17,7 @@ Each lane/profile is compared with its measured baseline in
 `reference_segments.toml`. MIO10 GPU fast scores about 1.55 cm on the RTX 5090.
 The same code runs on `linux-64`, `linux-aarch64`, and macOS `osx-arm64`.
 
-Design notes — the module-by-module account of the port, the full Python API,
+Design notes — the module-by-module account of the estimator, the full Python API,
 the reference set, the gates and every recorded decision:
 [docs/design-notes.md](docs/design-notes.md).
 
@@ -77,19 +77,18 @@ default in every tracking tool.
 {"config.vio_max_iterations": 7, "port.redetect_survivor_ratio": 0.85, "port.frame_update_max_iterations": 5}
 ```
 
-A key spelled `port.` is a knob basalt has no field for; absent, it reproduces
-basalt's behaviour. A key that is neither a basalt field nor a listed port key
-is a `KeyError`, so a typo cannot silently change a run. The fast profile changes
+Keys under `port.` select additional scheduling options. Their zero defaults
+retain per-frame detection and joint optimization. Unknown configuration or
+overlay keys raise `KeyError`, so a typo cannot silently change a run. The fast profile changes
 two things about the schedule and nothing about the arithmetic:
 
-- **Detection on demand.** basalt tops up every empty grid cell on every
-  frameset. The fast profile detects only when camera 0 holds fewer than 85 % of
+- **Detection on demand.** The reference profile detects every frameset. The fast profile detects only when camera 0 holds fewer than 85 % of
   the keypoints the last detecting frameset ended with, which is cuVSLAM's
   schedule.
-- **The window is solved at keyframes.** basalt re-solves the whole sliding
-  window on every frameset. The fast profile does so at keyframes only; between
+- **The window is solved at keyframes.** The reference profile solves the
+  whole sliding window every frameset. The fast profile does so at keyframes only; between
   them it solves the newest pose, velocity and biases against the held landmarks
-  and the IMU factor, five steps at most, and falls back to the joint solve when
+  and the IMU factor, up to six trials with the inclusive iteration cap, and falls back to the joint solve when
   that update declines. `VioSnapshot.frame_update` says which one ran.
 
 The gate compares each clip with the baseline for the selected lane and
@@ -163,10 +162,10 @@ frame = flow.process(t_ns, [left, right])
 frame.ids(0), frame.positions(0), frame.transforms(0), frame.occupancy(0)
 ```
 
-One `track` call is basalt's whole pipeline for one frameset in the calling
+One `track` call runs the whole pipeline for one frameset in the calling
 thread (Offline mode, D17), so every result is final and a repeat run over the
-same input is bit-identical. `VioStatus` has two states: `NeedMoreImu` where
-basalt would block on its IMU queue, `Tracking` otherwise; `replay.py` holds
+same input is bit-identical. `VioStatus` has two states: `NeedMoreImu` until
+IMU coverage extends past the frameset, `Tracking` otherwise; `replay.py` holds
 such a frameset and pushes it again once its samples arrive.
 
 Design notes — the accessors field by field, every refusal and its ceiling, and
@@ -193,24 +192,24 @@ Design notes — the accessors field by field, every refusal and its ceiling, an
 
 | Module | What it is |
 |---|---|
-| `lie` | `So3`/`Se3` over any `f32`/`f64` scalar: Sophus's `exp`/`log`, the adjoint, basalt's four SO(3) Jacobians and the decoupled SE(3) pair. |
+| `lie` | `So3`/`Se3` over any `f32`/`f64` scalar: SO(3) operations through kornia-algebra, the adjoint, four SO(3) Jacobians and the decoupled SE(3) pair. |
 | `types` | `TimeCamId`, `KeypointId`/`LandmarkId`, `AbsOrderMap`, the three pose states and the two fixed-linearization wrappers. |
-| `config` | basalt's `VioConfig`, read straight from `configs/*_config.json`, plus the `port.*` overlay keys the profiles set. |
-| `calib` | basalt's `Calibration`: extrinsics, the six shipped camera models, the 9- and 12-parameter IMU bias calibrations. |
-| `camera` | `pinhole`, `kb4` and `pinhole-radtan8` with basalt's 4-D homogeneous `project`/`unproject` and their analytic Jacobians. |
-| `image` | `ImageU16`: an owned flat 16-bit frame with an explicit row stride, and `interp`/`interp_grad`/`in_bounds` from `image.h`. |
-| `pyramid` | The `PyramidBuilder` stage seam, `PyramidU16`, and `CpuPyramidBuilder`, whose `subsample` is bit-exact with `image_pyr.h`. |
+| `config` | `VioConfig`, read straight from `configs/*_config.json`, plus the `port.*` overlay keys the profiles set. |
+| `calib` | `Calibration`: extrinsics, the six shipped camera models, the 9- and 12-parameter IMU bias calibrations. |
+| `camera` | `pinhole`, `kb4` and `pinhole-radtan8` with 4-D homogeneous `project`/`unproject` and their analytic Jacobians. |
+| `image` | `ImageU16`: an owned flat 16-bit frame with an explicit row stride, and bilinear sampling, central-difference gradients and interpolation bounds. |
+| `pyramid` | The `PyramidBuilder` stage seam, `PyramidU16`, and `CpuPyramidBuilder`, with a separable integer Gaussian filter and one final rounding. |
 | `landmark` | `StereographicParam`, the three-parameter `Landmark`, and `LandmarkDatabase` with a reproducible iteration order (D31). |
 | `ba_base` | `BundleAdjustmentBase`: the window state maps, Huber-weighted `compute_error`, the reprojection residual and its three Jacobians, DLT `triangulate`. |
-| `imu` | Preintegration: basalt's midpoint propagation, the covariance and bias-Jacobian recurrences, the 9-vector residual, gravity initialisation. |
+| `imu` | Preintegration: midpoint propagation, the covariance and bias-Jacobian recurrences, the 9-vector residual, gravity initialisation. |
 | `frontend` | The optical-flow frontend: `patterns`, `se2`, `ldlt`, `patch`, `tracker`, `detect`, `flow` (`FrameToFrameOpticalFlow`, with detection on demand) and `parallel`. |
 | `gpu` | The CubeCL frontend behind `gpu-wgpu`: the kernels, the per-cell corner selection, the patch and track stages, the `ReadRelay` that lets one stage's download carry another's buffers, and the seam counters. |
 | `linearize` | The square-root linearization: `LandmarkBlock` and `LinearizationAbsQR`, which produce `H`, `b`, `Q2Jp`, `Q2r` and `l_diff`. |
 | `marg` | Square-root marginalization: `MargHelper`'s rank-revealing flat Householder QR and `marginalizeHelperSqrtToSqrt`. |
-| `eigen` | The Eigen ports in one place — `qr`, `ldlt`, `svd`, `blas` — each reproducing Eigen's **operation order** rather than only its result (D44). |
+| `qr` | In-place nalgebra reflections and Givens rotations, using column-major storage and reusable scratch. |
 | `estimator` | The Offline sliding-window driver: `process_frame`, `schedule` (the keyframe vote and the keep/marginalize sets), the Levenberg-Marquardt `optimize` over reused scratch, and `frame_update`, the fast profile's between-keyframes solve. |
 
-Design notes — what each module reproduces, quoted against the C++ it comes from
+Design notes — each module's role and numerical contracts
 ([Core modules](docs/design-notes.md#core-modules)), and the four stages where an ulp or a rank
 decision is load-bearing: [the frontend](docs/design-notes.md#the-frontend-and-the-one-thing-that-is-not-bit-parity),
 [the landmark stage](docs/design-notes.md#the-landmark-stage-and-where-an-ulp-is-load-bearing),
@@ -337,11 +336,11 @@ Not in this branch, in the order they are likely to matter:
 - **The Python seam.** 0.14 ms a frameset between the feed and `Vio.track`,
   fixed across clips: a tenth of a fast `MIO10` call.
 - **More datasets.** Camera-only datasets (Assembly101, HO-Cap, the WildCap sets)
-  need basalt's vision-only estimator ported beside the VIO. Aria recordings need
+  need a vision-only estimator alongside the VIO. Aria recordings need
   the fisheye624 camera model.
 - **Results as a catalog layer.** One layer per segment with the estimated poses, the
   landmarks and the keypoints on the base recording's entity paths, registered beside
   the ground truth, so a run is browsed in the viewer, not in a CSV.
 - **Less code.** With ground-truth accuracy checks the Lie groups and the camera
-  models could come from kornia-rs and the Eigen-order QR, LDLT and SVD from nalgebra;
-  the ten-clip gate decides. About 2,800 lines.
+  models could move further into kornia-rs. S34 already uses nalgebra for QR,
+  the damped solve and SVD; the ground-truth gate checks further replacements.

@@ -152,8 +152,7 @@ pub struct Clip {
     pub dataset_name: String,
     /// Added to a frameset timestamp to reach the absolute device clock.
     pub capture_start_time_ns: i64,
-    /// `catalog` (the values the C++ was pushed) or `fixture` (the fork file's
-    /// doubles).
+    /// Calibration values from catalog f32 statics or the fixture JSON doubles.
     pub calibration_source: String,
     pub num_cameras: usize,
     pub framesets: usize,
@@ -220,7 +219,7 @@ pub struct Pgm {
     pub pixels: Vec<u8>,
 }
 
-/// `frame_<NNN>_cam<C>.pgm` under `directory`, in `tools/dump_flow.cpp`'s
+/// `frame_<NNN>_cam<C>.pgm` under `directory`, in 's
 /// layout.
 #[allow(
     dead_code,
@@ -334,8 +333,7 @@ pub static IMU: LazyLock<Vec<ImuRow>> = LazyLock::new(|| {
 });
 
 /// `KannalaBrandtCamera4<Scalar>::getTestProjections()[0]`
-/// (`basalt-headers/include/basalt/camera/kannala_brandt_camera4.hpp:487-495`),
-/// which is what `test_linearization.cpp:19` puts in both camera slots.
+/// which is what puts in both camera slots.
 #[allow(
     dead_code,
     reason = "used by linearize_reference; other binaries compile a subset"
@@ -351,10 +349,7 @@ pub const KB4_TEST_PROJECTION: [f64; 8] = [
     -0.000452646,
 ];
 
-/// xorshift64*, standing in for Eigen's `Random()`.
-///
-/// A Rust test that flakes is worse than one that is merely differently
-/// arbitrary, so nothing here draws from the system generator.
+/// Seeded xorshift64* keeps synthetic tests deterministic.
 #[allow(
     dead_code,
     reason = "used by linearize_reference; other binaries compile a subset"
@@ -379,7 +374,7 @@ impl Rng {
         x.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
 
-    /// Uniform on `[-1, 1]`, like `Eigen::Matrix::Random()`.
+    /// Uniform on `[-1, 1]`.
     pub fn symmetric(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
     }
@@ -393,7 +388,7 @@ impl Rng {
     }
 }
 
-/// The calibration `get_vo_estimator` builds (`test_linearization.cpp:15-22`):
+/// The calibration `get_vo_estimator` builds :
 /// two camera-to-IMU transforms that are small perturbations of identity, and
 /// [`KB4_TEST_PROJECTION`] in both camera slots.
 ///
@@ -431,7 +426,7 @@ pub fn test_calibration(rng: &mut Rng) -> Calibration<f64> {
 /// The reference the square-root marginalization is checked against: the QR of
 /// `marginalizeHelperSqrtToSqrt` never forms `JᵀJ`, so squaring its output and
 /// comparing with this is the same argument `VoMargSqrtLinearizationTest` makes
-/// about the linearization (`test_linearization.cpp:379-388`), one level up.
+/// about the linearization, one level up.
 #[allow(
     dead_code,
     reason = "used by marg_window; other binaries compile a subset"
@@ -630,9 +625,7 @@ pub fn flow_rig(count: usize) -> Calibration<f64> {
     }
 }
 
-/// basalt's shipped configuration, with the matching guess set to the same
-/// pixel so that `flow_rig`'s cameras — which see identical frames — really do
-/// match.
+/// Use the shipped configuration with same-pixel matching guesses for identical camera frames.
 #[allow(
     dead_code,
     reason = "used by flow_frontend; other binaries compile a subset"

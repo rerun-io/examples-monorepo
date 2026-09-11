@@ -1,57 +1,16 @@
-//! `basalt::FrameToFrameOpticalFlow`, ported from
-//! `frame_to_frame_optical_flow.h:103-749`.
+//! Frame-to-frame optical flow.
+//! Each frameset builds camera pyramids, tracks existing points, updates occupancy,
+//! detects and matches new points, then applies the epipolar filter.
 //!
-//! One call to [`FrameToFrameOpticalFlow::process_frame`] is basalt's
-//! `processFrame` (`:203-292`): build a pyramid per camera, track every keypoint
-//! from the previous frame, refresh the occupancy grid, detect and match new
-//! points, and drop the ones that fail the epipolar test.
+//! The driver is generic over pyramid and tracker backends. Callers supply pose
+//! prediction and depth feedback; this module has no IMU queue or processing
+//! thread (D17). Recall and multiscale-flow variants are unsupported.
 //!
-//! The driver is generic over the pyramid builder and the tracker
-//! ([`crate::pyramid::PyramidBuilder`], [`PatchTracker`]), both defaulting to the
-//! CPU backends, and no signature here names a concrete pyramid: a CubeCL
-//! backend arrives through [`FrameToFrameOpticalFlow::with_backends`]
-//! (`cubecl-portability.md` §12.1).
-//!
-//! ## What the port leaves out, and why
-//!
-//! * **The queues and the processing thread.** `processingLoop` (`:122-155`) pops
-//!   images off a TBB queue, drains four feedback queues and preintegrates the
-//!   IMU itself. Here the caller drives the frontend one frameset at a time and
-//!   hands in the two things those queues carried: the predicted pose pair and
-//!   the average scene depth. Nothing in this module knows the IMU exists
-//!   (decision D17: offline lockstep first).
-//! * **Recall.** `recallPoints` (`:526-575`) is off in every shipped config, and
-//!   it leaks a patch stack per landmark by design (`:590`, trap 18).
-//! * **The GUI bookkeeping.** `tracking_guesses`, `matching_guesses` and
-//!   `recall_guesses` (`optical_flow.h:110-112`) are only filled when `show_gui`
-//!   is set and are never read by the estimator.
-//! * **`OpticalFlowResult::pyramid_levels`.** Only
-//!   `MultiscaleFrameToFrameOpticalFlow` writes it (`:57-59`), and that variant
-//!   is out of scope, so [`Keypoints`] does not carry the field: it was always
-//!   empty, and a `Vec` cloned twice per frameset for a variant that does not
-//!   exist is storage nothing fills or reads.
-//!
-//! ## Five places the port does not match the C++ exactly
-//!
-//! * **The essential matrix is per camera** (deviation X03). `optical_flow.h:210`
-//!   computes the cam0-cam1 matrix once and stores it under every index, which is
-//!   wrong for cameras 2 and up. Each camera uses its own relative pose.
-//! * **Image bounds come from each camera's own resolution.** basalt reads
-//!   `calib.resolution.at(0)` for the whole rig (`:108-109`, trap 16); msd-g2's
-//!   cameras are stored rotated and do not share one (decision D30). The
-//!   detection grid is per camera as well, which is what the C++ does
-//!   (`keypoints.cpp:140-144` derives it from the image it is handed); the
-//!   *occupancy* matrix keeps camera 0's shape, which is also what the C++ does
-//!   (`:119`), so the two can disagree on a mixed-resolution rig and a cell whose
-//!   index falls outside the matrix is skipped where the C++ reads out of range.
-//! * **`getNumCams() >= 2` is not required** (trap 17). With one camera the
-//!   matching and filtering passes are skipped instead of indexing `T_i_c[1]`.
-//! * **The second mask test moves one step later.** `trackPoints` tests
-//!   `masks2.inBounds` between the forward and the backward track (`:352`); here
-//!   the whole forward pass runs, then the whole backward pass, so the test is
-//!   applied to the same tracked position afterwards. The same points are
-//!   dropped; the only cost is a backward track that would have been skipped.
-//! * **There is a keypoint budget.** See [`FrontendOptions::max_keypoints`].
+//! Essential matrices and image bounds are per camera. Detection uses each
+//! camera's geometry while occupancy retains camera 0's shape; out-of-range
+//! cells are skipped. Single-camera rigs skip stereo matching and filtering.
+//! Forward and backward passes are batched, with masks applied afterwards to
+//! the same positions. A keypoint budget bounds preallocated storage.
 
 use std::marker::PhantomData;
 
@@ -86,29 +45,20 @@ struct TrackPass {
     offered: Vec<usize>,
 }
 
-/// What [`Keypoints::responses`] holds where basalt's `keypoint_responses` map
-/// has no entry: the same `-1` its `addKeypoint` default argument stores (`:726`).
+/// Sentinel response `-1` for a keypoint without a detector score.
 pub const NO_RESPONSE: f32 = -1.0;
 
-/// The port's own frontend knobs, kept out of [`VioConfig`] so that basalt's
-/// JSON still round-trips byte for byte.
+/// Frontend options kept separate from the serialized VIO configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrontendOptions {
     /// Workers the tracking passes run on (decision D31). One is the
     /// deterministic reference lane; any value gives the same numbers.
     pub threads: usize,
-    /// Keypoints one camera may carry, and the capacity every buffer is sized for.
-    ///
-    /// basalt has no such cap: its maps grow. The port needs one because the
-    /// tracker's storage is preallocated (§12.2 forbids growing a buffer on the
-    /// per-frame path), so detection and stereo matching **stop adding** once a
-    /// camera reaches it, in the detector's own scan order. Keypoints that
-    /// already exist are never dropped to make room, and the frame stays
-    /// processable. The default is about eight times what the shipped 50-pixel
-    /// grid can produce on a 960x960 frame, so nothing in the reference
-    /// configuration comes near it, and
-    /// [`crate::frontend::tracker::MAX_CAPACITY`] is the ceiling a caller may
-    /// ask for.
+    /// Maximum keypoints per camera and the capacity used for its buffers.
+    /// Detection and matching stop adding in scan order when full, preserving existing
+    /// tracks and keeping the frame processable. The default exceeds the shipped
+    /// 50-pixel grid's capacity on a 960x960 image; the caller's upper limit is
+    /// [`crate::frontend::tracker::MAX_CAPACITY`].
     pub max_keypoints: usize,
 }
 
@@ -124,14 +74,10 @@ impl Default for FrontendOptions {
     }
 }
 
-/// The pose pair basalt's own IMU preintegration produces (`:261-262`).
-///
-/// `processingLoop` predicts the current frame's pose from the last state it got
-/// back from the estimator (`:147-150`) and `processFrame` turns the pair into a
-/// per-camera `T_c1_c2` that seeds the tracker. Handing it in keeps this module
-/// free of the IMU: with both poses at the identity — which is what basalt itself
-/// runs with until the first state arrives (`:140-147`) — the guess is the same
-/// pixel reprojected through `depth_guess`.
+/// Previous and predicted poses supplied by IMU preintegration.
+/// Keeping them as inputs makes the frontend independent of IMU processing.
+/// Two identities produce a depth-based reprojection of the same pixel until
+/// the first estimated state arrives.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct PosePrediction {
     /// `latest_state->T_w_i`, the pose of the previous frame.
@@ -140,31 +86,18 @@ pub struct PosePrediction {
     pub t_w_i_current: Se3<f32>,
 }
 
-/// One camera's tracked keypoints, in structure-of-arrays form.
-///
-/// basalt's `Keypoints` is an `Eigen::aligned_map<KeypointId, AffineCompact2f>`
-/// (`optical_flow.h:68`), i.e. an ordered map. The order is load-bearing — it is
-/// the order `filterPointsForCam` walks and the order new ids are handed out in —
-/// so this keeps the ids **sorted ascending** with the parallel arrays beside
-/// them, and looks up by binary search. The warps live in a [`FlowTransforms`],
-/// six flat coefficient arrays with the keypoint index fast-varying, so no
-/// per-keypoint record is an array of structs (§12.2). No hash map appears
-/// anywhere on the per-frame path.
+/// Tracked keypoints in structure-of-arrays form.
+/// Ids stay sorted ascending for deterministic filtering and id assignment,
+/// with binary-search lookup. [`FlowTransforms`] stores six coefficient arrays
+/// with keypoint index varying fastest; no per-frame hash map is needed.
 #[derive(Debug, Default, PartialEq)]
 pub struct Keypoints {
-    /// Keypoint ids, ascending. `LandmarkId == KeypointId` (`optical_flow.h:71`).
+    /// Keypoint ids, ascending. `LandmarkId == KeypointId`.
     pub ids: Vec<KeypointId>,
     /// The 2x3 warp of each keypoint, in the same order as [`Keypoints::ids`].
     pub transforms: FlowTransforms,
-    /// The detector response of each keypoint, `-1` where there is none.
-    ///
-    /// basalt keeps the responses in a second map that only `addKeypoint` writes
-    /// (`:730`), so a keypoint carried forward by `trackPoints` or inserted by
-    /// `addKeypoints` from the stereo match (`:734-741`) has **no entry at all**.
-    /// [`NO_RESPONSE`] is what `addKeypoint`'s own default argument stores for
-    /// "no response" (`:726`), so one array with that sentinel says the same
-    /// thing as the C++'s two maps. The value itself is OpenCV's integer
-    /// `cornerScore`, which is what the C++ records.
+    /// Detector responses, using [`NO_RESPONSE`] for tracked or stereo-matched points
+    /// without a score. Detected points carry integer OpenCV-style corner scores.
     pub responses: Vec<f32>,
 }
 
@@ -243,7 +176,7 @@ impl Keypoints {
         }
     }
 
-    /// `std::map::insert`, which **keeps** an existing entry (`:740`).
+    /// `std::map::insert`, which **keeps** an existing entry.
     ///
     /// Returns whether the keypoint was new.
     fn insert_if_absent(&mut self, id: KeypointId, transform: &AffineCompact2f) -> bool {
@@ -271,14 +204,8 @@ impl Keypoints {
 /// What one frameset produced: one [`Keypoints`] per camera.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FlowFrame {
-    // `Vec::clone_from` copies element by element through `Keypoints::clone_from`
-    // above, so deriving here keeps the buffer-preserving property.
-    /// Frameset timestamp in nanoseconds, `None` before the first frameset commits.
-    ///
-    /// basalt writes `t_ns = -1` until then (`optical_flow.h:172`), which makes
-    /// `-1` — and every other negative timestamp — ambiguous. The port carries
-    /// the absence in the type instead, so any `i64` is a timestamp like any
-    /// other.
+    // Frameset timestamp, absent until the first successful commit.
+    // Using `Option` leaves every i64 value, including negative values, valid as a timestamp.
     pub t_ns: Option<i64>,
     /// One entry per camera, in rig order.
     pub cameras: Vec<Keypoints>,
@@ -466,12 +393,9 @@ pub enum FrontendError {
     },
 }
 
-/// `basalt::FrameToFrameOpticalFlow<Scalar, Pattern>` with `Scalar = f32`.
-///
-/// Generic over the pyramid builder and the tracker, both defaulting to the CPU
-/// backends: a CubeCL implementation of [`PyramidBuilder`] and [`PatchTracker`]
-/// drops in through [`FrameToFrameOpticalFlow::with_backends`] and no public
-/// signature here names a concrete pyramid (§12.1).
+/// Frame-to-frame optical flow in f32, generic over pyramid and tracker backends.
+/// [`FrameToFrameOpticalFlow::with_backends`] selects implementations without
+/// exposing a concrete pyramid in the driver's public signatures.
 #[derive(Debug)]
 pub struct FrameToFrameOpticalFlow<
     P: Pattern,
@@ -482,16 +406,15 @@ pub struct FrameToFrameOpticalFlow<
     options: FrontendOptions,
     calib: Calibration<f32>,
     cameras: Vec<RigCamera<f32>>,
-    /// `E`, one 4x4 essential matrix per camera (`optical_flow.h:207-213`).
+    /// `E`, one 4x4 essential matrix per camera.
     essential: Vec<Matrix4<f32>>,
-    /// One detection grid per camera, from that camera's own image size, as the
-    /// C++ derives it inside `detectKeypointsWithCells` (`keypoints.cpp:140-144`).
+    /// One detection grid per camera, derived from that camera's image size.
     detection_grids: Vec<CellGrid>,
-    /// The occupancy grid, shaped from camera 0 as `cells` is (`:119`).
+    /// The occupancy grid, shaped from camera 0 as `cells` is.
     occupancy_grid: CellGrid,
-    /// `cells`, `(h/c + 1) x (w/c + 1)` counts per camera (`:119`).
+    /// `cells`, `(h/c + 1) x (w/c + 1)` counts per camera.
     cells: Vec<Vec<i32>>,
-    /// `last_keypoint_id` (`optical_flow.h:174`), the global landmark id space.
+    /// `last_keypoint_id`, the global landmark id space.
     last_keypoint_id: u64,
     /// Camera 0's keypoint count as the last **detecting** frameset left it,
     /// which is what `port.redetect_survivor_ratio` measures survivors against
@@ -501,13 +424,10 @@ pub struct FrameToFrameOpticalFlow<
     /// which is what makes "how many of these keypoints are new" answerable
     /// after the fact rather than only inside the call that produced them.
     last_keypoint_id_before_frame: u64,
-    /// `t_ns` (`optical_flow.h:172`), `None` until the first frame commits.
-    ///
-    /// basalt's `-1` sentinel is not ported: `processFrame` reads `t_ns < 0` as
-    /// "no previous frame", which would make a frameset at a negative timestamp
-    /// reset tracking instead of continuing it.
+    /// Timestamp of the last committed frame; `None` means no previous frame.
+    /// Negative timestamps remain valid and do not reset tracking.
     t_ns: Option<i64>,
-    /// `frame_counter` (`optical_flow.h:173`).
+    /// `frame_counter`.
     frame_counter: u64,
     /// `depth_guess`, seeded from the config and refreshed by the estimator.
     depth_guess: f32,
@@ -526,20 +446,19 @@ pub struct FrameToFrameOpticalFlow<
     tracker: T,
     patches: T::Patches,
     /// The source keypoint ids of each lane of the batch in flight, in map order
-    /// (`:299`, `:306`).
     ///
     /// Per lane rather than per call because a batch's passes are all launched
     /// before any of them is read, and mapping a tracked slot back to its
     /// keypoint needs this after the download.
     passes: Vec<TrackPass>,
-    /// The source warps of the pass being submitted, in the same order (`:300`,
-    /// `:307`). One buffer for the batch: a temporal pass overwrites it before
+    /// The source warps of the pass being submitted, in the same order (
+    /// ). One buffer for the batch: a temporal pass overwrites it before
     /// the next one, and every stereo pass of a frameset tracks the same
     /// camera-0 keypoints, so they share one copy of it.
     source: FlowTransforms,
     /// The source positions the forward patches are built at.
     positions: PointsSoA,
-    /// `transform_2` once the depth guess has been applied (`:342`).
+    /// `transform_2` once the depth guess has been applied.
     guesses: FlowTransforms,
     /// The ids that survived, in ascending source order, with their warps.
     tracked_ids: Vec<KeypointId>,
@@ -559,7 +478,7 @@ pub struct FrameToFrameOpticalFlow<
     detected: KeypointsData,
     /// The keypoints `addPointsForCamera(0)` produced, to be matched onward.
     new_cam0: Keypoints,
-    /// Ids the epipolar filter removes, ascending (`std::set`, `:669`).
+    /// Ids the epipolar filter removes, ascending (`std::set`).
     to_remove: Vec<KeypointId>,
     frame: FlowFrame,
     /// The keypoint state as it was before the frame in flight; see
@@ -608,12 +527,11 @@ struct FrameState {
 }
 
 impl<P: Pattern> FrameToFrameOpticalFlow<P, CpuPyramidBuilder, CpuPatchTracker<P>> {
-    /// `FrameToFrameOpticalFlow(conf, cal)` (`frame_to_frame_optical_flow.h:103-120`)
+    /// `FrameToFrameOpticalFlow(conf, cal)`
     /// on the CPU backends.
     ///
     /// The calibration arrives in `f64` — that is what the JSON gives — and is
     /// cast to `f32` here, as `OpticalFlowTyped`'s constructor does
-    /// (`optical_flow.h:204`).
     ///
     /// # Errors
     ///
@@ -688,12 +606,8 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
                 return Err(FrontendError::NegativeConfig { field, value });
             }
         }
-        // The detector's threshold ladder halves by integer division, so a
-        // `min_threshold` at or below zero never ends it — in basalt as much as
-        // here (`keypoints.cpp:162`, `:187`). The detector floors its own last
-        // rung as well ([`LOWEST_THRESHOLD_RUNG`]), but a config that asks for a
-        // ladder the C++ would hang on is refused rather than quietly run at a
-        // threshold nobody asked for.
+        // Refuse a non-positive minimum: integer halving would remain at zero forever.
+        // The public detector also floors its last rung as a second line of protection.
         let min_threshold: i32 = config.optical_flow_detection_min_threshold;
         if min_threshold < LOWEST_THRESHOLD_RUNG {
             return Err(FrontendError::ThresholdLadderNeverEnds {
@@ -722,14 +636,9 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         Ok(())
     }
 
-    /// The port's own knobs, which arrive from the caller rather than a basalt file.
-    ///
-    /// Every value a caller may type is bounded here, whatever backends the
-    /// frontend is then built on: [`FrameToFrameOpticalFlow::with_backends`]
-    /// takes a tracker that is already built, so [`PatchSoA::new`]'s own
-    /// ceilings — the second line under these — never run on that seam.
-    ///
-    /// [`PatchSoA::new`]: crate::frontend::tracker::PatchSoA::new
+    /// Validate caller-supplied frontend options independently of the selected backend.
+    /// A prebuilt tracker passed to `with_backends` does not run `PatchSoA::new`, so
+    /// the frontend must enforce its own bounds at this seam.
     fn validate_options(options: &FrontendOptions) -> Result<(), FrontendError> {
         // rayon spawns exactly what it is asked for, so an unbounded `threads`
         // exhausts the machine's threads instead of returning an error; zero is
@@ -802,7 +711,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         }
 
         let calib: Calibration<f32> = calibration.cast();
-        // `calib.T_i_c[i]` is indexed for every camera (`:264-265`, `:651`); a
+        // `calib.T_i_c[i]` is indexed for every camera; a
         // calibration with fewer poses than models would index past the end.
         if calib.t_i_c.len() != calib.intrinsics.len() {
             return Err(FrontendError::RaggedExtrinsics {
@@ -820,7 +729,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             .map(|index| {
                 if index == 0 {
                     // `T_c0_c0` has no baseline, so `t.normalized()` would be
-                    // NaN; nothing reads index 0 either way (`:704`).
+                    // NaN; nothing reads index 0 either way.
                     return Matrix4::zeros();
                 }
                 let t_i_j: Se3<f32> = calib.t_i_c[0].inverse() * calib.t_i_c[index];
@@ -829,8 +738,8 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             .collect();
 
         // `detectKeypointsWithCells` derives its grid from the image it is given
-        // (`keypoints.cpp:140-144`), so every camera gets its own; `cells` is
-        // shaped from camera 0 alone (`:119`), so that shape is separate.
+        // so every camera gets its own; `cells` is
+        // shaped from camera 0 alone, so that shape is separate.
         let cell: usize = config.optical_flow_detection_grid_size as usize;
         let mut detection_grids: Vec<CellGrid> = Vec::with_capacity(num_cams);
         for (camera, rig_camera) in cameras.iter().enumerate() {
@@ -847,7 +756,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             // `cells` below, one `i32` per cell per camera, and a `Vec` too long
             // to exist panics rather than returning (decision D32); and every
             // camera is detected on its own grid, which bounds that camera's
-            // detection scan on every frame (`detect.rs:494`). Saturating like
+            // detection scan on every frame (`detect.rs`). Saturating like
             // the sibling ceilings: a product that leaves `usize` is past it.
             if grid.rows.saturating_mul(grid.columns) > MAX_CELLS {
                 return Err(FrontendError::TooManyCells {
@@ -910,7 +819,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         self.cameras.len()
     }
 
-    /// The next keypoint id that will be handed out (`optical_flow.h:174`).
+    /// The next keypoint id that will be handed out.
     pub fn last_keypoint_id(&self) -> u64 {
         self.last_keypoint_id
     }
@@ -925,7 +834,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         self.last_keypoint_id_before_frame
     }
 
-    /// Framesets processed so far (`optical_flow.h:173`).
+    /// Framesets processed so far.
     pub fn frame_counter(&self) -> u64 {
         self.frame_counter
     }
@@ -950,13 +859,12 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         &self.cells[camera]
     }
 
-    /// The grid `cells` is shaped and indexed by, from camera 0 (`:119`).
+    /// The grid `cells` is shaped and indexed by, from camera 0.
     pub fn occupancy_grid(&self) -> CellGrid {
         self.occupancy_grid
     }
 
     /// The grid one camera is *detected* on, from its own image size
-    /// (`keypoints.cpp:140-144`).
     ///
     /// # Panics
     ///
@@ -965,15 +873,11 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         self.detection_grids[camera]
     }
 
-    /// One camera's essential matrix against camera 0 (`optical_flow.h:221`).
-    ///
-    /// Index 0 is the zero matrix: camera 0 has no epipolar geometry against
-    /// itself, and `filterPoints` starts at camera 1 (`:704`), so nothing reads
-    /// it. The C++ leaves the cam0-cam1 matrix there instead, equally unread.
+    /// This camera's essential matrix relative to camera 0.
+    /// Entry zero is the zero matrix and is not read by epipolar filtering.
     ///
     /// # Panics
-    ///
-    /// If `camera` is past the end of the rig.
+    /// If `camera` is outside the rig.
     pub fn essential(&self, camera: usize) -> Matrix4<f32> {
         self.essential[camera]
     }
@@ -984,17 +888,16 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     }
 
     /// Timestamp of the most recent frameset, `None` before the first
-    /// (`optical_flow.h:172`).
     pub fn t_ns(&self) -> Option<i64> {
         self.t_ns
     }
 
-    /// `depth_guess`: the estimator's average scene depth (`optical_flow.h:164`).
+    /// `depth_guess`: the estimator's average scene depth.
     pub fn depth_guess(&self) -> f32 {
         self.depth_guess
     }
 
-    /// `depth_guess`: the estimator's average scene depth (`optical_flow.h:164`).
+    /// `depth_guess`: the estimator's average scene depth.
     pub fn set_depth_guess(&mut self, depth: f32) {
         self.depth_guess = depth;
     }
@@ -1021,9 +924,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         t_ns: i64,
         sizes: impl ExactSizeIterator<Item = (usize, usize)>,
     ) -> Result<(), FrontendError> {
-        // Tracking is frame to frame, so a frameset that does not follow the last
-        // one has no previous frame of its own; basalt never sees one because its
-        // `processingLoop` reads a monotonic queue.
+        // Tracking requires a frameset strictly after the last committed timestamp.
         if let Some(previous_t_ns) = self.t_ns
             && t_ns <= previous_t_ns
         {
@@ -1039,13 +940,8 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
                 actual: sizes.len(),
             });
         }
-        // The geometry is the calibration's from here on: the camera model
-        // projects with the calibrated intrinsics, the detection grid is derived
-        // from the calibrated size, and the occupancy matrix is allocated from
-        // it. A frame of another size is not a smaller view of the same scene —
-        // its pixels mean different bearings — so it is refused rather than
-        // tracked against geometry it does not belong to. basalt never checks:
-        // its `img_data` comes from the device the calibration describes.
+        // Image size must match calibration: a different pixel geometry changes bearings,
+        // so reject it before tracking with incompatible intrinsics and cell grids.
         for (camera, (actual_width, actual_height)) in sizes.enumerate() {
             let expected_width: usize = self.cameras[camera].width() as usize;
             let expected_height: usize = self.cameras[camera].height() as usize;
@@ -1062,33 +958,17 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         Ok(())
     }
 
-    /// `processFrame` (`frame_to_frame_optical_flow.h:203-292`).
+    /// Process one frameset of widened 16-bit images.
+    /// `prediction` supplies previous and predicted poses; identities mean no state yet.
+    /// Missing mask lists suppress nothing.
     ///
-    /// `images` holds one frame per camera, already widened to 16 bits.
-    /// `prediction` is the pose pair the estimator's feedback would have
-    /// produced; two identities mean "no state has arrived yet", which is what
-    /// basalt runs with until the backend answers (`:140-147`). `masks` may be
-    /// shorter than the rig or empty, in which case the missing cameras suppress
-    /// nothing.
-    ///
-    /// **A rejected frame is as if it never happened.** The C++ has no such
-    /// problem because it never rejects a frame; the port can, at three points —
-    /// the frameset width, a pyramid geometry, and any error a pluggable backend
-    /// returns from the middle of tracking — and every one of them must leave the
-    /// frontend exactly as the last successful frame did. So the whole call runs
-    /// against a *staging* pyramid set with `pyramid` still holding the previous
-    /// frame, over a snapshot of the keypoint state; only after tracking, the
-    /// cell counts, the add/match passes and the epipolar filter have all
-    /// succeeded do the two pyramid sets swap and the clock advance. On any error
-    /// the keypoints, the occupancy counts and the id counter are restored and
-    /// the timestamp never moved.
+    /// A rejected frame leaves the frontend at its last successful state. Build into
+    /// staging pyramids and snapshot keypoints; swap pyramids and advance the clock
+    /// only after every pass succeeds. On failure restore keypoints, counts and ids.
     ///
     /// # Errors
-    ///
-    /// [`FrontendError`] when the frameset does not move the clock forward, when
-    /// it is the wrong width, when an image is not the size the calibration gives
-    /// that camera, when a pyramid refuses the geometry, or when the tracker or
-    /// detector refuses an input.
+    /// Returns [`FrontendError`] for invalid timestamp, camera count, image geometry,
+    /// pyramid geometry, or tracker/detector input.
     pub fn process_frame(
         &mut self,
         t_ns: i64,
@@ -1206,7 +1086,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             }
         } else {
             // `for (i) trackPoints(old_pyramid[i], pyramid[i], ..., T_c1_c2, i, i)`
-            // (`:261-271`), as one batch: every camera's pass is launched, then
+            // as one batch: every camera's pass is launched, then
             // one download answers all of them. A camera's pass reads only its
             // own two pyramids and writes only its own lane, so batching moves
             // no arithmetic — it removes the per-camera wait, which on the GPU
@@ -1225,7 +1105,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             for camera in 0..num_cams {
                 self.finish_camera(camera);
             }
-            // `for (i) updateCellCounts(i)` (`:277`).
+            // `for (i) updateCellCounts(i)`.
             for camera in 0..num_cams {
                 self.update_cell_counts(camera);
             }
@@ -1251,7 +1131,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
 
     /// Build this frame's pyramids into the staging set, touching nothing else.
     ///
-    /// `pyramid->at(i).setFromImage(img, config.optical_flow_levels)` (`:245-249`),
+    /// `pyramid->at(i).setFromImage(img, config.optical_flow_levels)`,
     /// with the allocation reused whenever the geometry is unchanged.
     fn build_staging(&mut self, images: &[ImageU16]) -> Result<(), FrontendError> {
         let levels: usize = self.config.optical_flow_levels as usize;
@@ -1288,9 +1168,9 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     }
 
     /// One camera's frame-to-frame track launched into its own lane:
-    /// `trackPoints(..., cam, cam)` (`:267-270`) up to the download.
+    /// `trackPoints(..., cam, cam)` up to the download.
     fn submit_camera(&mut self, camera: usize, t_c1_c2: &Se3<f32>) -> Result<(), FrontendError> {
-        // Source and destination are the same slot (`:299-308`, `:371`), so the
+        // Source and destination are the same slot, so the
         // ids and warps are copied out first — and the slot is only cleared once
         // the track has succeeded, so a refused frame does not lose the camera's
         // keypoints.
@@ -1307,13 +1187,13 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         self.finish_track_points(camera);
         self.frame.cameras[camera].clear();
         for (slot, id) in self.tracked_ids.iter().enumerate() {
-            // `keypoint_map_2.insert(result.begin(), result.end())` (`:372`); the
+            // `keypoint_map_2.insert(result.begin(), result.end())`; the
             // cell counts are rebuilt afterwards by `updateCellCounts`.
             self.frame.cameras[camera].set(*id, &self.tracked.get(slot), NO_RESPONSE);
         }
     }
 
-    /// The launching half of `trackPoints` (`:294-375`): the mask test, the
+    /// The launching half of `trackPoints` : the mask test, the
     /// guesses, the patch build and the tracker's own kernels, into `lane`.
     ///
     /// Reads the pass source IDs and shared source warps, then records its
@@ -1330,7 +1210,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         t_c1_c2: &Se3<f32>,
         tracking: bool,
     ) -> Result<(), FrontendError> {
-        // `use_depth = tracking || (matching && guess_type != SAME_PIXEL)` (`:316`).
+        // `use_depth = tracking || (matching && guess_type != SAME_PIXEL)`.
         let use_depth: bool = tracking
             || self.config.optical_flow_matching_guess_type != MatchingGuessType::SamePixel;
         let depth: f32 = self.depth_guess;
@@ -1342,12 +1222,12 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         for index in 0..self.source.len() {
             let transform_1: AffineCompact2f = self.source.get(index);
             let t1: Vector2<f32> = transform_1.translation;
-            // `if (masks1.inBounds(t1.x(), t1.y())) continue;` (`:329`).
+            // `if (masks1.inBounds(t1.x(), t1.y())) continue;`.
             if self.masks[cam1].in_bounds(t1.x, t1.y) {
                 continue;
             }
-            // `off = t2 - t2_guess` with `t2 == t1` (`:333-340`), then `t2 -= off`
-            // (`:342`), so the guess is simply `t2_guess`.
+            // `off = t2 - t2_guess` with `t2 == t1`, then `t2 -= off`
+            // so the guess is simply `t2_guess`.
             let translation: Vector2<f32> = if use_depth {
                 project_between_cams(&self.cameras, &t1, depth, t_c1_c2, cam1, cam2).1
             } else {
@@ -1362,7 +1242,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         }
 
         // The forward source patches come from the previous frame when tracking
-        // and from this frame's camera 0 when matching (`:267`, `:652`). This
+        // and from this frame's camera 0 when matching. This
         // frame is `staging` until the call commits.
         let source_pyramid: &B::Pyramid = if tracking {
             &self.pyramid[cam1]
@@ -1392,7 +1272,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         for slot in result.tracked() {
             let slot: usize = *slot as usize;
             let transform: AffineCompact2f = result.transform(slot);
-            // `if (masks2.inBounds(t2.x(), t2.y())) continue;` (`:352`).
+            // `if (masks2.inBounds(t2.x(), t2.y())) continue;`.
             if self.masks[cam2].in_bounds(transform.translation.x, transform.translation.y) {
                 continue;
             }
@@ -1402,12 +1282,12 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         }
     }
 
-    /// `updateCellCounts` (`:707-716`): rebuild one camera's occupancy from scratch.
+    /// `updateCellCounts` : rebuild one camera's occupancy from scratch.
     fn update_cell_counts(&mut self, camera: usize) {
         self.cells[camera].fill(0);
         for index in 0..self.frame.cameras[camera].len() {
             let position: Vector2<f32> = self.frame.cameras[camera].transforms.translation(index);
-            // `if (p[0] < x_start || ... || p[1] >= y_stop + c) continue;` (`:711`).
+            // `if (p[0] < x_start ||... || p[1] >= y_stop + c) continue;`.
             if !self.occupancy_grid.contains(position.x, position.y) {
                 continue;
             }
@@ -1416,7 +1296,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         }
     }
 
-    /// The `cells(y, x)++` half of `addKeypoint`/`addKeypoints` (`:729`, `:738`).
+    /// The `cells(y, x)++` half of `addKeypoint`/`addKeypoints`.
     fn bump_cell(&mut self, camera: usize, transform: &AffineCompact2f) {
         let (row, column) = self
             .occupancy_grid
@@ -1424,7 +1304,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         self.cells[camera][row * self.occupancy_grid.columns + column] += 1;
     }
 
-    /// `removeKeypoint` (`:743-749`): drop a keypoint and decrement its cell.
+    /// `removeKeypoint` : drop a keypoint and decrement its cell.
     fn remove_keypoint(&mut self, camera: usize, id: KeypointId) {
         let Some(transform) = self.frame.cameras[camera].remove(id) else {
             return;
@@ -1435,7 +1315,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         self.cells[camera][row * self.occupancy_grid.columns + column] -= 1;
     }
 
-    /// `addPointsForCamera` (`:577-610`): detect in the empty cells, register the
+    /// `addPointsForCamera` : detect in the empty cells, register the
     /// corners under fresh ids, and record camera 0's as the ones to match onward.
     ///
     /// Detection is capped at the camera's remaining budget
@@ -1462,11 +1342,11 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             .max_keypoints
             .saturating_sub(self.frame.cameras[camera].len());
 
-        // `detectKeypointsWithCells(pyramid->at(cam_id).lvl(0), ...)` (`:579-582`),
+        // `detectKeypointsWithCells(pyramid->at(cam_id).lvl(0)...)`,
         // on this camera's own grid and the rig's shared occupancy matrix.
         //
         // Level 0 of the staging pyramid is this frame's input image copied in
-        // unchanged (`image_pyr.h:73`), and the caller still holds it, so the
+        // unchanged, and the caller still holds it, so the
         // detector reads the image itself: same pixels, and no copy out of the
         // pyramid — whose seam lends nothing (deviation X04).
         self.detected.corners.clear();
@@ -1498,26 +1378,21 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             let transform: AffineCompact2f =
                 AffineCompact2f::at(Vector2::new(corner[0], corner[1]));
             let id: KeypointId = KeypointId(self.last_keypoint_id);
-            // `addKeypoint` (`:726-732`): bump the cell, then register.
+            // `addKeypoint` : bump the cell, then register.
             self.bump_cell(camera, &transform);
             self.frame.cameras[camera].set(id, &transform, response);
             if camera == 0 {
                 self.new_cam0.set(id, &transform, response);
             }
-            // `last_keypoint_id++` (`:606`), the global landmark id space.
+            // `last_keypoint_id++`, the global landmark id space.
             self.last_keypoint_id += 1;
         }
         Ok(())
     }
 
-    /// `addKeypoints` (`:734-741`): bump a cell for **every** offered keypoint,
-    /// then insert the ones whose id is not already present.
-    ///
-    /// The double count when a keypoint is both tracked in camera *i* and matched
-    /// into it from camera 0 is basalt's, not a slip: `std::map::insert` keeps the
-    /// existing entry while the loop above it has already incremented the cell.
-    /// The budget is the port's own: once the camera is full, the remaining
-    /// matches are dropped and their cells are not bumped either.
+    /// Bump occupancy for each offered keypoint, then insert ids that are new.
+    /// A point both tracked and matched increments twice while retaining its existing
+    /// entry. Once capacity is reached, further matches neither insert nor bump cells.
     fn add_keypoints(&mut self, camera: usize) {
         let count: usize = self.tracked_ids.len();
         for slot in 0..count {
@@ -1530,18 +1405,9 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         }
     }
 
-    /// `cam0OverlapCellsMasksForCam` (`:612-635`): mask the cells of camera
-    /// `camera` that project into camera 0 at `depth_guess`.
-    ///
-    /// The grid walked here is the frontend's own `x_start`/`x_stop`, which the
-    /// C++ takes from camera 0 (`:110-113`) whatever camera is being masked.
-    /// The rectangles are appended to camera `camera`'s own mask list, which
-    /// `run_passes` clears once per frameset: `optical_flow_detection_nonoverlap`
-    /// is `true` in every shipped config, so returning a fresh `Masks` here
-    /// allocated and freed up to `rows x columns` = 361 `Rect` per camera per
-    /// frameset on the msd rigs — the one per-frame allocation left in a module
-    /// whose doc promises none. The destructure is what lets one field be
-    /// written while the others are read.
+    /// Mask camera cells that project into camera 0 at `depth_guess`.
+    /// Use the frontend grid bounds and append to reusable per-camera mask lists.
+    /// Reusing those lists avoids allocating hundreds of rectangles each frameset.
     fn append_cam0_overlap_masks(&mut self, camera: usize) {
         let Self {
             masks,
@@ -1587,28 +1453,13 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         }
     }
 
-    /// Whether this frameset runs [`FrameToFrameOpticalFlow::add_points`] at
-    /// all (D75).
-    ///
-    /// basalt detects on every frameset, and `port.redetect_survivor_ratio` at
-    /// its `0` default keeps that exactly — this returns `true` before anything
-    /// else is read. Above zero the frameset detects only once camera 0 has
-    /// fallen below that fraction of the count the last detecting frameset left
-    /// it with, which is cuVSLAM's `SelectKeyframe` rule (survivors under 41 %
-    /// of the last detection) rather than a fixed target count, so it needs no
-    /// per-rig tuning.
-    ///
-    /// **The whole frameset is gated, on camera 0 alone.** `add_points` is one
-    /// unit — camera 0's detection, the cross-camera match that carries its new
-    /// keypoints into cameras 1..n, and the non-overlap detection on those same
-    /// cameras — so gating it per camera would leave a rig half detected, with
-    /// camera 0's new ids never matched onward. Camera 0 is also the only camera
-    /// the keyframe vote reads (`estimator/mod.rs`, D21), so its survivor count
-    /// is the state this decision is about.
-    ///
-    /// Pure in the frameset's own state: this frame's camera-0 count, the count
-    /// the last detecting frameset ended with, and a config field. No timer, no
-    /// frame index, nothing the estimator fed back, so a replay repeats it.
+    /// Decide whether the whole frameset detects again (D75).
+    /// A zero survivor-ratio setting detects every frame. Above zero, camera 0 must
+    /// fall below the configured fraction of its count after the last detection.
+    /// This relative budget needs no per-rig target count.
+    /// Gate the whole frameset so new camera-0 ids can be matched into every other
+    /// camera. Only camera 0 votes on keyframes, so its count is the relevant input.
+    /// No timing or arrival-order state participates; replay remains deterministic.
     fn should_detect(&self) -> bool {
         let ratio: f32 = self.config.port_redetect_survivor_ratio;
         // A ratio that is not a positive number is the knob switched off, NaN
@@ -1626,7 +1477,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         survivors < ratio * self.last_detect_count as f32
     }
 
-    /// `addPoints` (`:637-666`): detect on camera 0, match onward, then detect
+    /// `addPoints` : detect on camera 0, match onward, then detect
     /// again on the cameras that do not overlap camera 0.
     fn add_points(&mut self, images: &[ImageU16]) -> Result<(), FrontendError> {
         // Camera 0's cell winners are already on the host: `run_passes`
@@ -1636,7 +1487,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         self.add_points_for_camera(0, images)?;
 
         // `for (i = 1; i < getNumCams(); i++) trackPoints(pyr0, pyri, kpts0, ...)`
-        // (`:643-654`). With one camera there is nothing to match into (trap 17).
+        // With one camera there is nothing to match into (trap 17).
         // One batch again: camera *i*'s match reads camera 0's new keypoints and
         // writes camera *i* alone, so the whole rig is launched before any of it
         // is downloaded.
@@ -1686,7 +1537,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         self.detector.take_cells()?;
         self.timings.detect_ns += duration_ns(mark);
 
-        // `if (!config.optical_flow_detection_nonoverlap) continue;` (`:657-664`).
+        // `if (!config.optical_flow_detection_nonoverlap) continue;`.
         if self.config.optical_flow_detection_nonoverlap {
             for camera in 1..self.cameras.len() {
                 self.append_cam0_overlap_masks(camera);
@@ -1696,7 +1547,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         Ok(())
     }
 
-    /// `filterPointsForCam` (`:668-701`): drop the keypoints camera `camera`
+    /// `filterPointsForCam` : drop the keypoints camera `camera`
     /// shares with camera 0 whose epipolar error is too large.
     fn filter_points_for_cam(&mut self, camera: usize) {
         self.to_remove.clear();
@@ -1718,7 +1569,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             let ok1: bool = self.cameras[camera].model.unproject(&proj1, &mut p3d1);
 
             if ok0 && ok1 {
-                // `std::abs(p3d0.transpose() * E[cam] * p3d1)` (`:692`), in the
+                // `std::abs(p3d0.transpose() * E[cam] * p3d1)`, in the
                 // estimator's scalar and only then widened for the comparison.
                 let error: f32 = (p3d0.transpose() * essential * p3d1)[(0, 0)].abs();
                 if error > threshold {
@@ -1729,7 +1580,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             }
         }
 
-        // `for (int id : kp_to_remove) removeKeypoint(cam_id, id);` (`:700`), a
+        // `for (int id : kp_to_remove) removeKeypoint(cam_id, id);`, a
         // `std::set`, so ascending; `self.to_remove` is built in id order
         // already. Indexed rather than drained because `remove_keypoint` takes
         // `&mut self`, and the list does not change while it runs.
@@ -1740,7 +1591,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
         self.to_remove.clear();
     }
 
-    /// `filterPoints` (`:703-705`): every camera but camera 0.
+    /// `filterPoints` : every camera but camera 0.
     fn filter_points(&mut self) {
         for camera in 1..self.cameras.len() {
             self.filter_points_for_cam(camera);
@@ -1748,18 +1599,16 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
     }
 }
 
-/// `computeEssential` (`utils/keypoints.h:101-107`).
+/// `computeEssential`.
 ///
 /// `E.topLeftCorner<3,3>() = hat(t.normalized()) * R`, computed in `double`
-/// because that is what `optical_flow.h:209-212` casts to before calling it, and
+/// because that is what casts to before calling it, and
 /// cast back to the estimator's scalar afterwards.
 fn compute_essential(t_0_1: &Se3<f64>) -> Matrix4<f64> {
     let translation: Vector3<f64> = t_0_1.translation;
     let rotation = t_0_1.rotation.matrix();
     let mut essential: Matrix4<f64> = Matrix4::zeros();
-    // `Eigen::normalized()` is `v / v.norm()`, which is NaN for a zero baseline;
-    // the C++ does the same, and a rig with two coincident cameras has no
-    // epipolar geometry to test against anyway.
+    // Normalizing a zero baseline yields NaNs: coincident cameras have no epipolar geometry.
     let normalized: Vector3<f64> = translation / translation.norm();
     essential
         .fixed_view_mut::<3, 3>(0, 0)
@@ -1767,21 +1616,16 @@ fn compute_essential(t_0_1: &Se3<f64>) -> Matrix4<f64> {
     essential
 }
 
-/// `Ed.cast<Scalar>()` (`optical_flow.h:212`).
+/// `Ed.cast<Scalar>()`.
 fn cast_matrix4(matrix: &Matrix4<f64>) -> Matrix4<f32> {
     Matrix4::from_iterator(matrix.iter().map(|value| *value as f32))
 }
 
-/// `Calibration::projectBetweenCams` (`calibration/calibration.hpp:79-95`).
-///
-/// Returns the validity flag *and* the pixel. `trackPoints` discards the flag and
-/// uses whatever `project` wrote (`frame_to_frame_optical_flow.h:338`), while
-/// `cam0OverlapCellsMasksForCam` reads it (`:625-627`); both behaviours are the
-/// C++'s, so the pixel is always produced and the caller decides.
+/// Project between cameras, returning both validity and the written pixel.
+/// Tracking uses the pixel; overlap masking also checks validity.
 ///
 /// # Panics
-///
-/// If `i` or `j` is past the end of `cameras`.
+/// If either camera index is outside the rig.
 pub fn project_between_cams(
     cameras: &[RigCamera<f32>],
     ci_uv: &Vector2<f32>,
@@ -1796,7 +1640,7 @@ pub fn project_between_cams(
     ci_xyzw.w = 1.0;
 
     // `T_ci_cj.inverse() * ci_xyzw`: Sophus rotates and translates the first
-    // three components and carries the fourth through unchanged (`se3.hpp`).
+    // three components and carries the fourth through unchanged.
     let inverse: Se3<f32> = t_ci_cj.inverse();
     let point: Vector3<f32> = inverse * Vector3::new(ci_xyzw.x, ci_xyzw.y, ci_xyzw.z);
     let cj_xyzw: Vector4<f32> = Vector4::new(point.x, point.y, point.z, ci_xyzw.w);

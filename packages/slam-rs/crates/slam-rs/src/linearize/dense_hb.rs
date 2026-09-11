@@ -7,21 +7,11 @@ use super::landmark_block::{DenseHbScratch, LandmarkBlock};
 use super::reduce::deterministic_reduce;
 use crate::lie::LieScalar;
 
-/// One subtree's partial `(H, b)` of the dense reduction, and the columns it holds.
-///
-/// C++ gives every TBB task a full `total_size` x `total_size` partial and adds
-/// the whole square at each join (`:513-542`), but a subtree only ever writes
-/// the pose columns its landmarks observe — 22 of 85 on the median MIO10 frame
-/// for one landmark, and the union of a subtree's landmarks above that. The
-/// rest is `+0.0` on both sides of a join and `+0.0` after a reset, so keeping
-/// the square but touching only `columns` is the same arithmetic; see
-/// [`LandmarkBlock::active_cols`] for why `+= +0.0` here is the identity.
-///
-/// This partial is the one destination that argument holds for: it is created
-/// zeroed and [`Self::reset`] puts back `+0.0`, never `-0.0`, so no coefficient
-/// a skipped write would have changed exists. A block whose own columns are not
-/// the identity to skip — [`LandmarkBlock::active_writeback_is_exact`] — is
-/// added at full width instead.
+/// Partial dense `(H, b)` and the columns it touched.
+/// Only observed pose columns need updates if skipped writes are exact identities.
+/// Storage resets to positive zero, so untouched coefficients remain positive zero.
+/// Blocks with non-finite or signed-zero-sensitive writes use full width instead;
+/// see [`LandmarkBlock::active_writeback_is_exact`].
 #[derive(Debug, Clone)]
 struct DensePartial<S: LieScalar> {
     /// The partial `H`, full size, zero outside `columns` x `columns`.
@@ -113,20 +103,10 @@ impl<S: LieScalar> DensePartial<S> {
         }
     }
 
-    /// Add one landmark block's `(H, b)` and record the columns it wrote.
-    ///
-    /// The two halves belong together: [`Self::mark`] records what a join and a
-    /// reset will touch and the writeback is what writes it, so a drift between
-    /// them would leave coefficients no join adds and no reset clears — a
-    /// silently wrong reduction that no test would catch. Marking **after** the
-    /// add is what makes every column in range: the add is the check on the
-    /// block's layout.
-    ///
-    /// Which of the two writebacks runs is the block's own answer: the observed
-    /// columns when skipping the rest is the identity, the full width when it is
-    /// not, and then every column is marked because the full width writes every
-    /// column — a NaN spread into a column the block never observed is part of
-    /// the sum basalt takes (decision D32).
+    /// Add a landmark contribution and mark its written columns together.
+    /// Mark only after the add validates layout. Exact sparse writes mark observed
+    /// columns; full-width writes also mark NaNs propagated into unobserved columns,
+    /// so joins and resets cannot miss them (D32).
     fn accumulate(
         &mut self,
         block: &LandmarkBlock<S>,
@@ -291,12 +271,8 @@ mod tests {
         block
     }
 
-    /// The reduction adds a non-finite block at full width, bit for bit with the
-    /// system the C++ path writes, and marks every column it wrote.
-    ///
-    /// Skipping the block's unobserved columns would drop those NaNs — the
-    /// reduced camera system would come out finite where basalt's is not
-    /// (decision D32) — and leave coefficients no join adds and no reset clears.
+    /// Non-finite blocks must write and mark every column. Skipping unobserved columns
+    /// would suppress NaNs and leave coefficients outside join/reset bookkeeping (D32).
     #[test]
     fn a_non_finite_block_is_reduced_at_full_width() {
         let block: LandmarkBlock<f64> = a_block_carrying_a_nan();

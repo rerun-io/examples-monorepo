@@ -364,8 +364,7 @@ mod numerical_selection {
             ExpectedPath::BandWalk,
         );
 
-        // The port's own cap, checked where the C++ checks its cell budget: the
-        // truncation must fall in the same place in the same scan order.
+        // Capacity truncation must retain detector scan order.
         for budget in [1usize, 7, 40] {
             detection_agrees(
                 DetectionCase {

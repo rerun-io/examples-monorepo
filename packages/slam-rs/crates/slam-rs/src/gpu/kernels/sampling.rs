@@ -7,7 +7,7 @@ use cubecl::prelude::*;
 // together. The storage probe alone retains checked launch mode.
 // ── sampling ─────────────────────────────────────────────────────────────────
 
-/// `ImageU16::in_bounds` (`image.h:694-705`).
+/// `ImageU16::in_bounds`.
 #[cube]
 pub(crate) fn in_bounds(x: f32, y: f32, border: f32, width: usize, height: usize) -> bool {
     border <= x
@@ -22,8 +22,7 @@ fn at(image: &Array<u16>, base: usize, stride: usize, x: usize, y: usize) -> f32
     f32::cast_from(image[base + y * stride + x])
 }
 
-/// `ImageU16::interp` (`image.h:396-415`), with the multiplication grouping and
-/// the summation order the CPU port reproduces from Eigen.
+/// Bilinear sampling with the CPU implementation's multiplication grouping and sum order.
 #[cube]
 pub(crate) fn interp(image: &Array<u16>, base: usize, stride: usize, x: f32, y: f32) -> f32 {
     let ix = usize::cast_from(x);
@@ -38,7 +37,7 @@ pub(crate) fn interp(image: &Array<u16>, base: usize, stride: usize, x: f32, y: 
         + dx * dy * at(image, base, stride, ix + 1usize, iy + 1usize)
 }
 
-/// `ImageU16::interp_grad` (`image.h:418-469`) writing its three results into
+/// `ImageU16::interp_grad` writing its three results into
 /// three shared arrays at `slot`.
 ///
 /// The value is the bilinear surface; the gradient is the *central difference*

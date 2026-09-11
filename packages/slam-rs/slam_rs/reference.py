@@ -20,7 +20,7 @@ DecodePath: TypeAlias = Literal["cpu_gray8_dav1d_1thread", "cpu_gray8_swscale_ar
 The MSD gate is frozen on the single-threaded dav1d ``gray8`` path (D28). RoboCap's
 H.264 streams are decoded on the same one decoder thread but reformatted straight to
 ``gray8`` at a third of their size in one ``swscale`` call with ``SWS_AREA``, which is
-the operation the reference RoboCap reader performs.
+the combined area-resampling operation selected for RoboCap.
 """
 GroundTruthSource: TypeAlias = Literal["lighthouse", "mocap"]
 """How a segment's ground-truth rig poses were measured."""
@@ -75,7 +75,7 @@ modules is a manifest id nobody can rename.
 
 @dataclass(slots=True, frozen=True)
 class ImuParameters:
-    """Continuous-time IMU noise model and clock offset, in basalt's units.
+    """Continuous-time IMU noise model and clock offset, in the estimator's units.
 
     None of this is on the recordings; it comes from the device's own calibration
     file and is frozen here until dataforge logs it onto the IMU node.
@@ -106,7 +106,7 @@ class CaptureProperties:
     num_cameras: int
     """Cameras on the rig."""
     start_time_ns: int
-    """Device-clock time of ``video_time`` zero; add it to reach the clock every basalt CSV uses."""
+    """Device-clock time of ``video_time`` zero; add it to reach the absolute export clock."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -125,7 +125,7 @@ class LayerFingerprint:
 
 @dataclass(slots=True, frozen=True)
 class DatasetProperties:
-    """The rig geometry and basalt config shared by every segment of one dataset.
+    """The rig geometry and VIO config shared by every segment of one dataset.
 
     Calibration is byte-identical across a dataset's segments (33/33 for
     ``msd-index``, 15/15 for ``msd-g2``), so it is recorded once per dataset and
@@ -244,9 +244,9 @@ class RobocapReference:
     video_time_is_absolute: bool
     """Whether ``video_time`` is already the device clock the reference trajectories are on."""
     vio_config: str
-    """basalt VIO config the reference ran, relative to the package root."""
+    """VIO configuration selected for replay, relative to the package root."""
     calibration: str
-    """basalt calibration the reference ran, at :attr:`downscale`, relative to the package root."""
+    """Rig calibration selected for replay, at :attr:`downscale`, relative to the package root."""
     imu: ImuParameters
     """Frozen IMU noise model, from the device's Kalibr calibration."""
     sessions: tuple[RobocapSession, ...]
@@ -293,7 +293,7 @@ class ReferenceManifest:
         raise ValueError(f"{name!r} is not in the reference set; have {[d.name for d in self.datasets]}")
 
     def vio_config_text(self, dataset_name: str, profile: str = "reference") -> str:
-        """The basalt VIO config one dataset's segments run with, as its file's own text.
+        """The VIO config one dataset's segments run with, as its file's own text.
 
         Args:
             dataset_name: Catalog dataset name.

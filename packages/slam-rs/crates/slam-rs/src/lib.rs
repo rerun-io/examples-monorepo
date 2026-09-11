@@ -1,16 +1,8 @@
-//! Visual-inertial odometry core.
-//!
-//! The crate is deliberately free of Python, Rerun and GPU code: it consumes
-//! grayscale images and IMU samples and returns plain values. Python plumbing
-//! (catalog feed, evaluation, logging) lives in the `slam_rs` package and the
-//! bindings in `slam-rs-py`; `slam-rs-cli` is a placeholder binary whose only
-//! working subcommand is `version`.
-//!
-//! [`Vio`] is the Offline driver (D17): [`Vio::push_imu`] buffers samples and
-//! [`Vio::track`] runs the frontend and then the estimator to completion in the
-//! calling thread, so every result is final and a repeat run over the same input
-//! is bit-identical. Realtime mode — basalt's two threads joined by bounded
-//! queues — is stage S10's.
+//! Visual-inertial odometry core consuming grayscale images and IMU samples.
+//! Python catalog, evaluation and logging live in `slam_rs`; bindings live in
+//! `slam-rs-py`. The CLI currently provides only `version`.
+//! [`Vio`] buffers IMU samples and processes frames synchronously, returning final
+//! values with deterministic replay (D17). GPU frontend support is feature-gated.
 
 pub mod ba_base;
 pub mod calib;
@@ -70,13 +62,9 @@ pub(crate) fn duration_ns(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
-/// How far the estimator has got.
-///
-/// Offline mode has exactly these two states: basalt's estimator initialises
-/// inside the same `process_frame` that measures
-/// (`sqrt_keypoint_vio.cpp:263-296`), so a measured frameset always has a state
-/// and an uncovered one never does. There is no third, "initialising" status a
-/// caller could branch on.
+/// Offline status: a measured frame has a state; an uncovered frame needs more IMU.
+/// Initialization happens in the same call that first measures, so no separate
+/// initializing status is exposed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VioStatus {
     /// The frame arrived before the IMU samples that cover it. Nothing moved —
@@ -155,13 +143,8 @@ pub enum VioError {
         /// Timestamp of the rejected sample.
         t_ns: i64,
     },
-    /// A sample carries a value that is not a number.
-    ///
-    /// basalt does not check: its samples come from a device driver. Here they
-    /// come from a caller, and one non-finite component reaches both
-    /// preintegrators and poisons every state after it with nothing to undo it —
-    /// so it is bad input, refused at the boundary (D32), not a NaN the
-    /// estimator is asked to survive.
+    /// An IMU sample has a non-finite component. Refuse it at the boundary before
+    /// it contaminates both preintegrators and all following states (D32).
     #[error("imu sample at {t_ns} ns has a non-finite {field}")]
     NonFiniteImu {
         /// Timestamp of the rejected sample.
@@ -445,30 +428,12 @@ fn build_frontend(
     }
 }
 
-/// The estimator, driven one frameset at a time (D17, D24).
-///
-/// One `track` call is basalt's whole pipeline for one frameset, in the calling
-/// thread and in basalt's order:
-///
-/// 1. the frontend's own preintegration over `(t_prev, t_now]` and the pose
-///    prediction it feeds the KLT (`frame_to_frame_optical_flow.h:138-152`) —
-///    the estimator runs a **second, independent** preintegrator (D24) and the
-///    two are deliberately not shared;
-/// 2. `processFrame`, which produces the tracked keypoints;
-/// 3. the estimator's own IMU consumption and `measure`, which optimises and
-///    marginalizes;
-/// 4. the two feedback values basalt pushes back to the frontend: the newest
-///    state, and — because every shipped config sets
-///    `optical_flow_matching_guess_type = REPROJ_AVG_DEPTH` — the average scene
-///    depth from `computeProjections` (`sqrt_keypoint_vio.cpp:583-604`).
-///
-/// Nothing about arrival order can reach a decision: there are no queues, no
-/// drops (`vio_enforce_realtime` is refused) and no threads, which is what makes
-/// a repeat run bit-identical.
-///
-/// The frontend is `f32` throughout, as `FrameToFrameOpticalFlow<float,
-/// Pattern51>` is; the estimator's scalar is the type parameter, and `f32` is
-/// the shipped precision the reference lane runs (Q07).
+/// Synchronous frameset pipeline (D17, D24).
+/// First preintegrate for the frontend prediction, run optical flow, then run
+/// the estimator's independent preintegrator, measurement, optimization and
+/// marginalization. Feed back the newest state and average scene depth.
+/// The two preintegrators remain independent. No timing or queue dropping enters
+/// a decision. The frontend uses f32; the estimator scalar is selectable.
 #[derive(Debug)]
 pub struct Vio<S: lie::LieScalar = f32> {
     frontend: FrontendLane,
@@ -476,18 +441,14 @@ pub struct Vio<S: lie::LieScalar = f32> {
     /// The frontend's own IMU buffer (D24). The same samples reach the
     /// estimator through its own queue.
     frontend_imu: std::collections::VecDeque<imu::ImuSample>,
-    /// The frontend's already-popped sample, `processImu`'s `data` (`:169`).
+    /// The frontend's already-popped sample, `processImu`'s `data`.
     frontend_pending: Option<imu::Popped<f64>>,
-    /// `latest_state` (`frame_to_frame_optical_flow.h:141-146`), which doubles
-    /// as basalt's `first_state_arrived` (`:143`): `None` until the estimator
-    /// has published one. `predicted_state` (`:150`) is a member there and a
-    /// local here — nothing outside the prediction that produces it reads it.
+    /// Most recent estimated state; absent until the estimator publishes one.
     latest_state: Option<types::PoseVelBiasState<f64>>,
-    /// The frontend's own preintegration noise, `accel_cov`/`gyro_cov` at
-    /// `frame_to_frame_optical_flow.h:105-106`.
+    /// The frontend's own accelerometer and gyroscope preintegration noise.
     frontend_noise: imu::ImuNoise<f64>,
     /// The static bias calibration, applied to the frontend's samples in `f32`
-    /// and cast back to `f64` (`:171-178`).
+    /// and cast back to `f64`.
     calib_f32: calib::Calibration<f32>,
     /// Widened frames, reused so a steady-state `track` does not allocate.
     frames: Vec<image::ImageU16>,
@@ -495,7 +456,7 @@ pub struct Vio<S: lie::LieScalar = f32> {
     masks: Vec<frontend::detect::Masks>,
     /// Cameras in the rig; every frameset must carry exactly this many.
     camera_count: usize,
-    /// The last frameset's timestamp, `t_ns` in the frontend (`:172`).
+    /// The last frameset's timestamp, `t_ns` in the frontend.
     last_frame_t_ns: Option<i64>,
     /// What the last `track` decided; the S9 Rerun rung reads this.
     last_stats: Option<Box<estimator::FrameStats<S>>>,
@@ -528,14 +489,11 @@ impl<S: lie::LieScalar> PreparedTrack<'_, S> {
 }
 
 impl<S: lie::LieScalar> Vio<S> {
-    /// Build the pipeline from basalt's own config and calibration (D18).
+    /// Build the pipeline from configuration and calibration (D18).
     ///
     /// # Errors
-    ///
-    /// [`VioError::Frontend`] when the config names another flow type or
-    /// pattern or the rig is unusable, and [`VioError::Estimator`] when the
-    /// config asks for a path this port does not have — `vio_linearization_type`
-    /// other than `ABS_QR`, `vio_sqrt_marg` false, or `vio_enforce_realtime`.
+    /// Reject unsupported flow types or patterns, unusable rigs, linearization other
+    /// than `ABS_QR`, disabled square-root marginalization and realtime enforcement.
     pub fn new(
         config: config::VioConfig,
         calibration: calib::Calibration<f64>,
@@ -700,10 +658,7 @@ impl<S: lie::LieScalar> Vio<S> {
             });
         }
 
-        // `frame_to_frame_optical_flow.h:138-152`: the prediction the KLT is
-        // seeded with. Until the estimator has produced a state both poses are
-        // the identity, which is basalt's `first_state_arrived == false` path —
-        // and here that flag is `latest_state` being `None`.
+        // Before the first estimated state, both prediction poses are identity.
         let mark: std::time::Instant = std::time::Instant::now();
         let prediction: frontend::flow::PosePrediction = match self.latest_state {
             Some(latest) => {
@@ -720,7 +675,7 @@ impl<S: lie::LieScalar> Vio<S> {
         };
         self.frontend_timings.imu_ns = duration_ns(mark);
 
-        // `vit_tracker.cpp:534`: the `u8 << 8` widening the whole frontend
+        // the `u8 << 8` widening the whole frontend
         // assumes, into buffers that are reused frame to frame.
         self.frames
             .resize_with(images.len(), image::ImageU16::default);
@@ -749,7 +704,6 @@ impl<S: lie::LieScalar> Vio<S> {
         self.last_frame_t_ns = Some(t_ns);
 
         // The estimator reads only the ids and the observed pixels
-        // (`optical_flow.h:186-215`).
         let mut observations: estimator::FlowObservations =
             estimator::FlowObservations::new(t_ns, self.camera_count);
         debug_assert_eq!(
@@ -771,13 +725,13 @@ impl<S: lie::LieScalar> Vio<S> {
             .process_frame(std::sync::Arc::new(observations))?;
 
         // The estimator initialises inside the same `process_frame` that
-        // measures (`:263-296`), so a `Measured` outcome always has a state and
+        // measures, so a `Measured` outcome always has a state and
         // the outcome alone decides the status.
         let status: VioStatus = match outcome {
             estimator::FrameOutcome::NeedMoreImu => VioStatus::NeedMoreImu,
             estimator::FrameOutcome::Measured(stats) => {
                 self.last_stats = Some(stats);
-                // `:592-620`: the two feedback values, in basalt's order.
+                // Return the newest state, then the depth feedback.
                 self.publish_state();
                 self.publish_depth_guess()?;
                 VioStatus::Tracking
@@ -817,12 +771,12 @@ impl<S: lie::LieScalar> Vio<S> {
         }
     }
 
-    /// `processImu(curr_t_ns)` (`frame_to_frame_optical_flow.h:157-201`).
+    /// `processImu(curr_t_ns)`.
     ///
     /// The same three-part loop the estimator runs, over the frontend's own
     /// buffer and at `f64`: skip up to the previous frame, integrate up to this
     /// one, then close the interval by retiming the next sample. The bias
-    /// calibration happens in `f32` and is cast back (`:171-178`), which is what
+    /// calibration happens in `f32` and is cast back, which is what
     /// `Calibration<Scalar>` with `Scalar = float` means here.
     /// # Errors
     ///
@@ -837,7 +791,7 @@ impl<S: lie::LieScalar> Vio<S> {
         let prev_t_ns: i64 = self.last_frame_t_ns.unwrap_or(-1);
         let mut pim: imu::IntegratedImuMeasurement<f64> =
             imu::IntegratedImuMeasurement::new(prev_t_ns, &latest.bias_gyro, &latest.bias_accel);
-        // `:190-198`, the same three-part loop the estimator's own
+        // the same three-part loop the estimator's own
         // preintegration runs, through `IntegratedImuMeasurement::accumulate_to`.
         let noise: imu::ImuNoise<f64> = self.frontend_noise;
         let pending: Option<imu::Popped<f64>> = self.frontend_pending.take();
@@ -852,7 +806,7 @@ impl<S: lie::LieScalar> Vio<S> {
     }
 
     /// One sample off the frontend's buffer, calibrated in `f32` and cast back
-    /// to `f64` (`frame_to_frame_optical_flow.h:171-178`).
+    /// to `f64`.
     fn frontend_pop(&mut self) -> Option<imu::Popped<f64>> {
         let sample: imu::ImuSample = self.frontend_imu.pop_front()?;
         let accel: Vector3<f32> = self
@@ -866,7 +820,7 @@ impl<S: lie::LieScalar> Vio<S> {
         Some((sample.t_ns, gyro.cast(), accel.cast()))
     }
 
-    /// `opt_flow_state_queue->push(data)` (`sqrt_keypoint_vio.cpp:620`).
+    /// `opt_flow_state_queue->push(data)`.
     fn publish_state(&mut self) {
         if let Some(state) = self.estimator.state() {
             self.latest_state = Some(types::PoseVelBiasState {
@@ -879,28 +833,10 @@ impl<S: lie::LieScalar> Vio<S> {
         }
     }
 
-    /// `opt_flow_depth_guess_queue->push(avg_depth)` (`:583-604`).
-    ///
-    /// `num_features / Σ inverse-depth`, or `optical_flow_matching_default_depth`
-    /// when the sum is not positive. Only computed when the config asks for
-    /// `REPROJ_AVG_DEPTH`, which every shipped config does.
-    ///
-    /// **The reduction is `f64` on both instantiations because the C++ one is**
-    /// (D42): `computeProjections` is called with `Scalar2 = double`
-    /// (`ba_base.cpp:540,558`), so every `proj` is widened to `Vector4d` on the
-    /// way into the vector, and `:592-593` declares `avg_invdepth` and
-    /// `num_features` as `double` whatever `Scalar` is. `to_f64()` here is that
-    /// `cast<double>`, and the division follows it.
-    ///
-    /// One deviation, and it is on the way **out**: C++ carries the guess as a
-    /// `double` from the queue (`vio_estimator.h:108`) into
-    /// `OpticalFlowBase::depth_guess` (`optical_flow.h:164`), while the port's
-    /// frontend holds it as `f32` (`FrameToFrameOpticalFlow::depth_guess`), so
-    /// the quotient is rounded once here. The guess only seeds the KLT's
-    /// matching window, and the f64 backend lane reproduces the C++ trajectory
-    /// to 2.5e-13 m over 4,095 framesets with the same rounding in place, so it
-    /// reaches no decision on the shipped path; widening the frontend's field is
-    /// the fix if one ever does.
+    /// Average scene depth is `num_features / Σ inverse-depth`, or the configured
+    /// default when the sum is not positive. Compute only for `REPROJ_AVG_DEPTH`.
+    /// Both estimator lanes reduce in f64, then round once into the frontend's f32
+    /// depth guess, which seeds the KLT matching window.
     fn publish_depth_guess(&mut self) -> Result<(), VioError> {
         // No `t_i_c.is_empty()` clause: `SqrtKeypointVio::new` refuses a rig of
         // fewer than two cameras and is the only way to build the estimator a
@@ -1048,8 +984,7 @@ mod tests {
         }
     }
 
-    /// The package's own MSDMI config, the file `reference_segments.toml` names
-    /// and the C++ reference runs loaded.
+    /// MSDMI configuration named by the package manifest.
     const MSDMI_CONFIG: &str = include_str!("../../../configs/msdmi_config.json");
 
     fn pipeline() -> Vio<f32> {
@@ -1071,11 +1006,9 @@ mod tests {
         .unwrap()
     }
 
-    /// A frameset that arrives before the IMU covering it reports
-    /// [`VioStatus::NeedMoreImu`] and the frontend does **not** run: it would
-    /// swap its pyramids and advance its clock and counter, and the retry the
-    /// status invites would then track the frameset against itself (D17).
-    /// `vio_parity.rs` proves the retry itself; this proves nothing moved.
+    /// Insufficient IMU coverage must return [`VioStatus::NeedMoreImu`] before the
+    /// frontend advances pyramids, clock or ids. Otherwise a retry tracks the frame
+    /// against itself. This test checks that nothing moved (D17).
     #[test]
     fn a_frameset_ahead_of_the_imu_needs_more_imu() {
         let mut vio: Vio<f32> = pipeline();

@@ -5,19 +5,19 @@ use kornia_image::{Image, ImageSize};
 use kornia_imgproc::features::{Rect as KorniaRect, fast_detect_rect_u8};
 
 /// The Bresenham radius `cv::FAST` and kornia both skip at a border
-/// (`cells.rs:151`, `fast.rs:494`).
+/// (`cells.rs, `fast.rs).
 pub const FAST_BORDER: usize = 3;
 
 /// kornia's Bresenham ring: ring point `k` sits `FAST_RING_ROW[k]` rows and
-/// [`FAST_RING_COLUMN`]`[k]` columns from the centre (`fast.rs:489-490`).
+/// [`FAST_RING_COLUMN`]`[k]` columns from the centre (`fast.rs`).
 pub const FAST_RING_ROW: [i32; 16] = [0, 1, 2, 3, 3, 3, 2, 1, 0, -1, -2, -3, -3, -3, -2, -1];
 /// The column half of [`FAST_RING_ROW`]'s ring.
 pub const FAST_RING_COLUMN: [i32; 16] = [3, 3, 2, 1, 0, -1, -2, -3, -3, -3, -2, -1, 0, 1, 2, 3];
 
-/// Lanes in one block of kornia's in-block local-maximum filter (`fast.rs:539`).
+/// Lanes in one block of kornia's in-block local-maximum filter (`fast.rs`).
 pub const FAST_FILTER_LANES: usize = 16;
 
-/// The width at which kornia turns that filter on (`fast.rs:517`).
+/// The width at which kornia turns that filter on (`fast.rs`).
 const FAST_FILTER_WIDTH: usize = 800;
 
 /// Where kornia's local-maximum filter stops, and whether it runs at all.
@@ -26,7 +26,7 @@ const FAST_FILTER_WIDTH: usize = 800;
 /// *inside its own sixteen-lane block*, the blocks are aligned to the image's
 /// own left margin, and the scalar tail past the last whole block is
 /// unfiltered — kornia's SIMD loop runs while `x + 16 <= width - margin`
-/// (`fast.rs:524`). So the alignment and the tail are part of the corner set,
+/// (`fast.rs`). So the alignment and the tail are part of the corner set,
 /// not an implementation detail, and this is the one place that arithmetic
 /// lives: the CPU sweep gets it from kornia itself, and the GPU kernel and
 /// `tests/fast_model.rs` read it here rather than each spelling it out.
@@ -44,7 +44,7 @@ const FAST_ARC_LENGTH: usize = 9;
 /// One cell row's raw FAST candidates at one threshold, over the whole image width.
 ///
 /// `fast_detect_rect_u8` detects over **whole rows** and filters the result by
-/// column (`cells.rs:20-35`), so the scan a cell asks for depends only on its
+/// column (`cells.rs`), so the scan a cell asks for depends only on its
 /// row band and its threshold — the nineteen cells of one grid row at one rung
 /// all pay for the same 960-wide sweep. Scanning it once and filtering each
 /// cell's columns out of it is the same call with the same arguments, so the
@@ -52,7 +52,7 @@ const FAST_ARC_LENGTH: usize = 9;
 ///
 /// The whole-image width is what the scan has to keep: kornia's kernel turns its
 /// in-block local-maximum filter on at `width >= 800` and aligns its sixteen-lane
-/// blocks to the image's own left margin (`fast.rs:517`, `:524`), so a cell-sized
+/// blocks to the image's own left margin (`fast.rs`), so a cell-sized
 /// copy would detect a different set.
 ///
 /// Both scanners hold one of these, which is why it lives here beside the trait
@@ -106,24 +106,11 @@ impl BandCache {
     }
 }
 
-/// The CPU [`CornerScan`]: kornia's `fast_detect_rect_u8`, one sweep per
-/// `(row band, threshold)`.
-///
-/// basalt copies each cell into its own `cv::Mat` with `sub_img_raw(x, y) >> 8`
-/// (`keypoints.cpp:152-157`); one whole-image shift produces the same bytes and
-/// lets every cell be a zero-copy rectangle over it. The narrowed frame is
-/// built **once per frame** and kept: rebuilding the view per band call instead
-/// copies the whole frame forty times a frameset, which measured 40.1 ms against
-/// 9.4 ms on MIO07/1500 with every value unchanged.
-///
-/// And the frame is narrowed **into** that image rather than into a staging
-/// buffer it is then built from. `Image::from_size_slice` is `data.to_vec()`, so
-/// the old shape kept the frame twice — a `Vec<u8>` and the image's own copy —
-/// and paid a whole-frame `memcpy` per camera per frameset (0.9 MB at 960x960)
-/// for the second. kornia's `Image` derefs to its tensor, which has
-/// `as_slice_mut`, so the narrowing pass can write straight into the pixels the
-/// detector will read, and the image is reallocated only when the geometry
-/// changes.
+/// CPU [`CornerScan`]: one kornia rectangle sweep per row band and threshold.
+/// Narrow the u16 frame to u8 once per frame; all cells then use zero-copy rectangles.
+/// Rebuilding per band copied the whole frame repeatedly and measured 40.1 ms
+/// against 9.4 ms on MIO07/1500. Write directly into kornia's image storage to
+/// avoid a second full-frame copy; reallocate only when geometry changes.
 #[derive(Default)]
 pub struct CpuCornerScan {
     /// The narrowed frame, `None` until the first [`CornerScan::scan`], and
@@ -172,7 +159,7 @@ impl CornerScan for CpuCornerScan {
                 })?,
             ),
         };
-        // `sub_ptr[x] = (sub_img_raw(x, y) >> 8)` (`keypoints.cpp:156`), once,
+        // `sub_ptr[x] = (sub_img_raw(x, y) >> 8)`, once,
         // straight into the pixels the detector reads. One row's slice at a
         // time, not one `push` per pixel: the capacity check a `push` carries is
         // what stops the narrowing from vectorising.
@@ -225,20 +212,11 @@ impl CornerScan for CpuCornerScan {
     }
 }
 
-/// kornia's normalised FAST score as OpenCV's integer `cornerScore`.
-///
-/// kornia returns `corner_score_9_scalar(...) / 255.0` (`fast.rs:710`), the
-/// smallest threshold at which the pixel stops being a corner. OpenCV returns
-/// that minus one — the largest threshold at which it is still a corner
-/// (`fast_score.cpp`, `threshold = std::max(a0, -b0) - 1`). The subtraction is a
-/// constant shift, so it cannot change an ordering, but it is what makes the
-/// number the port reports equal to the one `cv::FAST` writes into
-/// `cv::KeyPoint::response` and basalt copies into `keypoint_responses`.
-///
-/// It is applied before suppression rather than after, so the scores compared
-/// against a non-candidate's zero are OpenCV's own. Nothing reaches zero: a
-/// candidate found at threshold `t` scores at least `t`, and the ladder's floor
-/// is `optical_flow_detection_min_threshold`.
+/// Convert normalized kornia FAST scores to OpenCV integer corner scores.
+/// Kornia reports the first threshold that rejects the corner; OpenCV reports
+/// the last that accepts it, one less. Convert before suppression so comparison
+/// against a non-candidate's zero uses the same score convention.
+/// Candidates at threshold `t` score at least `t`, and the ladder has a positive floor.
 #[inline]
 pub fn opencv_corner_score(normalized: f32) -> f32 {
     (normalized * 255.0).round() - 1.0

@@ -1,32 +1,8 @@
-//! The frontend's image container and its bilinear sampling.
-//!
-//! Ported from `thirdparty/basalt-headers/include/basalt/image/image.h`. Only
-//! the parts the VIO frontend runs on are here: an owned 16-bit grayscale
-//! buffer, `interp`, `interpGrad` and the floating-point `InBounds`. The cubic
-//! spline interpolators (`image.h:473-671`), the sub-image views and the
-//! `Eigen` overloads are not ported: nothing on the ABS_QR path calls them, and
-//! a borrowed sub-image view is exactly what the GPU seam forbids.
-//!
-//! ## Why 16 bits
-//!
-//! basalt widens every 8-bit source by eight bits on read
-//! (`src/vit/vit_tracker.cpp:534`, `include/basalt/io/dataset_io_euroc.h:102`)
-//! and runs the whole frontend at `uint16_t`. Keeping `u8` internally would
-//! change the last bits of every interpolation and therefore the trajectory,
-//! which is trap 4 of the architecture dossier (decision D08, tradeoff T02).
-//!
-//! ## Two divergences from the C++, both deliberate
-//!
-//! * **Row pitch is in elements, not bytes.** `Image<T>::pitch` is a byte
-//!   pitch cast through `unsigned char*` (`image.h:247`). A `Vec<u16>` cannot
-//!   express an odd byte pitch, and nothing in basalt produces one, so
-//!   [`ImageU16::stride`] counts `u16`s.
-//! * **The `u8 -> u16` copy honours the source byte stride.** basalt's shim
-//!   reads the source with a linear index (`vit_tracker.cpp:531-534`), which is
-//!   only right when `stride == width`, and the Python binding enforces that
-//!   (`python/vit_binding.py:285-286`). dav1d hands back padded rows (line size
-//!   1024 for a 960-wide frame), so the port takes the stride instead
-//!   (decision D28, trap 5). With `stride_bytes == width` the two agree.
+//! Owned u16 grayscale images and bilinear sampling for the frontend.
+//! Eight-bit input is widened by `u8 << 8`, preserving interpolation precision
+//! (D08). Row strides count u16 elements internally and bytes on input.
+//! Honor padded source rows, such as a 1024-byte decoder stride for a 960-pixel
+//! image (D28). Flat owned buffers support upload without repacking.
 
 use thiserror::Error;
 
@@ -73,12 +49,8 @@ pub enum ImageError {
     },
 }
 
-/// An owned 16-bit grayscale image: `height` rows of `width` pixels, `stride` apart.
-///
-/// One flat `Vec<u16>` with an explicit row stride, not a `Vec<Vec<u16>>` and
-/// not basalt's packed mipmap: a flat buffer plus `(width, height, stride)` is
-/// what a CubeCL `create_from_slice` wants, and anything else needs a repack
-/// per frame (deviation X04).
+/// An owned flat u16 image with explicit width, height and row stride.
+/// This layout can be uploaded as one buffer without per-frame repacking.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ImageU16 {
     data: Vec<u16>,
@@ -119,15 +91,11 @@ impl ImageU16 {
         })
     }
 
-    /// Widen an 8-bit image into a fresh 16-bit one, `u8 << 8` as basalt does.
-    ///
-    /// `stride_bytes` is the distance between the starts of two source rows;
-    /// `bytes` must hold at least `stride_bytes * height` of them.
+    /// Widen an 8-bit image with `u8 << 8`, honoring `stride_bytes` between rows.
+    /// The buffer must cover `stride_bytes * height` bytes.
     ///
     /// # Errors
-    ///
-    /// [`ImageError::StrideTooSmall`], [`ImageError::SizeOverflow`] or
-    /// [`ImageError::ShortBuffer`] when the geometry and the buffer disagree.
+    /// Returns stride, overflow or short-buffer errors when geometry is invalid.
     pub fn from_u8_strided(
         bytes: &[u8],
         width: usize,
@@ -267,24 +235,18 @@ impl ImageU16 {
         }
     }
 
-    /// The pixel at `(x, y)` with no bounds check beyond Rust's own.
+    /// Read a pixel after validating `x < width && y < height`.
     ///
-    /// The frontend's inner loops call this after [`ImageU16::in_bounds`]; the
-    /// invariant is `x < width && y < height`, and a violation panics on the
-    /// slice index rather than reading a neighbouring row, which is what
-    /// basalt's `operator()` does in release builds (`image.h:251-259`).
+    /// # Panics
+    /// If the resulting slice index is outside storage.
     #[inline]
     fn at(&self, x: usize, y: usize) -> f32 {
         f32::from(self.data[y * self.stride + x])
     }
 
-    /// basalt's floating-point bounds test, `image.h:687-689`.
-    ///
-    /// `border <= x && x < w - border - 1 && border <= y && y < h - border - 1`.
-    /// The extra `- 1` is what makes an integer coordinate of `w - 1`
-    /// out of bounds: [`ImageU16::interp`] reads `ix + 1` unconditionally.
-    /// `interp` needs `border >= 0`, `interp_grad` needs `border >= 1`
-    /// (`image.h:402`, `:424`).
+    /// Floating-point bounds: `border <= x < w - border - 1`, and likewise for y.
+    /// The extra pixel leaves room for interpolation's unconditional neighbor read.
+    /// Use border zero for values and at least one for gradients.
     pub fn in_bounds(&self, x: f32, y: f32, border: f32) -> bool {
         border <= x
             && x < (self.width as f32 - border - 1.0)
@@ -292,27 +254,13 @@ impl ImageU16 {
             && y < (self.height as f32 - border - 1.0)
     }
 
-    /// Bilinear sample at `(x, y)`, `image.h:396-415`.
-    ///
-    /// ```text
-    /// int ix = x;  int iy = y;
-    /// S dx = x - ix;   S dy = y - iy;
-    /// S ddx = 1 - dx;  S ddy = 1 - dy;
-    /// return ddx * ddy * (*this)(ix, iy)     + ddx * dy * (*this)(ix, iy + 1)
-    ///      + dx  * ddy * (*this)(ix + 1, iy) + dx  * dy * (*this)(ix + 1, iy + 1);
-    /// ```
-    ///
-    /// The multiplication grouping and the summation order are reproduced as
-    /// written: in `f32` both are load-bearing, and `interp_grad` below depends
-    /// on this function being exactly the bilinear surface it interpolates.
-    /// `int ix = x` truncates toward zero, which is a floor only for
-    /// non-negative `x`; that is guaranteed by `in_bounds(x, y, 0)`, which the
-    /// caller must satisfy (basalt asserts it only under
-    /// `BASALT_ENABLE_BOUNDS_CHECKS`, `image.h:402`).
+    /// Bilinear sampling with fixed multiplication grouping and summation order.
+    /// Interpolate the four surrounding pixels with weights formed from x/y fractions.
+    /// Truncation towards zero equals floor only for non-negative coordinates;
+    /// callers must establish `in_bounds(x, y, 0)` first.
     ///
     /// # Panics
-    ///
-    /// If `(x, y)` is outside the image, on the slice index.
+    /// If sampling indexes outside image storage.
     #[inline]
     pub fn interp(&self, x: f32, y: f32) -> f32 {
         debug_assert!(self.in_bounds(x, y, 0.0), "interp needs InBounds(x, y, 0)");
@@ -332,33 +280,13 @@ impl ImageU16 {
             + dx * dy * self.at(ix + 1, iy + 1)
     }
 
-    /// Bilinear sample and gradient at `(x, y)`, `image.h:418-469`.
-    ///
-    /// The value is [`ImageU16::interp`]; the gradient is the *central
-    /// difference of the bilinear surface at unit spacing*, not the analytic
-    /// derivative of that surface:
-    ///
-    /// ```text
-    /// res[1] = 0.5 * (res_px - res_mx);   // res_px = bilinear at (x + 1, y)
-    /// res[2] = 0.5 * (res_py - res_my);   // res_py = bilinear at (x, y + 1)
-    /// ```
-    ///
-    /// (`image.h:454`, `:466`), which is why basalt's own comment calls it
-    /// "bilinear interpolation of the gradient image from central differences"
-    /// (`image.h:289-291`) and warns it is not the gradient of the interpolated
-    /// function (`image.h:323-326`). It reads twelve pixels, `ix - 1` through
-    /// `ix + 2` and `iy - 1` through `iy + 2`, so the caller must satisfy
-    /// `in_bounds(x, y, 1)` (`image.h:424`).
-    ///
-    /// A fused whole-image `dx`/`dy` pass is deliberately absent: the KLT
-    /// tracker samples a sparse 52-tap pattern per patch and calls this per
-    /// tap, so a dense gradient image would be built and thrown away. The GPU
-    /// seam expects the fused "downsample + gradient" kernel to arrive with the
-    /// tracker, in [`crate::pyramid::PyramidBuilder`], not here.
+    /// Bilinear value and unit-spacing central differences of the bilinear surface.
+    /// The gradient is not its analytic derivative. The stencil reaches from `ix-1`
+    /// to `ix+2` and `iy-1` to `iy+2`, requiring `in_bounds(x, y, 1)`.
+    /// Sparse 52-tap KLT sampling avoids building a dense gradient image.
     ///
     /// # Panics
-    ///
-    /// If `(x, y)` is less than one pixel from the border, on the slice index.
+    /// If the gradient stencil indexes outside image storage.
     #[inline]
     pub fn interp_grad(&self, x: f32, y: f32) -> (f32, [f32; 2]) {
         debug_assert!(
@@ -454,7 +382,7 @@ mod tests {
     use proptest::prelude::*;
 
     /// `sin(x / 100 + y / 20)` sampled into `u16`, the image form of
-    /// `SmoothFunction` in `test/src/test_patch.cpp:11-30`.
+    /// Smooth analytic sampling function.
     const SMOOTH_AMPLITUDE: f64 = 20_000.0;
     const SMOOTH_OFFSET: f64 = 32_768.0;
 
@@ -640,19 +568,9 @@ mod tests {
         assert_abs_diff_eq!(image.interp(1.0, 1.5), 200.0, epsilon = 1e-4);
     }
 
-    /// Port of `TEST(Patch, ImageInterpolateGrad)`, `test/src/test_patch.cpp:32-46`.
-    ///
-    /// The C++ test evaluates `interpGrad` on `SmoothFunction`, an analytic
-    /// `sin(x/100 + y/20)`, and checks its Jacobian against numerical
-    /// differentiation of `interp` at the same point. The port samples that
-    /// same function into a real `ImageU16` and checks the same thing at the
-    /// same coordinate, `offset (231, 123) + (0.4, 0.34345)`.
-    ///
-    /// The step is one pixel, not an infinitesimal: `interpGrad`'s gradient is
-    /// by construction the unit-spacing central difference of the bilinear
-    /// surface (`image.h:447-466`), so the two agree to rounding. A second,
-    /// looser check against the analytic derivative of the sine catches a
-    /// swapped or sign-flipped axis, which the exact identity alone would not.
+    /// Sample a smooth sine into an image and compare `interp_grad` with unit-step
+    /// central differences of `interp`. A looser check against the sine's analytic
+    /// derivative also catches swapped or sign-flipped axes.
     #[test]
     fn image_interpolate_grad() {
         let image: ImageU16 = smooth_image(512, 256);
@@ -704,7 +622,7 @@ mod tests {
         }
 
         /// `interp_grad` is exactly the value and the unit-spacing central
-        /// differences of `interp` (`image.h:447-466`). Not bit-exact only
+        /// differences of `interp`. Not bit-exact only
         /// because `interp(x + 1, y)` recomputes `dx` from a different float.
         #[test]
         fn interp_grad_is_the_central_difference_of_interp(
@@ -722,8 +640,7 @@ mod tests {
         }
 
         /// On a smooth image the gradient agrees with a central finite
-        /// difference of `interp` taken at half-pixel steps, which is the check
-        /// `test_jacobian` performs in `test_patch.cpp`.
+        /// difference of `interp` taken at half-pixel steps.
         #[test]
         fn gradients_match_finite_differences_on_a_smooth_image(
             x in 30.0f32..480.0,

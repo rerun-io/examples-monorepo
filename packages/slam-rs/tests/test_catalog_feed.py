@@ -52,7 +52,7 @@ def _kb4_statics(
         distortion_model: ``simplecv.components.DistortionModel`` string to store.
         distortion_coefficients: Fixed-width coefficient list; defaults to msd-index cam0's KB4 values with a zero tail.
         transform_relation: ``Transform3D:relation`` code to store.
-        distortion_valid_radius: basalt's ``rpmax``, when the recording carries one.
+        distortion_valid_radius: The valid radius ``rpmax``, when the recording carries one.
 
     Returns:
         Synthetic statics with the storage conventions the catalog really uses.
@@ -122,14 +122,10 @@ def test_the_extrinsic_is_inverted_only_for_child_from_parent() -> None:
 def _rotate_pinhole_clockwise(
     fx: float, fy: float, cx: float, cy: float, width: int, height: int, rotation_cw_deg: int
 ) -> tuple[float, float, float, float]:
-    """Rotate a landscape pinhole calibration into the frame the images are stored in.
+    """Rotate landscape intrinsics into the stored image orientation.
 
-    msd-g2's video is stored rotated into portrait and its catalog calibration is
-    rotated to match, so this is the arithmetic that reconciles a raw-MSD
-    calibration with a catalog one. The feed itself never needs it — the catalog
-    already stores the rotated values — so it lives here, beside the test that is
-    its only caller: any A/B against a C++ basalt run fed from raw MSD needs the
-    convention, and pinning it keeps it from drifting.
+    The catalog already stores rotated calibration, so this helper is test-only.
+    It checks the relationship between landscape calibration and portrait images.
 
     Args:
         fx: Focal length along x before rotation.
@@ -158,7 +154,7 @@ def _rotate_pinhole_clockwise(
 
 
 def test_the_msd_g2_rotation_arithmetic() -> None:
-    """basalt's landscape msd-g2 calibration, rotated, is the catalog's portrait calibration."""
+    """The landscape msd-g2 calibration, rotated, is the catalog's portrait calibration."""
     landscape_width: int = 640
     landscape_height: int = 480
     # cam0 and cam1 are stored 90 degrees clockwise, cam2 and cam3 270.
@@ -441,6 +437,6 @@ def test_a_replay_export_associates_with_the_catalog_ground_truth(manifest: Refe
     sidecar: Trajectory = shift_clock(truth, segment.capture.start_time_ns)
     # All but the first pose, which sits on the capture's start time — 17 ms
     # before the sidecar's first row, so it has nothing to associate with. The
-    # ground truth does not cover the whole segment (D36).
+    # ground truth does not cover the whole segment.
     assert associate(read_trajectory(exported), sidecar).count == len(estimate) - 1
     assert associate(read_trajectory(relative_export), sidecar).count == 0

@@ -1,17 +1,7 @@
-//! The frontend's one and only source of parallelism.
-//!
-//! basalt runs the per-keypoint tracking loop through `tbb::parallel_for` over a
-//! `blocked_range` (`frame_to_frame_optical_flow.h:368-369`) and the per-camera
-//! pyramid build the same way (`:224-228`, `:245-249`). Decision D31 fixes how
-//! that lands in Rust: a **fixed chunk size**, per-chunk sequential accumulation,
-//! and an **explicit thread count** from the config — never the ambient rayon
-//! global pool, whose width depends on the machine and on whatever else in the
-//! process touched rayon first.
-//!
-//! Every loop routed through here is a pure function of the index, so the
-//! chunking cannot change a result; the fixed chunk size is belt and braces, and
-//! the tests run `threads = 1` against `threads = 4` and require identical
-//! output.
+//! Explicit frontend parallelism (D31).
+//! Use fixed chunks, sequential accumulation within chunks and a configured
+//! thread count instead of the ambient Rayon pool. Each loop is a pure function
+//! of its index; tests require identical output at one and four threads.
 
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuildError, ThreadPoolBuilder};

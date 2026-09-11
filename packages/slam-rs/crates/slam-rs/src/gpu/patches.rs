@@ -231,7 +231,7 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
     ///
     /// The offset is `source position - guess` per patch, which the backward
     /// pass adds back to the forward result
-    /// (`frame_to_frame_optical_flow.h:357`). It is computed on the host because
+    /// It is computed on the host because
     /// both terms are already there, and it rides in this buffer because the
     /// build needs the buffer anyway. The position runs stay zero on purpose: a
     /// backward build reads its positions out of the *forward result*, on the
@@ -268,7 +268,7 @@ impl<P: Pattern, R: Runtime> GpuPatches<P, R> {
     /// This is what keeps the backward pass on the device: its patches sit at
     /// the *forward* translations, which are already in the forward result
     /// buffer, so `positions` points there and nothing round-trips through the
-    /// host (`frame_to_frame_optical_flow.h:355`).
+    /// host.
     pub(super) fn launch_build_from(
         &self,
         pyramid: &GpuPyramid<R>,

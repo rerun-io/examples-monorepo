@@ -230,7 +230,7 @@ def check_calibration_matches_recording(basalt: _core.Calibration, cameras: tupl
     if tuple(basalt.resolution) != expected:
         raise ValueError(f"basalt's calibration is {list(basalt.resolution)}, the feed decodes {list(expected)} at downscale {downscale}")
     # `Calibration` exposes no intrinsics accessor, so the comparison goes through
-    # the round trip its own `to_json` writes, which is basalt's shape.
+    # the JSON round trip written by to_json.
     written: dict[str, Any] = json.loads(basalt.to_json())["value0"]
     for camera, lens, extrinsic in zip(cameras, written["intrinsics"], written["T_imu_cam"], strict=True):
         if lens["camera_type"] != camera.model:

@@ -1,4 +1,4 @@
-Dataset VIO configurations and RoboCap calibration.
+slam-rs JSON inputs: dataset VIO configurations and RoboCap calibration.
 
 Each dataset in ../reference_segments.toml selects one configuration. The
 reference profile leaves it unchanged. The default fast profile applies the

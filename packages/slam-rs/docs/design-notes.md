@@ -11,20 +11,20 @@ The core is being filled in stage by stage, bottom up. What is in it today:
 
 | Module | What it is |
 |---|---|
-| `lie` | `So3`/`Se3` over any `f32`/`f64` scalar: Sophus's `exp`/`log`, the adjoint, basalt's four SO(3) Jacobians and their inverses, the decoupled SE(3) pair, and the left-multiplied pose increment the estimator runs on. |
+| `lie` | `So3`/`Se3` over any `f32`/`f64` scalar: SO(3) operations through kornia-algebra, the adjoint, four SO(3) Jacobians and their inverses, the decoupled SE(3) pair, and the left-multiplied pose increment the estimator runs on. |
 | `types` | `TimeCamId`, `KeypointId`/`LandmarkId`, `AbsOrderMap`, `PoseState`/`PoseVelState`/`PoseVelBiasState` and the two fixed-linearization wrappers. |
-| `config` | basalt's `VioConfig`, read straight from `data/**/*_config.json`. |
-| `calib` | basalt's `Calibration`: extrinsics, the six shipped camera models, the 9- and 12-parameter IMU bias calibrations, plus a constructor that takes what the Python catalog feed reports. |
+| `config` | `VioConfig`, read from the package's `configs/*_config.json`. |
+| `calib` | `Calibration`: extrinsics, the six shipped camera models, the 9- and 12-parameter IMU bias calibrations, plus a constructor that takes what the Python catalog feed reports. |
 | `camera` | `pinhole`, `kb4` and `pinhole-radtan8` with basalt's 4-D homogeneous `project`/`unproject` and their analytic Jacobians (2x4 point, 2xN parameter, 4x2 and 4xN for unprojection), the `rpmax` and `z >= epsilonSqrt` domain checks, and a `CameraEnum` that dispatches without a vtable. `ds`, `eucm` and `ucm` parse but are rejected here. |
 | `image` | `ImageU16`: an owned flat 16-bit frame with an explicit row stride, the stride-aware `u8 << 8` widening basalt's readers do, and `interp`/`interp_grad`/`in_bounds` reproduced from `image.h` in the same arithmetic order. |
 | `pyramid` | The `PyramidBuilder` stage seam with an associated `Pyramid` type that lends nothing (geometry plus a copy into the caller's buffer), `PyramidU16` (one flat buffer per level, not basalt's packed mipmap) and `CpuPyramidBuilder`, whose `subsample` is bit-exact with `image_pyr.h:99-140`. |
 | `landmark` | `StereographicParam` (`project`/`unproject` and both Jacobians), the three-parameter `Landmark` with its backup pair, and `LandmarkDatabase`: the host->target->landmark adjacency, the `min_num_obs = 2` sweep and `remove_keyframes`. Landmarks live in one id-sorted `Vec` behind a `BTreeMap` index rather than a per-landmark hash map, and every map is a `BTreeMap`, so iteration order is reproducible (D31). |
-| `ba_base` | `BundleAdjustmentBase`: the two window state maps, `get_pose_state_with_lin`, basalt's Huber-weighted `compute_error` with optional outlier collection, `compute_projections`, `compute_delta`, `backup`/`restore`, the reprojection residual and its three Jacobians from `ba_utils.h`, `computeRelPose`, and DLT `triangulate` over a ported Eigen `JacobiSVD`. |
+| `ba_base` | `BundleAdjustmentBase`: the two window state maps, `get_pose_state_with_lin`, basalt's Huber-weighted `compute_error` with optional outlier collection, `compute_projections`, `compute_delta`, `backup`/`restore`, the reprojection residual and its three Jacobians from `ba_utils.h`, `computeRelPose`, and DLT `triangulate` using nalgebra SVD in f64. |
 | `imu` | Preintegration: `IntegratedImuMeasurement<S>` with basalt's midpoint propagation, covariance and bias-Jacobian recurrences, the 9-vector residual and its Jacobians, the LDLT square-root inverse covariance, the between-frames accumulation loop, gravity initialisation, and the 15-row IMU block the estimator whitens. |
 | `frontend` | The optical-flow frontend: `patterns` (Pattern52/51 from `patterns.h`; the other two are unreachable on every shipped config), `se2` (`AffineCompact2` and `Sophus::SE2::exp`), `ldlt` (Eigen's pivoted LDLT at 3x3), `patch` (the streaming inverse-compositional patch build), `tracker` (`PatchSoA`, `FlowTransforms`, the `SourcePatches`/`PatchTracker` stage traits and `CpuPatchTracker`), `detect` (basalt's centred cell grid over kornia-rs's FAST plus OpenCV's suppression), `flow` (`FrameToFrameOpticalFlow`, generic over the builder and tracker) and `parallel` (the explicit thread budget). |
-| `linearize` | The square-root linearization: `LandmarkBlock` (basalt's `[ J_p \| pad \| J_l \| r ]` buffer, the layout arithmetic of `landmark_block_abs_dynamic.hpp:83-96`, the Huber-weighted residual rows, three Householder reflections, back-substitution with its exact model cost change) and `LinearizationAbsQR`, which owns the blocks, the IMU blocks and the marginalization prior and produces `H`, `b`, `Q2Jp`, `Q2r` and `l_diff`. No damping and no Jacobian scaling: the fork comments every call site out and the port carries none of it (D34, D68). Eigen's `makeHouseholder` and `applyHouseholderOnTheLeft` are ported coefficient for coefficient rather than delegated to nalgebra's equivalents (D44). |
+| `linearize` | The square-root linearization: `LandmarkBlock` (basalt's `[ J_p \| pad \| J_l \| r ]` buffer, the layout arithmetic of `landmark_block_abs_dynamic.hpp:83-96`, the Huber-weighted residual rows, three Householder reflections, back-substitution with its exact model cost change) and `LinearizationAbsQR`, which owns the blocks, the IMU blocks and the marginalization prior and produces `H`, `b`, `Q2Jp`, `Q2r` and `l_diff`. No damping and no Jacobian scaling: the fork comments every call site out and the port carries none of it (D34, D68). S34 uses nalgebra reflection and Givens operations with preallocated scratch. |
 | `marg` | Square-root marginalization: `MargHelper`'s rank-revealing flat Householder QR, `marginalizeHelperSqrtToSqrt` — the one routine of the three the shipped path reaches — plus the `marginalize()` mechanics of `sqrt_keypoint_vio.cpp:896-1178` given an explicit keep/marginalize schedule. The two squared-form routines, the complete orthogonal decomposition they inverted the marginalized block with, and `checkMargNullspace`/`checkEigenvalues` are **not** ported: `SqrtKeypointVio::new` refuses `vio_sqrt_marg` off, so nothing on any shipped config reaches them (D68). |
-| `eigen` | What remains of the Eigen ports after D79: `qr` (`makeHouseholder`, `applyHouseholderOnTheLeft`, `makeGivens`, `JacobiRotation`) and `ldlt` (the pivoted LDLT at dynamic size, D41, which the LM step solves through). Their operation order is kept because their last bit reaches a rank test and a finite check; the Jacobi SVD and the BLAS-order reductions that used to live beside them come from nalgebra now (D79). |
+| `qr` | In-place nalgebra reflections and Givens rotations over column-major storage. |
 | `estimator` | The Offline sliding-window driver: `process_frame` (cover, initialise, measure, optimise, marginalize), `schedule` (basalt's keyframe vote, the lazy keyframe budget and the keep/marginalize sets `marg` is given) and `optimize` (the Levenberg-Marquardt loop, with the per-frame `lambda` reset, the `lambda · diag(H)` damping and the shared 7-iteration budget). |
 
 Two conventions in `ba_base` are basalt deviating from its own papers, and the
@@ -40,58 +40,16 @@ reductions are a different matter: they replace
 `tbb::parallel_deterministic_reduce`, whose order is a balanced join tree rather
 than a fold - see the `linearize` module.
 
-Every convention is quoted against the C++ it comes from, file and line, in the
-doc comments. `crates/slam-rs/tests/fixtures/` holds the shipped basalt
-calibration JSON the parsers are tested against, unmodified - the VIO configs
-they run with are the package's own `configs/`, read from there - plus four
-fixtures produced by the C++ fork itself: `pyramid/`, the first frame of the
-smoke reference segment as a PGM next to the four pyramid levels the fork builds
-from it, which the pyramid is checked against byte for byte;
-`camera_oracle.json`, what basalt's camera headers return for ten cameras and
-thirty points each in **both** precisions - pixel, bearing, and in double also
-both projection Jacobians and the unprojection Jacobian - plus six probe pixels
-handed straight to `unproject`, one of them singular; `imu/imu_oracle.json`,
-the delta state, covariance, bias Jacobians, Eigen LDLT and square-root inverse
-covariance of seven preintegration runs, plus what
-`Quaternion::FromTwoVectors` returns for ten accelerometer readings;
-`flow/`, three 960x960 frameset pairs as PGMs beside the keypoints the C++
-frontend produced from eight of them; `linearize/linearize_oracle.json`, four
-small visual-odometry problems (two and three frames, two cameras, three to six
-landmarks with two to four observations each, two of them carrying a
-marginalization prior with both of their first frames frozen at their
-linearization point) with, per landmark block, the layout numbers, the
-linearization error, the whole `storage` buffer after `linearizeLandmark` and
-after `performQR` (the damped and undamped buffers are in the file too, read by
-nothing since D68 dropped the damping stack), the `Q2Jp`/`Q2r` and `JtJ`/`Jtr`
-exports, and
-what `backSubstitute` leaves behind - plus, per problem, what
-`LinearizationAbsQR` returns through its public interface: the error, the dense
-`H` and `b`, the stacked `Q2Jp`/`Q2r` and the total `l_diff`; and
-`lmdb/lmdb_oracle.json`, the
-stereographic chart with both its Jacobians at twelve points, `linearizePoint`'s
-residual, `d_res_d_xi`, `d_res_d_p` and `proj` for five configurations of each of
-the two shipped reference cameras, ten `triangulate` cases with four of them
-placed on basalt's `0 < inv_dist < 3` acceptance gate, 32 more per precision
-sitting on that gate (half of them chosen because the summation order alone
-decides them), 32 probes of `head<3>().squaredNorm()` per precision, and 14
-residuals through the Huber-weighted cost, five of them above the threshold.
+Comments describe the crate's numerical contracts. Tests use synthetic inputs,
+finite differences, dense Schur identities and deterministic replay. S34 removed
+the external fixture and comparison suites; none is required for acceptance.
 
-The camera port reproduces every double to 1e-15 relative (1e-12 for
-unprojections, which run a Newton iteration) and every float **exactly**; the IMU
-port reproduces every double to 1e-14, and to 1e-7 through the whitening, which
-inverts the covariance; the landmark port reproduces the chart and the residual
-to 1e-12 in double and **exactly** in float, triangulation bit for bit on nine of
-the ten double cases, and Eigen's three-coefficient reduction order and the
-Huber-weighted cost of one observation bit for bit in both precisions. The
-linearization port reproduces **every** coefficient of all four problems - the
-QR'd block, `H`, `b`, `Q2Jp`, `Q2r`, the landmark increments and `l_diff` - to
-`6.3e-16` relative in double and `1.4e-6` in float, measured against the array's
-own scale. All six generators live on the fork's `slam-rs-reference` branch, as
-`tools/dump_pyramid.cpp`, `tools/camera_oracle.cpp`, `tools/imu_oracle.cpp`,
-`tools/dump_flow.cpp`, `tools/lmdb_oracle.cpp` and `tools/linearize_oracle.cpp`;
-the monorepo never compiles C++.
+The derivation sections below record why the original algorithms were chosen.
+Their historical comparisons explain those decisions, but do not define today's
+gate. S33 and S34 supersede operation-order requirements and deleted-test claims;
+see the S34 summary at the end for the current numerical implementation.
 
-The IMU fixture earns its keep on one run: the covariance after a single sample
+A useful IMU degeneracy case is this: the covariance after a single sample
 with a still gyroscope and accelerometer is rank deficient, and what basalt does
 with it is decided entirely by `Eigen::LDLT`. Eigen pivots on the *un-updated*
 diagonal, eliminates velocity first and leaves the position pivots at `-1.6e-27`,
@@ -491,7 +449,7 @@ from pathlib import Path
 from slam_rs import _core
 
 calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)  # the feed's dataclasses
-config = _core.VioConfig.from_json(Path("configs/msdmi_config.json").read_text())  # the file the C++ ran
+config = _core.VioConfig.from_json(Path("configs/msdmi_config.json").read_text())  # the dataset configuration
 config.optical_flow_image_safe_radius = 472.0    # settable per device, though the shipped file carries it
 
 vio = _core.Vio(calibration, config, threads=1)
@@ -500,15 +458,14 @@ result = vio.track(t_ns, [left, right])   # uint8[h, w] per camera
 result.status, result.world_from_rig      # VioStatus, [tx ty tz qx qy qz qw]
 ```
 
-One `track` call is basalt's whole pipeline for one frameset — the frontend's
+One `track` call runs the whole pipeline for one frameset — the frontend's
 own preintegration and pose prediction, `processFrame`, then the estimator's
 `measure` — in the calling thread (Offline mode, D17), so every result is final
 and a repeat run over the same input is bit-identical.
 
-`VioStatus` has two states. basalt's estimator initialises inside the same
+`VioStatus` has two states. The estimator initializes inside the same
 `process_frame` that measures, so a measured frameset always has a state and an
-uncovered one never does: `NeedMoreImu` where basalt would block on its IMU
-queue, `Tracking` otherwise. `NeedMoreImu` moves nothing — not the frontend,
+uncovered one never does: `NeedMoreImu` until the buffer covers the frameset, `Tracking` otherwise. `NeedMoreImu` moves nothing — not the frontend,
 neither IMU buffer, not the estimator — so the frameset is pushed again once its
 samples arrive and tracks as it would have with them all along (D17). A caller
 that drops it instead loses the frame; `replay.py` holds it and retries.
@@ -553,7 +510,7 @@ the rig:
 | `max_keypoints` | `tracker::MAX_CAPACITY` = 1,048,576 | every per-patch buffer is preallocated from it; `Vec::with_capacity(2**63)` panics with `capacity overflow` |
 | `threads` | `parallel::MAX_THREADS` = 1024 | rayon spawns exactly what it is asked for, so 100,000 workers wedge the machine rather than erroring |
 | `optical_flow_levels` | at most 23 reductions, i.e. `tracker::MAX_LEVELS` = 24 stored levels | it multiplies every buffer, each sized with `levels + 1`; a `Vec` whose bytes do not exist **aborts** instead of unwinding |
-| `optical_flow_detection_min_threshold` | at least 1 | the detector halves the FAST threshold until it drops below this, and zero halves to zero for ever — `keypoints.cpp:162,187` has the same non-terminating loop, so basalt hangs on it too |
+| `optical_flow_detection_min_threshold` | at least 1 | integer halving leaves zero unchanged, so a positive minimum prevents an infinite loop |
 | `optical_flow_detection_max_threshold` | at least `min_threshold` | otherwise the ladder never runs and the detector can never add a keypoint |
 | frameset image size | exactly the calibration's, per camera | the camera model, the detection grid and the occupancy matrix are all the calibrated geometry |
 | the calibrated resolution over `optical_flow_detection_grid_size` | `detect::MAX_CELLS` = 1,048,576 cells per camera | the occupancy counts are one `i32` per cell per camera, so a calibration is a memory request too: a one-pixel grid over a 4,294,967,294-pixel-square frame asked for 2^64 counts and `vec![0; rows * columns]` panicked with `capacity overflow` with no image in sight |
@@ -577,38 +534,30 @@ flow.t_ns              # int | None: the last accepted frameset, None before the
 ```
 
 Any `int64` is a timestamp, negative ones included: the frontend's clock is an
-`Option<i64>` rather than basalt's `t_ns = -1` sentinel (`optical_flow.h:172`),
-which read every negative timestamp as "no previous frame" and so restarted
-tracking on each one. Framesets must still arrive strictly in order, and a
+`Option<i64>` so negative timestamps remain valid and do not restart tracking. Framesets must still arrive strictly in order, and a
 refused frameset leaves the frontend exactly as the last accepted one did.
 
 `Calibration.from_catalog` reads `slam_rs.catalog_feed.CameraCalib` and
 `ImuCalib` attribute by attribute and hands them to `Calibration::from_catalog_parts`,
-so the catalog-to-basalt rules — the rotation-matrix check, the model names, the
-isotropic noise densities — are not written a second time in Python. One of
-basalt's own files is read by `Calibration.from_json` or `VioConfig.from_json`,
-which is what the frontend's constructor then takes.
+so rotation validation, model names and isotropic noise conversion stay in Rust.
+`Calibration.from_json` and `VioConfig.from_json` read the JSON formats slam-rs
+accepts, and their objects configure the frontend.
 
 ## The reference set
 
-`reference_segments.toml` freezes ten Monado SLAM Dataset segments — five
-two-camera `msd-index` (KB4 fisheye, 54 Hz) and five four-camera `msd-g2`
-(radtan8, 30 Hz) — in three tiers: **smoke** on every commit, **accuracy** per
-pull request, **long** nightly. A `[[dataset]]` block per catalog dataset pins the
-rig geometry and names the basalt VIO config its segments run with; a `[robocap]`
-section adds the two RoboCap sessions, 15 (1,588 framesets) and 21 (4,648), which
-have no ground truth and are gated against basalt's own output instead. Only
-session 15 carries a reference wall, measured on the cap itself.
+`reference_segments.toml` records catalog segments, dataset geometry, IMU noise,
+clock offsets, decode paths, configuration files and measured baselines.
+The tiers are **smoke** for quick checks, **release** for the release set, and
+**listed** for additional catalog segments. RoboCap sessions carry rig and replay
+metadata but no ground truth, so they cannot receive a ground-truth ATE verdict.
 
-Four things are frozen because the catalog cannot carry them and each one moves
-the numbers: the IMU noise densities and update rate, the camera-to-IMU time
-offset (0 for MSD, 14,902,432 ns for RoboCap), the decode path
-(`cpu_gray8_dav1d_1thread`, worth about 5 cm of ATE against NVDEC RGB), and the
-VIO config, vendored under `configs/` — basalt's constructor defaults are not its
-shipped files, and `vio_marg_lost_landmarks` alone was worth up to 12 cm (C72),
-so `slam_rs.reference.resolved_flow_config` reads the dataset's file and asserts the
-manifest's image safe radius against it. `slam_rs.reference`'s module docstring
-carries the rest of the account, including where the V2 tolerances live and why.
+Each baseline identifies a lane (`cpu` or `gpu`) and profile (`reference` or
+`fast`), plus its host, core digest, frameset count and measurement date.
+The estimator reads the dataset JSON under `configs/`; omitted fields use
+constructor defaults, but the dataset file remains the selected input (C72).
+Pinned noise, camera-to-IMU offsets and decode paths keep replay inputs stable.
+The catalog supplies images, IMU samples and ground truth. No reference bundle
+or filesystem-side dataset fallback is part of the gate.
 
 ```python
 from slam_rs.reference import load_manifest
@@ -617,36 +566,10 @@ manifest = load_manifest()
 segment = manifest.in_tier("smoke")[0]
 ```
 
-### The basalt C++ reference and the gate policy
-
-`tests/reference/msd/<segment>/` holds what the basalt C++ fork produced on each
-segment: `run.json` for all ten (fork commit, deterministic settings, the VIO
-config and calibration actually pushed, timings and the ATE against `gt.csv`),
-`basalt_traj.csv` for the eight smoke and accuracy segments, and `frames.sha256`
-plus a copy of `gt.csv` for the smoke pair so its gate runs with no NAS and no
-catalog. The two long-tier trajectories are 3.4 MB and 4.8 MB and stay out of
-git; `slam_rs.reference_bundle` resolves them from `SLAM_RS_REFERENCE_DIR` (or
-`data/reference/`) and the tests skip with a message naming the variable.
-
-Each segment carries a `gate_policy`, because basalt is not equally good
-everywhere:
-
-| policy | segments | why |
-|---|---|---|
-| `tight` | MIO10, MGO09, MIO07, MGO07 | basalt scores 0.8-2.4 cm; a regression is unambiguous |
-| `standard` | MIO04, MGO14, MIO14, MIPT03 | 8-38 cm, stable; gate relative to basalt's own number, not an absolute threshold |
-| `no_divergence` | MGO01, MGO13 | basalt is near failure: 43 cm and 78 cm here, 68 cm for the C++ binary on the raw files, and **18-32 cm of spread between two legitimate decode paths of the same estimator** — on MGO01 the ordering even flips. Only "kept tracking, did not diverge" is measurable. |
-
-`slam_rs.trajectory.ate` reproduces all ten published C++ figures exactly, and a
-re-decode through `catalog_feed` reproduces the C++ run's per-camera pixel
-digests frame for frame (824 of 824 on MIO10, 428 of 428 on MGO09). That second
-result is the load-bearing one: it means an A/B between the two estimators
-measures the estimator, not the decoder.
-
 ### Two clocks, converted once
 
 The catalog indexes a segment on `video_time`, which is **relative** to
-`capture.start_time_ns`, while every basalt CSV including the `gt.csv` sidecars is
+`capture.start_time_ns`, while exported trajectory CSV is
 on the **absolute** device clock; on the Index smoke segment the two differ by
 10,433,867,587,166 ns, so a trajectory exported on the wrong clock associates with
 nothing at all. The feed works in `video_time` throughout and
@@ -659,11 +582,9 @@ framesets, reading a catalog URL or local `.rrd` files served in process (no
 catalog server needed); its module docstring states the decisions that silently
 change the numbers — the pinned `gray8` dav1d path, the one-query windows whose
 edges land on frames that are keyframes in every camera, the rig shape and the
-two clocks. `slam_rs.trajectory` reads and writes basalt's CSV form (w-first,
-integer nanoseconds) and reports the rigid-aligned ATE the gate is written
-against, in `golden_compare.py`'s own arithmetic rather than the shared
-`simplecv` helper, whose variance floor would reject a stationary rig that the
-fork passes.
+two clocks. `slam_rs.trajectory` reads and writes w-first trajectory CSV with integer
+nanoseconds. ATE uses estimate-driven association and rigid alignment with
+scale fixed at one. No variance floor rejects a stationary rig.
 
 ```bash
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py \
@@ -674,7 +595,7 @@ Both `--rr-config.headless` and `--rr-config.save` are honoured; in a shell
 without `DISPLAY`, pass `--rr-config.headless` or the spawned viewer wedges the
 recording stream.
 
-### `--stage frontend`, and the C++ overlay
+### `--stage frontend`, and the tracked keypoints
 
 `--stage input` (the default) logs what the estimator is fed. `--stage frontend`
 runs the optical flow over the same framesets and logs what it produced, under
@@ -685,19 +606,10 @@ the dataset's own entity tree so nothing needs a second coordinate convention:
 | `/world/rig_00/cam_MM/pinhole/image` | the frame the frontend tracked, **full resolution** (JPEG), because the keypoints are in its pixels |
 | `.../keypoints` | `Points2D`, 2 px, one stable colour per track id from a hash of the id |
 | `.../trails` | `LineStrips2D`, the last ten positions of every live track, in the track's own colour |
-| `.../cells` | `Boxes2D` over the occupied cells of basalt's centred detection grid |
-| `.../keypoints_cpp` | what the C++ fork's `dump_flow.cpp` produced for the same frameset, in one contrasting magenta |
+| `.../cells` | `Boxes2D` over the occupied cells of the centered detection grid |
 | `/stats/frontend/...` | `num_tracks` and `num_new` per camera, and `frontend_ms` |
 
-The overlay is the parity claim made visible, and it is only ever drawn on the
-recording it came from: the eight committed dumps under
-`crates/slam-rs/tests/fixtures/flow/dumps/` name their segment in
-`dumps/source.json`, and `slam_rs.frontend_log`'s module docstring says why a
-`video_time` timestamp is not an association and what a directory from another
-recording, another rig or no `source.json` gets instead. On the smoke segment the
-port hands out 175 keypoint ids over the first eight framesets where the C++
-hands out 174, and every magenta ring in the viewer carries a coloured port dot
-at its centre bar a handful — the detector gap the flow gate measures.
+The overlays show the frontend's own keypoints and trails on the images it tracked.
 
 A blueprint is sent with the recording: one 2D view per camera plus the counters,
 panels collapsed. The whole 412-frameset smoke segment is 34.5 MiB of `.rrd` and
@@ -708,7 +620,7 @@ pixi run -e slam-rs-dev --frozen python tools/apps/replay.py \
     --stage frontend --rr-config.headless --rr-config.save data/replay-frontend.rrd
 ```
 
-### `--stage vio`, and the three trajectories
+### `--stage vio`, and the two trajectories
 
 `--stage vio` runs the whole pipeline and draws what the estimator decided, under
 the same tree:
@@ -717,25 +629,19 @@ the same tree:
 |---|---|
 | `/world/runs/slam_rs/trajectory` | the estimate so far, one green `LineStrips3D` |
 | `/world/runs/gt/trajectory` | the ground truth up to the cursor, near-white |
-| `/world/runs/basalt_cpp/trajectory` | the C++ reference up to the cursor, orange |
 | `/world/runs/slam_rs/rig` (+ `/cam_MM`) | the estimated rig's current pose, as `Pinhole` frusta from the calibration |
 | `/world/runs/slam_rs/window` | one frustum wireframe per window frame, blue for a keyframe, yellow for a long-term one, grey for a pose block |
 | `/world/runs/slam_rs/marginalized` | the frames the last marginalization removed, the same wireframes faded |
 | `/world/runs/slam_rs/landmarks` | `Points3D` in the world frame, coloured by the keyframe that hosts them |
 | `/world/rig_00/cam_MM/pinhole/keypoints` | the estimator's own frontend output, in the frontend rung's palette |
-| `/stats/vio/...` | landmark, observation and keyframe counts, LM iterations, lambda and the error before and after, the six `stage_ms/*`, `track_ms`, and `ate_cm/{gt,cpp}` |
+| `/stats/vio/...` | landmark, observation and keyframe counts, LM iterations, lambda and the error before and after, the six `stage_ms/*`, `track_ms`, and `ate_cm/gt` |
 
-The three trajectories do not start in one frame — basalt initialises its world
-at the identity with gravity along z, the ground truth is in the capture rig's
-own frame — so the run and the C++ reference carry the rigid alignment onto the
-ground truth as a `Transform3D`, refreshed every 30 framesets, and a run visibly
-settles into place over its first second. All three are drawn only up to the
-cursor and thinned to the frameset cadence: 1.04 MB each over the 412-frameset
-smoke segment, against the 17.20 MB of that recording's 54.13 MB that re-logging
-the 917 Hz ground truth whole cost, and about 100 MB each over a 4,000-frameset
-clip, so a long segment still wants `--max-framesets`. `slam_rs.vio_log`'s module
-docstring carries the reasoning, the visible time range that makes a per-frameset
-segment render as a path, and why the window is wireframes and the rig is not.
+The two trajectories are the estimate and ground truth. The estimator starts
+with its own gravity-aligned world frame; ground truth uses the capture frame.
+A rigid `Transform3D` aligns the estimate to ground truth and refreshes every
+30 framesets. Both paths stop at the cursor, with ground truth sampled at the
+frameset cadence to keep recording size bounded. The rig and window use the
+same alignment. `slam_rs.vio_log` documents the trail visibility and layout.
 
 ```bash
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py \
@@ -744,59 +650,39 @@ pixi run -e slam-rs-dev --frozen python tools/apps/replay.py \
 
 ## The V2 gate
 
-`tests/test_v2_gate.py` is the milestone (D14, D35, D36, D58). Per gated clip,
-driving `_core.Vio` and the feed directly with nothing logged: every frameset
-resolved, a refusal for want of IMU held and tracked again once the samples
-arrive (D17); at most 2 cm of ATE RMSE against the basalt C++ trajectory fed the
-same decoded pixels, and only where the C++ meets that against itself, which is
-clips under `PATH_BOUND_MAX_CLIP_S` = 100 seconds of replayed footage — on the
-410-second `MIO14` its own two precisions are 4.24 cm apart; against the `gt.csv`
-sidecar, inside **the C++'s own precision band** (`rmse_cm` and `rmse_cm_f64`,
-the same code on the same pixels with `use-double` flipped) or within
-`GT_BAND_RATIO` = 1.2 of the band's worst member, whichever is looser, which is
-the second alone since the ratio is above one — the band is 0.00007 cm wide on
-`MIO10` and 2.3 cm wide on `MIO14`, so "inside the band" on its own would gate
-the tight clips on rounding; and speed, the replay's own feed loop (decode plus
-`track`, nothing logged, the loop the C++ recorded as `run.feed_wall_time_s`)
-within 1.2x the C++ single-thread wall for the same footage (D58), never left
-off. The clauses, the association convention, the `no_divergence` pair's
-exception and the "every named clip is asserted" rule (C56) are stated once in
-the test's own module docstring.
+S34 replaces the C++ comparison gate with ground-truth checks through
+`slam_rs.reference.gate_failures`, covered by `tests/test_gate.py`.
+Every run must have enough tracked and associated poses, zero lost framesets,
+finite poses and measurements, and bounded extent relative to ground truth.
 
-The tolerances live in `slam_rs/reference.py` (`ATE_VS_CPP_CM`,
-`PATH_BOUND_MAX_CLIP_S`, `GT_BAND_RATIO`, `SPEED_TOLERANCE`,
-`DIVERGENCE_FACTOR`), not in the test: they are the milestone's verdict, and the accuracy-band pass
-measured what a meaningful band is (D60). Every row prints what it was judged on:
-`tracked, vs C++ <cm> (bound 2 cm | no bound, <n> s clip), vs GT <cm> (band [f32,
-f64], allowed <cm>), wall, C++ wall, ratio`.
+For a matching lane/profile baseline, ground-truth RMSE may be at most **1.10 ×**
+the manifest baseline. Median tracker time has the same **1.10 ×** limit only
+on the baseline's recorded host. A different host reports timing without a speed
+verdict. Missing or other-lane baselines do not impose accuracy or speed bounds;
+the tracking, association, finiteness and extent checks still apply.
 
-The lanes are D59's iteration rule. The default is the **iteration set** — MIO10
-whole plus the first ten seconds of one two-camera and one four-camera clip,
-about 1,650 framesets — because finding out at the end of a ten-clip run that
-everything failed is the way not to iterate. Either lane runs **shortest clip
-first** and asserts each clip as soon as it is measured, so the first clip that
-misses stops the run with its own row printed and is the one that gets fixed.
+Use the **smoke**, **release** and **listed** manifest tiers to choose clips.
+Baselines belong to their exact lane and profile; one lane's measurements are
+not another lane's limits. No C++ trajectories, precision bands, pixel dumps,
+NAS paths or external reference directories participate.
 
 ```bash
-cd packages/slam-rs
-pytest -m slow -q -s tests/test_v2_gate.py                    # the iteration set
-SLAM_RS_V2_ALL=1 pytest -m slow -q -s tests/test_v2_gate.py   # all ten, whole, shortest first
-SLAM_RS_V2_WINDOW_S=5 SLAM_RS_V2_ALL=1 pytest -m slow -q -s tests/test_v2_gate.py   # all ten, first 5 s each
+pixi run -e slam-rs-dev --frozen python tools/apps/fleet_check.py
+pixi run -e slam-rs-dev --frozen pytest -m slow -q -s tests/test_gate.py
 ```
 
-`SLAM_RS_V2_WINDOW_S` cuts every clip to its first N seconds and recomputes the
-C++'s own ground-truth error over exactly that span, so a windowed run is gated
-against the budget it actually had.
+The slow test queries catalog smoke segments. Catalog input is mandatory for
+catalog tests; an unavailable service is a failure, not a passing skip.
 
 ## Tests
 
-`pytest -q` deselects the `slow` marker and runs in about two seconds on
-synthetic inputs. The slow tests read a reference `.rrd` from the NAS or query the
-catalog, and skip when neither is reachable:
+`pytest -q` runs synthetic tests and deselects `slow`. Rust property and
+regression tests require no external fixture bundle. Slow integration tests
+query the catalog and fail if it is unavailable.
 
 ```bash
-pixi run -e slam-rs-dev --frozen tests   # fast
-cd packages/slam-rs && pytest -m slow -q # NAS + catalog
+pixi run -e slam-rs-dev --frozen tests
+pixi run -e slam-rs-dev --frozen pytest -m slow -q
 ```
 
 ## D70 — one GPU runtime: the CUDA lane is removed; wgpu is the GPU lane
@@ -1058,25 +944,25 @@ stride is comptime per unrolled step.
 The `Dnn` tags in this file and in the README name the project's recorded design decisions. What each one decided, in one line:
 
 - **D09** — FAST detection reuses kornia's grid-cell detector behind a thin wrapper
-- **D14** — Accuracy gate: trajectory-level, against basalt C++ on the same decode path, plus ground truth
+- **D14** — Superseded by S34: catalog ground truth, per-lane/profile manifest baselines, and same-host speed checks.
 - **D17** — Threading: Offline (lockstep) mode first; Realtime mode is an enum value reserved for later
 - **D31** — Deterministic reductions and the thread budget have an explicit Rust mapping
-- **D32** — Panic policy: the core never panics on data; NaN handling mirrors basalt
+- **D32** — Panic policy: the core never panics on data; non-finite handling follows each numerical contract
 - **D34** — The shipped VIO path has the landmark and pose damping machinery disabled; the port mirrors that
-- **D35** — Numeric gate ladder adopted from the paper dossier
-- **D36** — Gate policy per reference segment: tight, standard, no-divergence
+- **D35** — Superseded by S34: catalog ground truth, per-lane/profile manifest baselines, and same-host speed checks.
+- **D36** — Superseded by S34: catalog ground truth, per-lane/profile manifest baselines, and same-host speed checks.
 - **D41** — Eigen's pivoted LDLT semantics are load-bearing and are ported exactly
 - **D44** — Rotation matrices in numerically sensitive paths use Eigen's `toRotationMatrix` operation order
-- **D58** — Runtime parity is part of the stopping line; two parallel stages open
-- **D59** — The iteration loop: one or two short clips, fail-fast on the ten, speed is a gate clause
-- **D60** — The V2 accuracy gate, on the evidence: ground truth inside the C++'s own precision band, the path bound only where the C++ meets it itself, speed on every clip
+- **D58** — Superseded by S34: catalog ground truth, per-lane/profile manifest baselines, and same-host speed checks.
+- **D59** — Superseded by S34: catalog ground truth, per-lane/profile manifest baselines, and same-host speed checks.
+- **D60** — Superseded by S34: catalog ground truth, per-lane/profile manifest baselines, and same-host speed checks.
 - **D64** — Reaffirmed for the GPU lanes: no bit-accuracy; the bar is accuracy inside the band and faster than the CPU lane on the same machine
 - **D68** — The three unreachable blocks go: squared-form marginalization, nullspace diagnostics, the D34 damping stack
 - **D70** — One GPU runtime: the CUDA lane is removed; wgpu is the GPU lane (2026-09-09)
 - **D71** — Exponent-bit finite classification and bounded small-angle trig; the MIO14 replay passes its unchanged accuracy limit (2026-09-09)
 - **D72** — The GPU detector picks one corner per grid cell on the device; the candidate image never comes back (2026-09-09)
 - **D73** — The estimator's LM buffers live on the estimator and its hot loops walk columns; no arithmetic changes (2026-09-10)
-- **D74** — Speed profile: vendored configs stay C++-faithful; `configs/profiles/fast.json` overlays the knobs, `port.*` keys for the ones basalt has no field for (2026-09-10)
+- **D74** — Dataset JSON is the base input; profiles overlay validated keys. S34 makes fast the default and retains reference as the unchanged input.
 - **D75** — Redetect on demand: the fast profile detects when camera 0 holds fewer than 85 % of the last detecting frameset's keypoints (2026-09-10)
 - **D76** — The fast profile solves the window at keyframes and the newest 15-dof state alone between them, falling back to the joint solve when that update declines (2026-09-10)
 - **D77** — The GPU frontend waits once per phase and reserves its queue budget before it enqueues (2026-09-10)
@@ -1085,14 +971,14 @@ The `Dnn` tags in this file and in the README name the project's recorded design
 
 ## D74 — Speed profile
 
-Vendored configs stay C++-faithful (D17), and the Rust default LM cap stays 7.
+Dataset configs remain the base JSON inputs, and the Rust default LM cap stays 7.
 Speed knobs live in `configs/profiles/fast.json`; the first sets
 `config.vio_max_iterations` to 4 (at most five LM steps with the inclusive loop).
-**D76 puts that one back to basalt's 7** once the joint solve runs at keyframes
+**D76 restores the cap to 7** once the joint solve runs at keyframes
 only: with the window solved one frameset in seven, the eight trials buy 0.146 cm
 of MIO10 ATE for about 0.1 ms of mean and nothing on the median.
-The benchmark and tracking tools opt in with `--profile fast`. The default
-`reference` profile is empty and preserves the vendored text. Unknown overlay
+S34 selects `fast` by default in tracking tools. The explicit `reference`
+profile is empty and preserves the dataset JSON text. Unknown overlay
 keys raise `KeyError` so a typo cannot silently change the requested run.
 
 ## D75 — Redetect on demand: the fast profile detects when camera 0 has lost tracks
@@ -1111,8 +997,8 @@ last **detecting** frameset ended with. `configs/profiles/fast.json` sets `0.85`
 nothing else does.
 
 **Why the key is `port.` and not `config.`.** basalt has no field for it, and the
-vendored `configs/*.json` are the documents the C++ reference runs read, key for
-key (`tests/test_cpp_reference.py::test_the_vendored_configs_are_the_ones_the_cpp_runs_used`).
+`configs/*.json` remain the base inputs. Profile tests check the added keys
+and reject unknown overlay entries.
 So no port-only key is written into them: the profile overlay inserts it,
 `slam_rs.reference.PORT_CONFIG_KEYS` allowlists it so a typo is still a
 `KeyError`, and `VioConfig` skips serializing it while it is off — a basalt
@@ -1158,7 +1044,7 @@ the trade is re-openable once the wider clip set has been run — the clips with
 fast-dying tracks (MIO11, MIO07, MGO13) are where a halved landmark count would
 show, and they are not measured here.
 
-- **D74** — Speed profile: vendored configs stay C++-faithful; speed knobs live in `configs/profiles/fast.json`, opted into with `--profile fast` (2026-09-10)
+- **D74** — Dataset JSON is the base input; profiles overlay validated keys. S34 makes fast the default and retains reference as the unchanged input.
 - **D75** — Redetect on demand: the fast profile skips `addPoints` until camera 0 falls under `port.redetect_survivor_ratio` of its last detection (2026-09-10)
 
 ## D76 — The fast profile solves the window at keyframes and the newest state alone between them
@@ -1591,7 +1477,7 @@ the kernels already take base offsets — would take eleven to five.
 ## D79 — Eigen's operation order is no longer a requirement; the library does the arithmetic where it can
 
 Decision, 2026-09-10 (Pablo): the accuracy reference is ATE against ground truth
-on the catalog — D60's ten-clip gate and the fast profile's 1.1x band — not the
+on the catalog — now S34's per-lane/profile baseline gate — not the
 C++ trajectory byte for byte. D44's rule, that an elementary operation whose
 rounding can reach a rank test, a finite check or a triangulation gate reproduces
 Eigen's operation order, is retired wherever a library routine does the job. The
@@ -1604,7 +1490,8 @@ composition still renormalizes, and Sophus's `theta` conventions that
 `Se3::log` depends on stay ported); the patch Hessian's rank-one update is
 nalgebra's `ger`, which is bit-identical to the loop it replaced.
 
-What stays ported is what no library provides in the shape the estimator needs:
+At S33 the remaining local numerical routines were listed below. S34 later
+replaced the dynamic LDLT and elementary QR operations; this list is historical:
 the pivoted dynamic LDLT (D41), the Householder QR of the landmark blocks and the
 marginalization's rank-revealing QR, SE(3) with the decoupled pair and basalt's
 four SO(3) Jacobians and their inverses, and the square-root-marginalization LM
@@ -1615,7 +1502,8 @@ radtan8 model, a stride-aware u16 image path, a policy-configurable cell
 detector, any general QR or pivoted LDLT — and so what would have to grow
 upstream for the rest to follow.
 
-Bit-exact oracle assertions that the swapped arithmetic broke became measured
+Historical S33 validation (the external comparison tests were removed in S34):
+bit-exact oracle assertions that the swapped arithmetic broke became measured
 tolerances, each with its worst observed value in the comment. The one
 substantive rewrite is the marginalization prior's shape assertion in
 `vio_oracle.rs`: on seven of sixty f32 framesets the QR finds one more rank than
@@ -1645,3 +1533,39 @@ merge. Measured for this change against the #254 tip: MIO10 1.5527 -> 1.5532 cm,
 MIO07 2.1023 -> 2.0726 cm, MGO07 2.3749 -> 2.3746 cm, all framesets tracked;
 MIO10 median 1.333 -> 1.327 ms, MIO07 1.516 -> 1.419 ms. Net -289 lines,
 `eigen/svd.rs` and `eigen/blas.rs` gone.
+
+
+## S34 — Independent inputs, numerics and ground-truth acceptance
+
+S34 removed the basalt C++ fixtures, comparison tests, reference bundle resolver,
+reference trajectories, reader fallbacks and viewer comparison overlays. Comments
+now state slam-rs behavior rather than external file locations. Historical
+algorithm derivations above retain attribution; they are not active gate policy.
+
+The gate uses catalog ground truth and manifest baselines for each lane/profile,
+with zero lost framesets and at most 10% more ATE. The 10% median tracker-time
+limit applies only on the baseline host. Catalog integration tests require the
+catalog and fail when it is unavailable; there is no NAS fallback. Explicit local
+recording replay remains a supported user input, separate from the catalog gate.
+
+PR 2 replaced special reduction orders with natural fixed-order arithmetic,
+replaced dynamic LDLT with symmetrically scaled f64 full-pivot nalgebra LU,
+and uses nalgebra reflections and Givens rotations with reusable scratch.
+Absolute QR rank thresholds, fixed Newton iteration counts and the three-attempt
+finite-solve retry policy remain. Small guarded LDLTs retain their congruence
+generalized-inverse contract. Parallel triangulation rays are explicitly refused;
+tests exercise both sides of the inverse-distance cutoff at 3.
+
+The accepted PR 2 measurements are recorded in the
+[numerics report](/tmp/fleet-artifacts/slam-rs/cuvslam/reports/s34/s34-2-numerics.md):
+
+| Clip | Baseline ATE cm | PR 2 ATE cm | Ratio | Tracked / lost |
+|---|---:|---:|---:|---:|
+| MIO10 | 1.553190 | 1.552952 | 0.999847 | 412 / 0 |
+| MIO07 | 2.072640 | 2.114278 | 1.020089 | 4095 / 0 |
+| MGO07 | 2.374601 | 2.375311 | 1.000299 | 1596 / 0 |
+| MIO14 | 5.569799 | 6.013535 | 1.079668 | 22117 / 0 |
+
+All four met the 1.10 accuracy and latency bounds. The report records the
+MIO14 investigation, final replay and saved Viewer pixel evidence. These are
+PR 2 measurements, not new measurements from this documentation-only change.

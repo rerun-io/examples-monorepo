@@ -1,28 +1,13 @@
-//! `SqrtKeypointVioEstimator::optimize()` (`sqrt_keypoint_vio.cpp:1201-1639`).
+//! Levenberg-Marquardt optimization with an inner backtracking loop.
 //!
-//! A Levenberg–Marquardt loop with an inner backtracking loop, tabulated line
-//! by line in papers-part2 §12.7. Five things about it are basalt's and not the
-//! textbook's, and all five are reproduced here:
-//!
-//! * **`lambda` is reset every frame** to `vio_lm_lambda_initial` (`:1249`,
-//!   D11), so the trust region has no memory across framesets.
-//! * **The damping is `lambda · diag(H)` with a floor**, not `lambda·I`
-//!   (`:1415`, D10).
-//! * **The 7-iteration budget is shared with backtracking**: `it++` fires on a
-//!   rejection too (`:1592`, D12), so a frame that backtracks three times gets
-//!   four real linearizations.
-//! * **The increment is negated** before back-substitution (`:1450`, D13),
-//!   because `ba_utils.h:117` computes `π(x) − z` where the paper writes
-//!   `z − π(x)`.
-//! * **No Jacobian scaling and no landmark or pose damping** (D9/D34): the four
-//!   calls are commented out in the shipped source, and damping enters only
-//!   through the reduced system's diagonal. `backSubstitute` still calls
-//!   `setLandmarkDamping(0)` on itself; here there is nothing to undo, because
-//!   the three damping rows are never written.
-//!
-//! The accept test compares the true cost decrease with the linearized model's,
-//! and the model's includes the landmarks' own gain — it is positive at
-//! `inc = 0` (pr10-linearize.md finding 1). Nothing here "fixes" that.
+//! Lambda resets each frame (D11). Damping is `lambda · diag(H)` with a floor
+//! (D10), and rejected trials consume the same iteration budget as accepted ones
+//! (D12). The increment is negated before back-substitution because residuals
+//! are `π(x) − z` (D13). There is no Jacobian scaling or landmark/pose damping;
+//! only the reduced system's diagonal is damped (D34, D68).
+//! The acceptance test compares true cost decrease with predicted decrease,
+//! including the eliminated landmarks' own gain, which can be positive at zero
+//! pose increment.
 
 use std::collections::BTreeMap;
 
@@ -42,7 +27,7 @@ use crate::types::{
     Vector9, Vector15,
 };
 
-/// `max_num_iter` for the damped solve (`:1408`).
+/// `max_num_iter` for the damped solve.
 const MAX_SOLVE_ATTEMPTS: u32 = 3;
 
 /// Everything one `optimize` call works in that outlives the call.
@@ -76,13 +61,13 @@ impl<S: LieScalar> Default for OptimizeScratch<S> {
     }
 }
 
-/// The two hard-coded convergence constants of `:1566`, which are **not**
+/// The two hard-coded convergence constants, which are **not**
 /// config fields.
 pub(super) const FUNCTION_TOLERANCE: f64 = 1e-6;
 /// See [`FUNCTION_TOLERANCE`].
 pub(super) const STEP_TOLERANCE: f64 = 1e-4;
 
-/// `H.diagonal().segment<POSE_SIZE>(idx).array() = 1e20` (`:1400`), the value
+/// `H.diagonal().segment<POSE_SIZE>(idx).array() = 1e20`, the value
 /// `vio_fix_long_term_keyframes` pins a long-term keyframe's rows with.
 const FIXED_KEYFRAME_WEIGHT: f64 = 1e20;
 
@@ -97,84 +82,70 @@ pub(super) type SolveOutcome<S> = (Vec<LmIteration<S>>, LmTermination, StageTimi
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LmTermination {
     /// `opt_started` was false and `frame_states.size() <= 4`, so no
-    /// linearization ran at all (`:1207`).
+    /// linearization ran at all.
     NotStarted,
-    /// `(f_diff > 0 && f_diff < 1e-6) || step_norminf < 1e-4` (`:1565-1568`).
+    /// `(f_diff > 0 && f_diff < 1e-6) || step_norminf < 1e-4`.
     Converged,
-    /// The iteration budget ran out without converging (`:1283`).
+    /// The iteration budget ran out without converging.
     MaxIterations,
-    /// `lambda > max_lambda` after a rejection (`:1595-1598`).
+    /// `lambda > max_lambda` after a rejection.
     MaxDamping,
 }
 
-/// One step of the LM loop, accepted or rejected.
-///
-/// The five error components are split because their sum is what the accept
-/// test compares and a parity gap has to be attributable: the marg-prior term
-/// deliberately drops `½rᵀr` and can be negative (`ba_base.cpp:452-455`, D20),
-/// so a port that folds it into one number cannot tell which term drifted.
+/// One accepted or rejected LM step.
+/// Separate error components make changes in the objective attributable. The
+/// prior omits `½rᵀr` and can be negative (D20), so its term remains visible.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LmIteration<S: LieScalar> {
-    /// `it` when this step ran (`:1283`).
+    /// `it` when this step ran.
     pub iteration: i32,
-    /// `j`, the backtracking index inside this linearization (`:1350`).
+    /// `j`, the backtracking index inside this linearization.
     pub backtrack: i32,
-    /// `error_total` from `linearizeProblem` (`:1297`).
+    /// `error_total` from `linearizeProblem`.
     pub error_before: S,
-    /// `after_error_total` (`:1500`).
+    /// `after_error_total`.
     pub error_after: S,
-    /// `computeError`'s reprojection cost after the increment (`:1487`).
+    /// `computeError`'s reprojection cost after the increment.
     pub vision_error: S,
-    /// `computeImuError`'s `imu_error` (`:1492`).
+    /// `computeImuError`'s `imu_error`.
     pub imu_error: S,
     /// `computeImuError`'s `bg_error`.
     pub bias_gyro_error: S,
     /// `computeImuError`'s `ba_error`.
     pub bias_accel_error: S,
-    /// `computeMargPriorError` after the increment (`:1488`).
+    /// `computeMargPriorError` after the increment.
     pub marg_prior_error: S,
-    /// `l_diff` from `backSubstitute` (`:1454`).
+    /// `l_diff` from `backSubstitute`.
     pub l_diff: S,
-    /// `f_diff = error_total − after_error_total` (`:1509`).
+    /// `f_diff = error_total − after_error_total`.
     pub f_diff: S,
-    /// `relative_decrease = f_diff / l_diff` (`:1511`).
+    /// `relative_decrease = f_diff / l_diff`.
     pub relative_decrease: S,
-    /// `lambda` as the retry loop left it (`:1571`), which is what
-    /// `sqrt_keypoint_vio.h:209` calls "the value the damped solve used": the
-    /// escalated one after a non-finite increment, not the value the iteration
-    /// started with. Every attempt escalates on failure, the last one included,
-    /// so three failures record a `lambda` no attempt used — the fork's number
-    /// all the same.
+    /// Lambda after the retry loop. Every failure escalates it, including the last
+    /// attempt, so three failures record a value that no attempt used.
     pub lambda: S,
-    /// `step_norminf = inc.array().abs().maxCoeff()` (`:1477`).
+    /// `step_norminf = inc.array().abs().maxCoeff()`.
     pub step_norminf: S,
-    /// How many times the damped LDLT was retried (`:1410-1430`); more than one
+    /// How many times the damped LDLT was retried; more than one
     /// means the first increment was not finite.
     pub solve_attempts: u32,
-    /// `step_is_valid = l_diff > 0` (`:1528`).
+    /// `step_is_valid = l_diff > 0`.
     pub step_is_valid: bool,
-    /// `step_is_successful` (`:1529`), i.e. whether the increment was kept.
+    /// `step_is_successful`, i.e. whether the increment was kept.
     pub accepted: bool,
 }
 
 impl<S: LieScalar> SqrtKeypointVio<S> {
-    /// `optimize()` (`:1201-1639`), returning the LM trail, why it stopped and
-    /// the stages it timed. Whether it ran at all is `self.opt_started`, which
-    /// it sets.
+    /// Optimize and return the LM trail, stop reason and stage durations.
+    /// `self.opt_started` records whether optimization ran.
     ///
     /// # Errors
-    ///
-    /// [`EstimatorError::PriorOrderMismatch`] where C++ asserts the window
-    /// agrees with the prior (`:1227`, `:1237`),
-    /// [`EstimatorError::NumericallyInvalid`] where it prints "did not expect
-    /// numerical failure during linearization" and fails the frame
-    /// (`:1300-1303`), [`EstimatorError::FrameNotInOrdering`] where `:1468`
-    /// and `:1472` read the ordering with `.at()`, and the linearization's own
-    /// errors.
+    /// Returns typed errors for prior-order mismatch, invalid linearization,
+    /// missing ordering entries and failures from the linearizer.
     pub(super) fn optimize(&mut self, t_ns: i64) -> Result<SolveOutcome<S>, EstimatorError> {
         let mut lm: Vec<LmIteration<S>> = Vec::new();
         let mut timings: StageTimings = StageTimings::default();
-        // `:1207`: five states have to accumulate before the first
+        // five states have to accumulate before the first
         // optimization.
         if !self.opt_started && self.ba.frame_states.len() <= 4 {
             return Ok((lm, LmTermination::NotStarted, timings));
@@ -182,9 +153,8 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         self.opt_started = true;
 
         let imu_lin: ImuLinData<S> = self.imu_lin_data();
-        // The nine estimator members the C++ reads, as disjoint field borrows:
-        // the linearizer needs `ba` mutably while `marg_data` and `imu_meas`
-        // are borrowed into its inputs.
+        // Borrow estimator fields separately so the linearizer can mutate `ba` while
+        // borrowing the prior and IMU inputs.
         let Self {
             ref mut ba,
             ref mut damping,
@@ -201,17 +171,9 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             ref mut increment,
         } = *scratch;
 
-        // `:1221-1242`: poses first, then states, both in ascending timestamp
-        // order, and each entry checked against the prior's. C++ reads the prior
-        // with `.at()` for the poses (an out-of-range throw when it disagrees) and
-        // guards the states with `aom.items < marg_data.order.size()`, because the
-        // newest states are not in the prior yet.
-        //
-        // This is deliberately not `marg::window::build_absolute_ordering`: that
-        // one is `:726-763`, which walks the same two maps but stops at
-        // `last_state_to_marg` and returns the marginalization's own split. basalt
-        // writes the two loops out twice for the same reason, and merging them
-        // would mean one function with two payloads and two stopping rules.
+        // Order poses before states, each by timestamp, and check the prior prefix.
+        // This differs from marginalization ordering, which stops at
+        // `last_state_to_marg` and returns its own keep/marginalize split.
         let mut aom: AbsOrderMap = AbsOrderMap::new();
         for frame_id in ba.frame_poses.keys().copied() {
             let index: usize = aom.push(frame_id, POSE_SIZE)?;
@@ -237,10 +199,10 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             }
         }
 
-        // `:1249`, D11.
+        // D11.
         damping.lambda = S::from_literal(config.vio_lm_lambda_initial);
 
-        // `:1266-1267`: every interval, with no `aom` filter — unlike
+        // every interval, with no `aom` filter — unlike
         // `marginalize`, which keeps only the intervals both of whose ends are in
         // the ordering.
         let imu_input: ImuInput<'_, S> = ImuInput {
@@ -252,11 +214,11 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             imu: Some(&imu_input),
             used_frames: None,
             lost_landmarks: None,
-            // `:1258`: the same set `marginalize` builds at `:924`.
+            // Fix the same long-term keyframes as marginalization.
             fixed_frames: fixed_keyframes(config, ltkfs),
         };
 
-        // `:1268-1274`: one linearizer for the whole frame; the outer loop
+        // one linearizer for the whole frame; the outer loop
         // re-linearizes into it rather than rebuilding it.
         let mut lqr: LinearizationAbsQR<S> =
             LinearizationAbsQR::new(ba, &aom, LinearizationOptions::default(), &inputs)?;
@@ -267,23 +229,19 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         let mut it: i32 = 0;
         let mut termination: Option<LmTermination> = None;
 
-        // `:1283`.
         while it <= config.vio_max_iterations && termination.is_none() {
             let mark: std::time::Instant = std::time::Instant::now();
-            // `:1297-1303`.
             let (error_total, numerically_valid) = lqr.linearize_problem(ba, &inputs)?;
             if !numerically_valid {
                 return Err(EstimatorError::NumericallyInvalid { t_ns });
             }
-            // `:1320`.
             lqr.perform_qr()?;
             timings.linearize_ns += duration_ns(mark);
 
-            // `:1350`: the inner loop shares `it` with the outer one.
+            // the inner loop shares `it` with the outer one.
             let mut backtrack: i32 = 0;
             while it <= config.vio_max_iterations && termination.is_none() {
                 let mark: std::time::Instant = std::time::Instant::now();
-                // `:1393`.
                 let (h, b) = lqr.get_dense_h_b_into(ba, &inputs, dense)?;
                 // The reduced system is the ordering's: every `(idx, size)` in
                 // `aom` is a block of it, and every frame of the two maps has
@@ -292,12 +250,11 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 // below index it under that invariant.
                 debug_assert_eq!(h.nrows(), aom.total_size());
 
-                // `:1395-1406`.
                 if config.vio_fix_long_term_keyframes {
                     let weight: S = S::from_literal(FIXED_KEYFRAME_WEIGHT);
                     for t_ns in ltkfs {
                         let Some((idx, size)) = aom.get(*t_ns) else {
-                            // `:1397-1399`: C++ prints "[UNEXPECTED]" and skips.
+                            // Skip the unexpected missing entry.
                             log::warn!(
                                 "[UNEXPECTED] long-term keyframe {t_ns} ns is not in the ordering"
                             );
@@ -315,10 +272,9 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                     }
                 }
 
-                // `:1408-1430`.
                 let (inc_valid, solve_attempts): (bool, u32) =
                     damped_solve(h, b, damping, solve, increment);
-                // `:1432`: C++ warns and carries on with the non-finite increment.
+                // Continue with the non-finite increment after exhausting retries.
                 if !inc_valid {
                     log::warn!(
                         "frame {t_ns} ns: increment still not finite after {MAX_SOLVE_ATTEMPTS} damped solves"
@@ -326,17 +282,15 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 }
                 timings.solver_ns += duration_ns(mark);
 
-                // `:1443`.
                 ba.backup();
 
-                // `:1447-1454`, D13: negate, then back-substitute.
+                // D13: negate, then back-substitute.
                 let mark: std::time::Instant = std::time::Instant::now();
                 increment.neg_mut();
                 let inc: &DVector<S> = increment;
                 let l_diff: S = lqr.back_substitute(ba, &inputs, inc)?;
                 timings.back_substitution_ns += duration_ns(mark);
 
-                // `:1466-1474`.
                 for (frame_id, state) in &mut ba.frame_poses {
                     let Some((idx, _)) = aom.get(*frame_id) else {
                         return Err(EstimatorError::FrameNotInOrdering {
@@ -358,16 +312,14 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                     state.apply_inc(&step);
                 }
 
-                // `:1477`: `inc.array().abs().maxCoeff()`. `maxCoeff` folds with
-                // `numext::maxi`, which is order-independent for finite values, so a
-                // sequential fold is the same number; with a non-finite increment
-                // the fold order can matter and this one is left to right.
+                // Fold absolute increment coefficients left to right. Order can matter when
+                // an increment contains non-finite values.
                 let mut step_norminf: S = S::zero();
                 for value in inc.iter() {
                     step_norminf = eigen_maxi(step_norminf, value.abs());
                 }
 
-                // `:1484-1497`: the true cost at the new state.
+                // the true cost at the new state.
                 let mark: std::time::Instant = std::time::Instant::now();
                 let (vision_error, _) = ba.compute_error(None, S::zero())?;
                 let marg_prior_error: S = ba.compute_marg_prior_error(marg_data)?;
@@ -379,17 +331,14 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                     &accel_bias_weight,
                     &imu_lin.g,
                 )?;
-                // `:1495`: `vision += ((imu + bg) + ba)`, in that association.
+                // `vision += ((imu + bg) + ba)`, in that association.
                 let vision_and_inertial: S =
                     vision_error + ((imu_error + bias_gyro_error) + bias_accel_error);
                 timings.error_ns += duration_ns(mark);
 
-                // `:1500`.
                 let error_after: S = vision_and_inertial + marg_prior_error;
-                // `:1509-1511`.
                 let f_diff: S = error_total - error_after;
                 let relative_decrease: S = f_diff / l_diff;
-                // `:1528-1529`.
                 let step_is_valid: bool = l_diff > S::zero();
                 let accepted: bool = step_is_valid && relative_decrease > S::zero();
 
@@ -406,11 +355,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                     l_diff,
                     f_diff,
                     relative_decrease,
-                    // `:1571`: the fork reads `lambda` here, after the retry
-                    // loop, so a non-finite first solve is recorded with the
-                    // escalated value the next one would use — "the value the
-                    // damped solve used" (`sqrt_keypoint_vio.h:209`). Nothing
-                    // between the loop and this push moves it.
+                    // Record lambda after retries, including any escalation after the final failure.
                     lambda: damping.lambda,
                     step_norminf,
                     solve_attempts,
@@ -425,11 +370,10 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                     if lm_converged(f_diff, step_norminf) {
                         termination = Some(LmTermination::Converged);
                     }
-                    // `:1571`: leave the inner loop and re-linearize.
+                    // leave the inner loop and re-linearize.
                     break;
                 }
 
-                // `:1585-1598`.
                 damping.escalate();
                 ba.restore();
                 it += 1;
@@ -516,17 +460,10 @@ pub(super) fn damped_solve<S: LieScalar>(
     }
 }
 
-/// `ScBundleAdjustmentBase::computeImuError` (`sc_ba_base.cpp:657-704`), which
-/// the QR path calls even though everything else about it is Schur-complement
-/// machinery (`sqrt_keypoint_vio.cpp:1490-1492`).
-///
-/// Three sums: the whitened preintegration residual, and one random-walk term
-/// per bias. Intervals of zero length and intervals whose two ends are not both
-/// in the ordering are skipped (`:667`, `:672`); an interval that is in the
-/// ordering but has no state is [`EstimatorError::ImuFactorStateMissing`],
-/// where C++ throws out of `states.at()`.
-///
-/// Each quadratic form uses fixed-order folds over its residual coefficients.
+/// IMU cost: whitened preintegration plus one random-walk term per bias.
+/// Skip zero-length intervals and intervals not fully in the ordering. A missing
+/// state for an ordered endpoint returns [`EstimatorError::ImuFactorStateMissing`].
+/// Quadratic forms use fixed-order residual folds.
 fn compute_imu_error<S: LieScalar>(
     aom: &AbsOrderMap,
     states: &BTreeMap<FrameId, PoseVelBiasStateWithLin<S>>,
@@ -550,7 +487,7 @@ fn compute_imu_error<S: LieScalar>(
         }
         let (Some(start_state), Some(end_state)) = (states.get(&start_t), states.get(&end_t))
         else {
-            // `:671-672` are `.at()` calls: both endpoints are in `aom`, so a
+            //  are `.at()` calls: both endpoints are in `aom`, so a
             // miss in `frame_states` is an invariant break, and skipping the
             // factor would drop its residual from the true cost and change
             // which LM step is accepted (D32).
@@ -590,7 +527,7 @@ fn compute_imu_error<S: LieScalar>(
         }
         imu_error += S::from_literal(0.5) * quadratic;
 
-        // `:688`: `dt` in seconds, formed as `int64 · Scalar(1e-9)`.
+        // `dt` in seconds, formed as `int64 · Scalar(1e-9)`.
         let dt: S = S::from_literal(meas.get_dt_ns() as f64) * S::from_literal(1e-9);
         let res_bg: Vector3<S> = start.bias_gyro - end.bias_gyro;
         let gyro_dt: Vector3<S> = gyro_bias_weight / dt;
@@ -623,7 +560,7 @@ mod tests {
     use crate::types::PoseVelBiasState;
 
     /// `lambda`, `min_lambda`, `max_lambda`, `lambda_vee` as `optimize` starts a
-    /// frame: `lambda_vee` is [`VEE_FACTOR`], as `:1249-1251` resets it.
+    /// frame: `lambda_vee` is [`VEE_FACTOR`], as resets it.
     fn damping(lambda: f64, min_lambda: f64) -> LmDamping<f64> {
         LmDamping {
             lambda,
@@ -633,9 +570,7 @@ mod tests {
         }
     }
 
-    /// A single finite solve leaves `lambda` alone, so the value the trace
-    /// records is the one the iteration started with — the oracle's case, and
-    /// the reason the fixture cannot see the retry bug.
+    /// A finite first solve leaves the recorded lambda at its initial value.
     #[test]
     fn a_finite_solve_records_the_lambda_it_used() {
         let h: DMatrix<f64> = DMatrix::identity(3, 3);
@@ -718,11 +653,8 @@ mod tests {
         }
     }
 
-    /// A system the damping cannot rescue: every attempt fails, so `lambda` is
-    /// escalated three times (`:1426-1427` runs after the third failure too)
-    /// and the trace records `lambda · 2 · 4 · 8` — the value the port captured
-    /// **before** the loop until this fix, where the fork reads it after
-    /// (`:1571`, `sqrt_keypoint_vio.h:209`).
+    /// Three failed attempts escalate lambda by `2 · 4 · 8`, including after the
+    /// last failure. The trace must record that final value.
     #[test]
     fn a_solve_that_never_becomes_finite_records_the_escalated_lambda() {
         let h: DMatrix<f64> = DMatrix::identity(3, 3);
@@ -767,7 +699,7 @@ mod tests {
         assert_eq!(lm.lambda_vee, 4.0);
     }
 
-    /// `computeImuError` reads both endpoints with `.at()` (`sc_ba_base.cpp:671-672`).
+    /// `computeImuError` reads both endpoints with `.at()`.
     /// Skipping a factor whose state is gone understates the true cost and can
     /// flip the LM accept test, so the port refuses instead.
     ///

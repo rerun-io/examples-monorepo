@@ -1,10 +1,8 @@
-"""The RoboCap rig's own calibration, and the probe's cross-check against it.
+"""RoboCap calibration and recording geometry must agree.
 
-The recording stores 1920x1080 frames and the C++ ran 640x360, so the feed's
-downscale has to reproduce basalt's own converted calibration digit for digit,
-and the probe refuses a calibration file that describes another rig. The matcher,
-the inertial pairing and the camera subset are in ``test_frameset_matching``;
-the feed's MSD path is in ``test_catalog_feed``.
+The feed downsamples 1920x1080 images to 640x360 with matching intrinsics.
+The probe refuses a calibration for another rig. Separate tests check
+frameset matching, IMU pairing and camera selection.
 """
 
 import json
@@ -31,7 +29,7 @@ from slam_rs.reference import ImuParameters, ReferenceManifest, RobocapSession
 from slam_rs.tracking import check_calibration_matches_recording
 
 # The four fed cameras' native intrinsics exactly as the recording carries them,
-# in the C++'s order. float32 statics, so the digits stop where float32 does.
+# in manifest camera order. Statics carry float32 precision.
 ROBOCAP_INTRINSICS: tuple[tuple[float, float, float, float], ...] = (
     (625.53564453125, 626.1504516601562, 999.440185546875, 539.0486450195312),
     (636.4360961914062, 634.7124633789062, 956.2034301757812, 525.4381103515625),
@@ -123,11 +121,8 @@ def robocap_statics(
 
 
 def test_downscaling_the_recording_reproduces_basalts_own_calibration(manifest: ReferenceManifest) -> None:
-    """The recording's native statics at downscale 3 are the C++'s own 640x360 file.
-
-    The two come from one Kalibr tree by different routes — the fork's converter
-    wrote the file, the ``dataforge`` conversion wrote the statics — so this is
-    the check that the port is fed the rig the C++ was fed.
+    """Recording statics at downscale three must match the 640x360 calibration JSON.
+    Both describe the same Kalibr rig through different conversion paths.
     """
     basalt: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
     assert list(basalt.resolution) == [(640, 360)] * 4
@@ -232,10 +227,8 @@ def test_the_probe_refuses_a_calibration_whose_imu_is_not_the_manifests(manifest
 
 @pytest.mark.slow
 def test_the_feed_opens_the_real_robocap_rig(manifest: ReferenceManifest) -> None:
-    """Four of six cameras, 640x360, framesets on the C++'s own clock, both channels paired.
-
-    The one test that proves the whole read rather than its pieces: it needs the
-    NAS, so it sits behind ``slow`` like every other reference read.
+    """Read four of six cameras at 640x360 with matched clocks and paired IMU.
+    This whole-feed integration test needs the catalog and is marked slow.
     """
     session: RobocapSession = manifest.robocap.session("s00000015")
     with open_segment(CatalogSegment(manifest.catalog_url, "robocap", session.segment_id), manifest.robocap.imu, profile=RigProfile.from_robocap(manifest.robocap)) as feed:
@@ -247,7 +240,7 @@ def test_the_feed_opens_the_real_robocap_rig(manifest: ReferenceManifest) -> Non
         assert [(camera.width, camera.height) for camera in feed.cameras] == [(640, 360)] * 4
         assert all(camera.model == "kb4" for camera in feed.cameras)
         assert all(len(camera.distortion) == 4 for camera in feed.cameras)
-        # The frameset count and clock are basalt's own, to the nanosecond.
+        # Check frameset count and exact nanosecond timestamps.
         assert len(feed.frame_t_ns) == 1588
 
         frameset = next(feed.framesets())

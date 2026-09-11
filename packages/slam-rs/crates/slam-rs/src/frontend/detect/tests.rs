@@ -68,7 +68,7 @@ fn occupancy<'a>(counts: &'a [i32], grid: &CellGrid) -> Occupancy<'a> {
     }
 }
 
-/// `keypoints.cpp:140-144` on a 960x960 frame with `grid_size = 50`.
+///  on a 960x960 frame with `grid_size = 50`.
 #[test]
 fn the_grid_is_centred_and_stops_one_cell_early() {
     let grid: CellGrid = CellGrid::new(960, 960, 50).unwrap();
@@ -97,8 +97,7 @@ fn a_different_image_size_gives_a_different_grid_start() {
     assert!(!small.contains(210.0, 80.0));
 }
 
-/// The C++ `x_start + PATCH_SIZE * (w / PATCH_SIZE - 1)` underflows when the
-/// image is narrower than one cell; the port refuses the geometry instead.
+/// An image smaller than one cell must be refused before grid arithmetic underflows.
 #[test]
 fn an_image_narrower_than_a_cell_has_no_grid() {
     assert!(CellGrid::new(30, 200, 50).is_none());
@@ -106,7 +105,7 @@ fn an_image_narrower_than_a_cell_has_no_grid() {
     assert!(CellGrid::new(200, 200, 0).is_none());
 }
 
-/// A coordinate left of `x_start` truncates to column 0 in C++, not to -1.
+/// A coordinate just left of `x_start` truncates to column zero.
 #[test]
 fn a_coordinate_before_the_grid_lands_in_the_first_cell() {
     let grid: CellGrid = CellGrid::new(960, 960, 50).unwrap();
@@ -153,7 +152,7 @@ fn corners_are_found_and_stay_inside_the_edge_threshold() {
     }
 }
 
-/// The per-cell budget (`keypoints.cpp:173`) is `num_points_cell`.
+/// The per-cell budget is `num_points_cell`.
 #[test]
 fn no_cell_yields_more_than_its_budget() {
     let image: ImageU16 = dotted_image(200, 200, 16);
@@ -188,14 +187,9 @@ fn no_cell_yields_more_than_its_budget() {
     );
 }
 
-/// A `min_threshold` the halving ladder can never reach must still terminate.
-///
-/// basalt hangs here: `threshold /= 2` reaches 1, then 0, and `0 >= 0` keeps
-/// the loop alive for ever on the first empty cell (`keypoints.cpp:162`,
-/// `:187`). A blank frame is the worst case, because no cell ever fills its
-/// budget and every rung of the ladder is walked. The test finishing at all is
-/// the assertion; the counts are the same as a `min_threshold` of 1 gives,
-/// which is what the floor makes the ladder run.
+/// The threshold ladder must terminate even with a non-positive requested minimum.
+/// A blank frame walks every rung because no cell fills. The result must match
+/// a minimum of one, which is the enforced floor.
 #[test]
 fn a_non_positive_min_threshold_still_terminates() {
     let blank: ImageU16 = ImageU16::zeros(200, 200).unwrap();
@@ -322,7 +316,7 @@ fn a_valid_min_threshold_is_left_alone() {
     assert!(config().min_threshold > LOWEST_THRESHOLD_RUNG);
 }
 
-/// `keypoints.cpp:148`: an occupied cell is skipped whole.
+/// an occupied cell is skipped whole.
 #[test]
 fn an_occupied_cell_is_skipped() {
     let image: ImageU16 = dotted_image(200, 200, 16);
@@ -362,7 +356,7 @@ fn an_occupied_cell_is_skipped() {
     assert_eq!(out.len(), 0);
 }
 
-/// `keypoints.cpp:179`: a masked corner is dropped.
+/// a masked corner is dropped.
 #[test]
 fn a_mask_over_the_whole_image_drops_everything() {
     let image: ImageU16 = dotted_image(200, 200, 16);
@@ -393,7 +387,7 @@ fn a_mask_over_the_whole_image_drops_everything() {
     assert!(out.is_empty());
 }
 
-/// `keypoints.cpp:178`: outside `safe_radius` of the image centre, nothing is kept.
+/// outside `safe_radius` of the image centre, nothing is kept.
 #[test]
 fn the_safe_radius_gate_keeps_only_the_middle() {
     let image: ImageU16 = dotted_image(200, 200, 16);
@@ -511,8 +505,7 @@ fn a_short_occupancy_buffer_is_refused() {
     );
 }
 
-/// A detection grid wider than the occupancy matrix skips the cells that
-/// fall outside it, where the C++ indexes out of range (trap 15).
+/// Skip detection cells outside the allocated occupancy shape (trap 15).
 #[test]
 fn a_cell_outside_the_occupancy_matrix_is_skipped() {
     let image: ImageU16 = dotted_image(300, 200, 16);
@@ -543,7 +536,7 @@ fn a_cell_outside_the_occupancy_matrix_is_skipped() {
     }
 }
 
-/// `keypoints.h:66-68`: masked means inside *any* rectangle, half-open.
+/// masked means inside *any* rectangle, half-open.
 #[test]
 fn masks_are_half_open_and_disjunctive() {
     let masks: Masks = Masks {
@@ -618,7 +611,7 @@ fn suppression_thins_a_run_of_candidates() {
     assert_eq!(kept, vec![11.0, 14.0, 16.0]);
 }
 /// OpenCV's `cornerScore` is one less than the smallest threshold at which
-/// the pixel stops being a corner (`fast_score.cpp`), which is what kornia
+/// the pixel stops being a corner, which is what kornia
 /// returns. An isolated maximum-contrast peak therefore scores 254, not 255.
 #[test]
 fn the_response_is_opencvs_corner_score() {

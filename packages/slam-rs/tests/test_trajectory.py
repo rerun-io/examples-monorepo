@@ -148,7 +148,7 @@ def test_the_ported_alignment_agrees_with_simplecvs_on_well_conditioned_input(
 
 
 def test_shift_clock_moves_a_trajectory_onto_the_absolute_device_clock() -> None:
-    """The one conversion between video_time and the clock every basalt CSV uses."""
+    """The one conversion between video_time and the absolute export clock."""
     offset_ns: int = 10_433_867_587_166
     positions: Float64[ndarray, "5 3"] = np.arange(15, dtype=np.float64).reshape(5, 3)
     relative: Trajectory = _trajectory(np.array([0, 17_504_134, 100, 2**53 + 1, 2**54 + 3], dtype=np.int64), positions)
