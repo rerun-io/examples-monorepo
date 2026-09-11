@@ -30,9 +30,9 @@ pub(crate) const RING_BIAS: usize = 3;
 /// and two widths before any of this runs.
 #[cube(launch, launch_unchecked)]
 fn fast_score_kernel(
-    frame: &Array<u16>,
-    ring: &Array<u32>,
-    score: &mut Array<u8>,
+    frame: &[u16],
+    ring: &[u32],
+    score: &mut [u8],
     width: usize,
     height: usize,
     margin: usize,
@@ -72,11 +72,11 @@ fn fast_score_kernel(
         let row = y + usize::cast_from(ring[k]) - RING_BIAS;
         let column = x + usize::cast_from(ring[16usize + k]) - RING_BIAS;
         let p = u32::cast_from(frame[row * width + column]) >> 8u32;
-        let mut below: u32 = 0u32;
+        let mut below = 0u32;
         if center > p {
             below = center - p;
         }
-        let mut above: u32 = 0u32;
+        let mut above = 0u32;
         if p > center {
             above = p - center;
         }
@@ -87,8 +87,8 @@ fn fast_score_kernel(
     // Step by 2: each iteration shares the seven-element core `[k+1 .. k+8]`
     // between the arc starting at `k` and the one starting at `k+1`, which is
     // the canonical FAST-9 structure and the order kornia sums it in.
-    let mut dark_score: u32 = 0u32;
-    let mut bright_score: u32 = 0u32;
+    let mut dark_score = 0u32;
+    let mut bright_score = 0u32;
     #[unroll]
     for step in 0..8usize {
         let k = 2usize * step;
@@ -132,8 +132,8 @@ const FILTER_LAST: usize = FILTER_LANES - 1;
 #[cube(launch, launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 fn fast_localmax_kernel(
-    score: &Array<u8>,
-    kept: &mut Array<u8>,
+    score: &[u8],
+    kept: &mut [u8],
     width: usize,
     height: usize,
     margin: usize,
@@ -150,11 +150,11 @@ fn fast_localmax_kernel(
     let mut survivor = value;
     if use_filter == 1usize && x >= margin && x < filtered_end {
         let lane = (x - margin) % FILTER_LANES;
-        let mut left: u32 = 0u32;
+        let mut left = 0u32;
         if lane != 0usize {
             left = u32::cast_from(score[slot - 1usize]);
         }
-        let mut right: u32 = 0u32;
+        let mut right = 0u32;
         if lane != FILTER_LAST {
             right = u32::cast_from(score[slot + 1usize]);
         }
@@ -183,9 +183,9 @@ pub(crate) fn launch_fast_score<R: Runtime>(
             client,
             cubes,
             units,
-            ArrayArg::from_raw_parts(frame.0.clone(), frame.1),
-            ArrayArg::from_raw_parts(ring.0.clone(), ring.1),
-            ArrayArg::from_raw_parts(score.0.clone(), score.1),
+            BufferArg::from_raw_parts(frame.0.clone(), frame.1),
+            BufferArg::from_raw_parts(ring.0.clone(), ring.1),
+            BufferArg::from_raw_parts(score.0.clone(), score.1),
             width,
             height,
             margin,
@@ -212,8 +212,8 @@ pub(crate) fn launch_fast_localmax<R: Runtime>(
             client,
             cubes,
             units,
-            ArrayArg::from_raw_parts(score.0.clone(), score.1),
-            ArrayArg::from_raw_parts(kept.0.clone(), kept.1),
+            BufferArg::from_raw_parts(score.0.clone(), score.1),
+            BufferArg::from_raw_parts(kept.0.clone(), kept.1),
             width,
             height,
             margin,
@@ -235,20 +235,14 @@ pub(crate) const MASK_BITS: usize = 32;
 /// the CPU one. With a bitmask the host reads one word per thirty-two columns
 /// and only touches the score where a bit is set.
 #[cube(launch, launch_unchecked)]
-fn fast_mask_kernel(
-    kept: &Array<u8>,
-    mask: &mut Array<u32>,
-    width: usize,
-    height: usize,
-    words: usize,
-) {
+fn fast_mask_kernel(kept: &[u8], mask: &mut [u32], width: usize, height: usize, words: usize) {
     let word = usize::cast_from(ABSOLUTE_POS_X);
     let y = usize::cast_from(ABSOLUTE_POS_Y);
     if word >= words || y >= height {
         terminate!();
     }
     let first = word * MASK_BITS;
-    let mut bits: u32 = 0u32;
+    let mut bits = 0u32;
     for bit in 0..MASK_BITS {
         let x = first + bit;
         if x < width && kept[y * width + x] != 0u8 {
@@ -274,8 +268,8 @@ pub(crate) fn launch_fast_mask<R: Runtime>(
             client,
             cubes,
             units,
-            ArrayArg::from_raw_parts(kept.0.clone(), kept.1),
-            ArrayArg::from_raw_parts(mask.0.clone(), mask.1),
+            BufferArg::from_raw_parts(kept.0.clone(), kept.1),
+            BufferArg::from_raw_parts(mask.0.clone(), mask.1),
             width,
             height,
             words,

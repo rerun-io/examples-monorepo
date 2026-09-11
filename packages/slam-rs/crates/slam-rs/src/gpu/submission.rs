@@ -2,7 +2,8 @@
 
 use super::{GpuError, seam};
 
-/// CubeCL 0.10.0's private `custom_channel::CHANNEL_MAX_TASK` is 32.
+/// CubeCL 0.11.0-pre.3's private `custom_channel::CHANNEL_MAX_TASK` is 32
+/// (`cubecl-common/src/device/handle/channel.rs`).
 /// Recheck this value when upgrading CubeCL; it is not exported by the runtime.
 pub const CHANNEL_TASKS: usize = 32;
 
@@ -19,7 +20,7 @@ thread_local! {
 /// one-task stage, so even a pyramid larger than the budget is split safely.
 /// Leave one channel slot for the blocking flush or download itself.
 ///
-/// CubeCL clones share `utilities.properties` (0.10.0 `client.rs`), so its
+/// CubeCL clones share `utilities.properties` (0.11.0-pre.3 `client.rs`), so its
 /// address identifies their device's queue. A stale address can only retain an
 /// old count and cause an early flush. Runtime type separates backend types.
 /// Each device must have one producer thread; a read resets only that device.
@@ -141,10 +142,10 @@ fn download<R: cubecl::prelude::Runtime>(
     if super::runtime::armed(super::runtime::BLOCKING_READ) {
         return Err(cubecl::server::ServerError::Generic {
             reason: "the device is gone".to_owned(),
-            backtrace: cubecl::backtrace::BackTrace::default(),
+            backtrace: Default::default(),
         });
     }
-    cubecl::reader::read_sync(client.read_async(handles))
+    cubecl::future::reader::read_sync(client.read_async(handles))
 }
 
 /// One blocking download of every handle at once, and the protocol around it.

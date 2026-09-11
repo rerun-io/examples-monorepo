@@ -201,6 +201,7 @@ fn probe_availability() -> Result<(), GpuError> {
         power_preference: wgpu::PowerPreference::HighPerformance,
         force_fallback_adapter: false,
         compatible_surface: None,
+        apply_limit_buckets: false,
     });
     match cubecl::future::block_on(request) {
         Ok(_) => Ok(()),

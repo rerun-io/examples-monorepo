@@ -2439,10 +2439,22 @@ CORE_CDYLIB = "lib_core.dylib"
 # cargo never runs during `pixi lock`/`pixi install`: the extension is built by
 # this task and dropped next to the Python sources, where hatchling's editable
 # .pth already looks (the dpvo / mast3r-slam in-place pattern).
+[feature.slam-rs.tasks.slam-rs-patch-deps]
+# Always verify prepared content, including when task inputs have not changed.
+cmd = "python tools/prepare_patched_deps.py"
+cwd = "packages/slam-rs"
+description = "Prepare checksummed Cargo dependencies with local patches"
+
 [feature.slam-rs.tasks.slam-rs-build]
+depends-on = ["slam-rs-patch-deps"]
 cmd = "cargo build --release -p slam-rs-py && cp target/release/$CORE_CDYLIB slam_rs/_core.so"
 cwd = "packages/slam-rs"
 inputs = [
+    "packages/slam-rs/patches/**",
+    "packages/slam-rs/slam_rs/apis/prepare_patched_deps.py",
+    "packages/slam-rs/tools/prepare_patched_deps.py",
+    "packages/slam-rs/target/patch/cubecl-common-0.11.0-pre.3/**",
+    "packages/slam-rs/target/patch/cubecl-common-0.11.0-pre.3/.prepared-sha256",
     "packages/slam-rs/Cargo.toml",
     "packages/slam-rs/Cargo.lock",
     "packages/slam-rs/.cargo/config.toml",
@@ -2454,11 +2466,19 @@ outputs = ["packages/slam-rs/slam_rs/_core.so"]
 description = "Build the Rust VIO core and install slam_rs._core in place"
 
 [feature.slam-rs.tasks.slam-rs-clippy]
+depends-on = ["slam-rs-patch-deps"]
 cmd = "cargo clippy --workspace --all-targets -- -D warnings"
 cwd = "packages/slam-rs"
 description = "Run clippy over the whole Rust workspace"
 
+[feature.slam-rs.tasks.slam-rs-patch-test]
+depends-on = ["slam-rs-patch-deps"]
+cmd = "cargo test --locked --offline --manifest-path target/patch/cubecl-common-0.11.0-pre.3/Cargo.toml park"
+cwd = "packages/slam-rs"
+description = "Run the patched CubeCL channel park tests"
+
 [feature.slam-rs.tasks.slam-rs-rust-test]
+depends-on = ["slam-rs-patch-test"]
 cmd = "cargo test --workspace"
 cwd = "packages/slam-rs"
 description = "Run the Rust test suite (unit tests + proptest)"
@@ -2487,6 +2507,7 @@ description = "Build the core, then run the package tests"
 # Clippy checks GPU code and tests with warnings denied; the default lane
 # does not compile these optional modules.
 [feature.slam-rs.tasks.slam-rs-wgpu-clippy]
+depends-on = ["slam-rs-patch-deps"]
 cmd = "cargo clippy -p slam-rs --features gpu-wgpu --all-targets -- -D warnings"
 cwd = "packages/slam-rs"
 description = "Lint the portable wgpu lane, tests included, with warnings denied"
@@ -2503,11 +2524,13 @@ description = "Lint the portable wgpu lane, tests included, with warnings denied
 # CubeCL pool and every test in one binary shares one client; cargo runs
 # binaries one after another, which is what keeps both deterministic.
 [feature.slam-rs.tasks.slam-rs-wgpu-test]
-cmd = "cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_kernels -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_detect -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_seam_bench -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test frame_allocations -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_pool -- --list | grep -c ': test' && cargo test --locked --offline --workspace --features slam-rs/gpu-wgpu"
+depends-on = ["slam-rs-wgpu-build"]
+cmd = "cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_kernels -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_detect -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_seam_bench -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test frame_allocations -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_pool -- --list | grep -c ': test' && cargo test --locked --offline --workspace --features slam-rs/gpu-wgpu && python -m pytest -q -m slow tests/test_metal_python_host.py"
 cwd = "packages/slam-rs"
 description = "Run workspace tests with wgpu, checking that all five GPU integration binaries contain tests"
 
 [feature.slam-rs.tasks.slam-rs-wgpu-doc]
+depends-on = ["slam-rs-patch-deps"]
 cmd = 'RUSTDOCFLAGS="-D warnings" cargo doc --locked --offline --no-deps -p slam-rs -p slam-rs-py --features slam-rs/gpu-wgpu'
 cwd = "packages/slam-rs"
 description = "Build wgpu Rust documentation with warnings denied"
@@ -2515,9 +2538,15 @@ description = "Build wgpu Rust documentation with warnings denied"
 # The same core on the portable lane, for measuring it: `--gpu` then selects
 # wgpu, the only GPU runtime (D70).
 [feature.slam-rs.tasks.slam-rs-wgpu-build]
+depends-on = ["slam-rs-patch-deps"]
 cmd = "cargo build --release -p slam-rs-py --features gpu-wgpu && cp target/release/$CORE_CDYLIB slam_rs/_core.so"
 cwd = "packages/slam-rs"
 inputs = [
+    "packages/slam-rs/patches/**",
+    "packages/slam-rs/slam_rs/apis/prepare_patched_deps.py",
+    "packages/slam-rs/tools/prepare_patched_deps.py",
+    "packages/slam-rs/target/patch/cubecl-common-0.11.0-pre.3/**",
+    "packages/slam-rs/target/patch/cubecl-common-0.11.0-pre.3/.prepared-sha256",
     "packages/slam-rs/Cargo.toml",
     "packages/slam-rs/Cargo.lock",
     "packages/slam-rs/.cargo/config.toml",

@@ -53,7 +53,7 @@ const _: () = assert!(crate::frontend::detect::NO_CELL_WINNER == 4_294_967_295);
 #[cube]
 #[allow(clippy::too_many_arguments)]
 fn cell_candidate(
-    kept: &Array<u8>,
+    kept: &[u8],
     width: usize,
     x: usize,
     y: usize,
@@ -63,7 +63,7 @@ fn cell_candidate(
     last_y: usize,
     threshold: u32,
 ) -> u32 {
-    let mut value: u32 = 0u32;
+    let mut value = 0u32;
     if x >= first_x && x < last_x && y >= first_y && y < last_y {
         let score = u32::cast_from(kept[y * width + x]);
         if score > threshold {
@@ -106,8 +106,8 @@ fn cell_candidate(
 #[cube(launch, launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 fn fast_cell_select_kernel(
-    kept: &Array<u8>,
-    best: &mut Array<u32>,
+    kept: &[u8],
+    best: &mut [u32],
     width: usize,
     height: usize,
     cell: usize,
@@ -150,11 +150,13 @@ fn fast_cell_select_kernel(
     let edge_y = f32::cast_from(height) - SELECT_EDGE - 1.0f32;
 
     // `NO_CELL_WINNER`; see the assertion beside `KEY_ROW_SHIFT`.
-    let mut key: u32 = 4_294_967_295u32;
-    let mut y = first_y + usize::cast_from(UNIT_POS_Y);
-    while y < last_y {
-        let mut x = first_x + usize::cast_from(UNIT_POS_X);
-        while x < last_x {
+    let mut key = 4_294_967_295u32;
+    // CubeCL 0.11 emits C++ lambdas for `while` conditions. wgpu's MSL
+    // passthrough leaves the language version unset, which
+    // can reject lambdas in Python even when the Rust test executable works.
+    // Stepped ranges emit plain `for` loops with the same visits and order.
+    for y in range_stepped(first_y + usize::cast_from(UNIT_POS_Y), last_y, SELECT_DIM_Y) {
+        for x in range_stepped(first_x + usize::cast_from(UNIT_POS_X), last_x, SELECT_DIM_X) {
             let score = cell_candidate(
                 kept, width, x, y, first_x, last_x, first_y, last_y, threshold,
             );
@@ -162,7 +164,7 @@ fn fast_cell_select_kernel(
                 // OpenCV's rule: strictly greater than all eight neighbours, a
                 // neighbour that is not a candidate scoring zero. Both sides
                 // strict, so a plateau of equal scores yields nothing.
-                let mut rival: u32 = 0u32;
+                let mut rival = 0u32;
                 rival = max(
                     rival,
                     cell_candidate(
@@ -297,15 +299,13 @@ fn fast_cell_select_kernel(
                     }
                 }
             }
-            x += SELECT_DIM_X;
         }
-        y += SELECT_DIM_Y;
     }
 
     // Integer minimum is associative and commutative, so this tree is the same
     // answer as the ascending serial reduction the float kernels are obliged to
     // use — and every barrier is cube-uniform.
-    let mut reduce = SharedMemory::<u32>::new(SELECT_SLOTS);
+    let mut reduce = Shared::<[u32]>::new_slice(SELECT_SLOTS);
     reduce[unit] = key;
     sync_cube();
     #[unroll]
@@ -365,13 +365,9 @@ pub(crate) fn launch_fast_cell_select<R: Runtime>(
         fast_cell_select_kernel::launch_unchecked::<R>(
             client,
             CubeCount::Static(geometry.cells_x as u32, geometry.cells_y as u32, 1),
-            CubeDim {
-                x: SELECT_DIM_X as u32,
-                y: SELECT_DIM_Y as u32,
-                z: 1,
-            },
-            ArrayArg::from_raw_parts(kept.0.clone(), kept.1),
-            ArrayArg::from_raw_parts(best.0.clone(), best.1),
+            CubeDim::new_3d(SELECT_DIM_X as u32, SELECT_DIM_Y as u32, 1),
+            BufferArg::from_raw_parts(kept.0.clone(), kept.1),
+            BufferArg::from_raw_parts(best.0.clone(), best.1),
             geometry.width,
             geometry.height,
             geometry.cell,

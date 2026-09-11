@@ -5,6 +5,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/slam-rs", "crates/slam-rs-py", "crates/slam-rs-cli"]
+# Run the patched dependency's own unit tests as a standalone crate.
+exclude = ["target/patch/cubecl-common-0.11.0-pre.3"]
 
 [workspace.package]
 version = "0.1.0"
@@ -43,17 +45,17 @@ kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864
 # because upstream's are `f32`-only or coupled (S33 audit A, row 5).
 kornia-algebra = { git = "https://github.com/kornia/kornia-rs", rev = "e2148e864a1b63a8fe094b89175273ef08823183", default-features = false }
 
-# The GPU phase (decision D21, D70). CubeCL 0.10 stable with the optional
+# The GPU phase (decision D21, D70). CubeCL 0.11 prerelease with the optional
 # wgpu runtime; the default CPU build has no GPU dependency.
-cubecl = "0.10"
+cubecl = "=0.11.0-pre.3"
 # No `features` here: which shader compiler cubecl-wgpu builds is decided per
 # target in `crates/slam-rs/Cargo.toml`, because `spirv` and `msl` are not the
 # same lane on the same platform (see the two target sections there).
-cubecl-wgpu = "0.10"
+cubecl-wgpu = "=0.11.0-pre.3"
 
 # Probe wgpu before constructing a CubeCL client, whose bring-up can panic.
 # This feature subset adds nothing to cubecl-wgpu's compiled feature set.
-wgpu = { version = "29", default-features = false }
+wgpu = { version = "30", default-features = false }
 
 # The estimator must never panic on data: errors are typed and returned.
 [workspace.lints.clippy]
@@ -78,3 +80,21 @@ opt-level = 2
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Replace the idle device-channel 150 µs backoff with notified parking:
+# Mac two-camera seam 10.81 -> 3.34 ms; RTX 5090 stereo 0.378 -> 0.231 ms.
+# Source patch: patches/cubecl-common-0.11.0-pre.3-channel-park.patch.
+# The slam-rs-patch-deps Pixi task creates this manifest-relative directory;
+# CARGO_TARGET_DIR does not move target/patch.
+# Bare cargo before preparation fails with:
+# error: failed to load source for dependency `cubecl-common`
+# Caused by: failed to read `<package>/target/patch/cubecl-common-0.11.0-pre.3/Cargo.toml`
+# Caused by: No such file or directory (os error 2)
+# Fix: pixi run -e slam-rs-dev slam-rs-patch-deps
+# rust-analyzer: run that command once per checkout before opening the workspace.
+# (macOS: use -e slam-rs-osx-dev).
+# Bump: update version + archive sha256 in slam_rs/apis/prepare_patched_deps.py,
+# rebase the patch, update this path and the Pixi patch-test command, run the prepare
+# task, then regenerate Cargo.lock with cargo update -p cubecl-common.
+[patch.crates-io]
+cubecl-common = { path = "target/patch/cubecl-common-0.11.0-pre.3" }

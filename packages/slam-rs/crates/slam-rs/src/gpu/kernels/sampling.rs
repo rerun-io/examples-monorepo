@@ -18,13 +18,13 @@ pub(crate) fn in_bounds(x: f32, y: f32, border: f32, width: usize, height: usize
 
 /// One pixel of a level, as `f32`.
 #[cube]
-fn at(image: &Array<u16>, base: usize, stride: usize, x: usize, y: usize) -> f32 {
+fn at(image: &[u16], base: usize, stride: usize, x: usize, y: usize) -> f32 {
     f32::cast_from(image[base + y * stride + x])
 }
 
 /// Bilinear sampling with the CPU implementation's multiplication grouping and sum order.
 #[cube]
-pub(crate) fn interp(image: &Array<u16>, base: usize, stride: usize, x: f32, y: f32) -> f32 {
+pub(crate) fn interp(image: &[u16], base: usize, stride: usize, x: f32, y: f32) -> f32 {
     let ix = usize::cast_from(x);
     let iy = usize::cast_from(y);
     let dx = x - f32::cast_from(ix);
@@ -45,20 +45,20 @@ pub(crate) fn interp(image: &Array<u16>, base: usize, stride: usize, x: f32, y: 
 /// twelve pixels are read (`ix - 1` through `ix + 2`, `iy - 1` through
 /// `iy + 2`) and why the caller must have satisfied `in_bounds(x, y, 1)`.
 ///
-/// Three `&mut SharedMemory` parameters rather than a returned triple: a
+/// Three `&mut Shared` parameters rather than a returned triple: a
 /// `#[cube]` function returns one value, and the caller wants these in shared
 /// memory anyway so unit 0 can reduce over them.
 #[cube]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn interp_grad_into(
-    image: &Array<u16>,
+    image: &[u16],
     base: usize,
     stride: usize,
     x: f32,
     y: f32,
-    values: &mut SharedMemory<f32>,
-    grad_x: &mut SharedMemory<f32>,
-    grad_y: &mut SharedMemory<f32>,
+    values: &mut Shared<[f32]>,
+    grad_x: &mut Shared<[f32]>,
+    grad_y: &mut Shared<[f32]>,
     slot: usize,
 ) {
     let ix = usize::cast_from(x);
@@ -107,7 +107,7 @@ pub(crate) fn interp_grad_into(
 /// the even allocation to be made once at `allocate` rather than replaced every
 /// frame.
 #[cube(launch, launch_unchecked)]
-fn probe_kernel<N: Numeric>(src: &Array<N>, dst: &mut Array<N>, count: usize) {
+fn probe_kernel<N: Numeric>(src: &[N], dst: &mut [N], count: usize) {
     let index = usize::cast_from(ABSOLUTE_POS);
     if index >= count {
         terminate!();
@@ -121,7 +121,7 @@ fn probe_kernel<N: Numeric>(src: &Array<N>, dst: &mut Array<N>, count: usize) {
 /// `launch_unchecked`. It runs once per process, off the per-frame path, and it
 /// is the kernel whose whole job is to prove the runtime is sound: bounds checks
 /// off is the wrong shape for that, and 256 elements cost nothing either way.
-/// The `unsafe` that remains is `ArrayArg::from_raw_parts`, which every launcher
+/// The `unsafe` that remains is `BufferArg::from_raw_parts`, which every launcher
 /// needs to name a handle's element count, not the launch.
 pub(crate) fn launch_probe<N: Numeric, R: Runtime>(
     client: &ComputeClient<R>,
@@ -136,8 +136,8 @@ pub(crate) fn launch_probe<N: Numeric, R: Runtime>(
             client,
             cubes,
             units,
-            ArrayArg::from_raw_parts(src.0.clone(), src.1),
-            ArrayArg::from_raw_parts(dst.0.clone(), dst.1),
+            BufferArg::from_raw_parts(src.0.clone(), src.1),
+            BufferArg::from_raw_parts(dst.0.clone(), dst.1),
             count,
         );
     }
@@ -162,8 +162,8 @@ pub(crate) fn launch_copy_level0<R: Runtime>(
             client,
             cubes,
             units,
-            ArrayArg::from_raw_parts(src.0.clone(), src.1),
-            ArrayArg::from_raw_parts(dst.0.clone(), dst.1),
+            BufferArg::from_raw_parts(src.0.clone(), src.1),
+            BufferArg::from_raw_parts(dst.0.clone(), dst.1),
             count,
         );
     }
