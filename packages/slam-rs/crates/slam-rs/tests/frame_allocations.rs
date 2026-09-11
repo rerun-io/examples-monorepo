@@ -120,6 +120,7 @@ struct Allocations {
     allocations: usize,
     reallocations: usize,
     deallocations: usize,
+    allocated_bytes: usize,
 }
 
 impl Allocations {
@@ -146,6 +147,7 @@ fn measure<T>(body: impl FnOnce() -> T) -> (T, Allocations) {
         allocations: ALLOCATIONS.get(),
         reallocations: REALLOCATIONS.get(),
         deallocations: DEALLOCATIONS.get(),
+        allocated_bytes: ALLOCATED_BYTES.get(),
     };
     (value, counted)
 }
@@ -163,12 +165,12 @@ fn preparing_a_gpu_image_allocates_only_one_pixel_copy() {
     builder
         .prepare_images(std::slice::from_ref(&image))
         .unwrap();
-    measure(|| {
+    let (_, counted) = measure(|| {
         builder
             .prepare_images(std::slice::from_ref(&image))
             .unwrap()
     });
-    let bytes = ALLOCATED_BYTES.get();
+    let bytes = counted.allocated_bytes;
     assert!(
         bytes < 960 * 960 * size_of::<u16>() + 16_384,
         "allocated {bytes} bytes"
