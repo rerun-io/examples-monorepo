@@ -207,4 +207,37 @@ mod tests {
         }
         r
     }
+
+    macro_rules! pivot_boundary_properties {
+        ($name:ident, $scalar:ty) => {
+            proptest! {
+                #[test]
+                fn $name(distance in 0.01f64..0.49, above in any::<bool>(), residual in -4.0f64..4.0) {
+                    let threshold = <$scalar>::EPSILON.sqrt();
+                    let pivot = threshold * (1.0 + if above { distance as $scalar } else { -distance as $scalar });
+                    let mut storage = DMatrix::<$scalar>::zeros(5, 5);
+                    storage[(0, 0)] = 2.0;
+                    storage[(0, 1)] = 4.0; // dependent column
+                    storage[(1, 3)] = pivot; // column 2 is zero
+                    storage[(1, 4)] = residual as $scalar;
+                    let mut axis = [0.0; 5];
+                    let mut rank = 0;
+                    for col in 0..4 {
+                        let rows = 5 - rank;
+                        let (active, beta) = make_householder(&storage, col, rank, rows, &mut axis);
+                        if beta.abs() > threshold {
+                            apply_householder_on_the_left(storage.view_mut((rank, col), (rows, 5 - col)), &axis, active);
+                            rank += 1;
+                        }
+                    }
+                    prop_assert_eq!(rank, 1 + usize::from(above));
+                    prop_assert!((storage.column(4).norm_squared() - (residual as $scalar).powi(2)).abs() <= 32.0 * <$scalar>::EPSILON * (1.0 + residual.abs() as $scalar).powi(2));
+                    prop_assert!((storage[(1, 3)].abs() - pivot).abs() <= 8.0 * <$scalar>::EPSILON * pivot);
+                    prop_assert!((storage[(1, 3)] * storage[(1, 4)] - pivot * residual as $scalar).abs() <= 32.0 * <$scalar>::EPSILON * pivot * (1.0 + residual.abs() as $scalar));
+                }
+            }
+        };
+    }
+    pivot_boundary_properties!(pivot_boundary_f32, f32);
+    pivot_boundary_properties!(pivot_boundary_f64, f64);
 }
