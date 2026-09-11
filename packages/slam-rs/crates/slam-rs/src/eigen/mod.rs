@@ -38,5 +38,4 @@
 //! production caller left — the keyframe-eviction baseline in
 //! `crate::estimator` — and outlives `blas` for that reason alone.
 
-pub(crate) mod ldlt;
 pub(crate) mod qr;
