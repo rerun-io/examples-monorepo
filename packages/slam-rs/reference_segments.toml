@@ -330,3 +330,4 @@ cam_time_offset_ns = 14902432
 [[robocap.session]]
 session_id = "s00000015"
 segment_id = "robocap__f408193e6447b3b0__s00000015"
+reference_csv = "tests/fixtures/robocap_s15_trajectory.csv"

@@ -150,7 +150,7 @@ def main(config: Config) -> None:
     # nothing below reads a frameset: the export and the ATE happen with it shut.
     stage.refuse_lost_framesets()
     write_trajectory(output_csv, shift_clock(estimate, export_offset_ns))
-    print(f"{len(estimate)} tracked poses -> {output_csv} (the device clock, as basalt's CSVs carry it)")
+    print(f"{len(estimate)} tracked poses -> {output_csv} (absolute device clock)")
     if len(estimate) == 0:
         print("no ATE: the estimator reported no tracked pose")
         return

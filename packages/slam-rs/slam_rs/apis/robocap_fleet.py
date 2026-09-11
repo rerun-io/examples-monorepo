@@ -101,7 +101,7 @@ class Config:
     gpu: bool = False
     """Use the GPU frontend."""
     session: str = "s00000015"
-    """RoboCap session id from the manifest. Session 15 is the one with a reference wall on the cap."""
+    """RoboCap session id from the manifest. Defaults to session 15."""
     seconds: float = 0.0
     """Replay this much video time from the first frameset; 0 replays the whole session, which is what a fleet row is."""
     output_json: Path = Path("robocap_fleet.json")
@@ -116,14 +116,8 @@ class Config:
 
 def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config, machine: Machine) -> tuple[RobocapRow, Trajectory]:
     """Replay the session and report regression agreement without gating accuracy."""
-    # Every scoring input before the replay: 52.9 s of video must not be spent to
-    # reach a `slam` layer that did not ship or a mistyped `--reference-csv`
-    # (S22 review). Existence and readability first, and for both together,
-    # because reading the layer spins a catalog server and the typed path is the
-    # cheap mistake.
     reference_path: Path | None = config.reference_csv or (manifest.package_root / session.reference_csv if session.reference_csv else None)
     reference: Trajectory = read_trajectory(reference_path) if reference_path else empty_trajectory()
-    across_reference: Trajectory | None = None
     before: float | None = this_temperature_c()
     run: SegmentRun = run_robocap(
         manifest, session, seconds=config.seconds, window_s=config.window_s, profile=config.profile, catalog=config.catalog, gpu=config.gpu
@@ -140,7 +134,7 @@ def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config
     if unscored is None:
         try:
             against_reference = ate(run.estimate, reference) if len(reference) else None
-            across = None if across_reference is None else 100.0 * ate(run.estimate, across_reference).rmse_m
+            across = 100.0 * against_reference.rmse_m if config.reference_csv is not None and against_reference is not None else None
         except ValueError as association_failed:
             # 52.9 s of video has already been paid for by here, and the wall,
             # the budget and the temperatures it bought are the row's reason to
