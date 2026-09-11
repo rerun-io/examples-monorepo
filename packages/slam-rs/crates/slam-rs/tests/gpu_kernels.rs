@@ -968,6 +968,10 @@ mod absent_gpu {
 
     /// No Vulkan ICD: the loader enumerates nothing and wgpu has no adapter.
     #[cfg(feature = "gpu-wgpu")]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "requires the Vulkan ICD loader; Metal ignores VK_DRIVER_FILES"
+    )]
     #[test]
     fn a_wgpu_host_with_no_adapter_is_a_typed_error() {
         const NAME: &str = "absent_gpu::a_wgpu_host_with_no_adapter_is_a_typed_error";

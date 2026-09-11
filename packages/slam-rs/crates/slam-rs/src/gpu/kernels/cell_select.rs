@@ -151,10 +151,12 @@ fn fast_cell_select_kernel(
 
     // `NO_CELL_WINNER`; see the assertion beside `KEY_ROW_SHIFT`.
     let mut key = 4_294_967_295u32;
-    let mut y = first_y + usize::cast_from(UNIT_POS_Y);
-    while y < last_y {
-        let mut x = first_x + usize::cast_from(UNIT_POS_X);
-        while x < last_x {
+    // CubeCL 0.11 emits C++ lambdas for `while` conditions. wgpu's MSL
+    // passthrough leaves the language version unset, which
+    // can reject lambdas in Python even when the Rust test executable works.
+    // Stepped ranges emit plain `for` loops with the same visits and order.
+    for y in range_stepped(first_y + usize::cast_from(UNIT_POS_Y), last_y, SELECT_DIM_Y) {
+        for x in range_stepped(first_x + usize::cast_from(UNIT_POS_X), last_x, SELECT_DIM_X) {
             let score = cell_candidate(
                 kept, width, x, y, first_x, last_x, first_y, last_y, threshold,
             );
@@ -297,9 +299,7 @@ fn fast_cell_select_kernel(
                     }
                 }
             }
-            x += SELECT_DIM_X;
         }
-        y += SELECT_DIM_Y;
     }
 
     // Integer minimum is associative and commutative, so this tree is the same
