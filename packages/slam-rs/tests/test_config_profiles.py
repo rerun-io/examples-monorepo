@@ -36,12 +36,7 @@ def test_fast_profile_changes_only_the_lm_cap_and_the_two_port_gates() -> None:
 
 
 def test_no_vendored_config_carries_a_port_key() -> None:
-    """The vendored files stay the documents the C++ runs read, key for key.
-
-    ``tests/test_cpp_reference.py`` compares them against every run manifest, so
-    a port-only knob is inserted by the overlay and defaulted by
-    :class:`slam_rs._core.VioConfig` instead of being written into them.
-    """
+    """Port-only knobs are supplied by overlays, leaving dataset configurations unchanged."""
     manifest: ReferenceManifest = load_manifest()
     for dataset in manifest.datasets:
         values: dict = json.loads((manifest.package_root / dataset.vio_config).read_text())["value0"]

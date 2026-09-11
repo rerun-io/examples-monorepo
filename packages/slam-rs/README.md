@@ -1,7 +1,7 @@
 # slam-rs
 
 <p align="center">
-  <img src="media/slam-rs-github.gif" alt="slam-rs replaying a Monado SLAM Dataset clip in Rerun: the estimated trajectory against ground truth and the basalt C++ run, the landmarks, the rig, and the tracked keypoints on the camera frames" width="800" />
+  <img src="media/slam-rs-github.gif" alt="slam-rs replaying a Monado SLAM Dataset clip in Rerun: the estimated trajectory against ground truth, the landmarks, the rig, and the tracked keypoints on the camera frames" width="800" />
 </p>
 
 Visual-inertial odometry with a Rust core. The estimator is a port of the
@@ -11,13 +11,11 @@ catalog feed, decode, evaluation and Rerun logging — and talks to the core
 through a PyO3 extension module, so the whole pipeline runs from Python:
 `_core.Vio` consumes IMU samples and framesets and reports a pose, and
 `tools/apps/replay.py --stage vio` draws the estimate against the ground truth
-on the same frames. Two config profiles run on one code path. `reference`
-reproduces the C++ fork's estimator byte for byte; `fast` keeps its error within
-10 % of the reference's on each clip and makes the tracker call two to four times
-shorter. On the smoke segment the reference reads 1.50 cm from ground truth,
-where the C++ itself reads 1.43 cm; the fast profile reads 1.55 cm in 1.38 ms a
-frameset on an RTX 5090. The same code runs unchanged on `linux-64`,
-`linux-aarch64` and macOS `osx-arm64`.
+on the same frames. `fast` is the default profile; `reference` selects the
+unmodified dataset configuration. Accuracy is ATE against catalog ground truth.
+Each lane/profile is compared with its measured baseline in
+`reference_segments.toml`. MIO10 GPU fast scores about 1.55 cm on the RTX 5090.
+The same code runs on `linux-64`, `linux-aarch64`, and macOS `osx-arm64`.
 
 Design notes — the module-by-module account of the port, the full Python API,
 the reference set, the gates and every recorded decision:
@@ -36,15 +34,15 @@ pixi run -e slam-rs-dev --frozen slam-rs-build   # cargo build + install _core.s
 
 Then replay a segment. `--stage vio` is the whole pipeline; `--stage input` (the
 default) logs only what the estimator is fed, and `--stage frontend` runs the
-optical flow over it and draws its keypoints beside the C++ fork's:
+optical flow over it and draws its keypoints:
 
 ```bash
 cd packages/slam-rs
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio   # the smoke segment, in a viewer
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --rr-config.headless --rr-config.save data/replay-vio.rrd
-pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --segment <segment-id>       # another reference segment
+pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --segment <segment-id>       # another catalog segment
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --rrd base.rrd --gt-rrd gt.rrd   # a recording of your own
-pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --catalog rerun+http://dgx-spark:9988 --segment <any-segment-id>   # from a catalog server: any segment of a known dataset, no NAS mount
+pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --catalog rerun+http://dgx-spark:9988 --segment <any-segment-id>   # override the default catalog URL
 ```
 
 In a shell without `DISPLAY`, pass `--rr-config.headless` or the spawned viewer
@@ -57,8 +55,8 @@ speed profile:
 
 ```bash
 pixi run -e slam-rs-dev --frozen slam-rs-wgpu-build   # a core whose `--gpu` is wgpu
-pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --gpu                 # the reference profile
-pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --gpu --profile fast  # the fast one
+pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --gpu                 # the default fast profile
+pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --gpu --profile reference  # the unmodified dataset config
 ```
 
 Design notes: [the GPU lane](docs/design-notes.md#the-gpu-lane), and
@@ -70,9 +68,9 @@ that platform's `slam-rs` features are solved: `-e slam-rs-osx-dev` in place of
 
 ## Two profiles
 
-The configs under `configs/` are the files the C++ reference runs read, key for
-key, and a test keeps them that way. A profile is a flat overlay in
-`configs/profiles/<name>.json` applied on top of one. `reference` is empty.
+Each dataset names its configuration under `configs/`. A profile is a flat
+overlay in `configs/profiles/<name>.json`. `reference` is empty; `fast` is the
+default in every tracking tool.
 `fast` is three keys:
 
 ```json
@@ -94,13 +92,13 @@ two things about the schedule and nothing about the arithmetic:
   and the IMU factor, five steps at most, and falls back to the joint solve when
   that update declines. `VioSnapshot.frame_update` says which one ran.
 
-The gate is per clip: ATE against ground truth within 1.1x the reference
-profile's, and zero lost framesets. Fast trajectories are not byte-identical to
-reference ones, and not byte-identical across GPU vendors either. Reference
-trajectories are, on every Vulkan device measured; Metal differs in the last bit.
+The gate compares each clip with the baseline for the selected lane and
+profile. It allows at most 10% more ground-truth RMSE. The same-host speed
+clause allows at most 10% more median tracker time. Baselines record the core
+digest, host, frameset count, and measurement date.
 
 Every tracking tool takes `--profile reference|fast`: `replay.py`,
-`bench_track.py`, `fleet_check.py` and `robocap_fleet.py`. In code,
+`bench_track.py`, `fleet_check.py`, `robocap_fleet.py`, and `robocap_probe.py`. In code,
 `slam_rs.reference.profiled_config_text(path, "fast")` returns the overlaid JSON.
 
 Design notes: [D74](docs/design-notes.md#d74--speed-profile) the profile,
@@ -114,20 +112,23 @@ The library reads one thing: a recording in the dataforge rig schema. One base
 the IMU stream. Ground truth and results are separate layer files that stack onto
 the same entity paths.
 
-Raw data, whatever its files look like (an EuRoC folder, a ROS bag, a vendor
-SDK), is converted into that recording once, with a dataforge ingester. After
-that every tool reads the same bytes: the viewer, this estimator, the C++
-reference.
+The catalog is the dataset source for replay and fleet checks. The manifest
+stores catalog identifiers, rig settings, and layer fingerprints; it stores no
+dataset file paths. Any msd-index / msd-g2 / msd-odyssey segment replays from the catalog.
 
-- One sequence: `tools/apps/replay.py --stage vio --rrd base.rrd [--gt-rrd gt.rrd]`.
-  The feed serves the files from an in-process server; no catalog server is
-  needed.
-- Many sequences: register the base and layer files on a catalog server and
-  address them by segment id through the reference manifest.
+- Catalog replay: `tools/apps/replay.py --stage vio --segment <segment-id>`.
+  `--catalog` overrides the manifest URL.
+- Local replay: `tools/apps/replay.py --stage vio --rrd base.rrd [--gt-rrd gt.rrd]`.
+  This explicit file pair runs through an in-process server.
 
-The estimate comes back the same way: a trajectory CSV, and a Rerun recording
-that layers the estimated poses, the landmarks and the window onto the input,
-beside the ground truth and, where the reference set has one, the C++ run.
+The outputs are an estimated trajectory CSV on the absolute device clock and
+an optional Rerun recording with the estimate, ground truth, landmarks, and
+window. Without a ground-truth layer, replay prints "ground truth absent, not scored".
+
+RoboCap s15 has no ground truth. Its catalog replay is compared with
+`tests/fixtures/robocap_s15_trajectory.csv`, recorded with our GPU fast core.
+This is a regression measurement, reported without an accuracy gate.
+`--reference-csv` selects another regression trajectory.
 
 In code the contract is three calls: `Calibration` is the rig, `Vio.push_imu`
 takes one IMU sample, `Vio.track` takes one synchronized frameset of `uint8`
@@ -142,7 +143,7 @@ from slam_rs import _core
 from slam_rs.reference import profiled_config_text
 
 calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)  # the feed's dataclasses
-config = _core.VioConfig.from_json(Path("configs/msdmi_config.json").read_text())  # the file the C++ ran
+config = _core.VioConfig.from_json(Path("configs/msdmi_config.json").read_text())  # the dataset configuration
 config = _core.VioConfig.from_json(profiled_config_text(Path("configs/msdmi_config.json"), "fast"))  # or with the overlay
 
 vio = _core.Vio(calibration, config, threads=1, gpu=False)   # gpu=True runs the frontend on this host's GPU
@@ -182,10 +183,8 @@ Design notes — the accessors field by field, every refusal and its ceiling, an
 | `crates/slam-rs-cli` | `slam-rs` binary: a placeholder. `version` is the only subcommand that does anything; a replay runs through the Python tools. |
 | `slam_rs/` | The Python package: stubs, Tyro entry points under `apis/`. |
 | `tools/` | Thin CLI shims over `slam_rs/apis/`. |
-| `reference_segments.toml` | The frozen reference set. |
-| `configs/` | The basalt VIO configs the reference runs used, vendored from the fork, and the `profiles/` overlays. |
-| `tests/reference/` | Checked-in basalt C++ trajectories the gate tests reproduce. |
-| `slam_rs/reference_bundle.py` | Resolves the two long-tier artifacts kept out of git. |
+| `reference_segments.toml` | Catalog schema 9: rigs, segments, ground-truth fingerprints, and lane baselines. |
+| `configs/` | Dataset VIO configurations and the `profiles/` overlays. |
 
 `Cargo.lock` is committed. `cargo` never runs during `pixi lock` or
 `pixi install`: the build is an explicit, cached pixi task.
@@ -219,6 +218,9 @@ decision is load-bearing: [the frontend](docs/design-notes.md#the-frontend-and-t
 [the damping machinery](docs/design-notes.md#the-damping-machinery-the-shipped-vio-never-uses).
 
 ## Accuracy and speed
+
+The following tables record earlier profile comparisons. Current gate baselines
+are stored in `reference_segments.toml`.
 
 Latency is the synchronous `Vio.track` call, one CPU core, decode excluded,
 median over the clip after the first 60 framesets. ATE is RMSE against ground
@@ -262,7 +264,7 @@ slow for a measured reason: a synchronising read costs 7 ms of host time on
 Metal against 0.12 ms on the 5090, and the frontend makes two a frameset. The
 Pi 5 and the RK3588 cap have not run this tip.
 
-Design notes — the precision band (D60), the portability table and the fleet
+Historical design notes — the portability table and the fleet
 numbers with the Metal diagnosis:
 [the portable lane](docs/design-notes.md#the-portable-lane-and-the-two-silent-failures),
 [where it runs](docs/design-notes.md#where-the-portable-lane-runs),
@@ -292,33 +294,34 @@ pixi run -e slam-rs-osx-dev --frozen slam-rs-wgpu-doc     # the same strict docs
 pixi run -e slam-rs-osx-dev --frozen slam-rs-wgpu-test    # workspace tests with wgpu through Metal
 ```
 
-The oracle lanes are the fixtures the C++ fork itself produced — pyramid, camera,
-IMU, landmark, linearization and marginalization, under
-`crates/slam-rs/tests/fixtures/`, plus the frontend's keypoint parity in
-`crates/slam-rs/tests/flow_parity.rs` — and they run inside `slam-rs-rust-test`.
-`crates/slam-rs/tests/vio_oracle.rs` pins the vendored configs to the ones the
-C++ runs used and the reference profile's LM trail to the C++'s;
-`tests/test_config_profiles.py` covers the overlays and their typo check.
+Fast tests use synthetic inputs and Hypothesis properties; they finish in
+seconds and need no recordings. Tests that read recordings are marked `slow`
+and use the catalog. They check layer fingerprints, rig geometry, decode
+consistency, exported clocks, and the smoke gate.
 
-The smoke digest is checked in: `frames.sha256` and a copy of `gt.csv` under
-`tests/reference/msd/<segment>/` for the smoke pair, so that gate runs with no
-NAS and no catalog. The rest of the slow lane reads a reference `.rrd` from the
-NAS or queries the catalog, and skips when neither is reachable:
+The ground-truth gate requires zero lost framesets, at least
+`MIN_ASSOCIATED_POSES` estimate poses associated with ground truth, finite
+measurements, and an estimated extent no greater than `DIVERGENCE_FACTOR`
+times the truth's extent. With a matching baseline, RMSE must be at most
+`1.10 * baseline.gt_rmse_cm`. A missing lane/profile baseline prints "no baseline"
+and leaves accuracy ungated; tracking and validity clauses still apply.
+
+The gate measures the median over all accepted tracker calls. It must be at most `1.10 * baseline.median_tracker_ms` only on the
+baseline host with the matching lane/profile. Elsewhere the row prints the
+measurement and "speed not gated on this host".
 
 ```bash
 cd packages/slam-rs
-pytest -m slow -q                                             # NAS + catalog
-pytest -m slow -q -s tests/test_v2_gate.py                    # the iteration set
-SLAM_RS_V2_ALL=1 pytest -m slow -q -s tests/test_v2_gate.py   # all ten, whole, shortest first
-SLAM_RS_V2_WINDOW_S=5 SLAM_RS_V2_ALL=1 pytest -m slow -q -s tests/test_v2_gate.py   # all ten, first 5 s each
+pixi run -e slam-rs-dev --frozen pytest -q
+pixi run -e slam-rs-dev --frozen pytest -q -m slow -k "catalog or gate or robocap"
+pixi run -e slam-rs-dev --frozen python tools/apps/fleet_check.py --gpu --tier release
+pixi run -e slam-rs-dev --frozen python tools/apps/fleet_check.py --tier smoke
+pixi run -e slam-rs-dev --frozen python tools/apps/robocap_probe.py --gpu --rr-config.headless
 ```
 
-Design notes — the [reference set](docs/design-notes.md#the-reference-set) and its three tiers, the
-[gate policy](docs/design-notes.md#the-basalt-c-reference-and-the-gate-policy) per segment,
-[two clocks](docs/design-notes.md#two-clocks-converted-once), the
-[feed, the metrics and the replay tool](docs/design-notes.md#the-feed-the-metrics-and-the-replay-tool)
-with its entity trees, every clause of [the V2 gate](docs/design-notes.md#the-v2-gate), and what
-[the fast and slow lanes](docs/design-notes.md#tests) each cover.
+The tiers are `smoke` (MIO10, MGO09), `release` (MIO07, MGO07, MIO14), and
+`listed` (the other five). The two hold-out flags remain excluded from tuning.
+The historical design notes are retained separately in `docs/design-notes.md`.
 
 ## What is next
 
@@ -329,9 +332,6 @@ Not in this branch, in the order they are likely to matter:
   completion path in the read routine, gated to Metal, and per-adapter workgroup
   shapes chosen at start-up; the 5090 A/B harness stays the gate, so that path
   is untouched.
-- **Four cameras on the fast profile.** The schedule knobs were tuned on
-  two-camera clips. `MGO09_short_1_updown`, 3 s long, is the one ten-clip miss
-  (0.98 cm against a 0.85 cm band); the 53 s `MGO07` passes by 0.08 cm.
 - **A second core.** One core was the rule for this branch. The between-keyframes
   solve and the frontend's host work are independent enough to overlap.
 - **The Python seam.** 0.14 ms a frameset between the feed and `Vio.track`,
@@ -342,6 +342,6 @@ Not in this branch, in the order they are likely to matter:
 - **Results as a catalog layer.** One layer per segment with the estimated poses, the
   landmarks and the keypoints on the base recording's entity paths, registered beside
   the ground truth, so a run is browsed in the viewer, not in a CSV.
-- **Less code.** Under the tolerance requirement (D60, D64) the Lie groups and the camera
+- **Less code.** With ground-truth accuracy checks the Lie groups and the camera
   models could come from kornia-rs and the Eigen-order QR, LDLT and SVD from nalgebra;
   the ten-clip gate decides. About 2,800 lines.

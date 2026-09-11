@@ -46,13 +46,13 @@ def test_a_catalog_url_replaces_the_manifests_file_paths(manifest: ReferenceMani
     assert seen == [CatalogSegment(url=CATALOG, dataset_name=segment.dataset_name, segment_id=segment.segment_id)]
 
 
-def test_without_a_catalog_the_manifests_files_are_opened(manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The default source is unchanged: the manifest's base and ground-truth recordings."""
+def test_without_an_override_the_manifest_catalog_is_used(manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default source is the catalog URL in the manifest."""
     seen: list[SegmentSource] = _capture_source(monkeypatch)
     segment = manifest.by_id(SMOKE_SEGMENTS[1])
     with pytest.raises(_Opened):
         main(Config(rr_config=RerunTyroConfig(headless=True), segment=segment.segment_id))
-    assert seen == [LocalSegment(base_rrd=segment.base_path, gt_rrd=segment.gt_path)]
+    assert seen == [CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id)]
 
 
 def test_a_catalog_and_a_file_are_two_sources_and_refused(manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -73,12 +73,12 @@ def test_an_unlisted_catalog_segment_takes_its_datasets_parameters(manifest: Ref
     assert parameters == [next(s.imu for s in manifest.segments if s.dataset_name == "msd-g2")]
 
 
-def test_an_unlisted_segment_without_a_catalog_is_refused_with_the_way_out(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The manifest has files only for the reference set; the refusal names --catalog."""
+def test_an_unlisted_segment_uses_the_default_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unlisted segments use the catalog and their dataset configuration."""
     seen: list[SegmentSource] = _capture_source(monkeypatch)
-    with pytest.raises(ValueError, match="not in the reference set.*--catalog"):
+    with pytest.raises(_Opened):
         main(Config(rr_config=RerunTyroConfig(headless=True), segment=UNLISTED))
-    assert seen == []
+    assert seen == [CatalogSegment(CATALOG, "msd-g2", UNLISTED)]
 
 
 def test_a_catalog_segment_of_an_unknown_dataset_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -87,3 +87,23 @@ def test_a_catalog_segment_of_an_unknown_dataset_is_refused(monkeypatch: pytest.
     with pytest.raises(ValueError, match="'msd-nowhere' is not in the reference set"):
         main(Config(rr_config=RerunTyroConfig(headless=True), segment="msd-nowhere__X__Y", catalog=CATALOG))
     assert seen == []
+
+
+@pytest.mark.parametrize("with_gt", [False, True])
+def test_explicit_local_recording_pair_is_preserved(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, with_gt: bool) -> None:
+    seen: list[SegmentSource] = _capture_source(monkeypatch)
+    base: Path = tmp_path / "base.rrd"
+    truth: Path | None = tmp_path / "truth.rrd" if with_gt else None
+    with pytest.raises(_Opened):
+        main(Config(rr_config=RerunTyroConfig(headless=True), rrd=base, gt_rrd=truth))
+    assert seen == [LocalSegment(base, truth)]
+
+
+def test_unlisted_odyssey_uses_the_dataset_imu_without_a_segment_row(manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch) -> None:
+    parameters: list[ImuParameters] = []
+    seen: list[SegmentSource] = _capture_source(monkeypatch, parameters)
+    identifier: str = "msd-odyssey__MOO_others__MOO15_seated_screen"
+    with pytest.raises(_Opened):
+        main(Config(rr_config=RerunTyroConfig(headless=True), segment=identifier))
+    assert seen == [CatalogSegment(manifest.catalog_url, "msd-odyssey", identifier)]
+    assert parameters == [manifest.dataset("msd-odyssey").imu]

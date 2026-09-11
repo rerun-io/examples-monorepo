@@ -24,7 +24,7 @@ build-backend = "hatchling.build"
 packages = ["slam_rs"]
 
 [tool.pytest.ini_options]
-markers = ["slow: reads a reference .rrd from the NAS or queries the catalog (deselected by default; run with -m slow)"]
+markers = ["slow: reads recordings from the catalog (deselected by default; run with -m slow)"]
 addopts = "-m 'not slow'"
 # `DatasetEntry.manifest()` is deprecated but is the only surface that reports a
 # layer's size and schema digest, which the reference manifest pins.

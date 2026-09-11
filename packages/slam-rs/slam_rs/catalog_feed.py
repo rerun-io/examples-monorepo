@@ -609,7 +609,7 @@ class SegmentFeed:
     capture_start_time_ns: int
     """``property:capture:start_time_ns``: add it to a ``video_time`` to reach the absolute device clock."""
     export_offset_ns: int
-    """What an exported trajectory adds to its ``video_time`` stamps to land on the clock the C++ CSVs use.
+    """What an exported trajectory adds to its ``video_time`` stamps to land on the absolute device clock.
 
     :attr:`capture_start_time_ns` on a rig whose ``video_time`` is relative to it,
     and zero on one that records the device clock directly
@@ -1393,33 +1393,9 @@ def open_segment(
             yield _build_feed(base, ground_truth, segment_ids[0], parameters, profile, frame_stride, window_s)
     else:
         dataset: DatasetEntry = CatalogClient(source.url).get_dataset(source.dataset_name)
-        yield _build_feed(dataset, dataset, source.segment_id, parameters, profile, frame_stride, window_s)
-
-
-def read_rig_trajectory(rrd: Path) -> Trajectory:
-    """Every rig pose on one ``.rrd`` layer, on the ``video_time`` the layer stores.
-
-    The RoboCap ``slam`` layer is a trajectory and nothing else, on the same
-    ``video_time`` as the base layer it sits beside, so it is read the way the
-    ground-truth layer is. Moving it onto another clock is the caller's own step
-    (:func:`slam_rs.trajectory.shift_clock`) rather than a parameter here: reading
-    a layer and moving a clock are two things.
-
-    Args:
-        rrd: Layer holding the rig's ``Transform3D`` rows.
-
-    Returns:
-        The whole trajectory, oldest pose first.
-
-    Raises:
-        ValueError: If the file does not hold exactly one segment, or holds no rig poses.
-    """
-    with rr.server.Server(datasets={"layer": [str(rrd)]}) as server:
-        dataset: DatasetEntry = server.client().get_dataset("layer")
-        segment_ids: list[str] = list(dataset.segment_ids())
-        if len(segment_ids) != 1:
-            raise ValueError(f"{rrd} holds {len(segment_ids)} segments; a trajectory layer holds one")
-        found: Trajectory = _read_ground_truth(dataset, segment_ids[0], -(2**62), 2**62)
-    if len(found) == 0:
-        raise ValueError(f"{rrd} carries no {RIG_ENTITY} Transform3D rows")
-    return found
+        layers: pa.Table = dataset.manifest().to_arrow_table()
+        has_gt: bool = any(
+            row["rerun_segment_id"] == source.segment_id and row["rerun_layer_name"] == "gt"
+            for row in layers.select(["rerun_segment_id", "rerun_layer_name"]).to_pylist()
+        )
+        yield _build_feed(dataset, dataset if has_gt else None, source.segment_id, parameters, profile, frame_stride, window_s)

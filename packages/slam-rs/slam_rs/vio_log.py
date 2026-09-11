@@ -1,53 +1,4 @@
-"""Rerun logging for the estimator: the input rung, three trajectories, the keyframe window, the landmarks and the counters.
-
-All Rerun logging is Python (D03), so the core returns arrays and this module
-decides what they look like. It holds the whole drawn account of a replay — the
-rig's static geometry, the frames and the inertial samples the estimator is fed
-(:func:`log_frameset_inputs`), the drive that tracks them (:class:`VioStage`)
-and what the estimator decided — so the two tools that replay a segment draw one
-rung rather than two copies of one, and ``apis/`` is CLIs over it. The estimate is logged under ``/world/runs/slam_rs``,
-beside the dataset's own ``/world/runs/gt``, and the basalt C++ reference under
-``/world/runs/basalt_cpp``: the three trajectories are then one 3D view with
-three colours, and the viewer's own entity tree says which is which.
-
-The comparison is the point of the rung. Ground truth and the C++ trajectory are
-both known before the replay starts, so they are drawn **up to the cursor** just
-as the estimate is: at any time in the timeline the three lines have seen exactly
-the same interval, which is what makes a divergence readable rather than a matter
-of where the eye starts. Each frameset logs the one segment its line gained, and
-:func:`vio_blueprint` gives the three ``trajectory`` entities a visible time
-range running from the start of the recording to the cursor, which is what turns
-those segments back into the path so far — Rerun's default for a view that is
-not a time series is latest-at, under which a two-point strip renders alone. The
-rung is then linear in the frameset count, where re-logging each whole strip was
-quadratic: the ground truth alone cost 17.20 MB of the smoke recording's 54.13 MB
-of rows, and a 4,000-frameset segment paid about 100 MB a line.
-
-The two references are still thinned to the frameset cadence
-(:func:`at_frameset_cadence`), which is also what makes a segment a segment: the
-ground truth runs at 917 Hz against 54 Hz of framesets, so an unthinned line
-costs 17x the estimate's rows to draw what no viewer can resolve.
-:meth:`VioLogger.log_complete_paths` puts each whole path in once, static, at the
-end of a replay, so a viewer that opens the file anywhere still sees where each
-run went.
-
-The three do not start in one frame. basalt initialises its world at the identity
-with gravity along z, while the ground truth is in the capture rig's own frame,
-so an unaligned overlay puts the estimate metres away from the truth it is being
-compared with. The run and the C++ reference therefore carry a
-:class:`rerun.Transform3D` — the rigid alignment onto the ground truth, the same
-one the ATE reports — and everything under them (the trajectory, the rig, the
-window and the landmarks) is logged in the estimator's own frame and drawn in the
-dataset's. The alignment is refreshed every :data:`ATE_EVERY` framesets and is
-the identity until enough poses have been associated, so the run visibly settles
-into place over the first second.
-
-The keyframe window is drawn as frustum wireframes rather than
-:class:`rerun.Pinhole` frusta: a ``Pinhole`` carries no colour, and colour is how
-a keyframe, a demoted pose block and the frames the last marginalization removed
-are told apart. The estimated rig's own cameras are real ``Pinhole`` frusta,
-because there the camera is what is being drawn.
-"""
+"""Log VIO estimates, ground truth, rig geometry, and tracker statistics."""
 
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
@@ -84,8 +35,6 @@ RUN_ENTITY: str = "/world/runs/slam_rs"
 """Where this run's estimate goes, beside the dataset's own ``/world/runs/gt``."""
 GT_ENTITY: str = "/world/runs/gt"
 """The dataset's own ground-truth run, which the base recording already names."""
-CPP_ENTITY: str = "/world/runs/basalt_cpp"
-"""The basalt C++ reference trajectory for the same segment."""
 VIO_STATS_ENTITY: str = "/stats/vio"
 """Where the per-frame counters go, off the dataset's own tree and beside the frontend's.
 
@@ -99,8 +48,6 @@ ESTIMATE_COLOR: tuple[int, int, int] = (70, 220, 130)
 """The port's own trajectory: green."""
 GT_COLOR: tuple[int, int, int] = (235, 235, 235)
 """Ground truth: near-white, the reference every error is measured against."""
-CPP_TRAJECTORY_COLOR: tuple[int, int, int] = (255, 150, 40)
-"""The basalt C++ trajectory: orange, and not the frontend rung's magenta ``CPP_COLOR``."""
 KEYFRAME_COLOR: tuple[int, int, int, int] = (90, 200, 255, 255)
 """A keyframe still inside the window."""
 LTKF_COLOR: tuple[int, int, int, int] = (255, 235, 90, 255)
@@ -286,10 +233,8 @@ class VioLogger:
     """The rig's cameras, in rig order."""
     ground_truth: Trajectory
     """Ground truth for the whole segment, on ``video_time``; may be empty."""
-    cpp: Trajectory
-    """The basalt C++ trajectory for the whole segment, on ``video_time``; may be empty."""
     frame_t_ns: Int64[ndarray, " n_frames"]
-    """The segment's frameset times: the cadence the two references are drawn at."""
+    """The segment's frameset times: the cadence used to draw ground truth."""
     estimate_t_ns: list[int] = field(default_factory=list)
     """Timestamps of the poses reported so far, in replay order."""
     estimate_position_m: list[Float64[ndarray, " 3"]] = field(default_factory=list)
@@ -300,8 +245,6 @@ class VioLogger:
     """Camera 0's frustum wireframe in rig coordinates, drawn at every window pose."""
     ground_truth_strip: Trajectory = field(init=False)
     """The ground truth thinned to the frameset cadence: what the drawn strip is taken from."""
-    cpp_strip: Trajectory = field(init=False)
-    """The C++ trajectory thinned the same way."""
     previous_strips: dict[int, Float64[ndarray, " 10 3"]] = field(default_factory=dict)
     """The last frameset's window wireframes by timestamp: where a marginalized frame is drawn from."""
     framesets: int = 0
@@ -312,10 +255,9 @@ class VioLogger:
         log_rig(self.cameras, f"{RUN_ENTITY}/rig")
         self.window_strip = frustum_strip(self.cameras[0])
         self.ground_truth_strip = at_frameset_cadence(self.ground_truth, self.frame_t_ns)
-        self.cpp_strip = at_frameset_cadence(self.cpp, self.frame_t_ns)
 
     def log(self, result: _core.VioResult, snapshot: _core.VioSnapshot, frame: _core.FlowFrame, elapsed_ms: float) -> None:
-        """Log one tracked frameset: the keypoints, the three paths, the rig, the window, the landmarks and the counters.
+        """Log one tracked frameset: the keypoints, the estimated and ground-truth paths, the rig, the window, the landmarks and the counters.
 
         Args:
             result: What ``track`` returned; only called where it tracked.
@@ -324,13 +266,6 @@ class VioLogger:
             elapsed_ms: Wall time the ``track`` call took.
         """
         self.framesets += 1
-        if self.framesets == 1:
-            # Both the C++ trajectory and the ground truth are known before the
-            # replay starts, so this alignment is a constant of the run; it is
-            # written here rather than at construction because a row needs the
-            # caller's time cursor. The run's own alignment has no row until the
-            # first ATE, and a missing transform is the identity.
-            log_alignment(CPP_ENTITY, alignment_onto(self.cpp, self.ground_truth))
         pose: Float64[ndarray, " 7"] = result.world_from_rig
         self.estimate_t_ns.append(result.t_ns)
         self.estimate_position_m.append(pose[0:3].copy())
@@ -380,7 +315,6 @@ class VioLogger:
         for entity, trajectory, color in (
             (f"{RUN_ENTITY}/path", self.estimated(), ESTIMATE_COLOR),
             (f"{GT_ENTITY}/path", self.ground_truth_strip, GT_COLOR),
-            (f"{CPP_ENTITY}/path", self.cpp_strip, CPP_TRAJECTORY_COLOR),
         ):
             if len(trajectory) < 2:
                 continue
@@ -404,7 +338,7 @@ class VioLogger:
         if len(self.estimate_position_m) >= 2:
             segment: Float64[ndarray, "2 3"] = np.array(self.estimate_position_m[-2:], dtype=np.float64)
             rr.log(f"{RUN_ENTITY}/trajectory", rr.LineStrips3D([segment], colors=ESTIMATE_COLOR, radii=0.004))
-        for entity, trajectory, color in ((GT_ENTITY, self.ground_truth_strip, GT_COLOR), (CPP_ENTITY, self.cpp_strip, CPP_TRAJECTORY_COLOR)):
+        for entity, trajectory, color in ((GT_ENTITY, self.ground_truth_strip, GT_COLOR),):
             drawn: int = int(np.searchsorted(trajectory.t_ns, t_ns, side="right"))
             if drawn >= 2:
                 rr.log(f"{entity}/trajectory", rr.LineStrips3D([trajectory.position_m[drawn - 2 : drawn]], colors=color, radii=0.004))
@@ -483,7 +417,7 @@ class VioLogger:
             either number to mean anything.
         """
         scored: AteResult | None = None
-        for name, reference in (("gt", self.ground_truth), ("cpp", self.cpp)):
+        for name, reference in (("gt", self.ground_truth),):
             if len(reference) == 0 or len(estimated) < MIN_ASSOCIATED_POSES:
                 continue
             result: AteResult = ate(estimated, reference)
@@ -684,7 +618,7 @@ def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
                 rrb.Spatial3DView(
                     origin="/world",
                     name="world",
-                    overrides={f"{run}/trajectory": trail for run in (RUN_ENTITY, GT_ENTITY, CPP_ENTITY)},
+                    overrides={f"{run}/trajectory": trail for run in (RUN_ENTITY, GT_ENTITY)},
                 ),
                 rrb.Vertical(*views),
                 column_shares=[2, 1],
@@ -710,7 +644,10 @@ def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
                 # flat line: ``test_vio_log`` reads this partition off the views.
                 rrb.TimeSeriesView(
                     origin=VIO_STATS_ENTITY,
-                    contents=[f"{VIO_STATS_ENTITY}/stage_ms/{stage}" for stage in ("back_substitution", "error", "linearize", "predict", "keyframe", "optimize", "marginalize")],
+                    contents=[
+                        f"{VIO_STATS_ENTITY}/stage_ms/{stage}"
+                        for stage in ("back_substitution", "error", "linearize", "predict", "keyframe", "optimize", "marginalize")
+                    ],
                     name="solve stages (ms)",
                 ),
                 # The frontend's four in their own view for the same reason the
@@ -733,7 +670,7 @@ def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
                 rrb.TimeSeriesView(origin=VIO_STATS_ENTITY, contents=[f"{VIO_STATS_ENTITY}/lm_lambda"], name="LM damping"),
                 rrb.TimeSeriesView(
                     origin=VIO_STATS_ENTITY,
-                    contents=[f"{VIO_STATS_ENTITY}/ate_cm/gt", f"{VIO_STATS_ENTITY}/ate_cm/cpp"],
+                    contents=[f"{VIO_STATS_ENTITY}/ate_cm/gt"],
                     name="ATE (cm)",
                 ),
             ),

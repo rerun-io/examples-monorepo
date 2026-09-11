@@ -1,69 +1,14 @@
-# Reference set for slam-rs accuracy work: ten Monado SLAM Dataset segments.
-#
-# The set is motion-stratified over the two catalog datasets (five `msd-index`
-# stereo KB4 segments, five `msd-g2` four-camera radtan8 segments) and is split
-# into three tiers: `smoke` runs on every commit, `accuracy` per pull request,
-# `long` nightly.
-#
-# Everything here is frozen on purpose. The capture and ground-truth properties,
-# and each layer's size and schema hash, are what the catalog reports today, so a
-# re-conversion that changes a frame count or a schema fails a test instead of
-# silently moving the numbers. The decode path is frozen because it moves ATE by
-# about 5 cm on a deterministic VIO: the MSD AV1 streams are limited-range
-# yuv420p with flat chroma, so the `gray8` reformat (limited to full expansion)
-# recovers the original grayscale while the raw Y plane is off by up to 17 LSB.
-# The IMU block is frozen because the catalog does not carry noise densities,
-# bias random walks, the update rate or the camera time offset; the values are
-# basalt's own MSD calibration (`data/msd/msd*_calib.json`).
-#
-# Each `[[dataset]]` names the basalt VIO config its segments run with, vendored
-# under `configs/` from the fork's `data/msd/`. It is the whole configuration and
-# not one device field: `msd{mi,mg}_config.json` set `vio_marg_lost_landmarks =
-# true` where basalt's constructor says `false`, so a run built from the
-# constructor's defaults is a different estimator from the C++ reference's
-# (C72). `flow_config` reads the file and asserts the segment's
-# `optical_flow_image_safe_radius` against it; a test compares the vendored copy
-# with the configuration every C++ `run.json` embeds, key by key.
-#
-# Layers live on the NAS, one `.rrd` per segment per layer, plus a EuRoC-style
-# `gt.csv` sidecar. Two clocks are in play and confusing them costs every
-# association: the `video_time` index is relative, and the sidecar (like every
-# basalt CSV) is absolute device-clock nanoseconds. The conversion is exactly
-# `absolute = video_time + capture.start_time_ns`, which is why that field is
-# recorded per segment here.
+# Catalog replay set and measured ground-truth baselines.
+# video_time is relative on MSD; add capture.start_time_ns for the device clock.
+# RoboCap video_time is already absolute. Its camera offset is applied to frames.
+# The decode path is frozen: changing grayscale conversion moves ATE by about 5 cm.
+# IMU noise densities and random walks come from the MSD rigs' calibration.
+# smoke: MIO10/MGO09; release: MIO07/MGO07/MIO14; listed: the other five.
+# hold_out marks segments excluded from tuning. Baselines are keyed by profile/lane.
 
-# `[segment.reference]` pins the basalt C++ run this port is measured against:
-# the fork commit that produced it, the deterministic settings, the committed
-# trajectory (or a bundle-only marker for the two long segments), the C++ ATE
-# against the `gt.csv` sidecar, and its single-thread wall. `gate_policy` says
-# how hard that segment may be gated -- see the README.
-#
-# `[segment.reference.expected_cpp_ate]` carries that error twice: `rmse_cm` is
-# the reference run itself (`use-double 0`), `rmse_cm_f64` is the same code on
-# the same pixels with `use-double 1`, one thread and `deterministic 1`. The two
-# are the C++'s own precision band (D60) and their distance is what basalt's
-# answer is worth on that clip: 0.00007 cm on MIO10, 2.30 cm on the 410-second
-# MIO14, where changing nothing but the floating-point width also moves its
-# trajectory by 4.24 cm rmse. The port's ground-truth error is gated against that
-# band and not against a single number, because a single number claims a
-# precision the reference does not have. Every f64 value here was measured on
-# this decode path with `slam_rs.trajectory.ate`, the same call that produced the
-# f32 column, and each run's f32 twin reproduced `rmse_cm` exactly.
-#
-# `expected_cpp_wall_s` is the `run.feed_wall_time_s` of the run manifest beside
-# it: the decode-plus-VIO feed loop with nothing logged, on the reference host (a 32-core x86-64 workstation),
-# one TBB thread. The port's own replay of the same footage must land within
-# `SPEED_TOLERANCE` of it (D58), so a port that is several times slower fails the
-# gate rather than passing it quietly.
-#
-# `hold_out = true` marks a segment tuning may not look at (C56): the gate still
-# runs it and prints its row, and its numbers are a check on work done without
-# it.
-
-schema_version = 8
+schema_version = 9
 catalog_url = "rerun+http://dgx-spark:9988"
 
-# Landscape, unrotated: the Index stores its two fisheye cameras as captured.
 [[dataset]]
 name = "msd-index"
 entry_id = "18D2C8A5D1E6B2217c6d7f028ca47884"
@@ -72,9 +17,14 @@ camera_resolution_wh = [[960, 960], [960, 960]]
 image_rotation_cw_deg = [0, 0]
 vio_config = "configs/msdmi_config.json"
 
-# Portrait: the G2 video is stored rotated (cam0/cam1 90 degrees clockwise,
-# cam2/cam3 270), with the catalog intrinsics and extrinsics rotated to match.
-# Nothing may assume a landscape frame or a shared orientation across cameras.
+[dataset.imu]
+rate_hz = 1000.0
+gyro_noise_std = 0.000282
+accel_noise_std = 0.016
+gyro_bias_std = 0.0001
+accel_bias_std = 0.001
+cam_time_offset_ns = 0
+
 [[dataset]]
 name = "msd-g2"
 entry_id = "18D2CC37925CE0376257837ab3439f34"
@@ -83,15 +33,35 @@ camera_resolution_wh = [[480, 640], [480, 640], [480, 640], [480, 640]]
 image_rotation_cw_deg = [90, 90, 270, 270]
 vio_config = "configs/msdmg_config.json"
 
-# rotation-dominated panorama; 8 s, catches gross frontend or IMU sign errors in seconds
+[dataset.imu]
+rate_hz = 1000.0
+gyro_noise_std = 0.000282
+accel_noise_std = 0.016
+gyro_bias_std = 0.0001
+accel_bias_std = 0.001
+cam_time_offset_ns = 0
+
+[[dataset]]
+name = "msd-odyssey"
+entry_id = "18D2CC386BA138886257837ab3439f47"
+num_cameras = 2
+camera_resolution_wh = [[640, 480], [640, 480]]
+image_rotation_cw_deg = [0, 0]
+vio_config = "configs/msdmo_config.json"
+
+[dataset.imu]
+rate_hz = 1000.0
+gyro_noise_std = 0.000282
+accel_noise_std = 0.016
+gyro_bias_std = 0.0001
+accel_bias_std = 0.001
+cam_time_offset_ns = 0
+
 [[segment]]
 dataset_name = "msd-index"
-dataset_entry_id = "18D2C8A5D1E6B2217c6d7f028ca47884"
 segment_id = "msd-index__MIO_others__MIO10_short_2_panorama"
 tier = "smoke"
-base_url = "file:///mnt/nas/datasets/msd-rrd/base/msd-index__MIO_others__MIO10_short_2_panorama.rrd"
-gt_url = "file:///mnt/nas/datasets/msd-rrd/gt/msd-index__MIO_others__MIO10_short_2_panorama.rrd"
-gt_csv = "/mnt/nas/datasets/msd-rrd/sidecars/msd-index__MIO_others__MIO10_short_2_panorama/gt.csv"
+hold_out = false
 decode_path = "cpu_gray8_dav1d_1thread"
 
 [segment.capture]
@@ -112,50 +82,31 @@ schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c961006413
 size_bytes = 547545
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
-[segment.reference]
-gate_policy = "tight"
-fork_commit = "1455013875738d06ad2d0345b6bd7a779a54d5f0"
-fork_branch = "slam-rs-reference"
-fork_base = "30da970"
-decode_path = "cpu_gray8_dav1d_1thread"
-deterministic = true
-num_threads = 1
-use_double = false
-vio_config = "data/msd/msdmi_config.json"
-optical_flow_image_safe_radius = 472.0
-expected_cpp_wall_s = 7.674
-run_json = "tests/reference/msd/msd-index__MIO_others__MIO10_short_2_panorama/run.json"
-trajectory_sha256 = "19df37cecb08a2ea8687fdc6b8a5d44f07c4cb3040e6ae4a20d9bced682a125d"
-bundle_only = false
-trajectory_csv = "tests/reference/msd/msd-index__MIO_others__MIO10_short_2_panorama/basalt_traj.csv"
-frames_sha256 = "tests/reference/msd/msd-index__MIO_others__MIO10_short_2_panorama/frames.sha256"
-gt_csv_fixture = "tests/reference/msd/msd-index__MIO_others__MIO10_short_2_panorama/gt.csv"
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 412
+gt_rmse_cm = 1.5529520149042368
+median_tracker_ms = 2.01892526820302
+measured_on = "2026-09-10"
 
-[segment.reference.expected_cpp_ate]
-rmse_cm = 1.427751
-rmse_cm_f64 = 1.427823
-max_cm = 3.688551
-median_cm = 1.140685
-associated = 411
-total = 412
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 412
+gt_rmse_cm = 1.5485685474815554
+median_tracker_ms = 5.595673341304064
+measured_on = "2026-09-10"
 
-[segment.imu]
-rate_hz = 1000.0
-gyro_noise_std = 0.000282
-accel_noise_std = 0.016
-gyro_bias_std = 0.0001
-accel_bias_std = 0.001
-cam_time_offset_ns = 0
-
-# the easiest realistic sequence: the two-camera accuracy floor
 [[segment]]
 dataset_name = "msd-index"
-dataset_entry_id = "18D2C8A5D1E6B2217c6d7f028ca47884"
 segment_id = "msd-index__MIO_others__MIO07_mapping_easy"
-tier = "accuracy"
-base_url = "file:///mnt/nas/datasets/msd-rrd/base/msd-index__MIO_others__MIO07_mapping_easy.rrd"
-gt_url = "file:///mnt/nas/datasets/msd-rrd/gt/msd-index__MIO_others__MIO07_mapping_easy.rrd"
-gt_csv = "/mnt/nas/datasets/msd-rrd/sidecars/msd-index__MIO_others__MIO07_mapping_easy/gt.csv"
+tier = "release"
+hold_out = false
 decode_path = "cpu_gray8_dav1d_1thread"
 
 [segment.capture]
@@ -176,48 +127,31 @@ schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c961006413
 size_bytes = 6059638
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
-[segment.reference]
-gate_policy = "tight"
-fork_commit = "1583e31a7301942fcc123964b5a6b17fb10cbf44"
-fork_branch = "slam-rs-reference"
-fork_base = "30da970"
-decode_path = "cpu_gray8_dav1d_1thread"
-deterministic = true
-num_threads = 1
-use_double = false
-vio_config = "data/msd/msdmi_config.json"
-optical_flow_image_safe_radius = 472.0
-expected_cpp_wall_s = 81.984
-run_json = "tests/reference/msd/msd-index__MIO_others__MIO07_mapping_easy/run.json"
-trajectory_sha256 = "66641879339e0bf585f0487ff5289472240672746e0bed496816604139ad5d73"
-bundle_only = false
-trajectory_csv = "tests/reference/msd/msd-index__MIO_others__MIO07_mapping_easy/basalt_traj.csv"
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 4095
+gt_rmse_cm = 2.1142785579360557
+median_tracker_ms = 2.7023139409720898
+measured_on = "2026-09-10"
 
-[segment.reference.expected_cpp_ate]
-rmse_cm = 2.391717
-rmse_cm_f64 = 2.536595
-max_cm = 7.165734
-median_cm = 1.805338
-associated = 4094
-total = 4095
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 4095
+gt_rmse_cm = 2.204437636028058
+median_tracker_ms = 5.943018011748791
+measured_on = "2026-09-10"
 
-[segment.imu]
-rate_hz = 1000.0
-gyro_noise_std = 0.000282
-accel_noise_std = 0.016
-gyro_bias_std = 0.0001
-accel_bias_std = 0.001
-cam_time_offset_ns = 0
-
-# aggressive rotation and translation; stresses optical flow and preintegration
 [[segment]]
 dataset_name = "msd-index"
-dataset_entry_id = "18D2C8A5D1E6B2217c6d7f028ca47884"
 segment_id = "msd-index__MIO_others__MIO04_hand_shooter_hard"
-tier = "accuracy"
-base_url = "file:///mnt/nas/datasets/msd-rrd/base/msd-index__MIO_others__MIO04_hand_shooter_hard.rrd"
-gt_url = "file:///mnt/nas/datasets/msd-rrd/gt/msd-index__MIO_others__MIO04_hand_shooter_hard.rrd"
-gt_csv = "/mnt/nas/datasets/msd-rrd/sidecars/msd-index__MIO_others__MIO04_hand_shooter_hard/gt.csv"
+tier = "listed"
+hold_out = false
 decode_path = "cpu_gray8_dav1d_1thread"
 
 [segment.capture]
@@ -238,48 +172,31 @@ schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c961006413
 size_bytes = 9180481
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
-[segment.reference]
-gate_policy = "standard"
-fork_commit = "1583e31a7301942fcc123964b5a6b17fb10cbf44"
-fork_branch = "slam-rs-reference"
-fork_base = "30da970"
-decode_path = "cpu_gray8_dav1d_1thread"
-deterministic = true
-num_threads = 1
-use_double = false
-vio_config = "data/msd/msdmi_config.json"
-optical_flow_image_safe_radius = 472.0
-expected_cpp_wall_s = 121.119
-run_json = "tests/reference/msd/msd-index__MIO_others__MIO04_hand_shooter_hard/run.json"
-trajectory_sha256 = "104165a3102a3e5af086e8a5b213442d70afd3fd2611f2727a1eab5511345145"
-bundle_only = false
-trajectory_csv = "tests/reference/msd/msd-index__MIO_others__MIO04_hand_shooter_hard/basalt_traj.csv"
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 6119
+gt_rmse_cm = 22.631254405630916
+median_tracker_ms = 2.737950999289751
+measured_on = "2026-09-10"
 
-[segment.reference.expected_cpp_ate]
-rmse_cm = 19.238481
-rmse_cm_f64 = 19.291964
-max_cm = 45.759902
-median_cm = 14.858707
-associated = 6118
-total = 6119
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 6119
+gt_rmse_cm = 25.68377962030547
+median_tracker_ms = 5.505363456904888
+measured_on = "2026-09-10"
 
-[segment.imu]
-rate_hz = 1000.0
-gyro_noise_std = 0.000282
-accel_noise_std = 0.016
-gyro_bias_std = 0.0001
-accel_bias_std = 0.001
-cam_time_offset_ns = 0
-
-# near-stationary observer with a moving scene: outlier rejection under weak excitation
 [[segment]]
 dataset_name = "msd-index"
-dataset_entry_id = "18D2C8A5D1E6B2217c6d7f028ca47884"
 segment_id = "msd-index__MIO_others__MIO14_moving_props"
-tier = "long"
-base_url = "file:///mnt/nas/datasets/msd-rrd/base/msd-index__MIO_others__MIO14_moving_props.rrd"
-gt_url = "file:///mnt/nas/datasets/msd-rrd/gt/msd-index__MIO_others__MIO14_moving_props.rrd"
-gt_csv = "/mnt/nas/datasets/msd-rrd/sidecars/msd-index__MIO_others__MIO14_moving_props/gt.csv"
+tier = "release"
+hold_out = false
 decode_path = "cpu_gray8_dav1d_1thread"
 
 [segment.capture]
@@ -300,48 +217,31 @@ schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c961006413
 size_bytes = 32687369
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
-[segment.reference]
-gate_policy = "standard"
-fork_commit = "e0a5f8b020dc5990c277823f42b1cfb6c739e280"
-fork_branch = "slam-rs-reference"
-fork_base = "30da970"
-decode_path = "cpu_gray8_dav1d_1thread"
-deterministic = true
-num_threads = 1
-use_double = false
-vio_config = "data/msd/msdmi_config.json"
-optical_flow_image_safe_radius = 472.0
-expected_cpp_wall_s = 442.962
-run_json = "tests/reference/msd/msd-index__MIO_others__MIO14_moving_props/run.json"
-trajectory_sha256 = "68b4157d379967b1126a10592d42a02458625bf05fb3c2ee59495a90b824bb5e"
-bundle_only = true
-trajectory_csv = "msd-index__MIO_others__MIO14_moving_props/basalt_traj.csv"
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 22117
+gt_rmse_cm = 6.013535364329911
+median_tracker_ms = 2.770652063190937
+measured_on = "2026-09-10"
 
-[segment.reference.expected_cpp_ate]
-rmse_cm = 8.861614
-rmse_cm_f64 = 6.556824
-max_cm = 18.028181
-median_cm = 8.384531
-associated = 21969
-total = 22117
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 22117
+gt_rmse_cm = 6.627831893039312
+median_tracker_ms = 5.983363371342421
+measured_on = "2026-09-10"
 
-[segment.imu]
-rate_hz = 1000.0
-gyro_noise_std = 0.000282
-accel_noise_std = 0.016
-gyro_bias_std = 0.0001
-accel_bias_std = 0.001
-cam_time_offset_ns = 0
-
-# longest practical Index sequence: drift and long-horizon marginalisation
 [[segment]]
 dataset_name = "msd-index"
-dataset_entry_id = "18D2C8A5D1E6B2217c6d7f028ca47884"
 segment_id = "msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_fight_2"
-tier = "long"
-base_url = "file:///mnt/nas/datasets/msd-rrd/base/msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_fight_2.rrd"
-gt_url = "file:///mnt/nas/datasets/msd-rrd/gt/msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_fight_2.rrd"
-gt_csv = "/mnt/nas/datasets/msd-rrd/sidecars/msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_fight_2/gt.csv"
+tier = "listed"
+hold_out = false
 decode_path = "cpu_gray8_dav1d_1thread"
 
 [segment.capture]
@@ -362,48 +262,31 @@ schema_sha256 = "8953eaf30de8c0cbd58b344fafedd741dff9cd68e43101840ba44c961006413
 size_bytes = 47783314
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
-[segment.reference]
-gate_policy = "standard"
-fork_commit = "e0a5f8b020dc5990c277823f42b1cfb6c739e280"
-fork_branch = "slam-rs-reference"
-fork_base = "30da970"
-decode_path = "cpu_gray8_dav1d_1thread"
-deterministic = true
-num_threads = 1
-use_double = false
-vio_config = "data/msd/msdmi_config.json"
-optical_flow_image_safe_radius = 472.0
-expected_cpp_wall_s = 741.223
-run_json = "tests/reference/msd/msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_fight_2/run.json"
-trajectory_sha256 = "19ccc1638147418b7f2385f1d69e2b85787626942f5193927929de51e3722e96"
-bundle_only = true
-trajectory_csv = "msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_fight_2/basalt_traj.csv"
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 31577
+gt_rmse_cm = 39.27443038950311
+median_tracker_ms = 2.7906177565455437
+measured_on = "2026-09-10"
 
-[segment.reference.expected_cpp_ate]
-rmse_cm = 37.976171
-rmse_cm_f64 = 37.936851
-max_cm = 84.843701
-median_cm = 33.382882
-associated = 31576
-total = 31577
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 31577
+gt_rmse_cm = 39.15204921782488
+median_tracker_ms = 8.403763175010681
+measured_on = "2026-09-10"
 
-[segment.imu]
-rate_hz = 1000.0
-gyro_noise_std = 0.000282
-accel_noise_std = 0.016
-gyro_bias_std = 0.0001
-accel_bias_std = 0.001
-cam_time_offset_ns = 0
-
-# four-camera smoke run: exercises N>2, radtan8 and the 90/270 degree rotation path in 4 s
 [[segment]]
 dataset_name = "msd-g2"
-dataset_entry_id = "18D2CC37925CE0376257837ab3439f34"
 segment_id = "msd-g2__MGO_others__MGO09_short_1_updown"
 tier = "smoke"
-base_url = "file:///mnt/nas/datasets/msd-rrd/base/msd-g2__MGO_others__MGO09_short_1_updown.rrd"
-gt_url = "file:///mnt/nas/datasets/msd-rrd/gt/msd-g2__MGO_others__MGO09_short_1_updown.rrd"
-gt_csv = "/mnt/nas/datasets/msd-rrd/sidecars/msd-g2__MGO_others__MGO09_short_1_updown/gt.csv"
+hold_out = false
 decode_path = "cpu_gray8_dav1d_1thread"
 
 [segment.capture]
@@ -424,50 +307,31 @@ schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26b
 size_bytes = 276750
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
-[segment.reference]
-gate_policy = "tight"
-fork_commit = "1455013875738d06ad2d0345b6bd7a779a54d5f0"
-fork_branch = "slam-rs-reference"
-fork_base = "30da970"
-decode_path = "cpu_gray8_dav1d_1thread"
-deterministic = true
-num_threads = 1
-use_double = false
-vio_config = "data/msd/msdmg_config.json"
-optical_flow_image_safe_radius = 340.0
-expected_cpp_wall_s = 3.192
-run_json = "tests/reference/msd/msd-g2__MGO_others__MGO09_short_1_updown/run.json"
-trajectory_sha256 = "ae893a3d1aacf56c8ee8d6e5fd353eb7765a19c8075dfe00a9b410c741fab346"
-bundle_only = false
-trajectory_csv = "tests/reference/msd/msd-g2__MGO_others__MGO09_short_1_updown/basalt_traj.csv"
-frames_sha256 = "tests/reference/msd/msd-g2__MGO_others__MGO09_short_1_updown/frames.sha256"
-gt_csv_fixture = "tests/reference/msd/msd-g2__MGO_others__MGO09_short_1_updown/gt.csv"
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 107
+gt_rmse_cm = 0.9776211447928421
+median_tracker_ms = 3.173569682985544
+measured_on = "2026-09-10"
 
-[segment.reference.expected_cpp_ate]
-rmse_cm = 0.812082
-rmse_cm_f64 = 0.812563
-max_cm = 1.710338
-median_cm = 0.403854
-associated = 107
-total = 107
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 107
+gt_rmse_cm = 0.9774597452318616
+median_tracker_ms = 10.065324138849974
+measured_on = "2026-09-10"
 
-[segment.imu]
-rate_hz = 1000.0
-gyro_noise_std = 0.000282
-accel_noise_std = 0.016
-gyro_bias_std = 0.0001
-accel_bias_std = 0.001
-cam_time_offset_ns = 0
-
-# four-camera accuracy floor, the g2 twin of MIO07
 [[segment]]
 dataset_name = "msd-g2"
-dataset_entry_id = "18D2CC37925CE0376257837ab3439f34"
 segment_id = "msd-g2__MGO_others__MGO07_mapping_easy"
-tier = "accuracy"
-base_url = "file:///mnt/nas/datasets/msd-rrd/base/msd-g2__MGO_others__MGO07_mapping_easy.rrd"
-gt_url = "file:///mnt/nas/datasets/msd-rrd/gt/msd-g2__MGO_others__MGO07_mapping_easy.rrd"
-gt_csv = "/mnt/nas/datasets/msd-rrd/sidecars/msd-g2__MGO_others__MGO07_mapping_easy/gt.csv"
+tier = "release"
+hold_out = false
 decode_path = "cpu_gray8_dav1d_1thread"
 
 [segment.capture]
@@ -488,48 +352,31 @@ schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26b
 size_bytes = 4234733
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
-[segment.reference]
-gate_policy = "tight"
-fork_commit = "1583e31a7301942fcc123964b5a6b17fb10cbf44"
-fork_branch = "slam-rs-reference"
-fork_base = "30da970"
-decode_path = "cpu_gray8_dav1d_1thread"
-deterministic = true
-num_threads = 1
-use_double = false
-vio_config = "data/msd/msdmg_config.json"
-optical_flow_image_safe_radius = 340.0
-expected_cpp_wall_s = 39.647
-run_json = "tests/reference/msd/msd-g2__MGO_others__MGO07_mapping_easy/run.json"
-trajectory_sha256 = "94a5d506c39d368e1f4cd13040d1fb8cb698ba02ab99064488e4fd1e45afb2c8"
-bundle_only = false
-trajectory_csv = "tests/reference/msd/msd-g2__MGO_others__MGO07_mapping_easy/basalt_traj.csv"
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 1596
+gt_rmse_cm = 2.374494897537761
+median_tracker_ms = 3.0812059994786978
+measured_on = "2026-09-10"
 
-[segment.reference.expected_cpp_ate]
-rmse_cm = 2.075976
-rmse_cm_f64 = 2.076249
-max_cm = 4.669990
-median_cm = 1.769015
-associated = 1596
-total = 1596
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 1596
+gt_rmse_cm = 2.3729583686544053
+median_tracker_ms = 9.75686265155673
+measured_on = "2026-09-10"
 
-[segment.imu]
-rate_hz = 1000.0
-gyro_noise_std = 0.000282
-accel_noise_std = 0.016
-gyro_bias_std = 0.0001
-accel_bias_std = 0.001
-cam_time_offset_ns = 0
-
-# photometric: flicker breaks brightness constancy in the KLT frontend
 [[segment]]
 dataset_name = "msd-g2"
-dataset_entry_id = "18D2CC37925CE0376257837ab3439f34"
 segment_id = "msd-g2__MGO_others__MGO14_flickering_light"
-tier = "accuracy"
-base_url = "file:///mnt/nas/datasets/msd-rrd/base/msd-g2__MGO_others__MGO14_flickering_light.rrd"
-gt_url = "file:///mnt/nas/datasets/msd-rrd/gt/msd-g2__MGO_others__MGO14_flickering_light.rrd"
-gt_csv = "/mnt/nas/datasets/msd-rrd/sidecars/msd-g2__MGO_others__MGO14_flickering_light/gt.csv"
+tier = "listed"
+hold_out = true
 decode_path = "cpu_gray8_dav1d_1thread"
 
 [segment.capture]
@@ -550,49 +397,31 @@ schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26b
 size_bytes = 7752549
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
-[segment.reference]
-gate_policy = "standard"
-fork_commit = "1583e31a7301942fcc123964b5a6b17fb10cbf44"
-fork_branch = "slam-rs-reference"
-fork_base = "30da970"
-decode_path = "cpu_gray8_dav1d_1thread"
-deterministic = true
-num_threads = 1
-use_double = false
-vio_config = "data/msd/msdmg_config.json"
-optical_flow_image_safe_radius = 340.0
-expected_cpp_wall_s = 63.676
-hold_out = true
-run_json = "tests/reference/msd/msd-g2__MGO_others__MGO14_flickering_light/run.json"
-trajectory_sha256 = "eabf539fb507dd9d443ab55eedcce58998840ac3d8f0406d63557b2ed2cee850"
-bundle_only = false
-trajectory_csv = "tests/reference/msd/msd-g2__MGO_others__MGO14_flickering_light/basalt_traj.csv"
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 2887
+gt_rmse_cm = 8.595600070521419
+median_tracker_ms = 2.978031989187002
+measured_on = "2026-09-10"
 
-[segment.reference.expected_cpp_ate]
-rmse_cm = 8.587941
-rmse_cm_f64 = 8.589355
-max_cm = 18.404963
-median_cm = 7.132659
-associated = 2887
-total = 2887
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 2887
+gt_rmse_cm = 8.588033879857804
+median_tracker_ms = 8.762769866734743
+measured_on = "2026-09-10"
 
-[segment.imu]
-rate_hz = 1000.0
-gyro_noise_std = 0.000282
-accel_noise_std = 0.016
-gyro_bias_std = 0.0001
-accel_bias_std = 0.001
-cam_time_offset_ns = 0
-
-# low light: few, weak features; patch selection and threshold behaviour
 [[segment]]
 dataset_name = "msd-g2"
-dataset_entry_id = "18D2CC37925CE0376257837ab3439f34"
 segment_id = "msd-g2__MGO_others__MGO01_low_light"
-tier = "accuracy"
-base_url = "file:///mnt/nas/datasets/msd-rrd/base/msd-g2__MGO_others__MGO01_low_light.rrd"
-gt_url = "file:///mnt/nas/datasets/msd-rrd/gt/msd-g2__MGO_others__MGO01_low_light.rrd"
-gt_csv = "/mnt/nas/datasets/msd-rrd/sidecars/msd-g2__MGO_others__MGO01_low_light/gt.csv"
+tier = "listed"
+hold_out = false
 decode_path = "cpu_gray8_dav1d_1thread"
 
 [segment.capture]
@@ -613,48 +442,31 @@ schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26b
 size_bytes = 11475535
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
-[segment.reference]
-gate_policy = "no_divergence"
-fork_commit = "1583e31a7301942fcc123964b5a6b17fb10cbf44"
-fork_branch = "slam-rs-reference"
-fork_base = "30da970"
-decode_path = "cpu_gray8_dav1d_1thread"
-deterministic = true
-num_threads = 1
-use_double = false
-vio_config = "data/msd/msdmg_config.json"
-optical_flow_image_safe_radius = 340.0
-expected_cpp_wall_s = 98.728
-run_json = "tests/reference/msd/msd-g2__MGO_others__MGO01_low_light/run.json"
-trajectory_sha256 = "fcbddaf825cdb8358f0a99cf9038b6dff0b00b800125df7f06784805e4f61b14"
-bundle_only = false
-trajectory_csv = "tests/reference/msd/msd-g2__MGO_others__MGO01_low_light/basalt_traj.csv"
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 4255
+gt_rmse_cm = 39.83297183144492
+median_tracker_ms = 2.992178313434124
+measured_on = "2026-09-10"
 
-[segment.reference.expected_cpp_ate]
-rmse_cm = 42.925818
-rmse_cm_f64 = 42.919445
-max_cm = 113.670573
-median_cm = 37.044695
-associated = 4255
-total = 4255
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 4255
+gt_rmse_cm = 39.8263987332429
+median_tracker_ms = 9.64334700256586
+measured_on = "2026-09-10"
 
-[segment.imu]
-rate_hz = 1000.0
-gyro_noise_std = 0.000282
-accel_noise_std = 0.016
-gyro_bias_std = 0.0001
-accel_bias_std = 0.001
-cam_time_offset_ns = 0
-
-# worst-case dynamics in the corpus, where basalt itself is closest to failure
 [[segment]]
 dataset_name = "msd-g2"
-dataset_entry_id = "18D2CC37925CE0376257837ab3439f34"
 segment_id = "msd-g2__MGO_others__MGO13_sudden_movements"
-tier = "accuracy"
-base_url = "file:///mnt/nas/datasets/msd-rrd/base/msd-g2__MGO_others__MGO13_sudden_movements.rrd"
-gt_url = "file:///mnt/nas/datasets/msd-rrd/gt/msd-g2__MGO_others__MGO13_sudden_movements.rrd"
-gt_csv = "/mnt/nas/datasets/msd-rrd/sidecars/msd-g2__MGO_others__MGO13_sudden_movements/gt.csv"
+tier = "listed"
+hold_out = true
 decode_path = "cpu_gray8_dav1d_1thread"
 
 [segment.capture]
@@ -675,79 +487,35 @@ schema_sha256 = "ba97c05fc2013bb19f43fef8e7db6d023248f6a0a6e5ae1f1865ce339cae26b
 size_bytes = 10042232
 schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c28"
 
-[segment.reference]
-gate_policy = "no_divergence"
-fork_commit = "1583e31a7301942fcc123964b5a6b17fb10cbf44"
-fork_branch = "slam-rs-reference"
-fork_base = "30da970"
-decode_path = "cpu_gray8_dav1d_1thread"
-deterministic = true
-num_threads = 1
-use_double = false
-vio_config = "data/msd/msdmg_config.json"
-optical_flow_image_safe_radius = 340.0
-expected_cpp_wall_s = 83.352
-hold_out = true
-run_json = "tests/reference/msd/msd-g2__MGO_others__MGO13_sudden_movements/run.json"
-trajectory_sha256 = "9aabe18d53cf62475f1f92bf5b6ae41e72eb070b46c30157dab94042151794dd"
-bundle_only = false
-trajectory_csv = "tests/reference/msd/msd-g2__MGO_others__MGO13_sudden_movements/basalt_traj.csv"
+[[segment.baseline]]
+profile = "fast"
+lane = "gpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 3735
+gt_rmse_cm = 77.17036318634017
+median_tracker_ms = 2.9670502990484238
+measured_on = "2026-09-10"
 
-[segment.reference.expected_cpp_ate]
-rmse_cm = 77.971586
-rmse_cm_f64 = 77.970558
-max_cm = 120.581903
-median_cm = 79.325404
-associated = 3735
-total = 3735
+[[segment.baseline]]
+profile = "fast"
+lane = "cpu"
+host = "pablo-dl-server"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+framesets = 3735
+gt_rmse_cm = 77.16547338163446
+median_tracker_ms = 8.876016363501549
+measured_on = "2026-09-10"
 
-[segment.imu]
-rate_hz = 1000.0
-gyro_noise_std = 0.000282
-accel_noise_std = 0.016
-gyro_bias_std = 0.0001
-accel_bias_std = 0.001
-cam_time_offset_ns = 0
-
-# RoboCap: the hard six-camera fisheye rig and the deployment target. It has no
-# ground truth, so its metric is agreement with the basalt C++ output rather than
-# ATE against GT. The `slam` layer beside each base layer on the NAS **is** the
-# C++ golden run: session 15's layer, moved onto the CSV clock by
-# `imu.cam_time_offset_ns`, reproduces `tests/reference/robocap-s15/traj_s15_vga.csv`
-# pose for pose (0.000000 cm rmse, quaternion within float32 rounding), while the
-# catalog-fed C++ run in the reference bundle sits 9.70 cm away. So the C++ lane
-# to reproduce is `basalt_vio` on the raw session files: four of the six cameras,
-# `swscale` AREA downscale 3 to 640x360 on gray8, the Kalibr calibration
-# converted at that downscale, `deterministic=1` on one thread in f32.
-#
-# Both RoboCap entries name NAS file URLs on purpose: the base and `slam` layers
-# are read from those `.rrd` files and served in process, so this lane does not
-# depend on any catalog registration and there are no layer fingerprints to
-# record. Whether a catalog somewhere also holds the dataset is not this file's
-# business.
 [robocap]
 device_id = "f408193e6447b3b0"
 has_ground_truth = false
 decode_path = "cpu_gray8_swscale_area_downscale3"
-# The four cameras the C++ ran, in the calibration's own order: the two eye
-# cameras are excluded. These are the `name` statics on the rig's camera nodes,
-# which sit at cam_04, cam_00, cam_01 and cam_05 respectively.
 camera_names = ["left", "left_front", "right_front", "right"]
 downscale = 3
-# The rig's six cameras are triggered together but time-stamped per device, so a
-# frameset's frames sit tens of microseconds apart where two framesets sit 33 ms
-# apart; this is `dataset_io_robocap.cpp`'s own tolerance. The two inertial
-# channels run on their own clocks, which basalt pairs by interpolating the
-# accelerometer onto the gyroscope's timestamps.
 frameset_tolerance_ns = 1000000
 interpolate_accel_onto_gyro = true
-# The recorder stamps the device clock on the video timeline itself, where MSD
-# stamps time since `property:capture:start_time_ns`. So an exported trajectory
-# adds nothing here, and that is the clock the basalt CSVs beside the sessions
-# carry.
 video_time_is_absolute = true
-# basalt's own files, as `python/robocap_vit.toml` and
-# `scripts/basalt_convert_robocap_calib.py --downscale 3` produced them.
 vio_config = "configs/msdmo_config.json"
 calibration = "configs/robocap_calib_downscale3.json"
 
@@ -759,35 +527,7 @@ gyro_bias_std = 3.445397083168e-05
 accel_bias_std = 0.0001963150489218
 cam_time_offset_ns = 14902432
 
-# The two sessions S17 measured. `basalt_num_poses` is the pose count on the
-# session's own `slam` layer, which is also its complete frameset count.
-# `expected_cpp_wall_s` is optional and only session 15 has one: 88.91 s is what
-# the C++ took over the same 1,588 framesets at 30 fps with its own Rerun
-# logging on, measured on **cap A** (Pablo's vault note, S20 §2) — the one place
-# the port and the C++ ran on the same silicon. Like the MSD segments' own
-# `expected_cpp_wall_s` it is a reference wall from one machine, so on any other
-# machine the ratio to it is a fact about that machine.
 [[robocap.session]]
 session_id = "s00000015"
 segment_id = "robocap__f408193e6447b3b0__s00000015"
-base_url = "file:///mnt/nas/datasets/robocap/rrd/base/robocap__f408193e6447b3b0__s00000015.rrd"
-slam_url = "file:///mnt/nas/datasets/robocap/rrd/slam/robocap__f408193e6447b3b0__s00000015.rrd"
-basalt_num_poses = 1588
-expected_cpp_wall_s = 88.91
-
-[[robocap.session]]
-session_id = "s00000021"
-segment_id = "robocap__f408193e6447b3b0__s00000021"
-base_url = "file:///mnt/nas/datasets/robocap/rrd/base/robocap__f408193e6447b3b0__s00000021.rrd"
-slam_url = "file:///mnt/nas/datasets/robocap/rrd/slam/robocap__f408193e6447b3b0__s00000021.rrd"
-basalt_num_poses = 4648
-
-# Checked-in basalt C++ outputs for session 15, copied from the fork's gate run.
-# `golden` is the machine-local trajectory the fork gates against; `candidate` is
-# a fresh file-fed run of the same session. Comparing them reproduces the fork's
-# published gate numbers, which is what `tests/test_trajectory.py` asserts.
-[robocap.fixtures]
-golden = "tests/reference/robocap-s15/traj_s15_vga.csv"
-candidate = "tests/reference/robocap-s15/vit_files_trajectory.csv"
-expected_ate_rmse_cm = 0.13
-expected_associated = 1588
+reference_csv = "tests/fixtures/robocap_s15_trajectory.csv"
