@@ -48,6 +48,22 @@ class Config:
     """SLAM package containing Cargo.toml and patches/."""
 
 
+def content_fingerprint(tree: Path, patch: Path) -> str:
+    """Hash the manifest and every old/new file named by the shipped diff."""
+    paths: set[str] = {'Cargo.toml'}
+    for line in patch.read_text().splitlines():
+        if line.startswith(('--- a/', '+++ b/')):
+            paths.add(line[6:])
+    entries: list[str] = []
+    for name in sorted(paths):
+        path: Path = tree / name
+        if not path.resolve().is_relative_to(tree.resolve()):
+            raise ValueError(f'patch path escapes prepared tree: {name}')
+        digest: str = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else 'missing'
+        entries.append(f'{name}: {digest}\n')
+    return ''.join(entries)
+
+
 def prepare(crate: PatchedCrate, package_dir: Path, cargo_home: Path) -> None:
     """Verify, extract and patch one crate; retain a matching prepared tree."""
     package_dir = package_dir.resolve()
@@ -62,9 +78,11 @@ def prepare(crate: PatchedCrate, package_dir: Path, cargo_home: Path) -> None:
         # An opaque fingerprint avoids parsing a marker schema: compare exact bytes.
         fingerprint: str = f'{crate.sha256}\n{hashlib.sha256(patch.read_bytes()).hexdigest()}\n'
         marker: Path = destination / '.prepared-sha256'
-        if marker.is_file() and marker.read_text() == fingerprint and (destination / 'Cargo.toml').is_file():
-            print(f'{stem}: unchanged')
-            return
+        if marker.is_file():
+            if marker.read_text() == fingerprint + content_fingerprint(destination, patch):
+                print(f'{stem}: unchanged')
+                return
+            print(f'{stem}: inputs or prepared content mismatch; re-preparing')
         cached: Path | None = next((cargo_home / 'registry/cache').glob(f'*/{stem}.crate'), None)
         archive: bytes
         if cached is not None:
@@ -87,7 +105,7 @@ def prepare(crate: PatchedCrate, package_dir: Path, cargo_home: Path) -> None:
                 env=dict(os.environ, GIT_CEILING_DIRECTORIES=str(staging.parent)),
                 check=True,
             )
-            (extracted / '.prepared-sha256').write_text(fingerprint)
+            (extracted / '.prepared-sha256').write_text(fingerprint + content_fingerprint(extracted, patch))
             if destination.exists():
                 destination.rename(staging / "previous")
             extracted.rename(destination)

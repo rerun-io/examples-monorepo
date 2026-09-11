@@ -85,6 +85,8 @@ def test_real_patch_and_locked_cargo_resolution(tmp_path: Path) -> None:
     stem: str = f'{crate.name}-{crate.version}'
     channel: Path = tmp_path / 'target/patch' / stem / 'src/device/handle/channel.rs'
     assert hashlib.sha256(channel.read_bytes()).hexdigest() == CHANNEL_SHA256
+    main_channel: Path = package_dir / 'target/patch' / stem / 'src/device/handle/channel.rs'
+    assert hashlib.sha256(main_channel.read_bytes()).hexdigest() == CHANNEL_SHA256
     result: subprocess.CompletedProcess[str] = subprocess.run(
         # CubeCL is optional; select its lane so it appears in the resolved graph.
         ['cargo', 'metadata', '--locked', '--offline', '--format-version', '1', '--features', 'slam-rs/gpu-wgpu'],
@@ -114,3 +116,20 @@ def test_concurrent_preparation(tmp_path: Path, crate: PatchedCrate) -> None:
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         assert list(pool.map(caller, range(8))) == ['after\n'] * 8
+
+
+@pytest.mark.parametrize('filename', ['hello.txt', 'Cargo.toml'])
+@pytest.mark.parametrize('remove', [False, True])
+def test_repairs_prepared_files(tmp_path: Path, crate: PatchedCrate, filename: str, remove: bool, capsys: pytest.CaptureFixture[str]) -> None:
+    """An intact input marker must not hide edited or missing prepared files."""
+    prepare(crate, tmp_path, tmp_path / 'cargo')
+    output: Path = tmp_path / 'target/patch/example-1.0' / filename
+    digest: str = hashlib.sha256(output.read_bytes()).hexdigest()
+    if remove:
+        output.unlink()
+    else:
+        output.write_text('tampered\n')
+    capsys.readouterr()
+    prepare(crate, tmp_path, tmp_path / 'cargo')
+    assert hashlib.sha256(output.read_bytes()).hexdigest() == digest
+    assert 'prepared content mismatch' in capsys.readouterr().out
