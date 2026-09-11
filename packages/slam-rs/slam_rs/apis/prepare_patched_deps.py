@@ -1,9 +1,9 @@
 """Materialize checksummed Cargo archives and local patches before Cargo runs."""
 
+import fcntl
 import hashlib
 import io
 import os
-import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -53,41 +53,45 @@ def prepare(crate: PatchedCrate, package_dir: Path, cargo_home: Path) -> None:
     package_dir = package_dir.resolve()
     stem: str = f'{crate.name}-{crate.version}'
     destination: Path = package_dir / 'target/patch' / stem
-    patch: Path = package_dir / crate.patch
-    # An opaque fingerprint avoids parsing a marker schema: compare exact bytes.
-    fingerprint: str = f'{crate.sha256}\n{hashlib.sha256(patch.read_bytes()).hexdigest()}\n'
-    marker: Path = destination / '.prepared-sha256'
-    if marker.is_file() and marker.read_text() == fingerprint and (destination / 'Cargo.toml').is_file():
-        print(f'{stem}: unchanged')
-        return
-    cached: Path | None = next((cargo_home / 'registry/cache').glob(f'*/{stem}.crate'), None)
-    archive: bytes
-    if cached is not None:
-        archive = cached.read_bytes()
-    else:
-        with urllib.request.urlopen(f'https://static.crates.io/crates/{crate.name}/{stem}.crate', timeout=60) as response:
-            archive = response.read()
-    if hashlib.sha256(archive).hexdigest() != crate.sha256:
-        raise ValueError(f'{stem}: archive SHA256 mismatch')
+    # POSIX-only: the repository has Linux and macOS lanes, no Windows lane.
+    # Keep this inode beside the destination; never unlink a lock with waiters.
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=f'.{stem}-', dir=destination.parent) as temporary:
-        staging: Path = Path(temporary)
-        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-            tar.extractall(staging, filter='data')
-        extracted: Path = staging / stem
-        # Do not discover the enclosing worktree: git otherwise skips paths
-        # beneath its ignored target directory while returning success.
-        subprocess.run(
-            ['git', 'apply', '-p1', f'--directory={stem}', str(patch)],
-            cwd=staging,
-            env=dict(os.environ, GIT_CEILING_DIRECTORIES=str(staging.parent)),
-            check=True,
-        )
-        (extracted / '.prepared-sha256').write_text(fingerprint)
-        if destination.exists():
-            shutil.rmtree(destination)
-        extracted.rename(destination)
-    print(f'{stem}: prepared ({"cache" if cached is not None else "download"})')
+    with (destination.parent / f'.{stem}.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        patch: Path = package_dir / crate.patch
+        # An opaque fingerprint avoids parsing a marker schema: compare exact bytes.
+        fingerprint: str = f'{crate.sha256}\n{hashlib.sha256(patch.read_bytes()).hexdigest()}\n'
+        marker: Path = destination / '.prepared-sha256'
+        if marker.is_file() and marker.read_text() == fingerprint and (destination / 'Cargo.toml').is_file():
+            print(f'{stem}: unchanged')
+            return
+        cached: Path | None = next((cargo_home / 'registry/cache').glob(f'*/{stem}.crate'), None)
+        archive: bytes
+        if cached is not None:
+            archive = cached.read_bytes()
+        else:
+            with urllib.request.urlopen(f'https://static.crates.io/crates/{crate.name}/{stem}.crate', timeout=60) as response:
+                archive = response.read()
+        if hashlib.sha256(archive).hexdigest() != crate.sha256:
+            raise ValueError(f'{stem}: archive SHA256 mismatch')
+        with tempfile.TemporaryDirectory(prefix=f'.{stem}-', dir=destination.parent) as temporary:
+            staging: Path = Path(temporary)
+            with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+                tar.extractall(staging, filter='data')
+            extracted: Path = staging / stem
+            # Do not discover the enclosing worktree: git otherwise skips paths
+            # beneath its ignored target directory while returning success.
+            subprocess.run(
+                ['git', 'apply', '-p1', f'--directory={stem}', str(patch)],
+                cwd=staging,
+                env=dict(os.environ, GIT_CEILING_DIRECTORIES=str(staging.parent)),
+                check=True,
+            )
+            (extracted / '.prepared-sha256').write_text(fingerprint)
+            if destination.exists():
+                destination.rename(staging / "previous")
+            extracted.rename(destination)
+        print(f'{stem}: prepared ({"cache" if cached is not None else "download"})')
 
 
 def main(config: Config) -> None:

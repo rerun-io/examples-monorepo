@@ -98,3 +98,19 @@ def test_real_patch_and_locked_cargo_resolution(tmp_path: Path) -> None:
     assert len(packages) == 1
     assert packages[0]['source'] is None
     assert Path(packages[0]['manifest_path']).resolve() == (package_dir / 'target/patch' / stem / 'Cargo.toml').resolve()
+
+
+def test_concurrent_preparation(tmp_path: Path, crate: PatchedCrate) -> None:
+    """All eight callers can use a fresh destination after preparation."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    barrier: Barrier = Barrier(8)
+
+    def caller(number: int) -> str:
+        barrier.wait(timeout=10)
+        prepare(crate, tmp_path, tmp_path / 'cargo')
+        return (tmp_path / 'target/patch/example-1.0/hello.txt').read_text()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert list(pool.map(caller, range(8))) == ['after\n'] * 8
