@@ -90,10 +90,11 @@ codegen-units = 1
 # error: failed to load source for dependency `cubecl-common`
 # Caused by: failed to read `<package>/target/patch/cubecl-common-0.11.0-pre.3/Cargo.toml`
 # Caused by: No such file or directory (os error 2)
-# Fix: pixi run --frozen -e slam-rs-dev slam-rs-patch-deps
+# Fix: pixi run -e slam-rs-dev slam-rs-patch-deps
+# rust-analyzer: run that command once per checkout before opening the workspace.
 # (macOS: use -e slam-rs-osx-dev).
 # Bump: update version + archive sha256 in slam_rs/apis/prepare_patched_deps.py,
-# rebase the patch, update this path and the Pixi task output, run the prepare
+# rebase the patch, update this path and the Pixi patch-test command, run the prepare
 # task, then regenerate Cargo.lock with cargo update -p cubecl-common.
 [patch.crates-io]
 cubecl-common = { path = "target/patch/cubecl-common-0.11.0-pre.3" }
