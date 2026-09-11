@@ -5,8 +5,8 @@ import json
 import math
 import re
 from dataclasses import dataclass, replace
-from tomllib import TOMLDecodeError
 from pathlib import Path
+from tomllib import TOMLDecodeError
 from typing import Literal, TypeAlias
 
 from serde import SerdeError, coerce, field, serde
