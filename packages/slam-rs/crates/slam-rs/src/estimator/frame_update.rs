@@ -25,10 +25,6 @@ use crate::types::{
     FrameId, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseVelBiasStateWithLin, TimeCamId, Vector15,
 };
 
-/// The two states an IMU factor spans, stacked, which is what
-/// [`ImuBlock::add_dense_h_b`] writes into.
-const IMU_BLOCK_SIZE: usize = 2 * POSE_VEL_BIAS_SIZE;
-
 /// Which precondition sent a frameset back to the joint solve.
 ///
 /// `SqrtKeypointVio::frame_update` serves only a frameset whose newest state
@@ -115,11 +111,6 @@ pub(super) struct FrameUpdateScratch<S: LieScalar> {
     h_trial: DMatrix<S>,
     /// See [`Self::h_trial`].
     b_trial: DVector<S>,
-    /// The IMU factor's own 30x30 system, of which the trailing 15x15 corner is
-    /// the newest state's.
-    imu_h: DMatrix<S>,
-    /// See [`Self::imu_h`].
-    imu_b: DVector<S>,
     /// Reused double-precision storage for the scaled, damped normal matrix.
     solve: DMatrix<f64>,
     /// The increment [`damped_solve`] writes and the loop then negates.
@@ -138,8 +129,6 @@ impl<S: LieScalar> Default for FrameUpdateScratch<S> {
             b: DVector::zeros(POSE_VEL_BIAS_SIZE),
             h_trial: DMatrix::zeros(POSE_VEL_BIAS_SIZE, POSE_VEL_BIAS_SIZE),
             b_trial: DVector::zeros(POSE_VEL_BIAS_SIZE),
-            imu_h: DMatrix::zeros(IMU_BLOCK_SIZE, IMU_BLOCK_SIZE),
-            imu_b: DVector::zeros(IMU_BLOCK_SIZE),
             solve: DMatrix::zeros(0, 0),
             increment: DVector::zeros(POSE_VEL_BIAS_SIZE),
             rel_poses: Vec::new(),
@@ -209,8 +198,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             ref mut b,
             ref mut h_trial,
             ref mut b_trial,
-            ref mut imu_h,
-            ref mut imu_b,
             ref mut solve,
             ref mut increment,
             ref mut rel_poses,
@@ -226,7 +213,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 
         let mark: std::time::Instant = std::time::Instant::now();
         let (mut error_total, _): (S, S) = linearize_state(
-            ba, meas, &imu_lin, prev_t_ns, t_ns, &options, h, b, imu_h, imu_b, rel_poses,
+            ba, meas, &imu_lin, prev_t_ns, t_ns, &options, h, b, rel_poses,
         )?;
         timings.linearize_ns += duration_ns(mark);
 
@@ -276,8 +263,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 
             let mark: std::time::Instant = std::time::Instant::now();
             let (error_after, imu_after): (S, S) = linearize_state(
-                ba, meas, &imu_lin, prev_t_ns, t_ns, &options, h_trial, b_trial, imu_h, imu_b,
-                rel_poses,
+                ba, meas, &imu_lin, prev_t_ns, t_ns, &options, h_trial, b_trial, rel_poses,
             )?;
             timings.error_ns += duration_ns(mark);
 
@@ -383,8 +369,6 @@ fn linearize_state<S: LieScalar>(
     options: &LandmarkBlockOptions<S>,
     h: &mut DMatrix<S>,
     b: &mut DVector<S>,
-    imu_h: &mut DMatrix<S>,
-    imu_b: &mut DVector<S>,
     rel_poses: &mut Vec<RelPose<S>>,
 ) -> Result<(S, S), EstimatorError> {
     h.fill(S::zero());
@@ -512,9 +496,7 @@ fn linearize_state<S: LieScalar>(
         }
     }
 
-    // The IMU factor over `(prev, t_ns]`, with the previous state held: its
-    // 30x30 system's trailing corner is the newest state's, which is what
-    // deleting a fixed variable's rows and columns comes to.
+    // The previous state is fixed, so form only the newest-state contribution.
     let start_state: &PoseVelBiasStateWithLin<S> =
         ba.frame_states
             .get(&prev_t_ns)
@@ -532,14 +514,17 @@ fn linearize_state<S: LieScalar>(
                 missing_t_ns: t_ns,
             })?;
     let block: ImuBlock<S> = ImuBlock::linearize(meas, imu_lin, start_state, end_state);
-    imu_h.fill(S::zero());
-    imu_b.fill(S::zero());
-    block.add_dense_h_b(0, POSE_VEL_BIAS_SIZE, imu_h, imu_b);
-    for i in 0..POSE_VEL_BIAS_SIZE {
-        for j in 0..POSE_VEL_BIAS_SIZE {
-            h[(i, j)] += imu_h[(POSE_VEL_BIAS_SIZE + i, POSE_VEL_BIAS_SIZE + j)];
-        }
-        b[i] += imu_b[POSE_VEL_BIAS_SIZE + i];
+    let newest = block
+        .jp
+        .fixed_columns::<POSE_VEL_BIAS_SIZE>(POSE_VEL_BIAS_SIZE);
+    let jtj = newest.transpose() * newest;
+    let jtr = newest.transpose() * block.r;
+    // Preserve the old zero-initialized scatter's addition, including signed zero.
+    for (value, contribution) in h.iter_mut().zip(jtj.iter()) {
+        *value += S::zero() + *contribution;
+    }
+    for (value, contribution) in b.iter_mut().zip(jtr.iter()) {
+        *value += S::zero() + *contribution;
     }
     error += block.error;
 
@@ -960,8 +945,6 @@ mod tests {
         let vision = |vio: &mut SqrtKeypointVio<f64>| -> (f64, Vector15<f64>) {
             let mut h: DMatrix<f64> = DMatrix::zeros(POSE_VEL_BIAS_SIZE, POSE_VEL_BIAS_SIZE);
             let mut b: DVector<f64> = DVector::zeros(POSE_VEL_BIAS_SIZE);
-            let mut imu_h: DMatrix<f64> = DMatrix::zeros(IMU_BLOCK_SIZE, IMU_BLOCK_SIZE);
-            let mut imu_b: DVector<f64> = DVector::zeros(IMU_BLOCK_SIZE);
             let mut rel_poses: Vec<RelPose<f64>> = Vec::new();
             let (total, imu_error) = linearize_state(
                 &vio.ba,
@@ -972,13 +955,18 @@ mod tests {
                 &options,
                 &mut h,
                 &mut b,
-                &mut imu_h,
-                &mut imu_b,
                 &mut rel_poses,
             )
             .unwrap();
+            let block = ImuBlock::linearize(
+                &meas,
+                &imu_lin,
+                &vio.ba.frame_states[&PREV_T_NS],
+                &vio.ba.frame_states[&CURRENT_T_NS],
+            );
+            let full_gradient = block.jp.transpose() * block.r;
             let gradient: Vector15<f64> =
-                Vector15::from_fn(|i, _| b[i] - imu_b[POSE_VEL_BIAS_SIZE + i]);
+                Vector15::from_fn(|i, _| b[i] - full_gradient[POSE_VEL_BIAS_SIZE + i]);
             (total - imu_error, gradient)
         };
 

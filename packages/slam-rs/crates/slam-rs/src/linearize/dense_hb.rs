@@ -4,109 +4,34 @@ use nalgebra::{DMatrix, DVector};
 
 use super::LinearizeError;
 use super::landmark_block::{DenseHbScratch, LandmarkBlock};
-use super::reduce::deterministic_reduce;
 use crate::lie::LieScalar;
 
-/// Partial dense `(H, b)` and the columns it touched.
-/// Only observed pose columns need updates if skipped writes are exact identities.
-/// Storage resets to positive zero, so untouched coefficients remain positive zero.
-/// Blocks with non-finite or signed-zero-sensitive writes use full width instead;
-/// see [`LandmarkBlock::active_writeback_is_exact`].
+/// Dense accumulator, reset to positive zero before each assembly.
 #[derive(Debug, Clone)]
 struct DensePartial<S: LieScalar> {
-    /// The partial `H`, full size, zero outside `columns` x `columns`.
     h: DMatrix<S>,
-    /// The partial `b`, full size, zero outside `columns`.
     b: DVector<S>,
-    /// Which columns have been written, indexed by column.
-    written: Vec<bool>,
-    /// The same set ascending, which is the order `h`'s column-major storage wants.
-    columns: Vec<usize>,
-    /// The same set again as `(start, length)` runs of consecutive columns.
-    ///
-    /// `reset_sized` and addition between them are the whole
-    /// cost of the reduction's interior — 54 joins and 54 resets over 55
-    /// landmark blocks — and both touch `columns` x `columns` of a column-major
-    /// square. Walking `columns` reaches every coefficient through a `usize`
-    /// out of a `Vec`, which LLVM has to treat as a gather, plus a bounds check
-    /// per coefficient. The set is almost never scattered: a landmark's own
-    /// columns are two runs of six, and a subtree's union saturates towards the
-    /// contiguous `0..opt_size`. Holding the runs turns both operations into
-    /// slice work on `h`'s own storage. It is the same set, so the same
-    /// coefficients are touched, and both operations are elementwise, so no sum
-    /// is reassociated.
-    runs: Vec<(usize, usize)>,
 }
 
 impl<S: LieScalar> DensePartial<S> {
-    /// An identity accumulator for an `n`-column ordering.
     fn zeros(n: usize) -> Self {
         Self {
             h: DMatrix::zeros(n, n),
             b: DVector::zeros(n),
-            written: vec![false; n],
-            columns: Vec::with_capacity(n),
-            runs: Vec::new(),
         }
     }
 
-    /// Back to the identity for an `n`-column ordering, reusing the buffers.
-    ///
-    /// `reset_sized` is the cheaper reset and is what the reduction's own
-    /// subtree buffers take; this one zeroes the whole square, because the
-    /// accumulator the reduction hands back is written by three more parties —
-    /// the IMU blocks, the marginalization prior and the caller that pins a
-    /// fixed keyframe's rows — none of which record the columns they touched.
-    /// The window's landmarks cover nearly every column of the ordering
-    /// anyway, so on the frame that matters the two resets zero the same
-    /// square; what this saves is the allocation, not the memset.
+    /// Clear the full system: IMU, prior and fixed-keyframe writes also use it.
     fn reset_sized(&mut self, n: usize) {
         if self.b.nrows() == n {
             self.h.fill(S::zero());
             self.b.fill(S::zero());
-            self.columns.clear();
-            self.runs.clear();
-            self.written.fill(false);
         } else {
             *self = Self::zeros(n);
         }
     }
 
-    /// Record that `columns` have been written, keeping the list ascending.
-    ///
-    /// Every column is in range, so this indexes rather than absorbing an
-    /// out-of-range one (decision D32): [`Self::accumulate`] marks only a block
-    /// the writeback has accepted, whose check is `padding_idx <= h.ncols()`,
-    /// and both a block's `active_cols` and its `pose_columns` are inside its
-    /// own `padding_idx` ([`LandmarkBlock::allocate`] refuses a pose block that
-    /// is not); [`Self::join`] marks a partial of the same ordering.
-    fn mark(&mut self, columns: impl IntoIterator<Item = usize>) {
-        let mut added: bool = false;
-        for column in columns {
-            added |= !self.written[column];
-            self.written[column] = true;
-        }
-        if added {
-            self.columns.clear();
-            self.runs.clear();
-            for column in 0..self.written.len() {
-                if !self.written[column] {
-                    continue;
-                }
-                self.columns.push(column);
-                match self.runs.last_mut() {
-                    // Consecutive with the run being built, so extend it.
-                    Some((start, length)) if *start + *length == column => *length += 1,
-                    _ => self.runs.push((column, 1)),
-                }
-            }
-        }
-    }
-
-    /// Add a landmark contribution and mark its written columns together.
-    /// Mark only after the add validates layout. Exact sparse writes mark observed
-    /// columns; full-width writes also mark NaNs propagated into unobserved columns,
-    /// so joins and resets cannot miss them (D32).
+    /// Add one landmark, preserving full-width writes when required.
     fn accumulate(
         &mut self,
         block: &LandmarkBlock<S>,
@@ -114,36 +39,20 @@ impl<S: LieScalar> DensePartial<S> {
     ) -> Result<(), LinearizeError> {
         if block.active_writeback_is_exact() {
             block.add_dense_h_b_active(&mut self.h, &mut self.b, scratch)?;
-            self.mark(block.active_cols().iter().copied());
         } else {
             block.add_dense_h_b(&mut self.h, &mut self.b, scratch)?;
-            self.mark(block.pose_columns());
         }
         Ok(())
     }
 }
 
-/// The buffers [`super::LinearizationAbsQR::get_dense_h_b_into`] reduces in, held
-/// across calls and across frames.
-///
-/// One call over `n` landmark blocks needs the accumulator it returns plus
-/// `ceil(log2 n)` subtree partials, each a full `opt_size` square, and the
-/// linearizer's own leaf scratch: seven `87x87` `f32` matrices on the median
-/// MIO10 frame. The Levenberg-Marquardt loop calls it **once per inner step** —
-/// seven times on that frame — and every one of those buffers is either zeroed
-/// on entry (`DensePartial::reset_sized`) or reset by the reduction before a
-/// leaf writes it (`reset_sized`, which restores exactly `+0.0` over the
-/// columns that were written), so a buffer that persists is the same
-/// arithmetic on the same values.
-///
-/// The window changes size, so the buffers are keyed on `opt_size` and dropped
-/// when it moves; that happens when a keyframe enters or leaves, not per frame.
+/// Reusable dense accumulator and per-landmark transpose scratch.
+/// Blocks accumulate sequentially in their existing order. Buffers resize when
+/// the window ordering changes and are cleared before each assembly.
 #[derive(Debug, Clone)]
 pub struct DenseHbWorkspace<S: LieScalar> {
     /// What the reduction accumulates into and the caller reads.
     accumulator: DensePartial<S>,
-    /// One subtree partial per recursion depth, as `deterministic_reduce` wants
-    /// them.
     /// The per-block transpose buffer of [`LandmarkBlock::add_dense_h_b`].
     leaf: DenseHbScratch<S>,
 }
@@ -165,7 +74,7 @@ impl<S: LieScalar> DenseHbWorkspace<S> {
 }
 
 impl<S: LieScalar> DenseHbWorkspace<S> {
-    /// Reduce landmark blocks in their existing deterministic join order.
+    /// Accumulate landmark blocks in their existing order.
     pub(super) fn reduce(
         &mut self,
         opt_size: usize,
@@ -173,15 +82,9 @@ impl<S: LieScalar> DenseHbWorkspace<S> {
     ) -> Result<(&mut DMatrix<S>, &mut DVector<S>), LinearizeError> {
         self.prepare(opt_size);
         let DenseHbWorkspace { accumulator, leaf } = self;
-        deterministic_reduce::<DensePartial<S>, LinearizeError>(
-            blocks.len(),
-            accumulator,
-            &mut |i: usize, acc: &mut DensePartial<S>| {
-                let block: &LandmarkBlock<S> =
-                    blocks.get(i).ok_or(LinearizeError::LayoutOverflow)?;
-                acc.accumulate(block, leaf)
-            },
-        )?;
+        for block in blocks {
+            accumulator.accumulate(block, leaf)?;
+        }
         let DensePartial { h, b, .. } = accumulator;
 
         Ok((h, b))
@@ -271,8 +174,7 @@ mod tests {
         block
     }
 
-    /// Non-finite blocks must write and mark every column. Skipping unobserved columns
-    /// would suppress NaNs and leave coefficients outside join/reset bookkeeping (D32).
+    /// Non-finite blocks must write every column so unobserved columns retain NaNs.
     #[test]
     fn a_non_finite_block_is_reduced_at_full_width() {
         let block: LandmarkBlock<f64> = a_block_carrying_a_nan();
@@ -304,9 +206,6 @@ mod tests {
             assert_eq!(partial.b[i].to_bits(), b[i].to_bits(), "b({i})");
         }
 
-        // The join and the reset go over `columns`, so the fallback has to have
-        // marked the whole width it wrote.
-        assert_eq!(partial.columns, (0..n).collect::<Vec<usize>>());
         partial.reset_sized(partial.b.nrows());
         assert!(
             partial

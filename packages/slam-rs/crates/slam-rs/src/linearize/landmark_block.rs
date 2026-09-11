@@ -9,10 +9,7 @@ use crate::camera::CameraEnum;
 use crate::landmark::Landmark;
 use crate::lie::{LieScalar, c};
 use crate::linearize::{LinearizeError, RelPoseLin};
-use crate::qr::{
-    JacobiRotation, apply_householder_on_the_left, apply_rotation_on_the_left, make_givens,
-    make_householder,
-};
+use crate::qr::{apply_householder_on_the_left, make_givens, make_householder};
 use crate::types::{AbsOrderMap, LandmarkId, POSE_SIZE, TimeCamId};
 
 /// `LandmarkBlock<Scalar>::Options`.
@@ -501,9 +498,8 @@ impl<S: LieScalar> LandmarkBlock<S> {
                 &mut self.work_essential,
             );
             apply_householder_on_the_left(
-                &mut self.storage,
-                k,
-                remaining_rows,
+                self.storage
+                    .view_mut((k, 0), (remaining_rows, self.num_cols)),
                 &self.work_essential[..remaining_rows],
                 tau,
             );
@@ -519,11 +515,11 @@ impl<S: LieScalar> LandmarkBlock<S> {
         for n in 0..3 {
             let mut m: usize = self.num_rows - 4;
             while m > n {
-                let rot: JacobiRotation<S> = make_givens(
+                let rot: nalgebra::linalg::givens::GivensRotation<S> = make_givens(
                     self.storage[(m - 1, self.lm_idx + n)],
                     self.storage[(m, self.lm_idx + n)],
                 );
-                apply_rotation_on_the_left(&mut self.storage, m, m - 1, rot);
+                rot.rotate(&mut self.storage.fixed_rows_mut::<2>(m - 1));
                 m -= 1;
             }
         }

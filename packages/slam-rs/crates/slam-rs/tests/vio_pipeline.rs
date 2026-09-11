@@ -1,10 +1,8 @@
-//! Self-contained whole-pipeline, retry, and prior-comparison tests.
+//! Self-contained whole-pipeline and retry tests.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::PathBuf;
-
-use nalgebra::{DMatrix, DVector, SymmetricEigen};
 
 use slam_rs::config::VioConfig;
 use slam_rs::estimator::FrameUpdateOutcome;
@@ -390,103 +388,6 @@ fn a_refused_frameset_is_retried_bit_identically() {
         fingerprint(&behind),
         fingerprint(&ahead),
         "the two runs agree on the poses but not on the rest of the pipeline"
-    );
-}
-
-const PRIOR_NULL_RATIO: f64 = 1e-5;
-const PRIOR_TOLERANCE_F64: f64 = 5e-6;
-const PRIOR_TOLERANCE_F32: f64 = 3e-1;
-
-fn prior_deviation(
-    prior: &DMatrix<f64>,
-    rhs: &DVector<f64>,
-    reference: &DMatrix<f64>,
-    reference_rhs: &DVector<f64>,
-) -> (f64, f64) {
-    let information: DMatrix<f64> = prior.transpose() * prior;
-    let reference_information: DMatrix<f64> = reference.transpose() * reference;
-    let term: DVector<f64> = prior.transpose() * rhs;
-    let reference_term: DVector<f64> = reference.transpose() * reference_rhs;
-
-    let eigen: SymmetricEigen<f64, nalgebra::Dyn> =
-        SymmetricEigen::new(reference_information.clone());
-    let floor: f64 =
-        PRIOR_NULL_RATIO * PRIOR_NULL_RATIO * eigen.eigenvalues.iter().copied().fold(0.0, f64::max);
-    let whitener: DMatrix<f64> = &eigen.eigenvectors
-        * DMatrix::from_diagonal(&eigen.eigenvalues.map(|value| 1.0 / value.max(floor).sqrt()));
-
-    let error: DMatrix<f64> =
-        &(whitener.transpose() * (information - &reference_information)) * &whitener;
-    let deviation: f64 = SymmetricEigen::new(error).eigenvalues.amax();
-
-    let residual: DVector<f64> = whitener.transpose() * (term - &reference_term);
-    let scale: f64 = (whitener.transpose() * reference_term).norm().max(1.0);
-    (deviation, residual.norm() / scale)
-}
-
-fn reference_prior() -> (DMatrix<f64>, DVector<f64>) {
-    let directions: [[f64; 6]; 4] = [
-        [1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
-        [1.0, -1.0, 0.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, -1.0, 0.0, 0.0],
-    ];
-    let singular: [f64; 4] = [1.0e4, 1.0e2, 1.0e1, 3.0];
-    let mut prior: DMatrix<f64> = DMatrix::zeros(5, 6);
-    for (row, (direction, sigma)) in directions.iter().zip(singular).enumerate() {
-        for (column, value) in direction.iter().enumerate() {
-            prior[(row, column)] = value * sigma * std::f64::consts::FRAC_1_SQRT_2;
-        }
-    }
-    (prior, DVector::from_vec(vec![1.0, -2.0, 0.5, 0.25, 0.0]))
-}
-
-#[test]
-fn a_constraint_hidden_beside_a_zero_row_fails_the_prior_comparison() {
-    let (reference, reference_rhs) = reference_prior();
-    let mut candidate: DMatrix<f64> = reference.clone().insert_row(reference.nrows(), 0.0);
-    candidate[(reference.nrows(), 4)] = 0.5;
-    let rhs: DVector<f64> = reference_rhs.clone().insert_row(reference_rhs.nrows(), 0.0);
-
-    // What the shape said about it: one surplus row, and a smallest row norm of
-    // zero, from the row the reference already had.
-    assert_eq!(candidate.nrows(), reference.nrows() + 1);
-    let smallest: f64 = (0..candidate.nrows())
-        .map(|row| candidate.row(row).norm())
-        .fold(f64::INFINITY, f64::min);
-    assert_eq!(smallest, 0.0);
-
-    // The control first: the reference against itself is exactly equal.
-    let (same, _) = prior_deviation(&reference, &reference_rhs, &reference, &reference_rhs);
-    assert!(
-        same < PRIOR_TOLERANCE_F64,
-        "the reference moved: {same:.3e}"
-    );
-
-    let (deviation, _) = prior_deviation(&candidate, &rhs, &reference, &reference_rhs);
-    assert!(
-        deviation > PRIOR_TOLERANCE_F32,
-        "a 0.5 constraint in a direction the reference leaves free scored {deviation:.3e}, \
-         inside the loosest lane tolerance {PRIOR_TOLERANCE_F32:.1e}"
-    );
-}
-
-#[test]
-fn a_lost_direction_fails_the_prior_comparison_at_the_same_shape_and_norm() {
-    let (reference, reference_rhs) = reference_prior();
-    let mut candidate: DMatrix<f64> = reference.clone();
-    candidate.row_mut(3).fill(0.0);
-    candidate *= (reference.norm_squared() / candidate.norm_squared()).sqrt();
-
-    // What the shape and the digest say about it: nothing.
-    assert_eq!(candidate.shape(), reference.shape());
-    assert!((candidate.norm() - reference.norm()).abs() <= 1e-9 * reference.norm());
-
-    let (deviation, _) = prior_deviation(&candidate, &reference_rhs, &reference, &reference_rhs);
-    assert!(
-        deviation > PRIOR_TOLERANCE_F32,
-        "dropping the weakest of four constrained directions scored {deviation:.3e}, inside the \
-         loosest lane tolerance {PRIOR_TOLERANCE_F32:.1e}"
     );
 }
 
