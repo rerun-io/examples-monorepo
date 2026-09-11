@@ -38,9 +38,10 @@
 //!
 //! Two more, from the same reading:
 //!
-//! * `sqrt_cov_inv` is a **pseudo**-inverse square root: any LDLT pivot below
-//!   `numeric_limits<Scalar>::min()` is zeroed rather than producing an infinity
-//!   (`preintegration.h:313-319`).
+//! * The inverse covariance is formed through a guarded pivoted LDLT. Pivots
+//!   below the smallest positive normal value get zero weight. For singular
+//!   covariance this is a generalized inverse through congruence, not a
+//!   Moore-Penrose inverse, and it need not annihilate the null space.
 //! * Paper 1's Eq. (20) omits the `− v_i Δt` term. The code has it
 //!   (`preintegration.h:214`) and so does this port.
 //!
@@ -51,14 +52,9 @@
 //!   [`IntegratedImuMeasurement::get_cov_inv_sqrt`] recomputes the 9x9 LDLT on
 //!   every call instead, which needs no interior mutability and costs a few
 //!   hundred flops against the ~10⁸ the frontend spends on the same frame.
-//! * **The LDLT is Eigen's, ported.** `Eigen::LDLT` is not available as a
-//!   dependency, and it is not interchangeable with a textbook pivoted LDLT:
-//!   see `ldlt_in_place` for the two properties — pivoting on the *un-updated*
-//!   diagonal, and a tiny negative pivot on a dependent direction — that decide
-//!   what a *singular* covariance whitens to. Getting them wrong puts an
-//!   information weight of `1e26` on an unobservable direction where basalt puts
-//!   zero. `crates/slam-rs/tests/imu_oracle.rs` pins the factorization, the
-//!   whitening and the delta state against the C++ itself.
+//! * **The small pivoted LDLT stays local.** It pivots on the original diagonal,
+//!   then updates the selected column. Negative or tiny pivots get zero weight
+//!   during whitening, which keeps degenerate covariance finite.
 //! * **Jacobians are all-or-nothing.** C++ takes four nullable out-pointers;
 //!   every in-tree caller either asks for all of them or none
 //!   (`imu_block.hpp:41-48`), so the port has one plain method and one
@@ -67,9 +63,7 @@
 //!   writes `state1.t_ns`, so the frontend's long-lived `predicted_state` keeps
 //!   whatever it held before (`frame_to_frame_optical_flow.h:149`). The port
 //!   returns a fresh state and fills in `state0.t_ns + dt_ns`.
-//! * **`gravity_from_first_accel` takes the null axis in closed form** rather
-//!   than through Eigen's `JacobiSVD`; the difference, and its bound, are on
-//!   that function.
+//! * **Gravity initialization uses a closed-form cross-product axis.**
 //! * **Asserts become typed errors or tests.** `propagateState` asserts
 //!   `data.t_ns > curr_state.t_ns` (`preintegration.h:79-80`); here that is
 //!   [`ImuError::NonMonotonicSample`] (decision D32). The residual's
@@ -749,26 +743,17 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
         &self.d_state_d_bg
     }
 
-    /// The square-root inverse covariance the estimator whitens with,
-    /// `get_sqrt_cov_inv()` (`preintegration.h:280-287`, computed at `:305-321`).
-    ///
-    /// `M = D^{-1/2} L^{-1} P` from the pivoted LDLT `P cov Pᵀ = L D Lᵀ`, so
-    /// `Mᵀ M = cov⁻¹`. A pivot below `numeric_limits<Scalar>::min()` gives a
-    /// zero row rather than an infinity (`:313-319`), which makes this a
-    /// pseudo-inverse — the empty measurement's covariance is exactly zero and
-    /// its factor is exactly zero too.
-    ///
-    /// C++ caches this behind a dirty flag; the port recomputes it. See the
-    /// module deviations.
+    /// Whitening factor `M = D⁺½ L⁻¹ P` for `P cov Pᵀ = L D Lᵀ`.
+    /// For SPD covariance, `Mᵀ M = cov⁻¹`. Rows with a pivot below the smallest
+    /// positive normal value are zeroed so degenerate covariance contributes
+    /// finite, zero weight in those factor coordinates. The singular result is
+    /// a generalized inverse through congruence, not a Moore-Penrose inverse.
     pub fn get_cov_inv_sqrt(&self) -> Matrix9<S> {
         // `:306-307`
         let mut mat: Matrix9<S> = self.cov;
         let transpositions: [usize; POSE_VEL_SIZE] = ldlt_in_place(&mut mat);
 
-        // `:306` and `:309`: start from the identity, then apply the
-        // transpositions from the left in ascending order, which is what
-        // `transpositionsP() * I` evaluates to
-        // (`Eigen/src/Core/ProductEvaluators.h:1193-1200`).
+        // Apply the pivot permutation to the identity before solving with L.
         let mut m: Matrix9<S> = Matrix9::identity();
         for (k, pivot) in transpositions.iter().copied().enumerate() {
             if pivot != k {
@@ -817,57 +802,10 @@ static ANTIPARALLEL_WARNING: std::sync::Once = std::sync::Once::new();
 /// The initial orientation from one accelerometer sample
 /// (`src/vi_estimator/sqrt_keypoint_vio.cpp:277-278`).
 ///
-/// basalt zeroes the translation and sets the rotation to
-/// `Eigen::Quaternion::FromTwoVectors(data->accel, Vec3::UnitZ())`, so the
-/// measured specific force — which points "up" in the rig frame at rest — is
-/// rotated onto the world `+Z` axis and gravity ends up along `-Z`, matching
-/// [`gravity`]. Only roll and pitch are set; yaw is unobservable.
-///
-/// Ported from Eigen's `Quaternion::setFromTwoVectors`
-/// (`thirdparty/basalt-headers/thirdparty/eigen/Eigen/src/Geometry/Quaternion.h:686-726`),
-/// including the near-antiparallel branch at `:707-718`, which is reachable: a
-/// rig held upside down at initialisation reports `accel ≈ (0, 0, -9.81)`.
-///
-/// That branch needs an axis orthogonal to **both** input directions — Eigen
-/// solves `x·v0 = 0, x·v1 = 0` with a 2x3 `JacobiSVD` and takes `V.col(2)`
-/// (`:709-712`). The port takes `normalize(v0 × v1)`, which is the same null
-/// vector in closed form and, because `v1` is always `UnitZ` here, is computed
-/// without cancellation: `v0 × UnitZ = (v0.y, -v0.x, 0)`. An axis orthogonal to
-/// `v0` alone — what an earlier revision of this port used — leaves a real tilt
-/// error, not just a yaw offset.
-///
-/// # An accepted deviation, not a fixed one
-///
-/// `V.col(2)` is a null vector, so its **sign is arbitrary**, and Eigen's
-/// `JacobiSVD` does not pick the same one the closed form does. Over the probe's
-/// 64-point near-antiparallel sweep the two disagree on the sign in 17 of 64
-/// `f64` cases and 37 of 64 `f32` cases, with no pattern in the inputs — the
-/// choice comes out of the SVD's internal ordering, not out of the data.
-///
-/// When the signs disagree the two rotations differ by twice the branch's
-/// deficit angle, bounded by `2·sqrt(2·dummy_precision)`: **2.83e-6 rad in
-/// `f64`, 8.94e-3 rad in `f32`**. Measured worst cases on the sweep are 9.9e-7
-/// and 9.8e-4; a second sweep of random inputs reached 2.3e-6 and 2.2e-3.
-/// It is *Eigen* that is the inaccurate side: over the sweep its own tilt error
-/// reaches 9.9e-7 (`f64`) and 9.9e-4 (`f32`) where the closed form stays at
-/// 1.4e-9 and 3.2e-4. That is still a parity gap against the C++ reference, and
-/// the port does not hide it: the branch logs a warning the first time it fires,
-/// and `crates/slam-rs/tests/imu_oracle.rs`
-/// (`gravity_init_deviation_from_eigen_stays_within_its_bound`) pins the bound
-/// and the measured numbers against Eigen's own.
-///
-/// Reproducing Eigen exactly needs its `JacobiSVD` for a 2x3 with
-/// `ComputeFullV`, which for `rows < cols` runs a `ColPivHouseholderQR`
-/// preconditioner on the adjoint before the two-sided Jacobi sweep
-/// (`Eigen/src/SVD/JacobiSVD.h:36-44`, `:194-253`) — several hundred lines of
-/// Householder, pivoting and sign conventions that would each have to be
-/// bit-exact. That was assessed and deliberately not attempted; the branch only
-/// fires when a rig initialises within milliradians of upside down, and it sets
-/// yaw plus a bounded fraction of a degree of roll and pitch that the estimator
-/// re-estimates immediately.
-///
-/// Returns [`So3::identity`] for a zero or non-finite sample, which has no
-/// direction to align.
+/// Align measured specific force with world +Z. Only roll and pitch are
+/// observable. Near antiparallel inputs use a cross-product axis orthogonal
+/// to both directions; for exactly antiparallel inputs an arbitrary orthogonal
+/// axis resolves the unobservable yaw. Zero and non-finite samples return identity.
 pub fn gravity_from_first_accel<S: LieScalar>(accel: &Vector3<S>) -> So3<S> {
     let norm: S = accel.norm();
     if !norm.is_finite() || norm <= S::zero() {
@@ -878,8 +816,7 @@ pub fn gravity_from_first_accel<S: LieScalar>(accel: &Vector3<S>) -> So3<S> {
     let dot: S = v1.dot(&v0); // `:695`
 
     if dot < c::<S>(-1.0) + S::eigen_dummy_precision() {
-        // `:707-717`. This is the branch that is not bit-parity with Eigen; say
-        // so once, so a trajectory that starts here is explainable later.
+        // Report this ambiguous initial orientation once per process.
         ANTIPARALLEL_WARNING.call_once(|| {
             log::warn!(
                 "gravity initialisation took the near-antiparallel branch: the rig started \
@@ -897,8 +834,7 @@ pub fn gravity_from_first_accel<S: LieScalar>(accel: &Vector3<S>) -> So3<S> {
             axis.y * vector_scale,
             axis.z * vector_scale,
         );
-        // Eigen leaves the coefficients as computed; normalizing only removes
-        // the rounding of `sqrt(w2)² + (1 - w2)` against one.
+        // Normalize to remove rounding in the squared quaternion norm.
         return So3::from_unit_quaternion(nalgebra::UnitQuaternion::new_normalize(quaternion));
     }
 
@@ -915,15 +851,8 @@ pub fn gravity_from_first_accel<S: LieScalar>(accel: &Vector3<S>) -> So3<S> {
     So3::from_unit_quaternion(nalgebra::UnitQuaternion::new_normalize(quaternion))
 }
 
-/// A unit vector orthogonal to both `v0` and `v1`, Eigen's `V.col(2)` in closed
-/// form (`Quaternion.h:709-712`).
-///
-/// `v0 × v1` is the null vector of `[v0ᵀ; v1ᵀ]` whenever the two are
-/// independent. They coincide up to sign only when the rig is *exactly* upside
-/// down; the cross product then vanishes and the null space is the whole plane
-/// orthogonal to `v1`, of which Eigen's SVD returns `UnitX` for `v1 = UnitZ`.
-/// The fallback picks the same vector: the canonical axis with the smallest
-/// component in `v1`, projected off `v1`.
+/// A unit vector orthogonal to both inputs, using their cross product.
+/// For parallel inputs, project the least-aligned canonical axis off v1.
 fn axis_orthogonal_to_both<S: LieScalar>(v0: &Vector3<S>, v1: &Vector3<S>) -> Vector3<S> {
     let cross: Vector3<S> = v0.cross(v1);
     let norm: S = cross.norm();
@@ -946,42 +875,11 @@ fn axis_orthogonal_to_both<S: LieScalar>(v0: &Vector3<S>, v1: &Vector3<S>) -> Ve
     }
 }
 
-/// `Eigen::LDLT`'s in-place factorization of a 9x9 symmetric matrix, ported from
-/// `ldlt_inplace<Lower>::unblocked`
-/// (`thirdparty/basalt-headers/thirdparty/eigen/Eigen/src/Cholesky/LDLT.h:280-382`).
-///
-/// On return `mat` holds `D` on its diagonal and the strictly lower triangle of
-/// the unit lower `L`; the strict upper triangle is untouched leftover input,
-/// as in Eigen. The returned array is Eigen's `transpositionsP()`: applying
-/// `swap_rows(k, transpositions[k])` for ascending `k` builds the permutation
-/// `P` with `P A Pᵀ = L D Lᵀ`.
-///
-/// Two properties of *this* algorithm decide the whitening of a rank-deficient
-/// covariance, and neither survives a textbook right-looking LDLT:
-///
-/// * **The pivot is chosen on the un-updated diagonal.** Eigen delays the
-///   column updates (`:335-339`), so at step `k` the trailing diagonal still
-///   holds the *original* entries. That is why the Eigen source calls LDLT
-///   "not rank-revealing" (`:342-344`), and it changes which direction is
-///   eliminated first. For the covariance after one 5 ms sample with zero gyro
-///   and accelerometer, position and velocity are perfectly correlated
-///   (`p = ½ dt² a`, `v = dt a`), and Eigen eliminates the three *velocity*
-///   directions first, on their larger original variance.
-/// * **A dependent direction leaves a tiny negative pivot, not a zero.** With
-///   the velocity directions eliminated, the position pivots come out as
-///   `-1.6e-27` rather than `0`, and basalt's `vectorD()[i] < numeric_limits::min()`
-///   test (`preintegration.h:314`) — which a negative number passes — zeroes
-///   those rows of the factor. Pivoting the other way round leaves a tiny
-///   *positive* pivot instead, and `1/sqrt(tiny)` puts weights of order `1e26`
-///   on an unobservable direction.
-///
-/// Which side of zero the residue lands on is a property of the precision, not
-/// of the algorithm: the *same* case in `f32` leaves `+8.7e-19`, which is above
-/// `f32`'s `min()`, so basalt itself whitens those directions with a weight of
-/// `1.07e9`. The port reproduces that too, rather than deciding for basalt what
-/// a singular measurement ought to mean.
-///
-/// `crates/slam-rs/tests/imu_oracle.rs` pins all of it against the C++.
+/// Factor a symmetric 9x9 in place as `P A Pᵀ = L D Lᵀ`.
+/// Store D on the diagonal and unit-lower L below it. The upper triangle is
+/// unused. Apply the returned row swaps in ascending order to construct P.
+/// Select pivots from the original diagonal before updating the column.
+/// Whitening zeros negative and subnormal pivots instead of taking their roots.
 fn ldlt_in_place<S: LieScalar>(mat: &mut Matrix9<S>) -> [usize; POSE_VEL_SIZE] {
     let size: usize = POSE_VEL_SIZE;
     let mut transpositions: [usize; POSE_VEL_SIZE] = [0; POSE_VEL_SIZE];
@@ -1044,9 +942,7 @@ fn ldlt_in_place<S: LieScalar>(mat: &mut Matrix9<S>) -> [usize; POSE_VEL_SIZE] {
             }
         }
 
-        // `:345-346`. Eigen's cutoff is exactly zero, not an epsilon: LDLT is
-        // not rank-revealing, and the only thing this guard prevents is an
-        // infinity or a NaN (`:341-344`).
+        // Guard exact zero to avoid division by zero in the column update.
         let real_akk: S = mat[(k, k)];
         let pivot_is_valid: bool = real_akk.abs() > S::zero();
 
@@ -1060,7 +956,6 @@ fn ldlt_in_place<S: LieScalar>(mat: &mut Matrix9<S>) -> [usize; POSE_VEL_SIZE] {
             return transpositions;
         }
 
-        // `:359-360`. Eigen divides; it does not multiply by a reciprocal.
         if rs > 0 && pivot_is_valid {
             for i in (k + 1)..size {
                 mat[(i, k)] /= real_akk;
@@ -2922,6 +2817,38 @@ mod tests {
             let state1: PoseVelState<f64> = meas.predict_state(&PoseVelState::default(), &g);
             prop_assert!((state1.vel_w_i - g * total).norm() <= 1e-12);
             prop_assert!((state1.t_w_i.translation - g * 0.5 * total * total).norm() <= 1e-12);
+        }
+
+        #[test]
+        fn random_spd_covariance_is_inverted(values in prop::collection::vec(-1.0f64..1.0, 81)) {
+            let g = Matrix9::from_row_slice(&values);
+            let a = g.transpose() * g + Matrix9::identity();
+            let mut meas = IntegratedImuMeasurement::new(0, &Vector3::zeros(), &Vector3::zeros());
+            meas.cov = a;
+            let inverse = meas.get_cov_inv();
+            let reference = a.try_inverse().unwrap();
+            prop_assert!((inverse - reference).norm() < 1e-10 * (1.0 + reference.norm()));
+        }
+
+        #[test]
+        fn rank_deficient_gram_covariance_has_a_generalized_inverse(
+            weights in prop::array::uniform4(0.25f64..4.0), shift in 0usize..9,
+        ) {
+            // Four independent rows and scaled duplicate columns. This tests
+            // oblique null directions without rounding GᵀG into full rank.
+            let mut g = Matrix9::zeros();
+            for i in 0..4 {
+                g[(i, i)] = weights[i];
+                g[(i, i + 4)] = 2.0 * weights[i];
+            }
+            g.swap_columns(0, shift);
+            let a = g.transpose() * g;
+            let mut meas = IntegratedImuMeasurement::new(0, &Vector3::zeros(), &Vector3::zeros());
+            meas.cov = a;
+            let inverse = meas.get_cov_inv();
+            prop_assert!(inverse.iter().all(|v| v.is_finite()));
+            prop_assert!((inverse - inverse.transpose()).norm() < 1e-12 * (1.0 + inverse.norm()));
+            prop_assert!((a * inverse * a - a).norm() < 1e-10 * (1.0 + a.norm()));
         }
 
         /// The covariance stays symmetric and positive semi-definite, and the

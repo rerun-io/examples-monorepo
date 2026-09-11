@@ -24,12 +24,12 @@ use std::collections::BTreeSet;
 
 use nalgebra::{DMatrix, DVector};
 
-use crate::eigen::qr::{
-    BlockSpan, ColumnRedux, apply_householder_on_the_left_block, apply_householder_on_the_left_vec,
-    make_householder,
-};
 use crate::lie::LieScalar;
 use crate::marg::MargError;
+use crate::qr::{
+    BlockSpan, apply_householder_on_the_left_block, apply_householder_on_the_left_vec,
+    make_householder,
+};
 
 /// What the marginalization helper returns: the reduced system over the kept
 /// variables, as a square-root prior.
@@ -85,16 +85,9 @@ fn check_indices(
 /// rows `[marg_rank, total_rank)` against the kept columns (`:322-323`) — the
 /// part of the residual the marginalized variables can no longer explain.
 ///
-/// **The rank threshold is `sqrt(numeric_limits<Scalar>::epsilon())` on the raw
-/// `beta`** (`:284`, `:301`), not a relative test against the largest pivot.
-/// It is absolute, so it depends on the units the problem is scaled in — that
-/// is basalt's choice, and reproducing the C++'s decision on a column that
-/// lands on it is what makes two runs agree.
-///
-/// The Householder vector is written into the column and read back from it in
-/// C++ (`makeHouseholderInPlace`, then `Q2Jp.col(k).tail(...)` as the essential
-/// part, `:299-306`); the port keeps it in a scratch vector, which holds the
-/// same coefficients, and zeroes the column exactly where `:313` does.
+/// The rank policy uses the absolute threshold `sqrt(epsilon)` on `beta`.
+/// It therefore depends on the units of the scaled problem. A rejected
+/// column is zeroed without advancing the rank.
 pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
     mut q2jp: DMatrix<S>,
     mut q2r: DVector<S>,
@@ -112,9 +105,7 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
         });
     }
 
-    // `:256-278`: **marg first**, then keep, and `Q2Jp.applyOnTheRight(p)`,
-    // which is `new.col(i) = old.col(indices[i])`
-    // (`ProductEvaluators.h:1150-1160`, `Side == OnTheRight`).
+    // Permute marginalized columns first: new column i is old column indices[i].
     let indices: Vec<usize> = idx_to_marg
         .iter()
         .chain(idx_to_keep.iter())
@@ -127,10 +118,8 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
     let rank_threshold: S = S::default_epsilon().sqrt();
     let mut marg_rank: usize = 0;
     let mut total_rank: usize = 0;
-    // `tempVector.resize(cols + 1)` (`:290`): one scratch for the block and one
-    // slot past the end for the right-hand side.
-    let mut temp: Vec<S> = vec![S::zero(); cols + 1];
-    let mut essential: Vec<S> = vec![S::zero(); rows.saturating_sub(1)];
+    // Reuse a full unit-axis buffer for every reflection.
+    let mut essential: Vec<S> = vec![S::zero(); rows];
 
     for k in 0..cols {
         if total_rank >= rows {
@@ -140,22 +129,8 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
         let remaining_rows: usize = rows - base;
         let remaining_cols: usize = cols - k - 1;
 
-        // `:299`, `makeHouseholderInPlace` on `Q2Jp.col(k).tail(remainingRows)`.
-        //
-        // `Q2Jp` is `MatX`, i.e. column-major, so that segment is contiguous and
-        // its `squaredNorm()` takes Eigen's vectorised reduction — not the
-        // sequential fold a row-major landmark column takes. The difference
-        // reaches the `|beta| > sqrt(epsilon)` test three lines down: on the
-        // review's `9x2` problem the sequential fold accepts a column `f32`
-        // Eigen rejects and rejects one `f64` Eigen accepts.
-        let (h_coeff, beta) = make_householder(
-            &q2jp,
-            k,
-            base,
-            remaining_rows,
-            ColumnRedux::Contiguous,
-            &mut essential,
-        );
+        // Reflect this column; the resulting diagonal determines its rank.
+        let (h_coeff, beta) = make_householder(&q2jp, k, base, remaining_rows, &mut essential);
 
         if beta.abs() > rank_threshold {
             // `:302`.
@@ -170,16 +145,15 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
                     col_start: k + 1,
                     cols: remaining_cols,
                 },
-                &essential[..remaining_rows.saturating_sub(1)],
+                &essential[..remaining_rows],
                 h_coeff,
-                &mut temp[k + 1..],
             );
             // `:306`: the same reflection on the residual, in lockstep.
             apply_householder_on_the_left_vec(
                 &mut q2r,
                 base,
                 remaining_rows,
-                &essential[..remaining_rows.saturating_sub(1)],
+                &essential[..remaining_rows],
                 h_coeff,
             );
             total_rank += 1;

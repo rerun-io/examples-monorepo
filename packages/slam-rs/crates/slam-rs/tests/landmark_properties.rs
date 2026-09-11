@@ -108,11 +108,39 @@ fn behind_camera_points_fail_the_inverse_distance_gate() {
     assert!(result[3] < 0.0);
 }
 
-// Known numerical defect: see s34-1-rust-tests.md, parallel-ray DLT finding.
 #[test]
-#[ignore = "parallel DLT can return positive roundoff inverse distance; S34 report"]
 fn parallel_rays_fail_the_inverse_distance_gate() {
     let pose = Se3::new(So3::identity(), Vector3::new(0.1, 0.0, 0.0));
-    let result = triangulate(&Vector3::z(), &Vector3::z(), &pose).unwrap();
-    assert!(result[3] <= 0.0, "parallel rays returned {result:?}");
+    assert!(triangulate(&Vector3::z(), &Vector3::z(), &pose).is_none());
+    let pose32 = Se3::new(So3::identity(), Vector3::new(0.1f32, 0.0, 0.0));
+    assert!(triangulate(&Vector3::z(), &Vector3::z(), &pose32).is_none());
+}
+
+proptest! {
+    #[test]
+    fn inverse_distance_cutoff_f64(delta in 1e-8f64..0.01, baseline in 0.05f64..0.2) {
+        for (inverse_distance, accepted) in [(3.0 - delta, true), (3.0 + delta, false)] {
+            let pose = Se3::new(So3::identity(), Vector3::new(baseline, 0.0, 0.0));
+            let point = Vector3::new(0.0, 0.0, 1.0 / inverse_distance);
+            let f1 = (pose.inverse() * point).normalize();
+            let result = triangulate(&Vector3::z(), &f1, &pose).unwrap();
+            prop_assert!(result.iter().all(|v| v.is_finite()));
+            prop_assert_eq!(result[3] > 0.0 && result[3] < 3.0, accepted);
+            prop_assert!((result[3] - inverse_distance).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn inverse_distance_cutoff_f32(delta in 1e-4f32..0.01, baseline in 0.05f32..0.2) {
+        // Keep a gap larger than f32 reconstruction error on each side of 1/3 m.
+        for (inverse_distance, accepted) in [(3.0 - delta, true), (3.0 + delta, false)] {
+            let pose = Se3::new(So3::identity(), Vector3::new(baseline, 0.0, 0.0));
+            let point = Vector3::new(0.0, 0.0, 1.0 / inverse_distance);
+            let f1 = (pose.inverse() * point).normalize();
+            let result = triangulate(&Vector3::z(), &f1, &pose).unwrap();
+            prop_assert!(result.iter().all(|v| v.is_finite()));
+            prop_assert_eq!(result[3] > 0.0 && result[3] < 3.0, accepted);
+            prop_assert!((result[3] - inverse_distance).abs() < 2e-6);
+        }
+    }
 }

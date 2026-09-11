@@ -62,13 +62,8 @@ pub trait LieScalar: RealField + Copy {
         Self::SOPHUS_EPSILON.sqrt()
     }
 
-    /// `Eigen::NumTraits<Scalar>::dummy_precision()`: `1e-12` in double and
-    /// `1e-5` in float (`Eigen/src/Core/NumTraits.h`).
-    ///
-    /// Eigen's own fuzzy-comparison tolerance, several orders coarser than the
-    /// machine epsilon `RealField::default_epsilon` reports. It decides the
-    /// anti-parallel branch of `Quaternion::setFromTwoVectors`, which is how
-    /// basalt initialises orientation from the first accelerometer sample.
+    /// Near-antiparallel tolerance: 1e-12 for f64 and 1e-5 for f32.
+    /// This is coarser than machine epsilon to stabilize gravity initialization.
     fn eigen_dummy_precision() -> Self;
 
     /// `std::numeric_limits<Scalar>::min()`: the smallest positive normal value.
@@ -86,39 +81,6 @@ pub trait LieScalar: RealField + Copy {
     /// (`sqrt_keypoint_vio.cpp:788`, `:842`) so the first candidate always
     /// wins the `score < min_score` test.
     fn largest() -> Self;
-
-    /// Eigen's summation order for a **three**-coefficient reduction, such as
-    /// `v.head<3>().squaredNorm()`.
-    ///
-    /// The order is decided by `redux_traits` (`Eigen/src/Core/Redux.h:29-67`)
-    /// comparing `find_best_packet<Scalar, 3>` against the three coefficients,
-    /// so it is **not** the same in the two precisions:
-    ///
-    /// * `f64` — `Packet2d` is two doubles, so `LinearVectorizedTraversal`
-    ///   reduces one packet and folds the remainder in: `(a + b) + c`.
-    /// * `f32` — `Packet4f` is four floats, wider than the expression, so the
-    ///   aligned part is empty and the scalar `redux_novec_unroller` runs, which
-    ///   splits at `Length / 2` (`Redux.h:98-108`): `a + (b + c)`.
-    ///
-    /// Its one production caller left is the keyframe-eviction baseline in
-    /// `crate::estimator`: S33 replaced `head<3>().norm()` at the residual and
-    /// landmark sites with `Vector3::norm`, and this is what remains of the
-    /// three-coefficient tree.
-    ///
-    /// A sweep of 200,000 random vectors through the fork's own Eigen agrees
-    /// with exactly one order in each precision on every discriminating case
-    /// (48,359 of 200,000 in `f64`, 48,336 in `f32`) and with the other on none.
-    /// The packet widths come from the fork's build flags, where a trailing
-    /// `-march=nocona` overrides the earlier `-march=native` — so the reference
-    /// binary is SSE3, on every host, and this is not a property of the machine
-    /// the port happens to run on. The fixture `lmdb/lmdb_oracle.json` pins both
-    /// orders bit for bit.
-    ///
-    /// It matters: with the wrong order in `f64`, a landmark exactly 1/3 m away
-    /// normalises to `2.9999999999999996` instead of `3.0` and basalt's
-    /// `inv_dist < 3` gate (`sqrt_keypoint_vio.cpp:534`) accepts a landmark C++
-    /// rejects.
-    fn eigen_redux3(a: Self, b: Self, c: Self) -> Self;
 
     /// SO(3)'s exponential map at this precision, `kornia_algebra::lie::SO3F32::exp`
     /// or `SO3F64::exp`, in and out in basalt's `[qx, qy, qz, qw]` order.
@@ -149,11 +111,6 @@ pub trait LieScalar: RealField + Copy {
     /// The 3x3 rotation matrix, `SO3F32::matrix` or `SO3F64::matrix`, **column
     /// major**.
     ///
-    /// `glam`'s `from_quat` is Eigen's `toRotationMatrix` coefficient for
-    /// coefficient — `1 - (yy + zz)` on the diagonal from the doubled
-    /// components, the same products off it — so this is bit-identical to the
-    /// port it replaced, and `imu_oracle.rs` still asserts which axis a
-    /// rank-deficient covariance puts its weight on exactly.
     fn so3_matrix(quaternion_xyzw: &[Self; 4]) -> [Self; 9];
 
     /// The group inverse, `SO3F32::inverse` or `SO3F64::inverse`: the conjugate
@@ -166,7 +123,7 @@ pub trait LieScalar: RealField + Copy {
     /// Exact-as-possible conversion of a literal, standing in for C++'s `Scalar(x)`.
     fn from_literal(value: f64) -> Self;
 
-    /// Widen to `f64`, for the comparisons C++ promotes to `double`.
+    /// Convert to `f64` for diagnostics and scalar conversion.
     fn to_f64(self) -> f64;
 }
 
@@ -183,11 +140,6 @@ impl LieScalar for f64 {
 
     fn largest() -> Self {
         Self::MAX
-    }
-
-    /// One `Packet2d` plus the scalar remainder.
-    fn eigen_redux3(a: Self, b: Self, c: Self) -> Self {
-        (a + b) + c
     }
 
     fn so3_exp(omega: &[Self; 3]) -> [Self; 4] {
@@ -236,11 +188,6 @@ impl LieScalar for f32 {
         Self::MAX
     }
 
-    /// `Packet4f` is wider than three floats, so the scalar unroller runs.
-    fn eigen_redux3(a: Self, b: Self, c: Self) -> Self {
-        a + (b + c)
-    }
-
     fn so3_exp(omega: &[Self; 3]) -> [Self; 4] {
         SO3F32::exp(Vec3AF32::from_array(*omega)).to_array()
     }
@@ -282,13 +229,8 @@ pub(crate) fn c<S: LieScalar>(value: f64) -> S {
     S::from_literal(value)
 }
 
-/// `numext::maxi(a, b)` (`Core/MathFunctions.h`), which is what `cwiseMax`
-/// applies coefficient by coefficient.
-///
-/// `(a < b ? b : a)`, so a NaN on the left survives and `f32::max`'s
-/// NaN-suppressing behaviour is wrong here. `sqrt_keypoint_vio.cpp:1415` sends
-/// the result straight into the damped diagonal, so a NaN that Eigen keeps and
-/// Rust would drop changes whether the solve retries.
+/// Return the larger value, preserving a NaN on the left.
+/// The damped solver must retry on invalid input rather than suppress its NaN.
 pub(crate) fn eigen_maxi<S: LieScalar>(a: S, b: S) -> S {
     if a < b { b } else { a }
 }
@@ -476,24 +418,6 @@ impl<S: LieScalar> So3<S> {
     /// The rotation as a 3x3 matrix, `kornia_algebra::lie::SO3F32::matrix` /
     /// `SO3F64::matrix`.
     ///
-    /// `Sophus::SO3::matrix()` is `unit_quaternion().toRotationMatrix()`
-    /// (`Sophus/sophus/so3.hpp:257`), i.e. Eigen's
-    /// `QuaternionBase::toRotationMatrix`
-    /// (`thirdparty/basalt-headers/thirdparty/eigen/Eigen/src/Geometry/Quaternion.h:646-678`).
-    /// Upstream's is `glam`'s `Mat3::from_quat`, which is **that formula
-    /// coefficient for coefficient**: `1 - (yy + zz)` on the diagonal from the
-    /// doubled components, the same products off it. So this is bit-identical to
-    /// the port it replaced, and it is worth saying why that matters here rather
-    /// than treating it as luck.
-    ///
-    /// nalgebra's `to_rotation_matrix` builds each diagonal entry as
-    /// `ww + ii - jj - kk` and associates the off-diagonal triple products the
-    /// other way (`(x·y)·2` against `(2y)·x`). That is enough to move a
-    /// cancellation residue across zero: on one 5 ms `f32` IMU sample the
-    /// preintegrated covariance is rank deficient in a different *direction*
-    /// under the two roundings, and the whitening then puts its `1.15e18` weight
-    /// on a different axis (`crates/slam-rs/tests/imu_oracle.rs`,
-    /// `rotating_singular_f32`, which still asserts the axis exactly).
     pub fn matrix(&self) -> Matrix3<S> {
         // Both `glam` and nalgebra store column major, so the array transfers
         // without a transpose.
@@ -535,18 +459,7 @@ impl<S: LieScalar> std::ops::Mul<Vector3<S>> for So3<S> {
 
     /// Rotate a point, `SO3F32 * Vec3AF32` / `SO3F64 * Vec3F64`.
     ///
-    /// `Sophus::SO3::operator*(Point)` (`Sophus/sophus/so3.hpp:408-417`) writes
-    /// the rotation out as `uv = 2 (q.vec x p); p + q.w uv + q.vec x uv`, and
-    /// the port reproduced that association because it reaches a threshold:
-    /// `computeRelPose` rotates the baseline (`ba_utils.h:50`) into the relative
-    /// pose the DLT triangulates from, and basalt accepts a landmark only when
-    /// the result satisfies `0 < inv_dist < 3` (`sqrt_keypoint_vio.cpp:534`).
-    /// That gate is still there and the association is no longer the C++'s:
-    /// upstream is `glam`'s `p (w² - b·b) + b (2 (p·b)) + (b x p) 2w`, which is
-    /// the same rotation for a unit quaternion and a different last bit. What
-    /// decides a borderline landmark now is the ten-clip ATE gate, not this
-    /// ulp — and `triangulate` itself no longer reproduces Eigen either (S33
-    /// item 1).
+    /// Rotate a point with the scalar-specific kornia quaternion action.
     fn mul(self, rhs: Vector3<S>) -> Vector3<S> {
         Vector3::from(S::so3_act(&self.quaternion_xyzw(), &[rhs.x, rhs.y, rhs.z]))
     }
@@ -657,10 +570,7 @@ impl<S: LieScalar> Se3<S> {
     /// The homogeneous 4x4 matrix, `Sophus::SE3::matrix()`
     /// (`Sophus/sophus/se3.hpp:275-280`).
     ///
-    /// The rotation block goes through [`So3::matrix`], i.e. Eigen's
-    /// `toRotationMatrix` operation order (decision D44), because this matrix
-    /// is what the reprojection residual multiplies its landmark by
-    /// (`ba_utils.h:94`).
+    /// The rotation block uses [`So3::matrix`]; the final column is translation.
     pub fn matrix(&self) -> Matrix4<S> {
         let mut res: Matrix4<S> = Matrix4::zeros();
         res.fixed_view_mut::<3, 3>(0, 0)
@@ -795,24 +705,8 @@ pub fn left_jacobian_inv_so3<S: LieScalar>(phi: &Vector3<S>) -> Matrix3<S> {
 /// form on `(0, pi)`, a zeroth-order expansion at pi where `sin` vanishes, and
 /// the Taylor value `1/12` at zero.
 ///
-/// Two details are about arithmetic width rather than mathematics, and both
-/// change which branch an `f32` input lands in:
-///
-/// * **The pi comparison happens in `f64`.** C++ writes
-///   `phi_norm < M_PI - Sophus::Constants<Scalar>::epsilonSqrt()`
-///   (`sophus_utils.hpp:202`). `M_PI` is a `double`, so the whole comparison is
-///   promoted to `double` even when `Scalar` is `float`. Doing it in `f32`
-///   moves the threshold by about 2e-8, and the single `f32` value
-///   `3.13843035697937` — which is exactly `pi_f32 - epsilonSqrt_f32` — then
-///   takes the pi branch where basalt takes the closed form, changing the
-///   result from 0.0024845 to 0.0020120.
-/// * **`M_PI * M_PI` is a `double` product** that Eigen rounds to `Scalar`
-///   only when it divides (`sophus_utils.hpp:214`). Squaring `pi_f32` instead
-///   gives a different last bit.
-///
-/// The matrix is divided rather than multiplied by a reciprocal in the two
-/// constant branches, because that is what the C++ does and the two differ by
-/// an ulp in `f32`.
+/// Evaluate the threshold and denominator in the input scalar type.
+/// The constant branches divide the matrix directly by their denominator.
 fn inverse_jacobian_second_order_term<S: LieScalar>(
     phi_hat2: &Matrix3<S>,
     phi_norm2: S,
@@ -822,15 +716,16 @@ fn inverse_jacobian_second_order_term<S: LieScalar>(
         return phi_hat2 / c::<S>(12.0);
     }
     let phi_norm: S = phi_norm2.sqrt();
-    let threshold: f64 = std::f64::consts::PI - S::sophus_epsilon_sqrt().to_f64();
-    if phi_norm.to_f64() < threshold {
+    let pi: S = c(std::f64::consts::PI);
+    let threshold: S = pi - S::sophus_epsilon_sqrt();
+    if phi_norm < threshold {
         // Regular case on (0, pi).
         phi_hat2
             * (c::<S>(1.0) / phi_norm2
                 - (c::<S>(1.0) + phi_norm.cos()) / (c::<S>(2.0) * phi_norm * phi_norm.sin()))
     } else {
         // 0th-order Taylor expansion around pi.
-        phi_hat2 / c::<S>(std::f64::consts::PI * std::f64::consts::PI)
+        phi_hat2 / (pi * pi)
     }
 }
 
@@ -1059,49 +954,35 @@ mod tests {
         assert!((m.transpose() * m - Matrix3::identity()).norm() < 1e-12);
     }
 
-    /// The pi branch is selected in `f64`, as C++ does through `M_PI`.
-    ///
-    /// `3.13843035697937_f32` is exactly `pi_f32 - epsilonSqrt_f32`, so an
-    /// `f32` comparison sends it to the pi branch while basalt's promoted
-    /// `double` comparison keeps it on the closed form. The two expected values
-    /// are the ones the C++ produces at this input and at the next
-    /// representable `f32` above it (`sophus_utils.hpp:202-214`).
+    /// Check accuracy on both sides of the f32 branch boundary and at pi.
     #[test]
-    fn the_inverse_jacobian_pi_boundary_is_compared_in_f64() {
-        // 3.1384304_f32 is 3.138430356979370... exactly, which is exactly
-        // pi_f32 - epsilonSqrt_f32; the next f32 up is 3.138430595397949...
-        let below: Vector3<f32> = Vector3::new(3.138_430_4, 0.0, 0.0);
-        let above: Vector3<f32> = Vector3::new(f32::from_bits(below.x.to_bits() + 1), 0.0, 0.0);
-        assert_eq!(f64::from(below.x), 3.138_430_356_979_37);
-        assert_eq!(f64::from(above.x), 3.138_430_595_397_949);
-
-        // Closed form on (0, pi), the value the C++ produces here.
-        let expected_closed_form: f64 = 0.002_484_500_408_172_607_4;
-        assert_abs_diff_eq!(
-            f64::from(right_jacobian_inv_so3(&below)[(1, 1)]),
-            expected_closed_form,
-            epsilon = 1e-12
-        );
-        assert_abs_diff_eq!(
-            f64::from(left_jacobian_inv_so3(&below)[(1, 1)]),
-            expected_closed_form,
-            epsilon = 1e-12
-        );
-        // 0th-order expansion around pi, one ulp of input later.
-        let expected_near_pi: f64 = 0.002_011_954_784_393_310_5;
-        assert_abs_diff_eq!(
-            f64::from(right_jacobian_inv_so3(&above)[(1, 1)]),
-            expected_near_pi,
-            epsilon = 1e-12
-        );
-        assert_abs_diff_eq!(
-            f64::from(left_jacobian_inv_so3(&above)[(1, 1)]),
-            expected_near_pi,
-            epsilon = 1e-12
-        );
-        // The two branches really are far apart here, so this is a branch test,
-        // not a rounding test.
-        assert!((expected_closed_form - expected_near_pi).abs() > 4e-4);
+    fn the_inverse_jacobians_are_accurate_near_pi_in_f32() {
+        let boundary: f32 = std::f32::consts::PI - f32::sophus_epsilon_sqrt();
+        for angle in [
+            f32::from_bits(boundary.to_bits() - 1),
+            boundary,
+            f32::from_bits(boundary.to_bits() + 1),
+            std::f32::consts::PI,
+        ] {
+            let phi: Vector3<f32> = Vector3::new(angle, 0.0, 0.0);
+            let reference: Vector3<f64> = phi.map(f64::from);
+            for (actual, expected) in [
+                (
+                    right_jacobian_inv_so3(&phi),
+                    right_jacobian_inv_so3(&reference),
+                ),
+                (
+                    left_jacobian_inv_so3(&phi),
+                    left_jacobian_inv_so3(&reference),
+                ),
+            ] {
+                assert!(actual.iter().all(|v| v.is_finite()));
+                assert!(
+                    (actual.map(f64::from) - expected).norm() < 1e-3,
+                    "angle={angle}"
+                );
+            }
+        }
     }
 
     /// Near pi the closed form's `sin` denominator vanishes; basalt swaps in a
@@ -1193,6 +1074,23 @@ mod tests {
 
     proptest! {
         #![proptest_config(config())]
+
+        #[test]
+        fn inverse_so3_jacobians_are_accurate_near_pi_in_f32(
+            axis in tangent3(), gap in 0.0f32..0.01,
+        ) {
+            prop_assume!(axis.norm() > 0.1);
+            let phi: Vector3<f32> = axis.normalize().map(|v| v as f32)
+                * (std::f32::consts::PI - gap);
+            let reference: Vector3<f64> = phi.map(f64::from);
+            for (actual, expected) in [
+                (right_jacobian_inv_so3(&phi), right_jacobian_inv_so3(&reference)),
+                (left_jacobian_inv_so3(&phi), left_jacobian_inv_so3(&reference)),
+            ] {
+                prop_assert!(actual.iter().all(|v| v.is_finite()));
+                prop_assert!((actual.map(f64::from) - expected).norm() < 1e-3);
+            }
+        }
 
         #[test]
         fn so3_exp_then_log_is_the_identity(phi in tangent3()) {

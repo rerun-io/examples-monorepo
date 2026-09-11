@@ -936,24 +936,9 @@ impl<S: LieScalar> Camera<S> for PinholeRadtan8<S> {
         is_valid
     }
 
-    /// `pinhole_radtan8_camera.hpp:597-669`: five Newton steps on `distort`,
-    /// stopping early when the residual falls under `epsilonSqrt`.
-    ///
-    /// The 2x2 inverse inside the loop is written out because it has to round
-    /// like Eigen's, not like nalgebra's: Eigen takes **one** reciprocal of the
-    /// determinant and multiplies each cofactor by it
-    /// (`eigen/Eigen/src/LU/InverseImpl.h:66-83`, determinant at
-    /// `Determinant.h:40-44`), while `Matrix2::try_inverse` divides each
-    /// coefficient by the determinant. The two differ by a rounding step, which
-    /// is worth 4e-5 of bearing in `f32` on the msd-g2 cam2 calibration.
-    ///
-    /// A singular Jacobian is not special-cased either. `1 / 0` is an infinity,
-    /// the iterate becomes NaN, and the final `rp2 <= rpmax^2` comparison is
-    /// false, so the pixel is rejected — which is exactly what the C++ does with
-    /// `J.inverse()` (`:628`). Dividing by zero in floating point is not a
-    /// panic, so decision D32 is not in play, and returning the last finite
-    /// iterate instead would report success for a pixel that reprojects 50 px
-    /// away.
+    /// At most five Newton steps on `distort`, stopping early when the residual
+    /// falls under `epsilonSqrt`. A singular Jacobian rejects the pixel: the
+    /// last finite iterate need not reproject to the requested pixel.
     fn unproject(&self, proj: &Vector2<S>, p3d: &mut Vector4<S>) -> bool {
         let fx: S = self.param[0];
         let fy: S = self.param[1];
@@ -971,15 +956,12 @@ impl<S: LieScalar> Camera<S> for PinholeRadtan8<S> {
             let mut fundist: Vector2<S> = Vector2::zeros();
             self.distort(&undist, &mut fundist, Some(&mut jacobian));
             let residual: Vector2<S> = fundist - dist;
-            let determinant: S =
-                jacobian[(0, 0)] * jacobian[(1, 1)] - jacobian[(1, 0)] * jacobian[(0, 1)];
-            let invdet: S = S::one() / determinant;
-            let inverse: Matrix2<S> = Matrix2::new(
-                jacobian[(1, 1)] * invdet,
-                -jacobian[(0, 1)] * invdet,
-                -jacobian[(1, 0)] * invdet,
-                jacobian[(0, 0)] * invdet,
-            );
+            let Some(inverse) = jacobian.try_inverse() else {
+                // A rejected solve must not leave a usable bearing behind.
+                p3d.fixed_rows_mut::<3>(0).fill(c(f64::NAN));
+                p3d[3] = S::zero();
+                return false;
+            };
             undist -= inverse * residual;
             if residual.norm() < eps {
                 break;
@@ -1315,14 +1297,9 @@ mod tests {
     ///
     /// `fx = fy = 100`, `cx = 320`, `cy = 240`, `k4 = 1`: the distortion is
     /// `xp / (1 + rp^2)`, which peaks at 0.5 and has a vanishing derivative
-    /// there. Pixel (420, 240) asks for `xpp = 1`. C++ divides by the zero
-    /// determinant, carries NaNs through and fails the `rp2 <= rpmax^2` check
-    /// (`pinhole_radtan8_camera.hpp:628, :664-666`); so does this port. Stopping
-    /// the iteration and keeping the last finite iterate instead — which an
-    /// earlier version of this module did — reports success for a bearing that
-    /// reprojects fifty pixels away, which is the failure this test exists to
-    /// catch. `tests/camera_oracle.rs` pins the same case against the C++
-    /// numbers, in both scalars.
+    /// there. Pixel (420, 240) asks for `xpp = 1`. The singular solve must reject
+    /// the pixel and mark the bearing invalid. Accepting the last finite iterate
+    /// would return a bearing that reprojects fifty pixels away.
     #[test]
     fn a_singular_newton_step_rejects_the_pixel() {
         let camera: PinholeRadtan8<f64> = PinholeRadtan8::new(

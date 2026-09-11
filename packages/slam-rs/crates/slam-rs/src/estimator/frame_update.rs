@@ -14,7 +14,7 @@
 //! pose Jacobian are [`linearize_point`] and [`linearize_relative_pose`], the robust
 //! weight is the landmark block's own [`compute_error_weight`], the IMU factor is
 //! [`ImuBlock::linearize`], and the damped solve is [`damped_solve`] — the same
-//! Eigen LDLT the window solve runs. The damping policy is
+//! pivoted LU factorization the window solve runs. The damping policy is
 //! [`LmDamping`](super::LmDamping)'s own and the convergence test is
 //! [`lm_converged`], so the two schedules cannot drift apart on either. There is
 //! one reprojection model in the crate.
@@ -48,7 +48,6 @@ use super::optimize::{LmIteration, LmTermination, SolveOutcome, damped_solve};
 use super::{EstimatorError, SqrtKeypointVio, StageTimings, lm_converged};
 use crate::ba_base::{BundleAdjustmentBase, LinearizePointOut, linearize_point};
 use crate::duration_ns;
-use crate::eigen::ldlt::EigenLdlt;
 use crate::imu::{ImuBlock, ImuLinData, IntegratedImuMeasurement};
 use crate::lie::{LieScalar, Se3, eigen_maxi};
 use crate::linearize::{LandmarkBlockOptions, compute_error_weight, linearize_relative_pose};
@@ -151,8 +150,8 @@ pub(super) struct FrameUpdateScratch<S: LieScalar> {
     imu_h: DMatrix<S>,
     /// See [`Self::imu_h`].
     imu_b: DVector<S>,
-    /// The damped solve's factorization and working copy.
-    solve: EigenLdlt<S>,
+    /// Reused double-precision storage for the scaled, damped normal matrix.
+    solve: DMatrix<f64>,
     /// The increment [`damped_solve`] writes and the loop then negates.
     increment: DVector<S>,
     /// The pairs [`linearize_state`] has already evaluated, kept for its
@@ -171,7 +170,7 @@ impl<S: LieScalar> Default for FrameUpdateScratch<S> {
             b_trial: DVector::zeros(POSE_VEL_BIAS_SIZE),
             imu_h: DMatrix::zeros(IMU_BLOCK_SIZE, IMU_BLOCK_SIZE),
             imu_b: DVector::zeros(IMU_BLOCK_SIZE),
-            solve: EigenLdlt::empty(),
+            solve: DMatrix::zeros(0, 0),
             increment: DVector::zeros(POSE_VEL_BIAS_SIZE),
             rel_poses: Vec::new(),
         }
