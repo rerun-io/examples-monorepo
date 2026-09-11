@@ -86,20 +86,20 @@ schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c2
 profile = "fast"
 lane = "gpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 412
-gt_rmse_cm = 1.5531897910270267
-median_tracker_ms = 2.073256066069007
+gt_rmse_cm = 1.5529520149042368
+median_tracker_ms = 2.01892526820302
 measured_on = "2026-09-10"
 
 [[segment.baseline]]
 profile = "fast"
 lane = "cpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 412
-gt_rmse_cm = 1.548681936169996
-median_tracker_ms = 5.655172513797879
+gt_rmse_cm = 1.5485685474815554
+median_tracker_ms = 5.595673341304064
 measured_on = "2026-09-10"
 
 [[segment]]
@@ -131,20 +131,20 @@ schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c2
 profile = "fast"
 lane = "gpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 4095
-gt_rmse_cm = 2.072640406461682
-median_tracker_ms = 2.624445129185915
+gt_rmse_cm = 2.1142785579360557
+median_tracker_ms = 2.7023139409720898
 measured_on = "2026-09-10"
 
 [[segment.baseline]]
 profile = "fast"
 lane = "cpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 4095
-gt_rmse_cm = 2.1801766898055894
-median_tracker_ms = 5.923141725361347
+gt_rmse_cm = 2.204437636028058
+median_tracker_ms = 5.943018011748791
 measured_on = "2026-09-10"
 
 [[segment]]
@@ -176,20 +176,20 @@ schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c2
 profile = "fast"
 lane = "gpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 6119
-gt_rmse_cm = 22.664559812491312
-median_tracker_ms = 2.7129510417580605
+gt_rmse_cm = 22.631254405630916
+median_tracker_ms = 2.737950999289751
 measured_on = "2026-09-10"
 
 [[segment.baseline]]
 profile = "fast"
 lane = "cpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 6119
-gt_rmse_cm = 25.663163464972747
-median_tracker_ms = 5.402632988989353
+gt_rmse_cm = 25.68377962030547
+median_tracker_ms = 5.505363456904888
 measured_on = "2026-09-10"
 
 [[segment]]
@@ -221,20 +221,20 @@ schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c2
 profile = "fast"
 lane = "gpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 22117
-gt_rmse_cm = 5.56979899457329
-median_tracker_ms = 2.7664718218147755
+gt_rmse_cm = 6.013535364329911
+median_tracker_ms = 2.770652063190937
 measured_on = "2026-09-10"
 
 [[segment.baseline]]
 profile = "fast"
 lane = "cpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 22117
-gt_rmse_cm = 7.958601191961034
-median_tracker_ms = 5.9913829900324345
+gt_rmse_cm = 6.627831893039312
+median_tracker_ms = 5.983363371342421
 measured_on = "2026-09-10"
 
 [[segment]]
@@ -266,20 +266,20 @@ schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c2
 profile = "fast"
 lane = "gpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 31577
-gt_rmse_cm = 38.486029380937545
-median_tracker_ms = 2.9259631410241127
+gt_rmse_cm = 39.27443038950311
+median_tracker_ms = 2.7906177565455437
 measured_on = "2026-09-10"
 
 [[segment.baseline]]
 profile = "fast"
 lane = "cpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 31577
-gt_rmse_cm = 39.68529907290977
-median_tracker_ms = 8.378531318157911
+gt_rmse_cm = 39.15204921782488
+median_tracker_ms = 8.403763175010681
 measured_on = "2026-09-10"
 
 [[segment]]
@@ -311,20 +311,20 @@ schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c2
 profile = "fast"
 lane = "gpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 107
-gt_rmse_cm = 0.9778872996833629
-median_tracker_ms = 3.257982898503542
+gt_rmse_cm = 0.9776211447928421
+median_tracker_ms = 3.173569682985544
 measured_on = "2026-09-10"
 
 [[segment.baseline]]
 profile = "fast"
 lane = "cpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 107
-gt_rmse_cm = 0.9777033763543805
-median_tracker_ms = 9.955622255802155
+gt_rmse_cm = 0.9774597452318616
+median_tracker_ms = 10.065324138849974
 measured_on = "2026-09-10"
 
 [[segment]]
@@ -356,20 +356,20 @@ schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c2
 profile = "fast"
 lane = "gpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 1596
-gt_rmse_cm = 2.374600695982652
-median_tracker_ms = 3.0705055687576532
+gt_rmse_cm = 2.374494897537761
+median_tracker_ms = 3.0812059994786978
 measured_on = "2026-09-10"
 
 [[segment.baseline]]
 profile = "fast"
 lane = "cpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 1596
-gt_rmse_cm = 2.3741336097736867
-median_tracker_ms = 9.8024383187294
+gt_rmse_cm = 2.3729583686544053
+median_tracker_ms = 9.75686265155673
 measured_on = "2026-09-10"
 
 [[segment]]
@@ -401,20 +401,20 @@ schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c2
 profile = "fast"
 lane = "gpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 2887
-gt_rmse_cm = 8.62323091163306
-median_tracker_ms = 3.0115400440990925
+gt_rmse_cm = 8.595600070521419
+median_tracker_ms = 2.978031989187002
 measured_on = "2026-09-10"
 
 [[segment.baseline]]
 profile = "fast"
 lane = "cpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 2887
-gt_rmse_cm = 8.601215033296246
-median_tracker_ms = 8.74363910406828
+gt_rmse_cm = 8.588033879857804
+median_tracker_ms = 8.762769866734743
 measured_on = "2026-09-10"
 
 [[segment]]
@@ -446,20 +446,20 @@ schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c2
 profile = "fast"
 lane = "gpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 4255
-gt_rmse_cm = 39.81602875299696
-median_tracker_ms = 3.012289758771658
+gt_rmse_cm = 39.83297183144492
+median_tracker_ms = 2.992178313434124
 measured_on = "2026-09-10"
 
 [[segment.baseline]]
 profile = "fast"
 lane = "cpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 4255
-gt_rmse_cm = 39.82473558079779
-median_tracker_ms = 9.647301863878965
+gt_rmse_cm = 39.8263987332429
+median_tracker_ms = 9.64334700256586
 measured_on = "2026-09-10"
 
 [[segment]]
@@ -491,20 +491,20 @@ schema_sha256 = "89b1a6a3fa15e486aa15694a3ab98593f6de06b4e0b4888a3aef2e0ab0ca8c2
 profile = "fast"
 lane = "gpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 3735
-gt_rmse_cm = 77.13771043361253
-median_tracker_ms = 2.9493123292922974
+gt_rmse_cm = 77.17036318634017
+median_tracker_ms = 2.9670502990484238
 measured_on = "2026-09-10"
 
 [[segment.baseline]]
 profile = "fast"
 lane = "cpu"
 host = "pablo-dl-server"
-core_sha256 = "4cb8efe7cfae7e1a2c9b50e7a44c8448ba74a915209b1ce5c8d8e0fd50991aa6"
+core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
 framesets = 3735
-gt_rmse_cm = 77.15259016692208
-median_tracker_ms = 8.818400092422962
+gt_rmse_cm = 77.16547338163446
+median_tracker_ms = 8.876016363501549
 measured_on = "2026-09-10"
 
 [robocap]
