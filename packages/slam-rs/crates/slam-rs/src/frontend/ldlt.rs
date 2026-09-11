@@ -11,88 +11,11 @@ use nalgebra::Matrix3;
 /// Invert a symmetric patch Hessian, reading only its lower triangle.
 /// Singular diagonal pivots contribute zero in the factor coordinates.
 pub fn ldlt_inverse3(a: &Matrix3<f32>) -> Matrix3<f32> {
-    let (mat, transpositions): (Matrix3<f32>, [usize; 3]) = ldlt_decompose3(a);
+    let mut mat = *a;
+    let transpositions = crate::ldlt::ldlt_in_place(&mut mat);
     let mut result: Matrix3<f32> = Matrix3::identity();
     ldlt_solve3(&mat, &transpositions, &mut result);
     result
-}
-
-/// Pack unit-lower L and diagonal D, returning the symmetric pivot sequence.
-// A pivot step addresses the permutation and both matrix dimensions.
-#[allow(clippy::needless_range_loop)]
-fn ldlt_decompose3(a: &Matrix3<f32>) -> (Matrix3<f32>, [usize; 3]) {
-    const SIZE: usize = 3;
-    let mut mat: Matrix3<f32> = *a;
-    let mut transpositions: [usize; SIZE] = [0; SIZE];
-    let mut temp: [f32; SIZE] = [0.0; SIZE];
-
-    for k in 0..SIZE {
-        // the first index of the maximum, so ties take the earliest row.
-        let mut biggest: usize = k;
-        for i in (k + 1)..SIZE {
-            if mat[(i, i)].abs() > mat[(biggest, biggest)].abs() {
-                biggest = i;
-            }
-        }
-        transpositions[k] = biggest;
-
-        if k != biggest {
-            for j in 0..k {
-                let swap: f32 = mat[(k, j)];
-                mat[(k, j)] = mat[(biggest, j)];
-                mat[(biggest, j)] = swap;
-            }
-            for i in (biggest + 1)..SIZE {
-                let swap: f32 = mat[(i, k)];
-                mat[(i, k)] = mat[(i, biggest)];
-                mat[(i, biggest)] = swap;
-            }
-            let swap: f32 = mat[(k, k)];
-            mat[(k, k)] = mat[(biggest, biggest)];
-            mat[(biggest, biggest)] = swap;
-            for i in (k + 1)..biggest {
-                let swap: f32 = mat[(i, k)];
-                mat[(i, k)] = mat[(biggest, i)];
-                mat[(biggest, i)] = swap;
-            }
-        }
-
-        if k > 0 {
-            for i in 0..k {
-                temp[i] = mat[(i, i)] * mat[(k, i)];
-            }
-            let mut correction: f32 = 0.0;
-            for i in 0..k {
-                correction += mat[(k, i)] * temp[i];
-            }
-            mat[(k, k)] -= correction;
-            for row in (k + 1)..SIZE {
-                let mut update: f32 = 0.0;
-                for i in 0..k {
-                    update += mat[(row, i)] * temp[i];
-                }
-                mat[(row, k)] -= update;
-            }
-        }
-
-        let pivot: f32 = mat[(k, k)];
-        let pivot_is_valid: bool = pivot.abs() > 0.0;
-
-        if k == 0 && !pivot_is_valid {
-            for (j, transposition) in transpositions.iter_mut().enumerate() {
-                *transposition = j;
-            }
-            return (mat, transpositions);
-        }
-
-        if pivot_is_valid {
-            for row in (k + 1)..SIZE {
-                mat[(row, k)] /= pivot;
-            }
-        }
-    }
-
-    (mat, transpositions)
 }
 
 /// Apply the permutation, forward solve, guarded diagonal solve and back solve.

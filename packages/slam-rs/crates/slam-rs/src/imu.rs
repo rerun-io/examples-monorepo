@@ -21,6 +21,7 @@
 use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, Vector3};
 
 use crate::calib::Calibration;
+use crate::ldlt::ldlt_in_place;
 use crate::lie::{
     LieScalar, So3, c, left_jacobian_inv_so3, right_jacobian_inv_so3, right_jacobian_so3,
 };
@@ -738,96 +739,6 @@ fn axis_orthogonal_to_both<S: LieScalar>(v0: &Vector3<S>, v1: &Vector3<S>) -> Ve
     } else {
         basis
     }
-}
-
-/// Factor a symmetric 9x9 in place as `P A Pᵀ = L D Lᵀ`.
-/// Store D on the diagonal and unit-lower L below it. The upper triangle is
-/// unused. Apply the returned row swaps in ascending order to construct P.
-/// Select pivots from the original diagonal before updating the column.
-/// Whitening zeros negative and subnormal pivots instead of taking their roots.
-fn ldlt_in_place<S: LieScalar>(mat: &mut Matrix9<S>) -> [usize; POSE_VEL_SIZE] {
-    let size: usize = POSE_VEL_SIZE;
-    let mut transpositions: [usize; POSE_VEL_SIZE] = [0; POSE_VEL_SIZE];
-
-    for k in 0..size {
-        // `maxCoeff` keeps the *first* maximum, so the comparison
-        // has to be strict.
-        let mut pivot: usize = k;
-        for i in (k + 1)..size {
-            if mat[(i, i)].abs() > mat[(pivot, pivot)].abs() {
-                pivot = i;
-            }
-        }
-        transpositions[k] = pivot;
-
-        if pivot != k {
-            // a symmetric swap written to keep only the lower
-            // triangle valid, which is all the rest of the algorithm reads.
-            for column in 0..k {
-                let swapped: S = mat[(k, column)];
-                mat[(k, column)] = mat[(pivot, column)];
-                mat[(pivot, column)] = swapped;
-            }
-            for row in (pivot + 1)..size {
-                let swapped: S = mat[(row, k)];
-                mat[(row, k)] = mat[(row, pivot)];
-                mat[(row, pivot)] = swapped;
-            }
-            let swapped: S = mat[(k, k)];
-            mat[(k, k)] = mat[(pivot, pivot)];
-            mat[(pivot, pivot)] = swapped;
-            for i in (k + 1)..pivot {
-                let swapped: S = mat[(i, k)];
-                mat[(i, k)] = mat[(pivot, i)];
-                mat[(pivot, i)] = swapped;
-            }
-        }
-
-        // the delayed update. Column `k` is brought up to date from
-        // the columns already factorized; the trailing diagonal is not touched.
-        let rs: usize = size - k - 1;
-        if k > 0 {
-            let mut temp: [S; POSE_VEL_SIZE] = [S::zero(); POSE_VEL_SIZE];
-            for (j, entry) in temp.iter_mut().enumerate().take(k) {
-                *entry = mat[(j, j)] * mat[(k, j)]; // `:336`
-            }
-            let mut diagonal: S = S::zero();
-            for (j, entry) in temp.iter().enumerate().take(k) {
-                diagonal += mat[(k, j)] * *entry;
-            }
-            mat[(k, k)] -= diagonal; // `:337`
-            if rs > 0 {
-                for i in (k + 1)..size {
-                    let mut sum: S = S::zero();
-                    for (j, entry) in temp.iter().enumerate().take(k) {
-                        sum += mat[(i, j)] * *entry;
-                    }
-                    mat[(i, k)] -= sum; // `:338`
-                }
-            }
-        }
-
-        // Guard exact zero to avoid division by zero in the column update.
-        let real_akk: S = mat[(k, k)];
-        let pivot_is_valid: bool = real_akk.abs() > S::zero();
-
-        if k == 0 && !pivot_is_valid {
-            // the whole diagonal is zero, so there is nothing left
-            // to do but fill in the identity transpositions. The empty
-            // measurement takes this branch and whitens to zero.
-            for (j, entry) in transpositions.iter_mut().enumerate() {
-                *entry = j;
-            }
-            return transpositions;
-        }
-
-        if rs > 0 && pivot_is_valid {
-            for i in (k + 1)..size {
-                mat[(i, k)] /= real_akk;
-            }
-        }
-    }
-    transpositions
 }
 
 /// Linearization inputs for an IMU factor.
