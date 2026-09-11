@@ -2,16 +2,13 @@
 use super::detect::FAST_BORDER;
 use crate::image::ImageU16;
 
-/// `const int EDGE_THRESHOLD = 19` (`keypoints.cpp:55`).
+/// `const int EDGE_THRESHOLD = 19`.
 pub const EDGE_THRESHOLD: f32 = 19.0;
 
-/// The shared feature-count matrix, with the shape the caller allocated it for.
-///
-/// basalt sizes `cells` from **camera 0** (`frame_to_frame_optical_flow.h:119`)
-/// and then lets `detectKeypointsWithCells` index it with the *detected* image's
-/// own grid arithmetic (`keypoints.cpp:148`). For a rig whose cameras differ in
-/// size those two disagree, and the C++ reads out of range; carrying the shape
-/// explicitly is what lets the port skip such a cell instead.
+/// Shared feature counts with an explicit allocated shape.
+/// The frontend sizes occupancy from camera 0 while detection uses each camera's
+/// own grid. Explicit dimensions let mixed-resolution rigs skip cells outside
+/// the shared matrix instead of indexing beyond it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Occupancy<'a> {
     /// Feature counts, row-major over `rows` x `columns`.
@@ -22,7 +19,7 @@ pub struct Occupancy<'a> {
     pub columns: usize,
 }
 
-/// `basalt::Rect` (`utils/keypoints.h:55-61`): a half-open rectangle in pixels.
+/// A half-open rectangle in pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     /// Left edge.
@@ -36,14 +33,14 @@ pub struct Rect {
 }
 
 impl Rect {
-    /// `Rect::inBounds` (`keypoints.h:60`).
+    /// `Rect::inBounds`.
     #[inline]
     pub fn in_bounds(&self, x: f32, y: f32) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
 }
 
-/// `basalt::Masks` (`utils/keypoints.h:63-79`): regions of the image to ignore.
+/// Image regions to ignore.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Masks {
     /// The rectangles; a point inside any of them is masked.
@@ -51,13 +48,13 @@ pub struct Masks {
 }
 
 impl Masks {
-    /// `Masks::inBounds` (`keypoints.h:66-68`): inside *any* rectangle.
+    /// `Masks::inBounds` : inside *any* rectangle.
     #[inline]
     pub fn in_bounds(&self, x: f32, y: f32) -> bool {
         self.masks.iter().any(|mask| mask.in_bounds(x, y))
     }
 
-    /// `Masks::operator+=` (`keypoints.h:70-73`): append, never merge.
+    /// `Masks::operator+=` : append, never merge.
     pub fn extend(&mut self, other: &Masks) {
         self.masks.extend_from_slice(&other.masks);
     }
@@ -77,12 +74,8 @@ impl Masks {
 /// counts per camera.
 pub const MAX_CELLS: usize = crate::frontend::tracker::MAX_CAPACITY;
 
-/// basalt's centred detection grid (`keypoints.cpp:140-144`).
-///
-/// `x_start = (w % cell) / 2` and `x_stop = x_start + cell * (w / cell - 1)`, so
-/// the grid is centred in the image and its last cell ends one cell short of the
-/// right edge. The same arithmetic drives `updateCellCounts` and `addKeypoint`
-/// (`frame_to_frame_optical_flow.h:110-113`), which is why it lives in one place.
+/// Centered detection grid: `x_start = (w % cell) / 2` and
+/// `x_stop = x_start + cell * (w / cell - 1)`. Shared by detection and cell counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellGrid {
     /// `PATCH_SIZE`, i.e. `optical_flow_detection_grid_size`.
@@ -116,11 +109,8 @@ impl CellGrid {
         (0..columns).flat_map(move |column| (0..rows).map(move |row| (column, row)))
     }
 
-    /// The grid an image of `width` x `height` gets for a `cell`-pixel grid.
-    ///
-    /// `None` when the image is narrower or shorter than one cell: the C++
-    /// `x_start + PATCH_SIZE * (w / PATCH_SIZE - 1)` underflows `size_t` there
-    /// and the loop reads far outside the image.
+    /// Build a cell grid, returning `None` if either image side is smaller than one cell.
+    /// This prevents underflow in the final-cell index.
     pub fn new(width: usize, height: usize, cell: usize) -> Option<Self> {
         if cell == 0 || width < cell || height < cell {
             return None;
@@ -138,14 +128,9 @@ impl CellGrid {
         })
     }
 
-    /// The occupancy cell a keypoint falls in (`frame_to_frame_optical_flow.h:727-728`).
-    ///
-    /// The C++ computes `(kp.x - x_start) / c` in the estimator's **float**
-    /// scalar and casts to `int`, so a coordinate just left of `x_start` gives a
-    /// quotient in `(-1, 0]` that truncates to `0` rather than a negative index.
-    /// The saturating cast here does the same for the values the frontend can
-    /// produce and, unlike the C++, cannot index out of range on the ones it
-    /// cannot (trap 15).
+    /// Map a keypoint to an occupancy cell.
+    /// The f32 quotient is truncated towards zero: a point just left of the origin
+    /// maps to column zero. Saturating conversion prevents an invalid index (trap 15).
     #[inline]
     pub fn cell_of(&self, x: f32, y: f32) -> (usize, usize) {
         let column: i32 = ((x - self.x_start as f32) / self.cell as f32) as i32;
@@ -156,7 +141,7 @@ impl CellGrid {
         )
     }
 
-    /// Whether a keypoint is inside the grid at all (`frame_to_frame_optical_flow.h:711`).
+    /// Whether a keypoint is inside the grid at all.
     #[inline]
     pub fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.x_start as f32
@@ -176,21 +161,14 @@ pub struct DetectorConfig {
     pub min_threshold: i32,
     /// `optical_flow_detection_max_threshold`.
     pub max_threshold: i32,
-    /// `optical_flow_image_safe_radius`; `0` switches the gate off (`keypoints.cpp:178`).
+    /// `optical_flow_image_safe_radius`; `0` switches the gate off.
     pub safe_radius: f32,
 }
 
-/// The rung the halving threshold ladder stops at, whatever the config says.
-///
-/// basalt's ladder is `while (points_added < num_points_cell && threshold >=
-/// min_threshold) { ...; threshold /= 2; }` (`keypoints.cpp:162`, `:187`), and
-/// integer division halves 1 to 0 and then 0 to 0 for ever: a
-/// `min_threshold` of `0` or less makes **the C++ loop non-terminating too**, on
-/// the same cell, and the port reproduced that hang. The frontend refuses such a
-/// config up front ([`crate::frontend::flow::FrontendError::ThresholdLadderNeverEnds`]),
-/// and this floor is the second line: the detector is public, so a caller that
-/// builds a [`DetectorConfig`] by hand gets the ladder run down to a threshold of
-/// 1 and no further, rather than a wedged process (decision D32).
+/// Lowest rung of the detector's halving threshold ladder.
+/// Integer division leaves zero unchanged, so allowing a non-positive lower
+/// threshold could loop forever. The frontend refuses such configurations, and
+/// this floor also protects direct detector callers (D32).
 pub const LOWEST_THRESHOLD_RUNG: i32 = 1;
 
 /// The thresholds [`super::detect::detect_keypoints_with_cells`]'s ladder visits, in order.

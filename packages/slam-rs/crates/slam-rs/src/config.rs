@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Which linearization the estimator runs (`vio_config.h:42`).
+/// Which linearization the estimator runs.
 ///
 /// Only [`LinearizationType::AbsQr`] is ported (decision D13); the other two
 /// parse so a config that names them is still readable.
@@ -21,7 +21,7 @@ pub enum LinearizationType {
     RelSc,
 }
 
-/// How the frontend guesses where a feature moved (`vio_config.h:43`).
+/// How the frontend guesses where a feature moved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MatchingGuessType {
     /// Start from the same pixel.
@@ -35,13 +35,13 @@ pub enum MatchingGuessType {
     ReprojAvgDepth,
 }
 
-/// Which keyframe gets marginalized (`vio_config.h:44`).
+/// Which keyframe gets marginalized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KeyframeMargCriteria {
-    /// The shared-feature ratio rule (`sqrt_keypoint_vio.cpp:814`).
+    /// The shared-feature ratio rule.
     #[serde(rename = "KF_MARG_DEFAULT")]
     Default,
-    /// The fork's forward-vector rule (`sqrt_keypoint_vio.cpp:770`).
+    /// The forward-vector eviction rule.
     #[serde(rename = "KF_MARG_FORWARD_VECTOR")]
     ForwardVector,
 }
@@ -54,17 +54,14 @@ pub enum ConfigError {
     Parse(#[from] serde_json::Error),
 }
 
-/// cereal's outer wrapper: every basalt JSON is one object under `value0`.
+/// The JSON wrapper: one object under `value0`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Value0<T> {
     #[serde(rename = "value0")]
     value0: T,
 }
 
-/// basalt's `VioConfig` (`include/basalt/utils/vio_config.h:46-128`).
-///
-/// The scalar widths follow the C++ exactly (`float` vs `double` vs `int`), so a
-/// value that is `float` there cannot silently gain precision here.
+/// VIO configuration with explicit scalar widths for numerical fields.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct VioConfig {
@@ -144,18 +141,11 @@ pub struct VioConfig {
     /// Non-finite or non-positive values use zero.
     #[serde(rename = "port.redetect_survivor_ratio")]
     pub port_redetect_survivor_ratio: f32,
-    /// LM steps the non-keyframe frame update gets; `0` solves the whole window
-    /// on every frameset (D76).
-    ///
-    /// `0` — every basalt file's value and [`VioConfig::default`]'s — is
-    /// basalt's own schedule: `optimize` runs the 87-unknown sliding window on
-    /// every frameset. Above zero a frameset that took no keyframe instead
-    /// solves the newest state's 15 unknowns against fixed landmarks and its IMU
-    /// factor, and the joint solve runs at keyframes only. The loop is the
-    /// window's, inclusive as `vio_max_iterations` is, so `5` is a budget of
-    /// **six** trials — accepted and backtracked together — not five; the two
-    /// caps mean the same thing on purpose. Carried by the profile overlay alone
-    /// (`configs/profiles/fast.json`); the `port.` spelling is D75's.
+    /// LM steps for a non-keyframe update; zero solves the whole window each frameset (D76).
+    /// Above zero, non-keyframes solve only the newest state's 15 unknowns against
+    /// fixed landmarks and its IMU factor. Keyframes still run the joint solve.
+    /// The iteration cap is inclusive and shared with backtracking: five permits six
+    /// trials. `configs/profiles/fast.json` selects this schedule through the `port.` key.
     #[serde(rename = "port.frame_update_max_iterations")]
     pub port_frame_update_max_iterations: i32,
 
@@ -178,9 +168,7 @@ pub struct VioConfig {
     /// Tracked-keypoint ratio below which a new keyframe is made.
     #[serde(rename = "config.vio_new_kf_keypoints_thresh")]
     pub vio_new_kf_keypoints_thresh: f32,
-    /// Estimator debug output. Parsed because every shipped JSON carries it,
-    /// and read by nothing: in C++ it gates console prints and the nullspace
-    /// and eigenvalue diagnostics, which the port does not carry (D68).
+    /// Parsed compatibility field for estimator debug output; currently unused (D68).
     #[serde(rename = "config.vio_debug")]
     pub vio_debug: bool,
     /// Nullspace and eigenvalue logging. Parsed and read by nothing, for the
@@ -216,9 +204,7 @@ pub struct VioConfig {
     /// Damping ceiling; exceeding it abandons the frame's optimization.
     #[serde(rename = "config.vio_lm_lambda_max")]
     pub vio_lm_lambda_max: f64,
-    /// Inert: the Jacobian-scaling code it would select is commented out
-    /// (`sqrt_keypoint_vio.cpp:1211-1212`), matching the paper's statement that
-    /// scaling is skipped.
+    /// Inert: Jacobian scaling is absent from the estimator (D68).
     #[serde(rename = "config.vio_scale_jacobian")]
     pub vio_scale_jacobian: bool,
     /// Gauge prior weight on the first pose.
@@ -245,7 +231,7 @@ pub struct VioConfig {
 }
 
 impl Default for VioConfig {
-    /// `VioConfig::VioConfig()` (`src/utils/vio_config.cpp:47-128`).
+    /// `VioConfig::VioConfig()`.
     fn default() -> Self {
         Self {
             optical_flow_type: "frame_to_frame".to_owned(),
@@ -310,7 +296,7 @@ impl VioConfig {
         Ok(wrapper.value0)
     }
 
-    /// Write the config back in basalt's shape, wrapper and all.
+    /// Write configuration JSON with its `value0` wrapper.
     pub fn to_json_string(&self) -> Result<String, ConfigError> {
         Ok(serde_json::to_string_pretty(&Value0 { value0: self })?)
     }
@@ -365,7 +351,7 @@ mod tests {
 
         assert_eq!(index.optical_flow_image_safe_radius, 472.0);
         assert_eq!(g2.optical_flow_image_safe_radius, 340.0);
-        // The RoboCap driver points at this file (`python/robocap_vit.toml:8`).
+        // The RoboCap driver points at this file (`python/robocap_vit.toml).
         assert_eq!(odyssey.optical_flow_image_safe_radius, 388.0);
 
         let mut normalised: VioConfig = g2.clone();

@@ -71,8 +71,8 @@ fn the_first_frame_detects_on_camera_zero_and_matches_into_camera_one() {
     assert!(shared > 0, "camera 1 shares no id with camera 0");
 }
 
-/// `last_keypoint_id` is the global landmark id space (`optical_flow.h:71`,
-/// `:174`): ids are handed out in detection order and never reused.
+/// `last_keypoint_id` is the global landmark id space (
+/// ): ids are handed out in detection order and never reused.
 #[test]
 fn keypoint_ids_are_one_monotonic_space() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
@@ -131,12 +131,8 @@ fn gated_frontend(cameras: usize, ratio: f32) -> FrameToFrameOpticalFlow<Pattern
     FrameToFrameOpticalFlow::new(gated, &rig(cameras), FrontendOptions::default()).unwrap()
 }
 
-/// The gate's default is basalt's schedule (D75): `addPoints` on every
-/// frameset, so every frameset hands out ids.
-///
-/// This is the control the two tests below are read against — without it, a
-/// gated run that detects rarely could not be told from a rig that has nothing
-/// left to detect.
+/// At the default survivor ratio, detection runs every frameset (D75).
+/// This control distinguishes gated detection from a scene with no new corners.
 #[test]
 fn the_default_config_detects_on_every_frameset() {
     assert_eq!(VioConfig::default().port_redetect_survivor_ratio, 0.0);
@@ -388,7 +384,7 @@ fn redetection_keeps_its_baseline_after_a_rejected_frameset() {
     assert_eq!(faulty.last_keypoint_id(), clean.last_keypoint_id());
 }
 
-/// `updateCellCounts` / `addKeypoint` / `removeKeypoint` (`:707-749`) keep
+/// `updateCellCounts` / `addKeypoint` / `removeKeypoint` keep
 /// `cells` equal to the number of keypoints in each grid cell — except where
 /// `addKeypoints` deliberately double-counts, which cannot happen on camera 0.
 #[test]
@@ -487,9 +483,7 @@ fn two_runs_of_the_same_input_produce_the_same_frame() {
     assert_eq!(frames[0], frames[1]);
 }
 
-/// Trap 17: `getNumCams() >= 2` is a hard precondition in the C++
-/// (`optical_flow.h:210`). The port allows one camera and skips the passes
-/// that need a second.
+/// Single-camera rigs skip stereo passes (trap 17).
 #[test]
 fn a_single_camera_rig_detects_and_skips_matching() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(1, FrontendOptions::default());
@@ -563,8 +557,7 @@ fn a_frameset_of_the_wrong_width_is_refused() {
     );
 }
 
-/// A `min_threshold` of zero or less wedges the detector, in C++ as much as
-/// here, so the frontend refuses the config instead of accepting it.
+/// Refuse non-positive detector minima to prevent an infinite halving loop.
 #[test]
 fn a_config_whose_threshold_ladder_never_ends_is_refused() {
     for min_threshold in [0, -1, i32::MIN] {
@@ -794,12 +787,8 @@ fn a_frame_of_the_wrong_size_commits_nothing() {
     assert!(shared > 0, "the kept frame was not tracked against");
 }
 
-/// Two identical framesets at negative timestamps track each other.
-///
-/// basalt reads `t_ns < 0` as "no previous frame" (`optical_flow.h:172`), so
-/// the port used to detect from scratch on every negative timestamp and hand
-/// out a fresh id space each time. The clock is an `Option` now, so `-2` and
-/// `-1` are ordinary timestamps and the second frameset tracks the first.
+/// An optional clock makes negative timestamps ordinary values.
+/// Two identical frames at negative times must track instead of resetting ids.
 #[test]
 fn identical_frames_at_negative_timestamps_keep_their_ids() {
     let images: [ImageU16; 2] = [dotted_image(0), dotted_image(0)];
@@ -835,7 +824,7 @@ fn identical_frames_at_negative_timestamps_keep_their_ids() {
     );
 }
 
-/// `keypoints.cpp:179`: a mask covering the frame leaves nothing to detect.
+/// a mask covering the frame leaves nothing to detect.
 #[test]
 fn a_mask_over_the_whole_frame_suppresses_detection() {
     let mut flow: FrameToFrameOpticalFlow<Pattern51> = frontend(2, FrontendOptions::default());
@@ -1098,8 +1087,8 @@ fn a_calibration_whose_occupancy_grid_is_past_the_ceiling_is_refused() {
     }
 }
 
-/// Every camera is detected on **its own** grid (`keypoints.cpp:140-144`),
-/// even though the occupancy matrix keeps camera 0's shape (`:119`).
+/// Every camera is detected on **its own** grid,
+/// even though the occupancy matrix keeps camera 0's shape.
 ///
 /// The review's probe: with 50-pixel cells a 200x200 camera starts at 0 and a
 /// 240x240 camera at 20, and those two grids disagree about a corner near

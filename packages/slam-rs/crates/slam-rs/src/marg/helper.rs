@@ -1,24 +1,8 @@
-//! `MargHelper<Scalar>` (`include/basalt/vi_estimator/marg_helper.h`,
-//! `src/vi_estimator/marg_helper.cpp`): the routine that turns a linear system
-//! over `keep ∪ marg` into an equivalent one over `keep` alone.
-//!
-//! [`marginalize_helper_sqrt_to_sqrt`] takes `Q₂J_p`, `Q₂r` to `J_m`, `r_m`
-//! (`marg_helper.cpp:247-327`), and it is the only one of the C++'s three the
-//! port carries: the linearization is `ABS_QR` and `vio_sqrt_marg` is on in
-//! every shipped configuration, so `marginalize()` takes the
-//! `is_lin_sqrt && marg_data.is_sqrt` branch (`sqrt_keypoint_vio.cpp:1071-1073`)
-//! and `SqrtKeypointVio::new` refuses the flag off (D68).
-//!
-//! **It consumes its input.** C++ takes `MatX&` and ends with
-//! `abs_H.resize(0, 0)` (`:325-326`); the port takes the matrices **by value**,
-//! which says the same thing in a way the compiler checks.
-//!
-//! **The columns are permuted marg first** (`:259-273`), so that a flat QR
-//! sweeping left to right eliminates the marginalized variables before it
-//! reaches the kept ones and the rows below the marginalized rank are exactly
-//! the prior. The C++'s two squared forms permuted keep first because they took
-//! a Schur complement, which wanted the block to invert in the bottom-right
-//! corner.
+//! Eliminate marginalized variables from a square-root system.
+//! [`marginalize_helper_sqrt_to_sqrt`] consumes matrices by value and produces
+//! the prior Jacobian and residual. Put marginalized columns first, then sweep
+//! QR left to right; rows below their rank constrain only kept variables.
+//! Only square-root marginalization is supported (D68).
 
 use std::collections::BTreeSet;
 
@@ -41,12 +25,7 @@ pub struct ReducedSystem<S: LieScalar> {
     pub b: DVector<S>,
 }
 
-/// Validate the index sets against a system of `total` columns.
-///
-/// C++ has one assertion, `keep_size + marg_size == abs_H.cols()` (`:47`), and
-/// trusts the caller for the rest; an index out of range or shared between the
-/// two sets is an out-of-bounds read there. The port checks all three
-/// (decision D32).
+/// Validate complete, disjoint, in-range keep/marginalize index sets (D32).
 fn check_indices(
     idx_to_keep: &BTreeSet<usize>,
     idx_to_marg: &BTreeSet<usize>,
@@ -75,14 +54,14 @@ fn check_indices(
     Ok((keep_size, marg_size))
 }
 
-/// `MargHelper::marginalizeHelperSqrtToSqrt` (`marg_helper.cpp:247-327`).
+/// `MargHelper::marginalizeHelperSqrtToSqrt`.
 ///
 /// A rank-revealing Householder QR over the whole stacked `[J_marg | J_keep]`,
 /// swept column by column. Every column that produces a reflector with
 /// `|beta| > sqrt(epsilon)` consumes one row of rank; a column that does not is
 /// zeroed and the rank does not advance. `marg_rank` is the rank reached when
-/// the last marginalized column is done (`:316`), and the prior is the block of
-/// rows `[marg_rank, total_rank)` against the kept columns (`:322-323`) — the
+/// the last marginalized column is done, and the prior is the block of
+/// rows `[marg_rank, total_rank)` against the kept columns — the
 /// part of the residual the marginalized variables can no longer explain.
 ///
 /// The rank policy uses the absolute threshold `sqrt(epsilon)` on `beta`.
@@ -97,7 +76,6 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
     let rows: usize = q2jp.nrows();
     let cols: usize = q2jp.ncols();
     let (keep_size, marg_size) = check_indices(idx_to_keep, idx_to_marg, cols)?;
-    // `:254`.
     if q2r.nrows() != rows {
         return Err(MargError::RhsLengthMismatch {
             rows,
@@ -114,7 +92,6 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
     let permuted: DMatrix<S> = DMatrix::from_fn(rows, cols, |i, j| q2jp[(i, indices[j])]);
     q2jp = permuted;
 
-    // `:280-318`.
     let rank_threshold: S = S::default_epsilon().sqrt();
     let mut marg_rank: usize = 0;
     let mut total_rank: usize = 0;
@@ -133,9 +110,8 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
         let (h_coeff, beta) = make_householder(&q2jp, k, base, remaining_rows, &mut essential);
 
         if beta.abs() > rank_threshold {
-            // `:302`.
             q2jp[(base, k)] = beta;
-            // `:304-305`: the reflection on `bottomRightCorner(remainingRows,
+            // the reflection on `bottomRightCorner(remainingRows,
             // remainingCols)`, which starts at row `base`, column `k + 1`.
             apply_householder_on_the_left_block(
                 &mut q2jp,
@@ -148,7 +124,7 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
                 &essential[..remaining_rows],
                 h_coeff,
             );
-            // `:306`: the same reflection on the residual, in lockstep.
+            // the same reflection on the residual, in lockstep.
             apply_householder_on_the_left_vec(
                 &mut q2r,
                 base,
@@ -158,33 +134,28 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
             );
             total_rank += 1;
         } else {
-            // `:309`.
             q2jp[(base, k)] = S::zero();
         }
 
-        // `:313`: overwrite the Householder vector with zeros. `remainingRows`
+        // overwrite the Householder vector with zeros. `remainingRows`
         // is the value from **before** the rank advanced.
         for i in (base + 1)..rows {
             q2jp[(i, k)] = S::zero();
         }
 
-        // `:316`: `k == marg_size - 1` on a signed index, so with nothing to
-        // marginalize C++ compares against `-1` and never fires.
+        // With no marginalized columns there is no boundary at which to capture marginal rank.
         if k + 1 == marg_size {
             marg_rank = total_rank;
         }
     }
 
-    // `:320-323`.
     let keep_valid_rows: usize = (total_rank - marg_rank).max(1);
     let mut h: DMatrix<S> = DMatrix::zeros(keep_valid_rows, keep_size);
     let mut b: DVector<S> = DVector::zeros(keep_valid_rows);
     for i in 0..keep_valid_rows {
         let row: usize = marg_rank + i;
-        // `max(total_rank - marg_rank, 1)` can ask for a row past the end when
-        // the marginalized part alone exhausted the rank; C++ reads out of
-        // range there, the port leaves the row zero — which is the answer the
-        // arithmetic gives: nothing is left to constrain the kept variables.
+        // If marginalized variables exhaust the rank, leave the minimum output row zero:
+        // no remaining constraint acts on kept variables.
         if row >= rows {
             break;
         }
@@ -200,9 +171,7 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    // The probe columns below are the fork's `%.17g` printout, carried over
-    // verbatim even where the scalar does not need every figure. Keeping the
-    // printout is what makes them evidence.
+    // Keep probe constants at their recorded precision.
     #![allow(clippy::excessive_precision)]
 
     use super::*;
@@ -243,9 +212,7 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(32))]
 
-        /// The square-root QR marginalization and the dense Schur complement of
-        /// the same full-rank problem agree, which is basalt's own
-        /// `VoMargSqrtLinearizationTest` argument applied to `MargHelper`.
+        /// Square-root marginalization must equal the dense Schur complement for a full-rank problem.
         #[test]
         fn the_qr_marginalization_is_the_schur_complement(
             values in prop::collection::vec(-1.5f64..1.5, 96..97),
@@ -314,8 +281,7 @@ mod tests {
         );
     }
 
-    /// Marginalizing nothing is the identity on the information, which is the
-    /// `marg_size == 0` corner where C++ compares `k` against `-1`.
+    /// Marginalizing no variables preserves information.
     #[test]
     fn marginalizing_nothing_keeps_the_whole_system() {
         let j: DMatrix<f64> = DMatrix::from_fn(5, 3, |i, jj| ((i * 3 + jj) as f64).sin());

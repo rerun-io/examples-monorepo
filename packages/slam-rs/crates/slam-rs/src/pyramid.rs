@@ -1,70 +1,20 @@
-//! The frontend's integer Gaussian image pyramid.
+//! Integer Gaussian image pyramids for the frontend.
+//! A separable `[1, 4, 6, 4, 1]` filter uses reflect-101 borders, i32 accumulation
+//! and one final rounding `(value + 128) >> 8`. Each level halves both dimensions.
 //!
-//! Ported from `thirdparty/basalt-headers/include/basalt/image/image_pyr.h`.
-//! `subsample` (`image_pyr.h:99-140`) is reproduced operation for operation:
-//! a separable 5-tap `[1, 4, 6, 4, 1]` Gaussian with BORDER_REFLECT_101
-//! extrapolation, integer accumulation in an `i32` scratch buffer laid out
-//! row-major over `dst_height` x `src_width` — which reproduces C++'s
-//! transposed *arithmetic*, not its layout, see `subsample` — and one
-//! rounding at the very end, `(val + (1 << 7)) >> 8` (`image_pyr.h:135`).
-//! Each level halves both dimensions after filtering and rounds once to u16.
-//!
-//! ## What is not reproduced: the mipmap allocation
-//!
-//! basalt packs every level into one `w + w/2` wide buffer (`image_pyr.h:71`)
-//! and hands out sub-images (`lvl`, `image_pyr.h:146-152`). That is an
-//! allocation trick, not a numerical one, and it is the one thing the GPU seam
-//! forbids: a level must be a flat buffer with a stateable stride so it uploads
-//! as one `create_from_slice`. So [`PyramidU16`] owns one [`ImageU16`] per
-//! level and keeps basalt's level *geometry* — level `l` is
-//! `(width >> l, height >> l)` (`image_pyr.h:149-150`) — exactly (deviation X04).
-//!
-//! ## Level 0 is a copy, not a borrow
-//!
-//! basalt copies too (`lvl_internal(0).CopyFrom(other)`, `image_pyr.h:73`), and
-//! the seam rule is that no public signature returns a borrowed view into
-//! pyramid memory: the whole pyramid is one residency unit that a GPU backend
-//! uploads and owns. A borrowed level 0 would also tie the pyramid's lifetime
-//! to the input frame, which the per-frame reuse in
-//! [`CpuPyramidBuilder::build`] is built to avoid.
-//!
-//! ## Level counting
-//!
-//! `setFromImage(other, num_levels)` builds levels `1..=num_levels`
-//! (`image_pyr.h:75-79`), so basalt's `optical_flow_levels = 3` means **four**
-//! usable levels, 0 through 3. [`PyramidU16::with_capacity`] takes the same
-//! `num_levels` and allocates `num_levels + 1` levels.
-//!
-//! ## The seam lends nothing
-//!
-//! [`PyramidBuilder`] and its associated [`Pyramid`] type expose **no borrows**:
-//! only geometry ([`Pyramid::num_levels`], [`Pyramid::level_size`]) and a copy
-//! into a buffer the caller already owns ([`Pyramid::copy_level_into`]). That is
-//! the §12.3.2 rule — a GPU pyramid holds device handles and cannot lend a
-//! `&[u16]`, so generic frontend code written against `P: PyramidBuilder` must
-//! never be able to ask for one. The concrete CPU [`PyramidU16`] does keep one
-//! borrowing accessor, `level`, because the KLT tracker lands in this crate and
-//! reads pixels straight out of a CPU pyramid, but it is `pub(crate)`: the
-//! borrow stops at the crate boundary and cannot reach a public signature.
-//!
-//! ## No fused gradient here yet
-//!
-//! The CubeCL review wants "downsample + gradient" fused into one
-//! [`PyramidBuilder::build`] call. The KLT tracker samples a sparse 52-tap
-//! pattern and calls [`ImageU16::interp_grad`] per tap, so a dense gradient
-//! image would be built and discarded; the fused pass lands with the tracker,
-//! when there is a consumer that reads it.
+//! CPU levels own flat images; level zero is copied so pyramid lifetime and reuse
+//! are independent of input frames. Three requested reductions produce four
+//! levels, zero through three. The generic stage interface exposes geometry and
+//! copies into caller buffers, never borrowed device memory.
+//! Sparse KLT gradient sampling avoids constructing unused dense gradient images.
 
 use crate::image::{ImageError, ImageU16};
 
-/// The 5-tap Gaussian, `image_pyr.h:102`.
+/// The 5-tap Gaussian.
 const KERNEL: [i32; 5] = [1, 4, 6, 4, 1];
 
-/// Smallest side `subsample` can read: it indexes `abs(2 * 0 - 2) == 2`.
-///
-/// `image_pyr.h:110` reaches two rows above the first output row without a
-/// bounds check; in C++ that is out-of-range for a two-row image. The port
-/// refuses the geometry at construction instead (decision D32).
+/// Minimum filter side length: the first output reaches source index two.
+/// Refuse smaller geometry at construction (D32).
 pub(crate) const MIN_SIDE: usize = 3;
 
 /// The stage seam: build every level of one camera's pyramid in one call.
@@ -135,7 +85,7 @@ pub trait PyramidBuilder {
 /// memory and there is nothing to lend, so a `&[u16]` here would be an API
 /// that only the CPU backend could ever satisfy (deviation X04).
 pub trait Pyramid {
-    /// Levels held, which is basalt's `num_levels + 1`.
+    /// Stored level count, including level zero.
     fn num_levels(&self) -> usize;
 
     /// `(width, height, stride)` of one level, or `None` past the top.
@@ -235,16 +185,10 @@ pub struct PyramidU16 {
 }
 
 impl PyramidU16 {
-    /// Allocate every level for a `width` x `height` frame, zero-filled.
-    ///
-    /// `num_levels` is basalt's: `with_capacity(w, h, 3)` gives four levels,
-    /// 0 through 3, matching `optical_flow_levels = 3`.
+    /// Allocate zero-filled levels; three reductions give levels zero through three.
     ///
     /// # Errors
-    ///
-    /// [`PyramidError::TooSmall`] when a level would be narrower or shorter
-    /// than the kernel's reach, [`PyramidError::Image`] when the geometry does
-    /// not fit in a `usize`.
+    /// Refuse sides smaller than the kernel's reach or overflowing image geometry.
     pub fn with_capacity(
         width: usize,
         height: usize,
@@ -262,7 +206,7 @@ impl PyramidU16 {
         }
         let mut levels: Vec<ImageU16> = Vec::with_capacity(num_levels + 1);
         for level in 0..=num_levels {
-            // basalt's `lvl(l)`: `(orig_w >> lvl, image.h >> lvl)` (`image_pyr.h:149-150`).
+            // Level dimensions are original dimensions shifted right by the level index.
             levels.push(ImageU16::zeros(width >> level, height >> level)?);
         }
         Ok(Self { levels })
@@ -297,11 +241,7 @@ impl Pyramid for PyramidU16 {
     }
 }
 
-/// The CPU [`PyramidBuilder`]: basalt's `subsample`, level by level.
-///
-/// Owns the `i32` accumulator `subsample` needs (`image_pyr.h:105`) so the
-/// per-frame path allocates nothing once the builder has seen one frame of a
-/// given size.
+/// CPU pyramid builder with reusable i32 filtering scratch storage.
 #[derive(Debug, Clone, Default)]
 pub struct CpuPyramidBuilder {
     scratch: Vec<i32>,
@@ -326,7 +266,7 @@ impl PyramidBuilder for CpuPyramidBuilder {
         PyramidU16::with_capacity(width, height, num_levels)
     }
 
-    /// `ManagedImagePyr::setFromImage`, `image_pyr.h:70-80`.
+    /// `ManagedImagePyr::setFromImage`.
     ///
     /// `_camera` is unused here: the levels are host memory and the caller
     /// still holds `img`, so the detector reads the frame itself.
@@ -353,7 +293,7 @@ impl PyramidBuilder for CpuPyramidBuilder {
             });
         }
 
-        // `lvl_internal(0).CopyFrom(other)` (`image_pyr.h:73`). `copy_from` is
+        // `lvl_internal(0).CopyFrom(other)`. `copy_from` is
         // the same row-by-row copy, which is what a possibly strided source
         // needs; the geometry check above makes its resize a no-op.
         out.levels[0].copy_from(img)?;
@@ -373,7 +313,7 @@ impl PyramidBuilder for CpuPyramidBuilder {
 
 /// Scratch elements `subsample` needs at level 0, which is its largest use.
 ///
-/// `ManagedImage<int> tmp(img_sub.h, img.w)` (`image_pyr.h:105`) is
+/// `ManagedImage<int> tmp(img_sub.h, img.w)` is
 /// `img.w * (img.h / 2)` integers whichever way they are laid out; [`subsample`]
 /// holds them row-major over `dst_height` x `src_width`. A saturating product
 /// would turn an impossible geometry into a `vec!` that aborts the process, so
@@ -388,43 +328,22 @@ fn scratch_len(width: usize, height: usize) -> Result<usize, PyramidError> {
     Ok(len)
 }
 
-/// BORDER_REFLECT_101 for an index past the *high* end, `image_pyr.h:83`.
-///
-/// `h - 1 - |h - 1 - x|`. It is only a reflection for `x >= 0`; for a negative
-/// index basalt uses `std::abs` instead (`image_pyr.h:110-111`), which is the
-/// same reflection about 0 but a different expression. Trap 3 of the
-/// architecture dossier is precisely that these two are not one function.
+/// High-end reflect-101: `h - 1 - |h - 1 - x|` for non-negative x.
+/// Negative indices instead reflect with absolute value; the formulas are not
+/// interchangeable outside their domains (trap 3).
 #[inline]
 fn border101(x: i64, h: i64) -> i64 {
     h - 1 - (h - 1 - x).abs()
 }
 
-/// basalt's `subsample`, `image_pyr.h:99-140`, operation for operation.
-///
-/// C++ writes a **transposed** accumulator: `ManagedImage<int> tmp(img_sub.h,
-/// img.w)`, whose width is the destination height, holds `tmp(r, c)` with `r`
-/// the destination row and `c` the source column (`image_pyr.h:117`), and the
-/// horizontal pass walks its rows (`:126-136`). What that transposition decides
-/// is the *arithmetic*: `tmp.h` is the source width, so the second pass's
-/// `border101(2 * c + 2, tmp.h)` reflects about the source width, and that is
-/// reproduced here.
-///
-/// The **layout** is not reproduced, because it costs a cache line per
-/// coefficient in both directions: the vertical pass would stride its writes by
-/// `dst_height` and the horizontal pass would stride its `dst` writes by the
-/// row. The accumulator here is row-major over `dst_height` x `src_width`, so
-/// both passes run along their rows. Every value and every index is the one C++
-/// computes — the taps are integers, where an order is not a rounding.
-///
-/// There is exactly one rounding, at the end of the horizontal pass, so the
-/// separable form is bit-identical to a direct 5x5 convolution.
+/// Separable integer Gaussian subsampling.
+/// A row-major `dst_height × src_width` accumulator keeps both passes contiguous.
+/// Reflect the vertical pass about source height and the horizontal pass about
+/// source width. Exact integer sums and one final rounding equal direct 5x5 convolution.
 ///
 /// # Panics
-///
-/// If `src` is narrower or shorter than [`MIN_SIDE`], or `dst` is not
-/// `(src.width() >> 1, src.height() >> 1)`, or `scratch` is short. All three
-/// are established by [`PyramidU16::with_capacity`] and checked by
-/// [`CpuPyramidBuilder::build`].
+/// If source sides are below [`MIN_SIDE`], destination is not half-size, or scratch
+/// is short. Construction and builder checks establish these preconditions.
 fn subsample(src: &ImageU16, dst: &mut ImageU16, scratch: &mut [i32]) {
     let src_width: usize = src.width();
     let src_height: usize = src.height();
@@ -433,7 +352,7 @@ fn subsample(src: &ImageU16, dst: &mut ImageU16, scratch: &mut [i32]) {
     debug_assert_eq!(dst_width, src_width >> 1);
     debug_assert_eq!(dst_height, src_height >> 1);
 
-    // Vertical convolution, `image_pyr.h:108-121`, one accumulator row per
+    // Vertical convolution,, one accumulator row per
     // destination row.
     for r in 0..dst_height {
         let row2: i64 = 2 * r as i64;
@@ -463,18 +382,14 @@ fn subsample(src: &ImageU16, dst: &mut ImageU16, scratch: &mut [i32]) {
         }
     }
 
-    // Horizontal convolution, `image_pyr.h:123-139`. `tmp.h` is `src_width`, so
+    // Horizontal convolution. is `src_width`, so
     // the reflection is about the **source** width whichever way `tmp` is laid
     // out.
     for r in 0..dst_height {
         let band: &[i32] = &scratch[r * src_width..(r + 1) * src_width];
         for (c, pixel) in dst.row_mut(r).iter_mut().enumerate() {
-            // An interior column's five taps are the contiguous window
-            // `band[2c - 2 ..= 2c + 2]`. The reflection only bites at `c == 0`,
-            // where C++ takes `abs` of a negative index, and at the last column
-            // or two, where `2c + 2` runs past `src_width - 1`; peeling those
-            // out keeps the two `border101` calls and their four casts off the
-            // 230,400 interior columns of a level-0 pass.
+            // Interior five-tap windows are contiguous. Peel low/high border columns to keep
+            // reflection arithmetic out of the large interior loop.
             let value: i32 = match (2 * c)
                 .checked_sub(2)
                 .and_then(|first| band.get(first..)?.first_chunk::<5>())
@@ -502,7 +417,7 @@ fn subsample(src: &ImageU16, dst: &mut ImageU16, scratch: &mut [i32]) {
                         + KERNEL[4] * band[columns[4]]
                 }
             };
-            // `T val = ((val_int + (1 << 7)) >> 8)` (`image_pyr.h:135`). The
+            // `T val = ((val_int + (1 << 7)) >> 8)`. The
             // accumulator peaks at 65535 * 16 * 16, so the shift lands back in
             // `u16` exactly and the cast never truncates.
             *pixel = ((value + (1 << 7)) >> 8) as u16;
@@ -518,8 +433,7 @@ mod tests {
 
     use proptest::prelude::*;
 
-    /// True reflect-101, written the obvious way: mirror until the index lands
-    /// inside `[0, n)`. Independent of [`border101`] and of basalt's `abs`.
+    /// Independent reflect-101 implementation that repeatedly mirrors into `[0, n)`.
     fn reflect101_naive(mut index: i64, n: i64) -> i64 {
         assert!(n >= 2, "reflect-101 needs at least two samples");
         loop {
@@ -533,9 +447,7 @@ mod tests {
         }
     }
 
-    /// A direct 5x5 convolution with true reflect-101 borders and basalt's
-    /// single rounding. Independent of [`subsample`]: no separability, no
-    /// accumulator, no `abs`/`border101` split.
+    /// Independent direct 5x5 convolution with reflect-101 borders and one final rounding.
     fn subsample_naive(src: &ImageU16) -> ImageU16 {
         let width: usize = src.width() >> 1;
         let height: usize = src.height() >> 1;
@@ -592,7 +504,7 @@ mod tests {
 
     #[test]
     fn three_levels_means_four_usable_levels() {
-        // `optical_flow_levels = 3` -> levels 0..3 (`image_pyr.h:75-79`).
+        // `optical_flow_levels = 3` -> levels 0..3.
         let pyramid: PyramidU16 = build(&random_image(64, 48, 1), 3);
         assert_eq!(pyramid.num_levels(), 4);
         let sizes: Vec<(usize, usize)> = each_level(&pyramid)
@@ -604,7 +516,7 @@ mod tests {
 
     #[test]
     fn level_geometry_shifts_the_original_size() {
-        // `lvl(l)` is `(orig_w >> l, image.h >> l)` (`image_pyr.h:149-150`),
+        // `lvl(l)` is `(orig_w >> l, image.h >> l)`,
         // which for an odd side is not the same as halving the level below by
         // rounding up: 41 -> 20 -> 10 -> 5.
         let pyramid: PyramidU16 = build(&random_image(41, 27, 2), 3);
@@ -759,10 +671,8 @@ mod tests {
     #[test]
     fn border101_matches_the_naive_reflection_over_its_whole_domain() {
         for n in 2i64..24 {
-            // basalt calls `border101` with indices in `[0, 2 * (n - 1)]`
-            // (`image_pyr.h:112-113`) and `std::abs` below zero
-            // (`image_pyr.h:110-111`). Both agree with the naive reflection
-            // there, and `border101` does *not* below zero, which is trap 3.
+            // Check high-end reflection on `[0, 2*(n-1)]` and absolute-value reflection below
+            // zero against the independent implementation (trap 3).
             for x in 0..=2 * (n - 1) {
                 assert_eq!(
                     border101(x, n),
@@ -781,28 +691,11 @@ mod tests {
         }
     }
 
-    /// kornia-rs is the second, independent oracle for the same arithmetic.
-    ///
-    /// `pyrdown_u8` (`crates/kornia-imgproc/src/pyramid.rs:469`) runs the same
-    /// integer `[1,4,6,4,1]` kernel with reflect-101 borders and the same
-    /// single rounding, `(sum + 128) >> 8` (`:650`), against basalt's
-    /// `(val_int + (1 << 7)) >> 8` (`image_pyr.h:135`). It transposes the pass
-    /// order (horizontal first, `:498`) where basalt goes vertical first, which
-    /// changes nothing: both passes accumulate in integers and round once, so
-    /// each is exactly the 5x5 convolution.
-    ///
-    /// The comparison runs on `u16` pixels holding **0..255 unshifted**, not
-    /// the `<< 8` frontend values. The two are not comparable: rounding happens
-    /// on different magnitudes, so `subsample(v << 8) >> 8` is not
-    /// `subsample(v)` — the `<< 8` form keeps eight more bits of the weighted
-    /// sum before the shift discards them, and the two disagree by one LSB
-    /// wherever the discarded remainder crosses a half. That extra headroom is
-    /// exactly why basalt widens (kornia-rs inventory §2.1).
-    ///
-    /// Sizes are even on purpose: kornia sizes its output `div_ceil(2)`
-    /// (`pyramid.rs:473-474`) where basalt shifts right (`image_pyr.h:149`), so
-    /// on an odd side the two produce different geometries and only basalt's is
-    /// the reference.
+    /// Compare with kornia's independent integer pyramid filter.
+    /// Both use `[1,4,6,4,1]`, reflect-101 and one rounding `(sum + 128) >> 8`.
+    /// Use unshifted values 0–255: filtering widened `v << 8` and narrowing afterwards
+    /// rounds at a different magnitude and need not agree. Even dimensions avoid
+    /// kornia's ceil-half versus this crate's floor-half geometry difference.
     #[test]
     fn subsample_matches_kornia_pyrdown_u8_on_byte_valued_pixels() {
         use kornia_image::{Image, ImageSize};

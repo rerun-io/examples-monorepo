@@ -293,7 +293,7 @@ impl<R: Runtime> GpuCornerScan<R> {
                 // and one under zero is every candidate.
                 threshold: select.threshold.clamp(0, 255) as u32,
                 safe_radius: select.safe_radius,
-                // `img_raw.w / 2` is an integer halving (`keypoints.cpp:176`).
+                // `img_raw.w / 2` is an integer halving.
                 centre_x: (width / 2) as f32,
                 centre_y: (height / 2) as f32,
             },
@@ -671,7 +671,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
             return Err(DetectError::NotScanned);
         };
         // `row_start = rows.start.max(margin)`, `row_end = rows.end.min(height -
-        // margin)` (`fast.rs:495-498`).
+        // margin)` (`fast.rs).
         let first: usize = request.y.max(FAST_BORDER);
         let last: usize = (request.y + request.rows).min(self.height.saturating_sub(FAST_BORDER));
         let (width, stride): (usize, usize) = (self.width, self.words);

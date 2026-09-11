@@ -1,57 +1,18 @@
-//! Grid-cell FAST detection, ported from `src/utils/keypoints.cpp:132-205`.
+//! Grid-cell FAST detection over a centered grid.
 //!
-//! `detectKeypointsWithCells` walks a centred grid of `PATCH_SIZE` cells, skips
-//! the cells that already hold enough features, copies each cell down to 8 bits
-//! and runs `cv::FAST` on it with a halving threshold ladder, keeping the
-//! strongest corners that survive a distance-to-centre gate, the rectangle masks
-//! and an edge margin.
+//! Skip occupied cells, walk a halving threshold ladder, then keep the strongest
+//! corners that pass masks, safe radius and edge margins. Kornia's rectangle
+//! entry point lets this module own the cell geometry. Shrink the candidate
+//! rectangle by the three-pixel FAST ring radius on every side.
 //!
-//! ## What comes from kornia-rs, and what this wrapper adds
+//! The rectangle scanner scans whole rows, so call it once per row band and
+//! threshold and filter columns per cell. Cropping changes kornia's width-dependent
+//! local-maximum filter, so it is not interchangeable with this scan.
 //!
-//! kornia's grid detector was written against this exact function
-//! (`kornia-imgproc/src/features/cells.rs:92-99`), but its grid starts at `(0, 0)`
-//! with ceil-division cells while basalt centres the grid and stops one cell
-//! early. Rather than accept different cell boundaries, this wrapper keeps
-//! basalt's geometry and calls kornia's **rectangle** entry point
-//! [`kornia_imgproc::features::fast_detect_rect_u8`] (`cells.rs:141`), which is the layer the inventory
-//! recommends for "basalt-style consumers that already own a grid walker"
-//! (`cells.rs:20-22`). The rectangle is shrunk by the FAST ring radius on every
-//! side, because `cv::FAST` on a `PATCH_SIZE`-square sub-image detects only at
-//! sub-coordinates `[3, PATCH_SIZE - 3)`; a rectangle over the whole cell would
-//! detect in a three-pixel band the C++ never looks at.
-//!
-//! That entry point scans **whole rows** whatever columns the rectangle asks
-//! for, so the call is made once per `(cell row, threshold)` over the whole
-//! width and each cell filters its own columns out of the result — see `Band`,
-//! which also records why a cell-sized crop is not the same detection
-//! (kornia turns its in-block local-maximum filter on at `width >= 800`).
-//!
-//! **The scores are the same quantity, off by one.** At `arc_length == 9` kornia
-//! returns `corner_score_9_scalar(...) / 255.0` (`fast.rs:705-711`, `:838-873`):
-//! the max over the sixteen arc starts of the min saturating difference along the
-//! arc, which is the smallest threshold at which the pixel stops being a corner.
-//! OpenCV's `cornerScore` returns `max(a0, -b0) - 1`
-//! (`modules/features2d/src/fast_score.cpp`), i.e. the largest threshold at which
-//! it is **still** a corner — one less. [`opencv_corner_score`] applies that
-//! subtraction the moment a candidate comes back, so suppression, ranking and
-//! [`KeypointsData::responses`] all carry the integer `cv::FAST` reports.
-//!
-//! **Non-maximum suppression is this wrapper's job.** `cv::FAST`'s third argument
-//! defaults to `nonmaxSuppression = true`, and `fast_detect_rect_u8` performs
-//! none (`cells.rs:138`). Without it the port emits every pixel along a strong
-//! edge where the C++ emits only the local peaks — on a synthetic image of flat
-//! bright squares the port produced sixteen corners where `cv::FAST` produces
-//! **none**, because every candidate there ties with its neighbour.
-//! `suppress_non_maxima` reproduces OpenCV's rule exactly: a candidate survives
-//! only when its score is **strictly greater** than all eight neighbours', a
-//! neighbour that is not itself a candidate scoring zero. Strictness on both
-//! sides is why a plateau of equal scores yields nothing, which is OpenCV's
-//! behaviour and the reason for that sixteen-versus-zero.
-//!
-//! What is left is genuinely different and is accepted, not worked around
-//! (decision D09, trap 2): `cv::FAST` walks the whole cell in one pass with its
-//! own three-row score ring, and `std::sort` (`keypoints.cpp:166`) is not stable
-//! while the sort here is, so ties inside a cell retain their scan order.
+//! Convert normalized scores to integer corner scores by multiplying by 255 and
+//! subtracting one. Suppression requires a score strictly greater than all eight
+//! neighbors, with zero for non-candidates. Equal-score plateaus yield no corners.
+//! Stable sorting retains scan order among tied scores (D09, trap 2).
 
 mod band;
 pub use super::cell::{
@@ -74,10 +35,7 @@ pub use kornia_imgproc::features::FastCorner;
 
 use crate::image::ImageU16;
 
-/// What the detector can refuse.
-///
-/// The occupancy matrix is a caller-supplied buffer, so its size is an input
-/// like any other: the C++ indexes it unchecked (`keypoints.cpp:148`, trap 15).
+/// Detector input failures, including invalid caller-supplied occupancy dimensions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum DetectError {
     /// A backend claimed selection but returned a malformed key vector.
@@ -149,15 +107,12 @@ pub enum DetectError {
     },
 }
 
-/// `basalt::KeypointsData`'s two frontend fields (`utils/common_types.h`).
-///
-/// Parallel arrays rather than a vector of structs, for the same reason every
-/// other per-keypoint buffer here is (`cubecl-portability.md` §12.2), and cleared
-/// and refilled in place so the per-frame path allocates only when a frame beats
-/// the previous high-water mark.
+/// Detected corners and responses in parallel arrays.
+/// Buffers are cleared and filled in place, allocating only above the previous
+/// high-water mark (`cubecl-portability.md` §12.2).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct KeypointsData {
-    /// `kd.corners`, in the C++'s cell scan order.
+    /// Corners in cell scan order.
     pub corners: Vec<[f32; 2]>,
     /// `kd.corner_responses`, one per corner.
     pub responses: Vec<f32>,
@@ -409,38 +364,16 @@ impl DetectorScratch {
     }
 }
 
-/// `detectKeypointsWithCells` (`keypoints.cpp:132-205`).
-///
-/// `grid` is **the detected image's own** geometry, as the C++ derives it from
-/// `img_raw.w`/`.h` (`:140-144`); `occupancy` is the shared feature-count matrix,
-/// which basalt shapes from camera 0. The two agree for a rig whose cameras share
-/// a resolution and differ otherwise, which is why they are separate arguments.
-/// Cells at or over `num_points_cell` are skipped whole (`:148`); a cell whose
-/// index falls outside `occupancy` is skipped too, where the C++ reads out of
-/// range.
-///
-/// The threshold ladder is [`threshold_rungs`]: `max_threshold`, then repeatedly
-/// halved by integer division until it would drop below `min_threshold` — 40, 20,
-/// 10, 5 for the shipped configs (`:160-188`) — and it stops early as soon as the
-/// cell's budget is full. The last rung is never below [`LOWEST_THRESHOLD_RUNG`],
-/// which is what makes the ladder finite for every `min_threshold`; basalt's own
-/// is not.
-/// Within one threshold the surviving corners are ordered by descending response
-/// (`:166-167`) and taken until the budget is met, each having to clear the safe
-/// radius (`:178`), the masks (`:179`) and `EDGE_THRESHOLD` (`:180`).
-///
-/// `max_corners` caps the whole call. basalt has no such cap; the port needs one
-/// because every downstream buffer is fixed-capacity, and truncating in the
-/// detector's own scan order is what keeps a frame processable without ever
-/// discarding a keypoint that already exists.
+/// Detect corners with the image's own grid and a separate shared occupancy matrix.
+/// The shapes can differ for mixed-resolution rigs. Skip full cells and cells
+/// outside occupancy. Halve the threshold until the minimum or cell budget is
+/// reached, never below [`LOWEST_THRESHOLD_RUNG`]. Sort survivors by descending
+/// response and apply safe radius, masks and edge margin.
+/// `max_corners` caps the call in scan order to protect fixed-capacity buffers.
 ///
 /// # Errors
-///
-/// [`DetectError::OccupancyShapeOverflow`] when the declared shape does not fit
-/// in a `usize`, [`DetectError::OccupancyTooSmall`] when the counts buffer is
-/// shorter than the shape it was declared with, or
-/// [`DetectError::GrayViewRefused`] on an 8-bit view the image geometry should
-/// have made impossible.
+/// Returns typed errors for occupancy overflow, a short count buffer or an
+/// invalid gray image view.
 #[allow(clippy::too_many_arguments)]
 pub fn detect_keypoints_with_cells(
     image: &ImageU16,
@@ -497,7 +430,7 @@ pub fn detect_keypoints_with_cells(
     } = scratch;
 
     // `float dist_to_center = {full_x - img_raw.w / 2, ...}.norm()` — an integer
-    // halving of the size, then a float subtraction (`keypoints.cpp:176`).
+    // halving of the size, then a float subtraction.
     let centre_x: f32 = (width / 2) as f32;
     let centre_y: f32 = (height / 2) as f32;
 
@@ -567,7 +500,7 @@ pub fn detect_keypoints_with_cells(
             candidates.clear();
             if grid.cell > 2 * FAST_BORDER {
                 // `fast_detect_rect_u8` clamps the rectangle to the ring
-                // margin on every side (`cells.rs:12-15`); the columns this
+                // margin on every side (`cells.rs); the columns this
                 // cell keeps out of its row band are that clamp.
                 let first: f32 = (x + FAST_BORDER) as f32;
                 // The right clamp is the one a caller-supplied grid can
@@ -607,8 +540,7 @@ pub fn detect_keypoints_with_cells(
                 let full_y: f32 = corner.xy[1];
                 let dx: f32 = full_x - centre_x;
                 let dy: f32 = full_y - centre_y;
-                // `Eigen::Vector2f{...}.norm()` is `sqrt(dx*dx + dy*dy)`,
-                // not `hypot` (`keypoints.cpp:176`).
+                // Distance is `sqrt(dx*dx + dy*dy)`.
                 let dist_to_center: f32 = (dx * dx + dy * dy).sqrt();
 
                 if config.safe_radius != 0.0 && dist_to_center >= config.safe_radius {

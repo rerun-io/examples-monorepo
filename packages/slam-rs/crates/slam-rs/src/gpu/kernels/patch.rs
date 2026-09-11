@@ -4,22 +4,12 @@ use super::layout::*;
 use super::sampling::{in_bounds, interp_grad_into};
 use cubecl::prelude::*;
 
-// Per-frame launchers use launch_unchecked. Stage shape checks establish
-// the binding lengths; each raw binding keeps its handle and element count
-// together. The storage probe alone retains checked launch mode.
-// ── Eigen's pivoted LDLT at size three ───────────────────────────────────────
+// Per-frame launchers use unchecked launch after stage shape validation.
+// Each binding retains its handle and element count; only the storage probe uses checked launch.
 
-/// `internal::ldlt_inplace<Lower>::unblocked` at size 3 (`LDLT.h:277-380`),
-/// in place on a row-major 3x3.
-///
-/// A transcription of [`crate::frontend::ldlt::ldlt_inverse3`]'s first half,
-/// including the part that matters: on a rank-deficient `H` the pivot below
-/// `numeric_limits<float>::min()` is *skipped* rather than divided by, so a
-/// patch on a one-dimensional texture comes out with a finite zero-valued
-/// `H^-1 J^T` and stays valid, as it does in the C++.
-///
-/// `transpositions` and the early-out for an all-zero diagonal use a flag
-/// rather than a `return`, which a `#[cube]` function does not have.
+/// In-place guarded pivoted LDLT on a row-major 3x3 matrix.
+/// Tiny pivots get zero weight instead of division, keeping rank-deficient patch
+/// factors finite. Flags replace early returns for uniform device execution.
 #[cube]
 fn ldlt_decompose3(mat: &mut Array<f32>, transpositions: &mut Array<usize>) {
     let mut temp = Array::<f32>::new(3usize);
@@ -27,7 +17,7 @@ fn ldlt_decompose3(mat: &mut Array<f32>, transpositions: &mut Array<usize>) {
 
     for k in 0..3usize {
         if !done {
-            // "Find largest diagonal element" (`LDLT.h:305-307`); `maxCoeff`
+            // "Find largest diagonal element"; `maxCoeff`
             // reports the first index of the maximum, so ties take the earliest.
             let mut biggest = k;
             for i in (k + 1usize)..3usize {
@@ -39,7 +29,6 @@ fn ldlt_decompose3(mat: &mut Array<f32>, transpositions: &mut Array<usize>) {
 
             if k != biggest {
                 // "taking care to consider only the lower triangular part"
-                // (`LDLT.h:311-324`).
                 for j in 0..k {
                     let swap = mat[k * 3usize + j];
                     mat[k * 3usize + j] = mat[biggest * 3usize + j];
@@ -60,7 +49,7 @@ fn ldlt_decompose3(mat: &mut Array<f32>, transpositions: &mut Array<usize>) {
                 }
             }
 
-            // The delayed column updates through `temp` (`LDLT.h:326-338`).
+            // The delayed column updates through `temp`.
             if k > 0usize {
                 for i in 0..k {
                     temp[i] = mat[i * 3usize + i] * mat[k * 3usize + i];
@@ -79,7 +68,7 @@ fn ldlt_decompose3(mat: &mut Array<f32>, transpositions: &mut Array<usize>) {
                 }
             }
 
-            // LAPACK's cutoff of exactly zero (`LDLT.h:340-361`).
+            // LAPACK's cutoff of exactly zero.
             let pivot = mat[k * 3usize + k];
             let pivot_is_valid = f32::abs(pivot) > 0.0f32;
             if k == 0usize && !pivot_is_valid {
@@ -98,11 +87,11 @@ fn ldlt_decompose3(mat: &mut Array<f32>, transpositions: &mut Array<usize>) {
     }
 }
 
-/// `LDLT::_solve_impl_transposed<true>` at size 3 (`LDLT.h:543-577`), in place
+/// `LDLT::_solve_impl_transposed<true>` at size 3, in place
 /// on a row-major 3x3 right-hand side.
 #[cube]
 fn ldlt_solve3(mat: &Array<f32>, transpositions: &Array<usize>, rhs: &mut Array<f32>) {
-    // `dst = m_transpositions * rhs`: k ascending (`ProductEvaluators.h:1194`).
+    // `dst = m_transpositions * rhs`: k ascending.
     for k in 0..3usize {
         let target = transpositions[k];
         if target != k {
@@ -123,7 +112,7 @@ fn ldlt_solve3(mat: &Array<f32>, transpositions: &Array<usize>, rhs: &mut Array<
             }
         }
     }
-    // "more precisely, use pseudo-inverse of D" (`LDLT.h:551-568`): the
+    // "more precisely, use pseudo-inverse of D" : the
     // tolerance is `numeric_limits<float>::min()`, the smallest positive normal.
     for i in 0..3usize {
         let d = mat[i * 3usize + i];
@@ -164,7 +153,7 @@ fn ldlt_solve3(mat: &Array<f32>, transpositions: &Array<usize>, rhs: &mut Array<
 
 // ── the patch build ──────────────────────────────────────────────────────────
 
-/// `patch::build_patch` (`patch.h:101-166`) over one patch at one level.
+/// `patch::build_patch` over one patch at one level.
 ///
 /// One cube per `(patch, level)`, one unit per pattern tap. Three reductions
 /// run on unit 0 in ascending tap order — the tap sum with `grad_sum_se2`, the
@@ -172,7 +161,7 @@ fn ldlt_solve3(mat: &Array<f32>, transpositions: &Array<usize>, rhs: &mut Array<
 /// order is the value (decision D31).
 ///
 /// The product-rule correction that comes from differentiating the `1/mean`
-/// factor (`patch.h:135`) is applied with the **raw** tap, before the tap is
+/// factor is applied with the **raw** tap, before the tap is
 /// normalised, and the rows of out-of-bounds taps are zeroed: dropping that
 /// term gives a Jacobian that looks right and converges to the wrong warp.
 #[cube(launch, launch_unchecked)]
@@ -218,7 +207,7 @@ fn patch_build_kernel(
     let mut okflag = SharedMemory::<usize>::new(TAP_SLOTS);
     let mut red = SharedMemory::<f32>::new(16usize);
 
-    // `const Scalar scale = 1 << level` (`frame_to_frame_optical_flow.h:384`).
+    // `const Scalar scale = 1 << level`.
     let scale = f32::cast_from(1usize << level);
     let pos_x = positions[pos_x_base + patch] / scale;
     let pos_y = positions[pos_y_base + patch] / scale;
@@ -261,7 +250,7 @@ fn patch_build_kernel(
                 );
             }
             // `valGrad.tail<2>().transpose() * Jw_se2` with
-            // `Jw_se2 = [[1, 0, -tap_y], [0, 1, tap_x]]` (`patch.h:107-115`).
+            // `Jw_se2 = [[1, 0, -tap_y], [0, 1, tap_x]]`.
             grad_t[tap] = grad_x[tap] * -tap_y + grad_y[tap] * tap_x;
             okflag[tap] = 1usize;
         } else {
@@ -291,7 +280,7 @@ fn patch_build_kernel(
         }
         let points = f32::cast_from(valid_points);
         red[0usize] = sum;
-        // `mean = sum / n` and `mean_inv = n / sum` (`patch.h:129`, `:131`) are
+        // `mean = sum / n` and `mean_inv = n / sum` are
         // two separate divisions, not reciprocals of each other.
         red[1usize] = sum / points;
         red[2usize] = points / sum;
@@ -319,7 +308,7 @@ fn patch_build_kernel(
     sync_cube();
 
     if tap == 0usize {
-        // `H_se2 = J^T J` (`patch.h:151`), one rank-1 outer product per tap.
+        // `H_se2 = J^T J`, one rank-1 outer product per tap.
         let mut hessian = Array::<f32>::new(9usize);
         for i in 0..9usize {
             hessian[i] = 0.0f32;
@@ -355,7 +344,7 @@ fn patch_build_kernel(
     sync_cube();
 
     if tap < taps {
-        // `H_se2_inv_J_se2_T.col(i) = H^-1 * J^T.col(i)` (`patch.h:156`).
+        // `H_se2_inv_J_se2_T.col(i) = H^-1 * J^T.col(i)`.
         let c0 = grad_x[tap];
         let c1 = grad_y[tap];
         let c2 = grad_t[tap];
@@ -380,7 +369,7 @@ fn patch_build_kernel(
     sync_cube();
 
     if tap == 0usize {
-        // `valid = mean > eps && H^-1 J^T finite && data finite` (`patch.h:164`).
+        // `valid = mean > eps && H^-1 J^T finite && data finite`.
         let mut finite = true;
         for i in 0..taps {
             if okflag[i] == 0usize {

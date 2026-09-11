@@ -1,11 +1,6 @@
-//! One landmark's rows of the linear system, and the QR that eliminates it.
-//!
-//! `LandmarkBlockAbsDynamic<Scalar, POSE_SIZE>`
-//! (`include/basalt/linearization/landmark_block_abs_dynamic.hpp`), the block of
-//! CVPR 2021 Fig. 2: one dense buffer laid out `[ J_p | pad | J_l(3) | r ]`,
-//! three Householder reflections that rotate the landmark columns to upper
-//! triangular, and the two halves that fall out of it — rows `0..3` (`Q₁`) for
-//! back-substitution, rows `3..` (`Q₂`) for the reduced camera system.
+//! Landmark rows `[J_p | pad | J_l(3) | r]` and their QR elimination.
+//! Three reflections triangularize landmark columns. The first three rows
+//! support back-substitution; remaining rows form the reduced camera system.
 
 use nalgebra::{DMatrix, DVector, Matrix2x3, Matrix2x6, Matrix3, Vector2, Vector3};
 
@@ -20,24 +15,22 @@ use crate::qr::{
 };
 use crate::types::{AbsOrderMap, LandmarkId, POSE_SIZE, TimeCamId};
 
-/// `LandmarkBlock<Scalar>::Options` (`landmark_block.hpp:31-48`).
+/// `LandmarkBlock<Scalar>::Options`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LandmarkBlockOptions<S: LieScalar> {
-    /// Householder rather than Givens for the elimination (`:33`). basalt ships
-    /// `true` and the shipped VIO never changes it.
+    /// Select Householder instead of Givens elimination; defaults to true.
     pub use_householder: bool,
     /// Zero the residual and Jacobian of a projection the camera rejected
-    /// (`:37`), rather than keeping whatever the model wrote.
+    /// rather than keeping whatever the model wrote.
     pub use_valid_projections_only: bool,
     /// Huber threshold in **raw pixels**, or zero for a plain squared norm
-    /// (`:40`).
     pub huber_parameter: S,
-    /// Standard deviation of the reprojection error, in pixels (`:43`).
+    /// Standard deviation of the reprojection error, in pixels.
     pub obs_std_dev: S,
 }
 
 impl<S: LieScalar> Default for LandmarkBlockOptions<S> {
-    /// basalt's defaults (`landmark_block.hpp:33-47`).
+    /// Default landmark-block options.
     fn default() -> Self {
         Self {
             use_householder: true,
@@ -81,7 +74,7 @@ impl<S: LieScalar> Default for DenseHbScratch<S> {
     }
 }
 
-/// `LandmarkBlock<Scalar>::State` (`landmark_block.hpp:50`).
+/// `LandmarkBlock<Scalar>::State`.
 ///
 /// `Uninitialized` is unreachable in the port — [`LandmarkBlock::allocate`] is a
 /// constructor, so there is no half-built block to be in that state — and is
@@ -101,19 +94,13 @@ pub enum LandmarkBlockState {
     Marginalized,
 }
 
-/// One observation's place in the block, resolved once at allocation.
-///
-/// C++ keeps two parallel vectors — `pose_lin_vec` (a `RelPoseLin*`, null when
-/// the target frame is not in the ordering, `:70-75`) and `pose_tcid_vec` — and
-/// looks the two absolute offsets up with `at()` on every linearization
-/// (`:139-140`). The port resolves both at allocation and stores them, so the
-/// per-observation path has no map lookup and no way to throw.
+/// Observation offsets and relative-pose index resolved at allocation.
+/// This avoids repeated map lookups and fallible indexing during linearization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BlockObservation {
     /// Where the landmark was seen.
     tcid_t: TimeCamId,
-    /// Index into the driver's relative-pose table, or `None` for an
-    /// observation dropped for marginalization (C++'s null pointer, `:74`).
+    /// Relative-pose index, or `None` when marginalization drops this observation.
     rel_pose: Option<usize>,
     /// Column offset of the host frame's pose block.
     abs_h_idx: usize,
@@ -123,22 +110,22 @@ struct BlockObservation {
 
 /// One landmark's block of the linear system.
 ///
-/// Layout (`landmark_block_abs_dynamic.hpp:83-96`, architecture §1.3):
+/// Layout (architecture §1.3):
 ///
 /// ```text
-/// num_rows    = 2 * observations + 3          // 3 landmark-damping rows (:85)
-/// padding_idx = aom.total_size                // (:83)
-/// padding_size= (4 - padding_idx % 4) % 4     // 16-byte alignment (:87-88)
-/// lm_idx      = padding_idx + padding_size    // (:90)
-/// res_idx     = lm_idx + 3                    // (:91)
-/// num_cols    = res_idx + 1, asserted % 4 == 0 (:92-96)
+/// num_rows    = 2 * observations + 3          // 3 landmark-damping rows ()
+/// padding_idx = aom.total_size                // ()
+/// padding_size= (4 - padding_idx % 4) % 4     // 16-byte alignment ()
+/// lm_idx      = padding_idx + padding_size    // ()
+/// res_idx     = lm_idx + 3                    // ()
+/// num_cols    = res_idx + 1, asserted % 4 == 0 ()
 /// ```
 ///
 /// Storage is column major. Each reflection updates views of the existing
 /// matrix using a preallocated unit-axis buffer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LandmarkBlock<S: LieScalar> {
-    /// `storage` (`:530`): `[ J_p | pad | J_l | r ]`, `num_rows` x `num_cols`.
+    /// `storage` : `[ J_p | pad | J_l | r ]`, `num_rows` x `num_cols`.
     storage: DMatrix<S>,
     /// One entry per observation, in `lm.obs` order.
     observations: Vec<BlockObservation>,
@@ -146,11 +133,11 @@ pub struct LandmarkBlock<S: LieScalar> {
     ///
     /// Every other column of `0..padding_idx` stays exactly zero for the block's
     /// whole life: `linearizeLandmark` only ever writes `block<2, 6>` at an
-    /// observation's host and target offsets (`:178-179`), and the Householder
+    /// observation's host and target offsets, and the Householder
     /// reflections and Givens rotations that follow act on rows, which cannot
     /// move a zero column off zero. An observation dropped for marginalization
-    /// writes nothing at all — `:137` skips it for want of a relative pose, and
-    /// its `abs_t_idx` is the `0` sentinel of `:74`, which is a column of
+    /// writes nothing because it has no relative pose, and
+    /// its `abs_t_idx` is the `0` sentinel, which is a column of
     /// whichever frame the ordering puts first — so it is left out.
     /// [`Self::add_dense_h_b_active`] is the only reader, and
     /// `dense_h_b_touches_only_observed_columns` and
@@ -163,26 +150,26 @@ pub struct LandmarkBlock<S: LieScalar> {
     active_cols: Vec<usize>,
     /// The landmark this block belongs to.
     lm_id: LandmarkId,
-    /// `lm_ptr->host_kf_id` (`:525`).
+    /// `lm_ptr->host_kf_id`.
     host_kf_id: TimeCamId,
-    /// `is_fixed_` (`:552`): the landmark is not optimised.
+    /// `is_fixed_` : the landmark is not optimised.
     is_fixed: bool,
     padding_idx: usize,
     lm_idx: usize,
     res_idx: usize,
     num_rows: usize,
     num_cols: usize,
-    /// `state` (`:547`).
+    /// `state`.
     state: LandmarkBlockState,
-    /// The `tempVector2` of `:443`, the essential part of the reflector.
+    /// Reusable reflection-axis scratch.
     work_essential: Vec<S>,
 }
 
-/// `compute_error_weight` (`:456-470`).
+/// `compute_error_weight`.
 ///
 /// Returns `(weighted_error, weight)`. Note the Huber test is on the
 /// **squared** residual against the squared threshold, and that both are in
-/// raw pixels: the `1 / obs_std_dev` scaling happens afterwards (`:170-172`),
+/// raw pixels: the `1 / obs_std_dev` scaling happens afterwards,
 /// which is the "effective 2 sigma" deviation of papers-part2 §13.
 ///
 /// A free function rather than a method because the estimator's non-keyframe
@@ -207,17 +194,9 @@ pub fn compute_error_weight<S: LieScalar>(
 }
 
 impl<S: LieScalar> LandmarkBlock<S> {
-    /// `allocateLandmark` (`:35-104`).
-    ///
-    /// `rel_pose_index` maps a `(host, target)` pair to its slot in the driver's
-    /// relative-pose table; C++ stores the pointer itself (`:67-75`). An
-    /// observation whose target frame is not in `aom` is kept with no relative
-    /// pose, which is how a measurement dropped during marginalization survives
-    /// allocation and contributes nothing (`:70-75`, and the comment at
-    /// `:125-135` that says this should not happen in the first place).
-    ///
-    /// C++ asserts the host frame is in the ordering (`:62`) and that the
-    /// relative pose exists (`:68`); both are typed errors here (decision D32).
+    /// Allocate a landmark block from the ordering and relative-pose index table.
+    /// Targets outside the ordering retain zero-contribution observations with no
+    /// relative pose. A missing host or required pose returns a typed error (D32).
     pub fn allocate(
         lm_id: LandmarkId,
         lm: &Landmark<S>,
@@ -226,8 +205,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
         is_fixed: bool,
     ) -> Result<Self, LinearizeError> {
         let host: TimeCamId = lm.host_kf_id;
-        // `BASALT_ASSERT(aom.abs_order_map.count(lm.host_kf_id.frame_id) > 0)`
-        // (`:62`) — a landmark block without its host frame cannot be built.
+        // A landmark block requires its host frame in the ordering.
         let (abs_h_idx, _) = aom
             .get(host.frame_id)
             .ok_or(LinearizeError::HostNotInOrdering {
@@ -237,7 +215,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
         let mut observations: Vec<BlockObservation> = Vec::with_capacity(lm.obs.len());
         for &tcid_t in lm.obs.keys() {
             let rel_pose: Option<usize> = match aom.get(tcid_t.frame_id) {
-                // `:71` — in the ordering, so the pair must have a relative pose.
+                //  — in the ordering, so the pair must have a relative pose.
                 Some(_) => Some(rel_pose_index(host, tcid_t).ok_or(
                     LinearizeError::MissingRelativePose {
                         host: host.frame_id,
@@ -246,7 +224,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
                         target_cam: tcid_t.cam_id,
                     },
                 )?),
-                // `:74` — dropped for marginalization.
+                //  — dropped for marginalization.
                 None => None,
             };
             let abs_t_idx: usize = aom.get(tcid_t.frame_id).map_or(0, |(idx, _)| idx);
@@ -258,7 +236,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
             });
         }
 
-        // The layout arithmetic of `:83-96`, every step checked: the sizes come
+        // Check every step of layout arithmetic: the sizes come
         // from a caller-supplied ordering, and an overflow here would silently
         // wrap into a buffer that aliases its own blocks (decision D32).
         let padding_idx: usize = aom.total_size();
@@ -278,11 +256,11 @@ impl<S: LieScalar> LandmarkBlock<S> {
         let num_cols: usize = res_idx
             .checked_add(1)
             .ok_or(LinearizeError::LayoutOverflow)?;
-        // `BASALT_ASSERT(num_cols % 4 == 0)` (`:96`).
+        // The padded column count must be a multiple of four.
         if num_cols % 4 != 0 {
             return Err(LinearizeError::UnalignedBlock { num_cols });
         }
-        // `storage.resize(num_rows, num_cols)` (`:98`). Each dimension being
+        // `storage.resize(num_rows, num_cols)`. Each dimension being
         // representable is not enough: nalgebra multiplies them, and the
         // allocator wants the byte count, which must fit in an `isize`
         // (decision D32). An ordering carrying one absurd block size reaches
@@ -303,8 +281,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
                 cols: num_cols,
             });
         }
-        // Every pose block must fit: C++ writes `block<2, 6>(obs_idx, abs_idx)`
-        // with no bound check (`:178-179`).
+        // Check that every six-column pose block fits before writing.
         for obs in &observations {
             if obs.rel_pose.is_some() {
                 let end: usize = obs
@@ -323,7 +300,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
 
         let mut active_cols: Vec<usize> = Vec::with_capacity(2 * POSE_SIZE * observations.len());
         for obs in &observations {
-            // A dropped observation is skipped at `:137` and writes nothing;
+            // A dropped observation is skipped at and writes nothing;
             // its `abs_t_idx` is the `0` sentinel, not a column it owns.
             if obs.rel_pose.is_none() {
                 continue;
@@ -354,15 +331,15 @@ impl<S: LieScalar> LandmarkBlock<S> {
         })
     }
 
-    /// `linearizeLandmark` (`:110-191`): fill the block at the current
+    /// `linearizeLandmark` : fill the block at the current
     /// linearization point and return this landmark's share of the error.
     ///
     /// Three behaviours are deliberate and are kept (trap 11, decision D32):
     /// a projection the camera rejected contributes **nothing** when
-    /// `use_valid_projections_only` is set (`:152`); a non-finite Jacobian block
-    /// is **zeroed with a warning**, not an error (`:153-163`, which the comment
-    /// at `:165-166` says used to set `NumericalFailure`); and the two pose
-    /// blocks are accumulated with `+=` (`:178-179`), which is what makes a
+    /// `use_valid_projections_only` is set; a non-finite Jacobian block
+    /// is **zeroed with a warning**, not an error (which the comment
+    /// at says used to set `NumericalFailure`); and the two pose
+    /// blocks are accumulated with `+=`, which is what makes a
     /// landmark observed in its own host frame — where the host and target
     /// columns coincide — come out right.
     pub fn linearize_landmark(
@@ -372,14 +349,14 @@ impl<S: LieScalar> LandmarkBlock<S> {
         cameras: &[CameraEnum<S>],
         options: &LandmarkBlockOptions<S>,
     ) -> Result<S, LinearizeError> {
-        // `storage.setZero()` (`:115-117`).
+        // `storage.setZero()`.
         self.storage.fill(S::zero());
 
         let mut error_sum: S = S::zero();
 
         for (i, obs) in self.observations.iter().enumerate() {
             let Some(rel_idx) = obs.rel_pose else {
-                // `if (pose_lin_vec[i])` (`:137`): a dropped measurement.
+                // `if (pose_lin_vec[i])` : a dropped measurement.
                 continue;
             };
             let rel: &RelPoseLin<S> =
@@ -425,17 +402,16 @@ impl<S: LieScalar> LandmarkBlock<S> {
                 },
             );
 
-            // `if (is_fixed_) d_res_d_p.setZero()` (`:150`).
+            // `if (is_fixed_) d_res_d_p.setZero()`.
             if self.is_fixed {
                 d_res_d_p.fill(S::zero());
             }
 
-            // `:152`.
             if options.use_valid_projections_only && !valid {
                 continue;
             }
 
-            // `:153-163`: zeroed, never fatal.
+            // zeroed, never fatal.
             if !d_res_d_xi.iter().all(|v| v.to_f64().is_finite()) {
                 log::warn!(
                     "d_res_d_xi is not valid, lm = Landmark(id={:?}, host_kf_id={:?})",
@@ -453,14 +429,13 @@ impl<S: LieScalar> LandmarkBlock<S> {
                 d_res_d_p.fill(S::zero());
             }
 
-            // `:168-172`. `res.squaredNorm()` is a contiguous two-coefficient
+            // `res.squaredNorm()` is a contiguous two-coefficient
             // reduction, so there is only one order to take.
             let res_squared: S = res[0] * res[0] + res[1] * res[1];
             let (weighted_error, weight) = compute_error_weight(res_squared, options);
             let sqrt_weight: S = weight.sqrt() / options.obs_std_dev;
             error_sum += weighted_error / (options.obs_std_dev * options.obs_std_dev);
 
-            // `:174-175`.
             for r in 0..2 {
                 for col in 0..3 {
                     self.storage[(obs_idx + r, self.lm_idx + col)] =
@@ -469,7 +444,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
                 self.storage[(obs_idx + r, self.res_idx)] = sqrt_weight * res[r];
             }
 
-            // `:177-179`. The scaling happens once, in place, and then both pose
+            // The scaling happens once, in place, and then both pose
             // blocks are accumulated.
             d_res_d_xi *= sqrt_weight;
             let host_block: Matrix2x6<S> = d_res_d_xi * rel.d_rel_d_h;
@@ -490,7 +465,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
         Ok(error_sum)
     }
 
-    /// `performQR` (`:193-206`): eliminate the three landmark columns.
+    /// `performQR` : eliminate the three landmark columns.
     pub fn perform_qr(&mut self, options: &LandmarkBlockOptions<S>) -> Result<(), LinearizeError> {
         if self.state != LandmarkBlockState::Linearized {
             return Err(LinearizeError::WrongState {
@@ -507,20 +482,13 @@ impl<S: LieScalar> LandmarkBlock<S> {
         Ok(())
     }
 
-    /// `performQRHouseholder` (`:441-454`): three reflections, each applied to
+    /// `performQRHouseholder` : three reflections, each applied to
     /// the whole width of the block.
     fn perform_qr_householder(&mut self) {
         for k in 0..3 {
-            // `remainingRows = num_rows - k - 3` (`:446`): the damping rows are
-            // excluded, so the reflection never touches them.
-            //
-            // **Deviation.** With fewer than two observations the count runs
-            // out and C++ calls `makeHouseholder` on a segment of length zero,
-            // whose `tail` is then a block of length -1 — an assertion in a
-            // debug build and undefined behaviour in a release one. basalt
-            // never builds such a block (`min_num_obs = 2`,
-            // `landmark_database.cpp:207`), but the port must not be the thing
-            // that crashes if one ever appears, so the reflection is skipped.
+            // Exclude damping rows from reflection. Skip an empty reflection when fewer
+            // than two observations leave insufficient rows; malformed sparse blocks must
+            // not cause an out-of-range access.
             let remaining_rows: usize = self.num_rows.saturating_sub(k + 3);
             if remaining_rows == 0 {
                 continue;
@@ -542,13 +510,9 @@ impl<S: LieScalar> LandmarkBlock<S> {
         }
     }
 
-    /// `performQRGivens` (`:429-439`): Golub & Van Loan Algorithm 5.2.4.
-    ///
-    /// Not reached with basalt's shipped options (`use_householder = true`), and
-    /// kept because it is the reference the Householder path is checked against.
+    /// Givens QR (Golub & Van Loan Algorithm 5.2.4), retained to check Householder elimination.
     fn perform_qr_givens(&mut self) {
-        // C++'s `num_rows - 4` underflows on a block with no observations; see
-        // the note in [`Self::perform_qr_householder`].
+        // Guard empty observation sets before subtracting the row offset.
         if self.num_rows < 4 {
             return;
         }
@@ -565,22 +529,11 @@ impl<S: LieScalar> LandmarkBlock<S> {
         }
     }
 
-    /// `backSubstitute(pose_inc, l_diff)` (`:253-327`): recover this landmark's
-    /// increment from the pose increment, add its share of the model cost
-    /// change, and apply it.
-    ///
-    /// Two behaviours worth naming:
-    ///
-    /// * a singular `Q1Jl` is **warned about and skipped**, not an error
-    ///   (`:263-269`, trap 11), and an unusually small determinant only warns;
-    /// * the inverse distance is **projected**, not clamped:
-    ///   `max(0, inv_dist + inc[2])` (`:326`, trap 12).
-    ///
-    /// C++ also undoes the damping before the model cost change (`:310`) and
-    /// scales the increment by `Jl_col_scale` after it (`:322-323`); the port
-    /// carries neither, because nothing damps or scales (D34, D68).
-    ///
-    /// `pose_inc` must be `aom.total_size` long (`:259`).
+    /// Recover and apply the landmark increment, adding its predicted cost decrease.
+    /// A singular `Q1Jl` warns and skips the landmark; a small determinant only warns.
+    /// Project inverse distance with `max(0, inv_dist + inc[2])` (traps 11–12).
+    /// There is no landmark damping or Jacobian scaling (D34, D68).
+    /// The pose increment must span the full ordering.
     pub fn back_substitute(
         &mut self,
         lm: &mut Landmark<S>,
@@ -593,7 +546,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
                 found: self.state,
             });
         }
-        // `if (is_fixed_) return` (`:256`).
+        // `if (is_fixed_) return`.
         if self.is_fixed {
             return Ok(());
         }
@@ -604,7 +557,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
             });
         }
 
-        // `Q1Jl` (`:261`), the upper triangle of the 3x3 at the top of the
+        // `Q1Jl`, the upper triangle of the 3x3 at the top of the
         // landmark columns.
         let mut q1jl: Matrix3<S> = Matrix3::zeros();
         for r in 0..3 {
@@ -616,7 +569,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
         // The product of the triangular diagonal detects a singular landmark.
         let det: S = (q1jl[(0, 0)] * q1jl[(1, 1)] * q1jl[(2, 2)]).abs();
         if det == S::zero() {
-            // `:264-266`, trap 11: skip this landmark, keep the rest.
+            // trap 11: skip this landmark, keep the rest.
             log::warn!(
                 "det(Q1Jl) == 0, skipping backsubstitution for lm: Landmark(id={:?}, host_kf_id={:?})",
                 self.lm_id,
@@ -624,7 +577,6 @@ impl<S: LieScalar> LandmarkBlock<S> {
             );
             return Ok(());
         } else if det < c::<S>(0.01) {
-            // `:267-269`.
             log::warn!(
                 "Unusually small det(Q1Jl)={}, lm: Landmark(id={:?}, host_kf_id={:?})",
                 det.to_f64(),
@@ -633,7 +585,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
             );
         }
 
-        // `Q1Jr + Q1Jp * pose_inc` (`:271-274`).
+        // `Q1Jr + Q1Jp * pose_inc`.
         let mut rhs: Vector3<S> = Vector3::zeros();
         for r in 0..3 {
             let mut acc: S = S::zero();
@@ -654,14 +606,14 @@ impl<S: LieScalar> LandmarkBlock<S> {
         }
         inc = -inc;
 
-        // `:310` calls `setLandmarkDamping(0)` here, to undo the damping before
+        //  calls `setLandmarkDamping(0)` here, to undo the damping before
         // the model cost change. The port has no damping (D34, D68) and the
         // three damping rows are provably still zero — `storage` starts zeroed,
         // the observations fill rows `0..2*obs`, and both QR paths stop at
         // `num_rows - 3` — so there is nothing to undo.
 
         // `QJinc = storage.topLeftCorner(num_rows - 3, padding_idx) * pose_inc`
-        // (`:313`), then `QJinc.head<3>() += Q1Jl * inc` (`:316`) with `Q1Jl`
+        // then `QJinc.head<3>() += Q1Jl * inc` with `Q1Jl`
         // re-read from the now-undamped storage.
         let q2_rows: usize = self.num_rows - 3;
         let mut qjinc: DVector<S> = DVector::zeros(q2_rows);
@@ -680,15 +632,14 @@ impl<S: LieScalar> LandmarkBlock<S> {
             qjinc[r] += acc;
         }
 
-        // `diff = QJinc^T * (0.5 * QJinc + Qr)` (`:318-320`).
+        // `diff = QJinc^T * (0.5 * QJinc + Qr)`.
         let mut diff: S = S::zero();
         for r in 0..q2_rows {
             diff += qjinc[r] * (c::<S>(0.5) * qjinc[r] + self.storage[(r, self.res_idx)]);
         }
         *l_diff -= diff;
 
-        // `:322-326`, without `:322-323`'s `Jl_col_scale` multiply: the scale
-        // is all ones with nothing to scale the columns (D68).
+        // No column-scale multiplication is needed because Jacobian scaling is absent (D68).
         lm.direction[0] += inc[0];
         lm.direction[1] += inc[1];
         let updated: S = lm.inv_dist + inc[2];
@@ -700,7 +651,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
         Ok(())
     }
 
-    /// `get_dense_Q2Jp_Q2r(Q2Jp, Q2r, start_idx)` (`:472-478`): the null-space
+    /// `get_dense_Q2Jp_Q2r(Q2Jp, Q2r, start_idx)` : the null-space
     /// rows, the ones the marginalization QR of stage S7 consumes.
     ///
     /// Rows `3..num_rows` of the block become rows
@@ -714,7 +665,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
         start_idx: usize,
     ) -> Result<(), LinearizeError> {
         let rows: usize = self.num_q2rows();
-        // C++ asserts the column count (`:475`) and indexes the rows unchecked.
+        // Validate destination rows and columns before writing.
         if q2jp.ncols() != self.padding_idx {
             return Err(LinearizeError::StackedSystemSize {
                 expected: self.padding_idx,
@@ -750,16 +701,8 @@ impl<S: LieScalar> LandmarkBlock<S> {
         0..self.padding_idx
     }
 
-    /// `add_dense_H_b(H, b)` (`:494-500`): `H += JᵀJ`, `b += Jᵀr` over the same
-    /// `Q₂` rows.
-    ///
-    /// **Full width**: every column of `0..padding_idx` is written, as the C++
-    /// writes it, because `h` and `b` are the caller's and this method knows
-    /// nothing about what is in them. `Self::add_dense_h_b_active` is the same
-    /// sum over the observed columns only, for the one caller that owns its
-    /// destination and can prove the rest is the identity.
-    ///
-    /// Sum each coefficient over rows in increasing order.
+    /// Add `Q₂J_pᵀ Q₂J_p` and `Q₂J_pᵀ Q₂r` at full width.
+    /// Every column before padding is written, including non-finite propagation.
     pub fn add_dense_h_b(
         &self,
         h: &mut DMatrix<S>,
@@ -791,19 +734,8 @@ impl<S: LieScalar> LandmarkBlock<S> {
         Ok(())
     }
 
-    /// Whether the skip [`Self::add_dense_h_b_active`] makes is the identity on
-    /// a destination that is `+0.0` outside [`Self::active_cols`].
-    ///
-    /// The skipped writes are `x += Σ (a * 0)` over the columns the block does
-    /// not observe. That is `x += ±0.0`, which leaves a `+0.0` `x` alone — but
-    /// only while every factor is finite and those columns really are zero.
-    /// Neither is free: [`Landmark::add_observation`] accepts a non-finite
-    /// keypoint, the Huber weight carries the NaN past the Jacobian checks of
-    /// [`Self::linearize_landmark`], and the Householder reflections of
-    /// `crate::qr`'s reflections act on whole rows, which spreads it into columns the
-    /// block never observed. One pass over the `Q₂` rows decides both, and a
-    /// block that fails takes the full-width path so those NaNs are written
-    /// (decision D32: NaN handling mirrors basalt).
+    /// Use sparse writeback only when skipping inactive columns preserves every value,
+    /// including NaNs and signed zero (D32).
     pub(crate) fn active_writeback_is_exact(&self) -> bool {
         let rows: usize = self.num_q2rows();
         let mut active = self.active_cols.iter().copied().peekable();
@@ -828,7 +760,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
         (0..rows).all(|r| self.storage[(3 + r, self.res_idx)].to_f64().is_finite())
     }
 
-    /// C++ asserts the destination is big enough (`:496`); a typed error here.
+    /// Refuse a destination that is too small with a typed error.
     fn check_dense_h_b_size(&self, h: &DMatrix<S>, b: &DVector<S>) -> Result<(), LinearizeError> {
         if h.nrows() < self.padding_idx
             || h.ncols() < self.padding_idx
@@ -901,8 +833,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
         }
     }
 
-    /// `numQ2rows()` (`:426`): `num_rows - 3`, the rows the reduced camera
-    /// system takes. Note this counts the `Q₁` rows too — the name is basalt's.
+    /// Stored row count minus the three reserved damping rows; includes the `Q₁` rows.
     pub fn num_q2rows(&self) -> usize {
         self.num_rows - 3
     }
@@ -912,23 +843,19 @@ impl<S: LieScalar> LandmarkBlock<S> {
         self.lm_id
     }
 
-    /// `getState()` (`:424`).
+    /// `getState()`.
     pub fn state(&self) -> LandmarkBlockState {
         self.state
     }
 
-    /// `isNumericalFailure()` (`:22`).
-    ///
-    /// Always false in the port for the same reason it is almost always false in
-    /// C++: the comment at `:165-166` records that the `NumericalFailure` branch
-    /// was removed in favour of zeroing the offending Jacobian.
+    /// Numerical-failure status remains false: invalid Jacobians are zeroed instead.
     pub fn is_numerical_failure(&self) -> bool {
         self.state == LandmarkBlockState::NumericalFailure
     }
 
     /// The layout: `(num_rows, num_cols, padding_idx, lm_idx, res_idx)`.
     ///
-    /// The arithmetic of `:83-96` is the thing most likely to go wrong in a
+    /// Layout arithmetic is the part most likely to go wrong in a
     /// port, so it is observable and the fixture checks all five numbers.
     pub fn layout(&self) -> (usize, usize, usize, usize, usize) {
         (
@@ -940,7 +867,7 @@ impl<S: LieScalar> LandmarkBlock<S> {
         )
     }
 
-    /// The block buffer, `storage` (`:530`), row `r`, column `c`.
+    /// The block buffer, `storage`, row `r`, column `c`.
     pub fn storage(&self) -> &DMatrix<S> {
         &self.storage
     }
@@ -1152,9 +1079,9 @@ mod tests {
 
     /// A measurement dropped during marginalization writes no pose columns.
     ///
-    /// `linearizeLandmark` skips an observation with no relative pose (`:137`),
+    /// `linearizeLandmark` skips an observation with no relative pose,
     /// so nothing ever writes at its `abs_t_idx` — which is the `0` sentinel of
-    /// `:74`, another frame's first column. The block here is hosted in frame 1,
+    /// another frame's first column. The block here is hosted in frame 1,
     /// so that sentinel is not the host's own offset and the two are told apart:
     /// columns `0..6` stay zero through the linearization and the QR, and the
     /// dense system is the full loop's either way.
@@ -1196,7 +1123,7 @@ mod tests {
         assert_dense_h_b_is_the_full_loop(&block);
     }
 
-    /// The layout arithmetic of `:83-96` on every remainder of the padding rule.
+    /// The layout arithmetic of on every remainder of the padding rule.
     #[test]
     fn the_layout_pads_to_a_multiple_of_four() {
         for frames in 1..=6usize {
@@ -1216,7 +1143,7 @@ mod tests {
         }
     }
 
-    /// A host frame outside the ordering is `:62`'s assertion, typed.
+    /// A host frame outside the ordering is 's assertion, typed.
     #[test]
     fn a_host_outside_the_ordering_is_an_error() {
         let (_, lm, _) = fixture(1);
@@ -1227,7 +1154,7 @@ mod tests {
         );
     }
 
-    /// A missing relative pose is `:68`'s assertion, typed.
+    /// A missing relative pose is 's assertion, typed.
     #[test]
     fn a_missing_relative_pose_is_an_error() {
         let (aom, lm, _) = fixture(1);
@@ -1235,8 +1162,7 @@ mod tests {
         assert!(matches!(err, LinearizeError::MissingRelativePose { .. }));
     }
 
-    /// The state machine of `landmark_block.hpp:50`: every method that C++
-    /// asserts a state for returns a typed error instead.
+    /// Out-of-order block operations return typed state errors.
     #[test]
     fn methods_refuse_to_run_out_of_order() {
         let (aom, lm, rel) = fixture(1);
@@ -1245,7 +1171,7 @@ mod tests {
         assert_eq!(block.state(), LandmarkBlockState::Allocated);
         assert!(!block.is_numerical_failure());
 
-        // `performQR` asserts `Linearized` (`:194`).
+        // `performQR` asserts `Linearized`.
         assert_eq!(
             block.perform_qr(&options()).unwrap_err(),
             LinearizeError::WrongState {
@@ -1262,7 +1188,7 @@ mod tests {
         block.perform_qr(&options()).unwrap();
         assert_eq!(block.state(), LandmarkBlockState::Marginalized);
 
-        // `:259`: the increment is the whole ordering.
+        // the increment is the whole ordering.
         let mut l_diff: f64 = 0.0;
         let mut moved: Landmark<f64> = lm.clone();
         assert_eq!(
@@ -1276,13 +1202,10 @@ mod tests {
         );
     }
 
-    /// Two of basalt's deliberate non-failures (trap 11).
-    ///
-    /// A landmark seen **once** gives a `2 x 3` `J_l`, so after the QR the third
-    /// diagonal of `Q1Jl` is zero, `det(Q1Jl) == 0`, and `backSubstitute` warns
-    /// and returns without touching the landmark (`:263-266`). A **fixed**
-    /// landmark returns even earlier (`:256`). Neither is an error, and turning
-    /// either into one would change the estimator.
+    /// Singular and fixed landmarks are skipped without error (trap 11).
+    /// One observation gives rank at most two, so the third triangular diagonal is
+    /// zero and back-substitution leaves the landmark untouched. Fixed landmarks
+    /// return even earlier.
     #[test]
     fn a_singular_landmark_block_is_skipped_not_an_error() {
         let (aom, mut lm, rel) = fixture(1);
@@ -1307,14 +1230,14 @@ mod tests {
         assert_eq!(moved.inv_dist, lm.inv_dist);
         assert_eq!(l_diff, 0.0);
 
-        // And a fixed block returns before it even looks (`:256`).
+        // And a fixed block returns before it even looks.
         let (aom, lm, rel) = fixture(1);
         let mut fixed: LandmarkBlock<f64> =
             LandmarkBlock::allocate(lm.id, &lm, &index, &aom, true).unwrap();
         fixed
             .linearize_landmark(&lm, &rel, &cameras(), &options())
             .unwrap();
-        // `is_fixed_` zeroes `d_res_d_p` (`:150`), so the landmark columns are
+        // `is_fixed_` zeroes `d_res_d_p`, so the landmark columns are
         // empty before the QR ever runs.
         let (_, _, _, lm_idx, _) = fixed.layout();
         for row in 0..4 {
@@ -1332,10 +1255,8 @@ mod tests {
         assert_eq!(l_diff, 0.0);
     }
 
-    /// An observation whose target frame is not in the ordering is dropped:
-    /// C++ stores a null `RelPoseLin*` for it (`:70-75`) and skips it at `:137`,
-    /// leaving its two rows zero. That is how a measurement dropped during
-    /// marginalization survives allocation and contributes nothing.
+    /// An observation outside the ordering retains two zero rows and contributes
+    /// nothing after marginalization drops its relative pose.
     #[test]
     fn an_observation_outside_the_ordering_leaves_its_rows_zero() {
         let (aom, mut lm, rel) = fixture(1);
@@ -1364,11 +1285,11 @@ mod tests {
                 );
             }
         }
-        // ...and the two live observations did write.
+        // and the two live observations did write.
         assert!(block.storage().rows(0, 4).iter().any(|v| *v != 0.0));
     }
 
-    /// The Huber branch of `compute_error_weight` (`:456-470`): below the
+    /// The Huber branch of `compute_error_weight` : below the
     /// threshold the weight is one, above it the error grows linearly rather
     /// than quadratically.
     #[test]
@@ -1389,7 +1310,7 @@ mod tests {
         assert!((weight_out - 0.5).abs() < 1e-15, "{weight_out}");
         assert!((error_out - 0.5 * 1.5 * 0.5 * res_squared).abs() < 1e-15);
 
-        // With the threshold off it is a plain squared norm (`:466-468`).
+        // With the threshold off it is a plain squared norm.
         let plain: LandmarkBlockOptions<f64> = LandmarkBlockOptions {
             huber_parameter: 0.0,
             ..opt
@@ -1399,10 +1320,7 @@ mod tests {
         assert_eq!(error, 0.5 * res_squared);
     }
 
-    /// An ordering with one absurd block size passes every per-dimension check
-    /// and then multiplies out to a matrix nalgebra cannot allocate. C++ calls
-    /// `storage.resize(num_rows, num_cols)` (`:98`), which would abort in the
-    /// allocator; the port refuses first (decision D32).
+    /// Refuse matrix-size overflow before nalgebra allocation can abort (D32).
     #[test]
     fn a_block_too_large_to_allocate_is_an_error() {
         let (_, lm, _) = fixture(1);

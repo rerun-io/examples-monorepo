@@ -1,46 +1,16 @@
-//! The non-keyframe frame update (D76): the newest state alone, against fixed
-//! landmarks and its IMU factor.
+//! The non-keyframe update: solve only the newest state against fixed landmarks
+//! and its IMU factor (D76). It runs when `port.frame_update_max_iterations > 0`
+//! and no keyframe was taken. Zero keeps the full-window schedule.
 //!
-//! basalt has no counterpart. It is a fixed-lag smoother and re-solves the whole
-//! sliding window on every frameset ([`SqrtKeypointVio::optimize`]); cuVSLAM
-//! instead solves only the newest pose against constant landmarks per frame
-//! (`libs/pnp/multicam_pnp.cpp`) and runs bundle adjustment at keyframes, and
-//! this is that schedule's cheap half. It runs only when
-//! `port.frame_update_max_iterations` is above zero and only on a frameset that
-//! took no keyframe; at the knob's `0` default nothing here is reached and the
-//! estimator is basalt's, frame for frame.
+//! The residuals, Jacobians, robust weights, IMU factor, damped solve, damping
+//! policy and convergence predicate are shared with the window solve. The prior
+//! covers frozen blocks, while the newest state is unfrozen, so its cost is
+//! constant in this update. If the prior does order the newest state, this path
+//! declines the frame and the joint solve handles it.
 //!
-//! Everything numeric is borrowed rather than restated: the residual and its
-//! pose Jacobian are [`linearize_point`] and [`linearize_relative_pose`], the robust
-//! weight is the landmark block's own [`compute_error_weight`], the IMU factor is
-//! [`ImuBlock::linearize`], and the damped solve is [`damped_solve`] — the same
-//! pivoted LU factorization the window solve runs. The damping policy is
-//! [`LmDamping`](super::LmDamping)'s own and the convergence test is
-//! [`lm_converged`], so the two schedules cannot drift apart on either. There is
-//! one reprojection model in the crate.
-//!
-//! ## What is held, and why the prior is not here
-//!
-//! Landmarks, their host keyframes and every older state are constants, so the
-//! only free block is the newest state's 15 unknowns. The marginalization prior
-//! covers only blocks frozen at a linearization point — `computeDelta` refuses
-//! any other (`ba_base.cpp:294`) — and the newest state is appended unfrozen, so
-//! the prior's cost does not depend on the one variable this solves for and
-//! contributes neither a Jacobian nor a gradient. [`SqrtKeypointVio::frame_update`]
-//! checks that per frame and hands the frameset back to the joint solve if the
-//! prior ever does order it.
-//!
-//! ## The loop
-//!
-//! The window loop's shape, constant for constant: `lambda` reset to
-//! `vio_lm_lambda_initial` every frame (D11), `lambda·diag(H)` damping with the
-//! same floor (D10), the budget shared with backtracking (D12), the increment
-//! negated before it is applied (D13), and the shared Nielsen update and
-//! `1e-6`/`1e-4` convergence pair above. One difference, and it is a
-//! simplification the window cannot make: with nothing eliminated, the model's
-//! predicted decrease is `−(inc·b + ½ incᵀ H inc)` in closed form, which is what
-//! `backSubstitute` accumulates block by block when there are no landmark
-//! columns to substitute back.
+//! Lambda resets each frame; diagonal damping, the shared backtracking budget,
+//! negated increment and Nielsen update follow the window loop. With no landmark
+//! elimination, predicted decrease is `−(inc·b + ½ incᵀ H inc)` directly.
 
 use nalgebra::{DMatrix, DVector, Matrix2x6, Matrix4, Matrix6, Vector2, Vector6};
 
@@ -251,7 +221,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             return Ok(Err(FrameUpdateDecline::NoImuFactor));
         };
 
-        // `:1249`, D11: the trust region has no memory across framesets.
+        // D11: the trust region has no memory across framesets.
         damping.lambda = S::from_literal(config.vio_lm_lambda_initial);
 
         let mark: std::time::Instant = std::time::Instant::now();
@@ -298,7 +268,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             state.backup();
             state.apply_inc(&inc);
 
-            // `:1477`, folded left to right like the window's.
+            // folded left to right like the window's.
             let mut step_norminf: S = S::zero();
             for value in inc.iter() {
                 step_norminf = eigen_maxi(step_norminf, value.abs());
@@ -356,7 +326,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 continue;
             }
 
-            // `:1585-1598`.
             damping.escalate();
             let Some(state) = ba.frame_states.get_mut(&t_ns) else {
                 // Unreachable, as above.
@@ -447,10 +416,10 @@ fn linearize_state<S: LieScalar>(
                         camera_count: cameras.len(),
                     })?;
 
-            // `linearization_abs_qr.cpp:207-241`: the Jacobian at the
+            // the Jacobian at the
             // linearization point, the value at the current state when either
             // end is frozen. A landmark hosted by this frameset has no pose
-            // Jacobian at all (`:235-239`), which is what an identity relative
+            // Jacobian at all, which is what an identity relative
             // pose means.
             let (t_t_h, d_rel_d_t): (Matrix4<S>, Matrix6<S>) = if tcid_h == tcid_t {
                 (Matrix4::identity(), Matrix6::zeros())
@@ -510,11 +479,10 @@ fn linearize_state<S: LieScalar>(
                     proj: None,
                 },
             );
-            // `landmark_block_abs_dynamic.hpp:152`.
             if options.use_valid_projections_only && !valid {
                 continue;
             }
-            // `:153-163`: zeroed, never fatal.
+            // zeroed, never fatal.
             if !d_res_d_xi.iter().all(|v| v.to_f64().is_finite()) {
                 log::warn!(
                     "d_res_d_xi is not valid in the frame update, lm = {:?}",
@@ -523,7 +491,7 @@ fn linearize_state<S: LieScalar>(
                 d_res_d_xi.fill(S::zero());
             }
 
-            // `:168-179`, with the host block dropped: the landmark and its host
+            // with the host block dropped: the landmark and its host
             // are constants here.
             let res_squared: S = res[0] * res[0] + res[1] * res[1];
             let (weighted_error, weight) = compute_error_weight(res_squared, options);

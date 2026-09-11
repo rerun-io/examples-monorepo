@@ -7,7 +7,7 @@ use cubecl::prelude::*;
 // together. The storage probe alone retains checked launch mode.
 // ── the pyramid ──────────────────────────────────────────────────────────────
 
-/// `border101` for an index past the high end (`image_pyr.h:83`).
+/// `border101` for an index past the high end.
 ///
 /// `h - 1 - |h - 1 - x|`, written without an absolute value so it needs no
 /// signed intermediate: below `h` it is the identity, at or above it the
@@ -17,7 +17,7 @@ fn reflect_high(x: usize, h: usize) -> usize {
     if x < h { x } else { h + h - 2usize - x }
 }
 
-/// `std::abs(2 * r - k)` (`image_pyr.h:110-111`), which is the *other*
+/// `std::abs(2 * r - k)`, which is the *other*
 /// reflection: about zero rather than about the far edge. Trap 3 of the
 /// architecture dossier is that these two are not one function.
 // `usize::abs_diff` is not in CubeCL's kernel language, so the subtraction is
@@ -47,18 +47,10 @@ fn subsample_band(
         + usize::cast_from(src[row_base + c4])
 }
 
-/// [`crate::pyramid::subsample`] (`image_pyr.h:99-140`) as one fused 5x5 pass.
-///
-/// The CPU port runs the separable form: a vertical pass into an `i32`
-/// accumulator, then a horizontal pass with one rounding at the very end. Both
-/// passes are exact integer sums, so the fused 5x5 here is **bit-exact** with
-/// it — which is why this kernel's tolerance test asserts equality rather than
-/// a bound. Row indices reflect about the source height and column indices
-/// about the source width, exactly as the transposed C++ accumulator makes
-/// them (see the CPU docstring). Every pixel is non-negative and the
-/// accumulator peaks at `65535 * 16 * 16 = 16,776,960`, so `usize` carries it and
-/// `>> 8` is the C++ shift rather than a division that would differ on a
-/// negative value.
+/// Fused 5x5 counterpart of [`crate::pyramid::subsample`].
+/// Exact integer sums and one final rounding make it equal to the separable CPU
+/// filter. Reflect rows about source height and columns about source width.
+/// The maximum accumulator is `65535 * 16 * 16`, which fits the working integer.
 #[cube(launch, launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 fn subsample_kernel(
@@ -94,7 +86,7 @@ fn subsample_kernel(
         + 4usize * subsample_band(src, src_base + r3 * src_width, c0, c1, col2, c3, c4)
         + subsample_band(src, src_base + r4 * src_width, c0, c1, col2, c3, c4);
 
-    // `T val = ((val_int + (1 << 7)) >> 8)` (`image_pyr.h:135`).
+    // `T val = ((val_int + (1 << 7)) >> 8)`.
     dst[dst_base + r * dst_width + c] = u16::cast_from((acc + 128usize) >> 8usize);
 }
 

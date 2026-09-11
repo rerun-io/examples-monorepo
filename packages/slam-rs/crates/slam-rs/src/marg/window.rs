@@ -1,25 +1,10 @@
-//! The sliding-window half of `SqrtKeypointVioEstimator::marginalize`
-//! (`src/vi_estimator/sqrt_keypoint_vio.cpp:707-1198`): everything that happens
-//! **after** the schedule has decided what leaves.
+//! Apply a marginalization schedule to the sliding window.
+//! Build ordering, linearize with the current prior, split indices, eliminate,
+//! shrink state and landmark maps, then re-anchor the new prior.
 //!
-//! The schedule itself — the keyframe scoring at `:767-880`, the
-//! `states_to_remove` count at `:720-724`, and the `kf_ids` bookkeeping — is
-//! stage S8's and is not here. This module takes those four sets as
-//! [`MarginalizeSchedule`] and does the rest: build the absolute ordering,
-//! linearize the window with the current prior, split the ordering into kept
-//! and marginalized indices, run [`marginalize_helper_sqrt_to_sqrt`], shrink
-//! the window and the landmark database, and re-anchor the new prior.
-//!
-//! Two traps of the architecture dossier live here and are called out at the
-//! lines that implement them:
-//!
-//! * **Trap 7** — the state that stays behind as the prior's newest block is
-//!   frozen at its linearization point, `setLinTrue()` (`:1086-1088`). Without
-//!   it the prior's `delta` means nothing and the drift is silent.
-//! * **Trap 8** — the prior comes out of the helper linearized at `x = 0`, and
-//!   is put back into its delta-independent form by
-//!   `marg_data.b -= marg_data.H * delta` (`:1170-1172`). Its mirror on the way
-//!   in is `linearization_abs_qr.cpp:592`.
+//! Freeze the newest prior state before computing its delta (trap 7).
+//! Convert the helper's residual back to delta-independent form by subtracting
+//! `H * delta` (trap 8); omitting either step causes silent drift.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -35,35 +20,29 @@ use crate::types::{
     AbsOrderMap, FrameId, LandmarkId, MargLinData, POSE_SIZE, POSE_VEL_BIAS_SIZE, PoseStateWithLin,
 };
 
-/// What the schedule decided, `sqrt_keypoint_vio.cpp:724-880`.
-///
-/// `poses_to_marg` names pose blocks that leave, `kfs_to_marg` the subset of
-/// those that were keyframes hosting landmarks, `states_to_marg_all` full
-/// states that leave outright, and `states_to_marg_vel_bias` full states that
-/// keep their pose and lose their velocity and biases. So `poses_to_marg` is
-/// disjoint from both state sets, the two state sets are disjoint from each
-/// other, and `kfs_to_marg` is a subset of `poses_to_marg` rather than
-/// disjoint from it. C++ gets all of that from how it builds them; the port
-/// checks it (`validate_schedule`).
+/// Scheduled removals: poses, their hosted keyframes, full states, and state
+/// velocity/bias blocks. Pose removals and the two state sets are disjoint;
+/// keyframe removals are a subset of pose removals. Validate these relationships
+/// before changing the window.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MarginalizeSchedule {
-    /// `last_state_to_marg` (`:724`): the newest state the ordering reaches and
+    /// `last_state_to_marg` : the newest state the ordering reaches and
     /// the one that becomes the prior's 15-dof block.
     pub last_state_to_marg: FrameId,
-    /// `kfs_to_marg` (`:766`).
+    /// `kfs_to_marg`.
     pub kfs_to_marg: BTreeSet<FrameId>,
-    /// `poses_to_marg` (`:729`), a superset of `kfs_to_marg`.
+    /// `poses_to_marg`, a superset of `kfs_to_marg`.
     pub poses_to_marg: BTreeSet<FrameId>,
-    /// `states_to_marg_all` (`:743`).
+    /// `states_to_marg_all`.
     pub states_to_marg_all: BTreeSet<FrameId>,
-    /// `states_to_marg_vel_bias` (`:742`).
+    /// `states_to_marg_vel_bias`.
     pub states_to_marg_vel_bias: BTreeSet<FrameId>,
 }
 
 /// The configuration bits `marginalize()` reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MarginalizeOptions {
-    /// `config.vio_marg_lost_landmarks` (`:1116`).
+    /// `config.vio_marg_lost_landmarks`.
     pub marg_lost_landmarks: bool,
 }
 
@@ -73,11 +52,11 @@ pub struct MarginalizeInputs<'a, S: LieScalar> {
     /// What the schedule decided.
     pub schedule: &'a MarginalizeSchedule,
     /// Gravity and the two bias random-walk weights; `None` for a visual-only
-    /// window (`ImuLinData` at `:913`).
+    /// window (`ImuLinData` at ).
     pub imu_lin_data: Option<ImuLinData<S>>,
-    /// `lost_landmaks` (`:709`), the landmarks the frontend stopped tracking.
+    /// `lost_landmaks`, the landmarks the frontend stopped tracking.
     pub lost_landmarks: Option<&'a BTreeSet<LandmarkId>>,
-    /// `fixed_kfs` (`:924`): `ltkfs` when `config.vio_fix_long_term_keyframes`
+    /// `fixed_kfs` : `ltkfs` when `config.vio_fix_long_term_keyframes`
     /// is on, empty otherwise.
     pub fixed_frames: Option<&'a BTreeSet<FrameId>>,
     /// Flags.
@@ -87,28 +66,21 @@ pub struct MarginalizeInputs<'a, S: LieScalar> {
 /// What one marginalization produced besides the updated prior.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MarginalizeOutput<S: LieScalar> {
-    /// `aom` (`:726-763`): the ordering the marginalization linearized over.
+    /// `aom` : the ordering the marginalization linearized over.
     pub aom: AbsOrderMap,
-    /// `idx_to_keep` (`:980-1003`).
+    /// `idx_to_keep`.
     pub idx_to_keep: BTreeSet<usize>,
-    /// `idx_to_marg` (`:980-1003`).
+    /// `idx_to_marg`.
     pub idx_to_marg: BTreeSet<usize>,
     /// What `linearizeProblem` reported for the window that is leaving.
     pub error: S,
-    /// `numerically_valid`: false when a landmark block held a non-finite
-    /// Jacobian, which basalt zeroes with a warning rather than failing.
+    /// False if a landmark Jacobian was non-finite and zeroed with a warning.
     pub numerically_valid: bool,
 }
 
-/// Build the absolute ordering the marginalization runs over
-/// (`sqrt_keypoint_vio.cpp:726-763`).
-///
-/// Every pose block first, in timestamp order, then the full states up to and
-/// including `last_state_to_marg` — states newer than that are simply not in
-/// the system. Each block is checked against the prior's ordering as C++
-/// asserts (`:736`, `:758-759`): the prior must be a prefix of the window at
-/// exactly the same offsets, or the two systems do not describe the same
-/// variables.
+/// Order all poses by timestamp, then states through `last_state_to_marg`.
+/// The prior must be an exact prefix at the same offsets; otherwise the two
+/// systems assign different variables to the same columns.
 fn build_absolute_ordering<S: LieScalar>(
     estimator: &BundleAdjustmentBase<S>,
     marg_data: &MargLinData<S>,
@@ -117,7 +89,7 @@ fn build_absolute_ordering<S: LieScalar>(
     let mut aom: AbsOrderMap = AbsOrderMap::new();
     for frame_id in estimator.frame_poses.keys() {
         let offset: usize = aom.push(*frame_id, POSE_SIZE)?;
-        // `:736`: unconditional, because C++ uses `at()`.
+        // Every prior pose must have a matching ordering entry.
         if marg_data.order.get(*frame_id) != Some((offset, POSE_SIZE)) {
             return Err(MargError::PriorOrderMismatch {
                 frame_id: *frame_id,
@@ -125,13 +97,12 @@ fn build_absolute_ordering<S: LieScalar>(
         }
     }
     for frame_id in estimator.frame_states.keys() {
-        // `:745`.
         if *frame_id > last_state_to_marg {
             break;
         }
         let offset: usize = aom.push(*frame_id, POSE_VEL_BIAS_SIZE)?;
-        // `:758-759`: the comparison is against `aom.items` **before** the
-        // increment at `:762`, so a state past the end of the prior is not
+        // the comparison is against `aom.items` **before** the
+        // increment, so a state past the end of the prior is not
         // checked — it is the one entering it.
         if aom.items() <= marg_data.order.items()
             && marg_data.order.get(*frame_id) != Some((offset, POSE_VEL_BIAS_SIZE))
@@ -144,33 +115,13 @@ fn build_absolute_ordering<S: LieScalar>(
     Ok(aom)
 }
 
-/// Check the whole schedule against the linearized ordering, before anything
-/// mutates.
-///
-/// C++ builds the four sets and `last_state_to_marg` out of the window itself
-/// (`sqrt_keypoint_vio.cpp:724-880`) and then trusts them: `:1090-1112` erases
-/// what they name with `frame_states.at()` (which throws on a frame that is not
-/// there) and `frame_poses.erase()` (which silently does nothing), in that
-/// order, so a schedule that disagrees with the window takes effect *before* it
-/// is noticed — and a state newer than `last_state_to_marg` is not in the
-/// ordering at all, so it is deleted without having been marginalized. Every
-/// relationship below is an invariant of C++'s construction, and checking them
-/// here is what keeps a refused marginalization from leaving a half-rewritten
-/// window (decision D32).
-///
-/// Membership in `aom` is the same question as membership in the live maps:
-/// [`build_absolute_ordering`] just walked `frame_poses` and the prefix of
-/// `frame_states` up to `last_state_to_marg`, and nothing has changed since.
-/// The block size is what tells a pose from a full state, and it is what keeps
-/// `poses_to_marg` disjoint from the two state sets: it must hold 6-row blocks
-/// and they must hold 15-row blocks. The two state sets are checked against
-/// each other below; `kfs_to_marg` is checked to be a *subset* of
-/// `poses_to_marg`, which is what C++ builds it as.
-///
-/// The window's own linearization precondition is a different question, over a
-/// different ordering: `check_prior_blocks_linearized`.
+/// Validate the entire schedule before mutation (D32).
+/// Ordering membership establishes frame membership; block sizes distinguish
+/// poses from full states. Check disjoint state sets and that removed keyframes
+/// are a subset of removed poses. This prevents partial updates on refusal.
+/// Frozen-linearization preconditions are checked separately over the new prior.
 fn validate_schedule(aom: &AbsOrderMap, schedule: &MarginalizeSchedule) -> Result<(), MargError> {
-    // `:729` and `:876`: every pose that leaves is a pose block of the window.
+    //  and : every pose that leaves is a pose block of the window.
     for frame_id in &schedule.poses_to_marg {
         if !matches!(aom.get(*frame_id), Some((_, POSE_SIZE))) {
             return Err(MargError::ScheduledFrameNotInOrdering {
@@ -181,7 +132,6 @@ fn validate_schedule(aom: &AbsOrderMap, schedule: &MarginalizeSchedule) -> Resul
         }
     }
 
-    // `:875-876`.
     for frame_id in &schedule.kfs_to_marg {
         if !schedule.poses_to_marg.contains(frame_id) {
             return Err(MargError::KeyframeNotInPosesToMarg {
@@ -190,8 +140,8 @@ fn validate_schedule(aom: &AbsOrderMap, schedule: &MarginalizeSchedule) -> Resul
         }
     }
 
-    // `:743` and `:742`: both state sets are full states of the window, and
-    // `:745`'s `if (kv.first != last_state_to_marg)` keeps the newest state out
+    //  and : both state sets are full states of the window, and
+    // 's `if (kv.first != last_state_to_marg)` keeps the newest state out
     // of both — it is the one that becomes the prior's own block.
     for (set, frames) in [
         (ScheduleSet::StatesToMargAll, &schedule.states_to_marg_all),
@@ -218,7 +168,7 @@ fn validate_schedule(aom: &AbsOrderMap, schedule: &MarginalizeSchedule) -> Resul
         }
     }
 
-    // `:747-750`: the two state sets are an if/else over the same frame.
+    // the two state sets are an if/else over the same frame.
     if let Some(frame_id) = schedule
         .states_to_marg_all
         .intersection(&schedule.states_to_marg_vel_bias)
@@ -234,14 +184,9 @@ fn validate_schedule(aom: &AbsOrderMap, schedule: &MarginalizeSchedule) -> Resul
     Ok(())
 }
 
-/// The ordering the new prior gets, `marg_order_new` (`:1120-1133`).
-///
-/// C++ builds it by walking the **already shrunk** `frame_poses`; the port
-/// builds it from the sets instead, so the width check at `:1145` can run
-/// before anything mutates and a refusal leaves `marg_data` alone. The two
-/// give the same ordering: C++'s `frame_poses` at that point is
-/// `(frame_poses ∪ states_to_marg_vel_bias) \ poses_to_marg`, a `std::map` in
-/// ascending key order, which is what a [`BTreeSet`] of the same ids iterates.
+/// Construct the surviving prior ordering before mutation from
+/// `(frame_poses ∪ states_to_marg_vel_bias) \ poses_to_marg` in sorted order.
+/// This lets width validation fail without changing the prior or window.
 fn new_prior_ordering<S: LieScalar>(
     estimator: &BundleAdjustmentBase<S>,
     schedule: &MarginalizeSchedule,
@@ -261,22 +206,10 @@ fn new_prior_ordering<S: LieScalar>(
     Ok(order)
 }
 
-/// `computeDelta`'s own precondition on the ordering it is handed
-/// (`ba_base.cpp:294`, `:297`): every block of it frozen at its linearization
-/// point.
-///
-/// At `sqrt_keypoint_vio.cpp:1171` that ordering is the new prior's, so its
-/// 6-row blocks are the poses that survive plus the states that are about to be
-/// demoted ([`new_prior_ordering`]) — and demotion copies the state's
-/// `linearized` flag over (`imu_types.h:206-215`), which is exactly what
-/// [`BundleAdjustmentBase::get_pose_state_with_lin`] answers with for a block
-/// that is still a full state here. So both kinds are decidable before
-/// `:1090-1112` has moved anything, and the error is the one `compute_delta`
-/// would raise at `:1171`, only with the window still intact. The lookup cannot
-/// miss — [`new_prior_ordering`] builds the ordering out of those same two maps
-/// — so `?` carries its typed error rather than a branch that cannot be taken.
-/// The one 15-row block is `last_state_to_marg` (`ba_base.cpp:297`), which the
-/// caller checked is *not* linearized and is about to freeze (`:1086-1088`).
+/// Check that all surviving pose blocks are frozen before computing deltas.
+/// Demoted states carry their first six delta entries and frozen flag, so their
+/// precondition can be checked before demotion. The one full-state block is
+/// `last_state_to_marg`, which is checked unfrozen and will be frozen next.
 fn check_prior_blocks_linearized<S: LieScalar>(
     estimator: &BundleAdjustmentBase<S>,
     marg_order_new: &AbsOrderMap,
@@ -290,12 +223,11 @@ fn check_prior_blocks_linearized<S: LieScalar>(
 }
 
 /// Split the ordering into the indices that stay and the indices that go
-/// (`sqrt_keypoint_vio.cpp:980-1003`).
 ///
 /// A pose block goes whole or stays whole. A full state either goes whole
 /// (`states_to_marg_all`), keeps its six pose rows and loses the other nine
 /// (`states_to_marg_vel_bias`), or stays whole — and the last case is asserted
-/// to be `last_state_to_marg` alone (`:999`).
+/// to be `last_state_to_marg` alone.
 fn split_indices(
     aom: &AbsOrderMap,
     schedule: &MarginalizeSchedule,
@@ -319,14 +251,13 @@ fn split_indices(
                     idx_to_keep.extend(start_idx..start_idx + POSE_SIZE);
                     idx_to_marg.extend(start_idx + POSE_SIZE..start_idx + POSE_VEL_BIAS_SIZE);
                 } else {
-                    // `:999`.
                     if frame_id != schedule.last_state_to_marg {
                         return Err(MargError::UnscheduledState { frame_id });
                     }
                     idx_to_keep.extend(start_idx..start_idx + POSE_VEL_BIAS_SIZE);
                 }
             }
-            // C++ asserts `POSE_SIZE` or `POSE_VEL_BIAS_SIZE` (`:990`).
+            // Only pose and full-state block sizes are valid.
             size => return Err(MargError::UnexpectedBlockSize { frame_id, size }),
         }
     }
@@ -334,12 +265,9 @@ fn split_indices(
 }
 
 /// Linearize the window over `aom` with `prior` included and export the
-/// stacked square-root system (`sqrt_keypoint_vio.cpp:905-942`).
+/// stacked square-root system.
 ///
-/// The branch at `:935-939` chooses `get_dense_Q2Jp_Q2r` for a square-root
-/// prior and `get_dense_H_b` for a squared one. Only `ABS_QR` is ported
-/// (decision D13) and only a square-root prior can exist (D68), so the port
-/// takes the first unconditionally.
+/// Only square-root priors exist, so this always exports `Q2Jp` and `Q2r` (D68).
 fn linearize_for_marginalization<S: LieScalar>(
     estimator: &BundleAdjustmentBase<S>,
     aom: &AbsOrderMap,
@@ -350,21 +278,16 @@ fn linearize_for_marginalization<S: LieScalar>(
     let lin_inputs: LinearizationInputs<'_, S> = LinearizationInputs {
         marg: Some(prior),
         imu: imu_input,
-        // `:925`: only landmarks hosted by a marginalized keyframe, or lost.
+        // only landmarks hosted by a marginalized keyframe, or lost.
         used_frames: Some(&inputs.schedule.kfs_to_marg),
         lost_landmarks: inputs.lost_landmarks,
         fixed_frames: inputs.fixed_frames,
     };
-    // The defaults are safe: `LinearizationAbsQR::new` overwrites
-    // `huber_parameter` and `obs_std_dev` from the estimator
-    // (`linearization_abs_qr.cpp:69-73`, where C++ asserts they agree).
+    // The linearizer copies Huber threshold and observation deviation from the estimator.
     let mut lqr: LinearizationAbsQR<S> =
         LinearizationAbsQR::new(estimator, aom, LinearizationOptions::default(), &lin_inputs)?;
-    // `:928`.
     let (error, numerically_valid) = lqr.linearize_problem(estimator, &lin_inputs)?;
-    // `:932`.
     lqr.perform_qr()?;
-    // `:935-939`.
     let (h, b) = lqr.get_dense_q2jp_q2r(estimator, &lin_inputs)?;
     Ok(LinearizedWindow {
         h,
@@ -374,7 +297,7 @@ fn linearize_for_marginalization<S: LieScalar>(
     })
 }
 
-/// What one pass of `:905-942` produced.
+/// What one pass of produced.
 struct LinearizedWindow<S: LieScalar> {
     /// `Q2Jp_or_H`.
     h: DMatrix<S>,
@@ -386,25 +309,11 @@ struct LinearizedWindow<S: LieScalar> {
     numerically_valid: bool,
 }
 
-/// `SqrtKeypointVioEstimator::marginalize` from `:896` to `:1178`.
-///
-/// Mutates the window in place: `marg_data` becomes the new prior,
-/// `estimator.frame_states` / `frame_poses` / `lmdb` shrink, and the consumed
-/// IMU intervals leave `imu_meas`. Returns the ordering and the index split so
-/// stage S8 can log them.
-///
-/// The order of operations is basalt's, and two of the steps only work because
-/// of where they sit:
-///
-/// * `setLinTrue` on `last_state_to_marg` (`:1086-1088`) happens **before**
-///   `computeDelta`, so that state contributes a zero delta to the re-anchoring
-///   rather than the increment it accumulated as a free variable;
-/// * `marg_order_new` describes the window that *survives* — C++ builds it at
-///   `:1120-1133`, after the `states_to_marg_vel_bias` frames have been demoted
-///   into `frame_poses` and the `poses_to_marg` frames removed. The port
-///   computes the same set from the schedule instead
-///   (`new_prior_ordering`) so that `:1145`'s width check can run before the
-///   first mutation.
+/// Marginalize in place and return ordering and index split for diagnostics.
+/// The prior is replaced, frame and landmark maps shrink, and consumed IMU factors leave.
+/// Freeze `last_state_to_marg` before computing delta so its new prior delta is zero.
+/// Construct the surviving ordering from the schedule before mutation, allowing
+/// width and frozen-state checks to fail without a partial window update.
 pub fn marginalize<S: LieScalar>(
     estimator: &mut BundleAdjustmentBase<S>,
     marg_data: &mut MargLinData<S>,
@@ -414,11 +323,9 @@ pub fn marginalize<S: LieScalar>(
     let schedule: &MarginalizeSchedule = inputs.schedule;
     let last_state_to_marg: FrameId = schedule.last_state_to_marg;
 
-    // `:726-763`.
     let aom: AbsOrderMap = build_absolute_ordering(estimator, marg_data, last_state_to_marg)?;
 
-    // `:1086`: C++ asserts this before it freezes the state; the port checks it
-    // up front, so a refused marginalization leaves the window untouched.
+    // Check the freeze precondition before mutation so refusal leaves the window intact.
     match estimator.frame_states.get(&last_state_to_marg) {
         None => {
             return Err(MargError::FrameNotInWindow {
@@ -434,17 +341,14 @@ pub fn marginalize<S: LieScalar>(
     }
 
     // Everything the schedule claims about the window, checked here rather
-    // than discovered halfway through `:1090-1112`.
+    // than discovered halfway through.
     validate_schedule(&aom, schedule)?;
 
-    // `:1120-1133`, hoisted: the new prior's ordering is a function of the
-    // window and the schedule, so both the checks it carries — the
-    // linearization precondition `compute_delta` reaches only at `:1171`, and
-    // the `:1145` width check below — run before the first mutation.
+    // Compute the new ordering before mutation to check its width and frozen blocks.
     let marg_order_new: AbsOrderMap = new_prior_ordering(estimator, schedule)?;
     check_prior_blocks_linearized(estimator, &marg_order_new)?;
 
-    // `:915-922`: the intervals whose two ends are both in the ordering.
+    // the intervals whose two ends are both in the ordering.
     let imu_input: Option<ImuInput<'_, S>> = inputs.imu_lin_data.map(|lin_data| ImuInput {
         lin_data,
         measurements: imu_meas
@@ -458,14 +362,11 @@ pub fn marginalize<S: LieScalar>(
             .collect(),
     });
 
-    // `:905-942`.
     let live: LinearizedWindow<S> =
         linearize_for_marginalization(estimator, &aom, marg_data, imu_input.as_ref(), inputs)?;
 
-    // `:980-1003`.
     let (idx_to_keep, idx_to_marg) = split_indices(&aom, schedule)?;
 
-    // `:1145`.
     if idx_to_keep.len() != marg_order_new.total_size() {
         return Err(MargError::PriorWidthMismatch {
             cols: idx_to_keep.len(),
@@ -473,14 +374,13 @@ pub fn marginalize<S: LieScalar>(
         });
     }
 
-    // `:1069-1083`.
     let reduced: ReducedSystem<S> =
         marginalize_helper_sqrt_to_sqrt(live.h, live.b, &idx_to_keep, &idx_to_marg)?;
 
     // The linearization is done with the window; everything from here mutates.
     drop(imu_input);
 
-    // `:1085-1088`, trap 7. `validate_schedule` and the `:1086` check above
+    // trap 7. `validate_schedule` and the check above
     // both prove the lookup, so the `else` is unreachable; it is an error
     // rather than a skip because silently not freezing the state is trap 7
     // happening.
@@ -491,15 +391,13 @@ pub fn marginalize<S: LieScalar>(
     };
     state.set_linearized()?;
 
-    // `:1090-1096`.
     for id in &schedule.states_to_marg_all {
         estimator.frame_states.remove(id);
         imu_meas.remove(id);
     }
 
-    // `:1098-1105`: a keyframe that keeps its pose is demoted to a pose block,
+    // a keyframe that keeps its pose is demoted to a pose block,
     // carrying the first six entries of its delta and its `linearized` flag
-    // (`imu_types.h:206-215`).
     for id in &schedule.states_to_marg_vel_bias {
         // Proven by `validate_schedule`, like the lookup above: every frame in
         // this set is a 15-row block of the ordering, and the ordering was
@@ -513,19 +411,16 @@ pub fn marginalize<S: LieScalar>(
         imu_meas.remove(id);
     }
 
-    // `:1107-1112`.
     for id in &schedule.poses_to_marg {
         estimator.frame_poses.remove(id);
     }
 
-    // `:1114`.
     estimator.lmdb.remove_keyframes(
         &schedule.kfs_to_marg,
         &schedule.poses_to_marg,
         &schedule.states_to_marg_all,
     );
 
-    // `:1116-1118`.
     if inputs.options.marg_lost_landmarks
         && let Some(lost) = inputs.lost_landmarks
     {
@@ -534,17 +429,16 @@ pub fn marginalize<S: LieScalar>(
         }
     }
 
-    // `:1135-1137`. The width the helper produced is `idx_to_keep.len()`, and
-    // `:1145`'s check on it already ran above, against the same ordering.
+    // The helper output width equals the kept-index count, already checked against ordering.
     marg_data.h = reduced.h;
     marg_data.b = reduced.b;
     marg_data.order = marg_order_new;
 
-    // `:1147-1172`, trap 8. The prior comes out of the helper as
+    // trap 8. The prior comes out of the helper as
     // `P(x) = 0.5‖J x + res‖²`; putting it back into the delta-independent form
     // `P(x) = 0.5‖J (delta + x) + (res − J delta)‖²` is one subtraction.
     // This ordering's blocks were proven frozen before the first mutation
-    // (`check_prior_blocks_linearized`, and `:1086` above for the last state).
+    // (`check_prior_blocks_linearized`, and above for the last state).
     let delta: DVector<S> = estimator.compute_delta(&marg_data.order)?;
     subtract_h_delta(&mut marg_data.b, &marg_data.h, &delta);
 
@@ -557,7 +451,7 @@ pub fn marginalize<S: LieScalar>(
     })
 }
 
-/// `b -= H * delta` (`sqrt_keypoint_vio.cpp:1172`), written out so the
+/// `b -= H * delta`, written out so the
 /// summation order is fixed rather than nalgebra's.
 ///
 /// **Contract: `b.nrows() == h.nrows()` and `delta.nrows() == h.ncols()`.**

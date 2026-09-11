@@ -227,7 +227,7 @@ impl<P: Pattern, R: Runtime> PatchTracker for GpuPatchTracker<P, R> {
 }
 
 impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
-    /// `trackPoints` (`frame_to_frame_optical_flow.h:294-375`) on the device,
+    /// `trackPoints` on the device,
     /// launched into the next free lane and left there.
     fn submit_inner(
         &mut self,
@@ -291,8 +291,8 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                 f32::as_bytes(&self.staging[..TRANSFORM_RUNS * count]),
             );
 
-            // `off = source position - guess` (`:339`), which the backward guess
-            // adds back (`:357`). Both terms are on the host already, so the offset
+            // `off = source position - guess`, which the backward guess
+            // adds back. Both terms are on the host already, so the offset
             // rides along in the backward patch set's positions buffer instead of
             // costing a kernel.
             let guess_x: &[f32] = transforms_in.translations_x();
@@ -316,7 +316,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                 patches.launch_build(prev, patches.bases());
             }
 
-            // ── forward: `trackPoint(pyr_1, pyr_2, transform_1, transform_2)` (`:349`).
+            // ── forward: `trackPoint(pyr_1, pyr_2, transform_1, transform_2)`.
             kernels::launch_klt::<R>(
                 &self.client,
                 next.buffers(),
@@ -351,7 +351,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                 },
             );
 
-            // ── backward: `trackPoint(pyr_2, pyr_1, transform_2, recovered)` (`:359`).
+            // ── backward: `trackPoint(pyr_2, pyr_1, transform_2, recovered)`.
             let backward_view = (&self.backward, TRANSFORM_RUNS * count);
             kernels::launch_klt::<R>(
                 &self.client,
@@ -364,7 +364,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
                 false,
             );
 
-            // ── `dist2 = (t1 - t1_recovered).squaredNorm() < max` (`:362`).
+            // ── `dist2 = (t1 - t1_recovered).squaredNorm() < max`.
             kernels::launch_finish::<R>(
                 &self.client,
                 forward_view,

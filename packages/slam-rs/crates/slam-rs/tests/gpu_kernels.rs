@@ -545,7 +545,7 @@ fn the_gpu_tracker_recovers_the_same_shift_as_the_cpu() {
 /// A track onto an unrelated frame fails on both lanes, and fails the same way.
 ///
 /// The CPU suite's `a_mismatched_pair_is_rejected` at the seam: the
-/// forward-backward gate (`frame_to_frame_optical_flow.h:362-364`) is what
+/// forward-backward gate is what
 /// rejects a track onto an image the patch is not in, and it is the one exit
 /// the grid fixture above never takes. A backend that let a failed track
 /// through — or that failed a different set of patches from the CPU's — would
@@ -585,7 +585,7 @@ fn both_lanes_reject_a_track_onto_an_unrelated_frame() {
 /// Two thresholds meet near an edge and the grid fixture is built to stay away
 /// from both: the patch build needs its 52 taps in range at every level, and
 /// each Gauss-Newton step needs the new centre `FILTER_MARGIN = 2` pixels inside
-/// *that level's* image (`frame_to_frame_optical_flow.h:430`). At the coarsest
+/// *that level's* image. At the coarsest
 /// of four levels a 512-pixel frame is 64 wide, so the margin is 16 full-
 /// resolution pixels; this walks a column from 4 to 60 pixels from the left
 /// edge, which crosses it, and asserts the two lanes take the same branch at
@@ -629,7 +629,7 @@ fn both_lanes_agree_at_the_border_margin() {
 /// displaced between 4 and 28 pixels is inside the frame and straddles what
 /// four pyramid levels recover from this texture, so it is the tracker's own
 /// convergence that decides and it decides both ways; a guess at a negative
-/// coordinate is refused before any level runs (`optical_flow.h:346`, the
+/// coordinate is refused before any level runs (the
 /// `t2(0) >= 0 && ... < w` gate). Both lanes must take all three exits
 /// identically.
 #[test]
@@ -773,7 +773,7 @@ fn a_reused_corner_scan_carries_only_the_newest_frame() {
 ///
 /// The corner scanner and the pyramid builder are handed the same pixels once
 /// per camera per frameset — the detector's input *is* level 0
-/// (`keypoints.cpp:152`, `image_pyr.h:73`) — and until the camera index reached
+///  — and until the camera index reached
 /// both seams the GPU scanner had no way to know that, so it uploaded the frame
 /// a second time. This is the test that the sharing is exact rather than merely
 /// cheaper: the same corners at every rung, from a scanner that uploaded zero

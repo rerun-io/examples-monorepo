@@ -7,7 +7,7 @@ use crate::lie::{LieScalar, Se3};
 use crate::types::PoseStateWithLin;
 
 /// Jacobians at the linearization point, then only the transform at the current
-/// state when either end is frozen (`linearization_abs_qr.cpp:219-232`).
+/// state when either end is frozen.
 ///
 /// Callers handle identical image pairs before resolving states: their transform
 /// is identity and their Jacobians are zero, with no `compute_rel_pose` call.

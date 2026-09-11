@@ -1,34 +1,16 @@
-//! `SqrtKeypointVioEstimator::marginalize()` (`sqrt_keypoint_vio.cpp:707-1198`).
+//! Marginalization scheduling: select full states, velocity/bias blocks, poses
+//! and keyframes to remove. [`crate::marg::marginalize`] owns the algebra.
 //!
-//! Only the **schedule** lives here: which states lose their velocity and bias,
-//! which lose everything, which pose blocks go, and which keyframe the budget
-//! evicts. The algebra — the second linearization over the evicted keyframes'
-//! landmarks, the index split, the rank-revealing flat QR and the re-anchoring —
-//! is [`crate::marg::marginalize`], from stage S7.
+//! `states_to_remove = frame_states.size() - max_states + 1`: at a full window,
+//! the oldest state leaves and the second oldest is kept and frozen.
+//! The keyframe budget is lazy: eviction requires both an exceeded keyframe
+//! budget and a keyframe leaving the state window. A newly selected keyframe
+//! can therefore keep the count one above the configured budget until demotion.
+//! The shipped frame spacing and state-window sizes bound this overshoot.
 //!
-//! Two things make the schedule subtle:
-//!
-//! * `states_to_remove` is `frame_states.size() − max_states + 1`, so
-//!   `last_state_to_marg` is the **second** oldest state when the window is
-//!   full, not the oldest (`:720-724`). The oldest state leaves; the second
-//!   oldest is kept whole and has its linearization point frozen.
-//! * The keyframe budget is **lazy**. The eviction loop runs only while
-//!   `kf_ids.size() > max_kfs && !states_to_marg_vel_bias.empty()` (`:767`),
-//!   and nothing in the body shrinks `states_to_marg_vel_bias` — the keyframes
-//!   leaving the *state* window this step. A frame that has just been voted a
-//!   keyframe is still a state, so it cannot be evicted, and `kf_ids` sits one
-//!   over `max_kfs` until it is demoted to a pose block. On the smoke segment
-//!   that is framesets 49-50 and 56-57, eight keyframes against
-//!   `vio_max_kfs = 7`, and the C++ does exactly the same. The overshoot is at
-//!   most one because `vio_min_frames_after_kf = 5` puts keyframes six
-//!   framesets apart while a state leaves after `vio_max_states = 3` — which is
-//!   also why `states_to_marg_vel_bias` holds at most one entry and the newest
-//!   keyframe is always inside the two the eviction score skips.
-//!
-//! `KF_MARG_DEFAULT`'s second pass is a DSO-derived distance score whose own
-//! comment admits it "seems to mostly marginalize the oldest keyframe"
-//! (`:832-836`, D22) — which is not what it does; see
-//! [`SqrtKeypointVio::evict_by_default`].
+//! The default rule first checks tracked-feature ratios, then minimizes a
+//! DSO-derived distance score. Its self-distance term makes proximity to the
+//! newest keyframe dominate the second pass (D22).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -47,13 +29,11 @@ use crate::types::{FrameId, LandmarkId};
 pub enum EvictionReason {
     /// `KF_MARG_DEFAULT` first pass: the oldest keyframe whose tracked
     /// fraction fell below `vio_kf_marg_feature_ratio`, or which the current
-    /// frame does not observe at all (`:822-829`).
+    /// frame does not observe at all.
     FeatureRatio,
     /// `KF_MARG_DEFAULT` second pass: the minimum of the DSO distance score
-    /// (`:845-867`).
     DistanceScore,
     /// `KF_MARG_FORWARD_VECTOR`: the least distinctive viewing direction
-    /// (`:788-812`).
     ForwardVector,
 }
 
@@ -69,43 +49,36 @@ pub struct KeyframeEviction {
 /// What one marginalization did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarginalizationStats {
-    /// `states_to_remove` (`:720`).
+    /// `states_to_remove`.
     pub states_to_remove: usize,
-    /// The state that is kept whole and frozen (`:724`, `:1086-1087`).
+    /// The state that is kept whole and frozen.
     pub last_state_to_marg: FrameId,
     /// Pose blocks that leave: the non-keyframes, plus the evicted keyframes
-    /// (`:733`, `:875`).
     pub poses_to_marg: Vec<FrameId>,
-    /// States that leave entirely (`:754`).
+    /// States that leave entirely.
     pub states_to_marg_all: Vec<FrameId>,
-    /// Keyframe states demoted to pose blocks (`:752`).
+    /// Keyframe states demoted to pose blocks.
     pub states_to_marg_vel_bias: Vec<FrameId>,
-    /// Keyframes the budget evicted, oldest first (`:874`).
+    /// Keyframes the budget evicted, oldest first.
     pub kfs_to_marg: Vec<FrameId>,
     /// Which criterion pass chose each eviction, in the order they happened.
     pub evictions: Vec<KeyframeEviction>,
-    /// `idx_to_keep.size()` (`:1005`).
+    /// `idx_to_keep.size()`.
     pub kept_indices: usize,
     /// `idx_to_marg.size()`.
     pub marg_indices: usize,
-    /// Whether the marginalization's own linearization was numerically valid.
-    /// basalt discards this; the port reports it, because a marginalization run
-    /// on an invalid linearization is worth knowing about.
+    /// Whether the marginalization linearization was numerically valid.
     pub numerically_valid: bool,
-    /// `asize`, the width of the ordering the split was taken over (`:898`).
-    ///
-    /// It witnesses that the split covers the ordering: `kept_indices +
-    /// marg_indices == ordering_size` is what "every variable is either kept or
-    /// marginalized" means, and `tests/vio_oracle.rs` asserts that sum.
+    /// Ordering width; kept and marginalized index counts must sum to this value.
     pub ordering_size: usize,
-    /// `marg_order_new`, as `(frame, index, size)` (`:1120-1133`).
+    /// `marg_order_new`, as `(frame, index, size)`.
     pub prior_order: Vec<(FrameId, usize, usize)>,
 }
 
 /// What one call to [`SqrtKeypointVio::marginalize`] did, on its way into
 /// [`FrameStats`].
 ///
-/// Everything is empty when the trigger of `:717` did not fire, which is the
+/// Everything is empty when the trigger of did not fire, which is the
 /// common case: the window marginalizes on roughly one frameset in two.
 #[derive(Debug, Clone, Default)]
 pub(super) struct MarginalizationOutcome {
@@ -116,13 +89,9 @@ pub(super) struct MarginalizationOutcome {
 }
 
 impl<S: LieScalar> SqrtKeypointVio<S> {
-    /// `:465-472`: move the newest keyframe out of the `max_kfs` budget, if
-    /// [`SqrtKeypointVio::take_long_term_keyframe`] asked for it.
-    ///
-    /// The long-term keyframes are counted on the other side of `:717`'s pose
-    /// budget and are never eviction candidates, so this is the one way a
-    /// keyframe leaves the budget without leaving the window. The request is
-    /// consumed whether or not there was a keyframe to demote, as in C++.
+    /// Move the newest keyframe outside the ordinary budget when requested.
+    /// Long-term keyframes are never eviction candidates. Consume the request even
+    /// when no keyframe can be moved.
     pub(super) fn demote_long_term_keyframe(&mut self) {
         if !self.take_ltkf {
             return;
@@ -134,25 +103,20 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         self.take_ltkf = false;
     }
 
-    /// `marginalize(num_points_connected, lost_landmaks)` (`:707-1198`),
-    /// returning what it did and how long it took. Every component is
-    /// `None`/zero when the trigger of `:717` did not fire.
+    /// Run marginalization and return its decisions and duration.
+    /// Components stay empty or zero if the trigger does not fire.
     ///
     /// # Errors
-    ///
-    /// [`EstimatorError`] where C++ asserts or reads out of range: a keyframe
-    /// the eviction score needs that is not in the window, a window that
-    /// disagrees with the prior's ordering, or no selectable keyframe.
+    /// Returns [`EstimatorError`] for missing candidate frames, prior-order mismatch
+    /// or absence of a selectable keyframe.
     pub(super) fn marginalize(
         &mut self,
         num_points_connected: &BTreeMap<FrameId, usize>,
         lost_landmarks: &BTreeSet<LandmarkId>,
     ) -> Result<MarginalizationOutcome, EstimatorError> {
-        // `:710-713`.
         if !self.opt_started {
             return Ok(MarginalizationOutcome::default());
         }
-        // `:717`.
         if !(self.ba.frame_poses.len() > self.ltkfs.len() + self.max_kfs
             || self.ba.frame_states.len() >= self.max_states)
         {
@@ -160,23 +124,20 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         }
         let mark: std::time::Instant = std::time::Instant::now();
 
-        // `:720-724`. C++ computes this in `size_t` and stores it in an `int`,
-        // so a window shorter than `max_states - 1` wraps to a negative count
-        // and the advance does not happen; saturating arithmetic is that
-        // behaviour written down.
+        // Saturating arithmetic leaves a short window with no states to advance past.
         let states_to_remove: usize =
             (self.ba.frame_states.len() + 1).saturating_sub(self.max_states);
         let Some(last_state_to_marg) = self.ba.frame_states.keys().nth(states_to_remove).copied()
         else {
-            // C++ advances the iterator past `end()` and dereferences it.
+            // Refuse an advance beyond the state window.
             return Err(EstimatorError::StateWindowTooShort {
                 states: self.ba.frame_states.len(),
                 states_to_remove,
             });
         };
 
-        // `:731-740`: every pose block that is neither a keyframe nor a
-        // long-term keyframe. The ordering assertion of `:737` happens inside
+        // every pose block that is neither a keyframe nor a
+        // long-term keyframe. The ordering assertion of happens inside
         // `marg::marginalize`, which rebuilds the same `AbsOrderMap`.
         let mut poses_to_marg: BTreeSet<FrameId> = BTreeSet::new();
         for frame_id in self.ba.frame_poses.keys().copied() {
@@ -185,7 +146,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             }
         }
 
-        // `:744-763`: the states older than `last_state_to_marg` split by
+        // the states older than `last_state_to_marg` split by
         // whether they are keyframes.
         let mut states_to_marg_vel_bias: BTreeSet<FrameId> = BTreeSet::new();
         let mut states_to_marg_all: BTreeSet<FrameId> = BTreeSet::new();
@@ -202,7 +163,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             }
         }
 
-        // `:767-880`.
         let mut kfs_to_marg: BTreeSet<FrameId> = BTreeSet::new();
         let mut evictions: Vec<KeyframeEviction> = Vec::new();
         while self.kf_ids.len() > self.max_kfs && !states_to_marg_vel_bias.is_empty() {
@@ -227,7 +187,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             schedule: &schedule,
             imu_lin_data: Some(self.imu_lin_data()),
             lost_landmarks: Some(lost_landmarks),
-            // `:924`: the same set `optimize` builds at `:1258`.
+            // Fix the same long-term keyframes as optimization.
             fixed_frames: fixed_keyframes(&self.config, &self.ltkfs),
             options: MarginalizeOptions {
                 marg_lost_landmarks: self.config.vio_marg_lost_landmarks,
@@ -240,7 +200,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             &inputs,
         )?;
 
-        // `:1091-1094` and `:1108-1111`: the two estimator-side maps
+        //  and : the two estimator-side maps
         // `marg::marginalize` does not own. A demoted keyframe keeps both — it
         // is still in the window as a pose.
         self.last_marginalized.clear();
@@ -278,38 +238,22 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         })
     }
 
-    /// `KF_MARG_DEFAULT` (`:814-868`).
+    /// Default keyframe eviction.
     ///
-    /// First pass: walk from the oldest keyframe, skipping the newest two, and
-    /// take the first whose tracked fraction is below
-    /// `vio_kf_marg_feature_ratio` — or which the current frame does not
-    /// observe at all, which is what `num_points_connected.count(*it) == 0`
-    /// means. The ratio is computed in **`float`** whatever the estimator's
-    /// scalar is (`static_cast<float>` at `:826`) and then promoted to `double`
-    /// for the comparison, so the `f64` instantiation compares a
-    /// single-precision quotient. That cast cannot change the outcome for any
-    /// count the window can hold: distinct quotients of counts below a million
-    /// are at least `1e-6` apart while one `f32` ulp near `0.1` is `7.5e-9`,
-    /// and the one quotient that lands exactly on the threshold —
-    /// `connected · 10 == hosted` — rounds *up* in `f32` and so fails the
-    /// strict `<` in both precisions. It is ported because it is what the C++
-    /// computes, not because a decision turns on it.
+    /// First choose the oldest eligible keyframe whose tracked-feature ratio is
+    /// below the threshold, or which the current frame does not observe. Skip the
+    /// newest two. The quotient is computed in f32 and widened for comparison.
     ///
-    /// Second pass: the DSO score `sqrt(‖p_i − p_last‖) · Σ_j 1/(‖p_i − p_j‖ +
-    /// 1e-5)`, minimized, with the sum running over the candidate set
-    /// *including `i` itself* (`:848`). That self term is `1/1e-5 = 1e5` and
-    /// swamps the metre-scale distances to the other keyframes, so what
-    /// actually discriminates is `sqrt(‖p_i − p_last‖)` and the candidate
-    /// **nearest the newest keyframe** is evicted — not the oldest that the
-    /// comment at `:832-836` expects. The norms are Eigen's three-coefficient
-    /// reduction, whose order differs between the precisions (D47).
+    /// Otherwise minimize `sqrt(‖p_i − p_last‖) · Σ_j 1/(‖p_i − p_j‖ + 1e-5)`.
+    /// The sum includes the candidate itself, contributing `1e5`. This dominates
+    /// metre-scale distances, so proximity to the newest keyframe drives eviction.
     fn evict_by_default(
         &self,
         num_points_connected: &BTreeMap<FrameId, usize>,
     ) -> Result<KeyframeEviction, EstimatorError> {
         let candidates: Vec<FrameId> = self.eviction_candidates();
 
-        // `:820-830`. The `||` at `:823-824` short-circuits on the missing
+        // The `||` at short-circuits on the missing
         // connection *before* it reads `num_points_kf.at(*it)`, so a keyframe
         // absent from both maps is evicted rather than refused.
         for frame_id in &candidates {
@@ -319,8 +263,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                     reason: EvictionReason::FeatureRatio,
                 });
             };
-            // `:827` reads `num_points_kf.at(*it)`; basalt never erases the
-            // map, so a keyframe the frame does see always has an entry.
+            // Hosted counts are retained, so an observed keyframe must have an entry.
             let Some(hosted) = self.num_points_kf.get(frame_id).copied() else {
                 return Err(EstimatorError::KeyframeNotInWindow {
                     frame_id: *frame_id,
@@ -336,14 +279,14 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             }
         }
 
-        // `:838-867`. `:842`: `std::numeric_limits<Scalar>::max()`.
+        // : `std::numeric_limits<Scalar>::max()`.
         let mut min_score: S = S::largest();
         let mut min_score_id: Option<FrameId> = None;
-        // `:841`: `*kf_ids.crbegin()`. Every candidate comes out of `kf_ids`,
+        // `*kf_ids.crbegin()`. Every candidate comes out of `kf_ids`,
         // so an empty keyframe set has no candidate either and the one
         // `NoKeyframeToMarginalize` below reports it.
         if let Some(last_kf) = self.kf_ids.iter().next_back().copied() {
-            // `:854`: `frame_states.at(last_kf)`. The newest keyframe is the
+            // `frame_states.at(last_kf)`. The newest keyframe is the
             // newest frame whenever `take_kf` fired on it, and keyframes are at
             // least six frames apart, so it is a state in every shipped
             // configuration.
@@ -356,7 +299,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             let last_translation: Vector3<S> = last_state.state().t_w_i.translation;
             for frame_id in &candidates {
                 let here: Vector3<S> = self.keyframe_pose(*frame_id)?.translation;
-                // `:848-853`: the sum runs over the same candidate set, so a
+                // the sum runs over the same candidate set, so a
                 // keyframe's distance to itself contributes `1 / 1e-5`.
                 let mut denom: S = S::zero();
                 for other in &candidates {
@@ -372,7 +315,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 }
             }
         }
-        // `:872`: "if no frame was selected, the logic above is faulty".
+        // "if no frame was selected, the logic above is faulty".
         min_score_id
             .map(|frame_id| KeyframeEviction {
                 frame_id,
@@ -383,18 +326,12 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             })
     }
 
-    /// `KF_MARG_FORWARD_VECTOR` (`:770-813`), the fork's own criterion.
-    ///
-    /// Score each candidate keyframe by the sum of angles between its camera-0
-    /// forward vector and every other keyframe's — long-term keyframes
-    /// included, which is the difference from the default criterion's candidate
-    /// set — and evict the minimum, i.e. the least distinctive viewing
-    /// direction. `acos` is called unqualified inside `namespace basalt`, so the
-    /// `float` instantiation resolves to `::acosf` (the same overload trap as
-    /// `atan2` in D42); computing in `S` reproduces that.
+    /// Forward-vector eviction: sum camera-0 viewing-direction angles against other
+    /// keyframes, including long-term keyframes, and evict the minimum.
+    /// The least distinctive direction leaves. Angles use the estimator scalar.
     fn evict_by_forward_vector(&self) -> Result<KeyframeEviction, EstimatorError> {
         let candidates: Vec<FrameId> = self.eviction_candidates();
-        // `:781-786`: the scored-against set is `ltkfs ∪ kf_ids`, again without
+        // the scored-against set is `ltkfs ∪ kf_ids`, again without
         // its own newest two.
         let mut all_kfs: BTreeSet<FrameId> = self.ltkfs.clone();
         all_kfs.extend(self.kf_ids.iter().copied());
@@ -404,7 +341,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             .take(all_kfs.len().saturating_sub(2))
             .collect();
 
-        // `:788`: `std::numeric_limits<Scalar>::max()`.
+        // `std::numeric_limits<Scalar>::max()`.
         let mut min_score: S = S::largest();
         let mut min_score_id: Option<FrameId> = None;
         for frame_id in &candidates {
@@ -412,8 +349,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             let mut score: S = S::zero();
             for other in &against {
                 let fwd2: (S, S) = self.forward_vector_2d(*other)?;
-                // `fwd1.dot(fwd2)` on a 2-vector is Eigen's coefficient-based
-                // product: `a0 * b0 + a1 * b1`.
+                // Two-vector dot product: `a0 * b0 + a1 * b1`.
                 let dot: S = fwd1.0 * fwd2.0 + fwd1.1 * fwd2.1;
                 // `std::clamp(v, lo, hi)` = `v < lo ? lo : (hi < v ? hi : v)`,
                 // which returns a NaN unchanged.
@@ -441,9 +377,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             })
     }
 
-    /// `kf_ids` without its newest two (`std::prev(kf_ids.end(), 2)` at `:819`
-    /// and `:840`), empty when there are two or fewer — which is the
-    /// `kf_ids.size() > 2` guard C++ writes to keep `std::prev` valid.
+    /// All keyframes except the newest two; empty when there are at most two.
     fn eviction_candidates(&self) -> Vec<FrameId> {
         if self.kf_ids.len() <= 2 {
             return Vec::new();
@@ -455,8 +389,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             .collect()
     }
 
-    /// `frame_poses.at(ts).getPose()` (`:794`, `:849`), which C++ throws out of
-    /// when the keyframe is not a pose block.
+    /// Look up a keyframe pose block, returning an error if absent.
     fn keyframe_pose(&self, frame_id: FrameId) -> Result<Se3<S>, EstimatorError> {
         self.ba
             .frame_poses
@@ -468,7 +401,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             })
     }
 
-    /// `get_forward_vector2d` (`:792-798`): the camera-0 optical axis in the
+    /// `get_forward_vector2d` : the camera-0 optical axis in the
     /// world frame, projected onto the horizontal plane.
     ///
     /// Camera 0 exists: [`SqrtKeypointVio::new`] refuses a rig of fewer than
@@ -502,7 +435,7 @@ mod tests {
 
     /// Six keyframes one metre apart along `x` at the given azimuths, the
     /// newest also a state because the distance score reads
-    /// `frame_states.at(last_kf)` (`:854`), each hosting ten landmarks.
+    /// `frame_states.at(last_kf)`, each hosting ten landmarks.
     ///
     /// The azimuth is a rotation about the **world z**, so it turns the
     /// camera-0 forward vector's `(x, y)` part without changing its length —
@@ -558,12 +491,8 @@ mod tests {
         vio.kf_ids.iter().map(|t_ns| (*t_ns, 10)).collect()
     }
 
-    /// `fixed_kfs` reaches **both** linearizations. C++ builds it at `:924`
-    /// for the marginalization and at `:1258` for the optimization, so with
-    /// `vio_fix_long_term_keyframes` on a long-term keyframe's pose Jacobians
-    /// are zeroed in the prior it computes as well as in the increment it
-    /// solves. No shipped config sets the flag and nothing in the VIO calls
-    /// `take_long_term_keyframe`, so this is the only coverage.
+    /// Long-term keyframes are fixed in both the optimization and marginalization
+    /// linearizations, so their pose Jacobians are zero in both.
     #[test]
     fn a_long_term_keyframe_is_fixed_in_both_linearizations() {
         let mut vio: SqrtKeypointVio<f64> =
@@ -586,9 +515,9 @@ mod tests {
         );
     }
 
-    /// `takeLongTermKeyframe()` (`:124-127`) and the demotion it asks for
-    /// (`:465-472`): the newest keyframe leaves `kf_ids` for `ltkfs`, which
-    /// moves it to the other side of `:717`'s pose budget and out of the
+    /// `takeLongTermKeyframe()` and the demotion it asks for
+    /// the newest keyframe leaves `kf_ids` for `ltkfs`, which
+    /// moves it to the other side of 's pose budget and out of the
     /// eviction candidates. Nothing in the VIO path calls it — it is the
     /// Monado/API hook — so this is its only coverage.
     #[test]
@@ -623,7 +552,7 @@ mod tests {
         assert_eq!(vio.ltkfs.len(), 1);
     }
 
-    /// `std::prev(kf_ids.end(), 2)` (`:819`, `:840`) and the `kf_ids.size() > 2`
+    /// `std::prev(kf_ids.end(), 2)` and the `kf_ids.size() > 2`
     /// guard that keeps it valid.
     #[test]
     fn the_newest_two_keyframes_are_never_candidates() {
@@ -639,7 +568,7 @@ mod tests {
         assert!(two.eviction_candidates().is_empty());
     }
 
-    /// `:822-829` first pass: the oldest keyframe below
+    ///  first pass: the oldest keyframe below
     /// `vio_kf_marg_feature_ratio`, and nothing newer even if it is worse.
     #[test]
     fn the_ratio_pass_takes_the_oldest_poorly_tracked_keyframe() {
@@ -656,7 +585,7 @@ mod tests {
         );
     }
 
-    /// `num_points_connected.count(*it) == 0` (`:823`): a keyframe the current
+    /// `num_points_connected.count(*it) == 0` : a keyframe the current
     /// frame does not observe at all is taken by the **first** pass, whatever
     /// its hosted count — the missing entry and the low ratio are one `||`.
     #[test]
@@ -673,15 +602,9 @@ mod tests {
         );
     }
 
-    /// `:845-867` second pass: the DSO score is
-    /// `sqrt(‖p_i − p_last‖) · Σ_j 1/(‖p_i − p_j‖ + 1e-5)`, and the sum runs
-    /// over the candidate set **including `i` itself** (`:848`), so every
-    /// candidate carries a `1/1e-5 = 1e5` self term that swamps the metre-scale
-    /// distances to the others. What is left to discriminate is
-    /// `sqrt(‖p_i − p_last‖)`, so the candidate **nearest the newest keyframe**
-    /// is evicted — on six keyframes a metre apart, the newest candidate, not
-    /// the oldest that basalt's comment expects (`:832-836`, D22). Dropping the
-    /// self term, which reads like a bug, would invert the answer.
+    /// The distance score includes a `1e5` self term. On equally spaced keyframes,
+    /// this makes the candidate nearest the newest keyframe leave (D22).
+    /// Removing the self term would change the selection.
     #[test]
     fn the_distance_pass_takes_the_candidate_nearest_the_newest_keyframe() {
         let vio: SqrtKeypointVio<f64> = a_window_of_keyframes(KeyframeMargCriteria::Default, FLAT);
@@ -694,7 +617,7 @@ mod tests {
         );
     }
 
-    /// `:788-812`: the score is the sum of angles to every other keyframe, so
+    /// the score is the sum of angles to every other keyframe, so
     /// the minimum is the least distinctive viewing direction. With three
     /// candidates sharing an azimuth and a fourth a radian away, the eviction
     /// has to come out of the cluster — which of the three it is depends on
@@ -714,8 +637,8 @@ mod tests {
         );
     }
 
-    /// `frame_poses.at(ts)` (`:794`, `:849`) and `frame_states.at(last_kf)`
-    /// (`:854`) both throw when the window disagrees with `kf_ids`; the port
+    /// `frame_poses.at(ts)` and `frame_states.at(last_kf)`
+    ///  both throw when the window disagrees with `kf_ids`; the port
     /// returns the typed error instead (D32).
     #[test]
     fn a_keyframe_missing_from_the_window_is_a_typed_error() {
@@ -741,7 +664,7 @@ mod tests {
             })
         );
 
-        // Missing from **both** maps: `:823` sees `count(*it) == 0` first, so
+        // Missing from **both** maps: sees `count(*it) == 0` first, so
         // the keyframe is evicted and the hosted count is never read.
         let mut unseen: SqrtKeypointVio<f64> =
             a_window_of_keyframes(KeyframeMargCriteria::Default, FLAT);

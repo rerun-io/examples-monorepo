@@ -1,31 +1,7 @@
-//! basalt's four sampling patterns, ported from `optical_flow/patterns.h`.
-//!
-//! Each pattern is a fixed set of 2-D offsets from a keypoint. The C++ stores
-//! them as `constexpr Scalar pattern_raw[][2]` and maps them into a column-major
-//! `Eigen::Matrix<Scalar, 2, PATTERN_SIZE>`, so column `i` of `pattern2` is
-//! exactly `(pattern_raw[i][0], pattern_raw[i][1])` (`patterns.h:75-77`). Here
-//! that is one `[[f32; 2]]` slice in the same order, so index `i` is column `i`.
-//!
-//! * [`Pattern52`] — 52 taps at unit half-spacing, `patterns.h:107-126`.
-//! * [`Pattern51`] — `0.5 * Pattern52`, `patterns.h:146`.
-//!
-//! **Every shipped config sets `optical_flow_pattern = 51`**
-//! (`data/default_config.json`, `data/msd/*_config.json`), i.e. 52 taps at half
-//! spacing, so every sample of the shipped frontend is a genuine bilinear
-//! interpolation rather than a pixel read.
-//! [`crate::frontend::flow::FrameToFrameOpticalFlow`] refuses any other value,
-//! and the binding hard-codes `Pattern51`.
-//!
-//! The C++ has two more tables that are **not** ported, because no config
-//! selects them and nothing here could exercise them: `Pattern24`
-//! (`patterns.h:44-79`, 24 taps) and `Pattern50` (`patterns.h:148-158`,
-//! `0.75 * Pattern52`). Adding either back is a `Pattern` impl over its raw
-//! table beside `Pattern51`'s.
-//!
-//! The port is `f32` only (decision D05: the frontend runs `f32` on `u16`
-//! pixels). The scale factors are exact binary fractions and every raw offset is
-//! a small integer, so `0.5 *` and `0.75 *` are exact in both `f32` and the
-//! `double` Eigen evaluates them in.
+//! Fixed 2-D sampling offsets for optical-flow patches.
+//! [`Pattern52`] has 52 taps; [`Pattern51`] scales them by one half.
+//! Shipped configs select Pattern51 and the binding requires it, so sampling
+//! uses bilinear interpolation. Offsets and the binary scale are exact in f32.
 
 /// Taps in the largest pattern, and therefore the capacity of every per-patch buffer.
 ///
@@ -35,11 +11,7 @@
 /// patterns.
 pub const MAX_PATTERN_SIZE: usize = 52;
 
-/// One of basalt's sampling patterns, as a compile-time choice.
-///
-/// The C++ passes the pattern as a template template parameter
-/// (`OpticalFlowTyped<Scalar, Pattern>`, `optical_flow.h:184`); the port passes
-/// it as a type parameter with the same effect: no indirection at a tap.
+/// Compile-time sampling pattern; the type parameter avoids per-tap indirection.
 pub trait Pattern: Copy + Clone + Send + Sync + 'static {
     /// `Pattern::PATTERN_SIZE`.
     const SIZE: usize;
@@ -47,11 +19,11 @@ pub trait Pattern: Copy + Clone + Send + Sync + 'static {
     /// The number `optical_flow_pattern` carries in the config JSON.
     const CODE: i32;
 
-    /// The offsets, index `i` being column `i` of the C++ `pattern2`.
+    /// Tap offsets in sampling order.
     const OFFSETS: &'static [[f32; 2]];
 }
 
-/// `Pattern52` (`patterns.h:81-131`), 52 taps at spacing 2.
+/// `Pattern52`, 52 taps at spacing 2.
 ///
 /// ```text
 ///          00  01  02  03
@@ -66,7 +38,6 @@ pub trait Pattern: Copy + Clone + Send + Sync + 'static {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pattern52;
 
-/// `patterns.h:107-126`, verbatim.
 const PATTERN52_RAW: [[f32; 2]; 52] = [
     [-3.0, 7.0],
     [-1.0, 7.0],
@@ -128,7 +99,7 @@ impl Pattern for Pattern52 {
     const OFFSETS: &'static [[f32; 2]] = &PATTERN52_RAW;
 }
 
-/// `factor * Pattern52`, the way `patterns.h:146` and `:158` build the other two.
+/// `factor * Pattern52`, the way and build the other two.
 const fn scaled_pattern52(factor: f32) -> [[f32; 2]; 52] {
     let mut out: [[f32; 2]; 52] = [[0.0; 2]; 52];
     let mut i: usize = 0;
@@ -139,11 +110,11 @@ const fn scaled_pattern52(factor: f32) -> [[f32; 2]; 52] {
     out
 }
 
-/// `Pattern51` = `0.5 * Pattern52` (`patterns.h:133-146`), the shipped pattern.
+/// `Pattern51` = `0.5 * Pattern52`, the shipped pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pattern51;
 
-/// `0.5 * Pattern52::pattern2` (`patterns.h:146`).
+/// `0.5 * Pattern52::pattern2`.
 const PATTERN51_RAW: [[f32; 2]; 52] = scaled_pattern52(0.5);
 
 impl Pattern for Pattern51 {
@@ -176,7 +147,7 @@ mod tests {
         }
     }
 
-    /// The layout of the ASCII art in `patterns.h:82-101`: eight rows of
+    /// The layout of the ASCII art in : eight rows of
     /// descending `y`, and each row's `x` ascending.
     #[test]
     fn pattern52_rows_run_from_the_top_down_and_left_to_right() {
@@ -205,7 +176,7 @@ mod tests {
     }
 
     /// Both patterns are symmetric about the origin, which is what makes the
-    /// SE(2) rotation column of `Jw_se2` (`patch.h:114-115`) mean-free before
+    /// SE(2) rotation column of `Jw_se2` mean-free before
     /// normalisation.
     #[test]
     fn the_patterns_are_symmetric_about_the_origin() {

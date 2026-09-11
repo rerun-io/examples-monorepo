@@ -1,31 +1,9 @@
-//! The sliding-window marginalization mechanics, on a synthetic window.
-//!
-//! `sqrt_keypoint_vio.cpp:896-1178` has no unit test in basalt — the C++ only
-//! exercises it through a whole VIO run — so these are the port's own, written
-//! against properties the C++ code has rather than against a fixture. The
-//! helper itself is pinned coefficient for coefficient in
-//! `tests/marg_oracle.rs`.
-//!
-//! The window is the shape the estimator really marginalizes: two keyframes as
-//! 6-dof pose blocks, three frames as 15-dof states, forty landmarks — thirty
-//! hosted by the keyframe that leaves, ten by the one that stays — and each
-//! observed in every image of the frames inside the ordering plus, for a few of
-//! them, one image of the frame **outside** it, which is the "observation
-//! dropped for marginalization" path of
-//! `landmark_block_abs_dynamic.hpp:70-75`.
-//!
-//! What is checked:
-//!
-//! | test | what it pins |
-//! |---|---|
-//! | `marginalizing_a_keyframe_shrinks_the_window` | the frame maps, the landmark database, the new ordering, `setLinTrue`, the consumed IMU intervals |
-//! | `the_prior_is_the_schur_complement_of_the_window` | `J_mᵀJ_m` is the dense Schur complement of the same system, and the two agree on the kept variables' optimum |
-//! | `the_prior_is_re_anchored_on_the_delta` | `marg_data.b -= marg_data.H * delta` (`:1170-1172`, trap 8) against the un-anchored residual the helper returned |
-//! | `the_prior_error_is_the_quadratic_at_the_delta` | `computeMargPriorError` after `applyInc` equals the quadratic model evaluated at the accumulated delta |
-//! | `a_window_that_disagrees_with_the_prior_is_refused` | the ordering assertions of `:736` and `:758-759` |
-//! | `an_invalid_schedule_is_refused_before_anything_changes` | eight broken schedules, each a typed error with the window bit-identical afterwards |
-//! | `a_window_that_is_not_frozen_is_refused_before_anything_changes` | a valid schedule over a block that is not at its linearization point, either kind, refused with the window bit-identical afterwards |
-//! | `a_frozen_demoted_state_marginalizes` | the control: the same schedule, and the demotion it performs |
+//! Sliding-window marginalization on a synthetic window.
+//! Two pose keyframes, three full states and forty landmarks exercise removals,
+//! demotion and observations outside the ordering. Check the resulting maps and
+//! prior against dense Schur elimination, residual re-anchoring and the quadratic
+//! at accumulated delta. Invalid schedules and unfrozen blocks must be refused
+//! before mutation; a valid frozen demotion must succeed.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -76,7 +54,7 @@ fn pose_at(index: usize, rng: &mut Rng) -> Se3<f64> {
 ///
 /// `prior_covers_state0` chooses between the two shapes the estimator really
 /// sees: a steady-state prior over both keyframes **and** the state that
-/// entered it last (`sqrt_keypoint_vio.cpp:1120-1133` produces exactly that),
+/// entered it last ( produces exactly that),
 /// and an empty prior over the keyframes alone, which is what a window looks
 /// like before the first state has been marginalized.
 fn build_window(seed: u64, prior_covers_state0: bool) -> Window {
@@ -94,7 +72,7 @@ fn build_window(seed: u64, prior_covers_state0: bool) -> Window {
         poses.push(t_w_i);
         if *frame_id == KF0 || *frame_id == KF1 {
             // Both keyframes are in the prior, so both are frozen at their
-            // linearization point (`computeDelta` asserts it, `ba_base.cpp:294`).
+            // linearization point (`computeDelta` asserts it).
             estimator
                 .frame_poses
                 .insert(*frame_id, PoseStateWithLin::new(*frame_id, t_w_i, true));
@@ -170,7 +148,6 @@ fn build_window(seed: u64, prior_covers_state0: bool) -> Window {
     add_landmarks(&mut estimator, &mut rng, 1, 1000, 10);
 
     // The prior. Its ordering is a prefix of the window's, at the same offsets
-    // (`sqrt_keypoint_vio.cpp:736`, `:758-759`).
     let mut order: AbsOrderMap = AbsOrderMap::new();
     order.push(KF0, POSE_SIZE).unwrap();
     order.push(KF1, POSE_SIZE).unwrap();
@@ -224,7 +201,7 @@ fn schedule() -> MarginalizeSchedule {
 }
 
 /// The schedule that demotes: `STATE1` keeps its pose block and loses its
-/// velocity and biases (`:1098-1105`), so `STATE2` becomes the prior's newest
+/// velocity and biases, so `STATE2` becomes the prior's newest
 /// block.
 fn demote_state1() -> MarginalizeSchedule {
     MarginalizeSchedule {
@@ -269,7 +246,7 @@ fn window_debug(window: &Window) -> String {
 
 // ─── the tests ─────────────────────────────────────────────────────────────
 
-/// `sqrt_keypoint_vio.cpp:1085-1137`: what the window looks like afterwards.
+/// what the window looks like afterwards.
 #[test]
 fn marginalizing_a_keyframe_shrinks_the_window() {
     let mut window: Window = build_window(0xB00C, true);
@@ -279,12 +256,12 @@ fn marginalizing_a_keyframe_shrinks_the_window() {
     let out: MarginalizeOutput<f64> = run(&mut window, MarginalizeOptions::default());
 
     // The ordering the marginalization ran over stops at `last_state_to_marg`
-    // (`:745`): two poses and two states, not three.
+    // two poses and two states, not three.
     assert_eq!(out.aom.items(), 4);
     assert_eq!(out.aom.total_size(), 2 * POSE_SIZE + 2 * POSE_VEL_BIAS_SIZE);
     assert!(!out.aom.contains(STATE2), "the newest state is outside it");
 
-    // `:980-1003`: the split covers every column exactly once.
+    // the split covers every column exactly once.
     assert_eq!(
         out.idx_to_keep.len() + out.idx_to_marg.len(),
         out.aom.total_size()
@@ -295,7 +272,6 @@ fn marginalizing_a_keyframe_shrinks_the_window() {
     assert_eq!(out.idx_to_keep.len(), POSE_SIZE + POSE_VEL_BIAS_SIZE);
     assert!(out.numerically_valid);
 
-    // `:1107-1112` and `:1090-1096`.
     assert_eq!(
         window
             .estimator
@@ -315,13 +291,13 @@ fn marginalizing_a_keyframe_shrinks_the_window() {
         vec![STATE1, STATE2]
     );
 
-    // `:1085-1088`, trap 7: the state entering the prior is frozen, and its
+    // trap 7: the state entering the prior is frozen, and its
     // delta is still zero, so it contributes nothing to the re-anchoring.
     let state1 = window.estimator.frame_states.get(&STATE1).unwrap();
     assert!(state1.is_linearized());
     assert_eq!(*state1.delta(), nalgebra::SVector::<f64, 15>::zeros());
 
-    // `:1114`: every landmark hosted by the marginalized keyframe is gone, and
+    // every landmark hosted by the marginalized keyframe is gone, and
     // the ten hosted by the surviving one are not.
     assert_eq!(window.estimator.lmdb.num_landmarks(), 10);
     for id in 0..30u64 {
@@ -330,7 +306,7 @@ fn marginalizing_a_keyframe_shrinks_the_window() {
     for id in 1000..1010u64 {
         assert!(window.estimator.lmdb.landmark_exists(LandmarkId(id)));
     }
-    // ...and no observation is left in a frame that left the window.
+    // and no observation is left in a frame that left the window.
     for targets in window.estimator.lmdb.observations().values() {
         for tcid in targets.keys() {
             assert_ne!(tcid.frame_id, KF0);
@@ -338,13 +314,13 @@ fn marginalizing_a_keyframe_shrinks_the_window() {
         }
     }
 
-    // `:1094`: the interval that started at the marginalized state is consumed.
+    // the interval that started at the marginalized state is consumed.
     assert_eq!(
         window.imu_meas.keys().copied().collect::<Vec<_>>(),
         vec![STATE1]
     );
 
-    // `:1120-1137`: the new prior's ordering is the window that survives.
+    // the new prior's ordering is the window that survives.
     assert_eq!(window.marg.order.items(), 2);
     assert_eq!(window.marg.order.get(KF1), Some((0, POSE_SIZE)));
     assert_eq!(
@@ -365,7 +341,7 @@ fn marginalizing_a_keyframe_shrinks_the_window() {
 /// forms it, takes the dense Schur complement over the same index split, and
 /// checks that the square-root prior squares to it. That is the same argument
 /// `VoMargSqrtLinearizationTest` makes about the linearization
-/// (`test_linearization.cpp:379-388`), one level up.
+/// one level up.
 ///
 /// It also checks the statement that matters to the estimator: the increment
 /// that minimizes the reduced quadratic is the increment the full system would
@@ -387,7 +363,7 @@ fn the_prior_is_the_schur_complement_of_the_window() {
     let b: DVector<f64> = q2jp.transpose() * &q2r;
     let (schur_h, schur_b) = dense_schur(&h, &b, &keep, &marg);
 
-    // Undo the re-anchoring of `:1172` to compare like with like.
+    // Undo the re-anchoring of to compare like with like.
     let delta: DVector<f64> = marginalized
         .estimator
         .compute_delta(&marginalized.marg.order)
@@ -422,7 +398,7 @@ fn the_prior_is_the_schur_complement_of_the_window() {
     // biases, so nine directions carry no information. The solve is therefore
     // damped, with the same `lambda` on both sides — which is what the
     // estimator itself does (`H.diagonal() * lambda`,
-    // `sqrt_keypoint_vio.cpp:1415-1417`), so this compares the increment the
+    // ), so this compares the increment the
     // optimizer would really take.
     let lambda: f64 = 1e-6 * scale;
     let damped = |h: &DMatrix<f64>| -> DMatrix<f64> {
@@ -445,7 +421,7 @@ fn the_prior_is_the_schur_complement_of_the_window() {
     }
 }
 
-/// Trap 8: `marg_data.b -= marg_data.H * delta` (`:1170-1172`).
+/// Trap 8: `marg_data.b -= marg_data.H * delta`.
 ///
 /// The helper hands back a prior linearized at `x = 0`; the estimator stores
 /// priors in the delta-independent form, so the residual has to lose
@@ -456,7 +432,6 @@ fn the_prior_is_re_anchored_on_the_delta() {
     let mut window: Window = build_window(0xB00E, true);
     // Give the surviving keyframe a non-zero delta, so the re-anchoring has
     // something to subtract. `KF1` is frozen, so `applyInc` accumulates
-    // (`imu_types.h:240-248`).
     let inc: Vector6<f64> = Vector6::from_iterator((0..6).map(|k| 0.001 * (k as f64 + 1.0)));
     window
         .estimator
@@ -502,10 +477,10 @@ fn the_prior_is_re_anchored_on_the_delta() {
 }
 
 /// `computeMargPriorError` after an increment is the quadratic model evaluated
-/// at the accumulated delta (`ba_base.cpp:441-465`).
+/// at the accumulated delta.
 ///
 /// The prior is `P(x) = 0.5‖J(delta + x) + r‖²` and `computeMargPriorError`
-/// returns it with the constant `0.5 rᵀr` dropped (`:452-455`), i.e.
+/// returns it with the constant `0.5 rᵀr` dropped, i.e.
 /// `(J delta)ᵀ(0.5 J delta + r)`. The point of the test is that `applyInc` on a
 /// **frozen** frame accumulates into `delta` rather than moving the
 /// linearization point, so the prior sees the increment at all — trap 7 the
@@ -572,7 +547,7 @@ fn the_prior_error_is_the_quadratic_at_the_delta() {
     assert!(e1 > 0.0, "moving away from the linearization point costs");
 }
 
-/// The ordering assertions of `:736` and `:758-759` are typed errors here.
+/// Ordering mismatches return typed errors.
 ///
 /// The schedule's own relationships to the window are
 /// `an_invalid_schedule_is_refused_before_anything_changes`; this is the other
@@ -592,15 +567,9 @@ fn a_window_that_disagrees_with_the_prior_is_refused() {
     );
 }
 
-/// Every relationship the schedule is supposed to have with the window, broken
-/// one at a time: each is a typed error, and each leaves the window **exactly**
-/// as it was.
-///
-/// C++ never checks any of them — `:1090-1112` erases what the sets name in
-/// order, with `frame_states.at()` throwing and `frame_poses.erase()` silently
-/// doing nothing — so a schedule that disagrees with the window took effect
-/// before it was noticed. Eight ways it can disagree are covered here; a
-/// *valid* schedule over a window that is not frozen is the neighbouring test.
+/// Break schedule relationships one at a time. All eight invalid schedules must
+/// return typed errors and leave the window unchanged. Frozen-state validation
+/// is checked separately with an otherwise valid schedule.
 #[test]
 fn an_invalid_schedule_is_refused_before_anything_changes() {
     let unknown: FrameId = 999;
@@ -702,13 +671,8 @@ fn an_invalid_schedule_is_refused_before_anything_changes() {
     }
 }
 
-/// `computeDelta`'s precondition, which C++ only reaches at `:1171` — eighty
-/// lines after `:1090` started rewriting the window (`ba_base.cpp:294`).
-///
-/// The schedule is valid; what is wrong is the window. Both kinds of block the
-/// new prior gets are covered: a state that is about to be demoted into it, and
-/// a pose that simply survives. Either way the refusal is `computeDelta`'s own
-/// error, raised before the first mutation.
+/// Check frozen-state preconditions before mutation for both surviving poses and
+/// states being demoted. A valid schedule does not make an unfrozen block valid.
 #[test]
 fn a_window_that_is_not_frozen_is_refused_before_anything_changes() {
     let refused = |window: &mut Window, sched: &MarginalizeSchedule, frame_id: FrameId| {
@@ -722,7 +686,7 @@ fn a_window_that_is_not_frozen_is_refused_before_anything_changes() {
     };
 
     // The demoted state: `STATE1` is a free variable in the fixture, and
-    // demotion would carry that flag into the new prior (`imu_types.h:206-215`).
+    // demotion would carry that flag into the new prior.
     let mut window: Window = build_window(0xB017, true);
     refused(&mut window, &demote_state1(), STATE1);
 
@@ -737,7 +701,7 @@ fn a_window_that_is_not_frozen_is_refused_before_anything_changes() {
 }
 
 /// The control: freezing that one state, and nothing else, makes the same
-/// schedule marginalize — and what it does is the demotion of `:1098-1105`.
+/// schedule marginalize and demote the selected state.
 #[test]
 fn a_frozen_demoted_state_marginalizes() {
     let mut window: Window = build_window(0xB017, true);
@@ -767,7 +731,6 @@ fn a_frozen_demoted_state_marginalizes() {
 
 /// The stacked square-root system `marginalize` is about to consume, taken
 /// through the public linearizer with the same inputs
-/// (`sqrt_keypoint_vio.cpp:905-942`).
 fn linearized_system(window: &Window) -> (DMatrix<f64>, DVector<f64>) {
     use slam_rs::linearize::{LinearizationAbsQR, LinearizationInputs, LinearizationOptions};
 

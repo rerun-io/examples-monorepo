@@ -1,17 +1,7 @@
-//! The absolute-pose square-root linearizer.
-//!
-//! `LinearizationAbsQR<Scalar, POSE_SIZE>`
-//! (`include/basalt/linearization/linearization_abs_qr.hpp`,
-//! `src/linearization/linearization_abs_qr.cpp`): owns one landmark block per
-//! landmark, one IMU block per preintegrated interval, and the marginalization
-//! prior, and turns them into the dense reduced camera system the
-//! Levenberg-Marquardt loop solves.
-//!
-//! **Borrowing.** C++ keeps raw pointers to the estimator, the marginalization
-//! data and the IMU data for the linearizer's whole life (`:56-64`). The port
-//! passes them in at each call instead — `estimator` and a
-//! [`LinearizationInputs`] — so nothing here is self-referential and stage S8
-//! can hold the linearizer across an iteration while it mutates the window.
+//! Absolute-pose square-root linearization.
+//! Landmark blocks, IMU factors and the prior form the reduced camera system.
+//! Inputs are borrowed per call, allowing the estimator to retain the linearizer
+//! while updating the window without self-referential storage.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,17 +16,16 @@ use crate::linearize::reduce::deterministic_reduce_scalar;
 use crate::linearize::{DenseHbWorkspace, LinearizeError, RelPoseLin, linearize_relative_pose};
 use crate::types::{AbsOrderMap, FrameId, LandmarkId, MargLinData, POSE_VEL_BIAS_SIZE, TimeCamId};
 
-/// `LinearizationBase<Scalar, POSE_SIZE>::Options` (`linearization_base.hpp:23-26`),
+/// `LinearizationBase<Scalar, POSE_SIZE>::Options`,
 /// without the `linearization_type` field: only `ABS_QR` is ported (decision D13).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LinearizationOptions<S: LieScalar> {
-    /// The landmark blocks' options (`:24`).
+    /// The landmark blocks' options.
     pub lb_options: LandmarkBlockOptions<S>,
 }
 
 impl<S: LieScalar> Default for LinearizationOptions<S> {
-    /// basalt's defaults. Written out rather than derived: `#[derive(Default)]`
-    /// would demand `S: Default`, which `LieScalar` does not.
+    /// Explicit defaults avoid requiring `S: Default` beyond `LieScalar`.
     fn default() -> Self {
         Self {
             lb_options: LandmarkBlockOptions::default(),
@@ -44,11 +33,7 @@ impl<S: LieScalar> Default for LinearizationOptions<S> {
     }
 }
 
-/// `ImuLinData<Scalar>` plus the measurements it indexes
-/// (`imu_types.h:306-315`), which C++ carries as a `std::map` of pointers.
-///
-/// The key is the start timestamp of the interval; the end timestamp is
-/// `start + measurement.get_dt_ns()` (`imu_block.hpp:29-30`).
+/// IMU measurements indexed by start timestamp; end time is start plus duration.
 #[derive(Debug, Clone)]
 pub struct ImuInput<'a, S: LieScalar> {
     /// Gravity and the two bias random-walk square-root weights.
@@ -57,29 +42,24 @@ pub struct ImuInput<'a, S: LieScalar> {
     pub measurements: Vec<(i64, &'a IntegratedImuMeasurement<S>)>,
 }
 
-/// Everything `LinearizationAbsQR`'s constructor takes as a pointer in C++
-/// (`linearization_abs_qr.hpp:41-46`).
-///
-/// `last_state_to_marg` is not here: C++ takes it and immediately `UNUSED`s it
-/// (`linearization_abs_qr.cpp:67`).
+/// Borrowed inputs needed for a linearization call.
 #[derive(Debug)]
 pub struct LinearizationInputs<'a, S: LieScalar> {
     /// The square-root marginalization prior, if there is one.
     pub marg: Option<&'a MargLinData<S>>,
     /// The preintegrated IMU intervals, if the estimator is inertial.
     pub imu: Option<&'a ImuInput<'a, S>>,
-    /// Restrict the landmarks to those hosted by these frames (`:117-122`).
+    /// Restrict the landmarks to those hosted by these frames.
     pub used_frames: Option<&'a BTreeSet<FrameId>>,
-    /// ...or to these landmarks (`:120-121`).
+    /// or to these landmarks.
     pub lost_landmarks: Option<&'a BTreeSet<LandmarkId>>,
-    /// Frames whose pose Jacobians are zeroed (`:223-224`) and whose landmarks
-    /// are not optimised (`:140`).
+    /// Frames whose pose Jacobians are zeroed and whose landmarks
+    /// are not optimised.
     pub fixed_frames: Option<&'a BTreeSet<FrameId>>,
 }
 
 impl<S: LieScalar> Default for LinearizationInputs<'_, S> {
-    /// Every C++ pointer null: a visual-only problem with no prior and no
-    /// restriction (`linearization_abs_qr.hpp:41-46` default arguments).
+    /// An unrestricted visual-only problem without an IMU factor or prior.
     fn default() -> Self {
         Self {
             marg: None,
@@ -104,40 +84,33 @@ struct ImuMeta {
 #[derive(Debug, Clone)]
 pub struct LinearizationAbsQR<S: LieScalar> {
     options: LinearizationOptions<S>,
-    /// `landmark_ids` (`:104`), sorted (`:127`).
+    /// `landmark_ids`, sorted.
     landmark_ids: Vec<LandmarkId>,
-    /// `landmark_blocks` (`:105`), parallel to `landmark_ids`.
+    /// `landmark_blocks`, parallel to `landmark_ids`.
     landmark_blocks: Vec<LandmarkBlock<S>>,
-    /// `landmark_block_idx` (`:111`): the prefix sum of `numQ2rows()`.
+    /// `landmark_block_idx` : the prefix sum of `numQ2rows()`.
     landmark_block_idx: Vec<usize>,
-    /// `num_rows_Q2r` (`:135`).
+    /// `num_rows_Q2r`.
     num_rows_q2r: usize,
-    /// `relative_pose_lin` (`:126`) as a dense table, so the blocks hold an
+    /// `relative_pose_lin` as a dense table, so the blocks hold an
     /// index rather than a pointer. The `(host, target)` -> slot map that
     /// builds it is a local in [`Self::new`]: nothing needs it once the blocks
     /// have their indices.
     rel_pose_pairs: Vec<(TimeCamId, TimeCamId)>,
     rel_pose_lin: Vec<RelPoseLin<S>>,
-    /// One per preintegrated interval (`:106`, `:163-167`).
+    /// One per preintegrated interval.
     imu_meta: Vec<ImuMeta>,
     /// Filled by [`Self::linearize_problem`]; empty before it runs.
     imu_blocks: Vec<ImuBlock<S>>,
-    /// `aom` (`:119`).
+    /// `aom`.
     aom: AbsOrderMap,
 }
 
 impl<S: LieScalar> LinearizationAbsQR<S> {
-    /// The constructor (`linearization_abs_qr.cpp:50-172`).
-    ///
-    /// Allocates one relative pose per (host, target) pair of the landmark
-    /// database, selects and **sorts** the landmark ids (`:115-127` — the
-    /// comment says "for better visualization", but it is also what makes the
-    /// row order of the stacked system reproducible), allocates every landmark
-    /// block, and builds the prefix sum of their `Q₂` row counts.
-    ///
-    /// C++ asserts that the options' Huber threshold and observation sigma are
-    /// the estimator's (`:69-73`); the port copies them from the estimator
-    /// instead, so they cannot disagree.
+    /// Allocate relative poses and landmark blocks in sorted landmark order,
+    /// then build the prefix sum of reduced row counts. Sorting fixes row order.
+    /// Copy Huber threshold and observation deviation from the estimator so options
+    /// cannot disagree.
     pub fn new(
         estimator: &BundleAdjustmentBase<S>,
         aom: &AbsOrderMap,
@@ -147,7 +120,7 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         options.lb_options.huber_parameter = estimator.huber_thresh;
         options.lb_options.obs_std_dev = estimator.obs_std_dev;
 
-        // `:76-111`: one `RelPoseLin` per (host, target) pair.
+        // one `RelPoseLin` per (host, target) pair.
         let mut rel_pose_pairs: Vec<(TimeCamId, TimeCamId)> = Vec::new();
         let mut rel_pose_index: BTreeMap<(TimeCamId, TimeCamId), usize> = BTreeMap::new();
         for (tcid_h, target_map) in estimator.lmdb.observations() {
@@ -160,8 +133,7 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         }
         let rel_pose_lin: Vec<RelPoseLin<S>> = vec![RelPoseLin::default(); rel_pose_pairs.len()];
 
-        // `:115-127`. The database already keeps its landmarks id-sorted, so the
-        // `std::sort` of `:127` is the iteration order here.
+        // Landmarks already iterate in sorted id order.
         let mut landmark_ids: Vec<LandmarkId> = Vec::new();
         for lm in estimator.lmdb.landmarks() {
             let keep: bool = match (inputs.used_frames, inputs.lost_landmarks) {
@@ -176,7 +148,6 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             }
         }
 
-        // `:132-150`.
         let mut landmark_blocks: Vec<LandmarkBlock<S>> = Vec::with_capacity(landmark_ids.len());
         for &lm_id in &landmark_ids {
             let lm: &Landmark<S> = estimator
@@ -195,7 +166,6 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             )?);
         }
 
-        // `:152-161`.
         let mut landmark_block_idx: Vec<usize> = Vec::with_capacity(landmark_blocks.len());
         let mut num_rows_q2r: usize = 0;
         for block in &landmark_blocks {
@@ -205,12 +175,8 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
                 .ok_or(LinearizeError::LayoutOverflow)?;
         }
 
-        // `:163-167`. C++ computes `start_t + dt` unchecked and then indexes
-        // the ordering with `at()` inside every method that uses the block
-        // (`imu_block.hpp:89-93` and its four siblings), which throws on a
-        // missing frame and silently misplaces a 15x15 write on a frame that is
-        // in the ordering with a *pose-sized* slot. Both are resolved here,
-        // once, so the per-iteration path cannot fail (decision D32).
+        // Resolve IMU endpoints and full-state block sizes once at construction.
+        // Check timestamp addition and offsets before the repeated scatter path (D32).
         let mut imu_meta: Vec<ImuMeta> = Vec::new();
         if let Some(imu) = inputs.imu {
             for (start_t, meas) in &imu.measurements {
@@ -230,10 +196,7 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
                         start: *start_t,
                         end: end_t,
                     })?;
-                // An IMU factor is 15 columns wide at each end
-                // (`imu_block.hpp:21`). A pose-only slot next to one is not a
-                // narrower factor, it is a different problem: C++ would write
-                // fifteen columns over a six-column slot and into its neighbour.
+                // Each IMU endpoint needs 15 columns; a six-column pose slot would overwrite its neighbor.
                 for (frame, size) in [(*start_t, start_size), (end_t, end_size)] {
                     if size != POSE_VEL_BIAS_SIZE {
                         return Err(LinearizeError::ImuStateNotFullSize { frame, size });
@@ -262,36 +225,22 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         })
     }
 
-    /// `linearizeProblem(&numerically_valid)` (`:200-277`): the residual, its
-    /// Jacobians and the total error at the current state.
-    ///
-    /// Three stages, in this order and with this summation order:
-    ///
-    /// 1. every relative pose and its two Jacobians (`:207-241`), taken at the
-    ///    **linearization point** (`getPoseLin`) and then re-evaluated for its
-    ///    value alone at the current state when either end is frozen
-    ///    (`:229-232`) — first-estimate Jacobians, trap 7;
-    /// 2. the landmark blocks, folded in landmark order through
-    ///    `crate::linearize::reduce`, deterministic and independent of thread count;
-    /// 3. the IMU blocks (`:266-268`) and then the marginalization prior
-    ///    (`:270-274`), both serial in C++ too.
-    ///
-    /// Returns `(error, numerically_valid)`.
+    /// Linearize in fixed order: relative poses, landmark blocks, IMU blocks, prior.
+    /// Relative-pose Jacobians use frozen linearization points while values are
+    /// reevaluated at current states (trap 7). Landmark folds are independent of
+    /// thread count. Return error and numerical validity.
     pub fn linearize_problem(
         &mut self,
         estimator: &BundleAdjustmentBase<S>,
         inputs: &LinearizationInputs<'_, S>,
     ) -> Result<(S, bool), LinearizeError> {
-        // `:201-204`.
-
-        // 1. the relative poses (`:207-241`).
+        // 1. the relative poses.
         for (i, (tcid_h, tcid_t)) in self.rel_pose_pairs.iter().enumerate() {
             let Some(rpl) = self.rel_pose_lin.get_mut(i) else {
                 // Unreachable: the two vectors are built together.
                 return Err(LinearizeError::LayoutOverflow);
             };
             if tcid_h == tcid_t {
-                // `:235-239`.
                 rpl.t_t_h = Matrix4::identity();
                 rpl.d_rel_d_h = Matrix6::zeros();
                 rpl.d_rel_d_t = Matrix6::zeros();
@@ -318,7 +267,7 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
                         camera_count: estimator.calib.t_i_c.len(),
                     })?;
 
-            // `:219-221`: Jacobians at the linearization point.
+            // Jacobians at the linearization point.
             let mut d_rel_d_h: Matrix6<S> = Matrix6::zeros();
             let mut d_rel_d_t: Matrix6<S> = Matrix6::zeros();
             let t_t_h: Se3<S> = linearize_relative_pose(
@@ -330,7 +279,6 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
                 Some(&mut d_rel_d_t),
             );
 
-            // `:223-224`.
             if let Some(fixed) = inputs.fixed_frames {
                 if fixed.contains(&tcid_h.frame_id) {
                     d_rel_d_h = Matrix6::zeros();
@@ -369,7 +317,7 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
                 Ok(acc + contribution)
             })?;
 
-        // 3a. the IMU blocks (`:266-268`).
+        // 3a. the IMU blocks.
         self.imu_blocks.clear();
         if let Some(imu) = inputs.imu {
             for (meta, (_, meas)) in self.imu_meta.iter().zip(imu.measurements.iter()) {
@@ -392,7 +340,7 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             }
         }
 
-        // 3b. the marginalization prior (`:270-274`).
+        // 3b. the marginalization prior.
         if let Some(marg) = inputs.marg {
             error += estimator.compute_marg_prior_error(marg)?;
         }
@@ -400,7 +348,7 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         Ok((error, numerically_valid))
     }
 
-    /// `performQR()` (`:280-287`): eliminate every block's landmark columns.
+    /// `performQR()` : eliminate every block's landmark columns.
     pub fn perform_qr(&mut self) -> Result<(), LinearizeError> {
         let options: LandmarkBlockOptions<S> = self.options.lb_options;
         for block in &mut self.landmark_blocks {
@@ -409,15 +357,9 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         Ok(())
     }
 
-    /// `get_dense_H_b(H, b)` (`:511-563`): the reduced camera system.
-    ///
-    /// Fold landmark contributions in landmark order into one reusable dense
-    /// accumulator through `crate::linearize::reduce`. The fold is deterministic
-    /// and independent of thread count.
-    ///
-    /// The order of the additions after the landmark blocks is basalt's: IMU
-    /// (`:553`), then the marginalization prior (`:559`). `:556`'s pose damping
-    /// is not one of them (D68).
+    /// Build the dense reduced camera system with a reusable accumulator.
+    /// Fold landmarks in deterministic order, then add IMU factors and the prior.
+    /// There are no pose-damping rows (D68).
     pub fn get_dense_h_b(
         &self,
         estimator: &BundleAdjustmentBase<S>,
@@ -435,7 +377,7 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
     /// The reduced system is the workspace's own accumulator, handed back by
     /// reference: the Levenberg-Marquardt loop builds one per inner step and
     /// throws it away, so nothing wants an owned copy. The caller may write
-    /// into both — `sqrt_keypoint_vio.cpp:1395-1406` pins a fixed keyframe's
+    /// into both — pins a fixed keyframe's
     /// rows in place — because the next call zeroes the whole square rather
     /// than only the columns the reduction recorded.
     pub fn get_dense_h_b_into<'w>(
@@ -447,12 +389,12 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         let opt_size: usize = self.aom.total_size();
         let (h, b) = workspace.reduce(opt_size, &self.landmark_blocks)?;
 
-        // `add_dense_H_b_imu` (`:640-653`).
+        // `add_dense_H_b_imu`.
         for (block, meta) in self.imu_blocks.iter().zip(self.imu_meta.iter()) {
             block.add_dense_h_b(meta.start_idx, meta.end_idx, h, b);
         }
 
-        // `add_dense_H_b_marg_prior` (`:600-631`). `:595-598`'s pose-damping
+        // `add_dense_H_b_marg_prior`. 's pose-damping
         // diagonal is not here: nothing sets it (D68).
         if let Some(marg) = inputs.marg {
             estimator.linearize_marg_prior(marg, &self.aom, h, b)?;
@@ -461,13 +403,9 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         Ok((h, b))
     }
 
-    /// `get_dense_Q2Jp_Q2r(Q2Jp, Q2r)` (`:462-509`): the stacked square-root
-    /// system the marginalization of stage S7 consumes.
-    ///
-    /// The row budget, in this order (`:464-482`): the landmark blocks'
-    /// `num_rows_Q2r`, then 15 rows per IMU interval, then the marginalization
-    /// prior's rows. C++ reserves `aom.total_size` rows of pose damping between
-    /// the last two; nothing sets it (D68), so the port has no such rows.
+    /// Export the stacked square-root system for marginalization.
+    /// Rows are landmark contributions, 15 per IMU interval, then the prior.
+    /// No unused pose-damping rows are reserved (D68).
     pub fn get_dense_q2jp_q2r(
         &self,
         estimator: &BundleAdjustmentBase<S>,
@@ -487,7 +425,6 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         let mut q2jp: DMatrix<S> = DMatrix::zeros(total_size, poses_size);
         let mut q2r: DVector<S> = DVector::zeros(total_size);
 
-        // `:484-493`.
         for (block, &start) in self
             .landmark_blocks
             .iter()
@@ -496,23 +433,17 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
             block.get_dense_q2jp_q2r(&mut q2jp, &mut q2r, start)?;
         }
 
-        // `:496-502`.
         let mut start_idx: usize = imu_start_idx;
         for (block, meta) in self.imu_blocks.iter().zip(self.imu_meta.iter()) {
             block.add_dense_q2jp_q2r(meta.start_idx, meta.end_idx, start_idx, &mut q2jp, &mut q2r);
             start_idx += POSE_VEL_BIAS_SIZE;
         }
 
-        // `get_dense_Q2Jp_Q2r_marg_prior` (`:573-593`), trap 8: the prior's
+        // `get_dense_Q2Jp_Q2r_marg_prior`, trap 8: the prior's
         // residual is re-anchored at the current state as `H * delta + b`.
         if let Some(marg) = inputs.marg {
-            // The prior's columns are written into the *first* `marg_cols`
-            // columns of the stacked system (`:587-589`), which is only correct
-            // if its ordering is the window's prefix. `linearizeMargPrior`
-            // asserts exactly that before it does the same thing in Hessian
-            // form (`ba_base.cpp:383-388`); the square-root export in C++ does
-            // not, and would silently attach a frame's columns to another
-            // frame. The port checks both paths.
+            // Prior columns occupy the window prefix. Check ordering in both dense and
+            // square-root exports to avoid attaching one frame's columns to another.
             estimator.check_marg_prior_order(marg, &self.aom)?;
             let delta: DVector<S> = estimator.compute_delta(&marg.order)?;
             let (marg_rows, marg_cols) = (marg.h.nrows(), marg.h.ncols());
@@ -531,16 +462,9 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         Ok((q2jp, q2r))
     }
 
-    /// `backSubstitute(pose_inc)` (`:297-321`): apply the pose increment to the
-    /// landmarks and return the model cost change the whole problem predicts.
-    ///
-    /// **Reduction site 2 of 4** (`:307`): the per-block `l_diff` is summed in
-    /// block order. The IMU blocks (`:309-311`) and the prior (`:313-318`) add
-    /// theirs afterwards, in that order.
-    ///
-    /// The increment this takes is basalt's **negated** one
-    /// (`sqrt_keypoint_vio.cpp:1450`), the other half of the flipped residual
-    /// sign of `ba_utils.h:117`.
+    /// Apply pose increments to landmarks and return the predicted cost change.
+    /// Sum blocks in order, then IMU factors, then the prior. The input increment
+    /// must already be negated to compensate for the residual sign.
     pub fn back_substitute(
         &mut self,
         estimator: &mut BundleAdjustmentBase<S>,
@@ -586,7 +510,7 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
     }
 
     /// The options the blocks were built with, `options_`
-    /// (`linearization_abs_qr.hpp:102`), including the Huber threshold and the
+    /// including the Huber threshold and the
     /// pixel sigma copied off the estimator.
     pub fn options(&self) -> &LinearizationOptions<S> {
         &self.options

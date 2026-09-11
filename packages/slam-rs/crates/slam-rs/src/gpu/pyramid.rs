@@ -14,7 +14,7 @@ use crate::pyramid::{MIN_SIDE, Pyramid, PyramidError};
 ///
 /// The corner scanner and the pyramid builder are handed the *same* frame: the
 /// detector's input is level 0 of the pyramid this builder has just filled
-/// (`keypoints.cpp:152`, `image_pyr.h:73`). On the host that costs nothing —
+/// On the host that costs nothing —
 /// the caller still owns the image — but on a device it is a second upload of
 /// the whole frame. So the builder publishes level 0 here under the camera
 /// index [`crate::pyramid::PyramidBuilder::build`] gives it, and
@@ -89,18 +89,11 @@ pub struct GpuPyramid<R: Runtime> {
 }
 
 impl<R: Runtime> GpuPyramid<R> {
-    /// Allocate every level for a `width` x `height` frame and write `meta`.
-    ///
-    /// `num_levels` is basalt's, so the pyramid holds `num_levels + 1` levels
-    /// (0 through `num_levels`), matching [`crate::pyramid::PyramidU16`].
+    /// Allocate levels zero through `num_levels` and write device metadata.
     ///
     /// # Errors
-    ///
-    /// [`PyramidError::TooSmall`] when a level would be under the 5-tap
-    /// kernel's reach, as the CPU pyramid refuses it, and for `num_levels == 0`,
-    /// which the CPU pyramid accepts and this one cannot allocate;
-    /// [`GpuError::BufferTooLong`] when a pyramid buffer would be longer than
-    /// the `u32` its device metadata indexes it with.
+    /// Refuse geometry below the five-tap kernel's reach, zero requested levels,
+    /// and buffers exceeding the u32 device index range.
     fn new(
         client: ComputeClient<R>,
         width: usize,
@@ -305,7 +298,7 @@ impl<R: Runtime> crate::pyramid::PyramidBuilder for GpuPyramidBuilder<R> {
         )
     }
 
-    /// `ManagedImagePyr::setFromImage` (`image_pyr.h:70-80`) on the device.
+    /// `ManagedImagePyr::setFromImage` on the device.
     ///
     /// One upload for level 0 and one launch per halving. No synchronisation:
     /// the frame is left in flight and the tracker's own launches queue behind

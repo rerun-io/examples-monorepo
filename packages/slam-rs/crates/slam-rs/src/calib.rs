@@ -1,36 +1,12 @@
-//! basalt's camera-IMU calibration, read with serde.
+//! Camera-IMU calibration read with serde.
 //!
-//! Ported from `thirdparty/basalt-headers/include/basalt/calibration/calibration.hpp`
-//! and `calib_bias.hpp`. The on-disk shape is cereal's again: a `value0`
-//! wrapper, `T_imu_cam` as `{px, py, pz, qx, qy, qz, qw}`
-//! (`serialization/eigen_io.h:148-153`) and `intrinsics` as
-//! `{"camera_type": ..., "intrinsics": {...}}`
-//! (`serialization/headers_serialization.h:55-72`), so every shipped
-//! `*_calib.json` is a free test fixture (decision D18).
+//! JSON uses a `value0` wrapper, `T_imu_cam` entries with
+//! `{px, py, pz, qx, qy, qz, qw}`, and typed `intrinsics` objects.
+//! Projection and analytic Jacobians live in the camera module.
 //!
-//! Projection math is **not** here. This PR stores the camera parameters in the
-//! shape basalt stores them and stops; `project`/`unproject` and their analytic
-//! Jacobians land with the camera module.
-//!
-//! ## Two deliberate divergences
-//!
-//! * **The quaternion is normalized on read.** cereal writes the four
-//!   coefficients straight into Eigen's storage without normalizing; a
-//!   calibration a few ulps off unit length would then be a non-rotation. The
-//!   port normalizes and rejects a zero-norm quaternion instead of producing
-//!   NaNs (decision D32).
-//! * **Per-camera resolution is real data.** basalt assumes every camera shares
-//!   `resolution[0]` (`frame_to_frame_optical_flow.h:108-109`); the port keeps
-//!   one entry per camera because the msd-g2 recordings are stored rotated into
-//!   portrait (decision D30).
-//!
-//! ## The fixtures
-//!
-//! `msdmi_calib.json` (2 kb4 cameras, Valve Index), `msdmg_calib.json` (4
-//! pinhole-radtan8, HP Reverb G2), `euroc_ds_calib.json` (2 double-sphere, and
-//! the only shipped file with a vignette spline and mocap keys) and
-//! `robocap_calib.json` (4 kb4 at 960x540, the only one with non-default
-//! IMU noise).
+//! Quaternions are normalized on read; zero-norm values are rejected to avoid
+//! NaNs (D32). Each camera retains its own resolution because msd-g2 cameras
+//! can be stored with different portrait orientations (D30).
 
 use std::collections::BTreeMap;
 
@@ -64,8 +40,7 @@ pub enum CalibError {
         /// Number of `resolution` entries.
         resolutions: usize,
     },
-    /// A camera model name that is not one of the six basalt ships in its
-    /// calibration files.
+    /// A camera model name outside the six supported calibration variants.
     #[error("camera {index}: unknown camera model {model:?}")]
     UnknownCameraModel {
         /// Index of the offending camera.
@@ -106,10 +81,7 @@ struct Value0<T> {
     value0: T,
 }
 
-/// A rigid transform in basalt's on-disk form.
-///
-/// The rotation is stored `xyzw`, which is Eigen's internal quaternion order
-/// (`serialization/eigen_io.h:150-153`), not the `wxyz` a maths text would use.
+/// A rigid transform in the calibration JSON format, with `xyzw` quaternion order.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct PoseJson<S> {
     px: S,
@@ -166,7 +138,7 @@ mod vector3_json {
     }
 }
 
-/// Pinhole, `fx fy cx cy` (`camera/pinhole_camera.hpp:88`).
+/// Pinhole, `fx fy cx cy`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PinholeParams<S> {
     /// Focal length along image x, pixels.
@@ -179,7 +151,7 @@ pub struct PinholeParams<S> {
     pub cy: S,
 }
 
-/// Kannala-Brandt with four radial terms (`camera/kannala_brandt_camera4.hpp:91`).
+/// Kannala-Brandt with four radial terms.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Kb4Params<S> {
     /// Focal length along image x, pixels.
@@ -200,13 +172,9 @@ pub struct Kb4Params<S> {
     pub k4: S,
 }
 
-/// Pinhole with the eight-term rational Brown-Conrady distortion
-/// (`camera/pinhole_radtan8_camera.hpp:114`).
-///
-/// The parameter order on disk is `k1 k2 p1 p2 k3 k4 k5 k6`: the two tangential
-/// terms sit **between** the radial ones, matching OpenCV's layout and
-/// `serialization/headers_serialization.h:144-153`. `rpmax` is stored beside
-/// the twelve optimized parameters rather than inside them.
+/// Pinhole with eight-term rational Brown-Conrady distortion.
+/// The disk order is `k1 k2 p1 p2 k3 k4 k5 k6`, matching OpenCV.
+/// `rpmax` is stored beside the twelve optimized parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Radtan8Params<S> {
     /// Focal length along image x, pixels.
@@ -237,7 +205,7 @@ pub struct Radtan8Params<S> {
     pub rpmax: S,
 }
 
-/// Double sphere (`camera/double_sphere_camera.hpp:89`).
+/// Double sphere.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct DoubleSphereParams<S> {
     /// Focal length along image x, pixels.
@@ -254,7 +222,7 @@ pub struct DoubleSphereParams<S> {
     pub alpha: S,
 }
 
-/// Extended unified (`camera/extended_camera.hpp:90`).
+/// Extended unified.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ExtendedUnifiedParams<S> {
     /// Focal length along image x, pixels.
@@ -271,7 +239,7 @@ pub struct ExtendedUnifiedParams<S> {
     pub beta: S,
 }
 
-/// Unified / Mei (`camera/unified_camera.hpp:89`).
+/// Unified / Mei.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct UnifiedParams<S> {
     /// Focal length along image x, pixels.
@@ -286,21 +254,12 @@ pub struct UnifiedParams<S> {
     pub alpha: S,
 }
 
-/// One camera's projection model, `basalt::GenericCamera`
-/// (`camera/generic_camera.hpp:75-77`).
+/// One camera's projection model.
 ///
-/// The six variants are the ones that appear in shipped calibration files.
-/// basalt's variant also holds `fisheye624`, which no reference calibration
-/// uses; it is left out until a dataset needs it.
-///
-/// **Three of the six parse and are then refused.** `ds`, `eucm` and `ucm`
-/// have no projection in this port — D13 keeps the pinhole, kb4 and
-/// pinhole-radtan8 the shipped rigs use — so
-/// [`crate::camera::CameraEnum::from_model`] answers them with
-/// `CameraError::UnsupportedModel`. They are modelled here rather than left to
-/// serde so that a EuRoC-shaped calibration reports *which* model cannot be
-/// used, instead of a parse error naming a field; `euroc_ds_calib.json` is the
-/// fixture that pins it.
+/// Six variants can be parsed. `ds`, `eucm` and `ucm` have no projection
+/// implementation and return `CameraError::UnsupportedModel` from
+/// [`crate::camera::CameraEnum::from_model`] (D13). Parsing them first lets the
+/// error name the unsupported model rather than an unrelated JSON field.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "camera_type", content = "intrinsics")]
 pub enum CameraModel<S> {
@@ -325,7 +284,7 @@ pub enum CameraModel<S> {
 }
 
 impl<S: Copy> CameraModel<S> {
-    /// The model name basalt writes into `camera_type`, `getName()`.
+    /// The model name stored in `camera_type`.
     pub fn name(&self) -> &'static str {
         match self {
             Self::Pinhole(_) => "pinhole",
@@ -337,14 +296,9 @@ impl<S: Copy> CameraModel<S> {
         }
     }
 
-    /// The optimized parameters in basalt's `getParam()` order.
-    ///
-    /// `fx fy cx cy` first in every model, then the model's own terms; the
-    /// distortion coefficients alone are `params()[4..]`. For
-    /// `pinhole-radtan8` this is the twelve-vector basalt optimizes, and
-    /// `rpmax` is not in it: it is a fixed bound, which
-    /// [`CameraModel::valid_radius`] reports instead
-    /// (`serialization/headers_serialization.h:144-153`).
+    /// The optimized parameter vector: `fx fy cx cy`, then model-specific terms.
+    /// Distortion coefficients are `params()[4..]`. For `pinhole-radtan8`, `rpmax`
+    /// is a fixed bound outside the twelve-vector; see [`CameraModel::valid_radius`].
     pub fn params(&self) -> Vec<S> {
         match self {
             Self::Pinhole(p) => vec![p.fx, p.fy, p.cx, p.cy],
@@ -373,7 +327,7 @@ impl<S: Copy> CameraModel<S> {
 }
 
 impl<S: LieScalar> CameraModel<S> {
-    /// `GenericCamera::cast` (`camera/generic_camera.hpp`): the same model in
+    /// `GenericCamera::cast` : the same model in
     /// another scalar.
     pub fn cast<T: LieScalar>(&self) -> CameraModel<T> {
         let convert = |value: S| -> T { T::from_literal(value.to_f64()) };
@@ -437,7 +391,7 @@ impl<S: LieScalar> CameraModel<S> {
 }
 
 /// Static accelerometer calibration: bias plus a lower-triangular scale
-/// (`calibration/calib_bias.hpp:44-125`, 9 parameters).
+/// (9 parameters).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CalibAccelBias<S> {
@@ -454,7 +408,7 @@ impl<S: LieScalar> Default for CalibAccelBias<S> {
 }
 
 impl<S: LieScalar> CalibAccelBias<S> {
-    /// The bias and the scale matrix (`calib_bias.hpp:86-94`).
+    /// The bias and the scale matrix.
     ///
     /// The scale is lower triangular: column 0 is `(s1, s2, s3)`, then
     /// `(1,1) = s4`, `(2,1) = s5`, `(2,2) = s6`. Everything above the diagonal
@@ -473,16 +427,13 @@ impl<S: LieScalar> CalibAccelBias<S> {
         (bias, scale)
     }
 
-    /// `a_c = (I + S) a_r - b` (`calib_bias.hpp:101-107`).
+    /// `a_c = (I + S) a_r - b`.
     pub fn calibrated(&self, raw: &Vector3<S>) -> Vector3<S> {
         let (bias, scale) = self.bias_and_scale();
         raw + scale * raw - bias
     }
 
-    /// The inverse map, `invertCalibration` (`calib_bias.hpp:114-122`).
-    ///
-    /// Returns `None` when `I + S` is singular, where the C++ would hand back
-    /// an Eigen inverse full of infinities.
+    /// The inverse calibration map; returns `None` when `I + S` is singular.
     pub fn raw(&self, calibrated: &Vector3<S>) -> Option<Vector3<S>> {
         let (bias, scale) = self.bias_and_scale();
         let inverse: Matrix3<S> = (Matrix3::identity() + scale).try_inverse()?;
@@ -491,7 +442,7 @@ impl<S: LieScalar> CalibAccelBias<S> {
 }
 
 /// Static gyroscope calibration: bias plus a full 3x3 scale
-/// (`calibration/calib_bias.hpp:128-205`, 12 parameters).
+/// (12 parameters).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CalibGyroBias<S> {
@@ -508,7 +459,7 @@ impl<S: LieScalar> Default for CalibGyroBias<S> {
 }
 
 impl<S: LieScalar> CalibGyroBias<S> {
-    /// The bias and the scale matrix (`calib_bias.hpp:165-170`).
+    /// The bias and the scale matrix.
     ///
     /// Column-major: `(s1, s2, s3)`, `(s4, s5, s6)`, `(s7, s8, s9)`. Unlike the
     /// accelerometer's, this one is full, because it also absorbs the rotation
@@ -524,13 +475,13 @@ impl<S: LieScalar> CalibGyroBias<S> {
         (bias, scale)
     }
 
-    /// `w_c = (I + S) w_r - b` (`calib_bias.hpp:176-182`).
+    /// `w_c = (I + S) w_r - b`.
     pub fn calibrated(&self, raw: &Vector3<S>) -> Vector3<S> {
         let (bias, scale) = self.bias_and_scale();
         raw + scale * raw - bias
     }
 
-    /// The inverse map, `invertCalibration` (`calib_bias.hpp:189-197`).
+    /// The inverse map, `invertCalibration`.
     pub fn raw(&self, calibrated: &Vector3<S>) -> Option<Vector3<S>> {
         let (bias, scale) = self.bias_and_scale();
         let inverse: Matrix3<S> = (Matrix3::identity() + scale).try_inverse()?;
@@ -539,15 +490,14 @@ impl<S: LieScalar> CalibGyroBias<S> {
 }
 
 /// One camera's vignetting curve, a uniform B-spline over radius
-/// (`calibration.hpp:158`, `RdSpline<1, 4, Scalar>`).
+/// (`RdSpline<1, 4, Scalar>`).
 ///
 /// Parsed so a calibration round-trips; nothing reads it. cereal writes the
-/// three members unnamed (`serialization/headers_serialization.h:243-249`), so
+/// three members unnamed, so
 /// on disk they are `value0`, `value1` and `value2`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VignetteSpline<S> {
-    /// Start of the spline's domain. basalt reuses the time axis for radius in
-    /// pixels times 1e9 (`calibration.hpp:152-157`).
+    /// Start of the spline domain, using radius in pixels times 1e9 as the time axis.
     #[serde(rename = "value0")]
     pub start_t_ns: i64,
     /// Knot spacing on the same axis.
@@ -558,8 +508,7 @@ pub struct VignetteSpline<S> {
     pub knots: Vec<[S; 1]>,
 }
 
-/// The camera-IMU calibration, `basalt::Calibration`
-/// (`calibration/calibration.hpp:51-186`).
+/// The camera-IMU calibration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Calibration<S: LieScalar> {
     /// Camera pose in the IMU frame, one per camera: `p_i = T_i_c p_c`.
@@ -617,8 +566,7 @@ struct CalibrationJson<S: LieScalar> {
 }
 
 impl<S: LieScalar> Default for CalibrationJson<S> {
-    /// `Calibration::Calibration()` (`calibration.hpp:60-70`): the reasonable
-    /// defaults basalt starts from before a file overwrites them.
+    /// Default calibration values, overridden by fields present in a file.
     fn default() -> Self {
         Self {
             t_imu_cam: Vec::new(),
@@ -677,15 +625,13 @@ pub struct CameraParts<S> {
     pub cx: S,
     /// Principal point y, pixels.
     pub cy: S,
-    /// The catalog's model name. `"kb4"` and `"radtan8"` are what
-    /// `catalog_feed` produces; basalt's own `"pinhole-radtan8"`, `"pinhole"`,
-    /// `"ds"`, `"eucm"` and `"ucm"` are accepted too.
+    /// Catalog model name. Accepts `kb4`, `radtan8`, `pinhole-radtan8`,
+    /// `pinhole`, `ds`, `eucm` and `ucm`.
     pub model: String,
     /// Exactly the coefficients the model uses: four for `kb4`, eight for
     /// `radtan8` in the order `k1 k2 p1 p2 k3 k4 k5 k6`.
     pub distortion: Vec<S>,
-    /// basalt's `rpmax`, when the recording carries one. Required by
-    /// `radtan8`; ignored by every other model.
+    /// The recording's `rpmax`, required for `radtan8` and ignored by other models.
     pub distortion_valid_radius: Option<S>,
     /// The camera pose in the IMU frame as a 4x4 matrix, flattened in C order
     /// (row by row) — what `numpy.ndarray.ravel()` gives for the
@@ -716,11 +662,9 @@ pub struct ImuParts<S> {
 }
 
 impl<S: LieScalar + Serialize + DeserializeOwned> Calibration<S> {
-    /// Read one of basalt's calibration files.
-    ///
-    /// Unknown keys are collected and logged rather than rejected: EuRoC's
-    /// calibration carries a mocap block and msd-g2's carries a `comment`, and
-    /// neither belongs to the VIO struct.
+    /// Read a calibration JSON file.
+    /// Unknown keys are collected and logged: mocap blocks and descriptive comments
+    /// need not be part of the VIO calibration struct.
     pub fn from_json_str(text: &str) -> Result<Self, CalibError> {
         let wrapper: Value0<CalibrationJson<S>> = serde_json::from_str(text)?;
         let raw: CalibrationJson<S> = wrapper.value0;
@@ -765,7 +709,7 @@ impl<S: LieScalar + Serialize + DeserializeOwned> Calibration<S> {
         })
     }
 
-    /// Write the calibration back in basalt's shape, wrapper and all.
+    /// Write calibration JSON with its `value0` wrapper.
     pub fn to_json_string(&self) -> Result<String, CalibError> {
         let raw: CalibrationJson<S> = CalibrationJson {
             t_imu_cam: self.t_i_c.iter().map(PoseJson::from_se3).collect(),
@@ -792,14 +736,9 @@ impl<S: LieScalar> Calibration<S> {
         self.intrinsics.len()
     }
 
-    /// `Calibration::cast` (`calibration.hpp:113-136`): the whole rig in
-    /// another scalar.
-    ///
-    /// basalt builds its frontend from `cal.template cast<Scalar>()`
-    /// (`optical_flow.h:204`), so a `Calibration<f64>` read from the JSON is what
-    /// the file gives and a `Calibration<f32>` is what the frontend runs on
-    /// (decision D05). `unknown` is carried across unchanged; the C++ has no
-    /// such field.
+    /// Convert the whole rig to another scalar type.
+    /// JSON is read as f64 and the frontend uses an f32 calibration (D05).
+    /// Unknown fields are carried across unchanged.
     pub fn cast<T: LieScalar>(&self) -> Calibration<T> {
         let convert = |value: S| -> T { T::from_literal(value.to_f64()) };
         let convert3 = |value: &Vector3<S>| -> Vector3<T> {
@@ -835,24 +774,18 @@ impl<S: LieScalar> Calibration<S> {
     }
 
     /// Discrete-time gyroscope noise, `sigma_c sqrt(rate)`
-    /// (`calibration.hpp:186`).
     pub fn discrete_time_gyro_noise_std(&self) -> Vector3<S> {
         self.gyro_noise_std * self.imu_update_rate.sqrt()
     }
 
     /// Discrete-time accelerometer noise, `sigma_c sqrt(rate)`
-    /// (`calibration.hpp:193`).
     pub fn discrete_time_accel_noise_std(&self) -> Vector3<S> {
         self.accel_noise_std * self.imu_update_rate.sqrt()
     }
 
-    /// Build a calibration from what the catalog feed reports.
-    ///
-    /// The Python side already turns a recording's statics into
-    /// `CameraCalib`/`ImuCalib` dataclasses; this takes the same fields so the
-    /// PyO3 layer copies numbers rather than re-deriving them. The noise
-    /// densities are isotropic there and become the three equal components
-    /// basalt stores.
+    /// Build a calibration from catalog camera and IMU fields.
+    /// The PyO3 layer copies these values rather than deriving them again.
+    /// Isotropic noise densities become three equal components.
     pub fn from_catalog_parts(
         cameras: &[CameraParts<S>],
         imu: &ImuParts<S>,
@@ -885,13 +818,10 @@ impl<S: LieScalar> Calibration<S> {
     }
 }
 
-/// A rigid transform from a row-major 4x4, rejecting anything that is not one.
-///
-/// Sophus's rotation-matrix constructor requires **both** orthogonality and a
-/// positive determinant (`Sophus/sophus/so3.hpp:536-541`). Checking only the
-/// first lets a reflection through, and Eigen's matrix-to-quaternion conversion
-/// then returns a rotation that is not the input at all — `diag(-1, 1, 1)`
-/// becomes the identity, silently discarding the camera's geometry.
+/// Build a rigid transform from a row-major 4x4 matrix.
+/// A valid rotation must be orthogonal and have a positive determinant.
+/// Orthogonality alone accepts reflections, which cannot be represented by a
+/// rotation quaternion without losing the input geometry.
 fn pose_from_row_major<S: LieScalar>(m: &[S; 16], index: usize) -> Result<Se3<S>, CalibError> {
     let rotation: Matrix3<S> = Matrix3::new(m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]);
     let residual: Matrix3<S> = rotation.transpose() * rotation - Matrix3::identity();
@@ -954,8 +884,7 @@ fn camera_model_from_parts<S: LieScalar>(
                 k4: d[3],
             }))
         }
-        // `catalog_feed` calls the model `radtan8`; basalt calls the same thing
-        // `pinhole-radtan8`. Both names land here.
+        // Accept both `radtan8` and `pinhole-radtan8` for the same model.
         "radtan8" | "pinhole-radtan8" => {
             expect(8, "pinhole-radtan8")?;
             Ok(CameraModel::PinholeRadtan8(Radtan8Params {
@@ -971,8 +900,7 @@ fn camera_model_from_parts<S: LieScalar>(
                 k4: d[5],
                 k5: d[6],
                 k6: d[7],
-                // basalt's own default when a calibration omits it
-                // (`camera/pinhole_radtan8_camera.hpp`): no radial cut-off.
+                // An omitted radius means no radial cut-off.
                 rpmax: camera.distortion_valid_radius.unwrap_or_else(S::zero),
             }))
         }
@@ -1136,7 +1064,7 @@ mod tests {
         assert!(calib.intrinsics.iter().all(|m| m.name() == "kb4"));
         assert_eq!(calib.resolution, vec![[960, 540]; 4]);
         assert_eq!(calib.imu_update_rate, 200.0);
-        // Kalibr numbers, not basalt's MSD defaults.
+        // Kalibr noise values for this rig.
         assert_abs_diff_eq!(
             calib.gyro_noise_std,
             Vector3::repeat(0.000_730_044_281_254_7),
@@ -1194,7 +1122,7 @@ mod tests {
         let calib: Calibration<f64> = Calibration::from_json_str(text).unwrap();
         let q: [f64; 4] = calib.t_i_c[0].rotation.quaternion_xyzw();
         assert_abs_diff_eq!(q[3], 1.0, epsilon = 1e-15);
-        // Everything absent falls back to basalt's constructor defaults.
+        // Absent fields retain the constructor defaults.
         assert_eq!(calib.imu_update_rate, 200.0);
         assert_abs_diff_eq!(calib.accel_noise_std, Vector3::repeat(0.016), epsilon = 0.0);
 
@@ -1345,14 +1273,13 @@ mod tests {
             epsilon = 1e-15
         );
 
-        // The result serializes into basalt's own shape and reads back.
+        // Calibration JSON round-trips with its wrapper.
         let text: String = calib.to_json_string().unwrap();
         let reread: Calibration<f64> = Calibration::from_json_str(&text).unwrap();
         assert_close(&calib, &reread, "from_catalog_parts");
     }
 
-    /// The catalog spells the eight-coefficient model `radtan8`; basalt spells
-    /// it `pinhole-radtan8`. Both must produce the same variant.
+    /// Both `radtan8` and `pinhole-radtan8` must select the same variant.
     #[test]
     fn the_catalog_radtan8_name_is_accepted() {
         let coefficients: Vec<f64> = vec![0.1, 0.2, 0.001, 0.002, 0.3, 0.4, 0.5, 0.6];
@@ -1413,10 +1340,8 @@ mod tests {
         ));
     }
 
-    /// A reflection is orthonormal, so the orthogonality check alone lets it
-    /// through, and Eigen's conversion then turns `diag(-1, 1, 1)` into the
-    /// identity — a camera silently pointing somewhere else. Sophus rejects it
-    /// on the determinant (`Sophus/sophus/so3.hpp:539-540`) and so does this.
+    /// A reflection is orthogonal but has negative determinant. Reject it before
+    /// quaternion conversion can silently change the camera geometry.
     #[test]
     fn catalog_parts_reject_a_reflected_rotation() {
         let mut camera: CameraParts<f64> = a_camera("kb4", vec![0.1; 4]);

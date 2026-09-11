@@ -1,75 +1,22 @@
-//! IMU preintegration: the pseudo-measurement between two frames, its
-//! covariance, its bias Jacobians and the 9-vector residual the estimator
-//! whitens.
+//! IMU preintegration, covariance, bias Jacobians and whitened residuals.
 //!
-//! Ported line by line from
-//! `thirdparty/basalt-headers/include/basalt/imu/preintegration.h` and
-//! `.../imu/imu_types.h`, plus the between-frames accumulation loop in
-//! `src/vi_estimator/sqrt_keypoint_vio.cpp:315-336` and the block that consumes
-//! the result, `include/basalt/linearization/imu_block.hpp`.
+//! The estimator uses midpoint rotation `ΔR exp(½ Δt ω)`, retains `½ a Δt²`
+//! in position, and orders the state `[translation, rotation, velocity]` (D12).
+//! The full state appends gyro and accelerometer biases. Gyro-bias correction
+//! is pre-multiplied, requiring right inverse Jacobians for state blocks and a
+//! left inverse Jacobian for the gyro-bias block. Position residuals include
+//! `−v_i Δt`.
 //!
-//! # basalt is not Forster
+//! Covariance whitening uses guarded pivoted LDLT. Tiny or negative pivots receive
+//! zero weight; singular inputs yield a congruence generalized inverse, not
+//! necessarily a Moore-Penrose inverse. The 9x9 factor is recomputed per request
+//! to avoid interior mutability. Pivot selection precedes column updates.
 //!
-//! basalt cites Forster et al. 2017 and then deviates from it in four ways
-//! (decision D12). Every one of them is reproduced here, because each changes
-//! the numbers:
-//!
-//! 1. **Midpoint rotation** (`preintegration.h:85-88`). Forster Eq. (36) rotates
-//!    the acceleration by the rotation at the *start* of the interval; basalt
-//!    rotates by `ΔR · exp(½ Δt ω)`, an RK2-style midpoint. It propagates into
-//!    `d_next_d_accel` (`:105-106`) and into the `rightJacobianSO3(½ Δt ω)` of
-//!    `d_next_d_gyro` (`:113,116`).
-//! 2. **The position update keeps `½ a Δt²`** (`preintegration.h:93-94`), which
-//!    Paper 1's Eq. (12) drops. That is why `d_next_d_curr(0,3)` is non-zero
-//!    (`:100`) and `d_next_d_accel(0,0)` is `½ R Δt²` (`:105`).
-//! 3. **State ordering is `[translation, rotation, velocity]`**, not Forster's
-//!    `(ΔR, Δv, Δp)`. Provable from the Jacobian block writes, not from any
-//!    comment: `d_next_d_curr(0,6).diagonal() = dt` is `∂p/∂v` (`:98`) and
-//!    `(6,3) = hat(-a_world dt)` is `∂v/∂R` (`:99`). The residual agrees
-//!    (`:217`, `:219`, `:224`), and the 15-vector is
-//!    `[t(3), R(3), v(3), b_g(3), b_a(3)]` — confirmed by the `+9` and `+12`
-//!    column offsets in `imu_block.hpp:57-58`.
-//! 4. **The gyro-bias correction is pre-multiplied**
-//!    (`preintegration.h:219-221`), where Forster Eq. (44) puts it inside the
-//!    transpose on the right. The consequence is two *different* inverse
-//!    Jacobians in one function: [`right_jacobian_inv_so3`] for the state blocks
-//!    (`:228`) and [`left_jacobian_inv_so3`] for the gyro-bias block
-//!    (`:256-257`). Swapping them is a silent bias bug.
-//!
-//! Two more, from the same reading:
-//!
-//! * The inverse covariance is formed through a guarded pivoted LDLT. Pivots
-//!   below the smallest positive normal value get zero weight. For singular
-//!   covariance this is a generalized inverse through congruence, not a
-//!   Moore-Penrose inverse, and it need not annihilate the null space.
-//! * Paper 1's Eq. (20) omits the `− v_i Δt` term. The code has it
-//!   (`preintegration.h:214`) and so does this port.
-//!
-//! # Deviations of this port from the C++
-//!
-//! * **No `mutable` cache on the square-root inverse covariance.** C++ caches it
-//!   behind a dirty flag (`preintegration.h:163`, `:271-274`, `:328-330`);
-//!   [`IntegratedImuMeasurement::get_cov_inv_sqrt`] recomputes the 9x9 LDLT on
-//!   every call instead, which needs no interior mutability and costs a few
-//!   hundred flops against the ~10⁸ the frontend spends on the same frame.
-//! * **The small pivoted LDLT stays local.** It pivots on the original diagonal,
-//!   then updates the selected column. Negative or tiny pivots get zero weight
-//!   during whitening, which keeps degenerate covariance finite.
-//! * **Jacobians are all-or-nothing.** C++ takes four nullable out-pointers;
-//!   every in-tree caller either asks for all of them or none
-//!   (`imu_block.hpp:41-48`), so the port has one plain method and one
-//!   `_with_jacobians` method.
-//! * **`predict_state` sets the timestamp.** `preintegration.h:174-181` never
-//!   writes `state1.t_ns`, so the frontend's long-lived `predicted_state` keeps
-//!   whatever it held before (`frame_to_frame_optical_flow.h:149`). The port
-//!   returns a fresh state and fills in `state0.t_ns + dt_ns`.
-//! * **Gravity initialization uses a closed-form cross-product axis.**
-//! * **Asserts become typed errors or tests.** `propagateState` asserts
-//!   `data.t_ns > curr_state.t_ns` (`preintegration.h:79-80`); here that is
-//!   [`ImuError::NonMonotonicSample`] (decision D32). The residual's
-//!   `BASALT_ASSERT(ba_diff.segment<3>(3).isApproxToConstant(0))` (`:211`) holds
-//!   structurally — `d_next_d_accel` has no rotation rows and `F`'s rotation
-//!   rows are `[0 I 0]` — so it is a test, not a runtime check.
+//! Callers request all Jacobians or none. Prediction returns a fresh state with
+//! an updated timestamp, and gravity initialization uses a cross-product axis.
+//! Non-monotonic samples return typed errors (D32). Accelerometer bias cannot
+//! change delta rotation because its input Jacobian has zero rotation rows and
+//! the transition's rotation rows are `[0 I 0]`; tests enforce this identity.
 
 use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, Vector3};
 
@@ -82,9 +29,8 @@ use crate::types::{
 };
 
 /// Where the gyroscope bias starts inside a 15-vector state block: the `+9` of
-/// `imu_block.hpp:57`.
 const BIAS_GYRO_OFFSET: usize = POSE_VEL_SIZE;
-/// Where the accelerometer bias starts: the `+12` of `imu_block.hpp:58`.
+/// Accelerometer bias starts at offset 12 in the full state.
 const BIAS_ACCEL_OFFSET: usize = POSE_VEL_SIZE + 3;
 
 /// A `Vector3<f64>` in the measurement's scalar type.
@@ -102,22 +48,14 @@ pub type Matrix9x6<S> = SMatrix<S, POSE_VEL_SIZE, 6>;
 /// The IMU block's Jacobian: 15 rows over the two 15-column states.
 pub type Matrix15x30<S> = SMatrix<S, POSE_VEL_BIAS_SIZE, { 2 * POSE_VEL_BIAS_SIZE }>;
 
-/// Gravity in the world frame, `basalt::constants::g`
-/// (`include/basalt/utils/imu_types.h:63`).
+/// Gravity in the world frame.
 pub fn gravity<S: LieScalar>() -> Vector3<S> {
     Vector3::new(S::zero(), S::zero(), c::<S>(-9.81))
 }
 
-/// One timestamped gyroscope and accelerometer reading, `basalt::ImuData`
-/// (`imu_types.h:244-273`).
-///
-/// `f64` regardless of the estimator's scalar: timestamps are nanoseconds and
-/// IMU integration runs in double (decision D05), exactly as basalt's frontend
-/// does with its `IntegratedImuMeasurement<double>`
-/// (`frame_to_frame_optical_flow.h:142`). The samples are already through the
-/// static IMU calibration — `calib.calib_accel_bias.getCalibrated(...)`
-/// (`sqrt_keypoint_vio.cpp:235-236`) — and carry no bias correction; that
-/// happens at the linearization point inside [`IntegratedImuMeasurement::integrate`].
+/// Timestamped gyroscope and accelerometer reading stored in f64.
+/// Samples have static calibration applied. Linearization-point bias correction
+/// occurs during integration.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ImuSample {
     /// Timestamp of the sample, in nanoseconds.
@@ -128,11 +66,8 @@ pub struct ImuSample {
     pub accel: Vector3<f64>,
 }
 
-/// The two diagonal noise covariances `integrate` needs.
-///
-/// basalt squares the *discrete-time* noise densities
-/// (`sqrt_keypoint_vio.cpp:228-229`), which are the continuous ones scaled by
-/// `sqrt(imu_update_rate)` (`calibration.hpp:190,196`).
+/// Diagonal noise covariances: square continuous-time densities after multiplying
+/// by `sqrt(imu_update_rate)` to obtain discrete-time densities.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImuNoise<S: LieScalar> {
     /// Diagonal of the accelerometer noise covariance.
@@ -143,7 +78,6 @@ pub struct ImuNoise<S: LieScalar> {
 
 impl<S: LieScalar> ImuNoise<S> {
     /// The noise the estimator builds from a calibration
-    /// (`sqrt_keypoint_vio.cpp:228-229`).
     pub fn from_calibration(calib: &Calibration<S>) -> Self {
         Self {
             accel_cov: calib
@@ -156,18 +90,11 @@ impl<S: LieScalar> ImuNoise<S> {
     }
 }
 
-/// What the preintegration refuses to do.
-///
-/// The core never panics on data (decision D32): every ordering violation the
-/// C++ handles with `BASALT_ASSERT` or by breaking out of the processing loop is
-/// a value here.
+/// Typed preintegration failures; invalid data must not panic (D32).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ImuError {
-    /// A sample does not strictly follow the integrated interval.
-    ///
-    /// `propagateState` asserts `data.t_ns > curr_state.t_ns`
-    /// (`preintegration.h:79-80`); a duplicate timestamp is a zero `dt`, which
-    /// makes the whole measurement singular.
+    /// A sample fails to strictly follow the integrated interval. Duplicate timestamps
+    /// would give zero duration and a singular measurement.
     #[error("imu sample at {t_ns} ns does not follow the integrated state at {previous_t_ns} ns")]
     NonMonotonicSample {
         /// End of what has been integrated so far, relative to the start time.
@@ -177,7 +104,7 @@ pub enum ImuError {
     },
     /// Two frame timestamps that are equal or go backwards.
     ///
-    /// `sqrt_keypoint_vio.cpp:307-313` asserts both of these separately, and its
+    ///  asserts both of these separately, and its
     /// message says a zero time delta "leads to invalid IMU integration".
     #[error("frame interval [{t0_ns}, {t1_ns}] ns is empty or reversed")]
     NonMonotonicFrames {
@@ -186,11 +113,7 @@ pub enum ImuError {
         /// Timestamp of the current frame.
         t1_ns: i64,
     },
-    /// The interval does not start where the measurement was constructed.
-    ///
-    /// C++ cannot get this wrong: `measure()` builds the measurement with
-    /// `prev_frame->t_ns` and then integrates from that same variable
-    /// (`sqrt_keypoint_vio.cpp:304`, `:315`).
+    /// The requested interval starts at a different time from the measurement.
     #[error("interval starts at {t0_ns} ns but the measurement starts at {start_t_ns} ns")]
     StartTimeMismatch {
         /// Start time the measurement was constructed with.
@@ -198,10 +121,7 @@ pub enum ImuError {
         /// Start of the interval the caller asked for.
         t0_ns: i64,
     },
-    /// The interval cannot be closed because no sample follows the frame.
-    ///
-    /// basalt reaches the same state and ends the estimator: `if (!data.get())
-    /// break;` inside the closing step (`sqrt_keypoint_vio.cpp:331`).
+    /// No sample follows the frame to close the integration interval.
     #[error("no imu sample after {t1_ns} ns to close the interval with")]
     MissingSampleAfterFrame {
         /// Timestamp the interval had to reach.
@@ -218,7 +138,7 @@ pub enum ImuError {
 }
 
 /// The three Jacobians of one propagation step
-/// (`preintegration.h:96-119`, `F`, `A` and `G` at `:154-158`).
+/// (`F`, `A` and `G` at ).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PropagationJacobians<S: LieScalar> {
     /// `F = ∂next/∂curr`, Paper 1 Eq. (13)'s `J_f^s`.
@@ -229,28 +149,20 @@ pub struct PropagationJacobians<S: LieScalar> {
     pub d_next_d_gyro: Matrix9x3<S>,
 }
 
-/// The residual's Jacobians (`preintegration.h:227-258`).
+/// The residual's Jacobians.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImuResidualJacobians<S: LieScalar> {
-    /// `∂r/∂state0` (`preintegration.h:230-239`).
+    /// `∂r/∂state0`.
     pub d_res_d_state0: Matrix9<S>,
-    /// `∂r/∂state1` (`preintegration.h:241-247`).
+    /// `∂r/∂state1`.
     pub d_res_d_state1: Matrix9<S>,
-    /// `∂r/∂[b_g, b_a]`: gyro bias in columns 0-2, accel bias in columns 3-5.
-    ///
-    /// C++ returns the two 9x3 blocks separately and the block writes them to
-    /// `start_idx + 9` and `start_idx + 12` (`imu_block.hpp:57-58`), which is
-    /// this layout — the bias half of the 15-vector
-    /// `[t(3), R(3), v(3), b_g(3), b_a(3)]`.
+    /// Bias Jacobian: gyro bias in columns 0–2, accelerometer bias in columns 3–5.
+    /// These occupy offsets 9 and 12 of the full `[t, R, v, b_g, b_a]` state.
     pub d_res_d_bias: Matrix9x6<S>,
 }
 
-/// A pseudo-measurement built from consecutive IMU samples,
-/// `basalt::IntegratedImuMeasurement` (`preintegration.h:49-335`).
-///
-/// The delta state's `t_ns` is elapsed nanoseconds since [`Self::get_start_t_ns`],
-/// not absolute time: `integrate` subtracts the start time from every sample
-/// (`preintegration.h:148`).
+/// A pseudo-measurement from consecutive IMU samples.
+/// Delta time is elapsed nanoseconds from [`Self::get_start_t_ns`], not absolute time.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IntegratedImuMeasurement<S: LieScalar> {
     start_t_ns: i64,
@@ -263,7 +175,7 @@ pub struct IntegratedImuMeasurement<S: LieScalar> {
 }
 
 impl<S: LieScalar> Default for IntegratedImuMeasurement<S> {
-    /// `preintegration.h:123-130`: everything zero, start time zero.
+    /// everything zero, start time zero.
     fn default() -> Self {
         Self::new(0, &Vector3::zeros(), &Vector3::zeros())
     }
@@ -275,7 +187,7 @@ pub type Popped<S> = (i64, Vector3<S>, Vector3<S>);
 
 impl<S: LieScalar> IntegratedImuMeasurement<S> {
     /// An empty measurement starting at `start_t_ns`, linearized about the two
-    /// biases (`preintegration.h:133-139`).
+    /// biases.
     pub fn new(start_t_ns: i64, bias_gyro: &Vector3<S>, bias_accel: &Vector3<S>) -> Self {
         Self {
             start_t_ns,
@@ -288,21 +200,15 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
         }
     }
 
-    /// Propagate one state by one bias-corrected sample, with the three
-    /// Jacobians (`preintegration.h:76-120`, `propagateState`).
-    ///
-    /// `t_ns`, `accel` and `gyro` are C++'s `data` after the correction at
-    /// `:147-150`: the timestamp is relative to the measurement's start and the
-    /// biases are already removed. All three Jacobians are always computed
-    /// because every caller in the C++ asks for all three (`:158`).
+    /// Propagate one state with a bias-corrected sample and compute all three Jacobians.
+    /// The timestamp is relative to the measurement start; biases are already removed.
     pub fn propagate_state(
         curr_state: &PoseVelState<S>,
         t_ns: i64,
         accel: &Vector3<S>,
         gyro: &Vector3<S>,
     ) -> Result<(PoseVelState<S>, PropagationJacobians<S>), ImuError> {
-        // `:79-80` is an assert in C++; here it is the error that keeps a
-        // duplicate or reordered sample from producing a singular measurement.
+        // Refuse duplicate or reordered samples before they create a singular measurement.
         if t_ns <= curr_state.t_ns {
             return Err(ImuError::NonMonotonicSample {
                 previous_t_ns: curr_state.t_ns,
@@ -329,12 +235,12 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
             vel_w_i: curr_state.vel_w_i + accel_world * dt, // `:92`
         };
         next_state.t_w_i.rotation = curr_state.t_w_i.rotation * So3::exp(&(*gyro * dt)); // `:91`
-        // `:93-94`, deviation 2: the quadratic term stays.
+        // deviation 2: the quadratic term stays.
         next_state.t_w_i.translation = curr_state.t_w_i.translation
             + curr_state.vel_w_i * dt
             + accel_world * c::<S>(0.5) * dt * dt;
 
-        // `:96-101`. Only the *diagonal* of the (0,6) block is set, so the port
+        // Only the *diagonal* of the (0,6) block is set, so the port
         // writes three entries rather than a scaled identity.
         let mut d_next_d_curr: Matrix9<S> = Matrix9::identity();
         for i in 0..3 {
@@ -348,7 +254,6 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
             .fixed_view_mut::<3, 3>(0, 3)
             .copy_from(&(hat_accel_dt * dt * c::<S>(0.5)));
 
-        // `:103-107`
         let mut d_next_d_accel: Matrix9x3<S> = Matrix9x3::zeros();
         d_next_d_accel
             .fixed_view_mut::<3, 3>(0, 0)
@@ -357,7 +262,6 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
             .fixed_view_mut::<3, 3>(6, 0)
             .copy_from(&(rr_w_i_new_2 * dt));
 
-        // `:109-119`
         let mut d_next_d_gyro: Matrix9x3<S> = Matrix9x3::zeros();
         let jr: Matrix3<S> = right_jacobian_so3(&(*gyro * dt));
         let jr2: Matrix3<S> = right_jacobian_so3(&(*gyro * (c::<S>(0.5) * dt)));
@@ -382,7 +286,7 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
         ))
     }
 
-    /// Fold one sample into the measurement (`preintegration.h:146-167`).
+    /// Fold one sample into the measurement.
     ///
     /// `accel_cov` and `gyro_cov` are the diagonals of the discrete-time noise
     /// covariances. Nothing here allocates: every matrix is a fixed-size
@@ -406,7 +310,7 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
     ///
     /// The backend needs this: `popFromImuDataQueue` casts to `Scalar`
     /// **before** `calib_accel_bias.getCalibrated` runs
-    /// (`sqrt_keypoint_vio.cpp:377-390`, `:298-299`), so the static bias
+    /// so the static bias
     /// calibration of an `f32` estimator happens in `f32`. Calibrating in `f64`
     /// and casting afterwards is a different number.
     ///
@@ -421,7 +325,7 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
         accel_cov: &Vector3<S>,
         gyro_cov: &Vector3<S>,
     ) -> Result<(), ImuError> {
-        // `:147-150`: relative time, bias removed at the linearization point.
+        // relative time, bias removed at the linearization point.
         let t_ns: i64 =
             sample_t_ns
                 .checked_sub(self.start_t_ns)
@@ -436,53 +340,29 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
             Self::propagate_state(&self.delta_state, t_ns, &accel, &gyro)?; // `:158`
 
         self.delta_state = new_state; // `:160`
-        // `:161-162`, Paper 1 Eq. (21).
+        // Paper 1 Eq. (21).
         self.cov = j.d_next_d_curr * self.cov * j.d_next_d_curr.transpose()
             + j.d_next_d_accel * Matrix3::from_diagonal(accel_cov) * j.d_next_d_accel.transpose()
             + j.d_next_d_gyro * Matrix3::from_diagonal(gyro_cov) * j.d_next_d_gyro.transpose();
-        // `:165-166`, Paper 1 Eqs. (15)-(16).
+        // Paper 1 Eqs. (15)-(16).
         self.d_state_d_ba = -j.d_next_d_accel + j.d_next_d_curr * self.d_state_d_ba;
         self.d_state_d_bg = -j.d_next_d_gyro + j.d_next_d_curr * self.d_state_d_bg;
         Ok(())
     }
 
-    /// Accumulate every sample that belongs between two frames, exactly as
-    /// `measure()`'s producer loop does (`sqrt_keypoint_vio.cpp:315-336`).
+    /// Accumulate samples over one frame interval.
+    /// Skip samples at or before `skip_past_ns`, then integrate through `until_ns`.
+    /// If the interval remains short, retime the first later sample to the boundary
+    /// and integrate its own values, without interpolation. Return that pending
+    /// sample at its original timestamp for the next frame.
     ///
-    /// The three parts, in order:
-    ///
-    /// 1. Skip while `sample.t_ns <= skip_past_ns` (`:315-320`).
-    /// 2. Integrate while `sample.t_ns <= until_ns` (`:322-328`).
-    /// 3. If the accumulated interval still ends before `until_ns`, take the
-    ///    first sample *after* it, **retime that sample to `until_ns` and
-    ///    integrate it with its own accel and gyro** (`:330-336`, and the same
-    ///    code with the comment "Pretend last IMU sample before now happened
-    ///    now" at `frame_to_frame_optical_flow.h:194-198`). There is **no
-    ///    interpolation**: the values integrated over that last partial step are
-    ///    the later sample's, not a blend. The port does none either. basalt
-    ///    restores the timestamp afterwards, so the sample is still available to
-    ///    the next frame at its own time — which is why it comes back out.
-    ///
-    /// `pending` is the one sample already popped, C++'s loop-local `data`
-    /// (`:296`); it is taken by value and the new one returned, so the caller's
-    /// own `&mut self` is free for `pop`. An empty `pending` is primed from
-    /// `pop` first, as both call sites did inline.
-    ///
-    /// **Both producers drive this**: the estimator's own preintegration and
-    /// the second, independent one the frontend keeps (D24). They differ only
-    /// in where the samples come from and in the noise, which is what `pop` and
-    /// `noise` are; the per-sample arithmetic is
-    /// [`Self::integrate_calibrated`] either way.
+    /// Both frontend and estimator preintegrators use this loop (D24), with their
+    /// own sample source and noise model. Passing pending state by value leaves
+    /// the caller free to mutate its queue through `pop`.
     ///
     /// # Errors
-    ///
-    /// [`ImuError::NonMonotonicFrames`] on an empty or reversed frame gap,
-    /// [`ImuError::StartTimeMismatch`] when `skip_past_ns` is not the time the
-    /// measurement was built with, [`ImuError::MissingSampleAfterFrame`] when
-    /// nothing follows the frame to close the interval with, and whatever
-    /// [`Self::integrate_calibrated`] refuses. Both live producers precheck a
-    /// sample strictly after the frame, so none of these can fire on the
-    /// shipped path.
+    /// Refuse reversed intervals, a mismatched start time, missing closing samples
+    /// or any input rejected by [`Self::integrate_calibrated`].
     pub fn accumulate_to(
         &mut self,
         pending: Option<Popped<S>>,
@@ -491,7 +371,7 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
         until_ns: i64,
         noise: &ImuNoise<S>,
     ) -> Result<Option<Popped<S>>, ImuError> {
-        // `:307-313`: the frame gap is what the measurement integrates over, so
+        // the frame gap is what the measurement integrates over, so
         // an empty or reversed one has no measurement.
         if until_ns <= skip_past_ns {
             return Err(ImuError::NonMonotonicFrames {
@@ -499,7 +379,7 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
                 t1_ns: until_ns,
             });
         }
-        // `:304` builds the measurement with `prev_frame->t_ns` and `:315`
+        //  builds the measurement with `prev_frame->t_ns` and
         // skips past that same variable. Any other origin times every sample
         // against a start the measurement does not have.
         if skip_past_ns != self.start_t_ns {
@@ -511,14 +391,14 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
 
         let mut pending: Option<Popped<S>> = pending.or_else(&mut pop);
 
-        // `:315-320`: discard everything at or before the previous frameset.
+        // discard everything at or before the previous frameset.
         while let Some((t_ns, _, _)) = pending {
             if t_ns > skip_past_ns {
                 break;
             }
             pending = pop();
         }
-        // `:322-328`: integrate everything up to and including the frameset.
+        // integrate everything up to and including the frameset.
         while let Some((t_ns, gyro, accel)) = pending {
             if t_ns > until_ns {
                 break;
@@ -526,10 +406,7 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
             self.integrate_calibrated(t_ns, &accel, &gyro, &noise.accel_cov, &noise.gyro_cov)?;
             pending = pop();
         }
-        // `:330-336`: close the interval exactly on the frameset. basalt ends
-        // the estimator when its queue is dry here (`if (!data.get()) break;`);
-        // a measurement that stops short of the frame is silently wrong, so it
-        // is refused instead of returned.
+        // A measurement stopping before the frame is invalid; require a closing sample.
         if self.start_t_ns + self.get_dt_ns() < until_ns {
             let Some((_, gyro, accel)) = pending else {
                 return Err(ImuError::MissingSampleAfterFrame { t1_ns: until_ns });
@@ -539,7 +416,7 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
         Ok(pending)
     }
 
-    /// Predict the state at the end of the interval (`preintegration.h:174-181`).
+    /// Predict the state at the end of the interval.
     ///
     /// **Unchecked precondition:** `state0` is the state at
     /// [`Self::get_start_t_ns`]. The delta this applies is relative to that
@@ -549,21 +426,19 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
     /// stands still while the motion still applies. Both callers hold the
     /// precondition by construction and neither reads the timestamp: the
     /// estimator files the predicted state under the frameset's own `t_ns`
-    /// (`:427-441`) and the frontend takes only the pose
-    /// (`frame_to_frame_optical_flow.h:149`). Checking it would make this
+    ///  and the frontend takes only the pose
+    /// Checking it would make this
     /// fallible on the LM path for a value nothing there reads, which is the
     /// review follow-up rather than this fix round.
     pub fn predict_state(&self, state0: &PoseVelState<S>, g: &Vector3<S>) -> PoseVelState<S> {
         let dt: S = c::<S>(self.delta_state.t_ns as f64) * c::<S>(1e-9); // `:175`
         let mut state1: PoseVelState<S> = PoseVelState {
-            // C++ never writes `t_ns` here; see the module deviations.
+            // Advance the predicted timestamp by the integrated duration.
             t_ns: state0.t_ns.saturating_add(self.delta_state.t_ns),
             t_w_i: state0.t_w_i,
-            // `:178`
             vel_w_i: state0.vel_w_i + *g * dt + state0.t_w_i.rotation * self.delta_state.vel_w_i,
         };
         state1.t_w_i.rotation = state0.t_w_i.rotation * self.delta_state.t_w_i.rotation; // `:177`
-        // `:179-180`
         state1.t_w_i.translation = state0.t_w_i.translation
             + state0.vel_w_i * dt
             + *g * c::<S>(0.5) * dt * dt
@@ -571,7 +446,7 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
         state1
     }
 
-    /// The 9-vector residual between two states (`preintegration.h:200-261`).
+    /// The 9-vector residual between two states.
     ///
     /// Ordered `[translation(3), rotation(3), velocity(3)]` (deviation 3).
     pub fn residual(
@@ -585,7 +460,7 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
         self.residual_parts(state0, g, state1, curr_bg, curr_ba).0
     }
 
-    /// [`Self::residual`] plus the three Jacobians (`preintegration.h:227-258`).
+    /// [`Self::residual`] plus the three Jacobians.
     pub fn residual_with_jacobians(
         &self,
         state0: &PoseVelState<S>,
@@ -600,7 +475,6 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
         let res_rot: Vector3<S> = res.fixed_rows::<3>(3).into_owned();
         let j: Matrix3<S> = right_jacobian_inv_so3(&res_rot); // `:228`
 
-        // `:230-239`
         let mut d_res_d_state0: Matrix9<S> = Matrix9::zeros();
         d_res_d_state0
             .fixed_view_mut::<3, 3>(0, 0)
@@ -621,7 +495,6 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
             .fixed_view_mut::<3, 3>(6, 6)
             .copy_from(&-r0_inv);
 
-        // `:241-247`
         let mut d_res_d_state1: Matrix9<S> = Matrix9::zeros();
         d_res_d_state1
             .fixed_view_mut::<3, 3>(0, 0)
@@ -633,8 +506,8 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
             .fixed_view_mut::<3, 3>(6, 6)
             .copy_from(&r0_inv);
 
-        // `:250-258`. The gyro half is `-d_state_d_bg` with its rotation rows
-        // *replaced* — note the missing minus sign there, which is basalt's.
+        // Gyro-bias columns start as `-d_state_d_bg`, then replace the rotation rows
+        // with the rotation correction Jacobian, without that minus sign.
         let mut d_res_d_bias: Matrix9x6<S> = Matrix9x6::zeros();
         d_res_d_bias
             .fixed_view_mut::<9, 3>(0, 0)
@@ -658,8 +531,8 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
     }
 
     /// The residual and the four intermediates its Jacobians reuse:
-    /// `R0_inv` (`preintegration.h:213`), `tmp` (`:214`), `tmp2` (`:223`) and
-    /// `dt` (`:203`).
+    /// `R0_inv`, `tmp`, `tmp2` and
+    /// `dt`.
     fn residual_parts(
         &self,
         state0: &PoseVelState<S>,
@@ -670,29 +543,27 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
     ) -> (Vector9<S>, Matrix3<S>, Vector3<S>, Vector3<S>, S) {
         let dt: S = c::<S>(self.delta_state.t_ns as f64) * c::<S>(1e-9); // `:203`
 
-        // `:208-209`, Paper 1 Eq. (17).
+        // Paper 1 Eq. (17).
         let bg_diff: Vector9<S> = self.d_state_d_bg * (curr_bg - self.bias_gyro_lin);
         let ba_diff: Vector9<S> = self.d_state_d_ba * (curr_ba - self.bias_accel_lin);
 
         let r0_inv: Matrix3<S> = state0.t_w_i.rotation.inverse().matrix(); // `:213`
-        // `:214-215`. The `− vel * dt` term is the one Paper 1's Eq. (20) omits.
+        // The `− vel * dt` term is the one Paper 1's Eq. (20) omits.
         let tmp: Vector3<S> = r0_inv
             * (state1.t_w_i.translation
                 - state0.t_w_i.translation
                 - state0.vel_w_i * dt
                 - *g * c::<S>(0.5) * dt * dt);
-        // `:223`
         let tmp2: Vector3<S> = r0_inv * (state1.vel_w_i - state0.vel_w_i - *g * dt);
 
         let mut res: Vector9<S> = Vector9::zeros();
-        // `:217-218`
         res.fixed_rows_mut::<3>(0).copy_from(
             &(tmp
                 - (self.delta_state.t_w_i.translation
                     + bg_diff.fixed_rows::<3>(0)
                     + ba_diff.fixed_rows::<3>(0))),
         );
-        // `:219-221`, deviation 4: the gyro-bias correction is pre-multiplied.
+        // deviation 4: the gyro-bias correction is pre-multiplied.
         res.fixed_rows_mut::<3>(3).copy_from(
             &(So3::exp(&bg_diff.fixed_rows::<3>(3).into_owned())
                 * self.delta_state.t_w_i.rotation
@@ -700,7 +571,6 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
                 * state0.t_w_i.rotation)
                 .log(),
         );
-        // `:224-225`
         res.fixed_rows_mut::<3>(6).copy_from(
             &(tmp2
                 - (self.delta_state.vel_w_i
@@ -711,34 +581,32 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
         (res, r0_inv, tmp, tmp2, dt)
     }
 
-    /// Elapsed time of the measurement, in nanoseconds (`preintegration.h:264`).
+    /// Elapsed time of the measurement, in nanoseconds.
     pub fn get_dt_ns(&self) -> i64 {
         self.delta_state.t_ns
     }
 
-    /// Start time of the measurement, in nanoseconds (`preintegration.h:267`).
+    /// Start time of the measurement, in nanoseconds.
     pub fn get_start_t_ns(&self) -> i64 {
         self.start_t_ns
     }
 
-    /// The preintegrated delta state (`preintegration.h:294`).
+    /// The preintegrated delta state.
     pub fn get_delta_state(&self) -> &PoseVelState<S> {
         &self.delta_state
     }
 
-    /// The measurement covariance (`preintegration.h:290`).
+    /// The measurement covariance.
     pub fn get_cov(&self) -> &Matrix9<S> {
         &self.cov
     }
 
     /// Jacobian of the delta state with respect to the accelerometer bias
-    /// (`preintegration.h:297`).
     pub fn get_d_state_d_ba(&self) -> &Matrix9x3<S> {
         &self.d_state_d_ba
     }
 
     /// Jacobian of the delta state with respect to the gyroscope bias
-    /// (`preintegration.h:300`).
     pub fn get_d_state_d_bg(&self) -> &Matrix9x3<S> {
         &self.d_state_d_bg
     }
@@ -749,7 +617,6 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
     /// finite, zero weight in those factor coordinates. The singular result is
     /// a generalized inverse through congruence, not a Moore-Penrose inverse.
     pub fn get_cov_inv_sqrt(&self) -> Matrix9<S> {
-        // `:306-307`
         let mut mat: Matrix9<S> = self.cov;
         let transpositions: [usize; POSE_VEL_SIZE] = ldlt_in_place(&mut mat);
 
@@ -760,7 +627,7 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
                 m.swap_rows(k, pivot);
             }
         }
-        // `:310`: `matrixL()` is a *unit* lower triangular view, so the stored
+        // `matrixL()` is a *unit* lower triangular view, so the stored
         // diagonal (which holds D) is not read here.
         for i in 0..POSE_VEL_SIZE {
             for k in 0..i {
@@ -771,7 +638,7 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
                 }
             }
         }
-        // `:312-320`. The comparison is against
+        // The comparison is against
         // `std::numeric_limits<Scalar>::min()`, so a *negative* pivot — what a
         // rank-deficient covariance actually produces, see [`ldlt_in_place`] —
         // zeroes its row rather than taking the square root of a negative.
@@ -788,7 +655,7 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
         m
     }
 
-    /// The inverse covariance, `Mᵀ M` (`preintegration.h:270-277`).
+    /// The inverse covariance, `Mᵀ M`.
     pub fn get_cov_inv(&self) -> Matrix9<S> {
         let m: Matrix9<S> = self.get_cov_inv_sqrt();
         m.transpose() * m
@@ -800,7 +667,6 @@ impl<S: LieScalar> IntegratedImuMeasurement<S> {
 static ANTIPARALLEL_WARNING: std::sync::Once = std::sync::Once::new();
 
 /// The initial orientation from one accelerometer sample
-/// (`src/vi_estimator/sqrt_keypoint_vio.cpp:277-278`).
 ///
 /// Align measured specific force with world +Z. Only roll and pitch are
 /// observable. Near antiparallel inputs use a cross-product axis orthogonal
@@ -838,7 +704,6 @@ pub fn gravity_from_first_accel<S: LieScalar>(accel: &Vector3<S>) -> So3<S> {
         return So3::from_unit_quaternion(nalgebra::UnitQuaternion::new_normalize(quaternion));
     }
 
-    // `:719-723`
     let axis: Vector3<S> = v0.cross(&v1);
     let s: S = ((S::one() + dot) * c::<S>(2.0)).sqrt();
     let inv_s: S = S::one() / s;
@@ -885,7 +750,7 @@ fn ldlt_in_place<S: LieScalar>(mat: &mut Matrix9<S>) -> [usize; POSE_VEL_SIZE] {
     let mut transpositions: [usize; POSE_VEL_SIZE] = [0; POSE_VEL_SIZE];
 
     for k in 0..size {
-        // `:305-307`. `maxCoeff` keeps the *first* maximum, so the comparison
+        // `maxCoeff` keeps the *first* maximum, so the comparison
         // has to be strict.
         let mut pivot: usize = k;
         for i in (k + 1)..size {
@@ -896,7 +761,7 @@ fn ldlt_in_place<S: LieScalar>(mat: &mut Matrix9<S>) -> [usize; POSE_VEL_SIZE] {
         transpositions[k] = pivot;
 
         if pivot != k {
-            // `:313-321`: a symmetric swap written to keep only the lower
+            // a symmetric swap written to keep only the lower
             // triangle valid, which is all the rest of the algorithm reads.
             for column in 0..k {
                 let swapped: S = mat[(k, column)];
@@ -918,7 +783,7 @@ fn ldlt_in_place<S: LieScalar>(mat: &mut Matrix9<S>) -> [usize; POSE_VEL_SIZE] {
             }
         }
 
-        // `:330-339`: the delayed update. Column `k` is brought up to date from
+        // the delayed update. Column `k` is brought up to date from
         // the columns already factorized; the trailing diagonal is not touched.
         let rs: usize = size - k - 1;
         if k > 0 {
@@ -947,7 +812,7 @@ fn ldlt_in_place<S: LieScalar>(mat: &mut Matrix9<S>) -> [usize; POSE_VEL_SIZE] {
         let pivot_is_valid: bool = real_akk.abs() > S::zero();
 
         if k == 0 && !pivot_is_valid {
-            // `:348-357`: the whole diagonal is zero, so there is nothing left
+            // the whole diagonal is zero, so there is nothing left
             // to do but fill in the identity transpositions. The empty
             // measurement takes this branch and whitens to zero.
             for (j, entry) in transpositions.iter_mut().enumerate() {
@@ -965,47 +830,37 @@ fn ldlt_in_place<S: LieScalar>(mat: &mut Matrix9<S>) -> [usize; POSE_VEL_SIZE] {
     transpositions
 }
 
-/// The linearization point the IMU block needs, `basalt::ImuLinData`
-/// (`include/basalt/utils/imu_types.h:306-315`).
+/// Linearization inputs for an IMU factor.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImuLinData<S: LieScalar> {
     /// Gravity in the world frame.
     pub g: Vector3<S>,
     /// `1 / gyro_bias_std`, the square-root weight of the gyro random walk
-    /// (`sqrt_keypoint_vio.cpp:107-108`).
     pub gyro_bias_weight_sqrt: Vector3<S>,
     /// `1 / accel_bias_std`, the same for the accelerometer.
     pub accel_bias_weight_sqrt: Vector3<S>,
 }
 
-/// One linearized IMU factor: 15 whitened rows over two 15-column states.
-///
-/// A partial port of `basalt::ImuBlock` (`include/basalt/linearization/imu_block.hpp`)
-/// — enough to show how the residual and its Jacobians are consumed. The parts
-/// that belong to the square-root linearizer (`add_dense_Q2Jp_Q2r`,
-/// `scaleJp_cols`, `addJp_diag2`, `backSubstitute`) land with that stage.
-///
-/// Rows 0-8 are the whitened preintegration residual, rows 9-11 the gyro-bias
-/// random walk and rows 12-14 the accel-bias random walk. Columns 0-14 belong to
-/// the start state and 15-29 to the end state.
+/// An IMU factor with 15 whitened rows over two 15-column states.
+/// Rows 0–8 are preintegration, 9–11 gyro-bias random walk, and 12–14
+/// accelerometer-bias random walk. Start-state columns precede end-state columns.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImuBlock<S: LieScalar> {
-    /// `Jp` (`imu_block.hpp:21`, `:54-79`).
+    /// `Jp`.
     pub jp: Matrix15x30<S>,
-    /// `r` (`imu_block.hpp:22`, `:60-81`).
+    /// `r`.
     pub r: Vector15<S>,
     /// What `linearizeImu` returns: `imu_error + bg_error + ba_error`
-    /// (`imu_block.hpp:85`).
     pub error: S,
 }
 
 impl<S: LieScalar> ImuBlock<S> {
-    /// `ImuBlock::linearizeImu` (`imu_block.hpp:25-86`).
+    /// `ImuBlock::linearizeImu`.
     ///
     /// The residual is evaluated at the *linearized* states together with its
-    /// Jacobians (`:41-43`) and then, if either state has a frozen linearization
+    /// Jacobians and then, if either state has a frozen linearization
     /// point, re-evaluated at the current states for its **value only**
-    /// (`:45-48`). Skipping that second evaluation is trap 7 of the architecture
+    /// Skipping that second evaluation is trap 7 of the architecture
     /// dossier: it drifts rather than fails.
     pub fn linearize(
         meas: &IntegratedImuMeasurement<S>,
@@ -1056,7 +911,6 @@ impl<S: LieScalar> ImuBlock<S> {
         let dt: S = c::<S>(meas.get_dt_ns() as f64) * c::<S>(1e-9); // `:63`
         let sqrt_dt: S = dt.sqrt();
 
-        // `:65-73`
         let gyro_bias_weight_dt: Vector3<S> = lin_data.gyro_bias_weight_sqrt / sqrt_dt;
         let res_bg: Vector3<S> = start_state.state().bias_gyro - end_state.state().bias_gyro;
         jp.fixed_view_mut::<3, 3>(9, start_idx + BIAS_GYRO_OFFSET)
@@ -1067,7 +921,6 @@ impl<S: LieScalar> ImuBlock<S> {
         r.fixed_rows_mut::<3>(9).copy_from(&weighted_bg);
         let bg_error: S = c::<S>(0.5) * weighted_bg.norm_squared();
 
-        // `:75-83`
         let accel_bias_weight_dt: Vector3<S> = lin_data.accel_bias_weight_sqrt / sqrt_dt;
         let res_ba: Vector3<S> = start_state.state().bias_accel - end_state.state().bias_accel;
         jp.fixed_view_mut::<3, 3>(12, start_idx + BIAS_ACCEL_OFFSET)
@@ -1085,12 +938,8 @@ impl<S: LieScalar> ImuBlock<S> {
         }
     }
 
-    /// Scatter `JᵀJ` and `Jᵀr` into a dense Hessian and gradient
-    /// (`imu_block.hpp:104-129`).
-    ///
-    /// `start_idx` and `end_idx` are the two states' offsets in the stacked
-    /// state vector, which C++ reads from the `AbsOrderMap`. Out-of-range
-    /// offsets are ignored rather than panicking (decision D32).
+    /// Scatter `JᵀJ` and `Jᵀr` at the supplied start/end state offsets.
+    /// Out-of-range offsets are ignored instead of panicking (D32).
     pub fn add_dense_h_b(
         &self,
         start_idx: usize,
@@ -1128,12 +977,12 @@ impl<S: LieScalar> ImuBlock<S> {
     }
 
     /// Scatter the 15 whitened rows into the stacked square-root system,
-    /// `add_dense_Q2Jp_Q2r` (`imu_block.hpp:88-102`).
+    /// `add_dense_Q2Jp_Q2r`.
     ///
     /// `row_start_idx` is where this interval's rows begin; the driver advances
     /// it by `POSE_VEL_BIAS_SIZE` per interval
-    /// (`linearization_abs_qr.cpp:496-502`). Both column blocks are **added**,
-    /// not assigned (`:95-101`), which matters only if two intervals were ever
+    /// Both column blocks are **added**,
+    /// not assigned, which matters only if two intervals were ever
     /// given the same rows.
     ///
     /// Out-of-range offsets are ignored rather than panicking (decision D32),
@@ -1169,12 +1018,11 @@ impl<S: LieScalar> ImuBlock<S> {
     }
 
     /// This factor's share of the model cost change, `backSubstitute`
-    /// (`imu_block.hpp:159-183`).
     ///
     /// There is nothing to back-substitute — the IMU block has no eliminated
     /// variables — so the whole method is the `l_diff` accumulation
     /// `l_diff -= (J inc)ᵀ (0.5 (J inc) + r)` over the two states' slices of the
-    /// increment (`:166-182`).
+    /// increment.
     pub fn back_substitute(
         &self,
         start_idx: usize,
@@ -1191,7 +1039,7 @@ impl<S: LieScalar> ImuBlock<S> {
         if !fits(start_idx) || !fits(end_idx) {
             return;
         }
-        // `pose_inc_reduced` (`:166-168`): the start state's block, then the
+        // `pose_inc_reduced` : the start state's block, then the
         // end state's.
         let mut reduced: SMatrix<S, { 2 * POSE_VEL_BIAS_SIZE }, 1> = SMatrix::zeros();
         for i in 0..size {
@@ -1220,15 +1068,9 @@ mod tests {
     use nalgebra::SVector;
     use proptest::prelude::*;
 
-    // ── Test support ────────────────────────────────────────────────────
-    //
-    // Two things the C++ tests lean on are not ported: `Se3Spline<5>` (a
-    // cumulative B-spline on SE(3), out of V0 scope per papers.md §5, and about
-    // 700 lines for a ground-truth generator) and Eigen's `Random()`. In their
-    // place: `Trajectory` below is an analytic sum of sinusoids whose pose,
-    // world velocity, world acceleration and *body* angular velocity are all
-    // closed form, and `Rng` is a seeded xorshift so nothing flakes — Eigen's
-    // `Random()` never reseeds, so the C++ tests are deterministic too.
+    // Test support uses a smooth analytic trajectory with closed-form pose, velocity,
+    // acceleration and body angular velocity, plus a seeded xorshift generator.
+    // This keeps tests deterministic without a spline dependency.
 
     /// xorshift64*, so every ported test runs the same numbers each time.
     struct Rng(u64);
@@ -1247,7 +1089,7 @@ mod tests {
             x.wrapping_mul(0x2545_f491_4f6c_dd1d)
         }
 
-        /// Uniform on `[-1, 1]`, which is what `Eigen::Vector3d::Random()` gives.
+        /// Uniform value in `[-1, 1]`.
         fn uniform(&mut self) -> f64 {
             (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
         }
@@ -1257,7 +1099,7 @@ mod tests {
             low + (self.uniform() + 1.0) * 0.5 * (high - low)
         }
 
-        /// `Eigen::Vector3d::Random()`.
+        /// Three independent uniform values in `[-1, 1]`.
         fn vector3(&mut self) -> Vector3<f64> {
             Vector3::new(self.uniform(), self.uniform(), self.uniform())
         }
@@ -1268,15 +1110,9 @@ mod tests {
         }
     }
 
-    /// A smooth analytic trajectory, standing in for `Se3Spline<5>` with a
-    /// random knot sequence.
-    ///
-    /// Position is `A_k sin(w_k t + f_k)` per axis, so velocity and acceleration
-    /// are exact. Orientation is `exp(phi(t))` with
-    /// `phi_k(t) = B_k sin(u_k t + g_k)`, and the body angular velocity is
-    /// exactly `J_r(phi) phi_dot` — the right Jacobian already ported in
-    /// [`right_jacobian_so3`]. The frequencies are small enough that basalt's
-    /// midpoint integrator reaches the C++ tolerances over the same 20 s horizon.
+    /// Smooth analytic trajectory: sinusoidal position gives exact velocity and
+    /// acceleration. For `R = exp(phi(t))`, body angular velocity is `J_r(phi) phi_dot`.
+    /// Low frequencies keep midpoint integration error bounded over the 20-second test.
     struct Trajectory {
         pos_amp: Vector3<f64>,
         pos_freq: Vector3<f64>,
@@ -1351,9 +1187,7 @@ mod tests {
             right_jacobian_so3(&self.rotation_vector(t)) * self.rotation_vector_dot(t)
         }
 
-        /// The sample basalt's tests build: specific force in the body frame and
-        /// the body angular velocity, stamped at the *middle* of the interval
-        /// (`test_preintegration.cpp:74-81`).
+        /// Body-frame specific force and angular velocity sampled at the interval midpoint.
         fn sample(&self, t_ns: i64, dt_ns: i64) -> ImuSample {
             let pose: Se3<f64> = self.pose(t_ns);
             ImuSample {
@@ -1364,13 +1198,9 @@ mod tests {
         }
     }
 
-    /// `test_jacobian` from `thirdparty/basalt-headers/test/include/test_utils.h:22-61`.
-    ///
-    /// Central differences at `x0 = 0` — every call site in the fork passes a
-    /// zero `x0` — with Eigen's two comparisons: `isZero(prec)` is
-    /// `norm() <= prec` and `isApprox(other, prec)` is
-    /// `(a - b).norm() <= prec * min(|a|, |b|)`. `TestConstants<double>` is
-    /// `epsilon = 1e-8`, `max_norm = 1e-3` (`test_utils.h:10-14`).
+    /// Central differences at zero with epsilon `1e-8` and norm tolerance `1e-3`.
+    /// Zero comparison uses the absolute norm; relative comparison scales by the
+    /// smaller input norm.
     fn test_jacobian<const R: usize, const C: usize>(
         name: &str,
         ja: &SMatrix<f64, R, C>,
@@ -1411,11 +1241,10 @@ mod tests {
         }
     }
 
-    /// `TestConstants<double>::epsilon` (`test_utils.h:12`).
+    /// `TestConstants<double>::epsilon`.
     const DEFAULT_EPS: f64 = 1e-8;
-    /// `TestConstants<double>::max_norm` (`test_utils.h:13`).
+    /// `TestConstants<double>::max_norm`.
     const DEFAULT_MAX_NORM: f64 = 1e-3;
-    /// `test_preintegration.cpp:43-44` and `test_vio.cpp:14-15`.
     const ACCEL_STD_DEV: f64 = 0.23;
     const GYRO_STD_DEV: f64 = 0.0027;
 
@@ -1426,22 +1255,16 @@ mod tests {
         }
     }
 
-    /// `Eigen::MatrixBase::isApprox`, the relative comparison the fork asserts with.
+    /// Relative matrix comparison scaled by the smaller input norm.
     fn is_approx(a: &Vector3<f64>, b: &Vector3<f64>, precision: f64) -> bool {
         (a - b).norm() <= precision * a.norm().min(b.norm())
     }
 
-    // ── Ported: thirdparty/basalt-headers/test/src/test_preintegration.cpp ──
-    //
-    // Four of the six cases are ported. `CovarianceTest` (`:496-589`) is not:
-    // it is a 1 000-run Monte Carlo over 100 samples whose `kl <= 0.08` bound
-    // only holds at that sample count, which is ~10^5 unoptimised integrations
-    // and does not fit a gate that has to finish in seconds. Its content is
-    // covered instead by `the_first_covariance_step_is_the_noise_input_alone`
-    // and the symmetric-PSD / `MᵀM cov = I` property below. `RandomWalkTest`
-    // (`:591+`) tests Eigen's random number generator, not preintegration.
+    // Preintegration invariants include the first covariance step, symmetric positive
+    // semidefiniteness and the whitening identity. These directly check covariance
+    // behavior without a large Monte Carlo run.
 
-    /// `ImuPreintegrationTestCase.PredictTestGT` (`test_preintegration.cpp:56-99`).
+    /// `ImuPreintegrationTestCase.PredictTestGT`.
     ///
     /// 2 000 samples over 20 s, then `predictState` from the true state at 0 has
     /// to land on the true state at the end: velocity and translation within a
@@ -1491,11 +1314,7 @@ mod tests {
         );
     }
 
-    /// `ImuPreintegrationTestCase.PredictTest` (`test_preintegration.cpp:101-182`).
-    ///
-    /// `F`, `A` and `G` against central differences at every step of the sweep.
-    /// The C++ passes `eps = 1e-8` explicitly for the gyro block, which is the
-    /// `double` default anyway.
+    /// Compare transition and noise-input Jacobians with central differences at each step.
     #[test]
     fn propagate_state_jacobians_match_finite_differences() {
         let mut rng: Rng = Rng::new(0x5eed_0002);
@@ -1578,7 +1397,7 @@ mod tests {
         }
     }
 
-    /// `ImuPreintegrationTestCase.ResidualTest` (`test_preintegration.cpp:184-282`).
+    /// `ImuPreintegrationTestCase.ResidualTest`.
     ///
     /// The residual at the true end state is zero to `1e-6` per coefficient, and
     /// the four Jacobians match central differences at a perturbed end state.
@@ -1660,7 +1479,7 @@ mod tests {
     }
 
     /// The samples `BiasTest` and `ResidualBiasTest` share
-    /// (`test_preintegration.cpp:299-309`): 100 samples over 1 s with both
+    /// 100 samples over 1 s with both
     /// biases added in.
     fn biased_samples(
         trajectory: &Trajectory,
@@ -1695,7 +1514,7 @@ mod tests {
         meas
     }
 
-    /// `ImuPreintegrationTestCase.BiasTest` (`test_preintegration.cpp:284-372`).
+    /// `ImuPreintegrationTestCase.BiasTest`.
     ///
     /// The two bias Jacobians against re-integrating the same samples about a
     /// perturbed linearization point, compared through `PoseVelState::diff`.
@@ -1734,13 +1553,9 @@ mod tests {
         );
     }
 
-    /// `ImuPreintegrationTestCase.ResidualBiasTest` (`test_preintegration.cpp:374-494`).
-    ///
-    /// The first-order bias correction inside the residual has to agree with an
-    /// actual re-integration about the shifted bias (relative `1e-4`), and the
-    /// two bias Jacobians have to match finite differences taken *through* that
-    /// re-integration — the gyro one with the looser `max_norm = 1e-2` the C++
-    /// passes at `:492`.
+    /// Bias correction must agree with reintegration about the shifted bias within
+    /// relative `1e-4`. Compare both bias Jacobians through reintegration, with the
+    /// gyro Jacobian's norm tolerance `1e-2`.
     #[test]
     fn residual_bias_correction_agrees_with_reintegration() {
         let mut rng: Rng = Rng::new(0x5eed_0005);
@@ -1799,9 +1614,9 @@ mod tests {
         );
     }
 
-    // ── Ported: test/src/test_vio.cpp ───────────────────────────────────
+    // IMU factor invariants.
 
-    /// `ScBundleAdjustmentBase::checkNullspace` (`src/vi_estimator/sc_ba_base.cpp:485-639`),
+    /// `ScBundleAdjustmentBase::checkNullspace`,
     /// restricted to the pose-velocity-bias blocks the two IMU tests use — the
     /// pose-only branch belongs to the visual factors.
     ///
@@ -1820,7 +1635,7 @@ mod tests {
         let size: usize = order.total_size();
         let mut increments: [DVector<f64>; 6] = std::array::from_fn(|_| DVector::zeros(size));
 
-        // `:525-539`: the centroid the rotations turn about.
+        // the centroid the rotations turn about.
         let mut mean_trans: Vector3<f64> = Vector3::zeros();
         for (frame_id, _, _) in order.iter() {
             mean_trans += frame_states[&frame_id].state_lin().t_w_i.translation;
@@ -1835,7 +1650,7 @@ mod tests {
                 increments[3 + axis][offset + 3 + axis] = eps; // `:548-550`
             }
 
-            // `:564-573` and `:576-585`: the rotation increments also move the
+            //  and : the rotation increments also move the
             // translations (about the centroid) and the velocities.
             let j: Matrix3<f64> = -So3::hat(&(state.t_w_i.translation - mean_trans)) * eps;
             let j_vel: Matrix3<f64> = -So3::hat(&state.vel_w_i) * eps;
@@ -1858,11 +1673,11 @@ mod tests {
         result
     }
 
-    /// `ScBundleAdjustmentBase::computeImuError` (`src/vi_estimator/sc_ba_base.cpp:657-704`),
+    /// `ScBundleAdjustmentBase::computeImuError`,
     /// for the measurements the two IMU tests hold, summed into one number.
     ///
     /// Note `gyro_bias_weight / dt` here against `gyro_bias_weight_sqrt / sqrt(dt)`
-    /// in the block (`imu_block.hpp:65`): the caller passes the squared weight.
+    /// in the block : the caller passes the squared weight.
     fn compute_imu_error(
         order: &AbsOrderMap,
         states: &HashMap<i64, PoseVelBiasStateWithLin<f64>>,
@@ -1902,7 +1717,6 @@ mod tests {
     }
 
     /// Noisy samples over `[from_ns, to_ns)`, as both nullspace tests build them
-    /// (`test_vio.cpp:52-74`).
     fn noisy_samples(
         trajectory: &Trajectory,
         bg: &Vector3<f64>,
@@ -1940,7 +1754,7 @@ mod tests {
         meas
     }
 
-    /// `test_vio.cpp:82-86, 104-105`: both weights are `1e3`.
+    /// both weights are `1e3`.
     fn lin_data() -> ImuLinData<f64> {
         ImuLinData {
             g: gravity::<f64>(),
@@ -1949,7 +1763,7 @@ mod tests {
         }
     }
 
-    /// `VioTestSuite.ImuNullspace2Test` (`test/src/test_vio.cpp:28-147`).
+    /// `VioTestSuite.ImuNullspace2Test`.
     ///
     /// One IMU factor between two full states: the block's `H` and `b` have to
     /// reproduce the error change to `2e-2` for ten small random increments, and
@@ -1994,7 +1808,7 @@ mod tests {
         block.add_dense_h_b(0, POSE_VEL_BIAS_SIZE, &mut h, &mut b);
         let e0: f64 = block.error;
 
-        // `:114-136`: the quadratic model has to predict the error change.
+        // the quadratic model has to predict the error change.
         let gyro_weight: Vector3<f64> = ild.gyro_bias_weight_sqrt.map(|v: f64| v * v);
         let accel_weight: Vector3<f64> = ild.accel_bias_weight_sqrt.map(|v: f64| v * v);
         for _ in 0..10 {
@@ -2028,15 +1842,14 @@ mod tests {
         assert!(null_res[1].abs() <= 1e-8, "y {}", null_res[1]);
         assert!(null_res[2].abs() <= 1e-8, "z {}", null_res[2]);
         assert!(null_res[5].abs() <= 1e-6, "yaw {}", null_res[5]);
-        // Not in the C++, which only prints these: gravity makes roll and pitch
-        // observable, so they — and any random direction — must carry real
-        // information. Without this an all-zero `H` would pass vacuously.
+        // Gravity makes roll and pitch observable; require real information in those
+        // and random directions so an all-zero Hessian cannot pass vacuously.
         assert!(null_res[3].abs() > 1.0, "roll {}", null_res[3]);
         assert!(null_res[4].abs() > 1.0, "pitch {}", null_res[4]);
         assert!(null_res[6].abs() > 1.0, "random {}", null_res[6]);
     }
 
-    /// `VioTestSuite.ImuNullspace3Test` (`test/src/test_vio.cpp:151-286`).
+    /// `VioTestSuite.ImuNullspace3Test`.
     ///
     /// Two consecutive IMU factors over three states; the same four directions
     /// have to stay in the nullspace once both blocks are accumulated.
@@ -2108,9 +1921,8 @@ mod tests {
         assert!(null_res[1].abs() <= 1e-8, "y {}", null_res[1]);
         assert!(null_res[2].abs() <= 1e-8, "z {}", null_res[2]);
         assert!(null_res[5].abs() <= 1e-6, "yaw {}", null_res[5]);
-        // Not in the C++, which only prints these: gravity makes roll and pitch
-        // observable, so they — and any random direction — must carry real
-        // information. Without this an all-zero `H` would pass vacuously.
+        // Gravity makes roll and pitch observable; require real information in those
+        // and random directions so an all-zero Hessian cannot pass vacuously.
         assert!(null_res[3].abs() > 1.0, "roll {}", null_res[3]);
         assert!(null_res[4].abs() > 1.0, "pitch {}", null_res[4]);
         assert!(null_res[6].abs() > 1.0, "random {}", null_res[6]);
@@ -2118,10 +1930,8 @@ mod tests {
 
     // ── Port-specific tests ─────────────────────────────────────────────
 
-    /// The `BASALT_ASSERT` at `preintegration.h:211` holds structurally: the
-    /// accelerometer bias cannot move the rotation part of the delta state,
-    /// because `d_next_d_accel` has no rotation rows and `F`'s rotation rows are
-    /// `[0 I 0]`.
+    /// Accelerometer bias cannot move delta rotation: its input Jacobian has zero
+    /// rotation rows and the transition's rotation rows are `[0 I 0]`.
     #[test]
     fn the_accel_bias_jacobian_never_touches_rotation() {
         let mut rng: Rng = Rng::new(0x5eed_0008);
@@ -2140,7 +1950,7 @@ mod tests {
 
     /// The empty measurement is exactly zero everywhere, and its square-root
     /// inverse covariance is zero rather than infinite — the pseudo-inverse
-    /// branch at `preintegration.h:313-319`.
+    /// branch.
     #[test]
     fn an_empty_measurement_has_a_zero_pseudo_inverse() {
         let meas: IntegratedImuMeasurement<f64> = IntegratedImuMeasurement::default();
@@ -2204,8 +2014,8 @@ mod tests {
         /// and `G`.
         ///
         /// `cov_n = Σ_{k<n} F^k Q (F^k)ᵀ` with `Q = A Σa Aᵀ + G Σg Gᵀ`
-        /// (`preintegration.h:161-162`), `d_state_d_ba_n = -Σ_{k<n} F^k A` and
-        /// `d_state_d_bg_n = -Σ_{k<n} F^k G` (`:165-166`). One step, thirty
+        /// `d_state_d_ba_n = -Σ_{k<n} F^k A` and
+        /// `d_state_d_bg_n = -Σ_{k<n} F^k G`. One step, thirty
         /// steps and sub-millisecond intervals all fall out of the ranges.
         #[test]
         fn the_covariance_recurrence_matches_its_closed_form(
@@ -2365,7 +2175,7 @@ mod tests {
     /// empty interval, an interval starting somewhere else, and an interval it
     /// could not close — the last as `Ok` with a measurement shorter than the
     /// frame gap. Both producers precheck a sample strictly after the frame
-    /// (`sqrt_keypoint_vio.cpp:265-271` through `imu_covers_frame`, and
+    /// ( through `imu_covers_frame`, and
     /// `Vio::track`'s own coverage test), so none of this can fire on the
     /// shipped path; a public method promising to close the interval exactly
     /// must say so anyway (D32).
@@ -2381,7 +2191,7 @@ mod tests {
             move || samples.next()
         };
 
-        // An empty interval: `:307-313` asserts it, because a zero time delta
+        // An empty interval: asserts it, because a zero time delta
         // "leads to invalid IMU integration".
         assert_eq!(
             meas().accumulate_to(None, feed(vec![sample(1)]), 0, 0, &noise),
@@ -2418,7 +2228,7 @@ mod tests {
         );
 
         // The sample that does follow closes the interval exactly on the frame
-        // and comes back out at its own time (`:330-336`).
+        // and comes back out at its own time.
         let mut closed: IntegratedImuMeasurement<f64> = meas();
         let pending: Option<Popped<f64>> = closed
             .accumulate_to(
@@ -2433,7 +2243,7 @@ mod tests {
         assert_eq!(closed.get_dt_ns(), 10);
     }
 
-    /// `Quaternion::FromTwoVectors(accel, UnitZ)` (`sqrt_keypoint_vio.cpp:278`)
+    /// `Quaternion::FromTwoVectors(accel, UnitZ)`
     /// rotates the measured specific force onto the world `+Z` axis, so gravity
     /// lands along `-Z`.
     #[test]
@@ -2543,7 +2353,7 @@ mod tests {
 
     /// The 9x6 bias Jacobian carries the gyro block in columns 0-2 and the accel
     /// block in 3-5, which is what the estimator's `start_idx + 9` and
-    /// `start_idx + 12` column offsets mean (`imu_block.hpp:57-58`).
+    /// `start_idx + 12` column offsets mean.
     #[test]
     fn the_bias_jacobian_columns_are_gyro_then_accel() {
         let mut rng: Rng = Rng::new(0x5eed_000c);
@@ -2564,13 +2374,13 @@ mod tests {
         );
         let (res, jacobians) = meas.residual_with_jacobians(&state0, &g, &state1, &bg, &ba);
 
-        // The accel half is exactly `-d_state_d_ba` (`preintegration.h:250`).
+        // The accel half is exactly `-d_state_d_ba`.
         assert_eq!(
             jacobians.d_res_d_bias.fixed_view::<9, 3>(0, 3).into_owned(),
             -meas.get_d_state_d_ba()
         );
         // The gyro half is `-d_state_d_bg` with its rotation rows replaced by
-        // `+ leftJacobianInv(res_rot) * d_state_d_bg(3,0)` (`:252-257`).
+        // `+ leftJacobianInv(res_rot) * d_state_d_bg(3,0)`.
         let gyro_half: Matrix9x3<f64> =
             jacobians.d_res_d_bias.fixed_view::<9, 3>(0, 0).into_owned();
         assert_eq!(
@@ -2641,10 +2451,10 @@ mod tests {
     }
 
     /// The square-root and the squared form of the same factor agree:
-    /// `Q2Jpᵀ Q2Jp = H` and `Q2Jpᵀ Q2r = b` (`imu_block.hpp:88-129`).
+    /// `Q2Jpᵀ Q2Jp = H` and `Q2Jpᵀ Q2r = b`.
     ///
-    /// `addJp_diag2` (`:145-157`) must likewise be the squared column norms of
-    /// the same scattered Jacobian, and `backSubstitute` (`:159-183`) the model
+    /// `addJp_diag2` must likewise be the squared column norms of
+    /// the same scattered Jacobian, and `backSubstitute` the model
     /// cost change of the same `J` and `r`.
     #[test]
     fn the_imu_block_exports_agree_with_each_other() {
@@ -2710,7 +2520,7 @@ mod tests {
     }
 
     /// A frozen linearization point changes only the residual *value*, not the
-    /// Jacobians (`imu_block.hpp:45-48`, trap 7 of the architecture dossier).
+    /// Jacobians (trap 7 of the architecture dossier).
     #[test]
     fn the_block_re_evaluates_the_residual_at_a_linearized_state() {
         let mut rng: Rng = Rng::new(0x5eed_000d);
@@ -2745,7 +2555,7 @@ mod tests {
         let frozen: ImuBlock<f64> = ImuBlock::linearize(&meas, &ild, &frozen0, &plain1);
         // Same linearization point, so the Jacobian is untouched...
         assert_eq!(frozen.jp, reference.jp);
-        // ...but the residual moved with the state.
+        // but the residual moved with the state.
         assert!((frozen.r - reference.r).norm() > 1e-6);
     }
 

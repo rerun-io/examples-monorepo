@@ -1,35 +1,15 @@
-//! `test_camera.cpp` ported: project/unproject round trips and analytic
-//! Jacobians against central finite differences, at `f64` and `f32`.
+//! Camera round trips and analytic Jacobians checked with central finite differences.
+//! Synthetic cameras exercise a full test grid. Shipped kb4 and radtan8 intrinsics
+//! are also checked within the sensor domain, where inverse iterations converge.
+//! Radtan8 uses a fixed valid-radius constant declared in this file; no external
+//! fixture supplies it. Pinhole cases use synthetic projections.
 //!
-//! The C++ file is `thirdparty/basalt-headers/test/src/test_camera.cpp` and its
-//! finite-difference helper is `test/include/test_utils.h:22-61`. Both are
-//! reproduced here down to the tolerances (`test_utils.h:10-20`) and the
-//! comparison rule Eigen's `isApprox`/`isZero` implement, so a failure here
-//! means what it means in the C++ suite: the analytic Jacobian is not the
-//! derivative of the projection beside it.
-//!
-//! Two families of test run:
-//!
-//! * **basalt's own test cameras over basalt's own grid**, a literal port. The
-//!   radtan8 one needs the `rpmax` that `computeRpmax()` estimates, which this
-//!   port does not implement; the number is read from the C++ oracle fixture
-//!   instead (`camera_oracle.json`, `radtan8_odyssey_computed_rpmax`).
-//! * **the shipped intrinsics** — msdmi (2 kb4), msdmg (4 pinhole-radtan8, each
-//!   with its own `rpmax`), robocap (4 kb4) — restricted to points that land on
-//!   the sensor. That restriction is not a fudge: at 90 degrees off axis a real
-//!   fisheye projects a thousand pixels outside a 960-pixel image, and there
-//!   `unproject`'s three Newton steps (`kannala_brandt_camera4.hpp:359`) do not
-//!   converge, so neither the round trip nor the unprojection Jacobian holds —
-//!   in basalt either. `camera_oracle.rs` covers those points instead, by
-//!   agreeing with the C++ number for number.
-//!
-//! No shipped calibration is a pinhole (EuRoC's is double sphere), so the
-//! pinhole cameras are basalt's own test projections (`pinhole_camera.hpp:287`).
+//! Far off-axis fisheye unprojection may not converge in three Newton steps.
+//! Those points are outside the round-trip sweep. Explicit regression tests
+//! below cover selected edge cases; no deleted fixture suite supplies coverage.
 
 #![allow(clippy::unwrap_used)]
-// Several constants below are basalt's own literals or a C++ `%.17g` printout,
-// carried over exactly even where an f64 does not need every figure. Keeping the
-// printout verbatim is what makes them evidence.
+// Retain the declared precision of regression constants.
 #![allow(clippy::excessive_precision)]
 
 use nalgebra::{Matrix2x4, Matrix4x2, SMatrix, SVector, Vector2, Vector4};
@@ -44,13 +24,10 @@ use slam_rs::lie::LieScalar;
 
 mod common;
 
-/// `computeRpmax()` for the Odyssey+ test intrinsics, taken from the C++ oracle
-/// fixture (`camera_oracle.json`, camera `radtan8_odyssey_computed_rpmax`).
-/// basalt's own test camera is constructed with it
-/// (`pinhole_radtan8_camera.hpp:102`, `test_camera.cpp:306`).
+/// Fixed valid radius for the synthetic Odyssey+ radtan8 intrinsics.
 const ODYSSEY_COMPUTED_RPMAX: f64 = 2.5927503282280915;
 
-/// `TestConstants<Scalar>` (`test/include/test_utils.h:10-20`), plus the serde
+/// `TestConstants<Scalar>`, plus the serde
 /// bounds the calibration reader needs so a sweep can be written once and run at
 /// both precisions.
 trait TestConstants: LieScalar + Serialize + DeserializeOwned {
@@ -78,13 +55,12 @@ impl TestConstants for f32 {
     }
 }
 
-/// `Eigen::DenseBase::isZero(prec)`: every coefficient is within `prec` of zero.
+/// Every coefficient lies within `prec` of zero.
 fn is_zero<S: LieScalar, const R: usize, const C: usize>(m: &SMatrix<S, R, C>, prec: S) -> bool {
     m.iter().all(|value| value.abs() <= prec)
 }
 
-/// `Eigen::DenseBase::isApprox(other, prec)`:
-/// `(a - b).norm() <= prec * min(a.norm(), b.norm())`.
+/// Relative comparison: `(a-b).norm() <= prec * min(a.norm(), b.norm())`.
 fn is_approx<S: LieScalar, const R: usize, const C: usize>(
     a: &SMatrix<S, R, C>,
     b: &SMatrix<S, R, C>,
@@ -111,8 +87,8 @@ fn f32_pixel_bound(value: f64, principal_point: f64) -> f64 {
     8.0 * f64::from(f32::EPSILON) * (value.abs() + principal_point.abs())
 }
 
-/// `test_jacobian` (`test/include/test_utils.h:22-61`), with `x0` always zero as
-/// every call site in `test_camera.cpp` passes `…::Zero()`.
+/// `test_jacobian`, with `x0` always zero as
+/// every call site in passes `…::Zero()`.
 fn assert_jacobian<S: TestConstants, const R: usize, const C: usize>(
     name: &str,
     analytic: &SMatrix<S, R, C>,
@@ -152,14 +128,10 @@ fn assert_jacobian<S: TestConstants, const R: usize, const C: usize>(
     );
 }
 
-/// Which Jacobians a sweep checks.
-///
-/// `d_proj_d_param` is the calibration optimizer's, and calibration runs in
-/// double; the estimator only ever asks for `d_proj_d_p3d`. On the msd-g2
-/// intrinsics the parameter columns for `k4, k5, k6` reach 1e4 near the edge of
-/// the valid radius, where neither a 1e-2 nor a 1e-3 central difference in `f32`
-/// is a derivative any more — so that combination is checked in `f64` and
-/// against the C++ fixture, not by finite differences in `f32`.
+/// Select point and/or intrinsic Jacobians for the sweep.
+/// Radtan8 denominator-parameter columns can reach 1e4 near the valid-radius edge,
+/// where f32 finite differences lose derivative resolution. Check those parameter
+/// columns in f64; the estimator uses the point Jacobian.
 #[derive(Clone, Copy, PartialEq)]
 enum Check {
     /// `d_proj_d_p3d` only.
@@ -168,7 +140,7 @@ enum Check {
     PointAndParam,
 }
 
-/// `testProjectJacobian` (`test_camera.cpp:40-90`): the grid is
+/// `testProjectJacobian` : the grid is
 /// `x, y in -10..=10`, `z in -1..=5`, homogeneous `w = 1`.
 ///
 /// `domain` narrows the sweep to the pixels a camera can actually produce; the
@@ -224,10 +196,8 @@ fn sweep_project_jacobians<S, const N: usize, Cam>(
     }
 }
 
-/// `testProjectUnproject` (`test_camera.cpp:158-187`): the unprojected bearing is
-/// the normalized point, to `epsilonSqrt`. The homogeneous coordinate is
-/// `0.23424` on the way in and zero on the way back, which is the C++'s own way
-/// of checking that projection ignores it and unprojection zeroes it.
+/// Projection ignores the input homogeneous component; unprojection returns it as
+/// zero and recovers the normalized spatial point within `epsilonSqrt`.
 fn sweep_project_unproject<S: TestConstants, Cam: Camera<S>>(
     camera: &Cam,
     domain: impl Fn(&Vector2<S>) -> bool,
@@ -264,7 +234,7 @@ fn sweep_project_unproject<S: TestConstants, Cam: Camera<S>>(
     }
 }
 
-/// `testUnprojectJacobians` (`test_camera.cpp:190-241`).
+/// `testUnprojectJacobians`.
 fn sweep_unproject_jacobians<S, const N: usize, Cam>(
     camera: &Cam,
     domain: impl Fn(&Vector2<S>) -> bool,
@@ -314,7 +284,7 @@ fn sweep_unproject_jacobians<S, const N: usize, Cam>(
     }
 }
 
-/// `PinholeCamera::getTestProjections()` (`pinhole_camera.hpp:281-295`): EuRoC
+/// `PinholeCamera::getTestProjections()` : EuRoC
 /// and TUM VI 512.
 fn basalt_pinholes<S: TestConstants>() -> Vec<Pinhole<S>> {
     vec![
@@ -333,7 +303,7 @@ fn basalt_pinholes<S: TestConstants>() -> Vec<Pinhole<S>> {
     ]
 }
 
-/// `KannalaBrandtCamera4::getTestProjections()` (`kannala_brandt_camera4.hpp:487-495`).
+/// `KannalaBrandtCamera4::getTestProjections()`.
 fn basalt_kb4<S: TestConstants>() -> KannalaBrandt4<S> {
     KannalaBrandt4::new(SVector::<S, 8>::from([
         S::from_literal(379.045),
@@ -347,7 +317,7 @@ fn basalt_kb4<S: TestConstants>() -> KannalaBrandt4<S> {
     ]))
 }
 
-/// `PinholeRadtan8Camera::getTestProjections()` (`pinhole_radtan8_camera.hpp:705-718`),
+/// `PinholeRadtan8Camera::getTestProjections()`,
 /// the Odyssey+, with the radius `computeRpmax()` estimates for it.
 fn basalt_radtan8<S: TestConstants>() -> PinholeRadtan8<S> {
     PinholeRadtan8::new(
@@ -401,17 +371,13 @@ fn shipped_radtan8<S: TestConstants>() -> Vec<(PinholeRadtan8<S>, RigCamera<S>, 
         .collect()
 }
 
-/// The whole grid, as the C++ tests use it.
+/// Accept every point on the synthetic test grid.
 fn everywhere<S: LieScalar>(_proj: &Vector2<S>) -> bool {
     true
 }
 
-/// basalt's own operational domain for a keypoint: inside the image, and within
-/// `optical_flow_image_safe_radius` of the image centre
-/// (`frame_to_frame_optical_flow.h:508-511`, which masks the black corners of a
-/// fisheye). The radius is a config field, 472 for msd-index, 340 for msd-g2 and
-/// 388 for the Odyssey config RoboCap runs
-/// (`configs/msdmi_config.json`, `msdmg_config.json`, `msdmo_config.json`).
+/// Operational keypoint domain: inside the image and configured safe radius.
+/// The radius masks fisheye corners: 472 for Index, 340 for G2 and 388 for RoboCap.
 fn on_sensor<S: LieScalar>(
     rig: &RigCamera<S>,
     safe_radius: f64,
@@ -430,7 +396,7 @@ const MSDMI_SAFE_RADIUS: f64 = 472.0;
 const MSDMG_SAFE_RADIUS: f64 = 340.0;
 const ROBOCAP_SAFE_RADIUS: f64 = 388.0;
 
-// ─── basalt's own cameras, basalt's own grid ──────────────────────────────
+// Synthetic cameras on the full test grid.
 
 #[test]
 fn pinhole_project_jacobians() {
@@ -486,8 +452,7 @@ fn pinhole_unproject_jacobians() {
     }
 }
 
-/// `f64` only, as in the C++: `KannalaBrandtUnprojectJacobiansFloat` is
-/// commented out (`test_camera.cpp:401-403`).
+/// Check kb4 unprojection Jacobians in f64.
 #[test]
 fn kb4_unproject_jacobians() {
     sweep_unproject_jacobians(&basalt_kb4::<f64>(), everywhere);
@@ -534,13 +499,9 @@ fn shipped_kb4_unproject_jacobians() {
 
 // ─── what unprojection actually delivers on real fisheye calibrations ─────
 
-/// Inside basalt's safe radius the shipped calibrations invert to eleven
-/// digits — with one exception, which is pinned below.
-///
-/// This is the property the frontend depends on: `unproject` builds the
-/// epipolar guess and filters matches, and a bearing that is off by a degree is
-/// a false match. The grid is 41 x 41 x 8 points per camera, coarse enough to
-/// run in milliseconds and dense enough to cover the disc.
+/// Within safe radii, shipped calibrations should invert accurately except for
+/// the explicit regression cases below. Bearing errors affect both epipolar
+/// prediction and filtering, even when projected pixels still look plausible.
 #[test]
 fn the_round_trip_is_exact_inside_the_safe_radius() {
     let mut worst_by_camera: Vec<(String, f64)> = Vec::new();
@@ -635,10 +596,8 @@ fn msd_g2_cam2_does_not_invert_inside_the_safe_radius() {
     assert!((bearing - expected).norm() > 0.12);
 }
 
-/// Outside the safe radius a wide kb4 can invert to a bearing pointing the other
-/// way, and again basalt agrees digit for digit. RoboCap cam1 at 511 px from the
-/// image centre is 123 px beyond the 388 px radius the config masks with, so the
-/// frontend never asks; the estimator stage must keep it that way.
+/// Pin the selected off-axis unprojection result where fixed Newton iterations
+/// leave a bearing error, independently of the ordinary sensor-domain sweep.
 #[test]
 fn robocap_cam1_inverts_backwards_outside_the_safe_radius() {
     let calibration: Calibration<f64> =
@@ -729,7 +688,7 @@ proptest! {
                 CameraEnum::Pinhole(basalt_pinholes::<f64>()[0]),
                 RigCamera {
                     model: CameraEnum::Pinhole(basalt_pinholes::<f64>()[0]),
-                    // `PinholeCamera::getTestResolutions()` (`pinhole_camera.hpp:301`).
+                    // `PinholeCamera::getTestResolutions()`.
                     resolution: [752, 480],
                 },
                 376.0,
@@ -774,7 +733,7 @@ proptest! {
         z in -8.0f64..-0.1,
     ) {
         // kb4 accepts points behind its own plane whenever the radius is large
-        // (`kannala_brandt_camera4.hpp:152`), so the negative-z rejection is
+        // so the negative-z rejection is
         // only meaningful near the optical axis for that model.
         let pinhole: CameraEnum<f64> = CameraEnum::Pinhole(basalt_pinholes::<f64>()[0]);
         let radtan8: CameraEnum<f64> = CameraEnum::PinholeRadtan8(shipped_radtan8::<f64>()[0].0);

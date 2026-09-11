@@ -51,24 +51,14 @@ fn compose_se2_exp(state: &mut SharedMemory<f32>, t0: f32, t1: f32, theta: f32) 
     state[5usize] = m10 * exp_x + m11 * exp_y + state[5usize];
 }
 
-/// `tracker::track_point` and `track_point_at_level`
-/// (`frame_to_frame_optical_flow.h:377-438`), one cube per patch.
-///
-/// The coarse-to-fine sweep and the Gauss-Newton loop both run to their fixed
-/// bounds with a shared `alive` flag standing in for the C++ loop conditions —
-/// the CPU port already made that substitution and proved it changes no value
-/// (§12.2). Every `sync_cube` here is cube-uniform: the flag lives in shared
-/// memory and is read into a local *after* a barrier, so a unit never skips a
-/// barrier its neighbours reach.
-///
-/// `check_guess_bounds` is the `valid = t2 in [0, w) x [0, h)` test at `:346`,
-/// which the forward pass makes and the backward pass does not. When it fails
-/// the C++ returns the plain identity rather than the composed warp, and so
-/// does this: `alive[2usize]` records whether the sweep ran at all.
+/// Coarse-to-fine KLT, one cube per patch.
+/// Fixed-bound loops use a shared alive flag. Read it after barriers so no unit
+/// skips a barrier reached by its neighbors. Forward tracking checks the initial
+/// guess bounds; backward tracking does not. An invalid initial guess returns
+/// identity, recorded separately from failure after the sweep starts.
 #[cube(launch, launch_unchecked)]
-// `!(x < y)` is deliberate: it is how the C++ spells the increment guard, so a
-// NaN takes the branch it takes there. The initialisers of the locals that
-// stand in for an `if` expression are never read, which is the point.
+// Negated comparisons reject NaNs. Conditional store values use locals to avoid
+// the device compiler's conditional-store miscompile.
 #[allow(
     clippy::too_many_arguments,
     clippy::neg_cmp_op_on_partial_ord,
@@ -79,12 +69,8 @@ fn klt_kernel(
     pyramid_b: &Array<u16>,
     meta: &Array<u32>,
     store: &Array<f32>,
-    // One binding, read and written, not two views of the same buffer. Every
-    // caller passes the same handle for both roles — the C++ composes the warp
-    // in place (`:399`) — and wgpu refuses a buffer bound `STORAGE_READ_ONLY`
-    // and `STORAGE_READ_WRITE` in one dispatch, which is a validation error on
-    // any adapter whose pool does not merge the two slices into one binding.
-    // The cap's Mali G610 is that adapter.
+    // Compose the warp in place through one read/write binding. Binding the same
+    // buffer separately as read-only and read/write is invalid on some wgpu adapters.
     transforms: &mut Array<f32>,
     capacity: usize,
     taps: usize,
@@ -135,7 +121,7 @@ fn klt_kernel(
         }
         alive[0usize] = entered;
         alive[2usize] = entered;
-        // `transform.linear = identity`, `transform.translation = guess` (`:381`).
+        // `transform.linear = identity`, `transform.translation = guess`.
         state[0usize] = 1.0f32;
         state[1usize] = 0.0f32;
         state[2usize] = 0.0f32;
@@ -150,12 +136,12 @@ fn klt_kernel(
         if tap == 0usize {
             alive[1usize] = alive[0usize];
             if alive[0usize] == 1usize {
-                // `transform.translation /= scale` (`:386`), exact for a power of two.
+                // `transform.translation /= scale`, exact for a power of two.
                 let scale = f32::cast_from(1usize << level);
                 state[8usize] = scale;
                 state[4usize] /= scale;
                 state[5usize] /= scale;
-                // `patch_valid &= patches.valid(level, index)` (`:389`).
+                // `patch_valid &= patches.valid(level, index)`.
                 if store[4usize * data_len + level * capacity + patch] == 0.0f32 {
                     alive[0usize] = 0usize;
                 }
@@ -170,7 +156,7 @@ fn klt_kernel(
 
         for _iteration in 0..max_iterations {
             let sampling = alive[0usize] == 1usize;
-            // `residual(img, transform * pattern2, res)` (`patch.h:168-202`),
+            // `residual(img, transform * pattern2, res)`,
             // with the warp applied per tap.
             if sampling && tap < taps {
                 let tap_x = f32::reinterpret(meta[pattern + tap * 2usize]);
@@ -202,7 +188,7 @@ fn klt_kernel(
                         valid_points += 1u32;
                     }
                 }
-                // An all-black target cannot be normalised (`patch.h:183-186`).
+                // An all-black target cannot be normalised.
                 if sum < f32::new(f32::EPSILON) {
                     alive[0usize] = 0usize;
                 }
@@ -213,7 +199,7 @@ fn klt_kernel(
 
             let solving = alive[0usize] == 1usize;
             if solving && tap < taps {
-                // `res[i] = num_valid_points * val / sum - data[i]` (`patch.h:193`).
+                // `res[i] = num_valid_points * val / sum - data[i]`.
                 let sum = state[6usize];
                 let points = state[7usize];
                 let stored = store[(level * taps + tap) * capacity + patch];
@@ -239,11 +225,11 @@ fn klt_kernel(
                         residuals += 1u32;
                     }
                 }
-                // `return num_residuals > PATTERN_SIZE / 2` (`patch.h:201`).
+                // `return num_residuals > PATTERN_SIZE / 2`.
                 if residuals * 2u32 <= u32::cast_from(taps) {
                     alive[0usize] = 0usize;
                 } else {
-                    // `inc = -H_se2_inv_J_se2_T * res` (`:419`), taps ascending.
+                    // `inc = -H_se2_inv_J_se2_T * res`, taps ascending.
                     let mut sum_0 = 0.0f32;
                     let mut sum_1 = 0.0f32;
                     let mut sum_2 = 0.0f32;
@@ -256,8 +242,7 @@ fn klt_kernel(
                     let inc_1 = -sum_1;
                     let inc_2 = -sum_2;
                     let mut ok = is_finite(inc_0) && is_finite(inc_1) && is_finite(inc_2);
-                    // `inc.lpNorm<Infinity>()` is `(a < b) ? b : a` from element 0,
-                    // spelled out so a NaN takes the branch it takes in C++.
+                    // Fold the infinity norm from element zero, retaining a left-hand NaN.
                     let mut infinity_norm = f32::abs(inc_0);
                     if infinity_norm < f32::abs(inc_1) {
                         infinity_norm = f32::abs(inc_1);
@@ -270,7 +255,7 @@ fn klt_kernel(
                     }
                     if ok {
                         compose_se2_exp(&mut state, inc_0, inc_1, inc_2);
-                        // The new centre must stay two pixels inside (`:430-432`).
+                        // The new centre must stay two pixels inside.
                         if !in_bounds(state[4usize], state[5usize], FILTER_MARGIN, width, height) {
                             ok = false;
                         }
@@ -284,8 +269,7 @@ fn klt_kernel(
         }
 
         if tap == 0usize && alive[1usize] == 1usize {
-            // `transform.translation *= scale` (`:396`), which the C++ runs even
-            // when the level just failed.
+            // Scale translation even when this level failed.
             let scale = state[8usize];
             state[4usize] *= scale;
             state[5usize] *= scale;
@@ -295,7 +279,7 @@ fn klt_kernel(
 
     if tap == 0usize {
         if alive[2usize] == 1usize {
-            // `transform.linear = old_linear * transform.linear` (`:399`).
+            // `transform.linear = old_linear * transform.linear`.
             // Read into locals before the first write: the four coefficients
             // are at the indices the composed warp overwrites.
             let o00 = transforms[patch];
@@ -321,7 +305,7 @@ fn klt_kernel(
     }
 }
 
-/// The backward pass's inputs, from the forward result (`:355-359`).
+/// The backward pass's inputs, from the forward result.
 ///
 /// `off = t2 - t2_guess` with `t2 == t1` at that point, so
 /// `off == source position - guess`, and `t1_recovered = forward + off`; the
@@ -350,13 +334,13 @@ fn prepare_backward_kernel(
     out[6usize * count + index] = forward[6usize * count + index];
 }
 
-/// The recovered-distance test that decides a track (`:362-364`).
+/// The recovered-distance test that decides a track.
 ///
 /// The warp published is always the *forward* one; only the validity flag comes
 /// from the backward pass, exactly as `trackPoints` keeps `transform_1` and
 /// tests `(t1 - t1_recovered).squaredNorm()`.
 #[cube(launch, launch_unchecked)]
-// As `klt_kernel`: `!(dist2 < max)` is the C++'s own spelling of the test.
+// Use `!(dist2 < max)` so a NaN fails the distance guard.
 #[allow(clippy::too_many_arguments, clippy::neg_cmp_op_on_partial_ord)]
 fn finish_kernel(
     forward: &Array<f32>,

@@ -1,76 +1,22 @@
-//! basalt's camera models: projection, unprojection and their analytic Jacobians.
+//! Camera projection, unprojection and analytic Jacobians.
 //!
-//! Ported line by line from
-//! `thirdparty/basalt-headers/include/basalt/camera/{pinhole_camera,kannala_brandt_camera4,pinhole_radtan8_camera}.hpp`.
-//! Every formula and every domain check below names the C++ line it comes from,
-//! because the accuracy gate cannot tell a transcription slip from an estimator
-//! bug (decision D14).
+//! [`Camera::project`] writes a pixel and returns validity for a 4-D homogeneous
+//! point. Optional borrowed Jacobian matrices avoid allocation and dynamic dispatch
+//! (D11). Projection Jacobians are 2x4 and 2xN; unprojection Jacobians are 4x2
+//! and 4xN. The homogeneous coordinate has a zero derivative. Unprojection
+//! returns a unit bearing with fourth component zero.
 //!
-//! ## The signature
+//! Pinhole, kb4 and pinhole-radtan8 are implemented. `ds`, `eucm` and `ucm`
+//! parse in [`crate::calib`] but return [`CameraError::UnsupportedModel`].
+//! The intrinsic counts are 4, 8 and 12 respectively.
 //!
-//! basalt projects a **4-D homogeneous** point and writes the result through an
-//! out parameter, returning a validity flag:
+//! The radtan8 valid radius is read from calibration and held constant by
+//! [`PinholeRadtan8::apply_inc`], including during finite differences. Its
+//! unprojection Jacobian is unsupported and returns a typed error.
 //!
-//! ```cpp
-//! // pinhole_radtan8_camera.hpp:301-302
-//! bool project(const Eigen::MatrixBase<DerivedPoint3D>& p3d, Eigen::MatrixBase<DerivedPoint2D>& proj,
-//!              DerivedJ3D d_proj_d_p3d = nullptr, DerivedJparam d_proj_d_param = nullptr) const;
-//! ```
-//!
-//! The port keeps that shape: [`Camera::project`] fills a `Vector2` and returns
-//! `bool`, and [`Camera::project_with_jacobians`] takes the two Jacobians as
-//! `Option<&mut …>`. C++ selects the Jacobian blocks with `if constexpr` on a
-//! template parameter; the Rust equivalent is a monomorphized `Option` that the
-//! optimizer folds away, so neither form allocates and neither is a `Box<dyn>`
-//! (decision D11).
-//!
-//! Layouts follow basalt exactly: `d_proj_d_p3d` is 2x4 with a zero fourth
-//! column (the homogeneous coordinate never enters the projection),
-//! `d_proj_d_param` is 2xN with N = 4 for pinhole, 8 for kb4 and 12 for
-//! pinhole-radtan8, `d_p3d_d_proj` is 4x2 and `d_p3d_d_param` is 4xN, both with
-//! a zero fourth row. [`Camera::unproject`] returns a unit-norm bearing whose
-//! fourth component is zero, which is what `p3d.setZero()` followed by three
-//! assignments produces in C++ (`kannala_brandt_camera4.hpp:366-369`).
-//!
-//! ## What is here and what is not
-//!
-//! V0 ships `pinhole`, `kb4` and `pinhole-radtan8`: the models the reference
-//! datasets use (msd-index and RoboCap are kb4, msd-g2 is pinhole-radtan8) plus
-//! the pinhole the VIT binding maps `DISTORTION_NONE` onto (decision D11).
-//! `ds`, `eucm` and `ucm` parse in [`crate::calib`] and are rejected here with
-//! [`CameraError::UnsupportedModel`].
-//!
-//! Two pieces of the C++ are deliberately absent:
-//!
-//! * **`PinholeRadtan8Camera::computeRpmax()`** (`:131-242`), the gradient-ascent
-//!   estimate of the valid radius. Every calibration this port reads carries
-//!   `rpmax` on disk, and the ABS_QR VIO path does not optimize intrinsics, so
-//!   the estimate has no caller. [`PinholeRadtan8::apply_inc`] therefore leaves
-//!   `rpmax` alone where C++ recomputes it (`:688-691`) — which is also what
-//!   makes a finite-difference check of `d_proj_d_param` meaningful, since the
-//!   analytic Jacobian treats `rpmax` as a constant.
-//! * **`d_p3d_d_proj` for pinhole-radtan8**, which C++ does not have either: it
-//!   asserts (`:657-659`). The port returns
-//!   [`CameraError::UnprojectJacobianUnsupported`] rather than asserting.
-//!
-//! ## Scalars
-//!
-//! Generic over [`LieScalar`] (`f32` and `f64`) because the frontend runs `f32`
-//! and the estimator is instantiated at both (decision D05). Two rules, and they
-//! point in opposite directions:
-//!
-//! * **No domain check is promoted.** Every one compares a `Scalar` against
-//!   `Sophus::Constants<Scalar>::epsilonSqrt()`, which is `sqrt(1e-10)` in double
-//!   and `sqrt(1e-5)` in float, so the branch is genuinely precision-dependent
-//!   and the port reproduces it as it stands.
-//! * **`atan2` is promoted**, in kb4's projection only. The header imports `cos`,
-//!   `sin` and `sqrt` from `std` (`kannala_brandt_camera4.hpp:48-50`) but not
-//!   `atan2`, so the unqualified call at `:153` takes the `double` overload from
-//!   `<math.h>` and the float instantiation computes its angle in double. The
-//!   port does the same; see the comment at the call site for the measurement.
-//!
-//! Both are decision D37's rule — do in `f64` exactly what the C++ does in
-//! `double`, and no more — read off the C++ rather than assumed.
+//! Both scalar lanes retain precision-specific domain thresholds: `sqrt(1e-10)`
+//! for f64 and `sqrt(1e-5)` for f32. The kb4 projection angle is computed in f64
+//! and rounded back to the selected scalar to reduce angle rounding error.
 
 use nalgebra::{Matrix2, Matrix2x4, Matrix4x2, SMatrix, SVector, Vector2, Vector4};
 
@@ -83,13 +29,13 @@ pub enum CameraError {
     /// A model that [`crate::calib`] parses but this module does not project with.
     #[error("camera model {model} is parsed but its projection is not implemented")]
     UnsupportedModel {
-        /// basalt's name for the model, as written in `camera_type`.
+        /// Model name stored in `camera_type`.
         model: &'static str,
     },
-    /// basalt has no analytic unprojection Jacobian for this model.
+    /// An analytic unprojection Jacobian is unavailable for this model.
     #[error("camera model {model} has no analytic unprojection Jacobian")]
     UnprojectJacobianUnsupported {
-        /// basalt's name for the model, as written in `camera_type`.
+        /// Model name stored in `camera_type`.
         model: &'static str,
     },
     /// The calibration does not carry one resolution per camera.
@@ -102,13 +48,10 @@ pub enum CameraError {
     },
 }
 
-/// One camera model: basalt's `project`/`unproject` pair.
-///
-/// The associated `Params` vector is basalt's `param_` in `getParam()` order,
-/// which is also the order `operator+=` increments and the column order of
-/// `d_proj_d_param`.
+/// A camera model with projection and unprojection.
+/// `Params` uses the intrinsic parameter order, shared by increments and Jacobian columns.
 pub trait Camera<S: LieScalar>: Copy {
-    /// basalt's `N`, the number of intrinsic parameters.
+    /// Number of intrinsic parameters.
     const NUM_PARAMS: usize;
 
     /// `VecN`: the intrinsic parameters in `getParam()` order.
@@ -117,7 +60,7 @@ pub trait Camera<S: LieScalar>: Copy {
     /// `Mat2N`: the projection Jacobian with respect to the intrinsics.
     type ParamJacobian: Copy;
 
-    /// basalt's `getName()`, the string that appears in `camera_type`.
+    /// Model name stored in `camera_type`.
     fn name(&self) -> &'static str;
 
     /// `getParam()`.
@@ -126,10 +69,8 @@ pub trait Camera<S: LieScalar>: Copy {
     /// `operator+=`: increment the intrinsics, as the calibration optimizer does.
     fn apply_inc(&mut self, inc: &Self::Params);
 
-    /// Project a homogeneous point, filling `proj`; `false` outside the valid domain.
-    ///
-    /// `proj` is written even when the point is invalid, exactly as the C++
-    /// does: the caller checks the flag, not the pixel.
+    /// Project a homogeneous point, filling `proj`; return `false` outside the domain.
+    /// The pixel may be written even for invalid input, so callers must check validity.
     #[inline]
     fn project(&self, p3d: &Vector4<S>, proj: &mut Vector2<S>) -> bool {
         self.project_with_jacobians(p3d, proj, None, None)
@@ -148,11 +89,8 @@ pub trait Camera<S: LieScalar>: Copy {
     fn unproject(&self, proj: &Vector2<S>, p3d: &mut Vector4<S>) -> bool;
 }
 
-/// The models whose unprojection basalt differentiates: `pinhole` and `kb4`.
-///
-/// `pinhole-radtan8` is not one of them (`pinhole_radtan8_camera.hpp:657-659`
-/// asserts), and the C++ test file has the matching tests commented out
-/// (`test/src/test_camera.cpp:374-379`).
+/// Models with analytic unprojection Jacobians: pinhole and kb4.
+/// Radtan8 unprojection has no analytic Jacobian implementation.
 pub trait UnprojectJacobians<S: LieScalar>: Camera<S> {
     /// `Mat4N`: the unprojection Jacobian with respect to the intrinsics.
     type UnprojectParamJacobian: Copy;
@@ -169,14 +107,14 @@ pub trait UnprojectJacobians<S: LieScalar>: Camera<S> {
 
 // ─── pinhole ──────────────────────────────────────────────────────────────
 
-/// `basalt::PinholeCamera` (`pinhole_camera.hpp:55`), N = 4.
+/// Pinhole projection with four parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pinhole<S: LieScalar> {
     param: SVector<S, 4>,
 }
 
 impl<S: LieScalar> Pinhole<S> {
-    /// Build from `[fx, fy, cx, cy]` (`pinhole_camera.hpp:77`).
+    /// Build from `[fx, fy, cx, cy]`.
     pub fn new(param: SVector<S, 4>) -> Self {
         Self { param }
     }
@@ -199,7 +137,6 @@ impl<S: LieScalar> Camera<S> for Pinhole<S> {
         self.param += inc;
     }
 
-    /// `pinhole_camera.hpp:119-166`.
     fn project_with_jacobians(
         &self,
         p3d: &Vector4<S>,
@@ -216,15 +153,12 @@ impl<S: LieScalar> Camera<S> for Pinhole<S> {
         let y: S = p3d[1];
         let z: S = p3d[2];
 
-        // :134-135
         proj[0] = fx * x / z + cx;
         proj[1] = fy * y / z + cy;
 
-        // :137
         let is_valid: bool = z >= S::sophus_epsilon_sqrt();
 
         if let Some(jacobian) = d_proj_d_p3d {
-            // :142-149
             jacobian.fill(S::zero());
             let z2: S = z * z;
             jacobian[(0, 0)] = fx / z;
@@ -234,7 +168,6 @@ impl<S: LieScalar> Camera<S> for Pinhole<S> {
         }
 
         if let Some(jacobian) = d_proj_d_param {
-            // :156-160
             jacobian.fill(S::zero());
             jacobian[(0, 0)] = x / z;
             jacobian[(0, 2)] = S::one();
@@ -245,7 +178,6 @@ impl<S: LieScalar> Camera<S> for Pinhole<S> {
         is_valid
     }
 
-    /// `pinhole_camera.hpp:190-254`.
     fn unproject(&self, proj: &Vector2<S>, p3d: &mut Vector4<S>) -> bool {
         self.unproject_with_jacobians(proj, p3d, None, None)
     }
@@ -254,7 +186,6 @@ impl<S: LieScalar> Camera<S> for Pinhole<S> {
 impl<S: LieScalar> UnprojectJacobians<S> for Pinhole<S> {
     type UnprojectParamJacobian = SMatrix<S, 4, 4>;
 
-    /// `pinhole_camera.hpp:190-254`.
     fn unproject_with_jacobians(
         &self,
         proj: &Vector2<S>,
@@ -267,7 +198,6 @@ impl<S: LieScalar> UnprojectJacobians<S> for Pinhole<S> {
         let cx: S = self.param[2];
         let cy: S = self.param[3];
 
-        // :201-212
         let mx: S = (proj[0] - cx) / fx;
         let my: S = (proj[1] - cy) / fy;
         let r2: S = mx * mx + my * my;
@@ -280,7 +210,6 @@ impl<S: LieScalar> UnprojectJacobians<S> for Pinhole<S> {
         p3d[2] = norm_inv;
 
         if d_p3d_d_proj.is_some() || d_p3d_d_param.is_some() {
-            // :215-228
             let d_norm_inv_d_r2: S = -c::<S>(0.5) * norm_inv * norm_inv * norm_inv;
             let two: S = c(2.0);
 
@@ -295,13 +224,11 @@ impl<S: LieScalar> UnprojectJacobians<S> for Pinhole<S> {
             c1[2] = two * my * d_norm_inv_d_r2 / fy;
 
             if let Some(jacobian) = d_p3d_d_proj {
-                // :232-233
                 jacobian.set_column(0, &c0);
                 jacobian.set_column(1, &c1);
             }
 
             if let Some(jacobian) = d_p3d_d_param {
-                // :240-244
                 jacobian.set_column(2, &(-c0));
                 jacobian.set_column(3, &(-c1));
                 jacobian.set_column(0, &(-c0 * mx));
@@ -309,30 +236,29 @@ impl<S: LieScalar> UnprojectJacobians<S> for Pinhole<S> {
             }
         }
 
-        // :253
         true
     }
 }
 
 // ─── kb4 ──────────────────────────────────────────────────────────────────
 
-/// `basalt::KannalaBrandtCamera4` (`kannala_brandt_camera4.hpp:63`), N = 8.
+/// Kannala-Brandt projection with four radial terms and eight parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KannalaBrandt4<S: LieScalar> {
     param: SVector<S, 8>,
 }
 
 impl<S: LieScalar> KannalaBrandt4<S> {
-    /// Build from `[fx, fy, cx, cy, k1, k2, k3, k4]` (`kannala_brandt_camera4.hpp:86`).
+    /// Build from `[fx, fy, cx, cy, k1, k2, k3, k4]`.
     pub fn new(param: SVector<S, 8>) -> Self {
         Self { param }
     }
 
-    /// `solveTheta<ITER>` (`kannala_brandt_camera4.hpp:274-308`).
+    /// `solveTheta<ITER>`.
     ///
     /// Three Newton steps on `d(theta) - r_theta = 0`, with no convergence test
     /// and no guard on `d_func_d_theta`: the count is fixed at the call site
-    /// (`:359`, `solveTheta<3>`) and that is the whole stopping rule.
+    /// (`solveTheta<3>`) and that is the whole stopping rule.
     fn solve_theta(&self, r_theta: S, d_func_d_theta: &mut S) -> S {
         let k1: S = self.param[4];
         let k2: S = self.param[5];
@@ -343,7 +269,6 @@ impl<S: LieScalar> KannalaBrandt4<S> {
         for _ in 0..3 {
             let theta2: S = theta * theta;
 
-            // :284-292
             let mut func: S = k4 * theta2;
             func += k3;
             func *= theta2;
@@ -354,7 +279,6 @@ impl<S: LieScalar> KannalaBrandt4<S> {
             func += S::one();
             func *= theta;
 
-            // :294-301
             let mut derivative: S = c::<S>(9.0) * k4 * theta2;
             derivative += c::<S>(7.0) * k3;
             derivative *= theta2;
@@ -365,7 +289,6 @@ impl<S: LieScalar> KannalaBrandt4<S> {
             derivative += S::one();
             *d_func_d_theta = derivative;
 
-            // :304
             theta += (r_theta - func) / derivative;
         }
 
@@ -390,7 +313,6 @@ impl<S: LieScalar> Camera<S> for KannalaBrandt4<S> {
         self.param += inc;
     }
 
-    /// `kannala_brandt_camera4.hpp:129-260`.
     fn project_with_jacobians(
         &self,
         p3d: &Vector4<S>,
@@ -411,25 +333,14 @@ impl<S: LieScalar> Camera<S> for KannalaBrandt4<S> {
         let y: S = p3d[1];
         let z: S = p3d[2];
 
-        // :148-149
         let r2: S = x * x + y * y;
         let r: S = r2.sqrt();
 
         let mut is_valid: bool = true;
         if r > S::sophus_epsilon_sqrt() {
-            // :153-167. atan2(r, z) accepts z < 0: a fisheye sees behind its
-            // own plane, which is why this branch never invalidates a point.
-            //
-            // The angle is computed in `f64` and rounded back even in the `f32`
-            // instantiation, because that is what the C++ does. The header's
-            // `using` declarations (`:48-50`) cover `cos`, `sin` and `sqrt` but
-            // **not** `atan2`, so the unqualified call at `:153` resolves to
-            // `::atan2(double, double)` from `<math.h>` and the float arguments
-            // are promoted. Measured on this host: `atan2f(4.123105526f, -1.0f)`
-            // is `0x3fe784b5` while the promoted call gives `0x3fe784b6`, and
-            // that one bit of angle is 6e-5 px on basalt's own kb4 test camera.
-            // Same rule as decision D37, applied to a call instead of a
-            // comparison.
+            // `atan2(r, z)` permits negative z: a fisheye can see behind its own plane.
+            // Compute the angle in f64 and round back for the f32 lane; a one-bit angle
+            // change can move the projected pixel near a branch boundary.
             let theta: S = S::from_literal(r.to_f64().atan2(z.to_f64()));
             let theta2: S = theta * theta;
 
@@ -446,12 +357,10 @@ impl<S: LieScalar> Camera<S> for KannalaBrandt4<S> {
             let mx: S = x * r_theta / r;
             let my: S = y * r_theta / r;
 
-            // :169-170
             proj[0] = fx * mx + cx;
             proj[1] = fy * my + cy;
 
             if let Some(jacobian) = d_proj_d_p3d {
-                // :174-201
                 let d_r_d_x: S = x / r;
                 let d_r_d_y: S = y / r;
 
@@ -489,7 +398,6 @@ impl<S: LieScalar> Camera<S> for KannalaBrandt4<S> {
             }
 
             if let Some(jacobian) = d_proj_d_param {
-                // :208-219
                 jacobian.fill(S::zero());
                 jacobian[(0, 0)] = mx;
                 jacobian[(0, 2)] = S::one();
@@ -505,8 +413,7 @@ impl<S: LieScalar> Camera<S> for KannalaBrandt4<S> {
                 }
             }
         } else {
-            // :225-256. Too close to the optical axis for `atan2` to be stable,
-            // so the model degenerates to a pinhole and the sign of z decides.
+            // Near the optical axis, use the pinhole limit and let the sign of z decide validity.
             if z < S::sophus_epsilon_sqrt() {
                 is_valid = false;
             }
@@ -535,7 +442,6 @@ impl<S: LieScalar> Camera<S> for KannalaBrandt4<S> {
         is_valid
     }
 
-    /// `kannala_brandt_camera4.hpp:337-455`.
     fn unproject(&self, proj: &Vector2<S>, p3d: &mut Vector4<S>) -> bool {
         self.unproject_with_jacobians(proj, p3d, None, None)
     }
@@ -544,7 +450,6 @@ impl<S: LieScalar> Camera<S> for KannalaBrandt4<S> {
 impl<S: LieScalar> UnprojectJacobians<S> for KannalaBrandt4<S> {
     type UnprojectParamJacobian = SMatrix<S, 4, 8>;
 
-    /// `kannala_brandt_camera4.hpp:337-455`.
     fn unproject_with_jacobians(
         &self,
         proj: &Vector2<S>,
@@ -557,7 +462,6 @@ impl<S: LieScalar> UnprojectJacobians<S> for KannalaBrandt4<S> {
         let cx: S = self.param[2];
         let cy: S = self.param[3];
 
-        // :348-369
         let mx: S = (proj[0] - cx) / fx;
         let my: S = (proj[1] - cy) / fy;
 
@@ -581,7 +485,6 @@ impl<S: LieScalar> UnprojectJacobians<S> for KannalaBrandt4<S> {
         p3d[2] = cos_theta;
 
         if d_p3d_d_proj.is_some() || d_p3d_d_param.is_some() {
-            // :372-417
             let mut d_thetad_d_mx: S = S::zero();
             let mut d_thetad_d_my: S = S::zero();
             let mut d_scaling_d_thetad: S = S::zero();
@@ -626,13 +529,11 @@ impl<S: LieScalar> UnprojectJacobians<S> for KannalaBrandt4<S> {
             c1[2] = d_res2_d_my / fy;
 
             if let Some(jacobian) = d_p3d_d_proj {
-                // :421-422
                 jacobian.set_column(0, &c0);
                 jacobian.set_column(1, &c1);
             }
 
             if let Some(jacobian) = d_p3d_d_param {
-                // :429-443
                 jacobian.fill(S::zero());
 
                 jacobian.set_column(2, &(-c0));
@@ -652,18 +553,15 @@ impl<S: LieScalar> UnprojectJacobians<S> for KannalaBrandt4<S> {
             }
         }
 
-        // :454
         true
     }
 }
 
 // ─── pinhole-radtan8 ──────────────────────────────────────────────────────
 
-/// `basalt::PinholeRadtan8Camera` (`pinhole_radtan8_camera.hpp:69`), N = 12 plus `rpmax`.
-///
-/// `rpmax` bounds the radius in the z = 1 plane where the rational distortion
-/// is still injective (`:116-130`); zero means unbounded. It is stored beside
-/// the twelve optimized parameters, not inside them (`:729-733`).
+/// Rational Brown-Conrady projection with twelve parameters and `rpmax`.
+/// The radius bounds the injective region in the z = 1 plane. Zero is unbounded.
+/// It is stored separately from the optimized parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PinholeRadtan8<S: LieScalar> {
     param: SVector<S, 12>,
@@ -671,22 +569,18 @@ pub struct PinholeRadtan8<S: LieScalar> {
 }
 
 impl<S: LieScalar> PinholeRadtan8<S> {
-    /// Build from `[fx, fy, cx, cy, k1, k2, p1, p2, k3, k4, k5, k6]` and `rpmax`
-    /// (`pinhole_radtan8_camera.hpp:100-103`).
-    ///
-    /// Unlike the C++ constructor there is no `rpmax = -1` sentinel that
-    /// triggers `computeRpmax()`: the port never estimates the radius, it reads
-    /// it from the calibration.
+    /// Build from `[fx, fy, cx, cy, k1, k2, p1, p2, k3, k4, k5, k6]` and `rpmax`.
+    /// The radius is supplied by calibration, never estimated by this constructor.
     pub fn new(param: SVector<S, 12>, rpmax: S) -> Self {
         Self { param, rpmax }
     }
 
-    /// `getRpmax()` (`pinhole_radtan8_camera.hpp:702`).
+    /// `getRpmax()`.
     pub fn rpmax(&self) -> S {
         self.rpmax
     }
 
-    /// `distort` (`pinhole_radtan8_camera.hpp:505-563`): the normalized point
+    /// `distort` : the normalized point
     /// `(x', y')` mapped to `(x'', y'')`, with an optional 2x2 Jacobian.
     pub fn distort(
         &self,
@@ -707,7 +601,6 @@ impl<S: LieScalar> PinholeRadtan8<S> {
         let s2: S = c(2.0);
         let s3: S = c(3.0);
 
-        // :515-524
         let xp: S = undist[0];
         let yp: S = undist[1];
         let rp2: S = xp * xp + yp * yp;
@@ -719,7 +612,7 @@ impl<S: LieScalar> PinholeRadtan8<S> {
         dist[1] = yp * cdist + delta_y;
 
         if let Some(jacobian) = d_dist_d_undist {
-            // :530-559, sympy-derived in the C++ and transcribed verbatim.
+            // Analytic distortion Jacobian.
             let v0: S = xp * xp;
             let v1: S = yp * yp;
             let v2: S = v0 + v1;
@@ -762,13 +655,12 @@ impl<S: LieScalar> Camera<S> for PinholeRadtan8<S> {
         self.param
     }
 
-    /// `operator+=` (`pinhole_radtan8_camera.hpp:688-691`) **without** the
+    /// `operator+=` **without** the
     /// `rpmax_ = computeRpmax()` that follows it: see the module docs.
     fn apply_inc(&mut self, inc: &Self::Params) {
         self.param += inc;
     }
 
-    /// `pinhole_radtan8_camera.hpp:301-494`.
     fn project_with_jacobians(
         &self,
         p3d: &Vector4<S>,
@@ -798,7 +690,6 @@ impl<S: LieScalar> Camera<S> for PinholeRadtan8<S> {
         let s2: S = c(2.0);
         let s3: S = c(3.0);
 
-        // :324-336
         let xp: S = x / z;
         let yp: S = y / z;
         let rp2: S = xp * xp + yp * yp;
@@ -811,7 +702,6 @@ impl<S: LieScalar> Camera<S> for PinholeRadtan8<S> {
         proj[0] = fx * xpp + cx;
         proj[1] = fy * ypp + cy;
 
-        // :338-340
         let positive_z: bool = z >= S::sophus_epsilon_sqrt();
         let in_injective_area: bool = if self.rpmax == s0 {
             true
@@ -821,7 +711,7 @@ impl<S: LieScalar> Camera<S> for PinholeRadtan8<S> {
         let is_valid: bool = positive_z && in_injective_area;
 
         if let Some(jacobian) = d_proj_d_p3d {
-            // :348-398, sympy-derived in the C++ and transcribed verbatim.
+            // Analytic projection Jacobian with respect to the point.
             jacobian.fill(s0);
 
             let v0: S = p1 * y;
@@ -871,7 +761,7 @@ impl<S: LieScalar> Camera<S> for PinholeRadtan8<S> {
         }
 
         if let Some(jacobian) = d_proj_d_param {
-            // :405-488, sympy-derived in the C++ and transcribed verbatim.
+            // Analytic projection Jacobian with respect to the parameters.
             jacobian.fill(s0);
 
             let w0: S = z * z * z * z * z * z;
@@ -945,10 +835,8 @@ impl<S: LieScalar> Camera<S> for PinholeRadtan8<S> {
         let cx: S = self.param[2];
         let cy: S = self.param[3];
 
-        // :610-611
         let dist: Vector2<S> = Vector2::new((proj[0] - cx) / fx, (proj[1] - cy) / fy);
 
-        // :619-630
         let mut undist: Vector2<S> = dist;
         let eps: S = S::sophus_epsilon_sqrt();
         for _ in 0..5 {
@@ -970,14 +858,12 @@ impl<S: LieScalar> Camera<S> for PinholeRadtan8<S> {
         let xp: S = undist[0];
         let yp: S = undist[1];
 
-        // :651-655
         let norm_inv: S = S::one() / (xp * xp + yp * yp + S::one()).sqrt();
         p3d.fill(S::zero());
         p3d[0] = xp * norm_inv;
         p3d[1] = yp * norm_inv;
         p3d[2] = norm_inv;
 
-        // :664-666
         let rp2: S = xp * xp + yp * yp;
         if self.rpmax == S::zero() {
             true
@@ -989,15 +875,8 @@ impl<S: LieScalar> Camera<S> for PinholeRadtan8<S> {
 
 // ─── the variant ──────────────────────────────────────────────────────────
 
-/// `basalt::GenericCamera` (`generic_camera.hpp:62`), narrowed to V0's models.
-///
-/// basalt dispatches with `std::visit` and warns that a per-point visit is
-/// "**SLOW** … requires vtable lookup for every projection"
-/// (`generic_camera.hpp:127-129`); a Rust enum matched inside the loop is a
-/// jump table over three monomorphized bodies, with no vtable and no `Box<dyn>`.
-///
-/// `ds`, `eucm` and `ucm` parse in [`crate::calib::CameraModel`] but have no
-/// variant here: [`CameraEnum::from_model`] rejects them (decision D11).
+/// Dispatch among the three implemented projection models without a vtable.
+/// `ds`, `eucm` and `ucm` parse but are rejected by [`CameraEnum::from_model`] (D11).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CameraEnum<S: LieScalar> {
     /// `pinhole`.
@@ -1032,7 +911,7 @@ impl<S: LieScalar> CameraEnum<S> {
         }
     }
 
-    /// basalt's `getName()` (`generic_camera.hpp:96`).
+    /// The model name.
     pub fn name(&self) -> &'static str {
         match self {
             Self::Pinhole(cam) => cam.name(),
@@ -1076,7 +955,7 @@ impl<S: LieScalar> CameraEnum<S> {
     }
 
     /// Project and fill the 2x4 point Jacobian, the only one
-    /// `GenericCamera::project` exposes (`generic_camera.hpp:135`).
+    /// `GenericCamera::project` exposes.
     #[inline]
     pub fn project_with_jacobian(
         &self,
@@ -1103,10 +982,8 @@ impl<S: LieScalar> CameraEnum<S> {
         }
     }
 
-    /// Unproject and fill the 4x2 Jacobian (`generic_camera.hpp:157`).
-    ///
-    /// `pinhole-radtan8` has none: C++ asserts, the port returns
-    /// [`CameraError::UnprojectJacobianUnsupported`].
+    /// Unproject and fill the 4x2 Jacobian.
+    /// Radtan8 returns [`CameraError::UnprojectJacobianUnsupported`].
     pub fn unproject_with_jacobian(
         &self,
         proj: &Vector2<S>,
@@ -1125,12 +1002,8 @@ impl<S: LieScalar> CameraEnum<S> {
     }
 }
 
-/// One camera of a rig: a projection model plus the size of the images it produces.
-///
-/// basalt reads `resolution[0]` for every camera
-/// (`frame_to_frame_optical_flow.h:108-109`); the port carries a resolution per
-/// camera because the msd-g2 recordings are stored rotated into portrait and
-/// the cameras of one rig then disagree (decision D30).
+/// A projection model and its camera's own image size.
+/// Per-camera resolutions support rigs whose stored orientations differ (D30).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RigCamera<S: LieScalar> {
     /// The projection model.
@@ -1171,18 +1044,10 @@ impl<S: LieScalar> RigCamera<S> {
         self.resolution[1]
     }
 
-    /// `Image::InBounds(p, border)` for floating-point coordinates
-    /// (`image/image.h:695-705`).
-    ///
-    /// The `offset` of one that the C++ adds for floating-point scalars is what
-    /// keeps `interp` from reading the row past the last one, so a keypoint at
-    /// `border` is in and a keypoint at `height - border - 1` is out.
-    ///
-    /// No production caller: the frontend asks
-    /// [`crate::image::ImageU16::in_bounds`], the same C++ predicate over the
-    /// buffer it is about to read. This one answers from the *calibrated*
-    /// resolution, which is what `tests/camera_jacobians.rs` needs to say where
-    /// a projection lands on the sensor.
+    /// Floating-point image bounds with a one-pixel interpolation margin.
+    /// A coordinate at `border` is in; one at `height - border - 1` is out.
+    /// Tests use the calibrated resolution here. The frontend uses
+    /// [`crate::image::ImageU16::in_bounds`] on the actual buffer.
     pub fn in_bounds(&self, uv: &Vector2<S>, border: S) -> bool {
         let width: S = c(f64::from(self.resolution[0]));
         let height: S = c(f64::from(self.resolution[1]));
@@ -1201,7 +1066,7 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
 
-    /// `KannalaBrandtCamera4::getTestProjections()` (`kannala_brandt_camera4.hpp:491`).
+    /// `KannalaBrandtCamera4::getTestProjections()`.
     fn kb4_test_camera<S: LieScalar>() -> KannalaBrandt4<S> {
         KannalaBrandt4::new(SVector::<S, 8>::from([
             c(379.045),
@@ -1217,7 +1082,7 @@ mod tests {
 
     #[test]
     fn a_pinhole_projects_and_unprojects_a_known_point() {
-        // Euroc intrinsics, `pinhole_camera.hpp:287`.
+        // Euroc intrinsics.
         let camera: Pinhole<f64> = Pinhole::new(SVector::<f64, 4>::from([
             460.76484651566468,
             459.4051018049483,
@@ -1246,7 +1111,7 @@ mod tests {
         let camera: Pinhole<f64> =
             Pinhole::new(SVector::<f64, 4>::from([400.0, 400.0, 320.0, 240.0]));
         let mut uv: Vector2<f64> = Vector2::zeros();
-        // `pinhole_camera.hpp:137`: the bound is epsilonSqrt, not zero.
+        // the bound is epsilonSqrt, not zero.
         assert!(!camera.project(&Vector4::new(0.1, 0.1, -1.0, 1.0), &mut uv));
         assert!(uv.iter().all(|value| value.is_finite()));
         assert!(!camera.project(&Vector4::new(0.1, 0.1, 1e-8, 1.0), &mut uv));
@@ -1257,10 +1122,10 @@ mod tests {
     fn kb4_accepts_a_point_behind_its_own_plane_but_not_on_the_negative_axis() {
         let camera: KannalaBrandt4<f64> = kb4_test_camera();
         let mut uv: Vector2<f64> = Vector2::zeros();
-        // r > epsilonSqrt: `kannala_brandt_camera4.hpp:152` never invalidates,
+        // r > epsilonSqrt: never invalidates,
         // which is how a 190-degree fisheye sees behind itself.
         assert!(camera.project(&Vector4::new(1.0, 0.0, -1.0, 1.0), &mut uv));
-        // r <= epsilonSqrt and z < epsilonSqrt: `:226`.
+        // r <= epsilonSqrt and z < epsilonSqrt:.
         assert!(!camera.project(&Vector4::new(0.0, 0.0, -1.0, 1.0), &mut uv));
         assert!(uv.iter().all(|value| value.is_finite()));
     }
@@ -1278,7 +1143,7 @@ mod tests {
         let rpmax: f64 = camera.rpmax();
         assert_abs_diff_eq!(rpmax, 2.72763729095459, epsilon = 0.0);
 
-        // rp2 = (x/z)^2 + (y/z)^2 is compared against rpmax^2 (`:339`), so a
+        // rp2 = (x/z)^2 + (y/z)^2 is compared against rpmax^2, so a
         // point on the x axis at z = 1 is in or out by its x alone.
         let mut uv: Vector2<f64> = Vector2::zeros();
         let inside: Vector4<f64> = Vector4::new(rpmax - 1e-6, 0.0, 1.0, 1.0);
@@ -1325,7 +1190,7 @@ mod tests {
 
     #[test]
     fn radtan8_without_a_valid_radius_is_unbounded() {
-        // `:339`: rpmax == 0 means "injective everywhere", not "nothing is valid".
+        // rpmax == 0 means "injective everywhere", not "nothing is valid".
         let camera: PinholeRadtan8<f64> = PinholeRadtan8::new(
             SVector::<f64, 12>::from([
                 269.06, 269.16, 324.33, 245.22, 0.6257, 0.4661, -0.000185, -4.288e-5, 0.00417,
@@ -1388,7 +1253,7 @@ mod tests {
         assert_eq!(rig[0].model.name(), "kb4");
         assert_eq!([rig[0].width(), rig[0].height()], [960, 960]);
 
-        // `image/image.h:704`: border <= u < w - border - 1.
+        // border <= u < w - border - 1.
         assert!(rig[0].in_bounds(&Vector2::new(0.0, 0.0), 0.0));
         assert!(rig[0].in_bounds(&Vector2::new(958.999, 958.999), 0.0));
         assert!(!rig[0].in_bounds(&Vector2::new(959.0, 0.0), 0.0));

@@ -1,94 +1,30 @@
-//! The sliding-window VIO driver: `SqrtKeypointVioEstimator<Scalar>`.
+//! The offline sliding-window VIO driver.
 //!
-//! A port of `src/vi_estimator/sqrt_keypoint_vio.cpp` and
-//! `include/basalt/vi_estimator/sqrt_keypoint_vio.h` on the ABS_QR plus
-//! square-root-marginalization path only (D13), composing what the stages below
-//! already built: [`crate::ba_base::BundleAdjustmentBase`] for the window and
-//! the reprojection error, [`crate::imu::IntegratedImuMeasurement`] for the
-//! preintegration, [`crate::linearize::LinearizationAbsQR`] for the linearized
-//! problem and [`crate::marg::marginalize`] for the prior.
+//! The driver composes bundle adjustment, IMU preintegration, square-root
+//! linearization and marginalization. `process_frame` initializes from an
+//! accelerometer sample, integrates `(prev_t, curr_t]`, and calls `measure`.
+//! Measurement predicts the state, files observations, votes on a keyframe,
+//! triangulates landmarks, then optimizes and marginalizes.
 //!
-//! ## What the driver itself is
-//!
-//! Three functions, and they are the whole algorithm:
-//!
-//! * [`SqrtKeypointVio::process_frame`] is `proc_func`'s loop body
-//!   (`:263-355`): initialise from one accelerometer sample if this is the first
-//!   frame, preintegrate the IMU samples that fall in `(prev_t, curr_t]`, then
-//!   `measure`.
-//! * `SqrtKeypointVio::measure` (`:422-575`) predicts the new state, files the
-//!   observations, votes on a keyframe, triangulates what the window does not
-//!   yet know, and calls `optimize_and_marg`.
-//! * `optimize` (`optimize.rs`, `:1201-1639`) is the Levenberg–Marquardt loop
-//!   and `marginalize` (`schedule.rs`, `:707-1198`) is the schedule plus the
-//!   call into the square-root helper.
-//!
-//! ## Threading: none (D17)
-//!
-//! basalt runs this on its own thread behind a bounded `vision_data_queue` and
-//! a 3000-deep `imu_data_queue`, and drops framesets when
-//! `vio_enforce_realtime` is set. Offline mode has no threads and no drops:
-//! [`SqrtKeypointVio::push_imu`] appends to an unbounded buffer and
-//! `process_frame` runs to completion in the calling thread, so no queue state
-//! can reach an estimator decision. `vio_enforce_realtime` is therefore refused
-//! at construction rather than silently ignored — `src/vio.cpp:307-309` forces
-//! it off for offline replay anyway.
-//!
-//! ## What is deliberately not here
-//!
-//! `scheduleResetState`/`resetState` (`:120-195`): the VIT path only reaches it
-//! from Monado's reset request, and `measure` returning an error is the port's
-//! signal instead. `out_marg_queue` (`:952-978`), which exports `MargData` for
-//! the NFR mapper that D13 puts out of scope. `takeLongTermKeyframe` is
-//! implemented ([`SqrtKeypointVio::take_long_term_keyframe`]) because the
-//! `take_ltkf` branch inside `measure` is on the shipped path, but nothing in
-//! the VIO calls it. The visualization payloads (`:643-663`) become
-//! [`SqrtKeypointVio::snapshot`], which returns values; the Rerun rung that logs
-//! them is stage S9's (D03).
+//! Processing is synchronous (D17). IMU samples enter an unbounded buffer and
+//! frames run to completion in the calling thread. Realtime queue dropping is
+//! unsupported and `vio_enforce_realtime` is refused. Snapshots return values
+//! for visualization. Long-term keyframes are supported; mapper output is not.
 //!
 //! ## Where an error leaves the window
 //!
-//! Three classes, and only the first is retryable. The class is the **call site**, not the variant:
-//! [`EstimatorError::BundleAdjustment`] and [`EstimatorError::State`] are each raised from more
-//! than one, and the sites fall in different classes.
+//! The call site determines whether an error is retryable:
+//! 1. Validation before mutation leaves the estimator untouched. Correct the
+//!    input and retry, or construct a new estimator after a constructor error.
+//! 2. Errors after IMU consumption but before state insertion leave the old
+//!    window but consume the required samples. Rebuild the estimator.
+//! 3. Errors after insertion leave an advanced window; retrying would duplicate
+//!    observations. Rebuild the estimator.
 //!
-//! 1. **Raised before anything moves**, so the estimator is untouched and the
-//!    caller may retry with a corrected input: [`EstimatorError::CameraCountMismatch`]
-//!    and [`EstimatorError::NonMonotonicFrame`] from [`SqrtKeypointVio::process_frame`]'s
-//!    validation, and [`EstimatorError::UnsupportedPath`], [`EstimatorError::EnforceRealtime`],
-//!    [`EstimatorError::EmptyWindow`] and one [`EstimatorError::BundleAdjustment`] site from
-//!    [`SqrtKeypointVio::new`]: [`BaError::Camera`], raised while
-//!    [`BundleAdjustmentBase::new`] resolves the rig's projection models
-//!    (`ba_base.rs:647`, `camera.rs:1058`), which returns before an estimator
-//!    exists at all, so a corrected calibration may be passed to a new one.
-//! 2. **Raised after the IMU queue was consumed but before the new state was
-//!    filed.** [`EstimatorError::ImuQueueRanDry`] and [`EstimatorError::Imu`] come out of the
-//!    preintegration loops, which have already popped samples; and
-//!    [`EstimatorError::PreviousStateMissing`] comes out of `measure`'s prediction, after
-//!    the same pops. The window still holds the frames it did, but the samples
-//!    that interval needed are gone, so the same frameset can never be
-//!    integrated again: not retryable either.
-//! 3. **Raised after the new state, its observations and its preintegration
-//!    were inserted** — every remaining variant, and all but one of the sites
-//!    inside `measure`: the window-invariant breaks, `NumericallyInvalid` from
-//!    the LM loop, and anything `Linearize`, `Marginalize`, `BundleAdjustment`,
-//!    `Landmark` or `State` refuses there. The window has advanced by one
-//!    frameset while `prev_frame` has not, so retrying the same frameset would
-//!    file its observations twice.
-//!
-//!    One class-3 site sits before `measure`: `process_frame`'s initialization
-//!    pushes the first ordering entry (`:281-283`) after it has filed the first
-//!    state, so its [`EstimatorError::State`] would leave that same advanced window. It
-//!    cannot fire — the push is the first into a fresh [`AbsOrderMap`], with
-//!    nothing for `DuplicateFrame` to collide with and a fixed
-//!    `POSE_VEL_BIAS_SIZE` that cannot overflow the offset — and stays a `?`
-//!    because D32 leaves no room for the `unwrap` that would replace it.
-//!
-//! basalt has one answer to classes 2 and 3: it resets the whole estimator
-//! (`proc_func`'s `return false`, `scheduleResetState` at `:120-195`), which
-//! this port does not have. A caller that sees one of them must rebuild the
-//! estimator. Stage S9's Realtime mode is where the reset belongs (D5 of the S8
-//! simplify list).
+//! `BundleAdjustment` and `State` errors occur at multiple sites, so their
+//! variants alone do not establish retryability. Initialization also inserts a
+//! state before its first ordering entry. That ordering insertion cannot fail
+//! for a fresh map and fixed block size, but still uses a typed result (D32).
 
 mod frame_update;
 mod optimize;
@@ -128,11 +64,11 @@ pub use schedule::{EvictionReason, KeyframeEviction, MarginalizationStats};
 /// [`EstimatorError::KeyframeNotInWindow`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowRole {
-    /// A pose block, `frame_poses` (`:794`, `:849`).
+    /// A pose block, `frame_poses`.
     Pose,
-    /// A state block, `frame_states` (`:854`).
+    /// A state block, `frame_states`.
     State,
-    /// An entry in `num_points_kf`, the landmarks a keyframe hosts (`:827`).
+    /// An entry in `num_points_kf`, the landmarks a keyframe hosts.
     HostedLandmarkCount,
 }
 
@@ -147,15 +83,9 @@ impl std::fmt::Display for WindowRole {
     }
 }
 
-/// Everything the driver can refuse.
-///
-/// basalt's equivalents are `BASALT_ASSERT`s, an `std::out_of_range` from a
-/// `.at()`, or a `return false` that makes `proc_func` reset the whole state.
-/// Under D32 none of them may panic on data, so each becomes a variant here.
-///
-/// **Which errors leave the window where** is a property of the call site, not
-/// of the variant, and is set out under "Where an error leaves the window" in
-/// the module header.
+/// Typed failures from the driver (D32).
+/// Whether the window is unchanged depends on the call site, as described in
+/// the module documentation, rather than on the error variant alone.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum EstimatorError {
     /// `vio_linearization_type` is not `ABS_QR`, or `vio_sqrt_marg` is false:
@@ -202,8 +132,7 @@ pub enum EstimatorError {
         /// What it holds.
         value: f64,
     },
-    /// The damping bounds cross, so no `lambda` satisfies both (`:1415`,
-    /// `:1595`).
+    /// The damping bounds cross, so no `lambda` satisfies both (
     #[error("vio_lm_lambda_min {min} must not exceed vio_lm_lambda_max {max}")]
     DampingRangeReversed {
         /// `vio_lm_lambda_min`.
@@ -211,7 +140,7 @@ pub enum EstimatorError {
         /// `vio_lm_lambda_max`.
         max: f64,
     },
-    /// The rig has fewer than the two cameras `optical_flow.h:210` requires,
+    /// The rig has fewer than the two cameras requires,
     /// its intrinsics and extrinsics disagree, or a frameset carries a
     /// different number of cameras than the rig.
     #[error("expected {expected} cameras, got {actual}")]
@@ -221,7 +150,7 @@ pub enum EstimatorError {
         /// Cameras the rejected input carries.
         actual: usize,
     },
-    /// Frame timestamps must strictly increase: `:309-313` asserts both the
+    /// Frame timestamps must strictly increase: asserts both the
     /// duplicate and the reordering, because a zero `dt` makes the
     /// preintegration invalid.
     #[error("frameset at {t_ns} ns does not follow the previous frameset at {previous_t_ns} ns")]
@@ -231,9 +160,7 @@ pub enum EstimatorError {
         /// Timestamp of the rejected frameset.
         t_ns: i64,
     },
-    /// The window disagrees with the marginalization prior's ordering
-    /// (`:1227`, `:1237`). C++ asserts, or throws out of `.at()` when the frame
-    /// is missing from the prior altogether.
+    /// The window disagrees with the marginalization prior's ordering.
     #[error("frame {frame_id} sits at {found:?} in the window but at {expected:?} in the prior")]
     PriorOrderMismatch {
         /// The disagreeing frame.
@@ -243,9 +170,7 @@ pub enum EstimatorError {
         /// `(index, size)` the window just built.
         found: (usize, usize),
     },
-    /// A keyframe the eviction score reads is missing from the window
-    /// (`:824`, `:845-856`, `:794`) — `.at()` calls that C++ would throw out
-    /// of.
+    /// An eviction candidate is missing from the window.
     #[error("keyframe {frame_id} is not in the window as a {wanted}")]
     KeyframeNotInWindow {
         /// The keyframe the score wanted.
@@ -253,18 +178,14 @@ pub enum EstimatorError {
         /// What the score wanted it as.
         wanted: WindowRole,
     },
-    /// `measure` predicts the new state from `frame_states.at(last_state_t_ns)`
-    /// (`:428`), which C++ throws out of when the previous state has already
-    /// been marginalized.
+    /// The previous state needed to predict the new state is missing.
     #[error("the previous state at {t_ns} ns is not in the window")]
     PreviousStateMissing {
         /// `last_state_t_ns`.
         t_ns: i64,
     },
-    /// An IMU factor's endpoint is in the ordering but not in `frame_states`
-    /// (`sc_ba_base.cpp:671-672`, two `.at()` calls C++ throws out of).
-    /// Skipping the factor would drop its residual from the true cost and so
-    /// change which LM step is accepted, silently.
+    /// An IMU endpoint is in the ordering but absent from `frame_states`.
+    /// Skipping it would silently change the objective and the accepted LM step.
     #[error("the imu factor over ({start_t_ns}, {end_t_ns}] ns has no state at {missing_t_ns} ns")]
     ImuFactorStateMissing {
         /// `get_start_t_ns()`.
@@ -274,11 +195,8 @@ pub enum EstimatorError {
         /// Whichever endpoint the window is missing; the start when both are.
         missing_t_ns: i64,
     },
-    /// A keypoint `measure` recorded as unconnected is missing from the camera's
-    /// own keypoint map when the triangulation reads its pixel back (`:514`'s
-    /// `opt_flow_meas->keypoints.at(i).at(lm_id)`, which C++ throws out of).
-    /// The two come from the same frameset a few lines apart, so a miss means
-    /// the frameset changed under the loop.
+    /// An unconnected keypoint is missing when triangulation reads its pixel.
+    /// Both maps come from the same frameset, so this violates an internal invariant.
     #[error("keypoint {kpt_id:?} is unconnected in camera {cam_id} but not in its keypoint map")]
     UnconnectedKeypointMissing {
         /// The camera whose map the id came from.
@@ -286,24 +204,21 @@ pub enum EstimatorError {
         /// The id `measure` filed as unconnected.
         kpt_id: KeypointId,
     },
-    /// The state window is shorter than the marginalization's own advance
-    /// (`:724`): C++ advances the iterator past `end()` and dereferences it.
+    /// The state window is too short for the marginalization advance.
     #[error("{states} states cannot spare the {states_to_remove} the marginalization removes")]
     StateWindowTooShort {
         /// States in the window.
         states: usize,
-        /// `states_to_remove` (`:720-724`).
+        /// `states_to_remove`.
         states_to_remove: usize,
     },
-    /// A frame in the window is missing from the ordering `optimize` built
-    /// from that same window a few lines earlier (`:1468`, `:1472`, both
-    /// `.at()` calls C++ would throw out of).
+    /// A window frame is absent from the ordering built for that window.
     #[error("frame {frame_id} is in the window but not in its ordering")]
     FrameNotInOrdering {
         /// The frame the increment could not be applied to.
         frame_id: FrameId,
     },
-    /// The eviction loop found no keyframe to marginalize, which `:872` asserts
+    /// The eviction loop found no keyframe to marginalize, which asserts
     /// is impossible ("the logic above is faulty").
     #[error("no keyframe could be selected for marginalization out of {candidates} candidates")]
     NoKeyframeToMarginalize {
@@ -329,7 +244,7 @@ pub enum EstimatorError {
     /// when it was frozen.
     #[error("state: {0}")]
     State(#[from] StateError),
-    /// The IMU queue ran dry while skipping forward to the frameset (`:265-271`)
+    /// The IMU queue ran dry while skipping forward to the frameset
     /// after the coverage test found a sample past it, which means
     /// [`SqrtKeypointVio::push_imu`]'s ordering invariant broke. Not
     /// [`FrameOutcome::NeedMoreImu`]: the skip has consumed samples by then, so
@@ -339,7 +254,7 @@ pub enum EstimatorError {
         /// The frameset being initialized on.
         t_ns: i64,
     },
-    /// `linearizeProblem` reported `numerically_valid == false`, which `:1301`
+    /// `linearizeProblem` reported `numerically_valid == false`, which
     /// prints as "did not expect numerical failure during linearization" and
     /// then fails the frame.
     #[error("linearization was not numerically valid at frame {t_ns} ns")]
@@ -349,19 +264,10 @@ pub enum EstimatorError {
     },
 }
 
-/// `OpticalFlowResult` as the estimator reads it (`optical_flow.h:186-215`).
-///
-/// The frontend produces much more — the input images, the responses, the
-/// pyramid levels, the timing block — and the backend reads exactly this: one
-/// map of keypoint id to observed pixel per camera, plus the frameset
-/// timestamp. Keeping the estimator's input this narrow is what lets the oracle
-/// gate replay the **C++'s own** flow stream into the Rust window without a
-/// frontend in the loop.
-///
-/// The pixels are `f32` whatever the estimator's scalar is, because
-/// `AffineCompact2f` is: `:437` and `:511` cast them to `Scalar` at the point of
-/// use, so an `f64` estimator sees `f32` values widened, never `f64` precision
-/// the frontend never had.
+/// The estimator's flow input: a frameset timestamp and one keypoint-to-pixel map
+/// per camera. This boundary permits backend tests without running the frontend.
+/// Pixels are f32 even in the f64 estimator; widening cannot add precision that
+/// the frontend did not produce.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlowObservations {
     /// Frameset timestamp, nanoseconds on the IMU clock.
@@ -383,21 +289,17 @@ impl FlowObservations {
 /// What one `process_frame` call did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FrameOutcome<S: LieScalar> {
-    /// The buffered IMU samples do not yet reach past the frameset, so nothing
-    /// was consumed and the window is unchanged. basalt's `pop` blocks here;
-    /// Offline mode returns instead (D17).
+    /// IMU coverage does not extend past this frameset. Nothing was consumed and
+    /// the window is unchanged, so the caller can add samples and retry (D17).
     NeedMoreImu,
     /// The frame was measured. The statistics are per frame and are the input
     /// to the S9 Rerun rung.
     Measured(Box<FrameStats<S>>),
 }
 
-/// Nanosecond marks basalt pushes into the frame's `TimeStats`
-/// (`:1627-1636`), as durations rather than cumulative timestamps.
-///
-/// Wall-clock measurements, so they differ run to run. Nothing reads them: they
-/// are reported, never compared, which is what keeps `process_frame`
-/// bit-reproducible (D17).
+/// Per-frame stage durations in nanoseconds.
+/// Wall-clock timings vary between runs and are reported but never used in
+/// estimator decisions, preserving deterministic replay (D17).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StageTimings {
     /// IMU integration before measure plus state prediction and append inside it.
@@ -429,14 +331,14 @@ pub struct FrameStats<S: LieScalar> {
     pub connected: Vec<usize>,
     /// `unconnected_obs[cam].size()`, keypoints the window has never seen.
     pub unconnected: Vec<usize>,
-    /// Whether `take_kf` was set when this frame arrived (`:473`).
+    /// Whether `take_kf` was set when this frame arrived.
     pub took_keyframe: bool,
-    /// Whether the keyframe vote of `:454-456` fired on this frame.
+    /// Whether the keyframe vote of fired on this frame.
     pub keyframe_vote: bool,
-    /// `frames_after_kf` (`:202`) after the update: the vote's rate limiter,
+    /// `frames_after_kf` after the update: the vote's rate limiter,
     /// zero on a keyframe and one more than the last frame otherwise.
     pub frames_after_kf: i32,
-    /// `num_points_added` (`:552`), zero on a non-keyframe.
+    /// `num_points_added`, zero on a non-keyframe.
     pub num_points_added: usize,
     /// Keyframes after the update, oldest first.
     pub kf_ids: Vec<FrameId>,
@@ -448,14 +350,14 @@ pub struct FrameStats<S: LieScalar> {
     pub num_observations: usize,
     /// Landmarks `vio_marg_lost_landmarks` would drop this frame.
     pub num_lost_landmarks: usize,
-    /// `opt_started` (`:1207`) after this frameset: false until five states
+    /// `opt_started` after this frameset: false until five states
     /// have accumulated, true from the first linearization on.
     pub opt_started: bool,
     /// One entry per LM step, accepted or rejected, in order.
     pub lm: Vec<LmIteration<S>>,
     /// Why the LM loop stopped.
     pub termination: LmTermination,
-    /// The marginalization, when the trigger of `:717` fired.
+    /// The marginalization, when the trigger of fired.
     pub marginalization: Option<MarginalizationStats>,
     /// What D76's frame update did with this frameset: never attempted, taken,
     /// or refused by a named precondition.
@@ -488,13 +390,13 @@ pub struct WindowState<S: LieScalar> {
     pub t_w_i: Se3<S>,
     /// The nine dof beyond the pose, `None` for a pose-only block.
     pub vel_bias: Option<VelBias<S>>,
-    /// Whether the linearization point is frozen (`imu_types.h:109`).
+    /// Whether the linearization point is frozen.
     pub linearized: bool,
     /// Whether this frame is a keyframe.
     pub keyframe: bool,
     /// Whether this frame is a long-term keyframe.
     pub long_term_keyframe: bool,
-    /// `frame_idx`, the monotonic index basalt keeps for the UI (`:207`).
+    /// Monotonic frame index for the UI.
     pub frame_index: Option<usize>,
 }
 
@@ -516,7 +418,7 @@ pub struct SnapshotLandmark<S: LieScalar> {
 /// The window and its landmarks, for the V2 visual-validation rung (D51).
 ///
 /// `getAllPosesMap`, `get_current_points` and the `VioVisualizationData` fields
-/// (`:643-663`) collapsed into one value the caller reads once per frame. The
+///  collapsed into one value the caller reads once per frame. The
 /// core logs nothing itself (D03).
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowSnapshot<S: LieScalar> {
@@ -532,32 +434,26 @@ pub struct WindowSnapshot<S: LieScalar> {
     pub marginalized: Vec<FrameId>,
 }
 
-/// LM damping, the four fields of `sqrt_keypoint_vio.h:241` in one place.
+/// LM damping, the four fields of in one place.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct LmDamping<S: LieScalar> {
-    /// `lambda`, reset to `vio_lm_lambda_initial` every frame (D11, `:1249`).
+    /// `lambda`, reset to `vio_lm_lambda_initial` every frame (D11).
     lambda: S,
-    /// `min_lambda`, the floor of the damped diagonal (`:1415`).
+    /// `min_lambda`, the floor of the damped diagonal.
     min_lambda: S,
-    /// `max_lambda`; exceeding it terminates the frame (`:1595`).
+    /// `max_lambda`; exceeding it terminates the frame.
     max_lambda: S,
     /// `lambda_vee`, the Nielsen escalation factor, reset to 2 on an accept.
     lambda_vee: S,
 }
 
-/// `vee_factor` and `initial_vee`, both the compile-time constant 2.0
-/// (`sqrt_keypoint_vio.h:239-240`), not config fields.
+/// The compile-time Nielsen escalation constants, both 2.0.
 const VEE_FACTOR: f64 = 2.0;
 
 impl<S: LieScalar> LmDamping<S> {
-    /// `:1557-1562`: Nielsen's update after a step the objective accepted.
-    ///
-    /// `std::pow<Scalar>(x, 3)` deduces the exponent as `int`, so
-    /// `__promote_2<Scalar, int>` is `double` in both instantiations and the
-    /// power and the `1 −` happen in `double` before narrowing back — which is
-    /// why this is `to_f64().powf(3.0)` and not `x * x * x`. Both maxima are
-    /// `eigen_maxi` because `cwiseMax` is `numext::maxi`, which keeps a NaN on
-    /// the left where `f32::max` would drop it.
+    /// Nielsen's update after an accepted step.
+    /// The cubic and subtraction run in f64 before narrowing. Both maxima retain
+    /// a NaN on the left, allowing the caller to detect non-finite damping.
     fn accept(&mut self, relative_decrease: S) {
         let x: S = S::from_literal(2.0) * relative_decrease - S::one();
         let gain: S = S::from_literal(1.0 - x.to_f64().powf(3.0));
@@ -567,34 +463,26 @@ impl<S: LieScalar> LmDamping<S> {
         self.lambda_vee = S::from_literal(VEE_FACTOR);
     }
 
-    /// `:1585-1586`: the geometric escalation after a rejected step, which the
-    /// damped solve's own retry on a non-finite increment (`:1424-1425`) makes
-    /// with the same two lines.
+    /// Geometrically escalate damping after a rejected step or failed solve.
     fn escalate(&mut self) {
         self.lambda = self.lambda_vee * self.lambda;
         self.lambda_vee *= S::from_literal(VEE_FACTOR);
     }
 
-    /// `:1595`: whether the escalation has taken the frame past `max_lambda`.
-    ///
-    /// Both loops ask it after the rollback, where C++ asks it; nothing between
-    /// the escalation and the question touches the damping.
+    /// Check whether escalation exceeded the maximum lambda after rollback.
     fn exhausted(&self) -> bool {
         self.lambda > self.max_lambda
     }
 }
 
-/// `:1565-1568`: whether an accepted step is the last one the frame takes.
-///
-/// Both tolerances are hard-coded in C++ too. The window solve and D76's frame
-/// update ask this of their own `f_diff` and `step_norminf`, and there is one
-/// predicate so the two schedules cannot come to converge on different terms.
+/// Shared convergence predicate for the window and frame-update schedules.
+/// Both use the same fixed cost and infinity-norm tolerances.
 fn lm_converged<S: LieScalar>(f_diff: S, step_norminf: S) -> bool {
     (f_diff > S::zero() && f_diff < S::from_literal(optimize::FUNCTION_TOLERANCE))
         || step_norminf < S::from_literal(optimize::STEP_TOLERANCE)
 }
 
-/// `SqrtKeypointVioEstimator<Scalar>` (`sqrt_keypoint_vio.h:50-248`).
+/// `SqrtKeypointVioEstimator<Scalar>`.
 #[derive(Debug, Clone)]
 pub struct SqrtKeypointVio<S: LieScalar> {
     /// The sliding window: `frame_states`, `frame_poses`, `lmdb` and the
@@ -603,56 +491,55 @@ pub struct SqrtKeypointVio<S: LieScalar> {
     /// snapshot is the window's only view.
     pub(crate) ba: BundleAdjustmentBase<S>,
 
-    /// `prev_frame` (`:198`), the frameset the last `measure` consumed.
+    /// `prev_frame`, the frameset the last `measure` consumed.
     prev_frame: Option<Arc<FlowObservations>>,
-    /// `take_kf` (`:201`), true at construction so the first frame is a
-    /// keyframe (`:61`).
+    /// `take_kf`, true at construction so the first frame is a
+    /// keyframe.
     take_kf: bool,
-    /// `frames_after_kf` (`:202`), the rate limiter of `:455`.
+    /// Frames since the last keyframe, used to rate-limit keyframe selection.
     frames_after_kf: i32,
-    /// `frame_count` (`:203`), the source of `frame_idx`.
+    /// `frame_count`, the source of `frame_idx`.
     frame_count: usize,
-    /// `kf_ids` (`:204`).
+    /// `kf_ids`.
     kf_ids: BTreeSet<FrameId>,
-    /// `ltkfs` (`:205`), exempt from the `max_kfs` budget (`:717`).
+    /// `ltkfs`, exempt from the `max_kfs` budget.
     ltkfs: BTreeSet<FrameId>,
-    /// `take_ltkf` (`:206`).
+    /// `take_ltkf`.
     take_ltkf: bool,
-    /// `frame_idx` (`:207`).
+    /// `frame_idx`.
     frame_idx: BTreeMap<FrameId, usize>,
-    /// `last_state_t_ns` (`:209`).
+    /// `last_state_t_ns`.
     last_state_t_ns: i64,
-    /// `imu_meas` (`:210`), one preintegration per consecutive state pair.
+    /// `imu_meas`, one preintegration per consecutive state pair.
     imu_meas: BTreeMap<i64, IntegratedImuMeasurement<S>>,
-    /// `g` (`:212`), `(0, 0, -9.81)` unless the caller overrides it.
+    /// `g`, `(0, 0, -9.81)` unless the caller overrides it.
     g: Vector3<S>,
-    /// `prev_opt_flow_res` (`:216`), kept so a new keyframe can gather every
-    /// observation of a keypoint across the live window (`:491-505`).
+    /// `prev_opt_flow_res`, kept so a new keyframe can gather every
+    /// observation of a keypoint across the live window.
     prev_opt_flow_res: BTreeMap<FrameId, Arc<FlowObservations>>,
-    /// `num_points_kf` (`:218`). Never erased, exactly as basalt never erases
-    /// it — `:824` reads it for keyframes that left the window long ago.
+    /// Hosted-point counts retained even after a keyframe leaves the window.
     num_points_kf: BTreeMap<FrameId, usize>,
-    /// `marg_data` (`:221`), the square-root prior.
+    /// `marg_data`, the square-root prior.
     marg_data: MargLinData<S>,
-    /// `gyro_bias_sqrt_weight` (`:226`), `1 / gyro_bias_std`.
+    /// `gyro_bias_sqrt_weight`, `1 / gyro_bias_std`.
     gyro_bias_sqrt_weight: Vector3<S>,
-    /// `accel_bias_sqrt_weight` (`:226`).
+    /// `accel_bias_sqrt_weight`.
     accel_bias_sqrt_weight: Vector3<S>,
-    /// `max_states` (`:228`).
+    /// `max_states`.
     max_states: usize,
-    /// `max_kfs` (`:229`).
+    /// `max_kfs`.
     max_kfs: usize,
-    /// `T_w_i_init` (`:231`), the pose the first accelerometer sample gave.
+    /// `T_w_i_init`, the pose the first accelerometer sample gave.
     t_w_i_init: Se3<S>,
-    /// `initialized` (`:233`).
+    /// `initialized`.
     initialized: bool,
-    /// `opt_started` (`:234`), which flips once `frame_states.size() > 4`.
+    /// `opt_started`, which flips once `frame_states.size() > 4`.
     opt_started: bool,
-    /// `config` (`:237`).
+    /// `config`.
     config: VioConfig,
-    /// The four damping fields of `:241`.
+    /// The four damping configuration fields.
     damping: LmDamping<S>,
-    /// The estimator's own preintegration noise (`:228-229` of the constructor
+    /// The estimator's own preintegration noise ( of the constructor
     /// body). The frontend runs a second, independent preintegrator (D24) and
     /// the two are deliberately not shared.
     noise: ImuNoise<S>,
@@ -662,11 +549,10 @@ pub struct SqrtKeypointVio<S: LieScalar> {
     /// See [`Self::initial_bias_gyro`].
     initial_bias_accel: Vector3<S>,
 
-    /// `imu_data_queue` (`vio_estimator.h:91`), unbounded here: Offline mode
+    /// `imu_data_queue`, unbounded here: Offline mode
     /// never drops a sample and never blocks (D17, D24).
     imu_queue: VecDeque<ImuSample>,
-    /// C++'s loop-local `data` (`:296`), the one sample already popped and
-    /// calibrated. It survives across frames, so it is state, not a local.
+    /// The calibrated sample already popped from the queue, retained across frames.
     pending: Option<(i64, Vector3<S>, Vector3<S>)>,
     /// The newest timestamp [`Self::push_imu`] has accepted, whether that
     /// sample is still in [`Self::imu_queue`] or has already moved into
@@ -692,22 +578,12 @@ pub struct SqrtKeypointVio<S: LieScalar> {
     scratch: OptimizeScratch<S>,
 }
 
-/// Every live scalar the estimator's own arithmetic needs, checked before any
-/// of that arithmetic runs.
-///
-/// The estimator divides by the two bias deviations (`:226`) and by the squared
-/// observation deviation (`ba_base.cpp:181`), takes the square root of the IMU
-/// rate (`calibration.hpp:186`) and of the three initial prior weights
-/// (`:87-93`), and compares `lambda` against both damping bounds (`:1415`,
-/// `:1595`). basalt does all of it unchecked, on numbers that reach it from a
-/// device driver and a file it ships; here they reach it from a caller, so a
-/// value outside its domain is bad input refused at the boundary (D32) rather
-/// than a NaN or an infinity in a live prior. The `VioConfig` and `Calibration`
-/// parsers stay syntax-only: what a number has to be is a property of the
-/// arithmetic that reads it, and `Calibration` is also the frontend's.
-///
-/// The Nielsen escalation factor is not here: it is the compile-time
-/// [`VEE_FACTOR`], not a config field.
+/// Validate numerical domains before estimator arithmetic runs (D32).
+/// Bias and observation deviations are divisors; IMU rate and initial prior
+/// weights enter square roots; damping values enter comparisons. Invalid values
+/// must be refused before they create NaNs or infinities in a live prior.
+/// Parsers remain syntax-only because these constraints belong to the consuming
+/// algorithm. The Nielsen factor is a compile-time constant, not a config field.
 fn validate_scalars<S: LieScalar>(
     calibration: &Calibration<S>,
     config: &VioConfig,
@@ -757,14 +633,14 @@ fn validate_scalars<S: LieScalar>(
 }
 
 impl<S: LieScalar> SqrtKeypointVio<S> {
-    /// `SqrtKeypointVioEstimator(g, calib, config)` (`:57-117`).
+    /// `SqrtKeypointVioEstimator(g, calib, config)`.
     ///
     /// Sets the square-root gauge prior on the first state: `sqrt(init_pose_weight)`
     /// on indices 0 to 2 and on index 5 alone, and `sqrt(init_ba_weight)` /
-    /// `sqrt(init_bg_weight)` on 9 to 11 and 12 to 14 (`:87-93`, D18). Roll and
+    /// `sqrt(init_bg_weight)` on 9 to 11 and 12 to 14 (D18). Roll and
     /// pitch (3 and 4) are left free because gravity observes them. The
     /// **square root** is what the sqrt branch stores; the Hessian branch
-    /// (`:96-102`) stores the weight itself and is unreachable here (D13).
+    ///  stores the weight itself and is unreachable here (D13).
     ///
     /// # Errors
     ///
@@ -795,7 +671,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 max_kfs: config.vio_max_kfs,
             });
         }
-        // `optical_flow.h:210` and `vit_tracker.cpp:181`: a hard precondition,
+        //  and : a hard precondition,
         // because the epipolar filter needs a second camera.
         if calibration.t_i_c.len() < 2 {
             return Err(EstimatorError::CameraCountMismatch {
@@ -803,11 +679,8 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 actual: calibration.t_i_c.len(),
             });
         }
-        // The rig is one list of cameras: `intrinsics` carries the projections
-        // and `t_i_c` the extrinsics, and every camera id downstream indexes
-        // both. basalt reads them out of one `Calibration` and never checks,
-        // so a JSON with two extrinsics and one intrinsic would index out of
-        // range deep inside the triangulation; refuse it here instead.
+        // Each camera id indexes both intrinsics and extrinsics. Reject ragged lists
+        // before triangulation can read beyond either list.
         if calibration.intrinsics.len() != calibration.t_i_c.len() {
             return Err(EstimatorError::CameraCountMismatch {
                 expected: calibration.t_i_c.len(),
@@ -821,7 +694,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         let gyro_bias_sqrt_weight: Vector3<S> = calibration.gyro_bias_std.map(|v| S::one() / v);
         let accel_bias_sqrt_weight: Vector3<S> = calibration.accel_bias_std.map(|v| S::one() / v);
 
-        // `:71-73`.
         let obs_std_dev: S = S::from_literal(config.vio_obs_std_dev);
         let huber_thresh: S = S::from_literal(config.vio_obs_huber_thresh);
         let ba: BundleAdjustmentBase<S> =
@@ -832,7 +704,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             h: DMatrix::zeros(POSE_VEL_BIAS_SIZE, POSE_VEL_BIAS_SIZE),
             b: DVector::zeros(POSE_VEL_BIAS_SIZE),
         };
-        // `:87-93`, the square-root branch.
+        // the square-root branch.
         let pose_weight_sqrt: S = S::from_literal(config.vio_init_pose_weight).sqrt();
         let ba_weight_sqrt: S = S::from_literal(config.vio_init_ba_weight).sqrt();
         let bg_weight_sqrt: S = S::from_literal(config.vio_init_bg_weight).sqrt();
@@ -846,7 +718,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         Ok(Self {
             ba,
             prev_frame: None,
-            // `:61`.
             take_kf: true,
             frames_after_kf: 0,
             frame_count: 0,
@@ -886,11 +757,9 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         })
     }
 
-    /// The same estimator with basalt's own gravity, `(0, 0, -9.81)`
-    /// (`imu_types.h:63`), which is what `src/vio.cpp` and the VIT path pass.
+    /// Construct with gravity `(0, 0, -9.81)`.
     ///
     /// # Errors
-    ///
     /// As [`Self::new`].
     pub fn with_default_gravity(
         calibration: Calibration<S>,
@@ -899,7 +768,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         Self::new(gravity::<S>(), calibration, config)
     }
 
-    /// `takeLongTermKeyframe()` (`:124-127`): the next `measure` moves the
+    /// `takeLongTermKeyframe()` : the next `measure` moves the
     /// newest keyframe into `ltkfs`, where the `max_kfs` budget cannot evict it.
     ///
     /// Nothing in the VIO path calls this; it is a Monado/API hook.
@@ -907,20 +776,10 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         self.take_ltkf = true;
     }
 
-    /// `addIMUToQueue` (`:370-373`) plus the `popFromImuDataQueue` cast
-    /// (`:377-390`).
-    ///
-    /// Samples must arrive in order; a sample that does not follow the last one
-    /// **accepted** is dropped rather than reordered, because the integration
-    /// reads the stream strictly forward. "Accepted" is
-    /// [`Self::newest_imu_t_ns`], not the queue's back: the newest sample may
-    /// already sit in `Self::pending`, leaving the queue empty and an older
-    /// sample free to slot in behind it. The drop is reachable only from a
-    /// direct `SqrtKeypointVio` user, which is `tests/vio_oracle.rs`:
-    /// [`Vio::push_imu`](crate::Vio::push_imu) refuses the same sample with a
-    /// typed error before it gets here. The static bias calibration
-    /// (`calib_bias.hpp:101-107`) is applied when the sample is popped, as
-    /// `:298-299` does, not here.
+    /// Append an IMU sample only if it follows the newest accepted timestamp.
+    /// That timestamp includes the pending sample even when the queue is empty.
+    /// Direct callers have older samples dropped; [`Vio::push_imu`](crate::Vio::push_imu)
+    /// refuses them with a typed error. Static bias calibration occurs when popping.
     pub fn push_imu(&mut self, sample: ImuSample) {
         if let Some(newest) = self.newest_imu_t_ns
             && sample.t_ns <= newest
@@ -935,7 +794,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     /// [`Self::process_frame`] needs before it may consume anything (D17).
     ///
     /// Strictly past, because a sample landing exactly on the frameset is
-    /// consumed and the integration loop pops again (`:322-328`). The newest
+    /// consumed and the integration loop pops again. The newest
     /// accepted sample is never popped past — the skip loop stops at the
     /// previous frameset and the integration loop at this one, both below it —
     /// so this reads `Self::newest_imu_t_ns` rather than walking the queue.
@@ -953,17 +812,17 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         self.newest_imu_t_ns
     }
 
-    /// Whether the window has a state (`initialized`, `:233`).
+    /// Whether the window has a state (`initialized`).
     pub fn is_initialized(&self) -> bool {
         self.initialized
     }
 
-    /// `get_t_ns()` (`:138`), the newest state's timestamp.
+    /// `get_t_ns()`, the newest state's timestamp.
     pub fn last_state_t_ns(&self) -> i64 {
         self.last_state_t_ns
     }
 
-    /// `get_state()` (`:143`), the newest state, or `None` before the window has
+    /// `get_state()`, the newest state, or `None` before the window has
     /// one.
     pub fn state(&self) -> Option<&PoseVelBiasState<S>> {
         self.ba
@@ -972,7 +831,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             .map(PoseVelBiasStateWithLin::state)
     }
 
-    /// The keyframes, oldest first (`kf_ids`, `:204`).
+    /// The keyframes, oldest first (`kf_ids`).
     pub fn kf_ids(&self) -> impl Iterator<Item = FrameId> + '_ {
         self.kf_ids.iter().copied()
     }
@@ -982,7 +841,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         &self.marg_data
     }
 
-    /// `num_points_kf` (`:218`), landmarks hosted per keyframe when it was
+    /// `num_points_kf`, landmarks hosted per keyframe when it was
     /// created.
     pub fn num_points_kf(&self) -> &BTreeMap<FrameId, usize> {
         &self.num_points_kf
@@ -997,7 +856,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     /// marginalization removed, for the V2 Rerun rung (D51).
     ///
     /// The landmark position is `host_pose * T_i_c * unproject(direction) /
-    /// inv_dist`, exactly as `:628-640` builds the landmark bundle, and a
+    /// inv_dist`, exactly as builds the landmark bundle, and a
     /// landmark whose host has left the window is skipped as it is there.
     pub fn snapshot(&self) -> WindowSnapshot<S> {
         let states: Vec<WindowState<S>> = self
@@ -1066,24 +925,14 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         }
     }
 
-    /// One iteration of `proc_func`'s loop (`:263-355`).
-    ///
-    /// Pops and calibrates the IMU samples this frameset needs, initialises the
-    /// window from the first accelerometer sample if it has none
-    /// (`:263-296`, D17 of papers-part2 §13: there is no other initialization
-    /// stage), preintegrates `(prev_t, curr_t]` into one measurement with the
-    /// **previous state's** biases as the linearization point (`:302-304`), and
-    /// calls `Self::measure`.
-    ///
-    /// Returns [`FrameOutcome::NeedMoreImu`] and leaves everything untouched
-    /// when the buffer does not yet reach past `frame.t_ns`: basalt blocks on
-    /// its queue instead, and Offline mode must not let the arrival order of a
-    /// sample reach a decision (D17).
+    /// Process one frameset synchronously.
+    /// Initialize from the first accelerometer sample if needed, then preintegrate
+    /// `(prev_t, curr_t]` using the previous state's biases and call `measure`.
+    /// Return [`FrameOutcome::NeedMoreImu`] without mutation when coverage does not
+    /// extend past the frameset. Arrival order must not affect decisions (D17).
     ///
     /// # Errors
-    ///
-    /// [`EstimatorError`] on a non-monotonic frameset, a frameset of the wrong
-    /// width, or anything `measure` refuses.
+    /// [`EstimatorError`] for invalid frameset order or width, or a failure in `measure`.
     pub fn process_frame(
         &mut self,
         frame: Arc<FlowObservations>,
@@ -1098,7 +947,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         if let Some(prev) = &self.prev_frame
             && frame.t_ns <= prev.t_ns
         {
-            // `:309-313`, both asserts.
+            // both asserts.
             return Err(EstimatorError::NonMonotonicFrame {
                 previous_t_ns: prev.t_ns,
                 t_ns: frame.t_ns,
@@ -1122,7 +971,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         let mut meas: Option<IntegratedImuMeasurement<S>> = None;
 
         if !self.initialized {
-            // `:265-271`: skip forward to the frameset, then take that sample's
+            // skip forward to the frameset, then take that sample's
             // accelerometer reading as the whole initialization.
             //
             // No `NeedMoreImu` exit here, and that is the point: the skip has
@@ -1139,7 +988,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 }
             };
 
-            // `:273-278`: zero velocity, zero translation, and the rotation that
+            // zero velocity, zero translation, and the rotation that
             // takes the measured acceleration onto +Z.
             let vel_w_i_init: Vector3<S> = Vector3::zeros();
             self.t_w_i_init = Se3::new(gravity_from_first_accel(&accel), Vector3::zeros());
@@ -1170,14 +1019,13 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 .insert(self.last_state_t_ns, self.frame_count);
             self.frame_count += 1;
 
-            // `:281-283`: the first ordering entry, one 15-dof state at index 0.
+            // the first ordering entry, one 15-dof state at index 0.
             let mut order: AbsOrderMap = AbsOrderMap::new();
             order.push(self.last_state_t_ns, POSE_VEL_BIAS_SIZE)?;
             self.marg_data.order = order;
 
             self.initialized = true;
         } else if let Some(prev) = self.prev_frame.clone() {
-            // `:300-336`.
             let (bias_gyro, bias_accel) = match self.ba.frame_states.get(&self.last_state_t_ns) {
                 Some(state) => (state.state().bias_gyro, state.state().bias_accel),
                 None => (self.initial_bias_gyro, self.initial_bias_accel),
@@ -1185,7 +1033,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             let mut pim: IntegratedImuMeasurement<S> =
                 IntegratedImuMeasurement::new(prev.t_ns, &bias_gyro, &bias_accel);
 
-            // `:315-336`, the loop `IntegratedImuMeasurement::accumulate_to`
+            // the loop `IntegratedImuMeasurement::accumulate_to`
             // owns for both preintegrators.
             let noise: ImuNoise<S> = self.noise;
             let pending: Option<Popped<S>> = self.pending.take();
@@ -1203,17 +1051,13 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         let integration_ns: u64 = duration_ns(predict_started);
         let mut stats: FrameStats<S> = self.measure(Arc::clone(&frame), meas)?;
         stats.timings.predict_ns += integration_ns;
-        // `:354`, and only on success.
+        // and only on success.
         self.prev_frame = Some(frame);
         Ok(FrameOutcome::Measured(Box::new(stats)))
     }
 
-    /// `popFromImuDataQueue` (`:377-390`) followed by the static bias
-    /// calibration of `:298-299`.
-    ///
-    /// The cast to `Scalar` happens **before** the calibration, as it does in
-    /// C++: the queue holds `ImuData<double>` and `popFromImuDataQueue` casts,
-    /// then `getCalibrated` runs in `Scalar`.
+    /// Pop an IMU sample, cast it to the estimator scalar, then apply static bias
+    /// calibration in that scalar.
     fn pop_calibrated(&mut self) -> Option<(i64, Vector3<S>, Vector3<S>)> {
         let sample: ImuSample = self.imu_queue.pop_front()?;
         let gyro: Vector3<S> = sample.gyro.map(S::from_literal);
@@ -1225,11 +1069,11 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         ))
     }
 
-    /// `measure(opt_flow_meas, meas)` (`:422-575`).
+    /// `measure(opt_flow_meas, meas)`.
     ///
     /// **Contract: `frame.cameras.len() == self.ba.calib.t_i_c.len()`, which is
     /// at least two.** [`Self::process_frame`] checks the frameset width
-    /// against the rig (`:309`) and [`Self::new`] refuses a rig of fewer than
+    /// against the rig and [`Self::new`] refuses a rig of fewer than
     /// two cameras, so camera 0 exists and the per-camera vectors below are
     /// indexed directly rather than re-validated here.
     ///
@@ -1246,7 +1090,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         let num_cams: usize = frame.cameras.len();
         debug_assert_eq!(num_cams, self.ba.calib.t_i_c.len());
 
-        // `:427-441`: predict the new state from the previous one and the
+        // predict the new state from the previous one and the
         // preintegration, then file it under the frameset's timestamp.
         if let Some(pim) = meas {
             let previous: PoseVelBiasState<S> =
@@ -1280,11 +1124,10 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 
         let predict_ns: u64 = duration_ns(started);
 
-        // `:444`.
         self.prev_opt_flow_res
             .insert(frame.t_ns, Arc::clone(&frame));
 
-        // `:447-451`: file every observation the window already hosts, and
+        // file every observation the window already hosts, and
         // remember the rest per camera.
         let mut connected: Vec<usize> = vec![0; num_cams];
         let mut num_points_connected: BTreeMap<FrameId, usize> = BTreeMap::new();
@@ -1309,7 +1152,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             }
         }
 
-        // `:454-456`, D21: camera 0 alone votes, rate-limited to one keyframe
+        // D21: camera 0 alone votes, rate-limited to one keyframe
         // every `vio_min_frames_after_kf + 1` frames.
         //
         // The division is `Scalar(int) / size_t`, so the denominator is
@@ -1333,7 +1176,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         let took_keyframe: bool = self.take_kf;
         let mut num_points_added: usize = 0;
         if self.take_kf {
-            // `:473-552`.
             self.take_kf = false;
             self.frames_after_kf = 0;
             self.kf_ids.insert(self.last_state_t_ns);
@@ -1349,7 +1191,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             0
         };
 
-        // `:555-563`: every landmark this frameset did not see, in any camera.
+        // every landmark this frameset did not see, in any camera.
         let mut lost_landmarks: BTreeSet<LandmarkId> = BTreeSet::new();
         if self.config.vio_marg_lost_landmarks {
             for lm in self.ba.lmdb.landmarks() {
@@ -1360,7 +1202,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             }
         }
 
-        // `:566`, plus D76's gate: above zero, `port.frame_update_max_iterations`
+        // plus D76's gate: above zero, `port.frame_update_max_iterations`
         // moves the joint solve to the framesets that took a keyframe and gives
         // the others the newest state alone. The frame update declines a
         // frameset it cannot serve, and the joint solve owns the warmup.
@@ -1389,7 +1231,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         timings.marginalize_ns = marg.elapsed_ns;
         timings.measure_ns = duration_ns(started);
 
-        // `:1642-1653`, read off the window the two stages above left behind.
+        // read off the window the two stages above left behind.
         Ok(FrameStats {
             t_ns: frame.t_ns,
             connected,
@@ -1412,47 +1254,30 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         })
     }
 
-    /// `:474-552`: triangulate every unconnected observation into a new
-    /// landmark hosted by this frameset.
+    /// Triangulate unconnected observations into landmarks hosted by this frameset.
     ///
-    /// For each unconnected id, gather **every** observation of it across the
-    /// live `prev_opt_flow_res` (`:491-505`), then try each gathered image in
-    /// `TimeCamId` order as the second view: unproject both pixels, form
-    /// `T_0_1 = T_i_c[host]⁻¹ · T_i0_i1 · T_i_c[other]`, skip a baseline shorter
-    /// than `vio_min_triangulation_dist` (`:530`), DLT-triangulate, and accept
-    /// iff every coefficient is finite and `0 < inv_dist < 3` (`:534`). On
-    /// acceptance **all** gathered observations are filed, not only the pair
-    /// that triangulated (`:546-548`).
+    /// Gather all observations of each id in the live window and try second views
+    /// in `TimeCamId` order. Unproject both pixels, form
+    /// `T_0_1 = T_i_c[host]⁻¹ · T_i0_i1 · T_i_c[other]`, reject short baselines,
+    /// and accept finite DLT results only when `0 < inv_dist < 3`.
+    /// On acceptance, file all gathered observations, not just the successful pair.
+    /// Each camera may host landmarks.
     ///
-    /// The host camera is `i`, not camera 0: the database is genuinely
-    /// N-camera.
-    ///
-    /// **Contract: every camera id below is in the rig**, so the rig is
-    /// indexed directly. `cam_id` indexes `unconnected_obs`, which
-    /// [`Self::measure`] builds with one entry per frameset camera, and
-    /// `tcido.cam_id` names a camera of a frameset [`Self::process_frame`]
-    /// already accepted; both are therefore `< t_i_c.len()`, and
-    /// [`Self::new`] refuses a calibration whose `intrinsics` and `t_i_c`
-    /// disagree.
-    ///
-    /// **Deliberate deviation from the C++ line shape:** `:519-521` re-reads
-    /// the host pose and re-inverts it and the host camera's extrinsic for
-    /// every candidate pair. Nothing in the loop moves the host frame's pose
-    /// or the calibration, so they are resolved once each — the same values
-    /// from the same inputs, in the same products.
+    /// All camera ids have been validated against the rig. Host pose and calibration
+    /// stay constant throughout the loop, so their inverses are computed once.
     fn triangulate_unconnected(
         &mut self,
         frame: &FlowObservations,
         unconnected_obs: &[BTreeSet<KeypointId>],
     ) -> Result<usize, EstimatorError> {
         debug_assert_eq!(unconnected_obs.len(), self.ba.calib.t_i_c.len());
-        // `:509`: the squared threshold is formed in `double` and cast, so the
+        // the squared threshold is formed in `double` and cast, so the
         // `f32` instantiation compares against `(float)(0.05 * 0.05)`.
         let min_triang_distance2: S = S::from_literal(
             self.config.vio_min_triangulation_dist * self.config.vio_min_triangulation_dist,
         );
         let mut num_points_added: usize = 0;
-        // `:519`'s `T_i0_inv`: the host is this frameset, for every landmark
+        // 's `T_i0_inv`: the host is this frameset, for every landmark
         // and every pair.
         let t_i0_inv: Se3<S> = self
             .ba
@@ -1467,12 +1292,12 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
             let t_i_c0_inv: Se3<S> = self.ba.calib.t_i_c[cam_id].inverse();
             for kpt_id in ids {
                 let lm_id: LandmarkId = LandmarkId::from(*kpt_id);
-                // `:487`: another camera of this frameset may have hosted it
+                // another camera of this frameset may have hosted it
                 // already.
                 if self.ba.lmdb.landmark_exists(lm_id) {
                     continue;
                 }
-                // `:514`'s `.at(lm_id)`: `measure` took this id out of
+                // 's `.at(lm_id)`: `measure` took this id out of
                 // `host_keypoints` itself, so a miss is an invariant break, not
                 // a landmark to skip (D32).
                 let Some(p0_pixel) = host_keypoints.get(kpt_id) else {
@@ -1483,9 +1308,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                 };
                 let p0: Vector2<S> = cast_pixel::<S>(p0_pixel);
 
-                // `:491-505`: every image of this id in the live window,
-                // ordered by `TimeCamId` because C++ collects into a
-                // `std::map`.
+                // Visit every image of this id in the live window in `TimeCamId` order.
                 let mut kp_obs: BTreeMap<TimeCamId, Vector2<S>> = BTreeMap::new();
                 for (other_t_ns, other) in &self.prev_opt_flow_res {
                     for (other_cam, keypoints) in other.cameras.iter().enumerate() {
@@ -1500,7 +1323,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
 
                 let mut accepted: Option<Landmark<S>> = None;
                 for (tcido, p1) in &kp_obs {
-                    // `:512-517`: an unprojection the camera rejects skips this
+                    // an unprojection the camera rejects skips this
                     // pair, not the landmark.
                     let mut p0_3d: Vector4<S> = Vector4::zeros();
                     let mut p1_3d: Vector4<S> = Vector4::zeros();
@@ -1511,7 +1334,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                         continue;
                     }
 
-                    // `:519-522`.
                     let other_pose: Se3<S> =
                         *self.ba.get_pose_state_with_lin(tcido.frame_id)?.pose();
                     let t_i0_i1: Se3<S> = t_i0_inv * other_pose;
@@ -1549,7 +1371,6 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
                     }
                 }
 
-                // `:545-549`.
                 if let Some(landmark) = accepted {
                     self.ba.lmdb.add_landmark(lm_id, &landmark);
                     num_points_added += 1;
@@ -1562,7 +1383,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
         Ok(num_points_added)
     }
 
-    /// `ImuLinData` as `:1264` and `:913` build it.
+    /// `ImuLinData` as and build it.
     fn imu_lin_data(&self) -> ImuLinData<S> {
         ImuLinData {
             g: self.g,
@@ -1572,15 +1393,9 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     }
 }
 
-/// `fixed_kfs`: the keyframes whose pose Jacobians a linearization zeroes.
-///
-/// C++ builds the same set twice — `:924` for the marginalization's own
-/// linearization and `:1258` for the optimization's — so with
-/// `vio_fix_long_term_keyframes` on the long-term keyframes are fixed in the
-/// prior the window computes as well as in the increment it solves. `None` and
-/// an empty set mean the same thing to
-/// [`LinearizationAbsQR`](crate::linearize::LinearizationAbsQR); `None` is what
-/// the flag being off says.
+/// Keyframes whose pose Jacobians are zeroed in both optimization and marginalization.
+/// With `vio_fix_long_term_keyframes`, long-term poses stay fixed in the prior
+/// and in the solved increment. `None` and an empty set have the same numerical effect.
 fn fixed_keyframes<'a>(
     config: &VioConfig,
     ltkfs: &'a BTreeSet<FrameId>,
@@ -1592,7 +1407,7 @@ fn fixed_keyframes<'a>(
     }
 }
 
-/// `AffineCompact2f::translation().cast<Scalar>()` (`:437`).
+/// `AffineCompact2f::translation().cast<Scalar>()`.
 fn cast_pixel<S: LieScalar>(pixel: &Vector2<f32>) -> Vector2<S> {
     Vector2::new(
         S::from_literal(f64::from(pixel.x)),
@@ -1628,23 +1443,11 @@ mod tests {
         }
     }
 
-    /// The rig is one list of cameras, and
-    /// [`SqrtKeypointVio::triangulate_unconnected`] indexes the projections and
-    /// the extrinsics with the same id.
-    /// D32 at the API boundary: every scalar the estimator's own arithmetic
-    /// divides by, takes the square root of or compares against is checked
-    /// before any of that arithmetic runs.
-    ///
-    /// basalt runs it anyway: a negative `vio_init_pose_weight` puts a NaN on
-    /// the prior's diagonal (`:87-93`), a zero bias deviation an infinity in the
-    /// bias weight (`:226`), a negative `imu_update_rate` a NaN in both IMU
-    /// covariances (`calibration.hpp:186`), and a zero `vio_obs_std_dev` an
-    /// infinity in every Huber weight (`ba_base.cpp:181`). Every shipped
-    /// fixture is inside every domain, which is why no oracle lane can see
-    /// this.
-    ///
-    /// The values are the estimator's own scalar widened back to `f64`, so the
-    /// calibration probes use numbers `f32` holds exactly.
+    /// Check rig list lengths and all scalar domains at the boundary (D32).
+    /// Negative prior weights or IMU rates produce NaNs under square root; zero bias
+    /// or observation deviations produce infinities. Valid shipped calibrations
+    /// cannot exercise these failures, so explicit invalid inputs are required.
+    /// The probes use values exactly representable in f32 before widening to f64.
     #[test]
     fn a_scalar_outside_its_domain_is_refused_before_the_estimator_exists() {
         let refuse_config = |mutate: &dyn Fn(&mut VioConfig)| -> EstimatorError {
@@ -1789,12 +1592,9 @@ mod tests {
         );
     }
 
-    /// `push_imu` compares with the newest sample it has **accepted**, not with
-    /// the queue's back: once that sample has moved into `pending` the queue is
-    /// empty, and comparing with its back let an older sample slot in behind
-    /// the pending one, so a later integration met reversed timestamps
-    /// (`:947`'s loop). basalt cannot hit this — its queue is the only buffer —
-    /// but the port's public API could.
+    /// Compare IMU timestamps with the newest accepted sample, including `pending`.
+    /// Comparing only with an empty queue would let an older sample enter behind it
+    /// and reverse timestamps during integration.
     #[test]
     fn an_imu_sample_behind_the_pending_one_is_dropped() {
         let mut estimator: SqrtKeypointVio<f32> = estimator();
@@ -1823,15 +1623,9 @@ mod tests {
         );
     }
 
-    /// `:514`'s `opt_flow_meas->keypoints.at(i).at(lm_id)`: the triangulation
-    /// reads the host pixel back out of the map `measure` took the unconnected
-    /// id from, and C++ throws when it is not there. The port used to skip the
-    /// landmark silently (D32).
-    ///
-    /// Only a test can build this: `measure` fills `unconnected_obs[cam]` by
-    /// iterating `frame.cameras[cam]` and hands the same `frame` on, so the
-    /// two agree by construction on every ported path. The call below pairs an
-    /// id with a frameset that never carried it.
+    /// A missing host pixel must return an error instead of silently skipping a landmark.
+    /// Production `measure` builds both maps from the same frameset. This test
+    /// constructs inconsistent input explicitly to check that invariant (D32).
     #[test]
     fn an_unconnected_keypoint_missing_from_its_own_frameset_is_refused() {
         let mut estimator: SqrtKeypointVio<f32> = estimator();

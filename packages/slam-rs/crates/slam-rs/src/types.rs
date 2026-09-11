@@ -1,11 +1,5 @@
-//! The value types the estimator's state is built from.
-//!
-//! Ported from `include/basalt/utils/common_types.h`,
-//! `thirdparty/basalt-headers/include/basalt/imu/imu_types.h` and
-//! `include/basalt/utils/imu_types.h`. Nothing here optimizes: the point is
-//! that every index, every increment order and the fixed-linearization
-//! bookkeeping match the C++ exactly, because a sign or an offset wrong here
-//! shows up as slow drift rather than an obvious failure.
+//! Estimator state values, block indices and frozen-linearization bookkeeping.
+//! Correct offsets and increment conventions prevent silent trajectory drift.
 
 use std::collections::HashMap;
 
@@ -13,11 +7,11 @@ use nalgebra::{DMatrix, DVector, SVector, Vector3, Vector6};
 
 use crate::lie::{LieScalar, Se3};
 
-/// Degrees of freedom of a pose block (`imu_types.h:46`).
+/// Degrees of freedom of a pose block.
 pub const POSE_SIZE: usize = 6;
-/// Degrees of freedom of a pose-velocity block (`imu_types.h:47`).
+/// Degrees of freedom of a pose-velocity block.
 pub const POSE_VEL_SIZE: usize = 9;
-/// Degrees of freedom of a full state block (`imu_types.h:48`).
+/// Degrees of freedom of a full state block.
 pub const POSE_VEL_BIAS_SIZE: usize = 15;
 
 /// The 9-vector increment a pose-velocity state takes, and the width of the
@@ -27,17 +21,15 @@ pub type Vector9<S> = SVector<S, POSE_VEL_SIZE>;
 /// The 15-vector increment a full state takes.
 pub type Vector15<S> = SVector<S, POSE_VEL_BIAS_SIZE>;
 
-/// Identifies a frameset. basalt uses the frameset timestamp in nanoseconds as
-/// the id (`common_types.h:56`, `using FrameId = int64_t`).
+/// Frameset identifier, equal to its nanosecond timestamp.
 pub type FrameId = i64;
 
-/// Index of a camera on the rig (`common_types.h:59`, `using CamId = std::size_t`).
+/// Index of a camera on the rig (`using CamId = std::size_t`).
 pub type CamId = usize;
 
 /// One image: the frameset it belongs to and the camera that took it
-/// (`common_types.h:62-69`).
 ///
-/// The ordering is `frame_id` first, then `cam_id` (`common_types.h:76-79`), so
+/// The ordering is `frame_id` first, then `cam_id`, so
 /// a sorted collection groups a frameset's images together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct TimeCamId {
@@ -55,22 +47,18 @@ impl TimeCamId {
 }
 
 impl std::fmt::Display for TimeCamId {
-    /// `frame_id _ cam_id`, as `operator<<` prints it (`common_types.h:71-74`).
+    /// `frame_id _ cam_id`, as `operator<<` prints it.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}_{}", self.frame_id, self.cam_id)
     }
 }
 
-/// A tracked 2D feature (`optical_flow.h:67`, `using KeypointId = size_t`).
+/// A tracked 2D feature (`using KeypointId = size_t`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct KeypointId(pub u64);
 
-/// A landmark in the estimator's database.
-///
-/// basalt aliases the two (`optical_flow.h:71`, `using LandmarkId = KeypointId`)
-/// because a landmark inherits the id of the keypoint that spawned it; the port
-/// keeps them as separate newtypes so a keypoint index cannot be passed where a
-/// landmark id belongs, with explicit conversions both ways.
+/// Landmark id inherited from its source keypoint.
+/// Separate newtypes with explicit conversions prevent mixing landmark and keypoint ids.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct LandmarkId(pub u64);
 
@@ -115,15 +103,9 @@ pub enum StateError {
     },
 }
 
-/// Where each frame's block starts in the stacked state vector.
-///
-/// Ported from `include/basalt/utils/imu_types.h:293-304`. basalt assigns
-/// offsets by accumulating `total_size` as it walks the keyframe poses and then
-/// the full states (`sqrt_keypoint_vio.cpp:731-762`), so the offsets follow
-/// insertion order; the C++ container is a `std::map`, i.e. key-ordered, and the
-/// two coincide because keyframes always carry older timestamps than the
-/// states. The port stores insertion order explicitly, which is what the offset
-/// arithmetic actually depends on.
+/// Frame block offsets in insertion order, accumulated from block sizes.
+/// Poses are inserted before full states; explicit order records the arithmetic
+/// that defines the stacked state vector.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AbsOrderMap {
     entries: Vec<(FrameId, usize, usize)>,
@@ -191,31 +173,21 @@ impl AbsOrderMap {
     }
 }
 
-/// The marginalization prior, `MargLinData<Scalar>`
-/// (`include/basalt/utils/imu_types.h:317-326`).
-///
-/// The field named `h` is **not** a Hessian: it is the Jacobian `J_m` of
-/// Paper 2 Eq. (4) and `b` is the residual `r_m`, which is the only form the QR
-/// linearizer accepts (`linearization_abs_qr.cpp:578`). C++ carries a squared
-/// form beside it behind `is_sqrt` (`ba_base.cpp:426-438`); the port does not,
-/// because `SqrtKeypointVio::new` refuses `vio_sqrt_marg == false` (D68), so
-/// that flag is judged in exactly one place.
-///
-/// `order` gives the prior's variables their offsets, and the linearizer
-/// requires them to be a prefix of the window's ordering
-/// (`ba_base.cpp:383-388`).
+/// Square-root marginalization prior. `h` stores Jacobian `J_m`, not a Hessian,
+/// and `b` stores residual `r_m`. Only this form is supported (D68).
+/// Its ordering must be a prefix of the window ordering.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MargLinData<S: LieScalar> {
-    /// The prior's ordering (`:323`).
+    /// The prior's ordering.
     pub order: AbsOrderMap,
-    /// `J_m` (`:324`).
+    /// `J_m`.
     pub h: DMatrix<S>,
-    /// `r_m` (`:325`).
+    /// `r_m`.
     pub b: DVector<S>,
 }
 
 impl<S: LieScalar> Default for MargLinData<S> {
-    /// basalt's in-class initialiser: square root, empty (`:321-325`).
+    /// An empty square-root prior.
     fn default() -> Self {
         Self {
             order: AbsOrderMap::new(),
@@ -225,7 +197,7 @@ impl<S: LieScalar> Default for MargLinData<S> {
     }
 }
 
-/// An SE(3) pose at a timestamp (`imu_types.h:51-105`).
+/// An SE(3) pose at a timestamp.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PoseState<S: LieScalar> {
     /// Timestamp of the state, in nanoseconds.
@@ -250,13 +222,8 @@ impl<S: LieScalar> PoseState<S> {
     }
 }
 
-/// An SE(3) pose and a world-frame linear velocity at a timestamp
-/// (`imu_types.h:109-167`).
-///
-/// This is the state IMU preintegration propagates: the preintegrated
-/// pseudo-measurement is itself a `PoseVelState` whose `t_ns` counts elapsed
-/// nanoseconds rather than absolute time (`preintegration.h:148`, `:325`).
-/// C++ derives it from `PoseState`; here the pose is a field.
+/// Pose and world-frame velocity at a timestamp.
+/// Preintegrated delta states use elapsed nanoseconds instead of absolute time.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PoseVelState<S: LieScalar> {
     /// Timestamp of the state, in nanoseconds.
@@ -278,7 +245,7 @@ impl<S: LieScalar> Default for PoseVelState<S> {
 }
 
 impl<S: LieScalar> PoseVelState<S> {
-    /// A pose-velocity state from its parts (`imu_types.h:124-125`).
+    /// A pose-velocity state from its parts.
     pub fn new(t_ns: i64, t_w_i: Se3<S>, vel_w_i: Vector3<S>) -> Self {
         Self {
             t_ns,
@@ -287,7 +254,7 @@ impl<S: LieScalar> PoseVelState<S> {
         }
     }
 
-    /// Apply a 9-vector increment, `PoseVelState::applyInc` (`imu_types.h:140-143`).
+    /// Apply a 9-vector increment, `PoseVelState::applyInc`.
     ///
     /// The layout is `[trans(3), rot(3), vel(3)]`; the pose goes through
     /// [`Se3::apply_inc`] and the velocity is added.
@@ -297,7 +264,7 @@ impl<S: LieScalar> PoseVelState<S> {
     }
 
     /// The increment that takes `self` to `other`, `PoseVelState::diff`
-    /// (`imu_types.h:156-162`), the inverse of [`PoseVelState::apply_inc`].
+    /// the inverse of [`PoseVelState::apply_inc`].
     ///
     /// No production caller: the estimator's states are 15-dof and use
     /// [`PoseVelBiasState::diff`]. This is the 9-dof one, and it is what the
@@ -316,7 +283,7 @@ impl<S: LieScalar> PoseVelState<S> {
 }
 
 /// Pose, velocity and the two IMU biases at a timestamp
-/// (`imu_types.h:184-241`), the block the estimator actually optimizes.
+/// the block the estimator actually optimizes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PoseVelBiasState<S: LieScalar> {
     /// Timestamp of the state, in nanoseconds.
@@ -366,23 +333,17 @@ impl<S: LieScalar> PoseVelBiasState<S> {
         PoseState::new(self.t_ns, self.t_w_i)
     }
 
-    /// The pose and velocity part on its own.
-    ///
-    /// C++ gets this for free by inheritance — `IntegratedImuMeasurement::residual`
-    /// takes a `const PoseVelState&` and a `PoseVelBiasState` slices into it
-    /// (`imu_block.hpp:41-43`). The port hands over an explicit copy.
+    /// Copy the pose and velocity portion of the full state.
     pub fn pose_vel_state(&self) -> PoseVelState<S> {
         PoseVelState::new(self.t_ns, self.t_w_i, self.vel_w_i)
     }
 
     /// Apply a 15-vector increment, `PoseVelBiasState::applyInc`
-    /// (`imu_types.h:212-216`).
     ///
     /// The layout is `[trans(3), rot(3), vel(3), bias_gyro(3), bias_accel(3)]`:
     /// the pose goes through [`Se3::apply_inc`] and everything else is plain
     /// addition. The gyro bias comes **before** the accel bias, matching the
     /// prior weights the estimator installs at indices 9-11 and 12-14
-    /// (`sqrt_keypoint_vio.cpp:92-93`).
     pub fn apply_inc(&mut self, inc: &Vector15<S>) {
         self.t_w_i.apply_inc(&inc.fixed_rows::<6>(0).into_owned());
         self.vel_w_i += inc.fixed_rows::<3>(6);
@@ -391,7 +352,6 @@ impl<S: LieScalar> PoseVelBiasState<S> {
     }
 
     /// The increment that takes `self` to `other`, `PoseVelBiasState::diff`
-    /// (`imu_types.h:229-236`).
     ///
     /// The inverse of [`PoseVelBiasState::apply_inc`], so
     /// `self.diff(&other)` applied to `self` reproduces `other`.
@@ -412,12 +372,11 @@ impl<S: LieScalar> PoseVelBiasState<S> {
 }
 
 /// A pose block that can hold its linearization point fixed
-/// (`include/basalt/utils/imu_types.h:180-291`).
 ///
 /// Once [`PoseStateWithLin::set_linearized`] is called the Jacobians are frozen
 /// at `pose_linearized`, and every later increment accumulates into `delta` and
 /// is re-applied to that frozen pose rather than to the current one
-/// (`imu_types.h:240-248`). Skipping the accumulation still moves the estimate,
+/// Skipping the accumulation still moves the estimate,
 /// which is why the failure looks like drift instead of a crash (trap 7 of the
 /// architecture dossier).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -446,7 +405,7 @@ impl<S: LieScalar> Default for PoseStateWithLin<S> {
 }
 
 impl<S: LieScalar> PoseStateWithLin<S> {
-    /// A pose block at a timestamp (`imu_types.h:192-197`).
+    /// A pose block at a timestamp.
     pub fn new(t_ns: i64, t_w_i: Se3<S>, linearized: bool) -> Self {
         Self {
             linearized,
@@ -460,7 +419,7 @@ impl<S: LieScalar> PoseStateWithLin<S> {
     }
 
     /// The pose block a full state collapses to when it leaves the window
-    /// (`imu_types.h:206-215`): the first six entries of the state's delta
+    /// the first six entries of the state's delta
     /// carry over, and the current pose is rebuilt from the frozen one.
     pub fn from_pose_vel_bias(other: &PoseVelBiasStateWithLin<S>) -> Self {
         let delta: Vector6<S> = other.delta().fixed_rows::<6>(0).into_owned();
@@ -473,7 +432,7 @@ impl<S: LieScalar> PoseStateWithLin<S> {
             pose_linearized,
             t_w_i_current,
             // `backup_delta.setZero()` with the comment "unused, but avoids
-            // uninitialized gcc warning" (`imu_types.h:211`); the two poses get
+            // uninitialized gcc warning"; the two poses get
             // the same treatment here because Rust has no uninitialized field.
             backup_delta: Vector6::zeros(),
             backup_pose_linearized: pose_linearized,
@@ -481,11 +440,8 @@ impl<S: LieScalar> PoseStateWithLin<S> {
         }
     }
 
-    /// Freeze the linearization point, `setLinTrue` (`imu_types.h:224-228`).
-    ///
-    /// basalt asserts the delta is zero here; the port returns an error instead
-    /// (decision D32, the core never panics on data), because freezing on top of
-    /// an accumulated increment would silently discard it.
+    /// Freeze the linearization point only when delta is zero.
+    /// Otherwise freezing would discard accumulated motion; return an error (D32).
     pub fn set_linearized(&mut self) -> Result<(), StateError> {
         if self.delta != Vector6::zeros() {
             return Err(StateError::NonZeroDeltaAtLinearization {
@@ -497,7 +453,7 @@ impl<S: LieScalar> PoseStateWithLin<S> {
         Ok(())
     }
 
-    /// Apply an increment, `applyInc` (`imu_types.h:240-248`).
+    /// Apply an increment, `applyInc`.
     pub fn apply_inc(&mut self, inc: &Vector6<S>) {
         if self.linearized {
             self.delta += inc;
@@ -508,24 +464,21 @@ impl<S: LieScalar> PoseStateWithLin<S> {
         }
     }
 
-    /// Save the mutable state, `backup` (`imu_types.h:254-258`).
-    ///
-    /// The `linearized` flag is deliberately **not** saved: C++ does not save it
-    /// either, because a rejected Levenberg-Marquardt step never changes it.
+    /// Save mutable state. The frozen flag is unchanged by LM trials, so need not be saved.
     pub fn backup(&mut self) {
         self.backup_delta = self.delta;
         self.backup_pose_linearized = self.pose_linearized;
         self.backup_t_w_i_current = self.t_w_i_current;
     }
 
-    /// Undo the last increments, `restore` (`imu_types.h:260-264`).
+    /// Undo the last increments, `restore`.
     pub fn restore(&mut self) {
         self.delta = self.backup_delta;
         self.pose_linearized = self.backup_pose_linearized;
         self.t_w_i_current = self.backup_t_w_i_current;
     }
 
-    /// The pose the residuals are evaluated at, `getPose` (`imu_types.h:250-256`).
+    /// The pose the residuals are evaluated at, `getPose`.
     pub fn pose(&self) -> &Se3<S> {
         if self.linearized {
             &self.t_w_i_current
@@ -534,7 +487,7 @@ impl<S: LieScalar> PoseStateWithLin<S> {
         }
     }
 
-    /// The pose the Jacobians are evaluated at, `getPoseLin` (`imu_types.h:258`).
+    /// The pose the Jacobians are evaluated at, `getPoseLin`.
     pub fn pose_lin(&self) -> &Se3<S> {
         &self.pose_linearized.t_w_i
     }
@@ -556,7 +509,6 @@ impl<S: LieScalar> PoseStateWithLin<S> {
 }
 
 /// A full state block that can hold its linearization point fixed
-/// (`include/basalt/utils/imu_types.h:68-178`).
 ///
 /// The same fixed-linearization rule as [`PoseStateWithLin`], on the 15-vector.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -585,7 +537,7 @@ impl<S: LieScalar> Default for PoseVelBiasStateWithLin<S> {
 }
 
 impl<S: LieScalar> PoseVelBiasStateWithLin<S> {
-    /// A state block from a plain state (`imu_types.h:88-91`).
+    /// A state block from a plain state.
     pub fn new(state: PoseVelBiasState<S>, linearized: bool) -> Self {
         Self {
             linearized,
@@ -598,10 +550,8 @@ impl<S: LieScalar> PoseVelBiasStateWithLin<S> {
         }
     }
 
-    /// Freeze the linearization point, `setLinTrue` (`imu_types.h:110-114`).
-    ///
-    /// See [`PoseStateWithLin::set_linearized`] for why this returns an error
-    /// where basalt asserts.
+    /// Freeze the linearization point with the same zero-delta precondition as
+    /// [`PoseStateWithLin::set_linearized`].
     pub fn set_linearized(&mut self) -> Result<(), StateError> {
         if self.delta != Vector15::zeros() {
             return Err(StateError::NonZeroDeltaAtLinearization {
@@ -613,7 +563,7 @@ impl<S: LieScalar> PoseVelBiasStateWithLin<S> {
         Ok(())
     }
 
-    /// Apply a 15-vector increment, `applyInc` (`imu_types.h:116-124`).
+    /// Apply a 15-vector increment, `applyInc`.
     ///
     /// Once linearized the increment accumulates into `delta` and the current
     /// state is recomputed from the frozen one — not from the previous current
@@ -628,7 +578,7 @@ impl<S: LieScalar> PoseVelBiasStateWithLin<S> {
         }
     }
 
-    /// Save the mutable state, `backup` (`imu_types.h:139-143`).
+    /// Save the mutable state, `backup`.
     ///
     /// As for [`PoseStateWithLin::backup`], the `linearized` flag is not saved.
     pub fn backup(&mut self) {
@@ -637,14 +587,14 @@ impl<S: LieScalar> PoseVelBiasStateWithLin<S> {
         self.backup_state_current = self.state_current;
     }
 
-    /// Undo the last increments, `restore` (`imu_types.h:145-149`).
+    /// Undo the last increments, `restore`.
     pub fn restore(&mut self) {
         self.delta = self.backup_delta;
         self.state_linearized = self.backup_state_linearized;
         self.state_current = self.backup_state_current;
     }
 
-    /// The state the residuals are evaluated at, `getState` (`imu_types.h:126-132`).
+    /// The state the residuals are evaluated at, `getState`.
     pub fn state(&self) -> &PoseVelBiasState<S> {
         if self.linearized {
             &self.state_current
@@ -653,7 +603,7 @@ impl<S: LieScalar> PoseVelBiasStateWithLin<S> {
         }
     }
 
-    /// The state the Jacobians are evaluated at, `getStateLin` (`imu_types.h:134`).
+    /// The state the Jacobians are evaluated at, `getStateLin`.
     pub fn state_lin(&self) -> &PoseVelBiasState<S> {
         &self.state_linearized
     }
@@ -734,7 +684,7 @@ mod tests {
     }
 
     /// The keyframe poses go in first and the full states after, exactly as
-    /// `sqrt_keypoint_vio.cpp:731-762` builds it.
+    ///  builds it.
     #[test]
     fn the_ordering_lays_blocks_out_end_to_end() {
         let mut order: AbsOrderMap = AbsOrderMap::new();
@@ -913,7 +863,7 @@ mod tests {
     }
 
     /// A full state that leaves the window becomes a pose block carrying the
-    /// first six entries of its delta (`imu_types.h:206-215`).
+    /// first six entries of its delta.
     #[test]
     fn a_state_block_collapses_into_a_pose_block() {
         let mut state_block: PoseVelBiasStateWithLin<f64> =
@@ -938,8 +888,7 @@ mod tests {
     proptest! {
         #![proptest_config(config())]
 
-        /// `p0.diff(p1) == inc` whenever `p1 = p0.apply_inc(inc)`, the identity
-        /// the C++ doc comment states (`imu_types.h:218-228`).
+        /// `p0.diff(p1) == inc` when `p1 = p0.apply_inc(inc)`.
         #[test]
         fn apply_inc_and_diff_round_trip(seed in prop::array::uniform15(-0.4f64..0.4)) {
             let inc: Vector15<f64> = Vector15::from_column_slice(&seed);

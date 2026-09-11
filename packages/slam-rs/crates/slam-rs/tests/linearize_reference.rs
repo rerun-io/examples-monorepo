@@ -1,43 +1,12 @@
-//! basalt's own linearization tests, ported.
+//! Linearization invariants checked against independent dense algebra.
+//! The dense Schur reference builds `[J_p | J_l]` and eliminates landmarks
+//! explicitly. Compare objective, Hessian, gradient, back-substitution and model
+//! cost decrease. Also check square-root reconstruction identities and QR versus
+//! Cholesky up to row signs, including rank-deficient QR cases.
 //!
-//! `test/src/test_linearization.cpp` has four tests and
-//! `test/src/test_qr.cpp` three. Every one of them checks `ABS_QR` against a
-//! *second implementation* — `LinearizationAbsSC`, `LinearizationRelSC`, or
-//! Eigen's `HouseholderQR` and `LLT`. Only `ABS_QR` is in this port
-//! (decision D13), so the second implementation has to come from somewhere else:
-//!
-//! * **`VoNoMargLinearizationTest`, `VoMargLinearizationTest`** compare the
-//!   error, `H` and `b` of the three linearizations at 1e-8
-//!   (`test_linearization.cpp:147-161`, `:211-225`). Here the reference is
-//!   [`dense_schur_reference`] below: the whole problem written out as one dense
-//!   `[J_p | J_l]` per landmark and eliminated with an explicit Schur complement
-//!   `H = J_pᵀJ_p − J_pᵀJ_l (J_lᵀJ_l)⁻¹ J_lᵀJ_p`. That is what
-//!   `LinearizationAbsSC` computes; it is 40 lines here and it shares no code
-//!   with the thing under test, which is the whole point of the C++ test.
-//! * **`VoMargBacksubstituteTest`** additionally solves `inc = −H⁻¹b` and
-//!   compares the three `l_diff` values (`:290-297`). The reference `l_diff` is
-//!   the model cost change of the same dense system, with the landmark
-//!   increments recovered by Schur back-substitution.
-//! * **`VoMargSqrtLinearizationTest`** is the square-root identity
-//!   `Q₂ᵀJ_p` ᵀ`Q₂ᵀJ_p = H` and `Q₂ᵀJ_p` ᵀ`Q₂ᵀr = b` at 1e-3 / 1e-5
-//!   (`:379-388`). That one needs no second implementation at all and is ported
-//!   as it stands, with basalt's own tolerances.
-//! * **`QRvsLLT`, `QRvsLLTRankDef`** (`test_qr.cpp:9-35`) print `R` from a
-//!   Householder QR next to `Lᵀ` from the Cholesky of `JᵀJ` and assert nothing.
-//!   Ported as the assertion they demonstrate: the two agree row by row up to a
-//!   sign, and the port's own [`slam_rs`] Householder is what builds `R`.
-//! * **`RankDefLeastSquares`** (`:38-119`) is a marginalization test: it drives
-//!   `MargHelper::marginalizeHelperSq*`, which is stage S7. **Not ported here**;
-//!   it belongs with the code it tests.
-//!
-//! The problem itself is basalt's (`test_linearization.cpp:9-76`): six frames,
-//! two cameras sharing `KannalaBrandtCamera4::getTestProjections()[0]`, ten
-//! landmarks hosted per frame, every landmark observed in **every** image, a
-//! pixel of noise on each observation, `huber_thresh = 0.5`,
-//! `obs_std_dev = 2.0`. Eigen's `Random()` is replaced by a seeded xorshift, for
-//! the same reason the IMU tests replace it: `Random()` never reseeds, so the
-//! C++ test is deterministic too, and a Rust test that flakes is worse than one
-//! that is merely differently arbitrary.
+//! The seeded problem has six frames, two kb4 cameras and ten hosted landmarks
+//! per frame, observed across all images. Deterministic noise and fixed robust
+//! weights keep failures reproducible without external fixtures.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -59,7 +28,7 @@ use slam_rs::types::{
 mod common;
 use common::{Rng, test_calibration};
 
-/// The window `get_vo_estimator` builds (`test_linearization.cpp:9-76`), plus
+/// The window `get_vo_estimator` builds, plus
 /// the ordering it fills in.
 struct Problem {
     estimator: BundleAdjustmentBase<f64>,
@@ -67,14 +36,14 @@ struct Problem {
     marg: Option<MargLinData<f64>>,
 }
 
-/// `get_vo_estimator(num_frames, estimator, aom)` (`:9-76`).
+/// `get_vo_estimator(num_frames, estimator, aom)`.
 fn vo_problem(num_frames: usize, seed: u64) -> Problem {
     let mut rng: Rng = Rng::new(seed);
 
-    // `:15-22`: the two camera-to-IMU transforms and both intrinsics.
+    // the two camera-to-IMU transforms and both intrinsics.
     let calib: Calibration<f64> = test_calibration(&mut rng);
 
-    // `:25-26`: the 3-D points, five metres in front.
+    // the 3-D points, five metres in front.
     let points: Vec<Vector3<f64>> = (0..num_frames * 10)
         .map(|_| {
             let mut p: Vector3<f64> = rng.vector3();
@@ -83,7 +52,7 @@ fn vo_problem(num_frames: usize, seed: u64) -> Problem {
         })
         .collect();
 
-    // `:31-40`: the poses.
+    // the poses.
     let mut estimator: BundleAdjustmentBase<f64> =
         BundleAdjustmentBase::new(calib, 2.0, 0.5).unwrap();
     let mut aom: AbsOrderMap = AbsOrderMap::new();
@@ -99,13 +68,13 @@ fn vo_problem(num_frames: usize, seed: u64) -> Problem {
             .insert(i as i64, PoseStateWithLin::new(i as i64, t_w_i, false));
     }
 
-    // `:42-74`: ten landmarks hosted per frame, each seen in every image.
+    // ten landmarks hosted per frame, each seen in every image.
     for i in 0..num_frames {
         for j in 0..10 {
             let kp_idx: usize = 10 * i + j;
             let p3d: Vector3<f64> = points[kp_idx];
 
-            // `:47-52`: the landmark in its host camera's frame.
+            // the landmark in its host camera's frame.
             let t_c_w: Se3<f64> = (poses[i] * estimator.calib.t_i_c[0]).inverse();
             let p3d_cam: Vector3<f64> = t_c_w * p3d;
             let id: LandmarkId = LandmarkId(kp_idx as u64);
@@ -117,7 +86,7 @@ fn vo_problem(num_frames: usize, seed: u64) -> Problem {
             );
             estimator.lmdb.add_landmark(id, &landmark);
 
-            // `:56-73`: an observation in every image of every frame.
+            // an observation in every image of every frame.
             for (f, pose) in poses.iter().enumerate() {
                 for c in 0..2 {
                     let t_c_w: Se3<f64> = (*pose * estimator.calib.t_i_c[c]).inverse();
@@ -130,7 +99,7 @@ fn vo_problem(num_frames: usize, seed: u64) -> Problem {
                         &mut jacobian,
                     );
                     assert!(ok, "the synthetic problem must project");
-                    // `:65`: `Random() / 100` pixels of noise.
+                    // `Random() / 100` pixels of noise.
                     pixel[0] += rng.symmetric() / 100.0;
                     pixel[1] += rng.symmetric() / 100.0;
                     estimator
@@ -149,7 +118,7 @@ fn vo_problem(num_frames: usize, seed: u64) -> Problem {
     }
 }
 
-/// `get_vo_estimator_with_marg` (`test_linearization.cpp:78-100`): the same
+/// `get_vo_estimator_with_marg` : the same
 /// window, plus a prior over the first two frames and both of them frozen at
 /// their linearization point with a non-zero delta.
 fn vo_problem_with_marg(num_frames: usize, seed: u64) -> Problem {
@@ -157,18 +126,17 @@ fn vo_problem_with_marg(num_frames: usize, seed: u64) -> Problem {
     let mut rng: Rng = Rng::new(seed ^ 0x5eed);
 
     let marg_size: usize = 2 * POSE_SIZE;
-    // `:85-89`: `H = 1e6 I`, `b = 10 * Random()`.
+    // `H = 1e6 I`, `b = 10 * Random()`.
     let mut h: DMatrix<f64> = DMatrix::identity(marg_size, marg_size);
     h *= 1e6;
     let b: DVector<f64> =
         DVector::from_iterator(marg_size, (0..marg_size).map(|_| rng.symmetric() * 10.0));
 
-    // `:91-93`.
     let mut order: AbsOrderMap = AbsOrderMap::new();
     order.push(0, POSE_SIZE).unwrap();
     order.push(1, POSE_SIZE).unwrap();
 
-    // `:95-99`: freeze, then drift.
+    // freeze, then drift.
     for frame_id in [0i64, 1] {
         let pose = problem.estimator.frame_poses.get_mut(&frame_id).unwrap();
         pose.set_linearized().unwrap();
@@ -270,7 +238,6 @@ fn dense_schur_reference(
                 continue;
             }
 
-            // `landmark_block_abs_dynamic.hpp:456-470` and `:168-179`.
             let res_squared: f64 = res.norm_squared();
             let weight: f64 = if res_squared <= huber * huber {
                 1.0
@@ -315,7 +282,6 @@ fn dense_schur_reference(
     // The model cost change of the same dense system: recover each landmark's
     // increment by Schur back-substitution, then
     // `l_diff = -(J inc)ᵀ (r + 0.5 (J inc))`
-    // (`landmark_block_abs_dynamic.hpp:276-320`).
     let marg: Option<MargLinData<f64>> = problem.marg.clone();
     let delta: Option<DVector<f64>> = marg
         .as_ref()
@@ -365,7 +331,7 @@ fn linearize(problem: &Problem) -> (f64, LinearizationAbsQR<f64>) {
     (error, lqr)
 }
 
-/// `VoNoMargLinearizationTest` (`test_linearization.cpp:103-162`): the error,
+/// `VoNoMargLinearizationTest` : the error,
 /// `H` and `b` agree with a second implementation to 1e-8.
 #[test]
 fn vo_no_marg_linearization() {
@@ -376,7 +342,7 @@ fn vo_no_marg_linearization() {
 
     let (error_ref, h_ref, b_ref, _) = dense_schur_reference(&problem);
 
-    // basalt's own tolerances (`:155-157`).
+    // Fixed comparison tolerances.
     assert!(
         (error_qr - error_ref).abs() <= 1e-8,
         "{error_qr} vs {error_ref}"
@@ -393,7 +359,7 @@ fn vo_no_marg_linearization() {
     );
 }
 
-/// `VoMargLinearizationTest` (`:165-227`): the same with a marginalization
+/// `VoMargLinearizationTest` : the same with a marginalization
 /// prior and two frozen linearization points.
 #[test]
 fn vo_marg_linearization() {
@@ -411,8 +377,8 @@ fn vo_marg_linearization() {
         (error_qr - error_ref).abs() <= 1e-8,
         "{error_qr} vs {error_ref}"
     );
-    // The prior's `H` is `1e6 I`, so the absolute norm of `H` is around 1e12 and
-    // basalt's own absolute 1e-8 would be a 1e-20 relative demand. Scaled.
+    // Scale tolerance by the information norm: the prior Jacobian `1e6 I` yields
+    // information near `1e12`, where an absolute `1e-8` bound is inappropriate.
     let scale: f64 = h_ref.norm().max(1.0);
     assert!(
         (&h_qr - &h_ref).norm() <= 1e-8 * scale,
@@ -426,7 +392,7 @@ fn vo_marg_linearization() {
     );
 }
 
-/// `VoMargBacksubstituteTest` (`:230-308`): solve, back-substitute, and compare
+/// `VoMargBacksubstituteTest` : solve, back-substitute, and compare
 /// the model cost change against the second implementation.
 #[test]
 fn vo_marg_backsubstitute() {
@@ -440,7 +406,7 @@ fn vo_marg_backsubstitute() {
 
     let (_, _, _, l_diff_of) = dense_schur_reference(&problem);
 
-    // `:290`: `inc = -H.ldlt().solve(b)`.
+    // `inc = -H.ldlt().solve(b)`.
     let inc: DVector<f64> = -h.clone().lu().solve(&b).expect("the system is solvable");
     let l_diff_ref: f64 = l_diff_of(&inc);
 
@@ -462,7 +428,7 @@ fn vo_marg_backsubstitute() {
     );
 
     // The increment really does help: apply it to the poses too and the
-    // reprojection error drops. `:299-306` compares `computeError` across the
+    // reprojection error drops. compares `computeError` across the
     // three estimators; with one estimator, the meaningful statement is that the
     // step the model predicted a decrease for delivers one.
     assert!(l_diff_qr > 0.0, "the solved step must predict a decrease");
@@ -479,8 +445,7 @@ fn vo_marg_backsubstitute() {
     );
 }
 
-/// `VoMargSqrtLinearizationTest` (`:311-394`): the square-root identity
-/// `Q₂ᵀJ_pᵀ Q₂ᵀJ_p = H` and `Q₂ᵀJ_pᵀ Q₂ᵀr = b`, at basalt's own 1e-3 and 1e-5.
+/// Check `Q₂J_pᵀ Q₂J_p = H` and `Q₂J_pᵀ Q₂r = b` at `1e-3` and `1e-5`.
 #[test]
 fn vo_marg_sqrt_linearization() {
     let problem: Problem = vo_problem_with_marg(6, 0x1234_5678);
@@ -492,14 +457,13 @@ fn vo_marg_sqrt_linearization() {
     let (h, b) = lqr.get_dense_h_b(&problem.estimator, &inputs).unwrap();
     let (q2jp, q2r) = lqr.get_dense_q2jp_q2r(&problem.estimator, &inputs).unwrap();
 
-    // `:380-383`.
     let h_diff: f64 = (q2jp.transpose() * &q2jp - &h).norm();
     let b_diff: f64 = (q2jp.transpose() * &q2r - &b).norm();
     assert!(h_diff <= 1e-3, "H differs by {h_diff}");
     assert!(b_diff <= 1e-5, "b differs by {b_diff}");
 }
 
-/// `QRvsLLT` and `QRvsLLTRankDef` (`test_qr.cpp:9-35`), as the assertion they
+/// `QRvsLLT` and `QRvsLLTRankDef`, as the assertion they
 /// demonstrate: for a `10 x 6` `J`, the `R` of a Householder QR and the `Lᵀ` of
 /// the Cholesky of `JᵀJ` agree row by row up to a sign.
 ///
@@ -516,21 +480,19 @@ fn householder_qr_matches_the_cholesky_of_the_normal_equations() {
             }
         }
         if rank_deficient {
-            // `test_qr.cpp:26`: `J.col(2) = J.col(4)`.
+            // `J.col(2) = J.col(4)`.
             let col4: DVector<f64> = j.column(4).into_owned();
             j.set_column(2, &col4);
         }
 
         // The port has no standalone QR — the landmark block eliminates exactly
         // three columns — so the reflections are driven here the way
-        // `performQRHouseholder` drives them (`landmark_block_abs_dynamic.hpp:445-453`).
+        // `performQRHouseholder` drives them.
         let r_qr: DMatrix<f64> = householder_r(&j);
         let ata: DMatrix<f64> = j.transpose() * &j;
 
         if rank_deficient {
-            // `JᵀJ` is singular, so there is no Cholesky; what survives is that
-            // the QR still produces an upper-triangular `R` with `RᵀR = JᵀJ`,
-            // which is the point the C++ test prints.
+            // For singular `JᵀJ`, QR still yields triangular `R` with `RᵀR = JᵀJ`.
             let rtr: DMatrix<f64> = r_qr.transpose() * &r_qr;
             assert!(
                 (&rtr - &ata).norm() <= 1e-9 * ata.norm(),
@@ -634,26 +596,10 @@ fn the_q2_rows_are_orthogonal_to_the_landmark_columns() {
     }
 }
 
-/// `backSubstitute` returns the *linearized* cost decrease, and it is not the
-/// reduced system's decrease alone.
-///
-/// For one block with the orthogonal `Q = [Q₁, Q₂]` and the optimal landmark
-/// increment `R inc_l = −(Q₁ᵀr + Q₁ᵀJ_p inc_p)`, the first three rows of
-/// `Qᵀ J inc` are `−Q₁ᵀr` — so the *updated residual* `Qᵀ J inc + Qᵀ r` is zero
-/// there, which is what "the landmarks move to their own optimum" means — and
-///
-/// ```text
-/// l_diff = 0.5 ‖Q₁ᵀr‖²  −  inc_pᵀ b  −  0.5 inc_pᵀ H inc_p
-/// ```
-///
-/// with `H` and `b` the reduced camera system. The first term does not depend on
-/// the pose increment at all: it is what the landmarks gain by moving to their
-/// own optimum, and it is why basalt's `l_diff` is **nonnegative at `inc = 0`**
-/// — zero exactly when the eliminated residual `Q₁ᵀr` already is.
-/// The identity is `landmark_block_abs_dynamic.hpp:276-320` written out, and
-/// getting the constant term wrong would make every Levenberg-Marquardt gain
-/// ratio wrong in the same direction — which is exactly the kind of bug that
-/// still converges, only worse.
+/// Back-substitution predicts landmark gain as well as reduced camera gain:
+/// `l_diff = 0.5 ‖Q₁ᵀr‖² - inc_pᵀ b - 0.5 inc_pᵀ H inc_p`.
+/// The first term is independent of pose motion and nonnegative at zero increment.
+/// Omitting it biases every LM gain ratio even if the optimizer still converges.
 #[test]
 fn back_substitution_reduces_the_linearized_cost() {
     let mut problem: Problem = vo_problem(3, 0x0f0f_0f0f);
@@ -673,9 +619,7 @@ fn back_substitution_reduces_the_linearized_cost() {
         })
         .sum();
 
-    // The Gauss-Newton step, and basalt's sign convention: the solve gives
-    // `H inc = b`, and the increment applied is its negation
-    // (`sqrt_keypoint_vio.cpp:1450`).
+    // Solve `H inc = b`, then negate the increment before applying it.
     let inc: DVector<f64> = -h.clone().lu().solve(&b).expect("solvable");
     let quadratic: f64 =
         -(inc.transpose() * &b)[(0, 0)] - 0.5 * (inc.transpose() * &h * &inc)[(0, 0)];
@@ -718,16 +662,9 @@ fn back_substitution_reduces_the_linearized_cost() {
     );
 }
 
-/// First-estimate Jacobians (`linearization_abs_qr.cpp:229-232`, trap 7): once a
-/// frame is frozen, moving its current state changes the relative pose's
-/// **value** and leaves `d_rel_d_h` and `d_rel_d_t` exactly as they were.
-///
-/// Note what this does **not** say. `d_res_d_xi` comes out of `linearizePoint`
-/// against the re-evaluated `T_t_h` (`landmark_block_abs_dynamic.hpp:148`), so
-/// the block's own Jacobian columns do move; what is frozen is the pose
-/// composition, which is the only place basalt applies the first-estimate rule.
-/// A test that demanded frozen block columns would be testing a property basalt
-/// does not have.
+/// First-estimate Jacobians freeze relative-pose composition derivatives while
+/// reevaluating the relative-pose value at current states. Reprojection Jacobians
+/// can still change with that value; the complete block columns are not frozen.
 #[test]
 fn freezing_a_state_freezes_its_pose_jacobians_but_not_its_residuals() {
     let base: Problem = vo_problem_with_marg(4, 0x2222_3333);
@@ -806,11 +743,8 @@ fn the_reductions_are_reproducible() {
     }
 }
 
-/// The square-root export writes the prior into the *first* columns of the
-/// stacked system (`linearization_abs_qr.cpp:587-589`), so it is only correct
-/// when the prior's ordering is the window's prefix. C++ checks that in the
-/// Hessian path (`ba_base.cpp:383-388`) and not in the square-root one, where a
-/// disagreeing ordering silently attaches one frame's columns to another.
+/// The square-root prior export requires its ordering to be the window prefix;
+/// otherwise frame columns attach to the wrong variables.
 #[test]
 fn a_prior_ordering_that_disagrees_is_refused_by_both_exports() {
     let mut problem: Problem = vo_problem_with_marg(4, 0x3333_4444);
@@ -835,18 +769,15 @@ fn a_prior_ordering_that_disagrees_is_refused_by_both_exports() {
         lqr.get_dense_h_b(&problem.estimator, &inputs),
         Err(LinearizeError::Ba(BaError::MargOrderMismatch { .. }))
     ));
-    // ...and now so does the square-root path.
+    // and now so does the square-root path.
     assert!(matches!(
         lqr.get_dense_q2jp_q2r(&problem.estimator, &inputs),
         Err(LinearizeError::Ba(BaError::MargOrderMismatch { .. }))
     ));
 }
 
-/// An IMU factor is fifteen columns wide at each end (`imu_block.hpp:21`), and
-/// C++ discards the ordering's block sizes (`linearization_abs_qr.cpp:163-167`)
-/// and computes `start_t + dt` unchecked (`imu_block.hpp:30`). With pose-sized
-/// slots the scatter writes over the neighbouring state; the port refuses at
-/// construction, where it costs nothing.
+/// IMU factors require 15 columns at each endpoint and a non-overflowing end time.
+/// Reject pose-sized slots at construction before scatter can overwrite neighbors.
 #[test]
 fn an_imu_factor_over_pose_sized_slots_is_refused() {
     // A one-nanosecond measurement, so its endpoints are the two frames
@@ -941,7 +872,7 @@ fn an_imu_factor_over_pose_sized_slots_is_refused() {
     ));
 }
 
-/// The block layout arithmetic of `landmark_block_abs_dynamic.hpp:83-96` on
+/// The block layout arithmetic of on
 /// every ordering size, not just the ones the fixture happens to use.
 #[test]
 fn the_block_layout_follows_the_padding_rule() {

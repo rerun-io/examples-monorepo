@@ -1,30 +1,11 @@
-//! Replay a **whole** reference segment through the port, in either precision.
+//! Optional whole-clip replay harness.
+//! Read images, IMU samples and calibration from a local clip dump and write
+//! trajectory CSV on the absolute device clock. Accuracy is evaluated outside
+//! this Rust test against ground truth.
 //!
-//! `vio_parity.rs` compares sixty framesets against the C++'s own per-frame
-//! dump, which is what the committed fixtures carry. That is too short to answer
-//! the question this file exists for: on a four-thousand-frameset clip the two
-//! implementations end centimetres apart, and sixty framesets cannot tell a
-//! divergence that grows from one that starts.
-//!
-//! So this runs the same pipeline over a clip dumped by
-//! `tests/tools/dump_clip.py` — every frameset's gray8 pixels, every inertial
-//! sample, and the calibration the C++ reference was handed — and writes the
-//! trajectory as a basalt CSV on the absolute device clock, which is what
-//! `gt.csv` and `basalt_traj.csv` use. The comparison itself is then ordinary
-//! ATE arithmetic outside this crate: nothing here asserts an accuracy number,
-//! because the clip and the reference it would be measured against are both
-//! machine-local.
-//!
-//! ```bash
-//! SLAM_RS_CLIP_DIR=<clip-dir> \
-//! SLAM_RS_CLIP_SCALAR=f64 \
-//! SLAM_RS_CLIP_OUT=<clip-dir>/slam_rs_f64.csv \
-//! SLAM_RS_CLIP_STATS=<clip-dir>/slam_rs_f64_stats.csv \
-//!   cargo test --release --test full_clip -- --nocapture
-//! ```
-//!
-//! Without `SLAM_RS_CLIP_DIR` the test prints why and passes: a clip is 7.5 GB
-//! of PGM for the Index stereo segments and is never committed.
+//! Set `SLAM_RS_CLIP_DIR`, `SLAM_RS_CLIP_SCALAR`, `SLAM_RS_CLIP_OUT` and optionally
+//! `SLAM_RS_CLIP_STATS`, then run `cargo test --release --test full_clip -- --nocapture`.
+//! Without a clip directory the harness reports that it did not replay a clip.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -66,13 +47,8 @@ fn read_imu(path: &Path) -> Vec<ImuRow> {
         .collect()
 }
 
-/// Drive one precision over the whole clip and write the trajectory, and the
-/// per-frameset decisions when a path is given for them.
-///
-/// Every inertial sample is pushed before the first frameset. The retry gate in
-/// `vio_parity.rs` is the evidence that this is the same trajectory a live feed
-/// gives: a frameset the estimator refuses is held and tracked again, so arrival
-/// order cannot reach the poses.
+/// Replay one scalar lane and write trajectory and optional per-frame decisions.
+/// IMU input may be preloaded or delivered per frame to check arrival-order independence.
 fn replay<S: LieScalar>(
     clip: &Clip,
     directory: &Path,
@@ -91,11 +67,8 @@ fn replay<S: LieScalar>(
         },
     )
     .unwrap();
-    // Either the whole window before the first frameset, or the samples each
-    // frameset needs plus the one past it, which is how a live feed arrives.
-    // `vio_parity.rs`'s retry gate says the two give the same trajectory; over a
-    // whole clip that is a claim worth checking rather than assuming, so it is
-    // an option here and the report quotes the comparison.
+    // Select preloaded IMU or per-frame coverage including the first later sample.
+    // Both delivery modes should produce the same trajectory.
     let mut cursor: usize = 0;
     if !streamed {
         for row in imu {
@@ -216,9 +189,8 @@ fn the_whole_clip_replays_into_a_trajectory_csv() {
         .map(PathBuf::from)
         .unwrap_or_else(|| directory.join(format!("slam_rs_{}.csv", scalar.rust_name())));
     let stats: Option<PathBuf> = std::env::var_os("SLAM_RS_CLIP_STATS").map(PathBuf::from);
-    // The clip's own `calib.json` unless another file in it is named: the
-    // provenance of the calibration is itself a perturbation worth measuring,
-    // since the catalog stores float32 where the fork's file has doubles.
+    // Use the clip calibration unless overridden. Catalog f32 statics and calibration
+    // JSON doubles can differ, so the selected calibration is part of the input.
     let calibration: PathBuf = directory
         .join(std::env::var("SLAM_RS_CLIP_CALIB").unwrap_or_else(|_| "calib.json".to_string()));
     println!(

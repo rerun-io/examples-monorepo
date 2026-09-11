@@ -18,7 +18,7 @@ mod common;
 
 use common::cornered_bytes;
 
-/// `corner_score_9_scalar` (`kornia fast.rs:838`).
+/// `corner_score_9_scalar` (`kornia fast.rs).
 fn corner_score_9(gray: &[u8], width: usize, x: usize, y: usize) -> u8 {
     let center = i32::from(gray[y * width + x]);
     let mut dark = [0i32; 16];

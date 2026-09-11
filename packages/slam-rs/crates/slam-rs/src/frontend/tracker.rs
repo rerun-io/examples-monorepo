@@ -1,65 +1,16 @@
-//! The SE(2) inverse-compositional KLT tracker, ported from
-//! `frame_to_frame_optical_flow.h:294-438`.
+//! Inverse-compositional SE(2) KLT tracking.
+//! Run bounded Gauss-Newton steps per level, coarse to fine, then track backward
+//! and keep points that return close enough to their sources.
 //!
-//! Three C++ functions come across:
+//! [`PatchTracker`] and [`SourcePatches`] use an associated pyramid type so CPU
+//! and GPU backends share the driver. Buffers use structure-of-arrays storage
+//! with patch index varying fastest and allocate only above their high-water mark.
 //!
-//! * `trackPointAtLevel` (`:404-438`) — up to `optical_flow_max_iterations`
-//!   Gauss-Newton steps on one pyramid level;
-//! * `trackPoint` (`:377-402`) — the coarse-to-fine sweep, with the source patch
-//!   rebuilt from the previous frame's pyramid at every level;
-//! * `trackPoints` (`:294-375`) — the whole keypoint set forward, then backward,
-//!   keeping only the tracks that come back to where they started.
-//!
-//! ## The stage seam
-//!
-//! [`PatchTracker`] and [`SourcePatches`] are the trait pair the frontend is
-//! generic over (`cubecl-portability.md` §12.1). Neither names a concrete
-//! pyramid: the pyramid type is associated, bounded by
-//! [`crate::pyramid::Pyramid`], so a CubeCL backend supplies its own device-side
-//! pyramid, patch storage and tracker and the driver compiles against it
-//! unchanged. [`CpuPatchTracker`] and [`PatchSoA`] are the CPU pair.
-//!
-//! ## Data layout
-//!
-//! Every per-patch buffer here is structure-of-arrays with the **patch index
-//! fast-varying**, so thread *i* of a warp reads element *i*: the patch taps and
-//! Jacobians in [`PatchSoA`], the positions in [`PointsSoA`], and the 2x3 warps
-//! in [`FlowTransforms`], whose six coefficients live in six flat arrays rather
-//! than one array of six-float records (§12.2). Nothing on this path is a map,
-//! and nothing on it allocates once the buffers have reached their high-water
-//! mark.
-//!
-//! ## What the port moves, and why nothing moves numerically
-//!
-//! **The source patches are hoisted into a [`PatchSoA`].** `trackPoint` builds
-//! `PatchT p(old_pyr.lvl(level), old_transform.translation() / scale)` inside its
-//! level loop (`:388`). That patch depends only on the previous pyramid, the
-//! source position and the level — never on anything the tracker computes — so
-//! building all of them up front is the same arithmetic in a different order, and
-//! it is the split a GPU wants: one kernel over (patch, level), then one over
-//! patches. The forward patches come in as an argument; the backward ones are
-//! built inside [`CpuPatchTracker`], because their positions are the forward
-//! result.
-//!
-//! **The three passes are separated.** basalt does forward track, mask test and
-//! backward track inside one per-point body. Here the forward pass runs over all
-//! points, then the backward patches are built, then the backward pass runs.
-//! Points are independent, so per-point values are identical; the mask test that
-//! sat between the two passes moves to the caller, which drops the same points
-//! one step later (see [`super::flow`]).
-//!
-//! **Loops have fixed bounds.** The C++ conditions its `for` on `patch_valid`
-//! (`:383`, `:408`). Breaking out early and running to the end with a no-op give
-//! the same numbers here, and only the second form ports to a GPU where the whole
-//! warp runs the maximum count anyway (§12.2). Invalid points therefore idle
-//! instead of exiting.
-//!
-//! **The masks and the depth guess stay outside.** `trackPoints` reads
-//! `masks1`/`masks2` and calls `calib.projectBetweenCams` (`:329`, `:335-342`),
-//! which would drag the calibration into the tracker. The driver applies both and
-//! hands over the already-offset guesses; the offset itself is recovered here as
-//! `source position - guess`, exactly the `off` the C++ adds back before the
-//! backward track (`:357`).
+//! Source patches depend only on the previous pyramid, position and level, so
+//! build them before tracking. Backward patches depend on forward results and
+//! are built between passes. Invalid points idle through fixed loop bounds to
+//! keep GPU execution uniform. Masks and depth guesses stay in the driver;
+//! the tracker receives guesses and recovers their source-position offsets.
 
 use nalgebra::{Matrix2, Vector2, Vector3};
 
@@ -70,41 +21,26 @@ use crate::frontend::se2::{AffineCompact2f, se2_exp};
 use crate::image::ImageU16;
 use crate::pyramid::{Pyramid, PyramidU16};
 
-/// The increment guard at `frame_to_frame_optical_flow.h:425`.
+/// Upper bound for a valid increment.
 ///
 /// `pub(crate)` so the GPU lane's kernels alias it rather than re-declaring the
 /// number: the two lanes have no compiler coupling otherwise.
 pub(crate) const MAX_INCREMENT_INFINITY_NORM: f32 = 1e6;
 
-/// `const int filter_margin = 2` (`frame_to_frame_optical_flow.h:430`).
+/// `const int filter_margin = 2`.
 ///
 /// `pub(crate)` for the same reason as [`MAX_INCREMENT_INFINITY_NORM`].
 pub(crate) const FILTER_MARGIN: f32 = 2.0;
 
-/// The most keypoints a tracker may be sized for.
-///
-/// basalt needs no such ceiling: its keypoint maps grow, so its memory follows
-/// the scene. The port preallocates every per-patch buffer
-/// ([`FrontendOptions::max_keypoints`](super::flow::FrontendOptions::max_keypoints)),
-/// which turns the budget into a memory request that arrives from outside — over
-/// the Python boundary among other places — and `2^63` keypoints panicked
-/// `Vec::with_capacity` with a capacity overflow before this existed.
-///
-/// A million keypoints is about 3.4 kB of patch storage each at pattern 51 over
-/// four pyramid levels, so roughly 7 GB across the two [`PatchSoA`] a
-/// [`CpuPatchTracker`] holds: far more than any rig this port runs (the shipped
-/// 50-pixel grid on a 960x960 frame produces about 400) and far below the point
-/// where the products in [`PatchSoA::new`] leave the `usize` range.
+/// Maximum tracker capacity, bounding caller-controlled preallocation.
+/// A million keypoints already implies roughly 7 GB across two patch sets with
+/// four Pattern51 levels, far above the shipped grid's needs. Rejecting larger
+/// requests prevents capacity arithmetic overflow at the public boundary.
 pub const MAX_CAPACITY: usize = 1 << 20;
 
-/// The most pyramid levels a tracker may be sized for.
-///
-/// `num_levels` is `optical_flow_levels + 1` and every per-patch buffer is sized
-/// with it, so it multiplies the capacity above. Each level halves both sides of
-/// the image: at 24 levels the top of the pyramid is one pixel of a 16-million
-/// pixel-wide frame, and basalt ships 3. Without a ceiling here a config asking
-/// for `10^12` levels turned into a 600-petabyte `Vec`, and a `Vec` that cannot be
-/// allocated aborts the process rather than returning.
+/// Maximum pyramid level count, limiting the capacity multiplier.
+/// Each level halves image dimensions. Unbounded counts could request storage
+/// large enough to abort allocation instead of returning an input error.
 pub const MAX_LEVELS: usize = 24;
 
 /// What the tracker can refuse.
@@ -296,13 +232,8 @@ impl PointsSoA {
     }
 }
 
-/// A list of `Eigen::AffineCompact2f` warps in six flat arrays.
-///
-/// The C++ keeps them as 2x3 matrices in a map (`optical_flow.h:66-68`), which
-/// gives one coefficient a stride of six floats across keypoints. Splitting the
-/// six coefficients into six arrays is the layout §12.2 asks for; callers that
-/// want one warp back get it through [`FlowTransforms::get`], which costs six
-/// loads and no indirection.
+/// Affine warps in six flat coefficient arrays, with keypoint index varying fastest.
+/// [`FlowTransforms::get`] reconstructs one warp with six loads.
 #[derive(Debug, Default, PartialEq)]
 pub struct FlowTransforms {
     m00: Vec<f32>,
@@ -775,7 +706,7 @@ impl<P: Pattern> PatchSoA<P> {
         self.num_levels
     }
 
-    /// Whether one patch at one level may be tracked (`patch.h:164-165`).
+    /// Whether one patch at one level may be tracked.
     ///
     /// # Panics
     ///
@@ -804,7 +735,7 @@ impl<P: Pattern> SourcePatches for PatchSoA<P> {
     /// Build every patch at every level from `pyramid`.
     ///
     /// One patch per entry of `positions`, at `position / (1 << level)` — the
-    /// `old_transform.translation() / scale` of `frame_to_frame_optical_flow.h:388`.
+    /// Source position divided by the pyramid scale.
     /// [`build_patch`] writes straight into this structure's arrays, so no packed
     /// per-patch record is ever built (§12.2).
     ///
@@ -836,7 +767,7 @@ impl<P: Pattern> SourcePatches for PatchSoA<P> {
                     actual: pyramid.num_levels(),
                 });
             };
-            // `const Scalar scale = 1 << level` (`frame_to_frame_optical_flow.h:384`).
+            // `const Scalar scale = 1 << level`.
             let scale: f32 = (1u32 << level) as f32;
             for index in 0..count {
                 if !selected.is_none_or(|flags| flags[index]) {
@@ -1090,16 +1021,12 @@ pub trait PatchTracker {
     /// The source-patch storage it consumes.
     type Patches: SourcePatches<Pyramid = Self::Pyramid>;
 
-    /// Track every patch of `patches` from `prev` into `next`.
-    ///
-    /// `transforms_in[i]` is basalt's `transform_2` before tracking: the linear
-    /// part of the source keypoint and the translation the caller guesses. The
-    /// source position itself is `patches.position(i)`.
+    /// Track source patches from `prev` to `next`.
+    /// `transforms_in` supplies source linear parts and guessed translations;
+    /// source positions come from `patches`.
     ///
     /// # Errors
-    ///
-    /// [`TrackerError`] when the inputs do not match the shape the tracker was
-    /// built for.
+    /// [`TrackerError`] if inputs do not match the allocated tracker geometry.
     fn track(
         &mut self,
         prev: &Self::Pyramid,
@@ -1264,7 +1191,7 @@ impl<P: Pattern> CpuPatchTracker<P> {
 
         out.reset(count);
 
-        // ── forward: `trackPoint(pyr_1, pyr_2, transform_1, transform_2)` (`:349`)
+        // ── forward: `trackPoint(pyr_1, pyr_2, transform_1, transform_2)`
         let max_iterations: usize = self.max_iterations;
         let num_levels: usize = self.num_levels;
         let (target_width, target_height): (f32, f32) = level0_size(next);
@@ -1274,7 +1201,7 @@ impl<P: Pattern> CpuPatchTracker<P> {
                 &mut self.forward_valid[..count],
                 |index| {
                     let guess: Vector2<f32> = transforms_in.translation(index);
-                    // `valid = t2(0) >= 0 && t2(1) >= 0 && t2(0) < w && t2(1) < h` (`:346`).
+                    // `valid = t2(0) >= 0 && t2(1) >= 0 && t2(0) < w && t2(1) < h`.
                     if guess.x < 0.0
                         || guess.y < 0.0
                         || guess.x >= target_width
@@ -1316,7 +1243,7 @@ impl<P: Pattern> CpuPatchTracker<P> {
             backward.build(next, backward_positions, Some(&forward_valid[..count]))?;
         }
 
-        // ── backward: `trackPoint(pyr_2, pyr_1, transform_2, transform_1_recovered)` (`:359`)
+        // ── backward: `trackPoint(pyr_2, pyr_1, transform_2, transform_1_recovered)`
         let backward: &PatchSoA<P> = &self.backward;
         let forward: &FlowTransforms = &self.forward;
         let forward_valid: &[bool] = &self.forward_valid[..count];
@@ -1331,8 +1258,8 @@ impl<P: Pattern> CpuPatchTracker<P> {
                     if !forward_valid[index] {
                         return (kept, false);
                     }
-                    // `off = t2 - t2_guess` with `t2 == t1` at that point (`:339`),
-                    // so `off == source position - guess`; `t1_recovered += off` (`:357`).
+                    // `off = t2 - t2_guess` with `t2 == t1` at that point,
+                    // so `off == source position - guess`; `t1_recovered += off`.
                     let source: Vector2<f32> = patches.position(index);
                     let offset: Vector2<f32> = source - transforms_in.translation(index);
                     let recovered_guess: Vector2<f32> = forward.translation(index) + offset;
@@ -1348,7 +1275,7 @@ impl<P: Pattern> CpuPatchTracker<P> {
                     if !ok {
                         return (kept, false);
                     }
-                    // `dist2 = (t1 - t1_recovered).squaredNorm()` (`:362`).
+                    // `dist2 = (t1 - t1_recovered).squaredNorm()`.
                     let dist2: f32 = (source - recovered.translation).norm_squared();
                     (kept, dist2 < max_recovered_dist2)
                 },
@@ -1360,13 +1287,7 @@ impl<P: Pattern> CpuPatchTracker<P> {
     }
 }
 
-/// Level 0's `(width, height)` as floats, standing in for basalt's `w`, `h`.
-///
-/// basalt reads `calib.resolution.at(0)` for every camera
-/// (`frame_to_frame_optical_flow.h:108-109`, trap 16); the port reads the target
-/// camera's own level-0 size, which is the same number for a rig whose cameras
-/// share a resolution and the right one for msd-g2, whose cameras do not
-/// (decision D30).
+/// Target camera's level-zero dimensions as floats, supporting mixed-resolution rigs.
 fn level0_size(pyramid: &PyramidU16) -> (f32, f32) {
     // `check_track_inputs` refuses a pyramid with fewer levels than the patch
     // set, and the patch set always has at least one, so level 0 is there. The
@@ -1379,12 +1300,12 @@ fn level0_size(pyramid: &PyramidU16) -> (f32, f32) {
     }
 }
 
-/// `trackPoint` (`frame_to_frame_optical_flow.h:377-402`).
+/// `trackPoint`.
 ///
 /// Coarse to fine, with the translation divided by `1 << level` on the way in and
-/// multiplied back on the way out (`:386`, `:396`) — both exact in `f32`, since
-/// the scale is a power of two. The linear part starts at the identity (`:381`)
-/// and is composed with the source's at the end (`:399`), so the SE(2) rotation
+/// multiplied back on the way out — both exact in `f32`, since
+/// the scale is a power of two. The linear part starts at the identity
+/// and is composed with the source's at the end, so the SE(2) rotation
 /// is re-estimated from scratch at every frame pair and never warm-started
 /// (`papers-part2.md` §13 deviation D7).
 fn track_point<P: Pattern>(
@@ -1404,8 +1325,7 @@ fn track_point<P: Pattern>(
 
     for level in (0..num_levels).rev() {
         if !patch_valid {
-            // The C++ `for` exits here (`:383`); running the remaining levels as
-            // a no-op keeps the bound fixed and the numbers identical.
+            // Idle through remaining levels after failure to keep loop bounds fixed.
             continue;
         }
         let scale: f32 = (1u32 << level) as f32;
@@ -1430,13 +1350,13 @@ fn track_point<P: Pattern>(
     (transform, patch_valid)
 }
 
-/// `trackPointAtLevel` (`frame_to_frame_optical_flow.h:404-438`).
+/// `trackPointAtLevel`.
 ///
 /// One Gauss-Newton step is: warp the pattern, take the mean-normalised residual,
 /// `inc = -H_se2^-1 J_se2^T r`, reject a non-finite or huge increment
-/// (`:422-425`, because `SE2::exp` crashes on NaN), apply it on the right
-/// (`transform *= SE2::exp(inc)`, `:428`) and require the new centre to stay two
-/// pixels inside the image (`:430-432`).
+/// (because `SE2::exp` crashes on NaN), apply it on the right
+/// (`transform *= SE2::exp(inc)`) and require the new centre to stay two
+/// pixels inside the image.
 fn track_point_at_level<P: Pattern>(
     image: &ImageU16,
     patches: &PatchSoA<P>,
@@ -1454,7 +1374,7 @@ fn track_point_at_level<P: Pattern>(
 
     for _ in 0..max_iterations {
         if !patch_valid {
-            // `for (iteration = 0; patch_valid && ...)` (`:408`), as a no-op.
+            // `for (iteration = 0; patch_valid &&...)`, as a no-op.
             continue;
         }
 
@@ -1475,9 +1395,7 @@ fn track_point_at_level<P: Pattern>(
             );
 
             patch_valid &= increment.iter().all(|value| value.is_finite());
-            // `inc.lpNorm<Eigen::Infinity>()` is `cwiseAbs().maxCoeff()`, whose
-            // reduction is `(a < b) ? b : a` from element 0 — spelled out so a
-            // NaN takes the same branch it takes in C++.
+            // Fold absolute coefficients from element zero, retaining a left-hand NaN.
             let mut infinity_norm: f32 = increment[0].abs();
             for row in 1..3 {
                 let candidate: f32 = increment[row].abs();

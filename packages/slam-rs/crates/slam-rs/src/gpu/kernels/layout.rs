@@ -32,14 +32,14 @@ pub const TILE_H: u32 = 8;
 // The four numbers below are the CPU lane's own, aliased rather than
 // re-declared: a kernel that drifted from its reference by a constant would
 // still compile, and `FILTER_LANES` below already shows the shape.
-/// `border` on every patch tap, `PATCH_BORDER` (`patch.h:87`).
+/// `border` on every patch tap, `PATCH_BORDER`.
 pub(crate) const PATCH_BORDER: f32 = crate::frontend::patch::PATCH_BORDER;
-/// `const int filter_margin = 2` (`frame_to_frame_optical_flow.h:430`).
+/// `const int filter_margin = 2`.
 pub(crate) const FILTER_MARGIN: f32 = crate::frontend::tracker::FILTER_MARGIN;
-/// The increment guard at `frame_to_frame_optical_flow.h:425`.
+/// The increment guard at.
 pub(crate) const MAX_INCREMENT_INFINITY_NORM: f32 =
     crate::frontend::tracker::MAX_INCREMENT_INFINITY_NORM;
-/// `Sophus::Constants<float>::epsilon()` (`common.hpp:182-186`).
+/// `Sophus::Constants<float>::epsilon()`.
 pub(crate) const SOPHUS_EPSILON: f32 = <f32 as crate::lie::LieScalar>::SOPHUS_EPSILON;
 
 /// A device buffer and the element count the kernel will see in it.

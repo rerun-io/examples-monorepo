@@ -145,7 +145,7 @@ fn fast_cell_select_kernel(
         last_y = height - SELECT_MARGIN;
     }
 
-    // `border <= x && x < w - border - 1` (`image.h:687-689`), hoisted.
+    // `border <= x && x < w - border - 1`, hoisted.
     let edge_x = f32::cast_from(width) - SELECT_EDGE - 1.0f32;
     let edge_y = f32::cast_from(height) - SELECT_EDGE - 1.0f32;
 
@@ -280,8 +280,7 @@ fn fast_cell_select_kernel(
                     let fy = f32::cast_from(y);
                     let dx = fx - centre_x;
                     let dy = fy - centre_y;
-                    // `Eigen::Vector2f{...}.norm()`, not `hypot`
-                    // (`keypoints.cpp:176`).
+                    // Use sqrt of the sum of squares, not hypot.
                     let distance = f32::sqrt(dx * dx + dy * dy);
                     let mut inside = true;
                     if safe_radius != 0.0f32 && distance >= safe_radius {
