@@ -61,7 +61,7 @@ def test_the_calibration_comes_across_field_by_field(camera: CameraFactory, imu:
     calibration: _core.Calibration = _core.Calibration.from_catalog([camera(0, 0.0), camera(1, 0.1)], imu)
     assert calibration.camera_count == 2
     assert calibration.resolution == [(calibrated, calibrated), (calibrated, calibrated)]
-    # basalt's own JSON is the round trip, so a reader can check what was pushed.
+    # JSON round-tripping exposes the exact configuration passed to the core.
     assert _core.Calibration.from_json(calibration.to_json()).resolution == calibration.resolution
 
 
@@ -175,7 +175,7 @@ def test_the_frame_reports_shapes_the_stub_promises(camera: CameraFactory, front
         assert frame.positions(index).shape == (count, 2)
         assert frame.positions(index).dtype == np.float32
         assert frame.transforms(index).shape == (count, 2, 3)
-        # The occupancy grid is camera 0's for every camera, as basalt's is.
+        # Occupancy uses camera 0's grid for every camera.
         assert frame.occupancy(index).shape == (cells, cells)
         assert frame.occupancy(index).dtype == np.int32
     # The 2x3 warp starts at the identity with the keypoint's pixel in the last column.
@@ -217,8 +217,8 @@ def probe_detector(calibration_json: str, config_json: str) -> subprocess.Comple
     """Run :data:`DETECTOR_PROBE` against one config, or fail the test on a hang.
 
     Args:
-        calibration_json: The rig's calibration as basalt's JSON.
-        config_json: One of basalt's configs as text.
+        calibration_json: The rig's calibration as JSON.
+        config_json: A VIO config as text.
 
     Returns:
         The finished process, so the caller can assert on its output.
@@ -233,7 +233,7 @@ def probe_detector(calibration_json: str, config_json: str) -> subprocess.Comple
 
 
 def config_with(key: str, value: int) -> str:
-    """basalt's default config as text, with one integer field replaced."""
+    """Default VIO configuration as text, with one integer field replaced."""
     document: dict = json.loads(_core.VioConfig().to_json())
     assert key in document["value0"], f"{key} is not a config field: {sorted(document['value0'])}"
     document["value0"][key] = value
@@ -250,12 +250,9 @@ def test_the_shipped_config_detects_on_a_blank_frame_and_returns(camera: CameraF
 
 @pytest.mark.parametrize("min_threshold", [0, -1, -(2**31)])
 def test_a_detector_threshold_ladder_that_never_ends_is_refused(camera: CameraFactory, imu: ImuCalib, min_threshold: int) -> None:
-    """``min_threshold <= 0`` hangs the detector — and basalt's own — so it is refused.
-
-    ``keypoints.cpp:162,187`` halves the FAST threshold by integer division while
-    it is at or above ``min_threshold``: zero halves to zero for ever. The C++ has
-    the same non-terminating loop; the port refuses the config instead of running
-    it, and floors its own last rung as a second line.
+    """Refuse a non-positive detector threshold minimum.
+    Integer halving leaves zero unchanged, so the loop could never end.
+    The detector also floors its last rung to protect direct callers.
     """
     calibration: str = _core.Calibration.from_catalog([camera(0, 0.0)], imu).to_json()
     finished: subprocess.CompletedProcess[str] = probe_detector(
@@ -366,10 +363,8 @@ def test_a_frame_of_the_wrong_size_leaves_the_frontend_as_it_was(
 @settings(max_examples=10, deadline=None)
 @given(start=st.integers(min_value=-(10**12), max_value=-1))
 def test_identical_frames_at_negative_timestamps_keep_their_ids(frontend: FrontendFactory, texture: TextureFactory, start: int) -> None:
-    """basalt reads ``t_ns < 0`` as "no previous frame"; the port's clock is an Option.
-
-    Two identical framesets used to share **zero** ids at ``(-2, -1)`` and 14 of
-    16 at ``(0, 1)``: the negative timestamp made every frameset the first one.
+    """An optional frontend clock preserves negative timestamps.
+    Identical frames at (-2, -1) must track rather than start a new id space.
     """
     negative: _core.OpticalFlow = frontend(1)
     first: _core.FlowFrame = negative.process(start, [texture(0, 0)])

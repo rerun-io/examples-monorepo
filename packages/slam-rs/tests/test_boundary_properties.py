@@ -1,6 +1,6 @@
 """Property tests of the estimator's inertial boundary, driven through ``slam_rs._core`` (D23).
 
-Hypothesis drives the PyO3 boundary directly: no CLI oracle. Examples are capped
+Hypothesis drives the PyO3 boundary directly: no CLI subprocess. Examples are capped
 so the whole file stays inside the default, seconds-long suite. The image rules
 both entry points share — rank, dtype, layout, the frameset's width and the
 calibrated frame size — are parametrized over ``Vio.track`` and

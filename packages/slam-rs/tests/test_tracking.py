@@ -137,10 +137,8 @@ def test_a_run_that_never_tracked_still_reports_what_it_held(
 
 
 def test_the_estimator_is_configured_from_basalts_own_two_files(manifest: ReferenceManifest) -> None:
-    """C72: the RoboCap number is agreement with the C++, so the port is fed the C++'s own configuration.
-
-    Both files are committed beside the manifest, so this needs no NAS — which
-    is also why the cap can run the lane at all.
+    """The RoboCap estimator uses the two configuration files named by its manifest.
+    Both files are checked into the package, so configuration needs no external bundle.
     """
     calibration: _core.Calibration
     flow: _core.VioConfig

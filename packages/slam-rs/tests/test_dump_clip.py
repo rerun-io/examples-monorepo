@@ -1,10 +1,7 @@
-"""What the PC11 dump producer refuses before it opens a segment.
+"""Clip-dump selection errors must be refused before opening a segment.
 
-``tests/tools/dump_clip.py`` is a test-only producer — it writes the ``.npz``
-bundle :mod:`slam_rs.apis.bench_track` replays and the PGM directory the Rust
-lanes and the C++ oracle read — and a whole segment is gigabytes, so what is
-worth a test here is the selection it will not spend a feed on. It is reached as
-a namespace module under ``tests``, the same path pytest and pyrefly are given.
+The test-only producer writes an NPZ input for bench_track and PGM inputs for
+Rust replay. Whole segments are large, so invalid selection must fail early.
 """
 
 from pathlib import Path

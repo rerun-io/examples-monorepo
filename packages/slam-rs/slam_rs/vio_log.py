@@ -36,12 +36,7 @@ RUN_ENTITY: str = "/world/runs/slam_rs"
 GT_ENTITY: str = "/world/runs/gt"
 """The dataset's own ground-truth run, which the base recording already names."""
 VIO_STATS_ENTITY: str = "/stats/vio"
-"""Where the per-frame counters go, off the dataset's own tree and beside the frontend's.
-
-Named for the rung it belongs to, not for what it is: this module already imports
-three names from :mod:`slam_rs.frontend_log`, which has its own ``STATS_ENTITY``
-and its own ``CPP_COLOR`` with different values, and one unqualified import of
-either would have been silently wrong.
+"""Entity path for per-frame VIO counters, separate from dataset and frontend stats.
 """
 
 ESTIMATE_COLOR: tuple[int, int, int] = (70, 220, 130)
@@ -396,7 +391,7 @@ class VioLogger:
         rr.log(f"{VIO_STATS_ENTITY}/lm_lambda", rr.Scalars(snapshot.lm_lambda))
         # The cost the frame started and ended the LM loop at: the pair is the
         # convergence trace, and :func:`vio_blueprint` gives it an axis of its
-        # own. Both are negative on most frames, which is basalt's own convention
+        # own. Both are negative on most frames, following the prior cost convention
         # and not a sign error: the marginalization prior term deliberately drops
         # the 1/2 r^T r (``crates/slam-rs/src/estimator/optimize.rs:71``, D20).
         rr.log(f"{VIO_STATS_ENTITY}/lm_error_before", rr.Scalars(snapshot.lm_error_before))

@@ -1,41 +1,13 @@
-"""Dump a whole reference segment to disk so the Rust lanes can replay it offline.
+"""Dump catalog inputs for optional offline Rust replay and isolated timing.
 
-`crates/slam-rs/tests/full_clip.rs` needs three things the committed fixtures only
-carry for sixty framesets: every frameset's pixels, every inertial sample, and the
-calibration the C++ reference was actually handed. This writes all three into one
-directory:
+The directory holds clip metadata, calibration JSON, IMU CSV/JSON, frame hashes,
+gray8 PGMs and integer timestamps. The optional NPZ and calibration pickle
+feed bench_track without decoding in its timing loop. NPZ holds frames in
+memory, so bound benchmark dumps with max_framesets.
 
-```
-<clip>/clip.json              segment, clock, frameset timestamps, camera shapes
-<clip>/calib.json             basalt-shaped calibration, from the catalog statics
-<clip>/imu.csv                t_ns,gx,gy,gz,ax,ay,az on the video_time clock
-<clip>/frames.sha256          the C++ reference's own format, absolute timestamps
-<clip>/frame_<NNN>_cam<C>.pgm tools/dump_flow.cpp's layout, gray8
-<clip>/timestamps.txt         the same layout's frameset clock, one per line
-<clip>/imu.json               the same samples as imu.csv, in the fork's shape
-<clip>/clip.npz               `--npz`: the same framesets as one array bundle
-<clip>/clip.npz.calib.pkl     `--npz`: the feed's own `CameraCalib`/`ImuCalib`
-```
-
-The last pair is what `slam_rs.apis.bench_track` replays: that harness times
-`Vio.track` with no decoder and no Rerun, so it needs the pixels as one array
-and the calibration as the dataclasses the feed built — this is the tool that
-writes them, and `--npz` holds every frame in memory, so a bench dump wants
-`--max-framesets`.
-
-The last two are what the fork's `basalt_vio_oracle <frames-dir> <calib.json>
-<config.json> <out.json> [n]` reads, so one dump feeds both the port's own lane
-and the C++ oracle that isolates the backend from the frontend.
-
-The pixels come off the frozen `cpu_gray8_dav1d_1thread` decode path, so
-`frames.sha256` is comparable line by line with the reference run's file — which
-is the check that both implementations are fed the same clip. `--calibration
-fixture` swaps in the fork's `data/msd/msd*_calib.json` doubles instead of the
-catalog's float32-stored values, which is how the port's sensitivity to that
-difference is measured.
-
-A whole segment is large: MIO07 is 4,095 framesets of 960x960 stereo, 7.5 GB.
-Nothing here is committed and the directory is meant to be deleted afterwards.
+Catalog calibration uses f32 statics; fixture calibration uses the checked-in
+JSON doubles. Keeping this explicit permits sensitivity measurements.
+A full MIO07 stereo dump is about 7.5 GB and is not committed.
 """
 
 import hashlib
@@ -54,10 +26,10 @@ from slam_rs.catalog_feed import CameraCalib, CatalogSegment, Frameset, SegmentF
 from slam_rs.reference import ReferenceManifest, ReferenceSegment, load_manifest, resolved_flow_config
 
 FIXTURES: Path = Path(__file__).resolve().parents[2] / "crates/slam-rs/tests/fixtures"
-"""Where the fork's own MSD calibration files sit in this repository."""
+"""Directory holding MSD calibration JSON files."""
 
 DEVICE_CALIBRATION: dict[str, str] = {"msd-index": "msdmi_calib.json", "msd-g2": "msdmg_calib.json"}
-"""Catalog dataset to the fork calibration file that carries the same rig in doubles."""
+"""Catalog dataset to its calibration JSON with double-precision values."""
 
 
 @dataclass(slots=True)
@@ -69,7 +41,7 @@ class Config:
     output: Path
     """Directory the clip is written to; created if missing."""
     calibration: Literal["catalog", "fixture"] = "catalog"
-    """``catalog`` writes the float32-stored values the C++ reference was pushed; ``fixture`` writes the fork file's doubles."""
+    """``catalog`` writes float32 statics; ``fixture`` writes calibration-file doubles."""
     max_framesets: int | None = None
     """Stop after this many framesets; None dumps the whole segment."""
     npz: bool = False
@@ -79,19 +51,16 @@ class Config:
 
 
 def eigen_quaternion_xyzw(rotation: Float64[ndarray, "3 3"]) -> Float64[ndarray, " 4"]:
-    """Eigen's ``Quaterniond(Matrix3d)``, term for term.
+    """Convert a rotation matrix using trace and largest-diagonal quaternion branches.
 
-    ``vit_tracker.cpp:288`` builds the camera extrinsic this way from the 4x4 the
-    driver pushes, and the matrix it is given is not exactly orthonormal — the
-    catalog stores float32. Different conversions disagree in the last bits on
-    such a matrix, so this reproduces the one the reference actually ran rather
-    than calling a library.
+    Catalog matrices are stored in f32 and can be slightly non-orthogonal.
+    The explicit conversion keeps deterministic rounding without normalization.
 
     Args:
         rotation: Rotation block of ``imu_T_cam``.
 
     Returns:
-        The quaternion as ``[qx, qy, qz, qw]``, unnormalised exactly as Eigen leaves it.
+        The quaternion as ``[qx, qy, qz, qw]``, without normalization.
     """
     quaternion: Float64[ndarray, " 4"] = np.zeros(4, dtype=np.float64)
     trace: float = float(rotation.trace())
@@ -120,19 +89,17 @@ def eigen_quaternion_xyzw(rotation: Float64[ndarray, "3 3"]) -> Float64[ndarray,
 
 
 def catalog_calibration(feed: SegmentFeed, fork_file: dict[str, Any]) -> dict[str, Any]:
-    """A basalt calibration file holding the catalog's own geometry.
+    """Build calibration JSON using catalog intrinsics, resolution and extrinsics.
 
-    The intrinsics, resolutions and extrinsics are the values the C++ reference
-    was handed through the VIT C API; everything else — the noise model, the
-    update rate, the time offset — is not on the recording and stays as the fork
-    file has it.
+    Noise, update rate and time offset remain from the calibration file because
+    the recording does not carry them.
 
     Args:
         feed: Open segment feed, whose cameras carry the catalog geometry.
-        fork_file: The fork's ``msd*_calib.json``, already unwrapped from ``value0``.
+        fork_file: The calibration JSON, already unwrapped from ``value0``.
 
     Returns:
-        The ``value0`` body of a basalt calibration file.
+        The ``value0`` body of a calibration JSON file.
     """
     calibration: dict[str, Any] = dict(fork_file)
     poses: list[dict[str, float]] = []
@@ -181,11 +148,8 @@ def write_pgm(path: Path, image: UInt8[ndarray, "h w"]) -> None:
 
 
 def write_oracle_inputs(output: Path, frame_t_ns: list[int], imu_lines: list[str]) -> None:
-    """Write the two files `basalt_vio_oracle` reads beside the PGMs.
-
-    The tool takes the frameset clock as one integer per line and the inertial
-    window as JSON. Both are the values already written to ``clip.json`` and
-    ``imu.csv``, in the shape ``tools/vio_oracle.cpp`` parses.
+    """Write integer frameset timestamps and IMU JSON beside the PGMs.
+    These duplicate the clock and samples in clip.json and imu.csv for replay tools.
 
     Args:
         output: Clip directory.

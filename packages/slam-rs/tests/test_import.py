@@ -25,11 +25,8 @@ def test_core_reports_a_version() -> None:
 
 
 def test_a_frame_without_imu_needs_more_imu(pipeline: PipelineFactory, texture: TextureFactory) -> None:
-    """basalt blocks on its IMU queue here; Offline mode says so and returns (D17).
-
-    Nothing moves: the coverage test comes before the frontend, so the refused
-    frameset may be pushed again once its samples arrive and the result is the
-    one a run that had them all along would have produced.
+    """Insufficient IMU coverage returns before any frontend mutation (D17).
+    Retrying after samples arrive must match a run that had them from the start.
     """
     vio: _core.Vio = pipeline(2)
     assert vio.camera_count == 2

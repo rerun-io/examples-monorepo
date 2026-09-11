@@ -4,7 +4,7 @@ The feed is the Python half of the estimator's data contract: it reads a segment
 either from a catalog URL or from a local ``.rrd`` served in process, and hands
 the Rust core CPU grayscale images with integer-nanosecond timestamps.
 
-Three decisions are frozen here because each one silently changes the numbers:
+Five decisions are frozen here because each one silently changes the numbers:
 
 * **Pixels.** AV1 samples are muxed without re-encoding and decoded by
   single-threaded dav1d to ``gray8``. The MSD streams are limited-range
@@ -25,7 +25,7 @@ Three decisions are frozen here because each one silently changes the numbers:
   far apart two cameras' frames may be and still be one frameset.
 * **Clocks.** ``video_time`` is the IMU's clock. Frames and ground truth reach it
   by adding ``cam_time_offset_ns``, which is what "added to a camera timestamp to
-  reach the IMU clock" means and what basalt's own RoboCap reader does
+  reach the IMU clock" means and the feed's timestamp rule
   (``frameset_t = median(camera_t) + kCameraToImuOffsetNs``, the IMU untouched).
   MSD's offset is zero, so every MSD number is unchanged by this.
 * **Geometry.** ``Pinhole:image_from_camera`` is column-major, ``Pinhole:resolution``
@@ -71,7 +71,7 @@ DEFAULT_WINDOW_S: float = 60.0
 """Time window a long segment is cut into: a 7.6 s two-camera segment is 8.5 MB, so a 2,000 s one is not one query."""
 
 CameraModelName: TypeAlias = Literal["kb4", "radtan8"]
-"""Projection models V0 supports, named as basalt names them."""
+"""Projection models V0 supports, using the accepted calibration names."""
 
 _MODEL_BY_DISTORTION: dict[str, tuple[CameraModelName, int]] = {"kannala_brandt": ("kb4", 4), "brown_conrady": ("radtan8", 8)}
 """``simplecv.components.DistortionModel`` string to the model and the number of coefficients it uses."""
@@ -107,7 +107,7 @@ class CameraStatics:
     transform_relation: int
     """``Transform3D:relation``; must be :data:`CHILD_FROM_PARENT`."""
     distortion_valid_radius: float | None
-    """basalt's ``rpmax``; present on msd-g2 only."""
+    """The valid radius ``rpmax``; present on msd-g2 only."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -140,7 +140,7 @@ class CameraCalib:
     distortion: Float64[ndarray, " n_coeffs"]
     """Exactly the coefficients the model uses: 4 for kb4, ``k1 k2 p1 p2 k3 k4 k5 k6`` for radtan8."""
     distortion_valid_radius: float | None
-    """basalt's ``rpmax``, when the recording carries one."""
+    """The valid radius ``rpmax``, when the recording carries one."""
     imu_T_cam: Float64[ndarray, "4 4"]
     """Camera pose in the IMU frame: the inverse of the stored ``ChildFromParent`` transform."""
 
@@ -204,20 +204,10 @@ class Frameset:
     """Nearest ground-truth pose as ``[tx, ty, tz, qw, qx, qy, qz]``, or None without a ``gt`` layer."""
 
     def image_digests(self) -> tuple[str, ...]:
-        """Digest of each camera's gray8 bytes, in the same order as :attr:`images`.
+        """Digest each camera's contiguous gray8 buffer in image order.
 
-        This is the unit the basalt C++ reference records in its
-        ``frames.sha256`` (one ``t_ns,cam_index,sha256`` line per decoded frame),
-        so the two decoders can be compared frame by frame rather than only in
-        aggregate. Only the pixel-parity tests and the clip dumper ask for it,
-        which is why it is hashed on demand rather than in the feed loop: that
-        loop is what a gate's wall time and every fleet row's realtime factor
-        measure, and 0.68 ms a frameset of SHA-256 over 2x960x960 is decode plus
-        `track` and something else.
-
-        The array's own buffer is hashed rather than a ``tobytes()`` copy of it —
-        the same bytes and the same digest, and a non-contiguous frame raises
-        here rather than being hashed in a different order.
+        Hash on demand for pixel comparisons and clip dumps, avoiding hashing cost
+        in the feed loop and avoiding a temporary bytes copy.
 
         Returns:
             One hex digest per camera.
@@ -285,7 +275,7 @@ class RigProfile:
 
     False is MSD, whose ``video_time`` is relative to
     ``property:capture:start_time_ns``; RoboCap records the device clock itself,
-    and that is what every basalt CSV beside it carries.
+    and that is what trajectory CSV exports use.
     """
 
     def __post_init__(self) -> None:
@@ -301,7 +291,7 @@ class RigProfile:
 
     @classmethod
     def from_robocap(cls, reference: RobocapReference) -> "RigProfile":
-        """How the RoboCap rig has to be read, from the manifest's record of the C++ lane.
+        """Read the RoboCap rig selection, downscale, clock and pairing rules from the manifest.
 
         Args:
             reference: The manifest's ``[robocap]`` table, which is where the five
@@ -324,14 +314,10 @@ MSD_RIG: RigProfile = RigProfile()
 
 
 def scale_principal_point(value: float, downscale: int) -> float:
-    """One principal-point coordinate at ``1 / downscale`` of its resolution.
+    """Scale a principal-point coordinate by pixel centers.
 
-    The pixel's own centre is what scales, not its index: a pixel at ``c`` covers
-    ``[c, c + 1)`` whose centre is ``c + 0.5``, and the downscaled pixel centre
-    ``(c + 0.5) / d`` is at index ``(c + 0.5) / d - 0.5``. This is the convention
-    the fork's ``basalt_convert_robocap_calib.py`` writes, and reproducing it from
-    the recording's own native statics returns that file's digits exactly
-    (``tests/test_catalog_feed.py``).
+    A pixel at c has center c + 0.5. At downscale d its index becomes
+    (c + 0.5) / d - 0.5. This keeps calibration aligned with area-resampled pixels.
     """
     return (value + 0.5) / downscale - 0.5
 
@@ -535,8 +521,7 @@ def decode_gray(mp4_bytes: bytes, downscale: int = 1) -> Iterator[UInt8[ndarray,
 
     A ``downscale`` above one asks the same ``swscale`` call for the smaller frame
     with ``SWS_AREA``: one conversion, colour and size together, which is the
-    operation basalt's own RoboCap reader performs
-    (``cpu_gray8_swscale_area_downscale3``). Converting first and resampling
+    combined area-resampling operation. Converting first and resampling
     afterwards is a second, different filter and a different trajectory.
 
     Args:
@@ -579,7 +564,7 @@ class _VideoIndex:
     A frameset is one row: its ``video_time``, and the frame each fed camera
     contributes to it. On a hardware-synced rig fed whole that is the identity —
     frameset ``i`` is frame ``i`` of every camera — and on RoboCap it is the
-    nearest-match table basalt's reader builds.
+    nearest-match table built by this feed.
     """
 
     t_ns: Int64[ndarray, " n_framesets"]
@@ -620,7 +605,7 @@ class SegmentFeed:
     """Timestamp of every frameset on the inertial clock, before ``frame_stride`` is applied.
 
     That is ``video_time`` plus :attr:`ImuCalib.cam_time_offset_ns`, which is the
-    clock the estimator, the exported trajectory and every basalt CSV are on.
+    clock the estimator, the exported trajectory and ground-truth CSV exports are on.
     """
     camera_positions: tuple[int, ...]
     """Rig index of each fed camera, in the order a frameset's images arrive."""
@@ -852,19 +837,12 @@ def _window_bounds(index: _VideoIndex, window_ns: int) -> list[tuple[int, int]]:
 
 
 def _frame_nearest_anchor(times: Int64[ndarray, " n_frames"], cursor: int, anchor_t_ns: int, tolerance_ns: int) -> tuple[int | None, int]:
-    """The frame one camera contributes to one anchor, and where its cursor goes if the frameset falls.
+    """Select a camera frame nearest the anchor, breaking ties towards the later frame.
 
-    The camera walks forward from ``cursor`` while the next frame is no farther
-    from the anchor than the current one — ties take the later frame, which is
-    basalt's ``<=`` (``dataset_io_robocap.cpp:422-426``) — and contributes that
-    frame if it sits within ``tolerance_ns`` (inclusive, ``:427``).
-
-    When it does not, the cursor moves only if that nearest frame is *earlier*
-    than the anchor (``:428``): such a frame is farther from every later anchor
-    still, so no anchor can ever take it, while a camera running ahead keeps its
-    frame for the next anchor. The returned cursor is therefore where this camera
-    stands once the frameset falls; a caller whose frameset stands ignores it and
-    moves the cursor past the frame it took (``selected + 1``, ``:439``).
+    Accept the inclusive tolerance. On an incomplete frameset, discard a selected
+    frame only if it is earlier than the anchor: it cannot serve a later anchor.
+    A future frame stays available. On completion, the caller advances past each
+    selected frame so no image is reused.
 
     Args:
         times: The camera's frame timestamps, in time order.
@@ -887,25 +865,14 @@ def _frame_nearest_anchor(times: Int64[ndarray, " n_frames"], cursor: int, ancho
 
 
 def match_framesets(camera_t_ns: Sequence[Int64[ndarray, " n_frames"]], tolerance_ns: int) -> tuple[Int64[ndarray, " n_framesets"], Int64[ndarray, "n_framesets n_cameras"]]:
-    """Group frames into framesets the way basalt's multi-camera reader does.
+    """Group camera frames around camera 0 anchors.
 
-    Camera 0 is the anchor. Every other camera advances to the frame nearest the
-    anchor's, and the frameset exists only if every camera has one within
-    ``tolerance_ns``. Its timestamp is the median of the frames in it, which for
-    an even number of cameras is the lower middle plus half the gap to the upper
-    one — the arithmetic is basalt's, and reproducing it exactly is what makes the
-    port's frameset times equal the C++'s to the nanosecond.
-
-    A frame joins one frameset only: a complete frameset moves every non-anchor
-    cursor past the frame it took (``selected + 1``,
-    ``dataset_io_robocap.cpp:439``). An incomplete one moves a cursor only where
-    that camera's nearest frame is *earlier* than the anchor and can therefore
-    never partner a later one; a camera running ahead keeps its frame for the
-    next anchor.
-
-    An incomplete frameset whose anchor lies inside every camera's own span is an
-    interior drop, and basalt allows one per thousand interior anchors before it
-    calls the run unusable.
+    Every camera must have a nearest frame within the inclusive tolerance.
+    Use the median timestamp; for even counts, use the lower middle plus half
+    the integer gap. Complete framesets consume all selected images once.
+    Incomplete ones discard only frames earlier than the anchor.
+    Allow max(1, ceil(interior_anchors * 0.001)) incomplete interior anchors;
+    exterior anchors do not count against the rig.
 
     Args:
         camera_t_ns: Each fed camera's frame timestamps, in time order.
@@ -937,7 +904,7 @@ def match_framesets(camera_t_ns: Sequence[Int64[ndarray, " n_frames"]], toleranc
         interior: bool = overlap_start <= anchor_t_ns <= overlap_end
         interior_anchors += interior
         row: list[int] = [anchor_index]
-        # Where each camera would land: basalt commits these to the cursors only
+        # Where each camera would land: commit these to the cursors only
         # once the whole frameset stands.
         selected: list[int] = list(cursors)
         for position in range(1, len(camera_t_ns)):
@@ -961,7 +928,7 @@ def match_framesets(camera_t_ns: Sequence[Int64[ndarray, " n_frames"]], toleranc
             raise ValueError(f"frameset timestamps are not strictly increasing: {frameset_t_ns} follows {t_ns[-1]}")
         t_ns.append(frameset_t_ns)
         rows.append(row)
-    # basalt's own allowance, in its own arithmetic: one in a thousand, at least one.
+    # Allow one interior drop per thousand anchors, with a minimum of one.
     allowed_drops: int = max(1, math.ceil(interior_anchors * 0.001))
     if interior_drops > allowed_drops:
         raise ValueError(
@@ -1122,7 +1089,7 @@ def _read_imu(dataset: DatasetEntry, segment_id: str, interpolate_accel: bool, f
         raise ValueError(f"{segment_id}: IMU timestamps are not strictly increasing")
     # MSD logs both sensors on identical timestamps, so pairing is an assertion.
     # RoboCap's two channels run on their own clocks (10,745 gyro against 10,751
-    # accel on session 15), and basalt's reader interpolates the accelerometer
+    # accel on session 15), so interpolate accelerometer values
     # onto the gyroscope's timestamps; the core only ever sees the paired form.
     if not interpolate_accel:
         if not np.array_equal(gyro_t_ns, accel_t_ns):
@@ -1144,8 +1111,7 @@ def pair_accel_onto_gyro(
     A gyroscope sample outside the accelerometer's own span is dropped rather
     than held at an endpoint: ``numpy.interp`` clamps, which would feed the
     estimator a constant acceleration over a stretch it has no measurement for.
-    This is basalt's rule for RoboCap, whose file reader skips a gyroscope sample
-    that has no accelerometer sample on both sides of it.
+    Require accelerometer coverage on both sides of each retained gyroscope sample.
 
     Args:
         gyro_t_ns: Gyroscope timestamps, strictly increasing.
@@ -1160,12 +1126,9 @@ def pair_accel_onto_gyro(
         ValueError: If a channel is too short to interpolate with, or the two
             spans do not overlap, so the paired stream would be empty.
     """
-    # basalt deduplicates both raw channels before it pairs them
-    # (`sort_and_deduplicate`, `dataset_io_robocap.cpp:472`), keeping the first
-    # sample of each equal-timestamp run. That is what its `interval == 0` guard
-    # reads as alpha 0, and it is the whole difference from `numpy.interp`, which
-    # takes the second of a duplicated pair and then interpolates the next
-    # gyroscope sample from the wrong end of the gap.
+    # Deduplicate both channels before pairing, keeping the first
+    # sample of each equal-timestamp run. Keeping the second duplicate would
+    # change interpolation across the following gap.
     first_of_run: Bool[ndarray, " n_accel"] = np.ones(accel_t_ns.size, dtype=bool)
     first_of_run[1:] = np.diff(accel_t_ns) != 0
     accel_t_ns = accel_t_ns[first_of_run]
@@ -1177,8 +1140,8 @@ def pair_accel_onto_gyro(
         )
     inside: Bool[ndarray, " n_gyro"] = (gyro_t_ns >= accel_t_ns[0]) & (gyro_t_ns <= accel_t_ns[-1])
     if not bool(inside.any()):
-        # basalt errors instead of handing the estimator an empty inertial stream
-        # (`dataset_io_robocap.cpp:496`); a rig with no IMU is not this rig.
+        # Refuse an empty inertial stream:
+        # this rig requires paired IMU measurements.
         raise ValueError(
             f"the two inertial channels do not overlap, so nothing pairs: the gyroscope spans "
             f"{int(gyro_t_ns[0])}..{int(gyro_t_ns[-1])} ns and the accelerometer {int(accel_t_ns[0])}..{int(accel_t_ns[-1])} ns"
@@ -1262,12 +1225,10 @@ def _rig_trajectory(table: pa.Table, segment_id: str) -> Trajectory:
 
 
 def select_cameras(statics: pa.Table, camera_count: int, camera_names: tuple[str, ...] | None) -> tuple[int, ...]:
-    """Rig indices of the named cameras, in the caller's order.
+    """Resolve camera names to rig indices in caller order.
 
-    Names are read from each camera node's ``name`` static and compared with
-    hyphens normalised to underscores **on both sides**, because the rig writes
-    ``left-front`` where basalt's driver spells it ``left_front`` and a caller
-    may reasonably spell it either way.
+    Normalize hyphens to underscores on both sides so left-front and left_front
+    select the same recorded camera.
 
     Args:
         statics: Single-row table holding every camera node's statics.

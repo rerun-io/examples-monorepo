@@ -131,11 +131,11 @@ def test_robocap_carries_s15_and_no_ground_truth(manifest: ReferenceManifest) ->
 
 
 def test_robocap_names_the_configuration_the_cpp_ran(manifest: ReferenceManifest) -> None:
-    """The four cameras, the downscale, the two rig rules and basalt's own two files, all present."""
+    """The four cameras, the downscale, the two rig rules and the two configured JSON files, all present."""
     assert manifest.robocap.camera_names == ("left", "left_front", "right_front", "right")
     assert manifest.robocap.downscale == 3
     assert manifest.robocap.decode_path == "cpu_gray8_swscale_area_downscale3"
-    # basalt's `dataset_io_robocap.cpp` tolerance, and the pairing its reader does
+    # The manifest defines frameset tolerance and inertial pairing.
     # because the two inertial channels are on their own clocks.
     assert manifest.robocap.frameset_tolerance_ns == 1_000_000
     assert manifest.robocap.interpolate_accel_onto_gyro is True
@@ -164,7 +164,7 @@ def test_a_selector_the_manifest_cannot_satisfy_is_a_typed_error(manifest: Refer
 
 
 def test_flow_config_loads_the_datasets_own_basalt_config(manifest: ReferenceManifest) -> None:
-    """What the estimator is built with is the file, not basalt's constructor defaults.
+    """What the estimator is built with is the file, not constructor defaults.
 
     The difference is one key — ``vio_marg_lost_landmarks``, true in both MSD
     files and false in the constructor (C72) — so the assertion is on the config
@@ -221,7 +221,7 @@ def test_resolved_flow_config_hands_back_the_very_string_it_parsed(manifest: Ref
 
 
 def test_every_dataset_names_a_vendored_config_that_parses(manifest: ReferenceManifest) -> None:
-    """Both files are checked in beside the manifest and are basalt's own shape."""
+    """Both files are checked in beside the manifest and use the accepted JSON formats."""
     for dataset in manifest.datasets:
         path: Path = manifest.package_root / dataset.vio_config
         assert path.is_file(), dataset.name

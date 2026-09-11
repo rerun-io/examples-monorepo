@@ -64,12 +64,10 @@ def test_a_gyroscope_sample_the_accelerometer_does_not_cover_is_dropped() -> Non
 
 
 def test_the_accelerometers_span_is_closed_at_both_ends() -> None:
-    """basalt's endpoints, one nanosecond either side (`dataset_io_robocap.cpp:476-483`).
+    """Keep gyroscope samples exactly at either accelerometer endpoint.
 
-    A gyroscope sample **on** the first accelerometer timestamp interpolates with
-    alpha 0 and one on the last with alpha 1, so both are measurements and both
-    are kept; one nanosecond outside has no accelerometer sample on both sides of
-    it and is dropped rather than clamped.
+    Interpolation uses alpha zero or one there. A sample even one nanosecond
+    outside the span is dropped rather than clamped.
     """
     gyro_t_ns: Int64[ndarray, " 4"] = np.array([49, 50, 150, 151], dtype=np.int64)
     accel: Float64[ndarray, "2 3"] = np.array([[1.0, 1.0, 1.0], [3.0, 3.0, 3.0]])
@@ -80,12 +78,10 @@ def test_the_accelerometers_span_is_closed_at_both_ends() -> None:
 
 
 def test_two_accelerometer_samples_on_one_timestamp_take_the_first() -> None:
-    """basalt deduplicates the raw channel before pairing (`dataset_io_robocap.cpp:472`).
+    """Deduplicate before pairing, keeping the first sample at a timestamp.
 
-    Its `interval == 0` guard reads alpha 0 — the sample *before* — and the
-    deduplication is what makes that the only possible answer.
-    ``numpy.interp`` takes the second of the pair instead, and then interpolates
-    the following gyroscope sample from the wrong end of the gap.
+    This makes a zero-length interval select its earlier sample. Keeping the
+    second duplicate would change interpolation across the next gap.
     """
     paired = pair_accel_onto_gyro(
         np.array([20, 30], dtype=np.int64),
@@ -99,11 +95,10 @@ def test_two_accelerometer_samples_on_one_timestamp_take_the_first() -> None:
 
 
 def test_two_channels_that_do_not_overlap_are_refused() -> None:
-    """basalt errors rather than deliver an empty stream (`dataset_io_robocap.cpp:496`).
+    """Refuse an empty paired inertial stream.
 
-    The two channels have their own clocks, so a segment whose accelerometer
-    stops before its gyroscope starts pairs to nothing. Returning that silently
-    fed the estimator a rig with no inertial data at all.
+    Non-overlapping accelerometer and gyroscope spans cannot supply inertial
+    data to this rig.
     """
     with pytest.raises(ValueError, match=r"gyroscope spans 1000\.\.2000 ns and the accelerometer 10\.\.20 ns"):
         pair_accel_onto_gyro(
@@ -115,7 +110,8 @@ def test_two_channels_that_do_not_overlap_are_refused() -> None:
 
 
 def test_one_accelerometer_sample_is_not_enough_to_interpolate() -> None:
-    """`raw_accel.size() < 2` is basalt's own bar (`dataset_io_robocap.cpp:473`)."""
+    """At least two accelerometer samples are required for interpolation.
+"""
     with pytest.raises(ValueError, match="two accelerometer samples"):
         pair_accel_onto_gyro(np.array([10], dtype=np.int64), np.ones((1, 3)), np.array([10], dtype=np.int64), np.ones((1, 3)))
 
@@ -139,17 +135,15 @@ def test_the_pairing_boundary_is_typed() -> None:
 
 
 def test_the_named_cameras_come_back_in_the_callers_order() -> None:
-    """RoboCap's rig order is not the C++'s: cam_04, cam_00, cam_01, cam_05."""
+    """Select RoboCap cameras in manifest order: cam_04, cam_00, cam_01, cam_05.
+"""
     statics: pa.Table = camera_name_statics(["left_front", "right_front", "left_eye", "right_eye", "left", "right"])
     assert select_cameras(statics, 6, ("left", "left_front", "right_front", "right")) == (4, 0, 1, 5)
     assert select_cameras(statics, 6, None) == (0, 1, 2, 3, 4, 5)
 
 
 def test_a_hyphenated_name_matches_the_underscored_one() -> None:
-    """The rig writes ``left-front`` where basalt's driver spells it ``left_front``.
-
-    Both sides are normalised, so a manifest that spells a camera the way the
-    recording itself does selects it rather than being refused.
+    """Hyphen and underscore spellings must select the same recorded camera.
     """
     statics: pa.Table = camera_name_statics(["left-front", "right-front"])
     assert select_cameras(statics, 2, ("left_front",)) == (0,)
@@ -171,11 +165,10 @@ def test_two_cameras_answering_to_one_name_is_refused() -> None:
 
 
 def test_the_matcher_reproduces_basalts_median_on_robocaps_first_frameset() -> None:
-    """Session 15's four cameras start 59 us apart and basalt calls that 70258640500 ns.
+    """Four Session 15 timestamps spanning 59 us have median 70258640500 ns.
 
-    An even camera count takes the lower middle plus half the gap to the upper
-    one, which is neither the mean nor either middle value, and it is what the
-    NAS `slam` layer's own first row carries.
+    For an even camera count, use lower middle plus half the gap, not the mean
+    or either middle value.
     """
     left: Int64[ndarray, " 2"] = np.array([70258648000, 70291970222], dtype=np.int64)
     left_front: Int64[ndarray, " 2"] = np.array([70258633000, 70291955222], dtype=np.int64)
@@ -210,12 +203,10 @@ def test_a_camera_that_misses_the_anchor_drops_the_frameset() -> None:
 
 
 def test_a_frame_belongs_to_one_frameset() -> None:
-    """basalt consumes the frame it took, so the next anchor cannot have it again.
+    """A completed frameset consumes each selected image once.
 
-    Cursors move to ``selected + 1`` once every camera is inside the tolerance
-    (`dataset_io_robocap.cpp:439`). Leaving them on the selected frame fed the
-    estimator the same image twice under two frameset timestamps, which is a
-    measurement the rig never made.
+    Advance cursors to selected + 1 only after every camera meets tolerance;
+    otherwise the same image could acquire two frameset timestamps.
     """
     anchors: Int64[ndarray, " 2"] = np.array([100, 180], dtype=np.int64)
     partner: Int64[ndarray, " 1"] = np.array([140], dtype=np.int64)
@@ -226,17 +217,11 @@ def test_a_frame_belongs_to_one_frameset() -> None:
 
 
 def test_a_camera_selected_for_an_incomplete_frameset_keeps_its_frame() -> None:
-    """A provisional selection is thrown away with the frameset it was for.
+    """Discard provisional selections when the full frameset is incomplete.
 
-    The C++ moves the cursors only after ``complete``
-    (`dataset_io_robocap.cpp:439`), so a camera picked for a frameset that then
-    fell keeps its frame. Anchor 100 takes camera 1's 150 (|150 - 100| = 50, the
-    inclusive edge) but camera 2's only frame is 200, which is 100 away, so the
-    frameset falls. Anchor 200 then takes camera 1's 150 (index 0, again the
-    inclusive edge) and camera 2's 200 (index 0): one frameset, whose three-camera
-    median of (200, 150, 200) is 200 — the matcher adds no offset of its own, the
-    caller applies ``cam_time_offset_ns``. Committing camera 1's selection after
-    anchor 100 would exhaust that camera and leave the rig with no frameset.
+    Camera 1 at 150 can still partner anchor 200 after anchor 100 fails because
+    camera 2 is at 200. Committing it early would exhaust the camera.
+    The median is 200; clock offsets are applied by the caller.
     """
     anchors: Int64[ndarray, " 2"] = np.array([100, 200], dtype=np.int64)
     cameras: list[Int64[ndarray, " 1"]] = [np.array([150], dtype=np.int64), np.array([200], dtype=np.int64)]
@@ -247,11 +232,8 @@ def test_a_camera_selected_for_an_incomplete_frameset_keeps_its_frame() -> None:
 
 
 def test_a_frame_the_anchor_is_too_early_for_waits_for_the_next_anchor() -> None:
-    """A camera ahead of the anchor keeps its frame; one behind it is consumed.
-
-    The C++ advances the cursor past the nearest frame only when that frame is
-    *earlier* than the anchor (`dataset_io_robocap.cpp:428`), because a late
-    camera's frame is still the right partner for the anchor after this one.
+    """On failure, consume only a nearest frame earlier than the anchor.
+    A camera ahead of the anchor retains a potential partner for the next one.
     """
     anchors: Int64[ndarray, " 2"] = np.array([100, 200], dtype=np.int64)
     partner: Int64[ndarray, " 1"] = np.array([190], dtype=np.int64)
@@ -262,25 +244,11 @@ def test_a_frame_the_anchor_is_too_early_for_waits_for_the_next_anchor() -> None
 
 
 def test_a_frame_no_later_anchor_can_reach_is_consumed_on_the_spot() -> None:
-    """The one matcher rule whose effect never reaches the output, tested where it lives.
+    """Check stale-frame cursor advancement at the per-camera step.
 
-    `dataset_io_robocap.cpp:428` moves a camera's cursor past its nearest frame
-    when that frame is out of tolerance *and* earlier than the anchor. Anchors
-    only increase, so such a frame is farther from every later anchor still and
-    no frameset can ever take it. That also makes the rule invisible in
-    `match_framesets`'s output: leaving the cursor on the stale frame costs only
-    the nearest-frame walk, which re-reaches the same frame at the next anchor.
-    So it is pinned on the per-camera step instead, hand-computed:
-
-    * frames (0, 1000), cursor 0, anchor 100, tolerance 20 — the walk stays on 0
-      (|1000 - 100| = 900 is no closer than |0 - 100| = 100), 100 > 20 drops the
-      frameset, and 0 < 100, so the cursor moves to 1 and 0 is gone.
-    * frame (200) alone, same anchor — 100 > 20 drops it too, but 200 > 100, so
-      the cursor stays on 0 and 200 waits for the next anchor.
-    * frames (90, 110), same anchor — the walk ties onto 110, |110 - 100| = 10 is
-      inside the tolerance, and the cursor stays where it was: the caller commits
-      ``selected + 1`` only once the whole frameset stands.
-    * cursor 1 on a one-frame camera — exhausted, and it stays exhausted.
+    A frame earlier than an out-of-tolerance anchor cannot serve any later anchor.
+    Advancing past it saves work without changing final framesets. Future frames
+    stay available, ties select the later frame, and exhausted cursors stay exhausted.
     """
     assert _frame_nearest_anchor(np.array([0, 1000], dtype=np.int64), 0, 100, 20) == (None, 1)
     assert _frame_nearest_anchor(np.array([200], dtype=np.int64), 0, 100, 20) == (None, 0)
@@ -305,11 +273,7 @@ def test_a_tie_takes_the_later_frame() -> None:
 
 
 def test_interior_drops_are_allowed_one_in_a_thousand() -> None:
-    """A run that drops more interior framesets than basalt tolerates is not a run.
-
-    `dataset_io_robocap.cpp:458` allows ``max(1, ceil(interior * 0.001))``
-    incomplete framesets whose anchor lies inside every camera's own span; more
-    than that is a rig whose cameras are not the same recording.
+    """Refuse more than max(1, ceil(interior * 0.001)) incomplete interior anchors.
     """
     anchors: Int64[ndarray, " 4"] = np.array([1000, 1100, 1200, 1300], dtype=np.int64)
     # Four interior anchors allow one drop: this partner misses the third anchor.
@@ -325,7 +289,7 @@ def test_the_drop_allowance_rounds_up_past_a_thousand_anchors() -> None:
     """Past a thousand interior anchors the ceil, not the floor of one, sets the bar.
 
     The allowance is ``max(1, ceil(interior * 0.001))``
-    (`dataset_io_robocap.cpp:458`), so 1,001 interior anchors allow
+    , so 1,001 interior anchors allow
     ceil(1.001) = 2 drops. The anchors here are 0, 100, ... 100,000 and the
     partner is the same list minus two of its interior frames, which keeps its
     first and last frame and therefore keeps all 1,001 anchors interior: 999
@@ -344,15 +308,10 @@ def test_the_drop_allowance_rounds_up_past_a_thousand_anchors() -> None:
 
 
 def test_only_a_drop_inside_every_cameras_span_counts_against_the_run() -> None:
-    """An anchor no camera could partner is not the rig's fault, and is not counted.
+    """Count anchors and drops only inside the common camera time span.
 
-    Both counters are gated on ``overlap_start <= anchor <= overlap_end``
-    (`dataset_io_robocap.cpp:410` for the anchors, `:436` for the drops). The
-    anchors here are 0, 10, 20, 30, 40 and the one partner has 20 and 30, so the
-    overlap is [20, 30]: two interior anchors, both complete, and the misses at
-    0, 10 and 40 are exterior. Counting those would be 3 drops of 5 anchors
-    against an allowance of max(1, ceil(0.005)) = 1, and this rig — a partner
-    camera that simply started late and stopped early — would be refused.
+    A camera starting late or stopping early must not turn exterior anchors into
+    interior-drop failures.
     """
     anchors: Int64[ndarray, " 5"] = np.array([0, 10, 20, 30, 40], dtype=np.int64)
     t_ns, frame_index = match_framesets([anchors, np.array([20, 30], dtype=np.int64)], 1)
@@ -368,7 +327,8 @@ def test_frameset_timestamps_must_strictly_increase() -> None:
 
 
 def test_a_camera_with_no_frames_is_named() -> None:
-    """basalt refuses the rig rather than the frameset (`dataset_io_robocap.cpp:380`)."""
+    """Refuse invalid rig input before matching framesets.
+"""
     with pytest.raises(ValueError, match="camera 1 has no frames"):
         match_framesets([np.array([100, 200], dtype=np.int64), np.array([], dtype=np.int64)], 50)
 
@@ -384,10 +344,7 @@ def test_the_matcher_needs_a_camera() -> None:
 
 
 def test_the_profile_comes_from_the_manifest_not_the_code(manifest: ReferenceManifest) -> None:
-    """One place says what the C++ ran, and the profile only reads it.
-
-    All four fields, each against the manifest's own value: the tolerance and the
-    pairing rule were constants in the tool, which left the claim half true.
+    """The rig profile reads camera, downscale, tolerance and pairing fields from one manifest.
     """
     profile = RigProfile.from_robocap(manifest.robocap)
     assert profile.camera_names == manifest.robocap.camera_names == ("left", "left_front", "right_front", "right")

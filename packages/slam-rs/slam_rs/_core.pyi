@@ -163,7 +163,7 @@ class VioSnapshot:
     def __repr__(self) -> str: ...
 
 class Vio:
-    """basalt's VIO pipeline, driven one frameset at a time.
+    """The VIO pipeline, driven one frameset at a time.
 
     Offline mode (D17): the frontend and the backend run to completion in the
     calling thread, so every result is final and a repeat run over the same
@@ -184,7 +184,7 @@ class Vio:
         max_keypoints: int | None = None,
         gpu: bool = False,
     ) -> None:
-        """Build the pipeline for one rig; basalt's own files arrive through ``from_json``.
+        """Build the pipeline for one rig; JSON files arrive through ``from_json``.
 
         ``gpu`` runs the frontend's pyramid, patch build and KLT tracker through
         CubeCL on this host's GPU instead of the CPU port. The default is the
@@ -255,17 +255,17 @@ class Vio:
     def __repr__(self) -> str: ...
 
 class VioConfig:
-    """basalt's ``VioConfig``, as ``data/**/*_config.json`` carries it."""
+    """VIO configuration loaded from the package's JSON inputs."""
 
     def __init__(self) -> None:
-        """basalt's own defaults, the ones its constructor sets."""
+        """Default VIO configuration."""
 
     @staticmethod
     def from_json(text: str) -> VioConfig:
-        """Read one of basalt's config files; keys it omits keep their default."""
+        """Read a VIO config JSON file; keys it omits keep their default."""
 
     def to_json(self) -> str:
-        """Write the config back in basalt's shape, ``value0`` wrapper and all."""
+        """Write the config back in the JSON format slam-rs reads, ``value0`` wrapper and all."""
 
     optical_flow_image_safe_radius: float
     """Circular mask that hides a fisheye's black corners, in pixels; 0 disables it."""
@@ -273,18 +273,18 @@ class VioConfig:
     def __repr__(self) -> str: ...
 
 class Calibration:
-    """basalt's camera-IMU calibration: extrinsics, intrinsics and the noise model."""
+    """Camera-IMU calibration: extrinsics, intrinsics and the noise model."""
 
     @staticmethod
     def from_json(text: str) -> Calibration:
-        """Read one of basalt's calibration files."""
+        """Read a calibration JSON file."""
 
     @staticmethod
     def from_catalog(cameras: Sequence[CameraCalib], imu: ImuCalib) -> Calibration:
         """Build the calibration from the feed's dataclasses; ``imu.imu_T_body`` is unused."""
 
     def to_json(self) -> str:
-        """Write the calibration back in basalt's shape, ``value0`` wrapper and all."""
+        """Write the calibration back in the JSON format slam-rs reads, ``value0`` wrapper and all."""
 
     @property
     def camera_count(self) -> int: ...
@@ -330,7 +330,7 @@ class FlowFrame:
     def __repr__(self) -> str: ...
 
 class OpticalFlow:
-    """basalt's ``FrameToFrameOpticalFlow``, driven one frameset at a time.
+    """Frame-to-frame optical flow, driven one frameset at a time.
 
     Pattern 51 only, which is what every shipped config asks for; another
     ``optical_flow_pattern`` raises ``ValueError`` rather than tracking with the
@@ -351,7 +351,7 @@ class OpticalFlow:
         threads: int = 1,
         max_keypoints: int | None = None,
     ) -> None:
-        """Build a frontend for one rig; basalt's own files arrive through ``from_json``.
+        """Build a frontend for one rig; JSON files arrive through ``from_json``.
 
         Raises ``ValueError`` on a config the frontend cannot run — another
         pattern or flow type, a detector threshold ladder that never ends or

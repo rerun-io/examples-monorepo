@@ -1,17 +1,12 @@
-"""EuRoC/basalt trajectory CSVs and the rigid-aligned ATE that gates a run.
+"""Trajectory CSV input/output and rigid-aligned absolute trajectory error.
 
-The arithmetic is the basalt fork's ``golden_compare.py``: nearest-neighbour
-association with a 5 ms tolerance, driven by the estimate, rigid Umeyama
-alignment of the two associated point sets, and RMSE of the residual positions.
-It lives here so the gate, the replay tool and the tests all use one
-implementation.
+The estimate drives nearest-neighbor association within 5 ms. Rigid Umeyama
+alignment fixes scale at one, then positional RMSE measures the residual.
+The gate, replay tool and tests share this implementation.
 
-The file format is basalt's own: a ``#``-prefixed header line, then
-``t_ns, p_x, p_y, p_z, q_w, q_x, q_y, q_z``. Timestamps are integer nanoseconds
-and never pass through a float on the way in or out; the quaternion is
-**w-first** on disk and stays w-first in memory, because that is what both the
-``gt.csv`` sidecars and basalt's writer use. Rerun's XYZW ordering is converted
-exactly once, at the logging boundary.
+CSV columns are t_ns, p_x, p_y, p_z, q_w, q_x, q_y, q_z, with a comment header.
+Timestamps remain integer nanoseconds. Quaternions stay w-first in memory
+and convert to XYZW only at the logging boundary.
 """
 
 from dataclasses import dataclass
@@ -27,7 +22,7 @@ ASSOCIATION_TOLERANCE_NS: int = 5_000_000
 MIN_ASSOCIATED_POSES: int = 10
 """Fewest associations the gate accepts before it calls the comparison meaningless."""
 CSV_HEADER: str = "#timestamp [ns], p_x, p_y, p_z, q_w, q_x, q_y, q_z"
-"""Header basalt's own writer emits, and the one :func:`write_trajectory` reproduces."""
+"""CSV header emitted by :func:`write_trajectory`."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -82,7 +77,7 @@ class AteResult:
     """The rigid transform that took the reference positions onto the estimate's."""
 
     def summary(self) -> str:
-        """The two lines ``golden_compare.py`` prints, in centimetres."""
+        """Pose counts and trajectory errors, in centimetres."""
         return (
             f"poses: estimate={self.n_estimate} reference={self.n_reference} "
             f"associated={self.n_associated} (count delta {self.count_delta:.1%})\n"
@@ -101,9 +96,9 @@ def empty_trajectory() -> Trajectory:
 
 
 def read_trajectory(path: Path) -> Trajectory:
-    """Read a EuRoC/basalt trajectory CSV.
+    """Read a EuRoC-style trajectory CSV.
 
-    Comment lines starting with ``#`` are skipped, which covers both the basalt
+    Comment lines starting with ``#`` are skipped, which covers both the trajectory
     header (``#timestamp [ns], p_x, ...``) and the sidecar header
     (``#timestamp [ns],p_RS_R_x [m], ...``). The timestamp column is parsed as an
     integer directly from the text: routing it through float64 would be exact for
@@ -128,7 +123,7 @@ def read_trajectory(path: Path) -> Trajectory:
 
 
 def write_trajectory(path: Path, trajectory: Trajectory) -> None:
-    """Write a trajectory in basalt's CSV form, timestamps as exact integers.
+    """Write a trajectory in the trajectory CSV format, timestamps as exact integers.
 
     Args:
         path: Destination CSV; parent directories are created.
@@ -147,8 +142,8 @@ def shift_clock(trajectory: Trajectory, offset_ns: int) -> Trajectory:
     """Move a trajectory onto another clock by adding a constant nanosecond offset.
 
     The catalog indexes a segment on ``video_time``, which is relative to
-    ``property:capture:start_time_ns``; every basalt CSV, including the ``gt.csv``
-    sidecars, is on the absolute device clock. On the Index smoke segment the two
+    ``property:capture:start_time_ns``; trajectory CSV exports, including the ``gt.csv``
+    sidecars, are on the absolute device clock. On the Index smoke segment the two
     differ by 10,433,867,587,166 ns, so exporting relative timestamps produces a
     file that associates with **nothing**. This is the one place the conversion
     happens, and it happens at the CSV boundary.
@@ -188,7 +183,7 @@ def shift_clock(trajectory: Trajectory, offset_ns: int) -> Trajectory:
 def associate(reference: Trajectory, candidate: Trajectory, tolerance_ns: int = ASSOCIATION_TOLERANCE_NS) -> Association:
     """Match every reference pose to its nearest candidate pose in time.
 
-    Both trajectories must be sorted by timestamp, as basalt's writer emits them.
+    Both trajectories must be sorted by timestamp.
 
     Args:
         reference: Trajectory whose timestamps drive the association.
@@ -212,16 +207,11 @@ def associate(reference: Trajectory, candidate: Trajectory, tolerance_ns: int = 
 
 
 def rigid_alignment(source: Float64[ndarray, "n 3"], target: Float64[ndarray, "n 3"]) -> SimilarityTransform:
-    """Least-squares rigid transform taking ``source`` onto ``target``, scale fixed at 1.
+    """Least-squares rigid transform from source to target, with scale fixed at one.
 
-    This is ``golden_compare.py``'s inline arithmetic, ported unchanged, because
-    D14 gates on parity with the fork's numbers. In particular there is **no
-    variance floor**: a stationary rig, or a trajectory spanning micrometres,
-    aligns to itself with zero error rather than raising. The shared
-    ``simplecv.ops.umeyama_alignment`` rejects a source variance of 1e-9 or less
-    even when it is not estimating a scale, which would turn those runs into
-    errors instead of the passes the fork reports. That helper cross-checks this
-    one in the tests, on inputs where both are defined.
+    No variance floor is imposed: stationary and micrometre-scale trajectories
+    can align without raising. Tests cross-check the shared Umeyama helper on
+    inputs where both implementations are defined.
 
     Args:
         source: Points to move, one XYZ per row.
@@ -252,25 +242,13 @@ def rigid_alignment(source: Float64[ndarray, "n 3"], target: Float64[ndarray, "n
 
 
 def ate(estimate: Trajectory, reference: Trajectory, tolerance_ns: int = ASSOCIATION_TOLERANCE_NS) -> AteResult:
-    """Rigid-aligned absolute trajectory error of ``estimate`` against ``reference``.
+    """Rigid-aligned absolute trajectory error against the reference trajectory.
 
-    **The estimate drives the association**: each of its poses takes the nearest
-    reference pose within the tolerance, which is how the reference manifest's
-    own C++ numbers were produced and what keeps a 917 Hz ground truth from
-    weighting the metric by its own density. The convention is in this signature
-    on purpose — it used to live only in prose, and the one call site that
-    trusted the old parameter names silently plotted a different metric.
-
-    The alignment fixes the scale at 1: a visual-inertial estimator is metric, so
-    a fitted scale would hide a real error.
-
-    Whether the result is meaningful is the gate's question, not this one's: a
-    two-pose comparison returns a number here and
-    :func:`slam_rs.reference.d60_failures` rejects it there. This needs an
-    association and not a pose count, so an estimate on another clock has
-    nothing to align however many poses it carries: both fleet tools take the
-    refusal's own sentence as a row rather than a traceback, because which clock
-    a trajectory landed on is a fact about that machine.
+    Each estimate pose selects its nearest reference pose within tolerance.
+    Estimate-driven association prevents dense ground truth from changing metric
+    weights. Scale stays one because fitting it would hide a metric VIO error.
+    The metric needs at least one association; the ground-truth gate separately
+    checks coverage and run validity.
 
     Args:
         estimate: Trajectory under test, whose poses drive the association.
@@ -360,12 +338,10 @@ def coverage(reference: Trajectory, candidate: Trajectory) -> float:
 
 
 def extent_m(trajectory: Trajectory) -> float:
-    """The diagonal of a trajectory's bounding box, metres; ``0.0`` when it has no pose.
+    """Bounding-box diagonal in metres, or zero for an empty trajectory.
 
-    What a ``no_divergence`` clip is gated on (D60 clause 5): where basalt itself
-    is near failure a tolerance measures noise, so the run has to have stayed
-    bounded and nothing more. The V2 gate and the fleet tool both read it, which
-    is why it lives beside :func:`ate` rather than in either of them.
+    This diagnostic measures spatial extent; ground-truth acceptance is defined
+    by the manifest baseline gate.
 
     Args:
         trajectory: The trajectory to measure.

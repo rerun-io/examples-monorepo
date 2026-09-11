@@ -1,19 +1,8 @@
-"""What the frontend's Rerun layer promises: colours, and what ``log`` writes.
+"""Check frontend logging entity paths, times, colors and trails in saved chunks.
 
-The logging contract is checked against a recording, not against a mock. Each
-test initialises the global recording :class:`slam_rs.frontend_log.FrontendLogger`
-logs into (D03: the tools own no :class:`rerun.RecordingStream`), saves it to a
-temp file, and reads the chunks back with
-:class:`rerun.experimental.RrdReader` — the same rows a viewer would receive. So
-an entity path, a ``video_time`` value or a trail that never reached the file
-fails here.
-
-The frames are the synthetic 200x200 textures of :mod:`conftest` rather than the
-committed 960x960 fixtures: the fixtures are the Rust parity gate's, and four
-framesets of them through the frontend cost more than this whole Python suite.
-Reading the recording back is :mod:`conftest`'s :func:`read_rows`, which the
-estimator's logging suite drives too; the aliases below are declared here
-because ``tests`` is not on the typechecker's search path.
+Tests log into the global recording, save it and read back with RrdReader.
+Small synthetic textures keep these checks fast. Chunk inspection validates
+the recording contract; viewer pixels are checked separately.
 """
 
 from collections.abc import Callable

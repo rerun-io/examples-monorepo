@@ -16,12 +16,10 @@ def test_reference_profile_preserves_vendored_text() -> None:
 
 
 def test_fast_profile_changes_only_the_lm_cap_and_the_two_port_gates() -> None:
-    """The three keys the fast profile owns, and nothing else moves.
+    """The fast profile changes only its three declared keys.
 
-    Neither ``port.`` key is one of basalt's: they are the port's own
-    redetect-on-demand gate (D75) and its keyframe-gated joint solve (D76), so
-    both are absent from every vendored file and the overlay is the only thing
-    that ever sets them.
+    The port-prefixed keys select demand-based detection (D75) and the
+    keyframe-gated joint solve (D76). Only the overlay supplies them.
     """
     manifest: ReferenceManifest = load_manifest()
     for dataset in manifest.datasets:
