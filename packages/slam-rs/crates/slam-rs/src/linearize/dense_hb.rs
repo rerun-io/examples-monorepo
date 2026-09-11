@@ -67,20 +67,13 @@ impl<S: LieScalar> Default for DenseHbWorkspace<S> {
 }
 
 impl<S: LieScalar> DenseHbWorkspace<S> {
-    /// Every buffer at the identity for an `n`-column ordering.
-    fn prepare(&mut self, n: usize) {
-        self.accumulator.reset_sized(n);
-    }
-}
-
-impl<S: LieScalar> DenseHbWorkspace<S> {
     /// Accumulate landmark blocks in their existing order.
     pub(super) fn reduce(
         &mut self,
         opt_size: usize,
         blocks: &[LandmarkBlock<S>],
     ) -> Result<(&mut DMatrix<S>, &mut DVector<S>), LinearizeError> {
-        self.prepare(opt_size);
+        self.accumulator.reset_sized(opt_size);
         let DenseHbWorkspace { accumulator, leaf } = self;
         for block in blocks {
             accumulator.accumulate(block, leaf)?;

@@ -212,14 +212,29 @@ mod tests {
         ($name:ident, $scalar:ty) => {
             proptest! {
                 #[test]
-                fn $name(distance in 0.01f64..0.49, above in any::<bool>(), residual in -4.0f64..4.0) {
+                fn $name(
+                    distance in 0.01f64..0.49,
+                    above in any::<bool>(),
+                    residual in -4.0f64..4.0,
+                    lead_row in 0usize..5,
+                    pivot_row in 0usize..5,
+                    flip_lead in any::<bool>(),
+                    flip_pivot in any::<bool>(),
+                ) {
+                    // Rows are placed at random and signs flipped so every accepted
+                    // column needs a real two-row reflection, not a no-op. Entries
+                    // stay one per column so the arithmetic is exact and the pivot
+                    // sits exactly where `distance` puts it against the threshold.
+                    prop_assume!(lead_row != pivot_row);
                     let threshold = <$scalar>::EPSILON.sqrt();
                     let pivot = threshold * (1.0 + if above { distance as $scalar } else { -distance as $scalar });
+                    let lead_sign: $scalar = if flip_lead { -1.0 } else { 1.0 };
+                    let pivot_sign: $scalar = if flip_pivot { -1.0 } else { 1.0 };
                     let mut storage = DMatrix::<$scalar>::zeros(5, 5);
-                    storage[(0, 0)] = 2.0;
-                    storage[(0, 1)] = 4.0; // dependent column
-                    storage[(1, 3)] = pivot; // column 2 is zero
-                    storage[(1, 4)] = residual as $scalar;
+                    storage[(lead_row, 0)] = 2.0 * lead_sign;
+                    storage[(lead_row, 1)] = 4.0 * lead_sign; // dependent column
+                    storage[(pivot_row, 3)] = pivot * pivot_sign; // column 2 is zero
+                    storage[(pivot_row, 4)] = residual as $scalar * pivot_sign;
                     let mut axis = [0.0; 5];
                     let mut rank = 0;
                     for col in 0..4 {
