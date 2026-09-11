@@ -29,8 +29,21 @@ ignore = [
 
 [tool.vulture]
 paths = ["dataforge", "tests"]
-# Tyro-facing verb entry points and config fields; the CLI shims call them.
-ignore_names = ["main", "rr_config", "sequence", "force", "catalog_url", "dataset", "root", "_target"]
+# Tyro-facing verb entry points and config fields (the CLI shims call them), plus the
+# keyword-only parameters a test fake must accept to match the real catalog API.
+ignore_names = [
+    "main",
+    "rr_config",
+    "sequence",
+    "force",
+    "catalog_url",
+    "dataset",
+    "root",
+    "_target",
+    "on_duplicate",
+    "set_default",
+    "exist_ok",
+]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
 min_confidence = 60

@@ -71,6 +71,7 @@ world_T_cam  = world_T_rig @ rig_T_cam           # composes along the entity tre
     /cam_01                     fixed rig_T_cam offset (multi-camera ego devices)
       /pinhole/video, /pinhole/coco133_uv
     /imu_00                     peer sensor (IMU — see §8; emitted by dataforge)
+    /mag_00                     peer sensor (magnetometer — see §9; emitted by dataforge)
   /gt                           ground-truth annotations (UNCHANGED from v1, see §5)
 ```
 
@@ -138,6 +139,13 @@ When ingesting a recording:
    error.
 4. GT tensors resolve under `/world/gt/...` when `config.load_labels` is true.
 5. Timeline is `video_time` everywhere.
+6. Every non-camera peer sensor (`/world/rig_*/imu_*`, `/world/rig_*/mag_*`) has a
+   static `Transform3D` (`rig_T_imu` / `rig_T_mag`) and a static `kind`
+   (`"imu"` / `"mag"`); a sensor node without its transform is an error, because a
+   reader then cannot place its samples in the rig frame. A magnetometer's `field`
+   is in the sensor's native units, which are only known when it carries a `unit`
+   AnyValue — treat an absent `unit` as uncalibrated counts, never as tesla. The
+   optional `heading` child is derived, so a reader may ignore it entirely.
 
 The read side of these rules is `simplecv/catalog_rig_layout.py`: `parse_rig_layout`
 turns a catalog schema back into typed cameras (video stream, moving rig, rig `kind`,
@@ -199,5 +207,43 @@ actually emits it; simplecv's own exo/ego writer still does not.
   per IMU) are still TODO. RoboCap's IMU and camera clocks differ by a fixed
   14,902,432 ns offset (basalt's `kCameraToImuOffsetNs`); dataforge picks the raw
   **camera** clock for `video_time` and subtracts the offset from IMU timestamps.
+
+## 9. Magnetometer *(emitted — first writer: dataforge / Monado SLAM Datasets)*
+
+The magnetometer is the second peer sensor, and it needed no new vocabulary beyond
+the `"mag"` kind: it is an IMU-shaped stream (timestamps plus xyz) that happens to
+measure a field rather than motion. Headsets carry one next to the IMU — the
+**Monado SLAM Datasets** ship one per sequence for the Reverb G2 and the Odyssey+ —
+and it is the only sensor that observes an absolute heading, so a downstream
+yaw-drift evaluation wants it beside the video and the inertial data.
+
+**Layout** (the §8 shape, one entity down):
+
+```
+/world/rig_NN/mag_MM        Transform3D = rig_T_mag (static) + AnyValues{name, kind="mag", unit?}
+  /field                    Scalars (3-component, sensor's native units) — video_time
+  /heading                  Arrows3D (unit field direction × a fixed length) — video_time, derived
+```
+
+- The magnetometer is a **peer of the cameras and the IMU** (`/world/rig_NN/mag_MM`),
+  with its own mandatory static `rig_T_mag`, exactly as §8 requires of `imu_MM`.
+  `mag_MM` is zero-padded via `entity_id("mag", j)` and peer-indexed independently.
+- `field` is logged **raw, at its native rate, without interpolation, in the sensor's
+  own units**. Consumer headsets ship unlabelled counts, and inventing a calibration
+  would be worse than saying so; the optional `unit` AnyValue records the units when a
+  dataset actually documents them. MSD's Reverb G2 / Odyssey+ files are unlabelled
+  50 Hz xyz whose total field sits around 300 — consistent with milligauss, which is
+  an inference and not a claim the files make, so dataforge writes no `unit` for them.
+- `heading` is a **derived visualization aid**, not data: the same samples normalized
+  and scaled to a fixed length (0.15 m by default) so the field direction is legible
+  in the 3D view while riding the rig's `world_T_rig(t)`. Rows whose field norm is 0
+  (a dropout) get no arrow rather than a NaN direction. A reader that wants the field
+  reads `field`; `heading` may be dropped or regenerated at will.
+- Emitting a magnetometer did not change any existing path, so the schema version
+  stays `exoego:v2`.
+- **Status / TODO:** `SensorKind` in `simplecv/rig.py` now lists `"mag"` beside
+  `"imu"`, but simplecv's own exo/ego writer still emits neither; dataforge
+  (`packages/dataforge/dataforge/logging_toolkit.py`, `log_magnetometer`) is the only
+  writer.
 
 Any change to the layout should increment the schema version and update this doc.
