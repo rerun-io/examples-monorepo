@@ -1,0 +1,277 @@
+# Park the idle worker after its existing spin/yield budgets and unpark it after batch publication, flush, and shutdown. Install the worker handle before exposing clients, preserve wake tokens across the empty-check/park race, and recheck shutdown padding before parking. Keep the client full-queue backoff unchanged; retain a 10 ms fallback for unnotified last-client drops.
+# 
+# On Apple M4, a diagnostic version reduced the two-camera frontend seam from 10.81 to 3.34 ms. On RTX 5090 Vulkan, the stereo stage fell from 0.378 to 0.231 ms with byte-identical trajectories. These measurements motivate the notification protocol; they are not portable latency guarantees.
+# 
+# Test publication across the check/park boundary, parked shutdown draining, and eight concurrent producers. Extend the timeout only in these tests so polling cannot mask missing notifications.
+
+diff --git a/src/device/handle/channel.rs b/src/device/handle/channel.rs
+index b5893c23..2221842c 100644
+--- a/src/device/handle/channel.rs
++++ b/src/device/handle/channel.rs
+@@ -848,11 +848,13 @@ mod custom_channel {
+     /// Gives a hot window to absorb back-to-back submits without any syscall.
+     const SPIN_BUDGET_SERVER: u32 = 8192;
+     /// Number of `thread::yield_now` calls after the spin budget is exhausted,
+-    /// before the server drops to sleeping.
++    /// before the server parks.
+     const YIELD_BUDGET_SERVER: u32 = 64;
+-    /// Sleep duration once both the spin and yield budgets are exhausted.
+-    /// Bounds the wake-up latency from a fully idle state.
+-    const SLEEP_STEP_SERVER: Duration = Duration::from_micros(150);
++    /// Safety net for last-client drops, which do not send a notification.
++    /// Published batches wake the server directly; this is not a polling interval
++    /// on the submission path. Ten milliseconds bounds unattended teardown
++    /// without the frequent wakeups of a short sleep.
++    const PARK_TIMEOUT_SERVER: Duration = Duration::from_millis(10);
+ 
+     /// The client has the buffer to fill plus we add a factor of two to account for the double
+     /// buffering approach.
+@@ -911,6 +913,9 @@ mod custom_channel {
+                 })
+                 .unwrap();
+ 
++            // Install the handle before exposing any client. The worker may
++            // already be parked; its first producer can still wake it.
++            state.worker.set(thread.thread().clone()).unwrap();
+             (Self { state }, thread)
+         }
+ 
+@@ -919,6 +924,7 @@ mod custom_channel {
+         /// server keeps draining until the last one is gone.
+         pub fn request_shutdown(&self) {
+             self.state.shutdown.store(true, Ordering::Release);
++            self.state.wake_server();
+         }
+ 
+         /// Atomically reserves a slot in the buffer and writes the task.
+@@ -940,7 +946,10 @@ mod custom_channel {
+                 }
+ 
+                 self.state.init_task_at(index, func);
+-                self.state.enqueued_count.fetch_add(1, Ordering::SeqCst);
++                let count = self.state.enqueued_count.fetch_add(1, Ordering::SeqCst) + 1;
++                if count == CHANNEL_MAX_TASK as u32 {
++                    self.state.wake_server();
++                }
+                 return Ok(());
+             }
+         }
+@@ -948,6 +957,7 @@ mod custom_channel {
+         /// Forces a flush by filling the remaining buffer with no-op tasks.
+         pub fn flush(&self) {
+             self.state.pad_with_noops();
++            self.state.wake_server();
+         }
+     }
+ 
+@@ -957,6 +967,8 @@ mod custom_channel {
+         /// Written by the server thread (Release) after swapping buffers,
+         /// read by client threads (Acquire) before writing tasks.
+         queue_ptr: AtomicPtr<Task>,
++        /// Set before the first client is exposed to producers.
++        worker: std::sync::OnceLock<std::thread::Thread>,
+         /// Next available index for writing.
+         available_index: AtomicU32,
+         /// Number of tasks successfully written and ready for processing.
+@@ -969,6 +981,14 @@ mod custom_channel {
+     }
+ 
+     impl State {
++        /// Publish queue/shutdown state before calling this. `unpark` retains a
++        /// token if the worker has not parked yet, closing the check/park race.
++        fn wake_server(&self) {
++            if let Some(worker) = self.worker.get() {
++                worker.unpark();
++            }
++        }
++
+         /// Fills the rest of the current queue with no-op tasks so a partially
+         /// filled buffer reaches [`CHANNEL_MAX_TASK`] and the server swaps it in.
+         ///
+@@ -1046,6 +1066,10 @@ mod custom_channel {
+         client_buf: usize,
+         buffers: [TaskBuffer; 2],
+         ready_to_execute: bool,
++        #[cfg(test)]
++        before_park: Option<std::boxed::Box<dyn FnOnce() + Send>>,
++        #[cfg(test)]
++        park_timeout: Duration,
+     }
+ 
+     impl Server {
+@@ -1054,6 +1078,7 @@ mod custom_channel {
+ 
+             let state = Arc::new(State {
+                 queue_ptr: AtomicPtr::new(buffers[0].tasks.as_mut_ptr()),
++                worker: std::sync::OnceLock::new(),
+                 available_index: AtomicU32::new(0),
+                 enqueued_count: AtomicU32::new(0),
+                 shutdown: AtomicBool::new(false),
+@@ -1065,6 +1090,10 @@ mod custom_channel {
+                 client_buf: 0,
+                 buffers,
+                 ready_to_execute: false,
++                #[cfg(test)]
++                before_park: None,
++                #[cfg(test)]
++                park_timeout: PARK_TIMEOUT_SERVER,
+             }
+         }
+ 
+@@ -1098,10 +1127,27 @@ mod custom_channel {
+                     {
+                         return;
+                     }
++                    // Shutdown can itself publish padding after the queue check
++                    // above. Process that batch without waiting for a producer.
++                    if self.state.enqueued_count.load(Ordering::Acquire) >= CHANNEL_MAX_TASK as u32
++                    {
++                        continue;
++                    }
+                     if idle_count < SPIN_BUDGET_SERVER + YIELD_BUDGET_SERVER {
+                         std::thread::yield_now();
+                     } else {
+-                        std::thread::sleep(SLEEP_STEP_SERVER);
++                        // Every return (token, timeout, or spurious wake) goes
++                        // through the queue and shutdown checks before parking
++                        // again. No other park call consumes our wake token here.
++                        #[cfg(test)]
++                        if let Some(before_park) = self.before_park.take() {
++                            before_park();
++                        }
++                        #[cfg(test)]
++                        let timeout = self.park_timeout;
++                        #[cfg(not(test))]
++                        let timeout = PARK_TIMEOUT_SERVER;
++                        std::thread::park_timeout(timeout);
+                     }
+                 }
+                 idle_count = idle_count.saturating_add(1);
+@@ -1172,6 +1218,124 @@ mod custom_channel {
+             self.state.available_index.store(0, Ordering::SeqCst);
+         }
+     }
++
++    #[cfg(test)]
++    mod park_tests {
++        use super::*;
++        use crate::device::{DeviceId, DeviceServiceStage};
++        use std::sync::{Barrier, mpsc};
++        use std::thread;
++
++        // Hold the actual worker after its empty-queue check, immediately before
++        // parking. A long test-only timeout prevents polling from hiding a lost
++        // notification; completion must arrive within one second instead.
++        fn at_park() -> (DeviceClient, thread::JoinHandle<()>, Arc<AtomicBool>) {
++            let mut server = Server::new(RunnerId {
++                device: DeviceId::new(0, 0),
++                stage: DeviceServiceStage::Upstream,
++            });
++            let (ready_tx, ready_rx) = mpsc::channel();
++            let release = Arc::new(AtomicBool::new(false));
++            let release_worker = release.clone();
++            server.before_park = Some(std::boxed::Box::new(move || {
++                ready_tx.send(()).unwrap();
++                // Blocking channels may use park internally and consume the
++                // very token this test is checking. Spin at this test hook.
++                while !release_worker.load(Ordering::Acquire) {
++                    thread::yield_now();
++                }
++            }));
++            server.park_timeout = Duration::from_secs(60);
++            let state = server.state.clone();
++            let thread = thread::spawn(move || server.start());
++            state.worker.set(thread.thread().clone()).unwrap();
++            ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
++            (DeviceClient { state }, thread, release)
++        }
++
++        fn finish(client: DeviceClient, thread: thread::JoinHandle<()>) {
++            client.request_shutdown();
++            drop(client);
++            // The last Arc drop is intentionally only timeout-backed in normal
++            // operation. Explicitly wake after it so tests need not wait 60 s.
++            thread.thread().unpark();
++            thread.join().unwrap();
++        }
++
++        #[test]
++        fn published_batch_racing_park_keeps_its_wake_token() {
++            for flush in [false, true] {
++                let (client, thread, release) = at_park();
++                let (tx, rx) = mpsc::channel();
++                client.enqueue(move || tx.send(()).unwrap()).unwrap();
++                if flush {
++                    client.flush();
++                } else {
++                    for _ in 1..CHANNEL_MAX_TASK {
++                        client.enqueue(|| ()).unwrap();
++                    }
++                }
++                release.store(true, Ordering::Release);
++                let result = rx.recv_timeout(Duration::from_secs(1));
++                finish(client, thread);
++                result.expect("publish before park must retain a wake token");
++            }
++        }
++
++        #[test]
++        fn shutdown_wakes_a_parked_worker_and_drains_partial_work() {
++            let (client, thread, release) = at_park();
++            release.store(true, Ordering::Release);
++            thread::sleep(Duration::from_millis(20));
++            let (tx, rx) = mpsc::channel();
++            client.enqueue(move || tx.send(()).unwrap()).unwrap();
++            client.request_shutdown();
++            let result = rx.recv_timeout(Duration::from_secs(1));
++            finish(client, thread);
++            result.expect("shutdown must wake and drain without waiting for timeout");
++        }
++
++        #[test]
++        fn concurrent_producers_publish_every_task_once() {
++            let (client, thread, release) = at_park();
++            release.store(true, Ordering::Release);
++            thread::sleep(Duration::from_millis(20));
++            let barrier = Arc::new(Barrier::new(8));
++            let (tx, rx) = mpsc::channel();
++            let mut producers = Vec::new();
++            for producer in 0..8 {
++                let client = client.clone();
++                let barrier = barrier.clone();
++                let tx = tx.clone();
++                producers.push(thread::spawn(move || {
++                    barrier.wait();
++                    for task in 0..128 {
++                        let tx = tx.clone();
++                        client
++                            .enqueue(move || tx.send(producer * 128 + task).unwrap())
++                            .unwrap();
++                        if task % 7 == 0 {
++                            client.flush();
++                        }
++                    }
++                    client.flush();
++                }));
++            }
++            let mut received = Vec::new();
++            for _ in 0..1024 {
++                received.push(
++                    rx.recv_timeout(Duration::from_secs(1))
++                        .expect("producer wakeup lost"),
++                );
++            }
++            for producer in producers {
++                producer.join().unwrap();
++            }
++            finish(client, thread);
++            received.sort_unstable();
++            assert_eq!(received, (0..1024).collect::<Vec<_>>());
++        }
++    }
+ }
+ 
+ #[cfg(test)]
+-- 
+2.55.0
+
