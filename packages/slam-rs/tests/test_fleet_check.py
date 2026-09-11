@@ -10,7 +10,8 @@ import pytest
 from slam_rs.apis import fleet_check
 from slam_rs.apis.fleet_check import ClipResult, Config, main, measure
 from slam_rs.catalog_feed import CatalogSegment
-from slam_rs.reference import ReferenceManifest, ReferenceSegment
+from slam_rs.machine import this_machine
+from slam_rs.reference import Baseline, ReferenceManifest, ReferenceSegment
 from slam_rs.tracking import SegmentRun
 from slam_rs.trajectory import Trajectory, shift_clock
 
@@ -45,7 +46,12 @@ def test_scoring_uses_ground_truth_and_rejects_wrong_clock(
     )
     monkeypatch.setattr(fleet_check, "resolve_catalog_segments", lambda sources, **_kwargs: tuple(replace(source, has_ground_truth=True) for source in sources))
     monkeypatch.setattr(fleet_check, "run_segment", lambda *_args, **_kwargs: run)
-    result: ClipResult = measure(manifest, manifest.segments[0])
+    reference: Baseline = manifest.segments[0].baseline[0]
+    host_baseline: Baseline = replace(reference, lane="cpu", profile="fast", host=this_machine().hostname, gt_rmse_cm=3.0)
+    segment: ReferenceSegment = replace(manifest.segments[0], baseline=(replace(host_baseline, host="reference-host"), host_baseline))
+    result: ClipResult = measure(manifest, segment)
+    assert result.baseline == host_baseline
+    assert result.speed_gated
     assert result.measurement.associated == (30 if clock_offset == 0 else 0)
     assert bool(result.failures) == bool(clock_offset)
     output: Path = tmp_path / "new" / "fleet.json"

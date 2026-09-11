@@ -2,10 +2,13 @@
 
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from slam_rs import _core, reference
 from slam_rs.reference import (
@@ -245,6 +248,25 @@ def test_duplicate_baseline_is_rejected(tmp_path: Path) -> None:
     path.write_text(text[:end] + "\n" + text[start:end] + text[end:])
     with pytest.raises(ValueError, match="duplicate baseline"):
         load_manifest(path)
+
+
+@given(host=st.text(alphabet="abcdefghijklmnopqrstuvwxyz", min_size=1), duplicate=st.booleans())
+def test_baseline_duplicates_include_host(host: str, duplicate: bool) -> None:
+    text: str = MANIFEST_PATH.read_text()
+    start: int = text.index("[[segment.baseline]]")
+    end: int = text.index("\n[", start + 1)
+    row: str = text[start:end]
+    if not duplicate:
+        row = "\n".join(f'host = "{host}"' if line.startswith("host = ") else line for line in row.splitlines())
+    with TemporaryDirectory() as directory:
+        path: Path = Path(directory) / "hosts.toml"
+        path.write_text(text[:end] + "\n" + row + text[end:])
+        if duplicate:
+            with pytest.raises(ValueError, match="duplicate baseline"):
+                load_manifest(path)
+        else:
+            parsed: ReferenceManifest = load_manifest(path)
+            assert parsed.segments[0].baseline[1].host == host
 
 
 def test_gate_round_trips_through_toml(manifest: ReferenceManifest) -> None:
