@@ -12,7 +12,6 @@ use crate::imu::{ImuBlock, ImuLinData, IntegratedImuMeasurement};
 use crate::landmark::Landmark;
 use crate::lie::{LieScalar, Se3};
 use crate::linearize::landmark_block::{LandmarkBlock, LandmarkBlockOptions};
-use crate::linearize::reduce::deterministic_reduce_scalar;
 use crate::linearize::{DenseHbWorkspace, LinearizeError, RelPoseLin, linearize_relative_pose};
 use crate::types::{AbsOrderMap, FrameId, LandmarkId, MargLinData, POSE_VEL_BIAS_SIZE, TimeCamId};
 
@@ -294,28 +293,26 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         }
 
         // 2. Fold errors in landmark order and AND the validity flags.
-        // The fold is deterministic and independent of thread count; see
-        // `crate::linearize::reduce`. The `&&` needs no order.
+        // Accumulate sequentially in landmark order.
         let cameras = estimator.cameras();
         let lb_options: LandmarkBlockOptions<S> = self.options.lb_options;
         let blocks: &mut [LandmarkBlock<S>] = &mut self.landmark_blocks;
         let ids: &[LandmarkId] = &self.landmark_ids;
         let rel_pose_lin: &[RelPoseLin<S>] = &self.rel_pose_lin;
         let mut numerically_valid: bool = true;
-        let mut error: S =
-            deterministic_reduce_scalar::<S, LinearizeError>(blocks.len(), &mut |i, acc| {
-                let lm_id: LandmarkId = *ids.get(i).ok_or(LinearizeError::LayoutOverflow)?;
-                let lm: &Landmark<S> = estimator
-                    .lmdb
-                    .get_landmark(lm_id)
-                    .ok_or(LinearizeError::UnknownLandmark(lm_id))?;
-                let block: &mut LandmarkBlock<S> =
-                    blocks.get_mut(i).ok_or(LinearizeError::LayoutOverflow)?;
-                let contribution: S =
-                    block.linearize_landmark(lm, rel_pose_lin, cameras, &lb_options)?;
-                numerically_valid = numerically_valid && !block.is_numerical_failure();
-                Ok(acc + contribution)
-            })?;
+        let mut error: S = (0..blocks.len()).try_fold(S::zero(), |acc, i| {
+            let lm_id: LandmarkId = *ids.get(i).ok_or(LinearizeError::LayoutOverflow)?;
+            let lm: &Landmark<S> = estimator
+                .lmdb
+                .get_landmark(lm_id)
+                .ok_or(LinearizeError::UnknownLandmark(lm_id))?;
+            let block: &mut LandmarkBlock<S> =
+                blocks.get_mut(i).ok_or(LinearizeError::LayoutOverflow)?;
+            let contribution: S =
+                block.linearize_landmark(lm, rel_pose_lin, cameras, &lb_options)?;
+            numerically_valid = numerically_valid && !block.is_numerical_failure();
+            Ok::<S, LinearizeError>(acc + contribution)
+        })?;
 
         // 3a. the IMU blocks.
         self.imu_blocks.clear();
@@ -483,18 +480,17 @@ impl<S: LieScalar> LinearizationAbsQR<S> {
         let blocks: &mut [LandmarkBlock<S>] = &mut self.landmark_blocks;
         let ids: &[LandmarkId] = &self.landmark_ids;
         let lmdb: &mut crate::landmark::LandmarkDatabase<S> = &mut estimator.lmdb;
-        let mut l_diff: S =
-            deterministic_reduce_scalar::<S, LinearizeError>(blocks.len(), &mut |i, acc| {
-                let lm_id: LandmarkId = *ids.get(i).ok_or(LinearizeError::LayoutOverflow)?;
-                let lm: &mut Landmark<S> = lmdb
-                    .get_landmark_mut(lm_id)
-                    .ok_or(LinearizeError::UnknownLandmark(lm_id))?;
-                let block: &mut LandmarkBlock<S> =
-                    blocks.get_mut(i).ok_or(LinearizeError::LayoutOverflow)?;
-                let mut value: S = acc;
-                block.back_substitute(lm, pose_inc, &mut value)?;
-                Ok(value)
-            })?;
+        let mut l_diff: S = (0..blocks.len()).try_fold(S::zero(), |acc, i| {
+            let lm_id: LandmarkId = *ids.get(i).ok_or(LinearizeError::LayoutOverflow)?;
+            let lm: &mut Landmark<S> = lmdb
+                .get_landmark_mut(lm_id)
+                .ok_or(LinearizeError::UnknownLandmark(lm_id))?;
+            let block: &mut LandmarkBlock<S> =
+                blocks.get_mut(i).ok_or(LinearizeError::LayoutOverflow)?;
+            let mut value: S = acc;
+            block.back_substitute(lm, pose_inc, &mut value)?;
+            Ok::<S, LinearizeError>(value)
+        })?;
 
         for (block, meta) in self.imu_blocks.iter().zip(self.imu_meta.iter()) {
             block.back_substitute(meta.start_idx, meta.end_idx, pose_inc, &mut l_diff);
