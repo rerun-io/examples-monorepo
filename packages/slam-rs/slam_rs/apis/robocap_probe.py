@@ -59,6 +59,8 @@ def main(config: Config) -> None:
     """
     manifest: ReferenceManifest = load_manifest()
     session: RobocapSession = manifest.robocap.session(config.session)
+    if not manifest.robocap.is_listed(config.session):
+        print(f"{config.session} is not in the manifest: replaying it from the catalog with no regression reference")
     offset_ns: int = manifest.robocap.imu.cam_time_offset_ns
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / f"robocap-{session.session_id}" / "slam_rs.csv"
     calibration: _core.Calibration
