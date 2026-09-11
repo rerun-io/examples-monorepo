@@ -10,10 +10,7 @@ use nalgebra::{DMatrix, DVector};
 
 use crate::lie::LieScalar;
 use crate::marg::MargError;
-use crate::qr::{
-    BlockSpan, apply_householder_on_the_left_block, apply_householder_on_the_left_vec,
-    make_householder,
-};
+use crate::qr::{apply_householder_on_the_left, make_householder};
 
 /// What the marginalization helper returns: the reduced system over the kept
 /// variables, as a square-root prior.
@@ -113,22 +110,14 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
             q2jp[(base, k)] = beta;
             // the reflection acts on the trailing block that starts at row
             // `base`, column `k + 1`.
-            apply_householder_on_the_left_block(
-                &mut q2jp,
-                BlockSpan {
-                    row_start: base,
-                    rows: remaining_rows,
-                    col_start: k + 1,
-                    cols: remaining_cols,
-                },
+            apply_householder_on_the_left(
+                q2jp.view_mut((base, k + 1), (remaining_rows, remaining_cols)),
                 &essential[..remaining_rows],
                 h_coeff,
             );
             // the same reflection on the residual, in lockstep.
-            apply_householder_on_the_left_vec(
-                &mut q2r,
-                base,
-                remaining_rows,
+            apply_householder_on_the_left(
+                q2r.rows_mut(base, remaining_rows),
                 &essential[..remaining_rows],
                 h_coeff,
             );

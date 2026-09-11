@@ -58,8 +58,13 @@ pub fn reflect_column<S: LieScalar>(
         return Ok(());
     }
     let mut essential: Vec<S> = vec![S::zero(); len];
-    let (tau, _beta) = crate::qr::make_householder(storage, col, start, len, &mut essential);
-    crate::qr::apply_householder_on_the_left(storage, start, len, &essential, tau);
+    let (active, _beta) = crate::qr::make_householder(storage, col, start, len, &mut essential);
+    let cols = storage.ncols();
+    crate::qr::apply_householder_on_the_left(
+        storage.view_mut((start, 0), (len, cols)),
+        &essential,
+        active,
+    );
     Ok(())
 }
 
