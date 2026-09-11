@@ -13,7 +13,7 @@ use cubecl::prelude::*;
 /// bias cancels without a signed intermediate.
 pub(crate) const RING_BIAS: usize = 3;
 
-/// kornia's `corner_score_9_scalar` (`fast.rs) over every pixel.
+/// kornia's `corner_score_9_scalar` (`fast.rs`) over every pixel.
 ///
 /// The score is FAST-9's own: the maximum over the sixteen arc starts of the
 /// minimum over nine consecutive saturating differences, on the bright and the
@@ -117,7 +117,7 @@ const FILTER_LANES: usize = crate::frontend::detect::FAST_FILTER_LANES;
 /// The last lane of a block, which has no right-hand neighbour to beat.
 const FILTER_LAST: usize = FILTER_LANES - 1;
 
-/// kornia's in-block local-maximum filter (`fast.rs).
+/// kornia's in-block local-maximum filter (`fast.rs`).
 ///
 /// Turned on at `width >= 800`, where dense-corner images emit so many
 /// candidates that `Vec::push` dominates the CPU kernel; kornia keeps a lane

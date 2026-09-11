@@ -856,7 +856,7 @@ impl<S: LieScalar> SqrtKeypointVio<S> {
     /// marginalization removed, for the V2 Rerun rung (D51).
     ///
     /// The landmark position is `host_pose * T_i_c * unproject(direction) /
-    /// inv_dist`, exactly as builds the landmark bundle, and a
+    /// inv_dist`, exactly as the landmark bundle is built, and a
     /// landmark whose host has left the window is skipped as it is there.
     pub fn snapshot(&self) -> WindowSnapshot<S> {
         let states: Vec<WindowState<S>> = self

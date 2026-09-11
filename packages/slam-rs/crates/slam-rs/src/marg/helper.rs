@@ -111,8 +111,8 @@ pub fn marginalize_helper_sqrt_to_sqrt<S: LieScalar>(
 
         if beta.abs() > rank_threshold {
             q2jp[(base, k)] = beta;
-            // the reflection on `bottomRightCorner(remainingRows,
-            // remainingCols)`, which starts at row `base`, column `k + 1`.
+            // the reflection acts on the trailing block that starts at row
+            // `base`, column `k + 1`.
             apply_householder_on_the_left_block(
                 &mut q2jp,
                 BlockSpan {

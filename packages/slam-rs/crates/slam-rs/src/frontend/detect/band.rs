@@ -9,15 +9,15 @@ use kornia_imgproc::features::{Rect as KorniaRect, fast_detect_rect_u8};
 pub const FAST_BORDER: usize = 3;
 
 /// kornia's Bresenham ring: ring point `k` sits `FAST_RING_ROW[k]` rows and
-/// [`FAST_RING_COLUMN`]`[k]` columns from the centre (`fast.rs).
+/// [`FAST_RING_COLUMN`]`[k]` columns from the centre (`fast.rs`).
 pub const FAST_RING_ROW: [i32; 16] = [0, 1, 2, 3, 3, 3, 2, 1, 0, -1, -2, -3, -3, -3, -2, -1];
 /// The column half of [`FAST_RING_ROW`]'s ring.
 pub const FAST_RING_COLUMN: [i32; 16] = [3, 3, 2, 1, 0, -1, -2, -3, -3, -3, -2, -1, 0, 1, 2, 3];
 
-/// Lanes in one block of kornia's in-block local-maximum filter (`fast.rs).
+/// Lanes in one block of kornia's in-block local-maximum filter (`fast.rs`).
 pub const FAST_FILTER_LANES: usize = 16;
 
-/// The width at which kornia turns that filter on (`fast.rs).
+/// The width at which kornia turns that filter on (`fast.rs`).
 const FAST_FILTER_WIDTH: usize = 800;
 
 /// Where kornia's local-maximum filter stops, and whether it runs at all.
@@ -26,7 +26,7 @@ const FAST_FILTER_WIDTH: usize = 800;
 /// *inside its own sixteen-lane block*, the blocks are aligned to the image's
 /// own left margin, and the scalar tail past the last whole block is
 /// unfiltered — kornia's SIMD loop runs while `x + 16 <= width - margin`
-/// (`fast.rs). So the alignment and the tail are part of the corner set,
+/// (`fast.rs`). So the alignment and the tail are part of the corner set,
 /// not an implementation detail, and this is the one place that arithmetic
 /// lives: the CPU sweep gets it from kornia itself, and the GPU kernel and
 /// `tests/fast_model.rs` read it here rather than each spelling it out.
@@ -44,7 +44,7 @@ const FAST_ARC_LENGTH: usize = 9;
 /// One cell row's raw FAST candidates at one threshold, over the whole image width.
 ///
 /// `fast_detect_rect_u8` detects over **whole rows** and filters the result by
-/// column (`cells.rs), so the scan a cell asks for depends only on its
+/// column (`cells.rs`), so the scan a cell asks for depends only on its
 /// row band and its threshold — the nineteen cells of one grid row at one rung
 /// all pay for the same 960-wide sweep. Scanning it once and filtering each
 /// cell's columns out of it is the same call with the same arguments, so the
@@ -52,7 +52,7 @@ const FAST_ARC_LENGTH: usize = 9;
 ///
 /// The whole-image width is what the scan has to keep: kornia's kernel turns its
 /// in-block local-maximum filter on at `width >= 800` and aligns its sixteen-lane
-/// blocks to the image's own left margin (`fast.rs), so a cell-sized
+/// blocks to the image's own left margin (`fast.rs`), so a cell-sized
 /// copy would detect a different set.
 ///
 /// Both scanners hold one of these, which is why it lives here beside the trait

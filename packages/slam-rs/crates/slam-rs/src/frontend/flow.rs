@@ -756,7 +756,7 @@ impl<P: Pattern, B: PyramidBuilder, T: PatchTracker<Pattern = P, Pyramid = B::Py
             // `cells` below, one `i32` per cell per camera, and a `Vec` too long
             // to exist panics rather than returning (decision D32); and every
             // camera is detected on its own grid, which bounds that camera's
-            // detection scan on every frame (`detect.rs). Saturating like
+            // detection scan on every frame (`detect.rs`). Saturating like
             // the sibling ceilings: a product that leaves `usize` is past it.
             if grid.rows.saturating_mul(grid.columns) > MAX_CELLS {
                 return Err(FrontendError::TooManyCells {

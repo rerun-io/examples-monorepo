@@ -36,7 +36,8 @@ pub const TILE_H: u32 = 8;
 pub(crate) const PATCH_BORDER: f32 = crate::frontend::patch::PATCH_BORDER;
 /// `const int filter_margin = 2`.
 pub(crate) const FILTER_MARGIN: f32 = crate::frontend::tracker::FILTER_MARGIN;
-/// The increment guard at.
+/// Upper bound for a valid increment, aliased from the CPU tracker so both
+/// lanes share one number.
 pub(crate) const MAX_INCREMENT_INFINITY_NORM: f32 =
     crate::frontend::tracker::MAX_INCREMENT_INFINITY_NORM;
 /// `Sophus::Constants<float>::epsilon()`.

@@ -351,7 +351,7 @@ mod tests {
 
         assert_eq!(index.optical_flow_image_safe_radius, 472.0);
         assert_eq!(g2.optical_flow_image_safe_radius, 340.0);
-        // The RoboCap driver points at this file (`python/robocap_vit.toml).
+        // The RoboCap driver points at this file (`python/robocap_vit.toml`).
         assert_eq!(odyssey.optical_flow_image_safe_radius, 388.0);
 
         let mut normalised: VioConfig = g2.clone();

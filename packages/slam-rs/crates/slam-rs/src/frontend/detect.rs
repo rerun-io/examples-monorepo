@@ -500,7 +500,7 @@ pub fn detect_keypoints_with_cells(
             candidates.clear();
             if grid.cell > 2 * FAST_BORDER {
                 // `fast_detect_rect_u8` clamps the rectangle to the ring
-                // margin on every side (`cells.rs); the columns this
+                // margin on every side (`cells.rs`); the columns this
                 // cell keeps out of its row band are that clamp.
                 let first: f32 = (x + FAST_BORDER) as f32;
                 // The right clamp is the one a caller-supplied grid can

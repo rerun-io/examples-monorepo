@@ -671,7 +671,7 @@ impl<R: Runtime> CornerScan for GpuCornerScan<R> {
             return Err(DetectError::NotScanned);
         };
         // `row_start = rows.start.max(margin)`, `row_end = rows.end.min(height -
-        // margin)` (`fast.rs).
+        // margin)` (`fast.rs`).
         let first: usize = request.y.max(FAST_BORDER);
         let last: usize = (request.y + request.rows).min(self.height.saturating_sub(FAST_BORDER));
         let (width, stride): (usize, usize) = (self.width, self.words);
