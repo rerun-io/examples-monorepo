@@ -427,19 +427,135 @@ idle clock (P8, 210 MHz) for the whole run, so its absolute numbers are that
 operating point, not the card's. The Pi 5 and the RK3588 cap have not run this
 tip: both were unreachable on the day.
 
-**Why the Mac is slow.** Two independent causes, measured on the M4 with the
-seam counters of `gpu/seam.rs` and the device timestamps. A synchronising read
-costs **7.05 ms** of host time on Metal — the slope over 0, 1, 2 and 4 empty
-four-byte reads a frameset — against 0.115 ms on the 5090, and the frontend
-makes two a frameset, so about 14 of the Mac's 19 ms is completion latency in
-`cubecl-wgpu`'s read path (flush, map a staging buffer, wake the poll thread,
-wait on its callback). Independently, the kernels run **4.31 ms** of device time
-a frameset against 0.44 on the 5090 (KLT 425 µs a launch against 49, the FAST
-score 293 against 12.5): the workgroup shapes were chosen on NVIDIA. Uploads are
-1.4 ms. The task ceiling has no effect from 1 to 64. What a fix would have to
-do: a lower-latency completion path gated to Metal, and per-adapter workgroup
-shapes chosen from the device properties at start-up, so the 5090's path stays
-untouched; the 5090 A/B harness remains the gate. Neither is started.
+**Why the Mac is slow (S32 diagnosis).** The original empty-read and serialized
+kernel probes found a large completion delay. They did not establish a fast
+replay budget or prove that workgroup width caused the remaining cost.
+[S36 below](#s36--the-metal-lanes-two-sleeps) identifies the two sleeps,
+records their fixes, and replaces that budget with same-run measurements.
+
+## S36 — the Metal lane's two sleeps
+
+The Metal lane started near 18.8 / 18.7 / 21.3 ms on fast MIO10 / MIO07 /
+MGO07. Two independent sleeps caused most of the delay. wgpu-hal 29's Metal
+`wait` polled command-buffer status with a 1 ms sleep. wgpu 30 fixes that
+upstream (gfx-rs/wgpu#9328), reached here through CubeCL 0.11.0-pre.3.
+CubeCL's device-channel worker also idled with a 150 µs `nanosleep`.
+Across 1,000 measurements, macOS stretched it to 1.36 ms; Linux took about
+0.2 ms. A cold batch hand-off paid that delay, not every individual enqueue.
+Our worker patch uses park/unpark with a 10 ms safety timeout. The timeout
+also bounds teardown when the last client drops. Source and timing evidence:
+[s36-3-backoff.md](/tmp/fleet-artifacts/slam-rs/cuvslam/reports/s36/s36-3-backoff.md)
+and the corrections in
+[s36-8-validate-claims.md](/tmp/fleet-artifacts/slam-rs/cuvslam/reports/s36/s36-8-validate-claims.md).
+
+### How the fix ships
+
+`patches/cubecl-common-0.11.0-pre.3-channel-park.patch` is applied to a
+checksummed registry archive by `slam-rs-patch-deps`. Cargo's
+`[patch.crates-io]` selects the prepared tree under `target/patch/`.
+Preparation takes a process lock, verifies the archive hash even for cached
+downloads, and checks prepared files on reuse. Changed files cause repair.
+The Cargo tasks depend on preparation; the GPU test task also builds the
+Python extension so it cannot test a stale core. Bare Cargo and rust-analyzer
+need the prepare task once per checkout. The standalone offline patch test
+needs `cargo fetch --locked` for its manifest once per Cargo home, including
+its `test-log` test dependency. The bump runbook is the comment beside the
+Cargo override.
+
+Pablo chose a small checked-in patch, following the brush precedent, rather
+than a maintained fork, an upstream worker PR, or a vendored crate. The
+worker fix is not upstream at this decision point. This choice does not claim
+that Pixi cannot apply source patches: its tasks can, and rattler-build has
+recipe patches. Cargo still needs its own source override. Moving this
+package to pixi-build would be a separate workflow change.
+See [s36-6-patch-wiring.md](/tmp/fleet-artifacts/slam-rs/cuvslam/reports/s36/s36-6-patch-wiring.md)
+and [s36-9-wiring-hardening.md](/tmp/fleet-artifacts/slam-rs/cuvslam/reports/s36/s36-9-wiring-hardening.md).
+
+### Matched results and the rule
+
+The fixes, including PR #268's upload copy, are on main `8a2e9408`.
+The M4 and GB10 cells below are medians of three matched run medians per lane.
+Clip order is MIO10 / MIO07 / MGO07; time is tracker-call milliseconds.
+
+| host/device | GPU fast | CPU fast | CPU/GPU | ≥1.2x |
+|---|---|---|---|---|
+| Mac mini M4, Metal | 4.59 / 4.76 / 5.97 | 4.93 / 5.06 / 8.48 | 1.07x / 1.06x / 1.42x | fail / fail / pass |
+| Spark GB10, Vulkan | 2.88 / 3.07 / 4.75 | 5.35 / 5.42 / 9.00 | 1.86x / 1.76x / 1.90x | pass / pass / pass |
+
+The 5090's ten `gate.toml` reference rows span 2.0–3.2x against its own CPU
+lane. The 3060 has not been re-run since S32; its box needs a driver reboot.
+5090 trajectories stayed byte-identical throughout S36, and the park patch
+removed the stereo-stage regression from the compiler bump. These facts do
+not turn the historical MIO07 cuVSLAM absolute speed miss into a pass.
+Sources: the final Mac table in
+[s36-10-mac-attribution.md](/tmp/fleet-artifacts/slam-rs/cuvslam/reports/s36/s36-10-mac-attribution.md),
+[s36-11-gb10-coverage.md](/tmp/fleet-artifacts/slam-rs/cuvslam/reports/s36/s36-11-gb10-coverage.md),
+and S36-8 sections C and E3. Those reports retain their original publication
+status; the merge happened later.
+
+D64's rule is accuracy inside the band and faster than the CPU lane on the
+same machine; it did not specify 1.2x. Pablo's 2026-09-11 acceptance margin
+makes that at least 1.2x, with 1.5x retained as a research goal. These matched
+GPU/CPU comparisons are separate from the 1.10x regression limits in the
+manifest. The Mac's two-camera clips need another 0.486 / 0.543 ms to reach
+1.2x; MGO07 already meets it. A passing fleet regression row alone does not
+prove this speedup requirement.
+
+### The remaining budget
+
+Use real frames from the same run. S36-10 measured a 4.66 ms frontend:
+about 4.0 ms in reads, 0.57 ms in uploads, and 0.05 ms in host bookkeeping.
+About 2.2 ms of GPU compute sits inside those read spans. The rest includes
+readiness, transfer and scheduling; it is not all removable overhead.
+PR #268 reduced caller upload time to about 0.21 ms. The estimator median is
+about 0.15 ms, with a 0.87 ms mean because full window solves occupy the tail.
+These rounded medians describe the scale; only per-frame exclusive sums
+form an exact budget. Nested worker and GPU spans must not be added twice.
+
+S36-8 corrected the earlier subtraction of a default-config kernel fixture
+from a fast catalog replay. Never subtract across rigs, configurations or
+separate timing harnesses. The outer CubeCL profile token also missed later
+passes; the corrected probe sums every pass without forcing per-kernel sync.
+A 64-thread KLT group does not establish an occupancy problem on an M4.
+The tested fixture dispatched batches of 67 / 25 / 25 points, not its
+3,000-point capacity. These are latency observations, not GPU-counter proof
+of a bandwidth or occupancy limit.
+
+Four KLT iterations failed accuracy on Mac MIO10 (1.795 cm over 1.708 cm)
+and 5090 MIO14 (8.330 cm over 6.615 cm). A valid 32-thread mapping preserved
+all taps and reduction order, with all 660 paired FlowFrames identical, but
+had no gain: 3.417 vs 3.481 ms in the paired seam. Neither experiment ships.
+
+The open levers and estimates from S36-10 are:
+
+- Persistent staging and in-place `ComputeClient::write` uploads. Worker
+  staging writes cost about 0.4 ms, partly inside reads. Estimated saving is
+  0–0.2 ms, pending a prototype; buffer lifetime and ordering need tests.
+- The cold read hand-off and cached transfer resources. Estimated saving is
+  0–0.3 ms, not the whole loaded read. Temporal results determine stereo work,
+  so merging the two reads needs a design change. Together with uploads,
+  budget 1–2 engineering days to test these paths.
+- SIMD-local KLT reductions, point-major storage and multiple points per
+  group. Budget 2–4 days if the host paths resist improvement. Reduction
+  order changes, so every lane needs accuracy gates. No measured speedup is
+  promised. The rejected 32-thread mapping is not this redesign.
+
+### Baselines belong to a host
+
+`baseline_for(lane, profile, host)` prefers the matching host row, otherwise
+it returns the first row for that lane/profile, or None. Reference rows stay
+first. Accuracy and speed both use the selected row; speed is gated only
+when its host matches. The loader rejects duplicate `(lane, profile, host)`
+keys and accepts distinct hosts. Hypothesis tests cover lookup, fallback,
+report allowances, speed gating and duplicate handling.
+
+Mac MIO14 is 6.7605 cm both before and after S36. The old lookup compared it
+with the 5090's 6.0135 cm, exceeding the 1.10x limit despite no Mac regression.
+The Mac row now supplies its own accuracy reference. This changes the
+reference selection, not the multiplier or the GPU/CPU acceptance rule.
+Five GPU/fast rows each cover Mac mini and Spark smoke/release clips; measured
+hostnames, core hashes, repeat selection and before/after gate outputs are in
+[s36-13-wrapup.md](/tmp/fleet-artifacts/slam-rs/cuvslam/reports/s36/s36-13-wrapup.md).
 
 ## Python API
 
@@ -968,6 +1084,10 @@ The `Dnn` tags in this file and in the README name the project's recorded design
 - **D77** — The GPU frontend waits once per phase and reserves its queue budget before it enqueues (2026-09-10)
 - **D78** — One stage's download carries another's buffers: camera 0's cell selection rides the temporal tracks' read (2026-09-10)
 - **D79** — Eigen's operation order is no longer a requirement: nalgebra and kornia-algebra do the arithmetic where they can; the gate is ATE on the catalog (2026-09-10)
+- **D80** — D64 remains the GPU rule: accuracy inside the band and faster than the CPU lane on the same machine (2026-09-11)
+- **D81** — Prefer a host/lane/profile baseline; fall back to the first lane/profile row, and gate speed only on the selected row's host (2026-09-11)
+- **D82** — Ship the CubeCL worker fix as a checksummed archive plus local patch, prepared under a process lock and selected by Cargo; no maintained fork or upstream worker PR (2026-09-11)
+- **D83** — Require at least 1.2x GPU/CPU speedup on the same machine with accuracy in band; 1.5x is a research goal, separate from the 1.10x regression limits (2026-09-11)
 
 ## D74 — Speed profile
 

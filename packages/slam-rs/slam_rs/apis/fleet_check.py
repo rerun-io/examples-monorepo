@@ -62,7 +62,7 @@ class ClipResult:
     @property
     def speed_gated(self) -> bool:
         """Only measurements from the same host, lane, and profile gate speed."""
-        return self.baseline is not None and self.measurement.hostname == self.baseline.host
+        return self.baseline is not None and self.measurement.hostname.split(".")[0] == self.baseline.host
 
     @property
     def failures(self) -> tuple[str, ...]:
@@ -102,7 +102,8 @@ def measure(
     scoring: ScoringResult = score_trajectory(run.estimate, run.ground_truth)
     against_gt: AteResult | None = scoring.result
     lane: Lane = this_lane(gpu)
-    baseline: Baseline | None = segment.baseline_for(lane, profile)
+    hostname: str = this_machine().hostname
+    baseline: Baseline | None = segment.baseline_for(lane, profile, hostname)
     return ClipResult(
         segment_id=segment.segment_id,
         measurement=Measurement(
@@ -115,7 +116,7 @@ def measure(
             truth_extent_m=extent_m(run.ground_truth),
             poses_finite=nonfinite_position_text(run.estimate) is None,
             median_tracker_ms=run.median_tracker_ms,
-            hostname=this_machine().hostname,
+            hostname=hostname,
             lane=lane,
             profile=profile,
         ),

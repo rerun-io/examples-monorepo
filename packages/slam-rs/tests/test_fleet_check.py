@@ -1,6 +1,7 @@
 """Synthetic scoring tests; no recording or external source is needed."""
 
 import json
+import platform
 from dataclasses import replace
 from pathlib import Path
 
@@ -10,7 +11,8 @@ import pytest
 from slam_rs.apis import fleet_check
 from slam_rs.apis.fleet_check import ClipResult, Config, main, measure
 from slam_rs.catalog_feed import CatalogSegment
-from slam_rs.reference import ReferenceManifest, ReferenceSegment
+from slam_rs.machine import this_machine
+from slam_rs.reference import Baseline, ReferenceManifest, ReferenceSegment
 from slam_rs.tracking import SegmentRun
 from slam_rs.trajectory import Trajectory, shift_clock
 
@@ -31,10 +33,12 @@ def test_measure_rejects_mismatched_source_before_replay(
         measure(manifest, segment, source=source)
 
 
+@pytest.mark.parametrize("suffix", ["", ".attlocal.net", ".office.example"])
 @pytest.mark.parametrize("clock_offset", [0, 100_000_000_000])
 def test_scoring_uses_ground_truth_and_rejects_wrong_clock(
-    manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock_offset: int
+    manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock_offset: int, suffix: str
 ) -> None:
+    monkeypatch.setattr(platform, "node", lambda: f"pablos-Mac-mini{suffix}")
     truth: Trajectory = Trajectory(
         t_ns=np.arange(30, dtype=np.int64) * 10_000_000,
         position_m=np.random.default_rng(7).normal(size=(30, 3)),
@@ -45,7 +49,12 @@ def test_scoring_uses_ground_truth_and_rejects_wrong_clock(
     )
     monkeypatch.setattr(fleet_check, "resolve_catalog_segments", lambda sources, **_kwargs: tuple(replace(source, has_ground_truth=True) for source in sources))
     monkeypatch.setattr(fleet_check, "run_segment", lambda *_args, **_kwargs: run)
-    result: ClipResult = measure(manifest, manifest.segments[0])
+    reference: Baseline = manifest.segments[0].baseline[0]
+    host_baseline: Baseline = replace(reference, lane="cpu", profile="fast", host=this_machine().hostname, gt_rmse_cm=3.0)
+    segment: ReferenceSegment = replace(manifest.segments[0], baseline=(replace(host_baseline, host="reference-host"), host_baseline))
+    result: ClipResult = measure(manifest, segment)
+    assert result.baseline == host_baseline
+    assert result.speed_gated
     assert result.measurement.associated == (30 if clock_offset == 0 else 0)
     assert bool(result.failures) == bool(clock_offset)
     output: Path = tmp_path / "new" / "fleet.json"
@@ -62,6 +71,9 @@ def test_scoring_uses_ground_truth_and_rejects_wrong_clock(
         "gt_allowed_cm", "baseline_gt_rmse_cm", "median_tracker_ms", "speed_gated", "verdict",
     ]
     assert "NaN" not in output.read_text()
+    assert this_machine().hostname == "pablos-Mac-mini"
+    assert result.measurement.hostname == "pablos-Mac-mini"
+    assert json.loads(output.read_text())["machine"]["hostname"] == "pablos-Mac-mini"
     if clock_offset:
         assert json.loads(output.read_text())["clips"][0]["gt_rmse_cm"] is None
     assert json.loads(output.read_text())["config_sha256"] == {manifest.segments[0].dataset_name: "a" * 64}
