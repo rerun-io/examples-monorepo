@@ -211,7 +211,7 @@ def follow_eye_controls() -> rrb.EyeControls3D:
     )
 
 
-def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
+def build_blueprint(camera_names: list[str], *, pose_source: str = "basalt") -> rrb.Blueprint:
     """Default layout: 3D rig + a grid of camera panes over gyro/accel plots.
 
     Mirrors basalt's ``basalt_vio_blueprint.py`` layout, on exoego:v2 paths.
@@ -219,6 +219,7 @@ def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
     Args:
         camera_names: Full canonical camera labels in ``cam_00..cam_NN`` order;
             callers pass ``list(CAMERA_DISPLAY_ORDER)`` so panes stay stable.
+        pose_source: Derived run whose trajectory and trail the views display.
 
     Returns:
         The blueprint embedded in every RoboCap base-layer rrd.
@@ -238,7 +239,14 @@ def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
                         line_grid=True,
                         # The overview shows the whole SLAM path, while its trail stays hidden.
                         # Overrides on entities a base-only recording lacks are simply inert.
-                        overrides={schema.trail_path("basalt"): rrb.EntityBehavior(visible=False)},
+                        overrides={
+                            schema.trail_path(pose_source): rrb.EntityBehavior(visible=False),
+                            schema.trajectory_path(pose_source): rrb.VisibleTimeRanges(
+                                rrb.VisibleTimeRange(
+                                    "video_time", start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.cursor_relative(),
+                                )
+                            ),
+                        },
                     ),
                     # Follow-cam (rerun-io/eye_control_example pattern): the view's
                     # origin IS the rig frame, so a fixed first-person eye in that
@@ -251,8 +259,8 @@ def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
                         # The follow view hides the full path and shows only a 10 s
                         # cursor-relative trail. The window is a viewer setting.
                         overrides={
-                            schema.trajectory_path("basalt"): rrb.EntityBehavior(visible=False),
-                            schema.trail_path("basalt"): rrb.VisibleTimeRanges(
+                            schema.trajectory_path(pose_source): rrb.EntityBehavior(visible=False),
+                            schema.trail_path(pose_source): rrb.VisibleTimeRanges(
                                 rrb.VisibleTimeRange(
                                     "video_time",
                                     start=rrb.TimeRangeBoundary.cursor_relative(seconds=-10.0),
@@ -387,7 +395,7 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
                 by_name[cam_name] = video_path
         return {name: by_name[name] for name in CAMERA_DISPLAY_ORDER if name in by_name}
 
-    def _calibration(self, device: str) -> dict[str, Fisheye62Parameters]:
+    def calibration(self, device: str) -> dict[str, Fisheye62Parameters]:
         """Load the factory Kalibr calibration, keyed by canonical camera name."""
         calib_dir: Path = self.config.root / f"0factory-calibration-{device}"
         if not calib_dir.is_dir():
@@ -416,7 +424,7 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
             print(f"skip {identity.sequence_key} → {target}")
             return target
 
-        cameras: dict[str, Fisheye62Parameters] = self._calibration(source.device)
+        cameras: dict[str, Fisheye62Parameters] = self.calibration(source.device)
         # Every MP4's container comment is parsed before the recording opens: each
         # stream is retimed by its own epoch, and the earliest doubles as start_time_ns.
         segment_videos: dict[int, dict[str, Path]] = {}
@@ -450,25 +458,11 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
         ) as recording:
             # Deliberately NO ViewCoordinates at "/": the pose layer owns the root
             # ViewCoordinates (its world is gravity-aligned Z-up).
-            log_rig_node(recording, RIG, reference=RIG_REFERENCE, num_cameras=len(camera_names), name="robocap", kind="ego")
-            self._log_mesh(recording)
+            self.log_scene(recording, {name: cameras[name] for name in camera_names})
 
             frames_per_camera: dict[str, int] = dict.fromkeys(camera_names, 0)
             for cam_name in camera_names:
                 index: int = CAMERA_DISPLAY_ORDER.index(cam_name)
-                rr.log(
-                    schema.cam_path(RIG, index),
-                    rr.AnyValues(name=cam_name, kind="grayscale"),
-                    static=True,
-                    recording=recording,
-                )
-                log_pinhole(
-                    cameras[cam_name],
-                    cam_log_path=Path(schema.cam_path(RIG, index)),
-                    image_plane_distance=IMAGE_PLANE_DISTANCE,
-                    static=True,
-                    recording=recording,
-                )
                 for segment in source.segments:
                     if cam_name not in segment_epochs[segment]:
                         continue
@@ -496,6 +490,15 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
 
         print(f"done {identity.sequence_key} → {target} ({len(camera_names)} cameras, {len(source.segments)} segments, {max(frames_per_camera.values())} frames)")
         return target
+
+    def log_scene(self, recording: rr.RecordingStream, cameras: dict[str, Fisheye62Parameters]) -> None:
+        """Log the same calibrated rig, frusta and cap mesh for imported and live recordings."""
+        log_rig_node(recording, RIG, reference=RIG_REFERENCE, num_cameras=len(cameras), name="robocap", kind="ego")
+        self._log_mesh(recording)
+        for name, camera in cameras.items():
+            index: int = CAMERA_DISPLAY_ORDER.index(name)
+            rr.log(schema.cam_path(RIG, index), rr.AnyValues(name=name, kind="grayscale"), static=True, recording=recording)
+            log_pinhole(camera, cam_log_path=Path(schema.cam_path(RIG, index)), image_plane_distance=IMAGE_PLANE_DISTANCE, static=True, recording=recording)
 
     def _log_mesh(self, recording: rr.RecordingStream) -> None:
         """Log the textured cap scan as a static child of the rig, if the asset is readable.
