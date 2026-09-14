@@ -4,7 +4,7 @@
 # `pixi install` — the `slam-rs-build` pixi task compiles it explicitly.
 [workspace]
 resolver = "3"
-members = ["crates/slam-rs", "crates/slam-rs-py", "crates/slam-rs-cli"]
+members = ["crates/slam-rs", "crates/slam-rs-py", "crates/slam-rs-cli", "crates/robocap-recorder"]
 # Run the patched dependency's own unit tests as a standalone crate.
 exclude = ["target/patch/cubecl-common-0.11.0-pre.3"]
 
