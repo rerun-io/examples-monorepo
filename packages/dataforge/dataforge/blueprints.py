@@ -1,5 +1,6 @@
 """Shared exoego rig, camera, trajectory and IMU presentation."""
 
+import rerun as rr
 import rerun.blueprint as rrb
 from rerun.encodings import EntityPathLike
 
@@ -17,7 +18,13 @@ def build_rig_blueprint(
         rrb.Spatial2DView(name=name, origin=schema.pinhole_path(0, index), contents=f"{schema.pinhole_path(0, index)}/**")
         for index, name in enumerate(camera_names)
     ]
-    overview_overrides: dict[EntityPathLike, rrb.EntityBehavior | rrb.VisibleTimeRanges] = {}
+    overview_overrides: dict[EntityPathLike, rrb.EntityBehavior | rrb.VisibleTimeRanges | rr.Points3D] = {
+        # The rig is centimetres on a path that can be kilometres, so the overview marks
+        # its current pose with a screen-space dot: a point at the rig's own origin rides
+        # the rig transform, and a UI-point radius keeps the same pixel size at any zoom.
+        # Display only: no recorded geometry or calibration changes, and Follow never sees it.
+        schema.rig_path(0): rr.Points3D([[0.0, 0.0, 0.0]], radii=rr.Radius.ui_points(9.0), colors=[255, 220, 0], labels=["rig"], show_labels=True),
+    }
     follow_overrides: dict[EntityPathLike, rrb.EntityBehavior | rrb.VisibleTimeRanges] = {}
     for source in pose_sources:
         overview_overrides[schema.trail_path(source)] = rrb.EntityBehavior(visible=False)
