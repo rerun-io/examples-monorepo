@@ -105,13 +105,15 @@ def write_segment_layer(
     """Write one ``<segment>.rrd`` per segment under ``output_dir`` and register them as ``layer``.
 
     Each file is written atomically with the segment's own recording id, so it
-    joins that segment; an existing copy of the layer is replaced. Returns the
-    registered file URIs (``register=False`` only prepares the files).
+    joins that segment; an existing copy of the layer is replaced. A layer never
+    restates recording properties: a second ``/__properties`` chunk collides with
+    the base segment's when the catalog merges layers. Returns the registered
+    file URIs (``register=False`` only prepares the files).
     """
     outputs: list[str] = []
     for segment in segments:
         output: Path = output_dir.resolve() / f"{segment}.rrd"
-        with atomic_recording(output, application_id=application_id, recording_id=segment) as recording:
+        with atomic_recording(output, application_id=application_id, recording_id=segment, send_properties=False) as recording:
             log(segment, recording)
         outputs.append(output.as_uri())
     if register and outputs:

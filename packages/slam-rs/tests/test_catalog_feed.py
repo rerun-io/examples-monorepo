@@ -450,12 +450,12 @@ def test_catalog_resolution_batches_segments_by_dataset(monkeypatch: pytest.Monk
     client: MagicMock = MagicMock()
     client.get_dataset.return_value = MagicMock(spec=DatasetEntry)
     dataset: MagicMock = client.get_dataset.return_value
-    dataset.manifest.return_value = SessionContext().from_arrow(
+    dataset.segment_table.return_value = SessionContext().from_arrow(
         pa.table(
             {
-                "rerun_segment_id": ["first", "first", "second", "second"],
-                "rerun_layer_name": ["base", "gt", "base", "gt"],
-                "rerun_storage_url": ["file:///first.rrd", "file:///first-gt.rrd", "file:///second.rrd", "file:///second-gt.rrd"],
+                "rerun_segment_id": ["first", "second"],
+                "rerun_layer_names": [["base", "gt"], ["base", "gt"]],
+                "rerun_storage_urls": [["file:///first.rrd", "file:///first-gt.rrd"], ["file:///second.rrd", "file:///second-gt.rrd"]],
             }
         )
     )
@@ -467,7 +467,7 @@ def test_catalog_resolution_batches_segments_by_dataset(monkeypatch: pytest.Monk
     assert all(source.dataset is dataset and source.has_ground_truth for source in resolved)
     assert [source.ground_truth_uri for source in resolved] == ["file:///first-gt.rrd", "file:///second-gt.rrd"]
     client.get_dataset.assert_called_once_with("dataset")
-    dataset.manifest.assert_called_once_with()
+    dataset.segment_table.assert_called_once_with()
 
 
 @pytest.mark.parametrize(
@@ -481,8 +481,8 @@ def test_catalog_resolution_refuses_missing_inputs(monkeypatch: pytest.MonkeyPat
 
     client: MagicMock = MagicMock()
     client.get_dataset.return_value = MagicMock(spec=DatasetEntry)
-    client.get_dataset.return_value.manifest.return_value = SessionContext().from_arrow(
-        pa.table({"rerun_segment_id": ["present"], "rerun_layer_name": ["base"], "rerun_storage_url": ["file:///present.rrd"]})
+    client.get_dataset.return_value.segment_table.return_value = SessionContext().from_arrow(
+        pa.table({"rerun_segment_id": ["present"], "rerun_layer_names": [["base"]], "rerun_storage_urls": [["file:///present.rrd"]]})
     )
     monkeypatch.setattr(catalog_feed, "CatalogClient", lambda _url: client)
     with pytest.raises(ValueError, match=error):

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import rerun as rr
 from rerun.catalog import CatalogClient, DatasetEntry
+from rerun.experimental import RrdReader
 
 from dataforge.apis.register import Config as RegisterConfig
 from dataforge.apis.register import main as register
@@ -31,11 +32,15 @@ def test_backfill_adds_only_static_metadata_and_preserves_base(tmp_path: Path) -
         dataset: DatasetEntry = client.get_dataset("robocap")
         for _ in range(2):
             main(Config(catalog_url=server.url(), root=tmp_path, output_dir=tmp_path / "calibration", segments=(segment,)))
-        rows = dataset.manifest().select("rerun_layer_name").to_arrow_table().to_pydict()
-        assert sorted(rows["rerun_layer_name"]) == ["base", "sensor_metadata"]
+        rows = dataset.segment_table().select("rerun_layer_names").to_arrow_table().to_pylist()
+        assert [sorted(row["rerun_layer_names"]) for row in rows] == [["base", "sensor_metadata"]]
         table = dataset.filter_contents(["/world/rig_00/imu_00"]).reader(index=None).to_arrow_table()
         assert table["/world/rig_00/imu_00:applied_time_shift_ns"].to_pylist() == [[-14_902_432]]
     assert hashlib.sha256(base.read_bytes()).hexdigest() == before
+    # A layer must not restate the segment's recording properties (rerun-data-model gotcha 7).
+    layer_entities: set[str] = {str(chunk.entity_path) for chunk in RrdReader(tmp_path / "calibration" / f"{segment}.rrd").stream()}
+    assert "/__properties" not in layer_entities
+    assert "/world/rig_00/imu_00" in layer_entities
 
 
 def test_registration_restores_saved_sensor_metadata_after_a_catalog_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

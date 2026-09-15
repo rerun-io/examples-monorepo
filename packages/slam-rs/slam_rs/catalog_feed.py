@@ -195,9 +195,10 @@ def resolve_catalog_segments(sources: Sequence[CatalogSegment], require_ground_t
             dataset: DatasetEntry = CatalogClient(source.url).get_dataset(source.dataset_name)
             datasets[key] = dataset
             layers[key] = {}
-            table: pa.Table = dataset.manifest().select("rerun_segment_id", "rerun_layer_name", "rerun_storage_url").to_arrow_table()
+            # One row per segment; its layer names and storage URLs are parallel lists.
+            table: pa.Table = dataset.segment_table().select("rerun_segment_id", "rerun_layer_names", "rerun_storage_urls").to_arrow_table()
             for row in table.to_pylist():
-                layers[key].setdefault(row["rerun_segment_id"], {})[row["rerun_layer_name"]] = row["rerun_storage_url"]
+                layers[key][row["rerun_segment_id"]] = dict(zip(row["rerun_layer_names"], row["rerun_storage_urls"], strict=True))
         if source.segment_id not in layers[key]:
             raise ValueError(f"{source.segment_id}: absent from catalog")
         has_gt: bool = "gt" in layers[key][source.segment_id]
