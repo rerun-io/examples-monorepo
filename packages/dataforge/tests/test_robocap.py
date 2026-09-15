@@ -140,7 +140,12 @@ def test_factory_metadata_preserves_offsets_and_applied_correction(tmp_path: Pat
                      "gyroscope_random_walk: 0.00003\naccelerometer_random_walk: 0.0002\nupdate_rate: 200.0\n")
     camera: Path = factory / "imus_cam_l_extrinsic/left-camchain-imucam.yaml"
     camera.parent.mkdir()
-    camera.write_text("cam0:\n  timeshift_cam_imu: 0.018961111236788484\n")
+    camera.write_text(
+        "cam0:\n  camera_model: pinhole\n  distortion_model: equidistant\n  intrinsics: [300.0, 300.0, 320.0, 240.0]\n"
+        "  distortion_coeffs: [0.0, 0.0, 0.0, 0.0]\n  resolution: [640, 480]\n"
+        "  T_cam_imu: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]\n"
+        "  timeshift_cam_imu: 0.018961111236788484\n"
+    )
     dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=tmp_path))
     path: Path = tmp_path / "metadata.rrd"
     with rr.RecordingStream("metadata", recording_id="test") as recording:

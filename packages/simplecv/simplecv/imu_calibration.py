@@ -33,8 +33,10 @@ class ImuCalibration(rr.AsComponents):
     def __post_init__(self) -> None:
         for item in fields(self):
             value: float | str | None = getattr(self, item.name)
-            if isinstance(value, float) and (not isfinite(value) or value < 0.0 or (item.name == "rate_hz" and value == 0.0)):
-                raise ValueError(f"{item.name} must be finite and {'positive' if item.name == 'rate_hz' else 'nonnegative'}")
+            if isinstance(value, float) and (not isfinite(value) or value < 0.0):
+                raise ValueError(f"{item.name} must be finite and nonnegative")
+        if self.rate_hz == 0.0:
+            raise ValueError("rate_hz must be finite and positive")
 
     def as_component_batches(self) -> list[rr.DescribedComponentBatch]:
         batches: list[rr.DescribedComponentBatch] = []

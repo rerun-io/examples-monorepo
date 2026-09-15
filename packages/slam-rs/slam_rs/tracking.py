@@ -17,7 +17,7 @@ from scipy.spatial.transform import Rotation
 from slam_rs import _core
 from slam_rs.catalog_calibration import ImuCalib
 from slam_rs.catalog_feed import DEFAULT_WINDOW_S, CameraCalib, CatalogSegment, Frameset, RigProfile, SegmentFeed, open_segment
-from slam_rs.config import SlamConfig, config_text_sha256, profiled_config_text
+from slam_rs.config import SlamConfig, config_text_sha256
 from slam_rs.reference import ReferenceSegment, RobocapSession, resolved_flow_config
 from slam_rs.trajectory import Trajectory, shift_clock
 
@@ -127,7 +127,7 @@ class SegmentRun:
     """
 
 
-def _drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max_framesets: int | None = None, *, config_sha256: str) -> SegmentRun:
+def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max_framesets: int | None = None, *, config_sha256: str) -> SegmentRun:
     """Track framesets with IMU hold/retry; export estimates and truth on the device clock."""
     t_ns: list[int] = []
     positions: list[Float64[ndarray, " 3"]] = []
@@ -191,7 +191,7 @@ def run_segment(
         config_text: str
         flow, config_text = resolved_flow_config(settings, segment, profile=profile)
         lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow, gpu=gpu))
-        return _drive(feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets, config_sha256=config_text_sha256(config_text))
+        return drive(feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets, config_sha256=config_text_sha256(config_text))
 
 
 def robocap_estimator_files(
@@ -204,7 +204,7 @@ def robocap_estimator_files(
         used to identify the run.
     """
     calibration: _core.Calibration = _core.Calibration.from_json((settings.package_root / settings.robocap.calibration).read_text())
-    config_text: str = profiled_config_text(settings.package_root / settings.robocap.vio_config, profile, settings.package_root / "configs/profiles")
+    config_text: str = settings.robocap_config_text(profile)
     return calibration, _core.VioConfig.from_json(config_text), config_text
 
 
@@ -278,4 +278,4 @@ def run_robocap(
     ) as feed:
         check_calibration_matches_recording(calibration, feed.cameras, feed.imu, settings.robocap.downscale)
         stop_ns: int | None = None if seconds <= 0.0 else int(feed.frame_t_ns[0]) + int(seconds * 1e9)
-        return _drive(feed, Lockstep(vio=_core.Vio(calibration, flow, gpu=gpu)), stop_ns, config_sha256=config_text_sha256(config_text))
+        return drive(feed, Lockstep(vio=_core.Vio(calibration, flow, gpu=gpu)), stop_ns, config_sha256=config_text_sha256(config_text))

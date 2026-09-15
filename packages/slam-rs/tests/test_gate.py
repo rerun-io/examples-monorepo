@@ -56,7 +56,7 @@ def test_larger_error_cost_or_extent_cannot_remove_failures(low: float, extra: f
 
 @given(lane=st.sampled_from(["cpu", "gpu"]), profile=st.sampled_from(["reference", "fast"]))
 def test_baseline_resolution_matches_both_lane_and_profile(
-    benchmarks: Benchmarks, settings: SlamConfig, lane: Literal["cpu", "gpu"], profile: Literal["reference", "fast"]
+    benchmarks: Benchmarks, lane: Literal["cpu", "gpu"], profile: Literal["reference", "fast"]
 ) -> None:
     segment = replace(benchmarks.segments[0], baseline=(BASELINE,))
     measurement: Measurement = replace(PASSING, lane=lane, profile=profile, gt_rmse_cm=100.0, median_tracker_ms=100.0)
@@ -100,7 +100,7 @@ def test_mismatched_baseline_is_a_caller_error(baseline: Baseline) -> None:
 
 
 @given(host=st.text(alphabet="abcdefghijklmnopqrstuvwxyz", min_size=1), present=st.booleans())
-def test_host_baseline_preferred_with_reference_fallback(benchmarks: Benchmarks, settings: SlamConfig, host: str, present: bool) -> None:
+def test_host_baseline_preferred_with_reference_fallback(benchmarks: Benchmarks, host: str, present: bool) -> None:
     host_row: Baseline = replace(BASELINE, host=host, gt_rmse_cm=30.0, median_tracker_ms=40.0)
     segment = replace(benchmarks.segments[0], baseline=(BASELINE, host_row) if present else (BASELINE,))
     chosen: Baseline | None = segment.baseline_for("gpu", "fast", host)
@@ -117,7 +117,7 @@ def test_host_baseline_preferred_with_reference_fallback(benchmarks: Benchmarks,
 
 @pytest.mark.parametrize("suffix", ["", ".attlocal.net", ".office.example"])
 @given(error=st.sampled_from([30.0, 34.0]), cost=st.sampled_from([40.0, 45.0]))
-def test_host_suffix_preserves_baseline_and_gate(benchmarks: Benchmarks, settings: SlamConfig, suffix: str, error: float, cost: float) -> None:
+def test_host_suffix_preserves_baseline_and_gate(benchmarks: Benchmarks, suffix: str, error: float, cost: float) -> None:
     host_row: Baseline = replace(BASELINE, host="pablos-Mac-mini", gt_rmse_cm=30.0, median_tracker_ms=40.0)
     segment = replace(benchmarks.segments[0], baseline=(BASELINE, host_row))
     measurement: Measurement = replace(PASSING, hostname=f"pablos-Mac-mini{suffix}", gt_rmse_cm=error, median_tracker_ms=cost)

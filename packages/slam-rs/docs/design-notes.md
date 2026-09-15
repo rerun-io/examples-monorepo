@@ -661,7 +661,7 @@ accepts, and their objects configure the frontend.
 
 ## The reference set
 
-`slam.toml` records runtime IMU noise, clock offsets and configuration files.
+`slam.toml` records the catalog URL, per-dataset configuration files and the RoboCap rig rules.
 `benchmarks.toml` records regression segments, frozen decode paths and measured
 baselines. Catalog processing loads only the runtime file; evaluation loads both.
 The tiers are **smoke** for quick checks, **release** for the release set, and

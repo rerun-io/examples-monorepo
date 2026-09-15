@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use crate::{CalibrationSource, MotionKind};
 use anyhow::{Result, bail};
 
@@ -17,21 +19,18 @@ impl DeviceProfile {
         }
     }
 
+    /// Identify the cap this process runs on from the kernel hostname and the
+    /// device-tree serial (NUL-terminated).
+    pub fn from_this_device() -> Result<Self> {
+        let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname")?;
+        let serial = std::fs::read_to_string("/proc/device-tree/serial-number")?;
+        Self::identify(hostname.trim(), serial.trim_end_matches('\0'))
+    }
+
     pub fn serial(self) -> &'static str {
         match self {
             Self::CapA => "f408193e6447b3b0",
             Self::CapB => "fe6fede545c972fa",
-        }
-    }
-
-    /// Canonical order: left front, right front, left eye, right eye, left, right.
-    pub fn camera_paths(self) -> [&'static str; 6] {
-        CAMERAS.map(|camera| camera.path)
-    }
-
-    pub fn slam_cpus(self) -> Option<std::ops::Range<usize>> {
-        match self {
-            Self::CapA | Self::CapB => Some(4..8),
         }
     }
 
@@ -43,6 +42,12 @@ impl DeviceProfile {
         }
     }
 }
+
+/// Cortex-A76 cores reserved for the SLAM worker on both caps; capture stays
+/// under the normal scheduler.
+pub const SLAM_CPUS: Range<usize> = 4..8;
+/// Recorded streams: the cameras, then every sensor channel in `SENSORS` order.
+pub const STREAMS: usize = CAMERAS.len() + SENSORS.len();
 
 /// Capture geometry shared by the Rust camera and SLAM paths.
 pub const FRAME_WIDTH: usize = 1920;
@@ -58,6 +63,8 @@ pub struct SensorChannel {
     pub kind: MotionKind,
     pub prefix: &'static str,
     pub packet_size: usize,
+    /// Dataforge entity the samples are logged under.
+    pub entity: &'static str,
 }
 
 pub const SENSORS: [SensorChannel; 7] = [
@@ -66,6 +73,7 @@ pub const SENSORS: [SensorChannel; 7] = [
         device: 0,
         kind: MotionKind::Gyro,
         prefix: "in_anglvel",
+        entity: "/world/rig_00/imu_00/gyro",
         packet_size: 16,
     },
     SensorChannel {
@@ -73,6 +81,7 @@ pub const SENSORS: [SensorChannel; 7] = [
         device: 0,
         kind: MotionKind::Accel,
         prefix: "in_accel",
+        entity: "/world/rig_00/imu_00/accel",
         packet_size: 16,
     },
     SensorChannel {
@@ -80,6 +89,7 @@ pub const SENSORS: [SensorChannel; 7] = [
         device: 1,
         kind: MotionKind::Gyro,
         prefix: "in_anglvel",
+        entity: "/world/rig_00/imu_01/gyro",
         packet_size: 16,
     },
     SensorChannel {
@@ -87,6 +97,7 @@ pub const SENSORS: [SensorChannel; 7] = [
         device: 1,
         kind: MotionKind::Accel,
         prefix: "in_accel",
+        entity: "/world/rig_00/imu_01/accel",
         packet_size: 16,
     },
     SensorChannel {
@@ -94,6 +105,7 @@ pub const SENSORS: [SensorChannel; 7] = [
         device: 2,
         kind: MotionKind::Gyro,
         prefix: "in_anglvel",
+        entity: "/world/rig_00/imu_02/gyro",
         packet_size: 16,
     },
     SensorChannel {
@@ -101,6 +113,7 @@ pub const SENSORS: [SensorChannel; 7] = [
         device: 2,
         kind: MotionKind::Accel,
         prefix: "in_accel",
+        entity: "/world/rig_00/imu_02/accel",
         packet_size: 16,
     },
     SensorChannel {
@@ -108,6 +121,7 @@ pub const SENSORS: [SensorChannel; 7] = [
         device: 0,
         kind: MotionKind::Mag,
         prefix: "in_magn",
+        entity: "/world/rig_00/mag_00",
         packet_size: 24,
     },
 ];
@@ -116,32 +130,40 @@ pub const SENSORS: [SensorChannel; 7] = [
 pub struct CameraSpec {
     pub name: &'static str,
     pub path: &'static str,
+    /// Dataforge video entity the encoded samples are logged under.
+    pub video_entity: &'static str,
 }
 
 pub const CAMERAS: [CameraSpec; 6] = [
     CameraSpec {
         name: "left_front",
         path: "/dev/video75",
+        video_entity: "/world/rig_00/cam_00/pinhole/video",
     },
     CameraSpec {
         name: "right_front",
         path: "/dev/video111",
+        video_entity: "/world/rig_00/cam_01/pinhole/video",
     },
     CameraSpec {
         name: "left_eye",
         path: "/dev/video84",
+        video_entity: "/world/rig_00/cam_02/pinhole/video",
     },
     CameraSpec {
         name: "right_eye",
         path: "/dev/video66",
+        video_entity: "/world/rig_00/cam_03/pinhole/video",
     },
     CameraSpec {
         name: "left",
         path: "/dev/video102",
+        video_entity: "/world/rig_00/cam_04/pinhole/video",
     },
     CameraSpec {
         name: "right",
         path: "/dev/video93",
+        video_entity: "/world/rig_00/cam_05/pinhole/video",
     },
 ];
 

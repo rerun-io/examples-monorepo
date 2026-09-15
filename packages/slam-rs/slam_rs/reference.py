@@ -2,7 +2,7 @@
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from tomllib import TOMLDecodeError
 from typing import Literal, TypeAlias
@@ -132,8 +132,10 @@ class RobocapBenchmarks:
     """Frozen decoder used by regression comparisons."""
     sessions: tuple[RobocapSession, ...] = field(rename="session")
     """The measured sessions, in manifest order."""
+    device_id: str = field(skip=True, default="", compare=False)
+    """The device whose sessions the catalog holds; bound from the runtime settings by :func:`load_benchmarks`."""
 
-    def session(self, session_id: str, device_id: str) -> RobocapSession:
+    def session(self, session_id: str) -> RobocapSession:
         """The session with this id: the listed one, or any other session of this device on the catalog.
 
         An unlisted session has no regression reference; the tools report it unscored.
@@ -148,7 +150,7 @@ class RobocapBenchmarks:
             raise ValueError(
                 f"{session_id!r} is not a RoboCap session id (expected s00000015-style); listed: {[s.session_id for s in self.sessions]}"
             )
-        return RobocapSession(reference_csv=None, session_id=session_id, segment_id=f"robocap__{device_id}__{session_id}")
+        return RobocapSession(reference_csv=None, session_id=session_id, segment_id=f"robocap__{self.device_id}__{session_id}")
 
     def is_listed(self, session_id: str) -> bool:
         return any(session.session_id == session_id for session in self.sessions)
@@ -234,7 +236,7 @@ def load_benchmarks(settings: SlamConfig, path: Path = BENCHMARKS_PATH) -> Bench
             ):
                 if not math.isfinite(value) or value <= 0.0:
                     raise ValueError(f"{where}: [segment.baseline] {key} {name} must be finite and positive")
-    return parsed
+    return replace(parsed, robocap=replace(parsed.robocap, device_id=settings.robocap.device_id))
 
 
 @dataclass(slots=True, frozen=True)

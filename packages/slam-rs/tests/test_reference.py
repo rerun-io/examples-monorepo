@@ -24,24 +24,24 @@ from slam_rs.reference import (
 )
 
 
-def test_benchmarks_hold_ten_segments(benchmarks: Benchmarks, settings: SlamConfig) -> None:
+def test_benchmarks_hold_ten_segments(benchmarks: Benchmarks) -> None:
     assert len(benchmarks.segments) == 10
     assert benchmarks.schema_version == 1
 
 
-def test_segment_ids_are_unique(benchmarks: Benchmarks, settings: SlamConfig) -> None:
+def test_segment_ids_are_unique(benchmarks: Benchmarks) -> None:
     identifiers: list[str] = [segment.segment_id for segment in benchmarks.segments]
     assert len(set(identifiers)) == len(identifiers)
 
 
-def test_every_tier_and_decode_path_is_known(benchmarks: Benchmarks, settings: SlamConfig) -> None:
+def test_every_tier_and_decode_path_is_known(benchmarks: Benchmarks) -> None:
     for segment in benchmarks.segments:
         assert segment.tier in TIER_BY_NAME
         assert segment.decode_path in DECODE_PATH_BY_NAME
     assert {segment.tier for segment in benchmarks.segments} == set(TIER_BY_NAME)
 
 
-def test_the_tiers_are_the_ones_the_plan_names(benchmarks: Benchmarks, settings: SlamConfig) -> None:
+def test_the_tiers_are_the_ones_the_plan_names(benchmarks: Benchmarks) -> None:
     assert len(benchmarks.in_tier("smoke")) == 2
     assert len(benchmarks.in_tier("release")) == 3
     assert len(benchmarks.in_tier("listed")) == 5
@@ -49,14 +49,14 @@ def test_the_tiers_are_the_ones_the_plan_names(benchmarks: Benchmarks, settings:
 
 
 def test_any_robocap_session_of_the_device_replays_without_a_reference(benchmarks: Benchmarks, settings: SlamConfig) -> None:
-    listed = benchmarks.robocap.session("s00000015", settings.robocap.device_id)
+    listed = benchmarks.robocap.session("s00000015")
     assert listed.reference_csv is not None and benchmarks.robocap.is_listed("s00000015")
-    other = benchmarks.robocap.session("s00000099", settings.robocap.device_id)
+    other = benchmarks.robocap.session("s00000099")
     assert other.segment_id == f"robocap__{settings.robocap.device_id}__s00000099"
     assert other.reference_csv is None and not benchmarks.robocap.is_listed("s00000099")
 
 
-def test_robocap_carries_s15_and_no_ground_truth(benchmarks: Benchmarks, settings: SlamConfig) -> None:
+def test_robocap_carries_s15_and_no_ground_truth(benchmarks: Benchmarks) -> None:
     assert [session.session_id for session in benchmarks.robocap.sessions] == ["s00000015"]
     assert benchmarks.robocap.has_ground_truth is False
 
@@ -89,7 +89,7 @@ def test_an_unknown_selector_is_a_typed_error(benchmarks: Benchmarks, settings: 
     with pytest.raises(ValueError, match="MIO10_typo.*MIO10_short_2_panorama"):
         benchmarks.by_id("MIO10_typo")
     with pytest.raises(ValueError, match="s15.*s00000015"):
-        benchmarks.robocap.session("s15", settings.robocap.device_id)
+        benchmarks.robocap.session("s15")
     with pytest.raises(ValueError, match="msd-nope.*msd-index"):
         settings.dataset("msd-nope")
 

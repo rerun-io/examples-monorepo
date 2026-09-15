@@ -123,17 +123,13 @@ class _KalibrImu:
     """Nominal measurement frequency in Hz."""
 
 
-@serde
 @dataclass(frozen=True, slots=True)
-class _KalibrCameraTiming:
-    """Temporal part of one factory camchain entry."""
+class _FactoryCamera:
+    """One camera's entry in its factory Kalibr camchain file."""
 
-    timeshift_cam_imu: float | None = None
-    """Seconds; t_imu = t_camera + timeshift_cam_imu. Missing is unknown."""
-
-    def __post_init__(self) -> None:
-        if self.timeshift_cam_imu is not None and not math.isfinite(self.timeshift_cam_imu):
-            raise ValueError("timeshift_cam_imu must be finite")
+    path: Path
+    index: int
+    entry: KalibrCamWithExtrinsic
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,11 +244,10 @@ def follow_eye_controls() -> rrb.EyeControls3D:
     )
 
 
-def build_blueprint(camera_names: list[str], *, pose_source: str = "basalt") -> rrb.Blueprint:
+def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
     """Shared rig layout with RoboCap's calibrated follow-eye orientation."""
-    return build_rig_blueprint(
-        camera_names, pose_sources=tuple(dict.fromkeys(("basalt", "slam_rs", pose_source))), follow_eye=follow_eye_controls(),
-    )
+    return build_rig_blueprint(camera_names, follow_eye=follow_eye_controls())
+
 
 def build_table_blueprint(camera_names: list[str]) -> rrb.Blueprint:
     """Segment-table preview card: follow-framed 3D (full trajectory, all frusta,
@@ -354,21 +349,36 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
                 by_name[cam_name] = video_path
         return {name: by_name[name] for name in CAMERA_DISPLAY_ORDER if name in by_name}
 
+    def _factory_cameras(self, device: str) -> dict[str, _FactoryCamera]:
+        """Every canonical camera that has an entry in the device's factory camchain files.
+
+        Raises:
+            ValueError: If a camchain file is malformed, naming the file.
+        """
+        calib_dir: Path = self.config.root / f"0factory-calibration-{device}"
+        camchains: dict[Path, dict[str, KalibrCamWithExtrinsic]] = {}
+        cameras: dict[str, _FactoryCamera] = {}
+        for cam_name, (calib_folder, cam_index) in CAM_TO_CALIB_INFO.items():
+            imucam_files: list[Path] = sorted((calib_dir / calib_folder).glob("*-camchain-imucam.yaml"))
+            if not imucam_files:
+                continue
+            path: Path = imucam_files[0]
+            if path not in camchains:
+                try:
+                    camchains[path] = _load_kalibr_camchain_imucam(path)
+                except (SerdeError, YAMLError) as error:
+                    raise ValueError(f"{path}: {error}") from error
+            entry: KalibrCamWithExtrinsic | None = camchains[path].get(f"cam{cam_index}")
+            if entry is not None:
+                cameras[cam_name] = _FactoryCamera(path, cam_index, entry)
+        return cameras
+
     def calibration(self, device: str) -> dict[str, Fisheye62Parameters]:
         """Load the factory Kalibr calibration, keyed by canonical camera name."""
         calib_dir: Path = self.config.root / f"0factory-calibration-{device}"
         if not calib_dir.is_dir():
             raise FileNotFoundError(f"Calibration directory not found: {calib_dir}")
-        cameras: dict[str, Fisheye62Parameters] = {}
-        for cam_name, (calib_folder, cam_index) in CAM_TO_CALIB_INFO.items():
-            imucam_files: list[Path] = sorted((calib_dir / calib_folder).glob("*-camchain-imucam.yaml"))
-            if not imucam_files:
-                continue
-            cam_dict: dict[str, KalibrCamWithExtrinsic] = _load_kalibr_camchain_imucam(imucam_files[0])
-            cam_data: KalibrCamWithExtrinsic | None = cam_dict.get(f"cam{cam_index}")
-            if cam_data is not None:
-                cameras[cam_name] = _kalibr_cam_to_fisheye62(cam_data, name=cam_name)
-        return cameras
+        return {name: _kalibr_cam_to_fisheye62(camera.entry, name=name) for name, camera in self._factory_cameras(device).items()}
 
     # ── conversion ────────────────────────────────────────────────────────
     def convert(self, identity: SequenceIdentity, source: RobocapSource, *, force: bool) -> Path:
@@ -486,25 +496,18 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
             applied_time_shift_ns=-CAMERA_TO_IMU_OFFSET_NS,
             time_shift_source="DataForge legacy RoboCap ingestion; Basalt kCameraToImuOffsetNs; matches Cap A four-camera factory median; physical alignment not independently validated",
         ), static=True)
-        timings: dict[Path, dict[str, _KalibrCameraTiming]] = {}
+        factory_cameras: dict[str, _FactoryCamera] = self._factory_cameras(device)
         for name, entity in camera_entities.items():
-            folder, camera_index = CAM_TO_CALIB_INFO[name]
-            files: list[Path] = sorted((factory / folder).glob("*-camchain-imucam.yaml"))
-            if not files:
+            camera: _FactoryCamera | None = factory_cameras.get(name)
+            if camera is None or camera.entry.timeshift_cam_imu is None:
                 continue
-            path: Path = files[0]
-            if path not in timings:
-                try:
-                    timings[path] = from_yaml(dict[str, _KalibrCameraTiming], path.read_text())
-                except (SerdeError, YAMLError) as error:
-                    raise ValueError(f"{path}: {error}") from error
-            timing: _KalibrCameraTiming | None = timings[path].get(f"cam{camera_index}")
-            if timing is not None and timing.timeshift_cam_imu is not None:
-                recording.log(entity, rr.AnyValues(
-                    camera_imu_time_offset_ns=round(timing.timeshift_cam_imu * 1e9),
-                    time_offset_reference=imu_entity,
-                    time_offset_source=f"{path.relative_to(self.config.root)}#cam{camera_index}",
-                ), static=True)
+            if not math.isfinite(camera.entry.timeshift_cam_imu):
+                raise ValueError(f"{camera.path}#cam{camera.index}: timeshift_cam_imu must be finite")
+            recording.log(entity, rr.AnyValues(
+                camera_imu_time_offset_ns=round(camera.entry.timeshift_cam_imu * 1e9),
+                time_offset_reference=imu_entity,
+                time_offset_source=f"{camera.path.relative_to(self.config.root)}#cam{camera.index}",
+            ), static=True)
 
     def _log_mesh(self, recording: rr.RecordingStream) -> None:
         """Log the textured cap scan as a static child of the rig, if the asset is readable.

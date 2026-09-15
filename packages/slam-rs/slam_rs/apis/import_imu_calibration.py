@@ -4,9 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import rerun as rr
+from dataforge import schema
 from dataforge.paths import SENSOR_METADATA_LAYER
-from dataforge.writing import atomic_recording
-from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
+from dataforge.writing import select_segments, write_segment_layer
+from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.imu_calibration import ImuCalibration
 
 from slam_rs import _core
@@ -52,22 +53,15 @@ def main(config: Config) -> None:
     )
     client: CatalogClient = CatalogClient(config.catalog)
     dataset: DatasetEntry = client.get_dataset(config.dataset)
-    registered: set[str] = set(dataset.segment_ids())
-    selected: list[str] = sorted(config.segments or registered)
-    if set(selected) - registered:
-        raise ValueError(f"segments absent from {config.dataset}: {sorted(set(selected) - registered)}")
-    config.output_dir.mkdir(parents=True, exist_ok=True)
-    outputs: list[str] = []
-    for segment in selected:
-        if Path(segment).name != segment:
-            raise ValueError(f"invalid segment ID: {segment}")
-        output: Path = config.output_dir.resolve() / f"{segment}.rrd"
-        with atomic_recording(output, application_id="sensor-metadata", recording_id=segment) as recording:
-            recording.log("/world/rig_00/imu_00", metadata, rr.AnyValues(
-                applied_time_shift_ns=config.applied_time_shift_ns,
-                time_shift_source="Existing ingestion correction, explicitly supplied during calibration import",
-            ), static=True)
-        outputs.append(output.as_uri())
-    if config.register and outputs:
-        dataset.register(outputs, layer_name=SENSOR_METADATA_LAYER, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
+
+    def log(_segment: str, recording: rr.RecordingStream) -> None:
+        recording.log(schema.imu_path(0, 0), metadata, rr.AnyValues(
+            applied_time_shift_ns=config.applied_time_shift_ns,
+            time_shift_source="Existing ingestion correction, explicitly supplied during calibration import",
+        ), static=True)
+
+    outputs: list[str] = write_segment_layer(
+        dataset, SENSOR_METADATA_LAYER, config.output_dir, select_segments(dataset, config.segments), log,
+        application_id="sensor-metadata", register=config.register,
+    )
     print(f"{'Registered' if config.register else 'Prepared'} IMU metadata for {len(outputs)} segments of {config.dataset}")

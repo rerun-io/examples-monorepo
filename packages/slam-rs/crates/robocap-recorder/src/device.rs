@@ -14,6 +14,8 @@ pub struct IioDevice {
     layout: Option<IioScanLayout>,
     saved: Vec<(PathBuf, String)>,
     packet_size: usize,
+    /// Reused across reads: one allocation per device, not one per sample.
+    scratch: Vec<u8>,
 }
 
 impl IioDevice {
@@ -36,6 +38,7 @@ impl IioDevice {
             layout: None,
             saved: Vec::new(),
             packet_size: channel.packet_size,
+            scratch: vec![0; channel.packet_size * 256],
         };
         owner.set(&root.join("current_timestamp_clock"), "monotonic")?;
         let prefix = channel.prefix;
@@ -86,14 +89,13 @@ impl IioDevice {
             fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) == 0,
             "IIO descriptor fault"
         );
-        let mut bytes = vec![0; self.packet_size * 256];
-        let count = self.file.read(&mut bytes)?;
+        let count = self.file.read(&mut self.scratch)?;
         ensure!(
             count > 0 && count % self.packet_size == 0,
             "incomplete IIO scan read"
         );
         let layout = self.layout.as_ref().context("IIO layout missing")?;
-        bytes[..count]
+        self.scratch[..count]
             .chunks_exact(self.packet_size)
             .map(|packet| layout.decode(packet))
             .collect()

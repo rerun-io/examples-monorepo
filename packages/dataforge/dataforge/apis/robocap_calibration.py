@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.compute as pc
-from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
+import rerun as rr
+from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.data.ego.robocap_ego import CAMERA_DISPLAY_ORDER
 
 from dataforge import paths, schema, writing
@@ -30,37 +31,35 @@ def main(config: Config) -> None:
     """Read camera identities from the catalog, then register static-only layers."""
     client: CatalogClient = CatalogClient(config.catalog_url)
     entry: DatasetEntry = client.get_dataset("robocap")
-    registered: set[str] = set(entry.segment_ids())
-    selected: list[str] = sorted(config.segments or registered)
-    missing: set[str] = set(selected) - registered
-    if missing:
-        raise ValueError(f"sessions absent from robocap catalog: {sorted(missing)}")
+    selected: list[str] = writing.select_segments(entry, config.segments)
     if not selected:
         print("No RoboCap sessions registered")
         return
     statics: pa.Table = (
-        entry.filter_segments(selected).filter_contents([f"/world/rig_00/cam_{index:02d}" for index in range(len(CAMERA_DISPLAY_ORDER))] + ["/__properties/**"])
+        entry.filter_segments(selected).filter_contents([schema.cam_path(0, index) for index in range(len(CAMERA_DISPLAY_ORDER))] + ["/__properties/**"])
         .reader(index=None).to_arrow_table()
     )
     dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=config.root))
-    outputs: list[str] = []
+    devices: dict[str, str] = {}
     for segment in selected:
         parts: list[str] = segment.split("__")
-        if len(parts) != 3 or parts[0] != "robocap" or Path(segment).name != segment:
+        if len(parts) != 3 or parts[0] != "robocap":
             raise ValueError(f"not a legacy RoboCap session ID: {segment}")
-        device: str = parts[1]
-        if not (config.root / f"0factory-calibration-{device}").is_dir():
+        if not (config.root / f"0factory-calibration-{parts[1]}").is_dir():
             if config.segments:
-                raise FileNotFoundError(f"{segment}: no factory calibration for device {device}")
-            print(f"skip {segment}: no factory calibration for device {device}")
+                raise FileNotFoundError(f"{segment}: no factory calibration for device {parts[1]}")
+            print(f"skip {segment}: no factory calibration for device {parts[1]}")
             continue
+        devices[segment] = parts[1]
+
+    def log(segment: str, recording: rr.RecordingStream) -> None:
         segment_statics: pa.Table = statics.filter(pc.field("rerun_segment_id") == segment)
         schema_column: str = "property:capture:schema"
         if schema_column not in segment_statics.column_names or segment_statics[schema_column].drop_null().to_pylist() != [[schema.DATAFORGE_SCHEMA_VERSION]]:
             raise ValueError(f"{segment}: expected a legacy {schema.DATAFORGE_SCHEMA_VERSION} recording")
         cameras: dict[str, str] = {}
         for column in segment_statics.column_names:
-            if column.startswith("/world/rig_00/cam_") and column.endswith(":name"):
+            if column.startswith(f"{schema.rig_path(0)}/cam_") and column.endswith(":name"):
                 names: list[list[str]] = segment_statics[column].drop_null().to_pylist()
                 if not names:
                     continue
@@ -69,10 +68,7 @@ def main(config: Config) -> None:
                 cameras[names[0][0]] = column.removesuffix(":name")
         if not cameras:
             raise ValueError(f"{segment}: no named cameras in the catalog")
-        output: Path = config.output_dir.resolve() / f"{segment}.rrd"
-        with writing.atomic_recording(output, application_id="dataforge", recording_id=segment) as recording:
-            dataset.log_sensor_metadata(recording, device, cameras)
-        outputs.append(output.as_uri())
-    if outputs:
-        entry.register(outputs, layer_name=paths.SENSOR_METADATA_LAYER, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
+        dataset.log_sensor_metadata(recording, devices[segment], cameras)
+
+    outputs: list[str] = writing.write_segment_layer(entry, paths.SENSOR_METADATA_LAYER, config.output_dir, list(devices), log)
     print(f"Registered sensor metadata for {len(outputs)} legacy RoboCap sessions")

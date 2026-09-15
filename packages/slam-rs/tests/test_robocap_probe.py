@@ -124,7 +124,7 @@ def robocap_statics(
 # --- the downscale, on both the frames and the intrinsics --------------------
 
 
-def test_downscaling_the_recording_reproduces_basalts_own_calibration(settings: SlamConfig, robocap_imu: ImuCalib) -> None:
+def test_downscaling_the_recording_reproduces_basalts_own_calibration(settings: SlamConfig) -> None:
     """Recording statics at downscale three must match the 640x360 calibration JSON.
     Both describe the same Kalibr rig through different conversion paths.
     """
@@ -234,7 +234,7 @@ def test_the_feed_opens_the_real_robocap_rig(benchmarks: Benchmarks, settings: S
     """Read four of six cameras at 640x360 with matched clocks and paired IMU.
     This whole-feed integration test needs the catalog and is marked slow.
     """
-    session: RobocapSession = benchmarks.robocap.session("s00000015", settings.robocap.device_id)
+    session: RobocapSession = benchmarks.robocap.session("s00000015")
     with open_segment(
         CatalogSegment(settings.catalog_url, "robocap", session.segment_id), profile=RigProfile.from_robocap(settings.robocap)
     ) as feed:

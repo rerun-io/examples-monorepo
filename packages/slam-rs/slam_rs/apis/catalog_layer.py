@@ -6,13 +6,13 @@ from time import perf_counter
 from typing import Literal
 
 import torch
-from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
+from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer
 
 from slam_rs import _core
-from slam_rs.catalog_feed import CatalogSegment, RigProfile, SegmentFeed, open_segment
-from slam_rs.catalog_layer import write_layer
-from slam_rs.config import SlamConfig, config_text_sha256, load_slam_config, profiled_config_text
-from slam_rs.tracking import Lockstep, SegmentRun, _drive
+from slam_rs.catalog_feed import CatalogSegment, RigProfile, SegmentFeed, open_segment, resolve_catalog_segments
+from slam_rs.catalog_layer import POSE_SOURCE, write_layer
+from slam_rs.config import SlamConfig, config_text_sha256, load_slam_config
+from slam_rs.tracking import Lockstep, SegmentRun, drive
 
 
 @dataclass(slots=True)
@@ -42,29 +42,24 @@ def main(config: Config) -> None:
     is_robocap: bool = dataset_name == "robocap"
     rig_profile: RigProfile = RigProfile.from_robocap(settings.robocap) if is_robocap else RigProfile()
     catalog_url: str = config.catalog or settings.catalog_url
-    dataset: DatasetEntry = CatalogClient(catalog_url).get_dataset(dataset_name)
+    # One manifest query resolves the dataset handle that open_segment and the final register share.
+    segment: CatalogSegment = resolve_catalog_segments((CatalogSegment(catalog_url, dataset_name, config.segment),))[0]
+    dataset: DatasetEntry | None = segment.dataset
+    if dataset is None:
+        raise ValueError(f"{config.segment}: catalog resolution returned no dataset handle")
     output: Path = config.output_dir.resolve() / f"{config.segment}.rrd"
-    decode_device: Literal["cpu", "cuda"] = (
-        "cuda" if config.decode_device == "cuda" or (config.decode_device == "auto" and torch.cuda.is_available()) else "cpu"
-    )
-    if decode_device == "cuda" and not torch.cuda.is_available():
+    cuda_available: bool = torch.cuda.is_available()
+    if config.decode_device == "cuda" and not cuda_available:
         raise ValueError("CUDA decoding requires an available NVIDIA GPU and the slam-rs-cuda environment")
+    decode_device: Literal["cpu", "cuda"] = "cuda" if config.decode_device == "cuda" or (config.decode_device == "auto" and cuda_available) else "cpu"
     print(f"Loading {config.segment}: one bulk video query, decode={decode_device}", flush=True)
     started: float = perf_counter()
     feed: SegmentFeed
-    with open_segment(CatalogSegment(catalog_url, dataset_name, config.segment), profile=rig_profile,
-                      cache_video=True, decode_device=decode_device, include_ground_truth=False) as feed:
+    with open_segment(segment, profile=rig_profile, cache_video=True, decode_device=decode_device, include_ground_truth=False) as feed:
         load_s: float = perf_counter() - started
-        calibration: _core.Calibration
-        flow: _core.VioConfig
-        config_text: str
-        if is_robocap:
-            config_text = profiled_config_text(settings.package_root / settings.robocap.vio_config, config.profile,
-                                              settings.package_root / "configs/profiles")
-        else:
-            config_text = settings.vio_config_text(dataset_name, config.profile)
-        calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)
-        flow = _core.VioConfig.from_json(config_text)
+        config_text: str = settings.robocap_config_text(config.profile) if is_robocap else settings.vio_config_text(dataset_name, config.profile)
+        calibration: _core.Calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)
+        flow: _core.VioConfig = _core.VioConfig.from_json(config_text)
         use_gpu: bool = config.backend == "gpu" or (config.backend == "auto" and _core.gpu_backend is not None)
         vio: _core.Vio
         try:
@@ -79,9 +74,9 @@ def main(config: Config) -> None:
         backend: str = str(_core.gpu_backend) if vio.gpu else "cpu"
         print(f"{config.segment}: profile={config.profile}, backend={backend}, decode={decode_device}, load={load_s:.1f}s, "
               f"{len(feed.frame_t_ns)} framesets, cameras={feed.camera_positions}", flush=True)
-        run: SegmentRun = _drive(feed, Lockstep(vio), config_sha256=config_text_sha256(config_text))
+        run: SegmentRun = drive(feed, Lockstep(vio), config_sha256=config_text_sha256(config_text))
         write_layer(output, config.segment, run, clock_offset_ns=feed.export_offset_ns + feed.imu.cam_time_offset_ns,
                     profile=config.profile, backend=backend, decoder=decode_device)
-    dataset.register([output.as_uri()], layer_name="slam_rs", on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
+    dataset.register([output.as_uri()], layer_name=POSE_SOURCE, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
     print(f"Registered {len(run.estimate)} poses; {run.wall_s:.1f} s, {run.framesets / run.wall_s:.1f} framesets/s; {output}")
     print(dataset.segment_url(config.segment))

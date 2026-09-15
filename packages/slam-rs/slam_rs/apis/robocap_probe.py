@@ -60,7 +60,7 @@ def main(config: Config) -> None:
     """
     settings: SlamConfig = load_slam_config()
     benchmarks: Benchmarks = load_benchmarks(settings)
-    session: RobocapSession = benchmarks.robocap.session(config.session, settings.robocap.device_id)
+    session: RobocapSession = benchmarks.robocap.session(config.session)
     if not benchmarks.robocap.is_listed(config.session):
         print(f"{config.session} is not in benchmarks.toml: replaying it from the catalog with no regression reference")
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / f"robocap-{session.session_id}" / "slam_rs.csv"

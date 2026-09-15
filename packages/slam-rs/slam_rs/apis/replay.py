@@ -123,7 +123,7 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
     started: float = time.monotonic()
     replayed: int = 0
     # `--max-framesets` is a count and the feed reads by time; the feed is what
-    # converts one to the other, so this loop and `tracking._drive` cannot
+    # converts one to the other, so this loop and `tracking.drive` cannot
     # disagree about which frameset a count ends on.
     stop_ns: int | None = feed.stop_ns_after(config.max_framesets)
     # The stage that tracks needs the pixels its keypoints were computed on.

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pyarrow as pa
-from jaxtyping import Int64, Shaped, UInt8
+from jaxtyping import Bool, Int64, Shaped, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 
@@ -33,7 +33,41 @@ class CatalogVideo:
 
 def catalog_keyframes(column: pa.ChunkedArray) -> list[bool]:
     """Read packet flags, treating both sparse nulls and explicit false as false."""
-    return [bool(value and value[0]) for value in column.combine_chunks().to_pylist()]
+    flags: pa.ListArray = column.combine_chunks()
+    offsets: Int64[ndarray, " n_offsets"] = np.asarray(flags.offsets, dtype=np.int64)
+    # A row's flag is the first element of its list; null and empty rows have no elements.
+    has_flag: Bool[ndarray, " n_rows"] = offsets[1:] > offsets[:-1]
+    result: Bool[ndarray, " n_rows"] = np.zeros(len(flags), dtype=bool)
+    if has_flag.any():
+        values: Bool[ndarray, " n_values"] = np.asarray(flags.values.to_numpy(zero_copy_only=False), dtype=bool)
+        result[has_flag] = values[offsets[:-1][has_flag]]
+    return result.tolist()
+
+
+def packet_views(column: pa.ChunkedArray) -> list[UInt8[ndarray, " n_bytes"]]:
+    """One zero-copy view per encoded packet in a ``VideoStream:sample`` column.
+
+    Arrow has no ``list<u8>`` to binary cast, so the child buffer is sliced by the
+    list offsets. ``large_list`` keeps 64-bit offsets: one camera of a multi-hour
+    session exceeds ``int32``'s 2 GiB. The views keep the column's storage alive
+    while they live, and ``av.Packet`` copies from them, so nothing is duplicated.
+    """
+    blobs: pa.LargeListArray = column.combine_chunks().cast(pa.list_(pa.large_list(pa.uint8()))).flatten()
+    data: UInt8[ndarray, " n_bytes"] = blobs.values.to_numpy(zero_copy_only=True)
+    offsets: Int64[ndarray, " n_offsets"] = blobs.offsets.to_numpy(zero_copy_only=True)
+    return [data[start:stop] for start, stop in zip(offsets[:-1], offsets[1:], strict=True)]
+
+
+def catalog_codec(column: pa.ChunkedArray, where: str) -> CatalogCodecName:
+    """The codec of a ``VideoStream:codec`` column: logged once as a static, so row zero of the non-null values.
+
+    Raises:
+        ValueError: If the stream carries no codec, naming ``where`` it was read.
+    """
+    codecs: pa.Array = column.combine_chunks().drop_null().flatten()
+    if len(codecs) == 0:
+        raise ValueError(f"{where}: the video stream carries no codec, so its samples cannot be decoded")
+    return catalog_codec_name(int(codecs[0].as_py()))
 
 
 def read_catalog_videos(dataset: DatasetEntry, segment_id: str, entities: Sequence[str], timeline: str) -> tuple[CatalogVideo, ...]:
@@ -47,20 +81,14 @@ def read_catalog_videos(dataset: DatasetEntry, segment_id: str, entities: Sequen
     table: pa.Table = dataset.filter_segments(segment_id).filter_contents(paths).reader(index=timeline).select(timeline, *columns).to_arrow_table()
     videos: list[CatalogVideo] = []
     for entity in paths:
+        sample_column: str = f"{entity}:VideoStream:sample"
         # Rows from the other cameras can share timestamps but have null packets.
         # Filter the camera's projected columns before flattening nested buffers.
-        camera: pa.Table = table.select([timeline, *[f"{entity}:VideoStream:{component}" for component in ("sample", "is_keyframe", "codec")]])
-        camera = camera.filter(camera[1].is_valid())
-        times: Shaped[ndarray, " n_frames"] = camera[0].combine_chunks().to_numpy(zero_copy_only=False)
+        camera: pa.Table = table.select([timeline, sample_column, f"{entity}:VideoStream:is_keyframe", f"{entity}:VideoStream:codec"])
+        camera = camera.filter(camera[sample_column].is_valid())
+        times: Shaped[ndarray, " n_frames"] = camera[timeline].combine_chunks().to_numpy(zero_copy_only=False)
         if not len(times) or not np.all(np.diff(times.view(np.int64)) > 0):
             raise ValueError(f"{segment_id} {entity}: expected frames with strictly increasing timestamps")
-        blobs: pa.LargeListArray = camera[1].combine_chunks().cast(pa.list_(pa.large_list(pa.uint8()))).flatten()
-        data: UInt8[ndarray, " n_bytes"] = blobs.values.to_numpy(zero_copy_only=True)
-        offsets: Int64[ndarray, " n_offsets"] = blobs.offsets.to_numpy(zero_copy_only=True)
-        samples: list[UInt8[ndarray, " n_bytes"]] = [data[start:stop] for start, stop in zip(offsets[:-1], offsets[1:], strict=True)]
-        codecs: pa.Array = camera[3].combine_chunks().drop_null().flatten()
-        if not len(codecs):
-            raise ValueError(f"{segment_id} {entity}: video codec is missing")
-        flags: list[bool] = catalog_keyframes(camera[2])
-        videos.append(CatalogVideo(times, samples, flags, catalog_codec_name(int(codecs[0].as_py()))))
+        codec: CatalogCodecName = catalog_codec(camera[f"{entity}:VideoStream:codec"], f"{segment_id} {entity}")
+        videos.append(CatalogVideo(times, packet_views(camera[sample_column]), catalog_keyframes(camera[f"{entity}:VideoStream:is_keyframe"]), codec))
     return tuple(videos)

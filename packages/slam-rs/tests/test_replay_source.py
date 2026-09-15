@@ -36,7 +36,7 @@ def _capture_source(monkeypatch: pytest.MonkeyPatch) -> list[SegmentSource]:
     return seen
 
 
-def test_a_catalog_url_replaces_the_manifests_file_paths(benchmarks: Benchmarks, settings: SlamConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_catalog_url_replaces_the_manifests_file_paths(benchmarks: Benchmarks, monkeypatch: pytest.MonkeyPatch) -> None:
     """``--catalog`` opens the segment by id on the server, ground truth included, with no file path involved."""
     seen: list[SegmentSource] = _capture_source(monkeypatch)
     segment = benchmarks.by_id(SMOKE_SEGMENTS[1])
@@ -54,7 +54,7 @@ def test_without_an_override_the_manifest_catalog_is_used(benchmarks: Benchmarks
     assert seen == [CatalogSegment(settings.catalog_url, segment.dataset_name, segment.segment_id)]
 
 
-def test_a_catalog_and_a_file_are_two_sources_and_refused(settings: SlamConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_a_catalog_and_a_file_are_two_sources_and_refused(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """``--catalog`` with ``--rrd`` would silently pick one; the run stops with a sentence instead."""
     seen: list[SegmentSource] = _capture_source(monkeypatch)
     with pytest.raises(ValueError, match="two sources"):
@@ -62,7 +62,7 @@ def test_a_catalog_and_a_file_are_two_sources_and_refused(settings: SlamConfig, 
     assert seen == []
 
 
-def test_an_unlisted_catalog_segment_opens_without_a_benchmark_entry(settings: SlamConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_unlisted_catalog_segment_opens_without_a_benchmark_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     """Any segment of a known dataset replays from the catalog with that dataset's VIO configuration; no settings entry is needed."""
     seen: list[SegmentSource] = _capture_source(monkeypatch)
     with pytest.raises(_Opened):

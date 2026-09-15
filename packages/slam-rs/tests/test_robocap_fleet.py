@@ -70,7 +70,7 @@ def test_reference_csv_is_scored_without_a_ground_truth_gate(
 
 @pytest.mark.slow
 def test_catalog_robocap_regression_reference(benchmarks: Benchmarks, settings: SlamConfig) -> None:
-    session: RobocapSession = benchmarks.robocap.session("s00000015", settings.robocap.device_id)
+    session: RobocapSession = benchmarks.robocap.session("s00000015")
     if session.reference_csv is None:
         pytest.skip("RoboCap reference has not been recorded")
     measurement: tuple[RobocapRow, Trajectory] = measure(settings, session, Config(seconds=2.0), Machine("test", "x86_64", "test", 1))

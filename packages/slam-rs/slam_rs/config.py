@@ -91,7 +91,14 @@ class SlamConfig:
             ValueError: If the configuration has no such dataset.
             KeyError: If an overlay key is absent from the vendored config.
         """
-        path: Path = self.package_root / self.dataset(dataset_name).vio_config
+        return self._config_text(self.dataset(dataset_name).vio_config, profile)
+
+    def robocap_config_text(self, profile: str = "reference") -> str:
+        """The VIO config RoboCap sessions run with, overlaid like :meth:`vio_config_text`."""
+        return self._config_text(self.robocap.vio_config, profile)
+
+    def _config_text(self, relative: str | Path, profile: str) -> str:
+        path: Path = self.package_root / relative
         return profiled_config_text(path, profile, path.parent / "profiles")
 
 

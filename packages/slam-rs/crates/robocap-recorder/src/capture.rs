@@ -85,7 +85,7 @@ pub struct VideoSample<'a> {
 pub struct DirectWriter {
     recording: RecordingStream,
     sink: DurableRrdSink,
-    last_video: [Option<(i64, u64)>; 6],
+    last_video: [Option<(i64, u64)>; CAMERAS.len()],
     #[cfg(feature = "live-slam")]
     last_pose: Option<[f32; 3]>,
 }
@@ -208,14 +208,17 @@ impl DirectWriter {
         Ok(Self {
             recording,
             sink,
-            last_video: [None; 6],
+            last_video: [None; CAMERAS.len()],
             #[cfg(feature = "live-slam")]
             last_pose: None,
         })
     }
 
     pub fn video(&mut self, sample: VideoSample<'_>) -> Result<()> {
-        ensure!(sample.camera < 6, "unknown camera index");
+        ensure!(
+            usize::from(sample.camera) < CAMERAS.len(),
+            "unknown camera index"
+        );
         ensure!(
             sample.timestamp_ns >= 0 && !sample.annex_b.is_empty(),
             "invalid video sample"
@@ -235,19 +238,19 @@ impl DirectWriter {
                 "a camera must start each part with SPS, PPS, and IDR in Annex B format"
             );
         }
-        let entity = format!("/world/rig_00/cam_{:02}/pinhole/video", sample.camera);
+        let entity = CAMERAS[usize::from(sample.camera)].video_entity;
         self.recording.set_time(
             "video_time",
             TimeCell::from_duration_nanos(sample.timestamp_ns),
         );
         self.recording.log(
-            entity.as_str(),
+            entity,
             &rerun::VideoStream::update_fields()
                 .with_sample(sample.annex_b.to_vec())
                 .with_is_keyframe(sample.keyframe),
         )?;
         self.recording.log_serialized_batches(
-            entity.as_str(),
+            entity,
             false,
             [
                 field(
@@ -272,57 +275,38 @@ impl DirectWriter {
                 .is_none_or(|scale| scale.is_finite() && scale > 0.0),
             "invalid sensor scale"
         );
-        let entity = match sample.kind {
-            MotionKind::Gyro | MotionKind::Accel => {
-                ensure!(sample.device < 3, "unknown IMU index");
-                let suffix = if matches!(sample.kind, MotionKind::Gyro) {
-                    "gyro"
-                } else {
-                    "accel"
-                };
-                format!("/world/rig_00/imu_{:02}/{suffix}", sample.device)
-            }
-            MotionKind::Mag => {
-                ensure!(sample.device == 0, "unknown magnetometer index");
-                "/world/rig_00/mag_00".to_owned()
-            }
-        };
+        // `stream_index` already rejects unknown IMU and magnetometer indices.
+        let entity = SENSORS[sample.stream_index()? - CAMERAS.len()].entity;
         self.recording.set_time(
             "video_time",
             TimeCell::from_duration_nanos(sample.timestamp_ns),
         );
-        self.recording.log_serialized_batches(
-            entity.as_str(),
-            false,
-            [
-                field(
-                    "raw_counts",
-                    Arc::new(Int32Array::from(sample.raw.to_vec())),
-                ),
-                field(
-                    "source_timestamp_ns",
-                    Arc::new(Int64Array::from(vec![sample.timestamp_ns])),
-                ),
-                field(
-                    "source_sequence",
-                    Arc::new(UInt64Array::from(vec![sample.sequence])),
-                ),
-            ],
-        )?;
+        let mut batches = vec![
+            field(
+                "raw_counts",
+                Arc::new(Int32Array::from(sample.raw.to_vec())),
+            ),
+            field(
+                "source_timestamp_ns",
+                Arc::new(Int64Array::from(vec![sample.timestamp_ns])),
+            ),
+            field(
+                "source_sequence",
+                Arc::new(UInt64Array::from(vec![sample.sequence])),
+            ),
+        ];
+        if let Some(temperature) = sample.temperature_raw {
+            batches.push(field(
+                "temperature_raw",
+                Arc::new(Int32Array::from(vec![i32::from(temperature)])),
+            ));
+        }
+        self.recording
+            .log_serialized_batches(entity, false, batches)?;
         self.recording.log(
             format!("{entity}/raw"),
             &rerun::Scalars::new(sample.raw.map(f64::from)),
         )?;
-        if let Some(temperature) = sample.temperature_raw {
-            self.recording.log_serialized_batches(
-                entity.as_str(),
-                false,
-                [field(
-                    "temperature_raw",
-                    Arc::new(Int32Array::from(vec![i32::from(temperature)])),
-                )],
-            )?;
-        }
         if let Some(scale) = sample.scale {
             self.recording.log(
                 entity,

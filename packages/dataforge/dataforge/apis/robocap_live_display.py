@@ -36,6 +36,6 @@ def main(config: Config) -> None:
         application_id="robocap",
         # Contract with the Rust display loader: "{calibration_device}-display".
         recording_id=f"{config.source_device}-display",
-        default_blueprint=build_blueprint(list(CAMERA_DISPLAY_ORDER), pose_source="slam_rs"),
+        default_blueprint=build_blueprint(list(CAMERA_DISPLAY_ORDER)),
     ) as recording:
         dataset.log_scene(recording, cameras)

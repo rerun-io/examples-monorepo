@@ -240,7 +240,7 @@ def main(config: Config) -> None:
     """
     settings: SlamConfig = load_slam_config()
     benchmarks: Benchmarks = load_benchmarks(settings)
-    session: RobocapSession = benchmarks.robocap.session(config.session, settings.robocap.device_id)
+    session: RobocapSession = benchmarks.robocap.session(config.session)
     machine: Machine = this_machine()
     print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores")
     print(f"{session.segment_id}: ground truth absent, not scored; regression agreement is not gated")

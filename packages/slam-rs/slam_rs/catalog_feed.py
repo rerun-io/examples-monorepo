@@ -58,8 +58,8 @@ from datafusion import col, lit
 from jaxtyping import Bool, Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
-from simplecv.catalog_video import CatalogVideo, catalog_keyframes, read_catalog_videos
-from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name, wrap_mp4
+from simplecv.catalog_video import CatalogVideo, catalog_codec, catalog_keyframes, packet_views, read_catalog_videos
+from simplecv.catalog_video_codec import CatalogCodecName, wrap_mp4
 from simplecv.imu_calibration import ImuCalibration
 
 from slam_rs.catalog_calibration import (
@@ -693,18 +693,7 @@ class SegmentFeed:
             raise ValueError(
                 f"{self.segment_id}: cam_{camera_index:02d} returned {len(times)} samples for its frames [{first_frame}, {last_frame}]"
             )
-        # Arrow has no list<u8> -> binary cast, so slice the child buffer by the list
-        # offsets. large_list keeps 64-bit offsets: one camera of a multi-hour session
-        # exceeds the default int32's 2 GiB.
-        blobs: pa.LargeListArray = table[1].combine_chunks().cast(pa.list_(pa.large_list(pa.uint8()))).flatten()
-        data: UInt8[ndarray, " n_bytes"] = blobs.values.to_numpy(zero_copy_only=True)
-        offsets: Int64[ndarray, " n_offsets"] = blobs.offsets.to_numpy(zero_copy_only=True)
-        # Views into the column, not copies of it: `av.Packet` takes any buffer
-        # and copies into its own, so a `tobytes()` here would be a second copy
-        # of every encoded byte. The views keep `data` alive while they live.
-        samples: list[UInt8[ndarray, " n_sample_bytes"]] = [data[begin:end] for begin, end in zip(offsets[:-1], offsets[1:], strict=True)]
-        keyframes: list[bool] = catalog_keyframes(table[2])
-        return samples, keyframes
+        return packet_views(table[1]), catalog_keyframes(table[2])
 
 
 def _window_bounds(index: _VideoIndex, window_ns: int) -> list[tuple[int, int]]:
@@ -744,10 +733,7 @@ def _video_codec(table: pa.Table, entity: str) -> CatalogCodecName:
     """
     if table.num_rows == 0:
         raise ValueError(f"{entity}: the recording carries no video samples")
-    codecs: pa.Array = table[2].combine_chunks().drop_null().flatten()
-    if len(codecs) == 0:
-        raise ValueError(f"{entity}: the video stream carries no codec, so its samples cannot be decoded")
-    return catalog_codec_name(int(codecs[0].as_py()))
+    return catalog_codec(table[2], entity)
 
 
 def _shared_codec(per_camera: Sequence[tuple[int, CatalogCodecName]], segment_id: str) -> CatalogCodecName:
@@ -1031,11 +1017,18 @@ def _build_feed(
         if cache_video else None
     )
     index: _VideoIndex = _read_video_index(sensor_dataset, segment_id, camera_positions, profile.frameset_tolerance_ns, cached_videos)
-    cached_payloads: tuple[bytes, ...] | None = (
-        tuple(wrap_mp4(video.samples, video.keyframes, fps=index.fps, codec=video.codec) for video in cached_videos)
-        if cached_videos is not None else None
-    )
-    del cached_videos
+    cached_payloads: tuple[bytes, ...] | None = None
+    if cached_videos is not None:
+        # Mux one camera at a time and drop its packet views as soon as its MP4 exists,
+        # so the peak holds the packets plus one payload rather than every payload.
+        pending: list[CatalogVideo] = list(cached_videos)
+        del cached_videos
+        payloads: list[bytes] = []
+        while pending:
+            video: CatalogVideo = pending.pop(0)
+            payloads.append(wrap_mp4(video.samples, video.keyframes, fps=index.fps, codec=video.codec))
+            del video
+        cached_payloads = tuple(payloads)
     cameras: tuple[CameraCalib, ...] = tuple(
         camera_calib(number, read_camera_statics(camera_statics, rig_entities[position]), profile.downscale)
         for number, position in enumerate(camera_positions)

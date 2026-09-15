@@ -2,12 +2,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 
-use crate::{CaptureIdentity, DirectWriter, MotionSample, VideoSample};
+use crate::{CAMERAS, CaptureIdentity, DirectWriter, MotionSample, STREAMS, VideoSample};
 
 struct NextPart {
     writer: DirectWriter,
     identity: CaptureIdentity,
-    switched: [bool; 13],
+    switched: [bool; STREAMS],
 }
 
 /// Rotates a full six-camera, three-IMU, one-MAG recording without resampling.
@@ -23,7 +23,7 @@ pub struct SegmentedWriter {
     next: Option<NextPart>,
     duration_ns: i64,
     display: Option<crate::DisplayAssets>,
-    last_input: [Option<i64>; 13],
+    last_input: [Option<i64>; STREAMS],
     #[cfg(feature = "live-slam")]
     last_slam: Option<crate::SlamReport>,
 }
@@ -59,14 +59,17 @@ impl SegmentedWriter {
             next: None,
             duration_ns,
             display,
-            last_input: [None; 13],
+            last_input: [None; STREAMS],
             #[cfg(feature = "live-slam")]
             last_slam: None,
         })
     }
 
     pub fn video(&mut self, sample: VideoSample<'_>) -> Result<()> {
-        ensure!(sample.camera < 6, "unknown camera index");
+        ensure!(
+            usize::from(sample.camera) < CAMERAS.len(),
+            "unknown camera index"
+        );
         let stream = usize::from(sample.camera);
         self.check_order(stream, sample.timestamp_ns)?;
         let deadline = self
@@ -121,7 +124,7 @@ impl SegmentedWriter {
             self.next = Some(NextPart {
                 writer,
                 identity,
-                switched: [false; 13],
+                switched: [false; STREAMS],
             });
         }
         if let Some(next) = &mut self.next

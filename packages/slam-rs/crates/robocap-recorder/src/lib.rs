@@ -5,8 +5,8 @@ mod camera;
 mod capture;
 mod device_profile;
 pub use device_profile::{
-    CAMERAS, CameraSpec, DeviceProfile, FRAME_HEIGHT, FRAME_WIDTH, SENSORS, SLAM_DOWNSCALE,
-    SLAM_PIXELS, SensorChannel, slam_luma,
+    CAMERAS, CameraSpec, DeviceProfile, FRAME_HEIGHT, FRAME_WIDTH, SENSORS, SLAM_CPUS,
+    SLAM_DOWNSCALE, SLAM_PIXELS, STREAMS, SensorChannel, slam_luma,
 };
 mod display;
 pub use display::DisplayAssets;
