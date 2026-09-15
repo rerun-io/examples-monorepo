@@ -33,7 +33,8 @@ from slam_rs.catalog_feed import (
     imu_calib,
     open_segment,
 )
-from slam_rs.reference import SMOKE_SEGMENTS, ReferenceManifest, ReferenceSegment, resolved_flow_config
+from slam_rs.config import SlamConfig
+from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, resolved_flow_config
 from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import Trajectory, associate, read_trajectory, shift_clock, write_trajectory
 from slam_rs.vio_log import VioLogger, VioStage
@@ -179,9 +180,9 @@ def test_the_msd_g2_rotation_arithmetic() -> None:
         _rotate_pinhole_clockwise(1.0, 2.0, 3.0, 4.0, 8, 6, 45)
 
 
-def test_the_imu_calibration_carries_the_manifests_frozen_numbers(manifest: ReferenceManifest) -> None:
-    segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
-    calib = imu_calib(manifest.dataset(segment.dataset_name).imu, np.eye(4))
+def test_the_imu_calibration_carries_the_manifests_frozen_numbers(benchmarks: Benchmarks, settings: SlamConfig) -> None:
+    segment: ReferenceSegment = benchmarks.by_id(SMOKE_SEGMENT)
+    calib = imu_calib(settings.dataset(segment.dataset_name).imu, np.eye(4))
     assert calib.frequency_hz == 1000.0
     assert calib.gyro_noise_std == 0.000282
     assert calib.accel_noise_std == 0.016
@@ -306,11 +307,13 @@ def test_a_ground_truth_window_with_no_pose_in_it_is_empty() -> None:
 
 
 @pytest.mark.slow
-def test_the_smoke_segment_decodes_from_the_catalog(manifest: ReferenceManifest) -> None:
+def test_the_smoke_segment_decodes_from_the_catalog(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     """One real segment end to end: frame count, shape, dtype and paired IMU timestamps."""
-    segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
+    segment: ReferenceSegment = benchmarks.by_id(SMOKE_SEGMENT)
 
-    with open_segment(CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id), manifest.dataset(segment.dataset_name).imu) as feed:
+    with open_segment(
+        CatalogSegment(settings.catalog_url, segment.dataset_name, segment.segment_id), settings.dataset(segment.dataset_name).imu
+    ) as feed:
         assert isinstance(feed, SegmentFeed)
         assert len(feed.cameras) == 2
         assert len(feed.frame_t_ns) > 0
@@ -360,13 +363,17 @@ def test_the_smoke_segment_decodes_from_the_catalog(manifest: ReferenceManifest)
 
 
 @pytest.mark.slow
-def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample(manifest: ReferenceManifest) -> None:
+def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     """Cutting the segment into 2 s windows must reproduce the pixels and the inertial stream exactly."""
-    segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
+    segment: ReferenceSegment = benchmarks.by_id(SMOKE_SEGMENT)
     digests: dict[float, list[tuple[int, str]]] = {}
     imu_t_ns: dict[float, Int64[ndarray, " n_samples"]] = {}
     for window_s in (60.0, 2.0):
-        with open_segment(CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id), manifest.dataset(segment.dataset_name).imu, window_s=window_s) as feed:
+        with open_segment(
+            CatalogSegment(settings.catalog_url, segment.dataset_name, segment.segment_id),
+            settings.dataset(segment.dataset_name).imu,
+            window_s=window_s,
+        ) as feed:
             per_frameset: list[tuple[int, str]] = []
             emitted: list[Int64[ndarray, " n"]] = []
             for frameset in feed.framesets():
@@ -382,7 +389,9 @@ def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample(manifes
     # over a 7.6 s segment, a bound at 2.5 s leaves the last two windows unread.
     first_ns: int = digests[2.0][0][0]
     bounded_ns: int = first_ns + 2_500_000_000
-    with open_segment(CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id), manifest.dataset(segment.dataset_name).imu, window_s=2.0) as feed:
+    with open_segment(
+        CatalogSegment(settings.catalog_url, segment.dataset_name, segment.segment_id), settings.dataset(segment.dataset_name).imu, window_s=2.0
+    ) as feed:
         bounded: list[tuple[int, str]] = [(frameset.t_ns, frameset.digest()) for frameset in feed.framesets(bounded_ns)]
     assert bounded == digests[2.0][: len(bounded)]
     assert bounded_ns <= bounded[-1][0] < bounded_ns + 2_000_000_000
@@ -397,10 +406,8 @@ def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample(manifes
     np.testing.assert_array_equal(imu_t_ns[60.0], imu_t_ns[2.0])
 
 
-
-
 @pytest.mark.slow
-def test_a_replay_export_associates_with_the_catalog_ground_truth(manifest: ReferenceManifest, tmp_path: Path) -> None:
+def test_a_replay_export_associates_with_the_catalog_ground_truth(benchmarks: Benchmarks, settings: SlamConfig, tmp_path: Path) -> None:
     """The replay's own export path, end to end, lands on the sidecar's clock.
 
     Forty framesets of the smoke segment through the whole pipeline: enough for
@@ -408,14 +415,16 @@ def test_a_replay_export_associates_with_the_catalog_ground_truth(manifest: Refe
     Written with ``video_time`` the file associates with **nothing**, which is
     the regression being pinned.
     """
-    segment: ReferenceSegment = manifest.by_id(SMOKE_SEGMENT)
+    segment: ReferenceSegment = benchmarks.by_id(SMOKE_SEGMENT)
 
     config: Config = Config(rr_config=RerunTyroConfig(headless=True), segment=SMOKE_SEGMENT, stage="vio", max_framesets=40)
-    with open_segment(CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id), manifest.dataset(segment.dataset_name).imu) as feed:
+    with open_segment(
+        CatalogSegment(settings.catalog_url, segment.dataset_name, segment.segment_id), settings.dataset(segment.dataset_name).imu
+    ) as feed:
         truth: Trajectory = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
         assert len(truth)
         stage: VioStage = VioStage(
-            lockstep=Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), resolved_flow_config(manifest, segment)[0])),
+            lockstep=Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), resolved_flow_config(settings, segment)[0])),
             logger=VioLogger(
                 cameras=feed.cameras,
                 ground_truth=truth,
@@ -453,11 +462,15 @@ def test_catalog_resolution_batches_segments_by_dataset(monkeypatch: pytest.Monk
     client: MagicMock = MagicMock()
     client.get_dataset.return_value = MagicMock(spec=DatasetEntry)
     dataset: MagicMock = client.get_dataset.return_value
-    dataset.manifest.return_value = SessionContext().from_arrow(pa.table({
-        "rerun_segment_id": ["first", "first", "second", "second"],
-        "rerun_layer_name": ["base", "gt", "base", "gt"],
-        "rerun_storage_url": ["file:///first.rrd", "file:///first-gt.rrd", "file:///second.rrd", "file:///second-gt.rrd"],
-    }))
+    dataset.manifest.return_value = SessionContext().from_arrow(
+        pa.table(
+            {
+                "rerun_segment_id": ["first", "first", "second", "second"],
+                "rerun_layer_name": ["base", "gt", "base", "gt"],
+                "rerun_storage_url": ["file:///first.rrd", "file:///first-gt.rrd", "file:///second.rrd", "file:///second-gt.rrd"],
+            }
+        )
+    )
     monkeypatch.setattr(catalog_feed, "CatalogClient", lambda _url: client)
     resolved: tuple[CatalogSegment, ...] = resolve_catalog_segments(
         (CatalogSegment("test", "dataset", "first"), CatalogSegment("test", "dataset", "second")), require_ground_truth=require_truth
@@ -469,7 +482,9 @@ def test_catalog_resolution_batches_segments_by_dataset(monkeypatch: pytest.Monk
     dataset.manifest.assert_called_once_with()
 
 
-@pytest.mark.parametrize(("segment", "require_truth", "error"), [("missing", False, "absent from catalog"), ("present", True, "ground-truth layer absent")])
+@pytest.mark.parametrize(
+    ("segment", "require_truth", "error"), [("missing", False, "absent from catalog"), ("present", True, "ground-truth layer absent")]
+)
 def test_catalog_resolution_refuses_missing_inputs(monkeypatch: pytest.MonkeyPatch, segment: str, require_truth: bool, error: str) -> None:
     from unittest.mock import MagicMock
 
@@ -478,9 +493,9 @@ def test_catalog_resolution_refuses_missing_inputs(monkeypatch: pytest.MonkeyPat
 
     client: MagicMock = MagicMock()
     client.get_dataset.return_value = MagicMock(spec=DatasetEntry)
-    client.get_dataset.return_value.manifest.return_value = SessionContext().from_arrow(pa.table(
-        {"rerun_segment_id": ["present"], "rerun_layer_name": ["base"], "rerun_storage_url": ["file:///present.rrd"]}
-    ))
+    client.get_dataset.return_value.manifest.return_value = SessionContext().from_arrow(
+        pa.table({"rerun_segment_id": ["present"], "rerun_layer_name": ["base"], "rerun_storage_url": ["file:///present.rrd"]})
+    )
     monkeypatch.setattr(catalog_feed, "CatalogClient", lambda _url: client)
     with pytest.raises(ValueError, match=error):
         resolve_catalog_segments((CatalogSegment("test", "dataset", segment),), require_ground_truth=require_truth)

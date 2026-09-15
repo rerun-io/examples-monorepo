@@ -11,7 +11,7 @@ from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 from slam_rs import _core
 from slam_rs.catalog_feed import CatalogSegment, RigProfile, SegmentFeed, open_segment
 from slam_rs.catalog_layer import write_layer
-from slam_rs.reference import ImuParameters, ReferenceManifest, config_text_sha256, load_manifest
+from slam_rs.config import ImuParameters, SlamConfig, config_text_sha256, load_slam_config
 from slam_rs.tracking import Lockstep, SegmentRun, _drive, check_calibration_matches_recording, robocap_estimator_files
 
 
@@ -24,7 +24,7 @@ class Config:
     output_dir: Path
     """This dataset's results directory, visible at the same path to this host and the catalog server."""
     catalog: str | None = None
-    """Catalog URL; defaults to gate.toml."""
+    """Catalog URL; defaults to slam.toml."""
     profile: Literal["fast", "reference"] = "fast"
     """Estimator configuration profile."""
     backend: Literal["auto", "gpu", "cpu"] = "auto"
@@ -37,12 +37,12 @@ def main(config: Config) -> None:
     """Track the complete segment before publishing any replacement."""
     if Path(config.segment).name != config.segment:
         raise ValueError("segment ID must not contain path separators")
-    manifest: ReferenceManifest = load_manifest()
+    settings: SlamConfig = load_slam_config()
     dataset_name: str = config.segment.split("__", 1)[0]
     is_robocap: bool = dataset_name == "robocap"
-    parameters: ImuParameters = manifest.robocap.imu if is_robocap else manifest.dataset(dataset_name).imu
-    rig_profile: RigProfile = RigProfile.from_robocap(manifest.robocap) if is_robocap else RigProfile()
-    catalog_url: str = config.catalog or manifest.catalog_url
+    parameters: ImuParameters = settings.robocap.imu if is_robocap else settings.dataset(dataset_name).imu
+    rig_profile: RigProfile = RigProfile.from_robocap(settings.robocap) if is_robocap else RigProfile()
+    catalog_url: str = config.catalog or settings.catalog_url
     dataset: DatasetEntry = CatalogClient(catalog_url).get_dataset(dataset_name)
     output: Path = config.output_dir.resolve() / f"{config.segment}.rrd"
     decode_device: Literal["cpu", "cuda"] = (
@@ -60,11 +60,11 @@ def main(config: Config) -> None:
         flow: _core.VioConfig
         config_text: str
         if is_robocap:
-            calibration, flow, config_text = robocap_estimator_files(manifest, config.profile)
+            calibration, flow, config_text = robocap_estimator_files(settings, config.profile)
             check_calibration_matches_recording(calibration, feed.cameras, parameters, rig_profile.downscale)
         else:
             calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)
-            config_text = manifest.vio_config_text(dataset_name, config.profile)
+            config_text = settings.vio_config_text(dataset_name, config.profile)
             flow = _core.VioConfig.from_json(config_text)
         use_gpu: bool = config.backend == "gpu" or (config.backend == "auto" and _core.gpu_backend is not None)
         vio: _core.Vio

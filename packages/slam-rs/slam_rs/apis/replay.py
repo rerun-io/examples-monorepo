@@ -19,8 +19,9 @@ from slam_rs.catalog_feed import (
     SegmentSource,
     open_segment,
 )
+from slam_rs.config import ImuParameters, SlamConfig, load_slam_config
 from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
-from slam_rs.reference import SMOKE_SEGMENTS, ImuParameters, ReferenceManifest, ReferenceSegment, load_manifest, resolved_flow_config
+from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
 from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_trajectory
 from slam_rs.vio_log import FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
@@ -45,13 +46,13 @@ class Config:
     are in the pixels of the frame they tracked, not of a downscaled copy of it.
     """
     segment: str = SMOKE_SEGMENT
-    """Segment id from ``gate.toml``; also names the IMU parameters used for ``--rrd``."""
+    """Segment id from ``benchmarks.toml``; also names the IMU parameters used for ``--rrd``."""
     rrd: Path | None = None
     """Local base recording; retains the selected dataset configuration and IMU model."""
     gt_rrd: Path | None = None
     """Optional local ground-truth recording; requires --rrd."""
     catalog: str | None = None
-    """Catalog URL override; defaults to the manifest. Exclusive with local recording files."""
+    """Catalog URL override; defaults to slam.toml. Exclusive with local recording files."""
     max_framesets: int | None = None
     """Stop after this many framesets; None replays the whole segment."""
     frame_stride: int = 1
@@ -149,17 +150,18 @@ def main(config: Config) -> None:
     Args:
         config: Parsed CLI options.
     """
-    manifest: ReferenceManifest = load_manifest()
-    listed: ReferenceSegment | None = next((s for s in manifest.segments if s.segment_id == config.segment), None)
+    settings: SlamConfig = load_slam_config()
+    benchmarks: Benchmarks = load_benchmarks(settings)
+    listed: ReferenceSegment | None = next((s for s in benchmarks.segments if s.segment_id == config.segment), None)
     dataset_name: str = listed.dataset_name if listed is not None else config.segment.split("__")[0]
     vio_config: _core.VioConfig
     imu: ImuParameters
     if listed is not None:
-        vio_config, _config_text = resolved_flow_config(manifest, listed, profile=config.profile)
-        imu = manifest.dataset(listed.dataset_name).imu
+        vio_config, _config_text = resolved_flow_config(settings, listed, profile=config.profile)
+        imu = settings.dataset(listed.dataset_name).imu
     else:
-        vio_config = _core.VioConfig.from_json(manifest.vio_config_text(dataset_name, profile=config.profile))  # refuses an unknown dataset
-        imu = manifest.dataset(dataset_name).imu
+        vio_config = _core.VioConfig.from_json(settings.vio_config_text(dataset_name, profile=config.profile))  # refuses an unknown dataset
+        imu = settings.dataset(dataset_name).imu
     source: SegmentSource
     origin: str
     if config.rrd is not None:
@@ -170,7 +172,7 @@ def main(config: Config) -> None:
     else:
         if config.gt_rrd is not None:
             raise ValueError("--gt-rrd requires --rrd")
-        origin = config.catalog or manifest.catalog_url
+        origin = config.catalog or settings.catalog_url
         source = CatalogSegment(origin, dataset_name, config.segment)
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / config.segment / "slam_rs.csv"
     print(

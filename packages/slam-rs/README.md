@@ -14,7 +14,7 @@ through a PyO3 extension module, so the whole pipeline runs from Python:
 on the same frames. `fast` is the default profile; `reference` selects the
 unmodified dataset configuration. Accuracy is ATE against catalog ground truth.
 Each lane/profile is compared with its measured baseline in
-`gate.toml`. MIO10 GPU fast scores about 1.55 cm on the RTX 5090.
+`benchmarks.toml`. MIO10 GPU fast scores about 1.55 cm on the RTX 5090.
 The same code runs on `linux-64`, `linux-aarch64`, and macOS `osx-arm64`.
 
 Design notes — the module-by-module account of the estimator, the full Python API,
@@ -235,7 +235,8 @@ Design notes — the accessors field by field, every refusal and its ceiling, an
 | `crates/slam-rs-cli` | `slam-rs` binary: a placeholder. `version` is the only subcommand that does anything; a replay runs through the Python tools. |
 | `slam_rs/` | The Python package: stubs, Tyro entry points under `apis/`. |
 | `tools/` | Thin CLI shims over `slam_rs/apis/`. |
-| `gate.toml` | Gate schema 10: sensor models, tiers, hold-outs, and lane baselines. |
+| `slam.toml` | Runtime settings: estimator files, sensor noise models and RoboCap camera/clock rules. |
+| `benchmarks.toml` | Regression cases, tiers, hold-outs, frozen decode paths and lane baselines. |
 | `configs/` | Dataset VIO configurations and the `profiles/` overlays. |
 
 `Cargo.lock` is committed. `cargo` never runs during `pixi lock` or
@@ -272,7 +273,7 @@ decision is load-bearing: [the frontend](docs/design-notes.md#the-frontend-and-t
 ## Accuracy and speed
 
 The following tables record earlier profile comparisons. Current gate baselines
-are stored in `gate.toml`.
+are stored in `benchmarks.toml`.
 
 Latency is the synchronous `Vio.track` call, one CPU core, decode excluded,
 median over the clip after the first 60 framesets. ATE is RMSE against ground
@@ -302,7 +303,7 @@ and 6.37 cm on the fast profile.
 
 The fleet's fast-profile tracker medians below are milliseconds for
 `MIO10` / `MIO07` / `MGO07`. Ratios compare GPU with CPU on the same host.
-The 5090 values are the reference rows in `gate.toml`; GB10 and M4 use the
+The 5090 values are the reference rows in `benchmarks.toml`; GB10 and M4 use the
 median of three matched runs per lane from S36. These are different measurement
 sessions, not a cross-machine timing budget.
 
@@ -428,4 +429,19 @@ Not in this branch, in the order they are likely to matter:
   models could move further into kornia-rs. S34 already uses nalgebra for QR,
   the damped solve and SVD; the ground-truth gate checks further replacements.
 
-`gate.toml` beside this README holds the rigs’ sensor noise models that the catalog does not carry, gate tiers, hold-outs, decode paths, and measured lane/profile baselines. It also holds RoboCap rig and clock rules plus its one regression trajectory path. Camera geometry and capture facts come from the catalog.
+`slam.toml` holds runtime settings: estimator configuration paths, sensor noise models
+that the catalog does not carry, and RoboCap camera selection and clock rules.
+`benchmarks.toml` holds regression cases, tiers, hold-outs, frozen decode paths,
+measured lane/profile baselines and RoboCap's regression trajectory path.
+Normal catalog processing loads only `slam.toml`; evaluation commands load both.
+Camera geometry and capture facts come from the catalog.
+
+```python
+from slam_rs.config import SlamConfig, load_slam_config
+
+settings: SlamConfig = load_slam_config()
+```
+
+Evaluation adds `benchmarks = load_benchmarks(settings)` from `slam_rs.reference`.
+Both TOML files use schema version 1. They replace the former combined `gate.toml`;
+this split preserves its runtime settings and benchmark values.

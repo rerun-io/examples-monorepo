@@ -93,7 +93,7 @@ from slam_rs.catalog_timing import (
 from slam_rs.catalog_timing import (
     pair_accel_onto_gyro as pair_accel_onto_gyro,
 )
-from slam_rs.reference import ImuParameters, RobocapReference
+from slam_rs.config import ImuParameters, RobocapConfig
 from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, empty_trajectory, shift_clock
 
 RIG_ENTITY: str = "/world/rig_00"
@@ -246,11 +246,11 @@ class RigProfile:
             raise ValueError(f"frameset_tolerance_ns cannot be negative; got {self.frameset_tolerance_ns}")
 
     @classmethod
-    def from_robocap(cls, reference: RobocapReference) -> "RigProfile":
-        """Read the RoboCap rig selection, downscale, clock and pairing rules from the manifest.
+    def from_robocap(cls, reference: RobocapConfig) -> "RigProfile":
+        """Read the RoboCap rig selection, downscale, clock and pairing rules from slam.toml.
 
         Args:
-            reference: The manifest's ``[robocap]`` table, which is where the five
+            reference: The runtime ``[robocap]`` table, which is where the five
                 departures from MSD are written down.
 
         Returns:
@@ -1079,7 +1079,7 @@ def open_segment(
 
     Args:
         source: Where the segment lives.
-        parameters: Frozen IMU parameters, normally from the reference manifest.
+        parameters: Frozen IMU parameters, normally from slam.toml.
         profile: How this rig has to be read; the default is what MSD is.
         frame_stride: Yield every n-th frameset; every frame is still decoded.
         window_s: Longest time window fetched in one round trip.

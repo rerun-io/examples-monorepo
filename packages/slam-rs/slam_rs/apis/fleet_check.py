@@ -12,18 +12,9 @@ from serde.json import to_json
 
 from slam_rs import _core
 from slam_rs.catalog_feed import CatalogSegment, resolve_catalog_segments
+from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb
-from slam_rs.reference import (
-    GATE_RATIO,
-    SMOKE_SEGMENTS,
-    Baseline,
-    Measurement,
-    ReferenceManifest,
-    ReferenceSegment,
-    Tier,
-    gate_failures,
-    load_manifest,
-)
+from slam_rs.reference import GATE_RATIO, SMOKE_SEGMENTS, Baseline, Benchmarks, Measurement, ReferenceSegment, Tier, gate_failures, load_benchmarks
 from slam_rs.tracking import SegmentRun, run_segment
 from slam_rs.trajectory import AteResult, ScoringResult, extent_m, nonfinite_position_text, score_trajectory
 
@@ -84,7 +75,7 @@ class ClipResult:
 
 
 def measure(
-    manifest: ReferenceManifest,
+    settings: SlamConfig,
     segment: ReferenceSegment,
     gpu: bool = False,
     profile: Literal["reference", "fast"] = "fast",
@@ -93,12 +84,14 @@ def measure(
 ) -> ClipResult:
     """Replay a catalog segment and associate estimates with ground truth."""
     if source is None:
-        source = resolve_catalog_segments((CatalogSegment(catalog or manifest.catalog_url, segment.dataset_name, segment.segment_id),), require_ground_truth=True)[0]
+        source = resolve_catalog_segments(
+            (CatalogSegment(catalog or settings.catalog_url, segment.dataset_name, segment.segment_id),), require_ground_truth=True
+        )[0]
     if (source.dataset_name, source.segment_id) != (segment.dataset_name, segment.segment_id):
         raise ValueError(f"source {source.dataset_name}/{source.segment_id} does not match segment {segment.dataset_name}/{segment.segment_id}")
     if not source.has_ground_truth:
         raise ValueError(f"{segment.segment_id}: ground-truth layer absent")
-    run: SegmentRun = run_segment(manifest, segment, gpu=gpu, profile=profile, source=source)
+    run: SegmentRun = run_segment(settings, segment, gpu=gpu, profile=profile, source=source)
     scoring: ScoringResult = score_trajectory(run.estimate, run.ground_truth)
     against_gt: AteResult | None = scoring.result
     lane: Lane = this_lane(gpu)
@@ -192,11 +185,11 @@ class Config:
     profile: Literal["reference", "fast"] = "fast"
     """Configuration overlay."""
     catalog: str | None = None
-    """Catalog URL; defaults to the manifest."""
+    """Catalog URL; defaults to slam.toml."""
     segments: tuple[str, ...] = SMOKE_SEGMENTS
     """Segment ids to run."""
     tier: Tier | None = None
-    """Select a manifest tier instead of explicit ids."""
+    """Select a benchmark tier instead of explicit ids."""
     output_json: Path = Path("fleet_check.json")
     """Measurement output."""
     gpu: bool = False
@@ -206,14 +199,15 @@ class Config:
 def main(config: Config) -> None:
     """Validate sources, measure each segment, and persist results after each run."""
     lane: Lane = this_lane(config.gpu)
-    manifest: ReferenceManifest = load_manifest()
+    settings: SlamConfig = load_slam_config()
+    benchmarks: Benchmarks = load_benchmarks(settings)
     segments: tuple[ReferenceSegment, ...] = (
-        manifest.in_tier(config.tier) if config.tier else tuple(manifest.by_id(identifier) for identifier in config.segments)
+        benchmarks.in_tier(config.tier) if config.tier else tuple(benchmarks.by_id(identifier) for identifier in config.segments)
     )
     if not segments:
         raise ValueError("--segments named no clip")
     sources: tuple[CatalogSegment, ...] = resolve_catalog_segments(
-        tuple(CatalogSegment(config.catalog or manifest.catalog_url, segment.dataset_name, segment.segment_id) for segment in segments),
+        tuple(CatalogSegment(config.catalog or settings.catalog_url, segment.dataset_name, segment.segment_id) for segment in segments),
         require_ground_truth=True,
     )
     machine: Machine = this_machine()
@@ -222,7 +216,7 @@ def main(config: Config) -> None:
     config_digests: dict[str, str] = {}
     config.output_json.parent.mkdir(parents=True, exist_ok=True)
     for segment, source in zip(segments, sources, strict=True):
-        result: ClipResult = measure(manifest, segment, config.gpu, config.profile, source=source)
+        result: ClipResult = measure(settings, segment, config.gpu, config.profile, source=source)
         if segment.dataset_name in config_digests and config_digests[segment.dataset_name] != result.config_sha256:
             raise RuntimeError(f"{segment.dataset_name}: configuration changed during replay")
         config_digests[segment.dataset_name] = result.config_sha256

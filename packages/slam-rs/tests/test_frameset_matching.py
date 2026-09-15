@@ -27,12 +27,13 @@ from slam_rs.catalog_feed import (
     pair_accel_onto_gyro,
     select_cameras,
 )
-from slam_rs.reference import ReferenceManifest
+from slam_rs.config import SlamConfig
 
 
 def camera_name_statics(names: list[str]) -> pa.Table:
     """A statics table carrying just the ``name`` component of each camera node."""
     return pa.table({f"/world/rig_00/cam_{position:02d}:name": [[name]] for position, name in enumerate(names)})
+
 
 # --- the accelerometer onto the gyroscope's clock ----------------------------
 
@@ -111,8 +112,7 @@ def test_two_channels_that_do_not_overlap_are_refused() -> None:
 
 
 def test_one_accelerometer_sample_is_not_enough_to_interpolate() -> None:
-    """At least two accelerometer samples are required for interpolation.
-"""
+    """At least two accelerometer samples are required for interpolation."""
     with pytest.raises(ValueError, match="two accelerometer samples"):
         pair_accel_onto_gyro(np.array([10], dtype=np.int64), np.ones((1, 3)), np.array([10], dtype=np.int64), np.ones((1, 3)))
 
@@ -122,6 +122,8 @@ def test_pairing_an_empty_channel_says_which_one() -> None:
         pair_accel_onto_gyro(np.array([], dtype=np.int64), np.zeros((0, 3)), np.array([1], dtype=np.int64), np.ones((1, 3)))
     with pytest.raises(ValueError, match="0 accel"):
         pair_accel_onto_gyro(np.array([1], dtype=np.int64), np.ones((1, 3)), np.array([], dtype=np.int64), np.zeros((0, 3)))
+
+
 @pytest.mark.skipif(os.environ.get("PIXI_DEV_MODE") != "1", reason="beartype instrumentation requires PIXI_DEV_MODE=1")
 def test_the_pairing_boundary_is_typed() -> None:
     """float32 acceleration is a different array; beartype refuses it rather than upcasting."""
@@ -133,20 +135,19 @@ def test_the_pairing_boundary_is_typed() -> None:
             np.ones((2, 3), dtype=np.float32),  # pyrefly: ignore[bad-argument-type]
         )
 
+
 # --- which cameras of the rig are fed ---------------------------------------
 
 
 def test_the_named_cameras_come_back_in_the_callers_order() -> None:
-    """Select RoboCap cameras in manifest order: cam_04, cam_00, cam_01, cam_05.
-"""
+    """Select RoboCap cameras in settings order: cam_04, cam_00, cam_01, cam_05."""
     statics: pa.Table = camera_name_statics(["left_front", "right_front", "left_eye", "right_eye", "left", "right"])
     assert select_cameras(statics, 6, ("left", "left_front", "right_front", "right")) == (4, 0, 1, 5)
     assert select_cameras(statics, 6, None) == (0, 1, 2, 3, 4, 5)
 
 
 def test_a_hyphenated_name_matches_the_underscored_one() -> None:
-    """Hyphen and underscore spellings must select the same recorded camera.
-    """
+    """Hyphen and underscore spellings must select the same recorded camera."""
     statics: pa.Table = camera_name_statics(["left-front", "right-front"])
     assert select_cameras(statics, 2, ("left_front",)) == (0,)
     assert select_cameras(statics, 2, ("left-front",)) == (0,)
@@ -162,6 +163,7 @@ def test_a_camera_that_is_not_there_names_the_ones_that_are() -> None:
 def test_two_cameras_answering_to_one_name_is_refused() -> None:
     with pytest.raises(ValueError, match="cam_00 and cam_01 are both named 'left'"):
         select_cameras(camera_name_statics(["left", "left"]), 2, ("left",))
+
 
 # --- the frameset matcher ----------------------------------------------------
 
@@ -275,8 +277,7 @@ def test_a_tie_takes_the_later_frame() -> None:
 
 
 def test_interior_drops_are_allowed_one_in_a_thousand() -> None:
-    """Refuse more than max(1, ceil(interior * 0.001)) incomplete interior anchors.
-    """
+    """Refuse more than max(1, ceil(interior * 0.001)) incomplete interior anchors."""
     anchors: Int64[ndarray, " 4"] = np.array([1000, 1100, 1200, 1300], dtype=np.int64)
     # Four interior anchors allow one drop: this partner misses the third anchor.
     t_ns, _ = match_framesets([anchors, np.array([990, 1110, 1310], dtype=np.int64)], 50)
@@ -329,8 +330,7 @@ def test_frameset_timestamps_must_strictly_increase() -> None:
 
 
 def test_a_camera_with_no_frames_is_named() -> None:
-    """Refuse invalid rig input before matching framesets.
-"""
+    """Refuse invalid rig input before matching framesets."""
     with pytest.raises(ValueError, match="camera 1 has no frames"):
         match_framesets([np.array([100, 200], dtype=np.int64), np.array([], dtype=np.int64)], 50)
 
@@ -345,21 +345,23 @@ def test_the_matcher_needs_a_camera() -> None:
         match_framesets([], 1_000)
 
 
-def test_the_profile_comes_from_the_manifest_not_the_code(manifest: ReferenceManifest) -> None:
-    """The rig profile reads camera, downscale, tolerance and pairing fields from one manifest.
-    """
-    profile = RigProfile.from_robocap(manifest.robocap)
-    assert profile.camera_names == manifest.robocap.camera_names == ("left", "left_front", "right_front", "right")
-    assert profile.downscale == manifest.robocap.downscale == 3
-    assert profile.interpolate_accel_onto_gyro is manifest.robocap.interpolate_accel_onto_gyro is True
-    assert profile.frameset_tolerance_ns == manifest.robocap.frameset_tolerance_ns == 1_000_000
-    assert profile.video_time_is_absolute is manifest.robocap.video_time_is_absolute is True
+def test_the_profile_comes_from_the_manifest_not_the_code(settings: SlamConfig) -> None:
+    """The rig profile reads camera, downscale, tolerance and pairing fields from one settings."""
+    profile = RigProfile.from_robocap(settings.robocap)
+    assert profile.camera_names == settings.robocap.camera_names == ("left", "left_front", "right_front", "right")
+    assert profile.downscale == settings.robocap.downscale == 3
+    assert profile.interpolate_accel_onto_gyro is settings.robocap.interpolate_accel_onto_gyro is True
+    assert profile.frameset_tolerance_ns == settings.robocap.frameset_tolerance_ns == 1_000_000
+    assert profile.video_time_is_absolute is settings.robocap.video_time_is_absolute is True
     # What MSD is, and what every default in the feed means: the other state of
     # each of the five, so the profile is a statement and not a shape.
-    assert RigProfile(camera_names=None, downscale=1, interpolate_accel_onto_gyro=False, frameset_tolerance_ns=0, video_time_is_absolute=False) == MSD_RIG
+    assert (
+        RigProfile(camera_names=None, downscale=1, interpolate_accel_onto_gyro=False, frameset_tolerance_ns=0, video_time_is_absolute=False)
+        == MSD_RIG
+    )
 
 
-def test_a_profile_with_no_frames_left_is_refused_on_construction(manifest: ReferenceManifest) -> None:
+def test_a_profile_with_no_frames_left_is_refused_on_construction(settings: SlamConfig) -> None:
     """The downscale is checked where it is stated, before a byte is read.
 
     `_build_feed` reads the whole video index off the recording before it builds
@@ -368,4 +370,4 @@ def test_a_profile_with_no_frames_left_is_refused_on_construction(manifest: Refe
     with pytest.raises(ValueError, match="downscale must be at least 1; got 0"):
         RigProfile(downscale=0)
     with pytest.raises(ValueError, match="downscale must be at least 1; got -3"):
-        replace(RigProfile.from_robocap(manifest.robocap), downscale=-3)
+        replace(RigProfile.from_robocap(settings.robocap), downscale=-3)

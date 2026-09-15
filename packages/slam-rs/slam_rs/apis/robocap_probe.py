@@ -18,7 +18,8 @@ from slam_rs.catalog_feed import (
     RigProfile,
     open_segment,
 )
-from slam_rs.reference import ReferenceManifest, RobocapSession, load_manifest
+from slam_rs.config import SlamConfig, load_slam_config
+from slam_rs.reference import Benchmarks, RobocapSession, load_benchmarks
 from slam_rs.tracking import Lockstep, check_calibration_matches_recording, robocap_estimator_files
 from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_trajectory, read_trajectory, shift_clock, write_trajectory
 from slam_rs.vio_log import FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
@@ -34,11 +35,11 @@ class Config:
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
     """Viewer, save and headless behaviour."""
     catalog: str | None = None
-    """Catalog URL; defaults to the manifest."""
+    """Catalog URL; defaults to slam.toml."""
     gpu: bool = False
     """Use the GPU frontend."""
     reference_csv: Path | None = None
-    """Optional regression trajectory; defaults to the manifest."""
+    """Optional regression trajectory; defaults to benchmarks.toml."""
     session: str = "s00000015"
     """RoboCap session id; defaults to s15."""
     seconds: float = 0.0
@@ -57,33 +58,34 @@ def main(config: Config) -> None:
     Args:
         config: Parsed CLI options.
     """
-    manifest: ReferenceManifest = load_manifest()
-    session: RobocapSession = manifest.robocap.session(config.session)
-    if not manifest.robocap.is_listed(config.session):
-        print(f"{config.session} is not in the manifest: replaying it from the catalog with no regression reference")
-    offset_ns: int = manifest.robocap.imu.cam_time_offset_ns
+    settings: SlamConfig = load_slam_config()
+    benchmarks: Benchmarks = load_benchmarks(settings)
+    session: RobocapSession = benchmarks.robocap.session(config.session, settings.robocap.device_id)
+    if not benchmarks.robocap.is_listed(config.session):
+        print(f"{config.session} is not in benchmarks.toml: replaying it from the catalog with no regression reference")
+    offset_ns: int = settings.robocap.imu.cam_time_offset_ns
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / f"robocap-{session.session_id}" / "slam_rs.csv"
     calibration: _core.Calibration
     flow_config: _core.VioConfig
-    calibration, flow_config, _config_text = robocap_estimator_files(manifest, profile=config.profile)
-    reference_path: Path | None = config.reference_csv or (manifest.package_root / session.reference_csv if session.reference_csv else None)
+    calibration, flow_config, _config_text = robocap_estimator_files(settings, profile=config.profile)
+    reference_path: Path | None = config.reference_csv or (settings.package_root / session.reference_csv if session.reference_csv else None)
     reference: Trajectory = read_trajectory(reference_path) if reference_path else empty_trajectory()
     print("ground truth absent, not scored; regression reference is reported, not gated")
-    print(f"basalt calibration {manifest.robocap.calibration} at downscale {manifest.robocap.downscale}: {list(calibration.resolution)}")
-    print(f"basalt config {manifest.robocap.vio_config}: safe radius {flow_config.optical_flow_image_safe_radius} px")
+    print(f"basalt calibration {settings.robocap.calibration} at downscale {settings.robocap.downscale}: {list(calibration.resolution)}")
+    print(f"basalt config {settings.robocap.vio_config}: safe radius {flow_config.optical_flow_image_safe_radius} px")
 
     with open_segment(
-        CatalogSegment(config.catalog or manifest.catalog_url, "robocap", session.segment_id),
-        manifest.robocap.imu,
-        profile=RigProfile.from_robocap(manifest.robocap),
+        CatalogSegment(config.catalog or settings.catalog_url, "robocap", session.segment_id),
+        settings.robocap.imu,
+        profile=RigProfile.from_robocap(settings.robocap),
         window_s=config.window_s,
     ) as feed:
-        check_calibration_matches_recording(calibration, feed.cameras, manifest.robocap.imu, manifest.robocap.downscale)
+        check_calibration_matches_recording(calibration, feed.cameras, settings.robocap.imu, settings.robocap.downscale)
         first_ns: int = int(feed.frame_t_ns[0])
         last_ns: int = int(feed.frame_t_ns[-1]) if config.seconds <= 0.0 else first_ns + int(config.seconds * 1e9)
         replayed_ns: int = min(int(feed.frame_t_ns[-1]), last_ns) - first_ns
         print(
-            f"{len(feed.cameras)} of the rig's {feed.rig_cameras} cameras {manifest.robocap.camera_names} at rig positions {feed.camera_positions}, "
+            f"{len(feed.cameras)} of the rig's {feed.rig_cameras} cameras {settings.robocap.camera_names} at rig positions {feed.camera_positions}, "
             f"{feed.cameras[0].width}x{feed.cameras[0].height}, {len(feed.frame_t_ns)} framesets over "
             f"{(int(feed.frame_t_ns[-1]) - first_ns) / 1e9:.1f} s, replaying the first {replayed_ns / 1e9:.1f} s"
         )

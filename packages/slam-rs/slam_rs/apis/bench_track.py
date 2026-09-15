@@ -56,7 +56,7 @@ from numpy import ndarray
 
 from slam_rs import _core
 from slam_rs.catalog_feed import CameraCalib, Frameset, ImuCalib, ImuStream
-from slam_rs.reference import config_text_sha256, profiled_config_text
+from slam_rs.config import config_text_sha256, profiled_config_text
 from slam_rs.tracking import Lockstep
 
 Lane: TypeAlias = Literal["cpu", "gpu"]

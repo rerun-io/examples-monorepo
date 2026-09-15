@@ -1,0 +1,60 @@
+# Runtime SLAM settings. Recordings and their geometry are read from the catalog.
+# IMU noise and clock parameters remain here until ingestion carries them.
+
+schema_version = 1
+catalog_url = "rerun+http://dgx-spark:9988"
+
+[[dataset]]
+name = "msd-index"
+vio_config = "configs/msdmi_config.json"
+
+[dataset.imu]
+rate_hz = 1000.0
+gyro_noise_std = 0.000282
+accel_noise_std = 0.016
+gyro_bias_std = 0.0001
+accel_bias_std = 0.001
+cam_time_offset_ns = 0
+
+[[dataset]]
+name = "msd-g2"
+vio_config = "configs/msdmg_config.json"
+
+[dataset.imu]
+rate_hz = 1000.0
+gyro_noise_std = 0.000282
+accel_noise_std = 0.016
+gyro_bias_std = 0.0001
+accel_bias_std = 0.001
+cam_time_offset_ns = 0
+
+[[dataset]]
+name = "msd-odyssey"
+vio_config = "configs/msdmo_config.json"
+
+[dataset.imu]
+rate_hz = 1000.0
+gyro_noise_std = 0.000282
+accel_noise_std = 0.016
+gyro_bias_std = 0.0001
+accel_bias_std = 0.001
+cam_time_offset_ns = 0
+
+[robocap]
+device_id = "f408193e6447b3b0"
+camera_names = ["left", "left_front", "right_front", "right"]
+downscale = 3
+frameset_tolerance_ns = 1000000
+interpolate_accel_onto_gyro = true
+video_time_is_absolute = true
+vio_config = "configs/msdmo_config.json"
+calibration = "configs/robocap_calib_downscale3.json"
+
+[robocap.imu]
+rate_hz = 200.0
+gyro_noise_std = 0.0007300442812547
+accel_noise_std = 0.005955224218014
+gyro_bias_std = 3.445397083168e-05
+accel_bias_std = 0.0001963150489218
+cam_time_offset_ns = 14902432
+

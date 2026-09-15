@@ -18,7 +18,8 @@ from fixture_types import never
 from slam_rs.apis import bench_track
 from slam_rs.apis.bench_track import Config, Framesets, Lane, LaneRound, best_median_ms, interleave, main
 from slam_rs.catalog_feed import ImuCalib
-from slam_rs.reference import SMOKE_SEGMENTS, ReferenceManifest, profiled_config_text
+from slam_rs.config import SlamConfig, profiled_config_text
+from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks
 
 
 def test_the_schedule_runs_every_lane_once_per_round() -> None:
@@ -94,15 +95,16 @@ def test_an_empty_lane_selection_is_refused_before_any_file_or_affinity_work(mon
 
 @pytest.mark.parametrize("profile", ["reference", "fast"])
 def test_benchmark_records_identify_the_profile_and_one_resolved_config(
+    benchmarks: Benchmarks,
     profile: Literal["reference", "fast"],
-    manifest: ReferenceManifest,
+    settings: SlamConfig,
     imu: ImuCalib,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """RESULT and BEST retain profile identity; CONFIG records the digest once."""
-    config_path: Path = manifest.package_root / manifest.dataset(manifest.by_id(SMOKE_SEGMENTS[1]).dataset_name).vio_config
+    config_path: Path = settings.package_root / settings.dataset(benchmarks.by_id(SMOKE_SEGMENTS[1]).dataset_name).vio_config
     framesets: Framesets = Framesets(
         images=np.zeros((1, 1, 1, 1), dtype=np.uint8),
         t_ns=np.zeros(1, dtype=np.int64),

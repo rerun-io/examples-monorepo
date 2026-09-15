@@ -7,7 +7,7 @@ import numpy as np
 from jaxtyping import Float64
 from numpy import ndarray
 
-from slam_rs.reference import ImuParameters
+from slam_rs.config import ImuParameters
 
 CHILD_FROM_PARENT: int = 2
 """``rr.TransformRelation.ChildFromParent``; the only relation the extrinsic inversion is valid for."""
@@ -91,7 +91,7 @@ class ImuCalib:
     """The IMU as the estimator wants it: noise model plus the body transform."""
 
     frequency_hz: float
-    """Nominal update rate, from the reference manifest."""
+    """Nominal update rate, from the reference settings."""
     gyro_noise_std: float
     """Gyroscope noise density."""
     accel_noise_std: float
@@ -181,10 +181,10 @@ def camera_calib(index: int, statics: CameraStatics, downscale: int = 1) -> Came
 
 
 def imu_calib(parameters: ImuParameters, imu_T_body: Float64[ndarray, "4 4"]) -> ImuCalib:
-    """Combine the manifest's frozen noise model with the recording's IMU transform.
+    """Combine the settings’ frozen noise model with the recording's IMU transform.
 
     Args:
-        parameters: Frozen IMU parameters from the reference manifest.
+        parameters: Frozen IMU parameters from the reference settings.
         imu_T_body: Body pose in the IMU frame, the identity when the rig reference is the IMU.
 
     Returns:
@@ -199,5 +199,3 @@ def imu_calib(parameters: ImuParameters, imu_T_body: Float64[ndarray, "4 4"]) ->
         cam_time_offset_ns=parameters.cam_time_offset_ns,
         imu_T_body=imu_T_body,
     )
-
-

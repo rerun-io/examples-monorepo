@@ -10,13 +10,16 @@ from serde.json import to_json
 
 from slam_rs.apis import robocap_fleet
 from slam_rs.apis.robocap_fleet import Config, RobocapReport, RobocapRow, measure
+from slam_rs.config import SlamConfig
 from slam_rs.machine import Machine
-from slam_rs.reference import ReferenceManifest, RobocapSession
+from slam_rs.reference import Benchmarks, RobocapSession
 from slam_rs.tracking import SegmentRun
 from slam_rs.trajectory import Trajectory, empty_trajectory, write_trajectory
 
 
-def test_reference_csv_is_scored_without_a_ground_truth_gate(manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_reference_csv_is_scored_without_a_ground_truth_gate(
+    benchmarks: Benchmarks, settings: SlamConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     truth: Trajectory = Trajectory(
         t_ns=np.arange(30, dtype=np.int64) * 10_000_000,
         position_m=np.random.default_rng(9).normal(size=(30, 3)),
@@ -26,7 +29,9 @@ def test_reference_csv_is_scored_without_a_ground_truth_gate(manifest: Reference
     write_trajectory(path, truth)
     run: SegmentRun = SegmentRun(truth, 30, 0, 3.0, empty_trajectory(), 2.0, "a" * 64)
     monkeypatch.setattr(robocap_fleet, "run_robocap", lambda *_args, **_kwargs: run)
-    measurement: tuple[RobocapRow, Trajectory] = measure(manifest, manifest.robocap.sessions[0], Config(reference_csv=path), Machine("test", "x86_64", "test", 1))
+    measurement: tuple[RobocapRow, Trajectory] = measure(
+        settings, benchmarks.robocap.sessions[0], Config(reference_csv=path), Machine("test", "x86_64", "test", 1)
+    )
     row: RobocapRow = measurement[0]
     estimate: Trajectory = measurement[1]
     assert len(estimate) == 30
@@ -41,18 +46,34 @@ def test_reference_csv_is_scored_without_a_ground_truth_gate(manifest: Reference
     payload: dict[str, object] = json.loads(to_json(RobocapReport.from_row(changed, "fast")))
     assert payload["ms_per_frameset"] == 400.0
     assert list(payload) == [
-        "profile", "machine", "segment_id", "framesets", "tracked", "lost", "reference_rmse_cm", "reference_max_cm", "reference_median_cm",
-        "wall_s", "ms_per_frameset", "realtime_factor_15fps", "realtime_factor_30fps", "peak_rss_mb", "temp_c_before", "temp_c_after",
-        "cross_platform_ate_cm", "unscored", "config_sha256",
+        "profile",
+        "machine",
+        "segment_id",
+        "framesets",
+        "tracked",
+        "lost",
+        "reference_rmse_cm",
+        "reference_max_cm",
+        "reference_median_cm",
+        "wall_s",
+        "ms_per_frameset",
+        "realtime_factor_15fps",
+        "realtime_factor_30fps",
+        "peak_rss_mb",
+        "temp_c_before",
+        "temp_c_after",
+        "cross_platform_ate_cm",
+        "unscored",
+        "config_sha256",
     ]
 
 
 @pytest.mark.slow
-def test_catalog_robocap_regression_reference(manifest: ReferenceManifest) -> None:
-    session: RobocapSession = manifest.robocap.session("s00000015")
+def test_catalog_robocap_regression_reference(benchmarks: Benchmarks, settings: SlamConfig) -> None:
+    session: RobocapSession = benchmarks.robocap.session("s00000015", settings.robocap.device_id)
     if session.reference_csv is None:
         pytest.skip("RoboCap reference has not been recorded")
-    measurement: tuple[RobocapRow, Trajectory] = measure(manifest, session, Config(seconds=2.0), Machine("test", "x86_64", "test", 1))
+    measurement: tuple[RobocapRow, Trajectory] = measure(settings, session, Config(seconds=2.0), Machine("test", "x86_64", "test", 1))
     row: RobocapRow = measurement[0]
     estimate: Trajectory = measurement[1]
     assert len(estimate) > 10
@@ -63,7 +84,7 @@ def test_catalog_robocap_regression_reference(manifest: ReferenceManifest) -> No
 
 @pytest.mark.parametrize("failure", ["estimate", "reference", "clock", "no-reference"])
 def test_scoring_refusal_preserves_outputs_and_cost(
-    manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
+    benchmarks: Benchmarks, settings: SlamConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
 ) -> None:
     import json
 
@@ -80,8 +101,9 @@ def test_scoring_refusal_preserves_outputs_and_cost(
     output: Path = tmp_path / "output.json"
     run: SegmentRun = SegmentRun(estimate, 20, 0, 2.0, empty_trajectory(), 4.0, "a" * 64)
     if failure == "no-reference":
-        manifest = replace(manifest, robocap=replace(manifest.robocap, sessions=(replace(manifest.robocap.sessions[0], reference_csv=None),)))
-    monkeypatch.setattr(robocap_fleet, "load_manifest", lambda: manifest)
+        benchmarks = replace(benchmarks, robocap=replace(benchmarks.robocap, sessions=(replace(benchmarks.robocap.sessions[0], reference_csv=None),)))
+    monkeypatch.setattr(robocap_fleet, "load_slam_config", lambda: settings)
+    monkeypatch.setattr(robocap_fleet, "load_benchmarks", lambda _settings: benchmarks)
     monkeypatch.setattr(robocap_fleet, "run_robocap", lambda *_args, **_kwargs: run)
     with pytest.raises(SystemExit, match="associated" if failure == "clock" else "not finite"):
         robocap_fleet.main(Config(reference_csv=None if failure == "no-reference" else reference, output_json=output))

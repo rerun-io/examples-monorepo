@@ -25,11 +25,12 @@ from slam_rs.catalog_feed import (
     open_segment,
     scale_principal_point,
 )
-from slam_rs.reference import ImuParameters, ReferenceManifest, RobocapSession
+from slam_rs.config import ImuParameters, SlamConfig
+from slam_rs.reference import Benchmarks, RobocapSession
 from slam_rs.tracking import check_calibration_matches_recording
 
 # The four fed cameras' native intrinsics exactly as the recording carries them,
-# in manifest camera order. Statics carry float32 precision.
+# in settings camera order. Statics carry float32 precision.
 ROBOCAP_INTRINSICS: tuple[tuple[float, float, float, float], ...] = (
     (625.53564453125, 626.1504516601562, 999.440185546875, 539.0486450195312),
     (636.4360961914062, 634.7124633789062, 956.2034301757812, 525.4381103515625),
@@ -117,17 +118,19 @@ def robocap_statics(
         transform_relation=CHILD_FROM_PARENT,
         distortion_valid_radius=None,
     )
+
+
 # --- the downscale, on both the frames and the intrinsics --------------------
 
 
-def test_downscaling_the_recording_reproduces_basalts_own_calibration(manifest: ReferenceManifest) -> None:
+def test_downscaling_the_recording_reproduces_basalts_own_calibration(settings: SlamConfig) -> None:
     """Recording statics at downscale three must match the 640x360 calibration JSON.
     Both describe the same Kalibr rig through different conversion paths.
     """
-    basalt: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
+    basalt: _core.Calibration = _core.Calibration.from_json((settings.package_root / settings.robocap.calibration).read_text())
     assert list(basalt.resolution) == [(640, 360)] * 4
 
-    calib = camera_calib(0, robocap_statics(), manifest.robocap.downscale)
+    calib = camera_calib(0, robocap_statics(), settings.robocap.downscale)
     assert (calib.width, calib.height) == (640, 360)
     written = json.loads(basalt.to_json())["value0"]["intrinsics"][0]["intrinsics"]
     assert calib.fx == pytest.approx(written["fx"], abs=1e-3)
@@ -148,6 +151,7 @@ def test_a_downscale_below_one_is_refused() -> None:
     with pytest.raises(ValueError, match="downscale must be at least 1"):
         camera_calib(0, robocap_statics(), 0)
 
+
 def test_a_downscale_that_leaves_no_frame_is_refused() -> None:
     """A downscale past the frame's own width gives a camera zero pixels wide.
 
@@ -157,86 +161,87 @@ def test_a_downscale_that_leaves_no_frame_is_refused() -> None:
     with pytest.raises(ValueError, match=r"downscale 2000 leaves nothing of the 1920x1080 frame"):
         camera_calib(0, robocap_statics(), 2000)
 
+
 def robocap_rig(downscale: int = 3) -> tuple[CameraCalib, ...]:
     """The four fed cameras as the recording gives them, scaled by ``downscale``."""
     return tuple(camera_calib(number, robocap_statics(*values, camera=number), downscale) for number, values in enumerate(ROBOCAP_INTRINSICS))
 
 
-def test_the_probe_refuses_a_calibration_that_is_not_the_recordings_rig(manifest: ReferenceManifest) -> None:
+def test_the_probe_refuses_a_calibration_that_is_not_the_recordings_rig(settings: SlamConfig) -> None:
     """A calibration for another resolution, another lens or another rig geometry stops the run."""
-    basalt: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
+    basalt: _core.Calibration = _core.Calibration.from_json((settings.package_root / settings.robocap.calibration).read_text())
     at_three: tuple[CameraCalib, ...] = robocap_rig()
-    check_calibration_matches_recording(basalt, at_three, manifest.robocap.imu, 3)
+    check_calibration_matches_recording(basalt, at_three, settings.robocap.imu, 3)
 
     with pytest.raises(ValueError, match=r"basalt's calibration is \[\(640, 360\).*the feed decodes \[\(960, 540\)"):
-        check_calibration_matches_recording(basalt, robocap_rig(downscale=2), manifest.robocap.imu, 2)
+        check_calibration_matches_recording(basalt, robocap_rig(downscale=2), settings.robocap.imu, 2)
 
     with pytest.raises(ValueError, match="the feed selected 3"):
-        check_calibration_matches_recording(basalt, at_three[:3], manifest.robocap.imu, 3)
+        check_calibration_matches_recording(basalt, at_three[:3], settings.robocap.imu, 3)
 
     moved = ROBOCAP_INTRINSICS[0][:2] + (1200.0, ROBOCAP_INTRINSICS[0][3])
     shifted = (camera_calib(0, robocap_statics(*moved), 3), *at_three[1:])
     with pytest.raises(ValueError, match="cam 0: basalt's cx is 332.81.*the recording gives 399.66"):
-        check_calibration_matches_recording(basalt, shifted, manifest.robocap.imu, 3)
+        check_calibration_matches_recording(basalt, shifted, settings.robocap.imu, 3)
 
 
-def test_the_probe_refuses_a_lens_or_a_rig_geometry_that_drifted(manifest: ReferenceManifest) -> None:
+def test_the_probe_refuses_a_lens_or_a_rig_geometry_that_drifted(settings: SlamConfig) -> None:
     """The distortion and the extrinsics are compared too: a drifted route is a refusal, not a bias.
 
     A conversion that moved a coefficient or a camera would otherwise show up
     only as a few centimetres of trajectory error nobody could attribute to it.
     """
-    basalt: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
+    basalt: _core.Calibration = _core.Calibration.from_json((settings.package_root / settings.robocap.calibration).read_text())
     at_three: tuple[CameraCalib, ...] = robocap_rig()
 
     bent = ROBOCAP_KB4[0][:1] + (ROBOCAP_KB4[0][1] + 1e-4,) + ROBOCAP_KB4[0][2:]
     with pytest.raises(ValueError, match="cam 0: basalt's k2 is"):
         lens = (camera_calib(0, robocap_statics(*ROBOCAP_INTRINSICS[0], distortion=bent), 3), *at_three[1:])
-        check_calibration_matches_recording(basalt, lens, manifest.robocap.imu, 3)
+        check_calibration_matches_recording(basalt, lens, settings.robocap.imu, 3)
 
     with pytest.raises(ValueError, match="cam 0: basalt places it 1.000 mm from where the recording does"):
         shifted = (camera_calib(0, robocap_statics(*ROBOCAP_INTRINSICS[0], shift_m=1e-3), 3), *at_three[1:])
-        check_calibration_matches_recording(basalt, shifted, manifest.robocap.imu, 3)
+        check_calibration_matches_recording(basalt, shifted, settings.robocap.imu, 3)
 
     with pytest.raises(ValueError, match="cam 0: basalt turns it 0.1000 deg from where the recording does"):
         turned = (camera_calib(0, robocap_statics(*ROBOCAP_INTRINSICS[0], turn_deg=0.1), 3), *at_three[1:])
-        check_calibration_matches_recording(basalt, turned, manifest.robocap.imu, 3)
+        check_calibration_matches_recording(basalt, turned, settings.robocap.imu, 3)
 
 
-def test_the_probe_refuses_a_calibration_whose_imu_is_not_the_manifests(manifest: ReferenceManifest) -> None:
-    """The estimator reads the file's noise model and the feed reads the manifest's: they must be one model."""
-    basalt: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
+def test_the_probe_refuses_a_calibration_whose_imu_is_not_the_manifests(settings: SlamConfig) -> None:
+    """The estimator reads the file's noise model and the feed reads the settings’: they must be one model."""
+    basalt: _core.Calibration = _core.Calibration.from_json((settings.package_root / settings.robocap.calibration).read_text())
     at_three: tuple[CameraCalib, ...] = robocap_rig()
 
-    louder: ImuParameters = replace(manifest.robocap.imu, gyro_noise_std=2.0 * manifest.robocap.imu.gyro_noise_std)
+    louder: ImuParameters = replace(settings.robocap.imu, gyro_noise_std=2.0 * settings.robocap.imu.gyro_noise_std)
     with pytest.raises(ValueError, match="basalt's gyro_noise_std is"):
         check_calibration_matches_recording(basalt, at_three, louder, 3)
 
     # The offset belongs to the feed, which adds it to the frames; a file that
     # carried it too would move every frameset twice.
-    document: dict = json.loads((manifest.package_root / manifest.robocap.calibration).read_text())
-    document["value0"]["cam_time_offset_ns"] = manifest.robocap.imu.cam_time_offset_ns
+    document: dict = json.loads((settings.package_root / settings.robocap.calibration).read_text())
+    document["value0"]["cam_time_offset_ns"] = settings.robocap.imu.cam_time_offset_ns
     with pytest.raises(ValueError, match="carries cam_time_offset_ns 14902432"):
-        check_calibration_matches_recording(_core.Calibration.from_json(json.dumps(document)), at_three, manifest.robocap.imu, 3)
+        check_calibration_matches_recording(_core.Calibration.from_json(json.dumps(document)), at_three, settings.robocap.imu, 3)
+
+
 # --- the real rig, behind `slow` ---------------------------------------------
 
 
-
-
-
-
 @pytest.mark.slow
-def test_the_feed_opens_the_real_robocap_rig(manifest: ReferenceManifest) -> None:
+def test_the_feed_opens_the_real_robocap_rig(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     """Read four of six cameras at 640x360 with matched clocks and paired IMU.
     This whole-feed integration test needs the catalog and is marked slow.
     """
-    session: RobocapSession = manifest.robocap.session("s00000015")
-    with open_segment(CatalogSegment(manifest.catalog_url, "robocap", session.segment_id), manifest.robocap.imu, profile=RigProfile.from_robocap(manifest.robocap)) as feed:
+    session: RobocapSession = benchmarks.robocap.session("s00000015", settings.robocap.device_id)
+    with open_segment(
+        CatalogSegment(settings.catalog_url, "robocap", session.segment_id), settings.robocap.imu, profile=RigProfile.from_robocap(settings.robocap)
+    ) as feed:
         assert feed.camera_positions == (4, 0, 1, 5)
         assert feed.rig_cameras == 6
         # The feed reads its rig knobs off the profile it was given, so what the
-        # manifest says and what the feed does are one statement.
-        assert feed.profile == RigProfile.from_robocap(manifest.robocap)
+        # settings says and what the feed does are one statement.
+        assert feed.profile == RigProfile.from_robocap(settings.robocap)
         assert [(camera.width, camera.height) for camera in feed.cameras] == [(640, 360)] * 4
         assert all(camera.model == "kb4" for camera in feed.cameras)
         assert all(len(camera.distortion) == 4 for camera in feed.cameras)

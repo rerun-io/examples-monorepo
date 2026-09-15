@@ -16,15 +16,8 @@ from scipy.spatial.transform import Rotation
 
 from slam_rs import _core
 from slam_rs.catalog_feed import DEFAULT_WINDOW_S, CameraCalib, CatalogSegment, Frameset, RigProfile, SegmentFeed, open_segment
-from slam_rs.reference import (
-    ImuParameters,
-    ReferenceManifest,
-    ReferenceSegment,
-    RobocapSession,
-    config_text_sha256,
-    profiled_config_text,
-    resolved_flow_config,
-)
+from slam_rs.config import ImuParameters, SlamConfig, config_text_sha256, profiled_config_text
+from slam_rs.reference import ReferenceSegment, RobocapSession, resolved_flow_config
 from slam_rs.trajectory import Trajectory, shift_clock
 
 MAX_HELD_FRAMESETS: int = 2
@@ -180,7 +173,7 @@ def _drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, ma
 
 
 def run_segment(
-    manifest: ReferenceManifest,
+    settings: SlamConfig,
     segment: ReferenceSegment,
     window_s: float | None = None,
     max_framesets: int | None = None,
@@ -190,27 +183,27 @@ def run_segment(
     source: CatalogSegment | None = None,
 ) -> SegmentRun:
     """Replay an MSD segment from the catalog with its dataset configuration."""
-    source = source or CatalogSegment(catalog or manifest.catalog_url, segment.dataset_name, segment.segment_id)
+    source = source or CatalogSegment(catalog or settings.catalog_url, segment.dataset_name, segment.segment_id)
     feed: SegmentFeed
-    with open_segment(source, manifest.dataset(segment.dataset_name).imu) as feed:
+    with open_segment(source, settings.dataset(segment.dataset_name).imu) as feed:
         flow: _core.VioConfig
         config_text: str
-        flow, config_text = resolved_flow_config(manifest, segment, profile=profile)
+        flow, config_text = resolved_flow_config(settings, segment, profile=profile)
         lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow, gpu=gpu))
         return _drive(feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets, config_sha256=config_text_sha256(config_text))
 
 
 def robocap_estimator_files(
-    manifest: ReferenceManifest, profile: Literal["reference", "fast"] = "reference"
+    settings: SlamConfig, profile: Literal["reference", "fast"] = "reference"
 ) -> tuple[_core.Calibration, _core.VioConfig, str]:
-    """Read the RoboCap calibration and profiled configuration named by the manifest.
+    """Read the RoboCap calibration and profiled configuration named by the settings.
 
     Returns:
         Calibration, parsed VIO configuration, and the exact configuration text
         used to identify the run.
     """
-    calibration: _core.Calibration = _core.Calibration.from_json((manifest.package_root / manifest.robocap.calibration).read_text())
-    config_text: str = profiled_config_text(manifest.package_root / manifest.robocap.vio_config, profile, manifest.package_root / "configs/profiles")
+    calibration: _core.Calibration = _core.Calibration.from_json((settings.package_root / settings.robocap.calibration).read_text())
+    config_text: str = profiled_config_text(settings.package_root / settings.robocap.vio_config, profile, settings.package_root / "configs/profiles")
     return calibration, _core.VioConfig.from_json(config_text), config_text
 
 
@@ -255,7 +248,7 @@ def check_calibration_matches_recording(basalt: _core.Calibration, cameras: tupl
         ("accel_bias_std", basalt.accel_bias_std, imu.accel_bias_std),
     ):
         if any(abs(value - mine) > 1e-12 for value in theirs):
-            raise ValueError(f"basalt's {name} is {theirs}, the manifest gives {mine}")
+            raise ValueError(f"basalt's {name} is {theirs}, the settings give {mine}")
     if basalt.cam_time_offset_ns != 0:
         raise ValueError(
             f"basalt's calibration carries cam_time_offset_ns {basalt.cam_time_offset_ns}; the feed applies that offset, so the file must not"
@@ -263,7 +256,7 @@ def check_calibration_matches_recording(basalt: _core.Calibration, cameras: tupl
 
 
 def run_robocap(
-    manifest: ReferenceManifest,
+    settings: SlamConfig,
     session: RobocapSession,
     seconds: float = 0.0,
     window_s: float = DEFAULT_WINDOW_S,
@@ -274,14 +267,14 @@ def run_robocap(
     """Replay a RoboCap catalog session without logging."""
     calibration: _core.Calibration
     flow: _core.VioConfig
-    calibration, flow, config_text = robocap_estimator_files(manifest, profile=profile)
+    calibration, flow, config_text = robocap_estimator_files(settings, profile=profile)
     feed: SegmentFeed
     with open_segment(
-        CatalogSegment(catalog or manifest.catalog_url, "robocap", session.segment_id),
-        manifest.robocap.imu,
-        profile=RigProfile.from_robocap(manifest.robocap),
+        CatalogSegment(catalog or settings.catalog_url, "robocap", session.segment_id),
+        settings.robocap.imu,
+        profile=RigProfile.from_robocap(settings.robocap),
         window_s=window_s,
     ) as feed:
-        check_calibration_matches_recording(calibration, feed.cameras, manifest.robocap.imu, manifest.robocap.downscale)
+        check_calibration_matches_recording(calibration, feed.cameras, settings.robocap.imu, settings.robocap.downscale)
         stop_ns: int | None = None if seconds <= 0.0 else int(feed.frame_t_ns[0]) + int(seconds * 1e9)
         return _drive(feed, Lockstep(vio=_core.Vio(calibration, flow, gpu=gpu)), stop_ns, config_sha256=config_text_sha256(config_text))
