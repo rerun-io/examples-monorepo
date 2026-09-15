@@ -72,7 +72,8 @@ settings, with identical pose CSVs across all five runs. Synchronous storage
 checkpoints also delayed report publication by about 200 ms each second while
 the isolated estimator continued. This is short-run throughput evidence;
 long-session clock safety, thermal headroom, and pose accuracy remain separate
-acceptance gates. Detailed evidence: `/tmp/robocap-cap-a-performance/findings.md`.
+acceptance gates. The measurement logs live with the project notes, outside this
+repository.
 
 ## Implemented boundaries
 
@@ -163,9 +164,10 @@ Set `PKG_CONFIG_ALLOW_CROSS`, `PKG_CONFIG_LIBDIR`, `PKG_CONFIG_SYSROOT_DIR` and
 target linker search paths to that sysroot. Use matching libc compatibility
 libraries and the glibc 2.34 startup objects in the cross environment; mixing old
 startup objects with the cap's glibc 2.41 fails to link. Device libraries were
-copied for linking only; none were replaced on the cap. The local trial sysroot
-and exact build log are under `/tmp/robocap-cap-b-sysroot` and
-`/tmp/robocap-cap-b-app-evidence/cross-gstreamer-build.log` on the build host.
+copied for linking only; none were replaced on the cap. The sysroot is a
+build-host artifact outside this repository; `scripts/build-arm.sh` (the
+`robocap-direct-build` task) takes its absolute path as its one argument and
+checks the directories it needs before building.
 
 To validate original Cap B samples against this writer:
 
