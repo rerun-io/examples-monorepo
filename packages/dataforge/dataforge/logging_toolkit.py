@@ -40,9 +40,6 @@ from dataforge.video_encoding import (
     encode_frames_to_mp4 as encode_frames_to_mp4,
 )
 from dataforge.video_encoding import (
-    encode_image_files_to_mp4 as encode_image_files_to_mp4,
-)
-from dataforge.video_encoding import (
     mp4_frame_count as mp4_frame_count,
 )
 from dataforge.video_encoding import (

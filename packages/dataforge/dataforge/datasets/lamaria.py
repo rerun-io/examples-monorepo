@@ -58,8 +58,10 @@ from numpy import ndarray
 from projectaria_tools.core import data_provider
 from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Fisheye62Parameters
+from simplecv.rig import CameraKind
 
 from dataforge import aria, blueprints, paths, schema, transports, writing
+from dataforge.archives import remove_tree
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
@@ -112,9 +114,6 @@ RIG: int = 0
 """One Aria per sequence; the glasses are ``rig_00``."""
 RIG_REFERENCE: str = "imu_00"
 """The rig frame *is* imu-right's, LaMAria's published body frame."""
-
-CameraKind: TypeAlias = Literal["grayscale", "rgb"]
-"""exoego:v2 content hint on a camera node: what a consumer will decode."""
 
 GtWorld: TypeAlias = Literal["mps", "lv95"]
 """Which world frame a sequence's ground truth is expressed in."""
@@ -952,7 +951,7 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
             try:
                 summary: RecordingSummary = self.write_recording(identity, source, work_dir=work_dir, target=target)
             except BaseException:
-                shutil.rmtree(work_dir, ignore_errors=True)
+                remove_tree(work_dir)
                 retained: int = source.vrs_path.stat().st_size if source.vrs_path.is_file() else 0
                 print(f"  kept {retained / 1e9:.2f} GB of VRS in {source.vrs_path.parent} so a retry resumes instead of refetching")
                 raise

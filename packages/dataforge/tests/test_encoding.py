@@ -21,7 +21,6 @@ from numpy import ndarray
 from dataforge.video_encoding import (
     FrameSource,
     encode_frames_to_mp4,
-    encode_image_files_to_mp4,
     require_av1_nvenc,
     resolve_ffmpeg,
 )
@@ -176,7 +175,7 @@ def test_encode_image_files_reads_each_png_from_disk(tmp_path: Path, nvenc_ffmpe
         frame_path.write_bytes(blob)
         paths.append(frame_path)
     output: Path = tmp_path / "files.mp4"
-    fed: int = encode_image_files_to_mp4(paths, output, fps=FPS, ffmpeg=nvenc_ffmpeg)
+    fed: int = encode_frames_to_mp4((path.read_bytes() for path in paths), output, source=FrameSource("png"), fps=FPS, ffmpeg=nvenc_ffmpeg)
     assert fed == NUM_FRAMES
     codec_name, decoded, _ = video_stream_facts(output)
     assert codec_name == "av1"

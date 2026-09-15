@@ -1,8 +1,7 @@
-"""Download transports. v1 shipped ``local_verify``; ``hf_fetch`` lands with MSD.
-
-Planned surface (from the design report): ``hf_fetch`` (HuggingFace snapshots),
-``http_fetch``, ``gdrive_fetch``, ``api_fetch``, and ``local_verify`` for
-datasets that are already on disk (robocap's download verb is verify-only).
+"""Download transports: ``local_verify`` for corpora already on disk (robocap's download
+verb is verify-only), ``hf_fetch`` for HuggingFace snapshots (msd), and the resuming
+``http_fetch`` plus its Apache index reader (lamaria). ``gdrive_fetch`` is a stub no
+dataset needs yet.
 """
 
 from __future__ import annotations

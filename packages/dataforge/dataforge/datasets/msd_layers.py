@@ -463,7 +463,7 @@ def write_base_layer(
     collection: str,
     hf_revision: str,
     default_blueprint: rrb.Blueprint,
-) -> int:
+) -> None:
     """Write the sensor layer: every camera's video, the IMU, the magnetometer.
 
     Saved into ``staged_base`` rather than published, because the gt layer
@@ -483,9 +483,6 @@ def write_base_layer(
         collection: Collection the sequence came from, recorded likewise.
         hf_revision: The resolved repo sha this conversion read.
         default_blueprint: Layout embedded in the file.
-
-    Returns:
-        Frames the longest camera holds, which is the recording's ``num_frames``.
     """
     with writing.recording_to(staged_base, recording_id=identity.recording_id, default_blueprint=default_blueprint) as recording:
         # Deliberately NO ViewCoordinates at "/": the gt layer owns the root
@@ -531,7 +528,6 @@ def write_base_layer(
             hf_revision=hf_revision,
             duration_ns=streams.duration_ns,
         )
-    return streams.num_frames
 
 
 def write_gt_layer(
@@ -563,8 +559,6 @@ def write_gt_layer(
         staged_gt: Temp path to save into; the caller publishes it.
         base_rrd: The base layer to read the clock origin and accelerometer from.
         sidecar: The archive's ``gt/data.csv``, kept verbatim.
-        profile: The headset, for the world axes it declares and what produced
-            its ground truth.
         profile: The headset, for the world axes it declares and what produced
             its ground truth.
 
