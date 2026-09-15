@@ -67,7 +67,7 @@ from jaxtyping import Float64
 from numpy import ndarray
 
 from dataforge import blueprints, paths, schema, transports, writing
-from dataforge.archives import group_archives, open_member_reader, remove_tree
+from dataforge.archives import group_archives, open_member_reader, remove_tree, resolve_seven_zip
 from dataforge.basalt import CalibratedCamera, FollowFrame, follow_frame, load_calibration
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.datasets.msd_layers import (
@@ -546,6 +546,11 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         if base_done:
             print(f"  {locations.target} exists but {locations.sidecar} does not, so gt cannot be rebuilt from it; fetching the archive again")
 
+        # A machine that cannot encode AV1, or cannot unpack a volume set, should
+        # find out in a second rather than after a multi-gigabyte download.
+        require_av1_nvenc(resolve_ffmpeg())
+        if len(locations.archives) > 1:
+            resolve_seven_zip()
         self.enforce_raw_budget(source, locations.archives)
         # Both hub lookups happen before the archives are pulled and long before a
         # frame is encoded: neither a bad calibration nor a transient revision

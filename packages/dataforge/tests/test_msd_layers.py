@@ -16,7 +16,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import rerun as rr
-from conftest import calibration_fixture, column_rows, read_back
+from conftest import calibration_fixture, column_rows, read_back, recording_properties
 from jaxtyping import Float64, Int64
 from msd_hub import (
     FIXTURE_WORLD_R_RIG,
@@ -27,7 +27,6 @@ from msd_hub import (
     GT_PERIOD_NS,
     FakeHub,
     build_hub,
-    recording_properties,
 )
 from numpy import ndarray
 from scipy.spatial.transform import Rotation

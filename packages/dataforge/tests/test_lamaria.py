@@ -22,7 +22,17 @@ import pytest
 import rerun as rr
 import rerun.blueprint as rrb
 import serde.json
-from conftest import PublishedCamera, ServedRequest, read_back, read_calibration_json, serve  # pyrefly: ignore[missing-import]
+from conftest import (  # pyrefly: ignore[missing-import]
+    PublishedCamera,
+    ServedRequest,
+    blueprint_views,
+    column_rows,
+    eye_vector,
+    read_back,
+    read_calibration_json,
+    recording_properties,
+    serve,
+)
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
@@ -39,7 +49,7 @@ from dataforge.datasets.lamaria import (
     SequenceRecord,
 )
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import TRAIL_RADIUS_UI_POINTS, ImuChannel, require_av1_nvenc, resolve_ffmpeg
+from dataforge.logging_toolkit import TRAIL_RADIUS_UI_POINTS, ImuChannel
 from dataforge.world_up import MEASURED_UP_WINDOW_NS, MeasuredUp, measured_world_up
 
 REFERENCE_DIR: Path = Path(__file__).parent / "reference_data" / "lamaria"
@@ -361,27 +371,6 @@ def test_the_declared_follow_frame_is_the_calibration_own_forward_and_up() -> No
     assert np.linalg.norm(lamaria.FOLLOW_FORWARD) == pytest.approx(1.0, abs=1e-3)
     assert np.linalg.norm(lamaria.FOLLOW_UP) == pytest.approx(1.0, abs=1e-3)
     assert float(np.dot(lamaria.FOLLOW_FORWARD, lamaria.FOLLOW_UP)) == pytest.approx(0.0, abs=1e-3)
-
-
-def eye_vector(batch: rr.components.Position3DBatch | rr.components.Vector3DBatch | None) -> list[float]:
-    """Read one three-component field back out of an ``EyeControls3D`` archetype."""
-    assert batch is not None, "the follow eye sets every field"
-    return [float(value) for value in batch.as_arrow_array().flatten().to_pylist()]
-
-
-def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
-    """Every view in a blueprint, depth-first, whatever containers nest them."""
-    found: list[rrb.View] = []
-
-    def walk(node: rrb.View | rrb.Container) -> None:
-        if isinstance(node, rrb.View):
-            found.append(node)
-            return
-        for child in node.contents or ():
-            walk(child)
-
-    walk(blueprint.root_container)
-    return found
 
 
 def test_the_follow_eye_chases_the_wearer_from_behind_and_above() -> None:
@@ -722,34 +711,9 @@ def convert_one(fake: FakeArchive, *, force: bool = False) -> tuple[SequenceIden
     return identity, dataset.convert(identity, source, force=force)
 
 
-def column_rows(store: rr.experimental.ChunkStore, column: str) -> pa.Table:
-    """Non-null rows of one component column, index-sorted."""
-    table: pa.Table = store.reader(index=schema.TIMELINE).to_arrow_table().sort_by(schema.TIMELINE)
-    return table.select([schema.TIMELINE, column]).drop_null()
-
-
-def recording_properties(store: rr.experimental.ChunkStore, group: str) -> dict[str, object]:
-    """One property group's values (``property:<group>:*``), unwrapped from their one-row lists."""
-    table: pa.Table = store.reader(index=None, contents="/__properties/**").to_arrow_table()
-    row: dict[str, list[object] | None] = table.to_pylist()[0]
-    prefix: str = f"property:{group}:"
-    return {name.removeprefix(prefix): values[0] for name, values in row.items() if name.startswith(prefix) and values}
-
-
 def static_row(store: rr.experimental.ChunkStore, entity_path: str) -> dict[str, list[object]]:
     """The one static row of an entity, as a column → values mapping."""
     return store.reader(index=None, contents=entity_path).to_arrow_table().to_pylist()[0]
-
-
-@pytest.fixture(scope="module")
-def nvenc() -> Path:
-    """The resolved ffmpeg, or a skip when this machine cannot encode AV1 on the GPU."""
-    ffmpeg: Path = resolve_ffmpeg()
-    try:
-        require_av1_nvenc(ffmpeg)
-    except RuntimeError as error:
-        pytest.skip(f"no av1_nvenc: {error}")
-    return ffmpeg
 
 
 @dataclass(frozen=True, slots=True)
@@ -786,13 +750,13 @@ def convert_once(tmp_path: Path, sequence: str) -> ConvertedSequence:
 
 
 @pytest.fixture(scope="module")
-def converted_easy(tmp_path_factory: pytest.TempPathFactory, nvenc: Path) -> ConvertedSequence:
+def converted_easy(tmp_path_factory: pytest.TempPathFactory, nvenc_ffmpeg: Path) -> ConvertedSequence:
     """R_01_easy, converted once: pseudo ground truth and no surveyed points."""
     return convert_once(tmp_path_factory.mktemp("easy"), "R_01_easy")
 
 
 @pytest.fixture(scope="module")
-def converted_surveyed(tmp_path_factory: pytest.TempPathFactory, nvenc: Path) -> ConvertedSequence:
+def converted_surveyed(tmp_path_factory: pytest.TempPathFactory, nvenc_ffmpeg: Path) -> ConvertedSequence:
     """R_11_5cp, converted once: pseudo ground truth plus two control points."""
     return convert_once(tmp_path_factory.mktemp("surveyed"), "R_11_5cp")
 
@@ -892,7 +856,7 @@ def test_the_capture_properties_describe_the_sequence(converted_easy: ConvertedS
 
 
 def test_convert_deletes_the_vrs_and_the_mp4s_but_keeps_the_small_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
 ) -> None:
     with converting(tmp_path, monkeypatch) as fake:
         convert_one(fake)
@@ -902,7 +866,7 @@ def test_convert_deletes_the_vrs_and_the_mp4s_but_keeps_the_small_files(
         assert (fake.root / "training" / "R_01_easy" / "ground_truth" / "pGT" / "R_01_easy.txt").is_file()
 
 
-def test_keep_raw_leaves_the_vrs_and_the_encoded_mp4s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_keep_raw_leaves_the_vrs_and_the_encoded_mp4s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     with converting(tmp_path, monkeypatch, keep_raw=True) as fake:
         convert_one(fake)
         assert fake.vrs_path.is_file()
@@ -924,7 +888,7 @@ def test_a_sequence_with_both_layers_already_written_is_skipped_without_fetching
         assert target.read_bytes() == b"already done"
 
 
-def test_force_rewrites_an_existing_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_force_rewrites_an_existing_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     with converting(tmp_path, monkeypatch) as fake:
         dataset: LamariaDataset = LamariaDataset(fake.config)
         identity, source = dataset.discover()[0]
@@ -937,7 +901,7 @@ def test_force_rewrites_an_existing_recording(tmp_path: Path, monkeypatch: pytes
 
 
 def test_a_failed_encode_keeps_the_vrs_and_clears_the_scratch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc_ffmpeg: Path
 ) -> None:
     def explode(*_arguments: object, **_keywords: object) -> int:
         raise RuntimeError("nvenc fell over")
@@ -976,7 +940,7 @@ def test_a_machine_that_cannot_encode_av1_fails_before_it_fetches_anything(tmp_p
 
 
 def test_a_stalled_vrs_fetch_is_retried_and_resumed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc_ffmpeg: Path
 ) -> None:
     """The archive hangs up mid-transfer; the retry must append, never restart."""
     monkeypatch.setattr(lamaria.transports, "RETRY_BACKOFF_S", (0.0,))
@@ -1218,7 +1182,7 @@ def test_the_gt_properties_describe_the_trajectory_and_its_world(converted_easy:
 
 
 def test_a_measured_up_axis_the_declaration_disagrees_with_is_announced(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc_ffmpeg: Path
 ) -> None:
     """The declared axis is a claim about the data, so every convert re-measures it."""
     monkeypatch.setattr(lamaria, "WORLD_UP", "-y")
@@ -1291,7 +1255,7 @@ def test_every_levelled_control_point_min_distance_is_reported(converted_surveye
     assert "no height" in converted_surveyed.output
 
 
-def test_a_levelled_control_point_far_from_the_walk_stops_the_convert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_a_levelled_control_point_far_from_the_walk_stops_the_convert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     """Its tag was photographed by these cameras, so a wrong world frame shows up as distance."""
     far: dict[str, bytes] = archive_bodies()
     far["/lamaria/ground_truth/sparse/R_11_5cp.json"] = control_points_body(levelled_xyz_m=(0.0, 0.0, 500.0))
@@ -1308,7 +1272,7 @@ def test_a_levelled_control_point_far_from_the_walk_stops_the_convert(tmp_path: 
 # ── the two layers, gated independently ───────────────────────────────────
 
 
-def test_a_missing_gt_layer_is_rebuilt_from_the_base_rrd_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_a_missing_gt_layer_is_rebuilt_from_the_base_rrd_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     """Regenerating the gt corpus is ``rm gt/*.rrd`` and a convert: no fetch, no encode."""
 
     def refuse(_vrs_path: Path) -> lamaria.SequenceStreams:
@@ -1328,7 +1292,7 @@ def test_a_missing_gt_layer_is_rebuilt_from_the_base_rrd_alone(tmp_path: Path, m
         assert base_target.stat().st_mtime_ns == base_written_ns, "the base recording is the canonical raw, left alone"
 
 
-def test_a_missing_base_layer_is_rebuilt_without_the_gt_layer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_a_missing_base_layer_is_rebuilt_without_the_gt_layer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     """The other direction: an existing gt rrd is done, so a base rebuild leaves it as it is."""
     with converting(tmp_path, monkeypatch) as fake:
         identity, base_target = convert_one(fake)
@@ -1343,7 +1307,7 @@ def test_a_missing_base_layer_is_rebuilt_without_the_gt_layer(tmp_path: Path, mo
         assert gt_target.stat().st_mtime_ns == gt_written_ns, "the gt layer already exists, so it is not rewritten"
 
 
-def test_a_sequence_with_no_ground_truth_writes_no_gt_rrd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_a_sequence_with_no_ground_truth_writes_no_gt_rrd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     """The test split ships neither pGT nor control points; there is no world to establish."""
     with converting(tmp_path, monkeypatch) as fake:
         dataset: LamariaDataset = LamariaDataset(fake.config)
@@ -1362,7 +1326,7 @@ def test_a_sequence_with_no_ground_truth_writes_no_gt_rrd(tmp_path: Path, monkey
 
 
 def test_a_sequence_with_control_points_but_no_pgt_still_gets_a_gt_layer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
 ) -> None:
     """The surveyed points are ground truth in their own right, even with no trajectory."""
     with converting(tmp_path, monkeypatch, sequence="R_11_5cp") as fake:

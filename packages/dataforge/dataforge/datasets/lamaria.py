@@ -41,6 +41,7 @@ are documented in ``packages/dataforge/README.md``.
 
 from __future__ import annotations
 
+import json
 import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -57,6 +58,7 @@ from jaxtyping import Float64, Int64
 from numpy import ndarray
 from projectaria_tools.core import data_provider
 from scipy.spatial.transform import Rotation
+from serde import SerdeError
 from simplecv.camera_parameters import Fisheye62Parameters
 from simplecv.rig import CameraKind
 
@@ -218,7 +220,7 @@ CAMERA_SPECS: dict[aria.AriaStreamId, CameraSpec] = {
 """One entry per camera stream a LaMAria VRS carries."""
 
 
-@serde.serde
+@serde.serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class SequenceRecord:
     """One sequence as ``download`` resolved it from the archive's index pages."""
@@ -237,7 +239,7 @@ class SequenceRecord:
     """Whether ``ground_truth/sparse/`` lists this sequence (only surveyed ones)."""
 
 
-@serde.serde
+@serde.serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class LamariaManifest:
     """``<root>/manifest.json``: what the archive held when ``download`` last ran."""
@@ -707,7 +709,10 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         path: Path = self.config.root / MANIFEST_NAME
         if not path.is_file():
             raise FileNotFoundError(f"no {MANIFEST_NAME} at {path}; run `dataforge-download lamaria` first")
-        return serde.json.from_json(LamariaManifest, path.read_text())
+        try:
+            return serde.json.from_json(LamariaManifest, path.read_text())
+        except (SerdeError, json.JSONDecodeError) as error:
+            raise ValueError(f"{path}: {error}") from error
 
     def source(self, record: SequenceRecord) -> LamariaSource:
         """Place one manifest record in the local official layout."""
