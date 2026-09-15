@@ -44,6 +44,7 @@ from dataforge.euroc import (
 )
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
+    TRAJECTORY_COLOR,
     ImuChannel,
     log_camera_node,
     log_imu,
@@ -83,20 +84,8 @@ MsdDeviceChoice: TypeAlias = Literal["index", "g2", "odyssey"]
 """``--device``: which headset's corpus to work on, and which catalog dataset."""
 GtSource: TypeAlias = Literal["lighthouse", "mocap"]
 """What produced a device's ground truth: SteamVR Lighthouse, or a MoCap system."""
-GT_TRAJECTORY_COLOR: tuple[int, int, int] = (110, 180, 255)
-"""Fixed tint of the whole gt path; one trajectory is one quantity, not a per-row class."""
 GT_TRAJECTORY_RADIUS_M: float = 0.002
 """Line radius of the gt path, in metres — thin, because it overlays the rig itself."""
-GT_TRAIL_COLOR: tuple[int, int, int] = (255, 215, 90)
-"""Fixed tint of the recent-motion trail; warm, so it reads against the cool full path."""
-GT_TRAIL_RADIUS_UI_POINTS: float = 3.0
-"""Stroke width of the trail, in ui points — a screen-space width, not a metric one.
-
-The trail used to be a 2 cm ``Points3D`` and read as a string of scattered
-balls: at the archive's ~1 kHz a dot wide enough to see is wider than the gap
-between samples. It is drawn as segments now (``log_trail_segments``), and a
-stroke is measured on screen so one number serves a headset and a vehicle alike.
-"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -507,7 +496,7 @@ def write_gt_layer(
         # turns into a recent-motion trail on top of it.
         rr.log(
             schema.trajectory_path(schema.GT_RUN_SOURCE),
-            rr.LineStrips3D([gt.translations_xyz], colors=GT_TRAJECTORY_COLOR, radii=GT_TRAJECTORY_RADIUS_M),
+            rr.LineStrips3D([gt.translations_xyz], colors=TRAJECTORY_COLOR, radii=GT_TRAJECTORY_RADIUS_M),
             static=True,
             recording=recording,
         )
@@ -516,8 +505,6 @@ def write_gt_layer(
             schema.trail_path(schema.GT_RUN_SOURCE),
             times_ns=gt.times_ns,
             translations_xyz=gt.translations_xyz,
-            color=GT_TRAIL_COLOR,
-            radius_ui_points=GT_TRAIL_RADIUS_UI_POINTS,
         )
         recording.send_property(
             "gt",

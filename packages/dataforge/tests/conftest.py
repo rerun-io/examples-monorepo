@@ -25,12 +25,12 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import rerun as rr
-from jaxtyping import Float64, UInt8
+from jaxtyping import UInt8
 from numpy import ndarray
-from scipy.spatial.transform import Rotation
 from serde import field, from_dict, serde
 
 from dataforge import schema
+from dataforge.aria import PublishedTransform
 from dataforge.video_encoding import require_av1_nvenc, resolve_ffmpeg
 
 NOISE_CEILING: int = 96
@@ -233,24 +233,6 @@ class PublishedResolution:
     """Image width in pixels."""
     height: int
     """Image height in pixels."""
-
-
-@serde
-@dataclass(frozen=True)
-class PublishedTransform:
-    """A published rigid transform: a quaternion in x, y, z, w order and a translation."""
-
-    qvec: list[float]
-    """Rotation as ``[x, y, z, w]`` — pycolmap's order, which the official tooling reads it with."""
-    tvec: list[float]
-    """Translation in metres."""
-
-    def to_matrix(self) -> Float64[ndarray, "4 4"]:
-        """The same transform as a 4x4."""
-        matrix: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
-        matrix[:3, :3] = Rotation.from_quat(np.asarray(self.qvec, dtype=np.float64)).as_matrix()
-        matrix[:3, 3] = self.tvec
-        return matrix
 
 
 @serde

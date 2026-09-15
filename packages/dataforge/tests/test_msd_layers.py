@@ -35,11 +35,8 @@ from scipy.spatial.transform import Rotation
 from dataforge import paths, schema
 from dataforge.basalt import BasaltPose, CalibratedCamera, load_calibration, rotate_camera_cw, upright_quarter_turns
 from dataforge.datasets.msd import MSD_DEVICES, MsdDataset, MsdDeviceChoice
-from dataforge.datasets.msd_layers import (
-    GT_TRAIL_RADIUS_UI_POINTS,
-)
 from dataforge.euroc import GtTrajectory, TimestampedSamples, gt_trajectory
-from dataforge.logging_toolkit import ImuChannel
+from dataforge.logging_toolkit import TRAIL_RADIUS_UI_POINTS, ImuChannel
 from dataforge.world_up import MEASURED_UP_WINDOW_NS, WORLD_UP_VIEW_COORDINATES, MeasuredUp, measured_world_up
 
 VIEWER_AXIS_VECTORS: dict[int, tuple[float, float, float]] = {
@@ -397,7 +394,7 @@ def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail_of_segments(conve
         np.testing.assert_allclose(segment, path_xyz[[max(pose - 1, 0), pose]], atol=1e-6)
 
     static: dict[str, list[object]] = store.reader(index=None, contents=trail).to_arrow_table().to_pylist()[0]
-    assert static[f"{trail}:LineStrips3D:radii"] == [-GT_TRAIL_RADIUS_UI_POINTS], "the stroke is screen-space, not metric"
+    assert static[f"{trail}:LineStrips3D:radii"] == [-TRAIL_RADIUS_UI_POINTS], "the stroke is screen-space, not metric"
     assert f"{trail}:Points3D:positions" not in store.reader(index=schema.TIMELINE).to_arrow_table().column_names
 
 

@@ -39,7 +39,7 @@ from dataforge.datasets.lamaria import (
     SequenceRecord,
 )
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import ImuChannel, require_av1_nvenc, resolve_ffmpeg
+from dataforge.logging_toolkit import TRAIL_RADIUS_UI_POINTS, ImuChannel, require_av1_nvenc, resolve_ffmpeg
 from dataforge.world_up import MEASURED_UP_WINDOW_NS, MeasuredUp, measured_world_up
 
 REFERENCE_DIR: Path = Path(__file__).parent / "reference_data" / "lamaria"
@@ -1173,7 +1173,7 @@ def test_the_rig_transform_is_stored_child_from_parent_free(converted_easy: Conv
 
 
 def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail(converted_easy: ConvertedSequence) -> None:
-    """The overview strip is static and whole; the trail is one point per pose, for the cursor window."""
+    """The overview strip is static and whole; the trail is one segment per pose, for the cursor window."""
     store: rr.experimental.ChunkStore = read_back(converted_easy.gt)
     trajectory: str = schema.trajectory_path("gt")
     strips: list[list[list[float]]] = (
@@ -1181,13 +1181,13 @@ def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail(converted_easy: C
     )
     assert len(strips) == 1, "the whole trajectory is one strip"
     assert len(strips[0]) == GT_POSES
-    assert column_rows(store, f"{schema.trail_path('gt')}:Points3D:positions").num_rows == GT_POSES
+    assert column_rows(store, f"{schema.trail_path('gt')}:LineStrips3D:strips").num_rows == GT_POSES
     # A negative radius is Rerun's screen-space unit: a metric hairline over a
     # kilometre of walking renders as nothing in the rig overview.
     radii: list[object] = static_row(store, trajectory)[f"{trajectory}:LineStrips3D:radii"]
     assert radii == [pytest.approx(-lamaria.GT_TRAJECTORY_WIDTH_UI_POINTS)]
-    trail_radii: list[object] = static_row(store, schema.trail_path("gt"))[f"{schema.trail_path('gt')}:Points3D:radii"]
-    assert trail_radii == [pytest.approx(lamaria.GT_TRAIL_RADIUS_M)], "the trail is metric: it rides the wearer up close"
+    trail_radii: list[object] = static_row(store, schema.trail_path("gt"))[f"{schema.trail_path('gt')}:LineStrips3D:radii"]
+    assert trail_radii == [pytest.approx(-TRAIL_RADIUS_UI_POINTS)], "the trail is a screen-space stroke, like msd's"
 
 
 def test_only_the_gt_layer_states_the_world_axes(converted_easy: ConvertedSequence) -> None:

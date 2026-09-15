@@ -419,14 +419,23 @@ def log_pose_track(
     )
 
 
+TRAJECTORY_COLOR: tuple[int, int, int] = (110, 180, 255)
+"""Fixed tint of a whole ground-truth path; one trajectory is one quantity, not a per-row class."""
+TRAIL_COLOR: tuple[int, int, int] = (255, 215, 90)
+"""Fixed tint of the recent-motion trail; warm, so it reads against the cool full path."""
+TRAIL_RADIUS_UI_POINTS: float = 3.0
+"""Stroke width of a trail, in ui points: a screen-space width, so one number serves a
+headset and a vehicle alike."""
+
+
 def log_trail_segments(
     recording: rr.RecordingStream,
     entity_path: str,
     *,
     times_ns: Int64[ndarray, "n_poses"],
     translations_xyz: Float64[ndarray, "n_poses 3"],
-    color: tuple[int, int, int],
-    radius_ui_points: float,
+    color: tuple[int, int, int] = TRAIL_COLOR,
+    radius_ui_points: float = TRAIL_RADIUS_UI_POINTS,
 ) -> None:
     """Send a motion trail columnar: one two-point ``LineStrips3D`` per pose, the step that reached it.
 

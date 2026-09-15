@@ -65,6 +65,7 @@ from dataforge.archives import remove_tree
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
+    TRAJECTORY_COLOR,
     FrameKind,
     FrameSource,
     ImuChannel,
@@ -73,6 +74,7 @@ from dataforge.logging_toolkit import (
     log_imu,
     log_pose_track,
     log_rig_node,
+    log_trail_segments,
     log_video_stream,
     require_av1_nvenc,
     resolve_ffmpeg,
@@ -138,8 +140,6 @@ as unambiguous; below it the averaging window was not near rest and the warning 
 The five default sequences measure 0.92 to 1.01 g, so this leaves a visible margin
 for a wearer who is already moving at the start rather than tracking the corpus."""
 
-GT_TRAJECTORY_COLOR: tuple[int, int, int] = (110, 180, 255)
-"""Fixed tint of the whole gt path; one trajectory is one quantity, not a per-row class."""
 GT_TRAJECTORY_WIDTH_UI_POINTS: float = 1.5
 """Line width of the gt path, in **screen** points rather than metres.
 
@@ -147,12 +147,7 @@ A LaMAria walk is 170 m to 1.1 km long, so the overview view frames hundreds of
 metres at once and any honest metric width is a small fraction of a pixel there
 (0.01 m over a 400 m shot is 0.06 px, i.e. invisible). Rerun reads a negative
 radius as UI points, which keeps the overview path one visible hairline at every
-zoom. The trail below stays metric on purpose: it rides the wearer in the Follow
-view, where real centimetres are the point."""
-GT_TRAIL_COLOR: tuple[int, int, int] = (255, 215, 90)
-"""Fixed tint of the recent-motion trail; warm, so it reads against the cool full path."""
-GT_TRAIL_RADIUS_M: float = 0.02
-"""Point radius of the trail, in metres, at the pGT's 20 Hz."""
+zoom. The trail is drawn by ``log_trail_segments``, whose stroke is screen-space too."""
 
 CONTROL_POINT_COLOR: tuple[int, int, int] = (120, 255, 160)
 """Tint of a fully surveyed (levelled) control point."""
@@ -482,13 +477,13 @@ def rig_trajectory(pseudo_gt: aria.PseudoGt, *, rig_T_cam0: Float64[ndarray, "4 
 def validate_ground_truth(sequence: str, control_points: aria.ControlPointSet | None, trajectory: GtTrajectory) -> None:
     """Check the published ground truth against itself and against the walk.
 
-    Both failures a sequence's ground truth can have are caught here, before the
-    gt layer is written: a detection of a point the survey never published,
-    and a levelled point too far from where the wearer walked. Every point's tag
-    was photographed by these cameras, so that distance is the one check that
-    catches a wrong world frame or a missing origin translation, which no amount
-    of self-consistent maths would. No pose is nothing to measure against, so a
-    control-point-only sequence passes as it stands rather than being rejected.
+    A levelled point too far from where the wearer walked fails here, before the
+    gt layer is written. Every point's tag was photographed by these cameras, so
+    that distance is the one check that catches a wrong world frame or a missing
+    origin translation, which no amount of self-consistent maths would (the
+    document's own consistency is ``aria.read_control_points``' job). No pose is
+    nothing to measure against, so a control-point-only sequence passes as it
+    stands rather than being rejected.
 
     Args:
         sequence: Upstream sequence name, for the error messages.
@@ -496,15 +491,10 @@ def validate_ground_truth(sequence: str, control_points: aria.ControlPointSet | 
         trajectory: The rig's pose per published pGT stamp; may be empty.
 
     Raises:
-        ValueError: A detection names a point the survey never published, or a
-            levelled point sits further than ``CONTROL_POINT_MAX_DISTANCE_M``
+        ValueError: A levelled point sits further than ``CONTROL_POINT_MAX_DISTANCE_M``
             from the trajectory.
     """
     points: tuple[aria.ControlPoint, ...] = () if control_points is None else control_points.points
-    if control_points is not None:
-        unknown: set[str] = {detection.control_point for detection in control_points.detections} - {point.name for point in points}
-        if unknown:
-            raise ValueError(f"{sequence}: control point detection(s) name {', '.join(sorted(unknown))}, which the survey does not publish")
     if not trajectory.times_ns.size:
         return
     too_far: list[str] = []
@@ -574,7 +564,7 @@ def log_control_point_detections(
         recording: Destination recording stream.
         detections: Every detection of the sequence, sorted by stream then time.
         labels_by_name: Survey name → the label to draw, unlevelled suffix included;
-            ``validate_ground_truth`` has already proved it covers every detection.
+            ``aria.read_control_points`` has already proved it covers every detection.
     """
     for index, stream_id in enumerate(aria.CAMERA_STREAM_IDS):
         seen: list[aria.ControlPointDetection] = [detection for detection in detections if detection.stream_id == stream_id]
@@ -963,10 +953,6 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
                 if stream.stream_id == aria.SLAM_LEFT_STREAM_ID:
                     num_frames = samples
             for index, imu in enumerate(streams.imus):
-                # imu-right *is* the rig frame, so its pose is the identity by
-                # construction; log_imu's default says so exactly, without the
-                # 1e-17 residue of inverting and re-multiplying one transform.
-                reference_imu: bool = imu.stream_id == aria.IMU_RIGHT_STREAM_ID
                 log_imu(
                     recording,
                     RIG,
@@ -974,7 +960,7 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
                     gyro=imu.gyro,
                     accel=imu.accel,
                     name=aria.STREAM_LABELS[imu.stream_id],
-                    rig_T_imu=None if reference_imu else rr.Transform3D(translation=imu.rig_T_imu[:3, 3], mat3x3=imu.rig_T_imu[:3, :3]),
+                    rig_T_imu=rr.Transform3D(translation=imu.rig_T_imu[:3, 3], mat3x3=imu.rig_T_imu[:3, :3]),
                 )
             writing.send_capture_properties(
                 recording,
@@ -1060,29 +1046,23 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
                     quaternions_xyzw=trajectory.quaternions_xyzw,
                 )
                 # Two views of one trajectory: the static strip is the whole path for the
-                # overview, and the per-pose points are what the blueprint's cursor-relative
+                # overview, and the per-pose segments are what the blueprint's cursor-relative
                 # time range turns into a recent-motion trail in the Follow view.
                 rr.log(
                     schema.trajectory_path(schema.GT_RUN_SOURCE),
                     rr.LineStrips3D(
                         [trajectory.translations_xyz],
-                        colors=GT_TRAJECTORY_COLOR,
+                        colors=TRAJECTORY_COLOR,
                         radii=rr.components.Radius.ui_points(GT_TRAJECTORY_WIDTH_UI_POINTS),
                     ),
                     static=True,
                     recording=recording,
                 )
-                rr.log(
+                log_trail_segments(
+                    recording,
                     schema.trail_path(schema.GT_RUN_SOURCE),
-                    rr.Points3D.from_fields(colors=GT_TRAIL_COLOR, radii=GT_TRAIL_RADIUS_M),
-                    static=True,
-                    recording=recording,
-                )
-                rr.send_columns(
-                    schema.trail_path(schema.GT_RUN_SOURCE),
-                    indexes=[time_column(trajectory.times_ns)],
-                    columns=rr.Points3D.columns(positions=trajectory.translations_xyz),
-                    recording=recording,
+                    times_ns=trajectory.times_ns,
+                    translations_xyz=trajectory.translations_xyz,
                 )
             if points:
                 log_control_points(recording, points)
