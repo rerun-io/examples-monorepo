@@ -63,6 +63,7 @@ from simplecv.data.ego.robocap_ego import (
 from simplecv.rerun_log_utils import log_pinhole
 
 from dataforge import paths, schema, transports, writing
+from dataforge.blueprints import build_rig_blueprint
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import ImuChannel, log_imu, log_rig_node, log_video_stream
@@ -212,88 +213,10 @@ def follow_eye_controls() -> rrb.EyeControls3D:
 
 
 def build_blueprint(camera_names: list[str], *, pose_source: str = "basalt") -> rrb.Blueprint:
-    """Default layout: 3D rig + a grid of camera panes over gyro/accel plots.
-
-    Mirrors basalt's ``basalt_vio_blueprint.py`` layout, on exoego:v2 paths.
-
-    Args:
-        camera_names: Full canonical camera labels in ``cam_00..cam_NN`` order;
-            callers pass ``list(CAMERA_DISPLAY_ORDER)`` so panes stay stable.
-        pose_source: Derived run whose trajectory and trail the views display.
-
-    Returns:
-        The blueprint embedded in every RoboCap base-layer rrd.
-    """
-    camera_views: list[rrb.Spatial2DView] = [
-        rrb.Spatial2DView(name=name, origin=schema.pinhole_path(RIG, index), contents=f"{schema.pinhole_path(RIG, index)}/**")
-        for index, name in enumerate(camera_names)
-    ]
-    # TODO(dataforge): once dev1/dev2 are emitted, fan the plots out to one pane pair per IMU.
-    return rrb.Blueprint(
-        rrb.Vertical(
-            rrb.Horizontal(
-                rrb.Vertical(
-                    rrb.Spatial3DView(
-                        name="Rig",
-                        origin="/",
-                        line_grid=True,
-                        # The overview shows the whole SLAM path, while its trail stays hidden.
-                        # Overrides on entities a base-only recording lacks are simply inert.
-                        overrides={
-                            schema.trail_path(pose_source): rrb.EntityBehavior(visible=False),
-                            schema.trajectory_path(pose_source): rrb.VisibleTimeRanges(
-                                rrb.VisibleTimeRange(
-                                    "video_time", start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.cursor_relative(),
-                                )
-                            ),
-                        },
-                    ),
-                    # Follow-cam (rerun-io/eye_control_example pattern): the view's
-                    # origin IS the rig frame, so a fixed first-person eye in that
-                    # frame rides the rig. Inert until a pose layer animates rig_00.
-                    rrb.Spatial3DView(
-                        name="Follow",
-                        origin=schema.rig_path(RIG),
-                        contents="/**",
-                        line_grid=True,
-                        # The follow view hides the full path and shows only a 10 s
-                        # cursor-relative trail. The window is a viewer setting.
-                        overrides={
-                            schema.trajectory_path(pose_source): rrb.EntityBehavior(visible=False),
-                            schema.trail_path(pose_source): rrb.VisibleTimeRanges(
-                                rrb.VisibleTimeRange(
-                                    "video_time",
-                                    start=rrb.TimeRangeBoundary.cursor_relative(seconds=-10.0),
-                                    end=rrb.TimeRangeBoundary.cursor_relative(),
-                                )
-                            ),
-                        },
-                        eye_controls=follow_eye_controls(),
-                    ),
-                ),
-                rrb.Grid(*camera_views, grid_columns=2, name="Synchronized cameras"),
-                column_shares=[3, 2],
-            ),
-            rrb.Horizontal(
-                rrb.TimeSeriesView(
-                    name="Gyroscope",
-                    origin=schema.imu_path(RIG, IMU_DEVICE),
-                    contents=schema.gyro_path(RIG, IMU_DEVICE),
-                    plot_legend=rrb.PlotLegend(visible=True),
-                ),
-                rrb.TimeSeriesView(
-                    name="Accelerometer",
-                    origin=schema.imu_path(RIG, IMU_DEVICE),
-                    contents=schema.accel_path(RIG, IMU_DEVICE),
-                    plot_legend=rrb.PlotLegend(visible=True),
-                ),
-            ),
-            row_shares=[3, 1],
-        ),
-        rrb.TimePanel(timeline="video_time"),
-        collapse_panels=True,
+    """Shared rig layout with RoboCap's calibrated follow-eye orientation."""
+    return build_rig_blueprint(
+        camera_names, pose_sources=tuple(dict.fromkeys(("basalt", "slam_rs", pose_source))), follow_eye=follow_eye_controls(),
     )
-
 
 def build_table_blueprint(camera_names: list[str]) -> rrb.Blueprint:
     """Segment-table preview card: follow-framed 3D (full trajectory, all frusta,

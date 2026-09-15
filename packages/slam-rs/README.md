@@ -66,6 +66,59 @@ On macOS everything above runs from the mac lane's environment, which is where
 that platform's `slam-rs` features are solved: `-e slam-rs-osx-dev` in place of
 `-e slam-rs-dev`.
 
+## Register a SLAM layer
+
+Run a registered RoboCap, msd-index, msd-g2 or msd-odyssey segment and replace
+its single `slam_rs` layer. The output directory must be visible at the same
+absolute path to both the worker and the catalog server:
+
+```bash
+pixi install -e slam-rs-cuda
+pixi run -e slam-rs-cuda --frozen slam-rs-wgpu-build
+pixi run -e slam-rs-cuda --frozen slam-rs-catalog-layer \
+  --catalog rerun+http://dgx-spark.ilish-ruler.ts.net:9988 \
+  --segment robocap__f408193e6447b3b0__s00000059 \
+  --output-dir /mnt/nas/datasets/robocap/rrd/slam_rs
+```
+
+Defaults are `fast`, automatic GPU frontend selection, and CUDA/NVDEC decoding
+when available. `--decode-device cpu` selects the reference PyAV pixel
+conversion; `--backend cpu` selects the CPU estimator frontend. On hosts without
+CUDA, use the existing `slam-rs` or `slam-rs-osx` environment.
+
+The offline command fetches the selected cameras' compressed packets together
+once, builds their timestamp index from that result, and keeps decoders alive
+for the whole catalog segment. CUDA uses SimpleCV's TorchCodec reader, GPU
+resize and grayscale conversion, then transfers small grayscale batches to the
+Rust API. After indexing and muxing, the feed releases the packet buffers and
+retains only muxed streams. Allow several times the encoded size for transient
+Arrow, muxing and decoder buffers. The existing bounded-window feed
+remains the default for other tools and cap use.
+
+The layer animates the existing rig and adds a full trajectory, a recent trail,
+start/end markers and run metadata, following the Basalt layout. It preserves
+the base videos, sensor data and calibration. One estimator spans the session's
+file rolls. A run must finish with a finite pose for every supplied frameset
+before replacing the result. The DataForge blueprint includes both old Basalt
+and new slam-rs paths. Repeated runs replace `slam_rs`; they do not create named
+run versions. This command registers only the derived `slam_rs` data layer.
+The base recording and its blueprint must already be registered; the command
+does not ingest raw data or register/change blueprints.
+The shared layout has no RoboCap-specific eye orientation. RoboCap ingestion
+continues to supply its calibrated follow-eye settings.
+
+Layer generation does not load ground truth. When separate scoring tools need
+ground truth, the feed isolates the catalog's registered `gt` RRD in a
+temporary local catalog. This prevents estimated rig poses from entering later
+ground-truth queries through merged layers. The worker must be able to read
+that registered URI; a `file://` URI requires the input storage mounted at the
+same path. An inaccessible source fails explicitly, without using merged poses
+as ground truth. No raw dataset files are parsed or copied.
+
+NVDEC's RGB-to-gray conversion can differ from PyAV's direct YUV-to-gray
+conversion. The decoder is recorded in layer metadata; changing it is a change
+to the estimator's pixels, not only its speed.
+
 ## Two profiles
 
 Each dataset names its configuration under `configs/`. A profile is a flat

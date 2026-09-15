@@ -4,29 +4,31 @@ The feed is the Python half of the estimator's data contract: it reads a segment
 either from a catalog URL or from a local ``.rrd`` served in process, and hands
 the Rust core CPU grayscale images with integer-nanosecond timestamps.
 
-Five decisions are frozen here because each one silently changes the numbers:
+Five decisions matter here because each one can change the numbers:
 
-* **Pixels.** AV1 samples are muxed without re-encoding and decoded by
+* **Pixels.** The default CPU path muxes samples without re-encoding and decodes AV1 by
   single-threaded dav1d to ``gray8``. The MSD streams are limited-range
   ``yuv420p`` with flat chroma, so the ``gray8`` reformat (limited to full
   expansion) is what recovers the original grayscale; the raw Y plane is off by
   up to 17 LSB. dav1d also pads rows, so the decoded plane's ``line_size``
-  exceeds the frame width and the copy honours it.
-* **Round trips.** Video, IMU and ground truth for one time window arrive in one
-  query each, and long segments are cut into windows on ``video_time`` whose
+  exceeds the frame width and the copy honours it. The optional CUDA path uses
+  SimpleCV's NVDEC reader and GPU RGB-to-gray conversion; its pixel rounding differs.
+* **Round trips.** The default reads each camera, IMU and ground truth per time
+  window, and long segments are cut into windows on ``video_time`` whose
   edges land on frames that are keyframes in *every* camera, so a window decodes
   standalone. Decimated AV1 decode is a known upstream hazard: every frame is
-  decoded and ``frame_stride`` only decides which framesets are yielded.
+  decoded and ``frame_stride`` only decides which framesets are yielded. Offline
+  ``cache_video`` instead fetches all selected compressed streams once, reuses
+  those packets for the frame index, and keeps decoders alive for the segment.
 * **Rig shape.** A rig is not always four hardware-synced cameras fed at their
   stored resolution on one IMU clock. :class:`RigProfile` carries the four things
   that differ and default to what MSD is: which cameras of the rig are fed and in
   what order, the integer downscale applied to frames *and* intrinsics, whether
   the accelerometer has to be interpolated onto the gyroscope's clock, and how
   far apart two cameras' frames may be and still be one frameset.
-* **Clocks.** ``video_time`` is the IMU's clock. Frames and ground truth reach it
-  by adding ``cam_time_offset_ns``, which is what "added to a camera timestamp to
-  reach the IMU clock" means and the feed's timestamp rule
-  (``frameset_t = median(camera_t) + kCameraToImuOffsetNs``, the IMU untouched).
+* **Clocks.** DataForge stores frames, IMU and ground truth on the same
+  ``video_time`` clock. All three reach the estimator's inertial clock by adding
+  ``cam_time_offset_ns``. Query bounds must make the inverse conversion.
   MSD's offset is zero, so every MSD number is unchanged by this.
 * **Geometry.** ``Pinhole:image_from_camera`` is column-major, ``Pinhole:resolution``
   is ``(width, height)`` while the decoded array is ``(height, width)``, and the
@@ -38,12 +40,13 @@ Five decisions are frozen here because each one silently changes the numbers:
 
 import hashlib
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from io import BytesIO
 from os import PathLike
 from pathlib import Path
-from typing import TypeAlias
+from typing import Literal, TypeAlias
+from urllib.parse import ParseResult, unquote, urlparse
 
 import av
 import numpy as np
@@ -53,6 +56,7 @@ from datafusion import col, lit
 from jaxtyping import Bool, Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
+from simplecv.catalog_video import CatalogVideo, catalog_keyframes, read_catalog_videos
 from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name, wrap_mp4
 
 from slam_rs.catalog_calibration import (
@@ -106,7 +110,7 @@ class Frameset:
     """One synchronised multi-camera capture, decoded to grayscale."""
 
     t_ns: int
-    """Shared capture timestamp of every image, on the ``video_time`` clock."""
+    """Shared capture timestamp of every image, on the estimator's inertial clock."""
     images: list[UInt8[ndarray, "h w"]]
     """One C-contiguous grayscale image per camera, in rig camera order."""
     imu: ImuStream
@@ -164,8 +168,13 @@ class CatalogSegment:
     """Segment within the dataset."""
     dataset: DatasetEntry | None = None
     """Resolved dataset handle; absent until availability has been checked."""
-    has_ground_truth: bool = False
-    """Whether the resolved segment has a ground-truth layer."""
+    ground_truth_uri: str | None = None
+    """Registered ground-truth RRD, resolved from the catalog and readable by this worker."""
+
+    @property
+    def has_ground_truth(self) -> bool:
+        """Whether the resolved segment has a ground-truth layer."""
+        return self.ground_truth_uri is not None
 
 
 def resolve_catalog_segments(sources: Sequence[CatalogSegment], require_ground_truth: bool = False) -> tuple[CatalogSegment, ...]:
@@ -175,7 +184,7 @@ def resolve_catalog_segments(sources: Sequence[CatalogSegment], require_ground_t
     Ground-truth requirements are selected by the caller's scoring policy.
     """
     datasets: dict[tuple[str, str], DatasetEntry] = {}
-    layers: dict[tuple[str, str], dict[str, set[str]]] = {}
+    layers: dict[tuple[str, str], dict[str, dict[str, str]]] = {}
     resolved: list[CatalogSegment] = []
     for source in sources:
         key: tuple[str, str] = (source.url, source.dataset_name)
@@ -183,15 +192,15 @@ def resolve_catalog_segments(sources: Sequence[CatalogSegment], require_ground_t
             dataset: DatasetEntry = CatalogClient(source.url).get_dataset(source.dataset_name)
             datasets[key] = dataset
             layers[key] = {}
-            table: pa.Table = dataset.manifest().to_arrow_table().select(["rerun_segment_id", "rerun_layer_name"])
+            table: pa.Table = dataset.manifest().select("rerun_segment_id", "rerun_layer_name", "rerun_storage_url").to_arrow_table()
             for row in table.to_pylist():
-                layers[key].setdefault(row["rerun_segment_id"], set()).add(row["rerun_layer_name"])
+                layers[key].setdefault(row["rerun_segment_id"], {})[row["rerun_layer_name"]] = row["rerun_storage_url"]
         if source.segment_id not in layers[key]:
             raise ValueError(f"{source.segment_id}: absent from catalog")
         has_gt: bool = "gt" in layers[key][source.segment_id]
         if require_ground_truth and not has_gt:
             raise ValueError(f"{source.segment_id}: ground-truth layer absent")
-        resolved.append(replace(source, dataset=datasets[key], has_ground_truth=has_gt))
+        resolved.append(replace(source, dataset=datasets[key], ground_truth_uri=layers[key][source.segment_id].get("gt")))
     return tuple(resolved)
 
 
@@ -480,6 +489,10 @@ class SegmentFeed:
     """Frameset timing, the per-camera frames behind it, and the codec."""
     window_ns: int
     """Longest time window fetched in one round trip."""
+    cached_payloads: tuple[bytes, ...] | None = None
+    """Muxed streams for an offline run; packet buffers are released after indexing and muxing."""
+    decode_device: Literal["cpu", "cuda"] = "cpu"
+    """Pixel decoder; CUDA uses the shared TorchCodec reader with GPU resize."""
 
     @property
     def has_ground_truth(self) -> bool:
@@ -509,7 +522,11 @@ class SegmentFeed:
 
     def imu_between(self, first_ns: int, last_ns: int) -> ImuStream:
         """Every inertial sample with ``first_ns <= t <= last_ns``, on the inertial clock."""
-        return _read_imu(self.dataset, self.segment_id, self.profile.interpolate_accel_onto_gyro, first_ns, last_ns)
+        offset_ns: int = self.imu.cam_time_offset_ns
+        samples: ImuStream = _read_imu(
+            self.dataset, self.segment_id, self.profile.interpolate_accel_onto_gyro, first_ns - offset_ns, last_ns - offset_ns,
+        )
+        return replace(samples, t_ns=samples.t_ns + offset_ns)
 
     def ground_truth_between(self, first_ns: int, last_ns: int) -> Trajectory:
         """Ground-truth rig poses over ``[first_ns, last_ns]`` of the inertial clock.
@@ -534,12 +551,12 @@ class SegmentFeed:
     def framesets(self, stop_ns: int | None = None) -> Iterator[Frameset]:
         """Decode the segment and yield one frameset at a time.
 
-        Video, inertial samples and ground truth are all fetched one window at a
-        time, so ``window_s`` really does bound memory and startup cost — reading
-        a 586 s segment's IMU whole is 500k+ samples before the first frame comes
-        out. Window edges land on frames that are keyframes in every camera, so
-        each window decodes standalone; inside a window the cameras are decoded in
-        lockstep, so only one frame per camera is ever resident.
+        By default, video, inertial samples and ground truth are fetched one
+        window at a time, bounding memory and startup cost. Window edges land on
+        frames that are keyframes in every camera so each window decodes alone.
+        With cached video, the whole segment is one window, including its IMU
+        and ground truth. CPU decoding holds one image per camera; CUDA holds
+        a batch per camera.
 
         Each frameset carries the inertial samples since the previous one, running
         one sample past its own timestamp, and the nearest ground-truth pose.
@@ -574,7 +591,8 @@ class SegmentFeed:
         imu_period_ns: int = int(1e9 / max(self.imu.frequency_hz, 1.0))
         margin_ns: int = max(2 * frame_period_ns + 2 * imu_period_ns, 2_000_000)
         emitted_imu_t_ns: int = -(2**62)
-        for start, stop in _window_bounds(self.index, self.window_ns):
+        bounds: list[tuple[int, int]] = [(0, len(self.frame_t_ns))] if self.cached_payloads is not None else _window_bounds(self.index, self.window_ns)
+        for start, stop in bounds:
             window_first_ns: int = int(self.frame_t_ns[start])
             if stop_ns is not None and window_first_ns > stop_ns:
                 break
@@ -588,14 +606,15 @@ class SegmentFeed:
             window_gt: Trajectory = self.ground_truth_between(window_first_ns - margin_ns, window_last_ns + margin_ns)
 
             decoders: list[Iterator[UInt8[ndarray, "h w"]]] = []
-            for position in range(len(self.cameras)):
-                samples, keyframes = self._fetch_samples(position, start, stop)
-                decoders.append(decode_gray(wrap_mp4(samples, keyframes, fps=self.index.fps, codec=self.index.codec), self.profile.downscale))
-            # One frame per camera resident, and one decode cursor per camera: a
+            cursor: list[int] = []
+            for position, camera in enumerate(self.cameras):
+                window: tuple[bytes, int] = self._window_payload(position, start, stop)
+                decoders.append(self._open_decoder(window[0], camera))
+                cursor.append(window[1] - 1)
+            # One selected frame and one decode cursor per camera: a
             # camera that contributes no frame to this frameset still has its own
             # frames decoded in order, because dropping one breaks the next.
             decoded: list[UInt8[ndarray, "h w"] | None] = [None] * len(self.cameras)
-            cursor: list[int] = [int(self.index.frame_index[start, position]) - 1 for position in range(len(self.cameras))]
             for frameset_index in range(start, stop):
                 images: list[UInt8[ndarray, "h w"]] = []
                 for position, (camera, decoder) in enumerate(zip(self.cameras, decoders, strict=True)):
@@ -628,6 +647,21 @@ class SegmentFeed:
                     imu=frame_imu,
                     ground_truth=_nearest_pose(window_gt, t_ns),
                 )
+
+    def _open_decoder(self, payload: bytes, camera: CameraCalib) -> Iterator[UInt8[ndarray, "h w"]]:
+        """Keep the reference pixel conversion distinct from NVDEC."""
+        if self.decode_device == "cuda":
+            from slam_rs.cuda_decode import decode_gray_cuda
+
+            return decode_gray_cuda(payload, (camera.height, camera.width), self.profile.downscale)
+        return decode_gray(payload, self.profile.downscale)
+
+    def _window_payload(self, position: int, start: int, stop: int) -> tuple[bytes, int]:
+        """Muxed window and its first source-frame index, before frameset matching."""
+        if self.cached_payloads is not None:
+            return self.cached_payloads[position], 0
+        packets: tuple[list[UInt8[ndarray, " n_sample_bytes"]], list[bool]] = self._fetch_samples(position, start, stop)
+        return wrap_mp4(packets[0], packets[1], fps=self.index.fps, codec=self.index.codec), int(self.index.frame_index[start, position])
 
     def _fetch_samples(self, position: int, start: int, stop: int) -> tuple[list[UInt8[ndarray, " n_sample_bytes"]], list[bool]]:
         """Encoded samples and keyframe flags of one fed camera, over the framesets ``[start, stop)``.
@@ -666,8 +700,7 @@ class SegmentFeed:
         # and copies into its own, so a `tobytes()` here would be a second copy
         # of every encoded byte. The views keep `data` alive while they live.
         samples: list[UInt8[ndarray, " n_sample_bytes"]] = [data[begin:end] for begin, end in zip(offsets[:-1], offsets[1:], strict=True)]
-        # is_keyframe is logged only on keyframes, so its validity is the flag.
-        keyframes: list[bool] = table[2].combine_chunks().is_valid().to_pylist()
+        keyframes: list[bool] = catalog_keyframes(table[2])
         return samples, keyframes
 
 
@@ -742,12 +775,21 @@ def _shared_codec(per_camera: Sequence[tuple[int, CatalogCodecName]], segment_id
     return codec
 
 
-def _read_video_index(dataset: DatasetEntry, segment_id: str, camera_positions: Sequence[int], tolerance_ns: int) -> _VideoIndex:
+def _read_video_index(
+    dataset: DatasetEntry, segment_id: str, camera_positions: Sequence[int], tolerance_ns: int,
+    cached_videos: tuple[CatalogVideo, ...] | None = None,
+) -> _VideoIndex:
     """Frameset timing, per-camera frames, shared keyframes and codec, fetched without any sample bytes."""
     per_camera_times: list[Int64[ndarray, " n_frames"]] = []
     per_camera_keyframe: list[Bool[ndarray, " n_frames"]] = []
     per_camera_codec: list[tuple[int, CatalogCodecName]] = []
-    for camera_index in camera_positions:
+    for position, camera_index in enumerate(camera_positions):
+        if cached_videos is not None:
+            video: CatalogVideo = cached_videos[position]
+            per_camera_times.append(video.t_ns)
+            per_camera_keyframe.append(np.asarray(video.keyframes, dtype=bool))
+            per_camera_codec.append((camera_index, video.codec))
+            continue
         entity: str = f"{RIG_ENTITY}/cam_{camera_index:02d}/pinhole/video"
         table: pa.Table = (
             dataset.filter_segments([segment_id])
@@ -757,7 +799,7 @@ def _read_video_index(dataset: DatasetEntry, segment_id: str, camera_positions: 
             .to_arrow_table()
         )
         per_camera_times.append(np.asarray(table[TIMELINE].combine_chunks().cast(pa.int64())))
-        per_camera_keyframe.append(np.asarray(table[1].combine_chunks().is_valid().to_numpy(zero_copy_only=False), dtype=bool))
+        per_camera_keyframe.append(np.asarray(catalog_keyframes(table[1]), dtype=bool))
         per_camera_codec.append((camera_index, _video_codec(table, entity)))
     if not per_camera_codec:
         raise ValueError(f"{segment_id}: no camera was selected, so no video columns were read")
@@ -810,11 +852,7 @@ def _nearest_pose(trajectory: Trajectory, t_ns: int, tolerance_ns: int = ASSOCIA
 
 
 def _read_imu(dataset: DatasetEntry, segment_id: str, interpolate_accel: bool, first_ns: int, last_ns: int) -> ImuStream:
-    """Gyroscope and accelerometer over one time window, on the gyroscope's clock.
-
-    ``video_time`` **is** the inertial clock, so nothing is shifted here; the
-    frames come to it (:attr:`SegmentFeed.frame_t_ns`).
-    """
+    """Gyroscope and accelerometer over one window on the catalog's ``video_time`` clock."""
     table: pa.Table = (
         dataset.filter_segments([segment_id])
         .filter_contents([f"{IMU_ENTITY}/gyro", f"{IMU_ENTITY}/accel"])
@@ -960,6 +998,8 @@ def _build_feed(
     profile: RigProfile,
     frame_stride: int,
     window_s: float,
+    cache_video: bool = False,
+    decode_device: Literal["cpu", "cuda"] = "cpu",
 ) -> SegmentFeed:
     """Read calibration, IMU, ground truth and frameset timing for one segment."""
     if frame_stride < 1:
@@ -977,7 +1017,16 @@ def _build_feed(
         .to_arrow_table()
     )
     camera_positions: tuple[int, ...] = select_cameras(camera_statics, camera_count, profile.camera_names)
-    index: _VideoIndex = _read_video_index(sensor_dataset, segment_id, camera_positions, profile.frameset_tolerance_ns)
+    cached_videos: tuple[CatalogVideo, ...] | None = (
+        read_catalog_videos(sensor_dataset, segment_id, [f"{rig_entities[position]}/pinhole/video" for position in camera_positions], TIMELINE)
+        if cache_video else None
+    )
+    index: _VideoIndex = _read_video_index(sensor_dataset, segment_id, camera_positions, profile.frameset_tolerance_ns, cached_videos)
+    cached_payloads: tuple[bytes, ...] | None = (
+        tuple(wrap_mp4(video.samples, video.keyframes, fps=index.fps, codec=video.codec) for video in cached_videos)
+        if cached_videos is not None else None
+    )
+    del cached_videos
     cameras: tuple[CameraCalib, ...] = tuple(
         camera_calib(number, read_camera_statics(camera_statics, rig_entities[position]), profile.downscale)
         for number, position in enumerate(camera_positions)
@@ -1004,6 +1053,8 @@ def _build_feed(
         gt_dataset=gt_dataset,
         index=index,
         window_ns=int(window_s * 1e9),
+        cached_payloads=cached_payloads,
+        decode_device=decode_device,
     )
 
 
@@ -1014,6 +1065,10 @@ def open_segment(
     profile: RigProfile = MSD_RIG,
     frame_stride: int = 1,
     window_s: float = DEFAULT_WINDOW_S,
+    *,
+    cache_video: bool = False,
+    decode_device: Literal["cpu", "cuda"] = "cpu",
+    include_ground_truth: bool = True,
 ) -> Iterator[SegmentFeed]:
     """Open one segment for reading, from local ``.rrd`` files or from a catalog server.
 
@@ -1028,6 +1083,9 @@ def open_segment(
         profile: How this rig has to be read; the default is what MSD is.
         frame_stride: Yield every n-th frameset; every frame is still decoded.
         window_s: Longest time window fetched in one round trip.
+        cache_video: Fetch compressed streams together once; RAM use scales with encoded segment size.
+        decode_device: CPU PyAV or CUDA TorchCodec; CUDA requires the slam-rs-cuda environment.
+        include_ground_truth: Read isolated GT for scoring; False reads only the estimator's inputs.
 
     Yields:
         The open feed.
@@ -1037,20 +1095,34 @@ def open_segment(
     """
     if isinstance(source, LocalSegment):
         datasets: dict[str, str | PathLike[str] | Sequence[str | PathLike[str]]] = {"base": [str(source.base_rrd)]}
-        if source.gt_rrd is not None:
+        if include_ground_truth and source.gt_rrd is not None:
             datasets["gt"] = [str(source.gt_rrd)]
         with rr.server.Server(datasets=datasets) as server:
             client: CatalogClient = server.client()
             base: DatasetEntry = client.get_dataset("base")
-            ground_truth: DatasetEntry | None = client.get_dataset("gt") if source.gt_rrd is not None else None
+            ground_truth: DatasetEntry | None = client.get_dataset("gt") if "gt" in datasets else None
             segment_ids: list[str] = list(base.segment_ids())
             if len(segment_ids) != 1:
                 raise ValueError(f"{source.base_rrd} holds {len(segment_ids)} segments; the feed reads one")
-            yield _build_feed(base, ground_truth, segment_ids[0], parameters, profile, frame_stride, window_s)
+            yield _build_feed(base, ground_truth, segment_ids[0], parameters, profile, frame_stride, window_s, cache_video, decode_device)
     else:
         resolved: CatalogSegment = source if source.dataset is not None else resolve_catalog_segments((source,))[0]
         assert resolved.dataset is not None
-        yield _build_feed(
-            resolved.dataset, resolved.dataset if resolved.has_ground_truth else None,
-            resolved.segment_id, parameters, profile, frame_stride, window_s,
-        )
+        with ExitStack() as stack:
+            ground_truth: DatasetEntry | None = None
+            if include_ground_truth and resolved.ground_truth_uri is not None:
+                uri: ParseResult = urlparse(resolved.ground_truth_uri)
+                if uri.scheme == "file" and (uri.netloc not in ("", "localhost") or not Path(unquote(uri.path)).is_file()):
+                    raise ValueError(
+                        f"{resolved.segment_id}: registered ground truth {resolved.ground_truth_uri} is not accessible on this worker; "
+                        "mount the catalog's input storage at the same path to isolate ground truth from estimated poses"
+                    )
+                # The public catalog API merges layers. A GT-only local catalog
+                # keeps estimates on the animated rig out of every scoring read.
+                gt_server: rr.server.Server = stack.enter_context(rr.server.Server())
+                ground_truth = gt_server.client().create_dataset("gt")
+                ground_truth.register([resolved.ground_truth_uri]).wait()
+            yield _build_feed(
+                resolved.dataset, ground_truth,
+                resolved.segment_id, parameters, profile, frame_stride, window_s, cache_video, decode_device,
+            )

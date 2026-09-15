@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import pytest
+from datafusion import SessionContext
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
@@ -452,15 +453,18 @@ def test_catalog_resolution_batches_segments_by_dataset(monkeypatch: pytest.Monk
     client: MagicMock = MagicMock()
     client.get_dataset.return_value = MagicMock(spec=DatasetEntry)
     dataset: MagicMock = client.get_dataset.return_value
-    dataset.manifest.return_value.to_arrow_table.return_value = pa.table(
-        {"rerun_segment_id": ["first", "first", "second", "second"], "rerun_layer_name": ["base", "gt", "base", "gt"]}
-    )
+    dataset.manifest.return_value = SessionContext().from_arrow(pa.table({
+        "rerun_segment_id": ["first", "first", "second", "second"],
+        "rerun_layer_name": ["base", "gt", "base", "gt"],
+        "rerun_storage_url": ["file:///first.rrd", "file:///first-gt.rrd", "file:///second.rrd", "file:///second-gt.rrd"],
+    }))
     monkeypatch.setattr(catalog_feed, "CatalogClient", lambda _url: client)
     resolved: tuple[CatalogSegment, ...] = resolve_catalog_segments(
         (CatalogSegment("test", "dataset", "first"), CatalogSegment("test", "dataset", "second")), require_ground_truth=require_truth
     )
     assert [source.segment_id for source in resolved] == ["first", "second"]
     assert all(source.dataset is dataset and source.has_ground_truth for source in resolved)
+    assert [source.ground_truth_uri for source in resolved] == ["file:///first-gt.rrd", "file:///second-gt.rrd"]
     client.get_dataset.assert_called_once_with("dataset")
     dataset.manifest.assert_called_once_with()
 
@@ -474,9 +478,9 @@ def test_catalog_resolution_refuses_missing_inputs(monkeypatch: pytest.MonkeyPat
 
     client: MagicMock = MagicMock()
     client.get_dataset.return_value = MagicMock(spec=DatasetEntry)
-    client.get_dataset.return_value.manifest.return_value.to_arrow_table.return_value = pa.table(
-        {"rerun_segment_id": ["present"], "rerun_layer_name": ["base"]}
-    )
+    client.get_dataset.return_value.manifest.return_value = SessionContext().from_arrow(pa.table(
+        {"rerun_segment_id": ["present"], "rerun_layer_name": ["base"], "rerun_storage_url": ["file:///present.rrd"]}
+    ))
     monkeypatch.setattr(catalog_feed, "CatalogClient", lambda _url: client)
     with pytest.raises(ValueError, match=error):
         resolve_catalog_segments((CatalogSegment("test", "dataset", segment),), require_ground_truth=require_truth)

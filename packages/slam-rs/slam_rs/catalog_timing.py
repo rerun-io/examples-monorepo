@@ -25,8 +25,14 @@ class ImuStream:
 
     def between(self, first_ns: int, last_ns: int) -> "ImuStream":
         """The samples with ``first_ns < t <= last_ns``, half-open at the start."""
-        keep: Bool[ndarray, " n_samples"] = (self.t_ns > first_ns) & (self.t_ns <= last_ns)
-        return ImuStream(t_ns=self.t_ns[keep], gyro_rad_s=self.gyro_rad_s[keep], accel_m_s2=self.accel_m_s2[keep])
+        start: int = int(np.searchsorted(self.t_ns, first_ns, side="right"))
+        stop: int = int(np.searchsorted(self.t_ns, last_ns, side="right"))
+        # Own the small result so queued frames do not retain a whole segment.
+        return ImuStream(
+            t_ns=self.t_ns[start:stop].copy(),
+            gyro_rad_s=self.gyro_rad_s[start:stop].copy(),
+            accel_m_s2=self.accel_m_s2[start:stop].copy(),
+        )
 
 
 def _frame_nearest_anchor(times: Int64[ndarray, " n_frames"], cursor: int, anchor_t_ns: int, tolerance_ns: int) -> tuple[int | None, int]:
@@ -184,5 +190,4 @@ def pair_accel_onto_gyro(
         [np.interp(paired_t_ns, accel_t_ns, accel_m_s2[:, axis]) for axis in range(accel_m_s2.shape[1])]
     )
     return ImuStream(t_ns=paired_t_ns, gyro_rad_s=gyro_rad_s[inside], accel_m_s2=interpolated)
-
 

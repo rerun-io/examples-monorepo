@@ -26,7 +26,7 @@ def test_measure_rejects_mismatched_source_before_replay(
         "stub://catalog",
         "other-dataset" if wrong_dataset else segment.dataset_name,
         segment.segment_id if wrong_dataset else "other-segment",
-        has_ground_truth=True,
+        ground_truth_uri="file:///test-gt.rrd",
     )
     monkeypatch.setattr(fleet_check, "run_segment", lambda *_args, **_kwargs: pytest.fail("replayed mismatched source"))
     with pytest.raises(ValueError, match=f"source {source.dataset_name}/{source.segment_id}.*segment {segment.dataset_name}/{segment.segment_id}"):
@@ -47,7 +47,7 @@ def test_scoring_uses_ground_truth_and_rejects_wrong_clock(
     run: SegmentRun = SegmentRun(
         estimate=shift_clock(truth, clock_offset), framesets=30, lost=0, wall_s=1.0, config_sha256="a" * 64, ground_truth=truth, median_tracker_ms=2.0
     )
-    monkeypatch.setattr(fleet_check, "resolve_catalog_segments", lambda sources, **_kwargs: tuple(replace(source, has_ground_truth=True) for source in sources))
+    monkeypatch.setattr(fleet_check, "resolve_catalog_segments", lambda sources, **_kwargs: tuple(replace(source, ground_truth_uri="file:///test-gt.rrd") for source in sources))
     monkeypatch.setattr(fleet_check, "run_segment", lambda *_args, **_kwargs: run)
     reference: Baseline = manifest.segments[0].baseline[0]
     host_baseline: Baseline = replace(reference, lane="cpu", profile="fast", host=this_machine().hostname, gt_rmse_cm=3.0)
@@ -92,7 +92,7 @@ def test_nonfinite_scoring_keeps_costs_and_reports_refusal(
     bad: Trajectory = replace(finite, position_m=finite.position_m.copy())
     bad.position_m[3, 1] = np.nan
     run: SegmentRun = SegmentRun(finite if bad_reference else bad, 20, 0, 2.0, bad if bad_reference else finite, 4.0, "a" * 64)
-    monkeypatch.setattr(fleet_check, "resolve_catalog_segments", lambda sources, **_kwargs: tuple(replace(source, has_ground_truth=True) for source in sources))
+    monkeypatch.setattr(fleet_check, "resolve_catalog_segments", lambda sources, **_kwargs: tuple(replace(source, ground_truth_uri="file:///test-gt.rrd") for source in sources))
     monkeypatch.setattr(fleet_check, "run_segment", lambda *_args, **_kwargs: run)
     result: ClipResult = measure(manifest, manifest.segments[0])
     assert result.wall_s == 2.0

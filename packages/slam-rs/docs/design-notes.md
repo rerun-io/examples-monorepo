@@ -688,8 +688,14 @@ The catalog indexes a segment on `video_time`, which is **relative** to
 `capture.start_time_ns`, while exported trajectory CSV is
 on the **absolute** device clock; on the Index smoke segment the two differ by
 10,433,867,587,166 ns, so a trajectory exported on the wrong clock associates with
-nothing at all. The feed works in `video_time` throughout and
-`trajectory.shift_clock` converts once, at the CSV boundary.
+nothing at all. For MSD, the feed works in `video_time` and `trajectory.shift_clock` adds the
+capture epoch at the CSV boundary. RoboCap's `video_time` is already an absolute
+boot-relative camera clock. DataForge subtracts the camera-to-IMU offset when
+logging IMU samples, so cameras, IMU and ground truth all share that axis.
+The feed adds the offset to **all three** to reach the estimator's inertial
+clock, subtracting it from query bounds first. Adding it only to camera frames
+introduced a 14.902432 ms relative error. A catalog pose layer subtracts both
+the export epoch and camera offset to return to base `video_time`.
 
 ## The feed, the metrics and the replay tool
 

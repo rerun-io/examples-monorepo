@@ -2409,11 +2409,27 @@ python = "3.12.*"
 # pure-Rust crate needs nothing else. Same pin as gsplat-rust-renderer.
 rust = "1.97.*"
 tyro = ">=0.9.1,<0.10"
-# CPU torch only satisfies simplecv's module-load import.
-pytorch-cpu = ">=2.8.0"
-
 [feature.slam-rs.pypi-dependencies]
 slam-rs = { path = "packages/slam-rs", editable = true }
+dataforge = { path = "packages/dataforge", editable = true }
+
+[feature.slam-rs.tasks.slam-rs-catalog-layer]
+cmd = "python tools/apps/catalog_layer.py"
+cwd = "packages/slam-rs"
+description = "Run catalog VIO and replace its slam_rs pose layer (fast profile, GPU when available)"
+
+[feature.slam-rs-cpu]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
+
+[feature.slam-rs-cpu.dependencies]
+# SimpleCV's import needs torch even when the decoder is PyAV.
+pytorch-cpu = ">=2.8.0"
+
+[feature.slam-rs-nvdec]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.slam-rs-nvdec.dependencies]
+torchcodec = ">=0.14,<0.15"
 
 [feature.slam-rs.activation.env]
 PACKAGE_DIR = "packages/slam-rs"
@@ -3442,6 +3458,7 @@ slam-rs = { features = [
     "catalog-common",
     "rerun-prerelease",
     "slam-rs",
+    "slam-rs-cpu",
 ], solve-group = "slam-rs", no-default-feature = true }
 robocap-recorder = { features = ["robocap-recorder"], no-default-feature = true }
 robocap-cross = { features = ["robocap-cross"], no-default-feature = true }
@@ -3449,17 +3466,22 @@ slam-rs-dev = { features = [
     "catalog-common",
     "rerun-prerelease",
     "slam-rs",
+    "slam-rs-cpu",
     "dev",
 ], solve-group = "slam-rs", no-default-feature = true }
 slam-rs-osx = { features = [
     "slam-rs",
+    "slam-rs-cpu",
     "slam-rs-osx",
 ], solve-group = "slam-rs-osx", no-default-feature = true }
 slam-rs-osx-dev = { features = [
     "slam-rs",
+    "slam-rs-cpu",
     "slam-rs-osx",
     "dev",
 ], solve-group = "slam-rs-osx", no-default-feature = true }
+slam-rs-cuda = { features = ["catalog-common", "rerun-prerelease", "cuda", "slam-rs", "slam-rs-nvdec"], solve-group = "slam-rs-cuda", no-default-feature = true }
+slam-rs-cuda-dev = { features = ["catalog-common", "rerun-prerelease", "cuda", "slam-rs", "slam-rs-nvdec", "dev"], solve-group = "slam-rs-cuda", no-default-feature = true }
 mamma = { features = [
     "common",
     "cuda",
