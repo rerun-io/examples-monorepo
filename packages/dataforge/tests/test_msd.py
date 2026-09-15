@@ -35,10 +35,9 @@ from dataforge.datasets.msd import (
     MsdDeviceChoice,
     MsdSource,
     build_blueprint,
-    follow_eye,
 )
-from dataforge.datasets.msd_layers import WORLD_UP_VIEW_COORDINATES
 from dataforge.identity import SequenceIdentity
+from dataforge.world_up import WORLD_UP_VIEW_COORDINATES
 
 
 def test_every_device_is_one_catalog_dataset_named_after_it() -> None:
@@ -116,7 +115,7 @@ def test_the_follow_eye_chases_the_headset_from_behind_and_above() -> None:
     The Index's frame goes in, so the numbers are readable by hand: 0.9 m back
     along +z and 0.45 m up along -x is (-0.45, 0, -0.9), looking at 0.3 m ahead.
     """
-    eye: rrb.EyeControls3D = follow_eye(FollowFrame(forward=(0.0, 0.0, 1.0), up=(-1.0, 0.0, 0.0)))
+    eye: rrb.EyeControls3D = blueprints.follow_eye_controls((0.0, 0.0, 1.0), (-1.0, 0.0, 0.0))
 
     assert eye_vector(eye.position) == pytest.approx([-0.45, 0.0, -0.9], abs=1e-6)
     assert eye_vector(eye.look_target) == pytest.approx([0.0, 0.0, 0.3], abs=1e-6)

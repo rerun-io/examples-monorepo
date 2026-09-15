@@ -36,6 +36,16 @@ RIG_COLUMN_SHARES: tuple[int, int] = (3, 2)
 """Width split between the 3D column and the camera grid."""
 PLOT_ROW_SHARES: tuple[int, int] = (3, 1)
 """Height split between the views and the sensor plots."""
+FOLLOW_BACK_M: float = 0.9
+"""How far behind the device the follow eye sits, along the device's own forward."""
+FOLLOW_UP_M: float = 0.45
+"""How far above the device the follow eye sits, along the device's own up."""
+FOLLOW_AHEAD_M: float = 0.3
+"""How far ahead of the device the follow eye aims, so the shot leads the motion.
+
+The three distances were tuned together on LaMAria's R_01_easy and hold for the MSD
+headsets as they stand: a shot that keeps the camera frusta and the last ten seconds
+of trail in view at once without the ground filling it."""
 
 
 def camera_view(name: str, rig: int, cam: int) -> rrb.Spatial2DView:
@@ -105,9 +115,9 @@ def follow_eye_controls(
     forward: tuple[float, float, float],
     up: tuple[float, float, float],
     *,
-    back_m: float,
-    up_m: float,
-    ahead_m: float,
+    back_m: float = FOLLOW_BACK_M,
+    up_m: float = FOLLOW_UP_M,
+    ahead_m: float = FOLLOW_AHEAD_M,
 ) -> rrb.EyeControls3D:
     """A chase camera derived from the device's own forward and up.
 

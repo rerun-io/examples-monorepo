@@ -23,9 +23,8 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import Bool, Float64, Int64
+from jaxtyping import Float64, Int64
 from numpy import ndarray
-from scipy.spatial.transform import Rotation
 
 from dataforge import schema, writing
 from dataforge.archives import MemberReader
@@ -55,6 +54,7 @@ from dataforge.logging_toolkit import (
     log_video_stream,
 )
 from dataforge.video_encoding import FrameSource, encode_frames_to_mp4
+from dataforge.world_up import WORLD_UP_VIEW_COORDINATES, MeasuredUp, WorldUpAxis, measured_world_up
 
 RIG: int = 0
 """MSD is one headset; the whole device is ``rig_00``."""
@@ -83,32 +83,6 @@ MsdDeviceChoice: TypeAlias = Literal["index", "g2", "odyssey"]
 """``--device``: which headset's corpus to work on, and which catalog dataset."""
 GtSource: TypeAlias = Literal["lighthouse", "mocap"]
 """What produced a device's ground truth: SteamVR Lighthouse, or a MoCap system."""
-WorldUpAxis: TypeAlias = Literal["+x", "-x", "+y", "-y", "+z", "-z"]
-"""Signed axis of a tracking world that gravity points *away* from."""
-POSITIVE_WORLD_AXES: tuple[WorldUpAxis, WorldUpAxis, WorldUpAxis] = ("+x", "+y", "+z")
-"""Axis names by column index, for a positive mean; the negative row is below."""
-NEGATIVE_WORLD_AXES: tuple[WorldUpAxis, WorldUpAxis, WorldUpAxis] = ("-x", "-y", "-z")
-"""Axis names by column index, for a negative mean."""
-STANDARD_GRAVITY_MS2: float = 9.80665
-"""Standard gravity; ``measured_world_up`` reports its result as a fraction of this."""
-MEASURED_UP_WINDOW_NS: int = 2_000_000_000
-"""How much of a sequence's start ``measured_world_up`` averages over."""
-
-WORLD_UP_VIEW_COORDINATES: dict[WorldUpAxis, rr.components.ViewCoordinates] = {
-    "+x": rr.ViewCoordinates.RIGHT_HAND_X_UP,
-    "-x": rr.ViewCoordinates.RIGHT_HAND_X_DOWN,
-    "+y": rr.ViewCoordinates.RIGHT_HAND_Y_UP,
-    "-y": rr.ViewCoordinates.RIGHT_HAND_Y_DOWN,
-    "+z": rr.ViewCoordinates.RIGHT_HAND_Z_UP,
-    "-z": rr.ViewCoordinates.RIGHT_HAND_Z_DOWN,
-}
-"""Root ``ViewCoordinates`` per world up axis, right-handed throughout.
-
-Rerun's ``RIGHT_HAND_*`` aliases are exactly this table (``RIGHT_HAND_Y_UP`` is
-``RUB``, ``RIGHT_HAND_Z_UP`` is ``RFU``), so naming the up axis is the whole
-decision — the remaining two axes are then fixed by handedness. MSD's csvs say
-nothing about world axes at all; see ``MSD_DEVICES`` for how each device's is fixed.
-"""
 GT_TRAJECTORY_COLOR: tuple[int, int, int] = (110, 180, 255)
 """Fixed tint of the whole gt path; one trajectory is one quantity, not a per-row class."""
 GT_TRAJECTORY_RADIUS_M: float = 0.002
@@ -149,62 +123,6 @@ class MsdDevice:
     camera. Derived from the device's calibration — see ``MSD_DEVICES``."""
     gt_source: GtSource
     """What produced ``gt/data.csv``; goes into the gt layer's properties."""
-
-
-@dataclass(frozen=True, slots=True)
-class MeasuredUp:
-    """What one sequence's own gravity measurement found; the gt layer records both."""
-
-    axis: WorldUpAxis
-    """The dominant signed world axis the mean acceleration points along."""
-    fraction: float
-    """That component as a fraction of standard gravity; near 1 is a clean measurement."""
-
-
-def measured_world_up(gt: GtTrajectory, accel: ImuChannel, *, window_ns: int = MEASURED_UP_WINDOW_NS) -> MeasuredUp:
-    """Measure which world axis is up, from gravity as the accelerometer sees it.
-
-    An accelerometer at rest measures the *reaction* to gravity, so its reading
-    points **up**; rotating each sample into the world with the ground truth's
-    own orientation (``world_R_rig @ a_rig``) and averaging therefore yields a
-    vector along the world's up axis. Only the first couple of seconds are used:
-    a headset is typically still on the floor or on a head that has not started
-    moving, so the mean is nearly pure gravity there and gets noisier the longer
-    the window. Why this is measured at all, and what the three devices answer,
-    is on ``MSD_DEVICES``.
-
-    Args:
-        gt: The sequence's ground truth, already in xyzw order and sanitized.
-        accel: Accelerometer samples in m/s^2, on the same clock as ``gt``.
-        window_ns: Length of the averaging window, from the first sample both
-            streams cover.
-
-    Returns:
-        The axis and how much of gravity it carried — a health check, not a
-        calibration: a much smaller fraction means the mean is not gravity.
-
-    Raises:
-        ValueError: Either stream is empty, or they do not overlap inside the window.
-    """
-    if gt.times_ns.size == 0 or accel.times_ns.size == 0:
-        raise ValueError("measuring the world up axis needs both a gt pose and an accelerometer sample")
-    start_ns: int = max(int(gt.times_ns[0]), int(accel.times_ns[0]))
-    inside: Bool[ndarray, "n_samples"] = (accel.times_ns >= start_ns) & (accel.times_ns < start_ns + window_ns)
-    if not inside.any():
-        raise ValueError(f"no accelerometer sample within {window_ns / 1e9:g} s of {start_ns}, where the gt starts")
-
-    window_times_ns: Int64[ndarray, "n_window"] = accel.times_ns[inside]
-    after: Int64[ndarray, "n_window"] = np.clip(np.searchsorted(gt.times_ns, window_times_ns), 0, gt.times_ns.size - 1)
-    before: Int64[ndarray, "n_window"] = np.clip(after - 1, 0, gt.times_ns.size - 1)
-    nearest: Int64[ndarray, "n_window"] = np.where(
-        np.abs(gt.times_ns[before] - window_times_ns) <= np.abs(gt.times_ns[after] - window_times_ns), before, after
-    )
-    world_accel_xyz: Float64[ndarray, "n_window 3"] = Rotation.from_quat(gt.quaternions_xyzw[nearest]).apply(accel.values_xyz[inside])
-    mean_xyz: Float64[ndarray, "3"] = world_accel_xyz.mean(axis=0)
-
-    axis_index: int = int(np.argmax(np.abs(mean_xyz)))
-    names: tuple[WorldUpAxis, WorldUpAxis, WorldUpAxis] = POSITIVE_WORLD_AXES if mean_xyz[axis_index] >= 0.0 else NEGATIVE_WORLD_AXES
-    return MeasuredUp(axis=names[axis_index], fraction=float(abs(mean_xyz[axis_index]) / STANDARD_GRAVITY_MS2))
 
 
 @dataclass(frozen=True, slots=True)
@@ -568,7 +486,7 @@ def write_gt_layer(
     raw: TimestampedSamples = read_numeric_csv(sidecar.read_bytes(), num_values=GT_VALUE_COLUMNS)
     published: BaseClock = read_base_clock(base_rrd)
     gt: GtTrajectory = gt_trajectory(replace(raw, times_ns=raw.times_ns - published.start_time_ns))
-    measured: MeasuredUp = measured_world_up(gt, published.accel)
+    measured: MeasuredUp = measured_world_up(gt.times_ns, gt.quaternions_xyzw, published.accel)
     with writing.recording_to(staged_gt, recording_id=identity.recording_id, send_properties=False) as recording:
         # The gt layer establishes a world frame at all, so it — not the base
         # layer — owns the root ViewCoordinates. The axis is the device's

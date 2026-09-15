@@ -37,13 +37,10 @@ from dataforge.basalt import BasaltPose, CalibratedCamera, load_calibration, rot
 from dataforge.datasets.msd import MSD_DEVICES, MsdDataset, MsdDeviceChoice
 from dataforge.datasets.msd_layers import (
     GT_TRAIL_RADIUS_UI_POINTS,
-    MEASURED_UP_WINDOW_NS,
-    WORLD_UP_VIEW_COORDINATES,
-    MeasuredUp,
-    measured_world_up,
 )
 from dataforge.euroc import GtTrajectory, TimestampedSamples, gt_trajectory
 from dataforge.logging_toolkit import ImuChannel
+from dataforge.world_up import MEASURED_UP_WINDOW_NS, WORLD_UP_VIEW_COORDINATES, MeasuredUp, measured_world_up
 
 VIEWER_AXIS_VECTORS: dict[int, tuple[float, float, float]] = {
     rr.encodings.ViewDir.Right.value: (1.0, 0.0, 0.0),
@@ -90,7 +87,7 @@ def test_the_world_up_axis_is_measured_by_rotating_the_accelerometer_into_the_wo
     rig_accel_xyz[times_ns >= MEASURED_UP_WINDOW_NS] = [0.1, -0.2, -9.81]
     gt: GtTrajectory = gt_trajectory(constant_pose_gt(times_ns, np.asarray(world_R_rig.as_quat(), dtype=np.float64)))
 
-    measured: MeasuredUp = measured_world_up(gt, ImuChannel(times_ns=times_ns, values_xyz=rig_accel_xyz))
+    measured: MeasuredUp = measured_world_up(gt.times_ns, gt.quaternions_xyzw, ImuChannel(times_ns=times_ns, values_xyz=rig_accel_xyz))
 
     assert measured.axis == "+y"
     # At rest the whole of gravity lands on that one axis.

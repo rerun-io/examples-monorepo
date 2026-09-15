@@ -28,7 +28,7 @@ from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion
 
-from dataforge import aria, paths, schema
+from dataforge import aria, blueprints, paths, schema
 from dataforge.datasets import dataset_defaults, lamaria
 from dataforge.datasets.lamaria import (
     DEFAULT_SEQUENCES,
@@ -40,6 +40,7 @@ from dataforge.datasets.lamaria import (
 )
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import ImuChannel, require_av1_nvenc, resolve_ffmpeg
+from dataforge.world_up import MEASURED_UP_WINDOW_NS, MeasuredUp, measured_world_up
 
 REFERENCE_DIR: Path = Path(__file__).parent / "reference_data" / "lamaria"
 """Verbatim excerpts of published LaMAria files, shared with ``test_aria.py``."""
@@ -384,11 +385,11 @@ def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
 
 
 def test_the_follow_eye_chases_the_wearer_from_behind_and_above() -> None:
-    eye: rrb.EyeControls3D = lamaria.follow_eye()
+    eye: rrb.EyeControls3D = blueprints.follow_eye_controls(lamaria.FOLLOW_FORWARD, lamaria.FOLLOW_UP)
     forward: Float64[ndarray, "3"] = np.array(lamaria.FOLLOW_FORWARD, dtype=np.float64)
     up: Float64[ndarray, "3"] = np.array(lamaria.FOLLOW_UP, dtype=np.float64)
 
-    assert eye_vector(eye.look_target) == pytest.approx((lamaria.FOLLOW_AHEAD_M * forward).tolist(), abs=1e-6)
+    assert eye_vector(eye.look_target) == pytest.approx((blueprints.FOLLOW_AHEAD_M * forward).tolist(), abs=1e-6)
     assert eye_vector(eye.eye_up) == pytest.approx(list(lamaria.FOLLOW_UP), abs=1e-6)
     position: list[float] = eye_vector(eye.position)
     assert float(np.dot(position, forward)) < 0.0, "the eye leans against forward"
@@ -1070,12 +1071,13 @@ def test_the_world_up_axis_is_measured_by_rotating_the_accelerometer_into_the_wo
     times_ns: Int64[ndarray, "n_samples"] = DEVICE_T0_NS + np.arange(4_000, dtype=np.int64) * IMU_PERIOD_NS
     accel: ImuChannel = resting_accel(times_ns, np.array([0.1, -0.2, 9.81]))
     # The second half of the capture points the other way; the 2 s window must ignore it.
-    accel.values_xyz[times_ns >= DEVICE_T0_NS + lamaria.MEASURED_UP_WINDOW_NS] = [0.1, -0.2, -9.81]
+    accel.values_xyz[times_ns >= DEVICE_T0_NS + MEASURED_UP_WINDOW_NS] = [0.1, -0.2, -9.81]
 
-    measured: lamaria.WorldUp = lamaria.measured_world_up(constant_rotation_trajectory(times_ns, Rotation.identity()), accel)
+    level: lamaria.GtTrajectory = constant_rotation_trajectory(times_ns, Rotation.identity())
+    measured: MeasuredUp = measured_world_up(level.times_ns, level.quaternions_xyzw, accel)
 
     assert measured.axis == "+z"
-    assert measured.fraction_of_g == pytest.approx(1.0, abs=0.01)
+    assert measured.fraction == pytest.approx(1.0, abs=0.01)
 
 
 def test_a_rig_lying_on_its_side_measures_the_axis_its_own_gravity_points_along() -> None:
@@ -1083,31 +1085,30 @@ def test_a_rig_lying_on_its_side_measures_the_axis_its_own_gravity_points_along(
     times_ns: Int64[ndarray, "n_samples"] = DEVICE_T0_NS + np.arange(1_000, dtype=np.int64) * IMU_PERIOD_NS
     world_R_rig: Rotation = Rotation.from_euler("x", 90.0, degrees=True)
 
-    measured: lamaria.WorldUp = lamaria.measured_world_up(
-        constant_rotation_trajectory(times_ns, world_R_rig), resting_accel(times_ns, np.array([0.0, 0.0, 9.80665]))
+    on_side: lamaria.GtTrajectory = constant_rotation_trajectory(times_ns, world_R_rig)
+    measured: MeasuredUp = measured_world_up(
+        on_side.times_ns, on_side.quaternions_xyzw, resting_accel(times_ns, np.array([0.0, 0.0, 9.80665]))
     )
 
     assert measured.axis == "-y"
-    assert measured.fraction_of_g == pytest.approx(1.0, abs=1e-6)
+    assert measured.fraction == pytest.approx(1.0, abs=1e-6)
 
 
 def test_measuring_the_world_up_axis_needs_both_a_pose_and_a_sample() -> None:
     empty_times: Int64[ndarray, "n_samples"] = np.zeros(0, dtype=np.int64)
     times_ns: Int64[ndarray, "n_samples"] = DEVICE_T0_NS + np.arange(10, dtype=np.int64) * IMU_PERIOD_NS
+    level: lamaria.GtTrajectory = constant_rotation_trajectory(times_ns, Rotation.identity())
     with pytest.raises(ValueError, match="both a gt pose and an accelerometer sample"):
-        lamaria.measured_world_up(
-            constant_rotation_trajectory(times_ns, Rotation.identity()), resting_accel(empty_times, np.array([0.0, 0.0, 9.8]))
-        )
+        measured_world_up(level.times_ns, level.quaternions_xyzw, resting_accel(empty_times, np.array([0.0, 0.0, 9.8])))
 
 
 def test_an_accelerometer_that_stops_before_the_ground_truth_starts_is_an_error() -> None:
     """The window opens where both streams are live, so an IMU that quit first leaves it empty."""
     times_ns: Int64[ndarray, "n_poses"] = DEVICE_T0_NS + np.arange(10, dtype=np.int64) * IMU_PERIOD_NS
     far_earlier: Int64[ndarray, "n_samples"] = times_ns - 60_000_000_000
+    level: lamaria.GtTrajectory = constant_rotation_trajectory(times_ns, Rotation.identity())
     with pytest.raises(ValueError, match="no accelerometer sample within"):
-        lamaria.measured_world_up(
-            constant_rotation_trajectory(times_ns, Rotation.identity()), resting_accel(far_earlier, np.array([0.0, 0.0, 9.8]))
-        )
+        measured_world_up(level.times_ns, level.quaternions_xyzw, resting_accel(far_earlier, np.array([0.0, 0.0, 9.8])))
 
 
 # ── the gt layer, written by the same convert ─────────────────────────────
