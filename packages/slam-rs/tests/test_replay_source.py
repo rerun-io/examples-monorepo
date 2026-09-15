@@ -13,7 +13,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from slam_rs.apis import replay
 from slam_rs.apis.replay import Config, main
 from slam_rs.catalog_feed import CatalogSegment, LocalSegment, SegmentSource
-from slam_rs.config import ImuParameters, SlamConfig
+from slam_rs.config import SlamConfig
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks
 
 CATALOG: str = "rerun+http://dgx-spark:9988"
@@ -25,13 +25,11 @@ class _Opened(Exception):
     """Raised by the stand-in feed so ``main`` stops once the source is chosen."""
 
 
-def _capture_source(monkeypatch: pytest.MonkeyPatch, parameters: list[ImuParameters] | None = None) -> list[SegmentSource]:
+def _capture_source(monkeypatch: pytest.MonkeyPatch) -> list[SegmentSource]:
     seen: list[SegmentSource] = []
 
-    def opened(source: SegmentSource, imu: ImuParameters, *_args: object, **_kwargs: object) -> None:
+    def opened(source: SegmentSource, *_args: object, **_kwargs: object) -> None:
         seen.append(source)
-        if parameters is not None:
-            parameters.append(imu)
         raise _Opened
 
     monkeypatch.setattr(replay, "open_segment", opened)
@@ -64,14 +62,12 @@ def test_a_catalog_and_a_file_are_two_sources_and_refused(settings: SlamConfig, 
     assert seen == []
 
 
-def test_an_unlisted_catalog_segment_takes_its_datasets_parameters(settings: SlamConfig, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Any segment of a known dataset replays from the catalog with that dataset's IMU model; no settings entry is needed."""
-    parameters: list[ImuParameters] = []
-    seen: list[SegmentSource] = _capture_source(monkeypatch, parameters)
+def test_an_unlisted_catalog_segment_opens_without_a_benchmark_entry(settings: SlamConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any segment of a known dataset replays from the catalog with that dataset's VIO configuration; no settings entry is needed."""
+    seen: list[SegmentSource] = _capture_source(monkeypatch)
     with pytest.raises(_Opened):
         main(Config(rr_config=RerunTyroConfig(headless=True), segment=UNLISTED, catalog=CATALOG))
     assert seen == [CatalogSegment(url=CATALOG, dataset_name="msd-g2", segment_id=UNLISTED)]
-    assert parameters == [settings.dataset("msd-g2").imu]
 
 
 def test_an_unlisted_segment_uses_the_default_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -83,7 +79,7 @@ def test_an_unlisted_segment_uses_the_default_catalog(monkeypatch: pytest.Monkey
 
 
 def test_a_catalog_segment_of_an_unknown_dataset_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A dataset the settings has no config or IMU model for cannot be replayed, catalog or not."""
+    """A dataset the settings has no VIO config for cannot be replayed, catalog or not."""
     seen: list[SegmentSource] = _capture_source(monkeypatch)
     with pytest.raises(ValueError, match="'msd-nowhere' has no runtime settings"):
         main(Config(rr_config=RerunTyroConfig(headless=True), segment="msd-nowhere__X__Y", catalog=CATALOG))
@@ -100,11 +96,9 @@ def test_explicit_local_recording_pair_is_preserved(monkeypatch: pytest.MonkeyPa
     assert seen == [LocalSegment(base, truth)]
 
 
-def test_unlisted_odyssey_uses_the_dataset_imu_without_a_segment_row(settings: SlamConfig, monkeypatch: pytest.MonkeyPatch) -> None:
-    parameters: list[ImuParameters] = []
-    seen: list[SegmentSource] = _capture_source(monkeypatch, parameters)
+def test_unlisted_odyssey_opens_without_a_segment_row(settings: SlamConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[SegmentSource] = _capture_source(monkeypatch)
     identifier: str = "msd-odyssey__MOO_others__MOO15_seated_screen"
     with pytest.raises(_Opened):
         main(Config(rr_config=RerunTyroConfig(headless=True), segment=identifier))
     assert seen == [CatalogSegment(settings.catalog_url, "msd-odyssey", identifier)]
-    assert parameters == [settings.dataset("msd-odyssey").imu]

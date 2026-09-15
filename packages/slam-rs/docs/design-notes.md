@@ -699,6 +699,9 @@ The feed adds the offset to **all three** to reach the estimator's inertial
 clock, subtracting it from query bounds first. Adding it only to camera frames
 introduced a 14.902432 ms relative error. A catalog pose layer subtracts both
 the export epoch and camera offset to return to base `video_time`.
+The common estimator shift now comes from the negative of the IMU entity's
+static `applied_time_shift_ns`, not from `slam.toml`. Factory per-camera
+calibration offsets are retained separately and are never applied a second time.
 
 ## The feed, the metrics and the replay tool
 

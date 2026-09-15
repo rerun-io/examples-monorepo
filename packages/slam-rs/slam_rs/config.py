@@ -15,39 +15,14 @@ SLAM_CONFIG_PATH: Path = Path(__file__).resolve().parents[1] / "slam.toml"
 
 @serde(type_check=coerce, deny_unknown_fields=True)
 @dataclass(slots=True, frozen=True)
-class ImuParameters:
-    """Continuous-time IMU noise model and clock offset, in the estimator's units.
-
-    None of this is on the recordings; it comes from the device's own calibration
-    file and is frozen here until dataforge logs it onto the IMU node.
-    """
-
-    rate_hz: float
-    """Nominal IMU update rate."""
-    gyro_noise_std: float
-    """Gyroscope noise density, rad/s/sqrt(Hz)."""
-    accel_noise_std: float
-    """Accelerometer noise density, m/s^2/sqrt(Hz)."""
-    gyro_bias_std: float
-    """Gyroscope bias random walk, rad/s^2/sqrt(Hz)."""
-    accel_bias_std: float
-    """Accelerometer bias random walk, m/s^3/sqrt(Hz)."""
-    cam_time_offset_ns: int
-    """Added to a camera timestamp to reach the IMU clock; zero for MSD."""
-
-
-@serde(type_check=coerce, deny_unknown_fields=True)
-@dataclass(slots=True, frozen=True)
 class DatasetProperties:
-    """The sensor model and VIO config shared by every segment of one dataset.
+    """The VIO config shared by every segment of one dataset.
 
-    The catalog supplies geometry; slam.toml supplies the sensor noise model.
+    The catalog supplies sensor geometry, noise and timestamp metadata.
     """
 
     name: str
     """Catalog dataset name."""
-    imu: ImuParameters
-    """Noise model from the rig calibration."""
     vio_config: Path
     """Dataset configuration path, relative to slam.toml."""
 
@@ -73,8 +48,6 @@ class RobocapConfig:
     """VIO configuration selected for replay, relative to the package root."""
     calibration: str
     """Rig calibration selected for replay, at :attr:`downscale`, relative to the package root."""
-    imu: ImuParameters
-    """Frozen IMU noise model, from the device's Kalibr calibration."""
 
 
 @serde(type_check=coerce, deny_unknown_fields=True)
@@ -87,9 +60,9 @@ class SlamConfig:
     catalog_url: str
     """Default catalog server, overridable by the command."""
     datasets: tuple[DatasetProperties, ...] = field(rename="dataset")
-    """Estimator configurations and IMU models by dataset."""
+    """Estimator configurations by dataset."""
     robocap: RobocapConfig
-    """RoboCap camera selection, sensor model and estimator files."""
+    """RoboCap camera selection and estimator files."""
     package_root: Path = field(skip=True, default=SLAM_CONFIG_PATH.parent, compare=False)
     """Directory containing slam.toml; estimator file paths are relative to it."""
 
@@ -128,8 +101,8 @@ def load_slam_config(path: Path = SLAM_CONFIG_PATH) -> SlamConfig:
         parsed: SlamConfig = from_toml(SlamConfig, path.read_text())
     except (SerdeError, TOMLDecodeError) as error:
         raise ValueError(f"{path}: {error}") from error
-    if parsed.schema_version != 1:
-        raise ValueError(f"{path}: expected schema_version 1")
+    if parsed.schema_version != 2:
+        raise ValueError(f"{path}: expected schema_version 2")
     return replace(parsed, package_root=path.parent)
 
 

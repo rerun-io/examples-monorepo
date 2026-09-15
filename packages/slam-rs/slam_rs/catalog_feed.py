@@ -28,7 +28,9 @@ Five decisions matter here because each one can change the numbers:
   far apart two cameras' frames may be and still be one frameset.
 * **Clocks.** DataForge stores frames, IMU and ground truth on the same
   ``video_time`` clock. All three reach the estimator's inertial clock by adding
-  ``cam_time_offset_ns``. Query bounds must make the inverse conversion.
+  ``cam_time_offset_ns``, derived from the catalog's signed
+  ``applied_time_shift_ns``. Query bounds make the inverse conversion. Factory
+  per-camera offsets are not applied again.
   MSD's offset is zero, so every MSD number is unchanged by this.
 * **Geometry.** ``Pinhole:image_from_camera`` is column-major, ``Pinhole:resolution``
   is ``(width, height)`` while the decoded array is ``(height, width)``, and the
@@ -58,6 +60,7 @@ from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.catalog_video import CatalogVideo, catalog_keyframes, read_catalog_videos
 from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name, wrap_mp4
+from simplecv.imu_calibration import ImuCalibration
 
 from slam_rs.catalog_calibration import (
     CHILD_FROM_PARENT as CHILD_FROM_PARENT,
@@ -93,7 +96,7 @@ from slam_rs.catalog_timing import (
 from slam_rs.catalog_timing import (
     pair_accel_onto_gyro as pair_accel_onto_gyro,
 )
-from slam_rs.config import ImuParameters, RobocapConfig
+from slam_rs.config import RobocapConfig
 from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, empty_trajectory, shift_clock
 
 RIG_ENTITY: str = "/world/rig_00"
@@ -994,7 +997,6 @@ def _build_feed(
     sensor_dataset: DatasetEntry,
     gt_dataset: DatasetEntry | None,
     segment_id: str,
-    parameters: ImuParameters,
     profile: RigProfile,
     frame_stride: int,
     window_s: float,
@@ -1008,6 +1010,13 @@ def _build_feed(
     reference: str = _static_string(rig_statics, f"{RIG_ENTITY}:reference")
     if reference != "imu_00":
         raise ValueError(f"{segment_id}: rig reference is {reference!r}, but the feed assumes the IMU is the rig frame")
+    # Validate calibration before fetching or decoding the large camera payloads.
+    calibration: ImuCalibration = ImuCalibration.from_catalog(rig_statics, IMU_ENTITY)
+    applied_shift_ns: int = _static_int(rig_statics, f"{IMU_ENTITY}:applied_time_shift_ns")
+    try:
+        imu: ImuCalib = imu_calib(calibration, np.eye(4, dtype=np.float64), applied_shift_ns)
+    except ValueError as error:
+        raise ValueError(f"{segment_id}: {error}") from error
     camera_count: int = int(_static_values(rig_statics, f"{RIG_ENTITY}:num_cameras")[0])
     rig_entities: list[str] = [f"{RIG_ENTITY}/cam_{position:02d}" for position in range(camera_count)]
     camera_statics: pa.Table = (
@@ -1041,10 +1050,10 @@ def _build_feed(
     return SegmentFeed(
         segment_id=segment_id,
         cameras=cameras,
-        imu=imu_calib(parameters, imu_T_body),
+        imu=replace(imu, imu_T_body=imu_T_body),
         capture_start_time_ns=capture_start_time_ns,
         export_offset_ns=0 if profile.video_time_is_absolute else capture_start_time_ns,
-        frame_t_ns=index.t_ns + parameters.cam_time_offset_ns,
+        frame_t_ns=index.t_ns + imu.cam_time_offset_ns,
         camera_positions=camera_positions,
         rig_cameras=camera_count,
         profile=profile,
@@ -1061,7 +1070,6 @@ def _build_feed(
 @contextmanager
 def open_segment(
     source: SegmentSource,
-    parameters: ImuParameters,
     profile: RigProfile = MSD_RIG,
     frame_stride: int = 1,
     window_s: float = DEFAULT_WINDOW_S,
@@ -1079,7 +1087,6 @@ def open_segment(
 
     Args:
         source: Where the segment lives.
-        parameters: Frozen IMU parameters, normally from slam.toml.
         profile: How this rig has to be read; the default is what MSD is.
         frame_stride: Yield every n-th frameset; every frame is still decoded.
         window_s: Longest time window fetched in one round trip.
@@ -1104,7 +1111,7 @@ def open_segment(
             segment_ids: list[str] = list(base.segment_ids())
             if len(segment_ids) != 1:
                 raise ValueError(f"{source.base_rrd} holds {len(segment_ids)} segments; the feed reads one")
-            yield _build_feed(base, ground_truth, segment_ids[0], parameters, profile, frame_stride, window_s, cache_video, decode_device)
+            yield _build_feed(base, ground_truth, segment_ids[0], profile, frame_stride, window_s, cache_video, decode_device)
     else:
         resolved: CatalogSegment = source if source.dataset is not None else resolve_catalog_segments((source,))[0]
         assert resolved.dataset is not None
@@ -1124,5 +1131,5 @@ def open_segment(
                 ground_truth.register([resolved.ground_truth_uri]).wait()
             yield _build_feed(
                 resolved.dataset, ground_truth,
-                resolved.segment_id, parameters, profile, frame_stride, window_s, cache_video, decode_device,
+                resolved.segment_id, profile, frame_stride, window_s, cache_video, decode_device,
             )

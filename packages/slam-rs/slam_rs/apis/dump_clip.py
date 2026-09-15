@@ -126,7 +126,6 @@ def main(config: Config) -> None:
 
     with open_segment(
         CatalogSegment(settings.catalog_url, segment.dataset_name, segment.segment_id),
-        settings.dataset(segment.dataset_name).imu,
         window_s=config.window_s,
     ) as feed:
         calibration_text: str

@@ -30,7 +30,6 @@ from slam_rs.catalog_feed import (
     _static_values,
     _video_codec,
     camera_calib,
-    imu_calib,
     open_segment,
 )
 from slam_rs.config import SlamConfig
@@ -180,16 +179,6 @@ def test_the_msd_g2_rotation_arithmetic() -> None:
         _rotate_pinhole_clockwise(1.0, 2.0, 3.0, 4.0, 8, 6, 45)
 
 
-def test_the_imu_calibration_carries_the_manifests_frozen_numbers(benchmarks: Benchmarks, settings: SlamConfig) -> None:
-    segment: ReferenceSegment = benchmarks.by_id(SMOKE_SEGMENT)
-    calib = imu_calib(settings.dataset(segment.dataset_name).imu, np.eye(4))
-    assert calib.frequency_hz == 1000.0
-    assert calib.gyro_noise_std == 0.000282
-    assert calib.accel_noise_std == 0.016
-    assert calib.cam_time_offset_ns == 0
-    np.testing.assert_array_equal(calib.imu_T_body, np.eye(4))
-
-
 def test_a_static_table_with_no_rows_names_the_entity() -> None:
     """A recording whose rig node carries no statics reached `statics[column][0]`.
 
@@ -312,7 +301,7 @@ def test_the_smoke_segment_decodes_from_the_catalog(benchmarks: Benchmarks, sett
     segment: ReferenceSegment = benchmarks.by_id(SMOKE_SEGMENT)
 
     with open_segment(
-        CatalogSegment(settings.catalog_url, segment.dataset_name, segment.segment_id), settings.dataset(segment.dataset_name).imu
+        CatalogSegment(settings.catalog_url, segment.dataset_name, segment.segment_id)
     ) as feed:
         assert isinstance(feed, SegmentFeed)
         assert len(feed.cameras) == 2
@@ -371,7 +360,6 @@ def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample(benchma
     for window_s in (60.0, 2.0):
         with open_segment(
             CatalogSegment(settings.catalog_url, segment.dataset_name, segment.segment_id),
-            settings.dataset(segment.dataset_name).imu,
             window_s=window_s,
         ) as feed:
             per_frameset: list[tuple[int, str]] = []
@@ -390,7 +378,7 @@ def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample(benchma
     first_ns: int = digests[2.0][0][0]
     bounded_ns: int = first_ns + 2_500_000_000
     with open_segment(
-        CatalogSegment(settings.catalog_url, segment.dataset_name, segment.segment_id), settings.dataset(segment.dataset_name).imu, window_s=2.0
+        CatalogSegment(settings.catalog_url, segment.dataset_name, segment.segment_id), window_s=2.0
     ) as feed:
         bounded: list[tuple[int, str]] = [(frameset.t_ns, frameset.digest()) for frameset in feed.framesets(bounded_ns)]
     assert bounded == digests[2.0][: len(bounded)]
@@ -419,7 +407,7 @@ def test_a_replay_export_associates_with_the_catalog_ground_truth(benchmarks: Be
 
     config: Config = Config(rr_config=RerunTyroConfig(headless=True), segment=SMOKE_SEGMENT, stage="vio", max_framesets=40)
     with open_segment(
-        CatalogSegment(settings.catalog_url, segment.dataset_name, segment.segment_id), settings.dataset(segment.dataset_name).imu
+        CatalogSegment(settings.catalog_url, segment.dataset_name, segment.segment_id)
     ) as feed:
         truth: Trajectory = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
         assert len(truth)

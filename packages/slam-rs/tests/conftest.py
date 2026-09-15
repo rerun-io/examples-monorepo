@@ -167,3 +167,11 @@ def texture() -> TextureFactory:
         return np.ascontiguousarray(np.roll(image, (shift_y, shift_x), axis=(0, 1)))
 
     return build
+
+
+@pytest.fixture(scope="session")
+def robocap_imu() -> ImuCalib:
+    """Cap A's factory noise model, used only as a test expectation."""
+    return ImuCalib(frequency_hz=200.0, gyro_noise_std=0.0007300442812547, accel_noise_std=0.005955224218014,
+                    gyro_bias_std=3.445397083168e-05, accel_bias_std=0.0001963150489218, cam_time_offset_ns=14_902_432,
+                    imu_T_body=np.eye(4, dtype=np.float64))

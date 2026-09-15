@@ -1,4 +1,4 @@
-"""``dataforge-register``: register base-layer rrds into a local Rerun catalog."""
+"""``dataforge-register``: register base recordings and saved sensor metadata."""
 
 from __future__ import annotations
 
@@ -38,6 +38,12 @@ def main(config: Config) -> None:
         layer_name=paths.BASE_LAYER,
         on_duplicate=OnDuplicateSegmentLayer.SKIP,
     ).wait()
+    # Restore additive backfills after a catalog restart without requiring raw
+    # factory files again. Ignore orphan metadata whose base is not in this tree.
+    metadata_paths: list[Path] = [paths.output_root() / paths.SENSOR_METADATA_LAYER / path.name for path in rrd_paths]
+    metadata_uris: list[str] = [path.resolve().as_uri() for path in metadata_paths if path.is_file()]
+    if metadata_uris:
+        entry.register(metadata_uris, layer_name=paths.SENSOR_METADATA_LAYER, on_duplicate=OnDuplicateSegmentLayer.SKIP).wait()
 
     dataset: DataforgeDataset = dataset_config.setup()
     # Blueprints register once: every register_blueprint call adds a NEW entry to the

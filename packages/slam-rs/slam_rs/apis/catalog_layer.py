@@ -11,8 +11,8 @@ from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 from slam_rs import _core
 from slam_rs.catalog_feed import CatalogSegment, RigProfile, SegmentFeed, open_segment
 from slam_rs.catalog_layer import write_layer
-from slam_rs.config import ImuParameters, SlamConfig, config_text_sha256, load_slam_config
-from slam_rs.tracking import Lockstep, SegmentRun, _drive, check_calibration_matches_recording, robocap_estimator_files
+from slam_rs.config import SlamConfig, config_text_sha256, load_slam_config, profiled_config_text
+from slam_rs.tracking import Lockstep, SegmentRun, _drive
 
 
 @dataclass(slots=True)
@@ -40,7 +40,6 @@ def main(config: Config) -> None:
     settings: SlamConfig = load_slam_config()
     dataset_name: str = config.segment.split("__", 1)[0]
     is_robocap: bool = dataset_name == "robocap"
-    parameters: ImuParameters = settings.robocap.imu if is_robocap else settings.dataset(dataset_name).imu
     rig_profile: RigProfile = RigProfile.from_robocap(settings.robocap) if is_robocap else RigProfile()
     catalog_url: str = config.catalog or settings.catalog_url
     dataset: DatasetEntry = CatalogClient(catalog_url).get_dataset(dataset_name)
@@ -53,19 +52,19 @@ def main(config: Config) -> None:
     print(f"Loading {config.segment}: one bulk video query, decode={decode_device}", flush=True)
     started: float = perf_counter()
     feed: SegmentFeed
-    with open_segment(CatalogSegment(catalog_url, dataset_name, config.segment), parameters, profile=rig_profile,
+    with open_segment(CatalogSegment(catalog_url, dataset_name, config.segment), profile=rig_profile,
                       cache_video=True, decode_device=decode_device, include_ground_truth=False) as feed:
         load_s: float = perf_counter() - started
         calibration: _core.Calibration
         flow: _core.VioConfig
         config_text: str
         if is_robocap:
-            calibration, flow, config_text = robocap_estimator_files(settings, config.profile)
-            check_calibration_matches_recording(calibration, feed.cameras, parameters, rig_profile.downscale)
+            config_text = profiled_config_text(settings.package_root / settings.robocap.vio_config, config.profile,
+                                              settings.package_root / "configs/profiles")
         else:
-            calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)
             config_text = settings.vio_config_text(dataset_name, config.profile)
-            flow = _core.VioConfig.from_json(config_text)
+        calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)
+        flow = _core.VioConfig.from_json(config_text)
         use_gpu: bool = config.backend == "gpu" or (config.backend == "auto" and _core.gpu_backend is not None)
         vio: _core.Vio
         try:
@@ -81,7 +80,7 @@ def main(config: Config) -> None:
         print(f"{config.segment}: profile={config.profile}, backend={backend}, decode={decode_device}, load={load_s:.1f}s, "
               f"{len(feed.frame_t_ns)} framesets, cameras={feed.camera_positions}", flush=True)
         run: SegmentRun = _drive(feed, Lockstep(vio), config_sha256=config_text_sha256(config_text))
-        write_layer(output, config.segment, run, clock_offset_ns=feed.export_offset_ns + parameters.cam_time_offset_ns,
+        write_layer(output, config.segment, run, clock_offset_ns=feed.export_offset_ns + feed.imu.cam_time_offset_ns,
                     profile=config.profile, backend=backend, decoder=decode_device)
     dataset.register([output.as_uri()], layer_name="slam_rs", on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
     print(f"Registered {len(run.estimate)} poses; {run.wall_s:.1f} s, {run.framesets / run.wall_s:.1f} framesets/s; {output}")

@@ -6,11 +6,15 @@ import sqlite3
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 import pytest
+import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Float64, Int64
 from numpy import ndarray
+from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.data.ego.robocap_ego import CAMERA_DISPLAY_ORDER
+from simplecv.imu_calibration import ImuCalibration
 
 from dataforge import schema
 from dataforge.datasets.robocap import (
@@ -126,3 +130,43 @@ def test_malformed_imu_db_is_skipped_not_fatal(tmp_path: Path) -> None:
     db_path: Path = tmp_path / "IMUWriter_dev2_session1_segment1.db"
     db_path.write_bytes(b"SQLite format 3\x00 this is not a database")
     assert read_imu_database(db_path) is None
+
+
+def test_factory_metadata_preserves_offsets_and_applied_correction(tmp_path: Path) -> None:
+    factory: Path = tmp_path / f"0factory-calibration-{DEVICE}"
+    noise: Path = factory / "imus_intrinsic/imu_mid_0.yaml"
+    noise.parent.mkdir(parents=True)
+    noise.write_text("gyroscope_noise_density: 0.0007\naccelerometer_noise_density: 0.006\n"
+                     "gyroscope_random_walk: 0.00003\naccelerometer_random_walk: 0.0002\nupdate_rate: 200.0\n")
+    camera: Path = factory / "imus_cam_l_extrinsic/left-camchain-imucam.yaml"
+    camera.parent.mkdir()
+    camera.write_text("cam0:\n  timeshift_cam_imu: 0.018961111236788484\n")
+    dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=tmp_path))
+    path: Path = tmp_path / "metadata.rrd"
+    with rr.RecordingStream("metadata", recording_id="test") as recording:
+        recording.save(path)
+        dataset.log_sensor_metadata(recording, DEVICE, {"left": schema.cam_path(0, 2)})
+    with rr.server.Server(datasets={"test": [path]}) as server:
+        client: CatalogClient = server.client()
+        entry: DatasetEntry = client.get_dataset("test")
+        table: pa.Table = entry.reader(index=None).to_arrow_table()
+        imu: ImuCalibration = ImuCalibration.from_catalog(table, "/world/rig_00/imu_00")
+        assert imu.gyro_noise_density == 0.0007
+        assert imu.rate_hz == 200.0
+        assert imu.source == f"0factory-calibration-{DEVICE}/imus_intrinsic/imu_mid_0.yaml"
+        assert table["/world/rig_00/imu_00:applied_time_shift_ns"].to_pylist() == [[-14_902_432]]
+        assert table["/world/rig_00/cam_02:camera_imu_time_offset_ns"].to_pylist() == [[18_961_111]]
+        assert table["/world/rig_00/cam_02:time_offset_reference"].to_pylist() == [["/world/rig_00/imu_00"]]
+
+
+def test_missing_device_calibration_is_not_replaced_with_another_caps(tmp_path: Path) -> None:
+    dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=tmp_path))
+    path: Path = tmp_path / "unknown.rrd"
+    with rr.RecordingStream("metadata", recording_id="unknown") as recording:
+        recording.save(path)
+        dataset.log_sensor_metadata(recording, "unknown-device", {})
+    with rr.server.Server(datasets={"test": [path]}) as server:
+        client: CatalogClient = server.client()
+        entry: DatasetEntry = client.get_dataset("test")
+        table: pa.Table = entry.reader(index=None).to_arrow_table()
+        assert ImuCalibration.from_catalog(table, "/world/rig_00/imu_00") == ImuCalibration()

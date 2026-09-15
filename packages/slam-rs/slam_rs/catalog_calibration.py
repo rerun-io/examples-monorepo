@@ -6,8 +6,7 @@ from typing import Literal, TypeAlias
 import numpy as np
 from jaxtyping import Float64
 from numpy import ndarray
-
-from slam_rs.config import ImuParameters
+from simplecv.imu_calibration import ImuCalibration
 
 CHILD_FROM_PARENT: int = 2
 """``rr.TransformRelation.ChildFromParent``; the only relation the extrinsic inversion is valid for."""
@@ -91,7 +90,7 @@ class ImuCalib:
     """The IMU as the estimator wants it: noise model plus the body transform."""
 
     frequency_hz: float
-    """Nominal update rate, from the reference settings."""
+    """Nominal update rate, from the catalog calibration."""
     gyro_noise_std: float
     """Gyroscope noise density."""
     accel_noise_std: float
@@ -101,7 +100,7 @@ class ImuCalib:
     accel_bias_std: float
     """Accelerometer bias random walk."""
     cam_time_offset_ns: int
-    """Added to a camera timestamp to reach the IMU clock."""
+    """Common shift added to cameras, IMU and GT to restore the estimator time origin; not a relative correction."""
     imu_T_body: Float64[ndarray, "4 4"]
     """Body pose in the IMU frame; the identity whenever the rig reference is the IMU."""
 
@@ -180,22 +179,24 @@ def camera_calib(index: int, statics: CameraStatics, downscale: int = 1) -> Came
     )
 
 
-def imu_calib(parameters: ImuParameters, imu_T_body: Float64[ndarray, "4 4"]) -> ImuCalib:
-    """Combine the settings’ frozen noise model with the recording's IMU transform.
+def imu_calib(calibration: ImuCalibration, imu_T_body: Float64[ndarray, "4 4"], applied_time_shift_ns: int) -> ImuCalib:
+    """Convert catalog calibration into estimator units without re-aligning samples.
 
-    Args:
-        parameters: Frozen IMU parameters from the reference settings.
-        imu_T_body: Body pose in the IMU frame, the identity when the rig reference is the IMU.
-
-    Returns:
-        The IMU calibration the estimator is configured with.
+    The inverse ingestion shift moves *both* cameras and IMU to the historical
+    estimator time origin. It must never be applied only to the camera stream.
+    Factory per-camera offsets are provenance; ingestion already aligned samples.
     """
+    if (calibration.rate_hz is None or calibration.gyro_noise_density is None
+            or calibration.accel_noise_density is None or calibration.gyro_bias_random_walk is None
+            or calibration.accel_bias_random_walk is None):
+        raise ValueError("missing IMU calibration: require rate_hz, gyro_noise_density, accel_noise_density, "
+                         "gyro_bias_random_walk and accel_bias_random_walk; ingest or backfill the catalog calibration")
     return ImuCalib(
-        frequency_hz=parameters.rate_hz,
-        gyro_noise_std=parameters.gyro_noise_std,
-        accel_noise_std=parameters.accel_noise_std,
-        gyro_bias_std=parameters.gyro_bias_std,
-        accel_bias_std=parameters.accel_bias_std,
-        cam_time_offset_ns=parameters.cam_time_offset_ns,
+        frequency_hz=calibration.rate_hz,
+        gyro_noise_std=calibration.gyro_noise_density,
+        accel_noise_std=calibration.accel_noise_density,
+        gyro_bias_std=calibration.gyro_bias_random_walk,
+        accel_bias_std=calibration.accel_bias_random_walk,
+        cam_time_offset_ns=-applied_time_shift_ns,
         imu_T_body=imu_T_body,
     )

@@ -196,8 +196,54 @@ actually emits it; simplecv's own exo/ego writer still does not.
   the schema version stays `exoego:v2`.
 - **RoboCap status / TODO:** dataforge v1 emits the middle IMU (`dev0`) only, as
   `imu_00`; `dev1`/`dev2` and a multi-IMU blueprint layout (one gyro/accel pane pair
-  per IMU) are still TODO. RoboCap's IMU and camera clocks differ by a fixed
-  14,902,432 ns offset (basalt's `kCameraToImuOffsetNs`); dataforge picks the raw
-  **camera** clock for `video_time` and subtracts the offset from IMU timestamps.
+  per IMU) are still TODO. Legacy RoboCap ingestion picks raw **camera** time for
+  `video_time` and subtracts 14,902,432 ns from IMU timestamps. This inherited
+  Basalt approximation matches the median of Cap A's four coverage-camera
+  factory offsets; it is not independently validated for every camera or device.
+
+### Optional static calibration
+
+Log `simplecv.imu_calibration.ImuCalibration` on the IMU entity with
+`static=True`. Each field is independently optional: omit unknown values;
+zero represents a known zero. Existing recordings without these fields remain
+valid. VIO consumers may require a complete noise model and should name missing
+fields rather than substitute another device's calibration.
+
+| Field | Meaning / units |
+|---|---|
+| `gyro_noise_density` | Isotropic continuous-time white noise, rad/s/√Hz |
+| `accel_noise_density` | Isotropic continuous-time white noise, m/s²/√Hz |
+| `gyro_bias_random_walk` | Bias random walk, rad/s²/√Hz |
+| `accel_bias_random_walk` | Bias random walk, m/s³/√Hz |
+| `rate_hz` | Nominal sensor sample rate; not measured stream cadence |
+| `source` | Calibration source and any assumption or placeholder status |
+
+The catalog column is, for example,
+`/world/rig_00/imu_00:simplecv.ImuCalibration:gyro_noise_density`.
+`ImuCalibration.from_catalog(table, imu_entity)` reads a static query into the
+same typed record. The archetype describes fixed sensor parameters, not the
+time-varying bias estimated by SLAM. It does not encode spatial extrinsics;
+those remain the existing `Transform3D`.
+
+### Calibration timing versus applied correction
+
+These are separate static `AnyValues` fields:
+
+| Entity | Fields | Meaning |
+|---|---|---|
+| Camera | `camera_imu_time_offset_ns`, `time_offset_reference`, `time_offset_source` | Factory estimate: `t_imu = t_camera + offset`; reference is the full IMU entity path, source identifies the calibration entry. |
+| IMU | `applied_time_shift_ns`, `time_shift_source` | Signed relative alignment shift already added to the source IMU timestamps during ingestion, in ns; applies to gyro/accel children. |
+
+The applied correction describes a relative sensor alignment adjustment, not a
+shared timeline-origin change such as subtracting capture start from all sensors.
+For legacy RoboCap it is **-14,902,432 ns**. Log an explicit `0` where ingestion
+applied no relative correction; absence means unknown. These fields describe
+existing timestamps and must not trigger a second relative correction. Kalibr's
+floating-point seconds are rounded to integer nanoseconds at ingestion.
+
+Calibration and timing provenance belong to the recording. A static-only
+`sensor_metadata` layer can add them to an existing catalog segment without
+rewriting its videos, samples, or poses. No existing entity paths change, so this
+optional extension remains `exoego:v2`.
 
 Any change to the layout should increment the schema version and update this doc.

@@ -48,16 +48,6 @@ def test_the_tiers_are_the_ones_the_plan_names(benchmarks: Benchmarks, settings:
     assert {segment.dataset_name for segment in benchmarks.in_tier("smoke")} == {"msd-index", "msd-g2"}
 
 
-def test_the_msd_imu_block_is_basalts(benchmarks: Benchmarks, settings: SlamConfig) -> None:
-    for segment in benchmarks.segments:
-        assert settings.dataset(segment.dataset_name).imu.rate_hz == 1000.0
-        assert settings.dataset(segment.dataset_name).imu.gyro_noise_std == 0.000282
-        assert settings.dataset(segment.dataset_name).imu.accel_noise_std == 0.016
-        assert settings.dataset(segment.dataset_name).imu.gyro_bias_std == 0.0001
-        assert settings.dataset(segment.dataset_name).imu.accel_bias_std == 0.001
-        assert settings.dataset(segment.dataset_name).imu.cam_time_offset_ns == 0
-
-
 def test_any_robocap_session_of_the_device_replays_without_a_reference(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     listed = benchmarks.robocap.session("s00000015", settings.robocap.device_id)
     assert listed.reference_csv is not None and benchmarks.robocap.is_listed("s00000015")
@@ -69,8 +59,6 @@ def test_any_robocap_session_of_the_device_replays_without_a_reference(benchmark
 def test_robocap_carries_s15_and_no_ground_truth(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     assert [session.session_id for session in benchmarks.robocap.sessions] == ["s00000015"]
     assert benchmarks.robocap.has_ground_truth is False
-    assert settings.robocap.imu.cam_time_offset_ns == 14_902_432
-    assert settings.robocap.imu.rate_hz == 200.0
 
 
 def test_robocap_names_the_configuration_the_cpp_ran(benchmarks: Benchmarks, settings: SlamConfig) -> None:
@@ -213,7 +201,7 @@ def test_a_duplicate_segment_id_is_rejected(benchmarks: Benchmarks, settings: Sl
 
 def test_an_unsupported_runtime_schema_is_refused(tmp_path: Path) -> None:
     path: Path = tmp_path / "old.toml"
-    path.write_text(SLAM_CONFIG_PATH.read_text().replace("schema_version = 1", "schema_version = 8"))
+    path.write_text(SLAM_CONFIG_PATH.read_text().replace("schema_version = 2", "schema_version = 8"))
     with pytest.raises(ValueError, match="schema_version"):
         load_slam_config(path)
 
@@ -225,9 +213,8 @@ def test_malformed_toml_is_refused_with_the_file_name(tmp_path: Path) -> None:
         load_slam_config(path)
 
 
-def test_dataset_imu_covers_unlisted_odyssey_and_preserves_holdouts(benchmarks: Benchmarks, settings: SlamConfig) -> None:
+def test_dataset_settings_cover_unlisted_odyssey_and_preserve_holdouts(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     assert {dataset.name for dataset in settings.datasets} == {"msd-index", "msd-g2", "msd-odyssey"}
-    assert all(dataset.imu == settings.datasets[0].imu for dataset in settings.datasets)
     assert sum(segment.hold_out for segment in benchmarks.segments) == 2
     assert {segment.segment_id.split("__")[-1].split("_")[0] for segment in benchmarks.in_tier("release")} == {"MIO07", "MGO07", "MIO14"}
 
@@ -287,7 +274,7 @@ def test_runtime_settings_refuse_unknown_keys_and_wrong_types_with_path(tmp_path
     broken: Path = tmp_path / "broken-slam.toml"
     text: str = SLAM_CONFIG_PATH.read_text()
     broken.write_text(
-        text.replace("schema_version = 1\n", replacement if replacement.startswith("schema_version") else replacement + "schema_version = 1\n")
+        text.replace("schema_version = 2\n", replacement if replacement.startswith("schema_version") else replacement + "schema_version = 2\n")
     )
     with pytest.raises(ValueError, match="broken-slam.toml"):
         load_slam_config(broken)

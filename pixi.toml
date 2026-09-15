@@ -2418,6 +2418,11 @@ cmd = "python tools/apps/catalog_layer.py"
 cwd = "packages/slam-rs"
 description = "Run catalog VIO and replace its slam_rs pose layer (fast profile, GPU when available)"
 
+[feature.slam-rs.tasks.slam-rs-import-imu-calibration]
+cmd = "python tools/import_imu_calibration.py"
+cwd = "packages/slam-rs"
+description = "Import a known Basalt IMU model as catalog metadata without rewriting recordings"
+
 [feature.slam-rs-cpu]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
@@ -3039,6 +3044,11 @@ description = "Convert discovered sequences into base-layer rrds (--sequence, --
 cmd = "python tools/apps/register.py"
 cwd = "packages/dataforge"
 description = "Register base-layer rrds into a local Rerun catalog"
+
+[feature.dataforge.tasks.dataforge-robocap-calibration]
+cmd = "python tools/robocap_calibration.py"
+cwd = "packages/dataforge"
+description = "Backfill factory calibration and applied timing metadata on legacy RoboCap sessions"
 
 [feature.dataforge.tasks.dataforge-view]
 cmd = "python tools/apps/view.py"

@@ -16,7 +16,9 @@ from pathlib import Path
 from dataforge.identity import SequenceIdentity
 
 BASE_LAYER: str = "base"
-"""The only layer dataforge v1 emits; the first path component under ``output_root()``."""
+"""Original measurement layer under ``output_root()``."""
+SENSOR_METADATA_LAYER: str = "sensor_metadata"
+"""Optional static calibration backfill, separate from original measurements."""
 
 
 def output_root() -> Path:

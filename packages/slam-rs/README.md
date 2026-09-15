@@ -235,7 +235,7 @@ Design notes — the accessors field by field, every refusal and its ceiling, an
 | `crates/slam-rs-cli` | `slam-rs` binary: a placeholder. `version` is the only subcommand that does anything; a replay runs through the Python tools. |
 | `slam_rs/` | The Python package: stubs, Tyro entry points under `apis/`. |
 | `tools/` | Thin CLI shims over `slam_rs/apis/`. |
-| `slam.toml` | Runtime settings: estimator files, sensor noise models and RoboCap camera/clock rules. |
+| `slam.toml` | Runtime settings: estimator files and RoboCap camera selection/reader rules. Sensor calibration comes from the catalog. |
 | `benchmarks.toml` | Regression cases, tiers, hold-outs, frozen decode paths and lane baselines. |
 | `configs/` | Dataset VIO configurations and the `profiles/` overlays. |
 
@@ -429,12 +429,17 @@ Not in this branch, in the order they are likely to matter:
   models could move further into kornia-rs. S34 already uses nalgebra for QR,
   the damped solve and SVD; the ground-truth gate checks further replacements.
 
-`slam.toml` holds runtime settings: estimator configuration paths, sensor noise models
-that the catalog does not carry, and RoboCap camera selection and clock rules.
+`slam.toml` holds runtime settings: estimator configuration paths and RoboCap
+camera selection and reader rules. Sensor noise, nominal rate and the applied
+timestamp correction come from static catalog metadata on the IMU node.
 `benchmarks.toml` holds regression cases, tiers, hold-outs, frozen decode paths,
 measured lane/profile baselines and RoboCap's regression trajectory path.
 Normal catalog processing loads only `slam.toml`; evaluation commands load both.
-Camera geometry and capture facts come from the catalog.
+Camera geometry and capture facts also come from the catalog. The normal
+`slam-rs-catalog-layer` command constructs calibration entirely from these
+fields. Regression probes may still compare against their frozen Basalt files.
+Missing calibration stops VIO before video decoding; no Cap A model is silently
+substituted for another device.
 
 ```python
 from slam_rs.config import SlamConfig, load_slam_config
@@ -443,5 +448,37 @@ settings: SlamConfig = load_slam_config()
 ```
 
 Evaluation adds `benchmarks = load_benchmarks(settings)` from `slam_rs.reference`.
-Both TOML files use schema version 1. They replace the former combined `gate.toml`;
-this split preserves its runtime settings and benchmark values.
+`slam.toml` uses schema version 2 (the former IMU blocks are removed), while
+`benchmarks.toml` remains version 1. They replace the former combined `gate.toml`.
+
+For existing legacy RoboCap recordings, add metadata without re-encoding:
+
+```bash
+pixi run -e dataforge --frozen dataforge-robocap-calibration \
+  --catalog-url rerun+http://dgx-spark:9988 \
+  --root /mnt/nas/datasets/robocap \
+  --output-dir /mnt/nas/datasets/robocap/rrd/sensor_metadata
+```
+
+New DataForge RoboCap conversions include the same metadata in their base layer.
+`dataforge-register` also restores saved `sensor_metadata` files beside their
+base recordings after a catalog restart, without rereading factory calibration.
+The backfill uses camera names from the catalog and only the matching device's
+factory folder. The historical 14.902432 ms approximation is recorded separately
+from each camera's factory offset; its physical accuracy is not newly validated.
+
+For a dataset with a known Basalt IMU model whose importer has not adopted the
+shared metadata yet, import it explicitly. Select only recordings made with that
+model, and state the correction ingestion already applied (zero for the MSD
+recordings). This records provenance, not a new synchronization adjustment:
+
+```bash
+pixi run -e slam-rs --frozen slam-rs-import-imu-calibration \
+  --catalog rerun+http://dgx-spark:9988 --dataset msd-index \
+  --calibration /path/to/msdmi_calib.json --applied-time-shift-ns 0 \
+  --output-dir /mnt/nas/datasets/msd-rrd/sensor_metadata
+```
+
+The output path must be visible to the server. Use `--no-register` to prepare
+Basalt metadata locally, transfer it to server-visible storage, then register
+those files as `sensor_metadata`. Neither command alters the base or SLAM layers.

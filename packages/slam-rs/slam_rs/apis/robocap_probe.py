@@ -63,7 +63,6 @@ def main(config: Config) -> None:
     session: RobocapSession = benchmarks.robocap.session(config.session, settings.robocap.device_id)
     if not benchmarks.robocap.is_listed(config.session):
         print(f"{config.session} is not in benchmarks.toml: replaying it from the catalog with no regression reference")
-    offset_ns: int = settings.robocap.imu.cam_time_offset_ns
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / f"robocap-{session.session_id}" / "slam_rs.csv"
     calibration: _core.Calibration
     flow_config: _core.VioConfig
@@ -76,11 +75,10 @@ def main(config: Config) -> None:
 
     with open_segment(
         CatalogSegment(config.catalog or settings.catalog_url, "robocap", session.segment_id),
-        settings.robocap.imu,
         profile=RigProfile.from_robocap(settings.robocap),
         window_s=config.window_s,
     ) as feed:
-        check_calibration_matches_recording(calibration, feed.cameras, settings.robocap.imu, settings.robocap.downscale)
+        check_calibration_matches_recording(calibration, feed.cameras, feed.imu, settings.robocap.downscale)
         first_ns: int = int(feed.frame_t_ns[0])
         last_ns: int = int(feed.frame_t_ns[-1]) if config.seconds <= 0.0 else first_ns + int(config.seconds * 1e9)
         replayed_ns: int = min(int(feed.frame_t_ns[-1]), last_ns) - first_ns
@@ -90,7 +88,7 @@ def main(config: Config) -> None:
             f"{(int(feed.frame_t_ns[-1]) - first_ns) / 1e9:.1f} s, replaying the first {replayed_ns / 1e9:.1f} s"
         )
         print(
-            f"camera offset {offset_ns} ns applied to the frames; capture_start_time_ns {feed.capture_start_time_ns} "
+            f"common estimator time shift {feed.imu.cam_time_offset_ns} ns applied to cameras and IMU; capture_start_time_ns {feed.capture_start_time_ns} "
             f"NOT added (video_time is the device clock), so the export shifts by {feed.export_offset_ns} ns"
         )
 
