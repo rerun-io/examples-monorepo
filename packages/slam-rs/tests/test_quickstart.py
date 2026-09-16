@@ -36,6 +36,19 @@ def test_the_download_tasks_pull_from_the_public_dataset() -> None:
         assert clip in smoke
 
 
+def test_registration_is_dataforges_job() -> None:
+    """The download mirrors dataforge's layer-major layout, so its register tool is the one that runs; slam-rs keeps no copy."""
+    with (REPO / "pixi.toml").open("rb") as handle:
+        task: dict[str, str | dict[str, str]] = tomllib.load(handle)["feature"]["slam-rs"]["tasks"]["slam-rs-register"]
+    cmd: str | dict[str, str] = task["cmd"]
+    env: str | dict[str, str] = task["env"]
+    assert isinstance(cmd, str) and isinstance(env, dict)
+    assert cmd.count("dataforge/tools/apps/register.py msd --device") == 3
+    assert env["DATAFORGE_OUTPUT_ROOT"] == "data/msd-rrd"
+    assert not importlib.util.find_spec("slam_rs.apis.register")
+    assert not (PACKAGE / "tools" / "apps" / "register.py").exists()
+
+
 def test_the_gate_tool_carries_no_machine_specific_name() -> None:
     assert (PACKAGE / "tools" / "apps" / "gate.py").is_file()
     assert not (PACKAGE / "tools" / "apps" / "fleet_check.py").exists()
