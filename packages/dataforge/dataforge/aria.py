@@ -41,7 +41,8 @@ from projectaria_tools.core.calibration import CameraCalibration, DeviceCalibrat
 from projectaria_tools.core.sensor_data import ImageData, ImageDataRecord, MotionData, TimeDomain
 from projectaria_tools.core.stream_id import StreamId
 from scipy.spatial.transform import Rotation
-from serde import from_dict, serde
+from serde import SerdeError, field, serde
+from serde.json import from_json
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion
 
 from dataforge.logging_toolkit import ImuChannel
@@ -218,14 +219,54 @@ class AriaRig:
                 name=STREAM_LABELS[stream_id],
             )
 
-        rig_T_imu: dict[AriaStreamId, Float64[ndarray, "4 4"]] = {}
+        # imu-right *is* the rig frame, so its pose is the identity by construction:
+        # stated exactly rather than as inv(T) @ T, which leaves ~1e-17 of residue.
+        rig_T_imu: dict[AriaStreamId, Float64[ndarray, "4 4"]] = {IMU_RIGHT_STREAM_ID: np.eye(4, dtype=np.float64)}
         for stream_id in IMU_STREAM_IDS:
+            if stream_id == IMU_RIGHT_STREAM_ID:
+                continue
             imu: ImuCalibration | None = calibration.get_imu_calib(STREAM_LABELS[stream_id])
             if imu is None:
                 raise ValueError(f"this VRS has no {STREAM_LABELS[stream_id]} calibration, so {stream_id} has no rig pose")
             device_T_imu: Float64[ndarray, "4 4"] = np.asarray(imu.get_transform_device_imu().to_matrix(), dtype=np.float64)
             rig_T_imu[stream_id] = imu_right_T_device @ device_T_imu
         return cls(cameras=cameras, rig_T_imu=rig_T_imu)
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class PublishedTransform:
+    """A published rigid transform: a quaternion in x, y, z, w order and a translation."""
+
+    qvec: tuple[float, float, float, float]
+    """Rotation as ``[x, y, z, w]`` — pycolmap's order, which the official tooling reads it with."""
+    tvec: tuple[float, float, float]
+    """Translation in metres."""
+
+    def to_matrix(self) -> Float64[ndarray, "4 4"]:
+        """The same transform as a 4x4."""
+        matrix: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
+        matrix[:3, :3] = Rotation.from_quat(np.asarray(self.qvec, dtype=np.float64)).as_matrix()
+        matrix[:3, 3] = self.tvec
+        return matrix
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class _PublishedCameraPose:
+    """The one key of a ``cam0``/``cam1`` entry the gt layer reads; the rest is left to the file."""
+
+    rig_T_cam: PublishedTransform = field(rename="T_b_s")
+    """Published as ``T_b_s``; the body frame is imu-right, so this *is* ``rig_T_cam``."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class _PublishedCalibration:
+    """An ``aria_calibrations/<seq>.json``, read only as far as camera-slam-left's pose."""
+
+    cam0: _PublishedCameraPose
+    """camera-slam-left, the frame the pseudo ground truth poses."""
 
 
 def read_rig_T_cam0(path: Path) -> Float64[ndarray, "4 4"]:
@@ -243,12 +284,15 @@ def read_rig_T_cam0(path: Path) -> Float64[ndarray, "4 4"]:
     Returns:
         ``rig_T_cam0``, from the entry's x, y, z, w quaternion and its
         translation in metres.
+
+    Raises:
+        ValueError: The file is not JSON, or holds no ``cam0.T_b_s`` of that shape.
     """
-    published: dict = json.loads(path.read_text())["cam0"]["T_b_s"]
-    rig_T_cam0: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
-    rig_T_cam0[:3, :3] = Rotation.from_quat(np.asarray(published["qvec"], dtype=np.float64)).as_matrix()
-    rig_T_cam0[:3, 3] = published["tvec"]
-    return rig_T_cam0
+    try:
+        published: _PublishedCalibration = from_json(_PublishedCalibration, path.read_text())
+    except (SerdeError, json.JSONDecodeError) as error:
+        raise ValueError(f"{path}: {error}") from error
+    return published.cam0.rig_T_cam.to_matrix()
 
 
 def rotate_uv_cw90(uv_px: Float64[ndarray, "n_points 2"], *, native_height_px: int) -> Float64[ndarray, "n_points 2"]:
@@ -386,7 +430,7 @@ def read_pseudo_gt(path: Path) -> PseudoGt:
 
 
 @serde
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SurveyedPoint:
     """One ``control_points`` entry as published, before the origin is subtracted.
 
@@ -395,14 +439,14 @@ class SurveyedPoint:
     point-to-frame mapping the other way round.
     """
 
-    measurement: list[float | None]
+    measurement: tuple[float | None, float | None, float | None]
     """LV95/LN02 easting, northing, height in metres; a ``None`` height was never levelled."""
-    uncertainty: list[float | None]
+    uncertainty: tuple[float | None, float | None, float | None]
     """One-sigma survey uncertainty per axis in metres, ``None`` where the axis is unknown."""
 
 
 @serde
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DetectedPoint:
     """One ``images`` entry as published: which point was seen in which frame, and where."""
 
@@ -410,8 +454,19 @@ class DetectedPoint:
     """Device-clock capture time of the frame, in nanoseconds."""
     control_point: str
     """Name of the control point detected."""
-    detection: list[float]
+    detection: tuple[float, float]
     """Pixel coordinates of the detection, ``[u, v]``."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class _ControlPointFile:
+    """A ``ground_truth/sparse/<seq>.json`` as far as dataforge reads it; other keys are the file's own."""
+
+    control_points: dict[str, SurveyedPoint]
+    """Surveyed points by name."""
+    images: dict[str, DetectedPoint]
+    """Detections by the extracted frame's file name, whose prefix names the stream."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -458,15 +513,24 @@ def read_control_points(path: Path) -> ControlPointSet:
 
     The published coordinates are LV95/LN02, so they are six-digit numbers whose
     float32 round-off is centimetres; every position is translated by
-    ``CUSTOM_ORIGIN_XYZ`` here, once, exactly as the official tooling does.
+    ``CUSTOM_ORIGIN_XYZ`` here, once, exactly as the official tooling does. The
+    file is also checked against itself here: a detection that names a point
+    the survey never published is an invariant of this one document, so it fails
+    at the door rather than in whichever writer reads the set next.
+
+    Raises:
+        ValueError: The file is not JSON, does not hold the two maps, a point
+            has no horizontal measurement, or a detection names an unpublished point.
     """
-    document: dict = json.loads(path.read_text())
+    try:
+        document: _ControlPointFile = from_json(_ControlPointFile, path.read_text())
+    except (SerdeError, json.JSONDecodeError) as error:
+        raise ValueError(f"{path}: {error}") from error
     points: list[ControlPoint] = []
-    for name, entry in document["control_points"].items():
-        surveyed: SurveyedPoint = from_dict(SurveyedPoint, entry)
+    for name, surveyed in document.control_points.items():
         easting, northing, height = surveyed.measurement
         if easting is None or northing is None:
-            raise ValueError(f"control point {name} has no horizontal measurement: {surveyed.measurement}")
+            raise ValueError(f"{path}: control point {name} has no horizontal measurement: {surveyed.measurement}")
         # Substituting the origin's own height for an unlevelled point makes its
         # translated z exactly 0.0, which is what ``has_height=False`` promises.
         published_xyz_m: Float64[ndarray, "3"] = np.array(
@@ -481,17 +545,18 @@ def read_control_points(path: Path) -> ControlPointSet:
             )
         )
 
-    detections: list[ControlPointDetection] = []
-    for image_name, entry in document["images"].items():
-        detected: DetectedPoint = from_dict(DetectedPoint, entry)
-        detections.append(
-            ControlPointDetection(
-                stream_id=stream_id_from_image_name(image_name),
-                timestamp_ns=detected.timestamp,
-                uv_px=np.asarray(detected.detection, dtype=np.float64),
-                control_point=detected.control_point,
-            )
+    detections: list[ControlPointDetection] = [
+        ControlPointDetection(
+            stream_id=stream_id_from_image_name(image_name),
+            timestamp_ns=detected.timestamp,
+            uv_px=np.asarray(detected.detection, dtype=np.float64),
+            control_point=detected.control_point,
         )
+        for image_name, detected in document.images.items()
+    ]
+    unknown: set[str] = {detection.control_point for detection in detections} - set(document.control_points)
+    if unknown:
+        raise ValueError(f"{path}: control point detection(s) name {', '.join(sorted(unknown))}, which the survey does not publish")
     detections.sort(key=lambda detection: (detection.stream_id, detection.timestamp_ns))
     return ControlPointSet(points=tuple(points), detections=tuple(detections))
 

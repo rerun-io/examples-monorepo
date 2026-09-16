@@ -11,7 +11,6 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from dataforge import paths
 from dataforge.datasets import AnnotatedDatasetUnion, RobocapConfig
 from dataforge.datasets.base import DataforgeDatasetConfig
-from dataforge.identity import SequenceIdentity
 
 
 @dataclass
@@ -44,14 +43,10 @@ def main(config: Config) -> None:
     if not candidates:
         raise FileNotFoundError(f"no {paths.BASE_LAYER}-layer rrd for {name} (sequence={config.sequence}) under {base_root}")
 
-    # The stem is the recording id, and the recording id is the identity: the
-    # sibling layers are the same id under another layer directory.
-    identity: SequenceIdentity = SequenceIdentity(dataset=name, parts=tuple(candidates[0].stem.split("__")[1:]))
-    found: list[Path] = []
-    for layer in paths.LAYERS:
-        layer_path: Path = paths.rrd_path(output_root, layer=layer, identity=identity)
-        if layer_path.is_file():
-            found.append(layer_path)
+    # The file name is the recording id, and the sibling layers are that same
+    # name under another layer directory.
+    selected: Path = candidates[0]
+    found: list[Path] = [path for path in (output_root / layer / selected.name for layer in paths.LAYERS) if path.is_file()]
     print(f"viewing {', '.join(str(path) for path in found)}")
     for layer_path in found:
         rr.log_file_from_path(layer_path)

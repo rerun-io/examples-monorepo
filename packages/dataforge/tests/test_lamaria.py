@@ -22,13 +22,23 @@ import pytest
 import rerun as rr
 import rerun.blueprint as rrb
 import serde.json
-from conftest import PublishedCamera, ServedRequest, read_back, read_calibration_json, serve  # pyrefly: ignore[missing-import]
+from conftest import (  # pyrefly: ignore[missing-import]
+    PublishedCamera,
+    ServedRequest,
+    blueprint_views,
+    column_rows,
+    eye_vector,
+    read_back,
+    read_calibration_json,
+    recording_properties,
+    serve,
+)
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion
 
-from dataforge import aria, paths, schema
+from dataforge import aria, blueprints, paths, schema
 from dataforge.datasets import dataset_defaults, lamaria
 from dataforge.datasets.lamaria import (
     DEFAULT_SEQUENCES,
@@ -39,7 +49,8 @@ from dataforge.datasets.lamaria import (
     SequenceRecord,
 )
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import ImuChannel, require_av1_nvenc, resolve_ffmpeg
+from dataforge.logging_toolkit import TRAIL_RADIUS_UI_POINTS, ImuChannel
+from dataforge.world_up import MEASURED_UP_WINDOW_NS, MeasuredUp, measured_world_up
 
 REFERENCE_DIR: Path = Path(__file__).parent / "reference_data" / "lamaria"
 """Verbatim excerpts of published LaMAria files, shared with ``test_aria.py``."""
@@ -349,46 +360,33 @@ def test_the_declared_follow_frame_is_the_calibration_own_forward_and_up() -> No
 
     ``T_b_s`` for cam0 is ``rig_T_cam`` of camera-slam-left in the imu-right
     frame, and the Aria device frame *is* that camera's frame (RDF: x right, y
-    down, z along the optical axis). So the rotation's third column is where the
-    wearer looks and the negated second column is the wearer's up.
+    down, z along the optical axis). The stereo pair's mean third column is where
+    the wearer looks. Aria records sideways, so the native image-up (``-y``) is the
+    wearer's *left*; the upright (quarter-turned) image's up is the native ``-x``,
+    and that is the wearer's up — gravity confirms it within a degree.
     """
     published: dict[str, PublishedCamera] = read_calibration_json(REFERENCE_DIR / "R_01_easy.calibration.json")
     rig_R_cam0: Float64[ndarray, "3 3"] = published["cam0"].rig_T_cam.to_matrix()[:3, :3]
+    rig_R_cam1: Float64[ndarray, "3 3"] = published["cam1"].rig_T_cam.to_matrix()[:3, :3]
+    up: Float64[ndarray, "3"] = -rig_R_cam0[:, 0]
+    # The pair's mean optical axis, levelled against up: one SLAM camera alone is yawed ~38 deg outward.
+    pair_xyz: Float64[ndarray, "3"] = rig_R_cam0[:, 2] + rig_R_cam1[:, 2]
+    forward: Float64[ndarray, "3"] = pair_xyz - float(pair_xyz @ up) * up
+    forward = forward / np.linalg.norm(forward)
 
-    np.testing.assert_allclose(lamaria.FOLLOW_FORWARD, rig_R_cam0[:, 2], atol=1e-3)
-    np.testing.assert_allclose(lamaria.FOLLOW_UP, -rig_R_cam0[:, 1], atol=1e-3)
+    np.testing.assert_allclose(lamaria.FOLLOW_FORWARD, forward, atol=1e-3)
+    np.testing.assert_allclose(lamaria.FOLLOW_UP, up, atol=1e-3)
     assert np.linalg.norm(lamaria.FOLLOW_FORWARD) == pytest.approx(1.0, abs=1e-3)
     assert np.linalg.norm(lamaria.FOLLOW_UP) == pytest.approx(1.0, abs=1e-3)
     assert float(np.dot(lamaria.FOLLOW_FORWARD, lamaria.FOLLOW_UP)) == pytest.approx(0.0, abs=1e-3)
 
 
-def eye_vector(batch: rr.components.Position3DBatch | rr.components.Vector3DBatch | None) -> list[float]:
-    """Read one three-component field back out of an ``EyeControls3D`` archetype."""
-    assert batch is not None, "the follow eye sets every field"
-    return [float(value) for value in batch.as_arrow_array().flatten().to_pylist()]
-
-
-def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
-    """Every view in a blueprint, depth-first, whatever containers nest them."""
-    found: list[rrb.View] = []
-
-    def walk(node: rrb.View | rrb.Container) -> None:
-        if isinstance(node, rrb.View):
-            found.append(node)
-            return
-        for child in node.contents or ():
-            walk(child)
-
-    walk(blueprint.root_container)
-    return found
-
-
 def test_the_follow_eye_chases_the_wearer_from_behind_and_above() -> None:
-    eye: rrb.EyeControls3D = lamaria.follow_eye()
+    eye: rrb.EyeControls3D = blueprints.follow_eye_controls(lamaria.FOLLOW_FORWARD, lamaria.FOLLOW_UP)
     forward: Float64[ndarray, "3"] = np.array(lamaria.FOLLOW_FORWARD, dtype=np.float64)
     up: Float64[ndarray, "3"] = np.array(lamaria.FOLLOW_UP, dtype=np.float64)
 
-    assert eye_vector(eye.look_target) == pytest.approx((lamaria.FOLLOW_AHEAD_M * forward).tolist(), abs=1e-6)
+    assert eye_vector(eye.look_target) == pytest.approx((blueprints.FOLLOW_AHEAD_M * forward).tolist(), abs=1e-6)
     assert eye_vector(eye.eye_up) == pytest.approx(list(lamaria.FOLLOW_UP), abs=1e-6)
     position: list[float] = eye_vector(eye.position)
     assert float(np.dot(position, forward)) < 0.0, "the eye leans against forward"
@@ -721,34 +719,9 @@ def convert_one(fake: FakeArchive, *, force: bool = False) -> tuple[SequenceIden
     return identity, dataset.convert(identity, source, force=force)
 
 
-def column_rows(store: rr.experimental.ChunkStore, column: str) -> pa.Table:
-    """Non-null rows of one component column, index-sorted."""
-    table: pa.Table = store.reader(index=schema.TIMELINE).to_arrow_table().sort_by(schema.TIMELINE)
-    return table.select([schema.TIMELINE, column]).drop_null()
-
-
-def recording_properties(store: rr.experimental.ChunkStore, group: str) -> dict[str, object]:
-    """One property group's values (``property:<group>:*``), unwrapped from their one-row lists."""
-    table: pa.Table = store.reader(index=None, contents="/__properties/**").to_arrow_table()
-    row: dict[str, list[object] | None] = table.to_pylist()[0]
-    prefix: str = f"property:{group}:"
-    return {name.removeprefix(prefix): values[0] for name, values in row.items() if name.startswith(prefix) and values}
-
-
 def static_row(store: rr.experimental.ChunkStore, entity_path: str) -> dict[str, list[object]]:
     """The one static row of an entity, as a column → values mapping."""
     return store.reader(index=None, contents=entity_path).to_arrow_table().to_pylist()[0]
-
-
-@pytest.fixture(scope="module")
-def nvenc() -> Path:
-    """The resolved ffmpeg, or a skip when this machine cannot encode AV1 on the GPU."""
-    ffmpeg: Path = resolve_ffmpeg()
-    try:
-        require_av1_nvenc(ffmpeg)
-    except RuntimeError as error:
-        pytest.skip(f"no av1_nvenc: {error}")
-    return ffmpeg
 
 
 @dataclass(frozen=True, slots=True)
@@ -785,13 +758,13 @@ def convert_once(tmp_path: Path, sequence: str) -> ConvertedSequence:
 
 
 @pytest.fixture(scope="module")
-def converted_easy(tmp_path_factory: pytest.TempPathFactory, nvenc: Path) -> ConvertedSequence:
+def converted_easy(tmp_path_factory: pytest.TempPathFactory, nvenc_ffmpeg: Path) -> ConvertedSequence:
     """R_01_easy, converted once: pseudo ground truth and no surveyed points."""
     return convert_once(tmp_path_factory.mktemp("easy"), "R_01_easy")
 
 
 @pytest.fixture(scope="module")
-def converted_surveyed(tmp_path_factory: pytest.TempPathFactory, nvenc: Path) -> ConvertedSequence:
+def converted_surveyed(tmp_path_factory: pytest.TempPathFactory, nvenc_ffmpeg: Path) -> ConvertedSequence:
     """R_11_5cp, converted once: pseudo ground truth plus two control points."""
     return convert_once(tmp_path_factory.mktemp("surveyed"), "R_11_5cp")
 
@@ -891,7 +864,7 @@ def test_the_capture_properties_describe_the_sequence(converted_easy: ConvertedS
 
 
 def test_convert_deletes_the_vrs_and_the_mp4s_but_keeps_the_small_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
 ) -> None:
     with converting(tmp_path, monkeypatch) as fake:
         convert_one(fake)
@@ -901,7 +874,7 @@ def test_convert_deletes_the_vrs_and_the_mp4s_but_keeps_the_small_files(
         assert (fake.root / "training" / "R_01_easy" / "ground_truth" / "pGT" / "R_01_easy.txt").is_file()
 
 
-def test_keep_raw_leaves_the_vrs_and_the_encoded_mp4s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_keep_raw_leaves_the_vrs_and_the_encoded_mp4s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     with converting(tmp_path, monkeypatch, keep_raw=True) as fake:
         convert_one(fake)
         assert fake.vrs_path.is_file()
@@ -923,7 +896,7 @@ def test_a_sequence_with_both_layers_already_written_is_skipped_without_fetching
         assert target.read_bytes() == b"already done"
 
 
-def test_force_rewrites_an_existing_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_force_rewrites_an_existing_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     with converting(tmp_path, monkeypatch) as fake:
         dataset: LamariaDataset = LamariaDataset(fake.config)
         identity, source = dataset.discover()[0]
@@ -936,7 +909,7 @@ def test_force_rewrites_an_existing_recording(tmp_path: Path, monkeypatch: pytes
 
 
 def test_a_failed_encode_keeps_the_vrs_and_clears_the_scratch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc_ffmpeg: Path
 ) -> None:
     def explode(*_arguments: object, **_keywords: object) -> int:
         raise RuntimeError("nvenc fell over")
@@ -975,7 +948,7 @@ def test_a_machine_that_cannot_encode_av1_fails_before_it_fetches_anything(tmp_p
 
 
 def test_a_stalled_vrs_fetch_is_retried_and_resumed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc_ffmpeg: Path
 ) -> None:
     """The archive hangs up mid-transfer; the retry must append, never restart."""
     monkeypatch.setattr(lamaria.transports, "RETRY_BACKOFF_S", (0.0,))
@@ -1070,12 +1043,13 @@ def test_the_world_up_axis_is_measured_by_rotating_the_accelerometer_into_the_wo
     times_ns: Int64[ndarray, "n_samples"] = DEVICE_T0_NS + np.arange(4_000, dtype=np.int64) * IMU_PERIOD_NS
     accel: ImuChannel = resting_accel(times_ns, np.array([0.1, -0.2, 9.81]))
     # The second half of the capture points the other way; the 2 s window must ignore it.
-    accel.values_xyz[times_ns >= DEVICE_T0_NS + lamaria.MEASURED_UP_WINDOW_NS] = [0.1, -0.2, -9.81]
+    accel.values_xyz[times_ns >= DEVICE_T0_NS + MEASURED_UP_WINDOW_NS] = [0.1, -0.2, -9.81]
 
-    measured: lamaria.WorldUp = lamaria.measured_world_up(constant_rotation_trajectory(times_ns, Rotation.identity()), accel)
+    level: lamaria.GtTrajectory = constant_rotation_trajectory(times_ns, Rotation.identity())
+    measured: MeasuredUp = measured_world_up(level.times_ns, level.quaternions_xyzw, accel)
 
     assert measured.axis == "+z"
-    assert measured.fraction_of_g == pytest.approx(1.0, abs=0.01)
+    assert measured.fraction == pytest.approx(1.0, abs=0.01)
 
 
 def test_a_rig_lying_on_its_side_measures_the_axis_its_own_gravity_points_along() -> None:
@@ -1083,31 +1057,30 @@ def test_a_rig_lying_on_its_side_measures_the_axis_its_own_gravity_points_along(
     times_ns: Int64[ndarray, "n_samples"] = DEVICE_T0_NS + np.arange(1_000, dtype=np.int64) * IMU_PERIOD_NS
     world_R_rig: Rotation = Rotation.from_euler("x", 90.0, degrees=True)
 
-    measured: lamaria.WorldUp = lamaria.measured_world_up(
-        constant_rotation_trajectory(times_ns, world_R_rig), resting_accel(times_ns, np.array([0.0, 0.0, 9.80665]))
+    on_side: lamaria.GtTrajectory = constant_rotation_trajectory(times_ns, world_R_rig)
+    measured: MeasuredUp = measured_world_up(
+        on_side.times_ns, on_side.quaternions_xyzw, resting_accel(times_ns, np.array([0.0, 0.0, 9.80665]))
     )
 
     assert measured.axis == "-y"
-    assert measured.fraction_of_g == pytest.approx(1.0, abs=1e-6)
+    assert measured.fraction == pytest.approx(1.0, abs=1e-6)
 
 
 def test_measuring_the_world_up_axis_needs_both_a_pose_and_a_sample() -> None:
     empty_times: Int64[ndarray, "n_samples"] = np.zeros(0, dtype=np.int64)
     times_ns: Int64[ndarray, "n_samples"] = DEVICE_T0_NS + np.arange(10, dtype=np.int64) * IMU_PERIOD_NS
+    level: lamaria.GtTrajectory = constant_rotation_trajectory(times_ns, Rotation.identity())
     with pytest.raises(ValueError, match="both a gt pose and an accelerometer sample"):
-        lamaria.measured_world_up(
-            constant_rotation_trajectory(times_ns, Rotation.identity()), resting_accel(empty_times, np.array([0.0, 0.0, 9.8]))
-        )
+        measured_world_up(level.times_ns, level.quaternions_xyzw, resting_accel(empty_times, np.array([0.0, 0.0, 9.8])))
 
 
 def test_an_accelerometer_that_stops_before_the_ground_truth_starts_is_an_error() -> None:
     """The window opens where both streams are live, so an IMU that quit first leaves it empty."""
     times_ns: Int64[ndarray, "n_poses"] = DEVICE_T0_NS + np.arange(10, dtype=np.int64) * IMU_PERIOD_NS
     far_earlier: Int64[ndarray, "n_samples"] = times_ns - 60_000_000_000
+    level: lamaria.GtTrajectory = constant_rotation_trajectory(times_ns, Rotation.identity())
     with pytest.raises(ValueError, match="no accelerometer sample within"):
-        lamaria.measured_world_up(
-            constant_rotation_trajectory(times_ns, Rotation.identity()), resting_accel(far_earlier, np.array([0.0, 0.0, 9.8]))
-        )
+        measured_world_up(level.times_ns, level.quaternions_xyzw, resting_accel(far_earlier, np.array([0.0, 0.0, 9.8])))
 
 
 # ── the gt layer, written by the same convert ─────────────────────────────
@@ -1172,7 +1145,7 @@ def test_the_rig_transform_is_stored_child_from_parent_free(converted_easy: Conv
 
 
 def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail(converted_easy: ConvertedSequence) -> None:
-    """The overview strip is static and whole; the trail is one point per pose, for the cursor window."""
+    """The overview strip is static and whole; the trail is one segment per pose, for the cursor window."""
     store: rr.experimental.ChunkStore = read_back(converted_easy.gt)
     trajectory: str = schema.trajectory_path("gt")
     strips: list[list[list[float]]] = (
@@ -1180,13 +1153,13 @@ def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail(converted_easy: C
     )
     assert len(strips) == 1, "the whole trajectory is one strip"
     assert len(strips[0]) == GT_POSES
-    assert column_rows(store, f"{schema.trail_path('gt')}:Points3D:positions").num_rows == GT_POSES
+    assert column_rows(store, f"{schema.trail_path('gt')}:LineStrips3D:strips").num_rows == GT_POSES
     # A negative radius is Rerun's screen-space unit: a metric hairline over a
     # kilometre of walking renders as nothing in the rig overview.
     radii: list[object] = static_row(store, trajectory)[f"{trajectory}:LineStrips3D:radii"]
     assert radii == [pytest.approx(-lamaria.GT_TRAJECTORY_WIDTH_UI_POINTS)]
-    trail_radii: list[object] = static_row(store, schema.trail_path("gt"))[f"{schema.trail_path('gt')}:Points3D:radii"]
-    assert trail_radii == [pytest.approx(lamaria.GT_TRAIL_RADIUS_M)], "the trail is metric: it rides the wearer up close"
+    trail_radii: list[object] = static_row(store, schema.trail_path("gt"))[f"{schema.trail_path('gt')}:LineStrips3D:radii"]
+    assert trail_radii == [pytest.approx(-TRAIL_RADIUS_UI_POINTS)], "the trail is a screen-space stroke, like msd's"
 
 
 def test_only_the_gt_layer_states_the_world_axes(converted_easy: ConvertedSequence) -> None:
@@ -1217,7 +1190,7 @@ def test_the_gt_properties_describe_the_trajectory_and_its_world(converted_easy:
 
 
 def test_a_measured_up_axis_the_declaration_disagrees_with_is_announced(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc: Path
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc_ffmpeg: Path
 ) -> None:
     """The declared axis is a claim about the data, so every convert re-measures it."""
     monkeypatch.setattr(lamaria, "WORLD_UP", "-y")
@@ -1290,7 +1263,7 @@ def test_every_levelled_control_point_min_distance_is_reported(converted_surveye
     assert "no height" in converted_surveyed.output
 
 
-def test_a_levelled_control_point_far_from_the_walk_stops_the_convert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_a_levelled_control_point_far_from_the_walk_stops_the_convert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     """Its tag was photographed by these cameras, so a wrong world frame shows up as distance."""
     far: dict[str, bytes] = archive_bodies()
     far["/lamaria/ground_truth/sparse/R_11_5cp.json"] = control_points_body(levelled_xyz_m=(0.0, 0.0, 500.0))
@@ -1307,7 +1280,7 @@ def test_a_levelled_control_point_far_from_the_walk_stops_the_convert(tmp_path: 
 # ── the two layers, gated independently ───────────────────────────────────
 
 
-def test_a_missing_gt_layer_is_rebuilt_from_the_base_rrd_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_a_missing_gt_layer_is_rebuilt_from_the_base_rrd_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     """Regenerating the gt corpus is ``rm gt/*.rrd`` and a convert: no fetch, no encode."""
 
     def refuse(_vrs_path: Path) -> lamaria.SequenceStreams:
@@ -1327,7 +1300,7 @@ def test_a_missing_gt_layer_is_rebuilt_from_the_base_rrd_alone(tmp_path: Path, m
         assert base_target.stat().st_mtime_ns == base_written_ns, "the base recording is the canonical raw, left alone"
 
 
-def test_a_missing_base_layer_is_rebuilt_without_the_gt_layer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_a_missing_base_layer_is_rebuilt_without_the_gt_layer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     """The other direction: an existing gt rrd is done, so a base rebuild leaves it as it is."""
     with converting(tmp_path, monkeypatch) as fake:
         identity, base_target = convert_one(fake)
@@ -1342,7 +1315,7 @@ def test_a_missing_base_layer_is_rebuilt_without_the_gt_layer(tmp_path: Path, mo
         assert gt_target.stat().st_mtime_ns == gt_written_ns, "the gt layer already exists, so it is not rewritten"
 
 
-def test_a_sequence_with_no_ground_truth_writes_no_gt_rrd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path) -> None:
+def test_a_sequence_with_no_ground_truth_writes_no_gt_rrd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     """The test split ships neither pGT nor control points; there is no world to establish."""
     with converting(tmp_path, monkeypatch) as fake:
         dataset: LamariaDataset = LamariaDataset(fake.config)
@@ -1361,7 +1334,7 @@ def test_a_sequence_with_no_ground_truth_writes_no_gt_rrd(tmp_path: Path, monkey
 
 
 def test_a_sequence_with_control_points_but_no_pgt_still_gets_a_gt_layer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc: Path
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
 ) -> None:
     """The surveyed points are ground truth in their own right, even with no trajectory."""
     with converting(tmp_path, monkeypatch, sequence="R_11_5cp") as fake:

@@ -36,6 +36,16 @@ RIG_COLUMN_SHARES: tuple[int, int] = (3, 2)
 """Width split between the 3D column and the camera grid."""
 PLOT_ROW_SHARES: tuple[int, int] = (3, 1)
 """Height split between the views and the sensor plots."""
+FOLLOW_BACK_M: float = 0.9
+"""How far behind the device the follow eye sits, along the device's own forward."""
+FOLLOW_UP_M: float = 0.45
+"""How far above the device the follow eye sits, along the device's own up."""
+FOLLOW_AHEAD_M: float = 0.3
+"""How far ahead of the device the follow eye aims, so the shot leads the motion.
+
+The three distances were tuned together on LaMAria's R_01_easy and hold for the MSD
+headsets as they stand: a shot that keeps the camera frusta and the last ten seconds
+of trail in view at once without the ground filling it."""
 
 
 def camera_view(name: str, rig: int, cam: int) -> rrb.Spatial2DView:
@@ -105,9 +115,9 @@ def follow_eye_controls(
     forward: tuple[float, float, float],
     up: tuple[float, float, float],
     *,
-    back_m: float,
-    up_m: float,
-    ahead_m: float,
+    back_m: float = FOLLOW_BACK_M,
+    up_m: float = FOLLOW_UP_M,
+    ahead_m: float = FOLLOW_AHEAD_M,
 ) -> rrb.EyeControls3D:
     """A chase camera derived from the device's own forward and up.
 
@@ -151,6 +161,8 @@ def rig_blueprint(
     the rig and highlights the last ``TRAIL_WINDOW_S`` of motion over the same
     path drawn thin and dim, so the two together read as "where it went" and
     "where it is going".
+    Only the overview draws the ground grid: the grid lives in the view origin's
+    frame, and in the rig frame there is no fixed ground plane to draw it on.
 
     Args:
         camera_panes: One pane per camera, in display order.
@@ -178,7 +190,13 @@ def rig_blueprint(
                         name="Follow",
                         origin=schema.rig_path(rig),
                         contents="/**",
-                        line_grid=True,
+                        # No grid: LineGrid3D draws on the origin frame's z = 0 plane,
+                        # and this view's origin is the rig, whose z axis is nowhere
+                        # near vertical on a worn device — the grid stood as a wall
+                        # beside the trail. The world ground is a moving plane in the
+                        # rig frame, so no fixed plane setting can represent it; the
+                        # overview above keeps the real ground.
+                        line_grid=False,
                         overrides={
                             # Not hidden: with the path gone the highlighted trail
                             # floated with nothing to place it against, so it stays
@@ -240,7 +258,7 @@ def table_blueprint(
                 name="Follow",
                 origin=schema.rig_path(rig),
                 contents=["/**", *video_exclusions, f"- {schema.trail_path(run_source)}/**"],
-                line_grid=True,
+                line_grid=False,  # rig-rooted, same reason as rig_blueprint's Follow view
                 eye_controls=eye_controls,
             ),
             front_pane,

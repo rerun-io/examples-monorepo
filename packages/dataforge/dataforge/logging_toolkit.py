@@ -20,7 +20,7 @@ from typing import Literal, TypeAlias
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from jaxtyping import Bool, Float64, Int64
+from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 from simplecv.rerun_log_utils import log_pinhole
@@ -38,9 +38,6 @@ from dataforge.video_encoding import (
 )
 from dataforge.video_encoding import (
     encode_frames_to_mp4 as encode_frames_to_mp4,
-)
-from dataforge.video_encoding import (
-    encode_image_files_to_mp4 as encode_image_files_to_mp4,
 )
 from dataforge.video_encoding import (
     mp4_frame_count as mp4_frame_count,
@@ -214,11 +211,10 @@ def log_video_stream(
     if times_ns is not None and shift_ns != 0:
         raise ValueError("shift_ns and times_ns are mutually exclusive: a per-sample clock is not an offset from the file's own")
     sample_count: int = 0
-    # Original PTS and replacement time of every sample chunk seen so far. The
-    # trailing keyframe chunk concatenates them once, rather than paying for a
-    # per-sample dict on a stream that can run to millions of frames.
+    # Original PTS of every sample chunk seen so far. The trailing keyframe chunk
+    # concatenates them once, rather than paying for a per-sample dict on a
+    # stream that can run to millions of frames.
     seen_pts_ns: list[Int64[ndarray, "n_rows"]] = []
-    seen_times_ns: list[Int64[ndarray, "n_rows"]] = []
 
     def retimed(record_batch: pa.RecordBatch, index: int, values_ns: Int64[ndarray, "n_rows"]) -> list[rr.experimental.Chunk]:
         """Same batch, same row ids, new index values (still a ``duration("ns")``)."""
@@ -247,7 +243,6 @@ def log_video_stream(
                 raise ValueError(f"{video_path.name} has more samples than the {times_ns.size} timestamps given")
             replacement: Int64[ndarray, "n_rows"] = times_ns[sample_count - record_batch.num_rows : sample_count]
             seen_pts_ns.append(original_ns)
-            seen_times_ns.append(replacement)
             return retimed(record_batch, index, replacement)
 
         # The trailing keyframe chunk. ``-bf 0`` forbids reordering, so the samples'
@@ -260,7 +255,9 @@ def log_video_stream(
         found: Int64[ndarray, "n_rows"] = np.searchsorted(sample_pts_ns, original_ns)
         if int(found.max(initial=-1)) >= sample_pts_ns.size or not np.array_equal(sample_pts_ns[found], original_ns):
             raise ValueError(f"{video_path.name}: keyframe PTS {original_ns[:4].tolist()} precede their samples; the reader's chunk order changed")
-        return retimed(record_batch, index, np.concatenate(seen_times_ns)[found])
+        # The samples seen so far took times_ns[:sample_count], so a keyframe's
+        # position among their PTS is its position in times_ns.
+        return retimed(record_batch, index, times_ns[found])
 
     # A B-frame source (iPhone/insta360 HEVC) forces Mp4Reader into an FFmpeg
     # re-encode; everything else passes through untouched, and then these options
@@ -398,8 +395,8 @@ def log_pose_track(
     entity_path: str,
     *,
     times_ns: Int64[ndarray, "n_poses"],
-    translations_xyz: Float64[ndarray, "n_poses 3"],
-    quaternions_xyzw: Float64[ndarray, "n_poses 4"],
+    translations_xyz: Float32[ndarray, "n_poses 3"] | Float64[ndarray, "n_poses 3"],
+    quaternions_xyzw: Float32[ndarray, "n_poses 4"] | Float64[ndarray, "n_poses 4"],
 ) -> None:
     """Send a temporal pose track columnar: one ``Transform3D`` per sample on ``video_time``.
 
@@ -411,8 +408,9 @@ def log_pose_track(
         recording: Destination recording stream.
         entity_path: Entity to animate, usually ``schema.rig_path(rig)``.
         times_ns: Pose times on the ``video_time`` clock, in nanoseconds.
-        translations_xyz: Positions in metres.
-        quaternions_xyzw: Orientations, scalar last.
+        translations_xyz: Positions in metres, in whichever float width the
+            source holds them; Rerun's transform components are float32 either way.
+        quaternions_xyzw: Orientations, scalar last, same widths.
     """
     rr.send_columns(
         entity_path,
@@ -422,14 +420,23 @@ def log_pose_track(
     )
 
 
+TRAJECTORY_COLOR: tuple[int, int, int] = (110, 180, 255)
+"""Fixed tint of a whole ground-truth path; one trajectory is one quantity, not a per-row class."""
+TRAIL_COLOR: tuple[int, int, int] = (255, 215, 90)
+"""Fixed tint of the recent-motion trail; warm, so it reads against the cool full path."""
+TRAIL_RADIUS_UI_POINTS: float = 3.0
+"""Stroke width of a trail, in ui points: a screen-space width, so one number serves a
+headset and a vehicle alike."""
+
+
 def log_trail_segments(
     recording: rr.RecordingStream,
     entity_path: str,
     *,
     times_ns: Int64[ndarray, "n_poses"],
     translations_xyz: Float64[ndarray, "n_poses 3"],
-    color: tuple[int, int, int],
-    radius_ui_points: float,
+    color: tuple[int, int, int] = TRAIL_COLOR,
+    radius_ui_points: float = TRAIL_RADIUS_UI_POINTS,
 ) -> None:
     """Send a motion trail columnar: one two-point ``LineStrips3D`` per pose, the step that reached it.
 

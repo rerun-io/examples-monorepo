@@ -47,8 +47,8 @@ What was measured, what it answered, and why each format decision went the way
 it did is in ``packages/dataforge/docs/msd.md``. Three modules hold what is not
 MSD-specific: ``dataforge.archives`` reads archive members,
 ``dataforge.basalt`` validates the calibration, and ``dataforge.euroc`` decodes
-the csv streams. What is left here is the device table, the world-up measurement
-its claims rest on, and the two layers.
+the csv streams. What is left here is the device table and the verbs that drive the two
+layers; ``dataforge.world_up`` measures the axis its claims rest on.
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ from jaxtyping import Float64
 from numpy import ndarray
 
 from dataforge import blueprints, paths, schema, transports, writing
-from dataforge.archives import group_archives, open_member_reader, remove_tree
+from dataforge.archives import group_archives, open_member_reader, remove_tree, resolve_seven_zip
 from dataforge.basalt import CalibratedCamera, FollowFrame, follow_frame, load_calibration
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.datasets.msd_layers import (
@@ -91,12 +91,6 @@ REPO_ID: str = "collabora/monado-slam-datasets"
 """HuggingFace dataset repo holding every MSD device."""
 REPO_ROOT: str = "M_monado_datasets"
 """Top-level directory inside the repo; every device tree hangs off it."""
-FOLLOW_BACK_M: float = 0.9
-"""How far behind the headset the follow eye sits, along the device's own forward."""
-FOLLOW_UP_M: float = 0.45
-"""How far above the headset the follow eye sits, along the device's own up."""
-FOLLOW_AHEAD_M: float = 0.3
-"""How far ahead of the headset the follow eye aims, so the shot leads the motion."""
 FOLLOW_FRAME_TOLERANCE_DEG: float = 5.0
 """How far a declared ``FollowFrame`` axis may sit from the calibration's before ``convert`` warns."""
 
@@ -249,11 +243,6 @@ def repo_revision(repo_id: str, revision: str | None = None) -> str | None:
     return HfApi().repo_info(repo_id, repo_type="dataset", revision=revision).sha
 
 
-def follow_eye(follow: FollowFrame) -> rrb.EyeControls3D:
-    """The device's chase camera: its own forward and up at this package's distances."""
-    return blueprints.follow_eye_controls(follow.forward, follow.up, back_m=FOLLOW_BACK_M, up_m=FOLLOW_UP_M, ahead_m=FOLLOW_AHEAD_M)
-
-
 def camera_views(num_cameras: int) -> list[rrb.Spatial2DView]:
     """One 2D pane per camera, labelled the way the archives name them (``cam0``…)."""
     return [blueprints.camera_view(f"cam{index}", RIG, index) for index in range(num_cameras)]
@@ -284,7 +273,7 @@ def build_blueprint(num_cameras: int, *, has_magnetometer: bool, follow: FollowF
         camera_views(num_cameras),
         rig=RIG,
         run_source=schema.GT_RUN_SOURCE,
-        eye_controls=follow_eye(follow),
+        eye_controls=blueprints.follow_eye_controls(follow.forward, follow.up),
         plots=plots,
     )
 
@@ -300,7 +289,7 @@ def build_table_blueprint(num_cameras: int, *, follow: FollowFrame) -> rrb.Bluep
         num_cameras,
         rig=RIG,
         run_source=schema.GT_RUN_SOURCE,
-        eye_controls=follow_eye(follow),
+        eye_controls=blueprints.follow_eye_controls(follow.forward, follow.up),
         front_pane=blueprints.camera_view("cam0", RIG, 0),
     )
 
@@ -557,6 +546,11 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         if base_done:
             print(f"  {locations.target} exists but {locations.sidecar} does not, so gt cannot be rebuilt from it; fetching the archive again")
 
+        # A machine that cannot encode AV1, or cannot unpack a volume set, should
+        # find out in a second rather than after a multi-gigabyte download.
+        require_av1_nvenc(resolve_ffmpeg())
+        if len(locations.archives) > 1:
+            resolve_seven_zip()
         self.enforce_raw_budget(source, locations.archives)
         # Both hub lookups happen before the archives are pulled and long before a
         # frame is encoded: neither a bad calibration nor a transient revision

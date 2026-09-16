@@ -25,12 +25,13 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import rerun as rr
-from jaxtyping import Float64, UInt8
+import rerun.blueprint as rrb
+from jaxtyping import UInt8
 from numpy import ndarray
-from scipy.spatial.transform import Rotation
 from serde import field, from_dict, serde
 
 from dataforge import schema
+from dataforge.aria import PublishedTransform
 from dataforge.video_encoding import require_av1_nvenc, resolve_ffmpeg
 
 NOISE_CEILING: int = 96
@@ -107,6 +108,43 @@ def read_back(rrd: Path) -> rr.experimental.ChunkStore:
     these recordings are a few dozen rows, so the list costs nothing.
     """
     return rr.experimental.ChunkStore.from_chunks(list(rr.experimental.RrdReader(rrd).stream()))
+
+
+def recording_properties(store: rr.experimental.ChunkStore, group: str) -> dict[str, object]:
+    """One property group's values (``property:<group>:*``), unwrapped from their one-row lists.
+
+    Properties live on the static ``/__properties`` entity, off every index, so
+    they need their own content-filtered read.
+    """
+    table: pa.Table = store.reader(index=None, contents="/__properties/**").to_arrow_table()
+    row: dict[str, list[object] | None] = table.to_pylist()[0]
+    prefix: str = f"property:{group}:"
+    return {name.removeprefix(prefix): values[0] for name, values in row.items() if name.startswith(prefix) and values}
+
+
+def eye_vector(batch: rr.components.Position3DBatch | rr.components.Vector3DBatch | None) -> list[float]:
+    """Read one three-component field back out of an ``EyeControls3D`` archetype.
+
+    Every field of the archetype is optional, so an unset one is a wiring failure
+    rather than a value worth asserting on.
+    """
+    assert batch is not None, "the follow eye sets every field it is read for"
+    return [float(value) for value in batch.as_arrow_array().flatten().to_pylist()]
+
+
+def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
+    """Every view in a blueprint, depth-first, whatever containers nest them."""
+    found: list[rrb.View] = []
+
+    def walk(node: rrb.View | rrb.Container) -> None:
+        if isinstance(node, rrb.View):
+            found.append(node)
+            return
+        for child in node.contents or ():
+            walk(child)
+
+    walk(blueprint.root_container)
+    return found
 
 
 def column_rows(store: rr.experimental.ChunkStore, column: str) -> pa.Table:
@@ -233,24 +271,6 @@ class PublishedResolution:
     """Image width in pixels."""
     height: int
     """Image height in pixels."""
-
-
-@serde
-@dataclass(frozen=True)
-class PublishedTransform:
-    """A published rigid transform: a quaternion in x, y, z, w order and a translation."""
-
-    qvec: list[float]
-    """Rotation as ``[x, y, z, w]`` — pycolmap's order, which the official tooling reads it with."""
-    tvec: list[float]
-    """Translation in metres."""
-
-    def to_matrix(self) -> Float64[ndarray, "4 4"]:
-        """The same transform as a 4x4."""
-        matrix: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
-        matrix[:3, :3] = Rotation.from_quat(np.asarray(self.qvec, dtype=np.float64)).as_matrix()
-        matrix[:3, 3] = self.tvec
-        return matrix
 
 
 @serde

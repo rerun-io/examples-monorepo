@@ -735,12 +735,10 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         if not poses.times_ns.size:
             print(f"  warning: no head poses in {head_pose_path}; the quest rig stays unposed")
             return
-        # The csv is read as float32 and Rerun's transform components are float32 too,
-        # so widening here for the shared writer is exact — the same bytes land.
         log_pose_track(
             recording,
             schema.rig_path(plan.quest_rig),
             times_ns=poses.times_ns,
-            translations_xyz=poses.translations_xyz.astype(np.float64),
-            quaternions_xyzw=poses.quaternions_xyzw.astype(np.float64),
+            translations_xyz=poses.translations_xyz,
+            quaternions_xyzw=poses.quaternions_xyzw,
         )

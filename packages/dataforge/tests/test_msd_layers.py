@@ -16,7 +16,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import rerun as rr
-from conftest import calibration_fixture, column_rows, read_back
+from conftest import calibration_fixture, column_rows, read_back, recording_properties
 from jaxtyping import Float64, Int64
 from msd_hub import (
     FIXTURE_WORLD_R_RIG,
@@ -27,7 +27,6 @@ from msd_hub import (
     GT_PERIOD_NS,
     FakeHub,
     build_hub,
-    recording_properties,
 )
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
@@ -35,15 +34,9 @@ from scipy.spatial.transform import Rotation
 from dataforge import paths, schema
 from dataforge.basalt import BasaltPose, CalibratedCamera, load_calibration, rotate_camera_cw, upright_quarter_turns
 from dataforge.datasets.msd import MSD_DEVICES, MsdDataset, MsdDeviceChoice
-from dataforge.datasets.msd_layers import (
-    GT_TRAIL_RADIUS_UI_POINTS,
-    MEASURED_UP_WINDOW_NS,
-    WORLD_UP_VIEW_COORDINATES,
-    MeasuredUp,
-    measured_world_up,
-)
 from dataforge.euroc import GtTrajectory, TimestampedSamples, gt_trajectory
-from dataforge.logging_toolkit import ImuChannel
+from dataforge.logging_toolkit import TRAIL_RADIUS_UI_POINTS, ImuChannel
+from dataforge.world_up import MEASURED_UP_WINDOW_NS, WORLD_UP_VIEW_COORDINATES, MeasuredUp, measured_world_up
 
 VIEWER_AXIS_VECTORS: dict[int, tuple[float, float, float]] = {
     rr.encodings.ViewDir.Right.value: (1.0, 0.0, 0.0),
@@ -90,7 +83,7 @@ def test_the_world_up_axis_is_measured_by_rotating_the_accelerometer_into_the_wo
     rig_accel_xyz[times_ns >= MEASURED_UP_WINDOW_NS] = [0.1, -0.2, -9.81]
     gt: GtTrajectory = gt_trajectory(constant_pose_gt(times_ns, np.asarray(world_R_rig.as_quat(), dtype=np.float64)))
 
-    measured: MeasuredUp = measured_world_up(gt, ImuChannel(times_ns=times_ns, values_xyz=rig_accel_xyz))
+    measured: MeasuredUp = measured_world_up(gt.times_ns, gt.quaternions_xyzw, ImuChannel(times_ns=times_ns, values_xyz=rig_accel_xyz))
 
     assert measured.axis == "+y"
     # At rest the whole of gravity lands on that one axis.
@@ -400,7 +393,7 @@ def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail_of_segments(conve
         np.testing.assert_allclose(segment, path_xyz[[max(pose - 1, 0), pose]], atol=1e-6)
 
     static: dict[str, list[object]] = store.reader(index=None, contents=trail).to_arrow_table().to_pylist()[0]
-    assert static[f"{trail}:LineStrips3D:radii"] == [-GT_TRAIL_RADIUS_UI_POINTS], "the stroke is screen-space, not metric"
+    assert static[f"{trail}:LineStrips3D:radii"] == [-TRAIL_RADIUS_UI_POINTS], "the stroke is screen-space, not metric"
     assert f"{trail}:Points3D:positions" not in store.reader(index=schema.TIMELINE).to_arrow_table().column_names
 
 

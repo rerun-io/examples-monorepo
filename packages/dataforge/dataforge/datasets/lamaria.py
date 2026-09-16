@@ -41,6 +41,7 @@ are documented in ``packages/dataforge/README.md``.
 
 from __future__ import annotations
 
+import json
 import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -53,16 +54,20 @@ import rerun as rr
 import rerun.blueprint as rrb
 import serde
 import serde.json
-from jaxtyping import Bool, Float64, Int64
+from jaxtyping import Float64, Int64
 from numpy import ndarray
 from projectaria_tools.core import data_provider
 from scipy.spatial.transform import Rotation
+from serde import SerdeError
 from simplecv.camera_parameters import Fisheye62Parameters
+from simplecv.rig import CameraKind
 
 from dataforge import aria, blueprints, paths, schema, transports, writing
+from dataforge.archives import remove_tree
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
+    TRAJECTORY_COLOR,
     FrameKind,
     FrameSource,
     ImuChannel,
@@ -71,11 +76,13 @@ from dataforge.logging_toolkit import (
     log_imu,
     log_pose_track,
     log_rig_node,
+    log_trail_segments,
     log_video_stream,
     require_av1_nvenc,
     resolve_ffmpeg,
     time_column,
 )
+from dataforge.world_up import WORLD_UP_VIEW_COORDINATES, MeasuredUp, WorldUpAxis, measured_world_up
 
 LamariaSplit: TypeAlias = Literal["training", "test"]
 """Which half of the benchmark a sequence belongs to; only ``training`` ships ground truth."""
@@ -113,17 +120,11 @@ RIG: int = 0
 RIG_REFERENCE: str = "imu_00"
 """The rig frame *is* imu-right's, LaMAria's published body frame."""
 
-CameraKind: TypeAlias = Literal["grayscale", "rgb"]
-"""exoego:v2 content hint on a camera node: what a consumer will decode."""
-
 GtWorld: TypeAlias = Literal["mps", "lv95"]
 """Which world frame a sequence's ground truth is expressed in."""
 
 MPS_WORLD_MAX_INDEX: int = 10
 """Highest ``R_NN`` index posed in the MPS frame; ``R_11`` onwards is surveyed in LV95/LN02."""
-
-WorldUpAxis: TypeAlias = Literal["+x", "-x", "+y", "-y", "+z", "-z"]
-"""Signed axis of a world frame that gravity points *away* from."""
 
 WORLD_UP: WorldUpAxis = "+z"
 """The up axis every LaMAria world is documented to have, and what the gt layer
@@ -141,14 +142,6 @@ as unambiguous; below it the averaging window was not near rest and the warning 
 The five default sequences measure 0.92 to 1.01 g, so this leaves a visible margin
 for a wearer who is already moving at the start rather than tracking the corpus."""
 
-STANDARD_GRAVITY_MS2: float = 9.80665
-"""Standard gravity; ``measured_world_up`` reports its result as a fraction of this."""
-MEASURED_UP_WINDOW_NS: int = 2_000_000_000
-"""How much of a sequence's start ``measured_world_up`` averages over: a wearer has
-usually not started walking yet, so the mean there is nearly pure gravity."""
-
-GT_TRAJECTORY_COLOR: tuple[int, int, int] = (110, 180, 255)
-"""Fixed tint of the whole gt path; one trajectory is one quantity, not a per-row class."""
 GT_TRAJECTORY_WIDTH_UI_POINTS: float = 1.5
 """Line width of the gt path, in **screen** points rather than metres.
 
@@ -156,12 +149,7 @@ A LaMAria walk is 170 m to 1.1 km long, so the overview view frames hundreds of
 metres at once and any honest metric width is a small fraction of a pixel there
 (0.01 m over a 400 m shot is 0.06 px, i.e. invisible). Rerun reads a negative
 radius as UI points, which keeps the overview path one visible hairline at every
-zoom. The trail below stays metric on purpose: it rides the wearer in the Follow
-view, where real centimetres are the point."""
-GT_TRAIL_COLOR: tuple[int, int, int] = (255, 215, 90)
-"""Fixed tint of the recent-motion trail; warm, so it reads against the cool full path."""
-GT_TRAIL_RADIUS_M: float = 0.02
-"""Point radius of the trail, in metres, at the pGT's 20 Hz."""
+zoom. The trail is drawn by ``log_trail_segments``, whose stroke is screen-space too."""
 
 CONTROL_POINT_COLOR: tuple[int, int, int] = (120, 255, 160)
 """Tint of a fully surveyed (levelled) control point."""
@@ -186,27 +174,26 @@ CP_UV_RADIUS_PX: float = 4.0
 """Marker radius of a control-point detection, in pixels of the upright 480x640
 SLAM image; it is drawn in ``CONTROL_POINT_COLOR``, the same green as the 3D point."""
 
-FOLLOW_FORWARD: tuple[float, float, float] = (0.018, -0.967, -0.253)
-"""Where the wearer looks, in the rig (imu-right) frame.
+FOLLOW_FORWARD: tuple[float, float, float] = (-0.106, -0.617, -0.780)
+"""Where the wearer looks, in the rig (imu-right) frame: the mean optical axis of the
+SLAM stereo pair, levelled against ``FOLLOW_UP``.
 
-The Aria device frame *is* camera-slam-left's frame (``device_T_cam`` for
-``1201-1`` is the identity), so the published ``cam0.T_b_s`` rotation is
-``rig_R_cam0`` and its third column is that camera's optical axis (RDF) in the
-rig frame. Typed in from R_01_easy's published calibration; a test re-derives it
-from the reference fixture."""
-FOLLOW_UP: tuple[float, float, float] = (-0.198, 0.245, -0.949)
-"""The wearer's up, in the rig frame: the negated second column of the same
-rotation (RDF's ``y`` is image-down, and glasses are worn upright)."""
-FOLLOW_BACK_M: float = 0.9
-"""How far behind the wearer the follow eye sits, along their own forward."""
-FOLLOW_UP_M: float = 0.45
-"""How far above the wearer the follow eye sits, along their own up."""
-FOLLOW_AHEAD_M: float = 0.3
-"""How far ahead of the wearer the eye aims, so the shot leads the motion.
+The published ``cam0.T_b_s`` / ``cam1.T_b_s`` rotations are ``rig_R_cam``, and each
+third column is that camera's optical axis (RDF). Aria's SLAM cameras are angled
+outward, so one camera alone is yawed ~38 deg from where the wearer faces; the pair's
+mean cancels it (the same rule msd's ``follow_frame`` applies). Checked against the
+walking direction of the two worn sequences, ``sequence_1_19`` and ``sequence_4_11``,
+which agree with this axis within 0.5 and 8.5 deg. Typed in from R_01_easy's
+published calibration; a test re-derives it from the reference fixture."""
+FOLLOW_UP: tuple[float, float, float] = (-0.980, -0.067, 0.187)
+"""The wearer's up, in the rig frame: the negated **first** column of the same rotation.
 
-The three distances were tuned together on R_01_easy, for a shot that holds the
-three camera frusta and the last ten seconds of trail in view at once without the
-ground filling it."""
+Aria Gen1 records its cameras sideways, so the native image-up (RDF ``-y``) is the
+wearer's *left*; the frames are logged turned a quarter clockwise, and the turned
+image's up is the native ``-x``. Cross-checked against gravity: imu-right's
+accelerometer at rest on R_01_easy reads ``(-9.55, -0.52, 1.84)`` m/s^2, within 1 deg
+of this axis, and world ``+z`` brought into the rig frame with the pGT agrees.
+A test re-derives it from the reference fixture."""
 IMAGE_ROTATION_CW_DEG: int = 90
 """How far clockwise every logged frame, pinhole and 2D detection is turned from
 what the archive publishes. Aria Gen1 records its cameras sideways; a consumer
@@ -242,7 +229,7 @@ CAMERA_SPECS: dict[aria.AriaStreamId, CameraSpec] = {
 """One entry per camera stream a LaMAria VRS carries."""
 
 
-@serde.serde
+@serde.serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class SequenceRecord:
     """One sequence as ``download`` resolved it from the archive's index pages."""
@@ -261,7 +248,7 @@ class SequenceRecord:
     """Whether ``ground_truth/sparse/`` lists this sequence (only surveyed ones)."""
 
 
-@serde.serde
+@serde.serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class LamariaManifest:
     """``<root>/manifest.json``: what the archive held when ``download`` last ran."""
@@ -366,23 +353,6 @@ class GtTrajectory:
 
 
 @dataclass(frozen=True, slots=True)
-class WorldUp:
-    """A measurement of which world axis is up, and how much of gravity landed on it.
-
-    A dataclass and not a ``NamedTuple``: beartype resolves a NamedTuple's field
-    annotations as forward references, which a ``Literal`` alias like
-    ``WorldUpAxis`` is not.
-    """
-
-    axis: WorldUpAxis
-    """The dominant signed world axis of the mean upward acceleration."""
-    fraction_of_g: float
-    """The mean's component along that axis as a fraction of standard gravity. A health
-    check, not a calibration: near 1 means the window really was near rest and the axis
-    is unambiguous, much less means the mean is not gravity."""
-
-
-@dataclass(frozen=True, slots=True)
 class RecordingSummary:
     """What one written layer turned out to hold; ``convert`` prints a line per layer.
 
@@ -403,7 +373,7 @@ class RecordingSummary:
     """Path length of those poses, in metres."""
     num_detections: int = 0
     """Control-point detections written under the camera pinholes."""
-    world_up: WorldUp | None = None
+    world_up: MeasuredUp | None = None
     """This sequence's own gravity measurement, or ``None`` when it has no poses to rotate with."""
 
 
@@ -515,60 +485,16 @@ def rig_trajectory(pseudo_gt: aria.PseudoGt, *, rig_T_cam0: Float64[ndarray, "4 
     )
 
 
-def measured_world_up(gt: GtTrajectory, accel: ImuChannel, *, window_ns: int = MEASURED_UP_WINDOW_NS) -> WorldUp:
-    """Measure which world axis is up, from gravity as imu-right reads it.
-
-    LaMAria states its worlds are Z-up, and this is what checks the claim instead
-    of trusting it. An accelerometer at rest measures the *reaction* to gravity,
-    so its reading points **up**; imu-right *is* the rig frame, so rotating each
-    sample into the world with the ground truth's own orientation
-    (``world_R_rig @ a_rig``) and averaging yields a vector along the world's up
-    axis. Only the first couple of seconds count: a wearer has usually not
-    started walking yet, and the mean gets noisier the longer the window.
-
-    Args:
-        gt: The sequence's rig trajectory, whose rotations do the rotating.
-        accel: imu-right's accelerometer channel in m/s^2, on the same device clock.
-        window_ns: Length of the averaging window, from the first time both streams cover.
-
-    Returns:
-        The dominant signed world axis and the fraction of |g| it carried.
-
-    Raises:
-        ValueError: Either stream is empty, or they do not overlap inside the window.
-    """
-    if gt.times_ns.size == 0 or accel.times_ns.size == 0:
-        raise ValueError("measuring the world up axis needs both a gt pose and an accelerometer sample")
-    start_ns: int = max(int(gt.times_ns[0]), int(accel.times_ns[0]))
-    inside: Bool[ndarray, "n_samples"] = (accel.times_ns >= start_ns) & (accel.times_ns < start_ns + window_ns)
-    if not inside.any():
-        raise ValueError(f"no accelerometer sample within {window_ns / 1e9:g} s of {start_ns}, where the ground truth starts")
-
-    window_times_ns: Int64[ndarray, "n_window"] = accel.times_ns[inside]
-    after: Int64[ndarray, "n_window"] = np.clip(np.searchsorted(gt.times_ns, window_times_ns), 0, gt.times_ns.size - 1)
-    before: Int64[ndarray, "n_window"] = np.clip(after - 1, 0, gt.times_ns.size - 1)
-    nearest: Int64[ndarray, "n_window"] = np.where(
-        np.abs(gt.times_ns[before] - window_times_ns) <= np.abs(gt.times_ns[after] - window_times_ns), before, after
-    )
-    world_accel_xyz: Float64[ndarray, "n_window 3"] = Rotation.from_quat(gt.quaternions_xyzw[nearest]).apply(accel.values_xyz[inside])
-    mean_xyz: Float64[ndarray, "3"] = world_accel_xyz.mean(axis=0)
-
-    axis_index: int = int(np.argmax(np.abs(mean_xyz)))
-    # Axis names by column index, signed by the mean's own direction.
-    names: tuple[WorldUpAxis, ...] = ("+x", "+y", "+z") if mean_xyz[axis_index] >= 0.0 else ("-x", "-y", "-z")
-    return WorldUp(axis=names[axis_index], fraction_of_g=float(abs(mean_xyz[axis_index]) / STANDARD_GRAVITY_MS2))
-
-
 def validate_ground_truth(sequence: str, control_points: aria.ControlPointSet | None, trajectory: GtTrajectory) -> None:
     """Check the published ground truth against itself and against the walk.
 
-    Both failures a sequence's ground truth can have are caught here, before the
-    gt layer is written: a detection of a point the survey never published,
-    and a levelled point too far from where the wearer walked. Every point's tag
-    was photographed by these cameras, so that distance is the one check that
-    catches a wrong world frame or a missing origin translation, which no amount
-    of self-consistent maths would. No pose is nothing to measure against, so a
-    control-point-only sequence passes as it stands rather than being rejected.
+    A levelled point too far from where the wearer walked fails here, before the
+    gt layer is written. Every point's tag was photographed by these cameras, so
+    that distance is the one check that catches a wrong world frame or a missing
+    origin translation, which no amount of self-consistent maths would (the
+    document's own consistency is ``aria.read_control_points``' job). No pose is
+    nothing to measure against, so a control-point-only sequence passes as it
+    stands rather than being rejected.
 
     Args:
         sequence: Upstream sequence name, for the error messages.
@@ -576,15 +502,10 @@ def validate_ground_truth(sequence: str, control_points: aria.ControlPointSet | 
         trajectory: The rig's pose per published pGT stamp; may be empty.
 
     Raises:
-        ValueError: A detection names a point the survey never published, or a
-            levelled point sits further than ``CONTROL_POINT_MAX_DISTANCE_M``
+        ValueError: A levelled point sits further than ``CONTROL_POINT_MAX_DISTANCE_M``
             from the trajectory.
     """
     points: tuple[aria.ControlPoint, ...] = () if control_points is None else control_points.points
-    if control_points is not None:
-        unknown: set[str] = {detection.control_point for detection in control_points.detections} - {point.name for point in points}
-        if unknown:
-            raise ValueError(f"{sequence}: control point detection(s) name {', '.join(sorted(unknown))}, which the survey does not publish")
     if not trajectory.times_ns.size:
         return
     too_far: list[str] = []
@@ -654,7 +575,7 @@ def log_control_point_detections(
         recording: Destination recording stream.
         detections: Every detection of the sequence, sorted by stream then time.
         labels_by_name: Survey name → the label to draw, unlevelled suffix included;
-            ``validate_ground_truth`` has already proved it covers every detection.
+            ``aria.read_control_points`` has already proved it covers every detection.
     """
     for index, stream_id in enumerate(aria.CAMERA_STREAM_IDS):
         seen: list[aria.ControlPointDetection] = [detection for detection in detections if detection.stream_id == stream_id]
@@ -747,11 +668,6 @@ def read_accel(base_rrd: Path) -> ImuChannel:
     )
 
 
-def follow_eye() -> rrb.EyeControls3D:
-    """The wearer's chase camera: their own forward and up at this package's distances."""
-    return blueprints.follow_eye_controls(FOLLOW_FORWARD, FOLLOW_UP, back_m=FOLLOW_BACK_M, up_m=FOLLOW_UP_M, ahead_m=FOLLOW_AHEAD_M)
-
-
 def camera_views() -> list[rrb.Spatial2DView]:
     """One 2D pane per camera stream, labelled the way the VRS names it."""
     return [blueprints.camera_view(aria.STREAM_LABELS[stream_id], RIG, index) for index, stream_id in enumerate(aria.CAMERA_STREAM_IDS)]
@@ -771,7 +687,7 @@ def build_blueprint() -> rrb.Blueprint:
         camera_views(),
         rig=RIG,
         run_source=schema.GT_RUN_SOURCE,
-        eye_controls=follow_eye(),
+        eye_controls=blueprints.follow_eye_controls(FOLLOW_FORWARD, FOLLOW_UP),
         plots=[
             blueprints.sensor_plot("Gyroscope", schema.imu_path(RIG, 0), schema.gyro_path(RIG, 0)),
             blueprints.sensor_plot("Accelerometer", schema.imu_path(RIG, 0), schema.accel_path(RIG, 0)),
@@ -785,7 +701,7 @@ def build_table_blueprint() -> rrb.Blueprint:
         len(aria.CAMERA_STREAM_IDS),
         rig=RIG,
         run_source=schema.GT_RUN_SOURCE,
-        eye_controls=follow_eye(),
+        eye_controls=blueprints.follow_eye_controls(FOLLOW_FORWARD, FOLLOW_UP),
         front_pane=camera_views()[0],
     )
 
@@ -802,7 +718,10 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         path: Path = self.config.root / MANIFEST_NAME
         if not path.is_file():
             raise FileNotFoundError(f"no {MANIFEST_NAME} at {path}; run `dataforge-download lamaria` first")
-        return serde.json.from_json(LamariaManifest, path.read_text())
+        try:
+            return serde.json.from_json(LamariaManifest, path.read_text())
+        except (SerdeError, json.JSONDecodeError) as error:
+            raise ValueError(f"{path}: {error}") from error
 
     def source(self, record: SequenceRecord) -> LamariaSource:
         """Place one manifest record in the local official layout."""
@@ -952,7 +871,7 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
             try:
                 summary: RecordingSummary = self.write_recording(identity, source, work_dir=work_dir, target=target)
             except BaseException:
-                shutil.rmtree(work_dir, ignore_errors=True)
+                remove_tree(work_dir)
                 retained: int = source.vrs_path.stat().st_size if source.vrs_path.is_file() else 0
                 print(f"  kept {retained / 1e9:.2f} GB of VRS in {source.vrs_path.parent} so a retry resumes instead of refetching")
                 raise
@@ -974,7 +893,7 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
             print(f"skip gt {identity.sequence_key} → {gt_target}")
         else:
             gt: RecordingSummary = self.write_gt_recording(identity, source, base_rrd=target, target=gt_target)
-            measured: str = "" if gt.world_up is None else f", world up {gt.world_up.axis} at {gt.world_up.fraction_of_g:.2f} g"
+            measured: str = "" if gt.world_up is None else f", world up {gt.world_up.axis} at {gt.world_up.fraction:.2f} g"
             print(
                 f"done gt {identity.sequence_key} → {gt_target} "
                 f"({gt.num_poses} poses over {gt.trajectory_len_m:.1f} m, "
@@ -1048,10 +967,6 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
                 if stream.stream_id == aria.SLAM_LEFT_STREAM_ID:
                     num_frames = samples
             for index, imu in enumerate(streams.imus):
-                # imu-right *is* the rig frame, so its pose is the identity by
-                # construction; log_imu's default says so exactly, without the
-                # 1e-17 residue of inverting and re-multiplying one transform.
-                reference_imu: bool = imu.stream_id == aria.IMU_RIGHT_STREAM_ID
                 log_imu(
                     recording,
                     RIG,
@@ -1059,7 +974,7 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
                     gyro=imu.gyro,
                     accel=imu.accel,
                     name=aria.STREAM_LABELS[imu.stream_id],
-                    rig_T_imu=None if reference_imu else rr.Transform3D(translation=imu.rig_T_imu[:3, 3], mat3x3=imu.rig_T_imu[:3, :3]),
+                    rig_T_imu=rr.Transform3D(translation=imu.rig_T_imu[:3, 3], mat3x3=imu.rig_T_imu[:3, :3]),
                 )
             writing.send_capture_properties(
                 recording,
@@ -1118,13 +1033,13 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         trajectory: GtTrajectory = rig_trajectory(published, rig_T_cam0=aria.read_rig_T_cam0(source.calibration_path))
         validate_ground_truth(source.sequence, control_points, trajectory)
 
-        world_up: WorldUp | None = None
+        world_up: MeasuredUp | None = None
         if trajectory.times_ns.size:
-            world_up = measured_world_up(trajectory, read_accel(base_rrd))
-            if world_up.axis != WORLD_UP or world_up.fraction_of_g < WORLD_UP_MIN_FRACTION_OF_G:
+            world_up = measured_world_up(trajectory.times_ns, trajectory.quaternions_xyzw, read_accel(base_rrd))
+            if world_up.axis != WORLD_UP or world_up.fraction < WORLD_UP_MIN_FRACTION_OF_G:
                 print(
                     f"  warning: lamaria declares world up {WORLD_UP} but {source.sequence} measured {world_up.axis} "
-                    f"carrying {world_up.fraction_of_g:.2f} of |g|; the rrd still states the declared axis"
+                    f"carrying {world_up.fraction:.2f} of |g|; the rrd still states the declared axis"
                 )
 
         points: tuple[aria.ControlPoint, ...] = () if control_points is None else control_points.points
@@ -1133,7 +1048,7 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         }
         with writing.atomic_recording(target, recording_id=identity.recording_id) as recording:
             # The right-handed axes WORLD_UP names; every LaMAria world is Z-up.
-            rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True, recording=recording)
+            rr.log("/", WORLD_UP_VIEW_COORDINATES[WORLD_UP], static=True, recording=recording)
             if trajectory.times_ns.size:
                 # from_parent stays unset: the stored value is world_T_rig, the
                 # child-to-parent step, which is what every child frustum rides.
@@ -1145,29 +1060,23 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
                     quaternions_xyzw=trajectory.quaternions_xyzw,
                 )
                 # Two views of one trajectory: the static strip is the whole path for the
-                # overview, and the per-pose points are what the blueprint's cursor-relative
+                # overview, and the per-pose segments are what the blueprint's cursor-relative
                 # time range turns into a recent-motion trail in the Follow view.
                 rr.log(
                     schema.trajectory_path(schema.GT_RUN_SOURCE),
                     rr.LineStrips3D(
                         [trajectory.translations_xyz],
-                        colors=GT_TRAJECTORY_COLOR,
+                        colors=TRAJECTORY_COLOR,
                         radii=rr.components.Radius.ui_points(GT_TRAJECTORY_WIDTH_UI_POINTS),
                     ),
                     static=True,
                     recording=recording,
                 )
-                rr.log(
+                log_trail_segments(
+                    recording,
                     schema.trail_path(schema.GT_RUN_SOURCE),
-                    rr.Points3D.from_fields(colors=GT_TRAIL_COLOR, radii=GT_TRAIL_RADIUS_M),
-                    static=True,
-                    recording=recording,
-                )
-                rr.send_columns(
-                    schema.trail_path(schema.GT_RUN_SOURCE),
-                    indexes=[time_column(trajectory.times_ns)],
-                    columns=rr.Points3D.columns(positions=trajectory.translations_xyz),
-                    recording=recording,
+                    times_ns=trajectory.times_ns,
+                    translations_xyz=trajectory.translations_xyz,
                 )
             if points:
                 log_control_points(recording, points)
@@ -1184,7 +1093,7 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
                     trajectory_len_m=trajectory.length_m,
                     duration_s=trajectory.duration_s,
                     world_up=WORLD_UP,
-                    world_up_fraction_of_g=None if world_up is None else world_up.fraction_of_g,
+                    world_up_fraction_of_g=None if world_up is None else world_up.fraction,
                     control_point_count=len(points),
                     num_detections=0 if control_points is None else len(control_points.detections),
                     gt_world=gt_world(source.sequence),

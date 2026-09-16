@@ -20,7 +20,7 @@ import os
 import shutil
 import subprocess
 import threading
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -237,21 +237,3 @@ def mp4_frame_count(path: Path) -> int:
             return stream.frames
         return sum(1 for packet in container.demux(stream) if packet.pts is not None)
 
-
-def encode_image_files_to_mp4(paths: Sequence[Path], output: Path, *, fps: int, gop: int = 30, cq: int = 32, ffmpeg: Path | None = None) -> int:
-    """Encode a PNG sequence already on disk, reading one file at a time.
-
-    Args:
-        paths: PNG files in presentation order.
-        output: mp4 to write.
-        fps: Nominal frame rate; see ``encode_frames_to_mp4``.
-        gop: Keyframe interval in frames.
-        cq: NVENC constant-quality target.
-        ffmpeg: Binary to use; ``None`` resolves via ``resolve_ffmpeg()``.
-
-    Returns:
-        Number of frames fed into the encoder.
-    """
-    return encode_frames_to_mp4(
-        (path.read_bytes() for path in paths), output, source=FrameSource("png"), fps=fps, gop=gop, cq=cq, ffmpeg=ffmpeg
-    )

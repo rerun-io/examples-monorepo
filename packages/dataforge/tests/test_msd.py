@@ -19,9 +19,9 @@ import pyarrow as pa
 import pytest
 import rerun as rr
 import rerun.blueprint as rrb
-from conftest import calibration_fixture, column_rows, read_back
+from conftest import blueprint_views, calibration_fixture, column_rows, eye_vector, read_back, recording_properties
 from jaxtyping import Float64
-from msd_hub import REVISION_SHA, SEQUENCE, FakeHub, build_hub, recording_properties
+from msd_hub import REVISION_SHA, SEQUENCE, FakeHub, build_hub
 from numpy import ndarray
 
 from dataforge import blueprints, paths, schema
@@ -35,10 +35,9 @@ from dataforge.datasets.msd import (
     MsdDeviceChoice,
     MsdSource,
     build_blueprint,
-    follow_eye,
 )
-from dataforge.datasets.msd_layers import WORLD_UP_VIEW_COORDINATES
 from dataforge.identity import SequenceIdentity
+from dataforge.world_up import WORLD_UP_VIEW_COORDINATES
 
 
 def test_every_device_is_one_catalog_dataset_named_after_it() -> None:
@@ -100,23 +99,13 @@ def test_discover_ignores_collections_of_other_devices(monkeypatch: pytest.Monke
 
 
 
-def eye_vector(batch: rr.components.Position3DBatch | rr.components.Vector3DBatch | None) -> list[float]:
-    """Read one three-component field back out of an ``EyeControls3D`` archetype.
-
-    Every field of the archetype is optional, so an unset one is a wiring failure
-    rather than a value worth asserting on.
-    """
-    assert batch is not None, "the follow eye sets every field it is read for"
-    return [float(value) for value in batch.as_arrow_array().flatten().to_pylist()]
-
-
 def test_the_follow_eye_chases_the_headset_from_behind_and_above() -> None:
     """A chase camera: back along forward, up along up, aimed just ahead of the rig.
 
     The Index's frame goes in, so the numbers are readable by hand: 0.9 m back
     along +z and 0.45 m up along -x is (-0.45, 0, -0.9), looking at 0.3 m ahead.
     """
-    eye: rrb.EyeControls3D = follow_eye(FollowFrame(forward=(0.0, 0.0, 1.0), up=(-1.0, 0.0, 0.0)))
+    eye: rrb.EyeControls3D = blueprints.follow_eye_controls((0.0, 0.0, 1.0), (-1.0, 0.0, 0.0))
 
     assert eye_vector(eye.position) == pytest.approx([-0.45, 0.0, -0.9], abs=1e-6)
     assert eye_vector(eye.look_target) == pytest.approx([0.0, 0.0, 0.3], abs=1e-6)
@@ -268,6 +257,24 @@ def test_a_failed_encode_keeps_the_archive_and_clears_the_scratch(
     assert not (hub.root / "work" / SEQUENCE).exists()
     assert not paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity).exists()
     assert "kept 0.0" in capsys.readouterr().out
+
+
+def test_a_machine_that_cannot_encode_av1_fails_before_it_fetches_anything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing GPU encoder must cost a second, not a multi-gigabyte download."""
+    hub: FakeHub = build_hub(tmp_path, monkeypatch)
+
+    def refuse(_ffmpeg: Path) -> None:
+        raise RuntimeError("no av1_nvenc here")
+
+    monkeypatch.setattr(msd, "require_av1_nvenc", refuse)
+    dataset: MsdDataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+
+    with pytest.raises(RuntimeError, match="no av1_nvenc here"):
+        dataset.convert(identity, source, force=False)
+
+    assert hub.fetched == [], "the encoder check comes before the fetch, not after it"
+    assert not paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity).exists()
 
 
 def test_a_sequence_with_both_layers_already_written_is_skipped_without_fetching(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -489,21 +496,6 @@ def test_both_blueprints_serialize_for_every_device_layout(tmp_path: Path, devic
 
     assert default_path.stat().st_size > 0
     assert table_path.stat().st_size > 0
-
-
-def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
-    """Every view in a blueprint, depth-first, whatever containers nest them."""
-    found: list[rrb.View] = []
-
-    def walk(node: rrb.View | rrb.Container) -> None:
-        if isinstance(node, rrb.View):
-            found.append(node)
-            return
-        for child in node.contents or ():
-            walk(child)
-
-    walk(blueprint.root_container)
-    return found
 
 
 @pytest.mark.parametrize("device", ["index", "g2", "odyssey"])

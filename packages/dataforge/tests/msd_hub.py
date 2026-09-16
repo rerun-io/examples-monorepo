@@ -16,9 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import pyarrow as pa
 import pytest
-import rerun as rr
 from conftest import calibration_fixture, png_frame
 from jaxtyping import Float64
 from numpy import ndarray
@@ -229,16 +227,4 @@ def build_hub(
         revisions=revisions,
         archives=[root / f"{collection_path}/{SEQUENCE}.zip"],
     )
-
-
-def recording_properties(store: rr.experimental.ChunkStore, group: str) -> dict[str, object]:
-    """One property group's values (``property:<group>:*``), unwrapped from their one-row lists.
-
-    Properties live on the static ``/__properties`` entity, off every index, so
-    they need their own content-filtered read.
-    """
-    table: pa.Table = store.reader(index=None, contents="/__properties/**").to_arrow_table()
-    row: dict[str, list[object] | None] = table.to_pylist()[0]
-    prefix: str = f"property:{group}:"
-    return {name.removeprefix(prefix): values[0] for name, values in row.items() if name.startswith(prefix) and values}
 
