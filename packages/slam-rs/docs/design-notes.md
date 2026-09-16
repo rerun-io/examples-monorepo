@@ -7,25 +7,44 @@ this file is relative to `packages/slam-rs/`.
 
 ## Core modules
 
+### Layout
+
+| Path | What it is |
+|---|---|
+| `crates/slam-rs` | The core (`slam_rs` lib). No Python, no Rerun; the GPU frontend is its `gpu-wgpu` feature. |
+| `crates/slam-rs-py` | PyO3 `cdylib` built in place as `slam_rs/_core.so`. |
+| `crates/slam-rs-cli` | `slam-rs` binary: a placeholder. `version` is the only subcommand that does anything; a replay runs through the Python tools. |
+| `slam_rs/` | The Python package: stubs, Tyro entry points under `apis/`. |
+| `tools/` | Thin CLI shims over `slam_rs/apis/`. |
+| `slam.toml` | Runtime settings: estimator files and RoboCap camera selection/reader rules. Sensor calibration comes from the catalog. |
+| `benchmarks.toml` | Regression cases, tiers, hold-outs, frozen decode paths and lane baselines. |
+| `configs/` | Dataset VIO configurations and the `profiles/` overlays. |
+
+`Cargo.lock` is committed. `cargo` never runs during `pixi lock` or
+`pixi install`: the build is an explicit, cached pixi task.
+
+### Modules
+
 The core is being filled in stage by stage, bottom up. What is in it today:
 
 | Module | What it is |
 |---|---|
 | `lie` | `So3`/`Se3` over any `f32`/`f64` scalar: SO(3) operations through kornia-algebra, the adjoint, four SO(3) Jacobians and their inverses, the decoupled SE(3) pair, and the left-multiplied pose increment the estimator runs on. |
 | `types` | `TimeCamId`, `KeypointId`/`LandmarkId`, `AbsOrderMap`, `PoseState`/`PoseVelState`/`PoseVelBiasState` and the two fixed-linearization wrappers. |
-| `config` | `VioConfig`, read from the package's `configs/*_config.json`. |
+| `config` | `VioConfig`, read from the package's `configs/*_config.json`, plus the `port.*` overlay keys the profiles set. |
 | `calib` | `Calibration`: extrinsics, the six shipped camera models, the 9- and 12-parameter IMU bias calibrations, plus a constructor that takes what the Python catalog feed reports. |
 | `camera` | `pinhole`, `kb4` and `pinhole-radtan8` with basalt's 4-D homogeneous `project`/`unproject` and their analytic Jacobians (2x4 point, 2xN parameter, 4x2 and 4xN for unprojection), the `rpmax` and `z >= epsilonSqrt` domain checks, and a `CameraEnum` that dispatches without a vtable. `ds`, `eucm` and `ucm` parse but are rejected here. |
 | `image` | `ImageU16`: an owned flat 16-bit frame with an explicit row stride, the stride-aware `u8 << 8` widening basalt's readers do, and `interp`/`interp_grad`/`in_bounds` reproduced from `image.h` in the same arithmetic order. |
-| `pyramid` | The `PyramidBuilder` stage seam with an associated `Pyramid` type that lends nothing (geometry plus a copy into the caller's buffer), `PyramidU16` (one flat buffer per level, not basalt's packed mipmap) and `CpuPyramidBuilder`, whose `subsample` is bit-exact with `image_pyr.h:99-140`. |
+| `pyramid` | The `PyramidBuilder` stage seam with an associated `Pyramid` type that lends nothing (geometry plus a copy into the caller's buffer), `PyramidU16` (one flat buffer per level, not basalt's packed mipmap) and `CpuPyramidBuilder`, with a separable integer Gaussian filter and one final rounding, whose `subsample` is bit-exact with `image_pyr.h:99-140`. |
 | `landmark` | `StereographicParam` (`project`/`unproject` and both Jacobians), the three-parameter `Landmark` with its backup pair, and `LandmarkDatabase`: the host->target->landmark adjacency, the `min_num_obs = 2` sweep and `remove_keyframes`. Landmarks live in one id-sorted `Vec` behind a `BTreeMap` index rather than a per-landmark hash map, and every map is a `BTreeMap`, so iteration order is reproducible (D31). |
 | `ba_base` | `BundleAdjustmentBase`: the two window state maps, `get_pose_state_with_lin`, basalt's Huber-weighted `compute_error` with optional outlier collection, `compute_projections`, `compute_delta`, `backup`/`restore`, the reprojection residual and its three Jacobians from `ba_utils.h`, `computeRelPose`, and DLT `triangulate` using nalgebra SVD in f64. |
 | `imu` | Preintegration: `IntegratedImuMeasurement<S>` with basalt's midpoint propagation, covariance and bias-Jacobian recurrences, the 9-vector residual and its Jacobians, the LDLT square-root inverse covariance, the between-frames accumulation loop, gravity initialisation, and the 15-row IMU block the estimator whitens. |
-| `frontend` | The optical-flow frontend: `patterns` (Pattern52/51 from `patterns.h`; the other two are unreachable on every shipped config), `se2` (`AffineCompact2` and `Sophus::SE2::exp`), `ldlt` (Eigen's pivoted LDLT at 3x3), `patch` (the streaming inverse-compositional patch build), `tracker` (`PatchSoA`, `FlowTransforms`, the `SourcePatches`/`PatchTracker` stage traits and `CpuPatchTracker`), `detect` (basalt's centred cell grid over kornia-rs's FAST plus OpenCV's suppression), `flow` (`FrameToFrameOpticalFlow`, generic over the builder and tracker) and `parallel` (the explicit thread budget). |
+| `frontend` | The optical-flow frontend: `patterns` (Pattern52/51 from `patterns.h`; the other two are unreachable on every shipped config), `se2` (`AffineCompact2` and `Sophus::SE2::exp`), `ldlt` (Eigen's pivoted LDLT at 3x3), `patch` (the streaming inverse-compositional patch build), `tracker` (`PatchSoA`, `FlowTransforms`, the `SourcePatches`/`PatchTracker` stage traits and `CpuPatchTracker`), `detect` (basalt's centred cell grid over kornia-rs's FAST plus OpenCV's suppression), `flow` (`FrameToFrameOpticalFlow`, generic over the builder and tracker, with detection on demand) and `parallel` (the explicit thread budget). |
+| `gpu` | The CubeCL frontend behind `gpu-wgpu`: the kernels, the per-cell corner selection, the patch and track stages, the `ReadRelay` that lets one stage's download carry another's buffers, and the seam counters. |
 | `linearize` | The square-root linearization: `LandmarkBlock` (basalt's `[ J_p \| pad \| J_l \| r ]` buffer, the layout arithmetic of `landmark_block_abs_dynamic.hpp:83-96`, the Huber-weighted residual rows, three Householder reflections, back-substitution with its exact model cost change) and `LinearizationAbsQR`, which owns the blocks, the IMU blocks and the marginalization prior and produces `H`, `b`, `Q2Jp`, `Q2r` and `l_diff`. No damping and no Jacobian scaling: the fork comments every call site out and the port carries none of it (D34, D68). S34 uses nalgebra reflection and Givens operations with preallocated scratch. |
 | `marg` | Square-root marginalization: `MargHelper`'s rank-revealing flat Householder QR, `marginalizeHelperSqrtToSqrt` — the one routine of the three the shipped path reaches — plus the `marginalize()` mechanics of `sqrt_keypoint_vio.cpp:896-1178` given an explicit keep/marginalize schedule. The two squared-form routines, the complete orthogonal decomposition they inverted the marginalized block with, and `checkMargNullspace`/`checkEigenvalues` are **not** ported: `SqrtKeypointVio::new` refuses `vio_sqrt_marg` off, so nothing on any shipped config reaches them (D68). |
-| `qr` | In-place nalgebra reflections and Givens rotations over column-major storage. |
-| `estimator` | The Offline sliding-window driver: `process_frame` (cover, initialise, measure, optimise, marginalize), `schedule` (basalt's keyframe vote, the lazy keyframe budget and the keep/marginalize sets `marg` is given) and `optimize` (the Levenberg-Marquardt loop, with the per-frame `lambda` reset, the `lambda · diag(H)` damping and the shared 7-iteration budget). |
+| `qr` | In-place nalgebra reflections and Givens rotations over column-major storage and reusable scratch. |
+| `estimator` | The Offline sliding-window driver: `process_frame` (cover, initialise, measure, optimise, marginalize), `schedule` (basalt's keyframe vote, the lazy keyframe budget and the keep/marginalize sets `marg` is given) and `optimize` (the Levenberg-Marquardt loop, with the per-frame `lambda` reset, the `lambda · diag(H)` damping and the shared 7-iteration budget over reused scratch), and `frame_update`, the fast profile's between-keyframes solve. |
 
 Two conventions in `ba_base` are basalt deviating from its own papers, and the
 port keeps **both** halves of each. The reprojection residual is `pi(...) - z`,
@@ -379,7 +398,7 @@ are not a new ten-clip gate run; the targeted regression evidence is in D71.
 Measured device by device in the portability run of 2026-09-08, before the speed
 work of D72 to D78, on the two smoke clips and the eleven per-kernel tolerance
 tests on each. The speed column is that branch's; the fast profile's numbers on
-the same devices are in [the next section](#the-fast-profile-across-the-fleet):
+the same devices are in [the next section](#the-fast-profile-across-the-hosts):
 
 | device | driver → compiler | tolerance suite | the lane |
 |---|---|---|---|
@@ -405,7 +424,7 @@ host's.
 Do not run `vulkaninfo` on the Pi 5: it hangs in uninterruptible sleep and
 wedges the box's I/O. The tolerance suite is the probe.
 
-## The fast profile across the fleet
+## The fast profile across the hosts
 
 The three cleanup-gate clips on the S32 tip (`6da2fb78`), one pass per profile,
 unpinned, decode in the same process, tracker-call medians in ms for
@@ -557,18 +576,146 @@ Five GPU/fast rows each cover Mac mini and Spark smoke/release clips; measured
 hostnames, core hashes, repeat selection and before/after gate outputs are in
 [s36-13-wrapup.md](/tmp/fleet-artifacts/slam-rs/cuvslam/reports/s36/s36-13-wrapup.md).
 
+## Running the tools
+
+The pixi tasks run from anywhere in the repository; the `python tools/...`
+commands below run from `packages/slam-rs`. Install the environment and build
+the core:
+
+```bash
+pixi install -e slam-rs-dev
+pixi run -e slam-rs-dev --frozen slam-rs-build   # cargo build + install _core.so in place
+```
+
+Then replay a segment. `--stage vio` is the whole pipeline; `--stage input` (the
+default) logs only what the estimator is fed, and `--stage frontend` runs the
+optical flow over it and draws its keypoints:
+
+```bash
+cd packages/slam-rs
+pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio   # the smoke segment, in a viewer
+pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --rr-config.headless --rr-config.save data/replay-vio.rrd
+pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --segment <segment-id>       # another catalog segment
+pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --rrd base.rrd --gt-rrd gt.rrd   # a recording of your own
+pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --catalog rerun+http://dgx-spark:9988 --segment <any-segment-id>   # use another catalog
+```
+
+In a shell without `DISPLAY`, pass `--rr-config.headless` or the spawned viewer
+wedges the recording stream. A long segment still wants `--max-framesets`.
+
+The GPU frontend is the off-by-default `gpu-wgpu` cargo feature, through
+CubeCL and wgpu (Vulkan / Metal / DX12). It writes the in-place
+`slam_rs/_core.so`; `--gpu` selects that frontend and `--profile fast` the
+speed profile:
+
+```bash
+pixi run -e slam-rs-dev --frozen slam-rs-wgpu-build   # a core whose `--gpu` is wgpu
+pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --gpu                 # the default fast profile
+pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --gpu --profile reference  # the unmodified dataset config
+```
+
+Design notes: [the GPU lane](#the-gpu-lane), and
+[the portable lane, and the two silent failures](#the-portable-lane-and-the-two-silent-failures).
+
+On macOS everything above runs from the mac lane's environment, which is where
+that platform's `slam-rs` features are solved: `-e slam-rs-osx-dev` in place of
+`-e slam-rs-dev`.
+
+## Register a SLAM layer
+
+Run a registered RoboCap, msd-index, msd-g2 or msd-odyssey segment and replace
+its single `slam_rs` layer. The output directory must be visible at the same
+absolute path to both the worker and the catalog server:
+
+```bash
+pixi install -e slam-rs-cuda
+pixi run -e slam-rs-cuda --frozen slam-rs-wgpu-build
+pixi run -e slam-rs-cuda --frozen slam-rs-catalog-layer \
+  --catalog rerun+http://dgx-spark.ilish-ruler.ts.net:9988 \
+  --segment robocap__f408193e6447b3b0__s00000059 \
+  --output-dir /mnt/nas/datasets/robocap/rrd/slam_rs
+```
+
+Defaults are `fast`, automatic GPU frontend selection, and CUDA/NVDEC decoding
+when available. `--decode-device cpu` selects the reference PyAV pixel
+conversion; `--backend cpu` selects the CPU estimator frontend. On hosts without
+CUDA, use the existing `slam-rs` or `slam-rs-osx` environment.
+
+The offline command fetches the selected cameras' compressed packets together
+once, builds their timestamp index from that result, and keeps decoders alive
+for the whole catalog segment. CUDA uses SimpleCV's TorchCodec reader, GPU
+resize and grayscale conversion, then transfers small grayscale batches to the
+Rust API. After indexing and muxing, the feed releases the packet buffers and
+retains only muxed streams. Allow several times the encoded size for transient
+Arrow, muxing and decoder buffers. The existing bounded-window feed
+remains the default for other tools and cap use.
+
+The layer animates the existing rig and adds a full trajectory, a recent trail,
+start/end markers and run metadata, following the Basalt layout. It preserves
+the base videos, sensor data and calibration. One estimator spans the session's
+file rolls. A run must finish with a finite pose for every supplied frameset
+before replacing the result. The DataForge blueprint includes both old Basalt
+and new slam-rs paths. Repeated runs replace `slam_rs`; they do not create named
+run versions. This command registers only the derived `slam_rs` data layer.
+The base recording and its blueprint must already be registered; the command
+does not ingest raw data or register/change blueprints.
+The shared layout has no RoboCap-specific eye orientation. RoboCap ingestion
+continues to supply its calibrated follow-eye settings.
+
+Layer generation does not load ground truth. When separate scoring tools need
+ground truth, the feed isolates the catalog's registered `gt` RRD in a
+temporary local catalog. This prevents estimated rig poses from entering later
+ground-truth queries through merged layers. The worker must be able to read
+that registered URI; a `file://` URI requires the input storage mounted at the
+same path. An inaccessible source fails explicitly, without using merged poses
+as ground truth. No raw dataset files are parsed or copied.
+
+NVDEC's RGB-to-gray conversion can differ from PyAV's direct YUV-to-gray
+conversion. The decoder is recorded in layer metadata; changing it is a change
+to the estimator's pixels, not only its speed.
+
+## Profiles
+
+Each dataset names its configuration under `configs/`. A profile is a flat
+overlay in `configs/profiles/<name>.json`. `reference` is empty; `fast` is the
+default in every tracking tool.
+`fast` is three keys:
+
+```json
+{"config.vio_max_iterations": 7, "port.redetect_survivor_ratio": 0.85, "port.frame_update_max_iterations": 5}
+```
+
+Keys under `port.` select additional scheduling options. Their zero defaults
+retain per-frame detection and joint optimization. Unknown configuration or
+overlay keys raise `KeyError`, so a typo cannot silently change a run. The scheduling decisions are described in D75 and D76 below.
+
+The gate compares each clip with the baseline for the selected lane and
+profile. It allows at most 10% more ground-truth RMSE. The same-host speed
+clause allows at most 10% more median tracker time. Baselines record the core
+digest, host, frameset count, and measurement date.
+
+Every tracking tool takes `--profile reference|fast`: `replay.py`,
+`bench_track.py`, `gate.py`, `robocap_fleet.py`, and `robocap_probe.py`. In code,
+`slam_rs.reference.profiled_config_text(path, "fast")` returns the overlaid JSON.
+
+Design notes: [D74](#d74--speed-profile) the profile,
+[D75](#d75--redetect-on-demand-the-fast-profile-detects-when-camera-0-has-lost-tracks) detection on demand,
+[D76](#d76--the-fast-profile-solves-the-window-at-keyframes-and-the-newest-state-alone-between-them) the keyframe-gated solve.
+
 ## Python API
 
 ```python
 from pathlib import Path
 
 from slam_rs import _core
+from slam_rs.reference import profiled_config_text
 
 calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)  # the feed's dataclasses
 config = _core.VioConfig.from_json(Path("configs/msdmi_config.json").read_text())  # the dataset configuration
+config = _core.VioConfig.from_json(profiled_config_text(Path("configs/msdmi_config.json"), "fast"))  # or with the overlay
 config.optical_flow_image_safe_radius = 472.0    # settable per device, though the shipped file carries it
 
-vio = _core.Vio(calibration, config, threads=1)
+vio = _core.Vio(calibration, config, threads=1, gpu=False)   # gpu=True runs the frontend on this host's GPU
 vio.push_imu_batch(t_ns, gyro, accel)     # int64[n], float64[n, 3], float64[n, 3], uncalibrated
 result = vio.track(t_ns, [left, right])   # uint8[h, w] per camera
 result.status, result.world_from_rig      # VioStatus, [tx ty tz qx qy qz qw]
@@ -599,6 +746,7 @@ snapshot.landmark_hosts         # int64[p], the hosting keyframe's timestamp
 snapshot.lm_iterations, snapshot.lm_lambda, snapshot.num_observations
 snapshot.lm_error_before, snapshot.lm_error_after
 snapshot.timings_ms             # the six estimator stages, milliseconds
+snapshot.frame_update           # whether the between-keyframes update ran
 
 frame = vio.flow_frame()        # the keypoints of the last accepted frameset, or None
 ```
@@ -705,6 +853,33 @@ calibration offsets are retained separately and are never applied a second time.
 
 ## The feed, the metrics and the replay tool
 
+The library reads one thing: a recording in the dataforge rig schema. One base
+`.rrd` per sequence carries the rig calibration, one video stream per camera and
+the IMU stream. Ground truth and results are separate layer files that stack onto
+the same entity paths.
+
+The catalog is the dataset source for replay and gate checks. The gate
+stores segment selectors, sensor models, tiers, hold-outs and measured baselines;
+it stores no copied capture facts or layer fingerprints. Any msd-index / msd-g2 / msd-odyssey segment replays from the catalog.
+
+- Catalog replay: `tools/apps/replay.py --stage vio --segment <segment-id>`.
+  `--catalog` overrides the gate URL.
+- Local replay: `tools/apps/replay.py --stage vio --rrd base.rrd [--gt-rrd gt.rrd]`.
+  This explicit file pair runs through an in-process server.
+
+The outputs are an estimated trajectory CSV on the absolute device clock and
+an optional Rerun recording with the estimate, ground truth, landmarks, and
+window. Without a ground-truth layer, replay prints "ground truth absent, not scored".
+
+RoboCap s15 has no ground truth. Its catalog replay is compared with
+`tests/fixtures/robocap_s15_trajectory.csv`, recorded with our GPU fast core.
+This is a regression measurement, reported without an accuracy gate.
+`--reference-csv` selects another regression trajectory.
+
+In code the contract is three calls: `Calibration` is the rig, `Vio.push_imu`
+takes one IMU sample, `Vio.track` takes one synchronized frameset of `uint8`
+images. The feed is the only adapter between the recording and those calls.
+
 `slam_rs.catalog_feed` turns one segment into calibration and grayscale
 framesets, reading a catalog URL or local `.rrd` files served in process (no
 catalog server needed); its module docstring states the decisions that silently
@@ -719,9 +894,8 @@ pixi run -e slam-rs-dev --frozen python tools/apps/replay.py \
     --rr-config.headless --rr-config.save data/replay-smoke.rrd
 ```
 
-Both `--rr-config.headless` and `--rr-config.save` are honoured; in a shell
-without `DISPLAY`, pass `--rr-config.headless` or the spawned viewer wedges the
-recording stream.
+Both `--rr-config.headless` and `--rr-config.save` are honoured; see
+[Running the tools](#running-the-tools) for headless replay.
 
 ### `--stage frontend`, and the tracked keypoints
 
@@ -783,11 +957,8 @@ S34 replaces the C++ comparison gate with ground-truth checks through
 Every run must have enough tracked and associated poses, zero lost framesets,
 finite poses and measurements, and bounded extent relative to ground truth.
 
-For a matching lane/profile baseline, ground-truth RMSE may be at most **1.10 ×**
-the manifest baseline. Median tracker time has the same **1.10 ×** limit only
-on the baseline's recorded host. A different host reports timing without a speed
-verdict. Missing or other-lane baselines do not impose accuracy or speed bounds;
-the tracking, association, finiteness and extent checks still apply.
+The [Tests](#tests) section states the current baseline selection, accuracy and
+same-host speed limits, including missing-baseline behavior.
 
 Use the **smoke**, **release** and **listed** manifest tiers to choose clips.
 Baselines belong to their exact lane and profile; one lane's measurements are
@@ -804,14 +975,85 @@ catalog tests; an unavailable service is a failure, not a passing skip.
 
 ## Tests
 
-`pytest -q` runs synthetic tests and deselects `slow`. Rust property and
-regression tests require no external fixture bundle. Slow integration tests
-query the catalog and fail if it is unavailable.
+```bash
+pixi run -e slam-rs-dev --frozen slam-rs-build      # cargo build + install _core.so in place
+pixi run -e slam-rs-dev --frozen tests              # pytest (depends on the build)
+pixi run -e slam-rs-dev --frozen lint               # ruff
+pixi run -e slam-rs-dev --frozen typecheck          # pyrefly
+pixi run -e slam-rs-dev --frozen deadcode           # vulture
+pixi run -e slam-rs-dev --frozen slam-rs-clippy     # cargo clippy -D warnings
+pixi run -e slam-rs-dev --frozen slam-rs-rust-test  # cargo test --workspace (default features)
+pixi run -e slam-rs-dev --frozen slam-rs-version    # print the core version
+```
+
+The wgpu lane's gates run from the base feature on every Linux platform the package
+declares, and from `slam-rs-osx-dev` on the Mac, where Metal is the backend:
 
 ```bash
-pixi run -e slam-rs-dev --frozen tests
-pixi run -e slam-rs-dev --frozen pytest -m slow -q
+pixi run -e slam-rs-dev     --frozen slam-rs-wgpu-clippy  # the portable lane compiles and is warning-clean, tests included
+pixi run -e slam-rs-dev     --frozen slam-rs-wgpu-test    # workspace tests with wgpu; five nonempty GPU binary checks
+pixi run -e slam-rs-dev     --frozen slam-rs-wgpu-doc     # rustdoc with warnings denied
+pixi run -e slam-rs-osx-dev --frozen slam-rs-wgpu-doc     # the same strict docs through the Mac lane
+pixi run -e slam-rs-osx-dev --frozen slam-rs-wgpu-test    # workspace tests with wgpu through Metal
 ```
+
+Fast tests use synthetic inputs and Hypothesis properties; they finish in
+seconds and need no recordings. `pytest -q` deselects `slow`. Rust property
+and regression tests require no external fixture bundle; unavailable catalogs
+fail slow integration tests. Tests that read recordings are marked `slow`
+and use the catalog. They check layer fingerprints, rig geometry, decode
+consistency, exported clocks, and the smoke gate.
+
+The ground-truth gate requires zero lost framesets, at least
+`MIN_ASSOCIATED_POSES` estimate poses associated with ground truth, finite
+measurements, and an estimated extent no greater than `DIVERGENCE_FACTOR`
+times the truth's extent. The gate prefers a baseline for the host, lane and profile; if absent, it uses
+the first row for that lane/profile. With that baseline, RMSE must be at most
+`1.10 * baseline.gt_rmse_cm`. A missing lane/profile baseline prints "no baseline"
+and leaves accuracy ungated; tracking and validity clauses still apply.
+
+The gate measures the median over all accepted tracker calls. It must be at most `1.10 * baseline.median_tracker_ms` only on the
+baseline host with the matching lane/profile. Elsewhere the row prints the
+measurement and "speed not gated on this host".
+
+```bash
+cd packages/slam-rs
+pixi run -e slam-rs-dev --frozen pytest -q
+pixi run -e slam-rs-dev --frozen pytest -m slow -q
+pixi run -e slam-rs-dev --frozen pytest -q -m slow -k "catalog or gate or robocap"
+pixi run -e slam-rs-dev --frozen python tools/apps/gate.py --gpu --tier release
+pixi run -e slam-rs-dev --frozen python tools/apps/gate.py --tier smoke
+pixi run -e slam-rs-dev --frozen python tools/apps/robocap_probe.py --gpu --rr-config.headless
+```
+
+The tiers are `smoke` (MIO10, MGO09), `release` (MIO07, MGO07, MIO14), and
+`listed` (the other five). The two hold-out flags remain excluded from tuning.
+
+### Patched dependencies
+
+`slam-rs-patch-deps` verifies the CubeCL archive SHA256, applies the checked-in
+channel park patch into `target/patch/`, and checks the prepared files on reuse.
+A process lock makes concurrent preparation safe. Cargo consumes that tree
+through `[patch.crates-io]`; the Pixi Cargo tasks prepare it first.
+
+Bare Cargo and rust-analyzer need this once per fresh checkout:
+
+```bash
+pixi run -e slam-rs-dev --frozen slam-rs-patch-deps
+# macOS: use -e slam-rs-osx-dev
+```
+
+`slam-rs-patch-test` resolves the prepared crate as a standalone package and
+runs offline. Fill each Cargo home's cache once from the package directory:
+
+```bash
+pixi run -e slam-rs-dev --frozen cargo fetch --locked --manifest-path target/patch/cubecl-common-0.11.0-pre.3/Cargo.toml
+pixi run -e slam-rs-dev --frozen slam-rs-patch-test
+```
+
+Use `slam-rs-osx-dev` on macOS. A missing `test-log` offline error means that
+cache is incomplete. The version-bump runbook is beside `[patch.crates-io]`
+in `Cargo.toml`.
 
 ## D70 — one GPU runtime: the CUDA lane is removed; wgpu is the GPU lane
 
@@ -1701,3 +1943,80 @@ The accepted PR 2 measurements are recorded in the
 All four met the 1.10 accuracy and latency bounds. The report records the
 MIO14 investigation, final replay and saved Viewer pixel evidence. These are
 PR 2 measurements, not new measurements from this documentation-only change.
+
+## What is next
+
+Not in this branch, in the order they are likely to matter:
+
+- **Metal.** Close the two-camera 1.2x gap. Measure persistent staging and
+  in-place `ComputeClient::write` uploads, then the cold read hand-off. A
+  SIMD-local KLT reduction redesign is a later option; changed reduction order
+  must pass accuracy gates on every lane. Four KLT iterations and a simple
+  32-thread mapping were tested and rejected.
+- **A second core.** One core was the rule for this branch. The between-keyframes
+  solve and the frontend's host work are independent enough to overlap.
+- **The Python seam.** 0.14 ms a frameset between the feed and `Vio.track`,
+  fixed across clips: a tenth of a fast `MIO10` call.
+- **More datasets.** Camera-only datasets (Assembly101, HO-Cap, the WildCap sets)
+  need a vision-only estimator alongside the VIO. Aria recordings need
+  the fisheye624 camera model.
+- **Results as a catalog layer.** One layer per segment with the estimated poses, the
+  landmarks and the keypoints on the base recording's entity paths, registered beside
+  the ground truth, so a run is browsed in the viewer, not in a CSV.
+- **Less code.** With ground-truth accuracy checks the Lie groups and the camera
+  models could move further into kornia-rs. S34 already uses nalgebra for QR,
+  the damped solve and SVD; the ground-truth gate checks further replacements.
+
+`slam.toml` holds runtime settings: estimator configuration paths and RoboCap
+camera selection and reader rules. Sensor noise, nominal rate and the applied
+timestamp correction come from static catalog metadata on the IMU node.
+`benchmarks.toml` holds regression cases, tiers, hold-outs, frozen decode paths,
+measured lane/profile baselines and RoboCap's regression trajectory path.
+Normal catalog processing loads only `slam.toml`; evaluation commands load both.
+Camera geometry and capture facts also come from the catalog. The normal
+`slam-rs-catalog-layer` command constructs calibration entirely from these
+fields. Regression probes may still compare against their frozen Basalt files.
+Missing calibration stops VIO before video decoding; no Cap A model is silently
+substituted for another device.
+
+```python
+from slam_rs.config import SlamConfig, load_slam_config
+
+settings: SlamConfig = load_slam_config()
+```
+
+Evaluation adds `benchmarks = load_benchmarks(settings)` from `slam_rs.reference`.
+`slam.toml` uses schema version 2 (the former IMU blocks are removed), while
+`benchmarks.toml` remains version 1. They replace the former combined `gate.toml`.
+
+For existing legacy RoboCap recordings, add metadata without re-encoding:
+
+```bash
+pixi run -e dataforge --frozen dataforge-robocap-calibration \
+  --catalog-url rerun+http://dgx-spark:9988 \
+  --root /mnt/nas/datasets/robocap \
+  --output-dir /mnt/nas/datasets/robocap/rrd/sensor_metadata
+```
+
+New DataForge RoboCap conversions include the same metadata in their base layer.
+`dataforge-register` also restores saved `sensor_metadata` files beside their
+base recordings after a catalog restart, without rereading factory calibration.
+The backfill uses camera names from the catalog and only the matching device's
+factory folder. The historical 14.902432 ms approximation is recorded separately
+from each camera's factory offset; its physical accuracy is not newly validated.
+
+For a dataset with a known Basalt IMU model whose importer has not adopted the
+shared metadata yet, import it explicitly. Select only recordings made with that
+model, and state the correction ingestion already applied (zero for the MSD
+recordings). This records provenance, not a new synchronization adjustment:
+
+```bash
+pixi run -e slam-rs --frozen slam-rs-import-imu-calibration \
+  --catalog rerun+http://dgx-spark:9988 --dataset msd-index \
+  --calibration /path/to/msdmi_calib.json --applied-time-shift-ns 0 \
+  --output-dir /mnt/nas/datasets/msd-rrd/sensor_metadata
+```
+
+The output path must be visible to the server. Use `--no-register` to prepare
+Basalt metadata locally, transfer it to server-visible storage, then register
+those files as `sensor_metadata`. Neither command alters the base or SLAM layers.
