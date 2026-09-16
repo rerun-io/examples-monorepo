@@ -1,239 +1,123 @@
-"""Shared exoego:v2 writers every dataforge converter reuses, plus the video encoder.
+"""exoego:v2 writers + video remux: the taps every dataforge converter reuses.
 
 These taps live together because every dataset needs them *identically* and each
 one hides an invariant that is easy to break silently: the rig node's honest key
 set, the ``Mp4Reader`` → ``send_chunks`` pass-through (which must not mint fresh
-row ids), the IMU/magnetometer nodes' mandatory static ``rig_T_sensor``, and the
-encoder's ban on B-frames.
+row ids), and the IMU/magnetometer nodes' mandatory static ``rig_T_sensor``.
 
-Datasets that ship image sequences instead of video get here through
-``encode_frames_to_mp4``: frames are piped straight into ffmpeg's stdin, so a
-converter never materializes a decoded frame tree on disk.
+The encoder that produces the mp4 these writers remux lives next door in
+``dataforge.video_encoding`` and is re-exported here, so a converter that
+encodes an image sequence and then logs it has one import to make.
 """
 
 from __future__ import annotations
 
-import contextlib
 import os
-import shutil
-import subprocess
-import threading
-from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
 
-import av
 import numpy as np
 import pyarrow as pa
 import rerun as rr
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
+from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
+from simplecv.rerun_log_utils import log_pinhole
+from simplecv.rig import CameraKind, PeerSensorKind
 
 from dataforge import schema
-
-FrameKind: TypeAlias = Literal["png", "gray8", "rgb24"]
-"""How one element of an encoder frame iterable is laid out."""
-
-RAW_PIXEL_FORMATS: dict[FrameKind, str] = {"gray8": "gray", "rgb24": "rgb24"}
-"""ffmpeg ``-pix_fmt`` name for each rawvideo frame kind."""
+from dataforge.video_encoding import (
+    RAW_PIXEL_FORMATS as RAW_PIXEL_FORMATS,
+)
+from dataforge.video_encoding import (
+    FrameKind as FrameKind,
+)
+from dataforge.video_encoding import (
+    FrameSource as FrameSource,
+)
+from dataforge.video_encoding import (
+    encode_frames_to_mp4 as encode_frames_to_mp4,
+)
+from dataforge.video_encoding import (
+    encode_image_files_to_mp4 as encode_image_files_to_mp4,
+)
+from dataforge.video_encoding import (
+    mp4_frame_count as mp4_frame_count,
+)
+from dataforge.video_encoding import (
+    require_av1_nvenc as require_av1_nvenc,
+)
+from dataforge.video_encoding import (
+    resolve_ffmpeg as resolve_ffmpeg,
+)
 
 VIDEO_SAMPLE_COMPONENT: str = "VideoStream:sample"
 """Component that marks an ``Mp4Reader`` chunk as carrying samples, not keyframe flags."""
+
+VIDEO_KEYFRAME_COMPONENT: str = "VideoStream:is_keyframe"
+"""Component of the trailing chunk that flags which samples are keyframes."""
+
+VideoChunkKind: TypeAlias = Literal["codec", "sample", "keyframe"]
+"""What one chunk out of an ``Mp4Reader`` stream is, by the components it carries."""
 
 IDENTITY_TRANSFORM: rr.Transform3D = rr.Transform3D(translation=[0.0, 0.0, 0.0], mat3x3=np.eye(3, dtype=np.float32))
 """Explicit identity pose; an argument-less ``Transform3D`` logs no components at all."""
 
 
-@dataclass(frozen=True, slots=True)
-class FrameSource:
-    """How the caller's frame iterable is laid out for ffmpeg's stdin."""
+def classify_video_chunk(record_batch: pa.RecordBatch) -> VideoChunkKind:
+    """Name one ``Mp4Reader`` chunk by its component set, or refuse to guess.
 
-    kind: FrameKind
-    """``"png"`` feeds encoded PNG bytes through ``image2pipe``; the raw kinds feed ``rawvideo`` planes."""
-    width: int | None = None
-    """Frame width in pixels; required for the raw kinds, which carry no header."""
-    height: int | None = None
-    """Frame height in pixels; required for the raw kinds, which carry no header."""
-
-    def __post_init__(self) -> None:
-        if self.kind == "png":
-            return
-        if self.width is None:
-            raise ValueError(f"a {self.kind} source needs an explicit width: rawvideo frames carry no header")
-        if self.height is None:
-            raise ValueError(f"a {self.kind} source needs an explicit height: rawvideo frames carry no header")
-
-    def input_args(self, *, fps: int) -> list[str]:
-        """ffmpeg input-side arguments that describe this layout on ``pipe:0``."""
-        if self.kind == "png":
-            return ["-f", "image2pipe", "-framerate", str(fps), "-c:v", "png", "-i", "pipe:0"]
-        return [
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            RAW_PIXEL_FORMATS[self.kind],
-            "-s",
-            f"{self.width}x{self.height}",
-            "-framerate",
-            str(fps),
-            "-i",
-            "pipe:0",
-        ]
-
-
-def resolve_ffmpeg() -> Path:
-    """Locate the ffmpeg to encode with: ``DATAFORGE_FFMPEG`` first, then ``PATH``."""
-    override: str | None = os.environ.get("DATAFORGE_FFMPEG")
-    if override:
-        return Path(override)
-    found: str | None = shutil.which("ffmpeg")
-    if found is None:
-        raise FileNotFoundError("no ffmpeg on PATH; set DATAFORGE_FFMPEG to an NVENC-capable binary")
-    return Path(found)
-
-
-def require_av1_nvenc(ffmpeg: Path) -> None:
-    """Refuse an ffmpeg that cannot encode AV1 on the GPU, before any frame is read.
-
-    Checked up front because the alternative failure is a software AV1 encode
-    that takes hours on a full sequence and looks like a hang.
+    ``Mp4Reader`` emits three shapes and the retiming tap treats each one
+    differently, so which is which is decided here rather than by an ``else``
+    that would silently absorb a fourth shape a later reader adds: a static
+    ``codec`` chunk carrying no index at all, the per-GOP ``sample`` chunks whose
+    index *is* the presentation clock, and one trailing ``keyframe`` chunk
+    indexed on the same timeline but holding one row per keyframe rather than per
+    sample.
 
     Args:
-        ffmpeg: Binary to interrogate with ``-encoders``.
-    """
-    listed: subprocess.CompletedProcess[str] = subprocess.run(
-        [str(ffmpeg), "-hide_banner", "-encoders"], capture_output=True, text=True, check=False
-    )
-    if "av1_nvenc" in listed.stdout:
-        return
-    raise RuntimeError(
-        f"{ffmpeg} lists no av1_nvenc encoder; point DATAFORGE_FFMPEG at an NVENC-capable ffmpeg "
-        "(for example ~/.pixi/bin/ffmpeg on the fleet)."
-    )
-
-
-def encode_frames_to_mp4(
-    frames: Iterable[bytes],
-    output: Path,
-    *,
-    source: FrameSource,
-    fps: int,
-    gop: int = 30,
-    cq: int = 32,
-    ffmpeg: Path | None = None,
-) -> int:
-    """Encode an iterable of frames into an AV1 mp4 by piping them through ffmpeg.
-
-    Nothing is written to disk but the mp4: a dataset that ships PNG or raw
-    frames streams straight from its archive into ffmpeg's stdin. Two properties
-    are load-bearing for the Rerun side:
-
-    * **No B-frames** (``-bf 0``). ``rr.VideoStream`` rejects reordered samples,
-      and ``Mp4Reader`` would otherwise have to re-encode the file it was just
-      handed.
-    * **Sample count is verified** against the mp4 after ffmpeg exits, so a
-      short pipe (a truncated archive, a dead encoder) fails here rather than as
-      a silent timestamp/sample misalignment in ``log_video_stream``.
-
-    ffmpeg's stderr is drained by a thread while frames go into its stdin: both
-    pipes are finite, so writing a large frame while stderr sits full deadlocks.
-
-    Args:
-        frames: One encoded PNG (``kind="png"``) or one raw plane per frame.
-        output: mp4 to write; its parent directory must exist.
-        source: Layout of the ``frames`` elements.
-        fps: Nominal frame rate stamped into the container. Real per-sample
-            timestamps are applied later by ``log_video_stream(times_ns=...)``.
-        gop: Keyframe interval in frames.
-        cq: NVENC constant-quality target; lower is bigger and better.
-        ffmpeg: Binary to use; ``None`` resolves via ``resolve_ffmpeg()``.
+        record_batch: One chunk's batch, whose ``rerun:*`` schema metadata still
+            carries the entity path an unrecognized shape is reported against.
 
     Returns:
-        Number of frames fed into the encoder.
+        Which of the three shapes this batch is.
+
+    Raises:
+        ValueError: The batch is indexed on ``video_time`` but carries neither a
+            sample nor a keyframe column, so retiming it would be a guess.
     """
-    binary: Path = resolve_ffmpeg() if ffmpeg is None else ffmpeg
-    require_av1_nvenc(binary)
-    command: list[str] = [
-        str(binary),
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        *source.input_args(fps=fps),
-        "-vf",
-        "pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p",
-        "-c:v",
-        "av1_nvenc",
-        "-preset",
-        "p4",
-        "-rc",
-        "vbr",
-        "-cq",
-        str(cq),
-        "-bf",
-        "0",
-        "-g",
-        str(gop),
-        "-movflags",
-        "+faststart",
-        str(output),
-    ]
-    complaints: list[bytes] = []
-    fed: int = 0
-    process: subprocess.Popen[bytes] = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    assert process.stdin is not None and process.stderr is not None
-    drain: threading.Thread = threading.Thread(target=lambda: complaints.append(process.stderr.read()), daemon=True)  # pyrefly: ignore
-    drain.start()
-    try:
-        for frame in frames:
-            process.stdin.write(frame)
-            fed += 1
-    except BrokenPipeError:
-        pass  # ffmpeg already died; its stderr below says why
-    finally:
-        # Closing flushes, so an encoder that already died would raise here and
-        # mask the RuntimeError below that carries its stderr.
-        with contextlib.suppress(BrokenPipeError):
-            process.stdin.close()
-        returncode: int = process.wait()
-        drain.join()
-    if returncode != 0:
-        stderr_text: str = b"".join(complaints).decode(errors="replace").strip()
-        raise RuntimeError(f"ffmpeg exited {returncode} while encoding {output.name} after {fed} frames:\n{stderr_text}")
-
-    written: int = mp4_frame_count(output)
-    if written != fed:
-        raise ValueError(f"{output} holds {written} samples but {fed} frames were fed; the pipe lost data")
-    return fed
+    names: list[str] = list(record_batch.schema.names)
+    if schema.TIMELINE not in names:
+        return "codec"
+    if VIDEO_SAMPLE_COMPONENT in names:
+        return "sample"
+    if VIDEO_KEYFRAME_COMPONENT in names:
+        return "keyframe"
+    metadata: dict[bytes, bytes] = record_batch.schema.metadata or {}
+    entity_path: str = metadata.get(b"rerun:entity_path", b"<unknown entity>").decode(errors="replace")
+    raise ValueError(
+        f"{entity_path}: an Mp4Reader chunk indexed on {schema.TIMELINE} carries neither {VIDEO_SAMPLE_COMPONENT} "
+        f"nor {VIDEO_KEYFRAME_COMPONENT}, only {names}; the reader's chunk shapes changed and retiming it would be a guess"
+    )
 
 
-def mp4_frame_count(path: Path) -> int:
-    """Number of video samples in an mp4, from the container index."""
-    with av.open(str(path)) as container:
-        stream: av.video.stream.VideoStream = container.streams.video[0]
-        if stream.frames:
-            return stream.frames
-        return sum(1 for packet in container.demux(stream) if packet.pts is not None)
+def time_column(times_ns: Int64[ndarray, "n_samples"]) -> rr.TimeColumn:
+    """The ``video_time`` index column for one stream's sample times.
 
-
-def encode_image_files_to_mp4(paths: Sequence[Path], output: Path, *, fps: int, gop: int = 30, cq: int = 32, ffmpeg: Path | None = None) -> int:
-    """Encode a PNG sequence already on disk, reading one file at a time.
+    ``view`` rather than ``astype``: ``timedelta64[ns]`` and ``int64`` share a
+    layout, so the column reinterprets the caller's array instead of copying a
+    1 kHz stream's worth of stamps. That only holds for ``int64``, hence the
+    dtype check — a float clock would be reinterpreted as nonsense nanoseconds.
 
     Args:
-        paths: PNG files in presentation order.
-        output: mp4 to write.
-        fps: Nominal frame rate; see ``encode_frames_to_mp4``.
-        gop: Keyframe interval in frames.
-        cq: NVENC constant-quality target.
-        ffmpeg: Binary to use; ``None`` resolves via ``resolve_ffmpeg()``.
+        times_ns: Sample times on the ``video_time`` clock, in nanoseconds.
 
     Returns:
-        Number of frames fed into the encoder.
+        The index column every ``send_columns`` call in this package passes.
     """
-    return encode_frames_to_mp4(
-        (path.read_bytes() for path in paths), output, source=FrameSource("png"), fps=fps, gop=gop, cq=cq, ffmpeg=ffmpeg
-    )
+    assert times_ns.dtype == np.int64, f"video_time is an int64 nanosecond clock, got {times_ns.dtype}"
+    return rr.TimeColumn(schema.TIMELINE, duration=times_ns.view("timedelta64[ns]"))
 
 
 def log_rig_node(
@@ -302,6 +186,9 @@ def log_video_stream(
        indexed on the same timeline, with one row per keyframe. Only the sample
        chunks count toward ``sample_count`` and consume ``times_ns``; the keyframe
        chunk is retimed by looking its PTS up among the samples already seen.
+       ``classify_video_chunk`` names each shape from its components and refuses
+       an unrecognized one, so a reader that grows a fourth shape fails loudly
+       instead of having it silently retimed as a keyframe chunk.
 
     ``shift_ns`` and ``times_ns`` answer different questions and cannot be
     combined: a shift means "the file's own PTS are right, the origin is not",
@@ -327,8 +214,11 @@ def log_video_stream(
     if times_ns is not None and shift_ns != 0:
         raise ValueError("shift_ns and times_ns are mutually exclusive: a per-sample clock is not an offset from the file's own")
     sample_count: int = 0
-    consumed: int = 0
-    new_time_by_pts: dict[int, int] = {}
+    # Original PTS and replacement time of every sample chunk seen so far. The
+    # trailing keyframe chunk concatenates them once, rather than paying for a
+    # per-sample dict on a stream that can run to millions of frames.
+    seen_pts_ns: list[Int64[ndarray, "n_rows"]] = []
+    seen_times_ns: list[Int64[ndarray, "n_rows"]] = []
 
     def retimed(record_batch: pa.RecordBatch, index: int, values_ns: Int64[ndarray, "n_rows"]) -> list[rr.experimental.Chunk]:
         """Same batch, same row ids, new index values (still a ``duration("ns")``)."""
@@ -336,28 +226,41 @@ def log_video_stream(
         return rr.experimental.Chunk.from_record_batch(record_batch.set_column(index, record_batch.schema.field(index), column))  # invariant 3
 
     def tap(chunk: rr.experimental.Chunk) -> list[rr.experimental.Chunk]:
-        nonlocal sample_count, consumed
-        if schema.TIMELINE not in chunk.timeline_names:
-            return [chunk]  # invariant 1: the static codec chunk carries no index
+        nonlocal sample_count
         record_batch: pa.RecordBatch = chunk.to_record_batch()
+        kind: VideoChunkKind = classify_video_chunk(record_batch)  # invariant 5
+        if kind == "codec":
+            return [chunk]  # invariant 1: the static codec chunk carries no index
         index: int = record_batch.schema.get_field_index(schema.TIMELINE)
-        original_ns: Int64[ndarray, "n_rows"] = np.asarray(record_batch.column(index).cast(pa.int64()))
-        is_sample_chunk: bool = VIDEO_SAMPLE_COMPONENT in record_batch.schema.names  # invariant 5
-        if is_sample_chunk:
+        if kind == "sample":
             sample_count += record_batch.num_rows
         if times_ns is None:
-            return [chunk] if shift_ns == 0 else retimed(record_batch, index, original_ns + shift_ns)
-        if is_sample_chunk:
-            if consumed + record_batch.num_rows > times_ns.size:
+            # invariant 4: the file's own PTS are the clock, so a plain remux never
+            # reads the index out at all and a shift only adds a constant to it.
+            if shift_ns == 0:
+                return [chunk]
+            return retimed(record_batch, index, np.asarray(record_batch.column(index).cast(pa.int64())) + shift_ns)
+
+        original_ns: Int64[ndarray, "n_rows"] = np.asarray(record_batch.column(index).cast(pa.int64()))
+        if kind == "sample":
+            if sample_count > times_ns.size:
                 raise ValueError(f"{video_path.name} has more samples than the {times_ns.size} timestamps given")
-            replacement: Int64[ndarray, "n_rows"] = times_ns[consumed : consumed + record_batch.num_rows]
-            consumed += record_batch.num_rows
-            new_time_by_pts.update(zip(original_ns.tolist(), replacement.tolist(), strict=True))
+            replacement: Int64[ndarray, "n_rows"] = times_ns[sample_count - record_batch.num_rows : sample_count]
+            seen_pts_ns.append(original_ns)
+            seen_times_ns.append(replacement)
             return retimed(record_batch, index, replacement)
-        unseen: list[int] = [pts for pts in original_ns.tolist() if pts not in new_time_by_pts]
-        if unseen:
-            raise ValueError(f"{video_path.name}: keyframe PTS {unseen[:4]} precede their samples; the reader's chunk order changed")
-        return retimed(record_batch, index, np.array([new_time_by_pts[pts] for pts in original_ns.tolist()], dtype=np.int64))
+
+        # The trailing keyframe chunk. ``-bf 0`` forbids reordering, so the samples'
+        # PTS are one ascending array and a single searchsorted places every keyframe
+        # among them; comparing what it landed on is what catches a reader that
+        # started emitting the keyframes before their samples.
+        if not seen_pts_ns:
+            raise ValueError(f"{video_path.name}: a keyframe chunk arrived before any sample; the reader's chunk order changed")
+        sample_pts_ns: Int64[ndarray, "n_samples"] = np.concatenate(seen_pts_ns)
+        found: Int64[ndarray, "n_rows"] = np.searchsorted(sample_pts_ns, original_ns)
+        if int(found.max(initial=-1)) >= sample_pts_ns.size or not np.array_equal(sample_pts_ns[found], original_ns):
+            raise ValueError(f"{video_path.name}: keyframe PTS {original_ns[:4].tolist()} precede their samples; the reader's chunk order changed")
+        return retimed(record_batch, index, np.concatenate(seen_times_ns)[found])
 
     # A B-frame source (iPhone/insta360 HEVC) forces Mp4Reader into an FFmpeg
     # re-encode; everything else passes through untouched, and then these options
@@ -373,8 +276,8 @@ def log_video_stream(
         transcode=rr.experimental.Mp4TranscodeOptions(try_gpu=True, ffmpeg_override=ffmpeg_override),
     )
     recording.send_chunks(reader.stream().flat_map(tap))  # invariant 2
-    if times_ns is not None and consumed != times_ns.size:
-        raise ValueError(f"{video_path.name} holds {consumed} samples but {times_ns.size} timestamps were given")
+    if times_ns is not None and sample_count != times_ns.size:
+        raise ValueError(f"{video_path.name} holds {sample_count} samples but {times_ns.size} timestamps were given")
     return sample_count
 
 
@@ -386,6 +289,186 @@ class ImuChannel:
     """Sample times on the ``video_time`` clock, in nanoseconds."""
     values_xyz: Float64[ndarray, "n_samples 3"]
     """Scaled samples (rad/s for gyro, m/s^2 for accel)."""
+
+
+def _log_scalar_channel(recording: rr.RecordingStream, entity_path: str, channel: ImuChannel) -> None:
+    """Send one sensor channel's samples columnar on ``video_time``; an empty channel logs nothing."""
+    if channel.times_ns.size == 0:
+        return
+    rr.send_columns(
+        entity_path,
+        indexes=[time_column(channel.times_ns)],
+        columns=rr.Scalars.columns(scalars=channel.values_xyz),
+        recording=recording,
+    )
+
+
+def _log_sensor_node(recording: rr.RecordingStream, node: str, *, name: str, kind: PeerSensorKind, **extra: object) -> None:
+    """Tag one non-camera peer sensor node with the static pair exoego:v2 §6 requires.
+
+    The identity ``rig_T_sensor`` is **not** optional: a reader that cannot place
+    a sensor's samples in the rig frame has to special-case the writer instead.
+    ``**extra`` carries a sensor's own optional keys (the magnetometer's ``unit``).
+    ``kind`` is a ``PeerSensorKind`` and not the wider ``SensorKind``: this writer
+    logs no ``Pinhole``, so a camera word here would produce a camera node with
+    no calibration.
+    """
+    rr.log(node, IDENTITY_TRANSFORM, static=True, recording=recording)
+    rr.log(node, rr.AnyValues(drop_untyped_nones=True, name=name, kind=kind, **extra), static=True, recording=recording)
+
+
+def log_camera_node(
+    recording: rr.RecordingStream,
+    rig: int,
+    cam: int,
+    camera: PinholeParameters | Fisheye62Parameters,
+    *,
+    name: str,
+    kind: CameraKind,
+    image_plane_distance: float,
+    camera_model: str | None = None,
+    distortion_valid_radius: float | None = None,
+    image_rotation_cw_deg: int | None = None,
+) -> None:
+    """Tag one ``/world/rig_NN/cam_MM`` node and log its calibration under it.
+
+    The node's metadata and its ``rig_T_cam`` + ``Pinhole`` belong together: a
+    camera whose calibration lands without its ``name``/``kind`` reads as an
+    unlabelled frustum, and one whose metadata lands without its calibration
+    cannot be projected at all.
+
+    The optional keys are **named** rather than taken as ``**extra``: they are a
+    closed set that consumers read off the node, and a kwargs bag turns a
+    misspelt one into a silently different AnyValue key.
+
+    Args:
+        recording: Destination recording stream.
+        rig: Rig index owning the camera.
+        cam: Camera index within the rig.
+        camera: The camera's simplecv parameters (intrinsics, distortion, ``rig_T_cam``).
+        name: Human stream label (``"cam0"``, ``"left-eye"``, …).
+        kind: Image content; ``"grayscale"``, ``"rgb"`` or ``"depth"``.
+        image_plane_distance: Frustum length in metres.
+        camera_model: Projection the coefficients belong to (``"kb4"``,
+            ``"pinhole-radtan8"``), so a consumer need not infer it from the
+            distortion component; ``None`` leaves the key off.
+        distortion_valid_radius: Normalized image radius past which the model
+            stops holding, for the models that declare one; ``None`` leaves the
+            key off, which is what a model without such a limit means.
+        image_rotation_cw_deg: Clockwise rotation already applied to this
+            camera's encoded frames — and to the ``camera`` parameters above,
+            which describe the rotated image — so a consumer relating the video
+            to the raw sensor readout knows how far it was turned. ``None``
+            leaves the key off, which is what an unturned camera means: a
+            logged ``0`` would state a decision where none was needed.
+    """
+    # drop_untyped_nones is AnyValues' default, but it is stated because callers
+    # rely on it: a kb4 camera passes distortion_valid_radius=None to mean "this
+    # model has no such radius", and the key must be absent rather than logged as
+    # an untyped null.
+    rr.log(
+        schema.cam_path(rig, cam),
+        rr.AnyValues(
+            drop_untyped_nones=True,
+            name=name,
+            kind=kind,
+            camera_model=camera_model,
+            distortion_valid_radius=distortion_valid_radius,
+            image_rotation_cw_deg=image_rotation_cw_deg,
+        ),
+        static=True,
+        recording=recording,
+    )
+    log_pinhole(
+        camera,
+        cam_log_path=Path(schema.cam_path(rig, cam)),
+        image_plane_distance=image_plane_distance,
+        static=True,
+        recording=recording,
+    )
+
+
+def log_pose_track(
+    recording: rr.RecordingStream,
+    entity_path: str,
+    *,
+    times_ns: Int64[ndarray, "n_poses"],
+    translations_xyz: Float64[ndarray, "n_poses 3"],
+    quaternions_xyzw: Float64[ndarray, "n_poses 4"],
+) -> None:
+    """Send a temporal pose track columnar: one ``Transform3D`` per sample on ``video_time``.
+
+    The rig node's ``world_T_rig``, and every other track that animates an
+    entity, go through here so the quaternion layout stays one decision: Rerun
+    wants the scalar **last**, whatever order the source file wrote.
+
+    Args:
+        recording: Destination recording stream.
+        entity_path: Entity to animate, usually ``schema.rig_path(rig)``.
+        times_ns: Pose times on the ``video_time`` clock, in nanoseconds.
+        translations_xyz: Positions in metres.
+        quaternions_xyzw: Orientations, scalar last.
+    """
+    rr.send_columns(
+        entity_path,
+        indexes=[time_column(times_ns)],
+        columns=rr.Transform3D.columns(translation=translations_xyz, quaternion=quaternions_xyzw),
+        recording=recording,
+    )
+
+
+def log_trail_segments(
+    recording: rr.RecordingStream,
+    entity_path: str,
+    *,
+    times_ns: Int64[ndarray, "n_poses"],
+    translations_xyz: Float64[ndarray, "n_poses 3"],
+    color: tuple[int, int, int],
+    radius_ui_points: float,
+) -> None:
+    """Send a motion trail columnar: one two-point ``LineStrips3D`` per pose, the step that reached it.
+
+    A trail is what a blueprint shows through a cursor-relative window, so it has
+    to be **per pose** rather than one growing strip — but a per-pose
+    ``Points3D`` draws it as dots, and at a 1 kHz sample rate a dot wide enough
+    to see is wider than the gap between samples, so the trail reads as a string
+    of scattered balls. One segment per pose, from the previous position to this
+    one, draws the same rows as a stroke the eye follows.
+
+    Two decisions the caller does not get to vary per row:
+
+    * **The first pose gets a zero-length segment**, so the trail has exactly as
+      many rows as the pose track it trails. One fewer would put the window a
+      sample out of step with the rig, which is worse than a strip the viewer
+      draws as nothing.
+    * **The tint and the width are static.** One trail is one quantity, not a
+      per-row class. The width is in ui points because it is a stroke on screen:
+      a metric radius would have to be re-picked for every device whose motion
+      is on a different scale.
+
+    Args:
+        recording: Destination recording stream.
+        entity_path: Entity to draw the trail on, usually ``schema.trail_path(source)``.
+        times_ns: Pose times on the ``video_time`` clock, in nanoseconds.
+        translations_xyz: Positions in metres, in the same order as ``times_ns``.
+        color: Trail tint, RGB.
+        radius_ui_points: Stroke width in ui points; Rerun carries it as a
+            negative radius, which is what keeps it screen-space.
+    """
+    rr.log(
+        entity_path,
+        rr.LineStrips3D.from_fields(colors=color, radii=rr.Radius.ui_points(radius_ui_points)),
+        static=True,
+        recording=recording,
+    )
+    previous: Int64[ndarray, "n_poses"] = np.maximum(np.arange(times_ns.size, dtype=np.int64) - 1, 0)
+    segments_xyz: Float64[ndarray, "n_poses 2 3"] = np.stack([translations_xyz[previous], translations_xyz], axis=1)
+    rr.send_columns(
+        entity_path,
+        indexes=[time_column(times_ns)],
+        columns=rr.LineStrips3D.columns(strips=list(segments_xyz)),
+        recording=recording,
+    )
 
 
 def log_imu(recording: rr.RecordingStream, rig: int, imu: int, *, gyro: ImuChannel, accel: ImuChannel, name: str) -> None:
@@ -403,17 +486,9 @@ def log_imu(recording: rr.RecordingStream, rig: int, imu: int, *, gyro: ImuChann
         accel: Linear-acceleration samples in m/s^2; an empty channel is skipped.
         name: Human label for the device (e.g. ``"dev0"``, ``"oak-imu"``).
     """
-    for channel, entity_path in ((gyro, schema.gyro_path(rig, imu)), (accel, schema.accel_path(rig, imu))):
-        if channel.times_ns.size == 0:
-            continue
-        rr.send_columns(
-            entity_path,
-            indexes=[rr.TimeColumn(schema.TIMELINE, duration=channel.times_ns.astype("timedelta64[ns]"))],
-            columns=rr.Scalars.columns(scalars=channel.values_xyz),
-            recording=recording,
-        )
-    rr.log(schema.imu_path(rig, imu), IDENTITY_TRANSFORM, static=True, recording=recording)
-    rr.log(schema.imu_path(rig, imu), rr.AnyValues(name=name, kind="imu"), static=True, recording=recording)
+    _log_scalar_channel(recording, schema.gyro_path(rig, imu), gyro)
+    _log_scalar_channel(recording, schema.accel_path(rig, imu), accel)
+    _log_sensor_node(recording, schema.imu_path(rig, imu), name=name, kind="imu")
 
 
 HEADING_COLOR: tuple[int, int, int] = (255, 128, 0)
@@ -454,14 +529,8 @@ def log_magnetometer(
             ``None`` leaves the key off rather than guessing.
         heading_length_m: Length of the heading arrows, in metres.
     """
-    node: str = schema.mag_path(rig, mag)
+    _log_scalar_channel(recording, schema.field_path(rig, mag), field)
     if field.times_ns.size:
-        rr.send_columns(
-            schema.field_path(rig, mag),
-            indexes=[rr.TimeColumn(schema.TIMELINE, duration=field.times_ns.astype("timedelta64[ns]"))],
-            columns=rr.Scalars.columns(scalars=field.values_xyz),
-            recording=recording,
-        )
         norms: Float64[ndarray, "n_samples"] = np.linalg.norm(field.values_xyz, axis=1)
         measured: Bool[ndarray, "n_samples"] = norms > 0.0
         if measured.any():
@@ -469,9 +538,8 @@ def log_magnetometer(
             rr.log(schema.heading_path(rig, mag), rr.Arrows3D.from_fields(colors=HEADING_COLOR), static=True, recording=recording)
             rr.send_columns(
                 schema.heading_path(rig, mag),
-                indexes=[rr.TimeColumn(schema.TIMELINE, duration=field.times_ns[measured].astype("timedelta64[ns]"))],
+                indexes=[time_column(field.times_ns[measured])],
                 columns=rr.Arrows3D.columns(vectors=headings),
                 recording=recording,
             )
-    rr.log(node, IDENTITY_TRANSFORM, static=True, recording=recording)
-    rr.log(node, rr.AnyValues(name=name, kind="mag", unit=unit), static=True, recording=recording)
+    _log_sensor_node(recording, schema.mag_path(rig, mag), name=name, kind="mag", unit=unit)
