@@ -301,6 +301,14 @@ takes 63 minutes on the fast profile against 81 on the reference. The ten-clip
 gate's hardest clip, `MIO14_moving_props`, reads 9.72 cm on the reference (D71)
 and 6.37 cm on the fast profile.
 
+Two independent switches are on in everything below. The **fast profile** is the
+schedule: detection on demand and the joint window solve at keyframes only. The
+**GPU lane** is where the frontend runs: pyramid, detection and KLT as CubeCL kernels
+through wgpu/Vulkan, with the estimator on one CPU thread in every lane. The Basalt
+numbers, from the paper and from our C++ reference build, are CPU only. ATE does not
+depend on the lane: the ten gated clips match their CPU-lane baselines to within a few
+hundredths of a centimetre.
+
 <p align="center">
   <img src="media/msd-benchmark-2026-09-16.png" alt="slam-rs fast profile on the RTX 5090 GPU lane against Basalt on every Monado SLAM Dataset recording: ATE per recording on a log scale for the Index, G2 and Odyssey+ headsets, and whole-clip replay speed against the Basalt C++ reference on the ten gated clips" width="1000" />
 </p>
