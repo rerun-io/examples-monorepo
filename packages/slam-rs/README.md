@@ -272,62 +272,27 @@ decision is load-bearing: [the frontend](docs/design-notes.md#the-frontend-and-t
 
 ## Accuracy and speed
 
-The following tables record earlier profile comparisons. Current gate baselines
-are stored in `benchmarks.toml`.
-
-Latency is the synchronous `Vio.track` call, one CPU core, decode excluded,
-median over the clip after the first 60 framesets. ATE is RMSE against ground
-truth after rigid alignment. On the RTX 5090 through Vulkan, wgpu frontend,
-three interleaved rounds each:
-
-| clip | cameras | length | reference: ms / cm | fast: ms / cm | cuVSLAM: ms / cm |
-|---|---:|---:|---|---|---|
-| `MIO10_short_2_panorama` (the smoke segment) | 2 | 7.6 s | 5.12 / 1.50 | 1.38 / 1.55 | 1.20 / 4.00 |
-| `MIO11_short_3_backandforth` | 2 | 11 s | 4.73 / 2.47 | 1.35 / 2.76 | 1.04 / 2.54 |
-| `MIO07_mapping_easy` | 2 | 76 s | 5.7 / 2.08 | 1.39 / 2.10 | 1.00 / 1.77 |
-| `MGO07_mapping_easy` | 4 | 53 s | 10.2 / 2.29 | 2.10 / 2.37 | — |
-
-cuVSLAM is NVIDIA's tracker in its offline Inertial mode on the same frames; its
-mode for the four-camera rig runs without the IMU and is not comparable, so that
-cell is blank. `MIO11` is the one clip of the four where the fast profile misses
-its band, by 0.04 cm.
-
-Over the whole catalog — 64 recordings, 316 minutes of video, one pass per
-profile — the fast profile is inside its 10 % band on 51, more accurate than the
-reference on 32, and loses no frameset on any; its tracker call is 2.0x
-(msd-index), 2.35x (msd-g2) and 2.7x (msd-odyssey) shorter at the median.
-Replaying the 156 minutes of msd-index end to end on one core, decode included,
-takes 63 minutes on the fast profile against 81 on the reference. The ten-clip
-gate's hardest clip, `MIO14_moving_props`, reads 9.72 cm on the reference (D71)
-and 6.37 cm on the fast profile.
-
-Two independent switches are on in everything below. The **fast profile** is the
-schedule: detection on demand and the joint window solve at keyframes only. The
-**GPU lane** is where the frontend runs: pyramid, detection and KLT as CubeCL kernels
-through wgpu/Vulkan, with the estimator on one CPU thread in every lane. The Basalt
-numbers, from the paper and from our C++ reference build, are CPU only. ATE does not
-depend on the lane: the ten gated clips match their CPU-lane baselines to within a few
-hundredths of a centimetre.
-
 <p align="center">
   <img src="media/msd-benchmark-2026-09-16.png" alt="slam-rs fast profile on the RTX 5090 GPU lane against Basalt on every Monado SLAM Dataset recording: ATE per recording on a log scale for the Index, G2 and Odyssey+ headsets, and whole-clip replay speed against the Basalt C++ reference on the ten gated clips" width="1000" />
 </p>
 
+Every Monado SLAM Dataset recording on the catalog, one pass on 2026-09-16 with the
+fast profile and the GPU frontend on an RTX 5090. ATE is RMSE in centimetres against
+the catalog ground truth after rigid alignment. The Basalt column is the MSD paper's
+Table IV (causal, multi-camera, CPU): a reference point, not a paired run.
+
 <!-- msd-sweep:start -->
-### Every Monado SLAM Dataset recording, fast profile on the GPU
+Measured 2026-09-16 on `215ad203`, core `40c7ab243c22`, decode `cpu_gray8_dav1d_1thread`.
 
-One pass over all 64 recordings on the catalog: RTX 5090 (pablo-dl-server), GPU lane, fast profile, decode
-`cpu_gray8_dav1d_1thread`, git `215ad203`, core `40c7ab243c22`, measured 2026-09-16. ATE is RMSE in
-centimetres against the catalog ground truth after rigid SE(3) alignment, estimate-driven association, scale fixed at
-one. The Basalt column is the MSD paper's Table IV (Basalt, multi-camera build, causal), same units, its own alignment
-and its own decode; treat it as a reference point, not a paired measurement. `×` no estimate, `∞` over 10 m.
-
-| dataset | recordings | slam-rs median ATE cm | Basalt (paper) median ATE cm | slam-rs lost framesets | slam-rs more accurate on |
+| dataset | recordings | slam-rs median ATE cm | Basalt (paper) median ATE cm | lost framesets | slam-rs lower on |
 |---|---:|---:|---:|---:|---:|
 | msd-index | 33 | 20.14 | 19.80 | 0 | 16 / 33 |
 | msd-g2 | 15 | 8.53 | 7.00 | 0 | 8 / 15 |
 | msd-odyssey | 16 | 7.57 | 6.05 | 0 | 10 / 16 |
 | all | 64 | 10.97 | 11.20 | 0 | 34 / 64 |
+
+<details>
+<summary>Every recording: slam-rs ATE, the tracker call inside the replay, and the paper's Basalt ATE</summary>
 
 #### msd-index (Valve Index, 2 cameras)
 
@@ -407,22 +372,22 @@ and its own decode; treat it as a reference point, not a paired measurement. `×
 | MOO14_flickering_light | 5026 | 5026 / 0 | 10.42 | 1.57 | 11.3 |
 | MOO15_seated_screen | 19380 | 19380 / 0 | 273.64 | 1.33 | 81.5 |
 | MOO16_still | 20082 | 20082 / 0 | 0.55 | 1.28 | 3.4 |
+
+</details>
 <!-- msd-sweep:end -->
 
-#### Where the time goes on the 5090, fast profile, GPU lane
+Two switches are on in these numbers. The **fast profile** is the schedule: detection
+on demand and the joint window solve at keyframes only. The **GPU lane** runs the
+frontend (pyramid, detection, KLT) as CubeCL kernels through wgpu/Vulkan; the
+estimator is one CPU thread in every lane, and ATE does not depend on the lane.
 
-Measured on the same build and day as the table above, with the sweep sharing the GPU:
-py-spy native sampling for the replay split, the core's own stage timers for the
-tracker, and an Nsight Systems Vulkan API trace for the per-frameset call counts.
+### Where the time goes
 
-A full catalog replay is decode-bound: py-spy over `fleet_check` on `MIO07` and `MGO07`
-puts 73–75 % of samples in dav1d plus the gray8 reformat, 17–18 % in the tracker
-(9–10 % GPU glue, two thirds of it waiting on the device; 8 % estimator), 6 % in Python
-glue and 1 % each in the copy into the core and the catalog client.
+A catalog replay is decode-bound: 73–75 % of samples in dav1d and the gray8 reformat,
+17–18 % in the tracker, 6 % in Python glue (py-spy over `MIO07` and `MGO07`).
 
-Inside `Vio.track` the fast profile is bimodal, so the median and the mean answer
-different questions. Stage timers from `.npz` dumps on one pinned core, three
-interleaved rounds pooled, first 60 framesets dropped, milliseconds:
+Inside `Vio.track` the fast profile is bimodal. Stage timers from `.npz` dumps, one
+pinned core, three rounds pooled, first 60 framesets dropped, milliseconds:
 
 | stage | MIO10 median / mean / p95 | MGO07 median / mean / p95 |
 |---|---|---|
@@ -433,23 +398,36 @@ interleaved rounds pooled, first 60 framesets dropped, milliseconds:
 | `measure` (estimator) | 0.15 / 0.73 / 5.44 | 0.26 / 1.07 / 6.35 |
 | of which `optimize` (joint solve, 14 % of framesets) | 0.04 / 0.62 / 5.29 | 0.08 / 0.86 / 5.92 |
 
-The 86 % of framesets between keyframes cost about 1.2 ms (two cameras) or 1.9 ms
-(four), and that floor is the frontend round trip: per frameset the Vulkan trace shows
-1.8 `vkWaitSemaphores` (about 0.27 ms of waiting), 5.5 queue submits, 18.5 command
-buffers and 1.3 `vkAllocateMemory`. The 14 % keyframe framesets pay the joint window
-solve (`solver` 3.1–3.2 ms, `linearize` 1.5–2.0 ms at p95), which is CPU-only and is
-what lifts the mean and the p95. Against the S30-C reference-profile numbers on the
-same lane, `MIO10` went from 5.05 ms to 1.19 ms at the median: detection moved on
-demand (1.45 → 0.01 ms) and the window solve moved to keyframes. The two tracker
-numbers in this README differ by design: the sweep table reports the call inside a
-full replay with decode interleaved and no pinning (`MGO07` 3.04 ms); the stage table
-reports the same call isolated (1.94 ms).
+The median is the frontend round trip: 86 % of framesets never solve the window, and
+per frameset the Vulkan trace shows 1.8 semaphore waits (0.27 ms), 5.5 submits and
+1.3 memory allocations. The mean and p95 are the keyframe solve on the CPU (`solver`
+3.1–3.2 ms, `linearize` 1.5–2.0 ms at p95). The per-recording tracker column above is
+the same call inside a full replay, unpinned with decode interleaved, and reads about
+1.5× the isolated number.
 
-The fleet's fast-profile tracker medians below are milliseconds for
-`MIO10` / `MIO07` / `MGO07`. Ratios compare GPU with CPU on the same host.
-The 5090 values are the reference rows in `benchmarks.toml`; GB10 and M4 use the
-median of three matched runs per lane from S36. These are different measurement
-sessions, not a cross-machine timing budget.
+### Fast versus reference profile
+
+Tracker call on the 5090 GPU lane, median after the first 60 framesets, three
+interleaved rounds. cuVSLAM is NVIDIA's tracker in offline Inertial mode on the same
+frames; its four-camera mode runs without the IMU, so that cell is blank.
+
+| clip | cameras | length | reference: ms / cm | fast: ms / cm | cuVSLAM: ms / cm |
+|---|---:|---:|---|---|---|
+| `MIO10_short_2_panorama` (the smoke segment) | 2 | 7.6 s | 5.12 / 1.50 | 1.38 / 1.55 | 1.20 / 4.00 |
+| `MIO11_short_3_backandforth` | 2 | 11 s | 4.73 / 2.47 | 1.35 / 2.76 | 1.04 / 2.54 |
+| `MIO07_mapping_easy` | 2 | 76 s | 5.7 / 2.08 | 1.39 / 2.10 | 1.00 / 1.77 |
+| `MGO07_mapping_easy` | 4 | 53 s | 10.2 / 2.29 | 2.10 / 2.37 | — |
+
+Over the whole catalog (S32, 2026-09-10) the fast profile is within its 10 % band of
+the reference on 51 of 64 recordings, more accurate on 32, loses no frameset, and its
+tracker call is 2.0–2.7× shorter at the median.
+
+### Across the fleet
+
+Fast-profile tracker medians in milliseconds for `MIO10` / `MIO07` / `MGO07`, GPU
+against CPU on the same host. The 5090 rows are the `benchmarks.toml` baselines; GB10 and
+M4 are the median of three matched runs from S36. Different sessions, not a
+cross-machine budget.
 
 | device | backend | GPU vs CPU fast medians, ms | CPU/GPU | ≥1.2x, accuracy in band |
 |---|---|---|---|---|
@@ -458,17 +436,11 @@ sessions, not a cross-machine timing budget.
 | Apple M4 (Mac mini) | Metal | 4.59 / 4.76 / 5.97 vs 4.93 / 5.06 / 8.48 | 1.07x / 1.06x / 1.42x | MIO10 and MIO07 miss; MGO07 passes |
 | RTX 3060, x86-64 | Vulkan | not re-run since the S32 tip; box needs a driver reboot | — | not measured |
 
-The Metal lane's two sleeps are fixed: wgpu 30 replaces the HAL's 1 ms
-completion polling, and our CubeCL patch parks and wakes the idle device
-worker. The upload copy fix also ships. The Mac's two-camera clips still need
-about 0.5 ms less tracker time to meet the 1.2x margin. MIO14's unchanged Mac
-ATE is checked against its own host row. Passing that regression gate does not
-establish the GPU/CPU speed margin.
-
-See [S36 — the Metal lane's two sleeps](docs/design-notes.md#s36--the-metal-lanes-two-sleeps)
-for the reports, measured budget, rejected experiments and remaining work.
-The [S32 fleet table](docs/design-notes.md#the-fast-profile-across-the-fleet)
-remains as historical evidence.
+The Metal lane's two sleeps are fixed (wgpu 30 replaces the 1 ms completion poll, the
+CubeCL patch parks the idle worker); the Mac's two-camera clips still need about
+0.5 ms to meet the 1.2× margin. See
+[S36](docs/design-notes.md#s36--the-metal-lanes-two-sleeps) and the
+[S32 fleet table](docs/design-notes.md#the-fast-profile-across-the-fleet).
 
 ## Tests and gates
 
