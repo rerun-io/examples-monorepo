@@ -6,6 +6,8 @@ from dataforge.schema import (
     accel_path,
     cam_path,
     capture_property,
+    control_points_path,
+    cp_uv_path,
     field_path,
     gyro_path,
     heading_path,
@@ -52,6 +54,19 @@ def test_run_paths_are_nested_below_the_source() -> None:
     assert run_path("basalt") == "/world/runs/basalt"
     assert trajectory_path("basalt") == "/world/runs/basalt/trajectory"
     assert trail_path("basalt") == "/world/runs/basalt/trail"
+
+
+def test_surveyed_control_points_live_under_the_world_gt_node() -> None:
+    """exoego:v2 §5 keeps ground truth at ``/world/gt/...``, independent of the rig layout."""
+    assert control_points_path() == "/world/gt/control_points"
+
+
+def test_control_point_detections_hang_off_the_camera_that_saw_them() -> None:
+    """A 2D detection is a per-camera derived quantity, so it sits under that camera's pinhole."""
+    assert cp_uv_path(0, 1) == "/world/rig_00/cam_01/pinhole/cp_uv"
+    assert cp_uv_path(0, 1).startswith(pinhole_path(0, 1))
+    with pytest.raises(ValueError, match="non-negative"):
+        cp_uv_path(0, -1)
 
 
 def test_magnetometer_is_a_peer_sensor_of_the_imu() -> None:

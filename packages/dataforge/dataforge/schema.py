@@ -5,7 +5,9 @@ one ``video_time`` timestamp timeline everywhere, world-anchored rigs at
 ``/world/rig_NN``, cameras at ``.../cam_MM/pinhole/video``, and IMUs at the
 (previously reserved) ``.../imu_MM/{gyro,accel}``. dataforge is the first
 emitter of the IMU section (§8) and of the magnetometer section (§9), whose
-``.../mag_MM/{field,heading}`` is the same peer-sensor shape.
+``.../mag_MM/{field,heading}`` is the same peer-sensor shape, and of §5's
+surveyed control points (``/world/gt/control_points`` with per-camera
+``.../pinhole/cp_uv`` detections).
 """
 
 from __future__ import annotations
@@ -82,6 +84,16 @@ def field_path(rig: int, mag: int) -> str:
 def heading_path(rig: int, mag: int) -> str:
     """``.../mag_MM/heading`` — the field direction as a fixed-length Arrows3D."""
     return f"{mag_path(rig, mag)}/heading"
+
+
+def control_points_path() -> str:
+    """``/world/gt/control_points`` — a sequence's surveyed points, in the world frame."""
+    return "/world/gt/control_points"
+
+
+def cp_uv_path(rig: int, cam: int) -> str:
+    """``.../cam_MM/pinhole/cp_uv`` — control-point detections in that camera's image."""
+    return f"{pinhole_path(rig, cam)}/cp_uv"
 
 
 def run_path(source: str) -> str:

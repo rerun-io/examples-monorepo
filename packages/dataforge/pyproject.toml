@@ -61,15 +61,13 @@ ignore_names = [
     "log_message",
     # pytest's module-level skip marker.
     "pytestmark",
-    # lamaria's tyro-facing config fields, and the stub parameters a signature has
-    # to accept but a body has no use for.
+    # lamaria's tyro-facing config fields.
     "sequences",
     "keep_raw",
     "base_url",
-    "arguments",
-    "keywords",
-    "args",
-    # The GPU-encoder gate fixture: requested for its skip, never read.
+    # The GPU-encoder gate fixture: requested for its skip, never read. Naming it
+    # in @pytest.mark.usefixtures instead only moves the report to the fixture
+    # itself, since vulture does not read strings.
     "nvenc",
 ]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]

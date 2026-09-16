@@ -124,7 +124,7 @@ def require_av1_nvenc(ffmpeg: Path) -> None:
 
 
 def encode_frames_to_mp4(
-    frames: Iterable[bytes],
+    frames: Iterable[bytes | memoryview],
     output: Path,
     *,
     source: FrameSource,

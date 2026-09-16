@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import PublishedCamera, read_calibration_json  # pyrefly: ignore[missing-import]
 from jaxtyping import Float64
 from numpy import ndarray
 
@@ -45,11 +46,11 @@ PGT_WORLD_R_CAM0: Float64[ndarray, "3 3"] = np.array(
 
 
 def test_read_calibration_json_reads_both_slam_cameras() -> None:
-    published: dict[str, aria.PublishedCamera] = aria.read_calibration_json(REFERENCE_DIR / "R_01_easy.calibration.json")
+    published: dict[str, PublishedCamera] = read_calibration_json(REFERENCE_DIR / "R_01_easy.calibration.json")
     # ``imu0`` is deliberately absent: it is the body frame, so its T_b_s is the
     # identity by definition and its entry carries noise densities, not a camera.
     assert sorted(published) == ["cam0", "cam1"]
-    cam0: aria.PublishedCamera = published["cam0"]
+    cam0: PublishedCamera = published["cam0"]
     assert cam0.model == "RAD_TAN_THIN_PRISM_FISHEYE"
     assert (cam0.resolution.width, cam0.resolution.height) == (640, 480)
     assert len(cam0.params) == 16, "the published layout is [fx, fy, cx, cy, k0..k5, p0, p1, s0..s3]"
@@ -57,11 +58,38 @@ def test_read_calibration_json_reads_both_slam_cameras() -> None:
 
 
 def test_published_rig_T_cam_reads_the_quaternion_as_xyzw() -> None:
-    published: dict[str, aria.PublishedCamera] = aria.read_calibration_json(REFERENCE_DIR / "R_01_easy.calibration.json")
+    published: dict[str, PublishedCamera] = read_calibration_json(REFERENCE_DIR / "R_01_easy.calibration.json")
     rig_T_cam: Float64[ndarray, "4 4"] = published["cam0"].rig_T_cam.to_matrix()
     assert rig_T_cam[:3, 3] == pytest.approx([0.01678296927310889, -0.10892921838506506, 0.07605583988186104], abs=1e-12)
     assert rig_T_cam[:3, :3] == pytest.approx(CAM0_RIG_R_CAM, abs=1e-6)
     assert rig_T_cam[3].tolist() == [0.0, 0.0, 0.0, 1.0]
+
+
+# ── the clockwise quarter turn ───────────────────────────────────────────
+
+SLAM_NATIVE_HEIGHT_PX: int = 480
+"""What both SLAM cameras' published pixel coordinates are measured in, before the turn."""
+
+
+def test_rotate_uv_cw90_lands_the_principal_point_on_the_rotated_one() -> None:
+    """The pixel map has to agree with what rotating the *calibration* does.
+
+    ``rotate_camera_calib_cw90deg`` moves camera-slam-left's principal point from
+    (322.8956, 240.4446) to (238.5554, 322.8956) — measured in
+    ``test_aria_vrs.py`` — so a detection at the native principal point must land
+    exactly there, or a control point would draw a quarter turn away from its tag.
+    """
+    published: dict[str, PublishedCamera] = read_calibration_json(REFERENCE_DIR / "R_01_easy.calibration.json")
+    cx, cy = published["cam0"].params[2:4]
+
+    rotated_uv_px: Float64[ndarray, "n_points 2"] = aria.rotate_uv_cw90(
+        np.array([[cx, cy], [0.0, 0.0]], dtype=np.float64), native_height_px=SLAM_NATIVE_HEIGHT_PX
+    )
+
+    assert rotated_uv_px.shape == (2, 2)
+    assert rotated_uv_px[0] == pytest.approx([238.5554400439367, 322.895555771704], abs=1e-9)
+    # The native top-left corner is the rotated top-right one: u = h - 1, v = 0.
+    assert rotated_uv_px[1] == pytest.approx([SLAM_NATIVE_HEIGHT_PX - 1.0, 0.0], abs=1e-12)
 
 
 # ── pseudo ground truth ──────────────────────────────────────────────────
@@ -108,13 +136,10 @@ def test_read_control_points_marks_an_unknown_height() -> None:
 
 def test_read_control_points_reads_detections_per_stream() -> None:
     control_points: aria.ControlPointSet = aria.read_control_points(REFERENCE_DIR / "R_11_5cp.control_points.json")
+    # The stream is read off the image name's own prefix; the file's per-camera
+    # timestamp map, which is keyed by stream *label*, is not read at all.
     assert [detection.stream_id for detection in control_points.detections] == ["1201-1", "1201-1", "1201-2"]
     first: aria.ControlPointDetection = control_points.detections[0]
     assert first.control_point == "OB1881"
     assert first.timestamp_ns == 928783591225
     assert first.uv_px == pytest.approx([439.0790695728934, 105.161001582523], abs=1e-12)
-    # Image names start with the stream id, which is what the map is keyed by —
-    # the file itself keys this map by stream *label*.
-    assert set(control_points.timestamps) == {"1201-1", "1201-2"}
-    assert control_points.timestamps["1201-1"][928783591225] == "1201-1-00468-928.784.jpg"
-    assert control_points.timestamps["1201-2"][1010383591250] == "1201-2-02100-1010.384.jpg"
