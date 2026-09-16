@@ -30,7 +30,7 @@ from simplecv.camera_parameters import (
     PinholeParameters,
 )
 
-from live_rerun.rig import CameraSensor, RigCalibration, SensorKind, entity_id
+from live_rerun.rig import CameraKind, CameraSensor, RigCalibration, entity_id
 
 # DepthAI reports extrinsic translations in centimetres; simplecv / Rerun log in
 # metres. See getCameraExtrinsics docs and the calibration_reader example.
@@ -55,7 +55,7 @@ class OakCameraCalib:
     height: int
     k_matrix: Float[ndarray, "3 3"]
     distortion: list[float]
-    kind: SensorKind
+    kind: CameraKind
     ref_T_cam_cm: Float[ndarray, "4 4"] | None = None
 
 

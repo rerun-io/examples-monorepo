@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from simplecv.rig import (  # noqa: F401
     INDEX_WIDTH,
+    CameraKind,
     CameraSensor,
     Rig,
     RigCalibration,
@@ -24,6 +25,7 @@ from simplecv.rig import (  # noqa: F401
 
 __all__ = [
     "INDEX_WIDTH",
+    "CameraKind",
     "CameraSensor",
     "Rig",
     "RigCalibration",
