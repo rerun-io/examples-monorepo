@@ -2439,7 +2439,8 @@ description = "Start the local in-memory Rerun catalog on :51235 (own shell; kee
 [feature.slam-rs.tasks.slam-rs-register]
 # dataforge owns registration; the download mirrors its layer-major layout, so its
 # register tool works on the tree unchanged (Linux: dataforge is a linux-only dep).
-cmd = "python ../dataforge/tools/apps/register.py msd --device index && python ../dataforge/tools/apps/register.py msd --device g2 && python ../dataforge/tools/apps/register.py msd --device odyssey"
+# A headset with no downloaded files is skipped; dataforge refuses an empty device.
+cmd = "bash -c 'for d in index g2 odyssey; do compgen -G \"data/msd-rrd/base/msd-${d}__*.rrd\" > /dev/null || continue; python ../dataforge/tools/apps/register.py msd --device $d || exit 1; done'"
 cwd = "packages/slam-rs"
 env = { DATAFORGE_OUTPUT_ROOT = "data/msd-rrd", RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Register downloaded MSD recordings in the catalog (dataforge-register per headset)"
@@ -2450,23 +2451,18 @@ cwd = "packages/slam-rs"
 depends-on = ["slam-rs-build"]
 description = "Score catalog segments against ground truth and baselines"
 
-[feature.slam-rs.tasks.slam-rs-download-smoke]
-cmd = "test -e data/msd-rrd/.tier-smoke || (hf download pablovela5620/msd-rrd --repo-type dataset --local-dir data/msd-rrd --include 'base/*MIO10_short_2_panorama*' --include 'gt/*MIO10_short_2_panorama*' --include 'sensor_metadata/*MIO10_short_2_panorama*' --include 'base/*MGO09_short_1_updown*' --include 'gt/*MGO09_short_1_updown*' --include 'sensor_metadata/*MGO09_short_1_updown*' --include 'base/*MOO09_short_1_updown*' --include 'gt/*MOO09_short_1_updown*' --include 'sensor_metadata/*MOO09_short_1_updown*' && touch data/msd-rrd/.tier-smoke)"
+[feature.slam-rs.tasks.slam-rs-download-sample]
+# The smoke-tier clips of benchmarks.toml: one two-camera (Index) and one four-camera (G2), about 7 MB.
+cmd = "test -e data/msd-rrd/.sample || (hf download pablovela5620/msd-rrd --repo-type dataset --local-dir data/msd-rrd --include '*MIO10_short_2_panorama*' --include '*MGO09_short_1_updown*' && touch data/msd-rrd/.sample)"
 cwd = "packages/slam-rs"
-outputs = ["packages/slam-rs/data/msd-rrd/.tier-smoke"]
-description = "Download the MSD smoke recordings"
-
-[feature.slam-rs.tasks.slam-rs-download-release]
-cmd = "test -e data/msd-rrd/.tier-release || (hf download pablovela5620/msd-rrd --repo-type dataset --local-dir data/msd-rrd --include 'base/*msd-index__MIO_others__MIO10_short_2_panorama*' --include 'gt/*msd-index__MIO_others__MIO10_short_2_panorama*' --include 'sensor_metadata/*msd-index__MIO_others__MIO10_short_2_panorama*' --include 'base/*msd-index__MIO_others__MIO07_mapping_easy*' --include 'gt/*msd-index__MIO_others__MIO07_mapping_easy*' --include 'sensor_metadata/*msd-index__MIO_others__MIO07_mapping_easy*' --include 'base/*msd-index__MIO_others__MIO04_hand_shooter_hard*' --include 'gt/*msd-index__MIO_others__MIO04_hand_shooter_hard*' --include 'sensor_metadata/*msd-index__MIO_others__MIO04_hand_shooter_hard*' --include 'base/*msd-index__MIO_others__MIO14_moving_props*' --include 'gt/*msd-index__MIO_others__MIO14_moving_props*' --include 'sensor_metadata/*msd-index__MIO_others__MIO14_moving_props*' --include 'base/*msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_fight_2*' --include 'gt/*msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_fight_2*' --include 'sensor_metadata/*msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_fight_2*' --include 'base/*msd-g2__MGO_others__MGO09_short_1_updown*' --include 'gt/*msd-g2__MGO_others__MGO09_short_1_updown*' --include 'sensor_metadata/*msd-g2__MGO_others__MGO09_short_1_updown*' --include 'base/*msd-g2__MGO_others__MGO07_mapping_easy*' --include 'gt/*msd-g2__MGO_others__MGO07_mapping_easy*' --include 'sensor_metadata/*msd-g2__MGO_others__MGO07_mapping_easy*' --include 'base/*msd-g2__MGO_others__MGO14_flickering_light*' --include 'gt/*msd-g2__MGO_others__MGO14_flickering_light*' --include 'sensor_metadata/*msd-g2__MGO_others__MGO14_flickering_light*' --include 'base/*msd-g2__MGO_others__MGO01_low_light*' --include 'gt/*msd-g2__MGO_others__MGO01_low_light*' --include 'sensor_metadata/*msd-g2__MGO_others__MGO01_low_light*' --include 'base/*msd-g2__MGO_others__MGO13_sudden_movements*' --include 'gt/*msd-g2__MGO_others__MGO13_sudden_movements*' --include 'sensor_metadata/*msd-g2__MGO_others__MGO13_sudden_movements*' && touch data/msd-rrd/.tier-release)"
-cwd = "packages/slam-rs"
-outputs = ["packages/slam-rs/data/msd-rrd/.tier-release"]
-description = "Download the MSD release recordings"
+outputs = ["packages/slam-rs/data/msd-rrd/.sample"]
+description = "Download the two MSD sample recordings the smoke gate scores"
 
 [feature.slam-rs.tasks.slam-rs-download-all]
-cmd = "test -e data/msd-rrd/.tier-all || (hf download pablovela5620/msd-rrd --repo-type dataset --local-dir data/msd-rrd --include 'base/*' --include 'gt/*' --include 'sensor_metadata/*' && touch data/msd-rrd/.tier-all)"
+cmd = "test -e data/msd-rrd/.all || (hf download pablovela5620/msd-rrd --repo-type dataset --local-dir data/msd-rrd && touch data/msd-rrd/.all)"
 cwd = "packages/slam-rs"
-outputs = ["packages/slam-rs/data/msd-rrd/.tier-all"]
-description = "Download every MSD recording"
+outputs = ["packages/slam-rs/data/msd-rrd/.all"]
+description = "Download every MSD recording (about 15.5 GB)"
 
 [feature.slam-rs.tasks.slam-rs-catalog-layer]
 cmd = "python tools/apps/catalog_layer.py"

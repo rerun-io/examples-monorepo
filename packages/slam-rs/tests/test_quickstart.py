@@ -18,7 +18,7 @@ def test_the_checked_in_settings_point_at_a_local_catalog(settings: SlamConfig) 
 
 @pytest.mark.parametrize(
     "task",
-    ["slam-rs-serve", "slam-rs-register", "slam-rs-gate", "slam-rs-download-smoke", "slam-rs-download-release", "slam-rs-download-all"],
+    ["slam-rs-serve", "slam-rs-register", "slam-rs-gate", "slam-rs-download-sample", "slam-rs-download-all"],
 )
 def test_the_quickstart_tasks_exist(task: str) -> None:
     with (REPO / "pixi.toml").open("rb") as handle:
@@ -29,11 +29,18 @@ def test_the_quickstart_tasks_exist(task: str) -> None:
 def test_the_download_tasks_pull_from_the_public_dataset() -> None:
     with (REPO / "pixi.toml").open("rb") as handle:
         tasks: dict[str, dict[str, str]] = tomllib.load(handle)["feature"]["slam-rs"]["tasks"]
-    for name in ("slam-rs-download-smoke", "slam-rs-download-release", "slam-rs-download-all"):
+    for name in ("slam-rs-download-sample", "slam-rs-download-all"):
         assert "pablovela5620/msd-rrd" in tasks[name]["cmd"]
-    smoke: str = tasks["slam-rs-download-smoke"]["cmd"]
-    for clip in ("MIO10_short_2_panorama", "MGO09_short_1_updown", "MOO09_short_1_updown"):
-        assert clip in smoke
+    assert "--include" not in tasks["slam-rs-download-all"]["cmd"]
+
+
+def test_the_sample_is_exactly_what_the_smoke_gate_scores() -> None:
+    with (REPO / "pixi.toml").open("rb") as handle:
+        sample: str = tomllib.load(handle)["feature"]["slam-rs"]["tasks"]["slam-rs-download-sample"]["cmd"]
+    with (PACKAGE / "benchmarks.toml").open("rb") as handle:
+        smoke: list[str] = [seg["segment_id"] for seg in tomllib.load(handle)["segment"] if seg["tier"] == "smoke"]
+    assert smoke and all(segment_id.rsplit("__", 1)[-1] in sample for segment_id in smoke)
+    assert sample.count("--include") == len(smoke)
 
 
 def test_registration_is_dataforges_job() -> None:
@@ -43,7 +50,7 @@ def test_registration_is_dataforges_job() -> None:
     cmd: str | dict[str, str] = task["cmd"]
     env: str | dict[str, str] = task["env"]
     assert isinstance(cmd, str) and isinstance(env, dict)
-    assert cmd.count("dataforge/tools/apps/register.py msd --device") == 3
+    assert "dataforge/tools/apps/register.py msd --device $d" in cmd and "index g2 odyssey" in cmd
     assert env["DATAFORGE_OUTPUT_ROOT"] == "data/msd-rrd"
     assert not importlib.util.find_spec("slam_rs.apis.register")
     assert not (PACKAGE / "tools" / "apps" / "register.py").exists()
