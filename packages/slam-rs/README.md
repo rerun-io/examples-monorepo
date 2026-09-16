@@ -12,35 +12,39 @@ Linux x86-64, Linux aarch64 and macOS arm64.
 
 ## Quickstart
 
-Five commands from a fresh clone: build the core, fetch two short recordings of
-the [Monado SLAM Dataset](https://huggingface.co/datasets/pablovela5620/msd-rrd)
-(one two-camera, one four-camera, about 7 MB), start a local catalog, register them, and replay
-one. [pixi](https://pixi.sh) is the only prerequisite.
-
 ```bash
-pixi run -e slam-rs-dev slam-rs-build            # cargo build, installs the core in place (about two minutes)
-pixi run -e slam-rs-dev slam-rs-download-sample  # two clips from HuggingFace
-pixi run -e slam-rs-dev slam-rs-serve            # local catalog on :51235; keep it running in its own terminal
-pixi run -e slam-rs-dev slam-rs-register         # dataforge's register tool, one catalog dataset per headset
-cd packages/slam-rs && pixi run -e slam-rs-dev python tools/apps/replay.py --stage vio   # MIO10 in the viewer
+git clone https://github.com/rerun-io/examples-monorepo.git
+cd examples-monorepo/packages/slam-rs
+pixi run -e slam-rs slam-rs-demo
 ```
 
-Then score what you just ran against the checked-in baselines. The gate prints
-the ATE beside the baseline and pass or fail; on a host that recorded no
-baseline the speed clause is reported, not gated.
+One command: it builds the core (about two minutes the first time), fetches two
+short recordings of the
+[Monado SLAM Dataset](https://huggingface.co/datasets/pablovela5620/msd-rrd)
+(one two-camera, one four-camera, 7 MB), starts a local Rerun catalog,
+registers them, and opens the Index clip in the viewer with the estimate drawn
+against ground truth. The terminal prints the ATE when the clip ends. You need
+[pixi](https://pixi.sh), a screen, and Linux. The catalog stays running for
+the next run.
+
+Then, when you want more:
 
 ```bash
-pixi run -e slam-rs-dev slam-rs-gate --tier smoke
+pixi run -e slam-rs slam-rs-gate --tier smoke      # score the two clips against the checked-in baselines
+pixi run -e slam-rs slam-rs-download-all           # all 64 recordings, 15.5 GB
+pixi run -e slam-rs slam-rs-register               # picks up the new files; idempotent
+pixi run -e slam-rs slam-rs-gate --tier release    # the ten gated clips
+pixi run -e slam-rs slam-rs-wgpu-build             # the GPU frontend; then --gpu on any tool
+pixi run -e slam-rs python tools/apps/replay.py --stage vio --rrd base.rrd --gt-rrd gt.rrd   # your own recording, no catalog
 ```
 
-- No display: add `--rr-config.headless --rr-config.save out.rrd` to the replay.
-- GPU frontend: `pixi run -e slam-rs-dev slam-rs-wgpu-build` once, then `--gpu` on any tool.
-- macOS: `-e slam-rs-osx-dev` in place of `-e slam-rs-dev`. Registration goes through
-  dataforge, which is Linux only, so replay a downloaded clip with `--rrd`/`--gt-rrd`.
-- A recording of your own, no catalog: `replay.py --stage vio --rrd base.rrd --gt-rrd gt.rrd`.
-- All 64 recordings (15.5 GB): `slam-rs-download-all`, register again, then
-  `slam-rs-gate --tier release`.
-  Details in [docs/reproduce.md](docs/reproduce.md).
+The gate prints the ATE beside the baseline and pass or fail; on a host that
+recorded no baseline the speed clause is reported, not gated. `slam-rs-serve`
+starts the catalog by hand in its own terminal; registrations live in memory,
+so register again after a restart. On macOS use `-e slam-rs-osx`: the core,
+the GPU frontend and the `--rrd` replay work there, the catalog step does not,
+because registration goes through dataforge, which is Linux only. More in
+[docs/reproduce.md](docs/reproduce.md).
 
 ```mermaid
 flowchart TB
@@ -60,9 +64,8 @@ flowchart TB
     data ~~~ run
 ```
 
-The server keeps registrations in memory: after a restart, register again (a
-few seconds for a handful of files). The catalog server does the decoding and
-serving; slam-rs only ever sees grayscale framesets and IMU samples.
+The catalog server does the decoding and serving; slam-rs only ever sees
+grayscale framesets and IMU samples.
 
 ## Results
 

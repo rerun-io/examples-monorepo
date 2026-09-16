@@ -6,8 +6,8 @@ dataset, the release gate, and where the recordings came from.
 ## The whole dataset
 
 ```bash
-pixi run -e slam-rs-dev slam-rs-download-all       # all 64 recordings, about 15.5 GB
-pixi run -e slam-rs-dev slam-rs-register           # idempotent: only new files are added
+pixi run -e slam-rs slam-rs-download-all       # all 64 recordings, about 15.5 GB
+pixi run -e slam-rs slam-rs-register           # idempotent: only new files are added
 ```
 
 The downloads land in `packages/slam-rs/data/msd-rrd/`, one directory per
@@ -18,9 +18,9 @@ marker file, so pixi skips one that is already there.
 ## The gate
 
 ```bash
-pixi run -e slam-rs-dev slam-rs-gate --tier smoke              # two short clips
-pixi run -e slam-rs-dev slam-rs-gate --tier release            # the ten gated clips, CPU lane
-pixi run -e slam-rs-dev slam-rs-gate --tier release --gpu      # the same on the GPU lane
+pixi run -e slam-rs slam-rs-gate --tier smoke              # two short clips
+pixi run -e slam-rs slam-rs-gate --tier release            # the ten gated clips, CPU lane
+pixi run -e slam-rs slam-rs-gate --tier release --gpu      # the same on the GPU lane
 ```
 
 Every clip must track every frameset, associate enough poses with ground truth,
@@ -35,8 +35,8 @@ ones.
 
 ```bash
 cd packages/slam-rs
-pixi run -e slam-rs-dev python tools/apps/replay.py --stage vio --segment msd-g2__MGO_others__MGO07_mapping_easy
-pixi run -e slam-rs-dev python tools/apps/replay.py --stage vio --gpu --profile reference --segment msd-g2__MGO_others__MGO07_mapping_easy
+pixi run -e slam-rs python tools/apps/replay.py --stage vio --segment msd-g2__MGO_others__MGO07_mapping_easy
+pixi run -e slam-rs python tools/apps/replay.py --stage vio --gpu --profile reference --segment msd-g2__MGO_others__MGO07_mapping_easy
 ```
 
 `--stage input` (the default) logs only what the estimator is fed; `--stage
