@@ -4,7 +4,7 @@ Layout (relative to the overridable roots; defaults are package-local because
 pixi tasks run with ``cwd = packages/dataforge``):
 
     data/raw/<dataset>/...            upstream layout, untouched
-    data/dataforge/rrd/<layer>/<recording_id>.rrd
+    data/dataforge/rrd/<layer>/<recording_id>.rrd   layer in {base, gt}
     data/dataforge/rrd/blueprints/<name>[-table].rbl
 """
 
@@ -16,7 +16,10 @@ from pathlib import Path
 from dataforge.identity import SequenceIdentity
 
 BASE_LAYER: str = "base"
-"""The only layer dataforge v1 emits; the first path component under ``output_root()``."""
+"""Sensor layer: the recording every dataset emits; the first path component under ``output_root()``."""
+
+GT_LAYER: str = "gt"
+"""Ground-truth trajectory layer; sibling of base (same recording ids, own directory)."""
 
 
 def output_root() -> Path:
