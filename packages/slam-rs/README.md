@@ -301,6 +301,138 @@ takes 63 minutes on the fast profile against 81 on the reference. The ten-clip
 gate's hardest clip, `MIO14_moving_props`, reads 9.72 cm on the reference (D71)
 and 6.37 cm on the fast profile.
 
+<!-- msd-sweep:start -->
+### Every Monado SLAM Dataset recording, fast profile on the GPU
+
+One pass over all 64 recordings on the catalog: RTX 5090 (pablo-dl-server), GPU lane, fast profile, decode
+`cpu_gray8_dav1d_1thread`, git `215ad203`, core `40c7ab243c22`, measured 2026-09-16. ATE is RMSE in
+centimetres against the catalog ground truth after rigid SE(3) alignment, estimate-driven association, scale fixed at
+one. The Basalt column is the MSD paper's Table IV (Basalt, multi-camera build, causal), same units, its own alignment
+and its own decode; treat it as a reference point, not a paired measurement. `×` no estimate, `∞` over 10 m.
+
+| dataset | recordings | slam-rs median ATE cm | Basalt (paper) median ATE cm | slam-rs lost framesets | slam-rs more accurate on |
+|---|---:|---:|---:|---:|---:|
+| msd-index | 33 | 20.14 | 19.80 | 0 | 16 / 33 |
+| msd-g2 | 15 | 8.53 | 7.00 | 0 | 8 / 15 |
+| msd-odyssey | 16 | 7.57 | 6.05 | 0 | 10 / 16 |
+| all | 64 | 10.97 | 11.20 | 0 | 34 / 64 |
+
+#### msd-index (Valve Index, 2 cameras)
+
+| recording | framesets | tracked / lost | slam-rs ATE cm | tracker ms | Basalt (paper) ATE cm |
+|---|---:|---:|---:|---:|---:|
+| MIO01_hand_puncher_1 | 7855 | 7855 / 0 | 74.06 | 2.84 | 62.0 |
+| MIO02_hand_puncher_2 | 4706 | 4706 / 0 | 134.42 | 2.78 | 117.7 |
+| MIO03_hand_shooter_easy | 6101 | 6101 / 0 | 9.77 | 2.84 | 9.5 |
+| MIO04_hand_shooter_hard | 6119 | 6119 / 0 | 22.63 | 2.76 | 20.6 |
+| MIO05_inspect_easy | 6613 | 6613 / 0 | 3.62 | 2.82 | 3.4 |
+| MIO06_inspect_hard | 5123 | 5123 / 0 | 8.41 | 2.89 | 4.9 |
+| MIO07_mapping_easy | 4095 | 4095 / 0 | 2.11 | 2.78 | 2.3 |
+| MIO08_mapping_hard | 1517 | 1517 / 0 | 5.04 | 2.67 | 5.7 |
+| MIO09_short_1_updown | 186 | 186 / 0 | 0.62 | 2.72 | 0.6 |
+| MIO10_short_2_panorama | 412 | 412 / 0 | 1.55 | 1.94 | 1.5 |
+| MIO11_short_3_backandforth | 590 | 590 / 0 | 2.75 | 2.37 | 2.4 |
+| MIO12_moving_screens | 19163 | 19163 / 0 | 44.62 | 2.88 | 43.1 |
+| MIO13_moving_person | 20227 | 20227 / 0 | 81.53 | 2.83 | 112.8 |
+| MIO14_moving_props | 22117 | 22117 / 0 | 6.01 | 2.82 | 5.9 |
+| MIO15_moving_person_props | 13545 | 13545 / 0 | 57.34 | 2.81 | 81.3 |
+| MIO16_moving_screens_person_props | 14304 | 14304 / 0 | 49.72 | 2.86 | 53.8 |
+| MIPB01_beatsaber_100bills_360_normal | 11764 | 11764 / 0 | 25.30 | 2.93 | 27.7 |
+| MIPB02_beatsaber_crabrave_360_hard | 11945 | 11945 / 0 | 21.14 | 2.93 | 23.5 |
+| MIPB03_beatsaber_countryrounds_360_expert | 20576 | 20576 / 0 | 20.89 | 2.92 | 19.1 |
+| MIPB04_beatsaber_fitbeat_hard | 9899 | 9899 / 0 | 8.63 | 2.90 | 10.5 |
+| MIPB05_beatsaber_fitbeat_360_expert | 9208 | 9208 / 0 | 5.17 | 2.94 | 4.4 |
+| MIPB06_beatsaber_fitbeat_expertplus_1 | 8742 | 8742 / 0 | 6.03 | 2.87 | 4.8 |
+| MIPB07_beatsaber_fitbeat_expertplus_2 | 8105 | 8105 / 0 | 4.92 | 2.70 | 6.2 |
+| MIPB08_beatsaber_long_session_1 | 118279 | 118279 / 0 | 62.05 | 2.51 | 63.0 |
+| MIPP01_pistolwhip_blackmagic_hard | 19057 | 19057 / 0 | 44.97 | 2.32 | 45.5 |
+| MIPP02_pistolwhip_lilith_hard | 12772 | 12772 / 0 | 23.16 | 2.30 | 24.1 |
+| MIPP03_pistolwhip_requiem_hard | 14555 | 14555 / 0 | 17.64 | 2.26 | 26.1 |
+| MIPP04_pistolwhip_revelations_hard | 14287 | 14287 / 0 | 22.91 | 1.94 | 28.7 |
+| MIPP05_pistolwhip_thefall_hard_2pistols | 11670 | 11670 / 0 | 20.12 | 1.99 | 18.3 |
+| MIPP06_pistolwhip_thegrave_hard | 22183 | 22183 / 0 | 25.78 | 2.43 | 28.3 |
+| MIPT01_thrillofthefight_setup | 19064 | 19064 / 0 | 11.52 | 2.83 | 10.7 |
+| MIPT02_thrillofthefight_fight_1 | 29145 | 29145 / 0 | 20.14 | 2.84 | 19.8 |
+| MIPT03_thrillofthefight_fight_2 | 31577 | 31577 / 0 | 39.27 | 2.84 | 40.0 |
+
+#### msd-g2 (HP Reverb G2, 4 cameras)
+
+| recording | framesets | tracked / lost | slam-rs ATE cm | tracker ms | Basalt (paper) ATE cm |
+|---|---:|---:|---:|---:|---:|
+| MGO01_low_light | 4255 | 4255 / 0 | 39.83 | 2.84 | 68.0 |
+| MGO02_hand_puncher | 4724 | 4724 / 0 | 42.45 | 2.81 | 55.6 |
+| MGO03_hand_shooter_easy | 4863 | 4863 / 0 | 13.49 | 2.87 | 14.5 |
+| MGO04_hand_shooter_hard | 4363 | 4363 / 0 | 26.02 | 2.83 | 26.2 |
+| MGO05_inspect_easy | 4086 | 4086 / 0 | 2.31 | 3.04 | 3.0 |
+| MGO06_inspect_hard | 4045 | 4045 / 0 | 8.53 | 2.88 | 11.1 |
+| MGO07_mapping_easy | 1596 | 1596 / 0 | 2.37 | 3.04 | 2.1 |
+| MGO08_mapping_hard | 746 | 746 / 0 | 2.67 | 2.57 | 2.7 |
+| MGO09_short_1_updown | 107 | 107 / 0 | 0.98 | 2.78 | 0.8 |
+| MGO10_short_2_panorama | 400 | 400 / 0 | 0.85 | 2.66 | 0.8 |
+| MGO11_short_3_backandforth | 539 | 539 / 0 | 2.30 | 2.64 | 1.7 |
+| MGO12_freemovement_long_session | 76438 | 76438 / 0 | 65.36 | 2.88 | 61.1 |
+| MGO13_sudden_movements | 3735 | 3735 / 0 | 77.17 | 2.87 | 68.3 |
+| MGO14_flickering_light | 2887 | 2887 / 0 | 8.60 | 2.87 | 7.0 |
+| MGO15_seated_screen | 23915 | 23915 / 0 | 1.99 | 2.63 | 5.5 |
+
+#### msd-odyssey (Samsung Odyssey+, 2 cameras)
+
+| recording | framesets | tracked / lost | slam-rs ATE cm | tracker ms | Basalt (paper) ATE cm |
+|---|---:|---:|---:|---:|---:|
+| MOO01_hand_puncher_1 | 4706 | 4706 / 0 | 29.46 | 1.56 | 28.1 |
+| MOO02_hand_puncher_2 | 5404 | 5404 / 0 | 23.26 | 1.56 | 23.8 |
+| MOO03_hand_shooter_easy | 4415 | 4415 / 0 | 16.65 | 1.57 | 17.6 |
+| MOO04_hand_shooter_hard | 4406 | 4406 / 0 | 9.80 | 1.53 | 6.5 |
+| MOO05_inspect_easy | 3014 | 3014 / 0 | 1.77 | 1.62 | 1.9 |
+| MOO06_inspect_hard | 4171 | 4171 / 0 | 4.56 | 1.63 | 5.6 |
+| MOO07_mapping_easy | 1237 | 1237 / 0 | 1.00 | 1.61 | 1.3 |
+| MOO08_mapping_hard | 592 | 592 / 0 | 5.34 | 1.45 | 2.8 |
+| MOO09_short_1_updown | 147 | 147 / 0 | 0.34 | 1.57 | 0.4 |
+| MOO10_short_2_panorama | 274 | 274 / 0 | 1.36 | 1.43 | 1.0 |
+| MOO11_short_3_backandforth | 405 | 405 / 0 | 1.80 | 1.41 | 1.9 |
+| MOO12_freemovement_long_session | 72810 | 72810 / 0 | 65.10 | 1.60 | 67.4 |
+| MOO13_sudden_movements | 4403 | 4403 / 0 | 50.37 | 1.52 | 50.1 |
+| MOO14_flickering_light | 5026 | 5026 / 0 | 10.42 | 1.57 | 11.3 |
+| MOO15_seated_screen | 19380 | 19380 / 0 | 273.64 | 1.33 | 81.5 |
+| MOO16_still | 20082 | 20082 / 0 | 0.55 | 1.28 | 3.4 |
+<!-- msd-sweep:end -->
+
+#### Where the time goes on the 5090, fast profile, GPU lane
+
+Measured on the same build and day as the table above, with the sweep sharing the GPU:
+py-spy native sampling for the replay split, the core's own stage timers for the
+tracker, and an Nsight Systems Vulkan API trace for the per-frameset call counts.
+
+A full catalog replay is decode-bound: py-spy over `fleet_check` on `MIO07` and `MGO07`
+puts 73–75 % of samples in dav1d plus the gray8 reformat, 17–18 % in the tracker
+(9–10 % GPU glue, two thirds of it waiting on the device; 8 % estimator), 6 % in Python
+glue and 1 % each in the copy into the core and the catalog client.
+
+Inside `Vio.track` the fast profile is bimodal, so the median and the mean answer
+different questions. Stage timers from `.npz` dumps on one pinned core, three
+interleaved rounds pooled, first 60 framesets dropped, milliseconds:
+
+| stage | MIO10 median / mean / p95 | MGO07 median / mean / p95 |
+|---|---|---|
+| `track` | 1.19 / 1.80 / 6.29 | 1.94 / 2.87 / 8.09 |
+| `frontend_track` (temporal KLT, GPU round trip) | 0.61 / 0.66 / 0.85 | 0.87 / 1.00 / 1.37 |
+| `frontend_stereo` | 0.23 / 0.23 / 0.58 | 0.48 / 0.55 / 1.05 |
+| `frontend_pyramid` + `detect` + `imu` | 0.07 / 0.07 / 0.09 | 0.15 / 0.16 / 0.17 |
+| `measure` (estimator) | 0.15 / 0.73 / 5.44 | 0.26 / 1.07 / 6.35 |
+| of which `optimize` (joint solve, 14 % of framesets) | 0.04 / 0.62 / 5.29 | 0.08 / 0.86 / 5.92 |
+
+The 86 % of framesets between keyframes cost about 1.2 ms (two cameras) or 1.9 ms
+(four), and that floor is the frontend round trip: per frameset the Vulkan trace shows
+1.8 `vkWaitSemaphores` (about 0.27 ms of waiting), 5.5 queue submits, 18.5 command
+buffers and 1.3 `vkAllocateMemory`. The 14 % keyframe framesets pay the joint window
+solve (`solver` 3.1–3.2 ms, `linearize` 1.5–2.0 ms at p95), which is CPU-only and is
+what lifts the mean and the p95. Against the S30-C reference-profile numbers on the
+same lane, `MIO10` went from 5.05 ms to 1.19 ms at the median: detection moved on
+demand (1.45 → 0.01 ms) and the window solve moved to keyframes. The two tracker
+numbers in this README differ by design: the sweep table reports the call inside a
+full replay with decode interleaved and no pinning (`MGO07` 3.04 ms); the stage table
+reports the same call isolated (1.94 ms).
+
 The fleet's fast-profile tracker medians below are milliseconds for
 `MIO10` / `MIO07` / `MGO07`. Ratios compare GPU with CPU on the same host.
 The 5090 values are the reference rows in `benchmarks.toml`; GB10 and M4 use the
