@@ -58,8 +58,19 @@ ignore_names = [
     "protocol_version",
     "do_HEAD",
     "do_GET",
+    "log_message",
     # pytest's module-level skip marker.
     "pytestmark",
+    # lamaria's tyro-facing config fields, and the stub parameters a signature has
+    # to accept but a body has no use for.
+    "sequences",
+    "keep_raw",
+    "base_url",
+    "arguments",
+    "keywords",
+    "args",
+    # The GPU-encoder gate fixture: requested for its skip, never read.
+    "nvenc",
 ]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
