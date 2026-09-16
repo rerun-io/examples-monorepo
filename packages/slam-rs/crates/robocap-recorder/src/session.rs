@@ -1,7 +1,7 @@
 use crate::{
-    Camera, CaptureIdentity, CapturedBuffer, DeviceProfile, FRAME_HEIGHT, FRAME_WIDTH,
-    FrameTrigger, IioDevice, MotionKind, MotionSample, SENSORS, SamplePipeline, SegmentedWriter,
-    SensorChannel, VideoSample, monotonic_ns,
+    CAMERAS, Camera, CaptureIdentity, CapturedBuffer, DeviceProfile, FRAME_HEIGHT, FRAME_WIDTH,
+    FrameTrigger, IioDevice, MotionKind, MotionSample, SENSORS, STREAMS, SamplePipeline,
+    SegmentedWriter, SensorChannel, VideoSample, monotonic_ns,
 };
 #[cfg(feature = "live-slam")]
 use crate::{ImuChannel, SLAM_CAMERAS, SlamInput, SlamProcess, SlamSender, slam_luma};
@@ -187,9 +187,7 @@ pub fn run(directory: PathBuf, seconds: u64, stop: &'static AtomicBool) -> Resul
         (1..=3600).contains(&seconds),
         "trial duration must be 1..3600 seconds"
     );
-    let hostname = fs::read_to_string("/proc/sys/kernel/hostname")?;
-    let serial = fs::read_to_string("/proc/device-tree/serial-number")?;
-    let profile = DeviceProfile::identify(hostname.trim(), serial.trim_end_matches('\0'))?;
+    let profile = DeviceProfile::from_this_device()?;
     // Refuse device access while the vendor application can own capture. A
     // stopped launcher can retain its dead child as a zombie until resumed.
     for process in fs::read_dir("/proc")? {
@@ -239,7 +237,7 @@ pub fn run(directory: PathBuf, seconds: u64, stop: &'static AtomicBool) -> Resul
     eprintln!("slam_worker_pid={}", slam.pid());
     let (tx, rx) = mpsc::sync_channel(2048);
     let mut workers = Vec::new();
-    for (camera, path) in profile.camera_paths().into_iter().enumerate() {
+    for (camera, path) in CAMERAS.iter().map(|camera| camera.path).enumerate() {
         let tx = tx.clone();
         #[cfg(feature = "live-slam")]
         let slam_sender = slam.sender();
@@ -281,7 +279,7 @@ pub fn run(directory: PathBuf, seconds: u64, stop: &'static AtomicBool) -> Resul
     let mut ready = 0;
     let mut started = None;
     let mut checkpoint = Instant::now();
-    let mut counts = [0_u64; 13];
+    let mut counts = [0_u64; STREAMS];
     let result = (|| -> Result<()> {
         loop {
             #[cfg(feature = "live-slam")]
@@ -296,7 +294,7 @@ pub fn run(directory: PathBuf, seconds: u64, stop: &'static AtomicBool) -> Resul
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(Event::Ready) => {
                     ready += 1;
-                    if ready == 13 {
+                    if ready == STREAMS {
                         trigger.start()?;
                         started = Some(Instant::now());
                         eprintln!(

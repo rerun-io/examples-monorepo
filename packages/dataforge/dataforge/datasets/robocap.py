@@ -16,9 +16,9 @@ resets cleanly at every boundary. Converted rrds span 16 MB to 22.7 GB. Both
 ``should_skip`` and mid-write failure are all-or-nothing at session granularity;
 that tradeoff is accepted for v1 and should be revisited if resumability matters.
 
-Clocks. Both sensors share one nanosecond device clock (boot-relative, NOT a
-Unix epoch — values sit around tens of seconds), offset by a fixed constant:
-basalt's RoboCap loader (``src/io/dataset_io_robocap.cpp``) *adds*
+Clocks. Both sensors use boot-relative device timestamps, not Unix time.
+Legacy ingestion applies a fixed temporal alignment approximation inherited
+from Basalt, whose RoboCap loader (``src/io/dataset_io_robocap.cpp``) *adds*
 ``kCameraToImuOffsetNs`` to camera timestamps to land on the IMU clock. We pick
 the **raw camera clock** for ``video_time`` — video times are
 ``comment_us * 1000 + pts_ns`` (the MP4 format-level ``comment`` tag is the
@@ -36,6 +36,7 @@ lives here).
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import sqlite3
@@ -51,6 +52,8 @@ import rerun.blueprint as rrb
 from beartype.roar import BeartypeException
 from jaxtyping import Float64, Int64
 from numpy import ndarray
+from serde import SerdeError, serde
+from serde.yaml import from_yaml
 from simplecv.camera_parameters import Fisheye62Parameters
 from simplecv.data.ego.robocap_ego import (
     CAM_TO_CALIB_INFO,
@@ -60,6 +63,8 @@ from simplecv.data.ego.robocap_ego import (
     _kalibr_cam_to_fisheye62,
     _load_kalibr_camchain_imucam,
 )
+from simplecv.imu_calibration import ImuCalibration
+from yaml import YAMLError
 
 from dataforge import blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
@@ -71,7 +76,8 @@ GYRO_SCALE: float = 0.000266316
 ACCEL_SCALE: float = 0.001197101
 """Raw accel LSB → m/s^2; measured in the basalt fork (``dataset_io_robocap.cpp``)."""
 CAMERA_TO_IMU_OFFSET_NS: int = 14_902_432
-"""basalt's ``kCameraToImuOffsetNs``: camera_ns + offset = imu_ns, so imu_ns - offset = camera_ns."""
+"""Legacy Basalt correction, matching the median of Cap A's four coverage-camera
+factory offsets. Not an independently validated offset for every camera/device."""
 IMAGE_PLANE_DISTANCE: float = 0.025
 """Frustum length in metres, matching ``RobocapEgoSequence.image_plane_distance``."""
 RIG: int = 0
@@ -82,6 +88,8 @@ so the rig's reference sensor is the IMU node, not a camera."""
 IMU_DEVICE: int = 0
 """v1 logs the middle IMU (``dev0``) only. TODO(dataforge): also emit dev1/dev2."""
 RUN_SOURCE: str = "basalt"
+EXTRA_RUN_SOURCES: tuple[str, ...] = ("slam_rs",)
+"""Further pose layers RoboCap sessions carry: the slam-rs catalog result layer."""
 """Processing source of the pose layer the blueprints already lay out; nothing writes it yet."""
 SESSION_DIR_RE: re.Pattern[str] = re.compile(r"^(?P<device>[0-9a-f]+)_session_(?P<session>\d+)$")
 """Session directory names; the ``-old`` duplicates deliberately do not match."""
@@ -98,6 +106,32 @@ MESH_MAT3X3: list[list[float]] = [
 """Rz(-80deg) @ Rx(-90deg), the rotation half of the same hand-tuned alignment."""
 VIDEO_NAME_RE: re.Pattern[str] = re.compile(r"^video_dev(?P<device>\d+)_session(?P<session>\d+)_segment(?P<segment>\d+)_(?P<camname>[a-z-]+)$")
 """Per-camera MP4 stem, e.g. ``video_dev0_session1_segment1_right-eye``."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class _KalibrImu:
+    """Optional fields from the vendor's Kalibr IMU YAML."""
+
+    gyroscope_noise_density: float | None = None
+    """Continuous-time gyro noise density."""
+    accelerometer_noise_density: float | None = None
+    """Continuous-time accelerometer noise density."""
+    gyroscope_random_walk: float | None = None
+    """Gyro bias random walk."""
+    accelerometer_random_walk: float | None = None
+    """Accelerometer bias random walk."""
+    update_rate: float | None = None
+    """Nominal measurement frequency in Hz."""
+
+
+@dataclass(frozen=True, slots=True)
+class _FactoryCamera:
+    """One camera's entry in its factory Kalibr camchain file."""
+
+    path: Path
+    index: int
+    entry: KalibrCamWithExtrinsic
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,7 +248,7 @@ def follow_eye_controls() -> rrb.EyeControls3D:
     )
 
 
-def build_blueprint(camera_names: list[str], *, pose_source: str = "basalt") -> rrb.Blueprint:
+def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
     """Default layout: 3D rig + a grid of camera panes over gyro/accel plots.
 
     Mirrors basalt's ``basalt_vio_blueprint.py`` layout, on exoego:v2 paths.
@@ -222,7 +256,6 @@ def build_blueprint(camera_names: list[str], *, pose_source: str = "basalt") -> 
     Args:
         camera_names: Full canonical camera labels in ``cam_00..cam_NN`` order;
             callers pass ``list(CAMERA_DISPLAY_ORDER)`` so panes stay stable.
-        pose_source: Derived run whose trajectory and trail the views display.
 
     Returns:
         The blueprint embedded in every RoboCap base-layer rrd.
@@ -231,7 +264,8 @@ def build_blueprint(camera_names: list[str], *, pose_source: str = "basalt") -> 
     return blueprints.rig_blueprint(
         [blueprints.camera_view(name, RIG, index) for index, name in enumerate(camera_names)],
         rig=RIG,
-        run_source=pose_source,
+        run_source=RUN_SOURCE,
+        extra_run_sources=EXTRA_RUN_SOURCES,
         eye_controls=follow_eye_controls(),
         plots=[
             blueprints.sensor_plot(name, schema.imu_path(RIG, IMU_DEVICE), contents)
@@ -330,21 +364,36 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
                 by_name[cam_name] = video_path
         return {name: by_name[name] for name in CAMERA_DISPLAY_ORDER if name in by_name}
 
+    def _factory_cameras(self, device: str) -> dict[str, _FactoryCamera]:
+        """Every canonical camera that has an entry in the device's factory camchain files.
+
+        Raises:
+            ValueError: If a camchain file is malformed, naming the file.
+        """
+        calib_dir: Path = self.config.root / f"0factory-calibration-{device}"
+        camchains: dict[Path, dict[str, KalibrCamWithExtrinsic]] = {}
+        cameras: dict[str, _FactoryCamera] = {}
+        for cam_name, (calib_folder, cam_index) in CAM_TO_CALIB_INFO.items():
+            imucam_files: list[Path] = sorted((calib_dir / calib_folder).glob("*-camchain-imucam.yaml"))
+            if not imucam_files:
+                continue
+            path: Path = imucam_files[0]
+            if path not in camchains:
+                try:
+                    camchains[path] = _load_kalibr_camchain_imucam(path)
+                except (SerdeError, YAMLError) as error:
+                    raise ValueError(f"{path}: {error}") from error
+            entry: KalibrCamWithExtrinsic | None = camchains[path].get(f"cam{cam_index}")
+            if entry is not None:
+                cameras[cam_name] = _FactoryCamera(path, cam_index, entry)
+        return cameras
+
     def calibration(self, device: str) -> dict[str, Fisheye62Parameters]:
         """Load the factory Kalibr calibration, keyed by canonical camera name."""
         calib_dir: Path = self.config.root / f"0factory-calibration-{device}"
         if not calib_dir.is_dir():
             raise FileNotFoundError(f"Calibration directory not found: {calib_dir}")
-        cameras: dict[str, Fisheye62Parameters] = {}
-        for cam_name, (calib_folder, cam_index) in CAM_TO_CALIB_INFO.items():
-            imucam_files: list[Path] = sorted((calib_dir / calib_folder).glob("*-camchain-imucam.yaml"))
-            if not imucam_files:
-                continue
-            cam_dict: dict[str, KalibrCamWithExtrinsic] = _load_kalibr_camchain_imucam(imucam_files[0])
-            cam_data: KalibrCamWithExtrinsic | None = cam_dict.get(f"cam{cam_index}")
-            if cam_data is not None:
-                cameras[cam_name] = _kalibr_cam_to_fisheye62(cam_data, name=cam_name)
-        return cameras
+        return {name: _kalibr_cam_to_fisheye62(camera.entry, name=name) for name, camera in self._factory_cameras(device).items()}
 
     # ── conversion ────────────────────────────────────────────────────────
     def convert(self, identity: SequenceIdentity, source: RobocapSource, *, force: bool) -> Path:
@@ -393,6 +442,7 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
             # Deliberately NO ViewCoordinates at "/": the pose layer owns the root
             # ViewCoordinates (its world is gravity-aligned Z-up).
             self.log_scene(recording, {name: cameras[name] for name in camera_names})
+            self.log_sensor_metadata(recording, source.device, {name: schema.cam_path(RIG, CAMERA_DISPLAY_ORDER.index(name)) for name in camera_names})
 
             frames_per_camera: dict[str, int] = dict.fromkeys(camera_names, 0)
             for cam_name in camera_names:
@@ -431,6 +481,45 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
         self._log_mesh(recording)
         for name, camera in cameras.items():
             log_camera_node(recording, RIG, CAMERA_DISPLAY_ORDER.index(name), camera, name=name, kind="grayscale", image_plane_distance=IMAGE_PLANE_DISTANCE)
+
+    def log_sensor_metadata(self, recording: rr.RecordingStream, device: str, camera_entities: dict[str, str]) -> None:
+        """Log factory calibration and the legacy ingestion's applied time shift.
+
+        Camera paths come from ingestion or the existing catalog so backfills
+        preserve the recording's camera numbering. No video or IMU samples are read.
+        """
+        factory: Path = self.config.root / f"0factory-calibration-{device}"
+        imu_entity: str = schema.imu_path(RIG, IMU_DEVICE)
+        noise_path: Path = factory / "imus_intrinsic/imu_mid_0.yaml"
+        if noise_path.is_file():
+            try:
+                noise: _KalibrImu = from_yaml(_KalibrImu, noise_path.read_text())
+            except (SerdeError, YAMLError) as error:
+                raise ValueError(f"{noise_path}: {error}") from error
+            recording.log(imu_entity, ImuCalibration(
+                gyro_noise_density=noise.gyroscope_noise_density,
+                accel_noise_density=noise.accelerometer_noise_density,
+                gyro_bias_random_walk=noise.gyroscope_random_walk,
+                accel_bias_random_walk=noise.accelerometer_random_walk,
+                rate_hz=noise.update_rate,
+                source=str(noise_path.relative_to(self.config.root)),
+            ), static=True)
+        recording.log(imu_entity, rr.AnyValues(
+            applied_time_shift_ns=-CAMERA_TO_IMU_OFFSET_NS,
+            time_shift_source="DataForge legacy RoboCap ingestion; Basalt kCameraToImuOffsetNs; matches Cap A four-camera factory median; physical alignment not independently validated",
+        ), static=True)
+        factory_cameras: dict[str, _FactoryCamera] = self._factory_cameras(device)
+        for name, entity in camera_entities.items():
+            camera: _FactoryCamera | None = factory_cameras.get(name)
+            if camera is None or camera.entry.timeshift_cam_imu is None:
+                continue
+            if not math.isfinite(camera.entry.timeshift_cam_imu):
+                raise ValueError(f"{camera.path}#cam{camera.index}: timeshift_cam_imu must be finite")
+            recording.log(entity, rr.AnyValues(
+                camera_imu_time_offset_ns=round(camera.entry.timeshift_cam_imu * 1e9),
+                time_offset_reference=imu_entity,
+                time_offset_source=f"{camera.path.relative_to(self.config.root)}#cam{camera.index}",
+            ), static=True)
 
     def _log_mesh(self, recording: rr.RecordingStream) -> None:
         """Log the textured cap scan as a static child of the rig, if the asset is readable.

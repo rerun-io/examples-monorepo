@@ -2,7 +2,7 @@
 
 One catalog dataset holds every layer under ``output_root()``, keyed by the
 directory it sits in: ``base`` is the sensor recording each converter writes and
-is required, and each derived layer (today: ``gt``) stacks onto the same
+is required, and each derived layer (``gt``, ``sensor_metadata``) stacks onto the same
 entities as a sibling. A layer with no files is simply not registered, so a
 corpus that has not been through a ground-truth pass registers exactly as before.
 """

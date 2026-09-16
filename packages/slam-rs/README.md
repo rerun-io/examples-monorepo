@@ -14,7 +14,7 @@ through a PyO3 extension module, so the whole pipeline runs from Python:
 on the same frames. `fast` is the default profile; `reference` selects the
 unmodified dataset configuration. Accuracy is ATE against catalog ground truth.
 Each lane/profile is compared with its measured baseline in
-`gate.toml`. MIO10 GPU fast scores about 1.55 cm on the RTX 5090.
+`benchmarks.toml`. MIO10 GPU fast scores about 1.55 cm on the RTX 5090.
 The same code runs on `linux-64`, `linux-aarch64`, and macOS `osx-arm64`.
 
 Design notes — the module-by-module account of the estimator, the full Python API,
@@ -65,6 +65,59 @@ Design notes: [the GPU lane](docs/design-notes.md#the-gpu-lane), and
 On macOS everything above runs from the mac lane's environment, which is where
 that platform's `slam-rs` features are solved: `-e slam-rs-osx-dev` in place of
 `-e slam-rs-dev`.
+
+## Register a SLAM layer
+
+Run a registered RoboCap, msd-index, msd-g2 or msd-odyssey segment and replace
+its single `slam_rs` layer. The output directory must be visible at the same
+absolute path to both the worker and the catalog server:
+
+```bash
+pixi install -e slam-rs-cuda
+pixi run -e slam-rs-cuda --frozen slam-rs-wgpu-build
+pixi run -e slam-rs-cuda --frozen slam-rs-catalog-layer \
+  --catalog rerun+http://dgx-spark.ilish-ruler.ts.net:9988 \
+  --segment robocap__f408193e6447b3b0__s00000059 \
+  --output-dir /mnt/nas/datasets/robocap/rrd/slam_rs
+```
+
+Defaults are `fast`, automatic GPU frontend selection, and CUDA/NVDEC decoding
+when available. `--decode-device cpu` selects the reference PyAV pixel
+conversion; `--backend cpu` selects the CPU estimator frontend. On hosts without
+CUDA, use the existing `slam-rs` or `slam-rs-osx` environment.
+
+The offline command fetches the selected cameras' compressed packets together
+once, builds their timestamp index from that result, and keeps decoders alive
+for the whole catalog segment. CUDA uses SimpleCV's TorchCodec reader, GPU
+resize and grayscale conversion, then transfers small grayscale batches to the
+Rust API. After indexing and muxing, the feed releases the packet buffers and
+retains only muxed streams. Allow several times the encoded size for transient
+Arrow, muxing and decoder buffers. The existing bounded-window feed
+remains the default for other tools and cap use.
+
+The layer animates the existing rig and adds a full trajectory, a recent trail,
+start/end markers and run metadata, following the Basalt layout. It preserves
+the base videos, sensor data and calibration. One estimator spans the session's
+file rolls. A run must finish with a finite pose for every supplied frameset
+before replacing the result. The DataForge blueprint includes both old Basalt
+and new slam-rs paths. Repeated runs replace `slam_rs`; they do not create named
+run versions. This command registers only the derived `slam_rs` data layer.
+The base recording and its blueprint must already be registered; the command
+does not ingest raw data or register/change blueprints.
+The shared layout has no RoboCap-specific eye orientation. RoboCap ingestion
+continues to supply its calibrated follow-eye settings.
+
+Layer generation does not load ground truth. When separate scoring tools need
+ground truth, the feed isolates the catalog's registered `gt` RRD in a
+temporary local catalog. This prevents estimated rig poses from entering later
+ground-truth queries through merged layers. The worker must be able to read
+that registered URI; a `file://` URI requires the input storage mounted at the
+same path. An inaccessible source fails explicitly, without using merged poses
+as ground truth. No raw dataset files are parsed or copied.
+
+NVDEC's RGB-to-gray conversion can differ from PyAV's direct YUV-to-gray
+conversion. The decoder is recorded in layer metadata; changing it is a change
+to the estimator's pixels, not only its speed.
 
 ## Two profiles
 
@@ -182,7 +235,8 @@ Design notes — the accessors field by field, every refusal and its ceiling, an
 | `crates/slam-rs-cli` | `slam-rs` binary: a placeholder. `version` is the only subcommand that does anything; a replay runs through the Python tools. |
 | `slam_rs/` | The Python package: stubs, Tyro entry points under `apis/`. |
 | `tools/` | Thin CLI shims over `slam_rs/apis/`. |
-| `gate.toml` | Gate schema 10: sensor models, tiers, hold-outs, and lane baselines. |
+| `slam.toml` | Runtime settings: estimator files and RoboCap camera selection/reader rules. Sensor calibration comes from the catalog. |
+| `benchmarks.toml` | Regression cases, tiers, hold-outs, frozen decode paths and lane baselines. |
 | `configs/` | Dataset VIO configurations and the `profiles/` overlays. |
 
 `Cargo.lock` is committed. `cargo` never runs during `pixi lock` or
@@ -219,7 +273,7 @@ decision is load-bearing: [the frontend](docs/design-notes.md#the-frontend-and-t
 ## Accuracy and speed
 
 The following tables record earlier profile comparisons. Current gate baselines
-are stored in `gate.toml`.
+are stored in `benchmarks.toml`.
 
 Latency is the synchronous `Vio.track` call, one CPU core, decode excluded,
 median over the clip after the first 60 framesets. ATE is RMSE against ground
@@ -249,7 +303,7 @@ and 6.37 cm on the fast profile.
 
 The fleet's fast-profile tracker medians below are milliseconds for
 `MIO10` / `MIO07` / `MGO07`. Ratios compare GPU with CPU on the same host.
-The 5090 values are the reference rows in `gate.toml`; GB10 and M4 use the
+The 5090 values are the reference rows in `benchmarks.toml`; GB10 and M4 use the
 median of three matched runs per lane from S36. These are different measurement
 sessions, not a cross-machine timing budget.
 
@@ -375,4 +429,56 @@ Not in this branch, in the order they are likely to matter:
   models could move further into kornia-rs. S34 already uses nalgebra for QR,
   the damped solve and SVD; the ground-truth gate checks further replacements.
 
-`gate.toml` beside this README holds the rigs’ sensor noise models that the catalog does not carry, gate tiers, hold-outs, decode paths, and measured lane/profile baselines. It also holds RoboCap rig and clock rules plus its one regression trajectory path. Camera geometry and capture facts come from the catalog.
+`slam.toml` holds runtime settings: estimator configuration paths and RoboCap
+camera selection and reader rules. Sensor noise, nominal rate and the applied
+timestamp correction come from static catalog metadata on the IMU node.
+`benchmarks.toml` holds regression cases, tiers, hold-outs, frozen decode paths,
+measured lane/profile baselines and RoboCap's regression trajectory path.
+Normal catalog processing loads only `slam.toml`; evaluation commands load both.
+Camera geometry and capture facts also come from the catalog. The normal
+`slam-rs-catalog-layer` command constructs calibration entirely from these
+fields. Regression probes may still compare against their frozen Basalt files.
+Missing calibration stops VIO before video decoding; no Cap A model is silently
+substituted for another device.
+
+```python
+from slam_rs.config import SlamConfig, load_slam_config
+
+settings: SlamConfig = load_slam_config()
+```
+
+Evaluation adds `benchmarks = load_benchmarks(settings)` from `slam_rs.reference`.
+`slam.toml` uses schema version 2 (the former IMU blocks are removed), while
+`benchmarks.toml` remains version 1. They replace the former combined `gate.toml`.
+
+For existing legacy RoboCap recordings, add metadata without re-encoding:
+
+```bash
+pixi run -e dataforge --frozen dataforge-robocap-calibration \
+  --catalog-url rerun+http://dgx-spark:9988 \
+  --root /mnt/nas/datasets/robocap \
+  --output-dir /mnt/nas/datasets/robocap/rrd/sensor_metadata
+```
+
+New DataForge RoboCap conversions include the same metadata in their base layer.
+`dataforge-register` also restores saved `sensor_metadata` files beside their
+base recordings after a catalog restart, without rereading factory calibration.
+The backfill uses camera names from the catalog and only the matching device's
+factory folder. The historical 14.902432 ms approximation is recorded separately
+from each camera's factory offset; its physical accuracy is not newly validated.
+
+For a dataset with a known Basalt IMU model whose importer has not adopted the
+shared metadata yet, import it explicitly. Select only recordings made with that
+model, and state the correction ingestion already applied (zero for the MSD
+recordings). This records provenance, not a new synchronization adjustment:
+
+```bash
+pixi run -e slam-rs --frozen slam-rs-import-imu-calibration \
+  --catalog rerun+http://dgx-spark:9988 --dataset msd-index \
+  --calibration /path/to/msdmi_calib.json --applied-time-shift-ns 0 \
+  --output-dir /mnt/nas/datasets/msd-rrd/sensor_metadata
+```
+
+The output path must be visible to the server. Use `--no-register` to prepare
+Basalt metadata locally, transfer it to server-visible storage, then register
+those files as `sensor_metadata`. Neither command alters the base or SLAM layers.

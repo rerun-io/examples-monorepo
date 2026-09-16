@@ -24,19 +24,19 @@ from time import perf_counter
 from typing import TypeAlias
 
 import numpy as np
-import pyarrow as pa
 import torch
 from jaxtyping import Shaped, UInt8
 from numpy import ndarray
-from rerun.catalog import DatasetEntry, DatasetView
+from rerun.catalog import DatasetEntry
 from rerun.experimental.dataloader import ColumnDecoder, DecodeRequest, FieldBatch
 from torch import Tensor
 from torchcodec.decoders import VideoDecoder
 
-from simplecv.catalog_video_codec import catalog_codec_name, wrap_mp4
+from simplecv.catalog_video import CatalogVideo, read_catalog_videos
+from simplecv.catalog_video_codec import wrap_mp4
 
 TimedeltaNs: TypeAlias = Shaped[ndarray, " n_samples"]
-"""Sample timestamps in timeline order, dtype ``timedelta64[ns]`` (jaxtyping has no timedelta dtype)."""
+"""Catalog index values in timeline order, preserving the timeline dtype."""
 FrameRgbChw: TypeAlias = UInt8[Tensor, "3 h w"]
 """One decoded frame, channels-first RGB on the decoder's device."""
 RECOMMENDED_FETCH_BLOCK_SIZE: int = 1024
@@ -58,33 +58,16 @@ def open_segment_decoder(
         fps: Nominal frame rate written into the wrapping MP4 track.
 
     Returns:
-        The sample timestamps (timedelta64[ns], timeline order), the raw video
+        The sample index values (original dtype, timeline order), the raw video
         samples with their keyframe flags (relayable as a Rerun VideoStream),
         and the decoder over the whole segment.
     """
-    view: DatasetView = dataset.filter_segments(segment_id).filter_contents(entity)
-    # No .sort(timeline): the reader already yields (segment, index)-ordered rows, and a
-    # client-side SortExec re-materializes the blob columns (~4x the query wall time).
-    # The ordering is an implicit server contract, so the guard below fails loudly if it
-    # ever breaks instead of silently corrupting packet order.
-    table = (
-        view.reader(index=timeline)
-        .select(timeline, f"/{entity}:VideoStream:sample", f"/{entity}:VideoStream:is_keyframe", f"/{entity}:VideoStream:codec")
-        .to_arrow_table()
-    )
-    times: TimedeltaNs = table[0].combine_chunks().to_numpy(zero_copy_only=False)
-    if np.any(times[1:] < times[:-1]):
-        raise ValueError(f"segment {segment_id}: reader returned rows out of timeline order; the no-sort fast path assumes index order")
-    blobs = table[1].combine_chunks().flatten()
-    data = memoryview(blobs.flatten().buffers()[1])
-    offsets: list[int] = blobs.offsets.to_pylist()
-    samples: list[bytes] = [bytes(data[start:end]) for start, end in zip(offsets[:-1], offsets[1:], strict=True)]
-    keyframes: list[bool] = [bool(flag) for flag in table[2].combine_chunks().flatten().to_pylist()]
-    codec_column: pa.Array = table[3].combine_chunks().flatten()
-    if len(codec_column) == 0:
-        raise ValueError(f"video codec is missing for {entity} in segment {segment_id}")
+    video: CatalogVideo = read_catalog_videos(dataset, segment_id, [entity], timeline)[0]
+    times: TimedeltaNs = video.times
+    samples: list[bytes] = [bytes(sample) for sample in video.samples]
+    keyframes: list[bool] = video.keyframes
     decoder: VideoDecoder = VideoDecoder(
-        wrap_mp4(samples, keyframes, fps, codec=catalog_codec_name(int(codec_column[0].as_py()))),
+        wrap_mp4(samples, keyframes, fps, codec=video.codec),
         device=device,
         seek_mode="exact",
         num_ffmpeg_threads=0,

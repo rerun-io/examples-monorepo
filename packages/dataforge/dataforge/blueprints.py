@@ -153,6 +153,7 @@ def rig_blueprint(
     run_source: str,
     eye_controls: rrb.EyeControls3D,
     plots: Sequence[rrb.TimeSeriesView],
+    extra_run_sources: Sequence[str] = (),
 ) -> rrb.Blueprint:
     """The default layout of a single-rig capture: 3D and cameras over the sensor plots.
 
@@ -171,11 +172,14 @@ def rig_blueprint(
             name (``"gt"``, ``"basalt"``, …).
         eye_controls: Eye of the follow view.
         plots: Sensor plot panes for the bottom row.
+        extra_run_sources: Further run sources whose trajectory and trail get the
+            same overrides, for a dataset that carries more than one pose layer.
 
     Returns:
         The blueprint embedded in the dataset's rrds and registered as the
         catalog dataset's default.
     """
+    sources: tuple[str, ...] = (run_source, *extra_run_sources)
     return rrb.Blueprint(
         rrb.Vertical(
             rrb.Horizontal(
@@ -184,7 +188,17 @@ def rig_blueprint(
                         name="Rig",
                         origin="/",
                         line_grid=True,
-                        overrides={schema.trail_path(run_source): rrb.EntityBehavior(visible=False)},
+                        overrides={
+                            # The rig is centimetres on a path that can be kilometres, so the
+                            # overview marks its current pose with a screen-space dot: a point
+                            # at the rig's own origin rides the rig transform, and a UI-point
+                            # radius keeps the same pixel size at any zoom. Display only: no
+                            # recorded geometry or calibration changes, and Follow never sees it.
+                            schema.rig_path(rig): rr.Points3D(
+                                [[0.0, 0.0, 0.0]], radii=rr.Radius.ui_points(9.0), colors=[255, 220, 0], labels=["rig"], show_labels=True
+                            ),
+                            **{schema.trail_path(source): rrb.EntityBehavior(visible=False) for source in sources},
+                        },
                     ),
                     rrb.Spatial3DView(
                         name="Follow",
@@ -201,16 +215,22 @@ def rig_blueprint(
                             # Not hidden: with the path gone the highlighted trail
                             # floated with nothing to place it against, so it stays
                             # as thin dim context underneath.
-                            schema.trajectory_path(run_source): rr.LineStrips3D.from_fields(
-                                colors=DIM_TRAJECTORY_COLOR, radii=rr.Radius.ui_points(DIM_TRAJECTORY_RADIUS_UI_POINTS)
-                            ),
-                            schema.trail_path(run_source): rrb.VisibleTimeRanges(
-                                rrb.VisibleTimeRange(
-                                    schema.TIMELINE,
-                                    start=rrb.TimeRangeBoundary.cursor_relative(seconds=TRAIL_WINDOW_S),
-                                    end=rrb.TimeRangeBoundary.cursor_relative(),
+                            **{
+                                schema.trajectory_path(source): rr.LineStrips3D.from_fields(
+                                    colors=DIM_TRAJECTORY_COLOR, radii=rr.Radius.ui_points(DIM_TRAJECTORY_RADIUS_UI_POINTS)
                                 )
-                            ),
+                                for source in sources
+                            },
+                            **{
+                                schema.trail_path(source): rrb.VisibleTimeRanges(
+                                    rrb.VisibleTimeRange(
+                                        schema.TIMELINE,
+                                        start=rrb.TimeRangeBoundary.cursor_relative(seconds=TRAIL_WINDOW_S),
+                                        end=rrb.TimeRangeBoundary.cursor_relative(),
+                                    )
+                                )
+                                for source in sources
+                            },
                         },
                         eye_controls=eye_controls,
                     ),

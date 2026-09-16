@@ -1,7 +1,7 @@
 //! SLAM process isolation. Capture never waits for the estimator.
 use crate::{
-    DeviceProfile, ImuChannel, LiveSlam, LiveSlamOptions, SLAM_PIXELS, SlamInput, SlamReport,
-    SlamStatus, monotonic_ns,
+    DeviceProfile, ImuChannel, LiveSlam, LiveSlamOptions, SLAM_CPUS, SLAM_PIXELS, SlamInput,
+    SlamReport, SlamStatus, monotonic_ns,
 };
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -179,23 +179,20 @@ impl Drop for SlamProcess {
 }
 
 pub fn slam_worker() -> Result<()> {
-    let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname")?;
-    let serial = std::fs::read_to_string("/proc/device-tree/serial-number")?;
-    let profile = DeviceProfile::identify(hostname.trim(), serial.trim_end_matches('\0'))?;
-    if let Some(range) = profile.slam_cpus() {
-        // Only this child and its subsequently created frontend threads use the
-        // four Cortex-A76 cores. Capture remains under the normal scheduler.
-        unsafe {
-            let mut cpus: libc::cpu_set_t = std::mem::zeroed();
-            libc::CPU_ZERO(&mut cpus);
-            for cpu in range {
-                libc::CPU_SET(cpu, &mut cpus);
-            }
-            ensure!(
-                libc::sched_setaffinity(0, std::mem::size_of_val(&cpus), &cpus) == 0,
-                "SLAM CPU affinity failed"
-            );
+    // Refuse to run anywhere but a verified cap, like the capture parent does.
+    DeviceProfile::from_this_device()?;
+    // Only this child and its subsequently created frontend threads use the
+    // reserved cores.
+    unsafe {
+        let mut cpus: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_ZERO(&mut cpus);
+        for cpu in SLAM_CPUS {
+            libc::CPU_SET(cpu, &mut cpus);
         }
+        ensure!(
+            libc::sched_setaffinity(0, std::mem::size_of_val(&cpus), &cpus) == 0,
+            "SLAM CPU affinity failed"
+        );
     }
     let mut slam = LiveSlam::cap_a_fast_profile(LiveSlamOptions {
         profile: std::env::var_os("ROBOCAP_SLAM_PROFILE").is_some(),

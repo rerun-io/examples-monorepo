@@ -2409,11 +2409,50 @@ python = "3.12.*"
 # pure-Rust crate needs nothing else. Same pin as gsplat-rust-renderer.
 rust = "1.97.*"
 tyro = ">=0.9.1,<0.10"
-# CPU torch only satisfies simplecv's module-load import.
-pytorch-cpu = ">=2.8.0"
+# dataforge's projectaria-tools drags moviepy in, and every moviepy 2.x caps
+# pillow < 12; without this the conda solve pins pillow 12 and the PyPI side is
+# unsatisfiable. Same pin as [feature.dataforge.dependencies].
+pillow = ">=11,<12"
 
 [feature.slam-rs.pypi-dependencies]
 slam-rs = { path = "packages/slam-rs", editable = true }
+
+# Catalog result-layer publishing imports dataforge; dataforge is a linux-only
+# member (projectaria-tools has no macOS 13 wheel), so the osx lane leaves it out.
+[feature.slam-rs.target.linux-64.pypi-dependencies]
+dataforge = { path = "packages/dataforge", editable = true }
+
+[feature.slam-rs.target.linux-aarch64.pypi-dependencies]
+dataforge = { path = "packages/dataforge", editable = true }
+
+[feature.slam-rs.pypi-options.dependency-overrides]
+# dataforge pulls projectaria-tools, which pins rerun-sdk==0.33.0 for its own
+# notebook tutorials; the workspace lane is rerun-sdk 0.37.0. Same override as
+# [feature.dataforge.pypi-options.dependency-overrides].
+rerun-sdk = { version = "==0.37.0", extras = ["catalog"] }
+
+[feature.slam-rs.tasks.slam-rs-catalog-layer]
+cmd = "python tools/apps/catalog_layer.py"
+cwd = "packages/slam-rs"
+description = "Run catalog VIO and replace its slam_rs pose layer (fast profile, GPU when available)"
+
+[feature.slam-rs.tasks.slam-rs-import-imu-calibration]
+cmd = "python tools/import_imu_calibration.py"
+cwd = "packages/slam-rs"
+description = "Import a known Basalt IMU model as catalog metadata without rewriting recordings"
+
+[feature.slam-rs-cpu]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
+
+[feature.slam-rs-cpu.dependencies]
+# SimpleCV's import needs torch even when the decoder is PyAV.
+pytorch-cpu = ">=2.8.0"
+
+[feature.slam-rs-nvdec]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.slam-rs-nvdec.dependencies]
+torchcodec = ">=0.14,<0.15"
 
 [feature.slam-rs.activation.env]
 PACKAGE_DIR = "packages/slam-rs"
@@ -3054,6 +3093,11 @@ cwd = "packages/dataforge"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Register every layer's rrds into a local Rerun catalog"
 
+[feature.dataforge.tasks.dataforge-robocap-calibration]
+cmd = "python tools/robocap_calibration.py"
+cwd = "packages/dataforge"
+description = "Backfill factory calibration and applied timing metadata on legacy RoboCap sessions"
+
 [feature.dataforge.tasks.dataforge-view]
 cmd = "python tools/apps/view.py"
 cwd = "packages/dataforge"
@@ -3473,6 +3517,7 @@ slam-rs = { features = [
     "catalog-common",
     "rerun-prerelease",
     "slam-rs",
+    "slam-rs-cpu",
 ], solve-group = "slam-rs", no-default-feature = true }
 robocap-recorder = { features = ["robocap-recorder"], no-default-feature = true }
 robocap-cross = { features = ["robocap-cross"], no-default-feature = true }
@@ -3480,17 +3525,22 @@ slam-rs-dev = { features = [
     "catalog-common",
     "rerun-prerelease",
     "slam-rs",
+    "slam-rs-cpu",
     "dev",
 ], solve-group = "slam-rs", no-default-feature = true }
 slam-rs-osx = { features = [
     "slam-rs",
+    "slam-rs-cpu",
     "slam-rs-osx",
 ], solve-group = "slam-rs-osx", no-default-feature = true }
 slam-rs-osx-dev = { features = [
     "slam-rs",
+    "slam-rs-cpu",
     "slam-rs-osx",
     "dev",
 ], solve-group = "slam-rs-osx", no-default-feature = true }
+slam-rs-cuda = { features = ["catalog-common", "rerun-prerelease", "cuda", "slam-rs", "slam-rs-nvdec"], solve-group = "slam-rs-cuda", no-default-feature = true }
+slam-rs-cuda-dev = { features = ["catalog-common", "rerun-prerelease", "cuda", "slam-rs", "slam-rs-nvdec", "dev"], solve-group = "slam-rs-cuda", no-default-feature = true }
 mamma = { features = [
     "common",
     "cuda",

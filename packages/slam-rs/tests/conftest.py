@@ -13,8 +13,8 @@ Fixtures rather than a module the tests import from each other: pytest injects
 these, so no test module has to be on another one's import path. That is also
 where :func:`read_rows` belongs — the two logging suites check their rungs
 against a real recording, and one reader means one account of what a row is,
-and :func:`manifest` — five suites read the frozen reference set and parsing it
-once a session is both cheaper and one account of what "the manifest" means.
+Runtime settings and benchmark definitions are separate session-scoped fixtures.
+Tests request benchmark definitions only when they evaluate regression cases.
 """
 
 from pathlib import Path
@@ -28,13 +28,20 @@ from numpy import ndarray
 
 from slam_rs import _core
 from slam_rs.catalog_feed import TIMELINE, CameraCalib, ImuCalib
-from slam_rs.reference import ReferenceManifest, load_manifest
+from slam_rs.config import SlamConfig, load_slam_config
+from slam_rs.reference import Benchmarks, load_benchmarks
 
 
 @pytest.fixture(scope="session")
-def manifest() -> ReferenceManifest:
-    """The frozen reference set, parsed once for the whole session."""
-    return load_manifest()
+def settings() -> SlamConfig:
+    """Runtime settings, parsed once for the whole session."""
+    return load_slam_config()
+
+
+@pytest.fixture(scope="session")
+def benchmarks(settings: SlamConfig) -> Benchmarks:
+    """Frozen regression cases, loaded only by evaluation tests."""
+    return load_benchmarks(settings)
 
 
 @pytest.fixture(scope="session")
@@ -160,3 +167,11 @@ def texture() -> TextureFactory:
         return np.ascontiguousarray(np.roll(image, (shift_y, shift_x), axis=(0, 1)))
 
     return build
+
+
+@pytest.fixture(scope="session")
+def robocap_imu() -> ImuCalib:
+    """Cap A's factory noise model, used only as a test expectation."""
+    return ImuCalib(frequency_hz=200.0, gyro_noise_std=0.0007300442812547, accel_noise_std=0.005955224218014,
+                    gyro_bias_std=3.445397083168e-05, accel_bias_std=0.0001963150489218, cam_time_offset_ns=14_902_432,
+                    imu_T_body=np.eye(4, dtype=np.float64))

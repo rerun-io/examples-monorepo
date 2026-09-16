@@ -10,8 +10,9 @@ import orjson
 from serde import coerce, serde
 from serde.json import to_json
 
+from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb, this_temperature_c
-from slam_rs.reference import ReferenceManifest, RobocapSession, load_manifest
+from slam_rs.reference import Benchmarks, RobocapSession, load_benchmarks
 from slam_rs.tracking import SegmentRun, run_robocap
 from slam_rs.trajectory import AteResult, ScoringResult, Trajectory, empty_trajectory, read_trajectory, score_trajectory, write_trajectory
 
@@ -173,11 +174,11 @@ class Config:
     """Config overlay applied before tracking."""
 
     catalog: str | None = None
-    """Catalog URL; defaults to the manifest."""
+    """Catalog URL; defaults to slam.toml."""
     gpu: bool = False
     """Use the GPU frontend."""
     session: str = "s00000015"
-    """RoboCap session id from the manifest. Defaults to session 15."""
+    """RoboCap session id; regression reference comes from benchmarks.toml. Defaults to session 15."""
     seconds: float = 0.0
     """Replay this much video time from the first frameset; 0 replays the whole session, which is what a fleet row is."""
     output_json: Path = Path("robocap_fleet.json")
@@ -190,13 +191,13 @@ class Config:
     """Longest time window of encoded samples fetched in one round trip."""
 
 
-def measure(manifest: ReferenceManifest, session: RobocapSession, config: Config, machine: Machine) -> tuple[RobocapRow, Trajectory]:
+def measure(settings: SlamConfig, session: RobocapSession, config: Config, machine: Machine) -> tuple[RobocapRow, Trajectory]:
     """Replay the session and report regression agreement without gating accuracy."""
-    reference_path: Path | None = config.reference_csv or (manifest.package_root / session.reference_csv if session.reference_csv else None)
+    reference_path: Path | None = config.reference_csv or (settings.package_root / session.reference_csv if session.reference_csv else None)
     reference: Trajectory = read_trajectory(reference_path) if reference_path else empty_trajectory()
     before: float | None = this_temperature_c()
     run: SegmentRun = run_robocap(
-        manifest, session, seconds=config.seconds, window_s=config.window_s, profile=config.profile, catalog=config.catalog, gpu=config.gpu
+        settings, session, seconds=config.seconds, window_s=config.window_s, profile=config.profile, catalog=config.catalog, gpu=config.gpu
     )
     after: float | None = this_temperature_c()
     scoring: ScoringResult = score_trajectory(run.estimate, reference if len(reference) else None)
@@ -237,15 +238,16 @@ def main(config: Config) -> None:
             accuracy number to report but a run that went wrong. Both outputs
             are written first: the cost they carry was measured.
     """
-    manifest: ReferenceManifest = load_manifest()
-    session: RobocapSession = manifest.robocap.session(config.session)
+    settings: SlamConfig = load_slam_config()
+    benchmarks: Benchmarks = load_benchmarks(settings)
+    session: RobocapSession = benchmarks.robocap.session(config.session)
     machine: Machine = this_machine()
     print(f"{machine.hostname}: {machine.arch}, libc {machine.libc}, {machine.cores} cores")
     print(f"{session.segment_id}: ground truth absent, not scored; regression agreement is not gated")
     started: float = time.monotonic()
     row: RobocapRow
     estimate: Trajectory
-    row, estimate = measure(manifest, session, config, machine)
+    row, estimate = measure(settings, session, config, machine)
     print(f"profile={config.profile} config_sha256={row.config_sha256}")
     output_csv: Path = config.output_csv if config.output_csv is not None else config.output_json.with_suffix(".csv")
     # Above both writes: a run that spent 52.9 s of video must not lose it to a

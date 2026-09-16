@@ -27,7 +27,7 @@ from numpy import ndarray
 
 from slam_rs import _core, tracking
 from slam_rs.catalog_feed import Frameset, ImuStream
-from slam_rs.reference import ReferenceManifest
+from slam_rs.config import SlamConfig
 from slam_rs.tracking import MAX_HELD_FRAMESETS, Lockstep, robocap_estimator_files
 from slam_rs.trajectory import empty_trajectory
 from slam_rs.vio_log import VioLogger, VioStage
@@ -134,23 +134,21 @@ def test_a_run_that_never_tracked_still_reports_what_it_held(
     assert "NEVER COVERED BY THE IMU at [0]" in stage.summary()
 
 
-
-
-def test_the_estimator_is_configured_from_basalts_own_two_files(manifest: ReferenceManifest) -> None:
-    """The RoboCap estimator uses the two configuration files named by its manifest.
+def test_the_estimator_is_configured_from_basalts_own_two_files(settings: SlamConfig) -> None:
+    """The RoboCap estimator uses the two configuration files named by its settings.
     Both files are checked into the package, so configuration needs no external bundle.
     """
     calibration: _core.Calibration
     flow: _core.VioConfig
     config_text: str
-    calibration, flow, config_text = robocap_estimator_files(manifest)
+    calibration, flow, config_text = robocap_estimator_files(settings)
     assert list(calibration.resolution) == [(640, 360)] * 4
     assert flow.optical_flow_image_safe_radius > 0.0
     # The text handed back is the one the config came from: a digest over it names what the estimator read.
     assert _core.VioConfig.from_json(config_text).to_json() == flow.to_json()
 
 
-def test_robocap_estimator_files_hand_back_the_very_string_they_parsed(manifest: ReferenceManifest, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_robocap_estimator_files_hand_back_the_very_string_they_parsed(settings: SlamConfig, monkeypatch: pytest.MonkeyPatch) -> None:
     """The RoboCap config text is the one string ``VioConfig.from_json`` received, and the profile reaches it."""
     parsed: list[str] = []
 
@@ -162,6 +160,6 @@ def test_robocap_estimator_files_hand_back_the_very_string_they_parsed(manifest:
 
     monkeypatch.setattr(tracking, "_core", SimpleNamespace(VioConfig=RecordingVioConfig, Calibration=_core.Calibration))
     config_text: str
-    _calibration, _flow, config_text = robocap_estimator_files(manifest, profile="fast")
+    _calibration, _flow, config_text = robocap_estimator_files(settings, profile="fast")
     assert parsed == [config_text]
     assert '"port.redetect_survivor_ratio"' in config_text

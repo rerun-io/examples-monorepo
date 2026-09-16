@@ -19,8 +19,9 @@ from slam_rs.catalog_feed import (
     SegmentSource,
     open_segment,
 )
+from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
-from slam_rs.reference import SMOKE_SEGMENTS, ImuParameters, ReferenceManifest, ReferenceSegment, load_manifest, resolved_flow_config
+from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
 from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_trajectory
 from slam_rs.vio_log import FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
@@ -45,13 +46,13 @@ class Config:
     are in the pixels of the frame they tracked, not of a downscaled copy of it.
     """
     segment: str = SMOKE_SEGMENT
-    """Segment id from ``gate.toml``; also names the IMU parameters used for ``--rrd``."""
+    """Segment id from ``benchmarks.toml``; also names the IMU parameters used for ``--rrd``."""
     rrd: Path | None = None
     """Local base recording; retains the selected dataset configuration and IMU model."""
     gt_rrd: Path | None = None
     """Optional local ground-truth recording; requires --rrd."""
     catalog: str | None = None
-    """Catalog URL override; defaults to the manifest. Exclusive with local recording files."""
+    """Catalog URL override; defaults to slam.toml. Exclusive with local recording files."""
     max_framesets: int | None = None
     """Stop after this many framesets; None replays the whole segment."""
     frame_stride: int = 1
@@ -122,7 +123,7 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
     started: float = time.monotonic()
     replayed: int = 0
     # `--max-framesets` is a count and the feed reads by time; the feed is what
-    # converts one to the other, so this loop and `tracking._drive` cannot
+    # converts one to the other, so this loop and `tracking.drive` cannot
     # disagree about which frameset a count ends on.
     stop_ns: int | None = feed.stop_ns_after(config.max_framesets)
     # The stage that tracks needs the pixels its keypoints were computed on.
@@ -149,17 +150,15 @@ def main(config: Config) -> None:
     Args:
         config: Parsed CLI options.
     """
-    manifest: ReferenceManifest = load_manifest()
-    listed: ReferenceSegment | None = next((s for s in manifest.segments if s.segment_id == config.segment), None)
+    settings: SlamConfig = load_slam_config()
+    benchmarks: Benchmarks = load_benchmarks(settings)
+    listed: ReferenceSegment | None = next((s for s in benchmarks.segments if s.segment_id == config.segment), None)
     dataset_name: str = listed.dataset_name if listed is not None else config.segment.split("__")[0]
     vio_config: _core.VioConfig
-    imu: ImuParameters
     if listed is not None:
-        vio_config, _config_text = resolved_flow_config(manifest, listed, profile=config.profile)
-        imu = manifest.dataset(listed.dataset_name).imu
+        vio_config, _config_text = resolved_flow_config(settings, listed, profile=config.profile)
     else:
-        vio_config = _core.VioConfig.from_json(manifest.vio_config_text(dataset_name, profile=config.profile))  # refuses an unknown dataset
-        imu = manifest.dataset(dataset_name).imu
+        vio_config = _core.VioConfig.from_json(settings.vio_config_text(dataset_name, profile=config.profile))  # refuses an unknown dataset
     source: SegmentSource
     origin: str
     if config.rrd is not None:
@@ -170,14 +169,14 @@ def main(config: Config) -> None:
     else:
         if config.gt_rrd is not None:
             raise ValueError("--gt-rrd requires --rrd")
-        origin = config.catalog or manifest.catalog_url
+        origin = config.catalog or settings.catalog_url
         source = CatalogSegment(origin, dataset_name, config.segment)
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / config.segment / "slam_rs.csv"
     print(
         f"replaying {config.segment} ({f'{listed.tier} tier' if listed is not None else 'not in the reference set: ground truth only'}) from {origin}"
     )
 
-    with open_segment(source, imu, frame_stride=config.frame_stride, window_s=config.window_s) as feed:
+    with open_segment(source, frame_stride=config.frame_stride, window_s=config.window_s) as feed:
         print(
             f"{len(feed.cameras)} cameras, {len(feed.frame_t_ns)} framesets, ground truth "
             f"{'attached' if feed.has_ground_truth else 'absent'}, clock offset {feed.capture_start_time_ns} ns"

@@ -482,7 +482,7 @@ Clip order is MIO10 / MIO07 / MGO07; time is tracker-call milliseconds.
 | Mac mini M4, Metal | 4.59 / 4.76 / 5.97 | 4.93 / 5.06 / 8.48 | 1.07x / 1.06x / 1.42x | fail / fail / pass |
 | Spark GB10, Vulkan | 2.88 / 3.07 / 4.75 | 5.35 / 5.42 / 9.00 | 1.86x / 1.76x / 1.90x | pass / pass / pass |
 
-The 5090's ten `gate.toml` reference rows span 2.0–3.2x against its own CPU
+The 5090's ten reference rows (now in `benchmarks.toml`) span 2.0–3.2x against its own CPU
 lane. The 3060 has not been re-run since S32; its box needs a driver reboot.
 5090 trajectories stayed byte-identical throughout S36, and the park patch
 removed the stereo-stage regression from the compiler bump. These facts do
@@ -661,8 +661,9 @@ accepts, and their objects configure the frontend.
 
 ## The reference set
 
-`gate.toml` records gate segments, IMU noise,
-clock offsets, decode paths, configuration files and measured baselines.
+`slam.toml` records the catalog URL, per-dataset configuration files and the RoboCap rig rules.
+`benchmarks.toml` records regression segments, frozen decode paths and measured
+baselines. Catalog processing loads only the runtime file; evaluation loads both.
 The tiers are **smoke** for quick checks, **release** for the release set, and
 **listed** for additional catalog segments. RoboCap sessions carry rig and replay
 metadata but no ground truth, so they cannot receive a ground-truth ATE verdict.
@@ -676,10 +677,12 @@ The catalog supplies images, IMU samples and ground truth. No reference bundle
 or filesystem-side dataset fallback is part of the gate.
 
 ```python
-from slam_rs.reference import load_manifest
+from slam_rs.config import load_slam_config
+from slam_rs.reference import load_benchmarks
 
-manifest = load_manifest()
-segment = manifest.in_tier("smoke")[0]
+settings = load_slam_config()
+benchmarks = load_benchmarks(settings)
+segment = benchmarks.in_tier("smoke")[0]
 ```
 
 ### Two clocks, converted once
@@ -688,8 +691,17 @@ The catalog indexes a segment on `video_time`, which is **relative** to
 `capture.start_time_ns`, while exported trajectory CSV is
 on the **absolute** device clock; on the Index smoke segment the two differ by
 10,433,867,587,166 ns, so a trajectory exported on the wrong clock associates with
-nothing at all. The feed works in `video_time` throughout and
-`trajectory.shift_clock` converts once, at the CSV boundary.
+nothing at all. For MSD, the feed works in `video_time` and `trajectory.shift_clock` adds the
+capture epoch at the CSV boundary. RoboCap's `video_time` is already an absolute
+boot-relative camera clock. DataForge subtracts the camera-to-IMU offset when
+logging IMU samples, so cameras, IMU and ground truth all share that axis.
+The feed adds the offset to **all three** to reach the estimator's inertial
+clock, subtracting it from query bounds first. Adding it only to camera frames
+introduced a 14.902432 ms relative error. A catalog pose layer subtracts both
+the export epoch and camera offset to return to base `video_time`.
+The common estimator shift now comes from the negative of the IMU entity's
+static `applied_time_shift_ns`, not from `slam.toml`. Factory per-camera
+calibration offsets are retained separately and are never applied a second time.
 
 ## The feed, the metrics and the replay tool
 
