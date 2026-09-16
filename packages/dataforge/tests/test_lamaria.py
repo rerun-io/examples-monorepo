@@ -360,14 +360,22 @@ def test_the_declared_follow_frame_is_the_calibration_own_forward_and_up() -> No
 
     ``T_b_s`` for cam0 is ``rig_T_cam`` of camera-slam-left in the imu-right
     frame, and the Aria device frame *is* that camera's frame (RDF: x right, y
-    down, z along the optical axis). So the rotation's third column is where the
-    wearer looks and the negated second column is the wearer's up.
+    down, z along the optical axis). The stereo pair's mean third column is where
+    the wearer looks. Aria records sideways, so the native image-up (``-y``) is the
+    wearer's *left*; the upright (quarter-turned) image's up is the native ``-x``,
+    and that is the wearer's up — gravity confirms it within a degree.
     """
     published: dict[str, PublishedCamera] = read_calibration_json(REFERENCE_DIR / "R_01_easy.calibration.json")
     rig_R_cam0: Float64[ndarray, "3 3"] = published["cam0"].rig_T_cam.to_matrix()[:3, :3]
+    rig_R_cam1: Float64[ndarray, "3 3"] = published["cam1"].rig_T_cam.to_matrix()[:3, :3]
+    up: Float64[ndarray, "3"] = -rig_R_cam0[:, 0]
+    # The pair's mean optical axis, levelled against up: one SLAM camera alone is yawed ~38 deg outward.
+    pair_xyz: Float64[ndarray, "3"] = rig_R_cam0[:, 2] + rig_R_cam1[:, 2]
+    forward: Float64[ndarray, "3"] = pair_xyz - float(pair_xyz @ up) * up
+    forward = forward / np.linalg.norm(forward)
 
-    np.testing.assert_allclose(lamaria.FOLLOW_FORWARD, rig_R_cam0[:, 2], atol=1e-3)
-    np.testing.assert_allclose(lamaria.FOLLOW_UP, -rig_R_cam0[:, 1], atol=1e-3)
+    np.testing.assert_allclose(lamaria.FOLLOW_FORWARD, forward, atol=1e-3)
+    np.testing.assert_allclose(lamaria.FOLLOW_UP, up, atol=1e-3)
     assert np.linalg.norm(lamaria.FOLLOW_FORWARD) == pytest.approx(1.0, abs=1e-3)
     assert np.linalg.norm(lamaria.FOLLOW_UP) == pytest.approx(1.0, abs=1e-3)
     assert float(np.dot(lamaria.FOLLOW_FORWARD, lamaria.FOLLOW_UP)) == pytest.approx(0.0, abs=1e-3)

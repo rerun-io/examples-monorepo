@@ -174,17 +174,26 @@ CP_UV_RADIUS_PX: float = 4.0
 """Marker radius of a control-point detection, in pixels of the upright 480x640
 SLAM image; it is drawn in ``CONTROL_POINT_COLOR``, the same green as the 3D point."""
 
-FOLLOW_FORWARD: tuple[float, float, float] = (0.018, -0.967, -0.253)
-"""Where the wearer looks, in the rig (imu-right) frame.
+FOLLOW_FORWARD: tuple[float, float, float] = (-0.106, -0.617, -0.780)
+"""Where the wearer looks, in the rig (imu-right) frame: the mean optical axis of the
+SLAM stereo pair, levelled against ``FOLLOW_UP``.
 
-The Aria device frame *is* camera-slam-left's frame (``device_T_cam`` for
-``1201-1`` is the identity), so the published ``cam0.T_b_s`` rotation is
-``rig_R_cam0`` and its third column is that camera's optical axis (RDF) in the
-rig frame. Typed in from R_01_easy's published calibration; a test re-derives it
-from the reference fixture."""
-FOLLOW_UP: tuple[float, float, float] = (-0.198, 0.245, -0.949)
-"""The wearer's up, in the rig frame: the negated second column of the same
-rotation (RDF's ``y`` is image-down, and glasses are worn upright)."""
+The published ``cam0.T_b_s`` / ``cam1.T_b_s`` rotations are ``rig_R_cam``, and each
+third column is that camera's optical axis (RDF). Aria's SLAM cameras are angled
+outward, so one camera alone is yawed ~38 deg from where the wearer faces; the pair's
+mean cancels it (the same rule msd's ``follow_frame`` applies). Checked against the
+walking direction of the two worn sequences, ``sequence_1_19`` and ``sequence_4_11``,
+which agree with this axis within 0.5 and 8.5 deg. Typed in from R_01_easy's
+published calibration; a test re-derives it from the reference fixture."""
+FOLLOW_UP: tuple[float, float, float] = (-0.980, -0.067, 0.187)
+"""The wearer's up, in the rig frame: the negated **first** column of the same rotation.
+
+Aria Gen1 records its cameras sideways, so the native image-up (RDF ``-y``) is the
+wearer's *left*; the frames are logged turned a quarter clockwise, and the turned
+image's up is the native ``-x``. Cross-checked against gravity: imu-right's
+accelerometer at rest on R_01_easy reads ``(-9.55, -0.52, 1.84)`` m/s^2, within 1 deg
+of this axis, and world ``+z`` brought into the rig frame with the pGT agrees.
+A test re-derives it from the reference fixture."""
 IMAGE_ROTATION_CW_DEG: int = 90
 """How far clockwise every logged frame, pinhole and 2D detection is turned from
 what the archive publishes. Aria Gen1 records its cameras sideways; a consumer
