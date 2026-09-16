@@ -43,6 +43,17 @@ ignore_names = [
     "on_duplicate",
     "set_default",
     "exist_ok",
+    # A context manager's __exit__ has to accept it; the bodies here do not use it.
+    "traceback",
+    # msd's tyro-facing config fields, and the stub parameters a signature has to
+    # accept but a body has no use for.
+    "device",
+    "keep_raw",
+    "raw_budget_gb",
+    "revision",
+    "keywords",
+    # The GPU-encoder gate fixture: requested for its skip, never read.
+    "nvenc",
 ]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true

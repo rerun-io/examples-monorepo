@@ -9,7 +9,7 @@ work plan — is in **[docs/dataforge-design-report.html](docs/dataforge-design-
 
 ## Run it
 
-From the repo root, with `<dataset>` one of `robocap`, `selfcap`, `wildcap`:
+From the repo root, with `<dataset>` one of `robocap`, `selfcap`, `wildcap`, `msd`:
 
 ```bash
 # 1. Catalog server, in a tmux session so it outlives your shell. Registrations
@@ -52,6 +52,52 @@ pixi run -e dataforge --frozen dataforge-register wildcap --corpus <corpus> --ro
 That registers dataset `wildcap-<corpus>`. `.mov` is skipped with a warning
 (remux: `ffmpeg -i in.mov -c copy out.mp4`).
 
+### Monado SLAM Datasets (msd)
+
+[`collabora/monado-slam-datasets`](https://huggingface.co/datasets/collabora/monado-slam-datasets)
+(CC-BY 4.0) ships each VR-headset sequence as a zip of PNG frames plus csv
+sensor logs — about 350 GB in total. dataforge never keeps that: `download`
+fetches only the device calibration and prints the plan, and `convert` fetches
+**one** sequence, streams its PNGs straight into the AV1 encoder, writes the
+rrd, and deletes the archive again.
+
+One headset is one catalog dataset, because a catalog dataset holds one default
+blueprint and the three headsets have different camera counts:
+
+| `--device` | catalog dataset | cameras | magnetometer |
+| --- | --- | --- | --- |
+| `index` | `msd-index` | 2 × 960×960 @ ~54 fps, `kb4` fisheye | no |
+| `g2` | `msd-g2` | 4 × 640×480 @ ~30 fps, `pinhole-radtan8` | yes |
+| `odyssey` | `msd-odyssey` | 2 × 640×480, `pinhole-radtan8` | yes |
+
+```bash
+export DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/msd-rrd     # rrds go to the NAS
+pixi run -e dataforge --frozen dataforge-download msd --device index
+# --sequence belongs to the verb, so it goes before the dataset subcommand
+pixi run -e dataforge --frozen dataforge-convert --sequence MIO09_short_1_updown msd --device index
+pixi run -e dataforge --frozen dataforge-convert msd --device index   # every sequence, one at a time
+pixi run -e dataforge --frozen dataforge-register msd --device index
+```
+
+`--root` is scratch, not storage: point it at local NVMe (it defaults to
+`packages/dataforge/data/raw/msd`). `--raw-budget-gb` (default 50) caps what
+that directory may hold, so a batch run that fails halfway cannot fill the
+disk; a sequence whose archives alone exceed the cap — the Index and G2 long
+sessions, at 66 and 55 GB — warns and is converted anyway, and leftovers that
+would breach it are a hard error naming the files to delete. `--keep-raw` keeps
+the archive and the encoded mp4s for debugging.
+
+Three sequences ship as Info-ZIP multi-volume sets (`.z01 … .zip`) — the
+`*_long_session` archives of all three headsets — which Python's `zipfile`
+cannot read; those go through the `7zz` CLI (the conda-forge `7zip` package),
+one camera directory extracted at a time.
+
+`video_time` is the device clock minus `t0`, and `t0` is the earliest sample of
+**any** stream including `gt` — the ground-truth layer is a sibling rrd and both
+must share the origin. Camera extrinsics come from the device's basalt
+`calibration.json`, whose `T_imu_cam` is the camera pose in the IMU frame; the
+rig frame *is* that frame, so the rig node states `reference = "imu_00"`.
+
 ### Environment variables
 
 | variable | default | purpose |
@@ -88,10 +134,11 @@ is a nominal-rate fiction for such a file.
 | `robocap` | one `(device, session)`; file-roll segments merge at convert | 6 fisheye video streams, the dev0 IMU, the cap mesh |
 | `selfcap` | one cut episode | 4 phone exo rigs + the OAK ego rig + the Quest (9 cameras), the OAK IMU, the Quest head-pose track |
 | `wildcap` | one capture directory | the videos only: no `Pinhole`, no `ViewCoordinates`, no transforms — calibration, sync and localization are later layers |
+| `msd` | one Monado SLAM sequence, fetched on demand | 2 or 4 grayscale video streams (AV1-encoded from the archive's PNGs), the IMU, and on the G2/Odyssey+ the magnetometer |
 
 A config's `command` is its CLI subcommand; its `name` is the catalog dataset
 and the prefix of every recording id. They are equal for robocap and selfcap;
-wildcap derives `wildcap-<corpus>`.
+wildcap derives `wildcap-<corpus>` and msd derives `msd-<device>`.
 
 **Verbs**, each a thin `tools/apps/*.py` shim over `dataforge/apis/`.
 `convert` writes `<DATAFORGE_OUTPUT_ROOT>/base/<recording_id>.rrd` through a
