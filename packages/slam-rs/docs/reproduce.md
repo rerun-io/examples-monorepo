@@ -11,7 +11,8 @@ pixi run -e slam-rs-dev slam-rs-register           # idempotent: only new files 
 ```
 
 The downloads land in `packages/slam-rs/data/msd-rrd/`, one directory per
-layer (`base`, `gt`, `sensor_metadata`) plus `blueprints/`. Each download leaves a
+layer (`base`, `gt`, `sensor_metadata`); registration writes the device blueprints
+into `blueprints/` beside them. Each download leaves a
 marker file, so pixi skips one that is already there.
 
 ## The gate

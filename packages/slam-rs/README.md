@@ -21,7 +21,7 @@ one. [pixi](https://pixi.sh) is the only prerequisite.
 pixi run -e slam-rs-dev slam-rs-build            # cargo build, installs the core in place (about two minutes)
 pixi run -e slam-rs-dev slam-rs-download-sample  # two clips from HuggingFace
 pixi run -e slam-rs-dev slam-rs-serve            # local catalog on :51235; keep it running in its own terminal
-pixi run -e slam-rs-dev slam-rs-register         # datasets msd-index, msd-g2, msd-odyssey
+pixi run -e slam-rs-dev slam-rs-register         # dataforge's register tool, one catalog dataset per headset
 cd packages/slam-rs && pixi run -e slam-rs-dev python tools/apps/replay.py --stage vio   # MIO10 in the viewer
 ```
 
@@ -35,7 +35,8 @@ pixi run -e slam-rs-dev slam-rs-gate --tier smoke
 
 - No display: add `--rr-config.headless --rr-config.save out.rrd` to the replay.
 - GPU frontend: `pixi run -e slam-rs-dev slam-rs-wgpu-build` once, then `--gpu` on any tool.
-- macOS: `-e slam-rs-osx-dev` in place of `-e slam-rs-dev`.
+- macOS: `-e slam-rs-osx-dev` in place of `-e slam-rs-dev`. Registration goes through
+  dataforge, which is Linux only, so replay a downloaded clip with `--rrd`/`--gt-rrd`.
 - A recording of your own, no catalog: `replay.py --stage vio --rrd base.rrd --gt-rrd gt.rrd`.
 - All 64 recordings (15.5 GB): `slam-rs-download-all`, register again, then
   `slam-rs-gate --tier release`.
