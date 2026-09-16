@@ -6,14 +6,13 @@ dataset, the release gate, and where the recordings came from.
 ## The whole dataset
 
 ```bash
-pixi run -e slam-rs-dev slam-rs-download-release   # the ten gated clips, about 1.5 GB
 pixi run -e slam-rs-dev slam-rs-download-all       # all 64 recordings, about 15.5 GB
 pixi run -e slam-rs-dev slam-rs-register           # idempotent: only new files are added
 ```
 
 The downloads land in `packages/slam-rs/data/msd-rrd/`, one directory per
-layer (`base`, `gt`, `sensor_metadata`) plus `blueprints/`. Each tier leaves a
-marker file, so pixi skips a tier that is already there.
+layer (`base`, `gt`, `sensor_metadata`) plus `blueprints/`. Each download leaves a
+marker file, so pixi skips one that is already there.
 
 ## The gate
 

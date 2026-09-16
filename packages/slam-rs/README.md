@@ -12,14 +12,14 @@ Linux x86-64, Linux aarch64 and macOS arm64.
 
 ## Quickstart
 
-Five commands from a fresh clone: build the core, fetch three short recordings of
+Five commands from a fresh clone: build the core, fetch two short recordings of
 the [Monado SLAM Dataset](https://huggingface.co/datasets/pablovela5620/msd-rrd)
-(one per headset, about 10 MB), start a local catalog, register them, and replay
+(one two-camera, one four-camera, about 7 MB), start a local catalog, register them, and replay
 one. [pixi](https://pixi.sh) is the only prerequisite.
 
 ```bash
 pixi run -e slam-rs-dev slam-rs-build            # cargo build, installs the core in place (about two minutes)
-pixi run -e slam-rs-dev slam-rs-download-smoke   # three clips and their blueprints from HuggingFace
+pixi run -e slam-rs-dev slam-rs-download-sample  # two clips from HuggingFace
 pixi run -e slam-rs-dev slam-rs-serve            # local catalog on :51235; keep it running in its own terminal
 pixi run -e slam-rs-dev slam-rs-register         # datasets msd-index, msd-g2, msd-odyssey
 cd packages/slam-rs && pixi run -e slam-rs-dev python tools/apps/replay.py --stage vio   # MIO10 in the viewer
@@ -37,15 +37,15 @@ pixi run -e slam-rs-dev slam-rs-gate --tier smoke
 - GPU frontend: `pixi run -e slam-rs-dev slam-rs-wgpu-build` once, then `--gpu` on any tool.
 - macOS: `-e slam-rs-osx-dev` in place of `-e slam-rs-dev`.
 - A recording of your own, no catalog: `replay.py --stage vio --rrd base.rrd --gt-rrd gt.rrd`.
-- The ten gated clips (1.5 GB) or all 64 (15.5 GB): `slam-rs-download-release` or
-  `slam-rs-download-all`, register again, then `slam-rs-gate --tier release`.
+- All 64 recordings (15.5 GB): `slam-rs-download-all`, register again, then
+  `slam-rs-gate --tier release`.
   Details in [docs/reproduce.md](docs/reproduce.md).
 
 ```mermaid
 flowchart TB
     subgraph data["Get the data, once"]
         direction LR
-        HF[("HuggingFace: msd-rrd")] -->|slam-rs-download-*| DATA["data/msd-rrd: base, gt, sensor_metadata"]
+        HF[("HuggingFace: msd-rrd")] -->|slam-rs-download-sample, -all| DATA["data/msd-rrd: base, gt, sensor_metadata"]
         DATA -->|slam-rs-register| CAT["local rerun server :51235"]
     end
     subgraph run["Every replay or gate run"]
