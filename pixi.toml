@@ -2409,9 +2409,27 @@ python = "3.12.*"
 # pure-Rust crate needs nothing else. Same pin as gsplat-rust-renderer.
 rust = "1.97.*"
 tyro = ">=0.9.1,<0.10"
+# dataforge's projectaria-tools drags moviepy in, and every moviepy 2.x caps
+# pillow < 12; without this the conda solve pins pillow 12 and the PyPI side is
+# unsatisfiable. Same pin as [feature.dataforge.dependencies].
+pillow = ">=11,<12"
+
 [feature.slam-rs.pypi-dependencies]
 slam-rs = { path = "packages/slam-rs", editable = true }
+
+# Catalog result-layer publishing imports dataforge; dataforge is a linux-only
+# member (projectaria-tools has no macOS 13 wheel), so the osx lane leaves it out.
+[feature.slam-rs.target.linux-64.pypi-dependencies]
 dataforge = { path = "packages/dataforge", editable = true }
+
+[feature.slam-rs.target.linux-aarch64.pypi-dependencies]
+dataforge = { path = "packages/dataforge", editable = true }
+
+[feature.slam-rs.pypi-options.dependency-overrides]
+# dataforge pulls projectaria-tools, which pins rerun-sdk==0.33.0 for its own
+# notebook tutorials; the workspace lane is rerun-sdk 0.37.0. Same override as
+# [feature.dataforge.pypi-options.dependency-overrides].
+rerun-sdk = { version = "==0.37.0", extras = ["catalog"] }
 
 [feature.slam-rs.tasks.slam-rs-catalog-layer]
 cmd = "python tools/apps/catalog_layer.py"
@@ -3021,14 +3039,43 @@ platforms = ["linux-64", "linux-aarch64"]
 [feature.dataforge.dependencies]
 python = "3.12.*"
 tyro = ">=0.9.1,<0.10"
+# transports.http_fetch streams and resumes LaMAria's Apache-served files with it.
+requests = "*"
 # CPU torch only satisfies simplecv's module-load import.
 pytorch-cpu = ">=2.8.0"
+# 7zz: the only extractor that reads MSD's Info-ZIP multi-volume archives
+# (<seq>.z01/.z02/.zip), which Python's zipfile refuses outright.
+7zip = ">=24.09"
+# The AV1 encoder every image-sequence dataset goes through. conda-forge's build
+# carries av1_nvenc, so the default resolve_ffmpeg() works without DATAFORGE_FFMPEG.
+# 9.x builds link the env's libjxl; the 8.1 build-number pin other features carry
+# does not apply (9.0's build numbers restarted below it and would exclude it).
+ffmpeg = ">=9.0.1"
+# projectaria-tools drags moviepy in for its tutorial notebooks, and every moviepy
+# 2.x caps pillow < 12; the conda solve would otherwise pin pillow 12 and make the
+# PyPI side unsatisfiable. Nothing here uses pillow directly.
+pillow = ">=11,<12"
 
 [feature.dataforge.pypi-dependencies]
 dataforge = { path = "packages/dataforge", editable = true }
+# VRS reader for the LaMAria Aria Gen1 sequences; ships linux-aarch64 wheels.
+projectaria-tools = ">=2.2"
+
+[feature.dataforge.pypi-options.dependency-overrides]
+# projectaria-tools pins rerun-sdk==0.33.0 for its own notebook tutorials; dataforge
+# only uses its VRS reader, and the workspace lane is rerun-sdk 0.37.0 (AGENTS.md
+# "Testing Rerun builds"). Same version + extras as [feature.common.pypi-dependencies].
+rerun-sdk = { version = "==0.37.0", extras = ["catalog"] }
 
 [feature.dataforge.activation.env]
 PACKAGE_DIR = "packages/dataforge"
+# tests/conftest.py holds the shared fixtures and read-back helpers, and test
+# modules import them by module name the way pytest puts them on sys.path;
+# pyrefly needs the same directory on its search path to resolve that import.
+PYREFLY_EXTRA_ARGS = "--search-path tests"
+# huggingface_hub reads its transfer knobs once, at import, so hf_fetch cannot turn
+# this on from inside the call; it has to be in the environment dataforge launches with.
+HF_XET_HIGH_PERFORMANCE = "1"
 
 [feature.dataforge.tasks.dataforge-download]
 cmd = "python tools/apps/download.py"
@@ -3038,12 +3085,13 @@ description = "Fetch (or verify, for local corpora) a dataset's raw tree"
 [feature.dataforge.tasks.dataforge-convert]
 cmd = "python tools/apps/convert.py"
 cwd = "packages/dataforge"
-description = "Convert discovered sequences into base-layer rrds (--sequence, --force)"
+description = "Convert discovered sequences into their layer rrds (--sequence, --force)"
 
 [feature.dataforge.tasks.dataforge-register]
 cmd = "python tools/apps/register.py"
 cwd = "packages/dataforge"
-description = "Register base-layer rrds into a local Rerun catalog"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Register every layer's rrds into a local Rerun catalog"
 
 [feature.dataforge.tasks.dataforge-robocap-calibration]
 cmd = "python tools/robocap_calibration.py"
@@ -3053,7 +3101,8 @@ description = "Backfill factory calibration and applied timing metadata on legac
 [feature.dataforge.tasks.dataforge-view]
 cmd = "python tools/apps/view.py"
 cwd = "packages/dataforge"
-description = "Open one converted recording in the viewer (--rr-config.headless in a bare shell)"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Open one converted recording — every layer of it — in the viewer (--rr-config.headless in a bare shell)"
 
 [feature.dataforge.tasks.robocap-live-display]
 cmd = "python tools/apps/robocap_live_display.py"

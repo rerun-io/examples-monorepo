@@ -22,13 +22,13 @@ import numpy as np
 
 from live_rerun.calibration import OakCameraCalib
 from live_rerun.rerun_video_logger import Codec
-from live_rerun.rig import SensorKind
+from live_rerun.rig import CameraKind
 
 # (label, board socket, image kind). Ordered reference-first: the LEFT mono
 # camera (CAM_B) is the rig reference frame (identity -> cam_00); rgb (CAM_A) and
 # right (CAM_C) follow. This order flows through to the calibration list, the
 # cam_<index> entity paths, the video paths, and the side-by-side 2D views.
-_SENSORS: tuple[tuple[str, dai.CameraBoardSocket, SensorKind], ...] = (
+_SENSORS: tuple[tuple[str, dai.CameraBoardSocket, CameraKind], ...] = (
     ("left", dai.CameraBoardSocket.CAM_B, "grayscale"),
     ("rgb", dai.CameraBoardSocket.CAM_A, "rgb"),
     ("right", dai.CameraBoardSocket.CAM_C, "grayscale"),

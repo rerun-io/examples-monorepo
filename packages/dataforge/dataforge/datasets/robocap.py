@@ -64,14 +64,12 @@ from simplecv.data.ego.robocap_ego import (
     _load_kalibr_camchain_imucam,
 )
 from simplecv.imu_calibration import ImuCalibration
-from simplecv.rerun_log_utils import log_pinhole
 from yaml import YAMLError
 
-from dataforge import paths, schema, transports, writing
-from dataforge.blueprints import build_rig_blueprint
+from dataforge import blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import ImuChannel, log_imu, log_rig_node, log_video_stream
+from dataforge.logging_toolkit import ImuChannel, log_camera_node, log_imu, log_rig_node, log_video_stream
 
 GYRO_SCALE: float = 0.000266316
 """Raw gyro LSB → rad/s; measured in the basalt fork (``dataset_io_robocap.cpp``)."""
@@ -89,6 +87,10 @@ RIG_REFERENCE: str = "imu_00"
 so the rig's reference sensor is the IMU node, not a camera."""
 IMU_DEVICE: int = 0
 """v1 logs the middle IMU (``dev0``) only. TODO(dataforge): also emit dev1/dev2."""
+RUN_SOURCE: str = "basalt"
+EXTRA_RUN_SOURCES: tuple[str, ...] = ("slam_rs",)
+"""Further pose layers RoboCap sessions carry: the slam-rs catalog result layer."""
+"""Processing source of the pose layer the blueprints already lay out; nothing writes it yet."""
 SESSION_DIR_RE: re.Pattern[str] = re.compile(r"^(?P<device>[0-9a-f]+)_session_(?P<session>\d+)$")
 """Session directory names; the ``-old`` duplicates deliberately do not match."""
 MESH_RELATIVE_PATH: str = "robocap-mesh/3DModel.glb"
@@ -229,10 +231,13 @@ def video_epoch_ns(video_path: Path) -> int:
 
 
 def follow_eye_controls() -> rrb.EyeControls3D:
-    """First-person eye controls aligned with RoboCap's rig frame."""
-    # EyeControls3D is marked unstable by the SDK; re-validate this factory on Rerun bumps.
-    return rrb.EyeControls3D(
-        kind=rrb.Eye3DKind.FirstPerson,
+    """First-person eye controls aligned with RoboCap's rig frame.
+
+    Hand-placed, not derived: RoboCap's six cameras do not make a front pair
+    whose baseline names an up axis, so the numbers below come from the cap mesh
+    alignment instead.
+    """
+    return blueprints.eye_controls_from_pose(
         # Rig-frame coordinates: the dev0 IMU frame's -Z is the wearer's up
         # (the cap mesh alignment maps scan-up there).
         position=(0.8, -0.8, -0.6),
@@ -240,44 +245,54 @@ def follow_eye_controls() -> rrb.EyeControls3D:
         # ~4 cm away), so this lines the view up with where the wearer faces.
         look_target=(0.0, 0.0, 0.0),
         eye_up=(0.0, 0.0, -1.0),
-        spin_speed=0.0,
     )
 
 
 def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
-    """Shared rig layout with RoboCap's calibrated follow-eye orientation."""
-    return build_rig_blueprint(camera_names, follow_eye=follow_eye_controls())
+    """Default layout: 3D rig + a grid of camera panes over gyro/accel plots.
+
+    Mirrors basalt's ``basalt_vio_blueprint.py`` layout, on exoego:v2 paths.
+
+    Args:
+        camera_names: Full canonical camera labels in ``cam_00..cam_NN`` order;
+            callers pass ``list(CAMERA_DISPLAY_ORDER)`` so panes stay stable.
+
+    Returns:
+        The blueprint embedded in every RoboCap base-layer rrd.
+    """
+    # TODO(dataforge): once dev1/dev2 are emitted, fan the plots out to one pane pair per IMU.
+    return blueprints.rig_blueprint(
+        [blueprints.camera_view(name, RIG, index) for index, name in enumerate(camera_names)],
+        rig=RIG,
+        run_source=RUN_SOURCE,
+        extra_run_sources=EXTRA_RUN_SOURCES,
+        eye_controls=follow_eye_controls(),
+        plots=[
+            blueprints.sensor_plot(name, schema.imu_path(RIG, IMU_DEVICE), contents)
+            for name, contents in (
+                ("Gyroscope", schema.gyro_path(RIG, IMU_DEVICE)),
+                ("Accelerometer", schema.accel_path(RIG, IMU_DEVICE)),
+            )
+        ],
+    )
 
 
 def build_table_blueprint(camera_names: list[str]) -> rrb.Blueprint:
     """Segment-table preview card: follow-framed 3D (full trajectory, all frusta,
     NO video textures) beside the single front-stereo video pane.
 
-    Cards decode exactly one stream (the front-stereo pane); everything else is
-    excluded rather than hidden. Every visible table row renders through this at
-    once (ARKitScenes profiled ~15 cards saturating 12 cores when they decoded all).
+    Every visible table row renders through this at once (ARKitScenes profiled
+    ~15 cards saturating 12 cores when they decoded all).
 
     Args:
         camera_names: Full canonical camera labels in ``cam_00..cam_NN`` order.
     """
-    video_exclusions: list[str] = [f"- {schema.video_path(RIG, index)}/**" for index in range(len(camera_names))]
-    return rrb.Blueprint(
-        rrb.Horizontal(
-            rrb.Spatial3DView(
-                name="Follow",
-                origin=schema.rig_path(RIG),
-                contents=["/**", *video_exclusions, f"- {schema.trail_path('basalt')}/**"],
-                line_grid=True,
-                eye_controls=follow_eye_controls(),
-            ),
-            rrb.Spatial2DView(
-                name=CAMERA_DISPLAY_ORDER[0],
-                origin=schema.pinhole_path(RIG, 0),
-                contents=f"{schema.pinhole_path(RIG, 0)}/**",
-            ),
-            column_shares=[3, 2],
-        ),
-        rrb.TimePanel(timeline="video_time"),
+    return blueprints.table_blueprint(
+        len(camera_names),
+        rig=RIG,
+        run_source=RUN_SOURCE,
+        eye_controls=follow_eye_controls(),
+        front_pane=blueprints.camera_view(CAMERA_DISPLAY_ORDER[0], RIG, 0),
     )
 
 
@@ -421,9 +436,8 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
 
         with writing.atomic_recording(
             target,
-            application_id="dataforge",
             recording_id=identity.recording_id,
-            default_blueprint=build_blueprint(list(CAMERA_DISPLAY_ORDER)),
+            default_blueprint=self.default_blueprint(),
         ) as recording:
             # Deliberately NO ViewCoordinates at "/": the pose layer owns the root
             # ViewCoordinates (its world is gravity-aligned Z-up).
@@ -466,9 +480,7 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
         log_rig_node(recording, RIG, reference=RIG_REFERENCE, num_cameras=len(cameras), name="robocap", kind="ego")
         self._log_mesh(recording)
         for name, camera in cameras.items():
-            index: int = CAMERA_DISPLAY_ORDER.index(name)
-            rr.log(schema.cam_path(RIG, index), rr.AnyValues(name=name, kind="grayscale"), static=True, recording=recording)
-            log_pinhole(camera, cam_log_path=Path(schema.cam_path(RIG, index)), image_plane_distance=IMAGE_PLANE_DISTANCE, static=True, recording=recording)
+            log_camera_node(recording, RIG, CAMERA_DISPLAY_ORDER.index(name), camera, name=name, kind="grayscale", image_plane_distance=IMAGE_PLANE_DISTANCE)
 
     def log_sensor_metadata(self, recording: rr.RecordingStream, device: str, camera_entities: dict[str, str]) -> None:
         """Log factory calibration and the legacy ingestion's applied time shift.
