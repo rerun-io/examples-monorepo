@@ -301,6 +301,10 @@ takes 63 minutes on the fast profile against 81 on the reference. The ten-clip
 gate's hardest clip, `MIO14_moving_props`, reads 9.72 cm on the reference (D71)
 and 6.37 cm on the fast profile.
 
+<p align="center">
+  <img src="media/msd-benchmark-2026-09-16.png" alt="slam-rs fast profile on the RTX 5090 GPU lane against Basalt on every Monado SLAM Dataset recording: ATE per recording on a log scale for the Index, G2 and Odyssey+ headsets, and whole-clip replay speed against the Basalt C++ reference on the ten gated clips" width="1000" />
+</p>
+
 <!-- msd-sweep:start -->
 ### Every Monado SLAM Dataset recording, fast profile on the GPU
 
