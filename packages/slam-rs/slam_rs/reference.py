@@ -171,7 +171,7 @@ class Benchmarks:
     def by_id(self, segment_id: str) -> ReferenceSegment:
         """The segment with this id.
 
-        A command line is what reaches this — ``fleet_check --segments`` and the
+        A command line is what reaches this — ``gate --segments`` and the
         replay tool's ``--segment`` — so an id the manifest cannot satisfy is a
         ``ValueError`` naming the ten it has, the same kind of answer
         :func:`load_benchmarks` gives for a manifest it cannot read. A bare

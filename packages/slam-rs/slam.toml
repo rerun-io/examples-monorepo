@@ -2,7 +2,7 @@
 # Sensor calibration and applied timestamp corrections are read from the catalog.
 
 schema_version = 2
-catalog_url = "rerun+http://dgx-spark:9988"
+catalog_url = "rerun+http://127.0.0.1:51235"
 
 [[dataset]]
 name = "msd-index"

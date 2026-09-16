@@ -2431,6 +2431,40 @@ dataforge = { path = "packages/dataforge", editable = true }
 # [feature.dataforge.pypi-options.dependency-overrides].
 rerun-sdk = { version = "==0.37.0", extras = ["catalog"] }
 
+[feature.slam-rs.tasks.slam-rs-serve]
+cmd = "bash -c 'ulimit -n 524288 && exec rerun server --port 51235'"
+cwd = "packages/slam-rs"
+description = "Start the local in-memory Rerun catalog on :51235 (own shell; keep it running)"
+
+[feature.slam-rs.tasks.slam-rs-register]
+cmd = "python tools/apps/register.py"
+cwd = "packages/slam-rs"
+description = "Register downloaded MSD recordings in the catalog"
+
+[feature.slam-rs.tasks.slam-rs-gate]
+cmd = "python tools/apps/gate.py"
+cwd = "packages/slam-rs"
+depends-on = ["slam-rs-build"]
+description = "Score catalog segments against ground truth and baselines"
+
+[feature.slam-rs.tasks.slam-rs-download-smoke]
+cmd = "test -e data/msd-rrd/.tier-smoke || (hf download pablovela5620/msd-rrd --repo-type dataset --local-dir data/msd-rrd --include 'base/*MIO10_short_2_panorama*' --include 'gt/*MIO10_short_2_panorama*' --include 'sensor_metadata/*MIO10_short_2_panorama*' --include 'base/*MGO09_short_1_updown*' --include 'gt/*MGO09_short_1_updown*' --include 'sensor_metadata/*MGO09_short_1_updown*' --include 'base/*MOO09_short_1_updown*' --include 'gt/*MOO09_short_1_updown*' --include 'sensor_metadata/*MOO09_short_1_updown*' --include 'blueprints/*' && touch data/msd-rrd/.tier-smoke)"
+cwd = "packages/slam-rs"
+outputs = ["packages/slam-rs/data/msd-rrd/.tier-smoke"]
+description = "Download the MSD smoke recordings and blueprints"
+
+[feature.slam-rs.tasks.slam-rs-download-release]
+cmd = "test -e data/msd-rrd/.tier-release || (hf download pablovela5620/msd-rrd --repo-type dataset --local-dir data/msd-rrd --include 'base/*msd-index__MIO_others__MIO10_short_2_panorama*' --include 'gt/*msd-index__MIO_others__MIO10_short_2_panorama*' --include 'sensor_metadata/*msd-index__MIO_others__MIO10_short_2_panorama*' --include 'base/*msd-index__MIO_others__MIO07_mapping_easy*' --include 'gt/*msd-index__MIO_others__MIO07_mapping_easy*' --include 'sensor_metadata/*msd-index__MIO_others__MIO07_mapping_easy*' --include 'base/*msd-index__MIO_others__MIO04_hand_shooter_hard*' --include 'gt/*msd-index__MIO_others__MIO04_hand_shooter_hard*' --include 'sensor_metadata/*msd-index__MIO_others__MIO04_hand_shooter_hard*' --include 'base/*msd-index__MIO_others__MIO14_moving_props*' --include 'gt/*msd-index__MIO_others__MIO14_moving_props*' --include 'sensor_metadata/*msd-index__MIO_others__MIO14_moving_props*' --include 'base/*msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_fight_2*' --include 'gt/*msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_fight_2*' --include 'sensor_metadata/*msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_fight_2*' --include 'base/*msd-g2__MGO_others__MGO09_short_1_updown*' --include 'gt/*msd-g2__MGO_others__MGO09_short_1_updown*' --include 'sensor_metadata/*msd-g2__MGO_others__MGO09_short_1_updown*' --include 'base/*msd-g2__MGO_others__MGO07_mapping_easy*' --include 'gt/*msd-g2__MGO_others__MGO07_mapping_easy*' --include 'sensor_metadata/*msd-g2__MGO_others__MGO07_mapping_easy*' --include 'base/*msd-g2__MGO_others__MGO14_flickering_light*' --include 'gt/*msd-g2__MGO_others__MGO14_flickering_light*' --include 'sensor_metadata/*msd-g2__MGO_others__MGO14_flickering_light*' --include 'base/*msd-g2__MGO_others__MGO01_low_light*' --include 'gt/*msd-g2__MGO_others__MGO01_low_light*' --include 'sensor_metadata/*msd-g2__MGO_others__MGO01_low_light*' --include 'base/*msd-g2__MGO_others__MGO13_sudden_movements*' --include 'gt/*msd-g2__MGO_others__MGO13_sudden_movements*' --include 'sensor_metadata/*msd-g2__MGO_others__MGO13_sudden_movements*' --include 'blueprints/*' && touch data/msd-rrd/.tier-release)"
+cwd = "packages/slam-rs"
+outputs = ["packages/slam-rs/data/msd-rrd/.tier-release"]
+description = "Download the MSD release recordings and blueprints"
+
+[feature.slam-rs.tasks.slam-rs-download-all]
+cmd = "test -e data/msd-rrd/.tier-all || (hf download pablovela5620/msd-rrd --repo-type dataset --local-dir data/msd-rrd --include 'base/*' --include 'gt/*' --include 'sensor_metadata/*' --include 'blueprints/*' && touch data/msd-rrd/.tier-all)"
+cwd = "packages/slam-rs"
+outputs = ["packages/slam-rs/data/msd-rrd/.tier-all"]
+description = "Download every MSD recording and the blueprints"
+
 [feature.slam-rs.tasks.slam-rs-catalog-layer]
 cmd = "python tools/apps/catalog_layer.py"
 cwd = "packages/slam-rs"
