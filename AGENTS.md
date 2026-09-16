@@ -139,7 +139,7 @@ are checked on the way in; the rest of the code holds typed objects, never dicts
 - **Rust owns its formats.** Documents a Rust extension produces or consumes (slam-rs
   `Calibration`, `VioConfig`; gsplat's scene files) are parsed by the Rust serde derive;
   Python asks the extension for typed accessors instead of parsing `to_json()` output.
-  The one sanctioned text-level exception is `slam_rs.reference.profiled_config_text`,
+  The one sanctioned text-level exception is `slam_rs.config.profiled_config_text`,
   which overlays profile keys onto the Rust-owned config JSON as text so the resolved
   bytes stay hashable.
 - **Rollout.** No big-bang: convert a hand-rolled `json.load`/`yaml.safe_load` + dict

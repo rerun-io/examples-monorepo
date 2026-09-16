@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import os
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import rerun as rr
 import rerun.blueprint as rrb
+from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer
 
 from dataforge import schema
 from dataforge.identity import SequenceIdentity
@@ -124,6 +125,52 @@ def atomic_recording(
         ) as recording,
     ):
         yield recording
+
+
+def select_segments(entry: DatasetEntry, requested: Sequence[str]) -> list[str]:
+    """Registered segment IDs to work on: the requested ones, or every segment when none are named.
+
+    Raises:
+        ValueError: If a requested ID is absent from the dataset or is not a plain file stem.
+    """
+    registered: set[str] = set(entry.segment_ids())
+    selected: list[str] = sorted(requested or registered)
+    missing: set[str] = set(selected) - registered
+    if missing:
+        raise ValueError(f"segments absent from {entry.name}: {sorted(missing)}")
+    for segment in selected:
+        if Path(segment).name != segment:
+            raise ValueError(f"invalid segment ID: {segment}")
+    return selected
+
+
+def write_segment_layer(
+    entry: DatasetEntry,
+    layer: str,
+    output_dir: Path,
+    segments: Sequence[str],
+    log: Callable[[str, rr.RecordingStream], None],
+    *,
+    application_id: str = "dataforge",
+    register: bool = True,
+) -> list[str]:
+    """Write one ``<segment>.rrd`` per segment under ``output_dir`` and register them as ``layer``.
+
+    Each file is written atomically with the segment's own recording id, so it
+    joins that segment; an existing copy of the layer is replaced. A layer never
+    restates recording properties: a second ``/__properties`` chunk collides with
+    the base segment's when the catalog merges layers. Returns the registered
+    file URIs (``register=False`` only prepares the files).
+    """
+    outputs: list[str] = []
+    for segment in segments:
+        output: Path = output_dir.resolve() / f"{segment}.rrd"
+        with atomic_recording(output, application_id=application_id, recording_id=segment, send_properties=False) as recording:
+            log(segment, recording)
+        outputs.append(output.as_uri())
+    if register and outputs:
+        entry.register(outputs, layer_name=layer, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
+    return outputs
 
 
 def send_capture_properties(

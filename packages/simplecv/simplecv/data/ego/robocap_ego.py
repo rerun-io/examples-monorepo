@@ -78,8 +78,8 @@ class KalibrCamWithExtrinsic:
     """Overlapping camera indices."""
     rostopic: str = ""
     """ROS topic name (optional)."""
-    timeshift_cam_imu: float = 0.0
-    """Time offset between camera and IMU."""
+    timeshift_cam_imu: float | None = None
+    """Seconds: t_imu = t_camera + offset; missing means unknown, not zero."""
     T_cn_cnm1: list[list[float]] | None = None
     """Optional stereo transform to previous camera."""
 

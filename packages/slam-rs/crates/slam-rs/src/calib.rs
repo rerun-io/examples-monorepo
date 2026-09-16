@@ -639,12 +639,12 @@ pub struct CameraParts<S> {
     pub imu_t_cam_row_major: [S; 16],
 }
 
-/// The IMU as a catalog recording plus the reference manifest describes it,
-/// mirroring `slam_rs.catalog_feed.ImuCalib`.
+/// The IMU as a catalog recording describes it, mirroring
+/// `slam_rs.catalog_feed.ImuCalib`.
 ///
-/// The catalog carries intrinsics and extrinsics but not the noise model, the
-/// update rate or the time offset, which is why these five numbers are frozen
-/// in `gate.toml` (decision D29).
+/// The catalog carries the extrinsics on the IMU node and the noise model and
+/// update rate as `simplecv.ImuCalibration` statics; the common time origin
+/// comes from its `applied_time_shift_ns` (decision D29).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImuParts<S> {
     /// Nominal update rate, Hz.

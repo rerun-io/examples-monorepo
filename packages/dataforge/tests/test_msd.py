@@ -568,7 +568,7 @@ def test_only_a_magnetometer_device_gets_the_third_plot_pane() -> None:
     follow: rrb.View = next(view for view in without if view.name == "Follow")
     assert set(follow.visualizer_overrides) == {schema.trajectory_path("gt"), schema.trail_path("gt")}
     rig: rrb.View = next(view for view in without if view.name == "Rig")
-    assert set(rig.visualizer_overrides) == {schema.trail_path("gt")}
+    assert set(rig.visualizer_overrides) == {schema.trail_path("gt"), schema.rig_path(0)}, "hidden trail plus the rig's pose marker"
 
 
 def test_the_two_3d_views_are_complementary_views_of_one_path() -> None:

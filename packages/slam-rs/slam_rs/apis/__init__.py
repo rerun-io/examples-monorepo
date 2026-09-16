@@ -1,7 +1,7 @@
 """Tyro-facing entry points; the scripts under ``tools/`` are thin shims over these.
 
-Every one of these tools reaches a user error the same way — a manifest id that
-is not in the manifest, a recording that is not on this machine, a
+Every one of these tools reaches a user error the same way — a benchmark id that
+is not in the reference set, a recording that is not on this machine, a
 configuration the port does not run, ``--gpu`` on a host with no driver — and
 what the operator should see for all of them is one sentence and a non-zero
 exit, not a traceback through the feed. :func:`run` is where that conversion

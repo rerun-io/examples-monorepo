@@ -26,7 +26,8 @@ from serde.json import to_json
 
 from slam_rs import _core
 from slam_rs.catalog_feed import CatalogSegment, Frameset, open_segment
-from slam_rs.reference import DecodePath, ReferenceManifest, ReferenceSegment, load_manifest, resolved_flow_config
+from slam_rs.config import SlamConfig, load_slam_config
+from slam_rs.reference import Benchmarks, DecodePath, ReferenceSegment, load_benchmarks, resolved_flow_config
 
 FIXTURES: Path = Path(__file__).resolve().parents[2] / "crates/slam-rs/tests/fixtures"
 """Directory holding MSD calibration JSON files."""
@@ -67,7 +68,7 @@ class Config:
     """Dump one reference segment's pixels, inertial samples and calibration."""
 
     segment: str
-    """Segment id from ``gate.toml``."""
+    """Segment id from ``benchmarks.toml``."""
     output: Path
     """Directory the clip is written to; created if missing."""
     calibration: Literal["catalog", "fixture"] = "catalog"
@@ -99,17 +100,18 @@ def main(config: Config) -> None:
 
     Raises:
         ValueError: If ``--npz`` was asked for with no frameset to bundle, if the
-            segment is not in the manifest, or if fixture mode is selected and its dataset has no fixture
+            segment is not in benchmarks.toml, or if fixture mode is selected and its dataset has no fixture
             calibration.
     """
-    # Before the manifest, the catalog and the output directory: zero framesets
+    # Before the settings, the catalog and the output directory: zero framesets
     # was accepted, every non-NPZ side file was written, and then `np.stack` on
     # the empty image list raised out of NumPy — leaving a directory that reads
     # as a clip and holds no frameset (S25 review).
     if config.npz and config.max_framesets == 0:
         raise ValueError("--max-framesets 0 with --npz has no frameset to bundle; the bench dump needs at least one")
-    manifest: ReferenceManifest = load_manifest()
-    segment: ReferenceSegment = manifest.by_id(config.segment)
+    settings: SlamConfig = load_slam_config()
+    benchmarks: Benchmarks = load_benchmarks(settings)
+    segment: ReferenceSegment = benchmarks.by_id(config.segment)
 
     config.output.mkdir(parents=True, exist_ok=True)
     bundle_images: list[UInt8[ndarray, "n_cameras h w"]] = []
@@ -123,8 +125,7 @@ def main(config: Config) -> None:
     dumped: int = 0
 
     with open_segment(
-        CatalogSegment(manifest.catalog_url, segment.dataset_name, segment.segment_id),
-        manifest.dataset(segment.dataset_name).imu,
+        CatalogSegment(settings.catalog_url, segment.dataset_name, segment.segment_id),
         window_s=config.window_s,
     ) as feed:
         calibration_text: str
@@ -181,7 +182,7 @@ def main(config: Config) -> None:
             imu_t=np.concatenate(bundle_imu_t),
             imu_g=np.concatenate(bundle_imu_gyro),
             imu_a=np.concatenate(bundle_imu_accel),
-            safe_radius=np.int64(resolved_flow_config(manifest, segment)[0].optical_flow_image_safe_radius),
+            safe_radius=np.int64(resolved_flow_config(settings, segment)[0].optical_flow_image_safe_radius),
         )
         # The dataclasses the feed built, because `bench_track` compares lanes on
         # the calibration the reference ran and not on a second derivation of it.
@@ -194,4 +195,3 @@ def main(config: Config) -> None:
     digest: str = hashlib.sha256((config.output / "frames.sha256").read_bytes()).hexdigest()
     print(f"{dumped} framesets, {clip.imu_samples} inertial samples -> {config.output}")
     print(f"frames.sha256 {digest}")
-

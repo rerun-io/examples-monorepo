@@ -14,7 +14,7 @@ through a PyO3 extension module, so the whole pipeline runs from Python:
 on the same frames. `fast` is the default profile; `reference` selects the
 unmodified dataset configuration. Accuracy is ATE against catalog ground truth.
 Each lane/profile is compared with its measured baseline in
-`gate.toml`. MIO10 GPU fast scores about 1.55 cm on the RTX 5090.
+`benchmarks.toml`. MIO10 GPU fast scores about 1.55 cm on the RTX 5090.
 The same code runs on `linux-64`, `linux-aarch64`, and macOS `osx-arm64`.
 
 Design notes — the module-by-module account of the estimator, the full Python API,
@@ -65,6 +65,59 @@ Design notes: [the GPU lane](docs/design-notes.md#the-gpu-lane), and
 On macOS everything above runs from the mac lane's environment, which is where
 that platform's `slam-rs` features are solved: `-e slam-rs-osx-dev` in place of
 `-e slam-rs-dev`.
+
+## Register a SLAM layer
+
+Run a registered RoboCap, msd-index, msd-g2 or msd-odyssey segment and replace
+its single `slam_rs` layer. The output directory must be visible at the same
+absolute path to both the worker and the catalog server:
+
+```bash
+pixi install -e slam-rs-cuda
+pixi run -e slam-rs-cuda --frozen slam-rs-wgpu-build
+pixi run -e slam-rs-cuda --frozen slam-rs-catalog-layer \
+  --catalog rerun+http://dgx-spark.ilish-ruler.ts.net:9988 \
+  --segment robocap__f408193e6447b3b0__s00000059 \
+  --output-dir /mnt/nas/datasets/robocap/rrd/slam_rs
+```
+
+Defaults are `fast`, automatic GPU frontend selection, and CUDA/NVDEC decoding
+when available. `--decode-device cpu` selects the reference PyAV pixel
+conversion; `--backend cpu` selects the CPU estimator frontend. On hosts without
+CUDA, use the existing `slam-rs` or `slam-rs-osx` environment.
+
+The offline command fetches the selected cameras' compressed packets together
+once, builds their timestamp index from that result, and keeps decoders alive
+for the whole catalog segment. CUDA uses SimpleCV's TorchCodec reader, GPU
+resize and grayscale conversion, then transfers small grayscale batches to the
+Rust API. After indexing and muxing, the feed releases the packet buffers and
+retains only muxed streams. Allow several times the encoded size for transient
+Arrow, muxing and decoder buffers. The existing bounded-window feed
+remains the default for other tools and cap use.
+
+The layer animates the existing rig and adds a full trajectory, a recent trail,
+start/end markers and run metadata, following the Basalt layout. It preserves
+the base videos, sensor data and calibration. One estimator spans the session's
+file rolls. A run must finish with a finite pose for every supplied frameset
+before replacing the result. The DataForge blueprint includes both old Basalt
+and new slam-rs paths. Repeated runs replace `slam_rs`; they do not create named
+run versions. This command registers only the derived `slam_rs` data layer.
+The base recording and its blueprint must already be registered; the command
+does not ingest raw data or register/change blueprints.
+The shared layout has no RoboCap-specific eye orientation. RoboCap ingestion
+continues to supply its calibrated follow-eye settings.
+
+Layer generation does not load ground truth. When separate scoring tools need
+ground truth, the feed isolates the catalog's registered `gt` RRD in a
+temporary local catalog. This prevents estimated rig poses from entering later
+ground-truth queries through merged layers. The worker must be able to read
+that registered URI; a `file://` URI requires the input storage mounted at the
+same path. An inaccessible source fails explicitly, without using merged poses
+as ground truth. No raw dataset files are parsed or copied.
+
+NVDEC's RGB-to-gray conversion can differ from PyAV's direct YUV-to-gray
+conversion. The decoder is recorded in layer metadata; changing it is a change
+to the estimator's pixels, not only its speed.
 
 ## Two profiles
 
@@ -182,7 +235,8 @@ Design notes — the accessors field by field, every refusal and its ceiling, an
 | `crates/slam-rs-cli` | `slam-rs` binary: a placeholder. `version` is the only subcommand that does anything; a replay runs through the Python tools. |
 | `slam_rs/` | The Python package: stubs, Tyro entry points under `apis/`. |
 | `tools/` | Thin CLI shims over `slam_rs/apis/`. |
-| `gate.toml` | Gate schema 10: sensor models, tiers, hold-outs, and lane baselines. |
+| `slam.toml` | Runtime settings: estimator files and RoboCap camera selection/reader rules. Sensor calibration comes from the catalog. |
+| `benchmarks.toml` | Regression cases, tiers, hold-outs, frozen decode paths and lane baselines. |
 | `configs/` | Dataset VIO configurations and the `profiles/` overlays. |
 
 `Cargo.lock` is committed. `cargo` never runs during `pixi lock` or
@@ -218,13 +272,144 @@ decision is load-bearing: [the frontend](docs/design-notes.md#the-frontend-and-t
 
 ## Accuracy and speed
 
-The following tables record earlier profile comparisons. Current gate baselines
-are stored in `gate.toml`.
+<p align="center">
+  <img src="media/msd-benchmark-2026-09-16.png" alt="slam-rs fast profile on the RTX 5090 GPU lane against Basalt on every Monado SLAM Dataset recording: ATE per recording on a log scale for the Index, G2 and Odyssey+ headsets, and whole-clip replay speed against the Basalt C++ reference on the ten gated clips" width="1000" />
+</p>
 
-Latency is the synchronous `Vio.track` call, one CPU core, decode excluded,
-median over the clip after the first 60 framesets. ATE is RMSE against ground
-truth after rigid alignment. On the RTX 5090 through Vulkan, wgpu frontend,
-three interleaved rounds each:
+Every Monado SLAM Dataset recording on the catalog, one pass on 2026-09-16 with the
+fast profile and the GPU frontend on an RTX 5090. ATE is RMSE in centimetres against
+the catalog ground truth after rigid alignment. The Basalt column is the MSD paper's
+Table IV (causal, multi-camera, CPU): a reference point, not a paired run.
+
+<!-- msd-sweep:start -->
+Measured 2026-09-16 on `215ad203`, core `40c7ab243c22`, decode `cpu_gray8_dav1d_1thread`.
+
+| dataset | recordings | slam-rs median ATE cm | Basalt (paper) median ATE cm | lost framesets | slam-rs lower on |
+|---|---:|---:|---:|---:|---:|
+| msd-index | 33 | 20.14 | 19.80 | 0 | 16 / 33 |
+| msd-g2 | 15 | 8.53 | 7.00 | 0 | 8 / 15 |
+| msd-odyssey | 16 | 7.57 | 6.05 | 0 | 10 / 16 |
+| all | 64 | 10.97 | 11.20 | 0 | 34 / 64 |
+
+<details>
+<summary>Every recording: slam-rs ATE, the tracker call inside the replay, and the paper's Basalt ATE</summary>
+
+#### msd-index (Valve Index, 2 cameras)
+
+| recording | framesets | tracked / lost | slam-rs ATE cm | tracker ms | Basalt (paper) ATE cm |
+|---|---:|---:|---:|---:|---:|
+| MIO01_hand_puncher_1 | 7855 | 7855 / 0 | 74.06 | 2.84 | 62.0 |
+| MIO02_hand_puncher_2 | 4706 | 4706 / 0 | 134.42 | 2.78 | 117.7 |
+| MIO03_hand_shooter_easy | 6101 | 6101 / 0 | 9.77 | 2.84 | 9.5 |
+| MIO04_hand_shooter_hard | 6119 | 6119 / 0 | 22.63 | 2.76 | 20.6 |
+| MIO05_inspect_easy | 6613 | 6613 / 0 | 3.62 | 2.82 | 3.4 |
+| MIO06_inspect_hard | 5123 | 5123 / 0 | 8.41 | 2.89 | 4.9 |
+| MIO07_mapping_easy | 4095 | 4095 / 0 | 2.11 | 2.78 | 2.3 |
+| MIO08_mapping_hard | 1517 | 1517 / 0 | 5.04 | 2.67 | 5.7 |
+| MIO09_short_1_updown | 186 | 186 / 0 | 0.62 | 2.72 | 0.6 |
+| MIO10_short_2_panorama | 412 | 412 / 0 | 1.55 | 1.94 | 1.5 |
+| MIO11_short_3_backandforth | 590 | 590 / 0 | 2.75 | 2.37 | 2.4 |
+| MIO12_moving_screens | 19163 | 19163 / 0 | 44.62 | 2.88 | 43.1 |
+| MIO13_moving_person | 20227 | 20227 / 0 | 81.53 | 2.83 | 112.8 |
+| MIO14_moving_props | 22117 | 22117 / 0 | 6.01 | 2.82 | 5.9 |
+| MIO15_moving_person_props | 13545 | 13545 / 0 | 57.34 | 2.81 | 81.3 |
+| MIO16_moving_screens_person_props | 14304 | 14304 / 0 | 49.72 | 2.86 | 53.8 |
+| MIPB01_beatsaber_100bills_360_normal | 11764 | 11764 / 0 | 25.30 | 2.93 | 27.7 |
+| MIPB02_beatsaber_crabrave_360_hard | 11945 | 11945 / 0 | 21.14 | 2.93 | 23.5 |
+| MIPB03_beatsaber_countryrounds_360_expert | 20576 | 20576 / 0 | 20.89 | 2.92 | 19.1 |
+| MIPB04_beatsaber_fitbeat_hard | 9899 | 9899 / 0 | 8.63 | 2.90 | 10.5 |
+| MIPB05_beatsaber_fitbeat_360_expert | 9208 | 9208 / 0 | 5.17 | 2.94 | 4.4 |
+| MIPB06_beatsaber_fitbeat_expertplus_1 | 8742 | 8742 / 0 | 6.03 | 2.87 | 4.8 |
+| MIPB07_beatsaber_fitbeat_expertplus_2 | 8105 | 8105 / 0 | 4.92 | 2.70 | 6.2 |
+| MIPB08_beatsaber_long_session_1 | 118279 | 118279 / 0 | 62.05 | 2.51 | 63.0 |
+| MIPP01_pistolwhip_blackmagic_hard | 19057 | 19057 / 0 | 44.97 | 2.32 | 45.5 |
+| MIPP02_pistolwhip_lilith_hard | 12772 | 12772 / 0 | 23.16 | 2.30 | 24.1 |
+| MIPP03_pistolwhip_requiem_hard | 14555 | 14555 / 0 | 17.64 | 2.26 | 26.1 |
+| MIPP04_pistolwhip_revelations_hard | 14287 | 14287 / 0 | 22.91 | 1.94 | 28.7 |
+| MIPP05_pistolwhip_thefall_hard_2pistols | 11670 | 11670 / 0 | 20.12 | 1.99 | 18.3 |
+| MIPP06_pistolwhip_thegrave_hard | 22183 | 22183 / 0 | 25.78 | 2.43 | 28.3 |
+| MIPT01_thrillofthefight_setup | 19064 | 19064 / 0 | 11.52 | 2.83 | 10.7 |
+| MIPT02_thrillofthefight_fight_1 | 29145 | 29145 / 0 | 20.14 | 2.84 | 19.8 |
+| MIPT03_thrillofthefight_fight_2 | 31577 | 31577 / 0 | 39.27 | 2.84 | 40.0 |
+
+#### msd-g2 (HP Reverb G2, 4 cameras)
+
+| recording | framesets | tracked / lost | slam-rs ATE cm | tracker ms | Basalt (paper) ATE cm |
+|---|---:|---:|---:|---:|---:|
+| MGO01_low_light | 4255 | 4255 / 0 | 39.83 | 2.84 | 68.0 |
+| MGO02_hand_puncher | 4724 | 4724 / 0 | 42.45 | 2.81 | 55.6 |
+| MGO03_hand_shooter_easy | 4863 | 4863 / 0 | 13.49 | 2.87 | 14.5 |
+| MGO04_hand_shooter_hard | 4363 | 4363 / 0 | 26.02 | 2.83 | 26.2 |
+| MGO05_inspect_easy | 4086 | 4086 / 0 | 2.31 | 3.04 | 3.0 |
+| MGO06_inspect_hard | 4045 | 4045 / 0 | 8.53 | 2.88 | 11.1 |
+| MGO07_mapping_easy | 1596 | 1596 / 0 | 2.37 | 3.04 | 2.1 |
+| MGO08_mapping_hard | 746 | 746 / 0 | 2.67 | 2.57 | 2.7 |
+| MGO09_short_1_updown | 107 | 107 / 0 | 0.98 | 2.78 | 0.8 |
+| MGO10_short_2_panorama | 400 | 400 / 0 | 0.85 | 2.66 | 0.8 |
+| MGO11_short_3_backandforth | 539 | 539 / 0 | 2.30 | 2.64 | 1.7 |
+| MGO12_freemovement_long_session | 76438 | 76438 / 0 | 65.36 | 2.88 | 61.1 |
+| MGO13_sudden_movements | 3735 | 3735 / 0 | 77.17 | 2.87 | 68.3 |
+| MGO14_flickering_light | 2887 | 2887 / 0 | 8.60 | 2.87 | 7.0 |
+| MGO15_seated_screen | 23915 | 23915 / 0 | 1.99 | 2.63 | 5.5 |
+
+#### msd-odyssey (Samsung Odyssey+, 2 cameras)
+
+| recording | framesets | tracked / lost | slam-rs ATE cm | tracker ms | Basalt (paper) ATE cm |
+|---|---:|---:|---:|---:|---:|
+| MOO01_hand_puncher_1 | 4706 | 4706 / 0 | 29.46 | 1.56 | 28.1 |
+| MOO02_hand_puncher_2 | 5404 | 5404 / 0 | 23.26 | 1.56 | 23.8 |
+| MOO03_hand_shooter_easy | 4415 | 4415 / 0 | 16.65 | 1.57 | 17.6 |
+| MOO04_hand_shooter_hard | 4406 | 4406 / 0 | 9.80 | 1.53 | 6.5 |
+| MOO05_inspect_easy | 3014 | 3014 / 0 | 1.77 | 1.62 | 1.9 |
+| MOO06_inspect_hard | 4171 | 4171 / 0 | 4.56 | 1.63 | 5.6 |
+| MOO07_mapping_easy | 1237 | 1237 / 0 | 1.00 | 1.61 | 1.3 |
+| MOO08_mapping_hard | 592 | 592 / 0 | 5.34 | 1.45 | 2.8 |
+| MOO09_short_1_updown | 147 | 147 / 0 | 0.34 | 1.57 | 0.4 |
+| MOO10_short_2_panorama | 274 | 274 / 0 | 1.36 | 1.43 | 1.0 |
+| MOO11_short_3_backandforth | 405 | 405 / 0 | 1.80 | 1.41 | 1.9 |
+| MOO12_freemovement_long_session | 72810 | 72810 / 0 | 65.10 | 1.60 | 67.4 |
+| MOO13_sudden_movements | 4403 | 4403 / 0 | 50.37 | 1.52 | 50.1 |
+| MOO14_flickering_light | 5026 | 5026 / 0 | 10.42 | 1.57 | 11.3 |
+| MOO15_seated_screen | 19380 | 19380 / 0 | 273.64 | 1.33 | 81.5 |
+| MOO16_still | 20082 | 20082 / 0 | 0.55 | 1.28 | 3.4 |
+
+</details>
+<!-- msd-sweep:end -->
+
+Two switches are on in these numbers. The **fast profile** is the schedule: detection
+on demand and the joint window solve at keyframes only. The **GPU lane** runs the
+frontend (pyramid, detection, KLT) as CubeCL kernels through wgpu/Vulkan; the
+estimator is one CPU thread in every lane, and ATE does not depend on the lane.
+
+### Where the time goes
+
+A catalog replay is decode-bound: 73–75 % of samples in dav1d and the gray8 reformat,
+17–18 % in the tracker, 6 % in Python glue (py-spy over `MIO07` and `MGO07`).
+
+Inside `Vio.track` the fast profile is bimodal. Stage timers from `.npz` dumps, one
+pinned core, three rounds pooled, first 60 framesets dropped, milliseconds:
+
+| stage | MIO10 median / mean / p95 | MGO07 median / mean / p95 |
+|---|---|---|
+| `track` | 1.19 / 1.80 / 6.29 | 1.94 / 2.87 / 8.09 |
+| `frontend_track` (temporal KLT, GPU round trip) | 0.61 / 0.66 / 0.85 | 0.87 / 1.00 / 1.37 |
+| `frontend_stereo` | 0.23 / 0.23 / 0.58 | 0.48 / 0.55 / 1.05 |
+| `frontend_pyramid` + `detect` + `imu` | 0.07 / 0.07 / 0.09 | 0.15 / 0.16 / 0.17 |
+| `measure` (estimator) | 0.15 / 0.73 / 5.44 | 0.26 / 1.07 / 6.35 |
+| of which `optimize` (joint solve, 14 % of framesets) | 0.04 / 0.62 / 5.29 | 0.08 / 0.86 / 5.92 |
+
+The median is the frontend round trip: 86 % of framesets never solve the window, and
+per frameset the Vulkan trace shows 1.8 semaphore waits (0.27 ms), 5.5 submits and
+1.3 memory allocations. The mean and p95 are the keyframe solve on the CPU (`solver`
+3.1–3.2 ms, `linearize` 1.5–2.0 ms at p95). The per-recording tracker column above is
+the same call inside a full replay, unpinned with decode interleaved, and reads about
+1.5× the isolated number.
+
+### Fast versus reference profile
+
+Tracker call on the 5090 GPU lane, median after the first 60 framesets, three
+interleaved rounds. cuVSLAM is NVIDIA's tracker in offline Inertial mode on the same
+frames; its four-camera mode runs without the IMU, so that cell is blank.
 
 | clip | cameras | length | reference: ms / cm | fast: ms / cm | cuVSLAM: ms / cm |
 |---|---:|---:|---|---|---|
@@ -233,25 +418,16 @@ three interleaved rounds each:
 | `MIO07_mapping_easy` | 2 | 76 s | 5.7 / 2.08 | 1.39 / 2.10 | 1.00 / 1.77 |
 | `MGO07_mapping_easy` | 4 | 53 s | 10.2 / 2.29 | 2.10 / 2.37 | — |
 
-cuVSLAM is NVIDIA's tracker in its offline Inertial mode on the same frames; its
-mode for the four-camera rig runs without the IMU and is not comparable, so that
-cell is blank. `MIO11` is the one clip of the four where the fast profile misses
-its band, by 0.04 cm.
+Over the whole catalog (S32, 2026-09-10) the fast profile is within its 10 % band of
+the reference on 51 of 64 recordings, more accurate on 32, loses no frameset, and its
+tracker call is 2.0–2.7× shorter at the median.
 
-Over the whole catalog — 64 recordings, 316 minutes of video, one pass per
-profile — the fast profile is inside its 10 % band on 51, more accurate than the
-reference on 32, and loses no frameset on any; its tracker call is 2.0x
-(msd-index), 2.35x (msd-g2) and 2.7x (msd-odyssey) shorter at the median.
-Replaying the 156 minutes of msd-index end to end on one core, decode included,
-takes 63 minutes on the fast profile against 81 on the reference. The ten-clip
-gate's hardest clip, `MIO14_moving_props`, reads 9.72 cm on the reference (D71)
-and 6.37 cm on the fast profile.
+### Across the fleet
 
-The fleet's fast-profile tracker medians below are milliseconds for
-`MIO10` / `MIO07` / `MGO07`. Ratios compare GPU with CPU on the same host.
-The 5090 values are the reference rows in `gate.toml`; GB10 and M4 use the
-median of three matched runs per lane from S36. These are different measurement
-sessions, not a cross-machine timing budget.
+Fast-profile tracker medians in milliseconds for `MIO10` / `MIO07` / `MGO07`, GPU
+against CPU on the same host. The 5090 rows are the `benchmarks.toml` baselines; GB10 and
+M4 are the median of three matched runs from S36. Different sessions, not a
+cross-machine budget.
 
 | device | backend | GPU vs CPU fast medians, ms | CPU/GPU | ≥1.2x, accuracy in band |
 |---|---|---|---|---|
@@ -260,17 +436,11 @@ sessions, not a cross-machine timing budget.
 | Apple M4 (Mac mini) | Metal | 4.59 / 4.76 / 5.97 vs 4.93 / 5.06 / 8.48 | 1.07x / 1.06x / 1.42x | MIO10 and MIO07 miss; MGO07 passes |
 | RTX 3060, x86-64 | Vulkan | not re-run since the S32 tip; box needs a driver reboot | — | not measured |
 
-The Metal lane's two sleeps are fixed: wgpu 30 replaces the HAL's 1 ms
-completion polling, and our CubeCL patch parks and wakes the idle device
-worker. The upload copy fix also ships. The Mac's two-camera clips still need
-about 0.5 ms less tracker time to meet the 1.2x margin. MIO14's unchanged Mac
-ATE is checked against its own host row. Passing that regression gate does not
-establish the GPU/CPU speed margin.
-
-See [S36 — the Metal lane's two sleeps](docs/design-notes.md#s36--the-metal-lanes-two-sleeps)
-for the reports, measured budget, rejected experiments and remaining work.
-The [S32 fleet table](docs/design-notes.md#the-fast-profile-across-the-fleet)
-remains as historical evidence.
+The Metal lane's two sleeps are fixed (wgpu 30 replaces the 1 ms completion poll, the
+CubeCL patch parks the idle worker); the Mac's two-camera clips still need about
+0.5 ms to meet the 1.2× margin. See
+[S36](docs/design-notes.md#s36--the-metal-lanes-two-sleeps) and the
+[S32 fleet table](docs/design-notes.md#the-fast-profile-across-the-fleet).
 
 ## Tests and gates
 
@@ -375,4 +545,56 @@ Not in this branch, in the order they are likely to matter:
   models could move further into kornia-rs. S34 already uses nalgebra for QR,
   the damped solve and SVD; the ground-truth gate checks further replacements.
 
-`gate.toml` beside this README holds the rigs’ sensor noise models that the catalog does not carry, gate tiers, hold-outs, decode paths, and measured lane/profile baselines. It also holds RoboCap rig and clock rules plus its one regression trajectory path. Camera geometry and capture facts come from the catalog.
+`slam.toml` holds runtime settings: estimator configuration paths and RoboCap
+camera selection and reader rules. Sensor noise, nominal rate and the applied
+timestamp correction come from static catalog metadata on the IMU node.
+`benchmarks.toml` holds regression cases, tiers, hold-outs, frozen decode paths,
+measured lane/profile baselines and RoboCap's regression trajectory path.
+Normal catalog processing loads only `slam.toml`; evaluation commands load both.
+Camera geometry and capture facts also come from the catalog. The normal
+`slam-rs-catalog-layer` command constructs calibration entirely from these
+fields. Regression probes may still compare against their frozen Basalt files.
+Missing calibration stops VIO before video decoding; no Cap A model is silently
+substituted for another device.
+
+```python
+from slam_rs.config import SlamConfig, load_slam_config
+
+settings: SlamConfig = load_slam_config()
+```
+
+Evaluation adds `benchmarks = load_benchmarks(settings)` from `slam_rs.reference`.
+`slam.toml` uses schema version 2 (the former IMU blocks are removed), while
+`benchmarks.toml` remains version 1. They replace the former combined `gate.toml`.
+
+For existing legacy RoboCap recordings, add metadata without re-encoding:
+
+```bash
+pixi run -e dataforge --frozen dataforge-robocap-calibration \
+  --catalog-url rerun+http://dgx-spark:9988 \
+  --root /mnt/nas/datasets/robocap \
+  --output-dir /mnt/nas/datasets/robocap/rrd/sensor_metadata
+```
+
+New DataForge RoboCap conversions include the same metadata in their base layer.
+`dataforge-register` also restores saved `sensor_metadata` files beside their
+base recordings after a catalog restart, without rereading factory calibration.
+The backfill uses camera names from the catalog and only the matching device's
+factory folder. The historical 14.902432 ms approximation is recorded separately
+from each camera's factory offset; its physical accuracy is not newly validated.
+
+For a dataset with a known Basalt IMU model whose importer has not adopted the
+shared metadata yet, import it explicitly. Select only recordings made with that
+model, and state the correction ingestion already applied (zero for the MSD
+recordings). This records provenance, not a new synchronization adjustment:
+
+```bash
+pixi run -e slam-rs --frozen slam-rs-import-imu-calibration \
+  --catalog rerun+http://dgx-spark:9988 --dataset msd-index \
+  --calibration /path/to/msdmi_calib.json --applied-time-shift-ns 0 \
+  --output-dir /mnt/nas/datasets/msd-rrd/sensor_metadata
+```
+
+The output path must be visible to the server. Use `--no-register` to prepare
+Basalt metadata locally, transfer it to server-visible storage, then register
+those files as `sensor_metadata`. Neither command alters the base or SLAM layers.

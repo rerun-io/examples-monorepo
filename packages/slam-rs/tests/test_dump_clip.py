@@ -22,11 +22,11 @@ def test_an_npz_dump_of_no_framesets_is_refused_before_the_feed_is_opened(monkey
     ``frames.sha256``, ``clip.json``) were all written before ``np.stack`` on the
     empty image list raised ``ValueError: need at least one array to stack`` — so
     the tool left a clip directory that reads as a dump and holds no frameset
-    (S25 review). The refusal comes before the manifest, the catalog and the
+    (S25 review). The refusal comes before the settings, the catalog and the
     output directory.
     """
 
-    monkeypatch.setattr(dump_clip, "load_manifest", never("the manifest was read for a dump of no framesets"))
+    monkeypatch.setattr(dump_clip, "load_slam_config", never("the settings was read for a dump of no framesets"))
     output: Path = tmp_path / "clip"
     with pytest.raises(ValueError, match="--max-framesets 0.*--npz"):
         main(Config(segment=SMOKE_SEGMENTS[1], output=output, max_framesets=0, npz=True))

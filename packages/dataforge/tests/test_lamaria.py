@@ -412,7 +412,7 @@ def test_the_default_blueprint_already_names_the_gt_layer_paths() -> None:
     overview: rrb.View = next(view for view in views if view.name == "Rig")
 
     assert set(follow.visualizer_overrides) == {schema.trajectory_path("gt"), schema.trail_path("gt")}
-    assert set(overview.visualizer_overrides) == {schema.trail_path("gt")}
+    assert set(overview.visualizer_overrides) == {schema.trail_path("gt"), schema.rig_path(0)}, "hidden trail plus the rig's pose marker"
 
 
 def test_the_table_card_decodes_only_the_slam_left_stream() -> None:

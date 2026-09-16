@@ -8,7 +8,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from slam_rs.apis.fleet_check import ClipResult
-from slam_rs.reference import Baseline, Measurement, ReferenceManifest, gate_failures
+from slam_rs.config import SlamConfig
+from slam_rs.reference import Baseline, Benchmarks, Measurement, gate_failures
 
 BASELINE: Baseline = Baseline("fast", "gpu", "baseline-host", "0" * 64, 100, 10.0, 20.0, "2026-09-10")
 PASSING: Measurement = Measurement(100, 100, 0, 100, 10.0, 1.0, 1.0, True, 20.0, "baseline-host", "gpu", "fast")
@@ -55,9 +56,9 @@ def test_larger_error_cost_or_extent_cannot_remove_failures(low: float, extra: f
 
 @given(lane=st.sampled_from(["cpu", "gpu"]), profile=st.sampled_from(["reference", "fast"]))
 def test_baseline_resolution_matches_both_lane_and_profile(
-    manifest: ReferenceManifest, lane: Literal["cpu", "gpu"], profile: Literal["reference", "fast"]
+    benchmarks: Benchmarks, lane: Literal["cpu", "gpu"], profile: Literal["reference", "fast"]
 ) -> None:
-    segment = replace(manifest.segments[0], baseline=(BASELINE,))
+    segment = replace(benchmarks.segments[0], baseline=(BASELINE,))
     measurement: Measurement = replace(PASSING, lane=lane, profile=profile, gt_rmse_cm=100.0, median_tracker_ms=100.0)
     failures: list[str] = gate_failures(measurement, segment.baseline_for(lane, profile, measurement.hostname))
     if lane == "gpu" and profile == "fast":
@@ -75,18 +76,20 @@ def test_other_host_gates_accuracy_but_not_speed() -> None:
 @given(value=st.sampled_from([float("nan"), float("inf"), float("-inf")]))
 def test_each_nonfinite_measurement_names_finite_clause(value: float) -> None:
     for measurement in (
-        replace(PASSING, gt_rmse_cm=value), replace(PASSING, extent_m=value),
-        replace(PASSING, truth_extent_m=value), replace(PASSING, median_tracker_ms=value),
+        replace(PASSING, gt_rmse_cm=value),
+        replace(PASSING, extent_m=value),
+        replace(PASSING, truth_extent_m=value),
+        replace(PASSING, median_tracker_ms=value),
     ):
         assert "finite: poses and measurements must be finite" in gate_failures(measurement, None)
 
 
 @pytest.mark.slow
-def test_catalog_smoke_gate(manifest: ReferenceManifest) -> None:
+def test_catalog_smoke_gate(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     from slam_rs.apis.fleet_check import ClipResult, measure
 
-    for segment in manifest.in_tier("smoke"):
-        result: ClipResult = measure(manifest, segment)
+    for segment in benchmarks.in_tier("smoke"):
+        result: ClipResult = measure(settings, segment)
         assert not result.failures, result.verdict
 
 
@@ -97,9 +100,9 @@ def test_mismatched_baseline_is_a_caller_error(baseline: Baseline) -> None:
 
 
 @given(host=st.text(alphabet="abcdefghijklmnopqrstuvwxyz", min_size=1), present=st.booleans())
-def test_host_baseline_preferred_with_reference_fallback(manifest: ReferenceManifest, host: str, present: bool) -> None:
+def test_host_baseline_preferred_with_reference_fallback(benchmarks: Benchmarks, host: str, present: bool) -> None:
     host_row: Baseline = replace(BASELINE, host=host, gt_rmse_cm=30.0, median_tracker_ms=40.0)
-    segment = replace(manifest.segments[0], baseline=(BASELINE, host_row) if present else (BASELINE,))
+    segment = replace(benchmarks.segments[0], baseline=(BASELINE, host_row) if present else (BASELINE,))
     chosen: Baseline | None = segment.baseline_for("gpu", "fast", host)
     assert chosen == (host_row if present else BASELINE)
     measurement: Measurement = replace(PASSING, hostname=host, gt_rmse_cm=30.0, median_tracker_ms=100.0)
@@ -114,11 +117,9 @@ def test_host_baseline_preferred_with_reference_fallback(manifest: ReferenceMani
 
 @pytest.mark.parametrize("suffix", ["", ".attlocal.net", ".office.example"])
 @given(error=st.sampled_from([30.0, 34.0]), cost=st.sampled_from([40.0, 45.0]))
-def test_host_suffix_preserves_baseline_and_gate(
-    manifest: ReferenceManifest, suffix: str, error: float, cost: float
-) -> None:
+def test_host_suffix_preserves_baseline_and_gate(benchmarks: Benchmarks, suffix: str, error: float, cost: float) -> None:
     host_row: Baseline = replace(BASELINE, host="pablos-Mac-mini", gt_rmse_cm=30.0, median_tracker_ms=40.0)
-    segment = replace(manifest.segments[0], baseline=(BASELINE, host_row))
+    segment = replace(benchmarks.segments[0], baseline=(BASELINE, host_row))
     measurement: Measurement = replace(PASSING, hostname=f"pablos-Mac-mini{suffix}", gt_rmse_cm=error, median_tracker_ms=cost)
     chosen: Baseline | None = segment.baseline_for("gpu", "fast", measurement.hostname)
     assert chosen == host_row

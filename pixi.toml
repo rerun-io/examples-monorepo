@@ -2409,11 +2409,50 @@ python = "3.12.*"
 # pure-Rust crate needs nothing else. Same pin as gsplat-rust-renderer.
 rust = "1.97.*"
 tyro = ">=0.9.1,<0.10"
-# CPU torch only satisfies simplecv's module-load import.
-pytorch-cpu = ">=2.8.0"
+# dataforge's projectaria-tools drags moviepy in, and every moviepy 2.x caps
+# pillow < 12; without this the conda solve pins pillow 12 and the PyPI side is
+# unsatisfiable. Same pin as [feature.dataforge.dependencies].
+pillow = ">=11,<12"
 
 [feature.slam-rs.pypi-dependencies]
 slam-rs = { path = "packages/slam-rs", editable = true }
+
+# Catalog result-layer publishing imports dataforge; dataforge is a linux-only
+# member (projectaria-tools has no macOS 13 wheel), so the osx lane leaves it out.
+[feature.slam-rs.target.linux-64.pypi-dependencies]
+dataforge = { path = "packages/dataforge", editable = true }
+
+[feature.slam-rs.target.linux-aarch64.pypi-dependencies]
+dataforge = { path = "packages/dataforge", editable = true }
+
+[feature.slam-rs.pypi-options.dependency-overrides]
+# dataforge pulls projectaria-tools, which pins rerun-sdk==0.33.0 for its own
+# notebook tutorials; the workspace lane is rerun-sdk 0.37.0. Same override as
+# [feature.dataforge.pypi-options.dependency-overrides].
+rerun-sdk = { version = "==0.37.0", extras = ["catalog"] }
+
+[feature.slam-rs.tasks.slam-rs-catalog-layer]
+cmd = "python tools/apps/catalog_layer.py"
+cwd = "packages/slam-rs"
+description = "Run catalog VIO and replace its slam_rs pose layer (fast profile, GPU when available)"
+
+[feature.slam-rs.tasks.slam-rs-import-imu-calibration]
+cmd = "python tools/import_imu_calibration.py"
+cwd = "packages/slam-rs"
+description = "Import a known Basalt IMU model as catalog metadata without rewriting recordings"
+
+[feature.slam-rs-cpu]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
+
+[feature.slam-rs-cpu.dependencies]
+# SimpleCV's import needs torch even when the decoder is PyAV.
+pytorch-cpu = ">=2.8.0"
+
+[feature.slam-rs-nvdec]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.slam-rs-nvdec.dependencies]
+torchcodec = ">=0.14,<0.15"
 
 [feature.slam-rs.activation.env]
 PACKAGE_DIR = "packages/slam-rs"
@@ -2556,6 +2595,53 @@ inputs = [
 ]
 outputs = ["packages/slam-rs/slam_rs/_core.so"]
 description = "Build the Rust VIO core with the portable wgpu CubeCL frontend and install it in place"
+
+# Build against the same GStreamer minor lane installed on Cap B. This small
+# environment also runs transport tests without loading the Python VIO stack.
+[feature.robocap-recorder]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.robocap-recorder.dependencies]
+rust = "1.97.*"
+c-compiler = "*"
+zlib = "*"
+gstreamer = "1.24.*"
+gst-plugins-base = "1.24.*"
+gst-plugins-good = "1.24.*"
+gst-plugins-bad = "1.24.*"
+# GStreamer 1.24 on aarch64 shares the older codec/XML dependency lane.
+ffmpeg = "7.*"
+pkg-config = "*"
+
+[feature.robocap-recorder.tasks.robocap-recorder-test]
+depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
+cmd = "cargo test --locked -p robocap-recorder --features gstreamer-capture,live-slam"
+cwd = "packages/slam-rs"
+
+[feature.robocap-recorder.tasks.robocap-recorder-clippy]
+depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
+cmd = "cargo clippy --locked -p robocap-recorder --features gstreamer-capture,live-slam --all-targets -- -D warnings"
+cwd = "packages/slam-rs"
+
+[feature.robocap-cross]
+platforms = ["linux-64"]
+
+[feature.robocap-cross.dependencies]
+rust = "1.97.*"
+rust-std-aarch64-unknown-linux-gnu = "1.97.*"
+gcc_linux-aarch64 = "15.*"
+pkg-config = "*"
+sysroot_linux-aarch64 = "2.34.*"
+
+[feature.robocap-cross.activation.env]
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER = "aarch64-conda-linux-gnu-gcc"
+CC_aarch64_unknown_linux_gnu = "aarch64-conda-linux-gnu-gcc"
+
+[feature.robocap-cross.tasks.robocap-direct-build]
+cmd = "bash crates/robocap-recorder/scripts/build-arm.sh"
+cwd = "packages/slam-rs"
+depends-on = [{ task = "slam-rs-patch-deps", environment = "slam-rs-dev" }]
+description = "Build the release ARM recorder; pass the cap runtime sysroot directory"
 
 # ── the macOS lane ───────────────────────────────────────────────────────
 # The linux environments get their runtime stack from `catalog-common` and
@@ -3007,11 +3093,21 @@ cwd = "packages/dataforge"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Register every layer's rrds into a local Rerun catalog"
 
+[feature.dataforge.tasks.dataforge-robocap-calibration]
+cmd = "python tools/robocap_calibration.py"
+cwd = "packages/dataforge"
+description = "Backfill factory calibration and applied timing metadata on legacy RoboCap sessions"
+
 [feature.dataforge.tasks.dataforge-view]
 cmd = "python tools/apps/view.py"
 cwd = "packages/dataforge"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Open one converted recording — every layer of it — in the viewer (--rr-config.headless in a bare shell)"
+
+[feature.dataforge.tasks.robocap-live-display]
+cmd = "python tools/apps/robocap_live_display.py"
+cwd = "packages/dataforge"
+description = "Prepare DataForge's calibrated RoboCap scene and live blueprint for the Rust recorder"
 
 [feature.dataforge.tasks.dataforge-serve]
 # One open fd per registered rrd; the default 1024 overflows fast (see arkitscenes-download-serve).
@@ -3421,22 +3517,30 @@ slam-rs = { features = [
     "catalog-common",
     "rerun-prerelease",
     "slam-rs",
+    "slam-rs-cpu",
 ], solve-group = "slam-rs", no-default-feature = true }
+robocap-recorder = { features = ["robocap-recorder"], no-default-feature = true }
+robocap-cross = { features = ["robocap-cross"], no-default-feature = true }
 slam-rs-dev = { features = [
     "catalog-common",
     "rerun-prerelease",
     "slam-rs",
+    "slam-rs-cpu",
     "dev",
 ], solve-group = "slam-rs", no-default-feature = true }
 slam-rs-osx = { features = [
     "slam-rs",
+    "slam-rs-cpu",
     "slam-rs-osx",
 ], solve-group = "slam-rs-osx", no-default-feature = true }
 slam-rs-osx-dev = { features = [
     "slam-rs",
+    "slam-rs-cpu",
     "slam-rs-osx",
     "dev",
 ], solve-group = "slam-rs-osx", no-default-feature = true }
+slam-rs-cuda = { features = ["catalog-common", "rerun-prerelease", "cuda", "slam-rs", "slam-rs-nvdec"], solve-group = "slam-rs-cuda", no-default-feature = true }
+slam-rs-cuda-dev = { features = ["catalog-common", "rerun-prerelease", "cuda", "slam-rs", "slam-rs-nvdec", "dev"], solve-group = "slam-rs-cuda", no-default-feature = true }
 mamma = { features = [
     "common",
     "cuda",

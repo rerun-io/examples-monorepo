@@ -1,7 +1,5 @@
-"""Catalog replay metadata, dataset configuration, and ground-truth gate rules."""
+"""Regression cases, measured baselines, and ground-truth acceptance rules."""
 
-import hashlib
-import json
 import math
 import re
 from dataclasses import dataclass, replace
@@ -13,10 +11,11 @@ from serde import SerdeError, coerce, field, serde
 from serde.toml import from_toml
 
 from slam_rs import _core
+from slam_rs.config import SlamConfig
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES
 
-MANIFEST_PATH: Path = Path(__file__).resolve().parents[1] / "gate.toml"
-"""The checked-in gate, beside the package rather than inside it."""
+BENCHMARKS_PATH: Path = Path(__file__).resolve().parents[1] / "benchmarks.toml"
+"""Checked-in regression cases and measured baselines."""
 
 Tier: TypeAlias = Literal["smoke", "release", "listed"]
 """Smoke checks, release checks, or additional listed segments."""
@@ -48,45 +47,6 @@ The ids live here rather than in the tool that runs them: the V2 gate, the fleet
 tool and both suites name the same two clips, and a string spelled in four
 modules is a manifest id nobody can rename.
 """
-
-
-@serde(type_check=coerce, deny_unknown_fields=True)
-@dataclass(slots=True, frozen=True)
-class ImuParameters:
-    """Continuous-time IMU noise model and clock offset, in the estimator's units.
-
-    None of this is on the recordings; it comes from the device's own calibration
-    file and is frozen here until dataforge logs it onto the IMU node.
-    """
-
-    rate_hz: float
-    """Nominal IMU update rate."""
-    gyro_noise_std: float
-    """Gyroscope noise density, rad/s/sqrt(Hz)."""
-    accel_noise_std: float
-    """Accelerometer noise density, m/s^2/sqrt(Hz)."""
-    gyro_bias_std: float
-    """Gyroscope bias random walk, rad/s^2/sqrt(Hz)."""
-    accel_bias_std: float
-    """Accelerometer bias random walk, m/s^3/sqrt(Hz)."""
-    cam_time_offset_ns: int
-    """Added to a camera timestamp to reach the IMU clock; zero for MSD."""
-
-
-@serde(type_check=coerce, deny_unknown_fields=True)
-@dataclass(slots=True, frozen=True)
-class DatasetProperties:
-    """The sensor model and VIO config shared by every segment of one dataset.
-
-    The catalog supplies geometry; the gate supplies the sensor noise model.
-    """
-
-    name: str
-    """Catalog dataset name."""
-    imu: ImuParameters
-    """Noise model from the rig calibration."""
-    vio_config: Path
-    """Dataset configuration path, relative to the manifest."""
 
 
 @serde(type_check=coerce, deny_unknown_fields=True)
@@ -163,33 +123,17 @@ class RobocapSession:
 
 @serde(type_check=coerce, deny_unknown_fields=True)
 @dataclass(slots=True, frozen=True)
-class RobocapReference:
-    """RoboCap rig parameters. This dataset has no ground truth."""
+class RobocapBenchmarks:
+    """Frozen RoboCap regression recordings and their pixel provenance."""
 
-    device_id: str
-    """The device whose sessions the catalog holds: segment ids are ``robocap__<device_id>__<session_id>``."""
     has_ground_truth: bool
-    """Always false: RoboCap has no measured ground truth."""
+    """Whether these regression sessions have measured ground truth."""
     decode_path: DecodePath
-    """Frozen decode path that produced the reference pixels."""
-    camera_names: tuple[str, ...]
-    """The cameras the reference ran, by their ``name`` static, in the calibration's own order."""
-    downscale: int
-    """Integer factor the reference reader downscaled both frames and intrinsics by."""
-    frameset_tolerance_ns: int
-    """How far a camera's frame may sit from the anchor camera's and still be the same capture."""
-    interpolate_accel_onto_gyro: bool
-    """Whether the accelerometer has to be interpolated onto the gyroscope's timestamps."""
-    video_time_is_absolute: bool
-    """Whether ``video_time`` is already the device clock the reference trajectories are on."""
-    vio_config: str
-    """VIO configuration selected for replay, relative to the package root."""
-    calibration: str
-    """Rig calibration selected for replay, at :attr:`downscale`, relative to the package root."""
-    imu: ImuParameters
-    """Frozen IMU noise model, from the device's Kalibr calibration."""
+    """Frozen decoder used by regression comparisons."""
     sessions: tuple[RobocapSession, ...] = field(rename="session")
     """The measured sessions, in manifest order."""
+    device_id: str = field(skip=True, default="", compare=False)
+    """The device whose sessions the catalog holds; bound from the runtime settings by :func:`load_benchmarks`."""
 
     def session(self, session_id: str) -> RobocapSession:
         """The session with this id: the listed one, or any other session of this device on the catalog.
@@ -214,49 +158,15 @@ class RobocapReference:
 
 @serde(type_check=coerce, deny_unknown_fields=True)
 @dataclass(slots=True, frozen=True)
-class ReferenceManifest:
-    """The whole reference set."""
+class Benchmarks:
+    """Regression cases and baselines; runtime settings are loaded separately."""
 
     schema_version: int
-    """Manifest layout version; bumped when a field changes meaning."""
-    catalog_url: str
-    """Catalog used to resolve the gate segments."""
-    datasets: tuple[DatasetProperties, ...] = field(rename="dataset")
-    """Rig geometry, one entry per catalog dataset the segments come from."""
+    """Benchmark schema version."""
     segments: tuple[ReferenceSegment, ...] = field(rename="segment")
-    """The ten MSD segments, in tier-then-dataset order."""
-    robocap: RobocapReference
-    """The RoboCap third reference."""
-    package_root: Path = field(skip=True, default=MANIFEST_PATH.parent, compare=False)
-    """Directory the manifest was read from; fixture paths are relative to it."""
-
-    def dataset(self, name: str) -> DatasetProperties:
-        """The dataset with this name.
-
-        Raises:
-            ValueError: If the manifest has no such dataset.
-        """
-        for dataset in self.datasets:
-            if dataset.name == name:
-                return dataset
-        raise ValueError(f"{name!r} is not in the reference set; have {[d.name for d in self.datasets]}")
-
-    def vio_config_text(self, dataset_name: str, profile: str = "reference") -> str:
-        """The VIO config one dataset's segments run with, as its file's own text.
-
-        Args:
-            dataset_name: Catalog dataset name.
-            profile: Named config overlay; reference preserves the original text.
-
-        Returns:
-            The overlaid JSON (original file text for reference), ready for :meth:`slam_rs._core.VioConfig.from_json`.
-
-        Raises:
-            ValueError: If the manifest has no such dataset.
-            KeyError: If an overlay key is absent from the vendored config.
-        """
-        path: Path = self.package_root / self.dataset(dataset_name).vio_config
-        return profiled_config_text(path, profile, path.parent / "profiles")
+    """MSD reference cases with tiers, hold-outs and measured baselines."""
+    robocap: RobocapBenchmarks
+    """RoboCap regression sessions."""
 
     def by_id(self, segment_id: str) -> ReferenceSegment:
         """The segment with this id.
@@ -264,7 +174,7 @@ class ReferenceManifest:
         A command line is what reaches this — ``fleet_check --segments`` and the
         replay tool's ``--segment`` — so an id the manifest cannot satisfy is a
         ``ValueError`` naming the ten it has, the same kind of answer
-        :func:`load_manifest` gives for a manifest it cannot read. A bare
+        :func:`load_benchmarks` gives for a manifest it cannot read. A bare
         ``KeyError`` reads as a dictionary miss.
 
         Raises:
@@ -285,69 +195,25 @@ def pose_floor_text(*, tracked: int, framesets: int) -> str:
     return f"{tracked} poses over {framesets} framesets is not a trajectory"
 
 
-PORT_CONFIG_KEYS: frozenset[str] = frozenset({"port.redetect_survivor_ratio", "port.frame_update_max_iterations"})
-"""Additional port configuration keys accepted in profile overlays."""
-
-
-def config_text_sha256(text: str) -> str:
-    """Identify the resolved configuration without changing its serialization.
-
-    Args:
-        text: The exact text returned by :func:`profiled_config_text`.
-
-    Returns:
-        The hexadecimal SHA-256 of the text encoded as UTF-8.
-    """
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def profiled_config_text(path: Path, profile: str = "reference", profiles: Path = MANIFEST_PATH.parent / "configs/profiles") -> str:
-    """Read a config and apply a named overlay; empty overlays preserve its text.
-
-    Args:
-        path: Base config JSON.
-        profile: Overlay file stem.
-        profiles: Directory holding the flat config-key overlays.
-
-    Returns:
-        Config JSON with the overlay applied.
-
-    Raises:
-        KeyError: If an overlay key is neither in the base value0 namespace nor
-            one of :data:`PORT_CONFIG_KEYS`.
-    """
-    text: str = path.read_text()
-    overlay: dict = json.loads((profiles / f"{profile}.json").read_text())
-    if not overlay:
-        return text
-    document: dict = json.loads(text)
-    values: dict = document["value0"]
-    for key in overlay:
-        if key not in values and key not in PORT_CONFIG_KEYS:
-            raise KeyError(key)
-    values.update(overlay)
-    return json.dumps(document)
-
-
 def resolved_flow_config(
-    manifest: ReferenceManifest, segment: ReferenceSegment, profile: Literal["reference", "fast"] = "reference"
+    settings: SlamConfig, segment: ReferenceSegment, profile: Literal["reference", "fast"] = "reference"
 ) -> tuple[_core.VioConfig, str]:
     """Read the dataset configuration and apply the requested profile."""
-    text: str = manifest.vio_config_text(segment.dataset_name, profile=profile)
+    text: str = settings.vio_config_text(segment.dataset_name, profile=profile)
     config: _core.VioConfig = _core.VioConfig.from_json(text)
     return config, text
 
 
-def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
-    """Deserialize the gate and validate relationships and finite baselines."""
+def load_benchmarks(settings: SlamConfig, path: Path = BENCHMARKS_PATH) -> Benchmarks:
+    """Read benchmark definitions and validate their dataset references and baselines."""
     try:
-        parsed: ReferenceManifest = from_toml(ReferenceManifest, path.read_text())
+        parsed: Benchmarks = from_toml(Benchmarks, path.read_text())
     except (SerdeError, TOMLDecodeError) as error:
         raise ValueError(f"{path}: {error}") from error
-    if parsed.schema_version != 10:
-        raise ValueError(f"{path}: expected schema_version 10")
+    if parsed.schema_version != 1:
+        raise ValueError(f"{path}: expected schema_version 1")
     identifiers: set[str] = set()
-    dataset_names: set[str] = {dataset.name for dataset in parsed.datasets}
+    dataset_names: set[str] = {dataset.name for dataset in settings.datasets}
     for segment in parsed.segments:
         where: str = f"{path}: [segment] {segment.segment_id}"
         if segment.segment_id in identifiers:
@@ -370,7 +236,7 @@ def load_manifest(path: Path = MANIFEST_PATH) -> ReferenceManifest:
             ):
                 if not math.isfinite(value) or value <= 0.0:
                     raise ValueError(f"{where}: [segment.baseline] {key} {name} must be finite and positive")
-    return replace(parsed, package_root=path.parent)
+    return replace(parsed, robocap=replace(parsed.robocap, device_id=settings.robocap.device_id))
 
 
 @dataclass(slots=True, frozen=True)
