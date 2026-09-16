@@ -61,3 +61,16 @@ def test_the_gate_tool_carries_no_machine_specific_name() -> None:
     assert not (PACKAGE / "tools" / "apps" / "fleet_check.py").exists()
     assert importlib.import_module("slam_rs.apis.gate").main is not None
     assert not importlib.util.find_spec("slam_rs.apis.fleet_check")
+
+
+def test_one_command_runs_the_whole_demo_in_the_viewer() -> None:
+    """`pixi run -e slam-rs slam-rs-demo` is the path for someone who just cloned: build, fetch the sample, serve, register, replay on screen."""
+    with (REPO / "pixi.toml").open("rb") as handle:
+        task: dict[str, object] = tomllib.load(handle)["feature"]["slam-rs"]["tasks"]["slam-rs-demo"]
+    depends: list[str] = list(task["depends-on"])  # type: ignore[arg-type]
+    assert "slam-rs-build" in depends and "slam-rs-download-sample" in depends
+    cmd: str = str(task["cmd"])
+    assert "rerun server" in cmd and "51235" in cmd, "starts the local catalog when none is listening"
+    assert "register" in cmd, "registers the sample before replaying"
+    assert "replay.py --stage vio" in cmd and "headless" not in cmd, "opens the viewer on screen"
+    assert task["cwd"] == "packages/slam-rs"
