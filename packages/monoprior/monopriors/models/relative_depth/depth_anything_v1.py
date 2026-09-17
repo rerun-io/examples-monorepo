@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
 from timeit import default_timer as timer
 from typing import Literal, TypedDict
 
@@ -9,8 +12,7 @@ from PIL import Image
 from transformers import pipeline
 
 from monopriors.depth_utils import disparity_to_depth, estimate_intrinsics
-
-from .base_relative_depth import BaseRelativePredictor, RelativeDepthPrediction
+from monopriors.models.relative_depth.base_relative_depth import BaseRelativePredictor, BaseRelativePredictorConfig, RelativeDepthPrediction
 
 
 class DepthDict(TypedDict):
@@ -32,6 +34,15 @@ def _parse_depth_pipeline_output(output: object) -> DepthDict:
     predicted_depth: Float32[torch.Tensor, "h w"] = predicted_depth_raw
     depth: Image.Image = depth_raw
     return {"predicted_depth": predicted_depth, "depth": depth}
+
+
+@dataclass
+class DepthAnythingV1Config(BaseRelativePredictorConfig):
+    """Configuration for Depth Anything v1 relative-depth prediction."""
+
+    def setup(self, device: Literal["cpu", "cuda"]) -> DepthAnythingV1Predictor:
+        """Build the configured Depth Anything v1 predictor on one device."""
+        return DepthAnythingV1Predictor(device=device)
 
 
 class DepthAnythingV1Predictor(BaseRelativePredictor[torch.nn.Module]):

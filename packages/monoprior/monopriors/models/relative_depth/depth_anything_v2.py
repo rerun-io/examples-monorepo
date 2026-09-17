@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
 from timeit import default_timer as timer
 from typing import Literal
 
@@ -8,9 +11,8 @@ from huggingface_hub import hf_hub_download
 from jaxtyping import Float, Float32, UInt8
 
 from monopriors.depth_utils import disparity_to_depth, estimate_intrinsics
+from monopriors.models.relative_depth.base_relative_depth import BaseRelativePredictor, BaseRelativePredictorConfig, RelativeDepthPrediction
 from monopriors.third_party.depth_anything_v2.dpt import DepthAnythingV2
-
-from .base_relative_depth import BaseRelativePredictor, RelativeDepthPrediction
 
 model_configs = {
     "vits": {
@@ -40,6 +42,18 @@ encoder2name: dict[str, str] = {
     "vitl": "Large",
     "vitg": "Giant",
 }
+
+
+@dataclass
+class DepthAnythingV2Config(BaseRelativePredictorConfig):
+    """Configuration for Depth Anything v2 relative-depth prediction."""
+
+    encoder: Literal["vits", "vitb", "vitl"] = "vits"
+    """DINOv2 encoder size."""
+
+    def setup(self, device: Literal["cpu", "cuda"]) -> DepthAnythingV2Predictor:
+        """Build the configured Depth Anything v2 predictor on one device."""
+        return DepthAnythingV2Predictor(device=device, encoder=self.encoder)
 
 
 class DepthAnythingV2Predictor(BaseRelativePredictor[DepthAnythingV2]):

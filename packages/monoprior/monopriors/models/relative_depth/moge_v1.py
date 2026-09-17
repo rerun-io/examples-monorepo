@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
 from timeit import default_timer as timer
 from typing import Literal
 
@@ -7,13 +10,21 @@ from einops import rearrange
 from jaxtyping import Float, UInt8
 
 from monopriors.depth_utils import depth_to_disparity
+from monopriors.models.relative_depth.base_relative_depth import BaseRelativePredictor, BaseRelativePredictorConfig, RelativeDepthPrediction
 from monopriors.third_party.moge.model._inference import InferenceOutput
 from monopriors.third_party.moge.model.v1 import MoGeModel
 
-from .base_relative_depth import BaseRelativePredictor, RelativeDepthPrediction
-
 MOGE_V1_CHECKPOINT_ID: str = "Ruicheng/moge-vitl"
 MOGE_V1_CHECKPOINT_REVISION: str = "979e84da9415762c30e6c0cf8dc0962896c793df"
+
+
+@dataclass
+class MoGeV1Config(BaseRelativePredictorConfig):
+    """Configuration for MoGe v1 relative-depth prediction."""
+
+    def setup(self, device: Literal["cpu", "cuda"]) -> MoGeV1Predictor:
+        """Build the configured MoGe v1 predictor on one device."""
+        return MoGeV1Predictor(device=device)
 
 
 class MoGeV1Predictor(BaseRelativePredictor[MoGeModel]):
