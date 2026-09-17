@@ -1,6 +1,6 @@
 import gc
 from pathlib import Path
-from typing import Literal, get_args, overload
+from typing import Final, Literal, get_args, overload
 
 import cv2
 import gradio as gr
@@ -36,6 +36,8 @@ except ImportError:
 
 model_load_status: str = "Models loaded and ready to use!"
 DEVICE: Literal["cuda"] | Literal["cpu"] = "cuda" if torch.cuda.is_available() else "cpu"
+EXAMPLE_DATA_DIR: Final[Path] = Path(__file__).resolve().parents[2] / "data" / "examples" / "single-image"
+"""Fetched by the ``_monoprior-download-single-image`` pixi task; the app task depends on it."""
 
 
 @overload
@@ -89,6 +91,8 @@ def _relative_predictor_name(model_name: RELATIVE_PREDICTORS | METRIC_PREDICTORS
             return "UniDepthRelativePredictor"
         case "MoGeV1Predictor":
             return "MoGeV1Predictor"
+        case "ZipDepthPredictor":
+            return "ZipDepthPredictor"
         case _:
             raise gr.Error(f"{model_name} is not a relative depth predictor.")
 
@@ -154,6 +158,7 @@ def on_submit(
                 rgb_hw3=rgb,
                 remove_flying_pixels=remove_flying_pixels,
                 depth_edge_threshold=depth_map_threshold,
+                log_disparity=True,  # the compare blueprint carves out a disparity view per model
             )
 
     return stream.read() or b""
@@ -232,10 +237,7 @@ with gr.Blocks() as relative_compare_block:
         outputs=[model_1_dropdown, model_2_dropdown],
     )
 
-    # get all jpegs in examples path
-    examples_paths = Path("examples").glob("*.jpeg")
-    # set the examples to be the sorted list of input parameterss (path, remove_flying_pixels, depth_map_threshold)
-    examples_list = sorted([[str(path)] for path in examples_paths])
+    examples_list = sorted([str(path)] for path in EXAMPLE_DATA_DIR.glob("*.jp*g"))
     examples = gr.Examples(
         examples=examples_list,
         inputs=[input_image, remove_flying_pixels, depth_map_threshold, model_type, model_1_dropdown, model_2_dropdown],
