@@ -34,13 +34,18 @@ def test_the_download_tasks_pull_from_the_public_dataset() -> None:
     assert "--include" not in tasks["slam-rs-download-all"]["cmd"]
 
 
-def test_the_sample_is_exactly_what_the_smoke_gate_scores() -> None:
+DEMO_CLIP: str = "msd-g2__MGO_others__MGO07_mapping_easy"
+"""The four-camera clip the README's gif shows; the demo replays it."""
+
+
+def test_the_sample_holds_the_smoke_clips_and_the_demo_clip() -> None:
     with (REPO / "pixi.toml").open("rb") as handle:
         sample: str = tomllib.load(handle)["feature"]["slam-rs"]["tasks"]["slam-rs-download-sample"]["cmd"]
     with (PACKAGE / "benchmarks.toml").open("rb") as handle:
         smoke: list[str] = [seg["segment_id"] for seg in tomllib.load(handle)["segment"] if seg["tier"] == "smoke"]
     assert smoke and all(segment_id.rsplit("__", 1)[-1] in sample for segment_id in smoke)
-    assert sample.count("--include") == len(smoke)
+    assert DEMO_CLIP.rsplit("__", 1)[-1] in sample
+    assert sample.count("--include") == len(smoke) + 1
 
 
 def test_registration_is_dataforges_job() -> None:
@@ -73,4 +78,5 @@ def test_one_command_runs_the_whole_demo_in_the_viewer() -> None:
     assert "rerun server" in cmd and "51235" in cmd, "starts the local catalog when none is listening"
     assert "register" in cmd, "registers the sample before replaying"
     assert "replay.py --stage vio" in cmd and "headless" not in cmd, "opens the viewer on screen"
+    assert f"--segment {DEMO_CLIP}" in cmd, "the four-camera clip from the gif, not the two-camera smoke clip"
     assert task["cwd"] == "packages/slam-rs"
