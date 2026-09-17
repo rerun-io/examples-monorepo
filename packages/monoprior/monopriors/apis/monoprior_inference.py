@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -10,26 +10,12 @@ from jaxtyping import UInt8
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from monopriors.models.monoprior import (
-    DsineAndUnidepth,
-    MoGeV2MonoPrior,
+    AnnotatedMonoPriorModelUnion,
+    MoGeV2MonoPriorConfig,
     MonoPriorModel,
     MonoPriorPrediction,
 )
 from monopriors.rr_logging_utils import log_metric_pred, log_normal_pred
-
-MONOPRIOR_MODELS = Literal["MoGeV2MonoPrior", "DsineAndUnidepth"]
-"""Available composite monoprior models."""
-
-
-def get_monoprior_model(model_name: MONOPRIOR_MODELS) -> MonoPriorModel:
-    """Instantiate a composite monoprior model by name."""
-    match model_name:
-        case "MoGeV2MonoPrior":
-            return MoGeV2MonoPrior()
-        case "DsineAndUnidepth":
-            return DsineAndUnidepth()
-        case _:
-            raise ValueError(f"Unknown monoprior model: {model_name}")
 
 
 @dataclass
@@ -40,8 +26,10 @@ class MonoPriorConfig:
     """Rerun logging configuration."""
     image_path: Path = Path("data/examples/single-image/room.jpg")
     """Path to the input image."""
-    model_name: MONOPRIOR_MODELS = "MoGeV2MonoPrior"
-    """Which composite monoprior model to use."""
+    model: AnnotatedMonoPriorModelUnion = field(default_factory=MoGeV2MonoPriorConfig)
+    """Composite monoprior model to run; select it with a model subcommand."""
+    device: Literal["cuda", "cpu"] = "cuda"
+    """Execution backend."""
     depth_edge_threshold: float = 0.1
     """Threshold for removing flying pixels at depth edges."""
 
@@ -68,7 +56,7 @@ def monoprior_from_img(config: MonoPriorConfig) -> None:
         raise FileNotFoundError(f"Failed to read image {config.image_path}")
     rgb_hw3: UInt8[np.ndarray, "h w 3"] = cv2.cvtColor(bgr_hw3, cv2.COLOR_BGR2RGB)
 
-    model: MonoPriorModel = get_monoprior_model(config.model_name)
+    model: MonoPriorModel = config.model.setup(device=config.device)
     pred: MonoPriorPrediction = model(rgb=rgb_hw3, K_33=None)
 
     rr.set_time("time", sequence=0)
