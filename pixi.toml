@@ -2438,7 +2438,7 @@ depends-on = ["slam-rs-build", "slam-rs-download-sample", "slam-rs-register"]
 description = "Build, fetch the sample, start the local catalog, register, and replay the four-camera MGO07 clip in the viewer"
 
 [feature.slam-rs.tasks.slam-rs-catalog-up]
-cmd = "bash -c 'set -e; if (exec 3<>/dev/tcp/127.0.0.1/51235) 2>/dev/null; then echo \"Reusing the catalog on 127.0.0.1:51235.\"; else mkdir -p data/msd-rrd; ulimit -n 524288 2>/dev/null || echo \"could not raise the open-file limit (now $(ulimit -n)); fine for the sample, raise it before registering all 64 recordings\" >&2; nohup rerun server --port 51235 > data/msd-rrd/server.log 2>&1 < /dev/null & wrapper=$!; ready=false; for attempt in {1..20}; do sleep 0.5; if (exec 3<>/dev/tcp/127.0.0.1/51235) 2>/dev/null; then ready=true; break; fi; done; pgrep -P $wrapper > data/msd-rrd/server.pid 2>/dev/null || echo $wrapper > data/msd-rrd/server.pid; if [ \"$ready\" != true ]; then echo \"the catalog did not start; see data/msd-rrd/server.log\" >&2; exit 1; fi; echo \"The catalog is up and stays running after the demo; slam-rs-serve starts it by hand; kill it by the pid in data/msd-rrd/server.pid.\"; fi'"
+cmd = "python tools/apps/catalog_up.py"
 cwd = "packages/slam-rs"
 description = "Start the local catalog on :51235 unless one is already listening"
 
@@ -2460,21 +2460,20 @@ description = "Register downloaded MSD recordings in the catalog (dataforge-regi
 [feature.slam-rs.tasks.slam-rs-gate]
 cmd = "python tools/apps/gate.py"
 cwd = "packages/slam-rs"
-depends-on = ["slam-rs-build"]
 description = "Score catalog segments against ground truth and baselines"
 
 [feature.slam-rs.tasks.slam-rs-download-sample]
-# The files themselves guard the download, so adding a clip to a tier re-downloads
-# for everyone; hf download reconciles what is already there.
+# All three layers must be present. Adding a clip and updating the count
+# re-downloads for everyone; hf download reconciles what is already there.
 # The two smoke-tier clips plus MGO07_mapping_easy, the four-camera clip the demo replays, about 50 MB in total.
-cmd = "test -e data/msd-rrd/base/msd-index__MIO_others__MIO10_short_2_panorama.rrd -a -e data/msd-rrd/base/msd-g2__MGO_others__MGO09_short_1_updown.rrd -a -e data/msd-rrd/base/msd-g2__MGO_others__MGO07_mapping_easy.rrd || hf download pablovela5620/msd-rrd --repo-type dataset --local-dir data/msd-rrd --include '*MIO10_short_2_panorama*' --include '*MGO09_short_1_updown*' --include '*MGO07_mapping_easy*'"
+cmd = "bash -c 'test \"$(ls data/msd-rrd/{base,gt,sensor_metadata}/*{MIO10_short_2_panorama,MGO09_short_1_updown,MGO07_mapping_easy}* 2>/dev/null | wc -l)\" -ge 9 || hf download pablovela5620/msd-rrd --repo-type dataset --local-dir data/msd-rrd --include \"*MIO10_short_2_panorama*\" --include \"*MGO09_short_1_updown*\" --include \"*MGO07_mapping_easy*\"'"
 cwd = "packages/slam-rs"
 description = "Download the sample: the two smoke clips and the demo clip"
 
 [feature.slam-rs.tasks.slam-rs-download-all]
-# The files themselves guard the download, so adding a clip to a tier re-downloads
-# for everyone; hf download reconciles what is already there.
-cmd = "test \"$(ls data/msd-rrd/base/*.rrd 2>/dev/null | wc -l)\" -ge 64 || hf download pablovela5620/msd-rrd --repo-type dataset --local-dir data/msd-rrd"
+# All three layers must be present. Adding a clip and updating the count
+# re-downloads for everyone; hf download reconciles what is already there.
+cmd = "bash -c 'test \"$(ls data/msd-rrd/{base,gt,sensor_metadata}/*.rrd 2>/dev/null | wc -l)\" -ge 192 || hf download pablovela5620/msd-rrd --repo-type dataset --local-dir data/msd-rrd'"
 cwd = "packages/slam-rs"
 description = "Download every MSD recording (about 15.5 GB)"
 
