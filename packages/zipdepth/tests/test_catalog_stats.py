@@ -10,12 +10,15 @@ def _every_field(scale: int) -> CatalogDatasetStats:
     return CatalogDatasetStats(
         segment_query=1.0 * scale,
         video_decode=2.0 * scale,
-        blob_decode=3.0 * scale,
-        augment=4.0 * scale,
-        samples_built=5 * scale,
-        png_fallbacks=6 * scale,
-        skipped_frames=7 * scale,
-        skipped_flat_frames=8 * scale,
+        jpeg_decode=3.0 * scale,
+        blob_decode=4.0 * scale,
+        augment=5.0 * scale,
+        samples_built=6 * scale,
+        png_fallbacks=7 * scale,
+        skipped_frames=8 * scale,
+        skipped_flat_frames=9 * scale,
+        skipped_low_valid_frames=10 * scale,
+        skipped_missing_payload_frames=11 * scale,
     )
 
 

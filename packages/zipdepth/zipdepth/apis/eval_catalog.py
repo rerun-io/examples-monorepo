@@ -20,6 +20,15 @@ from torch.utils.data import DataLoader
 
 from zipdepth.catalog.segments import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, PromptDACatalog, load_promptda_catalog, split_holdout_segments
 from zipdepth.catalog.targets import build_eval_transform
+from zipdepth.catalog.ultrawide import (
+    DEFAULT_ULTRAWIDE_PROMPT_SCALE,
+    ULTRAWIDE_LAYER,
+    CameraSelection,
+    PromptPlacement,
+    UltrawidePolicy,
+    footprint_box,
+    prompt_placement,
+)
 from zipdepth.data.transforms import AlbumentationsWrapper
 from zipdepth.evaluation.edge_metrics import EdgeStratifiedResult, edge_stratified_mae
 from zipdepth.evaluation.metrics import abs_relative_difference, align_depth_least_square, delta1_acc, disparity2depth, fit_affine_least_squares
@@ -63,6 +72,18 @@ class EvalCatalogConfig:
     """Deterministic fallback holdout size when no saved manifest exists."""
     holdout_seed: int = 0
     """Deterministic fallback holdout seed."""
+    cameras: CameraSelection = "wide"
+    """Cameras scored. Selecting the ultrawide adds a second, separately reported pass
+    over the same segments; the wide numbers never change. Ultrawide scoring supports
+    the ``metric`` and ``prompt-upsample`` evaluations only."""
+    ultrawide_min_valid_fraction: float = 0.0
+    """Ultrawide frames below this in-range target fraction are skipped. Zero scores
+    every frame: dropping sparse frames is a training data-efficiency choice, not a
+    property of the benchmark."""
+    ultrawide_valid_erosion_px: int = 1
+    """Ultrawide target-mask erosion radius; matches the training lane."""
+    ultrawide_prompt_scale: float = DEFAULT_ULTRAWIDE_PROMPT_SCALE
+    """Wide prompt footprint inside an ultrawide frame, as a fraction per axis."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -214,6 +235,102 @@ def aligned_inverse_diagnostic(
     return score_metric_depth(aligned_depth_hw, target_depth_hw, fit_hw)
 
 
+@dataclass(slots=True, frozen=True)
+class FootprintSplitMetrics:
+    """Ultrawide metric scores split by the wide prompt's footprint.
+
+    ``outside`` is the headline: those pixels have no prompt at all, so they show
+    what the model learned to do with an unprompted part of a prompted frame.
+    """
+
+    whole: MetricCatalogDepthMetrics
+    """Scores over every valid pixel in the frame."""
+    inside: MetricCatalogDepthMetrics
+    """Scores inside the prompt footprint."""
+    outside: MetricCatalogDepthMetrics
+    """Scores outside the prompt footprint."""
+    inside_prompt_upsample: MetricCatalogDepthMetrics
+    """Zero-parameter bilinear prompt-upsample floor inside the footprint."""
+
+
+def _mean_footprint_metrics(records: list[FootprintSplitMetrics]) -> FootprintSplitMetrics:
+    """Average one non-empty list of footprint-split records field by field."""
+    return FootprintSplitMetrics(
+        whole=_mean_metrics([record.whole for record in records]),
+        inside=_mean_metrics([record.inside for record in records]),
+        outside=_mean_metrics([record.outside for record in records]),
+        inside_prompt_upsample=_mean_metrics([record.inside_prompt_upsample for record in records]),
+    )
+
+
+def _footprint_metrics_report(prefix: str, metrics: FootprintSplitMetrics) -> dict[str, float]:
+    """Flatten footprint-split metrics into prefixed report keys."""
+    named: dict[str, MetricCatalogDepthMetrics] = {
+        "whole": metrics.whole,
+        "inside": metrics.inside,
+        "outside": metrics.outside,
+        "inside_prompt_upsample": metrics.inside_prompt_upsample,
+    }
+    return {
+        f"{prefix}_{region}_{field}": getattr(record, field)
+        for region, record in named.items()
+        for field in ("abs_rel", "delta1", "mae")
+    }
+
+
+def footprint_mask(placement: PromptPlacement, height: int, width: int) -> Bool[ndarray, "h w"]:
+    """Return the output pixels the scaled wide prompt covers.
+
+    Args:
+        placement: Prompt block position inside the prompt canvas.
+        height: Output image height.
+        width: Output image width.
+
+    Returns:
+        Boolean mask with shape ``(height, width)`` that is True inside the footprint.
+    """
+    box: tuple[int, int, int, int] = footprint_box(placement, (height, width))
+    inside_hw: Bool[ndarray, "h w"] = np.zeros((height, width), dtype=bool)
+    inside_hw[box[0] : box[2], box[1] : box[3]] = True
+    return inside_hw
+
+
+def score_footprint_split(
+    prediction_depth_hw: Float32[ndarray, "h w"],
+    target_depth_hw: Float32[ndarray, "h w"],
+    target_valid_hw: Bool[ndarray, "h w"],
+    prompt_depth_hw: Float32[ndarray, "192 256"],
+    prompt_valid_hw: Bool[ndarray, "192 256"],
+    inside_hw: Bool[ndarray, "h w"],
+) -> FootprintSplitMetrics | None:
+    """Score one ultrawide frame whole, inside, and outside the prompt footprint.
+
+    Args:
+        prediction_depth_hw: Predicted metric depth in metres.
+        target_depth_hw: Raycast ultrawide target depth in metres.
+        target_valid_hw: Eroded in-range target validity.
+        prompt_depth_hw: Padded prompt canvas depth in metres.
+        prompt_valid_hw: Padded prompt canvas validity.
+        inside_hw: Output pixels the prompt footprint covers.
+
+    Returns:
+        The four scored regions, or None when either region lacks enough valid
+        pixels to score.
+    """
+    height: int = target_depth_hw.shape[0]
+    width: int = target_depth_hw.shape[1]
+    baseline_depth_hw: Float32[ndarray, "h w"] = prompt_upsample_depth(prompt_depth_hw, prompt_valid_hw, height=height, width=width)
+    try:
+        return FootprintSplitMetrics(
+            whole=score_metric_depth(prediction_depth_hw, target_depth_hw, target_valid_hw),
+            inside=score_metric_depth(prediction_depth_hw, target_depth_hw, target_valid_hw & inside_hw),
+            outside=score_metric_depth(prediction_depth_hw, target_depth_hw, target_valid_hw & ~inside_hw),
+            inside_prompt_upsample=score_metric_depth(baseline_depth_hw, target_depth_hw, target_valid_hw & inside_hw),
+        )
+    except ValueError:
+        return None
+
+
 def _selected_segments(config: EvalCatalogConfig, catalog: PromptDACatalog) -> list[str]:
     """Resolve explicit segments or the saved training holdout manifest."""
     if config.segment_ids is None:
@@ -241,12 +358,129 @@ def _selected_segments(config: EvalCatalogConfig, catalog: PromptDACatalog) -> l
     return segment_ids
 
 
+def _evaluate_ultrawide(
+    config: EvalCatalogConfig,
+    catalog: PromptDACatalog,
+    segment_ids: list[str],
+    prompted_model: ZipDepthPrompt | None,
+    device: torch.device,
+) -> tuple[list[dict[str, float | int | str]], dict[str, float | int]]:
+    """Score the rectified ultrawide camera with the wide prompt padded into its footprint.
+
+    Args:
+        config: Evaluation settings, including the ultrawide mask and prompt policy.
+        catalog: Connected PromptDA catalog metadata.
+        segment_ids: Segments to score; those without the ultrawide layer are skipped.
+        prompted_model: Fused prompted model, or None to score the prompt-upsample floor.
+        device: Device the model runs on.
+
+    Returns:
+        Per-segment reports and the overall footprint-split summary.
+
+    Raises:
+        RuntimeError: If no ultrawide frame could be scored.
+    """
+    # Catalog-only imports stay local so pure metric tests run outside the catalog lane.
+    from zipdepth.catalog.builders import CpuSampleBuilder
+    from zipdepth.catalog.dataset import CatalogPromptDepthDataset
+
+    transform: AlbumentationsWrapper = build_eval_transform(config.height, config.width)
+    policy: UltrawidePolicy = UltrawidePolicy(
+        min_valid_fraction=config.ultrawide_min_valid_fraction,
+        valid_erosion_px=config.ultrawide_valid_erosion_px,
+        prompt_scale=config.ultrawide_prompt_scale,
+    )
+    placement: PromptPlacement = prompt_placement(policy.prompt_scale)
+    inside_hw: Bool[ndarray, "h w"] = footprint_mask(placement, config.height, config.width)
+    covered_ids: list[str] = [segment_id for segment_id in segment_ids if ULTRAWIDE_LAYER in catalog.row_by_id[segment_id].layer_names]
+    missing_count: int = len(segment_ids) - len(covered_ids)
+    if missing_count:
+        print(f"ultrawide: skipping {missing_count} segment(s) without the {ULTRAWIDE_LAYER!r} layer")
+
+    per_segment: list[dict[str, float | int | str]] = []
+    all_records: list[FootprintSplitMetrics] = []
+    segment_id: str
+    for segment_id in covered_ids:
+        dataset: CatalogPromptDepthDataset = CatalogPromptDepthDataset(
+            catalog.dataset_entry,
+            [segment_id],
+            catalog.row_by_id,
+            device=device,
+            builder_factory=lambda: CpuSampleBuilder(transform, min_depth_span=0.0, target_mode="metric", ultrawide_policy=policy),
+            shuffle_buffer_size=1,
+            frame_stride=config.frame_stride,
+            num_producers=1,
+            prefetch_samples=4,
+            cameras="ultrawide",
+        )
+        loader: DataLoader[dict[str, Tensor]] = DataLoader(dataset, batch_size=1, num_workers=0)
+        segment_records: list[FootprintSplitMetrics] = []
+        batch: dict[str, Tensor]
+        for batch in loader:
+            target_depth_hw: Float32[ndarray, "h w"] = batch["target_depth"][0, 0].numpy().astype(np.float32, copy=False)
+            target_valid_hw: Bool[ndarray, "h w"] = batch["target_valid"][0, 0].numpy().astype(bool, copy=False)
+            prompt_depth_hw: Float32[ndarray, "192 256"] = batch["prompt_depth"][0, 0].numpy().astype(np.float32, copy=False)
+            prompt_valid_hw: Bool[ndarray, "192 256"] = batch["prompt_valid"][0, 0].numpy().astype(bool, copy=False)
+            if prompted_model is not None:
+                image_bchw: UInt8[Tensor, "b 3 h w"] = batch["image"].to(device=device, non_blocking=True)
+                prompt_depth_bchw: Float32[Tensor, "b 1 192 256"] = batch["prompt_depth"].to(device=device, non_blocking=True)
+                with torch.inference_mode():
+                    prediction_depth_hw: Float32[ndarray, "h w"] = prompted_model(image_bchw, prompt_depth_bchw)[0, 0].float().cpu().numpy()
+            else:
+                prediction_depth_hw = prompt_upsample_depth(
+                    prompt_depth_hw, prompt_valid_hw, height=config.height, width=config.width
+                )
+            scored: FootprintSplitMetrics | None = score_footprint_split(
+                prediction_depth_hw, target_depth_hw, target_valid_hw, prompt_depth_hw, prompt_valid_hw, inside_hw
+            )
+            if scored is not None:
+                segment_records.append(scored)
+        if not segment_records:
+            print(f"{segment_id}: no scorable ultrawide frames")
+            continue
+        segment_metrics: FootprintSplitMetrics = _mean_footprint_metrics(segment_records)
+        segment_report: dict[str, float | int | str] = {
+            "segment_id": segment_id,
+            "frame_count": len(segment_records),
+            **_footprint_metrics_report("ultrawide", segment_metrics),
+        }
+        per_segment.append(segment_report)
+        all_records.extend(segment_records)
+        print(
+            f"{segment_id}: ultrawide AbsRel whole={segment_metrics.whole.abs_rel:.6f} "
+            f"inside={segment_metrics.inside.abs_rel:.6f} outside={segment_metrics.outside.abs_rel:.6f} "
+            f"(inside floor={segment_metrics.inside_prompt_upsample.abs_rel:.6f}) frames={len(segment_records)}"
+        )
+
+    if not all_records:
+        raise RuntimeError("ultrawide evaluation yielded no valid frames")
+    overall_metrics: FootprintSplitMetrics = _mean_footprint_metrics(all_records)
+    overall: dict[str, float | int] = {
+        "ultrawide_frame_count": len(all_records),
+        **_footprint_metrics_report("ultrawide", overall_metrics),
+    }
+    print(
+        f"overall ultrawide: whole AbsRel={overall_metrics.whole.abs_rel:.6f} MAE={overall_metrics.whole.mae:.6f}m | "
+        f"inside AbsRel={overall_metrics.inside.abs_rel:.6f} MAE={overall_metrics.inside.mae:.6f}m "
+        f"(prompt-upsample floor AbsRel={overall_metrics.inside_prompt_upsample.abs_rel:.6f} "
+        f"MAE={overall_metrics.inside_prompt_upsample.mae:.6f}m) | "
+        f"outside AbsRel={overall_metrics.outside.abs_rel:.6f} MAE={overall_metrics.outside.mae:.6f}m "
+        f"delta1={overall_metrics.outside.delta1:.6f} frames={len(all_records)}"
+    )
+    return per_segment, overall
+
+
 def main(config: EvalCatalogConfig) -> Path:
     """Evaluate selected segments, print explicit metric/diagnostic summaries, and write JSON."""
     if config.frame_stride <= 0:
         raise ValueError("frame_stride must be positive")
     if config.height <= 0 or config.width <= 0 or config.input_size <= 0:
         raise ValueError("height, width, and input_size must be positive")
+    if config.cameras not in ("wide", "ultrawide", "both"):
+        raise ValueError(f"unknown camera selection {config.cameras!r}")
+    scores_ultrawide: bool = config.cameras in ("ultrawide", "both")
+    if scores_ultrawide and config.evaluation not in ("metric", "prompt-upsample"):
+        raise ValueError(f"ultrawide scoring supports the metric and prompt-upsample evaluations, not {config.evaluation!r}")
     catalog: PromptDACatalog = load_promptda_catalog(config.catalog_url, config.dataset_name)
     segment_ids: list[str] = _selected_segments(config, catalog)
     transform: AlbumentationsWrapper = build_eval_transform(config.height, config.width)
@@ -275,8 +509,9 @@ def main(config: EvalCatalogConfig) -> Path:
     all_metric_records: list[MetricCatalogDepthMetrics] = []
     all_edge_records: list[dict[str, float]] = []
     all_diagnostic_records: list[MetricCatalogDepthMetrics] = []
+    wide_segment_ids: list[str] = segment_ids if config.cameras in ("wide", "both") else []
     segment_id: str
-    for segment_id in segment_ids:
+    for segment_id in wide_segment_ids:
         dataset: CatalogPromptDepthDataset = CatalogPromptDepthDataset(
             catalog.dataset_entry,
             [segment_id],
@@ -406,15 +641,19 @@ def main(config: EvalCatalogConfig) -> Path:
         per_segment.append(segment_report)
         all_diagnostic_records.extend(segment_diagnostic_records)
 
-    if not all_diagnostic_records:
+    if not all_diagnostic_records and wide_segment_ids:
         raise RuntimeError("evaluation yielded no valid frames")
-    overall_diagnostic: MetricCatalogDepthMetrics = _mean_metrics(all_diagnostic_records)
-    overall: dict[str, float | int] = {
-        "frame_count": len(all_diagnostic_records),
-        "aligned_inverse_diagnostic_abs_rel": overall_diagnostic.abs_rel,
-        "aligned_inverse_diagnostic_delta1": overall_diagnostic.delta1,
-        "aligned_inverse_diagnostic_mae": overall_diagnostic.mae,
-    }
+    overall: dict[str, float | int] = {}
+    if all_diagnostic_records:
+        overall_diagnostic: MetricCatalogDepthMetrics = _mean_metrics(all_diagnostic_records)
+        overall.update(
+            {
+                "frame_count": len(all_diagnostic_records),
+                "aligned_inverse_diagnostic_abs_rel": overall_diagnostic.abs_rel,
+                "aligned_inverse_diagnostic_delta1": overall_diagnostic.delta1,
+                "aligned_inverse_diagnostic_mae": overall_diagnostic.mae,
+            }
+        )
     if all_metric_records:
         overall_metric: MetricCatalogDepthMetrics = _mean_metrics(all_metric_records)
         overall.update(
@@ -440,16 +679,26 @@ def main(config: EvalCatalogConfig) -> Path:
                 f"(baseline/pred {stratified_means['flat_ratio_vs_baseline']:.3f}x) | "
                 f"EWMAE={stratified_means['ewmae']:.6f}m (baseline={stratified_means['baseline_ewmae']:.6f}m)"
             )
-    print(
-        f"overall aligned_inverse_diagnostic: AbsRel={overall['aligned_inverse_diagnostic_abs_rel']:.6f} "
-        f"delta1={overall['aligned_inverse_diagnostic_delta1']:.6f} MAE={overall['aligned_inverse_diagnostic_mae']:.6f}m"
-    )
+    if all_diagnostic_records:
+        print(
+            f"overall aligned_inverse_diagnostic: AbsRel={overall['aligned_inverse_diagnostic_abs_rel']:.6f} "
+            f"delta1={overall['aligned_inverse_diagnostic_delta1']:.6f} MAE={overall['aligned_inverse_diagnostic_mae']:.6f}m"
+        )
+
+    ultrawide_per_segment: list[dict[str, float | int | str]] = []
+    if scores_ultrawide:
+        ultrawide_result: tuple[list[dict[str, float | int | str]], dict[str, float | int]] = _evaluate_ultrawide(
+            config, catalog, segment_ids, prompted_model, device
+        )
+        ultrawide_per_segment = ultrawide_result[0]
+        overall.update(ultrawide_result[1])
 
     config.save_dir.mkdir(parents=True, exist_ok=True)
     output: Path = config.save_dir / f"eval_{config.evaluation}_{output_tag}.json"
     report: dict[str, object] = {
         "config": {**asdict(config), "checkpoint": str(checkpoint) if checkpoint is not None else None, "segment_ids": segment_ids},
         "per_segment": per_segment,
+        "ultrawide_per_segment": ultrawide_per_segment,
         "overall": overall,
     }
     with output.open("w") as file:
