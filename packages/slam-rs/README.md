@@ -114,8 +114,8 @@ between. `--profile reference` runs the unmodified dataset configuration.
 
 The **GPU lane** (`--gpu`) runs the frontend as CubeCL kernels through wgpu;
 the estimator is one CPU thread in every lane, and ATE does not depend on the
-lane. Design notes: [the speed profile](docs/design-notes.md#d74--speed-profile),
-[the GPU lane](docs/design-notes.md#the-gpu-lane).
+lane. The decisions behind both, one line each:
+[docs/design-notes.md](docs/design-notes.md#decision-references).
 
 ## Data
 

@@ -168,5 +168,5 @@ cross-machine budget.
 The Metal lane's two sleeps are fixed (wgpu 30 replaces the 1 ms completion poll, the
 CubeCL patch parks the idle worker); the Mac's two-camera clips still need about
 0.5 ms to meet the 1.2× margin. See
-[S36](design-notes.md#s36--the-metal-lanes-two-sleeps) and the
-[S32 host table](design-notes.md#the-fast-profile-across-the-hosts).
+[S36](design-notes.md#decision-references) and the
+[host baseline decisions](design-notes.md#decision-references).
