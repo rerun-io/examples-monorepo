@@ -81,7 +81,7 @@ def test_an_unknown_selector_is_a_typed_error(benchmarks: Benchmarks, settings: 
     """Every accessor that resolves a name names the ones there are, as a ``ValueError``.
 
     These three are what a tool resolves a command line through, and a
-    ``KeyError`` reads as a dictionary miss: ``fleet_check --segments <clip>
+    ``KeyError`` reads as a dictionary miss: ``gate --segments <clip>
     typo`` reached one after replaying the valid clip. The loader has always
     promised ``ValueError`` for a settings it cannot read; a selector it cannot
     satisfy is the same kind of answer.

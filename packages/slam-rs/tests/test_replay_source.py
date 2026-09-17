@@ -16,7 +16,7 @@ from slam_rs.catalog_feed import CatalogSegment, LocalSegment, SegmentSource
 from slam_rs.config import SlamConfig
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks
 
-CATALOG: str = "rerun+http://dgx-spark:9988"
+CATALOG: str = "rerun+http://127.0.0.1:51235"
 UNLISTED: str = "msd-g2__MGO_others__MGO11_short_3_backandforth"
 """A catalog segment of a known dataset that the reference set does not list."""
 
