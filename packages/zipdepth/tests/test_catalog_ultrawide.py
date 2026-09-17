@@ -17,6 +17,7 @@ from zipdepth.catalog.ultrawide import (
     erode_valid,
     footprint_box,
     interleave,
+    largest_hole_fraction,
     place_wide_prompt,
     prompt_placement,
     subsample_indices,
@@ -61,6 +62,10 @@ def test_ultrawide_policy_rejects_impossible_settings() -> None:
         UltrawidePolicy(valid_erosion_px=-1)
     with pytest.raises(ValueError):
         UltrawidePolicy(prompt_scale=0.0)
+    with pytest.raises(ValueError):
+        UltrawidePolicy(max_hole_fraction=1.5)
+    with pytest.raises(ValueError):
+        UltrawidePolicy(max_hole_fraction=-0.1)
 
 
 def test_place_wide_prompt_scales_the_block_and_zeroes_the_rest() -> None:
@@ -404,3 +409,100 @@ def test_cuda_and_cpu_builders_place_the_same_ultrawide_prompt() -> None:
     assert_allclose(actual["prompt_depth"].cpu().numpy(), expected["prompt_depth"].numpy(), rtol=1.0e-6, atol=0.0)
     assert_array_equal(actual["prompt_valid"].cpu().numpy(), expected["prompt_valid"].numpy())
     assert_array_equal(actual["target_valid"].cpu().numpy(), expected["target_valid"].numpy())
+
+
+def test_a_hole_cap_that_can_never_fire_is_refused() -> None:
+    """Fail at construction instead of running thousands of steps with an inert filter.
+
+    A frame that clears ``min_valid_fraction`` has at most ``1 - min_valid_fraction``
+    invalid area in total, and one region cannot exceed the total, so a cap at or
+    above that is subsumed. The first uw-v2 gate ran 0.8/0.2 and rejected nothing.
+    """
+    with pytest.raises(ValueError, match="max_hole_fraction"):
+        UltrawidePolicy(min_valid_fraction=0.8, max_hole_fraction=0.2)
+    with pytest.raises(ValueError, match="max_hole_fraction"):
+        UltrawidePolicy(min_valid_fraction=0.9, max_hole_fraction=0.5)
+
+    # The run's own pairing, and the two ways to mean "no hole filter", all stand.
+    assert UltrawidePolicy(min_valid_fraction=0.7, max_hole_fraction=0.2).max_hole_fraction == 0.2
+    assert UltrawidePolicy(min_valid_fraction=0.8, max_hole_fraction=0.1).max_hole_fraction == 0.1
+    assert UltrawidePolicy(min_valid_fraction=0.8).max_hole_fraction == 1.0
+    assert UltrawidePolicy(min_valid_fraction=0.0, max_hole_fraction=1.0).max_hole_fraction == 1.0
+
+
+def test_largest_hole_fraction_measures_one_connected_region_not_total_invalid_area() -> None:
+    """Separate speckle from a window: the same invalid area, very different holes."""
+    speckled_chw: Bool[Tensor, "1 20 20"] = torch.ones((1, 20, 20), dtype=torch.bool)
+    speckled_chw[0, ::2, ::2] = False
+    one_block_chw: Bool[Tensor, "1 20 20"] = torch.ones((1, 20, 20), dtype=torch.bool)
+    one_block_chw[0, :10, :10] = False
+
+    # 100 invalid pixels either way, but no speckle pixel touches another.
+    assert int((~speckled_chw).sum()) == int((~one_block_chw).sum()) == 100
+    assert largest_hole_fraction(speckled_chw) == pytest.approx(1.0 / 400.0)
+    assert largest_hole_fraction(one_block_chw) == pytest.approx(100.0 / 400.0)
+    assert largest_hole_fraction(torch.ones((1, 20, 20), dtype=torch.bool)) == 0.0
+    assert largest_hole_fraction(torch.zeros((1, 20, 20), dtype=torch.bool)) == 1.0
+
+
+def test_ultrawide_sample_drops_a_frame_with_one_oversized_hole() -> None:
+    """Reject a dense frame whose invalid area is one contiguous window, not speckle."""
+    rgb_chw: UInt8[Tensor, "3 h w"] = torch.zeros((3, *FRAME_HW), dtype=torch.uint8)
+    # 25% of the frame invalid in one block; the rest is a valid 1.5 m wall.
+    target_mm_hw: UInt16[ndarray, "h w"] = np.full(FRAME_HW, 1500, dtype=np.uint16)
+    target_mm_hw[: FRAME_HW[0] // 2, : FRAME_HW[1] // 2] = 0
+    target_blob_bytes: UInt8[ndarray, "target_n"] = np.frombuffer(encode_depth_png(target_mm_hw), dtype=np.uint8)
+    prompt_mm_hw: UInt16[ndarray, "192 256"] = np.full((192, 256), 1000, dtype=np.uint16)
+    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(encode_depth_png(prompt_mm_hw), dtype=np.uint8)
+    confidence: UInt8[ndarray, "confidence_n"] = np.full(192 * 256, 2, dtype=np.uint8)
+
+    def build(max_hole_fraction: float) -> tuple[dict[str, Tensor] | None, CpuSampleBuilder]:
+        builder: CpuSampleBuilder = CpuSampleBuilder(
+            build_eval_transform(*FRAME_HW),
+            min_depth_span=0.0,
+            target_mode="metric",
+            ultrawide_policy=UltrawidePolicy(
+                min_valid_fraction=0.7, max_hole_fraction=max_hole_fraction, valid_erosion_px=0
+            ),
+        )
+        return (
+            builder(rgb_chw, target_blob_bytes, prompt_blob_bytes, confidence, quarter_turns=0, sample_seed=1, camera="ultrawide"),
+            builder,
+        )
+
+    rejected, strict_builder = build(0.2)
+    kept, permissive_builder = build(1.0)
+
+    # 0.75 valid clears min_valid_fraction=0.7, so only the hole filter can drop it.
+    assert rejected is None
+    assert strict_builder.stats.skipped_large_hole_frames == 1
+    assert strict_builder.stats.skipped_low_valid_frames == 0
+    assert strict_builder.stats.samples_built == 0
+    assert kept is not None
+    assert permissive_builder.stats.skipped_large_hole_frames == 0
+    assert permissive_builder.stats.samples_built == 1
+
+
+def test_the_default_hole_policy_keeps_a_frame_that_is_all_hole() -> None:
+    """Change nothing for a run that does not ask for the filter."""
+    rgb_chw: UInt8[Tensor, "3 h w"] = torch.zeros((3, *FRAME_HW), dtype=torch.uint8)
+    target_mm_hw: UInt16[ndarray, "h w"] = np.full(FRAME_HW, 1500, dtype=np.uint16)
+    target_mm_hw[: FRAME_HW[0] // 2] = 0
+    target_blob_bytes: UInt8[ndarray, "target_n"] = np.frombuffer(encode_depth_png(target_mm_hw), dtype=np.uint8)
+    prompt_mm_hw: UInt16[ndarray, "192 256"] = np.full((192, 256), 1000, dtype=np.uint16)
+    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(encode_depth_png(prompt_mm_hw), dtype=np.uint8)
+    confidence: UInt8[ndarray, "confidence_n"] = np.full(192 * 256, 2, dtype=np.uint8)
+    builder: CpuSampleBuilder = CpuSampleBuilder(
+        build_eval_transform(*FRAME_HW),
+        min_depth_span=0.0,
+        target_mode="metric",
+        ultrawide_policy=UltrawidePolicy(min_valid_fraction=0.0, valid_erosion_px=0),
+    )
+
+    sample: dict[str, Tensor] | None = builder(
+        rgb_chw, target_blob_bytes, prompt_blob_bytes, confidence, quarter_turns=0, sample_seed=1, camera="ultrawide"
+    )
+
+    assert UltrawidePolicy().max_hole_fraction == 1.0
+    assert sample is not None
+    assert builder.stats.skipped_large_hole_frames == 0

@@ -137,6 +137,31 @@ views through windows, and thin structure.
   p10 0.866, min 0.669, 95% of frames at or above 0.7; `42444511` mean 0.958,
   p10 0.901, min 0.612, 98% above 0.7. The gate therefore costs a few percent of
   frames and removes the ones that teach the least per decoded frame.
+* **Drop `ultrawide_max_hole_fraction`,** the largest *connected* invalid region
+  as a frame fraction, also measured before erosion. Total invalid area cannot
+  tell speckle at glazing from one window swallowing a contiguous fifth of the
+  frame, and only the second kind leaves the metric loss with no target across a
+  whole region. Measured over 5,415 frames: 6.6% fall below 0.8 valid and 3.5%
+  carry a hole larger than 20% of the frame, so the two filters reject
+  overlapping but different frames. Components come from `scipy.ndimage.label`
+  (4-connectivity) on the CPU; a CUDA-built mask is copied down first so both
+  builders reject exactly the same frames. The pass is gated behind the total
+  invalid area, which no single region can exceed, so the default `1.0` never
+  labels anything. Rejections are counted as `skipped_large_hole_frames` and
+  logged beside `skipped_low_valid`.
+
+**The hole cap only bites below `1 - ultrawide_min_valid_fraction`.** A frame that
+clears the valid-fraction gate has at most `1 - min_valid` invalid area *in
+total*, and no single region can exceed the total, so any larger cap is subsumed
+and can never reject anything. `UltrawidePolicy.__post_init__` refuses such a
+pairing rather than silently doing nothing.
+
+This is not hypothetical: the first uw-v2 gate ran `0.8`/`0.2` and reported
+`skipped_large_hole = 0` across all 600 steps, because `0.2 >= 1 - 0.8`. The run
+therefore uses **`--ultrawide-min-valid-fraction 0.7 --ultrawide-max-hole-fraction
+0.2`**, which also keeps uw-v1's valid threshold so the margin's effect stays
+attributable. Re-gated at 300 steps it rejected **17** frames for one oversized
+hole beside 39 for low valid fraction — the ~3.5% tail the filter exists for.
 
 The existing flat-frame filter (`min_depth_span`, p95/p5 of valid depth) applies
 unchanged.
@@ -237,6 +262,77 @@ sigmoid is quantization precision — spreading the same output resolution over
 3.9 m instead of a 0.4 m span — and that works out to a few millimetres, far
 below the lane's ~70 mm edge-MAE gate.
 
+### Conditioning the margin on prompt coverage
+
+Opening the window *for every frame* is what the uw-v1 gate measured, and the
+wide lane does not survive it: 600 steps of `--range-margin-m 3.9` with
+`--cameras both` scored wide AbsRel **0.19** against v4's **0.013**. A wide
+prompt fills the canvas, so its own `[min, max]` is already the right range, and
+re-spanning the head for it is pure loss.
+
+`range_margin_coverage_max` conditions the widening on the prompt itself. The
+model computes coverage inside `forward_with_range`, from the same validity mask
+it already builds:
+
+```
+coverage = valid_prompt_mask.float().mean(dim=(1, 2, 3))
+widen    = coverage <= range_margin_coverage_max
+```
+
+A wide prompt covers the whole `192x256` canvas and scores ~1.0. An ultrawide
+prompt is the wide block padded into the central `122x91`, so it scores at most
+`122 * 91 / (256 * 192) = 0.226`, less where the block has holes. The two lanes
+never overlap, and `0.6` separates them with room on both sides. The gate is a
+`torch.where` on the per-element bounds, so a mixed `both` batch resolves each
+element independently and the fp16 export graph keeps its data-independent shape.
+
+The wide path is then **bit-identical** to the un-widened head: `torch.where`
+hands back the very tensors the prompt-bounded head computes. The default
+`range_margin_coverage_max = 1.0` is the largest coverage possible, so it admits
+every image and reproduces the ungated margin exactly; checkpoints written before
+the gate existed read back as `1.0` for the same reason. The uw-v2 fine-tune uses
+`range_margin_m = 3.9` with `range_margin_coverage_max = 0.6`.
+
+**Why this matters for the periphery.** On the 20 holdout segments a mean 27% of
+ultrawide periphery ground-truth pixels lie outside the prompt's `[min, max]`
+(25% below the minimum, 3% above the maximum), and 61% of frames have more than
+20% of their periphery unreachable. uw-v1 ran at margin 0.0 and therefore could
+not reach a quarter of the periphery at all.
+
+#### The lanes separate cleanly, measured
+
+Prompt coverage over the 4 gate segments (51 frames each, stride 60), which is
+the quantity the gate keys on:
+
+| camera | mean | p05 | median | min | max | fraction <= 0.6 (widened) |
+| --- | --- | --- | --- | --- | --- | --- |
+| wide | 0.960 | 0.818 | 1.000 | 0.247 | 1.000 | **2.0%** (1 of 51) |
+| ultrawide | 0.217 | 0.183 | 0.226 | 0.057 | 0.226 | **100%** |
+
+The gap between the wide p05 (**0.82**) and the ultrawide max (**0.23**) is wide
+enough that any threshold in roughly `[0.23, 0.82]` behaves identically, so `0.6`
+is not a tuned constant and the gate is not sensitive to it.
+
+#### Gate results, 600 steps from `zdpda-v4`
+
+Scored on 4 holdout segments at stride 60, `--cameras both`:
+
+| run | wide AbsRel | ultrawide outside-footprint AbsRel |
+| --- | --- | --- |
+| `zdpda-v4` reference | 0.012690 | — |
+| uw-v1 control (margin 0.0) | 0.015466 | 0.4072 |
+| global margin 3.9, ungated | ~0.19 | — |
+| **uw-v2 gate** (3.9, coverage 0.6) | **0.024991** | **0.355270** |
+
+The gated margin recovers the periphery — outside-footprint AbsRel improves 12.7%
+over the uw-v1 control — and it is nowhere near the ungated margin's collapse of
+the wide lane. It does not hold the wide lane at v4's number, though: the 0.0123
+gap over v4 is *not* mis-gating, since only 2% of wide frames are widened at all.
+It is the cost of co-training the shared backbone on ultrawide frames with an
+opened head. `--cameras both` alone already costs 0.0028 (the uw-v1 control), and
+the opened head adds the rest. 600 steps is also a very early read on a 140k
+OneCycle schedule.
+
 ## Training recipe
 
 Fine-tune from `zdpda-v4` (`data/checkpoints/zdpda-v4/final_model.pth`):
@@ -244,7 +340,8 @@ Fine-tune from `zdpda-v4` (`data/checkpoints/zdpda-v4/final_model.pth`):
 ```
 --cameras both --preset fast --max-lr 1e-4 --batch-size 8
 --height 768 --width 1024 --total-steps 140000 --freeze-bn --target-mode metric
---range-margin-m 3.9
+--range-margin-m 3.9 --range-margin-coverage-max 0.6
+--ultrawide-min-valid-fraction 0.7 --ultrawide-max-hole-fraction 0.2
 ```
 
 (`--range-margin-m` lands with the sibling PR; this lane does not read it.)

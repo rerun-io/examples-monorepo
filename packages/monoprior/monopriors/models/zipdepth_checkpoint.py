@@ -10,6 +10,9 @@ from monopriors.third_party.zipdepth.model_utils import StateDict, strip_state_d
 RANGE_MARGIN_M_KEY: str = "range_margin_m"
 """Trainer-checkpoint key holding the prompted head's output-range margin, in metres."""
 
+RANGE_MARGIN_COVERAGE_MAX_KEY: str = "range_margin_coverage_max"
+"""Trainer-checkpoint key holding the prompt coverage at or below which the margin applies."""
+
 
 def load_zipdepth_checkpoint(checkpoint: Path) -> dict[str, object]:
     """Load a bare state dict or a trainer checkpoint as a raw mapping.
@@ -47,6 +50,27 @@ def state_dict_from_checkpoint(loaded: dict[str, object], checkpoint: Path) -> S
     return strip_state_dict_prefixes(state_dict)
 
 
+def _float_from_checkpoint(loaded: dict[str, object], checkpoint: Path, key: str, default: float) -> float:
+    """Read one optional numeric scalar recorded beside the model state.
+
+    Args:
+        loaded: Mapping returned by :func:`load_zipdepth_checkpoint`.
+        checkpoint: Source path, used only for error messages.
+        key: Top-level key to read.
+        default: Value used when the key is absent.
+
+    Returns:
+        The recorded number as a float, or ``default``.
+
+    Raises:
+        ValueError: If the key holds anything but a non-boolean number.
+    """
+    raw_value: object = loaded.get(key, default)
+    if isinstance(raw_value, bool) or not isinstance(raw_value, float | int):
+        raise ValueError(f"checkpoint {key} must be a number: {checkpoint}")
+    return float(raw_value)
+
+
 def range_margin_m_from_checkpoint(loaded: dict[str, object], checkpoint: Path) -> float:
     """Read the prompted output-range margin, in metres, recorded by training.
 
@@ -59,10 +83,23 @@ def range_margin_m_from_checkpoint(loaded: dict[str, object], checkpoint: Path) 
         checkpoints written before the margin existed (for example
         ``zdpda-v4``).
     """
-    raw_margin_m: object = loaded.get(RANGE_MARGIN_M_KEY, 0.0)
-    if isinstance(raw_margin_m, bool) or not isinstance(raw_margin_m, float | int):
-        raise ValueError(f"checkpoint {RANGE_MARGIN_M_KEY} must be a number: {checkpoint}")
-    return float(raw_margin_m)
+    return _float_from_checkpoint(loaded, checkpoint, RANGE_MARGIN_M_KEY, 0.0)
+
+
+def range_margin_coverage_max_from_checkpoint(loaded: dict[str, object], checkpoint: Path) -> float:
+    """Read the prompt-coverage ceiling that gates the output-range margin.
+
+    Args:
+        loaded: Mapping returned by :func:`load_zipdepth_checkpoint`.
+        checkpoint: Source path, used only for error messages.
+
+    Returns:
+        The recorded ceiling, or ``1.0`` for bare state dicts and for checkpoints
+        written before the gate existed. ``1.0`` is the whole canvas, so an
+        ungated checkpoint keeps applying its margin to every image, exactly as
+        it did before the gate.
+    """
+    return _float_from_checkpoint(loaded, checkpoint, RANGE_MARGIN_COVERAGE_MAX_KEY, 1.0)
 
 
 def load_zipdepth_state_dict(checkpoint: Path) -> StateDict:
@@ -71,10 +108,12 @@ def load_zipdepth_state_dict(checkpoint: Path) -> StateDict:
 
 
 __all__ = (
+    "RANGE_MARGIN_COVERAGE_MAX_KEY",
     "RANGE_MARGIN_M_KEY",
     "load_zipdepth_checkpoint",
     "load_zipdepth_state_dict",
     "narrow_zipdepth_state_dict",
+    "range_margin_coverage_max_from_checkpoint",
     "range_margin_m_from_checkpoint",
     "state_dict_from_checkpoint",
 )

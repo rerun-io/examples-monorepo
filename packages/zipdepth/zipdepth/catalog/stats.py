@@ -23,6 +23,8 @@ class BuilderStats:
     """Frames rejected by the configured depth-span filter."""
     skipped_low_valid_frames: int = 0
     """Ultrawide frames rejected by the minimum valid-target-fraction gate."""
+    skipped_large_hole_frames: int = 0
+    """Ultrawide frames rejected because one connected invalid region was too large."""
 
 
 @dataclass(slots=True)
@@ -49,6 +51,8 @@ class CatalogDatasetStats:
     """Frames rejected by the configured depth-span filter."""
     skipped_low_valid_frames: int = 0
     """Ultrawide frames rejected by the minimum valid-target-fraction gate."""
+    skipped_large_hole_frames: int = 0
+    """Ultrawide frames rejected because one connected invalid region was too large."""
     skipped_missing_payload_frames: int = 0
     """Ultrawide chosen frames dropped because a payload column was null.
 
@@ -74,6 +78,7 @@ class CatalogDatasetStats:
             skipped_frames=self.skipped_frames + other.skipped_frames,
             skipped_flat_frames=self.skipped_flat_frames + other.skipped_flat_frames,
             skipped_low_valid_frames=self.skipped_low_valid_frames + other.skipped_low_valid_frames,
+            skipped_large_hole_frames=self.skipped_large_hole_frames + other.skipped_large_hole_frames,
             skipped_missing_payload_frames=self.skipped_missing_payload_frames + other.skipped_missing_payload_frames,
         )
 
