@@ -11,6 +11,7 @@ pytest.importorskip("arkitscenes_download", reason="ARKitScenes catalog dependen
 
 from zipdepth.apis.infer_segment_rerun import (  # noqa: E402
     METRICS_ROOT,
+    PREFILL_DEPTH_ENTITY,
     ULTRAWIDE_ROOT,
     WIDE_ROOT,
     CameraSummary,
@@ -47,6 +48,18 @@ def test_demo_blueprint_holds_both_camera_rows_and_the_metric_series() -> None:
         METRICS_ROOT,
     ]
     assert blueprint.collapse_panels is False
+
+
+def test_prefill_blueprint_appends_the_aligned_monocular_plane_after_the_shared_columns() -> None:
+    """Keep the padded layout column for column and add the MoGe-2 plane at the end."""
+    padded: list[str] = view_origins(demo_blueprint("padded").root_container)
+
+    prefill: list[str] = view_origins(demo_blueprint("prefill-hybrid").root_container)
+
+    ultrawide_columns: int = padded.index(f"{WIDE_ROOT}/rgb")
+    assert prefill[:ultrawide_columns] == padded[:ultrawide_columns]
+    assert prefill[ultrawide_columns] == PREFILL_DEPTH_ENTITY
+    assert prefill[ultrawide_columns + 1 :] == padded[ultrawide_columns:]
 
 
 def test_depth_millimetres_quantize_and_clamp_the_metric_range() -> None:
