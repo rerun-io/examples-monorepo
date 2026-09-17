@@ -373,7 +373,7 @@ def test_a_slot_is_cleared_once_when_it_empties_and_not_again_until_it_is_reused
 
 def translations(rows: Rows, entity: str) -> dict[int, tuple[float, ...]]:
     """Each frameset's logged translation on an entity, rounded so equal poses compare equal."""
-    return {t_ns: tuple(round(x, 9) for x in values["Transform3D:translation"]) for t_ns, values in rows[entity] if "Transform3D:translation" in values}
+    return {t_ns: tuple(round(x, 9) for x in values["Transform3D:translation"][0]) for t_ns, values in rows[entity] if "Transform3D:translation" in values}
 
 
 def test_window_slots_hold_real_poses_and_marginalized_slots_hold_the_poses_they_held(logged: Logged) -> None:

@@ -188,12 +188,12 @@ class VioLogger:
     """The ground truth thinned to the frameset cadence: what the drawn strip is taken from."""
     previous_window: dict[int, Float64[ndarray, " 7"]] = field(default_factory=dict)
     """Previous window poses by timestamp, used to draw marginalized frames."""
-    camera_intrinsics: Float64[ndarray, "3 3"] = field(init=False)
-    """Camera 0's intrinsics matrix, shared by the window and marginalized frusta."""
     pinholes: dict[tuple[int, int, int, int], rr.Pinhole] = field(init=False)
     """Camera 0 frusta by role colour, reused for every slot and frameset."""
     highest_slots: dict[Literal["window", "marginalized"], int] = field(default_factory=dict)
     """Highest initialized slot index in each family; static rig offsets are logged once."""
+    previous_counts: dict[Literal["window", "marginalized"], int] = field(default_factory=dict)
+    """Number of slots drawn in each family on the previous frameset."""
     framesets: int = 0
     """Framesets logged, which paces the ATE-so-far."""
 
@@ -202,10 +202,10 @@ class VioLogger:
         log_rig(self.cameras, f"{RUN_ENTITY}/rig")
         self.ground_truth_strip = at_frameset_cadence(self.ground_truth, self.frame_t_ns)
         camera: CameraCalib = self.cameras[0]
-        self.camera_intrinsics = image_from_camera(camera)
+        camera_intrinsics: Float64[ndarray, "3 3"] = image_from_camera(camera)
         self.pinholes = {
             color: rr.Pinhole(
-                image_from_camera=self.camera_intrinsics,
+                image_from_camera=camera_intrinsics,
                 resolution=[camera.width, camera.height],
                 camera_xyz=rr.ViewCoordinates.RDF,
                 image_plane_distance=FRUSTUM_DEPTH_M,
@@ -304,7 +304,7 @@ class VioLogger:
     def _log_camera_slots(
         self, family: Literal["window", "marginalized"], poses: list[Float64[ndarray, " 7"]], colors: list[tuple[int, int, int, int]]
     ) -> None:
-        """Draw poses as camera 0 frusta and clear every unused slot previously drawn."""
+        """Draw poses as camera 0 frusta and clear slots that just became empty."""
         camera: CameraCalib = self.cameras[0]
         highest: int = self.highest_slots.get(family, -1)
         for k, (pose, color) in enumerate(zip(poses, colors, strict=True)):
@@ -317,9 +317,9 @@ class VioLogger:
                 )
             rr.log(slot, rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7])))
             rr.log(f"{slot}/cam_00", self.pinholes[color])
-        # Repeat clears for slots still empty, so every frameset states their absence.
-        for k in range(len(poses), highest + 1):
+        for k in range(len(poses), self.previous_counts.get(family, 0)):
             rr.log(f"{RUN_ENTITY}/{family}/{k:02d}", rr.Clear(recursive=True))
+        self.previous_counts[family] = len(poses)
         self.highest_slots[family] = max(highest, len(poses) - 1)
 
     def _log_window(self, snapshot: _core.VioSnapshot) -> None:
