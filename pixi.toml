@@ -2432,10 +2432,10 @@ dataforge = { path = "packages/dataforge", editable = true }
 rerun-sdk = { version = "==0.37.0", extras = ["catalog"] }
 
 [feature.slam-rs.tasks.slam-rs-demo]
-cmd = "bash -c 'set -e; if (exec 3<>/dev/tcp/127.0.0.1/51235) 2>/dev/null; then echo \"Reusing the catalog on 127.0.0.1:51235.\"; else mkdir -p data/msd-rrd; ulimit -n 524288 2>/dev/null || true; nohup rerun server --port 51235 > data/msd-rrd/server.log 2>&1 < /dev/null & wrapper=$!; ready=false; for attempt in {1..20}; do sleep 0.5; if (exec 3<>/dev/tcp/127.0.0.1/51235) 2>/dev/null; then ready=true; break; fi; done; pgrep -P $wrapper > data/msd-rrd/server.pid 2>/dev/null || echo $wrapper > data/msd-rrd/server.pid; if [ \"$ready\" != true ]; then echo \"the catalog did not start; see data/msd-rrd/server.log\" >&2; exit 1; fi; echo \"The catalog is up and stays running after the demo; slam-rs-serve starts it by hand; kill it by the pid in data/msd-rrd/server.pid.\"; fi; export DATAFORGE_OUTPUT_ROOT=data/msd-rrd RERUN_INSECURE_SKIP_HOST_CHECK=1; for d in index g2 odyssey; do compgen -G \"data/msd-rrd/base/msd-${d}__*.rrd\" > /dev/null || continue; python ../dataforge/tools/apps/register.py msd --device $d || exit 1; done; echo \"Opening the viewer; the terminal prints the ATE when the clip ends.\"; python tools/apps/replay.py --stage vio'"
+cmd = "bash -c 'set -e; if (exec 3<>/dev/tcp/127.0.0.1/51235) 2>/dev/null; then echo \"Reusing the catalog on 127.0.0.1:51235.\"; else mkdir -p data/msd-rrd; ulimit -n 524288 2>/dev/null || true; nohup rerun server --port 51235 > data/msd-rrd/server.log 2>&1 < /dev/null & wrapper=$!; ready=false; for attempt in {1..20}; do sleep 0.5; if (exec 3<>/dev/tcp/127.0.0.1/51235) 2>/dev/null; then ready=true; break; fi; done; pgrep -P $wrapper > data/msd-rrd/server.pid 2>/dev/null || echo $wrapper > data/msd-rrd/server.pid; if [ \"$ready\" != true ]; then echo \"the catalog did not start; see data/msd-rrd/server.log\" >&2; exit 1; fi; echo \"The catalog is up and stays running after the demo; slam-rs-serve starts it by hand; kill it by the pid in data/msd-rrd/server.pid.\"; fi; export DATAFORGE_OUTPUT_ROOT=data/msd-rrd RERUN_INSECURE_SKIP_HOST_CHECK=1; for d in index g2 odyssey; do compgen -G \"data/msd-rrd/base/msd-${d}__*.rrd\" > /dev/null || continue; python ../dataforge/tools/apps/register.py msd --device $d || exit 1; done; echo \"Opening the viewer on MGO07 (four cameras, 53 s); the terminal prints the ATE when the clip ends.\"; python tools/apps/replay.py --stage vio --segment msd-g2__MGO_others__MGO07_mapping_easy'"
 cwd = "packages/slam-rs"
 depends-on = ["slam-rs-build", "slam-rs-download-sample"]
-description = "Build, fetch the sample, start the local catalog, register, and replay MIO10 in the viewer"
+description = "Build, fetch the sample, start the local catalog, register, and replay the four-camera MGO07 clip in the viewer"
 
 [feature.slam-rs.tasks.slam-rs-serve]
 cmd = "bash -c 'ulimit -n 524288 && exec rerun server --port 51235'"
@@ -2458,11 +2458,11 @@ depends-on = ["slam-rs-build"]
 description = "Score catalog segments against ground truth and baselines"
 
 [feature.slam-rs.tasks.slam-rs-download-sample]
-# The smoke-tier clips of benchmarks.toml: one two-camera (Index) and one four-camera (G2), about 7 MB.
-cmd = "test -e data/msd-rrd/.sample || (hf download pablovela5620/msd-rrd --repo-type dataset --local-dir data/msd-rrd --include '*MIO10_short_2_panorama*' --include '*MGO09_short_1_updown*' && touch data/msd-rrd/.sample)"
+# The two smoke-tier clips plus MGO07_mapping_easy, the four-camera clip the demo replays, about 50 MB in total.
+cmd = "test -e data/msd-rrd/.sample || (hf download pablovela5620/msd-rrd --repo-type dataset --local-dir data/msd-rrd --include '*MIO10_short_2_panorama*' --include '*MGO09_short_1_updown*' --include '*MGO07_mapping_easy*' && touch data/msd-rrd/.sample)"
 cwd = "packages/slam-rs"
 outputs = ["packages/slam-rs/data/msd-rrd/.sample"]
-description = "Download the two MSD sample recordings the smoke gate scores"
+description = "Download the sample: the two smoke clips and the demo clip"
 
 [feature.slam-rs.tasks.slam-rs-download-all]
 cmd = "test -e data/msd-rrd/.all || (hf download pablovela5620/msd-rrd --repo-type dataset --local-dir data/msd-rrd && touch data/msd-rrd/.all)"
