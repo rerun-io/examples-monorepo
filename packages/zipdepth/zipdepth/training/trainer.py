@@ -17,6 +17,7 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
+from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_M_KEY
 from monopriors.third_party.zipdepth.model_utils import strip_state_dict_prefixes
 
 from zipdepth.loss import MetricDepthLoss, ZipDepthLoss
@@ -66,6 +67,7 @@ class ZipDepthTrainer:
                 pin_batchnorm_eval: bool = False,
                 compile_mode: CompileMode = 'reduce-overhead',
                 channels_last: bool = False,
+                range_margin_m: float = 0.0,
                 ):
         """
         Args:
@@ -97,6 +99,8 @@ class ZipDepthTrainer:
             pin_batchnorm_eval: Return BatchNorm modules to eval after entering train mode
             compile_mode: torch.compile mode, or 'off'; dev-mode beartype disables it
             channels_last: Move four-dimensional batches with channels-last strides
+            range_margin_m: Prompted head output-range margin of the student, in metres,
+                recorded in every checkpoint so inference rebuilds the same head
         """
         self.student = student.to(device)
         self.train_loader = train_loader
@@ -128,6 +132,7 @@ class ZipDepthTrainer:
         self.target_mode = target_mode
         self.pin_batchnorm_eval = pin_batchnorm_eval
         self.channels_last = channels_last
+        self.range_margin_m = range_margin_m
 
         # Loss function initialization
         self.criterion: nn.Module = (
@@ -462,6 +467,7 @@ class ZipDepthTrainer:
             'model_state_dict': model_state,
             'optimizer_state_dict': self.optimizer.state_dict(),
             'loss': loss,
+            RANGE_MARGIN_M_KEY: self.range_margin_m,
         }
 
         if self.scheduler is not None:
