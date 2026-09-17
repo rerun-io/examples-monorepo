@@ -64,8 +64,8 @@ flowchart TB
     data ~~~ run
 ```
 
-The catalog server does the decoding and serving; slam-rs only ever sees
-grayscale framesets and IMU samples.
+The catalog serves the encoded video and the sensor streams; slam-rs decodes
+them itself and the estimator only ever sees grayscale framesets and IMU samples.
 
 ## Results
 
@@ -78,7 +78,6 @@ profile and the GPU frontend on an RTX 5090. ATE is RMSE in centimetres against
 the catalog ground truth after rigid alignment. The Basalt column is the MSD
 paper's Table IV (causal, multi-camera, CPU): a reference point, not a paired run.
 
-<!-- msd-sweep:start -->
 Measured 2026-09-16 on `215ad203`, core `40c7ab243c22`, decode `cpu_gray8_dav1d_1thread`.
 
 | dataset | recordings | slam-rs median ATE cm | Basalt (paper) median ATE cm | lost framesets | slam-rs lower on |
@@ -87,7 +86,6 @@ Measured 2026-09-16 on `215ad203`, core `40c7ab243c22`, decode `cpu_gray8_dav1d_
 | msd-g2 | 15 | 8.53 | 7.00 | 0 | 8 / 15 |
 | msd-odyssey | 16 | 7.57 | 6.05 | 0 | 10 / 16 |
 | all | 64 | 10.97 | 11.20 | 0 | 34 / 64 |
-<!-- msd-sweep:end -->
 
 Per-recording numbers, the reference profile and other hosts:
 [docs/benchmarks.md](docs/benchmarks.md).

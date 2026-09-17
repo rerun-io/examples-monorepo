@@ -1,7 +1,9 @@
 # slam-rs design notes
 
 A reference for the code; paths are relative to `packages/slam-rs/`.
-Decisions are one line each; the rest is in git history.
+Decisions are one line each. The full record behind them, with measurements and
+rejected experiments, is the version of this file before the cut:
+`git show b05efc00:packages/slam-rs/docs/design-notes.md` (2,022 lines).
 
 ## Core modules
 

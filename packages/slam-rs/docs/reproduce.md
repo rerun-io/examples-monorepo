@@ -12,8 +12,9 @@ pixi run -e slam-rs slam-rs-register           # idempotent: only new files are 
 
 The downloads land in `packages/slam-rs/data/msd-rrd/`, one directory per
 layer (`base`, `gt`, `sensor_metadata`); registration writes the device blueprints
-into `blueprints/` beside them. Each download leaves a
-marker file, so pixi skips one that is already there.
+into `blueprints/` beside them. A download is skipped when every layer of its
+recordings is already there, so it is safe to re-run and it picks up clips added
+to a tier.
 
 ## The gate
 
@@ -21,16 +22,15 @@ marker file, so pixi skips one that is already there.
 pixi run -e slam-rs slam-rs-gate --tier smoke              # two short clips
 pixi run -e slam-rs slam-rs-gate --tier release            # three longer clips (MIO07, MIO14, MGO07), CPU lane
 pixi run -e slam-rs slam-rs-gate --tier listed             # the other five gated clips
+pixi run -e slam-rs slam-rs-wgpu-build                     # once: the GPU core; the gate never rebuilds what it is handed
 pixi run -e slam-rs slam-rs-gate --tier release --gpu      # any tier on the GPU lane
 ```
 
-Every clip must track every frameset, associate enough poses with ground truth,
-and stay within 10 % of its baseline's RMSE. `benchmarks.toml` holds the
-baselines by lane, profile and host; the speed clause (10 % over the median
-tracker call) is only gated on the host that recorded the baseline, and
-reported everywhere else. The README's per-recording table is the same
-measurement run over every segment on the catalog rather than the ten gated
-ones. A tier is exactly its own clips: `smoke` is two, `release` three, `listed` five.
+The acceptance rules (tracking, association, the 10 % RMSE band, speed gated on
+the baseline host only, the no-baseline case) are in one place:
+[docs/design-notes.md, The gate](design-notes.md#the-gate). The per-recording
+table in [benchmarks.md](benchmarks.md) is the same measurement run over every
+segment on the catalog rather than the ten gated ones.
 
 ## Replaying and scoring one recording
 
