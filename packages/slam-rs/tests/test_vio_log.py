@@ -357,16 +357,41 @@ def test_the_frames_a_marginalization_removed_are_faded_pinholes_at_the_poses_th
     assert colours == {packed(MARGINALIZED_COLOR)}
 
 
-def test_a_slot_without_a_frame_is_cleared_that_same_frameset(logged: Logged) -> None:
-    """From its first use on, a slot is either drawn or cleared at every tracked frameset: no stale camera lingers."""
+def test_a_slot_is_cleared_once_when_it_empties_and_not_again_until_it_is_reused(logged: Logged) -> None:
+    """Rerun keeps the latest state, so one clear at the frameset a slot empties is exactly enough; repeating it is waste."""
     for prefix in (f"{RUN_ENTITY}/window", f"{RUN_ENTITY}/marginalized"):
         for slot in slot_entities(logged.rows, prefix):
             drawn: set[int] = {t_ns for t_ns, values in logged.rows[slot] if "Transform3D:translation" in values}
-            cleared: set[int] = {t_ns for t_ns, values in logged.rows[slot] if "Clear:is_recursive" in values}
+            cleared: list[int] = [t_ns for t_ns, values in logged.rows[slot] if "Clear:is_recursive" in values]
+            assert not (drawn & set(cleared)), (slot, "drawn and cleared at the same frameset")
+            previous_drawn: bool = False
             for t_ns in logged.tracked:
-                if t_ns >= min(drawn):
-                    assert (t_ns in drawn) != (t_ns in cleared), (slot, t_ns)
+                if t_ns in cleared:
+                    assert previous_drawn, (slot, t_ns, "cleared without having been drawn the frameset before")
+                previous_drawn = t_ns in drawn
 
+
+def translations(rows: Rows, entity: str) -> dict[int, tuple[float, ...]]:
+    """Each frameset's logged translation on an entity, rounded so equal poses compare equal."""
+    return {t_ns: tuple(round(x, 9) for x in values["Transform3D:translation"]) for t_ns, values in rows[entity] if "Transform3D:translation" in values}
+
+
+def test_window_slots_hold_real_poses_and_marginalized_slots_hold_the_poses_they_held(logged: Logged) -> None:
+    """The newest window pose is where the rig is; a marginalized frame is drawn where the previous window had it."""
+    rig: dict[int, tuple[float, ...]] = translations(logged.rows, f"{RUN_ENTITY}/rig")
+    window: list[dict[int, tuple[float, ...]]] = [translations(logged.rows, slot) for slot in slot_entities(logged.rows, f"{RUN_ENTITY}/window")]
+    for t_ns in logged.tracked:
+        drawn_now: set[tuple[float, ...]] = {slot[t_ns] for slot in window if t_ns in slot}
+        assert rig[t_ns] in drawn_now, (t_ns, "the current rig pose is not among the window frames")
+    marginalized: list[dict[int, tuple[float, ...]]] = [translations(logged.rows, slot) for slot in slot_entities(logged.rows, f"{RUN_ENTITY}/marginalized")]
+    checked: int = 0
+    for previous, t_ns in zip(logged.tracked, logged.tracked[1:], strict=False):
+        drawn_before: set[tuple[float, ...]] = {slot[previous] for slot in window if previous in slot}
+        for slot in marginalized:
+            if t_ns in slot:
+                assert slot[t_ns] in drawn_before, (t_ns, "a marginalized frame is drawn somewhere the previous window never was")
+                checked += 1
+    assert checked > 0, "no marginalized frame was ever checked"
 
 def views_of(node: rrb.Container | rrb.View) -> list[rrb.View]:
     """Every view under one blueprint node, in layout order."""
