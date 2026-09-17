@@ -17,6 +17,7 @@ from it, because ``tests`` is not on the typechecker's search path and every
 module in this directory therefore stands alone.
 """
 
+import re
 from pathlib import Path
 from typing import NamedTuple
 
@@ -34,12 +35,16 @@ from slam_rs import _core, vio_log
 from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CameraCalib
 from slam_rs.trajectory import AteResult, Trajectory, ate, empty_trajectory
 from slam_rs.vio_log import (
+    FRUSTUM_DEPTH_M,
     GT_ENTITY,
     IMAGE_PLANE_M,
+    KEYFRAME_COLOR,
+    LTKF_COLOR,
+    MARGINALIZED_COLOR,
+    POSE_COLOR,
     RUN_ENTITY,
     VIO_STATS_ENTITY,
     VioLogger,
-    frustum_strip,
     inverted,
     log_rig,
     vio_blueprint,
@@ -131,28 +136,6 @@ def logged(
     return drive(pipeline(2), (camera(0, 0.0), camera(1, 0.1)), straight_line(reference_t_ns), texture, tmp_path / "vio.rrd", read_rows)
 
 
-def test_the_frustum_wireframe_sits_where_the_camera_does(camera: CameraFactory) -> None:
-    """Apex at the camera's origin in rig coordinates, corners a fixed depth in front."""
-    offset: float = 0.1
-    strip: Float64[ndarray, "10 3"] = frustum_strip(camera(1, offset), depth_m=0.5)
-    assert strip.shape == (10, 3)
-    # The rig transform of the synthetic camera is a pure x translation, so the
-    # apex — the only point at the camera origin — lands on it exactly.
-    apex: Float64[ndarray, "n 3"] = strip[np.array([5, 8])]
-    np.testing.assert_allclose(apex, np.tile([offset, 0.0, 0.0], (2, 1)), atol=1e-12)
-    corners: Float64[ndarray, "n 3"] = np.delete(strip, [5, 8], axis=0)
-    assert np.all(corners[:, 2] == 0.5), "every corner sits at the requested depth along +z"
-    # A closed rectangle: the strip returns to the corner it started from.
-    np.testing.assert_allclose(strip[0], strip[4])
-
-
-def test_a_deeper_frustum_is_the_same_shape_scaled(camera: CameraFactory) -> None:
-    """Depth is a scale on the rays, so the wireframe never changes direction."""
-    near: Float64[ndarray, "10 3"] = frustum_strip(camera(0, 0.0), depth_m=0.05)
-    far: Float64[ndarray, "10 3"] = frustum_strip(camera(0, 0.0), depth_m=0.5)
-    np.testing.assert_allclose(10.0 * near, far, atol=1e-12)
-
-
 def image_planes(recording: Path) -> dict[str, float]:
     """Every ``Pinhole``'s image-plane distance in one recording, by entity path.
 
@@ -216,8 +199,7 @@ def test_every_tracked_frameset_writes_the_rung(logged: Logged) -> None:
     assert len(logged.tracked) >= FRAMESETS - 2, "only the framesets before the first covered one may fail to track"
     for entity in (
         f"{RUN_ENTITY}/rig",
-        f"{RUN_ENTITY}/window",
-        f"{RUN_ENTITY}/marginalized",
+        f"{RUN_ENTITY}/window/00",
         f"{RUN_ENTITY}/landmarks",
         f"{VIO_STATS_ENTITY}/num_landmarks",
         f"{VIO_STATS_ENTITY}/lm_iterations",
@@ -227,12 +209,6 @@ def test_every_tracked_frameset_writes_the_rung(logged: Logged) -> None:
     ):
         assert entity in logged.rows, f"{entity} never reached the recording"
         assert [t_ns for t_ns, _ in logged.rows[entity]] == logged.tracked, entity
-    # The window this run marginalizes from the fifth frameset on, and a
-    # marginalized frame is drawn from the poses of the window it just left: a
-    # row that is always empty is the layer looking the removed frames up in the
-    # window they are already gone from.
-    faded: list[int] = [len(values["LineStrips3D:strips"]) for _, values in logged.rows[f"{RUN_ENTITY}/marginalized"]]
-    assert max(faded) > 0, "the marginalized layer never drew a frame the last marginalization removed"
 
 
 def test_the_estimated_path_gains_one_segment_a_frameset(logged: Logged) -> None:
@@ -337,8 +313,85 @@ def test_a_run_without_references_still_logs_everything_else(pipeline: PipelineF
         frame_t_ns=np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64),
     )
     assert len(logger.estimated()) == 0
-    assert logger.window_strip.shape == (10, 3)
 
+
+def packed(color: tuple[int, int, int, int]) -> int:
+    """A colour as the recording stores it: one RGBA integer."""
+    r, g, b, a = color
+    return (r << 24) | (g << 16) | (b << 8) | a
+
+
+def slot_entities(rows: Rows, prefix: str) -> list[str]:
+    """The numbered slot entities under a prefix, in order: ``prefix/00``, ``prefix/01``, ..."""
+    return sorted(entity for entity in rows if re.fullmatch(rf"{re.escape(prefix)}/\d\d", entity))
+
+
+def test_window_frames_are_pinhole_cameras_on_numbered_slots(logged: Logged) -> None:
+    """Every pose still in the window is drawn the way the live rig is: a rig node with camera 0's ``Pinhole`` under it.
+
+    Same archetype as the rig, so the viewer treats them as cameras; the role
+    (keyframe, long-term keyframe, plain frame) is the frustum's colour. No
+    hand-drawn wireframes anywhere under the window.
+    """
+    slots: list[str] = slot_entities(logged.rows, f"{RUN_ENTITY}/window")
+    assert slots and slots[0] == f"{RUN_ENTITY}/window/00"
+    for entity, rows in logged.rows.items():
+        if entity.startswith((f"{RUN_ENTITY}/window", f"{RUN_ENTITY}/marginalized")):
+            assert not any("LineStrips3D:strips" in values for _, values in rows), entity
+    for slot in slots:
+        assert all("Transform3D:translation" in values for _, values in logged.rows[slot] if "Clear:is_recursive" not in values), slot
+        colours: set[int] = {values["Pinhole:color"][0] for _, values in logged.rows[f"{slot}/cam_00"] if "Pinhole:color" in values}
+        assert colours and colours <= {packed(KEYFRAME_COLOR), packed(LTKF_COLOR), packed(POSE_COLOR)}, slot
+    planes: dict[str, float] = image_planes(logged.recording)
+    assert planes[f"{RUN_ENTITY}/window/00/cam_00"] == pytest.approx(FRUSTUM_DEPTH_M)
+    assert planes[f"{RUN_ENTITY}/rig/cam_00"] == pytest.approx(IMAGE_PLANE_M)
+
+
+def test_the_frames_a_marginalization_removed_are_faded_pinholes_at_the_poses_they_held(logged: Logged) -> None:
+    """A frame the last marginalization removed is drawn once more, as the same camera, in the marginalized colour."""
+    slots: list[str] = slot_entities(logged.rows, f"{RUN_ENTITY}/marginalized")
+    assert slots, "no frameset drew a frame the last marginalization removed"
+    drawn: list[int] = [t_ns for t_ns, values in logged.rows[slots[0]] if "Transform3D:translation" in values]
+    assert drawn
+    colours: set[int] = {values["Pinhole:color"][0] for _, values in logged.rows[f"{slots[0]}/cam_00"] if "Pinhole:color" in values}
+    assert colours == {packed(MARGINALIZED_COLOR)}
+
+
+def test_a_slot_is_cleared_once_when_it_empties_and_not_again_until_it_is_reused(logged: Logged) -> None:
+    """Rerun keeps the latest state, so one clear at the frameset a slot empties is exactly enough; repeating it is waste."""
+    for prefix in (f"{RUN_ENTITY}/window", f"{RUN_ENTITY}/marginalized"):
+        for slot in slot_entities(logged.rows, prefix):
+            drawn: set[int] = {t_ns for t_ns, values in logged.rows[slot] if "Transform3D:translation" in values}
+            cleared: list[int] = [t_ns for t_ns, values in logged.rows[slot] if "Clear:is_recursive" in values]
+            assert not (drawn & set(cleared)), (slot, "drawn and cleared at the same frameset")
+            previous_drawn: bool = False
+            for t_ns in logged.tracked:
+                if t_ns in cleared:
+                    assert previous_drawn, (slot, t_ns, "cleared without having been drawn the frameset before")
+                previous_drawn = t_ns in drawn
+
+
+def translations(rows: Rows, entity: str) -> dict[int, tuple[float, ...]]:
+    """Each frameset's logged translation on an entity, rounded so equal poses compare equal."""
+    return {t_ns: tuple(round(x, 9) for x in values["Transform3D:translation"][0]) for t_ns, values in rows[entity] if "Transform3D:translation" in values}
+
+
+def test_window_slots_hold_real_poses_and_marginalized_slots_hold_the_poses_they_held(logged: Logged) -> None:
+    """The newest window pose is where the rig is; a marginalized frame is drawn where the previous window had it."""
+    rig: dict[int, tuple[float, ...]] = translations(logged.rows, f"{RUN_ENTITY}/rig")
+    window: list[dict[int, tuple[float, ...]]] = [translations(logged.rows, slot) for slot in slot_entities(logged.rows, f"{RUN_ENTITY}/window")]
+    for t_ns in logged.tracked:
+        drawn_now: set[tuple[float, ...]] = {slot[t_ns] for slot in window if t_ns in slot}
+        assert rig[t_ns] in drawn_now, (t_ns, "the current rig pose is not among the window frames")
+    marginalized: list[dict[int, tuple[float, ...]]] = [translations(logged.rows, slot) for slot in slot_entities(logged.rows, f"{RUN_ENTITY}/marginalized")]
+    checked: int = 0
+    for previous, t_ns in zip(logged.tracked, logged.tracked[1:], strict=False):
+        drawn_before: set[tuple[float, ...]] = {slot[previous] for slot in window if previous in slot}
+        for slot in marginalized:
+            if t_ns in slot:
+                assert slot[t_ns] in drawn_before, (t_ns, "a marginalized frame is drawn somewhere the previous window never was")
+                checked += 1
+    assert checked > 0, "no marginalized frame was ever checked"
 
 def views_of(node: rrb.Container | rrb.View) -> list[rrb.View]:
     """Every view under one blueprint node, in layout order."""
