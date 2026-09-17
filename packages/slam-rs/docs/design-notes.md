@@ -758,8 +758,8 @@ the same tree:
 | `/world/runs/slam_rs/trajectory` | the estimate so far, one green `LineStrips3D` |
 | `/world/runs/gt/trajectory` | the ground truth up to the cursor, near-white |
 | `/world/runs/slam_rs/rig` (+ `/cam_MM`) | the estimated rig's current pose, as `Pinhole` frusta from the calibration |
-| `/world/runs/slam_rs/window` | one frustum wireframe per window frame, blue for a keyframe, yellow for a long-term one, grey for a pose block |
-| `/world/runs/slam_rs/marginalized` | the frames the last marginalization removed, the same wireframes faded |
+| `/world/runs/slam_rs/window/NN/cam_00` | one `Pinhole` per window pose slot, blue for a keyframe, yellow for a long-term one, grey for a pose block |
+| `/world/runs/slam_rs/marginalized/NN/cam_00` | the frames the last marginalization removed, faded `Pinhole` frusta at their previous window poses |
 | `/world/runs/slam_rs/landmarks` | `Points3D` in the world frame, coloured by the keyframe that hosts them |
 | `/world/rig_00/cam_MM/pinhole/keypoints` | the estimator's own frontend output, in the frontend rung's palette |
 | `/stats/vio/...` | landmark, observation and keyframe counts, LM iterations, lambda and the error before and after, the six `stage_ms/*`, `track_ms`, and `ate_cm/gt` |

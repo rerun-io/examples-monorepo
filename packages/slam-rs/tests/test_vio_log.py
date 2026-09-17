@@ -17,10 +17,9 @@ from it, because ``tests`` is not on the typechecker's search path and every
 module in this directory therefore stands alone.
 """
 
+import re
 from pathlib import Path
 from typing import NamedTuple
-
-import re
 
 import numpy as np
 import pytest
