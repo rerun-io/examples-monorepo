@@ -42,7 +42,7 @@ pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio   # the
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --rr-config.headless --rr-config.save data/replay-vio.rrd
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --segment <segment-id>       # another catalog segment
 pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --rrd base.rrd --gt-rrd gt.rrd   # a recording of your own
-pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --catalog rerun+http://dgx-spark:9988 --segment <any-segment-id>   # override the default catalog URL
+pixi run -e slam-rs-dev --frozen python tools/apps/replay.py --stage vio --catalog rerun+http://dgx-spark:9988 --segment <any-segment-id>   # use another catalog
 ```
 
 In a shell without `DISPLAY`, pass `--rr-config.headless` or the spawned viewer
@@ -150,7 +150,7 @@ clause allows at most 10% more median tracker time. Baselines record the core
 digest, host, frameset count, and measurement date.
 
 Every tracking tool takes `--profile reference|fast`: `replay.py`,
-`bench_track.py`, `fleet_check.py`, `robocap_fleet.py`, and `robocap_probe.py`. In code,
+`bench_track.py`, `gate.py`, `robocap_fleet.py`, and `robocap_probe.py`. In code,
 `slam_rs.reference.profiled_config_text(path, "fast")` returns the overlaid JSON.
 
 Design notes: [D74](docs/design-notes.md#d74--speed-profile) the profile,
@@ -164,7 +164,7 @@ The library reads one thing: a recording in the dataforge rig schema. One base
 the IMU stream. Ground truth and results are separate layer files that stack onto
 the same entity paths.
 
-The catalog is the dataset source for replay and fleet checks. The gate
+The catalog is the dataset source for replay and gate checks. The gate
 stores segment selectors, sensor models, tiers, hold-outs and measured baselines;
 it stores no copied capture facts or layer fingerprints. Any msd-index / msd-g2 / msd-odyssey segment replays from the catalog.
 
@@ -487,8 +487,8 @@ measurement and "speed not gated on this host".
 cd packages/slam-rs
 pixi run -e slam-rs-dev --frozen pytest -q
 pixi run -e slam-rs-dev --frozen pytest -q -m slow -k "catalog or gate or robocap"
-pixi run -e slam-rs-dev --frozen python tools/apps/fleet_check.py --gpu --tier release
-pixi run -e slam-rs-dev --frozen python tools/apps/fleet_check.py --tier smoke
+pixi run -e slam-rs-dev --frozen python tools/apps/gate.py --gpu --tier release
+pixi run -e slam-rs-dev --frozen python tools/apps/gate.py --tier smoke
 pixi run -e slam-rs-dev --frozen python tools/apps/robocap_probe.py --gpu --rr-config.headless
 ```
 

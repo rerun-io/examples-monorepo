@@ -123,8 +123,8 @@ def measure(
 
 @serde(type_check=coerce, deny_unknown_fields=True)
 @dataclass(slots=True, frozen=True)
-class FleetClipReport:
-    """The twelve public fleet columns, in their original order."""
+class GateClipReport:
+    """The twelve public gate columns, in their original order."""
 
     segment_id: str
     """Catalog segment id."""
@@ -154,7 +154,7 @@ class FleetClipReport:
 
 @serde(type_check=coerce, deny_unknown_fields=True)
 @dataclass(slots=True, frozen=True)
-class FleetReport:
+class GateReport:
     """Machine, run identity and measured clip reports."""
 
     machine: Machine
@@ -167,7 +167,7 @@ class FleetReport:
     """Extension digest."""
     config_sha256: dict[str, str]
     """Resolved configuration digests by dataset."""
-    clips: list[FleetClipReport]
+    clips: list[GateClipReport]
     """Completed clips in run order."""
 
 
@@ -190,7 +190,7 @@ class Config:
     """Segment ids to run."""
     tier: Tier | None = None
     """Select a benchmark tier instead of explicit ids."""
-    output_json: Path = Path("fleet_check.json")
+    output_json: Path = Path("gate.json")
     """Measurement output."""
     gpu: bool = False
     """Use the GPU frontend."""
@@ -222,14 +222,14 @@ def main(config: Config) -> None:
         config_digests[segment.dataset_name] = result.config_sha256
         results.append(result)
         print(result.row(machine), flush=True)
-        report: FleetReport = FleetReport(
+        report: GateReport = GateReport(
             machine=machine,
             lane=lane,
             profile=config.profile,
             core_sha256=core_sha256,
             config_sha256=config_digests,
             clips=[
-                FleetClipReport(
+                GateClipReport(
                     segment_id=row.segment_id,
                     framesets=row.measurement.framesets,
                     tracked=row.measurement.tracked,

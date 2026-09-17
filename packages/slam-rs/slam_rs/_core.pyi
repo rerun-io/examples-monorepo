@@ -19,7 +19,7 @@ gpu_backend: Literal["wgpu"] | None
 
 A core built with the ``gpu-wgpu`` cargo feature carries ``"wgpu"``; nothing a
 caller passes to ``gpu=True`` names the runtime, this does, and it is what a
-fleet row's lane is named from (:func:`slam_rs.apis.fleet_check.this_lane`).
+fleet row's lane is named from (:func:`slam_rs.apis.gate.this_lane`).
 ``None`` is the default build, whose ``gpu=True`` is refused.
 """
 

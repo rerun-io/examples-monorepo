@@ -7,7 +7,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from slam_rs.apis.fleet_check import ClipResult
+from slam_rs.apis.gate import ClipResult
 from slam_rs.config import SlamConfig
 from slam_rs.reference import Baseline, Benchmarks, Measurement, gate_failures
 
@@ -86,7 +86,7 @@ def test_each_nonfinite_measurement_names_finite_clause(value: float) -> None:
 
 @pytest.mark.slow
 def test_catalog_smoke_gate(benchmarks: Benchmarks, settings: SlamConfig) -> None:
-    from slam_rs.apis.fleet_check import ClipResult, measure
+    from slam_rs.apis.gate import ClipResult, measure
 
     for segment in benchmarks.in_tier("smoke"):
         result: ClipResult = measure(settings, segment)

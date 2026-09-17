@@ -795,7 +795,7 @@ not another lane's limits. No C++ trajectories, precision bands, pixel dumps,
 NAS paths or external reference directories participate.
 
 ```bash
-pixi run -e slam-rs-dev --frozen python tools/apps/fleet_check.py
+pixi run -e slam-rs-dev --frozen python tools/apps/gate.py
 pixi run -e slam-rs-dev --frozen pytest -m slow -q -s tests/test_gate.py
 ```
 
