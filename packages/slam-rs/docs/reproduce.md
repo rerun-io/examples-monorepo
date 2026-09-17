@@ -19,8 +19,9 @@ marker file, so pixi skips one that is already there.
 
 ```bash
 pixi run -e slam-rs slam-rs-gate --tier smoke              # two short clips
-pixi run -e slam-rs slam-rs-gate --tier release            # the ten gated clips, CPU lane
-pixi run -e slam-rs slam-rs-gate --tier release --gpu      # the same on the GPU lane
+pixi run -e slam-rs slam-rs-gate --tier release            # three longer clips (MIO07, MIO14, MGO07), CPU lane
+pixi run -e slam-rs slam-rs-gate --tier listed             # the other five gated clips
+pixi run -e slam-rs slam-rs-gate --tier release --gpu      # any tier on the GPU lane
 ```
 
 Every clip must track every frameset, associate enough poses with ground truth,
@@ -29,7 +30,7 @@ baselines by lane, profile and host; the speed clause (10 % over the median
 tracker call) is only gated on the host that recorded the baseline, and
 reported everywhere else. The README's per-recording table is the same
 measurement run over every segment on the catalog rather than the ten gated
-ones.
+ones. A tier is exactly its own clips: `smoke` is two, `release` three, `listed` five.
 
 ## Replaying and scoring one recording
 

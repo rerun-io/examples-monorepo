@@ -33,7 +33,7 @@ Then, when you want more:
 pixi run -e slam-rs slam-rs-gate --tier smoke      # score the two short smoke clips against the checked-in baselines
 pixi run -e slam-rs slam-rs-download-all           # all 64 recordings, 15.5 GB
 pixi run -e slam-rs slam-rs-register               # picks up the new files; idempotent
-pixi run -e slam-rs slam-rs-gate --tier release    # the ten gated clips
+pixi run -e slam-rs slam-rs-gate --tier release    # three longer clips; --tier listed scores the other five
 pixi run -e slam-rs slam-rs-wgpu-build             # the GPU frontend; then --gpu on any tool
 pixi run -e slam-rs python tools/apps/replay.py --stage vio --rrd base.rrd --gt-rrd gt.rrd   # your own recording, no catalog
 ```
