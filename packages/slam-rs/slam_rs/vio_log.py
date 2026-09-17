@@ -123,6 +123,11 @@ def log_alignment(entity: str, alignment: SimilarityTransform) -> None:
     rr.log(entity, rr.Transform3D(translation=alignment.dst_t_src, mat3x3=alignment.dst_R_src))
 
 
+def image_from_camera(camera: CameraCalib) -> Float64[ndarray, "3 3"]:
+    """Build the camera's pinhole intrinsics matrix."""
+    return np.array([[camera.fx, 0.0, camera.cx], [0.0, camera.fy, camera.cy], [0.0, 0.0, 1.0]], dtype=np.float64)
+
+
 def log_rig(cameras: tuple[CameraCalib, ...], entity_prefix: str, pinhole_child: str = "") -> None:
     """Log a rig's static camera geometry, so whatever moves it draws as frusta.
 
@@ -145,13 +150,10 @@ def log_rig(cameras: tuple[CameraCalib, ...], entity_prefix: str, pinhole_child:
             rr.Transform3D(translation=camera.imu_T_cam[:3, 3], mat3x3=camera.imu_T_cam[:3, :3]),
             static=True,
         )
-        image_from_camera: Float64[ndarray, "3 3"] = np.array(
-            [[camera.fx, 0.0, camera.cx], [0.0, camera.fy, camera.cy], [0.0, 0.0, 1.0]], dtype=np.float64
-        )
         rr.log(
             f"{node}{pinhole_child}",
             rr.Pinhole(
-                image_from_camera=image_from_camera,
+                image_from_camera=image_from_camera(camera),
                 resolution=[camera.width, camera.height],
                 camera_xyz=rr.ViewCoordinates.RDF,
                 image_plane_distance=IMAGE_PLANE_M,
@@ -186,8 +188,10 @@ class VioLogger:
     """The ground truth thinned to the frameset cadence: what the drawn strip is taken from."""
     previous_window: dict[int, Float64[ndarray, " 7"]] = field(default_factory=dict)
     """Previous window poses by timestamp, used to draw marginalized frames."""
-    previous_slot_counts: dict[Literal["window", "marginalized"], int] = field(default_factory=dict)
-    """Number of occupied slots in each family on the previous frameset."""
+    camera_intrinsics: Float64[ndarray, "3 3"] = field(init=False)
+    """Camera 0's intrinsics matrix, shared by the window and marginalized frusta."""
+    pinholes: dict[tuple[int, int, int, int], rr.Pinhole] = field(init=False)
+    """Camera 0 frusta by role colour, reused for every slot and frameset."""
     highest_slots: dict[Literal["window", "marginalized"], int] = field(default_factory=dict)
     """Highest initialized slot index in each family; static rig offsets are logged once."""
     framesets: int = 0
@@ -197,6 +201,18 @@ class VioLogger:
         """Log the estimated rig's static geometry and thin the references."""
         log_rig(self.cameras, f"{RUN_ENTITY}/rig")
         self.ground_truth_strip = at_frameset_cadence(self.ground_truth, self.frame_t_ns)
+        camera: CameraCalib = self.cameras[0]
+        self.camera_intrinsics = image_from_camera(camera)
+        self.pinholes = {
+            color: rr.Pinhole(
+                image_from_camera=self.camera_intrinsics,
+                resolution=[camera.width, camera.height],
+                camera_xyz=rr.ViewCoordinates.RDF,
+                image_plane_distance=FRUSTUM_DEPTH_M,
+                color=color,
+            )
+            for color in (KEYFRAME_COLOR, LTKF_COLOR, POSE_COLOR, MARGINALIZED_COLOR)
+        }
 
     def log(self, result: _core.VioResult, snapshot: _core.VioSnapshot, frame: _core.FlowFrame, elapsed_ms: float) -> None:
         """Log one tracked frameset: the keypoints, the estimated and ground-truth paths, the rig, the window, the landmarks and the counters.
@@ -290,9 +306,6 @@ class VioLogger:
     ) -> None:
         """Draw poses as camera 0 frusta and clear every unused slot previously drawn."""
         camera: CameraCalib = self.cameras[0]
-        image_from_camera: Float64[ndarray, "3 3"] = np.array(
-            [[camera.fx, 0.0, camera.cx], [0.0, camera.fy, camera.cy], [0.0, 0.0, 1.0]], dtype=np.float64
-        )
         highest: int = self.highest_slots.get(family, -1)
         for k, (pose, color) in enumerate(zip(poses, colors, strict=True)):
             slot: str = f"{RUN_ENTITY}/{family}/{k:02d}"
@@ -303,20 +316,10 @@ class VioLogger:
                     static=True,
                 )
             rr.log(slot, rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7])))
-            rr.log(
-                f"{slot}/cam_00",
-                rr.Pinhole(
-                    image_from_camera=image_from_camera,
-                    resolution=[camera.width, camera.height],
-                    camera_xyz=rr.ViewCoordinates.RDF,
-                    image_plane_distance=FRUSTUM_DEPTH_M,
-                    color=color,
-                ),
-            )
+            rr.log(f"{slot}/cam_00", self.pinholes[color])
         # Repeat clears for slots still empty, so every frameset states their absence.
-        for k in range(len(poses), max(self.previous_slot_counts.get(family, 0), highest + 1)):
+        for k in range(len(poses), highest + 1):
             rr.log(f"{RUN_ENTITY}/{family}/{k:02d}", rr.Clear(recursive=True))
-        self.previous_slot_counts[family] = len(poses)
         self.highest_slots[family] = max(highest, len(poses) - 1)
 
     def _log_window(self, snapshot: _core.VioSnapshot) -> None:
@@ -332,7 +335,7 @@ class VioLogger:
         leaving: set[int] = set(snapshot.marginalized.tolist())
         marginalized: list[Float64[ndarray, " 7"]] = [pose for t_ns, pose in self.previous_window.items() if t_ns in leaving]
         self._log_camera_slots("marginalized", marginalized, [MARGINALIZED_COLOR] * len(marginalized))
-        self.previous_window = {t_ns: pose.copy() for t_ns, pose in zip(snapshot.window_t_ns.tolist(), poses, strict=True)}
+        self.previous_window = {t_ns: pose for t_ns, pose in zip(snapshot.window_t_ns.tolist(), poses, strict=True)}
 
     def _log_landmarks(self, snapshot: _core.VioSnapshot) -> None:
         """Draw the window's landmarks, coloured by the keyframe that hosts them."""
