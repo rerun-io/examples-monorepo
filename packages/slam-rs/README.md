@@ -18,11 +18,11 @@ cd examples-monorepo/packages/slam-rs
 pixi run -e slam-rs slam-rs-demo
 ```
 
-One command: it builds the core (about two minutes the first time), fetches two
-short recordings of the
+One command: it builds the core (about two minutes the first time), fetches
+three short recordings of the
 [Monado SLAM Dataset](https://huggingface.co/datasets/pablovela5620/msd-rrd)
-(one two-camera, one four-camera, 7 MB), starts a local Rerun catalog,
-registers them, and opens the Index clip in the viewer with the estimate drawn
+(about 50 MB), starts a local Rerun catalog, registers them, and opens the
+four-camera G2 clip from the gif above in the viewer, the estimate drawn
 against ground truth. The terminal prints the ATE when the clip ends. You need
 [pixi](https://pixi.sh), a screen, and Linux. The catalog stays running for
 the next run.
@@ -30,7 +30,7 @@ the next run.
 Then, when you want more:
 
 ```bash
-pixi run -e slam-rs slam-rs-gate --tier smoke      # score the two clips against the checked-in baselines
+pixi run -e slam-rs slam-rs-gate --tier smoke      # score the two short smoke clips against the checked-in baselines
 pixi run -e slam-rs slam-rs-download-all           # all 64 recordings, 15.5 GB
 pixi run -e slam-rs slam-rs-register               # picks up the new files; idempotent
 pixi run -e slam-rs slam-rs-gate --tier release    # the ten gated clips
