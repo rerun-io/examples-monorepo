@@ -48,16 +48,17 @@ def test_the_sample_holds_the_smoke_clips_and_the_demo_clip(benchmarks: Benchmar
     assert sample.count("--include") == len(smoke) + 1
 
 
-def test_a_download_is_skipped_only_when_its_own_files_are_there() -> None:
-    """The guard is the recordings themselves, not a marker: adding a clip to a tier re-downloads for everyone."""
+def test_a_download_is_skipped_only_when_every_layer_of_its_recordings_is_there() -> None:
+    """The guard is the recordings themselves across all three layers, not a marker and not the base layer alone."""
     with (REPO / "pixi.toml").open("rb") as handle:
         tasks: dict[str, dict[str, object]] = tomllib.load(handle)["feature"]["slam-rs"]["tasks"]
-    sample: str = str(tasks["slam-rs-download-sample"]["cmd"])
-    assert ".sample" not in sample and ".tier" not in sample
-    assert f"data/msd-rrd/base/{DEMO_CLIP}.rrd" in sample, "the demo clip's own file gates the sample download"
-    assert "outputs" not in tasks["slam-rs-download-sample"]
-    everything: str = str(tasks["slam-rs-download-all"]["cmd"])
-    assert ".all" not in everything and "64" in everything, "all means the 64 base recordings are present"
+    for name, count in (("slam-rs-download-sample", 9), ("slam-rs-download-all", 192)):
+        cmd: str = str(tasks[name]["cmd"])
+        assert ".sample" not in cmd and ".tier" not in cmd and ".all" not in cmd
+        assert "outputs" not in tasks[name]
+        assert all(layer in cmd for layer in ("base", "gt", "sensor_metadata")), name
+        assert str(count) in cmd, f"{name} checks for all {count} files"
+    assert "MGO07_mapping_easy" in str(tasks["slam-rs-download-sample"]["cmd"])
 
 
 def test_registration_is_dataforges_job() -> None:
@@ -94,8 +95,12 @@ def test_one_command_runs_the_whole_demo_in_the_viewer() -> None:
     assert cmd.startswith("python tools/apps/replay.py --stage vio") and "headless" not in cmd, "only the replay, on screen"
     assert f"--segment {DEMO_CLIP}" in cmd, "the four-camera clip from the gif, not the two-camera smoke clip"
     assert demo["cwd"] == "packages/slam-rs"
-    catalog_up: dict[str, object] = tasks["slam-rs-catalog-up"]
-    up: str = str(catalog_up["cmd"])
-    assert "rerun server" in up and "51235" in up and "server.pid" in up, "starts the local catalog only when nothing is listening"
-    assert "2>/dev/null || true" not in up, "a failed file-limit raise is reported, not hidden"
+    assert str(tasks["slam-rs-catalog-up"]["cmd"]) == "python tools/apps/catalog_up.py", "the lifecycle is Python, not a shell string"
     assert list(tasks["slam-rs-register"]["depends-on"]) == ["slam-rs-catalog-up"]  # type: ignore[arg-type]
+
+
+def test_the_gate_never_rebuilds_the_core_it_is_handed() -> None:
+    """`slam-rs-gate --gpu` must not depend on the CPU build: pixi would rebuild the CPU core over a GPU one."""
+    with (REPO / "pixi.toml").open("rb") as handle:
+        gate: dict[str, object] = tomllib.load(handle)["feature"]["slam-rs"]["tasks"]["slam-rs-gate"]
+    assert "depends-on" not in gate
