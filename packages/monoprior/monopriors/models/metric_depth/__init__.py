@@ -1,26 +1,32 @@
-from collections.abc import Callable
-from typing import Literal, get_args
+from typing import TYPE_CHECKING
 
-from .base_metric_depth import BaseMetricPredictor, MetricDepthPrediction
-from .moge_v2 import MoGeV2MetricPredictor
-from .unidepth import UniDepthMetricPredictor
+import tyro
 
-# Define predictor names as a list of strings
-METRIC_PREDICTORS = Literal["UniDepthMetricPredictor", "MoGeV2MetricPredictor"]
+from monopriors.models.metric_depth.base_metric_depth import BaseMetricPredictor, BaseMetricPredictorConfig, MetricDepthPrediction
+from monopriors.models.metric_depth.moge_v2 import MoGeV2MetricConfig, MoGeV2MetricPredictor
+from monopriors.models.metric_depth.unidepth import UniDepthMetricConfig, UniDepthMetricPredictor
 
-# Use the list to generate the __all__ list
-__all__: list[str] = list(get_args(METRIC_PREDICTORS)) + [
+metric_predictor_defaults: dict[str, BaseMetricPredictorConfig] = {
+    "unidepth-metric": UniDepthMetricConfig(),
+    "moge-v2-metric": MoGeV2MetricConfig(),
+}
+
+if TYPE_CHECKING:
+    MetricPredictorUnion = BaseMetricPredictorConfig
+else:
+    MetricPredictorUnion = tyro.extras.subcommand_type_from_defaults(metric_predictor_defaults, prefix_names=False)
+
+AnnotatedMetricPredictorUnion = tyro.conf.OmitSubcommandPrefixes[MetricPredictorUnion]
+
+__all__: list[str] = [
+    "AnnotatedMetricPredictorUnion",
+    "BaseMetricPredictor",
+    "BaseMetricPredictorConfig",
     "MetricDepthPrediction",
+    "MetricPredictorUnion",
+    "MoGeV2MetricConfig",
+    "MoGeV2MetricPredictor",
+    "UniDepthMetricConfig",
+    "UniDepthMetricPredictor",
+    "metric_predictor_defaults",
 ]
-
-
-def get_metric_predictor(
-    predictor_type: METRIC_PREDICTORS,
-) -> Callable[..., BaseMetricPredictor]:
-    match predictor_type:
-        case "UniDepthMetricPredictor":
-            return UniDepthMetricPredictor
-        case "MoGeV2MetricPredictor":
-            return MoGeV2MetricPredictor
-        case _:
-            raise ValueError(f"Unknown predictor type: {predictor_type}")

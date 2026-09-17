@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from jaxtyping import Float, UInt8
 
-from monopriors.models.metric_depth import BaseMetricPredictor, MetricDepthPrediction, get_metric_predictor
+from monopriors.models.metric_depth import BaseMetricPredictor, MetricDepthPrediction, UniDepthMetricConfig
 from monopriors.models.moge_v2.adapters import geometry_to_metric_prediction, normal_to_surface_prediction, rgb_to_cuda_batch
 from monopriors.models.moge_v2.export import Encoder
 from monopriors.models.moge_v2.predictor import MoGeV2GeometryOutput, MoGeV2TorchPredictor
@@ -45,7 +45,7 @@ class DsineAndUnidepth(MonoPriorModel):
     def __init__(self) -> None:
         super().__init__()
         # Keep this composite aligned with its name by using UniDepth for metric depth.
-        self.depth_model: BaseMetricPredictor = get_metric_predictor("UniDepthMetricPredictor")(device=self.device)
+        self.depth_model: BaseMetricPredictor = UniDepthMetricConfig().setup(device=self.device)
         self.surface_model: BaseNormalPredictor = get_normal_predictor("DSineNormalPredictor")(device=self.device)
 
     def __call__(

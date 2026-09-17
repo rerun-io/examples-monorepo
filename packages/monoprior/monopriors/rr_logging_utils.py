@@ -7,8 +7,8 @@ from einops import rearrange
 from jaxtyping import Bool, Float32, Float64, UInt8
 
 from monopriors.depth_utils import clip_disparity, depth_edges_mask, depth_to_disparity, depth_to_points
-from monopriors.models.metric_depth import METRIC_PREDICTORS, MetricDepthPrediction
-from monopriors.models.relative_depth import RELATIVE_PREDICTORS, RelativeDepthPrediction
+from monopriors.models.metric_depth import MetricDepthPrediction
+from monopriors.models.relative_depth import RelativeDepthPrediction
 from monopriors.models.stereo_depth import StereoDepthPrediction
 from monopriors.models.surface_normal.base_normal_model import SurfaceNormalPrediction
 
@@ -127,34 +127,34 @@ def log_relative_pred(
 
 
 def create_compare_depth_blueprint(
-    model_names: list[RELATIVE_PREDICTORS | METRIC_PREDICTORS],
+    display_labels: list[str],
 ) -> rrb.Blueprint:
-    # model_names: list[str] = [model.__class__.__name__ for model in models]
+    """Build a comparison layout from UI labels, not predictor selectors."""
     contents = [
         # disparity has no pinhole, so the 3D view can't back-project it; keep it out of the 3D view to avoid the warning badge
-        rrb.Spatial3DView(origin=f"{model_names[0]}", contents=["$origin/**", "- $origin/camera/disparity"]),
+        rrb.Spatial3DView(origin=f"{display_labels[0]}", contents=["$origin/**", "- $origin/camera/disparity"]),
         rrb.Vertical(
             rrb.Spatial2DView(
-                origin=f"{model_names[0]}/camera/pinhole/image",
+                origin=f"{display_labels[0]}/camera/pinhole/image",
             ),
             rrb.Spatial2DView(
-                origin=f"{model_names[0]}/camera/pinhole/depth",
+                origin=f"{display_labels[0]}/camera/pinhole/depth",
             ),
             rrb.Spatial2DView(
-                origin=f"{model_names[0]}/camera/disparity",
+                origin=f"{display_labels[0]}/camera/disparity",
             ),
         ),
         # disparity has no pinhole, so the 3D view can't back-project it; keep it out of the 3D view to avoid the warning badge
-        rrb.Spatial3DView(origin=f"{model_names[1]}", contents=["$origin/**", "- $origin/camera/disparity"]),
+        rrb.Spatial3DView(origin=f"{display_labels[1]}", contents=["$origin/**", "- $origin/camera/disparity"]),
         rrb.Vertical(
             rrb.Spatial2DView(
-                origin=f"{model_names[1]}/camera/pinhole/image",
+                origin=f"{display_labels[1]}/camera/pinhole/image",
             ),
             rrb.Spatial2DView(
-                origin=f"{model_names[1]}/camera/pinhole/depth",
+                origin=f"{display_labels[1]}/camera/pinhole/depth",
             ),
             rrb.Spatial2DView(
-                origin=f"{model_names[1]}/camera/disparity",
+                origin=f"{display_labels[1]}/camera/disparity",
             ),
         ),
     ]
