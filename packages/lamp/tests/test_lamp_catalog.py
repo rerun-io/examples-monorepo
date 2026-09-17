@@ -2,12 +2,12 @@
 
 from typing import Any
 
-import cv2
 import numpy as np
 import pytest
 import rerun as rr
+import rerun.blueprint as rrb
 import torch
-from jaxtyping import Float32, Int32, UInt8
+from jaxtyping import Float32, Int32
 from numpy import ndarray
 from posekit.predictions import BoxDetections, Keypoints2d
 from posekit.rerun_logging import person_color
@@ -19,7 +19,9 @@ from lamptrack.apis.lamp_catalog import (
     _log_camera_observations,
     _log_person,
     best_detection_window,
+    build_blueprint,
     build_time_grid,
+    follow_eye_controls,
     interpolate_pose,
     log_static_context,
 )
@@ -144,6 +146,7 @@ def test_log_person_draws_annotated_joints_a_trail_and_a_translucent_mesh(monkey
     joints = _batches_by_component(logged[0][1])
     assert joints["Points3D:keypoint_ids"].as_arrow_array().to_pylist() == list(range(24))
     assert joints["Points3D:class_ids"].as_arrow_array().to_pylist() == [0]
+    assert joints["Points3D:show_labels"].as_arrow_array().to_pylist() == [False], "the joint names would bury the 3D scene"
 
     trail = _batches_by_component(logged[4][1])
     assert len(trail["LineStrips3D:strips"].as_arrow_array().to_pylist()[0]) == 2, "the pelvis trail grows one point per frameset"
@@ -155,10 +158,9 @@ def test_log_person_draws_annotated_joints_a_trail_and_a_translucent_mesh(monkey
     assert mesh["Mesh3D:albedo_factor"].as_arrow_array().to_pylist() == [(red << 24) | (green << 16) | (blue << 8) | 128]
 
 
-def test_log_camera_observations_halves_the_preview_and_its_overlays(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Detection runs at full resolution while the logged preview is half size."""
+def test_log_camera_observations_keeps_overlays_in_full_resolution_pixels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The overlays sit on the relayed video frame, so they keep the detector's own pixel coordinates."""
     logged = _spy_on_rerun_log(monkeypatch)
-    image: UInt8[ndarray, "1080 1920 3"] = np.zeros((1080, 1920, 3), dtype=np.uint8)
     boxes = BoxDetections(
         xyxy=torch.asarray([[10.0, 20.0, 110.0, 220.0]], dtype=torch.float32),
         scores=torch.asarray([0.9], dtype=torch.float32),
@@ -172,28 +174,60 @@ def test_log_camera_observations_halves_the_preview_and_its_overlays(monkeypatch
         skeleton=COCO_17,
     )
 
-    _log_camera_observations("cam_00", image, boxes, keypoints, keypoint_conf_min=0.5)
+    _log_camera_observations("cam_00", boxes, keypoints, keypoint_conf_min=0.5)
 
-    root = "world/rig_00/cam_00/pinhole/preview"
+    root = "world/rig_00/cam_00/pinhole/detections"
     assert [entity_path for entity_path, _, _ in logged] == [
-        f"{root}/image",
-        f"{root}/detections",
-        f"{root}/detections/person_7/bbox",
-        f"{root}/detections/person_7/keypoints",
-    ]
+        root,
+        f"{root}/person_7/bbox",
+        f"{root}/person_7/keypoints",
+    ], "no re-encoded image: the frame comes from the relayed VideoStream on the same pinhole"
 
-    blob = _batches_by_component(logged[0][1])["EncodedImage:blob"].as_arrow_array().to_pylist()[0]
-    assert cv2.imdecode(np.asarray(blob, dtype=np.uint8), cv2.IMREAD_COLOR).shape == (540, 960, 3)
+    assert isinstance(logged[0][1], rr.Clear)
+    assert logged[0][1].is_recursive.as_arrow_array().to_pylist() == [True]
 
-    assert isinstance(logged[1][1], rr.Clear)
-    assert logged[1][1].is_recursive.as_arrow_array().to_pylist() == [True]
+    box = _batches_by_component(logged[1][1])
+    assert box["Boxes2D:centers"].as_arrow_array().to_pylist() == [[60.0, 120.0]]
+    assert box["Boxes2D:half_sizes"].as_arrow_array().to_pylist() == [[50.0, 100.0]]
 
-    box = _batches_by_component(logged[2][1])
-    assert box["Boxes2D:centers"].as_arrow_array().to_pylist() == [[30.0, 60.0]]
-    assert box["Boxes2D:half_sizes"].as_arrow_array().to_pylist() == [[25.0, 50.0]]
-
-    points = _batches_by_component(logged[3][1])
+    points = _batches_by_component(logged[2][1])
     positions: Float32[ndarray, "17 2"] = np.asarray(points["Points2D:positions"].as_arrow_array().to_pylist(), dtype=np.float32)
-    np.testing.assert_allclose(positions, np.arange(34, dtype=np.float32).reshape(17, 2))
+    np.testing.assert_allclose(positions, np.arange(34, dtype=np.float32).reshape(17, 2) * 2.0)
     assert points["Points2D:keypoint_ids"].as_arrow_array().to_pylist() == list(range(17))
     assert points["Points2D:class_ids"].as_arrow_array().to_pylist() == [0]
+
+
+
+def _views(container: rrb.Container | rrb.View) -> list[rrb.View]:
+    """Collect every view of a blueprint container in depth-first order."""
+    if not isinstance(container, rrb.Container):
+        return [container]
+    return [view for child in container.contents for view in _views(child)]
+
+
+def test_blueprint_follows_the_rig_and_keeps_overlays_inside_the_camera_views() -> None:
+    """The 3D eye rides the rig frame and every 2D view is rooted at its pinhole."""
+    cams = ("cam_00", "cam_01", "cam_04", "cam_05")
+
+    views = _views(build_blueprint(cams).root_container)
+
+    spatial_3d = [view for view in views if isinstance(view, rrb.Spatial3DView)]
+    assert len(spatial_3d) == 1
+    assert spatial_3d[0].origin == "world/rig_00", "the eye is expressed in the rig frame, so it rides the rig"
+    assert spatial_3d[0].contents == ["/**"], "world-frame people and in-frustum video frames both stay visible"
+    assert "EyeControls3D" in spatial_3d[0].properties
+
+    camera_views = [view for view in views if isinstance(view, rrb.Spatial2DView)]
+    assert [view.origin for view in camera_views] == [f"world/rig_00/{cam}/pinhole" for cam in cams]
+    assert [view.name for view in camera_views] == list(cams)
+    assert all(view.contents == "$origin/**" for view in camera_views), "the relayed video and the detections share the pinhole space"
+
+
+def test_follow_eye_sits_behind_and_above_the_rig_origin() -> None:
+    """cam_00 looks along rig ``+Y`` and the wearer's up is rig ``-Z``."""
+    eye = _batches_by_component(follow_eye_controls())
+
+    np.testing.assert_allclose(eye["EyeControls3D:position"].as_arrow_array().to_pylist(), [[0.0, -3.5, -1.8]], atol=1e-6)
+    np.testing.assert_allclose(eye["EyeControls3D:look_target"].as_arrow_array().to_pylist(), [[0.0, 0.0, 0.0]], atol=1e-6)
+    np.testing.assert_allclose(eye["EyeControls3D:eye_up"].as_arrow_array().to_pylist(), [[0.0, 0.0, -1.0]], atol=1e-6)
+    assert eye["EyeControls3D:spin_speed"].as_arrow_array().to_pylist() == [0.0]
