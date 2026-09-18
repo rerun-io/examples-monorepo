@@ -14,7 +14,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from easydict import EasyDict
 
 from monopriors.third_party.depth_anything_v2.dpt import DPTHead
 
@@ -35,7 +34,9 @@ class DPTHeadTemporal(DPTHead):
         super().__init__(in_channels, features, use_bn, out_channels, use_clstoken)
 
         assert num_frames > 0
-        motion_module_kwargs = EasyDict(
+        # Local patch: upstream held these in an easydict.EasyDict; they are only **-unpacked below,
+        # so a plain dict is identical and the monorepo carries no easydict dependency.
+        motion_module_kwargs = dict(
             num_attention_heads=8,
             num_transformer_block=1,
             num_attention_blocks=2,
