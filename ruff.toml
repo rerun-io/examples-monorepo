@@ -1,0 +1,25 @@
+# Fallback only: the closest package [tool.ruff] remains authoritative.
+line-length = 150
+extend-exclude = [
+    ".pixi",
+    "**/data",
+    "**/output",
+    "**/outputs",
+    "**/build",
+    "**/dist",
+    "**/node_modules",
+    "**/target",
+    # Pixi-build recipes and the vendored SAM 2 dependency.
+    "packages/asmk",
+    "packages/dpretrieval",
+    "packages/mast3r",
+    "packages/sam2-streaming",
+    # Vendor trees, including src-layout packages.
+    "packages/**/third_party",
+    "packages/*/thirdparty",
+]
+
+[lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+# SIM901 in AGENTS.md is not a Ruff rule (Ruff 0.15.18 rejects it).
+ignore = ["E501", "F722", "F821", "UP037", "UP040"]

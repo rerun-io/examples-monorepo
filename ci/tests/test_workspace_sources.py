@@ -13,7 +13,7 @@ from typing import Any
 
 import tomllib
 
-REPO_ROOT: Path = Path(__file__).resolve().parents[3]
+REPO_ROOT: Path = Path(__file__).resolve().parents[2]
 PACKAGES_DIR: Path = REPO_ROOT / "packages"
 
 
