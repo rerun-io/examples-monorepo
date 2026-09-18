@@ -1,9 +1,10 @@
 """Tests at the streaming parser and session boundary."""
 
 from collections.abc import Iterator
+from pathlib import Path
 
 from agent_traces.claude import ClaudeSession, SourceRecord, iter_records, parse_session
-from agent_traces.claude_records import Record, ResultContent, TextBlock, ToolResultBlock
+from agent_traces.claude_records import Block, Message, Record, ResultContent, TextBlock, ToolResultBlock
 from tests.conftest import SessionBuilder
 
 
@@ -60,7 +61,6 @@ def test_bad_lines_report_source_and_line_without_reading_ahead(session_builder:
 
 def test_inlines_only_outputs_inside_session_tool_results(session_builder: SessionBuilder) -> None:
     """Both CLI output references and persisted paths resolve within the session."""
-    from pathlib import Path
 
     results: Path = session_builder.path.with_suffix("") / "tool-results"
     results.mkdir(parents=True)
@@ -102,7 +102,6 @@ def test_inlines_only_outputs_inside_session_tool_results(session_builder: Sessi
 
 def test_inlines_list_result_text_without_removing_images(session_builder: SessionBuilder) -> None:
     """Persisted text replaces previews while image content stays attached."""
-    from pathlib import Path
 
     results: Path = session_builder.path.with_suffix("") / "tool-results"
     results.mkdir(parents=True)
@@ -236,3 +235,30 @@ def test_timestamp_grammar_and_integer_precision(session_builder: SessionBuilder
     session_builder.add("user", timestamp=rejected[0], message={"content": "bad"})
     with pytest.raises(ValueError, match=r"session-123.jsonl:1"):
         parse_session(session_builder.path)
+def test_structured_attachment_content_is_counted_not_rejected(session_builder: SessionBuilder) -> None:
+    """Reminder and file attachments carry list or object content; they must parse and be counted as skipped."""
+    session_builder.add("attachment", attachment={"type": "task_reminder", "content": [{"id": "1", "status": "open"}]})
+    session_builder.add("attachment", attachment={"type": "file", "content": {"filePath": "/x", "content": "y"}})
+    session_builder.add("attachment", attachment={"type": "hook_success", "command": "echo", "content": "hook said hi"})
+    session: ClaudeSession = parse_session(session_builder.path)
+    assert session.skipped == {"task_reminder": 1, "file": 1}
+    assert [timed.record.attachment.type for timed in session.main if timed.record.attachment] == ["hook_success"]
+
+
+def test_inlines_offloaded_output_with_invalid_utf8_bytes(session_builder: SessionBuilder) -> None:
+    """Tool stdout saved by the CLI can contain bytes that are not UTF-8; they are replaced, not fatal."""
+    session_dir: Path = session_builder.path.with_suffix("")
+    (session_dir / "tool-results").mkdir(parents=True)
+    (session_dir / "tool-results" / "out.txt").write_bytes(b"ok \xeb bad")
+    session_builder.add("assistant", message={"id": "m1", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]})
+    session_builder.add(
+        "user",
+        message={"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "Output saved to out.txt"}]},
+        toolUseResult={"persistedOutputPath": str(session_dir / "tool-results" / "out.txt")},
+    )
+    session: ClaudeSession = parse_session(session_builder.path)
+    assert session.n_inlined_outputs == 1
+    message: Message | None = session.main[-1].record.message
+    assert message is not None
+    block: Block = message.content[0]
+    assert isinstance(block, ToolResultBlock) and block.content == "ok \ufffd bad"
