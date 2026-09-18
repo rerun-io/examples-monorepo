@@ -32,3 +32,10 @@ exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modu
 sort_by_size = true
 min_confidence = 60
 ignore_names = ["pix_fmt", "time_base", "max_b_frames", "gop_size", "options", "enabled", "encoder_name"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e pyvrs-viewer-dev tests-integration)",
+    "golden: reference comparison against stored ground truth (run: pixi run -e pyvrs-viewer-dev tests-golden)",
+]
+addopts = "-m 'not integration and not golden'"

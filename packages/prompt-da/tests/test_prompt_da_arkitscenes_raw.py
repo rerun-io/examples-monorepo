@@ -12,6 +12,8 @@ import pytest
 from numpy.testing import assert_array_equal
 
 pytest.importorskip("pyarrow", reason="ARKitScenes catalog deps live in the prompt-da-stream envs")
+pytest.importorskip("rerun.catalog", reason="ARKitScenes catalog deps live in the prompt-da-stream envs")
+pytest.importorskip("imagecodecs", reason="ARKitScenes ingest deps live in the prompt-da-stream envs")
 pytest.importorskip("torchcodec", reason="raw video decode deps live in the prompt-da-stream envs")
 pytest.importorskip("arkitscenes_download", reason="ARKitScenes ingest deps live in the prompt-da-stream envs")
 

@@ -241,8 +241,15 @@ PSEUDO_DENSE_ROWS: str = """<tr><td valign="top"><img src="/isginf/icons/text.gi
 SPARSE_ROWS: str = """<tr><td valign="top"><img src="/isginf/icons/unknown.gif" alt="[   ]"></td><td><a href="R_11_5cp.json">R_11_5cp.json</a></td><td align="right">2025-09-05 01:08  </td><td align="right">1.8M</td><td>&nbsp;</td></tr>
 """
 
-CALIBRATION_BODY: bytes = (REFERENCE_DIR / "R_01_easy.calibration.json").read_bytes()
-"""R_01_easy's published calibration, verbatim: the gt layer reads ``cam0.T_b_s`` out of it."""
+
+def calibration_body() -> bytes:
+    """Read R_01_easy's published calibration when a test needs the archive."""
+    path: Path = REFERENCE_DIR / "R_01_easy.calibration.json"
+    if not path.is_file():
+        pytest.skip(f"published Aria calibration is absent: {path}")
+    return path.read_bytes()
+
+
 VRS_BODY: bytes = bytes(range(256)) * 64
 """16 384 bytes standing in for a VRS, long enough that a half-served body really resumes."""
 
@@ -262,9 +269,9 @@ def archive_bodies() -> dict[str, bytes]:
         "/lamaria/aria_calibrations/test/": apache_page("aria_calibrations/test", CALIBRATION_TEST_ROWS).encode(),
         "/lamaria/ground_truth/pseudo_dense/": apache_page("ground_truth/pseudo_dense", PSEUDO_DENSE_ROWS).encode(),
         "/lamaria/ground_truth/sparse/": apache_page("ground_truth/sparse", SPARSE_ROWS).encode(),
-        "/lamaria/aria_calibrations/training/R_01_easy.json": CALIBRATION_BODY,
-        "/lamaria/aria_calibrations/training/R_11_5cp.json": CALIBRATION_BODY,
-        "/lamaria/aria_calibrations/test/sequence_1_1.json": CALIBRATION_BODY,
+        "/lamaria/aria_calibrations/training/R_01_easy.json": calibration_body(),
+        "/lamaria/aria_calibrations/training/R_11_5cp.json": calibration_body(),
+        "/lamaria/aria_calibrations/test/sequence_1_1.json": calibration_body(),
         "/lamaria/ground_truth/pseudo_dense/R_01_easy.txt": pseudo_gt_body(),
         "/lamaria/ground_truth/pseudo_dense/R_11_5cp.txt": pseudo_gt_body(),
         "/lamaria/ground_truth/sparse/R_11_5cp.json": control_points_body(),
@@ -285,6 +292,7 @@ def archive(bodies: dict[str, bytes] | None = None, *, stall_once: str | None = 
 # ── download ──────────────────────────────────────────────────────────────
 
 
+@pytest.mark.integration
 def test_download_resolves_splits_and_ground_truth_from_the_index_pages(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     root: Path = tmp_path / "raw"
     with archive() as (base_url, _):
@@ -311,12 +319,13 @@ def test_download_resolves_splits_and_ground_truth_from_the_index_pages(tmp_path
     assert "13.7 GB" in output
 
 
+@pytest.mark.integration
 def test_download_lands_the_small_files_in_the_official_layout(tmp_path: Path) -> None:
     root: Path = tmp_path / "raw"
     with archive() as (base_url, _):
         LamariaDataset(LamariaConfig(root=root, base_url=base_url, sequences=("R_01_easy", "R_11_5cp", "sequence_1_1"))).download()
 
-    assert (root / "training" / "R_01_easy" / "aria_calibrations" / "R_01_easy.json").read_bytes() == CALIBRATION_BODY
+    assert (root / "training" / "R_01_easy" / "aria_calibrations" / "R_01_easy.json").read_bytes() == calibration_body()
     assert (root / "training" / "R_01_easy" / "ground_truth" / "pGT" / "R_01_easy.txt").read_bytes() == pseudo_gt_body()
     assert (root / "training" / "R_11_5cp" / "ground_truth" / "control_points" / "R_11_5cp.json").read_bytes() == control_points_body()
     # R_01_easy was never surveyed, and the test split has no ground truth.
@@ -327,6 +336,7 @@ def test_download_lands_the_small_files_in_the_official_layout(tmp_path: Path) -
     assert not list(root.rglob("*.vrs"))
 
 
+@pytest.mark.integration
 def test_download_then_discover_yields_every_downloaded_sequence(tmp_path: Path) -> None:
     root: Path = tmp_path / "raw"
     config: LamariaConfig = LamariaConfig(root=root, sequences=("R_01_easy", "R_11_5cp", "sequence_1_1"))
@@ -339,11 +349,13 @@ def test_download_then_discover_yields_every_downloaded_sequence(tmp_path: Path)
     assert [source.split for _, source in discovered] == ["training", "training", "test"]
 
 
+@pytest.mark.integration
 def test_a_sequence_no_raw_index_lists_is_named_in_the_error(tmp_path: Path) -> None:
     with archive() as (base_url, _), pytest.raises(ValueError, match="R_99_nonesuch"):
         LamariaDataset(LamariaConfig(root=tmp_path / "raw", base_url=base_url, sequences=("R_01_easy", "R_99_nonesuch"))).download()
 
 
+@pytest.mark.integration
 def test_a_sequence_with_no_published_calibration_is_named_in_the_error(tmp_path: Path) -> None:
     """Every LaMAria sequence ships one, so a missing entry means the archive changed."""
     bodies: dict[str, bytes] = archive_bodies()
@@ -355,6 +367,7 @@ def test_a_sequence_with_no_published_calibration_is_named_in_the_error(tmp_path
 # ── the follow frame and the blueprints ───────────────────────────────────
 
 
+@pytest.mark.golden
 def test_the_declared_follow_frame_is_the_calibration_own_forward_and_up() -> None:
     """The eye's axes are typed in by hand, so the calibration has to agree with them.
 
@@ -769,6 +782,7 @@ def converted_surveyed(tmp_path_factory: pytest.TempPathFactory, nvenc_ffmpeg: P
     return convert_once(tmp_path_factory.mktemp("surveyed"), "R_11_5cp")
 
 
+@pytest.mark.integration
 def test_convert_writes_three_camera_streams_and_two_imus(converted_easy: ConvertedSequence) -> None:
     assert converted_easy.base.name == "lamaria__R_01_easy.rrd"
     store: rr.experimental.ChunkStore = read_back(converted_easy.base)
@@ -788,6 +802,7 @@ def test_convert_writes_three_camera_streams_and_two_imus(converted_easy: Conver
     assert converted_easy.identity.recording_id == "lamaria__R_01_easy"
 
 
+@pytest.mark.integration
 def test_video_time_is_the_raw_device_clock(converted_easy: ConvertedSequence) -> None:
     """No shift anywhere: a pGT row's own timestamp must land on its frame."""
     samples: pa.Table = column_rows(read_back(converted_easy.base), f"{schema.video_path(0, 0)}:VideoStream:sample")
@@ -796,6 +811,7 @@ def test_video_time_is_the_raw_device_clock(converted_easy: ConvertedSequence) -
     assert times_ns[-1] == DEVICE_T0_NS + (SLAM_FRAMES - 1) * SLAM_PERIOD_NS
 
 
+@pytest.mark.golden
 def test_the_logged_cam_00_node_carries_the_published_rig_T_cam(converted_easy: ConvertedSequence) -> None:
     """``log_pinhole`` stores the child-from-parent step, so inverting it gives ``T_b_s`` back."""
     node: str = schema.cam_path(0, 0)
@@ -813,6 +829,7 @@ def test_the_logged_cam_00_node_carries_the_published_rig_T_cam(converted_easy: 
     assert row[f"{node}:kind"][0] == "grayscale"
 
 
+@pytest.mark.integration
 def test_the_rgb_camera_says_so_and_the_slam_pair_does_not(converted_easy: ConvertedSequence) -> None:
     store: rr.experimental.ChunkStore = read_back(converted_easy.base)
     kinds: list[object] = []
@@ -823,6 +840,7 @@ def test_the_rgb_camera_says_so_and_the_slam_pair_does_not(converted_easy: Conve
     assert kinds == ["grayscale", "grayscale", "rgb"]
 
 
+@pytest.mark.integration
 def test_imu_01_carries_its_real_pose_while_imu_00_is_the_rig(converted_easy: ConvertedSequence) -> None:
     """imu-right *is* the rig frame; imu-left sits 13 cm away and rotated."""
     store: rr.experimental.ChunkStore = read_back(converted_easy.base)
@@ -835,6 +853,7 @@ def test_imu_01_carries_its_real_pose_while_imu_00_is_the_rig(converted_easy: Co
     np.testing.assert_allclose(poses[1], IMU_LEFT_TRANSLATION_M, atol=1e-6)
 
 
+@pytest.mark.integration
 def test_the_base_layer_owns_no_world_frame(converted_easy: ConvertedSequence) -> None:
     """The gt layer establishes the world, so it owns the root axes and the rig transform."""
     store: rr.experimental.ChunkStore = read_back(converted_easy.base)
@@ -844,6 +863,7 @@ def test_the_base_layer_owns_no_world_frame(converted_easy: ConvertedSequence) -
     assert not [name for name in rig_columns if "Transform3D" in name]
 
 
+@pytest.mark.integration
 def test_the_capture_properties_describe_the_sequence(converted_easy: ConvertedSequence) -> None:
     vrs_bytes: int = len(archive_bodies()["/lamaria/raw_data/training/R_01_easy.vrs"])
     capture: dict[str, object] = recording_properties(read_back(converted_easy.base), "capture")
@@ -863,6 +883,7 @@ def test_the_capture_properties_describe_the_sequence(converted_easy: ConvertedS
     assert duration_s == pytest.approx((DEVICE_T0_NS + (SLAM_FRAMES - 1) * SLAM_PERIOD_NS - IMU_T0_NS) / 1e9, abs=1e-9)
 
 
+@pytest.mark.integration
 def test_convert_deletes_the_vrs_and_the_mp4s_but_keeps_the_small_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
 ) -> None:
@@ -874,6 +895,7 @@ def test_convert_deletes_the_vrs_and_the_mp4s_but_keeps_the_small_files(
         assert (fake.root / "training" / "R_01_easy" / "ground_truth" / "pGT" / "R_01_easy.txt").is_file()
 
 
+@pytest.mark.integration
 def test_keep_raw_leaves_the_vrs_and_the_encoded_mp4s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     with converting(tmp_path, monkeypatch, keep_raw=True) as fake:
         convert_one(fake)
@@ -881,6 +903,7 @@ def test_keep_raw_leaves_the_vrs_and_the_encoded_mp4s(tmp_path: Path, monkeypatc
         assert sorted(path.name for path in fake.root.rglob("*.mp4")) == ["cam_00.mp4", "cam_01.mp4", "cam_02.mp4"]
 
 
+@pytest.mark.integration
 def test_a_sequence_with_both_layers_already_written_is_skipped_without_fetching(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     with converting(tmp_path, monkeypatch) as fake:
         dataset: LamariaDataset = LamariaDataset(fake.config)
@@ -896,6 +919,7 @@ def test_a_sequence_with_both_layers_already_written_is_skipped_without_fetching
         assert target.read_bytes() == b"already done"
 
 
+@pytest.mark.integration
 def test_force_rewrites_an_existing_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     with converting(tmp_path, monkeypatch) as fake:
         dataset: LamariaDataset = LamariaDataset(fake.config)
@@ -908,6 +932,7 @@ def test_force_rewrites_an_existing_recording(tmp_path: Path, monkeypatch: pytes
         assert target.read_bytes() != b"stale"
 
 
+@pytest.mark.integration
 def test_a_failed_encode_keeps_the_vrs_and_clears_the_scratch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc_ffmpeg: Path
 ) -> None:
@@ -928,6 +953,7 @@ def test_a_failed_encode_keeps_the_vrs_and_clears_the_scratch(
         assert "kept" in capsys.readouterr().out
 
 
+@pytest.mark.integration
 def test_a_machine_that_cannot_encode_av1_fails_before_it_fetches_anything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A missing GPU encoder must cost a second, not a multi-gigabyte download."""
 
@@ -947,6 +973,7 @@ def test_a_machine_that_cannot_encode_av1_fails_before_it_fetches_anything(tmp_p
         assert not paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity).exists()
 
 
+@pytest.mark.integration
 def test_a_stalled_vrs_fetch_is_retried_and_resumed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc_ffmpeg: Path
 ) -> None:
@@ -972,6 +999,7 @@ def test_the_first_ten_controlled_sequences_are_posed_in_the_mps_frame() -> None
     assert lamaria.gt_world("sequence_1_19") == "lv95"
 
 
+@pytest.mark.golden
 def test_the_rig_pose_is_the_published_camera_pose_seen_from_the_rig() -> None:
     """``world_T_rig = world_T_cam0 @ cam0_T_rig``, and the fixture pins which way simplecv stores it.
 
@@ -996,6 +1024,7 @@ def test_the_rig_pose_is_the_published_camera_pose_seen_from_the_rig() -> None:
     assert trajectory.length_m == 0.0, "one pose covers no distance"
 
 
+@pytest.mark.integration
 def test_a_constant_rotation_leaves_the_path_length_the_camera_walked() -> None:
     """The rig sits a fixed offset from cam0, so a rigid walk has one length in both frames."""
     rig_T_cam0: Float64[ndarray, "4 4"] = published_rig_T_cam("cam0")
@@ -1011,6 +1040,7 @@ def test_a_constant_rotation_leaves_the_path_length_the_camera_walked() -> None:
     assert trajectory.duration_s == pytest.approx(3 * SLAM_PERIOD_NS / 1e9)
 
 
+@pytest.mark.integration
 def test_an_empty_pseudo_gt_yields_an_empty_trajectory() -> None:
     """A sequence with control points but no pGT still gets a gt layer, without poses."""
     empty: aria.PseudoGt = aria.PseudoGt(times_ns=np.zeros(0, dtype=np.int64), world_T_cam0=np.zeros((0, 4, 4)))
@@ -1091,6 +1121,7 @@ def gt_store(identity: SequenceIdentity) -> rr.experimental.ChunkStore:
     return read_back(paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity))
 
 
+@pytest.mark.integration
 def test_the_gt_layer_is_a_sibling_rrd_of_the_same_recording(converted_easy: ConvertedSequence) -> None:
     """One convert writes both layers: same recording id, own layer directory."""
     assert converted_easy.gt.is_file()
@@ -1098,6 +1129,7 @@ def test_the_gt_layer_is_a_sibling_rrd_of_the_same_recording(converted_easy: Con
     assert (converted_easy.gt.parent.name, converted_easy.base.parent.name) == (paths.GT_LAYER, paths.BASE_LAYER)
 
 
+@pytest.mark.integration
 def test_the_gt_layer_animates_the_rig_node_on_the_raw_device_clock(converted_easy: ConvertedSequence) -> None:
     """One row per published pose, at the pGT's own stamps, holding ``world_T_rig``."""
     poses: pa.Table = column_rows(read_back(converted_easy.gt), f"{schema.rig_path(0)}:Transform3D:translation")
@@ -1111,6 +1143,7 @@ def test_the_gt_layer_animates_the_rig_node_on_the_raw_device_clock(converted_ea
     np.testing.assert_allclose(logged_xyz, expected_rig_translations_xyz(), atol=1e-6)
 
 
+@pytest.mark.integration
 def test_the_logged_rig_rotation_is_the_pose_seen_from_the_rig(converted_easy: ConvertedSequence) -> None:
     """The fixture poses cam0 at its own ``rig_R_cam0``, so the composed rig rotation is the identity."""
     quaternions: pa.Table = column_rows(read_back(converted_easy.gt), f"{schema.rig_path(0)}:Transform3D:quaternion")
@@ -1118,6 +1151,7 @@ def test_the_logged_rig_rotation_is_the_pose_seen_from_the_rig(converted_easy: C
     np.testing.assert_allclose(np.asarray(stored[0][0], dtype=np.float64), [0.0, 0.0, 0.0, 1.0], atol=1e-6)
 
 
+@pytest.mark.integration
 def test_the_image_rotation_leaves_the_gt_poses_alone(converted_easy: ConvertedSequence) -> None:
     """The pGT poses the published, unrotated cam0, so ``world_T_rig`` must not turn with the pixels.
 
@@ -1134,6 +1168,7 @@ def test_the_image_rotation_leaves_the_gt_poses_alone(converted_easy: ConvertedS
     assert np.abs(stored - quarter_turn).max() > 0.5, "the gt layer never reads the rotated rig"
 
 
+@pytest.mark.integration
 def test_the_rig_transform_is_stored_child_from_parent_free(converted_easy: ConvertedSequence) -> None:
     """``world_T_rig`` is a child-to-parent step, which is Rerun's default relation.
 
@@ -1144,6 +1179,7 @@ def test_the_rig_transform_is_stored_child_from_parent_free(converted_easy: Conv
     assert f"{schema.rig_path(0)}:Transform3D:relation" not in columns
 
 
+@pytest.mark.integration
 def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail(converted_easy: ConvertedSequence) -> None:
     """The overview strip is static and whole; the trail is one segment per pose, for the cursor window."""
     store: rr.experimental.ChunkStore = read_back(converted_easy.gt)
@@ -1162,6 +1198,7 @@ def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail(converted_easy: C
     assert trail_radii == [pytest.approx(-TRAIL_RADIUS_UI_POINTS)], "the trail is a screen-space stroke, like msd's"
 
 
+@pytest.mark.integration
 def test_only_the_gt_layer_states_the_world_axes(converted_easy: ConvertedSequence) -> None:
     """The pose layer establishes a world frame at all, so it owns the root ViewCoordinates."""
     gt_root: pa.Table = read_back(converted_easy.gt).reader(index=None, contents="/").to_arrow_table()
@@ -1171,6 +1208,7 @@ def test_only_the_gt_layer_states_the_world_axes(converted_easy: ConvertedSequen
     assert "/:ViewCoordinates:xyz" not in base.reader(index=None, contents="/").to_arrow_table().column_names
 
 
+@pytest.mark.integration
 def test_the_gt_properties_describe_the_trajectory_and_its_world(converted_easy: ConvertedSequence) -> None:
     gt: dict[str, object] = recording_properties(read_back(converted_easy.gt), "gt")
     assert gt["num_poses"] == GT_POSES
@@ -1189,6 +1227,7 @@ def test_the_gt_properties_describe_the_trajectory_and_its_world(converted_easy:
     assert fraction_of_g > lamaria.WORLD_UP_MIN_FRACTION_OF_G, "a level wearer's accelerometer is nearly pure gravity"
 
 
+@pytest.mark.integration
 def test_a_measured_up_axis_the_declaration_disagrees_with_is_announced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc_ffmpeg: Path
 ) -> None:
@@ -1202,6 +1241,7 @@ def test_a_measured_up_axis_the_declaration_disagrees_with_is_announced(
     assert "measured +z" in output
 
 
+@pytest.mark.integration
 def test_a_level_wearer_measures_the_declared_axis_quietly(converted_easy: ConvertedSequence) -> None:
     assert "declares world up" not in converted_easy.output
 
@@ -1209,6 +1249,7 @@ def test_a_level_wearer_measures_the_declared_axis_quietly(converted_easy: Conve
 # ── control points ────────────────────────────────────────────────────────
 
 
+@pytest.mark.integration
 def test_the_control_points_are_static_labelled_points_in_the_world(converted_surveyed: ConvertedSequence) -> None:
     """Surveyed points are a property of the world, not of a moment, so they are static."""
     entity: str = schema.control_points_path()
@@ -1228,6 +1269,7 @@ def test_the_control_points_are_static_labelled_points_in_the_world(converted_su
     assert row[f"{entity}:Points3D:show_labels"] == [True], "five to fifteen labels are past Rerun's own cutoff"
 
 
+@pytest.mark.integration
 def test_the_control_point_detections_sit_under_the_camera_that_saw_them(converted_surveyed: ConvertedSequence) -> None:
     """One columnar Points2D per camera, at the detection stamps, labelled by point."""
     store: rr.experimental.ChunkStore = read_back(converted_surveyed.gt)
@@ -1249,6 +1291,7 @@ def test_the_control_point_detections_sit_under_the_camera_that_saw_them(convert
     assert f"{schema.cp_uv_path(0, 2)}:Points2D:positions" not in store.reader(index=schema.TIMELINE).to_arrow_table().column_names
 
 
+@pytest.mark.integration
 def test_the_gt_properties_count_the_control_points_and_their_detections(converted_surveyed: ConvertedSequence) -> None:
     gt: dict[str, object] = recording_properties(read_back(converted_surveyed.gt), "gt")
     assert gt["control_point_count"] == 2
@@ -1256,6 +1299,7 @@ def test_the_gt_properties_count_the_control_points_and_their_detections(convert
     assert gt["gt_world"] == "lv95", "R_11 onwards is surveyed in LV95/LN02"
 
 
+@pytest.mark.integration
 def test_every_levelled_control_point_min_distance_is_reported(converted_surveyed: ConvertedSequence) -> None:
     """The reach of each point is printed, because it is the check on the world frame."""
     assert LEVELLED_POINT_NAME in converted_surveyed.output
@@ -1263,6 +1307,7 @@ def test_every_levelled_control_point_min_distance_is_reported(converted_surveye
     assert "no height" in converted_surveyed.output
 
 
+@pytest.mark.integration
 def test_a_levelled_control_point_far_from_the_walk_stops_the_convert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     """Its tag was photographed by these cameras, so a wrong world frame shows up as distance."""
     far: dict[str, bytes] = archive_bodies()
@@ -1280,6 +1325,7 @@ def test_a_levelled_control_point_far_from_the_walk_stops_the_convert(tmp_path: 
 # ── the two layers, gated independently ───────────────────────────────────
 
 
+@pytest.mark.integration
 def test_a_missing_gt_layer_is_rebuilt_from_the_base_rrd_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     """Regenerating the gt corpus is ``rm gt/*.rrd`` and a convert: no fetch, no encode."""
 
@@ -1300,6 +1346,7 @@ def test_a_missing_gt_layer_is_rebuilt_from_the_base_rrd_alone(tmp_path: Path, m
         assert base_target.stat().st_mtime_ns == base_written_ns, "the base recording is the canonical raw, left alone"
 
 
+@pytest.mark.integration
 def test_a_missing_base_layer_is_rebuilt_without_the_gt_layer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     """The other direction: an existing gt rrd is done, so a base rebuild leaves it as it is."""
     with converting(tmp_path, monkeypatch) as fake:
@@ -1315,6 +1362,7 @@ def test_a_missing_base_layer_is_rebuilt_without_the_gt_layer(tmp_path: Path, mo
         assert gt_target.stat().st_mtime_ns == gt_written_ns, "the gt layer already exists, so it is not rewritten"
 
 
+@pytest.mark.integration
 def test_a_sequence_with_no_ground_truth_writes_no_gt_rrd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     """The test split ships neither pGT nor control points; there is no world to establish."""
     with converting(tmp_path, monkeypatch) as fake:
@@ -1333,6 +1381,7 @@ def test_a_sequence_with_no_ground_truth_writes_no_gt_rrd(tmp_path: Path, monkey
         assert fake.requested == []
 
 
+@pytest.mark.integration
 def test_a_sequence_with_control_points_but_no_pgt_still_gets_a_gt_layer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
 ) -> None:

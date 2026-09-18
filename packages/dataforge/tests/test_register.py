@@ -8,13 +8,16 @@ from typing import Any, ClassVar
 
 import pytest
 import rerun.blueprint as rrb
-from rerun.catalog import OnDuplicateSegmentLayer
 
-from dataforge import paths
-from dataforge.apis import register
-from dataforge.apis.register import Config
-from dataforge.datasets.msd import MsdConfig
-from dataforge.datasets.robocap import RobocapConfig
+pytest.importorskip("rerun.catalog", reason="catalog dependencies are optional outside the dataforge catalog environment")
+
+from rerun.catalog import OnDuplicateSegmentLayer  # noqa: E402
+
+from dataforge import paths  # noqa: E402
+from dataforge.apis import register  # noqa: E402
+from dataforge.apis.register import Config  # noqa: E402
+from dataforge.datasets.msd import MsdConfig  # noqa: E402
+from dataforge.datasets.robocap import RobocapConfig  # noqa: E402
 
 
 @dataclass

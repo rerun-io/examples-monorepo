@@ -117,6 +117,7 @@ FILE_PATH: str = "/file.bin"
 """Where the loopback archive serves ``PAYLOAD``."""
 
 
+@pytest.mark.integration
 def test_http_fetch_downloads_a_fresh_file(tmp_path: Path) -> None:
     dest: Path = tmp_path / "nested" / "file.bin"
     with serve({FILE_PATH: PAYLOAD}) as archive:
@@ -127,6 +128,7 @@ def test_http_fetch_downloads_a_fresh_file(tmp_path: Path) -> None:
     assert [(entry.method, entry.range_header) for entry in archive.served] == [("HEAD", None), ("GET", None)]
 
 
+@pytest.mark.integration
 def test_http_fetch_skips_a_file_that_is_already_complete(tmp_path: Path) -> None:
     dest: Path = tmp_path / "file.bin"
     dest.write_bytes(PAYLOAD)
@@ -136,6 +138,7 @@ def test_http_fetch_skips_a_file_that_is_already_complete(tmp_path: Path) -> Non
     assert [entry.method for entry in archive.served] == ["HEAD"], "a complete file must cost one HEAD and no body"
 
 
+@pytest.mark.integration
 def test_http_fetch_resumes_a_partial_file(tmp_path: Path) -> None:
     dest: Path = tmp_path / "file.bin"
     already: int = 4_096
@@ -146,6 +149,7 @@ def test_http_fetch_resumes_a_partial_file(tmp_path: Path) -> None:
     assert [(entry.method, entry.range_header) for entry in archive.served] == [("HEAD", None), ("GET", f"bytes={already}-")]
 
 
+@pytest.mark.integration
 def test_http_fetch_restarts_when_the_server_ignores_the_range(tmp_path: Path) -> None:
     """A 200 answer to a ``Range`` request carries the whole file, so appending would double the head."""
     dest: Path = tmp_path / "file.bin"
@@ -155,6 +159,7 @@ def test_http_fetch_restarts_when_the_server_ignores_the_range(tmp_path: Path) -
     assert dest.read_bytes() == PAYLOAD
 
 
+@pytest.mark.integration
 def test_http_fetch_refuses_a_local_file_longer_than_the_remote_one(tmp_path: Path) -> None:
     """No retry can fix this one, so it must not spend the budget either."""
     dest: Path = tmp_path / "file.bin"
@@ -164,6 +169,7 @@ def test_http_fetch_refuses_a_local_file_longer_than_the_remote_one(tmp_path: Pa
     assert [entry.method for entry in archive.served] == ["HEAD"], "one attempt, and no body transferred"
 
 
+@pytest.mark.integration
 def test_http_fetch_gives_up_after_its_attempts_and_keeps_the_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(transports, "RETRY_BACKOFF_S", (0.0,))
     dest: Path = tmp_path / "file.bin"
@@ -174,6 +180,7 @@ def test_http_fetch_gives_up_after_its_attempts_and_keeps_the_bytes(tmp_path: Pa
     assert dest.stat().st_size >= served, "the partial file is the point: the next attempt resumes from it"
 
 
+@pytest.mark.integration
 def test_http_fetch_retries_a_stalled_transfer_and_resumes_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -190,12 +197,14 @@ def test_http_fetch_retries_a_stalled_transfer_and_resumes_it(
 # ── http_index ────────────────────────────────────────────────────────────
 
 
+@pytest.mark.integration
 def test_http_index_reads_a_page_and_parses_it() -> None:
     with serve({"/training/": APACHE_INDEX.encode()}) as archive:
         listed: list[transports.IndexEntry] = http_index(f"{archive.base_url}/training/")
     assert [entry.name for entry in listed] == ["R_01_easy.vrs", "R_04_medium.vrs", "R_01_easy.json", "sequence_3_17.vrs"]
 
 
+@pytest.mark.integration
 def test_http_index_gives_up_on_a_page_the_archive_does_not_have(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(transports, "RETRY_BACKOFF_S", (0.0,))
     with serve({}) as archive, pytest.raises(RuntimeError, match="2 attempts"):

@@ -17,7 +17,18 @@ from numpy import ndarray
 
 from dataforge import aria
 
+pytestmark = pytest.mark.golden
+
 REFERENCE_DIR: Path = Path(__file__).parent / "reference_data" / "lamaria"
+
+
+def reference_file(name: str) -> Path:
+    """Locate a published reference excerpt, or skip with its missing path."""
+    path: Path = REFERENCE_DIR / name
+    if not path.is_file():
+        pytest.skip(f"LaMAria reference file is absent: {path}")
+    return path
+
 
 # ``imuR_T_device @ device_T_cam`` for camera-slam-left, read out of R_01_easy's VRS
 # device calibration — an independent derivation of the same transform the
@@ -46,7 +57,7 @@ PGT_WORLD_R_CAM0: Float64[ndarray, "3 3"] = np.array(
 
 
 def test_read_calibration_json_reads_both_slam_cameras() -> None:
-    published: dict[str, PublishedCamera] = read_calibration_json(REFERENCE_DIR / "R_01_easy.calibration.json")
+    published: dict[str, PublishedCamera] = read_calibration_json(reference_file("R_01_easy.calibration.json"))
     # ``imu0`` is deliberately absent: it is the body frame, so its T_b_s is the
     # identity by definition and its entry carries noise densities, not a camera.
     assert sorted(published) == ["cam0", "cam1"]
@@ -58,7 +69,7 @@ def test_read_calibration_json_reads_both_slam_cameras() -> None:
 
 
 def test_published_rig_T_cam_reads_the_quaternion_as_xyzw() -> None:
-    published: dict[str, PublishedCamera] = read_calibration_json(REFERENCE_DIR / "R_01_easy.calibration.json")
+    published: dict[str, PublishedCamera] = read_calibration_json(reference_file("R_01_easy.calibration.json"))
     rig_T_cam: Float64[ndarray, "4 4"] = published["cam0"].rig_T_cam.to_matrix()
     assert rig_T_cam[:3, 3] == pytest.approx([0.01678296927310889, -0.10892921838506506, 0.07605583988186104], abs=1e-12)
     assert rig_T_cam[:3, :3] == pytest.approx(CAM0_RIG_R_CAM, abs=1e-6)
@@ -79,7 +90,7 @@ def test_rotate_uv_cw90_lands_the_principal_point_on_the_rotated_one() -> None:
     ``test_aria_vrs.py`` — so a detection at the native principal point must land
     exactly there, or a control point would draw a quarter turn away from its tag.
     """
-    published: dict[str, PublishedCamera] = read_calibration_json(REFERENCE_DIR / "R_01_easy.calibration.json")
+    published: dict[str, PublishedCamera] = read_calibration_json(reference_file("R_01_easy.calibration.json"))
     cx, cy = published["cam0"].params[2:4]
 
     rotated_uv_px: Float64[ndarray, "n_points 2"] = aria.rotate_uv_cw90(
@@ -96,7 +107,7 @@ def test_rotate_uv_cw90_lands_the_principal_point_on_the_rotated_one() -> None:
 
 
 def test_read_pseudo_gt_keeps_every_row_in_file_order() -> None:
-    pgt: aria.PseudoGt = aria.read_pseudo_gt(REFERENCE_DIR / "R_01_easy.pseudo_gt.txt")
+    pgt: aria.PseudoGt = aria.read_pseudo_gt(reference_file("R_01_easy.pseudo_gt.txt"))
     # The fixture is R_01_easy's first three rows and its last two.
     assert pgt.times_ns.tolist() == [1389350666375, 1389400666375, 1389450666375, 1534150666375, 1534200666375]
     assert pgt.world_T_cam0.shape == (5, 4, 4)
@@ -113,7 +124,7 @@ def test_read_pseudo_gt_keeps_every_row_in_file_order() -> None:
 
 def test_read_control_points_translates_measurements_to_the_custom_origin() -> None:
     points: dict[str, aria.ControlPoint] = {
-        point.name: point for point in aria.read_control_points(REFERENCE_DIR / "R_11_5cp.control_points.json").points
+        point.name: point for point in aria.read_control_points(reference_file("R_11_5cp.control_points.json")).points
     }
     assert sorted(points) == ["OB1878", "OB1881"]
     surveyed: aria.ControlPoint = points["OB1878"]
@@ -125,7 +136,7 @@ def test_read_control_points_translates_measurements_to_the_custom_origin() -> N
 
 def test_read_control_points_marks_an_unknown_height() -> None:
     points: dict[str, aria.ControlPoint] = {
-        point.name: point for point in aria.read_control_points(REFERENCE_DIR / "R_11_5cp.control_points.json").points
+        point.name: point for point in aria.read_control_points(reference_file("R_11_5cp.control_points.json")).points
     }
     unlevelled: aria.ControlPoint = points["OB1881"]
     assert not unlevelled.has_height
@@ -135,7 +146,7 @@ def test_read_control_points_marks_an_unknown_height() -> None:
 
 
 def test_read_control_points_reads_detections_per_stream() -> None:
-    control_points: aria.ControlPointSet = aria.read_control_points(REFERENCE_DIR / "R_11_5cp.control_points.json")
+    control_points: aria.ControlPointSet = aria.read_control_points(reference_file("R_11_5cp.control_points.json"))
     # The stream is read off the image name's own prefix; the file's per-camera
     # timestamp map, which is keyed by stream *label*, is not read at all.
     assert [detection.stream_id for detection in control_points.detections] == ["1201-1", "1201-1", "1201-2"]

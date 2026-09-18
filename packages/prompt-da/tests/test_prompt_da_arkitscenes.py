@@ -9,17 +9,20 @@ import pytest
 import rerun as rr
 import torch
 from numpy.testing import assert_allclose, assert_array_equal
-from rerun.catalog import DatasetEntry
 from rerun.experimental import RrdReader
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser, log_fused_mesh
 
+pytest.importorskip("rerun.catalog", reason="ARKitScenes catalog deps live in the PromptDA catalog lanes")
 pytest.importorskip("pyarrow", reason="ARKitScenes catalog deps live in the PromptDA catalog lanes")
+pytest.importorskip("imagecodecs", reason="ARKitScenes ingest deps live in the PromptDA catalog lanes")
+pytest.importorskip("torchcodec", reason="NVDEC decode deps live in the PromptDA catalog lanes")
 pytest.importorskip("arkitscenes_download", reason="ARKitScenes catalog deps live in the PromptDA catalog lanes")
-_dataloader = pytest.importorskip("rerun.experimental.dataloader")
+_dataloader = pytest.importorskip("rerun.experimental.dataloader", reason="ARKitScenes streaming needs the Rerun dataloader")
 if not hasattr(_dataloader, "NoShuffle"):
     pytest.skip("NVDEC tests need the prerelease Rerun dataloader", allow_module_level=True)
 
 from arkitscenes_download.ingest.paths import CONFIDENCE, DEPTH_PROMPTDA, PROMPTDA_MESH, VIDEO_WIDE  # noqa: E402
+from rerun.catalog import DatasetEntry  # noqa: E402
 from rerun.experimental.dataloader import RerunIterableDataset  # noqa: E402
 from simplecv.rerun_dataloader import SegmentNvdecDecoder  # noqa: E402
 

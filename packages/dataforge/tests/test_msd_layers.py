@@ -111,6 +111,7 @@ def converted_index(tmp_path_factory, nvenc_ffmpeg: Path) -> Iterator[tuple[Fake
         yield hub, base_target, paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
 
 
+@pytest.mark.golden
 def test_the_logged_camera_node_carries_rig_T_cam(converted_index: tuple[FakeHub, Path, Path]) -> None:
     """``T_imu_cam`` is the camera's pose in the rig frame, and that is what lands on the node.
 
@@ -144,6 +145,7 @@ def convert_device(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device: MsdD
     return dataset.convert(identity, source, force=False)
 
 
+@pytest.mark.golden
 def test_a_radtan8_camera_node_names_its_projection_and_carries_its_validity_radius(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
 ) -> None:
@@ -163,6 +165,7 @@ def test_a_radtan8_camera_node_names_its_projection_and_carries_its_validity_rad
     assert row[f"{node}:distortion_valid_radius"][0] == pytest.approx(expected)
 
 
+@pytest.mark.integration
 def test_an_odyssey_camera_node_names_radtan8_and_states_no_validity_radius(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
 ) -> None:
@@ -185,6 +188,7 @@ def test_an_odyssey_camera_node_names_radtan8_and_states_no_validity_radius(
         assert radius not in table.column_names or table.column(radius).null_count == table.num_rows
 
 
+@pytest.mark.integration
 def test_a_kb4_camera_node_names_its_projection_and_claims_no_validity_radius(converted_index: tuple[FakeHub, Path, Path]) -> None:
     """kb4 is valid over the whole fisheye, so it declares no radius at all."""
     _, target, _ = converted_index
@@ -202,6 +206,7 @@ def test_a_kb4_camera_node_names_its_projection_and_claims_no_validity_radius(co
 # ── the upright roll ──────────────────────────────────────────────────────
 
 
+@pytest.mark.integration
 def test_the_g2_camera_nodes_state_the_quarter_turn_their_frames_were_encoded_by(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
 ) -> None:
@@ -226,6 +231,7 @@ def test_the_g2_camera_nodes_state_the_quarter_turn_their_frames_were_encoded_by
     assert all(rotation in (90, 180, 270) for rotation in logged), f"the G2's sideways cameras were not turned: {logged}"
 
 
+@pytest.mark.golden
 def test_a_rolled_camera_logs_the_calibration_of_the_pixels_it_encoded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
 ) -> None:
@@ -272,6 +278,7 @@ def test_a_rolled_camera_logs_the_calibration_of_the_pixels_it_encoded(
         assert not np.allclose(cam_R_rig.T, unrolled_rig_R_cam, atol=1e-3), "the pose was not rolled with the pixels"
 
 
+@pytest.mark.integration
 def test_the_g2_writes_frames_whose_dimensions_the_quarter_turn_swapped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
 ) -> None:
@@ -296,6 +303,7 @@ def test_the_g2_writes_frames_whose_dimensions_the_quarter_turn_swapped(
         assert encoded == (FRAME_HEIGHT, FRAME_WIDTH), f"cam{camera.index} was encoded {encoded} after {turns} quarter turn(s)"
 
 
+@pytest.mark.golden
 @pytest.mark.parametrize("device", ["index", "odyssey"])
 def test_an_upright_headset_is_left_exactly_as_it_was(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path, device: MsdDeviceChoice
@@ -326,6 +334,7 @@ def test_an_upright_headset_is_left_exactly_as_it_was(
 # ── gt layer ──────────────────────────────────────────────────────────────
 
 
+@pytest.mark.integration
 def test_the_gt_layer_is_a_sibling_rrd_of_the_same_recording(converted_index: tuple[FakeHub, Path, Path]) -> None:
     """One convert writes both layers: same recording id, own layer directory."""
     _, base_target, gt_target = converted_index
@@ -335,6 +344,7 @@ def test_the_gt_layer_is_a_sibling_rrd_of_the_same_recording(converted_index: tu
     assert (gt_target.parent.name, base_target.parent.name) == (paths.GT_LAYER, paths.BASE_LAYER)
 
 
+@pytest.mark.integration
 def test_the_gt_layer_animates_the_rig_node_at_the_full_gt_rate(converted_index: tuple[FakeHub, Path, Path]) -> None:
     hub, _, gt_target = converted_index
 
@@ -348,6 +358,7 @@ def test_the_gt_layer_animates_the_rig_node_at_the_full_gt_rate(converted_index:
     assert times_ns[-1] == (GT_NUM_POSES - 1) * GT_PERIOD_NS
 
 
+@pytest.mark.integration
 def test_the_rig_quaternion_is_the_file_quaternion_reordered_to_xyzw(converted_index: tuple[FakeHub, Path, Path]) -> None:
     """The csv writes the scalar first; a viewer reading the rrd must see it last."""
     _, _, gt_target = converted_index
@@ -361,6 +372,7 @@ def test_the_rig_quaternion_is_the_file_quaternion_reordered_to_xyzw(converted_i
     np.testing.assert_allclose(np.asarray(stored[GT_DROPOUT_ROW][0], dtype=np.float64), [0.0, 0.0, 0.0, 1.0], atol=1e-6)
 
 
+@pytest.mark.integration
 def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail_of_segments(converted_index: tuple[FakeHub, Path, Path]) -> None:
     """The overview strip is static and whole; the trail is one 2-point segment per pose.
 
@@ -397,6 +409,7 @@ def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail_of_segments(conve
     assert f"{trail}:Points3D:positions" not in store.reader(index=schema.TIMELINE).to_arrow_table().column_names
 
 
+@pytest.mark.integration
 def test_only_the_gt_layer_states_the_world_axes(converted_index: tuple[FakeHub, Path, Path]) -> None:
     """The pose layer establishes a world frame, so it owns the root ViewCoordinates."""
     _, base_target, gt_target = converted_index
@@ -408,6 +421,7 @@ def test_only_the_gt_layer_states_the_world_axes(converted_index: tuple[FakeHub,
     assert "/:ViewCoordinates:xyz" not in read_back(base_target).reader(index=None, contents="/").to_arrow_table().column_names
 
 
+@pytest.mark.integration
 def test_the_gt_properties_report_the_poses_the_repairs_and_the_measured_axis(converted_index: tuple[FakeHub, Path, Path]) -> None:
     _, _, gt_target = converted_index
 
@@ -423,6 +437,7 @@ def test_the_gt_properties_report_the_poses_the_repairs_and_the_measured_axis(co
     assert isinstance(measured_fraction, float) and measured_fraction > 0.9
 
 
+@pytest.mark.integration
 def test_a_derived_layer_carries_its_own_properties_and_no_recording_info(converted_index: tuple[FakeHub, Path, Path]) -> None:
     """A derived layer is the same recording as its base, so it states nothing about the recording.
 

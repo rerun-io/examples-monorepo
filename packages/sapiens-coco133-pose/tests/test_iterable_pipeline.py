@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
+import pytest
 import torch
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
@@ -11,6 +12,8 @@ from sapiens2_pose.api.runtime import PoseEstimation
 
 from sapiens_coco133_pose.api import iterable as iterable_module
 from sapiens_coco133_pose.api.iterable import DEFAULT_ITERABLE_RRD_PATH, IterableVideoPoseConfig, estimate_frame_pose_coco133, iter_video_pose_coco133
+
+torchcodec_decoders = pytest.importorskip("torchcodec.decoders", reason="iterable video tests need the TorchCodec decoder module")
 
 
 def test_estimate_frame_pose_coco133_detects_boxes_and_projects_sapiens_keypoints() -> None:
@@ -96,7 +99,6 @@ def test_estimate_frame_pose_coco133_can_use_rtmlib_direct_coco133_keypoints() -
 
 def test_iter_video_pose_coco133_uses_rtmlib_progress_defaults(monkeypatch: Any, tmp_path: Path) -> None:
     import tqdm.auto as tqdm_auto
-    from torchcodec import decoders as torchcodec_decoders
 
     progress_calls: list[tuple[int | None, str | None]] = []
 
@@ -142,8 +144,6 @@ def test_iter_video_pose_coco133_uses_rtmlib_progress_defaults(monkeypatch: Any,
 
 
 def test_iter_video_pose_coco133_allows_independent_rtmlib_pose_runtime_config(monkeypatch: Any, tmp_path: Path) -> None:
-    from torchcodec import decoders as torchcodec_decoders
-
     constructed_pose_configs: list[Any] = []
 
     class FakeVideoDecoder:

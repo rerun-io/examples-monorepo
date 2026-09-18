@@ -93,11 +93,15 @@ def test_video_pose_rrd_uses_one_stable_video_entity_for_frame_overlays(tmp_path
     np.testing.assert_allclose(artifact.bboxes, np.stack([bboxes[0], bboxes[0] + 1.0], axis=0))
 
 
+@pytest.mark.golden
 def test_rrd_candidate_matches_baseline_when_paths_are_provided() -> None:
     baseline_rrd = os.environ.get("SAPIENS_COCO133_BASELINE_RRD")
     candidate_rrd = os.environ.get("SAPIENS_COCO133_CANDIDATE_RRD")
     if baseline_rrd is None or candidate_rrd is None:
         pytest.skip("Set SAPIENS_COCO133_BASELINE_RRD and SAPIENS_COCO133_CANDIDATE_RRD to run RRD parity.")
+    for rrd_path in (Path(baseline_rrd), Path(candidate_rrd)):
+        if not rrd_path.is_file():
+            pytest.skip(f"RRD parity artifact is absent: {rrd_path}")
 
     metrics = compare_video_pose_rrds(Path(baseline_rrd), Path(candidate_rrd), PoseArtifactComparisonConfig(0.0, keypoint_score_threshold=0.3, max_keypoint_bbox_fraction=0.0))
 

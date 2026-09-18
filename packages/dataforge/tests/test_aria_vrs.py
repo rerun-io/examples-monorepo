@@ -40,7 +40,7 @@ SEQUENCE_DIR: Path = PACKAGE_DIR / "data" / "raw" / "lamaria" / "training" / "R_
 VRS_PATH: Path = SEQUENCE_DIR / "raw_data" / "R_01_easy.vrs"
 PUBLISHED_CALIBRATION_PATH: Path = SEQUENCE_DIR / "aria_calibrations" / "R_01_easy.json"
 
-pytestmark = pytest.mark.skipif(not VRS_PATH.is_file(), reason=f"no development VRS at {VRS_PATH}")
+requires_vrs = pytest.mark.skipif(not VRS_PATH.is_file(), reason=f"no development VRS at {VRS_PATH}")
 
 CW90_ABOUT_OPTICAL_AXIS: Float64[ndarray, "3 3"] = Rotation.from_euler("z", -90.0, degrees=True).as_matrix()
 """The quarter turn about a camera's own z that rotating its pixels clockwise is.
@@ -60,6 +60,8 @@ EXPECTED_STREAMS: dict[aria.AriaStreamId, tuple[int, float]] = {
 
 @pytest.fixture(scope="module")
 def provider() -> VrsDataProvider:
+    if not VRS_PATH.is_file():
+        pytest.skip(f"no development VRS at {VRS_PATH}")
     return aria.open_vrs(VRS_PATH)
 
 
@@ -80,6 +82,7 @@ def test_open_vrs_names_a_missing_file(tmp_path: Path) -> None:
         aria.open_vrs(tmp_path / "absent.vrs")
 
 
+@pytest.mark.golden
 def test_every_expected_stream_is_present_at_its_nominal_rate(provider: VrsDataProvider) -> None:
     for stream_id, (frames, nominal_rate_hz) in EXPECTED_STREAMS.items():
         times_ns: Int64[ndarray, "n_frames"] = aria.frame_timestamps_ns(provider, stream_id)
@@ -90,6 +93,7 @@ def test_every_expected_stream_is_present_at_its_nominal_rate(provider: VrsDataP
         assert measured_rate_hz == pytest.approx(nominal_rate_hz, rel=0.01), stream_id
 
 
+@pytest.mark.integration
 def test_slam_frames_are_gray_and_rgb_frames_are_three_channel(provider: VrsDataProvider) -> None:
     slam: list[aria.TimedImage] = list(islice(aria.iter_frames(provider, aria.SLAM_LEFT_STREAM_ID), 3))
     assert [image.shape for _, image in slam] == [(480, 640)] * 3
@@ -99,6 +103,7 @@ def test_slam_frames_are_gray_and_rgb_frames_are_three_channel(provider: VrsData
     assert {image.dtype for _, image in rgb} == {np.dtype(np.uint8)}
 
 
+@pytest.mark.integration
 def test_iter_frames_and_frame_timestamps_agree_frame_for_frame(provider: VrsDataProvider) -> None:
     """The encoder pairs the mp4's Nth sample with times_ns[N], so record order must match."""
     times_ns: Int64[ndarray, "n_frames"] = aria.frame_timestamps_ns(provider, aria.SLAM_RIGHT_STREAM_ID)
@@ -106,6 +111,7 @@ def test_iter_frames_and_frame_timestamps_agree_frame_for_frame(provider: VrsDat
     assert walked == times_ns[:200].tolist()
 
 
+@pytest.mark.golden
 def test_rig_T_cam_reproduces_the_published_calibration(rig: aria.AriaRig) -> None:
     published: dict[str, PublishedCamera] = read_calibration_json(PUBLISHED_CALIBRATION_PATH)
     for name, stream_id in (("cam0", aria.SLAM_LEFT_STREAM_ID), ("cam1", aria.SLAM_RIGHT_STREAM_ID)):
@@ -113,6 +119,7 @@ def test_rig_T_cam_reproduces_the_published_calibration(rig: aria.AriaRig) -> No
         assert from_vrs == pytest.approx(published[name].rig_T_cam.to_matrix(), abs=1e-3), name
 
 
+@pytest.mark.golden
 def test_published_intrinsics_match_the_vrs_ones(rig: aria.AriaRig) -> None:
     published: dict[str, PublishedCamera] = read_calibration_json(PUBLISHED_CALIBRATION_PATH)
     for name, stream_id in (("cam0", aria.SLAM_LEFT_STREAM_ID), ("cam1", aria.SLAM_RIGHT_STREAM_ID)):
@@ -123,6 +130,7 @@ def test_published_intrinsics_match_the_vrs_ones(rig: aria.AriaRig) -> None:
         assert (camera.intrinsics.width, camera.intrinsics.height) == (640, 480), name
 
 
+@pytest.mark.golden
 def test_the_upright_cameras_swap_their_axes_and_move_their_principal_point(rig: aria.AriaRig, upright_rig: aria.AriaRig) -> None:
     """A clockwise quarter turn of the pixels: ``w`` and ``h`` swap, ``(cx, cy)`` becomes ``(h - 1 - cy, cx)``."""
     for stream_id in aria.CAMERA_STREAM_IDS:
@@ -146,6 +154,7 @@ def test_the_upright_cameras_swap_their_axes_and_move_their_principal_point(rig:
     assert (upright_rig.cameras[aria.RGB_STREAM_ID].intrinsics.width, upright_rig.cameras[aria.RGB_STREAM_ID].intrinsics.height) == (1408, 1408)
 
 
+@pytest.mark.integration
 def test_the_upright_rig_turns_each_camera_about_its_own_optical_axis(rig: aria.AriaRig, upright_rig: aria.AriaRig) -> None:
     """The calibration follows the pixels: the pose turns, the camera stays where it is."""
     for stream_id in aria.CAMERA_STREAM_IDS:
@@ -158,6 +167,7 @@ def test_the_upright_rig_turns_each_camera_about_its_own_optical_axis(rig: aria.
         assert upright_rig.rig_T_imu[stream_id] == pytest.approx(rig.rig_T_imu[stream_id], abs=1e-15), stream_id
 
 
+@pytest.mark.golden
 def test_the_published_rig_T_cam0_is_the_unrotated_one(rig: aria.AriaRig, upright_rig: aria.AriaRig) -> None:
     """What the gt layer composes the pGT with must be the native transform.
 
@@ -165,12 +175,15 @@ def test_the_published_rig_T_cam0_is_the_unrotated_one(rig: aria.AriaRig, uprigh
     moves it onto the rig reads ``cam0.T_b_s`` — the native pose — and never the
     upright one the base layer's pixels ride.
     """
+    if not PUBLISHED_CALIBRATION_PATH.is_file():
+        pytest.skip(f"published Aria calibration is absent: {PUBLISHED_CALIBRATION_PATH}")
     published: Float64[ndarray, "4 4"] = aria.read_rig_T_cam0(PUBLISHED_CALIBRATION_PATH)
     assert published == pytest.approx(rig.cameras[aria.SLAM_LEFT_STREAM_ID].extrinsics.world_T_cam, abs=1e-3)
     upright: Float64[ndarray, "4 4"] = upright_rig.cameras[aria.SLAM_LEFT_STREAM_ID].extrinsics.world_T_cam
     assert np.abs(published[:3, :3] - upright[:3, :3]).max() > 0.5, "a quarter turn is not a rounding difference"
 
 
+@pytest.mark.golden
 def test_the_rig_frame_is_imu_right(rig: aria.AriaRig) -> None:
     assert rig.rig_T_imu[aria.IMU_RIGHT_STREAM_ID] == pytest.approx(np.eye(4), abs=1e-12)
     # imu-left sits a few millimetres away and is rotated: exoego:v2 needs that
@@ -183,6 +196,7 @@ def test_the_rig_frame_is_imu_right(rig: aria.AriaRig) -> None:
     assert rig_T_imu_left[:3, :3] @ rig_T_imu_left[:3, :3].T == pytest.approx(np.eye(3), abs=1e-9)
 
 
+@pytest.mark.integration
 def test_the_rgb_camera_is_only_in_the_vrs(rig: aria.AriaRig) -> None:
     """The published calibration has no RGB entry, so the VRS is the only source for cam_02."""
     assert set(rig.cameras) == set(aria.CAMERA_STREAM_IDS)
@@ -191,6 +205,7 @@ def test_the_rgb_camera_is_only_in_the_vrs(rig: aria.AriaRig) -> None:
     assert (rgb.intrinsics.width, rgb.intrinsics.height) == (1408, 1408)
 
 
+@pytest.mark.golden
 def test_imu_channels_are_raw_and_share_one_clock(provider: VrsDataProvider) -> None:
     channels: aria.ImuSamples = aria.read_imu(provider, aria.IMU_RIGHT_STREAM_ID)
     gyro, accel = channels
@@ -206,6 +221,7 @@ def test_imu_channels_are_raw_and_share_one_clock(provider: VrsDataProvider) -> 
     assert np.abs(gyro.values_xyz[:100]).max() < 0.1
 
 
+@pytest.mark.golden
 def test_imu_left_runs_at_its_own_rate(provider: VrsDataProvider) -> None:
     gyro: ImuChannel = aria.read_imu(provider, aria.IMU_LEFT_STREAM_ID)[0]
     frames, nominal_rate_hz = EXPECTED_STREAMS[aria.IMU_LEFT_STREAM_ID]
@@ -214,6 +230,8 @@ def test_imu_left_runs_at_its_own_rate(provider: VrsDataProvider) -> None:
     assert measured_rate_hz == pytest.approx(nominal_rate_hz, rel=0.01)
 
 
+@pytest.mark.integration
+@requires_vrs
 def test_open_streams_hands_the_encoder_upright_contiguous_frames() -> None:
     """The converter's frame stream turns the pixels the way it turned the calibration.
 
@@ -235,7 +253,11 @@ def test_open_streams_hands_the_encoder_upright_contiguous_frames() -> None:
     np.testing.assert_array_equal(upright, np.rot90(native, -1))
 
 
+@pytest.mark.integration
 def test_the_pseudo_gt_is_stamped_on_the_slam_left_frame_clock(provider: VrsDataProvider) -> None:
     """A gt layer can therefore be logged on ``video_time`` with no shift at all."""
-    pgt: aria.PseudoGt = aria.read_pseudo_gt(SEQUENCE_DIR / "ground_truth" / "pGT" / "R_01_easy.txt")
+    pgt_path: Path = SEQUENCE_DIR / "ground_truth" / "pGT" / "R_01_easy.txt"
+    if not pgt_path.is_file():
+        pytest.skip(f"LaMAria pseudo ground truth is absent: {pgt_path}")
+    pgt: aria.PseudoGt = aria.read_pseudo_gt(pgt_path)
     assert np.array_equal(pgt.times_ns, aria.frame_timestamps_ns(provider, aria.SLAM_LEFT_STREAM_ID))

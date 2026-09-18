@@ -10,7 +10,12 @@ eliminating any zombie process risk on test failure.
 
 from pathlib import Path
 
+import pytest
 import rerun as rr
+
+pytest.importorskip("rerun.catalog", reason="RRD baseline queries need the Rerun catalog dependencies")
+
+pytestmark = pytest.mark.golden
 
 
 def _get_entity_paths(rrd_path: Path) -> list[str]:

@@ -46,8 +46,9 @@ ENTITY: str = "/world/rig_00/cam_00/pinhole/video"
 
 @pytest.fixture(scope="module")
 def clip() -> Path:
-    """The checked-in clip. A fixture, not a bare constant, so a missing file fails once."""
-    assert CLIP.is_file(), f"{CLIP} is checked in; see tests/fixtures/README.md"
+    """The checked-in clip, or a skip naming the missing asset."""
+    if not CLIP.is_file():
+        pytest.skip(f"AV1 clip fixture is absent: {CLIP}; see tests/fixtures/README.md")
     return CLIP
 
 
@@ -85,6 +86,7 @@ def test_a_clock_that_is_not_int64_is_refused() -> None:
 # ── log_video_stream retiming ─────────────────────────────────────────────
 
 
+@pytest.mark.integration
 def test_sample_count_excludes_the_keyframe_chunk(tmp_path: Path, clip: Path) -> None:
     """``Mp4Reader`` emits a trailing keyframe chunk that is indexed but is not a sample."""
     target: Path = tmp_path / "count.rrd"
@@ -94,6 +96,7 @@ def test_sample_count_excludes_the_keyframe_chunk(tmp_path: Path, clip: Path) ->
     assert written == NUM_FRAMES
 
 
+@pytest.mark.integration
 def test_times_ns_replaces_every_sample_timestamp(tmp_path: Path, clip: Path) -> None:
     times_ns: Int64[ndarray, "n_samples"] = irregular_times_ns(NUM_FRAMES)
     target: Path = tmp_path / "retimed.rrd"
@@ -104,6 +107,7 @@ def test_times_ns_replaces_every_sample_timestamp(tmp_path: Path, clip: Path) ->
     assert np.array_equal(index_column(target), times_ns)
 
 
+@pytest.mark.integration
 def test_shift_ns_still_offsets_the_container_pts(tmp_path: Path, clip: Path) -> None:
     shift_ns: int = 1_700_000_000_000_000_000
     plain: Path = tmp_path / "plain.rrd"
@@ -115,6 +119,7 @@ def test_shift_ns_still_offsets_the_container_pts(tmp_path: Path, clip: Path) ->
     assert np.array_equal(index_column(shifted), index_column(plain) + shift_ns)
 
 
+@pytest.mark.integration
 def test_times_ns_and_shift_ns_are_mutually_exclusive(tmp_path: Path, clip: Path) -> None:
     target: Path = tmp_path / "both.rrd"
     with rr.RecordingStream("dataforge", recording_id="both") as recording:
@@ -123,6 +128,7 @@ def test_times_ns_and_shift_ns_are_mutually_exclusive(tmp_path: Path, clip: Path
             log_video_stream(recording, clip, ENTITY, shift_ns=5, times_ns=irregular_times_ns(NUM_FRAMES))
 
 
+@pytest.mark.integration
 def test_too_few_timestamps_is_an_error(tmp_path: Path, clip: Path) -> None:
     target: Path = tmp_path / "short.rrd"
     with rr.RecordingStream("dataforge", recording_id="short") as recording:
@@ -132,6 +138,7 @@ def test_too_few_timestamps_is_an_error(tmp_path: Path, clip: Path) -> None:
             log_video_stream(recording, clip, ENTITY, times_ns=irregular_times_ns(NUM_FRAMES - 3))
 
 
+@pytest.mark.integration
 def test_too_many_timestamps_is_an_error(tmp_path: Path, clip: Path) -> None:
     target: Path = tmp_path / "long.rrd"
     with rr.RecordingStream("dataforge", recording_id="long") as recording:
@@ -143,6 +150,7 @@ def test_too_many_timestamps_is_an_error(tmp_path: Path, clip: Path) -> None:
 # ── classify_video_chunk ──────────────────────────────────────────────────
 
 
+@pytest.mark.integration
 def test_every_chunk_the_reader_emits_is_one_of_the_three_named_shapes(clip: Path) -> None:
     """The real reader's own output, classified: one codec chunk, then samples, then one keyframe chunk."""
     reader: rr.experimental.Mp4Reader = rr.experimental.Mp4Reader(

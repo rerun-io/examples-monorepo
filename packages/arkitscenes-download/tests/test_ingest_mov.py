@@ -5,8 +5,11 @@ from pathlib import Path
 
 import av
 import numpy as np
+import pytest
 
 from arkitscenes_download.ingest.mov import iter_video_samples, prepare_video_track
+
+pytestmark = pytest.mark.integration
 
 
 class IngestMovTest(unittest.TestCase):

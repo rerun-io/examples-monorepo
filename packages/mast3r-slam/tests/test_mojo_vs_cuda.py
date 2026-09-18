@@ -32,7 +32,7 @@ from torch import Tensor
 cuda_backends = pytest.importorskip("mast3r_slam._backends", reason="CUDA backends not built")
 mojo_backends = pytest.importorskip("mast3r_slam_mojo_backends", reason="Mojo backends not built")
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+pytestmark = [pytest.mark.integration, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")]
 
 DEVICE = torch.device("cuda")
 POSE_ATOL = 1e-4

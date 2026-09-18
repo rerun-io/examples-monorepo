@@ -39,6 +39,7 @@ def test_cached_engine_path_rejects_bad_batch_range() -> None:
         cached_engine_path(Path("model.onnx"), config)
 
 
+@pytest.mark.integration
 @requires_cuda
 def test_cached_engine_path_is_deterministic_and_cache_keyed() -> None:
     """The engine name encodes batch range, precision, TRT version, and SM."""
@@ -52,6 +53,7 @@ def test_cached_engine_path_is_deterministic_and_cache_keyed() -> None:
     assert other != first
 
 
+@pytest.mark.integration
 @requires_cuda
 def test_preprocess_batch_shapes_dtypes_and_range() -> None:
     """Preprocessing yields normalized float32 CUDA tensors at the network size."""
@@ -73,6 +75,7 @@ def test_preprocess_batch_shapes_dtypes_and_range() -> None:
 
 
 @pytest.mark.skipif(os.environ.get("PROMPTDA_TRT_E2E") != "1", reason="set PROMPTDA_TRT_E2E=1 to run the engine-building parity test")
+@pytest.mark.integration
 @requires_cuda
 def test_trt_matches_torch_on_synthetic_frames() -> None:
     """The fp16 TRT engine agrees with the fp32 torch model within tolerance."""
@@ -102,6 +105,7 @@ def test_trt_matches_torch_on_synthetic_frames() -> None:
 
 
 @pytest.mark.skipif(os.environ.get("PROMPTDA_TRT_E2E") != "1", reason="set PROMPTDA_TRT_E2E=1 to run the engine-building parity test")
+@pytest.mark.integration
 @requires_cuda
 def test_trt_matches_torch_family_pipeline() -> None:
     """The TRT path agrees with the shared torch predictor contract end to end."""

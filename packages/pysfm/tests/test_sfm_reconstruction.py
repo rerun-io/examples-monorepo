@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import rerun.blueprint as rrb
 
 from pysfm.apis.sfm_reconstruction import create_sfm_blueprint
@@ -17,10 +18,13 @@ def test_create_sfm_blueprint_works_with_beartype_dev_mode() -> None:
     assert isinstance(blueprint, rrb.Horizontal)
 
 
+@pytest.mark.integration
 def test_fountain_example_files_populates_directory_upload() -> None:
     """Fountain example provides one directory-upload example row."""
-    examples: list[list[list[str]]] = _fountain_example_files()
+    if not any(FOUNTAIN_IMAGES_DIR.glob("*.png")) and not any(FOUNTAIN_IMAGES_DIR.glob("*.jpg")):
+        pytest.skip(f"Fountain example images are absent: {FOUNTAIN_IMAGES_DIR}; run: pixi run -e pysfm _download-sfm-example")
 
+    examples: list[list[list[str]]] = _fountain_example_files()
     assert len(examples) == 1
     assert len(examples[0]) == 1
     assert len(examples[0][0]) > 0

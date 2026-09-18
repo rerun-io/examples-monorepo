@@ -1,6 +1,12 @@
-from simplecv.rerun_dataloader import RECOMMENDED_FETCH_BLOCK_SIZE
+import pytest
 
-from mvs.apis.live_mesh import CLOUD_CATALOG_URL, CatalogDataConfig
+pytest.importorskip("rerun.catalog", reason="live mesh configuration imports need the Rerun catalog dependencies")
+pytest.importorskip("rerun.experimental.dataloader", reason="live mesh configuration imports need the Rerun dataloader")
+pytest.importorskip("torchcodec", reason="live mesh configuration imports need TorchCodec")
+
+from simplecv.rerun_dataloader import RECOMMENDED_FETCH_BLOCK_SIZE  # noqa: E402
+
+from mvs.apis.live_mesh import CLOUD_CATALOG_URL, CatalogDataConfig  # noqa: E402
 
 
 def test_catalog_data_config_defaults() -> None:

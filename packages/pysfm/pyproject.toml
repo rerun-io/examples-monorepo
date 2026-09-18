@@ -42,3 +42,10 @@ ignore_names = [
     "refine_sensor_from_rig",
     "rr_config",
 ]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e pysfm-dev tests-integration)",
+    "golden: reference comparison against stored ground truth (run: pixi run -e pysfm-dev tests-golden)",
+]
+addopts = "-m 'not integration and not golden'"

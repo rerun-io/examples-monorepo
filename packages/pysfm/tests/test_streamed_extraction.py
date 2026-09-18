@@ -109,6 +109,7 @@ def _run_streamed_extraction(
 # ---------------------------------------------------------------------------
 # Test: Equivalence on synthetic images (no resize)
 # ---------------------------------------------------------------------------
+@pytest.mark.integration
 def test_streamed_extraction_equivalence_synthetic(tmp_path: Path) -> None:
     """Streamed extraction produces identical DB contents on small synthetic images."""
     images_dir: Path = _create_synthetic_images(tmp_path / "data")
@@ -129,6 +130,7 @@ def test_streamed_extraction_equivalence_synthetic(tmp_path: Path) -> None:
     not FOUNTAIN_DIR.is_dir(),
     reason="Fountain dataset not downloaded — run: pixi run -e pysfm _download-sfm-example",
 )
+@pytest.mark.integration
 def test_streamed_extraction_equivalence_fountain(tmp_path: Path) -> None:
     """Streamed extraction produces equivalent DB contents on Fountain (resize path)."""
     # Use first 5 images for speed
@@ -137,7 +139,8 @@ def test_streamed_extraction_equivalence_fountain(tmp_path: Path) -> None:
     image_files: list[Path] = sorted(FOUNTAIN_DIR.glob("*.jpg"))[:5]
     if not image_files:
         image_files = sorted(FOUNTAIN_DIR.glob("*.png"))[:5]
-    assert len(image_files) >= 3, f"Expected >=3 images in {FOUNTAIN_DIR}, found {len(image_files)}"
+    if len(image_files) < 3:
+        pytest.skip(f"Fountain example needs at least 3 images in {FOUNTAIN_DIR}; found {len(image_files)}")
 
     for f in image_files:
         shutil.copy2(f, subset_dir / f.name)
