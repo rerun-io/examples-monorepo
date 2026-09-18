@@ -2994,7 +2994,7 @@ description = "Open the native Rerun viewer on the local catalog"
 # dataloader, derives frame selection / normals / ultrawide depth, writes
 # layer RRDs back. Explicit platforms required — see AGENTS.md.
 [feature.gauss-surf]
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.gauss-surf.dependencies]
 # Pinned to match the pyrefly site-package-path registration (python3.12).
@@ -3011,8 +3011,10 @@ torchcodec = "*"
 # ffmpeg <902 links libjxl 0.11 and dlopen-fails beside the env's 0.12.
 ffmpeg = { version = ">=8.1", build-number = ">=902" }
 einops = "*"
-# gsplat's source build (git pin below) needs ninja; nvcc comes from the cuda feature.
-ninja = "*"
+# gsplat 1.6.0 (upstream v1.6.0 commit c3d59bbb, not on PyPI) prebuilt on the ai-demos channel
+# for cuda 13.0 / torch 2.12 / py312, linux-64 and linux-aarch64: no source build at install,
+# and `pixi lock` no longer needs torch present (the git pin forced no-build-isolation).
+gsplat = "==1.6.0"
 # Direct gsplat seed initialization uses sklearn's three-neighbor search.
 scikit-learn = "*"
 # Direct holdout evaluation computes SSIM through torchmetrics.
@@ -3024,17 +3026,6 @@ arkitscenes-download = { path = "packages/arkitscenes-download", editable = true
 monopriors = { path = "packages/monoprior", editable = true }
 trtkit = { path = "packages/trtkit", editable = true }
 plyfile = ">=1.1,<2"
-# Part 8 (gsplat port): v1.6.0 release commit, pinned as git until the PyPI sdist
-# lands (then: bump the ai-demos conda recipe and drop this pin + no-build-isolation).
-# Builds ~50 CUDA TUs at install time — run installs with
-# TORCH_CUDA_ARCH_LIST="8.6;12.0+PTX" (not captured by the lock). uv fetches the
-# glm submodule (verified 2026-08-15).
-gsplat = { git = "https://github.com/nerfstudio-project/gsplat", rev = "c3d59bbb54f91d1c93f1a80dc86960c696b4a059" }
-
-[feature.gauss-surf.pypi-options]
-# gsplat's build requires torch: isolation would compile against a second,
-# wrong-CUDA torch. Build against the env's conda pytorch instead.
-no-build-isolation = ["gsplat"]
 
 [feature.gauss-surf.pypi-options.dependency-overrides]
 # Resolve monopriors' sam3>=0.1.0 requirement to the repository implementation.
