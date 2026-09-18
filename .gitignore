@@ -169,3 +169,5 @@ repomix-output.xml
 /typings/
 /yolo*
 artifacts/*
+
+packages/agent-traces/data/
