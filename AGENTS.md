@@ -66,7 +66,9 @@ Use module-top `pytest.importorskip("<module>", reason=...)` for imports that on
 resolve in a package's specialized env, so every env can collect the unit lane.
 When a required asset is absent, integration/golden tests must `pytest.skip`
 with a reason naming the asset; keep existing opt-in env-var gates as well as markers.
-Do not add import-only `tests/test_import.py` files; other tests and CI cover imports.
+An import-only `tests/test_import.py` is redundant once a package has real tests; delete it then.
+A package whose only test it is keeps it until step 5 gives it a real suite (pytest exits 5 on an
+empty selection, which would break `tests` and `gate`).
 
 ## Platforms & lockfile
 

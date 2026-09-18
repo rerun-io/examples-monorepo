@@ -1,7 +1,5 @@
 import pytest
 
-pytest.importorskip("easydict", reason="full exo/ego calibration requires easydict, absent from mv-api-dev")
-
 import numpy as np
 from jaxtyping import Float32, Int, UInt8
 from numpy import ndarray

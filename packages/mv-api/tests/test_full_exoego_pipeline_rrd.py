@@ -5,8 +5,6 @@ from typing import cast
 
 import pytest
 
-pytest.importorskip("easydict", reason="full exo/ego calibration requires easydict, absent from mv-api-dev")
-
 import numpy as np
 import open3d as o3d
 import rerun as rr
