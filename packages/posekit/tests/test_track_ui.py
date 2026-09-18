@@ -82,7 +82,10 @@ def test_state_delete_callback_closes_tracker_and_removes_rrds(tmp_path: Path, m
     assert not (tmp_path / f"{session.recording_id}.rrd").exists()
 
 
+@pytest.mark.integration
 def test_download_recording_contains_video_prompts_masks_and_confidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    if not CLIP.is_file():
+        pytest.skip(f"Click-tracking video missing: {CLIP}")
     session_with_mock: SessionWithMock = _session("download", prompted=[0])
     session: Session = session_with_mock[0]
     monkeypatch.setattr(track_recording, "RRD_DIR", tmp_path)

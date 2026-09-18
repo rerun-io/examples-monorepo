@@ -13,5 +13,5 @@ FIXTURE_DIR: Path = PACKAGE_DIR / "data" / "fixtures" / "test-library"
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 """Skip a test when CUDA is unavailable."""
 
-slow = pytest.mark.slow
+integration = pytest.mark.integration
 """Mark tests that download or load model artifacts."""

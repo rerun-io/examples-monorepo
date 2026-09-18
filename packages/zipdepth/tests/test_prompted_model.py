@@ -194,6 +194,7 @@ def test_zero_range_margin_reproduces_the_prompt_bounded_head_bit_for_bit(monkey
     assert torch.equal(outputs[0], reference_depth_bchw)
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
 def test_zero_range_margin_parity_holds_under_cuda_float16_autocast(monkeypatch: pytest.MonkeyPatch) -> None:
     """Repeat the parity guarantee in the reduced precision the export graph uses."""

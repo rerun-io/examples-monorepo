@@ -1,4 +1,4 @@
-"""Slow equivalence against the fork-recorded Aria fixture."""
+"""Equivalence against the fork-recorded Aria fixture."""
 
 from pathlib import Path
 
@@ -17,12 +17,16 @@ CHECKPOINT = PACKAGE_ROOT / "data" / "checkpoints" / "lamp_smpl_aria_gen2.pt"
 SMPL_MODEL = PACKAGE_ROOT / "data" / "body_models" / "smpl" / "SMPL_NEUTRAL.pkl"
 
 
+@pytest.mark.integration
 def test_fixture_path_matches_published_archive() -> None:
     """The replay resolves the exact archive published by the reviewer."""
-    assert fixture_path(FIXTURE_DIR) == FIXTURE_DIR / "test-library_fixture.npz"
+    expected_path: Path = FIXTURE_DIR / "test-library_fixture.npz"
+    if not expected_path.is_file():
+        pytest.skip(f"fork-recorded LAMP fixture absent: {expected_path}")
+    assert fixture_path(FIXTURE_DIR) == expected_path
 
 
-@pytest.mark.slow
+@pytest.mark.golden
 def test_fixture_lifter_and_smoothing_equivalence() -> None:
     """Pristine/owned CPU outputs are exact; upstream GPU smoothing is within 0.1 mm."""
     try:

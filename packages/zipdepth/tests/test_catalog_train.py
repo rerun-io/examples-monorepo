@@ -10,7 +10,11 @@ from torch import nn, optim
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
-from zipdepth.apis.train_catalog import (
+pytest.importorskip("easydict", reason="easydict is required by this test module")
+pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
+pytest.importorskip("arkitscenes_download", reason="arkitscenes_download is required by this test module")
+
+from zipdepth.apis.train_catalog import (  # noqa: E402
     CompileMode,
     ConstantCooldownLR,
     ResolutionStage,
@@ -29,9 +33,9 @@ from zipdepth.apis.train_catalog import (
     resolve_max_lr,
     resolve_training_recipe,
 )
-from zipdepth.catalog.segments import split_holdout_segments
-from zipdepth.loss import MetricDepthLoss, ZipDepthLoss
-from zipdepth.training.trainer import ZipDepthTrainer
+from zipdepth.catalog.segments import split_holdout_segments  # noqa: E402
+from zipdepth.loss import MetricDepthLoss, ZipDepthLoss  # noqa: E402
+from zipdepth.training.trainer import ZipDepthTrainer  # noqa: E402
 
 
 def test_upstream_train_config_loads_shipped_values_and_fallbacks(tmp_path: Path) -> None:

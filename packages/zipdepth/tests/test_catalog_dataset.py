@@ -10,7 +10,12 @@ from numpy import ndarray
 from numpy.testing import assert_array_equal
 from torch.utils.data import IterableDataset
 
+pytestmark = pytest.mark.integration
 pytest.importorskip("rerun.catalog", reason="Rerun catalog dependencies live in the zipdepth catalog lane")
+pytest.importorskip("rerun.experimental.dataloader", reason="rerun.experimental.dataloader is required by this test module")
+pytest.importorskip("torchcodec", reason="torchcodec is required by this test module")
+pytest.importorskip("imagecodecs", reason="imagecodecs is required by this test module")
+
 pytest.importorskip("arkitscenes_download", reason="ARKitScenes catalog dependencies live in the zipdepth catalog lane")
 pa = pytest.importorskip("pyarrow", reason="Arrow catalog dependencies live in the zipdepth catalog lane")
 

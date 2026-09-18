@@ -84,6 +84,7 @@ def test_validate_runtime_inputs_errors() -> None:
         validate_runtime_inputs(spec, _example_inputs(STATIC_BATCH + 1, "cpu"))
 
 
+@pytest.mark.integration
 @cuda_only
 def test_three_backend_parity(tmp_path: Path) -> None:
     module = TinyNet().cuda().eval()
@@ -115,6 +116,7 @@ def test_three_backend_parity(tmp_path: Path) -> None:
                 )
 
 
+@pytest.mark.integration
 @cuda_only
 def test_tensorrt_static_engine_drops_padded_rows(tmp_path: Path) -> None:
     """A static engine always computes its baked batch; callers must still see only their rows."""
@@ -137,6 +139,7 @@ def test_tensorrt_static_engine_drops_padded_rows(tmp_path: Path) -> None:
             torch.testing.assert_close(outputs[output_name], reference[output_name], rtol=1e-3, atol=1e-4)
 
 
+@pytest.mark.integration
 @cuda_only
 def test_tensorrt_cuda_graph_replay(tmp_path: Path) -> None:
     module = TinyNet().cuda().eval()
@@ -153,6 +156,7 @@ def test_tensorrt_cuda_graph_replay(tmp_path: Path) -> None:
         for output_name in ("features", "logits"):
             torch.testing.assert_close(outputs[output_name], expected[output_name], rtol=1e-4, atol=1e-5)
 
+@pytest.mark.integration
 @cuda_only
 def test_onnx_runtime_on_non_default_stream(tmp_path: Path) -> None:
     """Inputs produced on a side stream must be visible to the ORT run (and its

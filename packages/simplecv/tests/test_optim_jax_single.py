@@ -61,6 +61,7 @@ def test_proj_3d_vectorized_identity_no_nan():
     assert np.all(np.isfinite(uv)), "Projection produced NaN/Inf"
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not have_mano_pkls(), reason="MANO PKLs not found under data/")
 def test_residual_composition_is_finite():
     # Build a tiny synthetic scene using MANO left hand
@@ -100,7 +101,7 @@ def test_residual_composition_is_finite():
     assert np.isfinite(results.trans_optim).all(), "Non-finite trans_optim returned"
 
 
-@pytest.mark.slow
+@pytest.mark.integration
 @pytest.mark.skipif(not have_mano_pkls(), reason="MANO PKLs not found under data/")
 def test_single_hand_optim_recovers_close_3d():
     side = "left"

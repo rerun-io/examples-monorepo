@@ -232,6 +232,7 @@ def test_log_video_does_not_materialize_static_chunks(synthetic_h264_mp4: Path, 
     assert len(timestamps_ns) == _FRAME_COUNT
 
 
+@pytest.mark.integration
 def test_log_video_reencodes_hevc_to_h264(synthetic_hevc_mp4: Path, tmp_path: Path) -> None:
     """Callers can request H.264 output for browser compatibility."""
     if not _can_open_local_socket():
@@ -254,6 +255,7 @@ def test_log_video_reencodes_hevc_to_h264(synthetic_hevc_mp4: Path, tmp_path: Pa
     assert codec == rr.VideoCodec.H264
 
 
+@pytest.mark.integration
 def test_log_video_keeps_hevc_without_output_codec(synthetic_hevc_mp4: Path, tmp_path: Path) -> None:
     """The shared helper preserves the source codec unless its caller requests another one."""
     if not _can_open_local_socket():
@@ -312,6 +314,7 @@ def test_log_video_preserves_video_read_failure_context(tmp_path: Path) -> None:
     assert exc_info.value.__cause__ is not None
 
 
+@pytest.mark.golden
 def test_log_video_stream_roundtrip_pixels_match_source(
     synthetic_h264_mp4: Path,
     tmp_path: Path,

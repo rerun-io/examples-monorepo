@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from conftest import CHECKPOINT_PATH, SMPL_MODEL_PATH, requires_cuda, slow
+from conftest import CHECKPOINT_PATH, SMPL_MODEL_PATH, integration, requires_cuda
 
 from lamptrack.third_party.lamp.models.model_loader import build_lampnet_from_checkpoint
 
@@ -19,7 +19,7 @@ def _sha256(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-@slow
+@integration
 @requires_cuda
 def test_released_checkpoint_loads_with_neutral_smpl() -> None:
     """The pinned plain state dict loads with only the two runtime buffers absent."""

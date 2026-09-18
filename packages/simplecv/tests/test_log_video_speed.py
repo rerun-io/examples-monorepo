@@ -10,6 +10,8 @@ import rerun as rr
 
 from simplecv.rerun_log_utils import log_video
 
+pytestmark = pytest.mark.integration
+
 _HOCAP_BASE = Path("data/hocap/sample")
 _MAX_MP4_READER_TIME_S: float = 1.5
 _TRIALS: int = 5

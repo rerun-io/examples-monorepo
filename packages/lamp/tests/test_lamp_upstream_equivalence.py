@@ -18,6 +18,8 @@ from lamptrack.third_party.lamp.tracking.tracker import LampTracker
 
 REFERENCE_DIR = Path(__file__).parent / "reference_data" / "lamp"
 
+pytestmark = pytest.mark.golden
+
 
 def _load_module(name: str, filename: str) -> ModuleType:
     """Load one pristine source file under its original package name."""

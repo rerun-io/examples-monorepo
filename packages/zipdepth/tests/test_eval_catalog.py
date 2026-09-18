@@ -5,13 +5,17 @@ import pytest
 from jaxtyping import Bool, Float32
 from numpy import ndarray
 
-from zipdepth.apis.eval_catalog import (
+pytest.importorskip("easydict", reason="easydict is required by this test module")
+pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
+pytest.importorskip("arkitscenes_download", reason="arkitscenes_download is required by this test module")
+
+from zipdepth.apis.eval_catalog import (  # noqa: E402
     MetricCatalogDepthMetrics,
     affine_reference_depth,
     aligned_inverse_diagnostic,
     score_metric_depth,
 )
-from zipdepth.evaluation.edge_metrics import EdgeStratifiedResult, edge_stratified_mae
+from zipdepth.evaluation.edge_metrics import EdgeStratifiedResult, edge_stratified_mae  # noqa: E402
 
 
 def test_direct_metric_scoring_reports_unaligned_absrel_delta1_and_mae() -> None:

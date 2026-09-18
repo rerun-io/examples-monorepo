@@ -23,9 +23,6 @@ from monopriors.models.rig_depth.xlens_trt import ENGINE_OUTPUT_NAMES, EngineGeo
 from monopriors.third_party.xlens.models.dinov2.vision_transformer import FrozenRigGeometry
 from monopriors.third_party.xlens.models.net import XLensNet
 
-pytestmark = pytest.mark.slow
-
-
 
 def frozen_random_rig(model: XLensNet, views: int, image_hw: tuple[int, int], seed: int) -> tuple[UInt8[ndarray, "s h w 3"], FrozenRigGeometry]:
     """Random all-fisheye rig with poses, frozen on CPU."""

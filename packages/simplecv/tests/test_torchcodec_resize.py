@@ -10,7 +10,9 @@ import pytest
 import torch
 from jaxtyping import UInt8
 
-from simplecv.video_io import TorchCodecMultiVideoReader, TorchCodecVideoReader
+pytest.importorskip("torchcodec", reason="CPU and CUDA video decoding require torchcodec")
+
+from simplecv.video_io import TorchCodecMultiVideoReader, TorchCodecVideoReader  # noqa: E402
 
 _SOURCE_HW: tuple[int, int] = (240, 320)
 _RESIZE_HW: tuple[int, int] = (120, 160)
@@ -78,6 +80,7 @@ def test_resize_hw_multiview(synthetic_video: Path) -> None:
     assert tuple(chunk[0].shape) == (4, 3, *_RESIZE_HW)
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GPU resize path")
 def test_resize_hw_cuda_post_decode(synthetic_video: Path) -> None:
     """CUDA path decodes native then resizes on-GPU."""

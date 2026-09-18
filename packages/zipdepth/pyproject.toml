@@ -25,6 +25,13 @@ packages = ["zipdepth"]
 [tool.ruff]
 line-length = 150
 
+[tool.pytest.ini_options]
+markers = [
+    "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e zipdepth-dev tests-integration)",
+    "golden: reference comparison against stored ground truth (run: pixi run -e zipdepth-dev tests-golden)",
+]
+addopts = "-m 'not integration and not golden'"
+
 [tool.ruff.lint]
 select = ["E", "F", "UP", "B", "SIM", "I"]
 ignore = ["E501", "F722", "F821", "UP037", "UP040"]

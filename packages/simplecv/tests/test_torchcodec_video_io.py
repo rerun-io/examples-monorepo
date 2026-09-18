@@ -122,6 +122,7 @@ def multi_video_paths() -> list[Path]:
 class TestTorchCodecVideoReader:
     """Tests for TorchCodecVideoReader with file path input."""
 
+    @pytest.mark.integration
     def test_metadata_properties(self, sample_video_path: Path) -> None:
         """Test that video metadata is correctly extracted."""
         reader: TorchCodecVideoReader = TorchCodecVideoReader(sample_video_path, device="cpu")
@@ -132,6 +133,7 @@ class TestTorchCodecVideoReader:
         assert reader.frame_cnt > 0, "Frame count should be positive"
         assert reader.resolution == (reader.width, reader.height)
 
+    @pytest.mark.integration
     def test_frame_count_matches_opencv(self, sample_video_path: Path) -> None:
         """Verify frame count matches OpenCV VideoReader."""
         tc_reader: TorchCodecVideoReader = TorchCodecVideoReader(sample_video_path, device="cpu")
@@ -142,6 +144,7 @@ class TestTorchCodecVideoReader:
             f"Frame count mismatch: TorchCodec={tc_reader.frame_cnt}, OpenCV={cv_reader.frame_cnt}"
         )
 
+    @pytest.mark.integration
     def test_frame_shape_and_dtype(self, sample_video_path: Path) -> None:
         """Test that decoded frames have correct shape and dtype."""
         reader: TorchCodecVideoReader = TorchCodecVideoReader(sample_video_path, device="cpu")
@@ -153,6 +156,7 @@ class TestTorchCodecVideoReader:
         assert frame.shape[2] == reader.width, "Frame width mismatch"
         assert frame.dtype == torch.uint8, "Frame should be uint8"
 
+    @pytest.mark.integration
     def test_rgb_output_format(self, sample_video_path: Path) -> None:
         """Verify output is RGB tensor format."""
         tc_reader: TorchCodecVideoReader = TorchCodecVideoReader(sample_video_path, device="cpu")
@@ -168,6 +172,7 @@ class TestTorchCodecVideoReader:
         diff: float = float((tc_frame.to(torch.float32) - cv_rgb_chw.to(torch.float32)).abs().mean().item())
         assert diff < 5.0, f"Frames differ too much (mean diff={diff}), RGB conversion may be wrong"
 
+    @pytest.mark.integration
     def test_sequential_iteration(self, sample_video_path: Path) -> None:
         """Test sequential iteration through video."""
         reader: TorchCodecVideoReader = TorchCodecVideoReader(sample_video_path, device="cpu")
@@ -254,6 +259,7 @@ class TestTorchCodecVideoReader:
         finally:
             reader.close()
 
+    @pytest.mark.integration
     def test_random_access(self, sample_video_path: Path) -> None:
         """Test random access to frames."""
         reader: TorchCodecVideoReader = TorchCodecVideoReader(sample_video_path, device="cpu")
@@ -265,6 +271,7 @@ class TestTorchCodecVideoReader:
                 frame: UInt8[torch.Tensor, "3 h w"] = reader.get_frame(idx)
                 assert frame.shape[0] == 3, f"Frame {idx} should have 3 channels"
 
+    @pytest.mark.integration
     def test_negative_indexing(self, sample_video_path: Path) -> None:
         """Test negative indexing."""
         reader: TorchCodecVideoReader = TorchCodecVideoReader(sample_video_path, device="cpu")
@@ -276,6 +283,7 @@ class TestTorchCodecVideoReader:
 
         assert torch.equal(last_frame, explicit_last), "Negative indexing should work"
 
+    @pytest.mark.integration
     def test_slicing(self, sample_video_path: Path) -> None:
         """Test slice access."""
         reader: TorchCodecVideoReader = TorchCodecVideoReader(sample_video_path, device="cpu")
@@ -286,6 +294,7 @@ class TestTorchCodecVideoReader:
         assert frames.shape[0] == 5, "Slice should return 5 frames"
         assert frames.shape[1] == 3, "Each frame should have 3 channels"
 
+    @pytest.mark.integration
     def test_context_manager(self, sample_video_path: Path) -> None:
         """Test context manager protocol."""
         with TorchCodecVideoReader(sample_video_path, device="cpu") as reader:
@@ -296,6 +305,7 @@ class TestTorchCodecVideoReader:
 class TestTorchCodecVideoReaderBytes:
     """Tests for TorchCodecVideoReader with bytes input."""
 
+    @pytest.mark.integration
     def test_bytes_input(self, sample_video_path: Path) -> None:
         """Test creating reader from bytes."""
         video_bytes: bytes = sample_video_path.read_bytes()
@@ -305,6 +315,7 @@ class TestTorchCodecVideoReaderBytes:
         assert reader.height > 0
         assert reader.frame_cnt > 0
 
+    @pytest.mark.integration
     def test_bytes_matches_path(self, sample_video_path: Path) -> None:
         """Verify bytes and path inputs produce identical frames."""
         video_bytes: bytes = sample_video_path.read_bytes()
@@ -327,6 +338,7 @@ class TestTorchCodecVideoReaderBytes:
 class TestTorchCodecMultiVideoReader:
     """Tests for TorchCodecMultiVideoReader."""
 
+    @pytest.mark.integration
     def test_multi_video_creation(self, multi_video_paths: list[Path]) -> None:
         """Test creating multi-video reader."""
         sources: list[Path | bytes] = list(multi_video_paths)
@@ -335,6 +347,7 @@ class TestTorchCodecMultiVideoReader:
         assert len(reader.video_readers) == len(multi_video_paths)
         assert len(reader.video_paths) == len(multi_video_paths)
 
+    @pytest.mark.integration
     def test_multi_video_properties(self, multi_video_paths: list[Path]) -> None:
         """Test multi-video reader properties."""
         sources: list[Path | bytes] = list(multi_video_paths)
@@ -344,6 +357,7 @@ class TestTorchCodecMultiVideoReader:
         assert reader.width > 0
         assert len(reader) > 0
 
+    @pytest.mark.integration
     def test_multi_video_iteration(self, multi_video_paths: list[Path]) -> None:
         """Test iterating through synchronized frames."""
         sources: list[Path | bytes] = list(multi_video_paths)
@@ -403,6 +417,7 @@ class TestTorchCodecMultiVideoReader:
         assert int(frame_batches[0][0][0, 0, 0].item()) == 0
         assert int(frame_batches[1][0][0, 0, 0].item()) == 1
 
+    @pytest.mark.integration
     def test_multi_video_indexing(self, multi_video_paths: list[Path]) -> None:
         """Test random access to synchronized frames."""
         sources: list[Path | bytes] = list(multi_video_paths)
@@ -412,6 +427,7 @@ class TestTorchCodecMultiVideoReader:
         assert len(frame_list) == len(multi_video_paths)
         assert frame_list[0].shape[0] == 3
 
+    @pytest.mark.integration
     def test_multi_video_with_bytes(self, multi_video_paths: list[Path]) -> None:
         """Test multi-video reader with mixed bytes and paths."""
         # First video as bytes, rest as paths
@@ -494,6 +510,7 @@ class TestGetFramesAt:
         with pytest.raises(ValueError, match="Expected 2 frame indices"):
             reader.get_frames_at([0])
 
+    @pytest.mark.integration
     def test_cv2_reader_matches_torchcodec_contract(self, multi_video_paths: list[Path]) -> None:
         """The cv2 MultiVideoReader satisfies the same contract: RGB CHW uint8 tensors."""
         reader: MultiVideoReader = MultiVideoReader(multi_video_paths)

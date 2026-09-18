@@ -8,6 +8,8 @@ from numpy import ndarray
 from numpy.testing import assert_array_equal
 from torch import Tensor
 
+pytestmark = pytest.mark.integration
+
 pytest.importorskip("imagecodecs", reason="Fast PNG inflate lives in the zipdepth catalog lane")
 pytest.importorskip("arkitscenes_download", reason="Representative depth encoding lives in the zipdepth catalog lane")
 

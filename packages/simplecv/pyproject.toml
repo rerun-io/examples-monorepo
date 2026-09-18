@@ -42,7 +42,11 @@ simplecv-view-exoego = "simplecv.apis.view_exoego:entrypoint"
 include = ["simplecv*", "tools*", "tests*"]
 
 [tool.pytest.ini_options]
-markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
+markers = [
+    "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e simplecv-dev tests-integration)",
+    "golden: reference comparison against stored ground truth (run: pixi run -e simplecv-dev tests-golden)",
+]
+addopts = "-m 'not integration and not golden'"
 
 [tool.ruff]
 line-length = 150

@@ -10,16 +10,21 @@ import torch
 from jaxtyping import Int64, Shaped
 from numpy import ndarray
 
+pytestmark = pytest.mark.integration
 pytest.importorskip("rerun.catalog", reason="Rerun catalog dependencies live in the zipdepth catalog lane")
-pytest.importorskip("arkitscenes_download", reason="ARKitScenes catalog dependencies live in the zipdepth catalog lane")
-from rerun.catalog import DatasetEntry
-from rerun.experimental.dataloader import NoShuffle
+pytest.importorskip("rerun.experimental.dataloader", reason="rerun.experimental.dataloader is required by this test module")
+pytest.importorskip("torchcodec", reason="torchcodec is required by this test module")
+pytest.importorskip("imagecodecs", reason="imagecodecs is required by this test module")
 
-from zipdepth.catalog.builders import CudaSampleBuilder
-from zipdepth.catalog.dataloader_dataset import RerunPromptDepthDataset, _ExactTimestampSampleIndex
-from zipdepth.catalog.dataset import CatalogPromptDepthDataset
-from zipdepth.catalog.segments import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, PromptDACatalog, load_promptda_catalog
-from zipdepth.catalog.targets import AugmentPolicy
+pytest.importorskip("arkitscenes_download", reason="ARKitScenes catalog dependencies live in the zipdepth catalog lane")
+from rerun.catalog import DatasetEntry  # noqa: E402
+from rerun.experimental.dataloader import NoShuffle  # noqa: E402
+
+from zipdepth.catalog.builders import CudaSampleBuilder  # noqa: E402
+from zipdepth.catalog.dataloader_dataset import RerunPromptDepthDataset, _ExactTimestampSampleIndex  # noqa: E402
+from zipdepth.catalog.dataset import CatalogPromptDepthDataset  # noqa: E402
+from zipdepth.catalog.segments import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, PromptDACatalog, load_promptda_catalog  # noqa: E402
+from zipdepth.catalog.targets import AugmentPolicy  # noqa: E402
 
 TensorDigest: TypeAlias = tuple[torch.dtype, tuple[int, ...], bytes]
 SampleDigest: TypeAlias = dict[str, TensorDigest]

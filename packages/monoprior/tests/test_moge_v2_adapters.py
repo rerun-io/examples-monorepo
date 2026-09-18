@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import pytest
 import torch
-from conftest import requires_cuda, slow_cuda
+from conftest import requires_cuda
 from einops import rearrange
 from jaxtyping import Bool, Float32, UInt8
 from torch import Tensor
@@ -74,7 +74,7 @@ def test_single_image_adapters_reject_cpu_at_construction() -> None:
         MoGeV2NormalPredictor(device="cpu")
 
 
-@slow_cuda
+@pytest.mark.golden
 @requires_cuda
 def test_all_single_image_adapters_match_vendored_infer_on_room() -> None:
     """Metric, normal, and paired adapters match the pinned vendored reference."""

@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from conftest import requires_cuda, slow_cuda
+from conftest import integration, requires_cuda
 from huggingface_hub import snapshot_download
 from jaxtyping import Bool, Float32
 from torch import Tensor
@@ -18,7 +18,7 @@ from monopriors.apis.rig_depth import ETH3DRigPair, eth3d_rig_metrics, load_eth3
 from monopriors.models.rig_depth import RigDepthPrediction, XLensPredictor, XLensTrtPredictor
 from monopriors.models.rig_depth.xlens import download_xlens_checkpoint
 
-pytestmark = [slow_cuda, requires_cuda]
+pytestmark = requires_cuda
 
 EXPECTED_EPE_PX: float = 4.558876
 EXPECTED_BAD1_PERCENT: float = 88.851027
@@ -63,6 +63,7 @@ def _assert_parity(prediction: RigDepthPrediction, reference: RigDepthPrediction
     assert prediction.depth_m.shape == reference.depth_m.shape and prediction.mask.shape == reference.mask.shape
 
 
+@integration
 def test_dynamic_profile_engine_serves_batches_and_other_shapes(checkpoint: Path, pair: ETH3DRigPair, reference: RigDepthPrediction) -> None:
     """The default profile, one dynamic engine (views 2-4, up to the ETH3D crop, batch 2), matches eager fp32 at the rig shape and at a smaller off-opt shape."""
     height: int = pair.images.shape[1]
@@ -102,6 +103,7 @@ def test_dynamic_profile_engine_serves_batches_and_other_shapes(checkpoint: Path
         predictor(pair.images[:, :, :280], pair.rays[:, :, :280], pair.cam_types, pair.cam_T_ref)
 
 
+@pytest.mark.golden
 def test_tensorrt_matches_eager_fp32_and_keeps_accuracy(checkpoint: Path, pair: ETH3DRigPair, reference: RigDepthPrediction) -> None:
     """The rig-profile engine (dynamic batch up to 4) stays within 2% median abs-rel of eager fp32 and inside the ETH3D regression band."""
     predictor = XLensTrtPredictor(checkpoint=checkpoint, use_cuda_graph=True, profile="rig", max_batch_size=4)

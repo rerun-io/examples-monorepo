@@ -6,7 +6,11 @@ import numpy as np
 import pytest
 import rerun as rr
 
-from simplecv.catalog_video import CatalogVideo, read_catalog_videos
+pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
+
+from simplecv.catalog_video import CatalogVideo, read_catalog_videos  # noqa: E402
+
+pytestmark = pytest.mark.integration
 
 
 @pytest.mark.parametrize("timestamp", [False, True])

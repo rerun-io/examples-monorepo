@@ -10,8 +10,10 @@ from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
-from monopriors.apis.benchmark_xlens_trt import nearest_time_index
-from monopriors.apis.rig_depth_catalog import RigBatch, RigCollate, RigDepthCatalogConfig, create_rig_depth_catalog_blueprint
+pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
+
+from monopriors.apis.benchmark_xlens_trt import nearest_time_index  # noqa: E402
+from monopriors.apis.rig_depth_catalog import RigBatch, RigCollate, RigDepthCatalogConfig, create_rig_depth_catalog_blueprint  # noqa: E402
 
 CAMS: tuple[str, ...] = ("cam_00", "cam_01")
 

@@ -80,6 +80,7 @@ def test_set_model_device(predictor: ZipDepthPredictor) -> None:
     assert next(predictor.model.parameters()).device.type == "cpu"
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU and the Hub weights")
 def test_real_weights_predict() -> None:
     pred = ZipDepthConfig().setup(device="cuda")(np.full((240, 320, 3), 128, dtype=np.uint8), None)

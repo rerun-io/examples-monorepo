@@ -11,15 +11,21 @@ import torch
 from rerun.experimental import ViewerClient
 from simplecv.rerun_log_utils import RerunTyroConfig
 
-from zipdepth.apis.infer_rerun import InferRerunConfig, infer_rerun
+pytestmark = pytest.mark.golden
+pytest.importorskip("easydict", reason="easydict is required by this test module")
+
+from zipdepth.apis.infer_rerun import InferRerunConfig, infer_rerun  # noqa: E402
 
 PKG = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU and the Hub weights")
 def test_saved_recording_renders(tmp_path: Path) -> None:
+    image_path = PKG / "assets/examples/im0.jpg"
+    if not image_path.is_file():
+        pytest.skip(f"Example image missing: {image_path}")
     rrd = tmp_path / "zipdepth.rrd"
-    infer_rerun(InferRerunConfig(rr_config=RerunTyroConfig(headless=True, save=rrd), image=PKG / "assets/examples/im0.jpg"))
+    infer_rerun(InferRerunConfig(rr_config=RerunTyroConfig(headless=True, save=rrd), image=image_path))
     rr.disconnect()
     assert rrd.stat().st_size > 100_000
 
