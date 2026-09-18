@@ -231,6 +231,7 @@ def test_the_probe_refuses_a_calibration_whose_imu_is_not_the_catalogs(settings:
 
 
 @pytest.mark.integration
+@pytest.mark.usefixtures("live_catalog")
 def test_the_feed_opens_the_real_robocap_rig(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     """Read four of six cameras at 640x360 with matched clocks and paired IMU.
     This whole-feed integration test needs the catalog and is marked integration.

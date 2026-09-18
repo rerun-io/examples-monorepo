@@ -299,6 +299,7 @@ def test_a_ground_truth_window_with_no_pose_in_it_is_empty() -> None:
 
 
 @pytest.mark.integration
+@pytest.mark.usefixtures("live_catalog")
 def test_the_smoke_segment_decodes_from_the_catalog(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     """One real segment end to end: frame count, shape, dtype and paired IMU timestamps."""
     segment: ReferenceSegment = benchmarks.by_id(SMOKE_SEGMENT)
@@ -355,6 +356,7 @@ def test_the_smoke_segment_decodes_from_the_catalog(benchmarks: Benchmarks, sett
 
 
 @pytest.mark.integration
+@pytest.mark.usefixtures("live_catalog")
 def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     """Cutting the segment into 2 s windows must reproduce the pixels and the inertial stream exactly."""
     segment: ReferenceSegment = benchmarks.by_id(SMOKE_SEGMENT)
@@ -398,6 +400,7 @@ def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample(benchma
 
 
 @pytest.mark.integration
+@pytest.mark.usefixtures("live_catalog")
 def test_a_replay_export_associates_with_the_catalog_ground_truth(benchmarks: Benchmarks, settings: SlamConfig, tmp_path: Path) -> None:
     """The replay's own export path, end to end, lands on the sidecar's clock.
 

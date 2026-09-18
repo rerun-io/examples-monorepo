@@ -85,6 +85,7 @@ def test_each_nonfinite_measurement_names_finite_clause(value: float) -> None:
 
 
 @pytest.mark.golden
+@pytest.mark.usefixtures("live_catalog")
 def test_catalog_smoke_gate(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     from slam_rs.apis.gate import ClipResult, measure
 

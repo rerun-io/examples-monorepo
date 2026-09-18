@@ -17,7 +17,9 @@ Runtime settings and benchmark definitions are separate session-scoped fixtures.
 Tests request benchmark definitions only when they evaluate regression cases.
 """
 
+import socket
 from pathlib import Path
+from urllib.parse import urlparse
 
 import numpy as np
 import pytest
@@ -36,6 +38,20 @@ from slam_rs.reference import Benchmarks, load_benchmarks
 def settings() -> SlamConfig:
     """Runtime settings, parsed once for the whole session."""
     return load_slam_config()
+
+
+@pytest.fixture
+def live_catalog(settings: SlamConfig) -> None:
+    """Skip when the catalog server the integration/golden tests read from is not reachable.
+
+    The recordings are an asset like any other: a missing server is a skip that names it, not a failure.
+    """
+    url = urlparse(settings.catalog_url.replace("rerun+http://", "http://", 1))
+    try:
+        with socket.create_connection((url.hostname or "127.0.0.1", url.port or 80), timeout=2.0):
+            pass
+    except OSError as error:
+        pytest.skip(f"catalog server {settings.catalog_url} is not reachable ({error}); start it with `pixi run -e slam-rs slam-rs-catalog-up`")
 
 
 @pytest.fixture(scope="session")

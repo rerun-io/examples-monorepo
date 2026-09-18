@@ -69,6 +69,7 @@ def test_reference_csv_is_scored_without_a_ground_truth_gate(
 
 
 @pytest.mark.golden
+@pytest.mark.usefixtures("live_catalog")
 def test_catalog_robocap_regression_reference(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     session: RobocapSession = benchmarks.robocap.session("s00000015")
     if session.reference_csv is None:
