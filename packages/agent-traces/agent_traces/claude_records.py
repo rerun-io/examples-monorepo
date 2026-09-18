@@ -186,8 +186,8 @@ class Attachment:
     """Attachment subtype."""
     text: str = ""
     """Text detail when available."""
-    content: str | None = None
-    """Content detail when available."""
+    content: object = serde_field(default=None, serializer=lambda value: value, deserializer=lambda value: value)
+    """Content detail: a string for hook output, a list or object for reminders and file attachments; kept uninterpreted."""
     command: str | None = None
     """Queued command text."""
     message: str | None = None

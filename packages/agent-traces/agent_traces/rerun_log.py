@@ -16,6 +16,7 @@ import rerun as rr
 from agent_traces.blueprint import session_blueprint
 from agent_traces.claude import ClaudeSession, TimedRecord, result_images, result_text
 from agent_traces.claude_records import (
+    Block,
     CacheCreation,
     ImageBlock,
     ImageSource,
@@ -107,6 +108,79 @@ def tool_path(name: str) -> str:
     return f"mcp/{parts[1]}/{parts[2]}" if len(parts) == 3 and parts[0] == "mcp" else name
 
 
+def turn_rows(records: list[TimedRecord]) -> list[TextRow]:
+    """Aggregate main-session records in file order between human prompts.
+
+    Args:
+        records: Timestamped main transcript records from the parser, including any preamble.
+
+    Returns:
+        One row per human prompt.
+    """
+    turns: list[TextRow] = []
+    seen: set[str] = set()
+    for timed in records:
+        record: Record = timed.record
+        message: Message | None = record.message
+        blocks: list[Block] = message.content if message is not None else []
+        prompt_texts: list[str] = [block.text for block in blocks if isinstance(block, TextBlock)]
+        if record.type == "user" and not record.isCompactSummary and prompt_texts and not any(isinstance(block, ToolResultBlock) for block in blocks):
+            turns.append(
+                TextRow(
+                    timed.timestamp_ns,
+                    "\n".join(prompt_texts),
+                    values={
+                        "turn_index": len(turns),
+                        "prompt_id": record.promptId or "",
+                        "file_index": timed.file_index,
+                        "elapsed_ms": 0.0,
+                        "n_tool_calls": 0,
+                        "n_assistant_messages": 0,
+                        "n_images": 0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cache_read_tokens": 0,
+                        "cache_creation_tokens": 0,
+                        "thinking_tokens": 0,
+                    },
+                    color=ROLE_COLORS["user"],
+                )
+            )
+            seen = set()
+        if not turns:
+            continue
+        turn: TextRow = turns[-1]
+        turn.values["elapsed_ms"] = (timed.timestamp_ns - turn.timestamp_ns) / 1_000_000
+        n_images: int = 0
+        n_tool_calls: int = 0
+        for block in blocks:
+            match block:
+                case ToolUseBlock():
+                    n_tool_calls += 1
+                case ImageBlock():
+                    n_images += 1
+                case ToolResultBlock():
+                    n_images += len(result_images(block))
+        increments: dict[str, int] = {"n_tool_calls": n_tool_calls, "n_images": n_images}
+        if record.type == "assistant" and message is not None and message.id and message.id not in seen:
+            seen.add(message.id)
+            usage: Usage = message.usage or Usage()
+            details: OutputTokensDetails = usage.output_tokens_details or OutputTokensDetails()
+            increments.update(
+                n_assistant_messages=1,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cache_read_tokens=usage.cache_read_input_tokens,
+                cache_creation_tokens=usage.cache_creation_input_tokens,
+                thinking_tokens=details.thinking_tokens,
+            )
+        for name, value in increments.items():
+            previous: Scalar = turn.values[name]
+            assert isinstance(previous, int)
+            turn.values[name] = previous + value
+    return turns
+
+
 def write_session_rrd(session: ClaudeSession, out: Path) -> Path:
     """Save one session, including its subagents, to an RRD file.
 
@@ -145,7 +219,11 @@ def write_session_rrd(session: ClaudeSession, out: Path) -> Path:
             elif record.type == "attachment" and record.attachment is not None:
                 attachment_json: str = orjson.dumps(orjson.loads(timed.raw_json).get("attachment")).decode()
                 description: str = (
-                    record.attachment.text or record.attachment.content or record.attachment.command or record.attachment.message or attachment_json
+                    record.attachment.text
+                    or (record.attachment.content if isinstance(record.attachment.content, str) else "")
+                    or record.attachment.command
+                    or record.attachment.message
+                    or attachment_json
                 )
                 texts.setdefault(f"{prefix}lifecycle/attachments", []).append(
                     TextRow(
@@ -255,6 +333,11 @@ def write_session_rrd(session: ClaudeSession, out: Path) -> Path:
                                 timed.timestamp_ns, base64.b64decode(source.data), source.media_type, timed.file_index, image_call_id, image_origin
                             )
                         )
+    turns: list[TextRow] = turn_rows(session.main)
+    if turns:
+        texts["turns"] = turns
+        for metric, key in {"elapsed_ms": "elapsed_ms", "output_tokens": "output_tokens", "tool_calls": "n_tool_calls"}.items():
+            scalars[f"turns/{metric}"] = [ScalarRow(row.timestamp_ns, float(row.values[key]), int(row.values["file_index"])) for row in turns]
     out.parent.mkdir(parents=True, exist_ok=True)
     recording: rr.RecordingStream = rr.RecordingStream("agent_traces", recording_id=session.session_id)
     with tempfile.NamedTemporaryFile(dir=out.parent, prefix=out.name + ".", suffix=".tmp", delete=False) as temporary:
@@ -323,6 +406,7 @@ def write_session_rrd(session: ClaudeSession, out: Path) -> Path:
                     cli_versions=",".join(sorted(session.cli_versions)),
                     title=session.title,
                     models=",".join(sorted(session.models)),
+                    n_turns=len(turns),
                     n_subagents=len(session.subagents),
                     n_tool_calls=sum(row.values.get("phase") == "call" for rows in texts.values() for row in rows),
                     n_images=sum(len(rows) for rows in images.values()),
