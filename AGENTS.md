@@ -8,7 +8,7 @@ A **Pixi workspace monorepo** of computer vision projects. Runnable Python proje
 
 ## Environments
 
-Each root-managed runnable package has a prod env (`<name>`) and a dev env (`<name>-dev`, adds ruff, pytest, beartype, pyrefly, hypothesis, vulture). The dev env exposes the tasks `lint`, `typecheck`, `deadcode`, and `tests` (e.g. `pixi run -e <name>-dev tests`). In package directories that contain a `.envrc`, direnv auto-activates the `*-dev` env when you enter the directory.
+Each root-managed runnable package has a prod env (`<name>`) and a dev env (`<name>-dev`, adds ruff, pytest, beartype, pyrefly, hypothesis, vulture). The dev env exposes `lint`, `typecheck`, `deadcode`, `tests`, `tests-integration`, `tests-golden`, and `gate` (e.g. `pixi run -e <name>-dev tests`). In package directories that contain a `.envrc`, direnv auto-activates the `*-dev` env when you enter the directory.
 
 ## Commands
 
@@ -34,7 +34,7 @@ so CI installs only the small `ci` environment and runs one task: `pixi run -e c
 CI locally; the workflow YAML only checks out, sets up pixi, and runs tasks.
 
 Before merge, authors run `pixi run -e <name>-dev gate` for each affected
-package. The shared `gate` task runs `lint`, `typecheck`, `deadcode`, and `tests`.
+package. The shared `gate` task runs `lint`, `typecheck`, `deadcode`, `tests`, and `tests-integration`.
 Record the result in the PR body as `Gate: <package>-dev gate on <machine> @ <commit>`.
 CI requires a `Gate:` line on non-draft PRs (`ci/check_gate_line.sh`, reads `$PR_BODY`;
 locally `pixi run -e ci ci-gate-line`);
@@ -42,6 +42,31 @@ include Rerun pixel evidence when the PR changes a view.
 
 Root `ruff.toml` is a fallback for files without a closer Ruff config. Package
 `[tool.ruff]` settings take precedence; do not force the root config onto them.
+
+## Testing
+
+Choose tiers by what a test needs, never by how long it takes:
+
+- **Unit** (unmarked): pure logic and synthetic inputs; no GPU, downloaded assets,
+  server, device, or network.
+- **Integration** (`pytest.mark.integration`): needs a GPU, downloaded asset/model/fixture,
+  catalog server or Rerun dataloader, device, or network.
+- **Golden** (`pytest.mark.golden`): reference comparisons against stored ground truth,
+  accuracy/ATE bands, upstream reference data, or Rerun pixels; implies its assets,
+  so do not also mark integration.
+
+Every runnable package registers `integration` and `golden` in its pyproject's
+`[tool.pytest.ini_options]` and sets `addopts = "-m 'not integration and not golden'"`.
+`tests` runs the default unit lane; `tests-integration` and `tests-golden` select
+their markers explicitly (`pixi run -e <name>-dev --frozen <task>`).
+`gate` includes integration; run golden separately. `slow`, `slow_cuda`, and
+`hardware` are retired markers.
+
+Use module-top `pytest.importorskip("<module>", reason=...)` for imports that only
+resolve in a package's specialized env, so every env can collect the unit lane.
+When a required asset is absent, integration/golden tests must `pytest.skip`
+with a reason naming the asset; keep existing opt-in env-var gates as well as markers.
+Do not add import-only `tests/test_import.py` files; other tests and CI cover imports.
 
 ## Platforms & lockfile
 
