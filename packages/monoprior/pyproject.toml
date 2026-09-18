@@ -9,6 +9,10 @@ dependencies = [
     # common: numpy, scipy, jaxtyping, rerun-sdk, gradio, gradio-rerun,
     #         huggingface_hub, hf-transfer, tqdm, pyserde, av, opencv
     "geffnet>=1.0.2",
+    # models/stereo_depth/fast_foundationstereo.py loads the upstream YAML config with OmegaConf; the
+    # relative-depth/stereo registries import it eagerly, so every env installing monopriors needs it.
+    # TODO(step 5): replace with a pyserde dataclass for that config and drop omegaconf.
+    "omegaconf>=2.3.0,<3",
     "omnidata-tools>=0.0.23",
     "pytorch-lightning>=2.5.1,<3",
     "diffusers[torch]>=0.32.2",
