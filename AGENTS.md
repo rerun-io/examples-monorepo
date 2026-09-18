@@ -25,6 +25,22 @@ pixi run -e robocap-slam-dev --frozen tests
 
 Prefer `pixi run --frozen` to skip re-solving deps. Only omit `--frozen` when you've modified dependencies. The dev tasks (`pixi run -e <name>-dev {lint,typecheck,deadcode,tests}`) are the canonical runners — `typecheck` applies the monorepo `pyrefly.toml` plus any per-package baseline, whereas a bare `pyrefly check .` skips the baseline and can surface known false-positives.
 
+## CI
+
+GitHub Actions uses hosted runners only. Package dev environments are 4–18 GB,
+so CI installs only the small `ci` environment. `pixi run -e ci ci` runs Ruff
+across the repo and the repo-structure tests in `ci/tests`; `pixi lock --check`
+checks the lockfile (with `CONDA_OVERRIDE_CUDA=13.0`).
+
+Before merge, authors run `pixi run -e <name>-dev gate` for each affected
+package. The shared `gate` task runs `lint`, `typecheck`, `deadcode`, and `tests`.
+Record the result in the PR body as `Gate: <package>-dev gate on <machine> @ <commit>`.
+CI requires a `Gate:` line on non-draft PRs; include Rerun pixel evidence when
+the PR changes a view.
+
+Root `ruff.toml` is a fallback for files without a closer Ruff config. Package
+`[tool.ruff]` settings take precedence; do not force the root config onto them.
+
 ## Platforms & lockfile
 
 The workspace `platforms` list defines the full platform vocabulary: the plain `linux-64`, `linux-aarch64`, and `osx-arm64` CPU/macOS subdirs plus the named `linux-64-cuda13` and `linux-aarch64-cuda13` platforms, which carry the CUDA 13.0 and glibc 2.35 virtual packages. A feature opts into a platform by listing its plain subdir or named workspace platform. An environment only solves a platform that every one of its features allows. For a `common`-composing package to run on macOS, `common` and `dev` also list `osx-arm64`, with an osx-scoped `pytorch-cpu` (simplecv imports torch at module load).
@@ -76,7 +92,7 @@ Claude Code through `.claude/skills`). Both Codex and Claude Code load it when a
 
 ## Adding a new package
 
-1. Create `packages/<name>/` with `pyproject.toml`, the source module, `tools/`, and `tests/` (structure above). If it imports another workspace package, list that name in `[project].dependencies` **and** pin it in `[tool.uv.sources]` (`name = { path = "../<dir>", editable = true }`); `packages/simplecv/tests/test_workspace_sources.py` checks both and fails if the lock ever resolves a workspace name from PyPI.
+1. Create `packages/<name>/` with `pyproject.toml`, the source module, `tools/`, and `tests/` (structure above). If it imports another workspace package, list that name in `[project].dependencies` **and** pin it in `[tool.uv.sources]` (`name = { path = "../<dir>", editable = true }`); `ci/tests/test_workspace_sources.py` checks both and fails if the lock ever resolves a workspace name from PyPI.
 2. Add `[feature.<name>]` in the root `pixi.toml`: conda deps, pypi deps (editable install), `activation.env` with `PACKAGE_DIR = "packages/<name>"`, and tasks with `cwd = "packages/<name>"`. Declare `platforms` explicitly (see **Platforms & lockfile**).
 3. Add `<name>` and `<name>-dev` entries in `[environments]`, both with `solve-group = "<name>"` and `no-default-feature = true`; `<name>-dev` adds the `dev` feature.
 4. Copy a package `.envrc` (defaults `PIXI_ENV` to `<name>-dev`) and add `packages/<name>/data/` to `.gitignore`.
@@ -226,7 +242,7 @@ To test an **unreleased** Rerun build, add a `find-links` at
 `build.rerun.io/commit/<sha>/wheels/` to `[feature.rerun-prerelease.pypi-options]` (CI builds one
 per commit, including PR branches — `curl` the index first to confirm your platform; PR commits
 are usually linux-x86_64 only) and match `rerun-sdk == <ver>` to the wheel filename. Re-lock on
-linux-64 (pixi 0.70.x) and move back to a public release once the fix ships.
+linux-64 (pixi >= 0.73, as set by `requires-pixi`) and move back to a public release once the fix ships.
 
 ## Gotchas
 

@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e # v0.10.2
+        with:
+          pixi-version: v0.77.1
+          environments: ci
+          frozen: true
+          cache: true
+          cache-write: ${{ github.event_name == 'push' && github.ref_name == 'main' }}
+      - name: Lint and repository structure
+        run: pixi run -e ci --frozen ci
+      - name: Lock file is up to date
+        run: pixi lock --check
+        env:
+          CONDA_OVERRIDE_CUDA: "13.0"
+
+  pr-gate-line:
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Author recorded the pre-merge gate
+        shell: bash
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if ! grep -q '^Gate:' <<< "$PR_BODY"; then
+            echo '::error::Run pixi run -e <package>-dev gate for each affected package before merge, then add a PR body line: Gate: <package>-dev gate on <machine> @ <commit>'
+            exit 1
+          fi

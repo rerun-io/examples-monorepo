@@ -215,6 +215,24 @@ description = "Find dead code in the package"
 cmd = "cd $PACKAGE_DIR && pytest -q"
 description = "Run package tests"
 
+[feature.dev.tasks.gate]
+depends-on = ["lint", "typecheck", "deadcode", "tests"]
+description = "Run the author pre-merge checks for the package"
+
+# ─── ci feature (small environment for hosted GitHub runners) ─────────────
+[feature.ci]
+platforms = ["linux-64"]
+
+[feature.ci.dependencies]
+python = "3.12.*"
+ruff = "*"
+pytest = ">=8.0.0,<9"
+
+[feature.ci.tasks]
+ci-lint = { cmd = "ruff check .", cwd = "." }
+ci-structure = { cmd = "pytest -q ci/tests", cwd = "." }
+ci = { depends-on = ["ci-lint", "ci-structure"] }
+
 # ═══════════════════════════════════════════════════════════════════════════
 # simplecv
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1450,14 +1468,12 @@ PACKAGE_DIR = "packages/pysfm"
 
 # ── Download tasks ───────────────────────────────────────────────────────
 [feature.pysfm.tasks._pysfm-download-sfm-example]
+# One line on purpose: pixi collapses newlines inside cmd into spaces, which turned the
+# previous multi-line `python -c` program into a SyntaxError (AGENTS.md gotcha).
 cmd = """
 test -d data/examples/sfm_reconstruction/Fountain || \
 (mkdir -p data/examples/sfm_reconstruction && \
-python -c "
-import urllib.request, zipfile
-urllib.request.urlretrieve('https://cvg-data.inf.ethz.ch/local-feature-evaluation-schoenberger2017/Strecha-Fountain.zip', '/tmp/fountain.zip')
-zipfile.ZipFile('/tmp/fountain.zip').extractall('data/examples/sfm_reconstruction')
-")
+python -c "import urllib.request, zipfile; urllib.request.urlretrieve('https://cvg-data.inf.ethz.ch/local-feature-evaluation-schoenberger2017/Strecha-Fountain.zip', '/tmp/fountain.zip'); zipfile.ZipFile('/tmp/fountain.zip').extractall('data/examples/sfm_reconstruction')")
 """
 cwd = "packages/pysfm"
 description = "Download Fountain example dataset for SfM"
@@ -3192,6 +3208,7 @@ arkitscenes-download-dev = { features = [
     "arkitscenes-download",
     "dev",
 ], solve-group = "arkitscenes-download", no-default-feature = true }
+ci = { features = ["ci"], solve-group = "ci", no-default-feature = true }
 dev = { features = [
     "ide",
     "dev",

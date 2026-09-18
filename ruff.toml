@@ -1,0 +1,41 @@
+# Fallback only: the closest package [tool.ruff] remains authoritative.
+line-length = 150
+extend-exclude = [
+    ".pixi",
+    "**/data",
+    "**/output",
+    "**/outputs",
+    "**/build",
+    "**/dist",
+    "**/node_modules",
+    "**/target",
+    # Pixi-build recipes and the vendored SAM 2 dependency.
+    "packages/asmk",
+    "packages/dpretrieval",
+    "packages/mast3r",
+    "packages/sam2-streaming",
+    # Vendor trees, including src-layout packages.
+    "packages/**/third_party",
+    "packages/*/thirdparty",
+    # Vendor/reference boundaries already excluded by package configs.
+    "packages/lamp/tests/reference_data/lamp",
+    "packages/monoprior/tests/reference_data/fast_foundationstereo/upstream_*.py",
+    "packages/monoprior/tests/reference_data/liteanystereo/upstream_*.py",
+    "packages/monoprior/tests/reference_data/zipdepth/upstream_*.py",
+    "packages/monoprior/tests/reference_data/xlens/*.py",
+    "packages/monoprior/vulture_whitelists/fast_foundationstereo.py",
+    "packages/monoprior/notebooks",
+    "packages/simplecv/notebooks",
+    "packages/sam3d-body/src/sam3d_body/data/transforms",
+    "packages/sam3d-body/src/sam3d_body/data/utils",
+    "packages/sam3d-body/src/sam3d_body/models",
+    "packages/sam3d-body/src/sam3d_body/transforms",
+    "packages/sam3d-body/src/sam3d_body/utils",
+    "packages/sapiens2-pose/src/sapiens2_pose/assets",
+    "packages/sapiens2-pose/src/sapiens2_pose/sapiens_lite",
+]
+
+[lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+# SIM901 in AGENTS.md is not a Ruff rule (Ruff 0.15.18 rejects it).
+ignore = ["E501", "F722", "F821", "UP037", "UP040"]
