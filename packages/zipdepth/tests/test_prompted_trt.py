@@ -9,9 +9,6 @@ import pytest
 import torch
 from jaxtyping import Float32
 from monopriors.models.depth_completion.zipdepth_prompt import ZipDepthPrompt
-
-pytest.importorskip("easydict", reason="Predictor dependencies live in the zipdepth catalog lane")
-
 from monopriors.models.depth_completion.zipdepth_prompt_export import (  # noqa: E402
     IMAGE_INPUT_NAME,
     PROMPT_INPUT_NAME,

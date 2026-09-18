@@ -5,7 +5,6 @@ import pytest
 from jaxtyping import Bool, Float32
 from numpy import ndarray
 
-pytest.importorskip("easydict", reason="easydict is required by this test module")
 pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
 pytest.importorskip("arkitscenes_download", reason="arkitscenes_download is required by this test module")
 

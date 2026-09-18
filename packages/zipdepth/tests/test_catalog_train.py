@@ -10,7 +10,6 @@ from torch import nn, optim
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
-pytest.importorskip("easydict", reason="easydict is required by this test module")
 pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
 pytest.importorskip("arkitscenes_download", reason="arkitscenes_download is required by this test module")
 

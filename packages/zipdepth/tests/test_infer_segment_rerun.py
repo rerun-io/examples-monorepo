@@ -5,7 +5,6 @@ import pytest
 from jaxtyping import Float32, UInt16
 from numpy import ndarray
 
-pytest.importorskip("easydict", reason="easydict is required by this test module")
 pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
 pytest.importorskip("rerun.experimental.dataloader", reason="rerun.experimental.dataloader is required by this test module")
 pytest.importorskip("torchcodec", reason="torchcodec is required by this test module")

@@ -12,8 +12,6 @@ from rerun.experimental import ViewerClient
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 pytestmark = pytest.mark.golden
-pytest.importorskip("easydict", reason="easydict is required by this test module")
-
 from zipdepth.apis.infer_rerun import InferRerunConfig, infer_rerun  # noqa: E402
 
 PKG = Path(__file__).resolve().parents[1]
