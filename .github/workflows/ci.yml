@@ -37,14 +37,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-      - uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e # v0.10.2
-        with:
-          pixi-version: v0.77.1
-          environments: ci
-          frozen: true
-          cache: true
-          cache-write: false
+      # grep only: no pixi environment needed, and PR-body validation must not depend on lock health.
       - name: Author recorded the pre-merge gate
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
-        run: pixi run -e ci --frozen ci-gate-line
+        run: bash ci/check_gate_line.sh

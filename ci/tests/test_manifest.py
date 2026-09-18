@@ -7,11 +7,15 @@ import pytest
 import tomllib
 
 REPO_ROOT: Path = Path(__file__).resolve().parents[2]
+MANIFEST: dict = tomllib.loads((REPO_ROOT / "pixi.toml").read_text())
+# A runnable package is a packages/<x> directory with a root [feature.<x>] (AGENTS.md, "Adding a
+# new package"). Vendored dependencies such as sam2-streaming have a pyproject but no feature;
+# test_workspace_sources.py covers those.
+RUNNABLE_PACKAGES: list[Path] = sorted(REPO_ROOT / "packages" / name for name in MANIFEST["feature"] if (REPO_ROOT / "packages" / name).is_dir())
 
 
 def test_every_feature_declares_platforms() -> None:
-    manifest: dict = tomllib.loads((REPO_ROOT / "pixi.toml").read_text())
-    missing: list[str] = [f"feature.{name}" for name, feature in manifest["feature"].items() if "platforms" not in feature]
+    missing: list[str] = [f"feature.{name}" for name, feature in MANIFEST["feature"].items() if "platforms" not in feature]
     assert not missing, "Features without platforms:\n" + "\n".join(missing)
 
 
@@ -23,27 +27,10 @@ def pyrefly() -> tuple[dict, set[Path]]:
     return config, included
 
 
-@pytest.mark.parametrize(
-    "pyproject",
-    [
-        pytest.param(
-            path,
-            id=path.parent.name,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="sam2-streaming: sam2 missing project-includes; sam2-streaming-dev missing site-package-path",
-            )
-            if path.parent.name == "sam2-streaming"
-            else (),
-        )
-        for path in sorted((REPO_ROOT / "packages").glob("*/pyproject.toml"))
-        if "project" in tomllib.loads(path.read_text())
-    ],
-)
-def test_runnable_packages_are_registered_with_pyrefly(pyproject: Path, pyrefly: tuple[dict, set[Path]]) -> None:
+@pytest.mark.parametrize("package_dir", RUNNABLE_PACKAGES, ids=lambda package_dir: package_dir.name)
+def test_runnable_packages_are_registered_with_pyrefly(package_dir: Path, pyrefly: tuple[dict, set[Path]]) -> None:
     config, included = pyrefly
     problems: list[str] = []
-    package_dir: Path = pyproject.parent
     # Rust packages may have src/ alongside a flat Python module. Discover
     # both layouts; tool/ (sam3d-body), tools/ and tests/ are not modules.
     modules: list[Path] = [
@@ -66,12 +53,9 @@ def test_runnable_packages_are_registered_with_pyrefly(pyproject: Path, pyrefly:
 
 
 def test_package_features_have_prod_and_dev_environments() -> None:
-    manifest: dict = tomllib.loads((REPO_ROOT / "pixi.toml").read_text())
-    environments: dict = manifest["environments"]
+    environments: dict = MANIFEST["environments"]
     problems: list[str] = []
-    for name in sorted(manifest["feature"]):
-        if not (REPO_ROOT / "packages" / name).is_dir():
-            continue
+    for name in (package_dir.name for package_dir in RUNNABLE_PACKAGES):
         for env_name in (name, f"{name}-dev"):
             if env_name not in environments:
                 problems.append(f"feature.{name}: missing environment {env_name}")
@@ -95,12 +79,7 @@ def _task_commands(table: dict, prefix: str = "") -> dict[str, str | list[str]]:
     return commands
 
 
-
-
-@pytest.mark.parametrize(
-    ("name", "command"),
-    [pytest.param(name, command, id=name) for name, command in _task_commands(tomllib.loads((REPO_ROOT / "pixi.toml").read_text())).items()],
-)
+@pytest.mark.parametrize(("name", "command"), [pytest.param(name, command, id=name) for name, command in _task_commands(MANIFEST).items()])
 def test_task_commands_are_single_line(name: str, command: str | list[str]) -> None:
     """Pixi collapses newlines inside a multiline cmd into spaces (AGENTS.md gotcha), so a
     command split over lines without `&&` / `\\` silently becomes arguments to its first word.

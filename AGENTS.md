@@ -36,7 +36,8 @@ CI locally; the workflow YAML only checks out, sets up pixi, and runs tasks.
 Before merge, authors run `pixi run -e <name>-dev gate` for each affected
 package. The shared `gate` task runs `lint`, `typecheck`, `deadcode`, and `tests`.
 Record the result in the PR body as `Gate: <package>-dev gate on <machine> @ <commit>`.
-CI requires a `Gate:` line on non-draft PRs (`ci-gate-line`, reads `$PR_BODY`);
+CI requires a `Gate:` line on non-draft PRs (`ci/check_gate_line.sh`, reads `$PR_BODY`;
+locally `pixi run -e ci ci-gate-line`);
 include Rerun pixel evidence when the PR changes a view.
 
 Root `ruff.toml` is a fallback for files without a closer Ruff config. Package
