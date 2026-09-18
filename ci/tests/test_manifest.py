@@ -15,6 +15,14 @@ def test_every_feature_declares_platforms() -> None:
     assert not missing, "Features without platforms:\n" + "\n".join(missing)
 
 
+@pytest.fixture(scope="module")
+def pyrefly() -> tuple[dict, set[Path]]:
+    """pyrefly.toml plus its expanded project-includes, read once for all package cases."""
+    config: dict = tomllib.loads((REPO_ROOT / "pyrefly.toml").read_text())
+    included: set[Path] = {path for pattern in config["project-includes"] for path in REPO_ROOT.glob(pattern)}
+    return config, included
+
+
 @pytest.mark.parametrize(
     "pyproject",
     [
@@ -32,9 +40,8 @@ def test_every_feature_declares_platforms() -> None:
         if "project" in tomllib.loads(path.read_text())
     ],
 )
-def test_runnable_packages_are_registered_with_pyrefly(pyproject: Path) -> None:
-    config: dict = tomllib.loads((REPO_ROOT / "pyrefly.toml").read_text())
-    included: set[Path] = {path for pattern in config["project-includes"] for path in REPO_ROOT.glob(pattern)}
+def test_runnable_packages_are_registered_with_pyrefly(pyproject: Path, pyrefly: tuple[dict, set[Path]]) -> None:
+    config, included = pyrefly
     problems: list[str] = []
     package_dir: Path = pyproject.parent
     # Rust packages may have src/ alongside a flat Python module. Discover

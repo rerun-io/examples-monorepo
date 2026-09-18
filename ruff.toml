@@ -17,22 +17,6 @@ extend-exclude = [
     # Vendor trees, including src-layout packages.
     "packages/**/third_party",
     "packages/*/thirdparty",
-    # Vendor/reference boundaries already excluded by package configs.
-    "packages/lamp/tests/reference_data/lamp",
-    "packages/monoprior/tests/reference_data/fast_foundationstereo/upstream_*.py",
-    "packages/monoprior/tests/reference_data/liteanystereo/upstream_*.py",
-    "packages/monoprior/tests/reference_data/zipdepth/upstream_*.py",
-    "packages/monoprior/tests/reference_data/xlens/*.py",
-    "packages/monoprior/vulture_whitelists/fast_foundationstereo.py",
-    "packages/monoprior/notebooks",
-    "packages/simplecv/notebooks",
-    "packages/sam3d-body/src/sam3d_body/data/transforms",
-    "packages/sam3d-body/src/sam3d_body/data/utils",
-    "packages/sam3d-body/src/sam3d_body/models",
-    "packages/sam3d-body/src/sam3d_body/transforms",
-    "packages/sam3d-body/src/sam3d_body/utils",
-    "packages/sapiens2-pose/src/sapiens2_pose/assets",
-    "packages/sapiens2-pose/src/sapiens2_pose/sapiens_lite",
 ]
 
 [lint]
