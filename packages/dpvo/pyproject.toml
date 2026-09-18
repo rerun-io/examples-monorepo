@@ -51,3 +51,10 @@ ignore_names = [
     # DPVO internal attributes
     "image_", "__edges_all",
 ]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e dpvo-dev tests-integration)",
+    "golden: reference comparison against stored ground truth (run: pixi run -e dpvo-dev tests-golden)",
+]
+addopts = "-m 'not integration and not golden'"

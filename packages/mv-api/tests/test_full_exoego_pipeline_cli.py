@@ -2,8 +2,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 
 def test_node_app_cli_help_exposes_raw_hocap_and_max_frames() -> None:
     package_root: Path = Path(__file__).resolve().parents[1]

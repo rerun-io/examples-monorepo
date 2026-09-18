@@ -1,6 +1,5 @@
-import pytest
-
 import numpy as np
+import pytest
 from jaxtyping import Float32, Int, UInt8
 from numpy import ndarray
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
