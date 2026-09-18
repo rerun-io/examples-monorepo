@@ -35,6 +35,11 @@ min_confidence = 60
 ignore_names = ["pix_fmt", "framerate", "time_base", "options"]
 
 [tool.pytest.ini_options]
+markers = [
+    "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e slam-evals-dev tests-integration)",
+    "golden: reference comparison against stored ground truth (run: pixi run -e slam-evals-dev tests-golden)",
+]
+addopts = "-m 'not integration and not golden'"
 # Silence simplecv's `from_parent` DeprecationWarning (needs an upstream fix
 # in simplecv; until then we don't want it cluttering our test output).
 filterwarnings = [

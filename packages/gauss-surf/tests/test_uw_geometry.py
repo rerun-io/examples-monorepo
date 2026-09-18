@@ -4,10 +4,17 @@ from io import BytesIO
 
 import numpy as np
 import open3d as o3d
-from arkitscenes_download.ingest.depth import encode_depth_png
+import pytest
 from jaxtyping import Float32, UInt8, UInt16
 from numpy import ndarray
 from PIL import Image
+
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
+pytest.importorskip("rerun.experimental.dataloader", reason="requires the rerun.experimental.dataloader dependency in this environment")
+pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in this environment")
+pytest.importorskip("imagecodecs", reason="requires the imagecodecs dependency in this environment")
+
+from arkitscenes_download.ingest.depth import encode_depth_png
 
 from gauss_surf.uw_geometry import (
     build_brown_conrady_undistortion,
@@ -61,6 +68,7 @@ def test_zero_brown_conrady_builds_an_identity_remap() -> None:
     np.testing.assert_array_equal(undistortion.source_y_hw, expected_y_hw)
 
 
+@pytest.mark.golden
 def test_real_brown_conrady_remap_preserves_the_apple_exact_framing_contract() -> None:
     """The standard fit stays within 0.006 px of the old remap and preserves its rectified pinhole."""
     K_uw_33: Float32[ndarray, "3 3"] = np.array(

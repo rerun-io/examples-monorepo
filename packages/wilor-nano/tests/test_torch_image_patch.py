@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
+import pytest
 import torch
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -76,9 +77,10 @@ def test_torch_rgb_patch_matches_opencv_affine(
     np.testing.assert_allclose(torch_patch[0].numpy(), opencv_patch, atol=8)
 
 
+@pytest.mark.integration
 def test_torch_rgb_patch_runs_on_cuda_when_available() -> None:
     if not torch.cuda.is_available():
-        return
+        pytest.skip("CUDA required")
     frames_rgb: UInt8[Tensor, "batch h w 3"] = torch.arange(2 * 32 * 32 * 3, device="cuda").to(TORCH_UINT8).reshape(2, 32, 32, 3)
     patches: Float[Tensor, "num_patches patch patch 3"] = generate_rgb_image_patches_torch(
         frames_rgb,

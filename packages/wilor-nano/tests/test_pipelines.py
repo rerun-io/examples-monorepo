@@ -11,6 +11,7 @@ pip install pyrender
 
 import os
 import time
+from pathlib import Path
 
 os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
@@ -19,6 +20,8 @@ import pyrender
 import pytest
 import torch
 import trimesh
+
+pytestmark = pytest.mark.integration
 
 RUN_RENDER_TESTS = os.environ.get("RUN_WILOR_RENDER_TESTS") == "1"
 
@@ -301,7 +304,10 @@ class Renderer:
 
 
 @pytest.mark.skipif(not RUN_RENDER_TESTS, reason="manual pyrender demo test; set RUN_WILOR_RENDER_TESTS=1 to run")
+@pytest.mark.usefixtures("wilor_assets")
 def test_wilor_image_pipeline():
+    if not Path("assets/img.png").is_file():
+        pytest.skip("WiLoR asset not downloaded: assets/img.png")
     import cv2
     import numpy as np
     import torch
@@ -362,7 +368,10 @@ def test_wilor_image_pipeline():
 
 
 @pytest.mark.skipif(not RUN_RENDER_TESTS, reason="manual pyrender demo test; set RUN_WILOR_RENDER_TESTS=1 to run")
+@pytest.mark.usefixtures("wilor_assets")
 def test_wilor_video_pipeline():
+    if not Path("assets/video.mp4").is_file():
+        pytest.skip("WiLoR asset not downloaded: assets/video.mp4")
     import cv2
     import numpy as np
     import torch

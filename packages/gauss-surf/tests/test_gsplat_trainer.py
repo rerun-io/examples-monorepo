@@ -11,6 +11,11 @@ import torch
 from hypothesis import given
 from hypothesis import strategies as st
 
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
+pytest.importorskip("rerun.experimental.dataloader", reason="requires the rerun.experimental.dataloader dependency in this environment")
+pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in this environment")
+pytest.importorskip("imagecodecs", reason="requires the imagecodecs dependency in this environment")
+
 from gauss_surf.apis.train_gsplat import Config
 from gauss_surf.train_gsplat.cache import load_training_cameras, scene_scale_from_camera_poses
 from gauss_surf.train_gsplat.core import (
@@ -101,6 +106,7 @@ def test_training_cameras_keep_metric_centers_and_reproduce_applied_scale(tmp_pa
     np.testing.assert_allclose(scene_scale, np.float32(8.0 / 3.0), rtol=0.0, atol=2.0 * np.finfo(np.float32).eps)
 
 
+@pytest.mark.golden
 def test_part10_scene_scale_is_inverse_of_saved_applied_scale() -> None:
     """The local formula reproduces the historical float32 parser artifact."""
     package_root: Path = Path(__file__).parents[1]
@@ -288,6 +294,7 @@ def test_live_metric_splats_need_no_parent_coordinate_transform() -> None:
     os.environ.get("GAUSS_SURF_RUN_FUSED_PARITY") != "1" or not torch.cuda.is_available(),
     reason="requires CUDA and the accepted Stage-3b checkpoint",
 )
+@pytest.mark.golden
 def test_fused_raster_matches_two_call_reference_on_trained_scene() -> None:
     """One 8-channel pass preserves RGB and raw plane channels within atomics noise."""
     package_root: Path = Path(__file__).parents[1]
@@ -296,6 +303,8 @@ def test_fused_raster_matches_two_call_reference_on_trained_scene() -> None:
         package_root
         / "data/splat_runs/47115416-gaussurf/gsplat-direct/part8-stage3b/checkpoints/step-000006999.pt"
     )
+    _require_local_artifact(checkpoint_path)
+    _require_local_artifact(bundle_dir / "transforms.json")
     checkpoint: dict[str, object] = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     saved_splats: dict[str, torch.Tensor] = cast(dict[str, torch.Tensor], checkpoint["splats"])
     device: torch.device = torch.device("cuda")

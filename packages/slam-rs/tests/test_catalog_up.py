@@ -5,10 +5,14 @@ import socket
 from pathlib import Path
 
 import pytest
+
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
+
 from rerun.catalog import CatalogClient
 
 from slam_rs.apis.catalog_up import ensure_catalog
 
+pytestmark = pytest.mark.integration
 
 def free_port() -> int:
     with socket.socket() as probe:

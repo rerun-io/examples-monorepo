@@ -12,9 +12,13 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
+
 from slam_evals.catalog import mount_catalog
 from slam_evals.data.types import Modality
 from slam_evals.ingest import applicable_layers, ingest_sequence
+
+pytestmark = pytest.mark.integration
 
 _ALL_MODALITIES: list[Modality] = [
     Modality.MONO,

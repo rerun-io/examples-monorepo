@@ -9,6 +9,8 @@ import pytest
 
 from mamma.eval.golden import fit3d_comparison, landmarks_diagnostics
 
+pytestmark = pytest.mark.golden
+
 _GOLDEN_ROOT: Path = Path(__file__).parent.parent / "data" / "golden"
 _MA3D: Path = _GOLDEN_ROOT / "ma_3d/baseline/indoors/crossing_arms/verts_joints_body_id-00.npz"
 _MA2D: Path = _GOLDEN_ROOT / "ma_2d/baseline/indoors/crossing_arms"
@@ -31,7 +33,10 @@ def test_landmarks_golden_vs_golden_is_zero() -> None:
     predicted = {}
     predicted_vis = {}
     for cam in cams:
-        golden = np.load(_MA2D / f"{cam}.npz", allow_pickle=True)
+        golden_path: Path = _MA2D / f"{cam}.npz"
+        if not golden_path.is_file():
+            pytest.skip(f"golden artifact not downloaded: {golden_path}")
+        golden = np.load(golden_path, allow_pickle=True)
         predicted[cam] = golden["landmarks"][:, 0]
         predicted_vis[cam] = golden["visibilities"][:, 0]
     diags = landmarks_diagnostics(_MA2D, cams, predicted, predicted_vis, pred_scale_to_golden=1.0)

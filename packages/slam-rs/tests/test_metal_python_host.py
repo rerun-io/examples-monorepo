@@ -13,7 +13,7 @@ from numpy import ndarray
 from slam_rs import _core
 
 
-@pytest.mark.slow
+@pytest.mark.integration
 @pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS Metal")
 def test_python_host_metal_detects_stereo_features(rig: RigFactory, texture: TextureFactory, tmp_path: Path) -> None:
     """Construction alone misses shader compilation in the first detection pass."""

@@ -1,8 +1,13 @@
 """Behavior checks for the lossless uint8 normal-map representation."""
 
 import numpy as np
+import pytest
 from jaxtyping import Float32
 from numpy import ndarray
+
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
+pytest.importorskip("rerun.experimental.dataloader", reason="requires the rerun.experimental.dataloader dependency in this environment")
+pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in this environment")
 
 from gauss_surf.normals_encoding import decode_normals_png, encode_normals_png, to_away_from_camera
 

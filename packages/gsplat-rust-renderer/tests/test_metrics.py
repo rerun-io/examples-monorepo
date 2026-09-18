@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 from jaxtyping import Float32, UInt8
 from PIL import Image
 
@@ -70,6 +71,7 @@ def test_ssim_range() -> None:
     assert -1.0 <= result <= 1.0
 
 
+@pytest.mark.golden
 def test_ssim_matches_nerfbaselines_valid_window_reference() -> None:
     """SSIM uses dm-pix's valid window and stabilized covariance convention."""
     rng: np.random.Generator = np.random.default_rng(7)

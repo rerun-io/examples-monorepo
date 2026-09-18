@@ -3,6 +3,11 @@
 import numpy as np
 import pytest
 
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
+pytest.importorskip("rerun.experimental.dataloader", reason="requires the rerun.experimental.dataloader dependency in this environment")
+pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in this environment")
+pytest.importorskip("imagecodecs", reason="requires the imagecodecs dependency in this environment")
+
 from gauss_surf.apis.ultrawide_depth_batch import shard_video_ids
 
 CORPUS_VIDEO_IDS: list[str] = [f"4244{index:04d}" for index in range(37)]

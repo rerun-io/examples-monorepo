@@ -167,6 +167,7 @@ def test_quality_guard_reports_every_threshold_breach() -> None:
     ]
 
 
+@pytest.mark.golden
 def test_lego_checkpoint_predictions_match_published_full_split() -> None:
     """Bundled checkpoint renders reproduce published metrics over all 200 views."""
     checkpoint_dir: Path = scene_pretrained_dir("lego")
@@ -180,6 +181,7 @@ def test_lego_checkpoint_predictions_match_published_full_split() -> None:
     np.testing.assert_allclose(result.measured_ssim, result.published_ssim, atol=5e-6)
 
 
+@pytest.mark.golden
 def test_hotdog_checkpoint_predictions_match_published_full_split() -> None:
     """Hotdog's bundled renders reproduce both published metrics over 200 views."""
     checkpoint_dir: Path = scene_pretrained_dir("hotdog")

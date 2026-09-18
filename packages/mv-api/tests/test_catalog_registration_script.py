@@ -7,6 +7,8 @@ from typing import Any
 import pytest
 import tyro
 
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
+
 SCRIPT_PATH: Path = Path(__file__).parents[1] / "tools" / "apps" / "register_catalog_with_predictions.py"
 PIXI_TOML_PATH: Path = Path(__file__).parents[3] / "pixi.toml"
 

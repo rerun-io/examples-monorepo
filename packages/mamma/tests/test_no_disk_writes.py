@@ -44,6 +44,7 @@ def test_hot_loop_modules_have_no_write_calls() -> None:
 
 
 @needs_data
+@pytest.mark.integration
 def test_streaming_run_creates_no_files() -> None:
     import rerun as rr
     from simplecv.video_io import TorchCodecMultiVideoReader

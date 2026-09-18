@@ -2,8 +2,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def test_node_app_cli_help_exposes_raw_hocap_and_max_frames() -> None:
+    pytest.importorskip("easydict", reason="full exo/ego calibration requires easydict, absent from mv-api-dev")
     package_root: Path = Path(__file__).resolve().parents[1]
     result: subprocess.CompletedProcess[str] = subprocess.run(
         [sys.executable, "tools/apps/full_exoego_app.py", "--help"],

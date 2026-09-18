@@ -8,6 +8,8 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
+
 from mv_api.api.catalog_prediction_layer import (
     CatalogPredictionLayerConfig,
     CatalogSegment,

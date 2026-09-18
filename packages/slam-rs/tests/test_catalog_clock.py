@@ -5,12 +5,16 @@ from pathlib import Path
 import numpy as np
 import pytest
 import rerun as rr
+
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
+
 from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer
 from simplecv.imu_calibration import ImuCalibration
 
 from slam_rs.catalog_feed import CatalogSegment, ImuStream, LocalSegment, open_segment
 from slam_rs.trajectory import Trajectory
 
+pytestmark = pytest.mark.integration
 
 @pytest.fixture
 def offset_ns() -> int:

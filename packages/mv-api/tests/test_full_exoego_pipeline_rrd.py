@@ -3,9 +3,12 @@ from collections.abc import Generator
 from pathlib import Path
 from typing import cast
 
+import pytest
+
+pytest.importorskip("easydict", reason="full exo/ego calibration requires easydict, absent from mv-api-dev")
+
 import numpy as np
 import open3d as o3d
-import pytest
 import rerun as rr
 import torch
 from jaxtyping import Float32, Int, UInt8

@@ -124,6 +124,7 @@ def robocap_statics(
 # --- the downscale, on both the frames and the intrinsics --------------------
 
 
+@pytest.mark.golden
 def test_downscaling_the_recording_reproduces_basalts_own_calibration(settings: SlamConfig) -> None:
     """Recording statics at downscale three must match the 640x360 calibration JSON.
     Both describe the same Kalibr rig through different conversion paths.
@@ -226,13 +227,13 @@ def test_the_probe_refuses_a_calibration_whose_imu_is_not_the_catalogs(settings:
         check_calibration_matches_recording(_core.Calibration.from_json(json.dumps(document)), at_three, robocap_imu, 3)
 
 
-# --- the real rig, behind `slow` ---------------------------------------------
+# --- the real rig, behind `integration` ---------------------------------------------
 
 
-@pytest.mark.slow
+@pytest.mark.integration
 def test_the_feed_opens_the_real_robocap_rig(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     """Read four of six cameras at 640x360 with matched clocks and paired IMU.
-    This whole-feed integration test needs the catalog and is marked slow.
+    This whole-feed integration test needs the catalog and is marked integration.
     """
     session: RobocapSession = benchmarks.robocap.session("s00000015")
     with open_segment(

@@ -168,7 +168,7 @@ def test_two_runs_over_the_same_input_agree_exactly(pipeline: PipelineFactory, t
     is the property that makes a reference run reproducible, and a scheduling
     dependency would break it by an ulp long before it broke an ATE gate.
 
-    Catalog replay accuracy is covered by the slow ground-truth gate.
+    Catalog replay accuracy is covered by the golden ground-truth gate.
     """
     frames: list[list[UInt8[ndarray, "h w"]]] = [[texture(shift, 0), texture(shift + 1, 0)] for shift in shifts]
     runs: list[list[Float64[ndarray, " 7"]]] = []

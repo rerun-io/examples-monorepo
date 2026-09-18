@@ -6,6 +6,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
+pytest.importorskip("rerun.experimental.dataloader", reason="requires the rerun.experimental.dataloader dependency in this environment")
+pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in this environment")
+
 from gauss_surf.render_io import RenderCamera, load_render_cameras
 
 

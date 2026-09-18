@@ -57,3 +57,10 @@ exclude = [
 ]
 sort_by_size = true
 min_confidence = 60
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e wilor-nano-dev tests-integration)",
+    "golden: reference comparison against stored ground truth (run: pixi run -e wilor-nano-dev tests-golden)",
+]
+addopts = "-m 'not integration and not golden'"

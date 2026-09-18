@@ -11,6 +11,10 @@ from jaxtyping import Float32, Int64, UInt8
 from numpy import ndarray
 from torch import Tensor
 
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
+pytest.importorskip("rerun.experimental.dataloader", reason="requires the rerun.experimental.dataloader dependency in this environment")
+pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in this environment")
+
 from gauss_surf.catalog import match_exact_timestamps
 from gauss_surf.contracts import WIDE_CHOSEN_SHARPNESS_COLUMN
 from gauss_surf.normals_encoding import decode_normals_png, encode_normals_png
@@ -158,6 +162,7 @@ def test_chosen_timestamp_matching_refuses_one_nanosecond_drift() -> None:
 
 
 @requires_cuda
+@pytest.mark.integration
 def test_trt_front_facing_normals_keep_unit_length_and_positive_z_after_png() -> None:
     """The catalog representation stores away-from-camera RDF normals (the gaussurf training convention)."""
     from monopriors.models.moge_v2 import DEFAULT_IMAGE_HW, MoGeV2NormalOutput, MoGeV2TrtPredictor
