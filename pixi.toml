@@ -3243,6 +3243,10 @@ cwd = "packages/agent-traces"
 cmd = "python tools/apps/convert.py"
 cwd = "packages/agent-traces"
 
+[feature.agent-traces.tasks.agent-traces-register]
+cmd = "python tools/apps/register.py"
+cwd = "packages/agent-traces"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
