@@ -71,17 +71,11 @@ def aggregate_turns(records: list[TimedRecord]) -> list[Turn]:
         record: Record = timed.record
         message: Message | None = record.message
         blocks: list[Block] = message.content if message is not None else []
-        prompt_texts: list[str] = []
-        has_result: bool = False
-        for block in blocks:
-            match block:
-                case TextBlock(text=text):
-                    prompt_texts.append(text)
-                case ToolResultBlock():
-                    has_result = True
-        if record.type == "user" and not record.isCompactSummary and prompt_texts and not has_result:
-            turns.append(Turn(timed.timestamp_ns, "\n".join(prompt_texts), record.promptId or "", len(turns), timed.file_index, timed.timestamp_ns))
-            seen = set()
+        if record.type == "user" and not record.isCompactSummary and not any(isinstance(block, ToolResultBlock) for block in blocks):
+            prompt_texts: list[str] = [block.text for block in blocks if isinstance(block, TextBlock)]
+            if prompt_texts:
+                turns.append(Turn(timed.timestamp_ns, "\n".join(prompt_texts), record.promptId or "", len(turns), timed.file_index, timed.timestamp_ns))
+                seen = set()
         if not turns:
             continue
         turn: Turn = turns[-1]
