@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import requests
-from huggingface_hub import snapshot_download
+from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 
 CHUNK_BYTES: int = 1 << 20
 """Streaming block size: 1 MiB, small enough to resume cheaply, big enough to saturate a link."""
@@ -95,6 +95,13 @@ def hf_fetch(
         local_dir=str(local_dir),
         revision=revision,
     )
+    return local_dir
+
+
+def hf_fetch_files(repo_id: str, paths: Sequence[str], *, local_dir: Path, revision: str) -> Path:
+    """Fetch known dataset paths without listing the Hub repository."""
+    for path in paths:
+        hf_hub_download(repo_id, path, repo_type="dataset", local_dir=str(local_dir), revision=revision)
     return local_dir
 
 
@@ -217,3 +224,11 @@ def parse_apache_index(html: str) -> list[IndexEntry]:
 def gdrive_fetch() -> None:
     """Google Drive fetch — not needed by any v1 dataset yet."""
     raise NotImplementedError("gdrive_fetch is not needed by any v1 dataset")
+
+
+def repo_revision(repo_id: str, revision: str | None = None) -> str | None:
+    """Resolve a branch/tag to the commit sha stamped into every converted rrd.
+
+    Resolve without listing files so a dataset can pin all fetches once per run.
+    """
+    return HfApi().repo_info(repo_id, repo_type="dataset", revision=revision).sha
