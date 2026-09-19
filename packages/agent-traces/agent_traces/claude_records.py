@@ -1,9 +1,10 @@
 """Partial third-party Claude records; unknown fields are allowed."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import TypeAlias
 
+from serde import SerdeError, from_dict, serde
 from serde import field as serde_field
-from serde import serde
 
 
 @serde
@@ -34,29 +35,92 @@ class ResultContent:
 
 @serde
 @dataclass(frozen=True, slots=True)
-class ContentBlock:
-    """One message content block."""
+class TextBlock:
+    """Visible message text."""
 
-    type: str = ""
-    """Claude block kind."""
+    text: str = ""
+    """Text seen by the model."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class ThinkingBlock:
+    """Assistant reasoning."""
+
+    thinking: str = ""
+    """Reasoning text."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class ToolUseBlock:
+    """One tool invocation."""
+
     id: str = ""
     """Tool call identifier."""
     name: str = ""
     """Tool name."""
     input: dict[str, object] = serde_field(default_factory=dict, serializer=lambda value: value, deserializer=lambda value: value)
     """Tool-specific JSON arguments, preserved without interpretation."""
-    is_error: bool = False
-    """Whether this result reports a tool error."""
-    source: ImageSource | None = None
-    """Direct user image."""
-    thinking: str = ""
-    """Assistant reasoning text."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class ToolResultBlock:
+    """One tool response."""
+
     tool_use_id: str = ""
     """Identifier of the corresponding tool call."""
     content: str | list[ResultContent] | None = None
-    """Tool result text."""
-    text: str = ""
-    """Visible message text."""
+    """Tool result content."""
+    is_error: bool = False
+    """Whether this result reports a tool error."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class ImageBlock:
+    """Direct message image."""
+
+    source: ImageSource | None = None
+    """Encoded image when present."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class UnknownBlock:
+    """An unmodeled content kind."""
+
+    type: str = ""
+    """Original tag, or empty when absent."""
+
+
+Block: TypeAlias = TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock | ImageBlock | UnknownBlock
+BLOCK_TYPES: dict[str, type] = {
+    "text": TextBlock,
+    "thinking": ThinkingBlock,
+    "tool_use": ToolUseBlock,
+    "tool_result": ToolResultBlock,
+    "image": ImageBlock,
+}
+
+
+def decode_blocks(value: object) -> list[Block]:
+    """Normalize text and decode each known tag without union fallback."""
+    if isinstance(value, str):
+        return [TextBlock(text=value)]
+    if not isinstance(value, list):
+        raise SerdeError("message content must be a string or list")
+    blocks: list[Block] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise SerdeError("content block must be an object")
+        tag: object = item.get("type", "")
+        if not isinstance(tag, str):
+            raise SerdeError("content block type must be a string")
+        cls: type | None = BLOCK_TYPES.get(tag)
+        blocks.append(from_dict(cls, item) if cls is not None else UnknownBlock(type=tag))
+    return blocks
 
 
 @serde
@@ -109,8 +173,8 @@ class Message:
     """Assistant model name."""
     id: str = ""
     """Assistant message identifier."""
-    content: str | list[ContentBlock] = field(default_factory=list)
-    """Text or structured content blocks."""
+    content: list[Block] = serde_field(default_factory=list, deserializer=decode_blocks)
+    """Normalized typed content blocks."""
 
 
 @serde
@@ -156,8 +220,6 @@ class Record:
     """User or assistant message."""
     toolUseResult: ToolUseResult | None = None
     """Typed tool metadata when it is an object."""
-    tool_use_result_json: str = ""
-    """Unmodified tool metadata serialized at the input boundary."""
     uuid: str = ""
     """Record identifier."""
     parentUuid: str | None = None
@@ -192,7 +254,3 @@ class Record:
     """Generated session title."""
     totalCostUSD: float | int | None = None
     """Reported total session cost."""
-    raw_json: str = ""
-    """Raw lifecycle record JSON."""
-    attachment_json: str = ""
-    """Raw attachment JSON."""
