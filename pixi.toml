@@ -3235,6 +3235,10 @@ prerelease-mode = "allow"
 [feature.agent-traces.activation.env]
 PACKAGE_DIR = "packages/agent-traces"
 
+[feature.agent-traces.tasks.agent-traces-convert-all]
+cmd = "python tools/apps/convert_all.py"
+cwd = "packages/agent-traces"
+
 [feature.agent-traces.tasks.agent-traces-convert]
 cmd = "python tools/apps/convert.py"
 cwd = "packages/agent-traces"

@@ -261,3 +261,89 @@ def test_raw_tool_metadata_round_trips(session_builder: SessionBuilder, tmp_path
         [""],
         [""],
     ]
+def test_turns_follow_prompts_in_file_order(session_builder: SessionBuilder, tmp_path: Path) -> None:
+    """Turn totals exclude preamble and children, and deduplicate split usage."""
+    session_builder.add("assistant", message={"id": "before", "content": []})
+    session_builder.add("user", promptId="p1", message={"content": "first"})
+    session_builder.add(
+        "assistant",
+        message={
+            "id": "m1",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "cache_read_input_tokens": 3,
+                "cache_creation_input_tokens": 2,
+                "output_tokens_details": {"thinking_tokens": 1},
+            },
+            "content": [{"type": "tool_use", "id": "t", "name": "Bash"}],
+        },
+    )
+    session_builder.add("assistant", message={"id": "m1", "usage": {"input_tokens": 99}, "content": []})
+    session_builder.add(
+        "user", message={"content": [{"type": "text", "text": "result label"}, {"type": "tool_result", "tool_use_id": "t", "content": "done"}]}
+    )
+    session_builder.add("user", isCompactSummary=True, message={"content": "summary"})
+    session_builder.add("user", message={"content": [{"type": "text", "text": "second"}, {"type": "text", "text": "line"}]})
+    session_builder.add("assistant", message={"id": "m2", "usage": {"output_tokens": 8}, "content": []})
+    session_builder.add("user", path=session_builder.path.with_suffix("") / "subagents/agent-child.jsonl", message={"content": "child"})
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "turns.rrd"))
+    turns: pa.Table = entities["/turns"]
+    assert turns["TextLog:text"].to_pylist() == [["first"], ["second\nline"]]
+    for name, expected in {
+        "turn_index": [0, 1],
+        "file_index": [1, 6],
+        "prompt_id": ["p1", ""],
+        "elapsed_ms": [4000.0, 1000.0],
+        "n_tool_calls": [1, 0],
+        "n_assistant_messages": [1, 1],
+        "n_images": [0, 0],
+        "input_tokens": [10, 0],
+        "output_tokens": [4, 8],
+        "cache_read_tokens": [3, 0],
+        "cache_creation_tokens": [2, 0],
+        "thinking_tokens": [1, 0],
+    }.items():
+        assert turns[name].to_pylist() == [[value] for value in expected]
+    assert entities["/__properties/session"]["n_turns"].to_pylist() == [[2]]
+    for name, expected in {"elapsed_ms": [4000.0, 1000.0], "output_tokens": [4.0, 8.0], "tool_calls": [1.0, 0.0]}.items():
+        assert entities[f"/turns/{name}"]["Scalars:scalars"].to_pylist() == [[value] for value in expected]
+    assert not any(path.startswith("/agents/child/turns") for path in entities)
+
+
+def test_turn_images_and_nonprompt_users(session_builder: SessionBuilder, png_bytes: bytes, tmp_path: Path) -> None:
+    """Images count within turns; result-only and untimed users start no turn."""
+    import base64
+
+    image: dict[str, object] = {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(png_bytes).decode()},
+    }
+    session_builder.add("user", timestamp=None, message={"content": "untimed"})
+    session_builder.add("user", message={"content": [{"type": "text", "text": "prompt"}, image]})
+    session_builder.add("user", message={"content": [{"type": "tool_result", "content": [image]}]})
+    session_builder.add("user", message={"content": [image]})
+    session_builder.add("system", timestamp="2026-09-18T20:00:02.500Z", content="last in file")
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "images.rrd"))
+    assert entities["/turns"]["n_images"].to_pylist() == [[3]]
+    assert entities["/turns"]["elapsed_ms"].to_pylist() == [[1500.0]]
+    assert entities["/turns"]["TextLog:level"].to_pylist() == [["INFO"]]
+    assert entities["/turns"]["TextLog:color"].to_pylist() == [[0x8AB4F8FF]]
+    assert entities["/__properties/session"]["n_turns"].to_pylist() == [[1]]
+
+
+def test_turn_image_counts_match_emitted_rows(session_builder: SessionBuilder, png_bytes: bytes, tmp_path: Path) -> None:
+    """URL, missing-source, and assistant images do not become image rows."""
+    import base64
+
+    inline: dict[str, object] = {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(png_bytes).decode()},
+    }
+    url: dict[str, object] = {"type": "image", "source": {"type": "url", "url": "https://example.test/image.png"}}
+    session_builder.add("user", message={"content": [{"type": "text", "text": "prompt"}, inline, url, {"type": "image"}]})
+    session_builder.add("user", message={"content": [{"type": "tool_result", "content": [inline, url]}]})
+    session_builder.add("assistant", message={"content": [inline]})
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "image-counts.rrd"))
+    assert entities["/media/images"].num_rows == 2
+    assert entities["/turns"]["n_images"].to_pylist() == [[2]]

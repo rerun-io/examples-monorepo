@@ -29,6 +29,7 @@ from agent_traces.claude_records import (
     UnknownBlock,
     Usage,
 )
+from agent_traces.turns import Turn, aggregate_turns
 
 # TODO(codex): A Codex parser will target the same agent_traces record types.
 Scalar: TypeAlias = str | int | float | bool
@@ -145,7 +146,11 @@ def write_session_rrd(session: ClaudeSession, out: Path) -> Path:
             elif record.type == "attachment" and record.attachment is not None:
                 attachment_json: str = orjson.dumps(orjson.loads(timed.raw_json).get("attachment")).decode()
                 description: str = (
-                    record.attachment.text or record.attachment.content or record.attachment.command or record.attachment.message or attachment_json
+                    record.attachment.text
+                    or (record.attachment.content if isinstance(record.attachment.content, str) else "")
+                    or record.attachment.command
+                    or record.attachment.message
+                    or attachment_json
                 )
                 texts.setdefault(f"{prefix}lifecycle/attachments", []).append(
                     TextRow(
@@ -255,6 +260,32 @@ def write_session_rrd(session: ClaudeSession, out: Path) -> Path:
                                 timed.timestamp_ns, base64.b64decode(source.data), source.media_type, timed.file_index, image_call_id, image_origin
                             )
                         )
+    turns: list[Turn] = aggregate_turns(session.main)
+    for turn in turns:
+        texts.setdefault("turns", []).append(
+            TextRow(
+                turn.timestamp_ns,
+                turn.prompt,
+                values={
+                    "turn_index": turn.turn_index,
+                    "prompt_id": turn.prompt_id,
+                    "file_index": turn.file_index,
+                    "elapsed_ms": turn.elapsed_ms,
+                    "n_tool_calls": turn.n_tool_calls,
+                    "n_assistant_messages": turn.n_assistant_messages,
+                    "n_images": turn.n_images,
+                    "input_tokens": turn.input_tokens,
+                    "output_tokens": turn.output_tokens,
+                    "cache_read_tokens": turn.cache_read_tokens,
+                    "cache_creation_tokens": turn.cache_creation_tokens,
+                    "thinking_tokens": turn.thinking_tokens,
+                },
+                color=ROLE_COLORS["user"],
+            )
+        )
+        scalars.setdefault("turns/elapsed_ms", []).append(ScalarRow(turn.timestamp_ns, turn.elapsed_ms, turn.file_index))
+        scalars.setdefault("turns/output_tokens", []).append(ScalarRow(turn.timestamp_ns, float(turn.output_tokens), turn.file_index))
+        scalars.setdefault("turns/tool_calls", []).append(ScalarRow(turn.timestamp_ns, float(turn.n_tool_calls), turn.file_index))
     out.parent.mkdir(parents=True, exist_ok=True)
     recording: rr.RecordingStream = rr.RecordingStream("agent_traces", recording_id=session.session_id)
     with tempfile.NamedTemporaryFile(dir=out.parent, prefix=out.name + ".", suffix=".tmp", delete=False) as temporary:
@@ -323,6 +354,7 @@ def write_session_rrd(session: ClaudeSession, out: Path) -> Path:
                     cli_versions=",".join(sorted(session.cli_versions)),
                     title=session.title,
                     models=",".join(sorted(session.models)),
+                    n_turns=len(turns),
                     n_subagents=len(session.subagents),
                     n_tool_calls=sum(row.values.get("phase") == "call" for rows in texts.values() for row in rows),
                     n_images=sum(len(rows) for rows in images.values()),
