@@ -9,10 +9,11 @@ from dataforge.datasets.lamaria import LamariaConfig
 from dataforge.datasets.msd import MsdConfig
 from dataforge.datasets.robocap import RobocapConfig
 from dataforge.datasets.selfcap import SelfcapConfig
+from dataforge.datasets.show3d import Show3dConfig
 from dataforge.datasets.wildcap import WildcapConfig
 
 dataset_defaults: dict[str, DataforgeDatasetConfig] = {
-    config.command: config for config in (LamariaConfig(), MsdConfig(), RobocapConfig(), SelfcapConfig(), WildcapConfig())
+    config.command: config for config in (LamariaConfig(), MsdConfig(), RobocapConfig(), SelfcapConfig(), Show3dConfig(), WildcapConfig())
 }
 """Every dataset dataforge knows about, keyed by its CLI subcommand (``config.command``).
 
