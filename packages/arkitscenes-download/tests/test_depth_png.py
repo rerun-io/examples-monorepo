@@ -10,7 +10,9 @@ from jaxtyping import UInt8, UInt16
 from numpy import ndarray
 from numpy.testing import assert_array_equal
 
-from arkitscenes_download.ingest.depth import decode_depth_png, decode_depth_png_fast, encode_depth_png, inflate_depth_png_rows
+pytest.importorskip("imagecodecs", reason="depth PNG tests need imagecodecs from the ingest environment")
+
+from arkitscenes_download.ingest.depth import decode_depth_png, decode_depth_png_fast, encode_depth_png, inflate_depth_png_rows  # noqa: E402
 
 
 def _structured_depth() -> UInt16[ndarray, "h w"]:

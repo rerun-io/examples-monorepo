@@ -2,12 +2,17 @@
 
 from pathlib import Path
 
+import pytest
 import rerun as rr
+
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
+
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.imu_calibration import ImuCalibration
 
 from slam_rs.apis.import_imu_calibration import Config, main
 
+pytestmark = pytest.mark.integration
 
 def test_imports_original_basalt_noise_as_static_catalog_metadata(tmp_path: Path) -> None:
     base: Path = tmp_path / "base.rrd"

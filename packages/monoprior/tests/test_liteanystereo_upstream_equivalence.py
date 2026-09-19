@@ -14,6 +14,8 @@ from torch import nn
 from monopriors.third_party.liteanystereo.liteanystereov2 import build_liteanystereo
 from monopriors.third_party.liteanystereo.liteanystereov2_H import LiteAnyStereoH
 
+pytestmark = pytest.mark.golden
+
 REFERENCE_DIR: Path = Path(__file__).parent / "reference_data" / "liteanystereo"
 UPSTREAM_PACKAGE: str = "las_upstream"
 

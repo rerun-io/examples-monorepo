@@ -51,6 +51,7 @@ def rig_R_cam(camera: CalibratedCamera) -> Float64[ndarray, "3 3"]:
 # ── the real files ────────────────────────────────────────────────────────
 
 
+@pytest.mark.golden
 def test_the_index_ships_two_kb4_cameras_with_no_validity_radius() -> None:
     """kb4 is valid over the whole fisheye, so it declares no radius at all."""
     cameras: tuple[CalibratedCamera, ...] = load_calibration(calibration_fixture("index"))
@@ -63,6 +64,7 @@ def test_the_index_ships_two_kb4_cameras_with_no_validity_radius() -> None:
     assert {camera.resolution for camera in cameras} == {(960, 960)}
 
 
+@pytest.mark.golden
 @pytest.mark.parametrize(("device", "num_cameras"), [("g2", 4), ("odyssey", 2)])
 def test_the_mocap_headsets_ship_radtan8_cameras_that_all_state_an_rpmax(device: str, num_cameras: int) -> None:
     """Every radtan8 block holds the key; whether its value is a *limit* is the next test."""
@@ -76,6 +78,7 @@ def test_the_mocap_headsets_ship_radtan8_cameras_that_all_state_an_rpmax(device:
     assert {camera.resolution for camera in cameras} == {(640, 480)}
 
 
+@pytest.mark.golden
 def test_the_odyssey_zero_rpmax_is_a_stated_value_but_not_a_validity_limit() -> None:
     """Upstream really writes ``"rpmax": 0.0`` on both Odyssey+ cameras, and basalt reads
     a non-positive rpmax as *the validity check is off*.
@@ -95,6 +98,7 @@ def test_the_odyssey_zero_rpmax_is_a_stated_value_but_not_a_validity_limit() -> 
     assert all((camera.distortion_valid_radius or 0.0) > 2.7 for camera in g2)
 
 
+@pytest.mark.golden
 def test_a_kb4_camera_becomes_a_fisheye_with_its_four_radial_terms() -> None:
     cameras: tuple[CalibratedCamera, ...] = load_calibration(calibration_fixture("index"))
     model: Kb4Intrinsics | Radtan8Intrinsics = cameras[1].model
@@ -110,6 +114,7 @@ def test_a_kb4_camera_becomes_a_fisheye_with_its_four_radial_terms() -> None:
     assert camera.intrinsics.fl_x == model.fx
 
 
+@pytest.mark.golden
 def test_a_radtan8_camera_becomes_a_pinhole_with_all_eight_brown_conrady_terms() -> None:
     cameras: tuple[CalibratedCamera, ...] = load_calibration(calibration_fixture("g2"))
     model: Kb4Intrinsics | Radtan8Intrinsics = cameras[0].model
@@ -125,6 +130,7 @@ def test_a_radtan8_camera_becomes_a_pinhole_with_all_eight_brown_conrady_terms()
     assert (camera.intrinsics.width, camera.intrinsics.height) == (640, 480)
 
 
+@pytest.mark.golden
 def test_extrinsics_are_the_camera_pose_in_the_rig_frame() -> None:
     """``T_imu_cam`` is ``rig_T_cam``; the rig frame is the IMU frame."""
     cameras: tuple[CalibratedCamera, ...] = load_calibration(calibration_fixture("index"))
@@ -159,6 +165,7 @@ def broken_calibration(tmp_path: Path, device: str, damage) -> Path:
     return target
 
 
+@pytest.mark.integration
 def test_a_kb4_camera_missing_a_radial_term_is_refused_by_camera_and_key(tmp_path: Path) -> None:
     """Zero-defaulting k4 would turn a truncated file into a differently distorted camera."""
     broken: Path = broken_calibration(tmp_path, "index", lambda value: value["intrinsics"][1]["intrinsics"].pop("k4"))
@@ -167,6 +174,7 @@ def test_a_kb4_camera_missing_a_radial_term_is_refused_by_camera_and_key(tmp_pat
         load_calibration(broken)
 
 
+@pytest.mark.integration
 def test_a_radtan8_camera_missing_its_rpmax_is_refused(tmp_path: Path) -> None:
     """The validity radius is part of the model, not an optional extra."""
     broken: Path = broken_calibration(tmp_path, "odyssey", lambda value: value["intrinsics"][0]["intrinsics"].pop("rpmax"))
@@ -175,6 +183,7 @@ def test_a_radtan8_camera_missing_its_rpmax_is_refused(tmp_path: Path) -> None:
         load_calibration(broken)
 
 
+@pytest.mark.integration
 def test_lists_of_different_lengths_are_refused_rather_than_zipped(tmp_path: Path) -> None:
     """The three lists are per-camera; joining them short would silently drop a camera."""
     broken: Path = broken_calibration(tmp_path, "g2", lambda value: value["resolution"].pop())
@@ -183,12 +192,14 @@ def test_lists_of_different_lengths_are_refused_rather_than_zipped(tmp_path: Pat
         load_calibration(broken)
 
 
+@pytest.mark.integration
 def test_a_camera_count_the_device_disagrees_with_is_refused() -> None:
     """The wrong device's file parses perfectly; only the expected count catches it."""
     with pytest.raises(ValueError, match="4 camera"):
         load_calibration(calibration_fixture("g2"), expected_cameras=2)
 
 
+@pytest.mark.integration
 def test_an_unknown_camera_type_is_refused_by_name(tmp_path: Path) -> None:
     def retag(value: dict[str, Any]) -> None:
         value["intrinsics"][0]["camera_type"] = "eucm"
@@ -199,6 +210,7 @@ def test_an_unknown_camera_type_is_refused_by_name(tmp_path: Path) -> None:
         load_calibration(broken)
 
 
+@pytest.mark.integration
 def test_a_resolution_that_is_not_two_positive_ints_is_refused(tmp_path: Path) -> None:
     broken: Path = broken_calibration(tmp_path, "index", lambda value: value["resolution"].__setitem__(0, [960, 0]))
 
@@ -209,6 +221,7 @@ def test_a_resolution_that_is_not_two_positive_ints_is_refused(tmp_path: Path) -
 # ── follow frame ──────────────────────────────────────────────────────────
 
 
+@pytest.mark.golden
 def test_the_index_pair_looks_along_rig_z_and_calls_rig_minus_x_up() -> None:
     """Both answers are known outside this file, from the headset itself.
 
@@ -256,6 +269,7 @@ def test_a_baseline_tilted_out_of_the_image_plane_still_yields_an_orthonormal_fr
     np.testing.assert_allclose(frame.up, [0.0, -1.0, 0.0], atol=1e-12)
 
 
+@pytest.mark.golden
 @pytest.mark.parametrize("device", ["index", "g2", "odyssey"])
 def test_a_follow_frame_is_two_orthogonal_unit_vectors(device: str) -> None:
     frame: FollowFrame = follow_frame(load_calibration(calibration_fixture(device)))
@@ -368,6 +382,7 @@ def points_in_front_of(camera: CalibratedCamera) -> Float64[ndarray, "n_points 3
     )
 
 
+@pytest.mark.golden
 @pytest.mark.parametrize("device", ["index", "g2", "odyssey"])
 @pytest.mark.parametrize("quarter_turns", [1, 2, 3])
 def test_a_rolled_camera_projects_where_the_pixel_rotation_puts_the_original(device: str, quarter_turns: int) -> None:
@@ -402,6 +417,7 @@ def test_a_rolled_camera_projects_where_the_pixel_rotation_puts_the_original(dev
         np.testing.assert_allclose(opencv_pixels(rolled, rolled_points_xyz), expected_uv, atol=PROJECTION_TOLERANCE_PX)
 
 
+@pytest.mark.golden
 @pytest.mark.parametrize("device", ["index", "g2", "odyssey"])
 def test_four_quarter_turns_give_back_the_camera_they_started_from(device: str) -> None:
     """A full revolution is the identity, so nothing in the remap is one-way lossy.
@@ -434,6 +450,7 @@ def test_a_negative_turn_count_is_refused_rather_than_read_as_counter_clockwise(
         rotate_camera_cw(UPRIGHT_PAIR[0], -1)
 
 
+@pytest.mark.golden
 @pytest.mark.parametrize("device", ["index", "g2", "odyssey"])
 def test_the_upright_turn_of_every_real_camera(device: str) -> None:
     """The Index and the Odyssey+ answer zero turns, so their converted output is unchanged.
@@ -452,6 +469,7 @@ def test_the_upright_turn_of_every_real_camera(device: str) -> None:
     assert (device == "g2") == all(turn != 0 for turn in turns)
 
 
+@pytest.mark.golden
 @pytest.mark.parametrize("device", ["index", "g2", "odyssey"])
 def test_the_chosen_turn_is_the_one_that_points_image_up_at_the_headset_up(device: str) -> None:
     """The selection rule's actual claim, checked rather than the integer it returns.
@@ -471,6 +489,7 @@ def test_the_chosen_turn_is_the_one_that_points_image_up_at_the_headset_up(devic
         assert alignment > UPRIGHT_ALIGNMENT_FLOOR, f"cam{camera.index}'s upright image-up is {alignment:.4f} onto the headset up"
 
 
+@pytest.mark.golden
 @pytest.mark.parametrize("device", ["index", "g2", "odyssey"])
 def test_rolling_every_camera_upright_leaves_the_follow_frame_alone(device: str) -> None:
     """A roll turns the sensor about its own optical axis, so it moves neither axis of the frame.

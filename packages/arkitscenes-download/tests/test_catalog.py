@@ -8,12 +8,16 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
-from rerun.catalog import CatalogClient, DatasetEntry
-from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
+import pytest
 
-from arkitscenes_download.ingest import catalog
-from arkitscenes_download.ingest.catalog import Config, register_layer
+pytest.importorskip("rerun.catalog", reason="catalog registration tests need the Rerun catalog dependencies")
+
+from rerun.catalog import CatalogClient, DatasetEntry  # noqa: E402
+from rich.console import Console  # noqa: E402
+from rich.progress import Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn  # noqa: E402
+
+from arkitscenes_download.ingest import catalog  # noqa: E402
+from arkitscenes_download.ingest.catalog import Config, register_layer  # noqa: E402
 
 
 class CatalogProgressTest(unittest.TestCase):

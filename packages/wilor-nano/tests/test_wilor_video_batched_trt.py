@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in this environment")
 
 def test_batched_tensorrt_video_config_maps_to_fast_wilor_config(monkeypatch: pytest.MonkeyPatch) -> None:
     import torch

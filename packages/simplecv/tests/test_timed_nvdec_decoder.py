@@ -9,7 +9,10 @@ import torch
 from jaxtyping import UInt8
 from torch import Tensor
 
-pytest.importorskip("simplecv.rerun_dataloader", reason="needs torchcodec and rerun-sdk's dataloader extra")
+pytestmark = pytest.mark.integration
+pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
+pytest.importorskip("rerun.experimental.dataloader", reason="rerun.experimental.dataloader is required by this test module")
+pytest.importorskip("torchcodec", reason="torchcodec is required by this test module")
 
 from rerun.catalog import DatasetEntry  # noqa: E402
 from rerun.experimental.dataloader import DecodeRequest, FieldBatch  # noqa: E402

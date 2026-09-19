@@ -9,11 +9,16 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 PRETRAINED_MODELS_DIR = Path(__file__).parents[1] / "src" / "wilor_nano" / "pretrained_models"
 RUN_PROFILER_TESTS = os.environ.get("RUN_WILOR_PROFILER_TESTS") == "1"
 
 
+@pytest.mark.usefixtures("wilor_assets")
 def test_wilor_model():
+    if not Path("assets/img.png").is_file():
+        pytest.skip("WiLoR asset not downloaded: assets/img.png")
 
     import cv2
     import numpy as np
@@ -44,6 +49,7 @@ def test_wilor_model():
 
 
 @pytest.mark.skipif(not RUN_PROFILER_TESTS, reason="manual profiler test; set RUN_WILOR_PROFILER_TESTS=1 to run")
+@pytest.mark.usefixtures("mano_assets")
 def test_vit_profiler():
     import torch
     import torch.profiler
@@ -80,6 +86,7 @@ def test_vit_profiler():
 
 
 @pytest.mark.skipif(not RUN_PROFILER_TESTS, reason="manual profiler test; set RUN_WILOR_PROFILER_TESTS=1 to run")
+@pytest.mark.usefixtures("mano_assets")
 def test_wilor_profiler():
     import torch
     import torch.profiler

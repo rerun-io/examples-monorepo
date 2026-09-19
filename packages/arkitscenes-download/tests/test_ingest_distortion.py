@@ -4,15 +4,19 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import pytest
 import rerun as rr
 from rerun.experimental import RrdReader
 from simplecv.camera_parameters import Intrinsics as SimpleCVIntrinsics
 
-from arkitscenes_download.ingest.cli import _log_distortions
-from arkitscenes_download.ingest.metadata import CameraDistortion, decode_camera_distortions
-from arkitscenes_download.ingest.paths import PINHOLE_ULTRAWIDE
+pytest.importorskip("imagecodecs", reason="the ingest CLI needs imagecodecs from the ingest environment")
+
+from arkitscenes_download.ingest.cli import _log_distortions  # noqa: E402
+from arkitscenes_download.ingest.metadata import CameraDistortion, decode_camera_distortions  # noqa: E402
+from arkitscenes_download.ingest.paths import PINHOLE_ULTRAWIDE  # noqa: E402
 
 
+@pytest.mark.golden
 def test_calibration_rrd_logs_only_canonical_brown_conrady_distortion(tmp_path: Path) -> None:
     """The pinhole stores the standard model and 14-vector without Apple coefficient components."""
     forward_8: np.ndarray = np.array(
@@ -79,6 +83,7 @@ def test_calibration_rrd_logs_only_canonical_brown_conrady_distortion(tmp_path: 
 class CameraDistortionTest(unittest.TestCase):
     """Validate real ARKit calibration payloads."""
 
+    @pytest.mark.integration
     def test_real_movie_has_sane_radial_lookup_tables(self) -> None:
         """Decoded LUTs are nonempty, bounded, and mostly monotonic."""
         mov_path: Path = Path("data/raw/Training/47332195/47332195.mov")

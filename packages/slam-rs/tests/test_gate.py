@@ -84,7 +84,8 @@ def test_each_nonfinite_measurement_names_finite_clause(value: float) -> None:
         assert "finite: poses and measurements must be finite" in gate_failures(measurement, None)
 
 
-@pytest.mark.slow
+@pytest.mark.golden
+@pytest.mark.usefixtures("live_catalog")
 def test_catalog_smoke_gate(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     from slam_rs.apis.gate import ClipResult, measure
 

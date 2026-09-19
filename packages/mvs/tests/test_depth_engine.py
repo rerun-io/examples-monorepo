@@ -15,11 +15,14 @@ MODEL_PATH: Path = Path(__file__).parents[1] / "data" / "models" / "depth_model_
 GOLDEN_PATH: Path = Path(__file__).parent / "data" / "depth_golden.npz"
 
 
+@pytest.mark.golden
 def test_onnx_depth_engine_matches_cpu_golden() -> None:
     """CUDA depth max abs/rel: 0.001004/0.000753; confidence close pixels: 99.601%, max abs 4.725057."""
 
     if not MODEL_PATH.exists():
         pytest.skip(f"depth model is absent: {MODEL_PATH}")
+    if not GOLDEN_PATH.is_file():
+        pytest.skip(f"depth golden is absent: {GOLDEN_PATH}")
     with np.load(GOLDEN_PATH) as golden:
         seed: int = int(golden["seed"])
         inputs: dict[str, ndarray] = seeded_inputs(seed)
@@ -37,6 +40,7 @@ def test_onnx_depth_engine_matches_cpu_golden() -> None:
         assert float(confidence_close_bhw.mean()) >= 0.995
 
 
+@pytest.mark.integration
 def test_onnx_depth_engine_batch_outputs_match_single_samples() -> None:
     """Depth stays within 1e-3; at least 99.5% of CUDA's discrete confidence proxy agrees."""
 
@@ -73,6 +77,7 @@ def test_onnx_depth_engine_batch_outputs_match_single_samples() -> None:
     assert bool(torch.all(confidence_close_fraction_b >= 0.995)), confidence_close_fraction_b.tolist()
 
 
+@pytest.mark.integration
 def test_tensorrt_engine_matches_onnx_runtime() -> None:
     """TensorRT parity guards the cost-volume GridSample materialization.
 

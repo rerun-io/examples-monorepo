@@ -13,6 +13,7 @@ REAL_ULTRAWIDE_COEFFICIENTS_8: Float32[ndarray, "8"] = np.array(
 )
 
 
+@pytest.mark.golden
 def test_apple_even_percent_polynomial_round_trips_real_frame_radii() -> None:
     """The empirically selected even-power forward model inverts within 0.1 px."""
     model: AppleRadialPolynomial = AppleRadialPolynomial(REAL_ULTRAWIDE_COEFFICIENTS_8)
@@ -31,6 +32,7 @@ def test_apple_even_percent_polynomial_round_trips_real_frame_radii() -> None:
     assert max_round_trip_error_px < 0.1
 
 
+@pytest.mark.golden
 def test_opencv_rational_fit_conforms_to_the_pinhole_principal_point() -> None:
     """The standard fit keeps K unchanged and stays below 0.01 px on segment 47115416."""
     center_reference_xy: Float32[ndarray, "2"] = np.array([1853.150634765625, 1371.03173828125], dtype=np.float32)
@@ -54,6 +56,7 @@ def test_opencv_rational_fit_conforms_to_the_pinhole_principal_point() -> None:
     assert fit.distortion.p2 == pytest.approx(-1.9211448e-5, rel=1e-3)
 
 
+@pytest.mark.golden
 def test_opencv_fit_falls_back_to_polynomial_when_the_rational_denominator_misbehaves() -> None:
     """Segment 42898472's wide lens breaks the free rational denominator; the fit returns the k4..k6=0 polynomial form instead."""
     coefficients_8: Float32[ndarray, "8"] = np.array(

@@ -64,7 +64,7 @@ def _have_mano_pkls(mano_root: Path) -> bool:
     return (mano_root / "MANO_RIGHT.pkl").exists() and (mano_root / "MANO_LEFT.pkl").exists()
 
 
-@pytest.mark.slow
+@pytest.mark.golden
 @pytest.mark.parametrize("sequence", SEQUENCES)
 def test_mano_np_matches_torch_on_full_hocap(sequence: str) -> None:
     torch = pytest.importorskip("torch")

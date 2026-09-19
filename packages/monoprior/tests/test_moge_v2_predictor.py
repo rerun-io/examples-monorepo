@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 import pytest
 import torch
-from conftest import requires_cuda, slow_cuda, synthetic_rgb_batch
+from conftest import integration, requires_cuda, synthetic_rgb_batch
 from jaxtyping import Bool, Float32, UInt8
 from torch import Tensor
 
@@ -199,7 +199,7 @@ def test_trt_typed_entry_points_reject_wrong_heads() -> None:
         predictor.predict_geometry(rgb_bhw3)
 
 
-@slow_cuda
+@integration
 @requires_cuda
 def test_torch_predictor_returns_batched_metric_geometry() -> None:
     """The torch twin returns owning CUDA tensors in the geometry contract."""
@@ -245,7 +245,7 @@ def test_torch_predictor_returns_batched_metric_geometry() -> None:
     torch.testing.assert_close(prediction.points_bhw3[..., 2], prediction.depth_bhw, atol=0.0, rtol=0.0)
 
 
-@slow_cuda
+@integration
 @requires_cuda
 def test_trt_matches_torch_twin_at_caller_resolution() -> None:
     """ViT-L TensorRT and torch geometry meet the caller-resolution parity bounds."""
@@ -281,7 +281,7 @@ def test_trt_matches_torch_twin_at_caller_resolution() -> None:
         torch.testing.assert_close(held_tensor, held_copy)
 
 
-@slow_cuda
+@pytest.mark.golden
 @requires_cuda
 @pytest.mark.parametrize(
     ("encoder", "caller_hw"),
@@ -342,7 +342,7 @@ def test_trt_geometry_matches_vendored_infer_convention(encoder: Encoder, caller
     )
 
 
-@slow_cuda
+@integration
 @requires_cuda
 def test_torch_predictor_returns_batched_unit_normals_and_masks() -> None:
     """The unified Torch core honors the normal-only batch and output contract."""
@@ -375,7 +375,7 @@ def test_torch_predictor_returns_batched_unit_normals_and_masks() -> None:
     assert prediction.mask_bhw.max().item() <= 1.0
 
 
-@slow_cuda
+@integration
 @requires_cuda
 def test_trt_normal_heads_match_torch_twin_and_return_owning_outputs() -> None:
     """The cached normal-only engine matches Torch and returns owning tensors."""

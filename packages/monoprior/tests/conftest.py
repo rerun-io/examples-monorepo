@@ -16,8 +16,8 @@ if TYPE_CHECKING:
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 """Skip without a GPU; use for tests that load a checkpoint or build an engine."""
 
-slow_cuda = pytest.mark.slow
-"""Loads a checkpoint or builds a TensorRT engine; excluded from the default ``pytest`` run, select with ``-m slow``."""
+integration = pytest.mark.integration
+"""Loads a checkpoint or builds a TensorRT engine; excluded from the default ``pytest`` run, select with ``-m integration``."""
 
 
 def synthetic_rgb_batch(batch_size: int, image_hw: tuple[int, int]) -> UInt8[Tensor, "b h w 3"]:

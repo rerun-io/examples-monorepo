@@ -16,6 +16,7 @@ def _have_smplx_model() -> bool:
     return (SMPLX_MODEL_ROOT / "smplx" / "SMPLX_NEUTRAL.npz").exists()
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not _have_smplx_model(), reason="SMPL-X model file not available under simplecv/data/body_models/")
 def test_smplx_layer_forward_shapes() -> None:
     betas: Float32[ndarray, "16"] = np.zeros(16, dtype=np.float32)
@@ -27,6 +28,7 @@ def test_smplx_layer_forward_shapes() -> None:
     assert layer.faces.shape == (20908, 3)
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not _have_smplx_model(), reason="SMPL-X model file not available under simplecv/data/body_models/")
 def test_smplx_layer_rest_root_joint_matches_zero_pose_forward() -> None:
     betas: Float32[ndarray, "16"] = np.zeros(16, dtype=np.float32)

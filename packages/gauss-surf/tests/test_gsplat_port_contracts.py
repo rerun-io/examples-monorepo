@@ -115,6 +115,7 @@ def _sh_degree(step: int) -> int:
     return min(step // 1_000, 3)
 
 
+@pytest.mark.golden
 def test_part6_training_log_contains_the_exact_35_refinement_steps() -> None:
     """The checked-in real run, not a reconstructed config, owns this golden."""
     training_log: Path = _require_local_artifact(
@@ -132,6 +133,7 @@ def test_part6_training_log_contains_the_exact_35_refinement_steps() -> None:
     assert len(parsed_steps) == 35
 
 
+@pytest.mark.golden
 def test_part10_and_part8_0b_logs_contain_the_same_27_refinement_steps() -> None:
     """The two real reference runs, not reconstructed config, own the golden."""
     run_root: Path = Path(__file__).parents[1] / "data/splat_runs/47115416-gaussurf/gaussurf-arkit"
@@ -150,6 +152,7 @@ def test_part10_and_part8_0b_logs_contain_the_same_27_refinement_steps() -> None
     assert parsed_by_run == {"part10": PART10_REFINE_STEPS, "part8-0b": PART10_REFINE_STEPS}
 
 
+@pytest.mark.golden
 def test_part10_pause_after_reset_is_derived_from_train_frame_count() -> None:
     """Use all train images, correcting the old wide-only 570-image contract.
 

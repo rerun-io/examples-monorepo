@@ -448,6 +448,7 @@ def test_epfl_smart_kitchen_hololens_pose_loader_warns_when_leading_rows_use_fir
     np.testing.assert_array_equal(holo_poses.valid_mask, np.array([False, True]))
 
 
+@pytest.mark.integration
 def test_epfl_smart_kitchen_sequence_loads_coco133_labels_and_mano_stack(tmp_path: Path) -> None:
     if not _have_mano_pkls():
         pytest.skip("MANO model files are not available")
@@ -584,6 +585,7 @@ def test_epfl_smart_kitchen_ego_cams_use_nan_extrinsics_on_tracking_dropouts(tmp
     assert np.isfinite(cams[2].extrinsics.cam_t_world).all()
 
 
+@pytest.mark.integration
 def test_epfl_smart_kitchen_visualized_rrd_contains_video_labels_and_mano(tmp_path: Path) -> None:
     if not _have_mano_pkls():
         pytest.skip("MANO model files are not available")
@@ -654,6 +656,7 @@ def test_epfl_smart_kitchen_visualized_rrd_contains_video_labels_and_mano(tmp_pa
         query_session.close()
 
 
+@pytest.mark.integration
 def test_epfl_smart_kitchen_visualized_rrd_can_log_mano_vertex_normals(tmp_path: Path) -> None:
     if not _have_mano_pkls():
         pytest.skip("MANO model files are not available")
@@ -698,6 +701,7 @@ def test_epfl_smart_kitchen_visualized_rrd_can_log_mano_vertex_normals(tmp_path:
         query_session.close()
 
 
+@pytest.mark.integration
 def test_epfl_smart_kitchen_empty_hand_l2_cells_do_not_drop_keypoints(tmp_path: Path) -> None:
     if not _have_mano_pkls():
         pytest.skip("MANO model files are not available")
@@ -732,6 +736,7 @@ def test_epfl_smart_kitchen_empty_hand_l2_cells_do_not_drop_keypoints(tmp_path: 
     assert float(labels.xyzc_stack[0, 112, 3]) == 1.0
 
 
+@pytest.mark.integration
 def test_epfl_smart_kitchen_empty_body_l2_cells_do_not_drop_keypoints(tmp_path: Path) -> None:
     if not _have_mano_pkls():
         pytest.skip("MANO model files are not available")

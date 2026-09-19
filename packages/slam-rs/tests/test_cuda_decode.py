@@ -11,9 +11,11 @@ from av.video.stream import VideoStream
 from jaxtyping import UInt8
 from numpy import ndarray
 
+pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in this environment")
+
 from slam_rs.cuda_decode import decode_gray_cuda
 
-pytestmark = pytest.mark.slow
+pytestmark = pytest.mark.integration
 
 
 @pytest.fixture

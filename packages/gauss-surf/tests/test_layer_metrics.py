@@ -1,8 +1,11 @@
 """Behavior contracts for fused-publication error metrics."""
 
 import numpy as np
+import pytest
 from jaxtyping import Bool, Float32, UInt8
 from numpy import ndarray
+
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
 
 from gauss_surf.train_gsplat.layer_metrics import TriageErrors, angular_error_degrees, colorize_error, compute_triage_errors, viridis_like
 

@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 import torch
+
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
+pytest.importorskip("rerun.experimental.dataloader", reason="requires the rerun.experimental.dataloader dependency in this environment")
+pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in this environment")
 
 from gauss_surf.train_gsplat.cache import GpuTrainingCache, TrainingCamera
 from gauss_surf.train_gsplat.evaluation import evaluate_holdout

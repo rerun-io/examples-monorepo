@@ -130,6 +130,7 @@ rounded to.
 # ── download ──────────────────────────────────────────────────────────────
 
 
+@pytest.mark.integration
 def test_download_fetches_only_the_calibration_and_prints_the_plan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc_ffmpeg: Path
 ) -> None:
@@ -147,6 +148,7 @@ def test_download_fetches_only_the_calibration_and_prints_the_plan(
 # ── convert ───────────────────────────────────────────────────────────────
 
 
+@pytest.mark.integration
 def test_one_resolved_commit_serves_the_listing_the_fetches_and_the_rrd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
 ) -> None:
@@ -170,6 +172,7 @@ def test_one_resolved_commit_serves_the_listing_the_fetches_and_the_rrd(
     assert recording_properties(read_back(target), "capture")["hf_revision"] == REVISION_SHA
 
 
+@pytest.mark.integration
 def test_a_revision_the_hub_resolves_to_nothing_stops_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Without a sha there is no tree to name, so the conversion has nothing honest to record."""
     hub: FakeHub = build_hub(tmp_path, monkeypatch)
@@ -182,6 +185,7 @@ def test_a_revision_the_hub_resolves_to_nothing_stops_the_run(tmp_path: Path, mo
 
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("device", ["index", "g2"])
 def test_convert_writes_one_replayable_recording_and_deletes_the_raw(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device: MsdDeviceChoice, nvenc_ffmpeg: Path
@@ -228,6 +232,7 @@ def test_convert_writes_one_replayable_recording_and_deletes_the_raw(
     assert (hub.root / "M_monado_datasets" / profile.hf_dir / "extras" / "calibration.json").is_file()
 
 
+@pytest.mark.integration
 def test_keep_raw_leaves_the_archive_and_the_encoded_mp4s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     hub: FakeHub = build_hub(tmp_path, monkeypatch, keep_raw=True)
     dataset: MsdDataset = MsdDataset(hub.config)
@@ -237,6 +242,7 @@ def test_keep_raw_leaves_the_archive_and_the_encoded_mp4s(tmp_path: Path, monkey
     assert sorted(path.name for path in hub.root.rglob("*.mp4")) == ["cam0.mp4", "cam1.mp4"]
 
 
+@pytest.mark.integration
 def test_a_failed_encode_keeps_the_archive_and_clears_the_scratch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -259,6 +265,7 @@ def test_a_failed_encode_keeps_the_archive_and_clears_the_scratch(
     assert "kept 0.0" in capsys.readouterr().out
 
 
+@pytest.mark.integration
 def test_a_machine_that_cannot_encode_av1_fails_before_it_fetches_anything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A missing GPU encoder must cost a second, not a multi-gigabyte download."""
     hub: FakeHub = build_hub(tmp_path, monkeypatch)
@@ -277,6 +284,7 @@ def test_a_machine_that_cannot_encode_av1_fails_before_it_fetches_anything(tmp_p
     assert not paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity).exists()
 
 
+@pytest.mark.integration
 def test_a_sequence_with_both_layers_already_written_is_skipped_without_fetching(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     hub: FakeHub = build_hub(tmp_path, monkeypatch)
     dataset: MsdDataset = MsdDataset(hub.config)
@@ -291,6 +299,7 @@ def test_a_sequence_with_both_layers_already_written_is_skipped_without_fetching
     assert hub.fetched == []
 
 
+@pytest.mark.integration
 def test_a_world_up_the_data_disagrees_with_is_announced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc_ffmpeg: Path
 ) -> None:
@@ -306,6 +315,7 @@ def test_a_world_up_the_data_disagrees_with_is_announced(
     assert "measured +y" in output
 
 
+@pytest.mark.integration
 def test_a_follow_frame_the_calibration_disagrees_with_is_announced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc_ffmpeg: Path
 ) -> None:
@@ -322,6 +332,7 @@ def test_a_follow_frame_the_calibration_disagrees_with_is_announced(
     assert "up off by 90.0 deg" in output, "a quarter-turn roll is what the tolerance exists to catch"
 
 
+@pytest.mark.integration
 def test_a_follow_frame_the_calibration_agrees_with_stays_quiet(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc_ffmpeg: Path
 ) -> None:
@@ -348,6 +359,7 @@ def gt_rows(gt_rrd: Path) -> tuple[list[int], list[list[float]]]:
     return times_ns, [row[0] for row in poses.column(1).to_pylist()]
 
 
+@pytest.mark.integration
 def test_a_convert_publishes_the_gt_csv_verbatim_beside_the_two_rrds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
 ) -> None:
@@ -364,6 +376,7 @@ def test_a_convert_publishes_the_gt_csv_verbatim_beside_the_two_rrds(
     assert sidecar.read_bytes() == (tmp_path / "tree" / SEQUENCE / "mav0" / "gt" / "data.csv").read_bytes()
 
 
+@pytest.mark.integration
 def test_a_missing_gt_layer_is_rebuilt_from_the_sidecar_without_fetching(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -392,6 +405,7 @@ def test_a_missing_gt_layer_is_rebuilt_from_the_sidecar_without_fetching(
     assert "no fetch" in capsys.readouterr().out
 
 
+@pytest.mark.integration
 def test_a_missing_gt_layer_with_no_sidecar_falls_back_to_the_archive_and_says_why(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -414,6 +428,7 @@ def test_a_missing_gt_layer_with_no_sidecar_falls_back_to_the_archive_and_says_w
     assert "cannot be rebuilt" in capsys.readouterr().out
 
 
+@pytest.mark.integration
 def test_both_layers_and_the_sidecar_are_skipped_when_all_three_exist(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path
 ) -> None:
@@ -427,6 +442,7 @@ def test_both_layers_and_the_sidecar_are_skipped_when_all_three_exist(
     assert len(hub.fetched) == fetches, "everything exists, so nothing is downloaded"
 
 
+@pytest.mark.integration
 def test_force_republishes_both_layers_and_the_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
     """``--force`` bypasses the skip checks and nothing else: all three come back."""
     hub: FakeHub = build_hub(tmp_path, monkeypatch)
@@ -452,6 +468,7 @@ def test_force_republishes_both_layers_and_the_sidecar(tmp_path: Path, monkeypat
 # ── raw budget ────────────────────────────────────────────────────────────
 
 
+@pytest.mark.integration
 def test_a_sequence_bigger_than_the_budget_is_an_announced_exception(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], nvenc_ffmpeg: Path
 ) -> None:
@@ -466,6 +483,7 @@ def test_a_sequence_bigger_than_the_budget_is_an_announced_exception(
     assert "accepted exception" in output
 
 
+@pytest.mark.integration
 def test_leftovers_that_would_breach_the_budget_stop_the_fetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     hub: FakeHub = build_hub(tmp_path, monkeypatch, archive_bytes=30_000_000_000, raw_budget_gb=50.0)
     leftover: Path = hub.root / "M_monado_datasets/MI_valve_index/MIO_others/MIO12_moving_screens.zip"
@@ -507,6 +525,7 @@ def test_every_declared_follow_frame_is_two_orthogonal_unit_vectors(device: MsdD
     assert float(np.dot(follow.forward, follow.up)) == pytest.approx(0.0, abs=1e-3)
 
 
+@pytest.mark.golden
 @pytest.mark.parametrize("device", ["index", "g2", "odyssey"])
 def test_every_declared_follow_frame_is_the_real_calibration_own(device: MsdDeviceChoice) -> None:
     """The constants exist only because ``register`` has no sequence to derive them from.

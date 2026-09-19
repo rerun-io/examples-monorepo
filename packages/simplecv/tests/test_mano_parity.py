@@ -157,7 +157,7 @@ def _find_hocap_sample() -> tuple[Float32[ndarray, "10"], Float32[ndarray, "n 2 
     return betas, poses_m
 
 
-@pytest.mark.slow
+@pytest.mark.golden
 def test_mano_np_matches_torch_on_hocap_sample() -> None:
     res = _find_hocap_sample()
     if res is None:
@@ -167,7 +167,8 @@ def test_mano_np_matches_torch_on_hocap_sample() -> None:
     die_if_unbearable(poses_m, Float32[ndarray, "n 2 51"])  # (N,2,51)
 
     mano_root = Path("data")
-    assert (mano_root / "MANO_RIGHT.pkl").exists() and (mano_root / "MANO_LEFT.pkl").exists()
+    if not (mano_root / "MANO_RIGHT.pkl").is_file() or not (mano_root / "MANO_LEFT.pkl").is_file():
+        pytest.skip(f"MANO_RIGHT.pkl and MANO_LEFT.pkl required under {mano_root}")
 
     # Compare for both hands on a few frames
     n: int = min(3, poses_m.shape[0])

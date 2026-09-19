@@ -4,7 +4,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from conftest import requires_cuda, slow_cuda
+import pytest
+from conftest import integration, requires_cuda
 from huggingface_hub import snapshot_download
 from jaxtyping import Float32, UInt8
 from torch import nn
@@ -13,9 +14,8 @@ from monopriors.apis.stereo_depth import ETH3D_MAX_DISP, MiddleburyCalibration, 
 from monopriors.models.stereo_depth import FastFoundationStereoPredictor, StereoDepthPrediction
 from monopriors.models.stereo_depth.fast_foundationstereo import download_fast_foundationstereo_checkpoint, load_fast_foundationstereo
 
-pytestmark = slow_cuda
 
-
+@integration
 def test_released_checkpoint_remaps_serialized_architecture() -> None:
     """The pickled upstream architecture remaps with the released tensor and parameter counts."""
     checkpoint: Path = download_fast_foundationstereo_checkpoint()
@@ -27,6 +27,7 @@ def test_released_checkpoint_remaps_serialized_architecture() -> None:
 
 
 @requires_cuda
+@pytest.mark.golden
 def test_eth3d_playground_accuracy() -> None:
     """At the shared 192 px cutoff, the release stays near EPE 0.241 px and bad1 0.48%."""
     root: Path = Path(snapshot_download("pablovela5620/monoprior-example", repo_type="dataset", allow_patterns=["stereo/eth3d/two_view_training*/**"]))

@@ -14,7 +14,11 @@ from posekit.rerun_logging import person_color
 from posekit.skeletons import COCO_17
 from scipy.spatial.transform import Rotation
 
-from lamptrack.apis.lamp_catalog import (
+pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
+pytest.importorskip("rerun.experimental.dataloader", reason="rerun.experimental.dataloader is required by this test module")
+pytest.importorskip("torchcodec", reason="torchcodec is required by this test module")
+
+from lamptrack.apis.lamp_catalog import (  # noqa: E402
     Config,
     _log_camera_observations,
     _log_person,
@@ -25,7 +29,7 @@ from lamptrack.apis.lamp_catalog import (
     interpolate_pose,
     log_static_context,
 )
-from lamptrack.models.lamp import PersonState
+from lamptrack.models.lamp import PersonState  # noqa: E402
 
 
 def _batches_by_component(archetype: Any) -> dict[str, Any]:

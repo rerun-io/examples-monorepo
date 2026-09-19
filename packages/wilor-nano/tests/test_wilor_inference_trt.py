@@ -4,9 +4,12 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 import torch
 from jaxtyping import Float, Int, UInt8
 from numpy import ndarray
+
+pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in this environment")
 
 TORCH_UINT8: torch.dtype = torch.__dict__["uint8"]
 

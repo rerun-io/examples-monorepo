@@ -29,6 +29,8 @@ def test_point_accessors_are_read_only_and_edits_are_explicit() -> None:
 
 @pytest.fixture(scope="module")
 def tracker() -> Iterator[ClickTracker]:
+    if not CLIP.is_file():
+        pytest.skip(f"Click-tracking video missing: {CLIP}")
     # -ti drifts on point-only seeding (0.39–0.91 end scores); -s holds at 0.95+.
     click_tracker = ClickTracker(CLIP, Sam2VideoSegmenterConfig(variant="efficienttam-s-512").setup().predictor)
     yield click_tracker
@@ -36,6 +38,7 @@ def tracker() -> Iterator[ClickTracker]:
     click_tracker.close()
 
 
+@pytest.mark.integration
 @cuda_only
 def test_add_point_masks_the_click_and_preview_follows(tracker: ClickTracker) -> None:
     tracker.clear()
@@ -50,6 +53,7 @@ def test_add_point_masks_the_click_and_preview_follows(tracker: ClickTracker) ->
     assert tracker._state.memory_bank.count_non_conditional_memories() == 0
 
 
+@pytest.mark.integration
 @cuda_only
 def test_first_click_matches_explicit_resegment(tracker: ClickTracker) -> None:
     tracker.clear()
@@ -60,6 +64,7 @@ def test_first_click_matches_explicit_resegment(tracker: ClickTracker) -> None:
     assert first.score == replaced.score
 
 
+@pytest.mark.integration
 @cuda_only
 def test_negative_point_shrinks_and_removal_restores(tracker: ClickTracker) -> None:
     tracker.clear()
@@ -72,6 +77,7 @@ def test_negative_point_shrinks_and_removal_restores(tracker: ClickTracker) -> N
     assert tracker.remove_point_near(0, 10.0, 10.0, radius_px=100.0) == PointEdit(point=None, result=None)
 
 
+@pytest.mark.integration
 @cuda_only
 def test_undo_last_point_clears_its_frame_memory(tracker: ClickTracker) -> None:
     tracker.clear()
@@ -84,6 +90,7 @@ def test_undo_last_point_clears_its_frame_memory(tracker: ClickTracker) -> None:
     assert tracker._state.memory_bank.count_conditional_memories() == 1
 
 
+@pytest.mark.integration
 @cuda_only
 @pytest.mark.parametrize("click", [(353.0, 405.0), (390.0, 480.0), CHEST])
 def test_track_holds_object_through_clip(tracker: ClickTracker, click: tuple[float, float]) -> None:
@@ -94,6 +101,7 @@ def test_track_holds_object_through_clip(tracker: ClickTracker, click: tuple[flo
     assert results[-1].score > 0.7
 
 
+@pytest.mark.integration
 @cuda_only
 def test_refinement_preserves_propagated_object(tracker: ClickTracker) -> None:
     tracker.clear()
@@ -116,6 +124,7 @@ def test_refinement_preserves_propagated_object(tracker: ClickTracker) -> None:
     assert int(excluded.mask.sum()) >= 0.7 * area
 
 
+@pytest.mark.integration
 @cuda_only
 def test_track_runs_bidirectionally_with_confidence(tracker: ClickTracker) -> None:
     tracker.clear()
@@ -128,6 +137,7 @@ def test_track_runs_bidirectionally_with_confidence(tracker: ClickTracker) -> No
     assert all(0.0 <= result.object_score <= 1.0 for result in results)
 
 
+@pytest.mark.integration
 @cuda_only
 def test_decoding_from_other_threads_works(tracker: ClickTracker) -> None:
     # torchcodec's NVDEC decoder fails from any thread but its creator; web callbacks

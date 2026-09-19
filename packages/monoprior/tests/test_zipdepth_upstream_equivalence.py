@@ -51,6 +51,7 @@ def _assert_tensor_maps_equal(left: TensorMap, right: TensorMap) -> None:
         assert torch.equal(left_tensor, right_tensor), name
 
 
+@pytest.mark.golden
 def test_annotated_model_matches_upstream_through_training_and_fusion() -> None:
     upstream_architecture: ModuleType = _load_upstream_module("zipdepth_upstream_architecture", REFERENCE_DIR / "upstream_architecture.py")
     upstream_model_utils: ModuleType = _load_upstream_module("zipdepth_upstream_model_utils", REFERENCE_DIR / "upstream_model_utils.py")
@@ -110,6 +111,7 @@ def test_annotated_model_matches_upstream_through_training_and_fusion() -> None:
     assert torch.equal(upstream_remaining_fused_output_b1hw, ours_remaining_fused_output_b1hw)
 
 
+@pytest.mark.golden
 def test_state_dict_prefix_stripping_matches_upstream() -> None:
     upstream_model_utils: ModuleType = _load_upstream_module("zipdepth_upstream_model_utils_prefixes", REFERENCE_DIR / "upstream_model_utils.py")
     upstream_strip_state_dict_prefixes: Callable[[TensorMap], TensorMap] = upstream_model_utils.strip_state_dict_prefixes

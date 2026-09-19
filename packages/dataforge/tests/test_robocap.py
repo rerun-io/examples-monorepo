@@ -12,12 +12,15 @@ import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Float64, Int64
 from numpy import ndarray
-from rerun.catalog import CatalogClient, DatasetEntry
-from simplecv.data.ego.robocap_ego import CAMERA_DISPLAY_ORDER
-from simplecv.imu_calibration import ImuCalibration
 
-from dataforge import blueprints, schema
-from dataforge.datasets.robocap import (
+pytest.importorskip("rerun.catalog", reason="catalog metadata tests need the Rerun catalog dependencies")
+
+from rerun.catalog import CatalogClient, DatasetEntry  # noqa: E402
+from simplecv.data.ego.robocap_ego import CAMERA_DISPLAY_ORDER  # noqa: E402
+from simplecv.imu_calibration import ImuCalibration  # noqa: E402
+
+from dataforge import blueprints, schema  # noqa: E402
+from dataforge.datasets.robocap import (  # noqa: E402
     ACCEL_SCALE,
     CAMERA_TO_IMU_OFFSET_NS,
     GYRO_SCALE,
@@ -28,8 +31,8 @@ from dataforge.datasets.robocap import (
     build_table_blueprint,
     read_imu_database,
 )
-from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import ImuChannel
+from dataforge.identity import SequenceIdentity  # noqa: E402
+from dataforge.logging_toolkit import ImuChannel  # noqa: E402
 
 DEVICE: str = "f408193e6447b3b0"
 """Device id used by every fake session directory in these tests."""
@@ -168,6 +171,7 @@ def test_malformed_imu_db_is_skipped_not_fatal(tmp_path: Path) -> None:
     assert read_imu_database(db_path) is None
 
 
+@pytest.mark.integration
 def test_factory_metadata_preserves_offsets_and_applied_correction(tmp_path: Path) -> None:
     factory: Path = tmp_path / f"0factory-calibration-{DEVICE}"
     noise: Path = factory / "imus_intrinsic/imu_mid_0.yaml"
@@ -200,6 +204,7 @@ def test_factory_metadata_preserves_offsets_and_applied_correction(tmp_path: Pat
         assert table["/world/rig_00/cam_02:time_offset_reference"].to_pylist() == [["/world/rig_00/imu_00"]]
 
 
+@pytest.mark.integration
 def test_missing_device_calibration_is_not_replaced_with_another_caps(tmp_path: Path) -> None:
     dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=tmp_path))
     path: Path = tmp_path / "unknown.rrd"

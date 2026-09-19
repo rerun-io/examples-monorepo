@@ -1,8 +1,11 @@
 """Behavior checks for the GT-clean sub-dataset selection."""
 
 import pandas as pd
+import pytest
 
-from arkitscenes_download.ingest.subdataset import gt_clean_mask
+pytest.importorskip("rerun.catalog", reason="subdataset helpers need the Rerun catalog dependencies")
+
+from arkitscenes_download.ingest.subdataset import gt_clean_mask  # noqa: E402
 
 
 def test_gt_clean_mask_requires_gt_and_bounded_interior_gaps() -> None:

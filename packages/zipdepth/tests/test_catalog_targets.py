@@ -70,6 +70,7 @@ def test_depth_span_ratio_uses_the_stride_16_spatial_sample() -> None:
     assert ratio == pytest.approx(385.0 / 115.0)
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA depth-span filtering needs a GPU")
 def test_depth_span_ratio_cuda_matches_cpu_stride_sample() -> None:
     """Keep the CPU percentile semantics when the flat-frame filter moves to CUDA."""
@@ -124,10 +125,13 @@ def test_build_training_sample_does_not_create_depth_in_holes() -> None:
     assert not bool(sample["mask"].any())
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA sample construction needs a GPU")
 def test_build_training_sample_cuda_matches_deterministic_cpu_path() -> None:
     """Match production-size target geometry and bound CPU/GPU RGB filter drift."""
     image_path: Path = Path(__file__).parents[1] / "assets/examples/im0.jpg"
+    if not image_path.is_file():
+        pytest.skip(f"Example image missing: {image_path}")
     image_bgr_hwc: UInt8[ndarray, "asset_h asset_w 3"] | None = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     assert image_bgr_hwc is not None
     asset_rgb_hwc: UInt8[ndarray, "asset_h asset_w 3"] = cv2.cvtColor(image_bgr_hwc, cv2.COLOR_BGR2RGB)
@@ -162,6 +166,7 @@ def test_build_training_sample_cuda_matches_deterministic_cpu_path() -> None:
     assert int(image_error.max()) <= 1
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA sample construction needs a GPU")
 @pytest.mark.parametrize("quarter_turns", [0, 1, 2, 3])
 def test_build_training_sample_cuda_rotates_counter_clockwise_like_numpy(quarter_turns: int) -> None:
@@ -185,6 +190,7 @@ def test_build_training_sample_cuda_rotates_counter_clockwise_like_numpy(quarter
     assert_array_equal(actual_hwc, expected_hwc)
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA sample construction needs a GPU")
 def test_build_training_sample_cuda_is_reproducible_from_the_sample_generator() -> None:
     """Repeat stochastic augmentation exactly from an equal per-sample seed."""

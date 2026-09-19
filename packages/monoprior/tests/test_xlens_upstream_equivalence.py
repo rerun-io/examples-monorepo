@@ -17,6 +17,8 @@ from torch import Tensor, nn
 from monopriors.third_party.xlens.inference import preprocess as owned_preprocess
 from monopriors.third_party.xlens.models.net import XLensNet
 
+pytestmark = pytest.mark.golden
+
 REFERENCE_DIR: Path = Path(__file__).parent / "reference_data" / "xlens"
 UPSTREAM_PACKAGE: str = "xlens_upstream"
 

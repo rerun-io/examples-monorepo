@@ -1,7 +1,10 @@
 import numpy as np
+import pytest
 import torch
 
 from monopriors.models.relative_depth.depth_anything_v1 import DepthAnythingV1Predictor
+
+pytestmark = pytest.mark.integration
 
 
 def test_set_model_device_moves_in_place() -> None:

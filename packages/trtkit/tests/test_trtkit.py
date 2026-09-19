@@ -108,6 +108,7 @@ def test_sweep_stale_onnx_exports_keeps_current_recent_and_unrelated_files(tmp_p
     }
 
 
+@pytest.mark.integration
 @cuda_only
 def test_allow_tf32_cache_key(tmp_path: Path) -> None:
     """Disabling TF32 is part of the engine identity; enabling it keeps legacy names."""
@@ -343,6 +344,7 @@ class _ToyDynamic(torch.nn.Module):
         return self.conv(images) + bias[:, :, None, None]
 
 
+@pytest.mark.integration
 @cuda_only
 def test_dynamic_runtime_runs_two_shapes_from_one_engine(tmp_path: Path) -> None:
     """A shape-profiled engine serves several batch and spatial sizes with batch-1 side inputs."""

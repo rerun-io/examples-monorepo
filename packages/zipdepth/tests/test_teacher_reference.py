@@ -7,13 +7,19 @@ from jaxtyping import Bool, Float32
 from numpy import ndarray
 from torch import Tensor
 
-from zipdepth.apis.eval_teacher_reference import (
+pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
+pytest.importorskip("rerun.experimental.dataloader", reason="rerun.experimental.dataloader is required by this test module")
+pytest.importorskip("torchcodec", reason="torchcodec is required by this test module")
+pytest.importorskip("arkitscenes_download", reason="arkitscenes_download is required by this test module")
+pytest.importorskip("imagecodecs", reason="imagecodecs is required by this test module")
+
+from zipdepth.apis.eval_teacher_reference import (  # noqa: E402
     PeripheryReachability,
     prompt_output_range,
     replicate_prompt_canvas,
     score_periphery_reachability,
 )
-from zipdepth.catalog.ultrawide import DEFAULT_ULTRAWIDE_PROMPT_SCALE, PromptPlacement, prompt_placement
+from zipdepth.catalog.ultrawide import DEFAULT_ULTRAWIDE_PROMPT_SCALE, PromptPlacement, prompt_placement  # noqa: E402
 
 
 def test_prompt_output_range_ignores_the_zero_padding_only_when_absent() -> None:

@@ -67,6 +67,7 @@ def test_applies_inside_ignored_git_target(tmp_path: Path, crate: PatchedCrate) 
 
 
 @pytest.mark.skipif(shutil.which('cargo') is None, reason='real patch smoke test requires cargo on PATH')
+@pytest.mark.integration
 def test_real_patch_and_locked_cargo_resolution(tmp_path: Path) -> None:
     """The shipped patch matches the fork and Cargo uses the prepared crate."""
     package_dir: Path = Path(__file__).resolve().parents[1]

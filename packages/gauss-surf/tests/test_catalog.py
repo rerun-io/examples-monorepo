@@ -7,6 +7,11 @@ import pyarrow as pa
 import pytest
 import torch
 from jaxtyping import UInt8
+
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
+pytest.importorskip("rerun.experimental.dataloader", reason="requires the rerun.experimental.dataloader dependency in this environment")
+pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in this environment")
+
 from rerun.catalog import DatasetEntry
 from torch import Tensor
 

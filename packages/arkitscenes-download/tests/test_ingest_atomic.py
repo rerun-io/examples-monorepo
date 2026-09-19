@@ -6,9 +6,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import rerun as rr
 
-from arkitscenes_download.ingest.cli import atomic_recording
+pytest.importorskip("imagecodecs", reason="the ingest CLI needs imagecodecs from the ingest environment")
+
+from arkitscenes_download.ingest.cli import atomic_recording  # noqa: E402
 
 
 class _FakeRecording:

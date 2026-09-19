@@ -1,5 +1,12 @@
 """Schedule tests shared by the version-control and direct-gsplat stages."""
 
+import pytest
+
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
+pytest.importorskip("rerun.experimental.dataloader", reason="requires the rerun.experimental.dataloader dependency in this environment")
+pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in this environment")
+pytest.importorskip("imagecodecs", reason="requires the imagecodecs dependency in this environment")
+
 from gauss_surf.apis.train_gsplat import Config
 from gauss_surf.gsplat_schedule import (
     downscale_factor,
@@ -59,6 +66,7 @@ def test_opacity_reset_gate_preserves_the_refinement_cycle() -> None:
     assert callback_steps == (2_999, 3_001, 3_001, 6_001)
 
 
+@pytest.mark.golden
 def test_direct_trainer_refinement_steps_match_the_golden() -> None:
     """The public predicate derives its pause from all 1,221 training images."""
     actual_steps: tuple[int, ...] = tuple(

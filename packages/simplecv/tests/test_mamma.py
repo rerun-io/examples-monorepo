@@ -171,6 +171,7 @@ def _write_eval_gt_npz(path: Path, *, num_frames: int = 3, genders: tuple[str, .
     )
 
 
+@pytest.mark.integration
 def test_mamma_load_labels_builds_multi_person_smplx_stack(tmp_path: Path) -> None:
     sequence_dir: Path = _write_synthetic_sequence(tmp_path)
     _write_params_npz(sequence_dir / "pred" / "params_00.npz", num_frames=3, seed=0)
@@ -206,6 +207,7 @@ def test_mamma_load_labels_without_pred_returns_none(tmp_path: Path) -> None:
     assert sequence.exoego_labels is None
 
 
+@pytest.mark.integration
 def test_mamma_load_labels_from_eval_gt_warns_on_mixed_genders(tmp_path: Path) -> None:
     sequence_dir: Path = _write_synthetic_sequence(tmp_path)
     _write_eval_gt_npz(sequence_dir / "gt" / "global.npz")
@@ -227,6 +229,7 @@ def test_mamma_load_labels_from_eval_gt_warns_on_mixed_genders(tmp_path: Path) -
     assert labels.xyzc_stack.shape == (3, 133, 4)
 
 
+@pytest.mark.integration
 def test_mamma_load_labels_prefers_eval_gt_over_pred(tmp_path: Path) -> None:
     sequence_dir: Path = _write_synthetic_sequence(tmp_path)
     _write_params_npz(sequence_dir / "pred" / "params_00.npz", num_frames=3, seed=0)
@@ -241,6 +244,7 @@ def test_mamma_load_labels_prefers_eval_gt_over_pred(tmp_path: Path) -> None:
     assert labels.smplx_stack.betas.shape == (1, 300)
 
 
+@pytest.mark.integration
 def test_mamma_pred_params_warn_on_mixed_genders(tmp_path: Path) -> None:
     sequence_dir: Path = _write_synthetic_sequence(tmp_path)
     _write_params_npz(sequence_dir / "pred" / "params_00.npz", num_frames=3, seed=0, gender="neutral")
@@ -254,6 +258,7 @@ def test_mamma_pred_params_warn_on_mixed_genders(tmp_path: Path) -> None:
     assert labels.smplx_stack.gender == "neutral"
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not _have_smplx_model(), reason="SMPL-X model file not available under simplecv/data/body_models/")
 def test_log_smplx_batch_streams_meshes_in_chunks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The mesh logger must forward + send in bounded frame chunks, covering every frame.

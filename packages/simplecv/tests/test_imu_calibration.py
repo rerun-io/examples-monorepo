@@ -5,11 +5,15 @@ from pathlib import Path
 import pyarrow as pa
 import pytest
 import rerun as rr
-from rerun.catalog import CatalogClient, DatasetEntry
 
-from simplecv.imu_calibration import ImuCalibration
+pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
+
+from rerun.catalog import CatalogClient, DatasetEntry  # noqa: E402
+
+from simplecv.imu_calibration import ImuCalibration  # noqa: E402
 
 
+@pytest.mark.integration
 def test_catalog_preserves_known_zero_and_absent_calibration(tmp_path: Path) -> None:
     path: Path = tmp_path / "imu.rrd"
     calibration: ImuCalibration = ImuCalibration(gyro_noise_density=0.0, rate_hz=200.0, source="factory/imu.yaml")

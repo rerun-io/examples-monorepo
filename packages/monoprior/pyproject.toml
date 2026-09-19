@@ -173,8 +173,11 @@ ignore_names = [
 ]
 
 [tool.pytest.ini_options]
-markers = ["slow: loads a checkpoint or builds a TensorRT engine (deselected by default; run with -m slow)"]
-addopts = "-m 'not slow'"
+markers = [
+    "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e monoprior-dev tests-integration)",
+    "golden: reference comparison against stored ground truth (run: pixi run -e monoprior-dev tests-golden)",
+]
+addopts = "-m 'not integration and not golden'"
 
 # Workspace siblings named above resolve to their in-repo path (never to a PyPI
 # namesake); the root manifest installs the same paths editable.

@@ -43,7 +43,7 @@ def _have_mano_pkls() -> bool:
     return (mano_root / "MANO_RIGHT.pkl").exists() and (mano_root / "MANO_LEFT.pkl").exists()
 
 
-@pytest.mark.slow
+@pytest.mark.golden
 def test_epfl_mano_endpoint_error_against_csv_ground_truth() -> None:
     pick = _first_available_train_session()
     if pick is None:
@@ -60,7 +60,8 @@ def test_epfl_mano_endpoint_error_against_csv_ground_truth() -> None:
         load_labels=True,
     )
     # Sanity: the pose CSV must exist where the loader expects it.
-    assert hand_pose_path(cfg).exists(), f"Missing pose3d_mano.csv at {hand_pose_path(cfg)}"
+    if not hand_pose_path(cfg).is_file():
+        pytest.skip(f"Missing pose3d_mano.csv at {hand_pose_path(cfg)}")
 
     sequence = EpflSmartKitchenSequence(cfg)
     labels = sequence.exoego_labels

@@ -8,6 +8,9 @@ import pytest
 from datafusion import SessionContext
 from jaxtyping import Float64, Int64
 from numpy import ndarray
+
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
+
 from rerun.catalog import DatasetEntry
 from simplecv.rerun_log_utils import RerunTyroConfig
 
@@ -295,7 +298,8 @@ def test_a_ground_truth_window_with_no_pose_in_it_is_empty() -> None:
     assert len(_rig_trajectory(pa.table({TIMELINE: pa.array([10], type=pa.int64())}), SMOKE_SEGMENT)) == 0
 
 
-@pytest.mark.slow
+@pytest.mark.integration
+@pytest.mark.usefixtures("live_catalog")
 def test_the_smoke_segment_decodes_from_the_catalog(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     """One real segment end to end: frame count, shape, dtype and paired IMU timestamps."""
     segment: ReferenceSegment = benchmarks.by_id(SMOKE_SEGMENT)
@@ -351,7 +355,8 @@ def test_the_smoke_segment_decodes_from_the_catalog(benchmarks: Benchmarks, sett
         assert with_truth == len(feed.frame_t_ns) - 1
 
 
-@pytest.mark.slow
+@pytest.mark.integration
+@pytest.mark.usefixtures("live_catalog")
 def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     """Cutting the segment into 2 s windows must reproduce the pixels and the inertial stream exactly."""
     segment: ReferenceSegment = benchmarks.by_id(SMOKE_SEGMENT)
@@ -394,7 +399,8 @@ def test_the_window_size_does_not_change_a_single_pixel_or_an_imu_sample(benchma
     np.testing.assert_array_equal(imu_t_ns[60.0], imu_t_ns[2.0])
 
 
-@pytest.mark.slow
+@pytest.mark.integration
+@pytest.mark.usefixtures("live_catalog")
 def test_a_replay_export_associates_with_the_catalog_ground_truth(benchmarks: Benchmarks, settings: SlamConfig, tmp_path: Path) -> None:
     """The replay's own export path, end to end, lands on the sidecar's clock.
 

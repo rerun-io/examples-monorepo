@@ -64,6 +64,31 @@ def test_package_features_have_prod_and_dev_environments() -> None:
     assert not problems, "Package environment inconsistencies:\n" + "\n".join(problems)
 
 
+@pytest.mark.parametrize("package_dir", RUNNABLE_PACKAGES, ids=lambda package_dir: package_dir.name)
+def test_runnable_packages_configure_test_tiers(package_dir: Path) -> None:
+    config: dict = tomllib.loads((package_dir / "pyproject.toml").read_text())
+    options: dict = config.get("tool", {}).get("pytest", {}).get("ini_options", {})
+    markers: set[str] = {marker.partition(":")[0].strip() for marker in options.get("markers", [])}
+    problems: list[str] = []
+    for marker in ("integration", "golden"):
+        if marker not in markers:
+            problems.append(f"{package_dir.name}: missing {marker} marker registration")
+    if "-m 'not integration and not golden'" not in options.get("addopts", ""):
+        problems.append(f"{package_dir.name}: addopts must contain -m 'not integration and not golden'")
+    assert not problems, "Missing test tier configuration:\n" + "\n".join(problems)
+
+
+def test_packages_do_not_use_retired_pytest_markers() -> None:
+    retired: re.Pattern[str] = re.compile(r"\bmark\.(?:slow|slow_cuda|hardware)\b|[\"'](?:slow|slow_cuda|hardware)\s*:")
+    paths: list[Path] = sorted([*REPO_ROOT.glob("packages/*/pyproject.toml"), *REPO_ROOT.glob("packages/**/conftest.py")])
+    problems: list[str] = []
+    for path in paths:
+        for line_number, line in enumerate(path.read_text().splitlines(), start=1):
+            if retired.search(line):
+                problems.append(f"{path.relative_to(REPO_ROOT)}:{line_number}: {line.strip()}")
+    assert not problems, "Retired pytest markers (use integration or golden):\n" + "\n".join(problems)
+
+
 def _task_commands(table: dict, prefix: str = "") -> dict[str, str | list[str]]:
     """Find tasks at workspace, feature and target scope, including shorthand."""
     commands: dict[str, str | list[str]] = {}

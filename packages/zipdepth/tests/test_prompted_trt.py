@@ -9,7 +9,7 @@ import pytest
 import torch
 from jaxtyping import Float32
 from monopriors.models.depth_completion.zipdepth_prompt import ZipDepthPrompt
-from monopriors.models.depth_completion.zipdepth_prompt_export import (
+from monopriors.models.depth_completion.zipdepth_prompt_export import (  # noqa: E402
     IMAGE_INPUT_NAME,
     PROMPT_INPUT_NAME,
     ModelLoader,
@@ -17,11 +17,11 @@ from monopriors.models.depth_completion.zipdepth_prompt_export import (
     _ExportOutputs,
     export_zipdepth_prompt_onnx,
 )
-from monopriors.models.relative_depth.zipdepth import download_zipdepth_checkpoint
-from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_COVERAGE_MAX_KEY, RANGE_MARGIN_M_KEY
-from torch import Tensor, nn
+from monopriors.models.relative_depth.zipdepth import download_zipdepth_checkpoint  # noqa: E402
+from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_COVERAGE_MAX_KEY, RANGE_MARGIN_M_KEY  # noqa: E402
+from torch import Tensor, nn  # noqa: E402
 
-from zipdepth.apis import prompted_trt
+from zipdepth.apis import prompted_trt  # noqa: E402
 
 ExportInputs: TypeAlias = tuple[Float32[Tensor, "b 3 h w"], Float32[Tensor, "b 1 192 256"]]
 
@@ -215,6 +215,7 @@ trt_parity = pytest.mark.skipif(
 )
 
 
+@pytest.mark.integration
 @trt_parity
 def test_holey_and_narrow_prompt_torch_onnx_trt_parity() -> None:
     """Compare the real fp16 graph across Torch, ONNX Runtime, and TensorRT."""

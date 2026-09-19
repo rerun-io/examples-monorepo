@@ -115,5 +115,6 @@ def test_default_conversion_artifacts_live_under_pretrained_models() -> None:
 
     assert "pretrained_models/tensorrt" in DEFAULT_FULL_WILOR_ONNX_PATH.as_posix()
     assert "pretrained_models/tensorrt" in DEFAULT_DETECTOR_ENGINE_PATH.as_posix()
-    assert not DEFAULT_FULL_WILOR_ONNX_PATH.as_posix().startswith("/tmp/")
-    assert not DEFAULT_DETECTOR_ENGINE_PATH.as_posix().startswith("/tmp/")
+    package_root: Path = Path(__file__).resolve().parents[1]
+    assert DEFAULT_FULL_WILOR_ONNX_PATH.parent == package_root / "pretrained_models/tensorrt"
+    assert DEFAULT_DETECTOR_ENGINE_PATH.parent == package_root / "pretrained_models/tensorrt"

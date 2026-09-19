@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import pytest
 from scipy.spatial.transform import Rotation
 
 from arkitscenes_download.ingest.imu import gyro_degrees_to_radians
@@ -59,12 +60,16 @@ class IngestMathTest(unittest.TestCase):
             projected = (rotated_intrinsics @ rotated_point)[:2] / rotated_point[2]
             np.testing.assert_allclose(projected, rotate_pixels(pixel, (640, 480), quarter_turns), atol=1e-12)
 
+    @pytest.mark.integration
     def test_real_pose_projection_follows_the_baked_image_rotation(self) -> None:
         """A real trajectory pose and calibration preserve world-point alignment."""
         if not Path("data/raw/Training/47332195/lowres_wide.traj").is_file():
             self.skipTest("ARKitScenes sample sequence is unavailable")
         trajectory_row = np.loadtxt("data/raw/Training/47332195/lowres_wide.traj", max_rows=1)
-        calibration = np.loadtxt(sorted(Path("data/raw/Training/47332195/lowres_wide_intrinsics").glob("*.pincam"))[0])
+        calibration_paths: list[Path] = sorted(Path("data/raw/Training/47332195/lowres_wide_intrinsics").glob("*.pincam"))
+        if not calibration_paths:
+            self.skipTest("ARKitScenes sample lowres_wide_intrinsics calibration is unavailable")
+        calibration = np.loadtxt(calibration_paths[0])
         camera_from_world = Rotation.from_rotvec(trajectory_row[1:4])
         translation = trajectory_row[4:7]
         intrinsics = np.asarray([[calibration[2], 0.0, calibration[4]], [0.0, calibration[3], calibration[5]], [0.0, 0.0, 1.0]])

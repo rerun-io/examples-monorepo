@@ -213,10 +213,20 @@ description = "Find dead code in the package"
 
 [feature.dev.tasks.tests]
 cmd = "cd $PACKAGE_DIR && pytest -q"
-description = "Run package tests"
+description = "Run package unit tests"
+
+# `|| test $? -eq 5`: pytest exits 5 when a marker selects nothing; a package with no tests in a
+# tier must not fail `gate`. Any other exit code still fails.
+[feature.dev.tasks.tests-integration]
+cmd = "cd $PACKAGE_DIR && pytest -q -m integration || test $? -eq 5"
+description = "Run package integration tests"
+
+[feature.dev.tasks.tests-golden]
+cmd = "cd $PACKAGE_DIR && pytest -q -m golden || test $? -eq 5"
+description = "Run package golden reference tests"
 
 [feature.dev.tasks.gate]
-depends-on = ["lint", "typecheck", "deadcode", "tests"]
+depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration"]
 description = "Run the author pre-merge checks for the package"
 
 # ─── ci feature (small environment for hosted GitHub runners) ─────────────
@@ -2610,13 +2620,25 @@ depends-on = ["slam-rs-build"]
 cwd = "packages/slam-rs"
 description = "Print the version reported by the compiled core"
 
-# Python tests import slam_rs._core, so they need the build first; this shadows
-# the generic `tests` task from the dev feature.
+# Python tests import slam_rs._core, so every tier needs the build first;
+# these shadow the generic test tasks from the dev feature.
 [feature.slam-rs.tasks.tests]
 cmd = "pytest -q"
 depends-on = ["slam-rs-build"]
 cwd = "packages/slam-rs"
-description = "Build the core, then run the package tests"
+description = "Build the core, then run the package unit tests"
+
+[feature.slam-rs.tasks.tests-integration]
+cmd = "pytest -q -m integration || test $? -eq 5"
+depends-on = ["slam-rs-build"]
+cwd = "packages/slam-rs"
+description = "Build the core, then run the package integration tests"
+
+[feature.slam-rs.tasks.tests-golden]
+cmd = "pytest -q -m golden || test $? -eq 5"
+depends-on = ["slam-rs-build"]
+cwd = "packages/slam-rs"
+description = "Build the core, then run the package golden reference tests"
 
 # ── GPU lane (wgpu) ──────────────────────────────────────────────────────
 # The GPU runtime uses the host graphics driver and runs from the base feature.

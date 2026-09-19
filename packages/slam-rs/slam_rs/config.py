@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from tomllib import TOMLDecodeError
@@ -102,6 +103,14 @@ class SlamConfig:
         return profiled_config_text(path, profile, path.parent / "profiles")
 
 
+CATALOG_URL_ENV: str = "SLAM_RS_CATALOG_URL"
+"""Environment override for ``catalog_url``: the catalog server tools and tests read from.
+
+``slam.toml`` names the default (a server on this host); a machine that reads another server, e.g.
+``rerun+http://dgx-spark:9988``, sets this instead of editing the checked-in file.
+"""
+
+
 def load_slam_config(path: Path = SLAM_CONFIG_PATH) -> SlamConfig:
     """Read runtime settings without opening benchmark definitions."""
     try:
@@ -110,7 +119,7 @@ def load_slam_config(path: Path = SLAM_CONFIG_PATH) -> SlamConfig:
         raise ValueError(f"{path}: {error}") from error
     if parsed.schema_version != 2:
         raise ValueError(f"{path}: expected schema_version 2")
-    return replace(parsed, package_root=path.parent)
+    return replace(parsed, package_root=path.parent, catalog_url=os.environ.get(CATALOG_URL_ENV, parsed.catalog_url))
 
 
 PORT_CONFIG_KEYS: frozenset[str] = frozenset({"port.redetect_survivor_ratio", "port.frame_update_max_iterations"})

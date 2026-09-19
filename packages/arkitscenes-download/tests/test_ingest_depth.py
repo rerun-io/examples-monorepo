@@ -3,11 +3,15 @@
 import io
 import unittest
 
-import imagecodecs
-import numpy as np
-from PIL import Image
+import pytest
 
-from arkitscenes_download.ingest.depth import encode_depth_png
+pytest.importorskip("imagecodecs", reason="depth PNG tests need imagecodecs from the ingest environment")
+
+import imagecodecs  # noqa: E402
+import numpy as np  # noqa: E402
+from PIL import Image  # noqa: E402
+
+from arkitscenes_download.ingest.depth import encode_depth_png  # noqa: E402
 
 
 class DepthPngEncodingTest(unittest.TestCase):

@@ -3,6 +3,10 @@
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
+
 from gauss_surf.apis.register_segment import existing_recovery_rrds, recovery_rrds, write_extended_blueprints
 
 

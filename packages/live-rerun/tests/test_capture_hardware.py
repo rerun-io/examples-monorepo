@@ -1,7 +1,7 @@
 """Hardware-gated end-to-end capture test (requires an attached OAK device).
 
 Skipped automatically when no OAK is present, so it's a no-op in CI. Run it
-explicitly with a camera attached via ``pytest -m hardware``.
+explicitly with a camera attached via ``pytest -m integration``.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import pytest
 
 depthai = pytest.importorskip("depthai")
 
-pytestmark = pytest.mark.hardware
+pytestmark = pytest.mark.integration
 
 
 def _no_device() -> bool:

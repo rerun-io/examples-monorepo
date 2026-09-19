@@ -24,6 +24,8 @@ from zipdepth.catalog.ultrawide import (
     valid_fraction,
 )
 
+pytest.importorskip("imagecodecs", reason="imagecodecs is required by this test module")
+
 pytest.importorskip("arkitscenes_download", reason="ARKitScenes catalog dependencies live in the zipdepth catalog lane")
 
 from arkitscenes_download.ingest.depth import encode_depth_png  # noqa: E402
@@ -146,6 +148,7 @@ def test_erode_valid_zero_radius_is_the_identity() -> None:
         erode_valid(valid_chw, -1)
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA erosion parity needs a GPU")
 def test_erode_valid_matches_between_cpu_and_cuda() -> None:
     """Run the same pooling kernel on both devices and get the same mask."""
@@ -381,6 +384,7 @@ def test_ultrawide_rejects_a_portrait_frame_that_stays_portrait(quarter_turns: i
         )
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA builder parity needs a GPU")
 def test_cuda_and_cpu_builders_place_the_same_ultrawide_prompt() -> None:
     """Match the CPU builder's placed prompt exactly on the CUDA builder."""

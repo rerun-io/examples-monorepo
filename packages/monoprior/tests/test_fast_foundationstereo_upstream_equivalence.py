@@ -10,7 +10,7 @@ from typing import Any, cast
 
 import pytest
 import torch
-from conftest import requires_cuda, slow_cuda
+from conftest import requires_cuda
 from jaxtyping import Float32
 from omegaconf import DictConfig, OmegaConf
 from torch import Tensor, nn
@@ -20,6 +20,8 @@ from monopriors.third_party.fast_foundationstereo import extractor as owned_extr
 from monopriors.third_party.fast_foundationstereo import foundation_stereo as owned_foundation_stereo
 from monopriors.third_party.fast_foundationstereo import submodule as owned_submodule
 from monopriors.third_party.fast_foundationstereo.foundation_stereo import FastFoundationStereo, normalize_image
+
+pytestmark = pytest.mark.golden
 
 REFERENCE_DIR: Path = Path(__file__).parent / "reference_data" / "fast_foundationstereo"
 UPSTREAM_PACKAGE: str = "core"
@@ -245,7 +247,6 @@ def _load_pickled_model(checkpoint: Path, target_package: str) -> nn.Module:
     return model.float().cuda().eval()
 
 
-@slow_cuda
 @requires_cuda
 def test_released_checkpoint_matches_upstream_and_gwc_kernels(monkeypatch: pytest.MonkeyPatch) -> None:
     """The released pickle is exact across implementations, and its GWC kernels stay within tolerance."""

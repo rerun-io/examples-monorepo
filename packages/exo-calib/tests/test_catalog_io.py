@@ -1,7 +1,11 @@
-from simplecv.catalog_rig_layout import CatalogCamera, CatalogRigLayout
+import pytest
 
-from exo_calib.catalog_io import RigLayout, select_rig_layout
-from exo_calib.layer_io import PIPELINE_CALIBRATION_MARKER
+pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
+
+from simplecv.catalog_rig_layout import CatalogCamera, CatalogRigLayout  # noqa: E402
+
+from exo_calib.catalog_io import RigLayout, select_rig_layout  # noqa: E402
+from exo_calib.layer_io import PIPELINE_CALIBRATION_MARKER  # noqa: E402
 
 
 def _camera(

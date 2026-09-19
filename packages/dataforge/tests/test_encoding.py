@@ -120,6 +120,7 @@ def test_encode_fails_before_spawning_when_the_encoder_is_missing(tmp_path: Path
 # ── the two frame sources ─────────────────────────────────────────────────
 
 
+@pytest.mark.integration
 def test_png_pipe_encodes_every_frame(tmp_path: Path, nvenc_ffmpeg: Path) -> None:
     output: Path = tmp_path / "png.mp4"
     fed: int = encode_frames_to_mp4(png_bytes(), output, source=FrameSource("png"), fps=FPS, ffmpeg=nvenc_ffmpeg)
@@ -130,6 +131,7 @@ def test_png_pipe_encodes_every_frame(tmp_path: Path, nvenc_ffmpeg: Path) -> Non
     assert len(pts_values) == NUM_FRAMES
 
 
+@pytest.mark.integration
 def test_gray8_rawvideo_encodes_every_frame(tmp_path: Path, nvenc_ffmpeg: Path) -> None:
     output: Path = tmp_path / "gray.mp4"
     source: FrameSource = FrameSource("gray8", width=WIDTH, height=HEIGHT)
@@ -140,6 +142,7 @@ def test_gray8_rawvideo_encodes_every_frame(tmp_path: Path, nvenc_ffmpeg: Path) 
     assert decoded == NUM_FRAMES
 
 
+@pytest.mark.integration
 def test_encoded_stream_has_no_reordered_samples(tmp_path: Path, nvenc_ffmpeg: Path) -> None:
     """rr.VideoStream rejects reordered samples, so ``-bf 0`` is mandatory."""
     output: Path = tmp_path / "monotonic.mp4"
@@ -149,6 +152,7 @@ def test_encoded_stream_has_no_reordered_samples(tmp_path: Path, nvenc_ffmpeg: P
     assert all(later > earlier for earlier, later in zip(pts_values, pts_values[1:], strict=False))
 
 
+@pytest.mark.integration
 def test_gop_sets_the_keyframe_cadence(tmp_path: Path, nvenc_ffmpeg: Path) -> None:
     output: Path = tmp_path / "gop.mp4"
     encode_frames_to_mp4(
@@ -166,6 +170,7 @@ def test_raw_sources_require_their_dimensions(tmp_path: Path) -> None:
         FrameSource("rgb24", width=WIDTH)
 
 
+@pytest.mark.integration
 def test_encode_image_files_reads_each_png_from_disk(tmp_path: Path, nvenc_ffmpeg: Path) -> None:
     frame_dir: Path = tmp_path / "frames"
     frame_dir.mkdir()
@@ -206,6 +211,7 @@ def mean_abs_error(left: UInt8[ndarray, "height width"], right: UInt8[ndarray, "
     return float(np.abs(left.astype(np.int32) - right.astype(np.int32)).mean())
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("turns", [0, 1, 2, 3])
 def test_a_rotated_encode_turns_every_frame_that_many_quarters_clockwise(tmp_path: Path, nvenc_ffmpeg: Path, turns: int) -> None:
     """``rotate_cw_quarter_turns=k`` must land exactly where ``np.rot90(frame, k=-k)`` does.
@@ -245,6 +251,7 @@ def test_a_rotated_encode_turns_every_frame_that_many_quarters_clockwise(tmp_pat
         assert wrong > WRONG_ROTATION_ERROR_FLOOR, f"the half turn away is only {wrong:.2f} off; the frame is too symmetric to check"
 
 
+@pytest.mark.integration
 def test_an_odd_quarter_turn_swaps_the_encoded_dimensions(tmp_path: Path, nvenc_ffmpeg: Path) -> None:
     """The mp4 a rotated encode writes is H x W, so a consumer sizes its stream off the file."""
     dimensions: dict[int, tuple[int, int]] = {}
@@ -277,6 +284,7 @@ def test_a_turn_count_that_is_not_a_quarter_turn_is_refused(tmp_path: Path) -> N
             encode_frames_to_mp4([b""], output, source=FrameSource("png"), fps=FPS, rotate_cw_quarter_turns=turns)
 
 
+@pytest.mark.integration
 def test_a_failing_encode_reports_ffmpeg_stderr(tmp_path: Path, nvenc_ffmpeg: Path) -> None:
     """Wrong raw dimensions make ffmpeg exit non-zero; its complaint must survive."""
     output: Path = tmp_path / "bad.mp4"
@@ -286,6 +294,7 @@ def test_a_failing_encode_reports_ffmpeg_stderr(tmp_path: Path, nvenc_ffmpeg: Pa
     assert "ffmpeg" in str(failure.value)
 
 
+@pytest.mark.integration
 def test_garbage_frames_report_ffmpeg_stderr(tmp_path: Path, nvenc_ffmpeg: Path) -> None:
     """ffmpeg rejects the first non-PNG frame and closes the pipe under us.
 
@@ -327,6 +336,7 @@ def test_a_reader_that_dies_before_the_pipe_drains_still_reports_stderr(tmp_path
         encode_frames_to_mp4(slow_frames(), output, source=FrameSource("png"), fps=FPS, ffmpeg=quitter)
 
 
+@pytest.mark.integration
 def test_env_var_ffmpeg_is_used_when_no_binary_is_passed(tmp_path: Path, monkeypatch, nvenc_ffmpeg: Path) -> None:
     monkeypatch.setenv("DATAFORGE_FFMPEG", str(nvenc_ffmpeg))
     output: Path = tmp_path / "env.mp4"

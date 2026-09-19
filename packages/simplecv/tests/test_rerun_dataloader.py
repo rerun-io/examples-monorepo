@@ -8,12 +8,18 @@ import pytest
 import rerun as rr
 import torch
 from jaxtyping import UInt8
-from rerun.catalog import DatasetEntry
-from rerun.experimental.dataloader import DecodeRequest, FieldBatch
-from torch import Tensor
 
-import simplecv.rerun_dataloader as rerun_dataloader
-from simplecv.rerun_dataloader import SegmentNvdecDecoder
+pytestmark = pytest.mark.integration
+pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
+pytest.importorskip("rerun.experimental.dataloader", reason="rerun.experimental.dataloader is required by this test module")
+pytest.importorskip("torchcodec", reason="torchcodec is required by this test module")
+
+from rerun.catalog import DatasetEntry  # noqa: E402
+from rerun.experimental.dataloader import DecodeRequest, FieldBatch  # noqa: E402
+from torch import Tensor  # noqa: E402
+
+import simplecv.rerun_dataloader as rerun_dataloader  # noqa: E402
+from simplecv.rerun_dataloader import SegmentNvdecDecoder  # noqa: E402
 
 
 def test_segment_nvdec_decoder_decodes_a_fetch_block_across_segments(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -4,9 +4,16 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 import torch
 from jaxtyping import UInt8, UInt16
 from numpy import ndarray
+
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
+pytest.importorskip("rerun.experimental.dataloader", reason="requires the rerun.experimental.dataloader dependency in this environment")
+pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in this environment")
+pytest.importorskip("imagecodecs", reason="requires the imagecodecs dependency in this environment")
+
 from rerun.catalog import DatasetEntry, DatasetView
 
 from gauss_surf.catalog import SegmentReader

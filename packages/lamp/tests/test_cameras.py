@@ -7,6 +7,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 from jaxtyping import Float32, Float64
 from numpy import ndarray
@@ -150,6 +151,7 @@ def test_virtual_pinhole_lifter_rays_equal_kb4_unprojection() -> None:
     assert np.allclose(lifter_rays.numpy(), camera.unproject(distorted), atol=1e-6)
 
 
+@pytest.mark.golden
 def test_gravity_alignment_matches_pristine_mps_loader() -> None:
     """The package helper preserves upstream axis choice and handedness."""
     gravity_vectors = (

@@ -9,6 +9,11 @@ from monopriors.models.moge_v2 import MoGeV2NormalOutput, MoGeV2TrtPredictor
 from numpy import ndarray
 from torch import Tensor
 
+pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
+pytest.importorskip("rerun.experimental.dataloader", reason="requires the rerun.experimental.dataloader dependency in this environment")
+pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in this environment")
+pytest.importorskip("imagecodecs", reason="requires the imagecodecs dependency in this environment")
+
 from gauss_surf.apis.ultrawide_signals import ULTRAWIDE_IMAGE_HW, brown_conrady_coefficients
 from gauss_surf.contracts import (
     DISTORTION_COEFFICIENTS_COLUMN,
@@ -72,6 +77,7 @@ def test_distortion_reader_rejects_an_unrecognized_model_label() -> None:
 
 
 @requires_cuda
+@pytest.mark.integration
 def test_ultrawide_trt_normals_store_away_from_camera_positive_z() -> None:
     """The 480×640 engine keeps the same signed gaussurf convention as Part 4."""
     height: int = ULTRAWIDE_IMAGE_HW[0]

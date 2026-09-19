@@ -5,12 +5,17 @@ from pathlib import Path
 
 import pytest
 import rerun as rr
-from rerun.catalog import CatalogClient, DatasetEntry
-from rerun.experimental import RrdReader
 
-from dataforge.apis.register import Config as RegisterConfig
-from dataforge.apis.register import main as register
-from dataforge.apis.robocap_calibration import Config, main
+pytest.importorskip("rerun.catalog", reason="calibration backfill tests need the Rerun catalog dependencies")
+
+from rerun.catalog import CatalogClient, DatasetEntry  # noqa: E402
+from rerun.experimental import RrdReader  # noqa: E402
+
+from dataforge.apis.register import Config as RegisterConfig  # noqa: E402
+from dataforge.apis.register import main as register  # noqa: E402
+from dataforge.apis.robocap_calibration import Config, main  # noqa: E402
+
+pytestmark = pytest.mark.integration
 
 
 def test_backfill_adds_only_static_metadata_and_preserves_base(tmp_path: Path) -> None:

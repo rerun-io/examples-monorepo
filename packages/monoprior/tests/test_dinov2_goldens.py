@@ -9,6 +9,8 @@ import torch
 from monopriors.third_party.dinov2 import DINOv2, dinov2_vits14
 from monopriors.third_party.dinov2.vision_transformer import DinoVisionTransformer
 
+pytestmark = pytest.mark.golden
+
 
 @pytest.mark.parametrize(
     ("golden_prefix", "model_factory"),
@@ -35,6 +37,8 @@ def test_vits_intermediate_layers_match_permanent_goldens(
         )
 
     golden_path: Path = Path(__file__).parent / "reference_data" / "dinov2_vits_forward_goldens.npz"
+    if not golden_path.is_file():
+        pytest.skip(f"DINOv2 reference output missing: {golden_path}")
     with np.load(golden_path) as goldens:
         for layer_index, (patch_tokens, class_token) in enumerate(outputs):
             np.testing.assert_allclose(

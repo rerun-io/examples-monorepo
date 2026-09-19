@@ -11,8 +11,10 @@ from jaxtyping import Float32, Int64
 from numpy import ndarray
 from torch import Tensor, nn
 
-from monopriors.apis.rig_depth_catalog import RigDepthCatalogConfig
-from monopriors.models.rig_depth import (
+pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
+
+from monopriors.apis.rig_depth_catalog import RigDepthCatalogConfig  # noqa: E402
+from monopriors.models.rig_depth import (  # noqa: E402
     AnnotatedRigDepthPredictorUnion,
     BaseRigDepthPredictorConfig,
     RigDepthPrediction,
@@ -21,11 +23,11 @@ from monopriors.models.rig_depth import (
     rig_depth_predictor_defaults,
     unproject,
 )
-from monopriors.models.rig_depth.xlens import RigKeyMemo, RigTensors, normalize_framesets, rig_tensors
-from monopriors.models.rig_depth.xlens_trt import ENGINE_OUTPUT_NAMES, EngineGeometry, _XLensRigGraph, engine_geometry
-from monopriors.third_party.xlens.inference.preprocess import AssembledBatch, assemble_batch, normalize_image
-from monopriors.third_party.xlens.models.dinov2.vision_transformer import FrozenRigGeometry
-from monopriors.third_party.xlens.models.net import XLensNet
+from monopriors.models.rig_depth.xlens import RigKeyMemo, RigTensors, normalize_framesets, rig_tensors  # noqa: E402
+from monopriors.models.rig_depth.xlens_trt import ENGINE_OUTPUT_NAMES, EngineGeometry, _XLensRigGraph, engine_geometry  # noqa: E402
+from monopriors.third_party.xlens.inference.preprocess import AssembledBatch, assemble_batch, normalize_image  # noqa: E402
+from monopriors.third_party.xlens.models.dinov2.vision_transformer import FrozenRigGeometry  # noqa: E402
+from monopriors.third_party.xlens.models.net import XLensNet  # noqa: E402
 
 
 @pytest.fixture(scope="module")

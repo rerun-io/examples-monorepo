@@ -1,4 +1,8 @@
-from simplecv.catalog_rig_layout import CatalogComponent, CatalogRigLayout, catalog_components, parse_rig_layout
+import pytest
+
+pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
+
+from simplecv.catalog_rig_layout import CatalogComponent, CatalogRigLayout, catalog_components, parse_rig_layout  # noqa: E402
 
 
 def _components(rows: list[tuple[str, str, bool]]) -> list[CatalogComponent]:
