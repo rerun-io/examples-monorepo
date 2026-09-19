@@ -15,17 +15,32 @@ from serde import from_dict
 
 from dataforge import archives, blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
-from dataforge.datasets.show3d_annotation_source import Caption, HandProfile, read_hand_frames
-from dataforge.datasets.show3d_annotations import write_captions_layer, write_hand_pose_layer, write_properties_layer
-from dataforge.datasets.show3d_layers import write_base_layer
+from dataforge.datasets.show3d_captions import Caption, write_captions_layer, write_properties_layer
+from dataforge.datasets.show3d_hands import (
+    HandFrame,
+    HandProfileDoc,
+    read_hand_frames,
+    read_hand_profile,
+    write_hand_mesh_layer,
+    write_hand_pose_layer,
+)
+from dataforge.datasets.show3d_layers import Scene, write_base_layer
+from dataforge.datasets.show3d_mesh_source import MeshAsset, download_meshes, stripped_mesh
+from dataforge.datasets.show3d_object_source import ObjectFrame, read_object_frames
+from dataforge.datasets.show3d_objects import ObjectSanity, object_sanity, write_object_mesh_layer, write_object_pose_layer
 from dataforge.datasets.show3d_source import (
     CAMERAS,
+    HEADSET_CAMERAS,
     FrameClock,
     IndexRow,
+    calibration_file,
     caption_file,
     hand_pose_file,
     hand_profile_file,
+    mesh_name,
+    object_pose_file,
     read_frame_clock,
+    read_headset_calibrations,
     read_json,
 )
 from dataforge.identity import SequenceIdentity
@@ -68,7 +83,15 @@ class Show3dConfig(DataforgeDatasetConfig):
 class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
     """Publish each missing layer, then remove only the scene videos."""
 
-    layers: tuple[str, ...] = (paths.BASE_LAYER, paths.HAND_POSE_LAYER, paths.CAPTIONS_LAYER, paths.PROPERTIES_LAYER)
+    layers: tuple[str, ...] = (
+        paths.BASE_LAYER,
+        paths.HAND_POSE_LAYER,
+        paths.CAPTIONS_LAYER,
+        paths.PROPERTIES_LAYER,
+        paths.OBJECT_POSE_LAYER,
+        paths.OBJECT_MESH_LAYER,
+        paths.HAND_MESH_LAYER,
+    )
     """SHOW3D publication and loading order."""
 
     @cached_property
@@ -86,6 +109,7 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             local_dir=self.config.root,
             revision=self.commit_sha,
         )
+        download_meshes(self.config.root)
         sources: list[tuple[SequenceIdentity, IndexRow]] = self.discover()
         counts: Counter[str] = Counter(source.split for _, source in sources)
         print(
@@ -140,26 +164,39 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
 
     def convert(self, identity: SequenceIdentity, source: IndexRow, *, force: bool) -> Path:
         targets: dict[str, Path] = {layer: paths.rrd_path(paths.output_root(), layer=layer, identity=identity) for layer in self.layers}
-        want_base: bool = not writing.should_skip(targets[paths.BASE_LAYER], force=force)
-        want_hands: bool = source.has_hand_pose and not writing.should_skip(targets[paths.HAND_POSE_LAYER], force=force)
-        want_captions: bool = source.has_caption and not writing.should_skip(targets[paths.CAPTIONS_LAYER], force=force)
-        want_properties: bool = not writing.should_skip(targets[paths.PROPERTIES_LAYER], force=force)
-        if not any((want_base, want_hands, want_captions, want_properties)):
+        alias: str = source.object_alias
+        mesh: str | None = mesh_name(alias)
+        wants: dict[str, bool] = {
+            paths.BASE_LAYER: not writing.should_skip(targets[paths.BASE_LAYER], force=force),
+            paths.HAND_POSE_LAYER: source.has_hand_pose and not writing.should_skip(targets[paths.HAND_POSE_LAYER], force=force),
+            paths.CAPTIONS_LAYER: source.has_caption and not writing.should_skip(targets[paths.CAPTIONS_LAYER], force=force),
+            paths.PROPERTIES_LAYER: not writing.should_skip(targets[paths.PROPERTIES_LAYER], force=force),
+            paths.OBJECT_POSE_LAYER: source.has_object_pose and not writing.should_skip(targets[paths.OBJECT_POSE_LAYER], force=force),
+            paths.OBJECT_MESH_LAYER: source.has_object_pose and mesh is not None and not writing.should_skip(targets[paths.OBJECT_MESH_LAYER], force=force),
+            paths.HAND_MESH_LAYER: source.has_hand_pose and not writing.should_skip(targets[paths.HAND_MESH_LAYER], force=force),
+        }
+        need_caption: bool = wants[paths.CAPTIONS_LAYER] or (wants[paths.PROPERTIES_LAYER] and source.has_caption)
+        if wants[paths.OBJECT_POSE_LAYER] and mesh is None:
+            print(f"{identity.sequence_key}: no object_mesh: alias {alias!r} has no HOT3D mesh mapping")
+        if not any(wants.values()):
             return targets[paths.BASE_LAYER]
         key: str = identity.sequence_key
-        files: set[str] = set(base_files(source, key) if want_base else [])
-        if want_hands:
+        files: set[str] = set(base_files(source, key) if wants[paths.BASE_LAYER] else [])
+        if wants[paths.HAND_POSE_LAYER] or wants[paths.HAND_MESH_LAYER] or (wants[paths.OBJECT_POSE_LAYER] and source.has_hand_pose):
             files.update([*metadata_files(key), hand_pose_file(key), hand_profile_file(source.subject_id)])
-        if want_captions or (want_properties and source.has_caption):
+        if need_caption:
             files.add(caption_file(key))
+        if wants[paths.OBJECT_POSE_LAYER]:
+            files.update([*metadata_files(key), object_pose_file(key), *(calibration_file(key, camera) for camera in HEADSET_CAMERAS)])
         self.fetch_missing(sorted(files))
         scene_dir: Path = self.config.root / "scenes" / key
         written: list[str] = []
-        if want_base:
+        scene: Scene | None = None
+        if wants[paths.BASE_LAYER]:
             work: Path = self.config.root / "work" / identity.recording_id
             work.mkdir(parents=True, exist_ok=True)
             try:
-                write_base_layer(
+                scene = write_base_layer(
                     identity,
                     scene_dir,
                     targets[paths.BASE_LAYER],
@@ -170,29 +207,43 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             finally:
                 archives.remove_tree(work)
             written.append(paths.BASE_LAYER)
-        if want_hands:
-            clock: FrameClock = read_frame_clock(scene_dir, key)
-            profile_path: Path = self.config.root / hand_profile_file(source.subject_id)
-            profile_text: str = profile_path.read_text()
-            read_json(profile_path, HandProfile, text=profile_text)
-            write_hand_pose_layer(
-                identity,
-                clock,
-                read_hand_frames(self.config.root / hand_pose_file(key), clock),
-                profile_text,
-                targets[paths.HAND_POSE_LAYER],
-            )
+        clock: FrameClock | None = None
+        hand_frames: list[HandFrame] = []
+        profile: HandProfileDoc | None = None
+        if wants[paths.HAND_POSE_LAYER] or wants[paths.HAND_MESH_LAYER] or wants[paths.OBJECT_POSE_LAYER]:
+            clock = scene if scene is not None else read_frame_clock(scene_dir, key)
+            hand_frames = read_hand_frames(self.config.root / hand_pose_file(key), clock) if source.has_hand_pose else []
+        if wants[paths.HAND_POSE_LAYER] or wants[paths.HAND_MESH_LAYER]:
+            profile = read_hand_profile(self.config.root / hand_profile_file(source.subject_id))
+        if wants[paths.HAND_POSE_LAYER]:
+            assert clock is not None and profile is not None
+            write_hand_pose_layer(identity, clock, hand_frames, profile.text, targets[paths.HAND_POSE_LAYER])
             written.append(paths.HAND_POSE_LAYER)
-        caption: Caption | None = None
-        if want_captions or (want_properties and source.has_caption):
-            caption = read_json(self.config.root / caption_file(key), Caption)
-            if want_captions:
-                write_captions_layer(identity, caption, targets[paths.CAPTIONS_LAYER])
-                written.append(paths.CAPTIONS_LAYER)
-        if want_properties:
+        caption: Caption | None = read_json(self.config.root / caption_file(key), Caption) if need_caption else None
+        if wants[paths.CAPTIONS_LAYER]:
+            assert caption is not None
+            write_captions_layer(identity, caption, targets[paths.CAPTIONS_LAYER])
+            written.append(paths.CAPTIONS_LAYER)
+        if wants[paths.PROPERTIES_LAYER]:
             write_properties_layer(identity, source, caption, targets[paths.PROPERTIES_LAYER])
             written.append(paths.PROPERTIES_LAYER)
-        if want_base and not self.config.keep_raw:
+        if wants[paths.OBJECT_POSE_LAYER]:
+            assert clock is not None
+            frames: list[ObjectFrame] = read_object_frames(self.config.root / object_pose_file(key), clock)
+            metrics: ObjectSanity = object_sanity(
+                frames, list((scene.headsets if scene is not None else read_headset_calibrations(scene_dir, clock)).values()), hand_frames
+            )
+            write_object_pose_layer(identity, alias, clock, frames, metrics, targets[paths.OBJECT_POSE_LAYER])
+            written.append(paths.OBJECT_POSE_LAYER)
+        if wants[paths.OBJECT_MESH_LAYER]:
+            asset: MeshAsset = stripped_mesh(self.config.root, alias)
+            write_object_mesh_layer(identity, alias, asset.mesh_id, asset.path, targets[paths.OBJECT_MESH_LAYER])
+            written.append(paths.OBJECT_MESH_LAYER)
+        if wants[paths.HAND_MESH_LAYER]:
+            assert clock is not None and profile is not None
+            write_hand_mesh_layer(identity, clock, hand_frames, profile.model, targets[paths.HAND_MESH_LAYER])
+            written.append(paths.HAND_MESH_LAYER)
+        if wants[paths.BASE_LAYER] and not self.config.keep_raw:
             for video in scene_dir.glob("*.mp4"):
                 video.unlink()
         print(f"done {identity.sequence_key}: {', '.join(written)}")
@@ -204,7 +255,7 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
         exo: list[rrb.Spatial2DView] = []
         for camera in CAMERAS:
             view: rrb.Spatial2DView = blueprints.camera_view(camera.source_name, camera.rig, camera.cam, contents=contents)
-            (ego if camera.rig == 1 else exo).append(view)
+            (ego if camera in HEADSET_CAMERAS else exo).append(view)
         return rrb.Blueprint(
             rrb.Horizontal(
                 rrb.Vertical(
@@ -241,8 +292,9 @@ def base_files(source: IndexRow, key: str) -> list[str]:
         *(
             f"scenes/{key}/{name}"
             for camera in source.cameras
-            for name in (f"{camera.source_name}.mp4", f"camera_calibration/{camera.source_name}.json", f"blur_info/{camera.source_name}.mp4.json")
+            for name in (f"{camera.source_name}.mp4", f"blur_info/{camera.source_name}.mp4.json")
         ),
+        *(calibration_file(key, camera) for camera in source.cameras),
         f"scenes/{key}/blur_info/config.json",
-        *([f"object_pose/v1/scenes/{key}/object_pose.json"] if source.has_object_pose else []),
+        *([object_pose_file(key)] if source.has_object_pose else []),
     ]

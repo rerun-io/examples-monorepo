@@ -10,7 +10,7 @@ import pyarrow as pa
 import pytest
 import rerun as rr
 import rerun.blueprint as rrb
-from conftest import SHOW3D_RAW, blueprint_views, index_row, read_back, read_chunks, recording_properties
+from conftest import SHOW3D_RAW, Show3dSceneInputs, blueprint_views, index_row, read_back, read_chunks, recording_properties
 from jaxtyping import Bool, Float64
 from numpy import ndarray
 from serde import from_dict
@@ -20,12 +20,15 @@ from simplecv.umetrack_temp.generic_hand_model_numpy import NUM_JOINTS_PER_HAND,
 from dataforge import schema, transports
 from dataforge.datasets.base import DataforgeDataset
 from dataforge.datasets.show3d import Show3dConfig, Show3dDataset, base_files
-from dataforge.datasets.show3d_annotation_source import HAND_SIDES, Caption, HandFrame, HandPose, HandProfile, read_hand_frames
-from dataforge.datasets.show3d_annotations import high_confidence_coverage, write_hand_pose_layer, write_properties_layer
-from dataforge.datasets.show3d_layers import Scene, pinhole, read_scene
+from dataforge.datasets.show3d_calibration import pinhole
+from dataforge.datasets.show3d_captions import Caption, write_properties_layer
+from dataforge.datasets.show3d_hands import HAND_SIDES, HandFrame, HandPose, high_confidence_coverage, read_hand_frames, write_hand_pose_layer
+from dataforge.datasets.show3d_layers import Scene
 from dataforge.datasets.show3d_source import (
     CAPTIONS_VERSION,
     HAND_POSE_VERSION,
+    HEADSET_CAMERAS,
+    OBJECT_POSE_VERSION,
     FrameClock,
     FrameInfo,
     IndexRow,
@@ -33,8 +36,6 @@ from dataforge.datasets.show3d_source import (
     caption_file,
     hand_pose_file,
     hand_profile_file,
-    read_frame_clock,
-    read_json,
 )
 from dataforge.identity import SequenceIdentity
 
@@ -64,7 +65,6 @@ def test_hand_schema_preserves_null_world_and_null_uv_landmarks() -> None:
 
 
 def test_caption_schema_and_episode_properties_have_stable_types(tmp_path: Path) -> None:
-
     caption: Caption = from_dict(
         Caption,
         dict(
@@ -104,7 +104,7 @@ def test_caption_schema_and_episode_properties_have_stable_types(tmp_path: Path)
             hand="both" if present else "",
             overall_caption="Lift the toy." if present else "",
             hand_pose_version=HAND_POSE_VERSION if present else "",
-            object_pose_version="v1" if present else "",
+            object_pose_version=OBJECT_POSE_VERSION if present else "",
             captions_version=CAPTIONS_VERSION if present else "",
         )
         chunks: list[rr.experimental.Chunk] = read_chunks(target)
@@ -114,7 +114,6 @@ def test_caption_schema_and_episode_properties_have_stable_types(tmp_path: Path)
 
 
 def test_coverage_counts_strictly_above_half() -> None:
-
     assert high_confidence_coverage([0.0, 0.5, 0.51, 1.0]) == 0.5
 
 
@@ -128,37 +127,12 @@ class AnnotationBuild(NamedTuple):
     identity: SequenceIdentity
 
 
-@pytest.fixture(scope="module", params=["SPI102/keyboard_toss-away_83ef", "LYA722/birdhousetoy_shaking_8eca"])
-def annotation_scene(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory) -> AnnotationBuild:
-    key: str = request.param
-    hand_path: Path = SHOW3D_RAW / hand_pose_file(key)
-    subject: str = key.split("/")[0]
-    required: list[Path] = [
-        hand_path,
-        SHOW3D_RAW / hand_profile_file(subject),
-        SHOW3D_RAW / caption_file(key),
-        SHOW3D_RAW / "scenes" / key / "metadata/recording_info.json",
-        SHOW3D_RAW / "scenes" / key / "metadata/frame_info.json",
-    ]
-    for path in required:
-        if not path.is_file():
-            pytest.skip(f"SHOW3D annotation asset absent: {path}")
-    scene_dir: Path = SHOW3D_RAW / "scenes" / key
-    clock: FrameClock = read_frame_clock(scene_dir, key)
-    for camera in clock.info.resolution:
-        for relative in (f"camera_calibration/{camera}.json", f"blur_info/{camera}.mp4.json"):
-            path: Path = scene_dir / relative
-            if not path.is_file():
-                pytest.skip(f"SHOW3D scene asset absent: {path}")
-    scene: Scene = read_scene(scene_dir, scene_key=key)
-    frames: list[HandFrame] = read_hand_frames(hand_path, scene)
-    identity: SequenceIdentity = SequenceIdentity("show3d", tuple(key.split("/")))
-    target: Path = tmp_path_factory.mktemp(subject) / "hand_pose.rrd"
-    profile_path: Path = SHOW3D_RAW / hand_profile_file(subject)
-    profile_text: str = profile_path.read_text()
-    read_json(profile_path, HandProfile, text=profile_text)
-    write_hand_pose_layer(identity, scene, frames, profile_text, target)
-    return AnnotationBuild(scene, frames, target, read_chunks(target), identity)
+@pytest.fixture(scope="module")
+def annotation_scene(show3d_scene_inputs: Show3dSceneInputs, tmp_path_factory: pytest.TempPathFactory) -> AnnotationBuild:
+    inputs: Show3dSceneInputs = show3d_scene_inputs
+    target: Path = tmp_path_factory.mktemp(inputs.identity.parts[0]) / "hand_pose.rrd"
+    write_hand_pose_layer(inputs.identity, inputs.scene, inputs.hands, inputs.profile.text, target)
+    return AnnotationBuild(inputs.scene, inputs.hands, target, read_chunks(target), inputs.identity)
 
 
 @pytest.mark.integration
@@ -172,8 +146,8 @@ def test_real_scene_annotation_layers(annotation_scene: AnnotationBuild) -> None
     props: dict[str, object] = recording_properties(read_back(target), "hand_pose")
     assert props["version"] == HAND_POSE_VERSION
     assert recording_properties(read_back(target), "capture") == {}
-    for hand, side in HAND_SIDES:
-        poses: list[HandPose] = [frame.hand_poses[hand] for frame in frames]
+    for side in HAND_SIDES:
+        poses: list[HandPose] = [frame.hand_poses[side.key] for frame in frames]
         for suffix, component, expected in (
             ("landmarks", "Points3D:positions", sum(p.landmarks_3d_mm is not None for p in poses)),
             ("landmarks_local", "Points3D:positions", sum(p.landmarks_3d_mm_local is not None for p in poses)),
@@ -182,13 +156,15 @@ def test_real_scene_annotation_layers(annotation_scene: AnnotationBuild) -> None
             ("confidence", "Scalars:scalars", scene.info.num_frames),
         ):
             rows: list[rr.experimental.Chunk] = [
-                c for c in chunks if str(c.entity_path) == f"{schema.hands_path(side)}/{suffix}" and component in c.to_record_batch().schema.names
+                c
+                for c in chunks
+                if str(c.entity_path) == f"{schema.hands_path(side.name)}/{suffix}" and component in c.to_record_batch().schema.names
             ]
             assert sum(c.num_rows for c in rows) == expected
-        assert props[f"coverage_{side}_high_conf"] == pytest.approx(sum(p.confidence > 0.5 for p in poses) / scene.info.num_frames)
+        assert props[f"coverage_{side.name}_high_conf"] == pytest.approx(sum(p.confidence > 0.5 for p in poses) / scene.info.num_frames)
         for camera in (0, 1):
             uv_chunks: list[rr.experimental.Chunk] = [
-                c for c in chunks if str(c.entity_path) == schema.hand_uv_path(1, camera, side) and not c.is_static
+                c for c in chunks if str(c.entity_path) == schema.hand_uv_path(1, camera, side.name) and not c.is_static
             ]
             uv: Float64[ndarray, "n 21 2"] = np.concatenate(
                 [np.array(c.to_record_batch().column("Points2D:positions").to_pylist()) for c in uv_chunks]
@@ -211,20 +187,21 @@ def test_hand_landmarks_reproject_through_base_camera_chain(
     annotation_scene: AnnotationBuild,
 ) -> None:
     """Project published hands through the package camera and projection chain."""
-    scene, _, _, chunks, _ = annotation_scene
+    scene: Scene = annotation_scene.scene
+    chunks: list[rr.experimental.Chunk] = annotation_scene.chunks
     transforms: dict[int, Float64[ndarray, "4 4"]] = {
         pose.index: pose.T_WorldFromCamera for pose in scene.poses if pose.T_WorldFromCamera is not None
     }
-    for _, side in HAND_SIDES:
+    for side in HAND_SIDES:
         world: dict[int, Float64[ndarray, "21 3"]] = {
             row["frame_index"]: np.array(row["Points3D:positions"])
             for c in chunks
-            if str(c.entity_path) == f"{schema.hands_path(side)}/landmarks" and not c.is_static
+            if str(c.entity_path) == f"{schema.hands_path(side.name)}/landmarks" and not c.is_static
             for row in c.to_record_batch().to_pylist()
         }
-        for camera in [c for c in scene.cameras if c.camera.rig == 1]:
+        for camera in [c for c in scene.cameras if c.camera in HEADSET_CAMERAS]:
             errors: list[float] = []
-            path: str = schema.hand_uv_path(camera.camera.rig, camera.camera.cam, side)
+            path: str = schema.hand_uv_path(camera.camera.rig, camera.camera.cam, side.name)
             for chunk in chunks:
                 if str(chunk.entity_path) != path or chunk.is_static:
                     continue
@@ -245,7 +222,7 @@ def test_hand_landmarks_reproject_through_base_camera_chain(
                     errors.extend(np.linalg.norm(projected[valid] - shipped[valid], axis=1).tolist())
             assert len(errors) > 100
             median: float = float(np.median(errors))
-            print(f"{side}/{camera.camera.source_name}: {len(errors)} points, median error {median:.6f} px")
+            print(f"{side.name}/{camera.camera.source_name}: {len(errors)} points, median error {median:.6f} px")
             assert median < 0.5
 
 
@@ -253,7 +230,6 @@ def test_hand_landmarks_reproject_through_base_camera_chain(
 def test_convert_rebuilds_each_annotation_without_videos_or_fetch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-
     raw: Path = SHOW3D_RAW
     key: str = "SPI102/keyboard_toss-away_83ef"
     if not (raw / hand_pose_file(key)).is_file():
@@ -285,6 +261,11 @@ def test_convert_rebuilds_each_annotation_without_videos_or_fetch(
         has_hand_pose=True,
         has_caption=True,
     )
+    # This test isolates the PR3 layers: the later layers already exist.
+    for layer in ("object_pose", "object_mesh", "hand_mesh"):
+        existing: Path = output / layer / base.name
+        existing.parent.mkdir(parents=True)
+        existing.write_bytes(b"existing later layer")
     dataset: DataforgeDataset = Show3dConfig(root=root).setup()
     assert dataset.convert(identity, source, force=False) == base
     assert capsys.readouterr().out.splitlines()[-1] == f"done {key}: hand_pose, captions, properties"
@@ -304,15 +285,11 @@ def test_convert_rebuilds_each_annotation_without_videos_or_fetch(
 
 @pytest.mark.parametrize("fault", ["count", "index", "timestamp"])
 def test_hand_reader_rejects_census_or_clock_mismatch(tmp_path: Path, fault: str) -> None:
-
-    scene: Scene = Scene(
+    scene: FrameClock = FrameClock(
         RecordingInfo(20, 1, 60.0, {}),
         [FrameInfo(0, 20, 1.0, [])],
         np.array([0], dtype=np.int64),
         np.array([0], dtype=np.int64),
-        (),
-        [],
-        np.array([], dtype=np.int64),
     )
     hand: dict = dict(
         confidence=0.0,
@@ -343,7 +320,6 @@ def test_hand_reader_rejects_census_or_clock_mismatch(tmp_path: Path, fault: str
 
 
 def test_properties_only_conversion_needs_no_scene_sidecars(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path))
     identity: SequenceIdentity = SequenceIdentity("show3d", ("S", "none_wave-hands_abcd"))
     base: Path = tmp_path / "base" / f"{identity.recording_id}.rrd"
@@ -363,7 +339,6 @@ def test_properties_only_conversion_needs_no_scene_sidecars(tmp_path: Path, monk
 
 
 def test_default_blueprint_includes_instruction_below_ego_panes() -> None:
-
     views: list[rrb.View] = blueprint_views(Show3dConfig().setup().default_blueprint())
     assert [view.name for view in views[:4]] == ["Back rig frame", "headset0", "headset1", "Instruction"]
     assert isinstance(views[3], rrb.TextDocumentView)

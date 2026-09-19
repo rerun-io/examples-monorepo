@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import GenericAlias
@@ -12,14 +13,13 @@ import numpy as np
 import rerun as rr
 from jaxtyping import Float64, Int64
 from numpy import ndarray
-from scipy.spatial.transform import Rotation
 from serde import SerdeError, serde
 from serde.json import from_json
 
+from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetPose
 from dataforge.logging_toolkit import frame_index_column, time_column
 
 Split: TypeAlias = Literal["train", "test"]
-PoseSource: TypeAlias = Literal["mocap", "vio", "endpoint_interpolation", "legacy_unspecified"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,16 +34,65 @@ class Show3dCamera:
     """Camera index within the rig."""
 
 
+HEADSET_CAMERAS: tuple[Show3dCamera, Show3dCamera] = (Show3dCamera("headset0", 1, 0), Show3dCamera("headset1", 1, 1))
+"""The two moving headset cameras, in stereo order."""
+
 CAMERAS: tuple[Show3dCamera, ...] = (
-    Show3dCamera("headset0", 1, 0),
-    Show3dCamera("headset1", 1, 1),
+    *HEADSET_CAMERAS,
     *(Show3dCamera(f"rig{i}", 0, i) for i in range(8)),
 )
 """Dataset-wide camera identities; missing cameras never shift their peers."""
 
 
+OBJECTS: dict[str, str | None] = {
+    "dumbbell": "dumbbell_5lb",
+    "mouse": "mouse",
+    "keyboard": "keyboard",
+    "mug": "mug_white",
+    "mug2": "mug_patterned",
+    "balandabowl": "bowl",
+    "vase": "vase",
+    "brushholder": "holder_black",
+    "birdhousetoy": "birdhouse_toy",
+    "dinotoy": "dino_toy",
+    "whiteboardmarker": "whiteboard_marker",
+    "milk": "carton_milk",
+    "orangejuice": "carton_oj",
+    "mustard": "bottle_mustard",
+    "ranch": "bottle_ranch",
+    "bbq": "bottle_bbq",
+    "cansoup": "can_soup",
+    "canparmesan": "can_parmesan",
+    "cantomatosauce": "can_tomato_sauce",
+    "waffles": "food_waffles",
+    "vegetables": "food_vegetables",
+    "aria": "aria_small",
+    "keyboard2": None,
+    "cancoke": None,
+    "windex": None,
+    "clock": None,
+    "mug3": None,
+    "none": None,
+}
+
+
+def mesh_name(alias: str) -> str | None:
+    """Resolve a known alias; only listed unmapped aliases return None."""
+    try:
+        return OBJECTS[alias]
+    except KeyError as error:
+        raise ValueError(f"unknown SHOW3D object alias: {alias}") from error
+
+
+def calibration_file(key: str, camera: Show3dCamera) -> str:
+    """Repository-relative camera calibration."""
+    return f"scenes/{key}/camera_calibration/{camera.source_name}.json"
+
+
 HAND_POSE_VERSION: str = "v2"
 """Released hand annotation version."""
+OBJECT_POSE_VERSION: str = "v1"
+"""Released object annotation version."""
 CAPTIONS_VERSION: str = "v1"
 """Released caption version."""
 
@@ -51,6 +100,11 @@ CAPTIONS_VERSION: str = "v1"
 def hand_pose_file(key: str) -> str:
     """Repository-relative hand measurements."""
     return f"hand_pose/{HAND_POSE_VERSION}/scenes/{key}/hand_pose.json"
+
+
+def object_pose_file(key: str) -> str:
+    """Repository-relative object annotation."""
+    return f"object_pose/{OBJECT_POSE_VERSION}/scenes/{key}/object_pose.json"
 
 
 def hand_profile_file(subject: str) -> str:
@@ -194,18 +248,6 @@ def agrees_with_frame(record: FrameInfo | HeadsetPose, frame: FrameInfo) -> bool
     return record.index == frame.index and record.agt_frame_id == frame.agt_frame_id and abs(record.timestamp - frame.timestamp) <= 1e-6
 
 
-def validate_transform(transform: Float64[ndarray, "4 4"]) -> None:
-    """Reject non-rigid Float64[ndarray, '4 4'] transforms at the boundary."""
-    rotation: Float64[ndarray, "3 3"] = transform[:3, :3]
-    if (
-        not np.isfinite(transform).all()
-        or not np.allclose(transform[3], [0.0, 0.0, 0.0, 1.0])
-        or not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-5)
-        or not np.isclose(np.linalg.det(rotation), 1.0, atol=1e-5)
-    ):
-        raise ValueError("T_WorldFromCamera must be a finite proper rigid transform (det=1)")
-
-
 @dataclass(frozen=True, slots=True)
 class FrameClock:
     """Validated metadata census and recording clocks, independent of camera sidecars."""
@@ -222,6 +264,29 @@ class FrameClock:
     def indexes(self, positions: Int64[ndarray, "n"] | list[int] | slice) -> list[rr.TimeColumn]:
         """Both recording clocks at the selected frame positions."""
         return [time_column(self.times_ns[positions]), frame_index_column(self.frame_indices[positions])]
+
+
+    def send_sparse(self, recording: rr.RecordingStream, path: str, positions: list[int], columns: Iterable[rr.ComponentColumn]) -> None:
+        """Send available rows on both recording clocks; omit absent measurements."""
+        if positions:
+            rr.send_columns(path, indexes=self.indexes(positions), columns=columns, recording=recording)
+
+
+T = TypeVar("T")
+RowT = TypeVar("RowT")
+
+
+def sparse_rows(poses: Sequence[RowT], getter: Callable[[RowT], T | None]) -> tuple[list[int], list[T]]:  # noqa: UP047
+    """Select sparse measurements and their positions on the shared clock."""
+    positions: list[int] = []
+    values: list[T] = []
+    for position, pose in enumerate(poses):
+        value: T | None = getter(pose)
+        if value is not None:
+            positions.append(position)
+            values.append(value)
+    return positions, values
+
 
 
 def read_frame_clock(scene_dir: Path, scene_key: str) -> FrameClock:
@@ -241,80 +306,6 @@ def read_frame_clock(scene_dir: Path, scene_key: str) -> FrameClock:
         raise ValueError(f"{scene_key}: source frame indices and timestamps must be finite and strictly increasing")
     times: Int64[ndarray, "n"] = np.rint((timestamps - timestamps[0]) * 1e9).astype(np.int64)
     return FrameClock(info, frames, times, indices)
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class HeadsetPose:
-    """Legacy and version-1 headset pose entries."""
-
-    index: int
-    """Released video index."""
-    agt_frame_id: int
-    """Original frame id."""
-    timestamp: float
-    """Source seconds."""
-    T_WorldFromCamera: Float64[ndarray, "4 4"] | None
-    """Camera-to-back-rig transform in mm; absent transforms produce no pose row."""
-    is_synthesized: bool
-    """Legacy interpolation flag, independent of validity."""
-    pose_source: PoseSource | None = None
-    """New contract provenance; absent in legacy files."""
-    is_pose_valid: bool | None = None
-    """New contract validity; absent in legacy files."""
-
-    def __post_init__(self) -> None:
-        if self.T_WorldFromCamera is not None:
-            validate_transform(self.T_WorldFromCamera)
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class Intrinsics:
-    """Released undistorted pinhole intrinsics."""
-
-    ImageSizeX: int
-    """Width in pixels."""
-    ImageSizeY: int
-    """Height in pixels."""
-    fx: float
-    """Horizontal focal length in pixels."""
-    fy: float
-    """Vertical focal length in pixels."""
-    cx: float
-    """Principal point x in pixels."""
-    cy: float
-    """Principal point y in pixels."""
-    DistortionModel: Literal["PinholePlane"]
-    """The released images are already undistorted."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class RigCalibration(Intrinsics):
-    """One fixed back-rig camera."""
-
-    T_WorldFromCamera: Float64[ndarray, "4 4"]
-    """Camera-to-back-rig transform in mm."""
-
-    def __post_init__(self) -> None:
-        validate_transform(self.T_WorldFromCamera)
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class HeadsetCalibration(Intrinsics):
-    """One headset camera, including sparse pose rows."""
-
-    T_WorldFromCamera_by_index: dict[str, HeadsetPose]
-    """Pose records keyed by the decimal source index."""
-    pose_contract_version: int | None = None
-    """Optional new contract version."""
-
-    def __post_init__(self) -> None:
-        for key, pose in self.T_WorldFromCamera_by_index.items():
-            if key != str(pose.index):
-                raise ValueError(f"headset pose key {key} disagrees with index {pose.index}")
 
 
 @serde
@@ -353,42 +344,18 @@ def read_json(path: Path, cls: type[SourceT] | GenericAlias, *, text: str | None
         raise ValueError(f"{path}: {error}") from error
 
 
-@dataclass(frozen=True, slots=True)
-class HeadsetRig:
-    """Measured fixed stereo transform with its rigidity evidence."""
-
-    cam0_T_cam1: Float64[ndarray, "4 4"]
-    """Camera 1 in camera 0's frame, in metres."""
-    translation_std_m: float
-    """Maximum coordinate standard deviation over measured pairs."""
-    rotation_max_deg: float
-    """Maximum angular deviation from the mean rotation."""
-
-
-def headset_rig(left: HeadsetCalibration, right: HeadsetCalibration, *, scene: str) -> HeadsetRig:
-    """Fit non-synthesized valid stereo pairs and reject a non-rigid scene."""
-    relatives: list[Float64[ndarray, "4 4"]] = []
-    for key, pose in left.T_WorldFromCamera_by_index.items():
-        peer: HeadsetPose | None = right.T_WorldFromCamera_by_index.get(key)
-        if (
-            peer is None
-            or pose.is_synthesized
-            or peer.is_synthesized
-            or pose.is_pose_valid is False
-            or peer.is_pose_valid is False
-            or pose.T_WorldFromCamera is None
-            or peer.T_WorldFromCamera is None
-        ):
-            continue
-        relatives.append(np.linalg.inv(pose.T_WorldFromCamera) @ peer.T_WorldFromCamera)
-    if not relatives:
-        raise ValueError(f"{scene}: no non-synthesized valid headset pairs for rigidity")
-    transforms: Float64[ndarray, "n 4 4"] = np.stack(relatives)
-    mean: Float64[ndarray, "4 4"] = transforms.mean(axis=0)
-    mean[:3, :3] = Rotation.from_matrix(mean[:3, :3]).as_matrix()
-    translation_std: float = float(transforms[:, :3, 3].std(axis=0).max()) * 0.001
-    rotation_max: float = float(np.degrees(Rotation.from_matrix(transforms[:, :3, :3] @ mean[:3, :3].T).magnitude()).max())
-    if translation_std >= 0.001 or rotation_max >= 0.5:
-        raise ValueError(f"{scene}: headset is not rigid: translation std {translation_std * 1000:.6g} mm, rotation deviation {rotation_max:.6g} deg")
-    mean[:3, 3] *= 0.001
-    return HeadsetRig(mean, translation_std, rotation_max)
+def read_headset_calibrations(scene_dir: Path, clock: FrameClock) -> dict[str, HeadsetCalibration]:
+    """Read each headset once and check every pose against the full metadata clock."""
+    frames: dict[int, FrameInfo] = {frame.index: frame for frame in clock.frames}
+    headsets: dict[str, HeadsetCalibration] = {}
+    for camera in HEADSET_CAMERAS:
+        path: Path = scene_dir / f"camera_calibration/{camera.source_name}.json"
+        headset: HeadsetCalibration = read_json(path, HeadsetCalibration)
+        for pose in headset.T_WorldFromCamera_by_index.values():
+            frame: FrameInfo | None = frames.get(pose.index)
+            if frame is None:
+                raise ValueError(f"{path}: headset pose index absent from frame_info")
+            if not agrees_with_frame(pose, frame):
+                raise ValueError(f"{path}: headset pose {pose.index} disagrees with frame_info")
+        headsets[camera.source_name] = headset
+    return headsets

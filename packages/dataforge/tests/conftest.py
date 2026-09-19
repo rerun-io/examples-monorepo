@@ -32,7 +32,10 @@ from serde import field, from_dict, serde
 
 from dataforge import schema
 from dataforge.aria import PublishedTransform
-from dataforge.datasets.show3d_source import CAMERAS, IndexRow
+from dataforge.datasets.show3d_hands import HandFrame, HandProfileDoc, read_hand_frames, read_hand_profile
+from dataforge.datasets.show3d_layers import Scene, read_scene
+from dataforge.datasets.show3d_source import CAMERAS, FrameClock, IndexRow, hand_pose_file, hand_profile_file, read_frame_clock
+from dataforge.identity import SequenceIdentity
 from dataforge.video_encoding import require_av1_nvenc, resolve_ffmpeg
 
 NOISE_CEILING: int = 96
@@ -326,9 +329,46 @@ def read_chunks(rrd: Path) -> list[rr.experimental.Chunk]:
 def index_row(**overrides: str | int | bool) -> IndexRow:
     """Build a complete synthetic index row, overriding only the fields under test."""
     fields: dict[str, str | int | bool] = dict(
-        subject_id="S", scene_id="toy_pick_up_abcd", num_frames=4, split="train",
+        subject_id="S", scene_id="keyboard_pick_up_abcd", num_frames=4, split="train",
         has_object_pose=True, has_hand_pose=True, has_caption=True,
         **{f"has_{camera.source_name}": True for camera in CAMERAS},
     )
     fields.update(overrides)
     return from_dict(IndexRow, fields)
+
+
+class Show3dSceneInputs(NamedTuple):
+    """Shared real scene, measured hands, and one decoded subject profile."""
+
+    identity: SequenceIdentity
+    scene: Scene
+    hands: list[HandFrame]
+    profile: HandProfileDoc
+
+
+@pytest.fixture(scope="module", params=["SPI102/keyboard_toss-away_83ef", "LYA722/birdhousetoy_shaking_8eca"])
+def show3d_scene_inputs(request: pytest.FixtureRequest) -> Show3dSceneInputs:
+    """Skip absent local assets before reading the two reference scenes."""
+    key: str = request.param
+    identity: SequenceIdentity = SequenceIdentity("show3d", tuple(key.split("/")))
+    scene_dir: Path = SHOW3D_RAW / "scenes" / key
+    required: list[Path] = [
+        SHOW3D_RAW / hand_pose_file(key),
+        SHOW3D_RAW / hand_profile_file(identity.parts[0]),
+        *(scene_dir / f"metadata/{name}.json" for name in ("recording_info", "frame_info")),
+    ]
+    for path in required:
+        if not path.is_file():
+            pytest.skip(f"SHOW3D scene asset absent: {path}")
+    clock: FrameClock = read_frame_clock(scene_dir, key)
+    for camera in clock.info.resolution:
+        for relative in (f"camera_calibration/{camera}.json", f"blur_info/{camera}.mp4.json"):
+            path: Path = scene_dir / relative
+            if not path.is_file():
+                pytest.skip(f"SHOW3D scene asset absent: {path}")
+    scene: Scene = read_scene(scene_dir, scene_key=key)
+    return Show3dSceneInputs(
+        identity, scene,
+        read_hand_frames(SHOW3D_RAW / hand_pose_file(key), scene),
+        read_hand_profile(SHOW3D_RAW / hand_profile_file(identity.parts[0])),
+    )

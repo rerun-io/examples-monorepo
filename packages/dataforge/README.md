@@ -258,7 +258,7 @@ RERUN_INSECURE_SKIP_HOST_CHECK=1 DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/lamaria
 SHOW3D converts one subject/scene into layers sharing the recording ID
 `show3d__<subject>__<scene>`. `download` fetches the two indexes and subject
 profiles, then prints the plan. `convert` fetches one scene bundle at a time,
-atomically publishes base → hand_pose → captions → properties, and removes only
+atomically publishes base → hand_pose → captions → properties → object_pose → object_mesh → hand_mesh, and removes only
 the source MP4s unless `--keep-raw`. Each layer skips its own existing file unless
 `--force` is set. Retained sidecars rebuild annotations without reading video.
 
@@ -281,10 +281,19 @@ are cleaned beneath its `work/` directory, including on failure.
 | --- | --- | --- |
 | `base` | Available | Video, calibration, headset motion, frame metadata, blur boxes, capture census |
 | `hand_pose` | Available | World/local UmeTrack landmarks, headset UV, joint angles, wrist poses, confidence, verbatim profile |
-| `object_pose` | Reserved | Object transforms and coverage |
+| `object_pose` | Available | Sparse object transforms, every-frame confidence, coverage, headset FOV and nearest-palm census |
 | `captions` | Available | Markdown instruction and all structured caption fields |
 | `properties` | Available | Stable typed `episode` metadata: subject, split, object, action, hand, caption, versions |
-| `hand_mesh` / `object_mesh` | Reserved | Derived hand meshes and HOT3D assets |
+| `object_mesh` | Available for 22 aliases | Static HOT3D BOP GLB, matched by name; unsupported texture extension stripped |
+| `hand_mesh` | Available | Translucent UmeTrack meshes, static topology and frame-aligned world vertices; ≈8× `hand_pose`; see [docs](docs/show3d.md) |
+
+`hand_pose` owns the root AnnotationContext. Consumers can leave `hand_mesh`
+unregistered to avoid its storage cost; a follow-up can coarsen its clock.
+HOT3D BOP models are renumbered across releases, so mesh IDs resolve by name.
+Download discards `KHR_texture_transform` UV transforms so Rerun 0.37 can load
+the GLBs, then deletes the raw GLBs after the stripped assets are saved.
+The keyboard golden requires `in_ego_fov_fraction < 0.05`;
+it is not always behind both cameras. Source poses remain unchanged.
 
 `/world` is the moving back-rig frame, right-handed Y-up. `rig_00` holds
 rig0…rig7 at fixed `cam_00`…`cam_07` indices; `rig_01` holds the two headset

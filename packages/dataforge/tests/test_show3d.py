@@ -19,13 +19,13 @@ from serde import SerdeError, from_dict
 from dataforge import schema
 from dataforge.datasets.base import DataforgeDataset
 from dataforge.datasets.show3d import Show3dConfig, pane_contents
+from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetRig, RigCalibration, headset_rig
 from dataforge.datasets.show3d_layers import write_base_layer
-from dataforge.datasets.show3d_source import CAMERAS, BlurInfo, HeadsetCalibration, HeadsetRig, IndexRow, RigCalibration, headset_rig
+from dataforge.datasets.show3d_source import CAMERAS, BlurInfo, IndexRow
 from dataforge.identity import SequenceIdentity
 
 
 def test_source_schemas_accept_legacy_and_new_pose_contracts() -> None:
-
     pose: dict = dict(index=0, agt_frame_id=20, timestamp=1.0, T_WorldFromCamera=np.eye(4).tolist(), is_synthesized=False)
     calibration: dict = dict(
         ImageSizeX=64,
@@ -50,7 +50,6 @@ def test_source_schemas_accept_legacy_and_new_pose_contracts() -> None:
 
 
 def test_discovery_orders_object_scenes_then_train_then_test_and_skips_empty(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-
     for split, rows in (("train", [("z", 5, False), ("object", 4, True), ("empty", 0, False)]), ("test", [("a", 3, False)])):
         pq.write_table(
             pa.Table.from_pylist(
@@ -77,7 +76,6 @@ def test_discovery_orders_object_scenes_then_train_then_test_and_skips_empty(tmp
 
 
 def test_headset_rig_fits_mm_and_rejects_nonrigid_scene() -> None:
-
     camera: dict = dict(ImageSizeX=64, ImageSizeY=48, fx=30.0, fy=30.0, cx=32.0, cy=24.0, DistortionModel="PinholePlane")
     left: dict = {}
     right: dict = {}
@@ -101,7 +99,6 @@ def test_headset_rig_fits_mm_and_rejects_nonrigid_scene() -> None:
 @pytest.mark.integration
 @pytest.mark.parametrize(("subject", "scene", "count"), [("SPI102", "keyboard_toss-away_83ef", 30), ("LYA722", "birdhousetoy_shaking_8eca", 30)])
 def test_real_scene_base(tmp_path: Path, subject: str, scene: str, count: int) -> None:
-
     source: Path = SHOW3D_RAW / "scenes" / subject / scene
     if not (source / "headset0.mp4").is_file():
         pytest.skip(f"SHOW3D scene videos absent: {source}")
@@ -182,7 +179,6 @@ def tiny_scene(tmp_path: Path) -> Path:
 
 @pytest.mark.integration
 def test_synthetic_base_roundtrip(tmp_path: Path, tiny_scene: Path) -> None:
-
     target: Path = tmp_path / "synthetic.rrd"
     write_base_layer(SequenceIdentity("show3d", ("subject", "scene")), tiny_scene, target, work_dir=tmp_path / "work", hf_revision="test-sha")
     chunks: list[rr.experimental.Chunk] = read_chunks(target)
@@ -213,7 +209,6 @@ def test_synthetic_base_roundtrip(tmp_path: Path, tiny_scene: Path) -> None:
 
 
 def test_rig_calibration_is_typed_and_rejects_reflections() -> None:
-
     source: dict = dict(
         ImageSizeX=64, ImageSizeY=48, fx=30.0, fy=30.0, cx=32.0, cy=24.0, DistortionModel="PinholePlane", T_WorldFromCamera=np.eye(4).tolist()
     )
@@ -225,14 +220,12 @@ def test_rig_calibration_is_typed_and_rejects_reflections() -> None:
 
 
 def test_blur_boxes_normalize_inverted_corners() -> None:
-
     blur = BlurInfo({"255": [[454.64, 438.24, 452.30, 436.15], [1.0, 2.0, 3.0, 4.0]]})
     assert blur.blur_boxes["255"] == [[452.30, 436.15, 454.64, 438.24], [1.0, 2.0, 3.0, 4.0]]
     assert blur.num_normalized_boxes == 1
 
 
 def test_camera_indices_survive_missing_rig0() -> None:
-
     assert [(camera.source_name, camera.rig, camera.cam) for camera in CAMERAS] == [
         ("headset0", 1, 0),
         ("headset1", 1, 1),

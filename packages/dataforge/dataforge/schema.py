@@ -137,3 +137,43 @@ def hand_uv_path(rig: int, cam: int, side: str) -> str:
 def instruction_path() -> str:
     """§12: static task instruction document."""
     return "/task/instruction"
+
+
+def objects_path(alias: str) -> str:
+    """§11: tracked rigid object root in the world frame."""
+    return f"/world/gt/objects/{alias}"
+
+
+def object_mesh_path(alias: str) -> str:
+    """§11: static geometry in the tracked object's frame."""
+    return f"{objects_path(alias)}/mesh"
+
+
+def object_confidence_path(alias: str) -> str:
+    """§11: every-frame tracking confidence."""
+    return f"{objects_path(alias)}/confidence"
+
+
+def hand_mesh_path(side: str) -> str:
+    """§10: skinned vertices in the world frame."""
+    return f"{hands_path(side)}/mesh"
+
+
+def hand_confidence_path(side: str) -> str:
+    """Measured hand confidence."""
+    return f"{hands_path(side)}/confidence"
+
+
+def hand_joint_angles_path(side: str) -> str:
+    """UmeTrack joint angles."""
+    return f"{hands_path(side)}/joint_angles"
+
+
+def hand_wrist_path(side: str) -> str:
+    """World-from-wrist pose."""
+    return f"{hands_path(side)}/wrist"
+
+
+def hand_landmarks_path(side: str, local: bool) -> str:
+    """World or wrist-local hand landmarks."""
+    return f"{hands_path(side)}/{'landmarks_local' if local else 'landmarks'}"

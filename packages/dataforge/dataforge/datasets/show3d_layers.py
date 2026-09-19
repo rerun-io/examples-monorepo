@@ -14,25 +14,19 @@ from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from serde.json import to_json
-from simplecv.camera_parameters import Extrinsics, PinholeParameters
-from simplecv.camera_parameters import Intrinsics as CameraIntrinsics
 
 from dataforge import schema, writing
+from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetPose, HeadsetRig, Intrinsics, RigCalibration, headset_rig, pinhole
 from dataforge.datasets.show3d_source import (
     CAMERAS,
+    HEADSET_CAMERAS,
     BlurInfo,
     FrameClock,
     FrameInfo,
-    HeadsetCalibration,
-    HeadsetPose,
-    HeadsetRig,
-    Intrinsics,
     RecordingInfo,
-    RigCalibration,
     Show3dCamera,
-    agrees_with_frame,
-    headset_rig,
     read_frame_clock,
+    read_headset_calibrations,
     read_json,
 )
 from dataforge.identity import SequenceIdentity
@@ -79,6 +73,8 @@ class SceneCamera:
 class Scene(FrameClock):
     """Frame clock plus calibration, blur, and stereo data."""
 
+    headsets: dict[str, HeadsetCalibration]
+    """Headset calibrations shared with annotation census checks."""
     cameras: tuple[SceneCamera, ...]
     """Present cameras with all sidecars loaded."""
     poses: list[HeadsetPose]
@@ -96,36 +92,35 @@ def read_scene(scene_dir: Path, *, scene_key: str, frame_limit: int | None = Non
     frames: list[FrameInfo] = clock.frames
     indices: Int64[ndarray, "n"] = clock.frame_indices
     present: tuple[Show3dCamera, ...] = tuple(camera for camera in CAMERAS if camera.source_name in info.resolution)
-    if sum(camera.rig == 1 for camera in present) != 2:
+    if not all(camera in present for camera in HEADSET_CAMERAS):
         raise ValueError(f"{scene_key}: both headset cameras are required")
     calibrations: dict[str, Intrinsics] = {}
     texts: dict[str, str] = {}
-    headsets: list[HeadsetCalibration] = []
+    headsets: dict[str, HeadsetCalibration] = read_headset_calibrations(scene_dir, clock)
     for camera in present:
-        path: Path = scene_dir / f"camera_calibration/{camera.source_name}.json"
-        text: str = path.read_text()
         calibration: Intrinsics
-        if camera.rig == 1:
-            headset: HeadsetCalibration = read_json(path, HeadsetCalibration, text=text)
-            headsets.append(headset)
-            calibration = headset
-            texts[camera.source_name] = to_json(read_json(path, Intrinsics, text=text))
-            poses: list[HeadsetPose] = list(headset.T_WorldFromCamera_by_index.values())
-            pose_indices: Int64[ndarray, "n"] = np.array([pose.index for pose in poses], dtype=np.int64)
-            positions: Int64[ndarray, "n"] = np.searchsorted(indices, pose_indices)
-            if np.any(positions >= len(indices)) or not np.array_equal(indices[positions], pose_indices):
-                raise ValueError(f"{scene_key}: headset pose index absent from frame_info")
-            for pose, position in zip(poses, positions, strict=True):
-                frame: FrameInfo = frames[int(position)]
-                if not agrees_with_frame(pose, frame):
-                    raise ValueError(f"{scene_key}: headset pose {pose.index} disagrees with frame_info")
+        if camera in HEADSET_CAMERAS:
+            calibration = headsets[camera.source_name]
+            texts[camera.source_name] = to_json(
+                Intrinsics(
+                    ImageSizeX=calibration.ImageSizeX,
+                    ImageSizeY=calibration.ImageSizeY,
+                    fx=calibration.fx,
+                    fy=calibration.fy,
+                    cx=calibration.cx,
+                    cy=calibration.cy,
+                    DistortionModel=calibration.DistortionModel,
+                )
+            )
         else:
+            path: Path = scene_dir / f"camera_calibration/{camera.source_name}.json"
+            text: str = path.read_text()
             calibration = read_json(path, RigCalibration, text=text)
             texts[camera.source_name] = text
         if info.resolution[camera.source_name] != [calibration.ImageSizeY, calibration.ImageSizeX]:
             raise ValueError(f"{scene_key}/{camera.source_name}: resolution disagrees with calibration")
         calibrations[camera.source_name] = calibration
-    stereo: HeadsetRig = headset_rig(headsets[0], headsets[1], scene=scene_key)
+    stereo: HeadsetRig = headset_rig(headsets[HEADSET_CAMERAS[0].source_name], headsets[HEADSET_CAMERAS[1].source_name], scene=scene_key)
     count: int = info.num_frames if frame_limit is None else min(frame_limit, info.num_frames)
     cameras: list[SceneCamera] = []
     for camera in present:
@@ -155,7 +150,7 @@ def read_scene(scene_dir: Path, *, scene_key: str, frame_limit: int | None = Non
             )
         )
     poses = sorted(
-        (pose for pose in headsets[0].T_WorldFromCamera_by_index.values() if pose.index <= indices[count - 1]), key=lambda pose: pose.index
+        (pose for pose in headsets[HEADSET_CAMERAS[0].source_name].T_WorldFromCamera_by_index.values() if pose.index <= indices[count - 1]), key=lambda pose: pose.index
     )
     pose_indices = np.array([pose.index for pose in poses], dtype=np.int64)
     offsets: Int64[ndarray, "n"] = np.searchsorted(indices, pose_indices)
@@ -165,27 +160,16 @@ def read_scene(scene_dir: Path, *, scene_key: str, frame_limit: int | None = Non
         f"normalized blur boxes {sum(camera.blur.num_normalized_boxes for camera in cameras)}"
     )
     return Scene(
-        info=info, frames=frames[:count], times_ns=times, frame_indices=indices[:count], cameras=tuple(cameras), poses=poses, offsets=offsets
+        info=info,
+        frames=frames[:count],
+        times_ns=times,
+        frame_indices=indices[:count],
+        cameras=tuple(cameras),
+        poses=poses,
+        offsets=offsets,
+        headsets=headsets,
     )
 
-
-def pinhole(name: str, calibration: Intrinsics, rig_T_cam: Float64[ndarray, "4 4"]) -> PinholeParameters:
-    """Build a camera from typed source intrinsics and its metre-valued transform."""
-    if calibration.DistortionModel != "PinholePlane":
-        raise ValueError(f"{name}: unsupported distortion model")
-    return PinholeParameters(
-        name=name,
-        extrinsics=Extrinsics(world_R_cam=rig_T_cam[:3, :3], world_t_cam=rig_T_cam[:3, 3]),
-        intrinsics=CameraIntrinsics.from_focal_principal_point(
-            camera_conventions="RDF",
-            fl_x=calibration.fx,
-            fl_y=calibration.fy,
-            cx=calibration.cx,
-            cy=calibration.cy,
-            height=calibration.ImageSizeY,
-            width=calibration.ImageSizeX,
-        ),
-    )
 
 
 def log_cameras(recording: rr.RecordingStream, scene: Scene, work_dir: Path) -> None:
@@ -306,7 +290,7 @@ def write_base_layer(
     hf_revision: str,
     default_blueprint: rrb.Blueprint | None = None,
     frame_limit: int | None = None,
-) -> None:
+) -> Scene:
     """Validate a scene, then publish its BASE recording atomically."""
     scene: Scene = read_scene(scene_dir, scene_key=identity.sequence_key, frame_limit=frame_limit)
     with writing.atomic_recording(target, recording_id=identity.recording_id, default_blueprint=default_blueprint) as recording:
@@ -326,3 +310,5 @@ def write_base_layer(
             source_start_time_s=pa.array([scene.frames[0].timestamp], type=pa.float64()),
             source_start_frame_id=pa.array([scene.frames[0].agt_frame_id], type=pa.int64()),
         )
+
+    return scene
