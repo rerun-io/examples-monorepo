@@ -392,7 +392,7 @@ and neither is derived from the other.
 **Layout:**
 
 ```
-/world/gt/hands/profile                    Blob + MediaType (static, application/json)
+/world/gt/hands/profile                    TextDocument (static, media type application/json)
 /world/gt/hands/{left,right}
   /landmarks                              Points3D (21, world frame, metres)
   /landmarks_local                        Points3D (21, wrist frame, metres)
@@ -420,9 +420,9 @@ and neither is derived from the other.
 - `uv` holds the dataset's shipped projections in encoded-image pixels, only
   for cameras with those annotations; out-of-view points are `NaN`. Do not
   substitute newly computed projections for shipped values.
-- `profile` holds the per-subject hand model as a static JSON blob with media
-  type `application/json`. The blob is verbatim source JSON; logged geometry
-  and wrist translations are metres.
+- `profile` holds the per-subject hand model as a static `TextDocument` whose
+  media type is `application/json`; the text is the verbatim source JSON. Logged
+  geometry and wrist translations are metres.
 - A separate derived layer MAY add `mesh`: static `triangle_indices` and
   temporal `vertex_positions` in metres, world frame, only where posed. The
   sibling `wrist` does not transform this mesh.
