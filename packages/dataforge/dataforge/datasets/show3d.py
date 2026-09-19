@@ -50,13 +50,17 @@ REPO_ID: str = "facebook/show3d-dataset"
 
 
 def world_contents() -> list[str]:
-    """Everything under ``/world`` except the face-blur boxes, one explicit exclusion per camera.
+    """Everything under ``/world`` except face-blur boxes and shipped pixel keypoints.
 
     Rerun content filters honour exact paths and a trailing ``/**`` only: a rule such as
     ``- /world/**/blur_boxes`` matches nothing and hides nothing (verified with headless
     screenshots), so the exclusions are spelled out from the camera table.
     """
-    return ["+ /world/**", *(f"- {schema.pinhole_path(camera.rig, camera.cam)}/blur_boxes" for camera in CAMERAS)]
+    return [
+        "+ /world/**",
+        *(f"- {schema.pinhole_path(camera.rig, camera.cam)}/blur_boxes" for camera in CAMERAS),
+        *(f"- {schema.coco133_uv_path(camera.rig, camera.cam)}" for camera in CAMERAS),
+    ]
 
 
 def pane_contents(camera: Show3dCamera) -> list[str]:
@@ -66,10 +70,15 @@ def pane_contents(camera: Show3dCamera) -> list[str]:
     (the viewer reports "No transform path" per entity), and a projected ego image plane
     draws its frame and uv landmarks over the exo footage, so every other camera's
     ``pinhole/**`` subtree is excluded outright.
+
+    A rectified pinhole pane shows the viewer projection of ``coco133_xyz`` and hides
+    ``coco133_uv``. A camera with distortion would show ``coco133_uv`` and exclude
+    ``coco133_xyz`` because Rerun Pinhole cannot project through distortion. SHOW3D
+    cameras are all PinholePlane, so only the rectified rule applies here.
     """
     own: str = schema.pinhole_path(camera.rig, camera.cam)
     others: list[str] = [f"- {schema.pinhole_path(other.rig, other.cam)}/**" for other in CAMERAS if other is not camera]
-    return ["+ /world/**", f"- {own}/blur_boxes", *others]
+    return ["+ /world/**", f"- {own}/blur_boxes", f"- {schema.coco133_uv_path(camera.rig, camera.cam)}", *others]
 
 
 @dataclass

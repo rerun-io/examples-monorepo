@@ -244,22 +244,27 @@ def test_camera_indices_survive_missing_rig0() -> None:
 
 
 def test_pane_contents_keep_only_this_cameras_image_space() -> None:
-    """Each 2D pane excludes its own blur boxes and every other camera's pinhole subtree, all by explicit path."""
+    """Each 2D pane excludes its own blur boxes and shipped UV, plus every other pinhole subtree."""
     for camera in CAMERAS:
         contents: list[str] = pane_contents(camera)
         own: str = schema.pinhole_path(camera.rig, camera.cam)
         assert contents[0] == "+ /world/**"
         assert f"- {own}/blur_boxes" in contents
+        assert f"- {schema.coco133_uv_path(camera.rig, camera.cam)}" in contents
         assert f"- {own}/**" not in contents
         others: set[str] = {f"- {schema.pinhole_path(c.rig, c.cam)}/**" for c in CAMERAS if c is not camera}
         assert others <= set(contents)
-        assert len(contents) == 2 + len(others)
+        assert len(contents) == 3 + len(others)
         assert not any("**" in rule and not rule.endswith("/**") for rule in contents)
 
 
-def test_world_contents_exclude_blur_boxes_by_explicit_path() -> None:
-    """Rerun content filters ignore mid-path wildcards, so every blur entity is excluded by its exact path."""
+def test_world_contents_exclude_blur_boxes_and_shipped_uv_by_explicit_path() -> None:
+    """Rerun content filters ignore mid-path wildcards, so blur boxes and shipped UV use exact paths."""
     contents: list[str] = world_contents()
     assert contents[0] == "+ /world/**"
-    assert set(contents[1:]) == {f"- {schema.pinhole_path(camera.rig, camera.cam)}/blur_boxes" for camera in CAMERAS}
+    assert set(contents[1:]) == {
+        f"- {path}"
+        for camera in CAMERAS
+        for path in (f"{schema.pinhole_path(camera.rig, camera.cam)}/blur_boxes", schema.coco133_uv_path(camera.rig, camera.cam))
+    }
     assert not any("*" in rule for rule in contents[1:])
