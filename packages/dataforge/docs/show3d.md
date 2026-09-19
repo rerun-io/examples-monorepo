@@ -153,7 +153,7 @@ includes only headset0 video.
 | Source | Layer / destination |
 | --- | --- |
 | UmeTrack landmark names and connections | `hand_pose`: static `/` AnnotationContext, class 1 (class 0 remains reserved for COCO-133) |
-| `landmarks_3d_mm` / `landmarks_3d_mm_local` | `/world/gt/hands/{left,right}/landmarks` / `landmarks_local`: 21 Points3D in metres, static class/keypoint IDs |
+| `landmarks_3d_mm` | `/world/gt/hands/{left,right}/landmarks`: 21 Points3D in metres, static class/keypoint IDs. `landmarks_3d_mm_local` is not logged: it is the UmeTrack skinning of `joint_angles` in the wrist frame, and as a world-frame entity it drew a hand at the rig origin |
 | `joint_angles` | Hand `/joint_angles`: 22 float32 values per available row |
 | Wrist rotation and translation | Hand `/wrist`: world-from-wrist Transform3D, translation in metres |
 | Confidence | Hand `/confidence`: Scalars on every frame, including zero |

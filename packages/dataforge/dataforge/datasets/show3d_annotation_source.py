@@ -28,8 +28,6 @@ class HandPose:
     """World wrist position in millimetres."""
     landmarks_3d_mm: Float32[ndarray, "21 3"] | None
     """World landmarks in millimetres."""
-    landmarks_3d_mm_local: Float32[ndarray, "21 3"] | None
-    """Wrist-local landmarks in millimetres."""
     landmarks_2d: dict[str, list[list[float] | None]] | None
     """Headset pixels, with null entries outside the image."""
 

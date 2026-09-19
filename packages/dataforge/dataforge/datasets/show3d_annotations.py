@@ -125,25 +125,21 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
                 root + "/confidence", indexes=clock.indexes(slice(None)), columns=rr.Scalars.columns(scalars=confidence), recording=recording
             )
             coverage[f"coverage_{side}_high_conf"] = pa.array([high_confidence_coverage(confidence)], type=pa.float64())
-            for name, getter in (
-                ("landmarks", lambda pose: pose.landmarks_3d_mm),
-                ("landmarks_local", lambda pose: pose.landmarks_3d_mm_local),
-            ):
-                positions, values = sparse_rows(poses, getter)
-                rr.log(
-                    root + f"/{name}",
-                    rr.Points3D.from_fields(class_ids=1, keypoint_ids=list(range(NUM_LANDMARKS_PER_HAND)), show_labels=False, radii=0.004),
-                    static=True,
-                    recording=recording,
-                )
-                points: Float32[ndarray, "n 3"] = np.asarray(values, dtype=np.float32).reshape(-1, 3) * np.float32(0.001)
-                send_sparse(
-                    recording,
-                    root + f"/{name}",
-                    clock,
-                    positions,
-                    rr.Points3D.columns(positions=points).partition([NUM_LANDMARKS_PER_HAND] * len(positions)),
-                )
+            positions, values = sparse_rows(poses, lambda pose: pose.landmarks_3d_mm)
+            rr.log(
+                root + "/landmarks",
+                rr.Points3D.from_fields(class_ids=1, keypoint_ids=list(range(NUM_LANDMARKS_PER_HAND)), show_labels=False, radii=0.004),
+                static=True,
+                recording=recording,
+            )
+            points: Float32[ndarray, "n 3"] = np.asarray(values, dtype=np.float32).reshape(-1, 3) * np.float32(0.001)
+            send_sparse(
+                recording,
+                root + "/landmarks",
+                clock,
+                positions,
+                rr.Points3D.columns(positions=points).partition([NUM_LANDMARKS_PER_HAND] * len(positions)),
+            )
             positions, values = sparse_rows(poses, lambda pose: pose.joint_angles)
             angles: pa.Array = pa.array([value.tolist() for value in values], type=pa.list_(pa.float32(), NUM_JOINTS_PER_HAND))
             send_sparse(recording, root + "/joint_angles", clock, positions, rr.AnyValues.columns(joint_angles=angles))

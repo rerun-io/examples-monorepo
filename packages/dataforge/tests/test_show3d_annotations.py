@@ -46,7 +46,7 @@ def test_hand_schema_preserves_null_world_and_null_uv_landmarks() -> None:
         wrist_rotation=None,
         wrist_translation=None,
         landmarks_3d_mm=None,
-        landmarks_3d_mm_local=[[1.0, 2.0, 3.0]] * NUM_LANDMARKS_PER_HAND,
+        landmarks_3d_mm_local=[[1.0, 2.0, 3.0]] * NUM_LANDMARKS_PER_HAND,  # source field the layer deliberately drops
         landmarks_2d=None,
         extra="allowed",
     )
@@ -54,8 +54,6 @@ def test_hand_schema_preserves_null_world_and_null_uv_landmarks() -> None:
     assert frame.hand_poses["0"].landmarks_3d_mm is None
     assert frame.hand_poses["0"].joint_angles is not None
     assert frame.hand_poses["0"].joint_angles.dtype == np.float32
-    assert frame.hand_poses["0"].landmarks_3d_mm_local is not None
-    assert frame.hand_poses["0"].landmarks_3d_mm_local.shape == (NUM_LANDMARKS_PER_HAND, 3)
     pose["landmarks_2d"] = {"headset0": [None] + [[3.0, 4.0]] * (NUM_LANDMARKS_PER_HAND - 1)}
     frame = from_dict(HandFrame, dict(index=0, agt_frame_id=20, timestamp=1.0, missing_cameras=[], hand_poses={"0": pose, "1": pose}))
     assert frame.hand_poses["0"].landmarks_2d is not None
@@ -176,7 +174,6 @@ def test_real_scene_annotation_layers(annotation_scene: AnnotationBuild) -> None
         poses: list[HandPose] = [frame.hand_poses[hand] for frame in frames]
         for suffix, component, expected in (
             ("landmarks", "Points3D:positions", sum(p.landmarks_3d_mm is not None for p in poses)),
-            ("landmarks_local", "Points3D:positions", sum(p.landmarks_3d_mm_local is not None for p in poses)),
             ("joint_angles", "joint_angles", sum(p.joint_angles is not None for p in poses)),
             ("wrist", "Transform3D:translation", sum(p.wrist_translation is not None for p in poses)),
             ("confidence", "Scalars:scalars", scene.info.num_frames),
@@ -320,7 +317,6 @@ def test_hand_reader_rejects_census_or_clock_mismatch(tmp_path: Path, fault: str
         wrist_rotation=None,
         wrist_translation=None,
         landmarks_3d_mm=None,
-        landmarks_3d_mm_local=None,
         landmarks_2d=None,
     )
     records: dict = (
@@ -425,7 +421,7 @@ def test_hand_layer_omits_all_absent_measurements(tmp_path: Path) -> None:
         np.array([0], dtype=np.int64),
         np.array([0], dtype=np.int64),
     )
-    pose: HandPose = HandPose(0.0, None, None, None, None, None, None)
+    pose: HandPose = HandPose(0.0, None, None, None, None, None)
     frame: HandFrame = HandFrame(0, 20, 1.0, [], {"0": pose, "1": pose})
     target: Path = tmp_path / "hand_pose.rrd"
     write_hand_pose_layer(SequenceIdentity("show3d", ("S", "none_wave_abcd")), clock, [frame], "{}", target)
