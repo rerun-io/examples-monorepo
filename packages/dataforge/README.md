@@ -255,7 +255,7 @@ RERUN_INSECURE_SKIP_HOST_CHECK=1 DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/lamaria
 
 ### SHOW3D (show3d)
 
-SHOW3D converts one subject/scene into layers sharing the recording ID
+SHOW3D (Rim et al., CVPR 2026) is a back-rig plus Quest 3 hand-object capture; [docs/show3d.md](docs/show3d.md) opens with the papers, the capture system, how the labels were made and what ships. It converts one subject/scene into layers sharing the recording ID
 `show3d__<subject>__<scene>`. `download` fetches the two indexes and subject
 profiles, then prints the plan. `convert` fetches one scene bundle at a time,
 atomically publishes base → hand_pose → captions → properties, and removes only
