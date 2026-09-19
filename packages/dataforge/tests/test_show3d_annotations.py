@@ -11,7 +11,7 @@ import pytest
 import rerun as rr
 import rerun.blueprint as rrb
 from conftest import SHOW3D_RAW, blueprint_views, index_row, read_back, read_chunks, recording_properties
-from jaxtyping import Bool, Float64
+from jaxtyping import Bool, Float32, Float64
 from numpy import ndarray
 from serde import from_dict
 from simplecv.camera_parameters import PinholeParameters, perspective_projection
@@ -173,7 +173,6 @@ def test_real_scene_annotation_layers(annotation_scene: AnnotationBuild) -> None
     for hand, side in HAND_SIDES:
         poses: list[HandPose] = [frame.hand_poses[hand] for frame in frames]
         for suffix, component, expected in (
-            ("landmarks", "Points3D:positions", sum(p.landmarks_3d_mm is not None for p in poses)),
             ("joint_angles", "joint_angles", sum(p.joint_angles is not None for p in poses)),
             ("wrist", "Transform3D:translation", sum(p.wrist_translation is not None for p in poses)),
             ("confidence", "Scalars:scalars", scene.info.num_frames),
@@ -183,18 +182,47 @@ def test_real_scene_annotation_layers(annotation_scene: AnnotationBuild) -> None
             ]
             assert sum(c.num_rows for c in rows) == expected
         assert props[f"coverage_{side}_high_conf"] == pytest.approx(sum(p.confidence > 0.5 for p in poses) / scene.info.num_frames)
-        for camera in (0, 1):
-            uv_chunks: list[rr.experimental.Chunk] = [
-                c for c in chunks if str(c.entity_path) == schema.hand_uv_path(1, camera, side) and not c.is_static
-            ]
-            uv: Float64[ndarray, "n 21 2"] = np.concatenate(
-                [np.array(c.to_record_batch().column("Points2D:positions").to_pylist()) for c in uv_chunks]
-            )
-            source_rows: list[list[list[float] | None]] = [
-                p.landmarks_2d[f"headset{camera}"] for p in poses if p.landmarks_2d is not None and f"headset{camera}" in p.landmarks_2d
-            ]
-            assert len(uv) == len(source_rows)
-            assert np.isnan(uv).sum() == 2 * sum(point is None for row in source_rows for point in row)
+    for path, component, confidence_component, dimensions in (
+        (schema.coco133_xyz_path(), "Points3D:positions", "simplecv.KeypointConfidence3D:confidences", 3),
+        (schema.coco133_uv_path(1, 0), "Points2D:positions", "simplecv.KeypointConfidence2D:confidences", 2),
+        (schema.coco133_uv_path(1, 1), "Points2D:positions", "simplecv.KeypointConfidence2D:confidences", 2),
+    ):
+        keypoint_rows: list[dict] = [
+            row for chunk in chunks if str(chunk.entity_path) == path and not chunk.is_static for row in chunk.to_record_batch().to_pylist()
+        ]
+        keypoint_rows.sort(key=lambda row: row["frame_index"])
+        assert len(keypoint_rows) == len(frames)
+        points: Float64[ndarray, "n 133 d"] = np.array([row[component] for row in keypoint_rows])
+        confidence: Float64[ndarray, "n 133"] = np.array([row[confidence_component] for row in keypoint_rows])
+        assert points.shape == (len(frames), 133, dimensions)
+        assert confidence.shape == (len(frames), 133)
+        assert np.isfinite(confidence).all()
+        for index, frame in enumerate(frames):
+            assert keypoint_rows[index]["frame_index"] == frame.index
+            for hand_index, (key, _) in enumerate(HAND_SIDES):
+                pose: HandPose = frame.hand_poses[key]
+                offset: int = 91 + 21 * hand_index
+                # Source fingertip 0 maps to COCO thumb4, independent of interpolation.
+                if dimensions == 3:
+                    if pose.landmarks_3d_mm is None:
+                        assert np.isnan(points[index, offset : offset + 21]).all()
+                        assert (confidence[index, offset : offset + 21] == 0.0).all()
+                    else:
+                        np.testing.assert_allclose(points[index, offset + 4], pose.landmarks_3d_mm[0] * np.float32(0.001))
+                        assert confidence[index, offset + 4] == pytest.approx(pose.confidence)
+                else:
+                    camera_name: str = "headset0" if path == schema.coco133_uv_path(1, 0) else "headset1"
+                    pixels: list[list[float] | None] | None = (pose.landmarks_2d or {}).get(camera_name)
+                    if pixels is None or pixels[0] is None:
+                        assert np.isnan(points[index, offset + 4]).all()
+                        assert confidence[index, offset + 4] == 0.0
+                    else:
+                        np.testing.assert_allclose(points[index, offset + 4], pixels[0])
+                        assert confidence[index, offset + 4] == pytest.approx(pose.confidence)
+    assert {str(chunk.entity_path) for chunk in chunks if str(chunk.entity_path).endswith("/coco133_uv")} == {
+        schema.coco133_uv_path(1, 0),
+        schema.coco133_uv_path(1, 1),
+    }
     profile_text: list = next(
         c.to_record_batch().column("TextDocument:text").to_pylist() for c in chunks if str(c.entity_path) == schema.hand_profile_path()
     )
@@ -212,16 +240,17 @@ def test_hand_landmarks_reproject_through_base_camera_chain(
     transforms: dict[int, Float64[ndarray, "4 4"]] = {
         pose.index: pose.T_WorldFromCamera for pose in scene.poses if pose.T_WorldFromCamera is not None
     }
-    for _, side in HAND_SIDES:
+    for hand_index, (_, side) in enumerate(HAND_SIDES):
+        offset: int = 91 + 21 * hand_index
         world: dict[int, Float64[ndarray, "21 3"]] = {
-            row["frame_index"]: np.array(row["Points3D:positions"])
+            row["frame_index"]: np.array(row["Points3D:positions"])[offset : offset + 21]
             for c in chunks
-            if str(c.entity_path) == f"{schema.hands_path(side)}/landmarks" and not c.is_static
+            if str(c.entity_path) == schema.coco133_xyz_path() and not c.is_static
             for row in c.to_record_batch().to_pylist()
         }
         for camera in [c for c in scene.cameras if c.camera.rig == 1]:
             errors: list[float] = []
-            path: str = schema.hand_uv_path(camera.camera.rig, camera.camera.cam, side)
+            path: str = schema.coco133_uv_path(camera.camera.rig, camera.camera.cam)
             for chunk in chunks:
                 if str(chunk.entity_path) != path or chunk.is_static:
                     continue
@@ -237,7 +266,7 @@ def test_hand_landmarks_reproject_through_base_camera_chain(
                     assert parameters.intrinsics.k_matrix is not None
                     xyz: Float64[ndarray, "21 3"] = world[index] @ parameters.extrinsics.cam_R_world.T + parameters.extrinsics.cam_t_world
                     projected: Float64[ndarray, "21 2"] = perspective_projection(xyz, parameters.intrinsics.k_matrix.astype(np.float64))
-                    shipped: Float64[ndarray, "21 2"] = np.array(row["Points2D:positions"])
+                    shipped: Float64[ndarray, "21 2"] = np.array(row["Points2D:positions"])[offset : offset + 21]
                     valid: Bool[ndarray, "21"] = np.isfinite(shipped).all(axis=1) & np.isfinite(projected).all(axis=1)
                     errors.extend(np.linalg.norm(projected[valid] - shipped[valid], axis=1).tolist())
             assert len(errors) > 100
@@ -414,19 +443,79 @@ def test_fetch_missing_preserves_retained_raw_files(tmp_path: Path, monkeypatch:
     assert retained.read_text() == "keep"
 
 
-def test_hand_layer_omits_all_absent_measurements(tmp_path: Path) -> None:
+def test_hand_layer_writes_dense_coco133_with_shipped_confidence_and_pixels(tmp_path: Path) -> None:
     clock: FrameClock = FrameClock(
-        RecordingInfo(20, 1, 60.0, {}),
-        [FrameInfo(0, 20, 1.0, [])],
-        np.array([0], dtype=np.int64),
-        np.array([0], dtype=np.int64),
+        RecordingInfo(20, 2, 60.0, {}),
+        [FrameInfo(0, 20, 1.0, []), FrameInfo(1, 21, 2.0, [])],
+        np.array([0, 1_000_000_000], dtype=np.int64),
+        np.array([0, 1], dtype=np.int64),
     )
-    pose: HandPose = HandPose(0.0, None, None, None, None, None)
-    frame: HandFrame = HandFrame(0, 20, 1.0, [], {"0": pose, "1": pose})
+    landmarks: Float32[ndarray, "21 3"] = np.zeros((21, 3), dtype=np.float32)
+    landmarks[0] = [1000.0, 2000.0, 3000.0]
+    landmarks[5] = [2000.0, 4000.0, 6000.0]
+    landmarks[6] = [4000.0, 6000.0, 8000.0]
+    pixels: list[list[float] | None] = [[30.0, 40.0] for _ in range(21)]
+    pixels[5] = [10.0, 20.0]
+    pixels[6] = [50.0, 60.0]
+    pixels[1] = None
+    left: HandPose = HandPose(0.5, None, None, None, landmarks, {"headset0": pixels})
+    right: HandPose = HandPose(1.0, None, None, None, landmarks, {"headset1": pixels})
+    absent: HandPose = HandPose(0.75, None, None, None, None, None)
+    frames: list[HandFrame] = [
+        HandFrame(0, 20, 1.0, [], {"0": left, "1": right}),
+        HandFrame(1, 21, 2.0, [], {"0": absent, "1": right}),
+    ]
     target: Path = tmp_path / "hand_pose.rrd"
-    write_hand_pose_layer(SequenceIdentity("show3d", ("S", "none_wave_abcd")), clock, [frame], "{}", target)
-    temporal: list[rr.experimental.Chunk] = [chunk for chunk in read_chunks(target) if not chunk.is_static]
+    write_hand_pose_layer(SequenceIdentity("show3d", ("S", "none_wave_abcd")), clock, frames, "{}", target)
+    chunks: list[rr.experimental.Chunk] = read_chunks(target)
+    temporal: list[rr.experimental.Chunk] = [chunk for chunk in chunks if not chunk.is_static]
     assert {str(chunk.entity_path) for chunk in temporal} == {
         "/world/gt/hands/left/confidence",
         "/world/gt/hands/right/confidence",
+        "/world/gt/coco133_xyz",
+        "/world/rig_01/cam_00/pinhole/coco133_uv",
+        "/world/rig_01/cam_01/pinhole/coco133_uv",
     }
+    for path, component, confidence_component, dimensions in (
+        (schema.coco133_xyz_path(), "Points3D:positions", "simplecv.KeypointConfidence3D:confidences", 3),
+        (schema.coco133_uv_path(1, 0), "Points2D:positions", "simplecv.KeypointConfidence2D:confidences", 2),
+        (schema.coco133_uv_path(1, 1), "Points2D:positions", "simplecv.KeypointConfidence2D:confidences", 2),
+    ):
+        rows: list[dict] = [row for chunk in temporal if str(chunk.entity_path) == path for row in chunk.to_record_batch().to_pylist()]
+        rows.sort(key=lambda row: row["frame_index"])
+        assert [row["frame_index"] for row in rows] == [0, 1]
+        assert all("video_time" in row for row in rows)
+        points: Float64[ndarray, "2 133 d"] = np.array([row[component] for row in rows])
+        confidence: Float64[ndarray, "2 133"] = np.array([row[confidence_component] for row in rows])
+        assert points.shape == (2, 133, dimensions)
+        assert confidence.shape == (2, 133)
+        assert np.isfinite(confidence).all()
+        assert np.isnan(points[:, :9]).all()
+        assert np.isnan(points[:, 11:91]).all()
+        assert (confidence[:, :9] == 0.0).all()
+        assert (confidence[:, 11:91] == 0.0).all()
+        assert np.isnan(points[1, 91:112]).all()
+        assert np.isnan(points[1, 9]).all()
+        assert (confidence[1, 91:112] == 0.0).all()
+        assert confidence[1, 9] == 0.0
+        if dimensions == 3:
+            np.testing.assert_allclose(points[0, 95], [1.0, 2.0, 3.0])
+            np.testing.assert_allclose(points[0, [9, 91]], [[2.0, 4.0, 6.0]] * 2)
+            np.testing.assert_allclose(points[0, 92], [3.0, 5.0, 7.0])
+            assert (confidence[0, 91:112] == 0.5).all()
+            assert confidence[0, 9] == 0.5
+            assert (confidence[:, 112:133] == 1.0).all()
+            assert (confidence[:, 10] == 1.0).all()
+            colors: list[int] = rows[0]["Points3D:colors"]
+            assert len(colors) == 133
+            assert colors[95] == 0xFFFF00FF  # 0.5 confidence: yellow RGBA.
+            assert colors[116] == 0x00FF00FF  # 1.0 confidence: green RGBA.
+        else:
+            offset: int = 91 if path == schema.coco133_uv_path(1, 0) else 112
+            np.testing.assert_allclose(points[0, offset + 4], [30.0, 40.0])
+            np.testing.assert_allclose(points[0, offset + 1], [30.0, 40.0])
+            assert np.isnan(points[0, offset + 8]).all()  # Null index fingertip.
+            assert confidence[0, offset + 8] == 0.0
+            assert confidence[0, offset + 4] == (0.5 if offset == 91 else 1.0)
+            assert (confidence[~np.isfinite(points).all(axis=2)] == 0.0).all()
+    assert not any(str(chunk.entity_path).endswith(("/landmarks", "/uv")) for chunk in chunks)

@@ -152,25 +152,35 @@ includes only headset0 video.
 
 | Source | Layer / destination |
 | --- | --- |
-| UmeTrack landmark names and connections | `hand_pose`: static `/` AnnotationContext, class 1 (class 0 remains reserved for COCO-133) |
-| `landmarks_3d_mm` | `/world/gt/hands/{left,right}/landmarks`: 21 Points3D in metres, static class/keypoint IDs. `landmarks_3d_mm_local` is not logged: it is the UmeTrack skinning of `joint_angles` in the wrist frame, and as a world-frame entity it drew a hand at the rig origin |
+| COCO-133 names and connections | `hand_pose`: static `/` AnnotationContext, one class, ID 0, "Coco Wholebody" |
+| `landmarks_3d_mm` | `/world/gt/coco133_xyz`: dense 133-point Points3DWithConfidence rows in metres, class 0, static COCO keypoint IDs, per-point confidence colours |
 | `joint_angles` | Hand `/joint_angles`: 22 float32 values per available row |
 | Wrist rotation and translation | Hand `/wrist`: world-from-wrist Transform3D, translation in metres |
 | Confidence | Hand `/confidence`: Scalars on every frame, including zero |
-| `landmarks_2d` | `/world/rig_01/cam_0{0,1}/pinhole/hands/{left,right}/uv`: 21 Points2D, null landmarks become NaN pairs |
+| `landmarks_2d` | `/world/rig_01/cam_0{0,1}/pinhole/coco133_uv`: dense 133-point Points2DWithConfidence rows from shipped pixels; null points and absent hands become NaN with zero confidence |
 | Subject profile JSON | `/world/gt/hands/profile`: verbatim static TextDocument with `application/json` media type |
 | Caption JSON (all ten strings) | `captions`: static Markdown TextDocument at `/task/instruction`; overall caption first, other fields as a definition list |
 | Index row and caption | `properties`: one `episode` property chunk |
 
 `hand_pose` is the single owner of the root `AnnotationContext` until a shared
-layer exists.
+layer exists. UmeTrack landmarks use the Assembly-Hands index order and are
+mapped into COCO-133, including body wrists and interpolated thumb bases. Other
+body and face points remain NaN with zero confidence. Each available hand carries
+its shipped confidence; an absent hand has NaN positions and zero confidence.
+`landmarks_3d_mm_local` is not logged.
+
+A rectified pinhole pane shows the viewer projection of `coco133_xyz` and hides
+`coco133_uv`. A camera with distortion would show `coco133_uv` and exclude
+`coco133_xyz`, because Rerun Pinhole cannot project through distortion. SHOW3D
+cameras are all `PinholePlane`, so only the rectified rule applies. The world
+view also excludes every camera's `coco133_uv`.
 
 Every temporal annotation row has the base `video_time` and `frame_index`.
 The hand frame census must equal scene `recording_info.num_frames`, and frame
-IDs/timestamps must agree with `frame_info`. Optional fields produce rows only
-where present; confidence-zero records may still have local landmarks and joint
-angles. Hand JSON and profiles use partial pyserde schemas with unknown fields
-allowed. Profiles are stored without reserializing them.
+IDs/timestamps must agree with `frame_info`. Keypoint and confidence rows are
+dense on this clock. Joint angles and wrist transforms produce rows only where
+present; confidence-zero records may still have joint angles. Hand JSON and
+profiles use partial pyserde schemas with unknown fields allowed. Profiles are stored without reserializing them.
 
 Annotation layers use `send_properties=False` and write only their own property
 groups. `hand_pose` holds string `version=v2` and float64
@@ -183,7 +193,7 @@ is the scene ID's first token; action is everything between alias and final hash
 BASE census remains in `capture`.
 
 The keyboard and birdhouse reprojection goldens read the written hand landmarks and UV, then
-projects through the base sidecar camera chain (headset0 pose, fixed stereo
+project through the base sidecar camera chain (headset0 pose, fixed stereo
 camera transform, and pinhole intrinsics). Each hand/camera pair must have median
 finite-point error below 0.5 px. Skinning and mesh goldens belong to PR 4.
 

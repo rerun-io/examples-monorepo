@@ -129,9 +129,14 @@ def hand_profile_path() -> str:
     return "/world/gt/hands/profile"
 
 
-def hand_uv_path(rig: int, cam: int, side: str) -> str:
-    """§10: hand landmarks in camera pixels."""
-    return f"{pinhole_path(rig, cam)}/hands/{side}/uv"
+def coco133_xyz_path() -> str:
+    """§10: COCO-133 keypoints in world metres."""
+    return "/world/gt/coco133_xyz"
+
+
+def coco133_uv_path(rig: int, cam: int) -> str:
+    """§10: shipped COCO-133 keypoints in camera pixels."""
+    return f"{pinhole_path(rig, cam)}/coco133_uv"
 
 
 def instruction_path() -> str:

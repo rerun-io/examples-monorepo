@@ -8,10 +8,14 @@ from typing import TypeVar
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from jaxtyping import Float32, Float64
+from einops import rearrange
+from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
-from simplecv.umetrack_temp.generic_hand_model_numpy import LANDMARK, NUM_JOINTS_PER_HAND, NUM_LANDMARKS_PER_HAND, UME_HAND_CONNECTIONS
+from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
+from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_IDS, COCO_133_LINKS
+from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
+from simplecv.umetrack_temp.generic_hand_model_numpy import NUM_JOINTS_PER_HAND
 
 from dataforge import schema, writing
 from dataforge.datasets.show3d_annotation_source import HAND_SIDES, Caption, HandFrame, HandPose
@@ -102,9 +106,9 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
             "/",
             rr.AnnotationContext(
                 rr.ClassDescription(
-                    info=rr.AnnotationInfo(id=1, label="UmeTrack hand"),
-                    keypoint_annotations=[rr.AnnotationInfo(id=int(point), label=point.name) for point in LANDMARK],
-                    keypoint_connections=sorted(UME_HAND_CONNECTIONS),
+                    info=rr.AnnotationInfo(id=0, label="Coco Wholebody", color=(0, 0, 255)),
+                    keypoint_annotations=[rr.AnnotationInfo(id=point, label=name) for point, name in COCO_133_ID2NAME.items()],
+                    keypoint_connections=COCO_133_LINKS,
                 )
             ),
             static=True,
@@ -116,6 +120,75 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
             static=True,
             recording=recording,
         )
+        n_frames: int = len(selected)
+        xyz: Float32[ndarray, "n 133 3"] = np.full((n_frames, 133, 3), np.nan, dtype=np.float32)
+        conf: Float32[ndarray, "n 133"] = np.zeros((n_frames, 133), dtype=np.float32)
+        for frame_index, frame in enumerate(selected):
+            landmarks_lr: Float32[ndarray, "2 21 3"] = np.full((2, 21, 3), np.nan, dtype=np.float32)
+            for hand_index, (key, _) in enumerate(HAND_SIDES):
+                pose: HandPose = frame.hand_poses[key]
+                if pose.landmarks_3d_mm is not None:
+                    landmarks_lr[hand_index] = pose.landmarks_3d_mm * np.float32(0.001)
+            # Checked UmeTrack LANDMARK against Assembly-Hands HAND_ID2NAME: tips 0–4,
+            # wrist 5, thumb 6–7, finger joints 8–19, palm 20 have the same order.
+            xyz[frame_index] = assembly21_to_coco133(landmarks_lr)[:, :3]
+            for hand_index, (key, _) in enumerate(HAND_SIDES):
+                pose = frame.hand_poses[key]
+                if pose.landmarks_3d_mm is not None:
+                    offset: int = 91 + hand_index * 21
+                    conf[frame_index, offset : offset + 21] = np.float32(pose.confidence)
+                    conf[frame_index, 9 + hand_index] = np.float32(pose.confidence)
+                    if not np.isfinite(xyz[frame_index, offset + 1]).all():
+                        conf[frame_index, offset + 1] = np.float32(0.0)
+        flat_xyz: Float32[ndarray, "n 3"] = rearrange(xyz, "f k d -> (f k) d")
+        flat_conf: Float32[ndarray, "n"] = rearrange(conf, "f k -> (f k)")
+        colors: UInt8[ndarray, "n 3"] = confidence_scores_to_rgb(flat_conf[None, :, None])[0]
+        rr.log(
+            schema.coco133_xyz_path(),
+            Points3DWithConfidence.from_fields(class_ids=0, keypoint_ids=COCO_133_IDS, show_labels=False, radii=0.004),
+            static=True,
+            recording=recording,
+        )
+        rr.send_columns(
+            schema.coco133_xyz_path(),
+            indexes=clock.indexes(slice(None)),
+            columns=Points3DWithConfidence.columns(positions=flat_xyz, confidences=flat_conf, colors=colors).partition([133] * n_frames),
+            recording=recording,
+        )
+        for camera in [c for c in CAMERAS if c.rig == 1]:
+            uv: Float32[ndarray, "n 133 2"] = np.full((n_frames, 133, 2), np.nan, dtype=np.float32)
+            uv_conf: Float32[ndarray, "n 133"] = np.zeros((n_frames, 133), dtype=np.float32)
+            for frame_index, frame in enumerate(selected):
+                pixels_lr: Float32[ndarray, "2 21 3"] = np.full((2, 21, 3), np.nan, dtype=np.float32)
+                pixels_lr[:, :, 2] = np.float32(0.0)
+                for hand_index, (key, _) in enumerate(HAND_SIDES):
+                    pose = frame.hand_poses[key]
+                    pixels: list[list[float] | None] | None = (pose.landmarks_2d or {}).get(camera.source_name)
+                    if pixels is not None:
+                        pixels_lr[hand_index, :, :2] = np.asarray(
+                            [point if point is not None else [np.nan, np.nan] for point in pixels], dtype=np.float32
+                        )
+                uv[frame_index] = assembly21_to_coco133(pixels_lr)[:, :2]
+                for hand_index, (key, _) in enumerate(HAND_SIDES):
+                    offset = 91 + hand_index * 21
+                    uv_conf[frame_index, offset : offset + 21] = np.float32(frame.hand_poses[key].confidence)
+                    uv_conf[frame_index, 9 + hand_index] = np.float32(frame.hand_poses[key].confidence)
+                uv_conf[frame_index, ~np.isfinite(uv[frame_index]).all(axis=1)] = np.float32(0.0)
+            path: str = schema.coco133_uv_path(camera.rig, camera.cam)
+            rr.log(
+                path,
+                Points2DWithConfidence.from_fields(class_ids=0, keypoint_ids=COCO_133_IDS, show_labels=False, radii=3.0),
+                static=True,
+                recording=recording,
+            )
+            flat_uv: Float32[ndarray, "n 2"] = rearrange(uv, "f k d -> (f k) d")
+            flat_uv_conf: Float32[ndarray, "n"] = rearrange(uv_conf, "f k -> (f k)")
+            rr.send_columns(
+                path,
+                indexes=clock.indexes(slice(None)),
+                columns=Points2DWithConfidence.columns(positions=flat_uv, confidences=flat_uv_conf).partition([133] * n_frames),
+                recording=recording,
+            )
         coverage: dict[str, pa.Array] = {}
         for key, side in HAND_SIDES:
             poses: list[HandPose] = [frame.hand_poses[key] for frame in selected]
@@ -125,21 +198,6 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
                 root + "/confidence", indexes=clock.indexes(slice(None)), columns=rr.Scalars.columns(scalars=confidence), recording=recording
             )
             coverage[f"coverage_{side}_high_conf"] = pa.array([high_confidence_coverage(confidence)], type=pa.float64())
-            positions, values = sparse_rows(poses, lambda pose: pose.landmarks_3d_mm)
-            rr.log(
-                root + "/landmarks",
-                rr.Points3D.from_fields(class_ids=1, keypoint_ids=list(range(NUM_LANDMARKS_PER_HAND)), show_labels=False, radii=0.004),
-                static=True,
-                recording=recording,
-            )
-            points: Float32[ndarray, "n 3"] = np.asarray(values, dtype=np.float32).reshape(-1, 3) * np.float32(0.001)
-            send_sparse(
-                recording,
-                root + "/landmarks",
-                clock,
-                positions,
-                rr.Points3D.columns(positions=points).partition([NUM_LANDMARKS_PER_HAND] * len(positions)),
-            )
             positions, values = sparse_rows(poses, lambda pose: pose.joint_angles)
             angles: pa.Array = pa.array([value.tolist() for value in values], type=pa.list_(pa.float32(), NUM_JOINTS_PER_HAND))
             send_sparse(recording, root + "/joint_angles", clock, positions, rr.AnyValues.columns(joint_angles=angles))
@@ -151,19 +209,4 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
                 -1, 3
             ) * np.float32(0.001)
             send_sparse(recording, root + "/wrist", clock, positions, rr.Transform3D.columns(translation=translations, quaternion=rotations))
-            for camera in [c for c in CAMERAS if c.rig == 1]:
-                positions, values = sparse_rows(
-                    poses, lambda pose, camera=camera: pose.landmarks_2d.get(camera.source_name) if pose.landmarks_2d is not None else None
-                )
-                path: str = schema.hand_uv_path(camera.rig, camera.cam, side)
-                rr.log(
-                    path,
-                    rr.Points2D.from_fields(class_ids=1, keypoint_ids=list(range(NUM_LANDMARKS_PER_HAND)), show_labels=False, radii=3.0),
-                    static=True,
-                    recording=recording,
-                )
-                uv: Float32[ndarray, "n 2"] = np.array(
-                    [[point if point is not None else [np.nan, np.nan] for point in row] for row in values], dtype=np.float32
-                ).reshape(-1, 2)
-                send_sparse(recording, path, clock, positions, rr.Points2D.columns(positions=uv).partition([NUM_LANDMARKS_PER_HAND] * len(positions)))
         recording.send_property("hand_pose", rr.AnyValues(version=pa.array([HAND_POSE_VERSION], type=pa.string()), **coverage))
