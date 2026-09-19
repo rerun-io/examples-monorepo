@@ -10,7 +10,7 @@ from tests.test_rerun_log import read_entities
 
 def test_batch_resumes_and_hashes_subagents(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Three sessions convert once; changed children and missing outputs rebuild."""
-    from agent_traces.apis.convert_all import Config, load_manifest, main
+    from agent_traces.apis.convert_all import Config, Manifest, load_manifest, main
 
     home: Path = tmp_path / ".claude"
     for project, session_id in [("one", "a"), ("one", "b"), ("two", "c")]:
@@ -22,15 +22,16 @@ def test_batch_resumes_and_hashes_subagents(tmp_path: Path, capsys: pytest.Captu
     main(config)
     assert "converted=3 skipped=0 failed=0" in capsys.readouterr().out
     manifest_path: Path = tmp_path / "out/claude/manifest.json"
-    manifest = load_manifest(manifest_path)
+    manifest: Manifest = load_manifest(manifest_path)
     assert set(manifest.sessions) == {"a", "b", "c"}
-    assert manifest.sessions["a"].n_rows == 6
+    assert {session_id: entry.n_rows for session_id, entry in manifest.sessions.items()} == {"a": 6, "b": 5, "c": 5}
     assert read_entities(tmp_path / "out/claude/a.rrd")["/__properties/session"]["profile"].to_pylist() == [["claude"]]
     main(config)
     assert "converted=0 skipped=3 failed=0" in capsys.readouterr().out
     child.add("assistant", message={"content": "new"})
     main(config)
     assert "converted=1 skipped=2 failed=0" in capsys.readouterr().out
+    assert load_manifest(manifest_path).sessions["a"].n_rows == 7
     (tmp_path / "out/claude/b.rrd").unlink()
     main(config)
     assert "converted=1 skipped=2 failed=0" in capsys.readouterr().out
@@ -39,6 +40,7 @@ def test_batch_resumes_and_hashes_subagents(tmp_path: Path, capsys: pytest.Captu
     late.add("user", message={"content": "late child"})
     main(config)
     assert "converted=1 skipped=2 failed=0" in capsys.readouterr().out
+    assert load_manifest(manifest_path).sessions["a"].n_rows == 8
 
 
 def test_batch_filters_and_profile(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

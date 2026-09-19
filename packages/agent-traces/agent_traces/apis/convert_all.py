@@ -150,8 +150,8 @@ def main(config: Config) -> None:
         session = replace(session, profile=profile)
         rrd: Path = write_session_rrd(session, out / f"{session_id}.rrd")
         n_rows: int = sum(
-            chunk.to_record_batch().num_rows
-            for chunk in RrdReader(rrd).stream().to_chunks()
+            chunk.num_rows
+            for chunk in RrdReader(rrd).stream()
             if not str(chunk.entity_path).lstrip("/").startswith("__properties")
         )
         manifest.sessions[session_id] = ManifestEntry(str(path.resolve()), source_hash, rrd.name, datetime.now(UTC).isoformat(), n_rows)
