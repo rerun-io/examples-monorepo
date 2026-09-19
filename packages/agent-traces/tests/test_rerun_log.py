@@ -211,8 +211,53 @@ def test_all_row_families_preserve_nanoseconds(
     session_builder.add(
         "user",
         timestamp=timestamp,
-        message={"content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(png_bytes).decode()}}]},
+        message={
+            "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(png_bytes).decode()}}]
+        },
     )
     entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "precise.rrd"))
     for entity in ["/conversation/assistant", "/usage/input_tokens", "/media/images"]:
         assert entities[entity]["wall"].cast(pa.int64()).to_pylist() == [expected_ns]
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("failure_point", ["send_columns", "flush"])
+def test_failed_write_does_not_publish_or_leave_temporary_files(
+    session_builder: SessionBuilder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: bool, failure_point: str
+) -> None:
+    """Publication preserves an existing destination until all writes succeed."""
+    import rerun as rr
+
+    session_builder.add("user", message={"content": "hello"})
+    out: Path = tmp_path / "atomic.rrd"
+    if existing:
+        out.write_bytes(b"existing recording")
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        """Simulate an emission failure after the sink is attached."""
+        raise RuntimeError("injected write failure")
+
+    monkeypatch.setattr(rr.RecordingStream, failure_point, fail)
+    with pytest.raises(RuntimeError, match="injected write failure"):
+        write_session_rrd(parse_session(session_builder.path), out)
+    if existing:
+        assert out.read_bytes() == b"existing recording"
+    else:
+        assert not out.exists()
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_raw_tool_metadata_round_trips(session_builder: SessionBuilder, tmp_path: Path) -> None:
+    """Unknown nested metadata and non-object JSON survive on result rows."""
+    payloads: list[object] = [{"unknown": {"nested": [1, True, None]}}, "output", ["a", {"b": 2}], None]
+    for payload in payloads:
+        session_builder.add("user", toolUseResult=payload, message={"content": [{"type": "tool_result", "content": "ok"}]})
+    session_builder.add("user", message={"content": [{"type": "tool_result", "content": "ok"}]})
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "raw.rrd"))
+    assert entities["/tools/unknown"]["tool_use_result_json"].to_pylist() == [
+        ['{"unknown":{"nested":[1,true,null]}}'],
+        ['"output"'],
+        ['["a",{"b":2}]'],
+        [""],
+        [""],
+    ]
