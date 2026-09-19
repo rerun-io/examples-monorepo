@@ -48,7 +48,7 @@ headsets as they stand: a shot that keeps the camera frusta and the last ten sec
 of trail in view at once without the ground filling it."""
 
 
-def camera_view(name: str, rig: int, cam: int) -> rrb.Spatial2DView:
+def camera_view(name: str, rig: int, cam: int, *, contents: list[str] | None = None) -> rrb.Spatial2DView:
     """One camera's 2D pane.
 
     The origin is the ``pinhole`` node, not the camera node, so the pane *is*
@@ -59,11 +59,14 @@ def camera_view(name: str, rig: int, cam: int) -> rrb.Spatial2DView:
         name: Pane label, whatever the dataset calls the stream.
         rig: Rig index the camera hangs off.
         cam: Camera index within the rig.
+        contents: Optional entity filters; defaults to the camera subtree.
 
     Returns:
         The pane every dataset's camera grid is built from.
     """
-    return rrb.Spatial2DView(name=name, origin=schema.pinhole_path(rig, cam), contents=f"{schema.pinhole_path(rig, cam)}/**")
+    return rrb.Spatial2DView(
+        name=name, origin=schema.pinhole_path(rig, cam), contents=contents if contents is not None else f"{schema.pinhole_path(rig, cam)}/**"
+    )
 
 
 def sensor_plot(name: str, origin: str, contents: str) -> rrb.TimeSeriesView:

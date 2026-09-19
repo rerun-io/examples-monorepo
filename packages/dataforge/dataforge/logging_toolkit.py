@@ -117,11 +117,24 @@ def time_column(times_ns: Int64[ndarray, "n_samples"]) -> rr.TimeColumn:
     return rr.TimeColumn(schema.TIMELINE, duration=times_ns.view("timedelta64[ns]"))
 
 
+def frame_index_column(indices: Int64[ndarray, "n"]) -> rr.TimeColumn:
+    """Sequence timeline holding the upstream frame indices (Int64[ndarray, 'n'])."""
+    return rr.TimeColumn(schema.FRAME_INDEX, sequence=indices)
+
+
+FRAME_INDEX_FIELD: pa.Field = (
+    rr.experimental.Chunk.from_columns("/", indexes=[frame_index_column(np.array([0], dtype=np.int64))], columns=rr.Scalars.columns(scalars=[0.0]))
+    .to_record_batch()
+    .schema.field(schema.FRAME_INDEX)
+)
+"""Rerun-derived sequence field shared by video sample and keyframe chunks."""
+
+
 def log_rig_node(
     recording: rr.RecordingStream,
     rig: int,
     *,
-    reference: str,
+    reference: str | None,
     num_cameras: int,
     name: str | None = None,
     kind: str | None = None,
@@ -139,7 +152,8 @@ def log_rig_node(
         rig: Rig index; the node is ``schema.rig_path(rig)``.
         reference: Id of the sensor child whose frame the rig frame coincides
             with — usually ``"cam_00"``, but an inertially-referenced rig names
-            its ``imu_MM`` instead.
+            its ``imu_MM`` instead. ``None`` omits the key: a static world-anchored
+            rig with no sensor at its origin (exoego:v2 §4).
         num_cameras: Number of cameras actually logged under this rig.
         name: Optional human device label (``"robocap"``, ``"oak"``, an iPhone name).
         kind: Optional device role (``"exo"`` / ``"ego"`` / ``"quest"``).
@@ -162,6 +176,7 @@ def log_video_stream(
     *,
     shift_ns: int = 0,
     times_ns: Int64[ndarray, "n_samples"] | None = None,
+    frame_indices: Int64[ndarray, "n"] | None = None,
 ) -> int:
     """Remux one mp4 as a ``VideoStream``, optionally retimed, and count its samples.
 
@@ -195,11 +210,12 @@ def log_video_stream(
 
     Args:
         recording: Destination recording stream.
-        video_path: mp4 to remux (no decode, no re-encode).
+        video_path: mp4 to remux, with GPU transcoding when B-frames require it.
         entity_path: ``.../pinhole/video`` entity to log under.
         shift_ns: Nanoseconds added to every indexed chunk's ``video_time``.
         times_ns: Exact ``video_time`` per sample, in presentation order; must
             hold one value per sample in the file.
+        frame_indices: Optional Int64[ndarray, "n"] source indices; requires times_ns.
 
     Returns:
         Number of video samples written.
@@ -210,16 +226,23 @@ def log_video_stream(
     """
     if times_ns is not None and shift_ns != 0:
         raise ValueError("shift_ns and times_ns are mutually exclusive: a per-sample clock is not an offset from the file's own")
+    if frame_indices is not None and (times_ns is None or frame_indices.size != times_ns.size):
+        raise ValueError("frame_indices requires times_ns with the same number of samples")
     sample_count: int = 0
     # Original PTS of every sample chunk seen so far. The trailing keyframe chunk
     # concatenates them once, rather than paying for a per-sample dict on a
     # stream that can run to millions of frames.
     seen_pts_ns: list[Int64[ndarray, "n_rows"]] = []
 
-    def retimed(record_batch: pa.RecordBatch, index: int, values_ns: Int64[ndarray, "n_rows"]) -> list[rr.experimental.Chunk]:
+    def retimed(
+        record_batch: pa.RecordBatch, index: int, values_ns: Int64[ndarray, "n_rows"], positions: Int64[ndarray, "n_rows"]
+    ) -> list[rr.experimental.Chunk]:
         """Same batch, same row ids, new index values (still a ``duration("ns")``)."""
         column: pa.Array = pa.array(values_ns, type=pa.duration("ns"))
-        return rr.experimental.Chunk.from_record_batch(record_batch.set_column(index, record_batch.schema.field(index), column))  # invariant 3
+        updated: pa.RecordBatch = record_batch.set_column(index, record_batch.schema.field(index), column)
+        if frame_indices is not None:
+            updated = updated.add_column(index + 1, FRAME_INDEX_FIELD, pa.array(frame_indices[positions], type=pa.int64()))
+        return rr.experimental.Chunk.from_record_batch(updated)  # invariant 3
 
     def tap(chunk: rr.experimental.Chunk) -> list[rr.experimental.Chunk]:
         nonlocal sample_count
@@ -235,7 +258,12 @@ def log_video_stream(
             # reads the index out at all and a shift only adds a constant to it.
             if shift_ns == 0:
                 return [chunk]
-            return retimed(record_batch, index, np.asarray(record_batch.column(index).cast(pa.int64())) + shift_ns)
+            updated: pa.RecordBatch = record_batch.set_column(
+                index,
+                record_batch.schema.field(index),
+                pa.array(np.asarray(record_batch.column(index).cast(pa.int64())) + shift_ns, type=pa.duration("ns")),
+            )
+            return rr.experimental.Chunk.from_record_batch(updated)
 
         original_ns: Int64[ndarray, "n_rows"] = np.asarray(record_batch.column(index).cast(pa.int64()))
         if kind == "sample":
@@ -243,7 +271,7 @@ def log_video_stream(
                 raise ValueError(f"{video_path.name} has more samples than the {times_ns.size} timestamps given")
             replacement: Int64[ndarray, "n_rows"] = times_ns[sample_count - record_batch.num_rows : sample_count]
             seen_pts_ns.append(original_ns)
-            return retimed(record_batch, index, replacement)
+            return retimed(record_batch, index, replacement, np.arange(sample_count - record_batch.num_rows, sample_count, dtype=np.int64))
 
         # The trailing keyframe chunk. ``-bf 0`` forbids reordering, so the samples'
         # PTS are one ascending array and a single searchsorted places every keyframe
@@ -257,7 +285,7 @@ def log_video_stream(
             raise ValueError(f"{video_path.name}: keyframe PTS {original_ns[:4].tolist()} precede their samples; the reader's chunk order changed")
         # The samples seen so far took times_ns[:sample_count], so a keyframe's
         # position among their PTS is its position in times_ns.
-        return retimed(record_batch, index, times_ns[found])
+        return retimed(record_batch, index, times_ns[found], found)
 
     # A B-frame source (iPhone/insta360 HEVC) forces Mp4Reader into an FFmpeg
     # re-encode; everything else passes through untouched, and then these options
@@ -397,6 +425,7 @@ def log_pose_track(
     times_ns: Int64[ndarray, "n_poses"],
     translations_xyz: Float32[ndarray, "n_poses 3"] | Float64[ndarray, "n_poses 3"],
     quaternions_xyzw: Float32[ndarray, "n_poses 4"] | Float64[ndarray, "n_poses 4"],
+    frame_indices: Int64[ndarray, "n"] | None = None,
 ) -> None:
     """Send a temporal pose track columnar: one ``Transform3D`` per sample on ``video_time``.
 
@@ -411,10 +440,13 @@ def log_pose_track(
         translations_xyz: Positions in metres, in whichever float width the
             source holds them; Rerun's transform components are float32 either way.
         quaternions_xyzw: Orientations, scalar last, same widths.
+        frame_indices: Optional Int64[ndarray, "n"] source sequence index per pose.
     """
+    if frame_indices is not None and len(frame_indices) != len(times_ns):
+        raise ValueError("pose frame_indices and times_ns must have the same length")
     rr.send_columns(
         entity_path,
-        indexes=[time_column(times_ns)],
+        indexes=[time_column(times_ns), *([] if frame_indices is None else [frame_index_column(frame_indices)])],
         columns=rr.Transform3D.columns(translation=translations_xyz, quaternion=quaternions_xyzw),
         recording=recording,
     )

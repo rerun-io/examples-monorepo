@@ -21,6 +21,7 @@ from typing import ClassVar, Generic, TypeVar
 
 import rerun.blueprint as rrb
 
+from dataforge import paths
 from dataforge.identity import SequenceIdentity
 
 
@@ -58,6 +59,9 @@ SourceT = TypeVar("SourceT")
 
 class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
     """A dataset dataforge can download, enumerate, and convert to layer rrds."""
+
+    layers: tuple[str, ...] = paths.LAYERS
+    """Layers this dataset publishes, in loading order."""
 
     def __init__(self, config: ConfigT) -> None:
         self.config: ConfigT = config
