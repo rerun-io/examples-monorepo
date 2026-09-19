@@ -33,6 +33,7 @@ from dataforge.datasets.show3d_source import (
     HEADSET_CAMERAS,
     FrameClock,
     IndexRow,
+    Show3dCamera,
     calibration_file,
     caption_file,
     hand_pose_file,
@@ -48,7 +49,7 @@ from dataforge.identity import SequenceIdentity
 REPO_ID: str = "facebook/show3d-dataset"
 
 
-def pane_contents() -> list[str]:
+def world_contents() -> list[str]:
     """Everything under ``/world`` except the face-blur boxes, one explicit exclusion per camera.
 
     Rerun content filters honour exact paths and a trailing ``/**`` only: a rule such as
@@ -56,6 +57,19 @@ def pane_contents() -> list[str]:
     screenshots), so the exclusions are spelled out from the camera table.
     """
     return ["+ /world/**", *(f"- {schema.pinhole_path(camera.rig, camera.cam)}/blur_boxes" for camera in CAMERAS)]
+
+
+def pane_contents(camera: Show3dCamera) -> list[str]:
+    """One camera's 2D pane: the world seen through this pinhole and nothing from any other image plane.
+
+    A 2D pane cannot lift another pinhole's video or pixel landmarks into its own image
+    (the viewer reports "No transform path" per entity), and a projected ego image plane
+    draws its frame and uv landmarks over the exo footage, so every other camera's
+    ``pinhole/**`` subtree is excluded outright.
+    """
+    own: str = schema.pinhole_path(camera.rig, camera.cam)
+    others: list[str] = [f"- {schema.pinhole_path(other.rig, other.cam)}/**" for other in CAMERAS if other is not camera]
+    return ["+ /world/**", f"- {own}/blur_boxes", *others]
 
 
 @dataclass
@@ -263,11 +277,10 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
         return targets[paths.BASE_LAYER]
 
     def default_blueprint(self) -> rrb.Blueprint:
-        contents: list[str] = pane_contents()
         ego: list[rrb.Spatial2DView] = []
         exo: list[rrb.Spatial2DView] = []
         for camera in CAMERAS:
-            view: rrb.Spatial2DView = blueprints.camera_view(camera.source_name, camera.rig, camera.cam, contents=contents)
+            view: rrb.Spatial2DView = blueprints.camera_view(camera.source_name, camera.rig, camera.cam, contents=pane_contents(camera))
             (ego if camera in HEADSET_CAMERAS else exo).append(view)
         return rrb.Blueprint(
             rrb.Horizontal(
@@ -275,7 +288,7 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
                     rrb.Spatial3DView(
                         name="Back rig frame",
                         origin="/world",
-                        contents=contents,
+                        contents=world_contents(),
                         eye_controls=blueprints.eye_controls_from_pose((1.4, 0.7, 1.1), (0.25, -0.2, 0.1), (0.0, 1.0, 0.0)),
                     ),
                     rrb.Horizontal(*ego),

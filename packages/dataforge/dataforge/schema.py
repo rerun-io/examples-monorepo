@@ -174,6 +174,6 @@ def hand_wrist_path(side: str) -> str:
     return f"{hands_path(side)}/wrist"
 
 
-def hand_landmarks_path(side: str, local: bool) -> str:
-    """World or wrist-local hand landmarks."""
-    return f"{hands_path(side)}/{'landmarks_local' if local else 'landmarks'}"
+def hand_landmarks_path(side: str) -> str:
+    """§10: world-frame hand landmarks."""
+    return f"{hands_path(side)}/landmarks"
