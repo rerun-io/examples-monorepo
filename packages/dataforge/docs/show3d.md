@@ -1,5 +1,61 @@
 # SHOW3D observations and layer mapping
 
+## The dataset and its papers
+
+SHOW3D is a hand-object interaction dataset from Meta Reality Labs and Yale:
+Rim et al., *SHOW3D: Capturing Scenes of 3D Hands and Objects in the Wild*,
+CVPR 2026 ([arXiv 2603.28760](https://arxiv.org/abs/2603.28760), project page
+[show3d-dataset.github.io](https://show3d-dataset.github.io/), loader and
+challenge kit at
+[patrickqrim/SHOW3D-dataset-api](https://github.com/patrickqrim/SHOW3D-dataset-api),
+CC BY-NC 4.0). Its predecessor is Rim et al., *Ego-Exo 3D Hand Tracking in the
+Wild with a Mobile Multi-Camera Rig* (HANDS @ ICCV 2025,
+[arXiv 2510.02601](https://arxiv.org/abs/2510.02601)), whose small hands-only
+release is called EgoExo-Hands. Same rig, pipeline, and authors; SHOW3D is the
+scaled successor with object poses and captions, not a re-release.
+
+**Capture.** An 8 kg back-mounted rig carries eight monochrome fisheye cameras
+(1024×1280, 152°×116°) in a half-dome, and a Meta Quest 3 on the head contributes
+two more; all ten are hardware-synchronised at 60 Hz. Five OptiTrack cameras on
+the rig track a marker tree on the headset, the HOT3D method, which is where the
+headset pose comes from. The reference frame moves with the participant: the
+world in these recordings is the back rig, so overlays are exact within a frame
+but a static point in the room drifts across frames. The Hub ships **undistorted
+pinhole** video (`DistortionModel: PinholePlane`, no coefficients) cut from those
+fisheye sensors; the rectification is undocumented and our intrinsics imply
+roughly 100° horizontal field of view, so quote the Hub calibration, not the
+paper's 152°.
+
+**How the labels were made.** Nothing is hand-curated. Hands: Sapiens and
+InterNet detect 2D keypoints on per-hand virtual pinhole crops in all views,
+RANSAC triangulation fuses them, and inverse kinematics fits a per-subject
+UmeTrack skinning model built from a hand scan (`profile_umetrack.json`). The
+released confidence is **per hand**, a product of a triangulation term and the
+IK residual; the Hub's zero rules (hand untracked, headset pose rejected, face
+blur overlap) are applied at release. Median error is 5.7–7.9 mm against a
+30-camera dome and against manual clicks, with a 90th percentile up to 16 mm;
+hand-object interaction is the worst case. Objects: CNOS detection, FoundPose
+coarse pose and GoTrack refinement with multi-view gPnP against the HOT3D CAD
+models; it is a tracker with re-initialisation, so failures are temporally
+correlated and near-symmetric objects can flip. Captions on the Hub come from
+Qwen3-VL 235B over the video, not from the paper's instruction paraphrases.
+
+**What ships and what does not.** Labels exist only for the 1,689 train
+recordings (32 subjects); the 448 test recordings (6 subjects) have video and
+captions only. `hand_pose/v2` supersedes v1, whose landmarks were mis-scaled.
+The paper's masks and contact maps are not released. Depth is described on the
+Hub card as MapAnything-derived prediction and is not in the tree. MANO is
+mentioned once in the paper and never fitted; the hand model is UmeTrack.
+
+**Consequences for our layers.** Per-joint confidences in `coco133_xyz` are the
+per-hand scalar broadcast to that hand's slots. Headset poses flagged
+`is_synthesized` are interpolated, not tracked; we log them with the flag on
+`/world/rig_01` rather than dropping them. Frames with confidence 0 still carry
+`joint_angles`, and the hand layer keeps those rows. Frame `index` is the join
+key across every source file, so the video re-encode must keep the frame count
+exactly. A full research digest with sources and open questions is kept at
+`show3d-papers-research.html` under the fleet artifacts.
+
 ## Source layout and revision
 
 `facebook/show3d-dataset` has two `dataset_index_{train,test}.parquet` files.
