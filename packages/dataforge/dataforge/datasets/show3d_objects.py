@@ -84,6 +84,8 @@ def write_object_pose_layer(
     frames: list[ObjectFrame],
     metrics: ObjectSanity,
     target: Path,
+    *,
+    clock_offset_s: float,
 ) -> None:
     """Write every confidence, sparse proper transforms, and typed census metrics."""
     positions, values = sparse_rows(frames, lambda frame: frame.world_T_object)
@@ -106,6 +108,7 @@ def write_object_pose_layer(
             "object_pose",
             rr.AnyValues(
                 version=pa.array([OBJECT_POSE_VERSION], type=pa.string()),
+                clock_offset_s=pa.array([clock_offset_s], type=pa.float64()),
                 **{field.name: pa.array([getattr(metrics, field.name)], type=pa.float64()) for field in fields(ObjectSanity)},
             ),
         )

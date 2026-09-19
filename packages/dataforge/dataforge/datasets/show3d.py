@@ -26,7 +26,7 @@ from dataforge.datasets.show3d_hands import (
 )
 from dataforge.datasets.show3d_layers import Scene, write_base_layer
 from dataforge.datasets.show3d_mesh_source import MeshAsset, download_meshes, stripped_mesh
-from dataforge.datasets.show3d_object_source import ObjectFrame, read_object_frames
+from dataforge.datasets.show3d_object_source import ObjectFrame, ObjectTrack, read_object_frames
 from dataforge.datasets.show3d_objects import ObjectSanity, object_sanity, write_object_mesh_layer, write_object_pose_layer
 from dataforge.datasets.show3d_source import (
     CAMERAS,
@@ -229,21 +229,23 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
         if wants[paths.PROPERTIES_LAYER]:
             write_properties_layer(identity, source, caption, targets[paths.PROPERTIES_LAYER])
             written.append(paths.PROPERTIES_LAYER)
-        object_frames: list[ObjectFrame] | None = None
+        object_track: ObjectTrack | None = None
         if wants[paths.OBJECT_POSE_LAYER] or wants[paths.OBJECT_MESH_LAYER]:
             assert clock is not None
-            object_frames = read_object_frames(self.config.root / object_pose_file(key), clock)
+            object_track = read_object_frames(self.config.root / object_pose_file(key), clock)
+            if object_track.clock_offset_s != 0.0:
+                print(f"{identity.sequence_key}: object_pose timestamps are offset by {object_track.clock_offset_s:.6g} s from frame_info; aligned by index")
         if wants[paths.OBJECT_POSE_LAYER]:
-            assert clock is not None and object_frames is not None
-            frames: list[ObjectFrame] = object_frames
+            assert clock is not None and object_track is not None
+            frames: list[ObjectFrame] = object_track.frames
             metrics: ObjectSanity = object_sanity(
                 frames, list((scene.headsets if scene is not None else read_headset_calibrations(scene_dir, clock)).values()), hand_frames
             )
-            write_object_pose_layer(identity, alias, clock, frames, metrics, targets[paths.OBJECT_POSE_LAYER])
+            write_object_pose_layer(identity, alias, clock, frames, metrics, targets[paths.OBJECT_POSE_LAYER], clock_offset_s=object_track.clock_offset_s)
             written.append(paths.OBJECT_POSE_LAYER)
         if wants[paths.OBJECT_MESH_LAYER]:
-            assert object_frames is not None
-            if any(frame.posed for frame in object_frames):
+            assert object_track is not None
+            if any(frame.posed for frame in object_track.frames):
                 asset: MeshAsset = stripped_mesh(self.config.root, alias)
                 write_object_mesh_layer(identity, alias, asset.mesh_id, asset.path, targets[paths.OBJECT_MESH_LAYER])
                 written.append(paths.OBJECT_MESH_LAYER)

@@ -23,7 +23,7 @@ from dataforge.datasets.show3d import Show3dConfig, Show3dDataset
 from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetPose
 from dataforge.datasets.show3d_hands import HAND_SIDES, HandFrame, HandPose, write_hand_mesh_layer
 from dataforge.datasets.show3d_mesh_source import MESH_REPO, MeshAsset, MeshInfo, download_meshes, mesh_ids, strip_texture_transform, stripped_mesh
-from dataforge.datasets.show3d_object_source import ObjectFrame, read_object_frames
+from dataforge.datasets.show3d_object_source import CLOCK_TOLERANCE_S, ObjectFrame, ObjectTrack, read_object_frames
 from dataforge.datasets.show3d_objects import ObjectSanity, object_sanity, write_object_mesh_layer, write_object_pose_layer
 from dataforge.datasets.show3d_source import (
     HEADSET_CAMERAS,
@@ -155,10 +155,11 @@ def object_scene(show3d_scene_inputs: Show3dSceneInputs, tmp_path_factory: pytes
         asset: MeshAsset = stripped_mesh(SHOW3D_RAW, alias)
     except FileNotFoundError as error:
         pytest.skip(f"SHOW3D mesh asset absent: {error}")
-    frames: list[ObjectFrame] = read_object_frames(path, inputs.scene)
+    track: ObjectTrack = read_object_frames(path, inputs.scene)
+    frames: list[ObjectFrame] = track.frames
     metrics: ObjectSanity = object_sanity(frames, list(inputs.scene.headsets.values()), inputs.hands)
     output: Path = tmp_path_factory.mktemp(identity.parts[0] + "-objects")
-    write_object_pose_layer(identity, alias, inputs.scene, frames, metrics, output / "object_pose.rrd")
+    write_object_pose_layer(identity, alias, inputs.scene, frames, metrics, output / "object_pose.rrd", clock_offset_s=track.clock_offset_s)
     write_object_mesh_layer(identity, alias, asset.mesh_id, asset.path, output / "object_mesh.rrd")
     write_hand_mesh_layer(identity, inputs.scene, inputs.hands, inputs.profile.model, output / "hand_mesh.rrd")
     return ObjectBuild(identity, frames, inputs.hands, inputs.profile.model, output, metrics)
@@ -282,24 +283,40 @@ def test_convert_rebuilds_each_mesh_and_object_layer_without_video(
     assert not list(raw.rglob("*.mp4"))
 
 
-@pytest.mark.parametrize("fault", ["count", "key", "timestamp"])
-def test_object_reader_rejects_census_or_clock_mismatch(tmp_path: Path, fault: str) -> None:
-    clock: FrameClock = FrameClock(
-        RecordingInfo(20, 1, 60.0, {}), [FrameInfo(0, 20, 1.0, [])], np.array([0], dtype=np.int64), np.array([0], dtype=np.int64)
-    )
-    records: dict = (
-        {}
-        if fault == "count"
-        else {
-            "1" if fault == "key" else "0": dict(
-                index=0, agt_frame_id=20, timestamp=2.0 if fault == "timestamp" else 1.0, missing_cameras=[], R=[], t=[], confidence=0.0
-            )
-        }
-    )
+@pytest.mark.parametrize("fault", ["count", "key", "frame_id", "drift"])
+def test_object_reader_rejects_census_or_alignment_faults(tmp_path: Path, fault: str) -> None:
+    frames: list[FrameInfo] = [FrameInfo(0, 20, 1.0, []), FrameInfo(1, 21, 1.5, [])]
+    clock: FrameClock = FrameClock(RecordingInfo(20, 2, 60.0, {}), frames, np.array([0, 500_000_000], dtype=np.int64), np.array([0, 1], dtype=np.int64))
+    records: dict[str, dict[str, object]] = {
+        str(i): dict(index=i, agt_frame_id=20 + i, timestamp=frame.timestamp, missing_cameras=[], R=[], t=[], confidence=0.0) for i, frame in enumerate(frames)
+    }
+    if fault == "count":
+        records.pop("1")
+    elif fault == "key":
+        records["7"] = records.pop("1")
+    elif fault == "frame_id":
+        records["1"]["agt_frame_id"] = 99
+    elif fault == "drift":
+        records["1"]["timestamp"] = 1.5 + 0.25  # offset differs between frames
     path: Path = tmp_path / "object_pose.json"
     path.write_text(json.dumps(records))
-    with pytest.raises(ValueError, match="census|disagrees"):
+    with pytest.raises(ValueError, match="census|disagrees|drift"):
         read_object_frames(path, clock)
+
+
+def test_object_reader_tolerates_a_constant_clock_offset(tmp_path: Path) -> None:
+    """keyboard_fix-sticky-key_910a stamps object_pose.json 2318.58 s before frame_info; index is the join key."""
+    frames: list[FrameInfo] = [FrameInfo(0, 20, 1.0, []), FrameInfo(1, 21, 1.5, [])]
+    clock: FrameClock = FrameClock(RecordingInfo(20, 2, 60.0, {}), frames, np.array([0, 500_000_000], dtype=np.int64), np.array([0, 1], dtype=np.int64))
+    records: dict[str, dict[str, object]] = {
+        str(i): dict(index=i, agt_frame_id=20 + i, timestamp=frame.timestamp - 2318.583333, missing_cameras=[], R=[], t=[], confidence=0.0)
+        for i, frame in enumerate(frames)
+    }
+    path: Path = tmp_path / "object_pose.json"
+    path.write_text(json.dumps(records))
+    track: ObjectTrack = read_object_frames(path, clock)
+    assert [frame.index for frame in track.frames] == [0, 1]
+    assert track.clock_offset_s == pytest.approx(-2318.583333, abs=CLOCK_TOLERANCE_S)
 
 
 def test_unposed_object_layer_retains_confidence_and_typed_nan_metrics(tmp_path: Path) -> None:
@@ -314,11 +331,13 @@ def test_unposed_object_layer_retains_confidence_and_typed_nan_metrics(tmp_path:
         [ObjectFrame(0, 20, 1.0, [], [], [], 0.0)],
         ObjectSanity(0.0, float("nan"), float("nan")),
         target,
+        clock_offset_s=0.0,
     )
     chunks: list[rr.experimental.Chunk] = read_chunks(target)
     assert [str(c.entity_path) for c in chunks if not c.is_static] == [schema.object_confidence_path("toy")]
     props: dict[str, object] = recording_properties(read_back(target), "object_pose")
     assert props["coverage"] == 0.0
+    assert props["clock_offset_s"] == 0.0
     for name in ("in_ego_fov_fraction", "palm_dist_median_m"):
         value = props[name]
         assert isinstance(value, float)

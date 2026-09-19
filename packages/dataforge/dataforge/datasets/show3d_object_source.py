@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 from jaxtyping import Float64
@@ -10,7 +11,7 @@ from numpy import ndarray
 from serde import serde
 
 from dataforge.datasets.show3d_calibration import validate_transform
-from dataforge.datasets.show3d_source import FrameClock, FrameInfo, agrees_with_frame, read_json
+from dataforge.datasets.show3d_source import FrameClock, FrameInfo, read_json
 
 
 @serde
@@ -51,8 +52,26 @@ class ObjectFrame(FrameInfo):
             validate_transform(transform)
 
 
-def read_object_frames(path: Path, clock: FrameClock) -> list[ObjectFrame]:
-    """Validate the full census, then align records to the base clock."""
+class ObjectTrack(NamedTuple):
+    """Object records aligned to the base clock, plus the source clock offset they carry."""
+
+    frames: list[ObjectFrame]
+    clock_offset_s: float
+    """Constant ``object timestamp - frame_info timestamp`` in seconds; 0.0 when the clocks agree."""
+
+
+CLOCK_TOLERANCE_S: float = 1e-6
+"""Timestamps closer than this are the same instant; an offset must be constant to this tolerance."""
+
+
+def read_object_frames(path: Path, clock: FrameClock) -> ObjectTrack:
+    """Validate the full census, then align records to the base clock by index and frame id.
+
+    Some releases stamp ``object_pose.json`` on a different clock origin than
+    ``frame_info.json`` (a constant offset on every frame, thousands of seconds in
+    ``keyboard_fix-sticky-key_910a``). ``index`` is upstream's join key, so a constant
+    offset is tolerated and reported; a varying one is a corrupt file.
+    """
     frames: dict[str, ObjectFrame] = read_json(path, dict[str, ObjectFrame])
     if len(frames) != clock.info.num_frames:
         raise ValueError(f"{path}: object census disagrees with scene census")
@@ -60,10 +79,15 @@ def read_object_frames(path: Path, clock: FrameClock) -> list[ObjectFrame]:
         if key != str(frame.index):
             raise ValueError(f"{path}: key {key} disagrees with object index {frame.index}")
     selected: list[ObjectFrame] = []
+    offsets: list[float] = []
     for base in clock.frames:
         frame: ObjectFrame | None = frames.get(str(base.index))
-        if frame is None or not agrees_with_frame(frame, base):
+        if frame is None or frame.agt_frame_id != base.agt_frame_id:
             raise ValueError(f"{path}: object frame {base.index} disagrees with base sidecars")
         selected.append(frame)
-    return selected
-
+        offsets.append(frame.timestamp - base.timestamp)
+    spread: float = max(offsets) - min(offsets)
+    if spread > CLOCK_TOLERANCE_S:
+        raise ValueError(f"{path}: object timestamps drift against frame_info by {spread:.6g} s; the offset must be constant")
+    offset: float = float(np.median(offsets))
+    return ObjectTrack(selected, 0.0 if abs(offset) <= CLOCK_TOLERANCE_S else offset)
