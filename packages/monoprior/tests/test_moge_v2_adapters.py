@@ -112,7 +112,7 @@ def test_all_single_image_adapters_match_vendored_infer_on_room() -> None:
     normal_prediction: SurfaceNormalPrediction = normal_adapter(rgb_hw3)
     del normal_adapter
     torch.cuda.empty_cache()
-    paired_adapter: MoGeV2MonoPrior = MoGeV2MonoPrior()
+    paired_adapter: MoGeV2MonoPrior = MoGeV2MonoPrior(device="cuda")
     paired_prediction: MonoPriorPrediction = paired_adapter(rgb_hw3)
     del paired_adapter
     torch.cuda.empty_cache()
