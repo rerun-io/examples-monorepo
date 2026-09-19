@@ -71,4 +71,4 @@ def test_opens_only_dataset_layers(tmp_path: Path, opened: list[Path], show3d: b
         target.parent.mkdir()
         target.touch()
     view.main(Config(rr_config=RerunTyroConfig(headless=True), dataset=Show3dConfig() if show3d else MsdConfig(device="index")))
-    assert [path.parent.name for path in opened] == (["base"] if show3d else ["base", "gt", "sensor_metadata"])
+    assert [path.parent.name for path in opened] == (["base", "hand_pose", "captions", "properties"] if show3d else ["base", "gt", "sensor_metadata"])

@@ -189,4 +189,4 @@ def test_registers_only_dataset_layers(tmp_path: Path, catalog: FakeEntry, show3
     for layer in ("base", "gt", "sensor_metadata", "hand_pose", "captions", "properties"):
         make_rrds(tmp_path, layer, [f"{name}__a.rrd"])
     register.main(Config(dataset=Show3dConfig() if show3d else RobocapConfig()))
-    assert list(catalog.registered) == (["base"] if show3d else ["base", "gt", "sensor_metadata"])
+    assert list(catalog.registered) == (["base", "hand_pose", "captions", "properties"] if show3d else ["base", "gt", "sensor_metadata"])
