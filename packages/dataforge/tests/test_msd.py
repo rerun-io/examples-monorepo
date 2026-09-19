@@ -113,7 +113,7 @@ def test_the_follow_eye_chases_the_headset_from_behind_and_above() -> None:
     kind: rrb.components.Eye3DKindBatch | None = eye.kind
     spin_speed: rrb.components.AngularSpeedBatch | None = eye.spin_speed
     assert kind is not None and spin_speed is not None
-    assert kind.as_arrow_array().to_pylist() == [rrb.Eye3DKind.FirstPerson.value]
+    assert kind.as_arrow_array().to_pylist() == [rrb.Eye3DKind.Orbital.value]
     assert spin_speed.as_arrow_array().to_pylist() == [0.0]
 
 
