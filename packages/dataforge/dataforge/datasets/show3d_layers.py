@@ -21,6 +21,7 @@ from dataforge import schema, writing
 from dataforge.datasets.show3d_source import (
     CAMERAS,
     BlurInfo,
+    FrameClock,
     FrameInfo,
     HeadsetCalibration,
     HeadsetPose,
@@ -29,11 +30,13 @@ from dataforge.datasets.show3d_source import (
     RecordingInfo,
     RigCalibration,
     Show3dCamera,
+    agrees_with_frame,
     headset_rig,
+    read_frame_clock,
     read_json,
 )
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import frame_index_column, log_camera_node, log_pose_track, log_rig_node, log_video_stream, time_column
+from dataforge.logging_toolkit import log_camera_node, log_pose_track, log_rig_node, log_video_stream
 from dataforge.video_encoding import transcode_mp4_gray
 
 VIDEO_CQ: int = 36
@@ -73,17 +76,9 @@ class SceneCamera:
 
 
 @dataclass(frozen=True, slots=True)
-class Scene:
-    """All validated inputs required to write one scene prefix or full scene."""
+class Scene(FrameClock):
+    """Frame clock plus calibration, blur, and stereo data."""
 
-    info: RecordingInfo
-    """Full source census."""
-    frames: list[FrameInfo]
-    """Selected frame rows."""
-    times_ns: Int64[ndarray, "n"]
-    """Shifted duration clock."""
-    frame_indices: Int64[ndarray, "n"]
-    """Selected upstream indices."""
     cameras: tuple[SceneCamera, ...]
     """Present cameras with all sidecars loaded."""
     poses: list[HeadsetPose]
@@ -91,28 +86,15 @@ class Scene:
     offsets: Int64[ndarray, "n"]
     """Pose row positions found in the sorted frame indices."""
 
-    def indexes(self, positions: Int64[ndarray, "n"] | list[int] | slice) -> list[rr.TimeColumn]:
-        """Both recording clocks at the selected frame positions."""
-        return [time_column(self.times_ns[positions]), frame_index_column(self.frame_indices[positions])]
-
 
 def read_scene(scene_dir: Path, *, scene_key: str, frame_limit: int | None = None) -> Scene:
-    """Read and cross-check every sidecar before any GPU work."""
+    """Read the metadata clock, then validate camera sidecars against it."""
     if frame_limit is not None and frame_limit <= 0:
         raise ValueError("frame_limit must be positive")
-    for name in ("recording_info", "frame_info"):
-        if not (scene_dir / f"metadata/{name}.json").is_file():
-            raise ValueError(f"{scene_key}: missing metadata/{name}.json")
-    info: RecordingInfo = read_json(scene_dir / "metadata/recording_info.json", RecordingInfo)
-    frames: list[FrameInfo] = read_json(scene_dir / "metadata/frame_info.json", list[FrameInfo])
-    if len(frames) != info.num_frames:
-        raise ValueError(f"{scene_key}: frame_info has {len(frames)} rows, recording_info declares {info.num_frames}")
-    if frames[0].agt_frame_id != info.start_frame_id:
-        raise ValueError(f"{scene_key}: recording start_frame_id disagrees with frame_info")
-    indices: Int64[ndarray, "n"] = np.array([frame.index for frame in frames], dtype=np.int64)
-    timestamps: Float64[ndarray, "n"] = np.array([frame.timestamp for frame in frames], dtype=np.float64)
-    if not np.isfinite(timestamps).all() or np.any(np.diff(timestamps) <= 0) or np.any(np.diff(indices) <= 0):
-        raise ValueError(f"{scene_key}: source frame indices and timestamps must be finite and strictly increasing")
+    clock: FrameClock = read_frame_clock(scene_dir, scene_key)
+    info: RecordingInfo = clock.info
+    frames: list[FrameInfo] = clock.frames
+    indices: Int64[ndarray, "n"] = clock.frame_indices
     present: tuple[Show3dCamera, ...] = tuple(camera for camera in CAMERAS if camera.source_name in info.resolution)
     if sum(camera.rig == 1 for camera in present) != 2:
         raise ValueError(f"{scene_key}: both headset cameras are required")
@@ -135,7 +117,7 @@ def read_scene(scene_dir: Path, *, scene_key: str, frame_limit: int | None = Non
                 raise ValueError(f"{scene_key}: headset pose index absent from frame_info")
             for pose, position in zip(poses, positions, strict=True):
                 frame: FrameInfo = frames[int(position)]
-                if pose.agt_frame_id != frame.agt_frame_id or abs(pose.timestamp - frame.timestamp) > 1e-6:
+                if not agrees_with_frame(pose, frame):
                     raise ValueError(f"{scene_key}: headset pose {pose.index} disagrees with frame_info")
         else:
             calibration = read_json(path, RigCalibration, text=text)
@@ -177,7 +159,7 @@ def read_scene(scene_dir: Path, *, scene_key: str, frame_limit: int | None = Non
     )
     pose_indices = np.array([pose.index for pose in poses], dtype=np.int64)
     offsets: Int64[ndarray, "n"] = np.searchsorted(indices, pose_indices)
-    times: Int64[ndarray, "n"] = np.rint((timestamps[:count] - timestamps[0]) * 1e9).astype(np.int64)
+    times: Int64[ndarray, "n"] = clock.times_ns[:count]
     print(
         f"{scene_key}: headset translation std {stereo.translation_std_m * 1000:.9g} mm; rotation max {stereo.rotation_max_deg:.9g} deg; "
         f"normalized blur boxes {sum(camera.blur.num_normalized_boxes for camera in cameras)}"

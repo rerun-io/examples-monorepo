@@ -1,4 +1,4 @@
-# SHOW3D observations and BASE mapping
+# SHOW3D observations and layer mapping
 
 ## Source layout and revision
 
@@ -29,15 +29,18 @@ Each recording records the Hub commit it was built from as
 Without an explicit revision, the default branch resolves once per run to a
 cached commit SHA. Every Hub fetch uses that SHA.
 
-Conversion first fetches recording and frame metadata with `hf_hub_download`,
-avoiding a repository listing per scene. `RecordingInfo.resolution` selects
-video, calibration and blur files; index annotation flags select hand pose,
-object pose and caption files.
-Only source MP4s are removed after successful atomic BASE publication unless
+Conversion plans the union of missing layers' inputs, then fetches absent files
+with one fetch round (serial per-file downloads). Index camera and annotation flags select the
+files; scene metadata validates the census at the read boundary. `--force`
+rebuilds layers but never downloads raw files that are already present.
+Only a call that writes base removes source MP4s after all requested layers publish successfully unless
 `--keep-raw` is set. JSON, profiles, indexes, and annotations remain available
 for later layer builders. Temporary encoded MP4s live beneath `<root>/work/`
-and are removed even after failure. Existing BASE files skip without fetching
-unless `--force` is set.
+and are removed even after failure. Each layer skips its own existing file unless
+`--force` is set. Missing annotation layers rebuild from retained JSON without
+fetching MP4s or reading the base recording. A hand-only rebuild reads metadata,
+hand JSON, and the subject profile; it needs no calibration or blur sidecars.
+The properties layer needs only the index row and caption. Build order is base → hand_pose → captions → properties.
 
 ## Frames, clocks, and calibration variants
 
@@ -75,7 +78,9 @@ source start timestamp and frame ID to reverse the time shift.
 
 On 2026-09-19, the RTX 5090 host measured 20 evenly spaced frames per camera
 (200 samples per scene). Values below are video-only RRD MB / median grayscale
-PSNR dB / wall seconds. The builtin column is Mp4Reader's own AV1 transcode; the CQ columns are the shipped file-input path (`transcode_mp4_gray`, one scene = ten cameras, three at a time). Source sizes are decimal MB.
+PSNR dB / wall seconds. The builtin column is Mp4Reader's own AV1 transcode; the CQ columns are the
+shipped file-input path (`transcode_mp4_gray`, one scene = ten cameras, three at a time). Source
+sizes are decimal MB.
 
 | Scene | Frames | Source MB | Builtin AV1 | CQ 28 | CQ 32 | CQ 36 |
 | --- | ---: | ---: | --- | --- | --- | --- |
@@ -87,7 +92,12 @@ at least 40 dB on both scenes, at 0.60–0.69 times source size. GOP is 60 and
 B-frames are disabled. The raw report is
 `data/show3d-video-measurements.json` (ignored by git).
 
-The converter decodes each source in ffmpeg (`format=gray`) and encodes AV1 NVENC in the same process; against the earlier PyAV-pipe prototype this is MD5-identical output at 2.2 times the speed, and three concurrent camera encodes add another 1.6–1.7 times. A full 10-camera conversion of these scenes takes 8–10 s wall through `dataforge-convert` on the RTX 5090. Logging and deletion of each completed clip overlap the remaining encodes, and every sidecar is validated before the first encode.
+The converter decodes each source in ffmpeg (`format=gray`) and encodes AV1 NVENC in the same
+process; against the earlier PyAV-pipe prototype this is MD5-identical output at 2.2 times the
+speed, and three concurrent camera encodes add another 1.6–1.7 times. A full 10-camera conversion of
+these scenes takes 8–10 s wall through `dataforge-convert` on the RTX 5090. Logging and deletion of
+each completed clip overlap the remaining encodes, and every sidecar is validated before the first
+encode.
 
 The comparison is a plain Python CLI; no dedicated Pixi task is added:
 
@@ -98,7 +108,8 @@ DATAFORGE_FFMPEG=/home/pablo/.pixi/bin/ffmpeg \
 ```
 
 The tool measures only CQ 28/32/36 with the same `transcode_mp4_gray`
-file-input primitive as conversion; the builtin column was measured once through `Mp4Reader` and is kept for comparison. Reference frames are decoded
+file-input primitive as conversion; the builtin column was measured once through `Mp4Reader` and is
+kept for comparison. Reference frames are decoded
 once per scene, and each RRD is streamed once for scoring. PSNR decoding is
 outside the timer. Exact matches use an MSE floor of 1e-12 (168.13 dB).
 Codec, GOP, and CQ are static camera AnyValues.
@@ -133,11 +144,48 @@ blueprints retain all eight rig panes.
 | BASE census | Group `capture` (`schema=dataforge:v1`, plus `convert` group): int64 `num_frames`, `num_cameras`, `num_synthesized_headset_poses`, `source_start_frame_id`; float64 `source_start_time_s` |
 
 The default blueprint has the prototype's 3D eye, headset L/R panes, and a
-2-column × 4-row rig grid. Blur boxes are excluded by default. Headset views
+2-column × 4-row rig grid, with an instruction text pane below the ego pair. Blur boxes are excluded by default. Headset views
 include `/world/**` so later 3D annotations project into them. The table card
 includes only headset0 video.
 
-The `episode` property group is reserved for the later `properties` layer.
+### Annotation layers
+
+| Source | Layer / destination |
+| --- | --- |
+| UmeTrack landmark names and connections | `hand_pose`: static `/` AnnotationContext, class 1 (class 0 remains reserved for COCO-133) |
+| `landmarks_3d_mm` / `landmarks_3d_mm_local` | `/world/gt/hands/{left,right}/landmarks` / `landmarks_local`: 21 Points3D in metres, static class/keypoint IDs |
+| `joint_angles` | Hand `/joint_angles`: 22 float32 values per available row |
+| Wrist rotation and translation | Hand `/wrist`: world-from-wrist Transform3D, translation in metres |
+| Confidence | Hand `/confidence`: Scalars on every frame, including zero |
+| `landmarks_2d` | `/world/rig_01/cam_0{0,1}/pinhole/hands/{left,right}/uv`: 21 Points2D, null landmarks become NaN pairs |
+| Subject profile JSON | `/world/gt/hands/profile`: verbatim static TextDocument with `application/json` media type |
+| Caption JSON (all ten strings) | `captions`: static Markdown TextDocument at `/task/instruction`; overall caption first, other fields as a definition list |
+| Index row and caption | `properties`: one `episode` property chunk |
+
+`hand_pose` is the single owner of the root `AnnotationContext` until a shared
+layer exists.
+
+Every temporal annotation row has the base `video_time` and `frame_index`.
+The hand frame census must equal scene `recording_info.num_frames`, and frame
+IDs/timestamps must agree with `frame_info`. Optional fields produce rows only
+where present; confidence-zero records may still have local landmarks and joint
+angles. Hand JSON and profiles use partial pyserde schemas with unknown fields
+allowed. Profiles are stored without reserializing them.
+
+Annotation layers use `send_properties=False` and write only their own property
+groups. `hand_pose` holds string `version=v2` and float64
+`coverage_left_high_conf` / `coverage_right_high_conf` (confidence > 0.5).
+`captions` holds string `version=v1` and `hand`. The `episode` group contains nine
+string fields: `subject_id`, `split`, `object_alias`, `action`, `hand`,
+`overall_caption`, `hand_pose_version`, `object_pose_version`, `captions_version`.
+All keys are present for every scene; unavailable strings are empty. The alias
+is the scene ID's first token; action is everything between alias and final hash.
+BASE census remains in `capture`.
+
+The keyboard and birdhouse reprojection goldens read the written hand landmarks and UV, then
+projects through the base sidecar camera chain (headset0 pose, fixed stereo
+camera transform, and pinhole intrinsics). Each hand/camera pair must have median
+finite-point error below 0.5 px. Skinning and mesh goldens belong to PR 4.
 
 ## Findings reserved for later layers
 
@@ -152,6 +200,5 @@ No meshes are fetched or logged by BASE.
 
 The exploration survey found no depth tree on the Hub (404) as of 2026-09-19,
 although the README describes it.
-Depth remains reserved. Hand pose, object pose, captions, searchable properties,
-and hand/object meshes remain separate future layers.
+Depth remains reserved. Object pose and hand/object meshes remain future layers.
 

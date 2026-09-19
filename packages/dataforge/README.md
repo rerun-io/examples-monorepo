@@ -255,11 +255,12 @@ RERUN_INSECURE_SKIP_HOST_CHECK=1 DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/lamaria
 
 ### SHOW3D (show3d)
 
-SHOW3D converts one subject/scene into one BASE recording,
+SHOW3D converts one subject/scene into layers sharing the recording ID
 `show3d__<subject>__<scene>`. `download` fetches the two indexes and subject
 profiles, then prints the plan. `convert` fetches one scene bundle at a time,
-atomically publishes BASE, and removes only the source MP4s unless `--keep-raw`.
-Small calibration and annotation files remain for the next layers.
+atomically publishes base → hand_pose → captions → properties, and removes only
+the source MP4s unless `--keep-raw`. Each layer skips its own existing file unless
+`--force` is set. Retained sidecars rebuild annotations without reading video.
 
 ```bash
 export DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/show3d-rrd
@@ -279,10 +280,10 @@ are cleaned beneath its `work/` directory, including on failure.
 | Layer | Status | Contents |
 | --- | --- | --- |
 | `base` | Available | Video, calibration, headset motion, frame metadata, blur boxes, capture census |
-| `hand_pose` | Reserved | UmeTrack landmarks, joint angles, wrist poses, confidence, profile |
+| `hand_pose` | Available | World/local UmeTrack landmarks, headset UV, joint angles, wrist poses, confidence, verbatim profile |
 | `object_pose` | Reserved | Object transforms and coverage |
-| `captions` | Reserved | Instruction text |
-| `properties` | Reserved | Searchable episode metadata |
+| `captions` | Available | Markdown instruction and all structured caption fields |
+| `properties` | Available | Stable typed `episode` metadata: subject, split, object, action, hand, caption, versions |
 | `hand_mesh` / `object_mesh` | Reserved | Derived hand meshes and HOT3D assets |
 
 `/world` is the moving back-rig frame, right-handed Y-up. `rig_00` holds

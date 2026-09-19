@@ -10,7 +10,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 
 from dataforge import paths
 from dataforge.datasets import AnnotatedDatasetUnion, RobocapConfig
-from dataforge.datasets.base import DataforgeDatasetConfig
+from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 
 
 @dataclass
@@ -33,6 +33,7 @@ def main(config: Config) -> None:
     same entities — which is the only way an msd recording shows its ground truth.
     """
     dataset_config: DataforgeDatasetConfig = config.dataset
+    dataset: DataforgeDataset = dataset_config.setup()
     name: str = dataset_config.name
     output_root: Path = paths.output_root()
     base_root: Path = output_root / paths.BASE_LAYER
@@ -46,7 +47,7 @@ def main(config: Config) -> None:
     # The file name is the recording id, and the sibling layers are that same
     # name under another layer directory.
     selected: Path = candidates[0]
-    found: list[Path] = [path for path in (output_root / layer / selected.name for layer in paths.LAYERS) if path.is_file()]
+    found: list[Path] = [path for path in (output_root / layer / selected.name for layer in dataset.layers) if path.is_file()]
     print(f"viewing {', '.join(str(path) for path in found)}")
     for layer_path in found:
         rr.log_file_from_path(layer_path)

@@ -117,3 +117,23 @@ def trail_path(source: str) -> str:
 def capture_property(name: str) -> str:
     """``property:capture:<name>`` — recording-level capture metadata key."""
     return f"property:capture:{name}"
+
+
+def hands_path(side: str) -> str:
+    """§10: measured hand root in the world frame."""
+    return f"/world/gt/hands/{side}"
+
+
+def hand_profile_path() -> str:
+    """§10: self-contained subject hand profile JSON."""
+    return "/world/gt/hands/profile"
+
+
+def hand_uv_path(rig: int, cam: int, side: str) -> str:
+    """§10: hand landmarks in camera pixels."""
+    return f"{pinhole_path(rig, cam)}/hands/{side}/uv"
+
+
+def instruction_path() -> str:
+    """§12: static task instruction document."""
+    return "/task/instruction"

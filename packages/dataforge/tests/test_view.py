@@ -16,6 +16,7 @@ from dataforge import paths
 from dataforge.apis import view
 from dataforge.apis.view import Config
 from dataforge.datasets.msd import MsdConfig
+from dataforge.datasets.show3d import Show3dConfig
 from dataforge.identity import SequenceIdentity
 
 IDENTITY: SequenceIdentity = SequenceIdentity(dataset="msd-index", parts=("MIO_others", "MIO09_short_1_updown"))
@@ -60,3 +61,14 @@ def test_a_recording_with_no_derived_layer_opens_its_base_alone(opened: list[Pat
     view_index()
 
     assert opened == [base_target]
+
+
+@pytest.mark.parametrize("show3d", [False, True])
+def test_opens_only_dataset_layers(tmp_path: Path, opened: list[Path], show3d: bool) -> None:
+    name: str = "show3d" if show3d else "msd-index"
+    for layer in ("base", "gt", "sensor_metadata", "hand_pose", "captions", "properties"):
+        target: Path = tmp_path / layer / f"{name}__a.rrd"
+        target.parent.mkdir()
+        target.touch()
+    view.main(Config(rr_config=RerunTyroConfig(headless=True), dataset=Show3dConfig() if show3d else MsdConfig(device="index")))
+    assert [path.parent.name for path in opened] == (["base", "hand_pose", "captions", "properties"] if show3d else ["base", "gt", "sensor_metadata"])

@@ -69,7 +69,12 @@ ignore_names = [
     # in @pytest.mark.usefixtures instead only moves the report to the fixture
     # itself, since vulture does not read strings.
     "nvenc",
-    # SHOW3D index fields selected by the shared camera table.
+    # Partial profile envelope consumed by pyserde.
+    "hand_model",
+    # EpisodeProperties fields serialized through dataclasses.fields.
+    "hand_pose_version",
+    "object_pose_version",
+    "captions_version",
 ]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true

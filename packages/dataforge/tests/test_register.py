@@ -18,6 +18,7 @@ from dataforge.apis import register  # noqa: E402
 from dataforge.apis.register import Config  # noqa: E402
 from dataforge.datasets.msd import MsdConfig  # noqa: E402
 from dataforge.datasets.robocap import RobocapConfig  # noqa: E402
+from dataforge.datasets.show3d import Show3dConfig  # noqa: E402
 
 
 @dataclass
@@ -180,3 +181,12 @@ def test_replace_re_registers_a_regenerated_layer(tmp_path: Path, catalog: FakeE
     assert catalog.duplicates[paths.BASE_LAYER] == OnDuplicateSegmentLayer.REPLACE
     assert catalog.duplicates[paths.GT_LAYER] == OnDuplicateSegmentLayer.REPLACE
     assert "replacing duplicates" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("show3d", [False, True])
+def test_registers_only_dataset_layers(tmp_path: Path, catalog: FakeEntry, show3d: bool) -> None:
+    name: str = "show3d" if show3d else "robocap"
+    for layer in ("base", "gt", "sensor_metadata", "hand_pose", "captions", "properties"):
+        make_rrds(tmp_path, layer, [f"{name}__a.rrd"])
+    register.main(Config(dataset=Show3dConfig() if show3d else RobocapConfig()))
+    assert list(catalog.registered) == (["base", "hand_pose", "captions", "properties"] if show3d else ["base", "gt", "sensor_metadata"])

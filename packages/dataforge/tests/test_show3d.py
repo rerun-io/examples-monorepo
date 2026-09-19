@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import rerun as rr
-from conftest import read_back, recording_properties
+from conftest import SHOW3D_RAW, read_back, read_chunks, recording_properties
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
 from serde import SerdeError, from_dict
@@ -57,7 +57,7 @@ def test_discovery_orders_object_scenes_then_train_then_test_and_skips_empty(tmp
                 [
                     dict(
                         subject_id="AZH822",
-                        scene_id=name,
+                        scene_id=f"{name}_action_abcd",
                         num_frames=count,
                         has_object_pose=objects,
                         **{f"has_{camera}": True for camera in ("headset0", "headset1", *(f"rig{i}" for i in range(8)))},
@@ -71,7 +71,7 @@ def test_discovery_orders_object_scenes_then_train_then_test_and_skips_empty(tmp
         )
     dataset: DataforgeDataset = Show3dConfig(root=tmp_path).setup()
     pairs: list[tuple[SequenceIdentity, IndexRow]] = dataset.discover()
-    assert [identity.parts[1] for identity, _ in pairs] == ["object", "z", "a"]
+    assert [identity.parts[1] for identity, _ in pairs] == ["object_action_abcd", "z_action_abcd", "a_action_abcd"]
     assert [source.split for _, source in pairs] == ["train", "train", "test"]
     assert "empty" in capsys.readouterr().out
 
@@ -102,14 +102,14 @@ def test_headset_rig_fits_mm_and_rejects_nonrigid_scene() -> None:
 @pytest.mark.parametrize(("subject", "scene", "count"), [("SPI102", "keyboard_toss-away_83ef", 30), ("LYA722", "birdhousetoy_shaking_8eca", 30)])
 def test_real_scene_base(tmp_path: Path, subject: str, scene: str, count: int) -> None:
 
-    source: Path = Path(__file__).parents[1] / "data/raw/show3d/scenes" / subject / scene
+    source: Path = SHOW3D_RAW / "scenes" / subject / scene
     if not (source / "headset0.mp4").is_file():
         pytest.skip(f"SHOW3D scene videos absent: {source}")
     target: Path = tmp_path / "base.rrd"
     write_base_layer(SequenceIdentity("show3d", (subject, scene)), source, target, work_dir=tmp_path, frame_limit=count, hf_revision="test-sha")
     videos: dict[str, int] = {}
     pose_rows: int = 0
-    for chunk in rr.experimental.RrdReader(target).stream():
+    for chunk in read_chunks(target):
         batch: pa.RecordBatch = chunk.to_record_batch()
         if "VideoStream:sample" in batch.schema.names:
             videos[str(chunk.entity_path)] = videos.get(str(chunk.entity_path), 0) + chunk.num_rows
@@ -185,7 +185,7 @@ def test_synthetic_base_roundtrip(tmp_path: Path, tiny_scene: Path) -> None:
 
     target: Path = tmp_path / "synthetic.rrd"
     write_base_layer(SequenceIdentity("show3d", ("subject", "scene")), tiny_scene, target, work_dir=tmp_path / "work", hf_revision="test-sha")
-    chunks: list[rr.experimental.Chunk] = list(rr.experimental.RrdReader(target).stream())
+    chunks: list[rr.experimental.Chunk] = read_chunks(target)
     videos: dict[str, int] = {}
     for chunk in chunks:
         batch: pa.RecordBatch = chunk.to_record_batch()

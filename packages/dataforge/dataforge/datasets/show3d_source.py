@@ -9,11 +9,14 @@ from types import GenericAlias
 from typing import Literal, TypeAlias, TypeVar
 
 import numpy as np
-from jaxtyping import Float64
+import rerun as rr
+from jaxtyping import Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from serde import SerdeError, serde
 from serde.json import from_json
+
+from dataforge.logging_toolkit import frame_index_column, time_column
 
 Split: TypeAlias = Literal["train", "test"]
 PoseSource: TypeAlias = Literal["mocap", "vio", "endpoint_interpolation", "legacy_unspecified"]
@@ -37,6 +40,35 @@ CAMERAS: tuple[Show3dCamera, ...] = (
     *(Show3dCamera(f"rig{i}", 0, i) for i in range(8)),
 )
 """Dataset-wide camera identities; missing cameras never shift their peers."""
+
+
+HAND_POSE_VERSION: str = "v2"
+"""Released hand annotation version."""
+CAPTIONS_VERSION: str = "v1"
+"""Released caption version."""
+
+
+def hand_pose_file(key: str) -> str:
+    """Repository-relative hand measurements."""
+    return f"hand_pose/{HAND_POSE_VERSION}/scenes/{key}/hand_pose.json"
+
+
+def hand_profile_file(subject: str) -> str:
+    """Repository-relative subject profile."""
+    return f"hand_pose/hand_profiles/{subject}/profile_umetrack.json"
+
+
+def caption_file(key: str) -> str:
+    """Repository-relative caption record."""
+    return f"captions/{CAPTIONS_VERSION}/scenes/{key}/caption.json"
+
+
+def scene_id_parts(scene_id: str) -> tuple[str, str]:
+    """Validate the object_action_suffix grammar at the index boundary."""
+    parts: list[str] = scene_id.split("_")
+    if len(parts) < 3:
+        raise ValueError(f"invalid SHOW3D scene id: {scene_id!r}")
+    return parts[0], "_".join(parts[1:-1])
 
 
 def validate_component(part: str) -> None:
@@ -66,9 +98,58 @@ class IndexRow:
     has_caption: bool
     """Whether the index lists caption."""
 
+    has_headset0: bool
+    """Whether the index lists camera headset0."""
+    has_headset1: bool
+    """Whether the index lists camera headset1."""
+    has_rig0: bool
+    """Whether the index lists camera rig0."""
+    has_rig1: bool
+    """Whether the index lists camera rig1."""
+    has_rig2: bool
+    """Whether the index lists camera rig2."""
+    has_rig3: bool
+    """Whether the index lists camera rig3."""
+    has_rig4: bool
+    """Whether the index lists camera rig4."""
+    has_rig5: bool
+    """Whether the index lists camera rig5."""
+    has_rig6: bool
+    """Whether the index lists camera rig6."""
+    has_rig7: bool
+    """Whether the index lists camera rig7."""
+
     def __post_init__(self) -> None:
         for part in (self.subject_id, self.scene_id):
             validate_component(part)
+        scene_id_parts(self.scene_id)
+
+    @property
+    def cameras(self) -> list[Show3dCamera]:
+        """Index camera availability used to plan a single raw-input fetch."""
+        available: tuple[bool, ...] = (
+            self.has_headset0,
+            self.has_headset1,
+            self.has_rig0,
+            self.has_rig1,
+            self.has_rig2,
+            self.has_rig3,
+            self.has_rig4,
+            self.has_rig5,
+            self.has_rig6,
+            self.has_rig7,
+        )
+        return [camera for camera, enabled in zip(CAMERAS, available, strict=True) if enabled]
+
+    @property
+    def object_alias(self) -> str:
+        """Object token validated at the index boundary."""
+        return scene_id_parts(self.scene_id)[0]
+
+    @property
+    def action(self) -> str:
+        """Action tokens between object and suffix."""
+        return scene_id_parts(self.scene_id)[1]
 
 
 @serde
@@ -108,6 +189,11 @@ class FrameInfo:
     """Camera names missing at this frame."""
 
 
+def agrees_with_frame(record: FrameInfo | HeadsetPose, frame: FrameInfo) -> bool:
+    """Match identity and source time within one microsecond."""
+    return record.index == frame.index and record.agt_frame_id == frame.agt_frame_id and abs(record.timestamp - frame.timestamp) <= 1e-6
+
+
 def validate_transform(transform: Float64[ndarray, "4 4"]) -> None:
     """Reject non-rigid Float64[ndarray, '4 4'] transforms at the boundary."""
     rotation: Float64[ndarray, "3 3"] = transform[:3, :3]
@@ -118,6 +204,43 @@ def validate_transform(transform: Float64[ndarray, "4 4"]) -> None:
         or not np.isclose(np.linalg.det(rotation), 1.0, atol=1e-5)
     ):
         raise ValueError("T_WorldFromCamera must be a finite proper rigid transform (det=1)")
+
+
+@dataclass(frozen=True, slots=True)
+class FrameClock:
+    """Validated metadata census and recording clocks, independent of camera sidecars."""
+
+    info: RecordingInfo
+    """Full source census."""
+    frames: list[FrameInfo]
+    """Selected frame rows."""
+    times_ns: Int64[ndarray, "n"]
+    """Shifted duration clock."""
+    frame_indices: Int64[ndarray, "n"]
+    """Selected upstream indices."""
+
+    def indexes(self, positions: Int64[ndarray, "n"] | list[int] | slice) -> list[rr.TimeColumn]:
+        """Both recording clocks at the selected frame positions."""
+        return [time_column(self.times_ns[positions]), frame_index_column(self.frame_indices[positions])]
+
+
+def read_frame_clock(scene_dir: Path, scene_key: str) -> FrameClock:
+    """Read and cross-check only metadata/recording_info.json and frame_info.json."""
+    for name in ("recording_info", "frame_info"):
+        if not (scene_dir / f"metadata/{name}.json").is_file():
+            raise ValueError(f"{scene_key}: missing metadata/{name}.json")
+    info: RecordingInfo = read_json(scene_dir / "metadata/recording_info.json", RecordingInfo)
+    frames: list[FrameInfo] = read_json(scene_dir / "metadata/frame_info.json", list[FrameInfo])
+    if len(frames) != info.num_frames:
+        raise ValueError(f"{scene_key}: frame_info has {len(frames)} rows, recording_info declares {info.num_frames}")
+    if frames[0].agt_frame_id != info.start_frame_id:
+        raise ValueError(f"{scene_key}: recording start_frame_id disagrees with frame_info")
+    indices: Int64[ndarray, "n"] = np.array([frame.index for frame in frames], dtype=np.int64)
+    timestamps: Float64[ndarray, "n"] = np.array([frame.timestamp for frame in frames], dtype=np.float64)
+    if not np.isfinite(timestamps).all() or np.any(np.diff(timestamps) <= 0) or np.any(np.diff(indices) <= 0):
+        raise ValueError(f"{scene_key}: source frame indices and timestamps must be finite and strictly increasing")
+    times: Int64[ndarray, "n"] = np.rint((timestamps - timestamps[0]) * 1e9).astype(np.int64)
+    return FrameClock(info, frames, times, indices)
 
 
 @serde

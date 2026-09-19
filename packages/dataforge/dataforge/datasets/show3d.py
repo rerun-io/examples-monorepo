@@ -1,4 +1,4 @@
-"""SHOW3D discovery and one-scene-at-a-time BASE publication."""
+"""SHOW3D discovery and one-scene-at-a-time layered publication."""
 
 from __future__ import annotations
 
@@ -15,7 +15,19 @@ from serde import from_dict
 
 from dataforge import archives, blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
-from dataforge.datasets.show3d_source import CAMERAS, IndexRow, RecordingInfo, read_json
+from dataforge.datasets.show3d_annotation_source import Caption, HandProfile, read_hand_frames
+from dataforge.datasets.show3d_annotations import write_captions_layer, write_hand_pose_layer, write_properties_layer
+from dataforge.datasets.show3d_layers import write_base_layer
+from dataforge.datasets.show3d_source import (
+    CAMERAS,
+    FrameClock,
+    IndexRow,
+    caption_file,
+    hand_pose_file,
+    hand_profile_file,
+    read_frame_clock,
+    read_json,
+)
 from dataforge.identity import SequenceIdentity
 
 REPO_ID: str = "facebook/show3d-dataset"
@@ -54,7 +66,10 @@ class Show3dConfig(DataforgeDatasetConfig):
 
 
 class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
-    """Fetch one bundle, write BASE atomically, then remove only its source videos."""
+    """Publish each missing layer, then remove only the scene videos."""
+
+    layers: tuple[str, ...] = (paths.BASE_LAYER, paths.HAND_POSE_LAYER, paths.CAPTIONS_LAYER, paths.PROPERTIES_LAYER)
+    """SHOW3D publication and loading order."""
 
     @cached_property
     def commit_sha(self) -> str:
@@ -117,39 +132,71 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
         )
         return pairs
 
-    def convert(self, identity: SequenceIdentity, source: IndexRow, *, force: bool) -> Path:
-        from dataforge.datasets.show3d_layers import write_base_layer
+    def fetch_missing(self, files: list[str]) -> None:
+        """Fetch absent raw inputs once; force applies only to published layers."""
+        missing: list[str] = [name for name in files if not (self.config.root / name).is_file()]
+        if missing:
+            transports.hf_fetch_files(REPO_ID, missing, local_dir=self.config.root, revision=self.commit_sha)
 
-        target: Path = paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity)
-        if writing.should_skip(target, force=force):
-            return target
-        key: str = f"{source.subject_id}/{source.scene_id}"
-        files: list[str] = [f"scenes/{key}/metadata/{name}.json" for name in ("recording_info", "frame_info")]
-        transports.hf_fetch_files(REPO_ID, files, local_dir=self.config.root, revision=self.commit_sha)
+    def convert(self, identity: SequenceIdentity, source: IndexRow, *, force: bool) -> Path:
+        targets: dict[str, Path] = {layer: paths.rrd_path(paths.output_root(), layer=layer, identity=identity) for layer in self.layers}
+        want_base: bool = not writing.should_skip(targets[paths.BASE_LAYER], force=force)
+        want_hands: bool = source.has_hand_pose and not writing.should_skip(targets[paths.HAND_POSE_LAYER], force=force)
+        want_captions: bool = source.has_caption and not writing.should_skip(targets[paths.CAPTIONS_LAYER], force=force)
+        want_properties: bool = not writing.should_skip(targets[paths.PROPERTIES_LAYER], force=force)
+        if not any((want_base, want_hands, want_captions, want_properties)):
+            return targets[paths.BASE_LAYER]
+        key: str = identity.sequence_key
+        files: set[str] = set(base_files(source, key) if want_base else [])
+        if want_hands:
+            files.update([*metadata_files(key), hand_pose_file(key), hand_profile_file(source.subject_id)])
+        if want_captions or (want_properties and source.has_caption):
+            files.add(caption_file(key))
+        self.fetch_missing(sorted(files))
         scene_dir: Path = self.config.root / "scenes" / key
-        info: RecordingInfo = read_json(scene_dir / "metadata/recording_info.json", RecordingInfo)
-        files = [f"scenes/{key}/blur_info/config.json"]
-        for camera in info.resolution:
-            files.extend(f"scenes/{key}/{name}" for name in (f"{camera}.mp4", f"camera_calibration/{camera}.json", f"blur_info/{camera}.mp4.json"))
-        for present, tree, name in (
-            (source.has_hand_pose, "hand_pose/v2", "hand_pose"),
-            (source.has_object_pose, "object_pose/v1", "object_pose"),
-            (source.has_caption, "captions/v1", "caption"),
-        ):
-            if present:
-                files.append(f"{tree}/scenes/{key}/{name}.json")
-        transports.hf_fetch_files(REPO_ID, files, local_dir=self.config.root, revision=self.commit_sha)
-        work: Path = self.config.root / "work" / identity.recording_id
-        work.mkdir(parents=True, exist_ok=True)
-        try:
-            write_base_layer(identity, scene_dir, target, work_dir=work, hf_revision=self.commit_sha, default_blueprint=self.default_blueprint())
-        finally:
-            archives.remove_tree(work)
-        if not self.config.keep_raw:
+        written: list[str] = []
+        if want_base:
+            work: Path = self.config.root / "work" / identity.recording_id
+            work.mkdir(parents=True, exist_ok=True)
+            try:
+                write_base_layer(
+                    identity,
+                    scene_dir,
+                    targets[paths.BASE_LAYER],
+                    work_dir=work,
+                    hf_revision=self.commit_sha,
+                    default_blueprint=self.default_blueprint(),
+                )
+            finally:
+                archives.remove_tree(work)
+            written.append(paths.BASE_LAYER)
+        if want_hands:
+            clock: FrameClock = read_frame_clock(scene_dir, key)
+            profile_path: Path = self.config.root / hand_profile_file(source.subject_id)
+            profile_text: str = profile_path.read_text()
+            read_json(profile_path, HandProfile, text=profile_text)
+            write_hand_pose_layer(
+                identity,
+                clock,
+                read_hand_frames(self.config.root / hand_pose_file(key), clock),
+                profile_text,
+                targets[paths.HAND_POSE_LAYER],
+            )
+            written.append(paths.HAND_POSE_LAYER)
+        caption: Caption | None = None
+        if want_captions or (want_properties and source.has_caption):
+            caption = read_json(self.config.root / caption_file(key), Caption)
+            if want_captions:
+                write_captions_layer(identity, caption, targets[paths.CAPTIONS_LAYER])
+                written.append(paths.CAPTIONS_LAYER)
+        if want_properties:
+            write_properties_layer(identity, source, caption, targets[paths.PROPERTIES_LAYER])
+            written.append(paths.PROPERTIES_LAYER)
+        if want_base and not self.config.keep_raw:
             for video in scene_dir.glob("*.mp4"):
                 video.unlink()
-        print(f"done {identity.sequence_key} → {target}")
-        return target
+        print(f"done {identity.sequence_key}: {', '.join(written)}")
+        return targets[paths.BASE_LAYER]
 
     def default_blueprint(self) -> rrb.Blueprint:
         contents: list[str] = pane_contents()
@@ -168,7 +215,8 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
                         eye_controls=blueprints.eye_controls_from_pose((1.4, 0.7, 1.1), (0.25, -0.2, 0.1), (0.0, 1.0, 0.0)),
                     ),
                     rrb.Horizontal(*ego),
-                    row_shares=[3, 2],
+                    rrb.TextDocumentView(name="Instruction", origin=schema.instruction_path(), contents=[schema.instruction_path()]),
+                    row_shares=[3, 2, 1],
                 ),
                 rrb.Grid(*exo, grid_columns=2),
                 column_shares=[3, 2],
@@ -179,3 +227,22 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
 
     def table_blueprint(self) -> rrb.Blueprint:
         return rrb.Blueprint(blueprints.camera_view("headset0", 1, 0, contents=[f"+ {schema.video_path(1, 0)}"]), collapse_panels=True)
+
+
+def metadata_files(key: str) -> list[str]:
+    """The complete frame-clock input set."""
+    return [f"scenes/{key}/metadata/{name}.json" for name in ("recording_info", "frame_info")]
+
+
+def base_files(source: IndexRow, key: str) -> list[str]:
+    """Plan camera files from index availability before fetching metadata."""
+    return [
+        *metadata_files(key),
+        *(
+            f"scenes/{key}/{name}"
+            for camera in source.cameras
+            for name in (f"{camera.source_name}.mp4", f"camera_calibration/{camera.source_name}.json", f"blur_info/{camera.source_name}.mp4.json")
+        ),
+        f"scenes/{key}/blur_info/config.json",
+        *([f"object_pose/v1/scenes/{key}/object_pose.json"] if source.has_object_pose else []),
+    ]
