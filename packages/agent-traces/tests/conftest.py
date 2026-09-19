@@ -1,6 +1,6 @@
 """Small synthetic Claude session fixtures."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -16,8 +16,6 @@ class SessionBuilder:
     """Main transcript path."""
     index: int = 0
     """Next timestamp step in seconds."""
-    records: list[dict[str, object]] = field(default_factory=list)
-    """Synthetic records written by this builder."""
 
     def add(self, kind: str, *, path: Path | None = None, **fields: object) -> None:
         """Append a record at the next whole-second timestamp."""
@@ -27,7 +25,6 @@ class SessionBuilder:
         record: dict[str, object] = {"type": kind, "timestamp": stamp.isoformat(), **fields}
         with target.open("ab") as stream:
             stream.write(orjson.dumps(record) + b"\n")
-        self.records.append(record)
         self.index += 1
 
 

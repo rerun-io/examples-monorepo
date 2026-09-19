@@ -67,7 +67,7 @@ def test_inlines_only_outputs_inside_session_tool_results(session_builder: Sessi
     output.write_text("full tool output")
     session_builder.add(
         "user",
-        message={"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "preview"}]},
+        message={"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "Output saved to: missing-preview.txt"}]},
         toolUseResult={"agentId": "child", "persistedOutputPath": str(output), "future": 42},
     )
     session_builder.add(

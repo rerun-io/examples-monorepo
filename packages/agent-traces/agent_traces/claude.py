@@ -150,17 +150,19 @@ def parse_session(session_path: Path) -> ClaudeSession:
                 continue
             if record.message is not None and isinstance(record.message.content, list):
                 blocks: list[ContentBlock] = []
+                persisted: str | None = record.toolUseResult.persistedOutputPath if record.toolUseResult else None
                 block: ContentBlock
                 for block in record.message.content:
-                    persisted: str | None = record.toolUseResult.persistedOutputPath if record.toolUseResult else None
                     if block.type == "tool_result":
-                        text: str = (
-                            block.content
-                            if isinstance(block.content, str)
-                            else "".join(part.text for part in block.content or [] if part.type == "text")
-                        )
-                        match: re.Match[str] | None = re.search(r"(?:[Oo]utput saved to|[Ss]aved to(?: file)?):?\s*([^\n]+)", text)
-                        reference: str | None = persisted or (match.group(1).strip(" `") if match else None)
+                        reference: str | None = persisted
+                        if not reference:
+                            text: str = (
+                                block.content
+                                if isinstance(block.content, str)
+                                else "".join(part.text for part in block.content or [] if part.type == "text")
+                            )
+                            match: re.Match[str] | None = re.search(r"(?:[Oo]utput saved to|[Ss]aved to(?: file)?):?\s*([^\n]+)", text)
+                            reference = match.group(1).strip(" `") if match else None
                         if reference:
                             candidate: Path = Path(reference)
                             if not candidate.is_absolute():
