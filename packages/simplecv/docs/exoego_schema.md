@@ -19,19 +19,21 @@ axis-angle vectors, and seconds/nanoseconds for timestamps.
 ## 1. One rig per physical device
 
 - **Exo cameras** — each independent exo camera is its **own static,
-  world-anchored rig** (`rig_00`, `rig_01`, …, one camera each). The rig frame
+  world-anchored rig** (`rig_00`, `rig_01`, …). The rig frame
   coincides with world (`world_T_rig` is implicit identity — **no transform on the
-  rig node**), so each camera's `rig_T_cam` equals its `world_T_cam`. A future
-  multi-sensor exo unit (e.g. a RealSense or OAK with several sensors) simply adds
-  more cameras under one exo rig — no schema change.
+  rig node**), so each camera's `rig_T_cam` equals its `world_T_cam`. A multi-sensor
+  exo unit adds more cameras under one exo rig — no schema change.
 - **Ego device** — the worn device (Aria, HoloLens, Quest3, HOT3D, UmeTrack, …)
   is **one moving rig** whose `world_T_rig(t)` is the reference camera's
   trajectory. Its cameras are fixed `rig_T_cam` offsets from the reference
   camera (the rig origin, identity `rig_T_cam`). When the loader exposes cameras
   whose relative pose is **not** constant (not rigidly factorable), each ego
   camera falls back to its own single-camera moving rig.
+- **Device-anchored world** — world may be a moving device frame such as a
+  back-mounted rig; that rig is a static multi-camera exo rig in it. Physical
+  motion, if ever recovered, lives on `/world`.
 - **Rig indices** — exo rigs take `rig_00..rig_(E-1)` (E = number of exo
-  cameras); the ego rig follows at `rig_E`. With no exo cameras the ego rig is
+  rigs); the ego rig follows at `rig_E`. With no exo cameras the ego rig is
   `rig_00`.
 
 ## 2. Transform notation
@@ -42,6 +44,10 @@ Right-to-left composition, matching the project-wide rule:
 cam_points   = cam_T_world @ world_points       # world  → camera
 world_T_cam  = world_T_rig @ rig_T_cam           # composes along the entity tree
 ```
+
+All stored transforms are relative to `/world`; a temporal `Transform3D` a
+later layer writes on `/world` is applied by the viewer to every descendant
+and is not part of `world_T_cam`.
 
 - The **rig node** `/world/rig_NN` carries `world_T_rig` — for a moving rig this
   is a *temporal* `Transform3D` (logged without `from_parent`, so the stored
@@ -61,9 +67,11 @@ world_T_cam  = world_T_rig @ rig_T_cam           # composes along the entity tre
 ## 3. Entity tree
 
 ```
-/                               ViewCoordinates (RDF, static, at the root)
+/                               ViewCoordinates (static, at the root — the recording's world convention)
+/task                           recording-level text (§12)
+/frames                         per-frame source provenance (§14)
 /world
-  /rig_00                       static exo rig: AnyValues{schema_version, reference, num_cameras};
+  /rig_00                       static exo rig: AnyValues{schema_version, reference?, num_cameras};
                                 NO transform (implicit identity)
     /cam_00                     Transform3D = rig_T_cam = world_T_cam (static) + AnyValues{name, kind}
       /pinhole                  Pinhole / PinholeWithDistortion (static)
@@ -77,13 +85,17 @@ world_T_cam  = world_T_rig @ rig_T_cam           # composes along the entity tre
       /pinhole/video, /pinhole/coco133_uv
     /imu_00                     peer sensor (IMU — see §8; emitted by dataforge)
     /mag_00                     peer sensor (magnetometer — see §9; emitted by dataforge)
-  /gt                           ground-truth annotations (UNCHANGED from v1, see §5)
+  /gt                           ground-truth annotations (v1 paths retained, see §5; additions §10–11)
 ```
 
 - Entity ids are **zero-padded to two digits** (`rig_00`, `cam_00`) so they sort
   lexicographically in numeric order.
-- All entities use metres and the OpenCV **RDF** (Right-Down-Forward) camera
-  convention, logged as `ViewCoordinates.RDF` at `/`.
+- Positions use metres. Cameras use the OpenCV **RDF** (Right-Down-Forward)
+  convention. The root declares the dataset's world convention: `RDF` when
+  the world frame is a camera frame. Dataforge's msd/lamaria write
+  `RIGHT_HAND_Y_UP`/`RIGHT_HAND_Z_UP` via
+  `packages/dataforge/dataforge/world_up.py`; cameras stay RDF.
+- See §2 for re-framing the recording with a transform on `/world`.
 
 ## 4. Per-rig metadata
 
@@ -94,7 +106,10 @@ world_T_cam  = world_T_rig @ rig_T_cam           # composes along the entity tre
 - `reference` = the reference camera's id (e.g. `"cam_00"`),
 - `num_cameras`.
 
-Those three keys are the **required** set. A writer may add the two optional
+`schema_version` and `num_cameras` are required; `reference` is omitted for
+a static world-anchored rig whose origin is not a sensor. Readers place its
+children by `rig_T_cam` alone. `log_rig_static` still always writes a
+reference for single-camera rigs. A writer may add the two optional
 rig-level keys `name` (human device label, e.g. `"robocap"`, `"oak"`, an iPhone's
 advertised name) and `kind` (device role: `"exo"` / `"ego"` / `"quest"`) — dataforge
 emits both, because a capture with several unlike rigs is unreadable without them
@@ -103,6 +118,12 @@ as optional. Note also that `reference` names a **sensor child**, not necessaril
 camera: a rig whose extrinsics are all expressed in its inertial frame states
 `reference = "imu_00"` (dataforge's RoboCap rig does), and a single-camera rig
 trivially states `"cam_00"`.
+
+A moving headset rig MAY also carry temporal `AnyValues` on `/world/rig_NN`:
+`is_synthesized` (boolean), `pose_source` (the source's string tag), and
+`is_pose_valid` (boolean). Copy these per-frame flags only when shipped by the
+source; absence means unknown. They describe the rig pose on the same timelines
+as that pose and do not replace its `Transform3D` or the dropout rule in §2.
 
 Per camera, on `/world/rig_NN/cam_MM`: `name` (human stream label) and `kind`
 (`"rgb"` / `"grayscale"`, a best-effort content hint). Readers must also treat as
@@ -137,6 +158,13 @@ GT lives under `/world/gt/...`, independent of the rig layout:
 /world/gt/mano/{left,right}/...        global_orient / hand_pose / betas / mp_21
 /world/gt/env_mesh                     Mesh3D (static environment)
 ```
+
+Skeleton class IDs share the root `AnnotationContext` (§6):
+
+| Class ID | Layout | Writers |
+|---|---|---|
+| 0 | COCO-wholebody 133 | Existing exoego writers |
+| 1 | UmeTrack 21-landmark hand | SHOW3D (§10) |
 
 ### Projected 2D keypoints (per camera, derived)
 
@@ -195,7 +223,10 @@ When ingesting a recording:
    has none (implicit identity). Treat a temporal transform on an exo rig as an
    error.
 4. GT tensors resolve under `/world/gt/...` when `config.load_labels` is true.
-5. Timeline is `video_time` everywhere.
+5. Use `video_time` everywhere; a frame-indexed source additionally stamps
+   `frame_index` (sequence) on frame-aligned rows (§14). Dataforge exposes it
+   as `schema.FRAME_INDEX` (landing in the same PR stack). Native-rate sensors
+   keep their own sample times (§8).
 6. Every non-camera peer sensor (`/world/rig_*/imu_*`, `/world/rig_*/mag_*`) has a
    static `Transform3D` (`rig_T_imu` / `rig_T_mag`) and a static `kind`
    (`"imu"` / `"mag"`). This is a **writer-side** rule for now — dataforge's
@@ -207,6 +238,14 @@ When ingesting a recording:
    AnyValue — treat an absent `unit` as uncalibrated counts, never as tesla. The
    optional `heading` child is derived, so a reader may ignore it entirely.
 
+7. A reader that walks the transform tree to compute `world_T_cam` stops at
+   `/world`: it must not include that node's optional `root_T_world`
+   transform (§2).
+
+8. Log one static `AnnotationContext` at `/`, as all existing exoego writers
+   do. Merge the hand skeleton class (§10) and all other annotation classes
+   into that context, using the class IDs in §5.
+
 The read side of these rules is `simplecv/catalog_rig_layout.py`: `parse_rig_layout`
 turns a catalog schema back into typed cameras (video stream, moving rig, rig `kind`,
 calibration presence, camera-node markers). Consumers add only their selection policy
@@ -214,18 +253,8 @@ on top of it instead of parsing entity paths themselves.
 
 ## 7. Dataset author checklist
 
-Datasets need **no** per-dataset rig code — `build_rig_layout` derives everything
-from the normalized `exo_cam_list` / `exo_video_names` and `ego_cam_dict` /
-`ego_video_names`. To add or regenerate a dataset:
-
-- [ ] Provide calibrated `PinholeParameters` / `Fisheye62Parameters` per camera
-      (ego per-frame `world_T_cam`; exo static `world_T_cam`). Invalid ego frames
-      carry NaN extrinsics.
-- [ ] Emit GT (COCO-133, MANO) in metres under `/world/gt/...`.
-- [ ] Regenerate via the catalog generator (`batch_raw_to_rrd` → `visualize_exo_ego`).
-- [ ] Verify: `rerun rrd print <file>.rrd` shows `/world/rig_NN/cam_MM`, a
-      temporal `world_T_rig` on the ego rig, and `schema_version=exoego:v2`; no
-      `/world/{exo,ego}/*` remain.
+`BaseExoEgoSequence.build_rig_layout` produces single-camera exo rigs;
+dataforge writes multi-camera exo rigs directly.
 
 ## 8. IMU *(emitted — first writer: dataforge / RoboCap dev0)*
 
@@ -352,4 +381,126 @@ yaw-drift evaluation wants it beside the video and the inertial data.
   (`packages/dataforge/dataforge/logging_toolkit.py`, `log_magnetometer`) is the only
   writer.
 
-Any change to the layout should increment the schema version and update this doc.
+Specified here; writers land in dataforge's SHOW3D PRs (base, hand_pose, object_pose, captions layers).
+
+## 10. Hands
+
+UmeTrack hand annotations preserve the source's 21-landmark layout and subject
+model. §5 MANO and §10 UmeTrack may coexist; a reader picks by presence,
+and neither is derived from the other.
+
+**Layout:**
+
+```
+/world/gt/hands/profile                    TextDocument (static, media type application/json)
+/world/gt/hands/{left,right}
+  /landmarks                              Points3D (21, world frame, metres)
+  /landmarks_local                        Points3D (21, wrist frame, metres)
+  /joint_angles                           AnyValues{joint_angles} (22 radians)
+  /wrist                                  Transform3D = world_T_wrist (temporal)
+  /confidence                             Scalars (one value, every frame)
+  /mesh                                   Mesh3D (optional derived layer)
+/world/rig_NN/cam_MM/pinhole/hands/{left,right}/uv   Points2D (21, source projections)
+```
+
+- `landmarks` and `wrist` follow the sparse-pose convention below.
+  `landmarks_local` and `joint_angles` have rows only where the source supplies
+  them. Local landmarks remain wrist-frame data; consumers must apply
+  `world_T_wrist` before treating them as world positions. The sibling `wrist`
+  entity does not transform `landmarks` or `landmarks_local`.
+- For hands and objects (§11), pose rows are sparse: emit them only where
+  the source has a pose. `confidence` has one row on **every frame**, with `0`
+  when no pose exists. Consumers use confidence to identify gaps; they must
+  not carry the last pose forward as valid.
+- Use the UmeTrack 21-landmark layout, ids `0..20`, and edges
+  `UME_HAND_CONNECTIONS`; simplecv's `umetrack_temp` module is the reference.
+  Both hands use skeleton class id `1` (§5), with names from `LANDMARK`.
+  Log static `class_ids` and `keypoint_ids` on each landmark/UV entity.
+  COCO-133 mapping is a consumer concern.
+- `uv` holds the dataset's shipped projections in encoded-image pixels, only
+  for cameras with those annotations; out-of-view points are `NaN`. Do not
+  substitute newly computed projections for shipped values.
+- `profile` holds the per-subject hand model as a static `TextDocument` whose
+  media type is `application/json`; the text is the verbatim source JSON. Logged
+  geometry and wrist translations are metres.
+- A separate derived layer MAY add `mesh`: static `triangle_indices` and
+  temporal `vertex_positions` in metres, world frame, only where posed. The
+  sibling `wrist` does not transform this mesh.
+
+## 11. Objects
+
+Tracked rigid objects have one entity per object, independent of the cameras.
+
+**Layout:**
+
+```
+/world/gt/objects/<alias>                  Transform3D = world_T_object (temporal)
+  /confidence                             Scalars (one value, every frame)
+  /mesh                                   Asset3D or Mesh3D (static, optional layer)
+```
+
+- `<alias>` is the dataset's own object name. Translations and mesh coordinates
+  use metres; a mesh is in the object frame and inherits `world_T_object`.
+- Pose and confidence rows follow the sparse-pose and every-frame-confidence
+  convention in §10.
+- A separate layer MAY add a static `Asset3D` or `Mesh3D` at `mesh`; absence of a
+  mesh does not remove the object's pose or confidence.
+
+## 12. Captions/text
+
+Recording-level captions and instructions live outside the spatial tree.
+
+**Layout:**
+
+```
+/task/instruction                         TextDocument (static, text/markdown)
+```
+
+- Store recording-level text as a static markdown `TextDocument` at
+  `/task/instruction`. Also store the instruction/caption as a segment property,
+  following `rerun-io/rrd-datasets`, so catalog queries can find it without
+  loading the text entity. SHOW3D uses `episode.overall_caption` for its overall
+  caption; the document may include the source's structured caption fields.
+
+## 13. Face-blur boxes
+
+Face-blur regions describe the encoded camera image.
+
+**Layout:**
+
+```
+/world/rig_NN/cam_MM/pinhole/blur_boxes     Boxes2D (temporal)
+```
+
+- Log a row per annotated frame in encoded-image pixel coordinates, after any
+  image rotation or resize. A frame with no boxes has an empty batch, so boxes
+  from a previous frame do not persist.
+- Blueprints hide these entities by default. The boxes describe source blur
+  regions; logging them does not apply a blur to video pixels.
+
+## 14. Per-frame source provenance
+
+Frame provenance preserves source identity and missing-camera information.
+
+**Layout:**
+
+```
+/frames                                   AnyValues (one row per source frame)
+  source_frame_id                          integer source frame identifier
+  source_timestamp_s                      float64 source timestamp, seconds
+  missing_cameras                         list of source camera names (strings)
+```
+
+- These are columns on `/frames`, not child entities. Preserve source values;
+  `missing_cameras` is an empty list when every camera is present. A missing
+  camera keeps its assigned `cam_MM` index; do not renumber later cameras.
+- When the source has a frame index, use **two timelines** on frame-aligned
+  rows: `video_time` (duration) and `frame_index` (sequence, the source index).
+  SHOW3D sets `video_time = source_timestamp_s - first_source_timestamp_s` and
+  keeps the original timestamp in the provenance column. The source frame ID
+  and index may differ.
+- Native-rate sensors retain their own `video_time` samples (§8–9); this rule
+  does not resample them onto camera frames.
+
+These additive sections retain `exoego:v2`. An incompatible change to existing
+paths or meanings must increment the schema version and update this document.
