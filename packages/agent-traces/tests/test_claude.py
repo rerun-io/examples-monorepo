@@ -262,3 +262,27 @@ def test_inlines_offloaded_output_with_invalid_utf8_bytes(session_builder: Sessi
     assert message is not None
     block: Block = message.content[0]
     assert isinstance(block, ToolResultBlock) and block.content == "ok \ufffd bad"
+
+
+def test_session_sources_include_sorted_recursive_outputs(session_builder: SessionBuilder) -> None:
+    """Discovery includes ignored inputs but parses only child transcripts."""
+    from agent_traces.claude import session_sources
+
+    session_builder.add("user", message={"content": "main"})
+    root: Path = session_builder.path.with_suffix("")
+    for name in ["z", "a"]:
+        session_builder.add("user", path=root / f"subagents/agent-{name}.jsonl", message={"content": name})
+    (root / "tool-results/pdf-id").mkdir(parents=True)
+    (root / "tool-results/z.txt").write_text("output")
+    (root / "tool-results/pdf-id/page.jpg").write_bytes(b"image")
+    (root / "tool-results/agent-ignored.jsonl").write_text("not a transcript")
+    (root / "subagents/agent-directory.jsonl").mkdir()
+    assert session_sources(session_builder.path) == [
+        session_builder.path,
+        root / "subagents/agent-a.jsonl",
+        root / "subagents/agent-z.jsonl",
+        root / "tool-results/agent-ignored.jsonl",
+        root / "tool-results/pdf-id/page.jpg",
+        root / "tool-results/z.txt",
+    ]
+    assert list(parse_session(session_builder.path).subagents) == ["a", "z"]
