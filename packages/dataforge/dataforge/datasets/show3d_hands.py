@@ -266,7 +266,14 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
 
 
 def write_hand_mesh_layer(identity: SequenceIdentity, clock: FrameClock, frames: list[HandFrame], model: HandModelNumpy, target: Path) -> None:
-    """Skin posed hands in bounded batches; hand_pose owns the annotation context."""
+    """Skin trusted hands in bounded batches; hand_pose owns the annotation context.
+
+    The source ships a wrist and joint angles for many frames it marks with confidence 0
+    (the tracker lost the hand). Those rows are kept verbatim in ``hand_pose``; this
+    derived layer skins only frames with a wrist and confidence > 0, and writes an
+    empty vertex row on every other frame so the viewer's latest-at never holds a
+    stale mesh where no hand is.
+    """
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
         for side in HAND_SIDES:
             path: str = schema.hand_mesh_path(side.name)
@@ -276,23 +283,25 @@ def write_hand_mesh_layer(identity: SequenceIdentity, clock: FrameClock, frames:
                 static=True,
                 recording=recording,
             )
-            positions, poses = sparse_rows(
-                [frame.hand_poses[side.key] for frame in frames], lambda pose: pose if pose.wrist_rotation is not None else None
-            )
-            if any(pose.joint_angles is None for pose in poses):
+            poses: list[HandPose] = [frame.hand_poses[side.key] for frame in frames]
+            trusted: list[bool] = [pose.wrist_rotation is not None and pose.confidence > 0.0 for pose in poses]
+            if any(pose.joint_angles is None for pose, ok in zip(poses, trusted, strict=True) if ok):
                 raise ValueError(f"{identity.sequence_key}: posed {side.name} hand lacks joint angles")
-            for start in range(0, len(positions), SKINNING_BATCH_SIZE):
-                batch: list[int] = positions[start : start + SKINNING_BATCH_SIZE]
-                batch_poses: list[HandPose] = poses[start : start + SKINNING_BATCH_SIZE]
-                angles: Float32[ndarray, "n 22"] = np.asarray([pose.joint_angles for pose in batch_poses], dtype=np.float32)
-                wrists: Float32[ndarray, "n 4 4"] = np.zeros((len(batch), 4, 4), dtype=np.float32)
-                wrists[:, :3, :3] = np.asarray([pose.wrist_rotation for pose in batch_poses], dtype=np.float32)
-                wrists[:, :3, 3] = np.asarray([pose.wrist_translation for pose in batch_poses], dtype=np.float32)
-                wrists[:, 3, 3] = 1.0
-                vertices: Float32[ndarray, "n v 3"] = skin_mesh(model, angles, wrist_for_hand(wrists, side.model_index)) * np.float32(0.001)
-                clock.send_sparse(
-                    recording,
+            for start in range(0, len(frames), SKINNING_BATCH_SIZE):
+                stop: int = min(start + SKINNING_BATCH_SIZE, len(frames))
+                batch_poses: list[HandPose] = [poses[i] for i in range(start, stop) if trusted[i]]
+                vertices: Float32[ndarray, "k v 3"] = np.zeros((0, len(model.mesh_vertices), 3), dtype=np.float32)
+                if batch_poses:
+                    angles: Float32[ndarray, "k 22"] = np.asarray([pose.joint_angles for pose in batch_poses], dtype=np.float32)
+                    wrists: Float32[ndarray, "k 4 4"] = np.zeros((len(batch_poses), 4, 4), dtype=np.float32)
+                    wrists[:, :3, :3] = np.asarray([pose.wrist_rotation for pose in batch_poses], dtype=np.float32)
+                    wrists[:, :3, 3] = np.asarray([pose.wrist_translation for pose in batch_poses], dtype=np.float32)
+                    wrists[:, 3, 3] = 1.0
+                    vertices = skin_mesh(model, angles, wrist_for_hand(wrists, side.model_index)) * np.float32(0.001)
+                lengths: list[int] = [len(model.mesh_vertices) if trusted[i] else 0 for i in range(start, stop)]
+                rr.send_columns(
                     path,
-                    batch,
-                    rr.Mesh3D.columns(vertex_positions=vertices.reshape(-1, 3)).partition([len(model.mesh_vertices)] * len(batch)),
+                    indexes=clock.indexes(slice(start, stop)),
+                    columns=rr.Mesh3D.columns(vertex_positions=vertices.reshape(-1, 3)).partition(lengths),
+                    recording=recording,
                 )

@@ -260,7 +260,7 @@ finite-point error below 0.5 px. The mesh goldens also compare skinned landmarks
 | --- | --- | --- |
 | `object_pose/v1/.../object_pose.json` | `object_pose`: `/world/gt/objects/<alias>` Transform3D, translation in metres | Both clocks, only confidence > 0; `/confidence` Scalars on every frame |
 | HOT3D BOP stripped GLB | `object_mesh`: object `/mesh` Asset3D | Static; int64 `mesh_id`, string `mesh_source=bop-benchmark/hot3d` |
-| Hand JSON and full subject model | `hand_mesh`: `/world/gt/hands/{left,right}/mesh` Mesh3D | Static triangles and RGBA albedo (alpha 110); world vertices in metres on both clocks where a wrist exists; no properties |
+| Hand JSON and full subject model | `hand_mesh`: `/world/gt/hands/{left,right}/mesh` Mesh3D | Static triangles and RGBA albedo (alpha 110); one row per frame on both clocks: world vertices in metres where a wrist exists and confidence > 0, an empty vertex row otherwise; no properties |
 
 Object records use a partial pyserde schema. Confidence-zero records can have
 empty `R` and `t` lists; positive confidence requires finite 3×3 proper rotation
@@ -283,8 +283,13 @@ Hand meshes use the full pyserde `HandModelNumpy` through the `HandProfile`
 envelope (float32 geometry and int64 indices). `wrist_for_hand` mirrors the
 right hand; `skin_mesh` runs in batches of 256 frames. The model and wrist
 remain in millimetres until skinned vertices are converted once to metres.
-Left is blue, right is peach. A wrist without joint angles is an input error,
-not a silently dropped row. `hand_pose` remains the only AnnotationContext owner.
+Left is blue, right is peach. A trusted wrist without joint angles is an input error,
+not a silently dropped row. The source ships a wrist and joint angles on many frames
+it marks with confidence 0 (the tracker lost the hand; in `LWA828/bbq_pouring-out_5d8a`
+the right hand carries a wrist on 377 of its 503 confidence-0 frames). `hand_pose`
+keeps those rows verbatim; the derived mesh skins only frames with a wrist and
+confidence > 0 and writes an empty vertex row on every other frame, so latest-at
+never holds a stale mesh where no hand is. `hand_pose` remains the only AnnotationContext owner.
 The existing `/world/**` blueprint filter includes both object and hand meshes.
 
 ### Object-frame verification

@@ -132,6 +132,39 @@ def test_object_sanity_uses_depth_bounds_nearest_palm_and_posed_denominator() ->
     assert np.isnan(empty.palm_dist_median_m)
 
 
+def mesh_vertex_counts(chunks: Sequence[rr.experimental.Chunk]) -> dict[int, int]:
+    """Vertex count per frame_index across temporal Mesh3D chunks."""
+    rows: dict[int, int] = {}
+    for c in chunks:
+        batch: pa.RecordBatch = c.to_record_batch()
+        for index, vertices in zip(batch.column("frame_index").to_pylist(), batch.column("Mesh3D:vertex_positions").to_pylist(), strict=True):
+            rows[int(index)] = len(vertices)
+    return rows
+
+
+@pytest.mark.integration
+def test_hand_mesh_skips_zero_confidence_wrists_and_clears_absent_frames(show3d_scene_inputs: Show3dSceneInputs, tmp_path: Path) -> None:
+    """The source ships wrists at confidence 0; the derived mesh must not draw them, and absent frames must hold nothing."""
+    inputs: Show3dSceneInputs = show3d_scene_inputs
+    good: HandPose = next(
+        f.hand_poses["1"] for f in inputs.hands if f.hand_poses["1"].wrist_rotation is not None and f.hand_poses["1"].confidence > 0.0
+    )
+    lost: HandPose = HandPose(0.0, good.joint_angles, good.wrist_rotation, good.wrist_translation, None, None)
+    absent: HandPose = HandPose(0.0, good.joint_angles, None, None, None, None)
+    base: list[FrameInfo] = inputs.scene.frames[:3]
+    hands: list[HandFrame] = [
+        HandFrame(f.index, f.agt_frame_id, f.timestamp, f.missing_cameras, {"0": absent, "1": pose})
+        for f, pose in zip(base, [good, lost, absent], strict=True)
+    ]
+    target: Path = tmp_path / "hand_mesh.rrd"
+    write_hand_mesh_layer(inputs.identity, inputs.scene, hands, inputs.profile.model, target)
+    chunks: list[rr.experimental.Chunk] = read_chunks(target)
+    right: dict[int, int] = mesh_vertex_counts([c for c in chunks if str(c.entity_path) == schema.hand_mesh_path("right") and not c.is_static])
+    left: dict[int, int] = mesh_vertex_counts([c for c in chunks if str(c.entity_path) == schema.hand_mesh_path("left") and not c.is_static])
+    assert right == {base[0].index: len(inputs.profile.model.mesh_vertices), base[1].index: 0, base[2].index: 0}
+    assert left == {f.index: 0 for f in base}
+
+
 class ObjectBuild(NamedTuple):
     """Written layers and their independently shipped reference inputs."""
 
@@ -194,7 +227,12 @@ def test_real_scene_object_and_mesh_layers(object_scene: ObjectBuild) -> None:
     hand_chunks: list[rr.experimental.Chunk] = read_chunks(build.output / "hand_mesh.rrd")
     for side in HAND_SIDES:
         temporal: list[rr.experimental.Chunk] = [c for c in hand_chunks if str(c.entity_path) == schema.hand_mesh_path(side.name) and not c.is_static]
-        assert sum(c.num_rows for c in temporal) == sum(f.hand_poses[side.key].wrist_rotation is not None for f in build.hands)
+        # One row per frame: skinned vertices where Meta trusts the hand, an empty row otherwise so the viewer holds nothing.
+        assert sum(c.num_rows for c in temporal) == len(build.hands)
+        trusted: list[bool] = [f.hand_poses[side.key].wrist_rotation is not None and f.hand_poses[side.key].confidence > 0.0 for f in build.hands]
+        rows: dict[int, int] = mesh_vertex_counts(temporal)
+        assert [rows[f.index] > 0 for f in build.hands] == trusted
+        assert {n for n in rows.values() if n} == {len(build.profile.mesh_vertices)}
         assert all(set(c.timeline_names) == {"video_time", "frame_index"} for c in temporal)
         assert any(
             c.is_static and str(c.entity_path) == schema.hand_mesh_path(side.name) and "Mesh3D:triangle_indices" in c.to_record_batch().schema.names
