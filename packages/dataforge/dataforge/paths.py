@@ -32,6 +32,13 @@ CAPTIONS_LAYER: str = "captions"
 PROPERTIES_LAYER: str = "properties"
 """Searchable episode properties."""
 
+OBJECT_POSE_LAYER: str = "object_pose"
+"""Tracked rigid object poses and geometric census."""
+OBJECT_MESH_LAYER: str = "object_mesh"
+"""Static object-frame HOT3D geometry."""
+HAND_MESH_LAYER: str = "hand_mesh"
+"""Derived skinned world-frame hand geometry."""
+
 LAYERS: tuple[str, ...] = (BASE_LAYER, GT_LAYER, SENSOR_METADATA_LAYER)
 """Common layers; register and view use each dataset's own layer declaration."""
 

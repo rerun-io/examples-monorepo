@@ -17,9 +17,13 @@ from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_IDS, COCO_133_LINKS
 from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
 from simplecv.umetrack_temp.generic_hand_model_numpy import (
+    LEFT_HAND_INDEX,
     NUM_JOINTS_PER_HAND,
     NUM_LANDMARKS_PER_HAND,
+    RIGHT_HAND_INDEX,
     HandModelNumpy,
+    skin_mesh,
+    wrist_for_hand,
 )
 
 from dataforge import schema, writing
@@ -78,11 +82,15 @@ class HandSide:
     """Source hand key."""
     name: str
     """Schema side name."""
+    model_index: int
+    """UmeTrack handedness index."""
+    albedo: tuple[int, int, int, int]
+    """Mesh RGBA color."""
 
 
 HAND_SIDES: tuple[HandSide, HandSide] = (
-    HandSide("0", "left"),
-    HandSide("1", "right"),
+    HandSide("0", "left", LEFT_HAND_INDEX, (90, 160, 240, 110)),
+    HandSide("1", "right", RIGHT_HAND_INDEX, (240, 170, 130, 110)),
 )
 
 def read_hand_frames(hand_path: Path, clock: FrameClock) -> list[HandFrame]:
@@ -132,6 +140,8 @@ def read_hand_profile(path: Path) -> HandProfileDoc:
 
 
 
+SKINNING_BATCH_SIZE: int = 256
+"""Bound skinning workspace to less than 20 MB."""
 
 
 def high_confidence_coverage(confidence: list[float]) -> float:
@@ -253,3 +263,36 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
                 rr.Transform3D.columns(translation=translations, quaternion=rotations),
             )
         recording.send_property("hand_pose", rr.AnyValues(version=pa.array([HAND_POSE_VERSION], type=pa.string()), **coverage))
+
+
+def write_hand_mesh_layer(identity: SequenceIdentity, clock: FrameClock, frames: list[HandFrame], model: HandModelNumpy, target: Path) -> None:
+    """Skin posed hands in bounded batches; hand_pose owns the annotation context."""
+    with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
+        for side in HAND_SIDES:
+            path: str = schema.hand_mesh_path(side.name)
+            rr.log(
+                path,
+                rr.Mesh3D.from_fields(triangle_indices=model.mesh_triangles, albedo_factor=side.albedo),
+                static=True,
+                recording=recording,
+            )
+            positions, poses = sparse_rows(
+                [frame.hand_poses[side.key] for frame in frames], lambda pose: pose if pose.wrist_rotation is not None else None
+            )
+            if any(pose.joint_angles is None for pose in poses):
+                raise ValueError(f"{identity.sequence_key}: posed {side.name} hand lacks joint angles")
+            for start in range(0, len(positions), SKINNING_BATCH_SIZE):
+                batch: list[int] = positions[start : start + SKINNING_BATCH_SIZE]
+                batch_poses: list[HandPose] = poses[start : start + SKINNING_BATCH_SIZE]
+                angles: Float32[ndarray, "n 22"] = np.asarray([pose.joint_angles for pose in batch_poses], dtype=np.float32)
+                wrists: Float32[ndarray, "n 4 4"] = np.zeros((len(batch), 4, 4), dtype=np.float32)
+                wrists[:, :3, :3] = np.asarray([pose.wrist_rotation for pose in batch_poses], dtype=np.float32)
+                wrists[:, :3, 3] = np.asarray([pose.wrist_translation for pose in batch_poses], dtype=np.float32)
+                wrists[:, 3, 3] = 1.0
+                vertices: Float32[ndarray, "n v 3"] = skin_mesh(model, angles, wrist_for_hand(wrists, side.model_index)) * np.float32(0.001)
+                clock.send_sparse(
+                    recording,
+                    path,
+                    batch,
+                    rr.Mesh3D.columns(vertex_positions=vertices.reshape(-1, 3)).partition([len(model.mesh_vertices)] * len(batch)),
+                )
