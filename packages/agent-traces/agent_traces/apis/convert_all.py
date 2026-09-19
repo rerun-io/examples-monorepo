@@ -1,48 +1,16 @@
 """Convert a Claude home incrementally using a content-hash manifest."""
 
 import hashlib
-import os
-import tempfile
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from time import perf_counter
 
-import orjson
 from rerun.experimental import RrdReader
-from serde import SerdeError, serde
-from serde.json import from_json, to_json
 
-from agent_traces.claude import ClaudeSession, parse_session
+from agent_traces.claude import ClaudeSession, parse_session, session_sources
+from agent_traces.manifest import Manifest, ManifestEntry, load_manifest, save_manifest
 from agent_traces.rerun_log import write_session_rrd
-
-
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class ManifestEntry:
-    """One completed session conversion."""
-
-    source_path: str
-    """Absolute main transcript path."""
-    source_sha256: str
-    """Hash of main bytes followed by sorted child transcript bytes."""
-    rrd: str
-    """Recording path relative to the profile directory."""
-    converted_at: str
-    """UTC conversion time in ISO-8601 format."""
-    n_rows: int
-    """Temporal rows in the saved recording, excluding properties."""
-
-
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class Manifest:
-    """Completed conversions for one profile."""
-
-    version: int = 1
-    """Manifest schema version."""
-    sessions: dict[str, ManifestEntry] = field(default_factory=dict)
-    """Completed entries keyed by session id."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,44 +29,6 @@ class Config:
     """Only convert this session id."""
     since: str | None = None
     """Only main transcripts modified on or after this ISO date."""
-
-
-def load_manifest(path: Path) -> Manifest:
-    """Load a strict manifest, naming the source on decode errors.
-
-    Args:
-        path: Manifest JSON path.
-
-    Returns:
-        Saved progress, or an empty manifest if absent.
-
-    Raises:
-        ValueError: The manifest cannot be decoded.
-    """
-    if not path.exists():
-        return Manifest()
-    try:
-        return from_json(Manifest, path.read_bytes())
-    except (SerdeError, orjson.JSONDecodeError) as error:
-        raise ValueError(f"{path}: {error}") from error
-
-
-def save_manifest(manifest: Manifest, path: Path) -> None:
-    """Atomically replace saved progress in the same directory.
-
-    Args:
-        manifest: Completed session entries.
-        path: Destination JSON path.
-    """
-    temporary: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
-            temporary = Path(stream.name)
-            stream.write(to_json(manifest))
-        os.replace(temporary, path)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
 
 
 def main(config: Config) -> None:
@@ -130,7 +60,11 @@ def main(config: Config) -> None:
             continue
         started: float = perf_counter()
         digest = hashlib.sha256()
-        for source in [path, *sorted((path.with_suffix("") / "subagents").glob("agent-*.jsonl"))]:
+        for source in session_sources(path):
+            digest.update(source.relative_to(path.parent).as_posix().encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(str(source.stat().st_size).encode("ascii"))
+            digest.update(b"\0")
             with source.open("rb") as stream:
                 while block := stream.read(1024 * 1024):
                     digest.update(block)

@@ -330,3 +330,20 @@ def test_turn_images_and_nonprompt_users(session_builder: SessionBuilder, png_by
     assert entities["/turns"]["TextLog:level"].to_pylist() == [["INFO"]]
     assert entities["/turns"]["TextLog:color"].to_pylist() == [[0x8AB4F8FF]]
     assert entities["/__properties/session"]["n_turns"].to_pylist() == [[1]]
+
+
+def test_turn_image_counts_match_emitted_rows(session_builder: SessionBuilder, png_bytes: bytes, tmp_path: Path) -> None:
+    """URL, missing-source, and assistant images do not become image rows."""
+    import base64
+
+    inline: dict[str, object] = {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(png_bytes).decode()},
+    }
+    url: dict[str, object] = {"type": "image", "source": {"type": "url", "url": "https://example.test/image.png"}}
+    session_builder.add("user", message={"content": [{"type": "text", "text": "prompt"}, inline, url, {"type": "image"}]})
+    session_builder.add("user", message={"content": [{"type": "tool_result", "content": [inline, url]}]})
+    session_builder.add("assistant", message={"content": [inline]})
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "image-counts.rrd"))
+    assert entities["/media/images"].num_rows == 2
+    assert entities["/turns"]["n_images"].to_pylist() == [[2]]

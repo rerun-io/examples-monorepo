@@ -178,6 +178,16 @@ def parse_timestamp_ns(text: str) -> int:
     return (delta.days * 86400 + delta.seconds - offset_seconds) * 1_000_000_000 + fraction_ns
 
 
+def session_sources(session_path: Path) -> list[Path]:
+    """List the main transcript, sorted children, then sorted offloaded files."""
+    session_dir: Path = session_path.with_suffix("")
+    return [
+        session_path,
+        *sorted(path for path in (session_dir / "subagents").glob("agent-*.jsonl") if path.is_file()),
+        *sorted(path for path in (session_dir / "tool-results").rglob("*") if path.is_file()),
+    ]
+
+
 def parse_session(session_path: Path) -> ClaudeSession:
     """Read the main transcript and child files, counting omitted records.
 
@@ -204,7 +214,11 @@ def parse_session(session_path: Path) -> ClaudeSession:
         source_sha256: str = hashlib.file_digest(source, "sha256").hexdigest()
     transcripts: dict[str, list[TimedRecord]] = {}
     paths: dict[str, Path] = {"": source_path}
-    paths.update({path.stem.removeprefix("agent-"): path for path in sorted((source_path.with_suffix("") / "subagents").glob("agent-*.jsonl"))})
+    paths.update({
+        path.stem.removeprefix("agent-"): path
+        for path in session_sources(source_path)[1:]
+        if path.parent == source_path.with_suffix("") / "subagents"
+    })
     for agent_id, path in paths.items():
         rows: list[TimedRecord] = []
         source_record: SourceRecord
