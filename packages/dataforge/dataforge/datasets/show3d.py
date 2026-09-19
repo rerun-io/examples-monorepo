@@ -186,8 +186,10 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             files.update([*metadata_files(key), hand_pose_file(key), hand_profile_file(source.subject_id)])
         if need_caption:
             files.add(caption_file(key))
+        if wants[paths.OBJECT_POSE_LAYER] or wants[paths.OBJECT_MESH_LAYER]:
+            files.update([*metadata_files(key), object_pose_file(key)])
         if wants[paths.OBJECT_POSE_LAYER]:
-            files.update([*metadata_files(key), object_pose_file(key), *(calibration_file(key, camera) for camera in HEADSET_CAMERAS)])
+            files.update(calibration_file(key, camera) for camera in HEADSET_CAMERAS)
         self.fetch_missing(sorted(files))
         scene_dir: Path = self.config.root / "scenes" / key
         written: list[str] = []
@@ -210,7 +212,7 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
         clock: FrameClock | None = None
         hand_frames: list[HandFrame] = []
         profile: HandProfileDoc | None = None
-        if wants[paths.HAND_POSE_LAYER] or wants[paths.HAND_MESH_LAYER] or wants[paths.OBJECT_POSE_LAYER]:
+        if wants[paths.HAND_POSE_LAYER] or wants[paths.HAND_MESH_LAYER] or wants[paths.OBJECT_POSE_LAYER] or wants[paths.OBJECT_MESH_LAYER]:
             clock = scene if scene is not None else read_frame_clock(scene_dir, key)
             hand_frames = read_hand_frames(self.config.root / hand_pose_file(key), clock) if source.has_hand_pose else []
         if wants[paths.HAND_POSE_LAYER] or wants[paths.HAND_MESH_LAYER]:
@@ -227,18 +229,27 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
         if wants[paths.PROPERTIES_LAYER]:
             write_properties_layer(identity, source, caption, targets[paths.PROPERTIES_LAYER])
             written.append(paths.PROPERTIES_LAYER)
-        if wants[paths.OBJECT_POSE_LAYER]:
+        object_frames: list[ObjectFrame] | None = None
+        if wants[paths.OBJECT_POSE_LAYER] or wants[paths.OBJECT_MESH_LAYER]:
             assert clock is not None
-            frames: list[ObjectFrame] = read_object_frames(self.config.root / object_pose_file(key), clock)
+            object_frames = read_object_frames(self.config.root / object_pose_file(key), clock)
+        if wants[paths.OBJECT_POSE_LAYER]:
+            assert clock is not None and object_frames is not None
+            frames: list[ObjectFrame] = object_frames
             metrics: ObjectSanity = object_sanity(
                 frames, list((scene.headsets if scene is not None else read_headset_calibrations(scene_dir, clock)).values()), hand_frames
             )
             write_object_pose_layer(identity, alias, clock, frames, metrics, targets[paths.OBJECT_POSE_LAYER])
             written.append(paths.OBJECT_POSE_LAYER)
         if wants[paths.OBJECT_MESH_LAYER]:
-            asset: MeshAsset = stripped_mesh(self.config.root, alias)
-            write_object_mesh_layer(identity, alias, asset.mesh_id, asset.path, targets[paths.OBJECT_MESH_LAYER])
-            written.append(paths.OBJECT_MESH_LAYER)
+            assert object_frames is not None
+            if any(frame.posed for frame in object_frames):
+                asset: MeshAsset = stripped_mesh(self.config.root, alias)
+                write_object_mesh_layer(identity, alias, asset.mesh_id, asset.path, targets[paths.OBJECT_MESH_LAYER])
+                written.append(paths.OBJECT_MESH_LAYER)
+            else:
+                # A mesh with no pose row would sit at the world origin; the track carries no posed frame.
+                print(f"{identity.sequence_key}: no object_mesh: the object track has no posed frame")
         if wants[paths.HAND_MESH_LAYER]:
             assert clock is not None and profile is not None
             write_hand_mesh_layer(identity, clock, hand_frames, profile.model, targets[paths.HAND_MESH_LAYER])
