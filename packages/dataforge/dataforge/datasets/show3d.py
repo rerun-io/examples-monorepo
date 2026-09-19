@@ -270,7 +270,8 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             assert object_track is not None
             if any(frame.posed for frame in object_track.frames):
                 asset: MeshAsset = stripped_mesh(self.config.root, alias)
-                write_object_mesh_layer(identity, alias, asset.mesh_id, asset.path, targets[paths.OBJECT_MESH_LAYER])
+                assert clock is not None
+                write_object_mesh_layer(identity, alias, clock, object_track.frames, asset.mesh_id, asset.path, targets[paths.OBJECT_MESH_LAYER])
                 written.append(paths.OBJECT_MESH_LAYER)
             else:
                 # A mesh with no pose row would sit at the world origin; the track carries no posed frame.

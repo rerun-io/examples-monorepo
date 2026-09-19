@@ -24,7 +24,7 @@ from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetPos
 from dataforge.datasets.show3d_hands import HAND_SIDES, HandFrame, HandPose, write_hand_mesh_layer
 from dataforge.datasets.show3d_mesh_source import MESH_REPO, MeshAsset, MeshInfo, download_meshes, mesh_ids, strip_texture_transform, stripped_mesh
 from dataforge.datasets.show3d_object_source import CLOCK_TOLERANCE_S, ObjectFrame, ObjectTrack, read_object_frames
-from dataforge.datasets.show3d_objects import ObjectSanity, object_sanity, write_object_mesh_layer, write_object_pose_layer
+from dataforge.datasets.show3d_objects import HIDDEN_MESH_SCALE, ObjectSanity, object_sanity, write_object_mesh_layer, write_object_pose_layer
 from dataforge.datasets.show3d_source import (
     HEADSET_CAMERAS,
     OBJECT_POSE_VERSION,
@@ -193,7 +193,7 @@ def object_scene(show3d_scene_inputs: Show3dSceneInputs, tmp_path_factory: pytes
     metrics: ObjectSanity = object_sanity(frames, list(inputs.scene.headsets.values()), inputs.hands)
     output: Path = tmp_path_factory.mktemp(identity.parts[0] + "-objects")
     write_object_pose_layer(identity, alias, inputs.scene, frames, metrics, output / "object_pose.rrd", clock_offset_s=track.clock_offset_s)
-    write_object_mesh_layer(identity, alias, asset.mesh_id, asset.path, output / "object_mesh.rrd")
+    write_object_mesh_layer(identity, alias, inputs.scene, frames, asset.mesh_id, asset.path, output / "object_mesh.rrd")
     write_hand_mesh_layer(identity, inputs.scene, inputs.hands, inputs.profile.model, output / "hand_mesh.rrd")
     return ObjectBuild(identity, frames, inputs.hands, inputs.profile.model, output, metrics)
 
@@ -220,6 +220,18 @@ def test_real_scene_object_and_mesh_layers(object_scene: ObjectBuild) -> None:
         str(c.entity_path) == schema.object_mesh_path(alias) and c.is_static and "Asset3D:blob" in c.to_record_batch().schema.names
         for c in mesh_chunks
     )
+    # The static mesh would otherwise persist at the last pose through unposed frames; a dense scale on the
+    # mesh entity hides it there while the shipped pose stream on the parent stays sparse and untouched.
+    scale_rows: dict[int, float] = {}
+    for c in mesh_chunks:
+        if str(c.entity_path) == schema.object_mesh_path(alias) and not c.is_static:
+            batch: pa.RecordBatch = c.to_record_batch()
+            assert set(c.timeline_names) == {"video_time", "frame_index"}
+            for index, scale in zip(batch.column("frame_index").to_pylist(), batch.column("Transform3D:scale").to_pylist(), strict=True):
+                scale_rows[int(index)] = float(scale[0][0])
+    assert len(scale_rows) == len(build.frames)
+    assert any(not f.posed for f in build.frames), "fixture lacks an unposed object frame"
+    assert all(scale_rows[f.index] == float(np.float32(1.0 if f.posed else HIDDEN_MESH_SCALE)) for f in build.frames)
     assert recording_properties(read_back(build.output / "object_mesh.rrd"), "object_mesh") == {
         "mesh_id": 28 if alias == "keyboard" else 26,
         "mesh_source": "bop-benchmark/hot3d",
