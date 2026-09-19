@@ -119,8 +119,8 @@ def test_object_sanity_uses_depth_bounds_nearest_palm_and_posed_denominator() ->
     )
     palms: Float32[ndarray, "21 3"] = np.zeros((21, 3), dtype=np.float32)
     palms[20] = [0.0, 0.0, 900.0]
-    hand: HandPose = HandPose(1.0, None, None, None, palms, None, None)
-    absent: HandPose = HandPose(0.0, None, None, None, None, None, None)
+    hand: HandPose = HandPose(1.0, None, None, None, palms, None)
+    absent: HandPose = HandPose(0.0, None, None, None, None, None)
     hands: list[HandFrame] = [HandFrame(i, i, float(i), [], {"0": hand if i == 0 else absent, "1": absent}) for i in range(4)]
     result: ObjectSanity = object_sanity(frames, [camera], hands)
     assert result.coverage == 0.75
