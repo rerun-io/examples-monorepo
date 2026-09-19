@@ -395,7 +395,6 @@ and neither is derived from the other.
 /world/gt/hands/profile                    TextDocument (static, media type application/json)
 /world/gt/hands/{left,right}
   /landmarks                              Points3D (21, world frame, metres)
-  /landmarks_local                        Points3D (21, wrist frame, metres)
   /joint_angles                           AnyValues{joint_angles} (22 radians)
   /wrist                                  Transform3D = world_T_wrist (temporal)
   /confidence                             Scalars (one value, every frame)
@@ -404,10 +403,12 @@ and neither is derived from the other.
 ```
 
 - `landmarks` and `wrist` follow the sparse-pose convention below.
-  `landmarks_local` and `joint_angles` have rows only where the source supplies
-  them. Local landmarks remain wrist-frame data; consumers must apply
-  `world_T_wrist` before treating them as world positions. The sibling `wrist`
-  entity does not transform `landmarks` or `landmarks_local`.
+  `joint_angles` has rows only where the source supplies them. Wrist-frame
+  landmarks are never logged as their own entity: every entity under `/world`
+  is read in the world frame, so wrist-local coordinates would draw a hand at
+  the rig origin. They are the skinning of `joint_angles` with the profile,
+  and a consumer that needs them applies `world_T_wrist` to `landmarks`. The
+  sibling `wrist` entity does not transform `landmarks`.
 - For hands and objects (§11), pose rows are sparse: emit them only where
   the source has a pose. `confidence` has one row on **every frame**, with `0`
   when no pose exists. Consumers use confidence to identify gaps; they must
