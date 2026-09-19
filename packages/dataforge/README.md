@@ -280,7 +280,7 @@ are cleaned beneath its `work/` directory, including on failure.
 | Layer | Status | Contents |
 | --- | --- | --- |
 | `base` | Available | Video, calibration, headset motion, frame metadata, blur boxes, capture census |
-| `hand_pose` | Available | World/local UmeTrack landmarks, headset UV, joint angles, wrist poses, confidence, verbatim profile |
+| `hand_pose` | Available | COCO-133 keypoints with per-joint confidence (`world/gt/coco133_xyz`), shipped headset pixels (`coco133_uv`), joint angles, wrist poses, confidence, verbatim profile |
 | `object_pose` | Reserved | Object transforms and coverage |
 | `captions` | Available | Markdown instruction and all structured caption fields |
 | `properties` | Available | Stable typed `episode` metadata: subject, split, object, action, hand, caption, versions |
