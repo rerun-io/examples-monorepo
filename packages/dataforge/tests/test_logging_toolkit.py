@@ -415,3 +415,19 @@ def test_imu_nodes_carry_the_given_rig_T_imu(tmp_path: Path) -> None:
     table: pa.Table = read_back(target).reader(index=schema.TIMELINE).to_arrow_table()
     assert static_translation(table, schema.imu_path(RIG, 0)) == [0.0, 0.0, 0.0], "the reference IMU keeps the identity default"
     assert static_translation(table, schema.imu_path(RIG, 1)) == pytest.approx(rig_t_imu_left, abs=1e-6)
+
+
+@pytest.mark.integration
+def test_video_has_source_frame_index_and_duration(tmp_path: Path, clip: Path) -> None:
+    target: Path = tmp_path / "indexed.rrd"
+    indices: Int64[ndarray, "n"] = np.arange(NUM_FRAMES, dtype=np.int64) * 2 + 9
+    times: Int64[ndarray, "n"] = np.arange(NUM_FRAMES, dtype=np.int64) * 16_666_667
+    with rr.RecordingStream("test", recording_id="indexed") as recording:
+        recording.save(target)
+        assert log_video_stream(recording, clip, ENTITY, times_ns=times, frame_indices=indices) == NUM_FRAMES
+    np.testing.assert_array_equal(index_column(target, schema.FRAME_INDEX), indices)
+    np.testing.assert_array_equal(index_column(target), times)
+    for chunk in rr.experimental.RrdReader(target).stream():
+        if schema.TIMELINE in chunk.timeline_names:
+            assert chunk.to_record_batch().schema.field(schema.FRAME_INDEX).type == pa.int64()
+            assert chunk.to_record_batch().schema.field(schema.TIMELINE).type == pa.duration("ns")
