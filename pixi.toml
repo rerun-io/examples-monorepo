@@ -216,13 +216,14 @@ cmd = "cd $PACKAGE_DIR && pytest -q"
 description = "Run package unit tests"
 
 # `|| test $? -eq 5`: pytest exits 5 when a marker selects nothing; a package with no tests in a
-# tier must not fail `gate`. Any other exit code still fails.
+# tier must not fail `gate`. Any other exit code still fails. The `sh -c '... "$@"' _` wrapper keeps
+# pixi passthrough args (`pixi run tests-integration -- -rs`) attached to pytest instead of `test`.
 [feature.dev.tasks.tests-integration]
-cmd = "cd $PACKAGE_DIR && pytest -q -m integration || test $? -eq 5"
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
 description = "Run package integration tests"
 
 [feature.dev.tasks.tests-golden]
-cmd = "cd $PACKAGE_DIR && pytest -q -m golden || test $? -eq 5"
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
 description = "Run package golden reference tests"
 
 [feature.dev.tasks.gate]
@@ -2629,13 +2630,13 @@ cwd = "packages/slam-rs"
 description = "Build the core, then run the package unit tests"
 
 [feature.slam-rs.tasks.tests-integration]
-cmd = "pytest -q -m integration || test $? -eq 5"
+cmd = "sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
 depends-on = ["slam-rs-build"]
 cwd = "packages/slam-rs"
 description = "Build the core, then run the package integration tests"
 
 [feature.slam-rs.tasks.tests-golden]
-cmd = "pytest -q -m golden || test $? -eq 5"
+cmd = "sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
 depends-on = ["slam-rs-build"]
 cwd = "packages/slam-rs"
 description = "Build the core, then run the package golden reference tests"
