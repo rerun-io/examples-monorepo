@@ -21,9 +21,13 @@ from dataforge.datasets.show3d_hands import (
     HandProfileDoc,
     read_hand_frames,
     read_hand_profile,
+    write_hand_mesh_layer,
     write_hand_pose_layer,
 )
 from dataforge.datasets.show3d_layers import Scene, write_base_layer
+from dataforge.datasets.show3d_mesh_source import MeshAsset, download_meshes, stripped_mesh
+from dataforge.datasets.show3d_object_source import ObjectFrame, ObjectTrack, read_object_frames
+from dataforge.datasets.show3d_objects import ObjectSanity, object_sanity, write_object_mesh_layer, write_object_pose_layer
 from dataforge.datasets.show3d_source import (
     CAMERAS,
     HEADSET_CAMERAS,
@@ -34,7 +38,10 @@ from dataforge.datasets.show3d_source import (
     caption_file,
     hand_pose_file,
     hand_profile_file,
+    mesh_name,
+    object_pose_file,
     read_frame_clock,
+    read_headset_calibrations,
     read_json,
 )
 from dataforge.identity import SequenceIdentity
@@ -104,6 +111,9 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
         paths.HAND_POSE_LAYER,
         paths.CAPTIONS_LAYER,
         paths.PROPERTIES_LAYER,
+        paths.OBJECT_POSE_LAYER,
+        paths.OBJECT_MESH_LAYER,
+        paths.HAND_MESH_LAYER,
     )
     """SHOW3D publication and loading order."""
 
@@ -122,6 +132,7 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             local_dir=self.config.root,
             revision=self.commit_sha,
         )
+        download_meshes(self.config.root)
         sources: list[tuple[SequenceIdentity, IndexRow]] = self.discover()
         counts: Counter[str] = Counter(source.split for _, source in sources)
         print(
@@ -176,21 +187,32 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
 
     def convert(self, identity: SequenceIdentity, source: IndexRow, *, force: bool) -> Path:
         targets: dict[str, Path] = {layer: paths.rrd_path(paths.output_root(), layer=layer, identity=identity) for layer in self.layers}
+        alias: str = source.object_alias
+        mesh: str | None = mesh_name(alias)
         wants: dict[str, bool] = {
             paths.BASE_LAYER: not writing.should_skip(targets[paths.BASE_LAYER], force=force),
             paths.HAND_POSE_LAYER: source.has_hand_pose and not writing.should_skip(targets[paths.HAND_POSE_LAYER], force=force),
             paths.CAPTIONS_LAYER: source.has_caption and not writing.should_skip(targets[paths.CAPTIONS_LAYER], force=force),
             paths.PROPERTIES_LAYER: not writing.should_skip(targets[paths.PROPERTIES_LAYER], force=force),
+            paths.OBJECT_POSE_LAYER: source.has_object_pose and not writing.should_skip(targets[paths.OBJECT_POSE_LAYER], force=force),
+            paths.OBJECT_MESH_LAYER: source.has_object_pose and mesh is not None and not writing.should_skip(targets[paths.OBJECT_MESH_LAYER], force=force),
+            paths.HAND_MESH_LAYER: source.has_hand_pose and not writing.should_skip(targets[paths.HAND_MESH_LAYER], force=force),
         }
         need_caption: bool = wants[paths.CAPTIONS_LAYER] or (wants[paths.PROPERTIES_LAYER] and source.has_caption)
+        if wants[paths.OBJECT_POSE_LAYER] and mesh is None:
+            print(f"{identity.sequence_key}: no object_mesh: alias {alias!r} has no HOT3D mesh mapping")
         if not any(wants.values()):
             return targets[paths.BASE_LAYER]
         key: str = identity.sequence_key
         files: set[str] = set(base_files(source, key) if wants[paths.BASE_LAYER] else [])
-        if wants[paths.HAND_POSE_LAYER]:
+        if wants[paths.HAND_POSE_LAYER] or wants[paths.HAND_MESH_LAYER] or (wants[paths.OBJECT_POSE_LAYER] and source.has_hand_pose):
             files.update([*metadata_files(key), hand_pose_file(key), hand_profile_file(source.subject_id)])
         if need_caption:
             files.add(caption_file(key))
+        if wants[paths.OBJECT_POSE_LAYER] or wants[paths.OBJECT_MESH_LAYER]:
+            files.update([*metadata_files(key), object_pose_file(key)])
+        if wants[paths.OBJECT_POSE_LAYER]:
+            files.update(calibration_file(key, camera) for camera in HEADSET_CAMERAS)
         self.fetch_missing(sorted(files))
         scene_dir: Path = self.config.root / "scenes" / key
         written: list[str] = []
@@ -213,10 +235,10 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
         clock: FrameClock | None = None
         hand_frames: list[HandFrame] = []
         profile: HandProfileDoc | None = None
-        if wants[paths.HAND_POSE_LAYER]:
+        if wants[paths.HAND_POSE_LAYER] or wants[paths.HAND_MESH_LAYER] or wants[paths.OBJECT_POSE_LAYER] or wants[paths.OBJECT_MESH_LAYER]:
             clock = scene if scene is not None else read_frame_clock(scene_dir, key)
             hand_frames = read_hand_frames(self.config.root / hand_pose_file(key), clock) if source.has_hand_pose else []
-        if wants[paths.HAND_POSE_LAYER]:
+        if wants[paths.HAND_POSE_LAYER] or wants[paths.HAND_MESH_LAYER]:
             profile = read_hand_profile(self.config.root / hand_profile_file(source.subject_id))
         if wants[paths.HAND_POSE_LAYER]:
             assert clock is not None and profile is not None
@@ -230,6 +252,33 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
         if wants[paths.PROPERTIES_LAYER]:
             write_properties_layer(identity, source, caption, targets[paths.PROPERTIES_LAYER])
             written.append(paths.PROPERTIES_LAYER)
+        object_track: ObjectTrack | None = None
+        if wants[paths.OBJECT_POSE_LAYER] or wants[paths.OBJECT_MESH_LAYER]:
+            assert clock is not None
+            object_track = read_object_frames(self.config.root / object_pose_file(key), clock)
+            if object_track.clock_offset_s != 0.0:
+                print(f"{identity.sequence_key}: object_pose timestamps are offset by {object_track.clock_offset_s:.6g} s from frame_info; aligned by index")
+        if wants[paths.OBJECT_POSE_LAYER]:
+            assert clock is not None and object_track is not None
+            frames: list[ObjectFrame] = object_track.frames
+            metrics: ObjectSanity = object_sanity(
+                frames, list((scene.headsets if scene is not None else read_headset_calibrations(scene_dir, clock)).values()), hand_frames
+            )
+            write_object_pose_layer(identity, alias, clock, frames, metrics, targets[paths.OBJECT_POSE_LAYER], clock_offset_s=object_track.clock_offset_s)
+            written.append(paths.OBJECT_POSE_LAYER)
+        if wants[paths.OBJECT_MESH_LAYER]:
+            assert object_track is not None
+            if any(frame.posed for frame in object_track.frames):
+                asset: MeshAsset = stripped_mesh(self.config.root, alias)
+                write_object_mesh_layer(identity, alias, asset.mesh_id, asset.path, targets[paths.OBJECT_MESH_LAYER])
+                written.append(paths.OBJECT_MESH_LAYER)
+            else:
+                # A mesh with no pose row would sit at the world origin; the track carries no posed frame.
+                print(f"{identity.sequence_key}: no object_mesh: the object track has no posed frame")
+        if wants[paths.HAND_MESH_LAYER]:
+            assert clock is not None and profile is not None
+            write_hand_mesh_layer(identity, clock, hand_frames, profile.model, targets[paths.HAND_MESH_LAYER])
+            written.append(paths.HAND_MESH_LAYER)
         if wants[paths.BASE_LAYER] and not self.config.keep_raw:
             for video in scene_dir.glob("*.mp4"):
                 video.unlink()
@@ -282,4 +331,5 @@ def base_files(source: IndexRow, key: str) -> list[str]:
         ),
         *(calibration_file(key, camera) for camera in source.cameras),
         f"scenes/{key}/blur_info/config.json",
+        *([object_pose_file(key)] if source.has_object_pose else []),
     ]

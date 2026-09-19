@@ -65,7 +65,7 @@ and `blur_info/<camera>.mp4.json`. Annotation trees use the same subject/scene
 keys under `hand_pose/v2`, `object_pose/v1`, and `captions/v1`. Hand profiles
 are shared per subject at `hand_pose/hand_profiles/<subject>/profile_umetrack.json`.
 
-`download` fetches both indexes and all profiles. `discover` attaches `split`
+`download` fetches both indexes, all profiles, and the 22 mapped HOT3D BOP meshes. `discover` attaches `split`
 to each typed index row, unions both splits, and orders object scenes first,
 then train, then test, with subject/scene as a stable tie breaker.
 `--sequences` selects scene IDs or subject/scene keys; `--split` narrows the
@@ -83,7 +83,7 @@ over the index census. A fetched scene without metadata fails with a scene-speci
 Each recording records the Hub commit it was built from as
 `property:capture:hf_revision`; the corpus run pins one with `--revision`.
 Without an explicit revision, the default branch resolves once per run to a
-cached commit SHA. Every SHOW3D Hub fetch uses that SHA.
+cached commit SHA. Every SHOW3D Hub fetch uses that SHA. HOT3D BOP downloads resolve their own repository SHA.
 
 Conversion plans the union of missing layers' inputs, then fetches absent files
 with one fetch round (serial per-file downloads). Index camera and annotation flags select the
@@ -96,7 +96,7 @@ and are removed even after failure. Each layer skips its own existing file unles
 `--force` is set. Missing annotation layers rebuild from retained JSON without
 fetching MP4s or reading the base recording. A hand-only rebuild reads metadata,
 hand JSON, and the subject profile; it needs no calibration or blur sidecars.
-The properties layer needs only the index row and caption. Publication and execution order is base → hand_pose → captions → properties.
+The properties layer needs only the index row and caption. Publication and execution order is base → hand_pose → captions → properties → object_pose → object_mesh → hand_mesh.
 
 ## Frames, clocks, and calibration variants
 
@@ -252,8 +252,99 @@ BASE census remains in `capture`.
 The keyboard and birdhouse reprojection goldens read the written hand landmarks and UV, then
 project through the base sidecar camera chain (headset0 pose, fixed stereo
 camera transform, and pinhole intrinsics). Each hand/camera pair must have median
-finite-point error below 0.5 px.
+finite-point error below 0.5 px. The mesh goldens also compare skinned landmarks with the shipped world landmarks (see below).
 
-## Later layers
+## Object and mesh layers
 
-Object poses and object and hand meshes follow in the next commit.
+| Source | Layer / destination | Time and properties |
+| --- | --- | --- |
+| `object_pose/v1/.../object_pose.json` | `object_pose`: `/world/gt/objects/<alias>` Transform3D, translation in metres | Both clocks, only confidence > 0; `/confidence` Scalars on every frame |
+| HOT3D BOP stripped GLB | `object_mesh`: object `/mesh` Asset3D | Static; int64 `mesh_id`, string `mesh_source=bop-benchmark/hot3d` |
+| Hand JSON and full subject model | `hand_mesh`: `/world/gt/hands/{left,right}/mesh` Mesh3D | Static triangles and RGBA albedo (alpha 110); world vertices in metres on both clocks where a wrist exists; no properties |
+
+Object records use a partial pyserde schema. Confidence-zero records can have
+empty `R` and `t` lists; positive confidence requires finite 3×3 proper rotation
+(det=+1) and 3×1 translation. `vertices_world_space` is ignored. Census and
+frame identity/time must agree with the base metadata. Confidence-zero rows
+remain in the confidence signal; all posed rows remain in the transform signal.
+
+The `object_pose` property group contains string `version=v1` and float64
+`coverage`, `in_ego_fov_fraction`, and `palm_dist_median_m`. Coverage is the
+fraction of all frames with a pose. FOV is the fraction of posed frames whose
+object origin is in front of and inside either headset pinhole. Palm distance
+is the median, over frames with an object pose and at least one world palm,
+of the distance from the object origin to the nearest landmark 20, in metres.
+Undefined metrics use float64 NaN. These are census measurements, never row filters.
+Conversion reuses the base `Scene` clock and headset calibrations. For rebuilds
+without base, `read_headset_calibrations` applies the same clock
+agreement check, without reading videos, rig calibrations, or blur files.
+
+Hand meshes use the full pyserde `HandModelNumpy` through the `HandProfile`
+envelope (float32 geometry and int64 indices). `wrist_for_hand` mirrors the
+right hand; `skin_mesh` runs in batches of 256 frames. The model and wrist
+remain in millimetres until skinned vertices are converted once to metres.
+Left is blue, right is peach. A wrist without joint angles is an input error,
+not a silently dropped row. `hand_pose` remains the only AnnotationContext owner.
+The existing `/world/**` blueprint filter includes both object and hand meshes.
+
+### Object-frame verification
+
+The full sample recordings produce:
+
+| Scene | Posed / all frames | In either ego FOV | Median nearest palm (m) |
+| --- | ---: | ---: | ---: |
+| SPI102/keyboard_toss-away_83ef | 560 / 586 | 0.0 | 1.40923017 |
+| LYA722/birdhousetoy_shaking_8eca | 999 / 1002 | 1.0 | 0.11027603 |
+
+The birdhouse mesh sits in the right hand. The keyboard track is outside both
+headset images on every posed frame despite positive confidence; the wide view
+shows the keyboard far from both hands. A full depth census corrects the earlier
+prototype claim that it is always behind the headset: 458/560 posed centres
+are behind headset0 and 469/560 behind headset1; the remaining centres still
+project outside the images. The sanity properties expose this bad track without
+altering source poses.
+
+Pixel evidence from Rerun 0.37.0, headless Vulkan llvmpipe, with all seven layers merged:
+
+- [Birdhouse, frame 801](https://pablos-4800gt.ilish-ruler.ts.net:8768/show3d/pr4/birdhouse-all-layers-f4.png)
+- [Keyboard, frame 117](https://pablos-4800gt.ilish-ruler.ts.net:8768/show3d/pr4/keyboard-all-layers-f1.png)
+
+These snapshots show the camera images, projected skeletons, translucent hand
+meshes, object meshes, and instruction pane together.
+
+The skinning golden requires <0.01 mm for both hands in both scenes. The
+birdhouse palm-distance band is <0.2 m; the measured value is 0.11027603 m
+over 850 object/palm pairs. Keyboard bounds and both FOV bounds are unchanged.
+
+Storage was measured from the two full-scene `hand_mesh.rrd` files: their combined
+file bytes divided by their temporal Mesh3D row count give about 9.52 KB per
+posed hand-frame. The combined files are about 8× the corresponding `hand_pose`
+files. Extrapolating bytes per scene-frame from these two samples to the
+3,465,942 frames in 1,682 nonempty hand scenes gives about 60 GB; this is an
+estimate, not a full-corpus measurement. Consumers can leave `hand_mesh`
+unregistered; a later change can coarsen its clock.
+
+### BOP names, renumbering, and texture extension
+
+`download()` uses `transports.hf_fetch_files` for
+`bop-benchmark/hot3d/object_models/models_info.json` and all 22 mapped GLBs.
+The cache is `<raw root>/assets/hot3d_bop/`. The converter resolves mesh IDs by
+**name** in a cached census table, never by a numeric ID from another HOT3D
+release. [`OBJECTS`](../dataforge/datasets/show3d_source.py) is the alias-to-name
+mapping, including the listed aliases with no mesh.
+
+`keyboard2`, `cancoke`, `windex`, `clock`, and `mug3` have no matching mesh.
+Conversion prints the missing mapping only while building `object_pose`, and
+emits no `object_mesh` layer. The index token `none` denotes no object.
+A mapped alias without object poses also produces no mesh layer.
+
+Rerun 0.37 rejects `KHR_texture_transform`. Download strips that name from
+`extensionsUsed`/`extensionsRequired` and from material texture infos once,
+writing `stripped/obj_XXXXXX.glb` atomically and deleting the raw GLB.
+UV transforms are discarded so Rerun 0.37 loads the asset. This chunk-preserving rewrite
+updates JSON padding and GLB length while preserving binary chunks and other
+extensions. Node scale 0.001 stays intact: the GLB scene graph already makes
+the geometry metres, so the converter adds no second scale.
+
+The exploration survey found no depth tree on the Hub (404) as of 2026-09-19,
+although the README describes it. Depth remains reserved.

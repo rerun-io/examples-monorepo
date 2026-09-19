@@ -144,6 +144,26 @@ def instruction_path() -> str:
     return "/task/instruction"
 
 
+def objects_path(alias: str) -> str:
+    """§11: tracked rigid object root in the world frame."""
+    return f"/world/gt/objects/{alias}"
+
+
+def object_mesh_path(alias: str) -> str:
+    """§11: static geometry in the tracked object's frame."""
+    return f"{objects_path(alias)}/mesh"
+
+
+def object_confidence_path(alias: str) -> str:
+    """§11: every-frame tracking confidence."""
+    return f"{objects_path(alias)}/confidence"
+
+
+def hand_mesh_path(side: str) -> str:
+    """§10: skinned vertices in the world frame."""
+    return f"{hands_path(side)}/mesh"
+
+
 def hand_confidence_path(side: str) -> str:
     """Measured hand confidence."""
     return f"{hands_path(side)}/confidence"
