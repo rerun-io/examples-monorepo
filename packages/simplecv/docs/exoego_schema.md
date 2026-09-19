@@ -164,7 +164,6 @@ Skeleton class IDs share the root `AnnotationContext` (§6):
 | Class ID | Layout | Writers |
 |---|---|---|
 | 0 | COCO-wholebody 133 | Existing exoego writers |
-| 1 | UmeTrack 21-landmark hand | SHOW3D (§10) |
 
 ### Projected 2D keypoints (per camera, derived)
 
@@ -392,35 +391,37 @@ and neither is derived from the other.
 **Layout:**
 
 ```
+/world/gt/coco133_xyz                      Points3DWithConfidence (133, world frame, metres, class 0; hands fill 91..132 + body wrists 9/10)
 /world/gt/hands/profile                    TextDocument (static, media type application/json)
 /world/gt/hands/{left,right}
-  /landmarks                              Points3D (21, world frame, metres)
   /joint_angles                           AnyValues{joint_angles} (22 radians)
   /wrist                                  Transform3D = world_T_wrist (temporal)
   /confidence                             Scalars (one value, every frame)
   /mesh                                   Mesh3D (optional derived layer)
-/world/rig_NN/cam_MM/pinhole/hands/{left,right}/uv   Points2D (21, source projections)
+/world/rig_NN/cam_MM/pinhole/coco133_uv    Points2DWithConfidence (133, source projections, class 0)
 ```
 
-- `landmarks` and `wrist` follow the sparse-pose convention below.
-  `joint_angles` has rows only where the source supplies them. Wrist-frame
-  landmarks are never logged as their own entity: every entity under `/world`
-  is read in the world frame, so wrist-local coordinates would draw a hand at
-  the rig origin. They are the skinning of `joint_angles` with the profile,
-  and a consumer that needs them applies `world_T_wrist` to `landmarks`. The
-  sibling `wrist` entity does not transform `landmarks`.
+- `wrist` follows the sparse-pose convention below; `joint_angles` has rows
+  only where the source supplies them. Keypoints are NOT a per-dataset layout:
+  hands go through `assembly21_to_coco133` into the shared COCO-133 stack
+  (`world/gt/coco133_xyz`, class 0, dense 133 points every frame, per-keypoint
+  confidence = that hand's confidence, 0 where the hand is absent), logged with
+  `simplecv.rerun_custom_types.Points3DWithConfidence`, exactly as the
+  simplecv exoego writers do and as `rrd_exoego.py` reads back. Wrist-frame
+  landmarks are never logged as their own entity; they are the skinning of
+  `joint_angles` with the profile.
 - For hands and objects (§11), pose rows are sparse: emit them only where
   the source has a pose. `confidence` has one row on **every frame**, with `0`
   when no pose exists. Consumers use confidence to identify gaps; they must
   not carry the last pose forward as valid.
-- Use the UmeTrack 21-landmark layout, ids `0..20`, and edges
-  `UME_HAND_CONNECTIONS`; simplecv's `umetrack_temp` module is the reference.
-  Both hands use skeleton class id `1` (§5), with names from `LANDMARK`.
-  Log static `class_ids` and `keypoint_ids` on each landmark/UV entity.
-  COCO-133 mapping is a consumer concern.
-- `uv` holds the dataset's shipped projections in encoded-image pixels, only
-  for cameras with those annotations; out-of-view points are `NaN`. Do not
-  substitute newly computed projections for shipped values.
+- `coco133_uv` holds the dataset's shipped projections in encoded-image pixels
+  (`Points2DWithConfidence`, class 0, dense 133 rows, NaN + 0 confidence where
+  the source has no point), only for cameras with those annotations. Do not
+  substitute newly computed projections for shipped values. Pane rule: a
+  rectified pinhole pane shows the viewer's projection of `coco133_xyz` and
+  excludes `coco133_uv`; a camera with a distortion model shows `coco133_uv`
+  and excludes `coco133_xyz`, because Rerun's Pinhole cannot project through
+  distortion. Both stay in the recording.
 - `profile` holds the per-subject hand model as a static `TextDocument` whose
   media type is `application/json`; the text is the verbatim source JSON. Logged
   geometry and wrist translations are metres.
