@@ -207,13 +207,11 @@ def write_session_rrd(session: ClaudeSession, out: Path) -> Path:
                     scalars.setdefault(f"{prefix}tools/elapsed_ms/{tool_name}", []).append(
                         ScalarRow(timed.timestamp_ns, elapsed_ms, timed.file_index)
                     )
-                image_parts: list[ResultContent] = (
-                    block.content
-                    if block.type == "tool_result" and isinstance(block.content, list)
-                    else [ResultContent(type="image", source=block.source)]
-                    if block.type == "image" and record.type == "user"
-                    else []
-                )
+                image_parts: list[ResultContent] = []
+                if block.type == "tool_result" and isinstance(block.content, list):
+                    image_parts = block.content
+                elif block.type == "image" and record.type == "user":
+                    image_parts = [ResultContent(type="image", source=block.source)]
                 for part in image_parts:
                     source: ImageSource | None = part.source
                     if part.type == "image" and source is not None and source.type == "base64":
@@ -255,7 +253,7 @@ def write_session_rrd(session: ClaudeSession, out: Path) -> Path:
         recording.send_columns(
             entity,
             # SDK numeric timestamps are seconds. datetime64 keeps integer ns exact.
-            indexes=[rr.TimeColumn("wall", timestamp=[np.datetime64(row.timestamp_ns, "ns") for row in rows])],
+            indexes=[rr.TimeColumn("wall", timestamp=np.array([row.timestamp_ns for row in rows], dtype="datetime64[ns]"))],
             columns=[
                 *rr.TextLog.columns(text=[row.text for row in rows], level=[row.level for row in rows], color=np.array([row.color for row in rows], dtype=np.uint32)),
                 *rr.AnyValues.columns(
@@ -272,7 +270,7 @@ def write_session_rrd(session: ClaudeSession, out: Path) -> Path:
         scalar_rows.sort(key=lambda row: row.timestamp_ns)
         recording.send_columns(
             entity,
-            indexes=[rr.TimeColumn("wall", timestamp=[np.datetime64(row.timestamp_ns, "ns") for row in scalar_rows])],
+            indexes=[rr.TimeColumn("wall", timestamp=np.array([row.timestamp_ns for row in scalar_rows], dtype="datetime64[ns]"))],
             columns=[
                 *rr.Scalars.columns(scalars=[row.value for row in scalar_rows]),
                 *rr.AnyValues.columns(file_index=[row.file_index for row in scalar_rows]),
@@ -283,7 +281,7 @@ def write_session_rrd(session: ClaudeSession, out: Path) -> Path:
         image_rows.sort(key=lambda row: row.timestamp_ns)
         recording.send_columns(
             entity,
-            indexes=[rr.TimeColumn("wall", timestamp=[np.datetime64(row.timestamp_ns, "ns") for row in image_rows])],
+            indexes=[rr.TimeColumn("wall", timestamp=np.array([row.timestamp_ns for row in image_rows], dtype="datetime64[ns]"))],
             columns=[
                 *rr.EncodedImage.columns(blob=[row.blob for row in image_rows], media_type=[row.media_type for row in image_rows]),
                 *rr.AnyValues.columns(

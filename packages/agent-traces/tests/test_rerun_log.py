@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pyarrow as pa
+import pytest
 from rerun.experimental import RrdReader
 
 from agent_traces.claude import parse_session
@@ -192,3 +193,26 @@ def test_multiple_tool_entities_keep_sparse_columns_aligned(session_builder: Ses
     entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "multiple.rrd"))
     assert entities["/tools/Read"].num_rows == 4
     assert entities["/tools/Read"]["elapsed_ms"].to_pylist()[1::2] == [[1000.0], [1000.0]]
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "expected_ns"),
+    [("2026-09-18T15:00:00.123456789-05:00", 1_789_761_600_123_456_789), ("1969-12-31T23:59:59.999999999Z", -1)],
+)
+def test_all_row_families_preserve_nanoseconds(
+    session_builder: SessionBuilder, png_bytes: bytes, tmp_path: Path, timestamp: str, expected_ns: int
+) -> None:
+    """Text, scalar, and image columns keep exact timestamps across the epoch."""
+    import base64
+
+    session_builder.add(
+        "assistant", timestamp=timestamp, message={"id": "m1", "content": [{"type": "text", "text": "precise"}], "usage": {"input_tokens": 7}}
+    )
+    session_builder.add(
+        "user",
+        timestamp=timestamp,
+        message={"content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(png_bytes).decode()}}]},
+    )
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "precise.rrd"))
+    for entity in ["/conversation/assistant", "/usage/input_tokens", "/media/images"]:
+        assert entities[entity]["wall"].cast(pa.int64()).to_pylist() == [expected_ns]
