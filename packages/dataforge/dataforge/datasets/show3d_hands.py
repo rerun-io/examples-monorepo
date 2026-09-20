@@ -142,6 +142,9 @@ def read_hand_profile(path: Path) -> HandProfileDoc:
 
 SKINNING_BATCH_SIZE: int = 256
 """Bound skinning workspace to less than 20 MB."""
+MESH_CONFIDENCE: float = 0.5
+"""Skin a hand only above this confidence: the Hub README's default threshold ("filters most solver
+failures without throwing away usable data"); ``> 0`` includes "low-quality frames you usually want to drop"."""
 
 
 def high_confidence_coverage(confidence: list[float]) -> float:
@@ -269,10 +272,10 @@ def write_hand_mesh_layer(identity: SequenceIdentity, clock: FrameClock, frames:
     """Skin trusted hands in bounded batches; hand_pose owns the annotation context.
 
     The source ships a wrist and joint angles for many frames it marks with confidence 0
-    (the tracker lost the hand). Those rows are kept verbatim in ``hand_pose``; this
-    derived layer skins only frames with a wrist and confidence > 0, and writes an
-    empty vertex row on every other frame so the viewer's latest-at never holds a
-    stale mesh where no hand is.
+    (the tracker lost the hand) and for low-confidence frames whose landmarks float far
+    from any hand. Those rows are kept verbatim in ``hand_pose``; this derived layer skins
+    only frames with a wrist and confidence > ``MESH_CONFIDENCE``, and writes an empty
+    vertex row on every other frame so the viewer's latest-at never holds a stale mesh.
     """
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
         for side in HAND_SIDES:
@@ -284,7 +287,7 @@ def write_hand_mesh_layer(identity: SequenceIdentity, clock: FrameClock, frames:
                 recording=recording,
             )
             poses: list[HandPose] = [frame.hand_poses[side.key] for frame in frames]
-            trusted: list[bool] = [pose.wrist_rotation is not None and pose.confidence > 0.0 for pose in poses]
+            trusted: list[bool] = [pose.wrist_rotation is not None and pose.confidence > MESH_CONFIDENCE for pose in poses]
             if any(pose.joint_angles is None for pose, ok in zip(poses, trusted, strict=True) if ok):
                 raise ValueError(f"{identity.sequence_key}: posed {side.name} hand lacks joint angles")
             for start in range(0, len(frames), SKINNING_BATCH_SIZE):

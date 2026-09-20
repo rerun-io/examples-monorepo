@@ -260,7 +260,7 @@ finite-point error below 0.5 px. The mesh goldens also compare skinned landmarks
 | --- | --- | --- |
 | `object_pose/v1/.../object_pose.json` | `object_pose`: `/world/gt/objects/<alias>` Transform3D, translation in metres | Both clocks, only confidence > 0; `/confidence` Scalars on every frame |
 | HOT3D BOP stripped GLB | `object_mesh`: object `/mesh` Asset3D + dense Transform3D scale on `/mesh` | Static blob; scale 1 on posed frames, 1e-4 on unposed frames (hides the mesh instead of holding the last pose); int64 `mesh_id`, string `mesh_source=bop-benchmark/hot3d` |
-| Hand JSON and full subject model | `hand_mesh`: `/world/gt/hands/{left,right}/mesh` Mesh3D | Static triangles and RGBA albedo (alpha 110); one row per frame on both clocks: world vertices in metres where a wrist exists and confidence > 0, an empty vertex row otherwise; no properties |
+| Hand JSON and full subject model | `hand_mesh`: `/world/gt/hands/{left,right}/mesh` Mesh3D | Static triangles and RGBA albedo (alpha 110); one row per frame on both clocks: world vertices in metres where a wrist exists and confidence > 0.5 (the Hub README default), an empty vertex row otherwise; no properties |
 
 Object records use a partial pyserde schema. Confidence-zero records can have
 empty `R` and `t` lists; positive confidence requires finite 3×3 proper rotation
@@ -296,9 +296,13 @@ Left is blue, right is peach. A trusted wrist without joint angles is an input e
 not a silently dropped row. The source ships a wrist and joint angles on many frames
 it marks with confidence 0 (the tracker lost the hand; in `LWA828/bbq_pouring-out_5d8a`
 the right hand carries a wrist on 377 of its 503 confidence-0 frames). `hand_pose`
-keeps those rows verbatim; the derived mesh skins only frames with a wrist and
-confidence > 0 and writes an empty vertex row on every other frame, so latest-at
-never holds a stale mesh where no hand is. `hand_pose` remains the only AnnotationContext owner.
+keeps those rows verbatim. Low-confidence frames are worse than absent ones: at
+confidence 0.04 (`bbq_pouring-out_5d8a`, frame 138) the shipped left-hand landmarks
+float over empty floor in both headset images. The Hub README says to use
+`confidence > 0.5` by default and calls `> 0` "low-quality frames you usually want to
+drop", so the derived mesh skins only frames with a wrist and confidence > 0.5 and
+writes an empty vertex row on every other frame, so latest-at never holds a stale
+mesh where no hand is. The skeleton shows every shipped landmark, coloured by confidence. `hand_pose` remains the only AnnotationContext owner.
 The existing `/world/**` blueprint filter includes both object and hand meshes.
 
 ### Object-frame verification
