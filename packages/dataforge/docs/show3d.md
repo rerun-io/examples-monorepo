@@ -264,7 +264,7 @@ finite-point error below 0.5 px. The mesh goldens also compare skinned landmarks
 | Source | Layer / destination | Time and properties |
 | --- | --- | --- |
 | `object_pose/v1/.../object_pose.json` | `object_pose`: `/world/gt/objects/<alias>` Transform3D, translation in metres | Both clocks, only confidence > 0; `/confidence` Scalars on every frame |
-| HOT3D BOP stripped GLB | `object_mesh`: object `/mesh` Asset3D + dense Transform3D scale on `/mesh` | Static blob; scale 1 on posed frames, 1e-4 on unposed frames (hides the mesh instead of holding the last pose); int64 `mesh_id`, string `mesh_source=bop-benchmark/hot3d` |
+| HOT3D BOP stripped GLB | `object_mesh`: object `/mesh` Asset3D + dense Transform3D scale on `/mesh` | Static blob; scale 1 where confidence > 0.5 (the Hub README default), 1e-4 otherwise (hides the mesh instead of holding the last pose or showing a shaky one); int64 `mesh_id`, string `mesh_source=bop-benchmark/hot3d` |
 | Hand JSON and full subject model | `hand_mesh`: `/world/gt/hands/{left,right}/mesh` Mesh3D | Static triangles and RGBA albedo (alpha 110); one row per frame on both clocks: world vertices in metres where a wrist exists and confidence > 0.5 (the Hub README default), an empty vertex row otherwise; no properties |
 
 Object records use a partial pyserde schema. Confidence-zero records can have
@@ -276,8 +276,9 @@ remain in the confidence signal; all posed rows remain in the transform signal.
 The object pose stream is sparse, so the viewer's latest-at would keep the static mesh
 at its last pose through every unposed frame (26% of frames corpus-wide; 67% in
 `LWA828/bbq_pouring-out_5d8a`). The `object_mesh` layer therefore logs a dense
-`Transform3D` scale on the `/mesh` entity itself: 1 where posed, `HIDDEN_MESH_SCALE`
-(1e-4) elsewhere, which is invertible (no transform warning) and far below one pixel.
+`Transform3D` scale on the `/mesh` entity itself: 1 where confidence > 0.5 (the same Hub
+default the hands use; the object README says 0.5 "cuts most failures without throwing
+away usable data"), `HIDDEN_MESH_SCALE` (1e-4) elsewhere, which is invertible (no transform warning) and far below one pixel.
 `Clear` cannot serve here (a cleared parent drops the static mesh at the rig origin) and
 scale 0 or NaN translations trigger transform warnings. The parent pose stream stays
 exactly as shipped.

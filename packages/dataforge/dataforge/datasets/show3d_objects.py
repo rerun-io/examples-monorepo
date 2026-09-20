@@ -115,7 +115,7 @@ def write_object_pose_layer(
 
 
 HIDDEN_MESH_SCALE: float = 1e-4
-"""Mesh scale on unposed frames: invertible (no viewer warning) yet far below one pixel."""
+"""Mesh scale where the pose is absent or not trusted: invertible (no viewer warning) yet far below one pixel."""
 
 
 def write_object_mesh_layer(
@@ -125,15 +125,15 @@ def write_object_mesh_layer(
 
     The pose stream on the parent entity is sparse (posed frames only, as shipped), so the
     viewer's latest-at would keep the static mesh at the last pose through every unposed
-    frame. A dense scale on the mesh entity itself hides it there: 1 where posed,
-    ``HIDDEN_MESH_SCALE`` otherwise. ``Clear`` cannot do this (a cleared parent puts the
+    frame. A dense scale on the mesh entity itself hides it there, and also below the Hub's
+    default confidence threshold: 1 where trusted, ``HIDDEN_MESH_SCALE`` otherwise. ``Clear`` cannot do this (a cleared parent puts the
     static mesh at the rig origin) and scale 0 or NaN trigger transform warnings.
     """
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
         path: str = schema.object_mesh_path(alias)
         rr.log(path, rr.Asset3D(path=mesh), static=True, recording=recording)
         scales: Float32[ndarray, "n 3"] = np.repeat(
-            np.asarray([[1.0 if frame.posed else HIDDEN_MESH_SCALE] for frame in frames], dtype=np.float32), 3, axis=1
+            np.asarray([[1.0 if frame.trusted else HIDDEN_MESH_SCALE] for frame in frames], dtype=np.float32), 3, axis=1
         )
         rr.send_columns(path, indexes=clock.indexes(slice(None)), columns=rr.Transform3D.columns(scale=scales), recording=recording)
         recording.send_property(

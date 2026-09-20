@@ -234,7 +234,7 @@ def test_real_scene_object_and_mesh_layers(object_scene: ObjectBuild) -> None:
                 scale_rows[int(index)] = float(scale[0][0])
     assert len(scale_rows) == len(build.frames)
     assert any(not f.posed for f in build.frames), "fixture lacks an unposed object frame"
-    assert all(scale_rows[f.index] == float(np.float32(1.0 if f.posed else HIDDEN_MESH_SCALE)) for f in build.frames)
+    assert all(scale_rows[f.index] == float(np.float32(1.0 if f.trusted else HIDDEN_MESH_SCALE)) for f in build.frames)
     assert recording_properties(read_back(build.output / "object_mesh.rrd"), "object_mesh") == {
         "mesh_id": 28 if alias == "keyboard" else 26,
         "mesh_source": "bop-benchmark/hot3d",

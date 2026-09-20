@@ -27,13 +27,17 @@ from simplecv.umetrack_temp.generic_hand_model_numpy import (
 )
 
 from dataforge import schema, writing
-from dataforge.datasets.show3d_source import HAND_POSE_VERSION, HEADSET_CAMERAS, FrameClock, FrameInfo, agrees_with_frame, read_json, sparse_rows
+from dataforge.datasets.show3d_source import (
+    DEFAULT_CONFIDENCE,
+    HAND_POSE_VERSION,
+    HEADSET_CAMERAS,
+    FrameClock,
+    FrameInfo,
+    agrees_with_frame,
+    read_json,
+    sparse_rows,
+)
 from dataforge.identity import SequenceIdentity
-
-HAND_CONFIDENCE: float = 0.5
-"""Place landmarks and skin a hand only above this confidence: the Hub README's default threshold ("filters
-most solver failures without throwing away usable data"); ``> 0`` includes "low-quality frames you usually want
-to drop". The per-hand ``/confidence`` stream keeps the shipped value on every frame regardless."""
 
 
 @serde
@@ -57,7 +61,7 @@ class HandPose:
     @property
     def trusted(self) -> bool:
         """Above the Hub's default threshold; the one place that rule lives."""
-        return self.confidence > HAND_CONFIDENCE
+        return self.confidence > DEFAULT_CONFIDENCE
 
     def __post_init__(self) -> None:
         if not isfinite(self.confidence):
@@ -281,7 +285,7 @@ def write_hand_mesh_layer(identity: SequenceIdentity, clock: FrameClock, frames:
     The source ships a wrist and joint angles for many frames it marks with confidence 0
     (the tracker lost the hand) and for low-confidence frames whose landmarks float far
     from any hand. Those rows are kept verbatim in ``hand_pose``; this derived layer skins
-    only frames with a wrist and confidence > ``HAND_CONFIDENCE``, and writes an empty
+    only frames with a wrist and confidence > ``DEFAULT_CONFIDENCE``, and writes an empty
     vertex row on every other frame so the viewer's latest-at never holds a stale mesh.
     """
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
