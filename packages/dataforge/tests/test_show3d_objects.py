@@ -21,7 +21,7 @@ from simplecv.umetrack_temp.generic_hand_model_numpy import HandModelNumpy, skin
 from dataforge import paths, schema, transports
 from dataforge.datasets.show3d import Show3dConfig, Show3dDataset
 from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetPose
-from dataforge.datasets.show3d_hands import HAND_SIDES, MESH_CONFIDENCE, HandFrame, HandPose, write_hand_mesh_layer
+from dataforge.datasets.show3d_hands import HAND_CONFIDENCE, HAND_SIDES, HandFrame, HandPose, write_hand_mesh_layer
 from dataforge.datasets.show3d_mesh_source import MESH_REPO, MeshAsset, MeshInfo, download_meshes, mesh_ids, strip_texture_transform, stripped_mesh
 from dataforge.datasets.show3d_object_source import CLOCK_TOLERANCE_S, ObjectFrame, ObjectTrack, read_object_frames
 from dataforge.datasets.show3d_objects import HIDDEN_MESH_SCALE, ObjectSanity, object_sanity, write_object_mesh_layer, write_object_pose_layer
@@ -149,7 +149,7 @@ def test_hand_mesh_skins_only_above_default_confidence_and_clears_other_frames(s
     good: HandPose = next(
         f.hand_poses["1"]
         for f in inputs.hands
-        if f.hand_poses["1"].wrist_rotation is not None and f.hand_poses["1"].confidence > MESH_CONFIDENCE
+        if f.hand_poses["1"].wrist_rotation is not None and f.hand_poses["1"].confidence > HAND_CONFIDENCE
     )
     low: HandPose = HandPose(0.3, good.joint_angles, good.wrist_rotation, good.wrist_translation, good.landmarks_3d_mm, None)
     lost: HandPose = HandPose(0.0, good.joint_angles, good.wrist_rotation, good.wrist_translation, None, None)
@@ -244,7 +244,7 @@ def test_real_scene_object_and_mesh_layers(object_scene: ObjectBuild) -> None:
         temporal: list[rr.experimental.Chunk] = [c for c in hand_chunks if str(c.entity_path) == schema.hand_mesh_path(side.name) and not c.is_static]
         # One row per frame: skinned vertices where Meta trusts the hand, an empty row otherwise so the viewer holds nothing.
         assert sum(c.num_rows for c in temporal) == len(build.hands)
-        trusted: list[bool] = [f.hand_poses[side.key].wrist_rotation is not None and f.hand_poses[side.key].confidence > MESH_CONFIDENCE for f in build.hands]
+        trusted: list[bool] = [f.hand_poses[side.key].wrist_rotation is not None and f.hand_poses[side.key].confidence > HAND_CONFIDENCE for f in build.hands]
         rows: dict[int, int] = mesh_vertex_counts(temporal)
         assert [rows[f.index] > 0 for f in build.hands] == trusted
         assert {n for n in rows.values() if n} == {len(build.profile.mesh_vertices)}

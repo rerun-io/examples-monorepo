@@ -22,7 +22,15 @@ from dataforge.datasets.base import DataforgeDataset
 from dataforge.datasets.show3d import Show3dConfig, Show3dDataset, base_files
 from dataforge.datasets.show3d_calibration import pinhole
 from dataforge.datasets.show3d_captions import Caption, write_properties_layer
-from dataforge.datasets.show3d_hands import HAND_SIDES, HandFrame, HandPose, high_confidence_coverage, read_hand_frames, write_hand_pose_layer
+from dataforge.datasets.show3d_hands import (
+    HAND_CONFIDENCE,
+    HAND_SIDES,
+    HandFrame,
+    HandPose,
+    high_confidence_coverage,
+    read_hand_frames,
+    write_hand_pose_layer,
+)
 from dataforge.datasets.show3d_layers import Scene
 from dataforge.datasets.show3d_source import (
     CAPTIONS_VERSION,
@@ -179,8 +187,9 @@ def test_real_scene_annotation_layers(annotation_scene: AnnotationBuild) -> None
                 pose: HandPose = frame.hand_poses[side.key]
                 offset: int = 91 + 21 * hand_index
                 # Source fingertip 0 maps to COCO thumb4, independent of interpolation.
+                placed: bool = pose.confidence > HAND_CONFIDENCE  # Hub README default threshold
                 if dimensions == 3:
-                    if pose.landmarks_3d_mm is None:
+                    if pose.landmarks_3d_mm is None or not placed:
                         assert np.isnan(points[index, offset : offset + 21]).all()
                         assert (confidence[index, offset : offset + 21] == 0.0).all()
                     else:
@@ -189,7 +198,7 @@ def test_real_scene_annotation_layers(annotation_scene: AnnotationBuild) -> None
                 else:
                     camera_name: str = "headset0" if path == schema.coco133_uv_path(1, 0) else "headset1"
                     pixels: list[list[float] | None] | None = (pose.landmarks_2d or {}).get(camera_name)
-                    if pixels is None or pixels[0] is None:
+                    if pixels is None or pixels[0] is None or not placed:
                         assert np.isnan(points[index, offset + 4]).all()
                         assert confidence[index, offset + 4] == 0.0
                     else:
@@ -433,13 +442,15 @@ def test_hand_layer_writes_dense_coco133_with_shipped_confidence_and_pixels(tmp_
     pixels[5] = [10.0, 20.0]
     pixels[6] = [50.0, 60.0]
     pixels[1] = None
-    left: HandPose = HandPose(0.5, None, None, None, landmarks, {"headset0": pixels})
+    left: HandPose = HandPose(0.6, None, None, None, landmarks, {"headset0": pixels})
     right: HandPose = HandPose(1.0, None, None, None, landmarks, {"headset1": pixels})
     absent: HandPose = HandPose(0.75, None, None, None, None, None)
+    low: HandPose = HandPose(0.5, None, None, None, landmarks, {"headset0": pixels})  # at the threshold: shipped but not placed
     frames: list[HandFrame] = [
         HandFrame(0, 20, 1.0, [], {"0": left, "1": right}),
-        HandFrame(1, 21, 2.0, [], {"0": absent, "1": right}),
+        HandFrame(1, 21, 2.0, [], {"0": low, "1": right}),
     ]
+    del absent
     target: Path = tmp_path / "hand_pose.rrd"
     write_hand_pose_layer(SequenceIdentity("show3d", ("S", "none_wave_abcd")), clock, frames, "{}", target)
     chunks: list[rr.experimental.Chunk] = read_chunks(target)
@@ -477,13 +488,14 @@ def test_hand_layer_writes_dense_coco133_with_shipped_confidence_and_pixels(tmp_
             np.testing.assert_allclose(points[0, 95], [1.0, 2.0, 3.0])
             np.testing.assert_allclose(points[0, [9, 91]], [[2.0, 4.0, 6.0]] * 2)
             np.testing.assert_allclose(points[0, 92], [3.0, 5.0, 7.0])
-            assert (confidence[0, 91:112] == 0.5).all()
-            assert confidence[0, 9] == 0.5
+            assert confidence[0, 91:112] == pytest.approx(0.6)
+            assert confidence[0, 9] == pytest.approx(0.6)
+            assert np.isnan(points[1, 91:112]).all()  # confidence 0.5 is not above the README default
+            assert (confidence[1, 91:112] == 0.0).all()
             assert (confidence[:, 112:133] == 1.0).all()
             assert (confidence[:, 10] == 1.0).all()
             colors: list[int] = rows[0]["Points3D:colors"]
             assert len(colors) == 133
-            assert colors[95] == 0xFFFF00FF  # 0.5 confidence: yellow RGBA.
             assert colors[116] == 0x00FF00FF  # 1.0 confidence: green RGBA.
         else:
             offset: int = 91 if path == schema.coco133_uv_path(1, 0) else 112
@@ -491,6 +503,6 @@ def test_hand_layer_writes_dense_coco133_with_shipped_confidence_and_pixels(tmp_
             np.testing.assert_allclose(points[0, offset + 1], [30.0, 40.0])
             assert np.isnan(points[0, offset + 8]).all()  # Null index fingertip.
             assert confidence[0, offset + 8] == 0.0
-            assert confidence[0, offset + 4] == (0.5 if offset == 91 else 1.0)
+            assert confidence[0, offset + 4] == pytest.approx(0.6 if offset == 91 else 1.0)
             assert (confidence[~np.isfinite(points).all(axis=2)] == 0.0).all()
     assert not any(str(chunk.entity_path).endswith(("/landmarks", "/uv")) for chunk in chunks)

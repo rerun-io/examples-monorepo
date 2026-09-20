@@ -209,11 +209,11 @@ includes only headset0 video.
 | Source | Layer / destination |
 | --- | --- |
 | COCO-133 names and connections | `hand_pose`: static `/` AnnotationContext, one class, ID 0, "Coco Wholebody" |
-| `landmarks_3d_mm` | `/world/gt/coco133_xyz`: dense 133-point Points3DWithConfidence rows in metres, class 0, static COCO keypoint IDs, per-point confidence colours |
+| `landmarks_3d_mm` | `/world/gt/coco133_xyz`: dense 133-point Points3DWithConfidence rows in metres, class 0, static COCO keypoint IDs, per-point confidence colours; placed only where the hand's confidence is > 0.5 (the Hub README default) |
 | `joint_angles` | Hand `/joint_angles`: 22 float32 values per available row |
 | Wrist rotation and translation | Hand `/wrist`: world-from-wrist Transform3D, translation in metres |
 | Confidence | Hand `/confidence`: Scalars on every frame, including zero |
-| `landmarks_2d` | `/world/rig_01/cam_0{0,1}/pinhole/coco133_uv`: dense 133-point Points2DWithConfidence rows from shipped pixels; null points and absent hands become NaN with zero confidence |
+| `landmarks_2d` | `/world/rig_01/cam_0{0,1}/pinhole/coco133_uv`: dense 133-point Points2DWithConfidence rows from shipped pixels; null points, absent hands, and hands at confidence ≤ 0.5 become NaN with zero confidence |
 | Subject profile JSON | `/world/gt/hands/profile`: verbatim static TextDocument with `application/json` media type |
 | Caption JSON (all ten strings) | `captions`: static Markdown TextDocument at `/task/instruction`; overall caption first, other fields as a definition list |
 | Index row and caption | `properties`: one `episode` property chunk |
@@ -221,8 +221,13 @@ includes only headset0 video.
 `hand_pose` is the single owner of the root `AnnotationContext` until a shared
 layer exists. UmeTrack landmarks use the Assembly-Hands index order and are
 mapped into COCO-133, including body wrists and interpolated thumb bases. Other
-body and face points remain NaN with zero confidence. Each available hand carries
-its shipped confidence; an absent hand has NaN positions and zero confidence.
+body and face points remain NaN with zero confidence. Each placed hand carries
+its shipped confidence; an absent hand, or one at confidence ≤ 0.5, has NaN positions
+and zero confidence in the COCO stack. The Hub README sets `confidence > 0.5` as the
+default threshold and calls `> 0` "low-quality frames you usually want to drop"; at 0.04
+the shipped landmarks float over empty floor (`bbq_pouring-out_5d8a`, frame 138). The
+per-hand `/confidence` stream keeps the shipped value on every frame, so nothing is lost
+for a consumer who wants a different cut.
 `landmarks_3d_mm_local` is not logged.
 
 A rectified pinhole pane shows the viewer projection of `coco133_xyz` and hides
@@ -300,9 +305,9 @@ keeps those rows verbatim. Low-confidence frames are worse than absent ones: at
 confidence 0.04 (`bbq_pouring-out_5d8a`, frame 138) the shipped left-hand landmarks
 float over empty floor in both headset images. The Hub README says to use
 `confidence > 0.5` by default and calls `> 0` "low-quality frames you usually want to
-drop", so the derived mesh skins only frames with a wrist and confidence > 0.5 and
-writes an empty vertex row on every other frame, so latest-at never holds a stale
-mesh where no hand is. The skeleton shows every shipped landmark, coloured by confidence. `hand_pose` remains the only AnnotationContext owner.
+drop", so landmarks are placed and the derived mesh is skinned only above 0.5; the mesh writes
+an empty vertex row on every other frame, so latest-at never holds a stale mesh where no
+hand is. `hand_pose` remains the only AnnotationContext owner.
 The existing `/world/**` blueprint filter includes both object and hand meshes.
 
 ### Object-frame verification

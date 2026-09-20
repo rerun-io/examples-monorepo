@@ -142,9 +142,10 @@ def read_hand_profile(path: Path) -> HandProfileDoc:
 
 SKINNING_BATCH_SIZE: int = 256
 """Bound skinning workspace to less than 20 MB."""
-MESH_CONFIDENCE: float = 0.5
-"""Skin a hand only above this confidence: the Hub README's default threshold ("filters most solver
-failures without throwing away usable data"); ``> 0`` includes "low-quality frames you usually want to drop"."""
+HAND_CONFIDENCE: float = 0.5
+"""Place landmarks and skin a hand only above this confidence: the Hub README's default threshold ("filters
+most solver failures without throwing away usable data"); ``> 0`` includes "low-quality frames you usually want
+to drop". The per-hand ``/confidence`` stream keeps the shipped value on every frame regardless."""
 
 
 def high_confidence_coverage(confidence: list[float]) -> float:
@@ -180,14 +181,14 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
             landmarks_lr: Float32[ndarray, "2 21 3"] = np.full((2, 21, 3), np.nan, dtype=np.float32)
             for hand_index, side in enumerate(HAND_SIDES):
                 pose: HandPose = frame.hand_poses[side.key]
-                if pose.landmarks_3d_mm is not None:
+                if pose.landmarks_3d_mm is not None and pose.confidence > HAND_CONFIDENCE:
                     landmarks_lr[hand_index] = pose.landmarks_3d_mm * np.float32(0.001)
             # Checked UmeTrack LANDMARK against Assembly-Hands HAND_ID2NAME: tips 0–4,
             # wrist 5, thumb 6–7, finger joints 8–19, palm 20 have the same order.
             xyz[frame_index] = assembly21_to_coco133(landmarks_lr)[:, :3]
             for hand_index, side in enumerate(HAND_SIDES):
                 pose = frame.hand_poses[side.key]
-                if pose.landmarks_3d_mm is not None:
+                if pose.landmarks_3d_mm is not None and pose.confidence > HAND_CONFIDENCE:
                     offset: int = 91 + hand_index * 21
                     conf[frame_index, offset : offset + 21] = np.float32(pose.confidence)
                     conf[frame_index, 9 + hand_index] = np.float32(pose.confidence)
@@ -217,7 +218,7 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
                 for hand_index, side in enumerate(HAND_SIDES):
                     pose = frame.hand_poses[side.key]
                     pixels: list[list[float] | None] | None = (pose.landmarks_2d or {}).get(camera.source_name)
-                    if pixels is not None:
+                    if pixels is not None and pose.confidence > HAND_CONFIDENCE:
                         pixels_lr[hand_index, :, :2] = np.asarray(
                             [point if point is not None else [np.nan, np.nan] for point in pixels], dtype=np.float32
                         )
@@ -274,7 +275,7 @@ def write_hand_mesh_layer(identity: SequenceIdentity, clock: FrameClock, frames:
     The source ships a wrist and joint angles for many frames it marks with confidence 0
     (the tracker lost the hand) and for low-confidence frames whose landmarks float far
     from any hand. Those rows are kept verbatim in ``hand_pose``; this derived layer skins
-    only frames with a wrist and confidence > ``MESH_CONFIDENCE``, and writes an empty
+    only frames with a wrist and confidence > ``HAND_CONFIDENCE``, and writes an empty
     vertex row on every other frame so the viewer's latest-at never holds a stale mesh.
     """
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
@@ -287,7 +288,7 @@ def write_hand_mesh_layer(identity: SequenceIdentity, clock: FrameClock, frames:
                 recording=recording,
             )
             poses: list[HandPose] = [frame.hand_poses[side.key] for frame in frames]
-            trusted: list[bool] = [pose.wrist_rotation is not None and pose.confidence > MESH_CONFIDENCE for pose in poses]
+            trusted: list[bool] = [pose.wrist_rotation is not None and pose.confidence > HAND_CONFIDENCE for pose in poses]
             if any(pose.joint_angles is None for pose, ok in zip(poses, trusted, strict=True) if ok):
                 raise ValueError(f"{identity.sequence_key}: posed {side.name} hand lacks joint angles")
             for start in range(0, len(frames), SKINNING_BATCH_SIZE):
