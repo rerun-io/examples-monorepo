@@ -23,7 +23,6 @@ from dataforge.datasets.show3d import Show3dConfig, Show3dDataset, base_files
 from dataforge.datasets.show3d_calibration import pinhole
 from dataforge.datasets.show3d_captions import Caption, write_properties_layer
 from dataforge.datasets.show3d_hands import (
-    HAND_CONFIDENCE,
     HAND_SIDES,
     HandFrame,
     HandPose,
@@ -187,7 +186,7 @@ def test_real_scene_annotation_layers(annotation_scene: AnnotationBuild) -> None
                 pose: HandPose = frame.hand_poses[side.key]
                 offset: int = 91 + 21 * hand_index
                 # Source fingertip 0 maps to COCO thumb4, independent of interpolation.
-                placed: bool = pose.confidence > HAND_CONFIDENCE  # Hub README default threshold
+                placed: bool = pose.trusted  # Hub README default threshold
                 if dimensions == 3:
                     if pose.landmarks_3d_mm is None or not placed:
                         assert np.isnan(points[index, offset : offset + 21]).all()
