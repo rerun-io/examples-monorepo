@@ -367,7 +367,10 @@ impl GaussianDrawData {
         cloud_generation: u64,
         camera: &CameraApproximation,
     ) {
-        let renderer = ctx.renderer::<GaussianRenderer>();
+        // 0.38: `renderer()` reports registration failure instead of panicking.
+        let renderer = ctx
+            .renderer::<GaussianRenderer>()
+            .expect("GaussianRenderer must be registered before batching");
         if cloud.is_empty() {
             return;
         }
