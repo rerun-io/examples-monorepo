@@ -121,7 +121,7 @@ def test_writer_failure_propagates_after_saving_progress(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(convert_all, "write_session_rrd", fail_second)
     with pytest.raises(ValueError, match="writer failure"):
-        convert_all.main(convert_all.Config(home=home, out=tmp_path / "out"))
+        main(Config(home=home, out=tmp_path / "out"))
     assert set(load_manifest(tmp_path / "out/claude/manifest.json").sessions) == {"a"}
 
 
@@ -186,5 +186,5 @@ def test_appledouble_sidecars_are_not_sessions(tmp_path: Path, capsys: pytest.Ca
     builder: SessionBuilder = SessionBuilder(home / "projects" / "p" / "real.jsonl")
     builder.add("user", message={"content": "hello"})
     (home / "projects" / "p" / "._real.jsonl").write_bytes(b"\x00\x05\x16\x07 not json")
-    convert_all.main(convert_all.Config(home=home, out=tmp_path / "out"))
+    main(Config(home=home, out=tmp_path / "out"))
     assert "converted=1 skipped=0 failed=0" in capsys.readouterr().out
