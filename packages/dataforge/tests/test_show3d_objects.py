@@ -24,7 +24,7 @@ from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetPos
 from dataforge.datasets.show3d_hands import HAND_SIDES, HandFrame, HandPose, write_hand_mesh_layer
 from dataforge.datasets.show3d_mesh_source import MESH_REPO, MeshAsset, MeshInfo, download_meshes, mesh_ids, strip_texture_transform, stripped_mesh
 from dataforge.datasets.show3d_object_source import CLOCK_TOLERANCE_S, ObjectFrame, ObjectTrack, read_object_frames
-from dataforge.datasets.show3d_objects import HIDDEN_MESH_SCALE, ObjectSanity, object_sanity, write_object_mesh_layer, write_object_pose_layer
+from dataforge.datasets.show3d_objects import ObjectSanity, object_sanity, write_object_mesh_layer, write_object_pose_layer
 from dataforge.datasets.show3d_source import (
     HEADSET_CAMERAS,
     OBJECT_POSE_VERSION,
@@ -223,18 +223,21 @@ def test_real_scene_object_and_mesh_layers(object_scene: ObjectBuild) -> None:
         str(c.entity_path) == schema.object_mesh_path(alias) and c.is_static and "Asset3D:blob" in c.to_record_batch().schema.names
         for c in mesh_chunks
     )
-    # The static mesh would otherwise persist at the last pose through unposed frames; a dense scale on the
-    # mesh entity hides it there while the shipped pose stream on the parent stays sparse and untouched.
-    scale_rows: dict[int, float] = {}
+    # The static mesh would otherwise persist at the last pose through unposed frames. A temporal
+    # albedo alpha on the mesh entity hides it below the Hub's default confidence: rows only where
+    # visibility changes, latest-at carries them, the shipped pose stream on the parent stays sparse.
+    alpha_rows: dict[int, float] = {}
     for c in mesh_chunks:
         if str(c.entity_path) == schema.object_mesh_path(alias) and not c.is_static:
             batch: pa.RecordBatch = c.to_record_batch()
             assert set(c.timeline_names) == {"video_time", "frame_index"}
-            for index, scale in zip(batch.column("frame_index").to_pylist(), batch.column("Transform3D:scale").to_pylist(), strict=True):
-                scale_rows[int(index)] = float(scale[0][0])
-    assert len(scale_rows) == len(build.frames)
-    assert any(not f.posed for f in build.frames), "fixture lacks an unposed object frame"
-    assert all(scale_rows[f.index] == float(np.float32(1.0 if f.trusted else HIDDEN_MESH_SCALE)) for f in build.frames)
+            for index, albedo in zip(batch.column("frame_index").to_pylist(), batch.column("Asset3D:albedo_factor").to_pylist(), strict=True):
+                alpha_rows[int(index)] = (albedo[0] & 0xFF) / 255.0 if isinstance(albedo[0], int) else float(albedo[0][3])
+    trusted_by_frame: list[bool] = [f.trusted for f in build.frames]
+    assert any(not t for t in trusted_by_frame), "fixture lacks an untrusted object frame"
+    changes: list[int] = [f.index for i, f in enumerate(build.frames) if i == 0 or trusted_by_frame[i] != trusted_by_frame[i - 1]]
+    assert sorted(alpha_rows) == changes
+    assert all(alpha_rows[f.index] == (1.0 if f.trusted else 0.0) for f in build.frames if f.index in alpha_rows)
     assert recording_properties(read_back(build.output / "object_mesh.rrd"), "object_mesh") == {
         "mesh_id": 28 if alias == "keyboard" else 26,
         "mesh_source": "bop-benchmark/hot3d",

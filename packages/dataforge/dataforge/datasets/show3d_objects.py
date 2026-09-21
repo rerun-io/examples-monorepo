@@ -114,28 +114,25 @@ def write_object_pose_layer(
         )
 
 
-HIDDEN_MESH_SCALE: float = 1e-4
-"""Mesh scale where the pose is absent or not trusted: invertible (no viewer warning) yet far below one pixel."""
-
-
 def write_object_mesh_layer(
     identity: SequenceIdentity, alias: str, clock: FrameClock, frames: list[ObjectFrame], mesh_id: int, mesh: Path, target: Path
 ) -> None:
-    """Publish the GLB in the object frame, retaining its metre node scale.
+    """Publish the GLB in the object frame, retaining its metre node scale, visible only where trusted.
 
     The pose stream on the parent entity is sparse (posed frames only, as shipped), so the
     viewer's latest-at would keep the static mesh at the last pose through every unposed
-    frame. A dense scale on the mesh entity itself hides it there, and also below the Hub's
-    default confidence threshold: 1 where trusted, ``HIDDEN_MESH_SCALE`` otherwise. ``Clear`` cannot do this (a cleared parent puts the
-    static mesh at the rig origin) and scale 0 or NaN trigger transform warnings.
+    frame. The mesh entity therefore carries a temporal ``albedo_factor``: opaque white where the
+    frame is trusted (confidence above the Hub's default threshold), fully transparent otherwise.
+    Rows exist only where visibility changes; latest-at carries them. ``Clear`` cannot serve
+    (a cleared parent puts the static mesh at the rig origin); a scale of 0 warns and still draws.
     """
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
         path: str = schema.object_mesh_path(alias)
         rr.log(path, rr.Asset3D(path=mesh), static=True, recording=recording)
-        scales: Float32[ndarray, "n 3"] = np.repeat(
-            np.asarray([[1.0 if frame.trusted else HIDDEN_MESH_SCALE] for frame in frames], dtype=np.float32), 3, axis=1
-        )
-        rr.send_columns(path, indexes=clock.indexes(slice(None)), columns=rr.Transform3D.columns(scale=scales), recording=recording)
+        trusted: list[bool] = [frame.trusted for frame in frames]
+        changes: list[int] = [i for i in range(len(frames)) if i == 0 or trusted[i] != trusted[i - 1]]
+        albedo: Float32[ndarray, "k 4"] = np.asarray([[1.0, 1.0, 1.0, 1.0 if trusted[i] else 0.0] for i in changes], dtype=np.float32)
+        rr.send_columns(path, indexes=clock.indexes(changes), columns=rr.Asset3D.columns(albedo_factor=albedo), recording=recording)
         recording.send_property(
             "object_mesh", rr.AnyValues(mesh_id=pa.array([mesh_id], type=pa.int64()), mesh_source=pa.array([MESH_REPO], type=pa.string()))
         )
