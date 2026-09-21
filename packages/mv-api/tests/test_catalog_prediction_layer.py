@@ -506,7 +506,7 @@ def test_write_viewer_validation_notes_records_every_required_exo_screenshot(tmp
 
 
 def test_save_exo_viewer_blueprint_fixes_2d_visual_bounds(tmp_path: Path) -> None:
-    from rerun.experimental import RrdReader, StoreEntry
+    from rerun.chunk import RrdReader, StoreEntry
 
     target: ViewerScreenshotTarget = ViewerScreenshotTarget(
         camera_name="C10095",
@@ -567,7 +567,7 @@ def test_capture_native_viewer_screenshots_uses_timeout(monkeypatch: pytest.Monk
 
 def test_prediction_layer_rows_are_column_logged_on_video_time_only(tmp_path: Path) -> None:
     import rerun as rr
-    from rerun.experimental import RrdReader
+    from rerun.chunk import RrdReader
 
     stream: ExoCameraStream = ExoCameraStream(
         name="C10095",

@@ -21,6 +21,7 @@ import pyarrow as pa
 import pytest
 import rerun as rr
 import rerun.blueprint as rrb
+import rerun.chunk as rrc
 import serde.json
 from conftest import (  # pyrefly: ignore[missing-import]
     PublishedCamera,
@@ -732,7 +733,7 @@ def convert_one(fake: FakeArchive, *, force: bool = False) -> tuple[SequenceIden
     return identity, dataset.convert(identity, source, force=force)
 
 
-def static_row(store: rr.experimental.ChunkStore, entity_path: str) -> dict[str, list[object]]:
+def static_row(store: rrc.ChunkStore, entity_path: str) -> dict[str, list[object]]:
     """The one static row of an entity, as a column → values mapping."""
     return store.reader(index=None, contents=entity_path).to_arrow_table().to_pylist()[0]
 
@@ -785,7 +786,7 @@ def converted_surveyed(tmp_path_factory: pytest.TempPathFactory, nvenc_ffmpeg: P
 @pytest.mark.integration
 def test_convert_writes_three_camera_streams_and_two_imus(converted_easy: ConvertedSequence) -> None:
     assert converted_easy.base.name == "lamaria__R_01_easy.rrd"
-    store: rr.experimental.ChunkStore = read_back(converted_easy.base)
+    store: rrc.ChunkStore = read_back(converted_easy.base)
     assert [column_rows(store, f"{schema.video_path(0, index)}:VideoStream:sample").num_rows for index in range(3)] == [
         SLAM_FRAMES,
         SLAM_FRAMES,
@@ -831,7 +832,7 @@ def test_the_logged_cam_00_node_carries_the_published_rig_T_cam(converted_easy: 
 
 @pytest.mark.integration
 def test_the_rgb_camera_says_so_and_the_slam_pair_does_not(converted_easy: ConvertedSequence) -> None:
-    store: rr.experimental.ChunkStore = read_back(converted_easy.base)
+    store: rrc.ChunkStore = read_back(converted_easy.base)
     kinds: list[object] = []
     for index in range(3):
         node: str = schema.cam_path(0, index)
@@ -843,7 +844,7 @@ def test_the_rgb_camera_says_so_and_the_slam_pair_does_not(converted_easy: Conve
 @pytest.mark.integration
 def test_imu_01_carries_its_real_pose_while_imu_00_is_the_rig(converted_easy: ConvertedSequence) -> None:
     """imu-right *is* the rig frame; imu-left sits 13 cm away and rotated."""
-    store: rr.experimental.ChunkStore = read_back(converted_easy.base)
+    store: rrc.ChunkStore = read_back(converted_easy.base)
     poses: list[Float64[ndarray, "3"]] = []
     for imu in range(2):
         node: str = schema.imu_path(0, imu)
@@ -856,7 +857,7 @@ def test_imu_01_carries_its_real_pose_while_imu_00_is_the_rig(converted_easy: Co
 @pytest.mark.integration
 def test_the_base_layer_owns_no_world_frame(converted_easy: ConvertedSequence) -> None:
     """The gt layer establishes the world, so it owns the root axes and the rig transform."""
-    store: rr.experimental.ChunkStore = read_back(converted_easy.base)
+    store: rrc.ChunkStore = read_back(converted_easy.base)
     assert "/:ViewCoordinates:xyz" not in store.reader(index=None, contents="/").to_arrow_table().column_names
     rig_columns: list[str] = store.reader(index=None, contents=schema.rig_path(0)).to_arrow_table().column_names
     # A static transform here would permanently shadow the temporal world_T_rig.
@@ -1116,7 +1117,7 @@ def test_an_accelerometer_that_stops_before_the_ground_truth_starts_is_an_error(
 # ── the gt layer, written by the same convert ─────────────────────────────
 
 
-def gt_store(identity: SequenceIdentity) -> rr.experimental.ChunkStore:
+def gt_store(identity: SequenceIdentity) -> rrc.ChunkStore:
     """Read back the gt-layer rrd of one converted sequence."""
     return read_back(paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity))
 
@@ -1182,7 +1183,7 @@ def test_the_rig_transform_is_stored_child_from_parent_free(converted_easy: Conv
 @pytest.mark.integration
 def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail(converted_easy: ConvertedSequence) -> None:
     """The overview strip is static and whole; the trail is one segment per pose, for the cursor window."""
-    store: rr.experimental.ChunkStore = read_back(converted_easy.gt)
+    store: rrc.ChunkStore = read_back(converted_easy.gt)
     trajectory: str = schema.trajectory_path("gt")
     strips: list[list[list[float]]] = (
         store.reader(index=None, contents=trajectory).to_arrow_table().to_pylist()[0][f"{trajectory}:LineStrips3D:strips"]
@@ -1204,7 +1205,7 @@ def test_only_the_gt_layer_states_the_world_axes(converted_easy: ConvertedSequen
     gt_root: pa.Table = read_back(converted_easy.gt).reader(index=None, contents="/").to_arrow_table()
     declared: list[int] = [int(direction.value) for direction in rr.ViewCoordinates.RIGHT_HAND_Z_UP.coordinates]
     assert [int(value) for value in gt_root.to_pylist()[0]["/:ViewCoordinates:xyz"][0]] == declared
-    base: rr.experimental.ChunkStore = read_back(converted_easy.base)
+    base: rrc.ChunkStore = read_back(converted_easy.base)
     assert "/:ViewCoordinates:xyz" not in base.reader(index=None, contents="/").to_arrow_table().column_names
 
 
@@ -1272,7 +1273,7 @@ def test_the_control_points_are_static_labelled_points_in_the_world(converted_su
 @pytest.mark.integration
 def test_the_control_point_detections_sit_under_the_camera_that_saw_them(converted_surveyed: ConvertedSequence) -> None:
     """One columnar Points2D per camera, at the detection stamps, labelled by point."""
-    store: rr.experimental.ChunkStore = read_back(converted_surveyed.gt)
+    store: rrc.ChunkStore = read_back(converted_surveyed.gt)
     expected_rows: dict[int, int] = {0: len(DETECTION_FRAMES[aria.SLAM_LEFT_STREAM_ID]), 1: len(DETECTION_FRAMES[aria.SLAM_RIGHT_STREAM_ID])}
     for cam, rows in expected_rows.items():
         detections: pa.Table = column_rows(store, f"{schema.cp_uv_path(0, cam)}:Points2D:positions")
@@ -1391,7 +1392,7 @@ def test_a_sequence_with_control_points_but_no_pgt_still_gets_a_gt_layer(
         identity, source = dataset.discover()[0]
         dataset.convert(identity, replace(source, pseudo_gt_path=None), force=False)
 
-    store: rr.experimental.ChunkStore = gt_store(identity)
+    store: rrc.ChunkStore = gt_store(identity)
     entity: str = schema.control_points_path()
     assert len(static_row(store, entity)[f"{entity}:Points3D:labels"]) == 2
     gt: dict[str, object] = recording_properties(store, "gt")

@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import rerun as rr
 import trimesh
-from rerun.experimental import RrdReader
+from rerun.chunk import RrdReader
 
 from arkitscenes_download.ingest.gt import ArkitMeshSummary, log_arkit_mesh, log_gt_boxes
 

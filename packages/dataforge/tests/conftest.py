@@ -26,6 +26,7 @@ import pyarrow as pa
 import pytest
 import rerun as rr
 import rerun.blueprint as rrb
+import rerun.chunk as rrc
 from jaxtyping import UInt8
 from numpy import ndarray
 from serde import field, from_dict, serde
@@ -102,16 +103,16 @@ def png_frame(index: int, *, width: int, height: int, noisy: bool = False) -> by
     return buffer.tobytes()
 
 
-def read_back(rrd: Path) -> rr.experimental.ChunkStore:
+def read_back(rrd: Path) -> rrc.ChunkStore:
     """Load a saved rrd the way a consumer does: reader → store → queryable views.
 
     The stream is materialized because ``from_chunks`` declares ``Sequence[Chunk]``;
     these recordings are a few dozen rows, so the list costs nothing.
     """
-    return rr.experimental.ChunkStore.from_chunks(list(rr.experimental.RrdReader(rrd).stream()))
+    return rrc.ChunkStore.from_chunks(list(rrc.RrdReader(rrd).stream()))
 
 
-def recording_properties(store: rr.experimental.ChunkStore, group: str) -> dict[str, object]:
+def recording_properties(store: rrc.ChunkStore, group: str) -> dict[str, object]:
     """One property group's values (``property:<group>:*``), unwrapped from their one-row lists.
 
     Properties live on the static ``/__properties`` entity, off every index, so
@@ -148,7 +149,7 @@ def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
     return found
 
 
-def column_rows(store: rr.experimental.ChunkStore, column: str) -> pa.Table:
+def column_rows(store: rrc.ChunkStore, column: str) -> pa.Table:
     """Non-null rows of one component column, index-sorted."""
     table: pa.Table = store.reader(index=schema.TIMELINE).to_arrow_table().sort_by(schema.TIMELINE)
     return table.select([schema.TIMELINE, column]).drop_null()

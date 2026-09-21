@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import rerun as rr
-import rerun.experimental as rrx
+import rerun.chunk as rrc
 
 from monopriors.models.relative_depth import RelativeDepthPrediction
 from monopriors.rr_logging_utils import log_relative_pred
@@ -21,7 +21,7 @@ def _logged_chunks(tmp_path: Path, confidence: np.ndarray | None) -> dict[str, l
     pred = RelativeDepthPrediction(disparity=1.0 / depth, depth=depth, K_33=np.eye(3, dtype=np.float32) * 10, confidence=confidence)
     with rec:
         log_relative_pred(Path("world"), pred, np.zeros((H, W, 3), dtype=np.uint8), remove_flying_pixels=False)
-    reader = rrx.RrdReader(str(rrd))
+    reader = rrc.RrdReader(str(rrd))
     chunks: dict[str, list[tuple[set[str], bool]]] = {}
     for store in reader.recordings():
         for chunk in reader.stream(store=store).to_chunks():

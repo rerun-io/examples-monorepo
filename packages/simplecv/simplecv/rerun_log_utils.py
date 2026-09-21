@@ -13,6 +13,7 @@ from typing import Any
 import av
 import numpy as np
 import rerun as rr
+import rerun.chunk as rrc
 from jaxtyping import Float32, Float64, Int
 from numpy import ndarray
 from pyarrow import ChunkedArray, LargeListArray, ListArray, RecordBatch
@@ -332,7 +333,7 @@ def log_video(
             transcode=rr.experimental.Mp4TranscodeOptions(output_codec=output_codec, try_gpu=True),
         )
 
-        def _chunks_recording_times() -> Iterator[rr.experimental.Chunk]:
+        def _chunks_recording_times() -> Iterator[rrc.Chunk]:
             for chunk in reader.stream():
                 if not chunk.is_static:
                     batch: RecordBatch = chunk.to_record_batch()

@@ -52,6 +52,7 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 import rerun.blueprint as rrb
+import rerun.chunk as rrc
 import serde
 import serde.json
 from jaxtyping import Float64, Int64
@@ -658,7 +659,7 @@ def read_accel(base_rrd: Path) -> ImuChannel:
         layer logged it with.
     """
     entity_path: str = schema.accel_path(RIG, 0)
-    store: rr.experimental.ChunkStore = rr.experimental.RrdReader(base_rrd).store().stream().filter(content=entity_path).collect()
+    store: rrc.ChunkStore = rrc.RrdReader(base_rrd).store().stream().filter(content=entity_path).collect()
     samples: pa.Table = store.reader(index=schema.TIMELINE).to_arrow_table().sort_by(schema.TIMELINE)
     return ImuChannel(
         times_ns=np.asarray(samples.column(schema.TIMELINE).combine_chunks().cast(pa.int64()), dtype=np.int64),

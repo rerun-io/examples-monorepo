@@ -16,6 +16,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import rerun as rr
+import rerun.chunk as rrc
 from conftest import calibration_fixture, column_rows, read_back, recording_properties
 from jaxtyping import Float64, Int64
 from msd_hub import (
@@ -121,7 +122,7 @@ def test_the_logged_camera_node_carries_rig_T_cam(converted_index: tuple[FakeHub
     hub, target, _ = converted_index
 
     cameras: tuple[CalibratedCamera, ...] = load_calibration(hub.remote / "M_monado_datasets/MI_valve_index/extras/calibration.json")
-    store: rr.experimental.ChunkStore = read_back(target)
+    store: rrc.ChunkStore = read_back(target)
     for index in range(2):
         node: str = schema.cam_path(0, index)
         row: dict[str, list[object]] = store.reader(index=None, contents=node).to_arrow_table().to_pylist()[0]
@@ -158,7 +159,7 @@ def test_a_radtan8_camera_node_names_its_projection_and_carries_its_validity_rad
 
     expected: float | None = load_calibration(calibration_fixture("g2"))[0].distortion_valid_radius
     assert expected is not None and expected > 2.7
-    store: rr.experimental.ChunkStore = read_back(target)
+    store: rrc.ChunkStore = read_back(target)
     node: str = schema.cam_path(0, 0)
     row: dict[str, list[object]] = store.reader(index=None, contents=node).to_arrow_table().to_pylist()[0]
     assert row[f"{node}:camera_model"][0] == "pinhole-radtan8"
@@ -177,7 +178,7 @@ def test_an_odyssey_camera_node_names_radtan8_and_states_no_validity_radius(
     """
     target: Path = convert_device(tmp_path, monkeypatch, "odyssey")
 
-    store: rr.experimental.ChunkStore = read_back(target)
+    store: rrc.ChunkStore = read_back(target)
     for index in range(2):
         node: str = schema.cam_path(0, index)
         table: pa.Table = store.reader(index=None, contents=node).to_arrow_table()
@@ -193,7 +194,7 @@ def test_a_kb4_camera_node_names_its_projection_and_claims_no_validity_radius(co
     """kb4 is valid over the whole fisheye, so it declares no radius at all."""
     _, target, _ = converted_index
 
-    store: rr.experimental.ChunkStore = read_back(target)
+    store: rrc.ChunkStore = read_back(target)
     node: str = schema.cam_path(0, 0)
     table: pa.Table = store.reader(index=None, contents=node).to_arrow_table()
     assert table.to_pylist()[0][f"{node}:camera_model"][0] == "kb4"
@@ -221,7 +222,7 @@ def test_the_g2_camera_nodes_state_the_quarter_turn_their_frames_were_encoded_by
     target: Path = convert_device(tmp_path, monkeypatch, "g2")
 
     up_rig: tuple[float, float, float] = MSD_DEVICES["g2"].follow.up
-    store: rr.experimental.ChunkStore = read_back(target)
+    store: rrc.ChunkStore = read_back(target)
     logged: list[object] = []
     for camera in load_calibration(calibration_fixture("g2")):
         node: str = schema.cam_path(0, camera.index)
@@ -245,7 +246,7 @@ def test_a_rolled_camera_logs_the_calibration_of_the_pixels_it_encoded(
     target: Path = convert_device(tmp_path, monkeypatch, "g2")
 
     up_rig: tuple[float, float, float] = MSD_DEVICES["g2"].follow.up
-    store: rr.experimental.ChunkStore = read_back(target)
+    store: rrc.ChunkStore = read_back(target)
     for camera in load_calibration(calibration_fixture("g2")):
         rolled: CalibratedCamera = rotate_camera_cw(camera, upright_quarter_turns(camera, up_rig))
         assert rolled.resolution != camera.resolution, "this test needs a camera the roll actually changes"
@@ -317,7 +318,7 @@ def test_an_upright_headset_is_left_exactly_as_it_was(
     target: Path = convert_device(tmp_path, monkeypatch, device)
 
     up_rig: tuple[float, float, float] = MSD_DEVICES[device].follow.up
-    store: rr.experimental.ChunkStore = read_back(target)
+    store: rrc.ChunkStore = read_back(target)
     for camera in load_calibration(calibration_fixture(device)):
         assert upright_quarter_turns(camera, up_rig) == 0
         node: str = schema.cam_path(0, camera.index)
@@ -348,7 +349,7 @@ def test_the_gt_layer_is_a_sibling_rrd_of_the_same_recording(converted_index: tu
 def test_the_gt_layer_animates_the_rig_node_at_the_full_gt_rate(converted_index: tuple[FakeHub, Path, Path]) -> None:
     hub, _, gt_target = converted_index
 
-    store: rr.experimental.ChunkStore = read_back(gt_target)
+    store: rrc.ChunkStore = read_back(gt_target)
     poses: pa.Table = column_rows(store, f"{schema.rig_path(0)}:Transform3D:translation")
     assert poses.num_rows == GT_NUM_POSES, "gt is logged raw: no resampling, one row per csv row"
     times_ns: list[int] = poses.column(schema.TIMELINE).combine_chunks().cast(pa.int64()).to_pylist()
@@ -363,7 +364,7 @@ def test_the_rig_quaternion_is_the_file_quaternion_reordered_to_xyzw(converted_i
     """The csv writes the scalar first; a viewer reading the rrd must see it last."""
     _, _, gt_target = converted_index
 
-    store: rr.experimental.ChunkStore = read_back(gt_target)
+    store: rrc.ChunkStore = read_back(gt_target)
     stored: list[list[list[float]]] = column_rows(store, f"{schema.rig_path(0)}:Transform3D:quaternion").column(1).to_pylist()
     expected_xyzw: Float64[ndarray, "4"] = np.asarray(FIXTURE_WORLD_R_RIG.as_quat(), dtype=np.float64)
     # float32 on the wire, so a loose tolerance is the honest one.
@@ -386,7 +387,7 @@ def test_the_gt_layer_carries_a_full_path_and_a_per_pose_trail_of_segments(conve
     """
     _, _, gt_target = converted_index
 
-    store: rr.experimental.ChunkStore = read_back(gt_target)
+    store: rrc.ChunkStore = read_back(gt_target)
     trajectory: str = schema.trajectory_path("gt")
     strips: list[list[list[float]]] = (
         store.reader(index=None, contents=trajectory).to_arrow_table().to_pylist()[0][f"{trajectory}:LineStrips3D:strips"]
@@ -425,7 +426,7 @@ def test_only_the_gt_layer_states_the_world_axes(converted_index: tuple[FakeHub,
 def test_the_gt_properties_report_the_poses_the_repairs_and_the_measured_axis(converted_index: tuple[FakeHub, Path, Path]) -> None:
     _, _, gt_target = converted_index
 
-    store: rr.experimental.ChunkStore = read_back(gt_target)
+    store: rrc.ChunkStore = read_back(gt_target)
     gt: dict[str, object] = recording_properties(store, "gt")
     assert gt["num_poses"] == GT_NUM_POSES
     assert gt["duration_ns"] == (GT_NUM_POSES - 1) * GT_PERIOD_NS

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
-import rerun.experimental as rrx
+import rerun.chunk as rrc
 from jaxtyping import Bool, Float32
 from numpy import ndarray
 
@@ -74,7 +74,7 @@ def _parse_pose_entity_path(entity_path: str) -> tuple[int, Literal["bbox", "key
 
 def _load_one_recording_chunks(rrd_path: Path) -> list[Any]:
     """Load chunks from a single-recording Rerun archive."""
-    reader: rrx.RrdReader = rrx.RrdReader(str(rrd_path))
+    reader: rrc.RrdReader = rrc.RrdReader(str(rrd_path))
     recordings: list[Any] = list(reader.recordings())
     if len(recordings) != 1:
         raise ValueError(f"Expected exactly one recording in {rrd_path}, found {len(recordings)}.")

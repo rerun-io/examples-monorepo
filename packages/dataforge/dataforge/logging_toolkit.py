@@ -20,6 +20,7 @@ from typing import Literal, TypeAlias
 import numpy as np
 import pyarrow as pa
 import rerun as rr
+import rerun.chunk as rrc
 from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
@@ -216,12 +217,12 @@ def log_video_stream(
     # stream that can run to millions of frames.
     seen_pts_ns: list[Int64[ndarray, "n_rows"]] = []
 
-    def retimed(record_batch: pa.RecordBatch, index: int, values_ns: Int64[ndarray, "n_rows"]) -> list[rr.experimental.Chunk]:
+    def retimed(record_batch: pa.RecordBatch, index: int, values_ns: Int64[ndarray, "n_rows"]) -> list[rrc.Chunk]:
         """Same batch, same row ids, new index values (still a ``duration("ns")``)."""
         column: pa.Array = pa.array(values_ns, type=pa.duration("ns"))
-        return rr.experimental.Chunk.from_record_batch(record_batch.set_column(index, record_batch.schema.field(index), column))  # invariant 3
+        return rrc.Chunk.from_record_batch(record_batch.set_column(index, record_batch.schema.field(index), column))  # invariant 3
 
-    def tap(chunk: rr.experimental.Chunk) -> list[rr.experimental.Chunk]:
+    def tap(chunk: rrc.Chunk) -> list[rrc.Chunk]:
         nonlocal sample_count
         record_batch: pa.RecordBatch = chunk.to_record_batch()
         kind: VideoChunkKind = classify_video_chunk(record_batch)  # invariant 5

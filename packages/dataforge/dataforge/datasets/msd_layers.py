@@ -23,6 +23,7 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 import rerun.blueprint as rrb
+import rerun.chunk as rrc
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 
@@ -220,12 +221,12 @@ def read_base_clock(base_rrd: Path) -> BaseClock:
             accelerometer samples, so it is not a base layer this package wrote.
     """
     accel_path: str = schema.accel_path(RIG, IMU)
-    wanted: list[rr.experimental.Chunk] = [
+    wanted: list[rrc.Chunk] = [
         chunk
-        for chunk in rr.experimental.RrdReader(base_rrd).stream()
+        for chunk in rrc.RrdReader(base_rrd).stream()
         if chunk.entity_path == accel_path or chunk.entity_path.startswith(PROPERTIES_ENTITY)
     ]
-    store: rr.experimental.ChunkStore = rr.experimental.ChunkStore.from_chunks(wanted)
+    store: rrc.ChunkStore = rrc.ChunkStore.from_chunks(wanted)
     properties: pa.Table = store.reader(index=None, contents=f"{PROPERTIES_ENTITY}/**").to_arrow_table()
     origin: list[int] | None = properties.to_pylist()[0].get(schema.capture_property("start_time_ns")) if properties.num_rows else None
     if not origin:

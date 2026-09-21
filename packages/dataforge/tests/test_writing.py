@@ -3,13 +3,14 @@ from pathlib import Path
 import pyarrow as pa
 import pytest
 import rerun as rr
+import rerun.chunk as rrc
 
 from dataforge.writing import atomic_recording, atomic_write, recording_to, should_skip
 
 
 def property_columns(target: Path) -> set[str]:
     """Every ``property:*`` column of a saved rrd, read through the public reader."""
-    store: rr.experimental.ChunkStore = rr.experimental.ChunkStore.from_chunks(list(rr.experimental.RrdReader(target).stream()))
+    store: rrc.ChunkStore = rrc.ChunkStore.from_chunks(list(rrc.RrdReader(target).stream()))
     table: pa.Table = store.reader(index=None, contents="/__properties/**").to_arrow_table()
     return {name for name in table.column_names if name.startswith("property:")}
 
@@ -109,5 +110,5 @@ def test_recording_to_writes_the_path_it_is_given_and_publishes_nothing(tmp_path
         recording.log("/world", rr.Points3D([[1.0, 2.0, 3.0]]), static=True)
 
     assert staged.is_file() and staged.stat().st_size > 0
-    chunks: list[rr.experimental.Chunk] = list(rr.experimental.RrdReader(staged).stream())
+    chunks: list[rrc.Chunk] = list(rrc.RrdReader(staged).stream())
     assert any(chunk.entity_path == "/world" for chunk in chunks), "the closed recording is readable"

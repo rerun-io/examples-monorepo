@@ -9,7 +9,7 @@ import rerun as rr
 pytest.importorskip("rerun.catalog", reason="calibration backfill tests need the Rerun catalog dependencies")
 
 from rerun.catalog import CatalogClient, DatasetEntry  # noqa: E402
-from rerun.experimental import RrdReader  # noqa: E402
+from rerun.chunk import RrdReader  # noqa: E402
 
 from dataforge.apis.register import Config as RegisterConfig  # noqa: E402
 from dataforge.apis.register import main as register  # noqa: E402

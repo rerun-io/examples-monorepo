@@ -10,7 +10,7 @@ import gradio as gr
 import numpy as np
 import pytest
 import rerun as rr
-import rerun.experimental as rrx
+import rerun.chunk as rrc
 import torch
 from gradio_rerun import Rerun
 from gradio_rerun.events import SelectionChange, TimeUpdate
@@ -104,7 +104,7 @@ def test_download_recording_contains_video_prompts_masks_and_confidence(tmp_path
 
     output = _merge_rrd_parts(session)
     stats = subprocess.run(["rerun", "rrd", "stats", str(output)], check=True, capture_output=True, text=True)
-    entities = {str(chunk.entity_path) for chunk in rrx.RrdReader(output).stream()}
+    entities = {str(chunk.entity_path) for chunk in rrc.RrdReader(output).stream()}
     assert {"/video", "/video/points", "/video/mask", "/video/confidence", "/video/object_score"} <= entities
     assert "/video/mask" in stats.stdout
 
