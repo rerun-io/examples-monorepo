@@ -132,7 +132,11 @@ def inline_offloaded_output(block: ToolResultBlock, persisted_path: str | None, 
     if not candidate.is_absolute():
         candidate = tool_results_dir / candidate
     candidate = candidate.resolve()
-    if not candidate.is_relative_to(tool_results_dir.resolve()) or not candidate.is_file():
+    try:
+        is_output_file: bool = candidate.is_relative_to(tool_results_dir.resolve()) and candidate.is_file()
+    except OSError:  # the marker matched prose, not a path (e.g. "saved to" followed by a paragraph): name too long
+        return block
+    if not is_output_file:
         return block
     full_text: str = candidate.read_text(encoding="utf-8", errors="replace")
     replacement: str | list[ResultContent] = (
