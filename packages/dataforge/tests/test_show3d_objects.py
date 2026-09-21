@@ -227,12 +227,20 @@ def test_real_scene_object_and_mesh_layers(object_scene: ObjectBuild) -> None:
     # albedo alpha on the mesh entity hides it below the Hub's default confidence: rows only where
     # visibility changes, latest-at carries them, the shipped pose stream on the parent stays sparse.
     alpha_rows: dict[int, float] = {}
+    mesh_confidence: dict[int, float] = {}
     for c in mesh_chunks:
         if str(c.entity_path) == schema.object_mesh_path(alias) and not c.is_static:
             batch: pa.RecordBatch = c.to_record_batch()
             assert set(c.timeline_names) == {"video_time", "frame_index"}
-            for index, albedo in zip(batch.column("frame_index").to_pylist(), batch.column("Asset3D:albedo_factor").to_pylist(), strict=True):
-                alpha_rows[int(index)] = (albedo[0] & 0xFF) / 255.0 if isinstance(albedo[0], int) else float(albedo[0][3])
+            if "Asset3D:albedo_factor" in batch.schema.names:
+                for index, albedo in zip(batch.column("frame_index").to_pylist(), batch.column("Asset3D:albedo_factor").to_pylist(), strict=True):
+                    alpha_rows[int(index)] = (albedo[0] & 0xFF) / 255.0 if isinstance(albedo[0], int) else float(albedo[0][3])
+            if "Scalars:scalars" in batch.schema.names:
+                for index, value in zip(batch.column("frame_index").to_pylist(), batch.column("Scalars:scalars").to_pylist(), strict=True):
+                    mesh_confidence[int(index)] = float(value[0])
+    # The mesh entity also carries the shipped confidence on every frame, so selecting the mesh
+    # in the viewer or querying its entity shows the value behind the on/off alpha.
+    assert mesh_confidence == {f.index: f.confidence for f in build.frames}
     trusted_by_frame: list[bool] = [f.trusted for f in build.frames]
     assert any(not t for t in trusted_by_frame), "fixture lacks an untrusted object frame"
     changes: list[int] = [f.index for i, f in enumerate(build.frames) if i == 0 or trusted_by_frame[i] != trusted_by_frame[i - 1]]

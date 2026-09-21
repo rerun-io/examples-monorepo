@@ -264,7 +264,7 @@ finite-point error below 0.5 px. The mesh goldens also compare skinned landmarks
 | Source | Layer / destination | Time and properties |
 | --- | --- | --- |
 | `object_pose/v1/.../object_pose.json` | `object_pose`: `/world/gt/objects/<alias>` Transform3D, translation in metres | Both clocks, only confidence > 0; `/confidence` Scalars on every frame |
-| HOT3D BOP stripped GLB | `object_mesh`: object `/mesh` Asset3D + temporal `albedo_factor` on `/mesh` | Static blob; alpha 1 where confidence > 0.5 (the Hub README default), alpha 0 otherwise (invisible instead of held at the last pose or shown while shaky), rows only where visibility changes; int64 `mesh_id`, string `mesh_source=bop-benchmark/hot3d` |
+| HOT3D BOP stripped GLB | `object_mesh`: object `/mesh` Asset3D + temporal `albedo_factor` and `Scalars` on `/mesh` | Static blob; alpha 1 where confidence > 0.5 (the Hub README default), alpha 0 otherwise (invisible instead of held at the last pose or shown while shaky), rows only where visibility changes; the shipped confidence repeated as Scalars on every frame; int64 `mesh_id`, string `mesh_source=bop-benchmark/hot3d` |
 | Hand JSON and full subject model | `hand_mesh`: `/world/gt/hands/{left,right}/mesh` Mesh3D | Static triangles and RGBA albedo (alpha 110); one row per frame on both clocks: world vertices in metres where a wrist exists and confidence > 0.5 (the Hub README default), an empty vertex row otherwise; no properties |
 
 Object records use a partial pyserde schema. Confidence-zero records can have
@@ -281,7 +281,9 @@ Hub default the hands use; the object README says 0.5 "cuts most failures withou
 away usable data"), fully transparent elsewhere. Rows exist only where visibility changes;
 latest-at carries them, and the static blob plus a temporal colour on one entity is ordinary
 Rerun. `Clear` cannot serve here (a cleared parent drops the static mesh at the rig origin)
-and a scale of 0 warns and still draws. The parent pose stream stays exactly as shipped.
+and a scale of 0 warns and still draws. The parent pose stream stays exactly as shipped. The
+mesh entity also repeats the shipped confidence as `Scalars` on every frame, so selecting the
+mesh in the viewer, or querying its entity, shows the value behind the alpha.
 
 The `object_pose` property group contains string `version=v1` and float64
 `coverage`, `in_ego_fov_fraction`, and `palm_dist_median_m`. Coverage is the

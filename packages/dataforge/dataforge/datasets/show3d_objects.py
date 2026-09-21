@@ -125,6 +125,8 @@ def write_object_mesh_layer(
     frame is trusted (confidence above the Hub's default threshold), fully transparent otherwise.
     Rows exist only where visibility changes; latest-at carries them. ``Clear`` cannot serve
     (a cleared parent puts the static mesh at the rig origin); a scale of 0 warns and still draws.
+    The mesh entity also repeats the shipped confidence as ``Scalars`` on every frame, so the
+    value behind the alpha is one click away in the viewer and one column away in a query.
     """
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
         path: str = schema.object_mesh_path(alias)
@@ -133,6 +135,9 @@ def write_object_mesh_layer(
         changes: list[int] = [i for i in range(len(frames)) if i == 0 or trusted[i] != trusted[i - 1]]
         albedo: Float32[ndarray, "k 4"] = np.asarray([[1.0, 1.0, 1.0, 1.0 if trusted[i] else 0.0] for i in changes], dtype=np.float32)
         rr.send_columns(path, indexes=clock.indexes(changes), columns=rr.Asset3D.columns(albedo_factor=albedo), recording=recording)
+        rr.send_columns(
+            path, indexes=clock.indexes(slice(None)), columns=rr.Scalars.columns(scalars=[frame.confidence for frame in frames]), recording=recording
+        )
         recording.send_property(
             "object_mesh", rr.AnyValues(mesh_id=pa.array([mesh_id], type=pa.int64()), mesh_source=pa.array([MESH_REPO], type=pa.string()))
         )
