@@ -257,7 +257,7 @@ PyPI `rerun-sdk` pin is the source of truth; the Rust `re_*` crates
 silently loses protocol/tooling parity. To bump: Python first, then the Rust pins
 (matching that release's egui family), then re-lock Pixi and Cargo.
 
-The primary workspace lane runs **`rerun-sdk == 0.37.0`** with the `catalog`
+The primary workspace lane runs **`rerun-sdk == 0.38.1`** with the `catalog`
 extra through `common`. Catalog/stream environments add the `dataloader` extra
 through `rerun-prerelease`. `gradio-rerun` pins an exact `rerun-sdk`, so bump
 both pins in `[feature.common.pypi-dependencies]` together, never separately.
