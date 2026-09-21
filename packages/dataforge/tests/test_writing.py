@@ -112,3 +112,33 @@ def test_recording_to_writes_the_path_it_is_given_and_publishes_nothing(tmp_path
     assert staged.is_file() and staged.stat().st_size > 0
     chunks: list[rrc.Chunk] = list(rrc.RrdReader(staged).stream())
     assert any(chunk.entity_path == "/world" for chunk in chunks), "the closed recording is readable"
+
+
+def test_save_table_blueprint_writes_a_preview_card_for_the_recording_link(tmp_path: Path) -> None:
+    """Rerun 0.38 table blueprints are the views plus /table entities naming the preview column and its views."""
+    import rerun.blueprint as rrb
+
+    from dataforge.writing import save_table_blueprint
+
+    pane: rrb.Spatial2DView = rrb.Spatial2DView(origin="/world/rig_01/cam_00/pinhole", contents=["+ /world/rig_01/cam_00/pinhole/video"])
+    follow: rrb.Spatial3DView = rrb.Spatial3DView(origin="/world/rig_00")
+    target: Path = tmp_path / "blueprints" / "show3d-table.rbl"
+    save_table_blueprint(rrb.Blueprint(rrb.Horizontal(follow, pane), collapse_panels=True), target, timeline="video_time")
+    reader: rrc.RrdReader = rrc.RrdReader(target)
+    stores = reader.blueprints()
+    assert len(stores) == 1
+    chunks = list(reader.stream(store=stores[0]).to_chunks())
+    paths: set[str] = {str(chunk.entity_path) for chunk in chunks}
+    assert {"/table", "/table/layouts/table", "/table/layouts/cards"} <= paths
+    column: str = "/table/layouts/table/columns/recording\\ link"
+    assert column in paths and "/table/layouts/cards/fields/recording\\ link" in paths
+    preview_views: list[str] = [
+        view
+        for chunk in chunks
+        if str(chunk.entity_path) == column
+        for column_name in chunk.to_record_batch().schema.names
+        if column_name.endswith("TableColumnPreview:views")
+        for view in chunk.to_record_batch().column(column_name).to_pylist()[0]
+    ]
+    assert sorted(preview_views) == sorted([follow.blueprint_path(), pane.blueprint_path()])
+    assert all(path in paths for path in (f"/{follow.blueprint_path()}", f"/{pane.blueprint_path()}"))
