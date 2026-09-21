@@ -449,6 +449,7 @@ Tracked rigid objects have one entity per object, independent of the cameras.
 /world/gt/objects/<alias>                  Transform3D = world_T_object (temporal)
   /confidence                             Scalars (one value, every frame)
   /mesh                                   Asset3D or Mesh3D (static, optional layer)
+                                          + Scalars (the object's confidence, every frame)
 ```
 
 - `<alias>` is the dataset's own object name. Translations and mesh coordinates
@@ -463,6 +464,9 @@ Tracked rigid objects have one entity per object, independent of the cameras.
   where the object is posed above the source threshold, fully transparent
   otherwise, rows only where visibility changes. Geometry readers ignore it;
   the pose stream on the parent is untouched.
+- The mesh layer MAY repeat the object's `confidence` as `Scalars` on `mesh`, one
+  row every frame, so the value behind the alpha shows when the mesh is selected
+  and sits beside it in a query. `/confidence` on the object remains the record.
 
 ## 12. Captions/text
 
