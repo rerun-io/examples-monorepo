@@ -224,8 +224,7 @@ When ingesting a recording:
 4. GT tensors resolve under `/world/gt/...` when `config.load_labels` is true.
 5. Use `video_time` everywhere; a frame-indexed source additionally stamps
    `frame_index` (sequence) on frame-aligned rows (§14). Dataforge exposes it
-   as `schema.FRAME_INDEX` (landing in the same PR stack). Native-rate sensors
-   keep their own sample times (§8).
+   as `schema.FRAME_INDEX`. Native-rate sensors keep their own sample times (§8).
 6. Every non-camera peer sensor (`/world/rig_*/imu_*`, `/world/rig_*/mag_*`) has a
    static `Transform3D` (`rig_T_imu` / `rig_T_mag`) and a static `kind`
    (`"imu"` / `"mag"`). This is a **writer-side** rule for now — dataforge's
@@ -410,10 +409,19 @@ and neither is derived from the other.
   simplecv exoego writers do and as `rrd_exoego.py` reads back. Wrist-frame
   landmarks are never logged as their own entity; they are the skinning of
   `joint_angles` with the profile.
+- **Source threshold.** When a dataset publishes a recommended confidence
+  threshold, the shared COCO-133 stack places a hand only above it; at or below
+  it the slots are NaN with confidence 0, exactly like an absent hand, and the
+  shipped value survives on `/confidence`. SHOW3D's Hub README sets `> 0.5`
+  ("cuts most failures without throwing away usable data") and calls `> 0`
+  "low-quality frames you usually want to drop"; at 0.04 its landmarks float
+  over empty floor. Derived meshes (§10 `mesh`, §11 `mesh`) use the same cut.
 - For hands and objects (§11), pose rows are sparse: emit them only where
-  the source has a pose. `confidence` has one row on **every frame**, with `0`
-  when no pose exists. Consumers use confidence to identify gaps; they must
-  not carry the last pose forward as valid.
+  the source ships a pose, whatever its confidence (SHOW3D ships wrists on
+  many confidence-0 frames; they stay). `confidence` has one row on **every
+  frame**, with `0` when no pose exists. Consumers use confidence to identify
+  gaps and to apply the source threshold; they must not carry the last pose
+  forward as valid.
 - `coco133_uv` holds the dataset's shipped projections in encoded-image pixels
   (`Points2DWithConfidence`, class 0, dense 133 rows, NaN + 0 confidence where
   the source has no point), only for cameras with those annotations. Do not
@@ -426,7 +434,9 @@ and neither is derived from the other.
   media type is `application/json`; the text is the verbatim source JSON. Logged
   geometry and wrist translations are metres.
 - A separate derived layer MAY add `mesh`: static `triangle_indices` and
-  temporal `vertex_positions` in metres, world frame, only where posed. The
+  temporal `vertex_positions` in metres, world frame, one row per frame:
+  skinned vertices where a wrist exists above the source threshold, an empty
+  row otherwise, so the viewer's latest-at never holds a stale mesh. The
   sibling `wrist` does not transform this mesh.
 
 ## 11. Objects
@@ -447,6 +457,12 @@ Tracked rigid objects have one entity per object, independent of the cameras.
   convention in §10.
 - A separate layer MAY add a static `Asset3D` or `Mesh3D` at `mesh`; absence of a
   mesh does not remove the object's pose or confidence.
+- A static mesh under a sparse pose is held at its last pose by the viewer's
+  latest-at, and a `Clear` on the pose entity drops it to the rig origin. The
+  mesh layer therefore also logs a temporal `albedo_factor` on `mesh`: opaque
+  where the object is posed above the source threshold, fully transparent
+  otherwise, rows only where visibility changes. Geometry readers ignore it;
+  the pose stream on the parent is untouched.
 
 ## 12. Captions/text
 
