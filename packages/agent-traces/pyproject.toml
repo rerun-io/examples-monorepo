@@ -37,4 +37,4 @@ paths = ["agent_traces", "tests", "tools"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
 min_confidence = 60
-ignore_names = ["converted_at"]  # Serialized manifest field.
+ignore_names = ["converted_at", "subagent", "secs", "nanos", "duration", "unified_diff", "move_path", "agent_path", "durationMs"]  # Serialized fields.

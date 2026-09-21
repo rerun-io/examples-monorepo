@@ -358,3 +358,27 @@ def test_agent_and_host_properties(session_builder: SessionBuilder, tmp_path: Pa
     assert props["host"].to_pylist()[0][0]
     props = read_entities(write_session_rrd(session, tmp_path / "b.rrd", host="laptop"))["/__properties/session"]
     assert props["host"].to_pylist() == [["laptop"]]
+
+
+@pytest.mark.parametrize("name,kind", [("Bash", "shell"), ("Read", "file_read"), ("Edit", "file_edit"), ("Write", "file_edit"), ("WebFetch", "web_search"), ("WebSearch", "web_search"), ("mcp__server__tool", "mcp"), ("Agent", "subagent"), ("Workflow", "subagent"), ("Unknown", "other")])
+def test_claude_tool_kind_and_turn_model_effort(session_builder: SessionBuilder, tmp_path: Path, name: str, kind: str) -> None:
+    """Provider metadata survives the shared recording boundary."""
+    session_builder.add("user", message={"content": "inspect"})
+    session_builder.add("assistant", effort="high", message={"id": "m", "model": "claude-test", "content": [{"type": "tool_use", "id": "c", "name": name, "input": {}}]})
+    session_builder.add("user", message={"content": [{"type": "tool_result", "tool_use_id": "c", "content": "ok"}]})
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "kinds.rrd"))
+    entity: str = "mcp/server/tool" if kind == "mcp" else name
+    assert entities[f"/tools/{entity}"]["kind"].to_pylist() == [[kind], [kind]]
+    assert entities["/turns"]["model"].to_pylist() == [["claude-test"]]
+    assert entities["/turns"]["effort"].to_pylist() == [["high"]]
+
+
+def test_prompt_images_before_text_belong_to_new_turn(session_builder: SessionBuilder, png_bytes: bytes, tmp_path: Path) -> None:
+    """The entire prompt record starts a turn, regardless of block order."""
+    import base64
+
+    session_builder.add("user", message={"content": "first"})
+    session_builder.add("user", message={"content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(png_bytes).decode()}}, {"type": "text", "text": "second"}]})
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "prompt-images.rrd"))
+    assert entities["/turns"]["n_images"].to_pylist() == [[0], [1]]
+    assert entities["/turns"]["elapsed_ms"].to_pylist() == [[0.0], [0.0]]

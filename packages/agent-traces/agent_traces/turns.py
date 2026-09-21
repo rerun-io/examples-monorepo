@@ -1,20 +1,9 @@
 """Aggregate main-session records into typed turns in file order."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
-from agent_traces.claude import TimedRecord, result_images
-from agent_traces.claude_records import (
-    Block,
-    ImageBlock,
-    ImageSource,
-    Message,
-    OutputTokensDetails,
-    Record,
-    TextBlock,
-    ToolResultBlock,
-    ToolUseBlock,
-    Usage,
-)
+from agent_traces.events import AssistantText, EventGroup, Image, Payload, Prompt, TimedRecord, ToolCall, TurnBoundary, UsageSample, neutral_records
 
 
 @dataclass(slots=True)
@@ -50,52 +39,73 @@ class Turn:
     thinking_tokens: int = 0
     """Reasoning output tokens."""
 
+    model: str = ""
+    """First model in force in the turn."""
+    effort: str = ""
+    """First reasoning effort in force in the turn."""
+    duration_ms: float | None = None
+    """Explicit provider duration when available."""
+
     @property
     def elapsed_ms(self) -> float:
         """Elapsed time from the prompt to the last record."""
-        return (self.last_timestamp_ns - self.timestamp_ns) / 1_000_000
+        return self.duration_ms if self.duration_ms is not None else (self.last_timestamp_ns - self.timestamp_ns) / 1_000_000
 
 
-def aggregate_turns(records: list[TimedRecord]) -> list[Turn]:
-    """Accumulate main-session records between human prompts without mutation.
-
-    Args:
-        records: Main transcript records in file order, including any preamble.
-
-    Returns:
-        One turn per non-compaction user prompt without tool results.
-    """
+def aggregate_turns(records: Sequence[TimedRecord | EventGroup]) -> list[Turn]:
+    """Aggregate neutral events; explicit boundaries take precedence over prompts."""
+    events: list[TimedRecord] = neutral_records(records)
+    explicit: bool = any(isinstance(event.payload, TurnBoundary) for event in events)
     turns: list[Turn] = []
-    seen: set[str] = set()
-    for timed in records:
-        record: Record = timed.record
-        message: Message | None = record.message
-        blocks: list[Block] = message.content if message is not None else []
-        if record.type == "user" and not record.isCompactSummary and not any(isinstance(block, ToolResultBlock) for block in blocks):
-            prompt_texts: list[str] = [block.text for block in blocks if isinstance(block, TextBlock)]
-            if prompt_texts:
-                turns.append(Turn(timed.timestamp_ns, "\n".join(prompt_texts), record.promptId or "", len(turns), timed.file_index, timed.timestamp_ns))
-                seen = set()
+    by_id: dict[str, Turn] = {}
+    seen: dict[int, set[str]] = {}
+    seen_messages: dict[int, set[str]] = {}
+    prompt_lines: dict[int, int] = {}
+    for timed in events:
+        payload: Payload = timed.payload
+        if isinstance(payload, TurnBoundary) and payload.phase == "start":
+            turn: Turn = Turn(timed.timestamp_ns, "", timed.turn_id, len(turns), timed.file_index, timed.timestamp_ns)
+            turns.append(turn)
+            by_id[timed.turn_id] = turn
+        elif not explicit and isinstance(payload, Prompt) and payload.starts_turn:
+            if not turns or prompt_lines.get(turns[-1].turn_index) != timed.file_index:
+                turns.append(
+                    Turn(timed.timestamp_ns, payload.text, str(timed.values.get("prompt_id", "")), len(turns), timed.file_index, timed.timestamp_ns)
+                )
+                prompt_lines[turns[-1].turn_index] = timed.file_index
+            else:
+                turns[-1].prompt += "\n" + payload.text
         if not turns:
             continue
-        turn: Turn = turns[-1]
-        turn.last_timestamp_ns = timed.timestamp_ns
-        for block in blocks:
-            match block:
-                case ToolUseBlock():
-                    turn.n_tool_calls += 1
-                case ImageBlock(source=ImageSource(type="base64")) if record.type == "user":
-                    turn.n_images += 1
-                case ToolResultBlock():
-                    turn.n_images += sum(1 for source in result_images(block) if source.type == "base64")
-        if record.type == "assistant" and message is not None and message.id and message.id not in seen:
-            seen.add(message.id)
-            usage: Usage = message.usage or Usage()
-            details: OutputTokensDetails = usage.output_tokens_details or OutputTokensDetails()
-            turn.n_assistant_messages += 1
-            turn.input_tokens += usage.input_tokens
-            turn.output_tokens += usage.output_tokens
-            turn.cache_read_tokens += usage.cache_read_input_tokens
-            turn.cache_creation_tokens += usage.cache_creation_input_tokens
-            turn.thinking_tokens += details.thinking_tokens
+        current: Turn | None = by_id.get(timed.turn_id) if explicit else turns[-1]
+        if current is None:
+            continue
+        current.last_timestamp_ns = timed.timestamp_ns
+        current.model = current.model or timed.model
+        current.effort = current.effort or timed.effort
+        if explicit and isinstance(payload, Prompt) and not payload.compaction:
+            current.prompt += ("\n" if current.prompt else "") + payload.text
+        if isinstance(payload, TurnBoundary) and payload.phase == "complete":
+            current.duration_ms = payload.duration_ms if payload.duration_ms is not None else (timed.timestamp_ns - current.timestamp_ns) / 1_000_000
+        elif isinstance(payload, ToolCall):
+            current.n_tool_calls += 1
+        elif isinstance(payload, Image):
+            current.n_images += 1
+        elif explicit and isinstance(payload, AssistantText):
+            message_id: str = str(timed.values.get("message_id", timed.file_index))
+            messages: set[str] = seen_messages.setdefault(current.turn_index, set())
+            if message_id not in messages:
+                messages.add(message_id)
+                current.n_assistant_messages += 1
+        elif isinstance(payload, UsageSample):
+            identifiers: set[str] = seen.setdefault(current.turn_index, set())
+            if payload.response_id in identifiers:
+                continue
+            identifiers.add(payload.response_id)
+            current.n_assistant_messages += int(payload.count_message)
+            current.input_tokens += payload.counters.get("input_tokens", 0)
+            current.output_tokens += payload.counters.get("output_tokens", 0)
+            current.cache_read_tokens += payload.counters.get("cache_read_tokens", 0)
+            current.cache_creation_tokens += payload.counters.get("cache_creation_tokens", 0)
+            current.thinking_tokens += payload.counters.get("thinking_tokens", 0)
     return turns

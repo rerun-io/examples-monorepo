@@ -1,4 +1,4 @@
-"""Convert one Claude Code session to a recording."""
+"""Convert one Claude or Codex session to a recording."""
 
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -7,7 +7,9 @@ from pathlib import Path
 import orjson
 from rerun.chunk import RrdReader
 
-from agent_traces.claude import ClaudeSession, parse_session
+from agent_traces.claude import parse_session
+from agent_traces.codex import SkipRollout, parse_rollout
+from agent_traces.events import Session
 from agent_traces.rerun_log import write_session_rrd
 
 
@@ -16,11 +18,11 @@ class Config:
     """One-session conversion arguments."""
 
     session: Path
-    """Main Claude Code session JSONL path."""
+    """Main Claude transcript or Codex rollout JSONL path."""
     out: Path
     """Destination RRD path."""
     profile: str | None = None
-    """Override the profile inferred from the Claude home directory."""
+    """Override the profile inferred from the agent home directory."""
     host: str | None = None
     """Machine the sessions ran on, for transcripts copied from another host; defaults to this hostname."""
 
@@ -31,7 +33,14 @@ def main(config: Config) -> None:
     Args:
         config: Input path, output path, and optional profile override.
     """
-    session: ClaudeSession = parse_session(config.session)
+    with config.session.open("rb") as source:
+        first: object = orjson.loads(source.readline())
+    codex: bool = isinstance(first, dict) and first.get("type") == "session_meta"
+    try:
+        session: Session = parse_rollout(config.session) if codex else parse_session(config.session)
+    except SkipRollout as error:
+        print(f"skipped reason={error}")
+        return
     if config.profile is not None:
         session = replace(session, profile=config.profile)
     out: Path = write_session_rrd(session, config.out, host=config.host)

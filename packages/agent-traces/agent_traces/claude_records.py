@@ -252,5 +252,7 @@ class Record:
     """User-assigned session title."""
     aiTitle: str = ""
     """Generated session title."""
+    effort: str = ""
+    """Reasoning effort for this assistant record."""
     totalCostUSD: float | int | None = None
     """Reported total session cost."""

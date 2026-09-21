@@ -1,16 +1,32 @@
 """Stream Claude JSONL records into one typed session."""
 
+import base64
 import hashlib
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 import orjson
 from serde import SerdeError, from_dict
 
-from agent_traces.claude_records import Block, ImageSource, Record, ResultContent, ToolResultBlock
+from agent_traces import events as ev
+from agent_traces.claude_records import (
+    Block,
+    CacheCreation,
+    ImageBlock,
+    ImageSource,
+    OutputTokensDetails,
+    Record,
+    ResultContent,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    Usage,
+)
+from agent_traces.timestamps import parse_timestamp_ns as parse_timestamp_ns
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,42 +55,18 @@ class TimedRecord:
     """Raw tool metadata JSON, empty when absent or null."""
     raw_json: str
     """Whole source line for system and attachment records."""
+    events: list[ev.TimedRecord] = field(default_factory=list)
+    """Neutral events interpreted once by the Claude parser."""
 
 
 @dataclass(frozen=True, slots=True)
-class ClaudeSession:
+class ClaudeSession(ev.Session):
     """One session and its child agent transcripts."""
 
-    session_id: str
-    """Main transcript filename stem."""
-    profile: str
-    """Claude home name without the leading dot."""
-    source_path: Path
-    """Absolute main transcript path."""
     main: list[TimedRecord]
-    """Main transcript records in file order."""
+    """Source records retained for existing parser callers."""
     subagents: dict[str, list[TimedRecord]]
-    """Child transcripts keyed by agent id."""
-    skipped: dict[str, int]
-    """Counts of records omitted from temporal data."""
-
-    n_inlined_outputs: int = 0
-    """Number of tool result blocks expanded from local files."""
-
-    cwd: str = ""
-    """Last recorded main-session working directory."""
-    git_branch: str = ""
-    """Last recorded main-session branch."""
-    cli_versions: set[str] = field(default_factory=set)
-    """CLI versions found across all transcripts."""
-    models: set[str] = field(default_factory=set)
-    """Assistant models found across all transcripts."""
-    title: str = ""
-    """Last title in main-file order."""
-    total_cost_usd: float = float("nan")
-    """Last reported main-session total cost."""
-    source_sha256: str = ""
-    """SHA-256 of the main JSONL bytes."""
+    """Child source records retained for existing parser callers."""
 
 
 def iter_records(path: Path) -> Iterator[SourceRecord]:
@@ -150,38 +142,6 @@ def inline_offloaded_output(block: ToolResultBlock, persisted_path: str | None, 
 KEPT_ATTACHMENTS: frozenset[str] = frozenset({"queued_command", "command_permissions", "hook_success", "edited_text_file", "auto_mode"})
 
 
-TIMESTAMP_PATTERN: re.Pattern[str] = re.compile(
-    r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})"
-    r"(?:[.,]([0-9]{1,9}))?(Z|[+-][0-9]{2}:[0-9]{2})"
-)
-
-
-def parse_timestamp_ns(text: str) -> int:
-    """Parse a zoned ISO timestamp with one to nine optional fractional digits."""
-    matched: re.Match[str] | None = TIMESTAMP_PATTERN.fullmatch(text)
-    if matched is None:
-        raise ValueError(f"invalid timestamp: {text!r}")
-    stamp: datetime = datetime(
-        int(matched.group(1)),
-        int(matched.group(2)),
-        int(matched.group(3)),
-        int(matched.group(4)),
-        int(matched.group(5)),
-        int(matched.group(6)),
-    )
-    zone: str = matched.group(8)
-    offset_seconds: int = 0
-    if zone != "Z":
-        hours: int = int(zone[1:3])
-        minutes: int = int(zone[4:6])
-        if hours > 23 or minutes > 59:
-            raise ValueError(f"invalid timestamp offset: {zone!r}")
-        offset_seconds = (hours * 3600 + minutes * 60) * (1 if zone[0] == "+" else -1)
-    delta: timedelta = stamp - datetime(1970, 1, 1)
-    fraction_ns: int = int((matched.group(7) or "").ljust(9, "0"))
-    return (delta.days * 86400 + delta.seconds - offset_seconds) * 1_000_000_000 + fraction_ns
-
-
 def session_sources(session_path: Path) -> list[Path]:
     """List the main transcript, sorted children, then sorted offloaded files."""
     session_dir: Path = session_path.with_suffix("")
@@ -218,11 +178,13 @@ def parse_session(session_path: Path) -> ClaudeSession:
         source_sha256: str = hashlib.file_digest(source, "sha256").hexdigest()
     transcripts: dict[str, list[TimedRecord]] = {}
     paths: dict[str, Path] = {"": source_path}
-    paths.update({
-        path.stem.removeprefix("agent-"): path
-        for path in session_sources(source_path)[1:]
-        if path.parent == source_path.with_suffix("") / "subagents"
-    })
+    paths.update(
+        {
+            path.stem.removeprefix("agent-"): path
+            for path in session_sources(source_path)[1:]
+            if path.parent == source_path.with_suffix("") / "subagents"
+        }
+    )
     for agent_id, path in paths.items():
         rows: list[TimedRecord] = []
         source_record: SourceRecord
@@ -274,6 +236,7 @@ def parse_session(session_path: Path) -> ClaudeSession:
                     raw_json=source_record.raw_json,
                 )
             )
+        interpret_records(rows)
         transcripts[agent_id] = rows
     main: list[TimedRecord] = transcripts.pop("")
     return ClaudeSession(
@@ -292,3 +255,145 @@ def parse_session(session_path: Path) -> ClaudeSession:
         total_cost_usd=total_cost_usd,
         source_sha256=source_sha256,
     )
+
+
+def tool_kind(name: str) -> ev.ToolKind:
+    """Map Claude native names to the shared tool vocabulary."""
+    if name.startswith("mcp__"):
+        return "mcp"
+    kinds: dict[str, ev.ToolKind] = {
+        "Bash": "shell",
+        "Read": "file_read",
+        "Edit": "file_edit",
+        "Write": "file_edit",
+        "WebFetch": "web_search",
+        "WebSearch": "web_search",
+        "Agent": "subagent",
+        "Workflow": "subagent",
+    }
+    return kinds.get(name, "other")
+
+
+def tool_path(name: str) -> str:
+    """Map a Claude MCP name to its server and tool entity path."""
+    parts: list[str] = name.split("__", 2)
+    return f"mcp/{parts[1]}/{parts[2]}" if len(parts) == 3 and parts[0] == "mcp" else name
+
+
+def interpret_records(records: list[TimedRecord]) -> None:
+    """Interpret blocks once, retaining source records for parser compatibility."""
+    calls: dict[str, tuple[int, str]] = {}
+    seen: set[str] = set()
+    for timed in records:
+        if timed.record.message is not None:
+            for block in timed.record.message.content:
+                if isinstance(block, ToolUseBlock):
+                    calls[block.id] = (timed.timestamp_ns, block.name)
+    for timed in records:
+        record: Record = timed.record
+        values: dict[str, ev.Scalar] = {}
+        payloads: list[tuple[ev.Payload, dict[str, ev.Scalar]]] = []
+        if record.type == "system":
+            payloads.append(
+                (
+                    ev.Lifecycle("system", record.content if record.content is not None else record.subtype, (record.level or "INFO").upper()),
+                    {"subtype": record.subtype, "extra_json": timed.raw_json},
+                )
+            )
+        elif record.type == "attachment" and record.attachment is not None:
+            attachment_json: str = orjson.dumps(orjson.loads(timed.raw_json).get("attachment")).decode()
+            description: str = (
+                record.attachment.text
+                or (record.attachment.content if isinstance(record.attachment.content, str) else "")
+                or record.attachment.command
+                or record.attachment.message
+                or attachment_json
+            )
+            payloads.append(
+                (
+                    ev.Lifecycle("attachments", f"{record.attachment.type}: {description}"),
+                    {"subtype": record.attachment.type, "attachment_json": attachment_json},
+                )
+            )
+        elif record.type == "pr-link":
+            payloads.append((ev.Lifecycle("pr_links", record.prUrl), {"pr_number": record.prNumber, "pr_repository": record.prRepository}))
+        if record.message is not None:
+            if record.type == "assistant" and record.message.id:
+                usage: Usage = record.message.usage or Usage()
+                cache: CacheCreation = usage.cache_creation or CacheCreation()
+                details: OutputTokensDetails = usage.output_tokens_details or OutputTokensDetails()
+                counters: dict[str, int] = {
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "cache_read_tokens": usage.cache_read_input_tokens,
+                    "cache_creation_tokens": usage.cache_creation_input_tokens,
+                    "cache_creation_5m_tokens": cache.ephemeral_5m_input_tokens,
+                    "cache_creation_1h_tokens": cache.ephemeral_1h_input_tokens,
+                    "thinking_tokens": details.thinking_tokens,
+                }
+                payloads.append((ev.UsageSample(counters, record.message.id, emit=record.message.id not in seen), {}))
+                seen.add(record.message.id)
+            is_prompt: bool = (
+                record.type == "user"
+                and not record.isCompactSummary
+                and not any(isinstance(block, ToolResultBlock) for block in record.message.content)
+            )
+            for block in record.message.content:
+                sources: list[ImageSource] = []
+                call_id: str = ""
+                origin: Literal["tool_result", "user"] = "user"
+                match block:
+                    case ToolUseBlock():
+                        payloads.append(
+                            (ev.ToolCall(tool_path(block.name), block.id, orjson.dumps(block.input).decode(), tool_kind(block.name), block.name), {})
+                        )
+                    case ToolResultBlock():
+                        call: tuple[int, str] | None = calls.get(block.tool_use_id)
+                        name: str = call[1] if call else "unknown"
+                        elapsed: float = (timed.timestamp_ns - call[0]) / 1_000_000 if call else float("nan")
+                        payloads.append(
+                            (
+                                ev.ToolResult(
+                                    tool_path(name),
+                                    block.tool_use_id,
+                                    result_text(block),
+                                    timed.tool_use_result_json,
+                                    tool_kind(name),
+                                    elapsed,
+                                    block.is_error,
+                                    (record.toolUseResult.agentId or "") if record.toolUseResult else "",
+                                ),
+                                {},
+                            )
+                        )
+                        sources = result_images(block)
+                        call_id = block.tool_use_id
+                        origin = "tool_result"
+                    case ImageBlock(source=source) if record.type == "user" and source is not None:
+                        sources = [source]
+                    case TextBlock(text=text) | ThinkingBlock(thinking=text):
+                        values = {"uuid": record.uuid, "parent_uuid": record.parentUuid or "", "prompt_id": record.promptId or ""}
+                        if record.type == "assistant":
+                            values.update(message_id=record.message.id, request_id=record.requestId or "", model=record.message.model)
+                        payload: ev.Payload = (
+                            ev.Thinking(text)
+                            if isinstance(block, ThinkingBlock)
+                            else (ev.Prompt(text, is_prompt, record.isCompactSummary) if record.type == "user" else ev.AssistantText(text))
+                        )
+                        payloads.append((payload, values))
+                for source in sources:
+                    if source.type == "base64":
+                        payloads.append((ev.Image(base64.b64decode(source.data), source.media_type, call_id, origin), {}))
+        payloads.sort(key=lambda entry: not (isinstance(entry[0], ev.Prompt) and entry[0].starts_turn))
+        payloads.append((ev.Lifecycle(), {}))
+        for payload, values in payloads:
+            timed.events.append(
+                ev.TimedRecord(
+                    payload,
+                    timed.timestamp_ns,
+                    timed.file_index,
+                    values,
+                    model=record.message.model if record.type == "assistant" and record.message else "",
+                    effort=record.effort if record.type == "assistant" else "",
+                )
+            )

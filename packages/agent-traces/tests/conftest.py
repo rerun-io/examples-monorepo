@@ -50,3 +50,42 @@ def png_bytes() -> bytes:
         + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00"))
         + chunk(b"IEND", b"")
     )
+
+
+@dataclass(slots=True)
+class RolloutBuilder:
+    """Synthetic Codex envelopes, with no private rollout data."""
+
+    path: Path
+    """Rollout destination."""
+    index: int = 0
+    """Next timestamp step."""
+
+    def add(self, kind: str, **payload: object) -> None:
+        """Append a payload in a deterministic envelope."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        stamp: datetime = datetime(2026, 9, 18, 20, tzinfo=UTC) + timedelta(seconds=self.index)
+        with self.path.open("ab") as stream:
+            stream.write(orjson.dumps({"timestamp": stamp.isoformat(), "type": kind, "payload": payload}) + b"\n")
+        self.index += 1
+
+    def meta(self, thread_id: str = "thread", version: str = "0.153.4", **fields: object) -> None:
+        """Write the required metadata."""
+        self.add("session_meta", id=thread_id, cli_version=version, model_provider="openai", **fields)
+
+    def item(self, item_type: str, turn_id: str = "turn", **fields: object) -> None:
+        """Complete one item with known execution timing."""
+        self.add(
+            "event_msg",
+            type="item_completed",
+            turn_id=turn_id,
+            started_at_ms=1789761601000,
+            completed_at_ms=1789761601250,
+            item={"type": item_type, **fields},
+        )
+
+
+@pytest.fixture
+def rollout_builder(tmp_path: Path) -> RolloutBuilder:
+    """Create a synthetic Codex home."""
+    return RolloutBuilder(tmp_path / ".codex-alt/sessions/2026/09/18/rollout-thread.jsonl")

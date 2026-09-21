@@ -1,38 +1,34 @@
 """Write typed agent records as deterministic Rerun columns."""
 
-import base64
 import os
 import socket
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import Literal
 
 import numpy as np
-import orjson
 import pyarrow as pa
 import rerun as rr
 
 from agent_traces.blueprint import session_blueprint
-from agent_traces.claude import ClaudeSession, TimedRecord, result_images, result_text
-from agent_traces.claude_records import (
-    CacheCreation,
-    ImageBlock,
-    ImageSource,
-    Message,
-    OutputTokensDetails,
-    Record,
-    TextBlock,
-    ThinkingBlock,
-    ToolResultBlock,
-    ToolUseBlock,
-    UnknownBlock,
-    Usage,
+from agent_traces.events import (
+    AssistantText,
+    Image,
+    Lifecycle,
+    Payload,
+    Prompt,
+    Scalar,
+    Session,
+    Thinking,
+    TimedRecord,
+    ToolCall,
+    ToolResult,
+    UsageSample,
+    neutral_records,
 )
 from agent_traces.turns import Turn, aggregate_turns
 
-# TODO(codex): A Codex parser will target the same agent_traces record types.
-Scalar: TypeAlias = str | int | float | bool
 ROLE_COLORS: dict[str, int] = {"user": 0x8AB4F8FF, "assistant": 0xE8EAEDFF, "thinking": 0x9AA0A6FF, "compaction": 0xF5A623FF}
 """TextLog row colour (RGBA) per conversation entity, so roles read apart without the entity column."""
 CALL_COLOR: int = 0xF9D67AFF
@@ -85,30 +81,7 @@ class ImageRow:
     """Whether the image came from a tool_result or user."""
 
 
-@dataclass(frozen=True, slots=True)
-class ToolCall:
-    """A call used to name and time its result."""
-
-    timestamp_ns: int
-    """Call wall timestamp in nanoseconds."""
-    name: str
-    """Entity suffix of the tool."""
-
-
-def tool_path(name: str) -> str:
-    """Map an MCP tool name to its server and tool path.
-
-    Args:
-        name: Claude tool name, including any MCP prefix.
-
-    Returns:
-        Tool entity suffix, unchanged for non-MCP tools.
-    """
-    parts: list[str] = name.split("__", 2)
-    return f"mcp/{parts[1]}/{parts[2]}" if len(parts) == 3 and parts[0] == "mcp" else name
-
-
-def write_session_rrd(session: ClaudeSession, out: Path, *, host: str | None = None) -> Path:
+def write_session_rrd(session: Session, out: Path, *, host: str | None = None) -> Path:
     """Save one session, including its subagents, to an RRD file.
 
     Args:
@@ -124,143 +97,51 @@ def write_session_rrd(session: ClaudeSession, out: Path, *, host: str | None = N
     images: dict[str, list[ImageRow]] = {}
     for agent_id, records in {"": session.main, **session.subagents}.items():
         prefix: str = f"agents/{agent_id}/" if agent_id else ""
-        seen_message_ids: set[str] = set()
-        calls: dict[str, ToolCall] = {}
-        for event in records:
-            if event.record.message is not None:
-                for content in event.record.message.content:
-                    match content:
-                        case ToolUseBlock(id=call_id, name=name):
-                            calls[call_id] = ToolCall(event.timestamp_ns, tool_path(name))
         timed: TimedRecord
-        for timed in records:
-            record: Record = timed.record
-            if record.type == "system":
-                texts.setdefault(f"{prefix}lifecycle/system", []).append(
-                    TextRow(
-                        timed.timestamp_ns,
-                        record.content if record.content is not None else record.subtype,
-                        (record.level or "INFO").upper(),
-                        {"subtype": record.subtype, "file_index": timed.file_index, "extra_json": timed.raw_json},
-                    )
+        for timed in neutral_records(records):
+            payload: Payload = timed.payload
+            values: dict[str, Scalar] = {"file_index": timed.file_index, **timed.values}
+            if isinstance(payload, (Prompt, AssistantText, Thinking)):
+                name: str = (
+                    "thinking"
+                    if isinstance(payload, Thinking)
+                    else ("assistant" if isinstance(payload, AssistantText) else ("compaction" if payload.compaction else "user"))
                 )
-            elif record.type == "attachment" and record.attachment is not None:
-                attachment_json: str = orjson.dumps(orjson.loads(timed.raw_json).get("attachment")).decode()
-                description: str = (
-                    record.attachment.text
-                    or (record.attachment.content if isinstance(record.attachment.content, str) else "")
-                    or record.attachment.command
-                    or record.attachment.message
-                    or attachment_json
+                texts.setdefault(f"{prefix}conversation/{name}", []).append(
+                    TextRow(timed.timestamp_ns, payload.text, "DEBUG" if isinstance(payload, Thinking) else "INFO", values, ROLE_COLORS[name])
                 )
-                texts.setdefault(f"{prefix}lifecycle/attachments", []).append(
-                    TextRow(
-                        timed.timestamp_ns,
-                        f"{record.attachment.type}: {description}",
-                        values={"subtype": record.attachment.type, "file_index": timed.file_index, "attachment_json": attachment_json},
-                    )
-                )
-            elif record.type == "pr-link":
-                texts.setdefault(f"{prefix}lifecycle/pr_links", []).append(
-                    TextRow(
-                        timed.timestamp_ns,
-                        record.prUrl,
-                        values={"pr_number": record.prNumber, "pr_repository": record.prRepository, "file_index": timed.file_index},
-                    )
-                )
-            message: Message | None = record.message
-            if message is None:
-                continue
-            if record.type == "assistant" and message.id and message.id not in seen_message_ids:
-                seen_message_ids.add(message.id)
-                usage: Usage = message.usage or Usage()
-                cache: CacheCreation = usage.cache_creation or CacheCreation()
-                details: OutputTokensDetails = usage.output_tokens_details or OutputTokensDetails()
-                counters: dict[str, int] = {
-                    "input_tokens": usage.input_tokens,
-                    "output_tokens": usage.output_tokens,
-                    "cache_read_tokens": usage.cache_read_input_tokens,
-                    "cache_creation_tokens": usage.cache_creation_input_tokens,
-                    "cache_creation_5m_tokens": cache.ephemeral_5m_input_tokens,
-                    "cache_creation_1h_tokens": cache.ephemeral_1h_input_tokens,
-                    "thinking_tokens": details.thinking_tokens,
-                }
-                for name, value in counters.items():
+            elif isinstance(payload, Lifecycle) and payload.name:
+                texts.setdefault(f"{prefix}lifecycle/{payload.name}", []).append(TextRow(timed.timestamp_ns, payload.text, payload.level, values))
+            elif isinstance(payload, UsageSample) and payload.emit:
+                for name, value in payload.counters.items():
                     scalars.setdefault(f"{prefix}usage/{name}", []).append(ScalarRow(timed.timestamp_ns, float(value), timed.file_index))
-            for block in message.content:
-                image_sources: list[ImageSource] = []
-                image_call_id: str = ""
-                image_origin: Literal["tool_result", "user"] = "user"
-                match block:
-                    case ToolUseBlock():
-                        input_json: str = orjson.dumps(block.input).decode()
-                        texts.setdefault(f"{prefix}tools/{tool_path(block.name)}", []).append(
-                            TextRow(
-                                timed.timestamp_ns,
-                                f"▶ {block.name}  {input_json}",
-                                values={"tool_use_id": block.id, "phase": "call", "file_index": timed.file_index, "input_json": input_json},
-                                color=CALL_COLOR,
-                            )
-                        )
-                    case ToolResultBlock():
-                        call: ToolCall | None = calls.get(block.tool_use_id)
-                        tool_name: str = call.name if call else "unknown"
-                        elapsed_ms: float = (timed.timestamp_ns - call.timestamp_ns) / 1_000_000 if call else float("nan")
-                        text: str = result_text(block)
-                        elapsed_label: str = f"{elapsed_ms:.0f} ms" if elapsed_ms == elapsed_ms else "? ms"
-                        texts.setdefault(f"{prefix}tools/{tool_name}", []).append(
-                            TextRow(
-                                timed.timestamp_ns,
-                                f"◀ {tool_name} {elapsed_label}  {text}",
-                                "ERROR" if block.is_error else "INFO",
-                                {
-                                    "tool_use_id": block.tool_use_id,
-                                    "phase": "result",
-                                    "file_index": timed.file_index,
-                                    "result_text": text,
-                                    "tool_use_result_json": timed.tool_use_result_json,
-                                    "is_error": block.is_error,
-                                    "elapsed_ms": elapsed_ms,
-                                    "agent_id": record.toolUseResult.agentId or "" if record.toolUseResult else "",
-                                },
-                            )
-                        )
-                        scalars.setdefault(f"{prefix}tools/elapsed_ms/{tool_name}", []).append(
-                            ScalarRow(timed.timestamp_ns, elapsed_ms, timed.file_index)
-                        )
-                        image_sources = result_images(block)
-                        image_call_id = block.tool_use_id
-                        image_origin = "tool_result"
-                    case ImageBlock(source=source) if record.type == "user" and source is not None:
-                        image_sources = [source]
-                    case TextBlock(text=text) | ThinkingBlock(thinking=text):
-                        name: str = "thinking" if isinstance(block, ThinkingBlock) else ("compaction" if record.isCompactSummary else record.type)
-                        values: dict[str, Scalar] = {
-                            "file_index": timed.file_index,
-                            "uuid": record.uuid,
-                            "parent_uuid": record.parentUuid or "",
-                            "prompt_id": record.promptId or "",
-                        }
-                        if record.type == "assistant":
-                            values.update(message_id=message.id, request_id=record.requestId or "", model=message.model)
-                        texts.setdefault(f"{prefix}conversation/{name}", []).append(
-                            TextRow(
-                                timed.timestamp_ns,
-                                text,
-                                "DEBUG" if isinstance(block, ThinkingBlock) else "INFO",
-                                values,
-                                ROLE_COLORS[name],
-                            )
-                        )
-                    case UnknownBlock():
-                        pass
-                for source in image_sources:
-                    if source.type == "base64":
-                        images.setdefault(f"{prefix}media/images", []).append(
-                            ImageRow(
-                                timed.timestamp_ns, base64.b64decode(source.data), source.media_type, timed.file_index, image_call_id, image_origin
-                            )
-                        )
+            elif isinstance(payload, ToolCall):
+                values.update(tool_use_id=payload.call_id, phase="call", input_json=payload.input_json, kind=payload.kind)
+                texts.setdefault(f"{prefix}tools/{payload.name}", []).append(
+                    TextRow(timed.timestamp_ns, f"▶ {payload.display_name or payload.name}  {payload.input_json}", values=values, color=CALL_COLOR)
+                )
+            elif isinstance(payload, ToolResult):
+                elapsed_label: str = f"{payload.elapsed_ms:.0f} ms" if payload.elapsed_ms == payload.elapsed_ms else "? ms"
+                values.update(
+                    tool_use_id=payload.call_id,
+                    phase="result",
+                    result_text=payload.text,
+                    tool_use_result_json=payload.raw_json,
+                    is_error=payload.is_error,
+                    elapsed_ms=payload.elapsed_ms,
+                    agent_id=payload.agent_id,
+                    kind=payload.kind,
+                )
+                texts.setdefault(f"{prefix}tools/{payload.name}", []).append(
+                    TextRow(timed.timestamp_ns, f"◀ {payload.name} {elapsed_label}  {payload.text}", "ERROR" if payload.is_error else "INFO", values)
+                )
+                scalars.setdefault(f"{prefix}tools/elapsed_ms/{payload.name}", []).append(
+                    ScalarRow(timed.timestamp_ns, payload.elapsed_ms, timed.file_index)
+                )
+            elif isinstance(payload, Image):
+                images.setdefault(f"{prefix}media/images", []).append(
+                    ImageRow(timed.timestamp_ns, payload.blob, payload.media_type, timed.file_index, payload.call_id, payload.source)
+                )
     turns: list[Turn] = aggregate_turns(session.main)
     for turn in turns:
         texts.setdefault("turns", []).append(
@@ -269,6 +150,8 @@ def write_session_rrd(session: ClaudeSession, out: Path, *, host: str | None = N
                 turn.prompt,
                 values={
                     "turn_index": turn.turn_index,
+                    "model": turn.model,
+                    "effort": turn.effort,
                     "prompt_id": turn.prompt_id,
                     "file_index": turn.file_index,
                     "elapsed_ms": turn.elapsed_ms,
@@ -347,9 +230,10 @@ def write_session_rrd(session: ClaudeSession, out: Path, *, host: str | None = N
             recording.send_property(
                 "session",
                 rr.AnyValues(
+                    drop_untyped_nones=True,
                     session_id=session.session_id,
                     profile=session.profile,
-                    agent="claude",
+                    agent=session.agent,
                     host=host if host is not None else socket.gethostname(),
                     cwd=session.cwd,
                     git_branch=session.git_branch,
@@ -361,14 +245,27 @@ def write_session_rrd(session: ClaudeSession, out: Path, *, host: str | None = N
                     n_tool_calls=sum(row.values.get("phase") == "call" for rows in texts.values() for row in rows),
                     n_images=sum(len(rows) for rows in images.values()),
                     n_inlined_outputs=session.n_inlined_outputs,
-                    total_cost_usd=session.total_cost_usd,
+                    total_cost_usd=pa.array([session.total_cost_usd], type=pa.float64()),
+                    **(
+                        {
+                            "provider": session.provider,
+                            "originator": session.originator,
+                            "thread_source": session.thread_source,
+                            "forked_from": session.forked_from,
+                            "parent_thread": session.parent_thread,
+                            "total_input_tokens": session.total_input_tokens,
+                            "total_output_tokens": session.total_output_tokens,
+                        }
+                        if session.agent == "codex"
+                        else {}
+                    ),
                     source_path=str(session.source_path),
                     source_sha256=session.source_sha256,
                 ),
             )
             if session.skipped:
                 recording.send_property("skipped", rr.AnyValues(drop_untyped_nones=True, **session.skipped))
-            recording.send_recording_name(f"claude {session.session_id[:8]} {session.title or session.cwd}")
+            recording.send_recording_name(f"{session.agent} {session.session_id[:8]} {session.title or session.cwd}")
             recording.flush()
         finally:
             recording.disconnect()
