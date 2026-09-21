@@ -52,7 +52,7 @@ def main(config: Config) -> None:
         datetime.combine(date.fromisoformat(config.since), datetime.min.time(), UTC).timestamp() if config.since is not None else None
     )
     for path in sorted((home / "projects").glob("*/*.jsonl")):
-        if path.name.startswith("agent-"):
+        if path.name.startswith("agent-") or path.name.startswith("._"):  # subagent files; AppleDouble sidecars from macOS copies
             continue
         if config.project is not None and config.project not in path.parent.name:
             continue

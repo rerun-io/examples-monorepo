@@ -178,3 +178,13 @@ def test_missing_recording_retries_completed_entry(tmp_path: Path, capsys: pytes
     main(config)
     assert "converted=1 skipped=0 failed=0" in capsys.readouterr().out
     assert read_entities(recording)["/turns"]["TextLog:text"].to_pylist() == [["prompt"]]
+
+
+def test_appledouble_sidecars_are_not_sessions(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A macOS copy leaves `._<session>.jsonl` resource forks beside real transcripts; they are neither converted nor failures."""
+    home: Path = tmp_path / ".claude"
+    builder: SessionBuilder = SessionBuilder(home / "projects" / "p" / "real.jsonl")
+    builder.add("user", message={"content": "hello"})
+    (home / "projects" / "p" / "._real.jsonl").write_bytes(b"\x00\x05\x16\x07 not json")
+    convert_all.main(convert_all.Config(home=home, out=tmp_path / "out"))
+    assert "converted=1 skipped=0 failed=0" in capsys.readouterr().out
