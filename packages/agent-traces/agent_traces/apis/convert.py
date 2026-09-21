@@ -21,6 +21,8 @@ class Config:
     """Destination RRD path."""
     profile: str | None = None
     """Override the profile inferred from the Claude home directory."""
+    host: str | None = None
+    """Machine the sessions ran on, for transcripts copied from another host; defaults to this hostname."""
 
 
 def main(config: Config) -> None:
@@ -32,7 +34,7 @@ def main(config: Config) -> None:
     session: ClaudeSession = parse_session(config.session)
     if config.profile is not None:
         session = replace(session, profile=config.profile)
-    out: Path = write_session_rrd(session, config.out)
+    out: Path = write_session_rrd(session, config.out, host=config.host)
     counts: Counter[str] = Counter()
     families: Counter[str] = Counter()
     for chunk in RrdReader(out).stream().to_chunks():

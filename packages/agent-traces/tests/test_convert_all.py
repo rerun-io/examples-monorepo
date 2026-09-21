@@ -113,11 +113,11 @@ def test_writer_failure_propagates_after_saving_progress(tmp_path: Path, monkeyp
     for session_id in ["a", "b"]:
         SessionBuilder(home / "projects/one" / f"{session_id}.jsonl").add("user", message={"content": session_id})
 
-    def fail_second(session: ClaudeSession, out: Path) -> Path:
+    def fail_second(session: ClaudeSession, out: Path, *, host: str | None = None) -> Path:
         """Simulate a recording boundary failure after the first saved session."""
         if session.session_id == "b":
             raise ValueError("writer failure")
-        return write_session_rrd(session, out)
+        return write_session_rrd(session, out, host=host)
 
     monkeypatch.setattr(convert_all, "write_session_rrd", fail_second)
     with pytest.raises(ValueError, match="writer failure"):

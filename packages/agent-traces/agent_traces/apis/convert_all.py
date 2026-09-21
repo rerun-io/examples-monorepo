@@ -23,6 +23,8 @@ class Config:
     """Required output directory."""
     profile: str | None = None
     """Override the home directory name without its leading dot."""
+    host: str | None = None
+    """Machine the sessions ran on, for transcripts copied from another host; defaults to this hostname."""
     project: str | None = None
     """Only project directory names containing this substring."""
     session_id: str | None = None
@@ -82,7 +84,7 @@ def main(config: Config) -> None:
             print(f"FAILED {path}: {error} session_id={session_id} rows=0 seconds={perf_counter() - started:.3f}")
             continue
         session = replace(session, profile=profile)
-        rrd: Path = write_session_rrd(session, out / f"{session_id}.rrd")
+        rrd: Path = write_session_rrd(session, out / f"{session_id}.rrd", host=config.host)
         n_rows: int = sum(
             chunk.num_rows
             for chunk in RrdReader(rrd).stream()
