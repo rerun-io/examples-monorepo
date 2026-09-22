@@ -97,6 +97,40 @@ and is not part of `world_T_cam`.
   `packages/dataforge/dataforge/world_up.py`; cameras stay RDF.
 - See §2 for re-framing the recording with a transform on `/world`.
 
+### Layers versus paths
+
+A recording is usually served as several **layers**: one `.rrd` per sequence per
+layer, stacked by the viewer and the catalog on the shared recording id. Paths and
+layers answer different questions and never borrow from each other.
+
+- A **path** says what a thing is and where it sits in the scene. It is semantic
+  and stable: splitting or merging layers never moves an entity, and a layer's
+  name never appears in a path.
+- A **layer** says which file a thing came from, what it was built from, and that
+  it can be rebuilt alone. Layer names are dataset-local; this document does not
+  fix them.
+- The only provenance a path carries is `gt` versus `pred`: `gt` is what the
+  source shipped, whatever tool the source used to make it; `pred` is what we
+  estimated after ingest. Everything else about provenance (source file, model,
+  version, parameters) goes in the layer's property group and in static
+  `AnyValues` on the entity.
+- Each entity is written by exactly one layer. Root statics that other layers
+  depend on (`ViewCoordinates`, the `AnnotationContext` of §6) are written by the
+  base layer.
+- The base layer carries the source's metadata as property groups named for what
+  they describe (`capture`, `episode`). Every other layer carries exactly one
+  property group named after the layer, so `property:<layer>:*` always says which
+  file produced it. A layer that carries only properties is not a layer.
+- A layer that re-renders shipped numbers without changing them stays under `gt`
+  (a mesh skinned from shipped joint angles, an asset placed by a shipped pose).
+  A layer that changes numbers or adds model output writes under
+  `/world/pred/<name>/...` and `/world/rig_NN/cam_MM/pinhole/pred/<name>/...`,
+  mirroring the `gt` layout entity for entity so a blueprint or query moves
+  between them by swapping one prefix, and two methods can sit side by side.
+  Shipped label streams are never edited in place: a smoothing pass over the
+  hands is a new layer `hand_pose_smoothed` writing `/world/pred/smoothed/...`,
+  not a change to the layer that copies the source.
+
 ## 4. Per-rig metadata
 
 `simplecv.rerun_rig_logger.log_rig_static` logs, as static `rr.AnyValues` on each
@@ -164,6 +198,10 @@ Skeleton class IDs share the root `AnnotationContext` (§6):
 | Class ID | Layout | Writers |
 |---|---|---|
 | 0 | COCO-wholebody 133 | Existing exoego writers |
+| 100 | `left_hand` box (§13) | simplecv `Coco133RoiLayer`; reserved for dataforge |
+| 101 | `right_hand` box (§13) | simplecv `Coco133RoiLayer`; reserved for dataforge |
+| 102 | `full_body` box (§13) | simplecv `Coco133RoiLayer`; reserved for dataforge |
+| 103 | `face` box (§13) | dataforge / SHOW3D base |
 
 ### Projected 2D keypoints (per camera, derived)
 
@@ -173,8 +211,9 @@ Skeleton class IDs share the root `AnnotationContext` (§6):
 
 Each camera stores its own 2D projections beneath its `pinhole` entity. Missing
 points are `NaN` with confidence `0.0`. A parallel prediction layout under
-`/world/pred/...` and `/world/rig_NN/cam_MM/pinhole/pred/coco133_uv` is
-**reserved but not emitted by the current writer**.
+`/world/pred/<name>/...` and `/world/rig_NN/cam_MM/pinhole/pred/<name>/coco133_uv`
+is **reserved but not emitted by the current writer**; `<name>` identifies the
+method so several predictors can coexist beside `gt` (§3, Layers versus paths).
 
 ### Surveyed control points *(emitted — first writer: dataforge / LaMAria)*
 
@@ -241,8 +280,10 @@ When ingesting a recording:
    transform (§2).
 
 8. Log one static `AnnotationContext` at `/`, as all existing exoego writers
-   do. Merge the hand skeleton class (§10) and all other annotation classes
-   into that context, using the class IDs in §5.
+   do. Merge the hand skeleton class (§10), the box classes (§13) and all other
+   annotation classes into that context, using the class IDs in §5. In a layered
+   recording the base layer writes it (§3, Layers versus paths), so boxes in base
+   resolve their classes without any other layer present.
 
 The read side of these rules is `simplecv/catalog_rig_layout.py`: `parse_rig_layout`
 turns a catalog schema back into typed cameras (video stream, moving rig, rig `kind`,
@@ -484,21 +525,36 @@ Recording-level captions and instructions live outside the spatial tree.
   loading the text entity. SHOW3D uses `episode.overall_caption` for its overall
   caption; the document may include the source's structured caption fields.
 
-## 13. Face-blur boxes
+## 13. 2D boxes
 
-Face-blur regions describe the encoded camera image.
+Axis-aligned boxes on a camera image: faces, hands, bodies, objects. They sit
+under the camera's `pinhole` like `coco133_uv`, so they land on that image and
+on nothing else.
 
 **Layout:**
 
 ```
-/world/rig_NN/cam_MM/pinhole/blur_boxes     Boxes2D (temporal)
+/world/rig_NN/cam_MM/pinhole/boxes/<label>        Boxes2D (temporal): shipped or GT boxes
+/world/rig_NN/cam_MM/pinhole/pred/boxes/<label>   Boxes2D (temporal): our predictions
 ```
 
-- Log a row per annotated frame in encoded-image pixel coordinates, after any
-  image rotation or resize. A frame with no boxes has an empty batch, so boxes
-  from a previous frame do not persist.
-- Blueprints hide these entities by default. The boxes describe source blur
-  regions; logging them does not apply a blur to video pixels.
+- `<label>` names what the box encloses, from simplecv's `Coco133RoiLayer`
+  vocabulary: `left_hand`, `right_hand`, `full_body`, `face`. Each box carries the
+  matching `class_ids` (100-103, §5) from the root `AnnotationContext`, so colours
+  agree with the skeleton. `object` is reserved: the object alias goes in
+  `labels`, and its class id is assigned when the first writer needs it.
+- One entity per label. Kinds differ in cadence (face boxes exist only on
+  annotated frames, hand boxes on every frame), and one entity per label keeps
+  blueprint toggles, queries and clears independent.
+- Coordinates are encoded-image pixels, after any image rotation or resize. A
+  frame the source annotated with no boxes has an empty batch, so boxes from a
+  previous frame do not persist.
+- Shipped boxes go under `boxes/`, whatever the source drew them for. Why the
+  source drew them is provenance and goes in static `AnyValues` on the entity:
+  SHOW3D's `boxes/face` carry `source="blur_info"` because they are the regions
+  Meta blurred, and logging them applies no blur to video pixels. Boxes we
+  detect ourselves go under `pred/boxes/<label>` (§3, Layers versus paths).
+- Blueprints hide box entities by default.
 
 ## 14. Per-frame source provenance
 
