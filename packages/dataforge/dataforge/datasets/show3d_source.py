@@ -51,8 +51,6 @@ def calibration_file(key: str, camera: Show3dCamera) -> str:
 
 HAND_POSE_VERSION: str = "v2"
 """Released hand annotation version."""
-OBJECT_POSE_VERSION: str = "v1"
-"""Released object annotation version."""
 CAPTIONS_VERSION: str = "v1"
 """Released caption version."""
 
