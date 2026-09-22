@@ -97,6 +97,8 @@ HAND_POSE_VERSION: str = "v2"
 """Released hand annotation version."""
 CAPTIONS_VERSION: str = "v1"
 """Released caption version."""
+OBJECT_POSE_VERSION: str = "v1"
+"""Released object annotation version."""
 
 
 def hand_pose_file(key: str) -> str:
