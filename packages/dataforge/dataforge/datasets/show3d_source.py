@@ -95,8 +95,6 @@ away usable data" (hand_pose/README.md, object_pose/README.md); ``> 0`` is "low-
 want to drop". Landmarks and meshes are shown only above it; every shipped confidence value is kept."""
 HAND_POSE_VERSION: str = "v2"
 """Released hand annotation version."""
-OBJECT_POSE_VERSION: str = "v1"
-"""Released object annotation version."""
 CAPTIONS_VERSION: str = "v1"
 """Released caption version."""
 
