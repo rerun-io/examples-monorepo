@@ -42,9 +42,9 @@ outputs:
         - numpy
         - jaxtyping
         - rerun-sdk >=0.37.0
-        - pyserde
-        - tomli-w
-        - orjson
+        - pyserde >=0.31.2,<0.32
+        - tomli-w >=1.2,<2
+        - orjson >=3.11,<4
     tests:
       - python:
           imports: [slam_rs, slam_rs.rig, slam_rs.frontend_log, slam_rs.config]
@@ -67,7 +67,7 @@ outputs:
         - python 3.12.*
         - ${{ pin_subpackage('slam-rs', exact=True) }}
         # simplecv and dataforge are workspace PyPI path deps supplied by the consumer.
-        - tyro
+        - tyro >=0.9.1,<0.10
         - scipy
         - pyarrow
         - datafusion
