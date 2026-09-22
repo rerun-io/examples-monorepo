@@ -105,6 +105,16 @@ class IndexRow:
         scene_id_parts(self.scene_id)
 
     @property
+    def object_alias(self) -> str:
+        """Object token validated at the index boundary."""
+        return scene_id_parts(self.scene_id)[0]
+
+    @property
+    def action(self) -> str:
+        """Action tokens between object and suffix."""
+        return scene_id_parts(self.scene_id)[1]
+
+    @property
     def cameras(self) -> list[Show3dCamera]:
         """Index camera availability used to plan a single raw-input fetch."""
         available: tuple[bool, ...] = (

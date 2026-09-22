@@ -279,14 +279,14 @@ are cleaned beneath its `work/` directory, including on failure.
 
 | Layer | Status | Contents |
 | --- | --- | --- |
-| `base` | Available | Video, calibration, headset motion, frame metadata, blur boxes, capture census |
+| `base` | Available | Video, calibration, headset motion, frame metadata, face boxes (`boxes/face`), root AnnotationContext, `capture` census and `episode` metadata |
 
 `/world` is the moving back-rig frame, right-handed Y-up. `rig_00` holds
 rig0…rig7 at fixed `cam_00`…`cam_07` indices; `rig_01` holds the two headset
 cameras. Distances are metres. Every temporal column has `video_time` (source
 seconds minus the first timestamp) and the upstream `frame_index` sequence.
 The default layout shows 3D, both headset views, and the back-rig grid with
-blur boxes hidden; table cards decode headset0 only.
+face boxes hidden; table cards decode headset0 only.
 
 Video uses ffmpeg file-input grayscale decode → AV1 NVENC at 60 fps, GOP 60,
 no B-frames, then Mp4Reader remux. CQ 36 was chosen from the
