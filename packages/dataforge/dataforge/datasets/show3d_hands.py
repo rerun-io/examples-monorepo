@@ -14,7 +14,7 @@ from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from serde import serde
 from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
-from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_IDS, COCO_133_LINKS
+from simplecv.data.skeleton.coco_133 import COCO_133_IDS
 from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
 from simplecv.umetrack_temp.generic_hand_model_numpy import (
     NUM_JOINTS_PER_HAND,
@@ -142,18 +142,6 @@ def high_confidence_coverage(confidence: list[float]) -> float:
 def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selected: list[HandFrame], profile_text: str, target: Path) -> None:
     """Publish aligned measured hands and validated profile text on the base clocks."""
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
-        rr.log(
-            "/",
-            rr.AnnotationContext(
-                rr.ClassDescription(
-                    info=rr.AnnotationInfo(id=0, label="Coco Wholebody", color=(0, 0, 255)),
-                    keypoint_annotations=[rr.AnnotationInfo(id=point, label=name) for point, name in COCO_133_ID2NAME.items()],
-                    keypoint_connections=COCO_133_LINKS,
-                )
-            ),
-            static=True,
-            recording=recording,
-        )
         rr.log(
             schema.hand_profile_path(),
             rr.TextDocument(profile_text, media_type="application/json"),

@@ -186,7 +186,7 @@ def test_replace_re_registers_a_regenerated_layer(tmp_path: Path, catalog: FakeE
 @pytest.mark.parametrize("show3d", [False, True])
 def test_registers_only_dataset_layers(tmp_path: Path, catalog: FakeEntry, show3d: bool) -> None:
     name: str = "show3d" if show3d else "robocap"
-    for layer in ("base", "gt", "sensor_metadata", "hand_pose", "captions", "properties"):
+    for layer in ("base", "gt", "sensor_metadata", "hand_pose", "captions"):
         make_rrds(tmp_path, layer, [f"{name}__a.rrd"])
     register.main(Config(dataset=Show3dConfig() if show3d else RobocapConfig()))
-    assert list(catalog.registered) == (["base", "hand_pose", "captions", "properties"] if show3d else ["base", "gt", "sensor_metadata"])
+    assert list(catalog.registered) == (["base", "hand_pose", "captions"] if show3d else ["base", "gt", "sensor_metadata"])

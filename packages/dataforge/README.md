@@ -258,7 +258,7 @@ RERUN_INSECURE_SKIP_HOST_CHECK=1 DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/lamaria
 SHOW3D (Rim et al., CVPR 2026) is a back-rig plus Quest 3 hand-object capture; [docs/show3d.md](docs/show3d.md) opens with the papers, the capture system, how the labels were made and what ships. It converts one subject/scene into layers sharing the recording ID
 `show3d__<subject>__<scene>`. `download` fetches the two indexes and subject
 profiles, then prints the plan. `convert` fetches one scene bundle at a time,
-atomically publishes base → hand_pose → captions → properties, and removes only
+atomically publishes base → hand_pose → captions, and removes only
 the source MP4s unless `--keep-raw`. Each layer skips its own existing file unless
 `--force` is set. Retained sidecars rebuild annotations without reading video.
 
@@ -279,19 +279,17 @@ are cleaned beneath its `work/` directory, including on failure.
 
 | Layer | Status | Contents |
 | --- | --- | --- |
-| `base` | Available | Video, calibration, headset motion, frame metadata, blur boxes, capture census |
+| `base` | Available | Video, calibration, headset motion, frame metadata, face boxes (`boxes/face`), root AnnotationContext, `capture` census and `episode` metadata |
 | `hand_pose` | Available | COCO-133 keypoints with per-joint confidence (`world/gt/coco133_xyz`), shipped headset pixels (`coco133_uv`), joint angles, wrist poses, confidence, verbatim profile |
 | `captions` | Available | Markdown instruction and all structured caption fields |
-| `properties` | Available | Stable typed `episode` metadata: subject, split, object, action, hand, caption, versions |
 
-`hand_pose` owns the root AnnotationContext.
 
 `/world` is the moving back-rig frame, right-handed Y-up. `rig_00` holds
 rig0…rig7 at fixed `cam_00`…`cam_07` indices; `rig_01` holds the two headset
 cameras. Distances are metres. Every temporal column has `video_time` (source
 seconds minus the first timestamp) and the upstream `frame_index` sequence.
 The default layout shows 3D, both headset views, and the back-rig grid with
-blur boxes hidden; table cards decode headset0 only.
+face boxes hidden; table cards decode headset0 only.
 
 Video uses ffmpeg file-input grayscale decode → AV1 NVENC at 60 fps, GOP 60,
 no B-frames, then Mp4Reader remux. CQ 36 was chosen from the

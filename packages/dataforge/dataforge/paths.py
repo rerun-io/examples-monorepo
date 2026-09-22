@@ -29,8 +29,6 @@ HAND_POSE_LAYER: str = "hand_pose"
 """Measured hand annotations."""
 CAPTIONS_LAYER: str = "captions"
 """Scene instructions and captions."""
-PROPERTIES_LAYER: str = "properties"
-"""Searchable episode properties."""
 
 LAYERS: tuple[str, ...] = (BASE_LAYER, GT_LAYER, SENSOR_METADATA_LAYER)
 """Common layers; register and view use each dataset's own layer declaration."""

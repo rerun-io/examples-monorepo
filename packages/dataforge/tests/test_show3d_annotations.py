@@ -21,14 +21,13 @@ from dataforge import schema, transports
 from dataforge.datasets.base import DataforgeDataset
 from dataforge.datasets.show3d import Show3dConfig, Show3dDataset, base_files
 from dataforge.datasets.show3d_calibration import pinhole
-from dataforge.datasets.show3d_captions import Caption, write_properties_layer
+from dataforge.datasets.show3d_captions import Caption, write_captions_layer
 from dataforge.datasets.show3d_hands import HAND_SIDES, HandFrame, HandPose, high_confidence_coverage, read_hand_frames, write_hand_pose_layer
 from dataforge.datasets.show3d_layers import Scene
 from dataforge.datasets.show3d_source import (
     CAPTIONS_VERSION,
     HAND_POSE_VERSION,
     HEADSET_CAMERAS,
-    OBJECT_POSE_VERSION,
     FrameClock,
     FrameInfo,
     IndexRow,
@@ -62,7 +61,7 @@ def test_hand_schema_preserves_null_world_and_null_uv_landmarks() -> None:
     assert frame.hand_poses["0"].landmarks_2d["headset0"][1] == [3.0, 4.0]
 
 
-def test_caption_schema_and_episode_properties_have_stable_types(tmp_path: Path) -> None:
+def test_caption_layer_carries_the_searchable_fields(tmp_path: Path) -> None:
     caption: Caption = from_dict(
         Caption,
         dict(
@@ -80,35 +79,12 @@ def test_caption_schema_and_episode_properties_have_stable_types(tmp_path: Path)
         ),
     )
     assert caption.markdown().startswith("Lift the toy.\n\nObject alias\n:   ignored")
-    schemas: list[pa.Schema] = []
-    for present in (True, False):
-        source: IndexRow = index_row(
-            subject_id="S",
-            scene_id="toy_pick_up_abcd",
-            num_frames=4,
-            has_object_pose=present,
-            split="train",
-            has_hand_pose=present,
-            has_caption=present,
-        )
-        target: Path = tmp_path / f"{present}.rrd"
-        write_properties_layer(SequenceIdentity("show3d", ("S", source.scene_id)), source, caption if present else None, target)
-        props: dict[str, object] = recording_properties(read_back(target), "episode")
-        assert props == dict(
-            subject_id="S",
-            split="train",
-            object_alias="toy",
-            action="pick_up",
-            hand="both" if present else "",
-            overall_caption="Lift the toy." if present else "",
-            hand_pose_version=HAND_POSE_VERSION if present else "",
-            object_pose_version=OBJECT_POSE_VERSION if present else "",
-            captions_version=CAPTIONS_VERSION if present else "",
-        )
-        chunks: list[rr.experimental.Chunk] = read_chunks(target)
-        assert len(chunks) == 1
-        schemas.append(chunks[0].to_record_batch().schema.remove_metadata())
-    assert schemas[0] == schemas[1]
+    target: Path = tmp_path / "captions.rrd"
+    write_captions_layer(SequenceIdentity("show3d", ("S", "toy_pick_up_abcd")), caption, target)
+    # The captions layer carries exactly one property group, named after itself, with the fields a catalog user searches on.
+    assert recording_properties(read_back(target), "captions") == dict(version=CAPTIONS_VERSION, hand="both", overall_caption="Lift the toy.")
+    entities: set[str] = {str(chunk.entity_path) for chunk in read_chunks(target)}
+    assert entities == {schema.instruction_path(), "/__properties/captions"}
 
 
 def test_coverage_counts_strictly_above_half() -> None:
@@ -294,9 +270,9 @@ def test_convert_rebuilds_each_annotation_without_videos_or_fetch(
         existing.write_bytes(b"existing later layer")
     dataset: DataforgeDataset = Show3dConfig(root=root).setup()
     assert dataset.convert(identity, source, force=False) == base
-    assert capsys.readouterr().out.splitlines()[-1] == f"done {key}: hand_pose, captions, properties"
+    assert capsys.readouterr().out.splitlines()[-1] == f"done {key}: hand_pose, captions"
     assert "commit_sha" not in dataset.__dict__  # No Hub call is needed for retained sidecars.
-    targets: list[Path] = [output / layer / f"{identity.recording_id}.rrd" for layer in ("hand_pose", "captions", "properties")]
+    targets: list[Path] = [output / layer / f"{identity.recording_id}.rrd" for layer in ("hand_pose", "captions")]
     for missing in targets:
         before: dict[Path, int] = {p: p.stat().st_mtime_ns for p in [base, *targets]}
         missing.unlink()
@@ -304,7 +280,7 @@ def test_convert_rebuilds_each_annotation_without_videos_or_fetch(
         assert capsys.readouterr().out.splitlines()[-1] == f"done {key}: {missing.parent.name}"
         assert missing.is_file()
         assert all(p.stat().st_mtime_ns == stamp for p, stamp in before.items() if p != missing)
-    assert recording_properties(read_back(targets[-1]), "episode")["action"] == "toss-away"
+    assert recording_properties(read_back(targets[-1]), "captions")["version"] == CAPTIONS_VERSION
     assert base.read_bytes() == b"existing base must not be read or rewritten"
     assert retained_video.read_bytes() == b"keep raw when only annotations are rebuilt"
 
@@ -342,25 +318,6 @@ def test_hand_reader_rejects_census_or_clock_mismatch(tmp_path: Path, fault: str
     source.write_text(json.dumps(records))
     with pytest.raises(ValueError, match="census|disagrees"):
         read_hand_frames(source, scene)
-
-
-def test_properties_only_conversion_needs_no_scene_sidecars(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path))
-    identity: SequenceIdentity = SequenceIdentity("show3d", ("S", "none_wave-hands_abcd"))
-    base: Path = tmp_path / "base" / f"{identity.recording_id}.rrd"
-    base.parent.mkdir()
-    base.write_bytes(b"existing")
-    dataset: DataforgeDataset = Show3dConfig(root=tmp_path / "absent-raw").setup()
-    dataset.convert(
-        identity,
-        index_row(
-            subject_id="S", scene_id="none_wave-hands_abcd", num_frames=4, has_object_pose=False, split="test", has_hand_pose=False, has_caption=False
-        ),
-        force=False,
-    )
-    props: dict[str, object] = recording_properties(read_back(tmp_path / "properties" / base.name), "episode")
-    assert props["action"] == "wave-hands"
-    assert props["hand"] == props["overall_caption"] == props["captions_version"] == ""
 
 
 def test_default_blueprint_includes_instruction_below_ego_panes() -> None:

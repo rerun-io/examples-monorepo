@@ -15,7 +15,7 @@ from serde import from_dict
 
 from dataforge import archives, blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
-from dataforge.datasets.show3d_captions import Caption, write_captions_layer, write_properties_layer
+from dataforge.datasets.show3d_captions import Caption, write_captions_layer
 from dataforge.datasets.show3d_hands import (
     HandFrame,
     HandProfileDoc,
@@ -43,15 +43,15 @@ REPO_ID: str = "facebook/show3d-dataset"
 
 
 def world_contents() -> list[str]:
-    """Everything under ``/world`` except face-blur boxes and shipped pixel keypoints.
+    """Everything under ``/world`` except the shipped face boxes and shipped pixel keypoints.
 
     Rerun content filters honour exact paths and a trailing ``/**`` only: a rule such as
-    ``- /world/**/blur_boxes`` matches nothing and hides nothing (verified with headless
+    ``- /world/**/boxes/face`` matches nothing and hides nothing (verified with headless
     screenshots), so the exclusions are spelled out from the camera table.
     """
     return [
         "+ /world/**",
-        *(f"- {schema.pinhole_path(camera.rig, camera.cam)}/blur_boxes" for camera in CAMERAS),
+        *(f"- {schema.boxes_path(camera.rig, camera.cam, 'face')}" for camera in CAMERAS),
         *(f"- {schema.coco133_uv_path(camera.rig, camera.cam)}" for camera in CAMERAS),
     ]
 
@@ -69,9 +69,8 @@ def pane_contents(camera: Show3dCamera) -> list[str]:
     ``coco133_xyz`` because Rerun Pinhole cannot project through distortion. SHOW3D
     cameras are all PinholePlane, so only the rectified rule applies here.
     """
-    own: str = schema.pinhole_path(camera.rig, camera.cam)
     others: list[str] = [f"- {schema.pinhole_path(other.rig, other.cam)}/**" for other in CAMERAS if other is not camera]
-    return ["+ /world/**", f"- {own}/blur_boxes", f"- {schema.coco133_uv_path(camera.rig, camera.cam)}", *others]
+    return ["+ /world/**", f"- {schema.boxes_path(camera.rig, camera.cam, 'face')}", f"- {schema.coco133_uv_path(camera.rig, camera.cam)}", *others]
 
 
 @dataclass
@@ -103,7 +102,6 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
         paths.BASE_LAYER,
         paths.HAND_POSE_LAYER,
         paths.CAPTIONS_LAYER,
-        paths.PROPERTIES_LAYER,
     )
     """SHOW3D publication and loading order."""
 
@@ -180,16 +178,14 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             paths.BASE_LAYER: not writing.should_skip(targets[paths.BASE_LAYER], force=force),
             paths.HAND_POSE_LAYER: source.has_hand_pose and not writing.should_skip(targets[paths.HAND_POSE_LAYER], force=force),
             paths.CAPTIONS_LAYER: source.has_caption and not writing.should_skip(targets[paths.CAPTIONS_LAYER], force=force),
-            paths.PROPERTIES_LAYER: not writing.should_skip(targets[paths.PROPERTIES_LAYER], force=force),
         }
-        need_caption: bool = wants[paths.CAPTIONS_LAYER] or (wants[paths.PROPERTIES_LAYER] and source.has_caption)
         if not any(wants.values()):
             return targets[paths.BASE_LAYER]
         key: str = identity.sequence_key
         files: set[str] = set(base_files(source, key) if wants[paths.BASE_LAYER] else [])
         if wants[paths.HAND_POSE_LAYER]:
             files.update([*metadata_files(key), hand_pose_file(key), hand_profile_file(source.subject_id)])
-        if need_caption:
+        if wants[paths.CAPTIONS_LAYER]:
             files.add(caption_file(key))
         self.fetch_missing(sorted(files))
         scene_dir: Path = self.config.root / "scenes" / key
@@ -203,6 +199,7 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
                     identity,
                     scene_dir,
                     targets[paths.BASE_LAYER],
+                    index=source,
                     work_dir=work,
                     hf_revision=self.commit_sha,
                     default_blueprint=self.default_blueprint(),
@@ -222,14 +219,11 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             assert clock is not None and profile is not None
             write_hand_pose_layer(identity, clock, hand_frames, profile.text, targets[paths.HAND_POSE_LAYER])
             written.append(paths.HAND_POSE_LAYER)
-        caption: Caption | None = read_json(self.config.root / caption_file(key), Caption) if need_caption else None
+        caption: Caption | None = read_json(self.config.root / caption_file(key), Caption) if wants[paths.CAPTIONS_LAYER] else None
         if wants[paths.CAPTIONS_LAYER]:
             assert caption is not None
             write_captions_layer(identity, caption, targets[paths.CAPTIONS_LAYER])
             written.append(paths.CAPTIONS_LAYER)
-        if wants[paths.PROPERTIES_LAYER]:
-            write_properties_layer(identity, source, caption, targets[paths.PROPERTIES_LAYER])
-            written.append(paths.PROPERTIES_LAYER)
         if wants[paths.BASE_LAYER] and not self.config.keep_raw:
             for video in scene_dir.glob("*.mp4"):
                 video.unlink()
