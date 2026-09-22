@@ -193,7 +193,7 @@ blueprints retain all eight rig panes.
 | Calibration text | Static `source_calibration_json`: full rig JSON; headset intrinsics only (poses and flags have their own tracks) |
 | Frame metadata | `/frames`: `source_frame_id`, `source_timestamp_s`, `missing_cameras` (typed strings, including empty lists) |
 | Headset provenance | Temporal `is_synthesized`, optional `pose_source` and `is_pose_valid` on `rig_01` |
-| Blur xyxy pixels | Camera `/pinhole/blur_boxes`, partitioned `Boxes2D`; empty rows retained when supplied |
+| Blur xyxy pixels | Camera `/pinhole/boxes/face`, partitioned `Boxes2D` with class id 103 (`face`) and static `source="blur_info"`; empty rows retained when supplied (schema §13: named for what the box encloses, not why it was drawn) |
 | BASE census | Group `capture` (`schema=dataforge:v1`, plus `convert` group): int64 `num_frames`, `num_cameras`, `num_synthesized_headset_poses`, `source_start_frame_id`; float64 `source_start_time_s` |
 
 The default blueprint has the prototype's 3D eye, headset L/R panes, and a

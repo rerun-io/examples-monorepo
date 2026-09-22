@@ -54,6 +54,11 @@ def pinhole_path(rig: int, cam: int) -> str:
     return f"{cam_path(rig, cam)}/pinhole"
 
 
+def boxes_path(rig: int, cam: int, label: str) -> str:
+    """§13: ``.../pinhole/boxes/<label>`` — 2D boxes the source shipped, named for what they enclose."""
+    return f"{pinhole_path(rig, cam)}/boxes/{label}"
+
+
 def video_path(rig: int, cam: int) -> str:
     """``.../pinhole/video`` — the VideoStream entity on ``video_time``."""
     return f"{pinhole_path(rig, cam)}/video"

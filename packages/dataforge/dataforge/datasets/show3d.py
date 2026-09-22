@@ -29,15 +29,15 @@ REPO_ID: str = "facebook/show3d-dataset"
 
 
 def world_contents() -> list[str]:
-    """Everything under ``/world`` except face-blur boxes.
+    """Everything under ``/world`` except the shipped face boxes.
 
     Rerun content filters honour exact paths and a trailing ``/**`` only: a rule such as
-    ``- /world/**/blur_boxes`` matches nothing and hides nothing (verified with headless
+    ``- /world/**/boxes/face`` matches nothing and hides nothing (verified with headless
     screenshots), so the exclusions are spelled out from the camera table.
     """
     return [
         "+ /world/**",
-        *(f"- {schema.pinhole_path(camera.rig, camera.cam)}/blur_boxes" for camera in CAMERAS),
+        *(f"- {schema.boxes_path(camera.rig, camera.cam, 'face')}" for camera in CAMERAS),
     ]
 
 
@@ -49,9 +49,8 @@ def pane_contents(camera: Show3dCamera) -> list[str]:
     draws its frame and uv landmarks over the exo footage, so every other camera's
     ``pinhole/**`` subtree is excluded outright.
     """
-    own: str = schema.pinhole_path(camera.rig, camera.cam)
     others: list[str] = [f"- {schema.pinhole_path(other.rig, other.cam)}/**" for other in CAMERAS if other is not camera]
-    return ["+ /world/**", f"- {own}/blur_boxes", *others]
+    return ["+ /world/**", f"- {schema.boxes_path(camera.rig, camera.cam, 'face')}", *others]
 
 
 @dataclass
@@ -169,6 +168,7 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
                     identity,
                     scene_dir,
                     targets[paths.BASE_LAYER],
+                    index=source,
                     work_dir=work,
                     hf_revision=self.commit_sha,
                     default_blueprint=self.default_blueprint(),
