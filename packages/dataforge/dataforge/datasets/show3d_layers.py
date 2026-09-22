@@ -14,6 +14,8 @@ from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from serde.json import to_json
+from simplecv.data.skeleton.coco133_layers import COCO133_ROI_COLORS, COCO133_ROI_LABELS, Coco133RoiLayer
+from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
 
 from dataforge import schema, writing
 from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetPose, HeadsetRig, Intrinsics, RigCalibration, headset_rig, pinhole
@@ -23,6 +25,7 @@ from dataforge.datasets.show3d_source import (
     BlurInfo,
     FrameClock,
     FrameInfo,
+    IndexRow,
     RecordingInfo,
     Show3dCamera,
     read_frame_clock,
@@ -210,15 +213,20 @@ def log_cameras(recording: rr.RecordingStream, scene: Scene, work_dir: Path) -> 
                 )
                 clip.unlink()
                 if source.box_indices.size:
+                    # §13: shipped face boxes, named for what they enclose; why Meta drew them is metadata.
+                    face_path: str = schema.boxes_path(camera.rig, camera.cam, COCO133_ROI_LABELS[Coco133RoiLayer.FACE])
+                    rr.log(face_path, rr.AnyValues(source="blur_info"), static=True, recording=recording)
                     lengths: list[int] = [len(source.blur.blur_boxes[str(index)]) for index in source.box_indices]
                     boxes: Float32[ndarray, "n 4"] = np.asarray(
                         [box for index in source.box_indices for box in source.blur.blur_boxes[str(index)]], dtype=np.float32
                     ).reshape(-1, 4)
                     rr.send_columns(
-                        f"{schema.pinhole_path(camera.rig, camera.cam)}/blur_boxes",
+                        face_path,
                         indexes=scene.indexes(source.box_positions),
                         columns=rr.Boxes2D.columns(
-                            centers=(boxes[:, :2] + boxes[:, 2:]) / 2.0, half_sizes=(boxes[:, 2:] - boxes[:, :2]) / 2.0
+                            centers=(boxes[:, :2] + boxes[:, 2:]) / 2.0,
+                            half_sizes=(boxes[:, 2:] - boxes[:, :2]) / 2.0,
+                            class_ids=np.full(len(boxes), int(Coco133RoiLayer.FACE), dtype=np.uint16),
                         ).partition(lengths),
                         recording=recording,
                     )
@@ -281,11 +289,29 @@ def log_frames(recording: rr.RecordingStream, scene: Scene) -> None:
     )
 
 
+def annotation_context() -> rr.AnnotationContext:
+    """Root classes every layer relies on: the COCO-133 skeleton (class 0) and the §13 box labels (100-103)."""
+    return rr.AnnotationContext(
+        [
+            rr.ClassDescription(
+                info=rr.AnnotationInfo(id=0, label="Coco Wholebody", color=(0, 0, 255)),
+                keypoint_annotations=[rr.AnnotationInfo(id=point, label=name) for point, name in COCO_133_ID2NAME.items()],
+                keypoint_connections=COCO_133_LINKS,
+            ),
+            *(
+                rr.ClassDescription(info=rr.AnnotationInfo(id=int(layer), label=COCO133_ROI_LABELS[layer], color=COCO133_ROI_COLORS[layer]))
+                for layer in Coco133RoiLayer
+            ),
+        ]
+    )
+
+
 def write_base_layer(
     identity: SequenceIdentity,
     scene_dir: Path,
     target: Path,
     *,
+    index: IndexRow,
     work_dir: Path,
     hf_revision: str,
     default_blueprint: rrb.Blueprint | None = None,
@@ -295,6 +321,7 @@ def write_base_layer(
     scene: Scene = read_scene(scene_dir, scene_key=identity.sequence_key, frame_limit=frame_limit)
     with writing.atomic_recording(target, recording_id=identity.recording_id, default_blueprint=default_blueprint) as recording:
         rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True, recording=recording)
+        rr.log("/", annotation_context(), static=True, recording=recording)
         log_rig_node(recording, 0, reference=None, num_cameras=sum(camera.camera.rig == 0 for camera in scene.cameras), name="back_rig", kind="exo")
         log_rig_node(recording, 1, reference="cam_00", num_cameras=2, name="quest3", kind="ego")
         log_cameras(recording, scene, work_dir)
@@ -309,6 +336,16 @@ def write_base_layer(
             num_synthesized_headset_poses=pa.array([sum(pose.is_synthesized for pose in scene.poses)], type=pa.int64()),
             source_start_time_s=pa.array([scene.frames[0].timestamp], type=pa.float64()),
             source_start_frame_id=pa.array([scene.frames[0].agt_frame_id], type=pa.int64()),
+        )
+        # Source metadata a catalog user filters on; base carries it because it describes the episode, not a layer.
+        recording.send_property(
+            "episode",
+            rr.AnyValues(
+                subject_id=pa.array([index.subject_id], type=pa.string()),
+                split=pa.array([index.split], type=pa.string()),
+                object_alias=pa.array([index.object_alias], type=pa.string()),
+                action=pa.array([index.action], type=pa.string()),
+            ),
         )
 
     return scene

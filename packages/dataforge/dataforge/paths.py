@@ -29,8 +29,6 @@ HAND_POSE_LAYER: str = "hand_pose"
 """Measured hand annotations."""
 CAPTIONS_LAYER: str = "captions"
 """Scene instructions and captions."""
-PROPERTIES_LAYER: str = "properties"
-"""Searchable episode properties."""
 
 OBJECT_POSE_LAYER: str = "object_pose"
 """Tracked rigid object poses and geometric census."""

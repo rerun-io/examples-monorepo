@@ -333,7 +333,7 @@ def test_convert_rebuilds_each_mesh_and_object_layer_without_video(
     source: IndexRow = index_row(subject_id=build.identity.parts[0], scene_id=build.identity.parts[1])
     dataset.convert(build.identity, source, force=False)
     assert capsys.readouterr().out.splitlines()[-1] == (
-        f"done {key}: hand_pose, captions, properties, object_pose, object_mesh, hand_mesh"
+        f"done {key}: hand_pose, captions, object_pose, object_mesh, hand_mesh"
     )
     assert "commit_sha" not in dataset.__dict__
     targets: list[Path] = [output / layer / f"{build.identity.recording_id}.rrd" for layer in dataset.layers]
@@ -512,7 +512,7 @@ def test_convert_pending_unmapped_object_pose_prints_notice(
     poses: Path = raw / object_pose_file(identity.sequence_key)
     poses.parent.mkdir(parents=True)
     poses.write_text(json.dumps({"0": dict(**frame, R=[], t=[], confidence=0.0)}))
-    for layer in ("base", "properties"):
+    for layer in ("base",):
         target: Path = paths.rrd_path(paths.output_root(), layer=layer, identity=identity)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"existing")

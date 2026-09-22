@@ -96,7 +96,7 @@ and are removed even after failure. Each layer skips its own existing file unles
 `--force` is set. Missing annotation layers rebuild from retained JSON without
 fetching MP4s or reading the base recording. A hand-only rebuild reads metadata,
 hand JSON, and the subject profile; it needs no calibration or blur sidecars.
-The properties layer needs only the index row and caption. Publication and execution order is base → hand_pose → captions → properties → object_pose → object_mesh → hand_mesh.
+Publication and execution order is base → hand_pose → captions → object_pose → object_mesh → hand_mesh.
 
 ## Frames, clocks, and calibration variants
 
@@ -196,7 +196,7 @@ blueprints retain all eight rig panes.
 | Calibration text | Static `source_calibration_json`: full rig JSON; headset intrinsics only (poses and flags have their own tracks) |
 | Frame metadata | `/frames`: `source_frame_id`, `source_timestamp_s`, `missing_cameras` (typed strings, including empty lists) |
 | Headset provenance | Temporal `is_synthesized`, optional `pose_source` and `is_pose_valid` on `rig_01` |
-| Blur xyxy pixels | Camera `/pinhole/blur_boxes`, partitioned `Boxes2D`; empty rows retained when supplied |
+| Blur xyxy pixels | Camera `/pinhole/boxes/face`, partitioned `Boxes2D` with class id 103 (`face`) and static `source="blur_info"`; empty rows retained when supplied (schema §13: named for what the box encloses, not why it was drawn) |
 | BASE census | Group `capture` (`schema=dataforge:v1`, plus `convert` group): int64 `num_frames`, `num_cameras`, `num_synthesized_headset_poses`, `source_start_frame_id`; float64 `source_start_time_s` |
 
 The default blueprint has the prototype's 3D eye, headset L/R panes, and a
@@ -216,10 +216,10 @@ includes only headset0 video.
 | `landmarks_2d` | `/world/rig_01/cam_0{0,1}/pinhole/coco133_uv`: dense 133-point Points2DWithConfidence rows from shipped pixels; null points, absent hands, and hands at confidence ≤ 0.5 become NaN with zero confidence |
 | Subject profile JSON | `/world/gt/hands/profile`: verbatim static TextDocument with `application/json` media type |
 | Caption JSON (all ten strings) | `captions`: static Markdown TextDocument at `/task/instruction`; overall caption first, other fields as a definition list |
-| Index row and caption | `properties`: one `episode` property chunk |
 
-`hand_pose` is the single owner of the root `AnnotationContext` until a shared
-layer exists. UmeTrack landmarks use the Assembly-Hands index order and are
+The root `AnnotationContext` (COCO-133 skeleton and the §13 box classes) is
+written by base, so every layer resolves its classes without another one loaded.
+UmeTrack landmarks use the Assembly-Hands index order and are
 mapped into COCO-133, including body wrists and interpolated thumb bases. Other
 body and face points remain NaN with zero confidence. Each placed hand carries
 its shipped confidence; an absent hand, or one at confidence ≤ 0.5, has NaN positions
@@ -247,12 +247,11 @@ unknown envelope fields allowed. Profiles are stored without reserializing them.
 Annotation layers use `send_properties=False` and write only their own property
 groups. `hand_pose` holds string `version=v2` and float64
 `coverage_left_high_conf` / `coverage_right_high_conf` (confidence > 0.5).
-`captions` holds string `version=v1` and `hand`. The `episode` group contains nine
-string fields: `subject_id`, `split`, `object_alias`, `action`, `hand`,
-`overall_caption`, `hand_pose_version`, `object_pose_version`, `captions_version`.
-All keys are present for every scene; unavailable strings are empty. The alias
-is the scene ID's first token; action is everything between alias and final hash.
-BASE census remains in `capture`.
+`captions` holds string `version=v1`, `hand` and `overall_caption`. The index facts a
+catalog user filters on (`subject_id`, `split`, `object_alias`, `action`) are the
+`episode` group in base: they describe the source, not a layer. The alias is the
+scene ID's first token; action is everything between alias and final hash. The
+base census remains in `capture`.
 
 The keyboard and birdhouse reprojection goldens read the written hand landmarks and UV, then
 project through the base sidecar camera chain (headset0 pose, fixed stereo
