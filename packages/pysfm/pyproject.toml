@@ -20,7 +20,7 @@ ignore = [
     "F722",   # jaxtyping
     "F821",   # jaxtyping
     "UP037",  # jaxtyping with type quotes
-    "UP040",  # beartype compatibility
+    "UP040",  # PEP 695 `type` does not parse on our Python 3.10/3.11 envs, and beartype errors name only the alias, not the shape
 ]
 
 [tool.vulture]

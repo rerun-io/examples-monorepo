@@ -52,7 +52,9 @@ class ObjectFrame(FrameInfo):
         if self.posed:
             if np.shape(self.R) != (3, 3) or np.shape(self.t) != (3, 1):
                 raise ValueError("posed object requires 3x3 R and 3x1 t")
-            transform: Float64[ndarray, "4 4"] | None = self.world_T_object
+            # Not annotated: the property checks its own return, and a checked union local
+            # here was 42% of the dev-env integration lane (beartype rebuilds it per frame).
+            transform = self.world_T_object
             assert transform is not None
             validate_transform(transform)
 

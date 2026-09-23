@@ -135,7 +135,15 @@ def test_resolved_flow_config_hands_back_the_very_string_it_parsed(
 
     parsed: list[str] = []
 
-    class RecordingVioConfig:
+    class StandsInForVioConfig(type):
+        # Once ``_core`` is swapped, the function's own ``config: _core.VioConfig``
+        # annotation resolves to the stand-in, and beartype checks that local in the
+        # dev env; the stand-in has to accept real VioConfig values, and the Rust
+        # class cannot be subclassed.
+        def __instancecheck__(cls, instance: object) -> bool:
+            return isinstance(instance, _core.VioConfig)
+
+    class RecordingVioConfig(metaclass=StandsInForVioConfig):
         @staticmethod
         def from_json(text: str) -> _core.VioConfig:
             parsed.append(text)
