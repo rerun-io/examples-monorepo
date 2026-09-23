@@ -3,7 +3,7 @@ from typing import Any
 import numpy as np
 import torch
 from asmk import io_helpers
-from jaxtyping import Bool, Float, Float32, Int, Int64
+from jaxtyping import Bool, Float, Float32, Float64, Int, Int64
 from mast3r.model import AsymmetricMASt3R
 from mast3r.retrieval.model import how_select_local
 from mast3r.retrieval.processor import Retriever
@@ -101,13 +101,11 @@ class RetrievalDatabase(Retriever):
         topk_image_inds: list[int] = []
         topk_codes: Int64[ndarray, "n_local k"] | None = None  # Set when querying; remains None otherwise.
         if self.kf_counter > 0:
-            ranks: Float[ndarray, "1 n_images"]
-            ranked_scores: Float[ndarray, "1 n_images"]
             ranks, ranked_scores, topk_codes = self.query(feat_np, id_np)
 
-            scores: Float[ndarray, "1 n_images"] = np.empty_like(ranked_scores)
+            scores: Float64[ndarray, "n_query n_ranked"] = np.empty_like(ranked_scores)
             scores[np.arange(ranked_scores.shape[0])[:, None], ranks] = ranked_scores
-            scores_tensor: Float[Tensor, "n_images"] = torch.from_numpy(scores)[0]
+            scores_tensor: Float[Tensor, "n_ranked"] = torch.from_numpy(scores)[0]
 
             topk_images = torch.topk(scores_tensor, min(k, database_size))
 
@@ -125,7 +123,7 @@ class RetrievalDatabase(Retriever):
         self,
         feat: Float32[ndarray, "n_local d"],
         id: Int64[ndarray, "n_local"],
-    ) -> tuple[Int64[ndarray, "..."], Float[ndarray, "..."], Int64[ndarray, "..."]]:
+    ) -> tuple[Int64[ndarray, "n_query n_ranked"], Float64[ndarray, "n_query n_ranked"], Int64[ndarray, "n_local k"]]:
         """Query the ASMK inverted file for matching images.
 
         Args:
@@ -137,9 +135,6 @@ class RetrievalDatabase(Retriever):
         """
         step_params: dict = self.asmk.params.get("query_ivf")
 
-        ranks: Float[ndarray, "..."]
-        scores: Float[ndarray, "..."]
-        topk: Int64[ndarray, "..."]
         _images2, ranks, scores, topk = self.accumulate_scores(
             self.asmk.codebook,
             self.ivf_builder.kernel,
@@ -202,7 +197,7 @@ class RetrievalDatabase(Retriever):
         qvecs: Float32[ndarray, "n_local d"],
         qimids: Int64[ndarray, "n_local"],
         params: dict,
-    ) -> tuple[Int64[ndarray, "..."], Int64[ndarray, "..."], Float[ndarray, "..."], Int64[ndarray, "..."]]:
+    ) -> tuple[Int64[ndarray, "n_query"], Int64[ndarray, "n_query n_ranked"], Float64[ndarray, "n_query n_ranked"], Int64[ndarray, "n_local k"]]:
         """Accumulate scores for every query image given codebook, kernel,
         inverted_file and parameters.
 
@@ -232,17 +227,12 @@ class RetrievalDatabase(Retriever):
             quantized: tuple = (qvecs, topk_inds_np)
 
             aggregated = kern.aggregate_image(*quantized, **params["aggregate"])
-            ranks: Float[ndarray, "..."]
-            scores: Float[ndarray, "..."]
-            ranks, scores = ivf.search(
+            search_result: tuple[Int64[ndarray, "n_ranked"], Float64[ndarray, "n_ranked"]] = ivf.search(
                 *aggregated, **params["search"], similarity_func=similarity_func
             )
+            ranks, scores = search_result
             acc.append((imid, ranks, scores, topk_inds_np))
 
-        imids_all: tuple
-        ranks_all: tuple
-        scores_all: tuple
-        topk_all: tuple
         imids_all, ranks_all, scores_all, topk_all = zip(*acc, strict=False)
 
         return (

@@ -45,7 +45,9 @@ def object_sanity(frames: list[ObjectFrame], cameras: Sequence[HeadsetCalibratio
         for camera in cameras
     ]
     for frame in posed:
-        world_T_object: Float64[ndarray, "4 4"] | None = frame.world_T_object
+        # Not annotated: the property checks its own return, and a checked union local
+        # here was 29% of the dev-env integration lane (beartype rebuilds it per frame).
+        world_T_object = frame.world_T_object
         assert world_T_object is not None
         centre: Float64[ndarray, "3"] = world_T_object[:3, 3]
         for camera, k_matrix in zip(cameras, intrinsics, strict=True):

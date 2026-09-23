@@ -22,4 +22,5 @@ extend-exclude = [
 [lint]
 select = ["E", "F", "UP", "B", "SIM", "I"]
 # SIM901 in AGENTS.md is not a Ruff rule (Ruff 0.15.18 rejects it).
+# UP040: PEP 695 `type` does not parse on our Python 3.10/3.11 envs, and beartype errors name only the alias, not the shape.
 ignore = ["E501", "F722", "F821", "UP037", "UP040"]

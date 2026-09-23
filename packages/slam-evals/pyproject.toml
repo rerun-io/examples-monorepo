@@ -24,7 +24,7 @@ ignore = [
     "F722",   # jaxtyping forward annotation false positive
     "F821",   # jaxtyping forward annotation false positive
     "UP037",  # Remove quotes false positive with jaxtyping
-    "UP040",  # Beartype requires TypeAlias, not PEP 695 type
+    "UP040",  # PEP 695 `type` does not parse on our Python 3.10/3.11 envs, and beartype errors name only the alias, not the shape
 ]
 
 [tool.vulture]
