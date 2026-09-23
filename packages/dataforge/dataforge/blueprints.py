@@ -91,14 +91,17 @@ def eye_controls_from_pose(
     look_target: tuple[float, float, float],
     eye_up: tuple[float, float, float],
 ) -> rrb.EyeControls3D:
-    """A first-person eye placed by hand, in the coordinates of the view's origin.
+    """An orbital eye placed by hand, in the coordinates of the view's origin.
 
+    Orbital is the dataforge default for every 3D view: the eye orbits
+    ``look_target`` when dragged, which is what a person inspecting a rig or a
+    scene wants, whereas first-person controls fly the eye and lose the subject.
     The follow view's origin is the rig node, so an eye fixed in that frame rides
     the rig (the ``rerun-io/eye_control_example`` pattern).
 
     Args:
         position: Where the eye sits.
-        look_target: What it aims at.
+        look_target: What it aims at and orbits around.
         eye_up: Which way is up for the eye; it fixes the horizon's roll.
 
     Returns:
@@ -106,7 +109,7 @@ def eye_controls_from_pose(
     """
     # EyeControls3D is marked unstable by the SDK; re-validate this factory on Rerun bumps.
     return rrb.EyeControls3D(
-        kind=rrb.Eye3DKind.FirstPerson,
+        kind=rrb.Eye3DKind.Orbital,
         position=position,
         look_target=look_target,
         eye_up=eye_up,
