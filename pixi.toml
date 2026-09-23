@@ -242,6 +242,7 @@ pytest = ">=8.0.0,<9"
 [feature.ci.tasks]
 ci-lint = { cmd = "ruff check .", cwd = "." }
 ci-structure = { cmd = "pytest -q ci/tests", cwd = "." }
+ci-jaxtyping-baseline = { cmd = "python ci/tests/test_jaxtyping_spelling.py --update-baseline", cwd = "." }
 # CONDA_OVERRIDE_CUDA: the named CUDA platforms need the __cuda virtual package to resolve on a GPU-less host.
 ci-lock-check = { cmd = "pixi lock --check", cwd = ".", env = { CONDA_OVERRIDE_CUDA = "13.0" } }
 ci = { depends-on = ["ci-lint", "ci-structure", "ci-lock-check"] }
