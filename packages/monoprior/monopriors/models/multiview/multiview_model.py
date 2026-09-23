@@ -43,32 +43,14 @@ class PreprocessingMetadata(TypedDict):
 class MultiviewModelPredictions:
     """Minimal model outputs consumed by Monopriors post-processing."""
 
-    depth: Float32[ndarray, "*batch num_cams H W 1"]
+    depth: Float32[ndarray, "batch num_cams h w 1"]
     """Per-camera depth maps."""
-    depth_conf: Float32[ndarray, "*batch num_cams H W"]
+    depth_conf: Float32[ndarray, "batch num_cams h w"]
     """Per-pixel depth confidence."""
-    intrinsic: Float32[ndarray, "*batch num_cams 3 3"]
+    intrinsic: Float32[ndarray, "batch num_cams 3 3"]
     """Per-camera pinhole intrinsics."""
-    cam_T_world_b34: Float32[ndarray, "*batch num_cams 3 4"]
+    cam_T_world_b34: Float32[ndarray, "batch num_cams 3 4"]
     """World-to-camera extrinsics."""
-
-    def remove_batch_dim_if_one(self) -> "MultiviewModelPredictions":
-        """
-        Removes the batch dimension from all arrays if batch size is 1.
-
-        Returns:
-            A new instance with the singleton batch dimension removed.
-        """
-        if self.depth.shape[0] != 1:
-            return self
-
-        result = MultiviewModelPredictions(
-            depth=self.depth.squeeze(0),
-            depth_conf=self.depth_conf.squeeze(0),
-            cam_T_world_b34=self.cam_T_world_b34.squeeze(0),
-            intrinsic=self.intrinsic.squeeze(0),
-        )
-        return result
 
 
 @dataclass
@@ -337,10 +319,14 @@ def generate_multiview_pred(
     rgb_list: list[UInt8[ndarray, "original_h original_w 3"]],
     metadata_list: list[PreprocessingMetadata] | None = None,
 ) -> list[MultiviewPred]:
-    pred_class = pred_class.remove_batch_dim_if_one()
-    assert len(pred_class.cam_T_world_b34.shape) == 3, "Currently batch size of 1 is only supported"
-
-    depth_map_batch: Float32[ndarray, "num_cams resized_h resized_w 1"] = pred_class.depth
+    batch_size: int = pred_class.depth.shape[0]
+    if batch_size != 1:
+        raise ValueError(f"generate_multiview_pred supports a batch of one scene, got {batch_size}.")
+    # Index the single scene; these are views, so the padding fix below writes through as before.
+    depth_map_batch: Float32[ndarray, "num_cams resized_h resized_w 1"] = pred_class.depth[0]
+    depth_conf_batch: Float32[ndarray, "num_cams resized_h resized_w"] = pred_class.depth_conf[0]
+    intrinsics: Float32[ndarray, "num_cams 3 3"] = pred_class.intrinsic[0]
+    cam_T_world: Float32[ndarray, "num_cams 3 4"] = pred_class.cam_T_world_b34[0]
 
     # Get colors from original images and reshape them to match points
     processed_img_batch: Float32[ndarray, "num_cams 3 resized_h resized_w"] = img_tensors.numpy(force=True)
@@ -360,7 +346,7 @@ def generate_multiview_pred(
             # Remove padding from depths, world points, processed images, and confidence maps
             depth_maps.append(remove_padding_from_prediction(depth_map_batch[i], metadata_list[i]))
             processed_imgs.append(remove_padding_from_prediction(processed_img_batch[i], metadata_list[i]))
-            depth_confs.append(remove_padding_from_prediction(pred_class.depth_conf[i], metadata_list[i]))
+            depth_confs.append(remove_padding_from_prediction(depth_conf_batch[i], metadata_list[i]))
 
             # Also need to update camera intrinsics to account for removed padding
             if metadata_list[i]["mode"] == "pad":
@@ -368,24 +354,24 @@ def generate_multiview_pred(
                 pad_top: int = metadata_list[i]["padding"]["top"]
 
                 # Adjust principal point to account for removed padding
-                pred_class.intrinsic[i, 0, 2] -= pad_left
-                pred_class.intrinsic[i, 1, 2] -= pad_top
+                intrinsics[i, 0, 2] -= pad_left
+                intrinsics[i, 1, 2] -= pad_top
 
     else:
         depth_maps = list(depth_map_batch)
         processed_imgs = list(processed_img_batch)
-        depth_confs = list(pred_class.depth_conf)
+        depth_confs = list(depth_conf_batch)
 
     num_cams = len(rgb_list)
     if not all(
         len(values) == num_cams
-        for values in (pred_class.intrinsic, pred_class.cam_T_world_b34, processed_imgs, depth_maps, depth_confs)
+        for values in (intrinsics, cam_T_world, processed_imgs, depth_maps, depth_confs)
     ):
         raise ValueError("Model outputs and RGB inputs must contain the same number of cameras.")
 
     def materialize_prediction(idx: int) -> MultiviewPred:
-        intri = pred_class.intrinsic[idx]
-        extri = pred_class.cam_T_world_b34[idx]
+        intri = intrinsics[idx]
+        extri = cam_T_world[idx]
         processed_img = processed_imgs[idx]
         original_img = rgb_list[idx]
         depth_map = depth_maps[idx]
