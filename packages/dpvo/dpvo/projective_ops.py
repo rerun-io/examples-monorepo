@@ -71,7 +71,7 @@ def coords_grid(ht: int, wd: int, **kwargs: Any) -> Float[Tensor, "h w 2"]:
     return torch.stack([x, y], dim=-1)
 
 
-def iproj(patches: Float[Tensor, "... 3 ps ps"], intrinsics: Float[Tensor, "... 4"]) -> Float[Tensor, "... ps ps 4"]:
+def iproj(patches: Float[Tensor, "b e 3 ps ps"], intrinsics: Float[Tensor, "b e 4"]) -> Float[Tensor, "b e ps ps 4"]:
     """Inverse projection: lift patches from image coordinates to 3-D homogeneous rays.
 
     Converts each patch pixel ``(u, v, d)`` (where ``d`` is inverse depth)
@@ -88,30 +88,30 @@ def iproj(patches: Float[Tensor, "... 3 ps ps"], intrinsics: Float[Tensor, "... 
         intrinsics: Camera intrinsics ``(fx, fy, cx, cy)``.
 
     Returns:
-        4-D homogeneous points of shape ``(..., ps, ps, 4)``.
+        4-D homogeneous points of shape ``(b, e, ps, ps, 4)``.
     """
-    x: Float[Tensor, "... ps ps"]
-    y: Float[Tensor, "... ps ps"]
-    d: Float[Tensor, "... ps ps"]
+    x: Float[Tensor, "b e ps ps"]
+    y: Float[Tensor, "b e ps ps"]
+    d: Float[Tensor, "b e ps ps"]
     x, y, d = patches.unbind(dim=2)
 
-    fx: Float[Tensor, "..."]
-    fy: Float[Tensor, "..."]
-    cx: Float[Tensor, "..."]
-    cy: Float[Tensor, "..."]
+    fx: Float[Tensor, "b e 1 1"]
+    fy: Float[Tensor, "b e 1 1"]
+    cx: Float[Tensor, "b e 1 1"]
+    cy: Float[Tensor, "b e 1 1"]
     fx, fy, cx, cy = intrinsics[...,None,None].unbind(dim=2)
 
     # Normalised image coordinates: (u - cx) / fx, (v - cy) / fy
-    i: Float[Tensor, "... ps ps"] = torch.ones_like(d)
-    xn: Float[Tensor, "... ps ps"] = (x - cx) / fx
-    yn: Float[Tensor, "... ps ps"] = (y - cy) / fy
+    i: Float[Tensor, "b e ps ps"] = torch.ones_like(d)
+    xn: Float[Tensor, "b e ps ps"] = (x - cx) / fx
+    yn: Float[Tensor, "b e ps ps"] = (y - cy) / fy
 
     # Homogeneous 4-vector: (X/Z, Y/Z, 1, 1/Z)
-    X: Float[Tensor, "... ps ps 4"] = torch.stack([xn, yn, i, d], dim=-1)
+    X: Float[Tensor, "b e ps ps 4"] = torch.stack([xn, yn, i, d], dim=-1)
     return X
 
 
-def proj(X: Float[Tensor, "... 4"], intrinsics: Float[Tensor, "... 4"], depth: bool = False) -> Float[Tensor, "..."]:
+def proj(X: Float[Tensor, "b e ps ps 4"], intrinsics: Float[Tensor, "b e 4"], depth: bool = False) -> Float[Tensor, "b e ps ps 2"] | Float[Tensor, "b e ps ps 3"]:
     """Forward projection: project 3-D homogeneous points to pixel coordinates.
 
     Given a point ``(X, Y, Z, W)`` in the homogeneous representation and
@@ -133,21 +133,21 @@ def proj(X: Float[Tensor, "... 4"], intrinsics: Float[Tensor, "... 4"], depth: b
         Projected 2-D coordinates ``(u, v)`` or ``(u, v, d)`` if
         ``depth=True``.
     """
-    Y: Float[Tensor, "..."]
-    Z: Float[Tensor, "..."]
-    W: Float[Tensor, "..."]
+    Y: Float[Tensor, "b e ps ps"]
+    Z: Float[Tensor, "b e ps ps"]
+    W: Float[Tensor, "b e ps ps"]
     X, Y, Z, W = X.unbind(dim=-1)
 
-    fx: Float[Tensor, "..."]
-    fy: Float[Tensor, "..."]
-    cx: Float[Tensor, "..."]
-    cy: Float[Tensor, "..."]
+    fx: Float[Tensor, "b e 1 1"]
+    fy: Float[Tensor, "b e 1 1"]
+    cx: Float[Tensor, "b e 1 1"]
+    cy: Float[Tensor, "b e 1 1"]
     fx, fy, cx, cy = intrinsics[...,None,None].unbind(dim=2)
 
     # Inverse depth, clamped to avoid division by zero
-    d: Float[Tensor, "..."] = 1.0 / Z.clamp(min=0.1)
-    x: Float[Tensor, "..."] = fx * (d * X) + cx
-    y: Float[Tensor, "..."] = fy * (d * Y) + cy
+    d: Float[Tensor, "b e ps ps"] = 1.0 / Z.clamp(min=0.1)
+    x: Float[Tensor, "b e ps ps"] = fx * (d * X) + cx
+    y: Float[Tensor, "b e ps ps"] = fy * (d * Y) + cy
 
     if depth:
         return torch.stack([x, y, d], dim=-1)
