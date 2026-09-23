@@ -720,7 +720,7 @@ class DinoVisionTransformer(nn.Module):
         block: Block,
         attn_type: AttentionType = "global",
         pos: Float[Tensor, "batch views tokens 2"] | Int64[Tensor, "batch views tokens 2"] | None = None,
-        attn_mask: Float[Tensor, "packed_batch ... tokens tokens"] | Bool[Tensor, "packed_batch ... tokens tokens"] | None = None,
+        attn_mask: Float[Tensor, "packed_batch ... attn_tokens attn_tokens"] | Bool[Tensor, "packed_batch ... attn_tokens attn_tokens"] | None = None,
         dwc_info: DwcInfo | None = None,
     ) -> Float[Tensor, "batch views tokens features"]:
         """Run one attention layer.
