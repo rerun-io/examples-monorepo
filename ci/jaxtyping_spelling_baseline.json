@@ -2,15 +2,6 @@
   "packages/arkitscenes-download/arkitscenes_download/ingest/distortion.py": {
     "JT002": 3
   },
-  "packages/dpvo/dpvo/dpvo.py": {
-    "JT001": 40
-  },
-  "packages/dpvo/dpvo/loop_closure/long_term.py": {
-    "JT001": 2
-  },
-  "packages/dpvo/dpvo/patchgraph.py": {
-    "JT001": 20
-  },
   "packages/dpvo/dpvo/plot_utils.py": {
     "JT002": 1
   },
@@ -32,12 +23,6 @@
   "packages/mamma/src/mamma/landmarks/skeleton.py": {
     "JT002": 2
   },
-  "packages/mamma/tools/compare_presets.py": {
-    "JT001": 2
-  },
-  "packages/mamma/tools/validate_artifacts.py": {
-    "JT001": 9
-  },
   "packages/mamma/tools/validate_vs_pred.py": {
     "JT002": 8
   },
@@ -45,55 +30,30 @@
     "JT002": 1
   },
   "packages/mast3r-slam/mast3r_slam/async_logger.py": {
-    "JT001": 38,
     "JT002": 1
-  },
-  "packages/mast3r-slam/mast3r_slam/dataloader.py": {
-    "JT001": 16
   },
   "packages/mast3r-slam/mast3r_slam/image_types.py": {
     "JT002": 1
   },
-  "packages/mast3r-slam/mast3r_slam/log_events.py": {
-    "JT001": 6
-  },
   "packages/mast3r-slam/mast3r_slam/mast3r_utils.py": {
-    "JT001": 6,
     "JT002": 1
   },
-  "packages/mast3r-slam/mast3r_slam/nerfstudio_utils.py": {
-    "JT001": 6
-  },
   "packages/mast3r-slam/mast3r_slam/rerun_log_utils.py": {
-    "JT001": 32,
     "JT002": 5
   },
   "packages/mast3r-slam/mast3r_slam/retrieval_database.py": {
     "JT002": 9
   },
-  "packages/mast3r-slam/mast3r_slam/tracker.py": {
-    "JT001": 2
-  },
-  "packages/monoprior/monopriors/apis/depth_alignment.py": {
-    "JT001": 22
-  },
   "packages/monoprior/monopriors/apis/fusion.py": {
-    "JT001": 4,
     "JT002": 1
   },
   "packages/monoprior/monopriors/apis/metric_depth.py": {
-    "JT001": 6,
     "JT002": 1
   },
   "packages/monoprior/monopriors/apis/multiview_calibration.py": {
-    "JT001": 40,
     "JT002": 4
   },
-  "packages/monoprior/monopriors/apis/multiview_geometry.py": {
-    "JT001": 10
-  },
   "packages/monoprior/monopriors/apis/multiview_inference.py": {
-    "JT001": 16,
     "JT002": 1
   },
   "packages/monoprior/monopriors/apis/polycam_inference.py": {
@@ -101,24 +61,6 @@
   },
   "packages/monoprior/monopriors/apis/promptda_polycam.py": {
     "JT002": 1
-  },
-  "packages/monoprior/monopriors/apis/vda_inference.py": {
-    "JT001": 6
-  },
-  "packages/monoprior/monopriors/dc_utils.py": {
-    "JT001": 3
-  },
-  "packages/monoprior/monopriors/gradio_ui/depth_alignment_ui.py": {
-    "JT001": 12
-  },
-  "packages/monoprior/monopriors/gradio_ui/metric_depth_ui.py": {
-    "JT001": 4
-  },
-  "packages/monoprior/monopriors/gradio_ui/multiview_calibration_ui.py": {
-    "JT001": 6
-  },
-  "packages/monoprior/monopriors/gradio_ui/multiview_geometry_ui.py": {
-    "JT001": 8
   },
   "packages/monoprior/monopriors/models/depth_completion/base_completion_depth.py": {
     "JT002": 1
@@ -135,19 +77,11 @@
   "packages/monoprior/monopriors/models/monoprior/monoprior_models.py": {
     "JT002": 3
   },
-  "packages/monoprior/monopriors/models/multiview/multiview_model.py": {
-    "JT001": 39
-  },
   "packages/monoprior/monopriors/models/multiview/multiview_pointcloud.py": {
-    "JT001": 14,
     "JT002": 14
   },
   "packages/monoprior/monopriors/models/multiview/multiview_predictor.py": {
-    "JT001": 18,
     "JT002": 16
-  },
-  "packages/monoprior/monopriors/models/relative_depth/base_relative_depth.py": {
-    "JT001": 3
   },
   "packages/monoprior/monopriors/models/relative_depth/depth_anything_v1.py": {
     "JT002": 1
@@ -162,7 +96,6 @@
     "JT002": 2
   },
   "packages/monoprior/monopriors/models/relative_depth/video_depth_anything.py": {
-    "JT001": 40,
     "JT002": 1
   },
   "packages/monoprior/monopriors/models/relative_depth/zipdepth.py": {
@@ -183,20 +116,11 @@
   "packages/monoprior/monopriors/models/surface_normal/stable_normal_model.py": {
     "JT002": 1
   },
-  "packages/monoprior/monopriors/scale_utils.py": {
-    "JT001": 12
-  },
   "packages/monoprior/tests/test_depth_compare_ui.py": {
     "JT002": 1
   },
   "packages/monoprior/tests/test_monoprior_configs.py": {
     "JT002": 2
-  },
-  "packages/monoprior/tests/test_rig_depth_rays.py": {
-    "JT001": 1
-  },
-  "packages/monoprior/tests/test_stereo_rectify.py": {
-    "JT001": 2
   },
   "packages/monoprior/tools/utils/nerfstudio_to_sdfstudio.py": {
     "JT002": 2
@@ -208,22 +132,18 @@
     "JT002": 2
   },
   "packages/mv-api/src/mv_api/api/full_exoego_pipeline.py": {
-    "JT001": 36,
     "JT002": 14
   },
   "packages/mv-api/src/mv_api/data/synced_videos.py": {
-    "JT001": 8,
     "JT002": 6
   },
   "packages/mv-api/src/mv_api/multiview_pose_estimator.py": {
-    "JT001": 10,
     "JT002": 7
   },
   "packages/mv-api/tests/test_full_exoego_pipeline_helpers.py": {
     "JT002": 1
   },
   "packages/mv-api/tests/test_full_exoego_pipeline_rrd.py": {
-    "JT001": 4,
     "JT002": 5
   },
   "packages/mv-api/tests/test_synced_video_dataset.py": {
@@ -253,30 +173,11 @@
   "packages/prompt-da/src/rerun_prompt_da/gradio_ui/prompt_da_ui.py": {
     "JT002": 1
   },
-  "packages/pysfm/pysfm/apis/pycolmap_rig_recon.py": {
-    "JT001": 32
-  },
-  "packages/pysfm/pysfm/apis/pycolmap_vid_recon.py": {
-    "JT001": 32
-  },
-  "packages/pysfm/pysfm/apis/sfm_reconstruction.py": {
-    "JT001": 11
-  },
   "packages/pysfm/pysfm/apis/video_to_image.py": {
-    "JT001": 2,
     "JT002": 2
-  },
-  "packages/pysfm/pysfm/gradio_ui/nodes/sfm_reconstruction_ui.py": {
-    "JT001": 4
   },
   "packages/pysfm/pysfm/gradio_ui/nodes/video_to_image_ui.py": {
     "JT002": 1
-  },
-  "packages/pysfm/pysfm/streamed_pipeline.py": {
-    "JT001": 6
-  },
-  "packages/pysfm/tests/test_streamed_extraction.py": {
-    "JT001": 12
   },
   "packages/robocap-slam/robocap_slam/data/base.py": {
     "JT002": 1
@@ -306,7 +207,6 @@
     "JT002": 7
   },
   "packages/sam3d-body/src/sam3d_body/data/utils/prepare_batch.py": {
-    "JT001": 26,
     "JT002": 3
   },
   "packages/sam3d-body/src/sam3d_body/gradio_ui/sam3d_body_ui.py": {
@@ -322,7 +222,6 @@
     "JT002": 7
   },
   "packages/sam3d-body/src/sam3d_body/sam_3d_body_estimator.py": {
-    "JT001": 6,
     "JT002": 44
   },
   "packages/sapiens-coco133-pose/src/sapiens_coco133_pose/api/artifact.py": {
@@ -346,33 +245,25 @@
   "packages/simplecv/simplecv/_torchcodec_view_utils.py": {
     "JT002": 2
   },
-  "packages/simplecv/simplecv/apis/convert_to_ns.py": {
-    "JT001": 4
-  },
   "packages/simplecv/simplecv/apis/convert_to_rrd.py": {
     "JT002": 3
   },
   "packages/simplecv/simplecv/apis/exoego_tools/wilor_ego_tracking.py": {
-    "JT001": 6,
     "JT002": 7
   },
   "packages/simplecv/simplecv/apis/ingest_exoego_recording.py": {
     "JT002": 86
   },
   "packages/simplecv/simplecv/apis/mano_optim_benchmark.py": {
-    "JT001": 2,
     "JT002": 19
   },
   "packages/simplecv/simplecv/apis/mano_optim_benchmark_multi.py": {
-    "JT001": 2,
     "JT002": 18
   },
   "packages/simplecv/simplecv/apis/mano_optim_benchmark_single.py": {
-    "JT001": 2,
     "JT002": 29
   },
   "packages/simplecv/simplecv/apis/metric_exoego_calib.py": {
-    "JT001": 4,
     "JT002": 48
   },
   "packages/simplecv/simplecv/apis/quest3_oakd_loader.py": {
@@ -382,7 +273,6 @@
     "JT002": 40
   },
   "packages/simplecv/simplecv/apis/view_exoego.py": {
-    "JT001": 4,
     "JT002": 43
   },
   "packages/simplecv/simplecv/apis/view_torchcodec_multiview.py": {
@@ -412,14 +302,8 @@
   "packages/simplecv/simplecv/data/ego/hocap_ego.py": {
     "JT002": 10
   },
-  "packages/simplecv/simplecv/data/ego/rrd_ego.py": {
-    "JT001": 2
-  },
   "packages/simplecv/simplecv/data/exo/hocap_exo.py": {
     "JT002": 7
-  },
-  "packages/simplecv/simplecv/data/exo/rrd_exo.py": {
-    "JT001": 2
   },
   "packages/simplecv/simplecv/data/exoego/aria_gen2_pilot.py": {
     "JT002": 3
@@ -428,7 +312,6 @@
     "JT002": 3
   },
   "packages/simplecv/simplecv/data/exoego/base_exoego.py": {
-    "JT001": 16,
     "JT002": 25
   },
   "packages/simplecv/simplecv/data/exoego/ego100k.py": {
@@ -441,7 +324,6 @@
     "JT002": 7
   },
   "packages/simplecv/simplecv/data/exoego/hocap.py": {
-    "JT001": 4,
     "JT002": 3
   },
   "packages/simplecv/simplecv/data/exoego/hot3d.py": {
@@ -460,22 +342,13 @@
     "JT002": 3
   },
   "packages/simplecv/simplecv/data/skeleton/avp_fullbody.py": {
-    "JT001": 4,
     "JT002": 4
   },
-  "packages/simplecv/simplecv/image_types.py": {
-    "JT001": 2
-  },
   "packages/simplecv/simplecv/ops/mano/mano_jax.py": {
-    "JT001": 1,
     "JT002": 1
   },
   "packages/simplecv/simplecv/ops/mano/mano_np.py": {
-    "JT001": 1,
     "JT002": 12
-  },
-  "packages/simplecv/simplecv/ops/mano/mano_torch.py": {
-    "JT001": 1
   },
   "packages/simplecv/simplecv/ops/mano/optim_jax_multi.py": {
     "JT002": 11
@@ -486,18 +359,13 @@
   "packages/simplecv/simplecv/ops/mano/optim_jax_single_shape.py": {
     "JT002": 8
   },
-  "packages/simplecv/simplecv/ops/pc_utils.py": {
-    "JT001": 1
-  },
   "packages/simplecv/simplecv/ops/smplx/smplx_coco133.py": {
     "JT002": 7
   },
   "packages/simplecv/simplecv/ops/triangulate.py": {
-    "JT001": 27,
     "JT002": 67
   },
   "packages/simplecv/simplecv/ops/tsdf_depth_fuser.py": {
-    "JT001": 10,
     "JT002": 2
   },
   "packages/simplecv/simplecv/ops/umeyama.py": {
@@ -523,9 +391,6 @@
   },
   "packages/simplecv/simplecv/sensors/camera/fisheye62.py": {
     "JT002": 64
-  },
-  "packages/simplecv/simplecv/umetrack_temp/perspective_cropping.py": {
-    "JT001": 18
   },
   "packages/simplecv/simplecv/umetrack_temp/projection.py": {
     "JT002": 4
@@ -558,19 +423,15 @@
     "JT002": 4
   },
   "packages/vistadream/src/vistadream/api/multi_image_pipeline.py": {
-    "JT001": 18,
     "JT002": 4
   },
   "packages/vistadream/src/vistadream/api/single_img_pipeline.py": {
-    "JT001": 82,
     "JT002": 26
   },
   "packages/vistadream/src/vistadream/ops/connect.py": {
-    "JT001": 8,
     "JT002": 3
   },
   "packages/vistadream/src/vistadream/ops/gs/basic.py": {
-    "JT001": 56,
     "JT002": 22
   },
   "packages/vistadream/src/vistadream/ops/gs/train.py": {
@@ -580,14 +441,12 @@
     "JT002": 1
   },
   "packages/vistadream/src/vistadream/ops/trajs/basic.py": {
-    "JT001": 4,
     "JT002": 22
   },
   "packages/vistadream/src/vistadream/ops/trajs/spiral.py": {
     "JT002": 22
   },
   "packages/vistadream/src/vistadream/ops/utils.py": {
-    "JT001": 4,
     "JT002": 3
   },
   "packages/wilor-nano/src/wilor_nano/api/wilor_inference.py": {
@@ -600,11 +459,9 @@
     "JT002": 3
   },
   "packages/wilor-nano/src/wilor_nano/hand_detection.py": {
-    "JT001": 2,
     "JT002": 5
   },
   "packages/wilor-nano/src/wilor_nano/hand_keypoints.py": {
-    "JT001": 4,
     "JT002": 51
   },
   "packages/wilor-nano/src/wilor_nano/pipelines/wilor_hand_pose3d_estimation_pipeline.py": {

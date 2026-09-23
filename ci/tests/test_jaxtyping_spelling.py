@@ -1,12 +1,12 @@
-"""Ratchet jaxtyping spelling in authored package code with per-file counts.
+"""Ratchet jaxtyping hints in authored package code with per-file counts.
 
-JT001 requires lowercase axis names. JT002 requires an explicit-width dtype on
-numpy arrays: beartype checks dtype and rank per array, and a generic Float hides
-the width (a float64 K under Float32 is the classic crash). Torch tensors are exempt,
-because autocast and half precision legitimately vary their dtype. JT003 forbids
-symbolic axes, which raise AnnotationError on every call without @jaxtyped. Genuine
-numpy dtype polymorphism may carry the generic-dtype comment marker. Counts may
-fall but must not exceed the baseline.
+JT002 requires an explicit-width dtype on numpy arrays: beartype checks dtype and
+rank per array, and a generic Float hides the width (a float64 K under Float32 is the
+classic crash). Torch tensors are exempt, because autocast and half precision
+legitimately vary their dtype. JT003 forbids symbolic axes, which raise
+AnnotationError on every call without @jaxtyped. Genuine numpy dtype polymorphism
+may carry the generic-dtype comment marker. Counts may fall but must not exceed the
+baseline.
 """
 
 import ast
@@ -88,9 +88,6 @@ def _violations(source: str) -> list[tuple[int, str, str]]:
         ):
             problems.append((node.lineno, "JT002", dtype))
         for token in shape.value.split():
-            name: str = token.lstrip("*#_").split("=", maxsplit=1)[0]
-            if name and name != "..." and not re.fullmatch(r"[0-9]+", name) and not re.fullmatch(r"[a-z][a-z0-9_]*", name):
-                problems.append((shape.lineno, "JT001", token))
             expression: str = token[1:] if token.startswith(("*", "#")) else token
             if re.search(r"[+\-/()*]", expression):
                 problems.append((shape.lineno, "JT003", token))
@@ -140,15 +137,14 @@ def test_package_jaxtyping_spelling() -> None:
     baseline: dict[str, dict[str, int]] = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
     problems: list[str] = _new_violations(_scan_packages(), baseline)
     assert not problems, "\n".join(problems) + (
-        "\nFix the spelling (lowercase axis names, a fixed-width dtype such as Float32, no symbolic axes),"
+        "\nUse a fixed-width dtype such as Float32 on numpy arrays and no symbolic axes,"
         " or mark genuine dtype polymorphism with `# jaxtyping: generic-dtype`."
         " Lowering counts is always welcome — regenerate with `pixi run -e ci --frozen ci-jaxtyping-baseline`."
     )
 
 
-def test_lowercase_axes() -> None:
-    assert _violations('x: Float32[Array, "H W 3 *B"]') == [(1, "JT001", "H"), (1, "JT001", "W"), (1, "JT001", "*B")]
-    assert _violations('x: Float32[Array, "h w 3 n_joints=22 *batch #b _n _ *_ ..."]') == []
+def test_axis_names_are_not_policed() -> None:
+    assert _violations('x: Float32[ndarray, "H W 3 h w n_joints=22 *batch #b _n _ *_ ..."]') == []
 
 
 def test_explicit_width_and_escape_hatch() -> None:
@@ -188,12 +184,12 @@ def test_explicit_width_and_escape_hatch() -> None:
 
 def test_hints_are_found_in_all_ast_contexts() -> None:
     source: str = (
-        'Alias = list[jt.Float32[Array, "B"] | None]\n'
-        '@dataclass\nclass Record:\n    value: Float32[Array, "N"]\n'
-        'def f(x: Float32[Array, "H"]) -> Float32[Array, "W"]:\n    pass\n'
+        'Alias = list[jt.Float[np.ndarray, "b"] | None]\n'
+        '@dataclass\nclass Record:\n    value: Float[ndarray, "n"]\n'
+        'def f(x: Float[ndarray, "h"]) -> Int[ndarray, "w"]:\n    pass\n'
     )
-    assert _violations(source) == [(1, "JT001", "B"), (4, "JT001", "N"), (5, "JT001", "H"), (5, "JT001", "W")]
-    assert _violations('x = Other[Array, "H"]; y = Float32[Array, shape]; z = Float32["H"]') == []
+    assert _violations(source) == [(1, "JT002", "Float"), (4, "JT002", "Float"), (5, "JT002", "Float"), (5, "JT002", "Int")]
+    assert _violations('x = Other[ndarray, "n"]; y = Float[ndarray, shape]; z = Float["n"]') == []
 
 
 def test_symbolic_axes() -> None:
@@ -225,12 +221,12 @@ def test_vendor_paths_are_skipped() -> None:
 
 
 def test_baseline_allows_improvements_but_rejects_growth() -> None:
-    files: dict[str, list[tuple[int, str, str]]] = {"packages/demo/a.py": [(4, "JT001", "H"), (5, "JT001", "W")]}
-    assert _new_violations(files, {"packages/demo/a.py": {"JT001": 3}}) == []
-    assert _new_violations(files, {"packages/demo/a.py": {"JT001": 2}}) == []
-    assert _new_violations(files, {"packages/demo/a.py": {"JT001": 1}}) == ["packages/demo/a.py:5 JT001 W"]
-    assert _new_violations(files, {}) == ["packages/demo/a.py:4 JT001 H", "packages/demo/a.py:5 JT001 W"]
-    assert _new_violations(files, {"packages/demo/a.py": {"JT002": 9}}) == ["packages/demo/a.py:4 JT001 H", "packages/demo/a.py:5 JT001 W"]
+    files: dict[str, list[tuple[int, str, str]]] = {"packages/demo/a.py": [(4, "JT002", "Float"), (5, "JT002", "Int")]}
+    assert _new_violations(files, {"packages/demo/a.py": {"JT002": 3}}) == []
+    assert _new_violations(files, {"packages/demo/a.py": {"JT002": 2}}) == []
+    assert _new_violations(files, {"packages/demo/a.py": {"JT002": 1}}) == ["packages/demo/a.py:5 JT002 Int"]
+    assert _new_violations(files, {}) == ["packages/demo/a.py:4 JT002 Float", "packages/demo/a.py:5 JT002 Int"]
+    assert _new_violations(files, {"packages/demo/a.py": {"JT003": 9}}) == ["packages/demo/a.py:4 JT002 Float", "packages/demo/a.py:5 JT002 Int"]
 
 
 if __name__ == "__main__":
