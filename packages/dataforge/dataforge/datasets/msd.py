@@ -85,6 +85,7 @@ from dataforge.datasets.msd_layers import (
     write_gt_layer,
 )
 from dataforge.identity import SequenceIdentity
+from dataforge.transports import repo_revision
 from dataforge.video_encoding import require_av1_nvenc, resolve_ffmpeg
 
 REPO_ID: str = "collabora/monado-slam-datasets"
@@ -232,15 +233,6 @@ def list_collection_files(repo_id: str, collection_path: str, revision: str | No
     """
     entries = HfApi().list_repo_tree(repo_id, path_in_repo=collection_path, repo_type="dataset", revision=revision)
     return [(entry.path, entry.size) for entry in entries if isinstance(entry, RepoFile)]
-
-
-def repo_revision(repo_id: str, revision: str | None = None) -> str | None:
-    """Resolve a branch/tag to the commit sha stamped into every converted rrd.
-
-    Isolated from ``list_collection_files`` because ``convert`` needs it without
-    a listing, and a test needs it without a network.
-    """
-    return HfApi().repo_info(repo_id, repo_type="dataset", revision=revision).sha
 
 
 def camera_views(num_cameras: int) -> list[rrb.Spatial2DView]:

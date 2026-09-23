@@ -1,7 +1,7 @@
 """dataforge:v1 logging schema — the exoego:v2 conventions, as code. Stdlib-only.
 
 The authoritative prose spec is ``packages/simplecv/docs/exoego_schema.md``:
-one ``video_time`` timestamp timeline everywhere, world-anchored rigs at
+the ``video_time`` timeline and optional ``FRAME_INDEX`` sequence timeline, world-anchored rigs at
 ``/world/rig_NN``, cameras at ``.../cam_MM/pinhole/video``, and IMUs at the
 (previously reserved) ``.../imu_MM/{gyro,accel}``. dataforge is the first
 emitter of the IMU section (§8) and of the magnetometer section (§9), whose
@@ -14,6 +14,9 @@ from __future__ import annotations
 
 TIMELINE: str = "video_time"
 """The single timestamp timeline every dataforge stream logs on."""
+
+FRAME_INDEX: str = "frame_index"
+"""Sequence timeline holding the upstream frame index; datasets whose source has one stamp it beside video_time."""
 
 EXOEGO_SCHEMA_VERSION: str = "exoego:v2"
 """Value of the ``schema_version`` AnyValue on every rig node."""
@@ -49,6 +52,11 @@ def cam_path(rig: int, cam: int) -> str:
 def pinhole_path(rig: int, cam: int) -> str:
     """``.../cam_MM/pinhole`` — the (distorted) pinhole projection node."""
     return f"{cam_path(rig, cam)}/pinhole"
+
+
+def boxes_path(rig: int, cam: int, label: str) -> str:
+    """§13: ``.../pinhole/boxes/<label>`` — 2D boxes the source shipped, named for what they enclose."""
+    return f"{pinhole_path(rig, cam)}/boxes/{label}"
 
 
 def video_path(rig: int, cam: int) -> str:
@@ -114,3 +122,8 @@ def trail_path(source: str) -> str:
 def capture_property(name: str) -> str:
     """``property:capture:<name>`` — recording-level capture metadata key."""
     return f"property:capture:{name}"
+
+
+def instruction_path() -> str:
+    """§12: static task instruction document."""
+    return "/task/instruction"

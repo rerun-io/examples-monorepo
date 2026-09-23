@@ -9,7 +9,7 @@ work plan — is in **[docs/dataforge-design-report.html](docs/dataforge-design-
 
 ## Run it
 
-From the repo root, with `<dataset>` one of `robocap`, `selfcap`, `wildcap`, `msd`, `lamaria`:
+From the repo root, with `<dataset>` one of `robocap`, `selfcap`, `wildcap`, `msd`, `lamaria`, `show3d`:
 
 ```bash
 # 1. Catalog server, in a tmux session so it outlives your shell. Registrations
@@ -252,6 +252,47 @@ then registers both layers under one dataset:
 RERUN_INSECURE_SKIP_HOST_CHECK=1 DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/lamaria-rrd \
   pixi run -e dataforge --frozen dataforge-register --catalog-url rerun+http://127.0.0.1:9988 lamaria
 ```
+
+### SHOW3D (show3d)
+
+SHOW3D (Rim et al., CVPR 2026) is a back-rig plus Quest 3 hand-object capture; [docs/show3d.md](docs/show3d.md) opens with the papers, the capture system, how the labels were made and what ships. It converts one subject/scene into layers sharing the recording ID
+`show3d__<subject>__<scene>`. `download` fetches the two indexes and subject
+profiles, then prints the plan. `convert` fetches one scene bundle at a time,
+atomically publishes base, and removes only
+the source MP4s unless `--keep-raw`. Each layer skips its own existing file unless
+`--force` is set. Retained sidecars support later annotation layers.
+
+```bash
+export DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/show3d-rrd
+export DATAFORGE_FFMPEG=/home/pablo/.pixi/bin/ffmpeg
+pixi run -e dataforge --frozen dataforge-download show3d
+pixi run -e dataforge --frozen dataforge-convert show3d --sequences SPI102/keyboard_toss-away_83ef LYA722/birdhousetoy_shaking_8eca --keep-raw
+pixi run -e dataforge --frozen dataforge-convert show3d --split train
+pixi run -e dataforge --frozen dataforge-register show3d
+pixi run -e dataforge --frozen dataforge-view --sequence SPI102/keyboard_toss-away_83ef show3d --rr-config.headless
+```
+
+Object scenes come first, followed by remaining train and test scenes. Seven
+zero-frame AZH822 index rows are skipped with a reason. Scene metadata is the
+source of truth after fetch. `--root` defaults to `data/raw/show3d`; work clips
+are cleaned beneath its `work/` directory, including on failure.
+
+| Layer | Status | Contents |
+| --- | --- | --- |
+| `base` | Available | Video, calibration, headset motion, frame metadata, face boxes (`boxes/face`), root AnnotationContext, `capture` census and `episode` metadata |
+
+`/world` is the moving back-rig frame, right-handed Y-up. `rig_00` holds
+rig0…rig7 at fixed `cam_00`…`cam_07` indices; `rig_01` holds the two headset
+cameras. Distances are metres. Every temporal column has `video_time` (source
+seconds minus the first timestamp) and the upstream `frame_index` sequence.
+The default layout shows 3D, both headset views, and the back-rig grid with
+face boxes hidden; table cards decode headset0 only.
+
+Video uses ffmpeg file-input grayscale decode → AV1 NVENC at 60 fps, GOP 60,
+no B-frames, then Mp4Reader remux. CQ 36 was chosen from the
+[measured table](docs/show3d.md#video-measurement-and-encoder-decision).
+Each recording records the Hub commit it was built from as
+`property:capture:hf_revision`; the corpus run pins one with `--revision`.
 
 ### Environment variables
 

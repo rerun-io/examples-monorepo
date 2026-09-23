@@ -108,7 +108,7 @@ def read_back(rrd: Path) -> rr.experimental.ChunkStore:
     The stream is materialized because ``from_chunks`` declares ``Sequence[Chunk]``;
     these recordings are a few dozen rows, so the list costs nothing.
     """
-    return rr.experimental.ChunkStore.from_chunks(list(rr.experimental.RrdReader(rrd).stream()))
+    return rr.experimental.ChunkStore.from_chunks(read_chunks(rrd))
 
 
 def recording_properties(store: rr.experimental.ChunkStore, group: str) -> dict[str, object]:
@@ -311,3 +311,12 @@ def read_calibration_json(path: Path) -> dict[str, PublishedCamera]:
         pytest.skip(f"published Aria calibration is absent: {path}")
     document: dict = json.loads(path.read_text())
     return {name: from_dict(PublishedCamera, entry) for name, entry in document.items() if name.startswith("cam")}
+
+
+SHOW3D_RAW: Path = Path(__file__).parents[1] / "data/raw/show3d"
+"""Local full-length SHOW3D assets shared by annotation tests."""
+
+
+def read_chunks(rrd: Path) -> list[rr.experimental.Chunk]:
+    """Read every published chunk through the public RRD reader."""
+    return list(rr.experimental.RrdReader(rrd).stream())

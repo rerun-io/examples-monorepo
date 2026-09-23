@@ -1,4 +1,4 @@
-"""The pipe-fed AV1 encoder every dataforge converter shares, and the mp4 it produces.
+"""Shared AV1 encoders for frame iterables and grayscale MP4 transcoding.
 
 Datasets that ship image sequences instead of video get their video here:
 ``encode_frames_to_mp4`` pipes PNG or raw frames straight into ffmpeg's stdin, so
@@ -115,12 +115,71 @@ def require_av1_nvenc(ffmpeg: Path) -> None:
     Args:
         ffmpeg: Binary to interrogate with ``-encoders``.
     """
-    listed: subprocess.CompletedProcess[str] = subprocess.run(
-        [str(ffmpeg), "-hide_banner", "-encoders"], capture_output=True, text=True, check=False
-    )
+    listed: subprocess.CompletedProcess[str] = subprocess.run([str(ffmpeg), "-hide_banner", "-encoders"], capture_output=True, text=True, check=False)
     if "av1_nvenc" in listed.stdout:
         return
     raise RuntimeError(f"{ffmpeg} lists no av1_nvenc encoder; point DATAFORGE_FFMPEG at an NVENC-capable ffmpeg")
+
+
+def _nvenc_args(*, gop: int, cq: int) -> list[str]:
+    """Shared output options for pipe and file inputs; never emit B-frames."""
+    return [
+        "-c:v",
+        "av1_nvenc",
+        "-preset",
+        "p4",
+        "-rc",
+        "vbr",
+        "-cq",
+        str(cq),
+        "-bf",
+        "0",
+        "-g",
+        str(gop),
+        "-movflags",
+        "+faststart",
+    ]
+
+
+def transcode_mp4_gray(source: Path, output: Path, *, gop: int, cq: int, fps: int, frames: int) -> int:
+    """Decode a file to gray and encode AV1 directly in ffmpeg, checking sample count.
+
+    frames is the exact expected output count; source timing is applied by the caller.
+    The input -r assigns nominal timestamps without dropping or duplicating frames.
+    """
+    if frames <= 0:
+        raise ValueError("frames must be positive")
+    binary: Path = resolve_ffmpeg()
+    require_av1_nvenc(binary)
+    command: list[str] = [
+        str(binary),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-r",
+        str(fps),
+        "-i",
+        str(source),
+        "-map",
+        "0:v:0",
+        "-an",
+        "-vf",
+        f"format=gray,{EVEN_DIMENSION_AND_PIXEL_FORMAT}",
+        "-fps_mode",
+        "passthrough",
+        *_nvenc_args(gop=gop, cq=cq),
+        "-frames:v",
+        str(frames),
+        str(output),
+    ]
+    result: subprocess.CompletedProcess[str] = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode:
+        raise RuntimeError(f"ffmpeg exited {result.returncode} while transcoding {source}:\n{result.stderr}")
+    written: int = mp4_frame_count(output)
+    if written != frames:
+        raise ValueError(f"{output} holds {written} samples, expected {frames}")
+    return written
 
 
 def encode_frames_to_mp4(
@@ -184,20 +243,7 @@ def encode_frames_to_mp4(
         *source.input_args(fps=fps),
         "-vf",
         ",".join([*TRANSPOSE_FILTERS[rotate_cw_quarter_turns], EVEN_DIMENSION_AND_PIXEL_FORMAT]),
-        "-c:v",
-        "av1_nvenc",
-        "-preset",
-        "p4",
-        "-rc",
-        "vbr",
-        "-cq",
-        str(cq),
-        "-bf",
-        "0",
-        "-g",
-        str(gop),
-        "-movflags",
-        "+faststart",
+        *_nvenc_args(gop=gop, cq=cq),
         str(output),
     ]
     complaints: list[bytes] = []
@@ -236,4 +282,3 @@ def mp4_frame_count(path: Path) -> int:
         if stream.frames:
             return stream.frames
         return sum(1 for packet in container.demux(stream) if packet.pts is not None)
-
