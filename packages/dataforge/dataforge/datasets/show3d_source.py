@@ -44,20 +44,71 @@ CAMERAS: tuple[Show3dCamera, ...] = (
 """Dataset-wide camera identities; missing cameras never shift their peers."""
 
 
+OBJECTS: dict[str, str | None] = {
+    "dumbbell": "dumbbell_5lb",
+    "mouse": "mouse",
+    "keyboard": "keyboard",
+    "mug": "mug_white",
+    "mug2": "mug_patterned",
+    "balandabowl": "bowl",
+    "vase": "vase",
+    "brushholder": "holder_black",
+    "birdhousetoy": "birdhouse_toy",
+    "dinotoy": "dino_toy",
+    "whiteboardmarker": "whiteboard_marker",
+    "milk": "carton_milk",
+    "orangejuice": "carton_oj",
+    "mustard": "bottle_mustard",
+    "ranch": "bottle_ranch",
+    "bbq": "bottle_bbq",
+    "cansoup": "can_soup",
+    "canparmesan": "can_parmesan",
+    "cantomatosauce": "can_tomato_sauce",
+    "waffles": "food_waffles",
+    "vegetables": "food_vegetables",
+    "aria": "aria_small",
+    "keyboard2": None,
+    "cancoke": None,
+    "windex": None,
+    "clock": None,
+    "mug3": None,
+    "none": None,
+}
+
+
+def mesh_name(alias: str) -> str | None:
+    """Resolve a known alias; only listed unmapped aliases return None."""
+    try:
+        return OBJECTS[alias]
+    except KeyError as error:
+        raise ValueError(f"unknown SHOW3D object alias: {alias}") from error
+
+
 def calibration_file(key: str, camera: Show3dCamera) -> str:
     """Repository-relative camera calibration."""
     return f"scenes/{key}/camera_calibration/{camera.source_name}.json"
 
 
+DEFAULT_CONFIDENCE: float = 0.5
+"""The Hub's default confidence threshold for hands and objects: "cuts most solver failures without throwing
+away usable data" (hand_pose/README.md, object_pose/README.md); ``> 0`` is "low-quality frames you usually
+want to drop". Landmarks and meshes are shown only above it; every shipped confidence value is kept."""
 HAND_POSE_VERSION: str = "v2"
 """Released hand annotation version."""
 CAPTIONS_VERSION: str = "v1"
 """Released caption version."""
+OBJECT_POSE_VERSION: str = "v1"
+"""Released object annotation version."""
 
 
 def hand_pose_file(key: str) -> str:
     """Repository-relative hand measurements."""
     return f"hand_pose/{HAND_POSE_VERSION}/scenes/{key}/hand_pose.json"
+
+
+def object_pose_file(key: str) -> str:
+    """Repository-relative object annotation."""
+    return f"object_pose/{OBJECT_POSE_VERSION}/scenes/{key}/object_pose.json"
 
 
 def hand_profile_file(subject: str) -> str:
