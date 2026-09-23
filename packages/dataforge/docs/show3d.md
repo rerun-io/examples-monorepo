@@ -160,7 +160,7 @@ The comparison is a plain Python CLI; no dedicated Pixi task is added:
 ```bash
 cd packages/dataforge
 DATAFORGE_FFMPEG=/home/pablo/.pixi/bin/ffmpeg \
-  pixi run -e dataforge-dev --frozen python tools/apps/show3d_measure.py
+  pixi run -e dataforge --frozen python tools/apps/show3d_measure.py
 ```
 
 The tool measures only CQ 28/32/36 with the same `transcode_mp4_gray`

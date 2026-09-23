@@ -227,9 +227,8 @@ def load_framesets(dump: Path, limit: int | None) -> Framesets:
     with dump.with_suffix(dump.suffix + ".calib.pkl").open("rb") as handle:
         calibration = pickle.load(handle)
     # Annotated so the two shapes the pickle must have are written down once;
-    # this package runs beartype with PEP 526 checks off (a per-frame loop
-    # cannot afford them), so the guard against a dump from another version is
-    # the safe-radius check in `main` rather than these lines.
+    # beartype checks these lines in the dev env only, so in the prod env the
+    # guard against a dump from another version is the safe-radius check in `main`.
     cameras: tuple[CameraCalib, ...] = tuple(calibration["cameras"])
     imu: ImuCalib = calibration["imu"]
     t_ns: Int64[ndarray, " n"] = data["t_ns"]
