@@ -258,9 +258,9 @@ RERUN_INSECURE_SKIP_HOST_CHECK=1 DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/lamaria
 SHOW3D (Rim et al., CVPR 2026) is a back-rig plus Quest 3 hand-object capture; [docs/show3d.md](docs/show3d.md) opens with the papers, the capture system, how the labels were made and what ships. It converts one subject/scene into layers sharing the recording ID
 `show3d__<subject>__<scene>`. `download` fetches the two indexes and subject
 profiles, then prints the plan. `convert` fetches one scene bundle at a time,
-atomically publishes base, and removes only
+atomically publishes base → hand_pose → captions, and removes only
 the source MP4s unless `--keep-raw`. Each layer skips its own existing file unless
-`--force` is set. Retained sidecars support later annotation layers.
+`--force` is set. Retained sidecars rebuild annotations without reading video.
 
 ```bash
 export DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/show3d-rrd
@@ -280,6 +280,9 @@ are cleaned beneath its `work/` directory, including on failure.
 | Layer | Status | Contents |
 | --- | --- | --- |
 | `base` | Available | Video, calibration, headset motion, frame metadata, face boxes (`boxes/face`), root AnnotationContext, `capture` census and `episode` metadata |
+| `hand_pose` | Available | COCO-133 keypoints with per-joint confidence (`world/gt/coco133_xyz`), shipped headset pixels (`coco133_uv`), joint angles, wrist poses, confidence, verbatim profile |
+| `captions` | Available | Markdown instruction and all structured caption fields |
+
 
 `/world` is the moving back-rig frame, right-handed Y-up. `rig_00` holds
 rig0…rig7 at fixed `cam_00`…`cam_07` indices; `rig_01` holds the two headset

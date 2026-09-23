@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import GenericAlias
@@ -48,6 +49,27 @@ def calibration_file(key: str, camera: Show3dCamera) -> str:
     return f"scenes/{key}/camera_calibration/{camera.source_name}.json"
 
 
+HAND_POSE_VERSION: str = "v2"
+"""Released hand annotation version."""
+CAPTIONS_VERSION: str = "v1"
+"""Released caption version."""
+
+
+def hand_pose_file(key: str) -> str:
+    """Repository-relative hand measurements."""
+    return f"hand_pose/{HAND_POSE_VERSION}/scenes/{key}/hand_pose.json"
+
+
+def hand_profile_file(subject: str) -> str:
+    """Repository-relative subject profile."""
+    return f"hand_pose/hand_profiles/{subject}/profile_umetrack.json"
+
+
+def caption_file(key: str) -> str:
+    """Repository-relative caption record."""
+    return f"captions/{CAPTIONS_VERSION}/scenes/{key}/caption.json"
+
+
 def scene_id_parts(scene_id: str) -> tuple[str, str]:
     """Validate the object_action_suffix grammar at the index boundary."""
     parts: list[str] = scene_id.split("_")
@@ -77,6 +99,11 @@ class IndexRow:
     """Whether to prioritize this scene."""
     split: Split
     """Split attached when reading the parquet."""
+
+    has_hand_pose: bool
+    """Whether the index lists hand_pose."""
+    has_caption: bool
+    """Whether the index lists caption."""
 
     has_headset0: bool
     """Whether the index lists camera headset0."""
@@ -191,6 +218,27 @@ class FrameClock:
         """Both recording clocks at the selected frame positions."""
         return [time_column(self.times_ns[positions]), frame_index_column(self.frame_indices[positions])]
 
+
+    def send_sparse(self, recording: rr.RecordingStream, path: str, positions: list[int], columns: Iterable[rr.ComponentColumn]) -> None:
+        """Send available rows on both recording clocks; omit absent measurements."""
+        if positions:
+            rr.send_columns(path, indexes=self.indexes(positions), columns=columns, recording=recording)
+
+
+T = TypeVar("T")
+RowT = TypeVar("RowT")
+
+
+def sparse_rows(poses: Sequence[RowT], getter: Callable[[RowT], T | None]) -> tuple[list[int], list[T]]:  # noqa: UP047
+    """Select sparse measurements and their positions on the shared clock."""
+    positions: list[int] = []
+    values: list[T] = []
+    for position, pose in enumerate(poses):
+        value: T | None = getter(pose)
+        if value is not None:
+            positions.append(position)
+            values.append(value)
+    return positions, values
 
 
 

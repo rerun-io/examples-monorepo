@@ -15,13 +15,27 @@ from serde import from_dict
 
 from dataforge import archives, blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
-from dataforge.datasets.show3d_layers import write_base_layer
+from dataforge.datasets.show3d_captions import Caption, write_captions_layer
+from dataforge.datasets.show3d_hands import (
+    HandFrame,
+    HandProfileDoc,
+    read_hand_frames,
+    read_hand_profile,
+    write_hand_pose_layer,
+)
+from dataforge.datasets.show3d_layers import Scene, write_base_layer
 from dataforge.datasets.show3d_source import (
     CAMERAS,
     HEADSET_CAMERAS,
+    FrameClock,
     IndexRow,
     Show3dCamera,
     calibration_file,
+    caption_file,
+    hand_pose_file,
+    hand_profile_file,
+    read_frame_clock,
+    read_json,
 )
 from dataforge.identity import SequenceIdentity
 
@@ -29,7 +43,7 @@ REPO_ID: str = "facebook/show3d-dataset"
 
 
 def world_contents() -> list[str]:
-    """Everything under ``/world`` except the shipped face boxes.
+    """Everything under ``/world`` except the shipped face boxes and shipped pixel keypoints.
 
     Rerun content filters honour exact paths and a trailing ``/**`` only: a rule such as
     ``- /world/**/boxes/face`` matches nothing and hides nothing (verified with headless
@@ -38,6 +52,7 @@ def world_contents() -> list[str]:
     return [
         "+ /world/**",
         *(f"- {schema.boxes_path(camera.rig, camera.cam, 'face')}" for camera in CAMERAS),
+        *(f"- {schema.coco133_uv_path(camera.rig, camera.cam)}" for camera in CAMERAS),
     ]
 
 
@@ -48,9 +63,14 @@ def pane_contents(camera: Show3dCamera) -> list[str]:
     (the viewer reports "No transform path" per entity), and a projected ego image plane
     draws its frame and uv landmarks over the exo footage, so every other camera's
     ``pinhole/**`` subtree is excluded outright.
+
+    A rectified pinhole pane shows the viewer projection of ``coco133_xyz`` and hides
+    ``coco133_uv``. A camera with distortion would show ``coco133_uv`` and exclude
+    ``coco133_xyz`` because Rerun Pinhole cannot project through distortion. SHOW3D
+    cameras are all PinholePlane, so only the rectified rule applies here.
     """
     others: list[str] = [f"- {schema.pinhole_path(other.rig, other.cam)}/**" for other in CAMERAS if other is not camera]
-    return ["+ /world/**", f"- {schema.boxes_path(camera.rig, camera.cam, 'face')}", *others]
+    return ["+ /world/**", f"- {schema.boxes_path(camera.rig, camera.cam, 'face')}", f"- {schema.coco133_uv_path(camera.rig, camera.cam)}", *others]
 
 
 @dataclass
@@ -78,7 +98,11 @@ class Show3dConfig(DataforgeDatasetConfig):
 class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
     """Publish each missing layer, then remove only the scene videos."""
 
-    layers: tuple[str, ...] = (paths.BASE_LAYER,)
+    layers: tuple[str, ...] = (
+        paths.BASE_LAYER,
+        paths.HAND_POSE_LAYER,
+        paths.CAPTIONS_LAYER,
+    )
     """SHOW3D publication and loading order."""
 
     @cached_property
@@ -152,19 +176,26 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
         targets: dict[str, Path] = {layer: paths.rrd_path(paths.output_root(), layer=layer, identity=identity) for layer in self.layers}
         wants: dict[str, bool] = {
             paths.BASE_LAYER: not writing.should_skip(targets[paths.BASE_LAYER], force=force),
+            paths.HAND_POSE_LAYER: source.has_hand_pose and not writing.should_skip(targets[paths.HAND_POSE_LAYER], force=force),
+            paths.CAPTIONS_LAYER: source.has_caption and not writing.should_skip(targets[paths.CAPTIONS_LAYER], force=force),
         }
         if not any(wants.values()):
             return targets[paths.BASE_LAYER]
         key: str = identity.sequence_key
         files: set[str] = set(base_files(source, key) if wants[paths.BASE_LAYER] else [])
+        if wants[paths.HAND_POSE_LAYER]:
+            files.update([*metadata_files(key), hand_pose_file(key), hand_profile_file(source.subject_id)])
+        if wants[paths.CAPTIONS_LAYER]:
+            files.add(caption_file(key))
         self.fetch_missing(sorted(files))
         scene_dir: Path = self.config.root / "scenes" / key
         written: list[str] = []
+        scene: Scene | None = None
         if wants[paths.BASE_LAYER]:
             work: Path = self.config.root / "work" / identity.recording_id
             work.mkdir(parents=True, exist_ok=True)
             try:
-                write_base_layer(
+                scene = write_base_layer(
                     identity,
                     scene_dir,
                     targets[paths.BASE_LAYER],
@@ -176,6 +207,23 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
             finally:
                 archives.remove_tree(work)
             written.append(paths.BASE_LAYER)
+        clock: FrameClock | None = None
+        hand_frames: list[HandFrame] = []
+        profile: HandProfileDoc | None = None
+        if wants[paths.HAND_POSE_LAYER]:
+            clock = scene if scene is not None else read_frame_clock(scene_dir, key)
+            hand_frames = read_hand_frames(self.config.root / hand_pose_file(key), clock) if source.has_hand_pose else []
+        if wants[paths.HAND_POSE_LAYER]:
+            profile = read_hand_profile(self.config.root / hand_profile_file(source.subject_id))
+        if wants[paths.HAND_POSE_LAYER]:
+            assert clock is not None and profile is not None
+            write_hand_pose_layer(identity, clock, hand_frames, profile.text, targets[paths.HAND_POSE_LAYER])
+            written.append(paths.HAND_POSE_LAYER)
+        caption: Caption | None = read_json(self.config.root / caption_file(key), Caption) if wants[paths.CAPTIONS_LAYER] else None
+        if wants[paths.CAPTIONS_LAYER]:
+            assert caption is not None
+            write_captions_layer(identity, caption, targets[paths.CAPTIONS_LAYER])
+            written.append(paths.CAPTIONS_LAYER)
         if wants[paths.BASE_LAYER] and not self.config.keep_raw:
             for video in scene_dir.glob("*.mp4"):
                 video.unlink()

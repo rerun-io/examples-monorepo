@@ -124,6 +124,41 @@ def capture_property(name: str) -> str:
     return f"property:capture:{name}"
 
 
+def hands_path(side: str) -> str:
+    """§10: measured hand root in the world frame."""
+    return f"/world/gt/hands/{side}"
+
+
+def hand_profile_path() -> str:
+    """§10: self-contained subject hand profile JSON."""
+    return "/world/gt/hands/profile"
+
+
+def coco133_xyz_path() -> str:
+    """§10: COCO-133 keypoints in world metres."""
+    return "/world/gt/coco133_xyz"
+
+
+def coco133_uv_path(rig: int, cam: int) -> str:
+    """§10: shipped COCO-133 keypoints in camera pixels."""
+    return f"{pinhole_path(rig, cam)}/coco133_uv"
+
+
 def instruction_path() -> str:
     """§12: static task instruction document."""
     return "/task/instruction"
+
+
+def hand_confidence_path(side: str) -> str:
+    """Measured hand confidence."""
+    return f"{hands_path(side)}/confidence"
+
+
+def hand_joint_angles_path(side: str) -> str:
+    """UmeTrack joint angles."""
+    return f"{hands_path(side)}/joint_angles"
+
+
+def hand_wrist_path(side: str) -> str:
+    """World-from-wrist pose."""
+    return f"{hands_path(side)}/wrist"

@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import rerun as rr
-from conftest import SHOW3D_RAW, read_back, read_chunks, recording_properties
+from conftest import SHOW3D_RAW, index_row, read_back, read_chunks, recording_properties
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
 from serde import SerdeError, from_dict
@@ -23,12 +23,6 @@ from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetRig
 from dataforge.datasets.show3d_layers import write_base_layer
 from dataforge.datasets.show3d_source import CAMERAS, BlurInfo, IndexRow
 from dataforge.identity import SequenceIdentity
-
-
-def index_row(subject_id: str, scene_id: str, split: str = "train") -> IndexRow:
-    """An index row for the synthetic scenes; every camera present."""
-    cameras: dict[str, bool] = {f"has_{name}": True for name in ("headset0", "headset1", *(f"rig{i}" for i in range(8)))}
-    return from_dict(IndexRow, dict(subject_id=subject_id, scene_id=scene_id, num_frames=4, has_object_pose=True, split=split, **cameras))
 
 
 def test_source_schemas_accept_legacy_and_new_pose_contracts() -> None:
@@ -66,6 +60,8 @@ def test_discovery_orders_object_scenes_then_train_then_test_and_skips_empty(tmp
                         num_frames=count,
                         has_object_pose=objects,
                         **{f"has_{camera}": True for camera in ("headset0", "headset1", *(f"rig{i}" for i in range(8)))},
+                        has_hand_pose=True,
+                        has_caption=False,
                     )
                     for name, count, objects in rows
                 ]
@@ -111,7 +107,7 @@ def test_real_scene_base(tmp_path: Path, subject: str, scene: str, count: int) -
         SequenceIdentity("show3d", (subject, scene)),
         source,
         target,
-        index=index_row(subject, scene),
+        index=index_row(subject_id=subject, scene_id=scene),
         work_dir=tmp_path,
         frame_limit=count,
         hf_revision="test-sha",
@@ -196,7 +192,7 @@ def test_synthetic_base_roundtrip(tmp_path: Path, tiny_scene: Path) -> None:
         SequenceIdentity("show3d", ("subject", "toy_pick-up_abcd")),
         tiny_scene,
         target,
-        index=index_row("subject", "toy_pick-up_abcd", split="test"),
+        index=index_row(subject_id="subject", scene_id="toy_pick-up_abcd", split="test"),
         work_dir=tmp_path / "work",
         hf_revision="test-sha",
     )
@@ -280,22 +276,27 @@ def test_camera_indices_survive_missing_rig0() -> None:
 
 
 def test_pane_contents_keep_only_this_cameras_image_space() -> None:
-    """Each 2D pane excludes its own face boxes, plus every other pinhole subtree."""
+    """Each 2D pane excludes its own face boxes and shipped UV, plus every other pinhole subtree."""
     for camera in CAMERAS:
         contents: list[str] = pane_contents(camera)
         own: str = schema.pinhole_path(camera.rig, camera.cam)
         assert contents[0] == "+ /world/**"
         assert f"- {own}/boxes/face" in contents
+        assert f"- {schema.coco133_uv_path(camera.rig, camera.cam)}" in contents
         assert f"- {own}/**" not in contents
         others: set[str] = {f"- {schema.pinhole_path(c.rig, c.cam)}/**" for c in CAMERAS if c is not camera}
         assert others <= set(contents)
-        assert len(contents) == 2 + len(others)
+        assert len(contents) == 3 + len(others)
         assert not any("**" in rule and not rule.endswith("/**") for rule in contents)
 
 
-def test_world_contents_exclude_face_boxes_by_explicit_path() -> None:
-    """Rerun content filters ignore mid-path wildcards, so face boxes use exact paths."""
+def test_world_contents_exclude_face_boxes_and_shipped_uv_by_explicit_path() -> None:
+    """Rerun content filters ignore mid-path wildcards, so face boxes and shipped UV use exact paths."""
     contents: list[str] = world_contents()
     assert contents[0] == "+ /world/**"
-    assert set(contents[1:]) == {f"- {schema.boxes_path(camera.rig, camera.cam, 'face')}" for camera in CAMERAS}
+    assert set(contents[1:]) == {
+        f"- {path}"
+        for camera in CAMERAS
+        for path in (schema.boxes_path(camera.rig, camera.cam, "face"), schema.coco133_uv_path(camera.rig, camera.cam))
+    }
     assert not any("*" in rule for rule in contents[1:])
