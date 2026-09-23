@@ -10,7 +10,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-import rerun as rr
+import rerun.chunk as rrc
 from conftest import SHOW3D_RAW, index_row, read_back, read_chunks, recording_properties
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
@@ -196,7 +196,7 @@ def test_synthetic_base_roundtrip(tmp_path: Path, tiny_scene: Path) -> None:
         work_dir=tmp_path / "work",
         hf_revision="test-sha",
     )
-    chunks: list[rr.experimental.Chunk] = read_chunks(target)
+    chunks: list[rrc.Chunk] = read_chunks(target)
     videos: dict[str, int] = {}
     for chunk in chunks:
         batch: pa.RecordBatch = chunk.to_record_batch()
@@ -206,9 +206,9 @@ def test_synthetic_base_roundtrip(tmp_path: Path, tiny_scene: Path) -> None:
             videos[str(chunk.entity_path)] = videos.get(str(chunk.entity_path), 0) + chunk.num_rows
     assert videos == {"/world/rig_01/cam_00/pinhole/video": 4, "/world/rig_01/cam_01/pinhole/video": 4}
     # §13: shipped face boxes sit at pinhole/boxes/face with the FACE class id and their reason as metadata.
-    faces: list[rr.experimental.Chunk] = [chunk for chunk in chunks if str(chunk.entity_path) == schema.boxes_path(1, 0, "face")]
+    faces: list[rrc.Chunk] = [chunk for chunk in chunks if str(chunk.entity_path) == schema.boxes_path(1, 0, "face")]
     assert not any("blur" in str(chunk.entity_path) for chunk in chunks)
-    temporal_faces: list[rr.experimental.Chunk] = [chunk for chunk in faces if not chunk.is_static]
+    temporal_faces: list[rrc.Chunk] = [chunk for chunk in faces if not chunk.is_static]
     assert len(temporal_faces) == 1 and temporal_faces[0].num_rows == 2
     face_batch: pa.RecordBatch = temporal_faces[0].to_record_batch()
     assert face_batch.column("Boxes2D:centers").to_pylist() == [[[6.0, 10.0]], []]

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 
-from dataforge import paths, writing
+from dataforge import paths, schema, writing
 from dataforge.datasets import AnnotatedDatasetUnion, RobocapConfig
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 
@@ -67,8 +67,7 @@ def main(config: Config) -> None:
         entry.register_blueprint(blueprint_path.resolve().as_uri(), set_default=True)
     if entry.default_segment_table_blueprint() is None:
         table_path: Path = paths.blueprint_path(output_root, name, segment_table=True)
-        with writing.atomic_write(table_path) as temp_path:
-            dataset.table_blueprint().save(name, str(temp_path))
+        writing.save_table_blueprint(dataset.table_blueprint(), table_path, timeline=schema.TIMELINE)
         entry.register_blueprint(table_path.resolve().as_uri(), segment_table=True)
     counted: str = ", ".join(f"{len(found)} {layer}" for layer, found in paths_by_layer.items() if found)
     how: str = "replacing duplicates" if config.replace else "skipping duplicates"

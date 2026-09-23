@@ -11,7 +11,7 @@ from arkitscenes_download.schema import ALL_LAYER_NAMES
 from jaxtyping import Float64
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
-from rerun.experimental import RrdReader
+from rerun.chunk import RrdReader
 from simplecv.rerun_log_utils import mesh_bounding_geometry
 
 from gauss_surf.catalog import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, connect_catalog, register_layer

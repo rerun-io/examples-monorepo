@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import rerun as rr
-from rerun.experimental import RrdReader
+from rerun.chunk import RrdReader
 from simplecv.camera_parameters import Intrinsics as SimpleCVIntrinsics
 
 pytest.importorskip("imagecodecs", reason="the ingest CLI needs imagecodecs from the ingest environment")

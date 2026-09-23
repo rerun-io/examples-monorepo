@@ -6,7 +6,7 @@ import gradio as gr
 import numpy as np
 import pytest
 from jaxtyping import Float, Float32, UInt8
-from rerun.experimental import RrdReader
+from rerun.chunk import RrdReader
 
 from monopriors.gradio_ui.depth_compare_ui import change_dropdown, on_submit
 from monopriors.models.metric_depth import BaseMetricPredictor, MetricDepthPrediction, metric_predictor_defaults

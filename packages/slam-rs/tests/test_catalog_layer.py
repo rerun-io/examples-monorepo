@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-import rerun.experimental as rx
+import rerun.chunk as rrc
 from fixture_types import Rows, RowsReader
 
 from slam_rs.catalog_layer import write_layer
@@ -35,7 +35,7 @@ def test_layer_animates_the_base_rig_without_replacing_camera_data(tmp_path: Pat
     np.testing.assert_allclose(rows["/world/rig_00"][-1].values["Transform3D:translation"], [[1, 2, 3]])
     np.testing.assert_allclose(rows["/world/rig_00"][-1].values["Transform3D:quaternion"], [[0, 0, 0, 1]])
     assert [row.t_ns for row in rows["/world/runs/slam_rs/trail"]] == [2_000_000_000]
-    entities: set[str] = {chunk.entity_path for chunk in rx.RrdReader(path).stream().collect().stream()}
+    entities: set[str] = {chunk.entity_path for chunk in rrc.RrdReader(path).stream().collect().stream()}
     assert {"/world/runs/slam_rs/trajectory", "/world/runs/slam_rs/endpoints", "/world/runs/slam_rs"} <= entities
     assert not any("/cam_" in entity or "/imu_" in entity for entity in entities)
 

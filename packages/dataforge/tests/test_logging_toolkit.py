@@ -18,6 +18,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import rerun as rr
+import rerun.chunk as rrc
 from beartype.roar import BeartypeException
 from conftest import column_rows, read_back
 from jaxtyping import Float64, Int64
@@ -244,7 +245,7 @@ def test_magnetometer_node_carries_its_static_pose_and_metadata(tmp_path: Path) 
     with rr.RecordingStream("dataforge", recording_id="mag_static") as recording:
         recording.save(target)
         log_magnetometer(recording, RIG, MAG, field=synthetic_field(8), name="odyssey", unit=None)
-    store: rr.experimental.ChunkStore = read_back(target)
+    store: rrc.ChunkStore = read_back(target)
     columns: set[str] = {str(column) for column in store.schema()}
     node: str = schema.mag_path(RIG, MAG)
     assert any(f"Column name: {node}:Transform3D:" in column for column in columns), "rig_T_mag is mandatory, like the IMU's"
@@ -264,7 +265,7 @@ def test_empty_magnetometer_logs_only_the_static_node(tmp_path: Path) -> None:
     with rr.RecordingStream("dataforge", recording_id="mag_empty") as recording:
         recording.save(target)
         log_magnetometer(recording, RIG, MAG, field=empty, name="none")
-    store: rr.experimental.ChunkStore = read_back(target)
+    store: rrc.ChunkStore = read_back(target)
     columns: set[str] = {str(column) for column in store.schema()}
     assert any(f"{schema.mag_path(RIG, MAG)}:Transform3D:" in column for column in columns)
     assert not any(schema.field_path(RIG, MAG) in column for column in columns)
@@ -427,7 +428,7 @@ def test_video_has_source_frame_index_and_duration(tmp_path: Path, clip: Path) -
         assert log_video_stream(recording, clip, ENTITY, times_ns=times, frame_indices=indices) == NUM_FRAMES
     np.testing.assert_array_equal(index_column(target, schema.FRAME_INDEX), indices)
     np.testing.assert_array_equal(index_column(target), times)
-    for chunk in rr.experimental.RrdReader(target).stream():
+    for chunk in rrc.RrdReader(target).stream():
         if schema.TIMELINE in chunk.timeline_names:
             assert chunk.to_record_batch().schema.field(schema.FRAME_INDEX).type == pa.int64()
             assert chunk.to_record_batch().schema.field(schema.TIMELINE).type == pa.duration("ns")

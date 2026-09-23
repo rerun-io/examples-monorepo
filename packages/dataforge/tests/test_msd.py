@@ -19,6 +19,7 @@ import pyarrow as pa
 import pytest
 import rerun as rr
 import rerun.blueprint as rrb
+import rerun.chunk as rrc
 from conftest import blueprint_views, calibration_fixture, column_rows, eye_vector, read_back, recording_properties
 from jaxtyping import Float64
 from msd_hub import REVISION_SHA, SEQUENCE, FakeHub, build_hub
@@ -199,7 +200,7 @@ def test_convert_writes_one_replayable_recording_and_deletes_the_raw(
 
     assert target.is_file()
     assert target.name == f"msd-{device}__{MSD_DEVICES[device].collections[0]}__{SEQUENCE}.rrd"
-    store: rr.experimental.ChunkStore = read_back(target)
+    store: rrc.ChunkStore = read_back(target)
     profile: MsdDevice = MSD_DEVICES[device]
 
     # t0 is gt's first stamp: it is earlier than every other stream in the fixture.

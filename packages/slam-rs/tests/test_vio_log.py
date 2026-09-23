@@ -4,7 +4,7 @@ The logging contract is checked against a recording, not against a mock: the tes
 drives the whole pipeline over the synthetic rig, saves what
 :class:`slam_rs.vio_log.VioLogger` logged into the global recording (D03: the
 tools own no :class:`rerun.RecordingStream`) and reads the chunks back with
-:class:`rerun.experimental.RrdReader` — the same rows a viewer would receive. An
+:class:`rerun.chunk.RrdReader` — the same rows a viewer would receive. An
 entity path or a ``video_time`` value that never reached the file fails here.
 
 The reference trajectories are synthetic straight lines rather than a segment's:
@@ -25,7 +25,7 @@ import numpy as np
 import pytest
 import rerun as rr
 import rerun.blueprint as rrb
-import rerun.experimental as rx
+import rerun.chunk as rrc
 from fixture_types import FRAME_PERIOD_NS, IMU_PERIOD_NS, CameraFactory, PipelineFactory, Row, Rows, RowsReader, TextureFactory, gravity_batch
 from jaxtyping import Float64, Int64
 from numpy import ndarray
@@ -143,7 +143,7 @@ def image_planes(recording: Path) -> dict[str, float]:
     a rig's geometry is logged once and for all time, not at a cursor.
     """
     planes: dict[str, float] = {}
-    for chunk in rx.RrdReader(recording).stream().collect().stream():
+    for chunk in rrc.RrdReader(recording).stream().collect().stream():
         batch = chunk.to_record_batch()
         if "Pinhole:image_plane_distance" in batch.schema.names:
             planes[chunk.entity_path] = batch.column("Pinhole:image_plane_distance").to_pylist()[0][0]
@@ -157,7 +157,7 @@ def static_path_lengths(recording: Path) -> dict[str, int]:
     :func:`conftest.read_rows` drops exactly the rows this asks about.
     """
     lengths: dict[str, int] = {}
-    for chunk in rx.RrdReader(recording).stream().collect().stream():
+    for chunk in rrc.RrdReader(recording).stream().collect().stream():
         batch = chunk.to_record_batch()
         if chunk.is_static and "LineStrips3D:strips" in batch.schema.names:
             lengths[chunk.entity_path] = len(batch.column("LineStrips3D:strips").to_pylist()[0][0])

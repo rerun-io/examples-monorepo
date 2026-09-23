@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
-import rerun.experimental as rre
+import rerun.chunk as rrc
 import torch
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
@@ -65,13 +65,13 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
     using TorchCodec (~30x faster than disk-based remuxing).
     """
 
-    _recording: rre.LazyStore | None = None
+    _recording: rrc.LazyStore | None = None
     _video_blobs: dict[str, bytes] | None = None
 
     def __init__(
         self,
         cfg: RRDExoEgoConfig,
-        recording: rre.LazyStore | None = None,
+        recording: rrc.LazyStore | None = None,
         query_session: RRDQuerySession | None = None,
     ) -> None:
         self._recording = recording
@@ -86,7 +86,7 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
         than as_py()) and stores them in self._video_blobs.
         """
         assert self._recording is not None, "Recording must be provided by caller"
-        recording: rre.LazyStore = self._recording
+        recording: rrc.LazyStore = self._recording
         schema: Schema = recording.schema()
         timelines: list[IndexColumnDescriptor] = list(schema.index_columns())
         # make sure the timeline exists
@@ -127,7 +127,7 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
 
     def load_ego_cams(self) -> dict[CamNameType, list[CameraParam]]:
         assert self._recording is not None, "Recording must be provided by caller"
-        recording: rre.LazyStore = self._recording
+        recording: rrc.LazyStore = self._recording
         schema: Schema = recording.schema()
         timelines: list[IndexColumnDescriptor] = list(schema.index_columns())
         # Component Columns

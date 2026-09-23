@@ -9,7 +9,7 @@ import pytest
 import rerun as rr
 import torch
 from numpy.testing import assert_allclose, assert_array_equal
-from rerun.experimental import RrdReader
+from rerun.chunk import RrdReader
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser, log_fused_mesh
 
 pytest.importorskip("rerun.catalog", reason="ARKitScenes catalog deps live in the PromptDA catalog lanes")

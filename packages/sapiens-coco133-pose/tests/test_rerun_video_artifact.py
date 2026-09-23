@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as np
 import pytest
-import rerun.experimental as rrx
+import rerun.chunk as rrc
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
 from sapiens2_pose.api.pose_artifact import PoseArtifactComparisonConfig
@@ -52,7 +52,7 @@ def test_write_video_pose_rrd_round_trips_bbox_and_coco133_keypoints(tmp_path: P
     assert np.isnan(artifact.keypoints[0, 3:, :]).all()
     np.testing.assert_allclose(artifact.scores[0, :3], scores[0, :3])
 
-    reader = rrx.RrdReader(str(rrd_path))
+    reader = rrc.RrdReader(str(rrd_path))
     recordings: list[Any] = list(reader.recordings())
     keypoint_batches: list[dict[str, list[Any]]] = [
         chunk.to_record_batch().to_pydict()
@@ -79,7 +79,7 @@ def test_video_pose_rrd_uses_one_stable_video_entity_for_frame_overlays(tmp_path
 
     write_video_pose_rrd(frames, rrd_path=rrd_path, keypoint_threshold=0.5)
 
-    reader = rrx.RrdReader(str(rrd_path))
+    reader = rrc.RrdReader(str(rrd_path))
     recordings: list[Any] = list(reader.recordings())
     entity_paths: set[str] = {str(chunk.entity_path) for chunk in reader.stream(store=recordings[0]).to_chunks()}
     assert "/video/image" in entity_paths

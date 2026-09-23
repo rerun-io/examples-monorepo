@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
-import rerun.experimental as rre
+import rerun.chunk as rrc
 import torch
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
@@ -47,13 +47,13 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
     and decodes in-memory using TorchCodec (~30x faster than disk-based remuxing).
     """
 
-    _recording: rre.LazyStore | None = None
+    _recording: rrc.LazyStore | None = None
     _video_blobs: dict[str, bytes] | None = None
 
     def __init__(
         self,
         cfg: RRDExoEgoConfig,
-        recording: rre.LazyStore | None = None,
+        recording: rrc.LazyStore | None = None,
         query_session: RRDQuerySession | None = None,
     ) -> None:
         self._recording = recording
@@ -173,7 +173,7 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
         intrinsics/extrinsics get `None` so the list stays synchronized with video readers.
         """
         assert self._recording is not None, "Recording must be provided by caller"
-        recording: rre.LazyStore = self._recording
+        recording: rrc.LazyStore = self._recording
         schema = recording.schema()
         timeline: str = getattr(self, "_video_timeline", self._select_timeline(schema))
         camera_streams: list[_RRDCameraStream] = getattr(

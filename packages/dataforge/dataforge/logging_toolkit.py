@@ -20,6 +20,7 @@ from typing import Literal, TypeAlias
 import numpy as np
 import pyarrow as pa
 import rerun as rr
+import rerun.chunk as rrc
 from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
@@ -123,7 +124,7 @@ def frame_index_column(indices: Int64[ndarray, "n"]) -> rr.TimeColumn:
 
 
 FRAME_INDEX_FIELD: pa.Field = (
-    rr.experimental.Chunk.from_columns("/", indexes=[frame_index_column(np.array([0], dtype=np.int64))], columns=rr.Scalars.columns(scalars=[0.0]))
+    rrc.Chunk.from_columns("/", indexes=[frame_index_column(np.array([0], dtype=np.int64))], columns=rr.Scalars.columns(scalars=[0.0]))
     .to_record_batch()
     .schema.field(schema.FRAME_INDEX)
 )
@@ -236,15 +237,15 @@ def log_video_stream(
 
     def retimed(
         record_batch: pa.RecordBatch, index: int, values_ns: Int64[ndarray, "n_rows"], positions: Int64[ndarray, "n_rows"]
-    ) -> list[rr.experimental.Chunk]:
+    ) -> list[rrc.Chunk]:
         """Same batch, same row ids, new index values (still a ``duration("ns")``)."""
         column: pa.Array = pa.array(values_ns, type=pa.duration("ns"))
         updated: pa.RecordBatch = record_batch.set_column(index, record_batch.schema.field(index), column)
         if frame_indices is not None:
             updated = updated.add_column(index + 1, FRAME_INDEX_FIELD, pa.array(frame_indices[positions], type=pa.int64()))
-        return rr.experimental.Chunk.from_record_batch(updated)  # invariant 3
+        return rrc.Chunk.from_record_batch(updated)  # invariant 3
 
-    def tap(chunk: rr.experimental.Chunk) -> list[rr.experimental.Chunk]:
+    def tap(chunk: rrc.Chunk) -> list[rrc.Chunk]:
         nonlocal sample_count
         record_batch: pa.RecordBatch = chunk.to_record_batch()
         kind: VideoChunkKind = classify_video_chunk(record_batch)  # invariant 5
@@ -263,7 +264,7 @@ def log_video_stream(
                 record_batch.schema.field(index),
                 pa.array(np.asarray(record_batch.column(index).cast(pa.int64())) + shift_ns, type=pa.duration("ns")),
             )
-            return rr.experimental.Chunk.from_record_batch(updated)
+            return rrc.Chunk.from_record_batch(updated)
 
         original_ns: Int64[ndarray, "n_rows"] = np.asarray(record_batch.column(index).cast(pa.int64()))
         if kind == "sample":

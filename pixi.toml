@@ -63,9 +63,9 @@ torchvision = "*"
 
 [feature.common.pypi-dependencies]
 # pin-bump: hold — gradio-rerun's exact rerun-sdk pin must match.
-rerun-sdk = { version = "==0.37.0", extras = ["catalog"] } # pin-bump: hold
+rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
 gradio = "==6.13.0"                                        # pin-bump: hold
-gradio-rerun = "==0.37.0"                                  # pin-bump: hold
+gradio-rerun = "==0.38.1"                                  # pin-bump: hold
 simplecv = { path = "packages/simplecv", editable = true }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
@@ -102,7 +102,7 @@ simplecv = { path = "packages/simplecv", editable = true }
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.rerun-prerelease.pypi-dependencies]
-rerun-sdk = { version = "==0.37.0", extras = [
+rerun-sdk = { version = "==0.38.1", extras = [
     "catalog",
     "dataloader",
 ] }
@@ -1016,7 +1016,7 @@ scipy = "*"
 tyro = ">=0.9.1,<0.10"
 simplecv = { path = "packages/simplecv", editable = true }
 # pin-bump: hold — the macOS lane restates `common`'s exact pin; see AGENTS.md.
-rerun-sdk = { version = "==0.37.0", extras = ["catalog"] } # pin-bump: hold
+rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
 
 [feature.mv-api-catalog-register-mac.pypi-options]
 index-url = "https://pypi.org/simple"
@@ -1981,7 +1981,7 @@ xorg-libxrandr = "*"
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 lpips = ">=0.1.4,<1"
 plyfile = ">=1.1,<2"
-rerun-sdk = "==0.37.0"
+rerun-sdk = "==0.38.1"
 simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.gsplat-rust-renderer.activation.env]
@@ -2469,9 +2469,9 @@ dataforge = { path = "packages/dataforge", editable = true }
 
 [feature.slam-rs.pypi-options.dependency-overrides]
 # dataforge pulls projectaria-tools, which pins rerun-sdk==0.33.0 for its own
-# notebook tutorials; the workspace lane is rerun-sdk 0.37.0. Same override as
+# notebook tutorials; the workspace lane is rerun-sdk 0.38.1. Same override as
 # [feature.dataforge.pypi-options.dependency-overrides].
-rerun-sdk = { version = "==0.37.0", extras = ["catalog"] }
+rerun-sdk = { version = "==0.38.1", extras = ["catalog"] }
 
 [feature.slam-rs.tasks.slam-rs-demo]
 cmd = "python tools/apps/replay.py --stage vio --segment msd-g2__MGO_others__MGO07_mapping_easy"
@@ -2776,7 +2776,7 @@ hf-transfer = "*"
 simplecv = { path = "packages/simplecv", editable = true }
 # pin-bump: hold — the macOS lane restates `common`'s exact pin, so a Rerun bump
 # that misses this line leaves the Mac a release behind with no gate to say so.
-rerun-sdk = { version = "==0.37.0", extras = ["catalog"] } # pin-bump: hold
+rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
 
 # ═══════════════════════════════════════════════════════════════════════════
 # mamma — streaming multiview body capture (causal MAMMA pipeline)
@@ -3012,7 +3012,7 @@ description = "Open the native Rerun viewer on the local catalog"
 # ═══════════════════════════════════════════════════════════════════════════
 # gauss-surf — GausSurf splat pipeline over ARKitScenes catalog segments
 # ═══════════════════════════════════════════════════════════════════════════
-# Signals/catalog lane: reads the segment through the 0.37 prerelease
+# Signals/catalog lane: reads the segment through the 0.38 prerelease
 # dataloader, derives frame selection / normals / ultrawide depth, writes
 # layer RRDs back. Explicit platforms required — see AGENTS.md.
 [feature.gauss-surf]
@@ -3160,9 +3160,9 @@ projectaria-tools = ">=2.2"
 
 [feature.dataforge.pypi-options.dependency-overrides]
 # projectaria-tools pins rerun-sdk==0.33.0 for its own notebook tutorials; dataforge
-# only uses its VRS reader, and the workspace lane is rerun-sdk 0.37.0 (AGENTS.md
+# only uses its VRS reader, and the workspace lane is rerun-sdk 0.38.1 (AGENTS.md
 # "Testing Rerun builds"). Same version + extras as [feature.common.pypi-dependencies].
-rerun-sdk = { version = "==0.37.0", extras = ["catalog"] }
+rerun-sdk = { version = "==0.38.1", extras = ["catalog"] }
 
 [feature.dataforge.activation.env]
 PACKAGE_DIR = "packages/dataforge"

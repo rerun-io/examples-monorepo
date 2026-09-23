@@ -11,7 +11,7 @@ import numpy as np
 import rerun as rr
 from beartype.roar import BeartypeException
 from jaxtyping import Float64, Int64
-from rerun.experimental import RrdReader
+from rerun.chunk import RrdReader
 from scipy.spatial.transform import Rotation
 
 from arkitscenes_download.ca1m.alignment import ClockDiagnostics, RigidAlignment, diagnose_clock, rigid_umeyama

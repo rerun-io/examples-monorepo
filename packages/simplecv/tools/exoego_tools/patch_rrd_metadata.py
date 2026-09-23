@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import rerun as rr
-import rerun.experimental as rre
+import rerun.chunk as rrc
 import tyro
 from serde.json import from_json, to_json
 from tqdm.auto import tqdm
@@ -98,7 +98,7 @@ def patch_rrd_metadata(rrd_path: Path, metadata: RecordingMetadata) -> bool:
     """
     try:
         # Load original recording to get app_id and recording_id
-        reader: Any = rre.RrdReader(rrd_path)
+        reader: Any = rrc.RrdReader(rrd_path)
         recordings: list[Any] = list(reader.recordings())
         if not recordings:
             raise ValueError(f"No recordings found in {rrd_path}")

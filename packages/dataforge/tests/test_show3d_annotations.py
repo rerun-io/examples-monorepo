@@ -8,8 +8,8 @@ from typing import NamedTuple
 import numpy as np
 import pyarrow as pa
 import pytest
-import rerun as rr
 import rerun.blueprint as rrb
+import rerun.chunk as rrc
 from conftest import SHOW3D_RAW, Show3dSceneInputs, blueprint_views, index_row, read_back, read_chunks, recording_properties
 from jaxtyping import Bool, Float32, Float64
 from numpy import ndarray
@@ -97,7 +97,7 @@ class AnnotationBuild(NamedTuple):
     scene: Scene
     frames: list[HandFrame]
     target: Path
-    chunks: list[rr.experimental.Chunk]
+    chunks: list[rrc.Chunk]
     identity: SequenceIdentity
 
 
@@ -113,7 +113,7 @@ def annotation_scene(show3d_scene_inputs: Show3dSceneInputs, tmp_path_factory: p
 def test_real_scene_annotation_layers(annotation_scene: AnnotationBuild) -> None:
     scene, frames, target, chunks, identity = annotation_scene
     profile: Path = SHOW3D_RAW / hand_profile_file(identity.parts[0])
-    assert rr.experimental.RrdReader(target).recordings()[0].recording_id == identity.recording_id
+    assert rrc.RrdReader(target).recordings()[0].recording_id == identity.recording_id
     for chunk in chunks:
         if not chunk.is_static:
             assert set(chunk.timeline_names) == {"video_time", "frame_index"}
@@ -127,7 +127,7 @@ def test_real_scene_annotation_layers(annotation_scene: AnnotationBuild) -> None
             ("wrist", "Transform3D:translation", sum(p.wrist_translation is not None for p in poses)),
             ("confidence", "Scalars:scalars", scene.info.num_frames),
         ):
-            rows: list[rr.experimental.Chunk] = [
+            rows: list[rrc.Chunk] = [
                 c
                 for c in chunks
                 if str(c.entity_path) == f"{schema.hands_path(side.name)}/{suffix}" and component in c.to_record_batch().schema.names
@@ -190,7 +190,7 @@ def test_hand_landmarks_reproject_through_base_camera_chain(
 ) -> None:
     """Project published hands through the package camera and projection chain."""
     scene: Scene = annotation_scene.scene
-    chunks: list[rr.experimental.Chunk] = annotation_scene.chunks
+    chunks: list[rrc.Chunk] = annotation_scene.chunks
     transforms: dict[int, Float64[ndarray, "4 4"]] = {
         pose.index: pose.T_WorldFromCamera for pose in scene.poses if pose.T_WorldFromCamera is not None
     }
@@ -408,8 +408,8 @@ def test_hand_layer_writes_dense_coco133_with_shipped_confidence_and_pixels(tmp_
     del absent
     target: Path = tmp_path / "hand_pose.rrd"
     write_hand_pose_layer(SequenceIdentity("show3d", ("S", "none_wave_abcd")), clock, frames, "{}", target)
-    chunks: list[rr.experimental.Chunk] = read_chunks(target)
-    temporal: list[rr.experimental.Chunk] = [chunk for chunk in chunks if not chunk.is_static]
+    chunks: list[rrc.Chunk] = read_chunks(target)
+    temporal: list[rrc.Chunk] = [chunk for chunk in chunks if not chunk.is_static]
     assert {str(chunk.entity_path) for chunk in temporal} == {
         "/world/gt/hands/left/confidence",
         "/world/gt/hands/right/confidence",

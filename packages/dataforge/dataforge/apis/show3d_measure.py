@@ -11,7 +11,7 @@ from pathlib import Path
 import av
 import numpy as np
 import pyarrow as pa
-import rerun as rr
+import rerun.chunk as rrc
 from jaxtyping import UInt8
 from numpy import ndarray
 from serde import serde
@@ -72,7 +72,7 @@ def rrd_psnr(path: Path, references: dict[str, dict[int, UInt8[ndarray, "h w"]]]
         decoders[entity] = decoder
 
     def decoded_packets() -> Iterator[tuple[str, av.VideoFrame]]:
-        for chunk in rr.experimental.RrdReader(path).stream():
+        for chunk in rrc.RrdReader(path).stream():
             entity: str = str(chunk.entity_path)
             batch: pa.RecordBatch = chunk.to_record_batch()
             if entity not in decoders or "VideoStream:sample" not in batch.schema.names:

@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 
 import numpy as np
 import pytest
-import rerun.experimental as rx
+import rerun.chunk as rrc
 from fixture_types import FRAME, CameraFactory, FrontendFactory, PipelineFactory, RigFactory, Row, Rows, RowsReader, TextureFactory
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
@@ -147,7 +147,7 @@ def read_rows() -> RowsReader:
 
     def read(path: Path) -> Rows:
         rows: Rows = {}
-        for chunk in rx.RrdReader(path).stream().collect().stream():
+        for chunk in rrc.RrdReader(path).stream().collect().stream():
             if chunk.is_static:
                 continue
             batch = chunk.to_record_batch()

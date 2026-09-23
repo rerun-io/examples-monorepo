@@ -17,10 +17,60 @@ from typing import Any
 
 import rerun as rr
 import rerun.blueprint as rrb
+from rerun import bindings
 from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer
+from rerun.recording_stream import RecordingStream
 
 from dataforge import schema
 from dataforge.identity import SequenceIdentity
+
+SEGMENT_LINK_COLUMN: str = "recording link"
+"""The segment table's generated URI column; the one the table blueprint turns into a preview."""
+
+
+def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
+    """Every view in the blueprint's container tree, in layout order."""
+    views: list[rrb.View] = []
+
+    def walk(node: rrb.View | rrb.Container) -> None:
+        if isinstance(node, rrb.View):
+            views.append(node)
+        else:
+            for child in node.contents:
+                walk(child)
+
+    walk(blueprint.root_container)
+    return views
+
+
+def save_table_blueprint(blueprint: rrb.Blueprint, target: Path, *, timeline: str) -> None:
+    """Write a Rerun 0.38 segment-table blueprint: the views plus the ``/table`` entities.
+
+    0.38 redesigned table blueprints (the 0.37 files are ignored): the card and table layouts
+    each name the preview column, and ``TableColumnPreview`` lists the views a preview renders.
+    Every view is embedded as in a plain ``.rbl``; the extra entities are logged on the
+    blueprint timeline through the low-level archetypes, as the SDK's ``table_blueprints``
+    example does until a Python API exists. The recording link column comes first in the
+    table layout and is the card's link; the card title is the recording name property.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with atomic_write(target) as temp_path, RecordingStream._from_native(
+        bindings.new_blueprint(application_id=APPLICATION_ID, make_default=False, make_thread_default=False, default_enabled=True)
+    ) as stream:
+        stream.save(str(temp_path))
+        stream.set_time("blueprint", sequence=0)
+        blueprint._log_to_stream(stream)
+        column: str = rr.escape_entity_path_part(SEGMENT_LINK_COLUMN)
+        view_paths: list[str] = [view.blueprint_path() for view in blueprint_views(blueprint)]
+        for path in (f"/table/layouts/table/columns/{column}", f"/table/layouts/cards/fields/{column}"):
+            stream.log(path, rrb.experimental.TableColumn(cell_kind=rrb.components.TableCellKind.Preview))
+            stream.log(path, rrb.experimental.TableColumnPreview(views=view_paths))
+        stream.log("/table", rrb.experimental.PreviewsConfig(timeline=timeline))
+        stream.log("/table/layouts/table", rrb.experimental.TableLayout(column_order=[SEGMENT_LINK_COLUMN]))
+        stream.log(
+            "/table/layouts/cards",
+            rrb.experimental.CardLayout(field_order=[SEGMENT_LINK_COLUMN], title="property:RecordingInfo:name", link=SEGMENT_LINK_COLUMN),
+        )
 
 APPLICATION_ID: str = "dataforge"
 """Rerun application id of every recording this package writes; one package, one app."""

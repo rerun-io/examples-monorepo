@@ -11,7 +11,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-import rerun as rr
+import rerun.chunk as rrc
 from conftest import SHOW3D_RAW, Show3dSceneInputs, index_row, read_back, read_chunks, recording_properties
 from jaxtyping import Float32
 from numpy import ndarray
@@ -132,7 +132,7 @@ def test_object_sanity_uses_depth_bounds_nearest_palm_and_posed_denominator() ->
     assert np.isnan(empty.palm_dist_median_m)
 
 
-def mesh_vertex_counts(chunks: Sequence[rr.experimental.Chunk]) -> dict[int, int]:
+def mesh_vertex_counts(chunks: Sequence[rrc.Chunk]) -> dict[int, int]:
     """Vertex count per frame_index across temporal Mesh3D chunks."""
     rows: dict[int, int] = {}
     for c in chunks:
@@ -161,7 +161,7 @@ def test_hand_mesh_skins_only_above_default_confidence_and_clears_other_frames(s
     ]
     target: Path = tmp_path / "hand_mesh.rrd"
     write_hand_mesh_layer(inputs.identity, inputs.scene, hands, inputs.profile.model, target)
-    chunks: list[rr.experimental.Chunk] = read_chunks(target)
+    chunks: list[rrc.Chunk] = read_chunks(target)
     right: dict[int, int] = mesh_vertex_counts([c for c in chunks if str(c.entity_path) == schema.hand_mesh_path("right") and not c.is_static])
     left: dict[int, int] = mesh_vertex_counts([c for c in chunks if str(c.entity_path) == schema.hand_mesh_path("left") and not c.is_static])
     assert right == {base[0].index: len(inputs.profile.model.mesh_vertices), base[1].index: 0, base[2].index: 0, base[3].index: 0}
@@ -205,12 +205,12 @@ def object_scene(show3d_scene_inputs: Show3dSceneInputs, tmp_path_factory: pytes
 def test_real_scene_object_and_mesh_layers(object_scene: ObjectBuild) -> None:
     build: ObjectBuild = object_scene
     alias: str = scene_id_parts(build.identity.parts[1])[0]
-    chunks: list[rr.experimental.Chunk] = read_chunks(build.output / "object_pose.rrd")
+    chunks: list[rrc.Chunk] = read_chunks(build.output / "object_pose.rrd")
     for entity_path, component, expected in [
         (schema.objects_path(alias), "Transform3D:translation", sum(frame.confidence > 0.0 for frame in build.frames)),
         (schema.object_confidence_path(alias), "Scalars:scalars", len(build.frames)),
     ]:
-        selected: list[rr.experimental.Chunk] = [
+        selected: list[rrc.Chunk] = [
             c for c in chunks if str(c.entity_path) == entity_path and component in c.to_record_batch().schema.names
         ]
         assert sum(c.num_rows for c in selected) == expected
@@ -218,7 +218,7 @@ def test_real_scene_object_and_mesh_layers(object_scene: ObjectBuild) -> None:
     props: dict[str, object] = recording_properties(read_back(build.output / "object_pose.rrd"), "object_pose")
     assert props["version"] == OBJECT_POSE_VERSION
     assert props["coverage"] == pytest.approx(sum(f.confidence > 0.0 for f in build.frames) / len(build.frames))
-    mesh_chunks: list[rr.experimental.Chunk] = read_chunks(build.output / "object_mesh.rrd")
+    mesh_chunks: list[rrc.Chunk] = read_chunks(build.output / "object_mesh.rrd")
     assert any(
         str(c.entity_path) == schema.object_mesh_path(alias) and c.is_static and "Asset3D:blob" in c.to_record_batch().schema.names
         for c in mesh_chunks
@@ -250,9 +250,9 @@ def test_real_scene_object_and_mesh_layers(object_scene: ObjectBuild) -> None:
         "mesh_id": 28 if alias == "keyboard" else 26,
         "mesh_source": "bop-benchmark/hot3d",
     }
-    hand_chunks: list[rr.experimental.Chunk] = read_chunks(build.output / "hand_mesh.rrd")
+    hand_chunks: list[rrc.Chunk] = read_chunks(build.output / "hand_mesh.rrd")
     for side in HAND_SIDES:
-        temporal: list[rr.experimental.Chunk] = [c for c in hand_chunks if str(c.entity_path) == schema.hand_mesh_path(side.name) and not c.is_static]
+        temporal: list[rrc.Chunk] = [c for c in hand_chunks if str(c.entity_path) == schema.hand_mesh_path(side.name) and not c.is_static]
         # One row per frame: skinned vertices where Meta trusts the hand, an empty row otherwise so the viewer holds nothing.
         assert sum(c.num_rows for c in temporal) == len(build.hands)
         trusted: list[bool] = [f.hand_poses[side.key].wrist_rotation is not None and f.hand_poses[side.key].trusted for f in build.hands]
@@ -266,7 +266,7 @@ def test_real_scene_object_and_mesh_layers(object_scene: ObjectBuild) -> None:
         )
     for layer in ("object_pose", "object_mesh", "hand_mesh"):
         path: Path = build.output / f"{layer}.rrd"
-        assert rr.experimental.RrdReader(path).recordings()[0].recording_id == build.identity.recording_id
+        assert rrc.RrdReader(path).recordings()[0].recording_id == build.identity.recording_id
         assert recording_properties(read_back(path), "capture") == {}
     assert recording_properties(read_back(build.output / "hand_mesh.rrd"), "hand_mesh") == {}
 
@@ -397,7 +397,7 @@ def test_unposed_object_layer_retains_confidence_and_typed_nan_metrics(tmp_path:
         target,
         clock_offset_s=0.0,
     )
-    chunks: list[rr.experimental.Chunk] = read_chunks(target)
+    chunks: list[rrc.Chunk] = read_chunks(target)
     assert [str(c.entity_path) for c in chunks if not c.is_static] == [schema.object_confidence_path("toy")]
     props: dict[str, object] = recording_properties(read_back(target), "object_pose")
     assert props["coverage"] == 0.0
