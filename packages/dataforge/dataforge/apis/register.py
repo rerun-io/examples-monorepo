@@ -2,9 +2,8 @@
 
 One catalog dataset holds every layer under ``output_root()``, keyed by the
 directory it sits in: ``base`` is the sensor recording each converter writes and
-is required, and each derived layer (``gt``, ``sensor_metadata``) stacks onto the same
-entities as a sibling. A layer with no files is simply not registered, so a
-corpus that has not been through a ground-truth pass registers exactly as before.
+is required. Each dataset declares its derived layers, which share the base
+recording identity. A declared layer with no files is not registered.
 """
 
 from __future__ import annotations
@@ -41,11 +40,10 @@ class Config:
 def main(config: Config) -> None:
     """Create the dataset if needed and register every layer's rrds (idempotent)."""
     dataset_config: DataforgeDatasetConfig = config.dataset
+    dataset: DataforgeDataset = dataset_config.setup()
     name: str = dataset_config.name
     output_root: Path = paths.output_root()
-    paths_by_layer: dict[str, list[Path]] = {
-        layer: sorted((output_root / layer).glob(f"{name}__*.rrd")) for layer in paths.LAYERS
-    }
+    paths_by_layer: dict[str, list[Path]] = {layer: sorted((output_root / layer).glob(f"{name}__*.rrd")) for layer in dataset.layers}
     if not paths_by_layer[paths.BASE_LAYER]:
         raise FileNotFoundError(f"no {paths.BASE_LAYER}-layer rrds for {name} under {output_root / paths.BASE_LAYER}")
 
@@ -57,7 +55,6 @@ def main(config: Config) -> None:
             continue  # a derived layer nobody has produced yet
         entry.register([path.resolve().as_uri() for path in rrd_paths], layer_name=layer, on_duplicate=on_duplicate).wait()
 
-    dataset: DataforgeDataset = dataset_config.setup()
     # Blueprints register once: every register_blueprint call adds a NEW entry to the
     # catalog dataset's blueprint list (cluttering the viewer's selector), so an
     # incremental re-register skips a blueprint the catalog already has a default for.

@@ -316,10 +316,10 @@ class BaseExoEgoSequence(Generic[ConfigT], ABC):  # noqa: UP046
 
         Generic and dataset-agnostic: it consumes only the normalized
         ``exo_cam_list`` / ``exo_video_names`` and ``ego_cam_dict`` /
-        ``ego_video_names``, so every dataset flows through unchanged. Exo cameras
-        each become a static world-anchored rig (``rig_00..``, one camera each;
-        a future multi-sensor exo unit simply adds cameras under its rig); the
-        worn ego device becomes a moving rig (or a fallback of per-camera rigs if
+        ``ego_video_names``. Exo cameras each become a static world-anchored
+        single-camera rig (``rig_00..``). This builder does not produce
+        multi-camera exo rigs; dataforge writes those directly. The worn ego
+        device becomes a moving rig (or a fallback of per-camera rigs if
         not rigidly factorable). See :class:`RigLayout`.
 
         ``log_exo`` / ``log_ego`` mirror the viewer toggles so a disabled side

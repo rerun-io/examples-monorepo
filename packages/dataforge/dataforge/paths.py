@@ -4,7 +4,7 @@ Layout (relative to the overridable roots; defaults are package-local because
 pixi tasks run with ``cwd = packages/dataforge``):
 
     data/raw/<dataset>/...            upstream layout, untouched
-    data/dataforge/rrd/<layer>/<recording_id>.rrd   layer in {base, gt}
+    data/dataforge/rrd/<layer>/<recording_id>.rrd   layer declared by the dataset
     data/dataforge/rrd/blueprints/<name>[-table].rbl
     data/dataforge/rrd/sidecars/<recording_id>/<name>   small inputs a derived layer rebuilds from
 """
@@ -25,13 +25,20 @@ GT_LAYER: str = "gt"
 SENSOR_METADATA_LAYER: str = "sensor_metadata"
 """Static calibration backfill; sibling of base, separate from original measurements."""
 
-LAYERS: tuple[str, ...] = (BASE_LAYER, GT_LAYER, SENSOR_METADATA_LAYER)
-"""Every layer dataforge writes, base first.
+HAND_POSE_LAYER: str = "hand_pose"
+"""Measured hand annotations."""
+CAPTIONS_LAYER: str = "captions"
+"""Scene instructions and captions."""
 
-The one list ``register`` and ``view`` walk, so a new derived layer is registered
-and opened everywhere by adding it here. Layers share a recording id, so a viewer
-handed several files of one sequence merges them onto the same entities.
-"""
+OBJECT_POSE_LAYER: str = "object_pose"
+"""Tracked rigid object poses and geometric census."""
+OBJECT_MESH_LAYER: str = "object_mesh"
+"""Static object-frame HOT3D geometry."""
+HAND_MESH_LAYER: str = "hand_mesh"
+"""Derived skinned world-frame hand geometry."""
+
+LAYERS: tuple[str, ...] = (BASE_LAYER, GT_LAYER, SENSOR_METADATA_LAYER)
+"""Common layers; register and view use each dataset's own layer declaration."""
 
 
 def output_root() -> Path:

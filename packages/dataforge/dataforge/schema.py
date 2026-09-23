@@ -1,7 +1,7 @@
 """dataforge:v1 logging schema — the exoego:v2 conventions, as code. Stdlib-only.
 
 The authoritative prose spec is ``packages/simplecv/docs/exoego_schema.md``:
-one ``video_time`` timestamp timeline everywhere, world-anchored rigs at
+the ``video_time`` timeline and optional ``FRAME_INDEX`` sequence timeline, world-anchored rigs at
 ``/world/rig_NN``, cameras at ``.../cam_MM/pinhole/video``, and IMUs at the
 (previously reserved) ``.../imu_MM/{gyro,accel}``. dataforge is the first
 emitter of the IMU section (§8) and of the magnetometer section (§9), whose
@@ -14,6 +14,9 @@ from __future__ import annotations
 
 TIMELINE: str = "video_time"
 """The single timestamp timeline every dataforge stream logs on."""
+
+FRAME_INDEX: str = "frame_index"
+"""Sequence timeline holding the upstream frame index; datasets whose source has one stamp it beside video_time."""
 
 EXOEGO_SCHEMA_VERSION: str = "exoego:v2"
 """Value of the ``schema_version`` AnyValue on every rig node."""
@@ -49,6 +52,11 @@ def cam_path(rig: int, cam: int) -> str:
 def pinhole_path(rig: int, cam: int) -> str:
     """``.../cam_MM/pinhole`` — the (distorted) pinhole projection node."""
     return f"{cam_path(rig, cam)}/pinhole"
+
+
+def boxes_path(rig: int, cam: int, label: str) -> str:
+    """§13: ``.../pinhole/boxes/<label>`` — 2D boxes the source shipped, named for what they enclose."""
+    return f"{pinhole_path(rig, cam)}/boxes/{label}"
 
 
 def video_path(rig: int, cam: int) -> str:
@@ -114,3 +122,63 @@ def trail_path(source: str) -> str:
 def capture_property(name: str) -> str:
     """``property:capture:<name>`` — recording-level capture metadata key."""
     return f"property:capture:{name}"
+
+
+def hands_path(side: str) -> str:
+    """§10: measured hand root in the world frame."""
+    return f"/world/gt/hands/{side}"
+
+
+def hand_profile_path() -> str:
+    """§10: self-contained subject hand profile JSON."""
+    return "/world/gt/hands/profile"
+
+
+def coco133_xyz_path() -> str:
+    """§10: COCO-133 keypoints in world metres."""
+    return "/world/gt/coco133_xyz"
+
+
+def coco133_uv_path(rig: int, cam: int) -> str:
+    """§10: shipped COCO-133 keypoints in camera pixels."""
+    return f"{pinhole_path(rig, cam)}/coco133_uv"
+
+
+def instruction_path() -> str:
+    """§12: static task instruction document."""
+    return "/task/instruction"
+
+
+def objects_path(alias: str) -> str:
+    """§11: tracked rigid object root in the world frame."""
+    return f"/world/gt/objects/{alias}"
+
+
+def object_mesh_path(alias: str) -> str:
+    """§11: static geometry in the tracked object's frame."""
+    return f"{objects_path(alias)}/mesh"
+
+
+def object_confidence_path(alias: str) -> str:
+    """§11: every-frame tracking confidence."""
+    return f"{objects_path(alias)}/confidence"
+
+
+def hand_mesh_path(side: str) -> str:
+    """§10: skinned vertices in the world frame."""
+    return f"{hands_path(side)}/mesh"
+
+
+def hand_confidence_path(side: str) -> str:
+    """Measured hand confidence."""
+    return f"{hands_path(side)}/confidence"
+
+
+def hand_joint_angles_path(side: str) -> str:
+    """UmeTrack joint angles."""
+    return f"{hands_path(side)}/joint_angles"
+
+
+def hand_wrist_path(side: str) -> str:
+    """World-from-wrist pose."""
+    return f"{hands_path(side)}/wrist"

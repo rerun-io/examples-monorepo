@@ -9,7 +9,7 @@ work plan — is in **[docs/dataforge-design-report.html](docs/dataforge-design-
 
 ## Run it
 
-From the repo root, with `<dataset>` one of `robocap`, `selfcap`, `wildcap`, `msd`, `lamaria`:
+From the repo root, with `<dataset>` one of `robocap`, `selfcap`, `wildcap`, `msd`, `lamaria`, `show3d`:
 
 ```bash
 # 1. Catalog server, in a tmux session so it outlives your shell. Registrations
@@ -253,6 +253,61 @@ RERUN_INSECURE_SKIP_HOST_CHECK=1 DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/lamaria
   pixi run -e dataforge --frozen dataforge-register --catalog-url rerun+http://127.0.0.1:9988 lamaria
 ```
 
+### SHOW3D (show3d)
+
+SHOW3D (Rim et al., CVPR 2026) is a back-rig plus Quest 3 hand-object capture; [docs/show3d.md](docs/show3d.md) opens with the papers, the capture system, how the labels were made and what ships. It converts one subject/scene into layers sharing the recording ID
+`show3d__<subject>__<scene>`. `download` fetches the two indexes and subject
+profiles, then prints the plan. `convert` fetches one scene bundle at a time,
+atomically publishes base → hand_pose → captions → object_pose → object_mesh → hand_mesh, and removes only
+the source MP4s unless `--keep-raw`. Each layer skips its own existing file unless
+`--force` is set. Retained sidecars rebuild annotations without reading video.
+
+```bash
+export DATAFORGE_OUTPUT_ROOT=/mnt/nas/datasets/show3d-rrd
+export DATAFORGE_FFMPEG=/home/pablo/.pixi/bin/ffmpeg
+pixi run -e dataforge --frozen dataforge-download show3d
+pixi run -e dataforge --frozen dataforge-convert show3d --sequences SPI102/keyboard_toss-away_83ef LYA722/birdhousetoy_shaking_8eca --keep-raw
+pixi run -e dataforge --frozen dataforge-convert show3d --split train
+pixi run -e dataforge --frozen dataforge-register show3d
+pixi run -e dataforge --frozen dataforge-view --sequence SPI102/keyboard_toss-away_83ef show3d --rr-config.headless
+```
+
+Object scenes come first, followed by remaining train and test scenes. Seven
+zero-frame AZH822 index rows are skipped with a reason. Scene metadata is the
+source of truth after fetch. `--root` defaults to `data/raw/show3d`; work clips
+are cleaned beneath its `work/` directory, including on failure.
+
+| Layer | Status | Contents |
+| --- | --- | --- |
+| `base` | Available | Video, calibration, headset motion, frame metadata, face boxes (`boxes/face`), root AnnotationContext, `capture` census and `episode` metadata |
+| `hand_pose` | Available | COCO-133 keypoints with per-joint confidence (`world/gt/coco133_xyz`), shipped headset pixels (`coco133_uv`), joint angles, wrist poses, confidence, verbatim profile |
+| `object_pose` | Available | Sparse object transforms, every-frame confidence, coverage, headset FOV and nearest-palm census |
+| `captions` | Available | Markdown instruction and all structured caption fields |
+| `object_mesh` | Available for 22 aliases | Static HOT3D BOP GLB, matched by name; unsupported texture extension stripped |
+| `hand_mesh` | Available | Translucent UmeTrack meshes, static topology and frame-aligned world vertices; ≈8× `hand_pose`; see [docs](docs/show3d.md) |
+
+Consumers can leave `hand_mesh`
+unregistered to avoid its storage cost; a follow-up can coarsen its clock.
+HOT3D BOP models are renumbered across releases, so mesh IDs resolve by name.
+Download discards `KHR_texture_transform` UV transforms so Rerun 0.37 can load
+the GLBs, then deletes the raw GLBs after the stripped assets are saved.
+The keyboard golden requires `in_ego_fov_fraction < 0.05`;
+it is not always behind both cameras. Source poses remain unchanged.
+
+`/world` is the moving back-rig frame, right-handed Y-up. `rig_00` holds
+rig0…rig7 at fixed `cam_00`…`cam_07` indices; `rig_01` holds the two headset
+cameras. Distances are metres. Every temporal column has `video_time` (source
+seconds minus the first timestamp) and the upstream `frame_index` sequence.
+The default layout is the shared exo/ego layout (see *Blueprints*): 3D with the
+instruction under it, both headset views in the right column, and the eight back-rig
+cameras along the bottom, face boxes hidden; table cards decode headset0 only.
+
+Video uses ffmpeg file-input grayscale decode → AV1 NVENC at 60 fps, GOP 60,
+no B-frames, then Mp4Reader remux. CQ 36 was chosen from the
+[measured table](docs/show3d.md#video-measurement-and-encoder-decision).
+Each recording records the Hub commit it was built from as
+`property:capture:hf_revision`; the corpus run pins one with `--revision`.
+
 ### Environment variables
 
 | variable | default | purpose |
@@ -274,7 +329,7 @@ layer-major output tree: `base/` and its sibling `gt/`), `schema.py` (the
 `logging_toolkit.py` (the shared rig-node, video-stream, camera, IMU,
 magnetometer and pose-track writers), `video_encoding.py` (the pipe-fed AV1
 encoder, re-exported through `logging_toolkit`), `blueprints.py` (the
-single-rig viewer layout every dataset builds from), `archives.py` (reading
+single-rig and exo/ego viewer layouts every dataset builds from), `archives.py` (reading
 members out of a plain zip or an Info-ZIP volume set), `basalt.py` (basalt's
 `calibration.json` as one validated `CalibratedCamera` per camera: model,
 extrinsics, resolution, and the follow frame derived from them),
@@ -350,6 +405,13 @@ at `setup()`):
   holds exactly one per dataset, so one dataset = one camera layout.
 - **segment table** — the preview card the table renders for every visible row
   at once, so it decodes exactly one video stream.
+
+A multi-camera exo/ego dataset builds its default from `blueprints.exoego_blueprint`,
+simplecv's `view_exoego` arrangement: 3D top left (a task instruction, if the dataset
+has one, in a strip under it), worn cameras in a column on the right, static cameras
+in one strip along the bottom. Past `EXO_PANES_PER_TAB` (9) static cameras the strip
+continues in further tabs, filled in camera order. Panes are titled `rig_NN/cam_MM`,
+as in the entity tree.
 
 `register` adds them once and never replaces them (each registration is a new
 entry in the viewer's blueprint list). To refresh: delete the dataset, then

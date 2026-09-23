@@ -36,6 +36,12 @@ RIG_COLUMN_SHARES: tuple[int, int] = (3, 2)
 """Width split between the 3D column and the camera grid."""
 PLOT_ROW_SHARES: tuple[int, int] = (3, 1)
 """Height split between the views and the sensor plots."""
+EXOEGO_SHARES: tuple[int, int] = (4, 1)
+"""Split of the exo/ego layout, both ways: 3D view to ego column, and everything above to the exo strip."""
+INSTRUCTION_SHARES: tuple[int, int] = (5, 1)
+"""Height split between the 3D view and the instruction strip under it."""
+EXO_PANES_PER_TAB: int = 9
+"""Most exo panes one strip shows; a larger rig continues in further tabs, filled in order."""
 FOLLOW_BACK_M: float = 0.9
 """How far behind the device the follow eye sits, along the device's own forward."""
 FOLLOW_UP_M: float = 0.45
@@ -48,7 +54,7 @@ headsets as they stand: a shot that keeps the camera frusta and the last ten sec
 of trail in view at once without the ground filling it."""
 
 
-def camera_view(name: str, rig: int, cam: int) -> rrb.Spatial2DView:
+def camera_view(name: str, rig: int, cam: int, *, contents: list[str] | None = None) -> rrb.Spatial2DView:
     """One camera's 2D pane.
 
     The origin is the ``pinhole`` node, not the camera node, so the pane *is*
@@ -59,11 +65,14 @@ def camera_view(name: str, rig: int, cam: int) -> rrb.Spatial2DView:
         name: Pane label, whatever the dataset calls the stream.
         rig: Rig index the camera hangs off.
         cam: Camera index within the rig.
+        contents: Optional entity filters; defaults to the camera subtree.
 
     Returns:
         The pane every dataset's camera grid is built from.
     """
-    return rrb.Spatial2DView(name=name, origin=schema.pinhole_path(rig, cam), contents=f"{schema.pinhole_path(rig, cam)}/**")
+    return rrb.Spatial2DView(
+        name=name, origin=schema.pinhole_path(rig, cam), contents=contents if contents is not None else f"{schema.pinhole_path(rig, cam)}/**"
+    )
 
 
 def sensor_plot(name: str, origin: str, contents: str) -> rrb.TimeSeriesView:
@@ -88,14 +97,17 @@ def eye_controls_from_pose(
     look_target: tuple[float, float, float],
     eye_up: tuple[float, float, float],
 ) -> rrb.EyeControls3D:
-    """A first-person eye placed by hand, in the coordinates of the view's origin.
+    """An orbital eye placed by hand, in the coordinates of the view's origin.
 
+    Orbital is the dataforge default for every 3D view: the eye orbits
+    ``look_target`` when dragged, which is what a person inspecting a rig or a
+    scene wants, whereas first-person controls fly the eye and lose the subject.
     The follow view's origin is the rig node, so an eye fixed in that frame rides
     the rig (the ``rerun-io/eye_control_example`` pattern).
 
     Args:
         position: Where the eye sits.
-        look_target: What it aims at.
+        look_target: What it aims at and orbits around.
         eye_up: Which way is up for the eye; it fixes the horizon's roll.
 
     Returns:
@@ -103,7 +115,7 @@ def eye_controls_from_pose(
     """
     # EyeControls3D is marked unstable by the SDK; re-validate this factory on Rerun bumps.
     return rrb.EyeControls3D(
-        kind=rrb.Eye3DKind.FirstPerson,
+        kind=rrb.Eye3DKind.Orbital,
         position=position,
         look_target=look_target,
         eye_up=eye_up,
@@ -244,6 +256,52 @@ def rig_blueprint(
         rrb.TimePanel(timeline=schema.TIMELINE),
         collapse_panels=True,
     )
+
+
+def exoego_blueprint(
+    world_view: rrb.Spatial3DView,
+    *,
+    ego_panes: Sequence[rrb.Spatial2DView],
+    exo_panes: Sequence[rrb.Spatial2DView],
+    instruction: rrb.TextDocumentView | None = None,
+) -> rrb.Blueprint:
+    """The default layout of a multi-camera exo/ego capture.
+
+    The 3D view fills the top left, the worn cameras stack in a column to its right,
+    and the static cameras run in one strip along the bottom. A rig with more than
+    ``EXO_PANES_PER_TAB`` static cameras continues the strip in further tabs, filled
+    in camera order. A dataset that ships a task instruction gets it as a strip under
+    the 3D view. This is simplecv's ``view_exoego`` arrangement, kept so every exoego
+    dataset reads the same.
+
+    Args:
+        world_view: The scene view.
+        ego_panes: One pane per worn camera, top to bottom.
+        exo_panes: One pane per static camera, left to right.
+        instruction: The instruction pane, for a dataset that has one.
+
+    Returns:
+        The blueprint embedded in the dataset's rrds and registered as the
+        catalog dataset's default.
+    """
+    top: rrb.Container | rrb.View = world_view if instruction is None else rrb.Vertical(world_view, instruction, row_shares=list(INSTRUCTION_SHARES))
+    if ego_panes:
+        top = rrb.Horizontal(top, rrb.Vertical(*ego_panes), column_shares=list(EXOEGO_SHARES))
+    root: rrb.Container | rrb.View = top
+    if exo_panes:
+        tabs: list[Sequence[rrb.Spatial2DView]] = [
+            exo_panes[start : start + EXO_PANES_PER_TAB] for start in range(0, len(exo_panes), EXO_PANES_PER_TAB)
+        ]
+        strip: rrb.Container = (
+            rrb.Horizontal(*tabs[0])
+            if len(tabs) == 1
+            else rrb.Tabs(
+                *(rrb.Horizontal(*tab, name=tab[0].name if len(tab) == 1 else f"{tab[0].name} – {tab[-1].name}") for tab in tabs), active_tab=0
+            )
+        )
+        root = rrb.Vertical(top, strip, row_shares=list(EXOEGO_SHARES))
+    # An explicit TimePanel is not collapsed by collapse_panels, so it states its own state.
+    return rrb.Blueprint(root, rrb.TimePanel(timeline=schema.TIMELINE, state="collapsed"), collapse_panels=True)
 
 
 def table_blueprint(

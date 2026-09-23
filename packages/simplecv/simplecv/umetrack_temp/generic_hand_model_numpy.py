@@ -5,12 +5,13 @@ arrays so that downstream consumers can avoid a PyTorch dependency when GPU
 autograd is unnecessary.
 """
 
+import math
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import NamedTuple
 
 import numpy as np
-from jaxtyping import Float32, Int64
+from jaxtyping import Bool, Float32, Int64
 from numpy import ndarray
 from serde import serde
 
@@ -239,50 +240,50 @@ def hat(v: Float32[ndarray, "n 3"]) -> Float32[ndarray, "n 3 3"]:
 
 
 def _finger_fk(
-    joint_local_xfs: Float32[ndarray, "... dof_per_finger 4 4"],
-    parent_transform: Float32[ndarray, "... 4 4"],
-) -> list[Float32[ndarray, "... 4 4"]]:
+    joint_local_xfs: Float32[ndarray, "batch dof_per_finger 4 4"],
+    parent_transform: Float32[ndarray, "batch 4 4"],
+) -> list[Float32[ndarray, "batch 4 4"]]:
     """
     Computes the forward kinematics for a finger with 4 degrees of freedom (DoF),
     i.e., 4 joints, and returns 3 transformation frames.
 
     Args:
-        joint_local_xfs (Float32[ndarray, "... dof_per_finger 4 4"]): Local joint transformations.
-        parent_transform (Float32[ndarray, "... 4 4"]): Parent transformation matrix.
+        joint_local_xfs (Float32[ndarray, "batch dof_per_finger 4 4"]): Local joint transformations.
+        parent_transform (Float32[ndarray, "batch 4 4"]): Parent transformation matrix.
 
     Returns:
-        list[Float32[ndarray, "... 4 4"]]: List of computed transformation matrices.
+        list[Float32[ndarray, "batch 4 4"]]: List of computed transformation matrices.
     """
 
-    joint_local_xfs_arr: Float32[ndarray, "... dof_per_finger 4 4"] = np.asarray(joint_local_xfs, dtype=np.float32)
-    parent_transform_arr: Float32[ndarray, "... 4 4"] = np.asarray(parent_transform, dtype=np.float32)
+    joint_local_xfs_arr: Float32[ndarray, "batch dof_per_finger 4 4"] = np.asarray(joint_local_xfs, dtype=np.float32)
+    parent_transform_arr: Float32[ndarray, "batch 4 4"] = np.asarray(parent_transform, dtype=np.float32)
 
-    transform_mats: list[Float32[ndarray, "n 4 4"]] = [parent_transform_arr]
+    transform_mats: list[Float32[ndarray, "batch 4 4"]] = [parent_transform_arr]
     for i in range(DOF_PER_FINGER):
         transform_mats.append(np.matmul(transform_mats[-1], joint_local_xfs_arr[:, i]))
     return transform_mats[2:]
 
 
 def _joint_local_transform(
-    rotation_axis: Float32[ndarray, "... 20 3"],
-    rest_pose: Float32[ndarray, "... 20 3"],
-    joint_angles: Float32[ndarray, "... 20"],
-) -> Float32[ndarray, "... 20 4 4"]:
+    rotation_axis: Float32[ndarray, "batch 20 3"],
+    rest_pose: Float32[ndarray, "batch 20 3"],
+    joint_angles: Float32[ndarray, "batch 20"],
+) -> Float32[ndarray, "batch 20 4 4"]:
     """
     Computes the local transformation matrix for joints given their rotation axes,
     rest poses, and joint angles.
 
     Args:
-        rotation_axis (Float32[ndarray, "... 20 3"]): Rotation axes of the joints.
-        rest_pose (Float32[ndarray, "... 20 3"]): Rest poses of the joints.
-        joint_angles (Float32[ndarray, "... 20"]): Joint angles.
+        rotation_axis (Float32[ndarray, "batch 20 3"]): Rotation axes of the joints.
+        rest_pose (Float32[ndarray, "batch 20 3"]): Rest poses of the joints.
+        joint_angles (Float32[ndarray, "batch 20"]): Joint angles.
 
     Returns:
-        Float32[ndarray, "... 20 4 4"]: Computed local transformation matrix.
+        Float32[ndarray, "batch 20 4 4"]: Computed local transformation matrix.
     """
-    rotation_axis_arr: Float32[ndarray, "n 20 3"] = np.asarray(rotation_axis, dtype=np.float32)
-    rest_pose_arr: Float32[ndarray, "n 20 3"] = np.asarray(rest_pose, dtype=np.float32)
-    joint_angles_arr: Float32[ndarray, "n 20"] = np.asarray(joint_angles, dtype=np.float32)
+    rotation_axis_arr: Float32[ndarray, "batch 20 3"] = np.asarray(rotation_axis, dtype=np.float32)
+    rest_pose_arr: Float32[ndarray, "batch 20 3"] = np.asarray(rest_pose, dtype=np.float32)
+    joint_angles_arr: Float32[ndarray, "batch 20"] = np.asarray(joint_angles, dtype=np.float32)
 
     rotation_axis_flat: Float32[ndarray, "n_axes 3"] = rotation_axis_arr.reshape(-1, 3)
     rest_pose_flat: Float32[ndarray, "n_axes 3"] = rest_pose_arr.reshape(-1, 3)
@@ -302,85 +303,59 @@ def _joint_local_transform(
     return local_transform.reshape(rotation_axis_arr.shape[0], -1, 4, 4)
 
 
-def _lbs(
-    trans_mats: Float32[ndarray, "... num_joint_frames 4 4"],
-    skinned_points: Float32[ndarray, "... num_landmarks num_joint_frames 4"],
-) -> Float32[ndarray, "... num_landmarks 4"]:
-    """
-    Performs linear blend skinning (LBS) on the given points using the given transformation matrices.
-
-    Args:
-        trans_mats (Float32[ndarray, "... num_joint_frames 4 4"]): Transformation matrices.
-        skinned_points (Float32[ndarray, "... num_landmarks num_joint_frames 4"]): Skinned points to be transformed.
-
-    Returns:
-        Float32[ndarray, "... num_landmarks 4"]: Transformed points.
-    """
-
-    trans_expanded: Float32[ndarray, "... 1 num_joint_frames 4 4"] = trans_mats[:, None]
-    skinned_expanded: Float32[ndarray, "... num_landmarks num_joint_frames 4 1"] = skinned_points[..., None]
-    fk_points: Float32[ndarray, "... num_landmarks num_joint_frames 4 1"] = np.matmul(trans_expanded, skinned_expanded)
-    return np.sum(fk_points, axis=2).squeeze(-1)
-
-
 def _get_skinning_weights(
-    bone_indices: Int64[ndarray, "... num_landmarks max_landmark_weights"],
-    bone_weights: Float32[ndarray, "... num_landmarks max_landmark_weights"],
+    bone_indices: Int64[ndarray, "num_landmarks max_landmark_weights"],
+    bone_weights: Float32[ndarray, "num_landmarks max_landmark_weights"],
     n_frames: int,
-) -> Float32[ndarray, "... num_landmarks num_joint_frames"]:
+) -> Float32[ndarray, "num_landmarks num_joint_frames"]:
     """
     Computes skinning weights for the vertices given the bone indices, bone weights,
     and number of transformation frames.
 
     Args:
-        bone_indices (Int64[ndarray, "... num_landmarks max_landmark_weights"]): Indices of bones influencing each vertex.
-        bone_weights (Float32[ndarray, "... num_landmarks max_landmark_weights"]): Weights of bones for each vertex.
+        bone_indices (Int64[ndarray, "num_landmarks max_landmark_weights"]): Indices of bones influencing each vertex.
+        bone_weights (Float32[ndarray, "num_landmarks max_landmark_weights"]): Weights of bones for each vertex.
         n_frames (int): Number of transformation frames.
 
     Returns:
-        Float32[ndarray, "... num_landmarks num_joint_frames"]: Computed skinning weights for each vertex.
+        Float32[ndarray, "num_landmarks num_joint_frames"]: Computed skinning weights for each vertex.
     """
-
-    bone_indices_arr: Int64[ndarray, "n num_landmarks max_landmark_weights"] = np.asarray(bone_indices, dtype=np.int64)
-    bone_weights_arr: Float32[ndarray, "n num_landmarks max_landmark_weights"] = np.asarray(
-        bone_weights, dtype=np.float32
+    n_landmarks: int = bone_indices.shape[0]
+    skin_mat: Float32[ndarray, "num_landmarks num_joint_frames"] = np.zeros(
+        (n_landmarks, n_frames), dtype=bone_weights.dtype
     )
-
-    bs: int = bone_indices_arr.shape[0]
-    n_lms: int = bone_indices_arr.shape[1]
-    flat_idx_offset: Int64[ndarray, "flat_idx"] = np.arange(bs * n_lms, dtype=np.int64) * n_frames
-    flat_idx_offset = flat_idx_offset.reshape(bs, n_lms, 1)
-    bone_flat_idx: Int64[ndarray, "n num_landmarks max_landmark_weights"] = bone_indices_arr + flat_idx_offset
-    skin_mat: Float32[ndarray, "flat_weights"] = np.zeros(bs * n_lms * n_frames, dtype=bone_weights_arr.dtype)
-    non_zero_mask: ndarray = bone_weights_arr != 0
-    skin_mat[bone_flat_idx[non_zero_mask]] = bone_weights_arr[non_zero_mask]
-    return skin_mat.reshape(bs, n_lms, n_frames)
+    landmark_indices: Int64[ndarray, "num_landmarks max_landmark_weights"] = np.broadcast_to(
+        np.arange(n_landmarks, dtype=np.int64)[:, None], bone_indices.shape
+    )
+    non_zero_mask: Bool[ndarray, "num_landmarks max_landmark_weights"] = bone_weights != 0
+    skin_mat[landmark_indices[non_zero_mask], bone_indices[non_zero_mask]] = bone_weights[non_zero_mask]
+    return skin_mat
 
 
 def _hand_skinning_transform(
-    rotation_axis: Float32[ndarray, "... n_joints=22 3"],
-    rest_poses: Float32[ndarray, "... n_joints=22 3"],
-    joint_angles: Float32[ndarray, "... n_joints=22"],
-    wrist_transforms: Float32[ndarray, "... 4 4"],
-) -> Float32[ndarray, "... num_joint_frames 4 4"]:
+    rotation_axis: Float32[ndarray, "batch n_joints=22 3"],
+    rest_poses: Float32[ndarray, "batch n_joints=22 3"],
+    joint_angles: Float32[ndarray, "batch n_joints=22"],
+    wrist_transforms: Float32[ndarray, "batch 4 4"],
+) -> Float32[ndarray, "batch num_joint_frames 4 4"]:
     """
     Computes skinning transformation matrices for a hand model given rotation axes,
     rest poses, joint angles, and wrist transformations.
 
     Args:
-        rotation_axis (Float32[ndarray, "... n_joints=22 3"]): Rotation axes of the joints.
-        rest_poses (Float32[ndarray, "... n_joints=22 3"]): Rest poses of the joints.
-        joint_angles (Float32[ndarray, "... n_joints=22"]): Joint angles.
-        wrist_transforms (Float32[ndarray, "... 4 4"]): Wrist transformations.
+        rotation_axis (Float32[ndarray, "batch n_joints=22 3"]): Rotation axes of the joints.
+        rest_poses (Float32[ndarray, "batch n_joints=22 3"]): Rest poses of the joints.
+        joint_angles (Float32[ndarray, "batch n_joints=22"]): Joint angles.
+        wrist_transforms (Float32[ndarray, "batch 4 4"]): Wrist transformations.
 
     Returns:
-        Float32[ndarray, "... num_joint_frames 4 4"]: Computed skinning transformation matrices.
+        Float32[ndarray, "batch num_joint_frames 4 4"]: Computed skinning transformation matrices.
     """
 
-    transform_mats: list[Float32[ndarray, "... 4 4"]] = [wrist_transforms, wrist_transforms]
+    transform_mats: list[Float32[ndarray, "batch 4 4"]] = [wrist_transforms, wrist_transforms]
     d = DOF_PER_FINGER
 
-    joint_local_xfs: Float32[ndarray, "n 20 4 4"] = _joint_local_transform(
+    joint_local_xfs: Float32[ndarray, "batch 20 4 4"] = _joint_local_transform(
         rotation_axis[:, :20], rest_poses[:, :20], joint_angles[:, :20]
     )
 
@@ -392,115 +367,121 @@ def _hand_skinning_transform(
     return np.concatenate([m[:, None] for m in transform_mats], axis=1)
 
 
-def _get_skinned_vertices(
-    vertices: Float32[ndarray, "... num_landmarks 3"] | Float32[ndarray, "... num_landmarks 4"],
-    weights: Float32[ndarray, "... num_landmarks num_joint_frames"],
-) -> Float32[ndarray, "... num_landmarks num_joint_frames 4"]:
-    """
-    Computes skinned vertices given the original vertices and their corresponding skinning weights.
-
-    Args:
-        vertices (Float32[ndarray, "... num_landmarks 3"] | Float32[ndarray, "... num_landmarks 4"]): Original vertices.
-        weights (Float32[ndarray, "... num_landmarks num_joint_frames"]): Skinning weights for each vertex.
-
-    Returns:
-        Float32[ndarray, "... num_landmarks num_joint_frames 4"]: Skinned vertices.
-    """
-
-    vertices_arr: Float32[ndarray, "n num_landmarks channels"] = np.asarray(vertices, dtype=np.float32)
-    if vertices_arr.shape[-1] == 3:
-        homo: Float32[ndarray, "n num_landmarks 1"] = np.ones(vertices_arr.shape[:-1] + (1,), dtype=vertices_arr.dtype)
-        vertices_arr = np.concatenate([vertices_arr, homo], axis=-1)
-
-    vertices_expanded: Float32[ndarray, "n num_landmarks 1 4"] = vertices_arr[:, :, None]
-    weights_expanded: Float32[ndarray, "n num_landmarks num_joint_frames 1"] = weights[..., None]
-    return vertices_expanded * weights_expanded
-
-
 def _skin_points(
-    joint_rest_positions: Float32[ndarray, "... n_joints=22 3"],
-    joint_rotation_axes: Float32[ndarray, "... n_joints=22 3"],
-    skin_mat: Float32[ndarray, "... num_landmarks num_joint_frames"],
-    joint_angles: Float32[ndarray, "... n_joints=22"],
-    points: Float32[ndarray, "... num_landmarks 3"],
-    wrist_transforms: Float32[ndarray, "... 4 4"],
-) -> Float32[ndarray, "... num_landmarks 3"]:
+    hand_model: HandModelNumpy,
+    skin_mat: Float32[ndarray, "num_points num_joint_frames"],
+    points: Float32[ndarray, "num_points 3"],
+    joint_angles: Float32[ndarray, "*batch n_joints=22"],
+    wrist_transforms: Float32[ndarray, "*#batch 4 4"],
+) -> Float32[ndarray, "*batch num_points 3"]:
     """
     Computes skin points for the given joint and wrist transforms.
 
     Args:
-        joint_rest_positions (Float32[ndarray, "... n_joints=22 3"]): The rest positions of the joints.
-        joint_rotation_axes (Float32[ndarray, "... n_joints=22 3"]): The rotation axes of the joints.
-        skin_mat (Float32[ndarray, "... num_landmarks num_joint_frames"]): Skin matrix.
-        joint_angles (Float32[ndarray, "... n_joints=22"]): The angles of the joints.
-        points (Float32[ndarray, "... num_landmarks 3"]): Points to be skinned.
-        wrist_transforms (Float32[ndarray, "... 4 4"]): Wrist transformations.
+        hand_model (HandModelNumpy): Shared joint rest positions and rotation axes.
+        skin_mat (Float32[ndarray, "num_points num_joint_frames"]): Skin matrix.
+        joint_angles (Float32[ndarray, "*batch n_joints=22"]): The angles of the joints.
+        points (Float32[ndarray, "num_points 3"]): Points to be skinned.
+        wrist_transforms (Float32[ndarray, "*#batch 4 4"]): Wrist transformations.
 
     Returns:
-        Float32[ndarray, "... num_landmarks 3"]: The skinned vectors for the skin points.
+        Float32[ndarray, "*batch num_points 3"]: The skinned vectors for the skin points.
     """
-    joint_angles_arr: Float32[ndarray, "... n_joints=22"] = np.asarray(joint_angles, dtype=np.float32)
-    leading_dims = joint_angles_arr.shape[:-1]
-    numel = int(np.prod(leading_dims)) if leading_dims else 1
+    leading_dims: tuple[int, ...] = tuple(joint_angles.shape[:-1])
+    numel: int = math.prod(leading_dims)
 
-    joint_angles_flat: Float32[ndarray, "batch_flat n_joints=22"] = joint_angles_arr.reshape(numel, -1)
-    wrist_transforms_flat: Float32[ndarray, "batch_flat 4 4"] = np.asarray(wrist_transforms, dtype=np.float32).reshape(
-        numel, 4, 4
-    )
-
-    joint_rest_flat: Float32[ndarray, "batch_flat n_joints=22 3"] = joint_rest_positions.reshape(numel, -1, 3)
-    joint_axis_flat: Float32[ndarray, "batch_flat n_joints=22 3"] = joint_rotation_axes.reshape(numel, -1, 3)
-    points_flat: Float32[ndarray, "batch_flat num_landmarks 3"] = points.reshape(numel, -1, 3)
-
+    # Joint transforms require batched axes and pivots; points and weights stay shared.
+    joint_rest_flat: Float32[ndarray, "batch_flat 22 3"] = np.broadcast_to(hand_model.joint_rest_positions, (*leading_dims, 22, 3)).reshape(numel, 22, 3)
+    joint_axis_flat: Float32[ndarray, "batch_flat 22 3"] = np.broadcast_to(hand_model.joint_rotation_axes, (*leading_dims, 22, 3)).reshape(numel, 22, 3)
+    joint_angles_flat: Float32[ndarray, "batch_flat 22"] = joint_angles.reshape(numel, 22)
+    wrist_transforms_flat: Float32[ndarray, "batch_flat 4 4"] = np.broadcast_to(wrist_transforms, (*leading_dims, 4, 4)).reshape(numel, 4, 4)
     skin_xfs: Float32[ndarray, "batch_flat num_joint_frames 4 4"] = _hand_skinning_transform(
-        joint_axis_flat, joint_rest_flat, joint_angles_flat, wrist_transforms_flat
+        rotation_axis=joint_axis_flat,
+        rest_poses=joint_rest_flat,
+        joint_angles=joint_angles_flat,
+        wrist_transforms=wrist_transforms_flat,
     )
-
-    verts: Float32[ndarray, "batch_flat num_landmarks num_joint_frames 4"] = _get_skinned_vertices(
-        points_flat, skin_mat
+    points_homogeneous: Float32[ndarray, "num_points 4"] = np.concatenate(
+        [points, np.ones((points.shape[0], 1), dtype=points.dtype)], axis=-1
     )
-    skinned_vecs: Float32[ndarray, "batch_flat num_landmarks 3"] = _lbs(skin_xfs, verts)[..., :3]
-
-    if leading_dims:
-        return skinned_vecs.reshape(*leading_dims, skinned_vecs.shape[-2], skinned_vecs.shape[-1])
-    return skinned_vecs.reshape(skinned_vecs.shape[-2], skinned_vecs.shape[-1])
+    blended: Float32[ndarray, "batch_flat num_points 4 4"] = np.einsum("vf,nfij->nvij", skin_mat, skin_xfs)
+    out: Float32[ndarray, "batch_flat num_points 3"] = np.einsum("nvij,vj->nvi", blended, points_homogeneous)[..., :3]
+    return out.reshape(*leading_dims, points.shape[0], 3)
 
 
 def skin_landmarks(
     hand_model: HandModelNumpy,
-    joint_angles: Float32[ndarray, "... n_joints=22"],
-    wrist_transforms: Float32[ndarray, "... 4 4"],
-) -> Float32[ndarray, "... num_landmarks 3"]:
+    joint_angles: Float32[ndarray, "*batch n_joints=22"],
+    wrist_transforms: Float32[ndarray, "*batch 4 4"],
+) -> Float32[ndarray, "*batch num_landmarks 3"]:
     """
     Computes the skin landmarks for a given hand model, joint angles, and wrist transforms.
 
+    Use ``wrist_for_hand`` to prepare wrist transforms for either hand.
+
     Args:
         hand_model (HandModel): A model representing a hand.
-        joint_angles (Float32[ndarray, "... n_joints=22"]): The angles of the joints.
-        wrist_transforms (Float32[ndarray, "... 4 4"]): Wrist transformations.
+        joint_angles (Float32[ndarray, "*batch n_joints=22"]): The angles of the joints.
+        wrist_transforms (Float32[ndarray, "*batch 4 4"]): Wrist transformations.
 
     Returns:
-        Float32[ndarray, "... num_landmarks 3"]: The skinned landmarks.
+        Float32[ndarray, "*batch num_landmarks 3"]: The skinned landmarks.
     """
 
-    leading_dims = joint_angles.shape[:-1]
-    numel: int = int(np.prod(leading_dims)) if leading_dims else 1
-    max_weights = hand_model.landmark_rest_bone_indices.shape[-1]
-    skin_mat = _get_skinning_weights(
-        hand_model.landmark_rest_bone_indices.reshape(numel, -1, max_weights),
-        hand_model.landmark_rest_bone_weights.reshape(numel, -1, max_weights),
-        NUM_JOINT_FRAMES,
-    )
-    skinned: Float32[ndarray, "... num_landmarks 3"] = _skin_points(
-        hand_model.joint_rest_positions,
-        hand_model.joint_rotation_axes,
-        skin_mat,
-        joint_angles,
+    return _skin_points(
+        hand_model,
+        _get_skinning_weights(
+            hand_model.landmark_rest_bone_indices,
+            hand_model.landmark_rest_bone_weights,
+            NUM_JOINT_FRAMES,
+        ),
         hand_model.landmark_rest_positions,
+        joint_angles,
         wrist_transforms,
     )
 
-    return skinned
+
+def skin_mesh(
+    hand_model: HandModelNumpy,
+    joint_angles: Float32[ndarray, "*batch n_joints=22"],
+    wrist_transforms: Float32[ndarray, "*batch 4 4"],
+) -> Float32[ndarray, "*batch num_mesh_vertices 3"]:
+    """Skin a shared hand mesh over the leading pose batch dimensions.
+
+    Coordinates retain the model's units. Use ``wrist_for_hand`` to prepare
+    wrist transforms for either hand.
+
+    Args:
+        hand_model (HandModelNumpy): Left-hand rest mesh and dense blend weights.
+        joint_angles (Float32[ndarray, "*batch n_joints=22"]): Joint angles in radians.
+        wrist_transforms (Float32[ndarray, "*batch 4 4"]): World-from-wrist transforms.
+
+    Returns:
+        Float32[ndarray, "*batch num_mesh_vertices 3"]: Mesh vertices in the world frame.
+    """
+    return _skin_points(
+        hand_model,
+        hand_model.dense_bone_weights,
+        hand_model.mesh_vertices,
+        joint_angles,
+        wrist_transforms,
+    )
+
+
+def wrist_for_hand(wrist_transforms: Float32[ndarray, "*batch 4 4"], hand_idx: int) -> Float32[ndarray, "*batch 4 4"]:
+    """Copy wrist transforms and mirror right hands for the left-hand model.
+
+    Args:
+        wrist_transforms (Float32[ndarray, "*batch 4 4"]): World-from-wrist transforms.
+        hand_idx (int): LEFT_HAND_INDEX or RIGHT_HAND_INDEX.
+
+    Returns:
+        Float32[ndarray, "*batch 4 4"]: Independent transforms ready for skinning.
+    """
+    wrist: Float32[ndarray, "*batch 4 4"] = wrist_transforms.copy()
+    if hand_idx == RIGHT_HAND_INDEX:
+        wrist[..., :, 0] *= -1
+    return wrist
 
 
 def landmarks_from_hand_pose(
@@ -518,11 +499,8 @@ def landmarks_from_hand_pose(
         Float32[ndarray, "num_landmarks 3"]: The 3D landmarks in the world space.
     """
 
-    xf: Float32[ndarray, "4 4"] = hand_pose.wrist_xform.copy()
-    # This function expects the user hand model to be a left hand.
-    if hand_idx == RIGHT_HAND_INDEX:
-        xf[:, 0] *= -1
-    landmarks: Float32[ndarray, "... num_landmarks 3"] = skin_landmarks(
+    xf: Float32[ndarray, "4 4"] = wrist_for_hand(hand_pose.wrist_xform, hand_idx)
+    landmarks: Float32[ndarray, "num_landmarks 3"] = skin_landmarks(
         hand_model,
         hand_pose.joint_angles,
         xf,
