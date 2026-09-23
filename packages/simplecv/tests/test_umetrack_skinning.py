@@ -24,10 +24,10 @@ Backend: TypeAlias = Literal["numpy", "torch"]
 
 def _random_poses(
     seed: int, batch_shape: tuple[int, ...]
-) -> tuple[Float32[ndarray, "... 22"], Float32[ndarray, "... 4 4"]]:
+) -> tuple[Float32[ndarray, "*batch 22"], Float32[ndarray, "*batch 4 4"]]:
     rng: np.random.Generator = np.random.default_rng(seed)
-    angles: Float32[ndarray, "... 22"] = rng.uniform(-0.8, 0.8, (*batch_shape, 22)).astype(np.float32)
-    wrists: Float32[ndarray, "... 4 4"] = np.broadcast_to(np.eye(4, dtype=np.float32), (*batch_shape, 4, 4)).copy()
+    angles: Float32[ndarray, "*batch 22"] = rng.uniform(-0.8, 0.8, (*batch_shape, 22)).astype(np.float32)
+    wrists: Float32[ndarray, "*batch 4 4"] = np.broadcast_to(np.eye(4, dtype=np.float32), (*batch_shape, 4, 4)).copy()
     wrists[..., :3, :3] = numpy_model.so3_exp_map(rng.normal(size=(math.prod(batch_shape), 3)).astype(np.float32)).reshape(*batch_shape, 3, 3)
     wrists[..., :3, 3] = rng.normal(size=(*batch_shape, 3)).astype(np.float32)
     return angles, wrists
@@ -41,17 +41,17 @@ def _random_poses(
 def test_batch_matches_frames(
     batch_shape: tuple[int, ...],
     numpy_fn: Callable[
-        [numpy_model.HandModelNumpy, Float32[ndarray, "... 22"], Float32[ndarray, "... 4 4"]],
-        Float32[ndarray, "... points 3"],
+        [numpy_model.HandModelNumpy, Float32[ndarray, "*batch 22"], Float32[ndarray, "*batch 4 4"]],
+        Float32[ndarray, "*batch points 3"],
     ],
     torch_fn: Callable[
-        [torch_model.HandModelTorch, Float32[torch.Tensor, "... 22"], Float32[torch.Tensor, "... 4 4"]],
-        Float32[torch.Tensor, "... points 3"],
+        [torch_model.HandModelTorch, Float32[torch.Tensor, "*batch 22"], Float32[torch.Tensor, "*batch 4 4"]],
+        Float32[torch.Tensor, "*batch points 3"],
     ],
 ) -> None:
     hand_model: numpy_model.HandModelNumpy = synthetic_hand_model()
     angles, wrists = _random_poses(7, batch_shape)
-    expected: Float32[ndarray, "... points 3"] = np.stack(
+    expected: Float32[ndarray, "*batch points 3"] = np.stack(
         [numpy_fn(hand_model, angle, wrist) for angle, wrist in zip(angles.reshape(-1, 22), wrists.reshape(-1, 4, 4), strict=True)]
     ).reshape(*batch_shape, -1, 3)
     for actual in (

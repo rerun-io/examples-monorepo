@@ -258,7 +258,7 @@ def _finger_fk(
     joint_local_xfs_arr: Float32[ndarray, "batch dof_per_finger 4 4"] = np.asarray(joint_local_xfs, dtype=np.float32)
     parent_transform_arr: Float32[ndarray, "batch 4 4"] = np.asarray(parent_transform, dtype=np.float32)
 
-    transform_mats: list[Float32[ndarray, "n 4 4"]] = [parent_transform_arr]
+    transform_mats: list[Float32[ndarray, "batch 4 4"]] = [parent_transform_arr]
     for i in range(DOF_PER_FINGER):
         transform_mats.append(np.matmul(transform_mats[-1], joint_local_xfs_arr[:, i]))
     return transform_mats[2:]
@@ -281,9 +281,9 @@ def _joint_local_transform(
     Returns:
         Float32[ndarray, "batch 20 4 4"]: Computed local transformation matrix.
     """
-    rotation_axis_arr: Float32[ndarray, "n 20 3"] = np.asarray(rotation_axis, dtype=np.float32)
-    rest_pose_arr: Float32[ndarray, "n 20 3"] = np.asarray(rest_pose, dtype=np.float32)
-    joint_angles_arr: Float32[ndarray, "n 20"] = np.asarray(joint_angles, dtype=np.float32)
+    rotation_axis_arr: Float32[ndarray, "batch 20 3"] = np.asarray(rotation_axis, dtype=np.float32)
+    rest_pose_arr: Float32[ndarray, "batch 20 3"] = np.asarray(rest_pose, dtype=np.float32)
+    joint_angles_arr: Float32[ndarray, "batch 20"] = np.asarray(joint_angles, dtype=np.float32)
 
     rotation_axis_flat: Float32[ndarray, "n_axes 3"] = rotation_axis_arr.reshape(-1, 3)
     rest_pose_flat: Float32[ndarray, "n_axes 3"] = rest_pose_arr.reshape(-1, 3)
@@ -355,7 +355,7 @@ def _hand_skinning_transform(
     transform_mats: list[Float32[ndarray, "batch 4 4"]] = [wrist_transforms, wrist_transforms]
     d = DOF_PER_FINGER
 
-    joint_local_xfs: Float32[ndarray, "n 20 4 4"] = _joint_local_transform(
+    joint_local_xfs: Float32[ndarray, "batch 20 4 4"] = _joint_local_transform(
         rotation_axis[:, :20], rest_poses[:, :20], joint_angles[:, :20]
     )
 
@@ -371,21 +371,21 @@ def _skin_points(
     hand_model: HandModelNumpy,
     skin_mat: Float32[ndarray, "num_points num_joint_frames"],
     points: Float32[ndarray, "num_points 3"],
-    joint_angles: Float32[ndarray, "... n_joints=22"],
-    wrist_transforms: Float32[ndarray, "... 4 4"],
-) -> Float32[ndarray, "... num_points 3"]:
+    joint_angles: Float32[ndarray, "*batch n_joints=22"],
+    wrist_transforms: Float32[ndarray, "*#batch 4 4"],
+) -> Float32[ndarray, "*batch num_points 3"]:
     """
     Computes skin points for the given joint and wrist transforms.
 
     Args:
         hand_model (HandModelNumpy): Shared joint rest positions and rotation axes.
         skin_mat (Float32[ndarray, "num_points num_joint_frames"]): Skin matrix.
-        joint_angles (Float32[ndarray, "... n_joints=22"]): The angles of the joints.
+        joint_angles (Float32[ndarray, "*batch n_joints=22"]): The angles of the joints.
         points (Float32[ndarray, "num_points 3"]): Points to be skinned.
-        wrist_transforms (Float32[ndarray, "... 4 4"]): Wrist transformations.
+        wrist_transforms (Float32[ndarray, "*#batch 4 4"]): Wrist transformations.
 
     Returns:
-        Float32[ndarray, "... num_points 3"]: The skinned vectors for the skin points.
+        Float32[ndarray, "*batch num_points 3"]: The skinned vectors for the skin points.
     """
     leading_dims: tuple[int, ...] = tuple(joint_angles.shape[:-1])
     numel: int = math.prod(leading_dims)
@@ -411,9 +411,9 @@ def _skin_points(
 
 def skin_landmarks(
     hand_model: HandModelNumpy,
-    joint_angles: Float32[ndarray, "... n_joints=22"],
-    wrist_transforms: Float32[ndarray, "... 4 4"],
-) -> Float32[ndarray, "... num_landmarks 3"]:
+    joint_angles: Float32[ndarray, "*batch n_joints=22"],
+    wrist_transforms: Float32[ndarray, "*batch 4 4"],
+) -> Float32[ndarray, "*batch num_landmarks 3"]:
     """
     Computes the skin landmarks for a given hand model, joint angles, and wrist transforms.
 
@@ -421,11 +421,11 @@ def skin_landmarks(
 
     Args:
         hand_model (HandModel): A model representing a hand.
-        joint_angles (Float32[ndarray, "... n_joints=22"]): The angles of the joints.
-        wrist_transforms (Float32[ndarray, "... 4 4"]): Wrist transformations.
+        joint_angles (Float32[ndarray, "*batch n_joints=22"]): The angles of the joints.
+        wrist_transforms (Float32[ndarray, "*batch 4 4"]): Wrist transformations.
 
     Returns:
-        Float32[ndarray, "... num_landmarks 3"]: The skinned landmarks.
+        Float32[ndarray, "*batch num_landmarks 3"]: The skinned landmarks.
     """
 
     return _skin_points(
@@ -443,9 +443,9 @@ def skin_landmarks(
 
 def skin_mesh(
     hand_model: HandModelNumpy,
-    joint_angles: Float32[ndarray, "... n_joints=22"],
-    wrist_transforms: Float32[ndarray, "... 4 4"],
-) -> Float32[ndarray, "... num_mesh_vertices 3"]:
+    joint_angles: Float32[ndarray, "*batch n_joints=22"],
+    wrist_transforms: Float32[ndarray, "*batch 4 4"],
+) -> Float32[ndarray, "*batch num_mesh_vertices 3"]:
     """Skin a shared hand mesh over the leading pose batch dimensions.
 
     Coordinates retain the model's units. Use ``wrist_for_hand`` to prepare
@@ -453,11 +453,11 @@ def skin_mesh(
 
     Args:
         hand_model (HandModelNumpy): Left-hand rest mesh and dense blend weights.
-        joint_angles (Float32[ndarray, "... n_joints=22"]): Joint angles in radians.
-        wrist_transforms (Float32[ndarray, "... 4 4"]): World-from-wrist transforms.
+        joint_angles (Float32[ndarray, "*batch n_joints=22"]): Joint angles in radians.
+        wrist_transforms (Float32[ndarray, "*batch 4 4"]): World-from-wrist transforms.
 
     Returns:
-        Float32[ndarray, "... num_mesh_vertices 3"]: Mesh vertices in the world frame.
+        Float32[ndarray, "*batch num_mesh_vertices 3"]: Mesh vertices in the world frame.
     """
     return _skin_points(
         hand_model,
@@ -468,17 +468,17 @@ def skin_mesh(
     )
 
 
-def wrist_for_hand(wrist_transforms: Float32[ndarray, "... 4 4"], hand_idx: int) -> Float32[ndarray, "... 4 4"]:
+def wrist_for_hand(wrist_transforms: Float32[ndarray, "*batch 4 4"], hand_idx: int) -> Float32[ndarray, "*batch 4 4"]:
     """Copy wrist transforms and mirror right hands for the left-hand model.
 
     Args:
-        wrist_transforms (Float32[ndarray, "... 4 4"]): World-from-wrist transforms.
+        wrist_transforms (Float32[ndarray, "*batch 4 4"]): World-from-wrist transforms.
         hand_idx (int): LEFT_HAND_INDEX or RIGHT_HAND_INDEX.
 
     Returns:
-        Float32[ndarray, "... 4 4"]: Independent transforms ready for skinning.
+        Float32[ndarray, "*batch 4 4"]: Independent transforms ready for skinning.
     """
-    wrist: Float32[ndarray, "... 4 4"] = wrist_transforms.copy()
+    wrist: Float32[ndarray, "*batch 4 4"] = wrist_transforms.copy()
     if hand_idx == RIGHT_HAND_INDEX:
         wrist[..., :, 0] *= -1
     return wrist
@@ -500,7 +500,7 @@ def landmarks_from_hand_pose(
     """
 
     xf: Float32[ndarray, "4 4"] = wrist_for_hand(hand_pose.wrist_xform, hand_idx)
-    landmarks: Float32[ndarray, "... num_landmarks 3"] = skin_landmarks(
+    landmarks: Float32[ndarray, "num_landmarks 3"] = skin_landmarks(
         hand_model,
         hand_pose.joint_angles,
         xf,
