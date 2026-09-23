@@ -281,29 +281,22 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
         return targets[paths.BASE_LAYER]
 
     def default_blueprint(self) -> rrb.Blueprint:
-        ego: list[rrb.Spatial2DView] = []
-        exo: list[rrb.Spatial2DView] = []
-        for camera in CAMERAS:
-            view: rrb.Spatial2DView = blueprints.camera_view(camera.source_name, camera.rig, camera.cam, contents=pane_contents(camera))
-            (ego if camera in HEADSET_CAMERAS else exo).append(view)
-        return rrb.Blueprint(
-            rrb.Horizontal(
-                rrb.Vertical(
-                    rrb.Spatial3DView(
-                        name="Back rig frame",
-                        origin="/world",
-                        contents=world_contents(),
-                        eye_controls=blueprints.eye_controls_from_pose((1.4, 0.7, 1.1), (0.25, -0.2, 0.1), (0.0, 1.0, 0.0)),
-                    ),
-                    rrb.Horizontal(*ego),
-                    rrb.TextDocumentView(name="Instruction", origin=schema.instruction_path(), contents=[schema.instruction_path()]),
-                    row_shares=[3, 2, 1],
-                ),
-                rrb.Grid(*exo, grid_columns=2),
-                column_shares=[3, 2],
+        panes: dict[Show3dCamera, rrb.Spatial2DView] = {
+            camera: blueprints.camera_view(
+                schema.cam_path(camera.rig, camera.cam).removeprefix("/world/"), camera.rig, camera.cam, contents=pane_contents(camera)
+            )
+            for camera in CAMERAS
+        }
+        return blueprints.exoego_blueprint(
+            rrb.Spatial3DView(
+                name="Back rig frame",
+                origin="/world",
+                contents=world_contents(),
+                eye_controls=blueprints.eye_controls_from_pose((1.4, 0.7, 1.1), (0.25, -0.2, 0.1), (0.0, 1.0, 0.0)),
             ),
-            rrb.TimePanel(timeline=schema.TIMELINE),
-            collapse_panels=True,
+            ego_panes=[panes[camera] for camera in HEADSET_CAMERAS],
+            exo_panes=[pane for camera, pane in panes.items() if camera not in HEADSET_CAMERAS],
+            instruction=rrb.TextDocumentView(name="Instruction", origin=schema.instruction_path(), contents=[schema.instruction_path()]),
         )
 
     def table_blueprint(self) -> rrb.Blueprint:

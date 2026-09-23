@@ -321,11 +321,17 @@ def test_hand_reader_rejects_census_or_clock_mismatch(tmp_path: Path, fault: str
         read_hand_frames(source, scene)
 
 
-def test_default_blueprint_includes_instruction_below_ego_panes() -> None:
+def test_default_blueprint_is_the_exoego_layout_with_the_instruction() -> None:
     views: list[rrb.View] = blueprint_views(Show3dConfig().setup().default_blueprint())
-    assert [view.name for view in views[:4]] == ["Back rig frame", "headset0", "headset1", "Instruction"]
-    assert isinstance(views[3], rrb.TextDocumentView)
-    assert views[3].origin == schema.instruction_path()
+    assert [view.name for view in views] == [
+        "Back rig frame",
+        "Instruction",
+        "rig_01/cam_00",
+        "rig_01/cam_01",
+        *(f"rig_00/cam_{cam:02d}" for cam in range(8)),
+    ]
+    assert isinstance(views[1], rrb.TextDocumentView)
+    assert views[1].origin == schema.instruction_path()
 
 
 @pytest.mark.parametrize(("scene_id", "alias", "action"), [("none_clap-hands_a702", "none", "clap-hands"), ("toy_pick_up_abcd", "toy", "pick_up")])

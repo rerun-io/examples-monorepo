@@ -298,8 +298,9 @@ it is not always behind both cameras. Source poses remain unchanged.
 rig0…rig7 at fixed `cam_00`…`cam_07` indices; `rig_01` holds the two headset
 cameras. Distances are metres. Every temporal column has `video_time` (source
 seconds minus the first timestamp) and the upstream `frame_index` sequence.
-The default layout shows 3D, both headset views, and the back-rig grid with
-face boxes hidden; table cards decode headset0 only.
+The default layout is the shared exo/ego layout (see *Blueprints*): 3D with the
+instruction under it, both headset views in the right column, and the eight back-rig
+cameras along the bottom, face boxes hidden; table cards decode headset0 only.
 
 Video uses ffmpeg file-input grayscale decode → AV1 NVENC at 60 fps, GOP 60,
 no B-frames, then Mp4Reader remux. CQ 36 was chosen from the
@@ -328,7 +329,7 @@ layer-major output tree: `base/` and its sibling `gt/`), `schema.py` (the
 `logging_toolkit.py` (the shared rig-node, video-stream, camera, IMU,
 magnetometer and pose-track writers), `video_encoding.py` (the pipe-fed AV1
 encoder, re-exported through `logging_toolkit`), `blueprints.py` (the
-single-rig viewer layout every dataset builds from), `archives.py` (reading
+single-rig and exo/ego viewer layouts every dataset builds from), `archives.py` (reading
 members out of a plain zip or an Info-ZIP volume set), `basalt.py` (basalt's
 `calibration.json` as one validated `CalibratedCamera` per camera: model,
 extrinsics, resolution, and the follow frame derived from them),
@@ -404,6 +405,13 @@ at `setup()`):
   holds exactly one per dataset, so one dataset = one camera layout.
 - **segment table** — the preview card the table renders for every visible row
   at once, so it decodes exactly one video stream.
+
+A multi-camera exo/ego dataset builds its default from `blueprints.exoego_blueprint`,
+simplecv's `view_exoego` arrangement: 3D top left (a task instruction, if the dataset
+has one, in a strip under it), worn cameras in a column on the right, static cameras
+in one strip along the bottom. Past `EXO_PANES_PER_TAB` (9) static cameras the strip
+continues in further tabs, filled in camera order. Panes are titled `rig_NN/cam_MM`,
+as in the entity tree.
 
 `register` adds them once and never replaces them (each registration is a new
 entry in the viewer's blueprint list). To refresh: delete the dataset, then
