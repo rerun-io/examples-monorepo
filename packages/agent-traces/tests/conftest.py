@@ -22,7 +22,7 @@ class SessionBuilder:
         target: Path = path or self.path
         target.parent.mkdir(parents=True, exist_ok=True)
         stamp: datetime = datetime(2026, 9, 18, 20, tzinfo=UTC) + timedelta(seconds=self.index)
-        record: dict[str, object] = {"type": kind, "timestamp": stamp.isoformat(), **fields}
+        record: dict[str, object] = {"type": kind, "timestamp": stamp.isoformat(), "uuid": f"record-{self.index}", **fields}
         with target.open("ab") as stream:
             stream.write(orjson.dumps(record) + b"\n")
         self.index += 1

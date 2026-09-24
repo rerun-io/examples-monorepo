@@ -3,7 +3,7 @@
 import os
 import socket
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Literal
 
@@ -25,7 +25,6 @@ from agent_traces.events import (
     ToolCall,
     ToolResult,
     UsageSample,
-    neutral_records,
 )
 from agent_traces.turns import Turn, aggregate_turns
 
@@ -98,7 +97,7 @@ def write_session_rrd(session: Session, out: Path, *, host: str | None = None) -
     for agent_id, records in {"": session.main, **session.subagents}.items():
         prefix: str = f"agents/{agent_id}/" if agent_id else ""
         timed: TimedRecord
-        for timed in neutral_records(records):
+        for timed in records:
             payload: Payload = timed.payload
             values: dict[str, Scalar] = {"file_index": timed.file_index, **timed.values}
             if isinstance(payload, (Prompt, AssistantText, Thinking)):
@@ -112,9 +111,11 @@ def write_session_rrd(session: Session, out: Path, *, host: str | None = None) -
                 )
             elif isinstance(payload, Lifecycle) and payload.name:
                 texts.setdefault(f"{prefix}lifecycle/{payload.name}", []).append(TextRow(timed.timestamp_ns, payload.text, payload.level, values))
-            elif isinstance(payload, UsageSample) and payload.emit:
-                for name, value in payload.counters.items():
-                    scalars.setdefault(f"{prefix}usage/{name}", []).append(ScalarRow(timed.timestamp_ns, float(value), timed.file_index))
+            elif isinstance(payload, UsageSample):
+                for counter in fields(payload.usage):
+                    value: int | None = getattr(payload.usage, counter.name)
+                    if value is not None:
+                        scalars.setdefault(f"{prefix}usage/{counter.name}", []).append(ScalarRow(timed.timestamp_ns, float(value), timed.file_index))
             elif isinstance(payload, ToolCall):
                 values.update(tool_use_id=payload.call_id, phase="call", input_json=payload.input_json, kind=payload.kind)
                 texts.setdefault(f"{prefix}tools/{payload.name}", []).append(
@@ -158,17 +159,17 @@ def write_session_rrd(session: Session, out: Path, *, host: str | None = None) -
                     "n_tool_calls": turn.n_tool_calls,
                     "n_assistant_messages": turn.n_assistant_messages,
                     "n_images": turn.n_images,
-                    "input_tokens": turn.input_tokens,
-                    "output_tokens": turn.output_tokens,
-                    "cache_read_tokens": turn.cache_read_tokens,
-                    "cache_creation_tokens": turn.cache_creation_tokens,
-                    "thinking_tokens": turn.thinking_tokens,
+                    "input_tokens": (turn.usage.input_tokens or 0),
+                    "output_tokens": (turn.usage.output_tokens or 0),
+                    "cache_read_tokens": (turn.usage.cache_read_tokens or 0),
+                    "cache_creation_tokens": (turn.usage.cache_creation_tokens or 0),
+                    "thinking_tokens": (turn.usage.thinking_tokens or 0),
                 },
                 color=ROLE_COLORS["user"],
             )
         )
         scalars.setdefault("turns/elapsed_ms", []).append(ScalarRow(turn.timestamp_ns, turn.elapsed_ms, turn.file_index))
-        scalars.setdefault("turns/output_tokens", []).append(ScalarRow(turn.timestamp_ns, float(turn.output_tokens), turn.file_index))
+        scalars.setdefault("turns/output_tokens", []).append(ScalarRow(turn.timestamp_ns, float(turn.usage.output_tokens or 0), turn.file_index))
         scalars.setdefault("turns/tool_calls", []).append(ScalarRow(turn.timestamp_ns, float(turn.n_tool_calls), turn.file_index))
     out.parent.mkdir(parents=True, exist_ok=True)
     recording: rr.RecordingStream = rr.RecordingStream("agent_traces", recording_id=session.session_id)

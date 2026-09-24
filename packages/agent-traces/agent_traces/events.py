@@ -1,9 +1,8 @@
 """Provider-neutral events at the parser, turn, and recording boundaries."""
 
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol, TypeAlias, runtime_checkable
+from typing import Literal, TypeAlias
 
 Scalar: TypeAlias = str | int | float | bool
 ToolKind: TypeAlias = Literal["shell", "file_read", "file_edit", "web_search", "mcp", "subagent", "plan", "image", "other"]
@@ -15,7 +14,7 @@ class Prompt:
 
     text: str
     """Full text."""
-    starts_turn: bool = True
+    human: bool = True
     """Whether this block is part of a human prompt."""
     compaction: bool = False
     """Whether this text is a compaction summary."""
@@ -91,10 +90,10 @@ class Image:
 
 @dataclass(frozen=True, slots=True)
 class Lifecycle:
-    """A lifecycle row or a silent source-record marker."""
+    """A visible lifecycle row."""
 
-    name: str = ""
-    """Entity suffix; empty markers preserve file-order timing without a row."""
+    name: str
+    """Entity suffix."""
     text: str = ""
     """Display text."""
     level: str = "INFO"
@@ -102,17 +101,31 @@ class Lifecycle:
 
 
 @dataclass(frozen=True, slots=True)
-class UsageSample:
-    """Per-response counters, with parser-controlled deduplication."""
+class Usage:
+    """Provider token counters; None means the provider does not report a field."""
 
-    counters: dict[str, int]
-    """Counters keyed by shared usage entity suffix."""
-    response_id: str
-    """Response identifier used for turn-local deduplication."""
-    count_message: bool = True
-    """Whether this sample represents an assistant message (Claude)."""
-    emit: bool = True
-    """Whether this response is new across the whole transcript."""
+    input_tokens: int | None = None
+    """Input tokens."""
+    output_tokens: int | None = None
+    """Output tokens."""
+    cache_read_tokens: int | None = None
+    """Tokens read from cache."""
+    cache_creation_tokens: int | None = None
+    """Tokens written to cache."""
+    thinking_tokens: int | None = None
+    """Reasoning output tokens."""
+    cache_creation_5m_tokens: int | None = None
+    """Tokens written to the five-minute cache."""
+    cache_creation_1h_tokens: int | None = None
+    """Tokens written to the one-hour cache."""
+
+
+@dataclass(frozen=True, slots=True)
+class UsageSample:
+    """Per-response counters, deduplicated by the parser."""
+
+    usage: Usage
+    """Reported counters."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,25 +155,14 @@ class TimedRecord:
     """Flat recording metadata."""
     turn_id: str = ""
     """Explicit turn identifier, when supplied by the provider."""
+    prompt_id: str = ""
+    """Prompt identity carried by a turn start."""
+    message_id: str = ""
+    """Assistant message identity, independent of token usage."""
     model: str = ""
     """Model in force."""
     effort: str = ""
     """Reasoning effort in force."""
-
-
-@runtime_checkable
-class EventGroup(Protocol):
-    """Compatibility boundary for a source record producing several events."""
-
-    @property
-    def events(self) -> list[TimedRecord]:
-        """Neutral events interpreted by the parser."""
-        ...
-
-
-def neutral_records(records: Sequence[TimedRecord | EventGroup]) -> list[TimedRecord]:
-    """Flatten source groups without interpreting provider records."""
-    return [event for record in records for event in ([record] if isinstance(record, TimedRecord) else record.events)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,9 +175,9 @@ class Session:
     """Home name without its leading dot."""
     source_path: Path
     """Main transcript path."""
-    main: Sequence[TimedRecord | EventGroup]
-    """Main events or parser-owned source groups."""
-    subagents: Mapping[str, Sequence[TimedRecord | EventGroup]]
+    main: list[TimedRecord]
+    """Main neutral events."""
+    subagents: dict[str, list[TimedRecord]]
     """Child events keyed by thread identifier."""
     skipped: dict[str, int]
     """Omitted records by reason."""

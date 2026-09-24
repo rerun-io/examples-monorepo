@@ -430,3 +430,35 @@ def test_tool_elapsed_comes_from_the_raw_call_output_span(rollout_builder: Rollo
                          )
     entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "elapsed.rrd"))
     assert entities["/tools/elapsed_ms/exec"]["Scalars:scalars"].to_pylist() == [[2000.0]]
+
+
+def test_message_identity_and_late_usage_across_turns(rollout_builder: RolloutBuilder, tmp_path: Path) -> None:
+    """Repeated message IDs count per turn while response usage counts per transcript."""
+    from agent_traces.codex import parse_rollout
+    from agent_traces.events import AssistantText, UsageSample
+    from agent_traces.rerun_log import write_session_rrd
+    from agent_traces.turns import aggregate_turns
+
+    rollout_builder.meta()
+    for turn in ["one", "two"]:
+        rollout_builder.add("event_msg", type="task_started", turn_id=turn)
+        rollout_builder.item("UserMessage", turn_id=turn, id="human", content=[{"type": "text", "text": turn}])
+        for _ in range(2):
+            rollout_builder.item("AgentMessage", turn_id=turn, id="message", content=[{"type": "text", "text": "reply"}])
+        rollout_builder.item("AgentMessage", turn_id=turn, content=[{"type": "text", "text": "no identity"}])
+        rollout_builder.add("event_msg", type="task_complete", turn_id=turn, duration_ms=125)
+        rollout_builder.add("token_usage_record", turn_id=turn, response_id="shared", usage={"input_tokens": 7, "output_tokens": 3})
+    session = parse_rollout(rollout_builder.path)
+    assert [event.message_id for event in session.main if isinstance(event.payload, AssistantText)] == ["message", "message", "", "message", "message", ""]
+    samples: list[UsageSample] = [event.payload for event in session.main if isinstance(event.payload, UsageSample)]
+    assert len(samples) == 1
+    assert samples[0].usage.cache_creation_5m_tokens is None
+    assert samples[0].usage.cache_creation_1h_tokens is None
+    turns = aggregate_turns(session.main)
+    assert [turn.n_assistant_messages for turn in turns] == [1, 1]
+    assert [turn.elapsed_ms for turn in turns] == [125.0, 125.0]
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(session, tmp_path / "identities.rrd"))
+    assert entities["/turns"]["input_tokens"].to_pylist() == [[7], [0]]
+    assert entities["/usage/input_tokens"]["Scalars:scalars"].to_pylist() == [[7.0]]
+    assert "/usage/cache_creation_5m_tokens" not in entities
+    assert "/usage/cache_creation_1h_tokens" not in entities

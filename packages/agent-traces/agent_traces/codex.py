@@ -6,7 +6,7 @@ import hashlib
 import mimetypes
 import re
 from collections import defaultdict
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TypeAlias
@@ -96,7 +96,7 @@ def parse_file(path: Path) -> ev.Session:
     completed_items: int = 0
     has_usage_records: bool = False
     seen_responses: set[str] = set()
-    seen_legacy: set[tuple[str, tuple[int, ...]]] = set()
+    seen_legacy: set[tuple[str, ev.Usage]] = set()
     legacy_indices: set[int] = set()
     total: cr.TokenUsage = cr.TokenUsage()
     raw_calls: list[RawCall] = []
@@ -152,7 +152,7 @@ def parse_file(path: Path) -> ev.Session:
                     seen_responses.add(payload.response_id)
                     events.append(
                         ev.TimedRecord(
-                            ev.UsageSample(usage_counters(payload.usage), payload.response_id, count_message=False),
+                            ev.UsageSample(usage_counters(payload.usage)),
                             source.timestamp_ns,
                             source.file_index,
                             turn_id=payload.turn_id or turn_id,
@@ -179,14 +179,15 @@ def parse_file(path: Path) -> ev.Session:
                     effort = payload.thread_settings.reasoning_effort or ""
                 event: ev.Payload | None = None
                 values: dict[str, ev.Scalar] = {}
+                message_id: str = ""
                 timestamp: int = source.timestamp_ns
                 if payload.type == "token_count" and payload.info is not None and payload.info.last_token_usage is not None:
-                    counters: dict[str, int] = usage_counters(payload.info.last_token_usage)
-                    key: tuple[str, tuple[int, ...]] = (turn_id, tuple(counters.values()))
+                    counters: ev.Usage = usage_counters(payload.info.last_token_usage)
+                    key: tuple[str, ev.Usage] = (turn_id, counters)
                     if key not in seen_legacy:
                         seen_legacy.add(key)
                         legacy_indices.add(len(events))
-                        event = ev.UsageSample(counters, f"legacy-{len(seen_legacy)}", count_message=False)
+                        event = ev.UsageSample(counters)
                 elif payload.type == "task_started":
                     # `started_at` is Unix seconds; the envelope timestamp is the same instant at millisecond precision.
                     event = ev.TurnBoundary("start")
@@ -198,7 +199,8 @@ def parse_file(path: Path) -> ev.Session:
                     item: cr.Item | None = payload.item
                     if isinstance(item, cr.MessageItem):
                         text: str = "\n".join(part.text for part in item.content if part.text)
-                        event = ev.Prompt(text, False) if item.type == "UserMessage" else ev.AssistantText(text)
+                        event = ev.Prompt(text) if item.type == "UserMessage" else ev.AssistantText(text)
+                        message_id = item.id if item.type == "AgentMessage" else ""
                         values = {"message_id": item.id, "phase": item.phase or ""}
                     elif isinstance(item, (cr.CommandExecution, cr.FileChange, cr.McpToolCall, cr.OtherTool)):
                         if isinstance(item, cr.OtherTool) and item.type == "ContextCompaction":
@@ -222,7 +224,12 @@ def parse_file(path: Path) -> ev.Session:
                         reasoning_items[turn_id].append(len(events))
                         event = ev.Thinking("<encrypted reasoning, 0 bytes>")
                 if event is not None:
-                    events.append(ev.TimedRecord(event, timestamp, source.file_index, values, turn_id=turn_id, model=model, effort=effort))
+                    events.append(
+                        ev.TimedRecord(
+                            event, timestamp, source.file_index, values,
+                            turn_id=turn_id, prompt_id=turn_id, message_id=message_id, model=model, effort=effort,
+                        )
+                    )
                 elif payload.type != "item_completed":
                     skipped[payload.type] = skipped.get(payload.type, 0) + 1
             case _:
@@ -268,15 +275,15 @@ def parse_file(path: Path) -> ev.Session:
     )
 
 
-def usage_counters(usage: cr.TokenUsage) -> dict[str, int]:
-    """Translate only per-response counters to the shared usage vocabulary."""
-    return {
-        "input_tokens": usage.input_tokens,
-        "output_tokens": usage.output_tokens,
-        "cache_read_tokens": usage.cached_input_tokens,
-        "cache_creation_tokens": usage.cache_write_input_tokens,
-        "thinking_tokens": usage.reasoning_output_tokens,
-    }
+def usage_counters(usage: cr.TokenUsage) -> ev.Usage:
+    """Translate per-response counters to the shared usage vocabulary."""
+    return ev.Usage(
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_read_tokens=usage.cached_input_tokens,
+        cache_creation_tokens=usage.cache_write_input_tokens,
+        thinking_tokens=usage.reasoning_output_tokens,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,7 +474,7 @@ def parse_rollout(path: Path, index: dict[Path, cr.SessionMeta] | None = None) -
     check_version(rollout_meta(path))
     catalog: dict[Path, cr.SessionMeta] = index if index is not None else discover_rollouts(rollout_home(path))
     parent: ev.Session = parse_file(path)
-    children: dict[str, Sequence[ev.TimedRecord | ev.EventGroup]] = {}
+    children: dict[str, list[ev.TimedRecord]] = {}
     for child_path in rollout_tree(path, catalog)[1:]:
         try:
             child: ev.Session = parse_file(child_path)

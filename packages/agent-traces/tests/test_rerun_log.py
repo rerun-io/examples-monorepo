@@ -6,7 +6,8 @@ import pyarrow as pa
 import pytest
 from rerun.chunk import RrdReader
 
-from agent_traces.claude import ClaudeSession, parse_session
+from agent_traces.claude import parse_session
+from agent_traces.events import Session
 from agent_traces.rerun_log import write_session_rrd
 from tests.conftest import SessionBuilder
 
@@ -352,7 +353,7 @@ def test_turn_image_counts_match_emitted_rows(session_builder: SessionBuilder, p
 def test_agent_and_host_properties(session_builder: SessionBuilder, tmp_path: Path) -> None:
     """Every recording names its agent kind and the machine it ran on; host can be overridden for copied homes."""
     session_builder.add("user", message={"content": "hello"})
-    session: ClaudeSession = parse_session(session_builder.path)
+    session: Session = parse_session(session_builder.path)
     props: pa.Table = read_entities(write_session_rrd(session, tmp_path / "a.rrd"))["/__properties/session"]
     assert props["agent"].to_pylist() == [["claude"]]
     assert props["host"].to_pylist()[0][0]

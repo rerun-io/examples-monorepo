@@ -4,7 +4,7 @@ import base64
 import hashlib
 import re
 from collections.abc import Iterator
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -30,9 +30,11 @@ from agent_traces.timestamps import parse_timestamp_ns as parse_timestamp_ns
 
 
 @dataclass(frozen=True, slots=True)
-class SourceRecord:
+class _SourceRecord:
     """Typed record and uninterpreted source metadata."""
 
+    file_index: int
+    """Zero-based source line index."""
     record: Record
     """Decoded Claude record."""
     tool_use_result_json: str
@@ -41,35 +43,7 @@ class SourceRecord:
     """Whole source line for system and attachment records."""
 
 
-@dataclass(frozen=True, slots=True)
-class TimedRecord:
-    """Record positioned on wall time and in its source file."""
-
-    record: Record
-    """Typed Claude record."""
-    timestamp_ns: int
-    """Nanoseconds since the Unix epoch."""
-    file_index: int
-    """Zero-based source line index."""
-    tool_use_result_json: str
-    """Raw tool metadata JSON, empty when absent or null."""
-    raw_json: str
-    """Whole source line for system and attachment records."""
-    events: list[ev.TimedRecord] = field(default_factory=list)
-    """Neutral events interpreted once by the Claude parser."""
-
-
-@dataclass(frozen=True, slots=True)
-class ClaudeSession(ev.Session):
-    """One session and its child agent transcripts."""
-
-    main: list[TimedRecord]
-    """Source records retained for existing parser callers."""
-    subagents: dict[str, list[TimedRecord]]
-    """Child source records retained for existing parser callers."""
-
-
-def iter_records(path: Path) -> Iterator[SourceRecord]:
+def iter_records(path: Path) -> Iterator[_SourceRecord]:
     """Decode records one line at a time through the typed boundary.
 
     Args:
@@ -93,7 +67,7 @@ def iter_records(path: Path) -> Iterator[SourceRecord]:
                 tool_use_result_json: str = orjson.dumps(tool_metadata).decode() if tool_metadata is not None else ""
                 if not isinstance(tool_metadata, dict):
                     raw["toolUseResult"] = None
-                yield SourceRecord(record=from_dict(Record, raw), tool_use_result_json=tool_use_result_json, raw_json=raw_json)
+                yield _SourceRecord(file_index=line_number - 1, record=from_dict(Record, raw), tool_use_result_json=tool_use_result_json, raw_json=raw_json)
             except (orjson.JSONDecodeError, SerdeError) as error:
                 raise ValueError(f"{path}:{line_number}: {error}") from error
 
@@ -152,7 +126,7 @@ def session_sources(session_path: Path) -> list[Path]:
     ]
 
 
-def parse_session(session_path: Path) -> ClaudeSession:
+def parse_session(session_path: Path) -> ev.Session:
     """Read the main transcript and child files, counting omitted records.
 
     Args:
@@ -176,7 +150,7 @@ def parse_session(session_path: Path) -> ClaudeSession:
     total_cost_usd: float = float("nan")
     with source_path.open("rb") as source:
         source_sha256: str = hashlib.file_digest(source, "sha256").hexdigest()
-    transcripts: dict[str, list[TimedRecord]] = {}
+    transcripts: dict[str, list[ev.TimedRecord]] = {}
     paths: dict[str, Path] = {"": source_path}
     paths.update(
         {
@@ -186,9 +160,10 @@ def parse_session(session_path: Path) -> ClaudeSession:
         }
     )
     for agent_id, path in paths.items():
-        rows: list[TimedRecord] = []
-        source_record: SourceRecord
-        for file_index, source_record in enumerate(iter_records(path)):
+        rows: list[tuple[_SourceRecord, int]] = []
+        source_record: _SourceRecord
+        for source_record in iter_records(path):
+            file_index: int = source_record.file_index
             record: Record = source_record.record
             if record.version:
                 cli_versions.add(record.version)
@@ -227,19 +202,10 @@ def parse_session(session_path: Path) -> ClaudeSession:
                 timestamp_ns: int = parse_timestamp_ns(record.timestamp)
             except ValueError as error:
                 raise ValueError(f"{path}:{file_index + 1}: {error}") from error
-            rows.append(
-                TimedRecord(
-                    record=record,
-                    timestamp_ns=timestamp_ns,
-                    file_index=file_index,
-                    tool_use_result_json=source_record.tool_use_result_json,
-                    raw_json=source_record.raw_json,
-                )
-            )
-        interpret_records(rows)
-        transcripts[agent_id] = rows
-    main: list[TimedRecord] = transcripts.pop("")
-    return ClaudeSession(
+            rows.append((replace(source_record, record=record), timestamp_ns))
+        transcripts[agent_id] = interpret_records(rows)
+    main: list[ev.TimedRecord] = transcripts.pop("")
+    return ev.Session(
         session_id=source_path.stem,
         profile=source_path.parents[2].name.lstrip("."),
         source_path=source_path,
@@ -280,28 +246,30 @@ def tool_path(name: str) -> str:
     return f"mcp/{parts[1]}/{parts[2]}" if len(parts) == 3 and parts[0] == "mcp" else name
 
 
-def interpret_records(records: list[TimedRecord]) -> None:
-    """Interpret blocks once, retaining source records for parser compatibility."""
+def interpret_records(records: list[tuple[_SourceRecord, int]]) -> list[ev.TimedRecord]:
+    """Interpret source blocks into flat events with transcript-local usage deduplication."""
+    events: list[ev.TimedRecord] = []
+    turn_id: str = ""
     calls: dict[str, tuple[int, str]] = {}
     seen: set[str] = set()
-    for timed in records:
-        if timed.record.message is not None:
-            for block in timed.record.message.content:
+    for source_record, timestamp_ns in records:
+        if source_record.record.message is not None:
+            for block in source_record.record.message.content:
                 if isinstance(block, ToolUseBlock):
-                    calls[block.id] = (timed.timestamp_ns, block.name)
-    for timed in records:
-        record: Record = timed.record
+                    calls[block.id] = (timestamp_ns, block.name)
+    for source_record, timestamp_ns in records:
+        record: Record = source_record.record
         values: dict[str, ev.Scalar] = {}
         payloads: list[tuple[ev.Payload, dict[str, ev.Scalar]]] = []
         if record.type == "system":
             payloads.append(
                 (
                     ev.Lifecycle("system", record.content if record.content is not None else record.subtype, (record.level or "INFO").upper()),
-                    {"subtype": record.subtype, "extra_json": timed.raw_json},
+                    {"subtype": record.subtype, "extra_json": source_record.raw_json},
                 )
             )
         elif record.type == "attachment" and record.attachment is not None:
-            attachment_json: str = orjson.dumps(orjson.loads(timed.raw_json).get("attachment")).decode()
+            attachment_json: str = orjson.dumps(orjson.loads(source_record.raw_json).get("attachment")).decode()
             description: str = (
                 record.attachment.text
                 or (record.attachment.content if isinstance(record.attachment.content, str) else "")
@@ -318,26 +286,29 @@ def interpret_records(records: list[TimedRecord]) -> None:
         elif record.type == "pr-link":
             payloads.append((ev.Lifecycle("pr_links", record.prUrl), {"pr_number": record.prNumber, "pr_repository": record.prRepository}))
         if record.message is not None:
-            if record.type == "assistant" and record.message.id:
+            if record.type == "assistant" and record.message.id and record.message.id not in seen:
                 usage: Usage = record.message.usage or Usage()
                 cache: CacheCreation = usage.cache_creation or CacheCreation()
                 details: OutputTokensDetails = usage.output_tokens_details or OutputTokensDetails()
-                counters: dict[str, int] = {
-                    "input_tokens": usage.input_tokens,
-                    "output_tokens": usage.output_tokens,
-                    "cache_read_tokens": usage.cache_read_input_tokens,
-                    "cache_creation_tokens": usage.cache_creation_input_tokens,
-                    "cache_creation_5m_tokens": cache.ephemeral_5m_input_tokens,
-                    "cache_creation_1h_tokens": cache.ephemeral_1h_input_tokens,
-                    "thinking_tokens": details.thinking_tokens,
-                }
-                payloads.append((ev.UsageSample(counters, record.message.id, emit=record.message.id not in seen), {}))
+                counters: ev.Usage = ev.Usage(
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    cache_read_tokens=usage.cache_read_input_tokens,
+                    cache_creation_tokens=usage.cache_creation_input_tokens,
+                    cache_creation_5m_tokens=cache.ephemeral_5m_input_tokens,
+                    cache_creation_1h_tokens=cache.ephemeral_1h_input_tokens,
+                    thinking_tokens=details.thinking_tokens,
+                )
+                payloads.append((ev.UsageSample(counters), {}))
                 seen.add(record.message.id)
             is_prompt: bool = (
                 record.type == "user"
                 and not record.isCompactSummary
                 and not any(isinstance(block, ToolResultBlock) for block in record.message.content)
             )
+            if is_prompt and any(isinstance(block, TextBlock) for block in record.message.content):
+                turn_id = record.uuid
+                payloads.insert(0, (ev.TurnBoundary("start"), {}))
             for block in record.message.content:
                 sources: list[ImageSource] = []
                 call_id: str = ""
@@ -350,14 +321,14 @@ def interpret_records(records: list[TimedRecord]) -> None:
                     case ToolResultBlock():
                         call: tuple[int, str] | None = calls.get(block.tool_use_id)
                         name: str = call[1] if call else "unknown"
-                        elapsed: float = (timed.timestamp_ns - call[0]) / 1_000_000 if call else float("nan")
+                        elapsed: float = (timestamp_ns - call[0]) / 1_000_000 if call else float("nan")
                         payloads.append(
                             (
                                 ev.ToolResult(
                                     tool_path(name),
                                     block.tool_use_id,
                                     result_text(block),
-                                    timed.tool_use_result_json,
+                                    source_record.tool_use_result_json,
                                     tool_kind(name),
                                     elapsed,
                                     block.is_error,
@@ -384,16 +355,18 @@ def interpret_records(records: list[TimedRecord]) -> None:
                 for source in sources:
                     if source.type == "base64":
                         payloads.append((ev.Image(base64.b64decode(source.data), source.media_type, call_id, origin), {}))
-        payloads.sort(key=lambda entry: not (isinstance(entry[0], ev.Prompt) and entry[0].starts_turn))
-        payloads.append((ev.Lifecycle(), {}))
         for payload, values in payloads:
-            timed.events.append(
+            events.append(
                 ev.TimedRecord(
                     payload,
-                    timed.timestamp_ns,
-                    timed.file_index,
+                    timestamp_ns,
+                    source_record.file_index,
                     values,
+                    turn_id=turn_id,
+                    prompt_id=record.promptId or "",
+                    message_id=record.message.id if record.type == "assistant" and record.message else "",
                     model=record.message.model if record.type == "assistant" and record.message else "",
                     effort=record.effort if record.type == "assistant" else "",
                 )
             )
+    return events

@@ -105,7 +105,7 @@ def test_corrupt_manifest_names_path(tmp_path: Path, content: str) -> None:
 def test_writer_failure_propagates_after_saving_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A writer error is not treated as a parser error; prior progress survives."""
     from agent_traces.apis import convert_all
-    from agent_traces.claude import ClaudeSession
+    from agent_traces.events import Session
     from agent_traces.manifest import load_manifest
     from agent_traces.rerun_log import write_session_rrd
 
@@ -113,7 +113,7 @@ def test_writer_failure_propagates_after_saving_progress(tmp_path: Path, monkeyp
     for session_id in ["a", "b"]:
         SessionBuilder(home / "projects/one" / f"{session_id}.jsonl").add("user", message={"content": session_id})
 
-    def fail_second(session: ClaudeSession, out: Path, *, host: str | None = None) -> Path:
+    def fail_second(session: Session, out: Path, *, host: str | None = None) -> Path:
         """Simulate a recording boundary failure after the first saved session."""
         if session.session_id == "b":
             raise ValueError("writer failure")
