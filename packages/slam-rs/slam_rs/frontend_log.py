@@ -9,7 +9,7 @@ from jaxtyping import Float32, Int32, Int64, UInt8, UInt64
 from numpy import ndarray
 
 from slam_rs import _core
-from slam_rs.catalog_feed import RIG_ENTITY, CameraCalib
+from slam_rs.rig import RIG_ENTITY, CameraCalib
 
 TRAIL_LENGTH: int = 10
 """Positions kept per track for the trail behind it."""

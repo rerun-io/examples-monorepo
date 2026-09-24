@@ -10,7 +10,7 @@ from typing import ClassVar, Literal
 from jaxtyping import Bool, Float32, Float64, Int32, Int64, UInt8
 from numpy import ndarray
 
-from slam_rs.catalog_feed import CameraCalib, ImuCalib
+from slam_rs.rig import CameraCalib, ImuCalib
 
 __version__: str
 

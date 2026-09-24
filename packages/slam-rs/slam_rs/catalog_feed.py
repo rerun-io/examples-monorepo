@@ -97,14 +97,11 @@ from slam_rs.catalog_timing import (
     pair_accel_onto_gyro as pair_accel_onto_gyro,
 )
 from slam_rs.config import RobocapConfig
+from slam_rs.rig import IMU_ENTITY as IMU_ENTITY
+from slam_rs.rig import RIG_ENTITY as RIG_ENTITY
+from slam_rs.rig import TIMELINE as TIMELINE
 from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, empty_trajectory, shift_clock
 
-RIG_ENTITY: str = "/world/rig_00"
-"""Rig node of the ``exoego:v2`` tree; its reference frame is the IMU."""
-IMU_ENTITY: str = "/world/rig_00/imu_00"
-"""IMU node, whose transform is the identity because the IMU *is* the rig frame."""
-TIMELINE: str = "video_time"
-"""The one index both datasets carry: nanoseconds since ``property:capture:start_time_ns``."""
 DEFAULT_WINDOW_S: float = 60.0
 """Time window a long segment is cut into: a 7.6 s two-camera segment is 8.5 MB, so a 2,000 s one is not one query."""
 
