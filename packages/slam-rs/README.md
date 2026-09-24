@@ -103,6 +103,12 @@ CPU, which is what lifts the mean and the tail. A full replay from the catalog
 is decode-bound: three quarters of its time is AV1 decoding, under a fifth is
 the tracker.
 
+In the dev env, beartype checks the two annotated frame locals in
+`SegmentFeed.framesets` (`image`, `current`) on every decoded frame, which
+doubles the `slam-rs-dev` gate (about 63 s instead of 31 s). Time runs in the
+prod env, which never loads beartype. If the gate time starts to matter, drop
+those two annotations.
+
 ## Two profiles and two lanes
 
 The **fast profile**, the default, changes the schedule and nothing about the
