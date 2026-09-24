@@ -3660,7 +3660,7 @@ environments:
     - https://pypi.org/simple
     packages:
       p1:
-      - conda: https://prefix.dev/ai-demos/linux-64/lietorch-1.0-hecd5ce2_1.conda
+      - conda: https://prefix.dev/ai-demos/linux-64/lietorch-1.0-hecd5ce2_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/_openmp_mutex-4.5-7_kmp_llvm.conda
       - conda: https://prefix.dev/conda-forge/linux-64/alsa-lib-1.2.16.1-hb03c661_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/aom-3.14.1-pl5321h039972f_1.conda
@@ -4279,7 +4279,7 @@ environments:
     - https://pypi.org/simple
     packages:
       p1:
-      - conda: https://prefix.dev/ai-demos/linux-64/lietorch-1.0-hecd5ce2_1.conda
+      - conda: https://prefix.dev/ai-demos/linux-64/lietorch-1.0-hecd5ce2_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/_openmp_mutex-4.5-7_kmp_llvm.conda
       - conda: https://prefix.dev/conda-forge/linux-64/alsa-lib-1.2.16.1-hb03c661_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/aom-3.14.1-pl5321h039972f_1.conda
@@ -19130,7 +19130,7 @@ environments:
       - conda: https://conda.modular.com/max-nightly/noarch/mblack-26.5.0.dev2026062206-release.conda
       - conda: https://conda.modular.com/max-nightly/noarch/mojo-python-1.0.0b3.dev2026062206-release.conda
       - conda: https://prefix.dev/ai-demos/linux-64/libfaiss-1.10.0-cpu_openblas_h1d4e529_0.conda
-      - conda: https://prefix.dev/ai-demos/linux-64/lietorch-1.0-hecd5ce2_1.conda
+      - conda: https://prefix.dev/ai-demos/linux-64/lietorch-1.0-hecd5ce2_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/_openmp_mutex-4.5-7_kmp_llvm.conda
       - conda: https://prefix.dev/conda-forge/linux-64/aiohttp-3.14.1-py311h55b9665_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/alsa-lib-1.2.16.1-hb03c661_0.conda
@@ -19744,7 +19744,7 @@ environments:
       - conda: https://conda.modular.com/max-nightly/noarch/mblack-26.5.0.dev2026062206-release.conda
       - conda: https://conda.modular.com/max-nightly/noarch/mojo-python-1.0.0b3.dev2026062206-release.conda
       - conda: https://prefix.dev/ai-demos/linux-64/libfaiss-1.10.0-cpu_openblas_h1d4e529_0.conda
-      - conda: https://prefix.dev/ai-demos/linux-64/lietorch-1.0-hecd5ce2_1.conda
+      - conda: https://prefix.dev/ai-demos/linux-64/lietorch-1.0-hecd5ce2_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/_openmp_mutex-4.5-7_kmp_llvm.conda
       - conda: https://prefix.dev/conda-forge/linux-64/aiohttp-3.14.1-py311h55b9665_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/alsa-lib-1.2.16.1-hb03c661_0.conda
@@ -68683,33 +68683,33 @@ packages:
     - libfaiss >=1.10.0,<2
   size: 60624589
   timestamp: 1782105983388
-- conda: https://prefix.dev/ai-demos/linux-64/lietorch-1.0-hecd5ce2_1.conda
-  sha256: 7cb93b5613960de95315c72cabf2bc9557958efd26ca01aaa2df7398f39502ba
-  md5: a1516fbe68de4aa7f1f35f802040f5db
+- conda: https://prefix.dev/ai-demos/linux-64/lietorch-1.0-hecd5ce2_2.conda
+  sha256: fa01a063bd0532ffa9ba19c89e6d01f92f5f7130dcb4c6502cd4f685fbc470c1
+  md5: 6ba47195122b7e251ac53f4a60d86673
   depends:
   - python 3.11.*
-  - pytorch-gpu >=2.10.0
+  - pytorch-gpu 2.12.*
   - scipy
   - pyyaml
-  - libgcc >=13
   - __glibc >=2.17,<3.0.a0
   - libstdcxx >=13
+  - libgcc >=13
   - cuda-version >=13.0,<14
-  - cuda-nvtx >=13.0.85,<14.0a0
-  - libcusparse >=12.6.3.3,<13.0a0
-  - libcusolver >=12.0.4.66,<13.0a0
-  - libcurand >=10.4.0.35,<11.0a0
-  - cudnn >=9.23.1.3,<10.0a0
-  - python_abi 3.11.* *_cp311
-  - libcufft >=12.0.0.61,<13.0a0
-  - cuda-nvrtc >=13.0.88,<14.0a0
-  - cuda-cudart >=13.0.96,<14.0a0
-  - libcufile >=1.15.1.6,<2.0a0
   - libcublas >=13.1.1.3,<14.0a0
+  - libcusparse >=12.6.3.3,<13.0a0
+  - cuda-cudart >=13.0.96,<14.0a0
+  - cuda-nvrtc >=13.0.88,<14.0a0
+  - libcufile >=1.15.1.6,<2.0a0
+  - cudnn >=9.25.0.15,<10.0a0
+  - cuda-nvtx >=13.0.85,<14.0a0
+  - libcusolver >=12.0.4.66,<13.0a0
+  - libcufft >=12.0.0.61,<13.0a0
+  - python_abi 3.11.* *_cp311
+  - libcurand >=10.4.0.35,<11.0a0
   license: BSD-3-Clause
   run_exports: {}
-  size: 1224902
-  timestamp: 1782100192038
+  size: 2236888
+  timestamp: 1786213307230
 - conda: https://prefix.dev/ai-demos/linux-64/splat-transform-1.9.2-hcc556be_0.conda
   sha256: 9e71690778a141b6af8431a6e0f73eba289c297541dd1fd6ccfd66a205bbb6a9
   md5: f01c89bf27bf183dd3e4c176b71143a5
