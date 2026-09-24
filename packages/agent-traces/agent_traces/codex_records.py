@@ -1,10 +1,12 @@
 """Partial typed Codex rollout records; unknown fields remain allowed."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TypeAlias
 
 import orjson
 from serde import SerdeError, field, from_dict, serde
+
+from agent_traces.events import ToolKind
 
 
 @serde
@@ -216,6 +218,12 @@ class McpToolCall:
 
 @serde
 @dataclass(frozen=True, slots=True)
+class ContextCompaction:
+    """A native context boundary, not a tool invocation."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
 class OtherTool:
     """Partial OtherTool payload."""
 
@@ -231,19 +239,42 @@ class OtherTool:
     """Agent path."""
     path: str = ""
     """Image path."""
+    entity_name: str = ""
+    """Entity selected by the native tag table."""
+    tool_kind: ToolKind = "other"
+    """Tool family selected by the native tag table."""
     durationMs: int | float | None = None
     """Extension duration."""
 
 
-Item: TypeAlias = MessageItem | ReasoningItem | CommandExecution | FileChange | McpToolCall | OtherTool | UnknownItem
-ITEM_TYPES: dict[str, type] = {
-    "UserMessage": MessageItem,
-    "AgentMessage": MessageItem,
-    "Reasoning": ReasoningItem,
-    "CommandExecution": CommandExecution,
-    "FileChange": FileChange,
-    "McpToolCall": McpToolCall,
-    **{name: OtherTool for name in ("WebSearch", "Plan", "SubAgentActivity", "ImageView", "ContextCompaction", "Extension")},
+Item: TypeAlias = MessageItem | ReasoningItem | CommandExecution | FileChange | McpToolCall | OtherTool | ContextCompaction | UnknownItem
+
+
+@dataclass(frozen=True, slots=True)
+class ItemTag:
+    """The decoder and tool presentation share this native tag definition."""
+
+    record_type: type
+    """Partial native schema."""
+    entity_name: str = ""
+    """Default tool entity, empty for non-tools."""
+    tool_kind: ToolKind = "other"
+    """Neutral tool family."""
+
+
+ITEM_TYPES: dict[str, ItemTag] = {
+    "UserMessage": ItemTag(MessageItem),
+    "AgentMessage": ItemTag(MessageItem),
+    "Reasoning": ItemTag(ReasoningItem),
+    "ContextCompaction": ItemTag(ContextCompaction),
+    "CommandExecution": ItemTag(CommandExecution, "exec", "shell"),
+    "FileChange": ItemTag(FileChange, "apply_patch", "file_edit"),
+    "McpToolCall": ItemTag(McpToolCall, "mcp", "mcp"),
+    "WebSearch": ItemTag(OtherTool, "web_search", "web_search"),
+    "Plan": ItemTag(OtherTool, "update_plan", "plan"),
+    "SubAgentActivity": ItemTag(OtherTool, "subagent", "subagent"),
+    "ImageView": ItemTag(OtherTool, "view_image", "image"),
+    "Extension": ItemTag(OtherTool, "extension", "other"),
 }
 
 
@@ -254,8 +285,13 @@ def decode_item(value: object) -> Item | None:
     if not isinstance(value, dict) or not isinstance(value.get("type"), str):
         raise SerdeError("item requires a string type")
     tag: str = value["type"]
-    cls: type | None = ITEM_TYPES.get(tag)
-    return from_dict(cls, value) if cls is not None else UnknownItem(tag)
+    spec: ItemTag | None = ITEM_TYPES.get(tag)
+    if spec is None:
+        return UnknownItem(tag)
+    item: Item = from_dict(spec.record_type, value)
+    if isinstance(item, OtherTool):
+        return replace(item, entity_name=spec.entity_name, tool_kind=spec.tool_kind)
+    return item
 
 
 @serde

@@ -132,10 +132,10 @@ def write_session_rrd(session: Session, out: Path, *, host: str | None = None) -
                 )
             elif isinstance(payload, ToolResult):
                 elapsed_label: str = f"{payload.elapsed_ms:.0f} ms" if payload.elapsed_ms == payload.elapsed_ms else "? ms"
+                # The full result text lives once, in the visible TextLog row below.
                 values.update(
                     tool_use_id=payload.call_id,
                     phase="result",
-                    result_text=payload.text,
                     tool_use_result_json=payload.raw_json,
                     is_error=payload.is_error,
                     elapsed_ms=payload.elapsed_ms,
@@ -235,19 +235,33 @@ def write_session_rrd(session: Session, out: Path, *, host: str | None = None) -
                     ],
                     strict=True,
                 )
+            strings: dict[str, str] = {
+                "session_id": session.session_id,
+                "profile": session.profile,
+                "agent": session.agent,
+                "host": host if host is not None else socket.gethostname(),
+                "cwd": session.cwd,
+                "git_branch": session.git_branch,
+                "cli_versions": ",".join(sorted(session.cli_versions)),
+                "title": session.title,
+                "models": ",".join(sorted(session.models)),
+                "source_path": str(session.source_path),
+                "source_sha256": session.source_sha256,
+            }
+            if session.agent == "codex":
+                strings.update(
+                    provider=session.provider,
+                    originator=session.originator,
+                    thread_source=session.thread_source,
+                    forked_from=session.forked_from,
+                    parent_thread=session.parent_thread,
+                )
             recording.send_property(
                 "session",
                 rr.AnyValues(
                     drop_untyped_nones=True,
-                    session_id=session.session_id,
-                    profile=session.profile,
-                    agent=session.agent,
-                    host=host if host is not None else socket.gethostname(),
-                    cwd=session.cwd,
-                    git_branch=session.git_branch,
-                    cli_versions=",".join(sorted(session.cli_versions)),
-                    title=session.title,
-                    models=",".join(sorted(session.models)),
+                    # Explicit string arrays: AnyValues drops an untyped empty string the first time a process sees a field.
+                    **{name: pa.array([value], type=pa.string()) for name, value in strings.items()},
                     n_turns=len(turns),
                     n_subagents=len(session.subagents),
                     n_tool_calls=sum(row.values.get("phase") == "call" for rows in texts.values() for row in rows),
@@ -255,20 +269,10 @@ def write_session_rrd(session: Session, out: Path, *, host: str | None = None) -
                     n_inlined_outputs=session.n_inlined_outputs,
                     total_cost_usd=pa.array([session.total_cost_usd], type=pa.float64()),
                     **(
-                        {
-                            "provider": session.provider,
-                            "originator": session.originator,
-                            "thread_source": session.thread_source,
-                            "forked_from": session.forked_from,
-                            "parent_thread": session.parent_thread,
-                            "total_input_tokens": session.total_input_tokens,
-                            "total_output_tokens": session.total_output_tokens,
-                        }
+                        {"total_input_tokens": session.total_input_tokens, "total_output_tokens": session.total_output_tokens}
                         if session.agent == "codex"
                         else {}
                     ),
-                    source_path=str(session.source_path),
-                    source_sha256=session.source_sha256,
                 ),
             )
             if session.skipped:

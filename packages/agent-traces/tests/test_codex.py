@@ -147,7 +147,8 @@ def test_raw_tool_response_is_joined_by_arguments(rollout_builder: RolloutBuilde
     rollout_builder.add("response_item", type="function_call_output", call_id="raw-call", output="full result")
     entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "raw.rrd").path)
     assert entities["/tools/exec"]["input_json"].to_pylist()[0] == [raw]
-    assert entities["/tools/exec"]["tool_use_result_json"].to_pylist()[1] == ['"full result"']
+    assert "preview" in entities["/tools/exec"]["TextLog:text"].to_pylist()[1][0]
+    assert "preview" not in entities["/tools/exec"]["tool_use_result_json"].to_pylist()[1][0]
 
 
 def test_images_from_response_and_local_files(rollout_builder: RolloutBuilder, tmp_path: Path, png_bytes: bytes) -> None:
@@ -415,8 +416,8 @@ def test_turn_rows_sit_at_the_task_event_time(rollout_builder: RolloutBuilder, t
     assert wall_ns > 1_700_000_000 * 1_000_000_000  # 2023 or later, i.e. not 1970
 
 
-def test_tool_elapsed_comes_from_the_raw_call_output_span(rollout_builder: RolloutBuilder, tmp_path: Path) -> None:
-    """The item's own stamps are logging times ~1 ms apart; the raw call → output envelope span is the real wall time."""
+def test_tool_elapsed_does_not_use_the_raw_call_output_span(rollout_builder: RolloutBuilder, tmp_path: Path) -> None:
+    """The envelope includes orchestration and cannot establish command elapsed."""
     from agent_traces.codex import parse_rollout
     from agent_traces.rerun_log import write_session_rrd
 
@@ -429,7 +430,8 @@ def test_tool_elapsed_comes_from_the_raw_call_output_span(rollout_builder: Rollo
     rollout_builder.item("CommandExecution", id="c1", command=["bash", "-lc", "ls"], status="completed", exit_code=0, aggregated_output="ok",
                          )
     entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "elapsed.rrd").path)
-    assert entities["/tools/elapsed_ms/exec"]["Scalars:scalars"].to_pylist() == [[2000.0]]
+    elapsed: float = entities["/tools/elapsed_ms/exec"]["Scalars:scalars"].to_pylist()[0][0]
+    assert elapsed != elapsed
 
 
 def test_message_identity_and_late_usage_across_turns(rollout_builder: RolloutBuilder, tmp_path: Path) -> None:
@@ -501,3 +503,143 @@ def test_commands_agree_on_transcript_provider(tmp_path: Path) -> None:
     for name in ("agent", "session_id", "source_sha256"):
         assert single[name].to_pylist() == batch[name].to_pylist()
     assert single["agent"].to_pylist() == [["codex"]]
+
+
+def test_later_exact_call_wins(rollout_builder: RolloutBuilder) -> None:
+    """Search every exact key before considering an earlier text match."""
+    from agent_traces.codex import parse_file
+    from agent_traces.events import ToolCall
+
+    rollout_builder.meta()
+    rollout_builder.add("event_msg", type="task_started", turn_id="turn")
+    for call_id in ("heuristic", "exact"):
+        rollout_builder.add("response_item", type="function_call", name="exec_command", call_id=call_id, arguments='{"cmd":"ls"}')
+    rollout_builder.add("event_msg", type="item_completed", turn_id="turn", item={"type": "CommandExecution", "id": "exact", "command": ["bash", "-lc", "ls"]})
+    for call_id in ("heuristic", "exact"):
+        rollout_builder.add("response_item", type="function_call_output", call_id=call_id, output="ok")
+    calls: list[ToolCall] = [r.payload for r in parse_file(rollout_builder.path, {}).main if isinstance(r.payload, ToolCall)]
+    assert [c.call_id for c in calls] == ["exact"]
+
+
+@pytest.mark.parametrize("mode", ["mcp", "two", "repeat", "reverse", "ambiguous", "missing", "outside", "directory"])
+def test_command_correlation(rollout_builder: RolloutBuilder, mode: str) -> None:
+    """Family, containment and unique command identity govern non-exact joins."""
+    import math
+
+    from agent_traces.codex import parse_file
+    from agent_traces.events import Session, ToolCall, ToolResult
+
+    rollout_builder.meta()
+    rollout_builder.add("event_msg", type="task_started", turn_id="turn")
+    if mode == "mcp":
+        rollout_builder.add("response_item", type="function_call", name="mcp__server__tool", call_id="misleading", arguments='{"query":"ls"}')
+    script: str = 'text(await tools.exec_command({cmd:"ls", workdir:"/a"})); text(await tools.exec_command({cmd:"pwd"}));'
+    if mode == "reverse":
+        script = 'text(await tools.exec_command({cmd:"ls"}));'
+    rollout_builder.add("response_item", type="custom_tool_call", name="exec", call_id="first", input=script)
+    if mode in {"ambiguous", "reverse", "directory"}:
+        rollout_builder.add("response_item", type="function_call", name="exec_command", call_id="second", arguments='{"cmd":"pwd"}' if mode == "reverse" else '{"cmd":"ls","workdir":"/b"}')
+    if mode == "outside":
+        rollout_builder.add("response_item", type="custom_tool_call_output", call_id="first", output="ok")
+    commands: list[str] = ["ls", "pwd"] if mode == "two" else ["ls", "ls"] if mode == "repeat" else ["pwd", "ls"] if mode == "reverse" else ["ls"]
+    for i, command in enumerate(commands):
+        rollout_builder.add("event_msg", type="item_completed", turn_id="turn", item={"type": "CommandExecution", "id": f"native-{i}", "command": ["bash", "-lc", command], "cwd": "/a" if mode == "directory" else ""})
+    if mode not in {"missing", "outside"}:
+        rollout_builder.add("response_item", type="custom_tool_call_output", call_id="first", output="ok")
+    if mode == "mcp":
+        rollout_builder.add("response_item", type="function_call_output", call_id="misleading", output="ok")
+    if mode in {"ambiguous", "reverse", "directory"}:
+        rollout_builder.add("response_item", type="function_call_output", call_id="second", output="ok")
+    session: Session = parse_file(rollout_builder.path, {})
+    calls: list[ToolCall] = [r.payload for r in session.main if isinstance(r.payload, ToolCall)]
+    results: list[ToolResult] = [r.payload for r in session.main if isinstance(r.payload, ToolResult)]
+    expected: list[str] = ["native-0"] if mode in {"ambiguous", "missing", "outside"} else ["second", "first"] if mode == "reverse" else ["first"] * len(commands)
+    assert [c.call_id for c in calls] == expected
+    assert all(math.isnan(r.elapsed_ms) for r in results)
+
+
+@pytest.mark.parametrize("joined", [False, True])
+def test_command_input_and_full_output_once(rollout_builder: RolloutBuilder, tmp_path: Path, joined: bool) -> None:
+    """A command output appears once across the saved tool text fields."""
+    from agent_traces.codex import parse_rollout
+    from agent_traces.rerun_log import write_session_rrd
+
+    rollout_builder.meta()
+    output: str = "unique-output-marker\n" * 1000
+    if joined:
+        rollout_builder.add("response_item", type="custom_tool_call", name="exec", call_id="raw", input='text(await tools.exec_command({cmd:"cat example"}));')
+    rollout_builder.item("CommandExecution", id="native", command=["bash", "-lc", "cat example"], aggregated_output=output)
+    if joined:
+        rollout_builder.add("response_item", type="custom_tool_call_output", call_id="raw", output=output)
+    table: pa.Table = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "once.rrd").path)["/tools/exec"]
+    inputs: list[list[str]] = table["input_json"].to_pylist()
+    assert "cat example" in inputs[0][0]
+    assert "aggregated_output" not in inputs[0][0]
+    assert "unique-output-marker" not in inputs[0][0]
+    strings: str = "".join(value for name in table.column_names for cell in table[name].to_pylist() if isinstance(cell, list) for value in cell if isinstance(value, str))
+    assert strings.count("unique-output-marker") == 1000
+    assert output in strings
+
+
+def test_inventory_checks_version_once(rollout_builder: RolloutBuilder, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inventory and repeated emission share one collected, version-checked rollout."""
+    from agent_traces import codex
+    from agent_traces import codex_records as cr
+
+    rollout_builder.meta()
+    rollout_builder.item("Reasoning")
+    versions: list[str] = []
+    original = codex.check_version
+
+    def checked(meta: cr.SessionMeta) -> None:
+        versions.append(meta.cli_version)
+        original(meta)
+
+    monkeypatch.setattr(codex, "check_version", checked)
+    source = codex.session_source(rollout_builder.path)
+    assert source.parse().main == source.parse().main
+    assert versions == ["0.153.4"]
+
+
+def test_consumed_records_are_not_skipped(rollout_builder: RolloutBuilder) -> None:
+    """Consumed settings, user image carriers and duplicate usage are accounted for."""
+    from agent_traces.codex import parse_rollout
+    from agent_traces.events import Prompt
+
+    rollout_builder.meta()
+    rollout_builder.add("event_msg", type="thread_settings_applied", thread_settings={"reasoning_effort": "high"})
+    rollout_builder.add("event_msg", type="user_message", local_images=["missing.png"])
+    for _ in range(2):
+        rollout_builder.add("event_msg", type="token_count", info={"last_token_usage": {"input_tokens": 7}})
+    rollout_builder.add("token_usage_record", response_id="r", usage={"input_tokens": 7})
+    rollout_builder.item("ContextCompaction")
+    rollout_builder.item("UnknownFutureItem")
+    session = parse_rollout(rollout_builder.path)
+    assert session.skipped == {"UnknownFutureItem": 1}
+    assert any(isinstance(r.payload, Prompt) and r.payload.compaction for r in session.main)
+
+
+def test_new_tag_uses_one_definition(rollout_builder: RolloutBuilder, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Adding a modeled tool tag requires no second name table."""
+    from agent_traces import codex_records as cr
+    from agent_traces.codex import parse_rollout
+    from agent_traces.events import ToolCall
+
+    monkeypatch.setitem(cr.ITEM_TYPES, "FutureTool", cr.ItemTag(cr.OtherTool, "future", "other"))
+    rollout_builder.meta()
+    rollout_builder.item("FutureTool", id="new")
+    session = parse_rollout(rollout_builder.path)
+    assert [r.payload.name for r in session.main if isinstance(r.payload, ToolCall)] == ["future"]
+
+
+def test_replayed_metadata_keeps_existing_emitted_identity(rollout_builder: RolloutBuilder) -> None:
+    """A replayed header affects emission while the first header owns inventory."""
+    from agent_traces.codex import session_source
+
+    rollout_builder.meta("owner")
+    rollout_builder.meta("replayed", cwd="/replayed")
+    rollout_builder.item("Reasoning")
+    source = session_source(rollout_builder.path)
+    assert source.session_id == "owner"
+    assert source.parse().session_id == "replayed"
+    assert source.parse().cwd == "/replayed"

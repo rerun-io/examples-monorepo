@@ -1,5 +1,7 @@
 """Read saved recordings to test the public writer boundary."""
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pyarrow as pa
@@ -80,7 +82,8 @@ def test_tool_results_join_calls_and_preserve_images(session_builder: SessionBui
     assert tool["phase"].to_pylist() == [["call"], ["result"]]
     assert tool["TextLog:level"].to_pylist() == [["INFO"], ["ERROR"]]
     assert tool["input_json"].to_pylist()[0] == ['{"command":"echo","nested":[1,true,null]}']
-    assert tool["result_text"].to_pylist()[-1] == ["result"]
+    assert "result_text" not in tool.column_names  # the result text lives once, in the visible TextLog row
+    assert tool["TextLog:text"].to_pylist()[-1][0].endswith("  result")
     assert tool["elapsed_ms"].to_pylist()[-1] == [1000.0]
     assert tool["agent_id"].to_pylist()[-1] == ["child"]
     assert entities["/tools/elapsed_ms/mcp/server/tool"]["Scalars:scalars"].to_pylist() == [[1000.0]]
@@ -402,3 +405,17 @@ def test_written_counts_and_public_mode(session_builder: SessionBuilder, tmp_pat
     entities = read_entities(result.path)
     assert result.entity_rows == {name.lstrip("/"): table.num_rows for name, table in entities.items() if not name.startswith("/__properties")}
     assert {"conversation/user", "media/images", "usage/input_tokens", "turns", "agents/child/conversation/user"} <= result.entity_rows.keys()
+
+
+def test_empty_string_properties_survive_a_fresh_process(session_builder: SessionBuilder, tmp_path: Path) -> None:
+    """The first recording written by a process keeps empty strings; SDK inference drops an untyped first empty value."""
+    session_builder.add("user", message={"content": "hi"})
+    out: Path = tmp_path / "fresh.rrd"
+    script: str = (
+        "import sys; from pathlib import Path; from agent_traces.claude import parse_session; "
+        "from agent_traces.rerun_log import write_session_rrd; write_session_rrd(parse_session(Path(sys.argv[1])), Path(sys.argv[2]))"
+    )
+    subprocess.run([sys.executable, "-c", script, str(session_builder.path), str(out)], check=True)
+    props: pa.Table = read_entities(out)["/__properties/session"]
+    for key in ("title", "source_sha256"):
+        assert props[key].to_pylist() == [[""]]
