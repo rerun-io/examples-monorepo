@@ -2778,6 +2778,24 @@ simplecv = { path = "packages/simplecv", editable = true }
 # that misses this line leaves the Mac a release behind with no gate to say so.
 rerun-sdk = { version = "==0.37.0", extras = ["catalog"] } # pin-bump: hold
 
+# ── Package consumer lane ─────────────────────────────────────────────────
+# Installs the two pixi-build outputs of packages/slam-rs (recipe.yaml) the way
+# an external repo does, from the package directory as a source dependency, and
+# checks that the core imports without simplecv. The other slam-rs environments
+# keep the editable install: pixi rebuilds a source package whenever any file
+# under the package changes, which would recompile the Rust core on every edit.
+[feature.slam-rs-pkg]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
+
+[feature.slam-rs-pkg.dependencies]
+python = "3.12.*"
+slam-rs = { path = "packages/slam-rs" }
+slam-rs-catalog = { path = "packages/slam-rs" }
+
+[feature.slam-rs-pkg.tasks.slam-rs-pkg-check]
+cmd = "python -c \"import importlib.util, slam_rs, slam_rs.rig, slam_rs.frontend_log, slam_rs.config; assert 'site-packages' in slam_rs.__file__, slam_rs.__file__; assert importlib.util.find_spec('slam_rs.catalog_feed'); print('slam-rs', slam_rs._core.__version__, slam_rs.__file__)\""
+description = "Import the installed slam-rs core output and check the catalog output is present"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # mamma — streaming multiview body capture (causal MAMMA pipeline)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3638,6 +3656,7 @@ slam-rs-osx-dev = { features = [
     "dev",
 ], solve-group = "slam-rs-osx", no-default-feature = true }
 slam-rs-cuda = { features = ["catalog-common", "rerun-prerelease", "cuda", "slam-rs", "slam-rs-nvdec"], solve-group = "slam-rs-cuda", no-default-feature = true }
+slam-rs-pkg = { features = ["slam-rs-pkg"], solve-group = "slam-rs-pkg", no-default-feature = true }
 slam-rs-cuda-dev = { features = ["catalog-common", "rerun-prerelease", "cuda", "slam-rs", "slam-rs-nvdec", "dev"], solve-group = "slam-rs-cuda", no-default-feature = true }
 mamma = { features = [
     "common",
