@@ -7,7 +7,7 @@ You can then open a session in the Rerun viewer, or register many sessions on a 
 
 - One timeline, `wall`, from each transcript record's timestamp.
 - `conversation/`: user, assistant, thinking, and compaction text, in full.
-- `tools/<name>`: one row per tool call and one per result. MCP tools go under `tools/mcp/<server>/<tool>`. `tools/elapsed_ms/<name>` plots the time from call to result.
+- `tools/<name>`: one row per tool call and one per result, with the full output once. MCP tools go under `tools/mcp/<server>/<tool>`. `tools/elapsed_ms/<name>` plots the time from call to result.
 - `usage/`: tokens per model request, counted once per request.
 - `media/images`: screenshots and pasted images from the transcript.
 - `lifecycle/`: hooks, compaction boundaries, API errors, and similar events.
@@ -29,14 +29,8 @@ pixi run -e agent-traces rerun ~/agent-traces/claude/<session-id>.rrd
 ```
 
 `convert-all` writes `<out>/<profile>/<session-id>.rrd` and a `manifest.json` per profile.
-Run it again at any time: it skips a session only when its input files, effective host, and conversion revision match the manifest and its recording still exists.
-Changing `--host` or using a converter with a new content revision rebuilds the affected recordings.
-Manifest schema version 2 is required. If an older or unsupported version is found, the error names the manifest to delete before converting everything again.
-Both commands use the same input fingerprint for the recording's `source_sha256` property; batch conversion also stores it in the manifest.
-A symlinked transcript uses its target's session id and includes the target's child files.
+Run it again at any time. It converts a session again only when the session's files changed, when you pass a different `--host`, or when a new version of this package changes what a recording holds.
 Filter with `--project`, `--session-id`, or `--since YYYY-MM-DD`.
-
-Codex children are reported as `folded-subagent` only when their parent has a recording. Children of an excluded or failed parent are reported as `parent-skipped` or `parent-failed`. Discovery errors name the source path.
 
 To convert one transcript, use `agent-traces-convert --session <file>.jsonl --out <file>.rrd`.
 
@@ -57,7 +51,7 @@ pixi run -e agent-traces agent-traces-register --catalog-url rerun+http://localh
 
 Each profile becomes one dataset, `agent-traces-<profile>`, with one segment per session.
 `host`, `profile`, and `agent` are segment-table columns, so a query can group or filter by them.
-The server opens each recording through its `file://` path, so it must be able to read the output folder. Recordings, manifests, and registered blueprints are published with mode `0644`.
+The server opens each recording through its `file://` path, so it must be able to read the output folder. All files are written readable by every user (mode 644).
 
 `register` skips sessions that the dataset already has. After you convert changed sessions again, add `--replace` to update them.
 `rerun server` keeps registrations in memory. After a server restart, run `register` again.
@@ -77,5 +71,8 @@ If one session appears on two computers, the copy registered first is kept and t
 ## Limits
 
 - Codex rollouts from CLI versions older than 0.150 are skipped. `convert-all` prints the count per version.
+- Codex rollouts do not record how long each command ran, so Codex tool rows have no elapsed time.
+- Codex subagent rollouts go into their parent's recording. When the parent is skipped or fails, its subagents are skipped too, and the summary says why.
 - A transcript with a corrupt line fails as a whole. `convert-all` reports it and continues with the next session.
+- If `convert-all` reports an unsupported manifest version, delete that `manifest.json`. The next run converts every session in that profile again.
 - Costs are not computed. The Claude CLI's own session total is kept as a property when the transcript has one.
