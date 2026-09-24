@@ -1804,7 +1804,9 @@ trimesh = "*"
 mojo = "*"
 
 [feature.mast3r-slam.target.linux-64.dependencies]
-lietorch = ">=0.3.0"
+# Build 2 adds sm_89/90/120 kernels and compute_120 PTX; build 1 stops at sm_86, so every lietorch
+# kernel fails on an RTX 5090 with "no kernel image is available".
+lietorch = { version = "==1.0", build-number = ">=2" }
 mast3r = { path = "packages/mast3r" }
 asmk = { path = "packages/asmk" }
 
@@ -2301,7 +2303,7 @@ eigen = ">=3.4.0,<3.5"
 einops = ">=0.8.0,<0.9"
 matplotlib = ">=3.8.4,<3.9"
 icecream = ">=2.1.3,<2.2"
-lietorch = ">=0.3.0"
+lietorch = { version = "==1.0", build-number = ">=2" }  # build 2: sm_89/90/120 kernels (see mast3r-slam)
 numba = ">=0.60.0"
 plyfile = ">=1.0.3,<1.1"
 tyro = ">=0.9.1,<0.10"
