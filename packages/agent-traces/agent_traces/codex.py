@@ -2,7 +2,6 @@
 
 import base64
 import binascii
-import hashlib
 import mimetypes
 import re
 from collections import defaultdict
@@ -14,8 +13,10 @@ from typing import TypeAlias
 import orjson
 from serde import SerdeError, from_dict
 
+from agent_traces import claude
 from agent_traces import codex_records as cr
 from agent_traces import events as ev
+from agent_traces.sources import Discovery, SessionSource, provider_for
 from agent_traces.timestamps import parse_timestamp_ns
 
 Decoded: TypeAlias = cr.SessionMeta | cr.Context | cr.ResponseItem | cr.TokenRecord | cr.Event
@@ -90,7 +91,7 @@ def check_version(meta: cr.SessionMeta) -> None:
         raise SkipRollout(f"codex-cli-{meta.cli_version}")
 
 
-def parse_file(path: Path) -> ev.Session:
+def parse_file(path: Path, images: dict[str, Path]) -> ev.Session:
     """Interpret authoritative completion events without replaying response text."""
     check_version(rollout_meta(path))
     completed_items: int = 0
@@ -163,10 +164,8 @@ def parse_file(path: Path) -> ev.Session:
             case cr.Event():
                 turn_id = payload.turn_id or turn_id
                 for local in payload.local_images:
-                    image_path: Path = Path(local)
-                    if not image_path.is_absolute() and meta is not None:
-                        image_path = Path(meta.cwd) / image_path
-                    if image_path.is_file():
+                    image_path: Path | None = images.get(local)
+                    if image_path is not None:
                         events.append(
                             ev.TimedRecord(
                                 ev.Image(image_path.read_bytes(), mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"),
@@ -249,11 +248,9 @@ def parse_file(path: Path) -> ev.Session:
         events.extend(tool_events(completed, raw_calls, outputs, used))
     events = [replace(event, model=turn_models.get(event.turn_id, event.model)) for event in events]
     events.sort(key=lambda event: event.file_index)
-    with path.open("rb") as stream:
-        digest: str = hashlib.file_digest(stream, "sha256").hexdigest()
     home: Path = rollout_home(path)
     return ev.Session(
-        meta.id or meta.session_id,
+        meta.thread_id,
         home.name.lstrip("."),
         path.resolve(),
         events,
@@ -264,7 +261,6 @@ def parse_file(path: Path) -> ev.Session:
         git_branch=meta.git.branch if meta.git else "",
         cli_versions={meta.cli_version},
         models=models,
-        source_sha256=digest,
         provider=meta.model_provider or "",
         originator=meta.originator,
         thread_source=meta.thread_source,
@@ -413,22 +409,55 @@ def rollout_home(path: Path) -> Path:
     return next((parent.parent for parent in path.parents if parent.name in {"sessions", "archived_sessions"}), path.parent)
 
 
-def discover_rollouts(home: Path, failures: dict[Path, str] | None = None, skipped: dict[Path, str] | None = None) -> dict[Path, cr.SessionMeta]:
-    """Index metadata once; never read SQLite or full transcript bodies."""
+def discover_rollouts(home: Path, result: Discovery) -> dict[Path, cr.SessionMeta]:
+    """Index metadata once, retaining excluded parents for child ownership."""
     index: dict[Path, cr.SessionMeta] = {}
     for directory in ("sessions", "archived_sessions"):
-        for path in sorted((home / directory).rglob("*.jsonl")):
-            if path.name.startswith("._"):
+        for candidate in sorted((home / directory).rglob("*.jsonl")):
+            if candidate.name.startswith("._"):
                 continue
+            path: Path = candidate.resolve()
             try:
+                if provider_for(path) is claude:
+                    # Untagged historical Codex metadata retains its exclusion policy.
+                    try:
+                        rollout_meta(path)
+                    except SkipRollout:
+                        raise
+                    except ValueError:
+                        pass
+                    result.sessions.append(claude.session_source(path))
+                    continue
                 index[path] = rollout_meta(path)
+                check_version(index[path])
             except SkipRollout as error:
-                if skipped is not None:
-                    skipped[path] = str(error)
-            except ValueError as error:
-                if failures is not None:
-                    failures[path] = str(error)
+                result.skipped[path] = str(error)
+            except (ValueError, SerdeError, OSError) as error:
+                result.failed[path] = str(error)
     return index
+
+
+def discover(home: Path) -> Discovery:
+    """Inventory recording owners, keeping excluded descendants out of orphan recordings."""
+    result: Discovery = Discovery()
+    index: dict[Path, cr.SessionMeta] = discover_rollouts(home, result)
+    thread_ids: set[str] = {meta.thread_id for meta in index.values()}
+    for path, meta in index.items():
+        if meta.parent_thread_id in thread_ids:
+            continue
+        descendants: list[Path] = rollout_tree(path, index)[1:]
+        folded: tuple[Path, ...] = tuple(child for child in descendants if child not in result.skipped and child not in result.failed)
+        if path not in result.skipped and path not in result.failed:
+            try:
+                result.sessions.append(rollout_source(path, index, folded))
+                continue
+            except SkipRollout as error:
+                result.skipped[path] = str(error)
+            except (ValueError, SerdeError, OSError) as error:
+                result.failed[path] = str(error)
+        reason: str = "parent-failed" if path in result.failed else "parent-skipped"
+        result.skipped.update(dict.fromkeys(folded, reason))
+    return result
 
 
 def rollout_tree(path: Path, index: dict[Path, cr.SessionMeta]) -> list[Path]:
@@ -436,8 +465,8 @@ def rollout_tree(path: Path, index: dict[Path, cr.SessionMeta]) -> list[Path]:
     paths: list[Path] = [path]
     seen: set[str] = set()
     for current in paths:
-        meta: cr.SessionMeta = index[current] if current in index else rollout_meta(current)
-        thread_id: str = meta.id or meta.session_id
+        meta: cr.SessionMeta = index[current]
+        thread_id: str = meta.thread_id
         if thread_id in seen:
             continue
         seen.add(thread_id)
@@ -447,13 +476,25 @@ def rollout_tree(path: Path, index: dict[Path, cr.SessionMeta]) -> list[Path]:
     return paths
 
 
-def session_sources(path: Path, index: dict[Path, cr.SessionMeta] | None = None) -> list[Path]:
-    """List rollout tree and existing local images for content fingerprints."""
-    catalog: dict[Path, cr.SessionMeta] = index if index is not None else discover_rollouts(rollout_home(path))
-    paths: list[Path] = rollout_tree(path, catalog)
-    images: set[Path] = set()
+def session_source(path: Path) -> SessionSource:
+    """Build a single rollout inventory using the provider-owned home index."""
+    main: Path = path.expanduser().resolve()
+    result: Discovery = Discovery()
+    index: dict[Path, cr.SessionMeta] = discover_rollouts(rollout_home(main), result)
+    if main not in index:
+        index[main] = rollout_meta(main)
+    return rollout_source(main, index, ())
+
+
+def rollout_source(path: Path, index: dict[Path, cr.SessionMeta], folded: tuple[Path, ...]) -> SessionSource:
+    """Inventory the rollout tree and the local images its parser can read."""
+    check_version(index[path])
+    paths: list[Path] = rollout_tree(path, index)
+    transcripts: dict[str, Path] = {"": path, **{index[child].thread_id: child for child in paths[1:]}}
+    assets: dict[Path, dict[str, Path]] = {}
     for source in paths:
-        meta: cr.SessionMeta = catalog[source] if source in catalog else rollout_meta(source)
+        assets[source] = {}
+        meta: cr.SessionMeta = index[source]
         try:
             check_version(meta)
         except SkipRollout:
@@ -465,19 +506,25 @@ def session_sources(path: Path, index: dict[Path, cr.SessionMeta] | None = None)
                     if not image.is_absolute():
                         image = Path(meta.cwd) / image
                     if image.is_file():
-                        images.add(image)
-    return [*paths, *sorted(images)]
+                        assets[source][local] = image.resolve()
+    inputs: tuple[Path, ...] = (*paths, *sorted({image for images in assets.values() for image in images.values()}))
+    return SessionSource(index[path].thread_id, path, inputs, lambda: parse_rollout_inventory(path, transcripts, assets), folded)
 
 
-def parse_rollout(path: Path, index: dict[Path, cr.SessionMeta] | None = None) -> ev.Session:
-    """Parse one rollout and fold all available descendants into its recording."""
-    check_version(rollout_meta(path))
-    catalog: dict[Path, cr.SessionMeta] = index if index is not None else discover_rollouts(rollout_home(path))
-    parent: ev.Session = parse_file(path)
+def parse_rollout(path: Path) -> ev.Session:
+    """Inventory and parse one rollout with all available descendants."""
+    return session_source(path).parse()
+
+
+def parse_rollout_inventory(path: Path, transcripts: dict[str, Path], assets: dict[Path, dict[str, Path]]) -> ev.Session:
+    """Parse inventoried transcripts without discovering files again."""
+    parent: ev.Session = parse_file(path, assets[path])
     children: dict[str, list[ev.TimedRecord]] = {}
-    for child_path in rollout_tree(path, catalog)[1:]:
+    for agent_id, child_path in transcripts.items():
+        if not agent_id:
+            continue
         try:
-            child: ev.Session = parse_file(child_path)
+            child: ev.Session = parse_file(child_path, assets[child_path])
         except SkipRollout as error:
             reason: str = str(error)
             parent.skipped[reason] = parent.skipped.get(reason, 0) + 1

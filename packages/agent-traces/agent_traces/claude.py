@@ -1,7 +1,6 @@
 """Stream Claude JSONL records into one typed session."""
 
 import base64
-import hashlib
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
@@ -26,6 +25,7 @@ from agent_traces.claude_records import (
     ToolUseBlock,
     Usage,
 )
+from agent_traces.sources import Discovery, SessionSource, provider_for
 from agent_traces.timestamps import parse_timestamp_ns as parse_timestamp_ns
 
 
@@ -86,7 +86,7 @@ def result_images(block: ToolResultBlock) -> list[ImageSource]:
     return [part.source for part in block.content if part.type == "image" and part.source is not None]
 
 
-def inline_offloaded_output(block: ToolResultBlock, persisted_path: str | None, tool_results_dir: Path) -> ToolResultBlock:
+def inline_offloaded_output(block: ToolResultBlock, persisted_path: str | None, tool_results_dir: Path, outputs: frozenset[Path]) -> ToolResultBlock:
     """Expand a local tool response only within its session's output directory."""
     reference: str | None = persisted_path
     if not reference:
@@ -97,9 +97,9 @@ def inline_offloaded_output(block: ToolResultBlock, persisted_path: str | None, 
     candidate: Path = Path(reference)
     if not candidate.is_absolute():
         candidate = tool_results_dir / candidate
-    candidate = candidate.resolve()
     try:
-        is_output_file: bool = candidate.is_relative_to(tool_results_dir.resolve()) and candidate.is_file()
+        candidate = candidate.resolve()
+        is_output_file: bool = candidate.is_relative_to(tool_results_dir) and candidate in outputs
     except OSError:  # the marker matched prose, not a path (e.g. "saved to" followed by a paragraph): name too long
         return block
     if not is_output_file:
@@ -116,21 +116,44 @@ def inline_offloaded_output(block: ToolResultBlock, persisted_path: str | None, 
 KEPT_ATTACHMENTS: frozenset[str] = frozenset({"queued_command", "command_permissions", "hook_success", "edited_text_file", "auto_mode"})
 
 
-def session_sources(session_path: Path) -> list[Path]:
-    """List the main transcript, sorted children, then sorted offloaded files."""
-    session_dir: Path = session_path.with_suffix("")
-    return [
-        session_path,
-        *sorted(path for path in (session_dir / "subagents").glob("agent-*.jsonl") if path.is_file()),
-        *sorted(path for path in (session_dir / "tool-results").rglob("*") if path.is_file()),
-    ]
+def session_source(path: Path) -> SessionSource:
+    """Resolve one transcript and inventory its children and offloaded files."""
+    main: Path = path.expanduser().resolve()
+    directory: Path = main.with_suffix("")
+    transcripts: dict[str, Path] = {"": main}
+    transcripts.update({child.stem.removeprefix("agent-"): child.resolve() for child in sorted((directory / "subagents").glob("agent-*.jsonl")) if child.is_file()})
+    tool_results_dir: Path = (directory / "tool-results").resolve()
+    outputs: tuple[Path, ...] = tuple(asset.resolve() for asset in sorted(tool_results_dir.rglob("*")) if asset.is_file())
+    inputs: tuple[Path, ...] = (*transcripts.values(), *outputs)
+    return SessionSource(main.stem, main, inputs, lambda: parse_session_inventory(main, transcripts, tool_results_dir, frozenset(outputs)))
+
+
+def discover(home: Path) -> Discovery:
+    """Discover main transcripts, reporting inventory failures by path."""
+    result: Discovery = Discovery()
+    for path in sorted((home / "projects").glob("*/*.jsonl")):
+        if path.name.startswith(("agent-", "._")):
+            continue
+        try:
+            result.sessions.append(provider_for(path).session_source(path))
+        except (ValueError, SerdeError, OSError) as error:
+            result.failed[path] = str(error)
+    return result
 
 
 def parse_session(session_path: Path) -> ev.Session:
+    """Build a source inventory and parse a single Claude session."""
+    return session_source(session_path).parse()
+
+
+def parse_session_inventory(source_path: Path, paths: dict[str, Path], tool_results_dir: Path, outputs: frozenset[Path]) -> ev.Session:
     """Read the main transcript and child files, counting omitted records.
 
     Args:
-        session_path: Main JSONL path under a Claude home's projects directory.
+        source_path: Resolved main transcript.
+        paths: Inventoried agent transcripts.
+        tool_results_dir: Resolved offloaded-output directory.
+        outputs: Inventoried offloaded files.
 
     Returns:
         One typed session with child records and recording metadata.
@@ -138,8 +161,6 @@ def parse_session(session_path: Path) -> ev.Session:
     Raises:
         ValueError: A record or timestamp is malformed.
     """
-    source_path: Path = session_path.resolve()
-    tool_results_dir: Path = source_path.with_suffix("") / "tool-results"
     n_inlined_outputs: int = 0
     skipped: dict[str, int] = {}
     cwd: str = ""
@@ -148,17 +169,7 @@ def parse_session(session_path: Path) -> ev.Session:
     models: set[str] = set()
     title: str = ""
     total_cost_usd: float = float("nan")
-    with source_path.open("rb") as source:
-        source_sha256: str = hashlib.file_digest(source, "sha256").hexdigest()
     transcripts: dict[str, list[ev.TimedRecord]] = {}
-    paths: dict[str, Path] = {"": source_path}
-    paths.update(
-        {
-            path.stem.removeprefix("agent-"): path
-            for path in session_sources(source_path)[1:]
-            if path.parent == source_path.with_suffix("") / "subagents"
-        }
-    )
     for agent_id, path in paths.items():
         rows: list[tuple[_SourceRecord, int]] = []
         source_record: _SourceRecord
@@ -192,7 +203,7 @@ def parse_session(session_path: Path) -> ev.Session:
                 for block in record.message.content:
                     match block:
                         case ToolResultBlock():
-                            expanded: ToolResultBlock = inline_offloaded_output(block, persisted, tool_results_dir)
+                            expanded: ToolResultBlock = inline_offloaded_output(block, persisted, tool_results_dir, outputs)
                             n_inlined_outputs += int(expanded is not block)
                             block = expanded
                     blocks.append(block)
@@ -219,7 +230,6 @@ def parse_session(session_path: Path) -> ev.Session:
         models=models,
         title=title,
         total_cost_usd=total_cost_usd,
-        source_sha256=source_sha256,
     )
 
 

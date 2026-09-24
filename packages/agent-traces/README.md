@@ -29,8 +29,14 @@ pixi run -e agent-traces rerun ~/agent-traces/claude/<session-id>.rrd
 ```
 
 `convert-all` writes `<out>/<profile>/<session-id>.rrd` and a `manifest.json` per profile.
-Run it again at any time: it converts only sessions whose input files changed.
+Run it again at any time: it skips a session only when its input files, effective host, and conversion revision match the manifest and its recording still exists.
+Changing `--host` or using a converter with a new content revision rebuilds the affected recordings.
+Manifest schema version 2 is required. If an older or unsupported version is found, the error names the manifest to delete before converting everything again.
+Both commands use the same input fingerprint for the recording's `source_sha256` property; batch conversion also stores it in the manifest.
+A symlinked transcript uses its target's session id and includes the target's child files.
 Filter with `--project`, `--session-id`, or `--since YYYY-MM-DD`.
+
+Codex children are reported as `folded-subagent` only when their parent has a recording. Children of an excluded or failed parent are reported as `parent-skipped` or `parent-failed`. Discovery errors name the source path.
 
 To convert one transcript, use `agent-traces-convert --session <file>.jsonl --out <file>.rrd`.
 
@@ -51,7 +57,7 @@ pixi run -e agent-traces agent-traces-register --catalog-url rerun+http://localh
 
 Each profile becomes one dataset, `agent-traces-<profile>`, with one segment per session.
 `host`, `profile`, and `agent` are segment-table columns, so a query can group or filter by them.
-The server opens each recording through its `file://` path, so it must be able to read the output folder.
+The server opens each recording through its `file://` path, so it must be able to read the output folder. Recordings, manifests, and registered blueprints are published with mode `0644`.
 
 `register` skips sessions that the dataset already has. After you convert changed sessions again, add `--replace` to update them.
 `rerun server` keeps registrations in memory. After a server restart, run `register` again.

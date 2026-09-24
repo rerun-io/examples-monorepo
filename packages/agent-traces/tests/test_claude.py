@@ -254,7 +254,7 @@ def test_inlines_offloaded_output_with_invalid_utf8_bytes(session_builder: Sessi
 
 def test_session_sources_include_sorted_recursive_outputs(session_builder: SessionBuilder) -> None:
     """Discovery includes ignored inputs but parses only child transcripts."""
-    from agent_traces.claude import session_sources
+    from agent_traces.claude import session_source
 
     session_builder.add("user", message={"content": "main"})
     root: Path = session_builder.path.with_suffix("")
@@ -265,7 +265,7 @@ def test_session_sources_include_sorted_recursive_outputs(session_builder: Sessi
     (root / "tool-results/pdf-id/page.jpg").write_bytes(b"image")
     (root / "tool-results/agent-ignored.jsonl").write_text("not a transcript")
     (root / "subagents/agent-directory.jsonl").mkdir()
-    assert session_sources(session_builder.path) == [
+    assert list(session_source(session_builder.path).inputs) == [
         session_builder.path,
         root / "subagents/agent-a.jsonl",
         root / "subagents/agent-z.jsonl",
@@ -311,3 +311,22 @@ def test_flat_events_carry_turn_and_assistant_identity(session_builder: SessionB
     assistant_events: list[TimedRecord] = [event for event in session.main if event.file_index >= 2]
     assert [type(event.payload) for event in assistant_events] == [UsageSample, Thinking, AssistantText, ToolCall, ToolCall]
     assert all(event.message_id == "m1" for event in assistant_events)
+
+
+def test_parser_reads_only_inventoried_files(session_builder: SessionBuilder) -> None:
+    """Children and offloaded outputs added after inventory wait for the next conversion."""
+    from agent_traces.claude import session_source
+    from agent_traces.events import ToolResult
+
+    output = session_builder.path.with_suffix("") / "tool-results/new.txt"
+    session_builder.add("user", message={"content": [{"type": "tool_result", "tool_use_id": "t", "content": "preview"}]}, toolUseResult={"persistedOutputPath": str(output)})
+    source = session_source(session_builder.path)
+    output.parent.mkdir(parents=True)
+    output.write_text("full output")
+    session_builder.add("user", path=session_builder.path.with_suffix("") / "subagents/agent-late.jsonl", message={"content": "late"})
+    session = source.parse()
+    assert not session.subagents
+    assert [event.payload.text for event in session.main if isinstance(event.payload, ToolResult)] == ["preview"]
+    updated = session_source(session_builder.path).parse()
+    assert set(updated.subagents) == {"late"}
+    assert [event.payload.text for event in updated.main if isinstance(event.payload, ToolResult)] == ["full output"]

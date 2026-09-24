@@ -5,12 +5,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import orjson
-from rerun.chunk import RrdReader
 
-from agent_traces.claude import parse_session
-from agent_traces.codex import SkipRollout, parse_rollout
+from agent_traces.codex import SkipRollout
 from agent_traces.events import Session
-from agent_traces.rerun_log import write_session_rrd
+from agent_traces.manifest import fingerprint
+from agent_traces.rerun_log import WrittenRecording, write_session_rrd
+from agent_traces.sources import SessionSource, provider_for
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,25 +33,18 @@ def main(config: Config) -> None:
     Args:
         config: Input path, output path, and optional profile override.
     """
-    with config.session.open("rb") as source:
-        first: object = orjson.loads(source.readline())
-    codex: bool = isinstance(first, dict) and first.get("type") == "session_meta"
     try:
-        session: Session = parse_rollout(config.session) if codex else parse_session(config.session)
+        source: SessionSource = provider_for(config.session.expanduser()).session_source(config.session)
+        session: Session = replace(source.parse(), source_sha256=fingerprint(source.inputs))
     except SkipRollout as error:
         print(f"skipped reason={error}")
         return
     if config.profile is not None:
         session = replace(session, profile=config.profile)
-    out: Path = write_session_rrd(session, config.out, host=config.host)
-    counts: Counter[str] = Counter()
+    written: WrittenRecording = write_session_rrd(session, config.out, host=config.host)
+    counts: Counter[str] = Counter(written.entity_rows)
     families: Counter[str] = Counter()
-    for chunk in RrdReader(out).stream():
-        entity: str = str(chunk.entity_path).lstrip("/")
-        if entity.startswith("__properties"):
-            continue
-        rows: int = chunk.num_rows
-        counts[entity] += rows
+    for entity, rows in counts.items():
         parts: list[str] = entity.split("/")
         family: str = parts[2] if parts[0] == "agents" else parts[0]
         families[family] += rows
@@ -61,4 +54,4 @@ def main(config: Config) -> None:
     print(f"n_turns={counts['turns']}")
     print(f"images={families['media']} inlined_outputs={session.n_inlined_outputs}")
     print(f"skipped={orjson.dumps(session.skipped, option=orjson.OPT_SORT_KEYS).decode()}")
-    print(out)
+    print(written.path)

@@ -87,8 +87,8 @@ def test_bad_session_keeps_good_progress(tmp_path: Path, capsys: pytest.CaptureF
     "content",
     [
         "{broken",
-        '{"version":1,"sessions":{},"unknown":true}',
-        '{"sessions":{"a":{"source_path":"a","source_sha256":"b","rrd":"a.rrd","converted_at":"now","n_rows":1,"unknown":true}}}',
+        '{"version":2,"sessions":{},"unknown":true}',
+        '{"version":2,"sessions":{"a":{"source_path":"a","source_sha256":"b","rrd":"a.rrd","converted_at":"now","host":"h","revision":1,"n_rows":1,"unknown":true}}}',
     ],
 )
 def test_corrupt_manifest_names_path(tmp_path: Path, content: str) -> None:
@@ -107,13 +107,13 @@ def test_writer_failure_propagates_after_saving_progress(tmp_path: Path, monkeyp
     from agent_traces.apis import convert_all
     from agent_traces.events import Session
     from agent_traces.manifest import load_manifest
-    from agent_traces.rerun_log import write_session_rrd
+    from agent_traces.rerun_log import WrittenRecording, write_session_rrd
 
     home: Path = tmp_path / ".claude"
     for session_id in ["a", "b"]:
         SessionBuilder(home / "projects/one" / f"{session_id}.jsonl").add("user", message={"content": session_id})
 
-    def fail_second(session: Session, out: Path, *, host: str | None = None) -> Path:
+    def fail_second(session: Session, out: Path, *, host: str | None = None) -> WrittenRecording:
         """Simulate a recording boundary failure after the first saved session."""
         if session.session_id == "b":
             raise ValueError("writer failure")
@@ -190,3 +190,94 @@ def test_appledouble_sidecars_are_not_sessions(tmp_path: Path, capsys: pytest.Ca
 
     main(Config(home=home, out=tmp_path / "out"))
     assert "converted=1 skipped=0 failed=0" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("version", [1, 999])
+def test_unsupported_manifest_version_requires_reconversion(tmp_path: Path, version: int) -> None:
+    """Old or unknown schemas require an explicit reset, including nonempty v1 files."""
+    from agent_traces.manifest import load_manifest
+
+    path: Path = tmp_path / "manifest.json"
+    path.write_text(f'{{"version":{version},"sessions":{{"old":{{}}}}}}')
+    with pytest.raises(ValueError, match=rf"{path}.*delete.*convert everything again"):
+        load_manifest(path)
+
+
+def test_symlink_inventory_and_conversion_contract(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """A renamed link keeps target identity, child dependencies, and cache settings."""
+    from dataclasses import replace
+
+    from agent_traces import manifest
+    from agent_traces.apis import convert, convert_all
+
+    target: Path = tmp_path / "original/projects/p/real.jsonl"
+    SessionBuilder(target).add("user", message={"content": "main"})
+    child = SessionBuilder(target.with_suffix("") / "subagents/agent-child.jsonl")
+    child.add("user", message={"content": "child"})
+    home: Path = tmp_path / ".claude"
+    link: Path = home / "projects/p/alias.jsonl"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(target)
+    config = convert_all.Config(home=home, out=tmp_path / "out", host="one")
+    convert_all.main(config)
+    assert "converted=1 skipped=0 failed=0" in capsys.readouterr().out
+    saved = manifest.load_manifest(tmp_path / "out/claude/manifest.json")
+    assert set(saved.sessions) == {"real"}
+    props = read_entities(tmp_path / "out/claude/real.rrd")["/__properties/session"]
+    assert props["session_id"].to_pylist() == [["real"]]
+    from rerun.chunk import RrdReader
+
+    assert RrdReader(tmp_path / "out/claude/real.rrd").recordings()[0].recording_id == "real"
+    assert props["source_sha256"].to_pylist() == [[saved.sessions["real"].source_sha256]]
+    convert.main(convert.Config(session=link, out=tmp_path / "single.rrd"))
+    assert read_entities(tmp_path / "single.rrd")["/__properties/session"]["source_sha256"].to_pylist() == props["source_sha256"].to_pylist()
+    capsys.readouterr()
+    convert_all.main(config)
+    assert "converted=0 skipped=1 failed=0" in capsys.readouterr().out
+    child.add("assistant", message={"content": "changed"})
+    convert_all.main(config)
+    assert "converted=1 skipped=0 failed=0" in capsys.readouterr().out
+    config = replace(config, host="other")
+    convert_all.main(config)
+    assert "converted=1 skipped=0 failed=0" in capsys.readouterr().out
+    monkeypatch.setattr(manifest, "CONVERSION_REVISION", manifest.CONVERSION_REVISION + 1)
+    convert_all.main(config)
+    assert "converted=1 skipped=0 failed=0" in capsys.readouterr().out
+    convert_all.main(config)
+    assert "converted=0 skipped=1 failed=0" in capsys.readouterr().out
+
+
+def test_manifest_failure_preserves_published_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Publication failure preserves the old manifest and removes the temporary file."""
+    from agent_traces import writing
+    from agent_traces.manifest import Manifest, save_manifest
+
+    path = tmp_path / "manifest.json"
+    save_manifest(Manifest(), path)
+    original = path.read_bytes()
+
+    def fail_replace(source: Path, target: Path) -> None:
+        assert source.read_bytes()
+        assert target == path
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(writing.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        save_manifest(Manifest(), path)
+    assert path.read_bytes() == original
+    assert set(tmp_path.iterdir()) == {path}
+
+
+def test_claude_transcript_in_codex_home(tmp_path: Path) -> None:
+    """Home layout chooses search paths; first-record detection chooses each parser."""
+    from agent_traces.apis import convert, convert_all
+
+    home = tmp_path / ".codex"
+    path = home / "sessions/a.jsonl"
+    SessionBuilder(path).add("user", message={"content": "hello"})
+    convert.main(convert.Config(session=path, out=tmp_path / "single.rrd"))
+    convert_all.main(convert_all.Config(home=home, out=tmp_path / "batch"))
+    single = read_entities(tmp_path / "single.rrd")["/__properties/session"]
+    batch = read_entities(tmp_path / "batch/codex/a.rrd")["/__properties/session"]
+    for name in ("agent", "session_id", "source_sha256"):
+        assert single[name].to_pylist() == batch[name].to_pylist()

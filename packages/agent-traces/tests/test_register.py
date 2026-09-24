@@ -178,3 +178,29 @@ def test_errors_are_reported_per_recording(converted: Path, catalog: dict[str, F
     assert "registered=1 skipped_duplicates=0 errors=1 missing=0" in output
     assert catalog["agent-traces-x"].blueprints == ["existing"]
     assert not (converted / "x/agent-traces.rbl").exists()
+
+
+def test_all_published_files_are_readable(converted: Path, catalog: dict[str, FakeEntry]) -> None:
+    """The catalog's user can read recordings, manifests, and the default blueprint."""
+    register.main(register.Config(catalog_url="rerun+http://127.0.0.1:1", out=converted))
+    for profile in ("x", "y"):
+        for name in ("a.rrd", "manifest.json", "agent-traces.rbl"):
+            assert (converted / profile / name).stat().st_mode & 0o777 == 0o644
+
+
+def test_blueprint_failure_leaves_no_partial_file(converted: Path, catalog: dict[str, FakeEntry], monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed blueprint save neither publishes nor leaves its temporary file."""
+    import rerun.blueprint as rrb
+
+    before = set((converted / "x").iterdir())
+
+    def fail_save(self: rrb.Blueprint, application_id: str, path: Path) -> None:
+        assert application_id == "agent_traces"
+        path.write_bytes(b"partial")
+        raise RuntimeError("save failed")
+
+    monkeypatch.setattr(rrb.Blueprint, "save", fail_save)
+    with pytest.raises(RuntimeError, match="save failed"):
+        register.main(register.Config(catalog_url="rerun+http://127.0.0.1:1", out=converted, profile="x"))
+    assert set((converted / "x").iterdir()) == before
+    assert not catalog["agent-traces-x"].blueprints

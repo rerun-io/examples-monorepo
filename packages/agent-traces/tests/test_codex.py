@@ -23,7 +23,7 @@ def test_codex_explicit_turn_and_reasoning(rollout_builder: RolloutBuilder, tmp_
     rollout_builder.item("Reasoning", id="reasoning")
     rollout_builder.item("AgentMessage", id="answer", content=[{"type": "text", "text": "done"}])
     rollout_builder.add("event_msg", type="task_complete", turn_id="turn", duration_ms=1250, completed_at=1789761601)
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "codex.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "codex.rrd").path)
     assert entities["/conversation/thinking"]["TextLog:text"].to_pylist() == [["<encrypted reasoning, 6 bytes>"]]
     assert entities["/conversation/thinking"]["TextLog:level"].to_pylist() == [["DEBUG"]]
     assert entities["/turns"]["elapsed_ms"].to_pylist() == [[1250.0]]
@@ -79,7 +79,7 @@ def test_usage_deduplicates_responses_and_prefers_records(rollout_builder: Rollo
             },
             thread_token_usage={"input_tokens": 30, "output_tokens": 6},
         )
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "usage.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "usage.rrd").path)
     assert entities["/usage/input_tokens"]["Scalars:scalars"].to_pylist() == [[10.0], [20.0]]
     assert entities["/turns"]["input_tokens"].to_pylist() == [[30]]
     assert entities["/__properties/session"]["total_input_tokens"].to_pylist() == [[30]]
@@ -101,7 +101,7 @@ def test_legacy_usage_deduplicates_within_each_turn(rollout_builder: RolloutBuil
                 type="token_count",
                 info={"last_token_usage": {"input_tokens": 7, "output_tokens": 4}, "total_token_usage": {"input_tokens": 999}},
             )
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "fallback.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "fallback.rrd").path)
     assert entities["/usage/input_tokens"]["Scalars:scalars"].to_pylist() == [[7.0], [7.0]]
     assert entities["/turns"]["input_tokens"].to_pylist() == [[7], [7]]
 
@@ -128,7 +128,7 @@ def test_tool_items_share_native_entities(
 
     rollout_builder.meta()
     rollout_builder.item(native, turn_id="turn", id="item", **fields)
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "tool.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "tool.rrd").path)
     assert entities[f"/tools/{name}"]["kind"].to_pylist() == [[kind], [kind]]
     assert entities[f"/tools/{name}"]["phase"].to_pylist() == [["call"], ["result"]]
     elapsed: float = entities[f"/tools/elapsed_ms/{name}"]["Scalars:scalars"].to_pylist()[0][0]
@@ -145,7 +145,7 @@ def test_raw_tool_response_is_joined_by_arguments(rollout_builder: RolloutBuilde
     rollout_builder.add("response_item", type="function_call", call_id="raw-call", name="exec_command", arguments=raw)
     rollout_builder.item("CommandExecution", id="different", command=["bash", "-lc", "echo synthetic"], aggregated_output="preview")
     rollout_builder.add("response_item", type="function_call_output", call_id="raw-call", output="full result")
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "raw.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "raw.rrd").path)
     assert entities["/tools/exec"]["input_json"].to_pylist()[0] == [raw]
     assert entities["/tools/exec"]["tool_use_result_json"].to_pylist()[1] == ['"full result"']
 
@@ -171,7 +171,7 @@ def test_images_from_response_and_local_files(rollout_builder: RolloutBuilder, t
         ],
     )
     rollout_builder.add("event_msg", type="user_message", local_images=[str(local), str(tmp_path / "missing.png")])
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "images.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "images.rrd").path)
     assert entities["/media/images"].num_rows == 2
     assert entities["/turns"]["n_images"].to_pylist() == [[2]]
     assert entities["/conversation/user"].num_rows == 1
@@ -179,7 +179,7 @@ def test_images_from_response_and_local_files(rollout_builder: RolloutBuilder, t
 
 def test_subagents_fold_recursively_and_orphans_keep_parent(rollout_builder: RolloutBuilder, tmp_path: Path) -> None:
     """Home-wide parent identifiers, including archived children, define the tree."""
-    from agent_traces.codex import parse_rollout, session_sources
+    from agent_traces.codex import parse_rollout, session_source
     from agent_traces.events import Session
 
     rollout_builder.meta()
@@ -196,7 +196,7 @@ def test_subagents_fold_recursively_and_orphans_keep_parent(rollout_builder: Rol
     orphan.item("Reasoning")
     parsed: Session = parse_rollout(rollout_builder.path)
     assert set(parsed.subagents) == {"child", "grandchild"}
-    assert set(session_sources(rollout_builder.path)) == {rollout_builder.path, child.path, grandchild.path}
+    assert set(session_source(rollout_builder.path).inputs) == {rollout_builder.path, child.path, grandchild.path}
     assert parse_rollout(orphan.path).parent_thread == "missing"
 
 
@@ -263,7 +263,7 @@ def test_model_changes_after_task_start_and_unknown_events(rollout_builder: Roll
     rollout_builder.add("event_msg", type="future_event")
     rollout_builder.item("FutureItem")
     session: Session = parse_rollout(rollout_builder.path)
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(session, tmp_path / "models.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(session, tmp_path / "models.rrd").path)
     assert entities["/turns"]["model"].to_pylist() == [["first"], ["second"]]
     assert entities["/turns"]["n_assistant_messages"].to_pylist() == [[1], [1]]
     assert session.skipped["future_event"] == 1
@@ -283,7 +283,7 @@ def test_batch_bad_rollout_keeps_progress_and_private_errors(
     main(Config(home=tmp_path / ".codex-alt", out=tmp_path / "out"))
     output: str = capsys.readouterr().out
     assert "converted=1 skipped=0 failed=1" in output
-    assert "FAILED" in output
+    assert f"FAILED {bad}:" in output
     assert "must not appear" not in output
 
 
@@ -300,7 +300,7 @@ def test_reasoning_matches_turn_and_order_with_missing_payload(rollout_builder: 
     rollout_builder.add("turn_context", turn_id="two", model="model")
     rollout_builder.add("response_item", type="reasoning", encrypted_content="abcdef", internal_chat_message_metadata_passthrough={"turn_id": "two"})
     rollout_builder.item("Reasoning", turn_id="two")
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "reasoning.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "reasoning.rrd").path)
     assert entities["/conversation/thinking"]["TextLog:text"].to_pylist() == [
         ["<encrypted reasoning, 3 bytes>"],
         ["<encrypted reasoning, 0 bytes>"],
@@ -363,7 +363,7 @@ def test_mcp_raw_arguments_match_without_json_whitespace(rollout_builder: Rollou
         error={"message": "synthetic error"},
     )
     rollout_builder.add("response_item", type="function_call_output", call_id="raw", output="synthetic response")
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "mcp.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "mcp.rrd").path)
     assert entities["/tools/mcp/search/find"]["input_json"].to_pylist()[0] == [arguments]
     assert entities["/tools/mcp/search/find"]["tool_use_result_json"].to_pylist()[1] == ['"synthetic response"']
     assert entities["/tools/mcp/search/find"]["TextLog:level"].to_pylist()[1] == ["ERROR"]
@@ -379,7 +379,7 @@ def test_task_completion_bounds_elapsed_without_duration(rollout_builder: Rollou
     rollout_builder.item("UserMessage", content=[{"type": "text", "text": "go"}])
     rollout_builder.add("event_msg", type="task_complete", turn_id="turn", completed_at=1789761602)
     rollout_builder.add("token_usage_record", turn_id="turn", response_id="late", usage={"output_tokens": 2})
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "bounded.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "bounded.rrd").path)
     # `started_at`/`completed_at` are Unix seconds; the turn is bounded by the task events' envelope timestamps (2 builder steps).
     assert entities["/turns"]["elapsed_ms"].to_pylist() == [[2000.0]]
     assert entities["/turns"]["output_tokens"].to_pylist() == [[2]]
@@ -394,7 +394,7 @@ def test_native_tool_details_survive_without_raw_call(rollout_builder: RolloutBu
 
     rollout_builder.meta()
     rollout_builder.item("WebSearch", id="search", query="synthetic query", action={"type": "search", "query": "synthetic query"}, results=[{"title": "synthetic result"}])
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "search.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "search.rrd").path)
     raw: str = entities["/tools/web_search"]["input_json"].to_pylist()[0][0]
     assert orjson.loads(raw)["query"] == "synthetic query"
     result: str = entities["/tools/web_search"]["tool_use_result_json"].to_pylist()[1][0]
@@ -410,7 +410,7 @@ def test_turn_rows_sit_at_the_task_event_time(rollout_builder: RolloutBuilder, t
     rollout_builder.add("event_msg", type="task_started", turn_id="turn", started_at=1789761600)
     rollout_builder.item("UserMessage", content=[{"type": "text", "text": "go"}])
     rollout_builder.add("event_msg", type="task_complete", turn_id="turn", duration_ms=5, completed_at=1789761600)
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "turn-time.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "turn-time.rrd").path)
     wall_ns: int = entities["/turns"]["wall"].cast(pa.int64()).to_pylist()[0]
     assert wall_ns > 1_700_000_000 * 1_000_000_000  # 2023 or later, i.e. not 1970
 
@@ -428,7 +428,7 @@ def test_tool_elapsed_comes_from_the_raw_call_output_span(rollout_builder: Rollo
     rollout_builder.add("response_item", type="custom_tool_call_output", call_id="c1", output=[{"type": "text", "text": "ok"}])  # step 5
     rollout_builder.item("CommandExecution", id="c1", command=["bash", "-lc", "ls"], status="completed", exit_code=0, aggregated_output="ok",
                          )
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "elapsed.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "elapsed.rrd").path)
     assert entities["/tools/elapsed_ms/exec"]["Scalars:scalars"].to_pylist() == [[2000.0]]
 
 
@@ -457,8 +457,47 @@ def test_message_identity_and_late_usage_across_turns(rollout_builder: RolloutBu
     turns = aggregate_turns(session.main)
     assert [turn.n_assistant_messages for turn in turns] == [1, 1]
     assert [turn.elapsed_ms for turn in turns] == [125.0, 125.0]
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(session, tmp_path / "identities.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(session, tmp_path / "identities.rrd").path)
     assert entities["/turns"]["input_tokens"].to_pylist() == [[7], [0]]
     assert entities["/usage/input_tokens"]["Scalars:scalars"].to_pylist() == [[7.0]]
     assert "/usage/cache_creation_5m_tokens" not in entities
     assert "/usage/cache_creation_1h_tokens" not in entities
+
+
+@pytest.mark.parametrize("parent_state", ["version", "empty", "failed"])
+def test_excluded_parent_does_not_claim_folded_children(rollout_builder: RolloutBuilder, tmp_path: Path, capsys: pytest.CaptureFixture[str], parent_state: str) -> None:
+    """A child has no recording when its known owner is excluded or fails."""
+    from agent_traces.apis.convert_all import Config, main
+
+    rollout_builder.meta(version="0.149.0" if parent_state == "version" else "0.153.4")
+    if parent_state == "failed":
+        with rollout_builder.path.open("ab") as stream:
+            stream.write(b"{broken\n")
+    child = RolloutBuilder(tmp_path / ".codex-alt/archived_sessions/child.jsonl")
+    child.meta("child", parent_thread_id="thread")
+    child.item("Reasoning")
+    main(Config(home=tmp_path / ".codex-alt", out=tmp_path / "out"))
+    output = capsys.readouterr().out
+    assert "folded-subagent" not in output
+    assert ("parent-failed" if parent_state == "failed" else "parent-skipped") in output
+    assert ("converted=0 skipped=1 failed=1" if parent_state == "failed" else "converted=0 skipped=2 failed=0") in output
+    assert not list((tmp_path / "out").rglob("*.rrd"))
+    if parent_state == "failed":
+        assert f"FAILED {rollout_builder.path}:" in output
+
+
+def test_commands_agree_on_transcript_provider(tmp_path: Path) -> None:
+    """A Codex transcript in a projects layout uses Codex in both commands."""
+    from agent_traces.apis import convert, convert_all
+
+    home = tmp_path / ".claude"
+    rollout = RolloutBuilder(home / "projects/p/renamed.jsonl")
+    rollout.meta("canonical")
+    rollout.item("Reasoning")
+    convert.main(convert.Config(session=rollout.path, out=tmp_path / "single.rrd"))
+    convert_all.main(convert_all.Config(home=home, out=tmp_path / "batch"))
+    single = read_entities(tmp_path / "single.rrd")["/__properties/session"]
+    batch = read_entities(tmp_path / "batch/claude/canonical.rrd")["/__properties/session"]
+    for name in ("agent", "session_id", "source_sha256"):
+        assert single[name].to_pylist() == batch[name].to_pylist()
+    assert single["agent"].to_pylist() == [["codex"]]

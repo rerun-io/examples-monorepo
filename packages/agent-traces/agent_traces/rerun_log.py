@@ -1,8 +1,6 @@
 """Write typed agent records as deterministic Rerun columns."""
 
-import os
 import socket
-import tempfile
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Literal
@@ -27,6 +25,7 @@ from agent_traces.events import (
     UsageSample,
 )
 from agent_traces.turns import Turn, aggregate_turns
+from agent_traces.writing import atomic_write
 
 ROLE_COLORS: dict[str, int] = {"user": 0x8AB4F8FF, "assistant": 0xE8EAEDFF, "thinking": 0x9AA0A6FF, "compaction": 0xF5A623FF}
 """TextLog row colour (RGBA) per conversation entity, so roles read apart without the entity column."""
@@ -80,7 +79,17 @@ class ImageRow:
     """Whether the image came from a tool_result or user."""
 
 
-def write_session_rrd(session: Session, out: Path, *, host: str | None = None) -> Path:
+@dataclass(frozen=True, slots=True)
+class WrittenRecording:
+    """Published recording and the temporal rows sent to each entity."""
+
+    path: Path
+    """Published recording path."""
+    entity_rows: dict[str, int]
+    """Rows per entity path, excluding recording properties."""
+
+
+def write_session_rrd(session: Session, out: Path, *, host: str | None = None) -> WrittenRecording:
     """Save one session, including its subagents, to an RRD file.
 
     Args:
@@ -89,7 +98,7 @@ def write_session_rrd(session: Session, out: Path, *, host: str | None = None) -
         host: Machine the session ran on; defaults to this machine's hostname.
 
     Returns:
-        The output path after the recording has been flushed and closed.
+        The published path and row counts after the recording is flushed and closed.
     """
     texts: dict[str, list[TextRow]] = {}
     scalars: dict[str, list[ScalarRow]] = {}
@@ -173,9 +182,7 @@ def write_session_rrd(session: Session, out: Path, *, host: str | None = None) -
         scalars.setdefault("turns/tool_calls", []).append(ScalarRow(turn.timestamp_ns, float(turn.n_tool_calls), turn.file_index))
     out.parent.mkdir(parents=True, exist_ok=True)
     recording: rr.RecordingStream = rr.RecordingStream("agent_traces", recording_id=session.session_id)
-    with tempfile.NamedTemporaryFile(dir=out.parent, prefix=out.name + ".", suffix=".tmp", delete=False) as temporary:
-        temp_path: Path = Path(temporary.name)
-    try:
+    with atomic_write(out) as temp_path:
         try:
             recording.save(temp_path, default_blueprint=session_blueprint())
             # Explicit Arrow lists preserve sparse rows and bypass AnyValues' global
@@ -270,7 +277,8 @@ def write_session_rrd(session: Session, out: Path, *, host: str | None = None) -
             recording.flush()
         finally:
             recording.disconnect()
-        os.replace(temp_path, out)
-    finally:
-        temp_path.unlink(missing_ok=True)
-    return out
+    counts: dict[str, int] = {}
+    for batches in (texts, scalars, images):
+        for entity, batch in batches.items():
+            counts[entity] = counts.get(entity, 0) + len(batch)
+    return WrittenRecording(out, counts)

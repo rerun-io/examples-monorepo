@@ -63,6 +63,12 @@ class SessionMeta:
     """Git metadata."""
 
 
+    @property
+    def thread_id(self) -> str:
+        """Canonical thread identity across metadata versions."""
+        return self.id or self.session_id
+
+
 @serde
 @dataclass(frozen=True, slots=True)
 class Content:

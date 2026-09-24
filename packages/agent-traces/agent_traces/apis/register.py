@@ -1,7 +1,5 @@
 """Register converted session recordings in a Rerun catalog."""
 
-import os
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,6 +7,7 @@ from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer, 
 
 from agent_traces.blueprint import session_blueprint
 from agent_traces.manifest import Manifest, load_manifest
+from agent_traces.writing import atomic_write
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,15 +88,8 @@ def main(config: Config) -> None:
         # dataset and re-register. Never truncate an .rbl a live server holds open.
         if entry.default_blueprint() is None:
             blueprint_path: Path = profile / "agent-traces.rbl"
-            temporary: Path | None = None
-            try:
-                with tempfile.NamedTemporaryFile(dir=profile, suffix=".rbl", delete=False) as stream:
-                    temporary = Path(stream.name)
+            with atomic_write(blueprint_path) as temporary:
                 session_blueprint().save("agent_traces", temporary)
-                os.replace(temporary, blueprint_path)
-            finally:
-                if temporary is not None:
-                    temporary.unlink(missing_ok=True)
             entry.register_blueprint(blueprint_path.resolve().as_uri(), set_default=True)
         segment_ids: set[str] = set(entry.segment_ids())
         print(
