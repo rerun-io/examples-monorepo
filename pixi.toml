@@ -1937,7 +1937,7 @@ platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 [feature.gsplat-rust-renderer.dependencies]
 python = "3.12.*"
 # rerun 0.35 crates require rustc >= 1.95
-rust = "1.97.*"
+rust = "1.98.*"
 clang = "*"
 cmake = "*"
 pkg-config = "*"
@@ -2451,7 +2451,7 @@ platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 python = "3.12.*"
 # conda-forge `rust` ships cargo/rustc/clippy/rustfmt and sets the linker; a
 # pure-Rust crate needs nothing else. Same pin as gsplat-rust-renderer.
-rust = "1.97.*"
+rust = "1.98.*"
 tyro = ">=0.9.1,<0.10"
 # dataforge's projectaria-tools drags moviepy in, and every moviepy 2.x caps
 # pillow < 12; without this the conda solve pins pillow 12 and the PyPI side is
@@ -2704,7 +2704,7 @@ description = "Build the Rust VIO core with the portable wgpu CubeCL frontend an
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.robocap-recorder.dependencies]
-rust = "1.97.*"
+rust = "1.98.*"
 c-compiler = "*"
 zlib = "*"
 gstreamer = "1.24.*"
@@ -2729,8 +2729,8 @@ cwd = "packages/slam-rs"
 platforms = ["linux-64"]
 
 [feature.robocap-cross.dependencies]
-rust = "1.97.*"
-rust-std-aarch64-unknown-linux-gnu = "1.97.*"
+rust = "1.98.*"
+rust-std-aarch64-unknown-linux-gnu = "1.98.*"
 gcc_linux-aarch64 = "15.*"
 pkg-config = "*"
 sysroot_linux-aarch64 = "2.34.*"
