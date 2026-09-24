@@ -82,7 +82,7 @@ slam-rs = { git = "https://github.com/rerun-io/examples-monorepo", subdirectory 
 
 `pixi install` compiles the Rust core once per checkout (about a minute on a workstation) and installs
 `slam_rs` with `_core`, `rig`, `frontend_log`, `config` and `machine`, which import only numpy,
-jaxtyping, pyserde and rerun-sdk (0.37 or later). Add `slam-rs-catalog` from the same source for the
+jaxtyping, pyserde and rerun-sdk (0.38.1 or later). Add `slam-rs-catalog` from the same source for the
 catalog readers, `tracking`, `vio_log`, `trajectory`, `reference` and the tyro apis; that output expects
 `simplecv` and `dataforge` from your workspace, as this monorepo supplies them through `catalog-common`.
 Pin a commit with `rev = "<sha>"` once you depend on it.

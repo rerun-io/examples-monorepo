@@ -41,7 +41,7 @@ outputs:
         - python 3.12.*
         - numpy
         - jaxtyping
-        - rerun-sdk >=0.37.0
+        - rerun-sdk >=0.38.1,<0.39
         - pyserde >=0.31.2,<0.32
         - tomli-w >=1.2,<2
         - orjson >=3.11,<4
