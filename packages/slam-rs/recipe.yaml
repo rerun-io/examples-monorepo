@@ -1,0 +1,80 @@
+recipe:
+  name: slam-rs
+  version: "0.1.0"
+
+source:
+  path: .
+  filter:
+    exclude:
+      - target/**
+      - data/**
+      - .pixi/**
+      - '**/__pycache__/**'
+      - slam_rs/_core.so
+
+outputs:
+  - package:
+      name: slam-rs
+    build:
+      script:
+        - export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+        - python tools/prepare_patched_deps.py
+        - cargo build --release -p slam-rs-py --locked
+        - python -m pip install . --no-deps --no-build-isolation -vv
+        - export SP_DIR="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
+        - if: osx
+          then: cp target/release/lib_core.dylib "$SP_DIR/slam_rs/_core.so"
+          else: cp target/release/lib_core.so "$SP_DIR/slam_rs/_core.so"
+        - rm -f "$SP_DIR"/slam_rs/catalog_*.py "$SP_DIR"/slam_rs/{tracking,vio_log,cuda_decode,trajectory,reference}.py
+        - rm -rf "$SP_DIR/slam_rs/apis" "$SP_DIR/slam_rs/__pycache__"
+    requirements:
+      build:
+        - ${{ compiler('c') }}
+        - rust 1.97.*
+        - git
+      host:
+        - python 3.12.*
+        - pip
+        - hatchling
+        - tyro
+      run:
+        - python 3.12.*
+        - numpy
+        - jaxtyping
+        - rerun-sdk >=0.38.1,<0.39
+        - pyserde >=0.31.2,<0.32
+        - tomli-w >=1.2,<2
+        - orjson >=3.11,<4
+    tests:
+      - python:
+          imports: [slam_rs, slam_rs.rig, slam_rs.frontend_log, slam_rs.config]
+          pip_check: false
+
+  - package:
+      name: slam-rs-catalog
+    build:
+      script:
+        - python -m pip install . --no-deps --no-build-isolation -vv
+        - export SP_DIR="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
+        - rm -f "$SP_DIR"/slam_rs/_core* "$SP_DIR/slam_rs/py.typed" "$SP_DIR"/slam_rs/{__init__,rig,frontend_log,config,machine}.py
+        - rm -rf "$SP_DIR"/slam_rs-*.dist-info "$SP_DIR/slam_rs/__pycache__"
+    requirements:
+      host:
+        - python 3.12.*
+        - pip
+        - hatchling
+      run:
+        - python 3.12.*
+        - ${{ pin_subpackage('slam-rs', exact=True) }}
+        # simplecv and dataforge are workspace PyPI path deps supplied by the consumer.
+        - tyro >=0.9.1,<0.10
+        - scipy
+        - pyarrow
+        - datafusion
+        - av
+        - py-opencv
+        - pytorch
+    tests:
+      - script:
+          - test -f "$SP_DIR/slam_rs/catalog_feed.py"
+          - test -d "$SP_DIR/slam_rs/apis"

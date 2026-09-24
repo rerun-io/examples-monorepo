@@ -4,7 +4,7 @@ This file provides guidance to coding agents when working with code in this repo
 
 ## What This Is
 
-A **Pixi workspace monorepo** of computer vision projects. Runnable Python projects live in `packages/<name>/` with their modules, CLI tools, and tests; the directory also contains build-only dependencies and vendored code. Root-managed dependencies, tasks, and environments live in `pixi.toml`. Runnable packages keep standard Python packaging metadata and package-specific tooling config such as `[tool.ruff]` and `[tool.vulture]` in `pyproject.toml`; Pixi-build packages such as `asmk`, `dpretrieval`, and `mast3r` have their own build manifests.
+A **Pixi workspace monorepo** of computer vision projects. Runnable Python projects live in `packages/<name>/` with their modules, CLI tools, and tests; the directory also contains build-only dependencies and vendored code. Root-managed dependencies, tasks, and environments live in `pixi.toml`. Runnable packages keep standard Python packaging metadata and package-specific tooling config such as `[tool.ruff]` and `[tool.vulture]` in `pyproject.toml`; Pixi-build packages such as `asmk`, `dpretrieval`, `mast3r`, and `slam-rs` have their own build manifests (see **Pixi-build packages**).
 
 ## Environments
 
@@ -81,6 +81,31 @@ The workspace `platforms` list defines the full platform vocabulary: the plain `
 **Every linux-only feature MUST declare `platforms = ["linux-64", "linux-aarch64"]` explicitly.** Since pixi 0.71 (PR prefix-dev/pixi#6178), a feature that omits `platforms` defaults to the entire workspace list — including `osx-arm64` and the named CUDA platforms. An env's platforms are the intersection of its features' lists, so one omitting feature can demand unintended macOS or CUDA solves; if that demand is unsolvable (CUDA deps like `libcublas`), **every `pixi install -e <any-env>`/`pixi lock` in the whole workspace aborts** on the next lock write. Solvable missing demands get silently solved and added to the lock instead. When adding a feature, copy the `platforms` line from an existing linux-only feature (e.g. `mv-api`).
 
 **Whole-workspace lock generation.** Resolution never needs package Python at build time: every in-repo package exposes static metadata, and anything that would need a build step is vendored or prebuilt instead. What limits a host is pixi's build dispatch, which instantiates every env that contains editable or git PyPI deps on the current machine and picks any of that env's platforms to do so. Every env has a linux-64 lane, so **a linux-64 host regenerates the whole-workspace lock**. A linux-aarch64 host can re-lock changes scoped to envs that have an aarch64 lane; a change to a shared feature (`cuda`, `common`, `dev`) also invalidates the linux-64-only envs and `pixi lock` fails with `build dispatch initialization failed: the environment '<env>' does not support 'linux-aarch64' on this machine`. Re-lock such changes on a linux-64 host: apply the change in a worktree there, run `CONDA_OVERRIDE_CUDA=13.0 pixi lock`, copy `pixi.lock` back, and confirm with `pixi lock --check`. macOS cannot regenerate the full lock for the same reason: linux-only envs cannot exist on osx.
+
+## Pixi-build packages
+
+`asmk`, `dpretrieval`, `mast3r` and `slam-rs` are built by the `pixi-build-rattler-build` backend
+from a `recipe.yaml` beside a `[package]` manifest, and consumed as source dependencies
+(`name = { path = "packages/<name>" }` inside the workspace; `name = { git = "<repo>", subdirectory =
+"packages/<name>" }` from another repo). `pixi lock` only renders the recipe; the compile happens at
+`pixi install`. slam-rs is the model for a package with a compiled core and a heavy tooling lane: one
+recipe, two `package:` outputs from the same directory (`slam-rs` = the abi3 extension plus the modules
+that run on numpy + rerun-sdk; `slam-rs-catalog` = the catalog readers, tracking, evaluation and the
+tyro apis, which expect `simplecv`/`dataforge` from the consumer workspace). The `slam-rs-pkg`
+environment installs both outputs exactly as an external repo would and `slam-rs-pkg-check` imports
+them; run it after touching the recipe or the package layout.
+
+Two rules learned the hard way:
+
+- **Development environments keep the editable install.** pixi fingerprints every file under a
+  source package's directory and rebuilds the package when any of them changes, so a conda source
+  dependency on slam-rs would recompile the Rust core on every Python edit or test run. The `*-dev`
+  and prod environments stay on the editable PyPI path dependency plus the `slam-rs-build` task; only
+  `slam-rs-pkg` and external consumers use the conda outputs.
+- **No `staging:` output for a path source.** rattler-build keys its multi-output staging cache on the
+  rendered source spec, not on the file contents, so after an edit pixi re-runs the recipe and the
+  cache hands back the old files. Give every output its own `script:` (the slam-rs catalog output is a
+  pip install that deletes the core files) and make sure no file lands in two outputs.
 
 ## Architecture
 

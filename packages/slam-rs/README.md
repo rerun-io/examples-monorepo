@@ -67,6 +67,26 @@ flowchart TB
 The catalog serves the encoded video and the sensor streams; slam-rs decodes
 them itself and the estimator only ever sees grayscale framesets and IMU samples.
 
+### Use slam-rs from another repo
+
+The package is a pixi-build source dependency with two outputs. A Vio-only consumer needs the core:
+
+```toml
+[workspace]
+preview = ["pixi-build"]
+
+[dependencies]
+python = "3.12.*"
+slam-rs = { git = "https://github.com/rerun-io/examples-monorepo", subdirectory = "packages/slam-rs" }
+```
+
+`pixi install` compiles the Rust core once per checkout (about a minute on a workstation) and installs
+`slam_rs` with `_core`, `rig`, `frontend_log`, `config` and `machine`, which import only numpy,
+jaxtyping, pyserde and rerun-sdk (0.38.1 or later). Add `slam-rs-catalog` from the same source for the
+catalog readers, `tracking`, `vio_log`, `trajectory`, `reference` and the tyro apis; that output expects
+`simplecv` and `dataforge` from your workspace, as this monorepo supplies them through `catalog-common`.
+Pin a commit with `rev = "<sha>"` once you depend on it.
+
 ## Results
 
 <p align="center">
