@@ -49,6 +49,11 @@ huggingface_hub = "*"
 tqdm = "*"
 transformers = ">=5.0.0"
 jupyterlab = "*"
+# pin-bump: hold — gradio-rerun's exact rerun-sdk pin (PyPI, below) must match.
+rerun-sdk = "==0.38.1" # pin-bump: hold
+# Half of the PyPI `catalog` extra (rerun-sdk[catalog] == datafusion + pandas);
+# datafusion stays on PyPI below: the conda build pins libprotobuf against ffmpeg 9.
+pandas = ">=2"
 
 [feature.common.target.linux-aarch64.dependencies]
 xorg-libx11 = "*"
@@ -62,10 +67,11 @@ pytorch-cpu = "*"
 torchvision = "*"
 
 [feature.common.pypi-dependencies]
-# pin-bump: hold — gradio-rerun's exact rerun-sdk pin must match.
-rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
+# pin-bump: hold — gradio-rerun pins rerun-sdk exactly; the conda rerun-sdk in
+# [feature.common.dependencies] satisfies it through pixi's conda->PyPI mapping.
 gradio = "==6.13.0"                                        # pin-bump: hold
 gradio-rerun = "==0.38.1"                                  # pin-bump: hold
+datafusion = "==54.0.0"
 simplecv = { path = "packages/simplecv", editable = true }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
@@ -101,11 +107,16 @@ simplecv = { path = "packages/simplecv", editable = true }
 [feature.rerun-prerelease]
 platforms = ["linux-64", "linux-aarch64"]
 
+[feature.rerun-prerelease.dependencies]
+rerun-sdk = "==0.38.1"
+# The PyPI `catalog` + `dataloader` extras, spelled out (datafusion on PyPI below).
+pandas = ">=2"
+av = "*"
+pillow = "*"
+torchvision = "*"
+
 [feature.rerun-prerelease.pypi-dependencies]
-rerun-sdk = { version = "==0.38.1", extras = [
-    "catalog",
-    "dataloader",
-] }
+datafusion = "==54.0.0"
 
 
 # ─── CUDA 13.0 feature (shared across all GPU envs) ─────────────────────────
@@ -1006,6 +1017,9 @@ platforms = ["osx-arm64"]
 
 [feature.mv-api-catalog-register-mac.dependencies]
 av = "*"
+# pin-bump: hold — the macOS lane restates `common`'s exact pin; see AGENTS.md.
+rerun-sdk = "==0.38.1" # pin-bump: hold
+pandas = ">=2"
 datasets = ">=4.0.0"
 h5py = ">=3.13.0,<4"
 natsort = ">=8.4.0,<9"
@@ -1014,9 +1028,8 @@ scipy = "*"
 
 [feature.mv-api-catalog-register-mac.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
+datafusion = "==54.0.0"
 simplecv = { path = "packages/simplecv", editable = true }
-# pin-bump: hold — the macOS lane restates `common`'s exact pin; see AGENTS.md.
-rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
 
 [feature.mv-api-catalog-register-mac.pypi-options]
 index-url = "https://pypi.org/simple"
@@ -1955,6 +1968,7 @@ orjson = ">=3.11,<4"
 # CPU-only PyTorch for lpips metrics (no CUDA requirement).
 pytorch-cpu = ">=2.8.0"
 torchvision = "*"
+rerun-sdk = "==0.38.1"
 
 [feature.gsplat-rust-renderer.target.linux-64.dependencies]
 # gilrs (via re_viewer) links libudev through pkg-config at build time.
@@ -1983,7 +1997,6 @@ xorg-libxrandr = "*"
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 lpips = ">=0.1.4,<1"
 plyfile = ">=1.1,<2"
-rerun-sdk = "==0.38.1"
 simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.gsplat-rust-renderer.activation.env]
@@ -2408,7 +2421,7 @@ description = "Launch DPVO Gradio web UI"
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.slam-evals.dependencies]
-python = "3.10.*"
+python = "3.12.*"
 pyyaml = "*"
 pyarrow = ">=20.0.0,<21"
 tqdm = "*"
@@ -2473,7 +2486,7 @@ dataforge = { path = "packages/dataforge", editable = true }
 # dataforge pulls projectaria-tools, which pins rerun-sdk==0.33.0 for its own
 # notebook tutorials; the workspace lane is rerun-sdk 0.38.1. Same override as
 # [feature.dataforge.pypi-options.dependency-overrides].
-rerun-sdk = { version = "==0.38.1", extras = ["catalog"] }
+rerun-sdk = "==0.38.1"
 
 [feature.slam-rs.tasks.slam-rs-demo]
 cmd = "python tools/apps/replay.py --stage vio --segment msd-g2__MGO_others__MGO07_mapping_easy"
@@ -2773,12 +2786,14 @@ scipy = "*"
 tqdm = "*"
 # simplecv declares it, and the conda build spares uv a Rust source build.
 hf-transfer = "*"
+# pin-bump: hold — the macOS lane restates `common`'s exact pin, so a Rerun bump
+# that misses this line leaves the Mac a release behind with no gate to say so.
+rerun-sdk = "==0.38.1" # pin-bump: hold
+pandas = ">=2"
 
 [feature.slam-rs-osx.pypi-dependencies]
 simplecv = { path = "packages/simplecv", editable = true }
-# pin-bump: hold — the macOS lane restates `common`'s exact pin, so a Rerun bump
-# that misses this line leaves the Mac a release behind with no gate to say so.
-rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
+datafusion = "==54.0.0"
 
 # ── Package consumer lane ─────────────────────────────────────────────────
 # Installs the two pixi-build outputs of packages/slam-rs (recipe.yaml) the way
@@ -3182,7 +3197,7 @@ projectaria-tools = ">=2.2"
 # projectaria-tools pins rerun-sdk==0.33.0 for its own notebook tutorials; dataforge
 # only uses its VRS reader, and the workspace lane is rerun-sdk 0.38.1 (AGENTS.md
 # "Testing Rerun builds"). Same version + extras as [feature.common.pypi-dependencies].
-rerun-sdk = { version = "==0.38.1", extras = ["catalog"] }
+rerun-sdk = "==0.38.1"
 
 [feature.dataforge.activation.env]
 PACKAGE_DIR = "packages/dataforge"
