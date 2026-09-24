@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar
 
+import pyarrow as pa
 import pytest
 import rerun.blueprint as rrb
 
@@ -39,6 +41,10 @@ class FakeEntry:
     blueprints: list[tuple[str, bool]] = field(default_factory=list)
     opened_as: tuple[str, str] = ("", "")
     """``(catalog url, dataset name)`` the client was asked for."""
+    blueprint_rows: dict[str, str] = field(default_factory=dict)
+    """Registered blueprint entries (id -> storage url), as the hidden blueprint dataset lists them."""
+    unregistered: list[str] = field(default_factory=list)
+    """Blueprint entry ids dropped from the blueprint dataset."""
 
     def register(self, uris: list[str], *, layer_name: str, on_duplicate: Any) -> FakeRegistration:
         self.registered[layer_name] = list(uris)
@@ -53,6 +59,23 @@ class FakeEntry:
 
     def register_blueprint(self, uri: str, *, set_default: bool = False, segment_table: bool = False) -> None:
         self.blueprints.append((uri, segment_table))
+
+    def blueprint_dataset(self) -> FakeEntry:
+        """The real entry has a hidden per-dataset blueprint dataset; one object plays both here."""
+        return self
+
+    def manifest(self) -> SimpleNamespace:
+        table: pa.Table = pa.table({"rerun_segment_id": list(self.blueprint_rows), "rerun_storage_url": list(self.blueprint_rows.values())})
+        return SimpleNamespace(to_arrow_table=lambda: table)
+
+    def unregister(self, *, segments_to_drop: str | list[str], layers_to_drop: list[str], force: bool = False) -> FakeRegistration:
+        assert layers_to_drop == [], "a refresh drops whole blueprint entries, never single layers"
+        self.unregistered.extend([segments_to_drop] if isinstance(segments_to_drop, str) else segments_to_drop)
+        return FakeRegistration()
+
+    def segment_table(self) -> SimpleNamespace:
+        """Just enough of the segment-table DataFrame for ``schema().names``."""
+        return SimpleNamespace(schema=lambda: SimpleNamespace(names=["rerun_segment_id", "property:RecordingInfo:name"]))
 
 
 @dataclass
@@ -125,6 +148,25 @@ def test_blueprints_are_registered_once_each(tmp_path: Path, catalog: FakeEntry)
     register.main(Config(dataset=RobocapConfig()))
     assert [segment_table for _, segment_table in catalog.blueprints] == [False, True]
     assert all(Path(paths.blueprint_path(tmp_path, "robocap", segment_table=table)).exists() for table in (False, True))
+
+
+def test_refresh_blueprints_replaces_the_defaults_and_retires_the_old_entries(tmp_path: Path, catalog: FakeEntry) -> None:
+    """A refresh writes new dated files (a live server holds the registered ones open), makes them the defaults,
+    unregisters every older entry, and deletes only the old files in this dataset's blueprint directory."""
+    make_rrds(tmp_path, paths.BASE_LAYER, ["robocap__a.rrd"])
+    blueprint_dir: Path = tmp_path / "blueprints"
+    blueprint_dir.mkdir()
+    old: list[Path] = [blueprint_dir / "robocap.rbl", blueprint_dir / "robocap-table.rbl"]
+    foreign: Path = tmp_path / "elsewhere.rbl"
+    for path in (*old, foreign):
+        path.write_bytes(b"rbl")
+    catalog.blueprint_rows = {"rec_default": old[0].as_uri(), "rec_table": old[1].as_uri(), "rec_foreign": foreign.as_uri()}
+    register.main(Config(dataset=RobocapConfig(), refresh_blueprints=True))
+    assert [segment_table for _, segment_table in catalog.blueprints] == [False, True]
+    new: list[Path] = [Path(uri.removeprefix("file://")) for uri, _ in catalog.blueprints]
+    assert all(path.exists() and path.parent == blueprint_dir and path not in old for path in new)
+    assert sorted(catalog.unregistered) == ["rec_default", "rec_foreign", "rec_table"]
+    assert not any(path.exists() for path in old) and foreign.exists()
 
 
 def test_reports_a_count_per_layer(tmp_path: Path, catalog: FakeEntry, capsys) -> None:

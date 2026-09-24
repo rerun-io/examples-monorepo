@@ -12,6 +12,7 @@ import os
 import tempfile
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,35 @@ from dataforge.identity import SequenceIdentity
 
 SEGMENT_LINK_COLUMN: str = "recording link"
 """The segment table's generated URI column; the one the table blueprint turns into a preview."""
+
+
+@dataclass(frozen=True, slots=True)
+class TableField:
+    """One segment-table column a layout shows by default, under a readable header."""
+
+    column: str
+    """Physical column name, e.g. ``property:episode:action``."""
+    name: str
+    """Header the card or table shows instead of the physical name."""
+
+
+@dataclass(frozen=True, slots=True)
+class TableFields:
+    """The columns each segment-table layout shows by default, in display order.
+
+    A layout with no fields keeps the viewer's default (every property column); a layout
+    with fields shows exactly those and hides every other non-system column, which the
+    viewer's column menu can still bring back.
+    """
+
+    cards: tuple[TableField, ...] = ()
+    """Card body fields, below the title and the preview."""
+    table: tuple[TableField, ...] = ()
+    """Table columns after the recording link."""
+
+
+VIEWER_DEFAULT_FIELDS: TableFields = TableFields()
+"""No declaration: every layout keeps the viewer's column defaults."""
 
 
 def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
@@ -43,7 +73,9 @@ def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
     return views
 
 
-def save_table_blueprint(blueprint: rrb.Blueprint, target: Path, *, timeline: str) -> None:
+def save_table_blueprint(
+    blueprint: rrb.Blueprint, target: Path, *, timeline: str, fields: TableFields = VIEWER_DEFAULT_FIELDS, columns: Sequence[str] = ()
+) -> None:
     """Write a Rerun 0.38 segment-table blueprint: the views plus the ``/table`` entities.
 
     0.38 redesigned table blueprints (the 0.37 files are ignored): the card and table layouts
@@ -52,6 +84,14 @@ def save_table_blueprint(blueprint: rrb.Blueprint, target: Path, *, timeline: st
     blueprint timeline through the low-level archetypes, as the SDK's ``table_blueprints``
     example does until a Python API exists. The recording link column comes first in the
     table layout and is the card's link; the card title is the recording name property.
+
+    Args:
+        blueprint: The preview views, laid out as the card shows them.
+        target: ``.rbl`` to write; replaced atomically.
+        timeline: Timeline the previews play on.
+        fields: Columns each layout shows by default; see ``TableFields``.
+        columns: Every column of the segment table, so a layout with fields can hide the
+            rest by name. ``rerun_*`` system columns keep the viewer default (hidden).
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     with atomic_write(target) as temp_path, RecordingStream._from_native(
@@ -66,10 +106,24 @@ def save_table_blueprint(blueprint: rrb.Blueprint, target: Path, *, timeline: st
             stream.log(path, rrb.experimental.TableColumn(cell_kind=rrb.components.TableCellKind.Preview))
             stream.log(path, rrb.experimental.TableColumnPreview(views=view_paths))
         stream.log("/table", rrb.experimental.PreviewsConfig(timeline=timeline))
-        stream.log("/table/layouts/table", rrb.experimental.TableLayout(column_order=[SEGMENT_LINK_COLUMN]))
+        for prefix, shown in (("/table/layouts/table/columns", fields.table), ("/table/layouts/cards/fields", fields.cards)):
+            if not shown:
+                continue  # no declaration: the viewer default stays
+            names: dict[str, str] = {field.column: field.name for field in shown}
+            for name in columns:
+                if name == SEGMENT_LINK_COLUMN or name.startswith("rerun_"):
+                    continue
+                visible: bool = name in names
+                stream.log(
+                    f"{prefix}/{rr.escape_entity_path_part(name)}",
+                    rrb.experimental.TableColumn(visible=visible, name=names[name] if visible else None),
+                )
+        stream.log("/table/layouts/table", rrb.experimental.TableLayout(column_order=[SEGMENT_LINK_COLUMN, *(f.column for f in fields.table)]))
         stream.log(
             "/table/layouts/cards",
-            rrb.experimental.CardLayout(field_order=[SEGMENT_LINK_COLUMN], title="property:RecordingInfo:name", link=SEGMENT_LINK_COLUMN),
+            rrb.experimental.CardLayout(
+                field_order=[SEGMENT_LINK_COLUMN, *(f.column for f in fields.cards)], title="property:RecordingInfo:name", link=SEGMENT_LINK_COLUMN
+            ),
         )
 
 APPLICATION_ID: str = "dataforge"

@@ -18,7 +18,7 @@ from serde import SerdeError, from_dict
 
 from dataforge import schema
 from dataforge.datasets.base import DataforgeDataset
-from dataforge.datasets.show3d import Show3dConfig, pane_contents, world_contents
+from dataforge.datasets.show3d import Show3dConfig, pane_contents, preview_world_contents, world_contents
 from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetRig, RigCalibration, headset_rig
 from dataforge.datasets.show3d_layers import write_base_layer
 from dataforge.datasets.show3d_source import CAMERAS, BlurInfo, IndexRow
@@ -300,3 +300,39 @@ def test_world_contents_exclude_face_boxes_and_shipped_uv_by_explicit_path() -> 
         for path in (schema.boxes_path(camera.rig, camera.cam, "face"), schema.coco133_uv_path(camera.rig, camera.cam))
     }
     assert not any("*" in rule for rule in contents[1:])
+
+
+def test_preview_world_contents_exclude_every_video_but_keep_every_frustum() -> None:
+    """The table card's 3D view decodes nothing: each video is excluded, each Pinhole (the frustum) is kept."""
+    contents: list[str] = preview_world_contents()
+    assert contents[0] == "+ /world/**"
+    for camera in CAMERAS:
+        assert f"- {schema.video_path(camera.rig, camera.cam)}/**" in contents
+        assert f"- {schema.boxes_path(camera.rig, camera.cam, 'face')}" in contents
+        assert f"- {schema.coco133_uv_path(camera.rig, camera.cam)}" in contents
+        assert f"- {schema.pinhole_path(camera.rig, camera.cam)}/**" not in contents
+    assert len(contents) == 1 + 3 * len(CAMERAS)
+
+
+def test_table_blueprint_pairs_the_scene_with_the_headset_pane_and_its_projected_overlays() -> None:
+    """The card is the video-free scene beside one headset pane that sees the world through its own pinhole."""
+    import rerun.blueprint as rrb
+
+    from dataforge.writing import blueprint_views
+
+    views: list[rrb.View] = blueprint_views(Show3dConfig().setup().table_blueprint())
+    assert [type(view) for view in views] == [rrb.Spatial3DView, rrb.Spatial2DView]
+    scene, pane = views
+    assert scene.origin == "/world" and scene.contents == preview_world_contents()
+    headset = next(camera for camera in CAMERAS if (camera.rig, camera.cam) == (1, 0))
+    assert pane.origin == schema.pinhole_path(1, 0) and pane.contents == pane_contents(headset)
+
+
+def test_table_fields_show_what_the_episode_is_and_the_table_adds_coverage() -> None:
+    fields = Show3dConfig().setup().table_fields()
+    assert [field.name for field in fields.cards] == ["action", "object", "caption", "subject", "split"]
+    assert [field.name for field in fields.table] == [
+        "action", "object", "subject", "split", "left hand coverage", "right hand coverage", "object coverage", "caption"
+    ]
+    assert all(field.column.startswith("property:") for field in fields.table)
+

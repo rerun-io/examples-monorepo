@@ -142,3 +142,44 @@ def test_save_table_blueprint_writes_a_preview_card_for_the_recording_link(tmp_p
     ]
     assert sorted(preview_views) == sorted([follow.blueprint_path(), pane.blueprint_path()])
     assert all(path in paths for path in (f"/{follow.blueprint_path()}", f"/{pane.blueprint_path()}"))
+
+
+def test_save_table_blueprint_shows_the_declared_fields_and_hides_every_other_column(tmp_path: Path) -> None:
+    """A layout with declared fields shows them under their names, first, and hides every other non-system column."""
+    import rerun as rr
+    import rerun.blueprint as rrb
+
+    from dataforge.writing import SEGMENT_LINK_COLUMN, TableField, TableFields, save_table_blueprint
+
+    action: TableField = TableField("property:episode:action", "action")
+    coverage: TableField = TableField("property:object_pose:coverage", "object coverage")
+    columns: list[str] = ["rerun_segment_id", action.column, coverage.column, "property:capture:schema", "video_time:start"]
+    target: Path = tmp_path / "table.rbl"
+    save_table_blueprint(
+        rrb.Blueprint(rrb.Spatial3DView(origin="/world")),
+        target,
+        timeline="video_time",
+        fields=TableFields(cards=(action,), table=(action, coverage)),
+        columns=columns,
+    )
+    reader: rrc.RrdReader = rrc.RrdReader(target)
+    batches = [(str(chunk.entity_path), chunk.to_record_batch()) for chunk in reader.stream(store=reader.blueprints()[0]).to_chunks()]
+
+    def value(path: str, component: str) -> object:
+        found: list[object] = [
+            batch.column(name).to_pylist()[0] for entity, batch in batches if entity == path for name in batch.schema.names if name.endswith(component)
+        ]
+        return found[0] if found else None
+
+    for layout, shown in (("cards/fields", [action]), ("table/columns", [action, coverage])):
+        for column in columns:
+            path: str = f"/table/layouts/{layout}/{rr.escape_entity_path_part(column)}"
+            field: TableField | None = next((f for f in shown if f.column == column), None)
+            if column.startswith("rerun_"):
+                assert value(path, "TableColumn:visible") is None, f"{layout}: system columns keep the viewer default"
+            elif field is not None:
+                assert value(path, "TableColumn:visible") == [True] and value(path, "TableColumn:name") == [field.name], f"{layout}: {column}"
+            else:
+                assert value(path, "TableColumn:visible") == [False], f"{layout}: {column} is hidden"
+    assert value("/table/layouts/cards", "CardLayout:field_order") == [SEGMENT_LINK_COLUMN, action.column]
+    assert value("/table/layouts/table", "TableLayout:column_order") == [SEGMENT_LINK_COLUMN, action.column, coverage.column]

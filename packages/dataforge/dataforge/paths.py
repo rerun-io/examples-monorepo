@@ -56,9 +56,9 @@ def rrd_path(root: Path, *, layer: str, identity: SequenceIdentity) -> Path:
     return root / layer / f"{identity.recording_id}.rrd"
 
 
-def blueprint_path(root: Path, name: str, *, segment_table: bool = False) -> Path:
-    """Blueprint location: ``<root>/blueprints/<name>[-table].rbl``."""
-    return root / "blueprints" / f"{name}{'-table' if segment_table else ''}.rbl"
+def blueprint_path(root: Path, name: str, *, segment_table: bool = False, stamp: str | None = None) -> Path:
+    """Blueprint location: ``<root>/blueprints/<name>[-table][-<stamp>].rbl``; a refresh stamps a new file."""
+    return root / "blueprints" / f"{name}{'-table' if segment_table else ''}{f'-{stamp}' if stamp else ''}.rbl"
 
 
 SIDECAR_DIR: str = "sidecars"
