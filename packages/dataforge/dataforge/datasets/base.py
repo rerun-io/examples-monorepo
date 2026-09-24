@@ -23,7 +23,7 @@ import rerun.blueprint as rrb
 
 from dataforge import paths
 from dataforge.identity import SequenceIdentity
-from dataforge.writing import VIEWER_DEFAULT_FIELDS, TableFields
+from dataforge.writing import TableFields
 
 
 @dataclass
@@ -111,4 +111,4 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
         The segment table carries every property a layer writes, far more than a card
         can show legibly. Empty keeps the viewer default (every property column).
         """
-        return VIEWER_DEFAULT_FIELDS
+        return TableFields()

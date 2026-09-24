@@ -50,13 +50,6 @@ from dataforge.writing import TableField, TableFields
 REPO_ID: str = "facebook/show3d-dataset"
 
 
-BACK_RIG_EYE: rrb.EyeControls3D = blueprints.eye_controls_from_pose((1.4, 0.7, 1.1), (0.25, -0.2, 0.1), (0.0, 1.0, 0.0))
-"""Eye of every SHOW3D 3D view: behind and above the back rig, looking at the table."""
-
-PREVIEW_EYE: rrb.EyeControls3D = blueprints.eye_controls_from_pose((1.25, 0.6, 1.0), (0.2, -0.15, 0.05), (0.0, 1.0, 0.0))
-"""Table-card eye: the direction of ``BACK_RIG_EYE``, closer, so the hands and object read at card size with every frustum in frame."""
-
-
 def world_contents() -> list[str]:
     """Everything under ``/world`` except the shipped face boxes and shipped pixel keypoints.
 
@@ -72,25 +65,13 @@ def world_contents() -> list[str]:
 
 
 def preview_world_contents() -> list[str]:
-    """The segment-table 3D view: every camera frustum, both hands, the object, no image content.
+    """The segment-table 3D view: ``world_contents`` without any camera's video.
 
     Every visible table row renders this at once, so nothing here may decode video. Each
-    camera's video is **excluded**, not hidden (a hidden entity is still decoded), which leaves
-    the Pinhole frustum with an empty image plane; the face boxes and shipped pixel keypoints
-    only make sense on an image, so they go too.
+    video is **excluded**, not hidden (a hidden entity is still decoded), which leaves every
+    Pinhole frustum with an empty image plane.
     """
-    return [
-        "+ /world/**",
-        *(
-            rule
-            for camera in CAMERAS
-            for rule in (
-                f"- {schema.video_path(camera.rig, camera.cam)}/**",
-                f"- {schema.boxes_path(camera.rig, camera.cam, 'face')}",
-                f"- {schema.coco133_uv_path(camera.rig, camera.cam)}",
-            )
-        ),
-    ]
+    return [*world_contents(), *(f"- {schema.video_path(camera.rig, camera.cam)}/**" for camera in CAMERAS)]
 
 
 def pane_contents(camera: Show3dCamera) -> list[str]:
@@ -322,7 +303,7 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
                 name="Back rig frame",
                 origin="/world",
                 contents=world_contents(),
-                eye_controls=BACK_RIG_EYE,
+                eye_controls=blueprints.eye_controls_from_pose((1.4, 0.7, 1.1), (0.25, -0.2, 0.1), (0.0, 1.0, 0.0)),
             ),
             ego_panes=[panes[camera] for camera in HEADSET_CAMERAS],
             exo_panes=[pane for camera, pane in panes.items() if camera not in HEADSET_CAMERAS],
@@ -335,11 +316,11 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
         The caption wraps inside a card but runs wide in a table row, so the table puts it last,
         where it no longer pushes the short columns off screen.
         """
-        action = TableField("property:episode:action", "action")
-        obj = TableField("property:episode:object_alias", "object")
-        caption = TableField("property:captions:overall_caption", "caption")
-        subject = TableField("property:episode:subject_id", "subject")
-        split = TableField("property:episode:split", "split")
+        action: TableField = TableField("property:episode:action", "action")
+        obj: TableField = TableField("property:episode:object_alias", "object")
+        caption: TableField = TableField("property:captions:overall_caption", "caption")
+        subject: TableField = TableField("property:episode:subject_id", "subject")
+        split: TableField = TableField("property:episode:split", "split")
         coverage: tuple[TableField, ...] = (
             TableField("property:hand_pose:coverage_left_high_conf", "left hand coverage"),
             TableField("property:hand_pose:coverage_right_high_conf", "right hand coverage"),
@@ -355,7 +336,13 @@ class Show3dDataset(DataforgeDataset[Show3dConfig, IndexRow]):
         headset: Show3dCamera = HEADSET_CAMERAS[0]
         return rrb.Blueprint(
             rrb.Horizontal(
-                rrb.Spatial3DView(name="Scene", origin="/world", contents=preview_world_contents(), eye_controls=PREVIEW_EYE),
+                rrb.Spatial3DView(
+                    name="Scene",
+                    origin="/world",
+                    contents=preview_world_contents(),
+                    # Closer than the full layout's eye, so the hands and object read at card size with every frustum in frame.
+                    eye_controls=blueprints.eye_controls_from_pose((1.25, 0.6, 1.0), (0.2, -0.15, 0.05), (0.0, 1.0, 0.0)),
+                ),
                 blueprints.camera_view(headset.source_name, headset.rig, headset.cam, contents=pane_contents(headset)),
             ),
             collapse_panels=True,

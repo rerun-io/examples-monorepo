@@ -54,9 +54,6 @@ class TableFields:
     """Table columns after the recording link."""
 
 
-VIEWER_DEFAULT_FIELDS: TableFields = TableFields()
-"""No declaration: every layout keeps the viewer's column defaults."""
-
 
 def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
     """Every view in the blueprint's container tree, in layout order."""
@@ -74,7 +71,7 @@ def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
 
 
 def save_table_blueprint(
-    blueprint: rrb.Blueprint, target: Path, *, timeline: str, fields: TableFields = VIEWER_DEFAULT_FIELDS, columns: Sequence[str] = ()
+    blueprint: rrb.Blueprint, target: Path, *, timeline: str, fields: TableFields, columns: Sequence[str] = ()
 ) -> None:
     """Write a Rerun 0.38 segment-table blueprint: the views plus the ``/table`` entities.
 
@@ -90,8 +87,9 @@ def save_table_blueprint(
         target: ``.rbl`` to write; replaced atomically.
         timeline: Timeline the previews play on.
         fields: Columns each layout shows by default; see ``TableFields``.
-        columns: Every column of the segment table, so a layout with fields can hide the
-            rest by name. ``rerun_*`` system columns keep the viewer default (hidden).
+        columns: Every column of the segment table; a layout with fields hides the undeclared
+            ones by name (the viewer shows every property column otherwise). ``rerun_*`` system
+            columns keep the viewer default (hidden).
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     with atomic_write(target) as temp_path, RecordingStream._from_native(
@@ -100,24 +98,18 @@ def save_table_blueprint(
         stream.save(str(temp_path))
         stream.set_time("blueprint", sequence=0)
         blueprint._log_to_stream(stream)
-        column: str = rr.escape_entity_path_part(SEGMENT_LINK_COLUMN)
+        link: str = rr.escape_entity_path_part(SEGMENT_LINK_COLUMN)
         view_paths: list[str] = [view.blueprint_path() for view in blueprint_views(blueprint)]
-        for path in (f"/table/layouts/table/columns/{column}", f"/table/layouts/cards/fields/{column}"):
-            stream.log(path, rrb.experimental.TableColumn(cell_kind=rrb.components.TableCellKind.Preview))
-            stream.log(path, rrb.experimental.TableColumnPreview(views=view_paths))
-        stream.log("/table", rrb.experimental.PreviewsConfig(timeline=timeline))
         for prefix, shown in (("/table/layouts/table/columns", fields.table), ("/table/layouts/cards/fields", fields.cards)):
-            if not shown:
-                continue  # no declaration: the viewer default stays
-            names: dict[str, str] = {field.column: field.name for field in shown}
-            for name in columns:
-                if name == SEGMENT_LINK_COLUMN or name.startswith("rerun_"):
-                    continue
-                visible: bool = name in names
-                stream.log(
-                    f"{prefix}/{rr.escape_entity_path_part(name)}",
-                    rrb.experimental.TableColumn(visible=visible, name=names[name] if visible else None),
-                )
+            stream.log(f"{prefix}/{link}", rrb.experimental.TableColumn(cell_kind=rrb.components.TableCellKind.Preview))
+            stream.log(f"{prefix}/{link}", rrb.experimental.TableColumnPreview(views=view_paths))
+            headers: dict[str, str] = {field.column: field.name for field in shown}
+            for column, header in headers.items():
+                stream.log(f"{prefix}/{rr.escape_entity_path_part(column)}", rrb.experimental.TableColumn(visible=True, name=header))
+            hidden: list[str] = [c for c in columns if headers and c not in headers and c != SEGMENT_LINK_COLUMN and not c.startswith("rerun_")]
+            for column in hidden:
+                stream.log(f"{prefix}/{rr.escape_entity_path_part(column)}", rrb.experimental.TableColumn(visible=False))
+        stream.log("/table", rrb.experimental.PreviewsConfig(timeline=timeline))
         stream.log("/table/layouts/table", rrb.experimental.TableLayout(column_order=[SEGMENT_LINK_COLUMN, *(f.column for f in fields.table)]))
         stream.log(
             "/table/layouts/cards",

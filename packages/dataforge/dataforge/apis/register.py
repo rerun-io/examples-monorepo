@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+import pyarrow as pa
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 
 from dataforge import paths, schema, writing
@@ -40,10 +41,11 @@ class Config:
     refresh_blueprints: bool = False
     """Replace the registered default and table blueprints with ones written from the current code.
 
-    Registered ``.rbl`` files are held open by the server, so a refresh writes new dated files,
-    makes them the defaults, then unregisters every older blueprint entry of the dataset and
-    deletes those files when they sit in this dataset's blueprint directory. The dataset id and
-    its segments are unchanged, so links keep working."""
+    Writes new dated ``.rbl`` files beside the old ones, makes them the defaults, then unregisters
+    every other blueprint entry of the dataset and deletes those entries' files when they sit in
+    this dataset's blueprint directory. The dataset id and its segments are unchanged, so links
+    keep working. Also run it after registering a new layer: the table blueprint hides undeclared
+    columns by name, so columns the new layer brings stay visible until the next refresh."""
 
 
 def main(config: Config) -> None:
@@ -67,41 +69,38 @@ def main(config: Config) -> None:
     # Blueprints register once: every register_blueprint call adds a NEW entry to the
     # catalog dataset's blueprint list (cluttering the viewer's selector), so an
     # incremental re-register skips a blueprint the catalog already has a default for,
-    # and --refresh-blueprints retires the old entries it replaces. A re-register must
-    # also never truncate an .rbl a live catalog server holds open.
+    # and --refresh-blueprints retires the entries its new files replace.
     refresh: bool = config.refresh_blueprints
-    # Every blueprint entry the dataset has now (id -> storage URL), listed by its hidden blueprint dataset
-    # (None until the dataset has any blueprint).
-    blueprint_entries: DatasetEntry | None = entry.blueprint_dataset() if refresh else None
-    stale: dict[str, str] = (
-        {
-            row["rerun_segment_id"]: row["rerun_storage_url"]
-            for row in blueprint_entries.manifest().to_arrow_table().select(["rerun_segment_id", "rerun_storage_url"]).to_pylist()
-        }
-        if blueprint_entries is not None
-        else {}
-    )
     stamp: str | None = datetime.now().strftime("%Y%m%d-%H%M%S") if refresh else None
+    written: set[Path] = set()
     if refresh or entry.default_blueprint() is None:
-        blueprint_path: Path = paths.blueprint_path(output_root, name, stamp=stamp)
+        blueprint_path: Path = paths.blueprint_path(output_root, name, stamp=stamp).resolve()
         with writing.atomic_write(blueprint_path) as temp_path:
             dataset.default_blueprint().save(name, str(temp_path))
-        entry.register_blueprint(blueprint_path.resolve().as_uri(), set_default=True)
+        entry.register_blueprint(blueprint_path.as_uri(), set_default=True)
+        written.add(blueprint_path)
     if refresh or entry.default_segment_table_blueprint() is None:
-        table_path: Path = paths.blueprint_path(output_root, name, segment_table=True, stamp=stamp)
-        fields: writing.TableFields = dataset.table_fields()
-        # Hiding the undeclared columns needs their names; only a declaring dataset pays that round trip.
-        columns: list[str] = entry.segment_table().schema().names if fields.cards or fields.table else []
-        writing.save_table_blueprint(dataset.table_blueprint(), table_path, timeline=schema.TIMELINE, fields=fields, columns=columns)
-        entry.register_blueprint(table_path.resolve().as_uri(), segment_table=True)
-    if blueprint_entries is not None and stale:
-        blueprint_entries.unregister(segments_to_drop=list(stale), layers_to_drop=[]).wait()
-        blueprint_dir: Path = paths.blueprint_path(output_root, name).parent
-        for url in stale.values():
-            old: Path = Path(unquote(urlparse(url).path))
-            if old.parent == blueprint_dir:
-                old.unlink(missing_ok=True)
-        print(f"retired {len(stale)} older blueprint entries of '{name}'")
+        table_path: Path = paths.blueprint_path(output_root, name, segment_table=True, stamp=stamp).resolve()
+        columns: list[str] = entry.segment_table().schema().names
+        writing.save_table_blueprint(dataset.table_blueprint(), table_path, timeline=schema.TIMELINE, fields=dataset.table_fields(), columns=columns)
+        entry.register_blueprint(table_path.as_uri(), segment_table=True)
+        written.add(table_path)
+    # Every blueprint entry lives in the dataset's hidden blueprint dataset, one segment per .rbl.
+    blueprint_entries: DatasetEntry | None = entry.blueprint_dataset() if refresh else None
+    if blueprint_entries is not None:
+        listed: pa.Table = blueprint_entries.segment_table().select("rerun_segment_id", "rerun_storage_urls").to_arrow_table()
+        files: dict[str, Path] = {
+            segment: Path(unquote(urlparse(urls[0]).path))
+            for segment, urls in zip(listed["rerun_segment_id"].to_pylist(), listed["rerun_storage_urls"].to_pylist(), strict=True)
+        }
+        stale: dict[str, Path] = {segment: path for segment, path in files.items() if path not in written}
+        if stale:
+            blueprint_entries.unregister(segments_to_drop=list(stale), layers_to_drop=[]).wait()
+            blueprint_dir: Path = paths.blueprint_path(output_root, name).parent.resolve()  # registered URLs are resolved paths
+            ours: list[Path] = [path for path in stale.values() if path.parent == blueprint_dir]
+            for path in ours:
+                path.unlink(missing_ok=True)
+            print(f"retired {len(stale)} older blueprint entries of '{name}' and deleted {len(ours)} of their files")
     counted: str = ", ".join(f"{len(found)} {layer}" for layer, found in paths_by_layer.items() if found)
     how: str = "replacing duplicates" if config.replace else "skipping duplicates"
     print(f"registered {counted} rrds into '{name}' at {config.catalog_url} ({how})")

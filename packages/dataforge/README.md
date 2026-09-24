@@ -426,8 +426,9 @@ pixi run -e dataforge --frozen dataforge-register --refresh-blueprints <dataset>
 
 The segment table carries every property a layer writes. A dataset's `table_fields()`
 names the few columns the cards and the table show by default, under readable
-headers; every other property column is hidden (the viewer's Columns menu brings
-it back).
+headers; every other column is hidden by name (the viewer's Columns menu brings it
+back). The names are taken when the table blueprint is written, so after
+registering a new layer, refresh the blueprints or its columns show up everywhere.
 
 Conventions this package follows — beartype under `PIXI_DEV_MODE`, thin `tools/`
 shims, jaxtyping annotations, `pixi run -e dataforge-dev {lint,typecheck,deadcode,tests}` —
