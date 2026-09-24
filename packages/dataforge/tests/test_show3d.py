@@ -18,10 +18,10 @@ from serde import SerdeError, from_dict
 
 from dataforge import schema
 from dataforge.datasets.base import DataforgeDataset
-from dataforge.datasets.show3d import Show3dConfig, pane_contents, world_contents
+from dataforge.datasets.show3d import Show3dConfig, pane_contents, preview_world_contents, world_contents
 from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetRig, RigCalibration, headset_rig
 from dataforge.datasets.show3d_layers import write_base_layer
-from dataforge.datasets.show3d_source import CAMERAS, BlurInfo, IndexRow
+from dataforge.datasets.show3d_source import CAMERAS, BlurInfo, IndexRow, Show3dCamera
 from dataforge.identity import SequenceIdentity
 
 
@@ -300,3 +300,25 @@ def test_world_contents_exclude_face_boxes_and_shipped_uv_by_explicit_path() -> 
         for path in (schema.boxes_path(camera.rig, camera.cam, "face"), schema.coco133_uv_path(camera.rig, camera.cam))
     }
     assert not any("*" in rule for rule in contents[1:])
+
+
+def test_preview_world_contents_exclude_every_video_but_keep_every_frustum() -> None:
+    """The table card's 3D view is the full scene minus each camera's video; no rule touches a Pinhole."""
+    contents: list[str] = preview_world_contents()
+    videos: set[str] = {f"- {schema.video_path(camera.rig, camera.cam)}/**" for camera in CAMERAS}
+    assert set(contents) - set(world_contents()) == videos
+    assert set(world_contents()) <= set(contents)
+
+
+def test_table_blueprint_pairs_the_scene_with_the_headset_pane_and_its_projected_overlays() -> None:
+    """The card is the video-free scene beside one headset pane that sees the world through its own pinhole."""
+    import rerun.blueprint as rrb
+
+    from dataforge.writing import blueprint_views
+
+    views: list[rrb.View] = blueprint_views(Show3dConfig().setup().table_blueprint())
+    assert [type(view) for view in views] == [rrb.Spatial3DView, rrb.Spatial2DView]
+    scene, pane = views
+    assert scene.origin == "/world" and scene.contents == preview_world_contents()
+    headset: Show3dCamera = next(camera for camera in CAMERAS if (camera.rig, camera.cam) == (1, 0))
+    assert pane.origin == schema.pinhole_path(1, 0) and pane.contents == pane_contents(headset)

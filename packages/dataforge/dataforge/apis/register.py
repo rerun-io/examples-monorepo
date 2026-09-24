@@ -9,7 +9,10 @@ recording identity. A declared layer with no files is not registered.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
+from typing import Any
+from urllib.parse import unquote, urlparse
 
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 
@@ -38,7 +41,7 @@ class Config:
 
 
 def main(config: Config) -> None:
-    """Create the dataset if needed and register every layer's rrds (idempotent)."""
+    """Create the dataset if needed, register every layer's rrds (idempotent), and republish its blueprints."""
     dataset_config: DataforgeDatasetConfig = config.dataset
     dataset: DataforgeDataset = dataset_config.setup()
     name: str = dataset_config.name
@@ -55,20 +58,30 @@ def main(config: Config) -> None:
             continue  # a derived layer nobody has produced yet
         entry.register([path.resolve().as_uri() for path in rrd_paths], layer_name=layer, on_duplicate=on_duplicate).wait()
 
-    # Blueprints register once: every register_blueprint call adds a NEW entry to the
-    # catalog dataset's blueprint list (cluttering the viewer's selector), so an
-    # incremental re-register skips a blueprint the catalog already has a default for.
-    # To refresh a blueprint, delete the dataset and re-register. A re-register must
-    # also never truncate an .rbl a live catalog server holds open.
-    if entry.default_blueprint() is None:
-        blueprint_path: Path = paths.blueprint_path(output_root, name)
-        with writing.atomic_write(blueprint_path) as temp_path:
-            dataset.default_blueprint().save(name, str(temp_path))
-        entry.register_blueprint(blueprint_path.resolve().as_uri(), set_default=True)
-    if entry.default_segment_table_blueprint() is None:
-        table_path: Path = paths.blueprint_path(output_root, name, segment_table=True)
-        writing.save_table_blueprint(dataset.table_blueprint(), table_path, timeline=schema.TIMELINE)
-        entry.register_blueprint(table_path.resolve().as_uri(), segment_table=True)
+    # Every run republishes the blueprints from the current code, so a new layer's columns and a changed
+    # layout both land without a separate step. register_blueprint only ever ADDS an entry, and a live
+    # server holds registered files open (never overwrite them), so the run writes new stamped files,
+    # registers them as the defaults, and retires every entry the blueprint dataset listed before it.
+    blueprint_entries: DatasetEntry | None = entry.blueprint_dataset()  # None while the dataset has no blueprints
+    retiring: dict[str, Path] = {}
+    if blueprint_entries is not None:
+        listed: list[dict[str, Any]] = blueprint_entries.segment_table().select("rerun_segment_id", "rerun_storage_urls").to_arrow_table().to_pylist()
+        retiring = {row["rerun_segment_id"]: Path(unquote(urlparse(row["rerun_storage_urls"][0]).path)) for row in listed}
+    stamp: str = datetime.now().strftime("%Y%m%d-%H%M%S-%f")  # microseconds: back-to-back runs never share a file name
+    blueprint_path: Path = paths.blueprint_path(output_root, name, stamp=stamp).resolve()
+    with writing.atomic_write(blueprint_path) as temp_path:
+        dataset.default_blueprint().save(name, str(temp_path))
+    entry.register_blueprint(blueprint_path.as_uri(), set_default=True)
+    table_path: Path = paths.blueprint_path(output_root, name, segment_table=True, stamp=stamp).resolve()
+    columns: list[str] = entry.segment_table().schema().names
+    writing.save_table_blueprint(dataset.table_blueprint(), table_path, timeline=schema.TIMELINE, fields=dataset.table_fields(), columns=columns)
+    entry.register_blueprint(table_path.as_uri(), set_default=True, segment_table=True)
+    if blueprint_entries is not None and retiring:
+        blueprint_entries.unregister(segments_to_drop=list(retiring), layers_to_drop=[]).wait()
+        ours: list[Path] = [path for path in retiring.values() if path.parent == blueprint_path.parent]  # both resolved
+        for path in ours:
+            path.unlink(missing_ok=True)
+        print(f"retired {len(retiring)} older blueprint entries of '{name}' and deleted {len(ours)} of their files")
     counted: str = ", ".join(f"{len(found)} {layer}" for layer, found in paths_by_layer.items() if found)
     how: str = "replacing duplicates" if config.replace else "skipping duplicates"
     print(f"registered {counted} rrds into '{name}' at {config.catalog_url} ({how})")

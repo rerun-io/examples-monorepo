@@ -413,13 +413,23 @@ in one strip along the bottom. Past `EXO_PANES_PER_TAB` (9) static cameras the s
 continues in further tabs, filled in camera order. Panes are titled `rig_NN/cam_MM`,
 as in the entity tree.
 
-`register` adds them once and never replaces them (each registration is a new
-entry in the viewer's blueprint list). To refresh: delete the dataset, then
-re-register — files on disk are untouched.
+Every `register` run republishes both blueprints from the current code. It writes
+new stamped `.rbl` files (a live server holds the registered ones open, so they are
+never overwritten), makes them the defaults, then unregisters every older blueprint
+entry of the dataset, hand-registered ones included, and deletes the older files in
+`blueprints/`. The dataset id and its segments stay, so links keep working.
 
-```bash
-pixi run -e dataforge --frozen python -c "from rerun.catalog import CatalogClient; CatalogClient('rerun+http://127.0.0.1:51235').get_dataset(name='<name>').delete()"
-```
+The native viewer saves its own copy of each table layout on disk
+(`~/.local/share/rerun/blueprints/tables/` on Linux,
+`~/Library/Application Support/rerun/blueprints/tables/` on macOS) and can keep
+showing that copy after a new default is registered, even after a restart; "Refresh
+dataset" does not reload it. Clear that folder to see the new card.
+
+The segment table carries every property a layer writes. A dataset's `table_fields()`
+names the few columns the cards and the table show by default, under readable
+headers; every other column is hidden by name (the viewer's Columns menu brings it
+back). `register` takes the column names after it registers the layers, so the run
+that adds a layer also hides that layer's columns.
 
 Conventions this package follows — beartype under `PIXI_DEV_MODE`, thin `tools/`
 shims, jaxtyping annotations, `pixi run -e dataforge-dev {lint,typecheck,deadcode,tests}` —

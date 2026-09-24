@@ -5,7 +5,7 @@ pixi tasks run with ``cwd = packages/dataforge``):
 
     data/raw/<dataset>/...            upstream layout, untouched
     data/dataforge/rrd/<layer>/<recording_id>.rrd   layer declared by the dataset
-    data/dataforge/rrd/blueprints/<name>[-table].rbl
+    data/dataforge/rrd/blueprints/<name>[-table]-<stamp>.rbl   rewritten by every register run
     data/dataforge/rrd/sidecars/<recording_id>/<name>   small inputs a derived layer rebuilds from
 """
 
@@ -56,9 +56,9 @@ def rrd_path(root: Path, *, layer: str, identity: SequenceIdentity) -> Path:
     return root / layer / f"{identity.recording_id}.rrd"
 
 
-def blueprint_path(root: Path, name: str, *, segment_table: bool = False) -> Path:
-    """Blueprint location: ``<root>/blueprints/<name>[-table].rbl``."""
-    return root / "blueprints" / f"{name}{'-table' if segment_table else ''}.rbl"
+def blueprint_path(root: Path, name: str, *, stamp: str, segment_table: bool = False) -> Path:
+    """Blueprint location: ``<root>/blueprints/<name>[-table]-<stamp>.rbl``; every register run stamps new files."""
+    return root / "blueprints" / f"{name}{'-table' if segment_table else ''}-{stamp}.rbl"
 
 
 SIDECAR_DIR: str = "sidecars"

@@ -23,6 +23,7 @@ import rerun.blueprint as rrb
 
 from dataforge import paths
 from dataforge.identity import SequenceIdentity
+from dataforge.writing import TableFields
 
 
 @dataclass
@@ -103,3 +104,11 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
         reason: without it, table cards fall back to viewer heuristics that
         decode every stream of every visible row.
         """
+
+    def table_fields(self) -> TableFields:
+        """Segment-table columns the card and table layouts show by default.
+
+        The segment table carries every property a layer writes, far more than a card
+        can show legibly. Empty keeps the viewer default (every property column).
+        """
+        return TableFields()

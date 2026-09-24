@@ -115,15 +115,23 @@ def test_recording_to_writes_the_path_it_is_given_and_publishes_nothing(tmp_path
 
 
 def test_save_table_blueprint_writes_a_preview_card_for_the_recording_link(tmp_path: Path) -> None:
-    """Rerun 0.38 table blueprints are the views plus /table entities naming the preview column and its views."""
+    """Rerun 0.38 table blueprints are the views plus /table entities naming the preview column and its views.
+
+    With no declared fields the layouts keep the viewer default: no column is hidden."""
     import rerun.blueprint as rrb
 
-    from dataforge.writing import save_table_blueprint
+    from dataforge.writing import TableFields, save_table_blueprint
 
     pane: rrb.Spatial2DView = rrb.Spatial2DView(origin="/world/rig_01/cam_00/pinhole", contents=["+ /world/rig_01/cam_00/pinhole/video"])
     follow: rrb.Spatial3DView = rrb.Spatial3DView(origin="/world/rig_00")
     target: Path = tmp_path / "blueprints" / "show3d-table.rbl"
-    save_table_blueprint(rrb.Blueprint(rrb.Horizontal(follow, pane), collapse_panels=True), target, timeline="video_time")
+    save_table_blueprint(
+        rrb.Blueprint(rrb.Horizontal(follow, pane), collapse_panels=True),
+        target,
+        timeline="video_time",
+        fields=TableFields(),
+        columns=["rerun_segment_id", "property:capture:schema"],
+    )
     reader: rrc.RrdReader = rrc.RrdReader(target)
     stores = reader.blueprints()
     assert len(stores) == 1
@@ -142,3 +150,45 @@ def test_save_table_blueprint_writes_a_preview_card_for_the_recording_link(tmp_p
     ]
     assert sorted(preview_views) == sorted([follow.blueprint_path(), pane.blueprint_path()])
     assert all(path in paths for path in (f"/{follow.blueprint_path()}", f"/{pane.blueprint_path()}"))
+    assert not any("capture:schema" in path for path in paths), "no declared fields: nothing is hidden"
+
+
+def test_save_table_blueprint_shows_the_declared_fields_and_hides_every_other_column(tmp_path: Path) -> None:
+    """A layout with declared fields shows them under their headers, first, and hides every other non-system column."""
+    import rerun as rr
+    import rerun.blueprint as rrb
+
+    from dataforge.writing import SEGMENT_LINK_COLUMN, TableField, TableFields, save_table_blueprint
+
+    action: TableField = TableField("property:episode:action", "action")
+    coverage: TableField = TableField("property:object_pose:coverage", "object coverage")
+    target: Path = tmp_path / "table.rbl"
+    save_table_blueprint(
+        rrb.Blueprint(rrb.Spatial3DView(origin="/world")),
+        target,
+        timeline="video_time",
+        fields=TableFields(cards=(action,), table=(action, coverage)),
+        columns=["rerun_segment_id", action.column, coverage.column, "property:capture:schema", "video_time:start"],
+    )
+    reader: rrc.RrdReader = rrc.RrdReader(target)
+    logged: dict[tuple[str, str], object] = {
+        (str(chunk.entity_path), name.rsplit(":", 1)[-1]): chunk.to_record_batch().column(name).to_pylist()[0]
+        for chunk in reader.stream(store=reader.blueprints()[0]).to_chunks()
+        for name in chunk.to_record_batch().schema.names
+        if name.startswith(("TableColumn:", "CardLayout:", "TableLayout:"))
+    }
+
+    def column(layout: str, name: str) -> tuple[object, object]:
+        path: str = f"/table/layouts/{layout}/{rr.escape_entity_path_part(name)}"
+        return logged.get((path, "visible")), logged.get((path, "name"))
+
+    assert column("cards/fields", action.column) == ([True], ["action"])
+    assert column("table/columns", action.column) == ([True], ["action"])
+    assert column("table/columns", coverage.column) == ([True], ["object coverage"])
+    assert column("cards/fields", coverage.column) == ([False], None), "declared for the table only"
+    for layout in ("cards/fields", "table/columns"):
+        assert column(layout, "property:capture:schema") == ([False], None)
+        assert column(layout, "video_time:start") == ([False], None)
+        assert column(layout, "rerun_segment_id") == (None, None), "system columns keep the viewer default"
+    assert logged[("/table/layouts/cards", "field_order")] == [SEGMENT_LINK_COLUMN, action.column]
+    assert logged[("/table/layouts/table", "column_order")] == [SEGMENT_LINK_COLUMN, action.column, coverage.column]
