@@ -20,9 +20,14 @@ from dataforge import schema
 from dataforge.datasets.base import DataforgeDataset
 from dataforge.datasets.show3d import Show3dConfig, pane_contents, preview_world_contents, world_contents
 from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetRig, RigCalibration, headset_rig
+from dataforge.datasets.show3d_captions import Caption, write_captions_layer
+from dataforge.datasets.show3d_hands import HandFrame, HandPose, write_hand_pose_layer
 from dataforge.datasets.show3d_layers import write_base_layer
-from dataforge.datasets.show3d_source import CAMERAS, BlurInfo, IndexRow, Show3dCamera
+from dataforge.datasets.show3d_object_source import ObjectFrame
+from dataforge.datasets.show3d_objects import ObjectSanity, write_object_pose_layer
+from dataforge.datasets.show3d_source import CAMERAS, BlurInfo, FrameClock, FrameInfo, IndexRow, RecordingInfo, Show3dCamera
 from dataforge.identity import SequenceIdentity
+from dataforge.writing import TableFields
 
 
 def test_source_schemas_accept_legacy_and_new_pose_contracts() -> None:
@@ -239,6 +244,57 @@ def test_synthetic_base_roundtrip(tmp_path: Path, tiny_scene: Path) -> None:
     assert recording_properties(read_back(target), "episode") == dict(subject_id="subject", split="test", object_alias="toy", action="pick-up")
     assert not list((tmp_path / "work").glob("*.mp4"))
 
+
+@pytest.mark.integration
+def test_table_fields_name_columns_the_layer_writers_produce(tmp_path: Path, tiny_scene: Path) -> None:
+    """``table_fields()`` names its columns by string, so a writer that renames a property would strand one silently.
+
+    Writes every layer the table reads (base from the tiny scene, the others from minimal inputs) and checks that
+    each declared column is a property one of them wrote. Integration only because the base layer encodes video.
+    """
+    identity: SequenceIdentity = SequenceIdentity("show3d", ("subject", "toy_pick-up_abcd"))
+    index: IndexRow = index_row(subject_id="subject", scene_id="toy_pick-up_abcd")
+    write_base_layer(identity, tiny_scene, tmp_path / "base.rrd", index=index, work_dir=tmp_path / "work", hf_revision="test-sha")
+    caption: Caption = from_dict(
+        Caption,
+        dict(
+            object_alias="toy",
+            action_hint="pick-up",
+            hand="both",
+            interaction_description="Lift",
+            start_state="Rest",
+            end_state="Held",
+            intent="Move",
+            scene_description="Room",
+            additional_observations="",
+            overall_caption="Lift the toy.",
+        ),
+    )
+    write_captions_layer(identity, caption, tmp_path / "captions.rrd")
+    clock: FrameClock = FrameClock(
+        RecordingInfo(20, 2, 60.0, {}),
+        [FrameInfo(0, 20, 1.0, []), FrameInfo(1, 21, 2.0, [])],
+        np.array([0, 1_000_000_000], dtype=np.int64),
+        np.array([0, 1], dtype=np.int64),
+    )
+    absent: HandPose = HandPose(0.0, None, None, None, None, None)
+    hands: list[HandFrame] = [HandFrame(i, 20 + i, 1.0 + i, [], {"0": absent, "1": absent}) for i in range(2)]
+    write_hand_pose_layer(identity, clock, hands, "{}", tmp_path / "hand_pose.rrd")
+    objects: list[ObjectFrame] = [
+        ObjectFrame(0, 20, 1.0, [], np.eye(3).tolist(), [[0.0], [0.0], [1000.0]], 1.0),
+        ObjectFrame(1, 21, 2.0, [], [], [], 0.0),
+    ]
+    write_object_pose_layer(identity, "toy", clock, objects, ObjectSanity(0.5, 1.0, 0.1), tmp_path / "object_pose.rrd", clock_offset_s=0.0)
+
+    written: set[str] = {
+        name
+        for layer in tmp_path.glob("*.rrd")
+        for name in read_back(layer).reader(index=None, contents="/__properties/**").to_arrow_table().column_names
+        if name.startswith("property:")
+    }
+    fields: TableFields = Show3dConfig().setup().table_fields()
+    declared: set[str] = {field.column for field in (*fields.cards, *fields.table)}
+    assert declared <= written, f"table_fields() names columns no layer writes: {sorted(declared - written)}"
 
 def test_rig_calibration_is_typed_and_rejects_reflections() -> None:
     source: dict = dict(
