@@ -38,7 +38,8 @@ class FakeEntry:
     registered: dict[str, list[str]] = field(default_factory=dict)
     duplicates: dict[str, Any] = field(default_factory=dict)
     """The ``on_duplicate`` policy each layer was registered under."""
-    blueprints: list[tuple[str, bool]] = field(default_factory=list)
+    blueprints: list[tuple[str, bool, bool]] = field(default_factory=list)
+    """``(uri, set_default, segment_table)`` of every ``register_blueprint`` call."""
     opened_as: tuple[str, str] = ("", "")
     """``(catalog url, dataset name)`` the client was asked for."""
     blueprint_rows: dict[str, str] = field(default_factory=dict)
@@ -51,14 +52,8 @@ class FakeEntry:
         self.duplicates[layer_name] = on_duplicate
         return FakeRegistration()
 
-    def default_blueprint(self) -> None:
-        return None
-
-    def default_segment_table_blueprint(self) -> None:
-        return None
-
-    def register_blueprint(self, uri: str, *, set_default: bool = False, segment_table: bool = False) -> None:
-        self.blueprints.append((uri, segment_table))
+    def register_blueprint(self, uri: str, set_default: bool = True, *, segment_table: bool = False) -> None:
+        self.blueprints.append((uri, set_default, segment_table))
         self.blueprint_rows[f"rec_new_{len(self.blueprints)}"] = uri  # the server lists new entries beside the old ones
 
     def blueprint_dataset(self) -> FakeEntry:
@@ -146,16 +141,21 @@ def test_base_is_required(tmp_path: Path, catalog: FakeEntry) -> None:
         register.main(Config(dataset=RobocapConfig()))
 
 
-def test_blueprints_are_registered_once_each(tmp_path: Path, catalog: FakeEntry) -> None:
+def registered_files(catalog: FakeEntry) -> list[Path]:
+    """The files behind every ``register_blueprint`` call, in call order."""
+    return [Path(uri.removeprefix("file://")) for uri, _, _ in catalog.blueprints]
+
+
+def test_every_run_registers_both_blueprints_as_the_defaults(tmp_path: Path, catalog: FakeEntry) -> None:
     make_rrds(tmp_path, paths.BASE_LAYER, ["robocap__a.rrd"])
     register.main(Config(dataset=RobocapConfig()))
-    assert [segment_table for _, segment_table in catalog.blueprints] == [False, True]
-    assert all(Path(paths.blueprint_path(tmp_path, "robocap", segment_table=table)).exists() for table in (False, True))
+    assert [(set_default, segment_table) for _, set_default, segment_table in catalog.blueprints] == [(True, False), (True, True)]
+    assert all(path.exists() for path in registered_files(catalog))
 
 
-def test_refresh_blueprints_replaces_the_defaults_and_retires_the_old_entries(tmp_path: Path, catalog: FakeEntry, monkeypatch) -> None:
-    """A refresh writes new dated files, makes them the defaults, unregisters every other entry, and deletes
-    only the old files in this dataset's blueprint directory, also under the default relative output root."""
+def test_a_run_retires_the_blueprint_entries_it_replaces(tmp_path: Path, catalog: FakeEntry, monkeypatch) -> None:
+    """Every entry listed before the run is unregistered; only the old files in this dataset's blueprint
+    directory are deleted, also under the default relative output root."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", "rrd")  # relative, like the default; registered URLs are absolute
     root: Path = tmp_path / "rrd"
@@ -167,12 +167,19 @@ def test_refresh_blueprints_replaces_the_defaults_and_retires_the_old_entries(tm
     for path in (*old, foreign):
         path.write_bytes(b"rbl")
     catalog.blueprint_rows = {"rec_default": old[0].as_uri(), "rec_table": old[1].as_uri(), "rec_foreign": foreign.as_uri()}
-    register.main(Config(dataset=RobocapConfig(), refresh_blueprints=True))
-    assert [segment_table for _, segment_table in catalog.blueprints] == [False, True]
-    new: list[Path] = [Path(uri.removeprefix("file://")) for uri, _ in catalog.blueprints]
-    assert all(path.exists() and path.parent == blueprint_dir and path not in old for path in new)
+    register.main(Config(dataset=RobocapConfig()))
+    assert all(path.exists() and path.parent == blueprint_dir and path not in old for path in registered_files(catalog))
     assert sorted(catalog.unregistered) == ["rec_default", "rec_foreign", "rec_table"], "the two new entries stay"
     assert not any(path.exists() for path in old) and foreign.exists()
+
+
+def test_back_to_back_runs_keep_only_the_latest_blueprints(tmp_path: Path, catalog: FakeEntry) -> None:
+    """Two runs inside one second must not share file names, or the second deletes the files it just registered."""
+    make_rrds(tmp_path, paths.BASE_LAYER, ["robocap__a.rrd"])
+    register.main(Config(dataset=RobocapConfig()))
+    register.main(Config(dataset=RobocapConfig()))
+    assert sorted(catalog.unregistered) == ["rec_new_1", "rec_new_2"]
+    assert sorted((tmp_path / "blueprints").iterdir()) == sorted(registered_files(catalog)[2:])
 
 
 def test_reports_a_count_per_layer(tmp_path: Path, catalog: FakeEntry, capsys) -> None:

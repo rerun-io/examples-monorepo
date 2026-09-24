@@ -115,7 +115,9 @@ def test_recording_to_writes_the_path_it_is_given_and_publishes_nothing(tmp_path
 
 
 def test_save_table_blueprint_writes_a_preview_card_for_the_recording_link(tmp_path: Path) -> None:
-    """Rerun 0.38 table blueprints are the views plus /table entities naming the preview column and its views."""
+    """Rerun 0.38 table blueprints are the views plus /table entities naming the preview column and its views.
+
+    With no declared fields the layouts keep the viewer default: no column is hidden."""
     import rerun.blueprint as rrb
 
     from dataforge.writing import TableFields, save_table_blueprint
@@ -123,7 +125,13 @@ def test_save_table_blueprint_writes_a_preview_card_for_the_recording_link(tmp_p
     pane: rrb.Spatial2DView = rrb.Spatial2DView(origin="/world/rig_01/cam_00/pinhole", contents=["+ /world/rig_01/cam_00/pinhole/video"])
     follow: rrb.Spatial3DView = rrb.Spatial3DView(origin="/world/rig_00")
     target: Path = tmp_path / "blueprints" / "show3d-table.rbl"
-    save_table_blueprint(rrb.Blueprint(rrb.Horizontal(follow, pane), collapse_panels=True), target, timeline="video_time", fields=TableFields())
+    save_table_blueprint(
+        rrb.Blueprint(rrb.Horizontal(follow, pane), collapse_panels=True),
+        target,
+        timeline="video_time",
+        fields=TableFields(),
+        columns=["rerun_segment_id", "property:capture:schema"],
+    )
     reader: rrc.RrdReader = rrc.RrdReader(target)
     stores = reader.blueprints()
     assert len(stores) == 1
@@ -142,6 +150,7 @@ def test_save_table_blueprint_writes_a_preview_card_for_the_recording_link(tmp_p
     ]
     assert sorted(preview_views) == sorted([follow.blueprint_path(), pane.blueprint_path()])
     assert all(path in paths for path in (f"/{follow.blueprint_path()}", f"/{pane.blueprint_path()}"))
+    assert not any("capture:schema" in path for path in paths), "no declared fields: nothing is hidden"
 
 
 def test_save_table_blueprint_shows_the_declared_fields_and_hides_every_other_column(tmp_path: Path) -> None:

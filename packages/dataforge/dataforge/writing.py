@@ -54,7 +54,6 @@ class TableFields:
     """Table columns after the recording link."""
 
 
-
 def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
     """Every view in the blueprint's container tree, in layout order."""
     views: list[rrb.View] = []
@@ -71,7 +70,7 @@ def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
 
 
 def save_table_blueprint(
-    blueprint: rrb.Blueprint, target: Path, *, timeline: str, fields: TableFields, columns: Sequence[str] = ()
+    blueprint: rrb.Blueprint, target: Path, *, timeline: str, fields: TableFields, columns: Sequence[str]
 ) -> None:
     """Write a Rerun 0.38 segment-table blueprint: the views plus the ``/table`` entities.
 
@@ -103,12 +102,14 @@ def save_table_blueprint(
         for prefix, shown in (("/table/layouts/table/columns", fields.table), ("/table/layouts/cards/fields", fields.cards)):
             stream.log(f"{prefix}/{link}", rrb.experimental.TableColumn(cell_kind=rrb.components.TableCellKind.Preview))
             stream.log(f"{prefix}/{link}", rrb.experimental.TableColumnPreview(views=view_paths))
-            headers: dict[str, str] = {field.column: field.name for field in shown}
-            for column, header in headers.items():
-                stream.log(f"{prefix}/{rr.escape_entity_path_part(column)}", rrb.experimental.TableColumn(visible=True, name=header))
-            hidden: list[str] = [c for c in columns if headers and c not in headers and c != SEGMENT_LINK_COLUMN and not c.startswith("rerun_")]
-            for column in hidden:
-                stream.log(f"{prefix}/{rr.escape_entity_path_part(column)}", rrb.experimental.TableColumn(visible=False))
+            if not shown:
+                continue  # no declared fields: the viewer shows every property column
+            for field in shown:
+                stream.log(f"{prefix}/{rr.escape_entity_path_part(field.column)}", rrb.experimental.TableColumn(visible=True, name=field.name))
+            declared: set[str] = {field.column for field in shown}
+            for column in columns:
+                if column not in declared and column != SEGMENT_LINK_COLUMN and not column.startswith("rerun_"):
+                    stream.log(f"{prefix}/{rr.escape_entity_path_part(column)}", rrb.experimental.TableColumn(visible=False))
         stream.log("/table", rrb.experimental.PreviewsConfig(timeline=timeline))
         stream.log("/table/layouts/table", rrb.experimental.TableLayout(column_order=[SEGMENT_LINK_COLUMN, *(f.column for f in fields.table)]))
         stream.log(
