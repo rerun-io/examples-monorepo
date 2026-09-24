@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from time import perf_counter
 
-from rerun.experimental import RrdReader
+from rerun.chunk import RrdReader
 
 from agent_traces.claude import ClaudeSession, parse_session, session_sources
 from agent_traces.manifest import Manifest, ManifestEntry, load_manifest, save_manifest
