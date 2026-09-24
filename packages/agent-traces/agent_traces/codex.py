@@ -244,7 +244,7 @@ def parse_file(path: Path) -> ev.Session:
     events.sort(key=lambda event: event.file_index)
     with path.open("rb") as stream:
         digest: str = hashlib.file_digest(stream, "sha256").hexdigest()
-    home: Path = next((parent.parent for parent in path.parents if parent.name in {"sessions", "archived_sessions"}), path.parent)
+    home: Path = rollout_home(path)
     return ev.Session(
         meta.id or meta.session_id,
         home.name.lstrip("."),
@@ -313,7 +313,7 @@ class CompletedTool:
     """Original native item JSON, including tool-specific result fields."""
 
 
-def matching_call(completed: CompletedTool, calls: list[RawCall], used: set[int]) -> tuple[RawCall, cr.ResponseItem] | None:
+def matching_call(completed: CompletedTool, calls: list[RawCall], used: set[int]) -> RawCall | None:
     """Join exact IDs or tool-specific arguments, never unrelated call order."""
     item: cr.CommandExecution | cr.FileChange | cr.McpToolCall | cr.OtherTool = completed.item
     for index, call in enumerate(calls):
@@ -335,15 +335,15 @@ def matching_call(completed: CompletedTool, calls: list[RawCall], used: set[int]
             matches |= bool(item.path) and orjson.dumps(item.path).decode() in raw
         if matches:
             used.add(index)
-            return call, response
+            return call
     return None
 
 
 def tool_events(completed: CompletedTool, calls: list[RawCall], outputs: dict[str, tuple[str, int]], used: set[int]) -> list[ev.TimedRecord]:
     """Emit native call and result events, enriched with matched raw data."""
     item: cr.CommandExecution | cr.FileChange | cr.McpToolCall | cr.OtherTool = completed.item
-    matched: tuple[RawCall, cr.ResponseItem] | None = matching_call(completed, calls, used)
-    response: cr.ResponseItem | None = matched[1] if matched is not None else None
+    matched: RawCall | None = matching_call(completed, calls, used)
+    response: cr.ResponseItem | None = matched.response if matched is not None else None
     name: str
     kind: ev.ToolKind
     text: str = ""
@@ -378,7 +378,7 @@ def tool_events(completed: CompletedTool, calls: list[RawCall], outputs: dict[st
     # The item's own started/completed stamps record when Codex logged it, ~1 ms apart. The raw call → output
     # envelope span is the command's real wall time; fall back to the item stamps when the pair is missing.
     paired: bool = matched is not None and output is not None
-    started_ns: int = matched[0].timestamp_ns if paired and matched is not None else completed.started_ns
+    started_ns: int = matched.timestamp_ns if paired and matched is not None else completed.started_ns
     completed_ns: int = output[1] if paired and output is not None else completed.completed_ns
     elapsed: float = (completed_ns - started_ns) / 1_000_000 if paired else float("nan")  # unknown, never the ~1 ms logging span
     return [

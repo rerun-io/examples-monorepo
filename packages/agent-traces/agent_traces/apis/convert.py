@@ -46,11 +46,11 @@ def main(config: Config) -> None:
     out: Path = write_session_rrd(session, config.out, host=config.host)
     counts: Counter[str] = Counter()
     families: Counter[str] = Counter()
-    for chunk in RrdReader(out).stream().to_chunks():
+    for chunk in RrdReader(out).stream():
         entity: str = str(chunk.entity_path).lstrip("/")
         if entity.startswith("__properties"):
             continue
-        rows: int = chunk.to_record_batch().num_rows
+        rows: int = chunk.num_rows
         counts[entity] += rows
         parts: list[str] = entity.split("/")
         family: str = parts[2] if parts[0] == "agents" else parts[0]

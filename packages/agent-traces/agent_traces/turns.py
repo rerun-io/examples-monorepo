@@ -60,7 +60,6 @@ def aggregate_turns(records: Sequence[TimedRecord | EventGroup]) -> list[Turn]:
     by_id: dict[str, Turn] = {}
     seen: dict[int, set[str]] = {}
     seen_messages: dict[int, set[str]] = {}
-    prompt_lines: dict[int, int] = {}
     for timed in events:
         payload: Payload = timed.payload
         if isinstance(payload, TurnBoundary) and payload.phase == "start":
@@ -68,11 +67,10 @@ def aggregate_turns(records: Sequence[TimedRecord | EventGroup]) -> list[Turn]:
             turns.append(turn)
             by_id[timed.turn_id] = turn
         elif not explicit and isinstance(payload, Prompt) and payload.starts_turn:
-            if not turns or prompt_lines.get(turns[-1].turn_index) != timed.file_index:
+            if not turns or turns[-1].file_index != timed.file_index:
                 turns.append(
                     Turn(timed.timestamp_ns, payload.text, str(timed.values.get("prompt_id", "")), len(turns), timed.file_index, timed.timestamp_ns)
                 )
-                prompt_lines[turns[-1].turn_index] = timed.file_index
             else:
                 turns[-1].prompt += "\n" + payload.text
         if not turns:
