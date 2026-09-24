@@ -38,6 +38,7 @@ from dataforge.datasets.show3d_source import (
     sparse_rows,
 )
 from dataforge.identity import SequenceIdentity
+from dataforge.logging_toolkit import log_static
 
 
 @serde
@@ -166,12 +167,7 @@ def high_confidence_coverage(confidence: list[float]) -> float:
 def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selected: list[HandFrame], profile_text: str, target: Path) -> None:
     """Publish aligned measured hands and validated profile text on the base clocks."""
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
-        rr.log(
-            schema.hand_profile_path(),
-            rr.TextDocument(profile_text, media_type="application/json"),
-            static=True,
-            recording=recording,
-        )
+        log_static(schema.hand_profile_path(), rr.TextDocument(profile_text, media_type="application/json"), recording=recording)
         n_frames: int = len(selected)
         xyz: Float32[ndarray, "n 133 3"] = np.full((n_frames, 133, 3), np.nan, dtype=np.float32)
         conf: Float32[ndarray, "n 133"] = np.zeros((n_frames, 133), dtype=np.float32)
@@ -195,12 +191,7 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
         flat_xyz: Float32[ndarray, "n 3"] = rearrange(xyz, "f k d -> (f k) d")
         flat_conf: Float32[ndarray, "n"] = rearrange(conf, "f k -> (f k)")
         colors: UInt8[ndarray, "n 3"] = confidence_scores_to_rgb(flat_conf[None, :, None])[0]
-        rr.log(
-            schema.coco133_xyz_path(),
-            Points3DWithConfidence.from_fields(class_ids=0, keypoint_ids=COCO_133_IDS, show_labels=False, radii=0.004),
-            static=True,
-            recording=recording,
-        )
+        log_static(schema.coco133_xyz_path(), Points3DWithConfidence.from_fields(class_ids=0, keypoint_ids=COCO_133_IDS, show_labels=False, radii=0.004), recording=recording)
         rr.send_columns(
             schema.coco133_xyz_path(),
             indexes=clock.indexes(slice(None)),
@@ -227,12 +218,7 @@ def write_hand_pose_layer(identity: SequenceIdentity, clock: FrameClock, selecte
                     uv_conf[frame_index, 9 + hand_index] = np.float32(frame.hand_poses[side.key].confidence)
                 uv_conf[frame_index, ~np.isfinite(uv[frame_index]).all(axis=1)] = np.float32(0.0)
             path: str = schema.coco133_uv_path(camera.rig, camera.cam)
-            rr.log(
-                path,
-                Points2DWithConfidence.from_fields(class_ids=0, keypoint_ids=COCO_133_IDS, show_labels=False, radii=3.0),
-                static=True,
-                recording=recording,
-            )
+            log_static(path, Points2DWithConfidence.from_fields(class_ids=0, keypoint_ids=COCO_133_IDS, show_labels=False, radii=3.0), recording=recording)
             flat_uv: Float32[ndarray, "n 2"] = rearrange(uv, "f k d -> (f k) d")
             flat_uv_conf: Float32[ndarray, "n"] = rearrange(uv_conf, "f k -> (f k)")
             rr.send_columns(
@@ -279,12 +265,7 @@ def write_hand_mesh_layer(identity: SequenceIdentity, clock: FrameClock, frames:
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
         for side in HAND_SIDES:
             path: str = schema.hand_mesh_path(side.name)
-            rr.log(
-                path,
-                rr.Mesh3D.from_fields(triangle_indices=model.mesh_triangles, albedo_factor=side.albedo),
-                static=True,
-                recording=recording,
-            )
+            log_static(path, rr.Mesh3D.from_fields(triangle_indices=model.mesh_triangles, albedo_factor=side.albedo), recording=recording)
             poses: list[HandPose] = [frame.hand_poses[side.key] for frame in frames]
             trusted: list[bool] = [pose.wrist_rotation is not None and pose.trusted for pose in poses]
             if any(pose.joint_angles is None for pose, ok in zip(poses, trusted, strict=True) if ok):

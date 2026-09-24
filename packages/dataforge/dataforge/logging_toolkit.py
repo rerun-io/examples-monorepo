@@ -63,6 +63,18 @@ IDENTITY_TRANSFORM: rr.Transform3D = rr.Transform3D(translation=[0.0, 0.0, 0.0],
 """Explicit identity pose; an argument-less ``Transform3D`` logs no components at all."""
 
 
+def log_static(entity_path: str, archetype: rr.AsComponents, *, recording: rr.RecordingStream) -> None:
+    """Log one static row and flush it to the file before anything else is sent.
+
+    ``rr.log`` queues rows in the recording's batcher until close, while ``send_columns``
+    chunks bypass it, so a static row logged first would land behind every later column. A
+    viewer that streams the file (segment-table previews) then draws per-frame data before
+    the static rows it needs: a Mesh3D without its static ``triangle_indices`` fails to load.
+    """
+    rr.log(entity_path, archetype, static=True, recording=recording)
+    recording.flush()
+
+
 def classify_video_chunk(record_batch: pa.RecordBatch) -> VideoChunkKind:
     """Name one ``Mp4Reader`` chunk by its component set, or refuse to guess.
 
@@ -162,12 +174,7 @@ def log_rig_node(
     # AnyValues omits a None-valued kwarg while its key is still untyped, so name/kind
     # simply stay off the node when a dataset has nothing meaningful to say. The registry
     # is process-global: once any recording types the key, later Nones arrive as nulls.
-    rr.log(
-        schema.rig_path(rig),
-        rr.AnyValues(schema_version=schema.EXOEGO_SCHEMA_VERSION, reference=reference, num_cameras=num_cameras, name=name, kind=kind),
-        static=True,
-        recording=recording,
-    )
+    log_static(schema.rig_path(rig), rr.AnyValues(schema_version=schema.EXOEGO_SCHEMA_VERSION, reference=reference, num_cameras=num_cameras, name=name, kind=kind), recording=recording)
 
 
 def log_video_stream(
@@ -344,8 +351,8 @@ def _log_sensor_node(
     logs no ``Pinhole``, so a camera word here would produce a camera node with
     no calibration.
     """
-    rr.log(node, IDENTITY_TRANSFORM if rig_T_sensor is None else rig_T_sensor, static=True, recording=recording)
-    rr.log(node, rr.AnyValues(drop_untyped_nones=True, name=name, kind=kind, **extra), static=True, recording=recording)
+    log_static(node, IDENTITY_TRANSFORM if rig_T_sensor is None else rig_T_sensor, recording=recording)
+    log_static(node, rr.AnyValues(drop_untyped_nones=True, name=name, kind=kind, **extra), recording=recording)
 
 
 def log_camera_node(
@@ -397,19 +404,14 @@ def log_camera_node(
     # rely on it: a kb4 camera passes distortion_valid_radius=None to mean "this
     # model has no such radius", and the key must be absent rather than logged as
     # an untyped null.
-    rr.log(
-        schema.cam_path(rig, cam),
-        rr.AnyValues(
+    log_static(schema.cam_path(rig, cam), rr.AnyValues(
             drop_untyped_nones=True,
             name=name,
             kind=kind,
             camera_model=camera_model,
             distortion_valid_radius=distortion_valid_radius,
             image_rotation_cw_deg=image_rotation_cw_deg,
-        ),
-        static=True,
-        recording=recording,
-    )
+        ), recording=recording)
     log_pinhole(
         camera,
         cam_log_path=Path(schema.cam_path(rig, cam)),
@@ -417,6 +419,7 @@ def log_camera_node(
         static=True,
         recording=recording,
     )
+    recording.flush()  # simplecv logs the Pinhole through rr.log; flush it ahead of later columns, as log_static does
 
 
 def log_pose_track(
@@ -500,12 +503,7 @@ def log_trail_segments(
         radius_ui_points: Stroke width in ui points; Rerun carries it as a
             negative radius, which is what keeps it screen-space.
     """
-    rr.log(
-        entity_path,
-        rr.LineStrips3D.from_fields(colors=color, radii=rr.Radius.ui_points(radius_ui_points)),
-        static=True,
-        recording=recording,
-    )
+    log_static(entity_path, rr.LineStrips3D.from_fields(colors=color, radii=rr.Radius.ui_points(radius_ui_points)), recording=recording)
     previous: Int64[ndarray, "n_poses"] = np.maximum(np.arange(times_ns.size, dtype=np.int64) - 1, 0)
     segments_xyz: Float64[ndarray, "n_poses 2 3"] = np.stack([translations_xyz[previous], translations_xyz], axis=1)
     rr.send_columns(
@@ -593,7 +591,7 @@ def log_magnetometer(
         measured: Bool[ndarray, "n_samples"] = norms > 0.0
         if measured.any():
             headings: Float64[ndarray, "n_headings 3"] = field.values_xyz[measured] / norms[measured, None] * heading_length_m
-            rr.log(schema.heading_path(rig, mag), rr.Arrows3D.from_fields(colors=HEADING_COLOR), static=True, recording=recording)
+            log_static(schema.heading_path(rig, mag), rr.Arrows3D.from_fields(colors=HEADING_COLOR), recording=recording)
             rr.send_columns(
                 schema.heading_path(rig, mag),
                 indexes=[time_column(field.times_ns[measured])],

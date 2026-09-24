@@ -72,7 +72,7 @@ from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
 from dataforge import blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import ImuChannel, log_imu, log_pose_track, log_rig_node, log_video_stream
+from dataforge.logging_toolkit import ImuChannel, log_imu, log_pose_track, log_rig_node, log_static, log_video_stream
 
 DATE_DIR_RE: re.Pattern[str] = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 """Capture-day directories under the subset; the loose ``manifest.json`` siblings do not match."""
@@ -628,7 +628,7 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         ) as recording:
             # The base layer owns the root ViewCoordinates because it already carries a real
             # moving-rig pose: the Quest world is right-handed Y-up.
-            rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True, recording=recording)
+            log_static("/", rr.ViewCoordinates.RIGHT_HAND_Y_UP, recording=recording)
 
             num_frames: int = 0
             for rig_plan in plan.rigs:
@@ -674,17 +674,12 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         Returns:
             Number of video samples written for this camera.
         """
-        rr.log(
-            schema.cam_path(camera.rig, camera.cam),
-            rr.AnyValues(
+        log_static(schema.cam_path(camera.rig, camera.cam), rr.AnyValues(
                 name=camera.name,
                 kind=camera.kind,
                 num_native_frames=camera.native_frames,
                 native_duration_ns=camera.native_duration_ns,
-            ),
-            static=True,
-            recording=recording,
-        )
+            ), recording=recording)
         calibration: CameraCalibration = camera.calibration
         focal_length_xy: Float64[ndarray, "2"] = calibration.focal_length_xy
         principal_point_xy: Float64[ndarray, "2"] = calibration.principal_point_xy
@@ -704,9 +699,7 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         # TODO(dataforge): the Quest intrinsics describe the 1280x1280 sensor array while
         # capture_resolution (and the mp4) is 1280x960, so cy lands ~160 px below the image
         # centre. Confirm the crop origin against the device before shifting the principal point.
-        rr.log(
-            schema.pinhole_path(camera.rig, camera.cam),
-            PinholeWithDistortion(
+        log_static(schema.pinhole_path(camera.rig, camera.cam), PinholeWithDistortion(
                 pinhole=rr.Pinhole(
                     image_from_camera=image_from_camera,
                     width=calibration.width,
@@ -715,10 +708,7 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
                     image_plane_distance=IMAGE_PLANE_DISTANCE,
                 ),
                 distortion=distortion,
-            ),
-            static=True,
-            recording=recording,
-        )
+            ), recording=recording)
         # Raw PTS is already the shared episode clock (see the module docstring), so no shift.
         return log_video_stream(recording, camera.video_path, schema.video_path(camera.rig, camera.cam))
 

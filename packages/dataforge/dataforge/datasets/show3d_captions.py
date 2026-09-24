@@ -10,6 +10,7 @@ from serde import serde
 from dataforge import schema, writing
 from dataforge.datasets.show3d_source import CAPTIONS_VERSION
 from dataforge.identity import SequenceIdentity
+from dataforge.logging_toolkit import log_static
 
 
 @serde
@@ -58,7 +59,7 @@ class Caption:
 def write_captions_layer(identity: SequenceIdentity, caption: Caption, target: Path) -> None:
     """Publish the static instruction and the caption fields a catalog user searches on."""
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
-        rr.log(schema.instruction_path(), rr.TextDocument(caption.markdown(), media_type="text/markdown"), static=True, recording=recording)
+        log_static(schema.instruction_path(), rr.TextDocument(caption.markdown(), media_type="text/markdown"), recording=recording)
         recording.send_property(
             "captions",
             rr.AnyValues(

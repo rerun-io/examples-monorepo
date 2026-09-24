@@ -20,6 +20,7 @@ from dataforge.datasets.show3d_mesh_source import MESH_REPO
 from dataforge.datasets.show3d_object_source import ObjectFrame
 from dataforge.datasets.show3d_source import OBJECT_POSE_VERSION, FrameClock, sparse_rows
 from dataforge.identity import SequenceIdentity
+from dataforge.logging_toolkit import log_static
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,7 +133,7 @@ def write_object_mesh_layer(
     """
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
         path: str = schema.object_mesh_path(alias)
-        rr.log(path, rr.Asset3D(path=mesh), static=True, recording=recording)
+        log_static(path, rr.Asset3D(path=mesh), recording=recording)
         trusted: list[bool] = [frame.trusted for frame in frames]
         changes: list[int] = [i for i in range(len(frames)) if i == 0 or trusted[i] != trusted[i - 1]]
         albedo: Float32[ndarray, "k 4"] = np.asarray([[1.0, 1.0, 1.0, 1.0 if trusted[i] else 0.0] for i in changes], dtype=np.float32)

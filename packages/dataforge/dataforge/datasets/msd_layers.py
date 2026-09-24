@@ -52,6 +52,7 @@ from dataforge.logging_toolkit import (
     log_magnetometer,
     log_pose_track,
     log_rig_node,
+    log_static,
     log_trail_segments,
     log_video_stream,
 )
@@ -483,7 +484,7 @@ def write_gt_layer(
         # declared one, not this sequence's measurement: every rrd of a device
         # must agree, and a disagreement is a warning, not a silent
         # per-sequence reorientation.
-        rr.log("/", WORLD_UP_VIEW_COORDINATES[profile.world_up], static=True, recording=recording)
+        log_static("/", WORLD_UP_VIEW_COORDINATES[profile.world_up], recording=recording)
         log_pose_track(
             recording,
             schema.rig_path(RIG),
@@ -495,12 +496,7 @@ def write_gt_layer(
         # whole in the overview and dimmed to context in the follow view, and the
         # per-pose segments are what the blueprint's cursor-relative time range
         # turns into a recent-motion trail on top of it.
-        rr.log(
-            schema.trajectory_path(schema.GT_RUN_SOURCE),
-            rr.LineStrips3D([gt.translations_xyz], colors=TRAJECTORY_COLOR, radii=GT_TRAJECTORY_RADIUS_M),
-            static=True,
-            recording=recording,
-        )
+        log_static(schema.trajectory_path(schema.GT_RUN_SOURCE), rr.LineStrips3D([gt.translations_xyz], colors=TRAJECTORY_COLOR, radii=GT_TRAJECTORY_RADIUS_M), recording=recording)
         log_trail_segments(
             recording,
             schema.trail_path(schema.GT_RUN_SOURCE),

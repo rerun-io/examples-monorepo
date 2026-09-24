@@ -33,7 +33,7 @@ from dataforge.datasets.show3d_source import (
     read_json,
 )
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import log_camera_node, log_pose_track, log_rig_node, log_video_stream
+from dataforge.logging_toolkit import log_camera_node, log_pose_track, log_rig_node, log_static, log_video_stream
 from dataforge.video_encoding import transcode_mp4_gray
 
 VIDEO_CQ: int = 36
@@ -197,17 +197,12 @@ def log_cameras(recording: rr.RecordingStream, scene: Scene, work_dir: Path) -> 
                     kind="grayscale",
                     image_plane_distance=0.05,
                 )
-                rr.log(
-                    schema.cam_path(camera.rig, camera.cam),
-                    rr.AnyValues(
+                log_static(schema.cam_path(camera.rig, camera.cam), rr.AnyValues(
                         source_calibration_json=source.calibration_json,
                         video_codec=VIDEO_CODEC,
                         gop=pa.array([VIDEO_GOP], type=pa.int64()),
                         cq=pa.array([VIDEO_CQ], type=pa.int64()),
-                    ),
-                    static=True,
-                    recording=recording,
-                )
+                    ), recording=recording)
                 log_video_stream(
                     recording, clip, schema.video_path(camera.rig, camera.cam), times_ns=scene.times_ns, frame_indices=scene.frame_indices
                 )
@@ -215,7 +210,7 @@ def log_cameras(recording: rr.RecordingStream, scene: Scene, work_dir: Path) -> 
                 if source.box_indices.size:
                     # §13: shipped face boxes, named for what they enclose; why Meta drew them is metadata.
                     face_path: str = schema.boxes_path(camera.rig, camera.cam, COCO133_ROI_LABELS[Coco133RoiLayer.FACE])
-                    rr.log(face_path, rr.AnyValues(source="blur_info"), static=True, recording=recording)
+                    log_static(face_path, rr.AnyValues(source="blur_info"), recording=recording)
                     lengths: list[int] = [len(source.blur.blur_boxes[str(index)]) for index in source.box_indices]
                     boxes: Float32[ndarray, "n 4"] = np.asarray(
                         [box for index in source.box_indices for box in source.blur.blur_boxes[str(index)]], dtype=np.float32
@@ -320,8 +315,8 @@ def write_base_layer(
     """Validate a scene, then publish its BASE recording atomically."""
     scene: Scene = read_scene(scene_dir, scene_key=identity.sequence_key, frame_limit=frame_limit)
     with writing.atomic_recording(target, recording_id=identity.recording_id, default_blueprint=default_blueprint) as recording:
-        rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True, recording=recording)
-        rr.log("/", annotation_context(), static=True, recording=recording)
+        log_static("/", rr.ViewCoordinates.RIGHT_HAND_Y_UP, recording=recording)
+        log_static("/", annotation_context(), recording=recording)
         log_rig_node(recording, 0, reference=None, num_cameras=sum(camera.camera.rig == 0 for camera in scene.cameras), name="back_rig", kind="exo")
         log_rig_node(recording, 1, reference="cam_00", num_cameras=2, name="quest3", kind="ego")
         log_cameras(recording, scene, work_dir)

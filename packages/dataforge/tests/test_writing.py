@@ -142,3 +142,27 @@ def test_save_table_blueprint_writes_a_preview_card_for_the_recording_link(tmp_p
     ]
     assert sorted(preview_views) == sorted([follow.blueprint_path(), pane.blueprint_path()])
     assert all(path in paths for path in (f"/{follow.blueprint_path()}", f"/{pane.blueprint_path()}"))
+
+
+def test_log_static_lands_ahead_of_later_columns(tmp_path: Path) -> None:
+    """A static row logged with log_static comes before later send_columns chunks in the file.
+
+    Card previews stream a segment in file order and draw early: a Mesh3D whose static
+    triangle_indices land after its per-frame vertex_positions is drawn without them and
+    fails ("num_positions % 3 == 0"), which is what SHOW3D's hand meshes did.
+    """
+    import numpy as np
+
+    from dataforge.logging_toolkit import log_static
+
+    target: Path = tmp_path / "layer.rrd"
+    with recording_to(target, recording_id="rec", send_properties=False) as recording:
+        log_static("/mesh", rr.Mesh3D.from_fields(triangle_indices=[[0, 1, 2]]), recording=recording)
+        rr.send_columns(
+            "/mesh",
+            indexes=[rr.TimeColumn("frame_index", sequence=[0, 1])],
+            columns=rr.Mesh3D.columns(vertex_positions=np.zeros((6, 3), dtype=np.float32)).partition([3, 3]),
+            recording=recording,
+        )
+    order: list[bool] = [chunk.is_static for chunk in rrc.RrdReader(target).stream().to_chunks() if str(chunk.entity_path) == "/mesh"]
+    assert order == [True, False]

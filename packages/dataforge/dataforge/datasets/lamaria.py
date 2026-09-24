@@ -77,6 +77,7 @@ from dataforge.logging_toolkit import (
     log_imu,
     log_pose_track,
     log_rig_node,
+    log_static,
     log_trail_segments,
     log_video_stream,
     require_av1_nvenc,
@@ -546,9 +547,7 @@ def log_control_points(recording: rr.RecordingStream, points: tuple[aria.Control
     for point in points:
         published_uncertainty_m: Float64[ndarray, "n_axes"] = point.uncertainty_xyz_m[np.isfinite(point.uncertainty_xyz_m)]
         radii_m.append(max(CONTROL_POINT_RADIUS_FLOOR_M, float(published_uncertainty_m.max()) if published_uncertainty_m.size else 0.0))
-    rr.log(
-        schema.control_points_path(),
-        rr.Points3D(
+    log_static(schema.control_points_path(), rr.Points3D(
             positions=np.stack([point.position_xyz_m for point in points]),
             colors=[CONTROL_POINT_COLOR if point.has_height else CONTROL_POINT_UNLEVELLED_COLOR for point in points],
             radii=radii_m,
@@ -556,10 +555,7 @@ def log_control_points(recording: rr.RecordingStream, points: tuple[aria.Control
             # Rerun hides labels past a handful of points on its own; a survey is
             # exactly the case where every name is worth reading.
             show_labels=True,
-        ),
-        static=True,
-        recording=recording,
-    )
+        ), recording=recording)
 
 
 def log_control_point_detections(
@@ -588,12 +584,7 @@ def log_control_point_detections(
         uv_px: Float64[ndarray, "n_detections 2"] = aria.rotate_uv_cw90(
             np.stack([detection.uv_px for detection in seen]), native_height_px=CAMERA_SPECS[stream_id].native_height_px
         )
-        rr.log(
-            schema.cp_uv_path(RIG, index),
-            rr.Points2D.from_fields(colors=CONTROL_POINT_COLOR, radii=CP_UV_RADIUS_PX, show_labels=True),
-            static=True,
-            recording=recording,
-        )
+        log_static(schema.cp_uv_path(RIG, index), rr.Points2D.from_fields(colors=CONTROL_POINT_COLOR, radii=CP_UV_RADIUS_PX, show_labels=True), recording=recording)
         rr.send_columns(
             schema.cp_uv_path(RIG, index),
             indexes=[time_column(times_ns)],
@@ -1049,7 +1040,7 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
         }
         with writing.atomic_recording(target, recording_id=identity.recording_id) as recording:
             # The right-handed axes WORLD_UP names; every LaMAria world is Z-up.
-            rr.log("/", WORLD_UP_VIEW_COORDINATES[WORLD_UP], static=True, recording=recording)
+            log_static("/", WORLD_UP_VIEW_COORDINATES[WORLD_UP], recording=recording)
             if trajectory.times_ns.size:
                 # from_parent stays unset: the stored value is world_T_rig, the
                 # child-to-parent step, which is what every child frustum rides.
@@ -1063,16 +1054,11 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
                 # Two views of one trajectory: the static strip is the whole path for the
                 # overview, and the per-pose segments are what the blueprint's cursor-relative
                 # time range turns into a recent-motion trail in the Follow view.
-                rr.log(
-                    schema.trajectory_path(schema.GT_RUN_SOURCE),
-                    rr.LineStrips3D(
+                log_static(schema.trajectory_path(schema.GT_RUN_SOURCE), rr.LineStrips3D(
                         [trajectory.translations_xyz],
                         colors=TRAJECTORY_COLOR,
                         radii=rr.components.Radius.ui_points(GT_TRAJECTORY_WIDTH_UI_POINTS),
-                    ),
-                    static=True,
-                    recording=recording,
-                )
+                    ), recording=recording)
                 log_trail_segments(
                     recording,
                     schema.trail_path(schema.GT_RUN_SOURCE),

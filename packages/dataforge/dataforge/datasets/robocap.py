@@ -69,7 +69,7 @@ from yaml import YAMLError
 from dataforge import blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import ImuChannel, log_camera_node, log_imu, log_rig_node, log_video_stream
+from dataforge.logging_toolkit import ImuChannel, log_camera_node, log_imu, log_rig_node, log_static, log_video_stream
 
 GYRO_SCALE: float = 0.000266316
 """Raw gyro LSB → rad/s; measured in the basalt fork (``dataset_io_robocap.cpp``)."""
@@ -496,18 +496,18 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
                 noise: _KalibrImu = from_yaml(_KalibrImu, noise_path.read_text())
             except (SerdeError, YAMLError) as error:
                 raise ValueError(f"{noise_path}: {error}") from error
-            recording.log(imu_entity, ImuCalibration(
+            log_static(imu_entity, ImuCalibration(
                 gyro_noise_density=noise.gyroscope_noise_density,
                 accel_noise_density=noise.accelerometer_noise_density,
                 gyro_bias_random_walk=noise.gyroscope_random_walk,
                 accel_bias_random_walk=noise.accelerometer_random_walk,
                 rate_hz=noise.update_rate,
                 source=str(noise_path.relative_to(self.config.root)),
-            ), static=True)
-        recording.log(imu_entity, rr.AnyValues(
+            ), recording=recording)
+        log_static(imu_entity, rr.AnyValues(
             applied_time_shift_ns=-CAMERA_TO_IMU_OFFSET_NS,
             time_shift_source="DataForge legacy RoboCap ingestion; Basalt kCameraToImuOffsetNs; matches Cap A four-camera factory median; physical alignment not independently validated",
-        ), static=True)
+        ), recording=recording)
         factory_cameras: dict[str, _FactoryCamera] = self._factory_cameras(device)
         for name, entity in camera_entities.items():
             camera: _FactoryCamera | None = factory_cameras.get(name)
@@ -515,11 +515,11 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
                 continue
             if not math.isfinite(camera.entry.timeshift_cam_imu):
                 raise ValueError(f"{camera.path}#cam{camera.index}: timeshift_cam_imu must be finite")
-            recording.log(entity, rr.AnyValues(
+            log_static(entity, rr.AnyValues(
                 camera_imu_time_offset_ns=round(camera.entry.timeshift_cam_imu * 1e9),
                 time_offset_reference=imu_entity,
                 time_offset_source=f"{camera.path.relative_to(self.config.root)}#cam{camera.index}",
-            ), static=True)
+            ), recording=recording)
 
     def _log_mesh(self, recording: rr.RecordingStream) -> None:
         """Log the textured cap scan as a static child of the rig, if the asset is readable.
@@ -532,8 +532,8 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
             print(f"  warning: cap mesh not readable, skipping: {mesh_path}")
             return
         mesh_entity: str = f"{schema.rig_path(RIG)}/mesh"
-        rr.log(mesh_entity, rr.Transform3D(translation=MESH_TRANSLATION, mat3x3=MESH_MAT3X3), static=True, recording=recording)
-        rr.log(mesh_entity, rr.Asset3D(path=mesh_path), static=True, recording=recording)
+        log_static(mesh_entity, rr.Transform3D(translation=MESH_TRANSLATION, mat3x3=MESH_MAT3X3), recording=recording)
+        log_static(mesh_entity, rr.Asset3D(path=mesh_path), recording=recording)
 
     def _log_imu(self, recording: rr.RecordingStream, source: RobocapSource) -> None:
         """Log the dev0 IMU's raw gyro/accel samples columnar on ``video_time``.

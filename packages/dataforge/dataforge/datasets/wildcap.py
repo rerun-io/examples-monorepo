@@ -40,7 +40,7 @@ import rerun.blueprint as rrb
 from dataforge import blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import log_rig_node, log_video_stream
+from dataforge.logging_toolkit import log_rig_node, log_static, log_video_stream
 
 EGO_RIG_NAME: str = "ego"
 """Device label of the single moving rig; the raw tree names no device."""
@@ -242,14 +242,14 @@ class WildcapDataset(DataforgeDataset[WildcapConfig, Path]):
             num_frames: int = 0
             for rig, video_path in enumerate(exo):
                 log_rig_node(recording, rig, reference="cam_00", num_cameras=1, name=video_path.stem, kind="exo")
-                rr.log(schema.cam_path(rig, 0), rr.AnyValues(name=video_path.stem), static=True, recording=recording)
+                log_static(schema.cam_path(rig, 0), rr.AnyValues(name=video_path.stem), recording=recording)
                 # Raw PTS is the only clock the raw tree has (see the module docstring), so no shift.
                 num_frames = max(num_frames, log_video_stream(recording, video_path, schema.video_path(rig, 0)))
             if ego:
                 ego_rig: int = len(exo)
                 log_rig_node(recording, ego_rig, reference="cam_00", num_cameras=len(ego), name=EGO_RIG_NAME, kind="ego")
                 for cam, video_path in enumerate(ego):
-                    rr.log(schema.cam_path(ego_rig, cam), rr.AnyValues(name=video_path.stem), static=True, recording=recording)
+                    log_static(schema.cam_path(ego_rig, cam), rr.AnyValues(name=video_path.stem), recording=recording)
                     num_frames = max(num_frames, log_video_stream(recording, video_path, schema.video_path(ego_rig, cam)))
             writing.send_capture_properties(recording, identity, num_cameras=len(exo) + len(ego), num_frames=num_frames)
 
