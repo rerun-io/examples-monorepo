@@ -30,7 +30,7 @@ outputs:
     requirements:
       build:
         - ${{ compiler('c') }}
-        - rust 1.97.*
+        - rust 1.98.*
         - git
       host:
         - python 3.12.*
