@@ -302,27 +302,32 @@ frames/s; Quest camera 630 → 4,700 frames/s, CPU only). ffmpeg still rotates: 
 NumPy measured slower (0.21 vs 0.17 s per 100 RGB frames). dataforge also writes more than simplecv:
 hand meshes (0.7–1.5 s), projections (1.0–2.1 s), IMU, objects.
 
-### Sample conversions (2026-09-25, prod env, converter `1+fb2576abcf9d`)
+### Sample conversions (2026-09-25, prod env, converter `1+48f64eeefd42`)
 
-| recording | capture s | total s | s/capture-min | bytes (6 layers) |
-| --- | --- | --- | --- | --- |
-| hot3d-aria__P0001_550ea2ac | 130.2 | 34.6 | 16.0 | 354.2 MB |
-| hot3d-aria__P0001_624f2ba9 | 124.7 | 35.6 | 17.1 | 323.1 MB |
-| hot3d-aria__P0001_8d136980 | 127.5 | 34.5 | 16.2 | 306.1 MB |
-| hot3d-aria__P0001_9c030609 | 126.1 | 36.3 | 17.3 | 344.5 MB |
-| hot3d-aria__P0001_a68492d5 | 124.6 | 36.0 | 17.3 | 348.6 MB |
-| hot3d-aria__P0001_a9d6c83d | 128.8 | 34.1 | 15.9 | 303.6 MB |
-| hot3d-aria__P0002_2ea9af5b | 121.3 | 32.0 | 15.8 | 297.9 MB |
-| hot3d-aria__P0002_65085bfc | 119.6 | 31.4 | 15.8 | 290.2 MB |
-| hot3d-quest3__P0002_1464cbdc | 132.7 | 24.9 | 11.3 | 304.7 MB |
-| hot3d-quest3__P0002_273c2819 | 121.3 | 17.4 | 8.6 | 170.6 MB |
-| hot3d-quest3__P0002_45904c71 | 123.7 | 17.6 | 8.5 | 180.8 MB |
-| hot3d-quest3__P0002_75103f48 | 121.4 | 16.9 | 8.3 | 188.1 MB |
-| hot3d-quest3__P0002_a2f1b530 | 56.4 | 8.4 | 8.9 | 88.8 MB |
-| hot3d-quest3__P0002_af0d3d4a | 101.7 | 14.8 | 8.7 | 158.2 MB |
-| hot3d-quest3__P0002_c3aec89e | 137.5 | 18.7 | 8.2 | 218.0 MB |
-| hot3d-quest3__P0003_3fb19e29 | 62.1 | 10.1 | 9.7 | 97.9 MB |
+The 16 samples re-converted after the TurboJPEG decode path and the follow-up review (v2); the
+v1 column is the first sample run (`1+fb2576abcf9d`, projectaria-tools decode). compare_layers at
+atol 0 finds every v2 layer equal to v1 except the Aria RGB video samples
+(`/world/rig_00/cam_00/pinhole/video`): the RGB stream now reaches NVENC as the JPEG's own 4:2:0
+planes instead of a YUV→RGB→YUV round trip. The SLAM and Quest 3 videos are byte-identical.
 
-The Aria samples run at 15.8–17.3 s per capture-minute, the Quest 3 samples at 8.2–11.3.
-`P0002_1464cbdc` (11.3) has a 2.85 GB VRS (the others 1.5–1.6 GB) and a 183 MB base layer
-(the others ~70 MB): its frames carry more detail, so transcode takes 21.6 s instead of ~14 s. Registration time is added when the samples are registered.
+| recording | capture s | total s | s/capture-min | v1 s/capture-min | transcode s | bytes (6 layers) |
+| --- | --- | --- | --- | --- | --- | --- |
+| hot3d-aria__P0001_550ea2ac | 130.2 | 15.7 | 7.2 | 16.0 | 7.3 | 357.9 MB |
+| hot3d-aria__P0001_624f2ba9 | 124.7 | 17.1 | 8.2 | 17.1 | 6.6 | 327.7 MB |
+| hot3d-aria__P0001_8d136980 | 127.5 | 15.7 | 7.4 | 16.2 | 6.6 | 310.6 MB |
+| hot3d-aria__P0001_9c030609 | 126.1 | 17.4 | 8.3 | 17.3 | 6.8 | 349.1 MB |
+| hot3d-aria__P0001_a68492d5 | 124.6 | 17.7 | 8.5 | 17.3 | 7.1 | 352.6 MB |
+| hot3d-aria__P0001_a9d6c83d | 128.8 | 14.6 | 6.8 | 15.9 | 6.8 | 308.3 MB |
+| hot3d-aria__P0002_2ea9af5b | 121.3 | 13.5 | 6.7 | 15.8 | 6.3 | 302.8 MB |
+| hot3d-aria__P0002_65085bfc | 119.6 | 13.5 | 6.8 | 15.8 | 6.3 | 294.8 MB |
+| hot3d-quest3__P0002_1464cbdc | 132.7 | 8.2 | 3.7 | 11.3 | 5.0 | 304.7 MB |
+| hot3d-quest3__P0002_273c2819 | 121.3 | 7.1 | 3.5 | 8.6 | 4.3 | 170.6 MB |
+| hot3d-quest3__P0002_45904c71 | 123.7 | 7.0 | 3.4 | 8.5 | 4.0 | 180.8 MB |
+| hot3d-quest3__P0002_75103f48 | 121.4 | 7.2 | 3.5 | 8.3 | 4.3 | 188.1 MB |
+| hot3d-quest3__P0002_a2f1b530 | 56.4 | 3.3 | 3.5 | 8.9 | 2.0 | 88.8 MB |
+| hot3d-quest3__P0002_af0d3d4a | 101.7 | 5.9 | 3.5 | 8.7 | 3.5 | 158.2 MB |
+| hot3d-quest3__P0002_c3aec89e | 137.5 | 7.6 | 3.3 | 8.2 | 4.3 | 218.0 MB |
+| hot3d-quest3__P0003_3fb19e29 | 62.1 | 3.7 | 3.6 | 9.7 | 2.3 | 97.9 MB |
+
+The Aria samples run at 6.7–8.5 s per capture-minute (v1 15.8–17.3), the Quest 3 samples at
+3.3–3.7 (v1 8.2–11.3). Registration time is added when the samples are registered.
