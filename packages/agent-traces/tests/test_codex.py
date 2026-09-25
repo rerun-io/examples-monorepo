@@ -678,6 +678,10 @@ def test_replayed_metadata_preserves_every_child(rollout_builder: RolloutBuilder
         ('tools.exec_command({cmd:"ls", workdir:"/a"});', "ls", "file:///a", True),
         ('tools.exec_command({cmd:"ls", workdir:"/a b/"});', "ls", "file:///a%20b", True),
         ('tools.exec_command({cmd:"ls", workdir:"/b"});', "ls", "file:///a", False),
+        ('tools.exec_command({cmd:"ls", workdir:"/"});', "ls", "", False),
+        ('tools.exec_command({cmd:"ls", workdir:"/"});', "ls", "file:///", True),
+        # A nested template hides quoted code from a naive tokenizer; the whole script is rejected.
+        ('const note = `outer ${`tools.exec_command({cmd:"ls"})`}`; text(note); await tools.exec_command({cmd:"pwd"});', "ls", "/a", False),
     ],
 )
 def test_exec_script_requires_literal_command_arguments(

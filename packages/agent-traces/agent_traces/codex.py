@@ -186,7 +186,7 @@ def collect(path: Path) -> RolloutFacts:
                     image: Path = Path(local)
                     if not image.is_absolute():
                         image = Path(facts.meta.cwd) / image
-                    facts.images[local] = image.resolve()
+                    facts.images[local] = image  # the path as referenced: later runs must follow any symlink again
             elif isinstance(payload, cr.ResponseItem):
                 if payload.type == "reasoning":
                     owner: str = payload.internal_chat_message_metadata_passthrough.turn_id if payload.internal_chat_message_metadata_passthrough else turn_id

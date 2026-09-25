@@ -418,3 +418,33 @@ def test_image_replacement_at_read_boundary_rebuilds(
     assert read_entities(saved)["/media/images"]["EncodedImage:blob"].to_pylist() == [[list(png_bytes + b"newer")]]
     main(config)
     assert "converted=0 skipped=1 failed=0" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("first_target", ["first.png", "absent.png"])
+def test_image_symlink_retarget_rebuilds(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], png_bytes: bytes, first_target: str,
+) -> None:
+    """An image referenced through a symlink is re-read through that link, so retargeting it rebuilds."""
+    from agent_traces.apis.convert_all import Config, main
+    from tests.conftest import RolloutBuilder
+
+    home = tmp_path / ".codex"
+    parent = RolloutBuilder(home / "sessions/main.jsonl")
+    parent.meta("main")
+    parent.item("Reasoning")
+    (tmp_path / "first.png").write_bytes(png_bytes)
+    (tmp_path / "second.png").write_bytes(png_bytes + b"second")
+    link = tmp_path / "current.png"
+    link.symlink_to(tmp_path / first_target)
+    parent.add("event_msg", type="user_message", local_images=[str(link)])
+    config = Config(home=home, out=tmp_path / "out")
+    main(config)
+    capsys.readouterr()
+    link.unlink()
+    link.symlink_to(tmp_path / "second.png")
+    main(config)
+    assert "converted=1 skipped=0 failed=0" in capsys.readouterr().out
+    saved = tmp_path / "out/codex/main.rrd"
+    assert read_entities(saved)["/media/images"]["EncodedImage:blob"].to_pylist() == [[list(png_bytes + b"second")]]
+    main(config)
+    assert "converted=0 skipped=1 failed=0" in capsys.readouterr().out

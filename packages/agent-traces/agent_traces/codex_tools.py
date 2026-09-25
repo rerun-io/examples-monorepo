@@ -95,7 +95,9 @@ def names_command(raw: str, item: cr.CommandExecution) -> bool:
 def same_directory(requested: str, native_cwd: str) -> bool:
     """Compare a call's plain path with the item's cwd, which Codex records as a file:// URI."""
     native: str = unquote(urlparse(native_cwd).path) if native_cwd.startswith("file://") else native_cwd
-    return bool(requested) and requested.rstrip("/") == native.rstrip("/")
+    if not requested or not native:
+        return False  # an unknown directory never matches, not even "/"
+    return (requested.rstrip("/") or "/") == (native.rstrip("/") or "/")
 
 
 @serde
@@ -127,8 +129,9 @@ def script_commands(script: str) -> list[ShellArguments]:
             script,
         ) if not token.startswith(("//", "/*"))
     ]
-    # A slash outside strings/comments may start a regex; don't scan its contents.
-    if any(token in {"/", '"', "'", "`"} for token in tokens):
+    # A slash outside strings/comments may start a regex, and an interpolated template may nest another template
+    # that this tokenizer would split; neither can be scanned safely, so the whole script stays unmatched.
+    if any(token in {"/", '"', "'", "`"} or (token.startswith("`") and "${" in token) for token in tokens):
         return []
     commands: list[ShellArguments] = []
     for start in range(len(tokens) - 5):
