@@ -23,6 +23,7 @@ import rerun as rr
 import rerun.chunk as rrc
 from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
+from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 from simplecv.data.skeleton.coco133_layers import COCO133_ROI_COLORS, COCO133_ROI_LABELS, Coco133RoiLayer
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
@@ -419,6 +420,22 @@ def log_camera_node(
         static=True,
         recording=recording,
     )
+
+
+def log_dense_pose_track(
+    recording: rr.RecordingStream,
+    path: str,
+    *,
+    times_ns: Int64[ndarray, "n"],
+    frame_indices: Int64[ndarray, "n"],
+    transforms: Float32[ndarray, "n 4 4"] | Float64[ndarray, "n 4 4"],
+) -> None:
+    """One row per stamp; missing poses get NaN quaternions so latest-at does not hold them."""
+    valid: Bool[ndarray, "n"] = np.isfinite(transforms).all(axis=(1, 2))
+    quaternions: Float64[ndarray, "n 4"] = np.full((len(transforms), 4), np.nan)
+    if np.any(valid):
+        quaternions[valid] = Rotation.from_matrix(transforms[valid, :3, :3]).as_quat()
+    log_pose_track(recording, path, times_ns=times_ns, frame_indices=frame_indices, translations_xyz=transforms[:, :3, 3], quaternions_xyzw=quaternions)
 
 
 def log_pose_track(
