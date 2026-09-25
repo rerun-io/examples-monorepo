@@ -5,7 +5,7 @@ mapping: COCO thumb-base slots 92/113 are wrist–thumb CMC midpoints (palm is u
 wrist slots 9/10 copy hand wrists 91/112. These derived slots carry the source hand
 confidence, as SHOW3D does. ``coco133_from_coco_hands`` serves sources that ship
 COCO-WholeBody hand order (HO-Cap): they get their shipped slots and nothing derived.
-Class 0 uses the root COCO-133 AnnotationContext. No writer projects 3D into 2D.
+Class 0 uses the root COCO-133 AnnotationContext. Derived projections use a separate entity from shipped 2D.
 """
 
 import numpy as np
@@ -121,13 +121,14 @@ def log_keypoints2d(
     rig: int,
     cam: int,
     *,
+    path: str | None = None,
     times_ns: Int64[ndarray, "t"],
     frame_indices: Int64[ndarray, "t"],
     positions: Float32[ndarray, "t 133 2"],
     confidence: Float32[ndarray, "t 133"] | None,
 ) -> None:
-    """Write shipped Float32[t,133,2] pixels and Float32[t,133] confidence (or None), without colours."""
-    path: str = schema.coco133_uv_path(rig, cam)
+    """Write Float32[t,133,2] pixels and confidence; path defaults to shipped 2D."""
+    path = schema.coco133_uv_path(rig, cam) if path is None else path
     positions, scores = confidence_rule(positions, confidence)
     rr.log(
         path,

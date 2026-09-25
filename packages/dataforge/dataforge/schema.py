@@ -144,6 +144,11 @@ def coco133_uv_path(rig: int, cam: int) -> str:
     return f"{pinhole_path(rig, cam)}/coco133_uv"
 
 
+def coco133_uv_projected_path(rig: int, cam: int) -> str:
+    """Derived COCO-133 keypoints projected through the full camera lens model."""
+    return f"{pinhole_path(rig, cam)}/coco133_uv_projected"
+
+
 def instruction_path() -> str:
     """§12: static task instruction document."""
     return "/task/instruction"

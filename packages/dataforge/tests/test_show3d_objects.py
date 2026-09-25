@@ -252,17 +252,17 @@ def test_real_scene_object_and_mesh_layers(object_scene: ObjectBuild) -> None:
         "mesh_source": "bop-benchmark/hot3d",
     }
     hand_chunks: list[rrc.Chunk] = read_chunks(build.output / "hand_mesh.rrd")
-    for side in HAND_SIDES:
-        temporal: list[rrc.Chunk] = [c for c in hand_chunks if str(c.entity_path) == schema.hand_mesh_path(side.name) and not c.is_static]
+    for hand_index, side in enumerate(HAND_SIDES):
+        temporal: list[rrc.Chunk] = [c for c in hand_chunks if str(c.entity_path) == schema.hand_mesh_path(side) and not c.is_static]
         # One row per frame: skinned vertices where Meta trusts the hand, an empty row otherwise so the viewer holds nothing.
         assert sum(c.num_rows for c in temporal) == len(build.hands)
-        trusted: list[bool] = [f.hand_poses[side.key].wrist_rotation is not None and f.hand_poses[side.key].trusted for f in build.hands]
+        trusted: list[bool] = [f.hand_poses[str(hand_index)].wrist_rotation is not None and f.hand_poses[str(hand_index)].trusted for f in build.hands]
         rows: dict[int, int] = mesh_vertex_counts(temporal)
         assert [rows[f.index] > 0 for f in build.hands] == trusted
         assert {n for n in rows.values() if n} == {len(build.profile.mesh_vertices)}
         assert all(set(c.timeline_names) == {"video_time", "frame_index"} for c in temporal)
         assert any(
-            c.is_static and str(c.entity_path) == schema.hand_mesh_path(side.name) and "Mesh3D:triangle_indices" in c.to_record_batch().schema.names
+            c.is_static and str(c.entity_path) == schema.hand_mesh_path(side) and "Mesh3D:triangle_indices" in c.to_record_batch().schema.names
             for c in hand_chunks
         )
     for layer in ("object_pose", "object_mesh", "hand_mesh"):
@@ -275,11 +275,11 @@ def test_real_scene_object_and_mesh_layers(object_scene: ObjectBuild) -> None:
 @pytest.mark.golden
 def test_skinning_matches_shipped_landmarks_both_hands(object_scene: ObjectBuild) -> None:
     build: ObjectBuild = object_scene
-    for side in HAND_SIDES:
+    for hand_index, _side in enumerate(HAND_SIDES):
         poses: list[HandPose] = [
-            frame.hand_poses[side.key]
+            frame.hand_poses[str(hand_index)]
             for frame in build.hands
-            if frame.hand_poses[side.key].wrist_rotation is not None and frame.hand_poses[side.key].landmarks_3d_mm is not None
+            if frame.hand_poses[str(hand_index)].wrist_rotation is not None and frame.hand_poses[str(hand_index)].landmarks_3d_mm is not None
         ]
         assert poses
         assert all(pose.joint_angles is not None for pose in poses)
@@ -288,10 +288,10 @@ def test_skinning_matches_shipped_landmarks_both_hands(object_scene: ObjectBuild
         wrists[:, :3, :3] = np.asarray([pose.wrist_rotation for pose in poses])
         wrists[:, :3, 3] = np.asarray([pose.wrist_translation for pose in poses])
         wrists[:, 3, 3] = 1.0
-        predicted: Float32[ndarray, "n 21 3"] = skin_landmarks(build.profile, angles, wrist_for_hand(wrists, side.model_index))
+        predicted: Float32[ndarray, "n 21 3"] = skin_landmarks(build.profile, angles, wrist_for_hand(wrists, hand_index))
         shipped: Float32[ndarray, "n 21 3"] = np.asarray([pose.landmarks_3d_mm for pose in poses], dtype=np.float32)
         error: float = float(np.linalg.norm(predicted - shipped, axis=-1).max())
-        print(f"{build.identity.sequence_key} hand {side.key}: max skinning error {error:.8f} mm")
+        print(f"{build.identity.sequence_key} hand {hand_index}: max skinning error {error:.8f} mm")
         assert error < 0.01
 
 
