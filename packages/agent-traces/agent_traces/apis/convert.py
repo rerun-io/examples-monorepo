@@ -47,6 +47,7 @@ def main(config: Config) -> None:
     print(f"entities={len(counts)} rows={sum(counts.values())}")
     for family, count in sorted(families.items()):
         print(f"{family}: {count}")
+    print(f"n_turns={counts['turns']}")
     print(f"images={families['media']} inlined_outputs={session.n_inlined_outputs}")
     print(f"skipped={orjson.dumps(session.skipped, option=orjson.OPT_SORT_KEYS).decode()}")
     print(out)

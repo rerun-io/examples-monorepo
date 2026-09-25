@@ -31,21 +31,32 @@ def session_blueprint() -> rrb.Blueprint:
         view_range=encodings.TimeRange(encodings.TimeRangeBoundary.infinite(), encodings.TimeRangeBoundary.infinite())
     )
     return rrb.Blueprint(
-        rrb.Horizontal(
-            rrb.Vertical(conversation, tools, row_shares=[3, 2]),
-            rrb.Vertical(
-                rrb.Spatial2DView(name="Images", origin="/media/images"),
-                rrb.TimeSeriesView(
-                    name="Tokens per request",
-                    origin="/usage",
-                    contents=["+ /usage/input_tokens", "+ /usage/output_tokens", "+ /usage/thinking_tokens"],
-                    axis_x=whole_session,
+        rrb.Vertical(
+            rrb.Horizontal(
+                rrb.Vertical(conversation, tools, row_shares=[3, 2]),
+                rrb.Vertical(
+                    rrb.Spatial2DView(name="Images", origin="/media/images"),
+                    rrb.TimeSeriesView(
+                        name="Tokens per request",
+                        origin="/usage",
+                        contents=["+ /usage/input_tokens", "+ /usage/output_tokens", "+ /usage/thinking_tokens"],
+                        axis_x=whole_session,
+                    ),
+                    rrb.TimeSeriesView(
+                        name="Cache tokens",
+                        origin="/usage",
+                        contents=["+ /usage/cache_read_tokens", "+ /usage/cache_creation_tokens"],
+                        axis_x=whole_session,
+                    ),
+                    rrb.TimeSeriesView(name="Tool elapsed (ms)", origin="/tools/elapsed_ms", axis_x=whole_session),
+                    row_shares=[3, 2, 2, 2],
                 ),
-                rrb.TimeSeriesView(name="Cache tokens", origin="/usage", contents=["+ /usage/cache_read_tokens", "+ /usage/cache_creation_tokens"], axis_x=whole_session),
-                rrb.TimeSeriesView(name="Tool elapsed (ms)", origin="/tools/elapsed_ms", axis_x=whole_session),
-                row_shares=[3, 2, 2, 2],
+                column_shares=[3, 2],
             ),
-            column_shares=[3, 2],
+            rrb.DataframeView(
+                name="Turns", origin="/turns", contents=["+ /turns"], query=rrb.archetypes.DataframeQuery(timeline="wall", apply_latest_at=False)
+            ),
+            row_shares=[4, 1],
         ),
         rrb.TimePanel(state="expanded", timeline="wall"),
     )
