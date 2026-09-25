@@ -3,16 +3,16 @@
 ## Source
 
 The video source is `pablovela5620/assembly101-720p` at
-`001839131530cee9b2deb9ca66c025998d10cba4`. The local mirror README declares
-CC BY-NC 4.0. Official actions come from `cvml-nus/assembly101` at `bfc15ea5`,
+`001839131530cee9b2deb9ca66c025998d10cba4`. Official actions come from `cvml-nus/assembly101` at `bfc15ea5`,
 `annotations/` only. The separate AssemblyHands annotation product is not ingested.
 
-The read-only `root` defaults to `/mnt/nas/datasets/assembly101`. It contains
+The read-only `root` defaults to `paths.raw_root() / "assembly101"`. It contains
 `videos/av1-720-new/`, `assembly101_camera_and_hand_poses/`,
 `assemblyhands-toolkit/calib/nimble_json_calib/`, and `manifests/`.
-`DATAFORGE_RAW_ROOT` changes the parent of `assembly101`; `--root` specifies the
-exact dataset root. `--annotations-root` is independent and defaults to
-`/mnt/nas/datasets/assembly101/official/annotations`.
+Set `DATAFORGE_RAW_ROOT=/mnt/nas/datasets` for NAS inputs, or pass `--root`
+and `--annotations-root`. The environment variable sets the parent of `assembly101`
+(default `data/raw`); `--root` sets the exact dataset root. The annotations default
+is `paths.raw_root() / "assembly101/official/annotations"`.
 
 For this lane, use `--root /home/pablo/exoego-data/assembly101/raw` and
 `DATAFORGE_OUTPUT_ROOT=/home/pablo/exoego-data/assembly101/iter`. Conversion
@@ -21,7 +21,8 @@ copies finished recordings to the NAS. `--frame-limit N` writes under
 `preview-firstN`, keeping previews separate from full recordings.
 
 `download()` verifies the local tree without network access or writes. The mirror
-manifest, when present, distinguishes missing pose assets from video-only captures.
+manifest must contain an explicit `video_only=True` row to accept a capture without
+pose members. Partial pose trees always fail verification.
 `dataforge.datasets.assembly101_download.fetch_pose_members(destination, sequences,
 members)` is an explicit driver-only transport. It opens the remote
 `AssemblyPoses.zip` through `HfFileSystem` with 16 MiB range blocks and copies only
@@ -58,7 +59,7 @@ an action frame `f` maps to video frame `2f` and time `f/30`.
 | `videos/av1-720-new/<seq>/HMC_*_mono10bit_low.mp4` | 60 Hz, start-aligned | base | `/world/rig_08/cam_00..03/pinhole/video` |
 | `camera_extrinsics_fixed/<seq>.json` | static | base | Eight camera transforms, mm → m; also calibration-session identity |
 | `camera_extrinsics_ego/<seq>.json` | 60 Hz, real frame keys | base | Temporal `/world/rig_08`, four static camera offsets |
-| `nimble_json_calib/<seq>.json` | static | base | Per-camera Pinhole K and lens coefficients as camera AnyValues |
+| `nimble_json_calib/<seq>.json` | static | base | Per-camera Pinhole K and CameraDistortion model/coefficients |
 | `timestamp/<seq>.json` | rounded device seconds | base | Capture `timestamp_t0` and clock evidence; not used as noisy video timing |
 | `landmarks3D/<seq>.json` | 60 Hz, real keys | hand_pose | `/world/gt/coco133_xyz`, Points3DWithConfidence, mm → m |
 | `landmarks2D/<seq>.json` | 60 Hz, real keys | hand_pose | All 12 `<pinhole>/coco133_uv`, Points2DWithConfidence; exo ×2/3, ego ×1 |
@@ -66,7 +67,7 @@ an action frame `f` maps to video frame `2f` and time `f/30`.
 | `fine-grained-annotations/{train,validation,test}.csv` | 30 Hz segment boundaries | actions | `/task/actions/fine`, all active labels, union across views |
 | `coarse-annotations/coarse_labels/{assembly,disassembly}_<seq>.txt` | 30 Hz segment boundaries | actions | `/task/actions/coarse`, labels retain their assembly/disassembly part |
 | `manifests/sequences.csv` | sequence metadata | — | Verification of pose coverage; not a separate stream |
-| Other manifests, README, LICENSE | metadata | — | Source inventory/provenance; not sensor data |
+| Other manifests, README | metadata | — | Source inventory/provenance; not sensor data |
 | Action vocabularies, `head_actions.txt`, `tail_actions.txt`, coarse splits and view lists | metadata | — | Not ingested: segment rows already contain labels; benchmark splits are not streams |
 | `camera_position_fixed`, `camera_position_ego` | static / 60 Hz | — | Not ingested: exact duplicate of extrinsic translation |
 | `hand_bboxes` | 60 Hz | — | Not ingested: derived from shipped 2D landmarks |
@@ -95,10 +96,11 @@ Pinhole and `calibration_source="none"`. Ego lenses resolve by serial across all
 nimble files. The 17 video-only sequences have no transforms or Pinholes.
 
 K is scaled once from nimble source dimensions to the stored video dimensions.
-Rerun 0.38.1 cannot apply these distortion models. The camera node retains the
-model name, coefficients in `k1..k6,p1..p4` order and `distortion_applied=False`.
-The projection module implements OpenCV Brown-Conrady and OVFishEye62 (KB6 with
-p1/p2 swapped) for consumers and the golden test. Pinhole-only residuals measured
+Calibration goes through simplecv camera types and `log_camera_node`, with distortion
+stored as `CameraDistortion` on the pinhole entity. Nimble coefficients enter
+simplecv's Brown-Conrady and Kannala-Brandt models unchanged; the golden test uses
+those projection functions. Rerun 0.38.1 does not apply the distortion in its Viewer.
+Pinhole-only residuals measured
 by the driver are roughly 0.6–4.9 px median exo and 4–105 px ego in source pixels.
 The blueprint therefore shows shipped 2D in camera panes without overlaying
 undistorted 3D projections. AV1 packets are remuxed, never transcoded, including

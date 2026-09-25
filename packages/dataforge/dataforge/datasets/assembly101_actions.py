@@ -3,7 +3,6 @@
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeAlias
 
 import numpy as np
 from jaxtyping import Int64
@@ -44,7 +43,14 @@ class Segment:
             raise ValueError("invalid action interval")
 
 
-Actions: TypeAlias = dict[str, list[Segment]]
+@dataclass(frozen=True, slots=True)
+class Actions:
+    """Both official annotation granularities for one sequence."""
+
+    coarse: list[Segment]
+    """Assembly/disassembly segments."""
+    fine: list[Segment]
+    """View-unioned fine action segments."""
 
 
 def read_actions(root: Path, sequences: set[str]) -> dict[str, Actions]:
@@ -68,14 +74,16 @@ def read_actions(root: Path, sequences: set[str]) -> dict[str, Actions]:
             if not path.is_file():
                 continue
             with path.open(newline="") as handle:
-                coarse.extend(Segment(int(fields[0]), int(fields[1]), f"{part}: {fields[2]}") for fields in csv.reader(handle, delimiter="\t") if fields)
-        result[sequence] = {"coarse": sorted(coarse), "fine": sorted(unique[sequence])}
+                coarse.extend(
+                    Segment(int(fields[0]), int(fields[1]), f"{part}: {fields[2]}") for fields in csv.reader(handle, delimiter="\t") if fields
+                )
+        result[sequence] = Actions(sorted(coarse), sorted(unique[sequence]))
     return result
 
 
 def action_rows(segments: list[Segment], frame_limit: int | None = None) -> tuple[Int64[ndarray, "n"], list[str]]:
     """All active labels at each boundary; an empty document clears ended actions."""
-    boundaries: list[int] = sorted({boundary for segment in segments for boundary in (segment.start, segment.end)})
+    boundaries: list[int] = sorted({0, *(boundary for segment in segments for boundary in (segment.start, segment.end))}) if segments else []
     ratio: int = FRAME_RATE // ANNOTATION_RATE
     if frame_limit is not None:
         boundaries = [boundary for boundary in boundaries if boundary * ratio < frame_limit]

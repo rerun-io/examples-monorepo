@@ -7,7 +7,7 @@ from zipfile import ZipFile
 
 from huggingface_hub import HfFileSystem
 
-from dataforge.datasets.assembly101_source import POSE_MEMBERS
+from dataforge.datasets.assembly101_source import NAS_ROOT, POSE_MEMBERS
 
 MIRROR_ZIP: str = "datasets/pablovela5620/assembly101-720p@001839131530cee9b2deb9ca66c025998d10cba4/AssemblyPoses.zip"
 
@@ -18,7 +18,7 @@ def fetch_pose_members(destination: Path, sequences: tuple[str, ...], members: t
     This opt-in network function is never called by download(), conversion or tests.
     The driver owns its staging destination and subsequent raw-tree placement.
     """
-    if destination.resolve().is_relative_to(Path("/mnt/nas")):
+    if destination.resolve().is_relative_to(NAS_ROOT):
         raise ValueError("Assembly101 extraction must use local staging, never the NAS")
     if not sequences or any("/" in name or name in (".", "..") for name in (*sequences, *members)):
         raise ValueError("explicit plain sequence and member names are required")

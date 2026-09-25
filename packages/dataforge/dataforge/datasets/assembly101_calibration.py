@@ -8,8 +8,10 @@ import numpy as np
 from jaxtyping import Float64
 from numpy import ndarray
 from serde import coerce, serde
+from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion, PinholeParameters
 
-from dataforge.datasets.assembly101_source import pose_path, read_record, read_transforms
+from dataforge.datasets.assembly101_source import pose_path, read_transforms
+from dataforge.records import read_json
 
 
 @serde(type_check=coerce)
@@ -46,23 +48,13 @@ class Lens:
     k6: float
     """Sixth radial coefficient (fisheye)."""
     p1: float
-    """First tangential coefficient; fisheye swaps the OpenCV convention."""
+    """First tangential coefficient, passed to simplecv unchanged."""
     p2: float
     """Second tangential coefficient."""
-
-    p3: float = 0.0
-    """Third tangential coefficient (zero in this release)."""
-    p4: float = 0.0
-    """Fourth tangential coefficient (zero in this release)."""
 
     @property
     def key(self) -> str:
         return self.SerialNo.replace("_", ":")
-
-    @property
-    def coefficients(self) -> list[float]:
-        """Source order k1..k6,p1..p4, preserved as camera data."""
-        return [self.k1, self.k2, self.k3, self.k4, self.k5, self.k6, self.p1, self.p2, self.p3, self.p4]
 
     def matrix(self, stored: tuple[int, int]) -> Float64[ndarray, "3 3"]:
         """Scale K from source to stored pixels exactly once."""
@@ -82,69 +74,48 @@ class NimbleRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class Calibration:
-    """Resolved lenses and per-camera provenance; no cross-session borrowing."""
+class ResolvedLens:
+    """One camera's lens and calibration provenance."""
 
-    lenses: dict[str, Lens]
-    """Camera key to lens."""
-    sources: dict[str, str]
-    """Camera key to matching nimble sequence, or absent."""
+    lens: Lens
+    """Shipped nimble parameters."""
+    source: str
+    """Matching nimble sequence name."""
 
 
-def resolve_calibration(root: Path, fixed: dict[str, Float64[ndarray, "4 4"]], sequence: str | None = None) -> Calibration:
+def resolve_calibration(root: Path, fixed: dict[str, Float64[ndarray, "4 4"]]) -> dict[str, ResolvedLens]:
     """Match identical fixed extrinsics for exo; ego lenses are invariant by serial."""
-    lenses: dict[str, Lens] = {}
-    sources: dict[str, str] = {}
+    resolved: dict[str, ResolvedLens] = {}
     for path in sorted((root / "assemblyhands-toolkit/calib/nimble_json_calib").glob("*.json")):
-        records: list[NimbleRecord] = read_record(path, NimbleFile).data
+        records: list[NimbleRecord] = read_json(path, list[NimbleRecord])
         candidate_path: Path = pose_path(root, "camera_extrinsics_fixed", path.stem)
-        matched: bool = False
-        if fixed and candidate_path.is_file():
-            candidate: dict[str, Float64[ndarray, "4 4"]] = fixed if path.stem == sequence else read_transforms(candidate_path)
-            matched = candidate.keys() == fixed.keys() and all(
-                np.allclose(candidate[key], value, rtol=0.0, atol=1e-3) for key, value in fixed.items()
-            )
+        if not candidate_path.is_file():
+            raise ValueError(f"Assembly101 calibration donor missing: {candidate_path}")
+        candidate: dict[str, Float64[ndarray, "4 4"]] = read_transforms(candidate_path)
+        matched: bool = candidate.keys() == fixed.keys() and all(
+            np.allclose(candidate[key], value, rtol=0.0, atol=1e-3) for key, value in fixed.items()
+        )
         for record in records:
             lens: Lens = record.Camera
-            if lens.key not in lenses and (lens.DistortionModel == "OVFishEye62" or matched):
-                lenses[lens.key] = lens
-                sources[lens.key] = f"nimble:{path.stem}"
-    return Calibration(lenses, sources)
+            if lens.key not in resolved and (lens.DistortionModel == "OVFishEye62" or matched):
+                resolved[lens.key] = ResolvedLens(lens, f"nimble:{path.stem}")
+    return resolved
 
 
-def project(points: Float64[ndarray, "n 3"], lens: Lens, stored: tuple[int, int]) -> Float64[ndarray, "n 2"]:
-    """Project camera-space Float64[n,3] points into stored pixels, including distortion."""
-    xy: Float64[ndarray, "n 2"] = points[:, :2] / points[:, 2:]
-    radius2: Float64[ndarray, "n"] = np.sum(xy * xy, axis=1)
-    if lens.DistortionModel == "OVFishEye62":
-        radius: Float64[ndarray, "n"] = np.sqrt(radius2)
-        theta: Float64[ndarray, "n"] = np.arctan(radius)
-        distorted: Float64[ndarray, "n"] = theta.copy()
-        for index, coefficient in enumerate(lens.coefficients[:6], start=1):
-            distorted += coefficient * theta ** (2 * index + 1)
-        xy = xy * np.divide(distorted, radius, out=np.ones_like(radius), where=radius != 0)[:, None]
-        radius2 = np.sum(xy * xy, axis=1)
-        p1, p2 = lens.p2, lens.p1
-        radial: Float64[ndarray, "n"] = np.ones_like(radius2)
-    else:
-        p1, p2 = lens.p1, lens.p2
-        radial = 1.0 + lens.k1 * radius2 + lens.k2 * radius2**2 + lens.k3 * radius2**3
-    x: Float64[ndarray, "n"] = xy[:, 0]
-    y: Float64[ndarray, "n"] = xy[:, 1]
-    uv: Float64[ndarray, "n 2"] = np.column_stack(
-        (
-            x * radial + 2 * p1 * x * y + p2 * (radius2 + 2 * x * x),
-            y * radial + p1 * (radius2 + 2 * y * y) + 2 * p2 * x * y,
+def camera_parameters(lens: Lens, transform: Float64[ndarray, "4 4"], stored: tuple[int, int]) -> PinholeParameters | Fisheye62Parameters:
+    """Build a camera with Float64[4,4] parent-from-camera metres and stored pixels.
+
+    Nimble distortion coefficients enter simplecv's models unchanged.
+    """
+    intrinsics: Intrinsics = Intrinsics.from_k_matrix(camera_conventions="RDF", k_matrix=lens.matrix(stored), width=stored[0], height=stored[1])
+    extrinsics: Extrinsics = Extrinsics(world_R_cam=transform[:3, :3], world_t_cam=transform[:3, 3])
+    if lens.DistortionModel == "OpenCV":
+        return PinholeParameters(
+            lens.SerialNo, extrinsics, intrinsics, distortion=BrownConradyDistortion(lens.k1, lens.k2, lens.p1, lens.p2, lens.k3)
         )
+    return Fisheye62Parameters(
+        lens.SerialNo,
+        extrinsics,
+        intrinsics,
+        distortion=KannalaBrandtDistortion(lens.k1, lens.k2, lens.k3, lens.k4, lens.k5, lens.k6, lens.p1, lens.p2),
     )
-    matrix: Float64[ndarray, "3 3"] = lens.matrix(stored)
-    return uv * np.array([matrix[0, 0], matrix[1, 1]]) + matrix[:2, 2]
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class NimbleFile:
-    """Typed envelope for nimble's bare list."""
-
-    data: list[NimbleRecord]
-    """One record per camera."""

@@ -13,7 +13,7 @@ import pyarrow as pa
 import rerun as rr
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
-from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
+from simplecv.data.skeleton.assembly_hands import _ASM2COCO, _ASM2COCO_R, assembly21_to_coco133
 from simplecv.data.skeleton.coco_133 import COCO_133_IDS, LEFT_HAND_IDX, RIGHT_HAND_IDX
 from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
 
@@ -56,6 +56,28 @@ def coco133_from_hands(
     covered: Bool[ndarray, "133"] = HAND_OF_SLOT >= 0
     confidence[covered] = confidence_lr[HAND_OF_SLOT[covered]]
     return positions, confidence
+
+
+def coco133_from_hands_batch(
+    joints: Float32[ndarray, "n 2 21 d"], confidence: Float32[ndarray, "n 2"]
+) -> tuple[Float32[ndarray, "n 133 d"], Float32[ndarray, "n 133"]]:
+    """Map Float32[n,2,21,d] Assembly joints and Float32[n,2] hand scores.
+
+    Uses the scalar adapter's tables and midpoint policy; writers normalize missing joints.
+    """
+    dimensions: int = joints.shape[-1]
+    if dimensions not in (2, 3):
+        raise ValueError("hand landmarks must have 2 or 3 coordinates")
+    positions: Float32[ndarray, "n 133 d"] = np.full((len(joints), 133, dimensions), np.nan, dtype=np.float32)
+    for hand, mapping in enumerate((_ASM2COCO, _ASM2COCO_R)):
+        for joint, slots in mapping.items():
+            positions[:, slots, :] = joints[:, hand, joint, None, :]
+        valid: Bool[ndarray, "n"] = ~np.isnan(joints[:, hand, [5, 6], :]).any(axis=(1, 2))
+        positions[valid, 92 + 21 * hand] = (joints[valid, hand, 5] + joints[valid, hand, 6]) * np.float32(0.5)
+    scores: Float32[ndarray, "n 133"] = np.zeros((len(joints), 133), dtype=np.float32)
+    covered: Bool[ndarray, "133"] = HAND_OF_SLOT >= 0
+    scores[:, covered] = confidence[:, HAND_OF_SLOT[covered]]
+    return positions, scores
 
 
 def confidence_rule(

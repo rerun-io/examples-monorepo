@@ -1,6 +1,5 @@
 """Assembly101 discovery and three-layer conversion from the extracted mirror."""
 
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
@@ -10,7 +9,7 @@ import rerun.blueprint as rrb
 from dataforge import blueprints, paths, schema, writing
 from dataforge.datasets.assembly101_actions import Actions, read_actions
 from dataforge.datasets.assembly101_layers import Scene, camera_sources, read_scene, write_actions, write_base, write_hands
-from dataforge.datasets.assembly101_source import EGO_RIG, EXO_SERIALS, FRAME_RATE, POSE_MEMBERS, pose_path, read_manifest
+from dataforge.datasets.assembly101_source import EGO_RIG, EXO_SERIALS, FRAME_RATE, NAS_ROOT, POSE_MEMBERS, pose_path, read_manifest
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
 
@@ -23,9 +22,9 @@ class Assembly101Config(DataforgeDatasetConfig):
     """CLI and catalog name."""
     _target: type = field(default_factory=lambda: Assembly101Dataset)
     """Dataset implementation."""
-    root: Path = field(default_factory=lambda: Path(os.environ.get("DATAFORGE_RAW_ROOT", "/mnt/nas/datasets")) / "assembly101")
+    root: Path = field(default_factory=lambda: paths.raw_root() / "assembly101")
     """Mirror layout containing videos, extracted pose members and nimble calibration."""
-    annotations_root: Path = Path("/mnt/nas/datasets/assembly101/official/annotations")
+    annotations_root: Path = field(default_factory=lambda: paths.raw_root() / "assembly101/official/annotations")
     """Independent read-only official annotations root."""
     sequences: tuple[str, ...] | None = None
     """Sequence directories to include, or all present videos."""
@@ -66,18 +65,23 @@ class Assembly101Dataset(DataforgeDataset[Assembly101Config, str]):
             self.verify_sequence(sequence)
         print(f"assembly101: verified {len(selected)} local sequences; no files changed")
 
-    def verify_sequence(self, sequence: str) -> None:
+    def verify_sequence(self, sequence: str) -> bool:
         """Refuse partial pose trees; truly video-only sequences have no pose members."""
         if len(camera_sources(self.config.root, sequence)) != 12:
             raise FileNotFoundError(f"{sequence}: expected 12 videos in {self.config.root / 'videos/av1-720-new'}")
         members: list[Path] = [pose_path(self.config.root, member, sequence) for member in POSE_MEMBERS]
-        if self.pose_expected.get(sequence, False) or any(path.exists() for path in members):
-            for path in members:
-                if not path.is_file() or path.stat().st_size == 0:
-                    raise FileNotFoundError(f"Assembly101 pose asset missing: {path}")
-            calibration: Path = self.config.root / "assemblyhands-toolkit/calib/nimble_json_calib"
-            if not any(calibration.glob("*.json")):
-                raise FileNotFoundError(f"Assembly101 nimble assets missing: {calibration}")
+        if not any(path.exists() for path in members) and self.pose_expected.get(sequence) is False:
+            return False
+        if sequence not in self.pose_expected and not any(path.exists() for path in members):
+            raise FileNotFoundError(f"{self.config.root / 'manifests/sequences.csv'}: explicit video_only=True row required for {sequence}")
+        for path in members:
+            if not path.is_file() or path.stat().st_size == 0:
+                raise FileNotFoundError(f"Assembly101 pose asset missing: {path}")
+        calibration: Path = self.config.root / "assemblyhands-toolkit/calib/nimble_json_calib"
+        if not any(calibration.glob("*.json")):
+            raise FileNotFoundError(f"Assembly101 nimble assets missing: {calibration}")
+
+        return True
 
     def targets(self, identity: SequenceIdentity) -> dict[str, Path]:
         root: Path = paths.output_root()
@@ -89,25 +93,30 @@ class Assembly101Dataset(DataforgeDataset[Assembly101Config, str]):
         """Publish only available layers, atomically, sharing the recording identity."""
         targets: dict[str, Path] = self.targets(identity)
         for target in targets.values():
-            if any(target.resolve().is_relative_to(root.resolve()) for root in (self.config.root, self.config.annotations_root, Path("/mnt/nas"))):
+            if any(target.resolve().is_relative_to(root.resolve()) for root in (self.config.root, self.config.annotations_root, NAS_ROOT)):
                 raise ValueError(f"refusing conversion output beneath raw inputs or NAS: {target}")
         with self.timer.stage("fetch"):
-            self.verify_sequence(source)
+            has_poses: bool = self.verify_sequence(source)
             if self.actions is None:
                 self.actions = read_actions(self.config.annotations_root, {sequence for _, sequence in self.discover()})
             actions: Actions = self.actions[source]
         available: list[str] = [paths.BASE_LAYER]
-        if pose_path(self.config.root, "landmarks3D", source).is_file():
+        if has_poses:
             available.append(paths.HAND_POSE_LAYER)
-        if any(actions.values()):
+        if actions.coarse or actions.fine:
             available.append("actions")
         pending: list[str] = [layer for layer in available if not writing.should_skip(targets[layer], force=force)]
         if not pending:
             return targets[paths.BASE_LAYER]
         with self.timer.stage("fetch"):
-            scene: Scene = read_scene(self.config.root, source, self.config.frame_limit)
-        if len(scene.frames):
-            self.timer.capture_s = (int(scene.frames[-1]) + 1) / FRAME_RATE
+            scene: Scene = read_scene(self.config.root, source, self.config.frame_limit, has_poses=has_poses)
+        self.timer.capture_s = (
+            max(
+                max(camera.num_frames for camera in scene.cameras),
+                int(scene.poses.frames[-1]) + 1 if scene.poses is not None and len(scene.poses.frames) else 0,
+            )
+            / FRAME_RATE
+        )
         for layer in pending:
             with (
                 self.timer.stage(f"write:{layer}"),
@@ -124,6 +133,10 @@ class Assembly101Dataset(DataforgeDataset[Assembly101Config, str]):
                     write_hands(recording, self.config.root, source, scene, self.config.frame_limit)
                 else:
                     write_actions(recording, actions, self.config.frame_limit)
+            if force and layer == paths.BASE_LAYER:
+                for optional in (paths.HAND_POSE_LAYER, "actions"):
+                    if optional not in available:
+                        targets[optional].unlink(missing_ok=True)
         return targets[paths.BASE_LAYER]
 
     def default_blueprint(self) -> rrb.Blueprint:

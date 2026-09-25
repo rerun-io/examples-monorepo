@@ -11,10 +11,11 @@ import numpy as np
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 from serde import SerdeError, coerce, field, from_dict, serde
-from serde.json import from_json
 
-from dataforge.hands import coco133_from_hands, confidence_rule
+from dataforge.hands import coco133_from_hands_batch
+from dataforge.records import read_json
 
+NAS_ROOT: Path = Path("/mnt/nas")
 FRAME_RATE: int = 60
 ANNOTATION_RATE: int = 30
 EGO_RIG: int = 8
@@ -26,9 +27,9 @@ T = TypeVar("T")
 
 
 def read_record(path: Path, cls: type[T]) -> T:  # noqa: UP047
-    """Read a small typed JSON record and name the source on decode failure."""
+    """Decode a numpy-valued map through a dataclass root, naming decode failures."""
     try:
-        return from_json(cls, '{"data":' + path.read_text() + "}")
+        return from_dict(cls, {"data": json.loads(path.read_text())})
     except (SerdeError, json.JSONDecodeError) as error:
         raise ValueError(f"{path}: {error}") from error
 
@@ -83,7 +84,7 @@ HandRows: TypeAlias = tuple[Int64[ndarray, "n"], Float32[ndarray, "n 133 d"], Fl
 
 def read_confidence(path: Path) -> dict[int, Float32[ndarray, "2"]]:
     """Decode a confidence stream once, retaining real frame keys."""
-    rows: dict[str, HandConfidence] = read_record(path, ConfidenceStream).data
+    rows: dict[str, HandConfidence] = read_json(path, dict[str, HandConfidence])
     return {int(key): np.array([row.left, row.right], dtype=np.float32) for key, row in rows.items()}
 
 
@@ -99,13 +100,10 @@ def frame_batches(rows: Mapping[str, object], frame_limit: int | None) -> Iterat
 def coco_rows(
     keys: list[str], pairs: list[dict[str, list[list[float | int]]]], confidence: dict[int, Float32[ndarray, "2"]], dimensions: int, scale: float
 ) -> HandRows:
-    """Decode one batch of shipped hand pairs into dense COCO rows under the keypoint rule."""
-    positions: Float32[ndarray, "n 133 d"] = np.empty((len(keys), 133, dimensions), dtype=np.float32)
-    scores: Float32[ndarray, "n 133"] = np.empty((len(keys), 133), dtype=np.float32)
-    for index, (key, raw) in enumerate(zip(keys, pairs, strict=True)):
-        pair: HandPair = from_dict(HandPair, raw)
-        positions[index], scores[index] = coco133_from_hands(pair.array(dimensions) * np.float32(scale), confidence[int(key)])
-    positions, scores = confidence_rule(positions, scores)
+    """Decode a batch into raw COCO rows; shared writers apply the confidence rule."""
+    joints: Float32[ndarray, "n 2 21 d"] = np.stack([from_dict(HandPair, raw).array(dimensions) for raw in pairs]) * np.float32(scale)
+    confidence_batch: Float32[ndarray, "n 2"] = np.stack([confidence[int(key)] for key in keys])
+    positions, scores = coco133_from_hands_batch(joints, confidence_batch)
     return np.array(keys, dtype=np.int64), positions, scores
 
 
@@ -125,14 +123,13 @@ def read_hand_rows(
 
 
 def read_pixels(
-    path: Path, confidence: dict[int, Float32[ndarray, "2"]], camera_keys: list[str], frame_limit: int | None
+    path: Path, confidence: dict[int, Float32[ndarray, "2"]], camera_scales: dict[str, float], frame_limit: int | None
 ) -> Iterator[tuple[str, HandRows]]:
     """Read the large 2D member once; keep only one 256-frame camera batch in addition to it."""
     with path.open() as handle:
         rows: dict[str, dict[str, dict[str, list[list[float | int]]]]] = json.load(handle)
     for keys in frame_batches(rows, frame_limit):
-        for camera in camera_keys:
-            scale: float = 2.0 / 3.0 if camera.startswith("C") else 1.0
+        for camera, scale in camera_scales.items():
             yield camera, coco_rows(keys, [rows[key].pop(camera) for key in keys], confidence, 2, scale)
         for key in keys:
             del rows[key]
@@ -159,24 +156,6 @@ class EgoTransforms:
 
     data: dict[str, dict[str, Float64[ndarray, "4 4"]]]
     """World-from-camera transforms, source mm."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class Timestamps:
-    """Device times, retained as clock evidence."""
-
-    data: dict[str, float]
-    """Seconds keyed by real frame index."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class ConfidenceStream:
-    """Per-frame hand confidence map."""
-
-    data: dict[str, HandConfidence]
-    """One scalar for each hand in each frame."""
 
 
 @serde

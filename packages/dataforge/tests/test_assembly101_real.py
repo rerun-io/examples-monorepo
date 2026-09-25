@@ -7,10 +7,13 @@ import numpy as np
 import pyarrow as pa
 import pytest
 from conftest import read_chunks
+from simplecv.camera_parameters import PinholeParameters
+from simplecv.sensors.camera.brown_conrady import project_brown_conrady_diagonal
+from simplecv.sensors.camera.fisheye62 import project_kannala_brandt_diagonal
 
 from dataforge import schema
 from dataforge.datasets.assembly101 import Assembly101Config
-from dataforge.datasets.assembly101_calibration import project
+from dataforge.datasets.assembly101_calibration import camera_parameters
 from dataforge.datasets.assembly101_layers import camera_sources, read_scene
 from dataforge.datasets.assembly101_source import EGO_RIG, POSE_MEMBERS, pose_path, read_confidence, read_hand_rows, read_pixels
 
@@ -78,7 +81,9 @@ def test_real_first_60_frames_all_layers(tmp_path: Path, monkeypatch: pytest.Mon
 
 @pytest.mark.golden
 def test_all_12_lenses_match_shipped_pixels(assembly101_root: Path) -> None:
-    scene = read_scene(assembly101_root, KEY, None)
+    scene = read_scene(assembly101_root, KEY, None, has_poses=True)
+    assert scene.poses is not None
+    poses = scene.poses
     confidence = read_confidence(pose_path(assembly101_root, "hand_confidences", KEY))
     # Every 97th real key across the whole capture, matching the raw-facts measurement.
     xyz = {}
@@ -90,20 +95,26 @@ def test_all_12_lenses_match_shipped_pixels(assembly101_root: Path) -> None:
                 xyz[int(frame)] = points.astype(np.float64)
     cameras = {camera.key: camera for camera in scene.cameras}
     errors = {key: [] for key in cameras}
-    for key, (frames, pixels, _) in read_pixels(pose_path(assembly101_root, "landmarks2D", KEY), confidence, list(cameras), None):
+    for key, (frames, pixels, _) in read_pixels(
+        pose_path(assembly101_root, "landmarks2D", KEY), confidence, {key: camera.scale for key, camera in cameras.items()}, None
+    ):
         camera = cameras[key]
-        stored = (1280, 720) if camera.rig != EGO_RIG else (636, 480)
+        stored = camera.stored_resolution
         for frame, measured in zip(frames, pixels, strict=True):
             if int(frame) not in xyz:
                 continue
             if camera.rig == EGO_RIG:
-                transform = scene.world_T_rig[np.searchsorted(scene.frames, frame)] @ scene.rig_T_cam[key]
+                transform = poses.world_T_rig[np.searchsorted(poses.frames, frame)] @ poses.rig_T_cam[key]
             else:
-                transform = scene.fixed[key].copy()
+                transform = poses.fixed[key].copy()
                 transform[:3, 3] *= 0.001
             inverse = np.linalg.inv(transform)
             points = xyz[int(frame)] @ inverse[:3, :3].T + inverse[:3, 3]
-            predicted = project(points, scene.calibration.lenses[key], stored)
+            parameters = camera_parameters(poses.calibration[key].lens, transform, stored)
+            if isinstance(parameters, PinholeParameters):
+                predicted = project_brown_conrady_diagonal(xyz[int(frame)][None], [parameters], filter_invalid=False)[0]
+            else:
+                predicted = project_kannala_brandt_diagonal(xyz[int(frame)][None], [parameters], filter_invalid=False)[0]
             valid = np.isfinite(measured).all(axis=1) & (points[:, 2] > 0)
             valid &= (measured[:, 0] >= 0) & (measured[:, 0] < stored[0]) & (measured[:, 1] >= 0) & (measured[:, 1] < stored[1])
             # Thumb-base midpoints are derived separately in 2D and 3D; projection is nonlinear.
