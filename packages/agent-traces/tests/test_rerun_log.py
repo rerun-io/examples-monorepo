@@ -1,12 +1,15 @@
 """Read saved recordings to test the public writer boundary."""
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pyarrow as pa
 import pytest
 from rerun.chunk import RrdReader
 
-from agent_traces.claude import ClaudeSession, parse_session
+from agent_traces.claude import parse_session
+from agent_traces.events import Session
 from agent_traces.rerun_log import write_session_rrd
 from tests.conftest import SessionBuilder
 
@@ -36,7 +39,7 @@ def test_conversations_have_only_wall_time_and_keep_identity(session_builder: Se
     )
     session_builder.add("user", isCompactSummary=True, message={"content": "summary"})
     session_builder.add("user", path=session_builder.path.with_suffix("") / "subagents/agent-child.jsonl", message={"content": "child"})
-    out: Path = write_session_rrd(parse_session(session_builder.path), tmp_path / "session.rrd")
+    out: Path = write_session_rrd(parse_session(session_builder.path), tmp_path / "session.rrd").path
     entities: dict[str, pa.Table] = read_entities(out)
     timelines: set[str] = {
         field.name for table in entities.values() for field in table.schema if (field.metadata or {}).get(b"rerun:kind") == b"index"
@@ -73,13 +76,14 @@ def test_tool_results_join_calls_and_preserve_images(session_builder: SessionBui
     )
     session_builder.add("user", message={"content": [image]})
     session_builder.add("user", message={"content": [{"type": "tool_result", "tool_use_id": "unknown", "content": "no call"}]})
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "tools.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "tools.rrd").path)
     tool: pa.Table = entities["/tools/mcp/server/tool"]
     assert tool.num_rows == 2
     assert tool["phase"].to_pylist() == [["call"], ["result"]]
     assert tool["TextLog:level"].to_pylist() == [["INFO"], ["ERROR"]]
     assert tool["input_json"].to_pylist()[0] == ['{"command":"echo","nested":[1,true,null]}']
-    assert tool["result_text"].to_pylist()[-1] == ["result"]
+    assert "result_text" not in tool.column_names  # the result text lives once, in the visible TextLog row
+    assert tool["TextLog:text"].to_pylist()[-1][0].endswith("  result")
     assert tool["elapsed_ms"].to_pylist()[-1] == [1000.0]
     assert tool["agent_id"].to_pylist()[-1] == ["child"]
     assert entities["/tools/elapsed_ms/mcp/server/tool"]["Scalars:scalars"].to_pylist() == [[1000.0]]
@@ -116,7 +120,7 @@ def test_usage_counts_first_row_per_message_id_per_agent(session_builder: Sessio
         path=session_builder.path.with_suffix("") / "subagents/agent-child.jsonl",
         message={"id": "m1", "usage": {"input_tokens": 7}, "content": []},
     )
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "usage.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "usage.rrd").path)
     expected: dict[str, int] = {
         "input_tokens": 10,
         "output_tokens": 4,
@@ -133,7 +137,6 @@ def test_usage_counts_first_row_per_message_id_per_agent(session_builder: Sessio
 
 def test_lifecycle_and_flat_recording_properties(session_builder: SessionBuilder, tmp_path: Path) -> None:
     """Lifecycle details and skipped metadata survive as rows and properties."""
-    import hashlib
     import socket
 
     session_builder.add("user", cwd="/workspace", gitBranch="main", version="2.1.9", message={"content": "hello"})
@@ -151,7 +154,7 @@ def test_lifecycle_and_flat_recording_properties(session_builder: SessionBuilder
     session_builder.add("ai-title", timestamp=None, aiTitle="last title")
     session_builder.add("cost-state", timestamp=None, totalCostUSD=1.0)
     session_builder.add("cost-state", timestamp=None, totalCostUSD=2.5)
-    out: Path = write_session_rrd(parse_session(session_builder.path), tmp_path / "properties.rrd")
+    out: Path = write_session_rrd(parse_session(session_builder.path), tmp_path / "properties.rrd").path
     entities: dict[str, pa.Table] = read_entities(out)
     system: pa.Table = entities["/lifecycle/system"]
     assert system["TextLog:text"].to_pylist() == [["retry"], ["compact_boundary"]]
@@ -176,7 +179,7 @@ def test_lifecycle_and_flat_recording_properties(session_builder: SessionBuilder
         "n_inlined_outputs": 0,
         "total_cost_usd": 2.5,
         "source_path": str(session_builder.path.resolve()),
-        "source_sha256": hashlib.sha256(session_builder.path.read_bytes()).hexdigest(),
+        "source_sha256": "",
     }
     for key, value in expected.items():
         assert props[key].to_pylist() == [[value]]
@@ -190,7 +193,7 @@ def test_multiple_tool_entities_keep_sparse_columns_aligned(session_builder: Ses
     for index, tool in enumerate(["Bash", "Read", "Read"]):
         session_builder.add("assistant", message={"content": [{"type": "tool_use", "id": str(index), "name": tool, "input": {}}]})
         session_builder.add("user", message={"content": [{"type": "tool_result", "tool_use_id": str(index), "content": "ok"}]})
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "multiple.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "multiple.rrd").path)
     assert entities["/tools/Read"].num_rows == 4
     assert entities["/tools/Read"]["elapsed_ms"].to_pylist()[1::2] == [[1000.0], [1000.0]]
 
@@ -215,7 +218,7 @@ def test_all_row_families_preserve_nanoseconds(
             "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(png_bytes).decode()}}]
         },
     )
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "precise.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "precise.rrd").path)
     for entity in ["/conversation/assistant", "/usage/input_tokens", "/media/images"]:
         assert entities[entity]["wall"].cast(pa.int64()).to_pylist() == [expected_ns]
 
@@ -253,7 +256,7 @@ def test_raw_tool_metadata_round_trips(session_builder: SessionBuilder, tmp_path
     for payload in payloads:
         session_builder.add("user", toolUseResult=payload, message={"content": [{"type": "tool_result", "content": "ok"}]})
     session_builder.add("user", message={"content": [{"type": "tool_result", "content": "ok"}]})
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "raw.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "raw.rrd").path)
     assert entities["/tools/unknown"]["tool_use_result_json"].to_pylist() == [
         ['{"unknown":{"nested":[1,true,null]}}'],
         ['"output"'],
@@ -287,7 +290,7 @@ def test_turns_follow_prompts_in_file_order(session_builder: SessionBuilder, tmp
     session_builder.add("user", message={"content": [{"type": "text", "text": "second"}, {"type": "text", "text": "line"}]})
     session_builder.add("assistant", message={"id": "m2", "usage": {"output_tokens": 8}, "content": []})
     session_builder.add("user", path=session_builder.path.with_suffix("") / "subagents/agent-child.jsonl", message={"content": "child"})
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "turns.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "turns.rrd").path)
     turns: pa.Table = entities["/turns"]
     assert turns["TextLog:text"].to_pylist() == [["first"], ["second\nline"]]
     for name, expected in {
@@ -324,7 +327,7 @@ def test_turn_images_and_nonprompt_users(session_builder: SessionBuilder, png_by
     session_builder.add("user", message={"content": [{"type": "tool_result", "content": [image]}]})
     session_builder.add("user", message={"content": [image]})
     session_builder.add("system", timestamp="2026-09-18T20:00:02.500Z", content="last in file")
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "images.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "images.rrd").path)
     assert entities["/turns"]["n_images"].to_pylist() == [[3]]
     assert entities["/turns"]["elapsed_ms"].to_pylist() == [[1500.0]]
     assert entities["/turns"]["TextLog:level"].to_pylist() == [["INFO"]]
@@ -344,7 +347,7 @@ def test_turn_image_counts_match_emitted_rows(session_builder: SessionBuilder, p
     session_builder.add("user", message={"content": [{"type": "text", "text": "prompt"}, inline, url, {"type": "image"}]})
     session_builder.add("user", message={"content": [{"type": "tool_result", "content": [inline, url]}]})
     session_builder.add("assistant", message={"content": [inline]})
-    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "image-counts.rrd"))
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "image-counts.rrd").path)
     assert entities["/media/images"].num_rows == 2
     assert entities["/turns"]["n_images"].to_pylist() == [[2]]
 
@@ -352,9 +355,90 @@ def test_turn_image_counts_match_emitted_rows(session_builder: SessionBuilder, p
 def test_agent_and_host_properties(session_builder: SessionBuilder, tmp_path: Path) -> None:
     """Every recording names its agent kind and the machine it ran on; host can be overridden for copied homes."""
     session_builder.add("user", message={"content": "hello"})
-    session: ClaudeSession = parse_session(session_builder.path)
-    props: pa.Table = read_entities(write_session_rrd(session, tmp_path / "a.rrd"))["/__properties/session"]
+    session: Session = parse_session(session_builder.path)
+    props: pa.Table = read_entities(write_session_rrd(session, tmp_path / "a.rrd").path)["/__properties/session"]
     assert props["agent"].to_pylist() == [["claude"]]
     assert props["host"].to_pylist()[0][0]
-    props = read_entities(write_session_rrd(session, tmp_path / "b.rrd", host="laptop"))["/__properties/session"]
+    props = read_entities(write_session_rrd(session, tmp_path / "b.rrd", host="laptop").path)["/__properties/session"]
     assert props["host"].to_pylist() == [["laptop"]]
+
+
+@pytest.mark.parametrize("name,kind", [("Bash", "shell"), ("Read", "file_read"), ("Edit", "file_edit"), ("Write", "file_edit"), ("WebFetch", "web_search"), ("WebSearch", "web_search"), ("mcp__server__tool", "mcp"), ("Agent", "subagent"), ("Workflow", "subagent"), ("Unknown", "other")])
+def test_claude_tool_kind_and_turn_model_effort(session_builder: SessionBuilder, tmp_path: Path, name: str, kind: str) -> None:
+    """Provider metadata survives the shared recording boundary."""
+    session_builder.add("user", message={"content": "inspect"})
+    session_builder.add("assistant", effort="high", message={"id": "m", "model": "claude-test", "content": [{"type": "tool_use", "id": "c", "name": name, "input": {}}]})
+    session_builder.add("user", message={"content": [{"type": "tool_result", "tool_use_id": "c", "content": "ok"}]})
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "kinds.rrd").path)
+    entity: str = "mcp/server/tool" if kind == "mcp" else name
+    assert entities[f"/tools/{entity}"]["kind"].to_pylist() == [[kind], [kind]]
+    assert entities["/turns"]["model"].to_pylist() == [["claude-test"]]
+    assert entities["/turns"]["effort"].to_pylist() == [["high"]]
+
+
+def test_prompt_images_before_text_belong_to_new_turn(session_builder: SessionBuilder, png_bytes: bytes, tmp_path: Path) -> None:
+    """The entire prompt record starts a turn, regardless of block order."""
+    import base64
+
+    session_builder.add("user", message={"content": "first"})
+    session_builder.add("user", message={"content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(png_bytes).decode()}}, {"type": "text", "text": "second"}]})
+    entities: dict[str, pa.Table] = read_entities(write_session_rrd(parse_session(session_builder.path), tmp_path / "prompt-images.rrd").path)
+    assert entities["/turns"]["n_images"].to_pylist() == [[0], [1]]
+    assert entities["/turns"]["elapsed_ms"].to_pylist() == [[0.0], [0.0]]
+
+
+def test_written_counts_and_public_mode(session_builder: SessionBuilder, tmp_path: Path, png_bytes: bytes) -> None:
+    """Writer counts match saved text, images, usage, turns, and children."""
+    import base64
+
+    from agent_traces.claude import parse_session
+    from agent_traces.rerun_log import write_session_rrd
+
+    session_builder.add("user", message={"content": [
+        {"type": "text", "text": "hello"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(png_bytes).decode()}},
+    ]})
+    session_builder.add("assistant", message={"id": "m", "content": "hi", "usage": {"input_tokens": 7, "output_tokens": 3}})
+    session_builder.add("user", path=session_builder.path.with_suffix("") / "subagents/agent-child.jsonl", message={"content": "child"})
+    result = write_session_rrd(parse_session(session_builder.path), tmp_path / "counts.rrd")
+    assert result.path.stat().st_mode & 0o777 == 0o644
+    entities = read_entities(result.path)
+    assert result.entity_rows == {name.lstrip("/"): table.num_rows for name, table in entities.items() if not name.startswith("/__properties")}
+    assert {"conversation/user", "media/images", "usage/input_tokens", "turns", "agents/child/conversation/user"} <= result.entity_rows.keys()
+
+
+def test_empty_string_properties_survive_a_fresh_process(session_builder: SessionBuilder, tmp_path: Path) -> None:
+    """The first recording written by a process keeps empty strings; SDK inference drops an untyped first empty value."""
+    session_builder.add("user", message={"content": "hi"})
+    out: Path = tmp_path / "fresh.rrd"
+    script: str = (
+        "import sys; from pathlib import Path; from agent_traces.claude import parse_session; "
+        "from agent_traces.rerun_log import write_session_rrd; write_session_rrd(parse_session(Path(sys.argv[1])), Path(sys.argv[2]))"
+    )
+    subprocess.run([sys.executable, "-c", script, str(session_builder.path), str(out)], check=True)
+    props: pa.Table = read_entities(out)["/__properties/session"]
+    for key in ("title", "source_sha256"):
+        assert props[key].to_pylist() == [[""]]
+
+
+@pytest.mark.parametrize("provider,cost", [("claude", None), ("codex", None), ("claude", 1.25)])
+def test_reported_cost_or_null(tmp_path: Path, provider: str, cost: float | None) -> None:
+    """Both providers write null for an absent cost; reported finite cost survives."""
+    from agent_traces.claude import parse_session
+    from agent_traces.codex import parse_rollout
+    from tests.conftest import RolloutBuilder, SessionBuilder
+
+    if provider == "claude":
+        builder = SessionBuilder(tmp_path / ".claude/projects/p/a.jsonl")
+        builder.add("user", message={"content": "hello"})
+        if cost is not None:
+            builder.add("cost-state", totalCostUSD=cost)
+        session = parse_session(builder.path)
+    else:
+        rollout = RolloutBuilder(tmp_path / ".codex/sessions/a.jsonl")
+        rollout.meta()
+        rollout.item("Reasoning")
+        session = parse_rollout(rollout.path)
+    assert session.total_cost_usd == cost
+    entities = read_entities(write_session_rrd(session, tmp_path / "cost.rrd").path)
+    assert entities["/__properties/session"]["total_cost_usd"].to_pylist() == [[cost]]

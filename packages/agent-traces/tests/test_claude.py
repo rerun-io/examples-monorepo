@@ -1,10 +1,10 @@
 """Tests at the streaming parser and session boundary."""
 
-from collections.abc import Iterator
 from pathlib import Path
 
-from agent_traces.claude import ClaudeSession, SourceRecord, iter_records, parse_session
-from agent_traces.claude_records import Block, Message, Record, ResultContent, TextBlock, ToolResultBlock
+from agent_traces.claude import iter_records, parse_session
+from agent_traces.claude_records import Record, TextBlock
+from agent_traces.events import Image, Lifecycle, Prompt, Session, ToolResult
 from tests.conftest import SessionBuilder
 
 
@@ -12,15 +12,15 @@ def test_streams_typed_records_and_preserves_line_indices(session_builder: Sessi
     """Unknown fields are allowed and file order remains available."""
     session_builder.add("user", message={"role": "user", "content": "hello"}, future_field=True)
     session_builder.add("assistant", message={"id": "m1", "content": [{"type": "text", "text": "hi"}]})
-    records: Iterator[SourceRecord] = iter_records(session_builder.path)
+    records = iter_records(session_builder.path)
     assert iter(records) is records
     first: Record = next(records).record
     assert first.message is not None
     assert first.message.content == [TextBlock(text="hello")]
-    session: ClaudeSession = parse_session(session_builder.path)
+    session: Session = parse_session(session_builder.path)
     assert session.session_id == "session-123"
     assert session.profile == "claude-alt"
-    assert [row.file_index for row in session.main] == [0, 1]
+    assert [row.file_index for row in session.main] == [0, 0, 1, 1]
     assert session.main[0].timestamp_ns == 1_789_761_600_000_000_000
 
 
@@ -32,13 +32,12 @@ def test_skips_noise_and_folds_subagents_without_losing_tool_results(session_bui
     session_builder.add("future-kind")
     session_builder.add("system", timestamp=None)
     session_builder.add("user", path=session_builder.path.with_suffix("") / "subagents/agent-child.jsonl", message={"content": "child"})
-    session: ClaudeSession = parse_session(session_builder.path)
+    session: Session = parse_session(session_builder.path)
     assert session.skipped == {"total_tokens_reminder": 1, "queue-operation": 1, "future-kind": 1, "system": 1}
     assert len(session.main) == 1
-    assert session.main[0].record.message is not None
-    assert isinstance(session.main[0].record.message.content, list)
-    assert isinstance(session.main[0].record.message.content[0], ToolResultBlock)
-    assert session.main[0].record.message.content[0].tool_use_id == "t1"
+    assert isinstance(session.main[0].payload, ToolResult)
+    assert session.main[0].payload.call_id == "t1"
+    assert session.main[0].payload.text == "done"
     assert list(session.subagents) == ["child"]
     assert session.subagents["child"][0].file_index == 0
 
@@ -50,7 +49,7 @@ def test_bad_lines_report_source_and_line_without_reading_ahead(session_builder:
     session_builder.add("user", message={"content": "valid"})
     with session_builder.path.open("ab") as stream:
         stream.write(b"{broken\n")
-    records: Iterator[SourceRecord] = iter_records(session_builder.path)
+    records = iter_records(session_builder.path)
     assert next(records).record.type == "user"
     with pytest.raises(ValueError, match=r"session-123.jsonl:2"):
         next(records)
@@ -84,20 +83,12 @@ def test_inlines_only_outputs_inside_session_tool_results(session_builder: Sessi
     session_builder.add(
         "user", message={"content": [{"type": "tool_result", "content": "outside"}]}, toolUseResult={"persistedOutputPath": str(outside)}
     )
-    session: ClaudeSession = parse_session(session_builder.path)
-    actual: list[str | None] = []
-    for row in session.main:
-        assert row.record.message is not None
-        assert isinstance(row.record.message.content, list)
-        assert isinstance(row.record.message.content[0], ToolResultBlock)
-        content: str | list[ResultContent] | None = row.record.message.content[0].content
-        assert isinstance(content, str) or content is None
-        actual.append(content)
-    assert actual == ["full tool output", "full tool output", "missing", "outside"]
+    session: Session = parse_session(session_builder.path)
+    results_emitted: list[ToolResult] = [row.payload for row in session.main if isinstance(row.payload, ToolResult)]
+    assert [result.text for result in results_emitted] == ["full tool output", "full tool output", "missing", "outside"]
     assert session.n_inlined_outputs == 2
-    assert session.main[0].record.toolUseResult is not None
-    assert session.main[0].record.toolUseResult.agentId == "child"
-    assert '"future":42' in session.main[0].tool_use_result_json
+    assert results_emitted[0].agent_id == "child"
+    assert '"future":42' in results_emitted[0].raw_json
 
 
 def test_inlines_list_result_text_without_removing_images(session_builder: SessionBuilder) -> None:
@@ -121,14 +112,13 @@ def test_inlines_list_result_text_without_removing_images(session_builder: Sessi
             ]
         },
     )
-    session: ClaudeSession = parse_session(session_builder.path)
-    record: Record = session.main[0].record
-    assert record.message is not None and isinstance(record.message.content, list)
-    assert isinstance(record.message.content[0], ToolResultBlock)
-    content: str | list[ResultContent] | None = record.message.content[0].content
-    assert isinstance(content, list)
-    assert [part.type for part in content] == ["text", "image"]
-    assert content[0].text == "complete output"
+    session: Session = parse_session(session_builder.path)
+    assert isinstance(session.main[0].payload, ToolResult)
+    assert session.main[0].payload.text == "complete output"
+    assert isinstance(session.main[1].payload, Image)
+    assert session.main[1].payload.blob == b"\x00"
+    assert session.main[1].payload.media_type == "image/png"
+    assert session.main[1].payload.source == "tool_result"
     assert session.n_inlined_outputs == 1
 
 
@@ -149,7 +139,7 @@ def test_invalid_record_shape_and_timestamp_name_the_source(session_builder: Ses
 def test_wall_timestamp_preserves_nanoseconds_and_timezone(session_builder: SessionBuilder) -> None:
     """ISO timestamps retain their full precision rather than rounding floats."""
     session_builder.add("user", timestamp="2026-09-18T15:00:00.123456789-05:00", message={"content": "precise"})
-    session: ClaudeSession = parse_session(session_builder.path)
+    session: Session = parse_session(session_builder.path)
     assert session.main[0].timestamp_ns == 1_789_761_600_123_456_789
 
 
@@ -161,11 +151,13 @@ def test_content_boundary_normalizes_and_rejects_malformed_known_blocks(session_
 
     session_builder.add("user", message={"content": "hello"})
     session_builder.add("assistant", message={"content": [{"type": "future", "text": 42}, {}]})
-    session: ClaudeSession = parse_session(session_builder.path)
-    assert session.main[0].record.message is not None
-    assert session.main[1].record.message is not None
-    assert session.main[0].record.message.content == [TextBlock(text="hello")]
-    assert session.main[1].record.message.content == [UnknownBlock(type="future"), UnknownBlock()]
+    session: Session = parse_session(session_builder.path)
+    assert [row.payload.text for row in session.main if isinstance(row.payload, Prompt)] == ["hello"]
+    records = list(iter_records(session_builder.path))
+    assert records[0].record.message is not None
+    assert records[1].record.message is not None
+    assert records[0].record.message.content == [TextBlock(text="hello")]
+    assert records[1].record.message.content == [UnknownBlock(type="future"), UnknownBlock()]
     session_builder.add("assistant", message={"content": [{"type": "text", "text": 42}]})
     with pytest.raises(ValueError, match=r"session-123.jsonl:3"):
         parse_session(session_builder.path)
@@ -185,13 +177,11 @@ def test_source_metadata_cannot_be_spoofed_and_invalid_utf8_is_replaced(session_
         toolUseResult={"persistedOutputPath": "result.txt", "unknown": {"nested": [None]}},
         message={"content": [{"type": "tool_result", "content": "preview"}]},
     )
-    session: ClaudeSession = parse_session(session_builder.path)
-    assert session.main[0].raw_json == ""
-    assert '"unknown":{"nested":[null]}' in session.main[0].tool_use_result_json
-    assert not hasattr(session.main[0].record, "raw_json")
-    assert session.main[0].record.message is not None
-    assert isinstance(session.main[0].record.message.content[0], ToolResultBlock)
-    assert session.main[0].record.message.content[0].content == "full\ufffdoutput"
+    session: Session = parse_session(session_builder.path)
+    result = session.main[0].payload
+    assert isinstance(result, ToolResult)
+    assert result.raw_json == '{"persistedOutputPath":"result.txt","unknown":{"nested":[null]}}'
+    assert result.text == "full\ufffdoutput"
 
 
 def test_timestamp_grammar_and_integer_precision(session_builder: SessionBuilder) -> None:
@@ -240,9 +230,9 @@ def test_structured_attachment_content_is_counted_not_rejected(session_builder: 
     session_builder.add("attachment", attachment={"type": "task_reminder", "content": [{"id": "1", "status": "open"}]})
     session_builder.add("attachment", attachment={"type": "file", "content": {"filePath": "/x", "content": "y"}})
     session_builder.add("attachment", attachment={"type": "hook_success", "command": "echo", "content": "hook said hi"})
-    session: ClaudeSession = parse_session(session_builder.path)
+    session: Session = parse_session(session_builder.path)
     assert session.skipped == {"task_reminder": 1, "file": 1}
-    assert [timed.record.attachment.type for timed in session.main if timed.record.attachment] == ["hook_success"]
+    assert [timed.values["subtype"] for timed in session.main if isinstance(timed.payload, Lifecycle)] == ["hook_success"]
 
 
 def test_inlines_offloaded_output_with_invalid_utf8_bytes(session_builder: SessionBuilder) -> None:
@@ -256,17 +246,15 @@ def test_inlines_offloaded_output_with_invalid_utf8_bytes(session_builder: Sessi
         message={"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "Output saved to out.txt"}]},
         toolUseResult={"persistedOutputPath": str(session_dir / "tool-results" / "out.txt")},
     )
-    session: ClaudeSession = parse_session(session_builder.path)
+    session: Session = parse_session(session_builder.path)
     assert session.n_inlined_outputs == 1
-    message: Message | None = session.main[-1].record.message
-    assert message is not None
-    block: Block = message.content[0]
-    assert isinstance(block, ToolResultBlock) and block.content == "ok \ufffd bad"
+    result = session.main[-1].payload
+    assert isinstance(result, ToolResult) and result.text == "ok \ufffd bad"
 
 
 def test_session_sources_include_sorted_recursive_outputs(session_builder: SessionBuilder) -> None:
     """Discovery includes ignored inputs but parses only child transcripts."""
-    from agent_traces.claude import session_sources
+    from agent_traces.claude import session_source
 
     session_builder.add("user", message={"content": "main"})
     root: Path = session_builder.path.with_suffix("")
@@ -277,7 +265,7 @@ def test_session_sources_include_sorted_recursive_outputs(session_builder: Sessi
     (root / "tool-results/pdf-id/page.jpg").write_bytes(b"image")
     (root / "tool-results/agent-ignored.jsonl").write_text("not a transcript")
     (root / "subagents/agent-directory.jsonl").mkdir()
-    assert session_sources(session_builder.path) == [
+    assert list(session_source(session_builder.path).inputs) == [
         session_builder.path,
         root / "subagents/agent-a.jsonl",
         root / "subagents/agent-z.jsonl",
@@ -292,9 +280,53 @@ def test_marker_prose_that_is_not_a_path_is_left_alone(session_builder: SessionB
     """A tool result whose text says "saved to" followed by a paragraph must not be treated as a file reference."""
     prose: str = "Output saved to " + "x" * 5000
     session_builder.add("user", message={"content": [{"type": "tool_result", "tool_use_id": "1", "content": prose}]})
-    session: ClaudeSession = parse_session(session_builder.path)
-    message: Message | None = session.main[0].record.message
-    assert message is not None
-    block: Block = message.content[0]
-    assert isinstance(block, ToolResultBlock) and block.content == prose
+    session: Session = parse_session(session_builder.path)
+    result = session.main[0].payload
+    assert isinstance(result, ToolResult) and result.text == prose
     assert session.n_inlined_outputs == 0
+
+
+def test_flat_events_carry_turn_and_assistant_identity(session_builder: SessionBuilder) -> None:
+    """A boundary precedes an image-first prompt; tool-only messages retain identity."""
+    from agent_traces.events import AssistantText, Thinking, TimedRecord, ToolCall, TurnBoundary, UsageSample
+
+    session_builder.add("assistant", message={"id": "before", "content": "preamble"})
+    session_builder.add("user", uuid="prompt-uuid", promptId="prompt-id", message={"content": [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA=="}},
+        {"type": "text", "text": "first"}, {"type": "text", "text": "second"},
+    ]})
+    session_builder.add("assistant", message={"id": "m1", "content": [
+        {"type": "thinking", "thinking": "reason"}, {"type": "text", "text": "reply"},
+        {"type": "tool_use", "id": "call", "name": "Bash"},
+    ]})
+    session_builder.add("assistant", message={"id": "m1", "content": [{"type": "tool_use", "id": "next", "name": "Read"}]})
+    session: Session = parse_session(session_builder.path)
+    assert all(isinstance(event, TimedRecord) for event in session.main)
+    assert all(event.turn_id == "" for event in session.main if event.file_index == 0)
+    prompt_events: list[TimedRecord] = [event for event in session.main if event.file_index == 1]
+    assert [type(event.payload) for event in prompt_events] == [TurnBoundary, Image, Prompt, Prompt]
+    assert prompt_events[0].payload == TurnBoundary("start")
+    assert prompt_events[0].prompt_id == "prompt-id"
+    assert all(event.turn_id == "prompt-uuid" for event in session.main if event.file_index >= 1)
+    assistant_events: list[TimedRecord] = [event for event in session.main if event.file_index >= 2]
+    assert [type(event.payload) for event in assistant_events] == [UsageSample, Thinking, AssistantText, ToolCall, ToolCall]
+    assert all(event.message_id == "m1" for event in assistant_events)
+
+
+def test_parser_reads_only_inventoried_files(session_builder: SessionBuilder) -> None:
+    """Children and offloaded outputs added after inventory wait for the next conversion."""
+    from agent_traces.claude import session_source
+    from agent_traces.events import ToolResult
+
+    output = session_builder.path.with_suffix("") / "tool-results/new.txt"
+    session_builder.add("user", message={"content": [{"type": "tool_result", "tool_use_id": "t", "content": "preview"}]}, toolUseResult={"persistedOutputPath": str(output)})
+    source = session_source(session_builder.path)
+    output.parent.mkdir(parents=True)
+    output.write_text("full output")
+    session_builder.add("user", path=session_builder.path.with_suffix("") / "subagents/agent-late.jsonl", message={"content": "late"})
+    session = source.parse()
+    assert not session.subagents
+    assert [event.payload.text for event in session.main if isinstance(event.payload, ToolResult)] == ["preview"]
+    updated = session_source(session_builder.path).parse()
+    assert set(updated.subagents) == {"late"}
+    assert [event.payload.text for event in updated.main if isinstance(event.payload, ToolResult)] == ["full output"]

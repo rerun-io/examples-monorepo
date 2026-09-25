@@ -1,16 +1,20 @@
-"""Convert a Claude home incrementally using a content-hash manifest."""
+"""Convert a Claude or Codex home incrementally using a content-hash manifest."""
 
-import hashlib
+import socket
+from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from time import perf_counter
 
-from rerun.chunk import RrdReader
+import orjson
 
-from agent_traces.claude import ClaudeSession, parse_session, session_sources
-from agent_traces.manifest import Manifest, ManifestEntry, load_manifest, save_manifest
-from agent_traces.rerun_log import write_session_rrd
+from agent_traces import manifest as manifest_contract
+from agent_traces.codex import SkipRollout
+from agent_traces.events import Session
+from agent_traces.manifest import Manifest, ManifestEntry, fingerprint, fingerprint_with_extras, input_digest, load_manifest, save_manifest
+from agent_traces.rerun_log import WrittenRecording, write_session_rrd
+from agent_traces.sources import Discovery, provider_for
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,7 +22,7 @@ class Config:
     """Batch conversion arguments."""
 
     home: Path
-    """Claude home directory; a leading tilde is expanded."""
+    """Claude or Codex home directory; a leading tilde is expanded."""
     out: Path
     """Required output directory."""
     profile: str | None = None
@@ -40,6 +44,7 @@ def main(config: Config) -> None:
         config: Input home, output root, and optional selection filters.
     """
     home: Path = config.home.expanduser()
+    host: str = config.host if config.host is not None else socket.gethostname()
     profile: str = config.profile if config.profile is not None else home.name.lstrip(".")
     out: Path = config.out.expanduser() / profile
     out.mkdir(parents=True, exist_ok=True)
@@ -51,47 +56,65 @@ def main(config: Config) -> None:
     since: float | None = (
         datetime.combine(date.fromisoformat(config.since), datetime.min.time(), UTC).timestamp() if config.since is not None else None
     )
-    for path in sorted((home / "projects").glob("*/*.jsonl")):
-        if path.name.startswith("agent-") or path.name.startswith("._"):  # subagent files; AppleDouble sidecars from macOS copies
-            continue
+    discovery: Discovery = provider_for(home).discover(home)
+    for path, error in discovery.failed.items():
+        failed += 1
+        print(f"FAILED {path}: {error}")
+    reasons: Counter[str] = Counter(discovery.skipped.values())
+    skipped += len(discovery.skipped)
+    for source in discovery.sessions:
+        path: Path = source.main
+        session_id: str = source.session_id
         if config.project is not None and config.project not in path.parent.name:
             continue
-        if config.session_id is not None and config.session_id != path.stem:
+        if config.session_id is not None and config.session_id != session_id:
             continue
         if since is not None and path.stat().st_mtime < since:
             continue
         started: float = perf_counter()
-        digest = hashlib.sha256()
-        for source in session_sources(path):
-            digest.update(source.relative_to(path.parent).as_posix().encode("utf-8"))
-            digest.update(b"\0")
-            digest.update(str(source.stat().st_size).encode("ascii"))
-            digest.update(b"\0")
-            with source.open("rb") as stream:
-                while block := stream.read(1024 * 1024):
-                    digest.update(block)
-        source_hash: str = digest.hexdigest()
-        session_id: str = path.stem
-        entry: ManifestEntry | None = manifest.sessions.get(session_id)
-        if entry is not None and entry.source_sha256 == source_hash and (out / entry.rrd).is_file():
-            skipped += 1
-            print(f"skipped {session_id} rows={entry.n_rows} seconds={perf_counter() - started:.3f}")
-            continue
         try:
-            session: ClaudeSession = parse_session(path)
-        except ValueError as error:
+            transcript_hash: str = fingerprint(source.inputs)
+            entry: ManifestEntry | None = manifest.sessions.get(session_id)
+            source_hash: str = fingerprint_with_extras(
+                transcript_hash, {image: input_digest(Path(image)) for image in entry.extra_inputs} if entry is not None else {},
+            )
+            if (
+                entry is not None
+                and entry.source_sha256 == source_hash
+                and entry.host == host
+                and entry.revision == manifest_contract.CONVERSION_REVISION
+                and (out / entry.rrd).is_file()
+            ):
+                skipped += 1 + len(source.folded)
+                reasons["unchanged"] += 1
+                reasons.update(["folded-subagent"] * len(source.folded))
+                print(f"skipped {session_id} rows={entry.n_rows} seconds={perf_counter() - started:.3f}")
+                continue
+            session: Session = source.parse()
+        except SkipRollout as error:
+            skipped += 1 + len(source.folded)
+            reasons[str(error)] += 1
+            reasons.update(["parent-skipped"] * len(source.folded))
+            continue
+        except (ValueError, OSError) as error:
             failed += 1
+            skipped += len(source.folded)
+            reasons.update(["parent-failed"] * len(source.folded))
             print(f"FAILED {path}: {error} session_id={session_id} rows=0 seconds={perf_counter() - started:.3f}")
             continue
-        session = replace(session, profile=profile)
-        rrd: Path = write_session_rrd(session, out / f"{session_id}.rrd", host=config.host)
-        n_rows: int = sum(
-            chunk.num_rows
-            for chunk in RrdReader(rrd).stream()
-            if not str(chunk.entity_path).lstrip("/").startswith("__properties")
+        source_hash = fingerprint_with_extras(transcript_hash, session.extra_inputs)
+        session = replace(session, profile=profile, source_sha256=source_hash)
+        written: WrittenRecording = write_session_rrd(session, out / f"{session_id}.rrd", host=host)
+        n_rows: int = sum(written.entity_rows.values())
+        manifest.sessions[session_id] = ManifestEntry(
+            source_path=str(path), source_sha256=source_hash, rrd=written.path.name, extra_inputs=tuple(sorted(session.extra_inputs)),
+            converted_at=datetime.now(UTC).isoformat(), n_rows=n_rows, host=host, revision=manifest_contract.CONVERSION_REVISION,
         )
-        manifest.sessions[session_id] = ManifestEntry(str(path.resolve()), source_hash, rrd.name, datetime.now(UTC).isoformat(), n_rows)
         save_manifest(manifest, manifest_path)
         converted += 1
+        skipped += len(source.folded)
+        reasons.update(["folded-subagent"] * len(source.folded))
         print(f"converted {session_id} rows={n_rows} seconds={perf_counter() - started:.3f}")
+        del session  # Release this recording tree before parsing the next one.
+    print(f"skip_reasons={orjson.dumps(dict(sorted(reasons.items()))).decode()}")
     print(f"converted={converted} skipped={skipped} failed={failed} out={out}")
