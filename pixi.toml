@@ -3232,10 +3232,39 @@ cmd = "bash -c 'ulimit -n 524288 && exec rerun server --port 51235'"
 cwd = "packages/dataforge"
 description = "Start the local in-memory Rerun catalog on :51235 (own shell; keep running to register/view)"
 
+# agent-traces — one Claude Code session per recording, without torch.
+[feature.agent-traces]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
+
+[feature.agent-traces.dependencies]
+python = "3.12.*"
+pyserde = "*"
+orjson = "*"
+tomli-w = "*"
+tyro = ">=0.9.1,<0.10"
+
+[feature.agent-traces.pypi-dependencies]
+agent-traces = { path = "packages/agent-traces", editable = true }
+# pin-bump: hold — this torch-free lane restates `common`'s exact pin; see AGENTS.md.
+rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
+
+[feature.agent-traces.pypi-options]
+index-url = "https://pypi.org/simple"
+prerelease-mode = "allow"
+
+[feature.agent-traces.activation.env]
+PACKAGE_DIR = "packages/agent-traces"
+
+[feature.agent-traces.tasks.agent-traces-convert]
+cmd = "python tools/apps/convert.py"
+cwd = "packages/agent-traces"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
+agent-traces = { features = ["agent-traces"], solve-group = "agent-traces", no-default-feature = true }
+agent-traces-dev = { features = ["agent-traces", "dev"], solve-group = "agent-traces", no-default-feature = true }
 arkitscenes-download = { features = [
     "common",
     "arkitscenes-download",
