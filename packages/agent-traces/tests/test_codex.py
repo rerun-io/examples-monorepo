@@ -1,5 +1,6 @@
 """Codex parser and recording contracts use synthetic rollouts."""
 
+import re
 from pathlib import Path
 
 import pyarrow as pa
@@ -473,8 +474,8 @@ def test_excluded_parent_does_not_claim_folded_children(rollout_builder: Rollout
 
     rollout_builder.meta(version="0.149.0" if parent_state == "version" else "0.153.4")
     if parent_state == "failed":
-        with rollout_builder.path.open("ab") as stream:
-            stream.write(b"{broken\n")
+        with rollout_builder.path.open("ab") as stream:  # valid JSON with an invalid envelope still fails the rollout
+            stream.write(b'{"timestamp":"not-a-time","type":"event_msg","payload":{"type":"task_started","turn_id":"turn"}}\n')
     child = RolloutBuilder(tmp_path / ".codex-alt/archived_sessions/child.jsonl")
     child.meta("child", parent_thread_id="thread")
     child.item("Reasoning")
@@ -786,3 +787,31 @@ def test_shell_call_workdir_matches_file_uri_cwd(rollout_builder: RolloutBuilder
     rollout_builder.add("response_item", type="function_call_output", call_id="raw", output="ok")
     calls = [r.payload for r in parse_rollout(rollout_builder.path).main if isinstance(r.payload, ToolCall)]
     assert [call.call_id for call in calls] == ["raw" if joined else "native"]
+
+
+def test_damaged_rollout_line_is_skipped_counted_and_warned(rollout_builder: RolloutBuilder) -> None:
+    """A damaged line after the header costs that line only; the rest of the rollout converts."""
+    from agent_traces.codex import parse_rollout
+    from agent_traces.events import Thinking
+
+    rollout_builder.meta()
+    rollout_builder.item("Reasoning")
+    with rollout_builder.path.open("ab") as stream:
+        stream.write(b'{"type":"event_msg","pay\n')
+    rollout_builder.item("Reasoning")
+    with pytest.warns(UserWarning, match=rf"{re.escape(str(rollout_builder.path))}:3: "):
+        session = parse_rollout(rollout_builder.path)
+    assert session.skipped["damaged-line"] == 1
+    assert sum(isinstance(e.payload, Thinking) for e in session.main) == 2
+
+
+def test_valid_json_that_is_not_an_object_still_fails_the_rollout(rollout_builder: RolloutBuilder) -> None:
+    """Only a line that is not valid JSON counts as damaged; a JSON value of the wrong shape is a format change."""
+    from agent_traces.codex import parse_rollout
+
+    rollout_builder.meta()
+    rollout_builder.item("Reasoning")
+    with rollout_builder.path.open("ab") as stream:
+        stream.write(b"[]\n")
+    with pytest.raises(ValueError, match=r"line=3 invalid rollout structure"):
+        parse_rollout(rollout_builder.path)

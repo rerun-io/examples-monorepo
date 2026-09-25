@@ -25,7 +25,7 @@ from agent_traces.claude_records import (
     ToolUseBlock,
     Usage,
 )
-from agent_traces.sources import Discovery, SessionSource, provider_for
+from agent_traces.sources import DamagedLine, Discovery, SessionSource, provider_for, skip_damaged
 from agent_traces.timestamps import parse_timestamp_ns as parse_timestamp_ns
 
 
@@ -43,22 +43,29 @@ class _SourceRecord:
     """Whole source line for system and attachment records."""
 
 
-def iter_records(path: Path) -> Iterator[_SourceRecord]:
+def iter_records(path: Path) -> Iterator[_SourceRecord | DamagedLine]:
     """Decode records one line at a time through the typed boundary.
 
     Args:
         path: Source JSONL file.
 
     Yields:
-        Typed records in source order, without reading ahead.
+        Typed records in source order, without reading ahead, and a `DamagedLine` for each line that is not
+        valid JSON.
 
     Raises:
-        ValueError: A line is malformed; the message names its file and line.
+        ValueError: A valid JSON line is not a record of the expected shape; the message names its file and line.
     """
     with path.open("rb") as stream:
         for line_number, line in enumerate(stream, start=1):
             try:
                 decoded: object = orjson.loads(line)
+            except orjson.JSONDecodeError:
+                decoded = DamagedLine(path, line_number)
+            if isinstance(decoded, DamagedLine):
+                yield decoded
+                continue
+            try:
                 if not isinstance(decoded, dict):
                     raise ValueError(f"{path}:{line_number}: expected a JSON object")
                 raw: dict[str, object] = decoded
@@ -68,7 +75,7 @@ def iter_records(path: Path) -> Iterator[_SourceRecord]:
                 if not isinstance(tool_metadata, dict):
                     raw["toolUseResult"] = None
                 yield _SourceRecord(file_index=line_number - 1, record=from_dict(Record, raw), tool_use_result_json=tool_use_result_json, raw_json=raw_json)
-            except (orjson.JSONDecodeError, SerdeError) as error:
+            except SerdeError as error:
                 raise ValueError(f"{path}:{line_number}: {error}") from error
 
 
@@ -172,8 +179,11 @@ def parse_session_inventory(source_path: Path, paths: dict[str, Path], tool_resu
     transcripts: dict[str, list[ev.TimedRecord]] = {}
     for agent_id, path in paths.items():
         rows: list[tuple[_SourceRecord, int]] = []
-        source_record: _SourceRecord
+        source_record: _SourceRecord | DamagedLine
         for source_record in iter_records(path):
+            if isinstance(source_record, DamagedLine):
+                skip_damaged(source_record, skipped)
+                continue
             file_index: int = source_record.file_index
             record: Record = source_record.record
             if record.version:

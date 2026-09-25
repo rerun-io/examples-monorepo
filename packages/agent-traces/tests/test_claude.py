@@ -5,6 +5,7 @@ from pathlib import Path
 from agent_traces.claude import iter_records, parse_session
 from agent_traces.claude_records import Record, TextBlock
 from agent_traces.events import Image, Lifecycle, Prompt, Session, ToolResult
+from agent_traces.sources import DamagedLine
 from tests.conftest import SessionBuilder
 
 
@@ -14,7 +15,9 @@ def test_streams_typed_records_and_preserves_line_indices(session_builder: Sessi
     session_builder.add("assistant", message={"id": "m1", "content": [{"type": "text", "text": "hi"}]})
     records = iter_records(session_builder.path)
     assert iter(records) is records
-    first: Record = next(records).record
+    first_line = next(records)
+    assert not isinstance(first_line, DamagedLine)
+    first: Record = first_line.record
     assert first.message is not None
     assert first.message.content == [TextBlock(text="hello")]
     session: Session = parse_session(session_builder.path)
@@ -43,16 +46,17 @@ def test_skips_noise_and_folds_subagents_without_losing_tool_results(session_bui
 
 
 def test_bad_lines_report_source_and_line_without_reading_ahead(session_builder: SessionBuilder) -> None:
-    """A valid first line is yielded before the bad second line is decoded."""
+    """A valid first line is yielded before a damaged second line is reported; a wrongly shaped object still raises."""
     import pytest
 
     session_builder.add("user", message={"content": "valid"})
     with session_builder.path.open("ab") as stream:
         stream.write(b"{broken\n")
     records = iter_records(session_builder.path)
-    assert next(records).record.type == "user"
-    with pytest.raises(ValueError, match=r"session-123.jsonl:2"):
-        next(records)
+    first_line = next(records)
+    assert not isinstance(first_line, DamagedLine)
+    assert first_line.record.type == "user"
+    assert next(records) == DamagedLine(session_builder.path, 2)
     session_builder.path.write_bytes(b'{"type": "user", "message": {"content": 123}}\n')
     with pytest.raises(ValueError, match=r"session-123.jsonl:1"):
         list(iter_records(session_builder.path))
@@ -153,11 +157,12 @@ def test_content_boundary_normalizes_and_rejects_malformed_known_blocks(session_
     session_builder.add("assistant", message={"content": [{"type": "future", "text": 42}, {}]})
     session: Session = parse_session(session_builder.path)
     assert [row.payload.text for row in session.main if isinstance(row.payload, Prompt)] == ["hello"]
-    records = list(iter_records(session_builder.path))
-    assert records[0].record.message is not None
-    assert records[1].record.message is not None
-    assert records[0].record.message.content == [TextBlock(text="hello")]
-    assert records[1].record.message.content == [UnknownBlock(type="future"), UnknownBlock()]
+    records = [line.record for line in iter_records(session_builder.path) if not isinstance(line, DamagedLine)]
+    assert len(records) == 2
+    assert records[0].message is not None
+    assert records[1].message is not None
+    assert records[0].message.content == [TextBlock(text="hello")]
+    assert records[1].message.content == [UnknownBlock(type="future"), UnknownBlock()]
     session_builder.add("assistant", message={"content": [{"type": "text", "text": 42}]})
     with pytest.raises(ValueError, match=r"session-123.jsonl:3"):
         parse_session(session_builder.path)
@@ -330,3 +335,25 @@ def test_parser_reads_only_inventoried_files(session_builder: SessionBuilder) ->
     updated = session_source(session_builder.path).parse()
     assert set(updated.subagents) == {"late"}
     assert [event.payload.text for event in updated.main if isinstance(event.payload, ToolResult)] == ["full output"]
+
+
+def test_damaged_lines_are_skipped_counted_and_warned(session_builder: SessionBuilder) -> None:
+    """A line that is not valid JSON, in the main file or a subagent file, costs that line only."""
+    import pytest
+
+    from agent_traces.events import Prompt
+
+    session_builder.add("user", message={"content": "before"})
+    with session_builder.path.open("ab") as stream:
+        stream.write(b'{"type": "user", "mess\x00\x00\n')
+    session_builder.add("user", message={"content": "after"})
+    child: Path = session_builder.path.with_suffix("") / "subagents/agent-child.jsonl"
+    session_builder.add("user", path=child, message={"content": "child"})
+    with child.open("ab") as stream:
+        stream.write(b'{"type": "user", "message": {"con\n')
+    with pytest.warns(UserWarning) as caught:
+        session = parse_session(session_builder.path)
+    assert sorted(str(warning.message).split(": ")[0] for warning in caught) == sorted([f"{session_builder.path}:2", f"{child}:2"])
+    assert session.skipped["damaged-line"] == 2
+    assert [e.payload.text for e in session.main if isinstance(e.payload, Prompt)] == ["before", "after"]
+    assert [e.payload.text for e in session.subagents["child"] if isinstance(e.payload, Prompt)] == ["child"]

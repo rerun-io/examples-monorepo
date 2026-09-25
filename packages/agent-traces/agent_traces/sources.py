@@ -1,5 +1,6 @@
 """Resolved recording inputs shared by discovery, hashing, and parsing."""
 
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,6 +10,22 @@ from serde import serde
 from serde.json import from_json
 
 from agent_traces.events import Session
+
+
+@dataclass(frozen=True, slots=True)
+class DamagedLine:
+    """A transcript line that is not valid JSON, usually left by an interrupted write."""
+
+    path: Path
+    """Transcript that holds the line."""
+    line_number: int
+    """One-based line number."""
+
+
+def skip_damaged(line: DamagedLine, skipped: dict[str, int]) -> None:
+    """Count a damaged line under the session's skipped records and warn with its location."""
+    warnings.warn(f"{line.path}:{line.line_number}: skipped a line that is not valid JSON", stacklevel=2)
+    skipped["damaged-line"] = skipped.get("damaged-line", 0) + 1
 
 
 @dataclass(frozen=True, slots=True)
