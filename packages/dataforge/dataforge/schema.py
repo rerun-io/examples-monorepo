@@ -174,6 +174,11 @@ def hand_confidence_path(side: str) -> str:
     return f"{hands_path(side)}/confidence"
 
 
+def hand_mano_path(side: str) -> str:
+    """Shipped MANO parameters, logged as data."""
+    return f"{hands_path(side)}/mano"
+
+
 def hand_joint_angles_path(side: str) -> str:
     """UmeTrack joint angles."""
     return f"{hands_path(side)}/joint_angles"

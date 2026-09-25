@@ -18,10 +18,9 @@ from serde import serde
 from serde.json import to_json
 
 from dataforge import archives, paths, writing
-from dataforge.datasets.show3d_layers import VIDEO_GOP
 from dataforge.datasets.show3d_source import CAMERAS, RecordingInfo, read_json, validate_component
 from dataforge.logging_toolkit import log_video_stream
-from dataforge.video_encoding import transcode_mp4_gray
+from dataforge.video_encoding import AV1_GOP, transcode_mp4_gray
 
 
 @dataclass
@@ -128,7 +127,7 @@ def main(config: Config) -> None:
                     for entity, source in videos.items():
                         clip: Path = work / f"{source.stem}-{mode}.mp4"
                         try:
-                            transcode_mp4_gray(source, clip, fps=int(info.fps), gop=VIDEO_GOP, cq=cq, frames=info.num_frames)
+                            transcode_mp4_gray(source, clip, fps=int(info.fps), gop=AV1_GOP, cq=cq, frames=info.num_frames)
                             log_video_stream(recording, clip, entity)
                         finally:
                             clip.unlink(missing_ok=True)

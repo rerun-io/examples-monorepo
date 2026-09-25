@@ -99,8 +99,8 @@ class HandSide:
 
 
 HAND_SIDES: tuple[HandSide, HandSide] = (
-    HandSide("0", "left", LEFT_HAND_INDEX, (90, 160, 240, 110)),
-    HandSide("1", "right", RIGHT_HAND_INDEX, (240, 170, 130, 110)),
+    HandSide("0", "left", LEFT_HAND_INDEX, hands.HAND_ALBEDO["left"]),
+    HandSide("1", "right", RIGHT_HAND_INDEX, hands.HAND_ALBEDO["right"]),
 )
 
 def read_hand_frames(hand_path: Path, clock: FrameClock) -> list[HandFrame]:
