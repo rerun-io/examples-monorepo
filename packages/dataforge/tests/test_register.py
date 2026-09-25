@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
+from unittest.mock import MagicMock
 
 import pyarrow as pa
 import pytest
@@ -13,7 +14,7 @@ import rerun.blueprint as rrb
 
 pytest.importorskip("rerun.catalog", reason="catalog dependencies are optional outside the dataforge catalog environment")
 
-from rerun.catalog import OnDuplicateSegmentLayer  # noqa: E402
+from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer  # noqa: E402
 
 from dataforge import paths  # noqa: E402
 from dataforge.apis import register  # noqa: E402
@@ -84,25 +85,25 @@ class FakeClient:
     shared: ClassVar[FakeEntry] = FakeEntry()
     """The entry every instance returns; the fixture replaces it per test."""
 
-    def create_dataset(self, name: str, *, exist_ok: bool = False) -> FakeEntry:
+    def create_dataset(self, name: str, *, exist_ok: bool = False) -> DatasetEntry:
         FakeClient.shared.opened_as = (self.url, name)
-        return FakeClient.shared
+        entry = MagicMock(spec=DatasetEntry, wraps=FakeClient.shared)
+        entry.blueprint_dataset.return_value = entry
+        return entry
 
 
 @pytest.fixture
 def catalog(tmp_path: Path, monkeypatch) -> FakeEntry:
     """Point the output root at a tmp tree and swap the catalog types for fakes.
 
-    Both names are patched, not just the client: ``main`` annotates its locals
-    (``client: CatalogClient``, ``entry: DatasetEntry``) and beartype checks
-    every one of those under ``PIXI_DEV_MODE``, so a fake that the annotation
-    does not admit fails before the code under test runs.
+    The client wraps the fake entry in a DatasetEntry-spec mock: beartype checks
+    ``republish_blueprints(entry: DatasetEntry, ...)`` under ``PIXI_DEV_MODE``
+    against the real class, which a module-level patch cannot replace.
     """
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path))
     entry: FakeEntry = FakeEntry()
     monkeypatch.setattr(FakeClient, "shared", entry)
     monkeypatch.setattr(register, "CatalogClient", FakeClient)
-    monkeypatch.setattr(register, "DatasetEntry", FakeEntry)
     return entry
 
 
@@ -245,3 +246,17 @@ def test_registers_only_dataset_layers(tmp_path: Path, catalog: FakeEntry, show3
         make_rrds(tmp_path, layer, [f"{name}__a.rrd"])
     register.main(Config(dataset=Show3dConfig() if show3d else RobocapConfig()))
     assert list(catalog.registered) == (["base", "hand_pose", "captions"] if show3d else ["base", "gt", "sensor_metadata"])
+
+
+def test_sample_name_subset_and_timing(tmp_path: Path, catalog: FakeEntry) -> None:
+    from dataforge.timing import RegisterRecord, load_records
+
+    make_rrds(tmp_path, "base", ["robocap__a.rrd", "robocap__b.rrd"])
+    register.main(Config(dataset=RobocapConfig(), catalog_name="robocap-sample", sequences=("robocap__b",)))
+    assert catalog.opened_as[1] == "robocap-sample"
+    assert [Path(uri).stem for uri in catalog.registered["base"]] == ["robocap__b"]
+    record = load_records(tmp_path / "timing/register.jsonl", RegisterRecord)[0]
+    assert record.dataset == "robocap-sample"
+    assert record.segment_count == 1
+    assert set(record.layer_s) == {"base"}
+    assert record.total_s >= record.blueprint_s >= 0.0

@@ -22,7 +22,7 @@ from dataforge import paths, schema, transports
 from dataforge.datasets.show3d import Show3dConfig, Show3dDataset
 from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetPose
 from dataforge.datasets.show3d_hands import HAND_SIDES, HandFrame, HandPose, write_hand_mesh_layer
-from dataforge.datasets.show3d_mesh_source import MESH_REPO, MeshAsset, MeshInfo, download_meshes, mesh_ids, strip_texture_transform, stripped_mesh
+from dataforge.datasets.show3d_mesh_source import MESH_REPO, MeshAsset, MeshInfo, download_meshes, mesh_ids, stripped_mesh
 from dataforge.datasets.show3d_object_source import CLOCK_TOLERANCE_S, ObjectFrame, ObjectTrack, read_object_frames
 from dataforge.datasets.show3d_objects import ObjectSanity, object_sanity, write_object_mesh_layer, write_object_pose_layer
 from dataforge.datasets.show3d_source import (
@@ -42,6 +42,7 @@ from dataforge.datasets.show3d_source import (
     scene_id_parts,
 )
 from dataforge.identity import SequenceIdentity
+from dataforge.objects import strip_texture_transform
 
 
 def test_object_record_accepts_empty_unposed_rows_and_checks_proper_rotation() -> None:
@@ -335,6 +336,7 @@ def test_convert_rebuilds_each_mesh_and_object_layer_without_video(
     assert capsys.readouterr().out.splitlines()[-1] == (
         f"done {key}: hand_pose, captions, object_pose, object_mesh, hand_mesh"
     )
+    assert dataset.timer.capture_s == {"SPI102": 9.749999999, "LYA722": 16.683333332}[build.identity.parts[0]]
     assert "commit_sha" not in dataset.__dict__
     targets: list[Path] = [output / layer / f"{build.identity.recording_id}.rrd" for layer in dataset.layers]
     for layer in ("object_pose", "object_mesh", "hand_mesh"):

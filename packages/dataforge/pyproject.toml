@@ -75,6 +75,11 @@ ignore_names = [
     "hand_pose_version",
     "object_pose_version",
     "captions_version",
+    # Timing record fields serialized by pyserde.
+    "converter_version",
+    "host",
+    # MagicMock configuration in the fake catalog (tests/test_register.py).
+    "return_value",
 ]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true

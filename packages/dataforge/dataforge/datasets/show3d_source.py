@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import GenericAlias
@@ -268,12 +268,6 @@ class FrameClock:
     def indexes(self, positions: Int64[ndarray, "n"] | list[int] | slice) -> list[rr.TimeColumn]:
         """Both recording clocks at the selected frame positions."""
         return [time_column(self.times_ns[positions]), frame_index_column(self.frame_indices[positions])]
-
-
-    def send_sparse(self, recording: rr.RecordingStream, path: str, positions: list[int], columns: Iterable[rr.ComponentColumn]) -> None:
-        """Send available rows on both recording clocks; omit absent measurements."""
-        if positions:
-            rr.send_columns(path, indexes=self.indexes(positions), columns=columns, recording=recording)
 
 
 T = TypeVar("T")

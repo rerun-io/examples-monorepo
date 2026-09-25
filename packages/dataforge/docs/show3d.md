@@ -363,10 +363,13 @@ Conversion prints the missing mapping only while building `object_pose`, and
 emits no `object_mesh` layer. The index token `none` denotes no object.
 A mapped alias without object poses also produces no mesh layer.
 
-Rerun 0.37 rejects `KHR_texture_transform`. Download strips that name from
+Rerun rejects glTF files that require `KHR_texture_transform`; see
+[`strip_texture_transform`](../dataforge/objects.py) for the version and dated
+verification evidence, and the [driver pixels](https://pablos-4800gt.ilish-ruler.ts.net:8768/exoego-migration/evidence/foundation-glb-texture-transform-0381.png).
+Download therefore strips `KHR_texture_transform` from
 `extensionsUsed`/`extensionsRequired` and from material texture infos once,
 writing `stripped/obj_XXXXXX.glb` atomically and deleting the raw GLB.
-UV transforms are discarded so Rerun 0.37 loads the asset. This chunk-preserving rewrite
+The shared helper is `dataforge.objects.strip_texture_transform`. This chunk-preserving rewrite
 updates JSON padding and GLB length while preserving binary chunks and other
 extensions. Node scale 0.001 stays intact: the GLB scene graph already makes
 the geometry metres, so the converter adds no second scale.

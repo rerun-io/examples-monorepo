@@ -1,9 +1,8 @@
-"""HOT3D name matching and chunk-preserving GLB rewriting for Rerun 0.37.
+"""HOT3D name matching and asset preparation.
 
-UV transforms are discarded so Rerun 0.37 loads the asset."""
+GLBs pass through dataforge.objects.strip_texture_transform (see there).
+"""
 
-import json
-import struct
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -13,6 +12,7 @@ from serde import serde
 
 from dataforge import transports
 from dataforge.datasets.show3d_source import OBJECTS, read_json
+from dataforge.objects import strip_texture_transform
 
 MESH_REPO: str = "bop-benchmark/hot3d"
 
@@ -55,45 +55,6 @@ def stripped_mesh(raw_root: Path, alias: str) -> MeshAsset:
     if not path.is_file():
         raise FileNotFoundError(f"{path}: run dataforge-download show3d first")
     return MeshAsset(mesh_id, path)
-
-
-def strip_texture_transform(glb: bytes) -> bytes:
-    """Remove unsupported texture transforms, preserving all other GLB chunks.
-
-    GLB's open-ended JSON document is edited structurally; binary buffers, node
-    scales and unrelated extensions are left intact.
-    """
-    if len(glb) < 20 or struct.unpack_from("<4sII", glb) != (b"glTF", 2, len(glb)):
-        raise ValueError("invalid GLB v2 header")
-    length, kind = struct.unpack_from("<I4s", glb, 12)
-    if kind != b"JSON" or 20 + length > len(glb):
-        raise ValueError("invalid GLB JSON chunk")
-    document: dict[str, object] = json.loads(glb[20 : 20 + length])
-    extension: str = "KHR_texture_transform"
-    for key in ("extensionsUsed", "extensionsRequired"):
-        names: object = document.get(key)
-        if isinstance(names, list):
-            document[key] = [name for name in names if name != extension]
-            if not document[key]:
-                del document[key]
-    # Traverse texture infos, including those inside material extensions.
-    materials: object = document.get("materials", [])
-    pending: list[object] = list(materials) if isinstance(materials, list) else []
-    while pending:
-        value: object = pending.pop()
-        if isinstance(value, dict):
-            extensions: object = value.get("extensions")
-            if isinstance(extensions, dict):
-                extensions.pop(extension, None)
-                if not extensions:
-                    del value["extensions"]
-            pending.extend(value.values())
-        elif isinstance(value, list):
-            pending.extend(value)
-    payload: bytes = json.dumps(document, separators=(",", ":")).encode()
-    payload += b" " * (-len(payload) % 4)
-    tail: bytes = glb[20 + length :]
-    return struct.pack("<4sII", b"glTF", 2, 20 + len(payload) + len(tail)) + struct.pack("<I4s", len(payload), b"JSON") + payload + tail
 
 
 def download_meshes(raw_root: Path) -> None:

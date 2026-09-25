@@ -25,6 +25,9 @@ from rerun.recording_stream import RecordingStream
 from dataforge import schema
 from dataforge.identity import SequenceIdentity
 
+CONVERT_SCHEMA_VERSION: str = "1"
+"""Schema version shared by recording properties and conversion timing records."""
+
 SEGMENT_LINK_COLUMN: str = "recording link"
 """The segment table's generated URI column; the one the table blueprint turns into a preview."""
 
@@ -294,4 +297,4 @@ def send_capture_properties(
         "capture",
         rr.AnyValues(schema=schema.DATAFORGE_SCHEMA_VERSION, num_frames=num_frames, num_cameras=num_cameras, **present),
     )
-    recording.send_property("convert", rr.AnyValues(version="1"))
+    recording.send_property("convert", rr.AnyValues(version=CONVERT_SCHEMA_VERSION))
