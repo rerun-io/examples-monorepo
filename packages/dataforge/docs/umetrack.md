@@ -85,6 +85,27 @@ SHOW3D fixture refactor comparison: 35 hand-pose component tracks and 6 mesh tra
 
 Integration, golden, and viewer pixel evidence are driver-run gates. Integration converts the first 60 frames of both iteration recordings with the shared NVENC fixture. Driver visual checks must include changing frames in all four panes, world geometry, hand disappearance, and real frame 430 rig disappearance. No pixel validation has been claimed by the sandbox implementation.
 
+## Parity
+
+Checked on 2026-09-25 against simplecv `main` @ 34ee7f4c. The reference is simplecv's own rrds for the three real recordings that have one: `real/hand_hand/training/user_03/recording_05`, `real/hand_hand/training/user_01/recording_14` and `real/hand_hand/testing/user_09/recording_04`. There is no synthetic reference. Rows are matched on `video_time`, which is identical on every row.
+
+| Recording | coco133_xyz joints in both | Max joint distance | Rig translation / rotation (tracked) | Other differences |
+| --- | --- | --- | --- | --- |
+| user_03/recording_05 | 18,920 | 6.0e-8 m | 6.0e-8 m / 4.3e-6° | frame 430: simplecv carries 44 keypoints and the rig pose forward; ours is NaN + `untracked` |
+| user_01/recording_14 | 19,844 | 3.1e-8 m | 6.0e-8 m / 4.0e-6° | none beyond the table above |
+| user_09/recording_04 | 11,000 | 4.5e-8 m | 6.0e-8 m / 4.9e-6° | none beyond the table above |
+
+Intrinsics and all eight lens coefficients are equal. The static camera extrinsics agree to 4e-8 m. simplecv's reprojected 2D agrees with `coco133_uv_projected` to 4e-4 px. Every other difference is in "Differences from simplecv". Missing joints have NaN confidence in simplecv and 0.0 here.
+
 ## Timing
 
-Reserved for the driver. Read conversion and registration JSONL reports with `dataforge.timing.load_records`. Record host, revision, output bytes, capture seconds, stages and elapsed seconds per capture-minute. Compare the same recordings against simplecv preprocessing plus conversion in the prod environment. Separate skipped runs; overlapping stages do not sum to wall time. No full-corpus run before the soft timing gate and user approval.
+Measured on pablo-dl-server (RTX 5090, NVENC) on 2026-09-25, in the prod environments, from local copies. The numbers are seconds of processing per minute of capture.
+
+| Recording | Capture | dataforge `convert` | simplecv split + convert | dataforge s/min | simplecv s/min |
+| --- | --- | --- | --- | --- | --- |
+| real/hand_hand/training/user_03/recording_05 | 14.86 s (431 frames, 29 fps) | 2.64 s (transcode 2.43) | 4.03 s + 0.18 s | 10.7 | 17.0 |
+| synthetic/separate_hand/testing/user_19/recording_02 | 14.93 s (448 frames, 30 fps) | 2.80 s (transcode 2.45) | 4.98 s + 0.17 s | 11.3 | 20.7 |
+
+dataforge times come from its own timers (`convert.jsonl`: fetch, transcode, write per layer). The four crops encode in parallel, and the base write includes the transcode. simplecv times are its own timers: `split_umetrack_video.py` encodes the four crops one after the other at preset p7, and `batch_raw_to_rrd.py` then remuxes the split files. Neither figure includes Python and pixi startup, which is about 2.7 s per process on both sides. Output sizes for the real recording: base 5.6 MB, hand_pose 0.51 MB, hand_mesh 8.2 MB, projections 0.41 MB. dataforge is faster per capture-minute, so the soft speed gate passes. Registration time is added when the sample is registered.
+
+The eight sample recordings convert at 8.6–15.8 s per capture-minute. The one exception is `synthetic/hand_hand/testing/user_09/recording_01` (68 frames, 2.3 s) at 33.6 s/min, where fixed per-recording costs dominate.
