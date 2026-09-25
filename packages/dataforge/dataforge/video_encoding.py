@@ -80,7 +80,7 @@ def parallel_clips(jobs: list[tuple[Path, Callable[[], None]]], timer: SequenceT
             clip.unlink(missing_ok=True)
 
 
-FrameKind: TypeAlias = Literal["png", "jpeg", "gray8", "rgb24", "yuv420p", "yuv422p", "yuv444p"]
+FrameKind: TypeAlias = Literal["hevc", "png", "jpeg", "gray8", "rgb24", "yuv420p", "yuv422p", "yuv444p"]
 """How one element of an encoder frame iterable is laid out."""
 
 RAW_PIXEL_FORMATS: dict[FrameKind, str] = {"gray8": "gray", "rgb24": "rgb24", "yuv420p": "yuv420p", "yuv422p": "yuv422p", "yuv444p": "yuv444p"}
@@ -125,7 +125,7 @@ class FrameSource:
     """JPEG colour planes require explicit full-to-limited range conversion."""
 
     def __post_init__(self) -> None:
-        if self.kind in IMAGE_DECODERS:
+        if self.kind in IMAGE_DECODERS or self.kind == "hevc":
             return
         if self.width is None:
             raise ValueError(f"a {self.kind} source needs an explicit width: rawvideo frames carry no header")
@@ -134,6 +134,8 @@ class FrameSource:
 
     def input_args(self, *, fps: int) -> list[str]:
         """ffmpeg input-side arguments that describe this layout on ``pipe:0``."""
+        if self.kind == "hevc":
+            return ["-f", "hevc", "-r", str(fps), "-i", "pipe:0"]
         if self.kind in IMAGE_DECODERS:
             return ["-f", "image2pipe", "-framerate", str(fps), "-c:v", IMAGE_DECODERS[self.kind], "-i", "pipe:0"]
         return [
