@@ -1,9 +1,11 @@
 """Shared hand measurements; positions are metres or shipped image pixels.
 
-The two-hand adapter uses simplecv's ``assembly21_to_coco133`` mapping: COCO thumb-base
-slots 92/113 are wrist–thumb CMC midpoints (palm is unused), and wrist slots 9/10 copy hand wrists 91/112.
-These derived slots carry the source hand confidence, as SHOW3D does. Class 0
-uses the root COCO-133 AnnotationContext. No writer projects 3D into 2D.
+Two adapters, one policy. ``coco133_from_hands`` uses simplecv's ``assembly21_to_coco133``
+mapping: COCO thumb-base slots 92/113 are wrist–thumb CMC midpoints (palm is unused), and
+wrist slots 9/10 copy hand wrists 91/112. These derived slots carry the source hand
+confidence, as SHOW3D does. ``coco133_from_coco_hands`` serves sources that ship
+COCO-WholeBody hand order (HO-Cap): they get their shipped slots and nothing derived.
+Class 0 uses the root COCO-133 AnnotationContext. No writer projects 3D into 2D.
 """
 
 import numpy as np
@@ -12,7 +14,7 @@ import rerun as rr
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
-from simplecv.data.skeleton.coco_133 import COCO_133_IDS
+from simplecv.data.skeleton.coco_133 import COCO_133_IDS, LEFT_HAND_IDX, RIGHT_HAND_IDX
 from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
 
 from dataforge import schema
@@ -20,8 +22,20 @@ from dataforge.logging_toolkit import frame_index_column, time_column
 
 HAND_OF_SLOT: Int64[ndarray, "133"] = np.full(133, -1, dtype=np.int64)
 """Owning hand index, or -1 for uncovered COCO slots."""
-HAND_OF_SLOT[9] = HAND_OF_SLOT[91:112] = 0
-HAND_OF_SLOT[10] = HAND_OF_SLOT[112:133] = 1
+HAND_OF_SLOT[9] = HAND_OF_SLOT[LEFT_HAND_IDX] = 0
+HAND_OF_SLOT[10] = HAND_OF_SLOT[RIGHT_HAND_IDX] = 1
+
+
+HAND_ALBEDO: dict[str, tuple[int, int, int, int]] = {"left": (90, 160, 240, 110), "right": (240, 170, 130, 110)}
+"""Shared per-side mesh RGBA."""
+
+
+def coco133_from_coco_hands(joints_lr: Float32[ndarray, "2 21 d"]) -> Float32[ndarray, "133 d"]:
+    """Copy Float32[2,21,d] left/right COCO hands; missing joints enter as NaN."""
+    result: Float32[ndarray, "133 d"] = np.full((133, joints_lr.shape[-1]), np.nan, dtype=np.float32)
+    result[LEFT_HAND_IDX] = joints_lr[0]
+    result[RIGHT_HAND_IDX] = joints_lr[1]
+    return result
 
 
 def coco133_from_hands(

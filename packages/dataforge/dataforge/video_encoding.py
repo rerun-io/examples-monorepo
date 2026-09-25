@@ -1,7 +1,7 @@
 """Shared AV1 encoders for frame iterables and grayscale MP4 transcoding.
 
 Datasets that ship image sequences instead of video get their video here:
-``encode_frames_to_mp4`` pipes PNG or raw frames straight into ffmpeg's stdin, so
+``encode_frames_to_mp4`` pipes PNG, JPEG or raw frames straight into ffmpeg's stdin, so
 a converter never materializes a decoded frame tree on disk. Two properties are
 load-bearing for the Rerun side and are enforced rather than documented — the ban
 on B-frames (``rr.VideoStream`` rejects reordered samples) and the sample-count
@@ -20,18 +20,73 @@ import os
 import shutil
 import subprocess
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Literal, TypeAlias
 
 import av
 
-FrameKind: TypeAlias = Literal["png", "gray8", "rgb24"]
+from dataforge.timing import SequenceTimer
+
+AV1_CQ: int = 36
+"""Port-wide AV1 NVENC quality (binding brief). Selected on RTX 5090 with SHOW3D: CQ36 is
+the smallest tested output above 40 dB median.
+
+Keyboard / birdhouse (MB, dB, seconds): builtin 53.8/44.61/9.9,
+117.5/44.77/15.0; CQ28 93.2/45.58/9.6, 188.7/45.43/12.1;
+CQ32 60.1/44.19/9.5, 128.0/44.03/12.1; CQ36 37.2/43.05/9.5,
+87.6/42.58/12.0. Source: 62.4 / 127.4 MB; 20 frames per camera.
+"""
+AV1_GOP: int = 60
+"""Port-wide AV1 NVENC keyframe interval in frames (binding brief): one second at
+SHOW3D's 60 fps, two at HO-Cap's 30 Hz."""
+
+
+@contextlib.contextmanager
+def parallel_clips(jobs: list[tuple[Path, Callable[[], None]]], timer: SequenceTimer) -> Iterator[Iterator[Path]]:
+    """Encode with three workers; yield clips in submission order while later jobs run.
+
+    The caller consumes and may delete each clip before requesting the next.
+    Cleanup waits for encoders and removes every leftover, including on failure.
+    Transcode measures first submit to final encode completion, excluding logging.
+    """
+    finished: list[float] = []
+
+    def encode(job: Callable[[], None]) -> None:
+        try:
+            job()
+        finally:
+            finished.append(perf_counter())
+
+    started: float = perf_counter()
+    try:
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures: list[Future[None]] = [executor.submit(encode, job) for _, job in jobs]
+
+            def ready() -> Iterator[Path]:
+                for (clip, _), future in zip(jobs, futures, strict=True):
+                    future.result()
+                    yield clip
+
+            yield ready()
+    finally:
+        if finished:
+            timer.add("transcode", max(finished) - started)
+        for clip, _ in jobs:
+            clip.unlink(missing_ok=True)
+
+
+FrameKind: TypeAlias = Literal["png", "jpeg", "gray8", "rgb24"]
 """How one element of an encoder frame iterable is laid out."""
 
 RAW_PIXEL_FORMATS: dict[FrameKind, str] = {"gray8": "gray", "rgb24": "rgb24"}
 """ffmpeg ``-pix_fmt`` name for each rawvideo frame kind."""
+
+IMAGE_DECODERS: dict[FrameKind, str] = {"png": "png", "jpeg": "mjpeg"}
+"""ffmpeg input decoder for each encoded-image frame kind."""
 
 TRANSPOSE_FILTERS: dict[int, tuple[str, ...]] = {
     0: (),
@@ -59,14 +114,14 @@ class FrameSource:
     """How the caller's frame iterable is laid out for ffmpeg's stdin."""
 
     kind: FrameKind
-    """``"png"`` feeds encoded PNG bytes through ``image2pipe``; the raw kinds feed ``rawvideo`` planes."""
+    """``"png"`` / ``"jpeg"`` feed encoded image bytes through ``image2pipe``; the raw kinds feed ``rawvideo`` planes."""
     width: int | None = None
     """Frame width in pixels; required for the raw kinds, which carry no header."""
     height: int | None = None
     """Frame height in pixels; required for the raw kinds, which carry no header."""
 
     def __post_init__(self) -> None:
-        if self.kind == "png":
+        if self.kind in IMAGE_DECODERS:
             return
         if self.width is None:
             raise ValueError(f"a {self.kind} source needs an explicit width: rawvideo frames carry no header")
@@ -75,8 +130,8 @@ class FrameSource:
 
     def input_args(self, *, fps: int) -> list[str]:
         """ffmpeg input-side arguments that describe this layout on ``pipe:0``."""
-        if self.kind == "png":
-            return ["-f", "image2pipe", "-framerate", str(fps), "-c:v", "png", "-i", "pipe:0"]
+        if self.kind in IMAGE_DECODERS:
+            return ["-f", "image2pipe", "-framerate", str(fps), "-c:v", IMAGE_DECODERS[self.kind], "-i", "pipe:0"]
         return [
             "-f",
             "rawvideo",
@@ -210,7 +265,7 @@ def encode_frames_to_mp4(
     pipes are finite, so writing a large frame while stderr sits full deadlocks.
 
     Args:
-        frames: One encoded PNG (``kind="png"``) or one raw plane per frame.
+        frames: One encoded PNG/JPEG (``kind="png"``/``"jpeg"``) or one raw plane per frame.
         output: mp4 to write; its parent directory must exist.
         source: Layout of the ``frames`` elements.
         fps: Nominal frame rate stamped into the container. Real per-sample

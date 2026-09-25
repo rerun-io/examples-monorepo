@@ -16,7 +16,7 @@ from jaxtyping import Float64, UInt8
 from numpy import ndarray
 from serde import SerdeError, from_dict
 
-from dataforge import schema
+from dataforge import schema, video_encoding
 from dataforge.datasets.base import DataforgeDataset
 from dataforge.datasets.show3d import Show3dConfig, pane_contents, preview_world_contents, world_contents
 from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetRig, RigCalibration, headset_rig
@@ -410,7 +410,7 @@ def test_camera_logging_overlaps_remaining_encodes(tmp_path: Path, tiny_scene: P
 
     monkeypatch.setattr(show3d_layers, "transcode_mp4_gray", encode)
     monkeypatch.setattr(show3d_layers, "log_video_stream", log_video)
-    monkeypatch.setattr(show3d_layers, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(video_encoding, "perf_counter", lambda: clock[0])
     scene = show3d_layers.read_scene(tiny_scene, scene_key="synthetic")
     timer = timing.SequenceTimer()
     with writing.atomic_recording(tmp_path / "base.rrd", recording_id="test") as recording:

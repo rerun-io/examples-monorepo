@@ -436,6 +436,10 @@ def log_pose_track(
     entity, go through here so the quaternion layout stays one decision: Rerun
     wants the scalar **last**, whatever order the source file wrote.
 
+    To hide an entity on a missing row, pass dense rows with NaN translation
+    and quaternion. Rerun treats a quaternion that fails normalisation as an
+    invalid transform, so latest-at does not carry the previous pose.
+
     Args:
         recording: Destination recording stream.
         entity_path: Entity to animate, usually ``schema.rig_path(rig)``.
