@@ -1,9 +1,8 @@
 """HOT3D layer writers; raw VRS and sidecars are read-only."""
 
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
 from functools import partial
-from itertools import chain
+from itertools import chain, islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -32,12 +31,30 @@ from dataforge.logging_toolkit import (
     time_column,
 )
 from dataforge.timing import SequenceTimer
-from dataforge.video_encoding import AV1_CQ, AV1_GOP, FrameSource, decode_jpeg_frames, encode_frames_to_mp4, jpeg_frame_source, parallel_clips
-from dataforge.vrs import VrsImageReader
+from dataforge.video_encoding import AV1_CQ, AV1_GOP, FrameSource, encode_frames_to_mp4, parallel_clips
+from dataforge.vrs import ImageRecord, VrsImageReader
+
+
+def camera_jpegs(reader: VrsImageReader, camera: CameraStream, source_path: Path, *, preview: bool) -> Iterator[bytes]:
+    """Check native timestamps and counts, reading only the selected prefix for previews."""
+    records: Iterator[ImageRecord] = islice(reader.images(), len(camera.times_ns)) if preview else reader.images()
+    seen: int = 0
+    for record in records:
+        if seen < len(camera.times_ns):
+            if record.capture_timestamp_ns != camera.times_ns[seen]:
+                raise ValueError(f"{source_path}/{camera.model.stream_id}: capture timestamp mismatch at frame {seen}")
+            yield record.image
+        seen += 1
+    expected: int = len(camera.times_ns) if preview else camera.source_count
+    if seen != expected:
+        raise ValueError(f"{source_path}/{camera.model.stream_id}: {seen} image records, expected {expected}")
 
 
 def write_base(recording: rr.RecordingStream, scene: Scene, identity: SequenceIdentity, timer: SequenceTimer) -> None:
     """Encode every native image once and publish shipped device poses and IMU samples."""
+    # PyTurboJPEG is in the dataforge envs only; slam-rs imports this module through the dataset registry.
+    from dataforge.jpeg import decode_jpeg_frames, jpeg_frame_source
+
     rr.log("/", DEVICES[scene.device].view_coordinates, static=True, recording=recording)
     rr.log("/", annotation_context(), static=True, recording=recording)
     log_rig_node(recording, 0, reference=None, num_cameras=len(scene.cameras), name=scene.device, kind="ego")
@@ -48,25 +65,12 @@ def write_base(recording: rr.RecordingStream, scene: Scene, identity: SequenceId
         model: CameraModel = camera.model
         reader: VrsImageReader = VrsImageReader(scene.source / "recording.vrs", model.stream_id)
 
-        def images() -> Iterator[bytes]:
-            # Every record must carry the projectaria-tools stamp of the same index (the
-            # record <-> video-sample proof); a preview decodes only its prefix.
-            seen: int = 0
-            for record in reader.images():
-                if seen < len(camera.times_ns):
-                    if record.capture_timestamp_ns != camera.times_ns[seen]:
-                        raise ValueError(f"{scene.source}/{model.stream_id}: capture timestamp mismatch at frame {seen}")
-                    yield record.image
-                seen += 1
-            if seen != camera.source_count:
-                raise ValueError(f"{scene.source}/{model.stream_id}: {seen} image records, expected {camera.source_count}")
-
-        encoded_images: Iterator[bytes] = images()
+        encoded_images: Iterator[bytes] = camera_jpegs(reader, camera, scene.source, preview=scene.stop_ns is not None)
         first: bytes = next(encoded_images)
         source: FrameSource = jpeg_frame_source(first)
         if (source.width, source.height) != (model.width, model.height):
             raise ValueError(f"{scene.source}/{model.stream_id}: JPEG dimensions disagree with calibration")
-        count: int = encode_frames_to_mp4(
+        encode_frames_to_mp4(
             decode_jpeg_frames(chain([first], encoded_images), source=source),
             clip,
             source=source,
@@ -76,8 +80,6 @@ def write_base(recording: rr.RecordingStream, scene: Scene, identity: SequenceId
             rotate_cw_quarter_turns=1,
             filter_threads=1,
         )
-        if count != len(camera.times_ns):
-            raise ValueError(f"{scene.source}/{model.stream_id}: encoded {count}, expected {len(camera.times_ns)}")
 
     with TemporaryDirectory(prefix="hot3d-", dir=work_root) as work:
         clips: list[Path] = [Path(work) / f"{camera.model.stream_id}.mp4" for camera in scene.cameras]
@@ -227,36 +229,22 @@ def write_hands(recording: rr.RecordingStream, scene: Scene, profile: HandProfil
             )
 
 
-@dataclass(frozen=True, slots=True)
-class ProjectedKeypoints:
-    """Full-precision lens projections before the Float32 logging boundary."""
-
-    positions: Float64[ndarray, "n 133 2"]
-    """Rotated image pixels; rejected joints are NaN."""
-    confidence: Float32[ndarray, "n 133"]
-    """Source joint confidence, zero for rejected projections."""
-
-
 def project_keypoints(
     calibration: CameraCalibration,
     world_T_device: Float64[ndarray, "n 4 4"],
     positions: Float32[ndarray, "n 133 3"],
-    confidence: Float32[ndarray, "n 133"],
-) -> ProjectedKeypoints:
+) -> Float64[ndarray, "n 133 2"]:
     """Project dense world joints through the shipped camera model.
 
     Args:
         calibration: Full lens model in the logged image orientation.
         world_T_device: Float64[ndarray, "n 4 4"] GT poses, NaN when missing.
         positions: Float32[ndarray, "n 133 3"] world metres.
-        confidence: Float32[ndarray, "n 133"] shipped joint confidence.
 
     Returns:
-        Float64 pixels and Float32 confidence, with NaN/0 for invalid joints.
+        Float64[ndarray, "n 133 2"] pixels, with NaN for invalid joints.
     """
-    positions, confidence = hands.confidence_rule(positions, confidence)
     pixels: Float64[ndarray, "n 133 2"] = np.full((*positions.shape[:2], 2), np.nan)
-    scores: Float32[ndarray, "n 133"] = np.zeros_like(confidence)
     device_T_camera: Float64[ndarray, "4 4"] = np.asarray(calibration.get_transform_device_camera().to_matrix())
     # Loop locals stay unannotated: beartype would rebuild a jaxtyping checker per joint in the dev env.
     for index, pose in enumerate(world_T_device):
@@ -270,8 +258,7 @@ def project_keypoints(
             pixel = calibration.project(point)
             if pixel is not None and np.isfinite(pixel).all():
                 pixels[index, joint] = pixel
-                scores[index, joint] = confidence[index, joint]
-    return ProjectedKeypoints(pixels, scores)
+    return pixels
 
 
 def write_projections(recording: rr.RecordingStream, scene: Scene, batch: HandBatch) -> None:
@@ -279,7 +266,7 @@ def write_projections(recording: rr.RecordingStream, scene: Scene, batch: HandBa
     recording.send_property("projections", rr.AnyValues(derived_from="coco133_xyz", camera_model="FISHEYE624"))
     world_T_device: Float64[ndarray, "n 4 4"] = pose_array(scene.headset, scene.times_ns)
     for cam, camera in enumerate(scene.cameras):
-        projected: ProjectedKeypoints = project_keypoints(camera.calibration, world_T_device, batch.positions, batch.confidence)
+        pixels: Float64[ndarray, "n 133 2"] = project_keypoints(camera.calibration, world_T_device, batch.positions)
         hands.log_keypoints2d(
             recording,
             0,
@@ -287,8 +274,8 @@ def write_projections(recording: rr.RecordingStream, scene: Scene, batch: HandBa
             path=schema.coco133_uv_projected_path(0, cam),
             times_ns=scene.times_ns,
             frame_indices=scene.frame_indices,
-            positions=projected.positions.astype(np.float32),
-            confidence=projected.confidence,
+            positions=pixels.astype(np.float32),
+            confidence=batch.confidence,
         )
 
 

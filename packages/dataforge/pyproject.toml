@@ -34,6 +34,9 @@ paths = ["dataforge", "tests"]
 # Tyro-facing verb entry points and config fields (the CLI shims call them), plus the
 # keyword-only parameters a test fake must accept to match the real catalog API.
 ignore_names = [
+    # VRS binary header fields retained to match FileFormat.h positional unpacking.
+    "previous_record_size",
+    "uncompressed_size",
     "main",
     "rr_config",
     "sequence",

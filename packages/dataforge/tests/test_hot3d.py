@@ -286,6 +286,7 @@ def test_full_lens_projection_matches_reference_and_rotated_pixels() -> None:
 
     from dataforge.datasets.hot3d_layers import project_keypoints
     from dataforge.datasets.hot3d_vrs import CameraModel, CameraTransform
+    from dataforge.hands import confidence_rule
 
     params = np.array([300.0, 320.0, 240.0, 0.02, -0.004, 0.001, -0.0002, 0.00003, -0.000004, 0.003, -0.005, 0.007, -0.002, 0.004, -0.001])
     model = CameraModel(
@@ -328,15 +329,16 @@ def test_full_lens_projection_matches_reference_and_rotated_pixels() -> None:
         positions[0, slot] = world_T_cam[:3, :3] @ camera_point + world_T_cam[:3, 3]
     positions[1] = positions[0]
     scores = np.full((2, 133), 0.75, dtype=np.float32)
-    native = project_keypoints(model.calibration(rotate_cw90=False), world_T_device, positions, scores)
-    np.testing.assert_allclose(native.positions[0, 91], expected, atol=1e-6, rtol=0.0)
-    rotated = project_keypoints(model.calibration(rotate_cw90=True), world_T_device, positions, scores)
-    np.testing.assert_allclose(rotated.positions[0, 91], [479 - expected[1], expected[0]], atol=1e-6, rtol=0.0)
-    assert rotated.confidence[0, 91] == 0.75
-    assert np.isnan(rotated.positions[0, [0, 92, 93]]).all()
-    assert (rotated.confidence[0, [0, 92, 93]] == 0.0).all()
-    assert np.isnan(rotated.positions[1]).all()
-    assert (rotated.confidence[1] == 0.0).all()
+    native = project_keypoints(model.calibration(rotate_cw90=False), world_T_device, positions)
+    np.testing.assert_allclose(native[0, 91], expected, atol=1e-6, rtol=0.0)
+    rotated = project_keypoints(model.calibration(rotate_cw90=True), world_T_device, positions)
+    np.testing.assert_allclose(rotated[0, 91], [479 - expected[1], expected[0]], atol=1e-6, rtol=0.0)
+    _, confidence = confidence_rule(rotated.astype(np.float32), scores)
+    assert confidence[0, 91] == 0.75
+    assert np.isnan(rotated[0, [0, 92, 93]]).all()
+    assert (confidence[0, [0, 92, 93]] == 0.0).all()
+    assert np.isnan(rotated[1]).all()
+    assert (confidence[1] == 0.0).all()
 
 
 @pytest.mark.parametrize("config_type,count", [(Hot3dAriaConfig, 3), (Hot3dQuest3Config, 2)])
@@ -367,12 +369,14 @@ def test_projection_rejects_valid_radius_and_image_bounds(valid_radius: float | 
     from projectaria_tools.core.sophus import SE3
 
     from dataforge.datasets.hot3d_layers import project_keypoints
+    from dataforge.hands import confidence_rule
 
     camera = CameraCalibration(
         "test", CameraModelType.FISHEYE624, np.array([300.0, 320.0, 240.0, *([0.0] * 12)]), SE3(), width, 480, valid_radius, 1.5, ""
     )
     positions = np.full((1, 133, 3), np.nan, dtype=np.float32)
     positions[0, 91] = [0.5, 0.0, 1.0]
-    projected = project_keypoints(camera, np.eye(4)[None], positions, np.ones((1, 133), dtype=np.float32))
-    assert np.isnan(projected.positions).all()
-    assert (projected.confidence == 0.0).all()
+    projected = project_keypoints(camera, np.eye(4)[None], positions)
+    assert np.isnan(projected).all()
+    _, confidence = confidence_rule(projected.astype(np.float32), np.ones((1, 133), dtype=np.float32))
+    assert (confidence == 0.0).all()

@@ -2,17 +2,17 @@
 
 import numpy as np
 import pytest
+import turbojpeg
 
-jpeg = pytest.importorskip("turbojpeg", reason="PyTurboJPEG is required for JPEG decode tests")
-
-from dataforge.video_encoding import FrameKind, FrameSource, decode_jpeg_frames, jpeg_frame_source  # noqa: E402
+from dataforge.jpeg import decode_jpeg_frames, jpeg_frame_source
+from dataforge.video_encoding import FrameKind, FrameSource
 
 
 @pytest.mark.parametrize(
     "sampling,kind,divisors", [(3, "gray8", []), (0, "yuv444p", [(1, 1)] * 2), (1, "yuv422p", [(2, 1)] * 2), (2, "yuv420p", [(2, 2)] * 2)]
 )
 def test_jpeg_planes_omit_padding_and_keep_order(sampling: int, kind: FrameKind, divisors: list[tuple[int, int]]) -> None:
-    codec = jpeg.TurboJPEG()
+    codec = turbojpeg.TurboJPEG()
     # Odd dimensions exercise TurboJPEG's padded luma and ceil-sized chroma.
     height, width = 13, 17
     frames = []
@@ -22,6 +22,7 @@ def test_jpeg_planes_omit_padding_and_keep_order(sampling: int, kind: FrameKind,
         pixels[:, :, 0] = np.arange(width, dtype=np.uint8) * 10
         pixels[:, :, 2] = np.arange(height, dtype=np.uint8)[:, None] * 15
         encoded = codec.encode(pixels, jpeg_subsample=sampling)
+        assert isinstance(encoded, bytes)
         frames.append(encoded)
         planes = codec.decode_to_yuv_planes(encoded, strides=(32, 32, 32))
         expected.append(
@@ -36,9 +37,10 @@ def test_jpeg_planes_omit_padding_and_keep_order(sampling: int, kind: FrameKind,
 
 
 def test_jpeg_geometry_change_refused() -> None:
-    codec = jpeg.TurboJPEG()
+    codec = turbojpeg.TurboJPEG()
     first = codec.encode(np.zeros((8, 12, 3), dtype=np.uint8))
     changed = codec.encode(np.zeros((12, 8, 3), dtype=np.uint8))
+    assert isinstance(first, bytes) and isinstance(changed, bytes)
     with pytest.raises(ValueError, match="JPEG layout changed"):
         list(decode_jpeg_frames([first, changed], source=jpeg_frame_source(first)))
 
@@ -53,8 +55,9 @@ def test_jpeg_gray_clockwise_rotation_cpu() -> None:
     if ffmpeg is None:
         pytest.skip("CPU ffmpeg executable absent")
     pixels = np.arange(8 * 12, dtype=np.uint8).reshape(8, 12)
-    codec = jpeg.TurboJPEG()
-    encoded = codec.encode(pixels, pixel_format=jpeg.TJPF_GRAY, jpeg_subsample=jpeg.TJSAMP_GRAY)
+    codec = turbojpeg.TurboJPEG()
+    encoded = codec.encode(pixels, pixel_format=turbojpeg.TJPF_GRAY, jpeg_subsample=turbojpeg.TJSAMP_GRAY)
+    assert isinstance(encoded, bytes)
     source = jpeg_frame_source(encoded)
     frame = next(decode_jpeg_frames([encoded], source=source))
     rotated = subprocess.run(
@@ -79,13 +82,14 @@ def test_jpeg_gray_clockwise_rotation_cpu() -> None:
         capture_output=True,
         check=True,
     )
-    expected = np.rot90(codec.decode(encoded, pixel_format=jpeg.TJPF_GRAY).reshape(8, 12), -1)
+    expected = np.rot90(codec.decode(encoded, pixel_format=turbojpeg.TJPF_GRAY).reshape(8, 12), -1)
     np.testing.assert_array_equal(np.frombuffer(rotated.stdout, dtype=np.uint8).reshape(12, 8), expected)
 
 
 def test_jpeg_decode_lookahead_is_bounded() -> None:
-    codec = jpeg.TurboJPEG()
+    codec = turbojpeg.TurboJPEG()
     encoded = codec.encode(np.zeros((8, 12, 3), dtype=np.uint8))
+    assert isinstance(encoded, bytes)
     consumed = []
 
     def images():

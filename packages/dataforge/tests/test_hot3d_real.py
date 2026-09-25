@@ -18,7 +18,8 @@ from dataforge.datasets.hot3d_source import DEVICES, URL_LIST_DATE, Device, Hot3
 from dataforge.datasets.hot3d_vrs import read_scene
 from dataforge.datasets.show3d_hands import read_hand_profile
 from dataforge.datasets.show3d_source import read_json
-from dataforge.video_encoding import AV1_CQ, AV1_GOP, decode_jpeg_frames, encode_frames_to_mp4, jpeg_frame_source
+from dataforge.jpeg import decode_jpeg_frames, jpeg_frame_source
+from dataforge.video_encoding import AV1_CQ, AV1_GOP, encode_frames_to_mp4
 from dataforge.vrs import VrsImageReader
 
 

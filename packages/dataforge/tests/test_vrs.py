@@ -10,7 +10,7 @@ import pytest
 from dataforge.vrs import VrsImageReader
 
 
-def synthetic_vrs(*, compression: int = 0, image_format: str = "jpg") -> bytes:
+def synthetic_vrs(*, compression: int = 0, image_format: str = "jpg", timestamp_offset: int = 4) -> bytes:
     def string(value: str) -> bytes:
         encoded = value.encode()
         return struct.pack("<I", len(encoded)) + encoded
@@ -21,7 +21,7 @@ def synthetic_vrs(*, compression: int = 0, image_format: str = "jpg") -> bytes:
     def record(payload: bytes, *, stream: int = 214, compressed: int = 0) -> bytes:
         return struct.pack("<IIiIdHBBI", 32 + len(payload), 0, stream, 2, 0.0, 1, 3, compressed, 0) + payload
 
-    layout = json.dumps({"data_layout": [{"name": "capture_timestamp_ns", "type": "DataPieceValue<int64_t>", "offset": 4}]})
+    layout = json.dumps({"data_layout": [{"name": "capture_timestamp_ns", "type": "DataPieceValue<int64_t>", "offset": timestamp_offset}]})
     description = (
         struct.pack("<IiH", 1, 214, 1)
         + tags({"device": "test"})
@@ -47,7 +47,6 @@ def test_vrs_image_order_layout_and_other_stream(tmp_path: Path) -> None:
     path = tmp_path / "tiny.vrs"
     path.write_bytes(synthetic_vrs())
     reader = VrsImageReader(path, "214-1")
-    assert reader.record_formats == {2: "data_layout/size=12+image/jpg"}
     frames = list(reader.images())
     assert [frame.capture_timestamp_ns for frame in frames] == [100, 200]
     assert [frame.image for frame in frames] == [b"\xff\xd8test\xff\xd9"] * 2
@@ -65,7 +64,54 @@ def test_vrs_unsupported_image_format_names_format(tmp_path: Path) -> None:
     path = tmp_path / "raw.vrs"
     path.write_bytes(synthetic_vrs(image_format="raw"))
     with pytest.raises(ValueError, match="data_layout/size=12\\+image/raw"):
-        list(VrsImageReader(path, "214-1").images())
+        VrsImageReader(path, "214-1")
+
+
+def test_vrs_invalid_layout_refused_at_open(tmp_path: Path) -> None:
+    path = tmp_path / "layout.vrs"
+    path.write_bytes(synthetic_vrs(timestamp_offset=8))
+    with pytest.raises(ValueError, match=r"layout.vrs/214-1: invalid capture_timestamp_ns layout"):
+        VrsImageReader(path, "214-1")
+
+
+@pytest.mark.parametrize(
+    "preview,timestamps,source_count,compression,error",
+    [
+        (True, [100], 2, 1, None),
+        (False, [100, 200], 2, 0, None),
+        (False, [100, 200], 3, 0, "2 image records, expected 3"),
+        (True, [100, 200, 300], 3, 0, "2 image records, expected 3"),
+        (True, [101], 2, 0, "capture timestamp mismatch at frame 0"),
+        (False, [100, 200], 2, 1, "compressed image record"),
+    ],
+)
+def test_camera_jpegs_checks_selected_census(
+    tmp_path: Path, preview: bool, timestamps: list[int], source_count: int, compression: int, error: str | None
+) -> None:
+    import numpy as np
+
+    from dataforge.datasets.hot3d_layers import camera_jpegs
+    from dataforge.datasets.hot3d_vrs import CameraModel, CameraStream, CameraTransform
+
+    path = tmp_path / "camera.vrs"
+    path.write_bytes(synthetic_vrs(compression=compression))
+    model = CameraModel(
+        "test",
+        "214-1",
+        640,
+        480,
+        "CameraModelType.FISHEYE624",
+        [300.0, 320.0, 240.0, *([0.0] * 12)],
+        CameraTransform(np.array([1.0, 0.0, 0.0, 0.0]), np.zeros(3)),
+        1.5,
+    )
+    camera = CameraStream(model, np.array(timestamps, dtype=np.int64), model.calibration(rotate_cw90=True), source_count)
+    images = camera_jpegs(VrsImageReader(path, "214-1"), camera, path, preview=preview)
+    if error is not None:
+        with pytest.raises(ValueError, match=error):
+            list(images)
+    else:
+        assert list(images) == [b"\xff\xd8test\xff\xd9"] * len(timestamps)
 
 
 @pytest.mark.parametrize(

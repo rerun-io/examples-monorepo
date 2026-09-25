@@ -152,7 +152,7 @@ objects because the viewer's pinhole cannot project them through a fisheye lens.
   JPEG block of each image record straight from the VRS container (no projectaria-tools
   decode, no pyvrs: it has no linux-aarch64 wheel); each record's DataLayout
   `capture_timestamp_ns` must equal the projectaria-tools stamp of the same index, and the
-  record count must equal the stream's. `video_encoding.decode_jpeg_frames` decodes them with
+  record count must equal the stream's (a preview reads only its prefix). `dataforge.jpeg.decode_jpeg_frames` decodes them with
   TurboJPEG to the JPEG's own planes (gray, or YUV 4:2:0 for RGB) on 8 threads per camera;
   ffmpeg rotates them, maps the JPEG's full-range YUV to limited range and encodes.
   Gray streams are byte-identical to the old RGB/gray path; RGB skips the old
