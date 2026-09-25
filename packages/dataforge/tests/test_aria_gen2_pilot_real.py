@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 import av
@@ -13,11 +14,12 @@ from conftest import read_chunks
 
 from dataforge import schema
 from dataforge.datasets.aria_gen2_pilot import AriaGen2PilotConfig
-from dataforge.datasets.aria_gen2_pilot_layers import camera_access_units
-from dataforge.datasets.aria_gen2_pilot_source import Scene, read_scene
+from dataforge.datasets.aria_gen2_pilot_source import Camera, Scene, read_scene
 from dataforge.datasets.hot3d_layers import project_keypoints
 from dataforge.datasets.hot3d_vrs import nearest_framesets
 from dataforge.video_encoding import AV1_CQ, AV1_GOP, FrameSource, encode_frames_to_mp4, resolve_ffmpeg
+from dataforge.vrs import census_images
+from dataforge.vrs_hevc import VrsHevcReader
 
 
 @pytest.fixture(scope="module")
@@ -55,12 +57,18 @@ def pilot_nvenc() -> Path:
     return ffmpeg
 
 
+def preview_access_units(scene: Scene, camera: Camera) -> Iterator[bytes]:
+    return census_images(
+        VrsHevcReader(scene.source / "video.vrs", camera.stream_id).images(), camera.times_ns, camera.source_count, preview=True, where=camera.stream_id
+    )
+
+
 @pytest.mark.integration
 def test_native_raw_counts_and_clocks(pilot_scene: Scene) -> None:
     scene = pilot_scene
     assert [camera.source_count for camera in scene.cameras] == [3302, 9907, 9906, 9906, 9907]
     for camera in scene.cameras:
-        assert sum(1 for _ in camera_access_units(scene.source, camera, preview=True)) == 60
+        assert sum(1 for _ in preview_access_units(scene, camera)) == 60
     assert len(scene.trajectory.times_ns) == 329300
     assert (np.diff(scene.trajectory.times_ns) == 1000000).all()
     assert len(scene.hands.times_ns) > 140  # native 30 Hz, ~5.1 seconds after MPS starts
@@ -113,7 +121,7 @@ def test_hevc_encode_keeps_color_resolution_and_order(pilot_scene: Scene, pilot_
 
     for camera in pilot_scene.cameras[:2]:
         clip = tmp_path / f"{camera.stream_id}.mp4"
-        frames = islice(camera_access_units(pilot_scene.source, camera, preview=True), 3)
+        frames = islice(preview_access_units(pilot_scene, camera), 3)
         assert encode_frames_to_mp4(frames, clip, source=FrameSource("hevc"), fps=camera.fps, cq=AV1_CQ, gop=AV1_GOP, ffmpeg=pilot_nvenc) == 3
         with av.open(str(clip)) as container:
             packets = [packet for packet in container.demux(video=0) if packet.pts is not None]

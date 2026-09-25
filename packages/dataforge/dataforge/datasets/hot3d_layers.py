@@ -2,7 +2,7 @@
 
 from collections.abc import Callable, Iterator
 from functools import partial
-from itertools import chain, islice
+from itertools import chain
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -32,22 +32,7 @@ from dataforge.logging_toolkit import (
 )
 from dataforge.timing import SequenceTimer
 from dataforge.video_encoding import AV1_CQ, AV1_GOP, FrameSource, encode_frames_to_mp4, parallel_clips
-from dataforge.vrs import ImageRecord, VrsImageReader
-
-
-def camera_jpegs(reader: VrsImageReader, camera: CameraStream, source_path: Path, *, preview: bool) -> Iterator[bytes]:
-    """Check native timestamps and counts, reading only the selected prefix for previews."""
-    records: Iterator[ImageRecord] = islice(reader.images(), len(camera.times_ns)) if preview else reader.images()
-    seen: int = 0
-    for record in records:
-        if seen < len(camera.times_ns):
-            if record.capture_timestamp_ns != camera.times_ns[seen]:
-                raise ValueError(f"{source_path}/{camera.model.stream_id}: capture timestamp mismatch at frame {seen}")
-            yield record.image
-        seen += 1
-    expected: int = len(camera.times_ns) if preview else camera.source_count
-    if seen != expected:
-        raise ValueError(f"{source_path}/{camera.model.stream_id}: {seen} image records, expected {expected}")
+from dataforge.vrs import VrsImageReader, census_images
 
 
 def write_base(recording: rr.RecordingStream, scene: Scene, identity: SequenceIdentity, timer: SequenceTimer) -> None:
@@ -65,7 +50,9 @@ def write_base(recording: rr.RecordingStream, scene: Scene, identity: SequenceId
         model: CameraModel = camera.model
         reader: VrsImageReader = VrsImageReader(scene.source / "recording.vrs", model.stream_id)
 
-        encoded_images: Iterator[bytes] = camera_jpegs(reader, camera, scene.source, preview=scene.stop_ns is not None)
+        encoded_images: Iterator[bytes] = census_images(
+            reader.images(), camera.times_ns, camera.source_count, preview=scene.stop_ns is not None, where=f"{scene.source}/{model.stream_id}"
+        )
         first: bytes = next(encoded_images)
         source: FrameSource = jpeg_frame_source(first)
         if (source.width, source.height) != (model.width, model.height):

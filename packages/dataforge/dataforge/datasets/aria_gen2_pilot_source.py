@@ -1,7 +1,6 @@
 """Read-only Aria Gen2 Pilot streams and MPS tables on their native clocks."""
 
 import csv
-import struct
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -206,7 +205,7 @@ def read_scene(source: Path, frame_limit: int | None = None) -> Scene:
     if frame_limit is not None and frame_limit < 1:
         raise ValueError("frame_limit must be positive")
     first: VrsHevcReader = VrsHevcReader(source / "video.vrs", CAMERAS[0][0])
-    factory: DeviceCalibration | None = device_calibration_from_json_string(first.file_tags["calib_json"])
+    factory: DeviceCalibration | None = device_calibration_from_json_string(first.description.file_tags["calib_json"])
     if factory is None:
         raise ValueError(f"{source}: missing factory calibration")
     cameras: list[Camera] = []
@@ -224,7 +223,7 @@ def read_scene(source: Path, frame_limit: int | None = None) -> Scene:
             if round(factory_height * scale) != height:
                 raise ValueError(f"{source}/{label}: stream {width}x{height} is not a uniform scale of {factory_width}x{factory_height}")
             calibration = calibration.rescale(np.array([width, height]), scale)
-        times: Int64[ndarray, "n"] = np.fromiter((struct.unpack_from("<q", payload, 60)[0] for payload in reader.records(124)), dtype=np.int64)
+        times: Int64[ndarray, "n"] = reader.capture_timestamps()
         if not len(times) or np.any(np.diff(times) <= 0):
             raise ValueError(f"{source}/{stream_id}: empty or unordered camera clock")
         cameras.append(Camera(stream_id, label, fps, calibration, times[:frame_limit], len(times)))

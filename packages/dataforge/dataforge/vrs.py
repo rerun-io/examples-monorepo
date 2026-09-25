@@ -11,9 +11,12 @@ import re
 import struct
 from collections.abc import Iterator
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import NamedTuple
 
+from jaxtyping import Int64
+from numpy import ndarray
 from serde import SerdeError, serde
 from serde.json import from_json
 
@@ -92,6 +95,112 @@ def _read_tags(stream: io.BufferedReader | io.BytesIO) -> dict[str, str]:
     return tags
 
 
+def read_record_header(stream: io.BufferedReader, offset: int, file_size: int, path: Path) -> RecordHeader:
+    """Seek to one record and check that it lies inside the file."""
+    stream.seek(offset)
+    record: RecordHeader = RecordHeader(*_RECORD_HEADER.unpack(_read_exact(stream, _RECORD_HEADER.size)))
+    if record.record_size < _RECORD_HEADER.size or offset + record.record_size > file_size:
+        raise ValueError(f"{path}: invalid VRS record size {record.record_size} at {offset}")
+    return record
+
+
+def read_layout(document: str, where: str) -> DataLayout:
+    """Decode one description DataLayout, naming the stream on failure."""
+    try:
+        return from_json(DataLayout, document)
+    except (SerdeError, json.JSONDecodeError) as error:
+        raise ValueError(f"{where}: invalid DataLayout: {error}") from error
+
+
+@dataclass(frozen=True, slots=True)
+class StreamDescription:
+    """One stream's record formats from the VRS description record."""
+
+    first_record: int
+    """Byte offset of the first record after the description."""
+    file_size: int
+    """File length when the description was read."""
+    record_formats: dict[int, str]
+    """``RF:Data:<version>`` record formats."""
+    layout_docs: dict[int, str]
+    """``DL:Data:<version>:0`` DataLayout JSON."""
+    configuration_docs: dict[int, str]
+    """``DL:Configuration:<version>:0`` DataLayout JSON."""
+    file_tags: dict[str, str]
+    """File-level tags that follow every stream entry."""
+
+
+def read_description(path: Path, stream_id: str, *, headers: tuple[bytes, ...]) -> StreamDescription:
+    """Validate the file header and read one stream's description tags.
+
+    ``headers`` lists the accepted file-format magics (``cordVRS2``; Gen2 Aria
+    also writes ``cordVRS1`` with a version-2 description).
+    """
+    record_formats: dict[int, str] = {}
+    layout_docs: dict[int, str] = {}
+    configuration_docs: dict[int, str] = {}
+    with path.open("rb") as stream:
+        header: bytes = _read_exact(stream, FILE_HEADER_SIZE)
+        if header[:8] != b"VisionRe" or header[72:80] not in headers:
+            raise ValueError(f"{path}: unsupported VRS file header")
+        header_size, record_header_size = struct.unpack_from("<II", header, 16)
+        if header_size != FILE_HEADER_SIZE or record_header_size != _RECORD_HEADER.size:
+            raise ValueError(f"{path}: unsupported VRS header sizes {header_size}/{record_header_size}")
+        description_offset: int = struct.unpack_from("<q", header, 32)[0]
+        first_record: int = struct.unpack_from("<q", header, 40)[0]
+        file_size: int = path.stat().st_size
+        if not FILE_HEADER_SIZE <= description_offset < file_size or not FILE_HEADER_SIZE <= first_record <= file_size:
+            raise ValueError(f"{path}: invalid VRS record offsets")
+        stream.seek(description_offset)
+        record: RecordHeader = RecordHeader(*_RECORD_HEADER.unpack(_read_exact(stream, _RECORD_HEADER.size)))
+        if (
+            record.recordable_type_id != DESCRIPTION_TYPE_ID
+            or record.format_version != DESCRIPTION_FORMAT_VERSION
+            or record.compression != UNCOMPRESSED
+            or not _RECORD_HEADER.size <= record.record_size <= file_size - description_offset
+        ):
+            raise ValueError(f"{path}: unsupported VRS description record")
+        description: io.BytesIO = io.BytesIO(_read_exact(stream, record.record_size - _RECORD_HEADER.size))
+    stream_count: int = struct.unpack("<I", _read_exact(description, 4))[0]
+    found: bool = False
+    for _ in range(stream_count):
+        type_id, instance_id = struct.unpack("<iH", _read_exact(description, 6))
+        _read_tags(description)  # User tags precede the internal record-format tags.
+        tags: dict[str, str] = _read_tags(description)
+        if f"{type_id}-{instance_id}" != stream_id:
+            continue
+        found = True
+        for key, value in tags.items():
+            if key.startswith("RF:Data:"):
+                version: int = int(key.removeprefix("RF:Data:"))
+                record_formats[version] = value
+                layout_docs[version] = tags.get(f"DL:Data:{version}:0", "")
+            elif key.startswith("RF:Configuration:"):
+                configuration: int = int(key.removeprefix("RF:Configuration:"))
+                configuration_docs[configuration] = tags.get(f"DL:Configuration:{configuration}:0", "")
+    file_tags: dict[str, str] = _read_tags(description)
+    if description.read(1):
+        raise ValueError(f"{path}: trailing VRS description bytes")
+    if not found:
+        raise ValueError(f"{path}: stream {stream_id} absent from description")
+    return StreamDescription(first_record, file_size, record_formats, layout_docs, configuration_docs, file_tags)
+
+
+def census_images(images: Iterator[ImageRecord], times_ns: Int64[ndarray, "n"], source_count: int, *, preview: bool, where: str) -> Iterator[bytes]:
+    """Check native timestamps and counts, reading only the selected prefix for previews."""
+    records: Iterator[ImageRecord] = islice(images, len(times_ns)) if preview else images
+    seen: int = 0
+    for record in records:
+        if seen < len(times_ns):
+            if record.capture_timestamp_ns != times_ns[seen]:
+                raise ValueError(f"{where}: capture timestamp mismatch at frame {seen}")
+            yield record.image
+        seen += 1
+    expected: int = len(times_ns) if preview else source_count
+    if seen != expected:
+        raise ValueError(f"{where}: {seen} image records, expected {expected}")
+
+
 class VrsImageReader:
     """Open a separate sequential reader per camera and validate its data formats.
 
@@ -103,59 +212,16 @@ class VrsImageReader:
     def __init__(self, path: Path, stream_id: str) -> None:
         self.path: Path = path
         self.stream_id: str = stream_id
-        self._record_formats: dict[int, str] = {}
-        layout_docs: dict[int, str] = {}
+        description: StreamDescription = read_description(path, stream_id, headers=(b"cordVRS2",))
+        self._first_record: int = description.first_record
+        self._file_size: int = description.file_size
         self._layouts: dict[int, tuple[int, int]] = {}
-        with path.open("rb") as stream:
-            header: bytes = _read_exact(stream, FILE_HEADER_SIZE)
-            if header[:8] != b"VisionRe" or header[72:80] != b"cordVRS2":
-                raise ValueError(f"{path}: unsupported VRS file header")
-            header_size, record_header_size = struct.unpack_from("<II", header, 16)
-            if header_size != FILE_HEADER_SIZE or record_header_size != _RECORD_HEADER.size:
-                raise ValueError(f"{path}: unsupported VRS header sizes {header_size}/{record_header_size}")
-            description_offset: int = struct.unpack_from("<q", header, 32)[0]
-            self._first_record: int = struct.unpack_from("<q", header, 40)[0]
-            self._file_size: int = path.stat().st_size
-            if not FILE_HEADER_SIZE <= description_offset < self._file_size or not FILE_HEADER_SIZE <= self._first_record <= self._file_size:
-                raise ValueError(f"{path}: invalid VRS record offsets")
-            stream.seek(description_offset)
-            record: RecordHeader = RecordHeader(*_RECORD_HEADER.unpack(_read_exact(stream, _RECORD_HEADER.size)))
-            if (
-                record.recordable_type_id != DESCRIPTION_TYPE_ID
-                or record.format_version != DESCRIPTION_FORMAT_VERSION
-                or record.compression != UNCOMPRESSED
-                or not _RECORD_HEADER.size <= record.record_size <= self._file_size - description_offset
-            ):
-                raise ValueError(f"{path}: unsupported VRS description record")
-            description: io.BytesIO = io.BytesIO(_read_exact(stream, record.record_size - _RECORD_HEADER.size))
-            stream_count: int = struct.unpack("<I", _read_exact(description, 4))[0]
-            found: bool = False
-            for _ in range(stream_count):
-                type_id, instance_id = struct.unpack("<iH", _read_exact(description, 6))
-                _read_tags(description)  # User tags precede the internal record-format tags.
-                tags: dict[str, str] = _read_tags(description)
-                if f"{type_id}-{instance_id}" == stream_id:
-                    found = True
-                    for key, value in tags.items():
-                        if key.startswith("RF:Data:"):
-                            version: int = int(key.removeprefix("RF:Data:"))
-                            self._record_formats[version] = value
-                            layout_docs[version] = tags.get(f"DL:Data:{version}:0", "")
-            _read_tags(description)  # File tags follow all stream entries.
-            if description.read(1):
-                raise ValueError(f"{path}: trailing VRS description bytes")
-            if not found:
-                raise ValueError(f"{path}: stream {stream_id} absent from description")
-
-        for version, record_format in self._record_formats.items():
+        for version, record_format in description.record_formats.items():
             match: re.Match[str] | None = re.fullmatch(r"data_layout/size=(\d+)\+image/jpg", record_format)
             if match is None:
                 raise ValueError(f"{self.path}/{self.stream_id}: unsupported image format {record_format}")
             size: int = int(match[1])
-            try:
-                layout: DataLayout = from_json(DataLayout, layout_docs[version])
-            except (SerdeError, json.JSONDecodeError) as error:
-                raise ValueError(f"{self.path}/{self.stream_id}: invalid DataLayout: {error}") from error
+            layout: DataLayout = read_layout(description.layout_docs[version], f"{self.path}/{self.stream_id}")
             timestamps: list[LayoutPiece] = [piece for piece in layout.data_layout if piece.name == "capture_timestamp_ns"]
             if len(timestamps) != 1 or timestamps[0].type != "DataPieceValue<int64_t>" or not 0 <= timestamps[0].offset <= size - 8:
                 raise ValueError(f"{self.path}/{self.stream_id}: invalid capture_timestamp_ns layout")
@@ -166,10 +232,7 @@ class VrsImageReader:
         with self.path.open("rb") as stream:
             offset: int = self._first_record
             while offset < self._file_size:
-                stream.seek(offset)
-                record: RecordHeader = RecordHeader(*_RECORD_HEADER.unpack(_read_exact(stream, _RECORD_HEADER.size)))
-                if record.record_size < _RECORD_HEADER.size or offset + record.record_size > self._file_size:
-                    raise ValueError(f"{self.path}: invalid VRS record size {record.record_size} at {offset}")
+                record: RecordHeader = read_record_header(stream, offset, self._file_size, self.path)
                 offset += record.record_size
                 if record.record_type != DATA_RECORD or f"{record.recordable_type_id}-{record.instance_id}" != self.stream_id:
                     continue

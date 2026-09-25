@@ -1,8 +1,5 @@
 """Native Gen2 sensors, MPS hand measurements and full-lens derived projections."""
 
-import struct
-from collections.abc import Iterator
-from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -14,7 +11,7 @@ from numpy import ndarray
 from projectaria_tools.core.calibration import ImuCalibration
 
 from dataforge import aria, hands, paths, schema, writing
-from dataforge.datasets.aria_gen2_pilot_source import Camera, Scene
+from dataforge.datasets.aria_gen2_pilot_source import Scene
 from dataforge.datasets.hot3d_layers import project_keypoints
 from dataforge.datasets.hot3d_vrs import nearest_framesets
 from dataforge.identity import SequenceIdentity
@@ -31,23 +28,8 @@ from dataforge.logging_toolkit import (
 )
 from dataforge.timing import SequenceTimer
 from dataforge.video_encoding import AV1_CQ, AV1_GOP, FrameSource, encode_frames_to_mp4
-from dataforge.vrs import ImageRecord
+from dataforge.vrs import census_images
 from dataforge.vrs_hevc import VrsHevcReader, VrsImuReader
-
-
-def camera_access_units(source: Path, camera: Camera, *, preview: bool) -> Iterator[bytes]:
-    """Check each raw record against its own camera census before encoding."""
-    records: Iterator[ImageRecord] = VrsHevcReader(source / "video.vrs", camera.stream_id).images()
-    if preview:
-        records = islice(records, len(camera.times_ns))
-    count: int = 0
-    for record in records:
-        if count >= len(camera.times_ns) or record.capture_timestamp_ns != camera.times_ns[count]:
-            raise ValueError(f"{source}/{camera.stream_id}: capture timestamp mismatch at frame {count}")
-        yield record.image
-        count += 1
-    if count != len(camera.times_ns):
-        raise ValueError(f"{source}/{camera.stream_id}: {count} records, expected {len(camera.times_ns)}")
 
 
 def write_motion(recording: rr.RecordingStream, scene: Scene) -> None:
@@ -80,31 +62,18 @@ def write_motion(recording: rr.RecordingStream, scene: Scene) -> None:
         recording=recording,
     )
     for index, label in enumerate(("imu-left", "imu-right")):
-        reader: VrsImuReader = VrsImuReader(scene.source / "video.vrs", f"1202-{index + 1}")
-        stamps: list[int] = []
-        gyros: list[list[float]] = []
-        accels: list[list[float]] = []
-        for payload in reader.records(79):
-            stamp: int = struct.unpack_from("<q", payload, 11)[0]
-            if scene.stop_ns is not None and stamp > scene.stop_ns:
-                break
-            stamps.append(stamp)
-            gyros.append(list(struct.unpack_from("<fff", payload, 55)) if payload[1] else [float("nan")] * 3)
-            accels.append(list(struct.unpack_from("<fff", payload, 43)) if payload[0] else [float("nan")] * 3)
+        imu_times, accel, gyro = VrsImuReader(scene.source / "video.vrs", f"1202-{index + 1}").samples(scene.stop_ns)
         imu: ImuCalibration | None = scene.calibration.get_imu_calib(label)
         if imu is None:
             raise ValueError(f"{scene.source}: missing {label} factory calibration")
         transform: Float64[ndarray, "4 4"] = np.asarray(imu.get_transform_device_imu().to_matrix())
-        imu_times: Int64[ndarray, "n"] = np.asarray(stamps, dtype=np.int64)
-        if np.any(np.diff(imu_times) <= 0):
-            raise ValueError(f"{scene.source}/{label}: unordered IMU timestamps")
         log_imu(
             recording,
             0,
             index,
             name=label,
-            gyro=ImuChannel(imu_times, np.asarray(gyros, dtype=np.float64).reshape(-1, 3)),
-            accel=ImuChannel(imu_times, np.asarray(accels, dtype=np.float64).reshape(-1, 3)),
+            gyro=ImuChannel(imu_times, gyro),
+            accel=ImuChannel(imu_times, accel),
             rig_T_imu=rr.Transform3D(translation=transform[:3, 3], mat3x3=transform[:3, :3]),
         )
 
@@ -122,7 +91,13 @@ def write_base(recording: rr.RecordingStream, scene: Scene, identity: SequenceId
             clip: Path = Path(work) / f"{camera.stream_id}.mp4"
             with timer.stage("transcode"):
                 encode_frames_to_mp4(
-                    camera_access_units(scene.source, camera, preview=scene.stop_ns is not None),
+                    census_images(
+                        VrsHevcReader(scene.source / "video.vrs", camera.stream_id).images(),
+                        camera.times_ns,
+                        camera.source_count,
+                        preview=scene.stop_ns is not None,
+                        where=f"{scene.source}/{camera.stream_id}",
+                    ),
                     clip,
                     source=FrameSource("hevc"),
                     fps=camera.fps,

@@ -85,28 +85,18 @@ def test_vrs_invalid_layout_refused_at_open(tmp_path: Path) -> None:
         (False, [100, 200], 2, 1, "compressed image record"),
     ],
 )
-def test_camera_jpegs_checks_selected_census(
+def test_census_images_checks_selected_census(
     tmp_path: Path, preview: bool, timestamps: list[int], source_count: int, compression: int, error: str | None
 ) -> None:
     import numpy as np
 
-    from dataforge.datasets.hot3d_layers import camera_jpegs
-    from dataforge.datasets.hot3d_vrs import CameraModel, CameraStream, CameraTransform
+    from dataforge.vrs import census_images
 
     path = tmp_path / "camera.vrs"
     path.write_bytes(synthetic_vrs(compression=compression))
-    model = CameraModel(
-        "test",
-        "214-1",
-        640,
-        480,
-        "CameraModelType.FISHEYE624",
-        [300.0, 320.0, 240.0, *([0.0] * 12)],
-        CameraTransform(np.array([1.0, 0.0, 0.0, 0.0]), np.zeros(3)),
-        1.5,
+    images = census_images(
+        VrsImageReader(path, "214-1").images(), np.array(timestamps, dtype=np.int64), source_count, preview=preview, where=f"{path}/214-1"
     )
-    camera = CameraStream(model, np.array(timestamps, dtype=np.int64), model.calibration(rotate_cw90=True), source_count)
-    images = camera_jpegs(VrsImageReader(path, "214-1"), camera, path, preview=preview)
     if error is not None:
         with pytest.raises(ValueError, match=error):
             list(images)
