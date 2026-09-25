@@ -289,7 +289,7 @@ are cleaned beneath its `work/` directory, including on failure.
 Consumers can leave `hand_mesh`
 unregistered to avoid its storage cost; a follow-up can coarsen its clock.
 HOT3D BOP models are renumbered across releases, so mesh IDs resolve by name.
-Download discards `KHR_texture_transform` UV transforms so Rerun 0.37 can load
+Download discards `KHR_texture_transform` UV transforms so Rerun 0.38.1 can load
 the GLBs, then deletes the raw GLBs after the stripped assets are saved.
 The keyboard golden requires `in_ego_fov_fraction < 0.05`;
 it is not always behind both cameras. Source poses remain unchanged.
@@ -383,19 +383,6 @@ layer is written with `send_properties=False` and carries only its own
 `property:<layer>:*` beside its data, never a properties-only layer. Layers share
 nothing but the recording id, which is what stacks them onto one segment.
 
-### The layer rule
-
-Every dataset follows it; `lamaria` is the reference implementation. **base** is a
-faithful conversion of the raw source and the only layer that needs it: it skips on
-its own rrd, and once it is published the bulk source is deleted, leaving only the
-small sidecars (calibration, ground truth) on disk. A **derived** layer reads the
-base rrd plus those sidecars — never the raw source — skips on its own rrd and
-rebuilds under `--force`, so regenerating one across a corpus is `rm <layer>/*.rrd`,
-a convert, and a `register --replace`. Capture properties live in base; a derived
-layer is written with `send_properties=False` and carries only its own
-`property:<layer>:*` beside its data, never a properties-only layer. Layers share
-nothing but the recording id, which is what stacks them onto one segment.
-
 ## Blueprints
 
 Every dataset provides two (abstract on `DataforgeDataset`; missing one fails
@@ -435,3 +422,24 @@ Conventions this package follows — beartype under `PIXI_DEV_MODE`, thin `tools
 shims, jaxtyping annotations, `pixi run -e dataforge-dev {lint,typecheck,deadcode,tests}` —
 are the monorepo ones in the root `AGENTS.md`. The logging schema is
 `packages/simplecv/docs/exoego_schema.md`.
+
+## Conventions for exoego ports
+
+Use the [dataset documentation template](docs/dataset-doc-template.md) for every
+port. Apply these rules:
+
+- Present joints retain shipped confidence; if none is shipped, use 1.0. Missing
+  joints and uncovered COCO slots use NaN positions and confidence 0.0.
+- `video_time` is the true timeline; `frame_index` is the second timeline. Keep
+  each stream's native rate and record its clock origin in
+  `property:capture:clock_source`.
+- Write `<pinhole>/coco133_uv` only from shipped 2D measurements.
+- Shared output helpers live in `dataforge.hands`, `dataforge.objects`, and
+  `dataforge.meshes`; skinning and source format adapters stay dataset-specific.
+- Conversion and registration append typed timing records under `timing/`.
+  Converters instrument optional work with `dataforge.timing.stage("fetch")`
+  and `stage("write:<layer>")`; nested stages overlap and must not be summed.
+- Register review subsets with `--catalog-name <dataset>-sample --sequences
+  <recording_id ...>`. File identities stay unchanged.
+- Compare layer data with `python tools/dev/compare_layers.py <a.rrd> <b.rrd>`
+  in the dataforge environment. Float tolerance defaults to 1e-6.

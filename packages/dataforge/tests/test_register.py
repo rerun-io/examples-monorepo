@@ -245,3 +245,19 @@ def test_registers_only_dataset_layers(tmp_path: Path, catalog: FakeEntry, show3
         make_rrds(tmp_path, layer, [f"{name}__a.rrd"])
     register.main(Config(dataset=Show3dConfig() if show3d else RobocapConfig()))
     assert list(catalog.registered) == (["base", "hand_pose", "captions"] if show3d else ["base", "gt", "sensor_metadata"])
+
+
+def test_sample_name_subset_and_timing(tmp_path: Path, catalog: FakeEntry) -> None:
+    from serde.json import from_json
+
+    from dataforge.timing import RegisterRecord
+
+    make_rrds(tmp_path, "base", ["robocap__a.rrd", "robocap__b.rrd"])
+    register.main(Config(dataset=RobocapConfig(), catalog_name="robocap-sample", sequences=("robocap__b",)))
+    assert catalog.opened_as[1] == "robocap-sample"
+    assert [Path(uri).stem for uri in catalog.registered["base"]] == ["robocap__b"]
+    record = from_json(RegisterRecord, (tmp_path / "timing/register.jsonl").read_text())
+    assert record.dataset == "robocap-sample"
+    assert record.segment_count == 1
+    assert set(record.layer_s) == {"base"}
+    assert record.total_s >= record.blueprint_s >= 0.0

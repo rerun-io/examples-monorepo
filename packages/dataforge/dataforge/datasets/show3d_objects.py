@@ -7,18 +7,17 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from jaxtyping import Float32, Float64
+from jaxtyping import Float64
 from numpy import ndarray
-from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import perspective_projection
 from simplecv.umetrack_temp.generic_hand_model_numpy import LANDMARK
 
-from dataforge import schema, writing
+from dataforge import objects, writing
 from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetPose
 from dataforge.datasets.show3d_hands import HandFrame
 from dataforge.datasets.show3d_mesh_source import MESH_REPO
 from dataforge.datasets.show3d_object_source import ObjectFrame
-from dataforge.datasets.show3d_source import OBJECT_POSE_VERSION, FrameClock, sparse_rows
+from dataforge.datasets.show3d_source import OBJECT_POSE_VERSION, FrameClock
 from dataforge.identity import SequenceIdentity
 
 
@@ -90,22 +89,16 @@ def write_object_pose_layer(
     clock_offset_s: float,
 ) -> None:
     """Write every confidence, sparse proper transforms, and typed census metrics."""
-    positions, values = sparse_rows(frames, lambda frame: frame.world_T_object)
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
-        transforms: Float64[ndarray, "n 4 4"] = np.asarray(values, dtype=np.float64).reshape(-1, 4, 4)
-        clock.send_sparse(
-            recording, schema.objects_path(alias), positions,
-            rr.Transform3D.columns(
-                translation=transforms[:, :3, 3] * 0.001,
-                quaternion=Rotation.from_matrix(transforms[:, :3, :3]).as_quat(),
-            ),
-        )
-        rr.send_columns(
-            schema.object_confidence_path(alias),
-            indexes=clock.indexes(slice(None)),
-            columns=rr.Scalars.columns(scalars=[frame.confidence for frame in frames]),
-            recording=recording,
-        )
+        transforms: Float64[ndarray, "n 4 4"] = np.full((len(frames), 4, 4), np.nan, dtype=np.float64)
+        for index, frame in enumerate(frames):
+            transform = frame.world_T_object
+            if transform is not None:
+                transforms[index] = transform
+                transforms[index, :3, 3] *= 0.001
+        # SHOW3D ships pose rows for every positive confidence, even below mesh visibility's 0.5.
+        objects.log_object_pose(recording, alias, clock.times_ns, clock.frame_indices, transforms,
+                                np.asarray([frame.confidence for frame in frames], dtype=np.float64), trust_threshold=0.0)
         recording.send_property(
             "object_pose",
             rr.AnyValues(
@@ -131,15 +124,8 @@ def write_object_mesh_layer(
     value behind the alpha is one click away in the viewer and one column away in a query.
     """
     with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
-        path: str = schema.object_mesh_path(alias)
-        rr.log(path, rr.Asset3D(path=mesh), static=True, recording=recording)
-        trusted: list[bool] = [frame.trusted for frame in frames]
-        changes: list[int] = [i for i in range(len(frames)) if i == 0 or trusted[i] != trusted[i - 1]]
-        albedo: Float32[ndarray, "k 4"] = np.asarray([[1.0, 1.0, 1.0, 1.0 if trusted[i] else 0.0] for i in changes], dtype=np.float32)
-        rr.send_columns(path, indexes=clock.indexes(changes), columns=rr.Asset3D.columns(albedo_factor=albedo), recording=recording)
-        rr.send_columns(
-            path, indexes=clock.indexes(slice(None)), columns=rr.Scalars.columns(scalars=[frame.confidence for frame in frames]), recording=recording
-        )
+        objects.log_object_mesh(recording, alias, clock.times_ns, clock.frame_indices, rr.Asset3D(path=mesh),
+                                np.asarray([frame.confidence for frame in frames], dtype=np.float64), trust_threshold=0.5)
         recording.send_property(
             "object_mesh", rr.AnyValues(mesh_id=pa.array([mesh_id], type=pa.int64()), mesh_source=pa.array([MESH_REPO], type=pa.string()))
         )

@@ -363,10 +363,14 @@ Conversion prints the missing mapping only while building `object_pose`, and
 emits no `object_mesh` layer. The index token `none` denotes no object.
 A mapped alias without object poses also produces no mesh layer.
 
-Rerun 0.37 rejects `KHR_texture_transform`. Download strips that name from
+Rerun 0.38.1 rejects glTF files that require `KHR_texture_transform` (checked
+2026-09-25). Native headless Viewer pixels show that the original HOT3D Keyboard
+(`37787722328019.glb`) and Smartphone (`5462893327580.glb`) do not render, while
+stripped copies render. See the [driver pixel evidence](https://pablos-4800gt.ilish-ruler.ts.net:8768/exoego-migration/evidence/foundation-glb-texture-transform-0381.png).
+Download therefore strips `KHR_texture_transform` from
 `extensionsUsed`/`extensionsRequired` and from material texture infos once,
 writing `stripped/obj_XXXXXX.glb` atomically and deleting the raw GLB.
-UV transforms are discarded so Rerun 0.37 loads the asset. This chunk-preserving rewrite
+The shared helper is `dataforge.objects.strip_texture_transform`. This chunk-preserving rewrite
 updates JSON padding and GLB length while preserving binary chunks and other
 extensions. Node scale 0.001 stays intact: the GLB scene graph already makes
 the geometry metres, so the converter adds no second scale.

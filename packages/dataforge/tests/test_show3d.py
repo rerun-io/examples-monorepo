@@ -378,3 +378,39 @@ def test_table_blueprint_pairs_the_scene_with_the_headset_pane_and_its_projected
     assert scene.origin == "/world" and scene.contents == preview_world_contents()
     headset: Show3dCamera = next(camera for camera in CAMERAS if (camera.rig, camera.cam) == (1, 0))
     assert pane.origin == schema.pinhole_path(1, 0) and pane.contents == pane_contents(headset)
+
+
+def test_camera_logging_overlaps_remaining_encodes(tmp_path: Path, tiny_scene: Path, monkeypatch) -> None:
+    from threading import Event
+
+    from dataforge import timing, writing
+    from dataforge.datasets import show3d_layers
+
+    first_logged = Event()
+    logged: list[str] = []
+    clock = [10.0]
+
+    def encode(source, destination, **kwargs):
+        if source.stem == "headset1":
+            assert first_logged.wait(timeout=5.0), "logging waited for every encoder"
+        destination.write_bytes(source.read_bytes())
+        return 4
+
+    def log_video(recording, clip, entity, **kwargs):
+        assert clip.read_bytes() == (tiny_scene / clip.name).read_bytes()
+        logged.append(clip.name)
+        if clip.stem == "headset0":
+            first_logged.set()
+        else:
+            # Logging time after the last encoder must not enter transcode time.
+            clock[0] = 100.0
+
+    monkeypatch.setattr(show3d_layers, "transcode_mp4_gray", encode)
+    monkeypatch.setattr(show3d_layers, "log_video_stream", log_video)
+    monkeypatch.setattr(show3d_layers, "perf_counter", lambda: clock[0])
+    scene = show3d_layers.read_scene(tiny_scene, scene_key="synthetic")
+    with timing.sequence_timer() as timer, writing.atomic_recording(tmp_path / "base.rrd", recording_id="test") as recording:
+        show3d_layers.log_cameras(recording, scene, tmp_path / "clips")
+    assert logged == ["headset0.mp4", "headset1.mp4"]
+    assert list((tmp_path / "clips").iterdir()) == []
+    assert timer.stage_s["transcode"] == 0.0

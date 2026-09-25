@@ -5,6 +5,7 @@ from __future__ import annotations
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import pyarrow as pa
@@ -14,8 +15,7 @@ from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from serde.json import to_json
-from simplecv.data.skeleton.coco133_layers import COCO133_ROI_COLORS, COCO133_ROI_LABELS, Coco133RoiLayer
-from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
+from simplecv.data.skeleton.coco133_layers import COCO133_ROI_LABELS, Coco133RoiLayer
 
 from dataforge import schema, writing
 from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetPose, HeadsetRig, Intrinsics, RigCalibration, headset_rig, pinhole
@@ -32,8 +32,10 @@ from dataforge.datasets.show3d_source import (
     read_headset_calibrations,
     read_json,
 )
+from dataforge.hands import annotation_context
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import log_camera_node, log_pose_track, log_rig_node, log_video_stream
+from dataforge.timing import record
 from dataforge.video_encoding import transcode_mp4_gray
 
 VIDEO_CQ: int = 36
@@ -179,12 +181,24 @@ def log_cameras(recording: rr.RecordingStream, scene: Scene, work_dir: Path) -> 
     """Encode at most three clips at once, then log and remove them in order."""
     work_dir.mkdir(parents=True, exist_ok=True)
     clips: list[Path] = [work_dir / f"{camera.camera.source_name}.mp4" for camera in scene.cameras]
+    completed: list[float] = []
+
+    def encode(source: SceneCamera, clip: Path) -> int:
+        try:
+            return transcode_mp4_gray(
+                source.video, clip, gop=VIDEO_GOP, cq=VIDEO_CQ, fps=int(scene.info.fps), frames=len(scene.frames),
+            )
+        finally:
+            # Capture completion before result() releases the logging thread.
+            completed.append(perf_counter())
+
+    started: float = perf_counter()
     try:
         with ThreadPoolExecutor(max_workers=3) as executor:
-            futures: list[Future[int]] = [
-                executor.submit(transcode_mp4_gray, camera.video, clip, gop=VIDEO_GOP, cq=VIDEO_CQ, fps=int(scene.info.fps), frames=len(scene.frames))
-                for camera, clip in zip(scene.cameras, clips, strict=True)
-            ]
+            futures: list[Future[int]] = []
+            for source, clip in zip(scene.cameras, clips, strict=True):
+                future: Future[int] = executor.submit(encode, source, clip)
+                futures.append(future)
             for source, clip, future in zip(scene.cameras, clips, futures, strict=True):
                 future.result()
                 camera: Show3dCamera = source.camera
@@ -231,6 +245,8 @@ def log_cameras(recording: rr.RecordingStream, scene: Scene, work_dir: Path) -> 
                         recording=recording,
                     )
     finally:
+        if completed:
+            record("transcode", max(completed) - started)
         for clip in clips:
             clip.unlink(missing_ok=True)
 
@@ -286,23 +302,6 @@ def log_frames(recording: rr.RecordingStream, scene: Scene) -> None:
             missing_cameras=pa.array([frame.missing_cameras for frame in scene.frames], type=pa.list_(pa.string())),
         ),
         recording=recording,
-    )
-
-
-def annotation_context() -> rr.AnnotationContext:
-    """Root classes every layer relies on: the COCO-133 skeleton (class 0) and the §13 box labels (100-103)."""
-    return rr.AnnotationContext(
-        [
-            rr.ClassDescription(
-                info=rr.AnnotationInfo(id=0, label="Coco Wholebody", color=(0, 0, 255)),
-                keypoint_annotations=[rr.AnnotationInfo(id=point, label=name) for point, name in COCO_133_ID2NAME.items()],
-                keypoint_connections=COCO_133_LINKS,
-            ),
-            *(
-                rr.ClassDescription(info=rr.AnnotationInfo(id=int(layer), label=COCO133_ROI_LABELS[layer], color=COCO133_ROI_COLORS[layer]))
-                for layer in Coco133RoiLayer
-            ),
-        ]
     )
 
 
