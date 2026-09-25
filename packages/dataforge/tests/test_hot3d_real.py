@@ -1,7 +1,11 @@
 """Driver-run HOT3D integration and golden checks on the two staged captures."""
 
+import csv
+import json
 import os
-from itertools import islice
+import struct
+from dataclasses import replace
+from itertools import islice, product
 from pathlib import Path
 
 import av
@@ -10,15 +14,20 @@ import pyarrow as pa
 import pytest
 import rerun.chunk as rrc
 from conftest import read_chunks
+from scipy.spatial.transform import Rotation
 
-from dataforge import aria, paths, schema
+from dataforge import aria, paths, schema, writing
 from dataforge.datasets.hot3d import Hot3dAriaConfig, Hot3dQuest3Config
-from dataforge.datasets.hot3d_hands import evaluate_hands
+from dataforge.datasets.hot3d_hands import evaluate_hands, mesh_vertices
+from dataforge.datasets.hot3d_layers import LayerWriter
 from dataforge.datasets.hot3d_source import DEVICES, URL_LIST_DATE, Device, Hot3dSource, Metadata
-from dataforge.datasets.hot3d_vrs import read_scene
+from dataforge.datasets.hot3d_vrs import Scene, read_scene
 from dataforge.datasets.show3d_hands import read_hand_profile
 from dataforge.datasets.show3d_source import read_json
+from dataforge.identity import SequenceIdentity
 from dataforge.jpeg import decode_jpeg_frames, jpeg_frame_source
+from dataforge.objects import strip_texture_transform
+from dataforge.timing import SequenceTimer
 from dataforge.video_encoding import AV1_CQ, AV1_GOP, encode_frames_to_mp4
 from dataforge.vrs import VrsImageReader
 
@@ -55,8 +64,13 @@ def hot3d_source(request: pytest.FixtureRequest) -> tuple[Device, Path]:
     ]
     if DEVICES[device].has_timecode_mapping:
         required.append(source / "timecode_devicetime_mapping.csv")
-    required.append(root / f"Hot3D{DEVICES[device].url_label}_download_urls-{URL_LIST_DATE}.json")
+    required += [root / "assets/instance.json", root / f"Hot3D{DEVICES[device].url_label}_download_urls-{URL_LIST_DATE}.json"]
     for path in required:
+        if not path.is_file():
+            pytest.skip(f"HOT3D asset absent: {path}")
+    metadata = read_json(source / "metadata.json", Metadata)
+    for alias in metadata.object_uids:
+        path = root / f"assets/{alias}.glb"
         if not path.is_file():
             pytest.skip(f"HOT3D asset absent: {path}")
     return device, source
@@ -74,7 +88,7 @@ def test_first_sixty_frames_all_layers(
     identity, found = dataset.discover()[0]
     dataset.convert(identity, found, force=True)
     targets = dataset.targets(identity)
-    assert set(targets) == {"base", "hand_pose", "projections"}
+    assert set(targets) == {"base", "hand_pose", "hand_mesh", "projections", "object_pose", "object_mesh"}
     scene = read_scene(Hot3dSource(source, read_json(source / "metadata.json", Metadata)), device, 60)
     for layer, target in targets.items():
         assert rrc.RrdReader(target).recordings()[0].recording_id == identity.recording_id
@@ -235,6 +249,100 @@ def test_fk_matches_simplecv_at_matching_stamps(hot3d_source: tuple[Device, Path
     )
     assert compared > len(scene.cameras[0].times_ns) * 0.9
     assert max_error <= 1e-4
+
+
+@pytest.mark.golden
+def test_mesh_skinning_and_fk_landmarks_share_world_frame(hot3d_source: tuple[Device, Path]) -> None:
+    device, source = hot3d_source
+    scene = read_scene(Hot3dSource(source, read_json(source / "metadata.json", Metadata)), device, 60)
+    profile = read_hand_profile(source / "umetrack_hand_user_profile.json")
+    batch = evaluate_hands(profile.model, scene.hands, scene.times_ns)
+    model = profile.model
+    # Append each exact rest landmark as a mesh probe, retaining its sparse skin
+    # weights. Compare the mesh path with FK; anatomical landmarks need not lie
+    # exactly on a surface vertex, so nearest-vertex distance is not this test.
+    weights = np.zeros((21, model.dense_bone_weights.shape[1]), dtype=np.float32)
+    for landmark, (indices, values) in enumerate(zip(model.landmark_rest_bone_indices, model.landmark_rest_bone_weights, strict=True)):
+        np.add.at(weights[landmark], indices, values)
+    augmented = replace(
+        model,
+        mesh_vertices=np.concatenate([model.mesh_vertices, model.landmark_rest_positions]),
+        dense_bone_weights=np.concatenate([model.dense_bone_weights, weights]),
+    )
+    for side, wrist_slot in [(0, 91), (1, 112)]:
+        present = np.isfinite(batch.angles[side]).all(axis=1)
+        assert np.any(present)
+        vertices = mesh_vertices(augmented, batch.angles[side, present], batch.wrists[side, present], side)
+        regular = mesh_vertices(model, batch.angles[side, present], batch.wrists[side, present], side)
+        np.testing.assert_allclose(vertices[:, : len(model.mesh_vertices)], regular, atol=1e-4, rtol=0.0)
+        # UmeTrack landmark 5 is the wrist, mapped into COCO's first hand slot.
+        np.testing.assert_allclose(vertices[:, -21 + 5], batch.positions[present, wrist_slot], atol=1e-4, rtol=0.0)
+        from dataforge.hands import coco133_from_hands
+
+        for index, points in enumerate(vertices[:, -21:]):
+            pair = np.full((2, 21, 3), np.nan, dtype=np.float32)
+            pair[side] = points
+            mapped, _ = coco133_from_hands(pair, np.ones(2, dtype=np.float32))
+            valid = np.isfinite(mapped).all(axis=1)
+            np.testing.assert_allclose(mapped[valid], batch.positions[present][index, valid], atol=1e-4, rtol=0.0)
+
+
+@pytest.mark.golden
+def test_object_mesh_placement_matches_raw_one_frame(hot3d_source: tuple[Device, Path], tmp_path: Path) -> None:
+    device, source = hot3d_source
+    scene: Scene = read_scene(Hot3dSource(source, read_json(source / "metadata.json", Metadata)), device, 1)
+    identity = SequenceIdentity(f"hot3d-{device}", (source.name,))
+    assets = source.parent.parent / "assets"
+    outputs = {}
+    writer = LayerWriter(scene, identity, SequenceTimer(), assets)
+    for layer in ("object_pose", "object_mesh"):
+        target = tmp_path / f"{layer}.rrd"
+        with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
+            writer.write_layer(layer, recording)
+        outputs[layer] = read_chunks(target)
+    with (source / "dynamic_objects.csv").open() as stream:
+        raw = next(csv.DictReader(stream))
+    alias = raw["object_uid"]
+    expected_rotation = Rotation.from_quat([float(raw[key]) for key in ("q_wo_x", "q_wo_y", "q_wo_z", "q_wo_w")]).as_matrix()
+    expected_translation = np.array([float(raw[key]) for key in ("t_wo_x[m]", "t_wo_y[m]", "t_wo_z[m]")])
+    stamp = int(raw["timestamp[ns]"])
+    if DEVICES[device].has_timecode_mapping:
+        with (source / "timecode_devicetime_mapping.csv").open() as stream:
+            mapping = {int(row["timecode_ns"]): int(row["devicetime_ns"]) for row in csv.DictReader(stream)}
+        stamp = mapping[stamp]
+    pose_rows = []
+    for chunk in outputs["object_pose"]:
+        if chunk.entity_path == schema.objects_path(alias) and not chunk.is_static:
+            table = chunk.to_record_batch()
+            for time, row in zip(table.column("video_time").cast(pa.int64()).to_pylist(), table.to_pylist(), strict=True):
+                if time == stamp and "Transform3D:translation" in row:
+                    pose_rows.append(row)
+    assert len(pose_rows) == 1
+    row = pose_rows[0]
+    translation = np.asarray(row["Transform3D:translation"]).reshape(3)
+    rotation = Rotation.from_quat(np.asarray(row["Transform3D:quaternion"]).reshape(4)).as_matrix()
+    blobs = [
+        chunk.to_record_batch().column("Asset3D:blob")[0].as_py()
+        for chunk in outputs["object_mesh"]
+        if chunk.entity_path == schema.object_mesh_path(alias) and "Asset3D:blob" in chunk.to_record_batch().schema.names
+    ]
+    assert len(blobs) == 1
+    native = (assets / f"{alias}.glb").read_bytes()
+    # An Arrow row holds a list of blobs, each itself a list<uint8>.
+    assert len(blobs[0]) == 1
+    assert np.asarray(blobs[0][0], dtype=np.uint8).tobytes() == strip_texture_transform(native)
+    # The asset is byte-preserved apart from the unsupported extension, so its
+    # internal node transforms and units cannot change. Check placement on the
+    # eight shipped POSITION-bound corners (no optional mesh package needed).
+    length = struct.unpack_from("<I", native, 12)[0]
+    document = json.loads(native[20 : 20 + length])
+    primitive = document["meshes"][0]["primitives"][0]
+    accessor = document["accessors"][primitive["attributes"]["POSITION"]]
+    vertices = np.array(list(product(*zip(accessor["min"], accessor["max"], strict=True))))
+    assert vertices.shape == (8, 3)
+    expected = vertices @ expected_rotation.T + expected_translation
+    placed = vertices @ rotation.T + translation
+    np.testing.assert_allclose(placed, expected, atol=1e-4, rtol=0.0)
 
 
 @pytest.mark.integration

@@ -446,3 +446,13 @@ def read_labels(source: Hot3dSource, device: Device, primary: Int64[ndarray, "n"
         read_poses(source.path / "dynamic_objects.csv", clock),
     )
 
+
+@serde
+@dataclass(frozen=True, slots=True)
+class AssetInfo:
+    """Native HOT3D instance identity; geometry is assets/<instance_id>.glb."""
+
+    instance_id: str
+    """ID used by dynamic_objects.csv."""
+    instance_name: str
+    """Human source name."""

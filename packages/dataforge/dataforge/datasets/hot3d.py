@@ -1,4 +1,4 @@
-"""Two HOT3D catalog datasets sharing one raw reader and three layer writers."""
+"""Two HOT3D catalog datasets sharing one raw reader and six layer writers."""
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,7 +56,10 @@ class Hot3dDataset(DataforgeDataset[Hot3dConfig, Hot3dSource]):
     layers: tuple[str, ...] = (
         paths.BASE_LAYER,
         paths.HAND_POSE_LAYER,
+        paths.HAND_MESH_LAYER,
         paths.PROJECTIONS_LAYER,
+        paths.OBJECT_POSE_LAYER,
+        paths.OBJECT_MESH_LAYER,
     )
 
     def __init__(self, config: Hot3dConfig) -> None:
@@ -103,7 +106,7 @@ class Hot3dDataset(DataforgeDataset[Hot3dConfig, Hot3dSource]):
             with self.timer.stage("fetch"):
                 scene = read_scene(source, self.device, self.config.frame_limit)
             self.timer.capture_s = (int(scene.cameras[0].times_ns[-1]) - int(scene.cameras[0].times_ns[0])) / 1e9
-            writer: LayerWriter = LayerWriter(scene, identity, self.timer)
+            writer: LayerWriter = LayerWriter(scene, identity, self.timer, self.config.root / "assets")
             for layer in pending:
                 with (
                     self.timer.stage(f"write:{layer}"),

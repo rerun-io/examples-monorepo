@@ -13,11 +13,12 @@ from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from projectaria_tools.core.calibration import CameraCalibration
 
-from dataforge import aria, hands, paths, schema, writing
-from dataforge.datasets.hot3d_hands import HandBatch, evaluate_hands
-from dataforge.datasets.hot3d_source import DEVICES, URL_LIST_DATE, pose_array
+from dataforge import aria, hands, meshes, objects, paths, schema, writing
+from dataforge.datasets.hot3d_hands import HandBatch, evaluate_hands, mesh_vertices
+from dataforge.datasets.hot3d_source import DEVICES, URL_LIST_DATE, AssetInfo, pose_array
 from dataforge.datasets.hot3d_vrs import CameraModel, CameraStream, Scene
-from dataforge.datasets.show3d_hands import HAND_SIDES, HandProfileDoc, read_hand_profile
+from dataforge.datasets.show3d_hands import HAND_SIDES, SKINNING_BATCH_SIZE, HandProfileDoc, read_hand_profile
+from dataforge.datasets.show3d_source import read_json
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
     ImuChannel,
@@ -279,27 +280,94 @@ def write_projections(recording: rr.RecordingStream, scene: Scene, batch: HandBa
         )
 
 
+def write_hand_meshes(recording: rr.RecordingStream, scene: Scene, profile: HandProfileDoc, batch: HandBatch) -> None:
+    """Skin in bounded batches and write empty vertex rows for missing hands."""
+    for index, side in enumerate(HAND_SIDES):
+        path: str = schema.hand_mesh_path(side.name)
+        rr.log(
+            path, rr.Mesh3D.from_fields(triangle_indices=profile.model.mesh_triangles, albedo_factor=side.albedo), static=True, recording=recording
+        )
+        for start in range(0, len(scene.times_ns), SKINNING_BATCH_SIZE):
+            selection: slice = slice(start, start + SKINNING_BATCH_SIZE)
+            valid: Bool[ndarray, "n"] = np.isfinite(batch.angles[index, selection]).all(axis=1) & (batch.scores[index, selection] > 0.0)
+            vertices: Float32[ndarray, "k v 3"] = np.empty((0, len(profile.model.mesh_vertices), 3), dtype=np.float32)
+            if np.any(valid):
+                vertices = mesh_vertices(profile.model, batch.angles[index, selection][valid], batch.wrists[index, selection][valid], index)
+            times: Int64[ndarray, "n"] = scene.times_ns[selection]
+            meshes.log_mesh_batch(
+                recording, path, times_ns=times, frame_indices=scene.frame_indices[selection], vertices=vertices, trusted=valid.tolist()
+            )
+
+
+def write_object_poses(recording: rr.RecordingStream, scene: Scene, census: dict[str, AssetInfo]) -> None:
+    """Write native IDs and dense poses, invalidating every census gap."""
+    for alias in scene.metadata.object_uids:
+        transforms: Float64[ndarray, "n 4 4"] = pose_array(scene.objects.get(alias, {}), scene.times_ns)
+        confidence: Float32[ndarray, "n"] = np.isfinite(transforms).all(axis=(1, 2)).astype(np.float32)
+        rr.log(schema.objects_path(alias), rr.AnyValues(instance_id=alias, name=census[alias].instance_name), static=True, recording=recording)
+        objects.log_object_pose(
+            recording,
+            alias,
+            times_ns=scene.times_ns,
+            frame_indices=scene.frame_indices,
+            transforms=transforms,
+            confidence=confidence,
+            missing="invalidate",
+        )
+
+
+def write_object_meshes(recording: rr.RecordingStream, scene: Scene, assets: Path) -> None:
+    """Write native geometry and confidence-driven visibility without owning poses."""
+    for alias in scene.metadata.object_uids:
+        transforms: Float64[ndarray, "n 4 4"] = pose_array(scene.objects.get(alias, {}), scene.times_ns)
+        posed: Bool[ndarray, "n"] = np.isfinite(transforms).all(axis=(1, 2))
+        asset: rr.Asset3D = rr.Asset3D(
+            contents=objects.strip_texture_transform((assets / f"{alias}.glb").read_bytes()), media_type="model/gltf-binary"
+        )
+        objects.log_object_mesh(
+            recording,
+            alias,
+            times_ns=scene.times_ns,
+            frame_indices=scene.frame_indices,
+            asset=asset,
+            confidence=posed.astype(np.float32),
+            posed=posed,
+            trust_threshold=0.0,
+        )
+
+
 class LayerWriter:
     """One conversion's dispatcher; hand profile and FK are evaluated once for hand layers and projections."""
 
-    def __init__(self, scene: Scene, identity: SequenceIdentity, timer: SequenceTimer) -> None:
+    def __init__(self, scene: Scene, identity: SequenceIdentity, timer: SequenceTimer, assets: Path) -> None:
         self.scene: Scene = scene
         self.identity: SequenceIdentity = identity
         self.timer: SequenceTimer = timer
+        self.assets: Path = assets
         self.profile: HandProfileDoc | None = None
         self.batch: HandBatch | None = None
+        self.census: dict[str, AssetInfo] | None = None
 
     def write_layer(self, layer: str, recording: rr.RecordingStream) -> None:
         """Dispatch disjoint layer owners, preparing shared data only when needed."""
-        if layer in (paths.HAND_POSE_LAYER, paths.PROJECTIONS_LAYER) and self.profile is None:
+        if layer in (paths.HAND_POSE_LAYER, paths.HAND_MESH_LAYER, paths.PROJECTIONS_LAYER) and self.profile is None:
             self.profile = read_hand_profile(self.scene.source / "umetrack_hand_user_profile.json")
             self.batch = evaluate_hands(self.profile.model, self.scene.hands, self.scene.times_ns)
+        if layer in (paths.OBJECT_POSE_LAYER, paths.OBJECT_MESH_LAYER) and self.census is None:
+            self.census = read_json(self.assets / "instance.json", dict[str, AssetInfo])
+            for alias in self.scene.metadata.object_uids:
+                if alias not in self.census or self.census[alias].instance_id != alias:
+                    raise ValueError(f"{self.assets}/instance.json: missing or mismatched native asset {alias}")
         writers: dict[str, Callable[[], None]] = {
             paths.BASE_LAYER: partial(write_base, recording, self.scene, self.identity, self.timer),
+            paths.OBJECT_MESH_LAYER: partial(write_object_meshes, recording, self.scene, self.assets),
         }
+        if self.census is not None:
+            writers[paths.OBJECT_POSE_LAYER] = partial(write_object_poses, recording, self.scene, self.census)
         if self.profile is not None and self.batch is not None:
             writers[paths.PROJECTIONS_LAYER] = partial(write_projections, recording, self.scene, self.batch)
             writers[paths.HAND_POSE_LAYER] = partial(write_hands, recording, self.scene, self.profile, self.batch)
+            writers[paths.HAND_MESH_LAYER] = partial(write_hand_meshes, recording, self.scene, self.profile, self.batch)
         if layer not in writers:
             raise ValueError(f"unknown HOT3D layer {layer}")
         writers[layer]()

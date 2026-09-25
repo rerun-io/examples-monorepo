@@ -1,11 +1,11 @@
-"""HOT3D UmeTrack FK using the same model math as SHOW3D."""
+"""HOT3D UmeTrack FK and skinning using the same model math as SHOW3D."""
 
 from dataclasses import dataclass
 
 import numpy as np
 from jaxtyping import Float32, Int64
 from numpy import ndarray
-from simplecv.umetrack_temp.generic_hand_model_numpy import HandModelNumpy, skin_landmarks, wrist_for_hand
+from simplecv.umetrack_temp.generic_hand_model_numpy import HandModelNumpy, skin_landmarks, skin_mesh, wrist_for_hand
 
 from dataforge import hands
 from dataforge.datasets.hot3d_source import UmeFrame
@@ -62,3 +62,9 @@ def umetrack_wrists(wrists: Float32[ndarray, "n 4 4"], side_index: int) -> Float
     transforms[:, :3, 3] *= np.float32(1000.0)
     return wrist_for_hand(transforms, HAND_SIDES[side_index].model_index)
 
+
+def mesh_vertices(
+    model: HandModelNumpy, angles: Float32[ndarray, "n 22"], wrists: Float32[ndarray, "n 4 4"], side_index: int
+) -> Float32[ndarray, "n v 3"]:
+    """Skin a present-hand batch into world metres, using SHOW3D's handedness rule."""
+    return skin_mesh(model, angles, umetrack_wrists(wrists, side_index)) * np.float32(0.001)
